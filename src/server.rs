@@ -285,10 +285,19 @@ async fn oauth_token(
     let mut s = store.lock().unwrap();
     s.cleanup_expired();
 
-    // Look up and remove auth code
-    let auth_code = match s.codes.remove(&body.code) {
-        Some(c) => c,
+    // Extract code data (clone to release borrow before mutating store)
+    let code_data = s.codes.get(&body.code).map(|c| {
+        (
+            c.client_id.clone(),
+            c.redirect_uri.clone(),
+            c.code_challenge.clone(),
+        )
+    });
+
+    let (stored_client_id, stored_redirect_uri, stored_challenge) = match code_data {
+        Some(d) => d,
         None => {
+            eprintln!("[OAuth] POST /token code not found (possibly already exchanged)");
             return (
                 StatusCode::BAD_REQUEST,
                 Json(json!({"error": "invalid_grant", "error_description": "Invalid or expired code"})),
@@ -298,14 +307,14 @@ async fn oauth_token(
     };
 
     // Validate client_id and redirect_uri
-    if auth_code.client_id != body.client_id {
+    if stored_client_id != body.client_id {
         return (
             StatusCode::BAD_REQUEST,
             Json(json!({"error": "invalid_grant", "error_description": "client_id mismatch"})),
         )
             .into_response();
     }
-    if auth_code.redirect_uri != body.redirect_uri {
+    if stored_redirect_uri != body.redirect_uri {
         return (
             StatusCode::BAD_REQUEST,
             Json(json!({"error": "invalid_grant", "error_description": "redirect_uri mismatch"})),
@@ -314,12 +323,12 @@ async fn oauth_token(
     }
 
     // PKCE S256 verification
-    let pkce_ok = verify_pkce(&body.code_verifier, &auth_code.code_challenge);
+    let pkce_ok = verify_pkce(&body.code_verifier, &stored_challenge);
     eprintln!(
         "[OAuth] POST /token PKCE verify: ok={} verifier_len={} challenge={}",
         pkce_ok,
         body.code_verifier.len(),
-        &auth_code.code_challenge
+        &stored_challenge
     );
     if !pkce_ok {
         return (
@@ -342,6 +351,11 @@ async fn oauth_token(
             created_at: Instant::now(),
             expires_in,
         },
+    );
+
+    eprintln!(
+        "[OAuth] POST /token SUCCESS — token issued (len={})",
+        token.len()
     );
 
     Json(json!({
@@ -472,6 +486,48 @@ async fn mcp_handler(
     response
 }
 
+// --- SSE Transport handler ---
+
+async fn sse_handler(State(store): State<SharedStore>, headers: HeaderMap) -> Response {
+    eprintln!("[MCP] GET /sse (SSE transport requested)");
+
+    // Validate bearer token
+    let token = match extract_bearer_token(&headers) {
+        Some(t) => t.to_string(),
+        None => {
+            return (StatusCode::UNAUTHORIZED, "Missing Authorization header").into_response();
+        }
+    };
+    if !store.lock().unwrap().validate_token(&token) {
+        return (StatusCode::UNAUTHORIZED, "Invalid or expired token").into_response();
+    }
+
+    let base = base_url();
+    let session_id = Uuid::new_v4().to_string();
+
+    // Return SSE stream with endpoint event, then keepalive pings
+    let body = format!(
+        "event: endpoint\ndata: {}/message?session_id={}\n\n",
+        base, session_id
+    );
+
+    eprintln!(
+        "[MCP] SSE endpoint sent: {}/message?session_id={}",
+        base, session_id
+    );
+
+    // For now, return the endpoint event as a single SSE response
+    // A full SSE implementation would keep the connection open
+    Response::builder()
+        .status(StatusCode::OK)
+        .header("Content-Type", "text/event-stream")
+        .header("Cache-Control", "no-cache")
+        .header("Connection", "keep-alive")
+        .header("Mcp-Session-Id", &session_id)
+        .body(axum::body::Body::from(body))
+        .unwrap()
+}
+
 // --- Server startup ---
 
 pub async fn run_server(port: u16) {
@@ -491,6 +547,9 @@ pub async fn run_server(port: u16) {
         .route("/authorize", get(oauth_authorize))
         .route("/token", post(oauth_token))
         .route("/mcp", post(mcp_handler))
+        // SSE transport: Claude.ai may try GET /sse to establish event stream
+        .route("/sse", get(sse_handler))
+        .route("/message", post(mcp_handler))
         .layer(cors)
         .with_state(store);
 
