@@ -92,20 +92,28 @@ fn handle_tools_list(id: Option<Value>) -> Value {
             "tools": [
                 {
                     "name": "generate_chart",
-                    "description": "Generate a trading chart PNG with candlesticks and technical indicators. Call list_indicators first to discover available indicators and their parameters. Returns base64-encoded PNG. Data from Yahoo Finance (stocks) or Binance (crypto).",
+                    "description": "Generate a financial candlestick or OHLCV chart image for a given stock or crypto ticker symbol. Supports multiple timeframes (1m, 5m, 15m, 1h, 4h, 1d, 1wk) and 33 technical indicators including RSI, MACD, EMA, Bollinger Bands, Ichimoku Cloud, Stochastic, ATR, OBV, VWAP, Supertrend, and more. Returns a rendered PNG chart with price action and indicator panels. Use when the user asks to plot, chart, visualize, render, or show price action, candlesticks, or technical analysis for any asset. Data sourced from Yahoo Finance (stocks like AAPL, MSFT, TSLA) and Binance (crypto like BTCUSDT, ETHUSDT). Call list_indicators first to discover all available indicator names and their configurable parameters.",
                     "inputSchema": {
                         "type": "object",
                         "properties": {
+                            "ticker": {
+                                "type": "string",
+                                "description": "Stock or crypto ticker symbol. Stocks: AAPL, MSFT, TSLA, GOOGL, AMZN (Yahoo Finance). Crypto: BTCUSDT, ETHUSDT, SOLUSDT (Binance). If omitted, uses random sample data."
+                            },
                             "symbol": {
                                 "type": "string",
-                                "description": "Trading symbol. Crypto: BTCUSDT, ETHUSDT (Binance). Stocks: AAPL, MSFT, TSLA (Yahoo Finance). If omitted, uses random sample data."
+                                "description": "Alias for ticker. Stock or crypto symbol."
+                            },
+                            "timeframe": {
+                                "type": "string",
+                                "description": "Candlestick timeframe / interval: 1m, 5m, 15m, 1h, 4h, 1d, 1wk",
+                                "default": "4h"
                             },
                             "interval": {
                                 "type": "string",
-                                "description": "Candle interval: 1m, 5m, 15m, 1h, 4h, 1d, 1wk",
-                                "default": "4h"
+                                "description": "Alias for timeframe."
                             },
-                            "panels": {
+                            "indicators": {
                                 "type": "array",
                                 "items": {
                                     "oneOf": [
@@ -120,22 +128,26 @@ fn handle_tools_list(id: Option<Value>) -> Value {
                                         }
                                     ]
                                 },
-                                "description": "Indicators to render. Each element is a name string (e.g. 'rsi') or an object with 'name' and optional parameters (e.g. {\"name\": \"rsi\", \"length\": 21}). Call list_indicators to see available indicators and their configurable parameters.",
+                                "description": "Technical indicators to render on the chart. Each element is a name string (e.g. 'rsi') or an object with 'name' and optional parameters (e.g. {\"name\": \"rsi\", \"length\": 21}). Overlays draw on the price chart, panels draw below. Call list_indicators for the full list of 33 available indicators.",
                                 "default": ["ema_stack", "cipher_b", "macd"]
+                            },
+                            "panels": {
+                                "type": "array",
+                                "description": "Alias for indicators."
                             },
                             "bars": {
                                 "type": "integer",
-                                "description": "Number of OHLCV bars",
+                                "description": "Number of OHLCV candlestick bars to display",
                                 "default": 200
                             },
                             "width": {
                                 "type": "integer",
-                                "description": "Image width in pixels",
+                                "description": "Chart image width in pixels",
                                 "default": 1920
                             },
                             "height": {
                                 "type": "integer",
-                                "description": "Image height in pixels",
+                                "description": "Chart image height in pixels",
                                 "default": 1080
                             }
                         }
@@ -143,7 +155,7 @@ fn handle_tools_list(id: Option<Value>) -> Value {
                 },
                 {
                     "name": "list_indicators",
-                    "description": "List all available technical indicators with descriptions, parameters, and categories. Use this to discover what indicators are available and how to configure them.",
+                    "description": "List all available technical analysis indicators supported by the chart generation tool. Returns 33 indicators organized by category: momentum indicators (RSI, MACD, Stochastic, CCI, Williams %R, ROC), trend indicators (EMA stack, Supertrend, ADX, Ichimoku Cloud, Parabolic SAR), volatility indicators (Bollinger Bands, ATR, Keltner Channels, Donchian Channels, Historical Volatility), volume indicators (OBV, MFI, CMF, VWAP, CVD, A/D Line), and crypto-specific indicators (Funding Rate, Open Interest, Long/Short Ratio, Fear & Greed Index). Each indicator includes a description, configurable parameters with defaults, and whether it renders as an overlay on the price chart or as a separate panel. Call this before generate_chart to discover valid indicator names and their configuration options.",
                     "inputSchema": {
                         "type": "object",
                         "properties": {}
@@ -216,15 +228,24 @@ fn tool_generate_chart(id: Option<Value>, args: &Value) -> Value {
     let bars = args.get("bars").and_then(|v| v.as_u64()).unwrap_or(200) as usize;
     let width = args.get("width").and_then(|v| v.as_u64()).unwrap_or(1920) as u32;
     let height = args.get("height").and_then(|v| v.as_u64()).unwrap_or(1080) as u32;
-    let symbol = args.get("symbol").and_then(|v| v.as_str());
+
+    // Accept both "symbol" and "ticker" parameter names
+    let symbol = args
+        .get("ticker")
+        .or_else(|| args.get("symbol"))
+        .and_then(|v| v.as_str());
+
+    // Accept both "timeframe" and "interval" parameter names
     let interval = args
-        .get("interval")
+        .get("timeframe")
+        .or_else(|| args.get("interval"))
         .and_then(|v| v.as_str())
         .unwrap_or("4h");
 
-    // Parse panels — supports both string array and mixed string/object array
+    // Accept both "indicators" and "panels" parameter names
     let panels_value = args
-        .get("panels")
+        .get("indicators")
+        .or_else(|| args.get("panels"))
         .cloned()
         .unwrap_or_else(|| json!(["ema_stack", "cipher_b", "macd"]));
 
