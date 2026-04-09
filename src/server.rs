@@ -413,6 +413,24 @@ fn verify_pkce(code_verifier: &str, code_challenge: &str) -> bool {
     computed == code_challenge
 }
 
+// --- Favicon ---
+
+const FAVICON_SVG: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <rect width="64" height="64" rx="8" fill="#1a1a2e"/>
+  <line x1="14" y1="12" x2="14" y2="52" stroke="#22c55e" stroke-width="2"/>
+  <rect x="10" y="20" width="8" height="18" rx="1" fill="#22c55e"/>
+  <line x1="28" y1="8" x2="28" y2="48" stroke="#ef4444" stroke-width="2"/>
+  <rect x="24" y="16" width="8" height="22" rx="1" fill="#ef4444"/>
+  <line x1="42" y1="18" x2="42" y2="56" stroke="#22c55e" stroke-width="2"/>
+  <rect x="38" y="26" width="8" height="16" rx="1" fill="#22c55e"/>
+  <line x1="56" y1="10" x2="56" y2="50" stroke="#ef4444" stroke-width="2"/>
+  <rect x="52" y="18" width="8" height="20" rx="1" fill="#ef4444"/>
+</svg>"##;
+
+async fn favicon_handler() -> impl IntoResponse {
+    ([(header::CONTENT_TYPE, "image/svg+xml")], FAVICON_SVG)
+}
+
 // --- MCP Streamable HTTP transport ---
 
 fn extract_bearer_token(headers: &HeaderMap) -> Option<&str> {
@@ -546,6 +564,8 @@ pub async fn run_server(port: u16) {
         .route("/register", post(oauth_register))
         .route("/authorize", get(oauth_authorize))
         .route("/token", post(oauth_token))
+        .route("/favicon.ico", get(favicon_handler))
+        .route("/favicon.svg", get(favicon_handler))
         // MCP endpoints — Claude.ai may try root, /mcp, /message, or /sse
         .route("/", get(sse_handler).post(mcp_handler))
         .route("/mcp", get(sse_handler).post(mcp_handler))
