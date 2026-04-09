@@ -5,6 +5,66 @@ use plotters::prelude::*;
 const BG: RGBColor = RGBColor(19, 23, 34);
 const GRID: RGBAColor = RGBAColor(42, 46, 57, 0.5);
 const TEXT: RGBColor = RGBColor(120, 123, 134);
+const TITLE_COLOR: RGBColor = RGBColor(210, 210, 210);
+
+/// Format epoch seconds to "YYYY-MM-DD HH:MM" (UTC, no chrono dep).
+fn format_epoch(epoch: i64) -> String {
+    let s = epoch;
+    let days_since_epoch = s / 86400;
+    let time_of_day = s % 86400;
+    let hours = time_of_day / 3600;
+    let minutes = (time_of_day % 3600) / 60;
+
+    // Days to Y-M-D (simplified Gregorian, correct for 1970–2099)
+    let mut y = 1970;
+    let mut remaining = days_since_epoch;
+    loop {
+        let days_in_year = if y % 4 == 0 && (y % 100 != 0 || y % 400 == 0) {
+            366
+        } else {
+            365
+        };
+        if remaining < days_in_year {
+            break;
+        }
+        remaining -= days_in_year;
+        y += 1;
+    }
+    let leap = y % 4 == 0 && (y % 100 != 0 || y % 400 == 0);
+    let month_days: [i64; 12] = [
+        31,
+        if leap { 29 } else { 28 },
+        31,
+        30,
+        31,
+        30,
+        31,
+        31,
+        30,
+        31,
+        30,
+        31,
+    ];
+    let mut m = 0;
+    for &md in &month_days {
+        if remaining < md {
+            break;
+        }
+        remaining -= md;
+        m += 1;
+    }
+    let d = remaining + 1;
+    format!("{:04}-{:02}-{:02} {:02}:{:02}", y, m + 1, d, hours, minutes)
+}
+
+/// Short date label depending on interval.
+fn format_bar_label(epoch: i64, interval: &str) -> String {
+    let full = format_epoch(epoch);
+    match interval {
+        "1d" | "1wk" | "1mo" => full[..10].to_string(), // YYYY-MM-DD
+        _ => full,                                      // YYYY-MM-DD HH:MM
+    }
+}
 
 pub fn render_chart(
     data: &OhlcvData,
@@ -32,10 +92,13 @@ pub fn render_chart(
         .fold(f64::NEG_INFINITY, f64::max);
     let p_margin = (p_max - p_min) * 0.05;
 
-    // Layout: candle panel takes 55%, rest shared equally
-    let candle_h = (height as f64 * 0.55) as u32;
+    // Title bar height
+    let title_h: u32 = 28;
+
+    // Layout: title + candle 55% + panels
+    let candle_h = ((height - title_h) as f64 * 0.55) as u32;
     let panel_h = if n_panels > 0 {
-        (height - candle_h) / n_panels as u32
+        (height - title_h - candle_h) / n_panels as u32
     } else {
         0
     };
@@ -43,9 +106,25 @@ pub fn render_chart(
     let root = BitMapBackend::new(output, (width, height)).into_drawing_area();
     root.fill(&BG)?;
 
+    // Draw title: "SYMBOL · INTERVAL"
+    {
+        let sym = data.symbol.as_deref().unwrap_or("Sample");
+        let ivl = data.interval.as_deref().unwrap_or("");
+        let title = if ivl.is_empty() {
+            sym.to_string()
+        } else {
+            format!("{} · {}", sym, ivl.to_uppercase())
+        };
+        root.draw_text(
+            &title,
+            &("monospace", 16).into_font().color(&TITLE_COLOR),
+            (12, 6),
+        )?;
+    }
+
     // Split vertically
     let mut areas = Vec::new();
-    let mut y_start = 0;
+    let mut y_start = title_h as i32;
 
     // Candle area
     let candle_area = root.clone().shrink((0, y_start), (width, candle_h));
@@ -256,6 +335,31 @@ pub fn render_chart(
                 &result.label,
                 &("monospace", 12).into_font().color(&TEXT),
                 (width as i32 - 80, 5),
+            )?;
+        }
+    }
+
+    // ---- Draw X-axis datetime labels along the bottom ----
+    {
+        let interval = data.interval.as_deref().unwrap_or("4h");
+        let y_pos = height as i32 - 4; // just above the bottom edge
+        let x_margin = 60; // match Y-axis label width
+        let chart_width = (width as i32 - x_margin - 10) as f64; // usable chart width
+        let label_count = (width / 180).max(3) as usize; // ~1 label per 180px
+        let step = (n / label_count).max(1);
+
+        for idx in (0..n).step_by(step) {
+            let epoch = data.bars[idx].date.parse::<i64>().unwrap_or(0);
+            if epoch == 0 {
+                continue;
+            }
+            let label = format_bar_label(epoch, interval);
+            let x_frac = idx as f64 / n as f64;
+            let x_px = x_margin + (x_frac * chart_width) as i32;
+            root.draw_text(
+                &label,
+                &("monospace", 10).into_font().color(&TEXT),
+                (x_px, y_pos - 10),
             )?;
         }
     }
