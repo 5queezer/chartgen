@@ -1,5 +1,6 @@
 use crate::data::{Bar, OhlcvData};
 use crate::indicator::*;
+use serde_json::{json, Value};
 use ta::indicators::{
     AverageTrueRange as TaAtr, BollingerBands as TaBB, CommodityChannelIndex as TaCci,
     ExponentialMovingAverage, KeltnerChannel as TaKC, MoneyFlowIndex as TaMfi,
@@ -25,6 +26,10 @@ pub struct EmaStack;
 impl Indicator for EmaStack {
     fn name(&self) -> &str {
         "EMA Stack"
+    }
+
+    fn description(&self) -> &str {
+        "EMA Stack — 4 exponential moving averages (8/21/50/200)"
     }
 
     fn compute(&self, data: &OhlcvData) -> PanelResult {
@@ -87,6 +92,26 @@ impl Default for BollingerBandsInd {
 impl Indicator for BollingerBandsInd {
     fn name(&self) -> &str {
         "Bollinger Bands"
+    }
+
+    fn description(&self) -> &str {
+        "Bollinger Bands — volatility bands around SMA"
+    }
+
+    fn params(&self) -> Value {
+        json!([
+            {"name": "period", "type": "integer", "default": 20},
+            {"name": "std_dev", "type": "number", "default": 2.0}
+        ])
+    }
+
+    fn configure(&mut self, params: &Value) {
+        if let Some(v) = params.get("period").and_then(|v| v.as_u64()) {
+            self.period = v as usize;
+        }
+        if let Some(v) = params.get("std_dev").and_then(|v| v.as_f64()) {
+            self.std_dev = v;
+        }
     }
 
     fn compute(&self, data: &OhlcvData) -> PanelResult {
@@ -161,6 +186,26 @@ impl Indicator for KeltnerChannels {
         "Keltner Channels"
     }
 
+    fn description(&self) -> &str {
+        "Keltner Channels — ATR-based volatility bands"
+    }
+
+    fn params(&self) -> Value {
+        json!([
+            {"name": "period", "type": "integer", "default": 20},
+            {"name": "multiplier", "type": "number", "default": 1.5}
+        ])
+    }
+
+    fn configure(&mut self, params: &Value) {
+        if let Some(v) = params.get("period").and_then(|v| v.as_u64()) {
+            self.period = v as usize;
+        }
+        if let Some(v) = params.get("multiplier").and_then(|v| v.as_f64()) {
+            self.multiplier = v;
+        }
+    }
+
     fn compute(&self, data: &OhlcvData) -> PanelResult {
         let n = data.len();
         let mut upper = vec![f64::NAN; n];
@@ -226,6 +271,20 @@ impl Indicator for Atr {
         "ATR"
     }
 
+    fn description(&self) -> &str {
+        "Average True Range — volatility measure"
+    }
+
+    fn params(&self) -> Value {
+        json!([{"name": "period", "type": "integer", "default": 14}])
+    }
+
+    fn configure(&mut self, params: &Value) {
+        if let Some(v) = params.get("period").and_then(|v| v.as_u64()) {
+            self.period = v as usize;
+        }
+    }
+
     fn compute(&self, data: &OhlcvData) -> PanelResult {
         let n = data.len();
         let mut vals = vec![f64::NAN; n];
@@ -256,6 +315,10 @@ pub struct Obv;
 impl Indicator for Obv {
     fn name(&self) -> &str {
         "OBV"
+    }
+
+    fn description(&self) -> &str {
+        "On-Balance Volume — cumulative volume flow"
     }
 
     fn compute(&self, data: &OhlcvData) -> PanelResult {
@@ -296,6 +359,20 @@ impl Default for Cci {
 impl Indicator for Cci {
     fn name(&self) -> &str {
         "CCI"
+    }
+
+    fn description(&self) -> &str {
+        "Commodity Channel Index — cyclical momentum"
+    }
+
+    fn params(&self) -> Value {
+        json!([{"name": "period", "type": "integer", "default": 20}])
+    }
+
+    fn configure(&mut self, params: &Value) {
+        if let Some(v) = params.get("period").and_then(|v| v.as_u64()) {
+            self.period = v as usize;
+        }
     }
 
     fn compute(&self, data: &OhlcvData) -> PanelResult {
@@ -349,6 +426,20 @@ impl Indicator for Roc {
         "ROC"
     }
 
+    fn description(&self) -> &str {
+        "Rate of Change — momentum percentage"
+    }
+
+    fn params(&self) -> Value {
+        json!([{"name": "period", "type": "integer", "default": 14}])
+    }
+
+    fn configure(&mut self, params: &Value) {
+        if let Some(v) = params.get("period").and_then(|v| v.as_u64()) {
+            self.period = v as usize;
+        }
+    }
+
     fn compute(&self, data: &OhlcvData) -> PanelResult {
         let closes = data.closes();
         let n = closes.len();
@@ -394,6 +485,20 @@ impl Default for Mfi {
 impl Indicator for Mfi {
     fn name(&self) -> &str {
         "MFI"
+    }
+
+    fn description(&self) -> &str {
+        "Money Flow Index — volume-weighted RSI"
+    }
+
+    fn params(&self) -> Value {
+        json!([{"name": "period", "type": "integer", "default": 14}])
+    }
+
+    fn configure(&mut self, params: &Value) {
+        if let Some(v) = params.get("period").and_then(|v| v.as_u64()) {
+            self.period = v as usize;
+        }
     }
 
     fn compute(&self, data: &OhlcvData) -> PanelResult {
@@ -451,6 +556,30 @@ impl Default for Stochastic {
 impl Indicator for Stochastic {
     fn name(&self) -> &str {
         "Stochastic"
+    }
+
+    fn description(&self) -> &str {
+        "Slow Stochastic — overbought/oversold oscillator"
+    }
+
+    fn params(&self) -> Value {
+        json!([
+            {"name": "period", "type": "integer", "default": 14},
+            {"name": "k_smooth", "type": "integer", "default": 3},
+            {"name": "d_smooth", "type": "integer", "default": 3}
+        ])
+    }
+
+    fn configure(&mut self, params: &Value) {
+        if let Some(v) = params.get("period").and_then(|v| v.as_u64()) {
+            self.period = v as usize;
+        }
+        if let Some(v) = params.get("k_smooth").and_then(|v| v.as_u64()) {
+            self.k_smooth = v as usize;
+        }
+        if let Some(v) = params.get("d_smooth").and_then(|v| v.as_u64()) {
+            self.d_smooth = v as usize;
+        }
     }
 
     fn compute(&self, data: &OhlcvData) -> PanelResult {
@@ -525,6 +654,20 @@ impl Indicator for WilliamsR {
         "Williams %R"
     }
 
+    fn description(&self) -> &str {
+        "Williams %R — momentum reversal indicator"
+    }
+
+    fn params(&self) -> Value {
+        json!([{"name": "period", "type": "integer", "default": 14}])
+    }
+
+    fn configure(&mut self, params: &Value) {
+        if let Some(v) = params.get("period").and_then(|v| v.as_u64()) {
+            self.period = v as usize;
+        }
+    }
+
     fn compute(&self, data: &OhlcvData) -> PanelResult {
         let closes = data.closes();
         let highs = data.highs();
@@ -586,6 +729,20 @@ impl Default for Donchian {
 impl Indicator for Donchian {
     fn name(&self) -> &str {
         "Donchian"
+    }
+
+    fn description(&self) -> &str {
+        "Donchian Channels — breakout trading bands"
+    }
+
+    fn params(&self) -> Value {
+        json!([{"name": "period", "type": "integer", "default": 20}])
+    }
+
+    fn configure(&mut self, params: &Value) {
+        if let Some(v) = params.get("period").and_then(|v| v.as_u64()) {
+            self.period = v as usize;
+        }
     }
 
     fn compute(&self, data: &OhlcvData) -> PanelResult {
@@ -651,6 +808,20 @@ impl Default for Cmf {
 impl Indicator for Cmf {
     fn name(&self) -> &str {
         "CMF"
+    }
+
+    fn description(&self) -> &str {
+        "Chaikin Money Flow — buying/selling pressure"
+    }
+
+    fn params(&self) -> Value {
+        json!([{"name": "period", "type": "integer", "default": 20}])
+    }
+
+    fn configure(&mut self, params: &Value) {
+        if let Some(v) = params.get("period").and_then(|v| v.as_u64()) {
+            self.period = v as usize;
+        }
     }
 
     fn compute(&self, data: &OhlcvData) -> PanelResult {

@@ -1,5 +1,6 @@
 use crate::data::OhlcvData;
 use crate::indicator::*;
+use serde_json::{json, Value};
 
 pub struct WaveTrend {
     pub ch_len: usize,
@@ -24,6 +25,26 @@ impl Default for WaveTrend {
 impl Indicator for WaveTrend {
     fn name(&self) -> &str {
         "WaveTrend"
+    }
+
+    fn description(&self) -> &str {
+        "WaveTrend Oscillator — cycle-based momentum"
+    }
+
+    fn params(&self) -> Value {
+        json!([
+            {"name": "ch_len", "type": "integer", "default": 9},
+            {"name": "avg_len", "type": "integer", "default": 12}
+        ])
+    }
+
+    fn configure(&mut self, params: &Value) {
+        if let Some(v) = params.get("ch_len").and_then(|v| v.as_u64()) {
+            self.ch_len = v as usize;
+        }
+        if let Some(v) = params.get("avg_len").and_then(|v| v.as_u64()) {
+            self.avg_len = v as usize;
+        }
     }
 
     fn compute(&self, data: &OhlcvData) -> PanelResult {

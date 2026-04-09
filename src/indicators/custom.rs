@@ -1,5 +1,6 @@
 use crate::data::OhlcvData;
 use crate::indicator::*;
+use serde_json::{json, Value};
 use ta::indicators::AverageTrueRange as TaAtr;
 use ta::{DataItem, Next};
 
@@ -21,6 +22,10 @@ pub struct Vwap;
 impl Indicator for Vwap {
     fn name(&self) -> &str {
         "VWAP"
+    }
+
+    fn description(&self) -> &str {
+        "Volume Weighted Average Price — intraday anchor"
     }
 
     fn compute(&self, data: &OhlcvData) -> PanelResult {
@@ -67,6 +72,20 @@ impl Default for Adx {
 impl Indicator for Adx {
     fn name(&self) -> &str {
         "ADX"
+    }
+
+    fn description(&self) -> &str {
+        "Average Directional Index — trend strength with +DI/-DI"
+    }
+
+    fn params(&self) -> Value {
+        json!([{"name": "period", "type": "integer", "default": 14}])
+    }
+
+    fn configure(&mut self, params: &Value) {
+        if let Some(v) = params.get("period").and_then(|v| v.as_u64()) {
+            self.period = v as usize;
+        }
     }
 
     fn compute(&self, data: &OhlcvData) -> PanelResult {
@@ -236,6 +255,26 @@ impl Indicator for Supertrend {
         "Supertrend"
     }
 
+    fn description(&self) -> &str {
+        "Supertrend — ATR-based trend follower"
+    }
+
+    fn params(&self) -> Value {
+        json!([
+            {"name": "period", "type": "integer", "default": 10},
+            {"name": "multiplier", "type": "number", "default": 3.0}
+        ])
+    }
+
+    fn configure(&mut self, params: &Value) {
+        if let Some(v) = params.get("period").and_then(|v| v.as_u64()) {
+            self.period = v as usize;
+        }
+        if let Some(v) = params.get("multiplier").and_then(|v| v.as_f64()) {
+            self.multiplier = v;
+        }
+    }
+
     fn compute(&self, data: &OhlcvData) -> PanelResult {
         let n = data.len();
         let mut dots = Vec::new();
@@ -354,6 +393,30 @@ impl Indicator for ParabolicSar {
         "Parabolic SAR"
     }
 
+    fn description(&self) -> &str {
+        "Parabolic SAR — trailing stop / trend reversal"
+    }
+
+    fn params(&self) -> Value {
+        json!([
+            {"name": "af_start", "type": "number", "default": 0.02},
+            {"name": "af_step", "type": "number", "default": 0.02},
+            {"name": "af_max", "type": "number", "default": 0.2}
+        ])
+    }
+
+    fn configure(&mut self, params: &Value) {
+        if let Some(v) = params.get("af_start").and_then(|v| v.as_f64()) {
+            self.af_start = v;
+        }
+        if let Some(v) = params.get("af_step").and_then(|v| v.as_f64()) {
+            self.af_step = v;
+        }
+        if let Some(v) = params.get("af_max").and_then(|v| v.as_f64()) {
+            self.af_max = v;
+        }
+    }
+
     fn compute(&self, data: &OhlcvData) -> PanelResult {
         let n = data.len();
         let mut dots = Vec::new();
@@ -459,6 +522,10 @@ impl Indicator for AdLine {
         "A/D"
     }
 
+    fn description(&self) -> &str {
+        "Accumulation/Distribution Line — volume flow"
+    }
+
     fn compute(&self, data: &OhlcvData) -> PanelResult {
         let n = data.len();
         let mut vals = vec![f64::NAN; n];
@@ -503,6 +570,20 @@ impl Default for HistVol {
 impl Indicator for HistVol {
     fn name(&self) -> &str {
         "HV"
+    }
+
+    fn description(&self) -> &str {
+        "Historical Volatility — annualized log-return std dev"
+    }
+
+    fn params(&self) -> Value {
+        json!([{"name": "period", "type": "integer", "default": 20}])
+    }
+
+    fn configure(&mut self, params: &Value) {
+        if let Some(v) = params.get("period").and_then(|v| v.as_u64()) {
+            self.period = v as usize;
+        }
     }
 
     fn compute(&self, data: &OhlcvData) -> PanelResult {
@@ -566,6 +647,20 @@ impl Default for VwapBands {
 impl Indicator for VwapBands {
     fn name(&self) -> &str {
         "VWAP Bands"
+    }
+
+    fn description(&self) -> &str {
+        "VWAP Bands — standard deviation bands around VWAP"
+    }
+
+    fn params(&self) -> Value {
+        json!([{"name": "std_dev", "type": "number", "default": 2.0}])
+    }
+
+    fn configure(&mut self, params: &Value) {
+        if let Some(v) = params.get("std_dev").and_then(|v| v.as_f64()) {
+            self.std_dev = v;
+        }
     }
 
     fn compute(&self, data: &OhlcvData) -> PanelResult {
@@ -635,6 +730,10 @@ impl Indicator for HeikinAshi {
         "HA"
     }
 
+    fn description(&self) -> &str {
+        "Heikin Ashi — smoothed trend candles"
+    }
+
     fn compute(&self, data: &OhlcvData) -> PanelResult {
         let n = data.len();
         let mut dots = Vec::with_capacity(n);
@@ -691,6 +790,10 @@ pub struct PivotPoints;
 impl Indicator for PivotPoints {
     fn name(&self) -> &str {
         "Pivot"
+    }
+
+    fn description(&self) -> &str {
+        "Pivot Points — support/resistance from prior bar"
     }
 
     fn compute(&self, data: &OhlcvData) -> PanelResult {
@@ -766,6 +869,20 @@ impl Default for VolumeProfile {
 impl Indicator for VolumeProfile {
     fn name(&self) -> &str {
         "VP"
+    }
+
+    fn description(&self) -> &str {
+        "Volume Profile — POC/VAH/VAL price levels"
+    }
+
+    fn params(&self) -> Value {
+        json!([{"name": "bins", "type": "integer", "default": 24}])
+    }
+
+    fn configure(&mut self, params: &Value) {
+        if let Some(v) = params.get("bins").and_then(|v| v.as_u64()) {
+            self.bins = v as usize;
+        }
     }
 
     fn compute(&self, data: &OhlcvData) -> PanelResult {
@@ -990,6 +1107,30 @@ impl Default for KalmanVolume {
 impl Indicator for KalmanVolume {
     fn name(&self) -> &str {
         "KVF"
+    }
+
+    fn description(&self) -> &str {
+        "Kalman Volume Filter — smoothed volume zone oscillator"
+    }
+
+    fn params(&self) -> Value {
+        json!([
+            {"name": "vzo_length", "type": "integer", "default": 70},
+            {"name": "k", "type": "number", "default": 0.06},
+            {"name": "sig_length", "type": "integer", "default": 10}
+        ])
+    }
+
+    fn configure(&mut self, params: &Value) {
+        if let Some(v) = params.get("vzo_length").and_then(|v| v.as_u64()) {
+            self.vzo_length = v as usize;
+        }
+        if let Some(v) = params.get("k").and_then(|v| v.as_f64()) {
+            self.k = v;
+        }
+        if let Some(v) = params.get("sig_length").and_then(|v| v.as_u64()) {
+            self.sig_length = v as usize;
+        }
     }
 
     fn compute(&self, data: &OhlcvData) -> PanelResult {
@@ -1255,6 +1396,30 @@ impl Default for Ichimoku {
 impl Indicator for Ichimoku {
     fn name(&self) -> &str {
         "Ichimoku"
+    }
+
+    fn description(&self) -> &str {
+        "Ichimoku Cloud — trend, support/resistance, momentum"
+    }
+
+    fn params(&self) -> Value {
+        json!([
+            {"name": "tenkan", "type": "integer", "default": 9},
+            {"name": "kijun", "type": "integer", "default": 26},
+            {"name": "senkou_b", "type": "integer", "default": 52}
+        ])
+    }
+
+    fn configure(&mut self, params: &Value) {
+        if let Some(v) = params.get("tenkan").and_then(|v| v.as_u64()) {
+            self.tenkan = v as usize;
+        }
+        if let Some(v) = params.get("kijun").and_then(|v| v.as_u64()) {
+            self.kijun = v as usize;
+        }
+        if let Some(v) = params.get("senkou_b").and_then(|v| v.as_u64()) {
+            self.senkou_b = v as usize;
+        }
     }
 
     fn compute(&self, data: &OhlcvData) -> PanelResult {

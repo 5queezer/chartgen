@@ -3,10 +3,11 @@ use base64::Engine;
 use serde_json::{json, Value};
 use std::io::{self, BufRead, Write};
 
-use crate::data;
 use crate::fetch;
-use crate::indicators;
-use crate::renderer;
+use chartgen::data;
+use chartgen::indicator::Indicator;
+use chartgen::indicators;
+use chartgen::renderer;
 
 pub fn run() {
     let stdin = io::stdin();
@@ -91,7 +92,7 @@ fn handle_tools_list(id: Option<Value>) -> Value {
             "tools": [
                 {
                     "name": "generate_chart",
-                    "description": "Generate a trading chart PNG with candlesticks and technical indicator panels. Supports 33 indicators. Returns base64-encoded PNG image. Data from Yahoo Finance (stocks) or Binance (crypto).",
+                    "description": "Generate a trading chart PNG with candlesticks and technical indicators. Call list_indicators first to discover available indicators and their parameters. Returns base64-encoded PNG. Data from Yahoo Finance (stocks) or Binance (crypto).",
                     "inputSchema": {
                         "type": "object",
                         "properties": {
@@ -106,8 +107,20 @@ fn handle_tools_list(id: Option<Value>) -> Value {
                             },
                             "panels": {
                                 "type": "array",
-                                "items": { "type": "string" },
-                                "description": "Indicators to render. Overlays draw on price chart, panels below. Available: ema_stack, bbands, keltner, donchian, vwap, vwap_bands, supertrend, sar, ichimoku, heikin_ashi, pivot, volume_profile (overlays); cipher_b, macd, rsi, wavetrend, stoch, atr, obv, cci, roc, mfi, williams_r, cmf, adx, ad, histvol, cvd, funding, oi, long_short, fear_greed, kalman_volume (panels)",
+                                "items": {
+                                    "oneOf": [
+                                        { "type": "string" },
+                                        {
+                                            "type": "object",
+                                            "properties": {
+                                                "name": { "type": "string" }
+                                            },
+                                            "required": ["name"],
+                                            "additionalProperties": true
+                                        }
+                                    ]
+                                },
+                                "description": "Indicators to render. Each element is a name string (e.g. 'rsi') or an object with 'name' and optional parameters (e.g. {\"name\": \"rsi\", \"length\": 21}). Call list_indicators to see available indicators and their configurable parameters.",
                                 "default": ["ema_stack", "cipher_b", "macd"]
                             },
                             "bars": {
@@ -130,7 +143,7 @@ fn handle_tools_list(id: Option<Value>) -> Value {
                 },
                 {
                     "name": "list_indicators",
-                    "description": "List all available technical indicator names with descriptions.",
+                    "description": "List all available technical indicators with descriptions, parameters, and categories. Use this to discover what indicators are available and how to configure them.",
                     "inputSchema": {
                         "type": "object",
                         "properties": {}
@@ -166,12 +179,40 @@ fn handle_tools_call(id: Option<Value>, params: Option<&Value>) -> Value {
     }
 }
 
-fn tool_generate_chart(id: Option<Value>, args: &Value) -> Value {
-    let panel_names: Vec<String> = args
-        .get("panels")
-        .and_then(|p| serde_json::from_value(p.clone()).ok())
-        .unwrap_or_else(|| vec!["ema_stack".into(), "cipher_b".into(), "macd".into()]);
+/// Parse panels array: each element can be a string ("rsi") or an object ({"name": "rsi", "length": 21}).
+fn parse_panels(panels_value: &Value) -> (Vec<Box<dyn Indicator>>, Vec<String>) {
+    let arr = match panels_value.as_array() {
+        Some(a) => a,
+        None => return (vec![], vec![]),
+    };
 
+    let mut result: Vec<Box<dyn Indicator>> = Vec::new();
+    let mut errors = Vec::new();
+
+    for item in arr {
+        if let Some(name) = item.as_str() {
+            // Simple string: "rsi"
+            match indicators::by_name(name) {
+                Some(ind) => result.push(ind),
+                None => errors.push(name.to_string()),
+            }
+        } else if let Some(obj) = item.as_object() {
+            // Object: {"name": "rsi", "length": 21}
+            let name = match obj.get("name").and_then(|n| n.as_str()) {
+                Some(n) => n,
+                None => continue,
+            };
+            match indicators::by_name_configured(name, &Value::Object(obj.clone())) {
+                Some(ind) => result.push(ind),
+                None => errors.push(name.to_string()),
+            }
+        }
+    }
+
+    (result, errors)
+}
+
+fn tool_generate_chart(id: Option<Value>, args: &Value) -> Value {
     let bars = args.get("bars").and_then(|v| v.as_u64()).unwrap_or(200) as usize;
     let width = args.get("width").and_then(|v| v.as_u64()).unwrap_or(1920) as u32;
     let height = args.get("height").and_then(|v| v.as_u64()).unwrap_or(1080) as u32;
@@ -180,6 +221,31 @@ fn tool_generate_chart(id: Option<Value>, args: &Value) -> Value {
         .get("interval")
         .and_then(|v| v.as_str())
         .unwrap_or("4h");
+
+    // Parse panels — supports both string array and mixed string/object array
+    let panels_value = args
+        .get("panels")
+        .cloned()
+        .unwrap_or_else(|| json!(["ema_stack", "cipher_b", "macd"]));
+
+    let (panel_indicators, unknown) = parse_panels(&panels_value);
+
+    if !unknown.is_empty() {
+        return json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "result": {
+                "content": [{
+                    "type": "text",
+                    "text": format!(
+                        "Unknown indicator(s): {}. Call list_indicators to see available indicators.",
+                        unknown.join(", ")
+                    )
+                }],
+                "isError": true
+            }
+        });
+    }
 
     let mut data = if let Some(sym) = symbol {
         let source = fetch::detect_source(sym);
@@ -193,32 +259,6 @@ fn tool_generate_chart(id: Option<Value>, args: &Value) -> Value {
     };
     data.symbol = symbol.map(|s| s.to_string());
     data.interval = Some(interval.to_string());
-
-    let mut unknown = Vec::new();
-    let panel_indicators: Vec<_> = panel_names
-        .iter()
-        .filter_map(|name| {
-            let ind = indicators::by_name(name);
-            if ind.is_none() {
-                unknown.push(name.clone());
-            }
-            ind
-        })
-        .collect();
-
-    if !unknown.is_empty() {
-        return json!({
-            "jsonrpc": "2.0",
-            "id": id,
-            "result": {
-                "content": [{
-                    "type": "text",
-                    "text": format!("Unknown indicator(s): {}. Available: {:?}", unknown.join(", "), indicators::available())
-                }],
-                "isError": true
-            }
-        });
-    }
 
     // Render to a temp file, then read as base64
     let tmp_path = format!("/tmp/chartgen_{}.png", std::process::id());
@@ -262,27 +302,36 @@ fn tool_generate_chart(id: Option<Value>, args: &Value) -> Value {
 }
 
 fn tool_list_indicators(id: Option<Value>) -> Value {
-    let info = json!({
-        "overlays": [
-            "ema_stack", "bbands", "keltner", "donchian", "vwap", "vwap_bands",
-            "supertrend", "sar", "ichimoku", "heikin_ashi", "pivot", "volume_profile"
-        ],
-        "panels": [
-            "cipher_b", "macd", "rsi", "wavetrend", "stoch", "atr", "obv", "cci",
-            "roc", "mfi", "williams_r", "cmf", "adx", "ad", "histvol", "cvd",
-            "kalman_volume"
-        ],
-        "external_api": [
-            "funding", "oi", "long_short", "fear_greed"
-        ]
-    });
+    let reg = indicators::registry();
+    let indicator_list: Vec<Value> = reg
+        .iter()
+        .map(|info| {
+            let mut entry = json!({
+                "name": info.name,
+                "description": info.description,
+                "type": info.category,
+                "overlay": info.is_overlay,
+            });
+            if !info.aliases.is_empty() {
+                entry["aliases"] = json!(info.aliases);
+            }
+            if info.params != json!([]) {
+                entry["configurable_params"] = info.params.clone();
+            }
+            entry
+        })
+        .collect();
+
     json!({
         "jsonrpc": "2.0",
         "id": id,
         "result": {
             "content": [{
                 "type": "text",
-                "text": serde_json::to_string_pretty(&info).unwrap()
+                "text": serde_json::to_string_pretty(&json!({
+                    "total": indicator_list.len(),
+                    "indicators": indicator_list
+                })).unwrap()
             }]
         }
     })

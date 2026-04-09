@@ -413,6 +413,10 @@ impl Indicator for CipherB {
         "Cipher B"
     }
 
+    fn description(&self) -> &str {
+        "Market Cipher B — composite (WaveTrend + divergences + RSI + Stoch RSI + MFI)"
+    }
+
     fn compute(&self, data: &OhlcvData) -> PanelResult {
         let cfg = &self.config;
         let n = data.len();

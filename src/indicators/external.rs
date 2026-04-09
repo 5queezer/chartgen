@@ -68,6 +68,10 @@ impl Indicator for Cvd {
         "cvd"
     }
 
+    fn description(&self) -> &str {
+        "Cumulative Volume Delta — buy vs sell pressure"
+    }
+
     fn compute(&self, data: &OhlcvData) -> PanelResult {
         let n = data.len();
         let mut cvd = vec![f64::NAN; n];
@@ -152,6 +156,10 @@ fn fetch_funding_data(symbol: &str) -> Result<Vec<(i64, f64)>, String> {
 impl Indicator for FundingRate {
     fn name(&self) -> &str {
         "funding_rate"
+    }
+
+    fn description(&self) -> &str {
+        "Funding Rate — crypto perpetual futures funding (Binance)"
     }
 
     fn compute(&self, data: &OhlcvData) -> PanelResult {
@@ -257,6 +265,10 @@ impl Indicator for OpenInterestHist {
         "open_interest"
     }
 
+    fn description(&self) -> &str {
+        "Open Interest — total outstanding futures contracts (Binance)"
+    }
+
     fn compute(&self, data: &OhlcvData) -> PanelResult {
         let sym = match data.symbol.as_deref() {
             Some(s) if is_crypto_symbol(s) => s,
@@ -352,6 +364,10 @@ fn fetch_ls_data(symbol: &str, interval: &str) -> Result<Vec<(i64, f64, f64)>, S
 impl Indicator for LongShortRatio {
     fn name(&self) -> &str {
         "long_short"
+    }
+
+    fn description(&self) -> &str {
+        "Long/Short Ratio — account positioning (Binance)"
     }
 
     fn compute(&self, data: &OhlcvData) -> PanelResult {
@@ -476,6 +492,10 @@ fn fng_color(value: f64) -> plotters::style::RGBAColor {
 impl Indicator for FearGreed {
     fn name(&self) -> &str {
         "fear_greed"
+    }
+
+    fn description(&self) -> &str {
+        "Fear & Greed Index — market sentiment (alternative.me)"
     }
 
     fn compute(&self, data: &OhlcvData) -> PanelResult {

@@ -7,6 +7,7 @@ pub mod ta_bridge;
 pub mod wavetrend;
 
 use crate::indicator::Indicator;
+use serde_json::Value;
 
 /// Get indicator by name.
 pub fn by_name(name: &str) -> Option<Box<dyn Indicator>> {
@@ -48,6 +49,13 @@ pub fn by_name(name: &str) -> Option<Box<dyn Indicator>> {
     }
 }
 
+/// Create an indicator by name and apply configuration params.
+pub fn by_name_configured(name: &str, params: &Value) -> Option<Box<dyn Indicator>> {
+    let mut ind = by_name(name)?;
+    ind.configure(params);
+    Some(ind)
+}
+
 pub fn available() -> &'static [&'static str] {
     &[
         "macd",
@@ -84,4 +92,124 @@ pub fn available() -> &'static [&'static str] {
         "long_short",
         "fear_greed",
     ]
+}
+
+/// Indicator metadata for tool discovery.
+pub struct IndicatorInfo {
+    pub name: &'static str,
+    pub aliases: &'static [&'static str],
+    pub description: String,
+    pub is_overlay: bool,
+    pub category: &'static str,
+    pub params: Value,
+}
+
+/// Returns metadata for all registered indicators.
+pub fn registry() -> Vec<IndicatorInfo> {
+    let mut entries = Vec::new();
+
+    macro_rules! reg {
+        ($name:expr, $aliases:expr, $cat:expr, $ind:expr) => {{
+            let ind: Box<dyn Indicator> = Box::new($ind);
+            entries.push(IndicatorInfo {
+                name: $name,
+                aliases: $aliases,
+                description: ind.description().to_string(),
+                is_overlay: $cat == "overlay",
+                category: $cat,
+                params: ind.params(),
+            });
+        }};
+    }
+
+    // Overlays
+    reg!("ema_stack", &["ema"], "overlay", ta_bridge::EmaStack);
+    reg!(
+        "bbands",
+        &["bollinger"],
+        "overlay",
+        ta_bridge::BollingerBandsInd::default()
+    );
+    reg!(
+        "keltner",
+        &[],
+        "overlay",
+        ta_bridge::KeltnerChannels::default()
+    );
+    reg!("donchian", &[], "overlay", ta_bridge::Donchian::default());
+    reg!("vwap", &[], "overlay", custom::Vwap);
+    reg!("vwap_bands", &[], "overlay", custom::VwapBands::default());
+    reg!("supertrend", &[], "overlay", custom::Supertrend::default());
+    reg!(
+        "sar",
+        &["parabolic_sar"],
+        "overlay",
+        custom::ParabolicSar::default()
+    );
+    reg!("ichimoku", &[], "overlay", custom::Ichimoku::default());
+    reg!("heikin_ashi", &["ha"], "overlay", custom::HeikinAshi);
+    reg!("pivot", &["pivot_points"], "overlay", custom::PivotPoints);
+    reg!(
+        "volume_profile",
+        &["vp"],
+        "overlay",
+        custom::VolumeProfile::default()
+    );
+
+    // Panels
+    reg!("cipher_b", &[], "panel", cipher_b::CipherB::default());
+    reg!("macd", &[], "panel", macd::Macd::default());
+    reg!("rsi", &[], "panel", rsi::Rsi::default());
+    reg!("wavetrend", &[], "panel", wavetrend::WaveTrend::default());
+    reg!(
+        "stoch",
+        &["stochastic"],
+        "panel",
+        ta_bridge::Stochastic::default()
+    );
+    reg!("atr", &[], "panel", ta_bridge::Atr::default());
+    reg!("obv", &[], "panel", ta_bridge::Obv);
+    reg!("cci", &[], "panel", ta_bridge::Cci::default());
+    reg!("roc", &[], "panel", ta_bridge::Roc::default());
+    reg!("mfi", &[], "panel", ta_bridge::Mfi::default());
+    reg!(
+        "williams_r",
+        &["willr"],
+        "panel",
+        ta_bridge::WilliamsR::default()
+    );
+    reg!("cmf", &[], "panel", ta_bridge::Cmf::default());
+    reg!("adx", &[], "panel", custom::Adx::default());
+    reg!("ad", &["ad_line"], "panel", custom::AdLine);
+    reg!("histvol", &["hv"], "panel", custom::HistVol::default());
+    reg!(
+        "kalman_volume",
+        &["kalman", "kvf"],
+        "panel",
+        custom::KalmanVolume::default()
+    );
+
+    // External API
+    reg!("cvd", &[], "external", external::Cvd);
+    reg!(
+        "funding",
+        &["funding_rate"],
+        "external",
+        external::FundingRate
+    );
+    reg!(
+        "oi",
+        &["open_interest"],
+        "external",
+        external::OpenInterestHist
+    );
+    reg!(
+        "long_short",
+        &["ls_ratio"],
+        "external",
+        external::LongShortRatio
+    );
+    reg!("fear_greed", &["fng"], "external", external::FearGreed);
+
+    entries
 }

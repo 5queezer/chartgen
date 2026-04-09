@@ -1,5 +1,6 @@
 use crate::data::OhlcvData;
 use crate::indicator::*;
+use serde_json::{json, Value};
 use ta::indicators::RelativeStrengthIndex;
 use ta::Next;
 
@@ -38,6 +39,20 @@ pub fn compute_rsi(closes: &[f64], length: usize) -> Vec<f64> {
 impl Indicator for Rsi {
     fn name(&self) -> &str {
         "RSI"
+    }
+
+    fn description(&self) -> &str {
+        "Relative Strength Index — momentum oscillator (0-100)"
+    }
+
+    fn params(&self) -> Value {
+        json!([{"name": "length", "type": "integer", "default": 14, "description": "RSI period"}])
+    }
+
+    fn configure(&mut self, params: &Value) {
+        if let Some(v) = params.get("length").and_then(|v| v.as_u64()) {
+            self.length = v as usize;
+        }
     }
 
     fn compute(&self, data: &OhlcvData) -> PanelResult {

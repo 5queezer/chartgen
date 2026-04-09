@@ -1,5 +1,6 @@
 use crate::data::OhlcvData;
 use plotters::style::RGBAColor;
+use serde_json::{json, Value};
 use ta::indicators::{ExponentialMovingAverage, SimpleMovingAverage};
 use ta::Next;
 
@@ -63,6 +64,21 @@ pub trait Indicator {
     #[allow(dead_code)]
     fn name(&self) -> &str;
     fn compute(&self, data: &OhlcvData) -> PanelResult;
+
+    /// Human-readable description for tool discovery.
+    fn description(&self) -> &str {
+        ""
+    }
+
+    /// Configurable parameters as JSON array: `[{"name": "length", "type": "integer", "default": 14, "description": "..."}, ...]`
+    /// Empty array means no configurable params.
+    fn params(&self) -> Value {
+        json!([])
+    }
+
+    /// Apply custom configuration from JSON object. Called before compute().
+    /// Only needs to handle the params declared by params().
+    fn configure(&mut self, _params: &Value) {}
 }
 
 // ---- Helpers ----

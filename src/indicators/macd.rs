@@ -1,5 +1,6 @@
 use crate::data::OhlcvData;
 use crate::indicator::*;
+use serde_json::{json, Value};
 use ta::indicators::MovingAverageConvergenceDivergence;
 use ta::Next;
 
@@ -22,6 +23,30 @@ impl Default for Macd {
 impl Indicator for Macd {
     fn name(&self) -> &str {
         "MACD"
+    }
+
+    fn description(&self) -> &str {
+        "Moving Average Convergence Divergence — trend momentum"
+    }
+
+    fn params(&self) -> Value {
+        json!([
+            {"name": "fast", "type": "integer", "default": 12},
+            {"name": "slow", "type": "integer", "default": 26},
+            {"name": "signal", "type": "integer", "default": 9}
+        ])
+    }
+
+    fn configure(&mut self, params: &Value) {
+        if let Some(v) = params.get("fast").and_then(|v| v.as_u64()) {
+            self.fast = v as usize;
+        }
+        if let Some(v) = params.get("slow").and_then(|v| v.as_u64()) {
+            self.slow = v as usize;
+        }
+        if let Some(v) = params.get("signal").and_then(|v| v.as_u64()) {
+            self.signal = v as usize;
+        }
     }
 
     fn compute(&self, data: &OhlcvData) -> PanelResult {
