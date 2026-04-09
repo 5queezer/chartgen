@@ -546,10 +546,11 @@ pub async fn run_server(port: u16) {
         .route("/register", post(oauth_register))
         .route("/authorize", get(oauth_authorize))
         .route("/token", post(oauth_token))
-        .route("/mcp", post(mcp_handler))
-        // SSE transport: Claude.ai may try GET /sse to establish event stream
-        .route("/sse", get(sse_handler))
+        // MCP endpoints — Claude.ai may try root, /mcp, /message, or /sse
+        .route("/", get(sse_handler).post(mcp_handler))
+        .route("/mcp", get(sse_handler).post(mcp_handler))
         .route("/message", post(mcp_handler))
+        .route("/sse", get(sse_handler))
         .layer(cors)
         .with_state(store);
 
