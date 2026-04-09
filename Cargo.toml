@@ -3,6 +3,14 @@ name = "chartgen"
 version = "0.1.0"
 edition = "2021"
 
+[lib]
+name = "chartgen"
+path = "src/lib.rs"
+
+[[bin]]
+name = "chartgen"
+path = "src/main.rs"
+
 [dependencies]
 plotters = { version = "0.3", default-features = false, features = ["bitmap_backend", "line_series", "bitmap_encoder", "ttf"] }
 clap = { version = "4", features = ["derive"] }

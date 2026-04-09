@@ -74,6 +74,13 @@ pub fn render_chart(
     height: u32,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let n = data.len();
+    if n == 0 {
+        // Nothing to render -- write a blank image
+        let root = BitMapBackend::new(output, (width, height)).into_drawing_area();
+        root.fill(&BG)?;
+        root.present()?;
+        return Ok(());
+    }
 
     // Compute all indicators
     let results: Vec<PanelResult> = panels.iter().map(|p| p.compute(data)).collect();

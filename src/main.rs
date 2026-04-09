@@ -1,10 +1,9 @@
-mod data;
 mod fetch;
-mod indicator;
-mod indicators;
 mod mcp;
-mod renderer;
 
+use chartgen::data;
+use chartgen::indicators;
+use chartgen::renderer;
 use clap::Parser;
 
 #[derive(Parser)]

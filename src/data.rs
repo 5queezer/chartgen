@@ -31,6 +31,9 @@ impl OhlcvData {
     pub fn len(&self) -> usize {
         self.bars.len()
     }
+    pub fn is_empty(&self) -> bool {
+        self.bars.is_empty()
+    }
 }
 
 /// Simple LCG PRNG (no external dep needed).
