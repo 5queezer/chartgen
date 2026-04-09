@@ -276,6 +276,19 @@ fn auto_range(r: &PanelResult) -> (f64, f64) {
             hi = hi.max(*v);
         }
     }
+    for bars in &r.bars {
+        for v in &bars.y {
+            if v.is_nan() {
+                continue;
+            }
+            lo = lo.min(bars.bottom.min(bars.bottom + *v));
+            hi = hi.max(bars.bottom.max(bars.bottom + *v));
+        }
+    }
+    // Fallback for empty panels
+    if lo.is_infinite() || hi.is_infinite() || (hi - lo).abs() < 1e-10 {
+        return (-1.0, 1.0);
+    }
     let margin = (hi - lo).max(1.0) * 0.1;
     (lo - margin, hi + margin)
 }

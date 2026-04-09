@@ -14,6 +14,8 @@ pub struct Bar {
 #[derive(Clone, Debug)]
 pub struct OhlcvData {
     pub bars: Vec<Bar>,
+    pub symbol: Option<String>,
+    pub interval: Option<String>,
 }
 
 impl OhlcvData {
@@ -73,5 +75,9 @@ pub fn sample_data(n: usize) -> OhlcvData {
         });
         price = c;
     }
-    OhlcvData { bars }
+    OhlcvData {
+        bars,
+        symbol: None,
+        interval: None,
+    }
 }

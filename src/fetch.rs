@@ -74,7 +74,11 @@ pub fn fetch_binance(symbol: &str, interval: &str, limit: usize) -> Result<Ohlcv
         return Err("Binance returned zero bars".into());
     }
 
-    Ok(OhlcvData { bars })
+    Ok(OhlcvData {
+        bars,
+        symbol: None,
+        interval: None,
+    })
 }
 
 pub fn fetch_yahoo(symbol: &str, interval: &str, limit: usize) -> Result<OhlcvData, String> {
@@ -189,7 +193,11 @@ pub fn fetch_yahoo(symbol: &str, interval: &str, limit: usize) -> Result<OhlcvDa
         bars = bars.split_off(bars.len() - limit);
     }
 
-    Ok(OhlcvData { bars })
+    Ok(OhlcvData {
+        bars,
+        symbol: None,
+        interval: None,
+    })
 }
 
 fn yahoo_interval_range(interval: &str) -> (&str, &str) {

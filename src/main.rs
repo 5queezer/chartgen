@@ -55,7 +55,7 @@ fn main() {
         return;
     }
 
-    let data = if let Some(ref sym) = cli.symbol {
+    let mut data = if let Some(ref sym) = cli.symbol {
         let source = match cli.source.as_str() {
             "binance" => "binance",
             "yahoo" => "yahoo",
@@ -75,6 +75,8 @@ fn main() {
     } else {
         data::sample_data(cli.bars)
     };
+    data.symbol = cli.symbol.clone();
+    data.interval = Some(cli.interval.clone());
 
     let panel_indicators: Vec<_> = cli
         .panels

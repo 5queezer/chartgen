@@ -1,5 +1,6 @@
 pub mod cipher_b;
 pub mod custom;
+pub mod external;
 pub mod macd;
 pub mod rsi;
 pub mod ta_bridge;
@@ -37,6 +38,11 @@ pub fn by_name(name: &str) -> Option<Box<dyn Indicator>> {
         "heikin_ashi" | "ha" => Some(Box::new(custom::HeikinAshi)),
         "pivot" | "pivot_points" => Some(Box::new(custom::PivotPoints)),
         "volume_profile" | "vp" => Some(Box::new(custom::VolumeProfile::default())),
+        "cvd" => Some(Box::new(external::Cvd)),
+        "funding" | "funding_rate" => Some(Box::new(external::FundingRate)),
+        "oi" | "open_interest" => Some(Box::new(external::OpenInterestHist)),
+        "long_short" | "ls_ratio" => Some(Box::new(external::LongShortRatio)),
+        "fear_greed" | "fng" => Some(Box::new(external::FearGreed)),
         _ => None,
     }
 }
@@ -70,5 +76,10 @@ pub fn available() -> &'static [&'static str] {
         "heikin_ashi",
         "pivot",
         "volume_profile",
+        "cvd",
+        "funding",
+        "oi",
+        "long_short",
+        "fear_greed",
     ]
 }
