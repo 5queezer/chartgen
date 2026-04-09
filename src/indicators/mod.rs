@@ -31,6 +31,12 @@ pub fn by_name(name: &str) -> Option<Box<dyn Indicator>> {
         "supertrend" => Some(Box::new(custom::Supertrend::default())),
         "sar" | "parabolic_sar" => Some(Box::new(custom::ParabolicSar::default())),
         "ichimoku" => Some(Box::new(custom::Ichimoku::default())),
+        "ad" | "ad_line" => Some(Box::new(custom::AdLine)),
+        "histvol" | "hv" => Some(Box::new(custom::HistVol::default())),
+        "vwap_bands" => Some(Box::new(custom::VwapBands::default())),
+        "heikin_ashi" | "ha" => Some(Box::new(custom::HeikinAshi)),
+        "pivot" | "pivot_points" => Some(Box::new(custom::PivotPoints)),
+        "volume_profile" | "vp" => Some(Box::new(custom::VolumeProfile::default())),
         _ => None,
     }
 }
@@ -58,5 +64,11 @@ pub fn available() -> &'static [&'static str] {
         "supertrend",
         "sar",
         "ichimoku",
+        "ad",
+        "histvol",
+        "vwap_bands",
+        "heikin_ashi",
+        "pivot",
+        "volume_profile",
     ]
 }

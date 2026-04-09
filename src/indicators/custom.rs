@@ -450,6 +450,454 @@ impl Indicator for ParabolicSar {
     }
 }
 
+// ---- Accumulation/Distribution Line (panel) ----
+
+pub struct AdLine;
+
+impl Indicator for AdLine {
+    fn name(&self) -> &str {
+        "A/D"
+    }
+
+    fn compute(&self, data: &OhlcvData) -> PanelResult {
+        let n = data.len();
+        let mut vals = vec![f64::NAN; n];
+        let mut cum = 0.0;
+
+        for (i, bar) in data.bars.iter().enumerate() {
+            let range = bar.high - bar.low;
+            let multiplier = if range > 0.0 {
+                ((bar.close - bar.low) - (bar.high - bar.close)) / range
+            } else {
+                0.0
+            };
+            cum += multiplier * bar.volume;
+            vals[i] = cum;
+        }
+
+        PanelResult {
+            lines: vec![Line {
+                y: vals,
+                color: rgba(0x2196F3, 0.9),
+                width: 2,
+                label: Some("A/D".into()),
+            }],
+            label: "A/D".into(),
+            ..Default::default()
+        }
+    }
+}
+
+// ---- Historical Volatility (panel) ----
+
+pub struct HistVol {
+    pub period: usize,
+}
+
+impl Default for HistVol {
+    fn default() -> Self {
+        Self { period: 20 }
+    }
+}
+
+impl Indicator for HistVol {
+    fn name(&self) -> &str {
+        "HV"
+    }
+
+    fn compute(&self, data: &OhlcvData) -> PanelResult {
+        let n = data.len();
+        let mut vals = vec![f64::NAN; n];
+
+        if n < 2 {
+            return PanelResult {
+                label: "HV".into(),
+                ..Default::default()
+            };
+        }
+
+        // Compute log returns
+        let mut log_returns = vec![f64::NAN; n];
+        for (i, pair) in data.bars.windows(2).enumerate() {
+            if pair[1].close > 0.0 && pair[0].close > 0.0 {
+                log_returns[i + 1] = (pair[1].close / pair[0].close).ln();
+            }
+        }
+
+        let period = self.period;
+        // Rolling window standard deviation, annualized
+        for i in period..n {
+            let window = &log_returns[i + 1 - period..=i];
+            let valid: Vec<f64> = window.iter().copied().filter(|r| !r.is_nan()).collect();
+            if valid.len() < 2 {
+                continue;
+            }
+            let count = valid.len() as f64;
+            let mean: f64 = valid.iter().sum::<f64>() / count;
+            let var: f64 = valid.iter().map(|r| (r - mean).powi(2)).sum::<f64>() / count;
+            vals[i] = var.sqrt() * (252.0_f64).sqrt() * 100.0;
+        }
+
+        PanelResult {
+            lines: vec![Line {
+                y: vals,
+                color: rgba(0xFF9800, 0.9),
+                width: 2,
+                label: Some("HV".into()),
+            }],
+            label: "HV".into(),
+            ..Default::default()
+        }
+    }
+}
+
+// ---- VWAP Bands (overlay) ----
+
+pub struct VwapBands {
+    pub std_dev: f64,
+}
+
+impl Default for VwapBands {
+    fn default() -> Self {
+        Self { std_dev: 2.0 }
+    }
+}
+
+impl Indicator for VwapBands {
+    fn name(&self) -> &str {
+        "VWAP Bands"
+    }
+
+    fn compute(&self, data: &OhlcvData) -> PanelResult {
+        let n = data.len();
+        let mut vwap_vals = vec![f64::NAN; n];
+        let mut upper = vec![f64::NAN; n];
+        let mut lower = vec![f64::NAN; n];
+
+        let mut cum_tp_vol = 0.0;
+        let mut cum_vol = 0.0;
+        let mut cum_tp2_vol = 0.0;
+
+        for (i, bar) in data.bars.iter().enumerate() {
+            let tp = (bar.high + bar.low + bar.close) / 3.0;
+            cum_tp_vol += tp * bar.volume;
+            cum_vol += bar.volume;
+            cum_tp2_vol += tp * tp * bar.volume;
+            if cum_vol > 0.0 {
+                let vwap = cum_tp_vol / cum_vol;
+                let variance = (cum_tp2_vol / cum_vol - vwap * vwap).max(0.0);
+                let std = variance.sqrt();
+                vwap_vals[i] = vwap;
+                upper[i] = vwap + self.std_dev * std;
+                lower[i] = vwap - self.std_dev * std;
+            }
+        }
+
+        PanelResult {
+            lines: vec![
+                Line {
+                    y: upper.clone(),
+                    color: rgba(0x787B86, 0.5),
+                    width: 1,
+                    label: Some("VWAP Upper".into()),
+                },
+                Line {
+                    y: vwap_vals,
+                    color: rgba(0xFF9800, 0.9),
+                    width: 2,
+                    label: Some("VWAP".into()),
+                },
+                Line {
+                    y: lower.clone(),
+                    color: rgba(0x787B86, 0.5),
+                    width: 1,
+                    label: Some("VWAP Lower".into()),
+                },
+            ],
+            fills: vec![Fill {
+                y1: upper,
+                y2: lower,
+                color: rgba(0xFF9800, 0.08),
+            }],
+            is_overlay: true,
+            label: "VWAP Bands".into(),
+            ..Default::default()
+        }
+    }
+}
+
+// ---- Heikin Ashi (overlay) ----
+
+pub struct HeikinAshi;
+
+impl Indicator for HeikinAshi {
+    fn name(&self) -> &str {
+        "HA"
+    }
+
+    fn compute(&self, data: &OhlcvData) -> PanelResult {
+        let n = data.len();
+        let mut dots = Vec::with_capacity(n);
+
+        if n == 0 {
+            return PanelResult {
+                is_overlay: true,
+                label: "HA".into(),
+                ..Default::default()
+            };
+        }
+
+        let mut ha_open = vec![0.0_f64; n];
+        let mut ha_close = vec![0.0_f64; n];
+
+        // First bar
+        ha_close[0] =
+            (data.bars[0].open + data.bars[0].high + data.bars[0].low + data.bars[0].close) / 4.0;
+        ha_open[0] = (data.bars[0].open + data.bars[0].close) / 2.0;
+
+        for i in 1..n {
+            let bar = &data.bars[i];
+            ha_close[i] = (bar.open + bar.high + bar.low + bar.close) / 4.0;
+            ha_open[i] = (ha_open[i - 1] + ha_close[i - 1]) / 2.0;
+        }
+
+        for i in 0..n {
+            let color = if ha_close[i] >= ha_open[i] {
+                rgba(0x26a69a, 0.9) // bullish green
+            } else {
+                rgba(0xef5350, 0.9) // bearish red
+            };
+            dots.push(Dot {
+                x: i,
+                y: ha_close[i],
+                color,
+                size: 3,
+            });
+        }
+
+        PanelResult {
+            dots,
+            is_overlay: true,
+            label: "HA".into(),
+            ..Default::default()
+        }
+    }
+}
+
+// ---- Pivot Points (overlay) ----
+
+pub struct PivotPoints;
+
+impl Indicator for PivotPoints {
+    fn name(&self) -> &str {
+        "Pivot"
+    }
+
+    fn compute(&self, data: &OhlcvData) -> PanelResult {
+        let n = data.len();
+        let mut pivot = vec![f64::NAN; n];
+        let mut r1 = vec![f64::NAN; n];
+        let mut s1 = vec![f64::NAN; n];
+        let mut r2 = vec![f64::NAN; n];
+        let mut s2 = vec![f64::NAN; n];
+
+        for i in 1..n {
+            let prev = &data.bars[i - 1];
+            let p = (prev.high + prev.low + prev.close) / 3.0;
+            pivot[i] = p;
+            r1[i] = 2.0 * p - prev.low;
+            s1[i] = 2.0 * p - prev.high;
+            r2[i] = p + (prev.high - prev.low);
+            s2[i] = p - (prev.high - prev.low);
+        }
+
+        PanelResult {
+            lines: vec![
+                Line {
+                    y: pivot,
+                    color: rgba(0xFFEB3B, 0.6),
+                    width: 1,
+                    label: Some("Pivot".into()),
+                },
+                Line {
+                    y: r1,
+                    color: rgba(0xef5350, 0.4),
+                    width: 1,
+                    label: Some("R1".into()),
+                },
+                Line {
+                    y: s1,
+                    color: rgba(0x26a69a, 0.4),
+                    width: 1,
+                    label: Some("S1".into()),
+                },
+                Line {
+                    y: r2,
+                    color: rgba(0xef5350, 0.3),
+                    width: 1,
+                    label: Some("R2".into()),
+                },
+                Line {
+                    y: s2,
+                    color: rgba(0x26a69a, 0.3),
+                    width: 1,
+                    label: Some("S2".into()),
+                },
+            ],
+            is_overlay: true,
+            label: "Pivot".into(),
+            ..Default::default()
+        }
+    }
+}
+
+// ---- Volume Profile (overlay) ----
+
+pub struct VolumeProfile {
+    pub bins: usize,
+}
+
+impl Default for VolumeProfile {
+    fn default() -> Self {
+        Self { bins: 24 }
+    }
+}
+
+impl Indicator for VolumeProfile {
+    fn name(&self) -> &str {
+        "VP"
+    }
+
+    fn compute(&self, data: &OhlcvData) -> PanelResult {
+        let n = data.len();
+
+        if n == 0 {
+            return PanelResult {
+                is_overlay: true,
+                label: "VP".into(),
+                ..Default::default()
+            };
+        }
+
+        // Find price range
+        let mut price_min = f64::INFINITY;
+        let mut price_max = f64::NEG_INFINITY;
+        for bar in &data.bars {
+            if bar.low < price_min {
+                price_min = bar.low;
+            }
+            if bar.high > price_max {
+                price_max = bar.high;
+            }
+        }
+
+        let price_range = price_max - price_min;
+        if price_range <= 0.0 {
+            return PanelResult {
+                is_overlay: true,
+                label: "VP".into(),
+                ..Default::default()
+            };
+        }
+
+        let bins = self.bins.max(1);
+        let bin_size = price_range / bins as f64;
+        let mut volume_bins = vec![0.0_f64; bins];
+        let mut total_volume = 0.0;
+
+        // Distribute volume into bins based on close price
+        for bar in &data.bars {
+            let idx = ((bar.close - price_min) / bin_size).floor() as usize;
+            let idx = idx.min(bins - 1);
+            volume_bins[idx] += bar.volume;
+            total_volume += bar.volume;
+        }
+
+        // Find POC (Point of Control)
+        let mut poc_idx = 0;
+        let mut max_vol = 0.0_f64;
+        for (i, &v) in volume_bins.iter().enumerate() {
+            if v > max_vol {
+                max_vol = v;
+                poc_idx = i;
+            }
+        }
+
+        let poc_price = price_min + (poc_idx as f64 + 0.5) * bin_size;
+
+        // Value Area: 70% of total volume centered around POC
+        let target_vol = total_volume * 0.70;
+        let mut va_vol = volume_bins[poc_idx];
+        let mut va_low_idx = poc_idx;
+        let mut va_high_idx = poc_idx;
+
+        while va_vol < target_vol && (va_low_idx > 0 || va_high_idx < bins - 1) {
+            let try_low = if va_low_idx > 0 {
+                volume_bins[va_low_idx - 1]
+            } else {
+                0.0
+            };
+            let try_high = if va_high_idx < bins - 1 {
+                volume_bins[va_high_idx + 1]
+            } else {
+                0.0
+            };
+
+            if try_low >= try_high && va_low_idx > 0 {
+                va_low_idx -= 1;
+                va_vol += volume_bins[va_low_idx];
+            } else if va_high_idx < bins - 1 {
+                va_high_idx += 1;
+                va_vol += volume_bins[va_high_idx];
+            } else if va_low_idx > 0 {
+                va_low_idx -= 1;
+                va_vol += volume_bins[va_low_idx];
+            } else {
+                break;
+            }
+        }
+
+        let vah_price = price_min + (va_high_idx as f64 + 1.0) * bin_size;
+        let val_price = price_min + va_low_idx as f64 * bin_size;
+
+        // Render as constant horizontal lines across all bars
+        let poc_line = vec![poc_price; n];
+        let vah_line = vec![vah_price; n];
+        let val_line = vec![val_price; n];
+
+        PanelResult {
+            lines: vec![
+                Line {
+                    y: poc_line,
+                    color: rgba(0xFFEB3B, 0.9),
+                    width: 2,
+                    label: Some("POC".into()),
+                },
+                Line {
+                    y: vah_line.clone(),
+                    color: rgba(0xef5350, 0.5),
+                    width: 1,
+                    label: Some("VAH".into()),
+                },
+                Line {
+                    y: val_line.clone(),
+                    color: rgba(0x26a69a, 0.5),
+                    width: 1,
+                    label: Some("VAL".into()),
+                },
+            ],
+            fills: vec![Fill {
+                y1: vah_line,
+                y2: val_line,
+                color: rgba(0xFFEB3B, 0.05),
+            }],
+            is_overlay: true,
+            label: "VP".into(),
+            ..Default::default()
+        }
+    }
+}
+
 // ---- Ichimoku Cloud (overlay) ----
 
 pub struct Ichimoku {
