@@ -235,10 +235,12 @@ async fn oauth_token(
         .get(header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
         .unwrap_or("none");
+    let body_preview = String::from_utf8_lossy(&body_bytes);
     eprintln!(
-        "[OAuth] POST /token content-type={} body_len={}",
+        "[OAuth] POST /token content-type={} body_len={} body={}",
         ct,
-        body_bytes.len()
+        body_bytes.len(),
+        &body_preview[..body_preview.len().min(500)]
     );
     let body: TokenRequest = if headers
         .get(header::CONTENT_TYPE)
@@ -258,9 +260,12 @@ async fn oauth_token(
     } else {
         // Parse as application/x-www-form-urlencoded
         let body_str = String::from_utf8_lossy(&body_bytes);
-        match serde_json::from_value(form_to_json(&body_str)) {
+        let parsed_json = form_to_json(&body_str);
+        eprintln!("[OAuth] POST /token parsed_form={}", parsed_json);
+        match serde_json::from_value(parsed_json) {
             Ok(b) => b,
             Err(e) => {
+                eprintln!("[OAuth] POST /token FORM PARSE ERROR: {}", e);
                 return (
                     StatusCode::BAD_REQUEST,
                     Json(json!({"error": "invalid_request", "error_description": format!("Form parse error: {}", e)})),
@@ -309,7 +314,14 @@ async fn oauth_token(
     }
 
     // PKCE S256 verification
-    if !verify_pkce(&body.code_verifier, &auth_code.code_challenge) {
+    let pkce_ok = verify_pkce(&body.code_verifier, &auth_code.code_challenge);
+    eprintln!(
+        "[OAuth] POST /token PKCE verify: ok={} verifier_len={} challenge={}",
+        pkce_ok,
+        body.code_verifier.len(),
+        &auth_code.code_challenge
+    );
+    if !pkce_ok {
         return (
             StatusCode::BAD_REQUEST,
             Json(
@@ -354,14 +366,29 @@ fn form_to_json(body: &str) -> Value {
 }
 
 fn urlencoding_decode(s: &str) -> String {
-    s.replace('+', " ")
-        .replace("%3A", ":")
-        .replace("%2F", "/")
-        .replace("%3D", "=")
-        .replace("%26", "&")
-        .replace("%25", "%")
-        .replace("%20", " ")
-        .replace("%2B", "+")
+    let mut result = String::with_capacity(s.len());
+    let mut chars = s.bytes();
+    while let Some(b) = chars.next() {
+        match b {
+            b'+' => result.push(' '),
+            b'%' => {
+                let hi = chars.next().unwrap_or(b'0');
+                let lo = chars.next().unwrap_or(b'0');
+                let hex = [hi, lo];
+                if let Ok(s) = std::str::from_utf8(&hex) {
+                    if let Ok(val) = u8::from_str_radix(s, 16) {
+                        result.push(val as char);
+                    } else {
+                        result.push('%');
+                        result.push(hi as char);
+                        result.push(lo as char);
+                    }
+                }
+            }
+            _ => result.push(b as char),
+        }
+    }
+    result
 }
 
 fn verify_pkce(code_verifier: &str, code_challenge: &str) -> bool {
