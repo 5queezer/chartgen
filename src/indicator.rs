@@ -1,5 +1,7 @@
 use crate::data::OhlcvData;
 use plotters::style::RGBAColor;
+use ta::indicators::{ExponentialMovingAverage, SimpleMovingAverage};
+use ta::Next;
 
 /// A line to draw on the panel.
 #[derive(Clone)]
@@ -76,29 +78,27 @@ pub fn ema(data: &[f64], period: usize) -> Vec<f64> {
     if data.is_empty() || period == 0 {
         return out;
     }
-    let k = 2.0 / (period as f64 + 1.0);
-    let mut val = data[0];
-    out[0] = val;
-    for i in 1..data.len() {
-        if data[i].is_nan() {
+    let mut ind = ExponentialMovingAverage::new(period).unwrap();
+    for (i, &v) in data.iter().enumerate() {
+        if v.is_nan() {
             continue;
         }
-        val = data[i] * k + val * (1.0 - k);
-        out[i] = val;
+        out[i] = ind.next(v);
     }
     out
 }
 
 pub fn sma(data: &[f64], period: usize) -> Vec<f64> {
     let mut out = vec![f64::NAN; data.len()];
-    if data.len() < period {
+    if data.is_empty() || period == 0 {
         return out;
     }
-    let mut sum: f64 = data[..period].iter().filter(|v| !v.is_nan()).sum();
-    out[period - 1] = sum / period as f64;
-    for i in period..data.len() {
-        sum += data[i] - data[i - period];
-        out[i] = sum / period as f64;
+    let mut ind = SimpleMovingAverage::new(period).unwrap();
+    for (i, &v) in data.iter().enumerate() {
+        if v.is_nan() {
+            continue;
+        }
+        out[i] = ind.next(v);
     }
     out
 }

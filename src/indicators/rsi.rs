@@ -1,5 +1,7 @@
 use crate::data::OhlcvData;
 use crate::indicator::*;
+use ta::indicators::RelativeStrengthIndex;
+use ta::Next;
 
 pub struct Rsi {
     pub length: usize,
@@ -23,37 +25,12 @@ pub fn compute_rsi(closes: &[f64], length: usize) -> Vec<f64> {
     if n <= length {
         return out;
     }
-
-    let mut avg_gain = 0.0;
-    let mut avg_loss = 0.0;
-
-    for i in 1..=length {
-        let d = closes[i] - closes[i - 1];
-        if d > 0.0 {
-            avg_gain += d;
-        } else {
-            avg_loss -= d;
+    let mut rsi = RelativeStrengthIndex::new(length).unwrap();
+    for (i, &c) in closes.iter().enumerate() {
+        if c.is_nan() {
+            continue;
         }
-    }
-    avg_gain /= length as f64;
-    avg_loss /= length as f64;
-
-    if avg_loss > 0.0 {
-        out[length] = 100.0 - 100.0 / (1.0 + avg_gain / avg_loss);
-    } else {
-        out[length] = 100.0;
-    }
-
-    for i in (length + 1)..n {
-        let d = closes[i] - closes[i - 1];
-        let (g, l) = if d > 0.0 { (d, 0.0) } else { (0.0, -d) };
-        avg_gain = (avg_gain * (length as f64 - 1.0) + g) / length as f64;
-        avg_loss = (avg_loss * (length as f64 - 1.0) + l) / length as f64;
-        out[i] = if avg_loss > 0.0 {
-            100.0 - 100.0 / (1.0 + avg_gain / avg_loss)
-        } else {
-            100.0
-        };
+        out[i] = rsi.next(c);
     }
     out
 }

@@ -1,5 +1,7 @@
 use crate::data::OhlcvData;
 use crate::indicator::*;
+use ta::indicators::MovingAverageConvergenceDivergence;
+use ta::Next;
 
 pub struct Macd {
     pub fast: usize,
@@ -24,12 +26,22 @@ impl Indicator for Macd {
 
     fn compute(&self, data: &OhlcvData) -> PanelResult {
         let closes = data.closes();
-        let ema_f = ema(&closes, self.fast);
-        let ema_s = ema(&closes, self.slow);
+        let n = closes.len();
+        let mut macd_line = vec![f64::NAN; n];
+        let mut sig = vec![f64::NAN; n];
+        let mut hist = vec![f64::NAN; n];
 
-        let macd_line: Vec<f64> = ema_f.iter().zip(&ema_s).map(|(f, s)| f - s).collect();
-        let sig = ema(&macd_line, self.signal);
-        let hist: Vec<f64> = macd_line.iter().zip(&sig).map(|(m, s)| m - s).collect();
+        let mut ind =
+            MovingAverageConvergenceDivergence::new(self.fast, self.slow, self.signal).unwrap();
+        for (i, &c) in closes.iter().enumerate() {
+            if c.is_nan() {
+                continue;
+            }
+            let out = ind.next(c);
+            macd_line[i] = out.macd;
+            sig[i] = out.signal;
+            hist[i] = out.histogram;
+        }
 
         let hist_colors: Vec<_> = hist
             .iter()
