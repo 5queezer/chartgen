@@ -1,4 +1,5 @@
 pub mod cipher_b;
+pub mod custom;
 pub mod macd;
 pub mod rsi;
 pub mod ta_bridge;
@@ -25,6 +26,11 @@ pub fn by_name(name: &str) -> Option<Box<dyn Indicator>> {
         "williams_r" | "willr" => Some(Box::new(ta_bridge::WilliamsR::default())),
         "donchian" => Some(Box::new(ta_bridge::Donchian::default())),
         "cmf" => Some(Box::new(ta_bridge::Cmf::default())),
+        "vwap" => Some(Box::new(custom::Vwap)),
+        "adx" => Some(Box::new(custom::Adx::default())),
+        "supertrend" => Some(Box::new(custom::Supertrend::default())),
+        "sar" | "parabolic_sar" => Some(Box::new(custom::ParabolicSar::default())),
+        "ichimoku" => Some(Box::new(custom::Ichimoku::default())),
         _ => None,
     }
 }
@@ -47,5 +53,10 @@ pub fn available() -> &'static [&'static str] {
         "williams_r",
         "donchian",
         "cmf",
+        "vwap",
+        "adx",
+        "supertrend",
+        "sar",
+        "ichimoku",
     ]
 }
