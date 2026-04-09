@@ -1036,27 +1036,17 @@ impl Indicator for KalmanVolume {
             }
         }
 
-        // Kalman filter
+        // Kalman filter — Pine Script initializes M_n = 0.0, nz(M_n[1]) = 0
         let mut m_n = vec![f64::NAN; n];
-        // Find first valid VZO to seed
-        let mut seeded = false;
+        let mut prev_m = 0.0_f64; // Pine: series float M_n = 0.0
         for i in 0..n {
             if vzo[i].is_nan() {
+                m_n[i] = prev_m; // carry forward like Pine's nz()
                 continue;
             }
-            if !seeded {
-                m_n[i] = vzo[i];
-                seeded = true;
-            } else {
-                // Find previous valid m_n
-                let prev = m_n[..i]
-                    .iter()
-                    .rev()
-                    .find(|v| !v.is_nan())
-                    .copied()
-                    .unwrap();
-                m_n[i] = self.k * vzo[i] + (1.0 - self.k) * prev;
-            }
+            let a_n = vzo[i];
+            prev_m = self.k * a_n + (1.0 - self.k) * prev_m;
+            m_n[i] = prev_m;
         }
 
         // Signal line = SMA(m_n, sig_length)
@@ -1177,9 +1167,9 @@ impl Indicator for KalmanVolume {
         let os_line = vec![-self.ob_os_zone; n];
         let bottom = vec![-2.0; n];
 
-        // Volume histogram bars
+        // Volume histogram bars (symmetric around zero)
         let mut pos_vol = vec![0.0; n];
-        let mut neg_vol = vec![0.0; n];
+        let mut neg_heights = vec![0.0; n];
         let mut bar_colors = Vec::with_capacity(n);
         let faint_teal = rgba(0x00BCD4, 0.15);
         for i in 0..n {
@@ -1189,9 +1179,12 @@ impl Indicator for KalmanVolume {
                 vol_norm[i]
             };
             pos_vol[i] = v;
-            neg_vol[i] = v;
+            neg_heights[i] = v; // height of negative bar (drawn from -v to 0)
             bar_colors.push(faint_teal);
         }
+
+        // Negative bars: use negative y so bottom+y goes below zero
+        let neg_y: Vec<f64> = neg_heights.iter().map(|v| -v).collect();
 
         PanelResult {
             lines: vec![],
@@ -1224,9 +1217,9 @@ impl Indicator for KalmanVolume {
                     bottom: 0.0,
                 },
                 Bars {
-                    y: neg_vol,
+                    y: neg_y,
                     colors: bar_colors,
-                    bottom: 0.0, // these draw downward as negative offset
+                    bottom: 0.0,
                 },
             ],
             dots,
