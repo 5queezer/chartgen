@@ -1,7 +1,7 @@
-use std::io::{self, BufRead, Write};
-use serde_json::{json, Value};
-use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
+use base64::Engine;
+use serde_json::{json, Value};
+use std::io::{self, BufRead, Write};
 
 use crate::{data, indicators, renderer};
 
@@ -159,18 +159,24 @@ fn tool_generate_chart(id: Option<Value>, args: &Value) -> Value {
     let bars = args.get("bars").and_then(|v| v.as_u64()).unwrap_or(120) as usize;
     let width = args.get("width").and_then(|v| v.as_u64()).unwrap_or(1920) as u32;
     let height = args.get("height").and_then(|v| v.as_u64()).unwrap_or(1080) as u32;
-    let output_path = args.get("output").and_then(|v| v.as_str()).map(|s| s.to_string());
+    let output_path = args
+        .get("output")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
 
     let data = data::sample_data(bars);
 
     let mut unknown = Vec::new();
-    let panel_indicators: Vec<_> = panel_names.iter().filter_map(|name| {
-        let ind = indicators::by_name(name);
-        if ind.is_none() {
-            unknown.push(name.clone());
-        }
-        ind
-    }).collect();
+    let panel_indicators: Vec<_> = panel_names
+        .iter()
+        .filter_map(|name| {
+            let ind = indicators::by_name(name);
+            if ind.is_none() {
+                unknown.push(name.clone());
+            }
+            ind
+        })
+        .collect();
 
     if !unknown.is_empty() {
         return json!({
@@ -187,9 +193,9 @@ fn tool_generate_chart(id: Option<Value>, args: &Value) -> Value {
     }
 
     // Render to a temp file, then read as base64
-    let tmp_path = output_path.clone().unwrap_or_else(|| {
-        format!("/tmp/chartgen_{}.png", std::process::id())
-    });
+    let tmp_path = output_path
+        .clone()
+        .unwrap_or_else(|| format!("/tmp/chartgen_{}.png", std::process::id()));
 
     if let Err(e) = renderer::render_chart(&data, &panel_indicators, &tmp_path, width, height) {
         return json!({
@@ -223,9 +229,7 @@ fn tool_generate_chart(id: Option<Value>, args: &Value) -> Value {
 
     let b64 = BASE64.encode(&png_bytes);
 
-    let mut content = vec![
-        json!({ "type": "image", "data": b64, "mimeType": "image/png" }),
-    ];
+    let mut content = vec![json!({ "type": "image", "data": b64, "mimeType": "image/png" })];
 
     if let Some(ref path) = output_path {
         content.push(json!({ "type": "text", "text": format!("Saved to {}", path) }));

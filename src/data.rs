@@ -1,6 +1,7 @@
 /// OHLCV bar and data container.
 
 #[derive(Clone, Debug)]
+#[allow(dead_code)]
 pub struct Bar {
     pub open: f64,
     pub high: f64,
@@ -33,9 +34,14 @@ impl OhlcvData {
 /// Simple LCG PRNG (no external dep needed).
 struct Rng(u64);
 impl Rng {
-    fn new(seed: u64) -> Self { Self(seed) }
+    fn new(seed: u64) -> Self {
+        Self(seed)
+    }
     fn next_f64(&mut self) -> f64 {
-        self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        self.0 = self
+            .0
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         ((self.0 >> 33) as f64) / (u32::MAX as f64)
     }
     /// Approximate normal via Box-Muller.
@@ -58,7 +64,11 @@ pub fn sample_data(n: usize) -> OhlcvData {
         let l = o.min(c) - rng.normal(0.0, 0.5).abs();
         let v = rng.normal(10.0, 0.8).exp();
         bars.push(Bar {
-            open: o, high: h, low: l, close: c, volume: v,
+            open: o,
+            high: h,
+            low: l,
+            close: c,
+            volume: v,
             date: format!("D{}", i),
         });
         price = c;

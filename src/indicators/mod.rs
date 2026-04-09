@@ -1,7 +1,7 @@
-pub mod macd;
-pub mod wavetrend;
-pub mod rsi;
 pub mod cipher_b;
+pub mod macd;
+pub mod rsi;
+pub mod wavetrend;
 
 use crate::indicator::Indicator;
 
@@ -11,7 +11,7 @@ pub fn by_name(name: &str) -> Option<Box<dyn Indicator>> {
         "macd" => Some(Box::new(macd::Macd::default())),
         "wavetrend" => Some(Box::new(wavetrend::WaveTrend::default())),
         "rsi" => Some(Box::new(rsi::Rsi::default())),
-        "cipher_b" => Some(Box::new(cipher_b::CipherB)),
+        "cipher_b" => Some(Box::new(cipher_b::CipherB::default())),
         _ => None,
     }
 }

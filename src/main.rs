@@ -1,8 +1,9 @@
 mod data;
+mod fetch;
 mod indicator;
 mod indicators;
-mod renderer;
 mod mcp;
+mod renderer;
 
 use clap::Parser;
 
@@ -29,6 +30,18 @@ struct Cli {
     #[arg(short = 'n', long, default_value_t = 120)]
     bars: usize,
 
+    /// Trading symbol (e.g., BTCUSDT, AAPL, MSFT). If omitted, uses sample data.
+    #[arg(short, long)]
+    symbol: Option<String>,
+
+    /// Candle interval (e.g., 1m, 5m, 15m, 1h, 4h, 1d, 1wk)
+    #[arg(short, long, default_value = "4h")]
+    interval: String,
+
+    /// Data source: auto, binance, yahoo
+    #[arg(long, default_value = "auto")]
+    source: String,
+
     /// Run as MCP server (stdio JSON-RPC)
     #[arg(long)]
     mcp: bool,
@@ -42,20 +55,62 @@ fn main() {
         return;
     }
 
-    let data = data::sample_data(cli.bars);
-
-    let panel_indicators: Vec<_> = cli.panels.iter().filter_map(|name| {
-        let ind = indicators::by_name(name);
-        if ind.is_none() {
-            eprintln!("Unknown indicator: {} (available: {:?})", name, indicators::available());
+    let data = if let Some(ref sym) = cli.symbol {
+        let source = match cli.source.as_str() {
+            "binance" => "binance",
+            "yahoo" => "yahoo",
+            _ => detect_source(sym),
+        };
+        match source {
+            "binance" => fetch::fetch_binance(sym, &cli.interval, cli.bars).unwrap_or_else(|e| {
+                eprintln!("Binance error: {}", e);
+                std::process::exit(1);
+            }),
+            "yahoo" => fetch::fetch_yahoo(sym, &cli.interval, cli.bars).unwrap_or_else(|e| {
+                eprintln!("Yahoo error: {}", e);
+                std::process::exit(1);
+            }),
+            _ => unreachable!(),
         }
-        ind
-    }).collect();
+    } else {
+        data::sample_data(cli.bars)
+    };
 
-    if let Err(e) = renderer::render_chart(&data, &panel_indicators, &cli.output, cli.width, cli.height) {
+    let panel_indicators: Vec<_> = cli
+        .panels
+        .iter()
+        .filter_map(|name| {
+            let ind = indicators::by_name(name);
+            if ind.is_none() {
+                eprintln!(
+                    "Unknown indicator: {} (available: {:?})",
+                    name,
+                    indicators::available()
+                );
+            }
+            ind
+        })
+        .collect();
+
+    if let Err(e) =
+        renderer::render_chart(&data, &panel_indicators, &cli.output, cli.width, cli.height)
+    {
         eprintln!("Error: {}", e);
         std::process::exit(1);
     }
 
     println!("Done: {}", cli.output);
+}
+
+fn detect_source(symbol: &str) -> &'static str {
+    let s = symbol.to_uppercase();
+    let crypto_quotes = ["USDT", "BUSD", "BTC", "ETH", "BNB", "USDC", "FDUSD"];
+    if crypto_quotes
+        .iter()
+        .any(|q| s.ends_with(q) && s.len() > q.len())
+    {
+        "binance"
+    } else {
+        "yahoo"
+    }
 }

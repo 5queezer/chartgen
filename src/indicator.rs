@@ -7,6 +7,7 @@ pub struct Line {
     pub y: Vec<f64>,
     pub color: RGBAColor,
     pub width: u32,
+    #[allow(dead_code)]
     pub label: Option<String>,
 }
 
@@ -56,6 +57,7 @@ pub struct PanelResult {
 
 /// Trait every indicator implements.
 pub trait Indicator {
+    #[allow(dead_code)]
     fn name(&self) -> &str;
     fn compute(&self, data: &OhlcvData) -> PanelResult;
 }
@@ -71,12 +73,16 @@ pub fn rgba(hex: u32, alpha: f64) -> RGBAColor {
 
 pub fn ema(data: &[f64], period: usize) -> Vec<f64> {
     let mut out = vec![f64::NAN; data.len()];
-    if data.is_empty() || period == 0 { return out; }
+    if data.is_empty() || period == 0 {
+        return out;
+    }
     let k = 2.0 / (period as f64 + 1.0);
     let mut val = data[0];
     out[0] = val;
     for i in 1..data.len() {
-        if data[i].is_nan() { continue; }
+        if data[i].is_nan() {
+            continue;
+        }
         val = data[i] * k + val * (1.0 - k);
         out[i] = val;
     }
@@ -85,12 +91,71 @@ pub fn ema(data: &[f64], period: usize) -> Vec<f64> {
 
 pub fn sma(data: &[f64], period: usize) -> Vec<f64> {
     let mut out = vec![f64::NAN; data.len()];
-    if data.len() < period { return out; }
+    if data.len() < period {
+        return out;
+    }
     let mut sum: f64 = data[..period].iter().filter(|v| !v.is_nan()).sum();
     out[period - 1] = sum / period as f64;
     for i in period..data.len() {
         sum += data[i] - data[i - period];
         out[i] = sum / period as f64;
+    }
+    out
+}
+
+/// Rolling lowest value over `period` bars.
+pub fn lowest(data: &[f64], period: usize) -> Vec<f64> {
+    let n = data.len();
+    let mut out = vec![f64::NAN; n];
+    if n == 0 || period == 0 {
+        return out;
+    }
+    for i in (period - 1)..n {
+        let lo = data[(i + 1 - period)..=i]
+            .iter()
+            .filter(|v| !v.is_nan())
+            .copied()
+            .fold(f64::INFINITY, f64::min);
+        out[i] = if lo.is_infinite() { f64::NAN } else { lo };
+    }
+    out
+}
+
+/// Rolling highest value over `period` bars.
+pub fn highest(data: &[f64], period: usize) -> Vec<f64> {
+    let n = data.len();
+    let mut out = vec![f64::NAN; n];
+    if n == 0 || period == 0 {
+        return out;
+    }
+    for i in (period - 1)..n {
+        let hi = data[(i + 1 - period)..=i]
+            .iter()
+            .filter(|v| !v.is_nan())
+            .copied()
+            .fold(f64::NEG_INFINITY, f64::max);
+        out[i] = if hi.is_infinite() { f64::NAN } else { hi };
+    }
+    out
+}
+
+/// Stochastic: 100 * (src - lowest(low, len)) / (highest(high, len) - lowest(low, len)).
+/// For stoch RSI, src=high=low=rsi values.
+pub fn stoch(src: &[f64], high: &[f64], low: &[f64], period: usize) -> Vec<f64> {
+    let lo = lowest(low, period);
+    let hi = highest(high, period);
+    let n = src.len();
+    let mut out = vec![f64::NAN; n];
+    for i in 0..n {
+        if src[i].is_nan() || lo[i].is_nan() || hi[i].is_nan() {
+            continue;
+        }
+        let range = hi[i] - lo[i];
+        out[i] = if range > 0.0 {
+            100.0 * (src[i] - lo[i]) / range
+        } else {
+            0.0
+        };
     }
     out
 }
