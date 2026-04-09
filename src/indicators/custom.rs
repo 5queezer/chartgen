@@ -898,6 +898,349 @@ impl Indicator for VolumeProfile {
     }
 }
 
+// ---- Kalman Volume Filter [ChartPrime] (panel) ----
+
+/// Weighted Moving Average.
+fn wma(data: &[f64], period: usize) -> Vec<f64> {
+    let n = data.len();
+    let mut out = vec![f64::NAN; n];
+    if n == 0 || period == 0 {
+        return out;
+    }
+    let denom: f64 = (1..=period).sum::<usize>() as f64;
+    for i in (period - 1)..n {
+        let mut sum = 0.0;
+        let mut all_valid = true;
+        for j in 0..period {
+            let v = data[i + j + 1 - period];
+            if v.is_nan() {
+                all_valid = false;
+                break;
+            }
+            sum += v * (j + 1) as f64;
+        }
+        if all_valid {
+            out[i] = sum / denom;
+        }
+    }
+    out
+}
+
+/// Hull Moving Average: WMA(2*WMA(src, len/2) - WMA(src, len), sqrt(len)).
+fn hma(data: &[f64], period: usize) -> Vec<f64> {
+    let n = data.len();
+    if n == 0 || period < 2 {
+        return vec![f64::NAN; n];
+    }
+    let half = period / 2;
+    let sqrt_len = (period as f64).sqrt().round() as usize;
+
+    let wma_half = wma(data, half.max(1));
+    let wma_full = wma(data, period);
+
+    // diff = 2 * wma_half - wma_full
+    let mut diff = vec![f64::NAN; n];
+    for i in 0..n {
+        if !wma_half[i].is_nan() && !wma_full[i].is_nan() {
+            diff[i] = 2.0 * wma_half[i] - wma_full[i];
+        }
+    }
+    wma(&diff, sqrt_len.max(1))
+}
+
+/// Rolling standard deviation over `period` bars (population stdev).
+fn rolling_stdev(data: &[f64], period: usize) -> Vec<f64> {
+    let n = data.len();
+    let mut out = vec![f64::NAN; n];
+    if n == 0 || period == 0 {
+        return out;
+    }
+    for i in (period - 1)..n {
+        let window = &data[i + 1 - period..=i];
+        let valid: Vec<f64> = window.iter().copied().filter(|v| !v.is_nan()).collect();
+        if valid.len() < 2 {
+            continue;
+        }
+        let cnt = valid.len() as f64;
+        let mean = valid.iter().sum::<f64>() / cnt;
+        let var = valid.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / cnt;
+        out[i] = var.sqrt();
+    }
+    out
+}
+
+pub struct KalmanVolume {
+    pub vzo_length: usize,
+    pub k: f64,
+    pub sig_length: usize,
+    pub ob_os_zone: f64,
+}
+
+impl Default for KalmanVolume {
+    fn default() -> Self {
+        Self {
+            vzo_length: 70,
+            k: 0.06,
+            sig_length: 10,
+            ob_os_zone: 0.6,
+        }
+    }
+}
+
+impl Indicator for KalmanVolume {
+    fn name(&self) -> &str {
+        "KVF"
+    }
+
+    fn compute(&self, data: &OhlcvData) -> PanelResult {
+        let n = data.len();
+        if n < 3 {
+            return PanelResult {
+                label: "KVF".into(),
+                ..Default::default()
+            };
+        }
+
+        let closes = data.closes();
+        let volumes: Vec<f64> = data.bars.iter().map(|b| b.volume).collect();
+
+        // Volume direction: positive if close > close[i-2], else negative
+        let mut vol_dir = vec![f64::NAN; n];
+        vol_dir[0] = volumes[0];
+        vol_dir[1] = volumes[1];
+        for i in 2..n {
+            vol_dir[i] = if closes[i] > closes[i - 2] {
+                volumes[i]
+            } else {
+                -volumes[i]
+            };
+        }
+
+        // VZO
+        let vzo_volume = hma(&vol_dir, self.vzo_length);
+        let total_volume = hma(&volumes, self.vzo_length);
+
+        let mut vzo = vec![f64::NAN; n];
+        for i in 0..n {
+            if !vzo_volume[i].is_nan() && !total_volume[i].is_nan() && total_volume[i].abs() > 1e-30
+            {
+                vzo[i] = vzo_volume[i] / total_volume[i];
+            }
+        }
+
+        // Z-score normalize VZO
+        let vzo_std = rolling_stdev(&vzo, 200);
+        for i in 0..n {
+            if !vzo[i].is_nan() && !vzo_std[i].is_nan() && vzo_std[i] > 1e-30 {
+                vzo[i] /= vzo_std[i];
+            }
+        }
+
+        // Kalman filter
+        let mut m_n = vec![f64::NAN; n];
+        // Find first valid VZO to seed
+        let mut seeded = false;
+        for i in 0..n {
+            if vzo[i].is_nan() {
+                continue;
+            }
+            if !seeded {
+                m_n[i] = vzo[i];
+                seeded = true;
+            } else {
+                // Find previous valid m_n
+                let prev = m_n[..i]
+                    .iter()
+                    .rev()
+                    .find(|v| !v.is_nan())
+                    .copied()
+                    .unwrap();
+                m_n[i] = self.k * vzo[i] + (1.0 - self.k) * prev;
+            }
+        }
+
+        // Signal line = SMA(m_n, sig_length)
+        let signal = sma(&m_n, self.sig_length);
+
+        // Volume histogram background
+        let vol_std = rolling_stdev(&volumes, 200);
+        let mut vol_norm = vec![f64::NAN; n];
+        for i in 0..n {
+            if !vol_std[i].is_nan() && vol_std[i] > 1e-30 {
+                let v = (volumes[i] / vol_std[i]) / 10.0;
+                vol_norm[i] = if v > 0.8 { 0.0 } else { v };
+            }
+        }
+
+        // Build dots for Kalman line (colored per bar)
+        let mut dots = Vec::new();
+        let cyan = 0x00BCD4;
+        let red = 0xFF1744;
+
+        for i in 0..n {
+            if m_n[i].is_nan() || signal[i].is_nan() {
+                continue;
+            }
+            let bullish = m_n[i] > signal[i];
+            let color = if bullish {
+                rgba(cyan, 0.9)
+            } else {
+                rgba(red, 0.9)
+            };
+            dots.push(Dot {
+                x: i,
+                y: m_n[i],
+                color,
+                size: 2,
+            });
+            // Signal dot (fainter)
+            let sig_color = if bullish {
+                rgba(cyan, 0.4)
+            } else {
+                rgba(red, 0.4)
+            };
+            dots.push(Dot {
+                x: i,
+                y: signal[i],
+                color: sig_color,
+                size: 1,
+            });
+        }
+
+        // Signal crossover/crossunder dots (at offset -1)
+        for i in 2..n {
+            if m_n[i].is_nan()
+                || m_n[i - 1].is_nan()
+                || signal[i].is_nan()
+                || signal[i - 1].is_nan()
+            {
+                continue;
+            }
+            let cross_over = m_n[i - 1] <= signal[i - 1] && m_n[i] > signal[i];
+            let cross_under = m_n[i - 1] >= signal[i - 1] && m_n[i] < signal[i];
+
+            let prev_m = m_n[i - 1];
+            let in_neutral = prev_m.abs() < self.ob_os_zone;
+
+            if cross_over {
+                let (size, color) = if prev_m < -self.ob_os_zone {
+                    (6, rgba(cyan, 1.0)) // oversold buy
+                } else if in_neutral {
+                    (4, rgba(cyan, 1.0)) // local buy
+                } else {
+                    continue;
+                };
+                dots.push(Dot {
+                    x: i - 1,
+                    y: prev_m,
+                    color,
+                    size,
+                });
+            } else if cross_under {
+                let (size, color) = if prev_m > self.ob_os_zone {
+                    (6, rgba(red, 1.0)) // overbought sell
+                } else if in_neutral {
+                    (4, rgba(red, 1.0)) // local sell
+                } else {
+                    continue;
+                };
+                dots.push(Dot {
+                    x: i - 1,
+                    y: prev_m,
+                    color,
+                    size,
+                });
+            }
+        }
+
+        // Fills between m_n and signal (bullish / bearish)
+        let mut bull_m = vec![f64::NAN; n];
+        let mut bull_s = vec![f64::NAN; n];
+        let mut bear_m = vec![f64::NAN; n];
+        let mut bear_s = vec![f64::NAN; n];
+        for i in 0..n {
+            if m_n[i].is_nan() || signal[i].is_nan() {
+                continue;
+            }
+            if m_n[i] > signal[i] {
+                bull_m[i] = m_n[i];
+                bull_s[i] = signal[i];
+            } else {
+                bear_m[i] = m_n[i];
+                bear_s[i] = signal[i];
+            }
+        }
+
+        // OB/OS zone fills
+        let top = vec![2.0; n];
+        let ob_line = vec![self.ob_os_zone; n];
+        let os_line = vec![-self.ob_os_zone; n];
+        let bottom = vec![-2.0; n];
+
+        // Volume histogram bars
+        let mut pos_vol = vec![0.0; n];
+        let mut neg_vol = vec![0.0; n];
+        let mut bar_colors = Vec::with_capacity(n);
+        let faint_teal = rgba(0x00BCD4, 0.15);
+        for i in 0..n {
+            let v = if vol_norm[i].is_nan() {
+                0.0
+            } else {
+                vol_norm[i]
+            };
+            pos_vol[i] = v;
+            neg_vol[i] = v;
+            bar_colors.push(faint_teal);
+        }
+
+        PanelResult {
+            lines: vec![],
+            fills: vec![
+                Fill {
+                    y1: bull_m,
+                    y2: bull_s,
+                    color: rgba(cyan, 0.15),
+                },
+                Fill {
+                    y1: bear_m,
+                    y2: bear_s,
+                    color: rgba(red, 0.15),
+                },
+                Fill {
+                    y1: top,
+                    y2: ob_line,
+                    color: rgba(red, 0.1),
+                },
+                Fill {
+                    y1: os_line,
+                    y2: bottom,
+                    color: rgba(cyan, 0.1),
+                },
+            ],
+            bars: vec![
+                Bars {
+                    y: pos_vol,
+                    colors: bar_colors.clone(),
+                    bottom: 0.0,
+                },
+                Bars {
+                    y: neg_vol,
+                    colors: bar_colors,
+                    bottom: 0.0, // these draw downward as negative offset
+                },
+            ],
+            dots,
+            hlines: vec![HLine {
+                y: 0.0,
+                color: rgba(0x787B86, 0.4),
+            }],
+            y_range: Some((-2.5, 2.5)),
+            label: "KVF".into(),
+            is_overlay: false,
+        }
+    }
+}
+
 // ---- Ichimoku Cloud (overlay) ----
 
 pub struct Ichimoku {
