@@ -212,6 +212,19 @@ fn yahoo_interval_range(interval: &str) -> (&str, &str) {
     }
 }
 
+pub fn detect_source(symbol: &str) -> &'static str {
+    let s = symbol.to_uppercase();
+    let crypto_quotes = ["USDT", "BUSD", "BTC", "ETH", "BNB", "USDC", "FDUSD"];
+    if crypto_quotes
+        .iter()
+        .any(|q| s.ends_with(q) && s.len() > q.len())
+    {
+        "binance"
+    } else {
+        "yahoo"
+    }
+}
+
 fn aggregate_bars(bars: &[Bar], period: usize) -> Vec<Bar> {
     bars.chunks(period)
         .filter(|chunk| !chunk.is_empty())

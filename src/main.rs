@@ -1,5 +1,6 @@
 mod fetch;
 mod mcp;
+mod server;
 
 use chartgen::data;
 use chartgen::indicators;
@@ -44,6 +45,14 @@ struct Cli {
     /// Run as MCP server (stdio JSON-RPC)
     #[arg(long)]
     mcp: bool,
+
+    /// Run as remote MCP HTTP server with OAuth 2.1 PKCE
+    #[arg(long)]
+    serve: bool,
+
+    /// Port for HTTP server (default 9315)
+    #[arg(long, default_value_t = 9315)]
+    port: u16,
 }
 
 fn main() {
@@ -54,11 +63,17 @@ fn main() {
         return;
     }
 
+    if cli.serve {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(server::run_server(cli.port));
+        return;
+    }
+
     let mut data = if let Some(ref sym) = cli.symbol {
         let source = match cli.source.as_str() {
             "binance" => "binance",
             "yahoo" => "yahoo",
-            _ => detect_source(sym),
+            _ => fetch::detect_source(sym),
         };
         match source {
             "binance" => fetch::fetch_binance(sym, &cli.interval, cli.bars).unwrap_or_else(|e| {
@@ -101,17 +116,4 @@ fn main() {
     }
 
     println!("Done: {}", cli.output);
-}
-
-fn detect_source(symbol: &str) -> &'static str {
-    let s = symbol.to_uppercase();
-    let crypto_quotes = ["USDT", "BUSD", "BTC", "ETH", "BNB", "USDC", "FDUSD"];
-    if crypto_quotes
-        .iter()
-        .any(|q| s.ends_with(q) && s.len() > q.len())
-    {
-        "binance"
-    } else {
-        "yahoo"
-    }
 }
