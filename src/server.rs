@@ -1,5 +1,5 @@
 use axum::extract::{Query, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -70,27 +70,25 @@ impl OAuthStore {
 
 type SharedStore = Arc<Mutex<OAuthStore>>;
 
-fn base_url(port: u16) -> String {
-    std::env::var("CHARTGEN_BASE_URL").unwrap_or_else(|_| format!("http://localhost:{}", port))
-}
-
-fn port_from_base_url() -> u16 {
-    // Extract port from CHARTGEN_BASE_URL or default
-    if let Ok(url) = std::env::var("CHARTGEN_BASE_URL") {
-        if let Some(port_str) = url.rsplit(':').next() {
-            if let Ok(p) = port_str.trim_end_matches('/').parse::<u16>() {
-                return p;
-            }
-        }
-    }
-    9315
+fn base_url() -> String {
+    std::env::var("CHARTGEN_BASE_URL").unwrap_or_else(|_| {
+        let port = std::env::var("_CHARTGEN_PORT")
+            .ok()
+            .and_then(|p| p.parse().ok())
+            .unwrap_or(9315u16);
+        format!("http://localhost:{}", port)
+    })
 }
 
 // --- OAuth endpoints ---
 
 async fn oauth_metadata(State(store): State<SharedStore>) -> Json<Value> {
-    let _ = store; // unused but kept for consistent handler signatures
-    let base = base_url(port_from_base_url());
+    let _ = store;
+    let base = base_url();
+    eprintln!(
+        "[OAuth] GET /.well-known/oauth-authorization-server → issuer={}",
+        base
+    );
     Json(json!({
         "issuer": base,
         "authorization_endpoint": format!("{}/authorize", base),
@@ -114,6 +112,10 @@ async fn oauth_register(
     State(store): State<SharedStore>,
     Json(body): Json<RegisterRequest>,
 ) -> (StatusCode, Json<Value>) {
+    eprintln!(
+        "[OAuth] POST /register client_name={:?} redirect_uris={:?}",
+        body.client_name, body.redirect_uris
+    );
     let client_id = Uuid::new_v4().to_string();
     let client_secret = Uuid::new_v4().to_string();
 
@@ -135,6 +137,9 @@ async fn oauth_register(
             "client_secret": client_secret,
             "client_name": body.client_name,
             "redirect_uris": body.redirect_uris,
+            "grant_types": ["authorization_code"],
+            "response_types": ["code"],
+            "token_endpoint_auth_method": "none",
         })),
     )
 }
@@ -160,6 +165,10 @@ async fn oauth_authorize(
     State(store): State<SharedStore>,
     Query(params): Query<AuthorizeQuery>,
 ) -> Response {
+    eprintln!(
+        "[OAuth] GET /authorize client_id={} redirect_uri={}",
+        params.client_id, params.redirect_uri
+    );
     let mut s = store.lock().unwrap();
     s.cleanup_expired();
 
@@ -216,10 +225,50 @@ struct TokenRequest {
     code_verifier: String,
 }
 
+/// Accept token request as either form-encoded or JSON (Claude.ai may send either).
 async fn oauth_token(
     State(store): State<SharedStore>,
-    axum::extract::Form(body): axum::extract::Form<TokenRequest>,
+    headers: HeaderMap,
+    body_bytes: axum::body::Bytes,
 ) -> Response {
+    let ct = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("none");
+    eprintln!(
+        "[OAuth] POST /token content-type={} body_len={}",
+        ct,
+        body_bytes.len()
+    );
+    let body: TokenRequest = if headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|ct| ct.contains("application/json"))
+    {
+        match serde_json::from_slice(&body_bytes) {
+            Ok(b) => b,
+            Err(e) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({"error": "invalid_request", "error_description": format!("JSON parse error: {}", e)})),
+                )
+                    .into_response();
+            }
+        }
+    } else {
+        // Parse as application/x-www-form-urlencoded
+        let body_str = String::from_utf8_lossy(&body_bytes);
+        match serde_json::from_value(form_to_json(&body_str)) {
+            Ok(b) => b,
+            Err(e) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({"error": "invalid_request", "error_description": format!("Form parse error: {}", e)})),
+                )
+                    .into_response();
+            }
+        }
+    };
     if body.grant_type != "authorization_code" {
         return (
             StatusCode::BAD_REQUEST,
@@ -291,6 +340,30 @@ async fn oauth_token(
     .into_response()
 }
 
+/// Parse application/x-www-form-urlencoded into a JSON object.
+fn form_to_json(body: &str) -> Value {
+    let mut map = serde_json::Map::new();
+    for pair in body.split('&') {
+        if let Some((key, value)) = pair.split_once('=') {
+            let key = urlencoding_decode(key);
+            let value = urlencoding_decode(value);
+            map.insert(key, Value::String(value));
+        }
+    }
+    Value::Object(map)
+}
+
+fn urlencoding_decode(s: &str) -> String {
+    s.replace('+', " ")
+        .replace("%3A", ":")
+        .replace("%2F", "/")
+        .replace("%3D", "=")
+        .replace("%26", "&")
+        .replace("%25", "%")
+        .replace("%20", " ")
+        .replace("%2B", "+")
+}
+
 fn verify_pkce(code_verifier: &str, code_challenge: &str) -> bool {
     let mut hasher = Sha256::new();
     hasher.update(code_verifier.as_bytes());
@@ -314,6 +387,8 @@ async fn mcp_handler(
     Json(body): Json<Value>,
 ) -> Response {
     let method = body.get("method").and_then(|m| m.as_str()).unwrap_or("");
+    let has_auth = extract_bearer_token(&headers).is_some();
+    eprintln!("[MCP] POST /mcp method={} has_auth={}", method, has_auth);
 
     // Allow initialize without auth; require Bearer token for everything else
     if method != "initialize" {
@@ -378,6 +453,8 @@ pub async fn run_server(port: u16) {
     // Store port for metadata endpoint
     std::env::set_var("_CHARTGEN_PORT", port.to_string());
 
+    let cors = CorsLayer::permissive();
+
     let app = Router::new()
         .route(
             "/.well-known/oauth-authorization-server",
@@ -387,7 +464,7 @@ pub async fn run_server(port: u16) {
         .route("/authorize", get(oauth_authorize))
         .route("/token", post(oauth_token))
         .route("/mcp", post(mcp_handler))
-        .layer(CorsLayer::permissive())
+        .layer(cors)
         .with_state(store);
 
     let addr = format!("0.0.0.0:{}", port);
