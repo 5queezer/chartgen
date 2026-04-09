@@ -14,10 +14,14 @@ pub fn render_chart(
     height: u32,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let n = data.len();
-    let n_panels = panels.len();
 
     // Compute all indicators
     let results: Vec<PanelResult> = panels.iter().map(|p| p.compute(data)).collect();
+
+    // Separate overlays from panels
+    let overlays: Vec<&PanelResult> = results.iter().filter(|r| r.is_overlay).collect();
+    let panel_results: Vec<&PanelResult> = results.iter().filter(|r| !r.is_overlay).collect();
+    let n_panels = panel_results.len();
 
     // Price range
     let p_min = data.lows().iter().cloned().fold(f64::INFINITY, f64::min);
@@ -53,7 +57,7 @@ pub fn render_chart(
         y_start += panel_h as i32;
     }
 
-    // ---- Draw candles ----
+    // ---- Draw candles + overlays ----
     {
         let mut chart = ChartBuilder::on(&candle_area)
             .margin(10)
@@ -96,6 +100,54 @@ pub fn render_chart(
             )))?;
         }
 
+        // Draw overlays on the candle chart
+        for overlay in &overlays {
+            // Fills
+            for fill in &overlay.fills {
+                let pairs: Vec<_> = fill
+                    .y1
+                    .iter()
+                    .zip(&fill.y2)
+                    .enumerate()
+                    .filter(|(_, (a, b))| !a.is_nan() && !b.is_nan())
+                    .map(|(i, (a, b))| {
+                        let (lo, hi) = if a < b { (*a, *b) } else { (*b, *a) };
+                        Rectangle::new(
+                            [(i as f64 - 0.4, lo), (i as f64 + 0.4, hi)],
+                            fill.color.filled(),
+                        )
+                    })
+                    .collect();
+                chart.draw_series(pairs)?;
+            }
+
+            // Lines
+            for line in &overlay.lines {
+                let points: Vec<_> = line
+                    .y
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, y)| !y.is_nan())
+                    .map(|(i, y)| (i as f64, *y))
+                    .collect();
+                if !points.is_empty() {
+                    chart.draw_series(std::iter::once(PathElement::new(
+                        points,
+                        line.color.stroke_width(line.width),
+                    )))?;
+                }
+            }
+
+            // Dots
+            for dot in &overlay.dots {
+                chart.draw_series(std::iter::once(Circle::new(
+                    (dot.x as f64, dot.y),
+                    dot.size,
+                    dot.color.filled(),
+                )))?;
+            }
+        }
+
         // Price label
         let lp = data.bars.last().unwrap().close;
         chart.draw_series(std::iter::once(Text::new(
@@ -106,7 +158,7 @@ pub fn render_chart(
     }
 
     // ---- Draw indicator panels ----
-    for (area, result) in areas.iter().zip(&results) {
+    for (area, result) in areas.iter().zip(&panel_results) {
         let (y_lo, y_hi) = result.y_range.unwrap_or_else(|| auto_range(result));
 
         let mut chart = ChartBuilder::on(area)

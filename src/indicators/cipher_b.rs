@@ -968,6 +968,7 @@ impl Indicator for CipherB {
             hlines,
             y_range: Some((-105.0, 105.0)),
             label: "Cipher B".into(),
+            ..Default::default()
         }
     }
 }

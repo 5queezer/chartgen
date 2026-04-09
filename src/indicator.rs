@@ -55,6 +55,7 @@ pub struct PanelResult {
     pub hlines: Vec<HLine>,
     pub y_range: Option<(f64, f64)>,
     pub label: String,
+    pub is_overlay: bool,
 }
 
 /// Trait every indicator implements.
