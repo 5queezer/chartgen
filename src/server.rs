@@ -97,7 +97,8 @@ async fn oauth_metadata(State(store): State<SharedStore>) -> Json<Value> {
         "response_types_supported": ["code"],
         "grant_types_supported": ["authorization_code"],
         "code_challenge_methods_supported": ["S256"],
-        "token_endpoint_auth_methods_supported": ["none", "client_secret_post"]
+        "token_endpoint_auth_methods_supported": ["none", "client_secret_post"],
+        "logo_uri": format!("{}/favicon.svg", base)
     }))
 }
 
@@ -140,6 +141,7 @@ async fn oauth_register(
             "grant_types": ["authorization_code"],
             "response_types": ["code"],
             "token_endpoint_auth_method": "none",
+            "logo_uri": format!("{}/favicon.svg", base_url()),
         })),
     )
 }
