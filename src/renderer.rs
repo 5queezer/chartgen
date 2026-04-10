@@ -245,10 +245,11 @@ pub fn render_chart(
             // HBars (VPVR horizontal histogram)
             for hbar in &overlay.hbars {
                 let bar_width = n as f64 * hbar.width;
+                let bar_offset = n as f64 * hbar.offset;
                 let (x_left, x_right) = if hbar.left {
-                    (0.0, bar_width)
+                    (bar_offset, bar_offset + bar_width)
                 } else {
-                    (n as f64 - bar_width, n as f64)
+                    (n as f64 - bar_offset - bar_width, n as f64 - bar_offset)
                 };
                 let y_top = hbar.y + hbar.height / 2.0;
                 let y_bot = hbar.y - hbar.height / 2.0;
