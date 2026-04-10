@@ -46,13 +46,14 @@ pub struct HLine {
     pub color: RGBAColor,
 }
 
-/// Horizontal bar for VPVR-style overlays (drawn right-to-left at a price level).
+/// Horizontal bar for VPVR-style overlays (drawn at a price level).
 #[derive(Clone)]
 pub struct HBar {
     pub y: f64,      // center price level
     pub height: f64, // bar height in price units
     pub width: f64,  // 0.0-1.0, fraction of chart width (proportional to volume)
     pub color: RGBAColor,
+    pub left: bool, // true = draw from left edge, false = draw from right edge
 }
 
 /// Output of an indicator computation.

@@ -858,11 +858,15 @@ impl Indicator for PivotPoints {
 
 pub struct VolumeProfile {
     pub bins: usize,
+    pub side: String, // "left" or "right"
 }
 
 impl Default for VolumeProfile {
     fn default() -> Self {
-        Self { bins: 24 }
+        Self {
+            bins: 24,
+            side: "left".into(),
+        }
     }
 }
 
@@ -876,12 +880,18 @@ impl Indicator for VolumeProfile {
     }
 
     fn params(&self) -> Value {
-        json!([{"name": "bins", "type": "integer", "default": 24}])
+        json!([
+            {"name": "bins", "type": "integer", "default": 24},
+            {"name": "side", "type": "string", "default": "left", "description": "left or right"}
+        ])
     }
 
     fn configure(&mut self, params: &Value) {
         if let Some(v) = params.get("bins").and_then(|v| v.as_u64()) {
             self.bins = v as usize;
+        }
+        if let Some(v) = params.get("side").and_then(|v| v.as_str()) {
+            self.side = v.to_string();
         }
     }
 
@@ -1023,6 +1033,7 @@ impl Indicator for VolumeProfile {
                 height: bin_size * 0.9, // small gap between bars
                 width: width_frac,
                 color,
+                left: self.side == "left",
             });
         }
 
