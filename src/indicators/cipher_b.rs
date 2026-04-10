@@ -1,6 +1,7 @@
 use super::rsi::compute_rsi;
 use crate::data::OhlcvData;
 use crate::indicator::*;
+use serde_json::{json, Value};
 
 // ---------------------------------------------------------------------------
 // Config
@@ -65,6 +66,9 @@ pub struct CipherBConfig {
     pub stoch_show_div: bool,
     pub stoch_show_hidden_div: bool,
 
+    // Dot mode
+    pub dot_mode: String, // "classic" (existing behavior) or "strict" (TV-like filtering)
+
     // Schaff Trend Cycle
     pub tc_show: bool,
     pub tc_length: usize,
@@ -125,6 +129,8 @@ impl Default for CipherBConfig {
             stoch_d_smooth: 3,
             stoch_show_div: false,
             stoch_show_hidden_div: false,
+
+            dot_mode: "strict".to_string(),
 
             tc_show: false,
             tc_length: 10,
@@ -417,6 +423,34 @@ impl Indicator for CipherB {
         "Market Cipher B — composite (WaveTrend + divergences + RSI + Stoch RSI + MFI)"
     }
 
+    fn params(&self) -> Value {
+        json!([
+            {"name": "dot_mode", "type": "string", "default": "strict", "description": "classic (WT cross only) or strict (with RSI+StochRSI filter)"},
+            {"name": "wt_channel_length", "type": "integer", "default": 9},
+            {"name": "wt_average_length", "type": "integer", "default": 12},
+            {"name": "wt_oversold", "type": "number", "default": -53},
+            {"name": "wt_overbought", "type": "number", "default": 53}
+        ])
+    }
+
+    fn configure(&mut self, params: &Value) {
+        if let Some(v) = params.get("dot_mode").and_then(|v| v.as_str()) {
+            self.config.dot_mode = v.to_string();
+        }
+        if let Some(v) = params.get("wt_channel_length").and_then(|v| v.as_u64()) {
+            self.config.wt_channel_len = v as usize;
+        }
+        if let Some(v) = params.get("wt_average_length").and_then(|v| v.as_u64()) {
+            self.config.wt_average_len = v as usize;
+        }
+        if let Some(v) = params.get("wt_oversold").and_then(|v| v.as_f64()) {
+            self.config.os_level = v;
+        }
+        if let Some(v) = params.get("wt_overbought").and_then(|v| v.as_f64()) {
+            self.config.ob_level = v;
+        }
+    }
+
     fn compute(&self, data: &OhlcvData) -> PanelResult {
         let cfg = &self.config;
         let n = data.len();
@@ -487,45 +521,6 @@ impl Indicator for CipherB {
                 y2: vec![0.0; n],
                 color: rgba(0xffffff, 0.15),
             });
-        }
-
-        // WT cross signals
-        for i in 1..n {
-            if wt1[i].is_nan() || wt2[i].is_nan() || wt1[i - 1].is_nan() || wt2[i - 1].is_nan() {
-                continue;
-            }
-            let cross_up = wt1[i - 1] < wt2[i - 1] && wt1[i] >= wt2[i];
-            let cross_down = wt1[i - 1] > wt2[i - 1] && wt1[i] <= wt2[i];
-
-            if cross_up && cfg.wt_buy_show && wt2[i] <= cfg.os_level {
-                dots.push(Dot {
-                    x: i,
-                    y: wt2[i],
-                    color: rgba(0x3fff00, 1.0),
-                    size: 6,
-                });
-            } else if cross_down && cfg.wt_sell_show && wt2[i] >= cfg.ob_level {
-                dots.push(Dot {
-                    x: i,
-                    y: wt2[i],
-                    color: rgba(0xff0000, 1.0),
-                    size: 6,
-                });
-            } else if cross_up {
-                dots.push(Dot {
-                    x: i,
-                    y: wt2[i],
-                    color: rgba(0x00e676, 0.7),
-                    size: 3,
-                });
-            } else if cross_down {
-                dots.push(Dot {
-                    x: i,
-                    y: wt2[i],
-                    color: rgba(0xff5252, 0.7),
-                    size: 3,
-                });
-            }
         }
 
         // ===================================================================
@@ -614,7 +609,11 @@ impl Indicator for CipherB {
         // ===================================================================
         let mut stoch_k = vec![f64::NAN; n];
         let mut stoch_d = vec![f64::NAN; n];
-        if cfg.stoch_show || cfg.stoch_show_div || cfg.stoch_show_hidden_div {
+        let need_stoch = cfg.stoch_show
+            || cfg.stoch_show_div
+            || cfg.stoch_show_hidden_div
+            || cfg.dot_mode == "strict";
+        if need_stoch {
             let stoch_src: Vec<f64> = if cfg.stoch_use_log {
                 closes.iter().map(|c| c.ln()).collect()
             } else {
@@ -657,6 +656,99 @@ impl Indicator for CipherB {
                     y2: stoch_d.clone(),
                     color: rgba(0x21baf3, 0.05),
                 });
+            }
+        }
+
+        // WT cross signals
+        for i in 1..n {
+            if wt1[i].is_nan() || wt2[i].is_nan() || wt1[i - 1].is_nan() || wt2[i - 1].is_nan() {
+                continue;
+            }
+            let cross_up = wt1[i - 1] < wt2[i - 1] && wt1[i] >= wt2[i];
+            let cross_down = wt1[i - 1] > wt2[i - 1] && wt1[i] <= wt2[i];
+
+            let is_strict = cfg.dot_mode == "strict";
+
+            if cross_up && cfg.wt_buy_show && wt2[i] <= cfg.os_level {
+                if is_strict {
+                    // Strict: require RSI oversold + Stoch RSI oversold
+                    let rsi_ok = !rsi_vals[i].is_nan() && rsi_vals[i] < 30.0;
+                    let stoch_ok = !stoch_k[i].is_nan() && stoch_k[i] < 20.0;
+                    if rsi_ok && stoch_ok {
+                        dots.push(Dot {
+                            x: i,
+                            y: wt2[i],
+                            color: rgba(0x3fff00, 1.0),
+                            size: 6,
+                        });
+                    }
+                } else {
+                    dots.push(Dot {
+                        x: i,
+                        y: wt2[i],
+                        color: rgba(0x3fff00, 1.0),
+                        size: 6,
+                    });
+                }
+            } else if cross_down && cfg.wt_sell_show && wt2[i] >= cfg.ob_level {
+                if is_strict {
+                    let rsi_ok = !rsi_vals[i].is_nan() && rsi_vals[i] > 70.0;
+                    let stoch_ok = !stoch_k[i].is_nan() && stoch_k[i] > 80.0;
+                    if rsi_ok && stoch_ok {
+                        dots.push(Dot {
+                            x: i,
+                            y: wt2[i],
+                            color: rgba(0xff0000, 1.0),
+                            size: 6,
+                        });
+                    }
+                } else {
+                    dots.push(Dot {
+                        x: i,
+                        y: wt2[i],
+                        color: rgba(0xff0000, 1.0),
+                        size: 6,
+                    });
+                }
+            } else if cross_up {
+                if is_strict {
+                    // Strict: only show small dot if RSI confirms
+                    let rsi_ok = !rsi_vals[i].is_nan() && rsi_vals[i] < 40.0;
+                    if rsi_ok {
+                        dots.push(Dot {
+                            x: i,
+                            y: wt2[i],
+                            color: rgba(0x00e676, 0.7),
+                            size: 3,
+                        });
+                    }
+                } else {
+                    dots.push(Dot {
+                        x: i,
+                        y: wt2[i],
+                        color: rgba(0x00e676, 0.7),
+                        size: 3,
+                    });
+                }
+            } else if cross_down {
+                if is_strict {
+                    let rsi_ok = !rsi_vals[i].is_nan() && rsi_vals[i] > 60.0;
+                    if rsi_ok {
+                        dots.push(Dot {
+                            x: i,
+                            y: wt2[i],
+                            color: rgba(0xff5252, 0.7),
+                            size: 3,
+                        });
+                    }
+                } else {
+                    dots.push(Dot {
+                        x: i,
+                        y: wt2[i],
+                        color: rgba(0xff5252, 0.7),
+                        size: 3,
+                    });
+                }
             }
         }
 
