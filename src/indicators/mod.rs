@@ -3,6 +3,7 @@ pub mod custom;
 pub mod external;
 pub mod macd;
 pub mod rsi;
+pub mod rsi_combo;
 pub mod ta_bridge;
 pub mod wavetrend;
 
@@ -40,6 +41,9 @@ pub fn by_name(name: &str) -> Option<Box<dyn Indicator>> {
         "pivot" | "pivot_points" => Some(Box::new(custom::PivotPoints)),
         "volume_profile" | "vp" | "vpvr" => Some(Box::new(custom::VolumeProfile::default())),
         "kalman" | "kalman_volume" | "kvf" => Some(Box::new(custom::KalmanVolume::default())),
+        "rsi_mfi_stoch" | "rsi_combo" | "combo" => {
+            Some(Box::new(rsi_combo::RsiMfiStochCombo::default()))
+        }
         "cvd" => Some(Box::new(external::Cvd)),
         "funding" | "funding_rate" => Some(Box::new(external::FundingRate)),
         "oi" | "open_interest" => Some(Box::new(external::OpenInterestHist)),
@@ -86,6 +90,7 @@ pub fn available() -> &'static [&'static str] {
         "pivot",
         "volume_profile",
         "kalman_volume",
+        "rsi_mfi_stoch",
         "cvd",
         "funding",
         "oi",
@@ -187,6 +192,12 @@ pub fn registry() -> Vec<IndicatorInfo> {
         &["kalman", "kvf"],
         "panel",
         custom::KalmanVolume::default()
+    );
+    reg!(
+        "rsi_mfi_stoch",
+        &["rsi_combo", "combo"],
+        "panel",
+        rsi_combo::RsiMfiStochCombo::default()
     );
 
     // External API
