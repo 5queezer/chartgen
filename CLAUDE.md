@@ -1,3 +1,10 @@
+## Workflow
+
+- Never push directly to `master`. Create a feature branch and open a PR.
+- Branch naming: `feat/<topic>`, `fix/<topic>`, `chore/<topic>`
+- `cargo fmt` is enforced by a pre-commit hook and a Claude settings.json hook.
+- Run `cargo clippy -- -D warnings` before pushing.
+
 ## graphify
 
 This project has a graphify knowledge graph at graphify-out/.
