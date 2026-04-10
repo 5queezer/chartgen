@@ -912,7 +912,7 @@ impl Indicator for VolumeProfile {
             if v.is_null() {
                 self.range_bars = None;
             } else if let Some(n) = v.as_u64() {
-                self.range_bars = Some(n as usize);
+                self.range_bars = if n == 0 { None } else { Some(n as usize) };
             }
         }
         if let Some(v) = params.get("split_up_down").and_then(|v| v.as_bool()) {
@@ -923,8 +923,10 @@ impl Indicator for VolumeProfile {
                 self.color_up = n as u32;
             } else if let Some(s) = v.as_str() {
                 if let Some(hex) = s.strip_prefix('#') {
-                    if let Ok(n) = u32::from_str_radix(hex, 16) {
-                        self.color_up = n;
+                    if hex.len() == 6 {
+                        if let Ok(n) = u32::from_str_radix(hex, 16) {
+                            self.color_up = n;
+                        }
                     }
                 }
             }
@@ -934,8 +936,10 @@ impl Indicator for VolumeProfile {
                 self.color_down = n as u32;
             } else if let Some(s) = v.as_str() {
                 if let Some(hex) = s.strip_prefix('#') {
-                    if let Ok(n) = u32::from_str_radix(hex, 16) {
-                        self.color_down = n;
+                    if hex.len() == 6 {
+                        if let Ok(n) = u32::from_str_radix(hex, 16) {
+                            self.color_down = n;
+                        }
                     }
                 }
             }
@@ -1124,6 +1128,7 @@ impl Indicator for VolumeProfile {
                         y: center,
                         height: bin_size * 0.9,
                         width: up_width,
+                        offset: 0.0,
                         color: rgba(self.color_up, opacity),
                         left: self.side == "left",
                     });
@@ -1133,6 +1138,7 @@ impl Indicator for VolumeProfile {
                         y: center,
                         height: bin_size * 0.9,
                         width: down_width,
+                        offset: up_width,
                         color: rgba(self.color_down, opacity),
                         left: self.side == "left",
                     });
@@ -1154,6 +1160,7 @@ impl Indicator for VolumeProfile {
                     y: center,
                     height: bin_size * 0.9,
                     width: width_frac,
+                    offset: 0.0,
                     color,
                     left: self.side == "left",
                 });
