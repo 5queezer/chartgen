@@ -262,7 +262,9 @@ pub fn render_chart(
                 if !overlay.label.is_empty() {
                     candle_area.draw_text(
                         &overlay.label,
-                        &("monospace", 14).into_font().color(&RGBColor(200, 200, 210)),
+                        &("monospace", 14)
+                            .into_font()
+                            .color(&RGBColor(200, 200, 210)),
                         (85, label_y),
                     )?;
                     label_y += 18;
@@ -391,7 +393,9 @@ pub fn render_chart(
         if !result.label.is_empty() {
             area.draw_text(
                 &result.label,
-                &("monospace", 15).into_font().color(&RGBColor(200, 200, 210)),
+                &("monospace", 15)
+                    .into_font()
+                    .color(&RGBColor(200, 200, 210)),
                 (85, 5),
             )?;
         }

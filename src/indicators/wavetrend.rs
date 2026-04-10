@@ -117,13 +117,13 @@ impl Indicator for WaveTrend {
                     y: wt1.clone(),
                     color: rgba(0x4994ec, 0.8),
                     width: 2,
-                    label: None,
+                    label: Some("WT1".into()),
                 },
                 Line {
                     y: wt2.clone(),
                     color: rgba(0x1f1559, 0.8),
                     width: 2,
-                    label: None,
+                    label: Some("WT2".into()),
                 },
             ],
             fills: vec![

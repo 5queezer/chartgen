@@ -467,13 +467,13 @@ impl Indicator for CipherB {
                 y: wt1.clone(),
                 color: rgba(0x4994ec, 0.8),
                 width: 2,
-                label: None,
+                label: Some("WT1".into()),
             });
             lines.push(Line {
                 y: wt2.clone(),
                 color: rgba(0x1f1559, 0.8),
                 width: 2,
-                label: None,
+                label: Some("WT2".into()),
             });
             fills.push(Fill {
                 y1: wt1.clone(),
@@ -538,7 +538,7 @@ impl Indicator for CipherB {
                 y: rsi_vals.clone(),
                 color: rgba(0xc33ee1, 0.75),
                 width: 2,
-                label: None,
+                label: Some("RSI".into()),
             });
             for (i, &rsi_v) in rsi_vals.iter().enumerate() {
                 if rsi_v.is_nan() {
@@ -644,13 +644,13 @@ impl Indicator for CipherB {
                     y: stoch_k.clone(),
                     color: rgba(0x21baf3, 0.3),
                     width: 2,
-                    label: None,
+                    label: Some("Stoch K".into()),
                 });
                 lines.push(Line {
                     y: stoch_d.clone(),
                     color: rgba(0x673ab7, 0.1),
                     width: 1,
-                    label: None,
+                    label: Some("Stoch D".into()),
                 });
                 fills.push(Fill {
                     y1: stoch_k.clone(),
@@ -675,7 +675,7 @@ impl Indicator for CipherB {
                 y: stc,
                 color: rgba(0x673ab7, 0.75),
                 width: 2,
-                label: None,
+                label: Some("STC".into()),
             });
         }
 
