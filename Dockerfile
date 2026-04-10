@@ -23,7 +23,5 @@ COPY --from=builder /app/target/release/chartgen /usr/local/bin/chartgen
 
 EXPOSE 9315
 
-ENV CHARTGEN_BASE_URL=https://chartgen.vasudev.xyz
-
 ENTRYPOINT ["chartgen"]
 CMD ["--serve"]
