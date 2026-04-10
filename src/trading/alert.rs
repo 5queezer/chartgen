@@ -40,6 +40,11 @@ impl AlertEngine {
         Self { alerts: Vec::new() }
     }
 
+    /// Replace the alert list with previously persisted alerts.
+    pub fn load(&mut self, alerts: Vec<Alert>) {
+        self.alerts = alerts;
+    }
+
     pub fn add(&mut self, symbol: String, condition: AlertCondition) -> AlertId {
         let id = Uuid::new_v4().to_string();
         self.alerts.push(Alert {
