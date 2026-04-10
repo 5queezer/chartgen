@@ -344,7 +344,7 @@ async fn oauth_token(
 
     // Issue access token
     let token = Uuid::new_v4().to_string();
-    let expires_in = Duration::from_secs(3600);
+    let expires_in = Duration::from_secs(7 * 24 * 3600); // 7 days
     s.tokens.insert(
         token.clone(),
         AccessToken {
@@ -363,7 +363,7 @@ async fn oauth_token(
     Json(json!({
         "access_token": token,
         "token_type": "Bearer",
-        "expires_in": 3600
+        "expires_in": 7 * 24 * 3600
     }))
     .into_response()
 }
