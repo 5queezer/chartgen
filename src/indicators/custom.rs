@@ -858,7 +858,12 @@ impl Indicator for PivotPoints {
 
 pub struct VolumeProfile {
     pub bins: usize,
-    pub side: String, // "left" or "right"
+    pub side: String,              // "left" or "right"
+    pub range_bars: Option<usize>, // only compute over last N bars (None = all)
+    pub split_up_down: bool,       // separate up/down volume colors
+    pub color_up: u32,             // hex color for up-volume
+    pub color_down: u32,           // hex color for down-volume
+    pub opacity: f64,              // overall opacity multiplier
 }
 
 impl Default for VolumeProfile {
@@ -866,6 +871,11 @@ impl Default for VolumeProfile {
         Self {
             bins: 24,
             side: "left".into(),
+            range_bars: None,
+            split_up_down: false,
+            color_up: 0x26a69a,
+            color_down: 0xef5350,
+            opacity: 0.35,
         }
     }
 }
@@ -882,7 +892,12 @@ impl Indicator for VolumeProfile {
     fn params(&self) -> Value {
         json!([
             {"name": "bins", "type": "integer", "default": 24},
-            {"name": "side", "type": "string", "default": "left", "description": "left or right"}
+            {"name": "side", "type": "string", "default": "left", "description": "left or right"},
+            {"name": "range_bars", "type": "integer", "default": null, "description": "only compute over last N bars (null = all)"},
+            {"name": "split_up_down", "type": "boolean", "default": false, "description": "separate up/down volume colors"},
+            {"name": "color_up", "type": "string", "default": "#26a69a", "description": "hex color for up-volume"},
+            {"name": "color_down", "type": "string", "default": "#ef5350", "description": "hex color for down-volume"},
+            {"name": "opacity", "type": "number", "default": 0.35, "description": "overall opacity multiplier (0.0-1.0)"}
         ])
     }
 
@@ -892,6 +907,41 @@ impl Indicator for VolumeProfile {
         }
         if let Some(v) = params.get("side").and_then(|v| v.as_str()) {
             self.side = v.to_string();
+        }
+        if let Some(v) = params.get("range_bars") {
+            if v.is_null() {
+                self.range_bars = None;
+            } else if let Some(n) = v.as_u64() {
+                self.range_bars = Some(n as usize);
+            }
+        }
+        if let Some(v) = params.get("split_up_down").and_then(|v| v.as_bool()) {
+            self.split_up_down = v;
+        }
+        if let Some(v) = params.get("color_up") {
+            if let Some(n) = v.as_u64() {
+                self.color_up = n as u32;
+            } else if let Some(s) = v.as_str() {
+                if let Some(hex) = s.strip_prefix('#') {
+                    if let Ok(n) = u32::from_str_radix(hex, 16) {
+                        self.color_up = n;
+                    }
+                }
+            }
+        }
+        if let Some(v) = params.get("color_down") {
+            if let Some(n) = v.as_u64() {
+                self.color_down = n as u32;
+            } else if let Some(s) = v.as_str() {
+                if let Some(hex) = s.strip_prefix('#') {
+                    if let Ok(n) = u32::from_str_radix(hex, 16) {
+                        self.color_down = n;
+                    }
+                }
+            }
+        }
+        if let Some(v) = params.get("opacity").and_then(|v| v.as_f64()) {
+            self.opacity = v.clamp(0.0, 1.0);
         }
     }
 
@@ -905,9 +955,25 @@ impl Indicator for VolumeProfile {
             };
         }
 
+        // Slice to last N bars if range_bars is set
+        let bars = if let Some(rb) = self.range_bars {
+            let start = n.saturating_sub(rb);
+            &data.bars[start..]
+        } else {
+            &data.bars[..]
+        };
+
+        if bars.is_empty() {
+            return PanelResult {
+                is_overlay: true,
+                label: "VPVR".into(),
+                ..Default::default()
+            };
+        }
+
         let mut price_min = f64::INFINITY;
         let mut price_max = f64::NEG_INFINITY;
-        for bar in &data.bars {
+        for bar in bars {
             if bar.low < price_min {
                 price_min = bar.low;
             }
@@ -927,16 +993,25 @@ impl Indicator for VolumeProfile {
         let bins = self.bins.max(1);
         let bin_size = price_range / bins as f64;
         let mut volume_bins = vec![0.0_f64; bins];
+        let mut volume_bins_up = vec![0.0_f64; bins];
+        let mut volume_bins_down = vec![0.0_f64; bins];
         let mut total_volume = 0.0;
 
         // Distribute volume proportionally across bins the bar spans
-        for bar in &data.bars {
+        for bar in bars {
             let bar_range = bar.high - bar.low;
+            let is_up = bar.close >= bar.open;
+
             if bar_range <= 0.0 || bar.volume <= 0.0 {
                 // Flat bar: assign all volume to close-price bin
                 let idx = ((bar.close - price_min) / bin_size).floor() as usize;
                 let idx = idx.min(bins - 1);
                 volume_bins[idx] += bar.volume;
+                if is_up {
+                    volume_bins_up[idx] += bar.volume;
+                } else {
+                    volume_bins_down[idx] += bar.volume;
+                }
             } else {
                 let lo_bin = ((bar.low - price_min) / bin_size).floor() as usize;
                 let hi_bin = ((bar.high - price_min) / bin_size).floor() as usize;
@@ -944,6 +1019,11 @@ impl Indicator for VolumeProfile {
                 let hi_bin = hi_bin.min(bins - 1);
                 if lo_bin == hi_bin {
                     volume_bins[lo_bin] += bar.volume;
+                    if is_up {
+                        volume_bins_up[lo_bin] += bar.volume;
+                    } else {
+                        volume_bins_down[lo_bin] += bar.volume;
+                    }
                 } else {
                     for (b, bin_vol) in volume_bins
                         .iter_mut()
@@ -956,14 +1036,20 @@ impl Indicator for VolumeProfile {
                         let overlap_lo = bar.low.max(bin_lo);
                         let overlap_hi = bar.high.min(bin_hi);
                         let fraction = (overlap_hi - overlap_lo) / bar_range;
-                        *bin_vol += bar.volume * fraction.max(0.0);
+                        let vol_portion = bar.volume * fraction.max(0.0);
+                        *bin_vol += vol_portion;
+                        if is_up {
+                            volume_bins_up[b] += vol_portion;
+                        } else {
+                            volume_bins_down[b] += vol_portion;
+                        }
                     }
                 }
             }
             total_volume += bar.volume;
         }
 
-        // POC
+        // POC (based on total volume)
         let mut poc_idx = 0;
         let mut max_vol = 0.0_f64;
         for (i, &v) in volume_bins.iter().enumerate() {
@@ -1010,31 +1096,68 @@ impl Indicator for VolumeProfile {
 
         // Build HBars
         let max_width = 0.25; // max 25% of chart width
-        let mut hbars = Vec::with_capacity(bins);
+        let opacity = self.opacity;
+        let mut hbars = Vec::with_capacity(if self.split_up_down { bins * 2 } else { bins });
+
         for (i, &vol) in volume_bins.iter().enumerate() {
             if vol <= 0.0 {
                 continue;
             }
             let center = price_min + (i as f64 + 0.5) * bin_size;
-            let width_frac = if max_vol > 0.0 {
-                (vol / max_vol) * max_width
+
+            if self.split_up_down {
+                let up_vol = volume_bins_up[i];
+                let down_vol = volume_bins_down[i];
+                let up_width = if max_vol > 0.0 {
+                    (up_vol / max_vol) * max_width
+                } else {
+                    0.0
+                };
+                let down_width = if max_vol > 0.0 {
+                    (down_vol / max_vol) * max_width
+                } else {
+                    0.0
+                };
+
+                if up_vol > 0.0 {
+                    hbars.push(HBar {
+                        y: center,
+                        height: bin_size * 0.9,
+                        width: up_width,
+                        color: rgba(self.color_up, opacity),
+                        left: self.side == "left",
+                    });
+                }
+                if down_vol > 0.0 {
+                    hbars.push(HBar {
+                        y: center,
+                        height: bin_size * 0.9,
+                        width: down_width,
+                        color: rgba(self.color_down, opacity),
+                        left: self.side == "left",
+                    });
+                }
             } else {
-                0.0
-            };
-            let color = if i == poc_idx {
-                rgba(0xFFD700, 0.7) // gold for POC
-            } else if i >= va_low_idx && i <= va_high_idx {
-                rgba(0x2962FF, 0.4) // blue for Value Area
-            } else {
-                rgba(0x2962FF, 0.2) // lighter blue outside VA
-            };
-            hbars.push(HBar {
-                y: center,
-                height: bin_size * 0.9, // small gap between bars
-                width: width_frac,
-                color,
-                left: self.side == "left",
-            });
+                let width_frac = if max_vol > 0.0 {
+                    (vol / max_vol) * max_width
+                } else {
+                    0.0
+                };
+                let color = if i == poc_idx {
+                    rgba(0xFFD700, (opacity * 2.0).min(1.0))
+                } else if i >= va_low_idx && i <= va_high_idx {
+                    rgba(0x2962FF, (opacity * 1.14).min(1.0))
+                } else {
+                    rgba(0x2962FF, opacity * 0.57)
+                };
+                hbars.push(HBar {
+                    y: center,
+                    height: bin_size * 0.9,
+                    width: width_frac,
+                    color,
+                    left: self.side == "left",
+                });
+            }
         }
 
         // HLines for POC, VAH, VAL
