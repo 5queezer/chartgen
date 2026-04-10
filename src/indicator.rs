@@ -57,6 +57,17 @@ pub struct HBar {
     pub left: bool, // true = draw from left edge, false = draw from right edge
 }
 
+/// Diagonal line between two points (for divergence markers).
+#[derive(Clone)]
+pub struct DivLine {
+    pub x1: usize, // start bar index
+    pub y1: f64,   // start y value
+    pub x2: usize, // end bar index
+    pub y2: f64,   // end y value
+    pub color: RGBAColor,
+    pub dashed: bool, // true = dashed line
+}
+
 /// Output of an indicator computation.
 #[derive(Clone, Default)]
 pub struct PanelResult {
@@ -66,6 +77,7 @@ pub struct PanelResult {
     pub dots: Vec<Dot>,
     pub hlines: Vec<HLine>,
     pub hbars: Vec<HBar>,
+    pub divlines: Vec<DivLine>,
     pub y_range: Option<(f64, f64)>,
     pub label: String,
     pub is_overlay: bool,
