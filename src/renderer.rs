@@ -100,7 +100,7 @@ pub fn render_chart(
     let p_margin = (p_max - p_min) * 0.05;
 
     // Title bar height
-    let title_h: u32 = 28;
+    let title_h: u32 = 40;
 
     // Layout: title + candle 55% + panels
     let candle_h = ((height - title_h) as f64 * 0.55) as u32;
@@ -124,8 +124,8 @@ pub fn render_chart(
         };
         root.draw_text(
             &title,
-            &("monospace", 16).into_font().color(&TITLE_COLOR),
-            (12, 6),
+            &("monospace", 24).into_font().color(&TITLE_COLOR),
+            (16, 10),
         )?;
     }
 
@@ -148,7 +148,7 @@ pub fn render_chart(
         let mut chart = ChartBuilder::on(&candle_area)
             .margin(10)
             .x_label_area_size(0)
-            .y_label_area_size(60)
+            .y_label_area_size(80)
             .build_cartesian_2d(0_f64..(n as f64), (p_min - p_margin)..(p_max + p_margin))?;
 
         chart
@@ -157,7 +157,7 @@ pub fn render_chart(
             .light_line_style(GRID)
             .bold_line_style(GRID)
             .axis_style(GRID)
-            .label_style(("monospace", 12, &TEXT))
+            .label_style(("monospace", 14, &TEXT))
             .draw()?;
 
         for (i, bar) in data.bars.iter().enumerate() {
@@ -217,9 +217,10 @@ pub fn render_chart(
                     .map(|(i, y)| (i as f64, *y))
                     .collect();
                 if !points.is_empty() {
+                    let draw_width = if line.width <= 1 { 2 } else { line.width };
                     chart.draw_series(std::iter::once(PathElement::new(
                         points,
-                        line.color.stroke_width(line.width),
+                        line.color.stroke_width(draw_width),
                     )))?;
                 }
             }
@@ -254,12 +255,41 @@ pub fn render_chart(
             }
         }
 
+        // Overlay labels and current value annotations on candle chart
+        {
+            let mut label_y = 5;
+            for overlay in &overlays {
+                if !overlay.label.is_empty() {
+                    candle_area.draw_text(
+                        &overlay.label,
+                        &("monospace", 14).into_font().color(&RGBColor(200, 200, 210)),
+                        (85, label_y),
+                    )?;
+                    label_y += 18;
+                }
+                for line in &overlay.lines {
+                    if let Some(ref lbl) = line.label {
+                        if let Some(val) = line.y.iter().rev().find(|v| !v.is_nan()) {
+                            let text = format!("{}: {:.2}", lbl, val);
+                            let RGBAColor(r, g, b, _) = line.color;
+                            candle_area.draw_text(
+                                &text,
+                                &("monospace", 12).into_font().color(&RGBColor(r, g, b)),
+                                (85, label_y),
+                            )?;
+                            label_y += 15;
+                        }
+                    }
+                }
+            }
+        }
+
         // Price label
         let lp = data.bars.last().unwrap().close;
         chart.draw_series(std::iter::once(Text::new(
             format!("{:.2}", lp),
             ((n - 1) as f64, lp),
-            ("monospace", 12).into_font().color(&WHITE),
+            ("monospace", 14).into_font().color(&WHITE),
         )))?;
     }
 
@@ -270,7 +300,7 @@ pub fn render_chart(
         let mut chart = ChartBuilder::on(area)
             .margin(5)
             .x_label_area_size(20)
-            .y_label_area_size(60)
+            .y_label_area_size(80)
             .build_cartesian_2d(0_f64..(n as f64), y_lo..y_hi)?;
 
         chart
@@ -279,7 +309,7 @@ pub fn render_chart(
             .light_line_style(GRID)
             .bold_line_style(GRID)
             .axis_style(GRID)
-            .label_style(("monospace", 10, &TEXT))
+            .label_style(("monospace", 13, &TEXT))
             .draw()?;
 
         // HLines
@@ -340,9 +370,10 @@ pub fn render_chart(
                 .map(|(i, y)| (i as f64, *y))
                 .collect();
             if !points.is_empty() {
+                let draw_width = if line.width <= 1 { 2 } else { line.width };
                 chart.draw_series(std::iter::once(PathElement::new(
                     points,
-                    line.color.stroke_width(line.width),
+                    line.color.stroke_width(draw_width),
                 )))?;
             }
         }
@@ -360,9 +391,29 @@ pub fn render_chart(
         if !result.label.is_empty() {
             area.draw_text(
                 &result.label,
-                &("monospace", 12).into_font().color(&TEXT),
-                (width as i32 - 80, 5),
+                &("monospace", 15).into_font().color(&RGBColor(200, 200, 210)),
+                (85, 5),
             )?;
+        }
+
+        // Current value annotations
+        {
+            let mut ann_y = 22; // below the panel label
+            for line in &result.lines {
+                if let Some(ref lbl) = line.label {
+                    // Find last non-NaN value
+                    if let Some(val) = line.y.iter().rev().find(|v| !v.is_nan()) {
+                        let text = format!("{}: {:.2}", lbl, val);
+                        let RGBAColor(r, g, b, _) = line.color;
+                        area.draw_text(
+                            &text,
+                            &("monospace", 12).into_font().color(&RGBColor(r, g, b)),
+                            (85, ann_y),
+                        )?;
+                        ann_y += 15;
+                    }
+                }
+            }
         }
     }
 
@@ -370,7 +421,7 @@ pub fn render_chart(
     {
         let interval = data.interval.as_deref().unwrap_or("4h");
         let y_pos = height as i32 - 4; // just above the bottom edge
-        let x_margin = 60; // match Y-axis label width
+        let x_margin = 80; // match Y-axis label width
         let chart_width = (width as i32 - x_margin - 10) as f64; // usable chart width
         let label_count = (width / 180).max(3) as usize; // ~1 label per 180px
         let step = (n / label_count).max(1);
@@ -385,7 +436,7 @@ pub fn render_chart(
             let x_px = x_margin + (x_frac * chart_width) as i32;
             root.draw_text(
                 &label,
-                &("monospace", 10).into_font().color(&TEXT),
+                &("monospace", 13).into_font().color(&TEXT),
                 (x_px, y_pos - 10),
             )?;
         }
