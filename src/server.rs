@@ -449,8 +449,8 @@ async fn mcp_handler(
     let has_auth = extract_bearer_token(&headers).is_some();
     eprintln!("[MCP] POST /mcp method={} has_auth={}", method, has_auth);
 
-    // Allow initialize without auth; require Bearer token for everything else
-    if method != "initialize" {
+    // Allow initialize and tools/list without auth for tool discovery
+    if method != "initialize" && method != "tools/list" {
         let token = match extract_bearer_token(&headers) {
             Some(t) => t.to_string(),
             None => {
@@ -502,6 +502,19 @@ async fn mcp_handler(
         .headers_mut()
         .insert("Mcp-Session-Id", session_id.parse().unwrap());
     response
+}
+
+// --- Health / discovery handler (no auth) ---
+
+async fn health_handler() -> Json<Value> {
+    eprintln!("[MCP] GET / (health/discovery check)");
+    Json(json!({
+        "name": "chartgen",
+        "version": "0.1.0",
+        "protocol": "MCP",
+        "protocolVersion": "2024-11-05",
+        "status": "ok"
+    }))
 }
 
 // --- SSE Transport handler ---
@@ -567,7 +580,7 @@ pub async fn run_server(port: u16) {
         .route("/favicon.ico", get(favicon_handler))
         .route("/favicon.svg", get(favicon_handler))
         // MCP endpoints — Claude.ai may try root, /mcp, /message, or /sse
-        .route("/", get(sse_handler).post(mcp_handler))
+        .route("/", get(health_handler).post(mcp_handler))
         .route("/mcp", get(sse_handler).post(mcp_handler))
         .route("/message", post(mcp_handler))
         .route("/sse", get(sse_handler))
