@@ -672,7 +672,7 @@ impl Indicator for CipherB {
             if cross_up && cfg.wt_buy_show && wt2[i] <= cfg.os_level {
                 if is_strict {
                     // Strict: require RSI oversold + Stoch RSI oversold
-                    let rsi_ok = !rsi_vals[i].is_nan() && rsi_vals[i] < cfg.rsi_oversold;
+                    let rsi_ok = !rsi_vals[i].is_nan() && rsi_vals[i] < 30.0;
                     let stoch_ok = !stoch_k[i].is_nan() && stoch_k[i] < 20.0;
                     if rsi_ok && stoch_ok {
                         dots.push(Dot {
