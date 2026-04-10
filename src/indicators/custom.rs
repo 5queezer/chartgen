@@ -868,11 +868,11 @@ impl Default for VolumeProfile {
 
 impl Indicator for VolumeProfile {
     fn name(&self) -> &str {
-        "VP"
+        "VPVR"
     }
 
     fn description(&self) -> &str {
-        "Volume Profile — POC/VAH/VAL price levels"
+        "Volume Profile Visible Range — horizontal volume histogram with POC/VAH/VAL"
     }
 
     fn params(&self) -> Value {
@@ -887,16 +887,14 @@ impl Indicator for VolumeProfile {
 
     fn compute(&self, data: &OhlcvData) -> PanelResult {
         let n = data.len();
-
         if n == 0 {
             return PanelResult {
                 is_overlay: true,
-                label: "VP".into(),
+                label: "VPVR".into(),
                 ..Default::default()
             };
         }
 
-        // Find price range
         let mut price_min = f64::INFINITY;
         let mut price_max = f64::NEG_INFINITY;
         for bar in &data.bars {
@@ -907,12 +905,11 @@ impl Indicator for VolumeProfile {
                 price_max = bar.high;
             }
         }
-
         let price_range = price_max - price_min;
         if price_range <= 0.0 {
             return PanelResult {
                 is_overlay: true,
-                label: "VP".into(),
+                label: "VPVR".into(),
                 ..Default::default()
             };
         }
@@ -922,15 +919,41 @@ impl Indicator for VolumeProfile {
         let mut volume_bins = vec![0.0_f64; bins];
         let mut total_volume = 0.0;
 
-        // Distribute volume into bins based on close price
+        // Distribute volume proportionally across bins the bar spans
         for bar in &data.bars {
-            let idx = ((bar.close - price_min) / bin_size).floor() as usize;
-            let idx = idx.min(bins - 1);
-            volume_bins[idx] += bar.volume;
+            let bar_range = bar.high - bar.low;
+            if bar_range <= 0.0 || bar.volume <= 0.0 {
+                // Flat bar: assign all volume to close-price bin
+                let idx = ((bar.close - price_min) / bin_size).floor() as usize;
+                let idx = idx.min(bins - 1);
+                volume_bins[idx] += bar.volume;
+            } else {
+                let lo_bin = ((bar.low - price_min) / bin_size).floor() as usize;
+                let hi_bin = ((bar.high - price_min) / bin_size).floor() as usize;
+                let lo_bin = lo_bin.min(bins - 1);
+                let hi_bin = hi_bin.min(bins - 1);
+                if lo_bin == hi_bin {
+                    volume_bins[lo_bin] += bar.volume;
+                } else {
+                    for (b, bin_vol) in volume_bins
+                        .iter_mut()
+                        .enumerate()
+                        .take(hi_bin + 1)
+                        .skip(lo_bin)
+                    {
+                        let bin_lo = price_min + b as f64 * bin_size;
+                        let bin_hi = bin_lo + bin_size;
+                        let overlap_lo = bar.low.max(bin_lo);
+                        let overlap_hi = bar.high.min(bin_hi);
+                        let fraction = (overlap_hi - overlap_lo) / bar_range;
+                        *bin_vol += bar.volume * fraction.max(0.0);
+                    }
+                }
+            }
             total_volume += bar.volume;
         }
 
-        // Find POC (Point of Control)
+        // POC
         let mut poc_idx = 0;
         let mut max_vol = 0.0_f64;
         for (i, &v) in volume_bins.iter().enumerate() {
@@ -939,10 +962,9 @@ impl Indicator for VolumeProfile {
                 poc_idx = i;
             }
         }
-
         let poc_price = price_min + (poc_idx as f64 + 0.5) * bin_size;
 
-        // Value Area: 70% of total volume centered around POC
+        // Value Area: 70% of total volume expanding from POC
         let target_vol = total_volume * 0.70;
         let mut va_vol = volume_bins[poc_idx];
         let mut va_low_idx = poc_idx;
@@ -959,7 +981,6 @@ impl Indicator for VolumeProfile {
             } else {
                 0.0
             };
-
             if try_low >= try_high && va_low_idx > 0 {
                 va_low_idx -= 1;
                 va_vol += volume_bins[va_low_idx];
@@ -977,39 +998,53 @@ impl Indicator for VolumeProfile {
         let vah_price = price_min + (va_high_idx as f64 + 1.0) * bin_size;
         let val_price = price_min + va_low_idx as f64 * bin_size;
 
-        // Render as constant horizontal lines across all bars
-        let poc_line = vec![poc_price; n];
-        let vah_line = vec![vah_price; n];
-        let val_line = vec![val_price; n];
+        // Build HBars
+        let max_width = 0.25; // max 25% of chart width
+        let mut hbars = Vec::with_capacity(bins);
+        for (i, &vol) in volume_bins.iter().enumerate() {
+            if vol <= 0.0 {
+                continue;
+            }
+            let center = price_min + (i as f64 + 0.5) * bin_size;
+            let width_frac = if max_vol > 0.0 {
+                (vol / max_vol) * max_width
+            } else {
+                0.0
+            };
+            let color = if i == poc_idx {
+                rgba(0xFFD700, 0.7) // gold for POC
+            } else if i >= va_low_idx && i <= va_high_idx {
+                rgba(0x2962FF, 0.4) // blue for Value Area
+            } else {
+                rgba(0x2962FF, 0.2) // lighter blue outside VA
+            };
+            hbars.push(HBar {
+                y: center,
+                height: bin_size * 0.9, // small gap between bars
+                width: width_frac,
+                color,
+            });
+        }
+
+        // HLines for POC, VAH, VAL
+        let poc_hline = HLine {
+            y: poc_price,
+            color: rgba(0xFFD700, 0.8),
+        };
+        let vah_hline = HLine {
+            y: vah_price,
+            color: rgba(0x787B86, 0.6),
+        };
+        let val_hline = HLine {
+            y: val_price,
+            color: rgba(0x787B86, 0.6),
+        };
 
         PanelResult {
-            lines: vec![
-                Line {
-                    y: poc_line,
-                    color: rgba(0xFFEB3B, 0.9),
-                    width: 2,
-                    label: Some("POC".into()),
-                },
-                Line {
-                    y: vah_line.clone(),
-                    color: rgba(0xef5350, 0.5),
-                    width: 1,
-                    label: Some("VAH".into()),
-                },
-                Line {
-                    y: val_line.clone(),
-                    color: rgba(0x26a69a, 0.5),
-                    width: 1,
-                    label: Some("VAL".into()),
-                },
-            ],
-            fills: vec![Fill {
-                y1: vah_line,
-                y2: val_line,
-                color: rgba(0xFFEB3B, 0.05),
-            }],
+            hbars,
+            hlines: vec![poc_hline, vah_hline, val_hline],
             is_overlay: true,
-            label: "VP".into(),
+            label: "VPVR".into(),
             ..Default::default()
         }
     }
@@ -1368,6 +1403,7 @@ impl Indicator for KalmanVolume {
                 y: 0.0,
                 color: rgba(0x787B86, 0.4),
             }],
+            hbars: vec![],
             y_range: Some((-2.5, 2.5)),
             label: "KVF".into(),
             is_overlay: false,

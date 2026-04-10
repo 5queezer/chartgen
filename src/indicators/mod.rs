@@ -38,7 +38,7 @@ pub fn by_name(name: &str) -> Option<Box<dyn Indicator>> {
         "vwap_bands" => Some(Box::new(custom::VwapBands::default())),
         "heikin_ashi" | "ha" => Some(Box::new(custom::HeikinAshi)),
         "pivot" | "pivot_points" => Some(Box::new(custom::PivotPoints)),
-        "volume_profile" | "vp" => Some(Box::new(custom::VolumeProfile::default())),
+        "volume_profile" | "vp" | "vpvr" => Some(Box::new(custom::VolumeProfile::default())),
         "kalman" | "kalman_volume" | "kvf" => Some(Box::new(custom::KalmanVolume::default())),
         "cvd" => Some(Box::new(external::Cvd)),
         "funding" | "funding_rate" => Some(Box::new(external::FundingRate)),
@@ -151,7 +151,7 @@ pub fn registry() -> Vec<IndicatorInfo> {
     reg!("pivot", &["pivot_points"], "overlay", custom::PivotPoints);
     reg!(
         "volume_profile",
-        &["vp"],
+        &["vp", "vpvr"],
         "overlay",
         custom::VolumeProfile::default()
     );

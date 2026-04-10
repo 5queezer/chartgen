@@ -46,6 +46,15 @@ pub struct HLine {
     pub color: RGBAColor,
 }
 
+/// Horizontal bar for VPVR-style overlays (drawn right-to-left at a price level).
+#[derive(Clone)]
+pub struct HBar {
+    pub y: f64,        // center price level
+    pub height: f64,   // bar height in price units
+    pub width: f64,    // 0.0-1.0, fraction of chart width (proportional to volume)
+    pub color: RGBAColor,
+}
+
 /// Output of an indicator computation.
 #[derive(Clone, Default)]
 pub struct PanelResult {
@@ -54,6 +63,7 @@ pub struct PanelResult {
     pub bars: Vec<Bars>,
     pub dots: Vec<Dot>,
     pub hlines: Vec<HLine>,
+    pub hbars: Vec<HBar>,
     pub y_range: Option<(f64, f64)>,
     pub label: String,
     pub is_overlay: bool,

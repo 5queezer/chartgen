@@ -232,6 +232,26 @@ pub fn render_chart(
                     dot.color.filled(),
                 )))?;
             }
+
+            // HLines on overlay
+            for h in &overlay.hlines {
+                chart.draw_series(std::iter::once(PathElement::new(
+                    vec![(0.0, h.y), (n as f64, h.y)],
+                    h.color.stroke_width(1),
+                )))?;
+            }
+
+            // HBars (VPVR horizontal histogram)
+            for hbar in &overlay.hbars {
+                let x_right = n as f64;
+                let x_left = x_right * (1.0 - hbar.width);
+                let y_top = hbar.y + hbar.height / 2.0;
+                let y_bot = hbar.y - hbar.height / 2.0;
+                chart.draw_series(std::iter::once(Rectangle::new(
+                    [(x_left, y_bot), (x_right, y_top)],
+                    hbar.color.filled(),
+                )))?;
+            }
         }
 
         // Price label
@@ -395,6 +415,10 @@ fn auto_range(r: &PanelResult) -> (f64, f64) {
             lo = lo.min(bars.bottom.min(bars.bottom + *v));
             hi = hi.max(bars.bottom.max(bars.bottom + *v));
         }
+    }
+    for hbar in &r.hbars {
+        lo = lo.min(hbar.y - hbar.height / 2.0);
+        hi = hi.max(hbar.y + hbar.height / 2.0);
     }
     // Fallback for empty panels
     if lo.is_infinite() || hi.is_infinite() || (hi - lo).abs() < 1e-10 {
