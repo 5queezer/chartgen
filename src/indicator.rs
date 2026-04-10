@@ -52,6 +52,7 @@ pub struct HBar {
     pub y: f64,      // center price level
     pub height: f64, // bar height in price units
     pub width: f64,  // 0.0-1.0, fraction of chart width (proportional to volume)
+    pub offset: f64, // offset from edge as fraction of chart width (0.0-1.0)
     pub color: RGBAColor,
     pub left: bool, // true = draw from left edge, false = draw from right edge
 }
