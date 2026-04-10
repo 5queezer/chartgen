@@ -69,6 +69,9 @@ pub struct CipherBConfig {
     // Dot mode
     pub dot_mode: String, // "classic" (existing behavior) or "strict" (TV-like filtering)
 
+    // MFI bars at zero line
+    pub show_mfi_bars: bool,
+
     // Schaff Trend Cycle
     pub tc_show: bool,
     pub tc_length: usize,
@@ -131,6 +134,7 @@ impl Default for CipherBConfig {
             stoch_show_hidden_div: false,
 
             dot_mode: "strict".to_string(),
+            show_mfi_bars: true,
 
             tc_show: false,
             tc_length: 10,
@@ -586,22 +590,40 @@ impl Indicator for CipherB {
                 })
                 .collect();
 
-            let mfi_colors: Vec<plotters::style::RGBAColor> = mfi_shifted
-                .iter()
-                .map(|v| {
-                    if v.is_nan() || *v > 0.0 {
-                        rgba(0x3ee145, 0.25)
-                    } else {
-                        rgba(0xff3d2e, 0.25)
-                    }
-                })
-                .collect();
+            if cfg.show_mfi_bars {
+                // MFI bars centered on zero line with directional coloring
+                let mfi_bar_colors: Vec<plotters::style::RGBAColor> = mfi_shifted
+                    .iter()
+                    .enumerate()
+                    .map(|(i, v)| {
+                        if v.is_nan() {
+                            rgba(0x000000, 0.0)
+                        } else if *v > 0.0 {
+                            let rising =
+                                i > 0 && !mfi_shifted[i - 1].is_nan() && *v > mfi_shifted[i - 1];
+                            if rising {
+                                rgba(0x3ee145, 0.6) // bright green
+                            } else {
+                                rgba(0x3ee145, 0.3) // dim green
+                            }
+                        } else {
+                            let falling =
+                                i > 0 && !mfi_shifted[i - 1].is_nan() && *v < mfi_shifted[i - 1];
+                            if falling {
+                                rgba(0xff3d2e, 0.6) // bright red
+                            } else {
+                                rgba(0xff3d2e, 0.3) // dim red
+                            }
+                        }
+                    })
+                    .collect();
 
-            bars_out.push(Bars {
-                y: vec![4.0; n],
-                colors: mfi_colors,
-                bottom: -95.0,
-            });
+                bars_out.push(Bars {
+                    y: vec![6.0; n],
+                    colors: mfi_bar_colors,
+                    bottom: -3.0, // centered on zero: -3 to +3
+                });
+            }
         }
 
         // ===================================================================
