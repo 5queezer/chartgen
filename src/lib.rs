@@ -5,3 +5,4 @@ pub mod indicator_state;
 pub mod indicators;
 pub mod mtf;
 pub mod renderer;
+pub mod trading;
