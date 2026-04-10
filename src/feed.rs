@@ -270,6 +270,71 @@ async fn fetch_binance_async(
     Ok(bars)
 }
 
+/// Aggregates 1-minute bars into higher-timeframe bars using timestamp-based bucket boundaries.
+pub struct BarAggregator {
+    interval_minutes: u64,
+    current: Option<Bar>,
+    current_bucket: i64,
+}
+
+impl BarAggregator {
+    /// Create a new aggregator from an interval string (e.g. "5m", "15m", "1h", "4h").
+    pub fn new(interval: &str) -> Self {
+        let interval_minutes = parse_interval_minutes(interval);
+        Self {
+            interval_minutes,
+            current: None,
+            current_bucket: 0,
+        }
+    }
+
+    /// Feed a 1-minute bar. Returns `Some(Bar)` when a completed higher-timeframe bar is ready.
+    pub fn update(&mut self, bar: &Bar) -> Option<Bar> {
+        let ts: i64 = bar.date.parse().unwrap_or(0);
+        let bucket = ts / (self.interval_minutes as i64 * 60);
+
+        match self.current.take() {
+            None => {
+                self.current = Some(bar.clone());
+                self.current_bucket = bucket;
+                None
+            }
+            Some(acc) => {
+                if bucket == self.current_bucket {
+                    // Same bucket: merge into accumulator.
+                    self.current = Some(Bar {
+                        open: acc.open,
+                        high: acc.high.max(bar.high),
+                        low: acc.low.min(bar.low),
+                        close: bar.close,
+                        volume: acc.volume + bar.volume,
+                        date: acc.date,
+                    });
+                    None
+                } else {
+                    // New bucket: emit the completed bar, start fresh.
+                    self.current = Some(bar.clone());
+                    self.current_bucket = bucket;
+                    Some(acc)
+                }
+            }
+        }
+    }
+}
+
+/// Parse an interval string like "1m", "5m", "15m", "1h", "4h" into minutes.
+fn parse_interval_minutes(interval: &str) -> u64 {
+    let s = interval.trim();
+    if let Some(hours) = s.strip_suffix('h') {
+        hours.parse::<u64>().unwrap_or(1) * 60
+    } else if let Some(mins) = s.strip_suffix('m') {
+        mins.parse::<u64>().unwrap_or(1)
+    } else {
+        // Fallback: treat as minutes.
+        s.parse::<u64>().unwrap_or(1)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -358,5 +423,163 @@ mod tests {
         assert!((bar.close - 100.75).abs() < f64::EPSILON);
         assert!((bar.volume - 999.99).abs() < f64::EPSILON);
         assert_eq!(bar.date, "1672531200");
+    }
+
+    // --- BarAggregator tests ---
+
+    /// Helper: create a Bar at a given unix-second timestamp.
+    fn make_bar(ts: i64, open: f64, high: f64, low: f64, close: f64, volume: f64) -> Bar {
+        Bar {
+            open,
+            high,
+            low,
+            close,
+            volume,
+            date: ts.to_string(),
+        }
+    }
+
+    #[test]
+    fn test_parse_interval_minutes() {
+        assert_eq!(parse_interval_minutes("1m"), 1);
+        assert_eq!(parse_interval_minutes("5m"), 5);
+        assert_eq!(parse_interval_minutes("15m"), 15);
+        assert_eq!(parse_interval_minutes("1h"), 60);
+        assert_eq!(parse_interval_minutes("4h"), 240);
+    }
+
+    #[test]
+    fn test_aggregator_first_bar_initializes() {
+        let mut agg = BarAggregator::new("5m");
+        let bar = make_bar(300, 100.0, 105.0, 95.0, 102.0, 10.0);
+        // First bar should not emit anything.
+        assert!(agg.update(&bar).is_none());
+        assert!(agg.current.is_some());
+    }
+
+    #[test]
+    fn test_aggregator_5m_from_1m_bars() {
+        let mut agg = BarAggregator::new("5m");
+
+        // 5 bars in the same 5-minute bucket: ts 300..599 all map to bucket 1 (300/300=1).
+        let bars = vec![
+            make_bar(300, 100.0, 110.0, 98.0, 105.0, 10.0),
+            make_bar(360, 105.0, 112.0, 103.0, 108.0, 20.0),
+            make_bar(420, 108.0, 109.0, 100.0, 101.0, 15.0),
+            make_bar(480, 101.0, 107.0, 99.0, 106.0, 25.0),
+            make_bar(540, 106.0, 111.0, 104.0, 110.0, 30.0),
+        ];
+
+        for bar in &bars[..5] {
+            assert!(agg.update(bar).is_none());
+        }
+
+        // Next bar in a new bucket triggers emit.
+        let next = make_bar(600, 110.0, 115.0, 109.0, 113.0, 5.0);
+        let emitted = agg.update(&next).expect("should emit completed bar");
+
+        assert!(
+            (emitted.open - 100.0).abs() < f64::EPSILON,
+            "O = first open"
+        );
+        assert!((emitted.high - 112.0).abs() < f64::EPSILON, "H = max high");
+        assert!((emitted.low - 98.0).abs() < f64::EPSILON, "L = min low");
+        assert!(
+            (emitted.close - 110.0).abs() < f64::EPSILON,
+            "C = last close"
+        );
+        assert!(
+            (emitted.volume - 100.0).abs() < f64::EPSILON,
+            "V = sum volumes"
+        );
+        assert_eq!(emitted.date, "300");
+    }
+
+    #[test]
+    fn test_aggregator_1h_from_1m_bars() {
+        let mut agg = BarAggregator::new("1h");
+
+        // 60 bars in the same 1-hour bucket: ts 3600..7199 → bucket 1 (ts / 3600).
+        let base_ts = 3600_i64;
+        for i in 0..60 {
+            let ts = base_ts + i * 60;
+            let bar = make_bar(ts, 50.0 + i as f64, 55.0 + i as f64, 48.0, 51.0, 1.0);
+            assert!(
+                agg.update(&bar).is_none(),
+                "should not emit within same bucket"
+            );
+        }
+
+        // Trigger with first bar of next hour.
+        let trigger = make_bar(7200, 999.0, 999.0, 999.0, 999.0, 1.0);
+        let result = agg.update(&trigger).expect("should emit 1h bar");
+
+        assert!((result.open - 50.0).abs() < f64::EPSILON, "O = first open");
+        // Max high = 55.0 + 59 = 114.0
+        assert!((result.high - 114.0).abs() < f64::EPSILON, "H = max high");
+        assert!((result.low - 48.0).abs() < f64::EPSILON, "L = min low");
+        assert!((result.close - 51.0).abs() < f64::EPSILON, "C = last close");
+        assert!(
+            (result.volume - 60.0).abs() < f64::EPSILON,
+            "V = sum of 60 × 1.0"
+        );
+        assert_eq!(result.date, "3600");
+    }
+
+    #[test]
+    fn test_aggregator_partial_interval_emits_on_bucket_change() {
+        let mut agg = BarAggregator::new("5m");
+
+        // Only 3 bars in the first bucket (partial).
+        let bars = vec![
+            make_bar(300, 100.0, 110.0, 90.0, 105.0, 10.0),
+            make_bar(360, 105.0, 108.0, 102.0, 107.0, 20.0),
+            make_bar(420, 107.0, 109.0, 101.0, 103.0, 15.0),
+        ];
+
+        for bar in &bars {
+            assert!(agg.update(bar).is_none());
+        }
+
+        // Jump to the next bucket.
+        let next = make_bar(600, 103.0, 106.0, 100.0, 104.0, 5.0);
+        let emitted = agg.update(&next).expect("should emit partial bar");
+
+        assert!((emitted.open - 100.0).abs() < f64::EPSILON);
+        assert!((emitted.high - 110.0).abs() < f64::EPSILON);
+        assert!((emitted.low - 90.0).abs() < f64::EPSILON);
+        assert!((emitted.close - 103.0).abs() < f64::EPSILON);
+        assert!((emitted.volume - 45.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_aggregator_ohlcv_correctness() {
+        let mut agg = BarAggregator::new("5m");
+
+        // Carefully chosen values to verify each OHLCV rule.
+        let bars = vec![
+            make_bar(0, 10.0, 15.0, 8.0, 12.0, 100.0),    // O=10
+            make_bar(60, 12.0, 20.0, 11.0, 14.0, 200.0),  // H=20 (max)
+            make_bar(120, 14.0, 16.0, 5.0, 9.0, 50.0),    // L=5 (min)
+            make_bar(180, 9.0, 13.0, 7.0, 11.0, 150.0),   // continuing
+            make_bar(240, 11.0, 14.0, 10.0, 13.0, 300.0), // C=13 (last)
+        ];
+
+        for bar in &bars {
+            assert!(agg.update(bar).is_none());
+        }
+
+        // Trigger emit.
+        let next = make_bar(300, 13.0, 14.0, 12.0, 13.5, 10.0);
+        let emitted = agg.update(&next).unwrap();
+
+        assert!((emitted.open - 10.0).abs() < f64::EPSILON, "O = first");
+        assert!((emitted.high - 20.0).abs() < f64::EPSILON, "H = max");
+        assert!((emitted.low - 5.0).abs() < f64::EPSILON, "L = min");
+        assert!((emitted.close - 13.0).abs() < f64::EPSILON, "C = last");
+        assert!(
+            (emitted.volume - 800.0).abs() < f64::EPSILON,
+            "V = 100+200+50+150+300"
+        );
     }
 }
