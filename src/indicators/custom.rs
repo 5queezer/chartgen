@@ -1545,6 +1545,7 @@ impl Indicator for KalmanVolume {
                 color: rgba(0x787B86, 0.4),
             }],
             hbars: vec![],
+            divlines: vec![],
             y_range: Some((-2.5, 2.5)),
             label: "KVF".into(),
             is_overlay: false,

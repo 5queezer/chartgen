@@ -72,6 +72,9 @@ pub struct CipherBConfig {
     // MFI bars at zero line
     pub show_mfi_bars: bool,
 
+    // Divergence line rendering
+    pub show_divergences: bool,
+
     // Schaff Trend Cycle
     pub tc_show: bool,
     pub tc_length: usize,
@@ -135,6 +138,7 @@ impl Default for CipherBConfig {
 
             dot_mode: "strict".to_string(),
             show_mfi_bars: true,
+            show_divergences: true,
 
             tc_show: false,
             tc_length: 10,
@@ -150,7 +154,7 @@ impl Default for CipherBConfig {
 // ---------------------------------------------------------------------------
 
 struct DivResult {
-    _fractal_top: Vec<bool>,
+    fractal_top: Vec<bool>,
     fractal_bot: Vec<bool>,
     bear_div: Vec<bool>,
     bull_div: Vec<bool>,
@@ -179,7 +183,7 @@ fn find_divs(
 
     if n < 5 {
         return DivResult {
-            _fractal_top: fractal_top,
+            fractal_top,
             fractal_bot,
             bear_div,
             bull_div,
@@ -277,7 +281,7 @@ fn find_divs(
     }
 
     DivResult {
-        _fractal_top: fractal_top,
+        fractal_top,
         fractal_bot,
         bear_div,
         bull_div,
@@ -433,7 +437,8 @@ impl Indicator for CipherB {
             {"name": "wt_channel_length", "type": "integer", "default": 9},
             {"name": "wt_average_length", "type": "integer", "default": 12},
             {"name": "wt_oversold", "type": "number", "default": -53},
-            {"name": "wt_overbought", "type": "number", "default": 53}
+            {"name": "wt_overbought", "type": "number", "default": 53},
+            {"name": "show_divergences", "type": "boolean", "default": true, "description": "render divergence lines on wave trend"}
         ])
     }
 
@@ -452,6 +457,9 @@ impl Indicator for CipherB {
         }
         if let Some(v) = params.get("wt_overbought").and_then(|v| v.as_f64()) {
             self.config.ob_level = v;
+        }
+        if let Some(v) = params.get("show_divergences").and_then(|v| v.as_bool()) {
+            self.config.show_divergences = v;
         }
     }
 
@@ -862,6 +870,54 @@ impl Indicator for CipherB {
         }
 
         // ===================================================================
+        // 6b. Generate divergence lines
+        // ===================================================================
+        let mut divlines = Vec::new();
+
+        if cfg.show_divergences {
+            if let Some(ref dr) = wt_div_result {
+                let mut prev_top_center: Option<usize> = None;
+                let mut prev_bot_center: Option<usize> = None;
+
+                for i in 4..n {
+                    let center = i - 2;
+
+                    if dr.fractal_top[i] {
+                        if let Some(prev_c) = prev_top_center {
+                            if dr.bear_div[i] {
+                                divlines.push(DivLine {
+                                    x1: prev_c,
+                                    y1: wt2[prev_c],
+                                    x2: center,
+                                    y2: wt2[center],
+                                    color: rgba(0xff0000, 0.8),
+                                    dashed: true,
+                                });
+                            }
+                        }
+                        prev_top_center = Some(center);
+                    }
+
+                    if dr.fractal_bot[i] {
+                        if let Some(prev_c) = prev_bot_center {
+                            if dr.bull_div[i] {
+                                divlines.push(DivLine {
+                                    x1: prev_c,
+                                    y1: wt2[prev_c],
+                                    x2: center,
+                                    y2: wt2[center],
+                                    color: rgba(0x00e676, 0.8),
+                                    dashed: true,
+                                });
+                            }
+                        }
+                        prev_bot_center = Some(center);
+                    }
+                }
+            }
+        }
+
+        // ===================================================================
         // 7. Signal dots
         // ===================================================================
 
@@ -1084,6 +1140,7 @@ impl Indicator for CipherB {
             bars: bars_out,
             dots,
             hlines,
+            divlines,
             y_range: Some((-105.0, 105.0)),
             label: "Cipher B".into(),
             ..Default::default()
