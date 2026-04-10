@@ -4,6 +4,7 @@
 - Branch naming: `feat/<topic>`, `fix/<topic>`, `chore/<topic>`
 - `cargo fmt` is enforced by a pre-commit hook and a Claude settings.json hook.
 - Run `cargo clippy -- -D warnings` before pushing.
+- After pushing a PR or force-pushing a rebase, wait for CodeRabbit AI to complete its review before merging. If CodeRabbit is rate-limited or stuck on "Review in progress", comment `@coderabbitai review` on the PR to request a new review. Never merge while CodeRabbit review is pending.
 
 ## graphify
 
