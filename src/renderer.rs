@@ -517,6 +517,16 @@ fn auto_range(r: &PanelResult) -> (f64, f64) {
         lo = lo.min(hbar.y - hbar.height / 2.0);
         hi = hi.max(hbar.y + hbar.height / 2.0);
     }
+    for divline in &r.divlines {
+        if !divline.y1.is_nan() {
+            lo = lo.min(divline.y1);
+            hi = hi.max(divline.y1);
+        }
+        if !divline.y2.is_nan() {
+            lo = lo.min(divline.y2);
+            hi = hi.max(divline.y2);
+        }
+    }
     // Fallback for empty panels
     if lo.is_infinite() || hi.is_infinite() || (hi - lo).abs() < 1e-10 {
         return (-1.0, 1.0);
