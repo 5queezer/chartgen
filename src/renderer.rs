@@ -394,6 +394,43 @@ pub fn render_chart(
             )))?;
         }
 
+        // Divergence lines
+        for divline in &result.divlines {
+            let x1 = divline.x1 as f64;
+            let y1 = divline.y1;
+            let x2 = divline.x2 as f64;
+            let y2 = divline.y2;
+
+            if divline.dashed {
+                let steps = 20;
+                let dx = (x2 - x1) / steps as f64;
+                let dy = (y2 - y1) / steps as f64;
+                for s in (0..steps).step_by(2) {
+                    let sx1 = x1 + dx * s as f64;
+                    let sy1 = y1 + dy * s as f64;
+                    let sx2 = x1 + dx * (s + 1) as f64;
+                    let sy2 = y1 + dy * (s + 1) as f64;
+                    chart.draw_series(LineSeries::new(
+                        [(sx1, sy1), (sx2, sy2)],
+                        ShapeStyle {
+                            color: divline.color.to_rgba(),
+                            filled: false,
+                            stroke_width: 2,
+                        },
+                    ))?;
+                }
+            } else {
+                chart.draw_series(LineSeries::new(
+                    [(x1, y1), (x2, y2)],
+                    ShapeStyle {
+                        color: divline.color.to_rgba(),
+                        filled: false,
+                        stroke_width: 2,
+                    },
+                ))?;
+            }
+        }
+
         // Label
         if !result.label.is_empty() {
             area.draw_text(
