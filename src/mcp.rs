@@ -1,6 +1,7 @@
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine as Base64Engine;
 use serde_json::{json, Value};
+use std::collections::HashSet;
 use std::io::{self, BufRead, Write};
 use std::sync::{Arc, RwLock};
 
@@ -47,7 +48,7 @@ pub fn run() {
             continue;
         }
 
-        let response = handle_mcp_request(method, id, req.get("params"), None);
+        let response = handle_mcp_request(method, id, req.get("params"), None, None);
 
         writeln!(stdout, "{}", response).ok();
         stdout.flush().ok();
@@ -57,16 +58,18 @@ pub fn run() {
 /// Handle a single MCP JSON-RPC request. Shared by stdio and HTTP transports.
 /// When `engine` is `Some`, trading tools are available; otherwise they return
 /// an error indicating that the trading engine is not running.
+/// `token` is the client's Bearer token (if any), used for subscription identity.
 pub fn handle_mcp_request(
     method: &str,
     id: Option<Value>,
     params: Option<&Value>,
     engine: Option<&Arc<RwLock<Engine>>>,
+    token: Option<&str>,
 ) -> Value {
     match method {
         "initialize" => handle_initialize(id),
         "tools/list" => handle_tools_list(id),
-        "tools/call" => handle_tools_call(id, params, engine),
+        "tools/call" => handle_tools_call(id, params, engine, token),
         "ping" => json!({ "jsonrpc": "2.0", "id": id, "result": {} }),
         _ => json!({
             "jsonrpc": "2.0",
@@ -287,6 +290,33 @@ fn handle_tools_list(id: Option<Value>) -> Value {
                         "type": "object",
                         "properties": {}
                     }
+                },
+                {
+                    "name": "subscribe_notifications",
+                    "description": "Subscribe to push notifications for triggered alerts via SSE. Optionally filter by symbols and alert types. Requires --trade mode and SSE connection.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "symbols": { "type": "array", "items": { "type": "string" }, "description": "Filter by trading pairs (e.g. [\"BTCUSDT\"]). Omit for all." },
+                            "alert_types": { "type": "array", "items": { "type": "string" }, "description": "Filter by alert types: price_above, price_below, indicator_signal. Omit for all." }
+                        }
+                    }
+                },
+                {
+                    "name": "unsubscribe_notifications",
+                    "description": "Remove push notification subscription. Requires --trade mode.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {}
+                    }
+                },
+                {
+                    "name": "list_subscriptions",
+                    "description": "Show active notification subscription filters and offline queue size. Requires --trade mode.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {}
+                    }
                 }
             ]
         }
@@ -297,6 +327,7 @@ fn handle_tools_call(
     id: Option<Value>,
     params: Option<&Value>,
     engine: Option<&Arc<RwLock<Engine>>>,
+    token: Option<&str>,
 ) -> Value {
     let tool_name = params
         .and_then(|p| p.get("name"))
@@ -321,6 +352,9 @@ fn handle_tools_call(
         "list_alerts" => tool_list_alerts(id, engine),
         "cancel_alert" => tool_cancel_alert(id, &arguments, engine),
         "get_notifications" => tool_get_notifications(id, engine),
+        "subscribe_notifications" => tool_subscribe_notifications(id, &arguments, engine, token),
+        "unsubscribe_notifications" => tool_unsubscribe_notifications(id, engine, token),
+        "list_subscriptions" => tool_list_subscriptions(id, engine, token),
         _ => json!({
             "jsonrpc": "2.0",
             "id": id,
@@ -1053,6 +1087,124 @@ fn tool_get_notifications(id: Option<Value>, engine: Option<&Arc<RwLock<Engine>>
     tool_ok(id, json!(items))
 }
 
+fn tool_subscribe_notifications(
+    id: Option<Value>,
+    args: &Value,
+    engine: Option<&Arc<RwLock<Engine>>>,
+    token: Option<&str>,
+) -> Value {
+    let engine = match engine {
+        Some(e) => e,
+        None => return engine_not_running(id),
+    };
+    let token = match token {
+        Some(t) => t,
+        None => {
+            return tool_ok(
+                id,
+                json!({"error": "No authentication token — subscribe via authenticated HTTP endpoint"}),
+            )
+        }
+    };
+
+    let symbols: Option<HashSet<String>> = args
+        .get("symbols")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect::<HashSet<_>>()
+        })
+        .and_then(|s| if s.is_empty() { None } else { Some(s) });
+
+    let alert_types: Option<HashSet<String>> = args
+        .get("alert_types")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect::<HashSet<_>>()
+        })
+        .and_then(|s| if s.is_empty() { None } else { Some(s) });
+
+    let mut e = engine.write().unwrap();
+    e.subscription_registry
+        .subscribe(token, symbols.clone(), alert_types.clone());
+    if let Err(err) = e.subscription_registry.save() {
+        eprintln!("[MCP] Failed to persist subscription: {err}");
+    }
+
+    tool_ok(
+        id,
+        json!({
+            "status": "subscribed",
+            "symbols": symbols,
+            "alert_types": alert_types,
+        }),
+    )
+}
+
+fn tool_unsubscribe_notifications(
+    id: Option<Value>,
+    engine: Option<&Arc<RwLock<Engine>>>,
+    token: Option<&str>,
+) -> Value {
+    let engine = match engine {
+        Some(e) => e,
+        None => return engine_not_running(id),
+    };
+    let token = match token {
+        Some(t) => t,
+        None => {
+            return tool_ok(
+                id,
+                json!({"error": "No authentication token — unsubscribe via authenticated HTTP endpoint"}),
+            )
+        }
+    };
+
+    let mut e = engine.write().unwrap();
+    let removed = e.subscription_registry.unsubscribe(token);
+    if let Err(err) = e.subscription_registry.save() {
+        eprintln!("[MCP] Failed to persist subscription: {err}");
+    }
+
+    tool_ok(
+        id,
+        json!({ "status": if removed { "unsubscribed" } else { "not_found" } }),
+    )
+}
+
+fn tool_list_subscriptions(
+    id: Option<Value>,
+    engine: Option<&Arc<RwLock<Engine>>>,
+    token: Option<&str>,
+) -> Value {
+    let engine = match engine {
+        Some(e) => e,
+        None => return engine_not_running(id),
+    };
+    let token = match token {
+        Some(t) => t,
+        None => return tool_ok(id, json!({"error": "No authentication token"})),
+    };
+
+    let e = engine.read().unwrap();
+    match e.subscription_registry.list(token) {
+        Some(info) => tool_ok(
+            id,
+            json!({
+                "subscribed": true,
+                "symbols": info.symbols,
+                "alert_types": info.alert_types,
+                "offline_queue_size": info.offline_queue_size,
+                "connected": info.connected,
+            }),
+        ),
+        None => tool_ok(id, json!({ "subscribed": false })),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1073,6 +1225,8 @@ mod tests {
             interval: "1h".to_string(),
             indicators: vec!["rsi".to_string()],
             data_dir,
+            notification_ttl_secs: 3600,
+            max_queue_size: 1000,
         })))
     }
 
@@ -1270,7 +1424,7 @@ mod tests {
 
     #[test]
     fn handle_mcp_tools_list_includes_trading_tools() {
-        let resp = handle_mcp_request("tools/list", Some(json!(1)), None, None);
+        let resp = handle_mcp_request("tools/list", Some(json!(1)), None, None, None);
         let tools = resp["result"]["tools"].as_array().unwrap();
         let names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
         assert!(names.contains(&"get_indicators"));
@@ -1283,5 +1437,112 @@ mod tests {
         assert!(names.contains(&"list_alerts"));
         assert!(names.contains(&"cancel_alert"));
         assert!(names.contains(&"get_notifications"));
+        assert!(names.contains(&"subscribe_notifications"));
+        assert!(names.contains(&"unsubscribe_notifications"));
+        assert!(names.contains(&"list_subscriptions"));
+    }
+
+    #[test]
+    fn subscribe_notifications_with_filters() {
+        let dir = temp_dir("sub_filter");
+        let engine = make_engine(dir.clone());
+
+        let args = json!({
+            "symbols": ["BTCUSDT"],
+            "alert_types": ["price_above", "price_below"]
+        });
+        let resp = tool_subscribe_notifications(Some(json!(1)), &args, Some(&engine), Some("tok1"));
+        assert!(!is_error(&resp));
+        let text = response_text(&resp);
+        let parsed: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(parsed["status"], "subscribed");
+        assert!(parsed["symbols"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("BTCUSDT")));
+        assert_eq!(parsed["alert_types"].as_array().unwrap().len(), 2);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn subscribe_notifications_no_token() {
+        let dir = temp_dir("sub_no_tok");
+        let engine = make_engine(dir.clone());
+
+        let args = json!({});
+        let resp = tool_subscribe_notifications(Some(json!(1)), &args, Some(&engine), None);
+        assert!(!is_error(&resp));
+        let text = response_text(&resp);
+        let parsed: Value = serde_json::from_str(&text).unwrap();
+        assert!(parsed["error"]
+            .as_str()
+            .unwrap()
+            .contains("No authentication token"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn unsubscribe_notifications_removes() {
+        let dir = temp_dir("unsub_remove");
+        let engine = make_engine(dir.clone());
+
+        let args = json!({});
+        tool_subscribe_notifications(Some(json!(1)), &args, Some(&engine), Some("tok1"));
+
+        let resp = tool_unsubscribe_notifications(Some(json!(2)), Some(&engine), Some("tok1"));
+        assert!(!is_error(&resp));
+        let text = response_text(&resp);
+        let parsed: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(parsed["status"], "unsubscribed");
+
+        let resp = tool_unsubscribe_notifications(Some(json!(3)), Some(&engine), Some("tok1"));
+        let text = response_text(&resp);
+        let parsed: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(parsed["status"], "not_found");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn list_subscriptions_shows_state() {
+        let dir = temp_dir("list_sub_state");
+        let engine = make_engine(dir.clone());
+
+        let resp = tool_list_subscriptions(Some(json!(1)), Some(&engine), Some("tok1"));
+        assert!(!is_error(&resp));
+        let text = response_text(&resp);
+        let parsed: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(parsed["subscribed"], false);
+
+        let args = json!({ "symbols": ["ETHUSDT"] });
+        tool_subscribe_notifications(Some(json!(2)), &args, Some(&engine), Some("tok1"));
+
+        let resp = tool_list_subscriptions(Some(json!(3)), Some(&engine), Some("tok1"));
+        let text = response_text(&resp);
+        let parsed: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(parsed["subscribed"], true);
+        assert!(parsed["symbols"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("ETHUSDT")));
+        assert_eq!(parsed["offline_queue_size"], 0);
+        assert_eq!(parsed["connected"], false);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn subscription_tools_return_error_without_engine() {
+        let resp = tool_subscribe_notifications(Some(json!(1)), &json!({}), None, Some("tok1"));
+        assert!(is_error(&resp));
+        assert!(response_text(&resp).contains("not running"));
+
+        let resp = tool_unsubscribe_notifications(Some(json!(2)), None, Some("tok1"));
+        assert!(is_error(&resp));
+
+        let resp = tool_list_subscriptions(Some(json!(3)), None, Some("tok1"));
+        assert!(is_error(&resp));
     }
 }

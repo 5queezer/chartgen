@@ -10,6 +10,7 @@ use crate::trading::alert::{AlertCondition, AlertEngine, TriggeredAlert};
 use crate::trading::order::OrderTracker;
 use crate::trading::persistence::{load_alerts, save_alerts, AuditLog};
 use crate::trading::position::PositionTracker;
+use crate::trading::subscription::SubscriptionRegistry;
 
 pub struct EngineConfig {
     pub symbol: String,
@@ -17,6 +18,10 @@ pub struct EngineConfig {
     pub indicators: Vec<String>,
     /// Data directory (e.g. ~/.chartgen/).
     pub data_dir: PathBuf,
+    /// TTL for offline notification queue entries (seconds). Default: 3600.
+    pub notification_ttl_secs: u64,
+    /// Max offline queue size per subscription. Default: 1000.
+    pub max_queue_size: usize,
 }
 
 pub struct Engine {
@@ -28,6 +33,8 @@ pub struct Engine {
     pub audit_log: AuditLog,
     /// Pending triggered-alert notifications (drained by MCP polling).
     pub notifications: Vec<TriggeredAlert>,
+    /// Push notification subscription registry.
+    pub subscription_registry: SubscriptionRegistry,
 }
 
 impl Engine {
@@ -43,6 +50,12 @@ impl Engine {
         let audit_log = AuditLog::new(config.data_dir.join("trades.log"));
         let indicator_state = IndicatorStateManager::new(config.indicators.clone(), 200);
 
+        let subscription_registry = SubscriptionRegistry::new(
+            std::time::Duration::from_secs(config.notification_ttl_secs),
+            config.max_queue_size,
+            config.data_dir.join("subscriptions.json"),
+        );
+
         Self {
             config,
             indicator_state,
@@ -51,6 +64,7 @@ impl Engine {
             position_tracker: PositionTracker::new(),
             audit_log,
             notifications: Vec::new(),
+            subscription_registry,
         }
     }
 
@@ -81,6 +95,11 @@ impl Engine {
                 &self.config.interval,
             );
             self.notifications.push(t.clone());
+        }
+
+        // 4b. Dispatch to push-notification subscribers
+        if !triggered.is_empty() {
+            self.subscription_registry.dispatch(&triggered);
         }
 
         // 5. Persist alerts (triggered ones were removed)
@@ -136,20 +155,32 @@ pub async fn run_engine(
         }
     });
 
-    while let Some(event) = rx.recv().await {
-        match event {
-            FeedEvent::Bar(bar) => {
-                let triggered = {
-                    let mut e = engine.write().unwrap();
-                    e.on_bar(bar)
-                };
-                for t in triggered {
-                    on_alert(t);
+    let mut cleanup_interval = tokio::time::interval(std::time::Duration::from_secs(60));
+    cleanup_interval.tick().await; // consume the immediate first tick
+
+    loop {
+        tokio::select! {
+            event = rx.recv() => {
+                match event {
+                    Some(FeedEvent::Bar(bar)) => {
+                        let triggered = {
+                            let mut e = engine.write().unwrap();
+                            e.on_bar(bar)
+                        };
+                        for t in triggered {
+                            on_alert(t);
+                        }
+                    }
+                    Some(FeedEvent::Tick(bar)) => {
+                        let mut e = engine.write().unwrap();
+                        e.position_tracker.update_price(&symbol, bar.close);
+                    }
+                    None => break,
                 }
             }
-            FeedEvent::Tick(bar) => {
+            _ = cleanup_interval.tick() => {
                 let mut e = engine.write().unwrap();
-                e.position_tracker.update_price(&symbol, bar.close);
+                e.subscription_registry.cleanup_expired();
             }
         }
     }
@@ -185,6 +216,8 @@ mod tests {
             interval: "1h".to_string(),
             indicators: vec!["rsi".to_string()],
             data_dir,
+            notification_ttl_secs: 3600,
+            max_queue_size: 1000,
         })
     }
 

@@ -495,12 +495,21 @@ async fn mcp_handler(
         return StatusCode::NO_CONTENT.into_response();
     }
 
+    // Extract token for subscription tools
+    let token_owned = extract_bearer_token(&headers).map(|t| t.to_string());
+
     // Run MCP handler in a blocking task (chart rendering + data fetching use blocking I/O)
     let method_owned = method.to_string();
     let params_owned = params.cloned();
     let engine = state.engine.clone();
     let result = tokio::task::spawn_blocking(move || {
-        handle_mcp_request(&method_owned, id, params_owned.as_ref(), engine.as_ref())
+        handle_mcp_request(
+            &method_owned,
+            id,
+            params_owned.as_ref(),
+            engine.as_ref(),
+            token_owned.as_deref(),
+        )
     })
     .await
     .unwrap();
@@ -546,27 +555,111 @@ async fn sse_handler(State(state): State<SharedState>, headers: HeaderMap) -> Re
     let base = base_url();
     let session_id = Uuid::new_v4().to_string();
 
-    // Return SSE stream with endpoint event, then keepalive pings
-    let body = format!(
+    eprintln!(
+        "[MCP] SSE endpoint: {}/message?session_id={}",
+        base, session_id
+    );
+
+    // Create notification channel
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+
+    // Link sender to subscription registry if engine is available
+    if let Some(ref engine) = state.engine {
+        let mut e = engine.write().unwrap();
+        e.subscription_registry.link_sender(&token, tx);
+    }
+
+    let token_cleanup = token.clone();
+    let engine_cleanup = state.engine.clone();
+
+    // Build SSE stream: initial endpoint event, then notifications + keepalives
+    let initial_event = format!(
         "event: endpoint\ndata: {}/message?session_id={}\n\n",
         base, session_id
     );
 
-    eprintln!(
-        "[MCP] SSE endpoint sent: {}/message?session_id={}",
-        base, session_id
-    );
+    let stream = async_stream::stream! {
+        yield Ok::<_, std::convert::Infallible>(initial_event);
 
-    // For now, return the endpoint event as a single SSE response
-    // A full SSE implementation would keep the connection open
+        let mut rx = rx;
+        let mut keepalive = tokio::time::interval(std::time::Duration::from_secs(30));
+        keepalive.tick().await; // consume immediate first tick
+
+        loop {
+            tokio::select! {
+                msg = rx.recv() => {
+                    match msg {
+                        Some(payload) => {
+                            yield Ok(format!("event: message\ndata: {}\n\n", payload));
+                        }
+                        None => break,
+                    }
+                }
+                _ = keepalive.tick() => {
+                    yield Ok(": keepalive\n\n".to_string());
+                }
+            }
+        }
+    };
+
+    // Wrap in a finalizer that cleans up on disconnect
+    let body_stream = CleanupStream {
+        inner: Box::pin(stream),
+        token: token_cleanup,
+        engine: engine_cleanup,
+        cleaned_up: false,
+    };
+
     Response::builder()
         .status(StatusCode::OK)
         .header("Content-Type", "text/event-stream")
         .header("Cache-Control", "no-cache")
         .header("Connection", "keep-alive")
         .header("Mcp-Session-Id", &session_id)
-        .body(axum::body::Body::from(body))
+        .body(axum::body::Body::from_stream(body_stream))
         .unwrap()
+}
+
+/// Stream wrapper that cleans up the subscription sender on drop.
+struct CleanupStream {
+    inner: std::pin::Pin<
+        Box<dyn futures_util::Stream<Item = Result<String, std::convert::Infallible>> + Send>,
+    >,
+    token: String,
+    engine: Option<Arc<RwLock<TradingEngine>>>,
+    cleaned_up: bool,
+}
+
+impl futures_util::Stream for CleanupStream {
+    type Item = Result<String, std::convert::Infallible>;
+
+    fn poll_next(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        self.inner.as_mut().poll_next(cx)
+    }
+}
+
+impl Drop for CleanupStream {
+    fn drop(&mut self) {
+        if !self.cleaned_up {
+            self.cleaned_up = true;
+            if let Some(ref engine) = self.engine {
+                match engine.write() {
+                    Ok(mut e) => {
+                        e.subscription_registry.unlink_sender(&self.token);
+                        eprintln!("[MCP] SSE disconnected, unlinked sender for token");
+                    }
+                    Err(poisoned) => {
+                        let mut e = poisoned.into_inner();
+                        e.subscription_registry.unlink_sender(&self.token);
+                        eprintln!("[MCP] SSE disconnected, unlinked sender (lock was poisoned)");
+                    }
+                }
+            }
+        }
+    }
 }
 
 // --- Server startup ---
