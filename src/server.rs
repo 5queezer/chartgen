@@ -4,17 +4,18 @@ use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use base64::Engine;
+use base64::Engine as Base64Engine;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 use tower_http::cors::CorsLayer;
 use uuid::Uuid;
 
 use crate::mcp::handle_mcp_request;
+use chartgen::engine::Engine as TradingEngine;
 
 // --- OAuth 2.1 PKCE in-memory store ---
 
@@ -68,7 +69,12 @@ impl OAuthStore {
     }
 }
 
-type SharedStore = Arc<Mutex<OAuthStore>>;
+struct AppState {
+    oauth: Mutex<OAuthStore>,
+    engine: Option<Arc<RwLock<TradingEngine>>>,
+}
+
+type SharedState = Arc<AppState>;
 
 fn base_url() -> String {
     std::env::var("CHARTGEN_BASE_URL").unwrap_or_else(|_| {
@@ -82,8 +88,8 @@ fn base_url() -> String {
 
 // --- OAuth endpoints ---
 
-async fn oauth_metadata(State(store): State<SharedStore>) -> Json<Value> {
-    let _ = store;
+async fn oauth_metadata(State(state): State<SharedState>) -> Json<Value> {
+    let _ = state;
     let base = base_url();
     eprintln!(
         "[OAuth] GET /.well-known/oauth-authorization-server → issuer={}",
@@ -110,7 +116,7 @@ struct RegisterRequest {
 }
 
 async fn oauth_register(
-    State(store): State<SharedStore>,
+    State(state): State<SharedState>,
     Json(body): Json<RegisterRequest>,
 ) -> (StatusCode, Json<Value>) {
     eprintln!(
@@ -125,7 +131,8 @@ async fn oauth_register(
         redirect_uris: body.redirect_uris.clone(),
     };
 
-    store
+    state
+        .oauth
         .lock()
         .unwrap()
         .clients
@@ -164,14 +171,14 @@ fn default_challenge_method() -> String {
 }
 
 async fn oauth_authorize(
-    State(store): State<SharedStore>,
+    State(state): State<SharedState>,
     Query(params): Query<AuthorizeQuery>,
 ) -> Response {
     eprintln!(
         "[OAuth] GET /authorize client_id={} redirect_uri={}",
         params.client_id, params.redirect_uri
     );
-    let mut s = store.lock().unwrap();
+    let mut s = state.oauth.lock().unwrap();
     s.cleanup_expired();
 
     // Validate client_id
@@ -229,7 +236,7 @@ struct TokenRequest {
 
 /// Accept token request as either form-encoded or JSON (Claude.ai may send either).
 async fn oauth_token(
-    State(store): State<SharedStore>,
+    State(state): State<SharedState>,
     headers: HeaderMap,
     body_bytes: axum::body::Bytes,
 ) -> Response {
@@ -284,7 +291,7 @@ async fn oauth_token(
             .into_response();
     }
 
-    let mut s = store.lock().unwrap();
+    let mut s = state.oauth.lock().unwrap();
     s.cleanup_expired();
 
     // Extract code data (clone to release borrow before mutating store)
@@ -443,7 +450,7 @@ fn extract_bearer_token(headers: &HeaderMap) -> Option<&str> {
 }
 
 async fn mcp_handler(
-    State(store): State<SharedStore>,
+    State(state): State<SharedState>,
     headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> Response {
@@ -467,7 +474,7 @@ async fn mcp_handler(
                     .into_response();
             }
         };
-        if !store.lock().unwrap().validate_token(&token) {
+        if !state.oauth.lock().unwrap().validate_token(&token) {
             return (
                 StatusCode::UNAUTHORIZED,
                 Json(json!({
@@ -491,8 +498,9 @@ async fn mcp_handler(
     // Run MCP handler in a blocking task (chart rendering + data fetching use blocking I/O)
     let method_owned = method.to_string();
     let params_owned = params.cloned();
+    let engine = state.engine.clone();
     let result = tokio::task::spawn_blocking(move || {
-        handle_mcp_request(&method_owned, id, params_owned.as_ref())
+        handle_mcp_request(&method_owned, id, params_owned.as_ref(), engine.as_ref())
     })
     .await
     .unwrap();
@@ -521,7 +529,7 @@ async fn health_handler() -> Json<Value> {
 
 // --- SSE Transport handler ---
 
-async fn sse_handler(State(store): State<SharedStore>, headers: HeaderMap) -> Response {
+async fn sse_handler(State(state): State<SharedState>, headers: HeaderMap) -> Response {
     eprintln!("[MCP] GET /sse (SSE transport requested)");
 
     // Validate bearer token
@@ -531,7 +539,7 @@ async fn sse_handler(State(store): State<SharedStore>, headers: HeaderMap) -> Re
             return (StatusCode::UNAUTHORIZED, "Missing Authorization header").into_response();
         }
     };
-    if !store.lock().unwrap().validate_token(&token) {
+    if !state.oauth.lock().unwrap().validate_token(&token) {
         return (StatusCode::UNAUTHORIZED, "Invalid or expired token").into_response();
     }
 
@@ -563,8 +571,11 @@ async fn sse_handler(State(store): State<SharedStore>, headers: HeaderMap) -> Re
 
 // --- Server startup ---
 
-pub async fn run_server(port: u16) {
-    let store = Arc::new(Mutex::new(OAuthStore::new()));
+pub async fn run_server(port: u16, engine: Option<Arc<RwLock<TradingEngine>>>) {
+    let state = Arc::new(AppState {
+        oauth: Mutex::new(OAuthStore::new()),
+        engine,
+    });
 
     // Store port for metadata endpoint
     std::env::set_var("_CHARTGEN_PORT", port.to_string());
@@ -587,7 +598,7 @@ pub async fn run_server(port: u16) {
         .route("/message", post(mcp_handler))
         .route("/sse", get(sse_handler))
         .layer(cors)
-        .with_state(store);
+        .with_state(state);
 
     let addr = format!("0.0.0.0:{}", port);
     println!("MCP server listening on {}", addr);
