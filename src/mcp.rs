@@ -1073,6 +1073,8 @@ mod tests {
             interval: "1h".to_string(),
             indicators: vec!["rsi".to_string()],
             data_dir,
+            notification_ttl_secs: 3600,
+            max_queue_size: 1000,
         })))
     }
 

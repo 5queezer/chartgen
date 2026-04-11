@@ -93,6 +93,8 @@ fn main() {
             interval: interval.clone(),
             indicators,
             data_dir,
+            notification_ttl_secs: 3600,
+            max_queue_size: 1000,
         };
 
         let engine = Arc::new(RwLock::new(Engine::new(config)));
