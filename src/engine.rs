@@ -1,8 +1,7 @@
 /// Top-level orchestrator wiring: feed -> indicators -> alerts -> trading.
 use std::path::PathBuf;
 use std::sync::Arc;
-
-use tokio::sync::RwLock;
+use std::sync::RwLock;
 
 use crate::data::Bar;
 use crate::feed::{BinanceFeed, FeedEvent};
@@ -27,6 +26,8 @@ pub struct Engine {
     pub order_tracker: OrderTracker,
     pub position_tracker: PositionTracker,
     pub audit_log: AuditLog,
+    /// Pending triggered-alert notifications (drained by MCP polling).
+    pub notifications: Vec<TriggeredAlert>,
 }
 
 impl Engine {
@@ -49,6 +50,7 @@ impl Engine {
             order_tracker: OrderTracker::new(),
             position_tracker: PositionTracker::new(),
             audit_log,
+            notifications: Vec::new(),
         }
     }
 
@@ -69,7 +71,7 @@ impl Engine {
             .alert_engine
             .evaluate(&self.config.symbol, &bar, &indicators);
 
-        // 4. Log triggered alerts
+        // 4. Log triggered alerts and queue notifications
         for t in &triggered {
             let condition_str = format!("{:?}", t.alert.condition);
             self.audit_log.log_alert_triggered(
@@ -78,6 +80,7 @@ impl Engine {
                 &self.config.symbol,
                 &self.config.interval,
             );
+            self.notifications.push(t.clone());
         }
 
         // 5. Persist alerts (triggered ones were removed)
@@ -95,6 +98,11 @@ impl Engine {
         id
     }
 
+    /// Drain all pending notifications (returns and clears the queue).
+    pub fn drain_notifications(&mut self) -> Vec<TriggeredAlert> {
+        std::mem::take(&mut self.notifications)
+    }
+
     /// Remove an alert and persist to disk.
     pub fn remove_alert(&mut self, id: &str) -> bool {
         let removed = self.alert_engine.remove(id);
@@ -108,12 +116,14 @@ impl Engine {
 
 /// Run the trading engine event loop.
 /// Connects to the WebSocket feed and processes bars through the engine.
+/// Uses `std::sync::RwLock` so the engine can also be accessed by the MCP
+/// handler without async infection.
 pub async fn run_engine(
     engine: Arc<RwLock<Engine>>,
     on_alert: impl Fn(TriggeredAlert) + Send + 'static,
 ) {
     let (symbol, interval) = {
-        let e = engine.read().await;
+        let e = engine.read().unwrap();
         (e.config.symbol.clone(), e.config.interval.clone())
     };
 
@@ -129,14 +139,16 @@ pub async fn run_engine(
     while let Some(event) = rx.recv().await {
         match event {
             FeedEvent::Bar(bar) => {
-                let mut e = engine.write().await;
-                let triggered = e.on_bar(bar);
+                let triggered = {
+                    let mut e = engine.write().unwrap();
+                    e.on_bar(bar)
+                };
                 for t in triggered {
                     on_alert(t);
                 }
             }
             FeedEvent::Tick(bar) => {
-                let mut e = engine.write().await;
+                let mut e = engine.write().unwrap();
                 e.position_tracker.update_price(&symbol, bar.close);
             }
         }
@@ -270,6 +282,41 @@ mod tests {
         let engine = make_engine(dir.clone());
         assert_eq!(engine.alert_engine.list().len(), 1);
         assert_eq!(engine.alert_engine.list()[0].symbol, "ETHUSDT");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn on_bar_pushes_to_notifications() {
+        let dir = temp_dir("notif_push");
+        let mut engine = make_engine(dir.clone());
+
+        engine.add_alert("BTCUSDT".to_string(), AlertCondition::PriceAbove(100.0));
+        engine.on_bar(make_bar(105.0));
+
+        // Notifications should contain the triggered alert
+        assert_eq!(engine.notifications.len(), 1);
+        assert!((engine.notifications[0].value - 105.0).abs() < f64::EPSILON);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn drain_notifications_clears_queue() {
+        let dir = temp_dir("notif_drain");
+        let mut engine = make_engine(dir.clone());
+
+        engine.add_alert("BTCUSDT".to_string(), AlertCondition::PriceAbove(100.0));
+        engine.on_bar(make_bar(105.0));
+        assert_eq!(engine.notifications.len(), 1);
+
+        let drained = engine.drain_notifications();
+        assert_eq!(drained.len(), 1);
+        assert!(engine.notifications.is_empty());
+
+        // Second drain returns empty
+        let drained2 = engine.drain_notifications();
+        assert!(drained2.is_empty());
 
         let _ = fs::remove_dir_all(&dir);
     }
