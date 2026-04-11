@@ -14,6 +14,7 @@ pub struct SubscriptionInfo {
     pub symbols: Option<HashSet<String>>,
     pub alert_types: Option<HashSet<String>>,
     pub offline_queue_size: usize,
+    pub connected: bool,
 }
 
 /// Persisted form of a subscription (filters only, no sender/queue).
@@ -89,9 +90,9 @@ impl SubscriptionRegistry {
         }
     }
 
-    /// Remove subscription completely.
-    pub fn unsubscribe(&mut self, token: &str) {
-        self.subscriptions.remove(token);
+    /// Remove subscription completely. Returns true if it existed.
+    pub fn unsubscribe(&mut self, token: &str) -> bool {
+        self.subscriptions.remove(token).is_some()
     }
 
     /// Return filters and queue size for a token.
@@ -100,6 +101,7 @@ impl SubscriptionRegistry {
             symbols: sub.symbols.clone(),
             alert_types: sub.alert_types.clone(),
             offline_queue_size: sub.offline_queue.len(),
+            connected: sub.sender.is_some(),
         })
     }
 

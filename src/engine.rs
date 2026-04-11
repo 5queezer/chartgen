@@ -155,20 +155,32 @@ pub async fn run_engine(
         }
     });
 
-    while let Some(event) = rx.recv().await {
-        match event {
-            FeedEvent::Bar(bar) => {
-                let triggered = {
-                    let mut e = engine.write().unwrap();
-                    e.on_bar(bar)
-                };
-                for t in triggered {
-                    on_alert(t);
+    let mut cleanup_interval = tokio::time::interval(std::time::Duration::from_secs(60));
+    cleanup_interval.tick().await; // consume the immediate first tick
+
+    loop {
+        tokio::select! {
+            event = rx.recv() => {
+                match event {
+                    Some(FeedEvent::Bar(bar)) => {
+                        let triggered = {
+                            let mut e = engine.write().unwrap();
+                            e.on_bar(bar)
+                        };
+                        for t in triggered {
+                            on_alert(t);
+                        }
+                    }
+                    Some(FeedEvent::Tick(bar)) => {
+                        let mut e = engine.write().unwrap();
+                        e.position_tracker.update_price(&symbol, bar.close);
+                    }
+                    None => break,
                 }
             }
-            FeedEvent::Tick(bar) => {
+            _ = cleanup_interval.tick() => {
                 let mut e = engine.write().unwrap();
-                e.position_tracker.update_price(&symbol, bar.close);
+                e.subscription_registry.cleanup_expired();
             }
         }
     }
