@@ -1107,12 +1107,15 @@ fn tool_subscribe_notifications(
         }
     };
 
-    let symbols: Option<HashSet<String>> =
-        args.get("symbols").and_then(|v| v.as_array()).map(|arr| {
+    let symbols: Option<HashSet<String>> = args
+        .get("symbols")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
             arr.iter()
                 .filter_map(|v| v.as_str().map(String::from))
-                .collect()
-        });
+                .collect::<HashSet<_>>()
+        })
+        .and_then(|s| if s.is_empty() { None } else { Some(s) });
 
     let alert_types: Option<HashSet<String>> = args
         .get("alert_types")
@@ -1120,8 +1123,9 @@ fn tool_subscribe_notifications(
         .map(|arr| {
             arr.iter()
                 .filter_map(|v| v.as_str().map(String::from))
-                .collect()
-        });
+                .collect::<HashSet<_>>()
+        })
+        .and_then(|s| if s.is_empty() { None } else { Some(s) });
 
     let mut e = engine.write().unwrap();
     e.subscription_registry
