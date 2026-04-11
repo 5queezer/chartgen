@@ -1126,7 +1126,9 @@ fn tool_subscribe_notifications(
     let mut e = engine.write().unwrap();
     e.subscription_registry
         .subscribe(token, symbols.clone(), alert_types.clone());
-    let _ = e.subscription_registry.save();
+    if let Err(err) = e.subscription_registry.save() {
+        eprintln!("[MCP] Failed to persist subscription: {err}");
+    }
 
     tool_ok(
         id,
@@ -1159,7 +1161,9 @@ fn tool_unsubscribe_notifications(
 
     let mut e = engine.write().unwrap();
     let removed = e.subscription_registry.unsubscribe(token);
-    let _ = e.subscription_registry.save();
+    if let Err(err) = e.subscription_registry.save() {
+        eprintln!("[MCP] Failed to persist subscription: {err}");
+    }
 
     tool_ok(
         id,

@@ -646,9 +646,17 @@ impl Drop for CleanupStream {
         if !self.cleaned_up {
             self.cleaned_up = true;
             if let Some(ref engine) = self.engine {
-                let mut e = engine.write().unwrap();
-                e.subscription_registry.unlink_sender(&self.token);
-                eprintln!("[MCP] SSE disconnected, unlinked sender for token");
+                match engine.write() {
+                    Ok(mut e) => {
+                        e.subscription_registry.unlink_sender(&self.token);
+                        eprintln!("[MCP] SSE disconnected, unlinked sender for token");
+                    }
+                    Err(poisoned) => {
+                        let mut e = poisoned.into_inner();
+                        e.subscription_registry.unlink_sender(&self.token);
+                        eprintln!("[MCP] SSE disconnected, unlinked sender (lock was poisoned)");
+                    }
+                }
             }
         }
     }
