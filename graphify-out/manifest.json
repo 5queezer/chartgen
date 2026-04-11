@@ -1,0 +1,22 @@
+{
+  "src/main.rs": 1775772754.0837164,
+  "src/indicator.rs": 1775779444.2637177,
+  "src/fetch.rs": 1775772754.0854483,
+  "src/data.rs": 1775769283.5419083,
+  "src/renderer.rs": 1775779444.266069,
+  "src/lib.rs": 1775769283.5402286,
+  "src/server.rs": 1775778602.5691123,
+  "src/mcp.rs": 1775777737.2935905,
+  "src/indicators/mod.rs": 1775779444.2670476,
+  "src/indicators/macd.rs": 1775773704.8278491,
+  "src/indicators/wavetrend.rs": 1775773704.8278491,
+  "src/indicators/rsi.rs": 1775773704.8258848,
+  "src/indicators/cipher_b.rs": 1775773704.8286088,
+  "src/indicators/ta_bridge.rs": 1775773704.8296087,
+  "src/indicators/external.rs": 1775773704.8319297,
+  "src/indicators/custom.rs": 1775779444.2670476,
+  "tests/e2e.rs": 1775769283.543908,
+  "CLAUDE.md": 1775778664.3581245,
+  "graphify-out/GRAPH_REPORT.md": 1775780154.7113798,
+  "chart.png": 1775779938.1479714
+}

@@ -2,7 +2,11 @@ mod fetch;
 mod mcp;
 mod server;
 
+use std::path::PathBuf;
+use std::sync::{Arc, RwLock};
+
 use chartgen::data;
+use chartgen::engine::{Engine, EngineConfig};
 use chartgen::indicators;
 use chartgen::renderer;
 use clap::Parser;
@@ -53,6 +57,14 @@ struct Cli {
     /// Port for HTTP server (default 9315)
     #[arg(long, default_value_t = 9315)]
     port: u16,
+
+    /// Run in trading mode with live WebSocket feed
+    #[arg(long)]
+    trade: bool,
+
+    /// Use Binance testnet (paper trading)
+    #[arg(long)]
+    testnet: bool,
 }
 
 fn main() {
@@ -65,7 +77,49 @@ fn main() {
 
     if cli.serve {
         let rt = tokio::runtime::Runtime::new().unwrap();
-        rt.block_on(server::run_server(cli.port));
+        rt.block_on(server::run_server(cli.port, None));
+        return;
+    }
+
+    if cli.trade {
+        let symbol = cli.symbol.clone().unwrap_or_else(|| "BTCUSDT".to_string());
+        let interval = cli.interval.clone();
+        let indicators: Vec<String> = cli.panels.clone();
+
+        let data_dir = dirs_data_dir();
+
+        let config = EngineConfig {
+            symbol: symbol.clone(),
+            interval: interval.clone(),
+            indicators,
+            data_dir,
+        };
+
+        let engine = Arc::new(RwLock::new(Engine::new(config)));
+        let engine_for_feed = engine.clone();
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            // Spawn the feed/engine loop
+            let _testnet = cli.testnet;
+            tokio::spawn(async move {
+                chartgen::engine::run_engine(engine_for_feed, |triggered| {
+                    eprintln!(
+                        "[engine] alert triggered: {} {:?} value={}",
+                        triggered.alert.symbol, triggered.alert.condition, triggered.value
+                    );
+                })
+                .await;
+            });
+
+            eprintln!(
+                "[trade] engine started for {} @ {} (testnet={})",
+                symbol, interval, cli.testnet
+            );
+
+            // Start the MCP HTTP server with engine reference
+            server::run_server(cli.port, Some(engine)).await;
+        });
         return;
     }
 
@@ -116,4 +170,14 @@ fn main() {
     }
 
     println!("Done: {}", cli.output);
+}
+
+/// Returns the data directory for chartgen state (~/.chartgen/).
+fn dirs_data_dir() -> PathBuf {
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .unwrap_or_else(|_| ".".to_string());
+    let dir = PathBuf::from(home).join(".chartgen");
+    let _ = std::fs::create_dir_all(&dir);
+    dir
 }
