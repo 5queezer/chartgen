@@ -1,5 +1,6 @@
 use crate::data::OhlcvData;
 use crate::indicator::*;
+use crate::trading::signals;
 use serde_json::{json, Value};
 use ta::indicators::AverageTrueRange as TaAtr;
 use ta::{DataItem, Next};
@@ -356,9 +357,9 @@ impl Indicator for Supertrend {
             // Label the bar only when the trend flips (signal event).
             let label = if i > 0 && !atr_vals[i - 1].is_nan() && trend[i] != trend[i - 1] {
                 if trend[i] {
-                    Some("flip_up".into())
+                    Some(signals::FLIP_UP.to_string())
                 } else {
-                    Some("flip_down".into())
+                    Some(signals::FLIP_DOWN.to_string())
                 }
             } else {
                 None
@@ -512,9 +513,9 @@ impl Indicator for ParabolicSar {
             // Label only the flip bars (direction reversal = signal event).
             let label = if trend_up != prev_trend_up {
                 if trend_up {
-                    Some("flip_up".into())
+                    Some(signals::FLIP_UP.to_string())
                 } else {
-                    Some("flip_down".into())
+                    Some(signals::FLIP_DOWN.to_string())
                 }
             } else {
                 None
@@ -796,9 +797,9 @@ impl Indicator for HeikinAshi {
                 let prev_bullish = ha_close[i - 1] >= ha_open[i - 1];
                 if bullish != prev_bullish {
                     if bullish {
-                        Some("flip_up".into())
+                        Some(signals::FLIP_UP.to_string())
                     } else {
-                        Some("flip_down".into())
+                        Some(signals::FLIP_DOWN.to_string())
                     }
                 } else {
                     None
@@ -1474,9 +1475,9 @@ impl Indicator for KalmanVolume {
 
             if cross_over {
                 let (size, color, label) = if prev_m < -self.ob_os_zone {
-                    (6, rgba(cyan, 1.0), "buy_oversold") // oversold buy
+                    (6, rgba(cyan, 1.0), signals::BUY_OVERSOLD) // oversold buy
                 } else if in_neutral {
-                    (4, rgba(cyan, 1.0), "buy") // local buy
+                    (4, rgba(cyan, 1.0), signals::BUY) // local buy
                 } else {
                     continue;
                 };
@@ -1485,13 +1486,13 @@ impl Indicator for KalmanVolume {
                     y: prev_m,
                     color,
                     size,
-                    label: Some(label.into()),
+                    label: Some(label.to_string()),
                 });
             } else if cross_under {
                 let (size, color, label) = if prev_m > self.ob_os_zone {
-                    (6, rgba(red, 1.0), "sell_overbought") // overbought sell
+                    (6, rgba(red, 1.0), signals::SELL_OVERBOUGHT) // overbought sell
                 } else if in_neutral {
-                    (4, rgba(red, 1.0), "sell") // local sell
+                    (4, rgba(red, 1.0), signals::SELL) // local sell
                 } else {
                     continue;
                 };
@@ -1500,7 +1501,7 @@ impl Indicator for KalmanVolume {
                     y: prev_m,
                     color,
                     size,
-                    label: Some(label.into()),
+                    label: Some(label.to_string()),
                 });
             }
         }

@@ -1,6 +1,7 @@
 use crate::data::OhlcvData;
 use crate::indicator::*;
 use crate::indicators::rsi::compute_rsi;
+use crate::trading::signals;
 use serde_json::{json, Value};
 
 pub struct RsiMfiStochCombo {
@@ -249,7 +250,7 @@ impl Indicator for RsiMfiStochCombo {
                         y: rsi[i],
                         color: rgba(0x00e676, 1.0),
                         size: 5,
-                        label: Some("rsi_oversold".into()),
+                        label: Some(signals::RSI_OVERSOLD.to_string()),
                     });
                 }
                 // RSI crosses down through overbought
@@ -263,7 +264,7 @@ impl Indicator for RsiMfiStochCombo {
                         y: rsi[i],
                         color: rgba(0xff0000, 1.0),
                         size: 5,
-                        label: Some("rsi_overbought".into()),
+                        label: Some(signals::RSI_OVERBOUGHT.to_string()),
                     });
                 }
 
@@ -281,7 +282,7 @@ impl Indicator for RsiMfiStochCombo {
                         y: k_smooth[i],
                         color: rgba(0x00e676, 1.0),
                         size: 5,
-                        label: Some("stoch_oversold".into()),
+                        label: Some(signals::STOCH_OVERSOLD.to_string()),
                     });
                 }
                 // Stoch K crosses down through D while K > 80
@@ -298,7 +299,7 @@ impl Indicator for RsiMfiStochCombo {
                         y: k_smooth[i],
                         color: rgba(0xff0000, 1.0),
                         size: 5,
-                        label: Some("stoch_overbought".into()),
+                        label: Some(signals::STOCH_OVERBOUGHT.to_string()),
                     });
                 }
             }

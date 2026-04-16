@@ -342,12 +342,21 @@ mod tests {
         let dir = temp_dir("on_bar_no_persist");
         let mut engine = make_engine(dir.clone());
 
-        // Add an alert that will NOT trigger on a 95.0 close (threshold 1000.0)
+        // Add an alert that will NOT trigger on a 95.0 close (threshold 1000.0).
+        // add_alert writes alerts.json synchronously; we use that file for the
+        // before/after snapshot.
         engine.add_alert("BTCUSDT".to_string(), AlertCondition::PriceAbove(1000.0));
 
         let alerts_path = dir.join("alerts.json");
-        // add_alert already wrote the file; capture its bytes for comparison.
         let before = fs::read(&alerts_path).expect("alerts.json must exist after add_alert");
+        let before_mtime = fs::metadata(&alerts_path)
+            .expect("metadata must exist")
+            .modified()
+            .expect("mtime must be available");
+
+        // Sleep so any rewrite during on_bar would produce a strictly newer
+        // mtime even on filesystems with coarse mtime resolution.
+        std::thread::sleep(std::time::Duration::from_millis(10));
 
         // Run several bars that won't fire the alert.
         for _ in 0..5 {
@@ -355,11 +364,22 @@ mod tests {
             assert!(triggered.is_empty());
         }
 
-        // File contents must be byte-identical (no rewrite happened).
         let after = fs::read(&alerts_path).expect("alerts.json should still exist");
+        let after_mtime = fs::metadata(&alerts_path)
+            .expect("metadata must exist")
+            .modified()
+            .expect("mtime must be available");
+
+        // Bytes AND mtime must be unchanged. Comparing only bytes would miss a
+        // regression that rewrites with byte-identical content; comparing only
+        // mtime would miss platforms with very coarse resolution.
         assert_eq!(
             before, after,
             "alerts.json should not be rewritten when no alerts trigger"
+        );
+        assert_eq!(
+            before_mtime, after_mtime,
+            "alerts.json mtime should not advance when no alerts trigger"
         );
 
         let _ = fs::remove_dir_all(&dir);
