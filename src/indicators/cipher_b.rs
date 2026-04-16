@@ -1,6 +1,7 @@
 use super::rsi::compute_rsi;
 use crate::data::OhlcvData;
 use crate::indicator::*;
+use crate::trading::signals;
 use serde_json::{json, Value};
 
 // ---------------------------------------------------------------------------
@@ -557,7 +558,7 @@ impl Indicator for CipherB {
                         y: rsi_v,
                         color: rgba(0x3ee145, 0.8),
                         size: 2,
-                        label: Some("rsi_oversold".into()),
+                        label: Some(signals::RSI_OVERSOLD.to_string()),
                     });
                 } else if rsi_v >= cfg.rsi_overbought {
                     dots.push(Dot {
@@ -565,7 +566,7 @@ impl Indicator for CipherB {
                         y: rsi_v,
                         color: rgba(0xe13e3e, 0.8),
                         size: 2,
-                        label: Some("rsi_overbought".into()),
+                        label: Some(signals::RSI_OVERBOUGHT.to_string()),
                     });
                 }
             }
@@ -712,7 +713,7 @@ impl Indicator for CipherB {
                             y: wt2[i],
                             color: rgba(0x3fff00, 1.0),
                             size: 6,
-                            label: Some("buy".into()),
+                            label: Some(signals::BUY.to_string()),
                         });
                     }
                 } else {
@@ -721,7 +722,7 @@ impl Indicator for CipherB {
                         y: wt2[i],
                         color: rgba(0x3fff00, 1.0),
                         size: 6,
-                        label: Some("buy".into()),
+                        label: Some(signals::BUY.to_string()),
                     });
                 }
             } else if cross_down && cfg.wt_sell_show && wt2[i] >= cfg.ob_level {
@@ -734,7 +735,7 @@ impl Indicator for CipherB {
                             y: wt2[i],
                             color: rgba(0xff0000, 1.0),
                             size: 6,
-                            label: Some("sell".into()),
+                            label: Some(signals::SELL.to_string()),
                         });
                     }
                 } else {
@@ -743,7 +744,7 @@ impl Indicator for CipherB {
                         y: wt2[i],
                         color: rgba(0xff0000, 1.0),
                         size: 6,
-                        label: Some("sell".into()),
+                        label: Some(signals::SELL.to_string()),
                     });
                 }
             } else if cross_up {
@@ -756,7 +757,7 @@ impl Indicator for CipherB {
                             y: wt2[i],
                             color: rgba(0x00e676, 0.7),
                             size: 3,
-                            label: Some("buy_small".into()),
+                            label: Some(signals::BUY_SMALL.to_string()),
                         });
                     }
                 } else {
@@ -765,7 +766,7 @@ impl Indicator for CipherB {
                         y: wt2[i],
                         color: rgba(0x00e676, 0.7),
                         size: 3,
-                        label: Some("buy_small".into()),
+                        label: Some(signals::BUY_SMALL.to_string()),
                     });
                 }
             } else if cross_down {
@@ -777,7 +778,7 @@ impl Indicator for CipherB {
                             y: wt2[i],
                             color: rgba(0xff5252, 0.7),
                             size: 3,
-                            label: Some("sell_small".into()),
+                            label: Some(signals::SELL_SMALL.to_string()),
                         });
                     }
                 } else {
@@ -786,7 +787,7 @@ impl Indicator for CipherB {
                         y: wt2[i],
                         color: rgba(0xff5252, 0.7),
                         size: 3,
-                        label: Some("sell_small".into()),
+                        label: Some(signals::SELL_SMALL.to_string()),
                     });
                 }
             }
@@ -945,7 +946,7 @@ impl Indicator for CipherB {
                         y: wt2[center],
                         color: rgba(0x00e676, 1.0),
                         size: 4,
-                        label: Some("wt_bull_div".into()),
+                        label: Some(signals::WT_BULL_DIV.to_string()),
                     });
                     any_bull = true;
                 }
@@ -955,7 +956,7 @@ impl Indicator for CipherB {
                         y: wt2[center],
                         color: rgba(0xe60000, 1.0),
                         size: 4,
-                        label: Some("wt_bear_div".into()),
+                        label: Some(signals::WT_BEAR_DIV.to_string()),
                     });
                     any_bear = true;
                 }
@@ -975,7 +976,7 @@ impl Indicator for CipherB {
                         y: wt2[center],
                         color: rgba(0x00e676, 0.4),
                         size: 4,
-                        label: Some("wt_bull_div".into()),
+                        label: Some(signals::WT_BULL_DIV.to_string()),
                     });
                     any_bull = true;
                 }
@@ -985,7 +986,7 @@ impl Indicator for CipherB {
                         y: wt2[center],
                         color: rgba(0xe60000, 0.4),
                         size: 4,
-                        label: Some("wt_bear_div".into()),
+                        label: Some(signals::WT_BEAR_DIV.to_string()),
                     });
                     any_bear = true;
                 }
@@ -1006,7 +1007,7 @@ impl Indicator for CipherB {
                             y: rsi_vals[center],
                             color: rgba(0x00e676, 1.0),
                             size: 4,
-                            label: Some("rsi_bull_div".into()),
+                            label: Some(signals::RSI_BULL_DIV.to_string()),
                         });
                     }
                     any_bull = true;
@@ -1018,7 +1019,7 @@ impl Indicator for CipherB {
                             y: rsi_vals[center],
                             color: rgba(0xe60000, 1.0),
                             size: 4,
-                            label: Some("rsi_bear_div".into()),
+                            label: Some(signals::RSI_BEAR_DIV.to_string()),
                         });
                     }
                     any_bear = true;
@@ -1040,7 +1041,7 @@ impl Indicator for CipherB {
                             y: stoch_k[center],
                             color: rgba(0x00e676, 1.0),
                             size: 4,
-                            label: Some("stoch_bull_div".into()),
+                            label: Some(signals::STOCH_BULL_DIV.to_string()),
                         });
                     }
                     any_bull = true;
@@ -1052,7 +1053,7 @@ impl Indicator for CipherB {
                             y: stoch_k[center],
                             color: rgba(0xe60000, 1.0),
                             size: 4,
-                            label: Some("stoch_bear_div".into()),
+                            label: Some(signals::STOCH_BEAR_DIV.to_string()),
                         });
                     }
                     any_bear = true;
@@ -1073,7 +1074,7 @@ impl Indicator for CipherB {
                         y: -95.0,
                         color: rgba(0x00e676, 1.0),
                         size: 5,
-                        label: Some("any_bull_div".into()),
+                        label: Some(signals::ANY_BULL_DIV.to_string()),
                     });
                 }
                 if any_bear {
@@ -1082,7 +1083,7 @@ impl Indicator for CipherB {
                         y: 95.0,
                         color: rgba(0xff0000, 1.0),
                         size: 5,
-                        label: Some("any_bear_div".into()),
+                        label: Some(signals::ANY_BEAR_DIV.to_string()),
                     });
                 }
             }
@@ -1123,7 +1124,7 @@ impl Indicator for CipherB {
                                         y: wt2[i],
                                         color: rgba(0xe2a400, 1.0),
                                         size: 8,
-                                        label: Some("gold_buy".into()),
+                                        label: Some(signals::GOLD_BUY.to_string()),
                                     });
                                 }
                             }
