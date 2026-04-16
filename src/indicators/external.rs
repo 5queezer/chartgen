@@ -521,6 +521,7 @@ impl Indicator for FearGreed {
                     y: v,
                     color: fng_color(v),
                     size: 2,
+                    label: None,
                 });
             }
         }

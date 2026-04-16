@@ -353,11 +353,22 @@ impl Indicator for Supertrend {
             } else {
                 rgba(0xef5350, 0.9)
             };
+            // Label the bar only when the trend flips (signal event).
+            let label = if i > 0 && !atr_vals[i - 1].is_nan() && trend[i] != trend[i - 1] {
+                if trend[i] {
+                    Some("flip_up".into())
+                } else {
+                    Some("flip_down".into())
+                }
+            } else {
+                None
+            };
             dots.push(Dot {
                 x: i,
                 y: val,
                 color,
                 size: 2,
+                label,
             });
         }
 
@@ -441,12 +452,14 @@ impl Indicator for ParabolicSar {
             y: sar,
             color: rgba(0x26a69a, 0.9),
             size: 2,
+            label: None,
         });
 
         for i in 1..n {
             let high = data.bars[i].high;
             let low = data.bars[i].low;
 
+            let prev_trend_up = trend_up;
             let mut new_sar = sar + af * (ep - sar);
 
             if trend_up {
@@ -496,11 +509,22 @@ impl Indicator for ParabolicSar {
             } else {
                 rgba(0xef5350, 0.9)
             };
+            // Label only the flip bars (direction reversal = signal event).
+            let label = if trend_up != prev_trend_up {
+                if trend_up {
+                    Some("flip_up".into())
+                } else {
+                    Some("flip_down".into())
+                }
+            } else {
+                None
+            };
             dots.push(Dot {
                 x: i,
                 y: sar,
                 color,
                 size: 2,
+                label,
             });
         }
 
@@ -761,16 +785,33 @@ impl Indicator for HeikinAshi {
         }
 
         for i in 0..n {
-            let color = if ha_close[i] >= ha_open[i] {
+            let bullish = ha_close[i] >= ha_open[i];
+            let color = if bullish {
                 rgba(0x26a69a, 0.9) // bullish green
             } else {
                 rgba(0xef5350, 0.9) // bearish red
+            };
+            // Label only color-flip bars (bullish/bearish transition = signal event).
+            let label = if i > 0 {
+                let prev_bullish = ha_close[i - 1] >= ha_open[i - 1];
+                if bullish != prev_bullish {
+                    if bullish {
+                        Some("flip_up".into())
+                    } else {
+                        Some("flip_down".into())
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
             };
             dots.push(Dot {
                 x: i,
                 y: ha_close[i],
                 color,
                 size: 3,
+                label,
             });
         }
 
@@ -1399,6 +1440,7 @@ impl Indicator for KalmanVolume {
                 y: m_n[i],
                 color,
                 size: 2,
+                label: None,
             });
             // Signal dot (fainter)
             let sig_color = if bullish {
@@ -1411,6 +1453,7 @@ impl Indicator for KalmanVolume {
                 y: signal[i],
                 color: sig_color,
                 size: 1,
+                label: None,
             });
         }
 
@@ -1430,10 +1473,10 @@ impl Indicator for KalmanVolume {
             let in_neutral = prev_m.abs() < self.ob_os_zone;
 
             if cross_over {
-                let (size, color) = if prev_m < -self.ob_os_zone {
-                    (6, rgba(cyan, 1.0)) // oversold buy
+                let (size, color, label) = if prev_m < -self.ob_os_zone {
+                    (6, rgba(cyan, 1.0), "buy_oversold") // oversold buy
                 } else if in_neutral {
-                    (4, rgba(cyan, 1.0)) // local buy
+                    (4, rgba(cyan, 1.0), "buy") // local buy
                 } else {
                     continue;
                 };
@@ -1442,12 +1485,13 @@ impl Indicator for KalmanVolume {
                     y: prev_m,
                     color,
                     size,
+                    label: Some(label.into()),
                 });
             } else if cross_under {
-                let (size, color) = if prev_m > self.ob_os_zone {
-                    (6, rgba(red, 1.0)) // overbought sell
+                let (size, color, label) = if prev_m > self.ob_os_zone {
+                    (6, rgba(red, 1.0), "sell_overbought") // overbought sell
                 } else if in_neutral {
-                    (4, rgba(red, 1.0)) // local sell
+                    (4, rgba(red, 1.0), "sell") // local sell
                 } else {
                     continue;
                 };
@@ -1456,6 +1500,7 @@ impl Indicator for KalmanVolume {
                     y: prev_m,
                     color,
                     size,
+                    label: Some(label.into()),
                 });
             }
         }

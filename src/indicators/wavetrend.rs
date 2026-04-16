@@ -84,6 +84,7 @@ impl Indicator for WaveTrend {
                     y: wt2[i],
                     color: rgba(0x3fff00, 1.0),
                     size: 6,
+                    label: Some("cross_up_os".into()),
                 });
             } else if cross_down && wt2[i] >= self.ob {
                 dots.push(Dot {
@@ -91,6 +92,7 @@ impl Indicator for WaveTrend {
                     y: wt2[i],
                     color: rgba(0xff0000, 1.0),
                     size: 6,
+                    label: Some("cross_down_ob".into()),
                 });
             } else if cross_up {
                 dots.push(Dot {
@@ -98,6 +100,7 @@ impl Indicator for WaveTrend {
                     y: wt2[i],
                     color: rgba(0x00e676, 0.7),
                     size: 3,
+                    label: Some("cross_up".into()),
                 });
             } else if cross_down {
                 dots.push(Dot {
@@ -105,6 +108,7 @@ impl Indicator for WaveTrend {
                     y: wt2[i],
                     color: rgba(0xff5252, 0.7),
                     size: 3,
+                    label: Some("cross_down".into()),
                 });
             }
         }

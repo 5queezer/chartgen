@@ -37,6 +37,9 @@ pub struct Dot {
     pub y: f64,
     pub color: RGBAColor,
     pub size: u32,
+    /// Optional semantic label for alert/signal matching (e.g. "buy", "rsi_oversold").
+    /// `None` means the dot is purely decorative (color-coded markers).
+    pub label: Option<String>,
 }
 
 /// Horizontal reference line.
