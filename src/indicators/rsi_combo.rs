@@ -249,6 +249,7 @@ impl Indicator for RsiMfiStochCombo {
                         y: rsi[i],
                         color: rgba(0x00e676, 1.0),
                         size: 5,
+                        label: Some("rsi_oversold".into()),
                     });
                 }
                 // RSI crosses down through overbought
@@ -262,6 +263,7 @@ impl Indicator for RsiMfiStochCombo {
                         y: rsi[i],
                         color: rgba(0xff0000, 1.0),
                         size: 5,
+                        label: Some("rsi_overbought".into()),
                     });
                 }
 
@@ -279,6 +281,7 @@ impl Indicator for RsiMfiStochCombo {
                         y: k_smooth[i],
                         color: rgba(0x00e676, 1.0),
                         size: 5,
+                        label: Some("stoch_oversold".into()),
                     });
                 }
                 // Stoch K crosses down through D while K > 80
@@ -295,6 +298,7 @@ impl Indicator for RsiMfiStochCombo {
                         y: k_smooth[i],
                         color: rgba(0xff0000, 1.0),
                         size: 5,
+                        label: Some("stoch_overbought".into()),
                     });
                 }
             }

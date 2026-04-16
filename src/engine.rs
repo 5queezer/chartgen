@@ -102,9 +102,12 @@ impl Engine {
             self.subscription_registry.dispatch(&triggered);
         }
 
-        // 5. Persist alerts (triggered ones were removed)
-        let alerts_path = self.config.data_dir.join("alerts.json");
-        let _ = save_alerts(&alerts_path, self.alert_engine.list());
+        // 5. Persist alerts only if the set changed (triggered alerts were removed).
+        // Avoids ~1440 unnecessary fs writes/day on 1m candles when nothing fires.
+        if !triggered.is_empty() {
+            let alerts_path = self.config.data_dir.join("alerts.json");
+            let _ = save_alerts(&alerts_path, self.alert_engine.list());
+        }
 
         triggered
     }
@@ -330,6 +333,34 @@ mod tests {
         // Notifications should contain the triggered alert
         assert_eq!(engine.notifications.len(), 1);
         assert!((engine.notifications[0].value - 105.0).abs() < f64::EPSILON);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn on_bar_does_not_persist_when_no_triggers() {
+        let dir = temp_dir("on_bar_no_persist");
+        let mut engine = make_engine(dir.clone());
+
+        // Add an alert that will NOT trigger on a 95.0 close (threshold 1000.0)
+        engine.add_alert("BTCUSDT".to_string(), AlertCondition::PriceAbove(1000.0));
+
+        let alerts_path = dir.join("alerts.json");
+        // add_alert already wrote the file; capture its bytes for comparison.
+        let before = fs::read(&alerts_path).expect("alerts.json must exist after add_alert");
+
+        // Run several bars that won't fire the alert.
+        for _ in 0..5 {
+            let triggered = engine.on_bar(make_bar(95.0));
+            assert!(triggered.is_empty());
+        }
+
+        // File contents must be byte-identical (no rewrite happened).
+        let after = fs::read(&alerts_path).expect("alerts.json should still exist");
+        assert_eq!(
+            before, after,
+            "alerts.json should not be rewritten when no alerts trigger"
+        );
 
         let _ = fs::remove_dir_all(&dir);
     }

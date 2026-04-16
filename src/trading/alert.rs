@@ -127,20 +127,17 @@ impl Default for AlertEngine {
 }
 
 /// Check if an indicator's PanelResult contains a dot-based signal matching `signal` (by label).
-/// A dot "fires" if it exists and its y value is not NaN.
-/// Falls back to checking any dot if no label matches.
+/// A dot "fires" if its label equals `signal` and its y value is finite.
+/// Returns `None` if no labeled dot matches — does NOT fall back to "any dot".
 fn evaluate_indicator_signal(
     indicators: &HashMap<String, PanelResult>,
     indicator: &str,
-    _signal: &str,
+    signal: &str,
 ) -> Option<f64> {
     let panel = indicators.get(indicator)?;
 
-    // Check if any dot in the panel has a finite y value (signal fired).
-    // Dots are only emitted at bars where the signal is active, so presence
-    // of a non-NaN dot means the signal triggered on this bar.
     for dot in &panel.dots {
-        if !dot.y.is_nan() {
+        if dot.y.is_finite() && dot.label.as_deref() == Some(signal) {
             return Some(dot.y);
         }
     }
@@ -262,6 +259,7 @@ mod tests {
             y: 42.0,
             color: RGBAColor(0, 255, 0, 1.0),
             size: 5,
+            label: Some("green_dot".into()),
         });
         indicators.insert("rsi".into(), panel);
 
@@ -288,5 +286,34 @@ mod tests {
         let bar = make_bar(100.0);
         let triggered = engine.evaluate("BTCUSD", &bar, &indicators);
         assert!(triggered.is_empty());
+    }
+
+    #[test]
+    fn indicator_signal_does_not_trigger_on_wrong_label() {
+        let mut engine = AlertEngine::new();
+        engine.add(
+            "BTCUSD".into(),
+            AlertCondition::IndicatorSignal {
+                indicator: "rsi".into(),
+                signal: "green_dot".into(),
+            },
+        );
+
+        let mut indicators = HashMap::new();
+        let mut panel = PanelResult::default();
+        panel.dots.push(Dot {
+            x: 0,
+            y: 42.0,
+            color: RGBAColor(255, 0, 0, 1.0),
+            size: 5,
+            label: Some("red_dot".into()),
+        });
+        indicators.insert("rsi".into(), panel);
+
+        let bar = make_bar(100.0);
+        let triggered = engine.evaluate("BTCUSD", &bar, &indicators);
+        assert!(triggered.is_empty());
+        // Alert should still be active (not consumed)
+        assert_eq!(engine.list().len(), 1);
     }
 }
