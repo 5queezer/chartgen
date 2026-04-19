@@ -1,0 +1,39 @@
+---
+title: chartgen
+description: Trading chart generator and MCP server in Rust. 33 indicators, Yahoo Finance + Binance, Claude.ai integration.
+template: splash
+hero:
+  tagline: Live data from Yahoo Finance and Binance, rendered as PNG candlestick charts with 33 technical indicators. Integrates with Claude.ai via OAuth 2.1 PKCE.
+  image:
+    file: ../../assets/screenshot.png
+    alt: AAPL 1D with EMA Stack, VPVR, RSI, MACD
+  actions:
+    - text: Quick Start
+      link: /chartgen/guides/quickstart/
+      icon: right-arrow
+    - text: View on GitHub
+      link: https://github.com/5queezer/chartgen
+      icon: external
+      variant: minimal
+---
+
+import { Card, CardGrid } from '@astrojs/starlight/components';
+
+<CardGrid>
+  <Card title="33 indicators" icon="seti:graphql">
+    Overlays, momentum, volatility, volume, and crypto-specific metrics. All
+    configurable via MCP parameters.
+  </Card>
+  <Card title="Live data" icon="rocket">
+    Yahoo Finance for stocks, Binance for crypto. Auto-detected from the
+    ticker suffix.
+  </Card>
+  <Card title="Claude.ai integration" icon="puzzle">
+    Connect as a remote MCP server with OAuth 2.1 PKCE, or run locally for
+    Claude Desktop.
+  </Card>
+  <Card title="Pure Rust" icon="setting">
+    Single binary, ~93MB Docker image, plotters-based rendering. Ships with
+    33 e2e tests.
+  </Card>
+</CardGrid>
