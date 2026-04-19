@@ -227,7 +227,7 @@ export async function getAccessToken(
     if (!pending) {
       throw new Error('Received OAuth code but no PKCE state is pending');
     }
-    if (returnedState && pending.state !== returnedState) {
+    if (!returnedState || pending.state !== returnedState) {
       throw new Error('OAuth state mismatch — possible CSRF');
     }
     const token = await exchangeCode(code, pending);

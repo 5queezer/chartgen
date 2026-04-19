@@ -91,17 +91,16 @@ export function createKlineChart(container: HTMLElement): KlineController {
 
       chart.applyNewData(klines);
 
-      if (rsiPaneId) {
-        chart.removeIndicator(rsiPaneId);
-        rsiPaneId = null;
-      }
-      if (rsiValues) {
+      if (rsiValues && !rsiPaneId) {
         const id = chart.createIndicator(
           { name: RSI_INDICATOR_NAME },
           false,
           { id: RSI_PANE_ID, height: 120 },
         );
         rsiPaneId = id ?? RSI_PANE_ID;
+      } else if (!rsiValues && rsiPaneId) {
+        chart.removeIndicator(rsiPaneId);
+        rsiPaneId = null;
       }
     },
 
