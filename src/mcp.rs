@@ -104,7 +104,7 @@ fn handle_tools_list(id: Option<Value>) -> Value {
             "tools": [
                 {
                     "name": "generate_chart",
-                    "description": "Generate a financial candlestick or OHLCV chart image for a given stock or crypto ticker symbol. Supports multiple timeframes (1m, 5m, 15m, 1h, 4h, 1d, 1wk) and 33 technical indicators including RSI, MACD, EMA, Bollinger Bands, Ichimoku Cloud, Stochastic, ATR, OBV, VWAP, Supertrend, and more. Returns a rendered PNG chart with price action and indicator panels. Use when the user asks to plot, chart, visualize, render, or show price action, candlesticks, or technical analysis for any asset. Data sourced from Yahoo Finance (stocks like AAPL, MSFT, TSLA) and Binance (crypto like BTCUSDT, ETHUSDT). Call list_indicators first to discover all available indicator names and their configurable parameters.",
+                    "description": "Generate a financial candlestick or OHLCV chart for a given stock or crypto ticker symbol. Supports multiple timeframes (1m, 5m, 15m, 1h, 4h, 1d, 1wk) and 33 technical indicators including RSI, MACD, EMA, Bollinger Bands, Ichimoku Cloud, Stochastic, ATR, OBV, VWAP, Supertrend, and more. Returns a rendered PNG chart with price action and indicator panels by default. Set format='summary' to instead receive a compact JSON summary (OHLCV stats, last indicator values, signals, divergences, levels) — much cheaper in tokens and ideal for automated reasoning without vision. Use when the user asks to plot, chart, visualize, render, or analyze price action, candlesticks, or technical signals. Data sourced from Yahoo Finance (stocks like AAPL, MSFT, TSLA) and Binance (crypto like BTCUSDT, ETHUSDT). Call list_indicators first to discover all available indicator names and their configurable parameters.",
                     "inputSchema": {
                         "type": "object",
                         "properties": {
@@ -161,6 +161,12 @@ fn handle_tools_list(id: Option<Value>) -> Value {
                                 "type": "integer",
                                 "description": "Chart image height in pixels",
                                 "default": 1080
+                            },
+                            "format": {
+                                "type": "string",
+                                "enum": ["png", "summary", "both"],
+                                "description": "Output format. 'png' (default) returns a rendered chart image. 'summary' returns a compact JSON summary (OHLCV stats, last indicator values, signals, divergences, levels) — typically 10-50x fewer tokens than a PNG and ideal for automated analysis without vision. 'both' returns the PNG plus the JSON summary.",
+                                "default": "png"
                             }
                         }
                     }
@@ -367,20 +373,25 @@ fn handle_tools_call(
 }
 
 /// Parse panels array: each element can be a string ("rsi") or an object ({"name": "rsi", "length": 21}).
-fn parse_panels(panels_value: &Value) -> (Vec<Box<dyn Indicator>>, Vec<String>) {
+/// Returns (indicators, request-keys-in-order, unknown-names).
+fn parse_panels(panels_value: &Value) -> (Vec<Box<dyn Indicator>>, Vec<String>, Vec<String>) {
     let arr = match panels_value.as_array() {
         Some(a) => a,
-        None => return (vec![], vec![]),
+        None => return (vec![], vec![], vec![]),
     };
 
     let mut result: Vec<Box<dyn Indicator>> = Vec::new();
+    let mut keys: Vec<String> = Vec::new();
     let mut errors = Vec::new();
 
     for item in arr {
         if let Some(name) = item.as_str() {
             // Simple string: "rsi"
             match indicators::by_name(name) {
-                Some(ind) => result.push(ind),
+                Some(ind) => {
+                    result.push(ind);
+                    keys.push(name.to_string());
+                }
                 None => errors.push(name.to_string()),
             }
         } else if let Some(obj) = item.as_object() {
@@ -390,13 +401,16 @@ fn parse_panels(panels_value: &Value) -> (Vec<Box<dyn Indicator>>, Vec<String>) 
                 None => continue,
             };
             match indicators::by_name_configured(name, &Value::Object(obj.clone())) {
-                Some(ind) => result.push(ind),
+                Some(ind) => {
+                    result.push(ind);
+                    keys.push(name.to_string());
+                }
                 None => errors.push(name.to_string()),
             }
         }
     }
 
-    (result, errors)
+    (result, keys, errors)
 }
 
 fn tool_generate_chart(id: Option<Value>, args: &Value) -> Value {
@@ -424,23 +438,29 @@ fn tool_generate_chart(id: Option<Value>, args: &Value) -> Value {
         .cloned()
         .unwrap_or_else(|| json!(["ema_stack", "cipher_b", "macd"]));
 
-    let (panel_indicators, unknown) = parse_panels(&panels_value);
+    // Output format: "png" (default), "summary" (JSON only), "both"
+    let format = args
+        .get("format")
+        .and_then(|v| v.as_str())
+        .unwrap_or("png")
+        .to_lowercase();
+
+    let want_png = matches!(format.as_str(), "png" | "both");
+    let want_summary = matches!(format.as_str(), "summary" | "both");
+    if !want_png && !want_summary {
+        return tool_err(id, "Unknown format: expected 'png', 'summary', or 'both'.");
+    }
+
+    let (panel_indicators, indicator_keys, unknown) = parse_panels(&panels_value);
 
     if !unknown.is_empty() {
-        return json!({
-            "jsonrpc": "2.0",
-            "id": id,
-            "result": {
-                "content": [{
-                    "type": "text",
-                    "text": format!(
-                        "Unknown indicator(s): {}. Call list_indicators to see available indicators.",
-                        unknown.join(", ")
-                    )
-                }],
-                "isError": true
-            }
-        });
+        return tool_err(
+            id,
+            &format!(
+                "Unknown indicator(s): {}. Call list_indicators to see available indicators.",
+                unknown.join(", ")
+            ),
+        );
     }
 
     let mut data = if let Some(sym) = symbol {
@@ -456,44 +476,60 @@ fn tool_generate_chart(id: Option<Value>, args: &Value) -> Value {
     data.symbol = symbol.map(|s| s.to_string());
     data.interval = Some(interval.to_string());
 
-    // Render to a temp file, then read as base64
-    let tmp_path = format!("/tmp/chartgen_{}.png", std::process::id());
-
-    if let Err(e) = renderer::render_chart(&data, &panel_indicators, &tmp_path, width, height) {
-        return json!({
-            "jsonrpc": "2.0",
-            "id": id,
-            "result": {
-                "content": [{ "type": "text", "text": format!("Render error: {}", e) }],
-                "isError": true
-            }
-        });
-    }
-
-    let png_bytes = match std::fs::read(&tmp_path) {
-        Ok(b) => b,
-        Err(e) => {
-            return json!({
-                "jsonrpc": "2.0",
-                "id": id,
-                "result": {
-                    "content": [{ "type": "text", "text": format!("Read error: {}", e) }],
-                    "isError": true
-                }
-            });
+    // Build summary payload up-front so indicator computation happens once
+    // regardless of whether we also render the PNG. Key by request name so
+    // the LLM can correlate output with the names it passed in.
+    let summary_value = if want_summary {
+        let mut indicators_json = serde_json::Map::new();
+        for (key, ind) in indicator_keys.iter().zip(panel_indicators.iter()) {
+            let pr = ind.compute(&data);
+            indicators_json.insert(key.clone(), panel_result_to_json(&pr));
         }
+        Some(json!({
+            "symbol": data.symbol,
+            "interval": data.interval,
+            "price": ohlcv_summary(&data),
+            "indicators": Value::Object(indicators_json),
+        }))
+    } else {
+        None
     };
 
-    std::fs::remove_file(&tmp_path).ok();
+    let mut content: Vec<Value> = Vec::new();
 
-    let b64 = BASE64.encode(&png_bytes);
+    if want_png {
+        let tmp_path = format!(
+            "/tmp/chartgen_{}_{}.png",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        );
+
+        if let Err(e) = renderer::render_chart(&data, &panel_indicators, &tmp_path, width, height) {
+            return tool_err(id, &format!("Render error: {}", e));
+        }
+
+        let png_bytes = match std::fs::read(&tmp_path) {
+            Ok(b) => b,
+            Err(e) => return tool_err(id, &format!("Read error: {}", e)),
+        };
+
+        std::fs::remove_file(&tmp_path).ok();
+
+        let b64 = BASE64.encode(&png_bytes);
+        content.push(json!({ "type": "image", "data": b64, "mimeType": "image/png" }));
+    }
+
+    if let Some(summary) = summary_value {
+        content.push(json!({
+            "type": "text",
+            "text": serde_json::to_string_pretty(&summary).unwrap(),
+        }));
+    }
 
     json!({
         "jsonrpc": "2.0",
         "id": id,
-        "result": {
-            "content": [{ "type": "image", "data": b64, "mimeType": "image/png" }]
-        }
+        "result": { "content": content }
     })
 }
 
@@ -570,20 +606,41 @@ fn tool_err(id: Option<Value>, msg: &str) -> Value {
 }
 
 // ---------------------------------------------------------------------------
-// Extract meaningful values from a PanelResult for JSON output
+// Extract meaningful values from a PanelResult for JSON output.
+// Generic over all indicators: reads only PanelResult fields, so any new
+// indicator that returns a PanelResult is covered automatically.
 // ---------------------------------------------------------------------------
+
+fn finite_or_null(v: f64) -> Value {
+    if v.is_finite() {
+        json!(v)
+    } else {
+        Value::Null
+    }
+}
 
 fn panel_result_to_json(pr: &chartgen::indicator::PanelResult) -> Value {
     let mut out = json!({ "label": pr.label, "is_overlay": pr.is_overlay });
 
-    // Lines: last y-value for each
+    if let Some((lo, hi)) = pr.y_range {
+        out["y_range"] = json!([finite_or_null(lo), finite_or_null(hi)]);
+    }
+
+    // Lines: last finite y-value for each
     if !pr.lines.is_empty() {
         let lines: Vec<Value> = pr
             .lines
             .iter()
             .enumerate()
             .map(|(i, line)| {
-                let last_val = line.y.iter().rev().find(|v| !v.is_nan()).copied();
+                let last_val = line
+                    .y
+                    .iter()
+                    .rev()
+                    .find(|v| v.is_finite())
+                    .copied()
+                    .map(|v| json!(v))
+                    .unwrap_or(Value::Null);
                 json!({
                     "index": i,
                     "label": line.label,
@@ -594,15 +651,22 @@ fn panel_result_to_json(pr: &chartgen::indicator::PanelResult) -> Value {
         out["lines"] = json!(lines);
     }
 
-    // Dots: last bar dots
+    // Dots: split labeled (semantic signals) from decorative
     if !pr.dots.is_empty() {
-        let dots: Vec<Value> = pr
-            .dots
-            .iter()
-            .filter(|d| !d.y.is_nan())
-            .map(|d| json!({ "x": d.x, "y": d.y }))
-            .collect();
-        out["dots"] = json!(dots);
+        let mut signals: Vec<Value> = Vec::new();
+        let mut decorative = 0usize;
+        for d in pr.dots.iter().filter(|d| d.y.is_finite()) {
+            match &d.label {
+                Some(label) => signals.push(json!({ "x": d.x, "y": d.y, "label": label })),
+                None => decorative += 1,
+            }
+        }
+        if !signals.is_empty() {
+            out["signals"] = json!(signals);
+        }
+        if decorative > 0 {
+            out["decorative_dots"] = json!(decorative);
+        }
     }
 
     // Hlines: horizontal reference levels
@@ -611,21 +675,104 @@ fn panel_result_to_json(pr: &chartgen::indicator::PanelResult) -> Value {
         out["hlines"] = json!(hlines);
     }
 
-    // Bars (histogram): last value
+    // Bars (histogram): last finite value
     if !pr.bars.is_empty() {
         let bars_info: Vec<Value> = pr
             .bars
             .iter()
             .enumerate()
             .map(|(i, b)| {
-                let last = b.y.last().copied().unwrap_or(f64::NAN);
-                json!({ "index": i, "last_value": if last.is_nan() { Value::Null } else { json!(last) } })
+                let last =
+                    b.y.iter()
+                        .rev()
+                        .find(|v| v.is_finite())
+                        .copied()
+                        .map(|v| json!(v))
+                        .unwrap_or(Value::Null);
+                json!({ "index": i, "last_value": last })
             })
             .collect();
         out["histogram"] = json!(bars_info);
     }
 
+    if !pr.fills.is_empty() {
+        out["fills_count"] = json!(pr.fills.len());
+    }
+
+    // Horizontal bars (e.g. VPVR price-volume nodes): expose top levels by width
+    if !pr.hbars.is_empty() {
+        let mut hbars: Vec<&chartgen::indicator::HBar> = pr.hbars.iter().collect();
+        hbars.sort_by(|a, b| {
+            b.width
+                .partial_cmp(&a.width)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        let top: Vec<Value> = hbars
+            .iter()
+            .take(5)
+            .map(|h| json!({ "y": h.y, "weight": h.width }))
+            .collect();
+        out["hbars_top"] = json!(top);
+        out["hbars_count"] = json!(pr.hbars.len());
+    }
+
+    // Divergence lines (momentum vs price divergence — important signals)
+    if !pr.divlines.is_empty() {
+        let divs: Vec<Value> = pr
+            .divlines
+            .iter()
+            .map(|d| {
+                json!({
+                    "x1": d.x1, "y1": d.y1,
+                    "x2": d.x2, "y2": d.y2,
+                    "dashed": d.dashed,
+                })
+            })
+            .collect();
+        out["divergences"] = json!(divs);
+    }
+
     out
+}
+
+// ---------------------------------------------------------------------------
+// OHLCV summary — compact view of the price series for LLM consumption
+// ---------------------------------------------------------------------------
+
+fn ohlcv_summary(data: &chartgen::data::OhlcvData) -> Value {
+    if data.bars.is_empty() {
+        return json!({ "bars": 0 });
+    }
+    let first = &data.bars[0];
+    let last = data.bars.last().unwrap();
+    let (mut hi, mut lo) = (f64::NEG_INFINITY, f64::INFINITY);
+    let mut vol = 0.0f64;
+    for b in &data.bars {
+        if b.high > hi {
+            hi = b.high;
+        }
+        if b.low < lo {
+            lo = b.low;
+        }
+        vol += b.volume;
+    }
+    let change_pct = if first.close != 0.0 {
+        Some((last.close - first.close) / first.close * 100.0)
+    } else {
+        None
+    };
+    json!({
+        "bars": data.bars.len(),
+        "first": { "date": first.date, "open": first.open, "close": first.close },
+        "last": {
+            "date": last.date,
+            "open": last.open, "high": last.high, "low": last.low,
+            "close": last.close, "volume": last.volume,
+        },
+        "range": { "high": hi, "low": lo },
+        "total_volume": vol,
+        "change_pct": change_pct,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -1544,5 +1691,175 @@ mod tests {
 
         let resp = tool_list_subscriptions(Some(json!(3)), None, Some("tok1"));
         assert!(is_error(&resp));
+    }
+
+    // --- generate_chart format param ---
+
+    fn chart_content(resp: &Value) -> &[Value] {
+        resp["result"]["content"].as_array().unwrap().as_slice()
+    }
+
+    #[test]
+    fn generate_chart_summary_returns_json_only() {
+        // No symbol → uses sample data, so no network.
+        let args = json!({
+            "bars": 60,
+            "indicators": ["rsi", "macd"],
+            "format": "summary"
+        });
+        let resp = tool_generate_chart(Some(json!(1)), &args);
+        assert!(!is_error(&resp));
+
+        let content = chart_content(&resp);
+        assert_eq!(content.len(), 1);
+        assert_eq!(content[0]["type"], "text");
+
+        let text = content[0]["text"].as_str().unwrap();
+        let parsed: Value = serde_json::from_str(text).unwrap();
+        assert_eq!(parsed["price"]["bars"], 60);
+        assert!(parsed["price"]["last"]["close"].is_number());
+        assert!(parsed["indicators"]["rsi"]["lines"].is_array());
+        assert!(parsed["indicators"]["macd"].is_object());
+    }
+
+    #[test]
+    fn generate_chart_summary_exposes_hlines_and_y_range() {
+        // RSI has hlines at 30/70 and y_range (0, 100).
+        let args = json!({
+            "bars": 60,
+            "indicators": ["rsi"],
+            "format": "summary"
+        });
+        let resp = tool_generate_chart(Some(json!(1)), &args);
+        let content = chart_content(&resp);
+        let text = content[0]["text"].as_str().unwrap();
+        let parsed: Value = serde_json::from_str(text).unwrap();
+
+        let rsi = &parsed["indicators"]["rsi"];
+        let hlines = rsi["hlines"].as_array().unwrap();
+        let ys: Vec<f64> = hlines.iter().map(|h| h["y"].as_f64().unwrap()).collect();
+        assert!(ys.iter().any(|y| (*y - 30.0).abs() < 0.01));
+        assert!(ys.iter().any(|y| (*y - 70.0).abs() < 0.01));
+
+        let y_range = rsi["y_range"].as_array().unwrap();
+        assert_eq!(y_range[0].as_f64().unwrap(), 0.0);
+        assert_eq!(y_range[1].as_f64().unwrap(), 100.0);
+    }
+
+    #[test]
+    fn generate_chart_both_returns_png_and_summary() {
+        let args = json!({
+            "bars": 60,
+            "indicators": ["rsi"],
+            "format": "both",
+            "width": 400,
+            "height": 300
+        });
+        let resp = tool_generate_chart(Some(json!(1)), &args);
+        assert!(!is_error(&resp));
+
+        let content = chart_content(&resp);
+        assert_eq!(content.len(), 2);
+        assert_eq!(content[0]["type"], "image");
+        assert_eq!(content[0]["mimeType"], "image/png");
+        assert_eq!(content[1]["type"], "text");
+
+        let text = content[1]["text"].as_str().unwrap();
+        let parsed: Value = serde_json::from_str(text).unwrap();
+        assert!(parsed["indicators"]["rsi"].is_object());
+    }
+
+    #[test]
+    fn generate_chart_unknown_format_errors() {
+        let args = json!({ "bars": 20, "format": "svg" });
+        let resp = tool_generate_chart(Some(json!(1)), &args);
+        assert!(is_error(&resp));
+        assert!(response_text(&resp).contains("Unknown format"));
+    }
+
+    #[test]
+    fn generate_chart_png_default_unchanged() {
+        // Default (no format param) returns a single image content item.
+        let args = json!({
+            "bars": 60,
+            "indicators": ["rsi"],
+            "width": 400,
+            "height": 300
+        });
+        let resp = tool_generate_chart(Some(json!(1)), &args);
+        assert!(!is_error(&resp));
+        let content = chart_content(&resp);
+        assert_eq!(content.len(), 1);
+        assert_eq!(content[0]["type"], "image");
+    }
+
+    #[test]
+    fn panel_result_to_json_covers_all_fields() {
+        use chartgen::indicator::{DivLine, Dot, Fill, HBar, HLine, Line, PanelResult};
+        use plotters::style::RGBAColor;
+
+        let c = RGBAColor(255, 0, 0, 1.0);
+        let pr = PanelResult {
+            lines: vec![Line {
+                y: vec![f64::NAN, 1.0, 2.0, 3.5],
+                color: c,
+                width: 1,
+                label: Some("main".into()),
+            }],
+            fills: vec![Fill {
+                y1: vec![0.0],
+                y2: vec![1.0],
+                color: c,
+            }],
+            bars: vec![],
+            dots: vec![
+                Dot {
+                    x: 5,
+                    y: 42.0,
+                    color: c,
+                    size: 4,
+                    label: Some("buy".into()),
+                },
+                Dot {
+                    x: 6,
+                    y: 43.0,
+                    color: c,
+                    size: 4,
+                    label: None,
+                },
+            ],
+            hlines: vec![HLine { y: 30.0, color: c }, HLine { y: 70.0, color: c }],
+            hbars: vec![HBar {
+                y: 100.0,
+                height: 1.0,
+                width: 0.8,
+                offset: 0.0,
+                color: c,
+                left: true,
+            }],
+            divlines: vec![DivLine {
+                x1: 1,
+                y1: 10.0,
+                x2: 5,
+                y2: 20.0,
+                color: c,
+                dashed: true,
+            }],
+            y_range: Some((0.0, 100.0)),
+            label: "Test".into(),
+            is_overlay: false,
+        };
+
+        let j = panel_result_to_json(&pr);
+        assert_eq!(j["label"], "Test");
+        assert_eq!(j["lines"][0]["last_value"], 3.5);
+        assert_eq!(j["y_range"][0], 0.0);
+        assert_eq!(j["y_range"][1], 100.0);
+        assert_eq!(j["signals"][0]["label"], "buy");
+        assert_eq!(j["decorative_dots"], 1);
+        assert_eq!(j["hlines"].as_array().unwrap().len(), 2);
+        assert_eq!(j["fills_count"], 1);
+        assert_eq!(j["hbars_count"], 1);
+        assert_eq!(j["divergences"][0]["dashed"], true);
     }
 }
