@@ -438,7 +438,8 @@ fn tool_generate_chart(id: Option<Value>, args: &Value) -> Value {
         .cloned()
         .unwrap_or_else(|| json!(["ema_stack", "cipher_b", "macd"]));
 
-    // Output format: "png" (default), "summary" (JSON only), "both"
+    // Output format: "png" (default), "summary" (JSON only), "both",
+    // or "series" (full per-bar JSON time-series).
     let format = args
         .get("format")
         .and_then(|v| v.as_str())
@@ -711,6 +712,24 @@ fn panel_result_to_series_json(
             })
             .collect();
         out["lines"] = json!(lines);
+    }
+
+    // Histogram (bar-style) series — e.g. MACD histogram, volume. Same
+    // 1:1 alignment with bars as `lines`.
+    if !pr.bars.is_empty() {
+        let histogram: Vec<Value> = pr
+            .bars
+            .iter()
+            .enumerate()
+            .map(|(i, b)| {
+                let values: Vec<Value> = b.y.iter().map(|v| finite_or_null(*v)).collect();
+                json!({
+                    "index": i,
+                    "values": values,
+                })
+            })
+            .collect();
+        out["histogram"] = json!(histogram);
     }
 
     // Labeled dots only — decorative (unlabeled) dots are dropped, matching
@@ -2116,6 +2135,29 @@ mod tests {
                 assert_eq!(sig_t, bar_t, "signal.t must match bars[x].t");
             }
         }
+    }
+
+    #[test]
+    fn generate_chart_series_macd_histogram_aligns_with_bars() {
+        // MACD emits a histogram (pr.bars) in addition to lines. Series
+        // must expose the full per-bar histogram values with 1:1 alignment.
+        let args = json!({
+            "bars": 80,
+            "indicators": ["macd"],
+            "format": "series"
+        });
+        let resp = tool_generate_chart(Some(json!(1)), &args);
+        let text = chart_content(&resp)[0]["text"].as_str().unwrap();
+        let parsed: Value = serde_json::from_str(text).unwrap();
+
+        assert_eq!(parsed["bars"].as_array().unwrap().len(), 80);
+        let macd = &parsed["indicators"]["macd"];
+        let histogram = macd["histogram"]
+            .as_array()
+            .expect("macd series must include histogram");
+        assert!(!histogram.is_empty());
+        let values = histogram[0]["values"].as_array().unwrap();
+        assert_eq!(values.len(), 80, "histogram values must be 1:1 with bars");
     }
 
     #[test]
