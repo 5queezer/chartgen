@@ -1716,3 +1716,763 @@ impl Indicator for Ichimoku {
         }
     }
 }
+
+// ---- Shared profile helpers (used by Session VP, HVN/LVN, Naked POC, TPO) ----
+
+struct ProfileResult {
+    volume_bins: Vec<f64>,
+    price_min: f64,
+    bin_size: f64,
+    bins: usize,
+    poc_idx: usize,
+    max_bin_volume: f64,
+    #[allow(dead_code)]
+    total_volume: f64,
+    poc_price: f64,
+    vah_price: f64,
+    val_price: f64,
+}
+
+/// Build a price-binned profile from a slice of bars.
+/// If `time_based`, each bar contributes 1.0 per bin touched (weighted by overlap);
+/// otherwise weighted by bar volume. Returns None if bars are empty or price range is zero.
+fn compute_profile(
+    bars: &[crate::data::Bar],
+    bins: usize,
+    time_based: bool,
+) -> Option<ProfileResult> {
+    if bars.is_empty() || bins == 0 {
+        return None;
+    }
+    let mut price_min = f64::INFINITY;
+    let mut price_max = f64::NEG_INFINITY;
+    for bar in bars {
+        if bar.low < price_min {
+            price_min = bar.low;
+        }
+        if bar.high > price_max {
+            price_max = bar.high;
+        }
+    }
+    let price_range = price_max - price_min;
+    if !price_range.is_finite() || price_range <= 0.0 {
+        return None;
+    }
+    let bin_size = price_range / bins as f64;
+    let mut volume_bins = vec![0.0_f64; bins];
+    let mut total = 0.0;
+
+    for bar in bars {
+        let weight = if time_based { 1.0 } else { bar.volume };
+        if !weight.is_finite() || weight <= 0.0 {
+            continue;
+        }
+        let bar_range = bar.high - bar.low;
+        if bar_range <= 0.0 {
+            let idx = ((bar.close - price_min) / bin_size).floor() as usize;
+            let idx = idx.min(bins - 1);
+            volume_bins[idx] += weight;
+        } else {
+            let lo_bin = ((bar.low - price_min) / bin_size).floor() as usize;
+            let hi_bin = ((bar.high - price_min) / bin_size).floor() as usize;
+            let lo_bin = lo_bin.min(bins - 1);
+            let hi_bin = hi_bin.min(bins - 1);
+            if lo_bin == hi_bin {
+                volume_bins[lo_bin] += weight;
+            } else {
+                for (b, bin_vol) in volume_bins
+                    .iter_mut()
+                    .enumerate()
+                    .take(hi_bin + 1)
+                    .skip(lo_bin)
+                {
+                    let bin_lo = price_min + b as f64 * bin_size;
+                    let bin_hi = bin_lo + bin_size;
+                    let overlap_lo = bar.low.max(bin_lo);
+                    let overlap_hi = bar.high.min(bin_hi);
+                    let fraction = ((overlap_hi - overlap_lo) / bar_range).max(0.0);
+                    *bin_vol += weight * fraction;
+                }
+            }
+        }
+        total += weight;
+    }
+
+    if total <= 0.0 {
+        return None;
+    }
+
+    let mut poc_idx = 0;
+    let mut max_vol = 0.0_f64;
+    for (i, &v) in volume_bins.iter().enumerate() {
+        if v > max_vol {
+            max_vol = v;
+            poc_idx = i;
+        }
+    }
+
+    let target = total * 0.70;
+    let mut va_vol = volume_bins[poc_idx];
+    let mut lo = poc_idx;
+    let mut hi = poc_idx;
+    while va_vol < target && (lo > 0 || hi < bins - 1) {
+        let try_lo = if lo > 0 { volume_bins[lo - 1] } else { 0.0 };
+        let try_hi = if hi < bins - 1 {
+            volume_bins[hi + 1]
+        } else {
+            0.0
+        };
+        if try_lo >= try_hi && lo > 0 {
+            lo -= 1;
+            va_vol += volume_bins[lo];
+        } else if hi < bins - 1 {
+            hi += 1;
+            va_vol += volume_bins[hi];
+        } else if lo > 0 {
+            lo -= 1;
+            va_vol += volume_bins[lo];
+        } else {
+            break;
+        }
+    }
+
+    Some(ProfileResult {
+        volume_bins,
+        price_min,
+        bin_size,
+        bins,
+        poc_idx,
+        max_bin_volume: max_vol,
+        total_volume: total,
+        poc_price: price_min + (poc_idx as f64 + 0.5) * bin_size,
+        vah_price: price_min + (hi as f64 + 1.0) * bin_size,
+        val_price: price_min + lo as f64 * bin_size,
+    })
+}
+
+/// Partition bar indices into sessions. Honors `bars_per_session` if Some & > 0,
+/// otherwise buckets by epoch-seconds date using `period_secs`. Fallback on parse
+/// failure: put all bars in one session.
+fn session_ranges(
+    data: &OhlcvData,
+    period_secs: i64,
+    bars_per_session: Option<usize>,
+) -> Vec<(usize, usize)> {
+    let n = data.len();
+    if n == 0 {
+        return vec![];
+    }
+    if let Some(bps) = bars_per_session {
+        if bps == 0 {
+            return vec![(0, n)];
+        }
+        let mut out = Vec::new();
+        let mut s = 0;
+        while s < n {
+            let e = (s + bps).min(n);
+            out.push((s, e));
+            s = e;
+        }
+        return out;
+    }
+    if period_secs <= 0 {
+        return vec![(0, n)];
+    }
+    let mut out = Vec::new();
+    let mut cur_bucket: Option<i64> = None;
+    let mut start = 0;
+    for i in 0..n {
+        let ts = match data.bars[i].date.parse::<i64>() {
+            Ok(v) => v,
+            Err(_) => return vec![(0, n)],
+        };
+        let bucket = ts.div_euclid(period_secs);
+        match cur_bucket {
+            Some(b) if b == bucket => {}
+            Some(_) => {
+                out.push((start, i));
+                start = i;
+                cur_bucket = Some(bucket);
+            }
+            None => {
+                cur_bucket = Some(bucket);
+                start = i;
+            }
+        }
+    }
+    out.push((start, n));
+    out
+}
+
+fn parse_period_secs(session: &str) -> i64 {
+    match session.to_ascii_lowercase().as_str() {
+        "weekly" | "week" | "1w" | "w" => 7 * 86400,
+        "hourly" | "1h" | "h" => 3600,
+        _ => 86400,
+    }
+}
+
+// ---- Session Volume Profile (overlay) ----
+
+/// Periodic volume profile: resets per session (daily/weekly/N-bar) and draws
+/// per-session POC/VAH/VAL as segmented horizontal lines.
+pub struct SessionVolumeProfile {
+    pub bins: usize,
+    pub session: String,
+    pub bars_per_session: Option<usize>,
+    pub show_value_area: bool,
+}
+
+impl Default for SessionVolumeProfile {
+    fn default() -> Self {
+        Self {
+            bins: 24,
+            session: "daily".into(),
+            bars_per_session: None,
+            show_value_area: true,
+        }
+    }
+}
+
+impl Indicator for SessionVolumeProfile {
+    fn name(&self) -> &str {
+        "SVP"
+    }
+
+    fn description(&self) -> &str {
+        "Session Volume Profile — per-session POC/VAH/VAL that reset each day/week"
+    }
+
+    fn params(&self) -> Value {
+        json!([
+            {"name": "bins", "type": "integer", "default": 24},
+            {"name": "session", "type": "string", "default": "daily", "description": "daily, weekly, or hourly"},
+            {"name": "bars_per_session", "type": "integer", "default": null, "description": "override session by fixed bar count"},
+            {"name": "show_value_area", "type": "boolean", "default": true, "description": "draw VAH/VAL in addition to POC"}
+        ])
+    }
+
+    fn configure(&mut self, params: &Value) {
+        if let Some(v) = params.get("bins").and_then(|v| v.as_u64()) {
+            self.bins = v as usize;
+        }
+        if let Some(v) = params.get("session").and_then(|v| v.as_str()) {
+            self.session = v.to_string();
+        }
+        if let Some(v) = params.get("bars_per_session") {
+            if v.is_null() {
+                self.bars_per_session = None;
+            } else if let Some(n) = v.as_u64() {
+                self.bars_per_session = if n == 0 { None } else { Some(n as usize) };
+            }
+        }
+        if let Some(v) = params.get("show_value_area").and_then(|v| v.as_bool()) {
+            self.show_value_area = v;
+        }
+    }
+
+    fn compute(&self, data: &OhlcvData) -> PanelResult {
+        let n = data.len();
+        let mut out = PanelResult {
+            is_overlay: true,
+            label: "SVP".into(),
+            ..Default::default()
+        };
+        if n == 0 {
+            return out;
+        }
+
+        let period_secs = parse_period_secs(&self.session);
+        let ranges = session_ranges(data, period_secs, self.bars_per_session);
+
+        for (s, e) in ranges {
+            if e <= s {
+                continue;
+            }
+            let slice = &data.bars[s..e];
+            let Some(prof) = compute_profile(slice, self.bins.max(1), false) else {
+                continue;
+            };
+
+            let mut poc_line = vec![f64::NAN; n];
+            let mut vah_line = vec![f64::NAN; n];
+            let mut val_line = vec![f64::NAN; n];
+            for i in s..e {
+                poc_line[i] = prof.poc_price;
+                vah_line[i] = prof.vah_price;
+                val_line[i] = prof.val_price;
+            }
+
+            out.lines.push(Line {
+                y: poc_line,
+                color: rgba(0xFFD700, 0.9),
+                width: 2,
+                label: Some("POC".into()),
+            });
+            if self.show_value_area {
+                out.lines.push(Line {
+                    y: vah_line,
+                    color: rgba(0x787B86, 0.7),
+                    width: 1,
+                    label: Some("VAH".into()),
+                });
+                out.lines.push(Line {
+                    y: val_line,
+                    color: rgba(0x787B86, 0.7),
+                    width: 1,
+                    label: Some("VAL".into()),
+                });
+            }
+        }
+
+        out
+    }
+}
+
+// ---- HVN / LVN Auto-Detection (overlay) ----
+
+/// Detects High and Low Volume Nodes on the visible-range profile and marks
+/// them as horizontal support/resistance lines.
+pub struct HvnLvn {
+    pub bins: usize,
+    pub range_bars: Option<usize>,
+    pub neighborhood: usize,
+    pub min_prominence: f64,
+    pub top_n: Option<usize>,
+    pub show_hvn: bool,
+    pub show_lvn: bool,
+}
+
+impl Default for HvnLvn {
+    fn default() -> Self {
+        Self {
+            bins: 48,
+            range_bars: None,
+            neighborhood: 2,
+            min_prominence: 0.10,
+            top_n: None,
+            show_hvn: true,
+            show_lvn: true,
+        }
+    }
+}
+
+impl Indicator for HvnLvn {
+    fn name(&self) -> &str {
+        "HVN/LVN"
+    }
+
+    fn description(&self) -> &str {
+        "High/Low Volume Nodes — auto-detected support/resistance from the volume profile"
+    }
+
+    fn params(&self) -> Value {
+        json!([
+            {"name": "bins", "type": "integer", "default": 48},
+            {"name": "range_bars", "type": "integer", "default": null, "description": "only scan the last N bars (null = all)"},
+            {"name": "neighborhood", "type": "integer", "default": 2, "description": "bins on each side to compare for local extrema"},
+            {"name": "min_prominence", "type": "number", "default": 0.10, "description": "minimum relative prominence (0-1) vs max bin"},
+            {"name": "top_n", "type": "integer", "default": null, "description": "keep only the N strongest nodes of each kind"},
+            {"name": "show_hvn", "type": "boolean", "default": true},
+            {"name": "show_lvn", "type": "boolean", "default": true}
+        ])
+    }
+
+    fn configure(&mut self, params: &Value) {
+        if let Some(v) = params.get("bins").and_then(|v| v.as_u64()) {
+            self.bins = v as usize;
+        }
+        if let Some(v) = params.get("range_bars") {
+            if v.is_null() {
+                self.range_bars = None;
+            } else if let Some(n) = v.as_u64() {
+                self.range_bars = if n == 0 { None } else { Some(n as usize) };
+            }
+        }
+        if let Some(v) = params.get("neighborhood").and_then(|v| v.as_u64()) {
+            self.neighborhood = v as usize;
+        }
+        if let Some(v) = params.get("min_prominence").and_then(|v| v.as_f64()) {
+            self.min_prominence = v.clamp(0.0, 1.0);
+        }
+        if let Some(v) = params.get("top_n") {
+            if v.is_null() {
+                self.top_n = None;
+            } else if let Some(n) = v.as_u64() {
+                self.top_n = if n == 0 { None } else { Some(n as usize) };
+            }
+        }
+        if let Some(v) = params.get("show_hvn").and_then(|v| v.as_bool()) {
+            self.show_hvn = v;
+        }
+        if let Some(v) = params.get("show_lvn").and_then(|v| v.as_bool()) {
+            self.show_lvn = v;
+        }
+    }
+
+    fn compute(&self, data: &OhlcvData) -> PanelResult {
+        let mut out = PanelResult {
+            is_overlay: true,
+            label: "HVN/LVN".into(),
+            ..Default::default()
+        };
+        let n = data.len();
+        if n == 0 {
+            return out;
+        }
+        let bars = if let Some(rb) = self.range_bars {
+            &data.bars[n.saturating_sub(rb)..]
+        } else {
+            &data.bars[..]
+        };
+        let Some(prof) = compute_profile(bars, self.bins.max(3), false) else {
+            return out;
+        };
+
+        let bins = prof.bins;
+        let k = self.neighborhood.max(1);
+        let min_abs = prof.max_bin_volume * self.min_prominence;
+
+        // Each entry: (price, prominence). Prominence = |v - nearest-neighbor-extreme|.
+        let mut hvns: Vec<(f64, f64)> = Vec::new();
+        let mut lvns: Vec<(f64, f64)> = Vec::new();
+        for i in 0..bins {
+            let v = prof.volume_bins[i];
+            let lo = i.saturating_sub(k);
+            let hi = (i + k).min(bins - 1);
+            let mut is_max = true;
+            let mut is_min = true;
+            let mut nbr_max = 0.0_f64;
+            let mut nbr_min = f64::INFINITY;
+            for j in lo..=hi {
+                if j == i {
+                    continue;
+                }
+                let nv = prof.volume_bins[j];
+                if nv >= v {
+                    is_max = false;
+                }
+                if nv <= v {
+                    is_min = false;
+                }
+                if nv > nbr_max {
+                    nbr_max = nv;
+                }
+                if nv < nbr_min {
+                    nbr_min = nv;
+                }
+            }
+            let price = prof.price_min + (i as f64 + 0.5) * prof.bin_size;
+            if is_max && (v - nbr_max) >= min_abs && v > 0.0 {
+                hvns.push((price, v - nbr_max));
+            }
+            if is_min
+                && nbr_max.is_finite()
+                && nbr_max > 0.0
+                && (nbr_max - v) >= min_abs
+                && v < prof.max_bin_volume
+            {
+                lvns.push((price, nbr_max - v));
+            }
+        }
+
+        let by_prominence_desc = |a: &(f64, f64), b: &(f64, f64)| {
+            b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
+        };
+        hvns.sort_by(by_prominence_desc);
+        lvns.sort_by(by_prominence_desc);
+        if let Some(k) = self.top_n {
+            hvns.truncate(k);
+            lvns.truncate(k);
+        }
+
+        if self.show_hvn {
+            for (price, _) in &hvns {
+                out.hlines.push(HLine {
+                    y: *price,
+                    color: rgba(0x26a69a, 0.75),
+                });
+            }
+        }
+        if self.show_lvn {
+            for (price, _) in &lvns {
+                out.hlines.push(HLine {
+                    y: *price,
+                    color: rgba(0xef5350, 0.55),
+                });
+            }
+        }
+        out
+    }
+}
+
+// ---- Naked POC (overlay) ----
+
+/// Tracks per-session POCs and draws only those that have not been revisited
+/// (price has not crossed the level since the session ended).
+pub struct NakedPoc {
+    pub bins: usize,
+    pub session: String,
+    pub bars_per_session: Option<usize>,
+    pub max_sessions: Option<usize>,
+    pub include_current: bool,
+}
+
+impl Default for NakedPoc {
+    fn default() -> Self {
+        Self {
+            bins: 24,
+            session: "daily".into(),
+            bars_per_session: None,
+            max_sessions: Some(20),
+            include_current: true,
+        }
+    }
+}
+
+impl Indicator for NakedPoc {
+    fn name(&self) -> &str {
+        "nPOC"
+    }
+
+    fn description(&self) -> &str {
+        "Naked POCs — unfilled point-of-control levels from previous sessions"
+    }
+
+    fn params(&self) -> Value {
+        json!([
+            {"name": "bins", "type": "integer", "default": 24},
+            {"name": "session", "type": "string", "default": "daily", "description": "daily, weekly, hourly"},
+            {"name": "bars_per_session", "type": "integer", "default": null},
+            {"name": "max_sessions", "type": "integer", "default": 20, "description": "look back at most N sessions"},
+            {"name": "include_current", "type": "boolean", "default": true, "description": "also draw the developing POC of the current session"}
+        ])
+    }
+
+    fn configure(&mut self, params: &Value) {
+        if let Some(v) = params.get("bins").and_then(|v| v.as_u64()) {
+            self.bins = v as usize;
+        }
+        if let Some(v) = params.get("session").and_then(|v| v.as_str()) {
+            self.session = v.to_string();
+        }
+        if let Some(v) = params.get("bars_per_session") {
+            if v.is_null() {
+                self.bars_per_session = None;
+            } else if let Some(n) = v.as_u64() {
+                self.bars_per_session = if n == 0 { None } else { Some(n as usize) };
+            }
+        }
+        if let Some(v) = params.get("max_sessions") {
+            if v.is_null() {
+                self.max_sessions = None;
+            } else if let Some(n) = v.as_u64() {
+                self.max_sessions = if n == 0 { None } else { Some(n as usize) };
+            }
+        }
+        if let Some(v) = params.get("include_current").and_then(|v| v.as_bool()) {
+            self.include_current = v;
+        }
+    }
+
+    fn compute(&self, data: &OhlcvData) -> PanelResult {
+        let mut out = PanelResult {
+            is_overlay: true,
+            label: "nPOC".into(),
+            ..Default::default()
+        };
+        let n = data.len();
+        if n == 0 {
+            return out;
+        }
+
+        let period_secs = parse_period_secs(&self.session);
+        let mut ranges = session_ranges(data, period_secs, self.bars_per_session);
+        if let Some(max) = self.max_sessions {
+            if ranges.len() > max {
+                let drop = ranges.len() - max;
+                ranges.drain(0..drop);
+            }
+        }
+
+        let total = ranges.len();
+        for (idx, (s, e)) in ranges.iter().enumerate() {
+            if *e <= *s {
+                continue;
+            }
+            let slice = &data.bars[*s..*e];
+            let Some(prof) = compute_profile(slice, self.bins.max(1), false) else {
+                continue;
+            };
+            let poc = prof.poc_price;
+            let is_current = idx + 1 == total;
+
+            if is_current {
+                if !self.include_current {
+                    continue;
+                }
+                let mut y = vec![f64::NAN; n];
+                for slot in y.iter_mut().take(*e).skip(*s) {
+                    *slot = poc;
+                }
+                out.lines.push(Line {
+                    y,
+                    color: rgba(0xFFD700, 0.7),
+                    width: 2,
+                    label: Some("dPOC".into()),
+                });
+                continue;
+            }
+
+            // Naked check: has any bar after this session touched the POC?
+            let filled = data.bars[*e..n]
+                .iter()
+                .any(|b| b.low <= poc && poc <= b.high);
+            if filled {
+                continue;
+            }
+
+            // Draw the naked POC only from session close onwards — it isn't
+            // known before the source session ends.
+            let mut y = vec![f64::NAN; n];
+            for slot in y.iter_mut().skip(*e) {
+                *slot = poc;
+            }
+            out.lines.push(Line {
+                y,
+                color: rgba(0xFF9800, 0.85),
+                width: 2,
+                label: Some("nPOC".into()),
+            });
+        }
+        out
+    }
+}
+
+// ---- TPO / Market Profile (overlay) ----
+
+/// Time Price Opportunity profile: like Volume Profile but each bar contributes
+/// equal weight (count of time units at each price), not volume.
+pub struct Tpo {
+    pub bins: usize,
+    pub side: String,
+    pub range_bars: Option<usize>,
+    pub opacity: f64,
+}
+
+impl Default for Tpo {
+    fn default() -> Self {
+        Self {
+            bins: 32,
+            side: "right".into(),
+            range_bars: None,
+            opacity: 0.35,
+        }
+    }
+}
+
+impl Indicator for Tpo {
+    fn name(&self) -> &str {
+        "TPO"
+    }
+
+    fn description(&self) -> &str {
+        "Time Price Opportunity — time-based market profile with POC/VAH/VAL"
+    }
+
+    fn params(&self) -> Value {
+        json!([
+            {"name": "bins", "type": "integer", "default": 32},
+            {"name": "side", "type": "string", "default": "right", "description": "left or right"},
+            {"name": "range_bars", "type": "integer", "default": null, "description": "only compute over last N bars"},
+            {"name": "opacity", "type": "number", "default": 0.35, "description": "bar opacity (0.0-1.0)"}
+        ])
+    }
+
+    fn configure(&mut self, params: &Value) {
+        if let Some(v) = params.get("bins").and_then(|v| v.as_u64()) {
+            self.bins = v as usize;
+        }
+        if let Some(v) = params.get("side").and_then(|v| v.as_str()) {
+            self.side = v.to_string();
+        }
+        if let Some(v) = params.get("range_bars") {
+            if v.is_null() {
+                self.range_bars = None;
+            } else if let Some(n) = v.as_u64() {
+                self.range_bars = if n == 0 { None } else { Some(n as usize) };
+            }
+        }
+        if let Some(v) = params.get("opacity").and_then(|v| v.as_f64()) {
+            self.opacity = v.clamp(0.0, 1.0);
+        }
+    }
+
+    fn compute(&self, data: &OhlcvData) -> PanelResult {
+        let mut out = PanelResult {
+            is_overlay: true,
+            label: "TPO".into(),
+            ..Default::default()
+        };
+        let n = data.len();
+        if n == 0 {
+            return out;
+        }
+        let bars = if let Some(rb) = self.range_bars {
+            &data.bars[n.saturating_sub(rb)..]
+        } else {
+            &data.bars[..]
+        };
+        let Some(prof) = compute_profile(bars, self.bins.max(1), true) else {
+            return out;
+        };
+
+        let max_width = 0.25;
+        let left = self.side == "left";
+        let va_lo_idx = ((prof.val_price - prof.price_min) / prof.bin_size).round() as usize;
+        let va_hi_idx = (((prof.vah_price - prof.price_min) / prof.bin_size).round() as usize)
+            .saturating_sub(1);
+
+        for (i, &count) in prof.volume_bins.iter().enumerate() {
+            if count <= 0.0 {
+                continue;
+            }
+            let center = prof.price_min + (i as f64 + 0.5) * prof.bin_size;
+            let width_frac = if prof.max_bin_volume > 0.0 {
+                (count / prof.max_bin_volume) * max_width
+            } else {
+                0.0
+            };
+            let color = if i == prof.poc_idx {
+                rgba(0xFFD700, (self.opacity * 2.0).min(1.0))
+            } else if i >= va_lo_idx && i <= va_hi_idx {
+                rgba(0x9C27B0, (self.opacity * 1.2).min(1.0))
+            } else {
+                rgba(0x9C27B0, self.opacity * 0.55)
+            };
+            out.hbars.push(HBar {
+                y: center,
+                height: prof.bin_size * 0.9,
+                width: width_frac,
+                offset: 0.0,
+                color,
+                left,
+            });
+        }
+
+        out.hlines.push(HLine {
+            y: prof.poc_price,
+            color: rgba(0xFFD700, 0.8),
+        });
+        out.hlines.push(HLine {
+            y: prof.vah_price,
+            color: rgba(0x9C27B0, 0.5),
+        });
+        out.hlines.push(HLine {
+            y: prof.val_price,
+            color: rgba(0x9C27B0, 0.5),
+        });
+
+        out
+    }
+}

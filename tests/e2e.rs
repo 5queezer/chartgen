@@ -256,6 +256,10 @@ fn test_overlay_classification() {
         "heikin_ashi",
         "pivot",
         "volume_profile",
+        "session_vp",
+        "hvn_lvn",
+        "naked_poc",
+        "tpo",
     ];
     let panels = [
         "macd",
@@ -306,6 +310,10 @@ fn test_all_aliases_resolve() {
         ("ha", "heikin_ashi"),
         ("pivot_points", "pivot"),
         ("vp", "volume_profile"),
+        ("svp", "session_vp"),
+        ("vp_nodes", "hvn_lvn"),
+        ("npoc", "naked_poc"),
+        ("market_profile", "tpo"),
         ("funding_rate", "funding"),
         ("open_interest", "oi"),
         ("ls_ratio", "long_short"),
@@ -450,7 +458,7 @@ fn test_sample_data_sizes() {
 #[test]
 fn test_available_count() {
     let available = indicators::available();
-    assert_eq!(available.len(), 34, "Expected 34 indicators");
+    assert_eq!(available.len(), 38, "Expected 38 indicators");
 }
 
 #[test]
@@ -468,4 +476,108 @@ fn test_all_available_resolve() {
 fn test_unknown_indicator_returns_none() {
     assert!(indicators::by_name("nonexistent_indicator").is_none());
     assert!(indicators::by_name("").is_none());
+}
+
+// ===========================================================================
+// 12. Volume-profile family: session reset, naked-POC fill detection
+// ===========================================================================
+
+fn hourly_bars(n: usize) -> OhlcvData {
+    // Craft 3 sessions of ~8 bars each using 86400s epoch boundaries.
+    let start: i64 = 1_700_000_000; // starts at a day boundary-ish
+    let mut base = sample_data(n);
+    for (i, bar) in base.bars.iter_mut().enumerate() {
+        let ts = start + (i as i64) * 3600;
+        bar.date = format!("{}", ts);
+    }
+    base
+}
+
+#[test]
+fn test_session_vp_resets_per_day() {
+    let data = hourly_bars(72); // 3 days
+    let ind = indicators::by_name_configured(
+        "session_vp",
+        &serde_json::json!({"bins": 12, "session": "daily"}),
+    )
+    .unwrap();
+    let result = ind.compute(&data);
+    // Expect multiple POC lines — one per session — each with NaN gaps.
+    let poc_lines: Vec<_> = result
+        .lines
+        .iter()
+        .filter(|l| l.label.as_deref() == Some("POC"))
+        .collect();
+    assert!(poc_lines.len() >= 2, "expected at least 2 session POCs");
+    for line in &poc_lines {
+        let nans = line.y.iter().filter(|v| v.is_nan()).count();
+        let finite = line.y.len() - nans;
+        assert!(
+            nans > 0,
+            "session POC should have NaN gaps outside its range"
+        );
+        assert!(finite > 0, "session POC should have some finite values");
+    }
+}
+
+#[test]
+fn test_naked_poc_excludes_filled_levels() {
+    let data = sample_data(200);
+    let ind = indicators::by_name_configured(
+        "naked_poc",
+        &serde_json::json!({"bars_per_session": 20, "include_current": false}),
+    )
+    .unwrap();
+    let result = ind.compute(&data);
+    // Every nPOC level must NOT be re-touched by any later bar's high/low range.
+    for line in result
+        .lines
+        .iter()
+        .filter(|l| l.label.as_deref() == Some("nPOC"))
+    {
+        let Some(start) = line.y.iter().position(|v| !v.is_nan()) else {
+            continue;
+        };
+        let poc = line.y[start];
+        // nPOC lines begin at the bar right after the source session closes,
+        // so `start` is the first post-session bar.
+        for i in start..data.bars.len() {
+            let b = &data.bars[i];
+            assert!(
+                !(b.low <= poc && poc <= b.high),
+                "naked POC {} was actually filled at bar {}",
+                poc,
+                i
+            );
+        }
+    }
+}
+
+#[test]
+fn test_hvn_lvn_produces_hlines() {
+    let data = sample_data(300);
+    let ind = indicators::by_name_configured(
+        "hvn_lvn",
+        &serde_json::json!({"bins": 40, "min_prominence": 0.05, "top_n": 5}),
+    )
+    .unwrap();
+    let result = ind.compute(&data);
+    assert!(result.is_overlay);
+    assert!(
+        !result.hlines.is_empty(),
+        "expected at least one HVN or LVN line"
+    );
+    for h in &result.hlines {
+        assert!(h.y.is_finite());
+    }
+}
+
+#[test]
+fn test_tpo_time_based_profile() {
+    let data = sample_data(100);
+    let ind = indicators::by_name("tpo").unwrap();
+    let result = ind.compute(&data);
+    assert!(result.is_overlay);
+    assert_eq!(result.hlines.len(), 3, "TPO should emit POC/VAH/VAL hlines");
+    assert!(!result.hbars.is_empty());
 }

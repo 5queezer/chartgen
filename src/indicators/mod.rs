@@ -40,6 +40,12 @@ pub fn by_name(name: &str) -> Option<Box<dyn Indicator>> {
         "heikin_ashi" | "ha" => Some(Box::new(custom::HeikinAshi)),
         "pivot" | "pivot_points" => Some(Box::new(custom::PivotPoints)),
         "volume_profile" | "vp" | "vpvr" => Some(Box::new(custom::VolumeProfile::default())),
+        "session_vp" | "svp" | "session_volume_profile" => {
+            Some(Box::new(custom::SessionVolumeProfile::default()))
+        }
+        "hvn_lvn" | "vp_nodes" | "volume_nodes" => Some(Box::new(custom::HvnLvn::default())),
+        "naked_poc" | "npoc" => Some(Box::new(custom::NakedPoc::default())),
+        "tpo" | "market_profile" => Some(Box::new(custom::Tpo::default())),
         "kalman" | "kalman_volume" | "kvf" => Some(Box::new(custom::KalmanVolume::default())),
         "rsi_mfi_stoch" | "rsi_combo" | "combo" => {
             Some(Box::new(rsi_combo::RsiMfiStochCombo::default()))
@@ -89,6 +95,10 @@ pub fn available() -> &'static [&'static str] {
         "heikin_ashi",
         "pivot",
         "volume_profile",
+        "session_vp",
+        "hvn_lvn",
+        "naked_poc",
+        "tpo",
         "kalman_volume",
         "rsi_mfi_stoch",
         "cvd",
@@ -159,6 +169,30 @@ pub fn registry() -> Vec<IndicatorInfo> {
         &["vp", "vpvr"],
         "overlay",
         custom::VolumeProfile::default()
+    );
+    reg!(
+        "session_vp",
+        &["svp", "session_volume_profile"],
+        "overlay",
+        custom::SessionVolumeProfile::default()
+    );
+    reg!(
+        "hvn_lvn",
+        &["vp_nodes", "volume_nodes"],
+        "overlay",
+        custom::HvnLvn::default()
+    );
+    reg!(
+        "naked_poc",
+        &["npoc"],
+        "overlay",
+        custom::NakedPoc::default()
+    );
+    reg!(
+        "tpo",
+        &["market_profile"],
+        "overlay",
+        custom::Tpo::default()
     );
 
     // Panels
