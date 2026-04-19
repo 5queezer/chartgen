@@ -3,3 +3,4 @@
 !docs/*.png
 .claude/
 .docs/
+graphify-out/
