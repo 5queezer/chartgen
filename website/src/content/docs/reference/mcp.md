@@ -23,11 +23,9 @@ Add chartgen to `claude_desktop_config.json`:
 
 ## Claude.ai
 
-Add `https://chartgen.vasudev.xyz` as a remote MCP connector. OAuth 2.1 PKCE
-is handled automatically — no manual token management.
-
-To self-host, run `chartgen --serve` behind a TLS-terminating reverse proxy
-and point Claude.ai at your own domain.
+Run `chartgen --serve` behind a TLS-terminating reverse proxy, then add your
+domain as a remote MCP connector in Claude.ai. OAuth 2.1 PKCE is handled by
+chartgen — no manual token management.
 
 ## Tools
 
@@ -38,8 +36,8 @@ an array of indicator specs, and image dimensions.
 
 ### `list_indicators`
 
-Returns the full catalog of 33 indicators with their accepted parameters.
-Use this to discover what you can pass to `generate_chart`.
+Returns the full catalog of registered indicators with their accepted
+parameters. Use this to discover what you can pass to `generate_chart`.
 
 ## Deployment
 

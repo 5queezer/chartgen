@@ -1,68 +1,77 @@
 ---
 title: Indicators
-description: All 33 indicators, grouped by category.
+description: All registered indicators, grouped by how they render.
 ---
 
-33 indicators across 5 categories. All names and aliases are accepted by the
-CLI (`-p <name>`) and the `generate_chart` MCP tool.
+Indicators live in three buckets in the registry (`src/indicators/mod.rs`):
 
-## Overlays (12)
+- **Overlays** draw on the price chart (bands, clouds, volume profiles).
+- **Panels** render as separate rows below the price chart (oscillators, volume).
+- **External** pull from third-party APIs (Binance derivatives, alternative.me).
 
-Drawn on the price chart.
+Every name and every alias below is accepted by the CLI (`-p <name>`) and by
+the `generate_chart` MCP tool's `indicators` parameter.
+
+## Overlays
 
 | Name | Aliases |
 |------|---------|
 | `ema_stack` | `ema` |
-| `bbands` | `bb`, `bollinger` |
-| `keltner` | `kc` |
-| `donchian` | `dc` |
-| `supertrend` | `st` |
-| `sar` | `psar` |
-| `ichimoku` | `ichi` |
-| `heikin_ashi` | `ha` |
+| `bbands` | `bollinger` |
+| `keltner` | |
+| `donchian` | |
 | `vwap` | |
 | `vwap_bands` | |
+| `supertrend` | |
+| `sar` | `parabolic_sar` |
+| `ichimoku` | |
+| `heikin_ashi` | `ha` |
 | `pivot` | `pivot_points` |
-| `vpvr` | `vp`, `volume_profile` |
+| `volume_profile` | `vp`, `vpvr` |
+| `session_vp` | `svp`, `session_volume_profile` |
+| `hvn_lvn` | `vp_nodes`, `volume_nodes` |
+| `naked_poc` | `npoc` |
+| `tpo` | `market_profile` |
 
-## Momentum (9)
+## Panels
 
 | Name | Aliases |
 |------|---------|
-| `rsi` | |
+| `cipher_b` | |
 | `macd` | |
+| `rsi` | |
+| `wavetrend` | |
 | `stoch` | `stochastic` |
+| `atr` | |
+| `obv` | |
 | `cci` | |
-| `williams_r` | `willr` |
 | `roc` | |
-| `wavetrend` | `wt` |
-| `cipher_b` | `cipher`, `cb` |
+| `mfi` | |
+| `williams_r` | `willr` |
+| `cmf` | |
 | `adx` | |
+| `ad` | `ad_line` |
+| `histvol` | `hv` |
+| `kalman_volume` | `kalman`, `kvf` |
+| `rsi_mfi_stoch` | `rsi_combo`, `combo` |
 
-## Volatility (3) · Volume (5) · Crypto (4)
+## External
 
-| Name | Aliases | Category |
-|------|---------|----------|
-| `atr` | | Volatility |
-| `histvol` | `hv` | Volatility |
-| `kalman_volume` | `kv` | Volatility |
-| `obv` | | Volume |
-| `mfi` | | Volume |
-| `cmf` | | Volume |
-| `ad` | `adline` | Volume |
-| `cvd` | | Volume |
-| `funding` | `funding_rate` | Crypto |
-| `oi` | `open_interest` | Crypto |
-| `long_short` | `ls_ratio` | Crypto |
-| `fear_greed` | `fng` | Crypto |
+| Name | Aliases |
+|------|---------|
+| `cvd` | |
+| `funding` | `funding_rate` |
+| `oi` | `open_interest` |
+| `long_short` | `ls_ratio` |
+| `fear_greed` | `fng` |
 
 ## Parameter examples (MCP)
 
 ```json
 {"name": "rsi", "length": 21}
 {"name": "bbands", "length": 30, "mult": 2.5}
-{"name": "vpvr", "bins": 32, "side": "right"}
+{"name": "volume_profile", "bins": 32, "side": "right"}
 ```
 
-Use the `list_indicators` MCP tool to discover the exact parameters each
-indicator accepts.
+Call the `list_indicators` MCP tool for the authoritative list with each
+indicator's description, default parameters, and category at runtime.
