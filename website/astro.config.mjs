@@ -9,7 +9,7 @@ export default defineConfig({
     starlight({
       title: 'chartgen',
       description:
-        'Trading chart generator and MCP server in Rust. 33 indicators, Yahoo Finance + Binance, Claude.ai integration.',
+        'Trading chart generator, MCP server, and live trading engine in Rust. 38 indicators, Yahoo Finance + Binance, Claude.ai integration.',
       social: [
         {
           icon: 'github',
@@ -18,13 +18,24 @@ export default defineConfig({
         },
       ],
       sidebar: [
-        { label: 'Quick Start', slug: 'guides/quickstart' },
+        {
+          label: 'Guides',
+          items: [
+            { label: 'Quick Start', slug: 'guides/quickstart' },
+            { label: 'Trading', slug: 'guides/trading' },
+            { label: 'Push notifications', slug: 'guides/notifications' },
+            { label: 'Deployment', slug: 'guides/deploy' },
+            { label: 'Contributing', slug: 'guides/contributing' },
+          ],
+        },
         {
           label: 'Reference',
           items: [
             { label: 'CLI', slug: 'reference/cli' },
             { label: 'Indicators', slug: 'reference/indicators' },
             { label: 'MCP Integration', slug: 'reference/mcp' },
+            { label: 'OAuth 2.1 PKCE', slug: 'reference/oauth' },
+            { label: 'Persistence', slug: 'reference/persistence' },
           ],
         },
       ],

@@ -1,9 +1,9 @@
 ---
 title: chartgen
-description: Trading chart generator and MCP server in Rust. 33 indicators, Yahoo Finance + Binance, Claude.ai integration.
+description: Trading chart generator, MCP server, and live trading engine in Rust. 38 indicators, Yahoo Finance + Binance, Claude.ai integration.
 template: splash
 hero:
-  tagline: Live data from Yahoo Finance and Binance, rendered as PNG candlestick charts with 33 technical indicators. Integrates with Claude.ai via OAuth 2.1 PKCE.
+  tagline: Live data from Yahoo Finance and Binance, rendered as PNG candlestick charts with 38 technical indicators. Streams a live WebSocket feed into an alert engine and integrates with Claude.ai via OAuth 2.1 PKCE.
   image:
     file: ../../assets/screenshot.png
     alt: AAPL 1D with EMA Stack, VPVR, RSI, MACD
@@ -20,20 +20,20 @@ hero:
 import { Card, CardGrid } from '@astrojs/starlight/components';
 
 <CardGrid>
-  <Card title="33 indicators" icon="seti:graphql">
+  <Card title="38 indicators" icon="seti:graphql">
     Overlays, momentum, volatility, volume, and crypto-specific metrics. All
-    configurable via MCP parameters.
+    configurable via MCP parameters — see the [indicator reference](/chartgen/reference/indicators/).
   </Card>
   <Card title="Live data" icon="rocket">
-    Yahoo Finance for stocks, Binance for crypto. Auto-detected from the
-    ticker suffix.
+    Yahoo Finance for stocks, Binance REST + WebSocket for crypto.
+    Auto-detected from the ticker suffix.
+  </Card>
+  <Card title="Trading engine" icon="setting">
+    `--trade` runs a live WebSocket feed with price and indicator-signal
+    [alerts](/chartgen/guides/trading/) and an order-lifecycle API.
   </Card>
   <Card title="Claude.ai integration" icon="puzzle">
-    Connect as a remote MCP server with OAuth 2.1 PKCE, or run locally for
-    Claude Desktop.
-  </Card>
-  <Card title="Pure Rust" icon="setting">
-    Single binary, ~93MB Docker image, plotters-based rendering. Ships with
-    33 e2e tests.
+    Connect as a remote MCP server with [OAuth 2.1 PKCE](/chartgen/reference/oauth/),
+    or run locally for Claude Desktop — 15 tools in total.
   </Card>
 </CardGrid>
