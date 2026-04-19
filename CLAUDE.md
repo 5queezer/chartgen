@@ -25,6 +25,12 @@ Decisions with multiple viable options and long-term consequences (transport pro
 - ADRs are immutable once merged. To revisit a decision, write a new ADR that supersedes the old one; link both ways.
 - Reference the ADR from the PR description (e.g. "Implements ADR-0002") and, where relevant, from code comments.
 
+## MCP Type Safety
+
+- Tool input types in `web/src/types/generated-input.ts` are generated from chartgen's `tools/list` schemas. Regenerate with `./scripts/gen-mcp-types.sh` after any change to `handle_tools_list` in `src/mcp.rs`. CI's `mcp-types-drift` job fails if the file is stale.
+- Tool response types in `web/src/types/responses.ts` are hand-written Zod schemas — no formal `outputSchema` exists upstream in MCP yet. They must be updated in the same PR as any change to a response-shaping Rust function (`panel_result_to_*_json`, `tool_get_indicators`, etc.). Treat them as part of the wire contract.
+- Validate MCP responses at the boundary with Zod `.parse()` — do not cast untrusted input.
+
 ## graphify
 
 This project has a graphify knowledge graph at graphify-out/. It is a
