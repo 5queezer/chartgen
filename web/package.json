@@ -1,0 +1,21 @@
+{
+  "name": "chartgen-web",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "Browser SPA for chartgen's MCP HTTP surface (OAuth 2.1 PKCE + klinecharts).",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "klinecharts": "^9.8.12"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.3",
+    "vite": "^8.0.8"
+  }
+}

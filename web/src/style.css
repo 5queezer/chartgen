@@ -1,0 +1,101 @@
+:root {
+  color-scheme: dark;
+  --bg: #0b0d12;
+  --bg-panel: #11141b;
+  --fg: #e6e9ef;
+  --fg-dim: #8a93a6;
+  --accent: #4f8cff;
+  --border: #1e2431;
+  --danger: #ff6b6b;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica,
+    Arial, sans-serif, "Apple Color Emoji", "Segoe UI Emoji";
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--bg);
+  color: var(--fg);
+}
+
+main#app {
+  display: flex;
+  flex-direction: column;
+}
+
+.bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-panel);
+}
+
+.bar h1 {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.bar form {
+  display: flex;
+  gap: 8px;
+}
+
+.bar input,
+.bar select,
+.bar button {
+  background: var(--bg);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 6px 10px;
+  font: inherit;
+  font-size: 13px;
+}
+
+.bar input {
+  width: 120px;
+  text-transform: uppercase;
+}
+
+.bar button {
+  cursor: pointer;
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+  font-weight: 500;
+}
+
+.bar button:disabled {
+  opacity: 0.5;
+  cursor: progress;
+}
+
+.status {
+  margin-left: auto;
+  font-size: 12px;
+  color: var(--fg-dim);
+  font-variant-numeric: tabular-nums;
+}
+
+.status.err {
+  color: var(--danger);
+}
+
+.chart {
+  flex: 1 1 auto;
+  min-height: 0;
+  width: 100%;
+}

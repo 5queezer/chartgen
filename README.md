@@ -26,6 +26,8 @@ cargo run -- --serve
 cargo run -- --serve --trade --testnet
 ```
 
+Browser SPA scaffold: [`web/`](./web/) — Vite + TypeScript client that drives the OAuth PKCE flow, renders candles + RSI via klinecharts, and logs SSE push notifications. See [`web/README.md`](./web/README.md).
+
 ## CLI
 
 | Flag | Description | Default |
