@@ -449,11 +449,113 @@ fn extract_bearer_token(headers: &HeaderMap) -> Option<&str> {
         .and_then(|v| v.strip_prefix("Bearer "))
 }
 
+/// Check whether the client's Accept header allows an `application/json`
+/// response. Missing Accept is tolerated (treated as "accepts anything").
+/// Returns `true` if JSON is acceptable; `false` means the server should
+/// reply with 406 Not Acceptable.
+fn accepts_json(headers: &HeaderMap) -> bool {
+    let accept = match headers.get(header::ACCEPT).and_then(|v| v.to_str().ok()) {
+        Some(v) => v,
+        None => return true, // tolerant default
+    };
+    // A bare `*/*` or a type/range that matches `application/json` or
+    // `application/*` is acceptable. Streamable HTTP clients typically send
+    // `application/json, text/event-stream`.
+    for raw in accept.split(',') {
+        let token = raw.split(';').next().unwrap_or("").trim();
+        if token.eq_ignore_ascii_case("*/*")
+            || token.eq_ignore_ascii_case("application/*")
+            || token.eq_ignore_ascii_case("application/json")
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// Build a JSON-RPC 2.0 error response with an explicit id and code.
+fn jsonrpc_error(id: Option<Value>, code: i64, message: &str) -> Value {
+    json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "error": { "code": code, "message": message }
+    })
+}
+
+/// Build the Streamable-HTTP response: `Content-Type: application/json`,
+/// echo any incoming `Mcp-Session-Id` header (spec-compliant correlation),
+/// and return the serialized JSON-RPC envelope as the body.
+fn streamable_http_json_response(
+    status: StatusCode,
+    body: Value,
+    session_id: Option<&str>,
+) -> Response {
+    let payload = serde_json::to_vec(&body).unwrap_or_else(|_| b"{}".to_vec());
+    let mut builder = Response::builder()
+        .status(status)
+        .header(header::CONTENT_TYPE, "application/json");
+    if let Some(sid) = session_id {
+        // Echo the client-supplied session id unchanged. chartgen is
+        // stateless on the sync path, so no server-side session tracking is
+        // required — the header is surfaced for clients that correlate on it.
+        builder = builder.header("Mcp-Session-Id", sid);
+    }
+    builder.body(axum::body::Body::from(payload)).unwrap()
+}
+
+/// Streamable HTTP (MCP spec 2025-03-26) request handler for `POST /mcp`
+/// (and the `POST /` / `POST /message` aliases).
+///
+/// Behavior:
+/// - If the client's `Accept` header does not allow `application/json`,
+///   respond with `406 Not Acceptable`.
+/// - Parse the body as JSON-RPC 2.0. Malformed bodies return
+///   `{"error": {"code": -32700}}` (Parse error).
+/// - `initialize` and `tools/list` are accepted without auth (tool
+///   discovery); everything else requires a valid bearer token.
+/// - The `Mcp-Session-Id` header, if present, is echoed back unchanged.
+///   chartgen does not track server-side session state.
+/// - Notifications return `204 No Content`.
+/// - Successful responses set `Content-Type: application/json`.
 async fn mcp_handler(
     State(state): State<SharedState>,
     headers: HeaderMap,
-    Json(body): Json<Value>,
+    body_bytes: axum::body::Bytes,
 ) -> Response {
+    // Echo any incoming session id (see spec §Session management).
+    let session_id = headers
+        .get("Mcp-Session-Id")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+
+    // Accept negotiation: reject when the client explicitly excludes JSON.
+    if !accepts_json(&headers) {
+        eprintln!("[MCP] POST /mcp → 406 Not Acceptable (Accept excludes application/json)");
+        let err = jsonrpc_error(
+            None,
+            -32600,
+            "Not Acceptable: server returns application/json",
+        );
+        return streamable_http_json_response(
+            StatusCode::NOT_ACCEPTABLE,
+            err,
+            session_id.as_deref(),
+        );
+    }
+
+    // Parse body as JSON-RPC 2.0. An empty body is treated as a parse error.
+    let body: Value = match serde_json::from_slice(&body_bytes) {
+        Ok(v) => v,
+        Err(e) => {
+            let err = jsonrpc_error(None, -32700, &format!("Parse error: {}", e));
+            return streamable_http_json_response(
+                StatusCode::BAD_REQUEST,
+                err,
+                session_id.as_deref(),
+            );
+        }
+    };
+
     let method = body.get("method").and_then(|m| m.as_str()).unwrap_or("");
     let has_auth = extract_bearer_token(&headers).is_some();
     eprintln!("[MCP] POST /mcp method={} has_auth={}", method, has_auth);
@@ -463,36 +565,40 @@ async fn mcp_handler(
         let token = match extract_bearer_token(&headers) {
             Some(t) => t.to_string(),
             None => {
-                return (
+                let err = jsonrpc_error(
+                    body.get("id").cloned(),
+                    -32000,
+                    "Missing Authorization header",
+                );
+                return streamable_http_json_response(
                     StatusCode::UNAUTHORIZED,
-                    Json(json!({
-                        "jsonrpc": "2.0",
-                        "id": body.get("id").cloned(),
-                        "error": {"code": -32000, "message": "Missing Authorization header"}
-                    })),
-                )
-                    .into_response();
+                    err,
+                    session_id.as_deref(),
+                );
             }
         };
         if !state.oauth.lock().unwrap().validate_token(&token) {
-            return (
+            let err = jsonrpc_error(body.get("id").cloned(), -32000, "Invalid or expired token");
+            return streamable_http_json_response(
                 StatusCode::UNAUTHORIZED,
-                Json(json!({
-                    "jsonrpc": "2.0",
-                    "id": body.get("id").cloned(),
-                    "error": {"code": -32000, "message": "Invalid or expired token"}
-                })),
-            )
-                .into_response();
+                err,
+                session_id.as_deref(),
+            );
         }
     }
 
     let id = body.get("id").cloned();
     let params = body.get("params");
 
-    // Notifications: no response needed
+    // Notifications: no response body. Still echo the session id.
     if method == "initialized" || method == "notifications/initialized" {
-        return StatusCode::NO_CONTENT.into_response();
+        let mut resp = StatusCode::NO_CONTENT.into_response();
+        if let Some(sid) = session_id.as_deref() {
+            if let Ok(val) = sid.parse() {
+                resp.headers_mut().insert("Mcp-Session-Id", val);
+            }
+        }
+        return resp;
     }
 
     // Extract token for subscription tools
@@ -514,13 +620,7 @@ async fn mcp_handler(
     .await
     .unwrap();
 
-    // Generate session ID header
-    let session_id = Uuid::new_v4().to_string();
-    let mut response = Json(result).into_response();
-    response
-        .headers_mut()
-        .insert("Mcp-Session-Id", session_id.parse().unwrap());
-    response
+    streamable_http_json_response(StatusCode::OK, result, session_id.as_deref())
 }
 
 // --- Health / discovery handler (no auth) ---
@@ -531,15 +631,25 @@ async fn health_handler() -> Json<Value> {
         "name": "chartgen",
         "version": "0.1.0",
         "protocol": "MCP",
-        "protocolVersion": "2024-11-05",
+        "protocolVersion": "2025-03-26",
         "status": "ok"
     }))
 }
 
 // --- SSE Transport handler ---
 
+/// Streamable HTTP (MCP 2025-03-26) server-initiated SSE stream.
+///
+/// Mounted at `GET /mcp` and aliased at `GET /sse` for backwards compatibility
+/// with existing Claude.ai connector deployments.
+///
+/// Unlike the legacy 2024-11-05 HTTP+SSE transport, this endpoint does **not**
+/// emit an `event: endpoint` frame or rotate a `session_id` — the client sends
+/// every JSON-RPC request to `POST /mcp` and reads server-initiated
+/// notifications (e.g. `notifications/alert_triggered`) from this stream
+/// directly as JSON-RPC notification frames.
 async fn sse_handler(State(state): State<SharedState>, headers: HeaderMap) -> Response {
-    eprintln!("[MCP] GET /sse (SSE transport requested)");
+    eprintln!("[MCP] GET /mcp (Streamable HTTP SSE stream requested)");
 
     // Validate bearer token
     let token = match extract_bearer_token(&headers) {
@@ -552,13 +662,13 @@ async fn sse_handler(State(state): State<SharedState>, headers: HeaderMap) -> Re
         return (StatusCode::UNAUTHORIZED, "Invalid or expired token").into_response();
     }
 
-    let base = base_url();
-    let session_id = Uuid::new_v4().to_string();
-
-    eprintln!(
-        "[MCP] SSE endpoint: {}/message?session_id={}",
-        base, session_id
-    );
+    // Echo the client-supplied Mcp-Session-Id if present, else mint one so
+    // clients that expect the header on the SSE response still get a value.
+    let session_id = headers
+        .get("Mcp-Session-Id")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| Uuid::new_v4().to_string());
 
     // Create notification channel
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<String>();
@@ -572,15 +682,10 @@ async fn sse_handler(State(state): State<SharedState>, headers: HeaderMap) -> Re
     let token_cleanup = token.clone();
     let engine_cleanup = state.engine.clone();
 
-    // Build SSE stream: initial endpoint event, then notifications + keepalives
-    let initial_event = format!(
-        "event: endpoint\ndata: {}/message?session_id={}\n\n",
-        base, session_id
-    );
-
+    // Build SSE stream: notifications + keepalives. No legacy endpoint event
+    // — Streamable HTTP clients POST to /mcp directly and read server
+    // notifications as raw JSON-RPC frames.
     let stream = async_stream::stream! {
-        yield Ok::<_, std::convert::Infallible>(initial_event);
-
         let mut rx = rx;
         let mut keepalive = tokio::time::interval(std::time::Duration::from_secs(30));
         keepalive.tick().await; // consume immediate first tick
@@ -590,7 +695,7 @@ async fn sse_handler(State(state): State<SharedState>, headers: HeaderMap) -> Re
                 msg = rx.recv() => {
                     match msg {
                         Some(payload) => {
-                            yield Ok(format!("event: message\ndata: {}\n\n", payload));
+                            yield Ok::<_, std::convert::Infallible>(format!("event: message\ndata: {}\n\n", payload));
                         }
                         None => break,
                     }
@@ -697,4 +802,360 @@ pub async fn run_server(port: u16, engine: Option<Arc<RwLock<TradingEngine>>>) {
     println!("MCP server listening on {}", addr);
     let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
     axum::serve(listener, app).await.unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use http_body_util::BodyExt;
+    use tower::ServiceExt;
+
+    fn test_app() -> Router {
+        let state = Arc::new(AppState {
+            oauth: Mutex::new(OAuthStore::new()),
+            engine: None,
+        });
+        Router::new()
+            .route("/", get(health_handler).post(mcp_handler))
+            .route("/mcp", get(sse_handler).post(mcp_handler))
+            .route("/message", post(mcp_handler))
+            .route("/sse", get(sse_handler))
+            .with_state(state)
+    }
+
+    fn headers_with(pairs: &[(&str, &str)]) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        for (k, v) in pairs {
+            h.insert(
+                header::HeaderName::from_bytes(k.as_bytes()).unwrap(),
+                v.parse().unwrap(),
+            );
+        }
+        h
+    }
+
+    // --- accepts_json unit tests ---
+
+    #[test]
+    fn accepts_json_missing_accept_is_tolerant() {
+        let h = HeaderMap::new();
+        assert!(accepts_json(&h));
+    }
+
+    #[test]
+    fn accepts_json_streamable_http_default() {
+        let h = headers_with(&[("accept", "application/json, text/event-stream")]);
+        assert!(accepts_json(&h));
+    }
+
+    #[test]
+    fn accepts_json_wildcard() {
+        let h = headers_with(&[("accept", "*/*")]);
+        assert!(accepts_json(&h));
+    }
+
+    #[test]
+    fn accepts_json_app_wildcard() {
+        let h = headers_with(&[("accept", "application/*")]);
+        assert!(accepts_json(&h));
+    }
+
+    #[test]
+    fn accepts_json_text_plain_only_rejected() {
+        let h = headers_with(&[("accept", "text/plain")]);
+        assert!(!accepts_json(&h));
+    }
+
+    #[test]
+    fn accepts_json_sse_only_rejected() {
+        let h = headers_with(&[("accept", "text/event-stream")]);
+        assert!(!accepts_json(&h));
+    }
+
+    #[test]
+    fn accepts_json_ignores_quality_parameters() {
+        let h = headers_with(&[("accept", "application/json;q=0.9, text/event-stream")]);
+        assert!(accepts_json(&h));
+    }
+
+    // --- Streamable HTTP POST /mcp tests ---
+
+    #[tokio::test]
+    async fn post_mcp_tools_list_returns_json() {
+        let app = test_app();
+        let body = br#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#;
+        let req = Request::builder()
+            .method("POST")
+            .uri("/mcp")
+            .header("accept", "application/json, text/event-stream")
+            .header("content-type", "application/json")
+            .body(Body::from(&body[..]))
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers().get(header::CONTENT_TYPE).unwrap(),
+            "application/json"
+        );
+
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let parsed: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(parsed["jsonrpc"], "2.0");
+        assert_eq!(parsed["id"], 1);
+        assert!(parsed["result"]["tools"].is_array());
+    }
+
+    #[tokio::test]
+    async fn post_mcp_initialize_advertises_new_protocol_version() {
+        let app = test_app();
+        let body = br#"{"jsonrpc":"2.0","id":1,"method":"initialize"}"#;
+        let req = Request::builder()
+            .method("POST")
+            .uri("/mcp")
+            .header("accept", "application/json, text/event-stream")
+            .header("content-type", "application/json")
+            .body(Body::from(&body[..]))
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let parsed: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(parsed["result"]["protocolVersion"], "2025-03-26");
+    }
+
+    #[tokio::test]
+    async fn post_mcp_accept_excludes_json_returns_406() {
+        let app = test_app();
+        let body = br#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#;
+        let req = Request::builder()
+            .method("POST")
+            .uri("/mcp")
+            .header("accept", "text/plain")
+            .header("content-type", "application/json")
+            .body(Body::from(&body[..]))
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_ACCEPTABLE);
+        assert_eq!(
+            resp.headers().get(header::CONTENT_TYPE).unwrap(),
+            "application/json"
+        );
+
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let parsed: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(parsed["jsonrpc"], "2.0");
+        assert!(parsed["error"].is_object());
+    }
+
+    #[tokio::test]
+    async fn post_mcp_echoes_session_id() {
+        let app = test_app();
+        let body = br#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#;
+        let req = Request::builder()
+            .method("POST")
+            .uri("/mcp")
+            .header("accept", "application/json, text/event-stream")
+            .header("content-type", "application/json")
+            .header("Mcp-Session-Id", "client-session-abc")
+            .body(Body::from(&body[..]))
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let sid = resp.headers().get("Mcp-Session-Id").unwrap();
+        assert_eq!(sid, "client-session-abc");
+    }
+
+    #[tokio::test]
+    async fn post_mcp_no_accept_header_defaults_to_json() {
+        // Tolerant default: no Accept header → treated as application/json.
+        let app = test_app();
+        let body = br#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#;
+        let req = Request::builder()
+            .method("POST")
+            .uri("/mcp")
+            .header("content-type", "application/json")
+            .body(Body::from(&body[..]))
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers().get(header::CONTENT_TYPE).unwrap(),
+            "application/json"
+        );
+    }
+
+    #[tokio::test]
+    async fn post_mcp_malformed_body_is_parse_error() {
+        let app = test_app();
+        let req = Request::builder()
+            .method("POST")
+            .uri("/mcp")
+            .header("accept", "application/json, text/event-stream")
+            .header("content-type", "application/json")
+            .body(Body::from("not-json"))
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let parsed: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(parsed["error"]["code"], -32700);
+    }
+
+    #[tokio::test]
+    async fn post_mcp_tools_call_without_auth_returns_401() {
+        let app = test_app();
+        let body =
+            br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"list_indicators"}}"#;
+        let req = Request::builder()
+            .method("POST")
+            .uri("/mcp")
+            .header("accept", "application/json, text/event-stream")
+            .header("content-type", "application/json")
+            .body(Body::from(&body[..]))
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            resp.headers().get(header::CONTENT_TYPE).unwrap(),
+            "application/json"
+        );
+    }
+
+    #[tokio::test]
+    async fn post_message_alias_also_works() {
+        // /message is retained as an alias of /mcp for backward compat.
+        let app = test_app();
+        let body = br#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#;
+        let req = Request::builder()
+            .method("POST")
+            .uri("/message")
+            .header("accept", "application/json, text/event-stream")
+            .header("content-type", "application/json")
+            .body(Body::from(&body[..]))
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    // --- GET /mcp SSE tests ---
+
+    #[tokio::test]
+    async fn get_mcp_without_auth_is_unauthorized() {
+        let app = test_app();
+        let req = Request::builder()
+            .method("GET")
+            .uri("/mcp")
+            .body(Body::empty())
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn get_mcp_with_valid_token_opens_sse_without_endpoint_event() {
+        // Build an app that shares state with us so we can inject a token.
+        let state = Arc::new(AppState {
+            oauth: Mutex::new(OAuthStore::new()),
+            engine: None,
+        });
+        // Seed a valid token.
+        {
+            let mut s = state.oauth.lock().unwrap();
+            s.tokens.insert(
+                "test-token".to_string(),
+                AccessToken {
+                    _token: "test-token".to_string(),
+                    _client_id: "test".to_string(),
+                    created_at: Instant::now(),
+                    expires_in: Duration::from_secs(3600),
+                },
+            );
+        }
+        let app: Router = Router::new()
+            .route("/mcp", get(sse_handler).post(mcp_handler))
+            .with_state(state);
+
+        let req = Request::builder()
+            .method("GET")
+            .uri("/mcp")
+            .header("authorization", "Bearer test-token")
+            .body(Body::empty())
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers().get(header::CONTENT_TYPE).unwrap(),
+            "text/event-stream"
+        );
+
+        // Pull a small chunk of the body — with a 30s keepalive and no
+        // subscription, no frame should arrive promptly. Race an immediate
+        // frame read against a short timeout: anything that does land must
+        // NOT contain a legacy `event: endpoint` frame.
+        let mut body = resp.into_body();
+        let first = tokio::time::timeout(
+            std::time::Duration::from_millis(200),
+            http_body_util::BodyExt::frame(&mut body),
+        )
+        .await;
+        if let Ok(Some(Ok(frame))) = first {
+            if let Ok(data) = frame.into_data() {
+                let s = String::from_utf8_lossy(&data);
+                assert!(
+                    !s.contains("event: endpoint"),
+                    "Streamable HTTP must not emit the legacy endpoint event, got: {}",
+                    s
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn get_sse_alias_behaves_like_get_mcp() {
+        // /sse is retained as an alias for legacy Claude.ai deployments.
+        let app = test_app();
+        let req = Request::builder()
+            .method("GET")
+            .uri("/sse")
+            .body(Body::empty())
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    // --- Health handler ---
+
+    #[tokio::test]
+    async fn get_root_advertises_new_protocol_version() {
+        let app = test_app();
+        let req = Request::builder()
+            .method("GET")
+            .uri("/")
+            .body(Body::empty())
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let parsed: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(parsed["protocolVersion"], "2025-03-26");
+    }
 }

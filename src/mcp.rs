@@ -84,7 +84,7 @@ fn handle_initialize(id: Option<Value>) -> Value {
         "jsonrpc": "2.0",
         "id": id,
         "result": {
-            "protocolVersion": "2024-11-05",
+            "protocolVersion": "2025-03-26",
             "capabilities": {
                 "tools": {}
             },
@@ -2184,6 +2184,15 @@ mod tests {
         let text = response_text(&resp);
         assert!(text.contains("Unknown format"));
         assert!(text.contains("series"));
+    }
+
+    #[test]
+    fn initialize_advertises_streamable_http_protocol_version() {
+        let resp = handle_initialize(Some(json!(1)));
+        assert_eq!(resp["jsonrpc"], "2.0");
+        assert_eq!(resp["id"], 1);
+        assert_eq!(resp["result"]["protocolVersion"], "2025-03-26");
+        assert_eq!(resp["result"]["serverInfo"]["name"], "chartgen");
     }
 
     #[test]
