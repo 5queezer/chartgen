@@ -104,7 +104,7 @@ fn handle_tools_list(id: Option<Value>) -> Value {
             "tools": [
                 {
                     "name": "generate_chart",
-                    "description": "Generate a financial candlestick or OHLCV chart for a given stock or crypto ticker symbol. Supports multiple timeframes (1m, 5m, 15m, 1h, 4h, 1d, 1wk) and 33 technical indicators including RSI, MACD, EMA, Bollinger Bands, Ichimoku Cloud, Stochastic, ATR, OBV, VWAP, Supertrend, and more. Returns a rendered PNG chart with price action and indicator panels by default. Set format='summary' to instead receive a compact JSON summary (OHLCV stats, last indicator values, signals, divergences, levels) — much cheaper in tokens and ideal for automated reasoning without vision. Use when the user asks to plot, chart, visualize, render, or analyze price action, candlesticks, or technical signals. Data sourced from Yahoo Finance (stocks like AAPL, MSFT, TSLA) and Binance (crypto like BTCUSDT, ETHUSDT). Call list_indicators first to discover all available indicator names and their configurable parameters.",
+                    "description": "Generate a financial candlestick or OHLCV chart for a given stock or crypto ticker symbol. Supports multiple timeframes (1m, 5m, 15m, 1h, 4h, 1d, 1wk) and 33 technical indicators including RSI, MACD, EMA, Bollinger Bands, Ichimoku Cloud, Stochastic, ATR, OBV, VWAP, Supertrend, and more. Returns a rendered PNG chart with price action and indicator panels by default. Set format='summary' to instead receive a compact JSON summary (OHLCV stats, last indicator values, signals, divergences, levels) — much cheaper in tokens and ideal for automated reasoning without vision. Set format='series' to receive a full per-bar time-series JSON payload (every OHLCV bar plus 1:1 aligned indicator value arrays, signals with bar timestamps, hlines, y_range) — useful for downstream numeric computation that needs raw arrays rather than last values. Use when the user asks to plot, chart, visualize, render, or analyze price action, candlesticks, or technical signals. Data sourced from Yahoo Finance (stocks like AAPL, MSFT, TSLA) and Binance (crypto like BTCUSDT, ETHUSDT). Call list_indicators first to discover all available indicator names and their configurable parameters.",
                     "inputSchema": {
                         "type": "object",
                         "properties": {
@@ -164,8 +164,8 @@ fn handle_tools_list(id: Option<Value>) -> Value {
                             },
                             "format": {
                                 "type": "string",
-                                "enum": ["png", "summary", "both"],
-                                "description": "Output format. 'png' (default) returns a rendered chart image. 'summary' returns a compact JSON summary (OHLCV stats, last indicator values, signals, divergences, levels) — typically 10-50x fewer tokens than a PNG and ideal for automated analysis without vision. 'both' returns the PNG plus the JSON summary.",
+                                "enum": ["png", "summary", "both", "series"],
+                                "description": "Output format. 'png' (default) returns a rendered chart image. 'summary' returns a compact JSON summary (OHLCV stats, last indicator values, signals, divergences, levels) — typically 10-50x fewer tokens than a PNG and ideal for automated analysis without vision. 'both' returns the PNG plus the JSON summary. 'series' returns a full per-bar time-series JSON payload (every OHLCV bar plus 1:1 aligned indicator value arrays with NaN→null for pre-warmup, signals with bar timestamps, hlines, and y_range) — ideal for downstream numeric computation.",
                                 "default": "png"
                             }
                         }
@@ -447,8 +447,12 @@ fn tool_generate_chart(id: Option<Value>, args: &Value) -> Value {
 
     let want_png = matches!(format.as_str(), "png" | "both");
     let want_summary = matches!(format.as_str(), "summary" | "both");
-    if !want_png && !want_summary {
-        return tool_err(id, "Unknown format: expected 'png', 'summary', or 'both'.");
+    let want_series = format.as_str() == "series";
+    if !want_png && !want_summary && !want_series {
+        return tool_err(
+            id,
+            "Unknown format: expected 'png', 'summary', 'both', or 'series'.",
+        );
     }
 
     let (panel_indicators, indicator_keys, unknown) = parse_panels(&panels_value);
@@ -476,19 +480,60 @@ fn tool_generate_chart(id: Option<Value>, args: &Value) -> Value {
     data.symbol = symbol.map(|s| s.to_string());
     data.interval = Some(interval.to_string());
 
-    // Build summary payload up-front so indicator computation happens once
-    // regardless of whether we also render the PNG. Key by request name so
-    // the LLM can correlate output with the names it passed in.
+    // Compute indicators up-front (once) so both the summary and the series
+    // payloads can reuse the same PanelResult values — no recomputation,
+    // values already aligned 1:1 with bars.
+    let computed: Vec<(String, chartgen::indicator::PanelResult)> = if want_summary || want_series {
+        indicator_keys
+            .iter()
+            .zip(panel_indicators.iter())
+            .map(|(key, ind)| (key.clone(), ind.compute(&data)))
+            .collect()
+    } else {
+        Vec::new()
+    };
+
+    // Build summary payload keyed by request name so the LLM can correlate
+    // output with the names it passed in.
     let summary_value = if want_summary {
         let mut indicators_json = serde_json::Map::new();
-        for (key, ind) in indicator_keys.iter().zip(panel_indicators.iter()) {
-            let pr = ind.compute(&data);
-            indicators_json.insert(key.clone(), panel_result_to_json(&pr));
+        for (key, pr) in &computed {
+            indicators_json.insert(key.clone(), panel_result_to_json(pr));
         }
         Some(json!({
             "symbol": data.symbol,
             "interval": data.interval,
             "price": ohlcv_summary(&data),
+            "indicators": Value::Object(indicators_json),
+        }))
+    } else {
+        None
+    };
+
+    // Build series payload: full OHLCV bars plus per-indicator per-bar values.
+    let series_value = if want_series {
+        let bars_arr: Vec<Value> = data
+            .bars
+            .iter()
+            .map(|b| {
+                json!({
+                    "t": bar_t(b),
+                    "o": finite_or_null(b.open),
+                    "h": finite_or_null(b.high),
+                    "l": finite_or_null(b.low),
+                    "c": finite_or_null(b.close),
+                    "v": finite_or_null(b.volume),
+                })
+            })
+            .collect();
+        let mut indicators_json = serde_json::Map::new();
+        for (key, pr) in &computed {
+            indicators_json.insert(key.clone(), panel_result_to_series_json(pr, &data));
+        }
+        Some(json!({
+            "symbol": data.symbol,
+            "interval": data.interval,
+            "bars": bars_arr,
             "indicators": Value::Object(indicators_json),
         }))
     } else {
@@ -523,6 +568,13 @@ fn tool_generate_chart(id: Option<Value>, args: &Value) -> Value {
         content.push(json!({
             "type": "text",
             "text": serde_json::to_string_pretty(&summary).unwrap(),
+        }));
+    }
+
+    if let Some(series) = series_value {
+        content.push(json!({
+            "type": "text",
+            "text": serde_json::to_string_pretty(&series).unwrap(),
         }));
     }
 
@@ -617,6 +669,78 @@ fn finite_or_null(v: f64) -> Value {
     } else {
         Value::Null
     }
+}
+
+// Bar.date stores unix-seconds as a string for real feeds (Binance/Yahoo)
+// and a synthetic label (e.g. "D0") for sample_data. Parse to u64 when
+// possible; fall back to JSON null so fixtures still produce valid output.
+fn bar_t(bar: &chartgen::data::Bar) -> Value {
+    bar.date
+        .parse::<u64>()
+        .ok()
+        .map(|n| json!(n))
+        .unwrap_or(Value::Null)
+}
+
+// Series-shape serializer: full per-bar values for each line, signals with
+// bar timestamps, and the same metadata (label/is_overlay/y_range/hlines)
+// that summary exposes. Pulls directly from the PanelResult — no
+// recomputation. NaN pre-warmup values serialize as JSON null.
+fn panel_result_to_series_json(
+    pr: &chartgen::indicator::PanelResult,
+    data: &chartgen::data::OhlcvData,
+) -> Value {
+    let mut out = json!({ "label": pr.label, "is_overlay": pr.is_overlay });
+
+    if let Some((lo, hi)) = pr.y_range {
+        out["y_range"] = json!([finite_or_null(lo), finite_or_null(hi)]);
+    }
+
+    if !pr.lines.is_empty() {
+        let lines: Vec<Value> = pr
+            .lines
+            .iter()
+            .enumerate()
+            .map(|(i, line)| {
+                let values: Vec<Value> = line.y.iter().map(|v| finite_or_null(*v)).collect();
+                json!({
+                    "index": i,
+                    "label": line.label,
+                    "values": values,
+                })
+            })
+            .collect();
+        out["lines"] = json!(lines);
+    }
+
+    // Labeled dots only — decorative (unlabeled) dots are dropped, matching
+    // summary's signal/decorative split semantics.
+    let mut signals: Vec<Value> = Vec::new();
+    for d in pr.dots.iter().filter(|d| d.y.is_finite()) {
+        if let Some(label) = &d.label {
+            let t = if d.x < data.bars.len() {
+                bar_t(&data.bars[d.x])
+            } else {
+                Value::Null
+            };
+            signals.push(json!({
+                "x": d.x,
+                "t": t,
+                "y": d.y,
+                "label": label,
+            }));
+        }
+    }
+    if !signals.is_empty() {
+        out["signals"] = json!(signals);
+    }
+
+    if !pr.hlines.is_empty() {
+        let hlines: Vec<Value> = pr.hlines.iter().map(|h| json!({ "y": h.y })).collect();
+        out["hlines"] = json!(hlines);
+    }
+
+    out
 }
 
 fn panel_result_to_json(pr: &chartgen::indicator::PanelResult) -> Value {
@@ -1861,5 +1985,184 @@ mod tests {
         assert_eq!(j["fills_count"], 1);
         assert_eq!(j["hbars_count"], 1);
         assert_eq!(j["divergences"][0]["dashed"], true);
+    }
+
+    // --- series format ---
+
+    #[test]
+    fn bar_t_parses_unix_seconds() {
+        use chartgen::data::Bar;
+        let numeric = Bar {
+            open: 1.0,
+            high: 1.0,
+            low: 1.0,
+            close: 1.0,
+            volume: 1.0,
+            date: "1713420000".into(),
+        };
+        assert_eq!(bar_t(&numeric), json!(1713420000u64));
+
+        let synthetic = Bar {
+            open: 1.0,
+            high: 1.0,
+            low: 1.0,
+            close: 1.0,
+            volume: 1.0,
+            date: "D5".into(),
+        };
+        assert_eq!(bar_t(&synthetic), Value::Null);
+    }
+
+    #[test]
+    fn generate_chart_series_returns_series_json() {
+        let args = json!({
+            "bars": 60,
+            "indicators": ["rsi"],
+            "format": "series"
+        });
+        let resp = tool_generate_chart(Some(json!(1)), &args);
+        assert!(!is_error(&resp));
+
+        let content = chart_content(&resp);
+        assert_eq!(content.len(), 1);
+        assert_eq!(content[0]["type"], "text");
+
+        let text = content[0]["text"].as_str().unwrap();
+        let parsed: Value = serde_json::from_str(text).unwrap();
+
+        let bars = parsed["bars"].as_array().unwrap();
+        assert_eq!(bars.len(), 60);
+        assert!(bars[0].get("t").is_some());
+        assert!(bars[0]["o"].is_number());
+
+        let rsi = &parsed["indicators"]["rsi"];
+        let values = rsi["lines"][0]["values"].as_array().unwrap();
+        assert_eq!(values.len(), 60, "values must be 1:1 with bars");
+
+        let hlines = rsi["hlines"].as_array().unwrap();
+        let ys: Vec<f64> = hlines.iter().map(|h| h["y"].as_f64().unwrap()).collect();
+        assert!(ys.iter().any(|y| (*y - 30.0).abs() < 0.01));
+        assert!(ys.iter().any(|y| (*y - 70.0).abs() < 0.01));
+
+        let y_range = rsi["y_range"].as_array().unwrap();
+        assert_eq!(y_range[0].as_f64().unwrap(), 0.0);
+        assert_eq!(y_range[1].as_f64().unwrap(), 100.0);
+    }
+
+    #[test]
+    fn panel_result_to_series_json_nan_is_null() {
+        // Direct test of the serializer: NaN pre-warmup values must become
+        // JSON null (serde_json can't emit NaN as a Number).
+        use chartgen::data::{Bar, OhlcvData};
+        use chartgen::indicator::{Line, PanelResult};
+        use plotters::style::RGBAColor;
+
+        let data = OhlcvData {
+            bars: (0..5)
+                .map(|i| Bar {
+                    open: 1.0,
+                    high: 1.0,
+                    low: 1.0,
+                    close: 1.0,
+                    volume: 1.0,
+                    date: format!("{}", 1_700_000_000_u64 + i * 3600),
+                })
+                .collect(),
+            symbol: None,
+            interval: None,
+        };
+        let pr = PanelResult {
+            lines: vec![Line {
+                y: vec![f64::NAN, f64::NAN, 1.0, 2.0, 3.0],
+                color: RGBAColor(0, 0, 0, 1.0),
+                width: 1,
+                label: Some("L".into()),
+            }],
+            ..Default::default()
+        };
+
+        let j = panel_result_to_series_json(&pr, &data);
+        let values = j["lines"][0]["values"].as_array().unwrap();
+        assert_eq!(values.len(), 5);
+        assert_eq!(values[0], Value::Null);
+        assert_eq!(values[1], Value::Null);
+        assert_eq!(values[2], json!(1.0));
+        assert_eq!(values[4], json!(3.0));
+    }
+
+    #[test]
+    fn generate_chart_series_signals_align_with_bars() {
+        // cipher_b emits labeled dots; assert every signal.x is in range
+        // and when signal.t is non-null it matches bars[x].t.
+        let args = json!({
+            "bars": 120,
+            "indicators": ["cipher_b"],
+            "format": "series"
+        });
+        let resp = tool_generate_chart(Some(json!(1)), &args);
+        let text = chart_content(&resp)[0]["text"].as_str().unwrap();
+        let parsed: Value = serde_json::from_str(text).unwrap();
+
+        let bars = parsed["bars"].as_array().unwrap();
+        assert_eq!(bars.len(), 120);
+
+        let cipher = &parsed["indicators"]["cipher_b"];
+        if let Some(signals) = cipher["signals"].as_array() {
+            for sig in signals {
+                let x = sig["x"].as_u64().unwrap() as usize;
+                assert!(x < bars.len(), "signal.x out of range");
+                let sig_t = &sig["t"];
+                let bar_t = &bars[x]["t"];
+                assert_eq!(sig_t, bar_t, "signal.t must match bars[x].t");
+            }
+        }
+    }
+
+    #[test]
+    fn generate_chart_series_omits_png() {
+        let args = json!({
+            "bars": 40,
+            "indicators": ["rsi"],
+            "format": "series",
+            "width": 400,
+            "height": 300
+        });
+        let resp = tool_generate_chart(Some(json!(1)), &args);
+        let content = chart_content(&resp);
+        assert_eq!(content.len(), 1);
+        assert_eq!(content[0]["type"], "text");
+    }
+
+    #[test]
+    fn generate_chart_unknown_format_lists_series() {
+        // Regression: ensure the error message now advertises 'series'.
+        let args = json!({ "bars": 20, "format": "svg" });
+        let resp = tool_generate_chart(Some(json!(1)), &args);
+        assert!(is_error(&resp));
+        let text = response_text(&resp);
+        assert!(text.contains("Unknown format"));
+        assert!(text.contains("series"));
+    }
+
+    #[test]
+    fn generate_chart_summary_byte_identity_golden() {
+        // sample_data is seeded (Rng::new(42)), so the pretty-printed summary
+        // for a fixed input is stable. This test guards against accidental
+        // changes to the summary serializer while the series format is added.
+        let args = json!({
+            "bars": 30,
+            "indicators": ["rsi"],
+            "format": "summary"
+        });
+        let resp = tool_generate_chart(Some(json!(1)), &args);
+        let actual = chart_content(&resp)[0]["text"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        const EXPECTED: &str = include_str!("../tests/golden/generate_chart_summary_rsi_30.json");
+        assert_eq!(
+            actual, EXPECTED,
+            "summary output must remain byte-identical"
+        );
     }
 }
