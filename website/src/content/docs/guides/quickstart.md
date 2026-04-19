@@ -76,3 +76,4 @@ cargo clippy -- -D warnings
 - [Deployment](/chartgen/guides/deploy/) — Docker, Coolify, release binaries, reverse proxy.
 - [OAuth](/chartgen/reference/oauth/) — Claude.ai connector flow.
 - [Persistence](/chartgen/reference/persistence/) — on-disk state formats.
+- [Contributing](/chartgen/guides/contributing/) — dev loop, CI jobs, keeping docs in sync.

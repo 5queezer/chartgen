@@ -13,8 +13,17 @@ chartgen --serve --trade --testnet \
   -p cipher_b -p rsi_mfi_stoch
 ```
 
-Add `--testnet` to route orders to Binance testnet (paper trading). Without it,
-`place_order` hits the live exchange.
+:::caution[Orders are currently local-only]
+`place_order` creates an entry in the local `OrderTracker` and writes a
+`SUBMITTED` line to `trades.log`, but the engine does not yet forward the
+order to an exchange. `--testnet` and `--trade` both exercise the same
+in-process path. A `BinanceTestnet` client exists in `src/trading/exchange.rs`
+but isn't wired into `place_order` yet. Plan your strategy testing
+accordingly — nothing submits to Binance, with or without `--testnet`.
+
+`get_balance` is stubbed and always returns an error. Use `get_positions`
+for locally-tracked positions.
+:::
 
 ## What the engine runs
 
@@ -22,7 +31,9 @@ Add `--testnet` to route orders to Binance testnet (paper trading). Without it,
   configured symbol and reconnects on drop, backfilling via REST.
 - **Bar aggregator** (`src/feed.rs`) — derives `5m`, `15m`, `1h`, and `4h`
   bars from the 1-minute stream so alerts can fire on higher timeframes
-  without a second subscription.
+  without a second subscription. `src/mtf.rs` provides the generic
+  multi-timeframe primitives (`1m` → `5m`/`15m`/`30m`/`1h`/`4h`/`1d`/`1wk`)
+  the aggregator is built on.
 - **Indicator state** (`src/indicator_state.rs`) — keeps a rolling
   200-bar window per (symbol, interval) and recomputes indicators on every
   closed bar.

@@ -52,7 +52,7 @@ Render a chart for a symbol. Accepts `ticker`/`symbol`, `timeframe`/`interval`,
 | `summary` | Compact JSON: OHLCV stats, last indicator values, signal dots, divergences, and horizontal reference levels. Typically 10–50× fewer tokens than a PNG — ideal for automated analysis without vision. |
 | `both` | PNG plus the JSON summary. |
 
-Example:
+Example request:
 
 ```json
 {
@@ -71,6 +71,37 @@ Example:
 }
 ```
 
+Summary payload shape (for `format=summary` or `format=both`):
+
+```json
+{
+  "symbol": "BTCUSDT",
+  "interval": "1h",
+  "price": {
+    "bars": 200,
+    "first": { "date": "...", "open": 66900.1, "close": 66950.2 },
+    "last":  { "date": "...", "open": 67400.0, "high": 67500.0,
+               "low": 67320.0, "close": 67432.5, "volume": 128.4 },
+    "range": { "high": 67980.0, "low": 65010.5 },
+    "total_volume": 18342.7,
+    "change_pct": 0.79
+  },
+  "indicators": {
+    "rsi": {
+      "label": "RSI(21)",
+      "is_overlay": false,
+      "y_range": [0.0, 100.0],
+      "lines": [{ "index": 0, "label": "RSI", "last_value": 62.4 }],
+      "signals": [{ "x": 197, "y": 72.1, "label": "rsi_overbought" }],
+      "hlines": [{ "y": 30.0 }, { "y": 70.0 }]
+    }
+  }
+}
+```
+
+Fields are keyed by the name each indicator was requested with, so
+`{"name": "rsi", "length": 21}` comes back as `indicators.rsi`.
+
 #### `list_indicators`
 
 Return the full indicator catalog with descriptions, aliases, and configurable
@@ -84,6 +115,25 @@ line values, dot presence (signals), and horizontal reference levels.
 
 Required: `symbol`, `indicators` (array of names). Optional: `interval` (default `4h`).
 
+Response shape:
+
+```json
+{
+  "symbol": "BTCUSDT",
+  "interval": "4h",
+  "source": "engine_cache",
+  "bars": 200,
+  "indicators": {
+    "rsi":  { "label": "RSI(14)", "lines": [...], "signals": [...], "hlines": [...] },
+    "macd": { "label": "MACD",    "lines": [...], "histogram": [...] }
+  }
+}
+```
+
+`source` is `engine_cache` when hitting the running trading engine's rolling
+window, `fetched` when the tool fell back to fresh OHLCV. The per-indicator
+object is the same shape `generate_chart` returns under `format=summary`.
+
 ### Orders & positions (require `--trade`)
 
 | Tool | Purpose | Required args |
@@ -92,11 +142,14 @@ Required: `symbol`, `indicators` (array of names). Optional: `interval` (default
 | `cancel_order` | Cancel an open order. | `order_id`. |
 | `get_orders` | List tracked orders. | Optional `filter`: `open` or `all` (default). |
 | `get_positions` | Open positions with unrealized PnL. | — |
-| `get_balance` | Account balances. Needs exchange credentials. | — |
+| `get_balance` | **Stub.** Always returns an error; use `get_positions`. | — |
 
-With `--testnet`, orders route to Binance testnet (paper trading). See the
-[trading guide](/chartgen/guides/trading/) for the order state machine and
-the `trades.log` audit trail format.
+:::caution
+`place_order` currently updates local state and the audit log only — the
+engine is not yet wired to submit to an exchange, so `--testnet` and the
+absence of `--testnet` behave the same. See the [trading guide](/chartgen/guides/trading/)
+for the full picture and the `trades.log` audit-trail format.
+:::
 
 ### Alerts (require `--trade`)
 

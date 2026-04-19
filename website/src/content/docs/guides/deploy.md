@@ -36,11 +36,13 @@ docker run -p 9315:9315 \
 The `~/.chartgen/` volume mount persists `alerts.json`, `trades.log`, and
 `subscriptions.json` across restarts. See the [persistence reference](/chartgen/reference/persistence/).
 
-### `CHARTGEN_BASE_URL`
+### Environment variables
 
-chartgen derives its OAuth issuer and redirect URLs from `CHARTGEN_BASE_URL`.
-If unset, it falls back to `http://localhost:<port>`, which Claude.ai will
-reject — always set this to the public HTTPS URL in production.
+| Name | Read by | Purpose |
+|------|---------|---------|
+| `CHARTGEN_BASE_URL` | `src/server.rs` | Public HTTPS URL that chartgen embeds in OAuth metadata, redirect URLs, and `logo_uri`. Falls back to `http://localhost:<port>`, which Claude.ai rejects — always set this in production. |
+| `HOME` / `USERPROFILE` | `src/main.rs` | Picks the data directory (`~/.chartgen/`). Override to relocate `alerts.json` / `trades.log` / `subscriptions.json`. |
+| `_CHARTGEN_PORT` | `src/server.rs` | Internal — set by the process to its own bind port so `base_url()` can compose the fallback URL. Do not set by hand. |
 
 ## Reverse proxy
 

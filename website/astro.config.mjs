@@ -25,6 +25,7 @@ export default defineConfig({
             { label: 'Trading', slug: 'guides/trading' },
             { label: 'Push notifications', slug: 'guides/notifications' },
             { label: 'Deployment', slug: 'guides/deploy' },
+            { label: 'Contributing', slug: 'guides/contributing' },
           ],
         },
         {
