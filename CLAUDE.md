@@ -8,9 +8,7 @@
 
 ## Documentation
 
-The Starlight site at `website/src/content/docs/` is user-facing — update it
-in the same PR as any user-facing change (CLI, MCP tool, indicator, HTTP/OAuth,
-persistence format, env var, deployment surface).
+The Starlight site at `website/src/content/docs/` is user-facing — update it in the same PR as any user-facing change (CLI, MCP tool, indicator, HTTP/OAuth, persistence format, env var, deployment surface).
 
 - `reference/indicators.md` is generated. Run `cargo run --example gen_docs`;
   the `docs-drift` CI job fails if it drifts. Refresh screenshots with
