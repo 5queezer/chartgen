@@ -51,6 +51,7 @@ Render a chart for a symbol. Accepts `ticker`/`symbol`, `timeframe`/`interval`,
 | `png` (default) | Base64-encoded PNG of the rendered chart. |
 | `summary` | Compact JSON: OHLCV stats, last indicator values, signal dots, divergences, and horizontal reference levels. Typically 10–50× fewer tokens than a PNG — ideal for automated analysis without vision. |
 | `both` | PNG plus the JSON summary. |
+| `series` | Full per-bar time-series JSON: every OHLCV bar plus indicator value arrays aligned 1:1 with bars (NaN → JSON `null` for pre-warmup), signals with bar timestamps, hlines, and y_range. Useful for downstream numeric computation that needs raw arrays rather than last values. |
 
 Example request:
 
@@ -101,6 +102,42 @@ Summary payload shape (for `format=summary` or `format=both`):
 
 Fields are keyed by the name each indicator was requested with, so
 `{"name": "rsi", "length": 21}` comes back as `indicators.rsi`.
+
+Series payload shape (for `format=series`):
+
+```json
+{
+  "symbol": "BTCUSDT",
+  "interval": "1h",
+  "bars": [
+    { "t": 1713420000, "o": 66900.1, "h": 67100.0, "l": 66850.0, "c": 67050.5, "v": 128.4 },
+    { "t": 1713423600, "o": 67050.5, "h": 67220.0, "l": 67010.0, "c": 67180.0, "v":  96.2 },
+    { "t": 1713427200, "o": 67180.0, "h": 67340.0, "l": 67120.0, "c": 67290.5, "v": 104.8 },
+    { "t": 1713430800, "o": 67290.5, "h": 67500.0, "l": 67240.0, "c": 67432.5, "v": 128.4 }
+  ],
+  "indicators": {
+    "rsi": {
+      "label": "RSI(21)",
+      "is_overlay": false,
+      "y_range": [0.0, 100.0],
+      "lines": [
+        { "index": 0, "label": "RSI", "values": [null, null, 68.2, 72.1] }
+      ],
+      "signals": [
+        { "x": 3, "t": 1713430800, "y": 72.1, "label": "rsi_overbought" }
+      ],
+      "hlines": [{ "y": 30.0 }, { "y": 70.0 }]
+    }
+  }
+}
+```
+
+`bars[i]` aligns 1:1 with every `indicators.*.lines[*].values[i]` (and
+`indicators.*.histogram[*].values[i]` when an indicator emits histogram
+bars, e.g. MACD). Pre-warmup indicator values are `null` (not truncated).
+Each signal carries both `x` (bar index) and `t` (unix seconds from the
+source feed, or `null` for synthetic sample data). `format=series` is
+exclusive — no PNG companion, a single text content item.
 
 #### `list_indicators`
 
