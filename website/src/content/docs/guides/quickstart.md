@@ -47,10 +47,32 @@ For Claude.ai (HTTP + OAuth 2.1 PKCE):
 cargo run -- --serve --port 9315
 ```
 
+## Run in trading mode
+
+Combine `--serve` with `--trade` to stream a live Binance WebSocket feed and
+expose order, position, and alert tools:
+
+```bash
+cargo run -- --serve --trade --testnet --symbol BTCUSDT --interval 1h
+```
+
+State lives under `~/.chartgen/` (`alerts.json`, `trades.log`, `subscriptions.json`).
+
 ## Run tests
 
 ```bash
-cargo test          # 33 e2e tests
+cargo test
 cargo fmt --check
 cargo clippy -- -D warnings
 ```
+
+## Next steps
+
+- [CLI reference](/chartgen/reference/cli/) — every flag.
+- [Indicators](/chartgen/reference/indicators/) — all 38 with sample renders and parameters.
+- [MCP integration](/chartgen/reference/mcp/) — the 15 tools exposed over stdio and HTTP.
+- [Trading](/chartgen/guides/trading/) — alerts, orders, and the live engine.
+- [Push notifications](/chartgen/guides/notifications/) — SSE subscriptions for triggered alerts.
+- [Deployment](/chartgen/guides/deploy/) — Docker, Coolify, release binaries, reverse proxy.
+- [OAuth](/chartgen/reference/oauth/) — Claude.ai connector flow.
+- [Persistence](/chartgen/reference/persistence/) — on-disk state formats.
