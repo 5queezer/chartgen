@@ -49,14 +49,19 @@ cargo run -- --serve --port 9315
 
 ## Run in trading mode
 
-Combine `--serve` with `--trade` to stream a live Binance WebSocket feed and
-expose order, position, and alert tools:
+`--trade` streams a live Binance WebSocket feed, runs the alert engine, and
+exposes the order / position / alert MCP tools over the same HTTP + OAuth
+server as `--serve`:
 
 ```bash
-cargo run -- --serve --trade --testnet --symbol BTCUSDT --interval 1h
+cargo run -- --trade --testnet --symbol BTCUSDT --interval 1h --port 9315
 ```
 
-State lives under `~/.chartgen/` (`alerts.json`, `trades.log`, `subscriptions.json`).
+`--trade` and `--serve` are mutually exclusive — mode dispatch in
+`src/main.rs` picks the first match and returns. Use `--trade` when you want
+the trading engine (it already serves HTTP); use `--serve` when you only need
+the charting tools. State lives under `~/.chartgen/` (`alerts.json`,
+`trades.log`, `subscriptions.json`).
 
 ## Run tests
 

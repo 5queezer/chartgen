@@ -46,6 +46,16 @@ Writes use a `.tmp` + rename sequence so readers never see a partial file.
 The engine only rewrites `alerts.json` when the set changes (add, remove, or
 fire) — idle bars cost zero writes.
 
+:::note[On-disk vs wire format]
+The condition keys above (`PriceAbove`, `PriceBelow`, `IndicatorSignal`) are
+`PascalCase` because the `AlertCondition` enum in `src/trading/alert.rs`
+uses serde's default externally-tagged encoding. The **MCP `set_alert` tool**
+accepts `snake_case` (`price_above`, etc.) and translates it into the enum
+at the request boundary in `src/mcp.rs`. If you are editing `alerts.json`
+directly, use PascalCase; if you are calling `set_alert` over MCP, use
+snake_case — see the [trading guide](/chartgen/guides/trading/#alerts).
+:::
+
 See the [trading guide](/chartgen/guides/trading/#signal-labels) for the
 valid `signal` labels.
 
@@ -53,7 +63,7 @@ valid `signal` labels.
 
 Append-only audit trail. One line per event, UTC timestamps:
 
-```
+```text
 2026-04-19T12:34:56Z SUBMITTED buy BTCUSDT 0.01 market id=abc123
 2026-04-19T12:34:57Z FILLED   buy BTCUSDT 0.01 @ 67432.5 id=abc123
 2026-04-19T13:00:00Z CANCELLED id=def456

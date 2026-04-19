@@ -4,14 +4,19 @@ description: Live WebSocket feed, order lifecycle, and price/indicator alerts.
 ---
 
 `--trade` starts a live engine: a Binance WebSocket kline feed, a rolling
-200-bar indicator state manager, an order tracker, and an alert engine.
-Combine with `--serve` to expose 12 extra MCP tools over HTTP.
+200-bar indicator state manager, an order tracker, and an alert engine — and
+serves them over the same HTTP + OAuth stack as `--serve`, exposing 12 extra
+MCP tools on top of the 3 charting tools.
 
 ```bash
-chartgen --serve --trade --testnet \
+chartgen --trade --testnet \
   --symbol BTCUSDT --interval 1h \
-  -p cipher_b -p rsi_mfi_stoch
+  --port 9315 -p cipher_b -p rsi_mfi_stoch
 ```
+
+`--trade` and `--serve` are mutually exclusive — mode dispatch in
+`src/main.rs` picks the first match and returns. Don't combine them;
+`--trade` alone does everything `--serve` does plus the trading engine.
 
 :::caution[Orders are currently local-only]
 `place_order` creates an entry in the local `OrderTracker` and writes a
@@ -70,7 +75,7 @@ returns exchange balances (requires credentials).
 
 Every order state transition is appended to `~/.chartgen/trades.log`:
 
-```
+```text
 2026-04-19T12:34:56Z SUBMITTED buy BTCUSDT 0.01 market id=abc123
 2026-04-19T12:34:57Z FILLED   buy BTCUSDT 0.01 @ 67432.5 id=abc123
 ```
