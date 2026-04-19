@@ -1881,17 +1881,10 @@ fn session_ranges(
     let mut out = Vec::new();
     let mut cur_bucket: Option<i64> = None;
     let mut start = 0;
-    let mut any_parsed = false;
     for i in 0..n {
         let ts = match data.bars[i].date.parse::<i64>() {
-            Ok(v) => {
-                any_parsed = true;
-                v
-            }
-            Err(_) => {
-                cur_bucket = None;
-                continue;
-            }
+            Ok(v) => v,
+            Err(_) => return vec![(0, n)],
         };
         let bucket = ts.div_euclid(period_secs);
         match cur_bucket {
@@ -1906,9 +1899,6 @@ fn session_ranges(
                 start = i;
             }
         }
-    }
-    if !any_parsed {
-        return vec![(0, n)];
     }
     out.push((start, n));
     out
@@ -2143,8 +2133,9 @@ impl Indicator for HvnLvn {
         let k = self.neighborhood.max(1);
         let min_abs = prof.max_bin_volume * self.min_prominence;
 
-        let mut hvns: Vec<(usize, f64)> = Vec::new();
-        let mut lvns: Vec<(usize, f64)> = Vec::new();
+        // Each entry: (price, prominence). Prominence = |v - nearest-neighbor-extreme|.
+        let mut hvns: Vec<(f64, f64)> = Vec::new();
+        let mut lvns: Vec<(f64, f64)> = Vec::new();
         for i in 0..bins {
             let v = prof.volume_bins[i];
             let lo = i.saturating_sub(k);
@@ -2173,7 +2164,7 @@ impl Indicator for HvnLvn {
             }
             let price = prof.price_min + (i as f64 + 0.5) * prof.bin_size;
             if is_max && (v - nbr_max) >= min_abs && v > 0.0 {
-                hvns.push((i, price));
+                hvns.push((price, v - nbr_max));
             }
             if is_min
                 && nbr_max.is_finite()
@@ -2181,28 +2172,22 @@ impl Indicator for HvnLvn {
                 && (nbr_max - v) >= min_abs
                 && v < prof.max_bin_volume
             {
-                lvns.push((i, price));
+                lvns.push((price, nbr_max - v));
             }
         }
 
-        // Rank by strength (HVN: raw vol, LVN: neighbor-max - v)
-        hvns.sort_by(|a, b| {
-            prof.volume_bins[b.0]
-                .partial_cmp(&prof.volume_bins[a.0])
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
-        lvns.sort_by(|a, b| {
-            prof.volume_bins[a.0]
-                .partial_cmp(&prof.volume_bins[b.0])
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
+        let by_prominence_desc = |a: &(f64, f64), b: &(f64, f64)| {
+            b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
+        };
+        hvns.sort_by(by_prominence_desc);
+        lvns.sort_by(by_prominence_desc);
         if let Some(k) = self.top_n {
             hvns.truncate(k);
             lvns.truncate(k);
         }
 
         if self.show_hvn {
-            for (_, price) in &hvns {
+            for (price, _) in &hvns {
                 out.hlines.push(HLine {
                     y: *price,
                     color: rgba(0x26a69a, 0.75),
@@ -2210,7 +2195,7 @@ impl Indicator for HvnLvn {
             }
         }
         if self.show_lvn {
-            for (_, price) in &lvns {
+            for (price, _) in &lvns {
                 out.hlines.push(HLine {
                     y: *price,
                     color: rgba(0xef5350, 0.55),
@@ -2347,8 +2332,10 @@ impl Indicator for NakedPoc {
                 continue;
             }
 
+            // Draw the naked POC only from session close onwards — it isn't
+            // known before the source session ends.
             let mut y = vec![f64::NAN; n];
-            for slot in y.iter_mut().skip(*s) {
+            for slot in y.iter_mut().skip(*e) {
                 *slot = poc;
             }
             out.lines.push(Line {
