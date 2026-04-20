@@ -159,7 +159,11 @@ Series payload shape (for `format=series`):
     "bbands": {
       "label": "BB",
       "is_overlay": true,
-      "lines": [ /* upper, middle, lower */ ],
+      "lines": [
+        { "index": 0, "label": "upper", "values": [null, null, 67400.5, 67511.7] },
+        { "index": 1, "label": "middle", "values": [null, null, 67051.3, 67163.1] },
+        { "index": 2, "label": "lower", "values": [null, null, 66702.1, 66814.5] }
+      ],
       "fills": [
         { "y1": [null, null, 67300.1, 67410.9], "y2": [null, null, 66802.4, 66915.3] }
       ]
