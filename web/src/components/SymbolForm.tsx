@@ -29,7 +29,7 @@ const inputClass =
   "bg-[color:var(--color-bg-elev)] border border-[color:var(--color-border)] rounded-md px-3 py-1.5 text-sm text-[color:var(--color-fg)] focus:outline-none focus:border-[color:var(--color-accent)]";
 
 const buttonClass =
-  "bg-[color:var(--color-accent)] text-black px-4 py-1.5 rounded-md text-sm font-medium hover:opacity-90 disabled:opacity-50 disabled:cursor-not-allowed";
+  "bg-[color:var(--color-accent)] text-white px-4 py-1.5 rounded-md text-sm font-medium hover:opacity-90 disabled:opacity-50 disabled:cursor-not-allowed";
 
 export function SymbolForm(props: SymbolFormProps): JSX.Element {
   const onSubmit = (e: Event) => {

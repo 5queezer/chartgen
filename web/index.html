@@ -5,6 +5,19 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>chartgen</title>
     <meta name="description" content="chartgen web frontend" />
+    <!-- Inter sans-serif per ADR-0006 (TradingView visual parity). Served
+         from Google Fonts CDN: zero bundle cost, zero build complexity.
+         Modern browsers (Chrome 86+, Firefox, Safari) partition caches by
+         top-level site, so cross-site font reuse is NOT a benefit here.
+         We accept the third-party privacy tradeoff for v0.2; revisit and
+         self-host via @fontsource/inter if privacy becomes a stated
+         product requirement. -->
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap"
+      rel="stylesheet"
+    />
   </head>
   <body>
     <div id="root"></div>
