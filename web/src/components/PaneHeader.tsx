@@ -55,7 +55,7 @@ export function PaneHeader(props: PaneHeaderProps): JSX.Element {
       <For each={props.lines}>
         {(line) => (
           <span class="pane-header-value" style={{ color: line.color }}>
-            {formatValue(line.value)}
+            {line.label} {formatValue(line.value)}
           </span>
         )}
       </For>
