@@ -10,7 +10,12 @@ import type { Notification } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 
 import type { GenerateChartInput } from "./types/generated-input";
-import { SeriesPayloadSchema, type SeriesPayload } from "./types/responses";
+import {
+  ListIndicatorsPayloadSchema,
+  SeriesPayloadSchema,
+  type ListIndicatorsPayload,
+  type SeriesPayload,
+} from "./types/responses";
 import { clearAccessToken, getAccessToken } from "./oauth";
 
 // Validate the MCP `CallToolResult` shape at the boundary (ADR-0004)
@@ -43,7 +48,10 @@ export interface McpSession {
   callGenerateChart: (args: {
     ticker: string;
     timeframe: string;
+    indicators: GenerateChartInput["indicators"];
   }) => Promise<SeriesPayload>;
+  /** Invoke `list_indicators` and parse the response. */
+  callListIndicators: () => Promise<ListIndicatorsPayload>;
   /** Install a handler invoked for every `notifications/*` frame. */
   onNotification: (handler: AlertNotificationHandler) => void;
   /** Close the underlying transport. */
@@ -164,18 +172,22 @@ export function createMcpSession(): McpSession {
   }
 
   return {
-    async callGenerateChart({ ticker, timeframe }) {
+    async callGenerateChart({ ticker, timeframe, indicators }) {
       const args: GenerateChartInput = {
         ticker,
         timeframe,
         format: "series",
-        indicators: ["rsi"],
+        indicators,
       };
       const json = await callToolWithAuthRetry(
         "generate_chart",
         args as unknown as Record<string, unknown>,
       );
       return SeriesPayloadSchema.parse(json);
+    },
+    async callListIndicators() {
+      const json = await callToolWithAuthRetry("list_indicators", {});
+      return ListIndicatorsPayloadSchema.parse(json);
     },
     onNotification(handler) {
       state.notificationHandler = handler;
