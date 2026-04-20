@@ -7,10 +7,23 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type { Notification } from "@modelcontextprotocol/sdk/types.js";
+import { z } from "zod";
 
 import type { GenerateChartInput } from "./types/generated-input";
 import { SeriesPayloadSchema, type SeriesPayload } from "./types/responses";
 import { clearAccessToken, getAccessToken } from "./oauth";
+
+// Validate the MCP `CallToolResult` shape at the boundary (ADR-0004)
+// instead of casting the SDK's `unknown`-typed return value.
+const CallToolResultSchema = z.object({
+  content: z.array(
+    z.object({
+      type: z.string(),
+      text: z.string().optional(),
+    }),
+  ),
+  isError: z.boolean().optional(),
+});
 
 const BASE_URL =
   (import.meta.env.VITE_CHARTGEN_BASE_URL as string | undefined) ?? "";
@@ -138,12 +151,7 @@ export function createMcpSession(): McpSession {
     let conn = await ensureConnected();
     try {
       const result = await conn.client.callTool({ name, arguments: args });
-      return extractJsonFromResult(
-        result as {
-          content: Array<{ type: string; text?: string }>;
-          isError?: boolean;
-        },
-      );
+      return extractJsonFromResult(CallToolResultSchema.parse(result));
     } catch (err) {
       if (!isUnauthorized(err)) throw err;
       // Re-auth once, then retry.
@@ -151,12 +159,7 @@ export function createMcpSession(): McpSession {
       await dropConnection();
       conn = await ensureConnected();
       const result = await conn.client.callTool({ name, arguments: args });
-      return extractJsonFromResult(
-        result as {
-          content: Array<{ type: string; text?: string }>;
-          isError?: boolean;
-        },
-      );
+      return extractJsonFromResult(CallToolResultSchema.parse(result));
     }
   }
 

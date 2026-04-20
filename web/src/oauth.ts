@@ -8,6 +8,8 @@
 // registrations as stable identifiers. PKCE state survives the redirect
 // via sessionStorage.
 
+import { z } from "zod";
+
 const LS_CLIENT_ID = "chartgen.oauth.client_id";
 const LS_CLIENT_SECRET = "chartgen.oauth.client_secret";
 const SS_PKCE = "chartgen.oauth.pkce";
@@ -23,11 +25,24 @@ function url(path: string): string {
   return path;
 }
 
-interface DiscoveryDocument {
-  authorization_endpoint: string;
-  token_endpoint: string;
-  registration_endpoint: string;
-}
+// Zod schemas for OAuth HTTP responses (ADR-0004: validate at the boundary).
+const DiscoveryDocumentSchema = z.object({
+  authorization_endpoint: z.string().url(),
+  token_endpoint: z.string().url(),
+  registration_endpoint: z.string().url(),
+});
+type DiscoveryDocument = z.infer<typeof DiscoveryDocumentSchema>;
+
+const RegistrationResponseSchema = z.object({
+  client_id: z.string(),
+  client_secret: z.string().optional(),
+});
+
+const TokenResponseSchema = z.object({
+  access_token: z.string(),
+  token_type: z.string().optional(),
+  expires_in: z.number().optional(),
+});
 
 interface PkceState {
   code_verifier: string;
@@ -71,8 +86,7 @@ async function discover(): Promise<DiscoveryDocument> {
   if (!res.ok) {
     throw new Error(`discovery failed: ${res.status}`);
   }
-  const doc = (await res.json()) as DiscoveryDocument;
-  return doc;
+  return DiscoveryDocumentSchema.parse(await res.json());
 }
 
 async function registerClient(registration_endpoint: string): Promise<{
@@ -94,10 +108,7 @@ async function registerClient(registration_endpoint: string): Promise<{
   if (!res.ok) {
     throw new Error(`registration failed: ${res.status}`);
   }
-  const body = (await res.json()) as {
-    client_id: string;
-    client_secret?: string;
-  };
+  const body = RegistrationResponseSchema.parse(await res.json());
   const client_secret = body.client_secret ?? "";
   return { client_id: body.client_id, client_secret };
 }
@@ -175,7 +186,7 @@ async function exchangeCode(
   if (!res.ok) {
     throw new Error(`token exchange failed: ${res.status}`);
   }
-  const json = (await res.json()) as { access_token: string };
+  const json = TokenResponseSchema.parse(await res.json());
   return json.access_token;
 }
 
@@ -212,7 +223,11 @@ async function tryConsumeRedirect(): Promise<boolean> {
   cachedAccessToken = token;
 
   // Scrub `code`/`state` from the URL so a refresh doesn't retrigger.
-  const cleanUrl = window.location.origin + window.location.pathname;
+  // Preserve the hash so any in-page anchor/route survives the scrub.
+  const cleanUrl =
+    window.location.origin +
+    window.location.pathname +
+    window.location.hash;
   window.history.replaceState({}, "", cleanUrl);
   return true;
 }
