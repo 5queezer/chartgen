@@ -33,3 +33,4 @@ one and link both ways.
 | [0002](/chartgen/decisions/0002-mcp-transport-streamable-http/) | MCP transport: Streamable HTTP 2025-03-26 | Accepted | 2026-04-19 |
 | [0003](/chartgen/decisions/0003-web-frontend-stack/) | Web frontend stack: SolidJS + TanStack Query + Kobalte + Tailwind v4 | Accepted | 2026-04-19 |
 | [0004](/chartgen/decisions/0004-mcp-type-safety/) | Type safety: codegen from MCP schemas + Zod at boundary | Accepted | 2026-04-19 |
+| [0005](/chartgen/decisions/0005-client-indicator-state/) | Client-side indicator state with localStorage persistence | Accepted | 2026-04-20 |
