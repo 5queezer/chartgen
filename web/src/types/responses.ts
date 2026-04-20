@@ -58,6 +58,29 @@ export const HLineSchema = z.object({
   y: z.number(),
 });
 
+export const SeriesFillSchema = z.object({
+  y1: z.array(FiniteOrNull),
+  y2: z.array(FiniteOrNull),
+});
+
+export const SeriesHBarSchema = z.object({
+  y: z.number(),
+  height: z.number(),
+  width: z.number(),
+  offset: z.number(),
+  left: z.boolean(),
+});
+
+export const SeriesDivLineSchema = z.object({
+  x1: z.number().int(),
+  t1: z.number().int().nullable(),
+  y1: z.number(),
+  x2: z.number().int(),
+  t2: z.number().int().nullable(),
+  y2: z.number(),
+  dashed: z.boolean(),
+});
+
 export const YRangeSchema = z.tuple([FiniteOrNull, FiniteOrNull]);
 
 export const SeriesIndicatorSchema = z.object({
@@ -68,6 +91,9 @@ export const SeriesIndicatorSchema = z.object({
   histogram: z.array(SeriesHistogramBucketSchema).optional(),
   signals: z.array(SeriesSignalSchema).optional(),
   hlines: z.array(HLineSchema).optional(),
+  fills: z.array(SeriesFillSchema).optional(),
+  hbars: z.array(SeriesHBarSchema).optional(),
+  divlines: z.array(SeriesDivLineSchema).optional(),
 });
 
 export const SeriesPayloadSchema = z.object({

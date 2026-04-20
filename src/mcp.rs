@@ -534,6 +534,73 @@ fn panel_result_to_series_json(
         out["hlines"] = json!(hlines);
     }
 
+    // Fills: shaded regions between two y-series (BBands, Keltner, Ichimoku
+    // cloud, VWAP bands). y1/y2 are 1:1 aligned with bars[]; NaN → null.
+    if !pr.fills.is_empty() {
+        let fills: Vec<Value> = pr
+            .fills
+            .iter()
+            .map(|f| {
+                let y1: Vec<Value> = f.y1.iter().map(|v| finite_or_null(*v)).collect();
+                let y2: Vec<Value> = f.y2.iter().map(|v| finite_or_null(*v)).collect();
+                json!({ "y1": y1, "y2": y2 })
+            })
+            .collect();
+        out["fills"] = json!(fills);
+    }
+
+    // Horizontal bars (VPVR, Session VP, HVN/LVN, Naked POC, TPO). Axis-
+    // relative numerics preserved from the struct; color is dropped — the
+    // client themes per indicator.
+    if !pr.hbars.is_empty() {
+        let hbars: Vec<Value> = pr
+            .hbars
+            .iter()
+            .map(|h| {
+                json!({
+                    "y": h.y,
+                    "height": h.height,
+                    "width": h.width,
+                    "offset": h.offset,
+                    "left": h.left,
+                })
+            })
+            .collect();
+        out["hbars"] = json!(hbars);
+    }
+
+    // Divergence lines: two-point segments (WaveTrend, RSI divs in Cipher B).
+    // Each endpoint carries both `x` (bar index) and `t` (unix seconds) to
+    // mirror the signal pattern; color is dropped.
+    if !pr.divlines.is_empty() {
+        let divlines: Vec<Value> = pr
+            .divlines
+            .iter()
+            .map(|d| {
+                let t1 = if d.x1 < data.bars.len() {
+                    bar_t(&data.bars[d.x1])
+                } else {
+                    Value::Null
+                };
+                let t2 = if d.x2 < data.bars.len() {
+                    bar_t(&data.bars[d.x2])
+                } else {
+                    Value::Null
+                };
+                json!({
+                    "x1": d.x1,
+                    "t1": t1,
+                    "y1": d.y1,
+                    "x2": d.x2,
+                    "t2": t2,
+                    "y2": d.y2,
+                    "dashed": d.dashed,
+                })
+            })
+            .collect();
+        out["divlines"] = json!(divlines);
+    }
+
     out
 }
 
@@ -1968,6 +2035,140 @@ mod tests {
         assert_eq!(resp["id"], 1);
         assert_eq!(resp["result"]["protocolVersion"], "2025-03-26");
         assert_eq!(resp["result"]["serverInfo"]["name"], "chartgen");
+    }
+
+    #[test]
+    fn series_includes_fills_when_indicator_emits_them() {
+        // Bollinger Bands emits a Fill between upper/lower bands. Series must
+        // expose it as fills[*].y1/y2 arrays aligned 1:1 with bars[].
+        let args = json!({
+            "bars": 60,
+            "indicators": ["bbands"],
+            "format": "series"
+        });
+        let resp = tool_generate_chart(Some(json!(1)), &args);
+        let text = chart_content(&resp)[0]["text"].as_str().unwrap();
+        let parsed: Value = serde_json::from_str(text).unwrap();
+
+        assert_eq!(parsed["bars"].as_array().unwrap().len(), 60);
+        let bb = &parsed["indicators"]["bbands"];
+        let fills = bb["fills"]
+            .as_array()
+            .expect("bbands series must include fills");
+        assert!(!fills.is_empty());
+        let y1 = fills[0]["y1"].as_array().unwrap();
+        let y2 = fills[0]["y2"].as_array().unwrap();
+        assert_eq!(y1.len(), 60, "fills.y1 must be 1:1 with bars");
+        assert_eq!(y2.len(), 60, "fills.y2 must be 1:1 with bars");
+        // Last bar must carry finite upper/lower band values with upper >= lower.
+        assert!(y1[59].is_number());
+        assert!(y2[59].is_number());
+        assert!(y1[59].as_f64().unwrap() >= y2[59].as_f64().unwrap());
+    }
+
+    #[test]
+    fn series_includes_hbars_for_vpvr() {
+        // VPVR emits horizontal bars at price levels. Series must expose them
+        // as hbars[*] with numeric y/height/width/offset and a boolean left.
+        let args = json!({
+            "bars": 120,
+            "indicators": ["vpvr"],
+            "format": "series"
+        });
+        let resp = tool_generate_chart(Some(json!(1)), &args);
+        let text = chart_content(&resp)[0]["text"].as_str().unwrap();
+        let parsed: Value = serde_json::from_str(text).unwrap();
+
+        let vpvr = &parsed["indicators"]["vpvr"];
+        let hbars = vpvr["hbars"]
+            .as_array()
+            .expect("vpvr series must include hbars");
+        assert!(!hbars.is_empty());
+        let first = &hbars[0];
+        assert!(first["y"].is_number());
+        assert!(first["height"].is_number());
+        assert!(first["width"].is_number());
+        assert!(first["offset"].is_number());
+        assert!(first["left"].is_boolean());
+    }
+
+    #[test]
+    fn series_includes_divlines_when_indicator_emits_them() {
+        // cipher_b produces divergence lines under the right conditions. Call
+        // the serializer directly on a synthetic PanelResult so the test is
+        // deterministic and doesn't depend on sample_data hitting a divergence.
+        use chartgen::data::{Bar, OhlcvData};
+        use chartgen::indicator::{DivLine, PanelResult};
+        use plotters::style::RGBAColor;
+
+        let data = OhlcvData {
+            bars: (0..5)
+                .map(|i| Bar {
+                    open: 1.0,
+                    high: 1.0,
+                    low: 1.0,
+                    close: 1.0,
+                    volume: 1.0,
+                    date: format!("{}", 1_713_427_200_u64 + i * 3600),
+                })
+                .collect(),
+            symbol: None,
+            interval: None,
+        };
+        let pr = PanelResult {
+            divlines: vec![DivLine {
+                x1: 1,
+                y1: 30.2,
+                x2: 4,
+                y2: 18.7,
+                color: RGBAColor(0, 255, 0, 0.8),
+                dashed: true,
+            }],
+            ..Default::default()
+        };
+
+        let j = panel_result_to_series_json(&pr, &data);
+        let divs = j["divlines"]
+            .as_array()
+            .expect("panel with divlines must emit divlines[]");
+        assert_eq!(divs.len(), 1);
+        let d = &divs[0];
+        assert_eq!(d["x1"], 1);
+        assert_eq!(d["y1"], 30.2);
+        assert_eq!(d["x2"], 4);
+        assert_eq!(d["y2"], 18.7);
+        assert_eq!(d["dashed"], true);
+        // t1/t2 must mirror bar_t for the bar at x1/x2.
+        assert_eq!(d["t1"], json!(1_713_427_200_u64 + 3600));
+        assert_eq!(d["t2"], json!(1_713_427_200_u64 + 4 * 3600));
+    }
+
+    #[test]
+    fn series_omits_channels_when_empty() {
+        // An indicator that produces no fills/hbars/divlines must not include
+        // those keys — matches the existing pattern for lines/histogram.
+        let args = json!({
+            "bars": 60,
+            "indicators": ["rsi"],
+            "format": "series"
+        });
+        let resp = tool_generate_chart(Some(json!(1)), &args);
+        let text = chart_content(&resp)[0]["text"].as_str().unwrap();
+        let parsed: Value = serde_json::from_str(text).unwrap();
+
+        let rsi = &parsed["indicators"]["rsi"];
+        assert!(
+            rsi.get("fills").is_none(),
+            "fills must be omitted when empty"
+        );
+        assert!(
+            rsi.get("hbars").is_none(),
+            "hbars must be omitted when empty"
+        );
+        assert!(
+            rsi.get("divlines").is_none(),
+            "divlines must be omitted when empty"
+        );
     }
 
     #[test]
