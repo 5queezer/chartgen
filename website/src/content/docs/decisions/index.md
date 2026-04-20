@@ -36,3 +36,4 @@ one and link both ways.
 | [0005](/chartgen/decisions/0005-client-indicator-state/) | Client-side indicator state with localStorage persistence | Accepted | 2026-04-20 |
 | [0006](/chartgen/decisions/0006-tradingview-visual-parity/) | TradingView visual parity for the web frontend | Accepted | 2026-04-19 |
 | [0007](/chartgen/decisions/0007-complete-series-serialization/) | Complete series serialization: fills, hbars, divlines | Accepted | 2026-04-19 |
+| [0008](/chartgen/decisions/0008-e2e-playwright/) | End-to-end tests with Playwright + CI integration | Accepted | 2026-04-19 |
