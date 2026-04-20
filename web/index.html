@@ -5,6 +5,16 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>chartgen</title>
     <meta name="description" content="chartgen web frontend" />
+    <!-- Inter sans-serif per ADR-0006 (TradingView visual parity). Served
+         from Google Fonts CDN rather than bundled: the same font is already
+         likely cached from another site, and the ~30KB WOFF2 would add to
+         the dashboard bundle otherwise. -->
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap"
+      rel="stylesheet"
+    />
   </head>
   <body>
     <div id="root"></div>

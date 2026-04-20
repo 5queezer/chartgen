@@ -34,3 +34,4 @@ one and link both ways.
 | [0003](/chartgen/decisions/0003-web-frontend-stack/) | Web frontend stack: SolidJS + TanStack Query + Kobalte + Tailwind v4 | Accepted | 2026-04-19 |
 | [0004](/chartgen/decisions/0004-mcp-type-safety/) | Type safety: codegen from MCP schemas + Zod at boundary | Accepted | 2026-04-19 |
 | [0005](/chartgen/decisions/0005-client-indicator-state/) | Client-side indicator state with localStorage persistence | Accepted | 2026-04-20 |
+| [0006](/chartgen/decisions/0006-tradingview-visual-parity/) | TradingView visual parity for the web frontend | Accepted | 2026-04-19 |
