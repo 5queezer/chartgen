@@ -51,7 +51,13 @@ export interface GenerateChartInput {
   /**
    * Alias for indicators.
    */
-  panels?: unknown[];
+  panels?: (
+    | string
+    | {
+        name: string;
+        [k: string]: unknown;
+      }
+  )[];
   /**
    * Alias for ticker. Stock or crypto symbol.
    */

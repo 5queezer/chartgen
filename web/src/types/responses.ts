@@ -38,7 +38,7 @@ export const SeriesBarSchema = z.object({
 
 export const SeriesLineSchema = z.object({
   index: z.number().int(),
-  label: z.string(),
+  label: z.string().nullable(),
   values: z.array(FiniteOrNull),
 });
 
@@ -118,7 +118,7 @@ export const OhlcvSummarySchema = z.union([
 
 export const SummaryLineSchema = z.object({
   index: z.number().int(),
-  label: z.string(),
+  label: z.string().nullable(),
   last_value: FiniteOrNull,
 });
 

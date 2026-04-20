@@ -58,6 +58,19 @@ pub fn tools_list_result() -> Value {
                         },
                         "panels": {
                             "type": "array",
+                            "items": {
+                                "oneOf": [
+                                    { "type": "string" },
+                                    {
+                                        "type": "object",
+                                        "properties": {
+                                            "name": { "type": "string" }
+                                        },
+                                        "required": ["name"],
+                                        "additionalProperties": true
+                                    }
+                                ]
+                            },
                             "description": "Alias for indicators."
                         },
                         "bars": {
