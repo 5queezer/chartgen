@@ -138,6 +138,10 @@ Auto-detection: `USDT`/`BTC`/`ETH` suffixes → Binance, everything else → Yah
 
 Add `https://chartgen.vasudev.xyz` as a remote MCP connector. OAuth 2.1 PKCE is handled automatically.
 
+### Web frontend
+
+A SolidJS browser SPA lives in [`web/`](web/) — one-screen chart viewer with the same OAuth PKCE flow. See the [Web frontend guide](https://5queezer.github.io/chartgen/guides/web/).
+
 ### Tools
 
 Charting:
