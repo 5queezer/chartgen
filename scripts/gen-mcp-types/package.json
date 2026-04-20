@@ -1,0 +1,13 @@
+{
+  "name": "chartgen-gen-mcp-types",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Codegen for TypeScript interfaces from chartgen's MCP tool inputSchema (see ADR-0004).",
+  "scripts": {
+    "build": "node generate.mjs"
+  },
+  "dependencies": {
+    "json-schema-to-typescript": "^15.0.4"
+  }
+}

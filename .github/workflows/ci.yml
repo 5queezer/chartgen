@@ -63,6 +63,26 @@ jobs:
             exit 1
           fi
 
+  mcp-types-drift:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y libfontconfig1-dev libfreetype-dev
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: scripts/gen-mcp-types/package-lock.json
+      - run: ./scripts/gen-mcp-types.sh
+      - name: Fail if generated MCP types drift from committed
+        run: |
+          if ! git diff --exit-code web/src/types/generated-input.ts; then
+            echo "::error::web/src/types/generated-input.ts is out of sync. Run './scripts/gen-mcp-types.sh' and commit the result." >&2
+            exit 1
+          fi
+
   build-release:
     runs-on: ubuntu-latest
     needs: [check, clippy, fmt]
