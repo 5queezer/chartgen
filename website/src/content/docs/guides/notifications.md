@@ -4,11 +4,21 @@ description: Subscribe to triggered alerts via SSE instead of polling.
 ---
 
 Under `--trade`, chartgen pushes triggered alerts to subscribed clients over
-the persistent SSE stream on `/mcp` and `/sse`. This is an alternative to
-polling [`get_notifications`](/chartgen/reference/mcp/#alerts-require---trade).
+the persistent SSE stream on `GET /mcp` (with `GET /sse` retained as a
+back-compat alias). This is an alternative to polling
+[`get_notifications`](/chartgen/reference/mcp/#alerts-require---trade).
 
 A subscription is bound to the access token in use, so each Claude.ai
 connection has its own filters and offline queue.
+
+:::note
+The server uses the **MCP Streamable HTTP transport (spec 2025-03-26)**.
+`GET /mcp` does **not** emit a legacy `event: endpoint` frame or rotate a
+`session_id` — clients send every request to `POST /mcp` directly and read
+server-initiated notifications from the SSE stream as raw JSON-RPC
+notification frames. See the [MCP reference](/chartgen/reference/mcp/) for
+the transport details.
+:::
 
 ## Subscribing
 

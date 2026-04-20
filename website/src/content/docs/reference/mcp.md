@@ -6,6 +6,11 @@ description: Connect chartgen to Claude Desktop or Claude.ai — 15 tools across
 chartgen speaks the Model Context Protocol over both stdio (Claude Desktop)
 and HTTP (Claude.ai). Both transports share the same tool definitions.
 
+The HTTP transport implements **MCP Streamable HTTP, spec
+[2025-03-26](https://spec.modelcontextprotocol.io/specification/2025-03-26/basic/transports/)**.
+See [ADR-0002](/chartgen/decisions/0002-mcp-transport-streamable-http/) for
+the migration rationale.
+
 ## Transports
 
 ### Claude Desktop (stdio)
@@ -23,13 +28,36 @@ Add chartgen to `claude_desktop_config.json`:
 }
 ```
 
-### Claude.ai (HTTP + OAuth 2.1 PKCE)
+### Claude.ai — Streamable HTTP (2025-03-26) + OAuth 2.1 PKCE
 
 Run `chartgen --serve` behind a TLS-terminating reverse proxy and add your
 domain as a remote MCP connector. OAuth is handled by chartgen — see the
 [OAuth reference](/chartgen/reference/oauth/) for the endpoint catalog and
-token lifetime. A persistent SSE stream on `/mcp` and `/sse` delivers push
-notifications — see [notifications](/chartgen/guides/notifications/).
+token lifetime.
+
+The connector uses a single endpoint — `/mcp` — in two modes:
+
+- **`POST /mcp`** — JSON-RPC 2.0 request/response. The server negotiates
+  `Content-Type` based on the client's `Accept` header. Streamable HTTP
+  clients send `Accept: application/json, text/event-stream`; chartgen's
+  synchronous tool calls return `Content-Type: application/json` with the
+  JSON-RPC response in the body. A client that explicitly excludes JSON
+  (e.g. `Accept: text/plain`) receives `406 Not Acceptable`. A missing
+  `Accept` header is tolerated and treated as `application/json`.
+- **`GET /mcp`** — optional server-initiated SSE stream. Used to deliver
+  push notifications such as `notifications/alert_triggered` as raw JSON-RPC
+  notification frames — see [push notifications](/chartgen/guides/notifications/).
+  Requires the Bearer token in the `Authorization` header.
+
+`Mcp-Session-Id` is supported: if a client sends the header on a `POST /mcp`
+request, the server echoes it back unchanged. chartgen's tool calls are
+stateless (auth is per-request via the Bearer token), so no server-side
+session state is tracked — the header is surfaced only for clients that
+correlate on it.
+
+`POST /` and `POST /message` are retained as aliases of `POST /mcp`, and
+`GET /sse` is retained as an alias of `GET /mcp`, for backwards compatibility
+with existing Claude.ai connector deployments that predate Streamable HTTP.
 
 ## Tool catalog
 

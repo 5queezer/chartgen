@@ -250,6 +250,7 @@ dependencies = [
  "futures-util",
  "hex",
  "hmac",
+ "http-body-util",
  "plotters",
  "rand",
  "reqwest",
@@ -259,6 +260,7 @@ dependencies = [
  "ta",
  "tokio",
  "tokio-tungstenite",
+ "tower",
  "tower-http",
  "uuid",
 ]

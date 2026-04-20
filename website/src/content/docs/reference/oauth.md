@@ -51,11 +51,14 @@ registration and token, and Claude.ai will re-register transparently.
 
 ## MCP handler behavior
 
+The HTTP transport is **MCP Streamable HTTP (spec 2025-03-26)**. See the
+[MCP reference](/chartgen/reference/mcp/) for the full transport description.
+
 | Endpoint | Behavior |
 |----------|----------|
 | `GET /` | Health / discovery JSON. Unauthenticated. |
-| `POST /mcp`, `POST /`, `POST /message` | JSON-RPC over HTTP. `tools/list` is accepted unauthenticated so the connector can enumerate tools before OAuth completes; `tools/call` requires a valid bearer token. |
-| `GET /mcp`, `GET /sse` | Persistent SSE stream. Pushes `notifications/alert_triggered` JSON-RPC messages to [subscribed clients](/chartgen/guides/notifications/). |
+| `POST /mcp` (aliases: `POST /`, `POST /message`) | JSON-RPC 2.0 over HTTP. `tools/list` and `initialize` are accepted unauthenticated so the connector can enumerate tools before OAuth completes; every other method requires a valid bearer token. Response `Content-Type: application/json`. Clients that send `Accept` without `application/json` receive `406 Not Acceptable`. An optional `Mcp-Session-Id` header is echoed back unchanged — chartgen does not track server-side session state. |
+| `GET /mcp` (alias: `GET /sse`) | Persistent SSE stream for server-initiated messages. Pushes `notifications/alert_triggered` JSON-RPC notification frames to [subscribed clients](/chartgen/guides/notifications/). No legacy `event: endpoint` frame is emitted — clients POST to `/mcp` directly. |
 
 ## Debugging
 
