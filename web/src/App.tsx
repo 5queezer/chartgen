@@ -85,7 +85,7 @@ export function App(): JSX.Element {
   return (
     <div class="flex flex-col h-screen w-screen">
       <header class="flex items-center gap-4 px-4 py-3 border-b border-[color:var(--color-border)]">
-        <h1 class="text-lg font-semibold mr-4">chartgen</h1>
+        <h1 class="text-lg font-semibold mr-4 leading-none">chartgen</h1>
         <SymbolForm
           ticker={ticker()}
           timeframe={timeframe()}
@@ -119,7 +119,10 @@ export function App(): JSX.Element {
         active={activeIndicators()}
       />
       <main class="flex-1 min-h-0">
-        <Chart series={query.data ?? null} />
+        <Chart
+          series={query.data ?? null}
+          activeIndicators={activeIndicators()}
+        />
       </main>
     </div>
   );
