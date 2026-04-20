@@ -155,6 +155,32 @@ Series payload shape (for `format=series`):
         { "x": 3, "t": 1713430800, "y": 72.1, "label": "rsi_overbought" }
       ],
       "hlines": [{ "y": 30.0 }, { "y": 70.0 }]
+    },
+    "bbands": {
+      "label": "BB",
+      "is_overlay": true,
+      "lines": [
+        { "index": 0, "label": "upper", "values": [null, null, 67400.5, 67511.7] },
+        { "index": 1, "label": "middle", "values": [null, null, 67051.3, 67163.1] },
+        { "index": 2, "label": "lower", "values": [null, null, 66702.1, 66814.5] }
+      ],
+      "fills": [
+        { "y1": [null, null, 67300.1, 67410.9], "y2": [null, null, 66802.4, 66915.3] }
+      ]
+    },
+    "vpvr": {
+      "label": "VPVR",
+      "is_overlay": true,
+      "hbars": [
+        { "y": 67432.5, "height": 12.1, "width": 0.82, "offset": 0.0, "left": true }
+      ]
+    },
+    "cipher_b": {
+      "label": "Cipher B",
+      "is_overlay": false,
+      "divlines": [
+        { "x1": 12, "t1": 1713427200, "y1": 30.2, "x2": 48, "t2": 1713556800, "y2": 18.7, "dashed": true }
+      ]
     }
   }
 }
@@ -166,6 +192,27 @@ bars, e.g. MACD). Pre-warmup indicator values are `null` (not truncated).
 Each signal carries both `x` (bar index) and `t` (unix seconds from the
 source feed, or `null` for synthetic sample data). `format=series` is
 exclusive — no PNG companion, a single text content item.
+
+Three additional channels round out the payload so the full set of
+`PanelResult` data an indicator emits is renderable on the wire — see
+[ADR-0007](/chartgen/decisions/0007-complete-series-serialization/):
+
+- **`fills`** — shaded regions between two y-series (Bollinger Bands,
+  Keltner Channels, Ichimoku cloud, VWAP bands). `y1` and `y2` are arrays
+  aligned 1:1 with `bars[]`; pre-warmup values are `null`.
+- **`hbars`** — horizontal bars at price levels, used by volume-profile
+  indicators (VPVR, Session VP, HVN/LVN, Naked POC, TPO). Each bar has a
+  price-space `y` and `height`, axis-relative `width` and `offset`
+  (0.0–1.0 as a fraction of chart width), and a boolean `left` that tells
+  the renderer which edge of the chart to anchor against.
+- **`divlines`** — two-point diagonal segments for divergences
+  (WaveTrend/RSI divergences in Cipher B, for example). Each endpoint
+  carries both `x` (bar index) and `t` (unix seconds, or `null` for
+  synthetic sample data), mirroring the signal shape, plus `dashed`.
+
+All three channels are omitted from the per-indicator object when the
+indicator emits none — matching the existing convention for `lines`,
+`histogram`, `signals`, and `hlines`.
 
 #### `list_indicators`
 
