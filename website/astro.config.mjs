@@ -38,6 +38,10 @@ export default defineConfig({
             { label: 'Persistence', slug: 'reference/persistence' },
           ],
         },
+        {
+          label: 'Decisions',
+          autogenerate: { directory: 'decisions' },
+        },
       ],
     }),
   ],
