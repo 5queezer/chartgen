@@ -42,12 +42,13 @@ export function SymbolForm(props: SymbolFormProps): JSX.Element {
       <TextField.Root
         value={props.ticker}
         onChange={(v) => props.onTickerChange(v)}
-        class="flex flex-col"
       >
-        <TextField.Label class="text-xs text-[color:var(--color-fg-muted)] mb-0.5">
-          Ticker
-        </TextField.Label>
-        <TextField.Input class={`${inputClass} w-32`} autocomplete="off" />
+        <TextField.Label class="sr-only">Ticker</TextField.Label>
+        <TextField.Input
+          class={`${inputClass} w-32`}
+          autocomplete="off"
+          placeholder="Ticker"
+        />
       </TextField.Root>
 
       <Select.Root<Timeframe>
@@ -66,16 +67,12 @@ export function SymbolForm(props: SymbolFormProps): JSX.Element {
           </Select.Item>
         )}
       >
-        <div class="flex flex-col">
-          <Select.Label class="text-xs text-[color:var(--color-fg-muted)] mb-0.5">
-            Timeframe
-          </Select.Label>
-          <Select.Trigger class={`${inputClass} w-24 text-left`}>
-            <Select.Value<Timeframe>>
-              {(state) => state.selectedOption()}
-            </Select.Value>
-          </Select.Trigger>
-        </div>
+        <Select.Label class="sr-only">Timeframe</Select.Label>
+        <Select.Trigger class={`${inputClass} w-24 text-left`}>
+          <Select.Value<Timeframe>>
+            {(state) => state.selectedOption()}
+          </Select.Value>
+        </Select.Trigger>
         <Select.Portal>
           <Select.Content class="bg-[color:var(--color-bg-elev)] border border-[color:var(--color-border)] rounded-md shadow-lg z-50">
             <Select.Listbox />
