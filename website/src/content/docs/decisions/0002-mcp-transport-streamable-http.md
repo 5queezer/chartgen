@@ -5,7 +5,7 @@ sidebar:
   order: 2
 ---
 
-**Status:** Accepted
+**Status:** Proposed
 **Date:** 2026-04-19
 
 ## Context and Problem Statement
