@@ -30,11 +30,12 @@ function load(): ActiveIndicator[] {
     if (raw === null) return [...DEFAULT_SET];
     const parsed = JSON.parse(raw);
     if (!Array.isArray(parsed)) return [...DEFAULT_SET];
-    // Keep only entries that match the wire contract; drop malformed
-    // items. An empty result is a legitimate user choice (cleared all
-    // indicators), so we respect it — we only fall back to defaults when
-    // the stored array itself is an empty array, not when filtering
-    // produced one.
+    // Two cases:
+    // 1. Stored array is explicitly empty → respect the user's choice
+    //    (they deliberately cleared all indicators).
+    // 2. Filter via isActiveIndicator drops every entry → treat the
+    //    stored data as corrupted and fall back to DEFAULT_SET rather
+    //    than presenting an empty chart silently.
     if (parsed.length === 0) return [];
     const valid = parsed.filter(isActiveIndicator);
     return valid.length > 0 ? valid : [...DEFAULT_SET];
