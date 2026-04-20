@@ -453,6 +453,9 @@ fn extract_bearer_token(headers: &HeaderMap) -> Option<&str> {
 /// response. Missing Accept is tolerated (treated as "accepts anything").
 /// Returns `true` if JSON is acceptable; `false` means the server should
 /// reply with 406 Not Acceptable.
+///
+/// Per RFC 7231 §5.3.1, a quality value of `q=0` means "not acceptable", so
+/// a media range with `q=0` is skipped even when the type matches.
 fn accepts_json(headers: &HeaderMap) -> bool {
     let accept = match headers.get(header::ACCEPT).and_then(|v| v.to_str().ok()) {
         Some(v) => v,
@@ -462,15 +465,36 @@ fn accepts_json(headers: &HeaderMap) -> bool {
     // `application/*` is acceptable. Streamable HTTP clients typically send
     // `application/json, text/event-stream`.
     for raw in accept.split(',') {
-        let token = raw.split(';').next().unwrap_or("").trim();
-        if token.eq_ignore_ascii_case("*/*")
+        let mut parts = raw.split(';');
+        let token = parts.next().unwrap_or("").trim();
+        let matches_json = token.eq_ignore_ascii_case("*/*")
             || token.eq_ignore_ascii_case("application/*")
-            || token.eq_ignore_ascii_case("application/json")
-        {
+            || token.eq_ignore_ascii_case("application/json");
+        if !matches_json {
+            continue;
+        }
+        // Honor `q=0` ("not acceptable"). Other q values still mean
+        // acceptable; we don't perform full quality-weighted negotiation.
+        let rejected = parts.any(|p| is_q_zero(p.trim()));
+        if !rejected {
             return true;
         }
     }
     false
+}
+
+/// Returns true when an Accept parameter is `q=0` (or `q=0.`, `q=0.0`, …) —
+/// RFC 7231 §5.3.1 quality value of zero, meaning "not acceptable".
+fn is_q_zero(param: &str) -> bool {
+    let rest = match param
+        .strip_prefix("q=")
+        .or_else(|| param.strip_prefix("Q="))
+    {
+        Some(r) => r.trim(),
+        None => return false,
+    };
+    // Accept "0", "0.", "0.0", "0.00", "0.000".
+    matches!(rest, "0" | "0." | "0.0" | "0.00" | "0.000")
 }
 
 /// Build a JSON-RPC 2.0 error response with an explicit id and code.
@@ -591,7 +615,12 @@ async fn mcp_handler(
     let params = body.get("params");
 
     // Notifications: no response body. Still echo the session id.
-    if method == "initialized" || method == "notifications/initialized" {
+    // Per JSON-RPC 2.0 §4.1, a frame without an `id` is a notification; a
+    // frame with an `id` is a request and MUST produce a matching response
+    // envelope — even when the method name matches a notification shape.
+    if (method == "initialized" || method == "notifications/initialized")
+        && body.get("id").is_none()
+    {
         let mut resp = StatusCode::NO_CONTENT.into_response();
         if let Some(sid) = session_id.as_deref() {
             if let Ok(val) = sid.parse() {
@@ -686,6 +715,12 @@ async fn sse_handler(State(state): State<SharedState>, headers: HeaderMap) -> Re
     // — Streamable HTTP clients POST to /mcp directly and read server
     // notifications as raw JSON-RPC frames.
     let stream = async_stream::stream! {
+        // Emit an immediate SSE comment so the response head is deterministic
+        // (useful for proxies flushing the response, and for tests that assert
+        // on the first frame). Comment lines beginning with ':' are ignored
+        // by spec-compliant SSE clients.
+        yield Ok::<_, std::convert::Infallible>(": connected\n\n".to_string());
+
         let mut rx = rx;
         let mut keepalive = tokio::time::interval(std::time::Duration::from_secs(30));
         keepalive.tick().await; // consume immediate first tick
@@ -884,6 +919,29 @@ mod tests {
         assert!(accepts_json(&h));
     }
 
+    #[test]
+    fn accepts_json_rejects_q_zero() {
+        // RFC 7231 §5.3.1: q=0 means "not acceptable".
+        let h = headers_with(&[("accept", "application/json;q=0")]);
+        assert!(!accepts_json(&h));
+    }
+
+    #[tokio::test]
+    async fn post_mcp_accept_q_zero_returns_406() {
+        let app = test_app();
+        let body = br#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#;
+        let req = Request::builder()
+            .method("POST")
+            .uri("/mcp")
+            .header("accept", "application/json;q=0")
+            .header("content-type", "application/json")
+            .body(Body::from(&body[..]))
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_ACCEPTABLE);
+    }
+
     // --- Streamable HTTP POST /mcp tests ---
 
     #[tokio::test]
@@ -1036,6 +1094,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn initialize_request_with_method_initialized_and_id_returns_response() {
+        // JSON-RPC 2.0 §4.1: a frame with an `id` is a request and MUST
+        // produce a matching response envelope, even if the method name
+        // matches a notification shape like `initialized`.
+        let app = test_app();
+        let body = br#"{"jsonrpc":"2.0","id":7,"method":"initialized"}"#;
+        let req = Request::builder()
+            .method("POST")
+            .uri("/mcp")
+            .header("accept", "application/json, text/event-stream")
+            .header("content-type", "application/json")
+            .body(Body::from(&body[..]))
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_ne!(
+            resp.status(),
+            StatusCode::NO_CONTENT,
+            "requests (id present) must not be treated as notifications"
+        );
+        assert_eq!(
+            resp.headers().get(header::CONTENT_TYPE).unwrap(),
+            "application/json"
+        );
+
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let parsed: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(parsed["jsonrpc"], "2.0");
+        assert_eq!(parsed["id"], 7);
+    }
+
+    #[tokio::test]
     async fn post_message_alias_also_works() {
         // /message is retained as an alias of /mcp for backward compat.
         let app = test_app();
@@ -1105,26 +1195,28 @@ mod tests {
             "text/event-stream"
         );
 
-        // Pull a small chunk of the body — with a 30s keepalive and no
-        // subscription, no frame should arrive promptly. Race an immediate
-        // frame read against a short timeout: anything that does land must
-        // NOT contain a legacy `event: endpoint` frame.
+        // The handler emits an immediate `: connected` SSE comment so the
+        // response head is deterministic. Assert unconditionally: a frame
+        // MUST arrive within the timeout, and it MUST NOT contain the legacy
+        // `event: endpoint` line.
         let mut body = resp.into_body();
         let first = tokio::time::timeout(
             std::time::Duration::from_millis(200),
             http_body_util::BodyExt::frame(&mut body),
         )
-        .await;
-        if let Ok(Some(Ok(frame))) = first {
-            if let Ok(data) = frame.into_data() {
-                let s = String::from_utf8_lossy(&data);
-                assert!(
-                    !s.contains("event: endpoint"),
-                    "Streamable HTTP must not emit the legacy endpoint event, got: {}",
-                    s
-                );
-            }
-        }
+        .await
+        .expect("first SSE frame did not arrive within 200ms")
+        .expect("SSE stream ended before first frame")
+        .expect("SSE frame read failed");
+        let data = first
+            .into_data()
+            .expect("first SSE frame must be a data frame");
+        let s = String::from_utf8_lossy(&data);
+        assert!(
+            !s.contains("event: endpoint"),
+            "Streamable HTTP must not emit the legacy endpoint event, got: {}",
+            s
+        );
     }
 
     #[tokio::test]
