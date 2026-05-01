@@ -44,6 +44,10 @@ export default defineConfig({
           label: 'Decisions',
           autogenerate: { directory: 'decisions' },
         },
+        {
+          label: 'Proposals',
+          autogenerate: { directory: 'proposals' },
+        },
       ],
     }),
   ],
