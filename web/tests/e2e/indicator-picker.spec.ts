@@ -98,9 +98,8 @@ test.describe("indicator picker", () => {
       page.getByRole("button", { name: `Remove ${newIndicatorName}` }),
     ).toBeVisible({ timeout: 30_000 });
 
-    // Click Load to seed a fresh query, then remove the chip and
-    // expect another refetch.
-    await page.getByRole("button", { name: "Load" }).click();
+    // The chart auto-loads after reload; once it has rendered, remove
+    // the chip and expect another refetch.
     await expectChartRendered(page);
 
     const refetchAfterRemove = page.waitForResponse(isGenerateChartCall, {

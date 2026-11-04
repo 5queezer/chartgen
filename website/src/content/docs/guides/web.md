@@ -8,10 +8,52 @@ The `web/` directory holds a SolidJS single-page app that connects to
 chart with an RSI panel. It implements
 [ADR-0003](/chartgen/decisions/0003-web-frontend-stack/).
 
-The v0.1 scope is deliberately narrow: ticker + timeframe + a Load
-button, and that's it. Alerts UI, order entry, multi-chart layouts,
-and LLM chat are explicitly out of scope until the core loop is
-solid.
+The scope is deliberately narrow: a top toolbar (symbol, timeframe,
+chart type), the indicator picker, and the chart. Alerts UI, order
+entry, multi-chart layouts, and LLM chat are explicitly out of scope
+until the core loop is solid.
+
+## Toolbar
+
+The chart loads automatically as soon as sign-in finishes and reloads
+whenever the symbol, timeframe, or indicator set changes. The previous
+chart stays on screen while the new one loads. There is no Load button; if a load fails, use **Retry** in the status line
+  or re-pick the current symbol or timeframe.
+
+- **Symbol** — the button shows the current ticker and opens the search
+  dialog. It filters a curated list of Binance USDT pairs and popular US
+  stocks, ETFs, indices, FX pairs and futures by ticker or name; with an
+  empty query it lists your recent symbols (last 10) first. There is no
+  search backend, so any other ticker can be typed and accepted with
+  Enter (it is uppercased). Tickers ending in `USDT`, `BUSD`, `BTC`,
+  `ETH`, `BNB`, `USDC` or `FDUSD` are fetched from Binance, everything
+  else from Yahoo Finance.
+- **Timeframe** — one-click buttons for 1m, 5m, 15m, 1h, 4h, 1D and 1W,
+  with the active one highlighted; the dropdown holds the rest (30m, 1M).
+- **Chart type** — Candles, Hollow candles (only up candles hollow), Bars (OHLC), Line, Area.
+  Heikin-Ashi is not offered because it needs client-side math
+  ([ADR-0003](/chartgen/decisions/0003-web-frontend-stack/)).
+
+Symbol, timeframe, chart type and recent symbols are saved in
+`localStorage` (keys prefixed `chartgen.layout.`) and restored on reload.
+
+### Keyboard shortcuts
+
+Shortcuts work when focus is on the chart or page body, and are ignored
+while typing in a field or while a dialog or menu is open.
+
+| Keys | Action |
+|---|---|
+| any letter | Open symbol search prefilled with that letter |
+| `↑` / `↓`, `Enter`, `Esc` | In symbol search: move, pick, close |
+| digit | Open the timeframe popup prefilled with that digit |
+| `Enter` in the popup | Switch timeframe |
+
+The timeframe popup accepts a number of minutes (`5`, `15`, `60`, `240`)
+or a number with a unit `m`, `h`, `d`, `w` (`1h`, `4H`, `1D`); an
+uppercase `M` means month (`1M`), lowercase `m` minutes. A lone `D`, `W`
+or `M` means one day, week or month. Only timeframes the backend serves are
+accepted.
 
 ## Getting started
 
@@ -29,7 +71,7 @@ Vite serves at `http://localhost:5173` and proxies OAuth + MCP
 endpoints to chartgen on port 9315, so no CORS or
 `VITE_CHARTGEN_BASE_URL` configuration is needed for local dev.
 
-Clicking **Load** triggers the OAuth 2.1 PKCE flow on first use:
+The first page load triggers the OAuth 2.1 PKCE flow:
 discovery → dynamic client registration → redirect to
 `/authorize` → token exchange. The access token stays in memory;
 the `client_id`/`client_secret` pair persists in `localStorage` so
@@ -65,15 +107,15 @@ domain) leave `VITE_CHARTGEN_BASE_URL` unset — the app will hit
   for why Solid over React/Svelte/Vue.
 - **[TanStack Solid Query](https://tanstack.com/query/latest/docs/framework/solid/overview)** — cache,
   retry, stale-while-revalidate. Cache keys are
-  `['generate_chart', ticker, timeframe]`, so switching timeframes
-  on a symbol we already loaded is instant.
+  `['generate_chart', ticker, timeframe, indicators]`, so switching
+  timeframes on a symbol we already loaded is instant.
 - **[`@modelcontextprotocol/sdk`](https://www.npmjs.com/package/@modelcontextprotocol/sdk)**
   with `StreamableHTTPClientTransport`. Bearer tokens flow through
   `requestInit.headers`; `fallbackNotificationHandler` taps into
   `notifications/alert_triggered` frames on the GET SSE stream
   (dormant logging in v0.1).
 - **[Kobalte](https://kobalte.dev/)** — WAI-ARIA-correct headless
-  primitives (`Select`, `TextField`). Visual styling via Tailwind.
+  primitives (`Dialog`, `DropdownMenu`, `Accordion`). Visual styling via Tailwind.
 - **[Tailwind v4](https://tailwindcss.com/)** — CSS-first config
   (no `postcss.config.js`). OKLCH dark palette.
 - **[klinecharts](https://klinecharts.com/)** — candles + RSI

@@ -1,8 +1,8 @@
 // Shared Playwright fixtures for the chartgen E2E suite.
 //
 // The `bootedApp` fixture walks the app through its cold-start path:
-// visit `/`, follow the OAuth PKCE redirect back to the app, fire a
-// Load, and wait for the chart canvas to render. Specs that need a
+// visit `/`, follow the OAuth PKCE redirect back to the app, let
+// the chart auto-load, and wait for the chart canvas to render. Specs that need a
 // ready-to-use app depend on it; specs that need to observe the boot
 // itself (smoke.spec.ts) skip it and drive `page` directly.
 //
@@ -92,8 +92,7 @@ export const test = base.extend<AppFixtures>({
       timeout: 30_000,
     });
 
-    // Click Load to trigger the initial chart fetch.
-    await page.getByRole("button", { name: "Load" }).click();
+    // The chart loads on its own once auth is ready.
     await expectChartRendered(page);
 
     await use(page);

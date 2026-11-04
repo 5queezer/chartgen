@@ -23,6 +23,7 @@ import {
   For,
   onCleanup,
   onMount,
+  untrack,
   type JSX,
 } from "solid-js";
 import {
@@ -34,6 +35,7 @@ import {
 } from "klinecharts";
 
 import { indicatorName, type ActiveIndicator } from "../stores/indicators";
+import type { ChartType } from "../stores/layout";
 import type { SeriesPayload } from "../types/responses";
 import { PaneHeader, type PaneHeaderLine } from "./PaneHeader";
 
@@ -409,6 +411,27 @@ interface HeaderState {
   top: number;
 }
 
+/** klinecharts `candle` style overrides per toolbar chart type. */
+const CHART_TYPE_STYLES: Record<ChartType, object> = {
+  candles: { type: "candle_solid" },
+  hollow: { type: "candle_up_stroke" },
+  bars: { type: "ohlc" },
+  line: {
+    type: "area",
+    area: { backgroundColor: "rgba(0,0,0,0)", point: { show: false } },
+  },
+  area: {
+    type: "area",
+    area: {
+      backgroundColor: [
+        { offset: 0, color: "rgba(41,98,255,0.28)" },
+        { offset: 1, color: "rgba(41,98,255,0.02)" },
+      ],
+      point: { show: false },
+    },
+  },
+};
+
 export interface ChartProps {
   /** Current series payload; `null` before the first load. */
   series: SeriesPayload | null;
@@ -419,6 +442,8 @@ export interface ChartProps {
    * client asked for.
    */
   activeIndicators: ActiveIndicator[];
+  /** Price rendering style chosen in the toolbar. */
+  chartType: ChartType;
 }
 
 export function Chart(props: ChartProps): JSX.Element {
@@ -581,6 +606,12 @@ export function Chart(props: ChartProps): JSX.Element {
     setHeaders(next);
   };
 
+  createEffect(() => {
+    chart()?.setStyles({
+      candle: CHART_TYPE_STYLES[props.chartType],
+    } as never);
+  });
+
   // React to crosshair changes by recomputing header values only.
   createEffect(() => {
     crosshairIndex();
@@ -591,7 +622,18 @@ export function Chart(props: ChartProps): JSX.Element {
   createEffect(() => {
     const c = chart();
     const series = props.series;
-    if (!c || !series) return;
+    if (!c) return;
+    if (!series) {
+      // Failed or cleared load: drop the stale candles and panes.
+      c.clearData();
+      const stale = untrack(paneIds);
+      for (const name of Object.keys(stale)) {
+        c.removeIndicator(stale[name]!, indicatorRegName(name));
+      }
+      setPaneIds({});
+      setHeaders([]);
+      return;
+    }
 
     // 1. Register any indicators we haven't seen before. Must happen
     //    before applyNewData so klinecharts's calc pipeline has the
@@ -619,7 +661,7 @@ export function Chart(props: ChartProps): JSX.Element {
     c.applyNewData(klines);
 
     // 3. Pane lifecycle. Create for new indicators, remove for dropped.
-    const currentPanes = paneIds();
+    const currentPanes = untrack(paneIds);
     const nextPanes: Record<string, string> = {};
     const activeNames = new Set<string>();
     for (const name of names) {
