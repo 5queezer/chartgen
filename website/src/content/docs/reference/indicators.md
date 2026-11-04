@@ -275,7 +275,7 @@ Moving Average (sma, ema, wma, hma, vwma, rma, alma, dema, tema, lsma)
 | `type` | `string` | `sma` | Moving average type |
 | `length` | `integer` | `9` | MA length |
 | `source` | `string` | `close` | Price source |
-| `offset` | `integer` | `0` | Shift the line by this many bars (negative = left) |
+| `offset` | `integer` | `0` | Shift the line by this many bars (negative = left). Values shifted past the last bar are dropped |
 
 ![ma sample render](../../../assets/indicators/ma.png)
 
@@ -289,7 +289,7 @@ Volume Weighted Moving Average (ta.vwma)
 |-------|------|---------|-------------|
 | `length` | `integer` | `9` | MA length |
 | `source` | `string` | `close` | Price source |
-| `offset` | `integer` | `0` | Shift the line by this many bars (negative = left) |
+| `offset` | `integer` | `0` | Shift the line by this many bars (negative = left). Values shifted past the last bar are dropped |
 
 ![vwma sample render](../../../assets/indicators/vwma.png)
 
@@ -303,7 +303,7 @@ Hull Moving Average (ta.hma)
 |-------|------|---------|-------------|
 | `length` | `integer` | `9` | MA length |
 | `source` | `string` | `close` | Price source |
-| `offset` | `integer` | `0` | Shift the line by this many bars (negative = left) |
+| `offset` | `integer` | `0` | Shift the line by this many bars (negative = left). Values shifted past the last bar are dropped |
 
 ![hma sample render](../../../assets/indicators/hma.png)
 

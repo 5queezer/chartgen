@@ -143,7 +143,7 @@ pub fn linreg_n(x: &[f64], n: usize) -> Vec<f64> {
 
 /// ta.alma with offset 0.85, sigma 6.
 pub fn alma_n(x: &[f64], n: usize) -> Vec<f64> {
-    let m = (0.85 * (n as f64 - 1.0)).floor();
+    let m = 0.85 * (n as f64 - 1.0); // ta.alma floor=false
     let s = n as f64 / 6.0;
     let weights: Vec<f64> = (0..n)
         .map(|i| (-((i as f64 - m).powi(2)) / (2.0 * s * s)).exp())
@@ -386,7 +386,7 @@ impl Indicator for Ma {
         v.push(source_param());
         v.push(
             json!({"name": "offset", "type": "integer", "default": 0, "min": -5000, "max": 5000,
-                      "description": "Shift the line by this many bars (negative = left)"}),
+                      "description": "Shift the line by this many bars (negative = left). Values shifted past the last bar are dropped"}),
         );
         Value::Array(v)
     }
@@ -557,6 +557,7 @@ impl Indicator for Envelopes {
                 y1: upper,
                 y2: lower,
                 color: rgba(0x2962FF, 0.1),
+                color_below: None,
             }],
             label: format!(
                 "Envelopes {} {} {}%",
@@ -634,7 +635,7 @@ impl Indicator for LinRegChannel {
                 .zip(&fit)
                 .map(|(y, f)| (y - f).powi(2))
                 .sum::<f64>()
-                / len as f64)
+                / (len - 1).max(1) as f64)
                 .sqrt();
             for i in 0..len {
                 base[n - len + i] = fit[i];
@@ -652,6 +653,7 @@ impl Indicator for LinRegChannel {
                 y1: up,
                 y2: lo,
                 color: rgba(0x2962FF, 0.1),
+                color_below: None,
             }],
             label: format!("LinReg Channel {}", self.length),
             is_overlay: true,
@@ -891,7 +893,9 @@ impl ZigZag {
                     }
                 }
                 Some(last) => {
-                    if (price - last.1).abs() / last.1.abs() * 100.0 >= self.deviation {
+                    if last.1 == 0.0
+                        || (price - last.1).abs() / last.1.abs() * 100.0 >= self.deviation
+                    {
                         out.push((i, price, high));
                     }
                 }
@@ -923,18 +927,32 @@ impl Indicator for ZigZag {
         }
     }
     fn compute(&self, data: &OhlcvData) -> PanelResult {
-        let divlines = self
-            .pivots(data)
+        let pv = self.pivots(data);
+        let seg = |(x1, y1): (usize, f64), (x2, y2): (usize, f64)| DivLine {
+            x1,
+            y1,
+            x2,
+            y2,
+            color: rgba(0x2962FF, 0.9),
+            dashed: false,
+        };
+        let mut divlines: Vec<DivLine> = pv
             .windows(2)
-            .map(|w| DivLine {
-                x1: w[0].0,
-                y1: w[0].1,
-                x2: w[1].0,
-                y2: w[1].1,
-                color: rgba(0x2962FF, 0.9),
-                dashed: false,
-            })
+            .map(|w| seg((w[0].0, w[0].1), (w[1].0, w[1].1)))
             .collect();
+        // Live last leg: last pivot to the most extreme bar since it (newest on ties).
+        if let Some(&(pi, py, was_high)) = pv.last() {
+            let mut best: Option<(usize, f64)> = None;
+            for (i, b) in data.bars.iter().enumerate().skip(pi + 1) {
+                let v = if was_high { b.low } else { b.high };
+                if best.is_none_or(|(_, bv)| if was_high { v <= bv } else { v >= bv }) {
+                    best = Some((i, v));
+                }
+            }
+            if let Some(end) = best {
+                divlines.push(seg((pi, py), end));
+            }
+        }
         PanelResult {
             divlines,
             label: format!("ZigZag {}% {}", self.deviation, self.depth),
@@ -1030,10 +1048,17 @@ mod tests {
             &[NAN, 1.5, 8. / 3.],
         );
 
-        let e = (-2.0f64).exp();
+        // m = 0.85 * 2 = 1.7 (no floor), s = 3 / 6 = 0.5
+        let w: Vec<f64> = (0..3)
+            .map(|i| (-((i as f64 - 1.7).powi(2)) / 0.5).exp())
+            .collect();
         close(
             &alma_n(&[1., 2., 4.], 3),
-            &[NAN, NAN, (e + 2. + 4. * e) / (1. + 2. * e)],
+            &[
+                NAN,
+                NAN,
+                (w[0] + 2. * w[1] + 4. * w[2]) / w.iter().sum::<f64>(),
+            ],
         );
     }
 
@@ -1123,7 +1148,7 @@ mod tests {
             .compute(&d);
         close(&r.lines[1].y, &[NAN, 1., 2., 3., 4.]);
         close(&r.lines[0].y, &[NAN, 1., 2., 3., 4.]);
-        // noisy: [1,3,2,4] -> slope 0.8, intercept 1.3 ; residual sd computed by hand
+        // noisy: [1,3,2,4] -> slope 0.8, intercept 1.3 ; residual sd (divisor len-1) computed by hand
         let d = closes(&[1., 3., 2., 4.]);
         let r = by_name_configured("linreg_channel", &json!({"length": 4, "upper_dev": 1}))
             .unwrap()
@@ -1131,7 +1156,7 @@ mod tests {
             .compute(&d);
         let fit = [1.3, 2.1, 2.9, 3.7];
         let res = [-0.3, 0.9, -0.9, 0.3f64];
-        let sd = (res.iter().map(|r| r * r).sum::<f64>() / 4.0).sqrt();
+        let sd = (res.iter().map(|r| r * r).sum::<f64>() / 3.0).sqrt();
         close(&r.lines[1].y, &fit);
         assert!((r.lines[0].y[3] - (3.7 + sd)).abs() < 1e-9);
         assert!((r.lines[2].y[3] - (3.7 - 2.0 * sd)).abs() < 1e-9);
@@ -1211,11 +1236,18 @@ mod tests {
                 .compute(&d)
         };
         let r = mk(5.0);
-        assert_eq!(r.divlines.len(), 2);
+        // Pivots at 1 (H), 2 (L), 3 (H) plus the live leg 3 -> 4.
+        assert_eq!(r.divlines.len(), 3);
         assert_eq!((r.divlines[0].x1, r.divlines[0].x2), (1, 2));
         assert_eq!((r.divlines[0].y1, r.divlines[0].y2), (20., 10.));
-        // 50% swing is below the 60% threshold: only one pivot survives.
-        assert!(mk(60.0).divlines.is_empty());
+        let live = &r.divlines[2];
+        assert_eq!((live.x1, live.y1, live.x2, live.y2), (3, 20., 4, 10.));
+        // 50% swing is below the 60% threshold: one pivot survives, so only
+        // its live leg to the newest lowest bar remains.
+        let r = mk(60.0);
+        assert_eq!(r.divlines.len(), 1);
+        let l = &r.divlines[0];
+        assert_eq!((l.x1, l.y1, l.x2, l.y2), (1, 20., 4, 10.));
     }
 
     #[test]

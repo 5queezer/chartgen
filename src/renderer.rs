@@ -234,12 +234,22 @@ pub fn render_chart(
                 )))?;
             }
 
-            // Segments on overlay (e.g. zigzag); drawn solid
+            // Segments on overlay (e.g. zigzag)
             for d in &overlay.divlines {
-                chart.draw_series(LineSeries::new(
-                    [(d.x1 as f64, d.y1), (d.x2 as f64, d.y2)],
-                    d.color.stroke_width(2),
-                ))?;
+                let (x1, y1, x2, y2) = (d.x1 as f64, d.y1, d.x2 as f64, d.y2);
+                // Dashed: 20 steps, every other one drawn (same as the panel path)
+                let steps = if d.dashed { 20 } else { 1 };
+                let (dx, dy) = ((x2 - x1) / steps as f64, (y2 - y1) / steps as f64);
+                let stride = if d.dashed { 2 } else { 1 };
+                for s in (0..steps).step_by(stride) {
+                    chart.draw_series(LineSeries::new(
+                        [
+                            (x1 + dx * s as f64, y1 + dy * s as f64),
+                            (x1 + dx * (s + 1) as f64, y1 + dy * (s + 1) as f64),
+                        ],
+                        d.color.stroke_width(2),
+                    ))?;
+                }
             }
 
             // HLines on overlay
