@@ -57,7 +57,7 @@ chart stays on screen while the new one loads. There is no Load button; if a loa
 - **Fullscreen** — hidden when the browser does not support it; toggles the browser Fullscreen API on the whole app;
   the chart resizes to fit.
 
-Symbol, timeframe, chart type, price-scale mode, theme and recent symbols are saved in
+Symbol, timeframe, chart type, price-scale mode, theme, time zone and recent symbols are saved in
 `localStorage` (keys prefixed `chartgen.layout.`) and restored on reload.
 
 ## Chart conveniences
@@ -84,6 +84,45 @@ Symbol, timeframe, chart type, price-scale mode, theme and recent symbols are sa
   axis scales it by hand and turns `auto` off; double-clicking the axis or
   clicking `auto` turns it back on, and `Alt+R` (reset chart) does too.
   The scale mode persists across reloads; `auto` always starts on.
+
+## Bottom bar
+
+The bar under the chart has TradingView's date-range buttons, a **Go to
+date** button, a clock and the time zone selector.
+
+- **Date ranges** — `1D 5D 1M 3M 6M YTD 1Y 5Y All`. A range switches to
+  TradingView's interval for it, loads older history until the range start
+  is covered, then fits the range into the width and scrolls to the newest
+  bar.
+
+  | Range | Interval | Range | Interval |
+  |---|---|---|---|
+  | 1D | 1m | YTD | 1d |
+  | 5D | 5m | 1Y | 1d |
+  | 1M | 30m | 5Y | 1wk |
+  | 3M | 1h | All | 1mo |
+  | 6M | 4h | | |
+
+  TradingView uses 2h for 6M; chartgen has no 2h timeframe. The range ends
+  at the newest bar. Month ranges are calendar months, and YTD starts on
+  1 January 00:00 in the selected time zone. A range with more bars than
+  pixels is shown at the minimum bar width, so only its newest part is
+  visible. Paging respects the history limit (see below); "All" loads as
+  much as the limit allows.
+- **Time zone** — the dropdown offers **UTC**, **Exchange**, **Local** (the
+  browser's zone) and a short list of common IANA zones. It sets the time
+  axis labels, the crosshair time label, the time in the price legend and
+  the clock beside it (shown with its UTC offset). The choice persists
+  across reloads and is part of a named layout. The default is Local.
+  The series payload carries no exchange, so **Exchange** is a heuristic
+  on the symbol: crypto and `=X` pairs are UTC, `.DE` is Europe/Berlin,
+  `.L` Europe/London, `.TO` America/Toronto, and everything else is
+  treated as America/New_York.
+- **Go to date** — the calendar button or `Alt+G` opens a dialog with a date
+  and an optional time (read in the selected time zone). OK pages history
+  back if the date is older than the loaded bars, then centers the nearest
+  bar. A date before the start of history goes to the first bar and says so
+  in the bar; at the history limit it goes to the oldest loaded bar.
 
 ## Live updates and history
 
@@ -152,6 +191,7 @@ while typing in a field or while a dialog or menu is open.
 | `↑` / `↓` or `+` / `-` | Zoom in / out |
 | `Home` / `End` | Jump to the first bar / to real time |
 | `Alt+R` | Reset chart (scroll to real time, default zoom) |
+| `Alt+G` | Go to date |
 
 The timeframe popup accepts a number of minutes (`5`, `15`, `60`, `240`)
 or a number with a unit `m`, `h`, `d`, `w` (`1h`, `4H`, `1D`); an

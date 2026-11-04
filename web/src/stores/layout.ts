@@ -1,5 +1,5 @@
 // Toolbar layout state — symbol, timeframe, chart type, price-scale
-// mode, color theme and recent symbols. Solid signals backed by localStorage under the
+// mode, color theme, time zone and recent symbols. Solid signals backed by localStorage under the
 // `chartgen.layout.` prefix; every value is validated on load and falls
 // back to its default if missing or corrupt.
 
@@ -7,6 +7,11 @@ import { createSignal } from "solid-js";
 
 import { applyTheme, THEME_NAMES, type ThemeName } from "../lib/theme";
 import { isTimeframe, type Timeframe } from "../lib/timeframe";
+import {
+  DEFAULT_TIME_ZONE,
+  isTimeZoneChoice,
+  type TimeZoneChoice,
+} from "../lib/timezone";
 
 export type ChartType =
   | "candles"
@@ -116,6 +121,7 @@ const storedTimeframe = read("timeframe");
 const storedChartType = read("chartType");
 const storedScaleMode = read("scaleMode");
 const storedTheme = read("theme");
+const storedTimeZone = read("timeZone");
 
 const [symbol, setSymbolSignal] = createSignal(
   normalizeSymbol(storedSymbol) ?? DEFAULT_SYMBOL,
@@ -133,6 +139,9 @@ const [theme, setThemeSignal] = createSignal<ThemeName>(
   initialTheme(storedTheme),
 );
 if (typeof document !== "undefined") applyTheme(theme());
+const [timeZone, setTimeZoneSignal] = createSignal<TimeZoneChoice>(
+  isTimeZoneChoice(storedTimeZone) ? storedTimeZone : DEFAULT_TIME_ZONE,
+);
 // Auto-fit keeps the price axis fitted to the visible bars; it turns off
 // when the user drags the axis. Session-only: it starts on at every load
 // because a manual scale does not survive a reload.
@@ -146,6 +155,7 @@ export {
   chartType,
   scaleMode,
   theme,
+  timeZone,
   autoScale,
   setAutoScale,
   recentSymbols,
@@ -188,4 +198,10 @@ export function setTheme(next: ThemeName): void {
   setThemeSignal(next);
   if (typeof document !== "undefined") applyTheme(next);
   persist("theme", next);
+}
+
+export function setTimeZone(next: TimeZoneChoice): void {
+  if (!isTimeZoneChoice(next)) return;
+  setTimeZoneSignal(next);
+  persist("timeZone", next);
 }

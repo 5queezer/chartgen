@@ -24,6 +24,7 @@ const base: LayoutState = {
   timeframe: "1h",
   chartType: "candles",
   scaleMode: "normal",
+  timeZone: "local",
   indicators: ["ema_stack", { name: "rsi", length: 14 }],
 };
 
@@ -162,7 +163,15 @@ describe("snapshot and dirty", () => {
     expect(isDirty(base, { ...base, timeframe: "4h" })).toBe(true);
     expect(isDirty(base, { ...base, chartType: "line" })).toBe(true);
     expect(isDirty(base, { ...base, scaleMode: "log" })).toBe(true);
+    expect(isDirty(base, { ...base, timeZone: "utc" })).toBe(true);
     expect(isDirty(base, { ...base, symbol: "ETHUSDT" })).toBe(true);
+  });
+
+  it("parses a state saved before time zones as the default", () => {
+    const { timeZone: _omit, ...old } = base;
+    expect(parseState(old)?.timeZone).toBe("local");
+    expect(parseState({ ...old, timeZone: "Mars/Base" })?.timeZone).toBe("local");
+    expect(parseState({ ...old, timeZone: "utc" })?.timeZone).toBe("utc");
   });
 
   it("ignores params equal to the registry default, but not hidden", () => {

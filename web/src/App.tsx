@@ -13,6 +13,7 @@ import { useQueryClient } from "@tanstack/solid-query";
 
 import type { Chart as KLineChart } from "klinecharts";
 
+import { BottomBar } from "./components/BottomBar";
 import { Chart, paletteColor } from "./components/Chart";
 import { DrawingToolbar } from "./components/DrawingToolbar";
 import { IndicatorChips } from "./components/IndicatorChips";
@@ -21,6 +22,7 @@ import { IndicatorSettings } from "./components/IndicatorSettings";
 import { LayoutMenu } from "./components/LayoutMenu";
 import { mergeParams } from "./lib/paramForm";
 import { PALETTES } from "./lib/theme";
+import { resolveTimeZone } from "./lib/timezone";
 import { plotsOf } from "./lib/plotStyle";
 import { StatusLine, type Status } from "./components/StatusLine";
 import { Toolbar } from "./components/Toolbar";
@@ -68,6 +70,7 @@ import {
   theme,
   symbol,
   timeframe,
+  timeZone,
 } from "./stores/layout";
 
 export function App(): JSX.Element {
@@ -366,6 +369,7 @@ export function App(): JSX.Element {
             activeIndicators={wireIndicators()}
             styles={plotStyles()}
             chartType={chartType()}
+            timeZone={resolveTimeZone(timeZone(), symbol())}
             onToggleHidden={(n) => toggleIndicatorHidden(indexOf(n))}
             onSettings={(n) => setSettingsIndex(indexOf(n))}
             onRemove={removeIndicator}
@@ -374,6 +378,7 @@ export function App(): JSX.Element {
         </div>
         <Watchlist session={session} enabled={authReady()} />
       </main>
+      <BottomBar chart={chart()} series={live()?.series ?? null} loadUntil={feed.loadUntil} />
     </div>
   );
 }

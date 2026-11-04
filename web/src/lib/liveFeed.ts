@@ -128,6 +128,8 @@ export interface LiveFeedOptions {
   doc?: VisibilityDoc;
 }
 
+export type LoadUntilResult = "covered" | "end" | "limit" | "error" | "aborted";
+
 export interface LiveFeed {
   /** Adopt a full load (ownership passes to the feed) or clear with null. */
   reset: (base: SeriesPayload | null, request: LiveRequest | null) => void;
@@ -138,6 +140,13 @@ export interface LiveFeed {
    * false if there is nothing to load (no series, no more history).
    */
   loadOlder: () => boolean;
+  /**
+   * Page back until the oldest loaded bar opens at or before `ts` (seconds).
+   * "covered": it does. "end": the source has no older bars. "limit":
+   * MAX_HISTORY_BARS are loaded. "error": a page failed (see the history
+   * status). "aborted": the chart was replaced meanwhile.
+   */
+  loadUntil: (ts: number) => Promise<LoadUntilResult>;
   dispose: () => void;
 }
 
@@ -288,6 +297,49 @@ export function createLiveFeed(opts: LiveFeedOptions): LiveFeed {
   };
   doc.addEventListener("visibilitychange", onVisibility);
 
+  // The page in flight; resolves true once merged, false if it failed or
+  // its generation ended.
+  let inflight: Promise<boolean> = Promise.resolve(false);
+
+  /** Load the page before `first` (the oldest bar's open time) and merge it. */
+  const loadPage = (req: LiveRequest, first: number): Promise<boolean> => {
+    const my = gen;
+    pageLoading = true;
+    opts.onHistoryStatus({ kind: "loading" });
+    inflight = opts
+      .fetch(req, {
+        bars: PAGE_BARS,
+        warmup: WARMUP,
+        end_time: first * 1000,
+        signal: abort.signal,
+      })
+      .then(
+        (page) => {
+          if (my !== gen || !series) return false;
+          pageLoading = false;
+          const r = mergeOlder(series, page);
+          if (!r.ok) {
+            opts.onHistoryStatus({
+              kind: "error",
+              message: `history page rejected (${r.reason})`,
+            });
+            return false;
+          }
+          series = r.series;
+          opts.onHistoryStatus(historyStatusOf(series));
+          emit({ version: ++version, kind: "older", count: r.count });
+          return true;
+        },
+        (err) => {
+          if (my !== gen) return false;
+          pageLoading = false;
+          opts.onHistoryStatus({ kind: "error", message: message(err) });
+          return false;
+        },
+      );
+    return inflight;
+  };
+
   return {
     reset(base, req) {
       endGeneration();
@@ -322,39 +374,21 @@ export function createLiveFeed(opts: LiveFeedOptions): LiveFeed {
         opts.onHistoryStatus(historyStatusOf(series));
         return false;
       }
-      const my = gen;
-      pageLoading = true;
-      opts.onHistoryStatus({ kind: "loading" });
-      opts
-        .fetch(request, {
-          bars: PAGE_BARS,
-          warmup: WARMUP,
-          end_time: first * 1000,
-          signal: abort.signal,
-        })
-        .then(
-          (page) => {
-            if (my !== gen || !series) return;
-            pageLoading = false;
-            const r = mergeOlder(series, page);
-            if (!r.ok) {
-              opts.onHistoryStatus({
-                kind: "error",
-                message: `history page rejected (${r.reason})`,
-              });
-              return;
-            }
-            series = r.series;
-            opts.onHistoryStatus(historyStatusOf(series));
-            emit({ version: ++version, kind: "older", count: r.count });
-          },
-          (err) => {
-            if (my !== gen) return;
-            pageLoading = false;
-            opts.onHistoryStatus({ kind: "error", message: message(err) });
-          },
-        );
+      void loadPage(request, first);
       return true;
+    },
+
+    async loadUntil(ts) {
+      const my = gen;
+      for (;;) {
+        const first = series?.bars[0]?.t;
+        if (my !== gen || !series || first == null) return "aborted";
+        if (first <= ts) return "covered";
+        if (!series.has_more) return "end";
+        if (series.bars.length >= MAX_HISTORY_BARS) return "limit";
+        if (!pageLoading) void loadPage(request!, first);
+        if (!(await inflight)) return my !== gen ? "aborted" : "error";
+      }
     },
 
     dispose() {
