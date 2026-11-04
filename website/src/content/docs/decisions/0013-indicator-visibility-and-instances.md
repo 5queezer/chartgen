@@ -31,9 +31,10 @@ different parameters (two RSIs).
 
 **Optional `hidden: true` on the stored entry (chosen).** Entries stay
 wire-shaped; the store adds one client-only key. `toWire()` drops hidden
-entries and strips the key before the request, so toggling visibility
-changes the request (the hidden indicator is no longer computed) but the
-server never sees the flag. Old arrays have no `hidden` keys and load as
+entries and strips the key before the request. The chart hides the pane or
+overlay and its legend immediately (it filters by the visible names), while
+the next request simply no longer asks for that indicator; the server never
+sees the flag. Old arrays have no `hidden` keys and load as
 all-visible.
 
 **Separate storage key for hidden names.** Keeps entries pure wire shape
@@ -49,7 +50,9 @@ response, so the second silently overwrites the first.
 
 ## Decision Outcome
 
-Chosen: the optional `hidden` flag on stored entries, parameter editing by
+Entries store only parameters that differ from the schema defaults (the
+picker adds the bare name), and the stored set is deduplicated by name on
+load. Chosen: the optional `hidden` flag on stored entries, parameter editing by
 entry index driven by the registry's `configurable_params` schema
 (`{ name, type: integer|number|boolean|string, default, description? }`),
 and **one instance per indicator name**, enforced by `addIndicator`.
@@ -60,12 +63,14 @@ and **one instance per indicator name**, enforced by `addIndicator`.
 the UI and the settings survive hiding; the settings form is generated, so
 new indicator parameters need no frontend work.
 
-**Negative.** Hiding or unhiding refetches the chart. Two instances of one
+**Negative.** Hiding drops the indicator from the request (so the cached
+response key changes) and unhiding refetches it. Two instances of one
 indicator (e.g. RSI 14 and RSI 21) are not supported until the backend
 keys response entries distinctly, e.g. by an instance id echoed back in
 the series payload; that needs a separate ADR with the wire change.
 The schema has no `min`/`max`/enum today: integers are validated as
-non-negative whole numbers (the server parses them as unsigned) and the
+whole numbers of at least 1 (the server parses them as unsigned and a zero
+length can panic it) and the
 form honours optional `min`/`max` if the registry adds them.
 
 ## More Information

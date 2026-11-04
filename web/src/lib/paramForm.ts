@@ -40,7 +40,11 @@ function kindOf(type: string): FieldKind {
   }
 }
 
-/** Map the schema to fields. Integer params are counts on the server (u64), so min defaults to 0. */
+/**
+ * Map the schema to fields. Integer params are counts/lengths on the server
+ * (u64) and 0 can panic it, so integers default to min 1 and max
+ * Number.MAX_SAFE_INTEGER unless the schema says otherwise.
+ */
 export function buildFields(
   specs: readonly ParamSpec[] | undefined,
 ): ParamField[] {
@@ -51,8 +55,8 @@ export function buildFields(
       kind,
       description: spec.description,
       defaultValue: spec.default ?? null,
-      min: spec.min ?? (kind === "integer" ? 0 : undefined),
-      max: spec.max,
+      min: spec.min ?? (kind === "integer" ? 1 : undefined),
+      max: spec.max ?? (kind === "integer" ? Number.MAX_SAFE_INTEGER : undefined),
       step: kind === "integer" ? 1 : "any",
     };
   });
@@ -85,13 +89,21 @@ export function initialValues(
   return out;
 }
 
-/** Params object (schema defaults that are set) for a freshly added indicator. */
-export function defaultParams(
-  specs: readonly ParamSpec[] | undefined,
+/**
+ * Params to store after an edit: entries outside the schema survive, schema
+ * params are replaced by `validated`, and values equal to the schema default
+ * are dropped (an entry only carries non-default params).
+ */
+export function mergeParams(
+  fields: readonly ParamField[],
+  current: Record<string, unknown>,
+  validated: Record<string, unknown>,
 ): Record<string, unknown> {
-  const out: Record<string, unknown> = {};
-  for (const f of buildFields(specs)) {
-    if (f.defaultValue !== null) out[f.name] = f.defaultValue;
+  const out: Record<string, unknown> = { ...current };
+  for (const f of fields) {
+    delete out[f.name];
+    const v = validated[f.name];
+    if (v !== undefined && v !== f.defaultValue) out[f.name] = v;
   }
   return out;
 }

@@ -91,6 +91,21 @@ describe("indicator store mutations", () => {
 });
 
 describe("indicator store visibility and params", () => {
+  it("dedupes by name on load, keeping the first entry", async () => {
+    stubStorage(
+      JSON.stringify([
+        { name: "rsi", length: 9 },
+        "macd",
+        "rsi",
+        { name: "macd", fast: 5, hidden: true },
+      ]),
+    );
+    expect((await loadStore()).activeIndicators()).toEqual([
+      { name: "rsi", length: 9 },
+      "macd",
+    ]);
+  });
+
   it("loads the pre-ADR-0013 format unchanged", async () => {
     stubStorage(JSON.stringify(["macd", { name: "rsi", length: 9 }]));
     const s = await loadStore();

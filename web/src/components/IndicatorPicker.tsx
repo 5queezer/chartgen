@@ -1,7 +1,7 @@
 // "Add Indicator" modal. Kobalte Dialog hosts a search input and a
 // per-category Accordion listing every indicator returned by
-// `list_indicators`. Clicking a row adds the indicator with its default
-// parameters (from `configurable_params`) and leaves the modal open for
+// `list_indicators`. Clicking a row adds the indicator by name (default
+// parameters; edit them via the settings dialog) and leaves the modal open for
 // multi-add; removal happens via the chip row, not here.
 //
 // The accordion is normally all-collapsed. When the search field is
@@ -22,7 +22,6 @@ import {
   indicatorName,
   type ActiveIndicator,
 } from "../stores/indicators";
-import { defaultParams } from "../lib/paramForm";
 import type {
   IndicatorInfoSchema,
   ListIndicatorsPayload,
@@ -56,14 +55,6 @@ const CATEGORY_LABEL: Record<string, string> = {
 
 function categoryLabel(category: string): string {
   return CATEGORY_LABEL[category] ?? category;
-}
-
-/** Build the entry for an indicator with its schema defaults applied. */
-function toActiveEntry(info: IndicatorInfo): ActiveIndicator {
-  const params = defaultParams(info.configurable_params);
-  return Object.keys(params).length > 0
-    ? { name: info.name, ...params }
-    : info.name;
 }
 
 function matches(info: IndicatorInfo, query: string): boolean {
@@ -193,7 +184,9 @@ export function IndicatorPicker(props: IndicatorPickerProps): JSX.Element {
   });
 
   const handleAdd = (info: IndicatorInfo) => {
-    addIndicator(toActiveEntry(info));
+    // Bare name: the server applies schema defaults, and only non-default
+    // params are ever stored on an entry.
+    addIndicator(info.name);
   };
 
   return (

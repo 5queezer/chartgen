@@ -14,6 +14,7 @@ import { Chart } from "./components/Chart";
 import { IndicatorChips } from "./components/IndicatorChips";
 import { IndicatorPicker } from "./components/IndicatorPicker";
 import { IndicatorSettings } from "./components/IndicatorSettings";
+import { mergeParams } from "./lib/paramForm";
 import { StatusLine, type Status } from "./components/StatusLine";
 import { Toolbar } from "./components/Toolbar";
 import { createMcpSession } from "./mcp";
@@ -138,14 +139,21 @@ export function App(): JSX.Element {
       <IndicatorSettings
         target={settingsTarget()}
         specs={
-          listIndicators.data?.indicators.find(
-            (i) => i.name === settingsTarget()?.name,
-          )?.configurable_params
+          listIndicators.data?.indicators.find((i) => {
+            const n = settingsTarget()?.name;
+            return i.name === n || i.aliases?.includes(n ?? "");
+          })?.configurable_params
         }
         onClose={() => setSettingsIndex(null)}
-        onSubmit={(params) => {
+        onSubmit={(params, fields) => {
           const i = settingsIndex();
-          if (i !== null) updateIndicatorParams(i, params);
+          const target = settingsTarget();
+          if (i !== null && target) {
+            updateIndicatorParams(
+              i,
+              mergeParams(fields, target.params, params),
+            );
+          }
           setSettingsIndex(null);
         }}
       />

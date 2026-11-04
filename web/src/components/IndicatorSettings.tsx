@@ -12,16 +12,18 @@ import {
   initialValues,
   validate,
   type FormValues,
+  type ParamField,
 } from "../lib/paramForm";
 import type { ParamSpec } from "../types/responses";
 
 export interface IndicatorSettingsProps {
   /** Indicator being edited, or null when the dialog is closed. */
   target: { name: string; params: Record<string, unknown> } | null;
-  /** `configurable_params` for the target; undefined while the registry loads. */
+  /** `configurable_params` for the target; undefined while the registry is unavailable. */
   specs: readonly ParamSpec[] | undefined;
   onClose: () => void;
-  onSubmit: (params: Record<string, unknown>) => void;
+  /** Called with the validated params and the fields they were validated against. */
+  onSubmit: (params: Record<string, unknown>, fields: ParamField[]) => void;
 }
 
 const inputClass =
@@ -32,9 +34,9 @@ const buttonClass =
 function SettingsForm(props: {
   name: string;
   params: Record<string, unknown>;
-  specs: readonly ParamSpec[] | undefined;
+  specs: readonly ParamSpec[];
   onClose: () => void;
-  onSubmit: (params: Record<string, unknown>) => void;
+  onSubmit: IndicatorSettingsProps["onSubmit"];
 }): JSX.Element {
   const fields = createMemo(() => buildFields(props.specs));
   const [values, setValues] = createSignal<FormValues>(
@@ -49,7 +51,7 @@ function SettingsForm(props: {
     e.preventDefault();
     const result = validate(fields(), values());
     setErrors(result.errors);
-    if (Object.keys(result.errors).length === 0) props.onSubmit(result.params);
+    if (Object.keys(result.errors).length === 0) props.onSubmit(result.params, fields());
   };
 
   return (
@@ -168,13 +170,41 @@ export function IndicatorSettings(props: IndicatorSettingsProps): JSX.Element {
           <Dialog.Content class="w-full max-w-sm bg-[color:var(--color-bg)] border border-[color:var(--color-border)] rounded-lg shadow-xl">
             <Show when={props.target} keyed>
               {(t) => (
-                <SettingsForm
-                  name={t.name}
-                  params={t.params}
-                  specs={props.specs}
-                  onClose={props.onClose}
-                  onSubmit={props.onSubmit}
-                />
+                // The form seeds its values from the schema once, so it is
+                // only built when the schema is available (never an empty
+                // form whose OK would wipe the params).
+                <Show
+                  when={props.specs}
+                  fallback={
+                    <div class="flex flex-col gap-3 p-4">
+                      <Dialog.Title class="text-sm font-semibold">
+                        {t.name}
+                      </Dialog.Title>
+                      <p class="text-sm text-[color:var(--color-fg-muted)]">
+                        Settings unavailable: the indicator list is loading or
+                        failed to load.
+                      </p>
+                      <div class="flex justify-end gap-2">
+                        <button type="button" class={buttonClass} onClick={props.onClose}>
+                          Cancel
+                        </button>
+                        <button type="button" class={buttonClass} disabled>
+                          OK
+                        </button>
+                      </div>
+                    </div>
+                  }
+                >
+                  {(specs) => (
+                    <SettingsForm
+                      name={t.name}
+                      params={t.params}
+                      specs={specs()}
+                      onClose={props.onClose}
+                      onSubmit={props.onSubmit}
+                    />
+                  )}
+                </Show>
               )}
             </Show>
           </Dialog.Content>

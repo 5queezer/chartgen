@@ -79,12 +79,12 @@ subsequent sessions skip registration.
 
 ## Managing indicators
 
-Indicators are added from the **Indicators** picker (with their default
-parameters) and listed as chips under the toolbar. Each indicator pane
+Indicators are added from the **Indicators** picker (by name, with the
+server's default parameters) and listed as chips under the toolbar. Each indicator pane
 legend shows controls on hover (or keyboard focus):
 
-- **Eye** hides the indicator. It disappears from the chart and is not
-  requested from the server; its chip stays, dimmed, with an eye button to
+- **Eye** hides the indicator. It disappears from the chart immediately and
+  is no longer requested from the server; its chip stays, dimmed, with an eye button to
   show it again.
 - **Gear** (or double-click on the legend row, or the gear on the chip)
   opens the settings dialog. The form is generated from the indicator's

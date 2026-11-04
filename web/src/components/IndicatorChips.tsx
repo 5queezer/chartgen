@@ -2,7 +2,7 @@
 // remove buttons. Hidden indicators are dimmed. Rendered beneath the header.
 // The empty state is a muted hint pointing at the picker button.
 
-import { For, Show, type JSX } from "solid-js";
+import { Index, Show, type JSX } from "solid-js";
 
 import {
   indicatorName,
@@ -33,34 +33,34 @@ export function IndicatorChips(props: IndicatorChipsProps): JSX.Element {
           </span>
         }
       >
-        <For each={props.entries}>
+        <Index each={props.entries}>
           {(entry, index) => {
-            const name = indicatorName(entry);
+            const name = () => indicatorName(entry());
             return (
               <span
                 class="inline-flex items-center gap-1 bg-[color:var(--color-bg-elev)] border border-[color:var(--color-border)] rounded-full pl-1.5 pr-1 py-0.5 text-xs font-mono text-[color:var(--color-fg)]"
-                classList={{ "opacity-50": isHidden(entry) }}
+                classList={{ "opacity-50": isHidden(entry()) }}
               >
                 <button
                   type="button"
-                  aria-label={`${isHidden(entry) ? "Show" : "Hide"} ${name}`}
-                  aria-pressed={isHidden(entry)}
-                  onClick={() => props.onToggleHidden(index())}
+                  aria-label={`${isHidden(entry()) ? "Show" : "Hide"} ${name()}`}
+                  aria-pressed={isHidden(entry())}
+                  onClick={() => props.onToggleHidden(index)}
                   class={chipButton}
                 >
                   <svg aria-hidden="true" viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
                     <path d="M1 8 C3 4.5 5.5 3 8 3 S13 4.5 15 8 C13 11.5 10.5 13 8 13 S3 11.5 1 8 Z" />
                     <circle cx="8" cy="8" r="2" />
-                    <Show when={isHidden(entry)}>
+                    <Show when={isHidden(entry())}>
                       <path d="M2 14 L14 2" />
                     </Show>
                   </svg>
                 </button>
-                <span classList={{ "line-through": isHidden(entry) }}>{name}</span>
+                <span classList={{ "line-through": isHidden(entry()) }}>{name()}</span>
                 <button
                   type="button"
-                  aria-label={`Settings for ${name}`}
-                  onClick={() => props.onSettings(index())}
+                  aria-label={`Settings for ${name()}`}
+                  onClick={() => props.onSettings(index)}
                   class={chipButton}
                 >
                   <svg aria-hidden="true" viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
@@ -70,8 +70,8 @@ export function IndicatorChips(props: IndicatorChipsProps): JSX.Element {
                 </button>
                 <button
                   type="button"
-                  aria-label={`Remove ${name}`}
-                  onClick={() => props.onRemove(name)}
+                  aria-label={`Remove ${name()}`}
+                  onClick={() => props.onRemove(name())}
                   class={`${chipButton} hover:!text-[color:var(--color-danger)]`}
                 >
                   ×
@@ -79,7 +79,7 @@ export function IndicatorChips(props: IndicatorChipsProps): JSX.Element {
               </span>
             );
           }}
-        </For>
+        </Index>
       </Show>
     </div>
   );

@@ -42,7 +42,14 @@ function load(): ActiveIndicator[] {
     //    stored data as corrupted and fall back to DEFAULT_SET rather
     //    than presenting an empty chart silently.
     if (parsed.length === 0) return [];
-    const valid = parsed.filter(isActiveIndicator);
+    // Entries are unique by name (the server keys its response by name);
+    // keep the first of any duplicates.
+    const seen = new Set<string>();
+    const valid = parsed.filter((e) => {
+      if (!isActiveIndicator(e) || seen.has(indicatorName(e))) return false;
+      seen.add(indicatorName(e));
+      return true;
+    });
     return valid.length > 0 ? valid : [...DEFAULT_SET];
   } catch {
     return [...DEFAULT_SET];

@@ -42,10 +42,8 @@ test.describe("indicator settings", () => {
     const show = page.getByRole("button", { name: "Show rsi", exact: true });
     await expect(show).toBeVisible();
 
-    // Chart data is only fetched after Load; the chips render from storage.
     await page.reload();
     await expect(show).toBeVisible();
-    await page.getByRole("button", { name: "Load" }).click();
     await expectChartRendered(page);
     await expect(page.locator(".pane-header", { hasText: "RSI" })).toHaveCount(0);
 
@@ -63,9 +61,21 @@ test.describe("indicator settings", () => {
     const chipRemove = page.getByRole("button", { name: "Remove rsi", exact: true });
     await expect(chipRemove).toHaveCount(0);
     await page.reload();
-    await page.getByRole("button", { name: "Load" }).click();
     await expectChartRendered(page);
     await expect(chipRemove).toHaveCount(0);
     await expect(page.locator(".pane-header", { hasText: "RSI" })).toHaveCount(0);
+  });
+
+  test("chip eye button keeps keyboard focus across toggles", async ({
+    bootedApp: page,
+  }) => {
+    const eye = page.getByRole("button", { name: /^(Hide|Show) rsi$/ });
+    await eye.focus();
+    await page.keyboard.press("Enter");
+    await expect(page.locator(".pane-header", { hasText: "RSI" })).toHaveCount(0);
+    await expect(eye).toBeFocused();
+    await page.keyboard.press("Enter");
+    await expect(rsiRow(page)).toBeVisible();
+    await expect(eye).toBeFocused();
   });
 });

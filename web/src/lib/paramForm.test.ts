@@ -3,9 +3,9 @@ import { describe, expect, it } from "vitest";
 import type { ParamSpec } from "../types/responses";
 import {
   buildFields,
-  defaultParams,
   defaultValues,
   initialValues,
+  mergeParams,
   validate,
 } from "./paramForm";
 
@@ -27,7 +27,7 @@ describe("buildFields", () => {
       "string",
       "integer",
     ]);
-    expect(f[0]).toMatchObject({ min: 0, step: 1, description: "period" });
+    expect(f[0]).toMatchObject({ min: 1, max: Number.MAX_SAFE_INTEGER, step: 1, description: "period" });
     expect(f[1]).toMatchObject({ min: 0.5, max: 5, step: "any" });
     expect(f[4]!.defaultValue).toBeNull();
   });
@@ -54,16 +54,6 @@ describe("values", () => {
   it("initialValues prefers current params over defaults", () => {
     const v = initialValues(fields, { length: 21, dots: false });
     expect(v).toMatchObject({ length: "21", dots: false, mult: "2" });
-  });
-
-  it("defaultParams omits null defaults", () => {
-    expect(defaultParams(specs)).toEqual({
-      length: 14,
-      mult: 2,
-      dots: true,
-      mode: "strict",
-    });
-    expect(defaultParams(undefined)).toEqual({});
   });
 });
 
@@ -102,8 +92,11 @@ describe("validate", () => {
     expect(validate(fields, { ...ok, length: "1.5" }).errors.length).toBe(
       "Must be a whole number",
     );
-    expect(validate(fields, { ...ok, length: "-1" }).errors.length).toBe(
-      "Must be at least 0",
+    expect(validate(fields, { ...ok, length: "0" }).errors.length).toBe(
+      "Must be at least 1",
+    );
+    expect(validate(fields, { ...ok, length: "1e300" }).errors.length).toBe(
+      "Must be at most 9007199254740991",
     );
     expect(validate(fields, { ...ok, mult: "0.1" }).errors.mult).toBe(
       "Must be at least 0.5",
@@ -111,5 +104,22 @@ describe("validate", () => {
     expect(validate(fields, { ...ok, mult: "Infinity" }).errors.mult).toBe(
       "Must be a number",
     );
+  });
+});
+
+describe("mergeParams", () => {
+  const fields = buildFields(specs);
+
+  it("keeps params outside the schema and drops default-valued ones", () => {
+    const merged = mergeParams(
+      fields,
+      { length: 21, legacy: "x", mult: 3 },
+      { length: 14, mult: 4, dots: false, mode: "strict" },
+    );
+    expect(merged).toEqual({ legacy: "x", mult: 4, dots: false });
+  });
+
+  it("clearing an optional param removes the stored value", () => {
+    expect(mergeParams(fields, { bars: 50 }, {})).toEqual({});
   });
 });
