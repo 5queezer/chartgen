@@ -80,7 +80,7 @@ impl Indicator for Adx {
     }
 
     fn params(&self) -> Value {
-        json!([{"name": "period", "type": "integer", "default": 14}])
+        json!([{"name": "period", "type": "integer", "min": 1, "max": 10000, "default": 14}])
     }
 
     fn configure(&mut self, params: &Value) {
@@ -262,8 +262,8 @@ impl Indicator for Supertrend {
 
     fn params(&self) -> Value {
         json!([
-            {"name": "period", "type": "integer", "default": 10},
-            {"name": "multiplier", "type": "number", "default": 3.0}
+            {"name": "period", "type": "integer", "min": 1, "max": 10000, "default": 10},
+            {"name": "multiplier", "type": "number", "min": 0, "max": 1000, "default": 3.0}
         ])
     }
 
@@ -411,9 +411,9 @@ impl Indicator for ParabolicSar {
 
     fn params(&self) -> Value {
         json!([
-            {"name": "af_start", "type": "number", "default": 0.02},
-            {"name": "af_step", "type": "number", "default": 0.02},
-            {"name": "af_max", "type": "number", "default": 0.2}
+            {"name": "af_start", "type": "number", "min": 0, "max": 1, "default": 0.02},
+            {"name": "af_step", "type": "number", "min": 0, "max": 1, "default": 0.02},
+            {"name": "af_max", "type": "number", "min": 0, "max": 1, "default": 0.2}
         ])
     }
 
@@ -602,7 +602,7 @@ impl Indicator for HistVol {
     }
 
     fn params(&self) -> Value {
-        json!([{"name": "period", "type": "integer", "default": 20}])
+        json!([{"name": "period", "type": "integer", "min": 1, "max": 10000, "default": 20}])
     }
 
     fn configure(&mut self, params: &Value) {
@@ -679,7 +679,7 @@ impl Indicator for VwapBands {
     }
 
     fn params(&self) -> Value {
-        json!([{"name": "std_dev", "type": "number", "default": 2.0}])
+        json!([{"name": "std_dev", "type": "number", "min": 0, "max": 100, "default": 2.0}])
     }
 
     fn configure(&mut self, params: &Value) {
@@ -933,13 +933,13 @@ impl Indicator for VolumeProfile {
 
     fn params(&self) -> Value {
         json!([
-            {"name": "bins", "type": "integer", "default": 24},
+            {"name": "bins", "type": "integer", "min": 1, "max": 1000, "default": 24},
             {"name": "side", "type": "string", "default": "left", "description": "left or right"},
-            {"name": "range_bars", "type": "integer", "default": null, "description": "only compute over last N bars (null = all)"},
+            {"name": "range_bars", "type": "integer", "min": 1, "max": 100000, "default": null, "description": "only compute over last N bars (null = all)"},
             {"name": "split_up_down", "type": "boolean", "default": false, "description": "separate up/down volume colors"},
             {"name": "color_up", "type": "string", "default": "#26a69a", "description": "hex color for up-volume"},
             {"name": "color_down", "type": "string", "default": "#ef5350", "description": "hex color for down-volume"},
-            {"name": "opacity", "type": "number", "default": 0.35, "description": "overall opacity multiplier (0.0-1.0)"}
+            {"name": "opacity", "type": "number", "min": 0, "max": 1, "default": 0.35, "description": "overall opacity multiplier (0.0-1.0)"}
         ])
     }
 
@@ -1333,9 +1333,9 @@ impl Indicator for KalmanVolume {
 
     fn params(&self) -> Value {
         json!([
-            {"name": "vzo_length", "type": "integer", "default": 70},
-            {"name": "k", "type": "number", "default": 0.06},
-            {"name": "sig_length", "type": "integer", "default": 10}
+            {"name": "vzo_length", "type": "integer", "min": 1, "max": 10000, "default": 70},
+            {"name": "k", "type": "number", "min": 0, "max": 1000, "default": 0.06},
+            {"name": "sig_length", "type": "integer", "min": 1, "max": 10000, "default": 10}
         ])
     }
 
@@ -1628,9 +1628,9 @@ impl Indicator for Ichimoku {
 
     fn params(&self) -> Value {
         json!([
-            {"name": "tenkan", "type": "integer", "default": 9},
-            {"name": "kijun", "type": "integer", "default": 26},
-            {"name": "senkou_b", "type": "integer", "default": 52}
+            {"name": "tenkan", "type": "integer", "min": 1, "max": 10000, "default": 9},
+            {"name": "kijun", "type": "integer", "min": 1, "max": 10000, "default": 26},
+            {"name": "senkou_b", "type": "integer", "min": 1, "max": 10000, "default": 52}
         ])
     }
 
@@ -1945,9 +1945,9 @@ impl Indicator for SessionVolumeProfile {
 
     fn params(&self) -> Value {
         json!([
-            {"name": "bins", "type": "integer", "default": 24},
+            {"name": "bins", "type": "integer", "min": 1, "max": 1000, "default": 24},
             {"name": "session", "type": "string", "default": "daily", "description": "daily, weekly, or hourly"},
-            {"name": "bars_per_session", "type": "integer", "default": null, "description": "override session by fixed bar count"},
+            {"name": "bars_per_session", "type": "integer", "min": 1, "max": 100000, "default": null, "description": "override session by fixed bar count"},
             {"name": "show_value_area", "type": "boolean", "default": true, "description": "draw VAH/VAL in addition to POC"}
         ])
     }
@@ -2068,11 +2068,11 @@ impl Indicator for HvnLvn {
 
     fn params(&self) -> Value {
         json!([
-            {"name": "bins", "type": "integer", "default": 48},
-            {"name": "range_bars", "type": "integer", "default": null, "description": "only scan the last N bars (null = all)"},
-            {"name": "neighborhood", "type": "integer", "default": 2, "description": "bins on each side to compare for local extrema"},
-            {"name": "min_prominence", "type": "number", "default": 0.10, "description": "minimum relative prominence (0-1) vs max bin"},
-            {"name": "top_n", "type": "integer", "default": null, "description": "keep only the N strongest nodes of each kind"},
+            {"name": "bins", "type": "integer", "min": 1, "max": 1000, "default": 48},
+            {"name": "range_bars", "type": "integer", "min": 1, "max": 100000, "default": null, "description": "only scan the last N bars (null = all)"},
+            {"name": "neighborhood", "type": "integer", "min": 1, "max": 10000, "default": 2, "description": "bins on each side to compare for local extrema"},
+            {"name": "min_prominence", "type": "number", "min": 0, "max": 1, "default": 0.10, "description": "minimum relative prominence (0-1) vs max bin"},
+            {"name": "top_n", "type": "integer", "min": 1, "max": 1000, "default": null, "description": "keep only the N strongest nodes of each kind"},
             {"name": "show_hvn", "type": "boolean", "default": true},
             {"name": "show_lvn", "type": "boolean", "default": true}
         ])
@@ -2241,10 +2241,10 @@ impl Indicator for NakedPoc {
 
     fn params(&self) -> Value {
         json!([
-            {"name": "bins", "type": "integer", "default": 24},
+            {"name": "bins", "type": "integer", "min": 1, "max": 1000, "default": 24},
             {"name": "session", "type": "string", "default": "daily", "description": "daily, weekly, hourly"},
-            {"name": "bars_per_session", "type": "integer", "default": null},
-            {"name": "max_sessions", "type": "integer", "default": 20, "description": "look back at most N sessions"},
+            {"name": "bars_per_session", "type": "integer", "min": 1, "max": 100000, "default": null},
+            {"name": "max_sessions", "type": "integer", "min": 1, "max": 1000, "default": 20, "description": "look back at most N sessions"},
             {"name": "include_current", "type": "boolean", "default": true, "description": "also draw the developing POC of the current session"}
         ])
     }
@@ -2382,10 +2382,10 @@ impl Indicator for Tpo {
 
     fn params(&self) -> Value {
         json!([
-            {"name": "bins", "type": "integer", "default": 32},
+            {"name": "bins", "type": "integer", "min": 1, "max": 1000, "default": 32},
             {"name": "side", "type": "string", "default": "right", "description": "left or right"},
-            {"name": "range_bars", "type": "integer", "default": null, "description": "only compute over last N bars"},
-            {"name": "opacity", "type": "number", "default": 0.35, "description": "bar opacity (0.0-1.0)"}
+            {"name": "range_bars", "type": "integer", "min": 1, "max": 100000, "default": null, "description": "only compute over last N bars"},
+            {"name": "opacity", "type": "number", "min": 0, "max": 1, "default": 0.35, "description": "bar opacity (0.0-1.0)"}
         ])
     }
 

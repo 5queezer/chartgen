@@ -59,11 +59,65 @@ pub fn by_name(name: &str) -> Option<Box<dyn Indicator>> {
     }
 }
 
+/// Check `params` against the indicator's declared schema (`Indicator::params`).
+/// Only declared params are inspected; `null` means "use the default".
+/// Integers must be whole numbers, floats must be finite, and both must respect
+/// the optional `min`/`max` of the schema entry.
+pub fn validate_params(name: &str, ind: &dyn Indicator, params: &Value) -> Result<(), String> {
+    let Some(obj) = params.as_object() else {
+        return Ok(());
+    };
+    let schema = ind.params();
+    for spec in schema.as_array().into_iter().flatten() {
+        let Some(pname) = spec.get("name").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        let Some(v) = obj.get(pname).filter(|v| !v.is_null()) else {
+            continue;
+        };
+        let bad = |why: &str| Err(format!("Invalid parameter for {name}: {pname} {why}"));
+        let ty = spec.get("type").and_then(|v| v.as_str()).unwrap_or("");
+        let num = match ty {
+            "integer" => match (v.as_i64(), v.as_u64()) {
+                (Some(i), _) => i as f64,
+                (None, Some(u)) => u as f64,
+                _ => return bad("must be an integer"),
+            },
+            "number" => match v.as_f64() {
+                Some(f) if f.is_finite() => f,
+                Some(_) => return bad("must be a finite number"),
+                None => return bad("must be a number"),
+            },
+            "boolean" if !v.is_boolean() => return bad("must be a boolean"),
+            "string" if !v.is_string() => return bad("must be a string"),
+            _ => continue,
+        };
+        if let Some(min) = spec.get("min").and_then(|v| v.as_f64()) {
+            if num < min {
+                return bad(&format!("must be >= {min}"));
+            }
+        }
+        if let Some(max) = spec.get("max").and_then(|v| v.as_f64()) {
+            if num > max {
+                return bad(&format!("must be <= {max}"));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Create an indicator by name and apply configuration params.
-pub fn by_name_configured(name: &str, params: &Value) -> Option<Box<dyn Indicator>> {
-    let mut ind = by_name(name)?;
+/// `Ok(None)` = unknown indicator; `Err` = a param failed validation.
+pub fn by_name_configured(
+    name: &str,
+    params: &Value,
+) -> Result<Option<Box<dyn Indicator>>, String> {
+    let Some(mut ind) = by_name(name) else {
+        return Ok(None);
+    };
+    validate_params(name, ind.as_ref(), params)?;
     ind.configure(params);
-    Some(ind)
+    Ok(Some(ind))
 }
 
 pub fn available() -> &'static [&'static str] {

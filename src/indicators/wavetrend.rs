@@ -34,8 +34,8 @@ impl Indicator for WaveTrend {
 
     fn params(&self) -> Value {
         json!([
-            {"name": "ch_len", "type": "integer", "default": 9},
-            {"name": "avg_len", "type": "integer", "default": 12}
+            {"name": "ch_len", "type": "integer", "min": 1, "max": 10000, "default": 9},
+            {"name": "avg_len", "type": "integer", "min": 1, "max": 10000, "default": 12}
         ])
     }
 

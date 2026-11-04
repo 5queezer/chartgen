@@ -100,8 +100,8 @@ impl Indicator for BollingerBandsInd {
 
     fn params(&self) -> Value {
         json!([
-            {"name": "period", "type": "integer", "default": 20},
-            {"name": "std_dev", "type": "number", "default": 2.0}
+            {"name": "period", "type": "integer", "min": 1, "max": 10000, "default": 20},
+            {"name": "std_dev", "type": "number", "min": 0, "max": 100, "default": 2.0}
         ])
     }
 
@@ -192,8 +192,8 @@ impl Indicator for KeltnerChannels {
 
     fn params(&self) -> Value {
         json!([
-            {"name": "period", "type": "integer", "default": 20},
-            {"name": "multiplier", "type": "number", "default": 1.5}
+            {"name": "period", "type": "integer", "min": 1, "max": 10000, "default": 20},
+            {"name": "multiplier", "type": "number", "min": 0, "max": 1000, "default": 1.5}
         ])
     }
 
@@ -276,7 +276,7 @@ impl Indicator for Atr {
     }
 
     fn params(&self) -> Value {
-        json!([{"name": "period", "type": "integer", "default": 14}])
+        json!([{"name": "period", "type": "integer", "min": 1, "max": 10000, "default": 14}])
     }
 
     fn configure(&mut self, params: &Value) {
@@ -366,7 +366,7 @@ impl Indicator for Cci {
     }
 
     fn params(&self) -> Value {
-        json!([{"name": "period", "type": "integer", "default": 20}])
+        json!([{"name": "period", "type": "integer", "min": 1, "max": 10000, "default": 20}])
     }
 
     fn configure(&mut self, params: &Value) {
@@ -431,7 +431,7 @@ impl Indicator for Roc {
     }
 
     fn params(&self) -> Value {
-        json!([{"name": "period", "type": "integer", "default": 14}])
+        json!([{"name": "period", "type": "integer", "min": 1, "max": 10000, "default": 14}])
     }
 
     fn configure(&mut self, params: &Value) {
@@ -492,7 +492,7 @@ impl Indicator for Mfi {
     }
 
     fn params(&self) -> Value {
-        json!([{"name": "period", "type": "integer", "default": 14}])
+        json!([{"name": "period", "type": "integer", "min": 1, "max": 10000, "default": 14}])
     }
 
     fn configure(&mut self, params: &Value) {
@@ -564,9 +564,9 @@ impl Indicator for Stochastic {
 
     fn params(&self) -> Value {
         json!([
-            {"name": "period", "type": "integer", "default": 14},
-            {"name": "k_smooth", "type": "integer", "default": 3},
-            {"name": "d_smooth", "type": "integer", "default": 3}
+            {"name": "period", "type": "integer", "min": 1, "max": 10000, "default": 14},
+            {"name": "k_smooth", "type": "integer", "min": 1, "max": 10000, "default": 3},
+            {"name": "d_smooth", "type": "integer", "min": 1, "max": 10000, "default": 3}
         ])
     }
 
@@ -659,7 +659,7 @@ impl Indicator for WilliamsR {
     }
 
     fn params(&self) -> Value {
-        json!([{"name": "period", "type": "integer", "default": 14}])
+        json!([{"name": "period", "type": "integer", "min": 1, "max": 10000, "default": 14}])
     }
 
     fn configure(&mut self, params: &Value) {
@@ -736,7 +736,7 @@ impl Indicator for Donchian {
     }
 
     fn params(&self) -> Value {
-        json!([{"name": "period", "type": "integer", "default": 20}])
+        json!([{"name": "period", "type": "integer", "min": 1, "max": 10000, "default": 20}])
     }
 
     fn configure(&mut self, params: &Value) {
@@ -815,7 +815,7 @@ impl Indicator for Cmf {
     }
 
     fn params(&self) -> Value {
-        json!([{"name": "period", "type": "integer", "default": 20}])
+        json!([{"name": "period", "type": "integer", "min": 1, "max": 10000, "default": 20}])
     }
 
     fn configure(&mut self, params: &Value) {

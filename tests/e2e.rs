@@ -500,6 +500,7 @@ fn test_session_vp_resets_per_day() {
         "session_vp",
         &serde_json::json!({"bins": 12, "session": "daily"}),
     )
+    .unwrap()
     .unwrap();
     let result = ind.compute(&data);
     // Expect multiple POC lines — one per session — each with NaN gaps.
@@ -527,6 +528,7 @@ fn test_naked_poc_excludes_filled_levels() {
         "naked_poc",
         &serde_json::json!({"bars_per_session": 20, "include_current": false}),
     )
+    .unwrap()
     .unwrap();
     let result = ind.compute(&data);
     // Every nPOC level must NOT be re-touched by any later bar's high/low range.
@@ -560,6 +562,7 @@ fn test_hvn_lvn_produces_hlines() {
         "hvn_lvn",
         &serde_json::json!({"bins": 40, "min_prominence": 0.05, "top_n": 5}),
     )
+    .unwrap()
     .unwrap();
     let result = ind.compute(&data);
     assert!(result.is_overlay);
@@ -580,4 +583,107 @@ fn test_tpo_time_based_profile() {
     assert!(result.is_overlay);
     assert_eq!(result.hlines.len(), 3, "TPO should emit POC/VAH/VAL hlines");
     assert!(!result.hbars.is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// Parameter validation: bad params must yield Err, never a panic
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_invalid_params_rejected_for_every_indicator() {
+    use serde_json::{json, Value};
+    use std::panic::{catch_unwind, AssertUnwindSafe};
+
+    let data = sample_data(60);
+    let mut checked = 0;
+    for info in indicators::registry() {
+        for spec in info.params.as_array().unwrap() {
+            let pname = spec["name"].as_str().unwrap();
+            let ty = spec["type"].as_str().unwrap();
+            let is_int = ty == "integer";
+            let is_num = ty == "number";
+            if !is_int && !is_num {
+                continue;
+            }
+            let mut bad: Vec<Value> = vec![json!("x"), json!(true)];
+            if is_int {
+                bad.extend([json!(0), json!(-1), json!(-100), json!(1.5)]);
+            }
+            if let Some(max) = spec.get("max").and_then(|v| v.as_f64()) {
+                bad.push(json!(max + 1.0));
+            }
+            if let Some(min) = spec.get("min").and_then(|v| v.as_f64()) {
+                bad.push(json!(min - 1.0));
+            }
+            for v in bad {
+                let params = json!({ "name": info.name, pname: v.clone() });
+                let r = catch_unwind(AssertUnwindSafe(|| {
+                    indicators::by_name_configured(info.name, &params)
+                }));
+                match r {
+                    Ok(Err(msg)) => {
+                        assert!(msg.contains(info.name) && msg.contains(pname), "{msg}")
+                    }
+                    Ok(Ok(_)) => panic!("{}.{pname}={v} was accepted", info.name),
+                    Err(_) => panic!("{}.{pname}={v} panicked", info.name),
+                }
+                checked += 1;
+            }
+            // Boundary values must be accepted and computable without panicking.
+            for bound in ["min", "max"] {
+                let Some(b) = spec.get(bound) else { continue };
+                let params = json!({ "name": info.name, pname: b });
+                let r = catch_unwind(AssertUnwindSafe(|| {
+                    let ind = indicators::by_name_configured(info.name, &params)
+                        .unwrap()
+                        .unwrap();
+                    ind.compute(&data)
+                }));
+                assert!(r.is_ok(), "{}.{pname}={b} panicked in compute", info.name);
+            }
+        }
+    }
+    assert!(checked > 100, "table looked too small: {checked}");
+}
+
+#[test]
+fn test_every_registered_indicator_has_schema_bounds_on_numeric_params() {
+    for info in indicators::registry() {
+        for spec in info.params.as_array().unwrap() {
+            if spec["type"] == "integer" {
+                assert!(
+                    spec.get("min").is_some() && spec.get("max").is_some(),
+                    "{}.{} lacks min/max",
+                    info.name,
+                    spec["name"]
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn test_nan_inf_floats_are_not_representable_or_rejected() {
+    use serde_json::{json, Number, Value};
+    // JSON cannot carry NaN/inf: Value::from(NaN) degrades to null (= default),
+    // which must neither panic nor change behaviour.
+    assert!(Number::from_f64(f64::NAN).is_none());
+    let nan = Value::from(f64::NAN);
+    assert!(nan.is_null());
+    for info in indicators::registry() {
+        for spec in info.params.as_array().unwrap() {
+            if spec["type"] == "number" {
+                let params = json!({ "name": info.name, spec["name"].as_str().unwrap(): nan });
+                assert!(indicators::by_name_configured(info.name, &params).is_ok());
+            }
+        }
+    }
+    // Non-finite values that do reach the validator are rejected.
+    let ind = indicators::by_name("bbands").unwrap();
+    let mut obj = serde_json::Map::new();
+    obj.insert("std_dev".into(), json!(f64::MAX));
+    assert!(
+        indicators::validate_params("bbands", ind.as_ref(), &Value::Object(obj)).is_err(),
+        "huge float must exceed max"
+    );
 }

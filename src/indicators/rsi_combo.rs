@@ -96,11 +96,11 @@ impl Indicator for RsiMfiStochCombo {
 
     fn params(&self) -> Value {
         json!([
-            {"name": "rsi_length", "type": "integer", "default": 14},
-            {"name": "mfi_length", "type": "integer", "default": 14},
-            {"name": "stoch_k", "type": "integer", "default": 14},
-            {"name": "stoch_d", "type": "integer", "default": 3},
-            {"name": "stoch_smooth", "type": "integer", "default": 3},
+            {"name": "rsi_length", "type": "integer", "min": 1, "max": 10000, "default": 14},
+            {"name": "mfi_length", "type": "integer", "min": 1, "max": 10000, "default": 14},
+            {"name": "stoch_k", "type": "integer", "min": 1, "max": 10000, "default": 14},
+            {"name": "stoch_d", "type": "integer", "min": 1, "max": 10000, "default": 3},
+            {"name": "stoch_smooth", "type": "integer", "min": 1, "max": 10000, "default": 3},
             {"name": "overbought", "type": "number", "default": 70},
             {"name": "oversold", "type": "number", "default": 30},
             {"name": "show_entry_dots", "type": "boolean", "default": true},
