@@ -86,7 +86,6 @@ const storedSymbol = read("symbol");
 const storedTimeframe = read("timeframe");
 const storedChartType = read("chartType");
 const storedScaleMode = read("scaleMode");
-const storedAutoScale = read("autoScale");
 
 const [symbol, setSymbolSignal] = createSignal(
   normalizeSymbol(storedSymbol) ?? DEFAULT_SYMBOL,
@@ -100,15 +99,22 @@ const [chartType, setChartTypeSignal] = createSignal<ChartType>(
 const [scaleMode, setScaleModeSignal] = createSignal<ScaleMode>(
   isScaleMode(storedScaleMode) ? storedScaleMode : DEFAULT_SCALE_MODE,
 );
-// Auto-fit locks the price axis to the visible bars; off lets the user
-// drag the axis to scale it by hand.
-const [autoScale, setAutoScaleSignal] = createSignal(
-  typeof storedAutoScale === "boolean" ? storedAutoScale : true,
-);
+// Auto-fit keeps the price axis fitted to the visible bars; it turns off
+// when the user drags the axis. Session-only: it starts on at every load
+// because a manual scale does not survive a reload.
+const [autoScale, setAutoScale] = createSignal(true);
 const [recentSymbols, setRecentSymbolsSignal] =
   createSignal<string[]>(loadRecents());
 
-export { symbol, timeframe, chartType, scaleMode, autoScale, recentSymbols };
+export {
+  symbol,
+  timeframe,
+  chartType,
+  scaleMode,
+  autoScale,
+  setAutoScale,
+  recentSymbols,
+};
 
 /** Select a symbol; invalid input is ignored. Recents are added separately. */
 export function setSymbol(next: string): void {
@@ -141,9 +147,4 @@ export function setChartType(next: ChartType): void {
 export function setScaleMode(next: ScaleMode): void {
   setScaleModeSignal(next);
   persist("scaleMode", next);
-}
-
-export function setAutoScale(next: boolean): void {
-  setAutoScaleSignal(next);
-  persist("autoScale", next);
 }

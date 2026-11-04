@@ -69,7 +69,7 @@ Symbol, timeframe, chart type, price-scale mode and recent symbols are saved in
   default) keeps the axis fitted to the visible bars. Dragging the price
   axis scales it by hand and turns `auto` off; double-clicking the axis or
   clicking `auto` turns it back on, and `Alt+R` (reset chart) does too.
-  The mode and the auto flag persist across reloads.
+  The scale mode persists across reloads; `auto` always starts on.
 
 ### Keyboard shortcuts
 

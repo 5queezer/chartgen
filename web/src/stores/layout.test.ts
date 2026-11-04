@@ -123,29 +123,26 @@ describe("layout store", () => {
     expect(s.autoScale()).toBe(true);
   });
 
-  it("restores a valid scale mode and rejects invalid scale values", async () => {
-    stubStorage({
-      "chartgen.layout.scaleMode": '"log"',
-      "chartgen.layout.autoScale": "false",
-    });
+  it("ignores a stored autoScale key: auto-fit always starts on", async () => {
+    const data = stubStorage({ "chartgen.layout.autoScale": "false" });
     const s = await load();
-    expect(s.scaleMode()).toBe("log");
+    expect(s.autoScale()).toBe(true);
+    s.setAutoScale(false);
+    expect(data.get("chartgen.layout.autoScale")).toBe("false"); // untouched leftover
     expect(s.autoScale()).toBe(false);
-    stubStorage({
-      "chartgen.layout.scaleMode": '"sqrt"',
-      "chartgen.layout.autoScale": '"yes"',
-    });
-    const bad = await load();
-    expect(bad.scaleMode()).toBe("normal");
-    expect(bad.autoScale()).toBe(true);
   });
 
-  it("persists scale changes", async () => {
+  it("restores a valid scale mode and rejects invalid values", async () => {
+    stubStorage({ "chartgen.layout.scaleMode": '"log"' });
+    expect((await load()).scaleMode()).toBe("log");
+    stubStorage({ "chartgen.layout.scaleMode": '"sqrt"' });
+    expect((await load()).scaleMode()).toBe("normal");
+  });
+
+  it("persists the scale mode", async () => {
     const data = stubStorage();
     const s = await load();
     s.setScaleMode("percentage");
-    s.setAutoScale(false);
     expect(data.get("chartgen.layout.scaleMode")).toBe('"percentage"');
-    expect(data.get("chartgen.layout.autoScale")).toBe("false");
   });
 });
