@@ -93,6 +93,52 @@ uppercase `M` means month (`1M`), lowercase `m` minutes. A lone `D`, `W`
 or `M` means one day, week or month. Only timeframes the backend serves are
 accepted.
 
+## Drawing tools
+
+The vertical toolbar on the left of the chart holds the drawing tools:
+trend line, ray, extended line, horizontal line, horizontal ray,
+vertical line, parallel channel, fib retracement, rectangle, text
+annotation and price label. Below them are a magnet toggle (off, weak,
+strong), lock all, hide all and remove all (asks for confirmation). The
+button at the top switches the cursor between crosshair and arrow.
+
+A tool is armed for exactly one drawing: pick it, click the chart to
+place the points, and the tool is released. Pick it again or press `Esc`
+to cancel. Drawings pan and zoom with the chart.
+
+- **Select** a drawing by clicking it, then press `Delete` or
+  `Backspace` to remove it.
+- **Right-click** a drawing for Remove and Lock/Unlock. Locked drawings
+  cannot be dragged but still answer right-click, so they can be
+  unlocked there. Right-clicking while a drawing is in progress cancels
+  it. Hide is only available for all drawings at once (toolbar eye).
+- **Double-click** a text annotation to edit its text in a dialog.
+
+Drawings are saved per symbol in `localStorage` under
+`chartgen.drawings.<SYMBOL>` as time and price points, so they survive
+reloads and timeframe changes. Points right of the last bar are stored
+as the last bar's time plus whole bar intervals. A drawing with a point
+before the oldest loaded bar stays hidden and untouched until older
+bars are loaded. Stored entries are validated on load and malformed ones
+are dropped. Each symbol is capped at 200 KB and the 100 most recently
+used symbols are kept. A red dot at the bottom of the toolbar means the
+drawing limit (500 per symbol) was reached or saving failed (storage
+full); hover it for details.
+
+| Keys | Action |
+|---|---|
+| `Alt+T` | Trend line |
+| `Alt+H` | Horizontal line |
+| `Alt+J` | Horizontal ray |
+| `Alt+V` | Vertical line |
+| `Alt+F` | Fib retracement |
+| `Esc` | Cancel the armed tool or close the drawing menu |
+| `Delete` / `Backspace` | Remove the selected drawing |
+| `Ctrl+Z` / `Cmd+Z` | Undo the last drawing action |
+
+The shortcuts use modifiers so they do not clash with the letter and
+digit shortcuts above.
+
 ## Getting started
 
 ```bash

@@ -623,7 +623,7 @@ export function Chart(props: ChartProps): JSX.Element {
       customApi: { formatBigNumber },
     });
     setChart(c);
-    props.onChartReady?.(c!);
+    if (c) props.onChartReady?.(c);
 
     // Wire the crosshair subscription. klinecharts fires an event on
     // every mouse move; we debounce into a single rAF tick so Solid

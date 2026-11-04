@@ -13,6 +13,7 @@ import {
 import type { Chart as KLineChart } from "klinecharts";
 
 import { Chart } from "./components/Chart";
+import { DrawingToolbar } from "./components/DrawingToolbar";
 import { IndicatorChips } from "./components/IndicatorChips";
 import { IndicatorPicker } from "./components/IndicatorPicker";
 import { IndicatorSettings } from "./components/IndicatorSettings";
@@ -209,16 +210,19 @@ export function App(): JSX.Element {
         error={listIndicators.isError ? listIndicators.error : null}
         active={activeIndicators()}
       />
-      <main class="flex-1 min-h-0">
-        <Chart
-          series={query.data ?? null}
-          activeIndicators={wireIndicators()}
-          chartType={chartType()}
-          onToggleHidden={(n) => toggleIndicatorHidden(indexOf(n))}
-          onSettings={(n) => setSettingsIndex(indexOf(n))}
-          onRemove={removeIndicator}
-          onChartReady={setChart}
-        />
+      <main class="flex flex-1 min-h-0">
+        <DrawingToolbar chart={chart()} symbol={symbol()} />
+        <div class="flex-1 min-w-0">
+          <Chart
+            series={query.data ?? null}
+            activeIndicators={wireIndicators()}
+            chartType={chartType()}
+            onToggleHidden={(n) => toggleIndicatorHidden(indexOf(n))}
+            onSettings={(n) => setSettingsIndex(indexOf(n))}
+            onRemove={removeIndicator}
+            onChartReady={setChart}
+          />
+        </div>
       </main>
     </div>
   );
