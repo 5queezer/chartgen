@@ -8,9 +8,13 @@ import {
   hbarRects,
   hbarTheme,
   hbarTiers,
+  payloadToDataIndex,
+  toDataSpace,
+  valueExtents,
   type Mapper,
   type SeriesDivLine,
   type SeriesHBar,
+  type SeriesIndicator,
 } from "./geometry";
 
 // Identity-ish mapping: 10px per bar, y flipped around 100 like a canvas.
@@ -270,6 +274,17 @@ describe("fillTheme", () => {
     expect(fillTheme("cipher_b", 9)).toEqual(fillTheme("bbands", 0));
   });
 
+  it("colors the Kalman bands and zones cyan/red in fill order", () => {
+    const k = [0, 1, 2, 3].map((i) => fillTheme("kalman", i).up);
+    expect(k).toEqual([
+      "rgba(0, 188, 212, 0.15)",
+      "rgba(255, 23, 68, 0.15)",
+      "rgba(255, 23, 68, 0.10)",
+      "rgba(0, 188, 212, 0.10)",
+    ]);
+    expect(fillTheme("kvf", 0)).toEqual(fillTheme("kalman_volume", 0));
+  });
+
   it("uses a single band color for generic channels", () => {
     const t = fillTheme("bbands", 0);
     expect(t.up).toBe(t.down);
@@ -280,5 +295,111 @@ describe("hbarTheme", () => {
   it("colors TPO apart from the volume profile but keeps the gold POC", () => {
     expect(hbarTheme("tpo").va).not.toBe(hbarTheme("volume_profile").va);
     expect(hbarTheme("tpo").poc).toBe(hbarTheme("vpvr").poc);
+  });
+});
+
+describe("payloadToDataIndex", () => {
+  it("is the identity when every bar has a timestamp", () => {
+    expect(payloadToDataIndex([{ t: 1 }, { t: 2 }, { t: 3 }])).toEqual([
+      0, 1, 2,
+    ]);
+  });
+
+  it("maps dropped (t === null) bars to -1 and shifts later bars left", () => {
+    expect(
+      payloadToDataIndex([{ t: null }, { t: 1 }, { t: null }, { t: 2 }]),
+    ).toEqual([-1, 0, -1, 1]);
+  });
+
+  it("handles empty and all-null input", () => {
+    expect(payloadToDataIndex([])).toEqual([]);
+    expect(payloadToDataIndex([{ t: null }])).toEqual([-1]);
+  });
+});
+
+const indicator = (o: Partial<SeriesIndicator>): SeriesIndicator => ({
+  label: "X",
+  is_overlay: false,
+  ...o,
+});
+
+describe("toDataSpace", () => {
+  const remap = [-1, 0, -1, 1, 2];
+
+  it("compacts fill arrays to the surviving bars", () => {
+    const out = toDataSpace(
+      indicator({ fills: [{ y1: [9, 1, 9, 2, 3], y2: [9, 0, 9, null, 0] }] }),
+      remap,
+    );
+    expect(out.fills).toEqual([{ y1: [1, 2, 3], y2: [0, null, 0] }]);
+  });
+
+  it("remaps divline endpoints, dropping ones on dropped or missing bars", () => {
+    const out = toDataSpace(
+      indicator({
+        divlines: [
+          div({ x1: 1, x2: 4 }),
+          div({ x1: 0, x2: 3 }), // starts on a dropped bar
+          div({ x1: 3, x2: 99 }), // past the payload
+        ],
+      }),
+      remap,
+    );
+    expect(out.divlines!.map((d) => [d.x1, d.x2])).toEqual([[0, 2]]);
+  });
+
+  it("passes hbars and metadata through, keeps absent channels absent", () => {
+    const hbars = [hbar({})];
+    const out = toDataSpace(indicator({ hbars, y_range: [0, 1] }), remap);
+    expect(out.hbars).toBe(hbars);
+    expect(out.y_range).toEqual([0, 1]);
+    expect(out.fills).toBeUndefined();
+    expect(out.divlines).toBeUndefined();
+  });
+});
+
+describe("valueExtents", () => {
+  it("spans every fill edge per bar, skipping nulls", () => {
+    const ext = valueExtents(
+      indicator({
+        fills: [
+          { y1: [5, null, 2], y2: [1, null, null] },
+          { y1: [7, 3, null], y2: [0, null, null] },
+        ],
+      }),
+      3,
+    );
+    expect(ext).toEqual([
+      { lo: 0, hi: 7 },
+      { lo: 3, hi: 3 },
+      { lo: 2, hi: 2 },
+    ]);
+  });
+
+  it("includes y_range on every bar for oscillator panes", () => {
+    const ext = valueExtents(
+      indicator({ y_range: [-2.5, 2.5], fills: [{ y1: [3, 0], y2: [1, 0] }] }),
+      2,
+    );
+    expect(ext).toEqual([
+      { lo: -2.5, hi: 3 },
+      { lo: -2.5, hi: 2.5 },
+    ]);
+  });
+
+  it("gives a geometry-only pane an axis from y_range alone", () => {
+    expect(valueExtents(indicator({ y_range: [0, 100] }), 2)).toEqual([
+      { lo: 0, hi: 100 },
+      { lo: 0, hi: 100 },
+    ]);
+  });
+
+  it("ignores y_range on overlays and null y_range bounds", () => {
+    expect(
+      valueExtents(indicator({ is_overlay: true, y_range: [0, 1] }), 1),
+    ).toEqual([{ lo: null, hi: null }]);
+    expect(valueExtents(indicator({ y_range: [null, 5] }), 1)).toEqual([
+      { lo: null, hi: 5 },
+    ]);
   });
 });

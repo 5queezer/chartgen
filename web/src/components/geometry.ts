@@ -36,7 +36,12 @@ export interface Mapper {
   y: (value: number) => number;
 }
 
-/** Visible data-index window, `to` exclusive (klinecharts VisibleRange). */
+/**
+ * Visible data-index window: klinecharts' `VisibleRange.from`/`to`, which
+ * klinecharts already clamps to [0, dataList.length] (`to` exclusive), so
+ * it never describes the empty space right of the last bar. Indices are
+ * data indices (see `payloadToDataIndex`), not payload indices.
+ */
 export interface IndexRange {
   from: number;
   to: number;
@@ -67,6 +72,80 @@ const isNum = (v: number | null | undefined): v is number =>
   typeof v === "number" && Number.isFinite(v);
 
 const sign = (d: number): -1 | 0 | 1 => (d > 0 ? 1 : d < 0 ? -1 : 0);
+
+/**
+ * Payload bar index → klinecharts data index. `seriesToKLines` drops bars
+ * with `t === null`, so later bars shift left; dropped bars map to -1.
+ */
+export function payloadToDataIndex(
+  bars: Array<{ t: number | null }>,
+): number[] {
+  let next = 0;
+  return bars.map((b) => (b.t === null ? -1 : next++));
+}
+
+/**
+ * Re-index an indicator's per-bar geometry from payload space into data
+ * space with `payloadToDataIndex`'s remap: fill arrays keep only the
+ * surviving bars; divline endpoints are remapped, and segments touching
+ * a dropped (or out-of-range) bar are discarded. hbars are price-space
+ * and pass through unchanged.
+ */
+export function toDataSpace(
+  ind: SeriesIndicator,
+  remap: number[],
+): SeriesIndicator {
+  const kept: number[] = [];
+  remap.forEach((d, p) => {
+    if (d >= 0) kept.push(p);
+  });
+  const fills = ind.fills?.map((f) => ({
+    y1: kept.map((p) => f.y1[p] ?? null),
+    y2: kept.map((p) => f.y2[p] ?? null),
+  }));
+  const divlines = ind.divlines?.flatMap((d) => {
+    const x1 = remap[d.x1] ?? -1;
+    const x2 = remap[d.x2] ?? -1;
+    return x1 < 0 || x2 < 0 ? [] : [{ ...d, x1, x2 }];
+  });
+  return { ...ind, fills, divlines };
+}
+
+export interface ValueExtent {
+  lo: number | null;
+  hi: number | null;
+}
+
+/**
+ * Per-bar values the y-axis has to include beyond the line/bar figures:
+ * the min/max of every fill edge at that bar and, for oscillator panes,
+ * the payload's `y_range`. That keeps fixed ranges such as RSI 0–100 or
+ * Kalman ±2.5 (whose OB/OS zones live at the edges) and gives
+ * geometry-only panes a real axis. klinecharts auto-scales over figure
+ * values only, so Chart.tsx feeds these through two invisible figures.
+ * Overlays ignore `y_range`, since pinning the price axis would be wrong.
+ */
+export function valueExtents(
+  ind: SeriesIndicator,
+  length: number,
+): ValueExtent[] {
+  const [rlo, rhi] =
+    !ind.is_overlay && ind.y_range ? ind.y_range : [null, null];
+  const out: ValueExtent[] = [];
+  for (let i = 0; i < length; i++) {
+    let lo = isNum(rlo) ? rlo : null;
+    let hi = isNum(rhi) ? rhi : null;
+    for (const f of ind.fills ?? []) {
+      for (const v of [f.y1[i], f.y2[i]]) {
+        if (!isNum(v)) continue;
+        lo = lo === null ? v : Math.min(lo, v);
+        hi = hi === null ? v : Math.max(hi, v);
+      }
+    }
+    out.push({ lo, hi });
+  }
+  return out;
+}
 
 /**
  * Polygons between `y1` and `y2`, clipped to the visible range plus one
@@ -215,6 +294,15 @@ const WAVE_FILLS: FillTheme[] = [
   single("rgba(33, 186, 243, 0.05)"),
 ];
 
+// Kalman Volume Filter emits: bull band, bear band, OB zone, OS zone
+// (0x00BCD4 cyan / 0xFF1744 red server-side).
+const KALMAN_FILLS: FillTheme[] = [
+  single("rgba(0, 188, 212, 0.15)"),
+  single("rgba(255, 23, 68, 0.15)"),
+  single("rgba(255, 23, 68, 0.10)"),
+  single("rgba(0, 188, 212, 0.10)"),
+];
+
 /** Fill colors for the `index`-th fill of indicator `name`. */
 export function fillTheme(name: string, index: number): FillTheme {
   switch (name) {
@@ -224,6 +312,10 @@ export function fillTheme(name: string, index: number): FillTheme {
     case "cipher_b":
     case "wavetrend":
       return WAVE_FILLS[index] ?? single(BAND_FILL);
+    case "kalman":
+    case "kalman_volume":
+    case "kvf":
+      return KALMAN_FILLS[index] ?? single(BAND_FILL);
     case "long_short":
     case "ls_ratio":
       return single("rgba(38, 166, 154, 0.10)");
