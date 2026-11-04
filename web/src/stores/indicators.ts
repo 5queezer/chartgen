@@ -23,7 +23,7 @@ export type ActiveIndicator =
 
 const STORAGE_KEY = "chartgen.indicators.active";
 
-const DEFAULT_SET: ActiveIndicator[] = [
+export const DEFAULT_SET: ActiveIndicator[] = [
   "ema_stack",
   { name: "rsi", length: 14 },
 ];

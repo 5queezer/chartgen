@@ -1,30 +1,19 @@
 // Named chart layouts (ADR-0015). A layout bundles symbol, timeframe, chart
-// type, scale mode, the indicator set and drawings. The live state stays in
-// the existing stores (layout, indicators, drawings); this store keeps the
+// type, scale mode and the indicator set. The live state stays in
+// the existing stores (layout, indicators); this store keeps the
 // saved snapshots under `chartgen.layouts` and applies them back through the
 // other stores' setters, so their persisted formats are untouched.
 //
-// Drawings stay in their per-symbol keys. A layout snapshots the drawings of
-// the symbol it was saved with plus the symbols it touched earlier, at most
-// MAX_LAYOUT_SYMBOLS of them (newest kept), each already capped by the
-// drawings store at MAX_BYTES. The dirty check only looks at the current
-// symbol's drawings.
+// Drawings are not part of a layout: they stay global per symbol, as in
+// TradingView with "sync drawings to all layouts".
 
 import { batch, createSignal } from "solid-js";
 
 import { isTimeframe, type Timeframe } from "../lib/timeframe";
 import {
-  drawingsRevision,
-  loadDrawings,
-  MAX_BYTES,
-  parseRecords,
-  requestDrawingsReload,
-  saveDrawings,
-  type DrawingRecord,
-} from "./drawings";
-import {
   activeIndicators,
   activeIndicatorsKey,
+  DEFAULT_SET,
   indicatorName,
   isActiveIndicator,
   setActiveIndicators,
@@ -33,6 +22,8 @@ import {
 import {
   CHART_TYPES,
   chartType,
+  DEFAULT_CHART_TYPE,
+  DEFAULT_SCALE_MODE,
   normalizeSymbol,
   SCALE_MODES,
   scaleMode,
@@ -49,7 +40,6 @@ import {
 const STORAGE_KEY = "chartgen.layouts";
 
 export const MAX_LAYOUTS = 50;
-export const MAX_LAYOUT_SYMBOLS = 5;
 export const MAX_NAME_LENGTH = 64;
 export const DEFAULT_LAYOUT_NAME = "Unnamed";
 
@@ -59,7 +49,6 @@ export interface LayoutState {
   chartType: ChartType;
   scaleMode: ScaleMode;
   indicators: ActiveIndicator[];
-  drawingsBySymbol?: Record<string, DrawingRecord[]>;
 }
 
 export interface Layout {
@@ -103,20 +92,6 @@ export function uniqueName(
   return candidate;
 }
 
-function parseDrawingsBySymbol(
-  x: unknown,
-): Record<string, DrawingRecord[]> | undefined {
-  if (!isPlainObject(x)) return undefined;
-  const out: Record<string, DrawingRecord[]> = {};
-  for (const [key, raw] of Object.entries(x)) {
-    const sym = normalizeSymbol(key);
-    if (sym === null || Object.keys(out).length >= MAX_LAYOUT_SYMBOLS) continue;
-    const records = parseRecords(raw);
-    if (JSON.stringify(records).length <= MAX_BYTES) out[sym] = records;
-  }
-  return Object.keys(out).length > 0 ? out : undefined;
-}
-
 /** Validate a stored/imported state; null if a required field is malformed. */
 export function parseState(x: unknown): LayoutState | null {
   if (!isPlainObject(x)) return null;
@@ -137,16 +112,14 @@ export function parseState(x: unknown): LayoutState | null {
     seen.add(indicatorName(e));
     return true;
   });
-  const state: LayoutState = {
+  // Any leftover `drawingsBySymbol` key is ignored.
+  return {
     symbol: sym,
     timeframe: x.timeframe,
     chartType: x.chartType as ChartType,
     scaleMode: x.scaleMode as ScaleMode,
     indicators,
   };
-  const drawings = parseDrawingsBySymbol(x.drawingsBySymbol);
-  if (drawings) state.drawingsBySymbol = drawings;
-  return state;
 }
 
 function parseLayout(x: unknown): Layout | null {
@@ -198,29 +171,6 @@ export function parseLayouts(
   };
 }
 
-/**
- * State to store for `live`: its drawings are the current symbol's, merged
- * over what `prev` held for other symbols (oldest dropped past the cap).
- */
-export function snapshot(
-  live: LayoutState,
-  prev?: LayoutState,
-): LayoutState {
-  const { drawingsBySymbol: mine, ...rest } = live;
-  const merged: Record<string, DrawingRecord[]> = {
-    ...prev?.drawingsBySymbol,
-    ...mine,
-  };
-  const symbols = Object.keys(merged).filter((s) => s !== live.symbol);
-  const kept = [...symbols, live.symbol].slice(-MAX_LAYOUT_SYMBOLS);
-  return {
-    ...rest,
-    drawingsBySymbol: Object.fromEntries(
-      kept.map((s) => [s, merged[s] ?? []]),
-    ),
-  };
-}
-
 function comparable(s: LayoutState): string {
   return JSON.stringify([
     s.symbol,
@@ -228,11 +178,10 @@ function comparable(s: LayoutState): string {
     s.chartType,
     s.scaleMode,
     activeIndicatorsKey(s.indicators),
-    s.drawingsBySymbol?.[s.symbol] ?? [],
   ]);
 }
 
-/** True when `live` differs from `saved` in anything a layout holds (current symbol's drawings only). */
+/** True when `live` differs from `saved` in anything a layout holds . */
 export function isDirty(saved: LayoutState, live: LayoutState): boolean {
   return comparable(saved) !== comparable(live);
 }
@@ -247,7 +196,7 @@ export function withSaved(
     ...file,
     items: file.items.map((l) =>
       l.id === id
-        ? { ...l, updatedAt: now, state: snapshot(live, l.state) }
+        ? { ...l, updatedAt: now, state: live }
         : l,
     ),
   };
@@ -338,7 +287,6 @@ function liveState(): LayoutState {
     chartType: chartType(),
     scaleMode: scaleMode(),
     indicators: activeIndicators(),
-    drawingsBySymbol: { [symbol()]: loadDrawings(symbol()) },
   };
 }
 
@@ -353,7 +301,7 @@ function load(): LayoutsFile {
   } catch {
     raw = undefined;
   }
-  return parseLayouts(raw, snapshot(liveState()), newId(), Date.now());
+  return parseLayouts(raw, liveState(), newId(), Date.now());
 }
 
 function persist(file: LayoutsFile): void {
@@ -374,7 +322,6 @@ export const activeLayout = (): Layout =>
 
 /** True when the live state differs from the active layout's saved snapshot. */
 export const layoutDirty = (): boolean => {
-  drawingsRevision();
   return isDirty(activeLayout().state, liveState());
 };
 
@@ -383,7 +330,7 @@ function update(next: LayoutsFile): void {
   persist(next);
 }
 
-/** Write a state through the existing stores' setters, drawings included. */
+/** Write a state through the existing stores' setters. */
 function applyState(state: LayoutState): void {
   batch(() => {
     setSymbol(state.symbol);
@@ -391,11 +338,6 @@ function applyState(state: LayoutState): void {
     setChartType(state.chartType);
     setScaleMode(state.scaleMode);
     setActiveIndicators(state.indicators);
-    const drawings = { [state.symbol]: [], ...state.drawingsBySymbol };
-    for (const [sym, records] of Object.entries(drawings)) {
-      saveDrawings(sym, records);
-    }
-    requestDrawingsReload();
   });
 }
 
@@ -406,26 +348,21 @@ export function saveLayout(): void {
 
 /** Copy the live state into a new layout and switch to it. False when the cap is reached. */
 export function saveLayoutAs(name: string): boolean {
-  const next = withAdded(
-    file(),
-    name,
-    snapshot(liveState()),
-    newId(),
-    Date.now(),
-  );
+  const next = withAdded(file(), name, liveState(), newId(), Date.now());
   if (next === null) return false;
   update(next);
   return true;
 }
 
-/** New layout on the current symbol with no indicators or drawings; switches to it. */
+/** New layout on the current symbol and timeframe, everything else at its default; switches to it. */
 export function createLayout(name: string): boolean {
-  const live = liveState();
-  const state: LayoutState = snapshot({
-    ...live,
-    indicators: [],
-    drawingsBySymbol: { [live.symbol]: [] },
-  });
+  const state: LayoutState = {
+    symbol: symbol(),
+    timeframe: timeframe(),
+    chartType: DEFAULT_CHART_TYPE,
+    scaleMode: DEFAULT_SCALE_MODE,
+    indicators: [...DEFAULT_SET],
+  };
   const next = withAdded(file(), name, state, newId(), Date.now());
   if (next === null) return false;
   update(next);
@@ -449,7 +386,7 @@ export function deleteLayout(id: string): void {
   const wasActive = file().active === id;
   const next = withoutLayout(file(), id);
   if (next === null) {
-    update(parseLayouts(undefined, snapshot(liveState()), newId(), Date.now()));
+    update(parseLayouts(undefined, liveState(), newId(), Date.now()));
     return;
   }
   update(next);

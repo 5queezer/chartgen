@@ -5,29 +5,6 @@ import type { Page } from "@playwright/test";
 
 import { test, expect } from "./fixtures/app";
 
-const A = { x: 300, y: 160 };
-const B = { x: 560, y: 260 };
-
-/**
- * Click with real mouse movement first: klinecharts only advances a
- * drawing on mouse-move + click, not on a teleporting click.
- */
-async function clickAt(page: Page, at: { x: number; y: number }) {
-  const box = await page.locator(".chart-container").boundingBox();
-  if (!box) throw new Error("chart container not laid out");
-  await page.mouse.move(box.x + at.x, box.y + at.y, { steps: 5 });
-  await page.mouse.down();
-  await page.mouse.up();
-  await page.waitForTimeout(700);
-}
-
-const overlays = (page: Page) =>
-  page.evaluate(() =>
-    (
-      window as unknown as { __chartgenDrawings: () => unknown[] }
-    ).__chartgenDrawings(),
-  );
-
 const layoutButton = (page: Page) =>
   page.getByRole("button", { name: /^Layout:/ });
 const layoutName = (page: Page) => page.getByTestId("layout-name");
@@ -35,7 +12,7 @@ const dirtyDot = (page: Page) => page.getByTestId("layout-dirty");
 const activeTimeframe = (page: Page) =>
   page.getByRole("group", { name: "Timeframe" }).locator("[aria-pressed=true]");
 const chip = (page: Page, name: string) =>
-  page.getByRole("button", { name: `Remove ${name}` });
+  page.getByRole("button", { name: `Remove ${name}`, exact: true });
 
 async function menu(page: Page, item: string | RegExp) {
   await layoutButton(page).click();
@@ -54,13 +31,6 @@ async function load(page: Page, name: string) {
   await page.getByRole("button", { name: new RegExp(`^${name}`) }).click();
 }
 
-async function drawTrendLine(page: Page) {
-  await page.getByRole("button", { name: "Trend line" }).click();
-  await clickAt(page, A);
-  await clickAt(page, B);
-  await expect.poll(() => overlays(page)).toHaveLength(1);
-}
-
 test.describe("layouts", () => {
   test("fresh install starts with a clean Unnamed layout", async ({
     bootedApp: page,
@@ -75,7 +45,7 @@ test.describe("layouts", () => {
     await page.getByRole("button", { name: "15m", exact: true }).click();
     await expect(dirtyDot(page)).toBeVisible();
 
-    await page.locator(".chart-container").click({ position: A });
+    await page.locator(".chart-container").click({ position: { x: 300, y: 160 } });
     let downloads = 0;
     page.on("download", () => downloads++);
     await page.keyboard.press("Control+s");
@@ -91,8 +61,8 @@ test.describe("layouts", () => {
   test("create, switch, unsaved prompt, persist, rename, delete", async ({
     bootedApp: page,
   }) => {
-    // Layout A: default indicators, a drawing, 1h.
-    await drawTrendLine(page);
+    // Layout A: ema_stack removed, 1h.
+    await chip(page, "ema_stack").click();
     await expect(dirtyDot(page)).toBeVisible();
     await page.keyboard.press("Control+s");
     await expect(dirtyDot(page)).toHaveCount(0);
@@ -100,23 +70,24 @@ test.describe("layouts", () => {
     await nameDialog(page, "Alpha");
     await expect(layoutName(page)).toHaveText("Alpha");
 
-    // Layout B: no indicators, no drawings, 15m.
+    // Layout B: created on A's symbol and timeframe with indicators back
+    // at the defaults; then 15m.
     await menu(page, /^Create new layout/);
     await nameDialog(page, "Beta");
     await expect(layoutName(page)).toHaveText("Beta");
-    await expect(chip(page, "ema_stack")).toHaveCount(0);
-    await expect.poll(() => overlays(page)).toHaveLength(0);
+    await expect(activeTimeframe(page)).toHaveText("1h");
+    await expect(chip(page, "ema_stack")).toBeVisible();
     await page.getByRole("button", { name: "15m", exact: true }).click();
     await expect(dirtyDot(page)).toBeVisible();
     await page.keyboard.press("Control+s");
     await expect(dirtyDot(page)).toHaveCount(0);
 
-    // Back to A: everything restored, drawing included.
+    // Back to A: everything restored.
     await load(page, "Alpha");
     await expect(layoutName(page)).toHaveText("Alpha");
     await expect(activeTimeframe(page)).toHaveText("1h");
-    await expect(chip(page, "ema_stack")).toBeVisible();
-    await expect.poll(() => overlays(page)).toHaveLength(1);
+    await expect(chip(page, "ema_stack")).toHaveCount(0);
+    await expect(chip(page, "rsi")).toBeVisible();
     await expect(dirtyDot(page)).toHaveCount(0);
 
     // Leaving a dirty layout asks first; Cancel stays put.
@@ -134,8 +105,7 @@ test.describe("layouts", () => {
     await page.getByRole("dialog").getByRole("button", { name: "Don't save" }).click();
     await expect(layoutName(page)).toHaveText("Beta");
     await expect(activeTimeframe(page)).toHaveText("15m");
-    await expect(chip(page, "ema_stack")).toHaveCount(0);
-    await expect.poll(() => overlays(page)).toHaveLength(0);
+    await expect(chip(page, "ema_stack")).toBeVisible();
     await load(page, "Alpha");
     await expect(activeTimeframe(page)).toHaveText("1h");
 

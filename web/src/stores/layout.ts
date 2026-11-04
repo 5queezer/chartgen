@@ -32,8 +32,8 @@ const PREFIX = "chartgen.layout.";
 
 const DEFAULT_SYMBOL = "BTCUSDT";
 const DEFAULT_TIMEFRAME: Timeframe = "1h";
-const DEFAULT_CHART_TYPE: ChartType = "candles";
-const DEFAULT_SCALE_MODE: ScaleMode = "normal";
+export const DEFAULT_CHART_TYPE: ChartType = "candles";
+export const DEFAULT_SCALE_MODE: ScaleMode = "normal";
 
 function read(key: string): unknown {
   if (typeof localStorage === "undefined") return undefined;

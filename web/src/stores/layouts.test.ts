@@ -2,13 +2,11 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   MAX_LAYOUTS,
-  MAX_LAYOUT_SYMBOLS,
   isDirty,
   parseExport,
   parseLayouts,
   parseState,
   serializeExport,
-  snapshot,
   uniqueName,
   withAdded,
   withRenamed,
@@ -18,23 +16,12 @@ import {
   type LayoutState,
 } from "./layouts";
 
-const rec = (t: number) => ({
-  name: "segment" as const,
-  points: [
-    { timestamp: t, value: 1 },
-    { timestamp: t + 1, value: 2 },
-  ],
-  lock: false,
-  visible: true,
-});
-
 const base: LayoutState = {
   symbol: "BTCUSDT",
   timeframe: "1h",
   chartType: "candles",
   scaleMode: "normal",
   indicators: ["ema_stack", { name: "rsi", length: 14 }],
-  drawingsBySymbol: { BTCUSDT: [rec(1)] },
 };
 
 const file = () => parseLayouts(undefined, base, "a", 1);
@@ -88,10 +75,7 @@ describe("parseLayouts", () => {
           state: {
             ...good.state,
             indicators: ["rsi", "rsi", 3, {}],
-            drawingsBySymbol: {
-              "bad sym": [],
-              ETHUSDT: [rec(2), { name: "nope" }],
-            },
+            drawingsBySymbol: { BTCUSDT: [] },
           },
         },
         { ...good, id: "d", name: "Dupe id" },
@@ -101,7 +85,7 @@ describe("parseLayouts", () => {
     expect(f.items.map((l) => l.id)).toEqual(["d"]);
     expect(f.active).toBe("d");
     expect(f.items[0]!.state.indicators).toEqual(["rsi"]);
-    expect(f.items[0]!.state.drawingsBySymbol).toEqual({ ETHUSDT: [rec(2)] });
+    expect(f.items[0]!.state).not.toHaveProperty("drawingsBySymbol");
   });
 
   it("caps at MAX_LAYOUTS", () => {
@@ -159,26 +143,7 @@ describe("reducers", () => {
 });
 
 describe("snapshot and dirty", () => {
-  it("keeps other symbols' drawings and bounds them", () => {
-    let state: LayoutState = base;
-    for (let i = 0; i < MAX_LAYOUT_SYMBOLS + 3; i++) {
-      state = snapshot(
-        { ...base, symbol: `S${i}`, drawingsBySymbol: { [`S${i}`]: [rec(i)] } },
-        state,
-      );
-    }
-    const keys = Object.keys(state.drawingsBySymbol!);
-    expect(keys).toHaveLength(MAX_LAYOUT_SYMBOLS);
-    expect(keys.at(-1)).toBe(`S${MAX_LAYOUT_SYMBOLS + 2}`);
-  });
-
-  it("always records the current symbol, even without drawings", () => {
-    expect(
-      snapshot({ ...base, drawingsBySymbol: {} }).drawingsBySymbol,
-    ).toEqual({ BTCUSDT: [] });
-  });
-
-  it("detects changes in every field, ignores key order and other symbols", () => {
+  it("detects changes in every field and ignores key order", () => {
     expect(isDirty(base, { ...base })).toBe(false);
     expect(
       isDirty(base, {
@@ -196,15 +161,6 @@ describe("snapshot and dirty", () => {
     expect(isDirty(base, { ...base, chartType: "line" })).toBe(true);
     expect(isDirty(base, { ...base, scaleMode: "log" })).toBe(true);
     expect(isDirty(base, { ...base, symbol: "ETHUSDT" })).toBe(true);
-    expect(
-      isDirty(base, { ...base, drawingsBySymbol: { BTCUSDT: [] } }),
-    ).toBe(true);
-    expect(
-      isDirty(base, {
-        ...base,
-        drawingsBySymbol: { BTCUSDT: [rec(1)], ETHUSDT: [rec(5)] },
-      }),
-    ).toBe(false);
   });
 
   it("withSaved clears the dirty state", () => {
@@ -258,7 +214,12 @@ describe("live bindings", () => {
 
     expect(l.createLayout("B")).toBe(true);
     expect(l.activeLayout().name).toBe("B");
-    expect(l.activeLayout().state.indicators).toEqual([]);
+    expect(l.activeLayout().state).toMatchObject({
+      symbol: "BTCUSDT",
+      timeframe: "4h",
+      chartType: "candles",
+      indicators: ["ema_stack", { name: "rsi", length: 14 }],
+    });
 
     lay.setTimeframe("15m");
     const a = l.layouts()[0]!;

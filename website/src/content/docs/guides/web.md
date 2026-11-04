@@ -142,7 +142,9 @@ digit shortcuts above.
 ## Layouts
 
 A layout is a named bundle of symbol, timeframe, chart type, scale mode,
-the indicator set (including hidden and edited ones) and drawings. The
+and the indicator set (including hidden and edited ones). Drawings are
+not part of a layout: they stay per symbol and look the same in every
+layout. The
 layout menu sits at the right end of the top bar and shows the active
 layout's name. A dot next to the name means the chart differs from the
 saved layout. The first start creates one layout, `Unnamed`, from your
@@ -153,7 +155,7 @@ current chart.
 | Save layout (`Ctrl+S` / `Cmd+S`) | Store the current chart in the active layout. Works from anywhere, including the chart, and replaces the browser's save dialog. |
 | Rename... | Rename the active layout. A name already in use gets a suffix: `Name (2)`. |
 | Make a copy / Save as... | Store the current chart as a new layout and switch to it. |
-| Create new layout... | A new layout on the current symbol with no indicators or drawings. |
+| Create new layout... | A new layout on the current symbol and timeframe; chart type, scale mode and indicators go back to their defaults. |
 | Load layout... | A searchable list of layouts; click one to switch. |
 | Export saved layout / Import layout... | Download the saved layout as a JSON file, or add one from a file. Imports are validated; invalid files are refused. |
 | Delete layout... | Delete the active layout after confirmation. The first remaining one becomes active; deleting the last one leaves a fresh `Unnamed`. |
@@ -164,11 +166,7 @@ changes survive a reload like any other chart state, and so does the
 active layout.
 
 Layouts are stored in `localStorage` under `chartgen.layouts` (at most
-50, validated on load, malformed ones dropped). Drawings stay in their
-per-symbol keys; a layout keeps a copy of the drawings of the symbol it
-was saved on plus up to four symbols it touched before, and applying a
-layout writes those back. Only the current symbol's drawings count for
-the unsaved-changes dot. See
+50, validated on load, malformed ones dropped). See
 [ADR-0015](/chartgen/decisions/0015-named-layouts/).
 
 ## Getting started

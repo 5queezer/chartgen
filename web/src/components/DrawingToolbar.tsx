@@ -24,7 +24,6 @@ import {
 
 import { isTypingContext } from "../lib/keys";
 import {
-  drawingsReload,
   loadDrawings,
   MAX_DRAWINGS,
   saveDrawings,
@@ -579,7 +578,7 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
   // changes. History is reset only after the rebuild.
   createEffect(
     on(
-      () => [props.chart, props.symbol, drawingsReload()] as const,
+      () => [props.chart, props.symbol] as const,
       ([chart, symbol]) => {
         if (!chart) return;
         rebuild(loadDrawings(symbol));
