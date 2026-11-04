@@ -101,12 +101,23 @@ export function payloadToDataIndex(
  * a dropped (or out-of-range) bar are discarded. hbars are price-space
  * and pass through, except their `color` is resolved here once (wire
  * color, else the tier theme for indicator `name`) instead of per frame.
+ *
+ * A null `remap` means the payload already is in data space (every bar
+ * has a timestamp, as in merged live data). Contract of that path: every
+ * field but `hbars` is shared with `ind` (same arrays, not copies), so
+ * in-place updates to `ind` show through and it costs nothing per bar;
+ * and nothing is filtered, in particular divlines whose endpoints lie
+ * outside the bars are kept. The caller guarantees the indices are valid
+ * (the live merge only emits divlines on bars it holds).
  */
 export function toDataSpace(
   ind: SeriesIndicator,
-  remap: number[],
+  remap: number[] | null,
   name = "",
 ): SeriesIndicator {
+  const colors = ind.hbars ? hbarColors(ind.hbars, ind.hlines ?? [], name) : [];
+  const hbars = ind.hbars?.map((h, i) => ({ ...h, color: colors[i] }));
+  if (remap === null) return { ...ind, hbars };
   const kept: number[] = [];
   remap.forEach((d, p) => {
     if (d >= 0) kept.push(p);
@@ -122,8 +133,6 @@ export function toDataSpace(
     const x2 = remap[d.x2] ?? -1;
     return x1 < 0 || x2 < 0 ? [] : [{ ...d, x1, x2 }];
   });
-  const colors = ind.hbars ? hbarColors(ind.hbars, ind.hlines ?? [], name) : [];
-  const hbars = ind.hbars?.map((h, i) => ({ ...h, color: colors[i] }));
   return { ...ind, fills, divlines, hbars };
 }
 

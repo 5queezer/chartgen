@@ -1,8 +1,11 @@
 // Status indicator next to the form. Pure presentational — the state
 // machine lives in App.tsx. v0.1 statuses: ready, authenticating...,
-// loading..., loaded, error: <message> (with a Retry action).
+// loading..., loaded, error: <message> (with a Retry action). After it, a
+// small live-feed badge: live, paused (hidden tab), retrying, resyncing.
 
 import { Show, type JSX } from "solid-js";
+
+import type { PollStatus } from "../lib/liveFeed";
 
 export type Status =
   | { kind: "ready" }
@@ -13,6 +16,8 @@ export type Status =
 
 export interface StatusLineProps {
   status: Status;
+  /** Live tail polling state; nothing is shown while it is off. */
+  live?: PollStatus;
   /** Called when the user clicks Retry on the error status. */
   onRetry: () => void;
 }
@@ -43,7 +48,27 @@ function colorFor(s: Status): string {
   }
 }
 
+/** Badge text and tooltip; null while polling is off. */
+function liveBadge(s: PollStatus): { text: string; title: string } | null {
+  switch (s.kind) {
+    case "off":
+      return null;
+    case "live":
+      return { text: "live", title: `Updating every ${s.everyMs / 1000}s` };
+    case "paused":
+      return { text: "paused", title: "Live updates pause while the tab is hidden" };
+    case "retrying":
+      return {
+        text: `live: retry in ${Math.round(s.inMs / 1000)}s`,
+        title: `Live update failed: ${s.message}`,
+      };
+    case "reloading":
+      return { text: "resyncing...", title: "Reloading the chart to catch up" };
+  }
+}
+
 export function StatusLine(props: StatusLineProps): JSX.Element {
+  const badge = () => (props.live ? liveBadge(props.live) : null);
   return (
     <span class={`text-sm font-mono ${colorFor(props.status)}`}>
       {formatStatus(props.status)}
@@ -55,6 +80,18 @@ export function StatusLine(props: StatusLineProps): JSX.Element {
         >
           Retry
         </button>
+      </Show>
+      <Show when={badge()}>
+        {(b) => (
+          <span
+            data-testid="live-status"
+            data-state={props.live?.kind}
+            class={`live-status is-${props.live?.kind}`}
+            title={b().title}
+          >
+            {b().text}
+          </span>
+        )}
       </Show>
     </span>
   );

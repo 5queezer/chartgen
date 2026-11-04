@@ -9,6 +9,7 @@ import {
   onMount,
   type JSX,
 } from "solid-js";
+import { useQueryClient } from "@tanstack/solid-query";
 
 import type { Chart as KLineChart } from "klinecharts";
 
@@ -34,7 +35,19 @@ import {
 import { isTypingContext } from "./lib/keys";
 import { createMcpSession } from "./mcp";
 import { tryHandlePendingRedirect } from "./oauth";
-import { createChartQuery, createListIndicatorsQuery } from "./queries";
+import {
+  chartQueryKey,
+  createChartQuery,
+  createListIndicatorsQuery,
+} from "./queries";
+import {
+  createLiveFeed,
+  type HistoryStatus,
+  type LiveRequest,
+  type LiveSnapshot,
+  type PollStatus,
+} from "./lib/liveFeed";
+import type { SeriesPayload } from "./types/responses";
 import { createAlertLogger } from "./services/notifications";
 import {
   activeIndicators,
@@ -140,6 +153,79 @@ export function App(): JSX.Element {
     enabled: authReady(),
   }));
 
+  // The live feed owns the chart's data from each full load on: it polls
+  // the tail and pages in history, and the chart renders its snapshots.
+  const [live, setLive] = createSignal<LiveSnapshot | null>(null);
+  const [pollStatus, setPollStatus] = createSignal<PollStatus>({ kind: "off" });
+  const [historyStatus, setHistoryStatus] = createSignal<HistoryStatus>({
+    kind: "idle",
+  });
+  const feed = createLiveFeed({
+    fetch: (request, { signal, ...args }) =>
+      session.callGenerateChart({ ...request, ...args }, signal),
+    reload: () => query.refetch(),
+    onSnapshot: setLive,
+    onPollStatus: setPollStatus,
+    onHistoryStatus: setHistoryStatus,
+  });
+  onCleanup(feed.dispose);
+
+  // Hand each full load to the feed. A request change (symbol, timeframe,
+  // visible indicators, params) suspends the feed at once, which drops
+  // every in-flight poll and page of the old chart; the old chart stays on
+  // screen until the new load lands (keepPreviousData), and is cleared if
+  // that load fails.
+  //
+  // What gets adopted is read from the query cache entry of exactly the
+  // current key, not from `query.data`: that can still be the previous
+  // key's result (placeholder, or published a tick after the key changed).
+  // Each successful fetch stamps the entry with a new dataUpdatedAt, so a
+  // refetch of the same key (Retry, re-pick, the feed's own reload) is
+  // adopted even when the payload is equal, and switching back to a cached
+  // key adopts that key's own data.
+  const queryClient = useQueryClient();
+  let feedKey = "";
+  // dataUpdatedAt of the adopted entry; null: none yet, -1: cleared.
+  let adoptedAt: number | null = null;
+  createEffect(() => {
+    const request: LiveRequest = {
+      ticker: symbol(),
+      timeframe: timeframe(),
+      indicators: wireIndicators(),
+    };
+    // Re-run whenever the query publishes a result.
+    void query.data;
+    void query.dataUpdatedAt;
+    void query.status;
+    untrack(() => {
+      const key = chartQueryKey(request);
+      const json = JSON.stringify(key);
+      if (json !== feedKey) {
+        feedKey = json;
+        adoptedAt = null;
+        feed.suspend();
+      }
+      const state = queryClient.getQueryState<SeriesPayload, Error>(key);
+      if (state?.data !== undefined) {
+        if (state.dataUpdatedAt === adoptedAt) return;
+        adoptedAt = state.dataUpdatedAt;
+        // A copy: the feed updates its series in place, the cache stays as loaded.
+        feed.reset(structuredClone(state.data), request);
+      } else if (state?.status === "error" && adoptedAt !== -1) {
+        adoptedAt = -1;
+        feed.reset(null, request);
+      }
+    });
+  });
+
+  if (import.meta.env.DEV) {
+    // E2E hook (tests/e2e/live-paging.spec.ts): what the chart holds.
+    (window as unknown as Record<string, unknown>).__chartgenTest = {
+      chart,
+      series: () => live()?.series ?? null,
+    };
+  }
+
   // A symbol only becomes a "recent" once its data actually loaded, so
   // typos never end up in the list.
   createEffect(() => {
@@ -211,6 +297,7 @@ export function App(): JSX.Element {
         </button>
         <StatusLine
           status={status()}
+          live={pollStatus()}
           onRetry={() => void query.refetch()}
         />
         <div class="ml-auto">
@@ -268,7 +355,10 @@ export function App(): JSX.Element {
         <DrawingToolbar chart={chart()} symbol={symbol()} />
         <div class="flex-1 min-w-0">
           <Chart
-            series={query.data ?? null}
+            series={live()?.series ?? null}
+            update={live()?.update ?? null}
+            history={historyStatus()}
+            onLoadOlder={feed.loadOlder}
             activeIndicators={wireIndicators()}
             styles={plotStyles()}
             chartType={chartType()}

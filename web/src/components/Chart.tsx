@@ -20,6 +20,11 @@
 // crosshair is active the header shows the values at that bar index;
 // otherwise it shows the last finite value. Handler is rAF-debounced.
 //
+// Live data: `series` is the live feed's merged series (lib/liveFeed.ts)
+// and `update` says what changed. Older pages are prepended through
+// klinecharts's load-data callback and tail polls go through updateData,
+// so neither moves the view; everything else is a full applyNewData.
+//
 // Visual styling is driven by ADR-0006 (TradingView visual parity).
 
 import {
@@ -27,14 +32,18 @@ import {
   createSignal,
   createMemo,
   Index,
+  Match,
   onCleanup,
   onMount,
+  Show,
+  Switch,
   untrack,
   type JSX,
 } from "solid-js";
 import {
   dispose,
   init,
+  LoadDataType,
   registerIndicator,
   type Chart as KChart,
   type IndicatorDrawCallback,
@@ -53,6 +62,11 @@ import {
   type ActiveIndicator,
   type IndicatorStyle,
 } from "../stores/indicators";
+import {
+  canPageBefore,
+  type HistoryStatus,
+  type SeriesUpdate,
+} from "../lib/liveFeed";
 import { theme, type ChartType } from "../stores/layout";
 import { PALETTES, type Palette } from "../lib/theme";
 import type { SeriesPayload } from "../types/responses";
@@ -189,6 +203,27 @@ const isEmptyShape = (s: IndicatorShape): boolean =>
  * klinecharts's own indicator registry; the app mounts one Chart.
  */
 const geometryStore = new Map<string, SeriesIndicator>();
+
+/**
+ * Put the geometry of `names` into `geometryStore`, in data space. When
+ * every bar has a timestamp (`timed`; always so for merged live data)
+ * payload and data indices coincide, and the stored entries share their
+ * fill arrays with the series, which a tail merge updates in place; a
+ * tail tick then only re-stores them (no per-bar copy) to pick up its
+ * re-built divlines.
+ */
+function storeGeometry(
+  series: SeriesPayload,
+  names: string[],
+  timed = series.bars.every((b) => b.t !== null),
+): void {
+  const remap = timed ? null : payloadToDataIndex(series.bars);
+  for (const name of names) {
+    const ind = series.indicators[name];
+    if (!ind || isEmptyShape(shapeFromPayload(series, name))) continue;
+    geometryStore.set(indicatorRegName(name), toDataSpace(ind, remap, name));
+  }
+}
 
 /**
  * klinecharts `draw` callback painting the indicator's fills, hbars and
@@ -395,10 +430,15 @@ function shapeFromPayload(
   return { lines, hist, geometry };
 }
 
-function seriesToKLines(series: SeriesPayload): KLineData[] {
+/** KLineData (with indicator stashes) for bars `from` up to `to`. */
+function seriesToKLines(
+  series: SeriesPayload,
+  from = 0,
+  to = series.bars.length,
+): KLineData[] {
   const names = Object.keys(series.indicators);
   const klines: KLineData[] = [];
-  for (let i = 0; i < series.bars.length; i++) {
+  for (let i = from; i < to; i++) {
     const bar = series.bars[i];
     if (!bar || bar.t === null) continue;
     const kline: KLineData = {
@@ -625,6 +665,9 @@ function tvStyles(p: Palette) {
 const CANDLE_PANE_ID = "candle_pane";
 // Matches the two-decimal compact volume in the legend.
 const VOLUME_PRECISION = 2;
+// New bars in one tail update up to which each is appended with its own
+// updateData (one full recalc each); more is applied in one step.
+const MAX_INCREMENTAL_BARS = 5;
 
 interface HeaderState {
   /** Series key (indicator request name); absent for the price pane. */
@@ -676,6 +719,21 @@ export interface ChartProps {
   onSettings?: (name: string) => void;
   onRemove?: (name: string) => void;
   onChartReady?: (chart: KChart) => void;
+  /**
+   * What changed since the previous `series` (lib/liveFeed.ts). A
+   * prepended page or a tail update that directly follows the last
+   * applied snapshot is fed to klinecharts incrementally, so the view
+   * keeps its position; anything else is a full `applyNewData`.
+   */
+  update?: SeriesUpdate | null;
+  /** History paging state, shown at the left edge. */
+  history?: HistoryStatus;
+  /**
+   * Called when the view reaches the oldest bar, and by the Retry
+   * button. True while a page load is in flight; false if there is no
+   * older history.
+   */
+  onLoadOlder?: () => boolean;
 }
 
 export function Chart(props: ChartProps): JSX.Element {
@@ -691,12 +749,23 @@ export function Chart(props: ChartProps): JSX.Element {
   const [crosshairIndex, setCrosshairIndex] = createSignal<number | null>(
     null,
   );
-  // Computed once per series, not per crosshair frame.
+  // True while the oldest loaded bar is in view.
+  const [atOldest, setAtOldest] = createSignal(false);
+  // Computed once per series, not per crosshair frame. pricePrecision
+  // samples the last 50 closes, so only those are mapped: this reruns on
+  // every live tick.
   const pricePrecisionForSeries = createMemo(() =>
-    pricePrecision(props.series?.bars.map((b) => b.c) ?? []),
+    pricePrecision(props.series?.bars.slice(-50).map((b) => b.c) ?? []),
   );
   let crosshairFrame: number | null = null;
   let layoutFrame: number | null = null;
+  // Version of the last snapshot handed to klinecharts (null: none).
+  let appliedVersion: number | null = null;
+  // klinecharts's "load older data" callback while a page is on its way.
+  // Holding it keeps klinecharts from asking again, which is what makes
+  // page loads one at a time; an error keeps it held until Retry.
+  let pendingOlder: ((data: KLineData[], more?: boolean) => void) | null =
+    null;
   // Names of the indicators currently requested (visible). Panes and legends
   // of anything else are dropped right away, before a refetch lands. A string
   // so param-only changes do not re-run the pane effect.
@@ -713,6 +782,22 @@ export function Chart(props: ChartProps): JSX.Element {
     });
     setChart(c);
     if (c) props.onChartReady?.(c);
+
+    // klinecharts asks for more data when the view reaches either end.
+    // "forward" is older bars (prepended); "backward" would be newer ones,
+    // which only ever come from the live tail, so that one is answered
+    // with "no more" at once (an unanswered request blocks the other).
+    c?.setLoadDataCallback(({ type, callback }) => {
+      if (type !== LoadDataType.Forward) {
+        callback([], false);
+        return;
+      }
+      pendingOlder = callback;
+      if (!(props.onLoadOlder?.() ?? false)) {
+        pendingOlder = null;
+        callback([], false);
+      }
+    });
 
     // Wire the crosshair subscription. klinecharts fires an event on
     // every mouse move; we debounce into a single rAF tick so Solid
@@ -739,10 +824,15 @@ export function Chart(props: ChartProps): JSX.Element {
     // Use the string form of the action type to avoid pulling in the
     // runtime enum (TS-only import-elision friendly).
     c!.subscribeAction("onCrosshairChange" as never, onCrosshair);
+    // The history-limit notice shows only while the oldest bar is in view.
+    const onRange = (range?: unknown) =>
+      setAtOldest((range as { from?: number } | undefined)?.from === 0);
+    c!.subscribeAction("onVisibleRangeChange" as never, onRange);
     const onLeave = () => setCrosshairIndex(null);
     host.addEventListener("mouseleave", onLeave);
     onCleanup(() => {
       c!.unsubscribeAction("onCrosshairChange" as never, onCrosshair);
+      c!.unsubscribeAction("onVisibleRangeChange" as never, onRange);
       host.removeEventListener("mouseleave", onLeave);
       if (crosshairFrame !== null) cancelAnimationFrame(crosshairFrame);
     });
@@ -884,13 +974,99 @@ export function Chart(props: ChartProps): JSX.Element {
     }
   });
 
+  /**
+   * Feed a live-feed change to klinecharts without losing the scroll
+   * position (a bare `applyNewData` snaps to the newest bar). False if
+   * klinecharts does not hold what the change builds on; the caller then
+   * does a full apply.
+   */
+  const applyIncremental = (
+    c: KChart,
+    series: SeriesPayload,
+    update: SeriesUpdate,
+    names: string[],
+  ): boolean => {
+    if (update.kind === "older") {
+      // Prepend through the held "load older" callback: klinecharts keeps
+      // the view anchored to the newest bar, so nothing on screen moves.
+      // The prepended page's indices shift every geometry index, so the
+      // store is refreshed first; the prepend recalcs and repaints.
+      // An empty page (count 0) ends the history, whatever has_more says.
+      const done = pendingOlder;
+      if (!done) return false;
+      pendingOlder = null;
+      storeGeometry(series, names);
+      done(
+        seriesToKLines(series, 0, update.count),
+        update.count > 0 && canPageBefore(series),
+      );
+      return true;
+    }
+    if (update.kind !== "tail") return false;
+    const list = c.getDataList();
+    const { from, prevLength } = update;
+    const head = series.bars[from]?.t;
+    if (list.length !== prevLength || head == null) return false;
+    if (list[from]?.timestamp !== head * 1000) return false;
+    // The tail merge updates fill arrays and divline lists in place, which
+    // the stored geometry shares (storeGeometry); only a list the merge
+    // had to create is not shared yet. Merged data is always timed.
+    for (const name of names) {
+      const ind = series.indicators[name];
+      const stored = geometryStore.get(indicatorRegName(name));
+      if (ind && stored && stored.divlines !== ind.divlines) {
+        storeGeometry(series, [name], true);
+      }
+    }
+    const klines = seriesToKLines(series, from);
+    const kept = prevLength - from;
+    const added = klines.length - kept;
+    if (added > MAX_INCREMENTAL_BARS) {
+      // A catch-up after missed bars: one updateData per bar would recalc
+      // every indicator per bar. Apply the whole list once instead and
+      // move the view back to where it was (applyNewData snaps it to the
+      // newest bar): the bar at the left edge returns to the same pixel.
+      // When the newest bar was in view the chart keeps following it.
+      const range = c.getVisibleRange();
+      const following = range.to >= prevLength;
+      const anchor = list[Math.min(range.from, prevLength - 1)]!.timestamp;
+      const xOf = () =>
+        (
+          c.convertToPixel({ timestamp: anchor }, {
+            paneId: CANDLE_PANE_ID,
+          }) as { x?: number }
+        ).x;
+      const x = xOf();
+      // A held "load older" callback stays valid: it prepends to whatever
+      // list klinecharts holds, which is still this series.
+      c.applyNewData(seriesToKLines(series), canPageBefore(series));
+      const x2 = xOf();
+      if (!following && x !== undefined && x2 !== undefined) {
+        c.scrollByDistance(x - x2);
+      }
+      return true;
+    }
+    // Bars we already have are updated in place; new ones go through
+    // updateData, which appends and, when the view is scrolled back,
+    // keeps it where it is. Each updateData recalcs every indicator over
+    // the whole list (klinecharts has no partial recalc), so an unchanged
+    // length still needs exactly one call to recalc and repaint.
+    for (let i = 0; i < kept; i++) Object.assign(list[from + i]!, klines[i]);
+    if (added === 0) c.updateData(list[prevLength - 1]!);
+    for (const k of klines.slice(kept)) c.updateData(k);
+    return true;
+  };
+
   // Feed new data and manage the indicator pane lifecycle.
   createEffect(() => {
     const c = chart();
     const series = props.series;
+    const update = props.update ?? null;
     if (!c) return;
     if (!series) {
       // Failed or cleared load: drop the stale candles and panes.
+      appliedVersion = null;
+      pendingOlder = null;
       c.clearData();
       const stale = untrack(paneIds);
       for (const name of Object.keys(stale)) {
@@ -902,28 +1078,43 @@ export function Chart(props: ChartProps): JSX.Element {
       return;
     }
 
+    const visible = new Set(visibleKey().split("\n"));
+    const names = Object.keys(series.indicators).filter((n) => visible.has(n));
+    // Axis ticks, the last-price badge and the legend share one precision.
+    const precision = pricePrecisionForSeries();
+
+    // A page or tail right after the last applied snapshot builds on what
+    // klinecharts holds. Anything else (a reset, a skipped version, a
+    // re-run for a visibility change) re-applies the whole series.
+    const follows =
+      update !== null &&
+      appliedVersion !== null &&
+      update.version === appliedVersion + 1;
+    appliedVersion = update?.version ?? null;
+    if (follows && applyIncremental(c, series, update, names)) {
+      c.setPriceVolumePrecision(precision, VOLUME_PRECISION);
+      return;
+    }
+
     // 1. Register any indicators we haven't seen before. Must happen
     //    before applyNewData so klinecharts's calc pipeline has the
     //    figure config to draw against. The geometry store is filled here
     //    too, in data space, so applyNewData's recalc and repaint see it.
-    const visible = new Set(visibleKey().split("\n"));
-    const names = Object.keys(series.indicators).filter((n) => visible.has(n));
-    const remap = payloadToDataIndex(series.bars);
     for (const name of names) {
       const shape = shapeFromPayload(series, name);
       if (isEmptyShape(shape)) continue;
       ensureRegistered(name, shape);
-      geometryStore.set(
-        indicatorRegName(name),
-        toDataSpace(series.indicators[name]!, remap, name),
-      );
     }
+    storeGeometry(series, names);
 
-    // 2. Push bar data with all per-indicator stashes applied.
+    // 2. Push bar data with all per-indicator stashes applied. applyNewData
+    //    drops any held "load older" request; `canPageBefore` (more history,
+    //    under the cap) tells klinecharts whether to ask for older bars at
+    //    the left edge.
+    pendingOlder = null;
     const klines = seriesToKLines(series);
-    c.applyNewData(klines);
-    // Axis ticks, the last-price badge and the legend share one precision.
-    c.setPriceVolumePrecision(pricePrecisionForSeries(), VOLUME_PRECISION);
+    c.applyNewData(klines, canPageBefore(series));
+    c.setPriceVolumePrecision(precision, VOLUME_PRECISION);
 
     // 3. Pane lifecycle. Create for new indicators, remove for dropped.
     // untrack: this effect writes paneIds below, so reading it tracked
@@ -1012,6 +1203,39 @@ export function Chart(props: ChartProps): JSX.Element {
         )}
       </Index>
       <PriceAxisControls chart={chart()} series={props.series} />
+      <Show
+        when={
+          props.history?.kind === "loading" ||
+          props.history?.kind === "error" ||
+          (props.history?.kind === "limit" && atOldest())
+        }
+      >
+        <div
+          class="history-status"
+          classList={{ "is-error": props.history?.kind === "error" }}
+          data-testid="history-status"
+          data-state={props.history?.kind}
+          title={
+            props.history?.kind === "error" ? props.history.message : undefined
+          }
+        >
+          <Switch>
+            <Match when={props.history?.kind === "loading"}>
+              <span class="history-spinner" aria-hidden="true" />
+              Loading history…
+            </Match>
+            <Match when={props.history?.kind === "error"}>
+              Older bars failed to load
+              <button type="button" onClick={() => props.onLoadOlder?.()}>
+                Retry
+              </button>
+            </Match>
+            <Match when={props.history?.kind === "limit"}>
+              History limit reached
+            </Match>
+          </Switch>
+        </div>
+      </Show>
     </div>
   );
 }

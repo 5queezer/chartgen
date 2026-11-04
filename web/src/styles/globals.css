@@ -276,3 +276,73 @@ body {
 .wl-remove:hover {
   color: var(--color-fg);
 }
+
+/* Live-feed badge after the status text (StatusLine). */
+.live-status {
+  margin-left: 10px;
+  font-size: 12px;
+  color: var(--color-fg-muted);
+}
+
+.live-status::before {
+  content: "";
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  margin-right: 5px;
+  border-radius: 50%;
+  vertical-align: middle;
+  background-color: currentColor;
+}
+
+.live-status.is-live {
+  color: var(--color-bull);
+}
+
+.live-status.is-retrying {
+  color: #f0b90b;
+}
+
+/* History paging state at the chart's left edge (Chart). */
+.history-status {
+  position: absolute;
+  z-index: 3;
+  top: 50%;
+  left: 8px;
+  transform: translateY(-50%);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  border: 1px solid var(--color-border);
+  border-radius: 4px;
+  background-color: var(--color-surface);
+  font-family: var(--font-sans);
+  font-size: 11px;
+  color: var(--color-fg-muted);
+}
+
+.history-status.is-error {
+  color: var(--color-danger);
+}
+
+.history-status button {
+  color: var(--color-fg);
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.history-spinner {
+  width: 10px;
+  height: 10px;
+  border: 2px solid var(--color-border);
+  border-top-color: var(--color-accent);
+  border-radius: 50%;
+  animation: history-spin 0.8s linear infinite;
+}
+
+@keyframes history-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}

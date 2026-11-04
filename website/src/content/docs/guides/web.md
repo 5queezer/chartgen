@@ -64,9 +64,9 @@ Symbol, timeframe, chart type, price-scale mode, theme and recent symbols are sa
   for symbols that trade around the clock (the Binance rule: tickers ending
   in `USDT`, `BUSD`, `BTC`, `ETH`, `BNB`, `USDC` or `FDUSD`). Stocks, FX and
   futures have trading sessions, so their bar close cannot be derived from the
-  interval and the badge is hidden. It also hides once the last bar's close
-  time has passed (live bar rollover is not delivered yet) or when the last
-  price is scrolled out of view.
+  interval and the badge is hidden. At the close it disappears for up to one
+  poll period (2 s) until the live update brings the next bar, and it hides
+  when the last price is scrolled out of view.
 - **Price scale** — the `%`, `log` and `auto` buttons in the bottom-right
   corner of the price axis. `%` shows percent change from the first
   visible bar and `log` a logarithmic scale; they are mutually exclusive
@@ -75,6 +75,58 @@ Symbol, timeframe, chart type, price-scale mode, theme and recent symbols are sa
   axis scales it by hand and turns `auto` off; double-clicking the axis or
   clicking `auto` turns it back on, and `Alt+R` (reset chart) does too.
   The scale mode persists across reloads; `auto` always starts on.
+
+## Live updates and history
+
+The chart stays live while the page is open, as in TradingView
+([ADR-0009](/chartgen/decisions/0009-live-tail-polling-and-history-paging/)).
+
+- **Live candle.** The forming candle, every indicator on it, the legend,
+  the last-price badge and the countdown update continuously. When the
+  interval rolls over, the finished candle gets its final values and a new
+  one appears. If the chart is scrolled to the newest bar it keeps
+  following it; if you scrolled back, the view stays where it is.
+- **Scroll-back history.** Scroll or drag to the oldest loaded bar and the
+  next 500 older bars load in place, without moving what is on screen. A
+  small "Loading history…" badge shows at the left edge meanwhile. If a page
+  fails, the badge offers **Retry**. Paging stops when the data source has
+  no older bars, or at 20,000 loaded bars, where the left edge shows
+  "History limit reached" (every live update recalculates the indicators
+  over all loaded bars, so the history is capped).
+- **Status.** A badge after the status text shows `live`, `paused` (tab
+  hidden), `live: retry in Ns` after a failed update, or `resyncing...`
+  while the chart reloads to catch up.
+
+How it works: the first load asks `generate_chart` for 500 bars with a
+`warmup` of 300. The app then polls the last two bars (`bars: 2`,
+`warmup: 300`) and merges them in by timestamp. A history page is
+`bars: 500, warmup: 300, end_time: <oldest bar × 1000>`. 800 bars fit in
+one Binance request, and a warmup of 300 covers the usual lookbacks (up to
+SMA/EMA 200) so values at a page seam line up. Changing the symbol,
+timeframe or indicators cancels every pending poll and page and does a
+full reload.
+
+| | 24/7 symbols (Binance rule) | Other symbols (Yahoo) |
+|---|---|---|
+| Poll period | 2 s | 15 s |
+| After a failed poll | doubles, up to 60 s | doubles, up to 60 s |
+
+- Polling pauses while the tab is hidden and catches up as soon as it is
+  visible again. If bars were missed (a hidden tab, a sleeping laptop),
+  the app fetches a longer tail to fill the gap, without moving the view.
+  The gap is estimated from the clock; when that comes to more than 700
+  bars a 24/7 chart reloads, which also scrolls it back to the newest bar.
+  Other symbols first try a 700-bar tail, because closed hours hold no
+  bars and the real gap is usually smaller.
+- **Limitations.** Volume profiles (`volume_profile`/VPVR, `tpo`,
+  `hvn_lvn`) keep the profile of the full load and are not recomputed for
+  live bars or older pages. A divergence line that forms while the chart
+  is open usually shows up only on the next full load, and a line crossing
+  a page boundary starts at that boundary. Recursive and cumulative indicators (EMA, RSI,
+  ATR, OBV, CVD, VWAP) can step slightly at a page seam or on the live
+  bar compared with one long request, because each request warms up
+  independently. Yahoo data is delayed, so its live bar moves only as
+  often as Yahoo updates it.
 
 ### Keyboard shortcuts
 
@@ -288,10 +340,19 @@ domain) leave `VITE_CHARTGEN_BASE_URL` unset — the app will hit
   on them. See
   [ADR-0003](/chartgen/decisions/0003-web-frontend-stack/#decision-outcome)
   for why Solid over React/Svelte/Vue.
-- **[TanStack Solid Query](https://tanstack.com/query/latest/docs/framework/solid/overview)** — cache,
-  retry, stale-while-revalidate. Cache keys are
-  `['generate_chart', ticker, timeframe, indicators]`, so switching
-  timeframes on a symbol we already loaded is instant.
+- **[TanStack Solid Query](https://tanstack.com/query/latest/docs/framework/solid/overview)** — cache
+  and retry for the full load. Cache keys are
+  `['generate_chart', ticker, timeframe, indicators]`, so switching back
+  to a timeframe we already loaded is instant (the live feed then catches
+  up). The query never goes stale and does not refetch on focus or
+  reconnect, because the live feed keeps the data fresh.
+- **Live feed** — `web/src/lib/liveFeed.ts` takes over each full load,
+  polls the tail and pages in history. The merge rules live in
+  `web/src/lib/seriesMerge.ts` (unit-tested): bars and every per-bar
+  channel are joined by timestamp, signals and divergence lines are
+  re-indexed, and anything that does not line up (another symbol or
+  interval, a gap, overlapping or stale bars, a different indicator
+  shape) is rejected and leads to a longer tail or a full reload.
 - **[`@modelcontextprotocol/sdk`](https://www.npmjs.com/package/@modelcontextprotocol/sdk)**
   with `StreamableHTTPClientTransport`. Bearer tokens flow through
   `requestInit.headers`; `fallbackNotificationHandler` taps into

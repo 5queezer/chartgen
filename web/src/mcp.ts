@@ -49,12 +49,19 @@ export type AlertNotificationHandler = (
 ) => void | Promise<void>;
 
 export interface McpSession {
-  /** Invoke `generate_chart` with `format: 'series'` and parse the response. */
-  callGenerateChart: (args: {
-    ticker: string;
-    timeframe: string;
-    indicators: GenerateChartInput["indicators"];
-  }) => Promise<SeriesPayload>;
+  /**
+   * Invoke `generate_chart` with `format: 'series'` and parse the response.
+   * `bars`, `warmup` and `end_time` page and poll the series (ADR-0009);
+   * omitted ones take the server defaults. `signal` aborts the call.
+   */
+  callGenerateChart: (
+    args: {
+      ticker: string;
+      timeframe: string;
+      indicators: GenerateChartInput["indicators"];
+    } & Pick<GenerateChartInput, "bars" | "warmup" | "end_time">,
+    signal?: AbortSignal,
+  ) => Promise<SeriesPayload>;
   /** Invoke `list_indicators` and parse the response. */
   callListIndicators: () => Promise<ListIndicatorsPayload>;
   /** Invoke `get_quotes` for the watchlist and parse the response. */
@@ -185,10 +192,15 @@ export function createMcpSession(): McpSession {
   async function callToolWithAuthRetry(
     name: string,
     args: Record<string, unknown>,
+    signal?: AbortSignal,
   ): Promise<unknown> {
     let conn = await ensureConnected();
     try {
-      const result = await conn.client.callTool({ name, arguments: args });
+      const result = await conn.client.callTool(
+        { name, arguments: args },
+        undefined,
+        { signal },
+      );
       return extractJsonFromResult(CallToolResultSchema.parse(result));
     } catch (err) {
       if (!isUnauthorized(err)) throw err;
@@ -196,22 +208,33 @@ export function createMcpSession(): McpSession {
       clearAccessToken();
       await dropConnection(conn);
       conn = await ensureConnected();
-      const result = await conn.client.callTool({ name, arguments: args });
+      const result = await conn.client.callTool(
+        { name, arguments: args },
+        undefined,
+        { signal },
+      );
       return extractJsonFromResult(CallToolResultSchema.parse(result));
     }
   }
 
   return {
-    async callGenerateChart({ ticker, timeframe, indicators }) {
+    async callGenerateChart(
+      { ticker, timeframe, indicators, bars, warmup, end_time },
+      signal,
+    ) {
       const args: GenerateChartInput = {
         ticker,
         timeframe,
         format: "series",
         indicators,
+        ...(bars !== undefined && { bars }),
+        ...(warmup !== undefined && { warmup }),
+        ...(end_time !== undefined && { end_time }),
       };
       const json = await callToolWithAuthRetry(
         "generate_chart",
         args as unknown as Record<string, unknown>,
+        signal,
       );
       return SeriesPayloadSchema.parse(json);
     },
