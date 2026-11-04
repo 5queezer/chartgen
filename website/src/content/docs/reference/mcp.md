@@ -69,8 +69,13 @@ without it returns an error.
 #### `generate_chart`
 
 Render a chart for a symbol. Accepts `ticker`/`symbol`, `timeframe`/`interval`,
-`indicators` (string names or objects with overrides), `bars`, `width`,
-`height`, and `format`.
+`indicators` (string names or objects with overrides), `bars` (default 200,
+max 5000), `width`, `height`, `format`, `end_time`, and `warmup`.
+
+| Parameter | Meaning |
+|-----------|---------|
+| `end_time` | Integer, ms since epoch. Only bars whose open time is strictly before `end_time` are returned. To load the page before the oldest bar you have, pass that bar's `t × 1000`. Omit it to get the newest bars, including the candle that is still forming. Applies to every format. When it is set, a failed upstream fetch returns a tool error; without it chartgen falls back to sample data. |
+| `warmup` | Integer, default 0, max 2000. `format=series` only. Fetches this many extra older bars and feeds them to the indicators, then trims them from the response, so the first returned bars have warmed-up values instead of `null`. `png`, `summary`, and `both` ignore it and render exactly `bars`. |
 
 `format` values:
 
@@ -182,7 +187,8 @@ Series payload shape (for `format=series`):
         { "x1": 12, "t1": 1713427200, "y1": 30.2, "x2": 48, "t2": 1713556800, "y2": 18.7, "dashed": true }
       ]
     }
-  }
+  },
+  "has_more": true
 }
 ```
 
@@ -213,6 +219,43 @@ Three additional channels round out the payload so the full set of
 All three channels are omitted from the per-indicator object when the
 indicator emits none — matching the existing convention for `lines`,
 `histogram`, `signals`, and `hlines`.
+
+##### Live tail and history paging
+
+See [ADR-0009](/chartgen/decisions/0009-live-tail-polling-and-history-paging/).
+
+- **Live tail.** Poll `{ "format": "series", "bars": 2, "warmup": 200 }`
+  every few seconds. The last bar is the candle still forming, and the one
+  before it is the last closed bar. Merge both into your arrays by `t`.
+- **Older history.** Request `{ "format": "series", "bars": 500,
+  "warmup": 200, "end_time": <bars[0].t of your oldest page × 1000> }`.
+  The new page ends right before `end_time`, so pages join without gaps or
+  duplicates.
+- **`has_more`** (boolean, always present in `format=series`) is `true`
+  when the source returned the full `bars + warmup` count, which means
+  older history may exist. It is `false` when history ran out (the page
+  can be shorter or empty) and when the payload came from the synthetic
+  sample fallback, which has no timestamps to page from.
+
+How `warmup` trims the channels: `bars[]`, `lines`, `histogram`, and
+`fills` keep only their last `bars` entries. Signal `x` values are shifted
+to the trimmed window, and signals inside the warmup are dropped. Divlines
+that lie entirely inside the warmup are dropped. Divlines that cross into
+the window are clipped to start at bar 0, with `y1` interpolated. Volume
+profile `hbars`, and the POC/VAH/VAL `hlines` that come with them, are
+recomputed over the returned bars only. `y_range` and other `hlines` don't
+change.
+
+Cumulative or recursive indicators (EMA, RSI, ATR, OBV, CVD, VWAP) don't
+fully converge with a finite `warmup`. At a page seam, values from two
+requests can differ slightly, or by a constant offset for running sums.
+Finite-window indicators (SMA, Bollinger Bands, Donchian) match exactly
+once `warmup` covers their lookback.
+
+Upstream limits: Binance requests are paginated at 1000 bars per call.
+Yahoo intraday history ends after about 30 days for 1m, 60 days for other
+sub-hour intervals, and 730 days for 1h/4h. US-stock 4h bars are built
+from 1h bars on the UTC 4h grid.
 
 #### `list_indicators`
 
