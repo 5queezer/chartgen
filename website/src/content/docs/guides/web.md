@@ -70,14 +70,22 @@ to cancel. Drawings pan and zoom with the chart.
 
 - **Select** a drawing by clicking it, then press `Delete` or
   `Backspace` to remove it.
-- **Right-click** a drawing for Remove, Lock and Hide. A locked drawing
-  ignores the mouse, so unlock it with the toolbar's lock-all button.
-- **Double-click** a text annotation to edit its text.
+- **Right-click** a drawing for Remove and Lock/Unlock. Locked drawings
+  cannot be dragged but still answer right-click, so they can be
+  unlocked there. Right-clicking while a drawing is in progress cancels
+  it. Hide is only available for all drawings at once (toolbar eye).
+- **Double-click** a text annotation to edit its text in a dialog.
 
 Drawings are saved per symbol in `localStorage` under
 `chartgen.drawings.<SYMBOL>` as time and price points, so they survive
-reloads and timeframe changes. Stored entries are validated on load and
-malformed ones are dropped.
+reloads and timeframe changes. Points right of the last bar are stored
+as the last bar's time plus whole bar intervals. A drawing with a point
+before the oldest loaded bar stays hidden and untouched until older
+bars are loaded. Stored entries are validated on load and malformed ones
+are dropped. Each symbol is capped at 200 KB and the 100 most recently
+used symbols are kept. A red dot at the bottom of the toolbar means the
+drawing limit (500 per symbol) was reached or saving failed (storage
+full); hover it for details.
 
 | Keys | Action |
 |---|---|

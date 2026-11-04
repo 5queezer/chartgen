@@ -13,7 +13,9 @@ import {
   Show,
   type JSX,
 } from "solid-js";
+import { Dialog } from "@kobalte/core";
 import {
+  ActionType,
   registerOverlay,
   type Chart as KChart,
   type OverlayCreate,
@@ -22,13 +24,19 @@ import {
 
 import {
   loadDrawings,
+  MAX_DRAWINGS,
   saveDrawings,
   serialize,
+  timeAxisOf,
+  toChartPoint,
+  type ChartPoint,
   type DrawingName,
   type DrawingRecord,
+  type TimeAxis,
 } from "../stores/drawings";
 
-// klinecharts has no rectangle; two corner points, drawn as a polygon.
+// klinecharts has no rectangle; two corner points, drawn as a polygon
+// whose colors come from the overlay's `styles.polygon`.
 registerOverlay({
   name: "cgRect",
   totalStep: 3,
@@ -48,16 +56,45 @@ registerOverlay({
           { x: a.x, y: b.y },
         ],
       },
+    };
+  },
+});
+
+// klinecharts' simpleAnnotation ignores all mouse events, so it could be
+// neither selected nor edited. This label can; its text is `extendData`.
+registerOverlay({
+  name: "cgText",
+  totalStep: 2,
+  needDefaultPointFigure: true,
+  needDefaultXAxisFigure: false,
+  needDefaultYAxisFigure: false,
+  createPointFigures: ({ overlay, coordinates }) => {
+    const c = coordinates[0];
+    if (!c) return [];
+    return {
+      type: "text",
+      attrs: {
+        x: c.x,
+        y: c.y,
+        text: typeof overlay.extendData === "string" ? overlay.extendData : "",
+        baseline: "middle",
+      },
       styles: {
         style: "stroke_fill",
-        color: "rgba(41, 98, 255, 0.15)",
+        color: "#d1d4dc",
+        backgroundColor: "#1e222d",
         borderColor: "#2962ff",
+        size: 12,
+        paddingLeft: 6,
+        paddingRight: 6,
+        paddingTop: 3,
+        paddingBottom: 3,
       },
     };
   },
 });
 
-type Magnet = "normal" | "weak_magnet" | "strong_magnet";
+type Magnet ="normal" | "weak_magnet" | "strong_magnet";
 
 interface ToolDef {
   name: DrawingName;
@@ -66,6 +103,14 @@ interface ToolDef {
   code?: string;
   icon: () => JSX.Element;
 }
+
+const RECT_STYLES = {
+  polygon: {
+    style: "stroke_fill",
+    color: "rgba(41, 98, 255, 0.15)",
+    borderColor: "#2962ff",
+  },
+};
 
 const MAX_HISTORY = 100;
 const DEFAULT_TEXT = "Text";
@@ -184,7 +229,7 @@ const TOOLS: readonly ToolDef[] = [
     ),
   },
   {
-    name: "simpleAnnotation",
+    name: "cgText",
     label: "Text annotation",
     icon: () => (
       <svg {...svgProps}>
@@ -212,12 +257,20 @@ const btnClass =
 const menuItemClass =
   "w-full text-left px-3 py-1.5 text-sm cursor-pointer hover:bg-[color:var(--color-border)] outline-none focus:bg-[color:var(--color-border)]";
 
-function isEditable(t: EventTarget | null): boolean {
-  return (
+/** True when a keystroke belongs to a field, dialog or menu, not to the chart. */
+function isTypingContext(e: KeyboardEvent): boolean {
+  const t = e.target;
+  if (
     t instanceof HTMLElement &&
     (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName))
-  );
+  ) {
+    return true;
+  }
+  return document.querySelector("[role=dialog], [role=menu]") !== null;
 }
+
+const LIMIT_NOTICE = `Drawing limit reached (${MAX_DRAWINGS})`;
+const SAVE_ERROR = "Drawings not saved: storage full";
 
 export interface DrawingToolbarProps {
   /** The klinecharts instance; null until the chart has mounted. */
@@ -232,46 +285,85 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
   const [crosshair, setCrosshair] = createSignal(true);
   const [lockAll, setLockAll] = createSignal(false);
   const [hideAll, setHideAll] = createSignal(false);
+  const [saveFailed, setSaveFailed] = createSignal(false);
+  const [limitHit, setLimitHit] = createSignal(false);
   const [menu, setMenu] = createSignal<{
     x: number;
     y: number;
     id: string;
   } | null>(null);
+  // Annotation text being edited in the dialog.
+  const [editing, setEditing] = createSignal<{
+    id: string;
+    text: string;
+  } | null>(null);
 
   // Overlay ids that belong to the current symbol's drawings, in
-  // creation order. `current` is the last committed state; each commit
-  // pushes the previous one onto `history` for Ctrl+Z.
+  // creation order. `canon` holds each one's stored record. `current` is
+  // the last committed state; each commit pushes the previous one onto
+  // `history` for Ctrl+Z.
   let ids: string[] = [];
+  const canon = new Map<string, DrawingRecord>();
+  // Drawings with a point before the first loaded bar. They are hidden and
+  // locked (klinecharts would clamp them onto the first bar) and never
+  // re-serialized from the chart, so their stored points stay intact.
+  const offRange = new Set<string>();
+  // Restored drawings waiting for the first data load.
+  let pending: DrawingRecord[] | null = null;
   let armedId: string | null = null;
   let selectedId: string | null = null;
   let current: DrawingRecord[] = [];
   let history: DrawingRecord[][] = [];
+  let limitTimer: number | undefined;
 
-  const snapshot = (): DrawingRecord[] => {
-    const chart = props.chart;
-    if (!chart) return [];
-    return serialize(
-      ids.flatMap((id) => {
-        const o = chart.getOverlayById(id);
-        return o ? [o] : [];
-      }),
-    );
-  };
+  const axis = (): TimeAxis | null =>
+    timeAxisOf(props.chart?.getDataList().map((d) => d.timestamp) ?? []);
 
   const syncFlags = () => {
     setLockAll(current.length > 0 && current.every((r) => r.lock));
     setHideAll(current.length > 0 && current.every((r) => !r.visible));
   };
 
+  const persist = () => setSaveFailed(!saveDrawings(props.symbol, current));
+
   /** Record the chart's present state: history for undo, then storage. */
   const commit = () => {
-    const next = snapshot();
+    const chart = props.chart;
+    if (!chart) return;
+    const ax = axis();
+    const next = ids.flatMap((id) => {
+      if (!offRange.has(id)) {
+        const o = chart.getOverlayById(id);
+        const [rec] = o ? serialize([o], ax) : [];
+        if (rec) canon.set(id, rec);
+      }
+      const rec = canon.get(id);
+      return rec ? [rec] : [];
+    });
     if (JSON.stringify(next) === JSON.stringify(current)) return;
     history.push(current);
     if (history.length > MAX_HISTORY) history.shift();
     current = next;
-    saveDrawings(props.symbol, current);
+    persist();
     syncFlags();
+  };
+
+  /**
+   * Chart-ready points for a record. `off` means a point precedes the first
+   * loaded bar; those points are parked on the first bar of a hidden copy.
+   */
+  const place = (
+    rec: DrawingRecord,
+    ax: TimeAxis,
+  ): { points: ChartPoint[]; off: boolean } => {
+    let off = false;
+    const points = rec.points.map((p) => {
+      const cp = toChartPoint(ax, p);
+      if (cp !== null) return cp;
+      off = true;
+      return { timestamp: ax.firstTs, value: p.value };
+    });
+    return { points, off };
   };
 
   const handlers = (): Partial<OverlayCreate> => ({
@@ -296,42 +388,47 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
       return false;
     },
     onRightClick: ({ overlay, pageX, pageY }: OverlayEvent) => {
-      if (pageX !== undefined && pageY !== undefined) {
+      if (overlay.id === armedId) {
+        cancelArmed();
+      } else if (pageX !== undefined && pageY !== undefined) {
         setMenu({ x: pageX, y: pageY, id: overlay.id });
       }
       return true;
     },
     onDoubleClick: ({ overlay }: OverlayEvent) => {
-      if (overlay.name !== "simpleAnnotation") return false;
-      const text = window.prompt(
-        "Annotation text",
-        typeof overlay.extendData === "string" ? overlay.extendData : "",
-      );
-      if (text !== null && text.length > 0) {
-        props.chart?.overrideOverlay({ id: overlay.id, extendData: text });
-        commit();
-      }
+      if (overlay.name !== "cgText") return false;
+      setEditing({
+        id: overlay.id,
+        text: typeof overlay.extendData === "string" ? overlay.extendData : "",
+      });
       return true;
     },
     onRemoved: ({ overlay }: OverlayEvent) => {
       ids = ids.filter((id) => id !== overlay.id);
+      canon.delete(overlay.id);
+      offRange.delete(overlay.id);
       if (selectedId === overlay.id) selectedId = null;
       return false;
     },
   });
 
-  const create = (rec: DrawingRecord) => {
+  /** Add a stored drawing to the chart; needs loaded data. */
+  const create = (rec: DrawingRecord, ax: TimeAxis) => {
+    const { points, off } = place(rec, ax);
     const id = props.chart?.createOverlay({
       name: rec.name,
-      points: rec.points,
+      points,
       styles: rec.styles as never,
       extendData: rec.extendData,
-      lock: rec.lock,
-      visible: rec.visible,
+      lock: off || rec.lock,
+      visible: !off && rec.visible,
       mode: magnet() as never,
       ...handlers(),
     });
-    if (typeof id === "string") ids.push(id);
+    if (typeof id !== "string") return;
+    ids.push(id);
+    canon.set(id, rec);
+    if (off) offRange.add(id);
   };
 
   /** Replace everything on the chart with `records` (restore / undo). */
@@ -339,10 +436,48 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
     cancelArmed();
     for (const id of [...ids]) props.chart?.removeOverlay(id);
     ids = [];
+    canon.clear();
+    offRange.clear();
     selectedId = null;
-    records.forEach(create);
-    current = snapshot();
+    const ax = axis();
+    if (ax === null) {
+      // No bars yet; refresh() restores them once data is ready.
+      pending = records;
+      current = records;
+    } else {
+      pending = null;
+      records.forEach((r) => create(r, ax));
+      current = ids.flatMap((id) => canon.get(id) ?? []);
+    }
     syncFlags();
+  };
+
+  /**
+   * Re-evaluate every drawing against the loaded bars: after a timeframe
+   * change or when older bars are paged in, points move or come into
+   * range. Hidden ones stay hidden until all their points are covered.
+   */
+  const refresh = () => {
+    if (pending !== null) {
+      const records = pending;
+      rebuild(records);
+      return;
+    }
+    const ax = axis();
+    if (ax === null) return;
+    for (const id of ids) {
+      const rec = canon.get(id);
+      if (!rec) continue;
+      const { points, off } = place(rec, ax);
+      if (off) offRange.add(id);
+      else offRange.delete(id);
+      props.chart?.overrideOverlay({
+        id,
+        points,
+        visible: !off && rec.visible,
+        lock: off || rec.lock,
+      });
+    }
   };
 
   function cancelArmed() {
@@ -357,11 +492,18 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
     const same = armed() === name;
     cancelArmed();
     if (same) return;
+    if (ids.length >= MAX_DRAWINGS) {
+      setLimitHit(true);
+      window.clearTimeout(limitTimer);
+      limitTimer = window.setTimeout(() => setLimitHit(false), 4000);
+      return;
+    }
     // Drawing on a hidden chart would be invisible, so show everything.
     if (hideAll()) toggleHide();
     const id = chart.createOverlay({
       name,
-      extendData: name === "simpleAnnotation" ? DEFAULT_TEXT : undefined,
+      extendData: name === "cgText" ? DEFAULT_TEXT : undefined,
+      styles: name === "cgRect" ? (RECT_STYLES as never) : undefined,
       mode: magnet() as never,
       ...handlers(),
     });
@@ -372,7 +514,9 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
   };
 
   const setAll = (patch: { lock: boolean } | { visible: boolean }) => {
-    for (const id of ids) props.chart?.overrideOverlay({ id, ...patch });
+    for (const id of ids) {
+      if (!offRange.has(id)) props.chart?.overrideOverlay({ id, ...patch });
+    }
     commit();
   };
 
@@ -416,27 +560,33 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
     const prev = history.pop();
     if (prev === undefined) return;
     rebuild(prev);
-    saveDrawings(props.symbol, current);
+    persist();
   };
 
-  const menuAction = (action: "remove" | "lock" | "hide") => {
+  const menuAction = (action: "remove" | "lock") => {
     const m = menu();
     setMenu(null);
     if (!m) return;
     if (action === "remove") removeIds([m.id]);
     else {
       const locked = props.chart?.getOverlayById(m.id)?.lock ?? false;
-      props.chart?.overrideOverlay({
-        id: m.id,
-        ...(action === "lock" ? { lock: !locked } : { visible: false }),
-      });
+      props.chart?.overrideOverlay({ id: m.id, lock: !locked });
+      commit();
+    }
+  };
+
+  const saveText = (e: SubmitEvent) => {
+    e.preventDefault();
+    const ed = editing();
+    setEditing(null);
+    if (ed && ed.text.length > 0) {
+      props.chart?.overrideOverlay({ id: ed.id, extendData: ed.text });
       commit();
     }
   };
 
   // (Re)load stored drawings whenever the chart appears or the symbol
-  // changes. Callbacks must not save during this, so current/history are
-  // reset only after the rebuild.
+  // changes. History is reset only after the rebuild.
   createEffect(
     on(
       () => [props.chart, props.symbol] as const,
@@ -444,17 +594,38 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
         if (!chart) return;
         rebuild(loadDrawings(symbol));
         history = [];
+        setSaveFailed(false);
       },
     ),
   );
 
+  // Data was (re)loaded or older bars were paged in.
+  createEffect(() => {
+    const chart = props.chart;
+    if (!chart) return;
+    chart.subscribeAction(ActionType.OnDataReady, refresh);
+    onCleanup(() => chart.unsubscribeAction(ActionType.OnDataReady, refresh));
+  });
+
   // E2E hook: the overlays that actually exist on the chart right now.
   if (import.meta.env.DEV) {
-    (window as unknown as Record<string, unknown>).__chartgenDrawings = () =>
+    const w = window as unknown as Record<string, unknown>;
+    w.__chartgenDrawings = () =>
       ids.flatMap((id) => {
         const o = props.chart?.getOverlayById(id);
-        return o ? [{ id, name: o.name, lock: o.lock, visible: o.visible }] : [];
+        return o
+          ? [
+              {
+                id,
+                name: o.name,
+                lock: o.lock,
+                visible: o.visible,
+                offRange: offRange.has(id),
+              },
+            ]
+          : [];
       });
+    onCleanup(() => delete w.__chartgenDrawings);
   }
 
   // Native context menu would sit on top of ours.
@@ -467,10 +638,15 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
   });
 
   const onKey = (e: KeyboardEvent) => {
-    if (e.defaultPrevented || isEditable(e.target)) return;
+    if (e.defaultPrevented) return;
+    // Our own menu has role=menu, so it is handled before the guard.
+    if (e.key === "Escape" && menu()) {
+      setMenu(null);
+      return;
+    }
+    if (isTypingContext(e)) return;
     if (e.key === "Escape") {
-      if (menu()) setMenu(null);
-      else cancelArmed();
+      cancelArmed();
       return;
     }
     const mod = e.ctrlKey || e.metaKey;
@@ -627,12 +803,60 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
             <button type="button" role="menuitem" class={menuItemClass} onClick={() => menuAction("lock")}>
               {props.chart?.getOverlayById(m().id)?.lock ? "Unlock" : "Lock"}
             </button>
-            <button type="button" role="menuitem" class={menuItemClass} onClick={() => menuAction("hide")}>
-              Hide
-            </button>
           </div>
         )}
       </Show>
+
+      <Show when={limitHit() || saveFailed()}>
+        <span
+          role="status"
+          class="mt-1 w-2.5 h-2.5 rounded-full bg-[color:var(--color-danger)]"
+          title={limitHit() ? LIMIT_NOTICE : SAVE_ERROR}
+          aria-label={limitHit() ? LIMIT_NOTICE : SAVE_ERROR}
+        />
+      </Show>
+
+      <Dialog.Root
+        open={editing() !== null}
+        onOpenChange={(open) => {
+          if (!open) setEditing(null);
+        }}
+      >
+        <Dialog.Portal>
+          <Dialog.Overlay class="fixed inset-0 z-40 bg-black/60" />
+          <div class="fixed inset-0 z-50 flex items-start justify-center pt-[10vh] px-4">
+            <Dialog.Content class="w-full max-w-sm bg-[color:var(--color-bg)] border border-[color:var(--color-border)] rounded-lg shadow-xl">
+              <form class="flex flex-col gap-3 p-4" onSubmit={saveText}>
+                <Dialog.Title class="text-sm font-semibold">
+                  Annotation text
+                </Dialog.Title>
+                <input
+                  type="text"
+                  aria-label="Annotation text"
+                  maxLength={200}
+                  value={editing()?.text ?? ""}
+                  onInput={(e) => {
+                    const text = e.currentTarget.value;
+                    setEditing((ed) => (ed ? { ...ed, text } : ed));
+                  }}
+                  class="bg-[color:var(--color-bg-elev)] border border-[color:var(--color-border)] rounded-md px-3 py-1.5 text-sm text-[color:var(--color-fg)] focus:outline-none focus:border-[color:var(--color-accent)]"
+                />
+                <div class="flex justify-end gap-2">
+                  <Dialog.CloseButton class="border border-[color:var(--color-border)] rounded-md px-3 py-1.5 text-sm hover:border-[color:var(--color-accent)] cursor-pointer">
+                    Cancel
+                  </Dialog.CloseButton>
+                  <button
+                    type="submit"
+                    class="bg-[color:var(--color-accent)] text-white rounded-md px-3 py-1.5 text-sm cursor-pointer"
+                  >
+                    Save
+                  </button>
+                </div>
+              </form>
+            </Dialog.Content>
+          </div>
+        </Dialog.Portal>
+      </Dialog.Root>
     </div>
   );
 }

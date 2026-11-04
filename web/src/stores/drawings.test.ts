@@ -1,12 +1,18 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   loadDrawings,
+  MAX_BYTES,
+  MAX_DRAWINGS,
+  MAX_SYMBOLS,
   parseRecord,
   parseRecords,
+  sanitizeStyles,
   saveDrawings,
   serialize,
   storageKey,
+  timeAxisOf,
+  toChartPoint,
   type DrawingRecord,
 } from "./drawings";
 
@@ -30,13 +36,10 @@ describe("parseRecord", () => {
     expect(r).toEqual({ ...good, lock: false, visible: true });
   });
 
-  it("keeps valid styles and extendData", () => {
-    const r = parseRecord({
-      ...good,
-      styles: { line: { color: "#fff" } },
-      extendData: "hello",
-    });
-    expect(r?.styles).toEqual({ line: { color: "#fff" } });
+  it("keeps whitelisted styles and extendData", () => {
+    const styles = { polygon: { color: "rgba(41, 98, 255, 0.15)", borderColor: "#2962ff" } };
+    const r = parseRecord({ ...good, styles, extendData: "hello" });
+    expect(r?.styles).toEqual(styles);
     expect(r?.extendData).toBe("hello");
   });
 
@@ -58,6 +61,27 @@ describe("parseRecord", () => {
   });
 });
 
+describe("sanitizeStyles", () => {
+  it("strips unknown keys and bad values", () => {
+    expect(
+      sanitizeStyles({
+        line: { color: "red" },
+        polygon: {
+          style: "evil",
+          color: "url(javascript:1)",
+          borderColor: "#fff",
+          borderSize: 99,
+          extra: 1,
+        },
+      }),
+    ).toEqual({ polygon: { borderColor: "#fff" } });
+  });
+
+  it("returns undefined when nothing is whitelisted", () => {
+    expect(sanitizeStyles({ line: { color: "#fff" } })).toBeUndefined();
+  });
+});
+
 describe("parseRecords", () => {
   it("drops malformed entries and keeps the rest", () => {
     expect(parseRecords([good, null, { name: "x" }, good])).toHaveLength(2);
@@ -66,22 +90,82 @@ describe("parseRecords", () => {
   it("returns [] for a non-array", () => {
     expect(parseRecords({ a: 1 })).toEqual([]);
   });
+
+  it("caps the list on load", () => {
+    expect(parseRecords(Array(MAX_DRAWINGS + 10).fill(good))).toHaveLength(
+      MAX_DRAWINGS,
+    );
+  });
+});
+
+// Bars at t = 1000, 2000, ..., 10000 (interval 1000).
+const bars = Array.from({ length: 10 }, (_, i) => (i + 1) * 1000);
+const axis = timeAxisOf(bars)!;
+
+describe("timeAxisOf", () => {
+  it("derives range and interval", () => {
+    expect(axis).toEqual({
+      firstTs: 1000,
+      lastTs: 10000,
+      count: 10,
+      intervalMs: 1000,
+    });
+  });
+
+  it("uses the most common spacing despite gaps", () => {
+    const withGap = [...bars.slice(0, 5), ...bars.slice(5).map((t) => t + 5000)];
+    expect(timeAxisOf(withGap)?.intervalMs).toBe(1000);
+  });
+
+  it("is null for fewer than two bars", () => {
+    expect(timeAxisOf([1000])).toBeNull();
+    expect(timeAxisOf([])).toBeNull();
+  });
+});
+
+describe("toChartPoint", () => {
+  it("passes in-range points through", () => {
+    expect(toChartPoint(axis, { timestamp: 5000, value: 1 })).toEqual({
+      timestamp: 5000,
+      value: 1,
+    });
+  });
+
+  it("maps future points to a data index", () => {
+    expect(toChartPoint(axis, { timestamp: 13000, value: 1 })).toEqual({
+      dataIndex: 12,
+      value: 1,
+    });
+  });
+
+  it("returns null before the first bar", () => {
+    expect(toChartPoint(axis, { timestamp: 500, value: 1 })).toBeNull();
+  });
 });
 
 describe("serialize", () => {
+  const overlay = (points: object[]) => ({
+    name: "segment",
+    points,
+    lock: false,
+    visible: true,
+  });
+
   it("strips dataIndex and drops incomplete points", () => {
-    const out = serialize([
-      {
-        name: "segment",
-        points: [
-          { timestamp: 1, value: 2, dataIndex: 7 } as never,
-          { timestamp: 3, value: 4 },
-        ],
-        lock: true,
-        visible: false,
-      },
-      { name: "segment", points: [{ value: 1 }], lock: false, visible: true },
-    ]);
+    const out = serialize(
+      [
+        {
+          ...overlay([
+            { timestamp: 1, value: 2, dataIndex: 7 },
+            { timestamp: 3, value: 4 },
+          ]),
+          lock: true,
+          visible: false,
+        },
+        overlay([{ value: 1 }]),
+      ],
+      null,
+    );
     expect(out).toEqual([
       {
         name: "segment",
@@ -94,22 +178,57 @@ describe("serialize", () => {
       },
     ]);
   });
+
+  it("persists future points as lastBarTs + n * interval", () => {
+    const out = serialize(
+      [overlay([{ timestamp: 5000, value: 1 }, { dataIndex: 14, value: 2 }])],
+      axis,
+    );
+    expect(out[0]?.points).toEqual([
+      { timestamp: 5000, value: 1 },
+      { timestamp: 15000, value: 2 },
+    ]);
+  });
+
+  it("round-trips a future point through toChartPoint", () => {
+    const [rec] = serialize([overlay([{ dataIndex: 12, value: 2 }])], axis);
+    expect(toChartPoint(axis, rec!.points[0]!)).toEqual({
+      dataIndex: 12,
+      value: 2,
+    });
+  });
+
+  it("extrapolates left of the first bar", () => {
+    const out = serialize([overlay([{ dataIndex: -2, value: 2 }])], axis);
+    expect(out[0]?.points[0]?.timestamp).toBe(-1000);
+  });
+
+  it("drops index-only points when there is no time axis", () => {
+    expect(serialize([overlay([{ dataIndex: 3, value: 1 }])], null)).toEqual([]);
+  });
 });
 
 describe("storage", () => {
+  let store: Map<string, string>;
+  let failWrites: boolean;
+
   beforeEach(() => {
-    const store = new Map<string, string>();
+    store = new Map();
+    failWrites = false;
     globalThis.localStorage = {
       getItem: (k: string) => store.get(k) ?? null,
-      setItem: (k: string, v: string) => void store.set(k, v),
+      setItem: (k: string, v: string) => {
+        if (failWrites) throw new Error("QuotaExceededError");
+        store.set(k, v);
+      },
       removeItem: (k: string) => void store.delete(k),
     } as Storage;
   });
 
   it("round-trips per symbol", () => {
     const recs = [good] as DrawingRecord[];
-    saveDrawings("BTCUSDT", recs);
-    expect(localStorage.getItem(storageKey("BTCUSDT"))).not.toBeNull();
+    expect(saveDrawings("BTCUSDT", recs)).toBe(true);
+    expect(store.has(storageKey("BTCUSDT"))).toBe(true);
     expect(loadDrawings("BTCUSDT")).toEqual(recs);
     expect(loadDrawings("ETHUSDT")).toEqual([]);
   });
@@ -117,11 +236,37 @@ describe("storage", () => {
   it("removes the key when the list is empty", () => {
     saveDrawings("BTCUSDT", [good] as DrawingRecord[]);
     saveDrawings("BTCUSDT", []);
-    expect(localStorage.getItem(storageKey("BTCUSDT"))).toBeNull();
+    expect(store.has(storageKey("BTCUSDT"))).toBe(false);
   });
 
   it("survives corrupt JSON", () => {
-    localStorage.setItem(storageKey("BTCUSDT"), "{not json");
+    store.set(storageKey("BTCUSDT"), "{not json");
     expect(loadDrawings("BTCUSDT")).toEqual([]);
+  });
+
+  it("reports quota failures and warns", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    failWrites = true;
+    expect(saveDrawings("BTCUSDT", [good] as DrawingRecord[])).toBe(false);
+    expect(warn).toHaveBeenCalled();
+    warn.mockRestore();
+  });
+
+  it("refuses to save beyond the per-symbol size cap", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const big = Array(MAX_BYTES / 100).fill(good) as DrawingRecord[];
+    expect(saveDrawings("BTCUSDT", big)).toBe(false);
+    expect(store.has(storageKey("BTCUSDT"))).toBe(false);
+    warn.mockRestore();
+  });
+
+  it("evicts least recently used symbols beyond the limit", () => {
+    const recs = [good] as DrawingRecord[];
+    for (let i = 0; i < MAX_SYMBOLS; i++) saveDrawings(`S${i}`, recs);
+    loadDrawings("S0"); // S0 becomes most recent, S1 the oldest
+    saveDrawings("NEW", recs);
+    expect(store.has(storageKey("S1"))).toBe(false);
+    expect(store.has(storageKey("S0"))).toBe(true);
+    expect(store.has(storageKey("NEW"))).toBe(true);
   });
 });
