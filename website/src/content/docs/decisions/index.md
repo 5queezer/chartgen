@@ -41,3 +41,4 @@ one and link both ways.
 | [0010](/chartgen/decisions/0010-overlay-geometry-rendering/) | Overlay geometry rendering via klinecharts indicator draw callbacks | Accepted | 2026-11-04 |
 | [0012](/chartgen/decisions/0012-geometry-colors-on-the-wire/) | Geometry colors on the wire | Accepted | 2026-11-04 |
 | [0013](/chartgen/decisions/0013-indicator-visibility-and-instances/) | Indicator visibility, parameter editing and one instance per indicator | Accepted | 2026-11-04 |
+| [0015](/chartgen/decisions/0015-named-layouts/) | Named chart layouts | Accepted | 2026-11-04 |
