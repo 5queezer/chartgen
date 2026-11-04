@@ -2,7 +2,9 @@
 //! Stoch, %R, DC, CMF) computed with Pine v5 semantics via `pine.rs`.
 //! The file name predates the port off the `ta` crate (ADR-0018).
 
-use super::pine::{atr, dev, div, ema_n, mfi, roc, sma_n, source_series, stdev, sum_n, zip};
+use super::pine::{
+    atr, dev, div, ema_n, is_zero, mfi, roc, sma_n, source_series, stdev, sum_n, zip,
+};
 use crate::data::OhlcvData;
 use crate::indicator::*;
 use serde_json::{json, Value};
@@ -788,8 +790,12 @@ impl Indicator for Cmf {
             vol[i] = bar.volume;
         }
 
-        // CMF = sum(mfv, period) / sum(vol, period)
-        let vals = div(&sum_n(&mfv, self.period), &sum_n(&vol, self.period));
+        // CMF = sum(mfv, period) / sum(vol, period). |mfv| <= volume per bar, so
+        // a numerator within float noise of the volume sum's scale is 0.
+        let num = sum_n(&mfv, self.period);
+        let den = sum_n(&vol, self.period);
+        let num = zip(&num, &den, |m, d| if is_zero(m, d) { 0.0 } else { m });
+        let vals = div(&num, &den);
 
         PanelResult {
             lines: vec![Line {
@@ -945,5 +951,39 @@ mod tests {
             ys(&Cmf { period: 2 }.compute(&d), 0),
             &[NAN, 0.0, 10.0 / 30.0],
         );
+    }
+
+    #[test]
+    fn stochastic_zero_range_leaves_no_gap() {
+        // raw %K = [_, 100, NaN, NaN, 100]: the flat 2-bar windows are a
+        // division by zero, which ta.sma skips, so %K carries 100.
+        let ind = Stochastic {
+            period: 2,
+            k_smooth: 1,
+            d_smooth: 2,
+        };
+        let r = ind.compute(&closes(&[1.0, 2.0, 2.0, 2.0, 3.0]));
+        eq(ys(&r, 0), &[NAN, 100.0, 100.0, 100.0, 100.0]);
+        eq(ys(&r, 1), &[NAN, NAN, 100.0, 100.0, 100.0]);
+    }
+
+    #[test]
+    fn cmf_btc_scale_zero_flow_is_exactly_zero() {
+        // 20 bars of large money flow, then 20 bars closing at mid-range:
+        // the last window's flow is exactly 0, not float residue.
+        let mut v = Vec::new();
+        for i in 0..40 {
+            let p = 65_000.0 + (i * 37 % 101) as f64 * 13.37;
+            let close = if i < 20 {
+                p + 40.0 * ((i % 3) as f64 - 1.0)
+            } else {
+                p
+            };
+            let vol = 2_345.678 + (i * 7919 % 9973) as f64 * 2.73;
+            v.push((p, p + 75.5, p - 75.5, close, vol));
+        }
+        let y = Cmf { period: 20 }.compute(&bars(&v)).lines[0].y.clone();
+        assert!(y[19].abs() > 1e-6);
+        assert_eq!(y[39], 0.0);
     }
 }

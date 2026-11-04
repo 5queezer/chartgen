@@ -1021,8 +1021,9 @@ mod tests {
             (0.0, 13.0, 11.0, 12.0, 0.0),
         ]);
         let r = run(Kind::EaseOfMovement, json!({"length":1}), &d);
-        // 10000 * 2 * 2 / 1000 = 40 ; zero volume -> NaN
-        eq(&r.lines[0].y, &[NAN, 40.0, NAN]);
+        // 10000 * 2 * 2 / 1000 = 40 ; zero volume -> NaN input, which
+        // ta.sma ignores: the last valid value carries (no gap).
+        eq(&r.lines[0].y, &[NAN, 40.0, 40.0]);
     }
 
     #[test]

@@ -2452,4 +2452,15 @@ mod tests {
         let first: Vec<f64> = r.dots.iter().filter(|d| d.x == 212).map(|d| d.y).collect();
         assert!(first.iter().all(|y| y.is_finite() && *y != 0.0));
     }
+
+    #[test]
+    fn histvol_skips_invalid_log_returns() {
+        // log returns = [_, 1, 1, -inf, inf]: the non-finite ones are skipped
+        // by ta.stdev, so the window keeps using the last two valid returns.
+        let e = std::f64::consts::E;
+        let mut d = closes(&[1.0, e, e * e, 0.0, e]);
+        d.interval = Some("1d".into());
+        let r = HistVol { period: 2 }.compute(&d);
+        eq(&r.lines[0].y, &[NAN, NAN, 0.0, 0.0, 0.0]);
+    }
 }

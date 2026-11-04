@@ -1,11 +1,16 @@
 //! Shared Pine Script v5 semantics for the TradingView-parity indicators.
 //!
-//! NaN rules (Pine `na`):
+//! NaN rules (Pine `na`, ADR-0018):
+//! - Windowed helpers (`sum_n`, `sma_n`, `wma_n`, `highest`, `lowest`,
+//!   `stdev`, `dev`, ...) ignore NaN (or infinite) values, as the Pine
+//!   reference documents for `ta.sma`, `ta.highest`, `ta.lowest`, `ta.stdev`
+//!   and `math.sum`: they compute over the last `n` valid values and are NaN
+//!   only until `n` valid values have been seen. A NaN input bar therefore
+//!   still gets a value (from the previous `n` valid inputs).
 //! - Recursive smoothers (`ema_n` / `rma_n`) seed with the SMA of the first
-//!   `n` valid values, then keep their state across a NaN (or infinite) input:
-//!   that bar outputs NaN and the recursion continues from the previous state.
-//! - Windowed helpers (`sum_n`, `sma_n`, `wma_n`, `highest`, `stdev`, ...)
-//!   output NaN while any NaN (or infinite) value lies inside the window.
+//!   `n` valid values. A NaN input keeps the state and outputs the previous
+//!   value on that bar (no gap). This na behaviour is unverified against a
+//!   live TradingView chart.
 //! - Division by zero yields NaN (`div`), never inf.
 //!
 //! Warmup values are NaN (serialized as null), never 0.
@@ -32,56 +37,72 @@ pub fn source_series(data: &OhlcvData, src: &str) -> Vec<f64> {
         .collect()
 }
 
-/// Apply `f` to every full window of `n` values; NaN if the window holds a NaN.
+/// Apply `f` to the last `n` valid (finite) values at every bar, oldest
+/// first; NaN values are skipped, and the result is NaN until `n` valid
+/// values have been seen.
 pub fn windowed(x: &[f64], n: usize, f: impl Fn(&[f64]) -> f64) -> Vec<f64> {
     let mut out = vec![f64::NAN; x.len()];
     if n == 0 {
         return out;
     }
-    for i in (n - 1)..x.len() {
-        let w = &x[i + 1 - n..=i];
-        if w.iter().all(|v| v.is_finite()) {
-            out[i] = f(w);
+    let mut w: std::collections::VecDeque<f64> = std::collections::VecDeque::with_capacity(n + 1);
+    for i in 0..x.len() {
+        if x[i].is_finite() {
+            w.push_back(x[i]);
+            if w.len() > n {
+                w.pop_front();
+            }
+        }
+        if w.len() == n {
+            out[i] = f(w.make_contiguous());
         }
     }
     out
 }
 
-/// Running-sum window total, NaN until `n` consecutive finite values exist (O(n)).
+/// Total of the last `n` valid values (NaN skipped), NaN until `n` valid
+/// values have been seen. O(len): a running sum that is re-summed exactly
+/// every `n` updates so floating-point drift cannot build up, and that is
+/// exactly 0 whenever every value in the window is 0.
 pub fn sum_n(x: &[f64], n: usize) -> Vec<f64> {
     let mut out = vec![f64::NAN; x.len()];
     if n == 0 {
         return out;
     }
-    let (mut sum, mut bad) = (0.0, 0usize);
+    let mut w: std::collections::VecDeque<f64> = std::collections::VecDeque::with_capacity(n + 1);
+    let (mut sum, mut nonzero, mut since_resum) = (0.0, 0usize, 0usize);
     for i in 0..x.len() {
-        if x[i].is_finite() {
-            sum += x[i];
-        } else {
-            bad += 1;
-        }
-        if i >= n {
-            let old = x[i - n];
-            if old.is_finite() {
+        let v = x[i];
+        if v.is_finite() {
+            w.push_back(v);
+            sum += v;
+            nonzero += usize::from(v != 0.0);
+            if w.len() > n {
+                let old = w.pop_front().unwrap_or(0.0);
                 sum -= old;
-            } else {
-                bad -= 1;
+                nonzero -= usize::from(old != 0.0);
+            }
+            since_resum += 1;
+            if since_resum >= n {
+                sum = w.iter().sum();
+                since_resum = 0;
             }
         }
-        if i + 1 >= n && bad == 0 {
-            out[i] = sum;
+        if w.len() == n {
+            out[i] = if nonzero == 0 { 0.0 } else { sum };
         }
     }
     out
 }
 
-/// ta.sma: running sum, NaN until `n` consecutive valid values exist.
+/// ta.sma over the last `n` valid values (see `sum_n`).
 pub fn sma_n(x: &[f64], n: usize) -> Vec<f64> {
     sum_n(x, n).into_iter().map(|s| s / n as f64).collect()
 }
 
-/// Exponential smoothing seeded with the SMA (ta.ema uses alpha = 2/(n+1),
-/// ta.rma uses alpha = 1/n).
+/// Exponential smoothing seeded with the SMA of the first `n` valid values
+/// (ta.ema uses alpha = 2/(n+1), ta.rma uses alpha = 1/n). A NaN input keeps
+/// the state and repeats the previous output.
 pub fn smoothed(x: &[f64], n: usize, alpha: f64) -> Vec<f64> {
     let mut out = vec![f64::NAN; x.len()];
     let seed = sma_n(x, n);
@@ -89,11 +110,11 @@ pub fn smoothed(x: &[f64], n: usize, alpha: f64) -> Vec<f64> {
     for i in 0..x.len() {
         if prev.is_nan() {
             prev = seed[i];
-            out[i] = prev;
         } else if x[i].is_finite() {
             prev = alpha * x[i] + (1.0 - alpha) * prev;
-            out[i] = prev;
         }
+        // A NaN input after the seed repeats the previous value.
+        out[i] = prev;
     }
     out
 }
@@ -313,7 +334,7 @@ pub fn dev(x: &[f64], n: usize) -> Vec<f64> {
 /// `lower = sum(volume * (change(src) >= 0 ? 0 : src), n)`,
 /// `100 - 100 / (1 + upper / lower)`. On bar 0 the change is na, both
 /// comparisons are false, so that bar's flow counts on both sides.
-/// A zero `lower` is a division by zero -> NaN.
+/// A zero `lower` (see `is_zero`) is a division by zero -> NaN.
 pub fn mfi(src: &[f64], vol: &[f64], n: usize) -> Vec<f64> {
     let ch = change_n(src, 1);
     let flow = |keep: fn(f64) -> bool| -> Vec<f64> {
@@ -325,12 +346,17 @@ pub fn mfi(src: &[f64], vol: &[f64], n: usize) -> Vec<f64> {
     let upper = sum_n(&flow(|c| c > 0.0 || c.is_nan()), n);
     let lower = sum_n(&flow(|c| c < 0.0 || c.is_nan()), n);
     zip(&upper, &lower, |u, l| {
-        if l == 0.0 || u.is_nan() || l.is_nan() {
+        if u.is_nan() || is_zero(l, u.abs() + l.abs()) {
             f64::NAN
         } else {
             100.0 - 100.0 / (1.0 + u / l)
         }
     })
+}
+/// `x` is zero up to floating-point noise relative to `scale`
+/// (`|x| <= 1e-12 * scale`); an exact 0 always counts.
+pub fn is_zero(x: f64, scale: f64) -> bool {
+    x == 0.0 || x.abs() <= 1e-12 * scale.abs()
 }
 /// Pine `ta.swma`: (x[3] + 2*x[2] + 2*x[1] + x[0]) / 6.
 pub fn swma(x: &[f64]) -> Vec<f64> {
@@ -495,5 +521,84 @@ pub(crate) mod test_util {
                 assert!((g - w).abs() < 1e-9, "idx {i}: got {g}, want {w} ({got:?})");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::test_util::{bars, eq, NAN};
+    use super::*;
+
+    #[test]
+    fn windows_skip_nan_values() {
+        // NaN only until n valid values; a NaN bar uses the last n valid ones.
+        eq(&sma_n(&[1.0, NAN, 3.0, 5.0], 2), &[NAN, NAN, 2.0, 4.0]);
+        eq(&sma_n(&[1.0, 3.0, NAN, 5.0], 2), &[NAN, 2.0, 2.0, 4.0]);
+        eq(&sum_n(&[1.0, f64::INFINITY, 3.0], 2), &[NAN, NAN, 4.0]);
+        eq(&highest(&[1.0, NAN, 3.0, 2.0], 2), &[NAN, NAN, 3.0, 3.0]);
+        eq(&lowest(&[1.0, NAN, 3.0, 2.0], 2), &[NAN, NAN, 1.0, 2.0]);
+        eq(&stdev(&[1.0, NAN, 3.0], 2), &[NAN, NAN, 1.0]);
+        eq(&dev(&[1.0, NAN, 3.0], 2), &[NAN, NAN, 1.0]);
+        eq(&wma_n(&[1.0, NAN, 4.0], 2), &[NAN, NAN, 3.0]);
+    }
+
+    #[test]
+    fn smoothers_seed_on_valid_values_and_hold_across_nan() {
+        // seed = SMA of the first 2 valid values, skipping the NaN
+        eq(&ema_n(&[1.0, NAN, 3.0, 5.0], 2), &[NAN, NAN, 2.0, 4.0]);
+        // after the seed a NaN input repeats the previous value
+        eq(&ema_n(&[1.0, 3.0, NAN, 5.0], 2), &[NAN, 2.0, 2.0, 4.0]);
+        eq(&rma_n(&[1.0, 3.0, NAN, 5.0], 2), &[NAN, 2.0, 2.0, 3.5]);
+    }
+
+    #[test]
+    fn running_sum_is_exactly_zero_after_large_values_leave() {
+        // 0.1 + 0.7 + 1e12 - 0.1 - 0.7 - 1e12 leaves float residue in a
+        // plain running sum; an all-zero window must be exactly 0.
+        // The exact re-sum runs at bars 2 and 5; bar 6 is the first
+        // all-zero window and must be exactly 0.
+        let x = [0.3, 0.1, 0.7, 1e12, 0.0, 0.0, 0.0, 0.25];
+        let s = sum_n(&x, 3);
+        assert!(s[..2].iter().all(|v| v.is_nan()));
+        assert_eq!(s[6], 0.0);
+        assert_eq!(s[7], 0.25);
+        assert!((s[3] - (1e12 + 0.8)).abs() < 1e-3);
+    }
+
+    #[test]
+    fn btc_scale_mfi_has_no_running_sum_drift() {
+        // 40 mixed bars at BTC prices / volumes, then 15 rising bars: the
+        // last 14-bar window has no negative flow, so `lower` is exactly 0
+        // and ta.mfi divides by zero (NaN) instead of returning ~100.
+        let mut v = Vec::new();
+        let mut p = 64_123.37;
+        for i in 0..55 {
+            let step = if i < 40 {
+                [431.17, -612.93, 287.41, -98.67, 503.29][i % 5]
+            } else {
+                12.5 + i as f64 * 0.37
+            };
+            p += step;
+            let vol = 1_234.567_8 + (i * 7919 % 9973) as f64 * 4.21;
+            v.push((p, p + 50.0, p - 50.0, p, vol));
+        }
+        let d = bars(&v);
+        let src = source_series(&d, "hlc3");
+        let vol = volumes(&d);
+        let ch = change_n(&src, 1);
+        let lower: Vec<f64> = (0..src.len())
+            .map(|i| if ch[i] < 0.0 { vol[i] * src[i] } else { 0.0 })
+            .collect();
+        assert_eq!(sum_n(&lower, 14)[54], 0.0);
+        let m = mfi(&src, &vol, 14);
+        assert!(m[54].is_nan(), "lower == 0 -> NaN, got {}", m[54]);
+        assert!(m[40].is_finite());
+    }
+
+    #[test]
+    fn is_zero_is_relative() {
+        assert!(is_zero(1.65e-8, 1.4e10));
+        assert!(!is_zero(1.65e-8, 1.0));
+        assert!(is_zero(0.0, 0.0));
     }
 }
