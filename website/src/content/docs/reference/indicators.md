@@ -38,6 +38,14 @@ data (external) — regenerate with `./scripts/gen_screenshots.sh`.
 | [`hvn_lvn`](#hvn_lvn) | `vp_nodes`, `volume_nodes` |
 | [`naked_poc`](#naked_poc) | `npoc` |
 | [`tpo`](#tpo) | `market_profile` |
+| [`ma`](#ma) |  |
+| [`vwma`](#vwma) |  |
+| [`hma`](#hma) |  |
+| [`ma_ribbon`](#ma_ribbon) |  |
+| [`envelopes`](#envelopes) |  |
+| [`linreg_channel`](#linreg_channel) |  |
+| [`chande_kroll_stop`](#chande_kroll_stop) |  |
+| [`zigzag`](#zigzag) |  |
 
 ### `ema_stack`
 
@@ -256,6 +264,123 @@ Time Price Opportunity — time-based market profile with POC/VAH/VAL
 
 ![tpo sample render](../../../assets/indicators/tpo.png)
 
+### `ma`
+
+Moving Average (sma, ema, wma, hma, vwma, rma, alma, dema, tema, lsma)
+
+**Parameters:**
+
+| Param | Type | Default | Description |
+|-------|------|---------|-------------|
+| `type` | `string` | `sma` | Moving average type |
+| `length` | `integer` | `9` | MA length |
+| `source` | `string` | `close` | Price source |
+| `offset` | `integer` | `0` | Shift the line by this many bars (negative = left) |
+
+![ma sample render](../../../assets/indicators/ma.png)
+
+### `vwma`
+
+Volume Weighted Moving Average (ta.vwma)
+
+**Parameters:**
+
+| Param | Type | Default | Description |
+|-------|------|---------|-------------|
+| `length` | `integer` | `9` | MA length |
+| `source` | `string` | `close` | Price source |
+| `offset` | `integer` | `0` | Shift the line by this many bars (negative = left) |
+
+![vwma sample render](../../../assets/indicators/vwma.png)
+
+### `hma`
+
+Hull Moving Average (ta.hma)
+
+**Parameters:**
+
+| Param | Type | Default | Description |
+|-------|------|---------|-------------|
+| `length` | `integer` | `9` | MA length |
+| `source` | `string` | `close` | Price source |
+| `offset` | `integer` | `0` | Shift the line by this many bars (negative = left) |
+
+![hma sample render](../../../assets/indicators/hma.png)
+
+### `ma_ribbon`
+
+Moving Average Ribbon — four moving averages (20/50/100/200 by default)
+
+**Parameters:**
+
+| Param | Type | Default | Description |
+|-------|------|---------|-------------|
+| `type` | `string` | `sma` | Moving average type |
+| `source` | `string` | `close` | Price source |
+| `length1` | `integer` | `20` | MA 1 length |
+| `length2` | `integer` | `50` | MA 2 length |
+| `length3` | `integer` | `100` | MA 3 length |
+| `length4` | `integer` | `200` | MA 4 length |
+
+![ma_ribbon sample render](../../../assets/indicators/ma_ribbon.png)
+
+### `envelopes`
+
+Envelopes — moving-average basis with upper/lower bands at a fixed percentage
+
+**Parameters:**
+
+| Param | Type | Default | Description |
+|-------|------|---------|-------------|
+| `type` | `string` | `sma` | Moving average type |
+| `length` | `integer` | `20` | Basis MA length |
+| `percent` | `number` | `10.0` | Band distance in percent of the basis |
+| `source` | `string` | `close` | Price source |
+
+![envelopes sample render](../../../assets/indicators/envelopes.png)
+
+### `linreg_channel`
+
+Linear Regression Channel — regression line over the last N bars with standard-deviation bands
+
+**Parameters:**
+
+| Param | Type | Default | Description |
+|-------|------|---------|-------------|
+| `length` | `integer` | `100` | Number of bars in the regression (uses fewer if less data) |
+| `upper_dev` | `number` | `2.0` | Upper deviation multiplier |
+| `lower_dev` | `number` | `2.0` | Lower deviation multiplier |
+| `source` | `string` | `close` | Price source |
+
+![linreg_channel sample render](../../../assets/indicators/linreg_channel.png)
+
+### `chande_kroll_stop`
+
+Chande Kroll Stop — ATR-based long and short trailing stops
+
+**Parameters:**
+
+| Param | Type | Default | Description |
+|-------|------|---------|-------------|
+| `atr_length` | `integer` | `10` | ATR / first high-low stop length (p) |
+| `atr_mult` | `number` | `1.0` | ATR multiplier (x) |
+| `stop_length` | `integer` | `9` | Stop smoothing length (q) |
+
+![chande_kroll_stop sample render](../../../assets/indicators/chande_kroll_stop.png)
+
+### `zigzag`
+
+ZigZag — connects confirmed swing pivots that differ by at least the deviation %
+
+**Parameters:**
+
+| Param | Type | Default | Description |
+|-------|------|---------|-------------|
+| `deviation` | `number` | `5.0` | Minimum price change between pivots in percent |
+| `depth` | `integer` | `10` | Pivot legs: bars on each side of a swing high/low |
+
+![zigzag sample render](../../../assets/indicators/zigzag.png)
+
 ## Panels
 
 ### Summary
@@ -279,6 +404,9 @@ Time Price Opportunity — time-based market profile with POC/VAH/VAL
 | [`histvol`](#histvol) | `hv` |
 | [`kalman_volume`](#kalman_volume) | `kalman`, `kvf` |
 | [`rsi_mfi_stoch`](#rsi_mfi_stoch) | `rsi_combo`, `combo` |
+| [`volume`](#volume) |  |
+| [`aroon`](#aroon) |  |
+| [`vortex`](#vortex) |  |
 
 ### `cipher_b`
 
@@ -503,6 +631,42 @@ RSI + Money Flow Index + Stochastic combo panel (all 0-100)
 | `show_trend_bars` | `boolean` | `true` |  |
 
 ![rsi_mfi_stoch sample render](../../../assets/indicators/rsi_mfi_stoch.png)
+
+### `volume`
+
+Volume histogram colored by candle direction, with optional volume MA (TradingView Volume)
+
+**Parameters:**
+
+| Param | Type | Default | Description |
+|-------|------|---------|-------------|
+| `ma_length` | `integer` | `20` | Volume SMA length (0 = off) |
+
+![volume sample render](../../../assets/indicators/volume.png)
+
+### `aroon`
+
+Aroon Up/Down — bars since the highest high / lowest low over length+1 bars
+
+**Parameters:**
+
+| Param | Type | Default | Description |
+|-------|------|---------|-------------|
+| `length` | `integer` | `14` | Aroon length |
+
+![aroon sample render](../../../assets/indicators/aroon.png)
+
+### `vortex`
+
+Vortex Indicator — VI+ and VI- trend direction lines
+
+**Parameters:**
+
+| Param | Type | Default | Description |
+|-------|------|---------|-------------|
+| `length` | `integer` | `14` | Vortex length |
+
+![vortex sample render](../../../assets/indicators/vortex.png)
 
 ## External
 

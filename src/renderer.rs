@@ -234,6 +234,14 @@ pub fn render_chart(
                 )))?;
             }
 
+            // Segments on overlay (e.g. zigzag); drawn solid
+            for d in &overlay.divlines {
+                chart.draw_series(LineSeries::new(
+                    [(d.x1 as f64, d.y1), (d.x2 as f64, d.y2)],
+                    d.color.stroke_width(2),
+                ))?;
+            }
+
             // HLines on overlay
             for h in &overlay.hlines {
                 chart.draw_series(std::iter::once(PathElement::new(

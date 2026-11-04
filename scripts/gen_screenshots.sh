@@ -4,7 +4,7 @@
 set -euo pipefail
 
 OUTPUT_DIR="website/src/assets/indicators"
-BIN="target/release/chartgen"
+BIN="${CARGO_TARGET_DIR:-target}/release/chartgen"
 
 # Use equity data for overlays and panels, crypto for external/derivatives.
 # AAPL on 1d gives clean stock-market visuals; BTCUSDT exercises the Binance
@@ -19,11 +19,13 @@ HEIGHT="640"
 OVERLAY=(
     ema_stack bbands keltner donchian vwap vwap_bands supertrend sar
     ichimoku heikin_ashi pivot volume_profile session_vp hvn_lvn naked_poc tpo
+    ma vwma hma ma_ribbon envelopes linreg_channel chande_kroll_stop zigzag
 )
 
 PANEL=(
     cipher_b macd rsi wavetrend stoch atr obv cci roc mfi williams_r cmf
     adx ad histvol kalman_volume rsi_mfi_stoch
+    volume aroon vortex
 )
 
 EXTERNAL=(cvd funding oi long_short fear_greed)
