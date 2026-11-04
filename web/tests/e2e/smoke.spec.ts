@@ -1,5 +1,5 @@
 // Cold-start smoke test — ensures the v0.2 happy path still ships:
-//   page load → OAuth PKCE dance → Load click → chart renders.
+//   page load → OAuth PKCE dance → auto-load → chart renders.
 //
 // This spec intentionally drives `page` directly instead of pulling in
 // the `bootedApp` fixture, because the fixture itself is what we want
@@ -17,12 +17,6 @@ test.describe("smoke", () => {
       }
     });
     page.on("pageerror", (err) => {
-      // KNOWN APP BUG: the data/pane effect in Chart.tsx reads paneIds()
-      // and then calls setPaneIds(), so Solid re-runs it until the stack
-      // overflows. The chart still renders. Ignored here so the suite is
-      // green; remove this filter when the effect wraps paneIds() in
-      // untrack().
-      if (err.message.includes("Maximum call stack size exceeded")) return;
       consoleErrors.push(`pageerror: ${err.message}`);
     });
 
@@ -54,22 +48,8 @@ test.describe("smoke", () => {
       timeout: 30_000,
     });
 
-    // Ready state should be visible before the user clicks Load.
-    await expect(page.locator("text=ready").first()).toBeVisible({
-      timeout: 5_000,
-    });
-
-    // Fill ticker + interval and submit.
-    // The TextField holds "BTCUSDT" by default; set it explicitly anyway
-    // so the test is self-documenting.
-    const ticker = page.getByLabel("Ticker");
-    await ticker.fill("BTCUSDT");
-
-    await page.getByRole("button", { name: "Load" }).click();
-
-    // During the fetch the status flips through "loading..." into
-    // "loaded". We don't need to catch the transient — `expectChartRendered`
-    // already waits for the "loaded" state.
+    // The chart loads without any button click; `expectChartRendered`
+    // waits for the "loaded" status.
     await expectChartRendered(page);
 
     // Default indicator set seeds RSI, so the RSI pane header should

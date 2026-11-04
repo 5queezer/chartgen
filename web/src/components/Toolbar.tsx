@@ -234,7 +234,11 @@ export function Toolbar(): JSX.Element {
             >
               <For each={CHART_TYPES}>
                 {(ct) => (
-                  <DropdownMenu.RadioItem value={ct} class={itemClass}>
+                  <DropdownMenu.RadioItem
+                    value={ct}
+                    class={itemClass}
+                    closeOnSelect
+                  >
                     <ChartTypeIcon type={ct} />
                     {CHART_TYPE_LABELS[ct]}
                   </DropdownMenu.RadioItem>
