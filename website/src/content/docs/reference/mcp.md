@@ -69,8 +69,22 @@ without it returns an error.
 #### `generate_chart`
 
 Render a chart for a symbol. Accepts `ticker`/`symbol`, `timeframe`/`interval`,
-`indicators` (string names or objects with overrides), `bars`, `width`,
-`height`, and `format`.
+`indicators` (string names or objects with overrides), `bars` (default 200),
+`width`, `height`, `format`, `end_time`, and `warmup`.
+
+| Parameter | Meaning |
+|-----------|---------|
+| `bars` | Integer, default 200. Capped at 5000 in every format (`png`, `summary`, `both`, `series`); larger values are silently clamped. On Binance each 1000 bars is one upstream request. |
+| `end_time` | Integer, ms since epoch, between `-2208988800000` (1900-01-01; index histories predate 1970) and one year from now. Only bars whose open time is strictly before `end_time` are returned. To load the page before the oldest bar you have, pass that bar's `t × 1000`. Omit it (or send `null`) to get the newest bars, including the candle that is still forming. Applies to every format. A string, a float or an out-of-range value is a tool error. |
+| `warmup` | Integer, default 0, max 1000. `format=series` only. Fetches this many extra older bars and feeds them to the indicators, then trims them from the response, so the first returned bars have warmed-up values instead of `null`. `png`, `summary`, and `both` ignore it and render exactly `bars`. |
+
+`timeframe` must be one of `1m 2m 3m 5m 15m 30m 60m 90m 1h 2h 4h 6h 8h 12h
+1d 3d 5d 1w 1wk 1M 1mo 3mo`; anything else is a tool error. Yahoo-style names
+are translated for Binance (`1wk` → `1w`, `1mo` → `1M`).
+
+With a `ticker`, a failed upstream fetch (network error, unknown symbol, rate
+limit) is a tool error in every format. Only a call without a ticker renders
+the synthetic demo series.
 
 `format` values:
 
@@ -182,7 +196,8 @@ Series payload shape (for `format=series`):
         { "x1": 12, "t1": 1713427200, "y1": 30.2, "x2": 48, "t2": 1713556800, "y2": 18.7, "dashed": true }
       ]
     }
-  }
+  },
+  "has_more": true
 }
 ```
 
@@ -213,6 +228,59 @@ Three additional channels round out the payload so the full set of
 All three channels are omitted from the per-indicator object when the
 indicator emits none — matching the existing convention for `lines`,
 `histogram`, `signals`, and `hlines`.
+
+##### Live tail and history paging
+
+See [ADR-0009](/chartgen/decisions/0009-live-tail-polling-and-history-paging/).
+
+- **Live tail.** Poll `{ "format": "series", "bars": 2, "warmup": 200 }`
+  every few seconds. The last bar is the candle still forming, and the one
+  before it is the last closed bar. Merge both into your arrays by `t`.
+  Yahoo stamps its live bar with the last trade time; chartgen snaps it
+  back onto its period start, so `t` always lands on the bar grid.
+- **Older history.** Request `{ "format": "series", "bars": 500,
+  "warmup": 200, "end_time": <bars[0].t of your oldest page × 1000> }`.
+  The new page ends right before `end_time`, so pages join without gaps or
+  duplicates.
+- **`has_more`** (boolean, always present in `format=series`) is `true`
+  when older history may exist before `bars[0]`. For Binance and the
+  sample source that means the full `bars + warmup` count came back. For
+  Yahoo it means the request window was not cut off by Yahoo's lookback
+  limit or the symbol's first trade date, so a short page (for example
+  2000 1m bars when one 7-day window only holds about 1950) still reports
+  `true`. It is `false` when history ran out (the page can be shorter or
+  empty) and for the no-ticker demo series, which has no timestamps.
+- **Volume profiles on partial responses.** `vpvr`, `hvn_lvn`, and `tpo`
+  are computed over the bars of the response they arrive in. Keep their
+  `hbars` and profile-derived `hlines` (POC/VAH/VAL, HVN/LVN nodes) from
+  the initial full load, and ignore them on tail-poll and history-page
+  responses, which cover only a slice of the chart.
+
+How `warmup` trims the channels: `bars[]`, `lines`, `histogram`, and
+`fills` keep only their last `bars` entries. Signal `x` values are shifted
+to the trimmed window, and signals inside the warmup are dropped. Divlines
+that end at or before the first returned bar are dropped. Divlines that
+cross into the window are clipped to start at bar 0, with `y1`
+interpolated. For windowed profiles (`vpvr`, `hvn_lvn`, `tpo`), `hbars`
+and `hlines` are recomputed over the returned bars only. `y_range` and the
+`hlines` of every other indicator don't change.
+
+Cumulative or recursive indicators (EMA, RSI, ATR, OBV, CVD, VWAP) don't
+fully converge with a finite `warmup`. At a page seam, values from two
+requests can differ slightly, or by a constant offset for running sums.
+Finite-window indicators (SMA, Bollinger Bands, Donchian) match exactly
+once `warmup` covers their lookback.
+
+Upstream limits: Binance requests are paginated at 1000 bars per call.
+Yahoo intraday history ends after about 30 days for 1m, 60 days for other
+sub-hour intervals, and 730 days for 1h/4h. Yahoo has no native 4h, so
+chartgen builds it from 1h bars. For exchange-traded symbols the buckets
+are anchored at each trading day's session open, like TradingView: a US
+stock gets 09:30–13:30 and 13:30–16:00 ET, the second one shorter. Each
+bucket's `t` is its first 1h bar. Crypto (`BTC-USD`) and FX (`EURUSD=X`)
+trade around the clock and use the UTC 4h grid instead. Each upstream
+request times out after 10 s, and a paginated Binance fetch gives up after
+20 s.
 
 #### `list_indicators`
 

@@ -96,11 +96,22 @@ export const SeriesIndicatorSchema = z.object({
   divlines: z.array(SeriesDivLineSchema).optional(),
 });
 
+// Merging contract (ADR-0009): volume/time profiles (vpvr, hvn_lvn, tpo)
+// are computed over the bars of *this* response. Keep `hbars` and the
+// profile-derived `hlines` (POC/VAH/VAL, HVN/LVN nodes) from the initial
+// full load; ignore them on tail-poll (`bars=2`) and history-page
+// (`end_time`) responses, which only cover a slice of the chart.
 export const SeriesPayloadSchema = z.object({
   symbol: z.string().nullable(),
   interval: z.string().nullable(),
   bars: z.array(SeriesBarSchema),
   indicators: z.record(z.string(), SeriesIndicatorSchema),
+  // True when older bars may exist before `bars[0]`: request them with
+  // `end_time = bars[0].t * 1000`. Binance/sample: the full
+  // `bars + warmup` count came back. Yahoo: the window was not cut by
+  // Yahoo's lookback limit or the symbol's first trade date. Always false
+  // for the no-ticker demo data (no timestamps) and exhausted history.
+  has_more: z.boolean(),
 });
 export type SeriesPayload = z.infer<typeof SeriesPayloadSchema>;
 

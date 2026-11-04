@@ -197,8 +197,39 @@ fn parse_panels(panels_value: &Value) -> ParsedPanels {
     (result, keys, errors, invalid)
 }
 
+/// Upper bound for `bars`: Binance pagination costs one upstream request per
+/// 1000 bars.
+const MAX_BARS: usize = 5000;
+/// Upper bound for `warmup` (ADR-0009).
+const MAX_WARMUP: usize = 1000;
+/// Oldest accepted `end_time`: 1900-01-01 (index histories predate 1970).
+const MIN_END_TIME_MS: i64 = -2_208_988_800_000;
+/// Newest accepted `end_time`, relative to now.
+const MAX_END_TIME_AHEAD_MS: i64 = 366 * 86_400_000;
+
 fn tool_generate_chart(id: Option<Value>, args: &Value) -> Value {
-    let bars = args.get("bars").and_then(|v| v.as_u64()).unwrap_or(200) as usize;
+    generate_chart(id, args, fetch::DataSource::from_env())
+}
+
+fn generate_chart(id: Option<Value>, args: &Value, source: fetch::DataSource) -> Value {
+    let bars = (args.get("bars").and_then(|v| v.as_u64()).unwrap_or(200) as usize).min(MAX_BARS);
+    // Exclusive upper bound (ms since epoch) on bar open time — history paging.
+    // JSON null counts as absent; anything else must be an in-range integer.
+    let end_time = match args.get("end_time") {
+        None | Some(Value::Null) => None,
+        Some(v) => {
+            let max = fetch::now_ms().saturating_add(MAX_END_TIME_AHEAD_MS);
+            match v.as_i64().filter(|t| (MIN_END_TIME_MS..=max).contains(t)) {
+                Some(t) => Some(t),
+                None => {
+                    return tool_err(
+                        id,
+                        "end_time must be an integer (ms since epoch) between 1900-01-01 and one year from now.",
+                    )
+                }
+            }
+        }
+    };
     let width = args.get("width").and_then(|v| v.as_u64()).unwrap_or(1920) as u32;
     let height = args.get("height").and_then(|v| v.as_u64()).unwrap_or(1080) as u32;
 
@@ -214,6 +245,12 @@ fn tool_generate_chart(id: Option<Value>, args: &Value) -> Value {
         .or_else(|| args.get("interval"))
         .and_then(|v| v.as_str())
         .unwrap_or("4h");
+    if data::interval_secs(interval).is_none() {
+        return tool_err(
+            id,
+            &format!("Unsupported timeframe: {interval}. Use e.g. 1m, 5m, 15m, 30m, 1h, 4h, 1d, 1wk, 1mo."),
+        );
+    }
 
     // Accept both "indicators" and "panels" parameter names
     let panels_value = args
@@ -256,15 +293,34 @@ fn tool_generate_chart(id: Option<Value>, args: &Value) -> Value {
         );
     }
 
-    let mut data = if let Some(sym) = symbol {
-        let source = fetch::detect_source(sym);
-        match source {
-            "binance" => fetch::fetch_binance(sym, interval, bars),
-            _ => fetch::fetch_yahoo(sym, interval, bars),
-        }
-        .unwrap_or_else(|_| data::sample_data(bars))
+    // Warmup bars feed indicator computation but are trimmed from the series
+    // payload. png/summary ignore it and render exactly `bars` (ADR-0009).
+    let warmup = if want_series {
+        (args.get("warmup").and_then(|v| v.as_u64()).unwrap_or(0) as usize).min(MAX_WARMUP)
     } else {
-        data::sample_data(bars)
+        0
+    };
+    let requested = bars + warmup;
+
+    // Without a ticker the live source serves the synthetic demo series
+    // (no timestamps, so nothing to page). With one, a fetch failure is an
+    // error in every format: sample bars would masquerade as market data.
+    let (mut data, has_more) = match (symbol, source) {
+        (None, fetch::DataSource::Live) if end_time.is_none() => {
+            (data::sample_data(requested), false)
+        }
+        (None, fetch::DataSource::Live) => {
+            return tool_err(
+                id,
+                "end_time requires a ticker (or CHARTGEN_DATA_SOURCE=sample).",
+            )
+        }
+        (sym, _) => {
+            match fetch::fetch_ohlcv(source, sym.unwrap_or(""), interval, requested, end_time) {
+                Ok(f) => (f.data, f.has_more),
+                Err(e) => return tool_err(id, &format!("Data fetch failed: {e}")),
+            }
+        }
     };
     data.symbol = symbol.map(|s| s.to_string());
     data.interval = Some(interval.to_string());
@@ -300,8 +356,16 @@ fn tool_generate_chart(id: Option<Value>, args: &Value) -> Value {
     };
 
     // Build series payload: full OHLCV bars plus per-indicator per-bar values.
+    // Indicators ran over warmup + visible bars; only the last `bars` are
+    // emitted, with every index-based channel re-based to match.
     let series_value = if want_series {
-        let bars_arr: Vec<Value> = data
+        let offset = data.len().saturating_sub(bars);
+        let visible = chartgen::data::OhlcvData {
+            bars: data.bars[offset..].to_vec(),
+            symbol: data.symbol.clone(),
+            interval: data.interval.clone(),
+        };
+        let bars_arr: Vec<Value> = visible
             .bars
             .iter()
             .map(|b| {
@@ -316,14 +380,25 @@ fn tool_generate_chart(id: Option<Value>, args: &Value) -> Value {
             })
             .collect();
         let mut indicators_json = serde_json::Map::new();
-        for (key, pr) in &computed {
-            indicators_json.insert(key.clone(), panel_result_to_series_json(pr, &data));
+        for ((key, pr), ind) in computed.iter().zip(panel_indicators.iter()) {
+            let mut trimmed = trim_panel_result(pr, offset);
+            // Volume/time profiles aggregate over the whole input window,
+            // not per bar: recompute their profile-derived channels (hbars
+            // and POC/VA/node hlines) over the visible window so warmup bars
+            // don't leak into the profile.
+            if offset > 0 && ind.windowed_profile() {
+                let profile = ind.compute(&visible);
+                trimmed.hbars = profile.hbars;
+                trimmed.hlines = profile.hlines;
+            }
+            indicators_json.insert(key.clone(), panel_result_to_series_json(&trimmed, &visible));
         }
         Some(json!({
             "symbol": data.symbol,
             "interval": data.interval,
             "bars": bars_arr,
             "indicators": Value::Object(indicators_json),
+            "has_more": has_more,
         }))
     } else {
         None
@@ -465,10 +540,55 @@ fn finite_or_null(v: f64) -> Value {
 // possible; fall back to JSON null so fixtures still produce valid output.
 fn bar_t(bar: &chartgen::data::Bar) -> Value {
     bar.date
-        .parse::<u64>()
+        .parse::<i64>()
         .ok()
         .map(|n| json!(n))
         .unwrap_or(Value::Null)
+}
+
+// Drop the first `offset` (warmup) bars from every index-based channel and
+// re-base indices onto the remaining bars. Dots inside the warmup are
+// dropped; divlines wholly inside it are dropped, and ones straddling the
+// boundary are clipped to start at bar 0 with y interpolated (lines that
+// only touch bar 0 would collapse to a point and are dropped too). hlines, hbars
+// and y_range are price-based and pass through unchanged.
+fn trim_panel_result(
+    pr: &chartgen::indicator::PanelResult,
+    offset: usize,
+) -> chartgen::indicator::PanelResult {
+    fn tail<T: Clone>(v: &[T], offset: usize) -> Vec<T> {
+        v.get(offset..).unwrap_or(&[]).to_vec()
+    }
+    let mut out = pr.clone();
+    for line in &mut out.lines {
+        line.y = tail(&line.y, offset);
+    }
+    for fill in &mut out.fills {
+        fill.y1 = tail(&fill.y1, offset);
+        fill.y2 = tail(&fill.y2, offset);
+    }
+    for b in &mut out.bars {
+        b.y = tail(&b.y, offset);
+        b.colors = tail(&b.colors, offset);
+    }
+    out.dots.retain(|d| d.x >= offset);
+    for d in &mut out.dots {
+        d.x -= offset;
+    }
+    out.divlines.retain(|d| d.x1.max(d.x2) > offset);
+    for d in &mut out.divlines {
+        if d.x1 < offset {
+            d.y1 += (d.y2 - d.y1) * (offset - d.x1) as f64 / (d.x2 - d.x1) as f64;
+            d.x1 = offset;
+        }
+        if d.x2 < offset {
+            d.y2 += (d.y1 - d.y2) * (offset - d.x2) as f64 / (d.x1 - d.x2) as f64;
+            d.x2 = offset;
+        }
+        d.x1 -= offset;
+        d.x2 -= offset;
+    }
+    out
 }
 
 // Series-shape serializer: full per-bar values for each line, signals with
@@ -838,11 +958,9 @@ fn tool_get_indicators(
 
     // Fetch data and compute from scratch
     let bars = 200;
-    let source = fetch::detect_source(symbol);
-    let fetch_result = match source {
-        "binance" => fetch::fetch_binance(symbol, interval, bars),
-        _ => fetch::fetch_yahoo(symbol, interval, bars),
-    };
+    let fetch_result =
+        fetch::fetch_ohlcv(fetch::DataSource::from_env(), symbol, interval, bars, None)
+            .map(|f| f.data);
     let mut ohlcv = match fetch_result {
         Ok(d) => d,
         Err(e) => return tool_err(id, &format!("Failed to fetch data: {e}")),
@@ -1885,6 +2003,12 @@ mod tests {
             date: "D5".into(),
         };
         assert_eq!(bar_t(&synthetic), Value::Null);
+
+        let pre_epoch = Bar {
+            date: "-631152000".into(), // 1950-01-01
+            ..numeric
+        };
+        assert_eq!(bar_t(&pre_epoch), json!(-631_152_000_i64));
     }
 
     #[test]
@@ -2227,5 +2351,434 @@ mod tests {
             assert_eq!(resp["result"]["isError"], true);
             assert_eq!(resp["result"]["content"][0]["text"], msg);
         }
+    }
+
+    // --- warmup / end_time / paging (ADR-0009) ---
+
+    const HOUR_MS: i64 = 3_600_000;
+    const END_4H_MS: i64 = 1_700_006_400_000; // on the 4h grid
+
+    fn series_payload(args: Value, source: fetch::DataSource) -> Value {
+        let resp = generate_chart(Some(json!(1)), &args, source);
+        assert!(
+            !is_error(&resp),
+            "unexpected error: {}",
+            response_text(&resp)
+        );
+        serde_json::from_str(chart_content(&resp)[0]["text"].as_str().unwrap()).unwrap()
+    }
+
+    fn bar_ts(p: &Value) -> Vec<i64> {
+        p["bars"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|b| b["t"].as_i64().unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn trim_panel_result_rebases_every_channel() {
+        use chartgen::data::{Bar, OhlcvData};
+        use chartgen::indicator::{Bars, DivLine, Dot, Fill, HBar, HLine, Line, PanelResult};
+        use plotters::style::RGBAColor;
+
+        let c = RGBAColor(0, 0, 0, 1.0);
+        let ys: Vec<f64> = (0..8).map(|i| i as f64).collect();
+        let dot = |x: usize| Dot {
+            x,
+            y: x as f64,
+            color: c,
+            size: 1,
+            label: Some(format!("d{x}")),
+        };
+        let div = |x1: usize, y1: f64, x2: usize, y2: f64| DivLine {
+            x1,
+            y1,
+            x2,
+            y2,
+            color: c,
+            dashed: false,
+        };
+        let pr = PanelResult {
+            lines: vec![Line {
+                y: ys.clone(),
+                color: c,
+                width: 1,
+                label: None,
+            }],
+            fills: vec![Fill {
+                y1: ys.clone(),
+                y2: ys.iter().map(|v| -v).collect(),
+                color: c,
+            }],
+            bars: vec![Bars {
+                y: ys.clone(),
+                colors: vec![c; 8],
+                bottom: 0.0,
+            }],
+            dots: vec![dot(1), dot(3), dot(7)],
+            hlines: vec![HLine { y: 70.0, color: c }],
+            hbars: vec![HBar {
+                y: 5.0,
+                height: 1.0,
+                width: 0.5,
+                offset: 0.0,
+                color: c,
+                left: false,
+            }],
+            divlines: vec![
+                div(0, 0.0, 2, 20.0),  // wholly inside warmup
+                div(1, 10.0, 5, 50.0), // straddles the boundary
+                div(4, 40.0, 7, 70.0), // fully visible
+                div(6, 60.0, 2, 20.0), // reversed, straddling
+                div(1, 10.0, 3, 30.0), // ends exactly on visible bar 0
+            ],
+            y_range: Some((0.0, 100.0)),
+            label: "T".into(),
+            is_overlay: false,
+        };
+
+        let t = trim_panel_result(&pr, 3);
+        assert_eq!(t.lines[0].y, vec![3.0, 4.0, 5.0, 6.0, 7.0]);
+        assert_eq!(t.fills[0].y1, vec![3.0, 4.0, 5.0, 6.0, 7.0]);
+        assert_eq!(t.fills[0].y2, vec![-3.0, -4.0, -5.0, -6.0, -7.0]);
+        assert_eq!(t.bars[0].y, vec![3.0, 4.0, 5.0, 6.0, 7.0]);
+        assert_eq!(t.bars[0].colors.len(), 5);
+        let xs: Vec<(usize, f64)> = t.dots.iter().map(|d| (d.x, d.y)).collect();
+        assert_eq!(xs, vec![(0, 3.0), (4, 7.0)]);
+        let divs: Vec<(usize, f64, usize, f64)> = t
+            .divlines
+            .iter()
+            .map(|d| (d.x1, d.y1, d.x2, d.y2))
+            .collect();
+        assert_eq!(
+            divs,
+            vec![(0, 30.0, 2, 50.0), (1, 40.0, 4, 70.0), (3, 60.0, 0, 30.0)]
+        );
+        assert_eq!(t.hlines.len(), 1);
+        assert_eq!(t.hbars.len(), 1);
+        assert_eq!(t.y_range, Some((0.0, 100.0)));
+
+        // Serialized against the trimmed bars, t fields resolve to visible bars.
+        let visible = OhlcvData {
+            bars: (3..8)
+                .map(|i| Bar {
+                    open: 1.0,
+                    high: 1.0,
+                    low: 1.0,
+                    close: 1.0,
+                    volume: 1.0,
+                    date: format!("{}", 1_000 + i),
+                })
+                .collect(),
+            symbol: None,
+            interval: None,
+        };
+        let j = panel_result_to_series_json(&t, &visible);
+        assert_eq!(j["signals"][0]["t"], json!(1_003));
+        assert_eq!(j["signals"][1]["t"], json!(1_007));
+        assert_eq!(j["divlines"][0]["t1"], json!(1_003));
+        assert_eq!(j["divlines"][0]["t2"], json!(1_005));
+        assert_eq!(j["lines"][0]["values"].as_array().unwrap().len(), 5);
+
+        // offset 0 is the identity.
+        let same = trim_panel_result(&pr, 0);
+        assert_eq!(same.lines[0].y, ys);
+        assert_eq!(same.dots.len(), 3);
+        assert_eq!(same.divlines.len(), 5);
+    }
+
+    #[test]
+    fn series_warmup_trims_to_bars_and_warms_indicators() {
+        let args = |warmup: u64| {
+            json!({
+                "ticker": "BTCUSDT",
+                "timeframe": "4h",
+                "bars": 50,
+                "warmup": warmup,
+                "end_time": END_4H_MS,
+                "indicators": ["rsi", "macd", "bbands", "donchian", "cipher_b"],
+                "format": "series"
+            })
+        };
+        let p = series_payload(args(100), fetch::DataSource::Sample);
+        let ts = bar_ts(&p);
+        assert_eq!(ts.len(), 50);
+        assert!(ts.iter().all(|t| t % 14_400 == 0), "bars on the 4h grid");
+        assert!(ts.windows(2).all(|w| w[1] - w[0] == 14_400));
+        assert_eq!(*ts.last().unwrap() * 1000, END_4H_MS - 4 * HOUR_MS);
+        assert_eq!(p["has_more"], true);
+
+        let ind = &p["indicators"];
+        let rsi = ind["rsi"]["lines"][0]["values"].as_array().unwrap();
+        assert_eq!(rsi.len(), 50);
+        assert!(rsi.iter().all(|v| v.is_number()));
+        assert_eq!(
+            ind["macd"]["histogram"][0]["values"]
+                .as_array()
+                .unwrap()
+                .len(),
+            50
+        );
+        let y1 = ind["bbands"]["fills"][0]["y1"].as_array().unwrap();
+        assert_eq!(y1.len(), 50);
+        assert!(
+            y1[0].is_number(),
+            "warmup must fill the first visible value"
+        );
+        for sig in ind["cipher_b"]["signals"].as_array().into_iter().flatten() {
+            let x = sig["x"].as_u64().unwrap() as usize;
+            assert!(x < 50);
+            assert_eq!(sig["t"].as_i64().unwrap(), ts[x]);
+        }
+
+        // Without warmup the same window starts with pre-warmup nulls.
+        let cold = series_payload(args(0), fetch::DataSource::Sample);
+        assert_eq!(bar_ts(&cold), ts);
+        assert!(cold["indicators"]["donchian"]["lines"][0]["values"][0].is_null());
+        assert_ne!(
+            cold["indicators"]["rsi"]["lines"][0]["values"][0],
+            ind["rsi"]["lines"][0]["values"][0]
+        );
+    }
+
+    #[test]
+    fn series_end_time_is_exclusive_and_pages_agree() {
+        let page = |bars: u64, end: i64| {
+            series_payload(
+                json!({
+                    "ticker": "ETHUSDT",
+                    "timeframe": "4h",
+                    "bars": bars,
+                    "warmup": 30,
+                    "end_time": end,
+                    "indicators": ["rsi"],
+                    "format": "series"
+                }),
+                fetch::DataSource::Sample,
+            )
+        };
+        let a = page(60, END_4H_MS);
+        let a_ts = bar_ts(&a);
+        assert!(a_ts.iter().all(|t| t * 1000 < END_4H_MS));
+
+        // Paging from the oldest loaded bar continues seamlessly.
+        let b = page(60, a_ts[0] * 1000);
+        let b_ts = bar_ts(&b);
+        assert_eq!(*b_ts.last().unwrap() + 14_400, a_ts[0]);
+
+        // Overlapping requests agree exactly on OHLCV.
+        let c = page(60, END_4H_MS - 30 * 4 * HOUR_MS);
+        let a_bars = a["bars"].as_array().unwrap();
+        let c_bars = c["bars"].as_array().unwrap();
+        let overlap: Vec<&Value> = c_bars
+            .iter()
+            .filter(|cb| a_bars.iter().any(|ab| ab == *cb))
+            .collect();
+        assert_eq!(overlap.len(), 30);
+        assert_eq!(c_bars[30..], a_bars[..30]);
+    }
+
+    #[test]
+    fn series_has_more_false_when_history_runs_out() {
+        let p = series_payload(
+            json!({
+                "timeframe": "1h",
+                "bars": 50,
+                "warmup": 20,
+                "end_time": 10 * HOUR_MS,
+                "indicators": ["rsi"],
+                "format": "series"
+            }),
+            fetch::DataSource::Sample,
+        );
+        assert_eq!(bar_ts(&p), (0..10).map(|h| h * 3_600).collect::<Vec<_>>());
+        assert_eq!(p["has_more"], false);
+
+        // Past the start of history: empty payload, not an error.
+        let p = series_payload(
+            json!({ "timeframe": "1h", "bars": 5, "end_time": 0,
+                    "indicators": ["rsi", "vpvr"], "format": "series" }),
+            fetch::DataSource::Sample,
+        );
+        assert!(p["bars"].as_array().unwrap().is_empty());
+        assert_eq!(p["has_more"], false);
+
+        // Exactly the requested count available → more may exist.
+        let p = series_payload(
+            json!({ "timeframe": "1h", "bars": 6, "warmup": 4, "end_time": 10 * HOUR_MS,
+                    "indicators": ["rsi"], "format": "series" }),
+            fetch::DataSource::Sample,
+        );
+        assert_eq!(p["bars"].as_array().unwrap().len(), 6);
+        assert_eq!(p["has_more"], true);
+    }
+
+    #[test]
+    fn series_tail_poll_returns_forming_bar() {
+        let before = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
+        let p = series_payload(
+            json!({ "ticker": "BTCUSDT", "timeframe": "1h", "bars": 2, "warmup": 50,
+                    "indicators": ["rsi"], "format": "series" }),
+            fetch::DataSource::Sample,
+        );
+        let ts = bar_ts(&p);
+        assert_eq!(ts.len(), 2);
+        // Newest bar is the one forming now (allow an hour rollover mid-test).
+        let current = before / HOUR_MS * HOUR_MS / 1000;
+        assert!(ts[1] == current || ts[1] == current + 3_600);
+        let rsi = p["indicators"]["rsi"]["lines"][0]["values"]
+            .as_array()
+            .unwrap();
+        assert!(rsi.iter().all(|v| v.is_number()));
+        assert_eq!(p["has_more"], true);
+    }
+
+    #[test]
+    fn series_hbars_cover_visible_window_only() {
+        let args = |warmup: u64| {
+            json!({ "ticker": "BTCUSDT", "timeframe": "4h", "bars": 40, "warmup": warmup,
+                    "end_time": END_4H_MS, "indicators": ["vpvr"], "format": "series" })
+        };
+        let warm = series_payload(args(200), fetch::DataSource::Sample);
+        let cold = series_payload(args(0), fetch::DataSource::Sample);
+        let hbars = &warm["indicators"]["vpvr"]["hbars"];
+        assert!(!hbars.as_array().unwrap().is_empty());
+        assert_eq!(hbars, &cold["indicators"]["vpvr"]["hbars"]);
+        assert_eq!(
+            warm["indicators"]["vpvr"]["hlines"],
+            cold["indicators"]["vpvr"]["hlines"]
+        );
+    }
+
+    #[test]
+    fn series_profile_hlines_cover_visible_window_without_hbars() {
+        // hvn_lvn derives node hlines from a volume profile but emits no hbars.
+        let args = |warmup: u64| {
+            json!({ "ticker": "BTCUSDT", "timeframe": "4h", "bars": 60, "warmup": warmup,
+                    "end_time": END_4H_MS, "indicators": ["hvn_lvn", "rsi"], "format": "series" })
+        };
+        let warm = series_payload(args(300), fetch::DataSource::Sample);
+        let cold = series_payload(args(0), fetch::DataSource::Sample);
+        let nodes = &warm["indicators"]["hvn_lvn"]["hlines"];
+        assert!(!nodes.as_array().unwrap().is_empty());
+        assert_eq!(nodes, &cold["indicators"]["hvn_lvn"]["hlines"]);
+        // Non-profile hlines (RSI 30/70) are untouched.
+        assert_eq!(
+            warm["indicators"]["rsi"]["hlines"],
+            cold["indicators"]["rsi"]["hlines"]
+        );
+        let windowed: Vec<&str> = indicators::registry()
+            .iter()
+            .filter(|i| indicators::by_name(i.name).is_some_and(|ind| ind.windowed_profile()))
+            .map(|i| i.name)
+            .collect();
+        assert_eq!(windowed, vec!["volume_profile", "hvn_lvn", "tpo"]);
+    }
+
+    #[test]
+    fn end_time_must_be_an_in_range_integer() {
+        for bad in [
+            json!("1700000000000"),
+            json!(1.7e12),
+            json!(1_700_000_000_000.5),
+            json!(u64::MAX),
+            json!(-2_208_988_800_001_i64),
+            json!(fetch::now_ms() + 400 * 86_400_000),
+        ] {
+            let resp = generate_chart(
+                Some(json!(1)),
+                &json!({ "ticker": "BTCUSDT", "end_time": bad, "format": "series" }),
+                fetch::DataSource::Sample,
+            );
+            assert!(is_error(&resp), "end_time {bad} must be rejected");
+            assert!(response_text(&resp).contains("end_time"));
+        }
+        // Boundaries and null are accepted (pre-1970 just has no sample bars).
+        for ok in [json!(null), json!(-2_208_988_800_000_i64), json!(END_4H_MS)] {
+            series_payload(
+                json!({ "ticker": "BTCUSDT", "end_time": ok, "bars": 5, "format": "series" }),
+                fetch::DataSource::Sample,
+            );
+        }
+    }
+
+    #[test]
+    fn unsupported_timeframe_is_a_tool_error() {
+        for tf in ["4611686018427387904m", "0h", "7h", "1x"] {
+            let resp = generate_chart(
+                Some(json!(1)),
+                &json!({ "ticker": "BTCUSDT", "timeframe": tf, "format": "series" }),
+                fetch::DataSource::Sample,
+            );
+            assert!(is_error(&resp), "timeframe {tf} must be rejected");
+            assert!(response_text(&resp).contains("Unsupported timeframe"));
+        }
+    }
+
+    #[test]
+    fn fetch_failure_with_ticker_errors_in_every_format() {
+        for format in ["png", "summary", "both", "series"] {
+            for end_time in [Value::Null, json!(END_4H_MS)] {
+                let resp = generate_chart(
+                    Some(json!(1)),
+                    &json!({ "ticker": "AAPL", "bars": 20, "format": format,
+                             "end_time": end_time, "width": 200, "height": 100 }),
+                    fetch::DataSource::Unavailable,
+                );
+                assert!(
+                    is_error(&resp),
+                    "{format}: must not fall back to sample data"
+                );
+                assert!(response_text(&resp).contains("upstream unavailable"));
+            }
+        }
+    }
+
+    #[test]
+    fn warmup_ignored_for_non_series_formats() {
+        let text = |args: Value| {
+            let resp = generate_chart(Some(json!(1)), &args, fetch::DataSource::Live);
+            chart_content(&resp)[0]["text"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        };
+        let base = json!({ "bars": 30, "indicators": ["rsi"], "format": "summary" });
+        let mut warm = base.clone();
+        warm["warmup"] = json!(500);
+        assert_eq!(text(base), text(warm));
+    }
+
+    #[test]
+    fn end_time_without_ticker_errors_on_live_source() {
+        let resp = generate_chart(
+            Some(json!(1)),
+            &json!({ "end_time": 1_700_000_000_000_i64, "format": "series" }),
+            fetch::DataSource::Live,
+        );
+        assert!(is_error(&resp));
+        assert!(response_text(&resp).contains("end_time"));
+    }
+
+    #[test]
+    fn legacy_sample_series_has_more_false_and_bars_clamped() {
+        // No ticker, live source: synthetic sample_data has no timestamps to page from.
+        let p = series_payload(
+            json!({ "bars": 20, "warmup": 10, "indicators": ["rsi"], "format": "series" }),
+            fetch::DataSource::Live,
+        );
+        assert_eq!(p["bars"].as_array().unwrap().len(), 20);
+        assert_eq!(p["has_more"], false);
+
+        let p = series_payload(
+            json!({ "timeframe": "1m", "bars": 100_000, "indicators": [], "format": "series" }),
+            fetch::DataSource::Sample,
+        );
+        assert_eq!(p["bars"].as_array().unwrap().len(), MAX_BARS);
     }
 }

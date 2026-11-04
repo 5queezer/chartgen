@@ -23,11 +23,15 @@ export interface CancelOrderInput {
 
 export interface GenerateChartInput {
   /**
-   * Number of OHLCV candlestick bars to display
+   * Number of OHLCV candlestick bars to display (max 5000, all formats)
    */
   bars?: number;
   /**
-   * Output format. 'png' (default) returns a rendered chart image. 'summary' returns a compact JSON summary (OHLCV stats, last indicator values, signals, divergences, levels) — typically 10-50x fewer tokens than a PNG and ideal for automated analysis without vision. 'both' returns the PNG plus the JSON summary. 'series' returns a full per-bar time-series JSON payload (every OHLCV bar plus 1:1 aligned indicator value arrays with NaN→null for pre-warmup, signals with bar timestamps, hlines, and y_range) — ideal for downstream numeric computation.
+   * History paging: return only bars whose open time (ms since epoch) is strictly before end_time — pass the oldest loaded bar's t × 1000 to fetch the page before it. Omit (or null) for the newest bars, including the still-forming one. Must be an integer between -2208988800000 (1900-01-01) and one year from now.
+   */
+  end_time?: number;
+  /**
+   * Output format. 'png' (default) returns a rendered chart image. 'summary' returns a compact JSON summary (OHLCV stats, last indicator values, signals, divergences, levels) — typically 10-50x fewer tokens than a PNG and ideal for automated analysis without vision. 'both' returns the PNG plus the JSON summary. 'series' returns a full per-bar time-series JSON payload (every OHLCV bar plus 1:1 aligned indicator value arrays with NaN→null for pre-warmup, signals with bar timestamps, hlines, and y_range, plus has_more=true when older history may exist) — ideal for downstream numeric computation.
    */
   format?: "png" | "summary" | "both" | "series";
   /**
@@ -63,13 +67,17 @@ export interface GenerateChartInput {
    */
   symbol?: string;
   /**
-   * Stock or crypto ticker symbol. Stocks: AAPL, MSFT, TSLA, GOOGL, AMZN (Yahoo Finance). Crypto: BTCUSDT, ETHUSDT, SOLUSDT (Binance). If omitted, uses random sample data.
+   * Stock or crypto ticker symbol. Stocks: AAPL, MSFT, TSLA, GOOGL, AMZN (Yahoo Finance). Crypto: BTCUSDT, ETHUSDT, SOLUSDT (Binance). If omitted, uses random sample data. If given and the upstream fetch fails, the call returns an error.
    */
   ticker?: string;
   /**
    * Candlestick timeframe / interval: 1m, 5m, 15m, 1h, 4h, 1d, 1wk
    */
   timeframe?: string;
+  /**
+   * format=series only: extra older bars (max 1000) fetched and fed to indicator computation, then trimmed, so the first returned bars carry warmed-up indicator values. Ignored by png/summary/both.
+   */
+  warmup?: number;
   /**
    * Chart image width in pixels
    */

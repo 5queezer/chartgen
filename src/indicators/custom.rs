@@ -923,6 +923,10 @@ impl Default for VolumeProfile {
 }
 
 impl Indicator for VolumeProfile {
+    fn windowed_profile(&self) -> bool {
+        true
+    }
+
     fn name(&self) -> &str {
         "VPVR"
     }
@@ -2058,6 +2062,10 @@ impl Default for HvnLvn {
 }
 
 impl Indicator for HvnLvn {
+    fn windowed_profile(&self) -> bool {
+        true
+    }
+
     fn name(&self) -> &str {
         "HVN/LVN"
     }
@@ -2372,6 +2380,10 @@ impl Default for Tpo {
 }
 
 impl Indicator for Tpo {
+    fn windowed_profile(&self) -> bool {
+        true
+    }
+
     fn name(&self) -> &str {
         "TPO"
     }

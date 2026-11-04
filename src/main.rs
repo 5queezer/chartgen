@@ -132,14 +132,18 @@ fn main() {
             _ => fetch::detect_source(sym),
         };
         match source {
-            "binance" => fetch::fetch_binance(sym, &cli.interval, cli.bars).unwrap_or_else(|e| {
-                eprintln!("Binance error: {}", e);
-                std::process::exit(1);
-            }),
-            "yahoo" => fetch::fetch_yahoo(sym, &cli.interval, cli.bars).unwrap_or_else(|e| {
-                eprintln!("Yahoo error: {}", e);
-                std::process::exit(1);
-            }),
+            "binance" => fetch::fetch_binance(sym, &cli.interval, cli.bars, None)
+                .map(|f| f.data)
+                .unwrap_or_else(|e| {
+                    eprintln!("Binance error: {}", e);
+                    std::process::exit(1);
+                }),
+            "yahoo" => fetch::fetch_yahoo(sym, &cli.interval, cli.bars, None)
+                .map(|f| f.data)
+                .unwrap_or_else(|e| {
+                    eprintln!("Yahoo error: {}", e);
+                    std::process::exit(1);
+                }),
             _ => unreachable!(),
         }
     } else {
