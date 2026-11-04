@@ -151,13 +151,16 @@ impl Indicator for BollingerBandsInd {
 pub struct KeltnerChannels {
     pub period: usize,
     pub multiplier: f64,
+    pub atr_length: usize,
 }
 
 impl Default for KeltnerChannels {
     fn default() -> Self {
+        // TradingView defaults: length 20, multiplier 2, ATR length 10.
         Self {
             period: 20,
-            multiplier: 1.5,
+            multiplier: 2.0,
+            atr_length: 10,
         }
     }
 }
@@ -174,7 +177,9 @@ impl Indicator for KeltnerChannels {
     fn params(&self) -> Value {
         json!([
             {"name": "period", "type": "integer", "min": 1, "max": 10000, "default": 20},
-            {"name": "multiplier", "type": "number", "min": 0, "max": 1000, "default": 1.5}
+            {"name": "multiplier", "type": "number", "min": 0, "max": 1000, "default": 2.0},
+            {"name": "atr_length", "type": "integer", "min": 1, "max": 10000, "default": 10,
+             "description": "ATR length for the band width"}
         ])
     }
 
@@ -185,13 +190,16 @@ impl Indicator for KeltnerChannels {
         if let Some(v) = params.get("multiplier").and_then(|v| v.as_f64()) {
             self.multiplier = v;
         }
+        if let Some(v) = params.get("atr_length").and_then(|v| v.as_u64()) {
+            self.atr_length = v as usize;
+        }
     }
 
     fn compute(&self, data: &OhlcvData) -> PanelResult {
-        // TV (Bands Style "Average True Range"): ta.ema(close, n) +/- mult * ta.atr.
-        // chartgen uses `period` for the ATR length too (TV's separate default is 10).
+        // TV (Bands Style "Average True Range"):
+        // ta.ema(close, period) +/- mult * ta.atr(atr_length).
         let middle = ema_n(&data.closes(), self.period);
-        let range = atr(data, self.period);
+        let range = atr(data, self.atr_length);
         let upper = zip(&middle, &range, |m, r| m + self.multiplier * r);
         let lower = zip(&middle, &range, |m, r| m - self.multiplier * r);
 
@@ -397,7 +405,8 @@ pub struct Roc {
 
 impl Default for Roc {
     fn default() -> Self {
-        Self { period: 14 }
+        // TradingView's default length.
+        Self { period: 9 }
     }
 }
 
@@ -411,7 +420,7 @@ impl Indicator for Roc {
     }
 
     fn params(&self) -> Value {
-        json!([{"name": "period", "type": "integer", "min": 1, "max": 10000, "default": 14}])
+        json!([{"name": "period", "type": "integer", "min": 1, "max": 10000, "default": 9}])
     }
 
     fn configure(&mut self, params: &Value) {
@@ -514,9 +523,10 @@ pub struct Stochastic {
 
 impl Default for Stochastic {
     fn default() -> Self {
+        // TradingView defaults: %K length 14, %K smoothing 1, %D smoothing 3.
         Self {
             period: 14,
-            k_smooth: 3,
+            k_smooth: 1,
             d_smooth: 3,
         }
     }
@@ -534,7 +544,7 @@ impl Indicator for Stochastic {
     fn params(&self) -> Value {
         json!([
             {"name": "period", "type": "integer", "min": 1, "max": 10000, "default": 14},
-            {"name": "k_smooth", "type": "integer", "min": 1, "max": 10000, "default": 3},
+            {"name": "k_smooth", "type": "integer", "min": 1, "max": 10000, "default": 1},
             {"name": "d_smooth", "type": "integer", "min": 1, "max": 10000, "default": 3}
         ])
     }
@@ -856,6 +866,7 @@ mod tests {
         let ind = KeltnerChannels {
             period: 2,
             multiplier: 1.0,
+            atr_length: 2,
         };
         let r = ind.compute(&ohlc());
         // ema2(close) = [_, 1.5, 2/3*4 + 1/3*1.5, ...], atr2 = [_, 2, 2.5, 1.75]
@@ -866,6 +877,25 @@ mod tests {
         let lo: Vec<f64> = mid.iter().zip(&atr).map(|(m, a)| m - a).collect();
         eq(&ys(&r, 0)[..4], &up);
         eq(&ys(&r, 2)[..4], &lo);
+        // separate ATR length: atr3 = [_, _, 7/3, 17/9]
+        let ind = KeltnerChannels {
+            atr_length: 3,
+            ..ind
+        };
+        let r = ind.compute(&ohlc());
+        eq(
+            &ys(&r, 0)[..4],
+            &[NAN, NAN, 19.0 / 6.0 + 7.0 / 3.0, 55.0 / 18.0 + 17.0 / 9.0],
+        );
+    }
+
+    #[test]
+    fn tradingview_defaults() {
+        let k = KeltnerChannels::default();
+        assert_eq!((k.period, k.multiplier, k.atr_length), (20, 2.0, 10));
+        let st = Stochastic::default();
+        assert_eq!((st.period, st.k_smooth, st.d_smooth), (14, 1, 3));
+        assert_eq!(Roc::default().period, 9);
     }
 
     #[test]
