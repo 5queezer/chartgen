@@ -52,9 +52,18 @@ CHARTGEN_PORT=9402 WEB_PORT=5402 npm run test:e2e
 server is started with `CHARTGEN_DATA_SOURCE=sample`, so no network is
 needed.
 
-If you already have the servers running on those ports, Playwright
-reuses them (`reuseExistingServer` outside CI). The first cold run
-builds chartgen, which takes a few minutes without a cache.
+Playwright starts both servers itself and fails fast if a port is
+already in use. That stops a leftover server from another checkout
+or an older commit from being tested by mistake. To reuse servers you
+started yourself from this checkout, opt in with `PW_REUSE_SERVER=1`
+(ignored in CI):
+
+```bash
+PW_REUSE_SERVER=1 npm run test:e2e
+```
+
+The first cold run builds chartgen, which takes a few minutes without
+a cache.
 
 ## How CI runs it
 

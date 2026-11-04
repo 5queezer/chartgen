@@ -8,6 +8,10 @@
 //   CHARTGEN_PORT (default 9315) — chartgen --serve
 //   WEB_PORT      (default 5173) — Vite dev server
 //
+// Servers already listening on those ports are reused only with
+// PW_REUSE_SERVER=1. Otherwise Playwright fails fast on a busy port, so a
+// leftover server from another checkout is never tested by mistake.
+//
 // Single worker because the chartgen OAuth store is process-global and
 // multiple tests racing through the PKCE dance would collide on state.
 
@@ -15,6 +19,7 @@ import { defineConfig, devices } from "@playwright/test";
 
 const CHARTGEN_PORT = Number(process.env.CHARTGEN_PORT ?? 9315);
 const WEB_PORT = Number(process.env.WEB_PORT ?? 5173);
+const REUSE_SERVER = !process.env.CI && process.env.PW_REUSE_SERVER === "1";
 
 export default defineConfig({
   testDir: "./tests/e2e",
@@ -50,7 +55,7 @@ export default defineConfig({
       cwd: "..",
       port: CHARTGEN_PORT,
       env: { CHARTGEN_DATA_SOURCE: "sample" },
-      reuseExistingServer: !process.env.CI,
+      reuseExistingServer: REUSE_SERVER,
       // Cold build can chew several minutes on a slow CI runner.
       // Cached Swatinem builds drop this to seconds.
       timeout: 300_000,
@@ -62,7 +67,7 @@ export default defineConfig({
       cwd: ".",
       port: WEB_PORT,
       env: { CHARTGEN_DEV_TARGET: `http://localhost:${CHARTGEN_PORT}` },
-      reuseExistingServer: !process.env.CI,
+      reuseExistingServer: REUSE_SERVER,
       timeout: 60_000,
       stdout: "pipe",
       stderr: "pipe",
