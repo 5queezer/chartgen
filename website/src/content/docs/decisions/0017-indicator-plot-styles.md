@@ -67,6 +67,10 @@ channels are 0-255. Invalid fields are dropped, and a style with nothing
   returns null for hidden plots, so nothing is drawn and the y-axis ignores
   them. Applying a change is one `overrideIndicator`, with no new data and no
   request. Histograms only take a color and visibility.
+- **Layouts** ([ADR-0015](./0015-named-layouts/)): the style is part of the
+  layout snapshot (kept and validated on import) and of the dirty comparison,
+  with plots and fields in sorted order, so restyling a plot marks the layout
+  dirty, as in TradingView. It stays off the wire.
 - **Legend:** the pane legend uses the same resolved colors and omits hidden
   plots; the indicator's controls stay.
 - **Settings dialog:** Kobalte Tabs "Inputs" and "Style". Defaults resets the

@@ -15,8 +15,10 @@ import {
   DEFAULT_SET,
   indicatorName,
   indicatorParams,
+  indicatorStyle,
   isHidden,
   isActiveIndicator,
+  sanitizeStyle,
   setActiveIndicators,
   type ActiveIndicator,
 } from "./indicators";
@@ -101,7 +103,8 @@ export function uniqueName(
 
 /**
  * Keep an indicator entry's name and its primitive params (number, string,
- * boolean) and the hidden flag; prototype-polluting keys are dropped.
+ * boolean), the hidden flag and the validated plot style (ADR-0017);
+ * prototype-polluting keys are dropped.
  */
 function sanitizeEntry(e: ActiveIndicator): ActiveIndicator {
   if (typeof e === "string") return e;
@@ -113,7 +116,12 @@ function sanitizeEntry(e: ActiveIndicator): ActiveIndicator {
         (typeof v === "number" && Number.isFinite(v)) ||
         (typeof v === "string" && v.length <= MAX_PARAM_STRING)),
   );
-  return Object.fromEntries([["name", e.name], ...params]) as ActiveIndicator;
+  const style = sanitizeStyle(e.style);
+  return Object.fromEntries([
+    ["name", e.name],
+    ...params,
+    ...(style ? [["style", style]] : []),
+  ]) as ActiveIndicator;
 }
 
 /** Validate a stored/imported state; null if a required field is malformed. */
@@ -208,10 +216,22 @@ export function parseLayouts(
 /** Param defaults per indicator name (and alias), as the registry reports them. */
 export type ParamDefaults = Record<string, Record<string, unknown>>;
 
+/** A plot style with plots and fields in sorted order, so equal styles compare equal. */
+function canonicalStyle(style: ReturnType<typeof indicatorStyle>): unknown {
+  const plots = Object.entries(style?.plots ?? {})
+    .sort(([a], [b]) => (a < b ? -1 : 1))
+    .map(([k, v]) => [
+      k,
+      Object.fromEntries(Object.entries(v).sort(([a], [b]) => (a < b ? -1 : 1))),
+    ]);
+  return plots.length > 0 ? Object.fromEntries(plots) : undefined;
+}
+
 /**
  * Entries in a form that ignores how a value was entered: params equal to
  * the schema default are dropped (the settings dialog does the same), keys
- * are sorted. The hidden flag is kept, so hiding an indicator is a change.
+ * are sorted. The hidden flag and the plot style are kept, so hiding an
+ * indicator or restyling a plot is a change, as in TradingView.
  */
 export function normalizeIndicators(
   entries: readonly ActiveIndicator[],
@@ -223,9 +243,11 @@ export function normalizeIndicators(
       .filter(([k, v]) => defaults[name]?.[k] !== v)
       .sort(([a], [b]) => (a < b ? -1 : 1));
     const hidden = isHidden(e) ? [["hidden", true]] : [];
-    return params.length + hidden.length === 0
+    const style = canonicalStyle(indicatorStyle(e));
+    const extra = [...hidden, ...(style ? [["style", style]] : [])];
+    return params.length + extra.length === 0
       ? name
-      : Object.fromEntries([["name", name], ...params, ...hidden]);
+      : Object.fromEntries([["name", name], ...params, ...extra]);
   });
 }
 
