@@ -405,6 +405,8 @@ const TV_STYLES = {
 const CANDLE_PANE_ID = "candle_pane";
 
 interface HeaderState {
+  /** Series key (indicator request name); absent for the price pane. */
+  key?: string;
   name: string;
   params?: string;
   lines: PaneHeaderLine[];
@@ -444,6 +446,10 @@ export interface ChartProps {
   activeIndicators: ActiveIndicator[];
   /** Price rendering style chosen in the toolbar. */
   chartType: ChartType;
+  /** Legend controls, keyed by indicator name (series key). */
+  onToggleHidden?: (name: string) => void;
+  onSettings?: (name: string) => void;
+  onRemove?: (name: string) => void;
 }
 
 export function Chart(props: ChartProps): JSX.Element {
@@ -595,11 +601,11 @@ export function Chart(props: ChartProps): JSX.Element {
         // 20px per row below the 4px price-header row — keeps overlays
         // readable without a DOM-measured layout pass.
         const top = 4 + 20 * overlayRow;
-        next.push({ name: displayName, params, lines: headerLines, top });
+        next.push({ key: name, name: displayName, params, lines: headerLines, top });
       } else {
         const size = c.getSize(paneMap[name]!);
         const top = size ? size.top + 4 : 0;
-        next.push({ name: displayName, params, lines: headerLines, top });
+        next.push({ key: name, name: displayName, params, lines: headerLines, top });
       }
     }
 
@@ -661,6 +667,8 @@ export function Chart(props: ChartProps): JSX.Element {
     c.applyNewData(klines);
 
     // 3. Pane lifecycle. Create for new indicators, remove for dropped.
+    // untrack: this effect writes paneIds below, so reading it tracked
+    // would re-run the effect forever (stack overflow).
     const currentPanes = untrack(paneIds);
     const nextPanes: Record<string, string> = {};
     const activeNames = new Set<string>();
@@ -709,6 +717,21 @@ export function Chart(props: ChartProps): JSX.Element {
             params={h.params}
             lines={h.lines}
             top={h.top}
+            onToggleHidden={
+              h.key !== undefined && props.onToggleHidden
+                ? () => props.onToggleHidden!(h.key!)
+                : undefined
+            }
+            onSettings={
+              h.key !== undefined && props.onSettings
+                ? () => props.onSettings!(h.key!)
+                : undefined
+            }
+            onRemove={
+              h.key !== undefined && props.onRemove
+                ? () => props.onRemove!(h.key!)
+                : undefined
+            }
           />
         )}
       </For>

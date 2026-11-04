@@ -22,6 +22,7 @@ import {
   indicatorName,
   type ActiveIndicator,
 } from "../stores/indicators";
+import { defaultParams } from "../lib/paramForm";
 import type {
   IndicatorInfoSchema,
   ListIndicatorsPayload,
@@ -57,28 +58,12 @@ function categoryLabel(category: string): string {
   return CATEGORY_LABEL[category] ?? category;
 }
 
-/**
- * Build the default-parameter entry for an indicator. If the registry
- * publishes `configurable_params` as an object, merge its defaults into
- * `{ name, ... }`. Otherwise fall back to the bare name.
- */
+/** Build the entry for an indicator with its schema defaults applied. */
 function toActiveEntry(info: IndicatorInfo): ActiveIndicator {
-  const params = info.configurable_params;
-  if (params && typeof params === "object" && !Array.isArray(params)) {
-    const defaults: Record<string, unknown> = {};
-    // Expect `{ param: { default: value, ... } }` — the registry's shape
-    // varies, so we defensively accept either a nested `default` or a
-    // bare value.
-    for (const [k, v] of Object.entries(params as Record<string, unknown>)) {
-      if (v && typeof v === "object" && "default" in (v as object)) {
-        defaults[k] = (v as { default: unknown }).default;
-      }
-    }
-    if (Object.keys(defaults).length > 0) {
-      return { name: info.name, ...defaults };
-    }
-  }
-  return info.name;
+  const params = defaultParams(info.configurable_params);
+  return Object.keys(params).length > 0
+    ? { name: info.name, ...params }
+    : info.name;
 }
 
 function matches(info: IndicatorInfo, query: string): boolean {

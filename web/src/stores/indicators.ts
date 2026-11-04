@@ -4,6 +4,11 @@
 // either a bare indicator name (string) or an object `{ name, ...params }`.
 // On first load the set is seeded with the v0.1 default so the chart looks
 // the same before the user touches the picker.
+//
+// Client-only state: an entry may also carry `hidden: true` (ADR-0013). It is
+// persisted with the entry but never sent to the server — `toWire` drops
+// hidden entries and strips the field from the rest. Entries are unique by
+// name because the server keys its response by indicator name.
 
 import { createSignal } from "solid-js";
 
@@ -62,6 +67,62 @@ function isActiveIndicator(x: unknown): x is ActiveIndicator {
   return false;
 }
 
+/** True when the entry is hidden on the client (never sent to the server). */
+export function isHidden(entry: ActiveIndicator): boolean {
+  return typeof entry !== "string" && entry.hidden === true;
+}
+
+/** Parameters of an entry, without `name` and the client-only `hidden`. */
+export function indicatorParams(entry: ActiveIndicator): Record<string, unknown> {
+  if (typeof entry === "string") return {};
+  const { name: _name, hidden: _hidden, ...params } = entry;
+  return params;
+}
+
+/** Build an entry from a name and params; a param-less entry stays a bare name. */
+function makeEntry(
+  name: string,
+  params: Record<string, unknown>,
+  hidden: boolean,
+): ActiveIndicator {
+  const hasParams = Object.keys(params).length > 0;
+  if (!hasParams && !hidden) return name;
+  return hidden ? { name, ...params, hidden: true } : { name, ...params };
+}
+
+/** Replace the parameters of the entry at `index`, keeping name and visibility. */
+export function withParams(
+  entries: ActiveIndicator[],
+  index: number,
+  params: Record<string, unknown>,
+): ActiveIndicator[] {
+  const entry = entries[index];
+  if (entry === undefined) return entries;
+  return entries.map((e, i) =>
+    i === index ? makeEntry(indicatorName(e), params, isHidden(e)) : e,
+  );
+}
+
+/** Set the hidden flag of the entry at `index`. */
+export function withHidden(
+  entries: ActiveIndicator[],
+  index: number,
+  hidden: boolean,
+): ActiveIndicator[] {
+  const entry = entries[index];
+  if (entry === undefined) return entries;
+  return entries.map((e, i) =>
+    i === index ? makeEntry(indicatorName(e), indicatorParams(e), hidden) : e,
+  );
+}
+
+/** Request payload for `generate_chart`: visible entries, client-only fields stripped. */
+export function toWire(entries: ActiveIndicator[]): ActiveIndicator[] {
+  return entries
+    .filter((e) => !isHidden(e))
+    .map((e) => makeEntry(indicatorName(e), indicatorParams(e), false));
+}
+
 /** Extract the indicator name from an entry regardless of its form. */
 export function indicatorName(entry: ActiveIndicator): string {
   return typeof entry === "string" ? entry : entry.name;
@@ -84,6 +145,22 @@ export function addIndicator(entry: ActiveIndicator): void {
   const name = indicatorName(entry);
   if (current.some((e) => indicatorName(e) === name)) return;
   setActiveIndicators([...current, entry]);
+}
+
+/** Replace the parameters of the entry at `index`. */
+export function updateIndicatorParams(
+  index: number,
+  params: Record<string, unknown>,
+): void {
+  setActiveIndicators(withParams(activeIndicators(), index, params));
+}
+
+/** Toggle the client-side visibility of the entry at `index`. */
+export function toggleIndicatorHidden(index: number): void {
+  const entries = activeIndicators();
+  const entry = entries[index];
+  if (entry === undefined) return;
+  setActiveIndicators(withHidden(entries, index, !isHidden(entry)));
 }
 
 /** Remove every entry whose name matches. */

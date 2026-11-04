@@ -10,10 +10,14 @@
 // app (Inter + tabular-nums). Native tooltip is kept for crosshair
 // hover; this header is the resting-state "current value" row.
 //
+// Indicator rows can also carry hover controls (hide, settings, remove) and
+// open settings on double-click, like TradingView. Rows without callbacks
+// (the price pane) stay non-interactive.
+//
 // Inputs are plain data derived from SeriesPayload — no klinecharts
 // imports here, which keeps this component cheap to re-render.
 
-import { For, type JSX } from "solid-js";
+import { For, Show, type JSX } from "solid-js";
 
 export interface PaneHeaderLine {
   /** Series label, e.g. "Money Flow" or "RSI". */
@@ -33,6 +37,52 @@ export interface PaneHeaderProps {
   lines: PaneHeaderLine[];
   /** Distance from the top of the chart host in pixels. */
   top: number;
+  /** Hide the indicator (client-side only). Omit for rows that cannot be hidden. */
+  onToggleHidden?: () => void;
+  /** Open the indicator's settings dialog. */
+  onSettings?: () => void;
+  /** Remove the indicator. Omit for the price pane. */
+  onRemove?: () => void;
+}
+
+function Icon(props: { children: JSX.Element }): JSX.Element {
+  return (
+    <svg
+      aria-hidden="true"
+      viewBox="0 0 16 16"
+      width="14"
+      height="14"
+      fill="none"
+      stroke="currentColor"
+      stroke-width="1.5"
+      stroke-linecap="round"
+      stroke-linejoin="round"
+    >
+      {props.children}
+    </svg>
+  );
+}
+
+function ControlButton(props: {
+  label: string;
+  onClick: () => void;
+  children: JSX.Element;
+}): JSX.Element {
+  return (
+    <button
+      type="button"
+      class="pane-header-btn"
+      aria-label={props.label}
+      title={props.label}
+      onClick={(e) => {
+        e.stopPropagation();
+        props.onClick();
+      }}
+      onDblClick={(e) => e.stopPropagation()}
+    >
+      <Icon>{props.children}</Icon>
+    </button>
+  );
 }
 
 function formatValue(v: number | null): string {
@@ -47,7 +97,12 @@ function formatValue(v: number | null): string {
 
 export function PaneHeader(props: PaneHeaderProps): JSX.Element {
   return (
-    <div class="pane-header" style={{ top: `${props.top}px` }}>
+    <div
+      class="pane-header"
+      classList={{ "pane-header-interactive": !!props.onSettings }}
+      style={{ top: `${props.top}px` }}
+      onDblClick={() => props.onSettings?.()}
+    >
       <span class="pane-header-label">{props.name}</span>
       {props.params ? (
         <span class="pane-header-params">{props.params}</span>
@@ -59,6 +114,33 @@ export function PaneHeader(props: PaneHeaderProps): JSX.Element {
           </span>
         )}
       </For>
+      <Show when={props.onToggleHidden || props.onSettings || props.onRemove}>
+        <span class="pane-header-controls">
+          <Show when={props.onToggleHidden}>
+            {(cb) => (
+              <ControlButton label={`Hide ${props.name}`} onClick={cb()}>
+                <path d="M1 8 C3 4.5 5.5 3 8 3 S13 4.5 15 8 C13 11.5 10.5 13 8 13 S3 11.5 1 8 Z" />
+                <circle cx="8" cy="8" r="2" />
+              </ControlButton>
+            )}
+          </Show>
+          <Show when={props.onSettings}>
+            {(cb) => (
+              <ControlButton label={`Settings for ${props.name}`} onClick={cb()}>
+                <circle cx="8" cy="8" r="2" />
+                <path d="M8 1.5 V3.5 M8 12.5 V14.5 M1.5 8 H3.5 M12.5 8 H14.5 M3.4 3.4 L4.8 4.8 M11.2 11.2 L12.6 12.6 M3.4 12.6 L4.8 11.2 M11.2 4.8 L12.6 3.4" />
+              </ControlButton>
+            )}
+          </Show>
+          <Show when={props.onRemove}>
+            {(cb) => (
+              <ControlButton label={`Remove ${props.name}`} onClick={cb()}>
+                <path d="M3.5 3.5 L12.5 12.5 M12.5 3.5 L3.5 12.5" />
+              </ControlButton>
+            )}
+          </Show>
+        </span>
+      </Show>
     </div>
   );
 }

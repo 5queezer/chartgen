@@ -199,13 +199,26 @@ export type SummaryPayload = z.infer<typeof SummaryPayloadSchema>;
 // list_indicators — `tool_list_indicators` return shape.
 // ---------------------------------------------------------------------------
 
+// One entry of `configurable_params` (`Indicator::params` in src/indicators/).
+// `type` is "integer" | "number" | "boolean" | "string"; `default` may be null
+// for optional params. Kept lenient so an unknown type never fails the parse.
+export const ParamSpecSchema = z.object({
+  name: z.string(),
+  type: z.string(),
+  default: z.unknown().optional(),
+  description: z.string().optional(),
+  min: z.number().optional(),
+  max: z.number().optional(),
+});
+export type ParamSpec = z.infer<typeof ParamSpecSchema>;
+
 export const IndicatorInfoSchema = z.object({
   name: z.string(),
   description: z.string(),
   type: z.string(), // category: "overlay" | "panel" | "external"
   overlay: z.boolean(),
   aliases: z.array(z.string()).optional(),
-  configurable_params: z.unknown().optional(), // registry-defined shape
+  configurable_params: z.array(ParamSpecSchema).optional(),
 });
 
 export const ListIndicatorsPayloadSchema = z.object({
