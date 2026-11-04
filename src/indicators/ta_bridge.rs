@@ -157,6 +157,7 @@ impl Indicator for BollingerBandsInd {
                 y1: upper,
                 y2: lower,
                 color: rgba(0x2196F3, 0.1),
+                color_below: None,
             }],
             is_overlay: true,
             label: "BB".into(),
@@ -246,6 +247,7 @@ impl Indicator for KeltnerChannels {
                 y1: upper,
                 y2: lower,
                 color: rgba(0x2196F3, 0.1),
+                color_below: None,
             }],
             is_overlay: true,
             label: "KC".into(),
@@ -619,6 +621,7 @@ impl Indicator for Stochastic {
                 y1: k_vals,
                 y2: d_vals,
                 color: rgba(0x2196F3, 0.1),
+                color_below: None,
             }],
             hlines: vec![
                 HLine {
@@ -785,6 +788,7 @@ impl Indicator for Donchian {
                 y1: upper,
                 y2: lower,
                 color: rgba(0x2196F3, 0.1),
+                color_below: None,
             }],
             is_overlay: true,
             label: "DC".into(),

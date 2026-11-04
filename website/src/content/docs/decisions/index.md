@@ -39,4 +39,5 @@ one and link both ways.
 | [0008](/chartgen/decisions/0008-e2e-playwright/) | End-to-end tests with Playwright + CI integration | Accepted | 2026-11-04 |
 | [0009](/chartgen/decisions/0009-live-tail-polling-and-history-paging/) | Live tail polling and history paging | Accepted | 2026-11-04 |
 | [0010](/chartgen/decisions/0010-overlay-geometry-rendering/) | Overlay geometry rendering via klinecharts indicator draw callbacks | Accepted | 2026-11-04 |
+| [0012](/chartgen/decisions/0012-geometry-colors-on-the-wire/) | Geometry colors on the wire | Accepted | 2026-11-04 |
 | [0013](/chartgen/decisions/0013-indicator-visibility-and-instances/) | Indicator visibility, parameter editing and one instance per indicator | Accepted | 2026-11-04 |

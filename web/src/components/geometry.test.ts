@@ -1,16 +1,21 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  DIVLINE_COLORS,
   divergenceKind,
   divlineSegments,
+  fillColors,
   fillPolygons,
   fillTheme,
+  hbarColors,
   hbarRects,
   hbarTheme,
   hbarTiers,
+  hlineStrokes,
   payloadToDataIndex,
   toDataSpace,
   valueExtents,
+  wireColor,
   type Mapper,
   type SeriesDivLine,
   type SeriesHBar,
@@ -243,6 +248,7 @@ describe("divlineSegments", () => {
       to: { x: 200, y: 60 },
       dashed: true,
       kind: "bear",
+      color: DIVLINE_COLORS.bear,
     });
   });
 
@@ -351,7 +357,7 @@ describe("toDataSpace", () => {
   it("passes hbars and metadata through, keeps absent channels absent", () => {
     const hbars = [hbar({})];
     const out = toDataSpace(indicator({ hbars, y_range: [0, 1] }), remap);
-    expect(out.hbars).toBe(hbars);
+    expect(out.hbars).toEqual([expect.objectContaining(hbars[0]!)]);
     expect(out.y_range).toEqual([0, 1]);
     expect(out.fills).toBeUndefined();
     expect(out.divlines).toBeUndefined();
@@ -401,5 +407,110 @@ describe("valueExtents", () => {
     expect(valueExtents(indicator({ y_range: [null, 5] }), 1)).toEqual([
       { lo: null, hi: 5 },
     ]);
+  });
+});
+
+describe("wireColor", () => {
+  it("accepts the server's rgba/rgb strings and rejects anything else", () => {
+    expect(wireColor("rgba(10,20,30,0.25)")).toBe("rgba(10,20,30,0.25)");
+    expect(wireColor("rgba(255,0,0,1)")).toBe("rgba(255,0,0,1)");
+    expect(wireColor("rgb(1, 2, 3)")).toBe("rgb(1, 2, 3)");
+    expect(wireColor("red")).toBeUndefined();
+    expect(wireColor("rgba(1,2)")).toBeUndefined();
+    expect(wireColor("")).toBeUndefined();
+    expect(wireColor(undefined)).toBeUndefined();
+  });
+});
+
+describe("wire colors vs theme fallback", () => {
+  const fill = { y1: [1], y2: [0] };
+
+  it("fillColors prefers the wire color, else the per-index theme", () => {
+    expect(
+      fillColors({ ...fill, color: "rgba(1,2,3,0.5)" }, "cipher_b", 1),
+    ).toEqual({ up: "rgba(1,2,3,0.5)", down: "rgba(1,2,3,0.5)" });
+    expect(fillColors(fill, "cipher_b", 1)).toEqual(fillTheme("cipher_b", 1));
+    expect(fillColors({ ...fill, color: "bogus" }, "cipher_b", 1)).toEqual(
+      fillTheme("cipher_b", 1),
+    );
+  });
+
+  it("fillColors uses color_below for the y1 < y2 orientation", () => {
+    const f = { ...fill, color: "rgba(1,2,3,0.2)", color_below: "rgba(4,5,6,0.2)" };
+    expect(fillColors(f, "ichimoku", 0)).toEqual({
+      up: "rgba(1,2,3,0.2)",
+      down: "rgba(4,5,6,0.2)",
+    });
+    expect(fillColors({ ...f, color_below: "nope" }, "ichimoku", 0).down).toBe(
+      "rgba(1,2,3,0.2)",
+    );
+  });
+
+  it("toDataSpace keeps color_below", () => {
+    const kept = toDataSpace(
+      indicator({
+        fills: [{ ...fill, color: "rgba(1,2,3,0.5)", color_below: "rgba(4,5,6,0.5)" }],
+      }),
+      [0],
+    );
+    expect(kept.fills![0]!.color_below).toBe("rgba(4,5,6,0.5)");
+  });
+
+  it("toDataSpace keeps the fill color", () => {
+    const out = toDataSpace(
+      indicator({ fills: [{ ...fill, color: "rgba(1,2,3,0.5)" }] }),
+      [0],
+    );
+    expect(out.fills![0]!.color).toBe("rgba(1,2,3,0.5)");
+  });
+
+  it("hbarColors uses wire colors, else POC/value-area tiers", () => {
+    const bars = [
+      { y: 10, height: 1, width: 0.5, offset: 0, left: true, color: "rgba(9,9,9,1)" },
+      { y: 20, height: 1, width: 0.2, offset: 0, left: true },
+    ];
+    const out = hbarColors(bars, [], "vpvr");
+    expect(out[0]).toBe("rgba(9,9,9,1)");
+    expect(out[1]).toBe(hbarTheme("vpvr").out);
+  });
+
+  it("divlineSegments colors by wire, else by slope", () => {
+    const d = { x1: 0, t1: null, y1: 1, x2: 5, t2: null, y2: 9, dashed: true };
+    const wired = divlineSegments([{ ...d, color: "rgba(1,2,3,1)" }], all, map, false);
+    expect(wired[0]!.color).toBe("rgba(1,2,3,1)");
+    expect(divlineSegments([d], all, map, false)[0]!.color).toBe(
+      DIVLINE_COLORS.bull,
+    );
+  });
+
+  it("hlineStrokes maps levels, clips to the pane and falls back to gray", () => {
+    const out = hlineStrokes(
+      [{ y: 30, color: "rgba(1,2,3,0.3)" }, { y: 70 }, { y: 500 }],
+      100,
+      (v) => 100 - v,
+    );
+    expect(out).toEqual([
+      { y: 70, color: "rgba(1,2,3,0.3)" },
+      { y: 30, color: "rgba(120, 123, 134, 0.80)" },
+    ]);
+  });
+
+  it("valueExtents ignores hline levels, as the PNG auto-range does", () => {
+    const hlines = [{ y: 0 }, { y: 70 }];
+    expect(valueExtents(indicator({ hlines }), 1)).toEqual([{ lo: null, hi: null }]);
+    expect(valueExtents(indicator({ hlines, y_range: [0, 100] }), 1)).toEqual([
+      { lo: 0, hi: 100 },
+    ]);
+  });
+
+  it("toDataSpace resolves hbar colors once (wire color, else tier)", () => {
+    const hb = { y: 1, height: 1, width: 0.5, offset: 0, left: true };
+    const out = toDataSpace(
+      indicator({ hbars: [{ ...hb, color: "rgba(9,9,9,1)" }, { ...hb, width: 0.1 }] }),
+      [],
+      "vpvr",
+    );
+    expect(out.hbars![0]!.color).toBe("rgba(9,9,9,1)");
+    expect(out.hbars![1]!.color).toBe(hbarTheme("vpvr").out);
   });
 });

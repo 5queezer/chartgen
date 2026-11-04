@@ -168,7 +168,10 @@ Series payload shape (for `format=series`):
       "signals": [
         { "x": 3, "t": 1713430800, "y": 72.1, "label": "rsi_overbought" }
       ],
-      "hlines": [{ "y": 30.0 }, { "y": 70.0 }]
+      "hlines": [
+        { "y": 30.0, "color": "rgba(62,225,69,0.3)" },
+        { "y": 70.0, "color": "rgba(225,62,62,0.3)" }
+      ]
     },
     "bbands": {
       "label": "BB",
@@ -179,21 +182,21 @@ Series payload shape (for `format=series`):
         { "index": 2, "label": "lower", "values": [null, null, 66702.1, 66814.5] }
       ],
       "fills": [
-        { "y1": [null, null, 67300.1, 67410.9], "y2": [null, null, 66802.4, 66915.3] }
+        { "y1": [null, null, 67300.1, 67410.9], "y2": [null, null, 66802.4, 66915.3], "color": "rgba(33,150,243,0.1)" }
       ]
     },
     "vpvr": {
       "label": "VPVR",
       "is_overlay": true,
       "hbars": [
-        { "y": 67432.5, "height": 12.1, "width": 0.82, "offset": 0.0, "left": true }
+        { "y": 67432.5, "height": 12.1, "width": 0.82, "offset": 0.0, "left": true, "color": "rgba(41,98,255,0.4)" }
       ]
     },
     "cipher_b": {
       "label": "Cipher B",
       "is_overlay": false,
       "divlines": [
-        { "x1": 12, "t1": 1713427200, "y1": 30.2, "x2": 48, "t2": 1713556800, "y2": 18.7, "dashed": true }
+        { "x1": 12, "t1": 1713427200, "y1": 30.2, "x2": 48, "t2": 1713556800, "y2": 18.7, "dashed": true, "color": "rgba(255,0,0,0.8)" }
       ]
     }
   },
@@ -224,6 +227,15 @@ Three additional channels round out the payload so the full set of
   (WaveTrend/RSI divergences in Cipher B, for example). Each endpoint
   carries both `x` (bar index) and `t` (unix seconds, or `null` for
   synthetic sample data), mirroring the signal shape, plus `dashed`.
+
+Every item of `fills`, `hbars`, `divlines` and `hlines` also carries a
+`color`: a CSS `"rgba(r,g,b,a)"` string with the color the PNG renderer
+uses, so clients can match the PNG exactly
+([ADR-0012](/chartgen/decisions/0012-geometry-colors-on-the-wire/)).
+A fill may also carry `color_below`, used where `y1 < y2` (`color`
+applies where `y1 >= y2`); it is omitted when the fill has one color.
+`lines` and `histogram` carry no color. Older servers omit `color`;
+clients should fall back to their own theme.
 
 All three channels are omitted from the per-indicator object when the
 indicator emits none — matching the existing convention for `lines`,

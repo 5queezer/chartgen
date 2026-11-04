@@ -20,6 +20,19 @@ pub struct Fill {
     pub y1: Vec<f64>,
     pub y2: Vec<f64>,
     pub color: RGBAColor,
+    /// Optional color used where `y1 < y2` (e.g. a red Ichimoku cloud);
+    /// `color` then applies where `y1 >= y2`. `None` uses `color` everywhere.
+    pub color_below: Option<RGBAColor>,
+}
+
+impl Fill {
+    /// Color for a bar with edges `y1`/`y2`.
+    pub fn color_for(&self, y1: f64, y2: f64) -> RGBAColor {
+        match self.color_below {
+            Some(below) if y1 < y2 => below,
+            _ => self.color,
+        }
+    }
 }
 
 /// Histogram bars.
@@ -210,4 +223,29 @@ pub fn stoch(src: &[f64], high: &[f64], low: &[f64], period: usize) -> Vec<f64> 
         };
     }
     out
+}
+
+#[cfg(test)]
+mod fill_tests {
+    use super::*;
+
+    #[test]
+    fn fill_color_for_uses_below_color_only_where_y1_lt_y2() {
+        let up = RGBAColor(0, 255, 0, 0.2);
+        let down = RGBAColor(255, 0, 0, 0.2);
+        let f = Fill {
+            y1: vec![],
+            y2: vec![],
+            color: up,
+            color_below: Some(down),
+        };
+        assert_eq!(f.color_for(2.0, 1.0), up);
+        assert_eq!(f.color_for(1.0, 1.0), up);
+        assert_eq!(f.color_for(1.0, 2.0), down);
+        let single = Fill {
+            color_below: None,
+            ..f
+        };
+        assert_eq!(single.color_for(1.0, 2.0), up);
+    }
 }

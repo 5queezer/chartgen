@@ -136,11 +136,13 @@ impl Indicator for WaveTrend {
                     y1: wt1,
                     y2: wt2,
                     color: rgba(0x4994ec, 0.25),
+                    color_below: None,
                 },
                 Fill {
                     y1: vwap,
                     y2: vec![0.0; n],
                     color: rgba(0xffffff, 0.15),
+                    color_below: None,
                 },
             ],
             dots,
