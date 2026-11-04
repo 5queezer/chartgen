@@ -17,6 +17,7 @@ import { DrawingToolbar } from "./components/DrawingToolbar";
 import { IndicatorChips } from "./components/IndicatorChips";
 import { IndicatorPicker } from "./components/IndicatorPicker";
 import { IndicatorSettings } from "./components/IndicatorSettings";
+import { LayoutMenu } from "./components/LayoutMenu";
 import { mergeParams } from "./lib/paramForm";
 import { StatusLine, type Status } from "./components/StatusLine";
 import { Toolbar } from "./components/Toolbar";
@@ -174,6 +175,9 @@ export function App(): JSX.Element {
           status={status()}
           onRetry={() => void query.refetch()}
         />
+        <div class="ml-auto">
+          <LayoutMenu />
+        </div>
       </header>
       <IndicatorChips
         entries={activeIndicators()}

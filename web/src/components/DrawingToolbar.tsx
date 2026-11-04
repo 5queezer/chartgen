@@ -22,7 +22,9 @@ import {
   type OverlayEvent,
 } from "klinecharts";
 
+import { isTypingContext } from "../lib/keys";
 import {
+  drawingsReload,
   loadDrawings,
   MAX_DRAWINGS,
   saveDrawings,
@@ -256,18 +258,6 @@ const btnClass =
   "relative w-9 h-9 inline-flex items-center justify-center rounded-md cursor-pointer text-[color:var(--color-fg-muted)] hover:bg-[color:var(--color-border)] hover:text-[color:var(--color-fg)] aria-pressed:bg-[color:var(--color-border)] aria-pressed:text-[color:var(--color-accent)]";
 const menuItemClass =
   "w-full text-left px-3 py-1.5 text-sm cursor-pointer hover:bg-[color:var(--color-border)] outline-none focus:bg-[color:var(--color-border)]";
-
-/** True when a keystroke belongs to a field, dialog or menu, not to the chart. */
-function isTypingContext(e: KeyboardEvent): boolean {
-  const t = e.target;
-  if (
-    t instanceof HTMLElement &&
-    (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName))
-  ) {
-    return true;
-  }
-  return document.querySelector("[role=dialog], [role=menu]") !== null;
-}
 
 const LIMIT_NOTICE = `Drawing limit reached (${MAX_DRAWINGS})`;
 const SAVE_ERROR = "Drawings not saved: storage full";
@@ -589,7 +579,7 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
   // changes. History is reset only after the rebuild.
   createEffect(
     on(
-      () => [props.chart, props.symbol] as const,
+      () => [props.chart, props.symbol, drawingsReload()] as const,
       ([chart, symbol]) => {
         if (!chart) return;
         rebuild(loadDrawings(symbol));

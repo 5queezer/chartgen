@@ -5,6 +5,8 @@
 // the chart pages bars in and out, so an index is meaningless across
 // loads, while a timestamp maps onto any timeframe.
 
+import { createSignal } from "solid-js";
+
 export const DRAWING_NAMES = [
   "segment",
   "rayLine",
@@ -45,6 +47,17 @@ const MAX_TEXT = 200;
 export const MAX_BYTES = 200_000;
 /** Symbols kept in storage; the least recently used are evicted. */
 export const MAX_SYMBOLS = 100;
+
+const [drawingsRevision, setDrawingsRevision] = createSignal(0);
+const [drawingsReload, setDrawingsReload] = createSignal(0);
+
+/** Bumps whenever stored drawings change; lets other stores track them reactively. */
+export { drawingsRevision, drawingsReload };
+
+/** Ask the drawing controller to re-read the stored drawings (e.g. after a layout switch). */
+export function requestDrawingsReload(): void {
+  setDrawingsReload((n) => n + 1);
+}
 
 export function storageKey(symbol: string): string {
   return PREFIX + symbol;
@@ -288,6 +301,7 @@ export function saveDrawings(
     if (records.length === 0) {
       localStorage.removeItem(storageKey(symbol));
       touch(symbol, false);
+      setDrawingsRevision((n) => n + 1);
       return true;
     }
     const json = JSON.stringify(records);
@@ -297,6 +311,7 @@ export function saveDrawings(
     }
     localStorage.setItem(storageKey(symbol), json);
     touch(symbol, true);
+    setDrawingsRevision((n) => n + 1);
     return true;
   } catch (err) {
     console.warn("failed to save drawings", err);

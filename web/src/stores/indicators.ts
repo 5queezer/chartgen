@@ -65,7 +65,7 @@ function persist(value: ActiveIndicator[]): void {
   }
 }
 
-function isActiveIndicator(x: unknown): x is ActiveIndicator {
+export function isActiveIndicator(x: unknown): x is ActiveIndicator {
   if (typeof x === "string") return x.length > 0;
   if (x && typeof x === "object" && !Array.isArray(x)) {
     const name = (x as { name?: unknown }).name;
