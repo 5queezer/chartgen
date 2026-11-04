@@ -46,7 +46,7 @@ impl Indicator for Rsi {
     }
 
     fn params(&self) -> Value {
-        json!([{"name": "length", "type": "integer", "default": 14, "description": "RSI period"}])
+        json!([{"name": "length", "type": "integer", "min": 1, "max": 10000, "default": 14, "description": "RSI period"}])
     }
 
     fn configure(&mut self, params: &Value) {

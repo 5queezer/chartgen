@@ -435,8 +435,8 @@ impl Indicator for CipherB {
     fn params(&self) -> Value {
         json!([
             {"name": "dot_mode", "type": "string", "default": "strict", "description": "classic (WT cross only) or strict (with RSI+StochRSI filter)"},
-            {"name": "wt_channel_length", "type": "integer", "default": 9},
-            {"name": "wt_average_length", "type": "integer", "default": 12},
+            {"name": "wt_channel_length", "type": "integer", "min": 1, "max": 10000, "default": 9},
+            {"name": "wt_average_length", "type": "integer", "min": 1, "max": 10000, "default": 12},
             {"name": "wt_oversold", "type": "number", "default": -53},
             {"name": "wt_overbought", "type": "number", "default": 53},
             {"name": "show_divergences", "type": "boolean", "default": true, "description": "render divergence lines on wave trend"}

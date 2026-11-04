@@ -148,12 +148,20 @@ fn handle_tools_call(
 }
 
 /// Parse panels array: each element can be a string ("rsi") or an object ({"name": "rsi", "length": 21}).
-/// Returns (indicators, request-keys-in-order, unknown-names).
-fn parse_panels(panels_value: &Value) -> (Vec<Box<dyn Indicator>>, Vec<String>, Vec<String>) {
+/// Returns (indicators, request-keys-in-order, unknown-names, invalid-parameter messages).
+type ParsedPanels = (
+    Vec<Box<dyn Indicator>>,
+    Vec<String>,
+    Vec<String>,
+    Vec<String>,
+);
+
+fn parse_panels(panels_value: &Value) -> ParsedPanels {
     let arr = match panels_value.as_array() {
         Some(a) => a,
-        None => return (vec![], vec![], vec![]),
+        None => return (vec![], vec![], vec![], vec![]),
     };
+    let mut invalid = Vec::new();
 
     let mut result: Vec<Box<dyn Indicator>> = Vec::new();
     let mut keys: Vec<String> = Vec::new();
@@ -176,16 +184,17 @@ fn parse_panels(panels_value: &Value) -> (Vec<Box<dyn Indicator>>, Vec<String>, 
                 None => continue,
             };
             match indicators::by_name_configured(name, &Value::Object(obj.clone())) {
-                Some(ind) => {
+                Ok(Some(ind)) => {
                     result.push(ind);
                     keys.push(name.to_string());
                 }
-                None => errors.push(name.to_string()),
+                Ok(None) => errors.push(name.to_string()),
+                Err(msg) => invalid.push(msg),
             }
         }
     }
 
-    (result, keys, errors)
+    (result, keys, errors, invalid)
 }
 
 fn tool_generate_chart(id: Option<Value>, args: &Value) -> Value {
@@ -231,7 +240,11 @@ fn tool_generate_chart(id: Option<Value>, args: &Value) -> Value {
         );
     }
 
-    let (panel_indicators, indicator_keys, unknown) = parse_panels(&panels_value);
+    let (panel_indicators, indicator_keys, unknown, invalid) = parse_panels(&panels_value);
+
+    if !invalid.is_empty() {
+        return tool_err(id, &invalid.join("; "));
+    }
 
     if !unknown.is_empty() {
         return tool_err(
@@ -2191,5 +2204,28 @@ mod tests {
             actual, EXPECTED,
             "summary output must remain byte-identical"
         );
+    }
+
+    #[test]
+    fn generate_chart_invalid_param_returns_tool_error() {
+        for (ind, msg) in [
+            (
+                json!({"name": "rsi", "length": 0}),
+                "Invalid parameter for rsi: length must be >= 1",
+            ),
+            (
+                json!({"name": "macd", "fast": 0}),
+                "Invalid parameter for macd: fast must be >= 1",
+            ),
+            (
+                json!({"name": "rsi", "length": -3}),
+                "Invalid parameter for rsi: length must be >= 1",
+            ),
+        ] {
+            let args = json!({"indicators": [ind], "bars": 50, "format": "summary"});
+            let resp = tool_generate_chart(Some(json!(1)), &args);
+            assert_eq!(resp["result"]["isError"], true);
+            assert_eq!(resp["result"]["content"][0]["text"], msg);
+        }
     }
 }

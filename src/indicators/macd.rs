@@ -31,9 +31,9 @@ impl Indicator for Macd {
 
     fn params(&self) -> Value {
         json!([
-            {"name": "fast", "type": "integer", "default": 12},
-            {"name": "slow", "type": "integer", "default": 26},
-            {"name": "signal", "type": "integer", "default": 9}
+            {"name": "fast", "type": "integer", "min": 1, "max": 10000, "default": 12},
+            {"name": "slow", "type": "integer", "min": 1, "max": 10000, "default": 26},
+            {"name": "signal", "type": "integer", "min": 1, "max": 10000, "default": 9}
         ])
     }
 
