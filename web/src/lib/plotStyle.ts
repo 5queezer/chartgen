@@ -3,11 +3,22 @@
 // line style / visibility of each plotted line and histogram, and to the
 // klinecharts figure style that draws it.
 
-import { plotKey, type IndicatorStyle, type PlotLineStyle } from "../stores/indicators";
+import {
+  labelKey,
+  plotKey,
+  type IndicatorStyle,
+  type PlotLineStyle,
+  type PlotStyle,
+} from "../stores/indicators";
 
 export interface PlotInfo {
-  /** `plotKey` of the plot: `line0`, `hist1`, ... */
+  /**
+   * Store key of the plot: `l:<label>` for a line whose label is unique in
+   * the indicator, else the index key `line0`, `hist1`, ...
+   */
   key: string;
+  /** True when `key` is an index key, which is only valid for `label`. */
+  indexKeyed: boolean;
   kind: "line" | "hist";
   /** Index within its kind. */
   index: number;
@@ -41,16 +52,25 @@ export function plotsOf(
   colorAt: (n: number) => string,
 ): PlotInfo[] {
   const lines = ind.lines ?? [];
-  const plots: PlotInfo[] = lines.map((line, i) => ({
-    key: plotKey("line", i),
-    kind: "line",
-    index: i,
-    label: line.label ?? `line${i}`,
-    defaultColor: colorAt(i),
-  }));
+  const counts = new Map<string, number>();
+  for (const line of lines) {
+    if (line.label) counts.set(line.label, (counts.get(line.label) ?? 0) + 1);
+  }
+  const plots: PlotInfo[] = lines.map((line, i) => {
+    const unique = !!line.label && counts.get(line.label) === 1;
+    return {
+      key: unique ? labelKey(line.label!) : plotKey("line", i),
+      indexKeyed: !unique,
+      kind: "line",
+      index: i,
+      label: line.label ?? `line${i}`,
+      defaultColor: colorAt(i),
+    };
+  });
   (ind.histogram ?? []).forEach((_, i) =>
     plots.push({
       key: plotKey("hist", i),
+      indexKeyed: true,
       kind: "hist",
       index: i,
       label: `hist${i}`,
@@ -60,18 +80,77 @@ export function plotsOf(
   return plots;
 }
 
-/** Effective style of a plot: the user's overrides over the defaults. */
-export function resolvePlot(
-  plot: Pick<PlotInfo, "key" | "defaultColor">,
+/**
+ * The stored override that applies to a plot, or undefined. An entry saved
+ * for another label is ignored. A legacy `line<i>` entry (saved before label
+ * keys existed) still applies to a label-keyed line at that index.
+ */
+export function plotOverride(
+  plot: PlotInfo,
   style: IndicatorStyle | undefined,
+): PlotStyle | undefined {
+  const plots = style?.plots;
+  if (!plots) return undefined;
+  const o =
+    plots[plot.key] ??
+    (plot.kind === "line" ? plots[plotKey("line", plot.index)] : undefined);
+  return o?.label !== undefined && o.label !== plot.label ? undefined : o;
+}
+
+/**
+ * Overrides re-keyed to the plots' current keys, recording the label on
+ * index-keyed lines. Overrides that no longer apply are dropped. This
+ * migrates legacy `line<i>` keys when the Style tab opens.
+ */
+export function rekeyPlots(
+  plots: readonly PlotInfo[],
+  style: IndicatorStyle | undefined,
+): Record<string, PlotStyle> {
+  const out: Record<string, PlotStyle> = {};
+  for (const p of plots) {
+    const o = plotOverride(p, style);
+    if (o) {
+      out[p.key] = p.kind === "line" && p.indexKeyed ? { ...o, label: p.label } : o;
+    }
+  }
+  return out;
+}
+
+/**
+ * Overrides keyed by figure key (`line0`, `hist1`) for the current payload,
+ * with labels already matched. This is what the chart hands klinecharts.
+ */
+export function figureOverrides(
+  plots: readonly PlotInfo[],
+  style: IndicatorStyle | undefined,
+): IndicatorStyle {
+  const out: Record<string, PlotStyle> = {};
+  for (const p of plots) {
+    const o = plotOverride(p, style);
+    if (o) out[plotKey(p.kind, p.index)] = o;
+  }
+  return { plots: out };
+}
+
+/** An override over the defaults. */
+export function resolveOverride(
+  o: PlotStyle | undefined,
+  defaultColor: string,
 ): ResolvedPlot {
-  const o = style?.plots[plot.key];
   return {
-    color: o?.color ?? plot.defaultColor,
+    color: o?.color ?? defaultColor,
     width: o?.width ?? DEFAULT_WIDTH,
     lineStyle: o?.lineStyle ?? "solid",
     visible: o?.visible ?? true,
   };
+}
+
+/** Effective style of a plot: the user's overrides over the defaults. */
+export function resolvePlot(
+  plot: PlotInfo,
+  style: IndicatorStyle | undefined,
+): ResolvedPlot {
+  return resolveOverride(plotOverride(plot, style), plot.defaultColor);
 }
 
 const DASH: Record<Exclude<PlotLineStyle, "solid">, number[]> = {

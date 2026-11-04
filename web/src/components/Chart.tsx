@@ -41,7 +41,13 @@ import {
   type KLineData,
 } from "klinecharts";
 
-import { figureStyle, plotsOf, resolvePlot } from "../lib/plotStyle";
+import {
+  figureOverrides,
+  figureStyle,
+  plotsOf,
+  resolveOverride,
+  resolvePlot,
+} from "../lib/plotStyle";
 import {
   indicatorName,
   type ActiveIndicator,
@@ -113,26 +119,29 @@ function plotFigureStyle(
   colorIdx: number,
   indicator: { extendData?: unknown },
 ): Record<string, unknown> {
-  const key = `${kind}${plotIndex}`;
-  const defaultColor = paletteColor(name, colorIdx);
+  const ext = indicator.extendData as IndicatorStyle | undefined;
   return figureStyle(
     kind,
-    resolvePlot({ key, defaultColor }, indicator.extendData as IndicatorStyle | undefined),
+    resolveOverride(ext?.plots[`${kind}${plotIndex}`], paletteColor(name, colorIdx)),
   );
+}
+
+/**
+ * klinecharts `extendData` of an indicator: the user's overrides keyed by
+ * figure key for the plots of the current payload (labels already matched).
+ */
+function extendFor(
+  name: string,
+  ind: NonNullable<SeriesPayload["indicators"][string]> | undefined,
+  style: IndicatorStyle | undefined,
+): IndicatorStyle {
+  return ind
+    ? figureOverrides(plotsOf(ind, (n) => paletteColor(name, n)), style)
+    : NO_STYLE;
 }
 
 /** Extend data of an indicator without overrides; klinecharts ignores an undefined override. */
 const NO_STYLE: IndicatorStyle = { plots: {} };
-
-/** False when the user hid the plot; its calc value is then null and nothing is drawn. */
-function plotVisible(
-  kind: "line" | "hist",
-  plotIndex: number,
-  indicator: { extendData?: unknown },
-): boolean {
-  const style = indicator.extendData as IndicatorStyle | undefined;
-  return style?.plots[`${kind}${plotIndex}`]?.visible !== false;
-}
 
 /** Legend entries of an indicator with the user's overrides applied; hidden plots are omitted. */
 function legendPlots(
@@ -336,6 +345,11 @@ function ensureRegistered(name: string, shape: IndicatorShape): void {
     calc: (dataList: KLineData[], indicator) => {
       const geo = geometryStore.get(regName);
       const extents = geo ? valueExtents(geo, dataList.length) : [];
+      // A hidden plot's value is null, so nothing is drawn for it.
+      const ext = indicator.extendData as IndicatorStyle | undefined;
+      const shown = (key: string) => ext?.plots[key]?.visible !== false;
+      const lineShown = Array.from({ length: shape.lines }, (_, i) => shown(`line${i}`));
+      const histShown = Array.from({ length: shape.hist }, (_, i) => shown(`hist${i}`));
       return dataList.map((bar, di) => {
         const row: Row = {
           range_lo: extents[di]?.lo ?? null,
@@ -344,7 +358,7 @@ function ensureRegistered(name: string, shape: IndicatorShape): void {
         for (let i = 0; i < shape.lines; i++) {
           const raw = bar[lineStashKey(name, i)];
           row[`line${i}`] =
-            plotVisible("line", i, indicator) &&
+            lineShown[i] &&
             typeof raw === "number" &&
             Number.isFinite(raw)
               ? raw
@@ -353,7 +367,7 @@ function ensureRegistered(name: string, shape: IndicatorShape): void {
         for (let i = 0; i < shape.hist; i++) {
           const raw = bar[histStashKey(name, i)];
           row[`hist${i}`] =
-            plotVisible("hist", i, indicator) &&
+            histShown[i] &&
             typeof raw === "number" &&
             Number.isFinite(raw)
               ? raw
@@ -837,16 +851,34 @@ export function Chart(props: ChartProps): JSX.Element {
     recomputeHeaders();
   });
 
+  // Line labels per indicator: overrides are matched by label (ADR-0017), so
+  // they are re-applied only when a payload changes the labels.
+  const labelSignature = createMemo(() =>
+    JSON.stringify(
+      Object.entries(props.series?.indicators ?? {}).map(([n, i]) => [
+        n,
+        i.lines?.map((l) => l.label),
+        i.histogram?.length ?? 0,
+      ]),
+    ),
+  );
+
   // Apply plot style overrides to the live indicators: one recalculation and
-  // repaint, no new data and no server round trip.
+  // repaint, no new data and no server round trip. Runs on style or label
+  // changes only; panes and the payload are read untracked.
   createEffect(() => {
     const c = chart();
     const styles = props.styles;
-    const panes = paneIds();
+    labelSignature();
     if (!c) return;
+    const panes = untrack(paneIds);
+    const indicators = untrack(() => props.series?.indicators);
     for (const name of Object.keys(panes)) {
       c.overrideIndicator(
-        { name: indicatorRegName(name), extendData: styles?.[name] ?? NO_STYLE },
+        {
+          name: indicatorRegName(name),
+          extendData: extendFor(name, indicators?.[name], styles?.[name]),
+        },
         panes[name],
       );
     }
@@ -915,7 +947,14 @@ export function Chart(props: ChartProps): JSX.Element {
         ? { id: CANDLE_PANE_ID }
         : { height: 120 };
       const newPaneId = c.createIndicator(
-        { name: regName, extendData: untrack(() => props.styles?.[name]) },
+        {
+          name: regName,
+          extendData: extendFor(
+            name,
+            ind,
+            untrack(() => props.styles?.[name]),
+          ),
+        },
         true,
         paneOptions,
       );

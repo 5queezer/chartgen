@@ -34,6 +34,12 @@ export interface PlotStyle {
   width?: number;
   lineStyle?: PlotLineStyle;
   visible?: boolean;
+  /**
+   * Server label of the line this entry was saved for. Only set on
+   * index-keyed entries (`line<i>`): the entry is ignored once the line at
+   * that index has a different label.
+   */
+  label?: string;
 }
 
 /** Per-indicator style overrides, keyed by `plotKey`. */
@@ -85,23 +91,35 @@ function persist(value: ActiveIndicator[]): void {
   }
 }
 
-const COLOR_RE =
-  /^(#([0-9a-f]{3}|[0-9a-f]{6}|[0-9a-f]{8})|rgba\(\s*\d{1,3}\s*,\s*\d{1,3}\s*,\s*\d{1,3}\s*,\s*(0|1|0?\.\d+|1\.0+)\s*\))$/i;
-const PLOT_KEY_RE = /^(line|hist)\d+$/;
+const CHANNEL = "(25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)";
+const COLOR_RE = new RegExp(
+  `^(#([0-9a-f]{3}|[0-9a-f]{6}|[0-9a-f]{8})|rgba\\(\\s*${CHANNEL}\\s*,\\s*${CHANNEL}\\s*,\\s*${CHANNEL}\\s*,\\s*(0|1|0?\\.\\d+|1\\.0+)\\s*\\))$`,
+  "i",
+);
+const MAX_LABEL = 64;
+// `line<i>` / `hist<i>` (index-keyed) or `l:<label>` (label-keyed line).
+const PLOT_KEY_RE = new RegExp(`^((line|hist)\\d+|l:.{1,${MAX_LABEL}})$`);
 const LINE_STYLES: readonly string[] = ["solid", "dashed", "dotted"];
 
 /**
- * Stable key of a plot: its kind and index in the series payload
- * (`line0`, `hist1`). Labels are not used because they can change with the
- * indicator's parameters or repeat within one indicator.
+ * Index key of a plot: its kind and index in the series payload (`line0`,
+ * `hist1`). Used for histograms and for lines whose label is not unique.
  */
 export function plotKey(kind: "line" | "hist", index: number): string {
   return `${kind}${index}`;
 }
 
+/** Key of a line identified by its (payload-unique) server label. */
+export function labelKey(label: string): string {
+  return `l:${label}`;
+}
+
 function sanitizePlot(x: unknown): PlotStyle | undefined {
   if (!x || typeof x !== "object" || Array.isArray(x)) return undefined;
-  const { color, width, lineStyle, visible } = x as Record<string, unknown>;
+  const { color, width, lineStyle, visible, label } = x as Record<
+    string,
+    unknown
+  >;
   const out: PlotStyle = {};
   if (typeof color === "string" && COLOR_RE.test(color)) out.color = color;
   if (
@@ -116,6 +134,9 @@ function sanitizePlot(x: unknown): PlotStyle | undefined {
     out.lineStyle = lineStyle as PlotLineStyle;
   }
   if (typeof visible === "boolean") out.visible = visible;
+  if (typeof label === "string" && label.length > 0 && label.length <= MAX_LABEL) {
+    out.label = label;
+  }
   return Object.keys(out).length > 0 ? out : undefined;
 }
 
@@ -282,12 +303,26 @@ export function updateIndicatorParams(
   setActiveIndicators(withParams(activeIndicators(), index, params));
 }
 
-/** Replace the plot style of the entry at `index`. */
-export function updateIndicatorStyle(
+/**
+ * Apply a settings dialog result to the entry at `index` in one write:
+ * `params` (undefined keeps them) and the plot `style`. The style is only
+ * written when it differs from the stored one, and nothing is persisted
+ * when nothing changes.
+ */
+export function updateIndicatorSettings(
   index: number,
+  params: Record<string, unknown> | undefined,
   style: IndicatorStyle | undefined,
 ): void {
-  setActiveIndicators(withStyle(activeIndicators(), index, style));
+  const entries = activeIndicators();
+  const entry = entries[index];
+  if (entry === undefined) return;
+  let next = params === undefined ? entries : withParams(entries, index, params);
+  const clean = sanitizeStyle(style);
+  if (JSON.stringify(clean) !== JSON.stringify(indicatorStyle(entry))) {
+    next = withStyle(next, index, clean);
+  }
+  if (next !== entries) setActiveIndicators(next);
 }
 
 /** Toggle the client-side visibility of the entry at `index`. */

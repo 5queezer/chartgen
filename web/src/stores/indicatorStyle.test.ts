@@ -28,6 +28,49 @@ describe("indicator plot styles (ADR-0017)", () => {
     expect(plotKey("hist", 2)).toBe("hist2");
   });
 
+  it("accepts label keys and records a line label, dropping bad ones", async () => {
+    const { sanitizeStyle, labelKey } = await loadStore();
+    expect(labelKey("WT1")).toBe("l:WT1");
+    expect(
+      sanitizeStyle({
+        plots: {
+          "l:WT1": { width: 2 },
+          "l:": { width: 2 },
+          line0: { width: 3, label: "RSI" },
+          line1: { width: 3, label: "" },
+          line2: { width: 3, label: "x".repeat(65) },
+        },
+      }),
+    ).toEqual({
+      plots: {
+        "l:WT1": { width: 2 },
+        line0: { width: 3, label: "RSI" },
+        line1: { width: 3 },
+        line2: { width: 3 },
+      },
+    });
+  });
+
+  it("updateIndicatorSettings writes params and style once, and skips no-ops", async () => {
+    const data = stubStorage(JSON.stringify([{ name: "rsi", length: 14, style }]));
+    const s = await loadStore();
+    const writes: string[] = [];
+    const set = localStorage.setItem;
+    vi.stubGlobal("localStorage", {
+      getItem: (k: string) => data.get(k) ?? null,
+      setItem: (k: string, v: string) => (writes.push(v), set(k, v)),
+    });
+    s.updateIndicatorSettings(0, undefined, style);
+    expect(writes).toHaveLength(0);
+    s.updateIndicatorSettings(0, { length: 9 }, { plots: { "l:RSI": { width: 2 } } });
+    expect(writes).toHaveLength(1);
+    expect(s.activeIndicators()).toEqual([
+      { name: "rsi", length: 9, style: { plots: { "l:RSI": { width: 2 } } } },
+    ]);
+    s.updateIndicatorSettings(0, undefined, undefined);
+    expect(s.activeIndicators()).toEqual([{ name: "rsi", length: 9 }]);
+  });
+
   it("sanitizeStyle keeps valid colors and drops the rest", async () => {
     const { sanitizeStyle } = await loadStore();
     const ok = ["#f00", "#ff0000", "#ff000080", "rgba(1, 2, 3, 0.5)", "rgba(0,0,0,1)"];
@@ -36,7 +79,7 @@ describe("indicator plot styles (ADR-0017)", () => {
         plots: { line0: { color } },
       });
     }
-    for (const color of ["red", "#ff", "#ggg", "rgba(1,2,3)", "url(x)", 5, null]) {
+    for (const color of ["red", "#ff", "#ggg", "rgba(1,2,3)", "rgba(256,0,0,1)", "rgba(0,999,0,1)", "rgba(0,0,0,2)", "url(x)", 5, null]) {
       expect(sanitizeStyle({ plots: { line0: { color } } })).toBeUndefined();
     }
   });

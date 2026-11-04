@@ -51,7 +51,11 @@ export function ColorPicker(props: ColorPickerProps): JSX.Element {
                     "ring-2 ring-[color:var(--color-accent)]": parsed().hex === c,
                   }}
                   style={{ background: c }}
-                  onClick={() => props.onChange(formatColor(c, parsed().alpha))}
+                  onClick={() =>
+                    props.onChange(
+                      formatColor(c, parsed().alpha === 0 ? 1 : parsed().alpha),
+                    )
+                  }
                 />
               )}
             </For>

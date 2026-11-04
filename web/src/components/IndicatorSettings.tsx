@@ -8,7 +8,7 @@
 import { Dialog, Switch, Tabs } from "@kobalte/core";
 import { For, Show, createMemo, createSignal, type JSX } from "solid-js";
 
-import { resolvePlot, type PlotInfo } from "../lib/plotStyle";
+import { rekeyPlots, resolvePlot, type PlotInfo } from "../lib/plotStyle";
 import {
   sanitizeStyle,
   type IndicatorStyle,
@@ -33,9 +33,13 @@ export interface IndicatorSettingsProps {
     name: string;
     params: Record<string, unknown>;
     style: IndicatorStyle | undefined;
+    hidden: boolean;
   } | null;
-  /** Plots of the indicator in the current series payload, with their default colors. */
-  plots: readonly PlotInfo[];
+  /**
+   * Plots of the indicator in the current series payload, with their default
+   * colors; null when the payload has no entry for it (e.g. it is hidden).
+   */
+  plots: readonly PlotInfo[] | null;
   /** `configurable_params` for the target; undefined while the registry is unavailable. */
   specs: readonly ParamSpec[] | undefined;
   onClose: () => void;
@@ -63,68 +67,94 @@ const tabClass =
 const LINE_STYLES: readonly PlotLineStyle[] = ["solid", "dashed", "dotted"];
 
 function StyleRows(props: {
-  plots: readonly PlotInfo[];
+  plots: readonly PlotInfo[] | null;
+  hidden: boolean;
   styles: Record<string, PlotStyle>;
-  onChange: (key: string, patch: PlotStyle) => void;
+  onChange: (plot: PlotInfo, patch: PlotStyle) => void;
 }): JSX.Element {
   return (
     <Show
-      when={props.plots.length > 0}
+      when={!props.hidden && props.plots}
       fallback={
         <p class="text-sm text-[color:var(--color-fg-muted)]">
-          This indicator has no lines to style.
+          Show the indicator to edit its style.
         </p>
       }
     >
-      <For each={props.plots}>
-        {(plot) => {
-          const r = () => resolvePlot(plot, { plots: props.styles });
-          const isLine = plot.kind === "line";
-          return (
-            <div class="flex items-center gap-3" data-testid={`style-row-${plot.key}`}>
-              <input
-                type="checkbox"
-                aria-label={`Show ${plot.label}`}
-                checked={r().visible}
-                onChange={(e) =>
-                  props.onChange(plot.key, { visible: e.currentTarget.checked })
-                }
-                class="cursor-pointer"
-              />
-              <span class="flex-1 min-w-0 truncate text-sm font-mono">{plot.label}</span>
-              <ColorPicker
-                label={`${plot.label} color`}
-                value={r().color}
-                onChange={(color) => props.onChange(plot.key, { color })}
-              />
-              <select
-                aria-label={`${plot.label} width`}
-                class={selectClass}
-                disabled={!isLine}
-                value={r().width}
-                onChange={(e) =>
-                  props.onChange(plot.key, { width: Number(e.currentTarget.value) })
-                }
-              >
-                <For each={[1, 2, 3, 4]}>{(w) => <option value={w}>{w}px</option>}</For>
-              </select>
-              <select
-                aria-label={`${plot.label} line style`}
-                class={selectClass}
-                disabled={!isLine}
-                value={r().lineStyle}
-                onChange={(e) =>
-                  props.onChange(plot.key, {
-                    lineStyle: e.currentTarget.value as PlotLineStyle,
-                  })
-                }
-              >
-                <For each={LINE_STYLES}>{(l) => <option value={l}>{l}</option>}</For>
-              </select>
-            </div>
-          );
-        }}
-      </For>
+      {(plots) => (
+        <Show
+          when={plots().length > 0}
+          fallback={
+            <p class="text-sm text-[color:var(--color-fg-muted)]">
+              This indicator has no lines to style.
+            </p>
+          }
+        >
+          <p class="text-xs text-[color:var(--color-fg-muted)]">
+            Changes to the lines on the Inputs tab apply after OK.
+          </p>
+          <For each={plots()}>
+            {(plot) => {
+              const r = () => resolvePlot(plot, { plots: props.styles });
+              const isLine = plot.kind === "line";
+              return (
+                <div
+                  class="flex items-center gap-3"
+                  data-testid={`style-row-${plot.key}`}
+                >
+                  <input
+                    type="checkbox"
+                    aria-label={`Show ${plot.label}`}
+                    checked={r().visible}
+                    onChange={(e) =>
+                      props.onChange(plot, { visible: e.currentTarget.checked })
+                    }
+                    class="cursor-pointer"
+                  />
+                  <span class="flex-1 min-w-0 truncate text-sm font-mono">
+                    {plot.label}
+                  </span>
+                  <ColorPicker
+                    label={`${plot.label} color`}
+                    value={r().color}
+                    onChange={(color) => props.onChange(plot, { color })}
+                  />
+                  <select
+                    aria-label={`${plot.label} width`}
+                    class={selectClass}
+                    disabled={!isLine}
+                    value={r().width}
+                    onChange={(e) =>
+                      props.onChange(plot, {
+                        width: Number(e.currentTarget.value),
+                      })
+                    }
+                  >
+                    <For each={[1, 2, 3, 4]}>
+                      {(w) => <option value={w}>{w}px</option>}
+                    </For>
+                  </select>
+                  <select
+                    aria-label={`${plot.label} line style`}
+                    class={selectClass}
+                    disabled={!isLine}
+                    value={r().lineStyle}
+                    onChange={(e) =>
+                      props.onChange(plot, {
+                        lineStyle: e.currentTarget.value as PlotLineStyle,
+                      })
+                    }
+                  >
+                    <For each={LINE_STYLES}>
+                      {(l) => <option value={l}>{l}</option>}
+                    </For>
+                  </select>
+                </div>
+              );
+            }}
+          </For>
+        </Show>
+      )}
     </Show>
   );
 }
@@ -133,7 +163,8 @@ function SettingsForm(props: {
   name: string;
   params: Record<string, unknown>;
   style: IndicatorStyle | undefined;
-  plots: readonly PlotInfo[];
+  hidden: boolean;
+  plots: readonly PlotInfo[] | null;
   specs: readonly ParamSpec[];
   onClose: () => void;
   onSubmit: IndicatorSettingsProps["onSubmit"];
@@ -145,14 +176,27 @@ function SettingsForm(props: {
   const [errors, setErrors] = createSignal<Record<string, string>>({});
   const [tab, setTab] = createSignal("inputs");
   const [plotStyles, setPlotStyles] = createSignal<Record<string, PlotStyle>>(
-    props.style?.plots ?? {},
+    props.plots
+      ? rekeyPlots(props.plots, props.style)
+      : (props.style?.plots ?? {}),
   );
 
   const setValue = (name: string, value: string | boolean) =>
     setValues({ ...values(), [name]: value });
 
-  const setPlot = (key: string, patch: PlotStyle) =>
-    setPlotStyles({ ...plotStyles(), [key]: { ...plotStyles()[key], ...patch } });
+  // Index-keyed lines record their label so the entry is ignored if another
+  // line later takes that index.
+  const setPlot = (plot: PlotInfo, patch: PlotStyle) =>
+    setPlotStyles({
+      ...plotStyles(),
+      [plot.key]: {
+        ...plotStyles()[plot.key],
+        ...patch,
+        ...(plot.kind === "line" && plot.indexKeyed
+          ? { label: plot.label }
+          : {}),
+      },
+    });
 
   const submit = (e: Event) => {
     e.preventDefault();
@@ -162,7 +206,11 @@ function SettingsForm(props: {
       setTab("inputs");
       return;
     }
-    props.onSubmit(result.params, fields(), sanitizeStyle({ plots: plotStyles() }));
+    props.onSubmit(
+      result.params,
+      fields(),
+      sanitizeStyle({ plots: plotStyles() }),
+    );
   };
 
   return (
@@ -186,72 +234,82 @@ function SettingsForm(props: {
           </Tabs.Trigger>
         </Tabs.List>
         <Tabs.Content value="inputs">
-      <div class="flex flex-col gap-3 p-4 max-h-[60vh] overflow-y-auto">
-        <Show
-          when={fields().length > 0}
-          fallback={
-            <p class="text-sm text-[color:var(--color-fg-muted)]">
-              This indicator has no settings.
-            </p>
-          }
-        >
-          <For each={fields()}>
-            {(f) => (
-              <div class="flex flex-col gap-1">
-                <div class="flex items-center justify-between gap-4">
-                  <label
-                    for={`param-${f.name}`}
-                    class="text-sm font-mono text-[color:var(--color-fg)]"
-                  >
-                    {f.name}
-                  </label>
-                  <Show
-                    when={f.kind === "boolean"}
-                    fallback={
-                      <input
-                        id={`param-${f.name}`}
-                        type={f.kind === "string" ? "text" : "number"}
-                        step={f.step}
-                        min={f.min}
-                        max={f.max}
-                        value={values()[f.name] as string}
-                        onInput={(e) => setValue(f.name, e.currentTarget.value)}
-                        aria-invalid={errors()[f.name] ? "true" : undefined}
-                        class={inputClass}
-                      />
-                    }
-                  >
-                    <Switch.Root
-                      checked={values()[f.name] === true}
-                      onChange={(v) => setValue(f.name, v)}
-                      class="inline-flex"
-                    >
-                      <Switch.Input id={`param-${f.name}`} />
-                      <Switch.Control class="inline-flex items-center w-9 h-5 rounded-full border border-[color:var(--color-border)] bg-[color:var(--color-bg-elev)] data-[checked]:bg-[color:var(--color-accent)] cursor-pointer transition-colors">
-                        <Switch.Thumb class="block w-4 h-4 rounded-full bg-white translate-x-0.5 data-[checked]:translate-x-[1.1rem] transition-transform" />
-                      </Switch.Control>
-                    </Switch.Root>
-                  </Show>
-                </div>
-                <Show when={f.description}>
-                  <span class="text-xs text-[color:var(--color-fg-muted)]">
-                    {f.description}
-                  </span>
-                </Show>
-                <Show when={errors()[f.name]}>
-                  <span role="alert" class="text-xs text-[color:var(--color-danger)]">
-                    {errors()[f.name]}
-                  </span>
-                </Show>
-              </div>
-            )}
-          </For>
-        </Show>
-      </div>
+          <div class="flex flex-col gap-3 p-4 max-h-[60vh] overflow-y-auto">
+            <Show
+              when={fields().length > 0}
+              fallback={
+                <p class="text-sm text-[color:var(--color-fg-muted)]">
+                  This indicator has no settings.
+                </p>
+              }
+            >
+              <For each={fields()}>
+                {(f) => (
+                  <div class="flex flex-col gap-1">
+                    <div class="flex items-center justify-between gap-4">
+                      <label
+                        for={`param-${f.name}`}
+                        class="text-sm font-mono text-[color:var(--color-fg)]"
+                      >
+                        {f.name}
+                      </label>
+                      <Show
+                        when={f.kind === "boolean"}
+                        fallback={
+                          <input
+                            id={`param-${f.name}`}
+                            type={f.kind === "string" ? "text" : "number"}
+                            step={f.step}
+                            min={f.min}
+                            max={f.max}
+                            value={values()[f.name] as string}
+                            onInput={(e) =>
+                              setValue(f.name, e.currentTarget.value)
+                            }
+                            aria-invalid={errors()[f.name] ? "true" : undefined}
+                            class={inputClass}
+                          />
+                        }
+                      >
+                        <Switch.Root
+                          checked={values()[f.name] === true}
+                          onChange={(v) => setValue(f.name, v)}
+                          class="inline-flex"
+                        >
+                          <Switch.Input id={`param-${f.name}`} />
+                          <Switch.Control class="inline-flex items-center w-9 h-5 rounded-full border border-[color:var(--color-border)] bg-[color:var(--color-bg-elev)] data-[checked]:bg-[color:var(--color-accent)] cursor-pointer transition-colors">
+                            <Switch.Thumb class="block w-4 h-4 rounded-full bg-white translate-x-0.5 data-[checked]:translate-x-[1.1rem] transition-transform" />
+                          </Switch.Control>
+                        </Switch.Root>
+                      </Show>
+                    </div>
+                    <Show when={f.description}>
+                      <span class="text-xs text-[color:var(--color-fg-muted)]">
+                        {f.description}
+                      </span>
+                    </Show>
+                    <Show when={errors()[f.name]}>
+                      <span
+                        role="alert"
+                        class="text-xs text-[color:var(--color-danger)]"
+                      >
+                        {errors()[f.name]}
+                      </span>
+                    </Show>
+                  </div>
+                )}
+              </For>
+            </Show>
+          </div>
         </Tabs.Content>
         <Tabs.Content value="style">
           <div class="flex flex-col gap-3 p-4 max-h-[60vh] overflow-y-auto">
-            <StyleRows plots={props.plots} styles={plotStyles()} onChange={setPlot} />
+            <StyleRows
+              plots={props.plots}
+              hidden={props.hidden}
+              styles={plotStyles()}
+              onChange={setPlot}
+            />
           </div>
         </Tabs.Content>
       </Tabs.Root>
@@ -259,7 +317,11 @@ function SettingsForm(props: {
         <button
           type="button"
           class={buttonClass}
-          disabled={tab() === "inputs" ? fields().length === 0 : props.plots.length === 0}
+          disabled={
+            tab() === "inputs"
+              ? fields().length === 0
+              : Object.keys(plotStyles()).length === 0
+          }
           onClick={() => {
             if (tab() === "inputs") {
               setValues(defaultValues(fields()));
@@ -317,7 +379,11 @@ export function IndicatorSettings(props: IndicatorSettingsProps): JSX.Element {
                         failed to load.
                       </p>
                       <div class="flex justify-end gap-2">
-                        <button type="button" class={buttonClass} onClick={props.onClose}>
+                        <button
+                          type="button"
+                          class={buttonClass}
+                          onClick={props.onClose}
+                        >
                           Cancel
                         </button>
                         <button type="button" class={buttonClass} disabled>
@@ -332,6 +398,7 @@ export function IndicatorSettings(props: IndicatorSettingsProps): JSX.Element {
                       name={t.name}
                       params={t.params}
                       style={t.style}
+                      hidden={t.hidden}
                       plots={props.plots}
                       specs={specs()}
                       onClose={props.onClose}

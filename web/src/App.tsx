@@ -41,11 +41,11 @@ import {
   indicatorName,
   indicatorParams,
   indicatorStyle,
+  isHidden,
   removeIndicator,
   toggleIndicatorHidden,
   toWire,
-  updateIndicatorParams,
-  updateIndicatorStyle,
+  updateIndicatorSettings,
 } from "./stores/indicators";
 import { setParamDefaults, type ParamDefaults } from "./stores/layouts";
 import {
@@ -121,6 +121,7 @@ export function App(): JSX.Element {
           name: indicatorName(entry),
           params: indicatorParams(entry),
           style: indicatorStyle(entry),
+          hidden: isHidden(entry),
         };
   });
 
@@ -168,7 +169,7 @@ export function App(): JSX.Element {
     const name = settingsTarget()?.name;
     const ind = name === undefined ? undefined : query.data?.indicators[name];
     return name === undefined || !ind
-      ? []
+      ? null
       : plotsOf(ind, (n) => paletteColor(name, n));
   });
 
@@ -240,15 +241,17 @@ export function App(): JSX.Element {
             // value equal to its default would change the wire entry and
             // refetch.
             const paramsChanged = fields.some(
-              (f) => (target.params[f.name] ?? f.defaultValue) !== params[f.name],
+              (f) =>
+                (target.params[f.name] ?? f.defaultValue ?? undefined) !==
+                (params[f.name] ?? undefined),
             );
-            if (paramsChanged) {
-              updateIndicatorParams(
-                i,
-                mergeParams(fields, target.params, params),
-              );
-            }
-            updateIndicatorStyle(i, style);
+            updateIndicatorSettings(
+              i,
+              paramsChanged
+                ? mergeParams(fields, target.params, params)
+                : undefined,
+              style,
+            );
           }
           setSettingsIndex(null);
         }}
