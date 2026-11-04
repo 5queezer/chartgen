@@ -227,6 +227,33 @@ describe("export", () => {
     ]);
   });
 
+  it("keeps a valid plot style and drops an invalid one on import", () => {
+    const good = { plots: { "l:RSI": { color: "#f00", width: 2 } } };
+    const state = {
+      ...base,
+      indicators: [
+        { name: "rsi", style: good },
+        { name: "ema_stack", style: { plots: { line0: { color: "red" } } } },
+      ],
+    };
+    expect(parseExport(exportOf(state))!.state.indicators).toEqual([
+      { name: "rsi", style: good },
+      { name: "ema_stack" },
+    ]);
+  });
+
+  it("a plot style change marks the layout dirty, regardless of key order", () => {
+    const a = { plots: { "l:RSI": { color: "#f00", width: 2 }, hist0: { visible: false } } };
+    const b = { plots: { hist0: { visible: false }, "l:RSI": { width: 2, color: "#f00" } } };
+    const withStyle = (style: unknown) => ({
+      ...base,
+      indicators: ["ema_stack", { name: "rsi", style }],
+    });
+    expect(isDirty(base, withStyle(a))).toBe(true);
+    expect(isDirty(withStyle(a), withStyle(b))).toBe(false);
+    expect(isDirty(withStyle(a), withStyle({ plots: { "l:RSI": { width: 3 } } }))).toBe(true);
+  });
+
   it("drops prototype-polluting keys", () => {
     const text = exportOf(base).replace(
       '"indicators":[',

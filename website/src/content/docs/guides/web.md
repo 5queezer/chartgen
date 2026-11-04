@@ -244,11 +244,18 @@ legend shows controls on hover (or keyboard focus):
   opens the settings dialog. The form is generated from the indicator's
   `configurable_params` (numbers, switches, text). **Defaults** resets the
   form to the schema defaults; **OK** validates and applies, which
-  refetches the chart with the new parameters.
+  refetches the chart with the new parameters. The **Style** tab lists each
+  plotted line and histogram with a visibility checkbox, a color swatch
+  (palette grid, opacity slider and custom color), a width (1-4 px) and a line
+  style (solid, dashed, dotted). Style changes apply instantly on the client,
+  never refetch, and also recolor the legend; hidden plots are not drawn and
+  their legend value is omitted. **Defaults** resets the tab being shown.
 - **×** removes the indicator. The price pane legend cannot be removed.
 
 The set, parameters and hidden state persist in `localStorage`
-([ADR-0013](/chartgen/decisions/0013-indicator-visibility-and-instances/)).
+([ADR-0013](/chartgen/decisions/0013-indicator-visibility-and-instances/)),
+and so do the plot styles
+([ADR-0017](/chartgen/decisions/0017-indicator-plot-styles/)).
 Each indicator can be added once; two instances with different parameters
 are not supported yet.
 

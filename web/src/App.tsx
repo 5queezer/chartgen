@@ -12,7 +12,7 @@ import {
 
 import type { Chart as KLineChart } from "klinecharts";
 
-import { Chart } from "./components/Chart";
+import { Chart, paletteColor } from "./components/Chart";
 import { DrawingToolbar } from "./components/DrawingToolbar";
 import { IndicatorChips } from "./components/IndicatorChips";
 import { IndicatorPicker } from "./components/IndicatorPicker";
@@ -20,6 +20,7 @@ import { IndicatorSettings } from "./components/IndicatorSettings";
 import { LayoutMenu } from "./components/LayoutMenu";
 import { mergeParams } from "./lib/paramForm";
 import { PALETTES } from "./lib/theme";
+import { plotsOf } from "./lib/plotStyle";
 import { StatusLine, type Status } from "./components/StatusLine";
 import { Toolbar } from "./components/Toolbar";
 import { Watchlist } from "./components/Watchlist";
@@ -39,10 +40,12 @@ import {
   activeIndicators,
   indicatorName,
   indicatorParams,
+  indicatorStyle,
+  isHidden,
   removeIndicator,
   toggleIndicatorHidden,
   toWire,
-  updateIndicatorParams,
+  updateIndicatorSettings,
 } from "./stores/indicators";
 import { setParamDefaults, type ParamDefaults } from "./stores/layouts";
 import {
@@ -114,8 +117,21 @@ export function App(): JSX.Element {
     const entry = i === null ? undefined : untrack(activeIndicators)[i];
     return entry === undefined
       ? null
-      : { name: indicatorName(entry), params: indicatorParams(entry) };
+      : {
+          name: indicatorName(entry),
+          params: indicatorParams(entry),
+          style: indicatorStyle(entry),
+          hidden: isHidden(entry),
+        };
   });
+
+  // Plot styles are client-only (ADR-0017): they reach the chart separately
+  // from the wire indicators, so a style change never refetches.
+  const plotStyles = createMemo(() =>
+    Object.fromEntries(
+      activeIndicators().map((e) => [indicatorName(e), indicatorStyle(e)]),
+    ),
+  );
 
   const query = createChartQuery(session, () => ({
     ticker: symbol(),
@@ -146,6 +162,15 @@ export function App(): JSX.Element {
       for (const n of [i.name, ...(i.aliases ?? [])]) defaults[n] = params;
     }
     setParamDefaults(defaults);
+  });
+
+  // Plots of the open dialog's indicator, from the last series payload.
+  const settingsPlots = createMemo(() => {
+    const name = settingsTarget()?.name;
+    const ind = name === undefined ? undefined : query.data?.indicators[name];
+    return name === undefined || !ind
+      ? null
+      : plotsOf(ind, (n) => paletteColor(name, n));
   });
 
   const status = createMemo<Status>(() => {
@@ -200,6 +225,7 @@ export function App(): JSX.Element {
       />
       <IndicatorSettings
         target={settingsTarget()}
+        plots={settingsPlots()}
         specs={
           listIndicators.data?.indicators.find((i) => {
             const n = settingsTarget()?.name;
@@ -207,13 +233,24 @@ export function App(): JSX.Element {
           })?.configurable_params
         }
         onClose={() => setSettingsIndex(null)}
-        onSubmit={(params, fields) => {
+        onSubmit={(params, fields, style) => {
           const i = settingsIndex();
           const target = settingsTarget();
           if (i !== null && target) {
-            updateIndicatorParams(
+            // A style-only OK must not rewrite the params: dropping a
+            // value equal to its default would change the wire entry and
+            // refetch.
+            const paramsChanged = fields.some(
+              (f) =>
+                (target.params[f.name] ?? f.defaultValue ?? undefined) !==
+                (params[f.name] ?? undefined),
+            );
+            updateIndicatorSettings(
               i,
-              mergeParams(fields, target.params, params),
+              paramsChanged
+                ? mergeParams(fields, target.params, params)
+                : undefined,
+              style,
             );
           }
           setSettingsIndex(null);
@@ -233,6 +270,7 @@ export function App(): JSX.Element {
           <Chart
             series={query.data ?? null}
             activeIndicators={wireIndicators()}
+            styles={plotStyles()}
             chartType={chartType()}
             onToggleHidden={(n) => toggleIndicatorHidden(indexOf(n))}
             onSettings={(n) => setSettingsIndex(indexOf(n))}
