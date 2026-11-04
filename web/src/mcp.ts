@@ -85,12 +85,20 @@ async function connectWithToken(
     };
   }
 
-  await client.connect(transport);
+  try {
+    await client.connect(transport);
+  } catch (err) {
+    // Don't leak a half-open client when the handshake fails.
+    await client.close().catch(() => {});
+    throw err;
+  }
   return { client, transport, token };
 }
 
 interface McpSessionInternalState {
   connected: ConnectedTransport | null;
+  /** In-flight connect shared by concurrent callers; cleared on settle. */
+  connecting: Promise<ConnectedTransport> | null;
   notificationHandler: AlertNotificationHandler | null;
 }
 
@@ -132,24 +140,39 @@ function isUnauthorized(err: unknown): boolean {
 export function createMcpSession(): McpSession {
   const state: McpSessionInternalState = {
     connected: null,
+    connecting: null,
     notificationHandler: null,
   };
 
-  async function ensureConnected(): Promise<ConnectedTransport> {
-    if (state.connected) return state.connected;
-    const token = await getAccessToken();
-    state.connected = await connectWithToken(token, state.notificationHandler);
-    return state.connected;
+  function ensureConnected(): Promise<ConnectedTransport> {
+    if (state.connected) return Promise.resolve(state.connected);
+    // Concurrent callers share one in-flight connect. The memo is cleared
+    // on settle, so a failed attempt is retried by the next call.
+    state.connecting ??= (async () => {
+      try {
+        const token = await getAccessToken();
+        const conn = await connectWithToken(token, state.notificationHandler);
+        state.connected = conn;
+        return conn;
+      } finally {
+        state.connecting = null;
+      }
+    })();
+    return state.connecting;
   }
 
-  async function dropConnection(): Promise<void> {
-    if (!state.connected) return;
+  /** Close `stale` (default: the current connection) and reset state. */
+  async function dropConnection(stale?: ConnectedTransport): Promise<void> {
+    const target = stale ?? state.connected;
+    if (!target) return;
+    // A concurrent caller may already have replaced it; only reset state
+    // if it is still the current one.
+    if (state.connected === target) state.connected = null;
     try {
-      await state.connected.client.close();
+      await target.client.close();
     } catch {
       // best-effort; close errors after a 401 are not actionable.
     }
-    state.connected = null;
   }
 
   async function callToolWithAuthRetry(
@@ -164,7 +187,7 @@ export function createMcpSession(): McpSession {
       if (!isUnauthorized(err)) throw err;
       // Re-auth once, then retry.
       clearAccessToken();
-      await dropConnection();
+      await dropConnection(conn);
       conn = await ensureConnected();
       const result = await conn.client.callTool({ name, arguments: args });
       return extractJsonFromResult(CallToolResultSchema.parse(result));
@@ -200,6 +223,8 @@ export function createMcpSession(): McpSession {
       }
     },
     async close() {
+      // Let an in-flight connect settle first so its client is not leaked.
+      await state.connecting?.catch(() => {});
       await dropConnection();
     },
   };
