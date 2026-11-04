@@ -66,7 +66,12 @@ class FakeDoc extends EventTarget {
   }
 }
 
-const REQ: LiveRequest = { ticker: "BTCUSDT", timeframe: "1m", indicators: ["sma"] };
+const REQ: LiveRequest = {
+  ticker: "BTCUSDT",
+  timeframe: "1m",
+  indicators: ["sma"],
+  chart_style: "candles",
+};
 
 function setup(
   fetchImpl = serve,

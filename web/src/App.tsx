@@ -63,6 +63,7 @@ import {
 import { setParamDefaults, type ParamDefaults } from "./stores/layouts";
 import {
   addRecent,
+  chartStyleOf,
   chartType,
   theme,
   symbol,
@@ -150,6 +151,7 @@ export function App(): JSX.Element {
     ticker: symbol(),
     timeframe: timeframe(),
     indicators: wireIndicators(),
+    chart_style: chartStyleOf(chartType()),
     enabled: authReady(),
   }));
 
@@ -192,6 +194,7 @@ export function App(): JSX.Element {
       ticker: symbol(),
       timeframe: timeframe(),
       indicators: wireIndicators(),
+      chart_style: chartStyleOf(chartType()),
     };
     // Re-run whenever the query publishes a result.
     void query.data;

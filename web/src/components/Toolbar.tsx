@@ -44,6 +44,7 @@ const CHART_TYPE_LABELS: Record<ChartType, string> = {
   bars: "Bars",
   line: "Line",
   area: "Area",
+  heikin_ashi: "Heikin Ashi",
 };
 
 function ChartTypeIcon(props: { type: ChartType }): JSX.Element {
@@ -63,6 +64,15 @@ function ChartTypeIcon(props: { type: ChartType }): JSX.Element {
           <path d="M5 2v14M13 4v11" />
           <rect x="3" y="5" width="4" height="7" fill="currentColor" />
           <rect x="11" y="7" width="4" height="5" fill="currentColor" />
+        </svg>
+      );
+    case "heikin_ashi":
+      return (
+        <svg {...common}>
+          <path d="M5 1v16M13 3v13" />
+          <rect x="3" y="4" width="4" height="9" fill="currentColor" />
+          <rect x="11" y="6" width="4" height="6" fill="currentColor" />
+          <path d="M1 15h16" stroke-dasharray="2 2" />
         </svg>
       );
     case "hollow":

@@ -8,7 +8,13 @@ import { createSignal } from "solid-js";
 import { applyTheme, THEME_NAMES, type ThemeName } from "../lib/theme";
 import { isTimeframe, type Timeframe } from "../lib/timeframe";
 
-export type ChartType = "candles" | "hollow" | "bars" | "line" | "area";
+export type ChartType =
+  | "candles"
+  | "hollow"
+  | "bars"
+  | "line"
+  | "area"
+  | "heikin_ashi";
 
 export const CHART_TYPES: readonly ChartType[] = [
   "candles",
@@ -16,7 +22,16 @@ export const CHART_TYPES: readonly ChartType[] = [
   "bars",
   "line",
   "area",
+  "heikin_ashi",
 ];
+
+/** Server price series style (`generate_chart.chart_style`) a chart type needs. */
+export type ChartStyle = "candles" | "heikin_ashi";
+
+/** Heikin Ashi is computed server-side (ADR-0003); every other type draws raw bars. */
+export function chartStyleOf(type: ChartType): ChartStyle {
+  return type === "heikin_ashi" ? "heikin_ashi" : "candles";
+}
 
 /** Price-axis scale: plain, percent change from the first visible bar, or logarithmic. */
 export type ScaleMode = "normal" | "percentage" | "log";

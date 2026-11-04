@@ -235,6 +235,13 @@ fn generate_chart(id: Option<Value>, args: &Value, source: fetch::DataSource) ->
     };
     let width = args.get("width").and_then(|v| v.as_u64()).unwrap_or(1920) as u32;
     let height = args.get("height").and_then(|v| v.as_u64()).unwrap_or(1080) as u32;
+    let chart_style = match args.get("chart_style") {
+        None | Some(Value::Null) => "candles",
+        Some(v) => match v.as_str() {
+            Some(s @ ("candles" | "heikin_ashi")) => s,
+            _ => return tool_err(id, "chart_style must be one of 'candles' or 'heikin_ashi'."),
+        },
+    };
 
     // Accept both "symbol" and "ticker" parameter names
     let symbol = args
@@ -327,6 +334,11 @@ fn generate_chart(id: Option<Value>, args: &Value, source: fetch::DataSource) ->
     };
     data.symbol = symbol.map(|s| s.to_string());
     data.interval = Some(interval.to_string());
+    // Heikin Ashi runs over bars+warmup, before indicators and trimming, so
+    // indicators see the same values TradingView computes on an HA chart.
+    if chart_style == "heikin_ashi" {
+        data = data.heikin_ashi();
+    }
 
     // Compute indicators up-front (once) so both the summary and the series
     // payloads can reuse the same PanelResult values — no recomputation,
@@ -399,6 +411,7 @@ fn generate_chart(id: Option<Value>, args: &Value, source: fetch::DataSource) ->
         Some(json!({
             "symbol": data.symbol,
             "interval": data.interval,
+            "chart_style": chart_style,
             "bars": bars_arr,
             "indicators": Value::Object(indicators_json),
             "has_more": has_more,
@@ -2781,6 +2794,101 @@ mod tests {
             cold["indicators"]["rsi"]["lines"][0]["values"][0],
             ind["rsi"]["lines"][0]["values"][0]
         );
+    }
+
+    fn ha_args(style: Value, warmup: u64, end: i64) -> Value {
+        json!({
+            "ticker": "ETHUSDT", "timeframe": "4h", "bars": 40, "warmup": warmup,
+            "end_time": end, "indicators": ["rsi"], "format": "series",
+            "chart_style": style
+        })
+    }
+
+    #[test]
+    fn chart_style_default_is_candles_and_unchanged() {
+        let none = series_payload(
+            json!({ "ticker": "ETHUSDT", "timeframe": "4h", "bars": 40,
+                    "end_time": END_4H_MS, "indicators": ["rsi"], "format": "series" }),
+            fetch::DataSource::Sample,
+        );
+        let candles = series_payload(
+            ha_args(json!("candles"), 0, END_4H_MS),
+            fetch::DataSource::Sample,
+        );
+        assert_eq!(none["chart_style"], "candles");
+        assert_eq!(none, candles);
+    }
+
+    #[test]
+    fn chart_style_heikin_ashi_transforms_bars_and_echoes() {
+        let real = series_payload(
+            ha_args(json!("candles"), 0, END_4H_MS),
+            fetch::DataSource::Sample,
+        );
+        let ha = series_payload(
+            ha_args(json!("heikin_ashi"), 0, END_4H_MS),
+            fetch::DataSource::Sample,
+        );
+        assert_eq!(ha["chart_style"], "heikin_ashi");
+        let (rb, hb) = (
+            real["bars"].as_array().unwrap(),
+            ha["bars"].as_array().unwrap(),
+        );
+        assert_eq!(rb.len(), hb.len());
+        let f = |b: &Value, k: &str| b[k].as_f64().unwrap();
+        // Seed bar and recurrence.
+        assert!((f(&hb[0], "o") - (f(&rb[0], "o") + f(&rb[0], "c")) / 2.0).abs() < 1e-9);
+        for i in 0..hb.len() {
+            let r = &rb[i];
+            let c = (f(r, "o") + f(r, "h") + f(r, "l") + f(r, "c")) / 4.0;
+            assert!((f(&hb[i], "c") - c).abs() < 1e-9);
+            if i > 0 {
+                let o = (f(&hb[i - 1], "o") + f(&hb[i - 1], "c")) / 2.0;
+                assert!((f(&hb[i], "o") - o).abs() < 1e-9);
+            }
+            assert_eq!(hb[i]["t"], r["t"]);
+            assert_eq!(hb[i]["v"], r["v"]);
+            assert!(f(&hb[i], "h") >= f(&hb[i], "o").max(f(&hb[i], "c")));
+            assert!(f(&hb[i], "l") <= f(&hb[i], "o").min(f(&hb[i], "c")));
+        }
+        assert_ne!(real["bars"], ha["bars"]);
+    }
+
+    #[test]
+    fn chart_style_heikin_ashi_pages_converge_after_warmup() {
+        // Same window fetched as a tail (warmup 200) and as an older page
+        // (shifted end_time): the HA seed difference decays by 1/2 per bar.
+        let a = series_payload(
+            ha_args(json!("heikin_ashi"), 200, END_4H_MS),
+            fetch::DataSource::Sample,
+        );
+        let b = series_payload(
+            ha_args(json!("heikin_ashi"), 60, END_4H_MS),
+            fetch::DataSource::Sample,
+        );
+        assert_eq!(a["bars"].as_array().unwrap().len(), 40);
+        for (x, y) in a["bars"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .zip(b["bars"].as_array().unwrap())
+        {
+            for k in ["o", "h", "l", "c"] {
+                let d = (x[k].as_f64().unwrap() - y[k].as_f64().unwrap()).abs();
+                assert!(d < 1e-6, "{k} differs by {d}");
+            }
+        }
+    }
+
+    #[test]
+    fn chart_style_rejects_unknown_value() {
+        let resp = generate_chart(
+            Some(json!(1)),
+            &json!({ "chart_style": "renko", "format": "series" }),
+            fetch::DataSource::Sample,
+        );
+        assert!(is_error(&resp));
+        assert!(response_text(&resp).contains("chart_style"));
     }
 
     #[test]

@@ -19,6 +19,38 @@ pub struct OhlcvData {
 }
 
 impl OhlcvData {
+    /// Heikin Ashi transform: haClose = ohlc4, haOpen = (prev haOpen + prev
+    /// haClose) / 2 seeded with (open + close) / 2, haHigh/haLow widened to
+    /// contain haOpen/haClose. Volume and timestamps are kept.
+    pub fn heikin_ashi(&self) -> OhlcvData {
+        let mut prev: Option<(f64, f64)> = None;
+        let bars = self
+            .bars
+            .iter()
+            .map(|b| {
+                let ha_close = (b.open + b.high + b.low + b.close) / 4.0;
+                let ha_open = match prev {
+                    Some((o, c)) => (o + c) / 2.0,
+                    None => (b.open + b.close) / 2.0,
+                };
+                prev = Some((ha_open, ha_close));
+                Bar {
+                    open: ha_open,
+                    high: b.high.max(ha_open).max(ha_close),
+                    low: b.low.min(ha_open).min(ha_close),
+                    close: ha_close,
+                    volume: b.volume,
+                    date: b.date.clone(),
+                }
+            })
+            .collect();
+        OhlcvData {
+            bars,
+            symbol: self.symbol.clone(),
+            interval: self.interval.clone(),
+        }
+    }
+
     pub fn closes(&self) -> Vec<f64> {
         self.bars.iter().map(|b| b.close).collect()
     }

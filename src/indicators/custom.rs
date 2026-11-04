@@ -735,19 +735,9 @@ impl Indicator for HeikinAshi {
             };
         }
 
-        let mut ha_open = vec![0.0_f64; n];
-        let mut ha_close = vec![0.0_f64; n];
-
-        // First bar
-        ha_close[0] =
-            (data.bars[0].open + data.bars[0].high + data.bars[0].low + data.bars[0].close) / 4.0;
-        ha_open[0] = (data.bars[0].open + data.bars[0].close) / 2.0;
-
-        for i in 1..n {
-            let bar = &data.bars[i];
-            ha_close[i] = (bar.open + bar.high + bar.low + bar.close) / 4.0;
-            ha_open[i] = (ha_open[i - 1] + ha_close[i - 1]) / 2.0;
-        }
+        let ha = data.heikin_ashi();
+        let ha_open: Vec<f64> = ha.bars.iter().map(|b| b.open).collect();
+        let ha_close: Vec<f64> = ha.bars.iter().map(|b| b.close).collect();
 
         for i in 0..n {
             let bullish = ha_close[i] >= ha_open[i];

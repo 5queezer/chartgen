@@ -6,6 +6,7 @@ import { createQuery, keepPreviousData } from "@tanstack/solid-query";
 import type { Accessor } from "solid-js";
 
 import { INITIAL_BARS, WARMUP } from "./lib/liveFeed";
+import type { ChartStyle } from "./stores/layout";
 import type { McpSession } from "./mcp";
 import { clearAccessToken } from "./oauth";
 import {
@@ -25,19 +26,21 @@ export interface ChartQueryInput {
   ticker: string;
   timeframe: string;
   indicators: ActiveIndicator[];
+  chart_style: ChartStyle;
   /** Gates the query — true once auth is ready. */
   enabled: boolean;
 }
 
 /** Query key of the chart query for a request. */
 export function chartQueryKey(
-  input: Pick<ChartQueryInput, "ticker" | "timeframe" | "indicators">,
+  input: Pick<ChartQueryInput, "ticker" | "timeframe" | "indicators" | "chart_style">,
 ) {
   return [
     "generate_chart",
     input.ticker,
     input.timeframe,
     activeIndicatorsKey(input.indicators),
+    input.chart_style,
   ] as const;
 }
 
@@ -57,8 +60,13 @@ export function createChartQuery(
   input: Accessor<ChartQueryInput>,
 ) {
   return createQuery<SeriesPayload, Error>(() => {
-    const { ticker, timeframe, indicators, enabled } = input();
-    const queryKey = chartQueryKey({ ticker, timeframe, indicators });
+    const { ticker, timeframe, indicators, chart_style, enabled } = input();
+    const queryKey = chartQueryKey({
+      ticker,
+      timeframe,
+      indicators,
+      chart_style,
+    });
     return {
       queryKey,
       // Warmed up like every page and tail (ADR-0009), so the first page
@@ -68,6 +76,7 @@ export function createChartQuery(
           ticker,
           timeframe,
           indicators,
+          chart_style,
           bars: INITIAL_BARS,
           warmup: WARMUP,
         }),

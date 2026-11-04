@@ -58,6 +58,15 @@ describe("layout store", () => {
     expect(s.recentSymbols()).toEqual(["AAPL", "MSFT"]);
   });
 
+  it("accepts heikin_ashi and maps chart types to server styles", async () => {
+    stubStorage({ "chartgen.layout.chartType": '"heikin_ashi"' });
+    const s = await load();
+    expect(s.chartType()).toBe("heikin_ashi");
+    expect(s.chartStyleOf("heikin_ashi")).toBe("heikin_ashi");
+    expect(s.chartStyleOf("hollow")).toBe("candles");
+    expect(s.chartStyleOf("candles")).toBe("candles");
+  });
+
   it("persists changes", async () => {
     const data = stubStorage();
     const s = await load();

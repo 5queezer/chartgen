@@ -27,6 +27,10 @@ export interface GenerateChartInput {
    */
   bars?: number;
   /**
+   * Price series style. 'candles' (default) uses the raw OHLC bars. 'heikin_ashi' replaces them with Heikin Ashi bars (haClose = ohlc4, haOpen = (prev haOpen + prev haClose) / 2, seeded with (open+close)/2) in every format. Like TradingView, indicators are then computed on the Heikin Ashi values. The transform runs over bars+warmup before trimming, so pages and tail polls converge after warmup. format=series echoes the applied style as chart_style.
+   */
+  chart_style?: "candles" | "heikin_ashi";
+  /**
    * History paging: return only bars whose open time (ms since epoch) is strictly before end_time — pass the oldest loaded bar's t × 1000 to fetch the page before it. Omit (or null) for the newest bars, including the still-forming one. Must be an integer between -2208988800000 (1900-01-01) and one year from now.
    */
   end_time?: number;

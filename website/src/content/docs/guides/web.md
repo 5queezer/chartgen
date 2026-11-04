@@ -39,7 +39,7 @@ chart stays on screen while the new one loads. There is no Load button; if a loa
   Finance. The watchlist **+** button opens the same dialog.
 - **Timeframe** — one-click buttons for 1m, 5m, 15m, 1h, 4h, 1D and 1W,
   with the active one highlighted; the dropdown holds the rest (30m, 1M).
-- **Chart type** — Candles, Hollow candles (only up candles hollow), Bars (OHLC), Line, Area.
+- **Chart type** — Candles, Hollow candles (only up candles hollow), Bars (OHLC), Line, Area, Heikin Ashi. Heikin Ashi is computed on the server (the web app sends `chart_style: "heikin_ashi"` with every load, tail poll and history page), so the legend shows Heikin Ashi OHLC values and indicators are calculated on them, as on TradingView. Switching to or from it reloads the chart.
   Heikin-Ashi is not offered because it needs client-side math
   ([ADR-0003](/chartgen/decisions/0003-web-frontend-stack/)).
 
