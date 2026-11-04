@@ -15,7 +15,12 @@
 import type { SeriesPayload } from "../types/responses";
 import type { ActiveIndicator } from "../stores/indicators";
 import { barCloseMs, isContinuousMarket } from "./countdown";
-import { mergeOlder, mergeTail, missingBars } from "./seriesMerge";
+import {
+  mergeOlder,
+  mergeTail,
+  missingBars,
+  sortChannels,
+} from "./seriesMerge";
 
 /** Bars of the initial full load. */
 export const INITIAL_BARS = 500;
@@ -41,6 +46,23 @@ export const MAX_BACKOFF_MS = 60_000;
  * WARMUP still one Binance call. A longer gap reloads the chart.
  */
 export const MAX_CATCHUP_BARS = 700;
+/**
+ * Most bars kept loaded. Paging stops there ("history limit reached"):
+ * every tick recalculates every indicator over all loaded bars.
+ */
+export const MAX_HISTORY_BARS = 20_000;
+
+/** True if `series` may page in older bars: the source has more, under the cap. */
+export function canPageBefore(series: SeriesPayload): boolean {
+  return series.has_more && series.bars.length < MAX_HISTORY_BARS;
+}
+
+const historyStatusOf = (series: SeriesPayload): HistoryStatus =>
+  !series.has_more
+    ? { kind: "end" }
+    : series.bars.length >= MAX_HISTORY_BARS
+      ? { kind: "limit" }
+      : { kind: "idle" };
 
 export interface LiveRequest {
   ticker: string;
@@ -83,7 +105,10 @@ export type HistoryStatus =
   | { kind: "idle" }
   | { kind: "loading" }
   | { kind: "error"; message: string }
-  | { kind: "end" };
+  /** The source has no older bars. */
+  | { kind: "end" }
+  /** MAX_HISTORY_BARS are loaded; paging stopped. */
+  | { kind: "limit" };
 
 type VisibilityDoc = Pick<
   Document,
@@ -125,6 +150,8 @@ export function createLiveFeed(opts: LiveFeedOptions): LiveFeed {
   let abort = new AbortController();
   let timer: ReturnType<typeof setTimeout> | null = null;
   let polling = false;
+  // A full reload is in flight: no polls until it lands (reset) or fails.
+  let reloading = false;
   let pageLoading = false;
   let failures = 0;
   // Bars for the next poll: TAIL_BARS, or more to catch up after a gap.
@@ -150,6 +177,7 @@ export function createLiveFeed(opts: LiveFeedOptions): LiveFeed {
     abort = new AbortController();
     clearTimer();
     polling = false;
+    reloading = false;
     pageLoading = false;
     failures = 0;
     nextBars = TAIL_BARS;
@@ -169,19 +197,25 @@ export function createLiveFeed(opts: LiveFeedOptions): LiveFeed {
 
   const reload = (my: number) => {
     clearTimer();
+    reloading = true;
     opts.onPollStatus({ kind: "reloading" });
     // A successful reload lands in reset() and starts a new generation.
-    // If this one is still current afterwards the reload failed or
-    // brought nothing new: keep polling, backed off.
-    const resume = () => {
-      if (my === gen) backoff(new Error("reload did not replace the chart"));
-    };
+    // The query publishes its result to App a few ticks after its
+    // refetch() promise settles (TanStack notifies in a later task), so
+    // the check is deferred by a task. If this generation is still current
+    // then, the reload failed: keep polling, backed off.
+    const resume = () =>
+      setTimeout(() => {
+        if (my !== gen) return;
+        reloading = false;
+        backoff(new Error("reload did not replace the chart"));
+      }, 0);
     opts.reload().then(resume, resume);
   };
 
   async function poll(): Promise<void> {
     timer = null;
-    if (!series || !request || polling) return;
+    if (!series || !request || polling || reloading) return;
     if (hidden()) {
       opts.onPollStatus({ kind: "paused" });
       return;
@@ -220,9 +254,18 @@ export function createLiveFeed(opts: LiveFeedOptions): LiveFeed {
       const close = barCloseMs(newest, series.interval ?? request.timeframe);
       const step = close === null ? null : close / 1000 - newest;
       const need = step ? missingBars(newest, head, step) + TAIL_BARS + 3 : Infinity;
-      if (need > MAX_CATCHUP_BARS) return reload(my);
-      nextBars = need;
-      return poll();
+      if (need <= MAX_CATCHUP_BARS) {
+        nextBars = need;
+        return poll();
+      }
+      // The estimate counts every interval of the gap. A session market
+      // has no bars while closed (nights, weekends), so the real gap can
+      // be far smaller: try the largest catch-up before reloading.
+      if (!isContinuousMarket(request.ticker)) {
+        nextBars = MAX_CATCHUP_BARS;
+        return poll();
+      }
+      return reload(my);
     } else if (r.reason !== "stale") {
       // A catch-up that still leaves a gap, or data that does not line
       // up with ours: start over from a full load.
@@ -233,7 +276,7 @@ export function createLiveFeed(opts: LiveFeedOptions): LiveFeed {
   }
 
   const onVisibility = () => {
-    if (hidden() || !series) return;
+    if (hidden() || !series || reloading) return;
     // Catch up right away; an in-flight poll reschedules itself.
     if (!polling) {
       clearTimer();
@@ -245,11 +288,9 @@ export function createLiveFeed(opts: LiveFeedOptions): LiveFeed {
   return {
     reset(base, req) {
       endGeneration();
-      series = base;
+      series = base && sortChannels(base);
       request = base ? req : null;
-      opts.onHistoryStatus(
-        base && !base.has_more ? { kind: "end" } : { kind: "idle" },
-      );
+      opts.onHistoryStatus(base ? historyStatusOf(base) : { kind: "idle" });
       if (!base) {
         opts.onPollStatus({ kind: "off" });
         opts.onSnapshot(null);
@@ -267,13 +308,17 @@ export function createLiveFeed(opts: LiveFeedOptions): LiveFeed {
     suspend() {
       endGeneration();
       opts.onPollStatus({ kind: "off" });
+      opts.onHistoryStatus({ kind: "idle" });
     },
 
     loadOlder() {
       if (!series || !request) return false;
       if (pageLoading) return true;
       const first = series.bars[0]?.t;
-      if (!series.has_more || first == null) return false;
+      if (!canPageBefore(series) || first == null) {
+        opts.onHistoryStatus(historyStatusOf(series));
+        return false;
+      }
       const my = gen;
       pageLoading = true;
       opts.onHistoryStatus({ kind: "loading" });
@@ -297,9 +342,7 @@ export function createLiveFeed(opts: LiveFeedOptions): LiveFeed {
               return;
             }
             series = r.series;
-            opts.onHistoryStatus(
-              series.has_more ? { kind: "idle" } : { kind: "end" },
-            );
+            opts.onHistoryStatus(historyStatusOf(series));
             emit({ version: ++version, kind: "older", count: r.count });
           },
           (err) => {

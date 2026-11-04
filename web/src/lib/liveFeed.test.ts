@@ -3,6 +3,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { SeriesPayload } from "../types/responses";
 import {
   FAST_POLL_MS,
+  MAX_CATCHUP_BARS,
+  MAX_HISTORY_BARS,
   PAGE_BARS,
   SLOW_POLL_MS,
   TAIL_BARS,
@@ -10,6 +12,7 @@ import {
   createLiveFeed,
   type FetchArgs,
   type HistoryStatus,
+  type LiveFeed,
   type LiveRequest,
   type LiveSnapshot,
   type PollStatus,
@@ -20,8 +23,15 @@ import {
 const BASE = 1_700_000_040; // on the 1m grid
 const tOf = (i: number) => BASE + i * 60;
 
+const range = (first: number, last: number) =>
+  Array.from({ length: Math.max(0, last - first + 1) }, (_, k) => first + k);
+
 function payload(first: number, last: number, has_more = true): SeriesPayload {
-  const idx = Array.from({ length: Math.max(0, last - first + 1) }, (_, k) => first + k);
+  return payloadOf(range(first, last), has_more);
+}
+
+/** A payload holding exactly the bars `idx` (gaps allowed: closed hours). */
+function payloadOf(idx: number[], has_more = true): SeriesPayload {
   return {
     symbol: "BTCUSDT",
     interval: "1m",
@@ -58,13 +68,16 @@ class FakeDoc extends EventTarget {
 
 const REQ: LiveRequest = { ticker: "BTCUSDT", timeframe: "1m", indicators: ["sma"] };
 
-function setup(fetchImpl = serve) {
+function setup(
+  fetchImpl = serve,
+  reloadImpl: (feed: LiveFeed) => Promise<void> = () => Promise.resolve(),
+) {
   const doc = new FakeDoc();
   const snapshots: Array<LiveSnapshot | null> = [];
   const polls: PollStatus[] = [];
   const history: HistoryStatus[] = [];
   const fetch = vi.fn(fetchImpl);
-  const reload = vi.fn(() => Promise.resolve());
+  const reload = vi.fn(() => reloadImpl(feed));
   const feed = createLiveFeed({
     fetch,
     reload,
@@ -196,8 +209,65 @@ describe("live tail polling", () => {
     await vi.advanceTimersByTimeAsync(FAST_POLL_MS);
     expect(t.reload).toHaveBeenCalledTimes(1);
     expect(t.polls).toContainEqual({ kind: "reloading" });
+    await vi.advanceTimersByTimeAsync(1); // the deferred failure check
     // The fake reload never resets the feed, so polling resumes backed off.
     expect(t.polls.at(-1)).toMatchObject({ kind: "retrying", inMs: 4_000 });
+  });
+
+  it("does not poll during a reload, and a landed reload shows no error", async () => {
+    let finish!: () => void;
+    const t = setup(serve, (feed) => {
+      // Like TanStack: the refetch promise settles, and the new data
+      // reaches App (reset) in a later task.
+      return new Promise<void>((res) => {
+        finish = () => {
+          res();
+          setTimeout(() => feed.reset(payload(4501, 5000), REQ), 0);
+        };
+      });
+    });
+    t.feed.reset(payload(501, 1000), REQ);
+    market.now = 5000;
+    await vi.advanceTimersByTimeAsync(FAST_POLL_MS);
+    expect(t.reload).toHaveBeenCalledTimes(1);
+    const calls = t.fetch.mock.calls.length;
+    t.doc.set("hidden");
+    t.doc.set("visible"); // would normally catch up at once
+    await vi.advanceTimersByTimeAsync(FAST_POLL_MS * 5);
+    expect(t.fetch.mock.calls.length).toBe(calls);
+
+    finish();
+    await vi.advanceTimersByTimeAsync(10);
+    expect(t.last()!.update.kind).toBe("reset");
+    expect(t.polls.some((p) => p.kind === "retrying")).toBe(false);
+    await vi.advanceTimersByTimeAsync(FAST_POLL_MS);
+    expect(t.polls.at(-1)).toEqual({ kind: "live", everyMs: FAST_POLL_MS });
+  });
+
+  it("tries one maximal tail before reloading a session market", async () => {
+    // A market closed between bar 1000 and bar 3000: by the clock ~2000
+    // bars are missing, but the real gap is two bars.
+    let open = [...range(0, 1000), 3000, 3001];
+    const t = setup((_r, args) => Promise.resolve(payloadOf(open.slice(-args.bars))));
+    t.feed.reset(payload(501, 1000), { ...REQ, ticker: "AAPL" });
+    await vi.advanceTimersByTimeAsync(SLOW_POLL_MS);
+    expect(t.fetch.mock.calls.map((c) => c[1].bars)).toEqual([2, MAX_CATCHUP_BARS]);
+    expect(t.reload).not.toHaveBeenCalled();
+    expect(t.last()!.series.bars.at(-1)!.t).toBe(tOf(3001));
+
+    // 1000 more bars after another break: the maximal tail cannot reach.
+    open = [...open, ...range(9000, 9999)];
+    await vi.advanceTimersByTimeAsync(SLOW_POLL_MS);
+    expect(t.fetch.mock.calls.slice(2).map((c) => c[1].bars)).toEqual([2, MAX_CATCHUP_BARS]);
+    expect(t.reload).toHaveBeenCalledTimes(1);
+  });
+
+  it("suspend resets the history status", () => {
+    const t = setup();
+    t.feed.reset(payload(501, 1000), REQ);
+    t.feed.loadOlder();
+    t.feed.suspend();
+    expect(t.history.at(-1)).toEqual({ kind: "idle" });
   });
 });
 
@@ -237,6 +307,32 @@ describe("history paging", () => {
     expect(t.feed.loadOlder()).toBe(true);
     await vi.advanceTimersByTimeAsync(0);
     expect(t.last()!.update).toMatchObject({ kind: "older", count: 500 });
+  });
+
+  it("stops at the history limit", async () => {
+    const t = setup();
+    t.feed.reset(payload(MAX_HISTORY_BARS * 2 - 500, MAX_HISTORY_BARS * 2), REQ);
+    market.now = MAX_HISTORY_BARS * 2;
+    // Page until the cap: 501 + 39 * 500 = 20001 bars.
+    for (let i = 0; i < 39; i++) {
+      expect(t.feed.loadOlder()).toBe(true);
+      await vi.advanceTimersByTimeAsync(0);
+    }
+    expect(t.last()!.series.bars.length).toBeGreaterThanOrEqual(MAX_HISTORY_BARS);
+    expect(t.history.at(-1)).toEqual({ kind: "limit" });
+    const calls = t.fetch.mock.calls.length;
+    expect(t.feed.loadOlder()).toBe(false);
+    expect(t.fetch.mock.calls.length).toBe(calls);
+  });
+
+  it("an empty page ends the history", async () => {
+    const t = setup(() => Promise.resolve(payload(1, 0, true)));
+    t.feed.reset(payload(501, 1000), REQ);
+    t.feed.loadOlder();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(t.last()!.update).toMatchObject({ kind: "older", count: 0 });
+    expect(t.history.at(-1)).toEqual({ kind: "end" });
+    expect(t.feed.loadOlder()).toBe(false);
   });
 
   it("starts at end when the full load has no more history", () => {
