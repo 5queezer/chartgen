@@ -18,6 +18,7 @@ import { IndicatorChips } from "./components/IndicatorChips";
 import { IndicatorPicker } from "./components/IndicatorPicker";
 import { IndicatorSettings } from "./components/IndicatorSettings";
 import { mergeParams } from "./lib/paramForm";
+import { PALETTES } from "./lib/theme";
 import { StatusLine, type Status } from "./components/StatusLine";
 import { Toolbar } from "./components/Toolbar";
 import {
@@ -44,12 +45,10 @@ import {
 import {
   addRecent,
   chartType,
+  theme,
   symbol,
   timeframe,
 } from "./stores/layout";
-
-// Matches `--color-bg` / the chart's PALETTE.bg so exported PNGs are not transparent.
-const SCREENSHOT_BACKGROUND = "#131722";
 
 export function App(): JSX.Element {
   // Long-lived session for the app's lifetime.
@@ -80,7 +79,7 @@ export function App(): JSX.Element {
     downloadChartImage(
       c,
       screenshotFilename(symbol(), timeframe(), new Date()),
-      SCREENSHOT_BACKGROUND,
+      PALETTES[theme()].bg,
     );
   };
 

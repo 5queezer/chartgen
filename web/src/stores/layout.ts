@@ -1,10 +1,11 @@
 // Toolbar layout state — symbol, timeframe, chart type, price-scale
-// mode and recent symbols. Solid signals backed by localStorage under the
+// mode, color theme and recent symbols. Solid signals backed by localStorage under the
 // `chartgen.layout.` prefix; every value is validated on load and falls
 // back to its default if missing or corrupt.
 
 import { createSignal } from "solid-js";
 
+import { applyTheme, THEME_NAMES, type ThemeName } from "../lib/theme";
 import { isTimeframe, type Timeframe } from "../lib/timeframe";
 
 export type ChartType = "candles" | "hollow" | "bars" | "line" | "area";
@@ -73,6 +74,19 @@ function isScaleMode(x: unknown): x is ScaleMode {
   return (SCALE_MODES as readonly unknown[]).includes(x);
 }
 
+function isThemeName(x: unknown): x is ThemeName {
+  return (THEME_NAMES as readonly unknown[]).includes(x);
+}
+
+/** Stored theme, else the OS preference on first load. */
+function initialTheme(stored: unknown): ThemeName {
+  if (isThemeName(stored)) return stored;
+  const prefersLight =
+    typeof matchMedia !== "undefined" &&
+    matchMedia("(prefers-color-scheme: light)").matches;
+  return prefersLight ? "light" : "dark";
+}
+
 function loadRecents(): string[] {
   const raw = read("recents");
   if (!Array.isArray(raw)) return [];
@@ -86,6 +100,7 @@ const storedSymbol = read("symbol");
 const storedTimeframe = read("timeframe");
 const storedChartType = read("chartType");
 const storedScaleMode = read("scaleMode");
+const storedTheme = read("theme");
 
 const [symbol, setSymbolSignal] = createSignal(
   normalizeSymbol(storedSymbol) ?? DEFAULT_SYMBOL,
@@ -99,6 +114,10 @@ const [chartType, setChartTypeSignal] = createSignal<ChartType>(
 const [scaleMode, setScaleModeSignal] = createSignal<ScaleMode>(
   isScaleMode(storedScaleMode) ? storedScaleMode : DEFAULT_SCALE_MODE,
 );
+const [theme, setThemeSignal] = createSignal<ThemeName>(
+  initialTheme(storedTheme),
+);
+if (typeof document !== "undefined") applyTheme(theme());
 // Auto-fit keeps the price axis fitted to the visible bars; it turns off
 // when the user drags the axis. Session-only: it starts on at every load
 // because a manual scale does not survive a reload.
@@ -111,6 +130,7 @@ export {
   timeframe,
   chartType,
   scaleMode,
+  theme,
   autoScale,
   setAutoScale,
   recentSymbols,
@@ -147,4 +167,10 @@ export function setChartType(next: ChartType): void {
 export function setScaleMode(next: ScaleMode): void {
   setScaleModeSignal(next);
   persist("scaleMode", next);
+}
+
+export function setTheme(next: ThemeName): void {
+  setThemeSignal(next);
+  if (typeof document !== "undefined") applyTheme(next);
+  persist("theme", next);
 }

@@ -28,8 +28,10 @@ import {
   chartType,
   setChartType,
   setSymbol,
+  setTheme,
   setTimeframe as storeSetTimeframe,
   symbol,
+  theme,
   timeframe,
   type ChartType,
 } from "../stores/layout";
@@ -306,6 +308,23 @@ export function Toolbar(props: ToolbarProps): JSX.Element {
       >
         <svg {...iconProps}>
           <path d="M3 9a6 6 0 1 0 2-4.5M3 2.5v3h3" stroke-linejoin="round" />
+        </svg>
+      </button>
+      <button
+        type="button"
+        class={buttonClass}
+        onClick={() => setTheme(theme() === "dark" ? "light" : "dark")}
+        aria-label={`Switch to ${theme() === "dark" ? "light" : "dark"} theme`}
+        title="Toggle light/dark theme"
+      >
+        <svg {...iconProps}>
+          <Show
+            when={theme() === "dark"}
+            fallback={<path d="M14.5 10.5A6 6 0 0 1 7.5 3.5a6 6 0 1 0 7 7z" stroke-linejoin="round" />}
+          >
+            <circle cx="9" cy="9" r="3" />
+            <path d="M9 1.5v2M9 14.5v2M1.5 9h2M14.5 9h2M3.7 3.7l1.4 1.4M12.9 12.9l1.4 1.4M3.7 14.3l1.4-1.4M12.9 5.1l1.4-1.4" />
+          </Show>
         </svg>
       </button>
       <Show when={document.fullscreenEnabled}>

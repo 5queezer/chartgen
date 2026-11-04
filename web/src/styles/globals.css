@@ -1,10 +1,9 @@
 @import "tailwindcss";
 
 /*
- * Dark-only theme per ADR-0003, with TradingView visual parity per
- * ADR-0006. Palette mirrors TradingView's dark theme (#131722 family)
- * so the UI reads as familiar to traders rather than as a generic
- * SaaS dashboard.
+ * TradingView visual parity per ADR-0006. These are the dark defaults
+ * (#131722 family); lib/theme.ts is the source of truth and overrides them
+ * at runtime for the light theme (ADR-0016). theme.test.ts keeps them in sync.
  */
 @theme {
   --color-bg: #131722;           /* chart + page background */
@@ -15,6 +14,11 @@
   --color-accent: #2962ff;       /* TV blue — primary buttons */
   --color-bull: #26a69a;         /* candle up */
   --color-bear: #ef5350;         /* candle down */
+  --color-grid: #2a2e39;         /* chart grid */
+  --color-crosshair: #787b86;    /* crosshair lines */
+  --color-label-bg: #1e222d;     /* crosshair axis labels */
+  --color-label-fg: #ffffff;
+  --color-neutral-fill: rgba(255, 255, 255, 0.15); /* neutral overlay fill */
 
   /* Back-compat aliases for components written against the v0.1 tokens. */
   --color-bg-elev: var(--color-surface);

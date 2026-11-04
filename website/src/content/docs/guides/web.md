@@ -40,10 +40,15 @@ chart stays on screen while the new one loads. There is no Load button; if a loa
   rows above the panes are not part of the image.
 - **Reset chart** (circular arrow) — scrolls to the latest bar and restores
   the default bar spacing. Same as `Alt+R`.
+- **Theme** (sun/moon) — switches between the dark and light themes
+  ([ADR-0016](/chartgen/decisions/0016-light-theme/)). The first visit follows
+  your OS color scheme. The chart, axes, crosshair, legends and screenshot
+  background all follow; colors sent by the server (indicator fills, lines)
+  stay as sent.
 - **Fullscreen** — hidden when the browser does not support it; toggles the browser Fullscreen API on the whole app;
   the chart resizes to fit.
 
-Symbol, timeframe, chart type, price-scale mode and recent symbols are saved in
+Symbol, timeframe, chart type, price-scale mode, theme and recent symbols are saved in
 `localStorage` (keys prefixed `chartgen.layout.`) and restored on reload.
 
 ## Chart conveniences

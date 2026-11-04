@@ -34,6 +34,8 @@ import {
   type DrawingRecord,
   type TimeAxis,
 } from "../stores/drawings";
+import { PALETTES } from "../lib/theme";
+import { theme } from "../stores/layout";
 
 // klinecharts has no rectangle; two corner points, drawn as a polygon
 // whose colors come from the overlay's `styles.polygon`.
@@ -81,8 +83,8 @@ registerOverlay({
       },
       styles: {
         style: "stroke_fill",
-        color: "#d1d4dc",
-        backgroundColor: "#1e222d",
+        color: PALETTES[theme()].fg,
+        backgroundColor: PALETTES[theme()].surface,
         borderColor: "#2962ff",
         size: 12,
         paddingLeft: 6,

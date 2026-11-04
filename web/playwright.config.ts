@@ -25,6 +25,8 @@ export default defineConfig({
   reporter: [["html", { open: "never" }], ["list"]],
   use: {
     baseURL: `http://localhost:${WEB_PORT}`,
+    // The theme defaults to the OS scheme; pin it so specs start dark.
+    colorScheme: "dark",
     trace: "on-first-retry",
     screenshot: "only-on-failure",
     video: "retain-on-failure",
