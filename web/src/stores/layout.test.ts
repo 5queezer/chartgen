@@ -145,4 +145,25 @@ describe("layout store", () => {
     s.setScaleMode("percentage");
     expect(data.get("chartgen.layout.scaleMode")).toBe('"percentage"');
   });
+
+  it("validates the stored theme and persists changes", async () => {
+    const data = stubStorage({ "chartgen.layout.theme": '"light"' });
+    let s = await load();
+    expect(s.theme()).toBe("light");
+    s.setTheme("dark");
+    expect(data.get("chartgen.layout.theme")).toBe('"dark"');
+
+    stubStorage({ "chartgen.layout.theme": '"neon"' });
+    s = await load();
+    expect(s.theme()).toBe("dark");
+  });
+
+  it("defaults to the OS color scheme when nothing is stored", async () => {
+    stubStorage();
+    vi.stubGlobal("matchMedia", (q: string) => ({
+      matches: q === "(prefers-color-scheme: light)",
+    }));
+    const s = await load();
+    expect(s.theme()).toBe("light");
+  });
 });

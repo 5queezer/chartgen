@@ -42,7 +42,8 @@ import {
 } from "klinecharts";
 
 import { indicatorName, type ActiveIndicator } from "../stores/indicators";
-import type { ChartType } from "../stores/layout";
+import { theme, type ChartType } from "../stores/layout";
+import { PALETTES, type Palette } from "../lib/theme";
 import type { SeriesPayload } from "../types/responses";
 import {
   barLegend,
@@ -64,19 +65,6 @@ import {
 } from "./geometry";
 import { PaneHeader, type PaneHeaderLine } from "./PaneHeader";
 import { PriceAxisControls } from "./PriceAxisControls";
-
-// TradingView-aligned palette. Kept in JS as well as CSS because
-// klinecharts draws to canvas and cannot resolve CSS variables.
-const PALETTE = {
-  bg: "#131722",
-  surface: "#1e222d",
-  border: "#2a2e39",
-  fg: "#d1d4dc",
-  fgDim: "#787b86",
-  accent: "#2962ff",
-  bull: "#26a69a",
-  bear: "#ef5350",
-} as const;
 
 const FONT_FAMILY = "Inter, system-ui, sans-serif";
 
@@ -416,146 +404,148 @@ function formatIndicatorParams(entry: ActiveIndicator): string | undefined {
   return parts.length > 0 ? `(${parts.join(", ")})` : undefined;
 }
 
-/** TradingView-style setStyles payload. Kept as a constant so future
- *  readers can see the whole styled surface in one place. */
-const TV_STYLES = {
-  grid: {
-    show: true,
-    horizontal: { show: true, color: PALETTE.border, size: 1 },
-    vertical: { show: true, color: PALETTE.border, size: 1 },
-  },
-  candle: {
-    bar: {
-      upColor: PALETTE.bull,
-      downColor: PALETTE.bear,
-      noChangeColor: PALETTE.fgDim,
-      upBorderColor: PALETTE.bull,
-      downBorderColor: PALETTE.bear,
-      noChangeBorderColor: PALETTE.fgDim,
-      upWickColor: PALETTE.bull,
-      downWickColor: PALETTE.bear,
-      noChangeWickColor: PALETTE.fgDim,
-    },
-    priceMark: {
+/** TradingView-style setStyles payload for a palette. Kept as one function so
+ *  future readers can see the whole styled surface in one place. */
+function tvStyles(p: Palette) {
+  return {
+    grid: {
       show: true,
-      high: { show: false, color: PALETTE.fg, textFamily: FONT_FAMILY },
-      low: { show: false, color: PALETTE.fg, textFamily: FONT_FAMILY },
-      last: {
+      horizontal: { show: true, color: p.grid, size: 1 },
+      vertical: { show: true, color: p.grid, size: 1 },
+    },
+    candle: {
+      bar: {
+        upColor: p.bull,
+        downColor: p.bear,
+        noChangeColor: p.fgMuted,
+        upBorderColor: p.bull,
+        downBorderColor: p.bear,
+        noChangeBorderColor: p.fgMuted,
+        upWickColor: p.bull,
+        downWickColor: p.bear,
+        noChangeWickColor: p.fgMuted,
+      },
+      priceMark: {
         show: true,
-        upColor: PALETTE.bull,
-        downColor: PALETTE.bear,
-        noChangeColor: PALETTE.accent,
+        high: { show: false, color: p.fg, textFamily: FONT_FAMILY },
+        low: { show: false, color: p.fg, textFamily: FONT_FAMILY },
+        last: {
+          show: true,
+          upColor: p.bull,
+          downColor: p.bear,
+          noChangeColor: p.accent,
+          line: {
+            show: true,
+            style: "dashed",
+            dashedValue: [4, 4],
+            size: 1,
+          },
+          text: {
+            show: true,
+            size: 12,
+            paddingLeft: 4,
+            paddingRight: 4,
+            paddingTop: 2,
+            paddingBottom: 2,
+            color: "#ffffff",
+            family: FONT_FAMILY,
+            weight: "500",
+            borderSize: 0,
+            borderColor: "transparent",
+            borderRadius: 2,
+          },
+        },
+      },
+      // Suppress the canvas-drawn candle tooltip — the DOM PaneHeader
+      // renders the readouts in a styled, consistent format.
+      tooltip: {
+        showRule: "none",
+        showType: "standard",
+      },
+    },
+    indicator: {
+      // Same story on the indicator side: the PaneHeader overlay is the
+      // single source of truth, so the canvas tooltip is silenced.
+      tooltip: {
+        showRule: "none",
+        showName: false,
+        showParams: false,
+      },
+      lastValueMark: {
+        show: false,
+      },
+    },
+    xAxis: {
+      axisLine: { show: true, color: p.border, size: 1 },
+      tickLine: { show: true, color: p.border, size: 1, length: 3 },
+      tickText: {
+        show: true,
+        color: p.fgMuted,
+        family: FONT_FAMILY,
+        weight: "400",
+        size: 11,
+      },
+    },
+    yAxis: {
+      axisLine: { show: true, color: p.border, size: 1 },
+      tickLine: { show: true, color: p.border, size: 1, length: 3 },
+      tickText: {
+        show: true,
+        color: p.fgMuted,
+        family: FONT_FAMILY,
+        weight: "400",
+        size: 11,
+      },
+    },
+    crosshair: {
+      show: true,
+      horizontal: {
+        show: true,
         line: {
           show: true,
           style: "dashed",
-          dashedValue: [4, 4],
+          dashedValue: [4, 2],
           size: 1,
+          color: p.crosshair,
         },
         text: {
           show: true,
-          size: 12,
-          paddingLeft: 4,
-          paddingRight: 4,
-          paddingTop: 2,
-          paddingBottom: 2,
-          color: "#ffffff",
+          color: p.labelFg,
+          size: 11,
           family: FONT_FAMILY,
-          weight: "500",
-          borderSize: 0,
-          borderColor: "transparent",
-          borderRadius: 2,
+          weight: "400",
+          backgroundColor: p.labelBg,
+          borderColor: p.border,
+        },
+      },
+      vertical: {
+        show: true,
+        line: {
+          show: true,
+          style: "dashed",
+          dashedValue: [4, 2],
+          size: 1,
+          color: p.crosshair,
+        },
+        text: {
+          show: true,
+          color: p.labelFg,
+          size: 11,
+          family: FONT_FAMILY,
+          weight: "400",
+          backgroundColor: p.labelBg,
+          borderColor: p.border,
         },
       },
     },
-    // Suppress the canvas-drawn candle tooltip — the DOM PaneHeader
-    // renders the readouts in a styled, consistent format.
-    tooltip: {
-      showRule: "none",
-      showType: "standard",
+    separator: {
+      size: 1,
+      color: p.border,
+      fill: true,
+      activeBackgroundColor: p.border,
     },
-  },
-  indicator: {
-    // Same story on the indicator side: the PaneHeader overlay is the
-    // single source of truth, so the canvas tooltip is silenced.
-    tooltip: {
-      showRule: "none",
-      showName: false,
-      showParams: false,
-    },
-    lastValueMark: {
-      show: false,
-    },
-  },
-  xAxis: {
-    axisLine: { show: true, color: PALETTE.border, size: 1 },
-    tickLine: { show: true, color: PALETTE.border, size: 1, length: 3 },
-    tickText: {
-      show: true,
-      color: PALETTE.fgDim,
-      family: FONT_FAMILY,
-      weight: "400",
-      size: 11,
-    },
-  },
-  yAxis: {
-    axisLine: { show: true, color: PALETTE.border, size: 1 },
-    tickLine: { show: true, color: PALETTE.border, size: 1, length: 3 },
-    tickText: {
-      show: true,
-      color: PALETTE.fgDim,
-      family: FONT_FAMILY,
-      weight: "400",
-      size: 11,
-    },
-  },
-  crosshair: {
-    show: true,
-    horizontal: {
-      show: true,
-      line: {
-        show: true,
-        style: "dashed",
-        dashedValue: [4, 2],
-        size: 1,
-        color: PALETTE.fgDim,
-      },
-      text: {
-        show: true,
-        color: "#ffffff",
-        size: 11,
-        family: FONT_FAMILY,
-        weight: "400",
-        backgroundColor: PALETTE.surface,
-        borderColor: PALETTE.border,
-      },
-    },
-    vertical: {
-      show: true,
-      line: {
-        show: true,
-        style: "dashed",
-        dashedValue: [4, 2],
-        size: 1,
-        color: PALETTE.fgDim,
-      },
-      text: {
-        show: true,
-        color: "#ffffff",
-        size: 11,
-        family: FONT_FAMILY,
-        weight: "400",
-        backgroundColor: PALETTE.surface,
-        borderColor: PALETTE.border,
-      },
-    },
-  },
-  separator: {
-    size: 1,
-    color: PALETTE.border,
-    fill: true,
-    activeBackgroundColor: PALETTE.border,
-  },
-} as const;
+  } as const;
+}
 
 const CANDLE_PANE_ID = "candle_pane";
 // Matches the two-decimal compact volume in the legend.
@@ -641,7 +631,7 @@ export function Chart(props: ChartProps): JSX.Element {
     const c = init(container, {
       // DeepPartial on purpose — we only override the leaves we care
       // about. klinecharts merges the rest from its default theme.
-      styles: TV_STYLES as never,
+      styles: tvStyles(PALETTES[untrack(theme)]) as never,
       customApi: { formatBigNumber },
     });
     setChart(c);
@@ -775,6 +765,11 @@ export function Chart(props: ChartProps): JSX.Element {
 
     setHeaders(next);
   };
+
+  // Repaint the canvas chrome on theme change; data is untouched.
+  createEffect(() => {
+    chart()?.setStyles(tvStyles(PALETTES[theme()]) as never);
+  });
 
   createEffect(() => {
     chart()?.setStyles({

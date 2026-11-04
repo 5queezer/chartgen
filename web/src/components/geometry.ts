@@ -13,6 +13,8 @@
 // older servers that omit `color`.
 
 import type { SeriesPayload } from "../types/responses";
+import { PALETTES } from "../lib/theme";
+import { theme } from "../stores/layout";
 
 export type SeriesIndicator = SeriesPayload["indicators"][string];
 export type SeriesFill = NonNullable<SeriesIndicator["fills"]>[number];
@@ -335,9 +337,9 @@ const single = (c: string): FillTheme => ({ up: c, down: c });
 
 // Cipher B / WaveTrend emit their fills in a fixed order: WT1/WT2 band,
 // VWAP-to-zero area, then (Cipher B only) Stoch K/D band.
-const WAVE_FILLS: FillTheme[] = [
+const waveFills = (): FillTheme[] => [
   single("rgba(73, 148, 236, 0.25)"),
-  single("rgba(255, 255, 255, 0.15)"),
+  single(PALETTES[theme()].neutralFill),
   single("rgba(33, 186, 243, 0.05)"),
 ];
 
@@ -358,7 +360,7 @@ export function fillTheme(name: string, index: number): FillTheme {
       return { up: "rgba(38, 166, 154, 0.20)", down: "rgba(239, 83, 80, 0.20)" };
     case "cipher_b":
     case "wavetrend":
-      return WAVE_FILLS[index] ?? single(BAND_FILL);
+      return waveFills()[index] ?? single(BAND_FILL);
     case "kalman":
     case "kalman_volume":
     case "kvf":
