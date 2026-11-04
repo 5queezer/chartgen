@@ -42,6 +42,7 @@ function toRow(section: string, s: SymbolEntry): Row {
 
 export function SymbolSearch(props: SymbolSearchProps): JSX.Element {
   let input!: HTMLInputElement;
+  let previouslyFocused: HTMLElement | null = null;
   const [query, setQuery] = createSignal("");
   const [active, setActive] = createSignal(0);
 
@@ -88,6 +89,7 @@ export function SymbolSearch(props: SymbolSearchProps): JSX.Element {
   };
 
   const onKeyDown = (e: KeyboardEvent) => {
+    if (e.isComposing) return;
     const n = rows().length;
     if (e.key === "ArrowDown") {
       e.preventDefault();
@@ -119,8 +121,16 @@ export function SymbolSearch(props: SymbolSearchProps): JSX.Element {
             class="pointer-events-auto w-full max-w-lg max-h-[70vh] flex flex-col bg-[color:var(--color-bg)] border border-[color:var(--color-border)] rounded-lg shadow-xl"
             onOpenAutoFocus={(e) => {
               e.preventDefault();
+              previouslyFocused =
+                document.activeElement instanceof HTMLElement
+                  ? document.activeElement
+                  : null;
               input.focus();
               input.setSelectionRange(input.value.length, input.value.length);
+            }}
+            onCloseAutoFocus={(e) => {
+              e.preventDefault();
+              previouslyFocused?.focus();
             }}
           >
             <div class="flex items-center justify-between px-4 pt-3">
@@ -141,6 +151,7 @@ export function SymbolSearch(props: SymbolSearchProps): JSX.Element {
                 role="combobox"
                 aria-expanded="true"
                 aria-controls="symbol-rows"
+                aria-activedescendant={`symbol-row-${active()}`}
                 aria-label="Search symbol or type any ticker"
                 autocomplete="off"
                 spellcheck={false}
@@ -171,6 +182,7 @@ export function SymbolSearch(props: SymbolSearchProps): JSX.Element {
                       </li>
                     </Show>
                     <li
+                      id={`symbol-row-${i()}`}
                       role="option"
                       data-symbol-row
                       aria-selected={i() === active()}

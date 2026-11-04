@@ -121,4 +121,66 @@ test.describe("toolbar", () => {
       page.getByRole("button", { name: "Chart type: Area" }),
     ).toBeVisible();
   });
+
+  test("Retry refetches after a failed load and the stale chart is cleared", async ({
+    bootedApp: page,
+  }) => {
+    let failNext = true;
+    await page.route("**/mcp", async (route) => {
+      const body = route.request().postData() ?? "";
+      if (failNext && body.includes('"generate_chart"')) {
+        failNext = false;
+        await route.fulfill({ status: 500, body: "boom" });
+        return;
+      }
+      await route.continue();
+    });
+
+    await page.getByRole("button", { name: "5m", exact: true }).click();
+    await expect(page.getByText(/^error:/)).toBeVisible({ timeout: 15_000 });
+    // The failed key has no data, so the old candles must not linger.
+    await expect(page.locator(".pane-header")).toHaveCount(0);
+
+    const call = chartCall(page, { timeframe: "5m" });
+    await page.getByRole("button", { name: "Retry" }).click();
+    await call;
+    await expectChartRendered(page);
+    await expect(page.getByText(/^error:/)).toHaveCount(0);
+  });
+
+  test("re-picking the active timeframe refetches", async ({
+    bootedApp: page,
+  }) => {
+    const call = chartCall(page, { timeframe: "1h" });
+    await page.getByRole("button", { name: "1h", exact: true }).click();
+    await call;
+  });
+
+  test("focus returns to the symbol button when the dialog closes", async ({
+    bootedApp: page,
+  }) => {
+    await symbolButton(page).click();
+    await expect(page.getByRole("combobox")).toBeFocused();
+    await page.keyboard.press("Escape");
+    await expect(symbolButton(page)).toBeFocused();
+  });
+
+  test("failed symbols are not saved as recents", async ({
+    bootedApp: page,
+  }) => {
+    await page.route("**/mcp", async (route) => {
+      const body = route.request().postData() ?? "";
+      if (body.includes('"generate_chart"') && body.includes('"TYPOUSDT"')) {
+        await route.fulfill({ status: 500, body: "boom" });
+        return;
+      }
+      await route.continue();
+    });
+    await symbolButton(page).click();
+    await page.getByRole("combobox").fill("typousdt");
+    await page.keyboard.press("Enter");
+    await expect(page.getByText(/^error:/)).toBeVisible({ timeout: 15_000 });
+    await symbolButton(page).click();
+    await expect(page.getByRole("option", { name: /TYPOUSDT/ })).toHaveCount(0);
+  });
 });

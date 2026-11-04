@@ -1,10 +1,12 @@
 // Top-level component. One screen: title, toolbar, status, chart.
 
 import {
+  createEffect,
   createMemo,
   createSignal,
   onCleanup,
   onMount,
+  untrack,
   type JSX,
 } from "solid-js";
 
@@ -21,7 +23,12 @@ import {
   activeIndicators,
   removeIndicator,
 } from "./stores/indicators";
-import { chartType, symbol, timeframe } from "./stores/layout";
+import {
+  addRecent,
+  chartType,
+  symbol,
+  timeframe,
+} from "./stores/layout";
 
 export function App(): JSX.Element {
   // Long-lived session for the app's lifetime.
@@ -52,6 +59,14 @@ export function App(): JSX.Element {
     enabled: authReady(),
   }));
 
+  // A symbol only becomes a "recent" once its data actually loaded, so
+  // typos never end up in the list.
+  createEffect(() => {
+    const loaded = query.isSuccess && !query.isPlaceholderData;
+    const current = symbol();
+    if (loaded) untrack(() => addRecent(current));
+  });
+
   // The indicator registry only changes between deploys, so this query
   // is cached forever. It fires as soon as auth is ready.
   const listIndicators = createListIndicatorsQuery(session, authReady);
@@ -74,7 +89,7 @@ export function App(): JSX.Element {
     <div class="flex flex-col h-screen w-screen">
       <header class="flex items-center gap-4 px-4 py-3 border-b border-[color:var(--color-border)]">
         <h1 class="text-lg font-semibold mr-4 leading-none">chartgen</h1>
-        <Toolbar />
+        <Toolbar onReselect={() => void query.refetch()} />
         <button
           type="button"
           onClick={() => setPickerOpen(true)}
@@ -85,7 +100,10 @@ export function App(): JSX.Element {
             {activeIndicators().length}
           </span>
         </button>
-        <StatusLine status={status()} />
+        <StatusLine
+          status={status()}
+          onRetry={() => void query.refetch()}
+        />
       </header>
       <IndicatorChips
         entries={activeIndicators()}

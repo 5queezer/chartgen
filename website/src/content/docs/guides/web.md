@@ -17,7 +17,8 @@ until the core loop is solid.
 
 The chart loads automatically as soon as sign-in finishes and reloads
 whenever the symbol, timeframe, or indicator set changes. The previous
-chart stays on screen while the new one loads. There is no Load button.
+chart stays on screen while the new one loads. There is no Load button; if a load fails, use **Retry** in the status line
+  or re-pick the current symbol or timeframe.
 
 - **Symbol** — the button shows the current ticker and opens the search
   dialog. It filters a curated list of Binance USDT pairs and popular US
@@ -28,8 +29,8 @@ chart stays on screen while the new one loads. There is no Load button.
   `ETH`, `BNB`, `USDC` or `FDUSD` are fetched from Binance, everything
   else from Yahoo Finance.
 - **Timeframe** — one-click buttons for 1m, 5m, 15m, 1h, 4h, 1D and 1W,
-  with the active one highlighted; the dropdown holds the rest (30m).
-- **Chart type** — Candles, Hollow candles, Bars (OHLC), Line, Area.
+  with the active one highlighted; the dropdown holds the rest (30m, 1M).
+- **Chart type** — Candles, Hollow candles (only up candles hollow), Bars (OHLC), Line, Area.
   Heikin-Ashi is not offered because it needs client-side math
   ([ADR-0003](/chartgen/decisions/0003-web-frontend-stack/)).
 
@@ -49,8 +50,9 @@ while typing in a field or while a dialog or menu is open.
 | `Enter` in the popup | Switch timeframe |
 
 The timeframe popup accepts a number of minutes (`5`, `15`, `60`, `240`)
-or a number with a unit `m`, `h`, `d`, `w` (`1h`, `4H`, `1D`); a lone
-`D` or `W` means one day or week. Only timeframes the backend serves are
+or a number with a unit `m`, `h`, `d`, `w` (`1h`, `4H`, `1D`); an
+uppercase `M` means month (`1M`), lowercase `m` minutes. A lone `D`, `W`
+or `M` means one day, week or month. Only timeframes the backend serves are
 accepted.
 
 ## Getting started

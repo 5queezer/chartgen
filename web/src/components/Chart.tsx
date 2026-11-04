@@ -414,7 +414,7 @@ interface HeaderState {
 /** klinecharts `candle` style overrides per toolbar chart type. */
 const CHART_TYPE_STYLES: Record<ChartType, object> = {
   candles: { type: "candle_solid" },
-  hollow: { type: "candle_stroke" },
+  hollow: { type: "candle_up_stroke" },
   bars: { type: "ohlc" },
   line: {
     type: "area",
@@ -622,7 +622,18 @@ export function Chart(props: ChartProps): JSX.Element {
   createEffect(() => {
     const c = chart();
     const series = props.series;
-    if (!c || !series) return;
+    if (!c) return;
+    if (!series) {
+      // Failed or cleared load: drop the stale candles and panes.
+      c.clearData();
+      const stale = untrack(paneIds);
+      for (const name of Object.keys(stale)) {
+        c.removeIndicator(stale[name]!, indicatorRegName(name));
+      }
+      setPaneIds({});
+      setHeaders([]);
+      return;
+    }
 
     // 1. Register any indicators we haven't seen before. Must happen
     //    before applyNewData so klinecharts's calc pipeline has the

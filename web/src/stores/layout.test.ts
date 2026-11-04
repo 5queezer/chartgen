@@ -70,23 +70,49 @@ describe("layout store", () => {
     expect(s.symbol()).toBe("ETH");
   });
 
-  it("dedupes recents, most recent first, capped at 10", async () => {
+  it("setSymbol does not touch recents; addRecent dedupes, newest first, capped at 10", async () => {
     stubStorage();
     const s = await load();
-    for (let i = 0; i < 12; i++) s.setSymbol(`SYM${i}`);
+    s.setSymbol("TYPO");
+    expect(s.recentSymbols()).toEqual([]);
+    for (let i = 0; i < 12; i++) s.addRecent(`SYM${i}`);
     expect(s.recentSymbols()).toHaveLength(10);
     expect(s.recentSymbols()[0]).toBe("SYM11");
-    s.setSymbol("SYM5");
+    s.addRecent("SYM5");
     expect(s.recentSymbols()[0]).toBe("SYM5");
     expect(s.recentSymbols().filter((x) => x === "SYM5")).toHaveLength(1);
     expect(s.recentSymbols()).toHaveLength(10);
   });
 
-  it("ignores blank symbols", async () => {
+  it("normalizes persisted symbol and recents on load", async () => {
+    stubStorage({
+      "chartgen.layout.symbol": '"  eth "',
+      "chartgen.layout.recents": JSON.stringify([
+        " aapl ",
+        "AAPL",
+        "bad symbol!",
+        "X".repeat(33),
+        "^gspc",
+        "",
+      ]),
+    });
+    const s = await load();
+    expect(s.symbol()).toBe("ETH");
+    expect(s.recentSymbols()).toEqual(["AAPL", "^GSPC"]);
+  });
+
+  it("rejects a persisted symbol with bad characters or length", async () => {
+    stubStorage({ "chartgen.layout.symbol": '"<script>"' });
+    expect((await load()).symbol()).toBe("BTCUSDT");
+    stubStorage({ "chartgen.layout.symbol": JSON.stringify("A".repeat(40)) });
+    expect((await load()).symbol()).toBe("BTCUSDT");
+  });
+
+  it("ignores blank or invalid symbols", async () => {
     stubStorage();
     const s = await load();
     s.setSymbol("   ");
+    s.setSymbol("no spaces");
     expect(s.symbol()).toBe("BTCUSDT");
-    expect(s.recentSymbols()).toEqual([]);
   });
 });

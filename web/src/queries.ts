@@ -58,7 +58,7 @@ export function createChartQuery(
       retry: (failureCount: number, error: Error) => {
         // The MCP wrapper re-auths once on 401, so any 401 that bubbles
         // out has already survived a retry. Drop the token defensively
-        // and let the user re-trigger manually.
+        // and let the user retry from the status line.
         if (/401|unauthoriz/i.test(error.message)) {
           clearAccessToken();
           return false;

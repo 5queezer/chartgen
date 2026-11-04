@@ -44,8 +44,15 @@ function persist(key: string, value: unknown): void {
   }
 }
 
-function isSymbol(x: unknown): x is string {
-  return typeof x === "string" && x.trim().length > 0;
+const MAX_SYMBOL_LENGTH = 32;
+const SYMBOL_CHARSET = /^[A-Z0-9.^=\-_/]+$/;
+
+/** Trim + uppercase; null if empty, too long, or has unexpected characters. */
+export function normalizeSymbol(x: unknown): string | null {
+  if (typeof x !== "string") return null;
+  const v = x.trim().toUpperCase();
+  if (v.length === 0 || v.length > MAX_SYMBOL_LENGTH) return null;
+  return SYMBOL_CHARSET.test(v) ? v : null;
 }
 
 function isChartType(x: unknown): x is ChartType {
@@ -55,7 +62,10 @@ function isChartType(x: unknown): x is ChartType {
 function loadRecents(): string[] {
   const raw = read("recents");
   if (!Array.isArray(raw)) return [];
-  return [...new Set(raw.filter(isSymbol))].slice(0, MAX_RECENTS);
+  const normalized = raw
+    .map(normalizeSymbol)
+    .filter((s): s is string => s !== null);
+  return [...new Set(normalized)].slice(0, MAX_RECENTS);
 }
 
 const storedSymbol = read("symbol");
@@ -63,7 +73,7 @@ const storedTimeframe = read("timeframe");
 const storedChartType = read("chartType");
 
 const [symbol, setSymbolSignal] = createSignal(
-  isSymbol(storedSymbol) ? storedSymbol : DEFAULT_SYMBOL,
+  normalizeSymbol(storedSymbol) ?? DEFAULT_SYMBOL,
 );
 const [timeframe, setTimeframeSignal] = createSignal<Timeframe>(
   isTimeframe(storedTimeframe) ? storedTimeframe : DEFAULT_TIMEFRAME,
@@ -76,12 +86,16 @@ const [recentSymbols, setRecentSymbolsSignal] =
 
 export { symbol, timeframe, chartType, recentSymbols };
 
-/** Select a symbol (uppercased) and move it to the front of the recents. */
+/** Select a symbol; invalid input is ignored. Recents are added separately. */
 export function setSymbol(next: string): void {
-  const value = next.trim().toUpperCase();
-  if (value === "") return;
+  const value = normalizeSymbol(next);
+  if (value === null) return;
   setSymbolSignal(value);
   persist("symbol", value);
+}
+
+/** Move a symbol that loaded successfully to the front of the recents. */
+export function addRecent(value: string): void {
   const recents = [
     value,
     ...recentSymbols().filter((s) => s !== value),

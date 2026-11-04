@@ -19,12 +19,17 @@ describe("parseTimeframe", () => {
     ["W", "1wk"],
     ["1w", "1wk"],
     ["24h", "1d"],
+    ["M", "1mo"],
+    ["1M", "1mo"],
+    ["1mo", "1mo"],
+    ["1MO", "1mo"],
+    ["1m", "1m"],
     [" 15 ", "15m"],
   ])("%s -> %s", (input, expected) => {
     expect(parseTimeframe(input)).toBe(expected);
   });
 
-  it.each(["", "h", "m", "7", "2h", "abc", "1x", "-5", "1.5"])(
+  it.each(["", "h", "m", "7", "2M", "2h", "abc", "1x", "-5", "1.5"])(
     "rejects %j",
     (input) => {
       expect(parseTimeframe(input)).toBeNull();

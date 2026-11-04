@@ -26,7 +26,7 @@ import {
   chartType,
   setChartType,
   setSymbol,
-  setTimeframe,
+  setTimeframe as storeSetTimeframe,
   symbol,
   timeframe,
   type ChartType,
@@ -116,7 +116,21 @@ function shouldIgnoreKey(e: KeyboardEvent): boolean {
   return document.querySelector("[role=dialog], [role=menu]") !== null;
 }
 
-export function Toolbar(): JSX.Element {
+export interface ToolbarProps {
+  /** Called when the user picks the symbol or timeframe that is already active. */
+  onReselect: () => void;
+}
+
+export function Toolbar(props: ToolbarProps): JSX.Element {
+  // Re-picking the current value refetches, so users can retry after an error.
+  const setTimeframe = (tf: Timeframe) => {
+    if (tf === timeframe()) props.onReselect();
+    else storeSetTimeframe(tf);
+  };
+  const selectSymbol = (next: string) => {
+    if (next.trim().toUpperCase() === symbol()) props.onReselect();
+    else setSymbol(next);
+  };
   const [searchOpen, setSearchOpen] = createSignal(false);
   const [searchSeed, setSearchSeed] = createSignal("");
   const [tfOpen, setTfOpen] = createSignal(false);
@@ -191,7 +205,11 @@ export function Toolbar(): JSX.Element {
             class={`${buttonClass} ${
               overflow.includes(timeframe()) ? activeClass : ""
             }`}
-            aria-label="More timeframes"
+            aria-label={
+              overflow.includes(timeframe())
+                ? `More timeframes (current: ${timeframeLabel(timeframe())})`
+                : "More timeframes"
+            }
           >
             <Show when={overflow.includes(timeframe())}>
               {timeframeLabel(timeframe())}
@@ -253,12 +271,13 @@ export function Toolbar(): JSX.Element {
         open={searchOpen()}
         onOpenChange={setSearchOpen}
         initialQuery={searchSeed()}
-        onSelect={setSymbol}
+        onSelect={selectSymbol}
       />
       <TimeframeEntry
         open={tfOpen()}
         onOpenChange={setTfOpen}
         initialValue={tfSeed()}
+        onSelect={setTimeframe}
       />
     </div>
   );
@@ -268,11 +287,13 @@ interface TimeframeEntryProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   initialValue: string;
+  onSelect: (tf: Timeframe) => void;
 }
 
 /** Small popup: type `15`, `4h`, `D`... and press Enter to switch timeframe. */
 function TimeframeEntry(props: TimeframeEntryProps): JSX.Element {
   let input!: HTMLInputElement;
+  let previouslyFocused: HTMLElement | null = null;
   const [value, setValue] = createSignal("");
   const parsed = () => parseTimeframe(value());
 
@@ -285,10 +306,18 @@ function TimeframeEntry(props: TimeframeEntryProps): JSX.Element {
             class="pointer-events-auto w-64 bg-[color:var(--color-bg)] border border-[color:var(--color-border)] rounded-lg shadow-xl p-4"
             onOpenAutoFocus={(e) => {
               e.preventDefault();
+              previouslyFocused =
+                document.activeElement instanceof HTMLElement
+                  ? document.activeElement
+                  : null;
               setValue(props.initialValue);
               input.value = props.initialValue;
               input.focus();
               input.setSelectionRange(input.value.length, input.value.length);
+            }}
+            onCloseAutoFocus={(e) => {
+              e.preventDefault();
+              previouslyFocused?.focus();
             }}
           >
             <Dialog.Title class="text-sm font-semibold mb-2">
@@ -307,7 +336,7 @@ function TimeframeEntry(props: TimeframeEntryProps): JSX.Element {
                 e.preventDefault();
                 const tf = parsed();
                 if (tf === null) return;
-                setTimeframe(tf);
+                props.onSelect(tf);
                 props.onOpenChange(false);
               }}
               class={`w-full bg-[color:var(--color-bg-elev)] border rounded-md px-3 py-2 text-sm text-[color:var(--color-fg)] focus:outline-none ${
