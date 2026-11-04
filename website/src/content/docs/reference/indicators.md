@@ -407,6 +407,29 @@ ZigZag — connects confirmed swing pivots that differ by at least the deviation
 | [`volume`](#volume) |  |
 | [`aroon`](#aroon) |  |
 | [`vortex`](#vortex) |  |
+| [`stoch_rsi`](#stoch_rsi) | `stochrsi` |
+| [`awesome_oscillator`](#awesome_oscillator) | `ao` |
+| [`momentum`](#momentum) | `mom` |
+| [`trix`](#trix) |  |
+| [`ultimate_oscillator`](#ultimate_oscillator) | `uo` |
+| [`ppo`](#ppo) | `price_oscillator` |
+| [`cmo`](#cmo) |  |
+| [`dpo`](#dpo) |  |
+| [`elder_force_index`](#elder_force_index) | `efi` |
+| [`tsi`](#tsi) |  |
+| [`kst`](#kst) |  |
+| [`coppock`](#coppock) | `coppock_curve` |
+| [`mass_index`](#mass_index) | `mi` |
+| [`bb_percent_b`](#bb_percent_b) | `percent_b`, `bbp` |
+| [`bb_width`](#bb_width) | `bbw`, `bandwidth` |
+| [`choppiness`](#choppiness) | `chop` |
+| [`fisher_transform`](#fisher_transform) | `fisher` |
+| [`ease_of_movement`](#ease_of_movement) | `eom` |
+| [`volume_oscillator`](#volume_oscillator) | `vol_osc` |
+| [`balance_of_power`](#balance_of_power) | `bop` |
+| [`rvi`](#rvi) | `relative_vigor_index` |
+| [`smi_ergodic`](#smi_ergodic) | `smi` |
+| [`connors_rsi`](#connors_rsi) | `crsi`, `connors` |
 
 ### `cipher_b`
 
@@ -667,6 +690,342 @@ Vortex Indicator — VI+ and VI- trend direction lines
 | `length` | `integer` | `14` | Vortex length |
 
 ![vortex sample render](../../../assets/indicators/vortex.png)
+
+### `stoch_rsi`
+
+Stochastic RSI (TradingView): ta.stoch of RSI, smoothed K and D (0-100)
+
+**Aliases:** `stochrsi`
+
+**Parameters:**
+
+| Param | Type | Default | Description |
+|-------|------|---------|-------------|
+| `smooth_k` | `integer` | `3` | %K smoothing (SMA) |
+| `smooth_d` | `integer` | `3` | %D smoothing (SMA of %K) |
+| `rsi_length` | `integer` | `14` | RSI period |
+| `stoch_length` | `integer` | `14` | Stochastic lookback applied to RSI |
+
+![stoch_rsi sample render](../../../assets/indicators/stoch_rsi.png)
+
+### `awesome_oscillator`
+
+Awesome Oscillator: SMA(hl2,5) - SMA(hl2,34) histogram, green when rising
+
+**Aliases:** `ao`
+
+**Parameters:**
+
+| Param | Type | Default | Description |
+|-------|------|---------|-------------|
+| `fast` | `integer` | `5` | Fast SMA of hl2 |
+| `slow` | `integer` | `34` | Slow SMA of hl2 |
+
+![awesome_oscillator sample render](../../../assets/indicators/awesome_oscillator.png)
+
+### `momentum`
+
+Momentum: close - close[length]
+
+**Aliases:** `mom`
+
+**Parameters:**
+
+| Param | Type | Default | Description |
+|-------|------|---------|-------------|
+| `length` | `integer` | `10` | Bars back |
+
+![momentum sample render](../../../assets/indicators/momentum.png)
+
+### `trix`
+
+TRIX: 10000 * change of triple-smoothed EMA of log(close)
+
+**Parameters:**
+
+| Param | Type | Default | Description |
+|-------|------|---------|-------------|
+| `length` | `integer` | `18` | EMA length (applied three times) |
+
+![trix sample render](../../../assets/indicators/trix.png)
+
+### `ultimate_oscillator`
+
+Ultimate Oscillator (Larry Williams): weighted 7/14/28 buying-pressure ratios (0-100)
+
+**Aliases:** `uo`
+
+**Parameters:**
+
+| Param | Type | Default | Description |
+|-------|------|---------|-------------|
+| `fast` | `integer` | `7` | Fast length |
+| `middle` | `integer` | `14` | Middle length |
+| `slow` | `integer` | `28` | Slow length |
+
+![ultimate_oscillator sample render](../../../assets/indicators/ultimate_oscillator.png)
+
+### `ppo`
+
+Price Oscillator (TradingView): (short MA - long MA) / long MA * 100, MA type ema or sma
+
+**Aliases:** `price_oscillator`
+
+**Parameters:**
+
+| Param | Type | Default | Description |
+|-------|------|---------|-------------|
+| `short` | `integer` | `10` | Short moving-average length |
+| `long` | `integer` | `21` | Long moving-average length |
+| `type` | `string` | `ema` | Moving average type |
+
+![ppo sample render](../../../assets/indicators/ppo.png)
+
+### `cmo`
+
+Chande Momentum Oscillator (-100 to 100)
+
+**Parameters:**
+
+| Param | Type | Default | Description |
+|-------|------|---------|-------------|
+| `length` | `integer` | `9` | Lookback |
+
+![cmo sample render](../../../assets/indicators/cmo.png)
+
+### `dpo`
+
+Detrended Price Oscillator: close - SMA shifted back length/2+1 bars
+
+**Parameters:**
+
+| Param | Type | Default | Description |
+|-------|------|---------|-------------|
+| `length` | `integer` | `21` | SMA length |
+
+![dpo sample render](../../../assets/indicators/dpo.png)
+
+### `elder_force_index`
+
+Elder Force Index: EMA of change(close) * volume
+
+**Aliases:** `efi`
+
+**Parameters:**
+
+| Param | Type | Default | Description |
+|-------|------|---------|-------------|
+| `length` | `integer` | `13` | EMA length |
+
+![elder_force_index sample render](../../../assets/indicators/elder_force_index.png)
+
+### `tsi`
+
+True Strength Index: double-smoothed momentum ratio (x100) with signal
+
+**Parameters:**
+
+| Param | Type | Default | Description |
+|-------|------|---------|-------------|
+| `long` | `integer` | `25` | Long (first) smoothing |
+| `short` | `integer` | `13` | Short (second) smoothing |
+| `signal` | `integer` | `13` | Signal EMA length |
+
+![tsi sample render](../../../assets/indicators/tsi.png)
+
+### `kst`
+
+Know Sure Thing: weighted sum of four smoothed rates of change, with signal
+
+**Parameters:**
+
+| Param | Type | Default | Description |
+|-------|------|---------|-------------|
+| `roc1` | `integer` | `10` | ROC length 1 |
+| `roc2` | `integer` | `15` | ROC length 2 |
+| `roc3` | `integer` | `20` | ROC length 3 |
+| `roc4` | `integer` | `30` | ROC length 4 |
+| `sma1` | `integer` | `10` | SMA length 1 |
+| `sma2` | `integer` | `10` | SMA length 2 |
+| `sma3` | `integer` | `10` | SMA length 3 |
+| `sma4` | `integer` | `15` | SMA length 4 |
+| `signal` | `integer` | `9` | Signal SMA length |
+
+![kst sample render](../../../assets/indicators/kst.png)
+
+### `coppock`
+
+Coppock Curve: WMA of ROC(long) + ROC(short)
+
+**Aliases:** `coppock_curve`
+
+**Parameters:**
+
+| Param | Type | Default | Description |
+|-------|------|---------|-------------|
+| `wma_length` | `integer` | `10` | WMA length |
+| `long_roc` | `integer` | `14` | Long ROC length |
+| `short_roc` | `integer` | `11` | Short ROC length |
+
+![coppock sample render](../../../assets/indicators/coppock.png)
+
+### `mass_index`
+
+Mass Index: rolling sum of EMA(high-low,9) / EMA(EMA(high-low,9),9)
+
+**Aliases:** `mi`
+
+**Parameters:**
+
+| Param | Type | Default | Description |
+|-------|------|---------|-------------|
+| `length` | `integer` | `10` | Summation length |
+
+![mass_index sample render](../../../assets/indicators/mass_index.png)
+
+### `bb_percent_b`
+
+Bollinger %B: (close - lower) / (upper - lower)
+
+**Aliases:** `percent_b`, `bbp`
+
+**Parameters:**
+
+| Param | Type | Default | Description |
+|-------|------|---------|-------------|
+| `length` | `integer` | `20` | SMA / stdev length |
+| `mult` | `number` | `2.0` | Standard deviation multiplier |
+
+![bb_percent_b sample render](../../../assets/indicators/bb_percent_b.png)
+
+### `bb_width`
+
+Bollinger Bands Width: 100 * (upper - lower) / basis, with Highest Expansion and Lowest Contraction
+
+**Aliases:** `bbw`, `bandwidth`
+
+**Parameters:**
+
+| Param | Type | Default | Description |
+|-------|------|---------|-------------|
+| `length` | `integer` | `20` | SMA / stdev length |
+| `mult` | `number` | `2.0` | Standard deviation multiplier |
+| `highest_expansion` | `integer` | `125` | Highest Expansion lookback |
+| `lowest_contraction` | `integer` | `125` | Lowest Contraction lookback |
+
+![bb_width sample render](../../../assets/indicators/bb_width.png)
+
+### `choppiness`
+
+Choppiness Index (0-100): high = sideways, low = trending
+
+**Aliases:** `chop`
+
+**Parameters:**
+
+| Param | Type | Default | Description |
+|-------|------|---------|-------------|
+| `length` | `integer` | `14` | Lookback |
+
+![choppiness sample render](../../../assets/indicators/choppiness.png)
+
+### `fisher_transform`
+
+Fisher Transform of hl2 with trigger line
+
+**Aliases:** `fisher`
+
+**Parameters:**
+
+| Param | Type | Default | Description |
+|-------|------|---------|-------------|
+| `length` | `integer` | `9` | Highest/lowest lookback of hl2 |
+
+![fisher_transform sample render](../../../assets/indicators/fisher_transform.png)
+
+### `ease_of_movement`
+
+Ease of Movement: SMA of 10000 * change(hl2) * (high-low) / volume
+
+**Aliases:** `eom`
+
+**Parameters:**
+
+| Param | Type | Default | Description |
+|-------|------|---------|-------------|
+| `length` | `integer` | `14` | SMA length |
+| `divisor` | `integer` | `10000` | Scaling divisor |
+
+![ease_of_movement sample render](../../../assets/indicators/ease_of_movement.png)
+
+### `volume_oscillator`
+
+Volume Oscillator: 100 * (EMA fast vol - EMA slow vol) / EMA slow vol
+
+**Aliases:** `vol_osc`
+
+**Parameters:**
+
+| Param | Type | Default | Description |
+|-------|------|---------|-------------|
+| `short` | `integer` | `5` | Short volume EMA |
+| `long` | `integer` | `10` | Long volume EMA |
+
+![volume_oscillator sample render](../../../assets/indicators/volume_oscillator.png)
+
+### `balance_of_power`
+
+Balance of Power: (close - open) / (high - low)
+
+**Aliases:** `bop`
+
+![balance_of_power sample render](../../../assets/indicators/balance_of_power.png)
+
+### `rvi`
+
+Relative Vigor Index: SWMA(close-open) / SWMA(high-low) sums, with signal
+
+**Aliases:** `relative_vigor_index`
+
+**Parameters:**
+
+| Param | Type | Default | Description |
+|-------|------|---------|-------------|
+| `length` | `integer` | `10` | Summation length |
+
+![rvi sample render](../../../assets/indicators/rvi.png)
+
+### `smi_ergodic`
+
+SMI Ergodic Indicator: ta.tsi ratio with signal and oscillator histogram
+
+**Aliases:** `smi`
+
+**Parameters:**
+
+| Param | Type | Default | Description |
+|-------|------|---------|-------------|
+| `long` | `integer` | `20` | Long (first) smoothing |
+| `short` | `integer` | `5` | Short (second) smoothing |
+| `signal` | `integer` | `5` | Signal EMA length |
+
+![smi_ergodic sample render](../../../assets/indicators/smi_ergodic.png)
+
+### `connors_rsi`
+
+Connors RSI: average of RSI, streak RSI and percent rank of ROC(1) (0-100)
+
+**Aliases:** `crsi`, `connors`
+
+**Parameters:**
+
+| Param | Type | Default | Description |
+|-------|------|---------|-------------|
+| `rsi_length` | `integer` | `3` | RSI length |
+| `updown_length` | `integer` | `2` | Streak RSI length |
+| `roc_length` | `integer` | `100` | Percent-rank lookback |
+
+![connors_rsi sample render](../../../assets/indicators/connors_rsi.png)
 
 ## External
 

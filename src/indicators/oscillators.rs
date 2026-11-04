@@ -11,168 +11,14 @@
 //!
 //! Warmup values are NaN (serialized as null), never 0.
 
+use super::pine::{
+    change_n, div, ema_n, finite_or_nan, gains_losses, highest, hist, line, lowest, nan_max,
+    nan_min, percentrank, roc, rsi, sma_n, stdev, stoch, sum_n, swma, true_range, wma_n, zip,
+};
 use crate::data::OhlcvData;
-use crate::indicator::*;
+use crate::indicator::{rgba, Bars, HLine, Indicator, PanelResult};
 use serde_json::{json, Value};
 
-// ---- Pine-style series helpers ----
-
-fn rolling(x: &[f64], len: usize, f: impl Fn(&[f64]) -> f64) -> Vec<f64> {
-    let mut out = vec![f64::NAN; x.len()];
-    if len == 0 {
-        return out;
-    }
-    for i in (len - 1)..x.len() {
-        let w = &x[i + 1 - len..=i];
-        if w.iter().all(|v| !v.is_nan()) {
-            out[i] = f(w);
-        }
-    }
-    out
-}
-
-fn p_sum(x: &[f64], len: usize) -> Vec<f64> {
-    rolling(x, len, |w| w.iter().sum())
-}
-fn p_sma(x: &[f64], len: usize) -> Vec<f64> {
-    rolling(x, len, |w| w.iter().sum::<f64>() / w.len() as f64)
-}
-fn p_highest(x: &[f64], len: usize) -> Vec<f64> {
-    rolling(x, len, |w| {
-        w.iter().cloned().fold(f64::NEG_INFINITY, f64::max)
-    })
-}
-fn p_lowest(x: &[f64], len: usize) -> Vec<f64> {
-    rolling(x, len, |w| w.iter().cloned().fold(f64::INFINITY, f64::min))
-}
-/// Population standard deviation (Pine `ta.stdev`, biased = true).
-fn p_stdev(x: &[f64], len: usize) -> Vec<f64> {
-    rolling(x, len, |w| {
-        let m = w.iter().sum::<f64>() / w.len() as f64;
-        (w.iter().map(|v| (v - m) * (v - m)).sum::<f64>() / w.len() as f64).sqrt()
-    })
-}
-/// Pine `ta.wma`: weights 1..len, newest bar heaviest.
-fn p_wma(x: &[f64], len: usize) -> Vec<f64> {
-    rolling(x, len, |w| {
-        let den = (w.len() * (w.len() + 1)) as f64 / 2.0;
-        w.iter()
-            .enumerate()
-            .map(|(k, v)| v * (k + 1) as f64)
-            .sum::<f64>()
-            / den
-    })
-}
-/// Pine `ta.swma`: (x[3] + 2*x[2] + 2*x[1] + x[0]) / 6.
-fn p_swma(x: &[f64]) -> Vec<f64> {
-    rolling(x, 4, |w| (w[0] + 2.0 * w[1] + 2.0 * w[2] + w[3]) / 6.0)
-}
-fn recursive(x: &[f64], len: usize, alpha: f64) -> Vec<f64> {
-    let seed = p_sma(x, len);
-    let mut out = vec![f64::NAN; x.len()];
-    for i in 0..x.len() {
-        let prev = if i > 0 { out[i - 1] } else { f64::NAN };
-        out[i] = if prev.is_nan() {
-            seed[i]
-        } else {
-            alpha * x[i] + (1.0 - alpha) * prev
-        };
-    }
-    out
-}
-fn p_ema(x: &[f64], len: usize) -> Vec<f64> {
-    recursive(x, len, 2.0 / (len as f64 + 1.0))
-}
-fn p_rma(x: &[f64], len: usize) -> Vec<f64> {
-    recursive(x, len, 1.0 / len as f64)
-}
-/// Pine `math.max(x, 0)` / `-math.min(x, 0)`: na stays na (Rust's f64::max would swallow NaN).
-fn gains_losses(ch: &[f64]) -> (Vec<f64>, Vec<f64>) {
-    let g = |f: fn(f64) -> f64| {
-        ch.iter()
-            .map(|&c| if c.is_nan() { c } else { f(c) })
-            .collect()
-    };
-    (g(|c| c.max(0.0)), g(|c| (-c).max(0.0)))
-}
-/// `x - x[k]`
-fn change_n(x: &[f64], k: usize) -> Vec<f64> {
-    (0..x.len())
-        .map(|i| if i >= k { x[i] - x[i - k] } else { f64::NAN })
-        .collect()
-}
-/// Pine `ta.roc`: 100 * (x - x[k]) / x[k]
-fn p_roc(x: &[f64], k: usize) -> Vec<f64> {
-    (0..x.len())
-        .map(|i| {
-            if i >= k {
-                100.0 * (x[i] - x[i - k]) / x[i - k]
-            } else {
-                f64::NAN
-            }
-        })
-        .collect()
-}
-fn p_rsi(x: &[f64], len: usize) -> Vec<f64> {
-    let ch = change_n(x, 1);
-    let (up, dn) = gains_losses(&ch);
-    let (u, d) = (p_rma(&up, len), p_rma(&dn, len));
-    (0..x.len())
-        .map(|i| {
-            if u[i].is_nan() || d[i].is_nan() {
-                f64::NAN
-            } else if d[i] == 0.0 {
-                100.0
-            } else if u[i] == 0.0 {
-                0.0
-            } else {
-                100.0 - 100.0 / (1.0 + u[i] / d[i])
-            }
-        })
-        .collect()
-}
-/// Pine `ta.stoch(src, high, low, len)`; zero range -> NaN (division by zero).
-fn p_stoch(src: &[f64], high: &[f64], low: &[f64], len: usize) -> Vec<f64> {
-    let (hh, ll) = (p_highest(high, len), p_lowest(low, len));
-    (0..src.len())
-        .map(|i| {
-            let r = hh[i] - ll[i];
-            if r > 0.0 {
-                100.0 * (src[i] - ll[i]) / r
-            } else {
-                f64::NAN
-            }
-        })
-        .collect()
-}
-fn zip(a: &[f64], b: &[f64], f: impl Fn(f64, f64) -> f64) -> Vec<f64> {
-    a.iter().zip(b).map(|(&x, &y)| f(x, y)).collect()
-}
-/// `x / y` with a zero denominator -> NaN (Pine yields na/inf; we keep NaN).
-fn div(a: &[f64], b: &[f64]) -> Vec<f64> {
-    zip(a, b, |x, y| if y == 0.0 { f64::NAN } else { x / y })
-}
-fn finite_or_nan(v: Vec<f64>) -> Vec<f64> {
-    v.into_iter()
-        .map(|x| if x.is_finite() { x } else { f64::NAN })
-        .collect()
-}
-/// Pine `ta.tr(true)`: first bar is high - low.
-fn true_range(d: &OhlcvData) -> Vec<f64> {
-    (0..d.len())
-        .map(|i| {
-            let b = &d.bars[i];
-            if i == 0 {
-                b.high - b.low
-            } else {
-                let pc = d.bars[i - 1].close;
-                (b.high - b.low)
-                    .max((b.high - pc).abs())
-                    .max((b.low - pc).abs())
-            }
-        })
-        .collect()
-}
 /// Connors RSI streak: consecutive up (+n) / down (-n) closes, 0 when equal.
 /// Mirrors the TV script, including bar 0 (`s[1]` is na, so it counts as down).
 fn updown(s: &[f64]) -> Vec<f64> {
@@ -200,24 +46,13 @@ fn updown(s: &[f64]) -> Vec<f64> {
     }
     out
 }
-/// Pine `ta.percentrank`: share of the previous `len` values <= current.
-fn p_percentrank(x: &[f64], len: usize) -> Vec<f64> {
-    let mut out = vec![f64::NAN; x.len()];
-    for i in len..x.len() {
-        let w = &x[i - len..i];
-        if !x[i].is_nan() && w.iter().all(|v| !v.is_nan()) {
-            out[i] = 100.0 * w.iter().filter(|&&v| v <= x[i]).count() as f64 / len as f64;
-        }
-    }
-    out
-}
 /// Pine `ta.tsi` ratio: ema(ema(pc, long), short) / ema(ema(|pc|, long), short).
 fn tsi_ratio(c: &[f64], short: usize, long: usize) -> Vec<f64> {
     let pc = change_n(c, 1);
     let ab: Vec<f64> = pc.iter().map(|v| v.abs()).collect();
     div(
-        &p_ema(&p_ema(&pc, long), short),
-        &p_ema(&p_ema(&ab, long), short),
+        &ema_n(&ema_n(&pc, long), short),
+        &ema_n(&ema_n(&ab, long), short),
     )
 }
 
@@ -321,6 +156,7 @@ impl Kind {
             Kind::AwesomeOscillator => &["ao"],
             Kind::Momentum => &["mom"],
             Kind::UltimateOscillator => &["uo"],
+            Kind::Ppo => &["price_oscillator"],
             Kind::ElderForceIndex => &["efi"],
             Kind::Coppock => &["coppock_curve"],
             Kind::MassIndex => &["mi"],
@@ -384,7 +220,7 @@ impl Kind {
                 "Ultimate Oscillator (Larry Williams): weighted 7/14/28 buying-pressure ratios (0-100)"
             }
             Kind::Ppo => {
-                "Percentage Price Oscillator: (EMA fast - EMA slow) / EMA slow * 100, with signal and histogram"
+                "Price Oscillator (TradingView): (short MA - long MA) / long MA * 100, MA type ema or sma"
             }
             Kind::Cmo => "Chande Momentum Oscillator (-100 to 100)",
             Kind::Dpo => "Detrended Price Oscillator: close - SMA shifted back length/2+1 bars",
@@ -398,7 +234,7 @@ impl Kind {
                 "Mass Index: rolling sum of EMA(high-low,9) / EMA(EMA(high-low,9),9)"
             }
             Kind::BbPercentB => "Bollinger %B: (close - lower) / (upper - lower)",
-            Kind::BbWidth => "Bollinger Bands Width: (upper - lower) / basis",
+            Kind::BbWidth => "Bollinger Bands Width: 100 * (upper - lower) / basis, with Highest Expansion and Lowest Contraction",
             Kind::Choppiness => "Choppiness Index (0-100): high = sideways, low = trending",
             Kind::FisherTransform => "Fisher Transform of hl2 with trigger line",
             Kind::EaseOfMovement => {
@@ -446,9 +282,8 @@ impl Kind {
                 ("slow", 28.0, 1.0, L, "Slow length"),
             ],
             Kind::Ppo => &[
-                ("fast", 12.0, 1.0, L, "Fast EMA length"),
-                ("slow", 26.0, 1.0, L, "Slow EMA length"),
-                ("signal", 9.0, 1.0, L, "Signal EMA length"),
+                ("short", 10.0, 1.0, L, "Short moving-average length"),
+                ("long", 21.0, 1.0, L, "Long moving-average length"),
             ],
             Kind::Cmo => &[("length", 9.0, 1.0, L, "Lookback")],
             Kind::Dpo => &[("length", 21.0, 1.0, L, "SMA length")],
@@ -475,9 +310,27 @@ impl Kind {
                 ("short_roc", 11.0, 1.0, L, "Short ROC length"),
             ],
             Kind::MassIndex => &[("length", 10.0, 1.0, L, "Summation length")],
-            Kind::BbPercentB | Kind::BbWidth => &[
+            Kind::BbPercentB => &[
                 ("length", 20.0, 1.0, L, "SMA / stdev length"),
                 ("mult", 2.0, 0.001, 50.0, "Standard deviation multiplier"),
+            ],
+            Kind::BbWidth => &[
+                ("length", 20.0, 1.0, L, "SMA / stdev length"),
+                ("mult", 2.0, 0.001, 50.0, "Standard deviation multiplier"),
+                (
+                    "highest_expansion",
+                    125.0,
+                    1.0,
+                    L,
+                    "Highest Expansion lookback",
+                ),
+                (
+                    "lowest_contraction",
+                    125.0,
+                    1.0,
+                    L,
+                    "Lowest Contraction lookback",
+                ),
             ],
             Kind::Choppiness => &[("length", 14.0, 2.0, L, "Lookback")],
             Kind::FisherTransform => &[("length", 9.0, 1.0, L, "Highest/lowest lookback of hl2")],
@@ -508,6 +361,8 @@ impl Kind {
 pub struct Osc {
     pub kind: Kind,
     vals: Vec<f64>,
+    /// Moving-average type for the Price Oscillator (`ema` | `sma`).
+    ma_type: String,
 }
 
 impl Osc {
@@ -515,6 +370,7 @@ impl Osc {
         Self {
             kind,
             vals: kind.spec().iter().map(|p| p.1).collect(),
+            ma_type: "ema".into(),
         }
     }
     fn u(&self, i: usize) -> usize {
@@ -522,41 +378,12 @@ impl Osc {
     }
 }
 
-fn line(y: Vec<f64>, color: u32, label: &str) -> Line {
-    Line {
-        y,
-        color: rgba(color, 0.9),
-        width: 2,
-        label: Some(label.into()),
-    }
-}
 fn hl(y: f64, alpha: f64) -> HLine {
     HLine {
         y,
         color: rgba(0x787b86, alpha),
     }
 }
-/// MACD-style histogram: dark when growing away from zero, light when fading.
-fn hist(y: Vec<f64>) -> Bars {
-    let colors = (0..y.len())
-        .map(|i| {
-            let pos = y[i] >= 0.0;
-            let rising = i > 0 && y[i] > y[i - 1];
-            match (pos, rising) {
-                (true, true) => rgba(0x26a69a, 0.9),
-                (true, false) => rgba(0xb2dfdb, 0.9),
-                (false, false) => rgba(0xff5252, 0.9),
-                (false, true) => rgba(0xffcdd2, 0.9),
-            }
-        })
-        .collect();
-    Bars {
-        y,
-        colors,
-        bottom: 0.0,
-    }
-}
-
 const BLUE: u32 = 0x2962ff;
 const ORANGE: u32 = 0xff6d00;
 const PURPLE: u32 = 0x7e57c2;
@@ -571,10 +398,10 @@ impl Indicator for Osc {
     }
 
     fn params(&self) -> Value {
-        Value::Array(
-            self.kind
-                .spec()
-                .iter()
+        let mut v: Vec<Value> = self
+            .kind
+            .spec()
+            .iter()
                 .map(|&(name, def, min, max, desc)| {
                     if name == "mult" {
                         json!({"name": name, "type": "number", "default": def, "min": min, "max": max, "description": desc})
@@ -582,11 +409,22 @@ impl Indicator for Osc {
                         json!({"name": name, "type": "integer", "default": def as i64, "min": min as i64, "max": max as i64, "description": desc})
                     }
                 })
-                .collect(),
-        )
+            .collect();
+        if self.kind == Kind::Ppo {
+            v.push(
+                json!({"name": "type", "type": "string", "default": "ema", "enum": ["ema", "sma"],
+                          "description": "Moving average type"}),
+            );
+        }
+        Value::Array(v)
     }
 
     fn configure(&mut self, params: &Value) {
+        if let Some(t) = params.get("type").and_then(|v| v.as_str()) {
+            if self.kind == Kind::Ppo && (t == "ema" || t == "sma") {
+                self.ma_type = t.into();
+            }
+        }
         for (i, &(name, _, min, max, _)) in self.kind.spec().iter().enumerate() {
             if let Some(v) = params.get(name).and_then(|v| v.as_f64()) {
                 if v.is_finite() {
@@ -608,15 +446,15 @@ impl Indicator for Osc {
         };
         match self.kind {
             Kind::StochRsi => {
-                let rsi = p_rsi(&c, u(2));
-                let k = p_sma(&p_stoch(&rsi, &rsi, &rsi, u(3)), u(0));
-                let dd = p_sma(&k, u(1));
-                r.lines = vec![line(k, BLUE, "%K"), line(dd, ORANGE, "%D")];
+                let rsi = rsi(&c, u(2));
+                let k = sma_n(&stoch(&rsi, &rsi, &rsi, u(3)), u(0));
+                let dd = sma_n(&k, u(1));
+                r.lines = vec![line(k, BLUE, 2, "%K"), line(dd, ORANGE, 2, "%D")];
                 r.hlines = vec![hl(80.0, 0.4), hl(50.0, 0.2), hl(20.0, 0.4)];
                 r.y_range = Some((0.0, 100.0));
             }
             Kind::AwesomeOscillator => {
-                let ao = zip(&p_sma(&hl2, u(0)), &p_sma(&hl2, u(1)), |a, b| a - b);
+                let ao = zip(&sma_n(&hl2, u(0)), &sma_n(&hl2, u(1)), |a, b| a - b);
                 // TV: red when ao - ao[1] <= 0, green otherwise (na -> green).
                 let colors = (0..ao.len())
                     .map(|i| {
@@ -635,58 +473,64 @@ impl Indicator for Osc {
                 r.hlines = vec![hl(0.0, 0.5)];
             }
             Kind::Momentum => {
-                r.lines = vec![line(change_n(&c, u(0)), BLUE, "MOM")];
+                r.lines = vec![line(change_n(&c, u(0)), BLUE, 2, "MOM")];
                 r.hlines = vec![hl(0.0, 0.5)];
             }
             Kind::Trix => {
-                let ln: Vec<f64> = c.iter().map(|v| v.ln()).collect();
-                let e = p_ema(&p_ema(&p_ema(&ln, u(0)), u(0)), u(0));
+                let ln: Vec<f64> = c
+                    .iter()
+                    .map(|&v| if v > 0.0 { v.ln() } else { f64::NAN })
+                    .collect();
+                let e = ema_n(&ema_n(&ema_n(&ln, u(0)), u(0)), u(0));
                 let y = change_n(&e, 1).iter().map(|v| v * 10000.0).collect();
-                r.lines = vec![line(y, 0xf23645, "TRIX")];
+                r.lines = vec![line(y, 0xf23645, 2, "TRIX")];
                 r.hlines = vec![hl(0.0, 0.5)];
             }
             Kind::UltimateOscillator => {
                 let n = c.len();
                 let (mut bp, mut tr) = (vec![f64::NAN; n], vec![f64::NAN; n]);
                 for i in 1..n {
-                    let (hi, lo) = (h[i].max(c[i - 1]), l[i].min(c[i - 1]));
+                    let (hi, lo) = (nan_max(h[i], c[i - 1]), nan_min(l[i], c[i - 1]));
                     bp[i] = c[i] - lo;
                     tr[i] = hi - lo;
                 }
-                let avg = |len| div(&p_sum(&bp, len), &p_sum(&tr, len));
+                let avg = |len| div(&sum_n(&bp, len), &sum_n(&tr, len));
                 let (a, b, s) = (avg(u(0)), avg(u(1)), avg(u(2)));
                 let y = (0..n)
                     .map(|i| 100.0 * (4.0 * a[i] + 2.0 * b[i] + s[i]) / 7.0)
                     .collect();
-                r.lines = vec![line(y, PURPLE, "UO")];
-                r.hlines = vec![hl(70.0, 0.4), hl(30.0, 0.4)];
+                r.lines = vec![line(y, PURPLE, 2, "UO")];
                 r.y_range = Some((0.0, 100.0));
             }
             Kind::Ppo => {
-                let slow = p_ema(&c, u(1));
-                let ppo = zip(&p_ema(&c, u(0)), &slow, |f, s| (f - s) / s * 100.0);
-                let sig = p_ema(&ppo, u(2));
-                let hg = zip(&ppo, &sig, |a, b| a - b);
-                r.lines = vec![line(ppo, BLUE, "PPO"), line(sig, ORANGE, "Signal")];
-                r.bars = vec![hist(hg)];
+                let ma = |n| {
+                    if self.ma_type == "sma" {
+                        sma_n(&c, n)
+                    } else {
+                        ema_n(&c, n)
+                    }
+                };
+                let long = ma(u(1));
+                let po = zip(&ma(u(0)), &long, |s, l| (s - l) / l * 100.0);
+                r.lines = vec![line(finite_or_nan(po), BLUE, 2, "PPO")];
                 r.hlines = vec![hl(0.0, 0.5)];
             }
             Kind::Cmo => {
                 let ch = change_n(&c, 1);
                 let (up, dn) = gains_losses(&ch);
-                let (s1, s2) = (p_sum(&up, u(0)), p_sum(&dn, u(0)));
+                let (s1, s2) = (sum_n(&up, u(0)), sum_n(&dn, u(0)));
                 let y = div(
                     &zip(&s1, &s2, |a, b| 100.0 * (a - b)),
                     &zip(&s1, &s2, |a, b| a + b),
                 );
-                r.lines = vec![line(y, PURPLE, "CMO")];
-                r.hlines = vec![hl(50.0, 0.3), hl(0.0, 0.5), hl(-50.0, 0.3)];
+                r.lines = vec![line(y, PURPLE, 2, "CMO")];
+                r.hlines = vec![hl(0.0, 0.5)];
                 r.y_range = Some((-100.0, 100.0));
             }
             Kind::Dpo => {
                 // TV (not centered): close - sma(close, len)[len/2 + 1]
                 let back = u(0) / 2 + 1;
-                let ma = p_sma(&c, u(0));
+                let ma = sma_n(&c, u(0));
                 let y = (0..c.len())
                     .map(|i| {
                         if i >= back {
@@ -696,12 +540,12 @@ impl Indicator for Osc {
                         }
                     })
                     .collect();
-                r.lines = vec![line(y, 0x43a047, "DPO")];
+                r.lines = vec![line(y, 0x43a047, 2, "DPO")];
                 r.hlines = vec![hl(0.0, 0.5)];
             }
             Kind::ElderForceIndex => {
                 let f = zip(&change_n(&c, 1), &vol, |a, b| a * b);
-                r.lines = vec![line(p_ema(&f, u(0)), 0xf23645, "EFI")];
+                r.lines = vec![line(ema_n(&f, u(0)), 0xf23645, 2, "EFI")];
                 r.hlines = vec![hl(0.0, 0.5)];
             }
             Kind::Tsi => {
@@ -709,59 +553,70 @@ impl Indicator for Osc {
                     .iter()
                     .map(|v| v * 100.0)
                     .collect();
-                let sig = p_ema(&t, u(2));
-                r.lines = vec![line(t, BLUE, "TSI"), line(sig, ORANGE, "Signal")];
+                let sig = ema_n(&t, u(2));
+                r.lines = vec![line(t, BLUE, 2, "TSI"), line(sig, ORANGE, 2, "Signal")];
                 r.hlines = vec![hl(0.0, 0.5)];
             }
             Kind::Kst => {
-                let s: Vec<Vec<f64>> = (0..4).map(|k| p_sma(&p_roc(&c, u(k)), u(4 + k))).collect();
+                let s: Vec<Vec<f64>> = (0..4).map(|k| sma_n(&roc(&c, u(k)), u(4 + k))).collect();
                 let y: Vec<f64> = (0..c.len())
                     .map(|i| s[0][i] + 2.0 * s[1][i] + 3.0 * s[2][i] + 4.0 * s[3][i])
                     .collect();
-                let sig = p_sma(&y, u(8));
-                r.lines = vec![line(y, 0x089981, "KST"), line(sig, 0xf23645, "Signal")];
+                let sig = sma_n(&y, u(8));
+                let (y, sig) = (finite_or_nan(y), finite_or_nan(sig));
+                r.lines = vec![
+                    line(y, 0x089981, 2, "KST"),
+                    line(sig, 0xf23645, 2, "Signal"),
+                ];
                 r.hlines = vec![hl(0.0, 0.5)];
             }
             Kind::Coppock => {
-                let s = zip(&p_roc(&c, u(1)), &p_roc(&c, u(2)), |a, b| a + b);
-                r.lines = vec![line(p_wma(&s, u(0)), BLUE, "Coppock")];
+                let s = zip(&roc(&c, u(1)), &roc(&c, u(2)), |a, b| a + b);
+                r.lines = vec![line(finite_or_nan(wma_n(&s, u(0))), BLUE, 2, "Coppock")];
                 r.hlines = vec![hl(0.0, 0.5)];
             }
             Kind::MassIndex => {
                 let span = zip(&h, &l, |a, b| a - b);
-                let e = p_ema(&span, 9);
-                let y = p_sum(&div(&e, &p_ema(&e, 9)), u(0));
-                r.lines = vec![line(y, BLUE, "MI")];
-                r.hlines = vec![hl(27.0, 0.4), hl(26.5, 0.3)];
+                let e = ema_n(&span, 9);
+                let y = sum_n(&div(&e, &ema_n(&e, 9)), u(0));
+                r.lines = vec![line(y, BLUE, 2, "MI")];
             }
             Kind::BbPercentB | Kind::BbWidth => {
-                let (basis, dev) = (p_sma(&c, u(0)), p_stdev(&c, u(0)));
+                let (basis, dev) = (sma_n(&c, u(0)), stdev(&c, u(0)));
                 let m = self.vals[1];
                 let up = zip(&basis, &dev, |b, s| b + m * s);
                 let lo = zip(&basis, &dev, |b, s| b - m * s);
                 if self.kind == Kind::BbPercentB {
                     let y = div(&zip(&c, &lo, |a, b| a - b), &zip(&up, &lo, |a, b| a - b));
-                    r.lines = vec![line(y, 0x2196f3, "%B")];
+                    r.lines = vec![line(y, 0x2196f3, 2, "%B")];
                     r.hlines = vec![hl(1.0, 0.4), hl(0.5, 0.2), hl(0.0, 0.4)];
                 } else {
-                    let y = div(&zip(&up, &lo, |a, b| a - b), &basis);
-                    r.lines = vec![line(y, 0x2196f3, "BBW")];
+                    let y: Vec<f64> = div(&zip(&up, &lo, |a, b| a - b), &basis)
+                        .iter()
+                        .map(|v| v * 100.0)
+                        .collect();
+                    let (he, lc) = (highest(&y, u(2)), lowest(&y, u(3)));
+                    r.lines = vec![
+                        line(y, 0x2196f3, 2, "BBW"),
+                        line(he, 0xf23645, 1, "Highest Expansion"),
+                        line(lc, 0x089981, 1, "Lowest Contraction"),
+                    ];
                 }
             }
             Kind::Choppiness => {
                 let n = u(0);
-                let rng = zip(&p_highest(&h, n), &p_lowest(&l, n), |a, b| a - b);
-                let ratio = div(&p_sum(&true_range(d), n), &rng);
+                let rng = zip(&highest(&h, n), &lowest(&l, n), |a, b| a - b);
+                let ratio = div(&sum_n(&true_range(d), n), &rng);
                 let y = ratio
                     .iter()
                     .map(|v| 100.0 * v.log10() / (n as f64).log10())
                     .collect();
-                r.lines = vec![line(finite_or_nan(y), BLUE, "CHOP")];
+                r.lines = vec![line(finite_or_nan(y), BLUE, 2, "CHOP")];
                 r.hlines = vec![hl(61.8, 0.4), hl(38.2, 0.4)];
                 r.y_range = Some((0.0, 100.0));
             }
             Kind::FisherTransform => {
-                let (hi, lo) = (p_highest(&hl2, u(0)), p_lowest(&hl2, u(0)));
+                let (hi, lo) = (highest(&hl2, u(0)), lowest(&hl2, u(0)));
                 let n = c.len();
                 let (mut fish, mut value) = (vec![f64::NAN; n], vec![f64::NAN; n]);
                 // Pine nz(x[1]): na -> 0
@@ -787,7 +642,10 @@ impl Indicator for Osc {
                 let trig = (0..n)
                     .map(|i| if i > 0 { fish[i - 1] } else { f64::NAN })
                     .collect();
-                r.lines = vec![line(fish, BLUE, "Fisher"), line(trig, ORANGE, "Trigger")];
+                r.lines = vec![
+                    line(fish, BLUE, 2, "Fisher"),
+                    line(trig, ORANGE, 2, "Trigger"),
+                ];
                 r.hlines = vec![
                     hl(1.5, 0.3),
                     hl(0.75, 0.3),
@@ -802,45 +660,48 @@ impl Indicator for Osc {
                     &zip(&change_n(&hl2, 1), &rng, |a, b| self.vals[1] * a * b),
                     &vol,
                 );
-                r.lines = vec![line(p_sma(&raw, u(0)), 0x2196f3, "EOM")];
+                r.lines = vec![line(sma_n(&raw, u(0)), 0x2196f3, 2, "EOM")];
                 r.hlines = vec![hl(0.0, 0.5)];
             }
             Kind::VolumeOscillator => {
-                let long = p_ema(&vol, u(1));
-                let y = zip(&p_ema(&vol, u(0)), &long, |s, l| 100.0 * (s - l) / l);
-                r.lines = vec![line(finite_or_nan(y), BLUE, "Vol Osc")];
+                let long = ema_n(&vol, u(1));
+                let y = zip(&ema_n(&vol, u(0)), &long, |s, l| 100.0 * (s - l) / l);
+                r.lines = vec![line(finite_or_nan(y), BLUE, 2, "Vol Osc")];
                 r.hlines = vec![hl(0.0, 0.5)];
             }
             Kind::BalanceOfPower => {
                 let num: Vec<f64> = d.bars.iter().map(|b| b.close - b.open).collect();
-                r.lines = vec![line(div(&num, &zip(&h, &l, |a, b| a - b)), BLUE, "BOP")];
+                r.lines = vec![line(div(&num, &zip(&h, &l, |a, b| a - b)), BLUE, 2, "BOP")];
                 r.hlines = vec![hl(0.0, 0.5)];
             }
             Kind::Rvi => {
                 let co: Vec<f64> = d.bars.iter().map(|b| b.close - b.open).collect();
-                let num = p_sum(&p_swma(&co), u(0));
-                let den = p_sum(&p_swma(&zip(&h, &l, |a, b| a - b)), u(0));
+                let num = sum_n(&swma(&co), u(0));
+                let den = sum_n(&swma(&zip(&h, &l, |a, b| a - b)), u(0));
                 let rvi = div(&num, &den);
-                let sig = p_swma(&rvi);
-                r.lines = vec![line(rvi, 0x089981, "RVGI"), line(sig, 0xf23645, "Signal")];
+                let sig = swma(&rvi);
+                r.lines = vec![
+                    line(rvi, 0x089981, 2, "RVGI"),
+                    line(sig, 0xf23645, 2, "Signal"),
+                ];
                 r.hlines = vec![hl(0.0, 0.5)];
             }
             Kind::SmiErgodic => {
                 let erg = tsi_ratio(&c, u(1), u(0));
-                let sig = p_ema(&erg, u(2));
+                let sig = ema_n(&erg, u(2));
                 let osc = zip(&erg, &sig, |a, b| a - b);
-                r.lines = vec![line(erg, BLUE, "SMI"), line(sig, ORANGE, "Signal")];
+                r.lines = vec![line(erg, BLUE, 2, "SMI"), line(sig, ORANGE, 2, "Signal")];
                 r.bars = vec![hist(osc)];
                 r.hlines = vec![hl(0.0, 0.5)];
             }
             Kind::ConnorsRsi => {
-                let rsi = p_rsi(&c, u(0));
-                let ud = p_rsi(&updown(&c), u(1));
-                let pr = p_percentrank(&p_roc(&c, 1), u(2));
+                let r1 = rsi(&c, u(0));
+                let ud = rsi(&updown(&c), u(1));
+                let pr = percentrank(&roc(&c, 1), u(2));
                 let y = (0..c.len())
-                    .map(|i| (rsi[i] + ud[i] + pr[i]) / 3.0)
+                    .map(|i| (r1[i] + ud[i] + pr[i]) / 3.0)
                     .collect();
-                r.lines = vec![line(y, BLUE, "CRSI")];
+                r.lines = vec![line(y, BLUE, 2, "CRSI")];
                 r.hlines = vec![hl(70.0, 0.4), hl(50.0, 0.2), hl(30.0, 0.4)];
                 r.y_range = Some((0.0, 100.0));
             }
@@ -905,23 +766,23 @@ mod tests {
     fn helpers_match_pine() {
         // ta.rsi(len 2): rma seeds with SMA of the first 2 changes.
         eq(
-            &p_rsi(&[1.0, 2.0, 1.0, 2.0, 3.0, 2.0], 2),
+            &rsi(&[1.0, 2.0, 1.0, 2.0, 3.0, 2.0], 2),
             &[NAN, NAN, 50.0, 75.0, 87.5, 43.75],
         );
         // ema seeds with SMA
-        eq(&p_ema(&[1.0, 2.0, 3.0, 4.0], 2), &[NAN, 1.5, 2.5, 3.5]);
-        eq(&p_wma(&[1.0, 2.0, 3.0], 3), &[NAN, NAN, 14.0 / 6.0]);
-        eq(&p_stdev(&[1.0, 3.0], 2), &[NAN, 1.0]);
+        eq(&ema_n(&[1.0, 2.0, 3.0, 4.0], 2), &[NAN, 1.5, 2.5, 3.5]);
+        eq(&wma_n(&[1.0, 2.0, 3.0], 3), &[NAN, NAN, 14.0 / 6.0]);
+        eq(&stdev(&[1.0, 3.0], 2), &[NAN, 1.0]);
         eq(
             &updown(&[1.0, 2.0, 3.0, 3.0, 2.0, 1.0]),
             &[-1.0, 1.0, 2.0, 0.0, -1.0, -2.0],
         );
         // 2 of the previous 3 values (1,2,3) are <= 2
         eq(
-            &p_percentrank(&[1.0, 2.0, 3.0, 2.0], 3),
+            &percentrank(&[1.0, 2.0, 3.0, 2.0], 3),
             &[NAN, NAN, NAN, 200.0 / 3.0],
         );
-        eq(&p_swma(&[0.0, 6.0, 0.0, 0.0]), &[NAN, NAN, NAN, 2.0]);
+        eq(&swma(&[0.0, 6.0, 0.0, 0.0]), &[NAN, NAN, NAN, 2.0]);
     }
 
     #[test]
@@ -990,17 +851,55 @@ mod tests {
     }
 
     #[test]
-    fn ppo_with_signal_and_hist() {
-        let r = run(
-            Kind::Ppo,
-            json!({"fast":2,"slow":3,"signal":2}),
-            &closes(&[1.0, 2.0, 3.0, 4.0, 5.0]),
-        );
-        // ema2 = 1.5, 2.5, 3.5 ; ema3 = 2, 3 at idx 2,3
+    fn price_oscillator_ema_and_sma() {
+        let d = closes(&[1.0, 2.0, 3.0, 4.0, 5.0]);
+        let r = run(Kind::Ppo, json!({"short":2,"long":3}), &d);
+        // ema2 = 1.5, 2.5, 3.5 ; ema3 = 2, 3 at idx 2,3 ; (s-l)/l*100
         eq(&r.lines[0].y[..4], &[NAN, NAN, 25.0, 100.0 / 6.0]);
-        let s = (25.0 + 100.0 / 6.0) / 2.0;
-        eq(&r.lines[1].y[..4], &[NAN, NAN, NAN, s]);
-        eq(&r.bars[0].y[..4], &[NAN, NAN, NAN, 100.0 / 6.0 - s]);
+        assert!(r.bars.is_empty() && r.lines.len() == 1);
+        // sma2 = _,1.5,2.5,3.5 ; sma3 = _,_,2,3 -> idx2 (2.5-2)/2*100
+        let r = run(Kind::Ppo, json!({"short":2,"long":3,"type":"sma"}), &d);
+        eq(&r.lines[0].y[..4], &[NAN, NAN, 25.0, 100.0 * 0.5 / 3.0]);
+    }
+
+    #[test]
+    fn non_finite_input_recovers() {
+        // an inf close must not poison the recursive smoothers forever
+        let mut c: Vec<f64> = (1..=40).map(|v| v as f64).collect();
+        c[10] = f64::INFINITY;
+        c[20] = 0.0; // ln(0) must be NaN in TRIX, not -inf
+        for k in [Kind::Trix, Kind::Cmo, Kind::Tsi, Kind::Kst] {
+            let y = run(k, json!({"length":2}), &closes(&c)).lines[0].y.clone();
+            assert!(y.iter().all(|v| !v.is_infinite()), "{}", k.name());
+        }
+        let e = ema_n(&[1.0, 2.0, f64::INFINITY, 4.0, 5.0, 6.0], 2);
+        assert!(e[5].is_finite(), "{e:?}");
+    }
+
+    #[test]
+    fn ultimate_oscillator_nan_propagates() {
+        let mut d = bars(&[(9.0, 10.0, 8.0, 9.0, 1.0); 6]);
+        d.bars[2].high = f64::NAN;
+        let r = run(
+            Kind::UltimateOscillator,
+            json!({"fast":1,"middle":2,"slow":3}),
+            &d,
+        );
+        assert!(r.lines[0].y[2].is_nan());
+        assert!(r.lines[0].y[3].is_nan());
+    }
+
+    #[test]
+    fn roc_zero_base_is_nan() {
+        eq(&roc(&[0.0, 5.0, 10.0], 1), &[NAN, NAN, 100.0]);
+    }
+
+    #[test]
+    fn running_sum_is_linear_and_exact() {
+        let x: Vec<f64> = (0..20000).map(|v| (v % 7) as f64).collect();
+        let y = sum_n(&x, 10000);
+        assert!(y[9998].is_nan());
+        assert_eq!(y[9999], x[..10000].iter().sum::<f64>());
     }
 
     #[test]
@@ -1078,13 +977,15 @@ mod tests {
     fn bollinger_percent_b_and_width() {
         let d = closes(&[1.0, 3.0, 2.0]);
         let p = json!({"length":2,"mult":2.0});
-        // idx1: basis 2, dev 1 -> [0,4]; %B = 3/4 ; width = 4/2
-        // idx2: basis 2.5, dev .5 -> [1.5,3.5]; %B = .25 ; width = 2/2.5
+        // idx1: basis 2, dev 1 -> [0,4]; %B = 3/4 ; width = 100 * 4/2
+        // idx2: basis 2.5, dev .5 -> [1.5,3.5]; %B = .25 ; width = 100 * 2/2.5
         eq(
             &run(Kind::BbPercentB, p.clone(), &d).lines[0].y,
             &[NAN, 0.75, 0.25],
         );
-        eq(&run(Kind::BbWidth, p, &d).lines[0].y, &[NAN, 2.0, 0.8]);
+        let w = run(Kind::BbWidth, p, &d);
+        eq(&w.lines[0].y, &[NAN, 200.0, 80.0]);
+        assert_eq!(w.lines.len(), 3);
     }
 
     #[test]
@@ -1169,7 +1070,7 @@ mod tests {
         eq(&streak, &[-1.0, 1.0, -1.0, 1.0, 2.0, -1.0]);
         // streak changes = _,2,-2,2,1,-3 -> rma2 up seed (2+0)/2=1, dn (0+2)/2=1 -> rsi 50 at idx2
         // idx3: up=.5*2+.5*1=1.5, dn=.5 -> 75 ; idx4: up=1.25, dn=.25 -> 83.333
-        eq(&p_rsi(&streak, 2)[2..5], &[50.0, 75.0, 100.0 - 100.0 / 6.0]);
+        eq(&rsi(&streak, 2)[2..5], &[50.0, 75.0, 100.0 - 100.0 / 6.0]);
         eq(
             &y,
             &[
@@ -1178,7 +1079,7 @@ mod tests {
                 NAN,
                 (75.0 + 75.0 + 100.0) / 3.0,
                 (87.5 + (100.0 - 100.0 / 6.0) + 50.0) / 3.0,
-                (43.75 + p_rsi(&streak, 2)[5] + 0.0) / 3.0,
+                (43.75 + rsi(&streak, 2)[5] + 0.0) / 3.0,
             ],
         );
     }
@@ -1192,7 +1093,7 @@ mod tests {
             (Kind::Momentum, 10),
             (Kind::Trix, 52),
             (Kind::UltimateOscillator, 28),
-            (Kind::Ppo, 25),
+            (Kind::Ppo, 20),
             (Kind::Cmo, 9),
             (Kind::Dpo, 31),
             (Kind::ElderForceIndex, 13),
@@ -1250,6 +1151,22 @@ mod tests {
                 let r = run(k, Value::Object(p), &full);
                 assert!(r.lines.iter().all(|l| l.y.len() == 60));
             }
+        }
+    }
+
+    #[test]
+    fn bbw_extremes_follow_bbw() {
+        let r = run(
+            Kind::BbWidth,
+            json!({"highest_expansion":3,"lowest_contraction":3,"length":2}),
+            &closes(&[1.0, 3.0, 2.0, 4.0, 4.0]),
+        );
+        let (w, he, lc) = (&r.lines[0].y, &r.lines[1].y, &r.lines[2].y);
+        assert_eq!(first_valid(he), 3);
+        for i in 3..5 {
+            let win = &w[i - 2..=i];
+            assert_eq!(he[i], win.iter().cloned().fold(f64::MIN, f64::max));
+            assert_eq!(lc[i], win.iter().cloned().fold(f64::MAX, f64::min));
         }
     }
 

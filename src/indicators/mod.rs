@@ -3,6 +3,7 @@ pub mod custom;
 pub mod external;
 pub mod macd;
 pub mod oscillators;
+pub mod pine;
 pub mod rsi;
 pub mod rsi_combo;
 pub mod ta_bridge;
