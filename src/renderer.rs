@@ -200,7 +200,7 @@ pub fn render_chart(
                         let (lo, hi) = if a < b { (*a, *b) } else { (*b, *a) };
                         Rectangle::new(
                             [(i as f64 - 0.4, lo), (i as f64 + 0.4, hi)],
-                            fill.color.filled(),
+                            fill.color_for(*a, *b).filled(),
                         )
                     })
                     .collect();
@@ -339,7 +339,7 @@ pub fn render_chart(
                     let (lo, hi) = if a < b { (*a, *b) } else { (*b, *a) };
                     Rectangle::new(
                         [(i as f64 - 0.4, lo), (i as f64 + 0.4, hi)],
-                        fill.color.filled(),
+                        fill.color_for(*a, *b).filled(),
                     )
                 })
                 .collect();

@@ -686,7 +686,11 @@ fn panel_result_to_series_json(
             .map(|f| {
                 let y1: Vec<Value> = f.y1.iter().map(|v| finite_or_null(*v)).collect();
                 let y2: Vec<Value> = f.y2.iter().map(|v| finite_or_null(*v)).collect();
-                json!({ "y1": y1, "y2": y2, "color": css_rgba(&f.color) })
+                let mut fill = json!({ "y1": y1, "y2": y2, "color": css_rgba(&f.color) });
+                if let Some(below) = &f.color_below {
+                    fill["color_below"] = json!(css_rgba(below));
+                }
+                fill
             })
             .collect();
         out["fills"] = json!(fills);
@@ -1945,6 +1949,7 @@ mod tests {
                 y1: vec![0.0],
                 y2: vec![1.0],
                 color: c,
+                color_below: None,
             }],
             bars: vec![],
             dots: vec![],
@@ -1985,6 +1990,34 @@ mod tests {
     }
 
     #[test]
+    fn series_json_serializes_fill_color_below_only_when_set() {
+        use chartgen::indicator::{Fill, PanelResult};
+        use plotters::style::RGBAColor;
+
+        let mk = |below| Fill {
+            y1: vec![1.0],
+            y2: vec![0.0],
+            color: RGBAColor(76, 175, 80, 0.2),
+            color_below: below,
+        };
+        let pr = PanelResult {
+            fills: vec![mk(Some(RGBAColor(239, 83, 80, 0.2))), mk(None)],
+            label: "T".into(),
+            is_overlay: true,
+            ..Default::default()
+        };
+        let data = chartgen::data::OhlcvData {
+            bars: vec![],
+            symbol: None,
+            interval: None,
+        };
+        let j = panel_result_to_series_json(&pr, &data);
+        assert_eq!(j["fills"][0]["color"], "rgba(76,175,80,0.2)");
+        assert_eq!(j["fills"][0]["color_below"], "rgba(239,83,80,0.2)");
+        assert!(j["fills"][1].get("color_below").is_none());
+    }
+
+    #[test]
     fn panel_result_to_json_covers_all_fields() {
         use chartgen::indicator::{DivLine, Dot, Fill, HBar, HLine, Line, PanelResult};
         use plotters::style::RGBAColor;
@@ -2001,6 +2034,7 @@ mod tests {
                 y1: vec![0.0],
                 y2: vec![1.0],
                 color: c,
+                color_below: None,
             }],
             bars: vec![],
             dots: vec![
@@ -2486,6 +2520,7 @@ mod tests {
                 y1: ys.clone(),
                 y2: ys.iter().map(|v| -v).collect(),
                 color: c,
+                color_below: None,
             }],
             bars: vec![Bars {
                 y: ys.clone(),

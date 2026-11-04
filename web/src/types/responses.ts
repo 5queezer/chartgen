@@ -65,6 +65,8 @@ export const SeriesFillSchema = z.object({
   y1: z.array(FiniteOrNull),
   y2: z.array(FiniteOrNull),
   color: z.string().optional(),
+  // Used where y1 < y2 (Ichimoku's red cloud); `color` applies elsewhere.
+  color_below: z.string().optional(),
 });
 
 export const SeriesHBarSchema = z.object({

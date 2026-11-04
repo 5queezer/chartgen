@@ -526,6 +526,7 @@ impl Indicator for CipherB {
                 y1: wt1.clone(),
                 y2: wt2.clone(),
                 color: rgba(0x4994ec, 0.25),
+                color_below: None,
             });
         }
         if cfg.vwap_show {
@@ -533,6 +534,7 @@ impl Indicator for CipherB {
                 y1: vwap.clone(),
                 y2: vec![0.0; n],
                 color: rgba(0xffffff, 0.15),
+                color_below: None,
             });
         }
 
@@ -688,6 +690,7 @@ impl Indicator for CipherB {
                     y1: stoch_k.clone(),
                     y2: stoch_d.clone(),
                     color: rgba(0x21baf3, 0.05),
+                    color_below: None,
                 });
             }
         }

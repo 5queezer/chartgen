@@ -24,7 +24,7 @@ the web heuristics guess them back from the indicator name and fill
 index: Cipher B colors are wrong when toggles such as `wt_show=false`
 change which fills are emitted, volume-profile tiers are a POC/value-area
 guess, divergence colors come from slope, and Ichimoku gets a
-TradingView-style cloud the PNG does not have. Separately, `hlines`
+TradingView-style green/red cloud while the PNG used a single blue. Separately, `hlines`
 (RSI 70/30, profile POC/VAH/VAL) are on the wire but the web chart never
 drew them.
 
@@ -49,7 +49,12 @@ Chosen option: serialize colors. Every item of `fills`, `hbars`,
 `divlines` and `hlines` in `format=series` gets a `color` field, a CSS
 string `"rgba(r,g,b,a)"` produced by a single helper from the
 `RGBAColor` the indicator set. `divlines` already carry `dashed`.
-`lines` and `histogram` are unchanged and still carry no color; the web
+A fill may also carry an optional `color_below`, used where `y1 < y2`
+(`color` applies where `y1 >= y2`). It is omitted when absent, so
+existing fills behave as before. Ichimoku uses it for the TradingView
+cloud, green `rgba(76,175,80,0.2)` above and red `rgba(239,83,80,0.2)`
+below. The PNG renderer picks the color per bar and the web chart reuses
+its existing split-at-crossings polygons. `lines` and `histogram` are unchanged and still carry no color; the web
 keeps its palette rotation for them.
 
 On the web, the wire color wins. `geometry.ts` validates it (an

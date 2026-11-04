@@ -111,6 +111,7 @@ export function toDataSpace(
     y1: kept.map((p) => f.y1[p] ?? null),
     y2: kept.map((p) => f.y2[p] ?? null),
     ...(f.color !== undefined && { color: f.color }),
+    ...(f.color_below !== undefined && { color_below: f.color_below }),
   }));
   const divlines = ind.divlines?.flatMap((d) => {
     const x1 = remap[d.x1] ?? -1;
@@ -375,14 +376,19 @@ export function fillTheme(name: string, index: number): FillTheme {
 
 const HLINE_FALLBACK = "rgba(120, 123, 134, 0.80)";
 
-/** Fill colors: the wire color for both orientations, else the theme. */
+/**
+ * Fill colors: the wire `color` where y1 >= y2 and `color_below` (when
+ * present) where y1 < y2, else the theme.
+ */
 export function fillColors(
   fill: SeriesFill,
   name: string,
   index: number,
 ): FillTheme {
   const c = wireColor(fill.color);
-  return c ? single(c) : fillTheme(name, index);
+  return c
+    ? { up: c, down: wireColor(fill.color_below) ?? c }
+    : fillTheme(name, index);
 }
 
 export type HBarTier = "poc" | "va" | "out";

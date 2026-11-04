@@ -308,6 +308,7 @@ impl Indicator for OpenInterestHist {
                 y1: aligned,
                 y2: zeros,
                 color: rgba(0x2196F3, 0.15),
+                color_below: None,
             }],
             label: "OI".into(),
             is_overlay: false,
@@ -419,6 +420,7 @@ impl Indicator for LongShortRatio {
                 y1: long_aligned,
                 y2: short_aligned,
                 color: rgba(0x26A69A, 0.1),
+                color_below: None,
             }],
             hlines: vec![HLine {
                 y: 0.5,

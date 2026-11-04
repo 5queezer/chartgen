@@ -738,6 +738,7 @@ impl Indicator for VwapBands {
                 y1: upper,
                 y2: lower,
                 color: rgba(0xFF9800, 0.08),
+                color_below: None,
             }],
             is_overlay: true,
             label: "VWAP Bands".into(),
@@ -1560,21 +1561,25 @@ impl Indicator for KalmanVolume {
                     y1: bull_m,
                     y2: bull_s,
                     color: rgba(cyan, 0.15),
+                    color_below: None,
                 },
                 Fill {
                     y1: bear_m,
                     y2: bear_s,
                     color: rgba(red, 0.15),
+                    color_below: None,
                 },
                 Fill {
                     y1: top,
                     y2: ob_line,
                     color: rgba(red, 0.1),
+                    color_below: None,
                 },
                 Fill {
                     y1: os_line,
                     y2: bottom,
                     color: rgba(cyan, 0.1),
+                    color_below: None,
                 },
             ],
             bars: vec![
@@ -1712,7 +1717,9 @@ impl Indicator for Ichimoku {
             fills: vec![Fill {
                 y1: senkou_a,
                 y2: senkou_b,
-                color: rgba(0x2196F3, 0.08),
+                // TradingView cloud: green where Senkou A >= B, red below.
+                color: rgba(0x4CAF50, 0.2),
+                color_below: Some(rgba(0xEF5350, 0.2)),
             }],
             is_overlay: true,
             label: "Ichimoku".into(),

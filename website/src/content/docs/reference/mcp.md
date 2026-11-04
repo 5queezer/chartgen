@@ -232,6 +232,8 @@ Every item of `fills`, `hbars`, `divlines` and `hlines` also carries a
 `color`: a CSS `"rgba(r,g,b,a)"` string with the color the PNG renderer
 uses, so clients can match the PNG exactly
 ([ADR-0012](/chartgen/decisions/0012-geometry-colors-on-the-wire/)).
+A fill may also carry `color_below`, used where `y1 < y2` (`color`
+applies where `y1 >= y2`); it is omitted when the fill has one color.
 `lines` and `histogram` carry no color. Older servers omit `color`;
 clients should fall back to their own theme.
 

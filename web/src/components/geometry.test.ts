@@ -435,6 +435,27 @@ describe("wire colors vs theme fallback", () => {
     );
   });
 
+  it("fillColors uses color_below for the y1 < y2 orientation", () => {
+    const f = { ...fill, color: "rgba(1,2,3,0.2)", color_below: "rgba(4,5,6,0.2)" };
+    expect(fillColors(f, "ichimoku", 0)).toEqual({
+      up: "rgba(1,2,3,0.2)",
+      down: "rgba(4,5,6,0.2)",
+    });
+    expect(fillColors({ ...f, color_below: "nope" }, "ichimoku", 0).down).toBe(
+      "rgba(1,2,3,0.2)",
+    );
+  });
+
+  it("toDataSpace keeps color_below", () => {
+    const kept = toDataSpace(
+      indicator({
+        fills: [{ ...fill, color: "rgba(1,2,3,0.5)", color_below: "rgba(4,5,6,0.5)" }],
+      }),
+      [0],
+    );
+    expect(kept.fills![0]!.color_below).toBe("rgba(4,5,6,0.5)");
+  });
+
   it("toDataSpace keeps the fill color", () => {
     const out = toDataSpace(
       indicator({ fills: [{ ...fill, color: "rgba(1,2,3,0.5)" }] }),
