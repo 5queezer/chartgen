@@ -595,6 +595,12 @@ fn trim_panel_result(
 // bar timestamps, and the same metadata (label/is_overlay/y_range/hlines)
 // that summary exposes. Pulls directly from the PanelResult — no
 // recomputation. NaN pre-warmup values serialize as JSON null.
+// CSS color string for the wire; the PNG renderer's colors are the source of
+// truth, so the web chart draws overlay geometry with exactly these.
+fn css_rgba(c: &plotters::style::RGBAColor) -> String {
+    format!("rgba({},{},{},{})", c.0, c.1, c.2, c.3)
+}
+
 fn panel_result_to_series_json(
     pr: &chartgen::indicator::PanelResult,
     data: &chartgen::data::OhlcvData,
@@ -663,7 +669,11 @@ fn panel_result_to_series_json(
     }
 
     if !pr.hlines.is_empty() {
-        let hlines: Vec<Value> = pr.hlines.iter().map(|h| json!({ "y": h.y })).collect();
+        let hlines: Vec<Value> = pr
+            .hlines
+            .iter()
+            .map(|h| json!({ "y": h.y, "color": css_rgba(&h.color) }))
+            .collect();
         out["hlines"] = json!(hlines);
     }
 
@@ -676,15 +686,15 @@ fn panel_result_to_series_json(
             .map(|f| {
                 let y1: Vec<Value> = f.y1.iter().map(|v| finite_or_null(*v)).collect();
                 let y2: Vec<Value> = f.y2.iter().map(|v| finite_or_null(*v)).collect();
-                json!({ "y1": y1, "y2": y2 })
+                json!({ "y1": y1, "y2": y2, "color": css_rgba(&f.color) })
             })
             .collect();
         out["fills"] = json!(fills);
     }
 
     // Horizontal bars (VPVR, Session VP, HVN/LVN, Naked POC, TPO). Axis-
-    // relative numerics preserved from the struct; color is dropped — the
-    // client themes per indicator.
+    // relative numerics preserved from the struct; color is the renderer's
+    // (ADR-0012).
     if !pr.hbars.is_empty() {
         let hbars: Vec<Value> = pr
             .hbars
@@ -696,6 +706,7 @@ fn panel_result_to_series_json(
                     "width": h.width,
                     "offset": h.offset,
                     "left": h.left,
+                    "color": css_rgba(&h.color),
                 })
             })
             .collect();
@@ -704,7 +715,7 @@ fn panel_result_to_series_json(
 
     // Divergence lines: two-point segments (WaveTrend, RSI divs in Cipher B).
     // Each endpoint carries both `x` (bar index) and `t` (unix seconds) to
-    // mirror the signal pattern; color is dropped.
+    // mirror the signal pattern; color is the renderer's (ADR-0012).
     if !pr.divlines.is_empty() {
         let divlines: Vec<Value> = pr
             .divlines
@@ -728,6 +739,7 @@ fn panel_result_to_series_json(
                     "t2": t2,
                     "y2": d.y2,
                     "dashed": d.dashed,
+                    "color": css_rgba(&d.color),
                 })
             })
             .collect();
@@ -1907,6 +1919,69 @@ mod tests {
         let content = chart_content(&resp);
         assert_eq!(content.len(), 1);
         assert_eq!(content[0]["type"], "image");
+    }
+
+    #[test]
+    fn css_rgba_formats_color() {
+        assert_eq!(
+            css_rgba(&plotters::style::RGBAColor(1, 2, 3, 0.5)),
+            "rgba(1,2,3,0.5)"
+        );
+        assert_eq!(
+            css_rgba(&plotters::style::RGBAColor(255, 0, 0, 1.0)),
+            "rgba(255,0,0,1)"
+        );
+    }
+
+    #[test]
+    fn series_json_carries_geometry_colors() {
+        use chartgen::indicator::{DivLine, Fill, HBar, HLine, PanelResult};
+        use plotters::style::RGBAColor;
+
+        let c = RGBAColor(10, 20, 30, 0.25);
+        let pr = PanelResult {
+            lines: vec![],
+            fills: vec![Fill {
+                y1: vec![0.0],
+                y2: vec![1.0],
+                color: c,
+            }],
+            bars: vec![],
+            dots: vec![],
+            hlines: vec![HLine { y: 30.0, color: c }],
+            hbars: vec![HBar {
+                y: 1.0,
+                height: 1.0,
+                width: 0.5,
+                offset: 0.0,
+                color: c,
+                left: false,
+            }],
+            divlines: vec![DivLine {
+                x1: 0,
+                y1: 1.0,
+                x2: 1,
+                y2: 2.0,
+                color: c,
+                dashed: true,
+            }],
+            y_range: None,
+            label: "T".into(),
+            is_overlay: false,
+        };
+        let data = chartgen::data::OhlcvData {
+            bars: vec![],
+            symbol: None,
+            interval: None,
+        };
+        let j = panel_result_to_series_json(&pr, &data);
+        let want = "rgba(10,20,30,0.25)";
+        assert_eq!(j["fills"][0]["color"], want);
+        assert_eq!(j["hbars"][0]["color"], want);
+        assert_eq!(j["divlines"][0]["color"], want);
+        assert_eq!(j["divlines"][0]["dashed"], true);
+        assert_eq!(j["hlines"][0]["color"], want);
+        assert_eq!(j["hlines"][0]["y"], 30.0);
     }
 
     #[test]
