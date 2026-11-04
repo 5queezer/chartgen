@@ -1,5 +1,5 @@
-// Toolbar layout state — symbol, timeframe, chart type and recent
-// symbols. Solid signals backed by localStorage under the
+// Toolbar layout state — symbol, timeframe, chart type, price-scale
+// mode and recent symbols. Solid signals backed by localStorage under the
 // `chartgen.layout.` prefix; every value is validated on load and falls
 // back to its default if missing or corrupt.
 
@@ -17,6 +17,15 @@ export const CHART_TYPES: readonly ChartType[] = [
   "area",
 ];
 
+/** Price-axis scale: plain, percent change from the first visible bar, or logarithmic. */
+export type ScaleMode = "normal" | "percentage" | "log";
+
+export const SCALE_MODES: readonly ScaleMode[] = [
+  "normal",
+  "percentage",
+  "log",
+];
+
 export const MAX_RECENTS = 10;
 
 const PREFIX = "chartgen.layout.";
@@ -24,6 +33,7 @@ const PREFIX = "chartgen.layout.";
 const DEFAULT_SYMBOL = "BTCUSDT";
 const DEFAULT_TIMEFRAME: Timeframe = "1h";
 const DEFAULT_CHART_TYPE: ChartType = "candles";
+const DEFAULT_SCALE_MODE: ScaleMode = "normal";
 
 function read(key: string): unknown {
   if (typeof localStorage === "undefined") return undefined;
@@ -59,6 +69,10 @@ function isChartType(x: unknown): x is ChartType {
   return (CHART_TYPES as readonly unknown[]).includes(x);
 }
 
+function isScaleMode(x: unknown): x is ScaleMode {
+  return (SCALE_MODES as readonly unknown[]).includes(x);
+}
+
 function loadRecents(): string[] {
   const raw = read("recents");
   if (!Array.isArray(raw)) return [];
@@ -71,6 +85,8 @@ function loadRecents(): string[] {
 const storedSymbol = read("symbol");
 const storedTimeframe = read("timeframe");
 const storedChartType = read("chartType");
+const storedScaleMode = read("scaleMode");
+const storedAutoScale = read("autoScale");
 
 const [symbol, setSymbolSignal] = createSignal(
   normalizeSymbol(storedSymbol) ?? DEFAULT_SYMBOL,
@@ -81,10 +97,18 @@ const [timeframe, setTimeframeSignal] = createSignal<Timeframe>(
 const [chartType, setChartTypeSignal] = createSignal<ChartType>(
   isChartType(storedChartType) ? storedChartType : DEFAULT_CHART_TYPE,
 );
+const [scaleMode, setScaleModeSignal] = createSignal<ScaleMode>(
+  isScaleMode(storedScaleMode) ? storedScaleMode : DEFAULT_SCALE_MODE,
+);
+// Auto-fit locks the price axis to the visible bars; off lets the user
+// drag the axis to scale it by hand.
+const [autoScale, setAutoScaleSignal] = createSignal(
+  typeof storedAutoScale === "boolean" ? storedAutoScale : true,
+);
 const [recentSymbols, setRecentSymbolsSignal] =
   createSignal<string[]>(loadRecents());
 
-export { symbol, timeframe, chartType, recentSymbols };
+export { symbol, timeframe, chartType, scaleMode, autoScale, recentSymbols };
 
 /** Select a symbol; invalid input is ignored. Recents are added separately. */
 export function setSymbol(next: string): void {
@@ -112,4 +136,14 @@ export function setTimeframe(next: Timeframe): void {
 export function setChartType(next: ChartType): void {
   setChartTypeSignal(next);
   persist("chartType", next);
+}
+
+export function setScaleMode(next: ScaleMode): void {
+  setScaleModeSignal(next);
+  persist("scaleMode", next);
+}
+
+export function setAutoScale(next: boolean): void {
+  setAutoScaleSignal(next);
+  persist("autoScale", next);
 }

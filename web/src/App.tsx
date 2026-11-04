@@ -10,6 +10,8 @@ import {
   type JSX,
 } from "solid-js";
 
+import type { Chart as KLineChart } from "klinecharts";
+
 import { Chart } from "./components/Chart";
 import { IndicatorChips } from "./components/IndicatorChips";
 import { IndicatorPicker } from "./components/IndicatorPicker";
@@ -17,6 +19,14 @@ import { IndicatorSettings } from "./components/IndicatorSettings";
 import { mergeParams } from "./lib/paramForm";
 import { StatusLine, type Status } from "./components/StatusLine";
 import { Toolbar } from "./components/Toolbar";
+import {
+  applyChartAction,
+  chartKeyAction,
+  downloadChartImage,
+  resetChart,
+  screenshotFilename,
+} from "./lib/chartActions";
+import { isTypingContext } from "./lib/keys";
 import { createMcpSession } from "./mcp";
 import { tryHandlePendingRedirect } from "./oauth";
 import { createChartQuery, createListIndicatorsQuery } from "./queries";
@@ -37,6 +47,9 @@ import {
   timeframe,
 } from "./stores/layout";
 
+// Matches `--color-bg` / the chart's PALETTE.bg so exported PNGs are not transparent.
+const SCREENSHOT_BACKGROUND = "#131722";
+
 export function App(): JSX.Element {
   // Long-lived session for the app's lifetime.
   const session = createMcpSession();
@@ -45,6 +58,36 @@ export function App(): JSX.Element {
   const [pickerOpen, setPickerOpen] = createSignal(false);
   // Index (into the active set) of the indicator whose settings dialog is open.
   const [settingsIndex, setSettingsIndex] = createSignal<number | null>(null);
+  const [chart, setChart] = createSignal<KLineChart | null>(null);
+  let main!: HTMLElement;
+
+  // Chart keyboard navigation: only when focus is on the page body or
+  // inside the chart area, never while typing or a dialog/menu is open.
+  onMount(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const c = chart();
+      const action = chartKeyAction(e);
+      if (!c || !action || isTypingContext(e)) return;
+      const t = e.target;
+      if (t !== document.body && !(t instanceof Node && main.contains(t))) {
+        return;
+      }
+      e.preventDefault();
+      applyChartAction(c, action);
+    };
+    window.addEventListener("keydown", onKey);
+    onCleanup(() => window.removeEventListener("keydown", onKey));
+  });
+
+  const screenshot = () => {
+    const c = chart();
+    if (!c) return;
+    downloadChartImage(
+      c,
+      screenshotFilename(symbol(), timeframe(), new Date()),
+      SCREENSHOT_BACKGROUND,
+    );
+  };
 
   // Consume the OAuth redirect (if any) before the first render gets
   // far enough to trigger a query. This is best-effort — if it fails,
@@ -114,7 +157,14 @@ export function App(): JSX.Element {
     <div class="flex flex-col h-screen w-screen">
       <header class="flex items-center gap-4 px-4 py-3 border-b border-[color:var(--color-border)]">
         <h1 class="text-lg font-semibold mr-4 leading-none">chartgen</h1>
-        <Toolbar onReselect={() => void query.refetch()} />
+        <Toolbar
+          onReselect={() => void query.refetch()}
+          onScreenshot={screenshot}
+          onResetChart={() => {
+            const c = chart();
+            if (c) resetChart(c);
+          }}
+        />
         <button
           type="button"
           onClick={() => setPickerOpen(true)}
@@ -165,7 +215,7 @@ export function App(): JSX.Element {
         error={listIndicators.isError ? listIndicators.error : null}
         active={activeIndicators()}
       />
-      <main class="flex-1 min-h-0">
+      <main ref={main} class="flex-1 min-h-0">
         <Chart
           series={query.data ?? null}
           activeIndicators={wireIndicators()}
@@ -173,6 +223,7 @@ export function App(): JSX.Element {
           onToggleHidden={(n) => toggleIndicatorHidden(indexOf(n))}
           onSettings={(n) => setSettingsIndex(indexOf(n))}
           onRemove={removeIndicator}
+          onChartReady={setChart}
         />
       </main>
     </div>

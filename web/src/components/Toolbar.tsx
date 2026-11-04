@@ -21,6 +21,8 @@ import {
   timeframeLabel,
   type Timeframe,
 } from "../lib/timeframe";
+import { toggleFullscreen } from "../lib/chartActions";
+import { isTypingContext } from "../lib/keys";
 import {
   CHART_TYPES,
   chartType,
@@ -94,6 +96,16 @@ function ChartTypeIcon(props: { type: ChartType }): JSX.Element {
   }
 }
 
+const iconProps = {
+  width: 18,
+  height: 18,
+  viewBox: "0 0 18 18",
+  fill: "none",
+  stroke: "currentColor",
+  "stroke-width": 1.5,
+  "aria-hidden": true,
+} as const;
+
 const buttonClass =
   "px-2.5 py-1.5 rounded-md text-sm cursor-pointer text-[color:var(--color-fg)] hover:bg-[color:var(--color-bg-elev)] inline-flex items-center gap-1.5";
 const activeClass =
@@ -105,20 +117,16 @@ const itemClass =
 
 /** True when a keystroke should be left alone (typing in a field, dialog/menu open). */
 function shouldIgnoreKey(e: KeyboardEvent): boolean {
-  if (e.defaultPrevented || e.ctrlKey || e.metaKey || e.altKey) return true;
-  const t = e.target;
-  if (
-    t instanceof HTMLElement &&
-    (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName))
-  ) {
-    return true;
-  }
-  return document.querySelector("[role=dialog], [role=menu]") !== null;
+  return e.ctrlKey || e.metaKey || e.altKey || isTypingContext(e);
 }
 
 export interface ToolbarProps {
   /** Called when the user picks the symbol or timeframe that is already active. */
   onReselect: () => void;
+  /** Download the chart as a PNG. */
+  onScreenshot: () => void;
+  /** Scroll to real time and restore the default bar spacing. */
+  onResetChart: () => void;
 }
 
 export function Toolbar(props: ToolbarProps): JSX.Element {
@@ -131,6 +139,9 @@ export function Toolbar(props: ToolbarProps): JSX.Element {
     if (next.trim().toUpperCase() === symbol()) props.onReselect();
     else setSymbol(next);
   };
+  const [fullscreen, setFullscreen] = createSignal(
+    document.fullscreenElement !== null,
+  );
   const [searchOpen, setSearchOpen] = createSignal(false);
   const [searchSeed, setSearchSeed] = createSignal("");
   const [tfOpen, setTfOpen] = createSignal(false);
@@ -153,8 +164,13 @@ export function Toolbar(props: ToolbarProps): JSX.Element {
         setTfOpen(true);
       }
     };
+    const onFullscreen = () => setFullscreen(document.fullscreenElement !== null);
     window.addEventListener("keydown", onKey);
-    onCleanup(() => window.removeEventListener("keydown", onKey));
+    document.addEventListener("fullscreenchange", onFullscreen);
+    onCleanup(() => {
+      window.removeEventListener("keydown", onKey);
+      document.removeEventListener("fullscreenchange", onFullscreen);
+    });
   });
 
   const overflow = TIMEFRAME_OPTIONS.filter(
@@ -266,6 +282,49 @@ export function Toolbar(props: ToolbarProps): JSX.Element {
           </DropdownMenu.Content>
         </DropdownMenu.Portal>
       </DropdownMenu.Root>
+
+      <span class="w-px h-5 bg-[color:var(--color-border)] mx-1" />
+
+      <button
+        type="button"
+        class={buttonClass}
+        onClick={props.onScreenshot}
+        aria-label="Take screenshot"
+        title="Download chart screenshot (PNG)"
+      >
+        <svg {...iconProps}>
+          <path d="M2 5.5h3l1-2h6l1 2h3v9H2z" stroke-linejoin="round" />
+          <circle cx="9" cy="10" r="2.5" />
+        </svg>
+      </button>
+      <button
+        type="button"
+        class={buttonClass}
+        onClick={props.onResetChart}
+        aria-label="Reset chart"
+        title="Reset chart (Alt+R)"
+      >
+        <svg {...iconProps}>
+          <path d="M3 9a6 6 0 1 0 2-4.5M3 2.5v3h3" stroke-linejoin="round" />
+        </svg>
+      </button>
+      <button
+        type="button"
+        class={buttonClass}
+        onClick={toggleFullscreen}
+        aria-pressed={fullscreen()}
+        aria-label="Fullscreen"
+        title="Toggle fullscreen"
+      >
+        <svg {...iconProps}>
+          <Show
+            when={fullscreen()}
+            fallback={<path d="M2 6V2h4M12 2h4v4M16 12v4h-4M6 16H2v-4" />}
+          >
+            <path d="M6 2v4H2M16 6h-4V2M12 16v-4h4M2 12h4v4" />
+          </Show>
+        </svg>
+      </button>
 
       <SymbolSearch
         open={searchOpen()}

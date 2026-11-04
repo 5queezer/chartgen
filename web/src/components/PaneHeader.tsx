@@ -19,6 +19,8 @@
 
 import { For, Show, type JSX } from "solid-js";
 
+import type { BarLegend } from "../lib/format";
+
 export interface PaneHeaderLine {
   /** Series label, e.g. "Money Flow" or "RSI". */
   label: string;
@@ -35,6 +37,11 @@ export interface PaneHeaderProps {
   params?: string;
   /** Per-line label + last value + color. */
   lines: PaneHeaderLine[];
+  /**
+   * Price-pane legend: O H L C, change vs previous close, and volume.
+   * Rendered after the label/params, before `lines`.
+   */
+  legend?: BarLegend;
   /** Distance from the top of the chart host in pixels. */
   top: number;
   /** Hide the indicator (client-side only). Omit for rows that cannot be hidden. */
@@ -107,6 +114,31 @@ export function PaneHeader(props: PaneHeaderProps): JSX.Element {
       {props.params ? (
         <span class="pane-header-params">{props.params}</span>
       ) : null}
+      <Show when={props.legend}>
+        {(l) => (
+          <>
+            <span
+              class={`pane-header-ohlc pane-header-${l().change?.direction ?? "flat"}`}
+              data-testid="price-legend"
+            >
+              <span>O <b data-testid="legend-o">{l().o}</b></span>
+              <span>H <b data-testid="legend-h">{l().h}</b></span>
+              <span>L <b data-testid="legend-l">{l().l}</b></span>
+              <span>C <b data-testid="legend-c">{l().c}</b></span>
+              <Show when={l().change}>
+                {(ch) => (
+                  <span data-testid="legend-change">
+                    {ch().abs} ({ch().pct})
+                  </span>
+                )}
+              </Show>
+            </span>
+            <span class="pane-header-vol">
+              Vol <span data-testid="legend-v">{l().v}</span>
+            </span>
+          </>
+        )}
+      </Show>
       <For each={props.lines}>
         {(line) => (
           <span class="pane-header-value" style={{ color: line.color }}>
