@@ -5,7 +5,7 @@ import type { Page, Response } from "@playwright/test";
 
 import { test, expect, expectChartRendered } from "./fixtures/app";
 
-/** Resolve on the next generate_chart tools/call whose args match. */
+/** Resolve on the next full-load generate_chart tools/call whose args match. */
 function chartCall(page: Page, match: { ticker?: string; timeframe?: string }) {
   return page.waitForResponse(
     (res: Response) => {
@@ -17,13 +17,21 @@ function chartCall(page: Page, match: { ticker?: string; timeframe?: string }) {
           method?: string;
           params?: {
             name?: string;
-            arguments?: { ticker?: string; timeframe?: string };
+            arguments?: {
+              ticker?: string;
+              timeframe?: string;
+              bars?: number;
+              end_time?: number;
+            };
           };
         };
         const a = b.params?.arguments;
         return (
           b.method === "tools/call" &&
           b.params?.name === "generate_chart" &&
+          // A full load, not a live tail poll or a history page.
+          a?.bars !== 2 &&
+          a?.end_time === undefined &&
           (match.ticker === undefined || a?.ticker === match.ticker) &&
           (match.timeframe === undefined || a?.timeframe === match.timeframe)
         );
@@ -128,7 +136,8 @@ test.describe("toolbar", () => {
     let failNext = true;
     await page.route("**/mcp", async (route) => {
       const body = route.request().postData() ?? "";
-      if (failNext && body.includes('"generate_chart"')) {
+      // The 5m full load, not a live tail poll (bars: 2) of the 1h chart.
+      if (failNext && body.includes('"generate_chart"') && body.includes('"5m"')) {
         failNext = false;
         await route.fulfill({ status: 500, body: "boom" });
         return;
