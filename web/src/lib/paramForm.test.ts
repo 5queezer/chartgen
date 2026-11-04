@@ -1,6 +1,3 @@
-// vite-plugin-solid defaults vitest to jsdom; these tests need neither DOM nor Solid rendering.
-// @vitest-environment node
-
 import { describe, expect, it } from "vitest";
 
 import type { ParamSpec } from "../types/responses";

@@ -77,6 +77,27 @@ discovery → dynamic client registration → redirect to
 the `client_id`/`client_secret` pair persists in `localStorage` so
 subsequent sessions skip registration.
 
+## Managing indicators
+
+Indicators are added from the **Indicators** picker (with their default
+parameters) and listed as chips under the toolbar. Each indicator pane
+legend shows controls on hover (or keyboard focus):
+
+- **Eye** hides the indicator. It disappears from the chart and is not
+  requested from the server; its chip stays, dimmed, with an eye button to
+  show it again.
+- **Gear** (or double-click on the legend row, or the gear on the chip)
+  opens the settings dialog. The form is generated from the indicator's
+  `configurable_params` (numbers, switches, text). **Defaults** resets the
+  form to the schema defaults; **OK** validates and applies, which
+  refetches the chart with the new parameters.
+- **×** removes the indicator. The price pane legend cannot be removed.
+
+The set, parameters and hidden state persist in `localStorage`
+([ADR-0013](/chartgen/decisions/0013-indicator-visibility-and-instances/)).
+Each indicator can be added once; two instances with different parameters
+are not supported yet.
+
 ## Build and deploy
 
 ```bash

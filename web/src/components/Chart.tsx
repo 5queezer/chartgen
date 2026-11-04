@@ -701,6 +701,9 @@ export function Chart(props: ChartProps): JSX.Element {
     // but getSize reads through the renderer — one microtask is enough
     // for pane heights to settle before we position the DOM headers.
     queueMicrotask(recomputeHeaders);
+    // Pane tops are not final yet in the microtask (the RSI legend landed
+    // on the price row); re-measure once the layout has settled.
+    requestAnimationFrame(recomputeHeaders);
   });
 
   onCleanup(() => {
