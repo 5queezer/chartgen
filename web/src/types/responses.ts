@@ -112,6 +112,9 @@ export const SeriesIndicatorSchema = z.object({
 export const SeriesPayloadSchema = z.object({
   symbol: z.string().nullable(),
   interval: z.string().nullable(),
+  // Price style the server applied to `bars` (and computed indicators on).
+  // Absent from servers that predate it: raw candles.
+  chart_style: z.enum(["candles", "heikin_ashi"]).optional(),
   bars: z.array(SeriesBarSchema),
   indicators: z.record(z.string(), SeriesIndicatorSchema),
   // True when older bars may exist before `bars[0]`: request them with

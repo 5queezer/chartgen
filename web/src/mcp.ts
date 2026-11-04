@@ -59,7 +59,7 @@ export interface McpSession {
       ticker: string;
       timeframe: string;
       indicators: GenerateChartInput["indicators"];
-    } & Pick<GenerateChartInput, "bars" | "warmup" | "end_time">,
+    } & Pick<GenerateChartInput, "bars" | "warmup" | "end_time" | "chart_style">,
     signal?: AbortSignal,
   ) => Promise<SeriesPayload>;
   /** Invoke `list_indicators` and parse the response. */
@@ -219,7 +219,7 @@ export function createMcpSession(): McpSession {
 
   return {
     async callGenerateChart(
-      { ticker, timeframe, indicators, bars, warmup, end_time },
+      { ticker, timeframe, indicators, bars, warmup, end_time, chart_style },
       signal,
     ) {
       const args: GenerateChartInput = {
@@ -230,6 +230,7 @@ export function createMcpSession(): McpSession {
         ...(bars !== undefined && { bars }),
         ...(warmup !== undefined && { warmup }),
         ...(end_time !== undefined && { end_time }),
+        ...(chart_style !== undefined && { chart_style }),
       };
       const json = await callToolWithAuthRetry(
         "generate_chart",

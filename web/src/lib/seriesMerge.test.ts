@@ -208,6 +208,19 @@ describe("mergeOlder", () => {
     });
   });
 
+  it("rejects mixing candles and Heikin Ashi bars", () => {
+    const cur = serve({ bars: 30, now: 100 });
+    const page = serve({ bars: 30, end: 71, now: 100 });
+    const tail = serve({ bars: 2, now: 101 });
+    const ha = { chart_style: "heikin_ashi" as const };
+    expect(mergeOlder(cur, { ...page, ...ha })).toEqual({ ok: false, reason: "style" });
+    expect(mergeTail(cur, { ...tail, ...ha })).toEqual({ ok: false, reason: "style" });
+    // Absent means candles; equal styles merge.
+    expect(mergeTail(cur, { ...tail, chart_style: "candles" }).ok).toBe(true);
+    const haCur = { ...cur, ...ha };
+    expect(mergeTail(haCur, { ...tail, ...ha }).ok).toBe(true);
+  });
+
   it("rejects a different indicator set or channel count", () => {
     const cur = serve({ bars: 30, now: 100 });
     const page = serve({ bars: 30, end: 71, now: 100 });

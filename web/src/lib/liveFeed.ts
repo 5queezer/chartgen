@@ -14,6 +14,7 @@
 
 import type { SeriesPayload } from "../types/responses";
 import type { ActiveIndicator } from "../stores/indicators";
+import type { ChartStyle } from "../stores/layout";
 import { barCloseMs, isContinuousMarket } from "./countdown";
 import {
   mergeOlder,
@@ -68,6 +69,8 @@ export interface LiveRequest {
   ticker: string;
   timeframe: string;
   indicators: ActiveIndicator[];
+  /** Sent with every poll and page, so merged bars share one style. */
+  chart_style: ChartStyle;
 }
 
 export interface FetchArgs {

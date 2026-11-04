@@ -87,6 +87,12 @@ pub fn tools_list_result() -> Value {
                             "description": "format=series only: extra older bars (max 1000) fetched and fed to indicator computation, then trimmed, so the first returned bars carry warmed-up indicator values. Ignored by png/summary/both.",
                             "default": 0
                         },
+                        "chart_style": {
+                            "type": "string",
+                            "enum": ["candles", "heikin_ashi"],
+                            "description": "Price series style. 'candles' (default) uses the raw OHLC bars. 'heikin_ashi' replaces them with Heikin Ashi bars (haClose = ohlc4, haOpen = (prev haOpen + prev haClose) / 2, seeded with (open+close)/2) in every format. Like TradingView, indicators are then computed on the Heikin Ashi values. The transform runs over bars+warmup before trimming, so pages and tail polls converge after warmup. format=series echoes the applied style as chart_style.",
+                            "default": "candles"
+                        },
                         "width": {
                             "type": "integer",
                             "description": "Chart image width in pixels",

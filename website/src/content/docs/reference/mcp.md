@@ -70,13 +70,14 @@ without it returns an error.
 
 Render a chart for a symbol. Accepts `ticker`/`symbol`, `timeframe`/`interval`,
 `indicators` (string names or objects with overrides), `bars` (default 200),
-`width`, `height`, `format`, `end_time`, and `warmup`.
+`width`, `height`, `format`, `end_time`, `warmup`, and `chart_style`.
 
 | Parameter | Meaning |
 |-----------|---------|
 | `bars` | Integer, default 200. Capped at 5000 in every format (`png`, `summary`, `both`, `series`); larger values are silently clamped. On Binance each 1000 bars is one upstream request. |
 | `end_time` | Integer, ms since epoch, between `-2208988800000` (1900-01-01; index histories predate 1970) and one year from now. Only bars whose open time is strictly before `end_time` are returned. To load the page before the oldest bar you have, pass that bar's `t × 1000`. Omit it (or send `null`) to get the newest bars, including the candle that is still forming. Applies to every format. A string, a float or an out-of-range value is a tool error. |
 | `warmup` | Integer, default 0, max 1000. `format=series` only. Fetches this many extra older bars and feeds them to the indicators, then trims them from the response, so the first returned bars have warmed-up values instead of `null`. `png`, `summary`, and `both` ignore it and render exactly `bars`. |
+| `chart_style` | `candles` (default) or `heikin_ashi`. `heikin_ashi` replaces the price bars with Heikin Ashi bars in every format: `haClose = (o+h+l+c)/4`, `haOpen = (prev haOpen + prev haClose)/2` (the first bar is seeded with `(o+c)/2`), `haHigh = max(h, haOpen, haClose)`, `haLow = min(l, haOpen, haClose)`; volume and timestamps are unchanged. Like TradingView, indicators are computed on the Heikin Ashi values, not the raw bars. The transform runs over `bars + warmup` before trimming, and because each `haOpen` is an exponentially decaying average, pages and tail polls with the same warmup agree after a few bars. `format=series` echoes the applied style as `chart_style`. Any other value is an error. |
 
 `timeframe` must be one of `1m 2m 3m 5m 15m 30m 60m 90m 1h 2h 4h 6h 8h 12h
 1d 3d 5d 1w 1wk 1M 1mo 3mo`; anything else is a tool error. Yahoo-style names
