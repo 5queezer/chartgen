@@ -88,3 +88,39 @@ body {
 .pane-header-value {
   font-variant-numeric: tabular-nums;
 }
+
+/* Indicator rows are interactive (hover controls, double-click for
+ * settings); the price row stays click-through. */
+.pane-header-interactive {
+  pointer-events: auto;
+}
+
+.pane-header-controls {
+  display: inline-flex;
+  gap: 2px;
+  opacity: 0;
+  transition: opacity 0.1s;
+}
+
+.pane-header:hover .pane-header-controls,
+.pane-header:focus-within .pane-header-controls {
+  opacity: 1;
+}
+
+.pane-header-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 4px;
+  color: var(--color-fg-muted);
+  background: transparent;
+  cursor: pointer;
+}
+
+.pane-header-btn:hover,
+.pane-header-btn:focus-visible {
+  color: var(--color-fg);
+  background: var(--color-bg-elev);
+}

@@ -20,7 +20,8 @@
 import {
   createEffect,
   createSignal,
-  For,
+  createMemo,
+  Index,
   onCleanup,
   onMount,
   untrack,
@@ -405,6 +406,8 @@ const TV_STYLES = {
 const CANDLE_PANE_ID = "candle_pane";
 
 interface HeaderState {
+  /** Series key (indicator request name); absent for the price pane. */
+  key?: string;
   name: string;
   params?: string;
   lines: PaneHeaderLine[];
@@ -444,6 +447,10 @@ export interface ChartProps {
   activeIndicators: ActiveIndicator[];
   /** Price rendering style chosen in the toolbar. */
   chartType: ChartType;
+  /** Legend controls, keyed by indicator name (series key). */
+  onToggleHidden?: (name: string) => void;
+  onSettings?: (name: string) => void;
+  onRemove?: (name: string) => void;
 }
 
 export function Chart(props: ChartProps): JSX.Element {
@@ -460,6 +467,13 @@ export function Chart(props: ChartProps): JSX.Element {
     null,
   );
   let crosshairFrame: number | null = null;
+  let layoutFrame: number | null = null;
+  // Names of the indicators currently requested (visible). Panes and legends
+  // of anything else are dropped right away, before a refetch lands. A string
+  // so param-only changes do not re-run the pane effect.
+  const visibleKey = createMemo(() =>
+    props.activeIndicators.map(indicatorName).join("\n"),
+  );
 
   onMount(() => {
     const c = init(container, {
@@ -595,11 +609,11 @@ export function Chart(props: ChartProps): JSX.Element {
         // 20px per row below the 4px price-header row — keeps overlays
         // readable without a DOM-measured layout pass.
         const top = 4 + 20 * overlayRow;
-        next.push({ name: displayName, params, lines: headerLines, top });
+        next.push({ key: name, name: displayName, params, lines: headerLines, top });
       } else {
         const size = c.getSize(paneMap[name]!);
         const top = size ? size.top + 4 : 0;
-        next.push({ name: displayName, params, lines: headerLines, top });
+        next.push({ key: name, name: displayName, params, lines: headerLines, top });
       }
     }
 
@@ -638,7 +652,8 @@ export function Chart(props: ChartProps): JSX.Element {
     // 1. Register any indicators we haven't seen before. Must happen
     //    before applyNewData so klinecharts's calc pipeline has the
     //    figure config to draw against.
-    const names = Object.keys(series.indicators);
+    const visible = new Set(visibleKey().split("\n"));
+    const names = Object.keys(series.indicators).filter((n) => visible.has(n));
     for (const name of names) {
       const shape = shapeFromPayload(series, name);
       if (shape.lines === 0 && shape.hist === 0) continue;
@@ -661,6 +676,8 @@ export function Chart(props: ChartProps): JSX.Element {
     c.applyNewData(klines);
 
     // 3. Pane lifecycle. Create for new indicators, remove for dropped.
+    // untrack: this effect writes paneIds below, so reading it tracked
+    // would re-run the effect forever (stack overflow).
     const currentPanes = untrack(paneIds);
     const nextPanes: Record<string, string> = {};
     const activeNames = new Set<string>();
@@ -693,25 +710,44 @@ export function Chart(props: ChartProps): JSX.Element {
     // but getSize reads through the renderer — one microtask is enough
     // for pane heights to settle before we position the DOM headers.
     queueMicrotask(recomputeHeaders);
+    // Pane tops are not final yet in the microtask (the RSI legend landed
+    // on the price row); re-measure once the layout has settled.
+    layoutFrame = requestAnimationFrame(recomputeHeaders);
   });
 
   onCleanup(() => {
+    if (layoutFrame !== null) cancelAnimationFrame(layoutFrame);
     if (container) dispose(container);
   });
 
   return (
     <div ref={host} class="chart-host">
       <div ref={container} class="chart-container" />
-      <For each={headers()}>
+      <Index each={headers()}>
         {(h) => (
           <PaneHeader
-            name={h.name}
-            params={h.params}
-            lines={h.lines}
-            top={h.top}
+            name={h().name}
+            params={h().params}
+            lines={h().lines}
+            top={h().top}
+            onToggleHidden={
+              h().key !== undefined && props.onToggleHidden
+                ? () => props.onToggleHidden!(h().key!)
+                : undefined
+            }
+            onSettings={
+              h().key !== undefined && props.onSettings
+                ? () => props.onSettings!(h().key!)
+                : undefined
+            }
+            onRemove={
+              h().key !== undefined && props.onRemove
+                ? () => props.onRemove!(h().key!)
+                : undefined
+            }
           />
         )}
-      </For>
+      </Index>
     </div>
   );
 }

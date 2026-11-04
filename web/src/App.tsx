@@ -5,14 +5,16 @@ import {
   createMemo,
   createSignal,
   onCleanup,
-  onMount,
   untrack,
+  onMount,
   type JSX,
 } from "solid-js";
 
 import { Chart } from "./components/Chart";
 import { IndicatorChips } from "./components/IndicatorChips";
 import { IndicatorPicker } from "./components/IndicatorPicker";
+import { IndicatorSettings } from "./components/IndicatorSettings";
+import { mergeParams } from "./lib/paramForm";
 import { StatusLine, type Status } from "./components/StatusLine";
 import { Toolbar } from "./components/Toolbar";
 import { createMcpSession } from "./mcp";
@@ -21,7 +23,12 @@ import { createChartQuery, createListIndicatorsQuery } from "./queries";
 import { createAlertLogger } from "./services/notifications";
 import {
   activeIndicators,
+  indicatorName,
+  indicatorParams,
   removeIndicator,
+  toggleIndicatorHidden,
+  toWire,
+  updateIndicatorParams,
 } from "./stores/indicators";
 import {
   addRecent,
@@ -36,6 +43,8 @@ export function App(): JSX.Element {
 
   const [authReady, setAuthReady] = createSignal(false);
   const [pickerOpen, setPickerOpen] = createSignal(false);
+  // Index (into the active set) of the indicator whose settings dialog is open.
+  const [settingsIndex, setSettingsIndex] = createSignal<number | null>(null);
 
   // Consume the OAuth redirect (if any) before the first render gets
   // far enough to trigger a query. This is best-effort — if it fails,
@@ -52,10 +61,26 @@ export function App(): JSX.Element {
     });
   });
 
+  // Hidden indicators are client-only and never requested from the server.
+  const wireIndicators = createMemo(() => toWire(activeIndicators()));
+
+  const indexOf = (name: string) =>
+    activeIndicators().findIndex((e) => indicatorName(e) === name);
+
+  // Only re-evaluates when the dialog opens/closes, so edits elsewhere do
+  // not reset a form in progress.
+  const settingsTarget = createMemo(() => {
+    const i = settingsIndex();
+    const entry = i === null ? undefined : untrack(activeIndicators)[i];
+    return entry === undefined
+      ? null
+      : { name: indicatorName(entry), params: indicatorParams(entry) };
+  });
+
   const query = createChartQuery(session, () => ({
     ticker: symbol(),
     timeframe: timeframe(),
-    indicators: activeIndicators(),
+    indicators: wireIndicators(),
     enabled: authReady(),
   }));
 
@@ -108,6 +133,29 @@ export function App(): JSX.Element {
       <IndicatorChips
         entries={activeIndicators()}
         onRemove={removeIndicator}
+        onToggleHidden={toggleIndicatorHidden}
+        onSettings={setSettingsIndex}
+      />
+      <IndicatorSettings
+        target={settingsTarget()}
+        specs={
+          listIndicators.data?.indicators.find((i) => {
+            const n = settingsTarget()?.name;
+            return i.name === n || i.aliases?.includes(n ?? "");
+          })?.configurable_params
+        }
+        onClose={() => setSettingsIndex(null)}
+        onSubmit={(params, fields) => {
+          const i = settingsIndex();
+          const target = settingsTarget();
+          if (i !== null && target) {
+            updateIndicatorParams(
+              i,
+              mergeParams(fields, target.params, params),
+            );
+          }
+          setSettingsIndex(null);
+        }}
       />
       <IndicatorPicker
         open={pickerOpen()}
@@ -120,8 +168,11 @@ export function App(): JSX.Element {
       <main class="flex-1 min-h-0">
         <Chart
           series={query.data ?? null}
-          activeIndicators={activeIndicators()}
+          activeIndicators={wireIndicators()}
           chartType={chartType()}
+          onToggleHidden={(n) => toggleIndicatorHidden(indexOf(n))}
+          onSettings={(n) => setSettingsIndex(indexOf(n))}
+          onRemove={removeIndicator}
         />
       </main>
     </div>
