@@ -1,0 +1,61 @@
+{
+ "timezone": "UTC",
+ "symbols": [
+  {
+   "symbol": "ETHBTC",
+   "status": "TRADING",
+   "baseAsset": "ETH",
+   "quoteAsset": "BTC",
+   "isSpotTradingAllowed": true
+  },
+  {
+   "symbol": "BTCUSDT",
+   "status": "TRADING",
+   "baseAsset": "BTC",
+   "quoteAsset": "USDT",
+   "isSpotTradingAllowed": true
+  },
+  {
+   "symbol": "ETHUSDT",
+   "status": "TRADING",
+   "baseAsset": "ETH",
+   "quoteAsset": "USDT",
+   "isSpotTradingAllowed": true
+  },
+  {
+   "symbol": "BNBUSDT",
+   "status": "TRADING",
+   "baseAsset": "BNB",
+   "quoteAsset": "USDT",
+   "isSpotTradingAllowed": true
+  },
+  {
+   "symbol": "BTCEUR",
+   "status": "TRADING",
+   "baseAsset": "BTC",
+   "quoteAsset": "EUR",
+   "isSpotTradingAllowed": true
+  },
+  {
+   "symbol": "SOLUSDT",
+   "status": "TRADING",
+   "baseAsset": "SOL",
+   "quoteAsset": "USDT",
+   "isSpotTradingAllowed": true
+  },
+  {
+   "symbol": "WBTCBTC",
+   "status": "TRADING",
+   "baseAsset": "WBTC",
+   "quoteAsset": "BTC",
+   "isSpotTradingAllowed": true
+  },
+  {
+   "symbol": "NEOBTC",
+   "status": "BREAK",
+   "baseAsset": "NEO",
+   "quoteAsset": "BTC",
+   "isSpotTradingAllowed": true
+  }
+ ]
+}

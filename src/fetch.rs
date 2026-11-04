@@ -69,7 +69,7 @@ pub fn now_ms() -> i64 {
 }
 
 /// Shared blocking HTTP client; every upstream request times out after 10 s.
-fn http() -> &'static reqwest::blocking::Client {
+pub(crate) fn http() -> &'static reqwest::blocking::Client {
     static CLIENT: OnceLock<reqwest::blocking::Client> = OnceLock::new();
     CLIENT.get_or_init(|| {
         reqwest::blocking::Client::builder()
@@ -565,7 +565,7 @@ fn path_segment(symbol: &str) -> Result<String, String> {
 }
 
 /// Percent-encode every byte except RFC 3986 unreserved characters.
-fn percent_encode(s: &str) -> String {
+pub(crate) fn percent_encode(s: &str) -> String {
     s.bytes()
         .map(|b| match b {
             b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {

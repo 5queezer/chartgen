@@ -6,6 +6,7 @@ use std::io::{self, BufRead, Write};
 use std::sync::{Arc, RwLock};
 
 use crate::fetch;
+use crate::search;
 use chartgen::data;
 use chartgen::engine::Engine;
 use chartgen::indicator::Indicator;
@@ -125,6 +126,7 @@ fn handle_tools_call(
         "list_indicators" => tool_list_indicators(id),
         "get_indicators" => tool_get_indicators(id, &arguments, engine),
         "get_quotes" => tool_get_quotes(id, &arguments),
+        "search_symbols" => tool_search_symbols(id, &arguments),
         "place_order" => tool_place_order(id, &arguments, engine),
         "cancel_order" => tool_cancel_order(id, &arguments, engine),
         "get_orders" => tool_get_orders(id, &arguments, engine),
@@ -1007,7 +1009,7 @@ const MAX_QUOTE_SYMBOLS: usize = 50;
 /// Trim + uppercase a ticker; `None` unless it is 1–32 characters of
 /// `A-Z 0-9 . ^ = - _` (the web client's `normalizeSymbol` rules) with at
 /// least one letter or digit, so it can never be a `.`/`..` path segment.
-fn normalize_quote_symbol(raw: &str) -> Option<String> {
+pub(crate) fn normalize_quote_symbol(raw: &str) -> Option<String> {
     let s = raw.trim().to_uppercase();
     let ok = (1..=32).contains(&s.len())
         && s.chars().any(|c| c.is_ascii_alphanumeric())
@@ -1073,6 +1075,55 @@ fn get_quotes(id: Option<Value>, args: &Value, source: fetch::DataSource) -> Val
         })
         .collect();
     tool_ok(id, json!({ "quotes": quotes }))
+}
+
+// ---------------------------------------------------------------------------
+// search_symbols (symbol search dialog)
+// ---------------------------------------------------------------------------
+
+fn tool_search_symbols(id: Option<Value>, args: &Value) -> Value {
+    search_symbols(id, args, fetch::DataSource::from_env())
+}
+
+fn search_symbols(id: Option<Value>, args: &Value, source: fetch::DataSource) -> Value {
+    let Some(query) = args.get("query").and_then(|v| v.as_str()) else {
+        return tool_err(id, "query is required and must be a string");
+    };
+    let limit = match args.get("limit") {
+        None | Some(Value::Null) => search::DEFAULT_LIMIT,
+        Some(v) => match v.as_u64() {
+            Some(n) if (1..=search::MAX_LIMIT as u64).contains(&n) => n as usize,
+            _ => {
+                return tool_err(
+                    id,
+                    &format!("limit must be an integer 1-{}", search::MAX_LIMIT),
+                )
+            }
+        },
+    };
+    let types: Vec<String> = match args.get("types") {
+        None | Some(Value::Null) => Vec::new(),
+        Some(v) => {
+            let strings: Option<Vec<String>> = v
+                .as_array()
+                .and_then(|a| a.iter().map(|t| t.as_str().map(str::to_string)).collect());
+            match strings {
+                Some(types) => types,
+                None => return tool_err(id, "types must be an array of strings"),
+            }
+        }
+    };
+    match search::search_symbols(source, query, limit, &types) {
+        Ok(out) => {
+            let results: Vec<Value> = out.results.iter().map(|r| r.to_json()).collect();
+            let mut payload = json!({ "results": results });
+            if !out.warnings.is_empty() {
+                payload["warnings"] = json!(out.warnings);
+            }
+            tool_ok(id, payload)
+        }
+        Err(e) => tool_err(id, &e),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -3091,5 +3142,74 @@ mod tests {
             None,
         );
         assert!(response_text(&resp).contains("symbols is required"));
+    }
+
+    // --- search_symbols ---
+
+    fn search(args: Value) -> Value {
+        search_symbols(Some(json!(1)), &args, fetch::DataSource::Sample)
+    }
+
+    #[test]
+    fn search_symbols_returns_ranked_results_with_contract_fields() {
+        let resp = search(json!({ "query": " spy " }));
+        assert!(!is_error(&resp), "{}", response_text(&resp));
+        let p: Value = serde_json::from_str(&response_text(&resp)).unwrap();
+        let first = &p["results"][0];
+        assert_eq!(first["symbol"], "SPY");
+        assert_eq!(first["type"], "etf");
+        assert_eq!(first["source"], "sample");
+        assert!(first["name"].is_string() && first["exchange"].is_string());
+        assert!(p.get("warnings").is_none());
+    }
+
+    #[test]
+    fn search_symbols_honours_limit_and_types() {
+        let resp = search(json!({ "query": "a", "limit": 2 }));
+        let p: Value = serde_json::from_str(&response_text(&resp)).unwrap();
+        assert_eq!(p["results"].as_array().unwrap().len(), 2);
+
+        let resp = search(json!({ "query": "e", "types": ["forex"] }));
+        let p: Value = serde_json::from_str(&response_text(&resp)).unwrap();
+        let r = p["results"].as_array().unwrap();
+        assert!(!r.is_empty() && r.iter().all(|x| x["type"] == "forex"));
+    }
+
+    #[test]
+    fn search_symbols_rejects_bad_input() {
+        for args in [
+            json!({}),
+            json!({ "query": 5 }),
+            json!({ "query": "" }),
+            json!({ "query": "a\u{7}" }),
+            json!({ "query": "a", "limit": 0 }),
+            json!({ "query": "a", "limit": 51 }),
+            json!({ "query": "a", "limit": "x" }),
+            json!({ "query": "a", "types": "etf" }),
+            json!({ "query": "a", "types": [1] }),
+            json!({ "query": "a", "types": ["bogus"] }),
+        ] {
+            assert!(is_error(&search(args.clone())), "{args}");
+        }
+    }
+
+    #[test]
+    fn search_symbols_is_dispatched_and_listed() {
+        let resp = handle_mcp_request("tools/list", Some(json!(1)), None, None, None);
+        let tools = resp["result"]["tools"].as_array().unwrap();
+        let tool = tools
+            .iter()
+            .find(|t| t["name"] == "search_symbols")
+            .unwrap();
+        assert_eq!(tool["inputSchema"]["required"], json!(["query"]));
+
+        let resp = handle_mcp_request(
+            "tools/call",
+            Some(json!(2)),
+            Some(&json!({ "name": "search_symbols", "arguments": {} })),
+            None,
+            None,
+        );
+        assert!(response_text(&resp).contains("query is required"));
     }
 }
