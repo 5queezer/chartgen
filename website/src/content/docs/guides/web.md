@@ -144,8 +144,7 @@ digit shortcuts above.
 A layout is a named bundle of symbol, timeframe, chart type, scale mode,
 and the indicator set (including hidden and edited ones). Drawings are
 not part of a layout: they stay per symbol and look the same in every
-layout. The
-layout menu sits at the right end of the top bar and shows the active
+layout. The layout menu sits at the right end of the top bar and shows the active
 layout's name. A dot next to the name means the chart differs from the
 saved layout. The first start creates one layout, `Unnamed`, from your
 current chart.
@@ -156,14 +155,19 @@ current chart.
 | Rename... | Rename the active layout. A name already in use gets a suffix: `Name (2)`. |
 | Make a copy / Save as... | Store the current chart as a new layout and switch to it. |
 | Create new layout... | A new layout on the current symbol and timeframe; chart type, scale mode and indicators go back to their defaults. |
-| Load layout... | A searchable list of layouts; click one to switch. |
-| Export saved layout / Import layout... | Download the saved layout as a JSON file, or add one from a file. Imports are validated; invalid files are refused. |
-| Delete layout... | Delete the active layout after confirmation. The first remaining one becomes active; deleting the last one leaves a fresh `Unnamed`. |
+| Load layout... | A searchable list of layouts; click one to switch, or the x on its row to delete it. The open layout cannot be deleted: switch to another one first. |
+| Export saved layout / Import layout... | Download the saved layout as a JSON file, or add one from a file. Imports are validated (files over 256 KB, other versions and unknown fields are refused or dropped); invalid files are refused. |
 
 Switching layouts applies all of the above. If the current layout has
 unsaved changes, a dialog offers Save, Don't save or Cancel. Unsaved
 changes survive a reload like any other chart state, and so does the
-active layout.
+active layout, so there is no "leave page?" prompt. Saving with nothing
+changed still shows "Layout saved". Hiding an indicator counts as a
+change; opening an indicator's settings and pressing OK without edits
+does not.
+
+If you use several tabs, each tab keeps its own open layout; saving in
+one tab does not discard layouts created in another.
 
 Layouts are stored in `localStorage` under `chartgen.layouts` (at most
 50, validated on load, malformed ones dropped). See

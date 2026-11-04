@@ -58,6 +58,14 @@ test.describe("layouts", () => {
     await expect(dirtyDot(page)).toHaveCount(0);
   });
 
+  test("Ctrl+S with nothing changed still confirms", async ({
+    bootedApp: page,
+  }) => {
+    await expect(dirtyDot(page)).toHaveCount(0);
+    await page.keyboard.press("Control+s");
+    await expect(page.getByTestId("layout-notice")).toHaveText("Layout saved");
+  });
+
   test("create, switch, unsaved prompt, persist, rename, delete", async ({
     bootedApp: page,
   }) => {
@@ -132,15 +140,22 @@ test.describe("layouts", () => {
     await nameDialog(page, "Gamma");
     await expect(layoutName(page)).toHaveText("Gamma");
 
-    // Delete the active layout: falls back to the other one.
-    await menu(page, /^Delete layout/);
-    await page.getByRole("dialog").getByRole("button", { name: "Delete" }).click();
-    await expect(layoutName(page)).toHaveText("Beta");
-    await expect(activeTimeframe(page)).toHaveText("15m");
+    // The open layout cannot be deleted; another one can.
     await menu(page, /^Load layout/);
     const list = page.getByRole("dialog");
-    await expect(list.getByRole("button", { name: /^Gamma/ })).toHaveCount(0);
-    await list.getByRole("textbox", { name: "Search layouts" }).fill("zzz");
-    await expect(list).toContainText("No layouts match");
+    await expect(
+      list.getByRole("button", { name: "Delete Gamma" }),
+    ).toBeDisabled();
+    await list.getByRole("button", { name: "Delete Beta" }).click();
+    await page.getByRole("dialog").getByRole("button", { name: "Delete", exact: true }).click();
+    await menu(page, /^Load layout/);
+    await expect(
+      page.getByRole("dialog").getByRole("button", { name: /^Beta/ }),
+    ).toHaveCount(0);
+    await expect(
+      page.getByRole("dialog").getByRole("button", { name: /^Gamma/ }),
+    ).toBeVisible();
+    await page.getByRole("textbox", { name: "Search layouts" }).fill("zzz");
+    await expect(page.getByRole("dialog")).toContainText("No layouts match");
   });
 });

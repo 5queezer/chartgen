@@ -187,9 +187,8 @@ export function activeIndicatorsKey(entries: ActiveIndicator[]): string {
   return JSON.stringify(
     entries.map((e) => {
       if (typeof e === "string") return e;
-      const sorted: Record<string, unknown> = {};
-      for (const k of Object.keys(e).sort()) sorted[k] = e[k];
-      return sorted;
+      // fromEntries defines own properties, so a `__proto__` key stays data.
+      return Object.fromEntries(Object.keys(e).sort().map((k) => [k, e[k]]));
     }),
   );
 }

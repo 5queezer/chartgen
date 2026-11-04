@@ -2,7 +2,10 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   MAX_LAYOUTS,
+  MAX_IMPORT_BYTES,
+  MAX_INDICATORS,
   isDirty,
+  normalizeIndicators,
   parseExport,
   parseLayouts,
   parseState,
@@ -133,12 +136,11 @@ describe("reducers", () => {
     expect(uniqueName(f.items, "B", "b")).toBe("B");
   });
 
-  it("delete moves the active layout and refuses to empty the list", () => {
+  it("delete removes other layouts but never the active one", () => {
     const f = withAdded(file(), "B", base, "b", 2)!;
-    const g = withoutLayout(f, "b")!;
-    expect(g.active).toBe("a");
-    expect(withoutLayout(f, "a")!.active).toBe("b");
-    expect(withoutLayout(g, "a")).toBeNull();
+    expect(f.active).toBe("b");
+    expect(withoutLayout(f, "a").items.map((l) => l.id)).toEqual(["b"]);
+    expect(withoutLayout(f, "b")).toBe(f);
   });
 });
 
@@ -163,6 +165,20 @@ describe("snapshot and dirty", () => {
     expect(isDirty(base, { ...base, symbol: "ETHUSDT" })).toBe(true);
   });
 
+  it("ignores params equal to the registry default, but not hidden", () => {
+    const defaults = { rsi: { length: 14 } };
+    const bare = { ...base, indicators: ["ema_stack", "rsi"] };
+    expect(isDirty(base, bare)).toBe(true);
+    expect(isDirty(base, bare, defaults)).toBe(false);
+    expect(
+      isDirty(base, { ...base, indicators: ["ema_stack", { name: "rsi", length: 21 }] }, defaults),
+    ).toBe(true);
+    expect(
+      isDirty(base, { ...base, indicators: ["ema_stack", { name: "rsi", length: 14, hidden: true }] }, defaults),
+    ).toBe(true);
+    expect(normalizeIndicators(base.indicators, defaults)).toEqual(["ema_stack", "rsi"]);
+  });
+
   it("withSaved clears the dirty state", () => {
     const live = { ...base, timeframe: "4h" as const };
     const f = withSaved(file(), "a", live, 5);
@@ -182,6 +198,45 @@ describe("export", () => {
     expect(parseExport('{"name":"x","state":{}}')).toBeNull();
     expect(parseState({ ...base, symbol: "" })).toBeNull();
   });
+
+  const exportOf = (state: unknown, version: unknown = 1) =>
+    JSON.stringify({ version, name: "X", state });
+
+  it("requires version 1 and rejects oversized files", () => {
+    expect(parseExport(exportOf(base))).not.toBeNull();
+    expect(parseExport(exportOf(base, 2))).toBeNull();
+    expect(parseExport(exportOf(base, null))).toBeNull();
+    const big = { ...base, indicators: ["a".repeat(MAX_IMPORT_BYTES)] };
+    expect(parseExport(exportOf(big))).toBeNull();
+  });
+
+  it("caps indicators", () => {
+    const many = Array.from({ length: MAX_INDICATORS + 20 }, (_, i) => `i${i}`);
+    expect(parseExport(exportOf({ ...base, indicators: many }))!.state.indicators).toHaveLength(MAX_INDICATORS);
+  });
+
+  it("keeps only primitive params and the hidden flag", () => {
+    const state = {
+      ...base,
+      indicators: [
+        { name: "rsi", length: 14, mode: "x", on: true, nested: { a: 1 }, list: [1], nil: null, inf: 1e999, hidden: true },
+      ],
+    };
+    expect(parseExport(exportOf(state))!.state.indicators).toEqual([
+      { name: "rsi", length: 14, mode: "x", on: true, hidden: true },
+    ]);
+  });
+
+  it("drops prototype-polluting keys", () => {
+    const text = exportOf(base).replace(
+      '"indicators":[',
+      '"indicators":[{"name":"evil","__proto__":{"polluted":1},"constructor":5,"prototype":6,"ok":1},',
+    );
+    const [evil] = parseExport(text)!.state.indicators;
+    expect(evil).toEqual({ name: "evil", ok: 1 });
+    expect(Object.keys(evil as object)).toEqual(["name", "ok"]);
+    expect(({} as Record<string, unknown>).polluted).toBeUndefined();
+  });
 });
 
 describe("live bindings", () => {
@@ -196,6 +251,60 @@ describe("live bindings", () => {
     });
     return data;
   }
+
+  const KEY = "chartgen.layouts";
+
+  /** Add a layout to the stored file, as another tab would. */
+  function otherTabAdds(data: Map<string, string>) {
+    const f = JSON.parse(data.get(KEY)!);
+    f.items.push({ ...f.items[0], id: "other", name: "Other" });
+    data.set(KEY, JSON.stringify(f));
+  }
+
+  it("keeps layouts another tab wrote between load and update", async () => {
+    const data = stub();
+    vi.resetModules();
+    const l = await import("./layouts");
+    otherTabAdds(data);
+    l.renameLayout(l.activeLayout().id, "Mine");
+    const names = JSON.parse(data.get(KEY)!).items.map((x: Layout) => x.name);
+    expect(names).toEqual(["Mine", "Other"]);
+  });
+
+  it("refreshes from the storage event and keeps this tab's active layout", async () => {
+    const data = stub();
+    const handlers: ((e: { key: string | null }) => void)[] = [];
+    vi.stubGlobal("window", { addEventListener: (_: string, h: never) => handlers.push(h) });
+    vi.resetModules();
+    const l = await import("./layouts");
+    const active = l.activeLayout().id;
+    otherTabAdds(data);
+    handlers.forEach((h) => h({ key: KEY }));
+    expect(l.layouts().map((x) => x.name)).toEqual(["Unnamed", "Other"]);
+    expect(l.activeLayout().id).toBe(active);
+  });
+
+  it("never overwrites an unusable stored value with the fallback", async () => {
+    for (const bad of ["{not json", '{"version":2,"items":[]}', '{"version":1,"active":"a","items":[null,{}]}']) {
+      const data = stub({ [KEY]: bad });
+      vi.resetModules();
+      const l = await import("./layouts");
+      expect(l.activeLayout().name).toBe("Unnamed");
+      expect(data.get(KEY)).toBe(bad);
+      expect(data.get(KEY + ".bak")).toBe(bad);
+
+      l.renameLayout(l.activeLayout().id, "Fresh");
+      expect(JSON.parse(data.get(KEY)!).items[0].name).toBe("Fresh");
+      expect(data.get(KEY + ".bak")).toBe(bad);
+    }
+  });
+
+  it("keeps an existing backup instead of replacing it", async () => {
+    const data = stub({ [KEY]: "{bad", [KEY + ".bak"]: "first" });
+    vi.resetModules();
+    await import("./layouts");
+    expect(data.get(KEY + ".bak")).toBe("first");
+  });
 
   it("seeds Unnamed from the current stores and tracks dirty/save/switch", async () => {
     const data = stub({ "chartgen.layout.timeframe": '"4h"' });

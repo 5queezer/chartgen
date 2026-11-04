@@ -12,9 +12,10 @@ import { batch, createSignal } from "solid-js";
 import { isTimeframe, type Timeframe } from "../lib/timeframe";
 import {
   activeIndicators,
-  activeIndicatorsKey,
   DEFAULT_SET,
   indicatorName,
+  indicatorParams,
+  isHidden,
   isActiveIndicator,
   setActiveIndicators,
   type ActiveIndicator,
@@ -41,6 +42,12 @@ const STORAGE_KEY = "chartgen.layouts";
 
 export const MAX_LAYOUTS = 50;
 export const MAX_NAME_LENGTH = 64;
+export const MAX_INDICATORS = 50;
+/** Largest layout file `parseExport` looks at. */
+export const MAX_IMPORT_BYTES = 256 * 1024;
+const MAX_PARAM_STRING = 200;
+const BACKUP_KEY = STORAGE_KEY + ".bak";
+const FORBIDDEN_KEYS = new Set(["__proto__", "constructor", "prototype"]);
 export const DEFAULT_LAYOUT_NAME = "Unnamed";
 
 export interface LayoutState {
@@ -92,6 +99,23 @@ export function uniqueName(
   return candidate;
 }
 
+/**
+ * Keep an indicator entry's name and its primitive params (number, string,
+ * boolean) and the hidden flag; prototype-polluting keys are dropped.
+ */
+function sanitizeEntry(e: ActiveIndicator): ActiveIndicator {
+  if (typeof e === "string") return e;
+  const params = Object.entries(e).filter(
+    ([k, v]) =>
+      k !== "name" &&
+      !FORBIDDEN_KEYS.has(k) &&
+      (typeof v === "boolean" ||
+        (typeof v === "number" && Number.isFinite(v)) ||
+        (typeof v === "string" && v.length <= MAX_PARAM_STRING)),
+  );
+  return Object.fromEntries([["name", e.name], ...params]) as ActiveIndicator;
+}
+
 /** Validate a stored/imported state; null if a required field is malformed. */
 export function parseState(x: unknown): LayoutState | null {
   if (!isPlainObject(x)) return null;
@@ -107,11 +131,14 @@ export function parseState(x: unknown): LayoutState | null {
   }
   // Same rule as the indicator store: valid entries, unique by name.
   const seen = new Set<string>();
-  const indicators = x.indicators.filter((e): e is ActiveIndicator => {
-    if (!isActiveIndicator(e) || seen.has(indicatorName(e))) return false;
-    seen.add(indicatorName(e));
-    return true;
-  });
+  const indicators = x.indicators
+    .filter((e): e is ActiveIndicator => {
+      if (!isActiveIndicator(e) || seen.has(indicatorName(e))) return false;
+      seen.add(indicatorName(e));
+      return true;
+    })
+    .slice(0, MAX_INDICATORS)
+    .map(sanitizeEntry);
   // Any leftover `drawingsBySymbol` key is ignored.
   return {
     symbol: sym,
@@ -138,52 +165,87 @@ function parseLayout(x: unknown): Layout | null {
 
 /**
  * Validate the stored file, dropping malformed items, duplicate ids and
- * anything past the cap. A missing or unusable file (fresh install,
- * corruption) becomes one default layout built from `current`.
+ * anything past the cap. Null when nothing usable is left.
  */
+export function parseStoredFile(raw: unknown): LayoutsFile | null {
+  if (!isPlainObject(raw) || raw.version !== 1 || !Array.isArray(raw.items)) {
+    return null;
+  }
+  const ids = new Set<string>();
+  const items: Layout[] = [];
+  for (const entry of raw.items) {
+    const layout = parseLayout(entry);
+    if (!layout || ids.has(layout.id) || items.length >= MAX_LAYOUTS) continue;
+    ids.add(layout.id);
+    items.push({ ...layout, name: uniqueName(items, layout.name) });
+  }
+  if (items.length === 0) return null;
+  const active =
+    typeof raw.active === "string" && ids.has(raw.active)
+      ? raw.active
+      : items[0]!.id;
+  return { version: 1, active, items };
+}
+
+/** The stored file, or one default layout built from `current` (fresh install, corruption). */
 export function parseLayouts(
   raw: unknown,
   current: LayoutState,
   id: string,
   now: number,
 ): LayoutsFile {
-  if (isPlainObject(raw) && raw.version === 1 && Array.isArray(raw.items)) {
-    const ids = new Set<string>();
-    const items: Layout[] = [];
-    for (const entry of raw.items) {
-      const layout = parseLayout(entry);
-      if (!layout || ids.has(layout.id) || items.length >= MAX_LAYOUTS) continue;
-      ids.add(layout.id);
-      items.push({ ...layout, name: uniqueName(items, layout.name) });
+  return (
+    parseStoredFile(raw) ?? {
+      version: 1,
+      active: id,
+      items: [
+        { id, name: DEFAULT_LAYOUT_NAME, updatedAt: now, state: current },
+      ],
     }
-    if (items.length > 0) {
-      const active =
-        typeof raw.active === "string" && ids.has(raw.active)
-          ? raw.active
-          : items[0]!.id;
-      return { version: 1, active, items };
-    }
-  }
-  return {
-    version: 1,
-    active: id,
-    items: [{ id, name: DEFAULT_LAYOUT_NAME, updatedAt: now, state: current }],
-  };
+  );
 }
 
-function comparable(s: LayoutState): string {
+/** Param defaults per indicator name (and alias), as the registry reports them. */
+export type ParamDefaults = Record<string, Record<string, unknown>>;
+
+/**
+ * Entries in a form that ignores how a value was entered: params equal to
+ * the schema default are dropped (the settings dialog does the same), keys
+ * are sorted. The hidden flag is kept, so hiding an indicator is a change.
+ */
+export function normalizeIndicators(
+  entries: readonly ActiveIndicator[],
+  defaults: ParamDefaults,
+): unknown[] {
+  return entries.map((e) => {
+    const name = indicatorName(e);
+    const params = Object.entries(indicatorParams(e))
+      .filter(([k, v]) => defaults[name]?.[k] !== v)
+      .sort(([a], [b]) => (a < b ? -1 : 1));
+    const hidden = isHidden(e) ? [["hidden", true]] : [];
+    return params.length + hidden.length === 0
+      ? name
+      : Object.fromEntries([["name", name], ...params, ...hidden]);
+  });
+}
+
+function comparable(s: LayoutState, defaults: ParamDefaults): string {
   return JSON.stringify([
     s.symbol,
     s.timeframe,
     s.chartType,
     s.scaleMode,
-    activeIndicatorsKey(s.indicators),
+    normalizeIndicators(s.indicators, defaults),
   ]);
 }
 
 /** True when `live` differs from `saved` in anything a layout holds . */
-export function isDirty(saved: LayoutState, live: LayoutState): boolean {
-  return comparable(saved) !== comparable(live);
+export function isDirty(
+  saved: LayoutState,
+  live: LayoutState,
+  defaults: ParamDefaults = {},
+): boolean {
+  return comparable(saved, defaults) !== comparable(live, defaults);
 }
 
 export function withSaved(
@@ -237,24 +299,20 @@ export function withRenamed(
   };
 }
 
-/** Remove a layout; the active one falls to the first remaining. Null if none would be left. */
-export function withoutLayout(
-  file: LayoutsFile,
-  id: string,
-): LayoutsFile | null {
-  const items = file.items.filter((l) => l.id !== id);
-  if (items.length === 0) return null;
-  const active = file.active === id ? items[0]!.id : file.active;
-  return { ...file, active, items };
+/** Remove a layout. The active layout cannot be removed: the file is returned unchanged. */
+export function withoutLayout(file: LayoutsFile, id: string): LayoutsFile {
+  if (id === file.active) return file;
+  return { ...file, items: file.items.filter((l) => l.id !== id) };
 }
 
 /** Parse an exported layout file: `{ name, state }`. */
 export function parseExport(
   text: string,
 ): { name: string; state: LayoutState } | null {
+  if (text.length > MAX_IMPORT_BYTES) return null;
   try {
     const raw: unknown = JSON.parse(text);
-    if (!isPlainObject(raw)) return null;
+    if (!isPlainObject(raw) || raw.version !== 1) return null;
     const name = cleanName(raw.name);
     const state = parseState(raw.state);
     return name && state ? { name, state } : null;
@@ -290,18 +348,27 @@ function liveState(): LayoutState {
   };
 }
 
-function load(): LayoutsFile {
-  let raw: unknown;
+type Stored =
+  | { kind: "absent" }
+  | { kind: "ok"; file: LayoutsFile }
+  | { kind: "unusable"; text: string };
+
+function readStored(): Stored {
+  if (typeof localStorage === "undefined") return { kind: "absent" };
+  let text: string | null;
   try {
-    const text =
-      typeof localStorage === "undefined"
-        ? null
-        : localStorage.getItem(STORAGE_KEY);
-    raw = text === null ? undefined : JSON.parse(text);
+    text = localStorage.getItem(STORAGE_KEY);
   } catch {
-    raw = undefined;
+    return { kind: "absent" };
   }
-  return parseLayouts(raw, liveState(), newId(), Date.now());
+  if (text === null) return { kind: "absent" };
+  try {
+    const parsed = parseStoredFile(JSON.parse(text));
+    if (parsed) return { kind: "ok", file: parsed };
+  } catch {
+    // Falls through to unusable.
+  }
+  return { kind: "unusable", text };
 }
 
 function persist(file: LayoutsFile): void {
@@ -313,21 +380,70 @@ function persist(file: LayoutsFile): void {
   }
 }
 
+/** Stored value that cannot be used is copied aside once and never overwritten by a fallback. */
+function keepBackup(text: string): void {
+  try {
+    if (localStorage.getItem(BACKUP_KEY) === null) {
+      localStorage.setItem(BACKUP_KEY, text);
+    }
+  } catch {
+    // Best-effort only.
+  }
+}
+
+function load(): LayoutsFile {
+  const stored = readStored();
+  if (stored.kind === "ok") return stored.file;
+  const fallback = parseLayouts(undefined, liveState(), newId(), Date.now());
+  if (stored.kind === "unusable") keepBackup(stored.text);
+  else persist(fallback);
+  return fallback;
+}
+
 const [file, setFile] = createSignal<LayoutsFile>(load());
-persist(file());
+
+/** `fresh` from storage, but this tab keeps its own active layout while it still exists. */
+function mergeActive(fresh: LayoutsFile): LayoutsFile {
+  const mine = file().active;
+  return fresh.items.some((l) => l.id === mine)
+    ? { ...fresh, active: mine }
+    : fresh;
+}
+
+// Another tab wrote the layouts: pick up its list.
+if (typeof window !== "undefined") {
+  window.addEventListener("storage", (e) => {
+    if (e.key !== STORAGE_KEY && e.key !== null) return;
+    const stored = readStored();
+    if (stored.kind === "ok") setFile(mergeActive(stored.file));
+  });
+}
 
 export const layouts = () => file().items;
 export const activeLayout = (): Layout =>
   file().items.find((l) => l.id === file().active) ?? file().items[0]!;
 
-/** True when the live state differs from the active layout's saved snapshot. */
-export const layoutDirty = (): boolean => {
-  return isDirty(activeLayout().state, liveState());
-};
+const [paramDefaults, setParamDefaults] = createSignal<ParamDefaults>({});
+export { setParamDefaults };
 
-function update(next: LayoutsFile): void {
+/** True when the live state differs from the active layout's saved snapshot. */
+export const layoutDirty = (): boolean =>
+  isDirty(activeLayout().state, liveState(), paramDefaults());
+
+/**
+ * Apply `reducer` to the layouts as they are in storage right now (another
+ * tab may have changed them since this tab loaded) and persist the result.
+ * Returns false when the reducer refuses (null). If the stored value is
+ * unusable, this tab's in-memory file is the base; the backup is kept.
+ */
+function update(reducer: (f: LayoutsFile) => LayoutsFile | null): boolean {
+  const stored = readStored();
+  const base = stored.kind === "ok" ? mergeActive(stored.file) : file();
+  const next = reducer(base);
+  if (next === null) return false;
   setFile(next);
   persist(next);
+  return true;
 }
 
 /** Write a state through the existing stores' setters. */
@@ -343,15 +459,12 @@ function applyState(state: LayoutState): void {
 
 /** Save the live state into the active layout. */
 export function saveLayout(): void {
-  update(withSaved(file(), activeLayout().id, liveState(), Date.now()));
+  update((f) => withSaved(f, f.active, liveState(), Date.now()));
 }
 
 /** Copy the live state into a new layout and switch to it. False when the cap is reached. */
 export function saveLayoutAs(name: string): boolean {
-  const next = withAdded(file(), name, liveState(), newId(), Date.now());
-  if (next === null) return false;
-  update(next);
-  return true;
+  return update((f) => withAdded(f, name, liveState(), newId(), Date.now()));
 }
 
 /** New layout on the current symbol and timeframe, everything else at its default; switches to it. */
@@ -363,45 +476,44 @@ export function createLayout(name: string): boolean {
     scaleMode: DEFAULT_SCALE_MODE,
     indicators: [...DEFAULT_SET],
   };
-  const next = withAdded(file(), name, state, newId(), Date.now());
-  if (next === null) return false;
-  update(next);
-  applyState(state);
-  return true;
+  return batch(() => {
+    const ok = update((f) => withAdded(f, name, state, newId(), Date.now()));
+    if (ok) applyState(state);
+    return ok;
+  });
 }
 
 export function switchLayout(id: string): void {
-  const target = file().items.find((l) => l.id === id);
-  if (!target) return;
-  update({ ...file(), active: id });
-  applyState(target.state);
+  batch(() => {
+    let target: Layout | undefined;
+    update((f) => {
+      target = f.items.find((l) => l.id === id);
+      return target ? { ...f, active: id } : null;
+    });
+    if (target) applyState(target.state);
+  });
 }
 
 export function renameLayout(id: string, name: string): void {
-  update(withRenamed(file(), id, name));
+  update((f) => withRenamed(f, id, name));
 }
 
-/** Delete a layout; deleting the last one resets to a fresh "Unnamed" layout of the live state. */
+/** Delete a layout other than the active one. */
 export function deleteLayout(id: string): void {
-  const wasActive = file().active === id;
-  const next = withoutLayout(file(), id);
-  if (next === null) {
-    update(parseLayouts(undefined, liveState(), newId(), Date.now()));
-    return;
-  }
-  update(next);
-  if (wasActive) applyState(activeLayout().state);
+  update((f) => withoutLayout(f, id));
 }
 
 /** Import an exported layout as a new layout and switch to it. False on invalid input or the cap. */
 export function importLayout(text: string): boolean {
   const parsed = parseExport(text);
   if (parsed === null) return false;
-  const next = withAdded(file(), parsed.name, parsed.state, newId(), Date.now());
-  if (next === null) return false;
-  update(next);
-  applyState(parsed.state);
-  return true;
+  return batch(() => {
+    const ok = update((f) =>
+      withAdded(f, parsed.name, parsed.state, newId(), Date.now()),
+    );
+    if (ok) applyState(parsed.state);
+    return ok;
+  });
 }
 
 /** JSON of the saved layout `id` for download, or null if unknown. */

@@ -67,8 +67,27 @@ Other rules:
 - Leaving a layout with unsaved changes asks Save / Don't save / Cancel.
 - "Create new layout" keeps the current symbol and timeframe and resets
   chart type, scale mode and indicators to their defaults.
-- Export and import use `{ version: 1, name, state }` and the same
-  validation as storage.
+- Export and import use `{ version: 1, name, state }`. Import refuses files
+  over 256 KB and other versions, keeps at most 50 indicators, and keeps
+  only number, string and boolean params (with `__proto__`, `constructor`
+  and `prototype` keys dropped); stored layouts get the same sanitising.
+  Import is validated before any unsaved-changes prompt.
+- The open layout cannot be deleted (as in TradingView); deleting is done
+  from the load list, so there is always at least one layout.
+- Every change re-reads `chartgen.layouts` from storage before applying
+  it, and a `storage` event refreshes the list, so a second tab does not
+  clobber the first. Each tab keeps its own active layout.
+- If the stored value exists but is unusable (bad JSON, another version,
+  no valid items), it is copied once to `chartgen.layouts.bak` and never
+  overwritten by the in-memory fallback; the first explicit change writes
+  a fresh file and the `.bak` stays.
+- The unsaved-changes check compares indicator entries with params equal
+  to the registry default removed (the settings dialog strips them too),
+  so pressing OK without edits is not a change. The hidden flag is
+  compared, so hiding or showing an indicator does count as a change.
+- No `beforeunload` prompt: live state is persisted per key as it changes,
+  so leaving the page loses nothing. The dot only means "differs from the
+  saved layout".
 
 ## Consequences
 

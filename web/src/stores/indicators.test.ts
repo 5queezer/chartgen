@@ -78,6 +78,13 @@ describe("indicator store mutations", () => {
     expect(activeIndicators()).toEqual(["ema_stack"]);
   });
 
+  it("activeIndicatorsKey keeps a __proto__ key as data", async () => {
+    stubStorage();
+    const { activeIndicatorsKey } = await loadStore();
+    const entry = JSON.parse('{"name":"x","__proto__":{"a":1}}');
+    expect(activeIndicatorsKey([entry])).toBe('[{"__proto__":{"a":1},"name":"x"}]');
+  });
+
   it("activeIndicatorsKey sorts object keys but preserves array order", async () => {
     stubStorage();
     const { activeIndicatorsKey } = await loadStore();

@@ -42,6 +42,7 @@ import {
   toWire,
   updateIndicatorParams,
 } from "./stores/indicators";
+import { setParamDefaults, type ParamDefaults } from "./stores/layouts";
 import {
   addRecent,
   chartType,
@@ -134,6 +135,18 @@ export function App(): JSX.Element {
   // The indicator registry only changes between deploys, so this query
   // is cached forever. It fires as soon as auth is ready.
   const listIndicators = createListIndicatorsQuery(session, authReady);
+
+  // Layout dirty check ignores params that equal the registry default.
+  createEffect(() => {
+    const defaults: ParamDefaults = {};
+    for (const i of listIndicators.data?.indicators ?? []) {
+      const params = Object.fromEntries(
+        (i.configurable_params ?? []).map((p) => [p.name, p.default]),
+      );
+      for (const n of [i.name, ...(i.aliases ?? [])]) defaults[n] = params;
+    }
+    setParamDefaults(defaults);
+  });
 
   const status = createMemo<Status>(() => {
     if (!authReady()) return { kind: "authenticating" };

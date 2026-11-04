@@ -1,7 +1,7 @@
 // Layout menu at the right end of the top bar (ADR-0015): the active
 // layout's name with an unsaved-changes dot, and a dropdown with Save
-// (Ctrl/Cmd+S), Rename, Save as, Create new, Load (searchable list),
-// Export/Import and Delete. Leaving a dirty layout asks first.
+// (Ctrl/Cmd+S), Rename, Save as, Create new, Load (searchable list with
+// per-row Delete) and Export/Import. Leaving a dirty layout asks first.
 
 import { Dialog, DropdownMenu } from "@kobalte/core";
 import {
@@ -15,6 +15,7 @@ import {
 
 import {
   MAX_LAYOUTS,
+  MAX_IMPORT_BYTES,
   MAX_NAME_LENGTH,
   activeLayout,
   createLayout,
@@ -23,6 +24,7 @@ import {
   importLayout,
   layoutDirty,
   layouts,
+  parseExport,
   renameLayout,
   saveLayout,
   saveLayoutAs,
@@ -34,11 +36,11 @@ type Dialogue =
       kind: "name";
       title: string;
       initial: string;
-      submit: (name: string) => boolean | void;
+      submit: (name: string) => void;
     }
   | { kind: "load" }
   | { kind: "unsaved"; proceed: () => void }
-  | { kind: "delete" };
+  | { kind: "delete"; id: string; name: string };
 
 const buttonClass =
   "px-2.5 py-1.5 rounded-md text-sm cursor-pointer text-[color:var(--color-fg)] hover:bg-[color:var(--color-bg-elev)] inline-flex items-center gap-1.5";
@@ -70,17 +72,24 @@ function download(filename: string, text: string): void {
 
 export function LayoutMenu(): JSX.Element {
   const [dialogue, setDialogue] = createSignal<Dialogue | null>(null);
-  const [notice, setNotice] = createSignal("");
+  const [notice, setNotice] = createSignal<{ text: string; error: boolean } | null>(
+    null,
+  );
   const [query, setQuery] = createSignal("");
   let fileInput!: HTMLInputElement;
   let noticeTimer: ReturnType<typeof setTimeout> | undefined;
 
-  const say = (message: string) => {
-    setNotice(message);
+  const say = (text: string, error = true) => {
+    setNotice({ text, error });
     clearTimeout(noticeTimer);
-    noticeTimer = setTimeout(() => setNotice(""), 4000);
+    noticeTimer = setTimeout(() => setNotice(null), 4000);
   };
   const full = () => say(`Layout limit reached (${MAX_LAYOUTS})`);
+  // Saving with nothing changed gives the same feedback as a real save.
+  const save = () => {
+    saveLayout();
+    say("Layout saved", false);
+  };
 
   // Ctrl/Cmd+S saves from anywhere, including inputs and the chart, and
   // keeps the browser's own save dialog from opening.
@@ -93,7 +102,7 @@ export function LayoutMenu(): JSX.Element {
         e.code === "KeyS"
       ) {
         e.preventDefault();
-        saveLayout();
+        save();
       }
     };
     window.addEventListener("keydown", onKey);
@@ -129,18 +138,29 @@ export function LayoutMenu(): JSX.Element {
     const file = fileInput.files?.[0];
     fileInput.value = "";
     if (!file) return;
-    const text = await file.text();
+    const text = file.size > MAX_IMPORT_BYTES ? "" : await file.text();
+    // Validate first so a bad file never raises the unsaved-changes prompt.
+    if (parseExport(text) === null) {
+      say("Not a valid layout file");
+      return;
+    }
     leaving(() => {
-      if (!importLayout(text)) say("Not a valid layout file, or limit reached");
+      if (!importLayout(text)) full();
     });
   };
 
   return (
     <div class="flex items-center gap-2" role="group" aria-label="Layout">
       <Show when={notice()}>
-        <span role="alert" class="text-xs text-[color:var(--color-danger)]">
-          {notice()}
-        </span>
+        {(n) => (
+          <span
+            role={n().error ? "alert" : "status"}
+            data-testid="layout-notice"
+            class={`text-xs ${n().error ? "text-[color:var(--color-danger)]" : "text-[color:var(--color-fg-muted)]"}`}
+          >
+            {n().text}
+          </span>
+        )}
       </Show>
       <DropdownMenu.Root>
         <DropdownMenu.Trigger
@@ -162,7 +182,7 @@ export function LayoutMenu(): JSX.Element {
         </DropdownMenu.Trigger>
         <DropdownMenu.Portal>
           <DropdownMenu.Content class={menuClass}>
-            <DropdownMenu.Item class={itemClass} onSelect={saveLayout}>
+            <DropdownMenu.Item class={itemClass} onSelect={save}>
               Save layout
               <span class="text-xs text-[color:var(--color-fg-muted)]">
                 {SAVE_HINT}
@@ -184,7 +204,9 @@ export function LayoutMenu(): JSX.Element {
                 askName(
                   "Save layout as",
                   `${activeLayout().name} copy`,
-                  (name) => saveLayoutAs(name) || (full(), true),
+                  (name) => {
+                    if (!saveLayoutAs(name)) full();
+                  },
                 )
               }
             >
@@ -194,9 +216,9 @@ export function LayoutMenu(): JSX.Element {
               class={itemClass}
               onSelect={() =>
                 leaving(() =>
-                  askName("Create new layout", "", (name) =>
-                    createLayout(name) || (full(), true),
-                  ),
+                  askName("Create new layout", "", (name) => {
+                    if (!createLayout(name)) full();
+                  }),
                 )
               }
             >
@@ -221,13 +243,6 @@ export function LayoutMenu(): JSX.Element {
               onSelect={() => fileInput.click()}
             >
               Import layout…
-            </DropdownMenu.Item>
-            <DropdownMenu.Separator class="my-1 border-t border-[color:var(--color-border)]" />
-            <DropdownMenu.Item
-              class={itemClass}
-              onSelect={() => setDialogue({ kind: "delete" })}
-            >
-              Delete layout…
             </DropdownMenu.Item>
           </DropdownMenu.Content>
         </DropdownMenu.Portal>
@@ -282,7 +297,7 @@ export function LayoutMenu(): JSX.Element {
                             }
                           >
                             {(l) => (
-                              <li>
+                              <li class="flex items-center gap-1">
                                 <button
                                   type="button"
                                   data-layout-id={l.id}
@@ -291,7 +306,7 @@ export function LayoutMenu(): JSX.Element {
                                       ? "true"
                                       : undefined
                                   }
-                                  class="w-full text-left px-2 py-1.5 text-sm rounded-md cursor-pointer hover:bg-[color:var(--color-bg-elev)] aria-[current=true]:text-[color:var(--color-accent)] flex justify-between gap-4"
+                                  class="flex-1 min-w-0 text-left px-2 py-1.5 text-sm rounded-md cursor-pointer hover:bg-[color:var(--color-bg-elev)] aria-[current=true]:text-[color:var(--color-accent)] flex justify-between gap-4"
                                   onClick={() => {
                                     setDialogue(null);
                                     if (l.id === activeLayout().id) return;
@@ -302,6 +317,26 @@ export function LayoutMenu(): JSX.Element {
                                   <span class="text-xs text-[color:var(--color-fg-muted)] shrink-0">
                                     {l.state.symbol} · {l.state.timeframe}
                                   </span>
+                                </button>
+                                <button
+                                  type="button"
+                                  aria-label={`Delete ${l.name}`}
+                                  title={
+                                    l.id === activeLayout().id
+                                      ? "Switch to another layout first"
+                                      : "Delete layout"
+                                  }
+                                  disabled={l.id === activeLayout().id}
+                                  class="px-2 py-1.5 text-sm rounded-md cursor-pointer text-[color:var(--color-fg-muted)] hover:text-[color:var(--color-danger)] disabled:opacity-30 disabled:cursor-not-allowed disabled:hover:text-[color:var(--color-fg-muted)]"
+                                  onClick={() =>
+                                    setDialogue({
+                                      kind: "delete",
+                                      id: l.id,
+                                      name: l.name,
+                                    })
+                                  }
+                                >
+                                  ×
                                 </button>
                               </li>
                             )}
@@ -340,7 +375,7 @@ export function LayoutMenu(): JSX.Element {
                             type="button"
                             class={primaryClass}
                             onClick={() => {
-                              saveLayout();
+                              save();
                               setDialogue(null);
                               d.proceed();
                             }}
@@ -357,7 +392,7 @@ export function LayoutMenu(): JSX.Element {
                           Delete layout
                         </Dialog.Title>
                         <Dialog.Description class="text-sm text-[color:var(--color-fg-muted)] mb-4">
-                          Delete “{activeLayout().name}”? This cannot be undone.
+                          Delete “{d.name}”? This cannot be undone.
                         </Dialog.Description>
                         <div class="flex justify-end gap-2">
                           <button
@@ -371,7 +406,7 @@ export function LayoutMenu(): JSX.Element {
                             type="button"
                             class={primaryClass}
                             onClick={() => {
-                              deleteLayout(activeLayout().id);
+                              deleteLayout(d.id);
                               setDialogue(null);
                             }}
                           >
