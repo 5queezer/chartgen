@@ -148,6 +148,7 @@ Charting:
 - **`generate_chart`** — render a chart. `format` can be `png` (default), `summary` (compact JSON with OHLCV stats, last indicator values, signals, divergences, and levels — 10–50× cheaper in tokens than a PNG), or `both`.
 - **`list_indicators`** — discover all 37 indicators with parameters.
 - **`get_indicators`** — compute indicators and return raw numeric values as JSON.
+- **`get_quotes`** — last price and change (vs previous close; rolling 24 h for Binance) for up to 50 symbols in one call (watchlist).
 
 Trading (require `--trade`):
 - **`place_order`**, **`cancel_order`**, **`get_orders`** — order lifecycle

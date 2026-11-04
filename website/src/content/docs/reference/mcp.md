@@ -61,7 +61,7 @@ with existing Claude.ai connector deployments that predate Streamable HTTP.
 
 ## Tool catalog
 
-15 tools. The 12 trading tools require `--trade`; attempting to call them
+16 tools. The 12 trading tools require `--trade`; attempting to call them
 without it returns an error.
 
 ### Charting (always available)
@@ -325,6 +325,57 @@ Response shape:
 `source` is `engine_cache` when hitting the running trading engine's rolling
 window, `fetched` when the tool fell back to fresh OHLCV. The per-indicator
 object is the same shape `generate_chart` returns under `format=summary`.
+
+#### `get_quotes`
+
+Last price and change for many symbols in one call. The web watchlist
+polls it every 5 s.
+
+Required: `symbols` (array of strings). Symbols are trimmed, uppercased and
+deduplicated. More than 50 distinct symbols is a tool error, and so is a
+missing `symbols` or a non-string entry.
+
+Response shape: one entry per distinct symbol, in request order:
+
+```json
+{
+  "quotes": [
+    {
+      "symbol": "AAPL",
+      "last": 349.51,
+      "change": 17.61,
+      "change_pct": 5.3058,
+      "prev_close": 331.9,
+      "high": 354.47,
+      "low": 340.99,
+      "volume": 88958176.0,
+      "source": "yahoo"
+    },
+    { "symbol": "NOPEUSDT", "error": "Binance: Invalid symbol." }
+  ]
+}
+```
+
+A symbol that fails gets `{symbol, error}` and never fails the call. That
+covers a malformed ticker (`"invalid symbol"`), an unknown ticker and an
+unreachable upstream. `change = last - prev_close` and
+`change_pct = change / prev_close × 100`. `high`, `low` and `volume` are
+`null` when upstream omits them. Numbers that are not finite are `null`.
+
+What `prev_close` means depends on `source` (see
+[ADR-0011](/chartgen/decisions/0011-watchlist-quotes/)):
+
+| `source` | Symbols | `last` / `prev_close` | `high` / `low` / `volume` |
+|---|---|---|---|
+| `yahoo` | stocks, ETFs, indices, FX | `regularMarketPrice` / previous session close (`chartPreviousClose`, v8 chart `range=1d`) | regular-session day values |
+| `binance` | tickers ending in `USDT`, `BTC`, `ETH`, … | `lastPrice` / `openPrice` of the **rolling 24 h** ticker | rolling 24 h; volume in the base asset |
+| `sample` | any (`CHARTGEN_DATA_SOURCE=sample`) | forming daily bar's close / previous daily close | forming daily bar |
+
+Binance symbols are fetched with one batched `/api/v3/ticker/24hr`
+request. Binance rejects the whole batch if any symbol is unknown, and
+then each symbol is requested on its own so only the bad one fails.
+Yahoo symbols cost one request each, with at most 8 in flight at a time.
+Each request times out after 10 s.
 
 ### Orders & positions (require `--trade`)
 
