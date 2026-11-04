@@ -150,6 +150,21 @@ export interface PlaceOrderInput {
   type: "market" | "limit";
 }
 
+export interface SearchSymbolsInput {
+  /**
+   * Maximum number of results
+   */
+  limit?: number;
+  /**
+   * Text to search for in tickers and names. Trimmed; 1-40 characters, no control characters.
+   */
+  query: string;
+  /**
+   * Only return these instrument types. Omit for all types.
+   */
+  types?: ("crypto" | "stock" | "etf" | "fund" | "index" | "forex" | "future")[];
+}
+
 export interface SetAlertInput {
   /**
    * Alert condition. One of: {"price_above": 0.85}, {"price_below": 0.805}, or {"indicator_signal": {"indicator": "cipher_b", "signal": "green_dot"}}

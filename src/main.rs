@@ -1,5 +1,6 @@
 mod fetch;
 mod mcp;
+mod search;
 mod server;
 
 use std::path::PathBuf;

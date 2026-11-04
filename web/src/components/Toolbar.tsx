@@ -35,6 +35,7 @@ import {
   timeframe,
   type ChartType,
 } from "../stores/layout";
+import type { McpSession } from "../mcp";
 import { SymbolSearch } from "./SymbolSearch";
 
 const CHART_TYPE_LABELS: Record<ChartType, string> = {
@@ -123,6 +124,7 @@ function shouldIgnoreKey(e: KeyboardEvent): boolean {
 }
 
 export interface ToolbarProps {
+  session: McpSession;
   /** Called when the user picks the symbol or timeframe that is already active. */
   onReselect: () => void;
   /** Download the chart as a PNG. */
@@ -352,6 +354,7 @@ export function Toolbar(props: ToolbarProps): JSX.Element {
         onOpenChange={setSearchOpen}
         initialQuery={searchSeed()}
         onSelect={selectSymbol}
+        session={props.session}
       />
       <TimeframeEntry
         open={tfOpen()}

@@ -150,6 +150,7 @@ export function Watchlist(props: WatchlistProps): JSX.Element {
           onOpenChange={setSearchOpen}
           initialQuery=""
           onSelect={addToWatchlist}
+          session={props.session}
         />
       </aside>
     </Show>

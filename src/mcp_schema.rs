@@ -155,6 +155,34 @@ pub fn tools_list_result() -> Value {
                 }
             },
             {
+                "name": "search_symbols",
+                "description": "Search symbols by ticker or name across all Binance spot pairs and Yahoo Finance instruments (stocks, ETFs, funds, indices, FX, futures), like TradingView's symbol search. Returns {results: [{symbol, name, exchange, type, source}], warnings?}, ranked: exact symbol match first, then prefix, then contains, then name match. type is one of crypto, stock, etf, fund, index, forex, future; source is binance, yahoo or sample. Crypto comes from Binance only (e.g. BTCUSDT); Yahoo's own crypto listings are dropped. If one source fails its results are omitted and a warning is added; the call fails only when every queried source fails.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 40,
+                            "description": "Text to search for in tickers and names. Trimmed; 1-40 characters, no control characters."
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 50,
+                            "default": 30,
+                            "description": "Maximum number of results"
+                        },
+                        "types": {
+                            "type": "array",
+                            "items": { "type": "string", "enum": ["crypto", "stock", "etf", "fund", "index", "forex", "future"] },
+                            "description": "Only return these instrument types. Omit for all types."
+                        }
+                    },
+                    "required": ["query"]
+                }
+            },
+            {
                 "name": "place_order",
                 "description": "Place a trading order. Requires --trade mode. Submits a market or limit order for the configured symbol.",
                 "inputSchema": {

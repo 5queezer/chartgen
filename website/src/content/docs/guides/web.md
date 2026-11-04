@@ -21,13 +21,22 @@ chart stays on screen while the new one loads. There is no Load button; if a loa
   or re-pick the current symbol or timeframe.
 
 - **Symbol** — the button shows the current ticker and opens the search
-  dialog. It filters a curated list of Binance USDT pairs and popular US
-  stocks, ETFs, indices, FX pairs and futures by ticker or name; with an
-  empty query it lists your recent symbols (last 10) first. There is no
-  search backend, so any other ticker can be typed and accepted with
-  Enter (it is uppercased). Tickers ending in `USDT`, `BUSD`, `BTC`,
-  `ETH`, `BNB`, `USDC` or `FDUSD` are fetched from Binance, everything
-  else from Yahoo Finance.
+  dialog. Typing searches every Binance spot pair and Yahoo Finance
+  instrument by ticker or name through the `search_symbols` tool
+  ([reference](/chartgen/reference/mcp/#search_symbols)), 200 ms after the
+  last keystroke. Rows show the ticker, name, exchange and a type badge,
+  ranked like TradingView: exact ticker, prefix, contains, then name. The
+  tabs **All**, **Crypto**, **Stocks**, **Funds** (ETFs and mutual
+  funds), **Indices**, **Forex** and **Futures** narrow the results by
+  type. While results load, or if the search fails, the built-in list of
+  popular symbols answers instantly; a status line under the tabs shows
+  "Searching…", an error, or a note that one source returned nothing, and
+  typing is never blocked. With an empty query the dialog lists your
+  recent symbols (last 10), then the popular list. The last row accepts
+  whatever you typed (uppercased) with Enter, for tickers the search does
+  not know. Tickers ending in `USDT`, `BUSD`, `BTC`, `ETH`, `BNB`, `USDC`
+  or `FDUSD` are fetched from Binance, everything else from Yahoo
+  Finance. The watchlist **+** button opens the same dialog.
 - **Timeframe** — one-click buttons for 1m, 5m, 15m, 1h, 4h, 1D and 1W,
   with the active one highlighted; the dropdown holds the rest (30m, 1M).
 - **Chart type** — Candles, Hollow candles (only up candles hollow), Bars (OHLC), Line, Area.
