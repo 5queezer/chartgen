@@ -1,16 +1,21 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  DIVLINE_COLORS,
   divergenceKind,
   divlineSegments,
+  fillColors,
   fillPolygons,
   fillTheme,
+  hbarColors,
   hbarRects,
   hbarTheme,
   hbarTiers,
+  hlineStrokes,
   payloadToDataIndex,
   toDataSpace,
   valueExtents,
+  wireColor,
   type Mapper,
   type SeriesDivLine,
   type SeriesHBar,
@@ -243,6 +248,7 @@ describe("divlineSegments", () => {
       to: { x: 200, y: 60 },
       dashed: true,
       kind: "bear",
+      color: DIVLINE_COLORS.bear,
     });
   });
 
@@ -400,6 +406,79 @@ describe("valueExtents", () => {
     ).toEqual([{ lo: null, hi: null }]);
     expect(valueExtents(indicator({ y_range: [null, 5] }), 1)).toEqual([
       { lo: null, hi: 5 },
+    ]);
+  });
+});
+
+describe("wireColor", () => {
+  it("accepts the server's rgba/rgb strings and rejects anything else", () => {
+    expect(wireColor("rgba(10,20,30,0.25)")).toBe("rgba(10,20,30,0.25)");
+    expect(wireColor("rgba(255,0,0,1)")).toBe("rgba(255,0,0,1)");
+    expect(wireColor("rgb(1, 2, 3)")).toBe("rgb(1, 2, 3)");
+    expect(wireColor("red")).toBeUndefined();
+    expect(wireColor("rgba(1,2)")).toBeUndefined();
+    expect(wireColor("")).toBeUndefined();
+    expect(wireColor(undefined)).toBeUndefined();
+  });
+});
+
+describe("wire colors vs theme fallback", () => {
+  const fill = { y1: [1], y2: [0] };
+
+  it("fillColors prefers the wire color, else the per-index theme", () => {
+    expect(
+      fillColors({ ...fill, color: "rgba(1,2,3,0.5)" }, "cipher_b", 1),
+    ).toEqual({ up: "rgba(1,2,3,0.5)", down: "rgba(1,2,3,0.5)" });
+    expect(fillColors(fill, "cipher_b", 1)).toEqual(fillTheme("cipher_b", 1));
+    expect(fillColors({ ...fill, color: "bogus" }, "cipher_b", 1)).toEqual(
+      fillTheme("cipher_b", 1),
+    );
+  });
+
+  it("toDataSpace keeps the fill color", () => {
+    const out = toDataSpace(
+      indicator({ fills: [{ ...fill, color: "rgba(1,2,3,0.5)" }] }),
+      [0],
+    );
+    expect(out.fills![0]!.color).toBe("rgba(1,2,3,0.5)");
+  });
+
+  it("hbarColors uses wire colors, else POC/value-area tiers", () => {
+    const bars = [
+      { y: 10, height: 1, width: 0.5, offset: 0, left: true, color: "rgba(9,9,9,1)" },
+      { y: 20, height: 1, width: 0.2, offset: 0, left: true },
+    ];
+    const out = hbarColors(bars, [], "vpvr");
+    expect(out[0]).toBe("rgba(9,9,9,1)");
+    expect(out[1]).toBe(hbarTheme("vpvr").out);
+  });
+
+  it("divlineSegments colors by wire, else by slope", () => {
+    const d = { x1: 0, t1: null, y1: 1, x2: 5, t2: null, y2: 9, dashed: true };
+    const wired = divlineSegments([{ ...d, color: "rgba(1,2,3,1)" }], all, map, false);
+    expect(wired[0]!.color).toBe("rgba(1,2,3,1)");
+    expect(divlineSegments([d], all, map, false)[0]!.color).toBe(
+      DIVLINE_COLORS.bull,
+    );
+  });
+
+  it("hlineStrokes maps levels, clips to the pane and falls back to gray", () => {
+    const out = hlineStrokes(
+      [{ y: 30, color: "rgba(1,2,3,0.3)" }, { y: 70 }, { y: 500 }],
+      100,
+      (v) => 100 - v,
+    );
+    expect(out).toEqual([
+      { y: 70, color: "rgba(1,2,3,0.3)" },
+      { y: 30, color: "rgba(120, 123, 134, 0.80)" },
+    ]);
+  });
+
+  it("valueExtents includes hline levels for panes but not overlays", () => {
+    const hlines = [{ y: 30 }, { y: 70 }];
+    expect(valueExtents(indicator({ hlines }), 1)).toEqual([{ lo: 30, hi: 70 }]);
+    expect(valueExtents(indicator({ hlines, is_overlay: true }), 1)).toEqual([
+      { lo: null, hi: null },
     ]);
   });
 });

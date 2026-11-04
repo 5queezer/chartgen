@@ -51,13 +51,12 @@ import {
   type BarLegend,
 } from "../lib/format";
 import {
-  DIVLINE_COLORS,
   divlineSegments,
+  fillColors,
   fillPolygons,
-  fillTheme,
+  hbarColors,
   hbarRects,
-  hbarTheme,
-  hbarTiers,
+  hlineStrokes,
   payloadToDataIndex,
   toDataSpace,
   valueExtents,
@@ -168,7 +167,7 @@ function drawGeometry(name: string): IndicatorDrawCallback {
     const fills = ind.fills ?? [];
     for (let fi = fills.length - 1; fi >= 0; fi--) {
       const fill = fills[fi]!;
-      const theme = fillTheme(name, fi);
+      const theme = fillColors(fill, name, fi);
       for (const poly of fillPolygons(fill.y1, fill.y2, visibleRange, map)) {
         ctx.fillStyle = poly.up ? theme.up : theme.down;
         ctx.beginPath();
@@ -182,15 +181,14 @@ function drawGeometry(name: string): IndicatorDrawCallback {
     ctx.globalCompositeOperation = "source-over";
 
     if (ind.hbars && ind.hbars.length > 0) {
-      const tiers = hbarTiers(ind.hbars, ind.hlines ?? []);
-      const colors = hbarTheme(name);
+      const colors = hbarColors(ind.hbars, ind.hlines ?? [], name);
       for (const r of hbarRects(
         ind.hbars,
         bounding.width,
         bounding.height,
         map.y,
       )) {
-        ctx.fillStyle = colors[tiers[r.index]!];
+        ctx.fillStyle = colors[r.index]!;
         ctx.fillRect(r.x, r.y, r.width, r.height);
       }
     }
@@ -203,15 +201,38 @@ function drawGeometry(name: string): IndicatorDrawCallback {
     );
     ctx.lineWidth = 2;
     for (const s of segments) {
-      ctx.strokeStyle = DIVLINE_COLORS[s.kind];
+      ctx.strokeStyle = s.color;
       ctx.setLineDash(s.dashed ? [4, 4] : []);
       ctx.beginPath();
       ctx.moveTo(s.from.x, s.from.y);
       ctx.lineTo(s.to.x, s.to.y);
       ctx.stroke();
     }
+    drawHLines(ctx, ind, bounding, map.y);
     return false;
   };
+}
+
+/**
+ * Full-width 1px horizontal reference lines (RSI 70/30, profile
+ * POC/VAH/VAL) in the server's color, as the PNG renderer draws them.
+ * Clipped to the pane: levels mapped outside it are skipped.
+ */
+function drawHLines(
+  ctx: CanvasRenderingContext2D,
+  ind: SeriesIndicator,
+  bounding: { width: number; height: number },
+  mapY: (value: number) => number,
+): void {
+  ctx.lineWidth = 1;
+  ctx.setLineDash([]);
+  for (const h of hlineStrokes(ind.hlines ?? [], bounding.height, mapY)) {
+    ctx.strokeStyle = h.color;
+    ctx.beginPath();
+    ctx.moveTo(0, h.y);
+    ctx.lineTo(bounding.width, h.y);
+    ctx.stroke();
+  }
 }
 
 /**

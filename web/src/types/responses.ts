@@ -54,13 +54,17 @@ export const SeriesSignalSchema = z.object({
   label: z.string(),
 });
 
+// `color` is a CSS "rgba(r,g,b,a)" string from the server's renderer
+// (ADR-0012); optional so payloads from older servers still parse.
 export const HLineSchema = z.object({
   y: z.number(),
+  color: z.string().optional(),
 });
 
 export const SeriesFillSchema = z.object({
   y1: z.array(FiniteOrNull),
   y2: z.array(FiniteOrNull),
+  color: z.string().optional(),
 });
 
 export const SeriesHBarSchema = z.object({
@@ -69,6 +73,7 @@ export const SeriesHBarSchema = z.object({
   width: z.number(),
   offset: z.number(),
   left: z.boolean(),
+  color: z.string().optional(),
 });
 
 export const SeriesDivLineSchema = z.object({
@@ -79,6 +84,7 @@ export const SeriesDivLineSchema = z.object({
   t2: z.number().int().nullable(),
   y2: z.number(),
   dashed: z.boolean(),
+  color: z.string().optional(),
 });
 
 export const YRangeSchema = z.tuple([FiniteOrNull, FiniteOrNull]);

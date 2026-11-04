@@ -7,9 +7,10 @@
 // callbacks and returns pixel-space primitives, so Chart.tsx's draw
 // callbacks only stroke/fill what comes back and the maths is unit-tested.
 //
-// Colors: the wire drops server-side colors (ADR-0007, "the client themes
-// per indicator"), so the theme helpers below mirror the Rust indicator
-// palettes. Swap them for payload fields once the wire carries colors.
+// Colors: the wire carries the server renderer's color per fill, hbar,
+// divline and hline (ADR-0012) and those win. The theme helpers below
+// mirror the Rust indicator palettes and only serve as the fallback for
+// older servers that omit `color`.
 
 import type { SeriesPayload } from "../types/responses";
 
@@ -66,6 +67,13 @@ export interface DivSegment {
   to: Point;
   dashed: boolean;
   kind: DivergenceKind;
+  /** Wire color when valid, else the bull/bear/flat fallback. */
+  color: string;
+}
+
+export interface HLineStroke {
+  y: number;
+  color: string;
 }
 
 const isNum = (v: number | null | undefined): v is number =>
@@ -102,6 +110,7 @@ export function toDataSpace(
   const fills = ind.fills?.map((f) => ({
     y1: kept.map((p) => f.y1[p] ?? null),
     y2: kept.map((p) => f.y2[p] ?? null),
+    ...(f.color !== undefined && { color: f.color }),
   }));
   const divlines = ind.divlines?.flatMap((d) => {
     const x1 = remap[d.x1] ?? -1;
@@ -117,9 +126,24 @@ export interface ValueExtent {
 }
 
 /**
+ * Accepts only the "rgba(r,g,b,a)" / "rgb(r,g,b)" strings the server
+ * emits. A canvas silently keeps its previous style when handed an
+ * unparsable color, which would repaint with a stale one, so anything
+ * else is treated as absent and the caller falls back to the theme.
+ */
+const CSS_RGB =
+  /^rgba?\(\s*\d{1,3}\s*,\s*\d{1,3}\s*,\s*\d{1,3}\s*(,\s*(\d+\.?\d*|\.\d+)\s*)?\)$/;
+export function wireColor(c: string | undefined): string | undefined {
+  return c !== undefined && CSS_RGB.test(c) ? c : undefined;
+}
+
+/**
  * Per-bar values the y-axis has to include beyond the line/bar figures:
  * the min/max of every fill edge at that bar and, for oscillator panes,
- * the payload's `y_range`. That keeps fixed ranges such as RSI 0–100 or
+ * the payload's `y_range` and every hline level. Overlays skip both:
+ * `y_range` would pin the price axis, and a far-away hline (e.g. a
+ * distant volume-profile node) would squash the candles; an overlay's
+ * hlines are still drawn, just clipped when off-screen. That keeps fixed ranges such as RSI 0–100 or
  * Kalman ±2.5 (whose OB/OS zones live at the edges) and gives
  * geometry-only panes a real axis. klinecharts auto-scales over figure
  * values only, so Chart.tsx feeds these through two invisible figures.
@@ -131,10 +155,17 @@ export function valueExtents(
 ): ValueExtent[] {
   const [rlo, rhi] =
     !ind.is_overlay && ind.y_range ? ind.y_range : [null, null];
+  const levels = ind.is_overlay
+    ? []
+    : (ind.hlines ?? []).map((h) => h.y).filter(isNum);
   const out: ValueExtent[] = [];
   for (let i = 0; i < length; i++) {
     let lo = isNum(rlo) ? rlo : null;
     let hi = isNum(rhi) ? rhi : null;
+    for (const v of levels) {
+      lo = lo === null ? v : Math.min(lo, v);
+      hi = hi === null ? v : Math.max(hi, v);
+    }
     for (const f of ind.fills ?? []) {
       for (const v of [f.y1[i], f.y2[i]]) {
         if (!isNum(v)) continue;
@@ -264,12 +295,30 @@ export function divlineSegments(
   for (const d of divlines) {
     if (Math.max(d.x1, d.x2) < range.from - 1) continue;
     if (Math.min(d.x1, d.x2) > range.to) continue;
+    const kind = divergenceKind(d, isOverlay);
     out.push({
       from: { x: map.x(d.x1), y: map.y(d.y1) },
       to: { x: map.x(d.x2), y: map.y(d.y2) },
       dashed: d.dashed,
-      kind: divergenceKind(d, isOverlay),
+      kind,
+      color: wireColor(d.color) ?? DIVLINE_COLORS[kind],
     });
+  }
+  return out;
+}
+
+/** hlines inside the pane, with the wire color (gray fallback). */
+export function hlineStrokes(
+  hlines: Array<{ y: number; color?: string }>,
+  paneHeight: number,
+  mapY: (value: number) => number,
+): HLineStroke[] {
+  const out: HLineStroke[] = [];
+  for (const h of hlines) {
+    if (!isNum(h.y)) continue;
+    const y = mapY(h.y);
+    if (y < 0 || y > paneHeight) continue;
+    out.push({ y, color: wireColor(h.color) ?? HLINE_FALLBACK });
   }
   return out;
 }
@@ -324,6 +373,18 @@ export function fillTheme(name: string, index: number): FillTheme {
   }
 }
 
+const HLINE_FALLBACK = "rgba(120, 123, 134, 0.80)";
+
+/** Fill colors: the wire color for both orientations, else the theme. */
+export function fillColors(
+  fill: SeriesFill,
+  name: string,
+  index: number,
+): FillTheme {
+  const c = wireColor(fill.color);
+  return c ? single(c) : fillTheme(name, index);
+}
+
 export type HBarTier = "poc" | "va" | "out";
 
 const HBAR_COLORS: Record<HBarTier, string> = {
@@ -367,6 +428,17 @@ export function hbarTiers(
     if (va && h.y >= va[0]! && h.y <= va[1]!) return "va";
     return "out";
   });
+}
+
+/** One color per hbar: the wire color, else the POC/value-area tier theme. */
+export function hbarColors(
+  hbars: SeriesHBar[],
+  hlines: Array<{ y: number }>,
+  name: string,
+): string[] {
+  const tiers = hbarTiers(hbars, hlines);
+  const theme = hbarTheme(name);
+  return hbars.map((h, i) => wireColor(h.color) ?? theme[tiers[i]!]);
 }
 
 export const DIVLINE_COLORS: Record<DivergenceKind, string> = {
