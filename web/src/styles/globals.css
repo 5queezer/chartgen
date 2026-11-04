@@ -166,15 +166,14 @@ body {
   display: flex;
   align-items: center;
   justify-content: center;
-  gap: 1px;
   box-sizing: border-box;
 }
 
 .price-scale-btn {
-  padding: 2px 3px;
+  padding: 2px 1px;
   border-radius: 3px;
   font-family: var(--font-sans);
-  font-size: 10px;
+  font-size: 9px;
   line-height: 14px;
   color: var(--color-fg-muted);
   cursor: pointer;
