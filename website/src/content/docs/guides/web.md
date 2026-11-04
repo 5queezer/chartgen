@@ -152,6 +152,7 @@ while typing in a field or while a dialog or menu is open.
 | `↑` / `↓` or `+` / `-` | Zoom in / out |
 | `Home` / `End` | Jump to the first bar / to real time |
 | `Alt+R` | Reset chart (scroll to real time, default zoom) |
+| `Alt+A` | Add a price alert at the last price |
 
 The timeframe popup accepts a number of minutes (`5`, `15`, `60`, `240`)
 or a number with a unit `m`, `h`, `d`, `w` (`1h`, `4H`, `1D`); an
@@ -235,6 +236,46 @@ the collapsed state are saved in `localStorage` under
 `chartgen.watchlist.symbols` and `chartgen.watchlist.collapsed`. On load,
 entries are trimmed, uppercased and deduplicated, and invalid ones are
 dropped. The list holds at most 50 symbols, the `get_quotes` limit.
+
+## Sidebar and price alerts
+
+The right sidebar has two tabs, **Watchlist** and **Alerts**; the tab you
+last used is remembered, and **»** collapses the whole sidebar. The Alerts
+tab shows the number of active alerts. The watchlist polls quotes only while
+its tab is showing.
+
+An alert watches one symbol's price. The conditions follow TradingView:
+
+| Condition | Fires when |
+|---|---|
+| Crossing | the price moves from one side of the level to the other, or lands on it |
+| Crossing up / Crossing down | the same, in one direction only |
+| Greater than / Less than | the price is above / below the level |
+
+**Only once** alerts switch off after firing (status *triggered*).
+**Every time** alerts stay active: a crossing alert fires on each new cross, and
+a greater / less alert fires once, then waits until the price is back on the
+other side of the level before it can fire again.
+
+Create an alert with the bell button in the header, `Alt+A` (an alert at the
+last price, ignored while typing in a field or with a dialog open), or **+** in
+the Alerts tab. The dialog takes the condition, price, trigger and an optional
+message. Active alerts for the chart symbol are drawn as dashed lines with a
+bell label; drag a line to move the level, or double-click it to edit.
+
+In the Alerts tab alerts are grouped by symbol with their status (*active*,
+*triggered*, *paused*). Hover a row for edit, pause / resume and delete;
+clicking the row switches the chart to that symbol.
+
+When an alert fires you get a toast, a short beep and, if you allow it, a
+browser notification. The browser is asked for notification permission when
+you create your first alert, not on load.
+
+Alerts are evaluated in the browser ([ADR-0020](/chartgen/decisions/0020-client-side-price-alerts/)):
+the chart symbol from the live feed, other symbols from their own quotes poll
+every 5 s. **They only fire while chartgen is open in a visible tab.** They
+are saved in `localStorage` under `chartgen.alerts.list` (at most 200;
+invalid entries are dropped on load) and are not shared between browsers.
 
 ## Layouts
 
