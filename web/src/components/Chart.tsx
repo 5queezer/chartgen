@@ -41,7 +41,12 @@ import {
   type KLineData,
 } from "klinecharts";
 
-import { indicatorName, type ActiveIndicator } from "../stores/indicators";
+import { figureStyle, plotsOf, resolvePlot } from "../lib/plotStyle";
+import {
+  indicatorName,
+  type ActiveIndicator,
+  type IndicatorStyle,
+} from "../stores/indicators";
 import { theme, type ChartType } from "../stores/layout";
 import { PALETTES, type Palette } from "../lib/theme";
 import type { SeriesPayload } from "../types/responses";
@@ -90,9 +95,57 @@ function hashName(name: string): number {
   return sum;
 }
 
-function paletteColor(name: string, index: number): string {
+export function paletteColor(name: string, index: number): string {
   const base = hashName(name);
   return TV_SERIES_PALETTE[(base + index) % TV_SERIES_PALETTE.length]!;
+}
+
+/**
+ * Figure-style mapping for user plot overrides (ADR-0017). The user's
+ * `IndicatorStyle` rides on the klinecharts indicator instance as its
+ * `extendData`, so a style change is one `overrideIndicator` (which
+ * recalculates and repaints) and never touches the data or the server.
+ */
+function plotFigureStyle(
+  name: string,
+  kind: "line" | "hist",
+  plotIndex: number,
+  colorIdx: number,
+  indicator: { extendData?: unknown },
+): Record<string, unknown> {
+  const key = `${kind}${plotIndex}`;
+  const defaultColor = paletteColor(name, colorIdx);
+  return figureStyle(
+    kind,
+    resolvePlot({ key, defaultColor }, indicator.extendData as IndicatorStyle | undefined),
+  );
+}
+
+/** Extend data of an indicator without overrides; klinecharts ignores an undefined override. */
+const NO_STYLE: IndicatorStyle = { plots: {} };
+
+/** False when the user hid the plot; its calc value is then null and nothing is drawn. */
+function plotVisible(
+  kind: "line" | "hist",
+  plotIndex: number,
+  indicator: { extendData?: unknown },
+): boolean {
+  const style = indicator.extendData as IndicatorStyle | undefined;
+  return style?.plots[`${kind}${plotIndex}`]?.visible !== false;
+}
+
+/** Legend entries of an indicator with the user's overrides applied; hidden plots are omitted. */
+function legendPlots(
+  name: string,
+  ind: NonNullable<SeriesPayload["indicators"][string]>,
+  style: IndicatorStyle | undefined,
+): Array<{ label: string; color: string; kind: "line" | "hist"; index: number }> {
+  return plotsOf(ind, (n) => paletteColor(name, n)).flatMap((p) => {
+    const r = resolvePlot(p, style);
+    return r.visible
+      ? [{ label: p.label, color: r.color, kind: p.kind, index: p.index }]
+      : [];
+  });
 }
 
 function indicatorRegName(name: string): string {
@@ -242,7 +295,7 @@ function ensureRegistered(name: string, shape: IndicatorShape): void {
     title: string;
     type?: "line" | "bar";
     baseValue?: number;
-    styles?: () => { color: string };
+    styles?: (data: unknown, indicator: { extendData?: unknown }) => Record<string, unknown>;
   }> = [
     // Typeless figures draw nothing but feed klinecharts's y-axis
     // auto-scale: fill edges and the payload y_range (`valueExtents`).
@@ -258,7 +311,7 @@ function ensureRegistered(name: string, shape: IndicatorShape): void {
       key: `line${i}`,
       title: "",
       type: "line",
-      styles: () => ({ color: paletteColor(name, i) }),
+      styles: (_d, ind) => plotFigureStyle(name, "line", i, i, ind),
     });
   }
   for (let i = 0; i < shape.hist; i++) {
@@ -270,7 +323,7 @@ function ensureRegistered(name: string, shape: IndicatorShape): void {
       title: "",
       type: "bar",
       baseValue: 0,
-      styles: () => ({ color: paletteColor(name, colorIdx) }),
+      styles: (_d, ind) => plotFigureStyle(name, "hist", i, colorIdx, ind),
     });
   }
 
@@ -280,7 +333,7 @@ function ensureRegistered(name: string, shape: IndicatorShape): void {
     precision: 2,
     figures: figures as never,
     draw: drawGeometry(name),
-    calc: (dataList: KLineData[]) => {
+    calc: (dataList: KLineData[], indicator) => {
       const geo = geometryStore.get(regName);
       const extents = geo ? valueExtents(geo, dataList.length) : [];
       return dataList.map((bar, di) => {
@@ -291,12 +344,20 @@ function ensureRegistered(name: string, shape: IndicatorShape): void {
         for (let i = 0; i < shape.lines; i++) {
           const raw = bar[lineStashKey(name, i)];
           row[`line${i}`] =
-            typeof raw === "number" && Number.isFinite(raw) ? raw : null;
+            plotVisible("line", i, indicator) &&
+            typeof raw === "number" &&
+            Number.isFinite(raw)
+              ? raw
+              : null;
         }
         for (let i = 0; i < shape.hist; i++) {
           const raw = bar[histStashKey(name, i)];
           row[`hist${i}`] =
-            typeof raw === "number" && Number.isFinite(raw) ? raw : null;
+            plotVisible("hist", i, indicator) &&
+            typeof raw === "number" &&
+            Number.isFinite(raw)
+              ? raw
+              : null;
         }
         return row;
       });
@@ -592,6 +653,8 @@ export interface ChartProps {
    * client asked for.
    */
   activeIndicators: ActiveIndicator[];
+  /** Client-side plot style overrides (ADR-0017), keyed by indicator name. */
+  styles?: Record<string, IndicatorStyle | undefined>;
   /** Price rendering style chosen in the toolbar. */
   chartType: ChartType;
   /** Legend controls, keyed by indicator name (series key). */
@@ -722,30 +785,21 @@ export function Chart(props: ChartProps): JSX.Element {
       const ind = series.indicators[name]!;
       if (!paneMap[name]) continue; // pane not yet created (or skipped)
 
-      const lineEntries = ind.lines ?? [];
-      const histEntries = ind.histogram ?? [];
-      const headerLines: PaneHeaderLine[] = [];
-      for (let i = 0; i < lineEntries.length; i++) {
-        const line = lineEntries[i]!;
-        const value =
-          xi !== null ? valueAt(line.values, xi) : lastFinite(line.values);
-        headerLines.push({
-          label: line.label ?? `line${i}`,
-          value,
-          color: paletteColor(name, i),
-        });
-      }
-      for (let i = 0; i < histEntries.length; i++) {
-        const hist = histEntries[i]!;
-        const value =
-          xi !== null ? valueAt(hist.values, xi) : lastFinite(hist.values);
-        headerLines.push({
-          label: `hist${i}`,
-          value,
-          color: paletteColor(name, lineEntries.length + i),
-        });
-      }
-      if (headerLines.length === 0) continue;
+      if ((ind.lines?.length ?? 0) + (ind.histogram?.length ?? 0) === 0) continue;
+      const headerLines: PaneHeaderLine[] = legendPlots(
+        name,
+        ind,
+        props.styles?.[name],
+      ).map((p) => {
+        const values =
+          (p.kind === "line" ? ind.lines![p.index] : ind.histogram![p.index])!
+            .values;
+        return {
+          label: p.label,
+          value: xi !== null ? valueAt(values, xi) : lastFinite(values),
+          color: p.color,
+        };
+      });
 
       const displayName = ind.label && ind.label.length > 0 ? ind.label : name;
       const params = paramsByName.get(name);
@@ -781,6 +835,21 @@ export function Chart(props: ChartProps): JSX.Element {
   createEffect(() => {
     crosshairIndex();
     recomputeHeaders();
+  });
+
+  // Apply plot style overrides to the live indicators: one recalculation and
+  // repaint, no new data and no server round trip.
+  createEffect(() => {
+    const c = chart();
+    const styles = props.styles;
+    const panes = paneIds();
+    if (!c) return;
+    for (const name of Object.keys(panes)) {
+      c.overrideIndicator(
+        { name: indicatorRegName(name), extendData: styles?.[name] ?? NO_STYLE },
+        panes[name],
+      );
+    }
   });
 
   // Feed new data and manage the indicator pane lifecycle.
@@ -845,7 +914,11 @@ export function Chart(props: ChartProps): JSX.Element {
       const paneOptions = ind.is_overlay
         ? { id: CANDLE_PANE_ID }
         : { height: 120 };
-      const newPaneId = c.createIndicator(regName, true, paneOptions);
+      const newPaneId = c.createIndicator(
+        { name: regName, extendData: untrack(() => props.styles?.[name]) },
+        true,
+        paneOptions,
+      );
       if (newPaneId !== null) nextPanes[name] = newPaneId;
     }
     for (const name of Object.keys(currentPanes)) {

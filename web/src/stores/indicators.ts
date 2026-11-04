@@ -9,6 +9,10 @@
 // persisted with the entry but never sent to the server — `toWire` drops
 // hidden entries and strips the field from the rest. Entries are unique by
 // name because the server keys its response by indicator name.
+//
+// An entry may also carry a client-only `style` (ADR-0017): per-plot color,
+// width, line style and visibility. It is validated on load and, like
+// `hidden`, never sent to the server nor part of the query key.
 
 import { createSignal } from "solid-js";
 
@@ -20,6 +24,22 @@ import { createSignal } from "solid-js";
 export type ActiveIndicator =
   | string
   | { name: string; [k: string]: unknown };
+
+export type PlotLineStyle = "solid" | "dashed" | "dotted";
+
+/** Client-side override of one plotted line or histogram. */
+export interface PlotStyle {
+  color?: string;
+  /** Stroke width in px, 1-4. */
+  width?: number;
+  lineStyle?: PlotLineStyle;
+  visible?: boolean;
+}
+
+/** Per-indicator style overrides, keyed by `plotKey`. */
+export interface IndicatorStyle {
+  plots: Record<string, PlotStyle>;
+}
 
 const STORAGE_KEY = "chartgen.indicators.active";
 
@@ -50,7 +70,7 @@ function load(): ActiveIndicator[] {
       seen.add(indicatorName(e));
       return true;
     });
-    return valid.length > 0 ? valid : [...DEFAULT_SET];
+    return valid.length > 0 ? valid.map(sanitizeEntry) : [...DEFAULT_SET];
   } catch {
     return [...DEFAULT_SET];
   }
@@ -63,6 +83,67 @@ function persist(value: ActiveIndicator[]): void {
   } catch {
     // Quota exceeded or private-mode storage: best-effort only.
   }
+}
+
+const COLOR_RE =
+  /^(#([0-9a-f]{3}|[0-9a-f]{6}|[0-9a-f]{8})|rgba\(\s*\d{1,3}\s*,\s*\d{1,3}\s*,\s*\d{1,3}\s*,\s*(0|1|0?\.\d+|1\.0+)\s*\))$/i;
+const PLOT_KEY_RE = /^(line|hist)\d+$/;
+const LINE_STYLES: readonly string[] = ["solid", "dashed", "dotted"];
+
+/**
+ * Stable key of a plot: its kind and index in the series payload
+ * (`line0`, `hist1`). Labels are not used because they can change with the
+ * indicator's parameters or repeat within one indicator.
+ */
+export function plotKey(kind: "line" | "hist", index: number): string {
+  return `${kind}${index}`;
+}
+
+function sanitizePlot(x: unknown): PlotStyle | undefined {
+  if (!x || typeof x !== "object" || Array.isArray(x)) return undefined;
+  const { color, width, lineStyle, visible } = x as Record<string, unknown>;
+  const out: PlotStyle = {};
+  if (typeof color === "string" && COLOR_RE.test(color)) out.color = color;
+  if (
+    typeof width === "number" &&
+    Number.isInteger(width) &&
+    width >= 1 &&
+    width <= 4
+  ) {
+    out.width = width;
+  }
+  if (typeof lineStyle === "string" && LINE_STYLES.includes(lineStyle)) {
+    out.lineStyle = lineStyle as PlotLineStyle;
+  }
+  if (typeof visible === "boolean") out.visible = visible;
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
+/**
+ * Validate an untrusted style (e.g. from localStorage): invalid fields and
+ * plots are dropped. Returns undefined when nothing valid remains.
+ */
+export function sanitizeStyle(x: unknown): IndicatorStyle | undefined {
+  if (!x || typeof x !== "object" || Array.isArray(x)) return undefined;
+  const raw = (x as { plots?: unknown }).plots;
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined;
+  const plots: Record<string, PlotStyle> = {};
+  for (const [key, value] of Object.entries(raw)) {
+    const plot = PLOT_KEY_RE.test(key) ? sanitizePlot(value) : undefined;
+    if (plot) plots[key] = plot;
+  }
+  return Object.keys(plots).length > 0 ? { plots } : undefined;
+}
+
+/** Entry with a validated `style`; the field is dropped when nothing valid remains. */
+function sanitizeEntry(entry: ActiveIndicator): ActiveIndicator {
+  if (typeof entry === "string" || !("style" in entry)) return entry;
+  return makeEntry(
+    entry.name,
+    indicatorParams(entry),
+    isHidden(entry),
+    sanitizeStyle(entry.style),
+  );
 }
 
 export function isActiveIndicator(x: unknown): x is ActiveIndicator {
@@ -79,10 +160,19 @@ export function isHidden(entry: ActiveIndicator): boolean {
   return typeof entry !== "string" && entry.hidden === true;
 }
 
-/** Parameters of an entry, without `name` and the client-only `hidden`. */
+/** The client-only style of an entry, if any. */
+export function indicatorStyle(
+  entry: ActiveIndicator,
+): IndicatorStyle | undefined {
+  return typeof entry === "string"
+    ? undefined
+    : (entry.style as IndicatorStyle | undefined);
+}
+
+/** Parameters of an entry, without `name` and the client-only `hidden` and `style`. */
 export function indicatorParams(entry: ActiveIndicator): Record<string, unknown> {
   if (typeof entry === "string") return {};
-  const { name: _name, hidden: _hidden, ...params } = entry;
+  const { name: _name, hidden: _hidden, style: _style, ...params } = entry;
   return params;
 }
 
@@ -91,10 +181,16 @@ function makeEntry(
   name: string,
   params: Record<string, unknown>,
   hidden: boolean,
+  style?: IndicatorStyle,
 ): ActiveIndicator {
-  const hasParams = Object.keys(params).length > 0;
-  if (!hasParams && !hidden) return name;
-  return hidden ? { name, ...params, hidden: true } : { name, ...params };
+  const extra = {
+    ...(hidden ? { hidden: true } : {}),
+    ...(style ? { style } : {}),
+  };
+  if (Object.keys(params).length === 0 && Object.keys(extra).length === 0) {
+    return name;
+  }
+  return { name, ...params, ...extra };
 }
 
 /** Replace the parameters of the entry at `index`, keeping name and visibility. */
@@ -106,7 +202,9 @@ export function withParams(
   const entry = entries[index];
   if (entry === undefined) return entries;
   return entries.map((e, i) =>
-    i === index ? makeEntry(indicatorName(e), params, isHidden(e)) : e,
+    i === index
+      ? makeEntry(indicatorName(e), params, isHidden(e), indicatorStyle(e))
+      : e,
   );
 }
 
@@ -119,7 +217,29 @@ export function withHidden(
   const entry = entries[index];
   if (entry === undefined) return entries;
   return entries.map((e, i) =>
-    i === index ? makeEntry(indicatorName(e), indicatorParams(e), hidden) : e,
+    i === index
+      ? makeEntry(indicatorName(e), indicatorParams(e), hidden, indicatorStyle(e))
+      : e,
+  );
+}
+
+/** Replace the style of the entry at `index`; undefined clears it. */
+export function withStyle(
+  entries: ActiveIndicator[],
+  index: number,
+  style: IndicatorStyle | undefined,
+): ActiveIndicator[] {
+  const entry = entries[index];
+  if (entry === undefined) return entries;
+  return entries.map((e, i) =>
+    i === index
+      ? makeEntry(
+          indicatorName(e),
+          indicatorParams(e),
+          isHidden(e),
+          sanitizeStyle(style),
+        )
+      : e,
   );
 }
 
@@ -160,6 +280,14 @@ export function updateIndicatorParams(
   params: Record<string, unknown>,
 ): void {
   setActiveIndicators(withParams(activeIndicators(), index, params));
+}
+
+/** Replace the plot style of the entry at `index`. */
+export function updateIndicatorStyle(
+  index: number,
+  style: IndicatorStyle | undefined,
+): void {
+  setActiveIndicators(withStyle(activeIndicators(), index, style));
 }
 
 /** Toggle the client-side visibility of the entry at `index`. */
