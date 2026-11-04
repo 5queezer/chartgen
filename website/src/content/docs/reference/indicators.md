@@ -16,6 +16,52 @@ the `generate_chart` MCP tool's `indicators` parameter. Screenshots are
 rendered from `AAPL` daily data (overlays and panels) and `BTCUSDT` daily
 data (external) — regenerate with `./scripts/gen_screenshots.sh`.
 
+## Values match TradingView
+
+Indicator math follows Pine Script v5 semantics, implemented once in
+`src/indicators/pine.rs` ([ADR-0018](/chartgen/decisions/0018-pine-semantics-for-indicators/)).
+`ta.ema` and `ta.rma` seed with the SMA of the first `length` values. RSI, ATR
+and DMI/ADX use Wilder's RMA. Bollinger Bands use the population standard
+deviation. Defaults are TradingView's. Bars before an indicator has seen
+`length` valid values are `null` (NaN), not partial values. With the same
+parameters and the same first bar, the values equal TradingView's built-ins.
+The community composites (`cipher_b`, `wavetrend`, `rsi_mfi_stoch`,
+`kalman_volume`) follow the Pine semantics of the `ta.*` calls in the scripts
+they port.
+
+Missing values (`na`) follow the Pine reference. Window functions (`sma`,
+`sum`, `stdev`, `highest`, `lowest`, ...) skip them and use the last `length`
+valid values, so a flat stochastic or a zero-range bar leaves no gap. EMA and
+RMA keep their state across a missing value and repeat the previous value;
+that case is not yet verified against a live TradingView chart.
+
+EMA and RMA are recursive, so a value depends on where the series starts.
+Load enough history before the bars you compare (`warmup` in series mode)
+so the start-up effect has decayed. Known differences:
+
+- **WaveTrend lengths.** `wavetrend` is the WaveTrend inside VuManChu Cipher B
+  and keeps its lengths 9 / 12 / 3 (LazyBear's script: 10 / 21 / 4).
+- **Calendar periods.** `vwap` / `vwap_bands` anchors and `pivot` periods
+  are UTC days, ISO weeks, months and years of the bar times. TradingView
+  uses the exchange session and time zone, which can differ for non-UTC
+  markets. On daily and higher charts the `session` anchor resets on every
+  bar, as TradingView's `timeframe.change("D")` does. Without bar timestamps
+  VWAP never resets and pivots stay empty.
+- **Pivots.** The higher-timeframe high / low / close comes from the loaded
+  chart bars. Every period is drawn (TradingView shows the last 15), and only
+  P, R1, S1, R2 and S2.
+- **Ichimoku.** The leading spans are shifted `displacement - 1` bars forward,
+  and the lagging span the same distance back. The cloud projected past the
+  last bar is not drawn yet.
+- **Intrabar data.** The volume profiles (`volume_profile`, `session_vp`,
+  `hvn_lvn`, `naked_poc`, `tpo`) and `cvd` spread each bar's volume over its
+  range. TradingView builds them from lower-timeframe data, so they are
+  approximations.
+- **Long warmups.** `kalman_volume` normalises by a 200-bar standard deviation
+  and needs about 280 bars before its first value.
+- **Unknown timeframe.** `histvol` needs the timeframe to annualize. When it
+  is unknown, the line stays empty.
+
 ## Overlays
 
 ### Summary
@@ -79,7 +125,8 @@ Keltner Channels — ATR-based volatility bands
 | Param | Type | Default | Description |
 |-------|------|---------|-------------|
 | `period` | `integer` | `20` |  |
-| `multiplier` | `number` | `1.5` |  |
+| `multiplier` | `number` | `2.0` |  |
+| `atr_length` | `integer` | `10` | ATR length for the band width |
 
 ![keltner sample render](../../../assets/indicators/keltner.png)
 
@@ -97,7 +144,13 @@ Donchian Channels — breakout trading bands
 
 ### `vwap`
 
-Volume Weighted Average Price — intraday anchor
+Volume Weighted Average Price — anchored to the session, week or month
+
+**Parameters:**
+
+| Param | Type | Default | Description |
+|-------|------|---------|-------------|
+| `anchor` | `string` | `session` | Reset period: UTC day (session), ISO week, calendar month, or never |
 
 ![vwap sample render](../../../assets/indicators/vwap.png)
 
@@ -109,7 +162,8 @@ VWAP Bands — standard deviation bands around VWAP
 
 | Param | Type | Default | Description |
 |-------|------|---------|-------------|
-| `std_dev` | `number` | `2.0` |  |
+| `std_dev` | `number` | `1.0` |  |
+| `anchor` | `string` | `session` | Reset period: UTC day (session), ISO week, calendar month, or never |
 
 ![vwap_bands sample render](../../../assets/indicators/vwap_bands.png)
 
@@ -153,6 +207,7 @@ Ichimoku Cloud — trend, support/resistance, momentum
 | `tenkan` | `integer` | `9` |  |
 | `kijun` | `integer` | `26` |  |
 | `senkou_b` | `integer` | `52` |  |
+| `displacement` | `integer` | `26` | Leading spans are drawn displacement - 1 bars ahead, the lagging span (close) as many bars back |
 
 ![ichimoku sample render](../../../assets/indicators/ichimoku.png)
 
@@ -166,7 +221,7 @@ Heikin Ashi — smoothed trend candles
 
 ### `pivot`
 
-Pivot Points — support/resistance from prior bar
+Pivot Points Standard (Traditional) — levels from the previous higher-timeframe period
 
 **Aliases:** `pivot_points`
 
@@ -498,7 +553,7 @@ Slow Stochastic — overbought/oversold oscillator
 | Param | Type | Default | Description |
 |-------|------|---------|-------------|
 | `period` | `integer` | `14` |  |
-| `k_smooth` | `integer` | `3` |  |
+| `k_smooth` | `integer` | `1` |  |
 | `d_smooth` | `integer` | `3` |  |
 
 ![stoch sample render](../../../assets/indicators/stoch.png)
@@ -541,7 +596,7 @@ Rate of Change — momentum percentage
 
 | Param | Type | Default | Description |
 |-------|------|---------|-------------|
-| `period` | `integer` | `14` |  |
+| `period` | `integer` | `9` |  |
 
 ![roc sample render](../../../assets/indicators/roc.png)
 
@@ -613,7 +668,7 @@ Historical Volatility — annualized log-return std dev
 
 | Param | Type | Default | Description |
 |-------|------|---------|-------------|
-| `period` | `integer` | `20` |  |
+| `period` | `integer` | `10` |  |
 
 ![histvol sample render](../../../assets/indicators/histvol.png)
 

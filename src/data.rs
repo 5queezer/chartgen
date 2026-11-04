@@ -117,6 +117,36 @@ pub fn interval_secs(interval: &str) -> Option<i64> {
     })
 }
 
+/// Bar length in seconds for indicator math (HV annualization, VWAP and
+/// pivot anchoring). Unlike the strict `interval_secs` (which gates what the
+/// data sources accept), this takes any multiple and any letter case:
+/// "1D", "1W", "2w", "4H", "1y", "D". A capital `M` means months and a
+/// lowercase `m` minutes (TradingView / Binance convention); "mo" is months
+/// in any case. Months are 30 days, years 365. `None` when unrecognised:
+/// callers treat that as an unknown timeframe, not as intraday.
+pub fn bar_interval_secs(interval: &str) -> Option<i64> {
+    const DAY: i64 = 86_400;
+    let s = interval.trim();
+    let split = s.find(|c: char| !c.is_ascii_digit()).unwrap_or(s.len());
+    let (num, unit) = s.split_at(split);
+    let k: i64 = if num.is_empty() { 1 } else { num.parse().ok()? };
+    let unit_secs = match unit {
+        "m" => 60,
+        "M" => 30 * DAY,
+        u => match u.to_ascii_lowercase().as_str() {
+            "s" => 1,
+            "min" => 60,
+            "h" => 3_600,
+            "d" => DAY,
+            "w" | "wk" => 7 * DAY,
+            "mo" => 30 * DAY,
+            "y" => 365 * DAY,
+            _ => return None,
+        },
+    };
+    (k > 0).then(|| k.checked_mul(unit_secs)).flatten()
+}
+
 /// Offset of the bar grid from the epoch: weekly bars open on Monday
 /// (1970-01-01 was a Thursday), everything else is epoch-aligned.
 fn grid_offset_ms(step: i64) -> i64 {
@@ -245,6 +275,26 @@ mod tests {
     use super::*;
 
     const HOUR_MS: i64 = 3_600_000;
+
+    #[test]
+    fn bar_interval_secs_is_case_insensitive_and_strict_about_unknowns() {
+        const DAY: i64 = 86_400;
+        assert_eq!(bar_interval_secs("1D"), Some(DAY));
+        assert_eq!(bar_interval_secs("1d"), Some(DAY));
+        assert_eq!(bar_interval_secs("D"), Some(DAY));
+        assert_eq!(bar_interval_secs("1W"), Some(7 * DAY));
+        assert_eq!(bar_interval_secs("2w"), Some(14 * DAY));
+        assert_eq!(bar_interval_secs("1WK"), Some(7 * DAY));
+        assert_eq!(bar_interval_secs("4H"), Some(14_400));
+        assert_eq!(bar_interval_secs("15m"), Some(900));
+        assert_eq!(bar_interval_secs("1M"), Some(30 * DAY));
+        assert_eq!(bar_interval_secs("3MO"), Some(90 * DAY));
+        assert_eq!(bar_interval_secs("1y"), Some(365 * DAY));
+        assert_eq!(bar_interval_secs("0d"), None);
+        assert_eq!(bar_interval_secs("1x"), None);
+        assert_eq!(bar_interval_secs(""), None);
+        assert_eq!(bar_interval_secs("99999999999999999999d"), None);
+    }
 
     #[test]
     fn interval_secs_parses_binance_and_yahoo_forms() {

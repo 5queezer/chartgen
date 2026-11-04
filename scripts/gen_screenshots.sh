@@ -15,6 +15,9 @@ INTERVAL="1d"
 BARS="200"
 WIDTH="1280"
 HEIGHT="640"
+# Indicators whose warmup exceeds $BARS get more history (kalman_volume
+# normalises by a 200-bar stdev and needs ~280 bars before its first value).
+declare -A BARS_FOR=([kalman_volume]=500)
 
 OVERLAY=(
     ema_stack bbands keltner donchian vwap vwap_bands supertrend sar
@@ -45,7 +48,7 @@ render() {
     local out="$OUTPUT_DIR/$name.png"
     printf "  %-20s %s -> %s ... " "$name" "$symbol" "$out"
     if "$BIN" -s "$symbol" -i "$INTERVAL" -p "$name" \
-        -n "$BARS" --width "$WIDTH" --height "$HEIGHT" \
+        -n "${BARS_FOR[$name]:-$BARS}" --width "$WIDTH" --height "$HEIGHT" \
         -o "$out" >/dev/null 2>&1; then
         echo "ok"
     else

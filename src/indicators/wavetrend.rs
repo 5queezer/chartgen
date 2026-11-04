@@ -64,7 +64,14 @@ impl Indicator for WaveTrend {
             .iter()
             .zip(&esa)
             .zip(&de)
-            .map(|((s, e), d)| if *d > 0.0 { (s - e) / (0.015 * d) } else { 0.0 })
+            // Pine: (ap - esa) / (0.015 * d); na or a zero d gives na.
+            .map(|((s, e), d)| {
+                if *d != 0.0 {
+                    (s - e) / (0.015 * d)
+                } else {
+                    f64::NAN
+                }
+            })
             .collect();
 
         let wt1 = ema(&ci, self.avg_len);
@@ -164,5 +171,41 @@ impl Indicator for WaveTrend {
             label: "WaveTrend".into(),
             ..Default::default()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::indicators::pine::test_util::{closes, eq, NAN};
+
+    #[test]
+    fn wavetrend_pine_semantics() {
+        let ind = WaveTrend {
+            ch_len: 2,
+            avg_len: 2,
+            ma_len: 2,
+            ..Default::default()
+        };
+        // hlc3 = close. esa = ema2 = [_, 1.5, 19/6, 55/18, ...];
+        // d = ema2(|ap - esa|) = [_, _, 2/3, 7/27, ...];
+        // ci = [_, _, 250/3, -100/7, ...]; wt1 = ema2(ci) seeds at bar 3.
+        let r = ind.compute(&closes(&[1.0, 2.0, 4.0, 3.0, 5.0, 4.0, 6.0]));
+        let wt1_3 = (250.0 / 3.0 - 100.0 / 7.0) / 2.0;
+        eq(&r.lines[0].y[..4], &[NAN, NAN, NAN, wt1_3]);
+        assert!((r.lines[0].y[4] - 67.06349206349209).abs() < 1e-9);
+        // wt2 = sma2(wt1)
+        eq(
+            &r.lines[1].y[..5],
+            &[NAN, NAN, NAN, NAN, (wt1_3 + 67.06349206349209) / 2.0],
+        );
+    }
+
+    #[test]
+    fn wavetrend_flat_prices_are_nan_not_zero() {
+        // d = 0 -> ci is a division by zero (na), so nothing is plotted.
+        let r = WaveTrend::default().compute(&closes(&[5.0; 40]));
+        assert!(r.lines[0].y.iter().all(|v| v.is_nan()));
+        assert!(r.dots.is_empty());
     }
 }

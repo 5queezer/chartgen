@@ -295,6 +295,19 @@ fn find_divs(
 // Schaff Trend Cycle
 // ---------------------------------------------------------------------------
 
+/// `x := na(x[1]) ? src : x[1] + factor * (src - x[1])`.
+fn pine_smooth(src: &[f64], factor: f64) -> Vec<f64> {
+    let mut out = vec![f64::NAN; src.len()];
+    for i in 0..src.len() {
+        out[i] = if i == 0 || out[i - 1].is_nan() {
+            src[i]
+        } else {
+            out[i - 1] + factor * (src[i] - out[i - 1])
+        };
+    }
+    out
+}
+
 fn compute_schaff(
     closes: &[f64],
     length: usize,
@@ -331,38 +344,20 @@ fn compute_schaff(
         })
         .collect();
 
-    // gamma
+    // gamma := beta > 0 ? gamma : nz(gamma[1]) (a na beta takes the nz branch)
     let mut gamma = vec![f64::NAN; n];
     for i in 0..n {
-        if macd_val[i].is_nan() || alpha[i].is_nan() || beta[i].is_nan() {
-            continue;
-        }
-        if beta[i] > 0.0 {
-            gamma[i] = (macd_val[i] - alpha[i]) / beta[i] * 100.0;
-        } else if i > 0 && !gamma[i - 1].is_nan() {
-            gamma[i] = gamma[i - 1];
-        }
+        gamma[i] = if beta[i] > 0.0 {
+            (macd_val[i] - alpha[i]) / beta[i] * 100.0
+        } else if i > 0 {
+            gamma[i - 1]
+        } else {
+            0.0
+        };
     }
 
-    // delta: recursive smooth
-    let mut delta = vec![f64::NAN; n];
-    let mut started = false;
-    for i in 0..n {
-        if gamma[i].is_nan() {
-            continue;
-        }
-        if !started {
-            delta[i] = gamma[i];
-            started = true;
-        } else {
-            let prev = if delta[i - 1].is_nan() {
-                gamma[i]
-            } else {
-                delta[i - 1]
-            };
-            delta[i] = prev + factor * (gamma[i] - prev);
-        }
-    }
+    // delta := na(delta[1]) ? gamma : delta[1] + factor * (gamma - delta[1])
+    let delta = pine_smooth(&gamma, factor);
 
     let epsilon = lowest(&delta, length);
     let zeta_raw = highest(&delta, length);
@@ -378,40 +373,20 @@ fn compute_schaff(
         })
         .collect();
 
-    // eta
+    // eta := zeta > 0 ? eta : nz(eta[1])
     let mut eta = vec![f64::NAN; n];
     for i in 0..n {
-        if delta[i].is_nan() || epsilon[i].is_nan() || zeta[i].is_nan() {
-            continue;
-        }
-        if zeta[i] > 0.0 {
-            eta[i] = (delta[i] - epsilon[i]) / zeta[i] * 100.0;
-        } else if i > 0 && !eta[i - 1].is_nan() {
-            eta[i] = eta[i - 1];
-        }
-    }
-
-    // stc: recursive smooth
-    let mut stc = vec![f64::NAN; n];
-    started = false;
-    for i in 0..n {
-        if eta[i].is_nan() {
-            continue;
-        }
-        if !started {
-            stc[i] = eta[i];
-            started = true;
+        eta[i] = if zeta[i] > 0.0 {
+            (delta[i] - epsilon[i]) / zeta[i] * 100.0
+        } else if i > 0 {
+            eta[i - 1]
         } else {
-            let prev = if stc[i - 1].is_nan() {
-                eta[i]
-            } else {
-                stc[i - 1]
-            };
-            stc[i] = prev + factor * (eta[i] - prev);
-        }
+            0.0
+        };
     }
 
-    stc
+    // stc := na(stc[1]) ? eta : stc[1] + factor * (eta - stc[1])
+    pine_smooth(&eta, factor)
 }
 
 // ---------------------------------------------------------------------------
@@ -502,7 +477,14 @@ impl Indicator for CipherB {
             .iter()
             .zip(&esa)
             .zip(&de)
-            .map(|((s, e), d)| if *d > 0.0 { (s - e) / (0.015 * d) } else { 0.0 })
+            // Pine: (src - esa) / (0.015 * de); na or a zero de gives na.
+            .map(|((s, e), d)| {
+                if *d != 0.0 {
+                    (s - e) / (0.015 * d)
+                } else {
+                    f64::NAN
+                }
+            })
             .collect();
 
         let wt1 = ema(&ci, cfg.wt_average_len);
@@ -582,11 +564,12 @@ impl Indicator for CipherB {
                 .bars
                 .iter()
                 .map(|b| {
+                    // Pine: (close - open) / (high - low); a zero range is na.
                     let range = b.high - b.low;
-                    if range > 0.0 {
+                    if range != 0.0 {
                         ((b.close - b.open) / range) * cfg.rsi_mfi_multiplier
                     } else {
-                        0.0
+                        f64::NAN
                     }
                 })
                 .collect();
@@ -660,12 +643,9 @@ impl Indicator for CipherB {
             let d_smoothed = sma(&k_smoothed, cfg.stoch_d_smooth);
 
             if cfg.stoch_avg {
+                // Pine math.avg(kk, d1): na while either is na.
                 for i in 0..n {
-                    if !k_smoothed[i].is_nan() && !d_smoothed[i].is_nan() {
-                        stoch_k[i] = (k_smoothed[i] + d_smoothed[i]) / 2.0;
-                    } else {
-                        stoch_k[i] = k_smoothed[i];
-                    }
+                    stoch_k[i] = (k_smoothed[i] + d_smoothed[i]) / 2.0;
                     stoch_d[i] = d_smoothed[i];
                 }
             } else {
@@ -1170,5 +1150,64 @@ impl Indicator for CipherB {
             label: "Cipher B".into(),
             ..Default::default()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::data::sample_data;
+    use crate::indicators::wavetrend::WaveTrend;
+
+    #[test]
+    fn cipher_b_wavetrend_matches_wavetrend_indicator() {
+        let d = sample_data(300);
+        let cb = CipherB::default().compute(&d);
+        let wt = WaveTrend::default().compute(&d);
+        for (a, b) in [
+            (&cb.lines[0].y, &wt.lines[0].y),
+            (&cb.lines[1].y, &wt.lines[1].y),
+        ] {
+            assert_eq!(a.len(), b.len());
+            assert!(a
+                .iter()
+                .zip(b.iter())
+                .all(|(x, y)| (x.is_nan() && y.is_nan()) || x == y));
+        }
+        // ema(9) -> ema(9) -> ema(12): 9 + 8 + 11 = 28 warmup bars, then sma(3)
+        assert_eq!(cb.lines[0].y.iter().position(|v| v.is_finite()), Some(27));
+        assert_eq!(cb.lines[1].y.iter().position(|v| v.is_finite()), Some(29));
+    }
+
+    #[test]
+    fn cipher_b_still_emits_signals_and_divergences() {
+        let d = sample_data(500);
+        let count = |r: &PanelResult, l: &str| {
+            r.dots
+                .iter()
+                .filter(|d| d.label.as_deref() == Some(l))
+                .count()
+        };
+        // Strict mode filters WT crosses by RSI / Stoch RSI; Wilder RSI is
+        // smoother than the old EMA-based one, so fewer pass, but some do.
+        let strict = CipherB::default().compute(&d);
+        let buys = [signals::BUY, signals::GOLD_BUY, signals::BUY_SMALL];
+        assert!(buys.iter().map(|l| count(&strict, l)).sum::<usize>() > 0);
+        assert!(strict.dots.iter().all(|d| d.y.is_finite()));
+        assert!(
+            !strict.divlines.is_empty(),
+            "WT divergences on 500 sample bars"
+        );
+        // Classic mode keeps every WT cross.
+        let mut classic = CipherB::default();
+        classic.configure(&json!({"dot_mode": "classic"}));
+        let classic = classic.compute(&d);
+        let crosses = [
+            signals::BUY,
+            signals::SELL,
+            signals::BUY_SMALL,
+            signals::SELL_SMALL,
+        ];
+        assert!(crosses.iter().map(|l| count(&classic, l)).sum::<usize>() >= 50);
     }
 }

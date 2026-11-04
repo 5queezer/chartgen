@@ -62,10 +62,11 @@ fn test_ema_known_values() {
     let data = vec![1.0, 2.0, 3.0, 4.0, 5.0];
     let result = ema(&data, 3);
     assert_eq!(result.len(), 5);
-    // All values should be finite (ta-rs EMA outputs from bar 0)
-    for &v in &result {
-        assert!(v.is_finite());
-    }
+    // Pine ta.ema: NaN warmup, seeded with SMA(1,2,3) = 2, then alpha = 0.5
+    assert!(result[0].is_nan() && result[1].is_nan());
+    assert!((result[2] - 2.0).abs() < 1e-10);
+    assert!((result[3] - 3.0).abs() < 1e-10);
+    assert!((result[4] - 4.0).abs() < 1e-10);
 }
 
 #[test]
@@ -87,10 +88,11 @@ fn test_sma_basic() {
     let data = vec![1.0, 2.0, 3.0, 4.0, 5.0];
     let result = sma(&data, 3);
     assert_eq!(result.len(), 5);
-    // ta-rs SMA outputs values from bar 0 (running average), not waiting for full period
-    for &v in &result {
-        assert!(v.is_finite());
-    }
+    // Pine ta.sma: NaN until a full window exists
+    assert!(result[0].is_nan() && result[1].is_nan());
+    assert!((result[2] - 2.0).abs() < 1e-10);
+    assert!((result[3] - 3.0).abs() < 1e-10);
+    assert!((result[4] - 4.0).abs() < 1e-10);
 }
 
 #[test]
@@ -103,11 +105,9 @@ fn test_sma_empty() {
 fn test_sma_period_larger_than_data() {
     let data = vec![1.0, 2.0, 3.0];
     let result = sma(&data, 10);
-    // ta-rs SMA still outputs values, but they are from partial windows
+    // Pine ta.sma: no full window, so every value is NaN
     assert_eq!(result.len(), 3);
-    for &v in &result {
-        assert!(v.is_finite());
-    }
+    assert!(result.iter().all(|v| v.is_nan()));
 }
 
 #[test]

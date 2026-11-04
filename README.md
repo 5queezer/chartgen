@@ -169,7 +169,8 @@ src/
 ├── mtf.rs               Multi-timeframe aggregation
 ├── indicators/
 │   ├── mod.rs           Registry (by_name, available, registry)
-│   ├── ta_bridge.rs     ta-rs wrappers
+│   ├── pine.rs          Pine v5 semantics helpers (ADR-0018)
+│   ├── ta_bridge.rs     classic built-ins (EMA, BB, KC, ATR, Stoch, ...)
 │   ├── custom.rs        custom indicators (incl. volume-profile family)
 │   ├── cipher_b.rs      Cipher B (Pine Script port)
 │   ├── external.rs      API-based indicators

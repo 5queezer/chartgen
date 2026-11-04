@@ -32,7 +32,7 @@ pub fn by_name(name: &str) -> Option<Box<dyn Indicator>> {
         "williams_r" | "willr" => Some(Box::new(ta_bridge::WilliamsR::default())),
         "donchian" => Some(Box::new(ta_bridge::Donchian::default())),
         "cmf" => Some(Box::new(ta_bridge::Cmf::default())),
-        "vwap" => Some(Box::new(custom::Vwap)),
+        "vwap" => Some(Box::new(custom::Vwap::default())),
         "adx" => Some(Box::new(custom::Adx::default())),
         "supertrend" => Some(Box::new(custom::Supertrend::default())),
         "sar" | "parabolic_sar" => Some(Box::new(custom::ParabolicSar::default())),
@@ -264,7 +264,7 @@ pub fn registry() -> Vec<IndicatorInfo> {
         ta_bridge::KeltnerChannels::default()
     );
     reg!("donchian", &[], "overlay", ta_bridge::Donchian::default());
-    reg!("vwap", &[], "overlay", custom::Vwap);
+    reg!("vwap", &[], "overlay", custom::Vwap::default());
     reg!("vwap_bands", &[], "overlay", custom::VwapBands::default());
     reg!("supertrend", &[], "overlay", custom::Supertrend::default());
     reg!(
