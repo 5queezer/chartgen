@@ -343,6 +343,17 @@ describe("history paging", () => {
     expect(t.fetch).toHaveBeenCalledTimes(1);
   });
 
+  it("loadUntil stops paging once isCurrent turns false", async () => {
+    const t = setup();
+    t.feed.reset(payload(501, 1000), REQ);
+    let current = true;
+    const done = t.feed.loadUntil(tOf(-10), () => current);
+    current = false;
+    await vi.advanceTimersByTimeAsync(0);
+    await expect(done).resolves.toBe("aborted");
+    expect(t.fetch).toHaveBeenCalledTimes(1);
+  });
+
   it("loadUntil joins a page that is already in flight", async () => {
     const t = setup();
     t.feed.reset(payload(501, 1000), REQ);

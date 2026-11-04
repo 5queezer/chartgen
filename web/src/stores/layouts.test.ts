@@ -167,7 +167,7 @@ describe("snapshot and dirty", () => {
     expect(isDirty(base, { ...base, symbol: "ETHUSDT" })).toBe(true);
   });
 
-  it("parses a state saved before time zones as the default", () => {
+  it("parses a state saved before time zones as the live zone", () => {
     const { timeZone: _omit, ...old } = base;
     expect(parseState(old)?.timeZone).toBe("local");
     expect(parseState({ ...old, timeZone: "Mars/Base" })?.timeZone).toBe("local");

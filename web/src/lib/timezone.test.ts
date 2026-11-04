@@ -2,8 +2,10 @@ import { describe, expect, it } from "vitest";
 
 import {
   exchangeTimeZone,
+  formatBarTime,
   formatClock,
   formatDateTime,
+  isDateBar,
   isTimeZoneChoice,
   offsetLabel,
   resolveTimeZone,
@@ -86,9 +88,37 @@ describe("zonedToUtc", () => {
     const w = { year: 2026, month: 7, day: 1, hour: 9, minute: 0, second: 0 };
     expect(zonedToUtc(w, "America/New_York")).toBe(Date.UTC(2026, 6, 1, 13, 0));
   });
-  it("puts a time inside a DST gap an hour early", () => {
+  it("puts a time inside a DST gap after it", () => {
     // 2026-03-08 02:30 does not exist in New York (clocks jump 02:00 -> 03:00).
-    const w = { year: 2026, month: 3, day: 8, hour: 2, minute: 30, second: 0 };
-    expect(wallClock(zonedToUtc(w, "America/New_York"), "America/New_York").hour).toBe(1);
+    const ny = { year: 2026, month: 3, day: 8, hour: 2, minute: 30, second: 0 };
+    expect(wallClock(zonedToUtc(ny, "America/New_York"), "America/New_York")).toMatchObject({
+      hour: 3,
+      minute: 30,
+    });
+    // Berlin: 2026-03-29 02:00 -> 03:00.
+    const de = { year: 2026, month: 3, day: 29, hour: 2, minute: 30, second: 0 };
+    expect(wallClock(zonedToUtc(de, "Europe/Berlin"), "Europe/Berlin")).toMatchObject({
+      day: 29,
+      hour: 3,
+      minute: 30,
+    });
+  });
+  it("takes the first occurrence in a DST overlap", () => {
+    // 2026-10-25 02:30 happens twice in Berlin; the first is CEST (UTC+2).
+    const w = { year: 2026, month: 10, day: 25, hour: 2, minute: 30, second: 0 };
+    expect(zonedToUtc(w, "Europe/Berlin")).toBe(Date.UTC(2026, 9, 25, 0, 30));
+  });
+});
+
+describe("date bars", () => {
+  it("recognises daily and longer intervals", () => {
+    for (const i of ["1d", "1wk", "1mo"]) expect(isDateBar(i)).toBe(true);
+    for (const i of ["1m", "4h", null]) expect(isDateBar(i)).toBe(false);
+  });
+  it("shows the date alone, the same in every zone", () => {
+    const midnight = Date.UTC(2026, 0, 1);
+    expect(formatBarTime(midnight, "America/New_York", "1d")).toBe("2026-01-01");
+    expect(formatBarTime(midnight, "Asia/Tokyo", "1wk")).toBe("2026-01-01");
+    expect(formatBarTime(midnight, "America/New_York", "1h")).toBe("2025-12-31 19:00");
   });
 });

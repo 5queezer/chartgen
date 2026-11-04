@@ -11,7 +11,6 @@ import { batch, createSignal } from "solid-js";
 
 import { isTimeframe, type Timeframe } from "../lib/timeframe";
 import {
-  DEFAULT_TIME_ZONE,
   isTimeZoneChoice,
   type TimeZoneChoice,
 } from "../lib/timezone";
@@ -161,8 +160,8 @@ export function parseState(x: unknown): LayoutState | null {
     timeframe: x.timeframe,
     chartType: x.chartType as ChartType,
     scaleMode: x.scaleMode as ScaleMode,
-    // Layouts saved before time zones existed have none.
-    timeZone: isTimeZoneChoice(x.timeZone) ? x.timeZone : DEFAULT_TIME_ZONE,
+    // Layouts saved before time zones existed keep the current zone.
+    timeZone: isTimeZoneChoice(x.timeZone) ? x.timeZone : timeZone(),
     indicators,
   };
 }
@@ -509,7 +508,7 @@ export function createLayout(name: string): boolean {
     timeframe: timeframe(),
     chartType: DEFAULT_CHART_TYPE,
     scaleMode: DEFAULT_SCALE_MODE,
-    timeZone: DEFAULT_TIME_ZONE,
+    timeZone: timeZone(),
     indicators: [...DEFAULT_SET],
   };
   return batch(() => {

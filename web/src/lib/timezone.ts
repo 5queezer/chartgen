@@ -121,6 +121,8 @@ export function wallClock(ms: number, tz: string): Wall {
   };
 }
 
+const DAY_MS = 86_400_000;
+
 const utcOf = (w: Wall) =>
   Date.UTC(w.year, w.month - 1, w.day, w.hour, w.minute, w.second);
 
@@ -130,13 +132,16 @@ export function offsetMs(ms: number, tz: string): number {
 }
 
 /**
- * The instant at which `tz`'s wall clock reads `wall`. A wall time inside
- * a DST gap does not exist; it lands an hour early (02:30 -> 01:30).
+ * The instant at which `tz`'s wall clock reads `wall`. A wall time inside a
+ * DST gap does not exist and lands after it (02:30 in the hour skipped at
+ * 02:00 -> 03:00 reads 03:30); in an overlap the first occurrence is used.
  */
 export function zonedToUtc(wall: Wall, tz: string): number {
   const guess = utcOf(wall);
-  const first = guess - offsetMs(guess, tz);
-  return guess - offsetMs(first, tz);
+  const before = guess - offsetMs(guess - DAY_MS, tz);
+  const after = guess - offsetMs(guess + DAY_MS, tz);
+  const valid = [before, after].filter((t) => utcOf(wallClock(t, tz)) === guess);
+  return valid.length > 0 ? Math.min(...valid) : before;
 }
 
 const pad = (n: number) => String(n).padStart(2, "0");
@@ -160,4 +165,18 @@ export function offsetLabel(ms: number, tz: string): string {
   const abs = Math.abs(minutes);
   const m = abs % 60;
   return `UTC${minutes < 0 ? "-" : "+"}${Math.floor(abs / 60)}${m ? `:${pad(m)}` : ""}`;
+}
+
+/** Daily, weekly and monthly bars stand for a date, not a time of day. */
+export function isDateBar(interval: string | null | undefined): boolean {
+  return /^\d+(d|wk|mo)$/.test(interval ?? "");
+}
+
+/**
+ * Legend time of a bar: the date alone for date bars (their open time is a
+ * session or UTC midnight, so it is read as a UTC date in every zone),
+ * otherwise date and time in `tz`.
+ */
+export function formatBarTime(ms: number, tz: string, interval: string | null): string {
+  return isDateBar(interval) ? new Date(ms).toISOString().slice(0, 10) : formatDateTime(ms, tz);
 }

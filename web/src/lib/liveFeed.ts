@@ -144,9 +144,10 @@ export interface LiveFeed {
    * Page back until the oldest loaded bar opens at or before `ts` (seconds).
    * "covered": it does. "end": the source has no older bars. "limit":
    * MAX_HISTORY_BARS are loaded. "error": a page failed (see the history
-   * status). "aborted": the chart was replaced meanwhile.
+   * status). "aborted": the chart was replaced meanwhile, or `isCurrent`
+   * (checked before each page) turned false.
    */
-  loadUntil: (ts: number) => Promise<LoadUntilResult>;
+  loadUntil: (ts: number, isCurrent?: () => boolean) => Promise<LoadUntilResult>;
   dispose: () => void;
 }
 
@@ -378,11 +379,11 @@ export function createLiveFeed(opts: LiveFeedOptions): LiveFeed {
       return true;
     },
 
-    async loadUntil(ts) {
+    async loadUntil(ts, isCurrent = () => true) {
       const my = gen;
       for (;;) {
         const first = series?.bars[0]?.t;
-        if (my !== gen || !series || first == null) return "aborted";
+        if (my !== gen || !isCurrent() || !series || first == null) return "aborted";
         if (first <= ts) return "covered";
         if (!series.has_more) return "end";
         if (series.bars.length >= MAX_HISTORY_BARS) return "limit";

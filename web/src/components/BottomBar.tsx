@@ -17,11 +17,19 @@ import {
 import type { Chart as KLineChart } from "klinecharts";
 
 import { centerOnTime, fitRange } from "../lib/chartNav";
+import { isTypingContext } from "../lib/keys";
 import type { LoadUntilResult } from "../lib/liveFeed";
-import { RANGES, RANGE_TIMEFRAME, rangeStart, type RangeId } from "../lib/range";
+import {
+  RANGES,
+  RANGE_TIMEFRAME,
+  barAlignedStart,
+  rangeStart,
+  type RangeId,
+} from "../lib/range";
 import type { Timeframe } from "../lib/timeframe";
 import {
   COMMON_TIME_ZONES,
+  isDateBar,
   formatClock,
   localTimeZone,
   offsetLabel,
@@ -51,7 +59,7 @@ export interface BottomBarProps {
   chart: KLineChart | null;
   series: SeriesPayload | null;
   /** Page history back to a time (liveFeed.loadUntil). */
-  loadUntil: (ts: number) => Promise<LoadUntilResult>;
+  loadUntil: (ts: number, isCurrent?: () => boolean) => Promise<LoadUntilResult>;
 }
 
 export function BottomBar(props: BottomBarProps): JSX.Element {
@@ -75,7 +83,15 @@ export function BottomBar(props: BottomBarProps): JSX.Element {
     };
     timer = setTimeout(tick, 1000 - (Date.now() % 1000));
     const onKey = (e: KeyboardEvent) => {
-      if (e.altKey && !e.ctrlKey && !e.metaKey && e.code === "KeyG") {
+      if (
+        e.altKey &&
+        !e.ctrlKey &&
+        !e.metaKey &&
+        e.code === "KeyG" &&
+        !e.repeat &&
+        props.series &&
+        !isTypingContext(e)
+      ) {
         e.preventDefault();
         setDialogOpen(true);
       }
@@ -94,10 +110,15 @@ export function BottomBar(props: BottomBarProps): JSX.Element {
     if (text !== null) noticeTimer = setTimeout(() => setNotice(null), NOTICE_MS);
   };
 
-  // A new interval's data arrives as a new series; resolve its waiter.
+  // A new interval's data arrives as a new series; resolve its waiter. It
+  // fails at once if the interval is changed again or the load failed
+  // (series cleared), so the buttons are not held for the whole timeout.
   createEffect(() => {
-    const interval = props.series?.interval;
-    if (waiting && interval === waiting.interval) waiting.done(true);
+    const series = props.series;
+    const current = timeframe();
+    if (!waiting) return;
+    if (series?.interval === waiting.interval) waiting.done(true);
+    else if (series === null || current !== waiting.interval) waiting.done(false);
   });
 
   const seriesFor = (interval: Timeframe) =>
@@ -132,34 +153,43 @@ export function BottomBar(props: BottomBarProps): JSX.Element {
       if (interval !== timeframe()) {
         setTimeframe(interval);
         if (!(await seriesFor(interval)) || !isCurrent()) {
-          if (isCurrent()) say("The new interval did not load");
+          if (isCurrent() && timeframe() === interval) say("The new interval did not load");
           return;
         }
       }
       const last = props.series?.bars.at(-1)?.t;
       if (last == null) return;
-      const start = rangeStart(range, last * 1000, tz());
-      const result = await props.loadUntil(start === null ? -Infinity : start / 1000);
+      const sym = symbol();
+      let start = rangeStart(range, last * 1000, tz());
+      // Daily and longer bars carry a date: keep the one that holds `start`.
+      if (start !== null && isDateBar(interval)) start = barAlignedStart(start, tz());
+      const result = await props.loadUntil(start === null ? -Infinity : start / 1000, isCurrent);
       await settled();
       const chart = props.chart;
       if (!isCurrent() || result === "aborted" || !chart) return;
+      if (symbol() !== sym || timeframe() !== interval) return;
       fitRange(chart, start);
       if (result === "limit") say("History limit reached");
     });
 
   const goToDate = (ms: number) =>
     navigate(async (isCurrent) => {
-      const result = await props.loadUntil(ms / 1000);
+      const sym = symbol();
+      const tf = timeframe();
+      const result = await props.loadUntil(ms / 1000, isCurrent);
       await settled();
       const chart = props.chart;
       if (!isCurrent() || result === "aborted" || !chart) return;
+      if (symbol() !== sym || timeframe() !== tf) return;
       const first = chart.getDataList()[0]?.timestamp;
       if (first === undefined) return;
       if (ms < first) {
         say(
-          result === "limit"
-            ? "History limit reached: showing the oldest loaded bar"
-            : "Date is before the start of history: showing the first bar",
+          result === "error"
+            ? "Could not load history: showing the oldest loaded bar"
+            : result === "limit"
+              ? "History limit reached: showing the oldest loaded bar"
+              : "Date is before the start of history: showing the first bar",
         );
       }
       centerOnTime(chart, Math.max(ms, first));

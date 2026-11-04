@@ -55,3 +55,13 @@ export function rangeStart(range: RangeId, endMs: number, tz: string): number | 
   const month = (back % 12) + 1;
   return zonedToUtc({ ...w, year, month, day: Math.min(w.day, daysIn(year, month)) }, tz);
 }
+
+/**
+ * `startMs` aligned for date bars (daily and longer): midnight UTC of the
+ * date `startMs` falls on in `tz`, so the bar holding that date is kept
+ * (a bar opens at UTC midnight, which is before a New York midnight).
+ */
+export function barAlignedStart(startMs: number, tz: string): number {
+  const w = wallClock(startMs, tz);
+  return Date.UTC(w.year, w.month - 1, w.day);
+}

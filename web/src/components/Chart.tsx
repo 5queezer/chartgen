@@ -76,7 +76,7 @@ import {
   pricePrecision,
   type BarLegend,
 } from "../lib/format";
-import { formatDateTime } from "../lib/timezone";
+import { formatBarTime } from "../lib/timezone";
 import {
   divlineSegments,
   fillColors,
@@ -879,7 +879,7 @@ export function Chart(props: ChartProps): JSX.Element {
       lines: [],
       legend:
         priceLegend && barTime != null
-          ? { ...priceLegend, time: formatDateTime(barTime * 1000, props.timeZone) }
+          ? { ...priceLegend, time: formatBarTime(barTime * 1000, props.timeZone, series.interval) }
           : (priceLegend ?? undefined),
       top: 4,
     });

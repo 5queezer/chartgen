@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { RANGES, RANGE_TIMEFRAME, rangeStart } from "./range";
+import { RANGES, RANGE_TIMEFRAME, barAlignedStart, rangeStart } from "./range";
 import { isTimeframe } from "./timeframe";
 
 const at = (y: number, mo: number, d: number, h = 0, mi = 0) =>
@@ -68,5 +68,17 @@ describe("rangeStart", () => {
 
   it("All has no start", () => {
     expect(rangeStart("All", end, "UTC")).toBeNull();
+  });
+});
+
+describe("barAlignedStart", () => {
+  it("keeps the daily bar of the start date west of UTC", () => {
+    // YTD in New York starts 2026-01-01 05:00 UTC; the 1 Jan bar opens 00:00 UTC.
+    const start = rangeStart("YTD", at(2026, 11, 5), "America/New_York")!;
+    expect(barAlignedStart(start, "America/New_York")).toBe(at(2026, 1, 1));
+  });
+  it("is the same date east of UTC", () => {
+    const start = rangeStart("YTD", at(2026, 11, 5), "Asia/Tokyo")!;
+    expect(barAlignedStart(start, "Asia/Tokyo")).toBe(at(2026, 1, 1));
   });
 });
