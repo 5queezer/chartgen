@@ -51,10 +51,10 @@ selected and dragged, which these shapes must not be. Rejected.
 Figures are drawn bar by bar, so a continuous polygon or a pane-anchored
 bar does not fit that model. Rejected.
 
-**`draw` callback on the generic chartgen indicator template.** Each
-indicator instance carries its payload entry as `extendData`. The
+**`draw` callback on the generic chartgen indicator template.** The
 template's `draw` callback runs on every frame with the live `xAxis`,
-`yAxis`, `visibleRange` and pane `bounding`. Chosen.
+`yAxis`, `visibleRange` and pane `bounding`, and reads the indicator's
+geometry from a store that `Chart.tsx` keeps. Chosen.
 
 ## Decision Outcome
 
@@ -71,13 +71,49 @@ module.**
     measured from the edge that `left` selects.
   - divline segments, culled when they fall outside the visible range.
 
-  Vitest covers the module (`npm test`).
-- `ensureRegistered` attaches `draw: drawGeometry(name)`. The callback
-  paints fills first, with `destination-over` so they sit behind grid and
-  candles like TradingView bands. It then paints hbars and divlines, and
-  returns `false` so klinecharts still draws the line and bar figures.
-- `createIndicator` / `overrideIndicator` pass the payload entry as
-  `extendData`, so each new payload replaces the geometry.
+  The visible range is klinecharts' own `VisibleRange`, which is already
+  clamped to the data. Vitest covers the module (`npm test`).
+- **Data space.** `seriesToKLines` drops bars with `t: null`, so a
+  payload index is not always a klinecharts data index.
+  `payloadToDataIndex` builds the remap, and `toDataSpace` compacts the
+  fill arrays and remaps divline endpoints once per payload. After that,
+  everything is drawn in data indices.
+- **Geometry store, not `extendData`.** The data effect writes each
+  indicator's data-space geometry into a module-level
+  `Map<regName, SeriesIndicator>` before `applyNewData`. The draw
+  callback reads it from there. `applyNewData` already recalculates and
+  repaints, so a new payload costs nothing extra. Passing the geometry
+  through `overrideIndicator({ extendData })` would re-run calc and layout
+  for every indicator on every payload, and live tail polling sends one
+  every few seconds.
+- **Paint order and z-order.** `ensureRegistered` attaches
+  `draw: drawGeometry(name)`. The callback paints fills first, with
+  `destination-over`, so they land behind the candles already on the pane
+  canvas, as TradingView bands do. The grid is painted afterwards, on top.
+  With `destination-over` each paint lands beneath the previous one, so
+  fills are iterated in reverse to keep the server's paint order. The
+  callback then paints hbars and divlines and returns `false`, so
+  klinecharts still draws the line and bar figures.
+
+  **Dependency:** this relies on nothing opaque being painted on the pane
+  canvas before the indicator's `draw`. klinecharts 9 paints no canvas
+  background, and the chart background comes from CSS. If a future change
+  (a klinecharts upgrade or a background style) paints one, every fill
+  would silently disappear beneath it.
+  `web/tests/e2e/overlay-geometry.spec.ts` guards this. It loads
+  Bollinger Bands and asserts that band-fill pixels are present on the
+  canvas and differ from the page background. With an opaque layer
+  injected, the test fails.
+- **Y-axis.** klinecharts auto-scales over figure values only. Two
+  typeless figures (`range_lo`, `range_hi`) draw nothing, but carry
+  `valueExtents` into the scale: the min and max of every fill edge per
+  bar, plus the payload's `y_range` for oscillator panes. That keeps
+  Kalman OB/OS zones and RSI 0–100 on-pane and gives geometry-only panes
+  a real axis. Like klinecharts' `minValue`/`maxValue`, `y_range` widens
+  the range and does not clamp it. We did not use those two fields:
+  klinecharts ignores them when no figure has a value, and its
+  `overrideIndicator` path writes `maxValue` through `setMinValue`.
+  Overlays ignore `y_range`, so the price axis is never pinned.
 - An indicator that emits only geometry (e.g. `volume_profile`) is no
   longer skipped by the "no lines, no histogram" check.
 - **Colors.** The wire drops server-side colors (ADR-0007), so the
@@ -102,10 +138,9 @@ with zoom-out. The client-side palette can drift from the Rust colors.
 The VPVR `split_up_down` mode cannot be colored up/down, because an
 up-only row and a down-only row look identical on the wire.
 
-**Neutral.** The geometry assumes payload bar index == klinecharts data
-index. That holds whenever bars carry timestamps, which every live
-source does. `seriesToKLines` only drops bars with `t: null` (synthetic
-sample data).
+**Neutral.** The geometry store is module-level, like klinecharts' own
+indicator registry. That is fine while the app mounts a single `Chart`,
+but a second chart instance would need the store keyed per chart.
 
 ## More Information
 

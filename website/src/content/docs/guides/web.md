@@ -150,9 +150,12 @@ domain) leave `VITE_CHARTGEN_BASE_URL` unset — the app will hit
   ([ADR-0007](/chartgen/decisions/0007-complete-series-serialization/))
   render in the chart and follow pan, zoom and rescale:
   - *fills* — semi-transparent bands between two series (Bollinger,
-    Keltner, Donchian, Stochastic, Cipher B / WaveTrend). The band breaks
-    where either series is `null`. The Ichimoku cloud switches between
-    green and red where Senkou A and Senkou B cross.
+    Keltner, Donchian, Stochastic, Cipher B / WaveTrend, the Kalman
+    Volume Filter bands and OB/OS zones). The band breaks where either
+    series is `null`. The Ichimoku cloud switches between green and red
+    where Senkou A and Senkou B cross. Oscillator panes always include
+    the indicator's `y_range` (e.g. RSI 0–100) and every fill edge, so
+    zones at the pane edge stay visible.
   - *hbars* — volume-profile rows (`volume_profile`, `tpo`), anchored
     to the left or right pane edge as the payload's `left` flag says,
     with width proportional to volume. The widest row (the POC) is gold,
