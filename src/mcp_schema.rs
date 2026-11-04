@@ -148,7 +148,7 @@ pub fn tools_list_result() -> Value {
                             "type": "array",
                             "items": { "type": "string" },
                             "maxItems": 50,
-                            "description": "Ticker symbols (e.g. [\"BTCUSDT\", \"AAPL\", \"^GSPC\"]). Trimmed, uppercased and deduplicated; at most 50 distinct symbols."
+                            "description": "Ticker symbols (e.g. [\"BTCUSDT\", \"AAPL\", \"^GSPC\"]). At most 50 entries; trimmed, uppercased and deduplicated."
                         }
                     },
                     "required": ["symbols"]

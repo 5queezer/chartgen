@@ -114,7 +114,7 @@ export interface GetPositionsInput {}
 
 export interface GetQuotesInput {
   /**
-   * Ticker symbols (e.g. ["BTCUSDT", "AAPL", "^GSPC"]). Trimmed, uppercased and deduplicated; at most 50 distinct symbols.
+   * Ticker symbols (e.g. ["BTCUSDT", "AAPL", "^GSPC"]). At most 50 entries; trimmed, uppercased and deduplicated.
    *
    * @maxItems 50
    */

@@ -1,5 +1,7 @@
 use crate::data::{self, Bar, OhlcvData};
-use std::sync::OnceLock;
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 /// Binance klines REST caps `limit` at 1000 per request.
@@ -263,7 +265,7 @@ pub fn fetch_yahoo(
         };
     }
 
-    let url = yahoo_chart_url(symbol, &window);
+    let url = yahoo_chart_url(symbol, &window)?;
 
     let resp = http()
         .get(&url)
@@ -551,11 +553,37 @@ fn yahoo_window(
     }
 }
 
-fn yahoo_chart_url(symbol: &str, w: &YahooWindow) -> String {
-    format!(
+/// `symbol` as exactly one URL path segment: everything but RFC 3986
+/// unreserved characters is percent-encoded, so `/`, `?` or `#` cannot
+/// change the request path. Dot-only input is rejected because URL
+/// parsers resolve `.`/`..` (even as `%2E`) as relative segments.
+fn path_segment(symbol: &str) -> Result<String, String> {
+    if symbol.chars().all(|c| c == '.') {
+        return Err(format!("Invalid symbol: {symbol:?}"));
+    }
+    Ok(percent_encode(symbol))
+}
+
+/// Percent-encode every byte except RFC 3986 unreserved characters.
+fn percent_encode(s: &str) -> String {
+    s.bytes()
+        .map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                (b as char).to_string()
+            }
+            _ => format!("%{b:02X}"),
+        })
+        .collect()
+}
+
+fn yahoo_chart_url(symbol: &str, w: &YahooWindow) -> Result<String, String> {
+    Ok(format!(
         "https://query1.finance.yahoo.com/v8/finance/chart/{}?interval={}&period1={}&period2={}",
-        symbol, w.api_interval, w.period1, w.period2
-    )
+        path_segment(symbol)?,
+        w.api_interval,
+        w.period1,
+        w.period2
+    ))
 }
 
 pub fn detect_source(symbol: &str) -> &'static str {
@@ -632,8 +660,12 @@ fn merge_bars(chunk: &[Bar]) -> Bar {
 // Quotes (watchlist): last price and change for many symbols at once.
 // ---------------------------------------------------------------------------
 
-/// Concurrent upstream requests per `get_quotes` call.
+/// Concurrent upstream requests per upstream per `get_quotes` call.
 const QUOTE_CONCURRENCY: usize = 8;
+/// How long a fetched quote (or per-symbol error) is served from the cache.
+const QUOTE_TTL_MS: i64 = 3_000;
+/// How long a symbol Binance rejected as unknown stays out of batches.
+const BAD_SYMBOL_TTL_MS: i64 = 300_000;
 
 /// Last price of one symbol and the reference it changed from. Yahoo and
 /// sample: `prev_close` is the previous daily close (TradingView's
@@ -657,25 +689,13 @@ pub fn fetch_quotes(source: DataSource, symbols: &[String]) -> Vec<Result<Quote,
             let now = now_ms();
             symbols.iter().map(|s| sample_quote(s, now)).collect()
         }
-        DataSource::Live => {
-            let (binance, yahoo): (Vec<usize>, Vec<usize>) =
-                (0..symbols.len()).partition(|&i| detect_source(&symbols[i]) == "binance");
-            let pick =
-                |idx: &[usize]| -> Vec<&str> { idx.iter().map(|&i| symbols[i].as_str()).collect() };
-            let mut out = vec![Err(String::new()); symbols.len()];
-            let fetched = fetch_binance_quotes(&pick(&binance))
-                .into_iter()
-                .zip(&binance)
-                .chain(
-                    par_map(&pick(&yahoo), fetch_yahoo_quote)
-                        .into_iter()
-                        .zip(&yahoo),
-                );
-            for (quote, &i) in fetched {
-                out[i] = quote;
-            }
-            out
-        }
+        DataSource::Live => cached_quotes(
+            quote_cache(),
+            symbols,
+            now_ms(),
+            |syms| fetch_binance_quotes(syms, binance_get),
+            fetch_yahoo_quote,
+        ),
         #[cfg(test)]
         DataSource::Unavailable => symbols
             .iter()
@@ -684,24 +704,119 @@ pub fn fetch_quotes(source: DataSource, symbols: &[String]) -> Vec<Result<Quote,
     }
 }
 
-/// `f` over `items` with at most `QUOTE_CONCURRENCY` in flight; results
-/// keep input order.
+/// Live quotes shared by every client: recent results per symbol, and
+/// symbols Binance rejected as unknown. Both keyed by symbol and stamped
+/// with the ms time they were stored.
+#[derive(Default)]
+struct QuoteCache {
+    quotes: HashMap<String, (i64, Result<Quote, String>)>,
+    bad: HashMap<String, (i64, String)>,
+}
+
+fn quote_cache() -> &'static Mutex<QuoteCache> {
+    static CACHE: OnceLock<Mutex<QuoteCache>> = OnceLock::new();
+    CACHE.get_or_init(Mutex::default)
+}
+
+/// A Binance per-symbol failure; the flag marks a symbol Binance rejected
+/// as unknown or malformed.
+type BinanceQuote = Result<Quote, (bool, String)>;
+
+/// Serve `symbols` from `cache` when fresh at `now` (ms), fetch the rest —
+/// Binance and Yahoo concurrently — and store the results. Symbols Binance
+/// rejected as unknown are answered from memory for `BAD_SYMBOL_TTL_MS`
+/// instead of breaking every batch. Clock and upstreams are injected so
+/// tests run offline.
+fn cached_quotes<B, Y>(
+    cache: &Mutex<QuoteCache>,
+    symbols: &[String],
+    now: i64,
+    binance: B,
+    yahoo: Y,
+) -> Vec<Result<Quote, String>>
+where
+    B: FnOnce(&[&str]) -> Vec<BinanceQuote> + Send,
+    Y: Fn(&str) -> Result<Quote, String> + Sync,
+{
+    let mut out: Vec<Option<Result<Quote, String>>> = vec![None; symbols.len()];
+    let (mut need_binance, mut need_yahoo) = (Vec::new(), Vec::new());
+    {
+        let mut c = cache.lock().unwrap_or_else(|e| e.into_inner());
+        c.quotes.retain(|_, (t, _)| now - *t < QUOTE_TTL_MS);
+        c.bad.retain(|_, (t, _)| now - *t < BAD_SYMBOL_TTL_MS);
+        for (i, s) in symbols.iter().enumerate() {
+            if let Some((_, q)) = c.quotes.get(s) {
+                out[i] = Some(q.clone());
+            } else if let Some((_, e)) = c.bad.get(s) {
+                out[i] = Some(Err(e.clone()));
+            } else if detect_source(s) == "binance" {
+                need_binance.push(i);
+            } else {
+                need_yahoo.push(i);
+            }
+        }
+    }
+
+    let pick = |idx: &[usize]| -> Vec<&str> { idx.iter().map(|&i| symbols[i].as_str()).collect() };
+    let (binance_syms, yahoo_syms) = (pick(&need_binance), pick(&need_yahoo));
+    let (from_binance, from_yahoo) = std::thread::scope(|s| {
+        let b = s.spawn(|| {
+            if binance_syms.is_empty() {
+                Vec::new()
+            } else {
+                binance(&binance_syms)
+            }
+        });
+        let y = par_map(&yahoo_syms, &yahoo);
+        (b.join().expect("binance quote worker panicked"), y)
+    });
+
+    let mut c = cache.lock().unwrap_or_else(|e| e.into_inner());
+    let binance_results = need_binance.iter().zip(from_binance).map(|(&i, r)| {
+        let r = r.map_err(|(unknown, e)| {
+            if unknown {
+                c.bad.insert(symbols[i].clone(), (now, e.clone()));
+            }
+            e
+        });
+        (i, r)
+    });
+    let results: Vec<_> = binance_results
+        .chain(need_yahoo.iter().copied().zip(from_yahoo))
+        .collect();
+    for (i, r) in results {
+        c.quotes.insert(symbols[i].clone(), (now, r.clone()));
+        out[i] = Some(r);
+    }
+    out.into_iter()
+        .map(|r| r.unwrap_or_else(|| Err("quote missing".into())))
+        .collect()
+}
+
+/// `f` over `items` on a work queue of at most `QUOTE_CONCURRENCY`
+/// workers; results keep input order.
 fn par_map<T, F>(items: &[&str], f: F) -> Vec<T>
 where
     T: Send,
     F: Fn(&str) -> T + Sync,
 {
-    items
-        .chunks(QUOTE_CONCURRENCY)
-        .flat_map(|chunk| {
-            std::thread::scope(|s| {
-                let handles: Vec<_> = chunk.iter().map(|it| s.spawn(|| f(it))).collect();
-                handles
-                    .into_iter()
-                    .map(|h| h.join().expect("quote worker panicked"))
-                    .collect::<Vec<T>>()
-            })
-        })
+    let next = AtomicUsize::new(0);
+    let results: Mutex<Vec<Option<T>>> = Mutex::new(items.iter().map(|_| None).collect());
+    std::thread::scope(|s| {
+        for _ in 0..QUOTE_CONCURRENCY.min(items.len()) {
+            s.spawn(|| loop {
+                let i = next.fetch_add(1, Ordering::Relaxed);
+                let Some(item) = items.get(i) else { break };
+                let r = f(item);
+                results.lock().unwrap_or_else(|e| e.into_inner())[i] = Some(r);
+            });
+        }
+    });
+    results
+        .into_inner()
+        .unwrap_or_else(|e| e.into_inner())
+        .into_iter()
+        .map(|r| r.expect("every queued item is processed"))
         .collect()
 }
 
@@ -725,42 +840,59 @@ fn sample_quote(symbol: &str, now_ms: i64) -> Result<Quote, String> {
 fn binance_ticker_url(symbols: &[&str]) -> String {
     let list = symbols
         .iter()
-        .map(|s| format!("%22{s}%22"))
+        .map(|s| format!("%22{}%22", percent_encode(s)))
         .collect::<Vec<_>>()
         .join(",");
     format!("https://api.binance.com/api/v3/ticker/24hr?symbols=%5B{list}%5D")
 }
 
-/// One batched 24 h ticker request for all symbols. Binance rejects the
-/// whole batch when any symbol is unknown, so a rejected batch is retried
-/// per symbol to isolate the bad one.
-fn fetch_binance_quotes(symbols: &[&str]) -> Vec<Result<Quote, String>> {
-    if symbols.is_empty() {
-        return Vec::new();
-    }
-    match binance_get(&binance_ticker_url(symbols)) {
-        Ok(body) => parse_binance_tickers(&body, symbols),
+/// One batched 24 h ticker request for all symbols via `get`. Binance
+/// rejects the whole batch when any symbol is unknown; only then is the
+/// batch retried per symbol to isolate the bad one. Other failures (rate
+/// limits 429/418, outages) fail every symbol without fanning out.
+fn fetch_binance_quotes<G>(symbols: &[&str], get: G) -> Vec<BinanceQuote>
+where
+    G: Fn(&str) -> Result<serde_json::Value, (bool, String)> + Sync,
+{
+    let parse = |body: &serde_json::Value, syms: &[&str]| -> Vec<BinanceQuote> {
+        parse_binance_tickers(body, syms)
+            .into_iter()
+            .map(|r| r.map_err(|e| (false, e)))
+            .collect()
+    };
+    match get(&binance_ticker_url(symbols)) {
+        Ok(body) => parse(&body, symbols),
         Err((true, _)) if symbols.len() > 1 => par_map(symbols, |s| {
-            binance_get(&binance_ticker_url(&[s]))
-                .map_err(|(_, e)| e)
-                .and_then(|body| parse_binance_tickers(&body, &[s]).remove(0))
+            get(&binance_ticker_url(&[s])).and_then(|body| parse(&body, &[s]).remove(0))
         }),
-        Err((_, e)) => symbols.iter().map(|_| Err(e.clone())).collect(),
+        Err(e) => symbols.iter().map(|_| Err(e.clone())).collect(),
     }
 }
 
+/// True when a Binance error response means the request named an unknown
+/// (-1121 Invalid symbol) or malformed (-1100 Illegal characters) symbol.
+fn binance_unknown_symbol(status: u16, body: &serde_json::Value) -> bool {
+    status == 400
+        && matches!(
+            body.get("code").and_then(|c| c.as_i64()),
+            Some(-1121 | -1100)
+        )
+}
+
 /// GET a Binance JSON endpoint. On failure the flag is true when Binance
-/// rejected the request (4xx, e.g. an unknown symbol) rather than being
-/// unreachable.
+/// rejected a symbol as unknown (see `binance_unknown_symbol`).
 fn binance_get(url: &str) -> Result<serde_json::Value, (bool, String)> {
     let resp = http()
         .get(url)
         .send()
         .map_err(|e| (false, format!("Binance request failed: {e}")))?;
     let status = resp.status();
-    let body: serde_json::Value = resp
-        .json()
-        .map_err(|e| (false, format!("Failed to parse Binance response: {e}")))?;
+    let body: serde_json::Value = resp.json().map_err(|e| {
+        (
+            false,
+            format!("Failed to parse Binance response ({status}): {e}"),
+        )
+    })?;
     if status.is_success() {
         return Ok(body);
     }
@@ -768,7 +900,7 @@ fn binance_get(url: &str) -> Result<serde_json::Value, (bool, String)> {
         || format!("Binance API returned status {status}"),
         |m| format!("Binance: {m}"),
     );
-    Err((status.is_client_error(), msg))
+    Err((binance_unknown_symbol(status.as_u16(), &body), msg))
 }
 
 /// Match a `/ticker/24hr?symbols=` array to `symbols` (in order). Pure, so
@@ -806,13 +938,16 @@ fn parse_binance_tickers(body: &serde_json::Value, symbols: &[&str]) -> Vec<Resu
         .collect()
 }
 
-fn yahoo_quote_url(symbol: &str) -> String {
-    format!("https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?range=1d&interval=1d")
+fn yahoo_quote_url(symbol: &str) -> Result<String, String> {
+    Ok(format!(
+        "https://query1.finance.yahoo.com/v8/finance/chart/{}?range=1d&interval=1d",
+        path_segment(symbol)?
+    ))
 }
 
 fn fetch_yahoo_quote(symbol: &str) -> Result<Quote, String> {
     let resp = http()
-        .get(yahoo_quote_url(symbol))
+        .get(yahoo_quote_url(symbol)?)
         .header("User-Agent", "Mozilla/5.0")
         .send()
         .map_err(|e| format!("Yahoo request failed: {e}"))?;
@@ -1026,7 +1161,7 @@ mod tests {
         let w = yahoo_window("1h", 100, Some((now - 800 * DAY) * 1000), now);
         assert!(w.period1 >= w.period2);
         assert_eq!(
-            yahoo_chart_url("AAPL", &yahoo_window("1d", 200, None, now)),
+            yahoo_chart_url("AAPL", &yahoo_window("1d", 200, None, now)).unwrap(),
             format!(
                 "https://query1.finance.yahoo.com/v8/finance/chart/AAPL?interval=1d&period1={}&period2={}",
                 now - 400 * DAY,
@@ -1354,10 +1489,218 @@ mod tests {
     }
 
     #[test]
-    fn par_map_preserves_order_across_chunks() {
-        let items: Vec<String> = (0..20).map(|i| i.to_string()).collect();
+    fn par_map_preserves_order_with_bounded_workers() {
+        let items: Vec<String> = (0..40).map(|i| i.to_string()).collect();
         let refs: Vec<&str> = items.iter().map(String::as_str).collect();
-        let out = par_map(&refs, |s| s.parse::<usize>().unwrap());
-        assert_eq!(out, (0..20).collect::<Vec<_>>());
+        let (running, peak) = (AtomicUsize::new(0), AtomicUsize::new(0));
+        let out = par_map(&refs, |s| {
+            let now = running.fetch_add(1, Ordering::SeqCst) + 1;
+            peak.fetch_max(now, Ordering::SeqCst);
+            std::thread::sleep(Duration::from_millis(2));
+            running.fetch_sub(1, Ordering::SeqCst);
+            s.parse::<usize>().unwrap()
+        });
+        assert_eq!(out, (0..40).collect::<Vec<_>>());
+        assert!(peak.load(Ordering::SeqCst) <= QUOTE_CONCURRENCY);
+        assert!(par_map(&[], |s| s.len()).is_empty());
+    }
+
+    // --- Quote cache, bad-symbol memory, Binance fan-out ---
+
+    fn q(last: f64) -> Quote {
+        Quote {
+            last,
+            prev_close: 1.0,
+            high: None,
+            low: None,
+            volume: None,
+            source: "binance",
+        }
+    }
+
+    fn syms(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// Fake upstreams that count calls and record which Binance symbols were
+    /// requested. NOPEUSDT is unknown to "Binance"; quotes carry `now` so a
+    /// refetch is visible.
+    struct Fakes {
+        binance_calls: Mutex<Vec<Vec<String>>>,
+        yahoo_calls: AtomicUsize,
+    }
+
+    impl Fakes {
+        fn new() -> Self {
+            Fakes {
+                binance_calls: Mutex::new(Vec::new()),
+                yahoo_calls: AtomicUsize::new(0),
+            }
+        }
+
+        fn run(
+            &self,
+            cache: &Mutex<QuoteCache>,
+            symbols: &[String],
+            now: i64,
+        ) -> Vec<Result<Quote, String>> {
+            cached_quotes(
+                cache,
+                symbols,
+                now,
+                |s: &[&str]| {
+                    self.binance_calls
+                        .lock()
+                        .unwrap()
+                        .push(s.iter().map(|x| x.to_string()).collect());
+                    s.iter()
+                        .map(|x| match *x {
+                            "NOPEUSDT" => Err((true, "Binance: Invalid symbol.".to_string())),
+                            _ => Ok(q(now as f64)),
+                        })
+                        .collect()
+                },
+                |_| {
+                    self.yahoo_calls.fetch_add(1, Ordering::SeqCst);
+                    Ok(q(now as f64))
+                },
+            )
+        }
+    }
+
+    #[test]
+    fn quote_cache_serves_fresh_results_and_refetches_after_ttl() {
+        let cache = Mutex::new(QuoteCache::default());
+        let f = Fakes::new();
+        let s = syms(&["BTCUSDT", "AAPL"]);
+        let t0 = 1_000_000;
+
+        let first = f.run(&cache, &s, t0);
+        assert_eq!(first[0].as_ref().unwrap().last, t0 as f64);
+        assert_eq!(first[1].as_ref().unwrap().last, t0 as f64);
+        assert_eq!(f.binance_calls.lock().unwrap().len(), 1);
+        assert_eq!(f.yahoo_calls.load(Ordering::SeqCst), 1);
+
+        // Within the TTL: no upstream calls, same values.
+        assert_eq!(f.run(&cache, &s, t0 + QUOTE_TTL_MS - 1), first);
+        assert_eq!(f.binance_calls.lock().unwrap().len(), 1);
+        assert_eq!(f.yahoo_calls.load(Ordering::SeqCst), 1);
+
+        // At the TTL: refetched.
+        let later = f.run(&cache, &s, t0 + QUOTE_TTL_MS);
+        assert_eq!(later[0].as_ref().unwrap().last, (t0 + QUOTE_TTL_MS) as f64);
+        assert_eq!(f.binance_calls.lock().unwrap().len(), 2);
+        assert_eq!(f.yahoo_calls.load(Ordering::SeqCst), 2);
+
+        // A cached symbol mixed with a new one only fetches the new one.
+        f.run(
+            &cache,
+            &syms(&["BTCUSDT", "ETHUSDT"]),
+            t0 + QUOTE_TTL_MS + 1,
+        );
+        assert_eq!(f.binance_calls.lock().unwrap()[2], vec!["ETHUSDT"]);
+    }
+
+    #[test]
+    fn unknown_binance_symbol_is_remembered_and_kept_out_of_batches() {
+        let cache = Mutex::new(QuoteCache::default());
+        let f = Fakes::new();
+        let s = syms(&["BTCUSDT", "NOPEUSDT"]);
+        let t0 = 5_000_000;
+
+        let r = f.run(&cache, &s, t0);
+        assert!(r[0].is_ok());
+        assert_eq!(r[1].as_ref().unwrap_err(), "Binance: Invalid symbol.");
+
+        // Quotes expired, bad-symbol memory not: only BTCUSDT is requested.
+        let r = f.run(&cache, &s, t0 + 60_000);
+        assert_eq!(f.binance_calls.lock().unwrap()[1], vec!["BTCUSDT"]);
+        assert_eq!(r[1].as_ref().unwrap_err(), "Binance: Invalid symbol.");
+
+        // After the memory expires the symbol is tried again.
+        f.run(&cache, &s, t0 + BAD_SYMBOL_TTL_MS);
+        assert_eq!(
+            f.binance_calls.lock().unwrap()[2],
+            vec!["BTCUSDT", "NOPEUSDT"]
+        );
+    }
+
+    #[test]
+    fn binance_unknown_symbol_only_for_400_with_symbol_codes() {
+        let code = |c: i64| serde_json::json!({ "code": c, "msg": "x" });
+        assert!(binance_unknown_symbol(400, &code(-1121)));
+        assert!(binance_unknown_symbol(400, &code(-1100)));
+        assert!(!binance_unknown_symbol(400, &code(-1102)));
+        assert!(!binance_unknown_symbol(429, &code(-1003)));
+        assert!(!binance_unknown_symbol(418, &code(-1003)));
+        assert!(!binance_unknown_symbol(400, &serde_json::json!({})));
+    }
+
+    #[test]
+    fn binance_fans_out_per_symbol_only_when_a_symbol_is_unknown() {
+        let body: serde_json::Value = serde_json::from_str(BINANCE_TICKERS).unwrap();
+        let entry = |sym: &str| {
+            serde_json::Value::Array(
+                body.as_array()
+                    .unwrap()
+                    .iter()
+                    .filter(|e| e["symbol"] == sym)
+                    .cloned()
+                    .collect(),
+            )
+        };
+
+        // Rate-limited batch: one request, every symbol fails, no fan-out.
+        let calls = AtomicUsize::new(0);
+        let r = fetch_binance_quotes(&["BTCUSDT", "ETHUSDT"], |_| {
+            calls.fetch_add(1, Ordering::SeqCst);
+            Err((false, "Binance API returned status 429".into()))
+        });
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(r.iter().all(|x| matches!(x, Err((false, _)))));
+
+        // Unknown symbol in the batch: retried per symbol.
+        let calls = AtomicUsize::new(0);
+        let r = fetch_binance_quotes(&["BTCUSDT", "NOPEUSDT"], |url| {
+            calls.fetch_add(1, Ordering::SeqCst);
+            if url.contains("NOPEUSDT") {
+                Err((true, "Binance: Invalid symbol.".into()))
+            } else {
+                Ok(entry("BTCUSDT"))
+            }
+        });
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+        assert_eq!(r[0].as_ref().unwrap().last, 80689.85);
+        assert!(matches!(&r[1], Err((true, _))));
+    }
+
+    #[test]
+    fn symbols_become_one_encoded_path_segment() {
+        assert_eq!(
+            yahoo_quote_url("AAPL").unwrap(),
+            "https://query1.finance.yahoo.com/v8/finance/chart/AAPL?range=1d&interval=1d"
+        );
+        assert!(yahoo_quote_url("^GSPC")
+            .unwrap()
+            .contains("/chart/%5EGSPC?"));
+        assert!(yahoo_quote_url("EURUSD=X")
+            .unwrap()
+            .contains("/chart/EURUSD%3DX?"));
+        // Slashes and query characters cannot leave the segment.
+        assert!(yahoo_quote_url("../../X")
+            .unwrap()
+            .contains("/chart/..%2F..%2FX?"));
+        assert!(yahoo_quote_url("A?b#c")
+            .unwrap()
+            .contains("/chart/A%3Fb%23c?"));
+        for dots in ["", ".", ".."] {
+            assert!(yahoo_quote_url(dots).is_err(), "{dots:?}");
+        }
+        let w = yahoo_window("1d", 10, None, 1_750_000_000);
+        assert!(yahoo_chart_url("../v7/x", &w)
+            .unwrap()
+            .contains("/chart/..%2Fv7%2Fx?"));
+        assert!(yahoo_chart_url("..", &w).is_err());
+        assert!(binance_ticker_url(&["A\"B"]).contains("%22A%22B%22"));
     }
 }

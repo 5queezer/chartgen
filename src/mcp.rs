@@ -1001,16 +1001,18 @@ fn tool_get_indicators(
 // get_quotes (watchlist, ADR-0011)
 // ---------------------------------------------------------------------------
 
-/// Most distinct symbols one `get_quotes` call accepts.
+/// Most symbols one `get_quotes` call accepts (the schema's `maxItems`).
 const MAX_QUOTE_SYMBOLS: usize = 50;
 
 /// Trim + uppercase a ticker; `None` unless it is 1–32 characters of
-/// `A-Z 0-9 . ^ = - _ /` (the web client's `normalizeSymbol` rules).
+/// `A-Z 0-9 . ^ = - _` (the web client's `normalizeSymbol` rules) with at
+/// least one letter or digit, so it can never be a `.`/`..` path segment.
 fn normalize_quote_symbol(raw: &str) -> Option<String> {
     let s = raw.trim().to_uppercase();
     let ok = (1..=32).contains(&s.len())
+        && s.chars().any(|c| c.is_ascii_alphanumeric())
         && s.chars()
-            .all(|c| c.is_ascii_alphanumeric() || ".^=-_/".contains(c));
+            .all(|c| c.is_ascii_alphanumeric() || ".^=-_".contains(c));
     ok.then_some(s)
 }
 
@@ -1022,6 +1024,9 @@ fn get_quotes(id: Option<Value>, args: &Value, source: fetch::DataSource) -> Val
     let Some(raw) = args.get("symbols").and_then(|v| v.as_array()) else {
         return tool_err(id, "symbols is required and must be an array of strings");
     };
+    if raw.len() > MAX_QUOTE_SYMBOLS {
+        return tool_err(id, &format!("At most {MAX_QUOTE_SYMBOLS} symbols per call"));
+    }
     let mut seen = HashSet::new();
     let mut valid = Vec::new();
     // Requested order after dedupe; `Err` holds the rejected input.
@@ -1038,12 +1043,6 @@ fn get_quotes(id: Option<Value>, args: &Value, source: fetch::DataSource) -> Val
             Some(_) => {}
             None => order.push(Err(text.to_string())),
         }
-    }
-    if order.len() > MAX_QUOTE_SYMBOLS {
-        return tool_err(
-            id,
-            &format!("At most {MAX_QUOTE_SYMBOLS} distinct symbols per call"),
-        );
     }
 
     // One result per valid symbol, in the same order as the `Ok` entries.
@@ -3017,6 +3016,18 @@ mod tests {
         assert_eq!(q[1]["error"], "invalid symbol");
         assert_eq!(q[2]["error"], "invalid symbol");
 
+        // No path separators, and never a dot-only (`.`/`..`) segment.
+        let q = quotes(
+            json!({ "symbols": ["../../X", "A/B", "..", "BRK.B", "^GSPC", "EURUSD=X"] }),
+            fetch::DataSource::Sample,
+        );
+        for bad in &q[..3] {
+            assert_eq!(bad["error"], "invalid symbol", "{bad}");
+        }
+        for good in &q[3..] {
+            assert!(good["last"].is_f64(), "{good}");
+        }
+
         let q = quotes(
             json!({ "symbols": ["BTCUSDT", "AAPL"] }),
             fetch::DataSource::Unavailable,
@@ -3044,10 +3055,21 @@ mod tests {
             fetch::DataSource::Sample,
         );
         assert!(is_error(&resp));
-        // Duplicates do not count towards the cap.
-        let dupes: Vec<&str> = std::iter::repeat_n("BTCUSDT", 60).collect();
+        assert!(response_text(&resp).contains("At most 50"));
+        // The cap applies to the raw array, before any entry is processed:
+        // an oversized array is rejected even if it is all duplicates or
+        // holds a non-string entry past the limit.
+        let mut dupes: Vec<Value> = std::iter::repeat_n(json!("BTCUSDT"), 60).collect();
+        dupes.push(json!(1));
+        let resp = get_quotes(
+            Some(json!(1)),
+            &json!({ "symbols": dupes }),
+            fetch::DataSource::Sample,
+        );
+        assert!(response_text(&resp).contains("At most 50"));
+        let fifty: Vec<&str> = std::iter::repeat_n("BTCUSDT", 50).collect();
         assert_eq!(
-            quotes(json!({ "symbols": dupes }), fetch::DataSource::Sample).len(),
+            quotes(json!({ "symbols": fifty }), fetch::DataSource::Sample).len(),
             1
         );
         assert!(quotes(json!({ "symbols": [] }), fetch::DataSource::Sample).is_empty());
