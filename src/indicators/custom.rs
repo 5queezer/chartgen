@@ -202,59 +202,57 @@ impl Indicator for Supertrend {
         // ta.supertrend: ATR is ta.atr (RMA of the true range).
         let atr_vals = super::pine::atr(data, self.period);
 
+        // Verbatim port of TradingView's `ta.supertrend` reference code; the
+        // bands use nz() of the previous bar (0 before the first value).
+        let b = &data.bars;
+        let nz = |v: f64| if v.is_nan() { 0.0 } else { v };
         let mut final_upper = vec![f64::NAN; n];
         let mut final_lower = vec![f64::NAN; n];
-        // true = UP, false = DOWN
-        let mut trend = vec![true; n];
+        // true = UP (direction -1), false = DOWN (direction 1)
+        let mut trend = vec![false; n];
         let mut st_val = vec![f64::NAN; n];
 
         for i in 0..n {
-            if atr_vals[i].is_nan() {
+            let hl2 = (b[i].high + b[i].low) / 2.0;
+            let mut upper = hl2 + self.multiplier * atr_vals[i];
+            let mut lower = hl2 - self.multiplier * atr_vals[i];
+            let (prev_upper, prev_lower, prev_st, prev_close, prev_atr) = if i == 0 {
+                (0.0, 0.0, f64::NAN, f64::NAN, f64::NAN)
+            } else {
+                (
+                    nz(final_upper[i - 1]),
+                    nz(final_lower[i - 1]),
+                    st_val[i - 1],
+                    b[i - 1].close,
+                    atr_vals[i - 1],
+                )
+            };
+            // Comparisons with NaN are false, as with Pine's na.
+            if !(lower > prev_lower || prev_close < prev_lower) {
+                lower = prev_lower;
+            }
+            if !(upper < prev_upper || prev_close > prev_upper) {
+                upper = prev_upper;
+            }
+            final_upper[i] = upper;
+            final_lower[i] = lower;
+
+            let close = b[i].close;
+            trend[i] = if prev_atr.is_nan() {
+                false
+            } else if prev_st == prev_upper {
+                close > upper
+            } else {
+                close >= lower
+            };
+            st_val[i] = if trend[i] { lower } else { upper };
+
+            // Not drawn while the ATR warms up, nor on bar 0, where the
+            // missing close[1] makes Pine's nz() band 0.
+            if atr_vals[i].is_nan() || i == 0 {
                 continue;
             }
-
-            let hl2 = (data.bars[i].high + data.bars[i].low) / 2.0;
-            let basic_upper = hl2 + self.multiplier * atr_vals[i];
-            let basic_lower = hl2 - self.multiplier * atr_vals[i];
-
-            if i == 0 || final_upper[i - 1].is_nan() {
-                final_upper[i] = basic_upper;
-                final_lower[i] = basic_lower;
-                // ta.supertrend: direction is 1 (down) while atr[1] is na.
-                trend[i] = false;
-            } else {
-                let prev_close = data.bars[i - 1].close;
-
-                final_upper[i] =
-                    if basic_upper < final_upper[i - 1] || prev_close > final_upper[i - 1] {
-                        basic_upper
-                    } else {
-                        final_upper[i - 1]
-                    };
-
-                final_lower[i] =
-                    if basic_lower > final_lower[i - 1] || prev_close < final_lower[i - 1] {
-                        basic_lower
-                    } else {
-                        final_lower[i - 1]
-                    };
-
-                let close = data.bars[i].close;
-                if close > final_upper[i] {
-                    trend[i] = true;
-                } else if close < final_lower[i] {
-                    trend[i] = false;
-                } else {
-                    trend[i] = trend[i - 1];
-                }
-            }
-
-            let val = if trend[i] {
-                final_lower[i]
-            } else {
-                final_upper[i]
-            };
-            st_val[i] = val;
+            let val = st_val[i];
 
             let color = if trend[i] {
                 rgba(0x26a69a, 0.9)
@@ -2386,6 +2384,33 @@ mod tests {
             &[4.0, 4.0, 4.0, 4.0, 3.0625, 0.09375, 1.796875],
         );
         assert_eq!(flips(&r), vec![(6, signals::FLIP_UP)]);
+    }
+
+    #[test]
+    fn supertrend_branches_on_previous_band_like_tradingview() {
+        // multiplier 0: both bands are hl2, so `prevST == prevUpper` holds in
+        // either direction and TradingView decides by `close > upper` alone.
+        let ind = Supertrend {
+            period: 2,
+            multiplier: 0.0,
+        };
+        let r = ind.compute(&ohlc());
+        eq(&dot_ys(&r), &[2.0, 3.5, 3.5, 2.25, 1.25, 2.5, 4.5]);
+        assert_eq!(
+            flips(&r),
+            vec![
+                (2, signals::FLIP_UP),
+                (3, signals::FLIP_DOWN),
+                (6, signals::FLIP_UP)
+            ]
+        );
+        // bar 0 is never drawn, even when the ATR is valid there
+        let r = Supertrend {
+            period: 1,
+            multiplier: 1.0,
+        }
+        .compute(&ohlc());
+        assert_eq!(r.dots[0].x, 1);
     }
 
     #[test]
