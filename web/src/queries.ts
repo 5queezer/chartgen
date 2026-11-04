@@ -100,10 +100,14 @@ export function createListIndicatorsQuery(
 }
 
 /**
- * Create a TanStack Solid Query for `get_quotes` (the watchlist). Polls
- * every `QUOTES_POLL_MS` while the tab is visible and stops while it is
- * hidden; returning to the tab refetches on focus and resumes polling.
- * The previous quotes stay on screen while a changed list loads.
+ * Create a TanStack Solid Query for `get_quotes` (the watchlist). The
+ * interval timer keeps running at `QUOTES_POLL_MS`; with the default
+ * `refetchIntervalInBackground: false` each tick is skipped while the tab
+ * is hidden, so polling resumes on the first tick after the tab is
+ * visible again. (`refetchOnWindowFocus` is off globally, so no refetch
+ * fires on the return itself.) The caller stops polling through
+ * `enabled`, e.g. while the panel is collapsed. The previous quotes stay
+ * on screen while a changed list loads.
  */
 export function createQuotesQuery(
   session: McpSession,
@@ -116,8 +120,7 @@ export function createQuotesQuery(
       queryFn: () => session.callGetQuotes(symbols),
       enabled: enabled && symbols.length > 0,
       staleTime: QUOTES_POLL_MS - 1_000,
-      refetchInterval: () =>
-        document.visibilityState === "visible" ? QUOTES_POLL_MS : false,
+      refetchInterval: QUOTES_POLL_MS,
       placeholderData: keepPreviousData,
       retry: (_failureCount: number, error: Error) => {
         if (/401|unauthoriz/i.test(error.message)) clearAccessToken();

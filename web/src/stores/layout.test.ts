@@ -106,6 +106,11 @@ describe("layout store", () => {
     expect((await load()).symbol()).toBe("BTCUSDT");
     stubStorage({ "chartgen.layout.symbol": JSON.stringify("A".repeat(40)) });
     expect((await load()).symbol()).toBe("BTCUSDT");
+    // `/` would add a path segment to the upstream URL.
+    stubStorage({ "chartgen.layout.symbol": '"../../X"' });
+    const s = await load();
+    expect(s.symbol()).toBe("BTCUSDT");
+    expect(s.normalizeSymbol("BTC/USDT")).toBeNull();
   });
 
   it("ignores blank or invalid symbols", async () => {

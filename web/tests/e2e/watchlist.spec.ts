@@ -2,7 +2,7 @@
 // add via the symbol search dialog, row click switches the chart, hover
 // remove, and persistence of the list and the collapsed state.
 
-import type { Page } from "@playwright/test";
+import type { Page, Request } from "@playwright/test";
 
 import { test, expect, expectChartRendered } from "./fixtures/app";
 
@@ -16,6 +16,31 @@ const symbolButton = (page: Page) =>
   page.getByRole("button", { name: /^Symbol:/ });
 
 const NUMBER = /^[+−]?\d+\.\d+%?$/;
+
+function isQuotesRequest(req: Request): boolean {
+  if (req.method() !== "POST" || !req.url().endsWith("/mcp")) return false;
+  try {
+    const b = req.postDataJSON() as { params?: { name?: string } };
+    return b.params?.name === "get_quotes";
+  } catch {
+    return false;
+  }
+}
+
+/** Fake the page visibility the way a tab switch does. */
+async function setVisibility(page: Page, state: "visible" | "hidden") {
+  await page.evaluate((s) => {
+    Object.defineProperty(document, "visibilityState", {
+      configurable: true,
+      get: () => s,
+    });
+    Object.defineProperty(document, "hidden", {
+      configurable: true,
+      get: () => s === "hidden",
+    });
+    document.dispatchEvent(new Event("visibilitychange", { bubbles: true }));
+  }, state);
+}
 
 test.describe("watchlist", () => {
   test("shows the default rows with numbers that tick over time", async ({
@@ -44,6 +69,49 @@ test.describe("watchlist", () => {
     await expect(table(page).locator("[data-flash]").first()).toBeAttached({
       timeout: 15_000,
     });
+  });
+
+  test("polling pauses while the tab is hidden and resumes when visible", async ({
+    bootedApp: page,
+  }) => {
+    // Hold one quotes response so it completes while the tab is hidden:
+    // the case that used to stop polling for good.
+    let release!: () => void;
+    const held = new Promise<void>((r) => (release = r));
+    let holding = true;
+    const heldRequest = page.waitForRequest(isQuotesRequest, {
+      timeout: 15_000,
+    });
+    await page.route("**/mcp", async (route) => {
+      if (holding && isQuotesRequest(route.request())) {
+        holding = false;
+        await held;
+      }
+      await route.continue();
+    });
+    await heldRequest;
+    // The request seen may have been sent before the route existed; wait
+    // until one is actually held.
+    await expect.poll(() => holding).toBe(false);
+    await setVisibility(page, "hidden");
+    const heldResponse = page.waitForResponse((r) =>
+      isQuotesRequest(r.request()),
+    );
+    release();
+    await heldResponse;
+
+    // Hidden: more than one poll period passes without a request.
+    let requests = 0;
+    page.on("request", (req) => {
+      if (isQuotesRequest(req)) requests++;
+    });
+    await page.waitForTimeout(6_500);
+    expect(requests).toBe(0);
+
+    // Visible again: the next tick polls.
+    const resumed = page.waitForRequest(isQuotesRequest, { timeout: 8_000 });
+    await setVisibility(page, "visible");
+    await resumed;
   });
 
   test("add via search, click switches chart, remove, reload persists", async ({
