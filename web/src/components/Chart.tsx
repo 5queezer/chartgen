@@ -6,6 +6,11 @@
 // The indicator's `calc` callback reads its stashed values back off the
 // bars — no math runs in the browser.
 //
+// Fills, hbars and divlines have no klinecharts figure type. Each payload
+// entry, re-indexed into data space, sits in the module-level
+// `geometryStore`; the template's `draw` callback paints it from
+// geometry.ts primitives before the default line/bar figures (ADR-0010).
+//
 // Pane lifecycle: we track created panes in a signal keyed by indicator
 // name. When a new indicator shows up we `createIndicator`; when one
 // drops out of the payload we `removeIndicator` and delete the entry.
@@ -32,6 +37,7 @@ import {
   init,
   registerIndicator,
   type Chart as KChart,
+  type IndicatorDrawCallback,
   type KLineData,
 } from "klinecharts";
 
@@ -44,6 +50,20 @@ import {
   pricePrecision,
   type BarLegend,
 } from "../lib/format";
+import {
+  DIVLINE_COLORS,
+  divlineSegments,
+  fillPolygons,
+  fillTheme,
+  hbarRects,
+  hbarTheme,
+  hbarTiers,
+  payloadToDataIndex,
+  toDataSpace,
+  valueExtents,
+  type Mapper,
+  type SeriesIndicator,
+} from "./geometry";
 import { PaneHeader, type PaneHeaderLine } from "./PaneHeader";
 import { PriceAxisControls } from "./PriceAxisControls";
 
@@ -106,6 +126,92 @@ const registeredIndicators = new Set<string>();
 interface IndicatorShape {
   lines: number;
   hist: number;
+  /** True when the indicator emits fills, hbars or divlines. */
+  geometry: boolean;
+}
+
+const isEmptyShape = (s: IndicatorShape): boolean =>
+  s.lines === 0 && s.hist === 0 && !s.geometry;
+
+/**
+ * Geometry per registered indicator name, already re-indexed into data
+ * space (`toDataSpace`). Written by the data effect before
+ * `applyNewData`, whose recalc + repaint is what picks it up, so a new
+ * payload costs no extra `overrideIndicator` pass. Module-level like
+ * klinecharts's own indicator registry; the app mounts one Chart.
+ */
+const geometryStore = new Map<string, SeriesIndicator>();
+
+/**
+ * klinecharts `draw` callback painting the indicator's fills, hbars and
+ * divlines from `geometryStore`. Runs on every frame, so the geometry
+ * follows pan/zoom/rescale. Returns false so the default line/bar
+ * figures still draw on top.
+ */
+function drawGeometry(name: string): IndicatorDrawCallback {
+  const regName = indicatorRegName(name);
+  return ({ ctx, visibleRange, bounding, xAxis, yAxis }) => {
+    const ind = geometryStore.get(regName);
+    if (!ind) return false;
+    const map: Mapper = {
+      x: (i) => xAxis.convertToPixel(i),
+      y: (v) => yAxis.convertToPixel(v),
+    };
+
+    // Fills go behind the candles already on this canvas, as in
+    // TradingView; the grid is painted afterwards on top. This relies on
+    // nothing opaque (e.g. a background) being painted on the pane canvas
+    // first. The e2e z-order test guards it. With destination-over each
+    // paint lands beneath the previous one, so iterate in reverse to keep
+    // the server's paint order. klinecharts restores the context after draw.
+    ctx.globalCompositeOperation = "destination-over";
+    const fills = ind.fills ?? [];
+    for (let fi = fills.length - 1; fi >= 0; fi--) {
+      const fill = fills[fi]!;
+      const theme = fillTheme(name, fi);
+      for (const poly of fillPolygons(fill.y1, fill.y2, visibleRange, map)) {
+        ctx.fillStyle = poly.up ? theme.up : theme.down;
+        ctx.beginPath();
+        poly.points.forEach((p, k) =>
+          k === 0 ? ctx.moveTo(p.x, p.y) : ctx.lineTo(p.x, p.y),
+        );
+        ctx.closePath();
+        ctx.fill();
+      }
+    }
+    ctx.globalCompositeOperation = "source-over";
+
+    if (ind.hbars && ind.hbars.length > 0) {
+      const tiers = hbarTiers(ind.hbars, ind.hlines ?? []);
+      const colors = hbarTheme(name);
+      for (const r of hbarRects(
+        ind.hbars,
+        bounding.width,
+        bounding.height,
+        map.y,
+      )) {
+        ctx.fillStyle = colors[tiers[r.index]!];
+        ctx.fillRect(r.x, r.y, r.width, r.height);
+      }
+    }
+
+    const segments = divlineSegments(
+      ind.divlines ?? [],
+      visibleRange,
+      map,
+      ind.is_overlay,
+    );
+    ctx.lineWidth = 2;
+    for (const s of segments) {
+      ctx.strokeStyle = DIVLINE_COLORS[s.kind];
+      ctx.setLineDash(s.dashed ? [4, 4] : []);
+      ctx.beginPath();
+      ctx.moveTo(s.from.x, s.from.y);
+      ctx.lineTo(s.to.x, s.to.y);
+      ctx.stroke();
+    }
+    return false;
+  };
 }
 
 /**
@@ -125,10 +231,18 @@ function ensureRegistered(name: string, shape: IndicatorShape): void {
   const figures: Array<{
     key: string;
     title: string;
-    type: "line" | "bar";
+    type?: "line" | "bar";
     baseValue?: number;
     styles?: () => { color: string };
-  }> = [];
+  }> = [
+    // Typeless figures draw nothing but feed klinecharts's y-axis
+    // auto-scale: fill edges and the payload y_range (`valueExtents`).
+    // Used instead of minValue/maxValue, which klinecharts only applies
+    // when figures already have values (geometry-only panes have none)
+    // and whose override path sets maxValue via setMinValue.
+    { key: "range_lo", title: "" },
+    { key: "range_hi", title: "" },
+  ];
 
   for (let i = 0; i < shape.lines; i++) {
     figures.push({
@@ -156,9 +270,15 @@ function ensureRegistered(name: string, shape: IndicatorShape): void {
     shortName: name.toUpperCase(),
     precision: 2,
     figures: figures as never,
-    calc: (dataList: KLineData[]) =>
-      dataList.map((bar) => {
-        const row: Row = {};
+    draw: drawGeometry(name),
+    calc: (dataList: KLineData[]) => {
+      const geo = geometryStore.get(regName);
+      const extents = geo ? valueExtents(geo, dataList.length) : [];
+      return dataList.map((bar, di) => {
+        const row: Row = {
+          range_lo: extents[di]?.lo ?? null,
+          range_hi: extents[di]?.hi ?? null,
+        };
         for (let i = 0; i < shape.lines; i++) {
           const raw = bar[lineStashKey(name, i)];
           row[`line${i}`] =
@@ -170,7 +290,8 @@ function ensureRegistered(name: string, shape: IndicatorShape): void {
             typeof raw === "number" && Number.isFinite(raw) ? raw : null;
         }
         return row;
-      }),
+      });
+    },
   });
 }
 
@@ -179,10 +300,14 @@ function shapeFromPayload(
   name: string,
 ): IndicatorShape {
   const ind = series.indicators[name];
-  if (!ind) return { lines: 0, hist: 0 };
+  if (!ind) return { lines: 0, hist: 0, geometry: false };
   const lines = ind.lines?.length ?? 0;
   const hist = ind.histogram?.length ?? 0;
-  return { lines, hist };
+  const geometry =
+    (ind.fills?.length ?? 0) > 0 ||
+    (ind.hbars?.length ?? 0) > 0 ||
+    (ind.divlines?.length ?? 0) > 0;
+  return { lines, hist, geometry };
 }
 
 function seriesToKLines(series: SeriesPayload): KLineData[] {
@@ -652,6 +777,7 @@ export function Chart(props: ChartProps): JSX.Element {
       const stale = untrack(paneIds);
       for (const name of Object.keys(stale)) {
         c.removeIndicator(stale[name]!, indicatorRegName(name));
+        geometryStore.delete(indicatorRegName(name));
       }
       setPaneIds({});
       setHeaders([]);
@@ -660,24 +786,19 @@ export function Chart(props: ChartProps): JSX.Element {
 
     // 1. Register any indicators we haven't seen before. Must happen
     //    before applyNewData so klinecharts's calc pipeline has the
-    //    figure config to draw against.
+    //    figure config to draw against. The geometry store is filled here
+    //    too, in data space, so applyNewData's recalc and repaint see it.
     const visible = new Set(visibleKey().split("\n"));
     const names = Object.keys(series.indicators).filter((n) => visible.has(n));
+    const remap = payloadToDataIndex(series.bars);
     for (const name of names) {
       const shape = shapeFromPayload(series, name);
-      if (shape.lines === 0 && shape.hist === 0) continue;
+      if (isEmptyShape(shape)) continue;
       ensureRegistered(name, shape);
-      const ind = series.indicators[name]!;
-      if (
-        (ind.fills && ind.fills.length > 0) ||
-        (ind.hbars && ind.hbars.length > 0) ||
-        (ind.divlines && ind.divlines.length > 0)
-      ) {
-        console.debug(
-          `[chartgen] indicator "${name}" has fills/hbars/divlines; ` +
-            "not rendered in this PR (tracked for PR γ).",
-        );
-      }
+      geometryStore.set(
+        indicatorRegName(name),
+        toDataSpace(series.indicators[name]!, remap),
+      );
     }
 
     // 2. Push bar data with all per-indicator stashes applied.
@@ -694,7 +815,7 @@ export function Chart(props: ChartProps): JSX.Element {
     const activeNames = new Set<string>();
     for (const name of names) {
       const shape = shapeFromPayload(series, name);
-      if (shape.lines === 0 && shape.hist === 0) continue; // skip empty
+      if (isEmptyShape(shape)) continue; // skip empty
       activeNames.add(name);
       const regName = indicatorRegName(name);
       if (currentPanes[name]) {
@@ -713,6 +834,7 @@ export function Chart(props: ChartProps): JSX.Element {
     for (const name of Object.keys(currentPanes)) {
       if (!activeNames.has(name)) {
         c.removeIndicator(currentPanes[name]!, indicatorRegName(name));
+        geometryStore.delete(indicatorRegName(name));
       }
     }
     setPaneIds(nextPanes);
