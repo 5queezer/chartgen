@@ -23,7 +23,7 @@ pub fn tools_list_result() -> Value {
                     "properties": {
                         "ticker": {
                             "type": "string",
-                            "description": "Stock or crypto ticker symbol. Stocks: AAPL, MSFT, TSLA, GOOGL, AMZN (Yahoo Finance). Crypto: BTCUSDT, ETHUSDT, SOLUSDT (Binance). If omitted, uses random sample data."
+                            "description": "Stock or crypto ticker symbol. Stocks: AAPL, MSFT, TSLA, GOOGL, AMZN (Yahoo Finance). Crypto: BTCUSDT, ETHUSDT, SOLUSDT (Binance). If omitted, uses random sample data. If given and the upstream fetch fails, the call returns an error."
                         },
                         "symbol": {
                             "type": "string",
@@ -75,16 +75,16 @@ pub fn tools_list_result() -> Value {
                         },
                         "bars": {
                             "type": "integer",
-                            "description": "Number of OHLCV candlestick bars to display (max 5000)",
+                            "description": "Number of OHLCV candlestick bars to display (max 5000, all formats)",
                             "default": 200
                         },
                         "end_time": {
                             "type": "integer",
-                            "description": "History paging: return only bars whose open time (ms since epoch) is strictly before end_time — pass the oldest loaded bar's t × 1000 to fetch the page before it. Omit for the newest bars, including the still-forming one. When set, a failed fetch is an error instead of falling back to sample data."
+                            "description": "History paging: return only bars whose open time (ms since epoch) is strictly before end_time — pass the oldest loaded bar's t × 1000 to fetch the page before it. Omit (or null) for the newest bars, including the still-forming one. Must be an integer between -2208988800000 (1900-01-01) and one year from now."
                         },
                         "warmup": {
                             "type": "integer",
-                            "description": "format=series only: extra older bars (max 2000) fetched and fed to indicator computation, then trimmed, so the first returned bars carry warmed-up indicator values. Ignored by png/summary/both.",
+                            "description": "format=series only: extra older bars (max 1000) fetched and fed to indicator computation, then trimmed, so the first returned bars carry warmed-up indicator values. Ignored by png/summary/both.",
                             "default": 0
                         },
                         "width": {

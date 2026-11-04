@@ -192,7 +192,11 @@ fn parse_panels(panels_value: &Value) -> (Vec<Box<dyn Indicator>>, Vec<String>, 
 /// 1000 bars.
 const MAX_BARS: usize = 5000;
 /// Upper bound for `warmup` (ADR-0009).
-const MAX_WARMUP: usize = 2000;
+const MAX_WARMUP: usize = 1000;
+/// Oldest accepted `end_time`: 1900-01-01 (index histories predate 1970).
+const MIN_END_TIME_MS: i64 = -2_208_988_800_000;
+/// Newest accepted `end_time`, relative to now.
+const MAX_END_TIME_AHEAD_MS: i64 = 366 * 86_400_000;
 
 fn tool_generate_chart(id: Option<Value>, args: &Value) -> Value {
     generate_chart(id, args, fetch::DataSource::from_env())
@@ -201,7 +205,22 @@ fn tool_generate_chart(id: Option<Value>, args: &Value) -> Value {
 fn generate_chart(id: Option<Value>, args: &Value, source: fetch::DataSource) -> Value {
     let bars = (args.get("bars").and_then(|v| v.as_u64()).unwrap_or(200) as usize).min(MAX_BARS);
     // Exclusive upper bound (ms since epoch) on bar open time — history paging.
-    let end_time = args.get("end_time").and_then(|v| v.as_i64());
+    // JSON null counts as absent; anything else must be an in-range integer.
+    let end_time = match args.get("end_time") {
+        None | Some(Value::Null) => None,
+        Some(v) => {
+            let max = fetch::now_ms().saturating_add(MAX_END_TIME_AHEAD_MS);
+            match v.as_i64().filter(|t| (MIN_END_TIME_MS..=max).contains(t)) {
+                Some(t) => Some(t),
+                None => {
+                    return tool_err(
+                        id,
+                        "end_time must be an integer (ms since epoch) between 1900-01-01 and one year from now.",
+                    )
+                }
+            }
+        }
+    };
     let width = args.get("width").and_then(|v| v.as_u64()).unwrap_or(1920) as u32;
     let height = args.get("height").and_then(|v| v.as_u64()).unwrap_or(1080) as u32;
 
@@ -217,6 +236,12 @@ fn generate_chart(id: Option<Value>, args: &Value, source: fetch::DataSource) ->
         .or_else(|| args.get("interval"))
         .and_then(|v| v.as_str())
         .unwrap_or("4h");
+    if data::interval_secs(interval).is_none() {
+        return tool_err(
+            id,
+            &format!("Unsupported timeframe: {interval}. Use e.g. 1m, 5m, 15m, 30m, 1h, 4h, 1d, 1wk, 1mo."),
+        );
+    }
 
     // Accept both "indicators" and "panels" parameter names
     let panels_value = args
@@ -264,9 +289,10 @@ fn generate_chart(id: Option<Value>, args: &Value, source: fetch::DataSource) ->
     };
     let requested = bars + warmup;
 
-    // `pageable`: bars carry real open times, so a client can page further
-    // back from them with `end_time`.
-    let (mut data, pageable) = match (symbol, source) {
+    // Without a ticker the live source serves the synthetic demo series
+    // (no timestamps, so nothing to page). With one, a fetch failure is an
+    // error in every format: sample bars would masquerade as market data.
+    let (mut data, has_more) = match (symbol, source) {
         (None, fetch::DataSource::Live) if end_time.is_none() => {
             (data::sample_data(requested), false)
         }
@@ -278,16 +304,11 @@ fn generate_chart(id: Option<Value>, args: &Value, source: fetch::DataSource) ->
         }
         (sym, _) => {
             match fetch::fetch_ohlcv(source, sym.unwrap_or(""), interval, requested, end_time) {
-                Ok(d) => (d, true),
-                // A sample fallback would splice synthetic bars into a paged history.
-                Err(e) if end_time.is_some() => {
-                    return tool_err(id, &format!("Data fetch failed: {e}"))
-                }
-                Err(_) => (data::sample_data(requested), false),
+                Ok(f) => (f.data, f.has_more),
+                Err(e) => return tool_err(id, &format!("Data fetch failed: {e}")),
             }
         }
     };
-    let has_more = pageable && data.len() >= requested;
     data.symbol = symbol.map(|s| s.to_string());
     data.interval = Some(interval.to_string());
 
@@ -348,10 +369,11 @@ fn generate_chart(id: Option<Value>, args: &Value, source: fetch::DataSource) ->
         let mut indicators_json = serde_json::Map::new();
         for ((key, pr), ind) in computed.iter().zip(panel_indicators.iter()) {
             let mut trimmed = trim_panel_result(pr, offset);
-            // Volume profiles (hbars + their POC/VA hlines) aggregate over a
-            // price range, not per bar: recompute them over the visible
-            // window so warmup bars don't leak into the profile.
-            if offset > 0 && !pr.hbars.is_empty() {
+            // Volume/time profiles aggregate over the whole input window,
+            // not per bar: recompute their profile-derived channels (hbars
+            // and POC/VA/node hlines) over the visible window so warmup bars
+            // don't leak into the profile.
+            if offset > 0 && ind.windowed_profile() {
                 let profile = ind.compute(&visible);
                 trimmed.hbars = profile.hbars;
                 trimmed.hlines = profile.hlines;
@@ -505,7 +527,7 @@ fn finite_or_null(v: f64) -> Value {
 // possible; fall back to JSON null so fixtures still produce valid output.
 fn bar_t(bar: &chartgen::data::Bar) -> Value {
     bar.date
-        .parse::<u64>()
+        .parse::<i64>()
         .ok()
         .map(|n| json!(n))
         .unwrap_or(Value::Null)
@@ -514,7 +536,8 @@ fn bar_t(bar: &chartgen::data::Bar) -> Value {
 // Drop the first `offset` (warmup) bars from every index-based channel and
 // re-base indices onto the remaining bars. Dots inside the warmup are
 // dropped; divlines wholly inside it are dropped, and ones straddling the
-// boundary are clipped to start at bar 0 with y interpolated. hlines, hbars
+// boundary are clipped to start at bar 0 with y interpolated (lines that
+// only touch bar 0 would collapse to a point and are dropped too). hlines, hbars
 // and y_range are price-based and pass through unchanged.
 fn trim_panel_result(
     pr: &chartgen::indicator::PanelResult,
@@ -539,7 +562,7 @@ fn trim_panel_result(
     for d in &mut out.dots {
         d.x -= offset;
     }
-    out.divlines.retain(|d| d.x1.max(d.x2) >= offset);
+    out.divlines.retain(|d| d.x1.max(d.x2) > offset);
     for d in &mut out.divlines {
         if d.x1 < offset {
             d.y1 += (d.y2 - d.y1) * (offset - d.x1) as f64 / (d.x2 - d.x1) as f64;
@@ -923,7 +946,8 @@ fn tool_get_indicators(
     // Fetch data and compute from scratch
     let bars = 200;
     let fetch_result =
-        fetch::fetch_ohlcv(fetch::DataSource::from_env(), symbol, interval, bars, None);
+        fetch::fetch_ohlcv(fetch::DataSource::from_env(), symbol, interval, bars, None)
+            .map(|f| f.data);
     let mut ohlcv = match fetch_result {
         Ok(d) => d,
         Err(e) => return tool_err(id, &format!("Failed to fetch data: {e}")),
@@ -1966,6 +1990,12 @@ mod tests {
             date: "D5".into(),
         };
         assert_eq!(bar_t(&synthetic), Value::Null);
+
+        let pre_epoch = Bar {
+            date: "-631152000".into(), // 1950-01-01
+            ..numeric
+        };
+        assert_eq!(bar_t(&pre_epoch), json!(-631_152_000_i64));
     }
 
     #[test]
@@ -2366,6 +2396,7 @@ mod tests {
                 div(1, 10.0, 5, 50.0), // straddles the boundary
                 div(4, 40.0, 7, 70.0), // fully visible
                 div(6, 60.0, 2, 20.0), // reversed, straddling
+                div(1, 10.0, 3, 30.0), // ends exactly on visible bar 0
             ],
             y_range: Some((0.0, 100.0)),
             label: "T".into(),
@@ -2419,7 +2450,7 @@ mod tests {
         let same = trim_panel_result(&pr, 0);
         assert_eq!(same.lines[0].y, ys);
         assert_eq!(same.dots.len(), 3);
-        assert_eq!(same.divlines.len(), 4);
+        assert_eq!(same.divlines.len(), 5);
     }
 
     #[test]
@@ -2586,6 +2617,90 @@ mod tests {
             warm["indicators"]["vpvr"]["hlines"],
             cold["indicators"]["vpvr"]["hlines"]
         );
+    }
+
+    #[test]
+    fn series_profile_hlines_cover_visible_window_without_hbars() {
+        // hvn_lvn derives node hlines from a volume profile but emits no hbars.
+        let args = |warmup: u64| {
+            json!({ "ticker": "BTCUSDT", "timeframe": "4h", "bars": 60, "warmup": warmup,
+                    "end_time": END_4H_MS, "indicators": ["hvn_lvn", "rsi"], "format": "series" })
+        };
+        let warm = series_payload(args(300), fetch::DataSource::Sample);
+        let cold = series_payload(args(0), fetch::DataSource::Sample);
+        let nodes = &warm["indicators"]["hvn_lvn"]["hlines"];
+        assert!(!nodes.as_array().unwrap().is_empty());
+        assert_eq!(nodes, &cold["indicators"]["hvn_lvn"]["hlines"]);
+        // Non-profile hlines (RSI 30/70) are untouched.
+        assert_eq!(
+            warm["indicators"]["rsi"]["hlines"],
+            cold["indicators"]["rsi"]["hlines"]
+        );
+        let windowed: Vec<&str> = indicators::registry()
+            .iter()
+            .filter(|i| indicators::by_name(i.name).is_some_and(|ind| ind.windowed_profile()))
+            .map(|i| i.name)
+            .collect();
+        assert_eq!(windowed, vec!["volume_profile", "hvn_lvn", "tpo"]);
+    }
+
+    #[test]
+    fn end_time_must_be_an_in_range_integer() {
+        for bad in [
+            json!("1700000000000"),
+            json!(1.7e12),
+            json!(1_700_000_000_000.5),
+            json!(u64::MAX),
+            json!(-2_208_988_800_001_i64),
+            json!(fetch::now_ms() + 400 * 86_400_000),
+        ] {
+            let resp = generate_chart(
+                Some(json!(1)),
+                &json!({ "ticker": "BTCUSDT", "end_time": bad, "format": "series" }),
+                fetch::DataSource::Sample,
+            );
+            assert!(is_error(&resp), "end_time {bad} must be rejected");
+            assert!(response_text(&resp).contains("end_time"));
+        }
+        // Boundaries and null are accepted (pre-1970 just has no sample bars).
+        for ok in [json!(null), json!(-2_208_988_800_000_i64), json!(END_4H_MS)] {
+            series_payload(
+                json!({ "ticker": "BTCUSDT", "end_time": ok, "bars": 5, "format": "series" }),
+                fetch::DataSource::Sample,
+            );
+        }
+    }
+
+    #[test]
+    fn unsupported_timeframe_is_a_tool_error() {
+        for tf in ["4611686018427387904m", "0h", "7h", "1x"] {
+            let resp = generate_chart(
+                Some(json!(1)),
+                &json!({ "ticker": "BTCUSDT", "timeframe": tf, "format": "series" }),
+                fetch::DataSource::Sample,
+            );
+            assert!(is_error(&resp), "timeframe {tf} must be rejected");
+            assert!(response_text(&resp).contains("Unsupported timeframe"));
+        }
+    }
+
+    #[test]
+    fn fetch_failure_with_ticker_errors_in_every_format() {
+        for format in ["png", "summary", "both", "series"] {
+            for end_time in [Value::Null, json!(END_4H_MS)] {
+                let resp = generate_chart(
+                    Some(json!(1)),
+                    &json!({ "ticker": "AAPL", "bars": 20, "format": format,
+                             "end_time": end_time, "width": 200, "height": 100 }),
+                    fetch::DataSource::Unavailable,
+                );
+                assert!(
+                    is_error(&resp),
+                    "{format}: must not fall back to sample data"
+                );
+                assert!(response_text(&resp).contains("upstream unavailable"));
+            }
+        }
     }
 
     #[test]

@@ -23,11 +23,11 @@ export interface CancelOrderInput {
 
 export interface GenerateChartInput {
   /**
-   * Number of OHLCV candlestick bars to display (max 5000)
+   * Number of OHLCV candlestick bars to display (max 5000, all formats)
    */
   bars?: number;
   /**
-   * History paging: return only bars whose open time (ms since epoch) is strictly before end_time — pass the oldest loaded bar's t × 1000 to fetch the page before it. Omit for the newest bars, including the still-forming one. When set, a failed fetch is an error instead of falling back to sample data.
+   * History paging: return only bars whose open time (ms since epoch) is strictly before end_time — pass the oldest loaded bar's t × 1000 to fetch the page before it. Omit (or null) for the newest bars, including the still-forming one. Must be an integer between -2208988800000 (1900-01-01) and one year from now.
    */
   end_time?: number;
   /**
@@ -67,7 +67,7 @@ export interface GenerateChartInput {
    */
   symbol?: string;
   /**
-   * Stock or crypto ticker symbol. Stocks: AAPL, MSFT, TSLA, GOOGL, AMZN (Yahoo Finance). Crypto: BTCUSDT, ETHUSDT, SOLUSDT (Binance). If omitted, uses random sample data.
+   * Stock or crypto ticker symbol. Stocks: AAPL, MSFT, TSLA, GOOGL, AMZN (Yahoo Finance). Crypto: BTCUSDT, ETHUSDT, SOLUSDT (Binance). If omitted, uses random sample data. If given and the upstream fetch fails, the call returns an error.
    */
   ticker?: string;
   /**
@@ -75,7 +75,7 @@ export interface GenerateChartInput {
    */
   timeframe?: string;
   /**
-   * format=series only: extra older bars (max 2000) fetched and fed to indicator computation, then trimmed, so the first returned bars carry warmed-up indicator values. Ignored by png/summary/both.
+   * format=series only: extra older bars (max 1000) fetched and fed to indicator computation, then trimmed, so the first returned bars carry warmed-up indicator values. Ignored by png/summary/both.
    */
   warmup?: number;
   /**

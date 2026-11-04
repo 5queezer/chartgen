@@ -106,6 +106,14 @@ pub trait Indicator {
     /// Apply custom configuration from JSON object. Called before compute().
     /// Only needs to handle the params declared by params().
     fn configure(&mut self, _params: &Value) {}
+
+    /// True for profiles aggregated over the whole input window (volume /
+    /// time profiles). Their `hbars` and `hlines` are profile-derived, so
+    /// series output with `warmup` recomputes them over the visible bars
+    /// only (ADR-0009).
+    fn windowed_profile(&self) -> bool {
+        false
+    }
 }
 
 // ---- Helpers ----

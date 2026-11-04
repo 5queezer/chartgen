@@ -1,0 +1,119 @@
+{
+ "chart": {
+  "result": [
+   {
+    "meta": {
+     "currency": "USD",
+     "symbol": "AAPL",
+     "exchangeName": "NMS",
+     "instrumentType": "EQUITY",
+     "firstTradeDate": 345479400,
+     "regularMarketTime": 1793810833,
+     "gmtoffset": -18000,
+     "timezone": "EST",
+     "exchangeTimezoneName": "America/New_York",
+     "currentTradingPeriod": {
+      "pre": {
+       "timezone": "EST",
+       "start": 1793782800,
+       "end": 1793802600,
+       "gmtoffset": -18000
+      },
+      "regular": {
+       "timezone": "EST",
+       "start": 1793802600,
+       "end": 1793826000,
+       "gmtoffset": -18000
+      },
+      "post": {
+       "timezone": "EST",
+       "start": 1793826000,
+       "end": 1793840400,
+       "gmtoffset": -18000
+      }
+     },
+     "dataGranularity": "1h"
+    },
+    "timestamp": [
+     1793716200,
+     1793719800,
+     1793723400,
+     1793727000,
+     1793730600,
+     1793734200,
+     1793737800,
+     1793802600,
+     1793806200,
+     1793810833
+    ],
+    "indicators": {
+     "quote": [
+      {
+       "open": [
+        199.5,
+        200.5,
+        201.5,
+        202.5,
+        203.5,
+        204.5,
+        205.5,
+        206.5,
+        207.5,
+        208.5
+       ],
+       "high": [
+        201,
+        202,
+        203,
+        204,
+        205,
+        206,
+        207,
+        208,
+        209,
+        210
+       ],
+       "low": [
+        199,
+        200,
+        201,
+        202,
+        203,
+        204,
+        205,
+        206,
+        207,
+        208
+       ],
+       "close": [
+        200,
+        201,
+        202,
+        203,
+        204,
+        205,
+        206,
+        207,
+        208,
+        209
+       ],
+       "volume": [
+        1000,
+        1001,
+        1002,
+        1003,
+        1004,
+        1005,
+        1006,
+        1007,
+        1008,
+        1009
+       ]
+      }
+     ]
+    }
+   }
+  ],
+  "error": null
+ }
+}

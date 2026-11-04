@@ -85,21 +85,46 @@ pub fn sample_data(n: usize) -> OhlcvData {
     }
 }
 
-/// Length of a bar interval in seconds ("1m", "4h", "1d", "1w"/"1wk",
-/// "1M"/"1mo"). Months are approximated as 30 days. `None` if unparseable.
+/// Length of a supported bar interval in seconds: the union of Binance and
+/// Yahoo timeframe names ("1m", "4h", "1d", "1w"/"1wk", "1M"/"1mo", ...).
+/// Months are approximated as 30 days. `None` for anything else, so callers
+/// can reject the timeframe instead of doing arithmetic on it.
 pub fn interval_secs(interval: &str) -> Option<i64> {
-    let split = interval.find(|c: char| !c.is_ascii_digit())?;
-    let (n, unit) = interval.split_at(split);
-    let n: i64 = n.parse().ok()?;
-    let unit_secs = match unit {
-        "m" => 60,
-        "h" => 3_600,
-        "d" => 86_400,
-        "w" | "wk" => 604_800,
-        "M" | "mo" => 2_592_000,
+    const MIN: i64 = 60;
+    const HOUR: i64 = 3_600;
+    const DAY: i64 = 86_400;
+    Some(match interval {
+        "1m" => MIN,
+        "2m" => 2 * MIN,
+        "3m" => 3 * MIN,
+        "5m" => 5 * MIN,
+        "15m" => 15 * MIN,
+        "30m" => 30 * MIN,
+        "60m" | "1h" => HOUR,
+        "90m" => 90 * MIN,
+        "2h" => 2 * HOUR,
+        "4h" => 4 * HOUR,
+        "6h" => 6 * HOUR,
+        "8h" => 8 * HOUR,
+        "12h" => 12 * HOUR,
+        "1d" => DAY,
+        "3d" => 3 * DAY,
+        "5d" => 5 * DAY,
+        "1w" | "1wk" => 7 * DAY,
+        "1M" | "1mo" => 30 * DAY,
+        "3mo" => 90 * DAY,
         _ => return None,
-    };
-    (n > 0).then_some(n * unit_secs)
+    })
+}
+
+/// Offset of the bar grid from the epoch: weekly bars open on Monday
+/// (1970-01-01 was a Thursday), everything else is epoch-aligned.
+fn grid_offset_ms(step: i64) -> i64 {
+    if step == 7 * 86_400 {
+        4 * 86_400_000
+    } else {
+        0
+    }
 }
 
 /// splitmix64 finalizer: a stateless hash so prices are a pure function of
@@ -132,8 +157,8 @@ fn grid_close(seed: u64, t: i64, step: i64) -> f64 {
 
 /// Deterministic, network-free OHLCV source (`CHARTGEN_DATA_SOURCE=sample`).
 ///
-/// Bars sit on the epoch-aligned `interval` grid (weeks and months are
-/// fixed-length approximations). The newest bar is the last grid slot whose
+/// Bars sit on the epoch-aligned `interval` grid (weeks start on Monday;
+/// months are a fixed 30-day approximation). The newest bar is the last grid slot whose
 /// open time is strictly before `end_time_ms`, capped at the bar forming at
 /// `now_ms`. Every completed bar is a pure function of its open time and
 /// `symbol`, so overlapping pages agree exactly. The forming bar moves
@@ -154,15 +179,22 @@ pub fn sample_ohlcv(
         (h ^ b as u64).wrapping_mul(0x0100_0000_01B3)
     });
 
-    let current_open_ms = now_ms.div_euclid(step_ms) * step_ms;
+    let off = grid_offset_ms(step);
+    let slot = |ms: i64| {
+        ms.saturating_sub(off)
+            .div_euclid(step_ms)
+            .saturating_mul(step_ms)
+            .saturating_add(off)
+    };
+    let current_open_ms = slot(now_ms);
     let last_open_ms = match end_time_ms {
-        Some(end) => ((end - 1).div_euclid(step_ms) * step_ms).min(current_open_ms),
+        Some(end) => slot(end.saturating_sub(1)).min(current_open_ms),
         None => current_open_ms,
     };
     let available = if last_open_ms < 0 {
         0
     } else {
-        (last_open_ms / step_ms + 1) as usize
+        ((last_open_ms - off) / step_ms + 1) as usize
     };
     let n = count.min(available);
 
@@ -227,6 +259,9 @@ mod tests {
         assert_eq!(interval_secs("h"), None);
         assert_eq!(interval_secs("0h"), None);
         assert_eq!(interval_secs("1x"), None);
+        // Absurd multiples are rejected rather than overflowing.
+        assert_eq!(interval_secs("4611686018427387904m"), None);
+        assert_eq!(interval_secs("7h"), None);
     }
 
     #[test]
@@ -304,6 +339,25 @@ mod tests {
         )
         .unwrap();
         assert_eq!(c.bars.last().unwrap().date, a.bars[2].date);
+    }
+
+    #[test]
+    fn sample_ohlcv_weekly_bars_open_on_monday() {
+        let d = sample_ohlcv("X", "1wk", 10, None, 1_750_000_000_000).unwrap();
+        assert_eq!(d.len(), 10);
+        for b in &d.bars {
+            let day = b.date.parse::<i64>().unwrap() / 86_400;
+            // Day 0 (1970-01-01) was a Thursday, so Mondays are day % 7 == 4.
+            assert_eq!(day % 7, 4, "weekly bar must open on Monday");
+        }
+        // The first weekly bar after the epoch is Monday 1970-01-05.
+        let d = sample_ohlcv("X", "1w", 5, Some(15 * 86_400_000), 1_750_000_000_000).unwrap();
+        assert_eq!(d.bars[0].date, (4 * 86_400).to_string());
+        assert_eq!(d.len(), 2);
+        // end_time = i64::MIN saturates instead of overflowing.
+        assert!(sample_ohlcv("X", "1h", 5, Some(i64::MIN), 0)
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
