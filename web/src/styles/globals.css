@@ -124,3 +124,83 @@ body {
   color: var(--color-fg);
   background: var(--color-bg-elev);
 }
+
+/* Price-legend change/volume colors (PaneHeader). */
+.pane-header-up {
+  color: var(--color-bull);
+}
+
+.pane-header-down {
+  color: var(--color-bear);
+}
+
+.pane-header-flat {
+  color: var(--color-fg-muted);
+}
+
+/* Bar-close countdown, aligned under the last-price badge by
+ * PriceAxisControls. */
+.price-countdown {
+  position: absolute;
+  z-index: 3;
+  box-sizing: border-box;
+  padding: 2px 0;
+  text-align: center;
+  font-family: var(--font-sans);
+  font-size: 11px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  line-height: 14px;
+  color: #ffffff;
+  border-radius: 2px;
+  pointer-events: none;
+}
+
+/* %, log, auto buttons in the bottom-right corner of the price axis. */
+.price-scale-controls {
+  position: absolute;
+  z-index: 3;
+  right: 0;
+  bottom: 0;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
+}
+
+.price-scale-btn {
+  padding: 2px 1px;
+  border-radius: 3px;
+  font-family: var(--font-sans);
+  font-size: 9px;
+  line-height: 14px;
+  color: var(--color-fg-muted);
+  cursor: pointer;
+}
+
+.price-scale-btn:hover {
+  background-color: var(--color-surface);
+  color: var(--color-fg);
+}
+
+.price-scale-btn.is-active {
+  color: var(--color-accent);
+}
+
+.chart-host:focus {
+  outline: none;
+}
+
+.pane-header-ohlc {
+  display: inline-flex;
+  gap: 8px;
+}
+
+.pane-header-ohlc b {
+  font-weight: 400;
+}
+
+.pane-header-vol {
+  color: var(--color-fg-muted);
+}

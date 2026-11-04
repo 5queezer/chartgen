@@ -115,4 +115,34 @@ describe("layout store", () => {
     s.setSymbol("no spaces");
     expect(s.symbol()).toBe("BTCUSDT");
   });
+
+  it("defaults the price scale to normal + auto-fit", async () => {
+    stubStorage();
+    const s = await load();
+    expect(s.scaleMode()).toBe("normal");
+    expect(s.autoScale()).toBe(true);
+  });
+
+  it("ignores a stored autoScale key: auto-fit always starts on", async () => {
+    const data = stubStorage({ "chartgen.layout.autoScale": "false" });
+    const s = await load();
+    expect(s.autoScale()).toBe(true);
+    s.setAutoScale(false);
+    expect(data.get("chartgen.layout.autoScale")).toBe("false"); // untouched leftover
+    expect(s.autoScale()).toBe(false);
+  });
+
+  it("restores a valid scale mode and rejects invalid values", async () => {
+    stubStorage({ "chartgen.layout.scaleMode": '"log"' });
+    expect((await load()).scaleMode()).toBe("log");
+    stubStorage({ "chartgen.layout.scaleMode": '"sqrt"' });
+    expect((await load()).scaleMode()).toBe("normal");
+  });
+
+  it("persists the scale mode", async () => {
+    const data = stubStorage();
+    const s = await load();
+    s.setScaleMode("percentage");
+    expect(data.get("chartgen.layout.scaleMode")).toBe('"percentage"');
+  });
 });

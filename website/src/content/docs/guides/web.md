@@ -34,8 +34,42 @@ chart stays on screen while the new one loads. There is no Load button; if a loa
   Heikin-Ashi is not offered because it needs client-side math
   ([ADR-0003](/chartgen/decisions/0003-web-frontend-stack/)).
 
-Symbol, timeframe, chart type and recent symbols are saved in
+- **Screenshot** (camera) — downloads the chart canvas, overlays included,
+  as a PNG on the chart background, named
+  `<SYMBOL>_<TF>_<yyyy-mm-dd_HHMM>.png` (local time). The DOM legend
+  rows above the panes are not part of the image.
+- **Reset chart** (circular arrow) — scrolls to the latest bar and restores
+  the default bar spacing. Same as `Alt+R`.
+- **Fullscreen** — hidden when the browser does not support it; toggles the browser Fullscreen API on the whole app;
+  the chart resizes to fit.
+
+Symbol, timeframe, chart type, price-scale mode and recent symbols are saved in
 `localStorage` (keys prefixed `chartgen.layout.`) and restored on reload.
+
+## Chart conveniences
+
+- **Price legend** — the top-left row of the price pane shows the symbol,
+  interval, **O H L C**, the change versus the previous close (absolute
+  and percent, green for up, red for down) and the volume (compact
+  `K`/`M`/`B`). It follows the crosshair bar while you hover and shows the
+  last bar otherwise. Price precision is derived from the data.
+- **Bar-close countdown** — a badge under the last-price label on the price
+  axis counts down to the close of the current bar (`MM:SS`, `HH:MM:SS`, or
+  `Nd HH:MM` for long intervals) and ticks every second. It is shown only
+  for symbols that trade around the clock (the Binance rule: tickers ending
+  in `USDT`, `BUSD`, `BTC`, `ETH`, `BNB`, `USDC` or `FDUSD`). Stocks, FX and
+  futures have trading sessions, so their bar close cannot be derived from the
+  interval and the badge is hidden. It also hides once the last bar's close
+  time has passed (live bar rollover is not delivered yet) or when the last
+  price is scrolled out of view.
+- **Price scale** — the `%`, `log` and `auto` buttons in the bottom-right
+  corner of the price axis. `%` shows percent change from the first
+  visible bar and `log` a logarithmic scale; they are mutually exclusive
+  and clicking the active one returns to the normal scale. `auto` (on by
+  default) keeps the axis fitted to the visible bars. Dragging the price
+  axis scales it by hand and turns `auto` off; double-clicking the axis or
+  clicking `auto` turns it back on, and `Alt+R` (reset chart) does too.
+  The scale mode persists across reloads; `auto` always starts on.
 
 ### Keyboard shortcuts
 
@@ -48,6 +82,10 @@ while typing in a field or while a dialog or menu is open.
 | `↑` / `↓`, `Enter`, `Esc` | In symbol search: move, pick, close |
 | digit | Open the timeframe popup prefilled with that digit |
 | `Enter` in the popup | Switch timeframe |
+| `←` / `→` | Scroll the chart by one bar |
+| `↑` / `↓` or `+` / `-` | Zoom in / out |
+| `Home` / `End` | Jump to the first bar / to real time |
+| `Alt+R` | Reset chart (scroll to real time, default zoom) |
 
 The timeframe popup accepts a number of minutes (`5`, `15`, `60`, `240`)
 or a number with a unit `m`, `h`, `d`, `w` (`1h`, `4H`, `1D`); an
