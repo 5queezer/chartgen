@@ -52,11 +52,22 @@ fn bar_open_ms(bar: &Bar) -> Option<i64> {
     bar.date.parse::<i64>().ok().map(|s| s * 1000)
 }
 
+/// Binance REST interval for a Yahoo-style timeframe the frontend may send
+/// ("1wk" → "1w", "1mo" → "1M", "60m" → "1h"). Binance names pass through.
+fn binance_interval(interval: &str) -> &str {
+    match interval {
+        "1wk" => "1w",
+        "1mo" => "1M",
+        "60m" => "1h",
+        other => other,
+    }
+}
+
 fn binance_klines_url(symbol: &str, interval: &str, limit: usize, end_ms: Option<i64>) -> String {
     let mut url = format!(
         "https://api.binance.com/api/v3/klines?symbol={}&interval={}&limit={}",
         symbol.to_uppercase(),
-        interval,
+        binance_interval(interval),
         limit
     );
     if let Some(end) = end_ms {
@@ -488,6 +499,21 @@ mod tests {
             binance_klines_url("BTCUSDT", "4h", 1000, Some(1_700_000_000_000)),
             "https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=4h&limit=1000&endTime=1700000000000"
         );
+    }
+
+    #[test]
+    fn binance_interval_maps_yahoo_names() {
+        assert_eq!(binance_interval("1wk"), "1w");
+        assert_eq!(binance_interval("1mo"), "1M");
+        assert_eq!(binance_interval("60m"), "1h");
+        for native in ["1m", "5m", "15m", "30m", "1h", "4h", "1d", "1w", "1M"] {
+            assert_eq!(binance_interval(native), native);
+        }
+        assert!(binance_klines_url("BTCUSDT", "1wk", 10, None).contains("&interval=1w&"));
+        assert!(binance_klines_url("BTCUSDT", "1mo", 10, None).contains("&interval=1M&"));
+        // Interval durations agree for both spellings (sample grid, Yahoo window).
+        assert_eq!(data::interval_secs("1wk"), data::interval_secs("1w"));
+        assert_eq!(data::interval_secs("1mo"), data::interval_secs("1M"));
     }
 
     #[test]
