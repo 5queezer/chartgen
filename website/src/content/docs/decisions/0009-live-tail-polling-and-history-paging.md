@@ -79,21 +79,35 @@ bounded cost, and pages join exactly at `end_time`. Chosen.
 Chosen: **tail polling via `generate_chart` + `end_time`/`warmup`
 paging. Push is deferred.**
 
-- `end_time` (ms since epoch) is an exclusive upper bound on bar open
-  time. With it set, a failed upstream fetch is a tool error. The silent
-  sample-data fallback would put synthetic bars into a real history.
-- `warmup` (series only, at most 2000) adds bars that are used for
+- `end_time` (ms since epoch, 1900-01-01 up to one year ahead) is an
+  exclusive upper bound on bar open time.
+- Whenever a ticker is given, a failed upstream fetch is a tool error in
+  every format. The old silent sample-data fallback would put synthetic
+  bars into a real history or a live tail. Only the no-ticker demo path
+  still renders sample data.
+- `warmup` (series only, at most 1000) adds bars that are used for
   computation and then trimmed. Every index-based channel is trimmed and
   re-indexed: `lines`, `histogram`, `fills`, `signals`, `divlines`.
-  Divlines that fall entirely inside the warmup are dropped. Divlines that
-  cross into the returned window are clipped at its first bar.
-  Volume-profile `hbars` and their `hlines` are recomputed over the
+  Divlines that end at or before the window's first bar are dropped.
+  Divlines that cross into the returned window are clipped at its first
+  bar. Indicators that declare `Indicator::windowed_profile()` (VPVR,
+  HVN/LVN, TPO) have their `hbars` and `hlines` recomputed over the
   returned window, so warmup bars don't enter the profile.
-- `has_more` in the series payload is `true` when the source returned
-  the full `bars + warmup` count. It tells the client to keep paging.
+- Clients keep profile `hbars` and profile-derived `hlines` from the
+  initial full load and ignore them on tail-poll and history-page
+  responses: those profiles cover only the slice the response carries.
+- `has_more` in the series payload tells the client to keep paging. For
+  Binance and the sample source it is `true` when the full
+  `bars + warmup` count came back. For Yahoo it is `true` unless the
+  window was cut off by Yahoo's lookback limit or the symbol's first
+  trade date, because one Yahoo window can legitimately hold fewer bars
+  than requested (1m: about 1950 per 7-day window).
 - Binance pagination goes backwards with `endTime` past the 1000-bar cap.
-  Yahoo uses `period1`/`period2` windows sized to the request. Its 1h→4h
-  aggregation uses the epoch 4h grid, so bucket boundaries match between
+  Yahoo uses `period1`/`period2` windows sized to the request. Its live
+  bar is snapped onto its period start. Its 1h→4h aggregation anchors
+  buckets at each trading day's session open for exchange-traded symbols
+  (TradingView parity) and on the UTC 4h grid for crypto/FX. Both rules
+  depend only on the bars themselves, so bucket boundaries match between
   pages.
 - `CHARTGEN_DATA_SOURCE=sample` switches to a deterministic offline
   source. Each bar's price is a pure function of the symbol and the bar's
@@ -120,7 +134,10 @@ tests can run offline against stable data.
   lookback. A larger `warmup` reduces the difference but cannot remove
   it.
 - Polling adds a request every interval per open chart, and latency is
-  bounded by the poll period.
+  bounded by the poll period. Upstream requests share one HTTP client with
+  a 10 s timeout, and a paginated Binance fetch has a 20 s budget.
+- Profile overlays don't update on tail polls. They stay as computed at
+  the initial load until the client reloads the full window.
 - Yahoo intraday history is short (1m ≈ 30 days, sub-hour ≈ 60 days,
   1h ≈ 730 days). Paging ends there and `has_more` becomes `false`.
 
