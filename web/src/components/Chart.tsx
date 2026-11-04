@@ -6,6 +6,11 @@
 // The indicator's `calc` callback reads its stashed values back off the
 // bars — no math runs in the browser.
 //
+// Fills, hbars and divlines have no klinecharts figure type. Each
+// indicator instance carries its payload entry as `extendData`, and the
+// template's `draw` callback paints them from geometry.ts primitives
+// before the default line/bar figures (ADR-0010).
+//
 // Pane lifecycle: we track created panes in a signal keyed by indicator
 // name. When a new indicator shows up we `createIndicator`; when one
 // drops out of the payload we `removeIndicator` and delete the entry.
@@ -32,12 +37,24 @@ import {
   init,
   registerIndicator,
   type Chart as KChart,
+  type IndicatorDrawCallback,
   type KLineData,
 } from "klinecharts";
 
 import { indicatorName, type ActiveIndicator } from "../stores/indicators";
 import type { ChartType } from "../stores/layout";
 import type { SeriesPayload } from "../types/responses";
+import {
+  DIVLINE_COLORS,
+  divlineSegments,
+  fillPolygons,
+  fillTheme,
+  hbarRects,
+  hbarTheme,
+  hbarTiers,
+  type Mapper,
+  type SeriesIndicator,
+} from "./geometry";
 import { PaneHeader, type PaneHeaderLine } from "./PaneHeader";
 
 // TradingView-aligned palette. Kept in JS as well as CSS because
@@ -99,6 +116,76 @@ const registeredIndicators = new Set<string>();
 interface IndicatorShape {
   lines: number;
   hist: number;
+  /** True when the indicator emits fills, hbars or divlines. */
+  geometry: boolean;
+}
+
+const isEmptyShape = (s: IndicatorShape): boolean =>
+  s.lines === 0 && s.hist === 0 && !s.geometry;
+
+/**
+ * klinecharts `draw` callback painting the indicator's fills, hbars and
+ * divlines from the payload entry stashed in `extendData`. Runs on every
+ * frame, so the geometry follows pan/zoom/rescale. Returns false so the
+ * default line/bar figures still draw on top.
+ */
+function drawGeometry(name: string): IndicatorDrawCallback {
+  return ({ ctx, indicator, visibleRange, bounding, xAxis, yAxis }) => {
+    const ind = indicator.extendData as SeriesIndicator | undefined;
+    if (!ind) return false;
+    const map: Mapper = {
+      x: (i) => xAxis.convertToPixel(i),
+      y: (v) => yAxis.convertToPixel(v),
+    };
+
+    // Fills go behind what the pane has already painted (grid, candles),
+    // as in TradingView; klinecharts restores the context after draw.
+    ctx.globalCompositeOperation = "destination-over";
+    (ind.fills ?? []).forEach((fill, fi) => {
+      const theme = fillTheme(name, fi);
+      for (const poly of fillPolygons(fill.y1, fill.y2, visibleRange, map)) {
+        ctx.fillStyle = poly.up ? theme.up : theme.down;
+        ctx.beginPath();
+        poly.points.forEach((p, k) =>
+          k === 0 ? ctx.moveTo(p.x, p.y) : ctx.lineTo(p.x, p.y),
+        );
+        ctx.closePath();
+        ctx.fill();
+      }
+    });
+    ctx.globalCompositeOperation = "source-over";
+
+    if (ind.hbars && ind.hbars.length > 0) {
+      const tiers = hbarTiers(ind.hbars, ind.hlines ?? []);
+      const colors = hbarTheme(name);
+      for (const r of hbarRects(
+        ind.hbars,
+        bounding.width,
+        bounding.height,
+        map.y,
+      )) {
+        ctx.fillStyle = colors[tiers[r.index]!];
+        ctx.fillRect(r.x, r.y, r.width, r.height);
+      }
+    }
+
+    const segments = divlineSegments(
+      ind.divlines ?? [],
+      visibleRange,
+      map,
+      ind.is_overlay,
+    );
+    ctx.lineWidth = 2;
+    for (const s of segments) {
+      ctx.strokeStyle = DIVLINE_COLORS[s.kind];
+      ctx.setLineDash(s.dashed ? [4, 4] : []);
+      ctx.beginPath();
+      ctx.moveTo(s.from.x, s.from.y);
+      ctx.lineTo(s.to.x, s.to.y);
+      ctx.stroke();
+    }
+    return false;
+  };
 }
 
 /**
@@ -149,6 +236,7 @@ function ensureRegistered(name: string, shape: IndicatorShape): void {
     shortName: name.toUpperCase(),
     precision: 2,
     figures: figures as never,
+    draw: drawGeometry(name),
     calc: (dataList: KLineData[]) =>
       dataList.map((bar) => {
         const row: Row = {};
@@ -172,10 +260,14 @@ function shapeFromPayload(
   name: string,
 ): IndicatorShape {
   const ind = series.indicators[name];
-  if (!ind) return { lines: 0, hist: 0 };
+  if (!ind) return { lines: 0, hist: 0, geometry: false };
   const lines = ind.lines?.length ?? 0;
   const hist = ind.histogram?.length ?? 0;
-  return { lines, hist };
+  const geometry =
+    (ind.fills?.length ?? 0) > 0 ||
+    (ind.hbars?.length ?? 0) > 0 ||
+    (ind.divlines?.length ?? 0) > 0;
+  return { lines, hist, geometry };
 }
 
 function seriesToKLines(series: SeriesPayload): KLineData[] {
@@ -656,19 +748,8 @@ export function Chart(props: ChartProps): JSX.Element {
     const names = Object.keys(series.indicators).filter((n) => visible.has(n));
     for (const name of names) {
       const shape = shapeFromPayload(series, name);
-      if (shape.lines === 0 && shape.hist === 0) continue;
+      if (isEmptyShape(shape)) continue;
       ensureRegistered(name, shape);
-      const ind = series.indicators[name]!;
-      if (
-        (ind.fills && ind.fills.length > 0) ||
-        (ind.hbars && ind.hbars.length > 0) ||
-        (ind.divlines && ind.divlines.length > 0)
-      ) {
-        console.debug(
-          `[chartgen] indicator "${name}" has fills/hbars/divlines; ` +
-            "not rendered in this PR (tracked for PR γ).",
-        );
-      }
     }
 
     // 2. Push bar data with all per-indicator stashes applied.
@@ -683,20 +764,27 @@ export function Chart(props: ChartProps): JSX.Element {
     const activeNames = new Set<string>();
     for (const name of names) {
       const shape = shapeFromPayload(series, name);
-      if (shape.lines === 0 && shape.hist === 0) continue; // skip empty
+      if (isEmptyShape(shape)) continue; // skip empty
       activeNames.add(name);
       const regName = indicatorRegName(name);
+      const ind = series.indicators[name]!;
+      // extendData feeds the geometry draw callback; refresh it on every
+      // payload so fills/hbars/divlines track the new bars.
       if (currentPanes[name]) {
+        c.overrideIndicator({ name: regName, extendData: ind }, currentPanes[name]);
         nextPanes[name] = currentPanes[name]!;
         continue;
       }
-      const ind = series.indicators[name]!;
       // Overlays attach to the candle pane; oscillators get their own
       // pane (isStack=true stacks panes bottom-up).
       const paneOptions = ind.is_overlay
         ? { id: CANDLE_PANE_ID }
         : { height: 120 };
-      const newPaneId = c.createIndicator(regName, true, paneOptions);
+      const newPaneId = c.createIndicator(
+        { name: regName, extendData: ind },
+        true,
+        paneOptions,
+      );
       if (newPaneId !== null) nextPanes[name] = newPaneId;
     }
     for (const name of Object.keys(currentPanes)) {
