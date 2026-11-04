@@ -591,16 +591,16 @@ fn trim_panel_result(
     out
 }
 
-// Series-shape serializer: full per-bar values for each line, signals with
-// bar timestamps, and the same metadata (label/is_overlay/y_range/hlines)
-// that summary exposes. Pulls directly from the PanelResult — no
-// recomputation. NaN pre-warmup values serialize as JSON null.
 // CSS color string for the wire; the PNG renderer's colors are the source of
 // truth, so the web chart draws overlay geometry with exactly these.
 fn css_rgba(c: &plotters::style::RGBAColor) -> String {
     format!("rgba({},{},{},{})", c.0, c.1, c.2, c.3)
 }
 
+// Series-shape serializer: full per-bar values for each line, signals with
+// bar timestamps, and the same metadata (label/is_overlay/y_range/hlines)
+// that summary exposes. Pulls directly from the PanelResult — no
+// recomputation. NaN pre-warmup values serialize as JSON null.
 fn panel_result_to_series_json(
     pr: &chartgen::indicator::PanelResult,
     data: &chartgen::data::OhlcvData,

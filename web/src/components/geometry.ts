@@ -97,11 +97,13 @@ export function payloadToDataIndex(
  * space with `payloadToDataIndex`'s remap: fill arrays keep only the
  * surviving bars; divline endpoints are remapped, and segments touching
  * a dropped (or out-of-range) bar are discarded. hbars are price-space
- * and pass through unchanged.
+ * and pass through, except their `color` is resolved here once (wire
+ * color, else the tier theme for indicator `name`) instead of per frame.
  */
 export function toDataSpace(
   ind: SeriesIndicator,
   remap: number[],
+  name = "",
 ): SeriesIndicator {
   const kept: number[] = [];
   remap.forEach((d, p) => {
@@ -118,7 +120,9 @@ export function toDataSpace(
     const x2 = remap[d.x2] ?? -1;
     return x1 < 0 || x2 < 0 ? [] : [{ ...d, x1, x2 }];
   });
-  return { ...ind, fills, divlines };
+  const colors = ind.hbars ? hbarColors(ind.hbars, ind.hlines ?? [], name) : [];
+  const hbars = ind.hbars?.map((h, i) => ({ ...h, color: colors[i] }));
+  return { ...ind, fills, divlines, hbars };
 }
 
 export interface ValueExtent {
@@ -141,14 +145,14 @@ export function wireColor(c: string | undefined): string | undefined {
 /**
  * Per-bar values the y-axis has to include beyond the line/bar figures:
  * the min/max of every fill edge at that bar and, for oscillator panes,
- * the payload's `y_range` and every hline level. Overlays skip both:
- * `y_range` would pin the price axis, and a far-away hline (e.g. a
- * distant volume-profile node) would squash the candles; an overlay's
- * hlines are still drawn, just clipped when off-screen. That keeps fixed ranges such as RSI 0–100 or
+ * the payload's `y_range`. That keeps fixed ranges such as RSI 0–100 or
  * Kalman ±2.5 (whose OB/OS zones live at the edges) and gives
  * geometry-only panes a real axis. klinecharts auto-scales over figure
  * values only, so Chart.tsx feeds these through two invisible figures.
  * Overlays ignore `y_range`, since pinning the price axis would be wrong.
+ * hlines are deliberately not included, in any pane: the PNG renderer's
+ * auto-range ignores them too, and a level far from the data (e.g. CVD's
+ * zero line) would squash the series. Off-range hlines are just clipped.
  */
 export function valueExtents(
   ind: SeriesIndicator,
@@ -156,17 +160,10 @@ export function valueExtents(
 ): ValueExtent[] {
   const [rlo, rhi] =
     !ind.is_overlay && ind.y_range ? ind.y_range : [null, null];
-  const levels = ind.is_overlay
-    ? []
-    : (ind.hlines ?? []).map((h) => h.y).filter(isNum);
   const out: ValueExtent[] = [];
   for (let i = 0; i < length; i++) {
     let lo = isNum(rlo) ? rlo : null;
     let hi = isNum(rhi) ? rhi : null;
-    for (const v of levels) {
-      lo = lo === null ? v : Math.min(lo, v);
-      hi = hi === null ? v : Math.max(hi, v);
-    }
     for (const f of ind.fills ?? []) {
       for (const v of [f.y1[i], f.y2[i]]) {
         if (!isNum(v)) continue;

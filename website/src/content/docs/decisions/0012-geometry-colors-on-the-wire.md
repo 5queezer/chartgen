@@ -66,11 +66,12 @@ newer web build still works against an older server.
 solid lines in the wire color, clipped to the pane, as the PNG renderer
 does. The server does not mark any hline as dashed, so none is.
 
-Y-axis rule: hline levels feed the same invisible `range_lo`/`range_hi`
-figures as fill edges in oscillator panes. Overlay indicators on the
-price pane do not include their hlines, because a far-away level such as
-a distant volume-profile node would squash the candles; those lines are
-simply not drawn when they fall outside the visible range.
+Y-axis rule: hline levels do not feed the auto-scale, in any pane. The
+PNG renderer's auto-range ignores hlines, and a level far from the data
+(CVD's zero line, a distant volume-profile node) would squash the series
+or candles. The web therefore matches the PNG: hlines are drawn where
+they fall inside the visible range and are clipped otherwise. Oscillators
+that need their levels in view (RSI 70/30) get them from `y_range`.
 
 ### Consequences
 

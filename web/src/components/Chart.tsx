@@ -54,7 +54,6 @@ import {
   divlineSegments,
   fillColors,
   fillPolygons,
-  hbarColors,
   hbarRects,
   hlineStrokes,
   payloadToDataIndex,
@@ -125,7 +124,7 @@ const registeredIndicators = new Set<string>();
 interface IndicatorShape {
   lines: number;
   hist: number;
-  /** True when the indicator emits fills, hbars or divlines. */
+  /** True when the indicator emits fills, hbars, divlines or hlines. */
   geometry: boolean;
 }
 
@@ -181,14 +180,13 @@ function drawGeometry(name: string): IndicatorDrawCallback {
     ctx.globalCompositeOperation = "source-over";
 
     if (ind.hbars && ind.hbars.length > 0) {
-      const colors = hbarColors(ind.hbars, ind.hlines ?? [], name);
       for (const r of hbarRects(
         ind.hbars,
         bounding.width,
         bounding.height,
         map.y,
       )) {
-        ctx.fillStyle = colors[r.index]!;
+        ctx.fillStyle = ind.hbars[r.index]!.color!;
         ctx.fillRect(r.x, r.y, r.width, r.height);
       }
     }
@@ -228,9 +226,11 @@ function drawHLines(
   ctx.setLineDash([]);
   for (const h of hlineStrokes(ind.hlines ?? [], bounding.height, mapY)) {
     ctx.strokeStyle = h.color;
+    // Snap to the pixel center so a 1px line is not blurred over two rows.
+    const y = Math.round(h.y) + 0.5;
     ctx.beginPath();
-    ctx.moveTo(0, h.y);
-    ctx.lineTo(bounding.width, h.y);
+    ctx.moveTo(0, y);
+    ctx.lineTo(bounding.width, y);
     ctx.stroke();
   }
 }
@@ -327,7 +327,8 @@ function shapeFromPayload(
   const geometry =
     (ind.fills?.length ?? 0) > 0 ||
     (ind.hbars?.length ?? 0) > 0 ||
-    (ind.divlines?.length ?? 0) > 0;
+    (ind.divlines?.length ?? 0) > 0 ||
+    (ind.hlines?.length ?? 0) > 0;
   return { lines, hist, geometry };
 }
 
@@ -818,7 +819,7 @@ export function Chart(props: ChartProps): JSX.Element {
       ensureRegistered(name, shape);
       geometryStore.set(
         indicatorRegName(name),
-        toDataSpace(series.indicators[name]!, remap),
+        toDataSpace(series.indicators[name]!, remap, name),
       );
     }
 

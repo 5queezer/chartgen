@@ -357,7 +357,7 @@ describe("toDataSpace", () => {
   it("passes hbars and metadata through, keeps absent channels absent", () => {
     const hbars = [hbar({})];
     const out = toDataSpace(indicator({ hbars, y_range: [0, 1] }), remap);
-    expect(out.hbars).toBe(hbars);
+    expect(out.hbars).toEqual([expect.objectContaining(hbars[0]!)]);
     expect(out.y_range).toEqual([0, 1]);
     expect(out.fills).toBeUndefined();
     expect(out.divlines).toBeUndefined();
@@ -495,11 +495,22 @@ describe("wire colors vs theme fallback", () => {
     ]);
   });
 
-  it("valueExtents includes hline levels for panes but not overlays", () => {
-    const hlines = [{ y: 30 }, { y: 70 }];
-    expect(valueExtents(indicator({ hlines }), 1)).toEqual([{ lo: 30, hi: 70 }]);
-    expect(valueExtents(indicator({ hlines, is_overlay: true }), 1)).toEqual([
-      { lo: null, hi: null },
+  it("valueExtents ignores hline levels, as the PNG auto-range does", () => {
+    const hlines = [{ y: 0 }, { y: 70 }];
+    expect(valueExtents(indicator({ hlines }), 1)).toEqual([{ lo: null, hi: null }]);
+    expect(valueExtents(indicator({ hlines, y_range: [0, 100] }), 1)).toEqual([
+      { lo: 0, hi: 100 },
     ]);
+  });
+
+  it("toDataSpace resolves hbar colors once (wire color, else tier)", () => {
+    const hb = { y: 1, height: 1, width: 0.5, offset: 0, left: true };
+    const out = toDataSpace(
+      indicator({ hbars: [{ ...hb, color: "rgba(9,9,9,1)" }, { ...hb, width: 0.1 }] }),
+      [],
+      "vpvr",
+    );
+    expect(out.hbars![0]!.color).toBe("rgba(9,9,9,1)");
+    expect(out.hbars![1]!.color).toBe(hbarTheme("vpvr").out);
   });
 });
