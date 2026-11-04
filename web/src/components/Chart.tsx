@@ -6,10 +6,10 @@
 // The indicator's `calc` callback reads its stashed values back off the
 // bars — no math runs in the browser.
 //
-// Fills, hbars and divlines have no klinecharts figure type. Each
-// indicator instance carries its payload entry as `extendData`, and the
-// template's `draw` callback paints them from geometry.ts primitives
-// before the default line/bar figures (ADR-0010).
+// Fills, hbars and divlines have no klinecharts figure type. Each payload
+// entry, re-indexed into data space, sits in the module-level
+// `geometryStore`; the template's `draw` callback paints it from
+// geometry.ts primitives before the default line/bar figures (ADR-0010).
 //
 // Pane lifecycle: we track created panes in a signal keyed by indicator
 // name. When a new indicator shows up we `createIndicator`; when one
@@ -52,6 +52,9 @@ import {
   hbarRects,
   hbarTheme,
   hbarTiers,
+  payloadToDataIndex,
+  toDataSpace,
+  valueExtents,
   type Mapper,
   type SeriesIndicator,
 } from "./geometry";
@@ -124,24 +127,40 @@ const isEmptyShape = (s: IndicatorShape): boolean =>
   s.lines === 0 && s.hist === 0 && !s.geometry;
 
 /**
+ * Geometry per registered indicator name, already re-indexed into data
+ * space (`toDataSpace`). Written by the data effect before
+ * `applyNewData`, whose recalc + repaint is what picks it up, so a new
+ * payload costs no extra `overrideIndicator` pass. Module-level like
+ * klinecharts's own indicator registry; the app mounts one Chart.
+ */
+const geometryStore = new Map<string, SeriesIndicator>();
+
+/**
  * klinecharts `draw` callback painting the indicator's fills, hbars and
- * divlines from the payload entry stashed in `extendData`. Runs on every
- * frame, so the geometry follows pan/zoom/rescale. Returns false so the
- * default line/bar figures still draw on top.
+ * divlines from `geometryStore`. Runs on every frame, so the geometry
+ * follows pan/zoom/rescale. Returns false so the default line/bar
+ * figures still draw on top.
  */
 function drawGeometry(name: string): IndicatorDrawCallback {
-  return ({ ctx, indicator, visibleRange, bounding, xAxis, yAxis }) => {
-    const ind = indicator.extendData as SeriesIndicator | undefined;
+  const regName = indicatorRegName(name);
+  return ({ ctx, visibleRange, bounding, xAxis, yAxis }) => {
+    const ind = geometryStore.get(regName);
     if (!ind) return false;
     const map: Mapper = {
       x: (i) => xAxis.convertToPixel(i),
       y: (v) => yAxis.convertToPixel(v),
     };
 
-    // Fills go behind what the pane has already painted (grid, candles),
-    // as in TradingView; klinecharts restores the context after draw.
+    // Fills go behind the candles already on this canvas, as in
+    // TradingView; the grid is painted afterwards on top. This relies on
+    // nothing opaque (e.g. a background) being painted on the pane canvas
+    // first. The e2e z-order test guards it. With destination-over each
+    // paint lands beneath the previous one, so iterate in reverse to keep
+    // the server's paint order. klinecharts restores the context after draw.
     ctx.globalCompositeOperation = "destination-over";
-    (ind.fills ?? []).forEach((fill, fi) => {
+    const fills = ind.fills ?? [];
+    for (let fi = fills.length - 1; fi >= 0; fi--) {
+      const fill = fills[fi]!;
       const theme = fillTheme(name, fi);
       for (const poly of fillPolygons(fill.y1, fill.y2, visibleRange, map)) {
         ctx.fillStyle = poly.up ? theme.up : theme.down;
@@ -152,7 +171,7 @@ function drawGeometry(name: string): IndicatorDrawCallback {
         ctx.closePath();
         ctx.fill();
       }
-    });
+    }
     ctx.globalCompositeOperation = "source-over";
 
     if (ind.hbars && ind.hbars.length > 0) {
@@ -205,10 +224,18 @@ function ensureRegistered(name: string, shape: IndicatorShape): void {
   const figures: Array<{
     key: string;
     title: string;
-    type: "line" | "bar";
+    type?: "line" | "bar";
     baseValue?: number;
     styles?: () => { color: string };
-  }> = [];
+  }> = [
+    // Typeless figures draw nothing but feed klinecharts's y-axis
+    // auto-scale: fill edges and the payload y_range (`valueExtents`).
+    // Used instead of minValue/maxValue, which klinecharts only applies
+    // when figures already have values (geometry-only panes have none)
+    // and whose override path sets maxValue via setMinValue.
+    { key: "range_lo", title: "" },
+    { key: "range_hi", title: "" },
+  ];
 
   for (let i = 0; i < shape.lines; i++) {
     figures.push({
@@ -237,9 +264,14 @@ function ensureRegistered(name: string, shape: IndicatorShape): void {
     precision: 2,
     figures: figures as never,
     draw: drawGeometry(name),
-    calc: (dataList: KLineData[]) =>
-      dataList.map((bar) => {
-        const row: Row = {};
+    calc: (dataList: KLineData[]) => {
+      const geo = geometryStore.get(regName);
+      const extents = geo ? valueExtents(geo, dataList.length) : [];
+      return dataList.map((bar, di) => {
+        const row: Row = {
+          range_lo: extents[di]?.lo ?? null,
+          range_hi: extents[di]?.hi ?? null,
+        };
         for (let i = 0; i < shape.lines; i++) {
           const raw = bar[lineStashKey(name, i)];
           row[`line${i}`] =
@@ -251,7 +283,8 @@ function ensureRegistered(name: string, shape: IndicatorShape): void {
             typeof raw === "number" && Number.isFinite(raw) ? raw : null;
         }
         return row;
-      }),
+      });
+    },
   });
 }
 
@@ -735,6 +768,7 @@ export function Chart(props: ChartProps): JSX.Element {
       const stale = untrack(paneIds);
       for (const name of Object.keys(stale)) {
         c.removeIndicator(stale[name]!, indicatorRegName(name));
+        geometryStore.delete(indicatorRegName(name));
       }
       setPaneIds({});
       setHeaders([]);
@@ -743,13 +777,19 @@ export function Chart(props: ChartProps): JSX.Element {
 
     // 1. Register any indicators we haven't seen before. Must happen
     //    before applyNewData so klinecharts's calc pipeline has the
-    //    figure config to draw against.
+    //    figure config to draw against. The geometry store is filled here
+    //    too, in data space, so applyNewData's recalc and repaint see it.
     const visible = new Set(visibleKey().split("\n"));
     const names = Object.keys(series.indicators).filter((n) => visible.has(n));
+    const remap = payloadToDataIndex(series.bars);
     for (const name of names) {
       const shape = shapeFromPayload(series, name);
       if (isEmptyShape(shape)) continue;
       ensureRegistered(name, shape);
+      geometryStore.set(
+        indicatorRegName(name),
+        toDataSpace(series.indicators[name]!, remap),
+      );
     }
 
     // 2. Push bar data with all per-indicator stashes applied.
@@ -767,29 +807,23 @@ export function Chart(props: ChartProps): JSX.Element {
       if (isEmptyShape(shape)) continue; // skip empty
       activeNames.add(name);
       const regName = indicatorRegName(name);
-      const ind = series.indicators[name]!;
-      // extendData feeds the geometry draw callback; refresh it on every
-      // payload so fills/hbars/divlines track the new bars.
       if (currentPanes[name]) {
-        c.overrideIndicator({ name: regName, extendData: ind }, currentPanes[name]);
         nextPanes[name] = currentPanes[name]!;
         continue;
       }
+      const ind = series.indicators[name]!;
       // Overlays attach to the candle pane; oscillators get their own
       // pane (isStack=true stacks panes bottom-up).
       const paneOptions = ind.is_overlay
         ? { id: CANDLE_PANE_ID }
         : { height: 120 };
-      const newPaneId = c.createIndicator(
-        { name: regName, extendData: ind },
-        true,
-        paneOptions,
-      );
+      const newPaneId = c.createIndicator(regName, true, paneOptions);
       if (newPaneId !== null) nextPanes[name] = newPaneId;
     }
     for (const name of Object.keys(currentPanes)) {
       if (!activeNames.has(name)) {
         c.removeIndicator(currentPanes[name]!, indicatorRegName(name));
+        geometryStore.delete(indicatorRegName(name));
       }
     }
     setPaneIds(nextPanes);
