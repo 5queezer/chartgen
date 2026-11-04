@@ -94,8 +94,12 @@ reviewer pays the cost.
   `npm run dev -- --port $WEB_PORT --strictPort` in `web/`.
   `CHARTGEN_PORT` (default 9315) and `WEB_PORT` (default 5173) are
   configurable so parallel checkouts do not collide; the Vite proxy
-  target follows via `CHARTGEN_DEV_TARGET`. `reuseExistingServer:
-  !process.env.CI` keeps local loops fast. Chartgen gets a 300-second
+  target follows via `CHARTGEN_DEV_TARGET`. Servers already listening on
+  those ports are reused only when `PW_REUSE_SERVER=1` is set (never on
+  CI); otherwise Playwright fails fast on a busy port, so a leftover
+  server from another checkout is never tested by mistake. Reuse is an
+  opt-in for fast local loops against servers you started from this
+  checkout. Chartgen gets a 300-second
   timeout because a cold build is measured in minutes on CI without a
   cache; on a warm Swatinem cache it's seconds. A debug build is used
   because it compiles faster than release and is fast enough here.

@@ -90,7 +90,9 @@ The chart stays live while the page is open, as in TradingView
   next 500 older bars load in place, without moving what is on screen. A
   small "Loading history…" badge shows at the left edge meanwhile. If a page
   fails, the badge offers **Retry**. Paging stops when the data source has
-  no older bars.
+  no older bars, or at 20,000 loaded bars, where the left edge shows
+  "History limit reached" (every live update recalculates the indicators
+  over all loaded bars, so the history is capped).
 - **Status.** A badge after the status text shows `live`, `paused` (tab
   hidden), `live: retry in Ns` after a failed update, or `resyncing...`
   while the chart reloads to catch up.
@@ -111,8 +113,11 @@ full reload.
 
 - Polling pauses while the tab is hidden and catches up as soon as it is
   visible again. If bars were missed (a hidden tab, a sleeping laptop),
-  the app fetches a longer tail to fill the gap. A gap of more than 700
-  bars reloads the chart, which also scrolls it back to the newest bar.
+  the app fetches a longer tail to fill the gap, without moving the view.
+  The gap is estimated from the clock; when that comes to more than 700
+  bars a 24/7 chart reloads, which also scrolls it back to the newest bar.
+  Other symbols first try a 700-bar tail, because closed hours hold no
+  bars and the real gap is usually smaller.
 - **Limitations.** Volume profiles (`volume_profile`/VPVR, `tpo`,
   `hvn_lvn`) keep the profile of the full load and are not recomputed for
   live bars or older pages. A divergence line that forms while the chart
