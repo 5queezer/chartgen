@@ -451,6 +451,7 @@ export interface ChartProps {
   onToggleHidden?: (name: string) => void;
   onSettings?: (name: string) => void;
   onRemove?: (name: string) => void;
+  onChartReady?: (chart: KChart) => void;
 }
 
 export function Chart(props: ChartProps): JSX.Element {
@@ -483,6 +484,7 @@ export function Chart(props: ChartProps): JSX.Element {
       customApi: { formatBigNumber },
     });
     setChart(c);
+    if (c) props.onChartReady?.(c);
 
     // Wire the crosshair subscription. klinecharts fires an event on
     // every mouse move; we debounce into a single rAF tick so Solid

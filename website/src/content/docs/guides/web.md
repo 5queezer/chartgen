@@ -55,6 +55,44 @@ uppercase `M` means month (`1M`), lowercase `m` minutes. A lone `D`, `W`
 or `M` means one day, week or month. Only timeframes the backend serves are
 accepted.
 
+## Drawing tools
+
+The vertical toolbar on the left of the chart holds the drawing tools:
+trend line, ray, extended line, horizontal line, horizontal ray,
+vertical line, parallel channel, fib retracement, rectangle, text
+annotation and price label. Below them are a magnet toggle (off, weak,
+strong), lock all, hide all and remove all (asks for confirmation). The
+button at the top switches the cursor between crosshair and arrow.
+
+A tool is armed for exactly one drawing: pick it, click the chart to
+place the points, and the tool is released. Pick it again or press `Esc`
+to cancel. Drawings pan and zoom with the chart.
+
+- **Select** a drawing by clicking it, then press `Delete` or
+  `Backspace` to remove it.
+- **Right-click** a drawing for Remove, Lock and Hide. A locked drawing
+  ignores the mouse, so unlock it with the toolbar's lock-all button.
+- **Double-click** a text annotation to edit its text.
+
+Drawings are saved per symbol in `localStorage` under
+`chartgen.drawings.<SYMBOL>` as time and price points, so they survive
+reloads and timeframe changes. Stored entries are validated on load and
+malformed ones are dropped.
+
+| Keys | Action |
+|---|---|
+| `Alt+T` | Trend line |
+| `Alt+H` | Horizontal line |
+| `Alt+J` | Horizontal ray |
+| `Alt+V` | Vertical line |
+| `Alt+F` | Fib retracement |
+| `Esc` | Cancel the armed tool or close the drawing menu |
+| `Delete` / `Backspace` | Remove the selected drawing |
+| `Ctrl+Z` / `Cmd+Z` | Undo the last drawing action |
+
+The shortcuts use modifiers so they do not clash with the letter and
+digit shortcuts above.
+
 ## Getting started
 
 ```bash

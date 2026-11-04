@@ -10,7 +10,10 @@ import {
   type JSX,
 } from "solid-js";
 
+import type { Chart as KChart } from "klinecharts";
+
 import { Chart } from "./components/Chart";
+import { DrawingToolbar } from "./components/DrawingToolbar";
 import { IndicatorChips } from "./components/IndicatorChips";
 import { IndicatorPicker } from "./components/IndicatorPicker";
 import { IndicatorSettings } from "./components/IndicatorSettings";
@@ -45,6 +48,7 @@ export function App(): JSX.Element {
   const [pickerOpen, setPickerOpen] = createSignal(false);
   // Index (into the active set) of the indicator whose settings dialog is open.
   const [settingsIndex, setSettingsIndex] = createSignal<number | null>(null);
+  const [chart, setChart] = createSignal<KChart | null>(null);
 
   // Consume the OAuth redirect (if any) before the first render gets
   // far enough to trigger a query. This is best-effort — if it fails,
@@ -165,15 +169,19 @@ export function App(): JSX.Element {
         error={listIndicators.isError ? listIndicators.error : null}
         active={activeIndicators()}
       />
-      <main class="flex-1 min-h-0">
-        <Chart
-          series={query.data ?? null}
-          activeIndicators={wireIndicators()}
-          chartType={chartType()}
-          onToggleHidden={(n) => toggleIndicatorHidden(indexOf(n))}
-          onSettings={(n) => setSettingsIndex(indexOf(n))}
-          onRemove={removeIndicator}
-        />
+      <main class="flex flex-1 min-h-0">
+        <DrawingToolbar chart={chart()} symbol={symbol()} />
+        <div class="flex-1 min-w-0">
+          <Chart
+            series={query.data ?? null}
+            activeIndicators={wireIndicators()}
+            chartType={chartType()}
+            onToggleHidden={(n) => toggleIndicatorHidden(indexOf(n))}
+            onSettings={(n) => setSettingsIndex(indexOf(n))}
+            onRemove={removeIndicator}
+            onChartReady={setChart}
+          />
+        </div>
       </main>
     </div>
   );
