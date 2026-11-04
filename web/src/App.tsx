@@ -20,6 +20,7 @@ import { IndicatorSettings } from "./components/IndicatorSettings";
 import { mergeParams } from "./lib/paramForm";
 import { StatusLine, type Status } from "./components/StatusLine";
 import { Toolbar } from "./components/Toolbar";
+import { Watchlist } from "./components/Watchlist";
 import {
   applyChartAction,
   chartKeyAction,
@@ -223,6 +224,7 @@ export function App(): JSX.Element {
             onChartReady={setChart}
           />
         </div>
+        <Watchlist session={session} enabled={authReady()} />
       </main>
     </div>
   );
