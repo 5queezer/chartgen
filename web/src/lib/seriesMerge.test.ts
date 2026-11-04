@@ -6,6 +6,7 @@ import {
   mergeOlder,
   mergeTail,
   missingBars,
+  sortChannels,
 } from "./seriesMerge";
 
 // A hand-made stand-in for the server's sample source: bar i opens at
@@ -167,11 +168,12 @@ describe("mergeOlder", () => {
     expect(page).toEqual(p0);
   });
 
-  it("accepts an empty last page and takes its has_more", () => {
+  it("accepts an empty page and ends the history with it", () => {
     const cur = serve({ bars: 30, now: 30 }); // bars 1..30
     const short = mergeOlder(cur, serve({ bars: 30, end: 1, now: 30 }));
     expect(short.ok && short.count).toBe(1);
-    const empty = mergeOlder(cur, serve({ bars: 0, end: 1, now: 30, has_more: false }));
+    // Even if the page claims more: asking again would loop on it.
+    const empty = mergeOlder(cur, serve({ bars: 0, end: 1, now: 30, has_more: true }));
     expect(empty.ok).toBe(true);
     if (empty.ok) {
       expect(empty.count).toBe(0);
@@ -292,12 +294,24 @@ describe("mergeTail", () => {
     expect(mergeTail(cur, longer)).toEqual({ ok: false, reason: "mismatch" });
   });
 
-  it("rejects a tail that starts before our history", () => {
-    const cur = serve({ bars: 2, now: 100 });
-    expect(mergeTail(cur, serve({ bars: 5, now: 100 }))).toEqual({
-      ok: false,
-      reason: "mismatch",
-    });
+  it("skips tail bars older than our history", () => {
+    // Our history is bars 91..100; a catch-up tail of 20 bars (86..105)
+    // reaches back past it.
+    const cur = serve({ bars: 10, now: 100 });
+    const r = mergeTail(cur, serve({ bars: 20, now: 105, tick: 1 }));
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.from).toBe(0);
+    const want = serve({ bars: 15, now: 105, tick: 1 });
+    // Lines/signals equal the request over our range; divlines may differ
+    // only by clipping at our first bar, which the merge keeps from ours.
+    expect(r.series.bars).toEqual(want.bars);
+    expect(r.series.indicators.macd!.lines).toEqual(want.indicators.macd!.lines);
+    expect(r.series.indicators.macd!.signals).toEqual(want.indicators.macd!.signals);
+    for (const d of r.series.indicators.macd!.divlines!) {
+      expect(r.series.bars[d.x1]!.t).toBe(d.t1);
+      expect(r.series.bars[d.x2]!.t).toBe(d.t2);
+    }
   });
 
   it("rejects a mismatched header or shape and leaves current untouched", () => {
@@ -332,6 +346,30 @@ describe("mergeTail", () => {
     const profile = clone(cur.indicators.vpvr!);
     const merged = tail(cur, serve({ bars: 2, now: 101, tick: 7 }));
     expect(merged.indicators.vpvr).toEqual(profile);
+  });
+
+  it("rebuilds only the signals and divlines in the tail window, in place", () => {
+    const cur = serve({ bars: 30, now: 99 });
+    const signals = cur.indicators.macd!.signals!;
+    const divlines = cur.indicators.macd!.divlines!;
+    const [oldSignal, oldLine] = [signals[0], divlines[0]];
+    const merged = tail(cur, serve({ bars: 2, now: 100 }));
+    expect(merged.indicators.macd!.signals).toBe(signals);
+    expect(merged.indicators.macd!.divlines).toBe(divlines);
+    expect(signals[0]).toBe(oldSignal);
+    expect(divlines[0]).toBe(oldLine);
+  });
+
+  it("sortChannels orders signals by bar and divlines by end bar", () => {
+    const s = serve({ bars: 30, now: 100 });
+    const macd = s.indicators.macd!;
+    macd.signals!.reverse();
+    macd.divlines!.reverse();
+    sortChannels(s);
+    const xs = macd.signals!.map((g) => g.x);
+    expect(xs).toEqual([...xs].sort((a, b) => a - b));
+    const ends = macd.divlines!.map((d) => Math.max(d.x1, d.x2));
+    expect(ends).toEqual([...ends].sort((a, b) => a - b));
   });
 
   it("drops a signal that vanished from the forming bar", () => {
