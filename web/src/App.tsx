@@ -1,4 +1,4 @@
-// Top-level component. One screen: title, form, status, chart.
+// Top-level component. One screen: title, toolbar, status, chart.
 
 import {
   createMemo,
@@ -12,7 +12,7 @@ import { Chart } from "./components/Chart";
 import { IndicatorChips } from "./components/IndicatorChips";
 import { IndicatorPicker } from "./components/IndicatorPicker";
 import { StatusLine, type Status } from "./components/StatusLine";
-import { SymbolForm, type Timeframe } from "./components/SymbolForm";
+import { Toolbar } from "./components/Toolbar";
 import { createMcpSession } from "./mcp";
 import { tryHandlePendingRedirect } from "./oauth";
 import { createChartQuery, createListIndicatorsQuery } from "./queries";
@@ -21,23 +21,18 @@ import {
   activeIndicators,
   removeIndicator,
 } from "./stores/indicators";
+import { chartType, symbol, timeframe } from "./stores/layout";
 
 export function App(): JSX.Element {
   // Long-lived session for the app's lifetime.
   const session = createMcpSession();
 
-  const [ticker, setTicker] = createSignal("BTCUSDT");
-  const [timeframe, setTimeframe] = createSignal<Timeframe>("1h");
-  // The query only runs once the user clicks Load — a trigger signal
-  // gates `enabled`. Clicking Load bumps a counter so the query also
-  // refetches if the user re-submits with identical inputs.
-  const [triggered, setTriggered] = createSignal(false);
   const [authReady, setAuthReady] = createSignal(false);
   const [pickerOpen, setPickerOpen] = createSignal(false);
 
   // Consume the OAuth redirect (if any) before the first render gets
   // far enough to trigger a query. This is best-effort — if it fails,
-  // the first Load click will surface the error via the query path.
+  // the first query will surface the error.
   onMount(async () => {
     await tryHandlePendingRedirect();
     setAuthReady(true);
@@ -51,15 +46,14 @@ export function App(): JSX.Element {
   });
 
   const query = createChartQuery(session, () => ({
-    ticker: ticker(),
+    ticker: symbol(),
     timeframe: timeframe(),
     indicators: activeIndicators(),
-    enabled: triggered() && authReady(),
+    enabled: authReady(),
   }));
 
   // The indicator registry only changes between deploys, so this query
-  // is cached forever. It fires as soon as auth is ready — the user
-  // doesn't need to hit Load first.
+  // is cached forever. It fires as soon as auth is ready.
   const listIndicators = createListIndicatorsQuery(session, authReady);
 
   const status = createMemo<Status>(() => {
@@ -76,24 +70,11 @@ export function App(): JSX.Element {
     return { kind: "ready" };
   });
 
-  const onSubmit = () => {
-    setTriggered(true);
-    // Force a refetch if the key hasn't changed.
-    void query.refetch();
-  };
-
   return (
     <div class="flex flex-col h-screen w-screen">
       <header class="flex items-center gap-4 px-4 py-3 border-b border-[color:var(--color-border)]">
         <h1 class="text-lg font-semibold mr-4 leading-none">chartgen</h1>
-        <SymbolForm
-          ticker={ticker()}
-          timeframe={timeframe()}
-          onTickerChange={setTicker}
-          onTimeframeChange={setTimeframe}
-          onSubmit={onSubmit}
-          disabled={!authReady() || query.isFetching}
-        />
+        <Toolbar />
         <button
           type="button"
           onClick={() => setPickerOpen(true)}
@@ -122,6 +103,7 @@ export function App(): JSX.Element {
         <Chart
           series={query.data ?? null}
           activeIndicators={activeIndicators()}
+          chartType={chartType()}
         />
       </main>
     </div>

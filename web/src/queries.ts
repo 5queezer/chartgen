@@ -2,7 +2,7 @@
 // server-state query for v0.1; alerts, positions, and orders will grow
 // their own hooks here as they land.
 
-import { createQuery } from "@tanstack/solid-query";
+import { createQuery, keepPreviousData } from "@tanstack/solid-query";
 import type { Accessor } from "solid-js";
 
 import type { McpSession } from "./mcp";
@@ -20,7 +20,7 @@ export interface ChartQueryInput {
   ticker: string;
   timeframe: string;
   indicators: ActiveIndicator[];
-  /** Gates the query — flip to true when the user clicks Load. */
+  /** Gates the query — true once auth is ready. */
   enabled: boolean;
 }
 
@@ -52,6 +52,8 @@ export function createChartQuery(
       queryFn: () =>
         session.callGenerateChart({ ticker, timeframe, indicators }),
       staleTime: 60_000,
+      // Keep the previous chart on screen while a new symbol/timeframe loads.
+      placeholderData: keepPreviousData,
       enabled,
       retry: (failureCount: number, error: Error) => {
         // The MCP wrapper re-auths once on 401, so any 401 that bubbles
