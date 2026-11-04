@@ -5,7 +5,76 @@ use serde_json::{json, Value};
 
 // ---- VWAP (overlay) ----
 
-pub struct Vwap;
+/// TradingView "Anchor Period" choices supported here.
+const VWAP_ANCHORS: &[&str] = &["session", "week", "month", "none"];
+
+fn anchor_param() -> Value {
+    json!({"name": "anchor", "type": "string", "default": "session", "enum": VWAP_ANCHORS,
+           "description": "Reset period: UTC day (session), ISO week, calendar month, or never"})
+}
+
+fn configure_anchor(anchor: &mut String, params: &Value) {
+    if let Some(v) = params
+        .get("anchor")
+        .and_then(|v| v.as_str())
+        .filter(|v| VWAP_ANCHORS.contains(v))
+    {
+        *anchor = v.to_string();
+    }
+}
+
+/// Pine `ta.vwap(hlc3, isNewPeriod, 1)`: volume-weighted mean of hlc3 and its
+/// volume-weighted population stdev, both reset on the first bar of every
+/// anchor period. Periods are UTC calendar days / ISO weeks / months of the
+/// bar times; on daily and higher charts "session" therefore resets on every
+/// bar (TradingView's `timeframe.change("D")` is true on each daily bar).
+/// Without bar timestamps the sums never reset (anchor "none").
+fn anchored_vwap(data: &OhlcvData, anchor: &str) -> (Vec<f64>, Vec<f64>) {
+    use super::pine::{bar_times, period_key, Period};
+    let period = match anchor {
+        "session" => Some(Period::Day),
+        "week" => Some(Period::Week),
+        "month" => Some(Period::Month),
+        _ => None,
+    };
+    let times = bar_times(data);
+    let n = data.len();
+    let (mut vwap, mut sd) = (vec![f64::NAN; n], vec![f64::NAN; n]);
+    let (mut sv, mut sv_src, mut sv_src2) = (0.0, 0.0, 0.0);
+    let mut prev_key = None;
+    for (i, bar) in data.bars.iter().enumerate() {
+        let key = match (&times, period) {
+            (Some(t), Some(p)) => Some(period_key(t[i], p)),
+            _ => None,
+        };
+        if i == 0 || key != prev_key {
+            (sv, sv_src, sv_src2) = (0.0, 0.0, 0.0);
+        }
+        prev_key = key;
+        let tp = (bar.high + bar.low + bar.close) / 3.0;
+        sv += bar.volume;
+        sv_src += tp * bar.volume;
+        sv_src2 += tp * tp * bar.volume;
+        if sv > 0.0 {
+            let m = sv_src / sv;
+            vwap[i] = m;
+            sd[i] = (sv_src2 / sv - m * m).max(0.0).sqrt();
+        }
+    }
+    (vwap, sd)
+}
+
+pub struct Vwap {
+    pub anchor: String,
+}
+
+impl Default for Vwap {
+    fn default() -> Self {
+        Self {
+            anchor: "session".into(),
+        }
+    }
+}
 
 impl Indicator for Vwap {
     fn name(&self) -> &str {
@@ -13,23 +82,19 @@ impl Indicator for Vwap {
     }
 
     fn description(&self) -> &str {
-        "Volume Weighted Average Price — intraday anchor"
+        "Volume Weighted Average Price — anchored to the session, week or month"
+    }
+
+    fn params(&self) -> Value {
+        json!([anchor_param()])
+    }
+
+    fn configure(&mut self, params: &Value) {
+        configure_anchor(&mut self.anchor, params);
     }
 
     fn compute(&self, data: &OhlcvData) -> PanelResult {
-        let n = data.len();
-        let mut vals = vec![f64::NAN; n];
-        let mut cum_tp_vol = 0.0;
-        let mut cum_vol = 0.0;
-
-        for (i, bar) in data.bars.iter().enumerate() {
-            let tp = (bar.high + bar.low + bar.close) / 3.0;
-            cum_tp_vol += tp * bar.volume;
-            cum_vol += bar.volume;
-            if cum_vol > 0.0 {
-                vals[i] = cum_tp_vol / cum_vol;
-            }
-        }
+        let (vals, _) = anchored_vwap(data, &self.anchor);
 
         PanelResult {
             lines: vec![Line {
@@ -570,11 +635,16 @@ impl Indicator for HistVol {
 
 pub struct VwapBands {
     pub std_dev: f64,
+    pub anchor: String,
 }
 
 impl Default for VwapBands {
     fn default() -> Self {
-        Self { std_dev: 2.0 }
+        // TradingView: band multiplier #1 = 1, anchor "Session".
+        Self {
+            std_dev: 1.0,
+            anchor: "session".into(),
+        }
     }
 }
 
@@ -588,39 +658,23 @@ impl Indicator for VwapBands {
     }
 
     fn params(&self) -> Value {
-        json!([{"name": "std_dev", "type": "number", "min": 0, "max": 100, "default": 2.0}])
+        json!([
+            {"name": "std_dev", "type": "number", "min": 0, "max": 100, "default": 1.0},
+            anchor_param()
+        ])
     }
 
     fn configure(&mut self, params: &Value) {
         if let Some(v) = params.get("std_dev").and_then(|v| v.as_f64()) {
             self.std_dev = v;
         }
+        configure_anchor(&mut self.anchor, params);
     }
 
     fn compute(&self, data: &OhlcvData) -> PanelResult {
-        let n = data.len();
-        let mut vwap_vals = vec![f64::NAN; n];
-        let mut upper = vec![f64::NAN; n];
-        let mut lower = vec![f64::NAN; n];
-
-        let mut cum_tp_vol = 0.0;
-        let mut cum_vol = 0.0;
-        let mut cum_tp2_vol = 0.0;
-
-        for (i, bar) in data.bars.iter().enumerate() {
-            let tp = (bar.high + bar.low + bar.close) / 3.0;
-            cum_tp_vol += tp * bar.volume;
-            cum_vol += bar.volume;
-            cum_tp2_vol += tp * tp * bar.volume;
-            if cum_vol > 0.0 {
-                let vwap = cum_tp_vol / cum_vol;
-                let variance = (cum_tp2_vol / cum_vol - vwap * vwap).max(0.0);
-                let std = variance.sqrt();
-                vwap_vals[i] = vwap;
-                upper[i] = vwap + self.std_dev * std;
-                lower[i] = vwap - self.std_dev * std;
-            }
-        }
+        let (vwap_vals, sd) = anchored_vwap(data, &self.anchor);
+        let upper = super::pine::zip(&vwap_vals, &sd, |v, d| v + self.std_dev * d);
+        let lower = super::pine::zip(&vwap_vals, &sd, |v, d| v - self.std_dev * d);
 
         PanelResult {
             lines: vec![
@@ -739,13 +793,33 @@ impl Indicator for HeikinAshi {
 
 pub struct PivotPoints;
 
+/// TradingView "Pivot Points Standard" with Pivots Timeframe "Auto":
+/// intraday charts with a multiplier <= 15 (minutes, or seconds on second
+/// charts) use the day, other intraday charts the week, daily charts the
+/// month, weekly and monthly charts the year.
+fn pivot_period(tf: super::pine::Timeframe) -> super::pine::Period {
+    use super::pine::{Period, Timeframe};
+    match tf {
+        Timeframe::Intraday(secs) => {
+            let multiplier = if secs < 60 { secs } else { secs / 60 };
+            if multiplier <= 15 {
+                Period::Day
+            } else {
+                Period::Week
+            }
+        }
+        Timeframe::Daily(_) => Period::Month,
+        Timeframe::Weekly | Timeframe::Monthly => Period::Year,
+    }
+}
+
 impl Indicator for PivotPoints {
     fn name(&self) -> &str {
         "Pivot"
     }
 
     fn description(&self) -> &str {
-        "Pivot Points — support/resistance from prior bar"
+        "Pivot Points Standard (Traditional) — levels from the previous higher-timeframe period"
     }
 
     fn compute(&self, data: &OhlcvData) -> PanelResult {
@@ -756,14 +830,37 @@ impl Indicator for PivotPoints {
         let mut r2 = vec![f64::NAN; n];
         let mut s2 = vec![f64::NAN; n];
 
-        for i in 1..n {
-            let prev = &data.bars[i - 1];
-            let p = (prev.high + prev.low + prev.close) / 3.0;
-            pivot[i] = p;
-            r1[i] = 2.0 * p - prev.low;
-            s1[i] = 2.0 * p - prev.high;
-            r2[i] = p + (prev.high - prev.low);
-            s2[i] = p - (prev.high - prev.low);
+        // Bars are grouped into UTC calendar periods (see `pivot_period`);
+        // every bar of a period gets the levels from the previous period's
+        // high / low / close, so each level is a step line per period. Without
+        // bar timestamps or a known timeframe the periods are unknown and the
+        // lines stay NaN.
+        let times = super::pine::bar_times(data);
+        let tf = super::pine::timeframe(data);
+        if let (Some(times), Some(tf)) = (times, tf) {
+            let period = pivot_period(tf);
+            let mut prev_hlc: Option<(f64, f64, f64)> = None;
+            let mut cur = (f64::NEG_INFINITY, f64::INFINITY, f64::NAN);
+            let mut cur_key = None;
+            for (i, bar) in data.bars.iter().enumerate() {
+                let key = super::pine::period_key(times[i], period);
+                if cur_key != Some(key) {
+                    if cur_key.is_some() {
+                        prev_hlc = Some(cur);
+                    }
+                    cur = (f64::NEG_INFINITY, f64::INFINITY, f64::NAN);
+                    cur_key = Some(key);
+                }
+                cur = (cur.0.max(bar.high), cur.1.min(bar.low), bar.close);
+                if let Some((h, l, c)) = prev_hlc {
+                    let p = (h + l + c) / 3.0;
+                    pivot[i] = p;
+                    r1[i] = 2.0 * p - l;
+                    s1[i] = 2.0 * p - h;
+                    r2[i] = p + (h - l);
+                    s2[i] = p - (h - l);
+                }
+            }
         }
 
         PanelResult {
@@ -2357,7 +2454,7 @@ impl Indicator for Tpo {
 mod tests {
     use super::*;
     use crate::data::sample_data;
-    use crate::indicators::pine::test_util::{closes, eq, ohlc, NAN};
+    use crate::indicators::pine::test_util::{bars, closes, eq, ohlc, NAN};
 
     fn dot_ys(r: &PanelResult) -> Vec<f64> {
         r.dots.iter().map(|d| d.y).collect()
@@ -2537,5 +2634,104 @@ mod tests {
         d.interval = Some("1d".into());
         let r = HistVol { period: 2 }.compute(&d);
         eq(&r.lines[0].y, &[NAN, NAN, 0.0, 0.0, 0.0]);
+    }
+
+    /// Bars (high, low, close, volume) stamped with unix `times` and `interval`.
+    fn timed(v: &[(f64, f64, f64, f64)], times: &[i64], interval: &str) -> OhlcvData {
+        let mut d = bars(
+            &v.iter()
+                .map(|&(h, l, c, vol)| (c, h, l, c, vol))
+                .collect::<Vec<_>>(),
+        );
+        for (b, t) in d.bars.iter_mut().zip(times) {
+            b.date = t.to_string();
+        }
+        d.interval = Some(interval.into());
+        d
+    }
+
+    fn flat(c: &[(f64, f64)]) -> Vec<(f64, f64, f64, f64)> {
+        c.iter().map(|&(c, v)| (c, c, c, v)).collect()
+    }
+
+    #[test]
+    fn vwap_session_resets_at_the_utc_day() {
+        // 6h bars: Jan 1 12:00, 18:00, Jan 2 00:00, 06:00 (UTC)
+        let t = [1_767_268_800, 1_767_290_400, 1_767_312_000, 1_767_333_600];
+        let d = timed(
+            &flat(&[(10.0, 1.0), (20.0, 3.0), (30.0, 1.0), (40.0, 1.0)]),
+            &t,
+            "6h",
+        );
+        let r = Vwap::default().compute(&d);
+        eq(&r.lines[0].y, &[10.0, 17.5, 30.0, 35.0]);
+        let mut none = Vwap::default();
+        none.configure(&json!({"anchor": "none"}));
+        eq(
+            &none.compute(&d).lines[0].y,
+            &[10.0, 17.5, 20.0, 140.0 / 6.0],
+        );
+        // bands: volume-weighted population stdev within the session
+        let r = VwapBands::default().compute(&d);
+        let sd1 = 18.75f64.sqrt();
+        eq(&r.lines[0].y, &[10.0, 17.5 + sd1, 30.0, 40.0]);
+        eq(&r.lines[2].y, &[10.0, 17.5 - sd1, 30.0, 30.0]);
+        // without bar timestamps there is nothing to anchor to
+        let r = Vwap::default().compute(&closes(&[10.0, 20.0]));
+        eq(&r.lines[0].y, &[10.0, 15.0]);
+    }
+
+    #[test]
+    fn vwap_week_and_month_anchors_on_daily_bars() {
+        let v = flat(&[(10.0, 1.0), (20.0, 1.0), (30.0, 1.0)]);
+        // Fri Jan 2, Mon Jan 5, Tue Jan 6 2026: a new ISO week on Monday
+        let d = timed(&v, &[1_767_312_000, 1_767_571_200, 1_767_657_600], "1d");
+        let mut w = Vwap::default();
+        w.configure(&json!({"anchor": "week"}));
+        eq(&w.compute(&d).lines[0].y, &[10.0, 20.0, 25.0]);
+        // "session" on a daily chart resets on every bar (VWAP = hlc3)
+        eq(&Vwap::default().compute(&d).lines[0].y, &[10.0, 20.0, 30.0]);
+        // Jan 30, Jan 31, Feb 1: a new month on Feb 1
+        let d = timed(&v, &[1_769_731_200, 1_769_817_600, 1_769_904_000], "1d");
+        let mut m = Vwap::default();
+        m.configure(&json!({"anchor": "month"}));
+        eq(&m.compute(&d).lines[0].y, &[10.0, 15.0, 30.0]);
+    }
+
+    #[test]
+    fn pivots_use_the_previous_higher_timeframe_period() {
+        let ys =
+            |r: &PanelResult| -> Vec<Vec<f64>> { r.lines.iter().map(|l| l.y.clone()).collect() };
+        // 15m chart -> daily pivots. Jan 1: H 14, L 8, C 11 -> P 11,
+        // R1 14, S1 8, R2 17, S2 5 for both Jan 2 bars.
+        let v = [
+            (12.0, 8.0, 10.0, 1.0),
+            (14.0, 9.0, 11.0, 1.0),
+            (20.0, 19.0, 19.5, 1.0),
+            (21.0, 18.0, 20.0, 1.0),
+        ];
+        let t = [1_767_310_200, 1_767_311_100, 1_767_312_000, 1_767_312_900];
+        let r = PivotPoints.compute(&timed(&v, &t, "15m"));
+        let want = [11.0, 14.0, 8.0, 17.0, 5.0];
+        for (line, w) in ys(&r).iter().zip(want) {
+            eq(line, &[NAN, NAN, w, w]);
+        }
+        // 1h chart -> weekly pivots: Thu Jan 1 and Sun Jan 4 share an ISO
+        // week, Mon Jan 5 starts the next one.
+        let t = [1_767_268_800, 1_767_290_400, 1_767_567_600, 1_767_571_200];
+        let r = PivotPoints.compute(&timed(&v, &t, "1h"));
+        // week 1 = bars 0-2: H 20, L 8, C 19.5 -> P 47.5 / 3
+        eq(&r.lines[0].y, &[NAN, NAN, NAN, 47.5 / 3.0]);
+        // daily chart -> monthly pivots (Jan 29, 30, 31 | Feb 1)
+        let t = [1_769_644_800, 1_769_731_200, 1_769_817_600, 1_769_904_000];
+        let r = PivotPoints.compute(&timed(&v, &t, "1d"));
+        eq(&r.lines[0].y, &[NAN, NAN, NAN, 47.5 / 3.0]);
+        // weekly chart -> yearly pivots (Dec 15, 22, 29 2025 | Jan 5 2026)
+        let t = [1_765_756_800, 1_766_361_600, 1_766_966_400, 1_767_571_200];
+        let r = PivotPoints.compute(&timed(&v, &t, "1W"));
+        eq(&r.lines[0].y, &[NAN, NAN, NAN, 47.5 / 3.0]);
+        // no timestamps: the period is unknown
+        let r = PivotPoints.compute(&closes(&[1.0, 2.0, 3.0]));
+        assert!(r.lines.iter().all(|l| l.y.iter().all(|v| v.is_nan())));
     }
 }
