@@ -124,6 +124,7 @@ fn handle_tools_call(
         "generate_chart" => tool_generate_chart(id, &arguments),
         "list_indicators" => tool_list_indicators(id),
         "get_indicators" => tool_get_indicators(id, &arguments, engine),
+        "get_quotes" => tool_get_quotes(id, &arguments),
         "place_order" => tool_place_order(id, &arguments, engine),
         "cancel_order" => tool_cancel_order(id, &arguments, engine),
         "get_orders" => tool_get_orders(id, &arguments, engine),
@@ -994,6 +995,85 @@ fn tool_get_indicators(
     }
     output["indicators"] = ind_results;
     tool_ok(id, output)
+}
+
+// ---------------------------------------------------------------------------
+// get_quotes (watchlist, ADR-0011)
+// ---------------------------------------------------------------------------
+
+/// Most distinct symbols one `get_quotes` call accepts.
+const MAX_QUOTE_SYMBOLS: usize = 50;
+
+/// Trim + uppercase a ticker; `None` unless it is 1–32 characters of
+/// `A-Z 0-9 . ^ = - _ /` (the web client's `normalizeSymbol` rules).
+fn normalize_quote_symbol(raw: &str) -> Option<String> {
+    let s = raw.trim().to_uppercase();
+    let ok = (1..=32).contains(&s.len())
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || ".^=-_/".contains(c));
+    ok.then_some(s)
+}
+
+fn tool_get_quotes(id: Option<Value>, args: &Value) -> Value {
+    get_quotes(id, args, fetch::DataSource::from_env())
+}
+
+fn get_quotes(id: Option<Value>, args: &Value, source: fetch::DataSource) -> Value {
+    let Some(raw) = args.get("symbols").and_then(|v| v.as_array()) else {
+        return tool_err(id, "symbols is required and must be an array of strings");
+    };
+    let mut seen = HashSet::new();
+    let mut valid = Vec::new();
+    // Requested order after dedupe; `Err` holds the rejected input.
+    let mut order: Vec<Result<String, String>> = Vec::new();
+    for v in raw {
+        let Some(text) = v.as_str() else {
+            return tool_err(id, "symbols must be an array of strings");
+        };
+        match normalize_quote_symbol(text) {
+            Some(s) if seen.insert(s.clone()) => {
+                valid.push(s.clone());
+                order.push(Ok(s));
+            }
+            Some(_) => {}
+            None => order.push(Err(text.to_string())),
+        }
+    }
+    if order.len() > MAX_QUOTE_SYMBOLS {
+        return tool_err(
+            id,
+            &format!("At most {MAX_QUOTE_SYMBOLS} distinct symbols per call"),
+        );
+    }
+
+    // One result per valid symbol, in the same order as the `Ok` entries.
+    let mut fetched = fetch::fetch_quotes(source, &valid).into_iter();
+    let quotes: Vec<Value> = order
+        .into_iter()
+        .map(|entry| match entry {
+            Err(text) => json!({ "symbol": text, "error": "invalid symbol" }),
+            Ok(sym) => match fetched.next() {
+                Some(Ok(q)) => {
+                    let change = q.last - q.prev_close;
+                    let change_pct = change / q.prev_close * 100.0;
+                    json!({
+                        "symbol": sym,
+                        "last": finite_or_null(q.last),
+                        "change": finite_or_null(change),
+                        "change_pct": finite_or_null(change_pct),
+                        "prev_close": finite_or_null(q.prev_close),
+                        "high": q.high.map_or(Value::Null, finite_or_null),
+                        "low": q.low.map_or(Value::Null, finite_or_null),
+                        "volume": q.volume.map_or(Value::Null, finite_or_null),
+                        "source": q.source,
+                    })
+                }
+                Some(Err(e)) => json!({ "symbol": sym, "error": e }),
+                None => json!({ "symbol": sym, "error": "quote missing" }),
+            },
+        })
+        .collect();
+    tool_ok(id, json!({ "quotes": quotes }))
 }
 
 // ---------------------------------------------------------------------------
@@ -2890,5 +2970,104 @@ mod tests {
             fetch::DataSource::Sample,
         );
         assert_eq!(p["bars"].as_array().unwrap().len(), MAX_BARS);
+    }
+
+    // --- get_quotes ---
+
+    fn quotes(args: Value, source: fetch::DataSource) -> Vec<Value> {
+        let resp = get_quotes(Some(json!(1)), &args, source);
+        assert!(!is_error(&resp), "{}", response_text(&resp));
+        let p: Value = serde_json::from_str(&response_text(&resp)).unwrap();
+        p["quotes"].as_array().unwrap().clone()
+    }
+
+    #[test]
+    fn get_quotes_sample_normalizes_dedupes_and_computes_change() {
+        let q = quotes(
+            json!({ "symbols": [" btcusdt", "AAPL", "BTCUSDT"] }),
+            fetch::DataSource::Sample,
+        );
+        assert_eq!(q.len(), 2);
+        assert_eq!(q[0]["symbol"], "BTCUSDT");
+        assert_eq!(q[1]["symbol"], "AAPL");
+        for e in &q {
+            assert_eq!(e["source"], "sample");
+            let (last, prev) = (
+                e["last"].as_f64().unwrap(),
+                e["prev_close"].as_f64().unwrap(),
+            );
+            let change = e["change"].as_f64().unwrap();
+            assert!((change - (last - prev)).abs() < 1e-9);
+            assert!((e["change_pct"].as_f64().unwrap() - change / prev * 100.0).abs() < 1e-9);
+            for k in ["high", "low", "volume"] {
+                assert!(e[k].is_f64(), "{k}");
+            }
+        }
+    }
+
+    #[test]
+    fn get_quotes_errors_per_symbol_without_failing_the_call() {
+        let q = quotes(
+            json!({ "symbols": ["BTCUSDT", "not a symbol!", ""] }),
+            fetch::DataSource::Sample,
+        );
+        assert_eq!(q.len(), 3);
+        assert!(q[0]["last"].is_f64());
+        assert_eq!(q[1]["symbol"], "not a symbol!");
+        assert_eq!(q[1]["error"], "invalid symbol");
+        assert_eq!(q[2]["error"], "invalid symbol");
+
+        let q = quotes(
+            json!({ "symbols": ["BTCUSDT", "AAPL"] }),
+            fetch::DataSource::Unavailable,
+        );
+        assert_eq!(q.len(), 2);
+        assert!(q
+            .iter()
+            .all(|e| e["error"] == "upstream unavailable" && e.get("last").is_none()));
+    }
+
+    #[test]
+    fn get_quotes_rejects_bad_input_and_more_than_fifty_symbols() {
+        for args in [
+            json!({}),
+            json!({ "symbols": "BTCUSDT" }),
+            json!({ "symbols": [1] }),
+        ] {
+            let resp = get_quotes(Some(json!(1)), &args, fetch::DataSource::Sample);
+            assert!(is_error(&resp), "{args}");
+        }
+        let many: Vec<String> = (0..51).map(|i| format!("S{i}")).collect();
+        let resp = get_quotes(
+            Some(json!(1)),
+            &json!({ "symbols": many }),
+            fetch::DataSource::Sample,
+        );
+        assert!(is_error(&resp));
+        // Duplicates do not count towards the cap.
+        let dupes: Vec<&str> = std::iter::repeat_n("BTCUSDT", 60).collect();
+        assert_eq!(
+            quotes(json!({ "symbols": dupes }), fetch::DataSource::Sample).len(),
+            1
+        );
+        assert!(quotes(json!({ "symbols": [] }), fetch::DataSource::Sample).is_empty());
+    }
+
+    #[test]
+    fn get_quotes_is_dispatched_and_listed() {
+        let resp = handle_mcp_request("tools/list", Some(json!(1)), None, None, None);
+        let tools = resp["result"]["tools"].as_array().unwrap();
+        let tool = tools.iter().find(|t| t["name"] == "get_quotes").unwrap();
+        assert_eq!(tool["inputSchema"]["required"], json!(["symbols"]));
+        assert_eq!(tool["inputSchema"]["properties"]["symbols"]["maxItems"], 50);
+
+        let resp = handle_mcp_request(
+            "tools/call",
+            Some(json!(2)),
+            Some(&json!({ "name": "get_quotes", "arguments": {} })),
+            None,
+            None,
+        );
+        assert!(response_text(&resp).contains("symbols is required"));
     }
 }

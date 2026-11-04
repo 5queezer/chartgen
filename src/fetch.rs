@@ -628,6 +628,231 @@ fn merge_bars(chunk: &[Bar]) -> Bar {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Quotes (watchlist): last price and change for many symbols at once.
+// ---------------------------------------------------------------------------
+
+/// Concurrent upstream requests per `get_quotes` call.
+const QUOTE_CONCURRENCY: usize = 8;
+
+/// Last price of one symbol and the reference it changed from. Yahoo and
+/// sample: `prev_close` is the previous daily close (TradingView's
+/// definition). Binance: the price at the start of the rolling 24 h window,
+/// which is what Binance's own ticker reports (ADR-0011).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Quote {
+    pub last: f64,
+    pub prev_close: f64,
+    pub high: Option<f64>,
+    pub low: Option<f64>,
+    pub volume: Option<f64>,
+    pub source: &'static str,
+}
+
+/// One quote per symbol, in input order. A failing symbol yields its own
+/// `Err` and never fails the others.
+pub fn fetch_quotes(source: DataSource, symbols: &[String]) -> Vec<Result<Quote, String>> {
+    match source {
+        DataSource::Sample => {
+            let now = now_ms();
+            symbols.iter().map(|s| sample_quote(s, now)).collect()
+        }
+        DataSource::Live => {
+            let (binance, yahoo): (Vec<usize>, Vec<usize>) =
+                (0..symbols.len()).partition(|&i| detect_source(&symbols[i]) == "binance");
+            let pick =
+                |idx: &[usize]| -> Vec<&str> { idx.iter().map(|&i| symbols[i].as_str()).collect() };
+            let mut out = vec![Err(String::new()); symbols.len()];
+            let fetched = fetch_binance_quotes(&pick(&binance))
+                .into_iter()
+                .zip(&binance)
+                .chain(
+                    par_map(&pick(&yahoo), fetch_yahoo_quote)
+                        .into_iter()
+                        .zip(&yahoo),
+                );
+            for (quote, &i) in fetched {
+                out[i] = quote;
+            }
+            out
+        }
+        #[cfg(test)]
+        DataSource::Unavailable => symbols
+            .iter()
+            .map(|_| Err("upstream unavailable".into()))
+            .collect(),
+    }
+}
+
+/// `f` over `items` with at most `QUOTE_CONCURRENCY` in flight; results
+/// keep input order.
+fn par_map<T, F>(items: &[&str], f: F) -> Vec<T>
+where
+    T: Send,
+    F: Fn(&str) -> T + Sync,
+{
+    items
+        .chunks(QUOTE_CONCURRENCY)
+        .flat_map(|chunk| {
+            std::thread::scope(|s| {
+                let handles: Vec<_> = chunk.iter().map(|it| s.spawn(|| f(it))).collect();
+                handles
+                    .into_iter()
+                    .map(|h| h.join().expect("quote worker panicked"))
+                    .collect::<Vec<T>>()
+            })
+        })
+        .collect()
+}
+
+/// Sample-source quote: the forming daily bar against the previous one, so
+/// it is deterministic per second and moves over time.
+fn sample_quote(symbol: &str, now_ms: i64) -> Result<Quote, String> {
+    let data = data::sample_ohlcv(symbol, "1d", 2, None, now_ms)?;
+    let [prev, cur] = data.bars.as_slice() else {
+        return Err("sample source has no previous daily bar".into());
+    };
+    Ok(Quote {
+        last: cur.close,
+        prev_close: prev.close,
+        high: Some(cur.high),
+        low: Some(cur.low),
+        volume: Some(cur.volume),
+        source: "sample",
+    })
+}
+
+fn binance_ticker_url(symbols: &[&str]) -> String {
+    let list = symbols
+        .iter()
+        .map(|s| format!("%22{s}%22"))
+        .collect::<Vec<_>>()
+        .join(",");
+    format!("https://api.binance.com/api/v3/ticker/24hr?symbols=%5B{list}%5D")
+}
+
+/// One batched 24 h ticker request for all symbols. Binance rejects the
+/// whole batch when any symbol is unknown, so a rejected batch is retried
+/// per symbol to isolate the bad one.
+fn fetch_binance_quotes(symbols: &[&str]) -> Vec<Result<Quote, String>> {
+    if symbols.is_empty() {
+        return Vec::new();
+    }
+    match binance_get(&binance_ticker_url(symbols)) {
+        Ok(body) => parse_binance_tickers(&body, symbols),
+        Err((true, _)) if symbols.len() > 1 => par_map(symbols, |s| {
+            binance_get(&binance_ticker_url(&[s]))
+                .map_err(|(_, e)| e)
+                .and_then(|body| parse_binance_tickers(&body, &[s]).remove(0))
+        }),
+        Err((_, e)) => symbols.iter().map(|_| Err(e.clone())).collect(),
+    }
+}
+
+/// GET a Binance JSON endpoint. On failure the flag is true when Binance
+/// rejected the request (4xx, e.g. an unknown symbol) rather than being
+/// unreachable.
+fn binance_get(url: &str) -> Result<serde_json::Value, (bool, String)> {
+    let resp = http()
+        .get(url)
+        .send()
+        .map_err(|e| (false, format!("Binance request failed: {e}")))?;
+    let status = resp.status();
+    let body: serde_json::Value = resp
+        .json()
+        .map_err(|e| (false, format!("Failed to parse Binance response: {e}")))?;
+    if status.is_success() {
+        return Ok(body);
+    }
+    let msg = body.get("msg").and_then(|m| m.as_str()).map_or_else(
+        || format!("Binance API returned status {status}"),
+        |m| format!("Binance: {m}"),
+    );
+    Err((status.is_client_error(), msg))
+}
+
+/// Match a `/ticker/24hr?symbols=` array to `symbols` (in order). Pure, so
+/// fixture JSON can drive it in tests.
+fn parse_binance_tickers(body: &serde_json::Value, symbols: &[&str]) -> Vec<Result<Quote, String>> {
+    let Some(entries) = body.as_array() else {
+        return symbols
+            .iter()
+            .map(|_| Err("Binance ticker response is not an array".into()))
+            .collect();
+    };
+    symbols
+        .iter()
+        .map(|s| {
+            let entry = entries
+                .iter()
+                .find(|e| e.get("symbol").and_then(|v| v.as_str()) == Some(s))
+                .ok_or("Binance returned no ticker for this symbol")?;
+            let num = |k: &str| -> Result<f64, String> {
+                entry
+                    .get(k)
+                    .and_then(|v| v.as_str())
+                    .and_then(|v| v.parse::<f64>().ok())
+                    .ok_or(format!("Binance ticker missing {k}"))
+            };
+            Ok(Quote {
+                last: num("lastPrice")?,
+                prev_close: num("openPrice")?,
+                high: num("highPrice").ok(),
+                low: num("lowPrice").ok(),
+                volume: num("volume").ok(),
+                source: "binance",
+            })
+        })
+        .collect()
+}
+
+fn yahoo_quote_url(symbol: &str) -> String {
+    format!("https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?range=1d&interval=1d")
+}
+
+fn fetch_yahoo_quote(symbol: &str) -> Result<Quote, String> {
+    let resp = http()
+        .get(yahoo_quote_url(symbol))
+        .header("User-Agent", "Mozilla/5.0")
+        .send()
+        .map_err(|e| format!("Yahoo request failed: {e}"))?;
+    let status = resp.status();
+    let body: serde_json::Value = resp
+        .json()
+        .map_err(|e| format!("Failed to parse Yahoo response ({status}): {e}"))?;
+    parse_yahoo_quote(&body)
+}
+
+/// Quote from a v8 chart response's `meta`: `regularMarketPrice` against
+/// `chartPreviousClose` (with `range=1d`, the previous session's close).
+/// Pure, so fixture JSON can drive it in tests.
+fn parse_yahoo_quote(body: &serde_json::Value) -> Result<Quote, String> {
+    let chart = body.get("chart").ok_or("Yahoo response missing chart")?;
+    if let Some(desc) = chart
+        .get("error")
+        .and_then(|e| e.get("description"))
+        .and_then(|d| d.as_str())
+    {
+        return Err(format!("Yahoo: {desc}"));
+    }
+    let meta = chart
+        .get("result")
+        .and_then(|r| r.get(0))
+        .and_then(|r| r.get("meta"))
+        .ok_or("Yahoo response missing chart.result[0].meta")?;
+    let num = |k: &str| meta.get(k).and_then(|v| v.as_f64());
+    Ok(Quote {
+        last: num("regularMarketPrice").ok_or("Yahoo meta missing regularMarketPrice")?,
+        prev_close: num("chartPreviousClose")
+            .or_else(|| num("previousClose"))
+            .ok_or("Yahoo meta missing chartPreviousClose")?,
+        high: num("regularMarketDayHigh"),
+        low: num("regularMarketDayLow"),
+        volume: num("regularMarketVolume"),
+        source: "yahoo",
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1026,5 +1251,113 @@ mod tests {
         assert!(!f.has_more);
         let f = parse_yahoo_chart(&fixture(), "1h", 100, None, &win("1h", NOV3_OPEN)).unwrap();
         assert!(f.has_more);
+    }
+
+    // --- Quotes (fixtures) ---
+
+    const BINANCE_TICKERS: &str = include_str!("../tests/fixtures/binance_ticker_24hr.json");
+    const AAPL_QUOTE: &str = include_str!("../tests/fixtures/yahoo_aapl_quote.json");
+
+    #[test]
+    fn binance_ticker_url_is_an_encoded_json_array() {
+        assert_eq!(
+            binance_ticker_url(&["BTCUSDT", "ETHUSDT"]),
+            "https://api.binance.com/api/v3/ticker/24hr?symbols=%5B%22BTCUSDT%22,%22ETHUSDT%22%5D"
+        );
+    }
+
+    #[test]
+    fn binance_tickers_parse_in_requested_order() {
+        let body: serde_json::Value = serde_json::from_str(BINANCE_TICKERS).unwrap();
+        let q = parse_binance_tickers(&body, &["ETHUSDT", "BTCUSDT", "SOLUSDT"]);
+        let eth = q[0].as_ref().unwrap();
+        assert_eq!(eth.source, "binance");
+        assert_eq!(eth.last, 2436.74);
+        assert_eq!(eth.prev_close, 2288.98);
+        let btc = q[1].as_ref().unwrap();
+        assert_eq!(btc.last, 80689.85);
+        // Rolling 24 h: the reference is openPrice, matching priceChange.
+        assert_eq!(btc.prev_close, 77782.0);
+        assert!((btc.last - btc.prev_close - 2907.85).abs() < 1e-6);
+        assert_eq!(btc.high, Some(81196.01));
+        assert_eq!(btc.low, Some(75736.38));
+        assert_eq!(btc.volume, Some(21753.13912));
+        assert!(q[2].as_ref().unwrap_err().contains("no ticker"));
+    }
+
+    #[test]
+    fn binance_tickers_reject_non_array_and_bad_numbers() {
+        let err = serde_json::json!({ "code": -1121, "msg": "Invalid symbol." });
+        assert!(parse_binance_tickers(&err, &["BTCUSDT"])[0].is_err());
+        let bad = serde_json::json!([{ "symbol": "BTCUSDT", "lastPrice": "x", "openPrice": "1" }]);
+        assert!(parse_binance_tickers(&bad, &["BTCUSDT"])[0]
+            .as_ref()
+            .unwrap_err()
+            .contains("lastPrice"));
+    }
+
+    #[test]
+    fn yahoo_quote_uses_previous_session_close() {
+        let body: serde_json::Value = serde_json::from_str(AAPL_QUOTE).unwrap();
+        let q = parse_yahoo_quote(&body).unwrap();
+        assert_eq!(q.source, "yahoo");
+        assert_eq!(q.last, 349.51);
+        assert_eq!(q.prev_close, 331.9);
+        assert_eq!(q.high, Some(354.47));
+        assert_eq!(q.low, Some(340.99));
+        assert_eq!(q.volume, Some(88_958_176.0));
+        // Matches Yahoo's own regularMarketChangePercent (5.306).
+        let pct = (q.last - q.prev_close) / q.prev_close * 100.0;
+        assert!((pct - 5.306).abs() < 1e-3);
+    }
+
+    #[test]
+    fn yahoo_quote_reports_upstream_error() {
+        let body = serde_json::json!({
+            "chart": { "result": null, "error": { "code": "Not Found", "description": "No data found, symbol may be delisted" } }
+        });
+        assert_eq!(
+            parse_yahoo_quote(&body).unwrap_err(),
+            "Yahoo: No data found, symbol may be delisted"
+        );
+        let no_price = serde_json::json!({ "chart": { "result": [{ "meta": { "chartPreviousClose": 1.0 } }] } });
+        assert!(parse_yahoo_quote(&no_price)
+            .unwrap_err()
+            .contains("regularMarketPrice"));
+    }
+
+    #[test]
+    fn sample_quote_is_current_daily_bar_vs_previous() {
+        let now = 1_793_800_000_123;
+        let q = sample_quote("BTCUSDT", now).unwrap();
+        let bars = data::sample_ohlcv("BTCUSDT", "1d", 2, None, now)
+            .unwrap()
+            .bars;
+        assert_eq!(q.source, "sample");
+        assert_eq!(q.prev_close, bars[0].close);
+        assert_eq!(q.last, bars[1].close);
+        assert_eq!(q.high, Some(bars[1].high));
+        // Deterministic for a given instant, moves with the wall clock.
+        assert_eq!(sample_quote("BTCUSDT", now).unwrap(), q);
+        assert_ne!(sample_quote("BTCUSDT", now + 1_000).unwrap().last, q.last);
+        assert_ne!(sample_quote("AAPL", now).unwrap().last, q.last);
+    }
+
+    #[test]
+    fn fetch_quotes_keeps_order_and_isolates_failures() {
+        let syms = vec!["AAPL".to_string(), "BTCUSDT".to_string()];
+        let q = fetch_quotes(DataSource::Sample, &syms);
+        assert_eq!(q.len(), 2);
+        assert!(q.iter().all(|r| r.is_ok()));
+        let q = fetch_quotes(DataSource::Unavailable, &syms);
+        assert!(q.iter().all(|r| r.is_err()));
+    }
+
+    #[test]
+    fn par_map_preserves_order_across_chunks() {
+        let items: Vec<String> = (0..20).map(|i| i.to_string()).collect();
+        let refs: Vec<&str> = items.iter().map(String::as_str).collect();
+        let out = par_map(&refs, |s| s.parse::<usize>().unwrap());
+        assert_eq!(out, (0..20).collect::<Vec<_>>());
     }
 }
