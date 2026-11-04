@@ -41,20 +41,6 @@ export function chartQueryKey(
   ] as const;
 }
 
-// Which query key (JSON) each chart payload was loaded for. Solid Query
-// updates `data` through a resource and a store, which need not change in
-// the same tick as the key, so `data` alone cannot be trusted to belong to
-// the current key; this tag can.
-const loadedFor = new WeakMap<SeriesPayload, string>();
-
-/** True if `data` is the chart query's result for `input`. */
-export function isChartDataFor(
-  data: SeriesPayload,
-  input: Pick<ChartQueryInput, "ticker" | "timeframe" | "indicators">,
-): boolean {
-  return loadedFor.get(data) === JSON.stringify(chartQueryKey(input));
-}
-
 /**
  * Create a TanStack Solid Query for `generate_chart`. The accessor
  * contract means every reactive read from `input()` becomes a
@@ -77,17 +63,19 @@ export function createChartQuery(
       queryKey,
       // Warmed up like every page and tail (ADR-0009), so the first page
       // seam has no null-indicator gap.
-      queryFn: async () => {
-        const data = await session.callGenerateChart({
+      queryFn: () =>
+        session.callGenerateChart({
           ticker,
           timeframe,
           indicators,
           bars: INITIAL_BARS,
           warmup: WARMUP,
-        });
-        loadedFor.set(data, JSON.stringify(queryKey));
-        return data;
-      },
+        }),
+      // Every fetch result is stored as it came in, never merged into the
+      // previous one (replaceEqualDeep). App adopts a load by the cache
+      // entry's dataUpdatedAt (App.tsx), not by object identity; this just
+      // keeps each load a distinct object.
+      structuralSharing: false,
       // This query is only the full load. The live feed (lib/liveFeed.ts)
       // keeps the data fresh from there and pages history into its own
       // merged copy, so a background refetch would only throw that away
@@ -100,7 +88,7 @@ export function createChartQuery(
       refetchOnWindowFocus: false,
       refetchOnReconnect: false,
       // Keep the previous chart on screen while a new symbol/timeframe
-      // loads. The feed never adopts placeholder data (see App.tsx).
+      // loads. The feed only adopts the current key's cache entry (App.tsx).
       placeholderData: keepPreviousData,
       enabled,
       retry: (failureCount: number, error: Error) => {

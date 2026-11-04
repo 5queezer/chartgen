@@ -9,7 +9,7 @@
 
 import type { Page, Request } from "@playwright/test";
 
-import { test, expect } from "./fixtures/app";
+import { test, expect, expectChartRendered } from "./fixtures/app";
 
 interface ChartArgs {
   ticker?: string;
@@ -279,4 +279,124 @@ test("switching timeframe mid-poll leaves no bars of the old one", async ({
   // And live on the new timeframe.
   const before = await lastClose(page);
   await expect.poll(() => lastClose(page), { timeout: 6_000 }).not.toBe(before);
+});
+
+const interval = (page: Page) =>
+  page.evaluate(
+    () => (window as unknown as { __chartgenTest: Hook }).__chartgenTest.series()?.interval,
+  );
+
+/** Record every state the live badge shows, into window.__liveStates. */
+function recordLiveStates(page: Page) {
+  return page.evaluate(() => {
+    const w = window as unknown as { __liveStates: string[] };
+    w.__liveStates = [];
+    new MutationObserver(() => {
+      const s = document.querySelector("[data-testid=live-status]")?.getAttribute("data-state");
+      if (s) w.__liveStates.push(s);
+    }).observe(document.body, { subtree: true, childList: true, attributes: true });
+  });
+}
+
+const liveStates = (page: Page) =>
+  page.evaluate(() => (window as unknown as { __liveStates: string[] }).__liveStates);
+
+test.describe("refetch of the current key", () => {
+  test("a re-pick is adopted and the chart stays live", async ({ bootedApp: page }) => {
+    // Page in some history so the reload is visible as a reset to 500 bars.
+    for (let i = 0; i < 20 && (await timestamps(page)).length <= 500; i++) {
+      await dragRight(page);
+    }
+    await expect.poll(async () => (await timestamps(page)).length).toBe(1000);
+
+    await recordLiveStates(page);
+    await page.getByRole("button", { name: "1h", exact: true }).click();
+    await expect.poll(async () => (await timestamps(page)).length).toBe(500);
+    const before = await lastClose(page);
+    await expect.poll(() => lastClose(page), { timeout: 6_000 }).not.toBe(before);
+    await expect(page.getByTestId("live-status")).toHaveAttribute("data-state", "live");
+    expect(await liveStates(page)).not.toContain("retrying");
+  });
+
+  test("after a refetch, switching back to a cached timeframe shows its candles", async ({
+    bootedApp: page,
+  }) => {
+    const calls = recordCalls(page);
+    await page.getByRole("button", { name: "1h", exact: true }).click();
+    await expect.poll(() => calls.filter((a) => a.bars === 500).length).toBe(1);
+    await page.getByRole("button", { name: "5m", exact: true }).click();
+    await expect.poll(() => interval(page), { timeout: 15_000 }).toBe("5m");
+    await page.getByRole("button", { name: "1h", exact: true }).click();
+    await expect.poll(() => interval(page), { timeout: 15_000 }).toBe("1h");
+
+    const ts = await timestamps(page);
+    expect(ts.length).toBe(500);
+    expectStrictlyIncreasing(ts);
+    expect(ts.every((t, i) => i === 0 || t - ts[i - 1]! === 3_600_000)).toBe(true);
+    // The cached 1h load is adopted, not refetched, and it ticks.
+    expect(calls.filter((a) => a.bars === 500 && a.timeframe === "1h")).toHaveLength(1);
+    const before = await lastClose(page);
+    await expect.poll(() => lastClose(page), { timeout: 6_000 }).not.toBe(before);
+  });
+});
+
+test("a catch-up after missed bars keeps the scrolled-back view", async ({ page }) => {
+  // The full load arrives 10 bars short, and tail polls are held until the
+  // view is scrolled back: the first poll then finds a gap and catches up
+  // with a longer tail, more bars than are appended one by one.
+  const MISSING = 10;
+  let releaseTails!: () => void;
+  const tailsHeld = new Promise<void>((r) => (releaseTails = r));
+  await page.route("**/mcp", async (route) => {
+    const a = chartArgs(route.request());
+    if (isTail(a)) {
+      await tailsHeld;
+      return route.continue().catch(() => {});
+    }
+    if (a?.bars !== 500 || a.end_time !== undefined) return route.continue();
+    const res = await route.fetch();
+    const rpc = (await res.json()) as {
+      result: { content: Array<{ type: string; text: string }> };
+    };
+    const s = JSON.parse(rpc.result.content[0]!.text);
+    const n = s.bars.length - MISSING;
+    s.bars = s.bars.slice(0, n);
+    for (const ind of Object.values(s.indicators) as Array<Record<string, any>>) {
+      for (const l of [...(ind.lines ?? []), ...(ind.histogram ?? [])]) {
+        l.values = l.values.slice(0, n);
+      }
+      for (const f of ind.fills ?? []) {
+        f.y1 = f.y1.slice(0, n);
+        f.y2 = f.y2.slice(0, n);
+      }
+      if (ind.signals) ind.signals = ind.signals.filter((g: { x: number }) => g.x < n);
+      if (ind.divlines) {
+        ind.divlines = ind.divlines.filter(
+          (d: { x1: number; x2: number }) => Math.max(d.x1, d.x2) < n,
+        );
+      }
+    }
+    rpc.result.content[0]!.text = JSON.stringify(s);
+    return route.fulfill({ response: res, json: rpc });
+  });
+  const calls = recordCalls(page);
+
+  await page.goto("/");
+  await page.evaluate(() => localStorage.clear());
+  await page.goto("/");
+  await expectChartRendered(page);
+  expect((await timestamps(page)).length).toBe(500 - MISSING);
+
+  await dragRight(page);
+  const anchor = (await timestamps(page))[300]!;
+  const x = await xOf(page, anchor);
+  releaseTails();
+
+  await expect.poll(async () => (await timestamps(page)).length).toBe(500);
+  expect(calls.filter(isTail).length).toBeGreaterThan(0);
+  expect(calls.some((a) => a.end_time === undefined && a.bars! > 2 && a.bars! < 500)).toBe(true);
+  expect(await xOf(page, anchor)).toBe(x);
+  const ts = await timestamps(page);
+  expectStrictlyIncreasing(ts);
+  expect(ts.every((t, i) => i === 0 || t - ts[i - 1]! === 3_600_000)).toBe(true);
 });

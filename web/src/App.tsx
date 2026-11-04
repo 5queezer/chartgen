@@ -9,7 +9,7 @@ import {
   onMount,
   type JSX,
 } from "solid-js";
-import { unwrap } from "solid-js/store";
+import { useQueryClient } from "@tanstack/solid-query";
 
 import type { Chart as KLineChart } from "klinecharts";
 
@@ -39,7 +39,6 @@ import {
   chartQueryKey,
   createChartQuery,
   createListIndicatorsQuery,
-  isChartDataFor,
 } from "./queries";
 import {
   createLiveFeed,
@@ -175,28 +174,47 @@ export function App(): JSX.Element {
   // visible indicators, params) suspends the feed at once, which drops
   // every in-flight poll and page of the old chart; the old chart stays on
   // screen until the new load lands (keepPreviousData), and is cleared if
-  // that load fails. Only data loaded for the current request is adopted.
+  // that load fails.
+  //
+  // What gets adopted is read from the query cache entry of exactly the
+  // current key, not from `query.data`: that can still be the previous
+  // key's result (placeholder, or published a tick after the key changed).
+  // Each successful fetch stamps the entry with a new dataUpdatedAt, so a
+  // refetch of the same key (Retry, re-pick, the feed's own reload) is
+  // adopted even when the payload is equal, and switching back to a cached
+  // key adopts that key's own data.
+  const queryClient = useQueryClient();
   let feedKey = "";
-  let adopted: SeriesPayload | null | undefined;
+  // dataUpdatedAt of the adopted entry; null: none yet, -1: cleared.
+  let adoptedAt: number | null = null;
   createEffect(() => {
     const request: LiveRequest = {
       ticker: symbol(),
       timeframe: timeframe(),
       indicators: wireIndicators(),
     };
-    const data = query.data;
+    // Re-run whenever the query publishes a result.
+    void query.data;
+    void query.dataUpdatedAt;
+    void query.status;
     untrack(() => {
-      const key = JSON.stringify(chartQueryKey(request));
-      if (key !== feedKey) {
-        feedKey = key;
-        adopted = undefined;
+      const key = chartQueryKey(request);
+      const json = JSON.stringify(key);
+      if (json !== feedKey) {
+        feedKey = json;
+        adoptedAt = null;
         feed.suspend();
       }
-      const raw = data === undefined ? null : unwrap(data);
-      if (raw === adopted || (raw && !isChartDataFor(raw, request))) return;
-      adopted = raw;
-      // A copy: the feed updates its series in place, the cache stays as loaded.
-      feed.reset(raw && structuredClone(raw), request);
+      const state = queryClient.getQueryState<SeriesPayload, Error>(key);
+      if (state?.data !== undefined) {
+        if (state.dataUpdatedAt === adoptedAt) return;
+        adoptedAt = state.dataUpdatedAt;
+        // A copy: the feed updates its series in place, the cache stays as loaded.
+        feed.reset(structuredClone(state.data), request);
+      } else if (state?.status === "error" && adoptedAt !== -1) {
+        adoptedAt = -1;
+        feed.reset(null, request);
+      }
     });
   });
 
