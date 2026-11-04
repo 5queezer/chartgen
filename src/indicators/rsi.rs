@@ -1,8 +1,6 @@
 use crate::data::OhlcvData;
 use crate::indicator::*;
 use serde_json::{json, Value};
-use ta::indicators::RelativeStrengthIndex;
-use ta::Next;
 
 pub struct Rsi {
     pub length: usize,
@@ -20,20 +18,9 @@ impl Default for Rsi {
     }
 }
 
+/// Pine `ta.rsi`: Wilder RMA of gains/losses, seeded with their SMA.
 pub fn compute_rsi(closes: &[f64], length: usize) -> Vec<f64> {
-    let n = closes.len();
-    let mut out = vec![f64::NAN; n];
-    if n <= length {
-        return out;
-    }
-    let mut rsi = RelativeStrengthIndex::new(length).unwrap();
-    for (i, &c) in closes.iter().enumerate() {
-        if c.is_nan() {
-            continue;
-        }
-        out[i] = rsi.next(c);
-    }
-    out
+    super::pine::rsi(closes, length)
 }
 
 impl Indicator for Rsi {
@@ -83,5 +70,32 @@ impl Indicator for Rsi {
             label: "RSI".into(),
             ..Default::default()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::indicators::pine::test_util::{closes, eq, NAN};
+
+    #[test]
+    fn rsi14_wilder_rma_seeding() {
+        // Wilder's / StockCharts' RSI(14) sample. The first 14 changes hold
+        // gains of 3.34 and losses of 1.40, so the RMA seeds are 3.34/14 and
+        // 0.1: RSI = 100 - 100 / (1 + 2.3857) = 70.464 at bar 14. Bar 15
+        // (change -0.28): gain = 0.23857 * 13/14, loss = (1.3 + 0.28) / 14.
+        let c = [
+            44.34, 44.09, 44.15, 43.61, 44.33, 44.83, 45.10, 45.42, 45.84, 46.08, 45.89, 46.03,
+            45.61, 46.28, 46.28, 46.00, 46.03, 46.41,
+        ];
+        let r = Rsi::default().compute(&closes(&c));
+        let mut want = vec![NAN; 14];
+        want.extend([
+            100.0 - 100.0 / (1.0 + 3.34 / 1.40),
+            100.0 - 100.0 / (1.0 + (3.34 / 14.0 * 13.0 / 14.0) / (1.58 / 14.0)),
+            66.48094183471265,
+            69.34685316290866,
+        ]);
+        eq(&r.lines[0].y, &want);
     }
 }

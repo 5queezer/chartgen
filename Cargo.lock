@@ -257,7 +257,6 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
- "ta",
  "tokio",
  "tokio-tungstenite",
  "tower",
@@ -1867,12 +1866,6 @@ dependencies = [
  "core-foundation-sys",
  "libc",
 ]
-
-[[package]]
-name = "ta"
-version = "0.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "609409d472a0a7d8d4dd9e19891bbdef546b9dce670c3057d0e02192dc541226"
 
 [[package]]
 name = "tempfile"

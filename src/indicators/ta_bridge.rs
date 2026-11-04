@@ -1,23 +1,11 @@
-use crate::data::{Bar, OhlcvData};
+//! Classic TradingView built-ins (EMA, BB, KC, ATR, OBV, CCI, ROC, MFI,
+//! Stoch, %R, DC, CMF) computed with Pine v5 semantics via `pine.rs`.
+//! The file name predates the port off the `ta` crate (ADR-0018).
+
+use super::pine::{atr, dev, div, ema_n, mfi, roc, sma_n, source_series, stdev, sum_n, zip};
+use crate::data::OhlcvData;
 use crate::indicator::*;
 use serde_json::{json, Value};
-use ta::indicators::{
-    AverageTrueRange as TaAtr, BollingerBands as TaBB, CommodityChannelIndex as TaCci,
-    ExponentialMovingAverage, KeltnerChannel as TaKC, MoneyFlowIndex as TaMfi,
-    OnBalanceVolume as TaObv, RateOfChange as TaRoc, SlowStochastic as TaSlow,
-};
-use ta::{DataItem, Next};
-
-fn make_data_item(bar: &Bar) -> DataItem {
-    DataItem::builder()
-        .open(bar.open)
-        .high(bar.high)
-        .low(bar.low)
-        .close(bar.close)
-        .volume(bar.volume)
-        .build()
-        .unwrap()
-}
 
 // ---- EMA Stack (overlay) ----
 
@@ -115,22 +103,12 @@ impl Indicator for BollingerBandsInd {
     }
 
     fn compute(&self, data: &OhlcvData) -> PanelResult {
+        // TV: basis = ta.sma(close, n), dev = mult * ta.stdev(close, n) (population).
         let closes = data.closes();
-        let n = closes.len();
-        let mut upper = vec![f64::NAN; n];
-        let mut middle = vec![f64::NAN; n];
-        let mut lower = vec![f64::NAN; n];
-
-        let mut ind = TaBB::new(self.period, self.std_dev).unwrap();
-        for (i, &c) in closes.iter().enumerate() {
-            if c.is_nan() {
-                continue;
-            }
-            let out = ind.next(c);
-            upper[i] = out.upper;
-            middle[i] = out.average;
-            lower[i] = out.lower;
-        }
+        let middle = sma_n(&closes, self.period);
+        let sd = stdev(&closes, self.period);
+        let upper = zip(&middle, &sd, |m, d| m + self.std_dev * d);
+        let lower = zip(&middle, &sd, |m, d| m - self.std_dev * d);
 
         PanelResult {
             lines: vec![
@@ -208,19 +186,12 @@ impl Indicator for KeltnerChannels {
     }
 
     fn compute(&self, data: &OhlcvData) -> PanelResult {
-        let n = data.len();
-        let mut upper = vec![f64::NAN; n];
-        let mut middle = vec![f64::NAN; n];
-        let mut lower = vec![f64::NAN; n];
-
-        let mut ind = TaKC::new(self.period, self.multiplier).unwrap();
-        for (i, bar) in data.bars.iter().enumerate() {
-            let di = make_data_item(bar);
-            let out = ind.next(&di);
-            upper[i] = out.upper;
-            middle[i] = out.average;
-            lower[i] = out.lower;
-        }
+        // TV (Bands Style "Average True Range"): ta.ema(close, n) +/- mult * ta.atr.
+        // chartgen uses `period` for the ATR length too (TV's separate default is 10).
+        let middle = ema_n(&data.closes(), self.period);
+        let range = atr(data, self.period);
+        let upper = zip(&middle, &range, |m, r| m + self.multiplier * r);
+        let lower = zip(&middle, &range, |m, r| m - self.multiplier * r);
 
         PanelResult {
             lines: vec![
@@ -288,14 +259,8 @@ impl Indicator for Atr {
     }
 
     fn compute(&self, data: &OhlcvData) -> PanelResult {
-        let n = data.len();
-        let mut vals = vec![f64::NAN; n];
-
-        let mut ind = TaAtr::new(self.period).unwrap();
-        for (i, bar) in data.bars.iter().enumerate() {
-            let di = make_data_item(bar);
-            vals[i] = ind.next(&di);
-        }
+        // TV: ta.rma(ta.tr(true), n).
+        let vals = atr(data, self.period);
 
         PanelResult {
             lines: vec![Line {
@@ -324,14 +289,28 @@ impl Indicator for Obv {
     }
 
     fn compute(&self, data: &OhlcvData) -> PanelResult {
-        let n = data.len();
-        let mut vals = vec![f64::NAN; n];
-
-        let mut ind = TaObv::new();
-        for (i, bar) in data.bars.iter().enumerate() {
-            let di = make_data_item(bar);
-            vals[i] = ind.next(&di);
-        }
+        // TV: ta.cum(math.sign(ta.change(close)) * volume). ta.cum skips na,
+        // so bar 0 (no change yet) is 0.
+        let mut cum = 0.0;
+        let vals: Vec<f64> = (0..data.len())
+            .map(|i| {
+                if i > 0 {
+                    let ch = data.bars[i].close - data.bars[i - 1].close;
+                    let sign = if ch > 0.0 {
+                        1.0
+                    } else if ch < 0.0 {
+                        -1.0
+                    } else {
+                        0.0
+                    };
+                    let flow = sign * data.bars[i].volume;
+                    if flow.is_finite() {
+                        cum += flow;
+                    }
+                }
+                cum
+            })
+            .collect();
 
         PanelResult {
             lines: vec![Line {
@@ -378,14 +357,11 @@ impl Indicator for Cci {
     }
 
     fn compute(&self, data: &OhlcvData) -> PanelResult {
-        let n = data.len();
-        let mut vals = vec![f64::NAN; n];
-
-        let mut ind = TaCci::new(self.period).unwrap();
-        for (i, bar) in data.bars.iter().enumerate() {
-            let di = make_data_item(bar);
-            vals[i] = ind.next(&di);
-        }
+        // TV: (hlc3 - ta.sma(hlc3, n)) / (0.015 * ta.dev(hlc3, n)).
+        let src = source_series(data, "hlc3");
+        let ma = sma_n(&src, self.period);
+        let md: Vec<f64> = dev(&src, self.period).iter().map(|d| 0.015 * d).collect();
+        let vals = div(&zip(&src, &ma, |s, m| s - m), &md);
 
         PanelResult {
             lines: vec![Line {
@@ -443,17 +419,8 @@ impl Indicator for Roc {
     }
 
     fn compute(&self, data: &OhlcvData) -> PanelResult {
-        let closes = data.closes();
-        let n = closes.len();
-        let mut vals = vec![f64::NAN; n];
-
-        let mut ind = TaRoc::new(self.period).unwrap();
-        for (i, &c) in closes.iter().enumerate() {
-            if c.is_nan() {
-                continue;
-            }
-            vals[i] = ind.next(c);
-        }
+        // TV: 100 * (close - close[n]) / close[n].
+        let vals = roc(&data.closes(), self.period);
 
         PanelResult {
             lines: vec![Line {
@@ -504,14 +471,12 @@ impl Indicator for Mfi {
     }
 
     fn compute(&self, data: &OhlcvData) -> PanelResult {
-        let n = data.len();
-        let mut vals = vec![f64::NAN; n];
-
-        let mut ind = TaMfi::new(self.period).unwrap();
-        for (i, bar) in data.bars.iter().enumerate() {
-            let di = make_data_item(bar);
-            vals[i] = ind.next(&di);
-        }
+        // TV: ta.mfi(hlc3, n).
+        let vals = mfi(
+            &source_series(data, "hlc3"),
+            &super::pine::volumes(data),
+            self.period,
+        );
 
         PanelResult {
             lines: vec![Line {
@@ -585,22 +550,11 @@ impl Indicator for Stochastic {
     }
 
     fn compute(&self, data: &OhlcvData) -> PanelResult {
-        let n = data.len();
-        let mut k_vals = vec![f64::NAN; n];
-        let mut d_vals = vec![f64::NAN; n];
-
-        // SlowStochastic(period, k_smooth) gives %K.
-        // %D is an EMA of %K with d_smooth period.
-        let mut k_ind = TaSlow::new(self.period, self.k_smooth).unwrap();
-        let mut d_ema = ExponentialMovingAverage::new(self.d_smooth).unwrap();
-
-        for (i, bar) in data.bars.iter().enumerate() {
-            let di = make_data_item(bar);
-            let k = k_ind.next(&di);
-            let d = d_ema.next(k);
-            k_vals[i] = k;
-            d_vals[i] = d;
-        }
+        // TV: %K = ta.sma(ta.stoch(close, high, low, period), k_smooth).
+        // %D is an SMA of %K with d_smooth period.
+        let raw = stoch(&data.closes(), &data.highs(), &data.lows(), self.period);
+        let k_vals = sma_n(&raw, self.k_smooth);
+        let d_vals = sma_n(&k_vals, self.d_smooth);
 
         PanelResult {
             lines: vec![
@@ -672,26 +626,13 @@ impl Indicator for WilliamsR {
     }
 
     fn compute(&self, data: &OhlcvData) -> PanelResult {
-        let closes = data.closes();
-        let highs = data.highs();
-        let lows = data.lows();
-        let n = closes.len();
-
-        let hh = highest(&highs, self.period);
-        let ll = lowest(&lows, self.period);
-
-        let mut vals = vec![f64::NAN; n];
-        for i in 0..n {
-            if hh[i].is_nan() || ll[i].is_nan() || closes[i].is_nan() {
-                continue;
-            }
-            let range = hh[i] - ll[i];
-            vals[i] = if range > 0.0 {
-                (hh[i] - closes[i]) / range * -100.0
-            } else {
-                0.0
-            };
-        }
+        // TV: 100 * (close - highest) / (highest - lowest); a zero range is NaN.
+        let hh = highest(&data.highs(), self.period);
+        let ll = lowest(&data.lows(), self.period);
+        let vals = div(
+            &zip(&data.closes(), &hh, |c, h| 100.0 * (c - h)),
+            &zip(&hh, &ll, |h, l| h - l),
+        );
 
         PanelResult {
             lines: vec![Line {
@@ -847,16 +788,8 @@ impl Indicator for Cmf {
             vol[i] = bar.volume;
         }
 
-        // CMF = SMA(mfv, period) / SMA(vol, period)
-        let mfv_sma = sma(&mfv, self.period);
-        let vol_sma = sma(&vol, self.period);
-
-        let mut vals = vec![f64::NAN; n];
-        for i in 0..n {
-            if !mfv_sma[i].is_nan() && !vol_sma[i].is_nan() && vol_sma[i] != 0.0 {
-                vals[i] = mfv_sma[i] / vol_sma[i];
-            }
-        }
+        // CMF = sum(mfv, period) / sum(vol, period)
+        let vals = div(&sum_n(&mfv, self.period), &sum_n(&vol, self.period));
 
         PanelResult {
             lines: vec![Line {
@@ -873,5 +806,144 @@ impl Indicator for Cmf {
             label: "CMF".into(),
             ..Default::default()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::indicators::pine::test_util::{bars, closes, eq, ohlc, NAN};
+
+    fn ys(r: &PanelResult, i: usize) -> &[f64] {
+        &r.lines[i].y
+    }
+
+    #[test]
+    fn ema_stack_seeds_with_sma() {
+        // EMA 8: 7 warmup NaNs, seed = SMA(1..=8) = 4.5, then 2/9*9 + 7/9*4.5 = 5.5.
+        let d = closes(&(1..=9).map(f64::from).collect::<Vec<_>>());
+        let r = EmaStack.compute(&d);
+        let mut want = vec![NAN; 7];
+        want.extend([4.5, 5.5]);
+        eq(ys(&r, 0), &want);
+        assert!(
+            ys(&r, 1).iter().all(|v| v.is_nan()),
+            "EMA 21 still warming up"
+        );
+    }
+
+    #[test]
+    fn bbands_sma_population_stdev() {
+        let ind = BollingerBandsInd {
+            period: 2,
+            std_dev: 1.0,
+        };
+        let r = ind.compute(&closes(&[1.0, 3.0, 5.0, 5.0]));
+        // basis = [_, 2, 4, 5], population stdev = [_, 1, 1, 0]
+        eq(ys(&r, 0), &[NAN, 3.0, 5.0, 5.0]);
+        eq(ys(&r, 1), &[NAN, 2.0, 4.0, 5.0]);
+        eq(ys(&r, 2), &[NAN, 1.0, 3.0, 5.0]);
+    }
+
+    #[test]
+    fn keltner_ema_basis_atr_bands() {
+        let ind = KeltnerChannels {
+            period: 2,
+            multiplier: 1.0,
+        };
+        let r = ind.compute(&ohlc());
+        // ema2(close) = [_, 1.5, 2/3*4 + 1/3*1.5, ...], atr2 = [_, 2, 2.5, 1.75]
+        let mid = [NAN, 1.5, 19.0 / 6.0, 55.0 / 18.0];
+        let atr = [NAN, 2.0, 2.5, 1.75];
+        eq(&ys(&r, 1)[..4], &mid);
+        let up: Vec<f64> = mid.iter().zip(&atr).map(|(m, a)| m + a).collect();
+        let lo: Vec<f64> = mid.iter().zip(&atr).map(|(m, a)| m - a).collect();
+        eq(&ys(&r, 0)[..4], &up);
+        eq(&ys(&r, 2)[..4], &lo);
+    }
+
+    #[test]
+    fn atr_is_rma_of_true_range() {
+        let r = Atr { period: 3 }.compute(&ohlc());
+        // TR = [2, 2, 3, 1, ...]; seed = 7/3, then (7/3 * 2 + 1) / 3 = 17/9.
+        eq(&ys(&r, 0)[..4], &[NAN, NAN, 7.0 / 3.0, 17.0 / 9.0]);
+    }
+
+    #[test]
+    fn obv_cumulates_signed_volume() {
+        let d = bars(&[
+            (1.0, 1.0, 1.0, 1.0, 10.0),
+            (2.0, 2.0, 2.0, 2.0, 20.0),
+            (2.0, 2.0, 2.0, 2.0, 30.0),
+            (1.0, 1.0, 1.0, 1.0, 40.0),
+            (3.0, 3.0, 3.0, 3.0, 50.0),
+        ]);
+        eq(ys(&Obv.compute(&d), 0), &[0.0, 20.0, 20.0, -20.0, 30.0]);
+    }
+
+    #[test]
+    fn cci_uses_mean_deviation() {
+        let r = Cci { period: 3 }.compute(&closes(&[1.0, 2.0, 3.0, 2.0]));
+        // idx 2: (3 - 2) / (0.015 * 2/3) = 100; idx 3: (2 - 7/3) / (0.015 * 4/9) = -50
+        eq(ys(&r, 0), &[NAN, NAN, 100.0, -50.0]);
+    }
+
+    #[test]
+    fn roc_has_nan_warmup() {
+        let r = Roc { period: 2 }.compute(&closes(&[1.0, 2.0, 4.0, 2.0]));
+        eq(ys(&r, 0), &[NAN, NAN, 300.0, 0.0]);
+    }
+
+    #[test]
+    fn mfi_matches_pine_reference() {
+        // hlc3 = close; flows (upper, lower) = (1, 1), (2, 0), (0, 1), (3, 0):
+        // bar 0 has no change, so its flow counts on both sides.
+        let r = Mfi { period: 2 }.compute(&closes(&[1.0, 2.0, 1.0, 3.0]));
+        eq(ys(&r, 0), &[NAN, 75.0, 200.0 / 3.0, 75.0]);
+    }
+
+    #[test]
+    fn stochastic_smooths_with_sma() {
+        let ind = Stochastic {
+            period: 2,
+            k_smooth: 2,
+            d_smooth: 2,
+        };
+        // raw %K = [_, 100, 100, 0, 100]
+        let r = ind.compute(&closes(&[1.0, 2.0, 3.0, 2.0, 4.0]));
+        eq(ys(&r, 0), &[NAN, NAN, 100.0, 50.0, 50.0]);
+        eq(ys(&r, 1), &[NAN, NAN, NAN, 75.0, 50.0]);
+    }
+
+    #[test]
+    fn williams_r_values_and_flat_range() {
+        let ind = WilliamsR { period: 2 };
+        let r = ind.compute(&closes(&[1.0, 2.0, 3.0, 2.0, 4.0]));
+        eq(ys(&r, 0), &[NAN, 0.0, 0.0, -100.0, 0.0]);
+        // zero range -> NaN (Pine division by zero), not 0
+        let r = ind.compute(&closes(&[5.0, 5.0, 5.0]));
+        assert!(ys(&r, 0).iter().all(|v| v.is_nan()));
+    }
+
+    #[test]
+    fn donchian_channels() {
+        let r = Donchian { period: 2 }.compute(&closes(&[1.0, 3.0, 2.0]));
+        eq(ys(&r, 0), &[NAN, 3.0, 3.0]);
+        eq(ys(&r, 1), &[NAN, 2.0, 2.5]);
+        eq(ys(&r, 2), &[NAN, 1.0, 2.0]);
+    }
+
+    #[test]
+    fn cmf_sum_ratio() {
+        // ad = [10, -10, 20], volume = [10, 10, 20]
+        let d = bars(&[
+            (2.0, 2.0, 0.0, 2.0, 10.0),
+            (0.0, 2.0, 0.0, 0.0, 10.0),
+            (4.0, 4.0, 0.0, 4.0, 20.0),
+        ]);
+        eq(
+            ys(&Cmf { period: 2 }.compute(&d), 0),
+            &[NAN, 0.0, 10.0 / 30.0],
+        );
     }
 }

@@ -2,19 +2,6 @@ use crate::data::OhlcvData;
 use crate::indicator::*;
 use crate::trading::signals;
 use serde_json::{json, Value};
-use ta::indicators::AverageTrueRange as TaAtr;
-use ta::{DataItem, Next};
-
-fn make_data_item(bar: &crate::data::Bar) -> DataItem {
-    DataItem::builder()
-        .open(bar.open)
-        .high(bar.high)
-        .low(bar.low)
-        .close(bar.close)
-        .volume(bar.volume)
-        .build()
-        .unwrap()
-}
 
 // ---- VWAP (overlay) ----
 
@@ -90,118 +77,42 @@ impl Indicator for Adx {
     }
 
     fn compute(&self, data: &OhlcvData) -> PanelResult {
-        let n = data.len();
+        use super::pine::{change_n, div, fixnan, rma_n, true_range, zip};
+        // TradingView ADX / DMI (DI length = ADX smoothing = period):
+        // plusDM / minusDM from ta.change(high) / -ta.change(low),
+        // DI = fixnan(100 * ta.rma(DM, n) / ta.rma(ta.tr, n)),
+        // ADX = 100 * ta.rma(|+DI - -DI| / (sum == 0 ? 1 : sum), n).
         let period = self.period;
-        let mut adx_vals = vec![f64::NAN; n];
-        let mut plus_di_vals = vec![f64::NAN; n];
-        let mut minus_di_vals = vec![f64::NAN; n];
-
-        if n < 2 {
-            return PanelResult {
-                label: "ADX".into(),
-                ..Default::default()
-            };
-        }
-
-        let p = period as f64;
-
-        // Compute raw TR, +DM, -DM
-        let mut tr = vec![0.0; n];
-        let mut plus_dm = vec![0.0; n];
-        let mut minus_dm = vec![0.0; n];
-
-        for i in 1..n {
-            let high = data.bars[i].high;
-            let low = data.bars[i].low;
-            let prev_high = data.bars[i - 1].high;
-            let prev_low = data.bars[i - 1].low;
-            let prev_close = data.bars[i - 1].close;
-
-            tr[i] = (high - low)
-                .max((high - prev_close).abs())
-                .max((low - prev_close).abs());
-
-            let up_move = high - prev_high;
-            let down_move = prev_low - low;
-
-            if up_move > down_move && up_move > 0.0 {
-                plus_dm[i] = up_move;
+        let up = change_n(&data.highs(), 1);
+        let down: Vec<f64> = change_n(&data.lows(), 1).iter().map(|c| -c).collect();
+        let dm = |a: f64, b: f64| {
+            if a.is_nan() {
+                f64::NAN
+            } else if a > b && a > 0.0 {
+                a
+            } else {
+                0.0
             }
-            if down_move > up_move && down_move > 0.0 {
-                minus_dm[i] = down_move;
-            }
+        };
+        let plus_dm = zip(&up, &down, dm);
+        let minus_dm = zip(&down, &up, dm);
+        // ta.tr (handle_na = false): na on bar 0, where close[1] is na.
+        let mut tr = true_range(data);
+        if let Some(t) = tr.first_mut() {
+            *t = f64::NAN;
         }
-
-        // Wilder's smoothing for TR, +DM, -DM
-        let mut smooth_tr = 0.0;
-        let mut smooth_plus_dm = 0.0;
-        let mut smooth_minus_dm = 0.0;
-
-        // Initialize with sum of first `period` values (starting from index 1)
-        if n < period + 1 {
-            return PanelResult {
-                label: "ADX".into(),
-                ..Default::default()
-            };
-        }
-
-        for i in 1..=period {
-            smooth_tr += tr[i];
-            smooth_plus_dm += plus_dm[i];
-            smooth_minus_dm += minus_dm[i];
-        }
-
-        let mut dx_vals = vec![f64::NAN; n];
-
-        // First DI values at index `period`
-        if smooth_tr > 0.0 {
-            plus_di_vals[period] = 100.0 * smooth_plus_dm / smooth_tr;
-            minus_di_vals[period] = 100.0 * smooth_minus_dm / smooth_tr;
-            let di_sum = plus_di_vals[period] + minus_di_vals[period];
-            if di_sum > 0.0 {
-                dx_vals[period] =
-                    100.0 * (plus_di_vals[period] - minus_di_vals[period]).abs() / di_sum;
-            }
-        }
-
-        for i in (period + 1)..n {
-            smooth_tr = smooth_tr - (smooth_tr / p) + tr[i];
-            smooth_plus_dm = smooth_plus_dm - (smooth_plus_dm / p) + plus_dm[i];
-            smooth_minus_dm = smooth_minus_dm - (smooth_minus_dm / p) + minus_dm[i];
-
-            if smooth_tr > 0.0 {
-                plus_di_vals[i] = 100.0 * smooth_plus_dm / smooth_tr;
-                minus_di_vals[i] = 100.0 * smooth_minus_dm / smooth_tr;
-                let di_sum = plus_di_vals[i] + minus_di_vals[i];
-                if di_sum > 0.0 {
-                    dx_vals[i] = 100.0 * (plus_di_vals[i] - minus_di_vals[i]).abs() / di_sum;
-                }
-            }
-        }
-
-        // ADX = Wilder's smoothing of DX
-        // First ADX value at index 2*period
-        if n > 2 * period {
-            let mut adx_sum = 0.0;
-            let mut count = 0;
-            for val in &dx_vals[period..=(2 * period)] {
-                if !val.is_nan() {
-                    adx_sum += val;
-                    count += 1;
-                }
-            }
-            if count > 0 {
-                let mut adx = adx_sum / count as f64;
-                adx_vals[2 * period] = adx;
-
-                for i in (2 * period + 1)..n {
-                    if !dx_vals[i].is_nan() {
-                        adx = (adx * (p - 1.0) + dx_vals[i]) / p;
-                        adx_vals[i] = adx;
-                    }
-                }
-            }
-        }
+        let trur = rma_n(&tr, period);
+        let di = |dm: &[f64]| {
+            let scaled: Vec<f64> = rma_n(dm, period).iter().map(|v| 100.0 * v).collect();
+            fixnan(&div(&scaled, &trur))
+        };
+        let plus_di_vals = di(&plus_dm);
+        let minus_di_vals = di(&minus_dm);
+        let dx = zip(&plus_di_vals, &minus_di_vals, |p, m| {
+            let sum = p + m;
+            (p - m).abs() / if sum == 0.0 { 1.0 } else { sum }
+        });
+        let adx_vals: Vec<f64> = rma_n(&dx, period).iter().map(|v| 100.0 * v).collect();
 
         PanelResult {
             lines: vec![
@@ -288,13 +199,8 @@ impl Indicator for Supertrend {
             };
         }
 
-        // Compute ATR using ta-rs
-        let mut atr_ind = TaAtr::new(self.period).unwrap();
-        let mut atr_vals = vec![f64::NAN; n];
-        for (i, bar) in data.bars.iter().enumerate() {
-            let di = make_data_item(bar);
-            atr_vals[i] = atr_ind.next(&di);
-        }
+        // ta.supertrend: ATR is ta.atr (RMA of the true range).
+        let atr_vals = super::pine::atr(data, self.period);
 
         let mut final_upper = vec![f64::NAN; n];
         let mut final_lower = vec![f64::NAN; n];
@@ -314,7 +220,8 @@ impl Indicator for Supertrend {
             if i == 0 || final_upper[i - 1].is_nan() {
                 final_upper[i] = basic_upper;
                 final_lower[i] = basic_lower;
-                trend[i] = true;
+                // ta.supertrend: direction is 1 (down) while atr[1] is na.
+                trend[i] = false;
             } else {
                 let prev_close = data.bars[i - 1].close;
 
@@ -441,69 +348,79 @@ impl Indicator for ParabolicSar {
             };
         }
 
+        // Port of Pine's `ta.sar` reference implementation. Bar 0 is na; bar 1
+        // seeds the trend from close vs close[1].
+        let (start, inc, max) = (self.af_start, self.af_step, self.af_max);
+        let b = &data.bars;
         // true = UP (SAR below price), false = DOWN (SAR above price)
-        let mut trend_up = true;
-        let mut sar = data.bars[0].low;
-        let mut ep = data.bars[0].high;
-        let mut af = self.af_start;
-
-        // First bar
-        dots.push(Dot {
-            x: 0,
-            y: sar,
-            color: rgba(0x26a69a, 0.9),
-            size: 2,
-            label: None,
-        });
+        let mut trend_up = false;
+        let mut sar = f64::NAN;
+        let mut ep = f64::NAN;
+        let mut af = start;
 
         for i in 1..n {
-            let high = data.bars[i].high;
-            let low = data.bars[i].low;
+            let (high, low) = (b[i].high, b[i].low);
+            let mut first_trend_bar = false;
+            let mut flipped = false;
+            if i == 1 {
+                trend_up = b[1].close > b[0].close;
+                if trend_up {
+                    ep = high;
+                    sar = b[0].low;
+                } else {
+                    ep = low;
+                    sar = b[0].high;
+                }
+                first_trend_bar = true;
+                af = start;
+            }
 
-            let prev_trend_up = trend_up;
-            let mut new_sar = sar + af * (ep - sar);
+            sar += af * (ep - sar);
 
             if trend_up {
-                // Clamp SAR to be at or below previous lows
-                new_sar = new_sar.min(data.bars[i - 1].low);
-                if i >= 2 {
-                    new_sar = new_sar.min(data.bars[i - 2].low);
-                }
-
-                if high > ep {
-                    ep = high;
-                    af = (af + self.af_step).min(self.af_max);
-                }
-
-                if low < new_sar {
+                if sar > low {
                     // Reverse to DOWN
+                    first_trend_bar = true;
+                    flipped = true;
                     trend_up = false;
-                    new_sar = ep;
+                    sar = high.max(ep);
                     ep = low;
-                    af = self.af_start;
+                    af = start;
                 }
-            } else {
-                // Clamp SAR to be at or above previous highs
-                new_sar = new_sar.max(data.bars[i - 1].high);
-                if i >= 2 {
-                    new_sar = new_sar.max(data.bars[i - 2].high);
-                }
+            } else if sar < high {
+                // Reverse to UP
+                first_trend_bar = true;
+                flipped = true;
+                trend_up = true;
+                sar = low.min(ep);
+                ep = high;
+                af = start;
+            }
 
-                if low < ep {
+            if !first_trend_bar {
+                if trend_up {
+                    if high > ep {
+                        ep = high;
+                        af = (af + inc).min(max);
+                    }
+                } else if low < ep {
                     ep = low;
-                    af = (af + self.af_step).min(self.af_max);
-                }
-
-                if high > new_sar {
-                    // Reverse to UP
-                    trend_up = true;
-                    new_sar = ep;
-                    ep = high;
-                    af = self.af_start;
+                    af = (af + inc).min(max);
                 }
             }
 
-            sar = new_sar;
+            // Clamp SAR to the previous two lows (UP) or highs (DOWN)
+            if trend_up {
+                sar = sar.min(b[i - 1].low);
+                if i > 1 {
+                    sar = sar.min(b[i - 2].low);
+                }
+            } else {
+                sar = sar.max(b[i - 1].high);
+                if i > 1 {
+                    sar = sar.max(b[i - 2].high);
+                }
+            }
 
             let color = if trend_up {
                 rgba(0x26a69a, 0.9)
@@ -511,7 +428,7 @@ impl Indicator for ParabolicSar {
                 rgba(0xef5350, 0.9)
             };
             // Label only the flip bars (direction reversal = signal event).
-            let label = if trend_up != prev_trend_up {
+            let label = if flipped {
                 if trend_up {
                     Some(signals::FLIP_UP.to_string())
                 } else {
@@ -612,37 +529,31 @@ impl Indicator for HistVol {
     }
 
     fn compute(&self, data: &OhlcvData) -> PanelResult {
-        let n = data.len();
-        let mut vals = vec![f64::NAN; n];
-
-        if n < 2 {
-            return PanelResult {
-                label: "HV".into(),
-                ..Default::default()
-            };
-        }
-
-        // Compute log returns
-        let mut log_returns = vec![f64::NAN; n];
-        for (i, pair) in data.bars.windows(2).enumerate() {
-            if pair[1].close > 0.0 && pair[0].close > 0.0 {
-                log_returns[i + 1] = (pair[1].close / pair[0].close).ln();
-            }
-        }
-
-        let period = self.period;
-        // Rolling window standard deviation, annualized
-        for i in period..n {
-            let window = &log_returns[i + 1 - period..=i];
-            let valid: Vec<f64> = window.iter().copied().filter(|r| !r.is_nan()).collect();
-            if valid.len() < 2 {
-                continue;
-            }
-            let count = valid.len() as f64;
-            let mean: f64 = valid.iter().sum::<f64>() / count;
-            let var: f64 = valid.iter().map(|r| (r - mean).powi(2)).sum::<f64>() / count;
-            vals[i] = var.sqrt() * (252.0_f64).sqrt() * 100.0;
-        }
+        // TV: 100 * ta.stdev(math.log(close / close[1]), n) * math.sqrt(365 / per),
+        // per = 1 for intraday and 1D charts, 7 otherwise.
+        let closes = data.closes();
+        let log_returns: Vec<f64> = (0..closes.len())
+            .map(|i| {
+                if i == 0 {
+                    f64::NAN
+                } else {
+                    (closes[i] / closes[i - 1]).ln()
+                }
+            })
+            .collect();
+        let per = match data
+            .interval
+            .as_deref()
+            .and_then(crate::data::interval_secs)
+        {
+            Some(secs) if secs > 86_400 => 7.0,
+            _ => 1.0,
+        };
+        let scale = 100.0 * (365.0_f64 / per).sqrt();
+        let vals: Vec<f64> = super::pine::stdev(&log_returns, self.period)
+            .iter()
+            .map(|v| v * scale)
+            .collect();
 
         PanelResult {
             lines: vec![Line {
@@ -1240,75 +1151,6 @@ impl Indicator for VolumeProfile {
 
 // ---- Kalman Volume Filter [ChartPrime] (panel) ----
 
-/// Weighted Moving Average.
-fn wma(data: &[f64], period: usize) -> Vec<f64> {
-    let n = data.len();
-    let mut out = vec![f64::NAN; n];
-    if n == 0 || period == 0 {
-        return out;
-    }
-    let denom: f64 = (1..=period).sum::<usize>() as f64;
-    for i in (period - 1)..n {
-        let mut sum = 0.0;
-        let mut all_valid = true;
-        for j in 0..period {
-            let v = data[i + j + 1 - period];
-            if v.is_nan() {
-                all_valid = false;
-                break;
-            }
-            sum += v * (j + 1) as f64;
-        }
-        if all_valid {
-            out[i] = sum / denom;
-        }
-    }
-    out
-}
-
-/// Hull Moving Average: WMA(2*WMA(src, len/2) - WMA(src, len), sqrt(len)).
-fn hma(data: &[f64], period: usize) -> Vec<f64> {
-    let n = data.len();
-    if n == 0 || period < 2 {
-        return vec![f64::NAN; n];
-    }
-    let half = period / 2;
-    let sqrt_len = (period as f64).sqrt().round() as usize;
-
-    let wma_half = wma(data, half.max(1));
-    let wma_full = wma(data, period);
-
-    // diff = 2 * wma_half - wma_full
-    let mut diff = vec![f64::NAN; n];
-    for i in 0..n {
-        if !wma_half[i].is_nan() && !wma_full[i].is_nan() {
-            diff[i] = 2.0 * wma_half[i] - wma_full[i];
-        }
-    }
-    wma(&diff, sqrt_len.max(1))
-}
-
-/// Rolling standard deviation over `period` bars (population stdev).
-fn rolling_stdev(data: &[f64], period: usize) -> Vec<f64> {
-    let n = data.len();
-    let mut out = vec![f64::NAN; n];
-    if n == 0 || period == 0 {
-        return out;
-    }
-    for i in (period - 1)..n {
-        let window = &data[i + 1 - period..=i];
-        let valid: Vec<f64> = window.iter().copied().filter(|v| !v.is_nan()).collect();
-        if valid.len() < 2 {
-            continue;
-        }
-        let cnt = valid.len() as f64;
-        let mean = valid.iter().sum::<f64>() / cnt;
-        let var = valid.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / cnt;
-        out[i] = var.sqrt();
-    }
-    out
-}
-
 pub struct KalmanVolume {
     pub vzo_length: usize,
     pub k: f64,
@@ -1357,6 +1199,7 @@ impl Indicator for KalmanVolume {
     }
 
     fn compute(&self, data: &OhlcvData) -> PanelResult {
+        use super::pine::{div, hma_n, stdev};
         let n = data.len();
         if n < 3 {
             return PanelResult {
@@ -1368,56 +1211,50 @@ impl Indicator for KalmanVolume {
         let closes = data.closes();
         let volumes: Vec<f64> = data.bars.iter().map(|b| b.volume).collect();
 
-        // Volume direction: positive if close > close[i-2], else negative
-        let mut vol_dir = vec![f64::NAN; n];
-        vol_dir[0] = volumes[0];
-        vol_dir[1] = volumes[1];
-        for i in 2..n {
-            vol_dir[i] = if closes[i] > closes[i - 2] {
-                volumes[i]
-            } else {
-                -volumes[i]
-            };
-        }
+        // Volume direction: positive if close > close[i-2], else negative.
+        // On bars 0-1 close[2] is na, the comparison is false -> negative.
+        let vol_dir: Vec<f64> = (0..n)
+            .map(|i| {
+                if i >= 2 && closes[i] > closes[i - 2] {
+                    volumes[i]
+                } else {
+                    -volumes[i]
+                }
+            })
+            .collect();
 
-        // VZO
-        let vzo_volume = hma(&vol_dir, self.vzo_length);
-        let total_volume = hma(&volumes, self.vzo_length);
+        // VZO (ta.hma: floor(sqrt(len)) final WMA)
+        let vzo_volume = hma_n(&vol_dir, self.vzo_length);
+        let total_volume = hma_n(&volumes, self.vzo_length);
 
-        let mut vzo = vec![f64::NAN; n];
+        let mut vzo_raw = vec![f64::NAN; n];
         for i in 0..n {
             if !vzo_volume[i].is_nan() && !total_volume[i].is_nan() && total_volume[i].abs() > 1e-30
             {
-                vzo[i] = vzo_volume[i] / total_volume[i];
+                vzo_raw[i] = vzo_volume[i] / total_volume[i];
             }
         }
 
-        // Z-score normalize VZO
-        let vzo_std = rolling_stdev(&vzo, 200);
-        for i in 0..n {
-            if !vzo[i].is_nan() && !vzo_std[i].is_nan() && vzo_std[i] > 1e-30 {
-                vzo[i] /= vzo_std[i];
-            }
-        }
+        // Z-score normalize VZO: vzo / ta.stdev(vzo, 200), na until 200 valid bars
+        let vzo = div(&vzo_raw, &stdev(&vzo_raw, 200));
 
-        // Kalman filter — Pine Script initializes M_n = 0.0, nz(M_n[1]) = 0
+        // Kalman filter — Pine Script initializes M_n = 0.0, nz(M_n[1]) = 0:
+        // a na input gives a na M_n, and the next bar restarts from 0.
         let mut m_n = vec![f64::NAN; n];
-        let mut prev_m = 0.0_f64; // Pine: series float M_n = 0.0
         for i in 0..n {
-            if vzo[i].is_nan() {
-                m_n[i] = prev_m; // carry forward like Pine's nz()
-                continue;
-            }
-            let a_n = vzo[i];
-            prev_m = self.k * a_n + (1.0 - self.k) * prev_m;
-            m_n[i] = prev_m;
+            let prev_m = if i > 0 && !m_n[i - 1].is_nan() {
+                m_n[i - 1]
+            } else {
+                0.0
+            };
+            m_n[i] = self.k * vzo[i] + (1.0 - self.k) * prev_m;
         }
 
         // Signal line = SMA(m_n, sig_length)
         let signal = sma(&m_n, self.sig_length);
 
         // Volume histogram background
-        let vol_std = rolling_stdev(&volumes, 200);
+        let vol_std = stdev(&volumes, 200);
         let mut vol_norm = vec![f64::NAN; n];
         for i in 0..n {
             if !vol_std[i].is_nan() && vol_std[i] > 1e-30 {
@@ -1610,6 +1447,9 @@ impl Indicator for KalmanVolume {
 
 // ---- Ichimoku Cloud (overlay) ----
 
+/// TradingView's default "Lagging Span" displacement.
+const ICHIMOKU_DISPLACEMENT: i64 = 26;
+
 pub struct Ichimoku {
     pub tenkan: usize,
     pub kijun: usize,
@@ -1686,6 +1526,11 @@ impl Indicator for Ichimoku {
                 senkou_b[i] = (hh_senkou_b[i] + ll_senkou_b[i]) / 2.0;
             }
         }
+        // TV plots the leading spans with `offset = displacement - 1` (26 - 1):
+        // bar i shows the value computed 25 bars earlier. Values projected past
+        // the last bar have no x position here and are dropped.
+        let senkou_a = super::pine::shift(&senkou_a, ICHIMOKU_DISPLACEMENT - 1);
+        let senkou_b = super::pine::shift(&senkou_b, ICHIMOKU_DISPLACEMENT - 1);
 
         PanelResult {
             lines: vec![
@@ -2493,5 +2338,118 @@ impl Indicator for Tpo {
         });
 
         out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::data::sample_data;
+    use crate::indicators::pine::test_util::{closes, eq, ohlc, NAN};
+
+    fn dot_ys(r: &PanelResult) -> Vec<f64> {
+        r.dots.iter().map(|d| d.y).collect()
+    }
+    fn flips(r: &PanelResult) -> Vec<(usize, &str)> {
+        r.dots
+            .iter()
+            .filter_map(|d| d.label.as_deref().map(|l| (d.x, l)))
+            .collect()
+    }
+
+    #[test]
+    fn adx_matches_pine_dmi() {
+        // +DM = [_, 1, 2, 0, 0, ...], -DM = [_, 0, 0, 0, 2, ...],
+        // rma2(ta.tr) = [_, _, 2.5, 1.75, 2.125]: DI starts at bar 2.
+        let r = Adx { period: 2 }.compute(&ohlc());
+        eq(
+            &r.lines[1].y[..5],
+            &[NAN, NAN, 60.0, 300.0 / 7.0, 300.0 / 17.0],
+        );
+        eq(&r.lines[2].y[..5], &[NAN, NAN, 0.0, 0.0, 800.0 / 17.0]);
+        // DX = [_, _, 1, 1, 5/11]; ADX = 100 * rma2(DX) seeds one bar later.
+        eq(&r.lines[0].y[..5], &[NAN, NAN, NAN, 100.0, 800.0 / 11.0]);
+    }
+
+    #[test]
+    fn supertrend_starts_down_and_flips_up() {
+        let ind = Supertrend {
+            period: 2,
+            multiplier: 1.0,
+        };
+        let r = ind.compute(&ohlc());
+        // ATR2 = [_, 2, 2.5, 1.75, 2.125, 1.8125, 2.40625, ...]; bar 1 is the
+        // first ATR bar, where ta.supertrend's direction is down (upper band).
+        assert_eq!(r.dots[0].x, 1);
+        eq(
+            &dot_ys(&r),
+            &[4.0, 4.0, 4.0, 4.0, 3.0625, 0.09375, 1.796875],
+        );
+        assert_eq!(flips(&r), vec![(6, signals::FLIP_UP)]);
+    }
+
+    #[test]
+    fn sar_matches_pine_reference() {
+        let r = ParabolicSar::default().compute(&ohlc());
+        // Bar 0 is na; bar 1 seeds an uptrend at low[0] = 0.
+        assert_eq!(r.dots[0].x, 1);
+        eq(&dot_ys(&r), &[0.0, 0.0, 0.2, 0.392, 5.0, 4.91, 0.5]);
+        assert_eq!(
+            flips(&r),
+            vec![(5, signals::FLIP_DOWN), (7, signals::FLIP_UP)]
+        );
+    }
+
+    #[test]
+    fn ichimoku_leads_spans_by_displacement() {
+        let ind = Ichimoku {
+            tenkan: 1,
+            kijun: 2,
+            senkou_b: 2,
+        };
+        let r = ind.compute(&closes(&(1..=28).map(f64::from).collect::<Vec<_>>()));
+        assert_eq!(r.lines[0].y[0], 1.0, "Tenkan is not shifted");
+        // Senkou A at bar j = c_j - 0.25 (j >= 1), drawn 25 bars later.
+        let mut a = vec![NAN; 26];
+        a.extend([1.75, 2.75]);
+        eq(&r.lines[2].y, &a);
+        let mut b = vec![NAN; 26];
+        b.extend([1.5, 2.5]);
+        eq(&r.lines[3].y, &b);
+    }
+
+    #[test]
+    fn histvol_annualizes_like_tradingview() {
+        let e = std::f64::consts::E;
+        let mut d = closes(&[1.0, e, e * e, e]);
+        // log returns = [_, 1, 1, -1]; population stdev(2) = [_, _, 0, 1]
+        let ind = HistVol { period: 2 };
+        d.interval = Some("1d".into());
+        eq(
+            &ind.compute(&d).lines[0].y,
+            &[NAN, NAN, 0.0, 100.0 * 365f64.sqrt()],
+        );
+        d.interval = Some("1w".into());
+        let weekly = 100.0 * (365.0f64 / 7.0).sqrt();
+        eq(&ind.compute(&d).lines[0].y, &[NAN, NAN, 0.0, weekly]);
+    }
+
+    #[test]
+    fn kalman_volume_uses_pine_hma_and_stdev() {
+        // ta.hma floors sqrt(3) to 1: hma3 = 2 * x - wma3.
+        eq(
+            &super::super::pine::hma_n(&[1.0, 2.0, 3.0, 4.0], 3),
+            &[NAN, NAN, 11.0 / 3.0, 14.0 / 3.0],
+        );
+        let ind = KalmanVolume {
+            vzo_length: 4,
+            ..Default::default()
+        };
+        // hma4 is valid from bar 4, ta.stdev(vzo, 200) from bar 203, the
+        // 10-bar signal from bar 212: no dot (and no 0 placeholder) before.
+        let r = ind.compute(&sample_data(300));
+        assert_eq!(r.dots.iter().map(|d| d.x).min(), Some(212));
+        let first: Vec<f64> = r.dots.iter().filter(|d| d.x == 212).map(|d| d.y).collect();
+        assert!(first.iter().all(|y| y.is_finite() && *y != 0.0));
     }
 }

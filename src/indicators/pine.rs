@@ -266,6 +266,24 @@ pub fn true_range(data: &OhlcvData) -> Vec<f64> {
         .collect()
 }
 
+/// Pine `ta.atr`: RMA of the true range (ta.tr(true)).
+pub fn atr(data: &OhlcvData, n: usize) -> Vec<f64> {
+    rma_n(&true_range(data), n)
+}
+
+/// Pine `fixnan`: replace NaN with the last non-NaN value (leading NaNs stay).
+pub fn fixnan(x: &[f64]) -> Vec<f64> {
+    let mut last = f64::NAN;
+    x.iter()
+        .map(|&v| {
+            if !v.is_nan() {
+                last = v;
+            }
+            last
+        })
+        .collect()
+}
+
 // ---- Oscillator helpers ----
 
 pub fn highest(x: &[f64], n: usize) -> Vec<f64> {
@@ -281,6 +299,37 @@ pub fn stdev(x: &[f64], n: usize) -> Vec<f64> {
     windowed(x, n, |w| {
         let m = w.iter().sum::<f64>() / w.len() as f64;
         (w.iter().map(|v| (v - m) * (v - m)).sum::<f64>() / w.len() as f64).sqrt()
+    })
+}
+/// Pine `ta.dev`: mean absolute deviation from the window's SMA.
+pub fn dev(x: &[f64], n: usize) -> Vec<f64> {
+    windowed(x, n, |w| {
+        let m = w.iter().sum::<f64>() / w.len() as f64;
+        w.iter().map(|v| (v - m).abs()).sum::<f64>() / w.len() as f64
+    })
+}
+/// Pine `ta.mfi(src, n)` as written in the Pine reference:
+/// `upper = sum(volume * (change(src) <= 0 ? 0 : src), n)`,
+/// `lower = sum(volume * (change(src) >= 0 ? 0 : src), n)`,
+/// `100 - 100 / (1 + upper / lower)`. On bar 0 the change is na, both
+/// comparisons are false, so that bar's flow counts on both sides.
+/// A zero `lower` is a division by zero -> NaN.
+pub fn mfi(src: &[f64], vol: &[f64], n: usize) -> Vec<f64> {
+    let ch = change_n(src, 1);
+    let flow = |keep: fn(f64) -> bool| -> Vec<f64> {
+        (0..src.len())
+            .map(|i| if keep(ch[i]) { vol[i] * src[i] } else { 0.0 })
+            .collect()
+    };
+    // A NaN change keeps the flow, matching Pine's false comparison with na.
+    let upper = sum_n(&flow(|c| c > 0.0 || c.is_nan()), n);
+    let lower = sum_n(&flow(|c| c < 0.0 || c.is_nan()), n);
+    zip(&upper, &lower, |u, l| {
+        if l == 0.0 || u.is_nan() || l.is_nan() {
+            f64::NAN
+        } else {
+            100.0 - 100.0 / (1.0 + u / l)
+        }
     })
 }
 /// Pine `ta.swma`: (x[3] + 2*x[2] + 2*x[1] + x[0]) / 6.
@@ -387,5 +436,64 @@ pub fn hist(y: Vec<f64>) -> Bars {
         y,
         colors,
         bottom: 0.0,
+    }
+}
+
+/// Fixture builders and a NaN-aware comparison shared by indicator unit tests.
+#[cfg(test)]
+pub(crate) mod test_util {
+    use crate::data::{Bar, OhlcvData};
+
+    pub const NAN: f64 = f64::NAN;
+
+    /// Bars from (open, high, low, close, volume) tuples.
+    pub fn bars(v: &[(f64, f64, f64, f64, f64)]) -> OhlcvData {
+        OhlcvData {
+            bars: v
+                .iter()
+                .map(|&(open, high, low, close, volume)| Bar {
+                    open,
+                    high,
+                    low,
+                    close,
+                    volume,
+                    date: String::new(),
+                })
+                .collect(),
+            symbol: None,
+            interval: None,
+        }
+    }
+
+    /// Flat bars (open = high = low = close) with volume 1.
+    pub fn closes(c: &[f64]) -> OhlcvData {
+        bars(&c.iter().map(|&x| (x, x, x, x, 1.0)).collect::<Vec<_>>())
+    }
+
+    /// OHLC fixture for the ATR / Keltner / ADX / Supertrend / SAR tests.
+    /// True range (ta.tr(true)): [2, 2, 3, 1, 2.5, 1.5, 3, 3].
+    pub fn ohlc() -> OhlcvData {
+        bars(&[
+            (1.0, 2.0, 0.0, 1.0, 1.0),
+            (1.0, 3.0, 1.0, 2.0, 1.0),
+            (2.0, 5.0, 2.0, 4.0, 1.0),
+            (4.0, 4.0, 3.0, 3.0, 1.0),
+            (3.0, 3.5, 1.0, 1.5, 1.0),
+            (1.5, 2.0, 0.5, 1.0, 1.0),
+            (1.0, 4.0, 1.0, 3.5, 1.0),
+            (3.5, 6.0, 3.0, 5.5, 1.0),
+        ])
+    }
+
+    /// Element-wise comparison; NaN must match NaN.
+    pub fn eq(got: &[f64], want: &[f64]) {
+        assert_eq!(got.len(), want.len(), "{got:?} vs {want:?}");
+        for (i, (g, w)) in got.iter().zip(want).enumerate() {
+            if w.is_nan() {
+                assert!(g.is_nan(), "idx {i}: got {g}, want NaN ({got:?})");
+            } else {
+                assert!((g - w).abs() < 1e-9, "idx {i}: got {g}, want {w} ({got:?})");
+            }
+        }
     }
 }
