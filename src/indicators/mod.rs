@@ -2,6 +2,8 @@ pub mod cipher_b;
 pub mod custom;
 pub mod external;
 pub mod macd;
+pub mod oscillators;
+pub mod pine;
 pub mod rsi;
 pub mod rsi_combo;
 pub mod ta_bridge;
@@ -67,6 +69,9 @@ pub fn by_name(name: &str) -> Option<Box<dyn Indicator>> {
         "vortex" => Some(Box::new(trend::Vortex::default())),
         "chande_kroll_stop" => Some(Box::new(trend::ChandeKrollStop::default())),
         "zigzag" => Some(Box::new(trend::ZigZag::default())),
+        n if oscillators::Kind::from_name(n).is_some() => {
+            oscillators::by_name(n).map(|o| Box::new(o) as Box<dyn Indicator>)
+        }
         _ => None,
     }
 }
@@ -190,6 +195,29 @@ pub fn available() -> &'static [&'static str] {
         "vortex",
         "chande_kroll_stop",
         "zigzag",
+        "stoch_rsi",
+        "awesome_oscillator",
+        "momentum",
+        "trix",
+        "ultimate_oscillator",
+        "ppo",
+        "cmo",
+        "dpo",
+        "elder_force_index",
+        "tsi",
+        "kst",
+        "coppock",
+        "mass_index",
+        "bb_percent_b",
+        "bb_width",
+        "choppiness",
+        "fisher_transform",
+        "ease_of_movement",
+        "volume_oscillator",
+        "balance_of_power",
+        "rvi",
+        "smi_ergodic",
+        "connors_rsi",
     ]
 }
 
@@ -340,6 +368,10 @@ pub fn registry() -> Vec<IndicatorInfo> {
     reg!("volume", &[], "panel", trend::Volume::default());
     reg!("aroon", &[], "panel", trend::Aroon::default());
     reg!("vortex", &[], "panel", trend::Vortex::default());
+    // TradingView-parity oscillators
+    for k in oscillators::ALL {
+        reg!(k.name(), k.aliases(), "panel", oscillators::Osc::new(k));
+    }
 
     // External API
     reg!("cvd", &[], "external", external::Cvd);

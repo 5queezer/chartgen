@@ -1,8 +1,11 @@
 //! Moving-average, volume and trend indicators mirroring TradingView's
 //! built-ins (Pine v5 semantics). Warmup values are NaN.
 
+use super::pine::{
+    line, linfit, ma_by_type, rma_n, shift, sma_n, source_series, true_range, volumes, windowed,
+};
 use crate::data::OhlcvData;
-use crate::indicator::{rgba, Bars, DivLine, Fill, Indicator, Line, PanelResult};
+use crate::indicator::{rgba, Bars, DivLine, Fill, Indicator, PanelResult};
 use serde_json::{json, Value};
 
 pub const MA_TYPES: &[&str] = &[
@@ -11,209 +14,6 @@ pub const MA_TYPES: &[&str] = &[
 pub const SOURCES: &[&str] = &[
     "close", "open", "high", "low", "hl2", "hlc3", "ohlc4", "hlcc4",
 ];
-
-// ---- Series helpers (Pine semantics) ----
-
-/// Source series as selected by the TradingView `source` input.
-pub fn source_series(data: &OhlcvData, src: &str) -> Vec<f64> {
-    data.bars
-        .iter()
-        .map(|b| match src {
-            "open" => b.open,
-            "high" => b.high,
-            "low" => b.low,
-            "hl2" => (b.high + b.low) / 2.0,
-            "hlc3" => (b.high + b.low + b.close) / 3.0,
-            "ohlc4" => (b.open + b.high + b.low + b.close) / 4.0,
-            "hlcc4" => (b.high + b.low + 2.0 * b.close) / 4.0,
-            _ => b.close,
-        })
-        .collect()
-}
-
-/// Apply `f` to every full window of `n` values; NaN if the window holds a NaN.
-fn windowed(x: &[f64], n: usize, f: impl Fn(&[f64]) -> f64) -> Vec<f64> {
-    let mut out = vec![f64::NAN; x.len()];
-    if n == 0 {
-        return out;
-    }
-    for i in (n - 1)..x.len() {
-        let w = &x[i + 1 - n..=i];
-        if w.iter().all(|v| !v.is_nan()) {
-            out[i] = f(w);
-        }
-    }
-    out
-}
-
-/// ta.sma: running sum, NaN until `n` consecutive valid values exist.
-pub fn sma_n(x: &[f64], n: usize) -> Vec<f64> {
-    let mut out = vec![f64::NAN; x.len()];
-    if n == 0 {
-        return out;
-    }
-    let (mut sum, mut nans) = (0.0, 0usize);
-    for i in 0..x.len() {
-        if x[i].is_nan() {
-            nans += 1;
-        } else {
-            sum += x[i];
-        }
-        if i >= n {
-            let old = x[i - n];
-            if old.is_nan() {
-                nans -= 1;
-            } else {
-                sum -= old;
-            }
-        }
-        if i + 1 >= n && nans == 0 {
-            out[i] = sum / n as f64;
-        }
-    }
-    out
-}
-
-/// Exponential smoothing seeded with the SMA (ta.ema uses alpha = 2/(n+1),
-/// ta.rma uses alpha = 1/n).
-fn smoothed(x: &[f64], n: usize, alpha: f64) -> Vec<f64> {
-    let mut out = vec![f64::NAN; x.len()];
-    let seed = sma_n(x, n);
-    let mut prev = f64::NAN;
-    for i in 0..x.len() {
-        if prev.is_nan() {
-            prev = seed[i];
-            out[i] = prev;
-        } else if !x[i].is_nan() {
-            prev = alpha * x[i] + (1.0 - alpha) * prev;
-            out[i] = prev;
-        }
-    }
-    out
-}
-
-pub fn ema_n(x: &[f64], n: usize) -> Vec<f64> {
-    smoothed(x, n, 2.0 / (n as f64 + 1.0))
-}
-
-pub fn rma_n(x: &[f64], n: usize) -> Vec<f64> {
-    smoothed(x, n, 1.0 / n.max(1) as f64)
-}
-
-/// ta.wma: linear weights, newest bar weighs `n`.
-pub fn wma_n(x: &[f64], n: usize) -> Vec<f64> {
-    let norm = (n * (n + 1)) as f64 / 2.0;
-    windowed(x, n, |w| {
-        w.iter()
-            .enumerate()
-            .map(|(i, v)| v * (i + 1) as f64)
-            .sum::<f64>()
-            / norm
-    })
-}
-
-/// Least-squares line through the window (x = 0..n-1, oldest first);
-/// returns (intercept, slope).
-fn linfit(w: &[f64]) -> (f64, f64) {
-    let n = w.len() as f64;
-    let (mut sx, mut sy, mut sxy, mut sxx) = (0.0, 0.0, 0.0, 0.0);
-    for (i, &y) in w.iter().enumerate() {
-        let x = i as f64;
-        sx += x;
-        sy += y;
-        sxy += x * y;
-        sxx += x * x;
-    }
-    let den = n * sxx - sx * sx;
-    let slope = if den == 0.0 {
-        0.0
-    } else {
-        (n * sxy - sx * sy) / den
-    };
-    ((sy - slope * sx) / n, slope)
-}
-
-/// ta.linreg(src, n, 0): regression value at the newest bar of each window.
-pub fn linreg_n(x: &[f64], n: usize) -> Vec<f64> {
-    windowed(x, n, |w| {
-        let (a, b) = linfit(w);
-        a + b * (w.len() - 1) as f64
-    })
-}
-
-/// ta.alma with offset 0.85, sigma 6.
-pub fn alma_n(x: &[f64], n: usize) -> Vec<f64> {
-    let m = 0.85 * (n as f64 - 1.0); // ta.alma floor=false
-    let s = n as f64 / 6.0;
-    let weights: Vec<f64> = (0..n)
-        .map(|i| (-((i as f64 - m).powi(2)) / (2.0 * s * s)).exp())
-        .collect();
-    let norm: f64 = weights.iter().sum();
-    windowed(x, n, |w| {
-        w.iter().zip(&weights).map(|(v, k)| v * k).sum::<f64>() / norm
-    })
-}
-
-/// ta.vwma: sma(src*volume, n) / sma(volume, n).
-pub fn vwma_n(x: &[f64], vol: &[f64], n: usize) -> Vec<f64> {
-    let xv: Vec<f64> = x.iter().zip(vol).map(|(a, b)| a * b).collect();
-    let (num, den) = (sma_n(&xv, n), sma_n(vol, n));
-    num.iter()
-        .zip(&den)
-        .map(|(a, b)| if *b == 0.0 { f64::NAN } else { a / b })
-        .collect()
-}
-
-/// ta.hma: wma(2*wma(x, n/2) - wma(x, n), floor(sqrt(n))).
-pub fn hma_n(x: &[f64], n: usize) -> Vec<f64> {
-    let half = wma_n(x, (n / 2).max(1));
-    let full = wma_n(x, n);
-    let raw: Vec<f64> = half.iter().zip(&full).map(|(a, b)| 2.0 * a - b).collect();
-    wma_n(&raw, ((n as f64).sqrt().floor() as usize).max(1))
-}
-
-/// Dispatch a moving average by TradingView type name.
-pub fn ma_by_type(kind: &str, x: &[f64], vol: &[f64], n: usize) -> Vec<f64> {
-    match kind {
-        "ema" => ema_n(x, n),
-        "wma" => wma_n(x, n),
-        "hma" => hma_n(x, n),
-        "vwma" => vwma_n(x, vol, n),
-        "rma" | "smma" => rma_n(x, n),
-        "alma" => alma_n(x, n),
-        "dema" => {
-            let e1 = ema_n(x, n);
-            let e2 = ema_n(&e1, n);
-            e1.iter().zip(&e2).map(|(a, b)| 2.0 * a - b).collect()
-        }
-        "tema" => {
-            let e1 = ema_n(x, n);
-            let e2 = ema_n(&e1, n);
-            let e3 = ema_n(&e2, n);
-            (0..x.len())
-                .map(|i| 3.0 * e1[i] - 3.0 * e2[i] + e3[i])
-                .collect()
-        }
-        "lsma" => linreg_n(x, n),
-        _ => sma_n(x, n),
-    }
-}
-
-/// Chart offset: the value computed at bar i is drawn at bar i + off.
-pub fn shift(x: &[f64], off: i64) -> Vec<f64> {
-    let mut out = vec![f64::NAN; x.len()];
-    for (i, &v) in x.iter().enumerate() {
-        let j = i as i64 + off;
-        if j >= 0 && (j as usize) < x.len() {
-            out[j as usize] = v;
-        }
-    }
-    out
-}
-
-fn volumes(data: &OhlcvData) -> Vec<f64> {
-    data.bars.iter().map(|b| b.volume).collect()
-}
 
 fn get_usize(p: &Value, k: &str) -> Option<usize> {
     p.get(k).and_then(|v| v.as_u64()).map(|v| v as usize)
@@ -230,15 +30,6 @@ fn get_str(p: &Value, k: &str, allowed: &[&str]) -> Option<String> {
         .map(String::from)
 }
 
-fn line(y: Vec<f64>, color: u32, width: u32, label: &str) -> Line {
-    Line {
-        y,
-        color: rgba(color, 0.9),
-        width,
-        label: Some(label.into()),
-    }
-}
-
 fn type_param(default: &str) -> Value {
     json!({"name": "type", "type": "string", "default": default, "enum": MA_TYPES,
            "description": "Moving average type"})
@@ -247,24 +38,6 @@ fn type_param(default: &str) -> Value {
 fn source_param() -> Value {
     json!({"name": "source", "type": "string", "default": "close", "enum": SOURCES,
            "description": "Price source"})
-}
-
-/// True range; the first bar uses high - low (ta.tr(true)).
-fn true_range(data: &OhlcvData) -> Vec<f64> {
-    data.bars
-        .iter()
-        .enumerate()
-        .map(|(i, b)| {
-            if i == 0 {
-                b.high - b.low
-            } else {
-                let pc = data.bars[i - 1].close;
-                (b.high - b.low)
-                    .max((b.high - pc).abs())
-                    .max((b.low - pc).abs())
-            }
-        })
-        .collect()
 }
 
 // ---- volume ----
@@ -967,6 +740,7 @@ mod tests {
     use super::*;
     use crate::data::{sample_data, Bar};
     use crate::indicators::by_name_configured;
+    use crate::indicators::pine::{alma_n, ema_n, hma_n, linreg_n, vwma_n, wma_n};
 
     const NAN: f64 = f64::NAN;
 
