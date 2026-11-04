@@ -1,6 +1,6 @@
 ---
 title: MCP Integration
-description: Connect chartgen to Claude Desktop or Claude.ai — 15 tools across charting, orders, alerts, and notifications.
+description: Connect chartgen to Claude Desktop or Claude.ai — 17 tools across charting, orders, alerts, and notifications.
 ---
 
 chartgen speaks the Model Context Protocol over both stdio (Claude Desktop)
@@ -61,7 +61,7 @@ with existing Claude.ai connector deployments that predate Streamable HTTP.
 
 ## Tool catalog
 
-16 tools. The 12 trading tools require `--trade`; attempting to call them
+17 tools. The 12 trading tools require `--trade`; attempting to call them
 without it returns an error.
 
 ### Charting (always available)
@@ -390,6 +390,64 @@ The Binance and Yahoo fetches for one call run at the same time.
   workers. The symbol is percent-encoded as a single URL path segment.
 
 Each request times out after 10 s.
+
+#### `search_symbols`
+
+Search tickers and names across all Binance spot pairs and Yahoo Finance
+instruments, like TradingView's symbol search. The web symbol search dialog
+calls it.
+
+Required: `query` (string). Optional: `limit` (integer 1–50, default 30),
+`types` (array of `crypto`, `stock`, `etf`, `fund`, `index`, `forex`,
+`future`; omitted or empty means all). The query is trimmed and must be 1–40
+characters without control characters. A bad query, `limit` or `types` is a
+tool error.
+
+```json
+{
+  "results": [
+    {
+      "symbol": "SPY",
+      "name": "State Street SPDR S&P 500 ETF Trust",
+      "exchange": "NYSEArca",
+      "type": "etf",
+      "source": "yahoo"
+    },
+    {
+      "symbol": "BTCUSDT",
+      "name": "BTC / USDT",
+      "exchange": "Binance",
+      "type": "crypto",
+      "source": "binance"
+    }
+  ],
+  "warnings": ["yahoo: Yahoo API returned status 429 Too Many Requests"]
+}
+```
+
+`warnings` is present only when a source failed. Results are ranked: exact
+symbol match first, then symbol prefix, then symbol contains, then name
+match. Ties keep Binance before Yahoo and Yahoo's own order. For crypto, a
+query equal to the base asset (`btc`) counts as an exact match, and USDT
+pairs come before other quote assets. Duplicate symbols are dropped.
+`symbol` can be passed straight to `generate_chart` or `get_quotes`.
+
+| `source` | Where | Notes |
+|---|---|---|
+| `binance` | `/api/v3/exchangeInfo`, `TRADING` spot pairs only (about 3000) | fetched once and cached in memory for 6 h, searched locally; `type` is `crypto`, `name` is `"BASE / QUOTE"` |
+| `yahoo` | `/v1/finance/search`, 20 quotes | cached per query for 60 s; `type` from `quoteType` (`EQUITY` → `stock`, `ETF` → `etf`, `INDEX` → `index`, `CURRENCY` → `forex`, `FUTURE` → `future`, `MUTUALFUND` → `fund`), `exchange` from `exchDisp` |
+| `sample` | built-in list of 30 symbols (`CHARTGEN_DATA_SOURCE=sample`) | no network |
+
+Yahoo results of other kinds (including crypto such as `BTC-USD`, which
+Binance covers) are dropped, and so are symbols outside `A-Z 0-9 . ^ = - _`
+(the symbols are uppercased first).
+
+Binance and Yahoo run at the same time, and a `types` filter skips a
+source that cannot match (for example, `["crypto"]` never calls Yahoo).
+When one source fails, the other's results are returned and `warnings`
+names the failure (`"binance: …"` or `"yahoo: …"`). The call is an error
+only when every queried source fails. Failed fetches are not cached. Each
+request times out after 10 s.
 
 ### Orders & positions (require `--trade`)
 

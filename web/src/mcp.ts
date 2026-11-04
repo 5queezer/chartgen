@@ -12,13 +12,16 @@ import { z } from "zod";
 import type {
   GenerateChartInput,
   GetQuotesInput,
+  SearchSymbolsInput,
 } from "./types/generated-input";
 import {
   ListIndicatorsPayloadSchema,
   QuotesPayloadSchema,
+  SearchSymbolsPayloadSchema,
   SeriesPayloadSchema,
   type ListIndicatorsPayload,
   type QuotesPayload,
+  type SearchSymbolsPayload,
   type SeriesPayload,
 } from "./types/responses";
 import { clearAccessToken, getAccessToken } from "./oauth";
@@ -59,6 +62,14 @@ export interface McpSession {
   callListIndicators: () => Promise<ListIndicatorsPayload>;
   /** Invoke `get_quotes` for the watchlist and parse the response. */
   callGetQuotes: (symbols: string[]) => Promise<QuotesPayload>;
+  /**
+   * Invoke `search_symbols` for the symbol search dialog. Aborting `signal`
+   * cancels the in-flight request.
+   */
+  callSearchSymbols: (
+    args: SearchSymbolsInput,
+    signal?: AbortSignal,
+  ) => Promise<SearchSymbolsPayload>;
   /** Install a handler invoked for every `notifications/*` frame. */
   onNotification: (handler: AlertNotificationHandler) => void;
   /** Close the underlying transport. */
@@ -185,10 +196,15 @@ export function createMcpSession(): McpSession {
   async function callToolWithAuthRetry(
     name: string,
     args: Record<string, unknown>,
+    signal?: AbortSignal,
   ): Promise<unknown> {
     let conn = await ensureConnected();
     try {
-      const result = await conn.client.callTool({ name, arguments: args });
+      const result = await conn.client.callTool(
+        { name, arguments: args },
+        undefined,
+        { signal },
+      );
       return extractJsonFromResult(CallToolResultSchema.parse(result));
     } catch (err) {
       if (!isUnauthorized(err)) throw err;
@@ -196,7 +212,11 @@ export function createMcpSession(): McpSession {
       clearAccessToken();
       await dropConnection(conn);
       conn = await ensureConnected();
-      const result = await conn.client.callTool({ name, arguments: args });
+      const result = await conn.client.callTool(
+        { name, arguments: args },
+        undefined,
+        { signal },
+      );
       return extractJsonFromResult(CallToolResultSchema.parse(result));
     }
   }
@@ -226,6 +246,14 @@ export function createMcpSession(): McpSession {
         args as unknown as Record<string, unknown>,
       );
       return QuotesPayloadSchema.parse(json);
+    },
+    async callSearchSymbols(args, signal) {
+      const json = await callToolWithAuthRetry(
+        "search_symbols",
+        args as unknown as Record<string, unknown>,
+        signal,
+      );
+      return SearchSymbolsPayloadSchema.parse(json);
     },
     onNotification(handler) {
       state.notificationHandler = handler;

@@ -296,3 +296,34 @@ export const QuotesPayloadSchema = z.object({
   quotes: z.array(z.union([QuoteSchema, QuoteErrorSchema])),
 });
 export type QuotesPayload = z.infer<typeof QuotesPayloadSchema>;
+
+// ---------------------------------------------------------------------------
+// search_symbols — `search_symbols` in `src/mcp.rs` / `src/search.rs`.
+//   Ranked results (exact symbol, prefix, contains, name match). `warnings`
+//   is present only when one source failed and its results are missing.
+// ---------------------------------------------------------------------------
+
+export const SEARCH_RESULT_TYPES = [
+  "crypto",
+  "stock",
+  "etf",
+  "fund",
+  "index",
+  "forex",
+  "future",
+] as const;
+
+export const SearchResultSchema = z.object({
+  symbol: z.string(),
+  name: z.string(),
+  exchange: z.string(),
+  type: z.enum(SEARCH_RESULT_TYPES),
+  source: z.enum(["binance", "yahoo", "sample"]),
+});
+export type SearchResult = z.infer<typeof SearchResultSchema>;
+
+export const SearchSymbolsPayloadSchema = z.object({
+  results: z.array(SearchResultSchema),
+  warnings: z.array(z.string()).optional(),
+});
+export type SearchSymbolsPayload = z.infer<typeof SearchSymbolsPayloadSchema>;

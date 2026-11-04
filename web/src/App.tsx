@@ -192,6 +192,7 @@ export function App(): JSX.Element {
       <header class="flex items-center gap-4 px-4 py-3 border-b border-[color:var(--color-border)]">
         <h1 class="text-lg font-semibold mr-4 leading-none">chartgen</h1>
         <Toolbar
+          session={session}
           onReselect={() => void query.refetch()}
           onScreenshot={screenshot}
           onResetChart={() => {

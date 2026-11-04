@@ -1,7 +1,10 @@
-// Symbol search dialog. Filters the curated catalogue by ticker/name,
-// lists recent symbols when the query is empty, and accepts any free-text
-// ticker (uppercased) since there is no search backend. Fully keyboard
-// driven: ArrowUp/Down move, Enter picks, Esc closes (Kobalte Dialog).
+// Symbol search dialog. Queries the `search_symbols` tool (all Binance spot
+// pairs and Yahoo instruments) after a short debounce, with category tabs
+// that filter by instrument type. While results load or the search fails
+// the curated catalogue answers instantly, recent symbols and the curated
+// list show when the query is empty, and any free-text ticker (uppercased)
+// stays available as the last row. Fully keyboard driven: ArrowUp/Down
+// move, Enter picks, Esc closes (Kobalte Dialog).
 
 import { Dialog } from "@kobalte/core";
 import {
@@ -10,11 +13,26 @@ import {
   createEffect,
   createMemo,
   createSignal,
+  onCleanup,
   type JSX,
 } from "solid-js";
 
-import { SYMBOLS, searchSymbols, type SymbolEntry } from "../lib/symbols";
+import { CATEGORIES, buildRows, type Category } from "../lib/symbolSearch";
+import type { McpSession } from "../mcp";
 import { recentSymbols } from "../stores/layout";
+import type { SearchResult } from "../types/responses";
+
+/** Pause after the last keystroke before the server is queried. */
+const SEARCH_DEBOUNCE_MS = 200;
+/** Longest query `search_symbols` accepts. */
+const MAX_QUERY_LENGTH = 40;
+
+interface Remote {
+  /** Query and category the results belong to. */
+  key: string;
+  results: SearchResult[];
+  warnings: string[];
+}
 
 export interface SymbolSearchProps {
   open: boolean;
@@ -22,22 +40,7 @@ export interface SymbolSearchProps {
   /** Text the input starts with (e.g. the letter that opened the dialog). */
   initialQuery: string;
   onSelect: (ticker: string) => void;
-}
-
-interface Row {
-  section: string;
-  ticker: string;
-  name: string;
-  badge: string;
-}
-
-function toRow(section: string, s: SymbolEntry): Row {
-  return {
-    section,
-    ticker: s.ticker,
-    name: s.name,
-    badge: `${s.kind} · ${s.exchange}`,
-  };
+  session: Pick<McpSession, "callSearchSymbols">;
 }
 
 export function SymbolSearch(props: SymbolSearchProps): JSX.Element {
@@ -45,38 +48,71 @@ export function SymbolSearch(props: SymbolSearchProps): JSX.Element {
   let previouslyFocused: HTMLElement | null = null;
   const [query, setQuery] = createSignal("");
   const [active, setActive] = createSignal(0);
+  const [category, setCategory] = createSignal<Category>(CATEGORIES[0]!);
+  const [remote, setRemote] = createSignal<Remote | null>(null);
+  const [loading, setLoading] = createSignal(false);
+  const [error, setError] = createSignal("");
 
   createEffect(() => {
     if (props.open) {
       setQuery(props.initialQuery);
+      setCategory(CATEGORIES[0]!);
       setActive(0);
     }
   });
 
-  const rows = createMemo<Row[]>(() => {
+  const searchKey = () => `${category().id}|${query().trim()}`;
+
+  // Debounced server search; changing the query or tab cancels the pending
+  // timer and the in-flight request, so outdated answers never land.
+  createEffect(() => {
     const q = query().trim();
-    if (q === "") {
-      const recent = recentSymbols().map((t): Row => {
-        const known = SYMBOLS.find((s) => s.ticker === t);
-        return known
-          ? toRow("Recent", known)
-          : { section: "Recent", ticker: t, name: "", badge: "" };
-      });
-      return [...recent, ...SYMBOLS.map((s) => toRow("Popular", s))];
+    const cat = category();
+    const key = searchKey();
+    setError("");
+    if (!props.open || q === "" || q.length > MAX_QUERY_LENGTH) {
+      setRemote(null);
+      setLoading(false);
+      return;
     }
-    const matches = searchSymbols(q).map((s) => toRow("Symbols", s));
-    const upper = q.toUpperCase();
-    if (matches.some((r) => r.ticker === upper)) return matches;
-    return [
-      ...matches,
-      {
-        section: "Other",
-        ticker: upper,
-        name: `Use "${upper}" as typed`,
-        badge: "custom",
-      },
-    ];
+    setLoading(true);
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => {
+      props.session
+        .callSearchSymbols(
+          { query: q, types: cat.types.length ? [...cat.types] : undefined },
+          ctrl.signal,
+        )
+        .then((r) => {
+          if (ctrl.signal.aborted) return;
+          setRemote({ key, results: r.results, warnings: r.warnings ?? [] });
+          setLoading(false);
+        })
+        .catch((e: unknown) => {
+          if (ctrl.signal.aborted) return;
+          setError(e instanceof Error ? e.message : String(e));
+          setLoading(false);
+        });
+    }, SEARCH_DEBOUNCE_MS);
+    onCleanup(() => {
+      clearTimeout(timer);
+      ctrl.abort();
+    });
   });
+
+  const current = () => {
+    const r = remote();
+    return r && r.key === searchKey() ? r : null;
+  };
+
+  const rows = createMemo(() =>
+    buildRows({
+      query: query(),
+      category: category(),
+      recents: recentSymbols(),
+      remote: current()?.results ?? null,
+    }),
+  );
 
   // Keep the highlighted row inside the list after the filter shrinks.
   createEffect(() => {
@@ -144,7 +180,7 @@ export function SymbolSearch(props: SymbolSearchProps): JSX.Element {
                 ×
               </Dialog.CloseButton>
             </div>
-            <div class="px-4 py-3 border-b border-[color:var(--color-border)]">
+            <div class="px-4 pt-3 pb-2 border-b border-[color:var(--color-border)]">
               <input
                 ref={input}
                 type="text"
@@ -164,6 +200,45 @@ export function SymbolSearch(props: SymbolSearchProps): JSX.Element {
                 onKeyDown={onKeyDown}
                 class="w-full bg-[color:var(--color-bg-elev)] border border-[color:var(--color-border)] rounded-md px-3 py-2 text-sm text-[color:var(--color-fg)] focus:outline-none focus:border-[color:var(--color-accent)]"
               />
+              <div
+                role="tablist"
+                aria-label="Symbol type"
+                class="flex flex-wrap gap-1 mt-2"
+              >
+                <For each={CATEGORIES}>
+                  {(c) => (
+                    <button
+                      type="button"
+                      role="tab"
+                      aria-selected={c.id === category().id}
+                      // Keep focus in the input so typing and arrows keep working.
+                      onMouseDown={(e) => e.preventDefault()}
+                      onClick={() => {
+                        setCategory(c);
+                        setActive(0);
+                        input.focus();
+                      }}
+                      class="px-2.5 py-1 rounded-full text-xs cursor-pointer border border-[color:var(--color-border)] text-[color:var(--color-fg-muted)] hover:text-[color:var(--color-fg)] aria-selected:bg-[color:var(--color-bg-elev)] aria-selected:text-[color:var(--color-accent)] aria-selected:border-[color:var(--color-accent)]"
+                    >
+                      {c.label}
+                    </button>
+                  )}
+                </For>
+              </div>
+              <p
+                role="status"
+                class="mt-2 min-h-4 text-xs text-[color:var(--color-fg-muted)]"
+              >
+                <Show when={loading()}>Searching…</Show>
+                <Show when={error()}>
+                  <span class="text-[color:var(--color-danger)]">
+                    Search unavailable ({error()}); showing built-in symbols.
+                  </span>
+                </Show>
+                <Show when={!loading() && !error() && current()?.warnings.length}>
+                  Some results may be missing: {current()?.warnings.join("; ")}
+                </Show>
+              </p>
             </div>
             <ul
               id="symbol-rows"
@@ -193,9 +268,17 @@ export function SymbolSearch(props: SymbolSearchProps): JSX.Element {
                       <span class="font-semibold w-28 shrink-0 truncate">
                         {row.ticker}
                       </span>
-                      <span class="flex-1 truncate text-[color:var(--color-fg-muted)]">
+                      <span
+                        class="flex-1 truncate text-[color:var(--color-fg-muted)]"
+                        title={row.name}
+                      >
                         {row.name}
                       </span>
+                      <Show when={row.exchange}>
+                        <span class="text-xs text-[color:var(--color-fg-muted)] shrink-0">
+                          {row.exchange}
+                        </span>
+                      </Show>
                       <Show when={row.badge}>
                         <span class="text-xs text-[color:var(--color-fg-muted)] border border-[color:var(--color-border)] rounded px-1.5 py-0.5 shrink-0">
                           {row.badge}
