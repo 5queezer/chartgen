@@ -12,6 +12,11 @@ const B = { x: 560, y: 260 };
 const FUTURE = { x: 1100, y: 200 };
 const MID = { x: (A.x + B.x) / 2, y: (A.y + B.y) / 2 };
 
+// The coordinates above assume the chart is as wide as a 1280 px viewport
+// without the right-side watchlist; widen the viewport by the panel's
+// 288 px (w-72) so FUTURE stays inside the plot.
+test.use({ viewport: { width: 1280 + 288, height: 720 } });
+
 const host = (page: Page) => page.locator(".chart-container");
 
 /**

@@ -86,11 +86,22 @@ test.describe("watchlist", () => {
     await expect(row(page, "ETHUSDT")).toHaveAttribute("aria-current", "true");
   });
 
-  test("collapse persists across reload", async ({ bootedApp: page }) => {
+  test("collapse resizes the chart and persists across reload", async ({
+    bootedApp: page,
+  }) => {
+    const chartWidth = () =>
+      page
+        .locator(".chart-host canvas")
+        .first()
+        .evaluate((c) => c.getBoundingClientRect().width);
+    const expandedWidth = await chartWidth();
+
     await page.getByRole("button", { name: "Collapse watchlist" }).click();
     await expect(table(page)).toHaveCount(0);
     const expand = page.getByRole("button", { name: "Expand watchlist" });
     await expect(expand).toBeVisible();
+    // The chart takes over the panel's width.
+    await expect.poll(chartWidth).toBeGreaterThan(expandedWidth + 200);
 
     await page.reload();
     await expectChartRendered(page);
@@ -99,6 +110,7 @@ test.describe("watchlist", () => {
 
     await expand.click();
     await expect(rows(page)).toHaveCount(7);
+    await expect.poll(chartWidth).toBeCloseTo(expandedWidth, 0);
     await expect(lastCell(page, "BTCUSDT")).toHaveText(NUMBER, {
       timeout: 15_000,
     });
