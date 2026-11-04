@@ -1445,13 +1445,12 @@ impl Indicator for KalmanVolume {
 
 // ---- Ichimoku Cloud (overlay) ----
 
-/// TradingView's default "Lagging Span" displacement.
-const ICHIMOKU_DISPLACEMENT: i64 = 26;
-
 pub struct Ichimoku {
     pub tenkan: usize,
     pub kijun: usize,
     pub senkou_b: usize,
+    /// TradingView's "Lagging Span" displacement.
+    pub displacement: usize,
 }
 
 impl Default for Ichimoku {
@@ -1460,6 +1459,7 @@ impl Default for Ichimoku {
             tenkan: 9,
             kijun: 26,
             senkou_b: 52,
+            displacement: 26,
         }
     }
 }
@@ -1477,7 +1477,9 @@ impl Indicator for Ichimoku {
         json!([
             {"name": "tenkan", "type": "integer", "min": 1, "max": 10000, "default": 9},
             {"name": "kijun", "type": "integer", "min": 1, "max": 10000, "default": 26},
-            {"name": "senkou_b", "type": "integer", "min": 1, "max": 10000, "default": 52}
+            {"name": "senkou_b", "type": "integer", "min": 1, "max": 10000, "default": 52},
+            {"name": "displacement", "type": "integer", "min": 1, "max": 10000, "default": 26,
+             "description": "Leading spans are drawn displacement - 1 bars ahead, the lagging span (close) as many bars back"}
         ])
     }
 
@@ -1490,6 +1492,9 @@ impl Indicator for Ichimoku {
         }
         if let Some(v) = params.get("senkou_b").and_then(|v| v.as_u64()) {
             self.senkou_b = v as usize;
+        }
+        if let Some(v) = params.get("displacement").and_then(|v| v.as_u64()) {
+            self.displacement = v as usize;
         }
     }
 
@@ -1524,11 +1529,14 @@ impl Indicator for Ichimoku {
                 senkou_b[i] = (hh_senkou_b[i] + ll_senkou_b[i]) / 2.0;
             }
         }
-        // TV plots the leading spans with `offset = displacement - 1` (26 - 1):
-        // bar i shows the value computed 25 bars earlier. Values projected past
-        // the last bar have no x position here and are dropped.
-        let senkou_a = super::pine::shift(&senkou_a, ICHIMOKU_DISPLACEMENT - 1);
-        let senkou_b = super::pine::shift(&senkou_b, ICHIMOKU_DISPLACEMENT - 1);
+        // TV plots the leading spans with `offset = displacement - 1`: bar i
+        // shows the value computed displacement - 1 bars earlier. Values
+        // projected past the last bar have no x position yet and are dropped.
+        // The lagging span is the close with `offset = -displacement + 1`.
+        let off = self.displacement.saturating_sub(1) as i64;
+        let senkou_a = super::pine::shift(&senkou_a, off);
+        let senkou_b = super::pine::shift(&senkou_b, off);
+        let lagging = super::pine::shift(&data.closes(), -off);
 
         PanelResult {
             lines: vec![
@@ -1555,6 +1563,12 @@ impl Indicator for Ichimoku {
                     color: rgba(0xef5350, 0.5),
                     width: 1,
                     label: Some("Senkou B".into()),
+                },
+                Line {
+                    y: lagging,
+                    color: rgba(0x43A047, 0.9),
+                    width: 1,
+                    label: Some("Lagging Span".into()),
                 },
             ],
             fills: vec![Fill {
@@ -2431,6 +2445,7 @@ mod tests {
             tenkan: 1,
             kijun: 2,
             senkou_b: 2,
+            displacement: 26,
         };
         let r = ind.compute(&closes(&(1..=28).map(f64::from).collect::<Vec<_>>()));
         assert_eq!(r.lines[0].y[0], 1.0, "Tenkan is not shifted");
@@ -2441,6 +2456,16 @@ mod tests {
         let mut b = vec![NAN; 26];
         b.extend([1.5, 2.5]);
         eq(&r.lines[3].y, &b);
+        // Lagging span: close drawn 25 bars back -> bar 0 shows close[25] = 26.
+        let mut lag = vec![26.0, 27.0, 28.0];
+        lag.extend(vec![NAN; 25]);
+        eq(&r.lines[4].y, &lag);
+        // displacement 3: spans 2 bars ahead, lagging span 2 bars back
+        let mut ind = ind;
+        ind.configure(&json!({"displacement": 3}));
+        let r = ind.compute(&closes(&[1.0, 2.0, 3.0, 4.0]));
+        eq(&r.lines[2].y, &[NAN, NAN, NAN, 1.75]);
+        eq(&r.lines[4].y, &[3.0, 4.0, NAN, NAN]);
     }
 
     #[test]
