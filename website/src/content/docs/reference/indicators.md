@@ -16,6 +16,40 @@ the `generate_chart` MCP tool's `indicators` parameter. Screenshots are
 rendered from `AAPL` daily data (overlays and panels) and `BTCUSDT` daily
 data (external) — regenerate with `./scripts/gen_screenshots.sh`.
 
+## Values match TradingView
+
+Indicator math follows Pine Script v5 semantics, implemented once in
+`src/indicators/pine.rs` ([ADR-0018](/chartgen/decisions/0018-pine-semantics-for-indicators/)).
+`ta.ema` and `ta.rma` seed with the SMA of the first `length` values. RSI, ATR
+and DMI/ADX use Wilder's RMA. Bollinger Bands use the population standard
+deviation. Bars before an indicator has a full window are `null` (NaN), not
+partial values. With the same parameters and the same first bar, the values
+equal TradingView's built-ins. The community composites (`cipher_b`,
+`wavetrend`, `rsi_mfi_stoch`, `kalman_volume`) follow the Pine semantics of
+the `ta.*` calls in the scripts they port.
+
+EMA and RMA are recursive, so a value depends on where the series starts.
+Load enough history before the bars you compare (`warmup` in series mode)
+so the start-up effect has decayed. Known differences:
+
+- **Defaults.** Some defaults differ from TradingView's: `keltner` uses 20 / 1.5
+  with the ATR length equal to `period` (TV: multiplier 2, ATR length 10);
+  `stoch` smooths %K over 3 bars (TV: 1); `roc` uses 14 (TV: 9); `histvol` uses
+  20 (TV: 10); `vwap_bands` uses 2 standard deviations (TV: 1); `wavetrend`
+  uses the Cipher B lengths 9 / 12 / 3 (LazyBear: 10 / 21 / 4). Set the same
+  parameters on both sides to compare.
+- **Anchoring.** `vwap` and `vwap_bands` accumulate from the first loaded bar
+  (TV resets every session). `pivot` uses the previous bar (TV uses the
+  previous higher-timeframe period).
+- **Ichimoku.** The leading spans are shifted 25 bars forward like TV's, but
+  the 25 projected future bars are not drawn, and there is no lagging span.
+- **Intrabar data.** The volume profiles (`volume_profile`, `session_vp`,
+  `hvn_lvn`, `naked_poc`, `tpo`) and `cvd` spread each bar's volume over its
+  range. TradingView builds them from lower-timeframe data, so they are
+  approximations.
+- **Long warmups.** `kalman_volume` normalises by a 200-bar standard deviation
+  and needs about 280 bars before its first value.
+
 ## Overlays
 
 ### Summary

@@ -46,6 +46,40 @@ fn main() {
          the `generate_chart` MCP tool's `indicators` parameter. Screenshots are\n\
          rendered from `AAPL` daily data (overlays and panels) and `BTCUSDT` daily\n\
          data (external) — regenerate with `./scripts/gen_screenshots.sh`.\n\
+         \n\
+         ## Values match TradingView\n\
+         \n\
+         Indicator math follows Pine Script v5 semantics, implemented once in\n\
+         `src/indicators/pine.rs` ([ADR-0018](/chartgen/decisions/0018-pine-semantics-for-indicators/)).\n\
+         `ta.ema` and `ta.rma` seed with the SMA of the first `length` values. RSI, ATR\n\
+         and DMI/ADX use Wilder's RMA. Bollinger Bands use the population standard\n\
+         deviation. Bars before an indicator has a full window are `null` (NaN), not\n\
+         partial values. With the same parameters and the same first bar, the values\n\
+         equal TradingView's built-ins. The community composites (`cipher_b`,\n\
+         `wavetrend`, `rsi_mfi_stoch`, `kalman_volume`) follow the Pine semantics of\n\
+         the `ta.*` calls in the scripts they port.\n\
+         \n\
+         EMA and RMA are recursive, so a value depends on where the series starts.\n\
+         Load enough history before the bars you compare (`warmup` in series mode)\n\
+         so the start-up effect has decayed. Known differences:\n\
+         \n\
+         - **Defaults.** Some defaults differ from TradingView's: `keltner` uses 20 / 1.5\n\
+         \x20 with the ATR length equal to `period` (TV: multiplier 2, ATR length 10);\n\
+         \x20 `stoch` smooths %K over 3 bars (TV: 1); `roc` uses 14 (TV: 9); `histvol` uses\n\
+         \x20 20 (TV: 10); `vwap_bands` uses 2 standard deviations (TV: 1); `wavetrend`\n\
+         \x20 uses the Cipher B lengths 9 / 12 / 3 (LazyBear: 10 / 21 / 4). Set the same\n\
+         \x20 parameters on both sides to compare.\n\
+         - **Anchoring.** `vwap` and `vwap_bands` accumulate from the first loaded bar\n\
+         \x20 (TV resets every session). `pivot` uses the previous bar (TV uses the\n\
+         \x20 previous higher-timeframe period).\n\
+         - **Ichimoku.** The leading spans are shifted 25 bars forward like TV's, but\n\
+         \x20 the 25 projected future bars are not drawn, and there is no lagging span.\n\
+         - **Intrabar data.** The volume profiles (`volume_profile`, `session_vp`,\n\
+         \x20 `hvn_lvn`, `naked_poc`, `tpo`) and `cvd` spread each bar's volume over its\n\
+         \x20 range. TradingView builds them from lower-timeframe data, so they are\n\
+         \x20 approximations.\n\
+         - **Long warmups.** `kalman_volume` normalises by a 200-bar standard deviation\n\
+         \x20 and needs about 280 bars before its first value.\n\
          \n",
     );
 
