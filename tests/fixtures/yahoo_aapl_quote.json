@@ -1,0 +1,102 @@
+{
+    "chart": {
+        "result": [
+            {
+                "meta": {
+                    "currency": "USD",
+                    "symbol": "AAPL",
+                    "exchangeName": "NMS",
+                    "fullExchangeName": "NasdaqGS",
+                    "instrumentType": "EQUITY",
+                    "firstTradeDate": 345479400,
+                    "regularMarketTime": 1793826001,
+                    "hasPrePostMarketData": true,
+                    "gmtoffset": -18000,
+                    "timezone": "EST",
+                    "exchangeTimezoneName": "America/New_York",
+                    "regularMarketPrice": 349.51,
+                    "regularMarketChangePercent": 5.306,
+                    "fulldayPrice": 350.04,
+                    "fulldayChange": 18.14,
+                    "fulldayChangePercent": 5.466,
+                    "fiftyTwoWeekHigh": 354.47,
+                    "fiftyTwoWeekLow": 243.42,
+                    "regularMarketDayHigh": 354.47,
+                    "regularMarketDayLow": 340.99,
+                    "regularMarketVolume": 88958176,
+                    "longName": "Apple Inc.",
+                    "shortName": "Apple Inc.",
+                    "chartPreviousClose": 331.9,
+                    "priceHint": 2,
+                    "currentTradingPeriod": {
+                        "pre": {
+                            "timezone": "EST",
+                            "end": 1793802600,
+                            "start": 1793782800,
+                            "gmtoffset": -18000
+                        },
+                        "regular": {
+                            "timezone": "EST",
+                            "end": 1793826000,
+                            "start": 1793802600,
+                            "gmtoffset": -18000
+                        },
+                        "post": {
+                            "timezone": "EST",
+                            "end": 1793840400,
+                            "start": 1793826000,
+                            "gmtoffset": -18000
+                        }
+                    },
+                    "dataGranularity": "1d",
+                    "range": "1d",
+                    "validRanges": [
+                        "1d",
+                        "5d",
+                        "1mo",
+                        "3mo",
+                        "6mo",
+                        "1y",
+                        "2y",
+                        "5y",
+                        "10y",
+                        "ytd",
+                        "max"
+                    ]
+                },
+                "timestamp": [
+                    1793826001
+                ],
+                "indicators": {
+                    "quote": [
+                        {
+                            "high": [
+                                354.4700012207031
+                            ],
+                            "low": [
+                                340.989990234375
+                            ],
+                            "volume": [
+                                88958176
+                            ],
+                            "open": [
+                                341.56500244140625
+                            ],
+                            "close": [
+                                349.510009765625
+                            ]
+                        }
+                    ],
+                    "adjclose": [
+                        {
+                            "adjclose": [
+                                349.510009765625
+                            ]
+                        }
+                    ]
+                }
+            }
+        ],
+        "error": null
+    }
+}

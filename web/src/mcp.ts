@@ -9,11 +9,16 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import type { Notification } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 
-import type { GenerateChartInput } from "./types/generated-input";
+import type {
+  GenerateChartInput,
+  GetQuotesInput,
+} from "./types/generated-input";
 import {
   ListIndicatorsPayloadSchema,
+  QuotesPayloadSchema,
   SeriesPayloadSchema,
   type ListIndicatorsPayload,
+  type QuotesPayload,
   type SeriesPayload,
 } from "./types/responses";
 import { clearAccessToken, getAccessToken } from "./oauth";
@@ -52,6 +57,8 @@ export interface McpSession {
   }) => Promise<SeriesPayload>;
   /** Invoke `list_indicators` and parse the response. */
   callListIndicators: () => Promise<ListIndicatorsPayload>;
+  /** Invoke `get_quotes` for the watchlist and parse the response. */
+  callGetQuotes: (symbols: string[]) => Promise<QuotesPayload>;
   /** Install a handler invoked for every `notifications/*` frame. */
   onNotification: (handler: AlertNotificationHandler) => void;
   /** Close the underlying transport. */
@@ -211,6 +218,14 @@ export function createMcpSession(): McpSession {
     async callListIndicators() {
       const json = await callToolWithAuthRetry("list_indicators", {});
       return ListIndicatorsPayloadSchema.parse(json);
+    },
+    async callGetQuotes(symbols) {
+      const args: GetQuotesInput = { symbols };
+      const json = await callToolWithAuthRetry(
+        "get_quotes",
+        args as unknown as Record<string, unknown>,
+      );
+      return QuotesPayloadSchema.parse(json);
     },
     onNotification(handler) {
       state.notificationHandler = handler;

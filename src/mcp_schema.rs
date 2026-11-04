@@ -139,6 +139,22 @@ pub fn tools_list_result() -> Value {
                 }
             },
             {
+                "name": "get_quotes",
+                "description": "Get the last price and change for many symbols in one call (watchlist). Returns one entry per distinct symbol, in request order: {symbol, last, change, change_pct, prev_close, high, low, volume, source}, or {symbol, error} when that symbol fails; one bad symbol never fails the call. Stocks/ETFs/indices/FX (Yahoo): change vs the previous session's close, like TradingView. Crypto (Binance, symbols ending in USDT, BTC, ETH, ...): change over the rolling 24 h window, as Binance's own ticker reports it.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "symbols": {
+                            "type": "array",
+                            "items": { "type": "string" },
+                            "maxItems": 50,
+                            "description": "Ticker symbols (e.g. [\"BTCUSDT\", \"AAPL\", \"^GSPC\"]). At most 50 entries; trimmed, uppercased and deduplicated."
+                        }
+                    },
+                    "required": ["symbols"]
+                }
+            },
+            {
                 "name": "place_order",
                 "description": "Place a trading order. Requires --trade mode. Submits a market or limit order for the configured symbol.",
                 "inputSchema": {

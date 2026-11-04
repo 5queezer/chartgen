@@ -13,8 +13,12 @@ import {
 } from "./stores/indicators";
 import type {
   ListIndicatorsPayload,
+  QuotesPayload,
   SeriesPayload,
 } from "./types/responses";
+
+/** Watchlist poll period while the tab is visible. */
+export const QUOTES_POLL_MS = 5_000;
 
 export interface ChartQueryInput {
   ticker: string;
@@ -93,4 +97,36 @@ export function createListIndicatorsQuery(
       return failureCount < 0;
     },
   }));
+}
+
+/**
+ * Create a TanStack Solid Query for `get_quotes` (the watchlist). The
+ * interval timer keeps running at `QUOTES_POLL_MS`; with the default
+ * `refetchIntervalInBackground: false` each tick is skipped while the tab
+ * is hidden, so polling resumes on the first tick after the tab is
+ * visible again. (`refetchOnWindowFocus` is off globally, so no refetch
+ * fires on the return itself.) The caller stops polling through
+ * `enabled`, e.g. while the panel is collapsed. The previous quotes stay
+ * on screen while a changed list loads.
+ */
+export function createQuotesQuery(
+  session: McpSession,
+  input: Accessor<{ symbols: string[]; enabled: boolean }>,
+) {
+  return createQuery<QuotesPayload, Error>(() => {
+    const { symbols, enabled } = input();
+    return {
+      queryKey: ["get_quotes", ...symbols] as const,
+      queryFn: () => session.callGetQuotes(symbols),
+      enabled: enabled && symbols.length > 0,
+      staleTime: QUOTES_POLL_MS - 1_000,
+      refetchInterval: QUOTES_POLL_MS,
+      placeholderData: keepPreviousData,
+      retry: (_failureCount: number, error: Error) => {
+        if (/401|unauthoriz/i.test(error.message)) clearAccessToken();
+        // The next poll is the retry.
+        return false;
+      },
+    };
+  });
 }

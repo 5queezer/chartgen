@@ -208,3 +208,71 @@ body {
 .pane-header-vol {
   color: var(--color-fg-muted);
 }
+
+/* Watchlist panel: four right-aligned numeric columns with tabular
+ * numerals, TradingView-style tick flash on the Last cell, and a remove
+ * button that appears over the row's right edge on hover. */
+.wl-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.3fr) repeat(3, minmax(0, 1fr));
+  column-gap: 8px;
+  align-items: center;
+  font-variant-numeric: tabular-nums;
+}
+
+.wl-row {
+  position: relative;
+  border-left: 2px solid transparent;
+}
+
+.wl-row:hover {
+  background: var(--color-bg-elev);
+}
+
+.wl-row[aria-current="true"] {
+  background: var(--color-bg-elev);
+  border-left-color: var(--color-accent);
+}
+
+.wl-last {
+  border-radius: 2px;
+  transition: background-color 0.5s ease-out;
+}
+
+.wl-flash-up {
+  background-color: color-mix(in srgb, var(--color-bull) 35%, transparent);
+  transition: none;
+}
+
+.wl-flash-down {
+  background-color: color-mix(in srgb, var(--color-bear) 35%, transparent);
+  transition: none;
+}
+
+.wl-remove {
+  position: absolute;
+  right: 4px;
+  top: 50%;
+  transform: translateY(-50%);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 4px;
+  font-size: 16px;
+  line-height: 1;
+  color: var(--color-fg-muted);
+  background: var(--color-border);
+  cursor: pointer;
+  opacity: 0;
+}
+
+.wl-row:hover .wl-remove,
+.wl-remove:focus-visible {
+  opacity: 1;
+}
+
+.wl-remove:hover {
+  color: var(--color-fg);
+}

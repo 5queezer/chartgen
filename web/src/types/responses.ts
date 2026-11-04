@@ -265,3 +265,34 @@ export const GetIndicatorsPayloadSchema = z.object({
   ),
 });
 export type GetIndicatorsPayload = z.infer<typeof GetIndicatorsPayloadSchema>;
+
+// ---------------------------------------------------------------------------
+// get_quotes — `get_quotes` in `src/mcp.rs` (ADR-0011).
+//   One entry per distinct requested symbol, in request order: a quote,
+//   or `{symbol, error}` when that symbol failed. Numbers go through
+//   `finite_or_null`; high/low/volume are null when upstream omits them.
+// ---------------------------------------------------------------------------
+
+export const QuoteSchema = z.object({
+  symbol: z.string(),
+  last: FiniteOrNull,
+  change: FiniteOrNull,
+  change_pct: FiniteOrNull,
+  prev_close: FiniteOrNull,
+  high: FiniteOrNull,
+  low: FiniteOrNull,
+  volume: FiniteOrNull,
+  source: z.enum(["binance", "yahoo", "sample"]),
+});
+export type Quote = z.infer<typeof QuoteSchema>;
+
+export const QuoteErrorSchema = z.object({
+  symbol: z.string(),
+  error: z.string(),
+});
+export type QuoteError = z.infer<typeof QuoteErrorSchema>;
+
+export const QuotesPayloadSchema = z.object({
+  quotes: z.array(z.union([QuoteSchema, QuoteErrorSchema])),
+});
+export type QuotesPayload = z.infer<typeof QuotesPayloadSchema>;

@@ -61,7 +61,7 @@ with existing Claude.ai connector deployments that predate Streamable HTTP.
 
 ## Tool catalog
 
-15 tools. The 12 trading tools require `--trade`; attempting to call them
+16 tools. The 12 trading tools require `--trade`; attempting to call them
 without it returns an error.
 
 ### Charting (always available)
@@ -325,6 +325,71 @@ Response shape:
 `source` is `engine_cache` when hitting the running trading engine's rolling
 window, `fetched` when the tool fell back to fresh OHLCV. The per-indicator
 object is the same shape `generate_chart` returns under `format=summary`.
+
+#### `get_quotes`
+
+Last price and change for many symbols in one call. The web watchlist
+polls it every 5 s.
+
+Required: `symbols` (array of at most 50 strings). Symbols are trimmed,
+uppercased and deduplicated. A valid symbol is 1–32 characters of
+`A-Z 0-9 . ^ = - _` with at least one letter or digit. These are tool
+errors: an array of more than 50 entries (checked before any entry is
+read, so duplicates count too), a missing `symbols` and a non-string
+entry.
+
+Response shape: one entry per distinct symbol, in request order:
+
+```json
+{
+  "quotes": [
+    {
+      "symbol": "AAPL",
+      "last": 349.51,
+      "change": 17.61,
+      "change_pct": 5.3058,
+      "prev_close": 331.9,
+      "high": 354.47,
+      "low": 340.99,
+      "volume": 88958176.0,
+      "source": "yahoo"
+    },
+    { "symbol": "NOPEUSDT", "error": "Binance: Invalid symbol." }
+  ]
+}
+```
+
+A symbol that fails gets `{symbol, error}` and never fails the call. That
+covers a malformed ticker (`"invalid symbol"`), an unknown ticker and an
+unreachable upstream. `change = last - prev_close` and
+`change_pct = change / prev_close × 100`. `high`, `low` and `volume` are
+`null` when upstream omits them. Numbers that are not finite are `null`.
+
+What `prev_close` means depends on `source` (see
+[ADR-0011](/chartgen/decisions/0011-watchlist-quotes/)):
+
+| `source` | Symbols | `last` / `prev_close` | `high` / `low` / `volume` |
+|---|---|---|---|
+| `yahoo` | stocks, ETFs, indices, FX | `regularMarketPrice` / previous session close (`chartPreviousClose`, v8 chart `range=1d`) | regular-session day values |
+| `binance` | tickers ending in `USDT`, `BTC`, `ETH`, … | `lastPrice` / `openPrice` of the **rolling 24 h** ticker | rolling 24 h; volume in the base asset |
+| `sample` | any (`CHARTGEN_DATA_SOURCE=sample`) | forming daily bar's close / previous daily close | forming daily bar |
+
+Live quotes are cached per symbol for 3 s, and the cache is shared by
+all clients, so tabs polling the same symbols share one upstream fetch
+per symbol at most every 3 s. Per-symbol errors are cached the same way.
+The Binance and Yahoo fetches for one call run at the same time.
+
+- **Binance** symbols are fetched with one batched `/api/v3/ticker/24hr`
+  request. Binance rejects the whole batch with HTTP 400 if any symbol is
+  unknown (`-1121`) or malformed (`-1100`). Only then is each symbol
+  requested on its own, so only the bad one fails. The bad symbol is
+  remembered for 5 minutes: it gets its error from memory and stays out
+  of the batch. Other failures, including rate limits (429/418), fail
+  every Binance symbol of that call and are never retried per symbol.
+- **Yahoo** symbols cost one request each, run by a queue of at most 8
+  workers. The symbol is percent-encoded as a single URL path segment.
+
+Each request times out after 10 s.
 
 ### Orders & positions (require `--trade`)
 

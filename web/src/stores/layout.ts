@@ -56,7 +56,7 @@ function persist(key: string, value: unknown): void {
 }
 
 const MAX_SYMBOL_LENGTH = 32;
-const SYMBOL_CHARSET = /^[A-Z0-9.^=\-_/]+$/;
+const SYMBOL_CHARSET = /^[A-Z0-9.^=\-_]+$/;
 
 /** Trim + uppercase; null if empty, too long, or has unexpected characters. */
 export function normalizeSymbol(x: unknown): string | null {

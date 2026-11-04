@@ -9,7 +9,7 @@ chart with an RSI panel. It implements
 [ADR-0003](/chartgen/decisions/0003-web-frontend-stack/).
 
 The scope is deliberately narrow: a top toolbar (symbol, timeframe,
-chart type), the indicator picker, and the chart. Alerts UI, order
+chart type), the indicator picker, the chart and a watchlist. Alerts UI, order
 entry, multi-chart layouts, and LLM chat are explicitly out of scope
 until the core loop is solid.
 
@@ -143,6 +143,37 @@ full); hover it for details.
 
 The shortcuts use modifiers so they do not clash with the letter and
 digit shortcuts above.
+
+## Watchlist
+
+The panel on the right of the chart lists symbols with their **Last**
+price, absolute change (**Chg**) and percentage change (**Chg%**).
+Changes are green when up and red when down, and the Last cell flashes
+green or red briefly whenever the price ticks. Quotes come from the
+[`get_quotes`](/chartgen/reference/mcp/#get_quotes) tool, polled every
+5 s while the browser tab is visible. Polling pauses while the tab is
+hidden or the panel is collapsed, and resumes within 5 s when you come back.
+
+- **Click a row** to show that symbol on the chart. The row of the
+  current chart symbol is highlighted.
+- **+** opens the symbol search dialog. The symbol you pick is added at
+  the bottom of the list, and the chart symbol stays unchanged.
+- **×** (shown on hover) removes a row.
+- **»** collapses the panel to a thin strip on the right edge; the list
+  icon there expands it again.
+
+Stock, ETF, index and FX rows change against the previous session's
+close, like TradingView. Crypto rows (Binance) change over the rolling
+24 hours, as Binance reports it, so for crypto the number can differ from
+TradingView's change since the daily open
+([ADR-0011](/chartgen/decisions/0011-watchlist-quotes/)). A symbol that
+fails to load shows dashes; hover the row for the reason.
+
+The list (default: BTCUSDT, ETHUSDT, SOLUSDT, AAPL, MSFT, NVDA, SPY) and
+the collapsed state are saved in `localStorage` under
+`chartgen.watchlist.symbols` and `chartgen.watchlist.collapsed`. On load,
+entries are trimmed, uppercased and deduplicated, and invalid ones are
+dropped. The list holds at most 50 symbols, the `get_quotes` limit.
 
 ## Getting started
 

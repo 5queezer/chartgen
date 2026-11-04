@@ -28,7 +28,7 @@ order (`src/main.rs` dispatches sequentially and returns early):
 2. **`--serve`** — HTTP MCP server with OAuth 2.1 PKCE, for Claude.ai
    (charting tools only).
 3. **`--trade`** — trading engine plus the same HTTP + OAuth server as
-   `--serve`, with all 15 tools exposed.
+   `--serve`, with all 16 tools exposed.
 4. **One-shot render** (no mode flag) — fetch data, render `chart.png`, exit.
 
 `--serve` and `--trade` are mutually exclusive; passing both runs only
