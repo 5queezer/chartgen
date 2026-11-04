@@ -426,10 +426,15 @@ tool error.
 ```
 
 `warnings` is present only when a source failed. Results are ranked: exact
-symbol match first, then symbol prefix, then symbol contains, then name
-match. Ties keep Binance before Yahoo and Yahoo's own order. For crypto, a
-query equal to the base asset (`btc`) counts as an exact match, and USDT
-pairs come before other quote assets. Duplicate symbols are dropped.
+match first, then symbol prefix, then symbol contains, then name match. An
+exact match is the symbol itself or its root: the base of a crypto pair
+(`BTC` for `BTCUSDT`), the base currency of `EURUSD=X`, the `ES` of `ES=F`
+and the `GSPC` of `^GSPC`. Among exact matches the order is coins (crypto
+with a non-fiat base), futures, forex (USD quote first), indices, crypto
+pairs with a fiat base (`EURUSDT`), then stocks, ETFs and funds, so `btc`
+gives `BTCUSDT`, `BTC=F`, then the Grayscale ETF `BTC`. After that USDT/USD
+quotes come first, then shorter symbols. Remaining ties keep Binance before
+Yahoo and Yahoo's own order. Duplicate symbols are dropped.
 `symbol` can be passed straight to `generate_chart` or `get_quotes`.
 
 | `source` | Where | Notes |
@@ -446,7 +451,27 @@ Binance and Yahoo run at the same time, and a `types` filter skips a
 source that cannot match (for example, `["crypto"]` never calls Yahoo).
 When one source fails, the other's results are returned and `warnings`
 names the failure (`"binance: …"` or `"yahoo: …"`). The call is an error
-only when every queried source fails. Failed fetches are not cached. Each
+only when every queried source fails.
+
+Upstream protection:
+
+- Concurrent identical lookups share one upstream request, so a cold cache
+  costs one `exchangeInfo` download however many searches arrive.
+- A failed lookup is remembered for 60 s instead of retried on every
+  keystroke.
+- After the 6 h TTL the Binance list is still served while it refreshes in
+  the background; a failed refresh keeps the old list and retries after
+  60 s.
+- Yahoo search is limited to 2 requests per second (burst 2) for the whole
+  server, since it shares a host with chart and quote requests. Over the
+  limit the call returns the Binance results plus a `yahoo: rate limited`
+  warning, and the rejection is not remembered. Cache hits cost no token.
+- Each source has a 4 s deadline. A source that misses it is reported as
+  `"<source>: timed out"`, its late answer still fills the cache, and the
+  other source's results are not held back.
+
+The Yahoo cache holds at most 500 queries and drops the oldest first. Its
+key is the query lowercased with inner whitespace collapsed. Each upstream
 request times out after 10 s.
 
 ### Orders & positions (require `--trade`)

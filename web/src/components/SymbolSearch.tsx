@@ -13,6 +13,7 @@ import {
   createEffect,
   createMemo,
   createSignal,
+  on,
   onCleanup,
   type JSX,
 } from "solid-js";
@@ -104,6 +105,16 @@ export function SymbolSearch(props: SymbolSearchProps): JSX.Element {
     const r = remote();
     return r && r.key === searchKey() ? r : null;
   };
+
+  // New results replace the rows under the highlight, so Enter must never
+  // pick a row other than the one shown: restart at the top.
+  createEffect(
+    on(
+      () => current()?.key ?? null,
+      () => setActive(0),
+      { defer: true },
+    ),
+  );
 
   const rows = createMemo(() =>
     buildRows({

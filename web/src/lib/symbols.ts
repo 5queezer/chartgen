@@ -1,7 +1,7 @@
-// Curated symbol list for the search dialog. There is no search
-// backend, so this is a static catalogue; any other ticker can still be
-// entered as free text. Routing (Binance vs Yahoo) happens server-side
-// in `detect_source`, keyed on the ticker suffix.
+// Curated symbol list for the search dialog: the empty-query view and the
+// instant stand-in while `search_symbols` results load or fail. Any other
+// ticker can still be entered as free text. Routing (Binance vs Yahoo)
+// happens server-side in `detect_source`, keyed on the ticker suffix.
 
 export type SymbolKind = "crypto" | "stock" | "etf" | "index" | "fx" | "futures";
 

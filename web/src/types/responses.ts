@@ -314,7 +314,8 @@ export const SEARCH_RESULT_TYPES = [
 ] as const;
 
 export const SearchResultSchema = z.object({
-  symbol: z.string(),
+  // The charset every chartgen symbol uses (`normalize_quote_symbol`).
+  symbol: z.string().regex(/^[A-Z0-9.^=\-_]{1,32}$/),
   name: z.string(),
   exchange: z.string(),
   type: z.enum(SEARCH_RESULT_TYPES),

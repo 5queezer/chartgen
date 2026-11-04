@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { SearchResult } from "../types/responses";
+import { SearchResultSchema } from "../types/responses";
 import { CATEGORIES, buildRows, type Category } from "./symbolSearch";
 
 const cat = (id: string): Category => {
@@ -84,5 +85,18 @@ describe("buildRows", () => {
 
   it("Funds covers etf and fund", () => {
     expect(cat("funds").types).toEqual(["etf", "fund"]);
+  });
+});
+
+describe("SearchResultSchema", () => {
+  it("rejects symbols outside the allowed charset", () => {
+    expect(SearchResultSchema.safeParse(remote("BRK-B", "stock")).success).toBe(
+      true,
+    );
+    for (const bad of ["a/b", "A B", "", "A".repeat(33)]) {
+      expect(SearchResultSchema.safeParse(remote(bad, "stock")).success).toBe(
+        false,
+      );
+    }
   });
 });
