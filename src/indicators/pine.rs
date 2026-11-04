@@ -305,6 +305,80 @@ pub fn fixnan(x: &[f64]) -> Vec<f64> {
         .collect()
 }
 
+// ---- Chart timeframe (Pine `timeframe.*`) and calendar periods ----
+
+/// Bar open times in unix seconds; `None` unless every bar has one.
+pub fn bar_times(data: &OhlcvData) -> Option<Vec<i64>> {
+    data.bars
+        .iter()
+        .map(|b| b.date.parse::<i64>().ok())
+        .collect()
+}
+
+/// Chart timeframe class, as Pine's `timeframe.isintraday` / `isdaily` / ...
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Timeframe {
+    /// Bar length in seconds (below a day).
+    Intraday(i64),
+    /// Multiplier in days (1D, 2D, ...).
+    Daily(i64),
+    Weekly,
+    Monthly,
+}
+
+/// The chart timeframe from `data.interval`, else inferred from the smallest
+/// gap between bar times. `None` when neither is known.
+pub fn timeframe(data: &OhlcvData) -> Option<Timeframe> {
+    const DAY: i64 = 86_400;
+    let secs = data
+        .interval
+        .as_deref()
+        .and_then(crate::data::bar_interval_secs)
+        .or_else(|| {
+            let t = bar_times(data)?;
+            t.windows(2).map(|w| w[1] - w[0]).filter(|d| *d > 0).min()
+        })?;
+    // Inferred gaps between daily stock bars shift by an hour across DST,
+    // hence the tolerances.
+    Some(if secs < 20 * 3_600 {
+        Timeframe::Intraday(secs)
+    } else if secs < 6 * DAY {
+        Timeframe::Daily(((secs as f64 / DAY as f64).round() as i64).max(1))
+    } else if secs < 25 * DAY {
+        Timeframe::Weekly
+    } else {
+        Timeframe::Monthly
+    })
+}
+
+/// A UTC calendar period, as used for VWAP anchors and pivot timeframes.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Period {
+    Day,
+    /// ISO week (starts on Monday).
+    Week,
+    Month,
+    Year,
+}
+
+/// Key of the UTC calendar period containing unix time `t`: two bars are in
+/// the same period exactly when their keys are equal.
+pub fn period_key(t: i64, p: Period) -> i64 {
+    use chrono::Datelike;
+    let Some(d) = chrono::DateTime::from_timestamp(t, 0).map(|dt| dt.date_naive()) else {
+        return i64::MIN;
+    };
+    match p {
+        Period::Day => d.num_days_from_ce() as i64,
+        Period::Week => {
+            let w = d.iso_week();
+            w.year() as i64 * 100 + w.week() as i64
+        }
+        Period::Month => d.year() as i64 * 100 + d.month() as i64,
+        Period::Year => d.year() as i64,
+    }
+}
+
 // ---- Oscillator helpers ----
 
 pub fn highest(x: &[f64], n: usize) -> Vec<f64> {

@@ -503,7 +503,8 @@ pub struct HistVol {
 
 impl Default for HistVol {
     fn default() -> Self {
-        Self { period: 20 }
+        // TradingView's default length.
+        Self { period: 10 }
     }
 }
 
@@ -517,7 +518,7 @@ impl Indicator for HistVol {
     }
 
     fn params(&self) -> Value {
-        json!([{"name": "period", "type": "integer", "min": 1, "max": 10000, "default": 20}])
+        json!([{"name": "period", "type": "integer", "min": 1, "max": 10000, "default": 10}])
     }
 
     fn configure(&mut self, params: &Value) {
@@ -539,13 +540,12 @@ impl Indicator for HistVol {
                 }
             })
             .collect();
-        let per = match data
-            .interval
-            .as_deref()
-            .and_then(crate::data::interval_secs)
-        {
-            Some(secs) if secs > 86_400 => 7.0,
-            _ => 1.0,
+        // An unknown timeframe cannot be annualized: the line stays NaN.
+        use super::pine::Timeframe;
+        let per = match super::pine::timeframe(data) {
+            Some(Timeframe::Intraday(_) | Timeframe::Daily(1)) => 1.0,
+            Some(_) => 7.0,
+            None => f64::NAN,
         };
         let scale = 100.0 * (365.0_f64 / per).sqrt();
         let vals: Vec<f64> = super::pine::stdev(&log_returns, self.period)
@@ -2482,6 +2482,31 @@ mod tests {
         d.interval = Some("1w".into());
         let weekly = 100.0 * (365.0f64 / 7.0).sqrt();
         eq(&ind.compute(&d).lines[0].y, &[NAN, NAN, 0.0, weekly]);
+        // any letter case / multiple; 1D and intraday use per = 1, 2D+ per = 7
+        let daily = 100.0 * 365f64.sqrt();
+        for (iv, want) in [
+            ("1W", weekly),
+            ("2w", weekly),
+            ("1M", weekly),
+            ("2D", weekly),
+            ("1D", daily),
+            ("4H", daily),
+            ("15m", daily),
+        ] {
+            d.interval = Some(iv.into());
+            eq(&ind.compute(&d).lines[0].y, &[NAN, NAN, 0.0, want]);
+        }
+        // unknown interval and no timestamps: unknown, not intraday
+        d.interval = Some("1x".into());
+        assert!(ind.compute(&d).lines[0].y.iter().all(|v| v.is_nan()));
+        d.interval = None;
+        assert!(ind.compute(&d).lines[0].y.iter().all(|v| v.is_nan()));
+        // no interval, but weekly bar times: inferred as weekly
+        for (i, b) in d.bars.iter_mut().enumerate() {
+            b.date = (1_700_000_000 + i as i64 * 7 * 86_400).to_string();
+        }
+        eq(&ind.compute(&d).lines[0].y, &[NAN, NAN, 0.0, weekly]);
+        assert_eq!(HistVol::default().period, 10);
     }
 
     #[test]
