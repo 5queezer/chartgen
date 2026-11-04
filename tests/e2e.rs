@@ -458,7 +458,7 @@ fn test_sample_data_sizes() {
 #[test]
 fn test_available_count() {
     let available = indicators::available();
-    assert_eq!(available.len(), 38, "Expected 38 indicators");
+    assert_eq!(available.len(), 49, "Expected 49 indicators");
 }
 
 #[test]
@@ -615,6 +615,19 @@ fn test_invalid_params_rejected_for_every_indicator() {
             if let Some(min) = spec.get("min").and_then(|v| v.as_f64()) {
                 bad.push(json!(min - 1.0));
             }
+            // Values inside a declared range (e.g. offset 0 or ma_length 0) are valid.
+            let (lo, hi) = (
+                spec.get("min").and_then(|v| v.as_f64()),
+                spec.get("max").and_then(|v| v.as_f64()),
+            );
+            bad.retain(|v| {
+                let in_range = v.as_f64().is_some_and(|f| {
+                    lo.is_some_and(|l| f >= l)
+                        && hi.is_some_and(|h| f <= h)
+                        && (!is_int || f.fract() == 0.0)
+                });
+                !in_range
+            });
             for v in bad {
                 let params = json!({ "name": info.name, pname: v.clone() });
                 let r = catch_unwind(AssertUnwindSafe(|| {

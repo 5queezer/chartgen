@@ -5,6 +5,7 @@ pub mod macd;
 pub mod rsi;
 pub mod rsi_combo;
 pub mod ta_bridge;
+pub mod trend;
 pub mod wavetrend;
 
 use crate::indicator::Indicator;
@@ -55,6 +56,17 @@ pub fn by_name(name: &str) -> Option<Box<dyn Indicator>> {
         "oi" | "open_interest" => Some(Box::new(external::OpenInterestHist)),
         "long_short" | "ls_ratio" => Some(Box::new(external::LongShortRatio)),
         "fear_greed" | "fng" => Some(Box::new(external::FearGreed)),
+        "volume" => Some(Box::new(trend::Volume::default())),
+        "ma" => Some(Box::new(trend::Ma::default())),
+        "vwma" => Some(Box::new(trend::Ma::fixed("vwma"))),
+        "hma" => Some(Box::new(trend::Ma::fixed("hma"))),
+        "ma_ribbon" => Some(Box::new(trend::MaRibbon::default())),
+        "envelopes" => Some(Box::new(trend::Envelopes::default())),
+        "linreg_channel" => Some(Box::new(trend::LinRegChannel::default())),
+        "aroon" => Some(Box::new(trend::Aroon::default())),
+        "vortex" => Some(Box::new(trend::Vortex::default())),
+        "chande_kroll_stop" => Some(Box::new(trend::ChandeKrollStop::default())),
+        "zigzag" => Some(Box::new(trend::ZigZag::default())),
         _ => None,
     }
 }
@@ -77,6 +89,13 @@ pub fn validate_params(name: &str, ind: &dyn Indicator, params: &Value) -> Resul
         };
         let bad = |why: &str| Err(format!("Invalid parameter for {name}: {pname} {why}"));
         let ty = spec.get("type").and_then(|v| v.as_str()).unwrap_or("");
+        if let (Some(allowed), Some(s)) = (spec.get("enum").and_then(|v| v.as_array()), v.as_str())
+        {
+            if !allowed.iter().any(|a| a.as_str() == Some(s)) {
+                let list: Vec<&str> = allowed.iter().filter_map(|a| a.as_str()).collect();
+                return bad(&format!("must be one of: {}", list.join(", ")));
+            }
+        }
         let num = match ty {
             "integer" => match (v.as_i64(), v.as_u64()) {
                 (Some(i), _) => i as f64,
@@ -160,6 +179,17 @@ pub fn available() -> &'static [&'static str] {
         "oi",
         "long_short",
         "fear_greed",
+        "volume",
+        "ma",
+        "vwma",
+        "hma",
+        "ma_ribbon",
+        "envelopes",
+        "linreg_channel",
+        "aroon",
+        "vortex",
+        "chande_kroll_stop",
+        "zigzag",
     ]
 }
 
@@ -287,6 +317,29 @@ pub fn registry() -> Vec<IndicatorInfo> {
         "panel",
         rsi_combo::RsiMfiStochCombo::default()
     );
+
+    // Trend / moving averages / volume
+    reg!("ma", &[], "overlay", trend::Ma::default());
+    reg!("vwma", &[], "overlay", trend::Ma::fixed("vwma"));
+    reg!("hma", &[], "overlay", trend::Ma::fixed("hma"));
+    reg!("ma_ribbon", &[], "overlay", trend::MaRibbon::default());
+    reg!("envelopes", &[], "overlay", trend::Envelopes::default());
+    reg!(
+        "linreg_channel",
+        &[],
+        "overlay",
+        trend::LinRegChannel::default()
+    );
+    reg!(
+        "chande_kroll_stop",
+        &[],
+        "overlay",
+        trend::ChandeKrollStop::default()
+    );
+    reg!("zigzag", &[], "overlay", trend::ZigZag::default());
+    reg!("volume", &[], "panel", trend::Volume::default());
+    reg!("aroon", &[], "panel", trend::Aroon::default());
+    reg!("vortex", &[], "panel", trend::Vortex::default());
 
     // External API
     reg!("cvd", &[], "external", external::Cvd);

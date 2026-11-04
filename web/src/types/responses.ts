@@ -228,6 +228,7 @@ export const ParamSpecSchema = z.object({
   description: z.string().optional(),
   min: z.number().optional(),
   max: z.number().optional(),
+  enum: z.array(z.string()).optional(),
 });
 export type ParamSpec = z.infer<typeof ParamSpecSchema>;
 
