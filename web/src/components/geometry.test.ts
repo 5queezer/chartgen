@@ -362,6 +362,18 @@ describe("toDataSpace", () => {
     expect(out.fills).toBeUndefined();
     expect(out.divlines).toBeUndefined();
   });
+
+  it("shares fills and divlines when the payload is already in data space", () => {
+    const ind = indicator({
+      fills: [{ y1: [1, 2], y2: [0, 0] }],
+      divlines: [div({ x1: 0, x2: 1 })],
+      hbars: [hbar({})],
+    });
+    const out = toDataSpace(ind, null, "vpvr");
+    expect(out.fills).toBe(ind.fills);
+    expect(out.divlines).toBe(ind.divlines);
+    expect(out.hbars![0]!.color).toBe(hbarTheme("vpvr").poc);
+  });
 });
 
 describe("valueExtents", () => {

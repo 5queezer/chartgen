@@ -9,6 +9,7 @@ import {
   onMount,
   type JSX,
 } from "solid-js";
+import { unwrap } from "solid-js/store";
 
 import type { Chart as KLineChart } from "klinecharts";
 
@@ -34,7 +35,20 @@ import {
 import { isTypingContext } from "./lib/keys";
 import { createMcpSession } from "./mcp";
 import { tryHandlePendingRedirect } from "./oauth";
-import { createChartQuery, createListIndicatorsQuery } from "./queries";
+import {
+  chartQueryKey,
+  createChartQuery,
+  createListIndicatorsQuery,
+  isChartDataFor,
+} from "./queries";
+import {
+  createLiveFeed,
+  type HistoryStatus,
+  type LiveRequest,
+  type LiveSnapshot,
+  type PollStatus,
+} from "./lib/liveFeed";
+import type { SeriesPayload } from "./types/responses";
 import { createAlertLogger } from "./services/notifications";
 import {
   activeIndicators,
@@ -140,6 +154,60 @@ export function App(): JSX.Element {
     enabled: authReady(),
   }));
 
+  // The live feed owns the chart's data from each full load on: it polls
+  // the tail and pages in history, and the chart renders its snapshots.
+  const [live, setLive] = createSignal<LiveSnapshot | null>(null);
+  const [pollStatus, setPollStatus] = createSignal<PollStatus>({ kind: "off" });
+  const [historyStatus, setHistoryStatus] = createSignal<HistoryStatus>({
+    kind: "idle",
+  });
+  const feed = createLiveFeed({
+    fetch: (request, { signal, ...args }) =>
+      session.callGenerateChart({ ...request, ...args }, signal),
+    reload: () => query.refetch(),
+    onSnapshot: setLive,
+    onPollStatus: setPollStatus,
+    onHistoryStatus: setHistoryStatus,
+  });
+  onCleanup(feed.dispose);
+
+  // Hand each full load to the feed. A request change (symbol, timeframe,
+  // visible indicators, params) suspends the feed at once, which drops
+  // every in-flight poll and page of the old chart; the old chart stays on
+  // screen until the new load lands (keepPreviousData), and is cleared if
+  // that load fails. Only data loaded for the current request is adopted.
+  let feedKey = "";
+  let adopted: SeriesPayload | null | undefined;
+  createEffect(() => {
+    const request: LiveRequest = {
+      ticker: symbol(),
+      timeframe: timeframe(),
+      indicators: wireIndicators(),
+    };
+    const data = query.data;
+    untrack(() => {
+      const key = JSON.stringify(chartQueryKey(request));
+      if (key !== feedKey) {
+        feedKey = key;
+        adopted = undefined;
+        feed.suspend();
+      }
+      const raw = data === undefined ? null : unwrap(data);
+      if (raw === adopted || (raw && !isChartDataFor(raw, request))) return;
+      adopted = raw;
+      // A copy: the feed updates its series in place, the cache stays as loaded.
+      feed.reset(raw && structuredClone(raw), request);
+    });
+  });
+
+  if (import.meta.env.DEV) {
+    // E2E hook (tests/e2e/live-paging.spec.ts): what the chart holds.
+    (window as unknown as Record<string, unknown>).__chartgenTest = {
+      chart,
+      series: () => live()?.series ?? null,
+    };
+  }
+
   // A symbol only becomes a "recent" once its data actually loaded, so
   // typos never end up in the list.
   createEffect(() => {
@@ -211,6 +279,7 @@ export function App(): JSX.Element {
         </button>
         <StatusLine
           status={status()}
+          live={pollStatus()}
           onRetry={() => void query.refetch()}
         />
         <div class="ml-auto">
@@ -268,7 +337,10 @@ export function App(): JSX.Element {
         <DrawingToolbar chart={chart()} symbol={symbol()} />
         <div class="flex-1 min-w-0">
           <Chart
-            series={query.data ?? null}
+            series={live()?.series ?? null}
+            update={live()?.update ?? null}
+            history={historyStatus()}
+            onLoadOlder={feed.loadOlder}
             activeIndicators={wireIndicators()}
             styles={plotStyles()}
             chartType={chartType()}
