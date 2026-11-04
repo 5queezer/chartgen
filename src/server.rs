@@ -337,7 +337,7 @@ async fn oauth_token(
         "[OAuth] POST /token PKCE verify: ok={} verifier_len={} challenge={}",
         pkce_ok,
         body.code_verifier.len(),
-        &stored_challenge
+        stored_challenge
     );
     if !pkce_ok {
         return (

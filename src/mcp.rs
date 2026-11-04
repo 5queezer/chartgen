@@ -1247,7 +1247,7 @@ fn tool_subscribe_notifications(
                 .filter_map(|v| v.as_str().map(String::from))
                 .collect::<HashSet<_>>()
         })
-        .and_then(|s| if s.is_empty() { None } else { Some(s) });
+        .filter(|s| !s.is_empty());
 
     let alert_types: Option<HashSet<String>> = args
         .get("alert_types")
@@ -1257,7 +1257,7 @@ fn tool_subscribe_notifications(
                 .filter_map(|v| v.as_str().map(String::from))
                 .collect::<HashSet<_>>()
         })
-        .and_then(|s| if s.is_empty() { None } else { Some(s) });
+        .filter(|s| !s.is_empty());
 
     let mut e = engine.write().unwrap();
     e.subscription_registry
