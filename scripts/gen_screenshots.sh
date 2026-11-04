@@ -26,6 +26,10 @@ PANEL=(
     cipher_b macd rsi wavetrend stoch atr obv cci roc mfi williams_r cmf
     adx ad histvol kalman_volume rsi_mfi_stoch
     volume aroon vortex
+    stoch_rsi awesome_oscillator momentum trix ultimate_oscillator ppo cmo dpo
+    elder_force_index tsi kst coppock mass_index bb_percent_b bb_width
+    choppiness fisher_transform ease_of_movement volume_oscillator
+    balance_of_power rvi smi_ergodic connors_rsi
 )
 
 EXTERNAL=(cvd funding oi long_short fear_greed)
