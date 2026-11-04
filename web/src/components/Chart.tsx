@@ -32,9 +32,11 @@ import {
   createSignal,
   createMemo,
   Index,
+  Match,
   onCleanup,
   onMount,
   Show,
+  Switch,
   untrack,
   type JSX,
 } from "solid-js";
@@ -60,7 +62,11 @@ import {
   type ActiveIndicator,
   type IndicatorStyle,
 } from "../stores/indicators";
-import type { HistoryStatus, SeriesUpdate } from "../lib/liveFeed";
+import {
+  canPageBefore,
+  type HistoryStatus,
+  type SeriesUpdate,
+} from "../lib/liveFeed";
 import { theme, type ChartType } from "../stores/layout";
 import { PALETTES, type Palette } from "../lib/theme";
 import type { SeriesPayload } from "../types/responses";
@@ -659,6 +665,9 @@ function tvStyles(p: Palette) {
 const CANDLE_PANE_ID = "candle_pane";
 // Matches the two-decimal compact volume in the legend.
 const VOLUME_PRECISION = 2;
+// New bars in one tail update up to which each is appended with its own
+// updateData (one full recalc each); more is applied in one step.
+const MAX_INCREMENTAL_BARS = 5;
 
 interface HeaderState {
   /** Series key (indicator request name); absent for the price pane. */
@@ -740,6 +749,8 @@ export function Chart(props: ChartProps): JSX.Element {
   const [crosshairIndex, setCrosshairIndex] = createSignal<number | null>(
     null,
   );
+  // True while the oldest loaded bar is in view.
+  const [atOldest, setAtOldest] = createSignal(false);
   // Computed once per series, not per crosshair frame. pricePrecision
   // samples the last 50 closes, so only those are mapped: this reruns on
   // every live tick.
@@ -813,10 +824,15 @@ export function Chart(props: ChartProps): JSX.Element {
     // Use the string form of the action type to avoid pulling in the
     // runtime enum (TS-only import-elision friendly).
     c!.subscribeAction("onCrosshairChange" as never, onCrosshair);
+    // The history-limit notice shows only while the oldest bar is in view.
+    const onRange = (range?: unknown) =>
+      setAtOldest((range as { from?: number } | undefined)?.from === 0);
+    c!.subscribeAction("onVisibleRangeChange" as never, onRange);
     const onLeave = () => setCrosshairIndex(null);
     host.addEventListener("mouseleave", onLeave);
     onCleanup(() => {
       c!.unsubscribeAction("onCrosshairChange" as never, onCrosshair);
+      c!.unsubscribeAction("onVisibleRangeChange" as never, onRange);
       host.removeEventListener("mouseleave", onLeave);
       if (crosshairFrame !== null) cancelAnimationFrame(crosshairFrame);
     });
@@ -957,10 +973,12 @@ export function Chart(props: ChartProps): JSX.Element {
       );
     }
   });
+
   /**
-   * Feed a live-feed change to klinecharts without `applyNewData`, which
-   * would reset the scroll position. False if klinecharts does not hold
-   * what the change builds on; the caller then does a full apply.
+   * Feed a live-feed change to klinecharts without losing the scroll
+   * position (a bare `applyNewData` snaps to the newest bar). False if
+   * klinecharts does not hold what the change builds on; the caller then
+   * does a full apply.
    */
   const applyIncremental = (
     c: KChart,
@@ -973,11 +991,15 @@ export function Chart(props: ChartProps): JSX.Element {
       // the view anchored to the newest bar, so nothing on screen moves.
       // The prepended page's indices shift every geometry index, so the
       // store is refreshed first; the prepend recalcs and repaints.
+      // An empty page (count 0) ends the history, whatever has_more says.
       const done = pendingOlder;
       if (!done) return false;
       pendingOlder = null;
       storeGeometry(series, names);
-      done(seriesToKLines(series, 0, update.count), series.has_more);
+      done(
+        seriesToKLines(series, 0, update.count),
+        update.count > 0 && canPageBefore(series),
+      );
       return true;
     }
     if (update.kind !== "tail") return false;
@@ -986,17 +1008,51 @@ export function Chart(props: ChartProps): JSX.Element {
     const head = series.bars[from]?.t;
     if (list.length !== prevLength || head == null) return false;
     if (list[from]?.timestamp !== head * 1000) return false;
+    // The tail merge updates fill arrays and divline lists in place, which
+    // the stored geometry shares (storeGeometry); only a list the merge
+    // had to create is not shared yet. Merged data is always timed.
+    for (const name of names) {
+      const ind = series.indicators[name];
+      const stored = geometryStore.get(indicatorRegName(name));
+      if (ind && stored && stored.divlines !== ind.divlines) {
+        storeGeometry(series, [name], true);
+      }
+    }
+    const klines = seriesToKLines(series, from);
+    const kept = prevLength - from;
+    const added = klines.length - kept;
+    if (added > MAX_INCREMENTAL_BARS) {
+      // A catch-up after missed bars: one updateData per bar would recalc
+      // every indicator per bar. Apply the whole list once instead and
+      // move the view back to where it was (applyNewData snaps it to the
+      // newest bar): the bar at the left edge returns to the same pixel.
+      // When the newest bar was in view the chart keeps following it.
+      const range = c.getVisibleRange();
+      const following = range.to >= prevLength;
+      const anchor = list[Math.min(range.from, prevLength - 1)]!.timestamp;
+      const xOf = () =>
+        (
+          c.convertToPixel({ timestamp: anchor }, {
+            paneId: CANDLE_PANE_ID,
+          }) as { x?: number }
+        ).x;
+      const x = xOf();
+      // A held "load older" callback stays valid: it prepends to whatever
+      // list klinecharts holds, which is still this series.
+      c.applyNewData(seriesToKLines(series), canPageBefore(series));
+      const x2 = xOf();
+      if (!following && x !== undefined && x2 !== undefined) {
+        c.scrollByDistance(x - x2);
+      }
+      return true;
+    }
     // Bars we already have are updated in place; new ones go through
     // updateData, which appends and, when the view is scrolled back,
     // keeps it where it is. Each updateData recalcs every indicator over
     // the whole list (klinecharts has no partial recalc), so an unchanged
-    // length still needs exactly one call to recalc and repaint, which
-    // also picks up the re-stored geometry (merged data is always timed).
-    storeGeometry(series, names, true);
-    const klines = seriesToKLines(series, from);
-    const kept = prevLength - from;
+    // length still needs exactly one call to recalc and repaint.
     for (let i = 0; i < kept; i++) Object.assign(list[from + i]!, klines[i]);
-    if (klines.length === kept) c.updateData(list[prevLength - 1]!);
+    if (added === 0) c.updateData(list[prevLength - 1]!);
     for (const k of klines.slice(kept)) c.updateData(k);
     return true;
   };
@@ -1052,11 +1108,12 @@ export function Chart(props: ChartProps): JSX.Element {
     storeGeometry(series, names);
 
     // 2. Push bar data with all per-indicator stashes applied. applyNewData
-    //    drops any held "load older" request; `has_more` tells klinecharts
-    //    whether to ask for older bars at the left edge.
+    //    drops any held "load older" request; `canPageBefore` (more history,
+    //    under the cap) tells klinecharts whether to ask for older bars at
+    //    the left edge.
     pendingOlder = null;
     const klines = seriesToKLines(series);
-    c.applyNewData(klines, series.has_more);
+    c.applyNewData(klines, canPageBefore(series));
     c.setPriceVolumePrecision(precision, VOLUME_PRECISION);
 
     // 3. Pane lifecycle. Create for new indicators, remove for dropped.
@@ -1148,7 +1205,9 @@ export function Chart(props: ChartProps): JSX.Element {
       <PriceAxisControls chart={chart()} series={props.series} />
       <Show
         when={
-          props.history?.kind === "loading" || props.history?.kind === "error"
+          props.history?.kind === "loading" ||
+          props.history?.kind === "error" ||
+          (props.history?.kind === "limit" && atOldest())
         }
       >
         <div
@@ -1160,20 +1219,21 @@ export function Chart(props: ChartProps): JSX.Element {
             props.history?.kind === "error" ? props.history.message : undefined
           }
         >
-          <Show
-            when={props.history?.kind === "loading"}
-            fallback={
-              <>
-                Older bars failed to load
-                <button type="button" onClick={() => props.onLoadOlder?.()}>
-                  Retry
-                </button>
-              </>
-            }
-          >
-            <span class="history-spinner" aria-hidden="true" />
-            Loading history…
-          </Show>
+          <Switch>
+            <Match when={props.history?.kind === "loading"}>
+              <span class="history-spinner" aria-hidden="true" />
+              Loading history…
+            </Match>
+            <Match when={props.history?.kind === "error"}>
+              Older bars failed to load
+              <button type="button" onClick={() => props.onLoadOlder?.()}>
+                Retry
+              </button>
+            </Match>
+            <Match when={props.history?.kind === "limit"}>
+              History limit reached
+            </Match>
+          </Switch>
         </div>
       </Show>
     </div>

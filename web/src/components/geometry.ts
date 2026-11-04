@@ -103,8 +103,12 @@ export function payloadToDataIndex(
  * color, else the tier theme for indicator `name`) instead of per frame.
  *
  * A null `remap` means the payload already is in data space (every bar
- * has a timestamp, as in merged live data): fills and divlines are then
- * shared with `ind`, not copied, so this costs nothing per bar.
+ * has a timestamp, as in merged live data). Contract of that path: every
+ * field but `hbars` is shared with `ind` (same arrays, not copies), so
+ * in-place updates to `ind` show through and it costs nothing per bar;
+ * and nothing is filtered, in particular divlines whose endpoints lie
+ * outside the bars are kept. The caller guarantees the indices are valid
+ * (the live merge only emits divlines on bars it holds).
  */
 export function toDataSpace(
   ind: SeriesIndicator,
