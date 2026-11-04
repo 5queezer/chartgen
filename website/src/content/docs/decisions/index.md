@@ -42,4 +42,5 @@ one and link both ways.
 | [0011](/chartgen/decisions/0011-watchlist-quotes/) | Watchlist quotes: batched get_quotes, rolling 24 h change for Binance | Accepted | 2026-11-04 |
 | [0012](/chartgen/decisions/0012-geometry-colors-on-the-wire/) | Geometry colors on the wire | Accepted | 2026-11-04 |
 | [0013](/chartgen/decisions/0013-indicator-visibility-and-instances/) | Indicator visibility, parameter editing and one instance per indicator | Accepted | 2026-11-04 |
+| [0015](/chartgen/decisions/0015-named-layouts/) | Named chart layouts | Accepted | 2026-11-04 |
 | [0016](/chartgen/decisions/0016-light-theme/) | Light theme with a single TypeScript token source | Accepted | 2026-11-04 |

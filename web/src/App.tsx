@@ -17,6 +17,7 @@ import { DrawingToolbar } from "./components/DrawingToolbar";
 import { IndicatorChips } from "./components/IndicatorChips";
 import { IndicatorPicker } from "./components/IndicatorPicker";
 import { IndicatorSettings } from "./components/IndicatorSettings";
+import { LayoutMenu } from "./components/LayoutMenu";
 import { mergeParams } from "./lib/paramForm";
 import { PALETTES } from "./lib/theme";
 import { StatusLine, type Status } from "./components/StatusLine";
@@ -43,6 +44,7 @@ import {
   toWire,
   updateIndicatorParams,
 } from "./stores/indicators";
+import { setParamDefaults, type ParamDefaults } from "./stores/layouts";
 import {
   addRecent,
   chartType,
@@ -134,6 +136,18 @@ export function App(): JSX.Element {
   // is cached forever. It fires as soon as auth is ready.
   const listIndicators = createListIndicatorsQuery(session, authReady);
 
+  // Layout dirty check ignores params that equal the registry default.
+  createEffect(() => {
+    const defaults: ParamDefaults = {};
+    for (const i of listIndicators.data?.indicators ?? []) {
+      const params = Object.fromEntries(
+        (i.configurable_params ?? []).map((p) => [p.name, p.default]),
+      );
+      for (const n of [i.name, ...(i.aliases ?? [])]) defaults[n] = params;
+    }
+    setParamDefaults(defaults);
+  });
+
   const status = createMemo<Status>(() => {
     if (!authReady()) return { kind: "authenticating" };
     if (query.isFetching) return { kind: "loading" };
@@ -174,6 +188,9 @@ export function App(): JSX.Element {
           status={status()}
           onRetry={() => void query.refetch()}
         />
+        <div class="ml-auto">
+          <LayoutMenu />
+        </div>
       </header>
       <IndicatorChips
         entries={activeIndicators()}

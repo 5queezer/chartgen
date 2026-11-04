@@ -23,7 +23,7 @@ export type ActiveIndicator =
 
 const STORAGE_KEY = "chartgen.indicators.active";
 
-const DEFAULT_SET: ActiveIndicator[] = [
+export const DEFAULT_SET: ActiveIndicator[] = [
   "ema_stack",
   { name: "rsi", length: 14 },
 ];
@@ -65,7 +65,7 @@ function persist(value: ActiveIndicator[]): void {
   }
 }
 
-function isActiveIndicator(x: unknown): x is ActiveIndicator {
+export function isActiveIndicator(x: unknown): x is ActiveIndicator {
   if (typeof x === "string") return x.length > 0;
   if (x && typeof x === "object" && !Array.isArray(x)) {
     const name = (x as { name?: unknown }).name;
@@ -187,9 +187,8 @@ export function activeIndicatorsKey(entries: ActiveIndicator[]): string {
   return JSON.stringify(
     entries.map((e) => {
       if (typeof e === "string") return e;
-      const sorted: Record<string, unknown> = {};
-      for (const k of Object.keys(e).sort()) sorted[k] = e[k];
-      return sorted;
+      // fromEntries defines own properties, so a `__proto__` key stays data.
+      return Object.fromEntries(Object.keys(e).sort().map((k) => [k, e[k]]));
     }),
   );
 }
