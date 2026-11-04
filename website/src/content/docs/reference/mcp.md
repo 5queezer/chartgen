@@ -331,9 +331,12 @@ object is the same shape `generate_chart` returns under `format=summary`.
 Last price and change for many symbols in one call. The web watchlist
 polls it every 5 s.
 
-Required: `symbols` (array of strings). Symbols are trimmed, uppercased and
-deduplicated. More than 50 distinct symbols is a tool error, and so is a
-missing `symbols` or a non-string entry.
+Required: `symbols` (array of at most 50 strings). Symbols are trimmed,
+uppercased and deduplicated. A valid symbol is 1–32 characters of
+`A-Z 0-9 . ^ = - _` with at least one letter or digit. These are tool
+errors: an array of more than 50 entries (checked before any entry is
+read, so duplicates count too), a missing `symbols` and a non-string
+entry.
 
 Response shape: one entry per distinct symbol, in request order:
 
@@ -371,10 +374,21 @@ What `prev_close` means depends on `source` (see
 | `binance` | tickers ending in `USDT`, `BTC`, `ETH`, … | `lastPrice` / `openPrice` of the **rolling 24 h** ticker | rolling 24 h; volume in the base asset |
 | `sample` | any (`CHARTGEN_DATA_SOURCE=sample`) | forming daily bar's close / previous daily close | forming daily bar |
 
-Binance symbols are fetched with one batched `/api/v3/ticker/24hr`
-request. Binance rejects the whole batch if any symbol is unknown, and
-then each symbol is requested on its own so only the bad one fails.
-Yahoo symbols cost one request each, with at most 8 in flight at a time.
+Live quotes are cached per symbol for 3 s, and the cache is shared by
+all clients, so tabs polling the same symbols share one upstream fetch
+per symbol at most every 3 s. Per-symbol errors are cached the same way.
+The Binance and Yahoo fetches for one call run at the same time.
+
+- **Binance** symbols are fetched with one batched `/api/v3/ticker/24hr`
+  request. Binance rejects the whole batch with HTTP 400 if any symbol is
+  unknown (`-1121`) or malformed (`-1100`). Only then is each symbol
+  requested on its own, so only the bad one fails. The bad symbol is
+  remembered for 5 minutes: it gets its error from memory and stays out
+  of the batch. Other failures, including rate limits (429/418), fail
+  every Binance symbol of that call and are never retried per symbol.
+- **Yahoo** symbols cost one request each, run by a queue of at most 8
+  workers. The symbol is percent-encoded as a single URL path segment.
+
 Each request times out after 10 s.
 
 ### Orders & positions (require `--trade`)

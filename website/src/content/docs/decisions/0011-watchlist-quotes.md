@@ -68,25 +68,34 @@ trading. Kept as a fallback if per-symbol requests get throttled.
 ## Decision Outcome
 
 Chosen: **a `get_quotes(symbols[])` tool. Binance uses the batched
-rolling 24 h ticker. Yahoo uses the v8 chart `meta` per symbol, at most 8
-requests at a time. The sample source compares the forming daily bar with
-the previous one.**
+rolling 24 h ticker. Yahoo uses the v8 chart `meta` per symbol, on a work
+queue of at most 8 workers, running at the same time as the Binance
+request. A 3 s per-symbol cache, shared by all clients, sits in front of
+both. The sample source compares the forming daily bar with the previous
+one.**
 
 - Each quote carries `source` (`binance`, `yahoo`, `sample`) so clients
   and docs can say which reference `prev_close` is. For Binance it is the
   price at the start of the rolling 24 h window.
-- Binance rejects a whole batch if one symbol is unknown (`-1121 Invalid
-  symbol`). On a 4xx the batch is retried per symbol, so only the bad
-  symbol gets `{symbol, error}`. A transport error is not retried.
-- Input is trimmed, uppercased, deduplicated and capped at 50 distinct
-  symbols, the same rules as the web store.
+- Binance rejects a whole batch if one symbol is unknown or malformed
+  (HTTP 400 with `-1121 Invalid symbol` or `-1100 Illegal characters`).
+  Only on those errors is the batch retried per symbol, so only the bad
+  symbol gets `{symbol, error}`. The bad symbol is remembered for 5
+  minutes and kept out of later batches. A rate limit (429/418) or
+  transport error is never fanned out into per-symbol requests, because
+  that would multiply the load just when Binance asks for less.
+- Input is trimmed, uppercased and deduplicated. An array of more than
+  50 entries is rejected before any entry is read. Symbols use the web
+  store's charset without `/`, and each symbol goes into upstream URLs
+  percent-encoded as one path segment, so input cannot change the
+  request path.
 
 ## Consequences
 
-**Positive.** One MCP call and one Binance request per poll, plus one
-request per Yahoo symbol. Stock, ETF, index and FX numbers match
-TradingView. A failing symbol stays isolated. E2E runs offline with
-values that move over time.
+**Positive.** One MCP call per poll, and at most one Binance request and
+one request per Yahoo symbol per 3 s, however many tabs are polling.
+Stock, ETF, index and FX numbers match TradingView. A failing symbol
+stays isolated. E2E runs offline with values that move over time.
 
 **Negative.**
 
@@ -95,9 +104,11 @@ values that move over time.
   Switching to daily klines with a cached previous close (the third
   option above) is the upgrade path if parity matters more than the
   extra state.
-- A list of mostly stocks costs one Yahoo request per symbol every 5 s
-  per open tab. There is no server-side cache yet, so many tabs multiply
-  the load.
+- A list of mostly stocks still costs one Yahoo request per symbol per
+  poll. The shared cache stops many tabs from multiplying that, but not
+  many different lists.
+- Quotes can be up to 3 s older than upstream, and a symbol Binance lists
+  newly can stay "invalid" for up to 5 minutes.
 
 **Neutral.** The frontend stops polling while the tab is hidden or the
 panel is collapsed.

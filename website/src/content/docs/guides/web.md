@@ -147,7 +147,7 @@ Changes are green when up and red when down, and the Last cell flashes
 green or red briefly whenever the price ticks. Quotes come from the
 [`get_quotes`](/chartgen/reference/mcp/#get_quotes) tool, polled every
 5 s while the browser tab is visible. Polling pauses while the tab is
-hidden or the panel is collapsed, and resumes when you come back.
+hidden or the panel is collapsed, and resumes within 5 s when you come back.
 
 - **Click a row** to show that symbol on the chart. The row of the
   current chart symbol is highlighted.
