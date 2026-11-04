@@ -140,7 +140,7 @@ export function Toolbar(props: ToolbarProps): JSX.Element {
     else setSymbol(next);
   };
   const [fullscreen, setFullscreen] = createSignal(
-    document.fullscreenElement !== null,
+    document.fullscreenElement != null,
   );
   const [searchOpen, setSearchOpen] = createSignal(false);
   const [searchSeed, setSearchSeed] = createSignal("");
@@ -164,7 +164,7 @@ export function Toolbar(props: ToolbarProps): JSX.Element {
         setTfOpen(true);
       }
     };
-    const onFullscreen = () => setFullscreen(document.fullscreenElement !== null);
+    const onFullscreen = () => setFullscreen(document.fullscreenElement != null);
     window.addEventListener("keydown", onKey);
     document.addEventListener("fullscreenchange", onFullscreen);
     onCleanup(() => {
@@ -308,23 +308,25 @@ export function Toolbar(props: ToolbarProps): JSX.Element {
           <path d="M3 9a6 6 0 1 0 2-4.5M3 2.5v3h3" stroke-linejoin="round" />
         </svg>
       </button>
-      <button
-        type="button"
-        class={buttonClass}
-        onClick={toggleFullscreen}
-        aria-pressed={fullscreen()}
-        aria-label="Fullscreen"
-        title="Toggle fullscreen"
-      >
-        <svg {...iconProps}>
-          <Show
-            when={fullscreen()}
-            fallback={<path d="M2 6V2h4M12 2h4v4M16 12v4h-4M6 16H2v-4" />}
-          >
-            <path d="M6 2v4H2M16 6h-4V2M12 16v-4h4M2 12h4v4" />
-          </Show>
-        </svg>
-      </button>
+      <Show when={document.fullscreenEnabled}>
+        <button
+          type="button"
+          class={buttonClass}
+          onClick={toggleFullscreen}
+          aria-pressed={fullscreen()}
+          aria-label="Fullscreen"
+          title="Toggle fullscreen"
+        >
+          <svg {...iconProps}>
+            <Show
+              when={fullscreen()}
+              fallback={<path d="M2 6V2h4M12 2h4v4M16 12v4h-4M6 16H2v-4" />}
+            >
+              <path d="M6 2v4H2M16 6h-4V2M12 16v-4h4M2 12h4v4" />
+            </Show>
+          </svg>
+        </button>
+      </Show>
 
       <SymbolSearch
         open={searchOpen()}

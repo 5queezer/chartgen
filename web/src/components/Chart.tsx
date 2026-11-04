@@ -32,14 +32,18 @@ import {
   init,
   registerIndicator,
   type Chart as KChart,
-  type Chart as KLineChart,
   type KLineData,
 } from "klinecharts";
 
 import { indicatorName, type ActiveIndicator } from "../stores/indicators";
 import type { ChartType } from "../stores/layout";
 import type { SeriesPayload } from "../types/responses";
-import { barLegend, pricePrecision, type BarLegend } from "../lib/format";
+import {
+  barLegend,
+  lastFiniteCloseIndex,
+  pricePrecision,
+  type BarLegend,
+} from "../lib/format";
 import { PaneHeader, type PaneHeaderLine } from "./PaneHeader";
 import { PriceAxisControls } from "./PriceAxisControls";
 
@@ -407,6 +411,8 @@ const TV_STYLES = {
 } as const;
 
 const CANDLE_PANE_ID = "candle_pane";
+// Matches the two-decimal compact volume in the legend.
+const VOLUME_PRECISION = 2;
 
 interface HeaderState {
   /** Series key (indicator request name); absent for the price pane. */
@@ -455,7 +461,7 @@ export interface ChartProps {
   onToggleHidden?: (name: string) => void;
   onSettings?: (name: string) => void;
   onRemove?: (name: string) => void;
-  onChartReady?: (chart: KLineChart) => void;
+  onChartReady?: (chart: KChart) => void;
 }
 
 export function Chart(props: ChartProps): JSX.Element {
@@ -470,6 +476,10 @@ export function Chart(props: ChartProps): JSX.Element {
   // (resting state → show last finite values).
   const [crosshairIndex, setCrosshairIndex] = createSignal<number | null>(
     null,
+  );
+  // Computed once per series, not per crosshair frame.
+  const pricePrecisionForSeries = createMemo(() =>
+    pricePrecision(props.series?.bars.map((b) => b.c) ?? []),
   );
   let crosshairFrame: number | null = null;
   let layoutFrame: number | null = null;
@@ -550,17 +560,15 @@ export function Chart(props: ChartProps): JSX.Element {
     // crosshair bar, or of the last bar at rest.
     const bars = series.bars;
     const legendIndex =
-      xi !== null && xi >= 0 && xi < bars.length ? xi : bars.length - 1;
+      xi !== null && xi >= 0 && xi < bars.length
+        ? xi
+        : lastFiniteCloseIndex(bars);
     next.push({
       name: series.symbol ?? "price",
       params: series.interval ? `· ${series.interval}` : undefined,
       lines: [],
       legend:
-        barLegend(
-          bars,
-          legendIndex,
-          pricePrecision(bars.map((b) => b.c)),
-        ) ?? undefined,
+        barLegend(bars, legendIndex, pricePrecisionForSeries()) ?? undefined,
       top: 4,
     });
 
@@ -675,6 +683,8 @@ export function Chart(props: ChartProps): JSX.Element {
     // 2. Push bar data with all per-indicator stashes applied.
     const klines = seriesToKLines(series);
     c.applyNewData(klines);
+    // Axis ticks, the last-price badge and the legend share one precision.
+    c.setPriceVolumePrecision(pricePrecisionForSeries(), VOLUME_PRECISION);
 
     // 3. Pane lifecycle. Create for new indicators, remove for dropped.
     // untrack: this effect writes paneIds below, so reading it tracked

@@ -4,6 +4,8 @@
 
 import type { Chart as KLineChart } from "klinecharts";
 
+import { setAutoScale } from "../stores/layout";
+
 export type ChartAction =
   | "scrollLeft"
   | "scrollRight"
@@ -73,7 +75,9 @@ export function applyChartAction(chart: KLineChart, action: ChartAction): void {
   }
 }
 
+/** Time axis back to real time at default zoom, and the price axis back to auto-fit. */
 export function resetChart(chart: KLineChart): void {
+  setAutoScale(true);
   chart.setBarSpace(DEFAULT_BAR_SPACE);
   chart.scrollToRealTime();
 }
@@ -106,6 +110,9 @@ export function downloadChartImage(
 
 /** Enter fullscreen on the app root, or leave it if already there. */
 export function toggleFullscreen(): void {
-  if (document.fullscreenElement) void document.exitFullscreen();
-  else void document.documentElement.requestFullscreen();
+  const request = document.fullscreenElement != null
+    ? document.exitFullscreen()
+    : document.documentElement.requestFullscreen();
+  // Rejects when the browser or an embedding iframe refuses; nothing to do.
+  request.catch(() => {});
 }

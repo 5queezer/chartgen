@@ -94,6 +94,37 @@ test.describe("chart ux", () => {
     await expect(auto).toHaveAttribute("aria-pressed", "true");
   });
 
+  test("dragging the price axis turns auto off; double-click turns it on", async ({
+    bootedApp: page,
+  }) => {
+    const auto = scaleButton(page, "auto");
+    await expect(auto).toHaveAttribute("aria-pressed", "true");
+    const box = await page.locator(".chart-host").boundingBox();
+    if (!box) throw new Error("chart host has no bounding box");
+    const x = box.x + box.width - 20;
+    const y = box.y + box.height / 3;
+    await page.mouse.move(x, y);
+    await page.mouse.down();
+    await page.mouse.move(x, y + 40, { steps: 5 });
+    await page.mouse.up();
+    await expect(auto).toHaveAttribute("aria-pressed", "false");
+    await page.mouse.dblclick(x, y);
+    await expect(auto).toHaveAttribute("aria-pressed", "true");
+  });
+
+  test("countdown is hidden for session-based (non-crypto) symbols", async ({
+    bootedApp: page,
+  }) => {
+    await expect(countdown(page)).toBeVisible();
+    await page.evaluate(() =>
+      localStorage.setItem("chartgen.layout.symbol", '"AAPL"'),
+    );
+    await page.reload();
+    await expectChartRendered(page);
+    await expect(page.getByTestId("price-legend")).toBeVisible();
+    await expect(countdown(page)).toHaveCount(0);
+  });
+
   test("screenshot button downloads a named PNG", async ({
     bootedApp: page,
   }) => {
@@ -117,6 +148,18 @@ test.describe("chart ux", () => {
     await expect(button).toHaveAttribute("aria-pressed", "true");
     await button.click();
     await expect(button).toHaveAttribute("aria-pressed", "false");
+  });
+
+  test("fullscreen button is hidden when the browser lacks support", async ({
+    bootedApp: page,
+  }) => {
+    await page.addInitScript(() => {
+      Object.defineProperty(document, "fullscreenEnabled", { get: () => false });
+    });
+    await page.reload();
+    await expectChartRendered(page);
+    await expect(page.getByRole("button", { name: "Take screenshot" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Fullscreen" })).toHaveCount(0);
   });
 
   test("chart keys work without errors", async ({ bootedApp: page }) => {

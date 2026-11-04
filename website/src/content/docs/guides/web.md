@@ -40,7 +40,7 @@ chart stays on screen while the new one loads. There is no Load button; if a loa
   rows above the panes are not part of the image.
 - **Reset chart** (circular arrow) — scrolls to the latest bar and restores
   the default bar spacing. Same as `Alt+R`.
-- **Fullscreen** — toggles the browser Fullscreen API on the whole app;
+- **Fullscreen** — hidden when the browser does not support it; toggles the browser Fullscreen API on the whole app;
   the chart resizes to fit.
 
 Symbol, timeframe, chart type, price-scale mode and recent symbols are saved in
@@ -55,15 +55,20 @@ Symbol, timeframe, chart type, price-scale mode and recent symbols are saved in
   last bar otherwise. Price precision is derived from the data.
 - **Bar-close countdown** — a badge under the last-price label on the price
   axis counts down to the close of the current bar (`MM:SS`, `HH:MM:SS`, or
-  `Nd HH:MM` for long intervals) and ticks every second. It shows `00:00`
-  once the bar's close time has passed, for example on a closed market,
-  and is hidden when the last price is scrolled out of view.
+  `Nd HH:MM` for long intervals) and ticks every second. It is shown only
+  for symbols that trade around the clock (the Binance rule: tickers ending
+  in `USDT`, `BUSD`, `BTC`, `ETH`, `BNB`, `USDC` or `FDUSD`). Stocks, FX and
+  futures have trading sessions, so their bar close cannot be derived from the
+  interval and the badge is hidden. It also hides once the last bar's close
+  time has passed (live bar rollover is not delivered yet) or when the last
+  price is scrolled out of view.
 - **Price scale** — the `%`, `log` and `auto` buttons in the bottom-right
   corner of the price axis. `%` shows percent change from the first
   visible bar and `log` a logarithmic scale; they are mutually exclusive
   and clicking the active one returns to the normal scale. `auto` (on by
-  default) keeps the axis fitted to the visible bars; turn it off to scale
-  the axis by dragging it. Double-clicking the price axis resets to auto.
+  default) keeps the axis fitted to the visible bars. Dragging the price
+  axis scales it by hand and turns `auto` off; double-clicking the axis or
+  clicking `auto` turns it back on, and `Alt+R` (reset chart) does too.
   The mode and the auto flag persist across reloads.
 
 ### Keyboard shortcuts

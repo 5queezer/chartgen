@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 
-import { barCloseMs, barCountdown, formatCountdown } from "./countdown";
+import {
+  barCloseMs,
+  barCountdown,
+  formatCountdown,
+  isContinuousMarket,
+} from "./countdown";
 
 const T0 = Date.UTC(2026, 0, 5, 12, 0, 0) / 1000; // Monday 12:00 UTC
 
@@ -63,4 +68,20 @@ describe("barCountdown", () => {
   it("is null for an unknown interval", () => {
     expect(barCountdown(T0, "nope", 0)).toBeNull();
   });
+  it("is null once the bar has closed", () => {
+    expect(barCountdown(T0, "1h", (T0 + 3600) * 1000)).toBeNull();
+    expect(barCountdown(T0, "1h", (T0 + 7200) * 1000)).toBeNull();
+    expect(barCountdown(T0, "1h", (T0 + 3599) * 1000)).toBe("00:01");
+  });
+});
+
+describe("isContinuousMarket", () => {
+  it.each(["BTCUSDT", "ethbtc", "SOLFDUSD", "BNBUSDC", "SOLUSDT"])(
+    "%s is 24/7",
+    (s) => expect(isContinuousMarket(s)).toBe(true),
+  );
+  it.each(["AAPL", "^GSPC", "EURUSD=X", "BTC", "USDT", "", null, undefined])(
+    "%s is not",
+    (s) => expect(isContinuousMarket(s)).toBe(false),
+  );
 });

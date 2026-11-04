@@ -15,10 +15,11 @@ import {
   createMemo,
   createSignal,
   onCleanup,
+  untrack,
   type JSX,
 } from "solid-js";
 
-import { barCountdown } from "../lib/countdown";
+import { barCountdown, isContinuousMarket } from "../lib/countdown";
 import {
   autoScale,
   scaleMode,
@@ -52,7 +53,10 @@ export function PriceAxisControls(props: PriceAxisControlsProps): JSX.Element {
   const text = createMemo(() => {
     const bar = lastBar();
     const interval = props.series?.interval;
+    // Only 24/7 symbols: session-based markets (Yahoo) close bars at
+    // times the interval alone cannot give.
     if (!bar || bar.t === null || !interval) return null;
+    if (!isContinuousMarket(props.series?.symbol)) return null;
     return barCountdown(bar.t, interval, now());
   });
 
@@ -94,28 +98,45 @@ export function PriceAxisControls(props: PriceAxisControlsProps): JSX.Element {
 
   // Scale mode + auto-fit. Re-applying the style type also makes
   // klinecharts drop any manual price-axis zoom, which is what "auto"
-  // means; with auto-fit on, dragging the axis is disabled.
+  // means, so it also runs whenever auto is switched back on.
   createEffect(() => {
     const c = props.chart;
     if (!c) return;
     const mode = scaleMode();
-    const auto = autoScale();
     c.setStyles({ yAxis: { type: mode } } as never);
-    c.setPaneOptions({
-      id: CANDLE_PANE_ID,
-      axisOptions: { scrollZoomEnabled: !auto },
-    });
     requestAnimationFrame(reposition);
   });
 
-  // Double-click on the axis resets to auto (klinecharts does the reset
+  createEffect(() => {
+    const c = props.chart;
+    if (!c || !autoScale()) return;
+    c.setStyles({ yAxis: { type: untrack(scaleMode) } } as never);
+    requestAnimationFrame(reposition);
+  });
+
+  // Dragging the axis scales it by hand, which turns auto off (as in
+  // TradingView); double-click resets to auto (klinecharts does the reset
   // itself; this keeps the persisted flag and the button in sync).
   createEffect(() => {
     const axisDom = props.chart?.getDom(CANDLE_PANE_ID, "yAxis" as never);
     if (!axisDom) return;
+    let pressed = false;
+    const onDown = () => (pressed = true);
+    const onMove = () => {
+      if (pressed && autoScale()) setAutoScale(false);
+    };
+    const onUp = () => (pressed = false);
     const onDblClick = () => setAutoScale(true);
+    axisDom.addEventListener("pointerdown", onDown);
+    axisDom.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
     axisDom.addEventListener("dblclick", onDblClick);
-    onCleanup(() => axisDom.removeEventListener("dblclick", onDblClick));
+    onCleanup(() => {
+      axisDom.removeEventListener("pointerdown", onDown);
+      axisDom.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      axisDom.removeEventListener("dblclick", onDblClick);
+    });
   });
 
   createEffect(() => {
@@ -133,11 +154,16 @@ export function PriceAxisControls(props: PriceAxisControlsProps): JSX.Element {
     requestAnimationFrame(reposition);
   });
 
-  const timer = setInterval(() => {
+  // Tick on wall-clock second boundaries so the badge changes as the
+  // bar's remaining seconds do.
+  let timer: ReturnType<typeof setTimeout>;
+  const tick = () => {
     setNow(Date.now());
     reposition();
-  }, 1000);
-  onCleanup(() => clearInterval(timer));
+    timer = setTimeout(tick, 1000 - (Date.now() % 1000));
+  };
+  timer = setTimeout(tick, 1000 - (Date.now() % 1000));
+  onCleanup(() => clearTimeout(timer));
 
   const toggle = (mode: ScaleMode) =>
     setScaleMode(scaleMode() === mode ? "normal" : mode);

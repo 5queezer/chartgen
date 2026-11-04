@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   barLegend,
+  lastFiniteCloseIndex,
   formatChange,
   formatPrice,
   formatVolume,
@@ -21,6 +22,10 @@ describe("pricePrecision", () => {
     expect(pricePrecision([67123.456789012])).toBe(2);
     expect(pricePrecision([30.123456789])).toBe(5);
     expect(pricePrecision([0.5123456789])).toBe(6);
+  });
+  it("keeps significant digits for tiny prices", () => {
+    expect(pricePrecision([1.234e-9])).toBe(12);
+    expect(pricePrecision([0.000001234])).toBe(9);
   });
   it("never goes below 2", () => {
     expect(pricePrecision([1500, 1510])).toBe(2);
@@ -95,10 +100,29 @@ describe("barLegend", () => {
       change: { abs: "-0.50", pct: "-4.55%", direction: "down" },
     });
   });
+  it("walks back to the last finite previous close", () => {
+    const gappy = [
+      { t: 1, o: 1, h: 1, l: 1, c: 10, v: 1 },
+      { t: 2, o: null, h: null, l: null, c: null, v: null },
+      { t: 3, o: 1, h: 1, l: 1, c: 11, v: 1 },
+    ];
+    expect(barLegend(gappy, 2, 2)?.change?.abs).toBe("+1.00");
+  });
   it("has no change on the first bar", () => {
     expect(barLegend(bars, 0, 2)?.change).toBeNull();
   });
   it("is null out of range", () => {
     expect(barLegend(bars, 5, 2)).toBeNull();
+  });
+});
+
+describe("lastFiniteCloseIndex", () => {
+  it("skips trailing bars without a close", () => {
+    const bars = [
+      { t: 1, o: 1, h: 1, l: 1, c: 5, v: 1 },
+      { t: 2, o: null, h: null, l: null, c: null, v: null },
+    ];
+    expect(lastFiniteCloseIndex(bars)).toBe(0);
+    expect(lastFiniteCloseIndex([])).toBe(-1);
   });
 });

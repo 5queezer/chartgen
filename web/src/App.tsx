@@ -59,19 +59,13 @@ export function App(): JSX.Element {
   // Index (into the active set) of the indicator whose settings dialog is open.
   const [settingsIndex, setSettingsIndex] = createSignal<number | null>(null);
   const [chart, setChart] = createSignal<KLineChart | null>(null);
-  let main!: HTMLElement;
 
-  // Chart keyboard navigation: only when focus is on the page body or
-  // inside the chart area, never while typing or a dialog/menu is open.
+  // Chart keyboard navigation: never while typing or a dialog/menu is open.
   onMount(() => {
     const onKey = (e: KeyboardEvent) => {
       const c = chart();
       const action = chartKeyAction(e);
       if (!c || !action || isTypingContext(e)) return;
-      const t = e.target;
-      if (t !== document.body && !(t instanceof Node && main.contains(t))) {
-        return;
-      }
       e.preventDefault();
       applyChartAction(c, action);
     };
@@ -215,7 +209,7 @@ export function App(): JSX.Element {
         error={listIndicators.isError ? listIndicators.error : null}
         active={activeIndicators()}
       />
-      <main ref={main} class="flex-1 min-h-0">
+      <main class="flex-1 min-h-0">
         <Chart
           series={query.data ?? null}
           activeIndicators={wireIndicators()}

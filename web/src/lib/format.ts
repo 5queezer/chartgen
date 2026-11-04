@@ -5,15 +5,21 @@ import type { SeriesPayload } from "../types/responses";
 
 type SeriesBar = SeriesPayload["bars"][number];
 
-const MAX_PRECISION = 8;
+const MAX_PRECISION = 12;
 const MIN_PRECISION = 2;
 const SAMPLE_BARS = 50;
 
-/** Decimals needed to print `v` exactly (up to MAX_PRECISION). */
+/**
+ * Decimals needed to print `v` exactly, but at least enough for three
+ * significant digits so tiny prices (1.234e-9) do not collapse to 0.00.
+ * Capped at MAX_PRECISION.
+ */
 function decimalsOf(v: number): number {
   const s = v.toFixed(MAX_PRECISION).replace(/0+$/, "");
   const dot = s.indexOf(".");
-  return dot === -1 ? 0 : s.length - dot - 1;
+  const fixed = dot === -1 ? 0 : s.length - dot - 1;
+  const significant = v === 0 ? 0 : -Math.floor(Math.log10(Math.abs(v))) + 3;
+  return Math.min(MAX_PRECISION, Math.max(fixed, significant));
 }
 
 /** Upper bound on useful decimals by magnitude, so float noise is not shown. */
@@ -28,7 +34,7 @@ function magnitudeCap(abs: number): number {
 /**
  * Price precision derived from the data: the most decimals any of the
  * last bars' closes needs, at least 2 and capped by magnitude (2 for
- * >=1000, 3 for >=100, 5 for >=1, 6 for >=0.01, else 8).
+ * >=1000, 3 for >=100, 5 for >=1, 6 for >=0.01, else 12).
  */
 export function pricePrecision(values: ReadonlyArray<number | null>): number {
   const finite = values
@@ -99,7 +105,22 @@ export interface BarLegend {
   change: Change | null;
 }
 
-/** Legend strings for `bars[index]`; null when the index is out of range. */
+function isFinitePrice(v: number | null): v is number {
+  return v !== null && Number.isFinite(v);
+}
+
+/** Index of the last bar with a finite close, or -1. */
+export function lastFiniteCloseIndex(bars: readonly SeriesBar[]): number {
+  for (let i = bars.length - 1; i >= 0; i--) {
+    if (isFinitePrice(bars[i]!.c)) return i;
+  }
+  return -1;
+}
+
+/**
+ * Legend strings for `bars[index]`; null when the index is out of range.
+ * The change is versus the most recent earlier bar with a finite close.
+ */
 export function barLegend(
   bars: readonly SeriesBar[],
   index: number,
@@ -107,12 +128,19 @@ export function barLegend(
 ): BarLegend | null {
   const bar = bars[index];
   if (!bar) return null;
+  let prevClose: number | null = null;
+  for (let i = index - 1; i >= 0; i--) {
+    if (isFinitePrice(bars[i]!.c)) {
+      prevClose = bars[i]!.c;
+      break;
+    }
+  }
   return {
     o: formatPrice(bar.o, precision),
     h: formatPrice(bar.h, precision),
     l: formatPrice(bar.l, precision),
     c: formatPrice(bar.c, precision),
     v: formatVolume(bar.v),
-    change: formatChange(bar.c, bars[index - 1]?.c ?? null, precision),
+    change: formatChange(bar.c, prevClose, precision),
   };
 }
