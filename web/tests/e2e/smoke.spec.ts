@@ -20,6 +20,23 @@ test.describe("smoke", () => {
       consoleErrors.push(`pageerror: ${err.message}`);
     });
 
+    // Count MCP `initialize` handshakes: all boot queries must share one
+    // connection (a leak shows up as one extra initialize per query).
+    let initializeCount = 0;
+    page.on("request", (req) => {
+      if (
+        req.method() !== "POST" ||
+        !new URL(req.url()).pathname.endsWith("/mcp")
+      )
+        return;
+      try {
+        if (JSON.parse(req.postData() ?? "").method === "initialize")
+          initializeCount++;
+      } catch {
+        // non-JSON or batch body; not an initialize request.
+      }
+    });
+
     // Start clean so the OAuth flow exercises dynamic registration.
     // If storage.clear() fails the test isn't really cold — surface that
     // so a reviewer knows what they're looking at.
@@ -36,6 +53,10 @@ test.describe("smoke", () => {
     if (clearError !== null) {
       console.warn(`[smoke] failed to reset browser storage: ${clearError}`);
     }
+
+    // The first load above may already have connected; count only the
+    // boot after the storage reset.
+    initializeCount = 0;
 
     // Boot. The app will 302 through /authorize and land back with a
     // scrubbed URL once the token exchange completes.
@@ -56,6 +77,8 @@ test.describe("smoke", () => {
     // render with the label text.
     const rsiHeader = page.locator(".pane-header").filter({ hasText: "RSI" });
     await expect(rsiHeader.first()).toBeVisible();
+
+    expect(initializeCount, "MCP initialize requests during boot").toBe(1);
 
     expect(
       consoleErrors,
