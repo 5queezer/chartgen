@@ -101,6 +101,10 @@ export const SeriesPayloadSchema = z.object({
   interval: z.string().nullable(),
   bars: z.array(SeriesBarSchema),
   indicators: z.record(z.string(), SeriesIndicatorSchema),
+  // True when the source returned the full `bars + warmup` count, so a
+  // request with `end_time = bars[0].t * 1000` may return older bars.
+  // False on synthetic fallback data (no timestamps) or exhausted history.
+  has_more: z.boolean(),
 });
 export type SeriesPayload = z.infer<typeof SeriesPayloadSchema>;
 
