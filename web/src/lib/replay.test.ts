@@ -13,6 +13,7 @@ import {
   isRepainting,
   playDelayMs,
   replayFrame,
+  replayLags,
   sliceSeries,
   stepCursor,
   windowStart,
@@ -156,8 +157,13 @@ describe("sliceSeries", () => {
     expect(s.bars).not.toBe(full.bars);
   });
 
-  it("clamps a cursor outside the bars", () => {
-    expect(sliceSeries(full, -3).bars).toHaveLength(1);
+  it("clamps a cursor outside the bars; before the first bar is empty", () => {
+    const none = sliceSeries(full, -1);
+    expect(none.bars).toEqual([]);
+    expect(none.indicators.rsi!.lines![0]!.values).toEqual([]);
+    expect(none.indicators.rsi!.signals).toEqual([]);
+    expect(none.indicators.rsi!.divlines).toEqual([]);
+    expect(sliceSeries(full, -3).bars).toEqual([]);
     expect(sliceSeries(full, 99).bars).toHaveLength(10);
     expect(sliceSeries(series(0), 0).bars).toEqual([]);
   });
@@ -177,6 +183,45 @@ describe("sliceSeries", () => {
     s.indicators = { ema: { label: "EMA", is_overlay: true, lines: [{ index: 0, label: null, values: [1, 2, 3] }] } };
     const ind = sliceSeries(s, 1).indicators.ema!;
     expect(Object.keys(ind).sort()).toEqual(["is_overlay", "label", "lines"]);
+  });
+});
+
+describe("lags", () => {
+  it("are derived from the requested indicators", () => {
+    expect(
+      replayLags([
+        "rsi",
+        "cipher_b",
+        "kvf",
+        { name: "ma", type: "ema", offset: -3 },
+        { name: "vwma", offset: 2 },
+        { name: "hma" },
+      ]),
+    ).toEqual({ cipher_b: { markers: 2 }, kvf: { markers: 1 }, ma: { tail: 3 } });
+  });
+
+  it("hold signals and divergences back until confirmed", () => {
+    const full = series(10);
+    // rsi: signals at 1 and 9; divlines 0→2 and 1→9.
+    const at = (c: number) => sliceSeries(full, c, { rsi: { markers: 2 } }).indicators.rsi!;
+    expect(at(2).signals!.map((x) => x.x)).toEqual([]);
+    expect(at(3).signals!.map((x) => x.x)).toEqual([1]);
+    expect(at(3).divlines).toEqual([]);
+    expect(at(4).divlines!.map((d) => [d.x1, d.x2])).toEqual([[0, 2]]);
+    expect(at(9).signals!.map((x) => x.x)).toEqual([1]);
+    expect(at(9).divlines).toHaveLength(1);
+  });
+
+  it("blank values a negative offset takes from later bars", () => {
+    const s = sliceSeries(series(10), 5, { rsi: { tail: 2 } }).indicators.rsi!;
+    expect(s.lines![0]!.values).toEqual([0, 1, 2, 3, null, null]);
+    expect(s.histogram![0]!.values).toEqual([-0, -1, -2, -3, null, null]);
+    expect(s.fills![0]!.y1).toEqual([2, 3, 4, 5, null, null]);
+    // A longer offset than the frame blanks it all.
+    expect(sliceSeries(series(10), 1, { rsi: { tail: 5 } }).indicators.rsi!.lines![0]!.values).toEqual([
+      null,
+      null,
+    ]);
   });
 });
 
@@ -270,8 +315,48 @@ describe("replayFrame", () => {
     ]);
     expect(zz.divlines!.map((d) => [d.x1, d.x2, d.dashed])).toEqual([
       [1, 3, false],
+      // The full-series leg 5→300 crossing the window start, clipped there.
+      [5, 10, false],
       [7, 12, true],
     ]);
+  });
+
+  it("clips a full-series leg crossing into the window at the window start", () => {
+    const n = RECOMPUTE_BARS + 10;
+    const s = series(n);
+    s.indicators.zigzag = {
+      label: "ZigZag",
+      is_overlay: true,
+      divlines: [
+        { x1: 0, t1: null, y1: 0, x2: 4, t2: null, y2: 4, dashed: false },
+        // Crosses the window start (10) and ends after the cursor.
+        { x1: 4, t1: null, y1: 4, x2: n + 4, t2: null, y2: n + 4, dashed: false },
+        // Right to left.
+        { x1: 20, t1: null, y1: 0, x2: 6, t2: null, y2: 14, dashed: true },
+      ],
+    };
+    const cursor = n - 1;
+    expect(windowStart(cursor)).toBe(10);
+    const zz = replayFrame(s, cursor, null).indicators.zigzag!;
+    expect(zz.divlines).toEqual([
+      { x1: 0, t1: null, y1: 0, x2: 4, t2: null, y2: 4, dashed: false },
+      { x1: 4, t1: null, y1: 4, x2: 10, t2: tOf(10), y2: 10, dashed: false },
+      { x1: 10, t1: tOf(10), y1: 10, x2: 6, t2: null, y2: 14, dashed: true },
+    ]);
+  });
+
+  it("is empty before the first bar", () => {
+    const f = replayFrame(series(10), -1, series(3));
+    expect(f.bars).toEqual([]);
+    expect(f.indicators.vpvr!.lines![0]!.values).toEqual([]);
+    expect(f.indicators.vpvr!.hbars).toEqual([]);
+  });
+
+  it("applies lags to the slice", () => {
+    const s = series(10);
+    delete s.indicators.vpvr;
+    expect(replayFrame(s, 4, null, { rsi: { markers: 3 } }).indicators.rsi!.signals!.map((x) => x.x)).toEqual([1]);
+    expect(replayFrame(s, 3, null, { rsi: { markers: 3 } }).indicators.rsi!.signals).toEqual([]);
   });
 
   it("ignores a recompute whose channels do not fit", () => {
@@ -387,6 +472,10 @@ describe("frameUpdate", () => {
 
   it("is null when nothing changed", () => {
     expect(frameUpdate(key(1, 5), key(1, 5), reset, true, 8)).toBeNull();
+  });
+
+  it("resets from an empty frame", () => {
+    expect(frameUpdate(key(1, -1), key(1, 0), reset, false, 8)!.kind).toBe("reset");
   });
 
   it("resets when the cursor moves back", () => {

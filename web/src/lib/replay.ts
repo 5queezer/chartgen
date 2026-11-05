@@ -7,16 +7,20 @@
 // regression channel move with every new bar, and Ichimoku's lagging span
 // plots future closes. For those (`isRepainting`) the replay asks the server
 // for a recompute that ends at the cursor (`generate_chart` with `end_time`)
-// and `replayFrame` lays it over the slice.
+// and `replayFrame` lays it over the slice. Markers drawn some bars before
+// they are confirmed (Cipher B's fractals, a moving average shifted back)
+// are held back by their lag (`replayLags`).
 //
 // No Solid, no klinecharts: services/replay.ts drives these, and
 // replay.test.ts covers them.
 
+import type { ActiveIndicator } from "../stores/indicators";
 import type { SeriesPayload } from "../types/responses";
 import { barCloseMs } from "./countdown";
 import { INITIAL_BARS, type SeriesUpdate } from "./liveFeed";
 
 type Indicator = SeriesPayload["indicators"][string];
+type DivLine = NonNullable<Indicator["divlines"]>[number];
 type Values = Array<number | null>;
 
 /** Playback speeds in bars per second, as TradingView offers them. */
@@ -56,6 +60,40 @@ const REPAINTING = new Set([
 
 /** True when indicator `name`'s output at a bar depends on later bars. */
 export const isRepainting = (name: string): boolean => REPAINTING.has(name.toLowerCase());
+
+/**
+ * Bars after its own bar at which an indicator's signals and divergence
+ * ends are known. Cipher B confirms a fractal two bars after its center
+ * (src/indicators/cipher_b.rs, `center = i - 2`); the Kalman volume filter
+ * marks a cross on the bar before the one that confirms it (`x: i - 1`).
+ */
+const MARKER_LAG: Record<string, number> = { cipher_b: 2, kalman: 1, kalman_volume: 1, kvf: 1 };
+/** Moving averages with an `offset` param; a negative one plots later bars' values. */
+const OFFSET_MAS = new Set(["ma", "vwma", "hma"]);
+
+/** How far an indicator's output runs ahead of its bars. */
+export interface Lag {
+  /** Bars until a signal or divergence end is confirmed. */
+  markers?: number;
+  /** Newest bars whose per-bar values come from later bars. */
+  tail?: number;
+}
+export type Lags = Record<string, Lag>;
+
+/** `Lag` per payload key (the request name) of the requested indicators. */
+export function replayLags(entries: readonly ActiveIndicator[]): Lags {
+  const out: Lags = {};
+  for (const e of entries) {
+    const name = typeof e === "string" ? e : e.name;
+    const key = name.toLowerCase();
+    const offset = typeof e === "string" ? undefined : e.offset;
+    const lag: Lag = {};
+    if (MARKER_LAG[key]) lag.markers = MARKER_LAG[key];
+    if (OFFSET_MAS.has(key) && typeof offset === "number" && offset < 0) lag.tail = -offset;
+    if (lag.markers || lag.tail) out[name] = lag;
+  }
+  return out;
+}
 
 /** Delay between two steps at `speed` bars per second. */
 export const playDelayMs = (speed: ReplaySpeed): number => 1000 / speed;
@@ -120,21 +158,29 @@ export function stepCursor(cursor: number, length: number, by = 1): number | nul
 export const windowStart = (cursor: number): number =>
   Math.max(0, cursor - RECOMPUTE_BARS + 1);
 
+const startOf = (d: { x1: number; x2: number }) => Math.min(d.x1, d.x2);
 const endOf = (d: { x1: number; x2: number }) => Math.max(d.x1, d.x2);
 
-function sliceIndicator(ind: Indicator, n: number): Indicator {
+function sliceIndicator(ind: Indicator, n: number, lag: Lag = {}): Indicator {
+  // Values from later bars (a negative MA offset) are not known yet.
+  const cut = (v: Values) => {
+    const out = v.slice(0, n);
+    for (let i = Math.max(0, n - (lag.tail ?? 0)); i < n; i++) out[i] = null;
+    return out;
+  };
   const out: Indicator = { ...ind };
-  if (ind.lines) out.lines = ind.lines.map((l) => ({ ...l, values: l.values.slice(0, n) }));
+  if (ind.lines) out.lines = ind.lines.map((l) => ({ ...l, values: cut(l.values) }));
   if (ind.histogram) {
-    out.histogram = ind.histogram.map((h) => ({ ...h, values: h.values.slice(0, n) }));
+    out.histogram = ind.histogram.map((h) => ({ ...h, values: cut(h.values) }));
   }
   if (ind.fills) {
-    out.fills = ind.fills.map((f) => ({ ...f, y1: f.y1.slice(0, n), y2: f.y2.slice(0, n) }));
+    out.fills = ind.fills.map((f) => ({ ...f, y1: cut(f.y1), y2: cut(f.y2) }));
   }
-  if (ind.signals) out.signals = ind.signals.filter((s) => s.x < n);
-  // A divergence is known once its end bar printed: one ending past the
-  // cursor is not drawn yet, not even in part.
-  if (ind.divlines) out.divlines = ind.divlines.filter((d) => endOf(d) < n);
+  const markers = lag.markers ?? 0;
+  if (ind.signals) out.signals = ind.signals.filter((s) => s.x + markers < n);
+  // A divergence is known once its end bar printed (and was confirmed): one
+  // ending later is not drawn yet, not even in part.
+  if (ind.divlines) out.divlines = ind.divlines.filter((d) => endOf(d) + markers < n);
   // New arrays per frame even where nothing changes: the chart re-stores an
   // indicator's geometry when these arrays change identity.
   if (ind.hlines) out.hlines = ind.hlines.slice();
@@ -143,19 +189,24 @@ function sliceIndicator(ind: Indicator, n: number): Indicator {
 }
 
 /**
- * `series` up to and including bar `cursorIndex` (clamped to the bars), in
- * every channel: bars and every per-bar array (lines, histogram, fills) are
- * cut, signals and divlines ending after the cursor are dropped. Indices
+ * `series` up to and including bar `cursorIndex` (clamped to the bars; -1
+ * leaves none), in every channel: bars and every per-bar array (lines,
+ * histogram, fills) are cut, signals and divlines ending after the cursor
+ * are dropped, both with each indicator's `lags` applied. Indices
  * stay those of `series` (a prefix keeps them), so the result has the
  * seriesMerge/geometry shape of a live series. hbars, hlines and y_range
  * are window aggregates and pass through; `replayFrame` replaces them for
  * repainting indicators. Returns new arrays throughout; `series` is untouched.
  */
-export function sliceSeries(series: SeriesPayload, cursorIndex: number): SeriesPayload {
-  const n = Math.max(0, Math.min(cursorIndex, series.bars.length - 1)) + 1;
+export function sliceSeries(
+  series: SeriesPayload,
+  cursorIndex: number,
+  lags: Lags = {},
+): SeriesPayload {
+  const n = Math.max(0, Math.min(cursorIndex, series.bars.length - 1) + 1);
   const indicators: SeriesPayload["indicators"] = {};
   for (const [name, ind] of Object.entries(series.indicators)) {
-    indicators[name] = sliceIndicator(ind, n);
+    indicators[name] = sliceIndicator(ind, n, lags[name]);
   }
   return { ...series, bars: series.bars.slice(0, n), indicators };
 }
@@ -196,14 +247,16 @@ function fits(ind: Indicator, r: Indicator, bars: number): boolean {
  * value: a repainting value from the full series would show the future.
  * Bars before the window keep the full series' values. hbars and hlines
  * come from the recompute only, signals and divlines from the recompute in
- * the window and from the full series before it.
+ * the window and from the full series before it; a full-series line that
+ * crosses into the window (ZigZag's leg) is clipped at the window start.
  */
 export function replayFrame(
   series: SeriesPayload,
   cursor: number,
   recompute: SeriesPayload | null,
+  lags: Lags = {},
 ): SeriesPayload {
-  const slice = sliceSeries(series, cursor);
+  const slice = sliceSeries(series, cursor, lags);
   const names = Object.keys(slice.indicators).filter(isRepainting);
   if (names.length === 0) return slice;
   const n = slice.bars.length;
@@ -218,7 +271,8 @@ export function replayFrame(
   for (const name of names) {
     const ind = slice.indicators[name]!;
     const found = recompute?.indicators[name];
-    const r = found && fits(ind, found, recompute!.bars.length) ? found : null;
+    // An empty frame shows no profile either.
+    const r = n > 0 && found && fits(ind, found, recompute!.bars.length) ? found : null;
     const pick = (dst: Values, src: Values | undefined) => {
       for (let i = from; i < n; i++) {
         const ri = toRc[i - from]!;
@@ -240,7 +294,9 @@ export function replayFrame(
     }
     if (ind.divlines || r?.divlines) {
       ind.divlines = [
-        ...(ind.divlines ?? []).filter((d) => endOf(d) < from),
+        ...(series.indicators[name]!.divlines ?? []).flatMap((d) =>
+          startOf(d) >= from ? [] : endOf(d) < from ? [d] : [clipEnd(d, from, slice.bars)],
+        ),
         ...(r?.divlines ?? []).flatMap((d) => {
           const x1 = at(d.x1);
           const x2 = at(d.x2);
@@ -253,6 +309,15 @@ export function replayFrame(
     if (r?.y_range) ind.y_range = r.y_range;
   }
   return slice;
+}
+
+/** `d` cut off at bar `at` (between its ends), on the same straight line. */
+function clipEnd(d: DivLine, at: number, bars: SeriesPayload["bars"]): DivLine {
+  const fromLeft = d.x1 <= d.x2;
+  const [xs, ys, xe, ye] = fromLeft ? [d.x1, d.y1, d.x2, d.y2] : [d.x2, d.y2, d.x1, d.y1];
+  const y = ys + ((ye - ys) * (at - xs)) / (xe - xs);
+  const t = bars[at]?.t ?? null;
+  return fromLeft ? { ...d, x2: at, y2: y, t2: t } : { ...d, x1: at, y1: y, t1: t };
 }
 
 /** What a replay frame was cut from: the live snapshot, the cursor and the recompute. */
@@ -309,7 +374,8 @@ export function frameUpdate(
       next.recompute === prev.recompute;
     return paged ? { version, kind: "older", count: base.count } : reset;
   }
-  if (next.cursor < prev.cursor) return reset;
+  // From an empty frame (no bar closed by the clock) the chart holds nothing to build on.
+  if (next.cursor < prev.cursor || prev.cursor < 0) return reset;
   if (next.cursor === prev.cursor && next.recompute === prev.recompute) return null;
   return {
     version,
