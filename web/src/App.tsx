@@ -67,7 +67,8 @@ import { createAlertLogger } from "./services/notifications";
 import { createReplay } from "./services/replay";
 import {
   copyChartLink,
-  pruneImportedIndicators,
+  importPending,
+  reconcileImported,
 } from "./services/shareLink";
 import {
   createAlertQuotes,
@@ -200,7 +201,8 @@ export function App(): JSX.Element {
     timeframe: timeframe(),
     indicators: wireIndicators(),
     chart_style: chartStyleOf(chartType()),
-    enabled: authReady(),
+    // Indicators from a share link wait for the registry check below.
+    enabled: authReady() && !importPending(),
   }));
 
   // The live feed owns the chart's data from each full load on: it polls
@@ -428,16 +430,15 @@ export function App(): JSX.Element {
   // is cached forever. It fires as soon as auth is ready.
   const listIndicators = createListIndicatorsQuery(session, authReady);
 
-  // A link may name indicators this server does not have: drop them once the
-  // registry is known instead of failing the chart load.
+  // Indicators from a share link are checked against the registry before
+  // the first chart request; if the registry cannot be loaded they are kept.
   createEffect(() => {
-    const list = listIndicators.data?.indicators;
-    if (!list) return;
-    untrack(() =>
-      pruneImportedIndicators(
-        new Set(list.flatMap((i) => [i.name, ...(i.aliases ?? [])])),
-      ),
-    );
+    if (listIndicators.isSuccess) {
+      const list = listIndicators.data.indicators;
+      untrack(() => reconcileImported(list));
+    } else if (listIndicators.isError) {
+      untrack(() => reconcileImported(undefined));
+    }
   });
 
   // Layout dirty check ignores params that equal the registry default.

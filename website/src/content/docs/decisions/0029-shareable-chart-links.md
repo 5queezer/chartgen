@@ -48,8 +48,11 @@ well and are easy to write by hand.
 
 - Parameters: `symbol`, `interval`, `type`, `ind`, `compare`, `tz`, all
   optional. `ind` is a comma list of names with optional `(key:value;...)`
-  parameters, written only when they differ from the registry default.
-  Hidden indicators are left out; `ind=` is an explicit empty list.
+  parameters, written only when they differ from the registry default; text
+  values are percent-encoded, numbers never use exponent notation. Hidden
+  indicators are left out, `hidden`, `style` and `name` are never read from a
+  link, and `ind` is limited to 2 KB and 50 entries. `ind=` is an explicit
+  empty list and `compare=` clears the compare symbols.
 - The app reads them once, before the first render (`applyShareLink`), through
   the normal store setters, so they persist like a manual change. It then
   removes only the share parameters from the address bar with
@@ -58,8 +61,17 @@ well and are easy to write by hand.
   they survive the OAuth round trip without being stashed. `code` and
   `state` are never touched.
 - Invalid values fall back to the stored state and decoding never throws.
-  Indicator names are checked against `list_indicators` once it loads and
-  unknown ones are removed.
+  `tz` must be one of the zones the app offers (the keywords are
+  case-insensitive).
+- Indicators a link brings in are decoded as raw strings and checked against
+  `list_indicators` before the first chart request (the query is held until
+  then). Their names are kept in `sessionStorage` so the check still happens
+  after the OAuth redirect. Unknown names are removed, and parameters are typed
+  by the registry spec and dropped when invalid (type, min/max, enum), so the
+  default applies; a toast lists what was left out. Only names from the link are
+  touched, because `list_indicators` can fall back to an empty list when script
+  storage fails and a global prune would then wipe the user's own scripts. If
+  the list cannot be loaded at all, the link's indicators are kept as decoded.
 - "Copy link to chart" in the toolbar and the chart context menu builds the
   URL from the current state, uses `navigator.clipboard` and falls back to a
   hidden readonly input with `execCommand("copy")`, then shows a toast.
@@ -79,5 +91,5 @@ well and are easy to write by hand.
   ([ADR-0013](/chartgen/decisions/0013-indicator-visibility-and-instances/))
   means a repeated name in `ind` keeps only its first entry; the encoding can
   carry instances later because it is a list.
-- Bad: the first chart request may include a name the server lacks and fail
-  before the registry loads and the name is dropped.
+- Bad: the first chart load waits for `list_indicators` when the link
+  carries indicators.

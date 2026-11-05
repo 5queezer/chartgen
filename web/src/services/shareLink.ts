@@ -1,11 +1,15 @@
 // Shareable chart links (ADR-0029): apply the share params of the URL once
 // at boot, and copy the current chart's link. Parsing lives in lib/shareLink.
 
+import { createSignal } from "solid-js";
+
 import {
   decodeShare,
   encodeShare,
   hasShareParams,
+  reconcileIndicators,
   stripShareParams,
+  type RegistryEntry,
 } from "../lib/shareLink";
 import {
   compareSymbols,
@@ -30,8 +34,34 @@ import {
 import { paramDefaults } from "../stores/layouts";
 import { showToast } from "./alertEngine";
 
-/** Names a link brought in, checked against the registry once it is known. */
-let imported: string[] = [];
+// Names a link brought in, checked against the indicator registry once it is
+// known. In sessionStorage so they survive the OAuth redirect of the tab.
+const PENDING_KEY = "chartgen.share.pending";
+
+function loadPending(): string[] {
+  try {
+    const raw: unknown = JSON.parse(sessionStorage.getItem(PENDING_KEY) ?? "[]");
+    return Array.isArray(raw)
+      ? raw.filter((n): n is string => typeof n === "string")
+      : [];
+  } catch {
+    return [];
+  }
+}
+
+function savePending(names: string[]): void {
+  try {
+    if (names.length === 0) sessionStorage.removeItem(PENDING_KEY);
+    else sessionStorage.setItem(PENDING_KEY, JSON.stringify(names));
+  } catch {
+    // Storage unavailable: the names are still checked in this page.
+  }
+}
+
+const [pending, setPending] = createSignal<string[]>(loadPending());
+
+/** True while imported indicators wait for the registry; hold the chart query. */
+export const importPending = (): boolean => pending().length > 0;
 
 /**
  * Apply the share params of the current URL to the stores and remove them
@@ -50,23 +80,46 @@ export function applyShareLink(): void {
   if (patch.timeZone !== undefined) setTimeZone(patch.timeZone);
   if (patch.indicators !== undefined) {
     setActiveIndicators(patch.indicators);
-    imported = patch.indicators.map(indicatorName);
+    const names = patch.indicators.map(indicatorName);
+    savePending(names);
+    setPending(names);
   }
-  if (patch.compare !== undefined) {
+  // Skip an unchanged list: replacing it would reset the scale mode.
+  if (
+    patch.compare !== undefined &&
+    patch.compare.join(",") !== compareSymbols().join(",")
+  ) {
     for (const s of compareSymbols()) removeCompare(s);
     for (const s of patch.compare) addCompare(s, symbol());
   }
   window.history.replaceState({}, "", pathname + stripShareParams(search) + hash);
 }
 
-/** Drop indicators a link brought in that the registry does not know. */
-export function pruneImportedIndicators(known: ReadonlySet<string>): void {
-  const unknown = new Set(imported.filter((n) => !known.has(n)));
-  imported = [];
-  if (unknown.size === 0) return;
-  setActiveIndicators(
-    activeIndicators().filter((e) => !unknown.has(indicatorName(e))),
+/**
+ * Check the indicators a link brought in against the registry (`undefined`
+ * when it could not be loaded) and release the chart query. Only those
+ * names are touched: unknown ones are removed, invalid params dropped, and
+ * a toast says what was left out.
+ */
+export function reconcileImported(
+  registry: readonly RegistryEntry[] | undefined,
+): void {
+  const names = pending();
+  if (names.length === 0) return;
+  const { entries, unknown, invalid } = reconcileIndicators(
+    activeIndicators(),
+    names,
+    registry,
   );
+  setActiveIndicators(entries);
+  savePending([]);
+  setPending([]);
+  if (unknown.length > 0) {
+    showToast(`Unknown indicator(s) left out: ${unknown.join(", ")}`);
+  }
+  if (invalid.length > 0) {
+    showToast(`Invalid parameter(s) ignored: ${invalid.join(", ")}`);
+  }
 }
 
 /** URL of the current chart. */

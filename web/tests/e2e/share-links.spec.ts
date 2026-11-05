@@ -30,6 +30,52 @@ test.describe("share links", () => {
     await expect(symbolButton(page)).toContainText("ETHUSDT");
   });
 
+  test("share params are stripped before the sign-in redirect", async ({
+    page,
+  }) => {
+    // The OAuth redirect would also end on `/`, so look at what the app
+    // itself wrote to the address bar before leaving for sign-in.
+    await page.addInitScript(() => {
+      const real = history.replaceState.bind(history);
+      history.replaceState = (data, unused, url) => {
+        const log = JSON.parse(sessionStorage.getItem("rs-log") ?? "[]");
+        log.push([location.search, String(url)]);
+        sessionStorage.setItem("rs-log", JSON.stringify(log));
+        real(data, unused, url);
+      };
+    });
+    await gotoApp(page, "/?symbol=ETHUSDT&interval=4h");
+    const log = await page.evaluate(() =>
+      JSON.parse(sessionStorage.getItem("rs-log") ?? "[]"),
+    );
+    expect(log[0]).toEqual(["?symbol=ETHUSDT&interval=4h", "/"]);
+  });
+
+  test("unknown indicators are dropped after sign-in with a toast", async ({
+    page,
+  }) => {
+    await gotoApp(page, "/?symbol=ETHUSDT&ind=rsi,bogus_xyz");
+
+    await expect(pane(page, "RSI").first()).toBeVisible();
+    await expect(page.getByText(/^error:/)).toHaveCount(0);
+    await expect(
+      page.locator("[data-toast]", { hasText: "bogus_xyz" }),
+    ).toBeVisible();
+    await expect(pane(page, "Volume")).toHaveCount(0);
+  });
+
+  test("invalid parameter values fall back to the default", async ({
+    page,
+  }) => {
+    await gotoApp(page, "/?ind=rsi(length:0)");
+
+    await expect(pane(page, "RSI").first()).toBeVisible();
+    await expect(page.getByText(/^error:/)).toHaveCount(0);
+    await expect(
+      page.locator("[data-toast]", { hasText: "rsi.length" }),
+    ).toBeVisible();
+  });
+
   test("invalid values fall back to the stored state", async ({ page }) => {
     await gotoApp(page, "/?symbol=&interval=7x&type=pie&ind=nope!!");
 
