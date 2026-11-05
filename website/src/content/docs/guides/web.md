@@ -40,8 +40,6 @@ chart stays on screen while the new one loads. There is no Load button; if a loa
 - **Timeframe** — one-click buttons for 1m, 5m, 15m, 1h, 4h, 1D and 1W,
   with the active one highlighted; the dropdown holds the rest (30m, 1M).
 - **Chart type** — Candles, Hollow candles (only up candles hollow), Bars (OHLC), Line, Area, Heikin Ashi. Heikin Ashi is computed on the server (the web app sends `chart_style: "heikin_ashi"` with every load, tail poll and history page), so the legend shows Heikin Ashi OHLC values and indicators are calculated on them, as on TradingView. Switching to or from it reloads the chart.
-  Heikin-Ashi is not offered because it needs client-side math
-  ([ADR-0003](/chartgen/decisions/0003-web-frontend-stack/)).
 
 - **Replay** (rewind) — starts and ends [bar replay](#bar-replay).
 - **Screenshot** (camera) — downloads the chart canvas, overlays included,
@@ -381,11 +379,12 @@ Right-clicking the chart (outside a drawing) opens a menu:
 | Reset chart view (`Alt+R`) | Scroll to real time at the default zoom |
 | Copy price | Copy the price under the cursor, in the chart's precision |
 | Add horizontal line at | Add a horizontal line at that price; it is saved like any drawing |
+| Add alert at | Open the alert dialog at that price |
 | Remove all drawings | Asks for confirmation |
 | Remove all indicators | Asks for confirmation |
 | Settings… | Open the chart settings dialog |
 
-Copy price and Add horizontal line only appear when the click is in the price
+Copy price, Add horizontal line and Add alert only appear when the click is in the price
 pane. Right-clicking a drawing opens the drawing menu instead. TradingView's
 "Lock vertical cursor line by time" is not offered because klinecharts has no
 pinned crosshair.

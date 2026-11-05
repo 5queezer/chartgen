@@ -26,6 +26,7 @@ export default defineConfig({
             { label: 'Push notifications', slug: 'guides/notifications' },
             { label: 'Scripted indicators', slug: 'guides/scripted-indicators' },
             { label: 'Web frontend', slug: 'guides/web' },
+            { label: 'TradingView parity', slug: 'guides/tradingview-parity' },
             { label: 'Testing', slug: 'guides/testing' },
             { label: 'TypeScript Types for MCP', slug: 'guides/types' },
             { label: 'Deployment', slug: 'guides/deploy' },
