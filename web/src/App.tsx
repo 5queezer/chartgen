@@ -66,6 +66,11 @@ import type { SeriesPayload } from "./types/responses";
 import { createAlertLogger } from "./services/notifications";
 import { createReplay } from "./services/replay";
 import {
+  copyChartLink,
+  importPending,
+  reconcileImported,
+} from "./services/shareLink";
+import {
   createAlertQuotes,
   feedChartSnapshot,
   feedPrice,
@@ -196,7 +201,8 @@ export function App(): JSX.Element {
     timeframe: timeframe(),
     indicators: wireIndicators(),
     chart_style: chartStyleOf(chartType()),
-    enabled: authReady(),
+    // Indicators from a share link wait for the registry check below.
+    enabled: authReady() && !importPending(),
   }));
 
   // The live feed owns the chart's data from each full load on: it polls
@@ -424,6 +430,17 @@ export function App(): JSX.Element {
   // is cached forever. It fires as soon as auth is ready.
   const listIndicators = createListIndicatorsQuery(session, authReady);
 
+  // Indicators from a share link are checked against the registry before
+  // the first chart request; if the registry cannot be loaded they are kept.
+  createEffect(() => {
+    if (listIndicators.isSuccess) {
+      const list = listIndicators.data.indicators;
+      untrack(() => reconcileImported(list));
+    } else if (listIndicators.isError) {
+      untrack(() => reconcileImported(undefined));
+    }
+  });
+
   // Layout dirty check ignores params that equal the registry default.
   createEffect(() => {
     const defaults: ParamDefaults = {};
@@ -469,6 +486,7 @@ export function App(): JSX.Element {
           session={session}
           onReselect={() => void query.refetch()}
           onScreenshot={screenshot}
+          onCopyLink={() => void copyChartLink()}
           onResetChart={resetView}
           onSettings={() => setSettingsOpen(true)}
           onCompare={() => setCompareOpen(true)}
@@ -574,6 +592,7 @@ export function App(): JSX.Element {
           drawings={drawings()}
           hasIndicators={activeIndicators().length > 0}
           onResetView={resetView}
+          onCopyLink={() => void copyChartLink()}
           onRemoveAllIndicators={() => setActiveIndicators([])}
           onSettings={() => setSettingsOpen(true)}
         >

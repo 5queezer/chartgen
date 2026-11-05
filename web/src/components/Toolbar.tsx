@@ -139,6 +139,7 @@ export interface ToolbarProps {
   onReselect: () => void;
   /** Download the chart as a PNG. */
   onScreenshot: () => void;
+  onCopyLink: () => void;
   /** Scroll to real time and restore the default bar spacing. */
   onResetChart: () => void;
   /** Open the symbol search in "add compare symbol" mode. */
@@ -342,6 +343,21 @@ export function Toolbar(props: ToolbarProps): JSX.Element {
         <svg {...iconProps}>
           <path d="M2 5.5h3l1-2h6l1 2h3v9H2z" stroke-linejoin="round" />
           <circle cx="9" cy="10" r="2.5" />
+        </svg>
+      </button>
+      <button
+        type="button"
+        class={buttonClass}
+        onClick={props.onCopyLink}
+        aria-label="Copy link to chart"
+        title="Copy link to chart"
+        data-testid="toolbar-copy-link"
+      >
+        <svg {...iconProps}>
+          <path
+            d="M7.5 10.5a3 3 0 0 0 4.2 0l2.8-2.8a3 3 0 0 0-4.2-4.2l-.8.8M10.5 7.5a3 3 0 0 0-4.2 0L3.5 10.3a3 3 0 0 0 4.2 4.2l.8-.8"
+            stroke-linecap="round"
+          />
         </svg>
       </button>
       <button

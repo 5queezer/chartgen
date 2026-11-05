@@ -102,7 +102,7 @@ pub(crate) fn binance_interval(interval: &str) -> &str {
 fn binance_klines_url(symbol: &str, interval: &str, limit: usize, end_ms: Option<i64>) -> String {
     let mut url = format!(
         "https://api.binance.com/api/v3/klines?symbol={}&interval={}&limit={}",
-        symbol.to_uppercase(),
+        percent_encode(&symbol.to_uppercase()),
         binance_interval(interval),
         limit
     );
@@ -1051,6 +1051,9 @@ mod tests {
             assert_eq!(binance_interval(native), native);
         }
         assert!(binance_klines_url("BTCUSDT", "1wk", 10, None).contains("&interval=1w&"));
+        // A symbol cannot inject query parameters.
+        let url = binance_klines_url("BTC&limit=1#x", "1h", 10, None);
+        assert!(url.contains("symbol=BTC%26LIMIT%3D1%23X&interval=1h&limit=10"));
         assert!(binance_klines_url("BTCUSDT", "1mo", 10, None).contains("&interval=1M&"));
         // Interval durations agree for both spellings (sample grid, Yahoo window).
         assert_eq!(data::interval_secs("1wk"), data::interval_secs("1w"));

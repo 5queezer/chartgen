@@ -55,3 +55,4 @@ one and link both ways.
 | [0025](/chartgen/decisions/0025-user-indicator-registry/) | Per-user indicator registry and MCP surface | Accepted | 2026-11-05 |
 | [0026](/chartgen/decisions/0026-line-and-histogram-colors/) | Line and histogram colors on the wire | Accepted | 2026-11-05 |
 | [0027](/chartgen/decisions/0027-serve-web-app-same-origin/) | Serve the web app from the MCP server's origin | Accepted | 2026-11-05 |
+| [0029](/chartgen/decisions/0029-shareable-chart-links/) | Shareable chart links as query parameters | Accepted | 2026-11-05 |

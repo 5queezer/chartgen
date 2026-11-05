@@ -377,6 +377,7 @@ Right-clicking the chart (outside a drawing) opens a menu:
 | Item | Action |
 |---|---|
 | Reset chart view (`Alt+R`) | Scroll to real time at the default zoom |
+| Copy link to chart | Copy a [shareable link](#sharing-a-chart) |
 | Copy price | Copy the price under the cursor, in the chart's precision |
 | Add horizontal line at | Add a horizontal line at that price; it is saved like any drawing |
 | Add alert at | Open the alert dialog at that price |
@@ -388,6 +389,39 @@ Copy price, Add horizontal line and Add alert only appear when the click is in t
 pane. Right-clicking a drawing opens the drawing menu instead. TradingView's
 "Lock vertical cursor line by time" is not offered because klinecharts has no
 pinned crosshair.
+
+## Sharing a chart
+
+The link icon in the toolbar ("Copy link to chart", also in the chart context
+menu) puts a URL on the clipboard and shows a "Link copied" toast. Opening it
+reproduces the chart:
+
+```text
+https://chartgen.vasudev.xyz/?symbol=ETHUSDT&interval=4h&type=candles&ind=rsi(length:21),ema_stack&compare=BTCUSDT&tz=UTC
+```
+
+| Parameter | Meaning |
+|---|---|
+| `symbol` | Chart symbol |
+| `interval` | Timeframe (`4h`, `240`, `1d`, ...) |
+| `type` | Chart type: `candles`, `hollow`, `bars`, `line`, `area`, `heikin_ashi` |
+| `ind` | Indicators, comma separated (at most 50, 2 KB). Non-default parameters go in parentheses, separated by `;`: `macd(fast:8;slow:20)`; characters outside letters, digits, `.`, `_` and `-` in a text value are percent-encoded. Visible indicators only; `ind=` means none |
+| `compare` | Compare symbols, comma separated; always written, `compare=` clears them |
+| `tz` | One of the time zones in the time-zone menu: `utc`, `exchange`, `local` or a listed IANA name such as `Europe/Berlin` |
+
+Every parameter is optional. The app reads them once on load, saves them like a
+manual change and removes them from the address bar. An invalid value (unknown
+interval, empty symbol) is ignored and the stored value stays.
+Indicators from a link are checked against the server's indicator list before
+the first chart request: names it does not know and parameters it rejects
+(wrong type, outside min/max, not a parameter of that indicator) are left out
+with a toast, so the indicator uses its default. Only what came from the link is
+checked; your other indicators are never removed. If the list cannot be loaded,
+the link's indicators are kept as they are. A link carries the chart setup only,
+not drawings, alerts, colors or indicator styles. The parameters survive the
+sign-in redirect. If the browser blocks the clipboard API (plain HTTP), the link
+is copied through a hidden text field instead.
+[ADR-0029](/chartgen/decisions/0029-shareable-chart-links/)
 
 ## Watchlist
 

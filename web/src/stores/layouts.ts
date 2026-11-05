@@ -467,7 +467,7 @@ export const activeLayout = (): Layout =>
   file().items.find((l) => l.id === file().active) ?? file().items[0]!;
 
 const [paramDefaults, setParamDefaults] = createSignal<ParamDefaults>({});
-export { setParamDefaults };
+export { paramDefaults, setParamDefaults };
 
 /** True when the live state differs from the active layout's saved snapshot. */
 export const layoutDirty = (): boolean =>
