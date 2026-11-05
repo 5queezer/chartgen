@@ -13,6 +13,16 @@ use chartgen::engine::Engine;
 use chartgen::indicator::Indicator;
 use chartgen::indicators;
 use chartgen::renderer;
+#[cfg(feature = "scripting")]
+use chartgen::scripting;
+
+/// `CHARTGEN_SCRIPTING=1` in a build with the `scripting` feature.
+fn scripting_enabled() -> bool {
+    #[cfg(feature = "scripting")]
+    return scripting::enabled();
+    #[cfg(not(feature = "scripting"))]
+    false
+}
 
 pub fn run() {
     let stdin = io::stdin();
@@ -50,7 +60,7 @@ pub fn run() {
             continue;
         }
 
-        let response = handle_mcp_request(method, id, req.get("params"), None, None, None);
+        let response = handle_mcp_request(method, id, req.get("params"), None, None, None, None);
 
         writeln!(stdout, "{}", response).ok();
         stdout.flush().ok();
@@ -62,6 +72,8 @@ pub fn run() {
 /// an error indicating that the trading engine is not running.
 /// `token` is the client's Bearer token (if any), used for subscription identity.
 /// `push` is set on the HTTP transport, for the chart push tools (ADR-0021).
+/// `user` owns the caller's scripted indicators (the OAuth client id, ADR-0025);
+/// `None` on stdio and whenever scripting is disabled.
 pub fn handle_mcp_request(
     method: &str,
     id: Option<Value>,
@@ -69,11 +81,12 @@ pub fn handle_mcp_request(
     engine: Option<&Arc<RwLock<Engine>>>,
     token: Option<&str>,
     push: Option<&PushCtx>,
+    user: Option<&str>,
 ) -> Value {
     match method {
         "initialize" => handle_initialize(id),
-        "tools/list" => handle_tools_list(id),
-        "tools/call" => handle_tools_call(id, params, engine, token, push),
+        "tools/list" => handle_tools_list(id, scripting_enabled()),
+        "tools/call" => handle_tools_call(id, params, engine, token, push, user),
         "ping" => json!({ "jsonrpc": "2.0", "id": id, "result": {} }),
         _ => json!({
             "jsonrpc": "2.0",
@@ -100,11 +113,18 @@ fn handle_initialize(id: Option<Value>) -> Value {
     })
 }
 
-fn handle_tools_list(id: Option<Value>) -> Value {
+/// The scripting tools are listed only when `scripting` (CHARTGEN_SCRIPTING=1).
+fn handle_tools_list(id: Option<Value>, scripting: bool) -> Value {
+    let mut result = chartgen::mcp_schema::tools_list_result();
+    if scripting {
+        if let Some(tools) = result["tools"].as_array_mut() {
+            tools.extend(chartgen::mcp_schema::scripting_tools());
+        }
+    }
     json!({
         "jsonrpc": "2.0",
         "id": id,
-        "result": chartgen::mcp_schema::tools_list_result()
+        "result": result
     })
 }
 
@@ -114,6 +134,7 @@ fn handle_tools_call(
     engine: Option<&Arc<RwLock<Engine>>>,
     token: Option<&str>,
     push: Option<&PushCtx>,
+    user: Option<&str>,
 ) -> Value {
     let tool_name = params
         .and_then(|p| p.get("name"))
@@ -125,9 +146,34 @@ fn handle_tools_call(
         .cloned()
         .unwrap_or(json!({}));
 
+    call_tool(
+        tool_name,
+        id,
+        arguments,
+        engine,
+        token,
+        push,
+        user,
+        scripting_enabled(),
+    )
+}
+
+/// Dispatch one tool call. The scripting tools exist only when `scripting`.
+#[allow(clippy::too_many_arguments)]
+#[cfg_attr(not(feature = "scripting"), allow(unused_variables))]
+fn call_tool(
+    tool_name: &str,
+    id: Option<Value>,
+    arguments: Value,
+    engine: Option<&Arc<RwLock<Engine>>>,
+    token: Option<&str>,
+    push: Option<&PushCtx>,
+    user: Option<&str>,
+    scripting: bool,
+) -> Value {
     match tool_name {
-        "generate_chart" => tool_generate_chart(id, &arguments),
-        "list_indicators" => tool_list_indicators(id),
+        "generate_chart" => tool_generate_chart(id, &arguments, user),
+        "list_indicators" => tool_list_indicators(id, user),
         "get_indicators" => tool_get_indicators(id, &arguments, engine),
         "get_quotes" => tool_get_quotes(id, &arguments),
         "search_symbols" => tool_search_symbols(id, &arguments),
@@ -145,6 +191,14 @@ fn handle_tools_call(
         "list_subscriptions" => tool_list_subscriptions(id, engine, token),
         "subscribe_chart" => tool_subscribe_chart(id, &arguments, push, token),
         "unsubscribe_chart" => tool_unsubscribe_chart(id, &arguments, push, token),
+        #[cfg(feature = "scripting")]
+        "register_indicator" if scripting => tool_register_indicator(id, &arguments, user),
+        #[cfg(feature = "scripting")]
+        "fork_indicator" if scripting => tool_fork_indicator(id, &arguments),
+        #[cfg(feature = "scripting")]
+        "list_my_indicators" if scripting => tool_list_my_indicators(id, user),
+        #[cfg(feature = "scripting")]
+        "delete_indicator" if scripting => tool_delete_indicator(id, &arguments, user),
         _ => json!({
             "jsonrpc": "2.0",
             "id": id,
@@ -165,7 +219,7 @@ type ParsedPanels = (
     Vec<String>,
 );
 
-fn parse_panels(panels_value: &Value) -> ParsedPanels {
+fn parse_panels(panels_value: &Value, user: Option<&str>) -> ParsedPanels {
     let arr = match panels_value.as_array() {
         Some(a) => a,
         None => return (vec![], vec![], vec![], vec![]),
@@ -179,7 +233,7 @@ fn parse_panels(panels_value: &Value) -> ParsedPanels {
     for item in arr {
         if let Some(name) = item.as_str() {
             // Simple string: "rsi"
-            match indicators::by_name(name) {
+            match indicators::by_name_for(name, user) {
                 Some(ind) => {
                     result.push(ind);
                     keys.push(name.to_string());
@@ -192,7 +246,7 @@ fn parse_panels(panels_value: &Value) -> ParsedPanels {
                 Some(n) => n,
                 None => continue,
             };
-            match indicators::by_name_configured(name, &Value::Object(obj.clone())) {
+            match indicators::by_name_configured_for(name, &Value::Object(obj.clone()), user) {
                 Ok(Some(ind)) => {
                     result.push(ind);
                     keys.push(name.to_string());
@@ -257,11 +311,17 @@ fn check_panels(unknown: &[String], invalid: &[String]) -> Result<(), String> {
     Ok(())
 }
 
-fn tool_generate_chart(id: Option<Value>, args: &Value) -> Value {
-    generate_chart(id, args, fetch::DataSource::from_env())
+/// `user` resolves the caller's scripted indicators first (ADR-0025).
+fn tool_generate_chart(id: Option<Value>, args: &Value, user: Option<&str>) -> Value {
+    generate_chart(id, args, fetch::DataSource::from_env(), user)
 }
 
-fn generate_chart(id: Option<Value>, args: &Value, source: fetch::DataSource) -> Value {
+fn generate_chart(
+    id: Option<Value>,
+    args: &Value,
+    source: fetch::DataSource,
+    user: Option<&str>,
+) -> Value {
     let bars = (args.get("bars").and_then(|v| v.as_u64()).unwrap_or(200) as usize).min(MAX_BARS);
     // Exclusive upper bound (ms since epoch) on bar open time — history paging.
     // JSON null counts as absent; anything else must be an in-range integer.
@@ -323,7 +383,7 @@ fn generate_chart(id: Option<Value>, args: &Value, source: fetch::DataSource) ->
         );
     }
 
-    let (panel_indicators, indicator_keys, unknown, invalid) = parse_panels(&panels_value);
+    let (panel_indicators, indicator_keys, unknown, invalid) = parse_panels(&panels_value, user);
     if let Err(e) = check_panels(&unknown, &invalid) {
         return tool_err(id, &e);
     }
@@ -367,16 +427,10 @@ fn generate_chart(id: Option<Value>, args: &Value, source: fetch::DataSource) ->
 
     // Compute indicators up-front (once) so both the summary and the series
     // payloads can reuse the same PanelResult values — no recomputation,
-    // values already aligned 1:1 with bars.
-    let computed: Vec<(String, chartgen::indicator::PanelResult)> = if want_summary || want_series {
-        indicator_keys
-            .iter()
-            .zip(panel_indicators.iter())
-            .map(|(key, ind)| (key.clone(), ind.compute(&data)))
-            .collect()
-    } else {
-        Vec::new()
-    };
+    // values already aligned 1:1 with bars. The PNG renders from them too.
+    // An indicator that fails (a user script, ADR-0025) is left out and
+    // reported under `indicator_errors`; the rest of the chart still renders.
+    let (computed, inds, errors_value) = compute_panels(&data, &indicator_keys, &panel_indicators);
 
     // Build summary payload keyed by request name so the LLM can correlate
     // output with the names it passed in.
@@ -385,25 +439,26 @@ fn generate_chart(id: Option<Value>, args: &Value, source: fetch::DataSource) ->
         for (key, pr) in &computed {
             indicators_json.insert(key.clone(), panel_result_to_json(pr));
         }
-        Some(json!({
+        let mut summary = json!({
             "symbol": data.symbol,
             "interval": data.interval,
             "price": ohlcv_summary(&data),
             "indicators": Value::Object(indicators_json),
-        }))
+        });
+        if let Some(errors) = &errors_value {
+            summary["indicator_errors"] = errors.clone();
+        }
+        Some(summary)
     } else {
         None
     };
 
     let series_value = want_series.then(|| {
-        series_json(
-            &data,
-            &computed,
-            &panel_indicators,
-            bars,
-            chart_style,
-            has_more,
-        )
+        let mut series = series_json(&data, &computed, &inds, bars, chart_style, has_more);
+        if let Some(errors) = &errors_value {
+            series["indicator_errors"] = errors.clone();
+        }
+        series
     });
 
     let mut content: Vec<Value> = Vec::new();
@@ -415,7 +470,9 @@ fn generate_chart(id: Option<Value>, args: &Value, source: fetch::DataSource) ->
             uuid::Uuid::new_v4()
         );
 
-        if let Err(e) = renderer::render_chart(&data, &panel_indicators, &tmp_path, width, height) {
+        let results: Vec<&chartgen::indicator::PanelResult> =
+            computed.iter().map(|(_, pr)| pr).collect();
+        if let Err(e) = renderer::render_results(&data, &results, &tmp_path, width, height) {
             return tool_err(id, &format!("Render error: {}", e));
         }
 
@@ -444,11 +501,57 @@ fn generate_chart(id: Option<Value>, args: &Value, source: fetch::DataSource) ->
         }));
     }
 
+    // format=png has no JSON payload to carry the errors: add a text item.
+    if let (Some(errors), "png") = (&errors_value, format.as_str()) {
+        content.push(json!({
+            "type": "text",
+            "text": serde_json::to_string_pretty(&json!({ "indicator_errors": errors })).unwrap(),
+        }));
+    }
+
     json!({
         "jsonrpc": "2.0",
         "id": id,
         "result": { "content": content }
     })
+}
+
+/// Computed panels for a chart: `(key, result)` and the indicator of each
+/// success, plus the `indicator_errors` map of the failures (`None` when all
+/// succeeded).
+type Computed<'a> = (
+    Vec<(String, chartgen::indicator::PanelResult)>,
+    Vec<&'a dyn Indicator>,
+    Option<Value>,
+);
+
+fn compute_panels<'a>(
+    data: &chartgen::data::OhlcvData,
+    keys: &[String],
+    panels: &'a [Box<dyn Indicator>],
+) -> Computed<'a> {
+    let (mut computed, mut inds) = (Vec::new(), Vec::new());
+    let mut errors = serde_json::Map::new();
+    let compute = || {
+        for (key, ind) in keys.iter().zip(panels) {
+            match ind.try_compute(data) {
+                Ok(pr) => {
+                    computed.push((key.clone(), pr));
+                    inds.push(ind.as_ref());
+                }
+                Err(e) => {
+                    errors.insert(key.clone(), e.to_json());
+                }
+            }
+        }
+    };
+    // One script budget for the whole chart (ADR-0025).
+    #[cfg(feature = "scripting")]
+    scripting::with_chart_budget(compute);
+    #[cfg(not(feature = "scripting"))]
+    ({ compute })();
+    let errors = (!errors.is_empty()).then_some(Value::Object(errors));
+    (computed, inds, errors)
 }
 
 // Build series payload: full OHLCV bars plus per-indicator per-bar values.
@@ -457,7 +560,7 @@ fn generate_chart(id: Option<Value>, args: &Value, source: fetch::DataSource) ->
 fn series_json(
     data: &chartgen::data::OhlcvData,
     computed: &[(String, chartgen::indicator::PanelResult)],
-    panel_indicators: &[Box<dyn Indicator>],
+    panel_indicators: &[&dyn Indicator],
     bars: usize,
     chart_style: &str,
     has_more: bool,
@@ -516,7 +619,7 @@ pub(crate) fn series_tail(
     chart_style: &str,
     bars: usize,
 ) -> Result<Value, String> {
-    let (panel_indicators, keys, unknown, invalid) = parse_panels(indicators);
+    let (panel_indicators, keys, unknown, invalid) = parse_panels(indicators, None);
     check_panels(&unknown, &invalid)?;
     let ha;
     let data = if chart_style == "heikin_ashi" {
@@ -525,16 +628,12 @@ pub(crate) fn series_tail(
     } else {
         raw
     };
-    let computed: Vec<_> = keys
-        .into_iter()
-        .zip(panel_indicators.iter())
-        .map(|(key, ind)| (key, ind.compute(data)))
-        .collect();
+    let (computed, inds, _) = compute_panels(data, &keys, &panel_indicators);
     let has_more = data.len() > bars;
     Ok(series_json(
         data,
         &computed,
-        &panel_indicators,
+        &inds,
         bars,
         chart_style,
         has_more,
@@ -583,7 +682,7 @@ fn tool_subscribe_chart(
             &format!("{PUSH_LIMIT}: at most {MAX_INDICATORS} indicators per subscription"),
         );
     }
-    let (_, _, unknown, invalid) = parse_panels(&indicators);
+    let (_, _, unknown, invalid) = parse_panels(&indicators, None);
     if let Err(e) = check_panels(&unknown, &invalid) {
         return tool_err(id, &e);
     }
@@ -627,10 +726,25 @@ fn no_push_transport(id: Option<Value>) -> Value {
     )
 }
 
-fn tool_list_indicators(id: Option<Value>) -> Value {
+/// Built-ins plus the caller's scripts (tagged `source: "user"`); a script
+/// replaces the built-in entry it shadows.
+fn tool_list_indicators(id: Option<Value>, user: Option<&str>) -> Value {
     let reg = indicators::registry();
-    let indicator_list: Vec<Value> = reg
+    #[cfg(feature = "scripting")]
+    let mine: Vec<Value> = user
+        .and_then(|u| scripting::persistence::global()?.list(u).ok())
+        .unwrap_or_default()
         .iter()
+        .map(user_indicator_entry)
+        .collect();
+    #[cfg(not(feature = "scripting"))]
+    let mine: Vec<Value> = {
+        let _ = user;
+        Vec::new()
+    };
+    let mut indicator_list: Vec<Value> = reg
+        .iter()
+        .filter(|info| !mine.iter().any(|m| m["name"] == info.name))
         .map(|info| {
             let mut entry = json!({
                 "name": info.name,
@@ -647,6 +761,7 @@ fn tool_list_indicators(id: Option<Value>) -> Value {
             entry
         })
         .collect();
+    indicator_list.extend(mine);
 
     json!({
         "jsonrpc": "2.0",
@@ -661,6 +776,170 @@ fn tool_list_indicators(id: Option<Value>) -> Value {
             }]
         }
     })
+}
+
+// ---------------------------------------------------------------------------
+// User indicators: Starlark scripts (ADR-0024, ADR-0025)
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "scripting")]
+/// `list_indicators` entry for a stored script.
+fn user_indicator_entry(s: &scripting::persistence::StoredScript) -> Value {
+    let m = &s.meta;
+    let overlay = m["overlay"].as_bool().unwrap_or(false);
+    let description = match m["description"].as_str() {
+        Some(d) if !d.is_empty() => d,
+        _ => m["title"].as_str().unwrap_or(&s.name),
+    };
+    let mut entry = json!({
+        "name": s.name,
+        "description": description,
+        "type": if overlay { "overlay" } else { "panel" },
+        "overlay": overlay,
+        "source": "user",
+    });
+    if m["params"].as_array().is_some_and(|p| !p.is_empty()) {
+        entry["configurable_params"] = m["params"].clone();
+    }
+    entry
+}
+
+#[cfg(feature = "scripting")]
+/// The store and user for a scripting tool, or the error response.
+fn scripting_session<'u>(
+    id: &Option<Value>,
+    user: Option<&'u str>,
+    tool: &str,
+) -> Result<(&'static scripting::persistence::Store, &'u str), Value> {
+    let Some(user) = user else {
+        return Err(tool_err(
+            id.clone(),
+            &format!(
+                "{tool} needs an authenticated HTTP session: user indicators belong to the OAuth client. The stdio server has no user."
+            ),
+        ));
+    };
+    match scripting::persistence::global() {
+        Some(store) => Ok((store, user)),
+        None => Err(tool_err(
+            id.clone(),
+            "The indicator store is unavailable (see the server log for CHARTGEN_DB).",
+        )),
+    }
+}
+
+#[cfg(feature = "scripting")]
+fn tool_register_indicator(id: Option<Value>, args: &Value, user: Option<&str>) -> Value {
+    let (store, user) = match scripting_session(&id, user, "register_indicator") {
+        Ok(s) => s,
+        Err(resp) => return resp,
+    };
+    let name = args.get("name").and_then(|v| v.as_str()).unwrap_or("");
+    let Some(source) = args.get("source").and_then(|v| v.as_str()) else {
+        return tool_err(id, "source is required");
+    };
+    if !scripting::valid_name(name) {
+        return tool_err(
+            id,
+            "name must be 1-48 lowercase letters, digits or _, starting with a letter",
+        );
+    }
+    let is_new = matches!(store.get(user, name), Ok(None));
+    if is_new && store.count(user).unwrap_or(0) >= scripting::MAX_SCRIPTS_PER_USER {
+        return tool_err(
+            id,
+            &format!(
+                "You have {} indicators, the limit; delete one first.",
+                scripting::MAX_SCRIPTS_PER_USER
+            ),
+        );
+    }
+    let compiled = match scripting::validate_as(user, name, source) {
+        Ok(c) => c,
+        Err(e) => {
+            let payload = json!({ "ok": false, "errors": [e.to_json()] });
+            return tool_err(id, &serde_json::to_string_pretty(&payload).unwrap());
+        }
+    };
+    let info = &compiled.info;
+    let hash = scripting::source_hash(source);
+    if let Err(e) = store.upsert(user, name, source, &info.to_json(), &hash) {
+        return tool_err(id, &format!("Could not store the indicator: {e}"));
+    }
+    tool_ok(
+        id,
+        json!({
+            "ok": true,
+            "name": name,
+            "title": info.title,
+            "overlay": info.overlay,
+            "configurable_params": info.params,
+            "replaced": !is_new,
+            "shadows_builtin": indicators::by_name(name).is_some(),
+        }),
+    )
+}
+
+#[cfg(feature = "scripting")]
+fn tool_fork_indicator(id: Option<Value>, args: &Value) -> Value {
+    let name = args
+        .get("builtin_name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let Some(source) = scripting::refimpl(name) else {
+        let forkable: Vec<&str> = scripting::REFIMPLS.iter().map(|(n, _)| *n).collect();
+        return tool_err(
+            id,
+            &format!(
+                "No Starlark reference implementation for `{name}`. Forkable built-ins: {}. Others can be rebuilt from ta.* functions.",
+                forkable.join(", ")
+            ),
+        );
+    };
+    let params = scripting::runtime::compile(name, source)
+        .map(|c| json!(c.info.params))
+        .unwrap_or(json!([]));
+    tool_ok(
+        id,
+        json!({ "name": name, "source": source, "configurable_params": params }),
+    )
+}
+
+#[cfg(feature = "scripting")]
+fn tool_list_my_indicators(id: Option<Value>, user: Option<&str>) -> Value {
+    let (store, user) = match scripting_session(&id, user, "list_my_indicators") {
+        Ok(s) => s,
+        Err(resp) => return resp,
+    };
+    let scripts = match store.list(user) {
+        Ok(s) => s,
+        Err(e) => return tool_err(id, &format!("Could not read your indicators: {e}")),
+    };
+    let list: Vec<Value> = scripts
+        .iter()
+        .map(|s| {
+            let mut e = user_indicator_entry(s);
+            e["title"] = s.meta["title"].clone();
+            e["created_at"] = json!(s.created_at);
+            e["updated_at"] = json!(s.updated_at);
+            e
+        })
+        .collect();
+    tool_ok(id, json!({ "total": list.len(), "indicators": list }))
+}
+
+#[cfg(feature = "scripting")]
+fn tool_delete_indicator(id: Option<Value>, args: &Value, user: Option<&str>) -> Value {
+    let (store, user) = match scripting_session(&id, user, "delete_indicator") {
+        Ok(s) => s,
+        Err(resp) => return resp,
+    };
+    let name = args.get("name").and_then(|v| v.as_str()).unwrap_or("");
+    match store.delete(user, name) {
+        Ok(true) => tool_ok(id, json!({ "ok": true, "name": name })),
+        Ok(false) => tool_err(id, &format!("You have no indicator named `{name}`.")),
+        Err(e) => tool_err(id, &format!("Could not delete the indicator: {e}")),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2008,7 +2287,7 @@ mod tests {
 
     #[test]
     fn handle_mcp_tools_list_includes_trading_tools() {
-        let resp = handle_mcp_request("tools/list", Some(json!(1)), None, None, None, None);
+        let resp = handle_mcp_request("tools/list", Some(json!(1)), None, None, None, None, None);
         let tools = resp["result"]["tools"].as_array().unwrap();
         let names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
         assert!(names.contains(&"get_indicators"));
@@ -2144,7 +2423,7 @@ mod tests {
             "indicators": ["rsi", "macd"],
             "format": "summary"
         });
-        let resp = tool_generate_chart(Some(json!(1)), &args);
+        let resp = tool_generate_chart(Some(json!(1)), &args, None);
         assert!(!is_error(&resp));
 
         let content = chart_content(&resp);
@@ -2167,7 +2446,7 @@ mod tests {
             "indicators": ["rsi"],
             "format": "summary"
         });
-        let resp = tool_generate_chart(Some(json!(1)), &args);
+        let resp = tool_generate_chart(Some(json!(1)), &args, None);
         let content = chart_content(&resp);
         let text = content[0]["text"].as_str().unwrap();
         let parsed: Value = serde_json::from_str(text).unwrap();
@@ -2192,7 +2471,7 @@ mod tests {
             "width": 400,
             "height": 300
         });
-        let resp = tool_generate_chart(Some(json!(1)), &args);
+        let resp = tool_generate_chart(Some(json!(1)), &args, None);
         assert!(!is_error(&resp));
 
         let content = chart_content(&resp);
@@ -2209,7 +2488,7 @@ mod tests {
     #[test]
     fn generate_chart_unknown_format_errors() {
         let args = json!({ "bars": 20, "format": "svg" });
-        let resp = tool_generate_chart(Some(json!(1)), &args);
+        let resp = tool_generate_chart(Some(json!(1)), &args, None);
         assert!(is_error(&resp));
         assert!(response_text(&resp).contains("Unknown format"));
     }
@@ -2223,7 +2502,7 @@ mod tests {
             "width": 400,
             "height": 300
         });
-        let resp = tool_generate_chart(Some(json!(1)), &args);
+        let resp = tool_generate_chart(Some(json!(1)), &args, None);
         assert!(!is_error(&resp));
         let content = chart_content(&resp);
         assert_eq!(content.len(), 1);
@@ -2432,7 +2711,7 @@ mod tests {
             "indicators": ["rsi"],
             "format": "series"
         });
-        let resp = tool_generate_chart(Some(json!(1)), &args);
+        let resp = tool_generate_chart(Some(json!(1)), &args, None);
         assert!(!is_error(&resp));
 
         let content = chart_content(&resp);
@@ -2511,7 +2790,7 @@ mod tests {
             "indicators": ["cipher_b"],
             "format": "series"
         });
-        let resp = tool_generate_chart(Some(json!(1)), &args);
+        let resp = tool_generate_chart(Some(json!(1)), &args, None);
         let text = chart_content(&resp)[0]["text"].as_str().unwrap();
         let parsed: Value = serde_json::from_str(text).unwrap();
 
@@ -2539,7 +2818,7 @@ mod tests {
             "indicators": ["macd"],
             "format": "series"
         });
-        let resp = tool_generate_chart(Some(json!(1)), &args);
+        let resp = tool_generate_chart(Some(json!(1)), &args, None);
         let text = chart_content(&resp)[0]["text"].as_str().unwrap();
         let parsed: Value = serde_json::from_str(text).unwrap();
 
@@ -2562,7 +2841,7 @@ mod tests {
             "width": 400,
             "height": 300
         });
-        let resp = tool_generate_chart(Some(json!(1)), &args);
+        let resp = tool_generate_chart(Some(json!(1)), &args, None);
         let content = chart_content(&resp);
         assert_eq!(content.len(), 1);
         assert_eq!(content[0]["type"], "text");
@@ -2572,7 +2851,7 @@ mod tests {
     fn generate_chart_unknown_format_lists_series() {
         // Regression: ensure the error message now advertises 'series'.
         let args = json!({ "bars": 20, "format": "svg" });
-        let resp = tool_generate_chart(Some(json!(1)), &args);
+        let resp = tool_generate_chart(Some(json!(1)), &args, None);
         assert!(is_error(&resp));
         let text = response_text(&resp);
         assert!(text.contains("Unknown format"));
@@ -2597,7 +2876,7 @@ mod tests {
             "indicators": ["bbands"],
             "format": "series"
         });
-        let resp = tool_generate_chart(Some(json!(1)), &args);
+        let resp = tool_generate_chart(Some(json!(1)), &args, None);
         let text = chart_content(&resp)[0]["text"].as_str().unwrap();
         let parsed: Value = serde_json::from_str(text).unwrap();
 
@@ -2626,7 +2905,7 @@ mod tests {
             "indicators": ["vpvr"],
             "format": "series"
         });
-        let resp = tool_generate_chart(Some(json!(1)), &args);
+        let resp = tool_generate_chart(Some(json!(1)), &args, None);
         let text = chart_content(&resp)[0]["text"].as_str().unwrap();
         let parsed: Value = serde_json::from_str(text).unwrap();
 
@@ -2703,7 +2982,7 @@ mod tests {
             "indicators": ["rsi"],
             "format": "series"
         });
-        let resp = tool_generate_chart(Some(json!(1)), &args);
+        let resp = tool_generate_chart(Some(json!(1)), &args, None);
         let text = chart_content(&resp)[0]["text"].as_str().unwrap();
         let parsed: Value = serde_json::from_str(text).unwrap();
 
@@ -2732,7 +3011,7 @@ mod tests {
             "indicators": ["rsi"],
             "format": "summary"
         });
-        let resp = tool_generate_chart(Some(json!(1)), &args);
+        let resp = tool_generate_chart(Some(json!(1)), &args, None);
         let actual = chart_content(&resp)[0]["text"]
             .as_str()
             .unwrap()
@@ -2761,7 +3040,7 @@ mod tests {
             ),
         ] {
             let args = json!({"indicators": [ind], "bars": 50, "format": "summary"});
-            let resp = tool_generate_chart(Some(json!(1)), &args);
+            let resp = tool_generate_chart(Some(json!(1)), &args, None);
             assert_eq!(resp["result"]["isError"], true);
             assert_eq!(resp["result"]["content"][0]["text"], msg);
         }
@@ -2773,7 +3052,7 @@ mod tests {
     const END_4H_MS: i64 = 1_700_006_400_000; // on the 4h grid
 
     fn series_payload(args: Value, source: fetch::DataSource) -> Value {
-        let resp = generate_chart(Some(json!(1)), &args, source);
+        let resp = generate_chart(Some(json!(1)), &args, source, None);
         assert!(
             !is_error(&resp),
             "unexpected error: {}",
@@ -3048,6 +3327,7 @@ mod tests {
             Some(json!(1)),
             &json!({ "chart_style": "renko", "format": "series" }),
             fetch::DataSource::Sample,
+            None,
         );
         assert!(is_error(&resp));
         assert!(response_text(&resp).contains("chart_style"));
@@ -3204,6 +3484,7 @@ mod tests {
                 Some(json!(1)),
                 &json!({ "ticker": "BTCUSDT", "end_time": bad, "format": "series" }),
                 fetch::DataSource::Sample,
+                None,
             );
             assert!(is_error(&resp), "end_time {bad} must be rejected");
             assert!(response_text(&resp).contains("end_time"));
@@ -3224,6 +3505,7 @@ mod tests {
                 Some(json!(1)),
                 &json!({ "ticker": "BTCUSDT", "timeframe": tf, "format": "series" }),
                 fetch::DataSource::Sample,
+                None,
             );
             assert!(is_error(&resp), "timeframe {tf} must be rejected");
             assert!(response_text(&resp).contains("Unsupported timeframe"));
@@ -3239,6 +3521,7 @@ mod tests {
                     &json!({ "ticker": "AAPL", "bars": 20, "format": format,
                              "end_time": end_time, "width": 200, "height": 100 }),
                     fetch::DataSource::Unavailable,
+                    None,
                 );
                 assert!(
                     is_error(&resp),
@@ -3252,7 +3535,7 @@ mod tests {
     #[test]
     fn warmup_ignored_for_non_series_formats() {
         let text = |args: Value| {
-            let resp = generate_chart(Some(json!(1)), &args, fetch::DataSource::Live);
+            let resp = generate_chart(Some(json!(1)), &args, fetch::DataSource::Live, None);
             chart_content(&resp)[0]["text"]
                 .as_str()
                 .unwrap()
@@ -3270,6 +3553,7 @@ mod tests {
             Some(json!(1)),
             &json!({ "end_time": 1_700_000_000_000_i64, "format": "series" }),
             fetch::DataSource::Live,
+            None,
         );
         assert!(is_error(&resp));
         assert!(response_text(&resp).contains("end_time"));
@@ -3398,7 +3682,7 @@ mod tests {
 
     #[test]
     fn get_quotes_is_dispatched_and_listed() {
-        let resp = handle_mcp_request("tools/list", Some(json!(1)), None, None, None, None);
+        let resp = handle_mcp_request("tools/list", Some(json!(1)), None, None, None, None, None);
         let tools = resp["result"]["tools"].as_array().unwrap();
         let tool = tools.iter().find(|t| t["name"] == "get_quotes").unwrap();
         assert_eq!(tool["inputSchema"]["required"], json!(["symbols"]));
@@ -3408,6 +3692,7 @@ mod tests {
             "tools/call",
             Some(json!(2)),
             Some(&json!({ "name": "get_quotes", "arguments": {} })),
+            None,
             None,
             None,
             None,
@@ -3466,7 +3751,7 @@ mod tests {
 
     #[test]
     fn search_symbols_is_dispatched_and_listed() {
-        let resp = handle_mcp_request("tools/list", Some(json!(1)), None, None, None, None);
+        let resp = handle_mcp_request("tools/list", Some(json!(1)), None, None, None, None, None);
         let tools = resp["result"]["tools"].as_array().unwrap();
         let tool = tools
             .iter()
@@ -3478,6 +3763,7 @@ mod tests {
             "tools/call",
             Some(json!(2)),
             Some(&json!({ "name": "search_symbols", "arguments": {} })),
+            None,
             None,
             None,
             None,
@@ -3495,6 +3781,7 @@ mod tests {
             None,
             token,
             push,
+            None,
         )
     }
 
@@ -3603,6 +3890,7 @@ mod tests {
             Some(json!(1)),
             &args,
             fetch::DataSource::Sample,
+            None,
         )))
         .unwrap();
         let mut raw = fetch::fetch_ohlcv(
@@ -3618,5 +3906,295 @@ mod tests {
         raw.interval = Some("4h".into());
         let pushed = series_tail(&raw, &json!(["rsi", "macd"]), "heikin_ashi", 2).unwrap();
         assert_eq!(pushed, polled);
+    }
+}
+
+/// Scripted indicators over MCP (ADR-0025): register → list → chart →
+/// delete, per-user isolation, shadowing and per-indicator errors.
+#[cfg(all(test, feature = "scripting"))]
+mod scripting_tests {
+    use super::*;
+
+    /// One store per test process (the store is process-wide); tests use
+    /// distinct users, so they don't see each other's scripts.
+    fn user() -> String {
+        let path = std::env::temp_dir().join(format!("chartgen-mcp-{}.db", std::process::id()));
+        scripting::persistence::open_global(&path).expect("test store");
+        format!("client-{}", uuid::Uuid::new_v4())
+    }
+
+    fn call(tool: &str, args: Value, user: Option<&str>) -> Value {
+        call_tool(tool, Some(json!(1)), args, None, None, None, user, true)
+    }
+
+    fn text(resp: &Value, i: usize) -> &str {
+        resp["result"]["content"][i]["text"].as_str().unwrap_or("")
+    }
+
+    fn payload(resp: &Value) -> Value {
+        assert!(
+            !resp["result"]["isError"].as_bool().unwrap_or(false),
+            "unexpected error: {}",
+            text(resp, 0)
+        );
+        serde_json::from_str(text(resp, 0)).unwrap()
+    }
+
+    fn chart(user: &str, indicators: Value, format: &str) -> Value {
+        let args = json!({ "bars": 200, "indicators": indicators, "format": format });
+        generate_chart(Some(json!(1)), &args, fetch::DataSource::Sample, Some(user))
+    }
+
+    const MOMENTUM: &str = r#"
+PARAMS = [{"name": "length", "type": "int", "default": 10, "min": 1, "max": 500}]
+META = {"title": "Momentum", "overlay": False}
+
+def compute(ohlcv, params, chart):
+    m = ohlcv.close - ohlcv.close[params["length"]]
+    chart.line(m, title = "MOM", color = "teal")
+    chart.dot(ta.crossover(m, 0), m, color = "green", label = "up")
+    chart.hline(0)
+"#;
+
+    #[test]
+    fn tools_listed_only_when_enabled() {
+        let names = |on: bool| -> Vec<String> {
+            handle_tools_list(Some(json!(1)), on)["result"]["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|t| t["name"].as_str().unwrap().to_string())
+                .collect()
+        };
+        let scripting = [
+            "register_indicator",
+            "fork_indicator",
+            "list_my_indicators",
+            "delete_indicator",
+        ];
+        assert!(scripting
+            .iter()
+            .all(|t| !names(false).contains(&t.to_string())));
+        assert!(scripting
+            .iter()
+            .all(|t| names(true).contains(&t.to_string())));
+        // codegen input never has them
+        let base = chartgen::mcp_schema::tools_list_result().to_string();
+        assert!(!base.contains("register_indicator"));
+        // disabled: the tools are unknown
+        let u = user();
+        let resp = call_tool(
+            "register_indicator",
+            None,
+            json!({"name": "x", "source": MOMENTUM}),
+            None,
+            None,
+            None,
+            Some(&u),
+            false,
+        );
+        assert!(text(&resp, 0).contains("Unknown tool"));
+    }
+
+    #[test]
+    fn register_list_chart_delete() {
+        let u = user();
+        let reg = payload(&call(
+            "register_indicator",
+            json!({"name": "my_momentum", "source": MOMENTUM}),
+            Some(&u),
+        ));
+        assert_eq!(reg["ok"], true);
+        assert_eq!(reg["replaced"], false);
+        assert_eq!(reg["configurable_params"][0]["type"], "integer");
+
+        let mine = payload(&call("list_my_indicators", json!({}), Some(&u)));
+        assert_eq!(mine["total"], 1);
+        assert_eq!(mine["indicators"][0]["name"], "my_momentum");
+        assert_eq!(mine["indicators"][0]["source"], "user");
+
+        let all = payload(&tool_list_indicators(Some(json!(1)), Some(&u)));
+        let entry = all["indicators"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|i| i["name"] == "my_momentum")
+            .expect("listed for its owner");
+        assert_eq!(entry["source"], "user");
+        assert_eq!(entry["type"], "panel");
+        assert_eq!(
+            all["total"].as_u64().unwrap() as usize,
+            indicators::registry().len() + 1
+        );
+
+        // used like a built-in, with params, next to a built-in
+        let resp = chart(
+            &u,
+            json!([{"name": "my_momentum", "length": 3}, "rsi"]),
+            "series",
+        );
+        let p = payload(&resp);
+        let mom = &p["indicators"]["my_momentum"];
+        assert_eq!(mom["label"], "Momentum");
+        let values = mom["lines"][0]["values"].as_array().unwrap();
+        assert_eq!(values.len(), 200);
+        assert!(values[..3].iter().all(|v| v.is_null()));
+        let c: Vec<f64> = p["bars"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|b| b["c"].as_f64().unwrap())
+            .collect();
+        assert!((values[10].as_f64().unwrap() - (c[10] - c[7])).abs() < 1e-9);
+        assert!(p["indicators"]["rsi"].is_object());
+        assert!(p.get("indicator_errors").is_none());
+        // invalid params are checked against PARAMS like a built-in
+        let resp = chart(&u, json!([{"name": "my_momentum", "length": 0}]), "series");
+        assert!(text(&resp, 0).contains("must be >= 1"));
+        // png renders it too
+        let resp = chart(&u, json!(["my_momentum"]), "png");
+        assert_eq!(resp["result"]["content"][0]["type"], "image");
+
+        let del = payload(&call(
+            "delete_indicator",
+            json!({"name": "my_momentum"}),
+            Some(&u),
+        ));
+        assert_eq!(del["ok"], true);
+        let resp = chart(&u, json!(["my_momentum"]), "series");
+        assert!(text(&resp, 0).contains("Unknown indicator"));
+        let resp = call("delete_indicator", json!({"name": "my_momentum"}), Some(&u));
+        assert!(text(&resp, 0).contains("no indicator named"));
+    }
+
+    #[test]
+    fn scripts_are_per_user() {
+        let (a, b) = (user(), user());
+        payload(&call(
+            "register_indicator",
+            json!({"name": "secret_sauce", "source": MOMENTUM}),
+            Some(&a),
+        ));
+        assert_eq!(
+            payload(&call("list_my_indicators", json!({}), Some(&b)))["total"],
+            0
+        );
+        let all_b = payload(&tool_list_indicators(Some(json!(1)), Some(&b)));
+        assert!(!all_b.to_string().contains("secret_sauce"));
+        let resp = chart(&b, json!(["secret_sauce"]), "series");
+        assert!(text(&resp, 0).contains("Unknown indicator"));
+        let resp = call(
+            "delete_indicator",
+            json!({"name": "secret_sauce"}),
+            Some(&b),
+        );
+        assert!(resp["result"]["isError"].as_bool().unwrap());
+        // no user (stdio): built-ins only, scripting tools refuse
+        let resp = generate_chart(
+            Some(json!(1)),
+            &json!({"indicators": ["secret_sauce"], "format": "series"}),
+            fetch::DataSource::Sample,
+            None,
+        );
+        assert!(text(&resp, 0).contains("Unknown indicator"));
+        let resp = call("list_my_indicators", json!({}), None);
+        assert!(text(&resp, 0).contains("authenticated"));
+        assert!(payload(&call("list_my_indicators", json!({}), Some(&a)))["total"] == 1);
+    }
+
+    #[test]
+    fn fork_shadows_the_builtin_for_its_owner_only() {
+        let (a, b) = (user(), user());
+        let fork = payload(&call(
+            "fork_indicator",
+            json!({"builtin_name": "wavetrend"}),
+            None,
+        ));
+        let source = fork["source"].as_str().unwrap().replace(
+            "chart.set_y_range(-105, 105)",
+            "chart.set_y_range(-105, 105)\n    chart.set_label(\"My WaveTrend\")",
+        );
+        assert_eq!(fork["configurable_params"][0]["name"], "ch_len");
+        let reg = payload(&call(
+            "register_indicator",
+            json!({"name": "wavetrend", "source": source}),
+            Some(&a),
+        ));
+        assert_eq!(reg["shadows_builtin"], true);
+        let label = |u: &str| {
+            payload(&chart(u, json!(["wavetrend"]), "series"))["indicators"]["wavetrend"]["label"]
+                .clone()
+        };
+        assert_eq!(label(&a), "My WaveTrend");
+        assert_eq!(label(&b), "WaveTrend");
+        let all = payload(&tool_list_indicators(Some(json!(1)), Some(&a)));
+        let wt: Vec<&Value> = all["indicators"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|i| i["name"] == "wavetrend")
+            .collect();
+        assert_eq!(wt.len(), 1, "the fork replaces the built-in entry");
+        assert_eq!(wt[0]["source"], "user");
+
+        let resp = call("fork_indicator", json!({"builtin_name": "rsi"}), None);
+        assert!(resp["result"]["isError"].as_bool().unwrap());
+        assert!(text(&resp, 0).contains("Forkable built-ins: wavetrend"));
+    }
+
+    #[test]
+    fn register_returns_structured_errors() {
+        let u = user();
+        let resp = call(
+            "register_indicator",
+            json!({"name": "bad", "source": "PARAMS = []\nMETA = {}\ndef compute(ohlcv, params, chart):\n    chart.line(ohlcv.close + \"x\")\n"}),
+            Some(&u),
+        );
+        assert!(resp["result"]["isError"].as_bool().unwrap());
+        let p: Value = serde_json::from_str(text(&resp, 0)).unwrap();
+        assert_eq!(p["ok"], false);
+        assert_eq!(p["errors"][0]["step"], "dry_run");
+        assert_eq!(p["errors"][0]["line"], 4);
+        assert!(p["errors"][0]["message"].is_string());
+        assert_eq!(
+            payload(&call("list_my_indicators", json!({}), Some(&u)))["total"],
+            0
+        );
+        let resp = call(
+            "register_indicator",
+            json!({"name": "Bad-Name", "source": MOMENTUM}),
+            Some(&u),
+        );
+        assert!(text(&resp, 0).contains("lowercase"));
+    }
+
+    #[test]
+    fn a_failing_script_fails_only_its_indicator() {
+        let u = user();
+        // Passes the 100-bar dry run, fails on the 200-bar chart.
+        let source = MOMENTUM.replace(
+            "    m = ohlcv.close",
+            "    if len(ohlcv.close) > 150:\n        fail(\"too many bars\")\n    m = ohlcv.close",
+        );
+        payload(&call(
+            "register_indicator",
+            json!({"name": "fragile", "source": source}),
+            Some(&u),
+        ));
+        for format in ["series", "summary", "both"] {
+            let resp = chart(&u, json!(["fragile", "rsi"]), format);
+            let i = usize::from(format == "both");
+            let p: Value = serde_json::from_str(text(&resp, i)).unwrap();
+            assert!(p["indicators"]["rsi"].is_object(), "{format}");
+            assert!(p["indicators"].get("fragile").is_none(), "{format}");
+            let e = &p["indicator_errors"]["fragile"];
+            assert_eq!(e["step"], "runtime");
+            assert!(e["message"].as_str().unwrap().contains("too many bars"));
+            assert_eq!(e["line"], 7);
+        }
+        let resp = chart(&u, json!(["fragile", "rsi"]), "png");
+        assert_eq!(resp["result"]["content"][0]["type"], "image");
+        let p: Value = serde_json::from_str(text(&resp, 1)).unwrap();
+        assert_eq!(p["indicator_errors"]["fragile"]["step"], "runtime");
     }
 }

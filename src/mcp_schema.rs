@@ -374,3 +374,53 @@ pub fn tools_list_result() -> Value {
         ]
     })
 }
+
+/// Tools for user-authored Starlark indicators (ADR-0025). `tools/list`
+/// appends them only when `CHARTGEN_SCRIPTING=1`; `tools_list_result()`
+/// (and so the generated TypeScript input types) never includes them.
+pub fn scripting_tools() -> Vec<Value> {
+    vec![
+        json!({
+            "name": "register_indicator",
+            "description": "Register (or replace) one of your own indicators, written in Starlark (a Python dialect; Pine Script-like). The source defines PARAMS = [{\"name\", \"type\": int|float|bool|string, \"default\", \"min\"?, \"max\"?, \"desc\"?}], META = {\"title\", \"overlay\": bool, \"description\"?} and def compute(ohlcv, params, chart). ohlcv.open/high/low/close/volume/time/hl2/hlc3/ohlc4 are series; series support + - * / and comparisons (giving bool series), & | ~, and close[1] for the previous bar. ta.* has sma, ema, wma, rma, rsi, stoch, atr, macd, highest, lowest, stdev, change, roc, crossover, crossunder, pivot_high, pivot_low and element-wise math. Draw with chart.line/fill/bars/dot/hline/hbar/divline/set_y_range/set_label. The script is parsed, statically checked and dry-run on 100 synthetic bars; a failure returns {ok: false, errors: [{step, line, message}]}. Once registered, use the name in generate_chart like a built-in; it shadows a built-in of the same name for you only. Call fork_indicator to start from a built-in's source.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "pattern": "^[a-z][a-z0-9_]{0,47}$", "description": "Indicator name: lowercase letters, digits and _, starting with a letter." },
+                    "source": { "type": "string", "maxLength": 65536, "description": "Starlark source defining PARAMS, META and compute(ohlcv, params, chart)." }
+                },
+                "required": ["name", "source"]
+            }
+        }),
+        json!({
+            "name": "fork_indicator",
+            "description": "Get the Starlark source of a built-in indicator, to edit and register under your account with register_indicator (keep the name to replace the built-in for you, or pick a new one). Only built-ins with a reference implementation can be forked; the error lists them.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "builtin_name": { "type": "string", "description": "Built-in indicator name, e.g. wavetrend." }
+                },
+                "required": ["builtin_name"]
+            }
+        }),
+        json!({
+            "name": "list_my_indicators",
+            "description": "List the indicators you registered: name, title, description, overlay, configurable_params, created_at and updated_at (unix seconds). list_indicators also includes them, tagged source: \"user\".",
+            "inputSchema": {
+                "type": "object",
+                "properties": {}
+            }
+        }),
+        json!({
+            "name": "delete_indicator",
+            "description": "Delete one of your registered indicators. A built-in it shadowed becomes visible again.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "Name of your indicator." }
+                },
+                "required": ["name"]
+            }
+        }),
+    ]
+}

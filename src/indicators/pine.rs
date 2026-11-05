@@ -506,6 +506,50 @@ pub fn percentrank(x: &[f64], n: usize) -> Vec<f64> {
     }
     out
 }
+/// Pine `ta.crossover(a, b)`: `a > b` on this bar and `a <= b` on the
+/// previous one. A comparison with na is false, so na never crosses.
+pub fn crossover(a: &[f64], b: &[f64]) -> Vec<bool> {
+    (0..a.len().min(b.len()))
+        .map(|i| i > 0 && a[i] > b[i] && a[i - 1] <= b[i - 1])
+        .collect()
+}
+/// Pine `ta.crossunder(a, b)`: `a < b` on this bar, `a >= b` on the previous.
+pub fn crossunder(a: &[f64], b: &[f64]) -> Vec<bool> {
+    (0..a.len().min(b.len()))
+        .map(|i| i > 0 && a[i] < b[i] && a[i - 1] >= b[i - 1])
+        .collect()
+}
+/// Pine `ta.pivothigh(src, left, right)`: on bar i, the value of bar
+/// `i - right` when it is above the `left` bars before it and not below the
+/// `right` bars after it; na otherwise (and while any bar of the window is
+/// na). The tie rule is unverified against a live TradingView chart.
+pub fn pivot_high(x: &[f64], left: usize, right: usize) -> Vec<f64> {
+    pivot(x, left, right, |c, v| v < c, |c, v| v <= c)
+}
+/// Pine `ta.pivotlow(src, left, right)`: mirror of `pivot_high`.
+pub fn pivot_low(x: &[f64], left: usize, right: usize) -> Vec<f64> {
+    pivot(x, left, right, |c, v| v > c, |c, v| v >= c)
+}
+fn pivot(
+    x: &[f64],
+    left: usize,
+    right: usize,
+    before: fn(f64, f64) -> bool,
+    after: fn(f64, f64) -> bool,
+) -> Vec<f64> {
+    let mut out = vec![f64::NAN; x.len()];
+    for i in (left + right)..x.len() {
+        let c = x[i - right];
+        let w = &x[i - right - left..=i];
+        if w.iter().any(|v| v.is_nan()) {
+            continue;
+        }
+        if w[..left].iter().all(|&v| before(c, v)) && w[left + 1..].iter().all(|&v| after(c, v)) {
+            out[i] = c;
+        }
+    }
+    out
+}
 pub fn zip(a: &[f64], b: &[f64], f: impl Fn(f64, f64) -> f64) -> Vec<f64> {
     a.iter().zip(b).map(|(&x, &y)| f(x, y)).collect()
 }
@@ -667,6 +711,17 @@ mod tests {
         let m = mfi(&src, &vol, 14);
         assert!(m[54].is_nan(), "lower == 0 -> NaN, got {}", m[54]);
         assert!(m[40].is_finite());
+    }
+
+    #[test]
+    fn crosses_and_pivots() {
+        let a = [1.0, 3.0, 2.0, NAN, 5.0];
+        let b = [2.0, 2.0, 2.0, 2.0, 2.0];
+        assert_eq!(crossover(&a, &b), [false, true, false, false, false]);
+        assert_eq!(crossunder(&a, &b), [false, false, false, false, false]);
+        let x = [1.0, 3.0, 2.0, 2.0, 1.0, 4.0];
+        eq(&pivot_high(&x, 1, 1), &[NAN, NAN, 3.0, NAN, NAN, NAN]);
+        eq(&pivot_low(&x, 1, 1), &[NAN, NAN, NAN, 2.0, NAN, 1.0]);
     }
 
     #[test]

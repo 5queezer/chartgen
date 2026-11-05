@@ -109,6 +109,22 @@ export const SeriesIndicatorSchema = z.object({
 // profile-derived `hlines` (POC/VAH/VAL, HVN/LVN nodes) from the initial
 // full load; ignore them on tail-poll (`bars=2`) and history-page
 // (`end_time`) responses, which only cover a slice of the chart.
+// A failed user-script indicator (ADR-0025): `ScriptError::to_json`.
+// `step` is the pipeline stage ("runtime" on a chart), `line` 1-based.
+export const IndicatorErrorSchema = z.object({
+  step: z.string(),
+  line: z.number().int().nullable(),
+  message: z.string(),
+});
+export type IndicatorError = z.infer<typeof IndicatorErrorSchema>;
+
+// Request key → error, for indicators left out of `indicators` because
+// they failed. Absent when every indicator computed (always, for
+// built-ins); servers that predate user scripts never send it.
+export const IndicatorErrorsSchema = z
+  .record(z.string(), IndicatorErrorSchema)
+  .optional();
+
 export const SeriesPayloadSchema = z.object({
   symbol: z.string().nullable(),
   interval: z.string().nullable(),
@@ -117,6 +133,7 @@ export const SeriesPayloadSchema = z.object({
   chart_style: z.enum(["candles", "heikin_ashi"]).optional(),
   bars: z.array(SeriesBarSchema),
   indicators: z.record(z.string(), SeriesIndicatorSchema),
+  indicator_errors: IndicatorErrorsSchema,
   // True when older bars may exist before `bars[0]`: request them with
   // `end_time = bars[0].t * 1000`. Binance/sample: the full
   // `bars + warmup` count came back. Yahoo: the window was not cut by
@@ -214,6 +231,7 @@ export const SummaryPayloadSchema = z.object({
   interval: z.string().nullable(),
   price: OhlcvSummarySchema,
   indicators: z.record(z.string(), SummaryIndicatorSchema),
+  indicator_errors: IndicatorErrorsSchema,
 });
 export type SummaryPayload = z.infer<typeof SummaryPayloadSchema>;
 
@@ -242,6 +260,9 @@ export const IndicatorInfoSchema = z.object({
   overlay: z.boolean(),
   aliases: z.array(z.string()).optional(),
   configurable_params: z.array(ParamSpecSchema).optional(),
+  // "user" for the caller's own scripted indicators (ADR-0025); absent
+  // for built-ins.
+  source: z.literal("user").optional(),
 });
 
 export const ListIndicatorsPayloadSchema = z.object({

@@ -24,6 +24,7 @@ export default defineConfig({
             { label: 'Quick Start', slug: 'guides/quickstart' },
             { label: 'Trading', slug: 'guides/trading' },
             { label: 'Push notifications', slug: 'guides/notifications' },
+            { label: 'Scripted indicators', slug: 'guides/scripted-indicators' },
             { label: 'Web frontend', slug: 'guides/web' },
             { label: 'Testing', slug: 'guides/testing' },
             { label: 'TypeScript Types for MCP', slug: 'guides/types' },

@@ -17,13 +17,33 @@ use uuid::Uuid;
 use crate::chart_push::{ChartHub, PushCtx, STREAM_BUFFER};
 use crate::mcp::handle_mcp_request;
 use chartgen::engine::Engine as TradingEngine;
+#[cfg(feature = "scripting")]
+use chartgen::scripting;
 
 // --- OAuth 2.1 PKCE in-memory store ---
 
 struct OAuthClient {
     _client_secret: Option<String>,
     redirect_uris: Vec<String>,
+    created_at: Instant,
+    /// Received a token at least once (unused clients are collected).
+    tokened: bool,
 }
+
+/// Dynamic client registration limits: `/authorize` auto-approves, so
+/// anyone can register; these keep the client table bounded.
+const MAX_REDIRECT_URIS: usize = 5;
+const MAX_REDIRECT_URI_LEN: usize = 512;
+const MAX_CLIENT_NAME_LEN: usize = 256;
+const MAX_CLIENTS: usize = 1000;
+/// Registrations per client address (the TCP peer) per `REGISTER_WINDOW`.
+/// Loopback peers are exempt: local tests and dev clients register freely,
+/// and behind a reverse proxy on the same host the peer is always loopback,
+/// so there only `MAX_CLIENTS` applies.
+const MAX_REGISTRATIONS_PER_IP: usize = 20;
+const REGISTER_WINDOW: Duration = Duration::from_secs(600);
+/// A client that never received a token is forgotten after this long.
+const UNUSED_CLIENT_TTL: Duration = Duration::from_secs(24 * 3600);
 
 struct AuthCode {
     _code: String,
@@ -36,7 +56,8 @@ struct AuthCode {
 
 struct AccessToken {
     _token: String,
-    _client_id: String,
+    #[cfg_attr(not(feature = "scripting"), allow(dead_code))]
+    client_id: String,
     created_at: Instant,
     expires_in: Duration,
 }
@@ -45,6 +66,8 @@ struct OAuthStore {
     clients: HashMap<String, OAuthClient>,
     codes: HashMap<String, AuthCode>,
     tokens: HashMap<String, AccessToken>,
+    /// Recent `/register` calls per client address.
+    registrations: HashMap<String, Vec<Instant>>,
 }
 
 impl OAuthStore {
@@ -53,7 +76,69 @@ impl OAuthStore {
             clients: HashMap::new(),
             codes: HashMap::new(),
             tokens: HashMap::new(),
+            registrations: HashMap::new(),
         }
+    }
+
+    /// Check a registration from `ip` against the limits, and count it.
+    /// Forgets clients that never got a token within `UNUSED_CLIENT_TTL`.
+    fn admit_registration(
+        &mut self,
+        ip: &str,
+        body: &RegisterRequest,
+    ) -> Result<(), (StatusCode, Value)> {
+        let bad = |what: String| {
+            Err((
+                StatusCode::BAD_REQUEST,
+                json!({"error": "invalid_client_metadata", "error_description": what}),
+            ))
+        };
+        if body.redirect_uris.is_empty() || body.redirect_uris.len() > MAX_REDIRECT_URIS {
+            return bad(format!("1 to {MAX_REDIRECT_URIS} redirect_uris required"));
+        }
+        if body
+            .redirect_uris
+            .iter()
+            .any(|u| u.len() > MAX_REDIRECT_URI_LEN)
+        {
+            return bad(format!(
+                "redirect_uris are limited to {MAX_REDIRECT_URI_LEN} characters"
+            ));
+        }
+        if body
+            .client_name
+            .as_ref()
+            .is_some_and(|n| n.len() > MAX_CLIENT_NAME_LEN)
+        {
+            return bad(format!(
+                "client_name is limited to {MAX_CLIENT_NAME_LEN} characters"
+            ));
+        }
+        let now = Instant::now();
+        self.registrations.retain(|_, hits| {
+            hits.retain(|t| now.duration_since(*t) < REGISTER_WINDOW);
+            !hits.is_empty()
+        });
+        let loopback = ip
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|a| a.is_loopback());
+        let hits = self.registrations.entry(ip.to_owned()).or_default();
+        if !loopback && hits.len() >= MAX_REGISTRATIONS_PER_IP {
+            return Err((
+                StatusCode::TOO_MANY_REQUESTS,
+                json!({"error": "slow_down", "error_description": "too many client registrations; try again later"}),
+            ));
+        }
+        hits.push(now);
+        self.clients
+            .retain(|_, c| c.tokened || now.duration_since(c.created_at) < UNUSED_CLIENT_TTL);
+        if self.clients.len() >= MAX_CLIENTS {
+            return Err((
+                StatusCode::SERVICE_UNAVAILABLE,
+                json!({"error": "temporarily_unavailable", "error_description": "client registry is full"}),
+            ));
+        }
+        Ok(())
     }
 
     fn cleanup_expired(&mut self) {
@@ -67,6 +152,14 @@ impl OAuthStore {
     fn validate_token(&mut self, token: &str) -> bool {
         self.cleanup_expired();
         self.tokens.contains_key(token)
+    }
+
+    /// The OAuth client a valid token was issued to: the owner of that
+    /// caller's scripted indicators (ADR-0025).
+    #[cfg(feature = "scripting")]
+    fn client_for_token(&mut self, token: &str) -> Option<String> {
+        self.cleanup_expired();
+        self.tokens.get(token).map(|t| t.client_id.clone())
     }
 }
 
@@ -120,18 +213,29 @@ struct RegisterRequest {
 
 async fn oauth_register(
     State(state): State<SharedState>,
+    ext: axum::http::Extensions,
     Json(body): Json<RegisterRequest>,
 ) -> (StatusCode, Json<Value>) {
     eprintln!(
-        "[OAuth] POST /register client_name={:?} redirect_uris={:?}",
-        body.client_name, body.redirect_uris
+        "[OAuth] POST /register redirect_uris={}",
+        body.redirect_uris.len()
     );
+    if let Err((status, err)) = state
+        .oauth
+        .lock()
+        .unwrap()
+        .admit_registration(&client_addr(&ext), &body)
+    {
+        return (status, Json(err));
+    }
     let client_id = Uuid::new_v4().to_string();
     let client_secret = Uuid::new_v4().to_string();
 
     let client = OAuthClient {
         _client_secret: Some(client_secret.clone()),
         redirect_uris: body.redirect_uris.clone(),
+        created_at: Instant::now(),
+        tokened: false,
     };
 
     state
@@ -140,6 +244,19 @@ async fn oauth_register(
         .unwrap()
         .clients
         .insert(client_id.clone(), client);
+    // With scripting on, the client id owns stored indicators, so it must
+    // survive restarts: persist the registration (ADR-0025).
+    #[cfg(feature = "scripting")]
+    if scripting::enabled() {
+        if let Some(store) = scripting::persistence::global() {
+            let saved = store
+                .gc_oauth_clients(UNUSED_CLIENT_TTL.as_secs() as i64)
+                .and_then(|_| store.save_oauth_client(&client_id, &body.redirect_uris));
+            if let Err(e) = saved {
+                eprintln!("[OAuth] could not persist a client registration: {e}");
+            }
+        }
+    }
 
     (
         StatusCode::CREATED,
@@ -177,10 +294,7 @@ async fn oauth_authorize(
     State(state): State<SharedState>,
     Query(params): Query<AuthorizeQuery>,
 ) -> Response {
-    eprintln!(
-        "[OAuth] GET /authorize client_id={} redirect_uri={}",
-        params.client_id, params.redirect_uri
-    );
+    eprintln!("[OAuth] GET /authorize");
     let mut s = state.oauth.lock().unwrap();
     s.cleanup_expired();
 
@@ -247,12 +361,11 @@ async fn oauth_token(
         .get(header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
         .unwrap_or("none");
-    let body_preview = String::from_utf8_lossy(&body_bytes);
+    // Never log the body: it carries the code, verifier and client_id.
     eprintln!(
-        "[OAuth] POST /token content-type={} body_len={} body={}",
+        "[OAuth] POST /token content-type={} body_len={}",
         ct,
-        body_bytes.len(),
-        &body_preview[..body_preview.len().min(500)]
+        body_bytes.len()
     );
     let body: TokenRequest = if headers
         .get(header::CONTENT_TYPE)
@@ -273,7 +386,6 @@ async fn oauth_token(
         // Parse as application/x-www-form-urlencoded
         let body_str = String::from_utf8_lossy(&body_bytes);
         let parsed_json = form_to_json(&body_str);
-        eprintln!("[OAuth] POST /token parsed_form={}", parsed_json);
         match serde_json::from_value(parsed_json) {
             Ok(b) => b,
             Err(e) => {
@@ -336,12 +448,7 @@ async fn oauth_token(
 
     // PKCE S256 verification
     let pkce_ok = verify_pkce(&body.code_verifier, &stored_challenge);
-    eprintln!(
-        "[OAuth] POST /token PKCE verify: ok={} verifier_len={} challenge={}",
-        pkce_ok,
-        body.code_verifier.len(),
-        stored_challenge
-    );
+    eprintln!("[OAuth] POST /token PKCE verify: ok={}", pkce_ok);
     if !pkce_ok {
         return (
             StatusCode::BAD_REQUEST,
@@ -359,11 +466,22 @@ async fn oauth_token(
         token.clone(),
         AccessToken {
             _token: token.clone(),
-            _client_id: body.client_id.clone(),
+            client_id: body.client_id.clone(),
             created_at: Instant::now(),
             expires_in,
         },
     );
+    if let Some(c) = s.clients.get_mut(&body.client_id) {
+        c.tokened = true;
+    }
+    #[cfg(feature = "scripting")]
+    if scripting::enabled() {
+        if let Some(store) = scripting::persistence::global() {
+            if let Err(e) = store.mark_oauth_client_used(&body.client_id) {
+                eprintln!("[OAuth] could not record client use: {e}");
+            }
+        }
+    }
 
     eprintln!(
         "[OAuth] POST /token SUCCESS — token issued (len={})",
@@ -677,6 +795,14 @@ async fn mcp_handler(
 
     // Extract token for subscription tools
     let token_owned = extract_bearer_token(&headers).map(|t| t.to_string());
+    // Scripted indicators belong to the token's OAuth client (ADR-0025).
+    #[cfg(feature = "scripting")]
+    let user = match &token_owned {
+        Some(t) if scripting::enabled() => state.oauth.lock().unwrap().client_for_token(t),
+        _ => None,
+    };
+    #[cfg(not(feature = "scripting"))]
+    let user: Option<String> = None;
 
     // Run MCP handler in a blocking task (chart rendering + data fetching use blocking I/O)
     let method_owned = method.to_string();
@@ -695,6 +821,7 @@ async fn mcp_handler(
             engine.as_ref(),
             token_owned.as_deref(),
             push.as_ref(),
+            user.as_deref(),
         )
     })
     .await
@@ -877,8 +1004,45 @@ impl Drop for CleanupStream {
 // --- Server startup ---
 
 pub async fn run_server(port: u16, engine: Option<Arc<RwLock<TradingEngine>>>) {
+    #[cfg_attr(not(feature = "scripting"), allow(unused_mut))]
+    let mut oauth = OAuthStore::new();
+    // Scripting: open (and migrate) the store at startup and restore the
+    // registered OAuth clients, so their scripts stay theirs (ADR-0025).
+    #[cfg(feature = "scripting")]
+    if scripting::enabled() {
+        let path = scripting::persistence::db_path();
+        let ttl = UNUSED_CLIENT_TTL.as_secs() as i64;
+        let restored = scripting::persistence::global()
+            .map(|s| s.gc_oauth_clients(ttl).and_then(|_| s.oauth_clients()));
+        match restored {
+            Some(Ok(clients)) => {
+                println!(
+                    "Scripting enabled: {} ({} OAuth clients restored)",
+                    path.display(),
+                    clients.len()
+                );
+                let now_unix = chrono::Utc::now().timestamp();
+                for c in clients {
+                    let age = Duration::from_secs((now_unix - c.created_at).max(0) as u64);
+                    oauth.clients.insert(
+                        c.client_id,
+                        OAuthClient {
+                            _client_secret: None,
+                            redirect_uris: c.redirect_uris,
+                            created_at: Instant::now()
+                                .checked_sub(age)
+                                .unwrap_or_else(Instant::now),
+                            tokened: c.last_token_at.is_some(),
+                        },
+                    );
+                }
+            }
+            Some(Err(e)) => eprintln!("[scripting] cannot read OAuth clients: {e}"),
+            None => eprintln!("[scripting] store unavailable at {}", path.display()),
+        }
+    }
     let state = Arc::new(AppState {
-        oauth: Mutex::new(OAuthStore::new()),
+        oauth: Mutex::new(oauth),
         engine,
         charts: ChartHub::from_env(),
     });
@@ -1258,7 +1422,7 @@ mod tests {
                 "test-token".to_string(),
                 AccessToken {
                     _token: "test-token".to_string(),
-                    _client_id: "test".to_string(),
+                    client_id: "test".to_string(),
                     created_at: Instant::now(),
                     expires_in: Duration::from_secs(3600),
                 },
@@ -1372,7 +1536,7 @@ mod tests {
             "push-token".to_string(),
             AccessToken {
                 _token: "push-token".to_string(),
-                _client_id: "test".to_string(),
+                client_id: "test".to_string(),
                 created_at: Instant::now(),
                 expires_in: Duration::from_secs(3600),
             },
@@ -1433,7 +1597,7 @@ mod tests {
             "push-token".to_string(),
             AccessToken {
                 _token: "push-token".to_string(),
-                _client_id: "test".to_string(),
+                client_id: "test".to_string(),
                 created_at: Instant::now(),
                 expires_in: Duration::from_secs(3600),
             },
@@ -1501,5 +1665,74 @@ mod tests {
         // Closing the stream ends its subscriptions; the feed lingers 30 s.
         drop(body);
         assert_eq!(state.charts.counts(), (0, 0, 1));
+    }
+
+    // --- dynamic client registration limits ---
+
+    fn reg(uris: &[&str]) -> RegisterRequest {
+        RegisterRequest {
+            redirect_uris: uris.iter().map(|u| u.to_string()).collect(),
+            client_name: None,
+        }
+    }
+
+    fn client(age: Duration, tokened: bool) -> OAuthClient {
+        OAuthClient {
+            _client_secret: None,
+            redirect_uris: vec![],
+            created_at: Instant::now() - age,
+            tokened,
+        }
+    }
+
+    #[test]
+    fn registration_metadata_is_capped() {
+        let mut s = OAuthStore::new();
+        let ok = reg(&["http://localhost/cb"]);
+        assert!(s.admit_registration("1.1.1.1", &ok).is_ok());
+        let (status, _) = s.admit_registration("1.1.1.1", &reg(&[])).unwrap_err();
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let six = reg(&["http://a/1"; 6]);
+        assert!(s.admit_registration("1.1.1.1", &six).is_err());
+        let long = "http://a/".to_string() + &"x".repeat(MAX_REDIRECT_URI_LEN);
+        assert!(s.admit_registration("1.1.1.1", &reg(&[&long])).is_err());
+        let mut named = reg(&["http://a/1"]);
+        named.client_name = Some("n".repeat(MAX_CLIENT_NAME_LEN + 1));
+        assert!(s.admit_registration("1.1.1.1", &named).is_err());
+    }
+
+    #[test]
+    fn registration_is_rate_limited_per_address() {
+        let mut s = OAuthStore::new();
+        let ok = reg(&["http://localhost/cb"]);
+        for _ in 0..MAX_REGISTRATIONS_PER_IP {
+            assert!(s.admit_registration("2.2.2.2", &ok).is_ok());
+        }
+        let (status, _) = s.admit_registration("2.2.2.2", &ok).unwrap_err();
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+        assert!(s.admit_registration("3.3.3.3", &ok).is_ok(), "per address");
+        for _ in 0..=MAX_REGISTRATIONS_PER_IP {
+            assert!(s.admit_registration("127.0.0.1", &ok).is_ok(), "loopback");
+        }
+    }
+
+    #[test]
+    fn registry_is_bounded_and_unused_clients_expire() {
+        let mut s = OAuthStore::new();
+        for i in 0..MAX_CLIENTS {
+            s.clients
+                .insert(format!("c{i}"), client(Duration::from_secs(60), false));
+        }
+        let ok = reg(&["http://localhost/cb"]);
+        let (status, _) = s.admit_registration("4.4.4.4", &ok).unwrap_err();
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        // never-used clients older than a day are collected; used ones stay
+        s.clients
+            .insert("c0".into(), client(UNUSED_CLIENT_TTL * 2, false));
+        s.clients
+            .insert("c1".into(), client(UNUSED_CLIENT_TTL * 2, true));
+        assert!(s.admit_registration("4.4.4.4", &ok).is_ok());
+        assert!(!s.clients.contains_key("c0"));
+        assert!(s.clients.contains_key("c1"));
     }
 }
