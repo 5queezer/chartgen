@@ -154,7 +154,12 @@ function SettingsForm(props: { onClose: () => void }): JSX.Element {
             <Part label="Borders" part="borderOn" up="borderUp" down="borderDown" />
             <Part label="Wick" part="wickOn" up="wickUp" down="wickDown" />
             <div class={rowClass}>
-              <span class="text-sm">Line and area</span>
+              <span class="text-sm" title="Also Line with markers, Step line and High-low">
+                Line and area
+                <span class="block text-xs text-[color:var(--color-fg-muted)]">
+                  Also markers, step line, high-low
+                </span>
+              </span>
               <Swatch label="Line and area" color="line" />
             </div>
           </div>

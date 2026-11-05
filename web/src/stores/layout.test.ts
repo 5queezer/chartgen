@@ -67,6 +67,15 @@ describe("layout store", () => {
     expect(s.chartStyleOf("candles")).toBe("candles");
   });
 
+  it("restores the client-drawn chart types, which load plain candles", async () => {
+    for (const t of ["baseline", "columns", "high_low", "step_line", "line_markers"]) {
+      stubStorage({ "chartgen.layout.chartType": JSON.stringify(t) });
+      const s = await load();
+      expect(s.chartType()).toBe(t);
+      expect(s.chartStyleOf(s.chartType())).toBe("candles");
+    }
+  });
+
   it("persists changes", async () => {
     const data = stubStorage();
     const s = await load();

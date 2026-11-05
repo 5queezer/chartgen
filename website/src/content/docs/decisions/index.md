@@ -56,3 +56,4 @@ one and link both ways.
 | [0026](/chartgen/decisions/0026-line-and-histogram-colors/) | Line and histogram colors on the wire | Accepted | 2026-11-05 |
 | [0027](/chartgen/decisions/0027-serve-web-app-same-origin/) | Serve the web app from the MCP server's origin | Accepted | 2026-11-05 |
 | [0029](/chartgen/decisions/0029-shareable-chart-links/) | Shareable chart links as query parameters | Accepted | 2026-11-05 |
+| [0030](/chartgen/decisions/0030-custom-chart-types/) | Chart types klinecharts does not draw | Accepted | 2026-11-05 |
