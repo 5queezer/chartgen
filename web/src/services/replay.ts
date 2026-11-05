@@ -11,17 +11,27 @@
 // The cursor is a replay clock: the close time of the cursor bar. A frame
 // holds every bar closed by then, so a history page (indices shift) keeps
 // the cursor, and a symbol, timeframe or indicator change (new data) is cut
-// again at the same clock; data that starts after it is paged back first.
+// again at the same clock; data that starts after it is paged back first,
+// and while no bar is closed by the clock the frame is empty, with a notice.
 // Frames come from the live snapshot (full series), the clock and the latest
-// server recompute of the repainting indicators, which runs at most every
-// RECOMPUTE_THROTTLE_MS while the cursor moves, and once more on pause.
+// server recompute of the repainting indicators. Recomputes run one at a
+// time, at most every RECOMPUTE_THROTTLE_MS while the cursor moves and once
+// more on pause; one that lands after the cursor moved on is still used.
 //
 // Price alerts never see a frame: they are fed from the live feed's own
 // snapshots (App.tsx), which carry no tail while replaying.
 
 import { batch, createEffect, createMemo, createSignal, onCleanup, untrack, type Accessor } from "solid-js";
 
-import { WARMUP, type FetchArgs, type LiveFeed, type LiveRequest, type LiveSnapshot } from "../lib/liveFeed";
+import {
+  WARMUP,
+  type FetchArgs,
+  type LiveFeed,
+  type LiveRequest,
+  type LiveSnapshot,
+  type LoadUntilResult,
+  type VisibilityDoc,
+} from "../lib/liveFeed";
 import {
   RECOMPUTE_BARS,
   RECOMPUTE_THROTTLE_MS,
@@ -35,6 +45,7 @@ import {
   isRepainting,
   playDelayMs,
   replayFrame,
+  replayLags,
   stepCursor,
   type FrameKey,
   type ReplaySpeed,
@@ -43,9 +54,6 @@ import { indicatorName } from "../stores/indicators";
 import type { SeriesPayload } from "../types/responses";
 
 export type ReplayMode = "off" | "select" | "active";
-
-/** The page visibility as the live feeds see it. */
-export type ReplayDoc = Pick<Document, "visibilityState" | "addEventListener" | "removeEventListener">;
 
 export interface ReplayOptions {
   /** The live feed's latest snapshot: the full series. */
@@ -69,7 +77,9 @@ export interface Replay {
   /** What the chart shows: the live snapshot, or the replay frame. */
   snapshot: Accessor<LiveSnapshot | null>;
   /** Pass to the live feeds as their `doc`. */
-  liveDoc: ReplayDoc;
+  liveDoc: VisibilityDoc;
+  /** Why the frame is empty or history is missing; null when all is well. */
+  notice: Accessor<string | null>;
   /** Enter replay in "select" mode; false when the chart cannot replay. */
   enter: () => boolean;
   /** Back to "select" to pick a new start. */
@@ -103,6 +113,9 @@ export function createReplay(opts: ReplayOptions): Replay {
   const [playing, setPlaying] = createSignal(false);
   const [speed, setSpeedSignal] = createSignal<ReplaySpeed>(1);
   const [recomputed, setRecomputed] = createSignal<Recompute | null>(null);
+  // Paging history back to the clock, and how the last attempt failed.
+  const [paging, setPaging] = createSignal(false);
+  const [pageError, setPageError] = createSignal<string | null>(null);
   // Mirrors `mode` for `liveDoc`, which the feeds read from timers and from
   // inside a batch, where a signal read could lag behind.
   let replaying = false;
@@ -111,7 +124,7 @@ export function createReplay(opts: ReplayOptions): Replay {
     setModeSignal(m);
   };
 
-  const liveDoc: ReplayDoc = {
+  const liveDoc: VisibilityDoc = {
     get visibilityState() {
       return replaying ? "hidden" : document.visibilityState;
     },
@@ -146,8 +159,10 @@ export function createReplay(opts: ReplayOptions): Replay {
       return live;
     }
     const base = live.series;
-    const cursor = Math.max(0, indexClosedBy(base.bars, c, base.interval));
-    const series = replayFrame(base, cursor, rc?.payload ?? null);
+    // -1: no bar closed by the clock (history starts later): an empty frame.
+    const cursor = indexClosedBy(base.bars, c, base.interval);
+    const lags = replayLags(opts.request()?.indicators ?? []);
+    const series = replayFrame(base, cursor, rc?.payload ?? null, lags);
     const key: FrameKey = {
       baseVersion: live.update.version,
       cursor,
@@ -166,8 +181,16 @@ export function createReplay(opts: ReplayOptions): Replay {
     mode() === "active" ? (snapshot()?.series.bars.at(-1)?.t ?? null) : null,
   );
 
+  /** Shown when history could not be paged back far enough. */
+  const failed = (r: LoadUntilResult): string | null =>
+    r === "error"
+      ? "Could not load the history before the replay start"
+      : r === "limit"
+        ? "History limit reached before the replay start"
+        : null;
+
   // New data (another timeframe or symbol) can start after the clock: page
-  // history back to it. Until then the frame holds the first bar.
+  // history back to it. Until then the frame is empty.
   let pagingTo: number | null = null;
   createEffect(() => {
     const c = clock();
@@ -176,28 +199,51 @@ export function createReplay(opts: ReplayOptions): Replay {
     if (mode() !== "active" || c === null || first == null || pagingTo === c) return;
     if (closeOf(first, series!.interval) <= c) return;
     pagingTo = c;
+    setPaging(true);
     const isCurrent = () => untrack(mode) === "active" && untrack(clock) === c;
     // The bar closing at the clock opens one bar length before it.
-    void opts.loadUntil(c - (closeOf(first, series!.interval) - first), isCurrent).finally(() => {
-      if (pagingTo === c) pagingTo = null;
+    void opts.loadUntil(c - (closeOf(first, series!.interval) - first), isCurrent).then((r) => {
+      if (pagingTo !== c) return;
+      pagingTo = null;
+      setPaging(false);
+      setPageError(failed(r));
     });
   });
 
+  const notice = createMemo(() => {
+    if (mode() !== "active") return null;
+    if (paging()) return "Loading history…";
+    const empty = snapshot()?.series.bars.length === 0;
+    return pageError() ?? (empty ? "No data before the replay start" : null);
+  });
+
   // --- Server recompute of the repainting indicators -------------------
+  // One at a time: aborting the one in flight for each newer cursor would
+  // starve the recompute while playing (every response outrun by the next
+  // step). A call meanwhile is kept and made once the one in flight settles.
   let abort: AbortController | null = null;
-  let seq = 0;
+  let pending = false;
   let rev = 0;
   const recompute = () => {
-    abort?.abort();
-    abort = null;
+    if (abort) {
+      pending = true;
+      return;
+    }
     const req = opts.request();
     const c = untrack(clock);
     if (!req || c === null || untrack(mode) !== "active") return;
     const indicators = req.indicators.filter((e) => isRepainting(indicatorName(e)));
     if (indicators.length === 0) return;
-    const my = ++seq;
     const ctrl = (abort = new AbortController());
     const key = JSON.stringify(req);
+    const settle = () => {
+      if (abort !== ctrl) return; // Replay ended meanwhile.
+      abort = null;
+      if (pending) {
+        pending = false;
+        recompute();
+      }
+    };
     // end_time is exclusive on the bar open: bars opening before the clock
     // are exactly those closed by it.
     opts
@@ -207,10 +253,16 @@ export function createReplay(opts: ReplayOptions): Replay {
       )
       .then(
         (payload) => {
-          if (my === seq) setRecomputed({ key, clock: c, payload, rev: ++rev });
+          // Still ahead of the clock (the cursor moved back): it would show
+          // the future, so the last usable one stays.
+          const now = untrack(clock);
+          if (abort === ctrl && now !== null && c <= now) {
+            setRecomputed({ key, clock: c, payload, rev: ++rev });
+          }
+          settle();
         },
         // Keep the last one; the next cursor move asks again.
-        () => {},
+        settle,
       );
   };
   const throttle = createThrottle(recompute, RECOMPUTE_THROTTLE_MS);
@@ -219,7 +271,9 @@ export function createReplay(opts: ReplayOptions): Replay {
       throttle.cancel();
       abort?.abort();
       abort = null;
+      pending = false;
       setRecomputed(null);
+      setPageError(null);
       return;
     }
     clock();
@@ -266,6 +320,7 @@ export function createReplay(opts: ReplayOptions): Replay {
     if (t == null) return;
     pause();
     batch(() => {
+      setPageError(null);
       setClock(closeOf(t, series!.interval));
       setMode("active");
     });
@@ -294,6 +349,7 @@ export function createReplay(opts: ReplayOptions): Replay {
     cursorTime,
     snapshot,
     liveDoc,
+    notice,
     enter() {
       const bars = untrack(opts.live)?.series.bars;
       // Untimed (no-ticker demo) bars have no times to replay by.
@@ -312,11 +368,12 @@ export function createReplay(opts: ReplayOptions): Replay {
       const ts = ms / 1000;
       const isCurrent = () => untrack(mode) !== "off";
       const first = untrack(opts.live)?.series.bars[0]?.t;
-      if (first != null && ts < first) await opts.loadUntil(ts, isCurrent);
+      const result = first != null && ts < first ? await opts.loadUntil(ts, isCurrent) : null;
       const bars = untrack(opts.live)?.series.bars;
       if (!isCurrent() || !bars) return;
-      // The bar the date falls in.
+      // The bar the date falls in; the first bar if history ends later.
       startAt(Math.max(0, cursorIndexAt(bars, ts)));
+      if (result) setPageError(failed(result));
     },
     step,
     togglePlay() {
