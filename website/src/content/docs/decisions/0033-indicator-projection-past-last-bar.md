@@ -62,14 +62,16 @@ Chosen: **option 2.**
 }
 ```
 
-- `bars` is the number of projected bars. `lines[k].index` and
+- `bars` is the number of projected bars, at most 500 (Pine's limit on a
+  plot `offset`). `lines[k].index` and
   `fills[k].index` name the plot they continue. Each array holds `bars`
   values: value `j` belongs to the `j`-th bar after the last one. NaN is
   `null`, as everywhere in the payload.
-- `t` holds those bars' open times. They step on from the last bar by the
-  interval (`data::interval_secs`), in calendar time: a stock's projection
-  does not skip weekends or closed hours. `t` is absent when the last bar
-  has no timestamp.
+- `t` holds those bars' open times (`data::future_bar_times`). They step
+  on from the last bar by the interval; monthly and quarterly bars step by
+  calendar months. Daily and longer bars skip Saturday and Sunday when no
+  loaded bar falls on a weekend (a stock, not crypto). `t` is absent when
+  the last bar has no timestamp.
 - Engine: `Indicator::projection(&data) -> Option<Projection>`, `None` by
   default. Ichimoku returns the Senkou A and B spans of its last
   `displacement - 1` bars, which are lines 2 and 3 and fill 0. Its new
@@ -82,7 +84,10 @@ Chosen: **option 2.**
   and ignores a page's.
 - Web: the chart sets klinecharts' right offset to `bars + 3` bars while
   something projects, as TradingView widens its right margin (80 px
-  otherwise). The indicator's `draw` callback paints the projected cloud
+  otherwise), but to at most half the pane. klinecharts stores that offset
+  in pixels and returns to it on `scrollToRealTime`, so the chart refits it
+  at the current bar width on every full load, End, Reset and date-range
+  fit. A wheel or key zoom keeps the margin in bars and needs no refit. The indicator's `draw` callback paints the projected cloud
   and span lines from the last bar on, at `xAxis.convertToPixel(index)`
   for indices past the data. Over that area the crosshair uses
   klinecharts' unclamped `realDataIndex`. The legend and Data Window then
@@ -101,9 +106,11 @@ projected spans with timestamps. Old clients parse the payload unchanged.
 
 - A second channel to keep in step. Code that slices or merges per-bar
   arrays (merge, replay) must also handle `future`.
-- The future times are calendar steps. TradingView skips session gaps for
-  stocks, so a daily stock projection reads a few days later on
-  TradingView.
+- Exchange sessions and holidays are not modelled: intraday stock bars
+  step through closed hours and daily bars through holidays, which
+  TradingView skips. That is deferred until bars carry their session.
+- At a wide zoom the half-pane cap leaves the end of a long projection off
+  screen; scrolling left shows it.
 - klinecharts draws no x-axis ticks or crosshair time label past the last
   bar. The future time shows only in the legend and the Data Window.
 - The PNG renderer still ends at the last bar. Only the web chart draws

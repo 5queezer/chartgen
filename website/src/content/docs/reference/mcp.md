@@ -309,13 +309,16 @@ bars ahead of price.
 }
 ```
 
-- `bars` is the number of bars after the last one. Value `j` of every
+- `bars` is the number of bars after the last one, at most 500. Value `j` of every
   array belongs to the `j`-th of them.
 - `lines[k].index` and `fills[k].index` name the line or fill the values
   continue: Senkou A (line 2), Senkou B (line 3) and the cloud (fill 0).
 - `t` is those bars' open times: the last bar's time plus `j + 1`
-  intervals, in calendar time (closed sessions are not skipped). It is
-  absent when the bars have no timestamps.
+  intervals. Monthly (`1M`, `1mo`) and quarterly (`3mo`) bars step by
+  calendar months. Daily and longer bars skip Saturday and Sunday when the
+  loaded bars have none on a weekend (stocks); exchange holidays and
+  intraday closed hours are not skipped. It is absent when the bars have
+  no timestamps.
 - The per-bar arrays are unchanged, so clients that ignore `future` keep
   working. Every series response carries the block, tails and pushes
   included: the forming bar moves the newest projected values. Take it

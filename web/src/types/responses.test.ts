@@ -73,6 +73,7 @@ describe("future (ADR-0033)", () => {
 
   it("rejects a malformed projection", () => {
     expect(() => SeriesPayloadSchema.parse(withFuture({ bars: 2, lines: [] }))).toThrow();
+    expect(() => SeriesPayloadSchema.parse(withFuture({ ...future, bars: -1 }))).toThrow();
   });
 });
 

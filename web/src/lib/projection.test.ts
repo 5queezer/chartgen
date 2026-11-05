@@ -5,13 +5,16 @@ import type { SeriesPayload } from "../types/responses";
 import { dataWindowRows } from "./dataWindow";
 import {
   DEFAULT_RIGHT_OFFSET,
+  fitProjection,
   futureFills,
   futureLines,
   futureTime,
   futureValue,
   inProjection,
   projectionBars,
+  projectionBarSpace,
   rightOffset,
+  setShownProjection,
   sliceFuture,
 } from "./projection";
 import { sliceSeries } from "./replay";
@@ -63,9 +66,39 @@ describe("projection (ADR-0033)", () => {
     const s = series();
     expect(projectionBars(s, ["ichimoku", "rsi"])).toBe(3);
     expect(projectionBars(s, ["rsi"])).toBe(0);
-    expect(rightOffset(0, 8)).toBe(DEFAULT_RIGHT_OFFSET);
-    expect(rightOffset(3, 8)).toBe(DEFAULT_RIGHT_OFFSET);
-    expect(rightOffset(26, 8)).toBe((26 + 3) * 8);
+    expect(rightOffset(0, 8, 1000)).toBe(DEFAULT_RIGHT_OFFSET);
+    expect(rightOffset(3, 8, 1000)).toBe(DEFAULT_RIGHT_OFFSET);
+    expect(rightOffset(26, 8, 1000)).toBe((26 + 3) * 8);
+    // At most half the pane: 500 bars at 8 px would be 4024 px.
+    expect(rightOffset(500, 8, 1000)).toBe(500);
+    expect(rightOffset(25, 20, 0)).toBe(28 * 20);
+  });
+
+  it("refits the margin at the chart's current bar width", () => {
+    const set: number[] = [];
+    let space = 8;
+    const chart = {
+      getBarSpace: () => space,
+      getSize: () => ({ width: 1000 }),
+      setOffsetRightDistance: (d: number) => set.push(d),
+    };
+    setShownProjection(25);
+    fitProjection(chart);
+    space = 20; // zoomed in: 25 bars now need 560 px, capped at 500
+    fitProjection(chart);
+    setShownProjection(0);
+    fitProjection(chart);
+    expect(set).toEqual([28 * 8, 500, DEFAULT_RIGHT_OFFSET]);
+  });
+
+  it("fits a date range together with the projection's margin", () => {
+    setShownProjection(25);
+    // 100 bars + 28 margin bars in 1280 px: 10 px each.
+    expect(projectionBarSpace(100, 1280)).toBe(10);
+    // 10 bars would leave a 737 px margin: the cap keeps it at half the pane.
+    expect(projectionBarSpace(10, 1000)).toBe(50);
+    setShownProjection(0);
+    expect(projectionBarSpace(100, 1280)).toBeNull();
   });
 
   it("reads projected values and times past the last bar", () => {

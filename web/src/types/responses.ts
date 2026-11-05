@@ -109,7 +109,7 @@ export const YRangeSchema = z.tuple([FiniteOrNull, FiniteOrNull]);
 // Ichimoku cloud's leading spans. `index` names the line / fill they
 // continue; `t` are the future bar times (absent without bar timestamps).
 export const SeriesFutureSchema = z.object({
-  bars: z.number().int(),
+  bars: z.number().int().nonnegative(),
   t: z.array(z.number().int()).optional(),
   lines: z.array(
     z.object({ index: z.number().int(), values: z.array(FiniteOrNull) }),

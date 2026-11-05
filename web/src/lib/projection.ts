@@ -30,12 +30,52 @@ export function projectionBars(
 
 /**
  * Right offset (px) that shows `bars` projected bars plus a small margin at
- * `barSpace` px per bar; the default when nothing is projected.
+ * `barSpace` px per bar, at most half of a `paneWidth` px pane (a long
+ * projection at a wide zoom would push every bar off screen); the default
+ * when nothing is projected.
  */
-export function rightOffset(bars: number, barSpace: number): number {
-  return bars > 0
-    ? Math.max(DEFAULT_RIGHT_OFFSET, (bars + MARGIN_BARS) * barSpace)
-    : DEFAULT_RIGHT_OFFSET;
+export function rightOffset(bars: number, barSpace: number, paneWidth: number): number {
+  if (bars <= 0) return DEFAULT_RIGHT_OFFSET;
+  const want = Math.max(DEFAULT_RIGHT_OFFSET, (bars + MARGIN_BARS) * barSpace);
+  return paneWidth > 0 ? Math.min(want, Math.max(DEFAULT_RIGHT_OFFSET, paneWidth / 2)) : want;
+}
+
+/** The klinecharts calls `fitProjection` makes (a structural subset of its Chart). */
+export interface OffsetChart {
+  getBarSpace: () => number;
+  getSize: (paneId?: string, position?: never) => { width: number } | null;
+  setOffsetRightDistance: (distance: number) => void;
+}
+
+// Bars the chart's shown indicators project: set by Chart.tsx per full load.
+let shownProjection = 0;
+
+/** Record how many bars the shown indicators project (0: none). */
+export function setShownProjection(bars: number): void {
+  shownProjection = bars;
+}
+
+/**
+ * Bar width that fits `count` bars plus the shown projection's margin into
+ * `width` px (the margin depends on the bar width); null when nothing is
+ * projected.
+ */
+export function projectionBarSpace(count: number, width: number): number | null {
+  if (shownProjection <= 0 || count <= 0) return null;
+  const free = width / (count + shownProjection + MARGIN_BARS);
+  const offset = rightOffset(shownProjection, free, width);
+  return (width - offset) / count;
+}
+
+/**
+ * Size the chart's right margin for the shown projection at its current bar
+ * width. klinecharts stores the margin in pixels and returns to it on
+ * scrollToRealTime, so call this before every scrollToRealTime and full
+ * data load; a wheel zoom keeps the margin in bars and needs nothing.
+ */
+export function fitProjection(chart: OffsetChart): void {
+  const width = chart.getSize("candle_pane", "main" as never)?.width ?? 0;
+  chart.setOffsetRightDistance(rightOffset(shownProjection, chart.getBarSpace(), width));
 }
 
 /** Future slot (0 = the bar after the last) of bar `index`, or null. */

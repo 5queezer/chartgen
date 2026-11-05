@@ -5,6 +5,7 @@
 import type { Chart as KLineChart } from "klinecharts";
 
 import { invertScale, setAutoScale, setInvertScale } from "../stores/layout";
+import { fitProjection } from "./projection";
 
 export type ChartAction =
   | "scrollLeft"
@@ -71,6 +72,7 @@ export function applyChartAction(chart: KLineChart, action: ChartAction): void {
       break;
     }
     case "end":
+      fitProjection(chart);
       chart.scrollToRealTime();
       break;
     case "reset":
@@ -86,6 +88,7 @@ export function applyChartAction(chart: KLineChart, action: ChartAction): void {
 export function resetChart(chart: KLineChart): void {
   setAutoScale(true);
   chart.setBarSpace(DEFAULT_BAR_SPACE);
+  fitProjection(chart);
   chart.scrollToRealTime();
 }
 

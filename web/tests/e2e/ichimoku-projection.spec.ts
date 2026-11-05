@@ -112,6 +112,43 @@ test("the cloud is drawn past the last bar and follows live ticks", async ({ pag
   }
 });
 
+test("after zooming in, End brings back room for the whole projection", async ({ page }) => {
+  await gotoApp(page);
+  await expect.poll(() => projected(page), { timeout: 15_000 }).toBeGreaterThan(500);
+  // Zoom in (klinecharts keeps the margin in bars), scroll back, then End,
+  // which returns to the margin in pixels: refitted at the new bar width.
+  await page.locator(".chart-host").click({ position: { x: 200, y: 200 } });
+  await page.keyboard.press("ArrowUp");
+  await page.keyboard.press("ArrowUp");
+  for (let i = 0; i < 10; i++) await page.keyboard.press("ArrowLeft");
+  await page.keyboard.press("End");
+  const h = await hook(page);
+  expect(h.barSpace).toBeGreaterThan(11);
+  expect(h.offset).toBeGreaterThanOrEqual(25 * h.barSpace);
+  // Cloud pixels on the 25th projected bar.
+  const band = await page.evaluate(
+    ({ from, to }) => {
+      const host = document.querySelector<HTMLElement>(".chart-container")!;
+      const left = host.getBoundingClientRect().left;
+      let count = 0;
+      for (const canvas of host.querySelectorAll<HTMLCanvasElement>("canvas")) {
+        const ctx = canvas.getContext("2d");
+        const rect = canvas.getBoundingClientRect();
+        if (!ctx || rect.width === 0) continue;
+        const scale = canvas.width / rect.width;
+        const x0 = Math.round((left + from - rect.left) * scale);
+        const x1 = Math.round((left + to - rect.left) * scale);
+        if (x0 < 0 || x1 > canvas.width || x1 <= x0) continue;
+        const d = ctx.getImageData(x0, 0, x1 - x0, canvas.height).data;
+        for (let i = 0; i < d.length; i += 4) if (Math.abs(d[i + 3]! - 51) <= 8) count++;
+      }
+      return count;
+    },
+    { from: h.lastX + 23.5 * h.barSpace, to: h.lastX + 24.5 * h.barSpace },
+  );
+  expect(band).toBeGreaterThan(0);
+});
+
 test("the legend reads the projected spans over the future bars", async ({ page }) => {
   await gotoApp(page);
   await expect.poll(() => projected(page), { timeout: 15_000 }).toBeGreaterThan(500);

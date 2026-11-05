@@ -116,13 +116,14 @@ import {
 } from "./geometry";
 import {
   FUTURE_LEGEND,
+  fitProjection,
   futureFills,
   futureLines,
   futureTime,
   futureValue,
   inProjection,
   projectionBars,
-  rightOffset,
+  setShownProjection,
 } from "../lib/projection";
 import { PaneHeader, type PaneHeaderLine } from "./PaneHeader";
 import { PriceAxisControls } from "./PriceAxisControls";
@@ -1411,6 +1412,7 @@ export function Chart(props: ChartProps): JSX.Element {
       appliedCompare = null;
       pendingOlder = null;
       c.clearData();
+      setShownProjection(0);
       const stale = untrack(paneIds);
       for (const name of Object.keys(stale)) {
         c.removeIndicator(stale[name]!, indicatorRegName(name));
@@ -1459,7 +1461,8 @@ export function Chart(props: ChartProps): JSX.Element {
     const klines = seriesToKLines(series, 0, series.bars.length, compare);
     // Room right of the last bar for any projection (Ichimoku's cloud), as
     // TradingView extends its right margin; applyNewData scrolls to it.
-    c.setOffsetRightDistance(rightOffset(projectionBars(series, names), c.getBarSpace()));
+    setShownProjection(projectionBars(series, names));
+    fitProjection(c);
     c.applyNewData(klines, canPageBefore(series));
     c.setPriceVolumePrecision(precision, VOLUME_PRECISION);
 
