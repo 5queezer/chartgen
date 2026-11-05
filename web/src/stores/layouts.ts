@@ -1,5 +1,5 @@
 // Named chart layouts (ADR-0015). A layout bundles symbol, timeframe, chart
-// type, scale mode and the indicator set. The live state stays in
+// type, scale mode, time zone and the indicator set. The live state stays in
 // the existing stores (layout, indicators); this store keeps the
 // saved snapshots under `chartgen.layouts` and applies them back through the
 // other stores' setters, so their persisted formats are untouched.
@@ -10,6 +10,10 @@
 import { batch, createSignal } from "solid-js";
 
 import { isTimeframe, type Timeframe } from "../lib/timeframe";
+import {
+  isTimeZoneChoice,
+  type TimeZoneChoice,
+} from "../lib/timezone";
 import {
   activeIndicators,
   DEFAULT_SET,
@@ -34,8 +38,10 @@ import {
   setScaleMode,
   setSymbol,
   setTimeframe,
+  setTimeZone,
   symbol,
   timeframe,
+  timeZone,
   type ChartType,
   type ScaleMode,
 } from "./layout";
@@ -57,6 +63,7 @@ export interface LayoutState {
   timeframe: Timeframe;
   chartType: ChartType;
   scaleMode: ScaleMode;
+  timeZone: TimeZoneChoice;
   indicators: ActiveIndicator[];
 }
 
@@ -153,6 +160,8 @@ export function parseState(x: unknown): LayoutState | null {
     timeframe: x.timeframe,
     chartType: x.chartType as ChartType,
     scaleMode: x.scaleMode as ScaleMode,
+    // Layouts saved before time zones existed keep the current zone.
+    timeZone: isTimeZoneChoice(x.timeZone) ? x.timeZone : timeZone(),
     indicators,
   };
 }
@@ -257,6 +266,7 @@ function comparable(s: LayoutState, defaults: ParamDefaults): string {
     s.timeframe,
     s.chartType,
     s.scaleMode,
+    s.timeZone,
     normalizeIndicators(s.indicators, defaults),
   ]);
 }
@@ -366,6 +376,7 @@ function liveState(): LayoutState {
     timeframe: timeframe(),
     chartType: chartType(),
     scaleMode: scaleMode(),
+    timeZone: timeZone(),
     indicators: activeIndicators(),
   };
 }
@@ -475,6 +486,7 @@ function applyState(state: LayoutState): void {
     setTimeframe(state.timeframe);
     setChartType(state.chartType);
     setScaleMode(state.scaleMode);
+    setTimeZone(state.timeZone);
     setActiveIndicators(state.indicators);
   });
 }
@@ -496,6 +508,7 @@ export function createLayout(name: string): boolean {
     timeframe: timeframe(),
     chartType: DEFAULT_CHART_TYPE,
     scaleMode: DEFAULT_SCALE_MODE,
+    timeZone: timeZone(),
     indicators: [...DEFAULT_SET],
   };
   return batch(() => {

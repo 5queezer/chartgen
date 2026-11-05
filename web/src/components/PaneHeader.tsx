@@ -117,6 +117,11 @@ export function PaneHeader(props: PaneHeaderProps): JSX.Element {
       <Show when={props.legend}>
         {(l) => (
           <>
+            <Show when={l().time}>
+              <span class="pane-header-vol" data-testid="legend-time">
+                {l().time}
+              </span>
+            </Show>
             <span
               class={`pane-header-ohlc pane-header-${l().change?.direction ?? "flat"}`}
               data-testid="price-legend"

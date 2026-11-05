@@ -330,6 +330,74 @@ describe("history paging", () => {
     expect(t.fetch.mock.calls.length).toBe(calls);
   });
 
+  it("loadUntil pages back until the timestamp is covered", async () => {
+    const t = setup();
+    t.feed.reset(payload(501, 1000), REQ);
+    const done = t.feed.loadUntil(tOf(100));
+    await vi.advanceTimersByTimeAsync(0);
+    await expect(done).resolves.toBe("covered");
+    expect(t.last()!.series.bars[0]!.t).toBe(tOf(1));
+    expect(t.fetch).toHaveBeenCalledTimes(1);
+    // Already covered: no request.
+    await expect(t.feed.loadUntil(tOf(500))).resolves.toBe("covered");
+    expect(t.fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("loadUntil stops paging once isCurrent turns false", async () => {
+    const t = setup();
+    t.feed.reset(payload(501, 1000), REQ);
+    let current = true;
+    const done = t.feed.loadUntil(tOf(-10), () => current);
+    current = false;
+    await vi.advanceTimersByTimeAsync(0);
+    await expect(done).resolves.toBe("aborted");
+    expect(t.fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("loadUntil joins a page that is already in flight", async () => {
+    const t = setup();
+    t.feed.reset(payload(501, 1000), REQ);
+    t.feed.loadOlder();
+    const done = t.feed.loadUntil(tOf(100));
+    await vi.advanceTimersByTimeAsync(0);
+    await expect(done).resolves.toBe("covered");
+    expect(t.fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("loadUntil stops at the start of history", async () => {
+    const t = setup();
+    t.feed.reset(payload(501, 1000), REQ);
+    const done = t.feed.loadUntil(tOf(-10));
+    await vi.advanceTimersByTimeAsync(0);
+    await expect(done).resolves.toBe("end");
+    expect(t.last()!.series.bars[0]!.t).toBe(tOf(0));
+  });
+
+  it("loadUntil stops at the history limit", async () => {
+    const t = setup();
+    t.feed.reset(payload(MAX_HISTORY_BARS * 2 - 500, MAX_HISTORY_BARS * 2), REQ);
+    market.now = MAX_HISTORY_BARS * 2;
+    const done = t.feed.loadUntil(0);
+    await vi.advanceTimersByTimeAsync(0);
+    await expect(done).resolves.toBe("limit");
+    expect(t.last()!.series.bars.length).toBeGreaterThanOrEqual(MAX_HISTORY_BARS);
+  });
+
+  it("loadUntil reports a failed page and an ended generation", async () => {
+    const t = setup();
+    t.feed.reset(payload(501, 1000), REQ);
+    market.fail = true;
+    const failed = t.feed.loadUntil(tOf(0));
+    await vi.advanceTimersByTimeAsync(0);
+    await expect(failed).resolves.toBe("error");
+
+    market.fail = false;
+    const aborted = t.feed.loadUntil(tOf(0));
+    t.feed.suspend();
+    await vi.advanceTimersByTimeAsync(0);
+    await expect(aborted).resolves.toBe("aborted");
+  });
+
   it("an empty page ends the history", async () => {
     const t = setup(() => Promise.resolve(payload(1, 0, true)));
     t.feed.reset(payload(501, 1000), REQ);

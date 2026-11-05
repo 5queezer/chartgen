@@ -76,6 +76,7 @@ import {
   pricePrecision,
   type BarLegend,
 } from "../lib/format";
+import { formatBarTime } from "../lib/timezone";
 import {
   divlineSegments,
   fillColors,
@@ -715,6 +716,8 @@ export interface ChartProps {
   styles?: Record<string, IndicatorStyle | undefined>;
   /** Price rendering style chosen in the toolbar. */
   chartType: ChartType;
+  /** IANA zone of the axis, crosshair and legend times. */
+  timeZone: string;
   /** Legend controls, keyed by indicator name (series key). */
   onToggleHidden?: (name: string) => void;
   onSettings?: (name: string) => void;
@@ -868,12 +871,16 @@ export function Chart(props: ChartProps): JSX.Element {
       xi !== null && xi >= 0 && xi < bars.length
         ? xi
         : lastFiniteCloseIndex(bars);
+    const priceLegend = barLegend(bars, legendIndex, pricePrecisionForSeries());
+    const barTime = bars[legendIndex]?.t;
     next.push({
       name: series.symbol ?? "price",
       params: series.interval ? `· ${series.interval}` : undefined,
       lines: [],
       legend:
-        barLegend(bars, legendIndex, pricePrecisionForSeries()) ?? undefined,
+        priceLegend && barTime != null
+          ? { ...priceLegend, time: formatBarTime(barTime * 1000, props.timeZone, series.interval) }
+          : (priceLegend ?? undefined),
       top: 4,
     });
 
@@ -934,6 +941,13 @@ export function Chart(props: ChartProps): JSX.Element {
     chart()?.setStyles({
       candle: CHART_TYPE_STYLES[props.chartType],
     } as never);
+  });
+
+  // The axis and crosshair labels are klinecharts' own; the legend's time
+  // is ours.
+  createEffect(() => {
+    chart()?.setTimezone(props.timeZone);
+    recomputeHeaders();
   });
 
   // React to crosshair changes by recomputing header values only.

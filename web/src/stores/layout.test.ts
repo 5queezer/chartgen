@@ -160,6 +160,18 @@ describe("layout store", () => {
     expect(data.get("chartgen.layout.scaleMode")).toBe('"percentage"');
   });
 
+  it("validates the stored time zone and persists changes", async () => {
+    stubStorage({ "chartgen.layout.timeZone": '"Mars/Base"' });
+    expect((await load()).timeZone()).toBe("local");
+    const data = stubStorage({ "chartgen.layout.timeZone": '"Europe/Berlin"' });
+    const s = await load();
+    expect(s.timeZone()).toBe("Europe/Berlin");
+    s.setTimeZone("utc");
+    expect(data.get("chartgen.layout.timeZone")).toBe('"utc"');
+    s.setTimeZone("nope");
+    expect(s.timeZone()).toBe("utc");
+  });
+
   it("validates the stored theme and persists changes", async () => {
     const data = stubStorage({ "chartgen.layout.theme": '"light"' });
     let s = await load();

@@ -103,6 +103,8 @@ export interface BarLegend {
   v: string;
   /** Null for the first bar, which has no previous close. */
   change: Change | null;
+  /** Bar open time in the chart's time zone; set by the chart, not `barLegend`. */
+  time?: string;
 }
 
 function isFinitePrice(v: number | null): v is number {
