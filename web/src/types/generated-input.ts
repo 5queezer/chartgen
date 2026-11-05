@@ -43,11 +43,15 @@ export interface GenerateChartInput {
    */
   height?: number;
   /**
-   * Technical indicators to render on the chart. Each element is a name string (e.g. 'rsi') or an object with 'name' and optional parameters (e.g. {"name": "rsi", "length": 21}). Overlays draw on the price chart, panels draw below. Call list_indicators for the full list of 33 available indicators.
+   * Technical indicators to render on the chart. Each element is a name string (e.g. 'rsi') or an object with 'name' and optional parameters (e.g. {"name": "rsi", "length": 21}). Results are keyed by name; give an object an 'id' to key it by that instead. The same indicator may appear several times (e.g. RSI 14 and RSI 21): a repeat without an id is keyed name#2, name#3, and so on. Overlays draw on the price chart, panels draw below. Call list_indicators for the full list of 33 available indicators.
    */
   indicators?: (
     | string
     | {
+        /**
+         * Instance key (ADR-0028): the response keys this entry by id instead of name, so one indicator can be requested several times with different parameters.
+         */
+        id?: string;
         name: string;
         [k: string]: unknown;
       }
@@ -62,6 +66,10 @@ export interface GenerateChartInput {
   panels?: (
     | string
     | {
+        /**
+         * Instance key (ADR-0028): the response keys this entry by id instead of name, so one indicator can be requested several times with different parameters.
+         */
+        id?: string;
         name: string;
         [k: string]: unknown;
       }
@@ -191,6 +199,10 @@ export interface SubscribeChartInput {
   indicators?: (
     | string
     | {
+        /**
+         * Instance key (ADR-0028): the response keys this entry by id instead of name, so one indicator can be requested several times with different parameters.
+         */
+        id?: string;
         name: string;
         [k: string]: unknown;
       }

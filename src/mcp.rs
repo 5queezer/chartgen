@@ -211,7 +211,7 @@ fn call_tool(
 }
 
 /// Parse panels array: each element can be a string ("rsi") or an object ({"name": "rsi", "length": 21}).
-/// Returns (indicators, request-keys-in-order, unknown-names, invalid-parameter messages).
+/// Returns (indicators, instance-keys-in-order, unknown-names, invalid-parameter messages).
 type ParsedPanels = (
     Vec<Box<dyn Indicator>>,
     Vec<String>,
@@ -219,10 +219,64 @@ type ParsedPanels = (
     Vec<String>,
 );
 
+/// Longest accepted instance `id` (ADR-0028).
+const MAX_INSTANCE_ID: usize = 64;
+
+/// Response key of every entry (ADR-0028): an object's `id` when it has one,
+/// else its name; a name requested again without an id gets `name#2`,
+/// `name#3`... so no instance overwrites another. `None` for an entry
+/// without a name; `Err` for an invalid or repeated `id`.
+fn instance_keys(arr: &[Value]) -> Result<Vec<Option<String>>, String> {
+    let mut taken = HashSet::new();
+    let mut ids = Vec::with_capacity(arr.len());
+    for item in arr {
+        let id = match item.get("id") {
+            None | Some(Value::Null) => None,
+            Some(Value::String(s)) if !s.is_empty() && s.chars().count() <= MAX_INSTANCE_ID => {
+                if !taken.insert(s.clone()) {
+                    return Err(format!("Duplicate indicator id: {s}"));
+                }
+                Some(s.clone())
+            }
+            Some(_) => {
+                return Err(format!(
+                    "Invalid indicator id: must be a string of 1 to {MAX_INSTANCE_ID} characters"
+                ))
+            }
+        };
+        ids.push(id);
+    }
+    Ok(arr
+        .iter()
+        .zip(ids)
+        .map(|(item, id)| {
+            let name = item
+                .as_str()
+                .or_else(|| item.get("name").and_then(|n| n.as_str()))?;
+            if id.is_some() {
+                return id;
+            }
+            let mut key = name.to_string();
+            for n in 2.. {
+                if !taken.contains(&key) {
+                    break;
+                }
+                key = format!("{name}#{n}");
+            }
+            taken.insert(key.clone());
+            Some(key)
+        })
+        .collect())
+}
+
 fn parse_panels(panels_value: &Value, user: Option<&str>) -> ParsedPanels {
     let arr = match panels_value.as_array() {
         Some(a) => a,
         None => return (vec![], vec![], vec![], vec![]),
+    };
+    let instance = match instance_keys(arr) {
+        Ok(k) => k,
+        Err(e) => return (vec![], vec![], vec![], vec![e]),
     };
     let mut invalid = Vec::new();
 
@@ -230,26 +284,30 @@ fn parse_panels(panels_value: &Value, user: Option<&str>) -> ParsedPanels {
     let mut keys: Vec<String> = Vec::new();
     let mut errors = Vec::new();
 
-    for item in arr {
+    for (item, key) in arr.iter().zip(instance) {
+        let Some(key) = key else { continue };
         if let Some(name) = item.as_str() {
             // Simple string: "rsi"
             match indicators::by_name_for(name, user) {
                 Some(ind) => {
                     result.push(ind);
-                    keys.push(name.to_string());
+                    keys.push(key);
                 }
                 None => errors.push(name.to_string()),
             }
         } else if let Some(obj) = item.as_object() {
-            // Object: {"name": "rsi", "length": 21}
+            // Object: {"name": "rsi", "length": 21, "id": "rsi#2"}; the id
+            // is the response key, not a parameter.
             let name = match obj.get("name").and_then(|n| n.as_str()) {
                 Some(n) => n,
                 None => continue,
             };
-            match indicators::by_name_configured_for(name, &Value::Object(obj.clone()), user) {
+            let mut params = obj.clone();
+            params.remove("id");
+            match indicators::by_name_configured_for(name, &Value::Object(params), user) {
                 Ok(Some(ind)) => {
                     result.push(ind);
-                    keys.push(name.to_string());
+                    keys.push(key);
                 }
                 Ok(None) => errors.push(name.to_string()),
                 Err(msg) => invalid.push(msg),
@@ -432,8 +490,8 @@ fn generate_chart(
     // reported under `indicator_errors`; the rest of the chart still renders.
     let (computed, inds, errors_value) = compute_panels(&data, &indicator_keys, &panel_indicators);
 
-    // Build summary payload keyed by request name so the LLM can correlate
-    // output with the names it passed in.
+    // Build summary payload keyed by request name (or instance id, ADR-0028)
+    // so the LLM can correlate output with the entries it passed in.
     let summary_value = if want_summary {
         let mut indicators_json = serde_json::Map::new();
         for (key, pr) in &computed {
@@ -3210,6 +3268,137 @@ mod tests {
             assert_eq!(resp["result"]["isError"], true);
             assert_eq!(resp["result"]["content"][0]["text"], msg);
         }
+    }
+
+    // --- multiple instances of one indicator (ADR-0028) ---
+
+    fn last_rsi(p: &Value, key: &str) -> f64 {
+        let v = p["indicators"][key]["lines"][0]["values"]
+            .as_array()
+            .unwrap();
+        v.last().unwrap().as_f64().unwrap()
+    }
+
+    #[test]
+    fn two_instances_are_keyed_by_id_regardless_of_order() {
+        let series = |indicators: Value| {
+            series_payload(
+                json!({ "bars": 60, "indicators": indicators, "format": "series" }),
+                fetch::DataSource::Live,
+            )
+        };
+        let p = series(json!([
+            { "name": "rsi", "length": 14 },
+            { "name": "rsi", "length": 21, "id": "rsi#2" },
+        ]));
+        let keys: Vec<&String> = p["indicators"].as_object().unwrap().keys().collect();
+        assert_eq!(keys.len(), 2);
+        let (r14, r21) = (last_rsi(&p, "rsi"), last_rsi(&p, "rsi#2"));
+        assert_ne!(r14, r21, "each instance has its own params");
+        // Each instance matches a single-instance request with its params.
+        let solo = series(json!([{ "name": "rsi", "length": 21 }]));
+        assert_eq!(r21, last_rsi(&solo, "rsi"));
+        // Reordering the request keeps every key on its instance.
+        let swapped = series(json!([
+            { "name": "rsi", "length": 21, "id": "rsi#2" },
+            { "name": "rsi", "length": 14 },
+        ]));
+        assert_eq!(last_rsi(&swapped, "rsi"), r14);
+        assert_eq!(last_rsi(&swapped, "rsi#2"), r21);
+    }
+
+    #[test]
+    fn repeats_without_an_id_get_numbered_keys() {
+        let p = series_payload(
+            json!({ "bars": 40, "format": "series", "indicators": [
+                "rsi",
+                { "name": "rsi", "length": 7 },
+                { "name": "macd", "id": "rsi#2" },
+            ] }),
+            fetch::DataSource::Live,
+        );
+        let mut keys: Vec<&String> = p["indicators"].as_object().unwrap().keys().collect();
+        keys.sort();
+        // The explicit id is reserved first, so the repeat skips to #3.
+        assert_eq!(keys, ["rsi", "rsi#2", "rsi#3"]);
+        assert!(
+            p["indicators"]["rsi#2"]["histogram"].is_array(),
+            "macd under its id"
+        );
+        assert_ne!(last_rsi(&p, "rsi"), last_rsi(&p, "rsi#3"));
+        // The summary format uses the same keys.
+        let resp = tool_generate_chart(
+            Some(json!(1)),
+            &json!({ "bars": 40, "format": "summary", "indicators": ["rsi", "rsi"] }),
+            None,
+        );
+        let s: Value = serde_json::from_str(&response_text(&resp)).unwrap();
+        assert!(s["indicators"]["rsi"].is_object() && s["indicators"]["rsi#2"].is_object());
+    }
+
+    #[test]
+    fn invalid_or_duplicate_ids_are_tool_errors() {
+        for (indicators, msg) in [
+            (
+                json!([{ "name": "rsi", "id": "a" }, { "name": "macd", "id": "a" }]),
+                "Duplicate indicator id: a",
+            ),
+            (
+                json!([{ "name": "rsi", "id": "" }]),
+                "Invalid indicator id: must be a string of 1 to 64 characters",
+            ),
+            (
+                json!([{ "name": "rsi", "id": 2 }]),
+                "Invalid indicator id: must be a string of 1 to 64 characters",
+            ),
+            (
+                json!([{ "name": "rsi", "id": "x".repeat(65) }]),
+                "Invalid indicator id: must be a string of 1 to 64 characters",
+            ),
+        ] {
+            let args = json!({ "indicators": indicators, "bars": 30, "format": "series" });
+            let resp = tool_generate_chart(Some(json!(1)), &args, None);
+            assert_eq!(resp["result"]["isError"], true);
+            assert_eq!(resp["result"]["content"][0]["text"], msg);
+        }
+    }
+
+    #[test]
+    fn id_is_not_passed_as_a_parameter() {
+        let with_id = series_payload(
+            json!({ "bars": 40, "format": "series",
+                    "indicators": [{ "name": "rsi", "length": 9, "id": "fast" }] }),
+            fetch::DataSource::Live,
+        );
+        let plain = series_payload(
+            json!({ "bars": 40, "format": "series",
+                    "indicators": [{ "name": "rsi", "length": 9 }] }),
+            fetch::DataSource::Live,
+        );
+        assert_eq!(with_id["indicators"]["fast"], plain["indicators"]["rsi"]);
+        assert!(with_id["indicators"].get("rsi").is_none());
+    }
+
+    #[test]
+    fn series_tail_keys_instances_like_generate_chart() {
+        let raw = data::sample_ohlcv("BTCUSDT", "1h", 80, None, 1_704_067_200_000).unwrap();
+        let tail = series_tail(
+            &raw,
+            &json!(["rsi", { "name": "rsi", "length": 21, "id": "rsi#2" }]),
+            "candles",
+            2,
+        )
+        .unwrap();
+        assert_eq!(tail["bars"].as_array().unwrap().len(), 2);
+        assert_ne!(last_rsi(&tail, "rsi"), last_rsi(&tail, "rsi#2"));
+        let solo = series_tail(
+            &raw,
+            &json!([{ "name": "rsi", "length": 21 }]),
+            "candles",
+            2,
+        )
+        .unwrap();
+        assert_eq!(last_rsi(&tail, "rsi#2"), last_rsi(&solo, "rsi"));
     }
 
     // --- warmup / end_time / paging (ADR-0009) ---
