@@ -156,7 +156,8 @@ describe("projection (ADR-0033)", () => {
     expect(d.bar?.c).toBe("—");
     expect(d.time).toContain("2023");
     const ichimoku = d.indicators.find((x) => x.key === "ichimoku")!;
-    expect(ichimoku.rows.map((r) => r.value)).toEqual(["—", span(3).toFixed(2)]);
+    // Overlay values use the price precision (3 decimals for these closes).
+    expect(ichimoku.rows.map((r) => r.value)).toEqual(["—", span(3).toFixed(3)]);
     expect(d.indicators.find((x) => x.key === "rsi")!.rows[0]!.value).toBe("—");
     // A bar past the projection reads the last bar, as before.
     const rest = dataWindowRows(s, 9, {}, [], opts);
