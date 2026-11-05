@@ -1,7 +1,7 @@
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine as Base64Engine;
 use serde_json::{json, Value};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io::{self, BufRead, Write};
 use std::sync::{Arc, RwLock};
 
@@ -222,11 +222,27 @@ type ParsedPanels = (
 /// Longest accepted instance `id` (ADR-0028).
 const MAX_INSTANCE_ID: usize = 64;
 
+/// Most indicator entries one `generate_chart` call accepts (the web app's
+/// cap too).
+const MAX_CHART_INDICATORS: usize = 50;
+
 /// Response key of every entry (ADR-0028): an object's `id` when it has one,
 /// else its name; a name requested again without an id gets `name#2`,
 /// `name#3`... so no instance overwrites another. `None` for an entry
-/// without a name; `Err` for an invalid or repeated `id`.
+/// without a name; `Err` for an invalid or repeated `id`, or an `id` equal
+/// to the name of an entry without one (that entry's key).
 fn instance_keys(arr: &[Value]) -> Result<Vec<Option<String>>, String> {
+    let entry_name = |item: &Value| -> Option<String> {
+        item.as_str()
+            .or_else(|| item.get("name").and_then(|n| n.as_str()))
+            .map(str::to_string)
+    };
+    // Names of the entries keyed by name.
+    let plain: HashSet<String> = arr
+        .iter()
+        .filter(|item| item.get("id").is_none_or(Value::is_null))
+        .filter_map(entry_name)
+        .collect();
     let mut taken = HashSet::new();
     let mut ids = Vec::with_capacity(arr.len());
     for item in arr {
@@ -235,6 +251,11 @@ fn instance_keys(arr: &[Value]) -> Result<Vec<Option<String>>, String> {
             Some(Value::String(s)) if !s.is_empty() && s.chars().count() <= MAX_INSTANCE_ID => {
                 if !taken.insert(s.clone()) {
                     return Err(format!("Duplicate indicator id: {s}"));
+                }
+                if plain.contains(s) {
+                    return Err(format!(
+                        "Indicator id {s} is also the name of an entry without an id; give that entry an id too"
+                    ));
                 }
                 Some(s.clone())
             }
@@ -246,23 +267,28 @@ fn instance_keys(arr: &[Value]) -> Result<Vec<Option<String>>, String> {
         };
         ids.push(id);
     }
+    // Next number to try per name (1: the bare name). Keys are only ever
+    // added, so it never has to go back: linear in the entry count.
+    let mut next: HashMap<String, usize> = HashMap::new();
     Ok(arr
         .iter()
         .zip(ids)
         .map(|(item, id)| {
-            let name = item
-                .as_str()
-                .or_else(|| item.get("name").and_then(|n| n.as_str()))?;
+            let name = entry_name(item)?;
             if id.is_some() {
                 return id;
             }
-            let mut key = name.to_string();
-            for n in 2.. {
+            let n = next.entry(name.clone()).or_insert(1);
+            let key = loop {
+                let key = match *n {
+                    1 => name.clone(),
+                    k => format!("{name}#{k}"),
+                };
+                *n += 1;
                 if !taken.contains(&key) {
-                    break;
+                    break key;
                 }
-                key = format!("{name}#{n}");
-            }
+            };
             taken.insert(key.clone());
             Some(key)
         })
@@ -441,6 +467,15 @@ fn generate_chart(
         );
     }
 
+    if panels_value
+        .as_array()
+        .is_some_and(|a| a.len() > MAX_CHART_INDICATORS)
+    {
+        return tool_err(
+            id,
+            &format!("At most {MAX_CHART_INDICATORS} indicators per chart."),
+        );
+    }
     let (panel_indicators, indicator_keys, unknown, invalid) = parse_panels(&panels_value, user);
     if let Err(e) = check_panels(&unknown, &invalid) {
         return tool_err(id, &e);
@@ -3361,6 +3396,56 @@ mod tests {
             assert_eq!(resp["result"]["isError"], true);
             assert_eq!(resp["result"]["content"][0]["text"], msg);
         }
+    }
+
+    #[test]
+    fn an_id_may_not_take_the_name_of_an_entry_without_one() {
+        let args = json!({ "bars": 30, "format": "series",
+                           "indicators": [{ "name": "rsi", "id": "macd" }, "macd"] });
+        let resp = tool_generate_chart(Some(json!(1)), &args, None);
+        assert_eq!(resp["result"]["isError"], true);
+        assert_eq!(
+            resp["result"]["content"][0]["text"],
+            "Indicator id macd is also the name of an entry without an id; give that entry an id too"
+        );
+        // Its own name is fine, and so is a name whose entries all have ids.
+        let ok = json!([{ "name": "rsi", "id": "rsi" }, { "name": "macd", "id": "rsi#2" }]);
+        assert!(instance_keys(ok.as_array().unwrap()).is_ok());
+    }
+
+    #[test]
+    fn generate_chart_caps_the_entry_count() {
+        let args = |n: usize| json!({ "bars": 30, "format": "summary", "indicators": vec![json!("rsi"); n] });
+        let resp = tool_generate_chart(Some(json!(1)), &args(MAX_CHART_INDICATORS), None);
+        assert!(!is_error(&resp), "{}", response_text(&resp));
+        let s: Value = serde_json::from_str(&response_text(&resp)).unwrap();
+        assert_eq!(s["indicators"].as_object().unwrap().len(), 50);
+        assert!(s["indicators"]["rsi#50"].is_object());
+        let resp = tool_generate_chart(Some(json!(1)), &args(MAX_CHART_INDICATORS + 1), None);
+        assert_eq!(resp["result"]["isError"], true);
+        assert_eq!(
+            resp["result"]["content"][0]["text"],
+            "At most 50 indicators per chart."
+        );
+    }
+
+    #[test]
+    fn instance_keys_are_linear_in_the_repeat_count() {
+        // Far past the cap: key assignment alone must not be quadratic.
+        let arr = vec![json!("rsi"); 100_000];
+        let started = std::time::Instant::now();
+        let keys = instance_keys(&arr).unwrap();
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+        assert_eq!(keys[0].as_deref(), Some("rsi"));
+        assert_eq!(keys[99_999].as_deref(), Some("rsi#100000"));
+        // An explicit id is skipped by the counter.
+        let arr = [
+            json!("rsi"),
+            json!({ "name": "rsi", "id": "rsi#2" }),
+            json!("rsi"),
+        ];
+        let keys: Vec<_> = instance_keys(&arr).unwrap().into_iter().flatten().collect();
+        assert_eq!(keys, ["rsi", "rsi#2", "rsi#3"]);
     }
 
     #[test]
