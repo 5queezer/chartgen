@@ -1,11 +1,12 @@
 // Bar replay (ADR-0023, web guide "Bar replay"). The suite's server runs
-// with CHARTGEN_DATA_SOURCE=sample, BTCUSDT is polled every 2 s while live.
-// The chart is observed through the DEV-only `window.__chartgenTest` hook
-// (App.tsx) and the MCP request log.
+// with CHARTGEN_DATA_SOURCE=sample: BTCUSDT is pushed (ADR-0021) every
+// ~500 ms while live, or polled every 2 s on the polling path. The chart is
+// observed through the DEV-only `window.__chartgenTest` hook (App.tsx) and
+// the MCP request log.
 
 import type { Page, Request } from "@playwright/test";
 
-import { test, expect, expectChartRendered } from "./fixtures/app";
+import { test, expect, gotoApp } from "./fixtures/app";
 
 interface ToolCall {
   name: string;
@@ -32,6 +33,7 @@ function toolCall(req: Request): ToolCall | null {
 const isLive = (c: ToolCall) =>
   c.name === "subscribe_chart" ||
   (c.name === "generate_chart" && c.args.bars === 2 && c.args.end_time === undefined);
+const isUnsubscribe = (c: ToolCall) => c.name === "unsubscribe_chart";
 
 function recordCalls(page: Page): ToolCall[] {
   const calls: ToolCall[] = [];
@@ -51,7 +53,7 @@ interface Hook {
     ) => Array<{ dataIndex?: number }>;
     getDom: () => HTMLElement | null;
   } | null;
-  series: () => { bars: Array<{ t: number }> } | null;
+  series: () => { bars: Array<{ t: number; c: number }> } | null;
   shownSeries: () => {
     bars: Array<{ t: number }>;
     indicators: Record<string, { hbars?: unknown[]; lines?: Array<{ values: unknown[] }> }>;
@@ -75,6 +77,19 @@ const liveTimes = (page: Page) =>
         .series()
         ?.bars.map((b) => b.t) ?? [],
   );
+
+/** Close of the live feed's newest bar: moves with every applied tick. */
+const liveClose = (page: Page) =>
+  page.evaluate(
+    () => (window as unknown as { __chartgenTest: Hook }).__chartgenTest.series()?.bars.at(-1)?.c ?? null,
+  );
+
+const drawings = (page: Page) =>
+  page.evaluate(
+    () => (window as unknown as { __chartgenDrawings: () => unknown[] }).__chartgenDrawings().length,
+  );
+
+const trendLine = (page: Page) => page.getByRole("button", { name: "Trend line" });
 
 const replayState = (page: Page) =>
   page.evaluate(() => (window as unknown as { __chartgenTest: Hook }).__chartgenTest.replay());
@@ -102,63 +117,139 @@ async function startInMiddle(page: Page): Promise<number> {
   return picked;
 }
 
+/**
+ * Pick a start, step, play and pause, then jump to real time, checking that
+ * nothing live reaches the chart meanwhile. `badge`: the live badge state
+ * of this path ("push" or "live").
+ */
+async function roundTrip(page: Page, badge: "push" | "live"): Promise<void> {
+  const calls = recordCalls(page);
+  await expect(page.getByTestId("live-status")).toHaveAttribute("data-state", badge);
+  // Ticks move the newest close while live.
+  const before = await liveClose(page);
+  await expect.poll(() => liveClose(page), { timeout: 6_000 }).not.toBe(before);
+  const fullCount = await shownCount(page);
+
+  const picked = await startInMiddle(page);
+  // A push subscription is ended at once.
+  if (badge === "push") await expect.poll(() => calls.filter(isUnsubscribe).length).toBe(1);
+  const liveDuringReplay = calls.filter(isLive).length;
+  const closeDuringReplay = await liveClose(page);
+  await expect.poll(async () => (await shownTimes(page)).at(-1)).toBe(picked);
+  const startCount = await shownCount(page);
+  expect(startCount).toBeLessThan(fullCount);
+  expect((await replayState(page)).cursorTime).toBe(picked / 1000);
+  // No live data in the toolbar badge while replaying.
+  await expect(page.getByTestId("live-status")).toHaveCount(0);
+
+  // One step adds exactly the next bar, by button and by Shift+→.
+  const times = await liveTimes(page);
+  const at = times.indexOf(picked / 1000);
+  await page.getByTestId("replay-step").click();
+  await expect.poll(() => shownCount(page)).toBe(startCount + 1);
+  expect((await shownTimes(page)).at(-1)).toBe(times[at + 1]! * 1000);
+  await page.keyboard.press("Shift+ArrowRight");
+  await expect.poll(() => shownCount(page)).toBe(startCount + 2);
+  expect((await shownTimes(page)).at(-1)).toBe(times[at + 2]! * 1000);
+
+  // Play at 10 bars/s advances; pause stops.
+  await page.getByTestId("replay-speed").click();
+  await page.getByRole("menuitemradio", { name: /^10x/ }).click();
+  await expect(page.getByTestId("replay-speed")).toHaveText("10x");
+  await page.getByTestId("replay-play").click();
+  await expect(page.getByTestId("replay-play")).toHaveAttribute("aria-label", "Pause");
+  await expect.poll(() => shownCount(page), { timeout: 5_000 }).toBeGreaterThan(startCount + 5);
+  await page.keyboard.press("Shift+ArrowDown");
+  await expect(page.getByTestId("replay-play")).toHaveAttribute("aria-label", "Play");
+  const paused = await shownCount(page);
+  await page.waitForTimeout(800);
+  expect(await shownCount(page)).toBe(paused);
+  // Contiguous bars, the same as the live series up to the cursor.
+  const shown = await shownTimes(page);
+  expect(shown).toEqual(times.slice(0, shown.length).map((t) => t * 1000));
+
+  // Two poll periods and more since entering: no poll, no subscription, and
+  // no pushed tick applied to the live series.
+  await page.waitForTimeout(2_500);
+  expect(calls.filter(isLive).length).toBe(liveDuringReplay);
+  expect(await liveClose(page)).toBe(closeDuringReplay);
+
+  // Jump to real time: the whole series again, and live resumes.
+  await page.getByTestId("replay-realtime").click();
+  await expect(page.getByTestId("replay-bar")).toHaveCount(0);
+  await expect.poll(async () => (await shownTimes(page)).length).toBeGreaterThanOrEqual(fullCount);
+  expect(await shownTimes(page)).toEqual((await liveTimes(page)).map((t) => t * 1000));
+  await expect
+    .poll(() => calls.filter(isLive).length, { timeout: 6_000 })
+    .toBeGreaterThan(liveDuringReplay);
+  if (badge === "push") {
+    expect(calls.filter(isLive).at(-1)!.name).toBe("subscribe_chart");
+  }
+  await expect(page.getByTestId("live-status")).toHaveAttribute("data-state", badge, {
+    timeout: 10_000,
+  });
+  await expect.poll(() => liveClose(page), { timeout: 6_000 }).not.toBe(closeDuringReplay);
+}
+
+test.describe("bar replay on the polling path", () => {
+  test.use({ push: false });
+  test("no polls while replaying; polling resumes", async ({ bootedApp: page }) => {
+    await roundTrip(page, "live");
+  });
+});
+
 test.describe("bar replay", () => {
   test("pick a start, step, play and pause, then jump to real time", async ({
     bootedApp: page,
   }) => {
-    const calls = recordCalls(page);
-    // Live first: the tail is being polled.
-    await expect.poll(() => calls.filter(isLive).length, { timeout: 6_000 }).toBeGreaterThan(0);
-    const fullCount = await shownCount(page);
+    await roundTrip(page, "push");
+  });
 
-    const picked = await startInMiddle(page);
-    const liveDuringReplay = calls.filter(isLive).length;
-    await expect.poll(async () => (await shownTimes(page)).at(-1)).toBe(picked);
-    const startCount = await shownCount(page);
-    expect(startCount).toBeLessThan(fullCount);
-    expect((await replayState(page)).cursorTime).toBe(picked / 1000);
-    // No live data in the toolbar badge while replaying.
-    await expect(page.getByTestId("live-status")).toHaveCount(0);
-
-    // One step adds exactly the next bar, by button and by Shift+→.
-    const times = await liveTimes(page);
-    const at = times.indexOf(picked / 1000);
-    await page.getByTestId("replay-step").click();
-    await expect.poll(() => shownCount(page)).toBe(startCount + 1);
-    expect((await shownTimes(page)).at(-1)).toBe(times[at + 1]! * 1000);
-    await page.keyboard.press("Shift+ArrowRight");
-    await expect.poll(() => shownCount(page)).toBe(startCount + 2);
-    expect((await shownTimes(page)).at(-1)).toBe(times[at + 2]! * 1000);
-
-    // Play at 10 bars/s advances; pause stops.
-    await page.getByTestId("replay-speed").click();
-    await page.getByRole("menuitemradio", { name: /^10x/ }).click();
-    await expect(page.getByTestId("replay-speed")).toHaveText("10x");
-    await page.getByTestId("replay-play").click();
-    await expect(page.getByTestId("replay-play")).toHaveAttribute("aria-label", "Pause");
-    await expect.poll(() => shownCount(page), { timeout: 5_000 }).toBeGreaterThan(startCount + 5);
-    await page.keyboard.press("Shift+ArrowDown");
-    await expect(page.getByTestId("replay-play")).toHaveAttribute("aria-label", "Play");
-    const paused = await shownCount(page);
-    await page.waitForTimeout(800);
-    expect(await shownCount(page)).toBe(paused);
-    // Contiguous bars, the same as the live series up to the cursor.
-    const shown = await shownTimes(page);
-    expect(shown).toEqual(times.slice(0, shown.length).map((t) => t * 1000));
-
-    // Two poll periods and more since entering: no poll, no push.
-    await page.waitForTimeout(2_500);
-    expect(calls.filter(isLive).length).toBe(liveDuringReplay);
-
-    // Jump to real time: the whole series again, and live resumes.
-    await page.getByTestId("replay-realtime").click();
+  test("Esc cancels an armed drawing tool first, then exits", async ({ bootedApp: page }) => {
+    await startInMiddle(page);
+    await trendLine(page).click();
+    await expect(trendLine(page)).toHaveAttribute("aria-pressed", "true");
+    await page.keyboard.press("Escape");
+    await expect(trendLine(page)).toHaveAttribute("aria-pressed", "false");
+    expect((await replayState(page)).mode).toBe("active");
+    await page.keyboard.press("Escape");
     await expect(page.getByTestId("replay-bar")).toHaveCount(0);
-    await expect.poll(async () => (await shownTimes(page)).length).toBeGreaterThanOrEqual(fullCount);
-    expect(await shownTimes(page)).toEqual((await liveTimes(page)).map((t) => t * 1000));
-    await expect
-      .poll(() => calls.filter(isLive).length, { timeout: 6_000 })
-      .toBeGreaterThan(liveDuringReplay);
-    await expect(page.getByTestId("live-status")).toHaveAttribute("data-state", "live");
+  });
+
+  test("picking a start never draws", async ({ bootedApp: page }) => {
+    await startInMiddle(page);
+    // Select bar cancels an armed tool.
+    await trendLine(page).click();
+    await page.getByTestId("replay-select-bar").click();
+    await expect(trendLine(page)).toHaveAttribute("aria-pressed", "false");
+    // A tool armed while picking does not get the pick click as a point.
+    await trendLine(page).click();
+    const box = (await page.locator(".chart-container").boundingBox())!;
+    await page.mouse.move(box.x + box.width * 0.4, box.y + box.height * 0.3, { steps: 5 });
+    await page.mouse.click(box.x + box.width * 0.4, box.y + box.height * 0.3);
+    await expect(page.getByTestId("replay-bar")).toHaveAttribute("data-mode", "active");
+    await page.waitForTimeout(700);
+    await page.mouse.move(box.x + box.width * 0.2, box.y + box.height * 0.5, { steps: 5 });
+    await page.waitForTimeout(300);
+    expect(await drawings(page)).toBe(0);
+  });
+
+  test("missing history shows an empty frame and the failure", async ({ bootedApp: page }) => {
+    await startInMiddle(page);
+    // 500 1m bars (8 h) end after the cursor (the middle of the 1h view, days
+    // back), and history pages fail.
+    await page.route("**/mcp", (route) =>
+      toolCall(route.request())?.args.end_time !== undefined
+        ? route.fulfill({ status: 500, body: "history down" })
+        : route.continue(),
+    );
+    await page.getByRole("button", { name: "1m", exact: true }).click();
+    await expect(page.getByTestId("replay-notice")).toHaveText(
+      "Could not load the history before the replay start",
+      { timeout: 15_000 },
+    );
+    expect(await shownTimes(page)).toEqual([]);
+    expect((await replayState(page)).cursorTime).toBeNull();
   });
 
   test("Esc exits and paging older history keeps the cursor", async ({ bootedApp: page }) => {
@@ -199,7 +290,7 @@ test.describe("bar replay", () => {
     // A trend line across bars left of the cursor. klinecharts takes a
     // click soon after the start pick for a double click: wait it out.
     await page.waitForTimeout(700);
-    await page.getByRole("button", { name: "Trend line" }).click();
+    await trendLine(page).click();
     for (const [fx, fy] of [
       [0.2, 0.3],
       [0.4, 0.4],
@@ -209,20 +300,15 @@ test.describe("bar replay", () => {
       await page.mouse.up();
       await page.waitForTimeout(700);
     }
-    const drawings = () =>
-      page.evaluate(
-        () => (window as unknown as { __chartgenDrawings: () => unknown[] }).__chartgenDrawings().length,
-      );
-    await expect.poll(drawings).toBe(1);
+    await expect.poll(() => drawings(page)).toBe(1);
     // Drawing clicks are not start picks.
     expect((await replayState(page)).cursorTime).toBe(picked / 1000);
     await page.keyboard.press("Shift+ArrowRight");
-    expect(await drawings()).toBe(1);
+    expect(await drawings(page)).toBe(1);
     const cursor = (await replayState(page)).cursorTime!;
 
-    // 15m bars: the initial load starts after the cursor, so history is
-    // paged back to it; the frame ends with the last 15m bar the cursor's
-    // 1h bar had closed by its close.
+    // 15m bars: the frame ends with the last 15m bar closed by the close of
+    // the cursor's 1h bar.
     await page.getByRole("button", { name: "15m", exact: true }).click();
     await expect
       .poll(async () => (await shownTimes(page)).at(-1), { timeout: 15_000 })
@@ -233,7 +319,7 @@ test.describe("bar replay", () => {
 
     await page.getByTestId("replay-close").click();
     await expect(page.getByTestId("replay-bar")).toHaveCount(0);
-    expect(await drawings()).toBe(1);
+    expect(await drawings(page)).toBe(1);
   });
 
   test("Select date starts at the bar of that date", async ({ bootedApp: page }) => {
@@ -260,9 +346,7 @@ test.describe("bar replay", () => {
     await page.addInitScript(() =>
       localStorage.setItem("chartgen.indicators.active", JSON.stringify(["rsi", "vpvr"])),
     );
-    await page.goto("/");
-    await expect(page.locator("text=authenticating...")).toHaveCount(0, { timeout: 30_000 });
-    await expectChartRendered(page);
+    await gotoApp(page);
     const calls = recordCalls(page);
 
     const picked = await startInMiddle(page);
