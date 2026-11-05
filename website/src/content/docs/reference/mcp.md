@@ -30,8 +30,10 @@ Add chartgen to `claude_desktop_config.json`:
 
 ### Claude.ai — Streamable HTTP (2025-03-26) + OAuth 2.1 PKCE
 
-Run `chartgen --serve` behind a TLS-terminating reverse proxy and add your
-domain as a remote MCP connector. OAuth is handled by chartgen — see the
+Run `chartgen --serve` behind a TLS-terminating reverse proxy and add
+`https://<your-domain>/mcp` (for the hosted instance,
+`https://chartgen.vasudev.xyz/mcp`) as a remote MCP connector. OAuth is
+handled by chartgen — see the
 [OAuth reference](/chartgen/reference/oauth/) for the endpoint catalog and
 token lifetime.
 
@@ -61,9 +63,12 @@ token and session id. A POST made only of notifications or responses (one, or a
 batch), such as `notifications/initialized` or `notifications/cancelled`, is
 answered with `202 Accepted` and no body.
 
-`POST /` and `POST /message` are retained as aliases of `POST /mcp`, and
+`POST /` and `POST /message` are retained as deprecated aliases of `POST /mcp`, and
 `GET /sse` is retained as an alias of `GET /mcp`, for backwards compatibility
-with existing Claude.ai connector deployments that predate Streamable HTTP.
+with existing Claude.ai connector deployments that predate Streamable HTTP or
+were added with the root URL. `GET /` is not MCP: it serves the
+[web app](/chartgen/guides/web/) to browsers and the health JSON to
+everyone else ([ADR-0027](/chartgen/decisions/0027-serve-web-app-same-origin/)).
 
 ## Tool catalog
 

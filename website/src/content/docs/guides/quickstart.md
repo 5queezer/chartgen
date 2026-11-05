@@ -47,6 +47,8 @@ For Claude.ai (HTTP + OAuth 2.1 PKCE):
 cargo run -- --serve --port 9315
 ```
 
+Add `https://<your-domain>/mcp` as the remote connector URL.
+
 ## Run in trading mode
 
 `--trade` streams a live Binance WebSocket feed, runs the alert engine, and

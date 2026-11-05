@@ -601,18 +601,33 @@ npm run typecheck  # strict + noUncheckedIndexedAccess
 npm test           # Vitest unit tests
 ```
 
-The build output is a static bundle ready for any CDN or object
-store. The recommended target is **Cloudflare Pages**:
+The production deployment serves the app from chartgen itself
+([ADR-0027](/chartgen/decisions/0027-serve-web-app-same-origin/)). The
+root `Dockerfile` builds `web/dist` with an empty `VITE_CHARTGEN_BASE_URL`,
+copies it into the image and sets `CHARTGEN_WEB_DIR`, so one container
+serves both on the same origin:
 
-1. Connect the GitHub repository in the Pages dashboard.
-2. Set **Build command** to `cd web && npm install && npm run build`.
-3. Set **Build output directory** to `web/dist`.
-4. Add `VITE_CHARTGEN_BASE_URL=https://chartgen.example.com` as an
-   environment variable if the API is on a different origin.
+- `GET /` from a browser (`Accept: text/html`) returns the app, as does
+  the OAuth callback `/?code=…`. Other `GET /` requests keep returning
+  the JSON health document.
+- `/mcp`, `/register`, `/authorize`, `/token` and `/.well-known/*` are
+  the server's own routes and take precedence over static files.
+- Other browser paths that match no file return `index.html`.
+- `/assets/*` (content-hashed) is cached as `immutable`, and
+  `index.html` as `no-cache`.
 
-For same-origin deployments (frontend and backend behind one
-domain) leave `VITE_CHARTGEN_BASE_URL` unset — the app will hit
-`/mcp`, `/register`, `/token` etc. on the current origin.
+To serve a local build the same way:
+
+```bash
+(cd web && npm run build)
+CHARTGEN_WEB_DIR=web/dist cargo run -- --serve   # open http://localhost:9315/
+```
+
+The bundle also works on any static host (CDN, object store, Cloudflare
+Pages). Set `VITE_CHARTGEN_BASE_URL=https://chartgen.example.com` at build
+time when the API is on a different origin. Leave it unset for
+same-origin hosting; the app then calls `/mcp`, `/register`, `/token`
+etc. on the current origin.
 
 ## Architecture
 

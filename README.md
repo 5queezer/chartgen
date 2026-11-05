@@ -136,11 +136,11 @@ Auto-detection: `USDT`/`BTC`/`ETH` suffixes → Binance, everything else → Yah
 
 ### Claude.ai
 
-Add `https://chartgen.vasudev.xyz` as a remote MCP connector. OAuth 2.1 PKCE is handled automatically.
+Add `https://chartgen.vasudev.xyz/mcp` as a remote MCP connector. OAuth 2.1 PKCE is handled automatically. (`POST /` still works as a deprecated alias for connectors added with the root URL.)
 
 ### Web frontend
 
-A SolidJS browser SPA lives in [`web/`](web/) — one-screen chart viewer with the same OAuth PKCE flow. See the [Web frontend guide](https://5queezer.github.io/chartgen/guides/web/).
+A SolidJS browser SPA lives in [`web/`](web/) — one-screen chart viewer with the same OAuth PKCE flow. The Docker image serves it at [chartgen.vasudev.xyz](https://chartgen.vasudev.xyz/) on the same origin as `/mcp`. See the [Web frontend guide](https://5queezer.github.io/chartgen/guides/web/).
 
 ### Tools
 
@@ -203,7 +203,7 @@ docker build -t chartgen .
 docker run -p 9315:9315 -e CHARTGEN_BASE_URL=https://your-domain.com chartgen
 ```
 
-2-stage build: `rust:1.86-slim` → `debian:bookworm-slim` (~93MB).
+3-stage build: `rust:1.95-slim-bookworm` (binary) + `node:22-bookworm-slim` (web app) → `debian:bookworm-slim`. The image sets `CHARTGEN_WEB_DIR=/usr/share/chartgen/web`, so browsers opening `/` get the web app while health checks and MCP clients get the JSON at `/` and MCP at `/mcp` ([ADR-0027](https://5queezer.github.io/chartgen/decisions/0027-serve-web-app-same-origin/)). Without `CHARTGEN_WEB_DIR` (e.g. `cargo run -- --serve`) no static files are served.
 
 ### CI/CD
 
