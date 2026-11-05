@@ -3,6 +3,7 @@
 // line style / visibility of each plotted line and histogram, and to the
 // klinecharts figure style that draws it.
 
+import { instanceLineColor } from "./instances";
 import {
   labelKey,
   plotKey,
@@ -60,11 +61,13 @@ interface PayloadHistogram {
 /**
  * Plots of a payload indicator in drawing order (lines, then histograms).
  * `colorAt` gives the fallback color for the n-th plot of the indicator,
- * used where the server sends none.
+ * used where the server sends none. For an instance after the first (`key`),
+ * lines default to a distinct palette color instead of the server's.
  */
 export function plotsOf(
   ind: PayloadPlots,
   colorAt: (n: number) => string,
+  key?: string,
 ): PlotInfo[] {
   const lines = ind.lines ?? [];
   const counts = new Map<string, number>();
@@ -79,7 +82,7 @@ export function plotsOf(
       kind: "line",
       index: i,
       label: line.label ?? `line${i}`,
-      defaultColor: line.color ?? colorAt(i),
+      defaultColor: (key ? instanceLineColor(key, i) : undefined) ?? line.color ?? colorAt(i),
       defaultWidth: line.width ?? DEFAULT_WIDTH,
     };
   });

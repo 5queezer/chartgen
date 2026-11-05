@@ -90,7 +90,7 @@ export function dataWindowRows(
     const ind = series.indicators[key]!;
     if (isEmptyVolumePane(bars, key)) continue;
     const kind = indicatorValueKind(key, ind.is_overlay);
-    const rows = plotsOf(ind, (n) => opts.colorAt(key, n)).flatMap((p) => {
+    const rows = plotsOf(ind, (n) => opts.colorAt(key, n), key).flatMap((p) => {
       if (!resolvePlot(p, styles[key]).visible) return [];
       const plot = p.kind === "line" ? ind.lines?.[p.index] : ind.histogram?.[p.index];
       const value =

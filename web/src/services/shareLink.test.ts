@@ -83,6 +83,15 @@ describe("applyShareLink", () => {
     expect(history.replaceState).not.toHaveBeenCalled();
   });
 
+  it("an explicit empty ind= clears the indicators", async () => {
+    stub("http://x/?symbol=BTCUSDT&ind=");
+    const { svc, ind } = await load();
+    expect(ind.activeIndicators().length).toBeGreaterThan(0);
+    svc.applyShareLink();
+    expect(ind.activeIndicators()).toEqual([]);
+    expect(svc.importPending()).toBe(false);
+  });
+
   it("reconciles only link names, with a toast, and releases the gate", async () => {
     stub("http://x/?ind=rsi(length:0),bogus_xyz");
     const { svc, ind } = await load();

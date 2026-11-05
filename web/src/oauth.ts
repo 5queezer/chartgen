@@ -95,22 +95,72 @@ async function discover(): Promise<DiscoveryDocument> {
   return DiscoveryDocumentSchema.parse(await res.json());
 }
 
+const MAX_REGISTRATION_RETRIES = 4;
+
+/** Wait before retry `attempt` (0-based): Retry-After seconds (max 60), else 2s, 4s, 8s... */
+export function retryDelayMs(attempt: number, retryAfter: string | null): number {
+  const secs = retryAfter === null ? NaN : Number(retryAfter);
+  if (Number.isFinite(secs) && secs >= 0) return Math.min(secs, 60) * 1000;
+  return Math.min(2 ** (attempt + 1), 60) * 1000;
+}
+
+// A registration the server rate-limits is retried; the countdown is
+// published so the UI can say why nothing happens.
+let notice: string | null = null;
+const noticeListeners = new Set<(n: string | null) => void>();
+
+function setNotice(n: string | null): void {
+  notice = n;
+  for (const fn of noticeListeners) fn(n);
+}
+
+/** Subscribe to the sign-in wait notice (null when none); returns unsubscribe. */
+export function subscribeSignInNotice(
+  fn: (n: string | null) => void,
+): () => void {
+  noticeListeners.add(fn);
+  fn(notice);
+  return () => noticeListeners.delete(fn);
+}
+
+async function waitWithNotice(ms: number): Promise<void> {
+  const end = Date.now() + ms;
+  for (let left = ms; left > 0; left = end - Date.now()) {
+    setNotice(
+      `Too many sign-ins from this network \u2014 retrying in ${Math.ceil(left / 1000)} s`,
+    );
+    await new Promise((r) => setTimeout(r, Math.min(left, 1000)));
+  }
+}
+
 async function registerClient(registration_endpoint: string): Promise<{
   client_id: string;
   client_secret: string;
 }> {
   const redirectUri = window.location.origin + "/";
-  const res = await fetch(registration_endpoint, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      client_name: "chartgen-web",
-      redirect_uris: [redirectUri],
-      grant_types: ["authorization_code"],
-      response_types: ["code"],
-      token_endpoint_auth_method: "none",
-    }),
-  });
+  let res: Response;
+  for (let attempt = 0; ; attempt++) {
+    res = await fetch(registration_endpoint, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        client_name: "chartgen-web",
+        redirect_uris: [redirectUri],
+        grant_types: ["authorization_code"],
+        response_types: ["code"],
+        token_endpoint_auth_method: "none",
+      }),
+    });
+    if (res.status !== 429) break;
+    if (attempt >= MAX_REGISTRATION_RETRIES) {
+      setNotice(null);
+      throw new Error(
+        "Too many sign-ins from this network. Try again in a minute.",
+      );
+    }
+    await waitWithNotice(retryDelayMs(attempt, res.headers.get("Retry-After")));
+  }
+  setNotice(null);
   if (!res.ok) {
     throw new Error(`registration failed: ${res.status}`);
   }

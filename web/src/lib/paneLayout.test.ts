@@ -1,0 +1,21 @@
+import { describe, expect, it } from "vitest";
+
+import { fitSubPanes } from "./paneLayout";
+
+describe("fitSubPanes", () => {
+  it("leaves a roomy layout alone", () => {
+    expect(fitSubPanes(400, [120, 120])).toBeNull();
+    expect(fitSubPanes(300, [])).toBeNull();
+  });
+
+  it("shrinks sub-panes to keep the price pane at 40% / 200px", () => {
+    const out = fitSubPanes(45, [120, 120, 120, 120, 120])!;
+    expect(out.every((h) => h >= 50)).toBe(true);
+    expect(645 - out.reduce((a, b) => a + b, 0)).toBeGreaterThanOrEqual(200);
+  });
+
+  it("never takes sub-panes below the minimum", () => {
+    const out = fitSubPanes(10, [60, 60, 60, 60, 60, 60, 60, 60])!;
+    expect(out.every((h) => h === 50)).toBe(true);
+  });
+});

@@ -27,6 +27,7 @@ import {
   trend,
 } from "../lib/quote";
 import type { McpSession } from "../mcp";
+import { subscribeSignInNotice } from "../oauth";
 import { createQuotesQuery } from "../queries";
 import { setSymbol, symbol } from "../stores/layout";
 import {
@@ -147,6 +148,8 @@ type Dialogue =
   | { kind: "delete"; id: string; name: string };
 
 export function Watchlist(props: WatchlistProps): JSX.Element {
+  const [signInNotice, setSignInNotice] = createSignal<string | null>(null);
+  onCleanup(subscribeSignInNotice(setSignInNotice));
   const [searchOpen, setSearchOpen] = createSignal(false);
   const [dialogue, setDialogue] = createSignal<Dialogue | null>(null);
   const [flagMenu, setFlagMenu] = createSignal<{
@@ -465,7 +468,15 @@ export function Watchlist(props: WatchlistProps): JSX.Element {
                 : "This list is empty. Use + to add a symbol."}
             </p>
           </Show>
-          <Show when={query.isError}>
+          <Show when={signInNotice()}>
+            <p
+              class="col-span-full px-3 py-2 text-xs text-[color:var(--color-fg-muted)]"
+              data-testid="signin-notice"
+            >
+              {signInNotice()}
+            </p>
+          </Show>
+          <Show when={query.isError && !signInNotice()}>
             <p class="col-span-full px-3 py-2 text-xs text-[color:var(--color-danger)]">
               Quotes unavailable: {query.error?.message}
             </p>

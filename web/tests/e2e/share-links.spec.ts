@@ -30,6 +30,12 @@ test.describe("share links", () => {
     await expect(symbolButton(page)).toContainText("ETHUSDT");
   });
 
+  test("an empty ind= clears the default indicators", async ({ page }) => {
+    await gotoApp(page, "/?symbol=BTCUSDT&ind=");
+    await expect(symbolButton(page)).toContainText("BTCUSDT");
+    await expect(page.locator("[data-testid^=indicator-legend]")).toHaveCount(0);
+  });
+
   test("a repeated name in ind makes two instances", async ({ page }) => {
     await gotoApp(page, "/?ind=rsi,rsi(length:21)");
 
