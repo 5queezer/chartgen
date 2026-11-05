@@ -70,7 +70,7 @@ export async function expectChartRendered(page: Page): Promise<void> {
  * window per step is a guess at page-load time that a loaded machine
  * easily exceeds.
  */
-async function boot(
+export async function bootApp(
   page: Page,
   navigate: () => Promise<unknown>,
 ): Promise<void> {
@@ -90,12 +90,12 @@ async function boot(
 
 /** Open `path` and wait for the booted app (OAuth done, chart rendered). */
 export function gotoApp(page: Page, path = "/"): Promise<void> {
-  return boot(page, () => page.goto(path));
+  return bootApp(page, () => page.goto(path));
 }
 
 /** Reload and wait for the booted app (OAuth done, chart rendered). */
 export function reloadApp(page: Page): Promise<void> {
-  return boot(page, () => page.reload());
+  return bootApp(page, () => page.reload());
 }
 
 export const test = base.extend<AppFixtures>({

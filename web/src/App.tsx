@@ -43,7 +43,7 @@ import { alignAsOf, COMPARE_PALETTE } from "./lib/compare";
 import { createCompareFeed, type CompareData } from "./lib/compareFeed";
 import { barCloseMs, isContinuousMarket } from "./lib/countdown";
 import { createMcpSession } from "./mcp";
-import { tryHandlePendingRedirect } from "./oauth";
+import { startSignIn, tryHandlePendingRedirect } from "./oauth";
 import {
   chartQueryKey,
   createChartQuery,
@@ -98,6 +98,7 @@ export function App(): JSX.Element {
   const session = createMcpSession();
 
   const [authReady, setAuthReady] = createSignal(false);
+  const [authError, setAuthError] = createSignal<string | null>(null);
   const [pickerOpen, setPickerOpen] = createSignal(false);
   // Index (into the active set) of the indicator whose settings dialog is open.
   const [settingsIndex, setSettingsIndex] = createSignal<number | null>(null);
@@ -129,10 +130,15 @@ export function App(): JSX.Element {
   };
 
   // Consume the OAuth redirect (if any) before the first render gets
-  // far enough to trigger a query. This is best-effort — if it fails,
-  // the first query will surface the error.
+  // far enough to trigger a query. If sign-in failed even after its one
+  // automatic retry, queries stay off (a query would only restart the
+  // flow, in a loop) and the status line offers "Sign in again".
   onMount(async () => {
-    await tryHandlePendingRedirect();
+    const err = await tryHandlePendingRedirect();
+    if (err) {
+      setAuthError(err.message);
+      return;
+    }
     setAuthReady(true);
 
     const logger = createAlertLogger(session);
@@ -355,6 +361,8 @@ export function App(): JSX.Element {
   });
 
   const status = createMemo<Status>(() => {
+    const authFailed = authError();
+    if (authFailed !== null) return { kind: "auth-error", message: authFailed };
     if (!authReady()) return { kind: "authenticating" };
     if (query.isFetching) return { kind: "loading" };
     if (query.isError) {
@@ -404,6 +412,11 @@ export function App(): JSX.Element {
           status={status()}
           live={pollStatus()}
           onRetry={() => void query.refetch()}
+          onSignIn={() =>
+            void startSignIn().catch((e: unknown) =>
+              setAuthError(e instanceof Error ? e.message : String(e)),
+            )
+          }
         />
         <div class="ml-auto">
           <LayoutMenu />
