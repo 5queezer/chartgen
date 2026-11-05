@@ -2,25 +2,33 @@ import { describe, expect, it } from "vitest";
 
 import {
   alertStatus,
+  barIndexOf,
   describeAlert,
   drawingLevels,
-  evaluate,
   fires,
   indicatorReading,
   isDrawingAlertTool,
-  rearmed,
   rearmedReading,
   type Alert,
   type AlertSource,
   type ChartValues,
 } from "./alerts";
+import { timeAxisOf } from "../stores/drawings";
 
 const at = (condition: Alert["condition"], price = 100) => ({
   condition,
   price,
 });
+type Level = ReturnType<typeof at>;
 
-describe("evaluate: crossing", () => {
+// A price alert's reading is the price minus its level: these run the
+// price-alert rules through `fires` / `rearmedReading`.
+const evaluate = (a: Level, prev: number | null, price: number) =>
+  fires(a.condition, prev === null ? null : [prev - a.price], [price - a.price]);
+const rearmed = (a: Level, price: number) => rearmedReading(a.condition, [price - a.price]);
+const RSI_SIG = '[{"length":14,"name":"rsi"}]';
+
+describe("fires on a price alert: crossing", () => {
   const a = at("crossing");
   it("fires from below and from above", () => {
     expect(evaluate(a, 99, 101)).toBe(true);
@@ -126,21 +134,58 @@ describe("drawingLevels (ADR-0034)", () => {
     expect(drawingLevels(rec, 9 * H)).toEqual([42]);
   });
 
-  it("a trend line interpolates and extrapolates in time/value space", () => {
+  // Hourly bars 0 h … 20 h without gaps, on a linear axis.
+  const hours = (...hs: number[]) => timeAxisOf(hs.map((h) => h * H))!;
+  const flat = { axis: hours(...Array.from({ length: 21 }, (_, i) => i)), log: false };
+
+  it("sloped lines need the chart's bars", () => {
     const rec = { name: "segment" as const, points: [p(0, 100), p(10 * H, 200)] };
-    expect(drawingLevels(rec, 5 * H)).toEqual([150]);
-    expect(drawingLevels(rec, 20 * H)).toEqual([300]);
-    expect(drawingLevels(rec, -10 * H)).toEqual([0]);
-    expect(drawingLevels({ ...rec, name: "straightLine" }, 15 * H)).toEqual([250]);
+    expect(drawingLevels(rec, 5 * H)).toEqual([]);
+  });
+
+  it("a trend line interpolates and extrapolates by bar", () => {
+    const rec = { name: "segment" as const, points: [p(0, 100), p(10 * H, 200)] };
+    expect(drawingLevels(rec, 5 * H, flat)).toEqual([150]);
+    expect(drawingLevels(rec, 20 * H, flat)).toEqual([300]);
+    // Past the last bar and before the first one, in whole bar intervals.
+    expect(drawingLevels(rec, 25 * H, flat)).toEqual([350]);
+    expect(drawingLevels(rec, -10 * H, flat)).toEqual([0]);
+    expect(drawingLevels({ ...rec, name: "straightLine" }, 15 * H, flat)).toEqual([250]);
+  });
+
+  it("a gap in the bars takes no room, as on the chart", () => {
+    // Bars at 0-4 h, then 20-24 h (a market closed overnight).
+    const view = { axis: hours(0, 1, 2, 3, 4, 20, 21, 22, 23, 24), log: false };
+    const rec = { name: "segment" as const, points: [p(0, 100), p(4 * H, 140)] };
+    // 24 h is bar 9: 100 + 9 × 10, not the 340 time would give.
+    expect(drawingLevels(rec, 24 * H, view)).toEqual([190]);
+    expect(drawingLevels(rec, 26 * H, view)).toEqual([210]);
+    expect(barIndexOf(view.axis, 21.4 * H)).toBe(6);
+    expect(barIndexOf(view.axis, 10 * H)).toBe(4);
+    expect(barIndexOf(view.axis, 15 * H)).toBe(5);
+    expect(barIndexOf(view.axis, -2 * H)).toBe(-2);
+  });
+
+  it("on a log axis the line is straight in log(value)", () => {
+    const rec = { name: "segment" as const, points: [p(0, 100), p(10 * H, 10_000)] };
+    expect(drawingLevels(rec, 5 * H, { ...flat, log: true })[0]).toBeCloseTo(1000);
+    expect(drawingLevels(rec, 5 * H, flat)[0]).toBeCloseTo(5050);
+    const negative = { name: "segment" as const, points: [p(0, -1), p(10 * H, 5)] };
+    expect(drawingLevels(negative, 5 * H, { ...flat, log: true })).toEqual([]);
+  });
+
+  it("a vertical line has no value", () => {
+    const rec = { name: "straightLine" as const, points: [p(5 * H, 100), p(5 * H, 200)] };
+    expect(drawingLevels(rec, 5 * H, flat)).toEqual([]);
   });
 
   it("a ray only runs from its start towards its second point", () => {
     const right = { name: "rayLine" as const, points: [p(10 * H, 100), p(20 * H, 200)] };
-    expect(drawingLevels(right, 30 * H)).toEqual([300]);
-    expect(drawingLevels(right, 5 * H)).toEqual([]);
+    expect(drawingLevels(right, 15 * H, flat)).toEqual([150]);
+    expect(drawingLevels(right, 5 * H, flat)).toEqual([]);
     const left = { name: "rayLine" as const, points: [p(10 * H, 100), p(0, 200)] };
-    expect(drawingLevels(left, 5 * H)).toEqual([150]);
-    expect(drawingLevels(left, 15 * H)).toEqual([]);
+    expect(drawingLevels(left, 5 * H, flat)).toEqual([150]);
+    expect(drawingLevels(left, 15 * H, flat)).toEqual([]);
   });
 
   it("a parallel channel has two lines", () => {
@@ -149,12 +194,20 @@ describe("drawingLevels (ADR-0034)", () => {
       points: [p(0, 100), p(10 * H, 200), p(5 * H, 120)],
     };
     // The main line is 150 at 5 h; the parallel one runs 30 below it.
-    expect(drawingLevels(rec, 5 * H)).toEqual([150, 120]);
-    expect(drawingLevels(rec, 10 * H)).toEqual([200, 170]);
+    expect(drawingLevels(rec, 5 * H, flat)).toEqual([150, 120]);
+    expect(drawingLevels(rec, 10 * H, flat)).toEqual([200, 170]);
+    // The third point's offset is measured in bars too: across a gap.
+    const gapped = { axis: hours(0, 1, 2, 3, 4, 20, 21, 22, 23, 24), log: false };
+    const across = {
+      name: "parallelStraightLine" as const,
+      points: [p(0, 100), p(4 * H, 140), p(20 * H, 130)],
+    };
+    // At 20 h (bar 5) the main line is 150: the parallel one runs 20 below.
+    expect(drawingLevels(across, 24 * H, gapped)).toEqual([190, 170]);
   });
 
   it("other tools have no level", () => {
-    expect(drawingLevels({ name: "cgRect", points: [p(0, 1), p(1, 2)] }, 0)).toEqual([]);
+    expect(drawingLevels({ name: "cgRect", points: [p(0, 1), p(1, 2)] }, 0, flat)).toEqual([]);
     expect(isDrawingAlertTool("cgRect")).toBe(false);
     expect(isDrawingAlertTool("segment")).toBe(true);
   });
@@ -194,6 +247,7 @@ describe("indicatorReading", () => {
     kind: "indicator",
     interval: "1h",
     instanceKey: "rsi",
+    signature: RSI_SIG,
     line: 0,
     name: "RSI (14)",
     against: { kind: "value", value: 70 },
@@ -226,6 +280,7 @@ describe("describeAlert", () => {
     kind: "indicator" as const,
     interval: "1h",
     instanceKey: "rsi",
+    signature: RSI_SIG,
     line: 0,
     name: "RSI (14)",
   };

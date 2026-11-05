@@ -375,12 +375,20 @@ function readIndex(): string[] {
   }
 }
 
+let onEvict: ((symbol: string) => void) | undefined;
+
+/** Called with each symbol whose drawings the LRU drops (the alerts store switches their alerts off). */
+export function setEvictionListener(fn: (symbol: string) => void): void {
+  onEvict = fn;
+}
+
 /** Move `symbol` to the front of the LRU index (or drop it); evict beyond MAX_SYMBOLS. */
 function touch(symbol: string, keep: boolean): void {
   const rest = readIndex().filter((s) => s !== symbol);
   const index = keep ? [symbol, ...rest] : rest;
   for (const evicted of index.splice(MAX_SYMBOLS)) {
     localStorage.removeItem(storageKey(evicted));
+    onEvict?.(evicted);
   }
   localStorage.setItem(INDEX_KEY, JSON.stringify(index));
 }

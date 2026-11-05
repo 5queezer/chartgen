@@ -12,7 +12,7 @@ import { pricePrecision } from "../lib/format";
 import { describeDrawing } from "../lib/objectTree";
 import { formatPrice } from "../lib/quote";
 import type { SeriesPayload } from "../types/responses";
-import { alerts, removeAlert } from "../stores/alerts";
+import { alerts, inactiveReason, removeAlert } from "../stores/alerts";
 import { compareEntries, removeCompare } from "../stores/compare";
 import {
   activeIndicators,
@@ -256,7 +256,7 @@ export function ObjectTree(props: ObjectTreeProps): JSX.Element {
                       </>
                     )}
                     <span class="ml-1 text-xs text-[color:var(--color-fg-muted)]">
-                      {alertStatus(a)}
+                      {inactiveReason(a) === null ? alertStatus(a) : `inactive: ${inactiveReason(a)}`}
                     </span>
                   </>
                 }

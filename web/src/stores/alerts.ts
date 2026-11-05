@@ -24,9 +24,10 @@ import {
   type AlertAgainst,
   type AlertSource,
   type ChartValues,
+  type ChartView,
   type Reading,
 } from "../lib/alerts";
-import { loadDrawings, type DrawingRecord } from "./drawings";
+import { loadDrawings, setEvictionListener, type DrawingRecord } from "./drawings";
 import { normalizeSymbol, symbol as chartSymbol } from "./layout";
 
 export const MAX_ALERTS = 200;
@@ -71,14 +72,19 @@ function sanitizeSource(raw: unknown): AlertSource | null | undefined {
     case "price":
       return undefined;
     case "drawing":
-      return isText(r.drawingId, 64) && isText(r.label, MAX_NAME)
-        ? { kind: "drawing", drawingId: r.drawingId, label: r.label }
-        : null;
+      if (!isText(r.drawingId, 64) || !isText(r.label, MAX_NAME)) return null;
+      if (r.interval !== undefined && !isText(r.interval, 16)) return null;
+      return {
+        kind: "drawing",
+        drawingId: r.drawingId,
+        label: r.label,
+        ...(r.interval !== undefined ? { interval: r.interval } : {}),
+      };
     case "indicator": {
       const against = sanitizeAgainst(r.against);
-      return typeof r.interval === "string" &&
-        r.interval.length <= 16 &&
+      return isText(r.interval, 16) &&
         isText(r.instanceKey, 100) &&
+        isText(r.signature, 2000) &&
         isIndex(r.line) &&
         isText(r.name, MAX_NAME) &&
         against !== null
@@ -86,6 +92,7 @@ function sanitizeSource(raw: unknown): AlertSource | null | undefined {
             kind: "indicator",
             interval: r.interval,
             instanceKey: r.instanceKey,
+            signature: r.signature,
             line: r.line,
             name: r.name,
             against,
@@ -137,7 +144,8 @@ function sanitizeAlert(raw: unknown): Alert | null {
   ) {
     alert.lastTriggeredAt = r.lastTriggeredAt;
   }
-  if (isText(r.note, MAX_NAME)) alert.note = r.note;
+  // A note explains why the app switched the alert off: only on inactive ones.
+  if (isText(r.note, MAX_NAME) && !alert.active) alert.note = r.note;
   return alert;
 }
 
@@ -227,12 +235,31 @@ export function forgetBaseline(symbol?: string): void {
     return;
   }
   baselines.delete(symbol);
+  forgetReadings(symbol);
+}
+
+/**
+ * Drop only the indicator readings of a symbol: after bar replay the feed
+ * restarts from older values, while the price baseline (fed by the quotes
+ * poll meanwhile) is still good.
+ */
+export function forgetReadings(symbol: string): void {
   for (const [id, r] of readings) if (r.symbol === symbol) readings.delete(id);
 }
 
 // --- What the chart shows (ADR-0034) ---------------------------------
-// Indicator alerts are only evaluated on the chart's own series, so the
-// Alerts tab needs to know which symbol, interval and indicators it holds.
+// Indicator and sloped-drawing alerts are only evaluated on the chart's own
+// series, so the Alerts tab needs to know which symbol, interval and
+// indicators it holds. `indicatorSignatures` maps the chart's instance keys
+// to their name and params (`activeIndicatorsKey` of the wire entry): an
+// alert whose instance changed since its creation does not run.
+
+const [indicatorSignatures, setIndicatorSignaturesSignal] = createSignal<
+  Readonly<Record<string, string>>
+>({}, { equals: (a, b) => JSON.stringify(a) === JSON.stringify(b) });
+export { indicatorSignatures };
+export const setIndicatorSignatures = (s: Readonly<Record<string, string>>): void =>
+  void setIndicatorSignaturesSignal(s);
 
 export interface ChartContext {
   symbol: string;
@@ -258,21 +285,28 @@ export const setChartContext = (ctx: ChartContext | null): void =>
   void setChartContextSignal(ctx);
 
 /**
- * Why an alert cannot fire right now, for the Alerts tab: "drawing deleted",
- * "open BTCUSDT 1h" (an indicator alert off the chart) or "indicator
- * removed". Null when it is evaluated (or simply paused).
+ * Why an alert cannot fire right now, for the Alerts tab and Object Tree:
+ * its note ("drawing deleted"), "open BTCUSDT 1h" (an indicator or sloped
+ * drawing alert while the chart shows something else), "indicator not on
+ * the chart" or "indicator changed" (other name or params under its key).
+ * Null when it is evaluated, or simply paused or triggered.
  */
 export function inactiveReason(
   a: Alert,
   ctx: ChartContext | null = chartContext(),
+  signatures: Readonly<Record<string, string>> = indicatorSignatures(),
 ): string | null {
   if (a.note) return a.note;
   const src = a.source;
-  if (!a.active || src?.kind !== "indicator") return null;
-  if (ctx?.symbol !== a.symbol || ctx.interval !== src.interval) {
-    return `open ${a.symbol} ${src.interval}`.trimEnd();
+  if (!a.active || src === undefined || src.kind === "price") return null;
+  const interval = src.interval;
+  if (interval === undefined) return null;
+  if (ctx?.symbol !== a.symbol || ctx.interval !== interval) {
+    return `open ${a.symbol} ${interval}`;
   }
-  return ctx.keys.includes(src.instanceKey) ? null : "indicator not on the chart";
+  if (src.kind === "drawing") return null;
+  if (!ctx.keys.includes(src.instanceKey)) return "indicator not on the chart";
+  return signatures[src.instanceKey] === src.signature ? null : "indicator changed";
 }
 // ---------------------------------------------------------------------
 
@@ -322,12 +356,10 @@ export function updateAlert(
       if (a.id !== id) return a;
       const { message, value, ...rest } = patch;
       const src = a.source;
-      const next: Alert = { ...a, ...rest, active: true };
+      const next: Alert = switchOn({ ...a, ...rest });
       if (value !== undefined && src?.kind === "indicator" && src.against.kind === "value") {
         next.source = { ...src, against: { kind: "value", value } };
       }
-      delete next.disarmed;
-      delete next.note;
       if (message !== undefined) {
         const m = message.trim().slice(0, MAX_MESSAGE);
         if (m === "") delete next.message;
@@ -337,6 +369,26 @@ export function updateAlert(
       return next;
     }),
   );
+}
+
+/** A drawing alert whose drawing is not in its symbol's stored drawings. */
+function drawingMissing(a: Alert): boolean {
+  const src = a.source;
+  return (
+    src?.kind === "drawing" &&
+    !loadDrawings(a.symbol, false).some((d) => d.id === src.drawingId)
+  );
+}
+
+/**
+ * `a` made active and re-armed; a drawing alert whose drawing is gone
+ * stays off, with the note, instead (it could never fire).
+ */
+function switchOn(a: Alert): Alert {
+  const next: Alert = { ...a, active: true };
+  delete next.disarmed;
+  delete next.note;
+  return drawingMissing(a) ? { ...next, active: false, note: DRAWING_DELETED } : next;
 }
 
 /**
@@ -360,14 +412,15 @@ export function setAlertActive(id: string, active: boolean): void {
   commit(
     fresh().map((a) => {
       if (a.id !== id) return a;
+      if (active) {
+        baselines.delete(a.symbol);
+        readings.delete(a.id);
+        return switchOn(a);
+      }
       const next = { ...a, active };
       delete next.disarmed;
       delete next.note;
-      if (!active) delete next.lastTriggeredAt;
-      else {
-        baselines.delete(a.symbol);
-        readings.delete(a.id);
-      }
+      delete next.lastTriggeredAt;
       return next;
     }),
   );
@@ -379,9 +432,11 @@ export function removeAlert(id: string): void {
 }
 
 /**
- * The drawings of `symbol` are now `ids` (called when they are saved):
- * alerts on a drawing that is gone are switched off with a note, not
- * deleted, so the user sees what happened.
+ * The drawings of `symbol` are now `ids` (called when they are saved, and
+ * with none when the symbol's drawings are evicted). Active alerts on a
+ * drawing that is gone are switched off with a note, not deleted, so the
+ * user sees what happened; when the drawing comes back (undo) they are
+ * switched on again.
  */
 export function syncDrawingAlerts(
   symbol: string,
@@ -392,26 +447,41 @@ export function syncDrawingAlerts(
   let changed = false;
   const next = list.map((a) => {
     const src = a.source;
-    if (a.symbol !== symbol || src?.kind !== "drawing" || a.note || have.has(src.drawingId)) {
-      return a;
+    if (a.symbol !== symbol || src?.kind !== "drawing") return a;
+    const present = have.has(src.drawingId);
+    if (!present && a.active) {
+      changed = true;
+      const off: Alert = { ...a, active: false, note: DRAWING_DELETED };
+      delete off.disarmed;
+      return off;
     }
-    changed = true;
-    const off: Alert = { ...a, active: false, note: DRAWING_DELETED };
-    delete off.disarmed;
-    return off;
+    if (present && a.note === DRAWING_DELETED) {
+      changed = true;
+      baselines.delete(symbol);
+      const on: Alert = { ...a, active: true };
+      delete on.note;
+      return on;
+    }
+    return a;
   });
   if (changed) commit(next);
 }
+// Evicted drawings (the per-symbol LRU in stores/drawings) are deleted too.
+setEvictionListener((symbol) => syncDrawingAlerts(symbol, []));
+
+/** Needs the chart's series: indicator alerts and sloped-drawing alerts. */
+const needsChart = (a: Alert) =>
+  a.source !== undefined && a.source.kind !== "price" && a.source.interval !== undefined;
 
 /**
  * Symbols with an active alert a price poll can evaluate, in first-seen
- * order. Indicator alerts only run on the chart's series, so they are left out.
+ * order. Alerts that need the chart's series are left out.
  */
 export function activeAlertSymbols(): string[] {
   return [
     ...new Set(
       alerts()
-        .filter((a) => a.active && a.source?.kind !== "indicator")
+        .filter((a) => a.active && !needsChart(a))
         .map((a) => a.symbol),
     ),
   ];
@@ -421,8 +491,11 @@ export function activeAlertSymbols(): string[] {
 export interface Tick {
   /** Epoch ms of the bar the price belongs to; defaults to `now`. */
   time?: number;
-  /** The chart's series, when the price is its last close (indicator alerts). */
-  chart?: ChartValues;
+  /**
+   * The chart's series, when the price is its last close: its interval and
+   * indicators (indicator alerts), its bars and scale (sloped drawings).
+   */
+  chart?: ChartValues & { view?: ChartView };
 }
 
 /**
@@ -457,15 +530,21 @@ export function processPrice(
         drawings ??= loadDrawings(symbol, false);
         const rec = drawings.find((d) => d.id === src.drawingId);
         if (!rec) return null;
+        // A sloped line needs the bars of the interval it was drawn on.
+        const view = src.interval === undefined ? undefined : tick.chart?.view;
+        if (src.interval !== undefined && (!view || tick.chart?.interval !== src.interval)) {
+          return null;
+        }
         // The line as it is now, at the previous and the current bar time:
         // moving a drawing over the price does not fire it.
         return {
-          prev: prev && drawingLevels(rec, prev.time).map((l) => prev.price - l),
-          cur: drawingLevels(rec, time).map((l) => price - l),
+          prev: prev && drawingLevels(rec, prev.time, view).map((l) => prev.price - l),
+          cur: drawingLevels(rec, time, view).map((l) => price - l),
         };
       }
       case "indicator": {
-        const cur = indicatorReading(src, price, tick.chart);
+        const same = indicatorSignatures()[src.instanceKey] === src.signature;
+        const cur = same ? indicatorReading(src, price, tick.chart) : null;
         const before = readings.get(a.id)?.reading ?? null;
         if (cur === null) readings.delete(a.id);
         else readings.set(a.id, { symbol, reading: cur });

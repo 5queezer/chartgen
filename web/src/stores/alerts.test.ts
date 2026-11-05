@@ -5,6 +5,7 @@ function stubStorage(initial: Record<string, string> = {}) {
   vi.stubGlobal("localStorage", {
     getItem: (k: string) => data.get(k) ?? null,
     setItem: (k: string, v: string) => void data.set(k, v),
+    removeItem: (k: string) => void data.delete(k),
   });
   return data;
 }
@@ -368,6 +369,7 @@ describe("several tabs", () => {
 
 const H = 3_600_000;
 const DRAWINGS_KEY = "chartgen.drawings.AAPL";
+const RSI_SIG = '[{"length":14,"name":"rsi"}]';
 const trendLine = {
   id: "d1",
   name: "segment",
@@ -378,11 +380,22 @@ const trendLine = {
   lock: false,
   visible: true,
 };
+const hline = {
+  id: "h1",
+  name: "horizontalStraightLine",
+  points: [{ timestamp: 0, value: 150 }],
+  lock: false,
+  visible: true,
+};
 const drawingAlert = {
   symbol: "AAPL",
   condition: "crossing_up" as const,
   trigger: "once" as const,
-  source: { kind: "drawing" as const, drawingId: "d1", label: "Trend line" },
+  source: { kind: "drawing" as const, drawingId: "d1", label: "Trend line", interval: "1h" },
+};
+const hlineAlert = {
+  ...drawingAlert,
+  source: { kind: "drawing" as const, drawingId: "h1", label: "Horizontal line" },
 };
 const rsiAlert = {
   symbol: "AAPL",
@@ -392,6 +405,7 @@ const rsiAlert = {
     kind: "indicator" as const,
     interval: "1h",
     instanceKey: "rsi",
+    signature: RSI_SIG,
     line: 0,
     name: "RSI (14)",
     against: { kind: "value" as const, value: 70 },
@@ -400,6 +414,20 @@ const rsiAlert = {
 const rsiChart = (...values: (number | null)[]) => ({
   chart: { interval: "1h", indicators: { rsi: { lines: [{ values }] } } },
 });
+
+/** The chart's tick at bar `h` (hourly bars 0 h … `h`), for sloped drawings. */
+async function barTick(h: number, interval = "1h") {
+  const { timeAxisOf } = await import("./drawings");
+  const axis = timeAxisOf(Array.from({ length: h + 1 }, (_, i) => i * H))!;
+  return { time: h * H, chart: { interval, indicators: {}, view: { axis, log: false } } };
+}
+
+/** Load the store with indicator signatures as the app sets them. */
+async function loadWithRsi() {
+  const s = await load();
+  s.setIndicatorSignatures({ rsi: RSI_SIG });
+  return s;
+}
 
 describe("sources: migration and validation", () => {
   it("an old record without a source is a price alert", async () => {
@@ -414,7 +442,14 @@ describe("sources: migration and validation", () => {
     const { sanitizeAlerts } = await load();
     const out = sanitizeAlerts([
       { ...valid, id: "p", source: { kind: "price" } },
-      { ...valid, id: "d", price: 0, source: drawingAlert.source, note: "drawing deleted" },
+      {
+        ...valid,
+        id: "d",
+        price: 0,
+        active: false,
+        source: drawingAlert.source,
+        note: "drawing deleted",
+      },
       { ...valid, id: "i", price: 0, source: rsiAlert.source },
       { ...valid, id: "bad-kind", source: { kind: "nope" } },
       { ...valid, id: "bad-drawing", source: { kind: "drawing", label: "x" } },
@@ -424,11 +459,20 @@ describe("sources: migration and validation", () => {
         source: { ...rsiAlert.source, against: { kind: "value", value: "70" } },
       },
       { ...valid, id: "bad-line", source: { ...rsiAlert.source, line: -1 } },
+      { ...valid, id: "no-interval", source: { ...rsiAlert.source, interval: "" } },
+      { ...valid, id: "no-signature", source: { ...rsiAlert.source, signature: undefined } },
     ])!;
     expect(out.map((a) => a.id)).toEqual(["p", "d", "i"]);
     expect(out[0]).not.toHaveProperty("source");
     expect(out[1]).toMatchObject({ source: drawingAlert.source, note: "drawing deleted" });
     expect(out[2]!.source).toEqual(rsiAlert.source);
+  });
+
+  it("keeps a note only on an inactive alert", async () => {
+    stubStorage();
+    const { sanitizeAlerts } = await load();
+    const [a] = sanitizeAlerts([{ ...valid, note: "drawing deleted" }])!;
+    expect(a).not.toHaveProperty("note");
   });
 
   it("an indicator alert can compare with zero or a negative value", async () => {
@@ -446,37 +490,57 @@ describe("sources: migration and validation", () => {
 });
 
 describe("drawing alerts", () => {
-  it("fire when the price crosses the line's value at the bar time", async () => {
+  it("fire when the price crosses the line's value at the bar", async () => {
     stubStorage({ [DRAWINGS_KEY]: JSON.stringify([trendLine]) });
     const s = await load();
     s.addAlert(drawingAlert);
-    // The line is 150 at 5 h and 160 at 6 h: 149 → 159 stays below it.
-    expect(s.processPrice("AAPL", 149, 1, { time: 5 * H })).toEqual([]);
-    expect(s.processPrice("AAPL", 159, 2, { time: 6 * H })).toEqual([]);
-    expect(s.processPrice("AAPL", 161, 3, { time: 6 * H })).toHaveLength(1);
+    // The line is 150 at bar 5 and 160 at bar 6: 149 → 159 stays below it.
+    expect(s.processPrice("AAPL", 149, 1, await barTick(5))).toEqual([]);
+    expect(s.processPrice("AAPL", 159, 2, await barTick(6))).toEqual([]);
+    expect(s.processPrice("AAPL", 161, 3, await barTick(6))).toHaveLength(1);
     expect(s.alerts()[0]).toMatchObject({ active: false, lastTriggeredAt: 3 });
+  });
+
+  it("a sloped line needs the chart at its interval; a horizontal one does not", async () => {
+    stubStorage({ [DRAWINGS_KEY]: JSON.stringify([trendLine, hline]) });
+    const s = await load();
+    const sloped = s.addAlert({ ...drawingAlert, condition: "greater" })!;
+    s.addAlert({ ...hlineAlert, condition: "greater" });
+    // Only the horizontal one is polled off the chart.
+    expect(s.activeAlertSymbols()).toEqual(["AAPL"]);
+    // A quotes poll (no chart): the horizontal line fires, the sloped one cannot.
+    expect(s.processPrice("AAPL", 1e6, 1).map((a) => a.source)).toEqual([hlineAlert.source]);
+    // Another interval on the chart.
+    expect(s.processPrice("AAPL", 1e6, 2, await barTick(5, "4h"))).toEqual([]);
+    expect(s.inactiveReason(s.alerts().find((a) => a.id === sloped.id)!, null)).toBe(
+      "open AAPL 1h",
+    );
+    expect(s.processPrice("AAPL", 1e6, 3, await barTick(5))).toHaveLength(1);
   });
 
   it("moving the drawing over the price does not fire it", async () => {
     const data = stubStorage({ [DRAWINGS_KEY]: JSON.stringify([trendLine]) });
     const s = await load();
     s.addAlert(drawingAlert);
-    s.processPrice("AAPL", 140, 1, { time: 5 * H });
-    const lower = { ...trendLine, points: trendLine.points.map((p) => ({ ...p, value: p.value - 50 })) };
+    s.processPrice("AAPL", 140, 1, await barTick(5));
+    const lower = {
+      ...trendLine,
+      points: trendLine.points.map((p) => ({ ...p, value: p.value - 50 })),
+    };
     data.set(DRAWINGS_KEY, JSON.stringify([lower]));
-    expect(s.processPrice("AAPL", 140, 2, { time: 5 * H })).toEqual([]);
+    expect(s.processPrice("AAPL", 140, 2, await barTick(5))).toEqual([]);
   });
 
   it("are skipped while the drawing is missing", async () => {
     stubStorage();
     const s = await load();
-    s.addAlert({ ...drawingAlert, condition: "greater" });
+    s.addAlert({ ...hlineAlert, condition: "greater" });
     expect(s.processPrice("AAPL", 1e9, 1)).toEqual([]);
     expect(s.alerts()[0]!.active).toBe(true);
   });
 
-  it("deleting the drawing disables its alerts with a note", async () => {
-    stubStorage({ [DRAWINGS_KEY]: JSON.stringify([trendLine]) });
+  it("deleting the drawing disables its alerts with a note; undo restores them", async () => {
+    const data = stubStorage({ [DRAWINGS_KEY]: JSON.stringify([trendLine]) });
     const s = await load();
     const a = s.addAlert(drawingAlert)!;
     const other = s.addAlert({ ...drawingAlert, symbol: "MSFT" })!;
@@ -484,22 +548,58 @@ describe("drawing alerts", () => {
     s.syncDrawingAlerts("AAPL", ["d1"]);
     expect(s.alerts().every((x) => x.active)).toBe(true);
 
+    data.delete(DRAWINGS_KEY);
     s.syncDrawingAlerts("AAPL", []);
     const byId = (id: string) => s.alerts().find((x) => x.id === id)!;
     expect(byId(a.id)).toMatchObject({ active: false, note: s.DRAWING_DELETED });
     expect(s.inactiveReason(byId(a.id))).toBe(s.DRAWING_DELETED);
     expect(byId(other.id).active).toBe(true);
     expect(byId(price.id).active).toBe(true);
-    // Still there, not deleted; resuming clears the note.
+
+    // Resuming or editing while the drawing is gone keeps it off, with the note.
     s.setAlertActive(a.id, true);
+    expect(byId(a.id)).toMatchObject({ active: false, note: s.DRAWING_DELETED });
+    s.updateAlert(a.id, { condition: "crossing" });
+    expect(byId(a.id)).toMatchObject({
+      active: false,
+      note: s.DRAWING_DELETED,
+      condition: "crossing",
+    });
+
+    // The drawing comes back (undo): the alert is on again.
+    data.set(DRAWINGS_KEY, JSON.stringify([trendLine]));
+    s.syncDrawingAlerts("AAPL", ["d1"]);
+    expect(byId(a.id).active).toBe(true);
     expect(byId(a.id)).not.toHaveProperty("note");
+  });
+
+  it("a paused alert on a deleted drawing gets the note when resumed", async () => {
+    stubStorage();
+    const s = await load();
+    const a = s.addAlert(hlineAlert)!;
+    s.setAlertActive(a.id, false);
+    s.syncDrawingAlerts("AAPL", []);
+    expect(s.alerts()[0]).not.toHaveProperty("note");
+    s.setAlertActive(a.id, true);
+    expect(s.alerts()[0]).toMatchObject({ active: false, note: s.DRAWING_DELETED });
+  });
+
+  it("drawings evicted from storage switch their alerts off", async () => {
+    stubStorage();
+    const s = await load();
+    const drawings = await import("./drawings");
+    s.addAlert({ ...hlineAlert, symbol: "S0" });
+    for (let i = 0; i <= drawings.MAX_SYMBOLS; i++) {
+      drawings.saveDrawings(`S${i}`, [hline as never]);
+    }
+    expect(s.alerts()[0]).toMatchObject({ active: false, note: s.DRAWING_DELETED });
   });
 });
 
 describe("indicator alerts", () => {
   it("cross on the forming bar's values between ticks", async () => {
     stubStorage();
-    const s = await load();
+    const s = await loadWithRsi();
     s.addAlert(rsiAlert);
     expect(s.processPrice("AAPL", 1, 1, rsiChart(60, 68))).toEqual([]);
     expect(s.processPrice("AAPL", 1, 2, rsiChart(60, 71))).toHaveLength(1);
@@ -511,11 +611,18 @@ describe("indicator alerts", () => {
   it("price against a plot: close crossing the EMA", async () => {
     stubStorage();
     const s = await load();
+    s.setIndicatorSignatures({ ema: "ema-sig" });
     s.addAlert({
       ...rsiAlert,
       condition: "crossing",
       trigger: "once",
-      source: { ...rsiAlert.source, instanceKey: "ema", name: "EMA 200", against: { kind: "price" } },
+      source: {
+        ...rsiAlert.source,
+        instanceKey: "ema",
+        signature: "ema-sig",
+        name: "EMA 200",
+        against: { kind: "price" },
+      },
     });
     const ema = (v: number) => ({
       chart: { interval: "1h", indicators: { ema: { lines: [{ values: [v] }] } } },
@@ -526,7 +633,7 @@ describe("indicator alerts", () => {
 
   it("are not evaluated without the chart, nor across a gap", async () => {
     stubStorage();
-    const s = await load();
+    const s = await loadWithRsi();
     s.addAlert(rsiAlert);
     s.processPrice("AAPL", 1, 1, rsiChart(68));
     // A quotes poll (no series) breaks the continuity.
@@ -535,16 +642,38 @@ describe("indicator alerts", () => {
     s.processPrice("AAPL", 1, 4, rsiChart(68));
     s.forgetBaseline("AAPL");
     expect(s.processPrice("AAPL", 1, 5, rsiChart(71))).toEqual([]);
-    // Another interval.
+    // After bar replay only the readings are dropped.
     s.processPrice("AAPL", 1, 6, rsiChart(68));
+    s.forgetReadings("AAPL");
+    expect(s.processPrice("AAPL", 1, 7, rsiChart(71))).toEqual([]);
+    // Another interval.
+    s.processPrice("AAPL", 1, 8, rsiChart(68));
     expect(
-      s.processPrice("AAPL", 1, 7, { chart: { ...rsiChart(71).chart, interval: "4h" } }),
+      s.processPrice("AAPL", 1, 9, { chart: { ...rsiChart(71).chart, interval: "4h" } }),
     ).toEqual([]);
+  });
+
+  it("do not run on another instance under the same key", async () => {
+    stubStorage();
+    const s = await loadWithRsi();
+    const a = s.addAlert(rsiAlert)!;
+    const ctx = { symbol: "AAPL", interval: "1h", keys: ["rsi"] };
+    s.processPrice("AAPL", 1, 1, rsiChart(68));
+    // RSI (14) removed and RSI (21) added: it gets the same key.
+    s.setIndicatorSignatures({ rsi: '[{"length":21,"name":"rsi"}]' });
+    expect(s.processPrice("AAPL", 1, 2, rsiChart(71))).toEqual([]);
+    expect(s.inactiveReason(s.alerts()[0]!, ctx)).toBe("indicator changed");
+    s.setIndicatorSignatures({});
+    expect(s.inactiveReason(s.alerts()[0]!, { ...ctx, keys: [] })).toBe(
+      "indicator not on the chart",
+    );
+    s.setIndicatorSignatures({ rsi: RSI_SIG });
+    expect(s.inactiveReason(s.alerts().find((x) => x.id === a.id)!, ctx)).toBeNull();
   });
 
   it("a greater-than alert fires on the first reading", async () => {
     stubStorage();
-    const s = await load();
+    const s = await loadWithRsi();
     s.addAlert({
       ...rsiAlert,
       condition: "greater",
@@ -557,7 +686,7 @@ describe("indicator alerts", () => {
 
   it("say why they are inactive and are left out of the quotes poll", async () => {
     stubStorage();
-    const s = await load();
+    const s = await loadWithRsi();
     const a = s.addAlert(rsiAlert)!;
     expect(s.activeAlertSymbols()).toEqual([]);
     expect(s.inactiveReason(a, null)).toBe("open AAPL 1h");

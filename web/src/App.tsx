@@ -18,6 +18,7 @@ import { BottomBar } from "./components/BottomBar";
 import {
   AlertDialog,
   AlertButton,
+  lastPlotValue,
   openAlertDialog,
   plotRef,
 } from "./components/AlertDialog";
@@ -31,7 +32,8 @@ import {
   DrawingToolbar,
   type DrawingsApi,
 } from "./components/DrawingToolbar";
-import { isDrawingAlertTool } from "./lib/alerts";
+import { isDrawingAlertTool, isHorizontalTool } from "./lib/alerts";
+import { forgetReadings, setIndicatorSignatures } from "./stores/alerts";
 import { IndicatorChips } from "./components/IndicatorChips";
 import { IndicatorPicker } from "./components/IndicatorPicker";
 import { IndicatorSettings } from "./components/IndicatorSettings";
@@ -86,11 +88,13 @@ import {
 } from "./services/shareLink";
 import {
   createAlertQuotes,
+  chartTick,
   feedChartSnapshot,
   feedPrice,
 } from "./services/alertEngine";
 import {
   activeIndicators,
+  activeIndicatorsKey,
   indicatorName,
   indicatorParams,
   indicatorStyle,
@@ -263,6 +267,9 @@ export function App(): JSX.Element {
         resuming = true;
         feed.reset(s, feedRequest);
         resuming = false;
+        // Indicator readings from before replay are no baseline for the
+        // live values that follow (ADR-0034).
+        forgetReadings(feedTicker);
       }
     },
     loadUntil: (ts, isCurrent) => feed.loadUntil(ts, isCurrent),
@@ -415,23 +422,30 @@ export function App(): JSX.Element {
   // --- Drawing and indicator alerts (ADR-0034) ---------------------------
   const alertDrawings = createMemo(() =>
     (drawings()?.list() ?? []).flatMap((d) =>
-      isDrawingAlertTool(d.name) ? [{ id: d.id, label: DRAWING_LABELS[d.name] }] : [],
+      isDrawingAlertTool(d.name)
+        ? [{ id: d.id, label: DRAWING_LABELS[d.name], sloped: !isHorizontalTool(d.name) }]
+        : [],
     ),
   );
   const alertParams = createMemo(() => paramLabels(wireIndicators(), paramDefaults()));
+  // Name and params per instance key: an indicator alert only runs on the
+  // instance it was created on.
+  createEffect(() =>
+    setIndicatorSignatures(
+      Object.fromEntries(wireIndicators().map((e) => [instanceKey(e), activeIndicatorsKey([e])])),
+    ),
+  );
   // From a legend row: an overlay (EMA) is the level the price crosses, an
   // oscillator (RSI) the source, prefilled with its last value.
   const addIndicatorAlert = (key: string) => {
-    const ind = live()?.series.indicators[key];
-    const values = ind?.lines?.[0]?.values;
-    if (!ind || !values) return;
+    const series = live()?.series ?? null;
+    const ind = series?.indicators[key];
+    if (!ind?.lines?.length) return;
     if (ind.is_overlay) {
       openAlertDialog({ level: plotRef(key, 0) });
       return;
     }
-    let last: number | null = null;
-    for (let i = values.length - 1; i >= 0 && last === null; i--) last = values[i] ?? null;
-    openAlertDialog({ source: plotRef(key, 0), price: last ?? undefined });
+    openAlertDialog({ source: plotRef(key, 0), price: lastPlotValue(series, key, 0) ?? undefined });
   };
   // ---------------------------------------------------------------------
 
@@ -456,8 +470,13 @@ export function App(): JSX.Element {
     (window as unknown as Record<string, unknown>).__chartgenTest = {
       chart,
       series: () => live()?.series ?? null,
-      // Alert e2e (tests/e2e/alerts.spec.ts): inject a live price.
-      feedPrice,
+      // Alert e2e (tests/e2e/alerts.spec.ts): inject a live price. For the
+      // chart symbol it comes with the chart's bars and indicators, as a
+      // live tail would (sloped drawing alerts need them).
+      feedPrice: (sym: string, price: number) => {
+        const s = live()?.series;
+        feedPrice(sym, price, s && sym === feedTicker ? chartTick(s) : undefined);
+      },
       // Bar replay e2e (tests/e2e/bar-replay.spec.ts): the frame on screen
       // and the replay state.
       shownSeries: () => shown()?.series ?? null,

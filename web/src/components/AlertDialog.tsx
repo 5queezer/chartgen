@@ -40,6 +40,7 @@ import {
   MAX_ALERTS,
   addAlert,
   alerts,
+  indicatorSignatures,
   lastPrice,
   updateAlert,
 } from "../stores/alerts";
@@ -184,7 +185,20 @@ interface PlotOption {
   label: string;
   /** Name in descriptions, e.g. "EMA 200" or "RSI (14)". */
   name: string;
-  last: number | null;
+}
+
+/** Last value of a plot in the series (its latest bar with one), or null. */
+export function lastPlotValue(
+  series: SeriesPayload | null,
+  key: string,
+  line: number,
+): number | null {
+  const values = series?.indicators[key]?.lines?.[line]?.values ?? [];
+  for (let i = values.length - 1; i >= 0; i--) {
+    const v = values[i];
+    if (v != null) return v;
+  }
+  return null;
 }
 
 /** Plots of the series' indicators, in legend order. */
@@ -199,11 +213,9 @@ function plotOptions(
     const lines = ind.lines ?? [];
     return lines.map((l, line) => {
       const label = l.label || `Plot ${line + 1}`;
-      let last: number | null = null;
-      for (let i = l.values.length - 1; i >= 0 && last === null; i--) last = l.values[i] ?? null;
       // A plot named like its indicator (RSI's RSI) reads as the indicator.
       const name = lines.length === 1 || label === base ? title : label;
-      return { ref: plotRef(key, line), key, line, label: `${title}: ${label}`, name, last };
+      return { ref: plotRef(key, line), key, line, label: `${title}: ${label}`, name };
     });
   });
 }
@@ -229,7 +241,7 @@ export interface AlertDialogProps {
   /** Params label per instance key, e.g. "(14)" (see `paramLabels`). */
   params: ReadonlyMap<string, string | undefined>;
   /** Drawings of the chart symbol an alert can watch. */
-  drawings: readonly { id: string; label: string }[];
+  drawings: readonly { id: string; label: string; sloped: boolean }[];
 }
 
 export function AlertDialog(props: AlertDialogProps): JSX.Element {
@@ -266,7 +278,7 @@ export function AlertDialog(props: AlertDialogProps): JSX.Element {
     return props.drawings.map((d) => {
       const n = (seen.get(d.label) ?? 0) + 1;
       seen.set(d.label, n);
-      return { ref: drawingRef(d.id), id: d.id, label: n > 1 ? `${d.label} ${n}` : d.label };
+      return { ...d, ref: drawingRef(d.id), label: n > 1 ? `${d.label} ${n}` : d.label };
     });
   });
   const sourcePlot = () => plots().find((p) => p.ref === draft()?.source);
@@ -302,17 +314,14 @@ export function AlertDialog(props: AlertDialogProps): JSX.Element {
 
   const pickSource = (source: string) => {
     const plot = plots().find((p) => p.ref === source);
-    const price = lastPrice(draft()?.symbol ?? "");
+    // The value now, not when the options were built.
+    const value = plot
+      ? lastPlotValue(props.series, plot.key, plot.line)
+      : lastPrice(draft()?.symbol ?? "");
     patch({
       source,
       level: VALUE,
-      price: plot
-        ? plot.last === null
-          ? ""
-          : String(+plot.last.toPrecision(6))
-        : price === null
-          ? ""
-          : priceText(price),
+      price: value === null ? "" : plot ? String(+value.toPrecision(6)) : priceText(value),
     });
   };
 
@@ -321,31 +330,32 @@ export function AlertDialog(props: AlertDialogProps): JSX.Element {
     const interval = props.series?.interval ?? "";
     if (d.source.startsWith("drawing:")) {
       const dr = drawings().find((x) => x.ref === d.source);
-      return dr ? { kind: "drawing", drawingId: dr.id, label: dr.label } : "That drawing is gone.";
+      if (!dr) return "That drawing is gone.";
+      if (!dr.sloped) return { kind: "drawing", drawingId: dr.id, label: dr.label };
+      // A sloped line is read on the bars of this interval (ADR-0034).
+      if (interval === "") return "The chart has no interval to read the line on.";
+      return { kind: "drawing", drawingId: dr.id, label: dr.label, interval };
     }
     const level = plots().find((p) => p.ref === d.level);
-    if (d.source === PRICE) {
-      if (!level) return { kind: "price" };
-      return {
-        kind: "indicator",
-        interval,
-        instanceKey: level.key,
-        line: level.line,
-        name: level.name,
-        against: { kind: "price" },
-      };
+    const plot = d.source === PRICE ? level : sourcePlot();
+    if (d.source === PRICE && !level) return { kind: "price" };
+    const signature = plot && indicatorSignatures()[plot.key];
+    if (!plot || !signature || interval === "") {
+      return "That indicator is no longer on the chart.";
     }
-    const own = sourcePlot();
-    if (!own) return "That indicator is no longer on the chart.";
     return {
       kind: "indicator",
       interval,
-      instanceKey: own.key,
-      line: own.line,
-      name: own.name,
-      against: level
-        ? { kind: "plot", line: level.line, name: level.name }
-        : { kind: "value", value },
+      instanceKey: plot.key,
+      signature,
+      line: plot.line,
+      name: plot.name,
+      against:
+        d.source === PRICE
+          ? { kind: "price" }
+          : level
+            ? { kind: "plot", line: level.line, name: level.name }
+            : { kind: "value", value },
     };
   };
 

@@ -22,6 +22,7 @@ import {
 } from "../stores/alerts";
 import { setSymbol, symbol } from "../stores/layout";
 import { setWatchlistCollapsed } from "../stores/watchlist";
+import { leader } from "../services/alertEngine";
 import { openAlertDialog } from "./AlertDialog";
 
 const iconButtonClass =
@@ -70,6 +71,14 @@ export function AlertsPanel(): JSX.Element {
           <span aria-hidden="true">»</span>
         </button>
       </div>
+      <Show when={!leader()}>
+        <p
+          data-role="alerts-elsewhere"
+          class="px-3 py-1.5 text-xs text-[color:var(--color-fg-muted)] border-b border-[color:var(--color-border)]"
+        >
+          Alerts are evaluated in another open chartgen tab.
+        </p>
+      </Show>
       <div class="flex-1 min-h-0 overflow-y-auto">
         <Show
           when={groups().length > 0}

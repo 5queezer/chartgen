@@ -1,8 +1,9 @@
 // Client-side alert evaluation and delivery (ADR-0020). Prices come from
 // two places and both end in `deliver`:
 //   - the chart symbol: the live feed's tail polls, via `feedChartSnapshot`,
-//     which also carry the indicator values indicator alerts read (ADR-0034:
-//     those only run while the chart shows their symbol and interval);
+//     which also carry the indicator values and bars that indicator and
+//     sloped-drawing alerts read (ADR-0034: those only run while the chart
+//     shows their symbol and interval);
 //   - every other symbol with an active alert: its own `get_quotes` poll
 //     (`createAlertQuotes`), at the watchlist's 5 s cadence. The chart
 //     symbol is left out of that poll so one price is never counted twice.
@@ -23,6 +24,9 @@ import type { LiveSnapshot } from "../lib/liveFeed";
 import { formatPrice } from "../lib/quote";
 import type { McpSession } from "../mcp";
 import { createQuotesQuery } from "../queries";
+import { timeAxisOf } from "../stores/drawings";
+import { scaleMode } from "../stores/layout";
+import type { SeriesPayload } from "../types/responses";
 import {
   activeAlertSymbols,
   forgetBaseline,
@@ -214,19 +218,37 @@ export function feedPrice(
  */
 export function feedChartSnapshot(symbol: string, snapshot: LiveSnapshot): void {
   const { bars, indicators } = snapshot.series;
-  const interval = snapshot.series.interval ?? "";
-  const last = bars[bars.length - 1];
-  const close = last?.c;
-  setChartContext({ symbol, interval, keys: Object.keys(indicators) });
+  const close = bars[bars.length - 1]?.c;
+  setChartContext({
+    symbol,
+    interval: snapshot.series.interval ?? "",
+    keys: Object.keys(indicators),
+  });
   if (snapshot.update.kind === "reset") {
     forgetBaseline(symbol);
     if (close != null) observePrice(symbol, close);
   } else if (snapshot.update.kind === "tail") {
-    feedPrice(symbol, close, {
-      time: last?.t != null ? last.t * 1000 : undefined,
-      chart: { interval, indicators },
-    });
+    feedPrice(symbol, close, chartTick(snapshot.series));
   }
+}
+
+/**
+ * What a price of the chart's series is evaluated with besides itself: the
+ * last bar's time, the interval and indicators, and how the chart draws
+ * (bars and log scale) for sloped drawing alerts.
+ */
+export function chartTick(series: SeriesPayload): Tick {
+  const times = series.bars.map((b) => (b.t === null ? NaN : b.t * 1000));
+  const axis = times.some(Number.isNaN) ? null : timeAxisOf(times);
+  const last = times.at(-1);
+  return {
+    time: last === undefined || Number.isNaN(last) ? undefined : last,
+    chart: {
+      interval: series.interval ?? "",
+      indicators: series.indicators,
+      view: axis ? { axis, log: scaleMode() === "log" } : undefined,
+    },
+  };
 }
 
 /**

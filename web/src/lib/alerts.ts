@@ -11,7 +11,7 @@
 // firing again requires the price to leave the level and cross it anew. The
 // state conditions would fire on every tick while satisfied, so after firing
 // they stay disarmed until the price is back on the other side (greater: at
-// or below the level; less: at or above it). `rearmed` is that test.
+// or below the level; less: at or above it). `rearmedReading` is that test.
 //
 // Sources (ADR-0034): an alert compares a left operand with a level. A price
 // alert compares the price with `price`; a drawing alert the price with the
@@ -23,7 +23,7 @@
 // level that is exactly the rule above; with several, crossing any level
 // fires, "greater" means above all of them and "less" below all of them.
 
-import type { DrawingName, DrawingRecord } from "../stores/drawings";
+import type { DrawingName, DrawingRecord, TimeAxis } from "../stores/drawings";
 
 export const CONDITIONS = [
   "crossing",
@@ -53,6 +53,13 @@ export type AlertSource =
       drawingId: string;
       /** Display name at creation, e.g. "Trend line". */
       label: string;
+      /**
+       * Set on sloped lines: the chart interval they were created on. A
+       * sloped line runs straight in bar-index space, so it is only
+       * evaluated while the chart shows the symbol at this interval.
+       * Horizontal lines have none and are evaluated anywhere.
+       */
+      interval?: string;
     }
   | {
       kind: "indicator";
@@ -60,6 +67,11 @@ export type AlertSource =
       interval: string;
       /** Instance key in the series payload (ADR-0028). */
       instanceKey: string;
+      /**
+       * Name and params of the instance at creation (`indicatorSignature`):
+       * a key reused by another instance, or changed params, do not match.
+       */
+      signature: string;
       /** Index into the indicator's `lines`. */
       line: number;
       /** Display name of the plot at creation, e.g. "RSI (14)" or "EMA 200". */
@@ -214,33 +226,9 @@ export function rearmedReading(condition: AlertCondition, cur: Reading): boolean
   }
 }
 
-/**
- * Does moving from `prev` to `price` fire the price alert? `prev` is null
- * before the first price is known: events cannot fire, states can.
- */
-export function evaluate(
-  alert: Pick<Alert, "condition" | "price">,
-  prev: number | null,
-  price: number,
-): boolean {
-  return fires(
-    alert.condition,
-    prev === null ? null : [prev - alert.price],
-    [price - alert.price],
-  );
-}
-
-/** True for conditions that need `rearmed` to hold before they fire again. */
+/** True for conditions that need `rearmedReading` to hold before they fire again. */
 export function needsRearm(condition: AlertCondition): boolean {
   return condition === "greater" || condition === "less";
-}
-
-/** `rearmedReading` of a price alert at `price`. */
-export function rearmed(
-  alert: Pick<Alert, "condition" | "price">,
-  price: number,
-): boolean {
-  return rearmedReading(alert.condition, [price - alert.price]);
 }
 
 /** The part of the chart's series an indicator alert reads. */
@@ -278,49 +266,76 @@ export function indicatorReading(
   return level === null ? null : [plot - level];
 }
 
-type Point = { timestamp: number; value: number };
+/** Horizontal tools: their level needs no bars, so they are evaluated off the chart too. */
+export const isHorizontalTool = (name: string): boolean =>
+  name === "horizontalStraightLine" || name === "horizontalRayLine";
 
-/** The straight line through `a` and `b` at time `t`, in time/value space. */
-function lineAt(a: Point, b: Point, t: number): number {
-  const dt = b.timestamp - a.timestamp;
-  if (dt === 0) return a.value;
-  return a.value + ((b.value - a.value) * (t - a.timestamp)) / dt;
+/**
+ * Bar index of a time on the chart's bars, as klinecharts places a drawing
+ * point: the nearest bar inside the data, whole bar intervals beyond it
+ * (`toChartPoint` in stores/drawings maps stored points the same way).
+ */
+export function barIndexOf(axis: TimeAxis, ts: number): number {
+  const times = axis.timestamps;
+  if (ts < axis.firstTs) return Math.round((ts - axis.firstTs) / axis.intervalMs);
+  if (ts > axis.lastTs) {
+    return axis.count - 1 + Math.round((ts - axis.lastTs) / axis.intervalMs);
+  }
+  let lo = 0;
+  let hi = times.length - 1;
+  while (hi - lo > 1) {
+    const mid = (lo + hi) >> 1;
+    if (times[mid]! <= ts) lo = mid;
+    else hi = mid;
+  }
+  return ts - times[lo]! <= times[hi]! - ts ? lo : hi;
+}
+
+/** How the chart draws: its bars, and whether the price axis is logarithmic. */
+export interface ChartView {
+  axis: TimeAxis;
+  log: boolean;
 }
 
 /**
- * The line values a drawing alert compares the price with at time `t`
+ * The line values a drawing alert compares the price with at bar time `t`
  * (epoch ms): one per line, two for a parallel channel, none where the
- * drawing has no value (a ray before its start) or cannot be alerted on.
- * Lines are linear in time/value space and extended past their points; a
- * trend line counts as extended both ways, like TradingView's.
+ * drawing has no value (a ray before its start, a vertical line) or cannot
+ * be alerted on. Horizontal lines are constant. A sloped line is read the
+ * way klinecharts draws it: straight in bar-index space (gaps such as
+ * nights and weekends take no room), in log(value) on a log axis, extended
+ * past its points (a trend line both ways, like TradingView's). Without
+ * `view` sloped lines have no value.
  */
 export function drawingLevels(
   rec: Pick<DrawingRecord, "name" | "points">,
   t: number,
+  view?: ChartView,
 ): number[] {
   const [a, b, c] = rec.points;
   if (!a) return [];
+  if (rec.name === "horizontalStraightLine") return [a.value];
+  // One point, extending right (DrawingToolbar's override).
+  if (rec.name === "horizontalRayLine") return t >= a.timestamp ? [a.value] : [];
+  const sloped =
+    rec.name === "segment" ||
+    rec.name === "straightLine" ||
+    rec.name === "rayLine" ||
+    rec.name === "parallelStraightLine";
+  if (!sloped || !b || !view) return [];
+  const { axis, log } = view;
+  if (log && rec.points.some((p) => p.value <= 0)) return [];
+  const x = (ts: number) => barIndexOf(axis, ts);
+  const y = (v: number) => (log ? Math.log(v) : v);
+  const [xa, xb, xt] = [x(a.timestamp), x(b.timestamp), x(t)];
+  if (xa === xb) return [];
   // A ray starts at its first point and runs towards its second.
-  const onRay = (toward: Point) =>
-    toward.timestamp === a.timestamp ||
-    (toward.timestamp > a.timestamp ? t >= a.timestamp : t <= a.timestamp);
-  switch (rec.name) {
-    case "horizontalStraightLine":
-      return [a.value];
-    case "horizontalRayLine":
-      // One point, extending right (DrawingToolbar's override).
-      return t >= a.timestamp ? [a.value] : [];
-    case "segment":
-    case "straightLine":
-      return b ? [lineAt(a, b, t)] : [];
-    case "rayLine":
-      return b && onRay(b) ? [lineAt(a, b, t)] : [];
-    case "parallelStraightLine": {
-      if (!b || !c) return [];
-      const v = lineAt(a, b, t);
-      return [v, v + c.value - lineAt(a, b, c.timestamp)];
-    }
-    default:
-      return [];
+  if (rec.name === "rayLine" && (xb > xa ? xt < xa : xt > xa)) return [];
+  const at = (i: number) => y(a.value) + ((y(b.value) - y(a.value)) * (i - xa)) / (xb - xa);
+  const out = [at(xt)];
+  if (rec.name === "parallelStraightLine") {
+    if (!c) return [];
+    out.push(at(xt) + y(c.value) - at(x(c.timestamp)));
   }
+  return log ? out.map(Math.exp) : out;
 }
