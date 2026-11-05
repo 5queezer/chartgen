@@ -110,8 +110,8 @@ Status legend:
 
 | Feature | TradingView | chartgen | Notes / links |
 |---|---|---|---|
-| Watchlist with last, change, change % | ✅ | ◐ | One list, polled every 5 s, max 50 symbols. Crypto change is rolling 24 h. [Watchlist](/chartgen/guides/web/#watchlist), [ADR-0011](/chartgen/decisions/0011-watchlist-quotes/) |
-| Multiple named watchlists, sections, flags | ✅ | ❌ | A single list. |
+| Watchlist with last, change, change % | ✅ | ◐ | Polled every 5 s for the active list, max 50 symbols per list. Crypto change is rolling 24 h. [Watchlist](/chartgen/guides/web/#watchlist), [ADR-0011](/chartgen/decisions/0011-watchlist-quotes/) |
+| Multiple named watchlists, sections, flags | ✅ | ◐ | Named lists (create, rename, duplicate, delete), collapsible sections, drag and Alt+Arrow reordering, seven flag colors and one Flagged view across lists. No separate list per flag color, no nested sections, no sync across devices; at most 20 lists and 20 sections per list. [Watchlist](/chartgen/guides/web/#watchlist), [ADR-0031](/chartgen/decisions/0031-multiple-watchlists/) |
 | Price alerts (crossing, up, down, greater, less) | ✅ | ◐ | Same conditions, once or every time, toast, beep and browser notification. Evaluated in the browser. [Sidebar and price alerts](/chartgen/guides/web/#sidebar-and-price-alerts), [ADR-0020](/chartgen/decisions/0020-client-side-price-alerts/) |
 | Alerts that fire with no tab open | ✅ | ❌ | Fire only while chartgen is open in a visible tab. The server alert tools exist for `--trade` users but are not wired to the web app. [ADR-0020](/chartgen/decisions/0020-client-side-price-alerts/) |
 | Alerts synced across devices | ✅ | ❌ | Stored per browser profile. |

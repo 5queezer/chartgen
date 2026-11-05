@@ -504,11 +504,38 @@ TradingView's change since the daily open
 ([ADR-0011](/chartgen/decisions/0011-watchlist-quotes/)). A symbol that
 fails to load shows dashes; hover the row for the reason.
 
-The list (default: BTCUSDT, ETHUSDT, SOLUSDT, AAPL, MSFT, NVDA, SPY) and
-the collapsed state are saved in `localStorage` under
-`chartgen.watchlist.symbols` and `chartgen.watchlist.collapsed`. On load,
-entries are trimmed, uppercased and deduplicated, and invalid ones are
-dropped. The list holds at most 50 symbols, the `get_quotes` limit.
+### Lists, sections and flags
+
+The name in the panel header opens the list switcher. It lists your
+watchlists, **Flagged**, and the actions **Create new list…**, **Rename…**,
+**Duplicate** and **Delete…** (which asks first). The last list cannot be
+deleted. The list you are viewing is remembered. Quotes are polled for that
+list only, so each list holds up to 50 symbols; you can have up to 20 lists.
+
+- **Add section** (the button next to **+**) appends a named divider. The
+  symbols under a divider belong to that section. Click the section name to
+  collapse or expand it; hover it to rename it (✎) or remove it (×, which keeps
+  its symbols). Up to 20 sections per list.
+- **Reorder** by dragging a row or section by its grip (⋮⋮, shown on hover), or
+  focus a row and press **Alt+ArrowUp** / **Alt+ArrowDown**. A section moves
+  together with its symbols.
+- **Flags**: right-click a row, or use the flag button shown on hover, to pick
+  one of seven colors (red, orange, yellow, green, cyan, blue, purple) or **No
+  flag**. A flagged row has a colored mark at its left edge. A flag belongs to
+  the symbol, so it shows in every list that holds it.
+- **Flagged** in the switcher is a read-only view of every flagged symbol across
+  all lists. You can still change flags there; a symbol disappears from the view
+  when you clear its flag. There is no separate list per color.
+
+The lists, sections, flags and the active list are saved as one versioned
+document in `localStorage` under `chartgen.watchlist.v2`, and the collapsed
+state under `chartgen.watchlist.collapsed`
+([ADR-0031](/chartgen/decisions/0031-multiple-watchlists/)). A list from an
+earlier version (`chartgen.watchlist.symbols`, default: BTCUSDT, ETHUSDT,
+SOLUSDT, AAPL, MSFT, NVDA, SPY) becomes the list "Watchlist" with no sections
+the first time you open the new version, and the old key is left in place. On
+load, symbols are trimmed, uppercased and deduplicated per list, and invalid
+entries are dropped.
 
 ## Sidebar and price alerts
 

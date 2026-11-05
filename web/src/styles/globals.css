@@ -263,9 +263,9 @@ body {
   transition: none;
 }
 
-.wl-remove {
+.wl-remove,
+.wl-row-action {
   position: absolute;
-  right: 4px;
   top: 50%;
   transform: translateY(-50%);
   display: inline-flex;
@@ -282,13 +282,125 @@ body {
   opacity: 0;
 }
 
+.wl-remove {
+  right: 4px;
+}
+
+/* Flag button sits left of the remove button; the grip at the row start. */
+.wl-flag {
+  right: 28px;
+}
+
+.wl-grip {
+  left: 2px;
+  width: 10px;
+  font-size: 10px;
+  letter-spacing: -2px;
+  cursor: grab;
+  touch-action: none;
+}
+
 .wl-row:hover .wl-remove,
-.wl-remove:focus-visible {
+.wl-row:hover .wl-row-action,
+.wl-section:hover .wl-row-action,
+.wl-remove:focus-visible,
+.wl-row-action:focus-visible {
   opacity: 1;
 }
 
-.wl-remove:hover {
+.wl-remove:hover,
+.wl-row-action:hover {
   color: var(--color-fg);
+}
+
+/* Flag colors, shared by the row marker and the picker swatches. */
+[data-flag="red"] { --wl-flag: #f23645; }
+[data-flag="orange"] { --wl-flag: #ff9800; }
+[data-flag="yellow"] { --wl-flag: #fdd835; }
+[data-flag="green"] { --wl-flag: #089981; }
+[data-flag="cyan"] { --wl-flag: #00bcd4; }
+[data-flag="blue"] { --wl-flag: #2962ff; }
+[data-flag="purple"] { --wl-flag: #9c27b0; }
+
+.wl-row[data-flag]::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 3px;
+  bottom: 3px;
+  width: 3px;
+  border-radius: 0 2px 2px 0;
+  background: var(--wl-flag);
+}
+
+.wl-swatch {
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: var(--wl-flag);
+  cursor: pointer;
+  border: 1px solid transparent;
+}
+
+.wl-swatch:hover,
+.wl-swatch:focus-visible {
+  border-color: var(--color-fg);
+}
+
+.wl-swatch-none {
+  background: transparent;
+  border-color: var(--color-border);
+  color: var(--color-fg-muted);
+  line-height: 1;
+}
+
+/* Section divider row: spans all columns. */
+.wl-section {
+  grid-column: 1 / -1;
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 4px 12px 4px 12px;
+  margin-top: 4px;
+  border-top: 1px solid var(--color-border);
+  border-left: 2px solid transparent;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--color-fg-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.wl-section .wl-row-action {
+  position: static;
+  transform: none;
+  flex-shrink: 0;
+  font-size: 13px;
+}
+
+.wl-section .wl-grip {
+  position: absolute;
+  left: 0;
+  top: 50%;
+  transform: translateY(-50%);
+}
+
+.wl-section-toggle {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  text-align: left;
+  text-transform: inherit;
+  letter-spacing: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+.wl-drop-before {
+  box-shadow: inset 0 2px 0 var(--color-accent);
 }
 
 /* Live-feed badge after the status text (StatusLine). */
