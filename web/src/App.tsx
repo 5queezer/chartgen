@@ -17,6 +17,8 @@ import { BottomBar } from "./components/BottomBar";
 import { AlertDialog, AlertButton } from "./components/AlertDialog";
 import { AlertLines } from "./components/AlertLines";
 import { Chart, paletteColor } from "./components/Chart";
+import { ChartContextMenu } from "./components/ChartContextMenu";
+import { ChartSettings } from "./components/ChartSettings";
 import { DrawingToolbar, type DrawingsApi } from "./components/DrawingToolbar";
 import { IndicatorChips } from "./components/IndicatorChips";
 import { IndicatorPicker } from "./components/IndicatorPicker";
@@ -24,6 +26,7 @@ import { IndicatorSettings } from "./components/IndicatorSettings";
 import { LayoutMenu } from "./components/LayoutMenu";
 import { ReplayBar } from "./components/ReplayBar";
 import { mergeParams } from "./lib/paramForm";
+import { resolveColors } from "./lib/chartStyle";
 import { PALETTES } from "./lib/theme";
 import { resolveTimeZone } from "./lib/timezone";
 import { plotsOf } from "./lib/plotStyle";
@@ -74,6 +77,7 @@ import {
   indicatorStyle,
   isHidden,
   removeIndicator,
+  setActiveIndicators,
   toggleIndicatorHidden,
   toWire,
   updateIndicatorSettings,
@@ -84,6 +88,7 @@ import {
   compareSymbols,
   removeCompare,
 } from "./stores/compare";
+import { chartSettings } from "./stores/chartSettings";
 import { setParamDefaults, type ParamDefaults } from "./stores/layouts";
 import {
   addRecent,
@@ -105,6 +110,7 @@ export function App(): JSX.Element {
   // Index (into the active set) of the indicator whose settings dialog is open.
   const [settingsIndex, setSettingsIndex] = createSignal<number | null>(null);
   const [chart, setChart] = createSignal<KLineChart | null>(null);
+  const [settingsOpen, setSettingsOpen] = createSignal(false);
 
   onMount(() => onCleanup(keepKeyboardFocus()));
 
@@ -127,8 +133,13 @@ export function App(): JSX.Element {
     downloadChartImage(
       c,
       screenshotFilename(symbol(), timeframe(), new Date()),
-      PALETTES[theme()].bg,
+      resolveColors(PALETTES[theme()], chartSettings().themes[theme()]).background,
     );
+  };
+
+  const resetView = () => {
+    const c = chart();
+    if (c) resetChart(c);
   };
 
   // Consume the OAuth redirect (if any) before the first render gets
@@ -458,10 +469,8 @@ export function App(): JSX.Element {
           session={session}
           onReselect={() => void query.refetch()}
           onScreenshot={screenshot}
-          onResetChart={() => {
-            const c = chart();
-            if (c) resetChart(c);
-          }}
+          onResetChart={resetView}
+          onSettings={() => setSettingsOpen(true)}
           onCompare={() => setCompareOpen(true)}
           replay={replay.mode() !== "off"}
           onReplay={() => (replay.mode() === "off" ? replay.enter() : replay.exit())}
@@ -545,6 +554,10 @@ export function App(): JSX.Element {
         error={listIndicators.isError ? listIndicators.error : null}
         active={activeIndicators()}
       />
+      <ChartSettings
+        open={settingsOpen()}
+        onClose={() => setSettingsOpen(false)}
+      />
       <main class="flex flex-1 min-h-0">
         <DrawingToolbar
           chart={chart()}
@@ -554,7 +567,15 @@ export function App(): JSX.Element {
           disarm={replay.mode() === "select"}
         />
         <AlertLines chart={chart()} symbol={symbol()} />
-        <div class="flex-1 min-w-0 relative">
+        <ChartContextMenu
+          chart={chart()}
+          symbol={symbol()}
+          drawings={drawings()}
+          hasIndicators={activeIndicators().length > 0}
+          onResetView={resetView}
+          onRemoveAllIndicators={() => setActiveIndicators([])}
+          onSettings={() => setSettingsOpen(true)}
+        >
           <Chart
             series={shown()?.series ?? null}
             update={shown()?.update ?? null}
@@ -580,7 +601,7 @@ export function App(): JSX.Element {
             drawingArmed={drawingArmed()}
             timeZone={resolveTimeZone(timeZone(), symbol())}
           />
-        </div>
+        </ChartContextMenu>
         <Sidebar
           session={session}
           enabled={authReady()}

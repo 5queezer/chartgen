@@ -44,6 +44,8 @@ export interface PaneHeaderProps {
    * Rendered after the label/params, before `lines`.
    */
   legend?: BarLegend;
+  /** Which legend parts to show (status line settings); all when omitted. */
+  legendShow?: { ohlc: boolean; change: boolean; volume: boolean };
   /** Distance from the top of the chart host in pixels. */
   top: number;
   /** `data-testid` of the row. */
@@ -119,25 +121,31 @@ export function PaneHeader(props: PaneHeaderProps): JSX.Element {
                 {l().time}
               </span>
             </Show>
-            <span
-              class={`pane-header-ohlc pane-header-${l().change?.direction ?? "flat"}`}
-              data-testid="price-legend"
-            >
-              <span>O <b data-testid="legend-o">{l().o}</b></span>
-              <span>H <b data-testid="legend-h">{l().h}</b></span>
-              <span>L <b data-testid="legend-l">{l().l}</b></span>
-              <span>C <b data-testid="legend-c">{l().c}</b></span>
-              <Show when={l().change}>
-                {(ch) => (
-                  <span data-testid="legend-change">
-                    {ch().abs} ({ch().pct})
-                  </span>
-                )}
-              </Show>
-            </span>
-            <span class="pane-header-vol">
-              Vol <span data-testid="legend-v">{l().v}</span>
-            </span>
+            <Show when={props.legendShow?.ohlc !== false || (l().change && props.legendShow?.change !== false)}>
+              <span
+                class={`pane-header-ohlc pane-header-${l().change?.direction ?? "flat"}`}
+                data-testid="price-legend"
+              >
+                <Show when={props.legendShow?.ohlc !== false}>
+                  <span>O <b data-testid="legend-o">{l().o}</b></span>
+                  <span>H <b data-testid="legend-h">{l().h}</b></span>
+                  <span>L <b data-testid="legend-l">{l().l}</b></span>
+                  <span>C <b data-testid="legend-c">{l().c}</b></span>
+                </Show>
+                <Show when={props.legendShow?.change !== false && l().change}>
+                  {(ch) => (
+                    <span data-testid="legend-change">
+                      {ch().abs} ({ch().pct})
+                    </span>
+                  )}
+                </Show>
+              </span>
+            </Show>
+            <Show when={props.legendShow?.volume !== false}>
+              <span class="pane-header-vol">
+                Vol <span data-testid="legend-v">{l().v}</span>
+              </span>
+            </Show>
           </>
         )}
       </Show>

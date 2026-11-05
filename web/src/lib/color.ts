@@ -1,6 +1,16 @@
 // Color helpers for the plot color picker: split a stored CSS color into an
 // opaque `#rrggbb` and an alpha, and join them back.
 
+const CHANNEL = "(25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)";
+const COLOR_RE = new RegExp(
+  `^(#([0-9a-f]{3}|[0-9a-f]{6}|[0-9a-f]{8})|rgba\\(\\s*${CHANNEL}\\s*,\\s*${CHANNEL}\\s*,\\s*${CHANNEL}\\s*,\\s*(0|1|0?\\.\\d+|1\\.0+)\\s*\\))$`,
+  "i",
+);
+/** True for the color forms the stores accept: `#rgb`, `#rrggbb`, `#rrggbbaa`, `rgba(r, g, b, a)`. */
+export function isColor(x: unknown): x is string {
+  return typeof x === "string" && COLOR_RE.test(x);
+}
+
 const clamp255 = (n: number) => Math.min(255, Math.max(0, Math.round(n)));
 const hex2 = (n: number) => clamp255(n).toString(16).padStart(2, "0");
 

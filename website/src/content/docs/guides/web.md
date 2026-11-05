@@ -349,6 +349,47 @@ full); hover it for details.
 The shortcuts use modifiers so they do not clash with the letter and
 digit shortcuts above.
 
+## Chart settings
+
+The gear button in the top toolbar (or **Settings…** in the chart context
+menu) opens the chart settings dialog with four tabs:
+
+- **Symbol** — body, borders and wick of the candles, each with an on/off
+  checkbox and an up and a down color, plus the line/area color. Border and
+  wick follow the body color until you pick one for them.
+- **Status line** — show or hide the OHLC values, the bar change, the volume
+  and the indicator values in the legends.
+- **Scales** — last price line, last price label, high and low price labels,
+  and the price scale placement (right or left).
+- **Appearance** — background color, vertical and horizontal grid lines and
+  grid color, crosshair style (dashed, dotted, solid) and color.
+
+Changes preview live on the chart. **OK** keeps them, **Cancel** (or `Esc`)
+reverts, and **Reset settings** puts the options and the current theme's colors
+back to the defaults (still previewed until OK; the other theme is untouched). Colors and the candle part toggles are stored per
+theme, so the light and dark themes can look different; the other options are
+shared. Everything is saved in `localStorage` under `chartgen.chartSettings`
+and validated on load. Settings are not part of named layouts. See
+[ADR-0019](/chartgen/decisions/0019-chart-settings/).
+
+## Chart context menu
+
+Right-clicking the chart (outside a drawing) opens a menu:
+
+| Item | Action |
+|---|---|
+| Reset chart view (`Alt+R`) | Scroll to real time at the default zoom |
+| Copy price | Copy the price under the cursor, in the chart's precision |
+| Add horizontal line at | Add a horizontal line at that price; it is saved like any drawing |
+| Remove all drawings | Asks for confirmation |
+| Remove all indicators | Asks for confirmation |
+| Settings… | Open the chart settings dialog |
+
+Copy price and Add horizontal line only appear when the click is in the price
+pane. Right-clicking a drawing opens the drawing menu instead. TradingView's
+"Lock vertical cursor line by time" is not offered because klinecharts has no
+pinned crosshair.
+
 ## Watchlist
 
 The panel on the right of the chart lists symbols with their **Last**

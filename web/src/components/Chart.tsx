@@ -75,6 +75,8 @@ import {
   MAX_COMPARE,
   rebaseScale,
 } from "../lib/compare";
+import { chartSettings } from "../stores/chartSettings";
+import { composeStyles, settingsStyles } from "../lib/chartStyle";
 import { PALETTES, type Palette } from "../lib/theme";
 import type { SeriesPayload } from "../types/responses";
 import {
@@ -880,6 +882,11 @@ export function Chart(props: ChartProps): JSX.Element {
   );
   let crosshairFrame: number | null = null;
   let layoutFrame: number | null = null;
+  let styleFrame: number | null = null;
+  let pendingStyles: object = {};
+  // Width of the price axis when it sits on the left; pane headers start
+  // after it so they do not cover its labels.
+  const [axisInset, setAxisInset] = createSignal(0);
   // Version of the last snapshot handed to klinecharts (null: none).
   let appliedVersion: number | null = null;
   // klinecharts's "load older data" callback while a page is on its way.
@@ -989,6 +996,11 @@ export function Chart(props: ChartProps): JSX.Element {
 
   const recomputeHeaders = () => {
     const c = chart();
+    setAxisInset(
+      c && chartSettings().options.scalePlacement === "left"
+        ? (c.getSize(CANDLE_PANE_ID, "yAxis" as never)?.width ?? 0)
+        : 0,
+    );
     const series = props.series;
     if (!c || !series) {
       setHeaders([]);
@@ -1088,15 +1100,30 @@ export function Chart(props: ChartProps): JSX.Element {
     setHeaders(next);
   };
 
-  // Repaint the canvas chrome on theme change; data is untouched.
+  // Repaint the canvas chrome on theme, chart type or settings change; data
+  // is untouched. The settings (ADR-0019) merge over the palette styles.
   createEffect(() => {
-    chart()?.setStyles(tvStyles(PALETTES[theme()]) as never);
-  });
-
-  createEffect(() => {
-    chart()?.setStyles({
-      candle: CHART_TYPE_STYLES[props.chartType],
-    } as never);
+    const c = chart();
+    if (!c) return;
+    const palette = PALETTES[theme()];
+    const settings = chartSettings();
+    // One setStyles call (one relayout), coalesced to a frame: a color drag
+    // fires this on every input event.
+    pendingStyles = composeStyles(
+      tvStyles(palette),
+      { candle: CHART_TYPE_STYLES[props.chartType] },
+      settingsStyles(
+        palette,
+        settings.themes[theme()],
+        settings.options,
+        props.chartType,
+      ),
+    );
+    styleFrame ??= requestAnimationFrame(() => {
+      styleFrame = null;
+      chart()?.setStyles(pendingStyles as never);
+      recomputeHeaders();
+    });
   });
 
   // The axis and crosshair labels are klinecharts' own; the legend's time
@@ -1427,19 +1454,33 @@ export function Chart(props: ChartProps): JSX.Element {
 
   onCleanup(() => {
     if (layoutFrame !== null) cancelAnimationFrame(layoutFrame);
+    if (styleFrame !== null) cancelAnimationFrame(styleFrame);
     if (container) dispose(container);
   });
 
   return (
-    <div ref={host} class="chart-host" tabindex="-1">
+    <div
+      ref={host}
+      class="chart-host"
+      tabindex="-1"
+      style={{
+        "background-color": chartSettings().themes[theme()].background,
+        "--axis-inset": `${axisInset()}px`,
+      }}
+    >
       <div ref={container} class="chart-container" />
       <Index each={headers()}>
         {(h) => (
           <PaneHeader
             name={h().name}
             params={h().params}
-            lines={h().lines}
+            lines={chartSettings().options.legendIndicators ? h().lines : []}
             legend={h().legend}
+            legendShow={{
+              ohlc: chartSettings().options.legendOhlc,
+              change: chartSettings().options.legendChange,
+              volume: chartSettings().options.legendVolume,
+            }}
             top={h().top}
             testId={
               h().compare !== undefined

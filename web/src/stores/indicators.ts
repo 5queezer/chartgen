@@ -16,6 +16,8 @@
 
 import { createSignal } from "solid-js";
 
+import { isColor } from "../lib/color";
+
 /**
  * Wire shape for a single indicator request. Matches the `indicators` field
  * on `generate_chart` input: bare name or object with `name` plus arbitrary
@@ -91,11 +93,6 @@ function persist(value: ActiveIndicator[]): void {
   }
 }
 
-const CHANNEL = "(25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)";
-const COLOR_RE = new RegExp(
-  `^(#([0-9a-f]{3}|[0-9a-f]{6}|[0-9a-f]{8})|rgba\\(\\s*${CHANNEL}\\s*,\\s*${CHANNEL}\\s*,\\s*${CHANNEL}\\s*,\\s*(0|1|0?\\.\\d+|1\\.0+)\\s*\\))$`,
-  "i",
-);
 const MAX_LABEL = 64;
 // `line<i>` / `hist<i>` (index-keyed) or `l:<label>` (label-keyed line).
 const PLOT_KEY_RE = new RegExp(`^((line|hist)\\d+|l:.{1,${MAX_LABEL}})$`);
@@ -121,7 +118,7 @@ function sanitizePlot(x: unknown): PlotStyle | undefined {
     unknown
   >;
   const out: PlotStyle = {};
-  if (typeof color === "string" && COLOR_RE.test(color)) out.color = color;
+  if (isColor(color)) out.color = color;
   if (
     typeof width === "number" &&
     Number.isInteger(width) &&
