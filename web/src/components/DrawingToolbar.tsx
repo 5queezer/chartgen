@@ -622,12 +622,17 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
       if (id !== null) highlight(id, true);
     }),
   );
-  // A press anywhere on the chart ends a selection made from the tree; the
-  // capture phase runs before klinecharts selects what the press landed on.
+  // A press anywhere on the chart ends a selection made from the tree (one
+  // klinecharts does not know of); the capture phase runs before klinecharts
+  // selects what the press landed on. Its own selections end with its events.
+  let fromTree: string | null = null;
   createEffect(() => {
     const dom = props.chart?.getDom();
     if (!dom) return;
-    const clear = () => setSelectedId(null);
+    const clear = () => {
+      if (fromTree !== null && selectedId() === fromTree) setSelectedId(null);
+      fromTree = null;
+    };
     dom.addEventListener("mousedown", clear, true);
     onCleanup(() => dom.removeEventListener("mousedown", clear, true));
   });
@@ -639,6 +644,7 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
     const p = canon.get(id)?.points[0];
     if (!chart || !p || !chart.getOverlayById(id)?.visible) return;
     cancelArmed();
+    fromTree = id;
     setSelectedId(id);
     const x = (chart.convertToPixel(
       { timestamp: p.timestamp, value: p.value },
