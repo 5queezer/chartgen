@@ -125,10 +125,13 @@ test.describe("series colors", () => {
     const dialog = page.getByRole("dialog");
     await dialog.getByRole("tab", { name: "Style" }).click();
     await expect(dialog.getByTestId("style-row-hist0")).toContainText("Volume");
-    await dialog.getByRole("button", { name: "Volume color", exact: true }).click();
-    // Presets keep the current opacity: the bars' 0.5.
-    await page.getByLabel("Color #9c27b0").click();
-    await page.keyboard.press("Escape");
+    // Volume has an up and a down palette color: recolor both.
+    for (const k of [1, 2]) {
+      await dialog.getByRole("button", { name: `Volume color ${k}`, exact: true }).click();
+      // Presets keep the current opacity: the bars' 0.5.
+      await page.getByLabel("Color #9c27b0").click();
+      await dialog.getByRole("tab", { name: "Style" }).click();
+    }
     await dialog.getByRole("button", { name: "OK" }).click();
     await expect(dialog).toHaveCount(0);
 
