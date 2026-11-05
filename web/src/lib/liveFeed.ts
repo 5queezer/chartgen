@@ -146,14 +146,19 @@ export interface PushApi {
   /**
    * Subscribe to pushed tails of `request` computed with `warmup`; resolves
    * to the subscription id. Rejects with a message containing "not
-   * pushable" for charts the server cannot push.
+   * pushable" for charts the server cannot push, or "push limit reached"
+   * when a cap or rate limit refuses it.
    */
   subscribe: (request: LiveRequest, warmup: number) => Promise<string>;
   unsubscribe: (subscriptionId: string) => Promise<unknown>;
 }
 
-/** True when `err` says the chart cannot be pushed: poll, don't retry. */
-export const isNotPushable = (err: unknown) => /not pushable/i.test(message(err));
+/**
+ * True when `err` says the chart will not be pushed (not pushable, or a cap
+ * or rate limit): poll it for this generation, don't retry.
+ */
+export const isNotPushable = (err: unknown) =>
+  /not pushable|push limit reached/i.test(message(err));
 
 export interface LiveFeedOptions {
   fetch: (request: LiveRequest, args: FetchArgs) => Promise<SeriesPayload>;
@@ -217,6 +222,10 @@ export function createLiveFeed(opts: LiveFeedOptions): LiveFeed {
   let pushFailures = 0;
   let pushable = true;
   let pushTimer: ReturnType<typeof setTimeout> | null = null;
+  // A pushed tail did not line up and asked for this poll (and its
+  // catch-up). Only such a poll is merged while subscribed; any other may
+  // carry bars older than the pushes already applied.
+  let catchUp = false;
 
   const hidden = () => doc.visibilityState === "hidden";
   const period = () =>
@@ -258,6 +267,7 @@ export function createLiveFeed(opts: LiveFeedOptions): LiveFeed {
     subscribing = false;
     pushFailures = 0;
     pushable = true;
+    catchUp = false;
   };
 
   const schedule = (ms: number) => {
@@ -363,12 +373,18 @@ export function createLiveFeed(opts: LiveFeedOptions): LiveFeed {
     } catch (err) {
       if (my !== gen) return;
       polling = false;
+      catchUp = false;
       // Pushes keep the chart live; the next misfit tail polls again.
       if (sub === null) backoff(err);
       return;
     }
     if (my !== gen || !series) return;
     polling = false;
+    if (sub !== null && !catchUp) {
+      // Push took over while this poll was out: drop it.
+      opts.onPollStatus({ kind: "push" });
+      return;
+    }
 
     const prevLength = series.bars.length;
     const newest = series.bars[prevLength - 1]?.t ?? null;
@@ -396,12 +412,15 @@ export function createLiveFeed(opts: LiveFeedOptions): LiveFeed {
         nextBars = MAX_CATCHUP_BARS;
         return poll();
       }
+      catchUp = false;
       return reload(my);
     } else if (r.reason !== "stale") {
       // A catch-up that still leaves a gap, or data that does not line
       // up with ours: start over from a full load.
+      catchUp = false;
       return reload(my);
     }
+    catchUp = false;
     if (sub !== null) {
       opts.onPollStatus({ kind: "push" });
       return;
@@ -538,6 +557,7 @@ export function createLiveFeed(opts: LiveFeedOptions): LiveFeed {
         // Missed bars or data that does not line up: a poll catches up
         // (or reloads) exactly as when polling.
         clearTimer();
+        catchUp = true;
         void poll();
       }
     },

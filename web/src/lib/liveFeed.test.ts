@@ -519,6 +519,42 @@ describe("push mode", () => {
     expect(t.polls.at(-1)).toEqual({ kind: "live", everyMs: SLOW_POLL_MS });
   });
 
+  it("keeps polling without retrying when a push limit refuses the chart", async () => {
+    const t = setupPush();
+    t.push.error = new Error("MCP tool error: push limit reached: at most 4 per token");
+    t.feed.reset(payload(501, 1000), REQ);
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(t.push.subscribe).toHaveBeenCalledTimes(1);
+    expect(t.polls.at(-1)).toEqual({ kind: "live", everyMs: FAST_POLL_MS });
+    // The next chart may try again.
+    t.push.error = null;
+    t.feed.reset(payload(501, 1000), { ...REQ, timeframe: "5m" });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(t.push.subscribe).toHaveBeenCalledTimes(2);
+    expect(t.polls.at(-1)).toEqual({ kind: "push" });
+  });
+
+  it("drops a routine poll that lands after push took over", async () => {
+    let release!: (s: SeriesPayload) => void;
+    const push = fakePush();
+    let subscribed!: () => void;
+    push.hold = new Promise((r) => (subscribed = r));
+    const t = setup(() => new Promise((res) => (release = res)), () => Promise.resolve(), push);
+    t.feed.reset(payload(501, 1000), REQ);
+    await vi.advanceTimersByTimeAsync(FAST_POLL_MS);
+    expect(t.fetch).toHaveBeenCalledTimes(1); // in flight
+    subscribed();
+    await vi.advanceTimersByTimeAsync(0);
+    market.tick = 0.9;
+    t.feed.applyPush("s1", payload(999, 1000));
+    // The poll was answered before that push and lands after it.
+    market.tick = 0.1;
+    release(payload(999, 1000));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(t.last()!.series.bars.at(-1)!.c).toBeCloseTo(1000.9);
+    expect(t.polls.at(-1)).toEqual({ kind: "push" });
+  });
+
   it("a generation change unsubscribes and subscribes the new chart", async () => {
     const t = setupPush();
     t.feed.reset(payload(501, 1000), REQ);
