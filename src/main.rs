@@ -1,3 +1,4 @@
+mod chart_push;
 mod fetch;
 mod mcp;
 mod search;

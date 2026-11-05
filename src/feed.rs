@@ -17,6 +17,7 @@ pub enum FeedEvent {
 pub struct BinanceFeed {
     symbol: String,
     interval: String,
+    trades: bool,
 }
 
 impl BinanceFeed {
@@ -24,6 +25,29 @@ impl BinanceFeed {
         Self {
             symbol: symbol.to_lowercase(),
             interval: interval.to_string(),
+            trades: false,
+        }
+    }
+
+    /// Also fold the `aggTrade` stream into the forming candle. Binance
+    /// pushes kline updates only every 2 s; trades arrive many times a
+    /// second, so this makes `Tick`s sub-second (chart push, ADR-0021).
+    pub fn with_trades(mut self) -> Self {
+        self.trades = true;
+        self
+    }
+
+    fn url(&self) -> String {
+        if self.trades {
+            format!(
+                "wss://stream.binance.com:9443/stream?streams={0}@kline_{1}/{0}@aggTrade",
+                self.symbol, self.interval
+            )
+        } else {
+            format!(
+                "wss://stream.binance.com:9443/ws/{}@kline_{}",
+                self.symbol, self.interval
+            )
         }
     }
 
@@ -35,10 +59,10 @@ impl BinanceFeed {
         let mut first_connect = true;
 
         loop {
-            let url = format!(
-                "wss://stream.binance.com:9443/ws/{}@kline_{}",
-                self.symbol, self.interval
-            );
+            let url = self.url();
+            // Forming candle that trades fold into, and the event time of
+            // the kline it came from: trades up to then are already in it.
+            let mut forming: Option<(Bar, i64)> = None;
 
             match tokio_tungstenite::connect_async(&url).await {
                 Ok((ws_stream, _)) => {
@@ -61,7 +85,7 @@ impl BinanceFeed {
                     loop {
                         match read.next().await {
                             Some(Ok(Message::Text(text))) => {
-                                match self.parse_kline_event(&text) {
+                                match self.parse_event(&text, &mut forming) {
                                     Ok(Some(event)) => {
                                         if tx.send(event).await.is_err() {
                                             // Receiver dropped.
@@ -111,12 +135,61 @@ impl BinanceFeed {
         }
     }
 
+    /// Parse a raw or combined-stream (`{"stream", "data"}`) message. A
+    /// kline replaces the forming candle; with `with_trades`, an `aggTrade`
+    /// newer than it is folded in and emitted as a `Tick`.
+    fn parse_event(
+        &self,
+        text: &str,
+        forming: &mut Option<(Bar, i64)>,
+    ) -> Result<Option<FeedEvent>, String> {
+        let mut v: serde_json::Value =
+            serde_json::from_str(text).map_err(|e| format!("json parse: {e}"))?;
+        if let Some(data) = v.get_mut("data") {
+            v = data.take();
+        }
+        match v.get("e").and_then(|e| e.as_str()) {
+            Some("kline") => {
+                let event = self.kline_event(&v)?;
+                if let Some(event) = &event {
+                    let (FeedEvent::Bar(bar) | FeedEvent::Tick(bar)) = event;
+                    let at = v.get("E").and_then(|e| e.as_i64()).unwrap_or(0);
+                    // A late close of the previous candle must not replace
+                    // a newer candle that trades already started.
+                    let newer = forming
+                        .as_ref()
+                        .is_none_or(|(f, _)| bar_secs(bar) >= bar_secs(f));
+                    if newer {
+                        *forming = Some((bar.clone(), at));
+                    }
+                }
+                Ok(event)
+            }
+            Some("aggTrade") if self.trades => {
+                let num = |k: &str| {
+                    v.get(k)
+                        .and_then(|x| x.as_str())
+                        .and_then(|x| x.parse::<f64>().ok())
+                };
+                let (Some(price), Some(qty), Some(t)) =
+                    (num("p"), num("q"), v.get("T").and_then(|x| x.as_i64()))
+                else {
+                    return Err("malformed aggTrade".into());
+                };
+                Ok(fold_trade(forming, &self.interval, price, qty, t).map(FeedEvent::Tick))
+            }
+            _ => Ok(None),
+        }
+    }
+
     /// Parse a Binance kline WebSocket message into a `FeedEvent`.
     /// Returns `Ok(None)` when the message is not a kline event.
+    #[cfg(test)]
     fn parse_kline_event(&self, text: &str) -> Result<Option<FeedEvent>, String> {
-        let v: serde_json::Value =
-            serde_json::from_str(text).map_err(|e| format!("json parse: {e}"))?;
+        self.parse_event(text, &mut None)
+    }
 
+    fn kline_event(&self, v: &serde_json::Value) -> Result<Option<FeedEvent>, String> {
         if v.get("e").and_then(|e| e.as_str()) != Some("kline") {
             return Ok(None);
         }
@@ -142,6 +215,69 @@ impl BinanceFeed {
         }
         Ok(())
     }
+}
+
+fn bar_secs(bar: &Bar) -> i64 {
+    bar.date.parse().unwrap_or(i64::MIN)
+}
+
+/// Open time (ms) of the candle after the one opening at `open_ms`, for a
+/// Binance interval. Months are calendar months; every other interval has
+/// a fixed length.
+fn next_open_ms(open_ms: i64, interval: &str) -> Option<i64> {
+    use chrono::{Datelike, TimeZone, Utc};
+    if interval == "1M" {
+        let d = Utc.timestamp_millis_opt(open_ms).single()?;
+        let (y, m) = if d.month() == 12 {
+            (d.year() + 1, 1)
+        } else {
+            (d.year(), d.month() + 1)
+        };
+        return Some(
+            Utc.with_ymd_and_hms(y, m, 1, 0, 0, 0)
+                .single()?
+                .timestamp_millis(),
+        );
+    }
+    Some(open_ms + crate::data::interval_secs(interval)? * 1000)
+}
+
+/// Fold a trade at `t_ms` into the forming candle and return the updated
+/// candle. A trade past the candle's end opens the next one. Trades the
+/// last kline already covered, trades before its open, and trades more than
+/// one candle ahead (wait for the kline) are skipped.
+fn fold_trade(
+    forming: &mut Option<(Bar, i64)>,
+    interval: &str,
+    price: f64,
+    qty: f64,
+    t_ms: i64,
+) -> Option<Bar> {
+    let (bar, synced_ms) = forming.as_mut()?;
+    let open_ms = bar_secs(bar).checked_mul(1000)?;
+    if t_ms <= *synced_ms || t_ms < open_ms {
+        return None;
+    }
+    let end = next_open_ms(open_ms, interval)?;
+    if t_ms >= end {
+        if t_ms >= next_open_ms(end, interval)? {
+            return None;
+        }
+        *bar = Bar {
+            open: price,
+            high: price,
+            low: price,
+            close: price,
+            volume: qty,
+            date: (end / 1000).to_string(),
+        };
+    } else {
+        bar.close = price;
+        bar.high = bar.high.max(price);
+        bar.low = bar.low.min(price);
+        bar.volume += qty;
+    }
+    Some(bar.clone())
 }
 
 /// Parse a single kline JSON object (`k` field) into a `Bar`.
@@ -358,5 +494,88 @@ mod tests {
         assert!((bar.close - 100.75).abs() < f64::EPSILON);
         assert!((bar.volume - 999.99).abs() < f64::EPSILON);
         assert_eq!(bar.date, "1672531200");
+    }
+
+    fn bar_at(t_secs: i64, close: f64) -> Bar {
+        Bar {
+            open: 100.0,
+            high: 101.0,
+            low: 99.0,
+            close,
+            volume: 10.0,
+            date: t_secs.to_string(),
+        }
+    }
+
+    #[test]
+    fn fold_trade_updates_forming_and_rolls_over() {
+        // 1m candle opening at 60 s, last kline event at 70 s.
+        let mut forming = Some((bar_at(60, 100.0), 70_000));
+        // Already covered by the kline: skipped.
+        assert!(fold_trade(&mut forming, "1m", 105.0, 1.0, 69_000).is_none());
+        let b = fold_trade(&mut forming, "1m", 102.5, 2.0, 71_000).unwrap();
+        assert_eq!(
+            (b.close, b.high, b.low, b.volume),
+            (102.5, 102.5, 99.0, 12.0)
+        );
+        let b = fold_trade(&mut forming, "1m", 98.0, 1.0, 72_000).unwrap();
+        assert_eq!((b.close, b.low), (98.0, 98.0));
+        // Past the candle's end: the next candle opens with this trade.
+        let b = fold_trade(&mut forming, "1m", 97.0, 0.5, 125_000).unwrap();
+        assert_eq!(b.date, "120");
+        assert_eq!(
+            (b.open, b.high, b.low, b.close, b.volume),
+            (97.0, 97.0, 97.0, 97.0, 0.5)
+        );
+        // More than one candle ahead: wait for the kline.
+        assert!(fold_trade(&mut forming, "1m", 97.0, 0.5, 300_000).is_none());
+        // No kline yet: nothing to fold into.
+        assert!(fold_trade(&mut None, "1m", 1.0, 1.0, 1).is_none());
+    }
+
+    #[test]
+    fn next_open_handles_calendar_months() {
+        // 2024-01-01 → 2024-02-01, 2024-12-01 → 2025-01-01.
+        assert_eq!(
+            next_open_ms(1_704_067_200_000, "1M"),
+            Some(1_706_745_600_000)
+        );
+        assert_eq!(
+            next_open_ms(1_733_011_200_000, "1M"),
+            Some(1_735_689_600_000)
+        );
+        assert_eq!(next_open_ms(0, "1h"), Some(3_600_000));
+    }
+
+    #[test]
+    fn combined_stream_kline_then_trade() {
+        let feed = BinanceFeed::new("BTCUSDT", "1m").with_trades();
+        assert!(feed
+            .url()
+            .ends_with("streams=btcusdt@kline_1m/btcusdt@aggTrade"));
+        let mut forming = None;
+        let kline = r#"{"stream":"btcusdt@kline_1m","data":{"e":"kline","E":70000,
+            "k":{"t":60000,"o":"1","h":"2","l":"0.5","c":"1.5","v":"3","x":false}}}"#;
+        assert!(matches!(
+            feed.parse_event(kline, &mut forming).unwrap(),
+            Some(FeedEvent::Tick(_))
+        ));
+        let trade = r#"{"stream":"btcusdt@aggTrade","data":{"e":"aggTrade","E":71000,
+            "p":"2.5","q":"1","T":71000}}"#;
+        match feed.parse_event(trade, &mut forming).unwrap() {
+            Some(FeedEvent::Tick(b)) => assert_eq!((b.close, b.high, b.volume), (2.5, 2.5, 4.0)),
+            other => panic!("expected a trade tick, got {other:?}"),
+        }
+        // A late close of an older candle does not replace the forming one.
+        let late = r#"{"e":"kline","E":72000,
+            "k":{"t":0,"o":"1","h":"1","l":"1","c":"1","v":"1","x":true}}"#;
+        assert!(matches!(
+            feed.parse_event(late, &mut forming).unwrap(),
+            Some(FeedEvent::Bar(_))
+        ));
+        assert_eq!(forming.unwrap().0.date, "60");
+        // Without with_trades, aggTrade frames are ignored.
+        let plain = BinanceFeed::new("BTCUSDT", "1m");
+        assert!(plain.parse_event(trade, &mut None).unwrap().is_none());
     }
 }

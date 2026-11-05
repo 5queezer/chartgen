@@ -5,6 +5,7 @@ use std::collections::HashSet;
 use std::io::{self, BufRead, Write};
 use std::sync::{Arc, RwLock};
 
+use crate::chart_push::{ChartRequest, PushCtx};
 use crate::fetch;
 use crate::search;
 use chartgen::data;
@@ -49,7 +50,7 @@ pub fn run() {
             continue;
         }
 
-        let response = handle_mcp_request(method, id, req.get("params"), None, None);
+        let response = handle_mcp_request(method, id, req.get("params"), None, None, None);
 
         writeln!(stdout, "{}", response).ok();
         stdout.flush().ok();
@@ -60,17 +61,19 @@ pub fn run() {
 /// When `engine` is `Some`, trading tools are available; otherwise they return
 /// an error indicating that the trading engine is not running.
 /// `token` is the client's Bearer token (if any), used for subscription identity.
+/// `push` is set on the HTTP transport, for the chart push tools (ADR-0021).
 pub fn handle_mcp_request(
     method: &str,
     id: Option<Value>,
     params: Option<&Value>,
     engine: Option<&Arc<RwLock<Engine>>>,
     token: Option<&str>,
+    push: Option<&PushCtx>,
 ) -> Value {
     match method {
         "initialize" => handle_initialize(id),
         "tools/list" => handle_tools_list(id),
-        "tools/call" => handle_tools_call(id, params, engine, token),
+        "tools/call" => handle_tools_call(id, params, engine, token, push),
         "ping" => json!({ "jsonrpc": "2.0", "id": id, "result": {} }),
         _ => json!({
             "jsonrpc": "2.0",
@@ -110,6 +113,7 @@ fn handle_tools_call(
     params: Option<&Value>,
     engine: Option<&Arc<RwLock<Engine>>>,
     token: Option<&str>,
+    push: Option<&PushCtx>,
 ) -> Value {
     let tool_name = params
         .and_then(|p| p.get("name"))
@@ -139,6 +143,8 @@ fn handle_tools_call(
         "subscribe_notifications" => tool_subscribe_notifications(id, &arguments, engine, token),
         "unsubscribe_notifications" => tool_unsubscribe_notifications(id, engine, token),
         "list_subscriptions" => tool_list_subscriptions(id, engine, token),
+        "subscribe_chart" => tool_subscribe_chart(id, &arguments, push, token),
+        "unsubscribe_chart" => tool_unsubscribe_chart(id, &arguments, push, token),
         _ => json!({
             "jsonrpc": "2.0",
             "id": id,
@@ -210,6 +216,47 @@ const MIN_END_TIME_MS: i64 = -2_208_988_800_000;
 /// Newest accepted `end_time`, relative to now.
 const MAX_END_TIME_AHEAD_MS: i64 = 366 * 86_400_000;
 
+fn chart_style_arg(args: &Value) -> Result<&'static str, &'static str> {
+    match args.get("chart_style") {
+        None | Some(Value::Null) => Ok("candles"),
+        Some(v) => match v.as_str() {
+            Some("candles") => Ok("candles"),
+            Some("heikin_ashi") => Ok("heikin_ashi"),
+            _ => Err("chart_style must be one of 'candles' or 'heikin_ashi'."),
+        },
+    }
+}
+
+fn check_interval(interval: &str) -> Result<(), String> {
+    match data::interval_secs(interval) {
+        Some(_) => Ok(()),
+        None => Err(format!(
+            "Unsupported timeframe: {interval}. Use e.g. 1m, 5m, 15m, 30m, 1h, 4h, 1d, 1wk, 1mo."
+        )),
+    }
+}
+
+/// Accept both "indicators" and "panels" parameter names
+fn indicators_arg(args: &Value) -> Value {
+    args.get("indicators")
+        .or_else(|| args.get("panels"))
+        .cloned()
+        .unwrap_or_else(|| json!(["ema_stack", "cipher_b", "macd"]))
+}
+
+fn check_panels(unknown: &[String], invalid: &[String]) -> Result<(), String> {
+    if !invalid.is_empty() {
+        return Err(invalid.join("; "));
+    }
+    if !unknown.is_empty() {
+        return Err(format!(
+            "Unknown indicator(s): {}. Call list_indicators to see available indicators.",
+            unknown.join(", ")
+        ));
+    }
+    Ok(())
+}
+
 fn tool_generate_chart(id: Option<Value>, args: &Value) -> Value {
     generate_chart(id, args, fetch::DataSource::from_env())
 }
@@ -235,12 +282,9 @@ fn generate_chart(id: Option<Value>, args: &Value, source: fetch::DataSource) ->
     };
     let width = args.get("width").and_then(|v| v.as_u64()).unwrap_or(1920) as u32;
     let height = args.get("height").and_then(|v| v.as_u64()).unwrap_or(1080) as u32;
-    let chart_style = match args.get("chart_style") {
-        None | Some(Value::Null) => "candles",
-        Some(v) => match v.as_str() {
-            Some(s @ ("candles" | "heikin_ashi")) => s,
-            _ => return tool_err(id, "chart_style must be one of 'candles' or 'heikin_ashi'."),
-        },
+    let chart_style = match chart_style_arg(args) {
+        Ok(s) => s,
+        Err(e) => return tool_err(id, e),
     };
 
     // Accept both "symbol" and "ticker" parameter names
@@ -255,19 +299,11 @@ fn generate_chart(id: Option<Value>, args: &Value, source: fetch::DataSource) ->
         .or_else(|| args.get("interval"))
         .and_then(|v| v.as_str())
         .unwrap_or("4h");
-    if data::interval_secs(interval).is_none() {
-        return tool_err(
-            id,
-            &format!("Unsupported timeframe: {interval}. Use e.g. 1m, 5m, 15m, 30m, 1h, 4h, 1d, 1wk, 1mo."),
-        );
+    if let Err(e) = check_interval(interval) {
+        return tool_err(id, &e);
     }
 
-    // Accept both "indicators" and "panels" parameter names
-    let panels_value = args
-        .get("indicators")
-        .or_else(|| args.get("panels"))
-        .cloned()
-        .unwrap_or_else(|| json!(["ema_stack", "cipher_b", "macd"]));
+    let panels_value = indicators_arg(args);
 
     // Output format: "png" (default), "summary" (JSON only), "both",
     // or "series" (full per-bar JSON time-series).
@@ -288,19 +324,8 @@ fn generate_chart(id: Option<Value>, args: &Value, source: fetch::DataSource) ->
     }
 
     let (panel_indicators, indicator_keys, unknown, invalid) = parse_panels(&panels_value);
-
-    if !invalid.is_empty() {
-        return tool_err(id, &invalid.join("; "));
-    }
-
-    if !unknown.is_empty() {
-        return tool_err(
-            id,
-            &format!(
-                "Unknown indicator(s): {}. Call list_indicators to see available indicators.",
-                unknown.join(", ")
-            ),
-        );
+    if let Err(e) = check_panels(&unknown, &invalid) {
+        return tool_err(id, &e);
     }
 
     // Warmup bars feed indicator computation but are trimmed from the series
@@ -370,55 +395,16 @@ fn generate_chart(id: Option<Value>, args: &Value, source: fetch::DataSource) ->
         None
     };
 
-    // Build series payload: full OHLCV bars plus per-indicator per-bar values.
-    // Indicators ran over warmup + visible bars; only the last `bars` are
-    // emitted, with every index-based channel re-based to match.
-    let series_value = if want_series {
-        let offset = data.len().saturating_sub(bars);
-        let visible = chartgen::data::OhlcvData {
-            bars: data.bars[offset..].to_vec(),
-            symbol: data.symbol.clone(),
-            interval: data.interval.clone(),
-        };
-        let bars_arr: Vec<Value> = visible
-            .bars
-            .iter()
-            .map(|b| {
-                json!({
-                    "t": bar_t(b),
-                    "o": finite_or_null(b.open),
-                    "h": finite_or_null(b.high),
-                    "l": finite_or_null(b.low),
-                    "c": finite_or_null(b.close),
-                    "v": finite_or_null(b.volume),
-                })
-            })
-            .collect();
-        let mut indicators_json = serde_json::Map::new();
-        for ((key, pr), ind) in computed.iter().zip(panel_indicators.iter()) {
-            let mut trimmed = trim_panel_result(pr, offset);
-            // Volume/time profiles aggregate over the whole input window,
-            // not per bar: recompute their profile-derived channels (hbars
-            // and POC/VA/node hlines) over the visible window so warmup bars
-            // don't leak into the profile.
-            if offset > 0 && ind.windowed_profile() {
-                let profile = ind.compute(&visible);
-                trimmed.hbars = profile.hbars;
-                trimmed.hlines = profile.hlines;
-            }
-            indicators_json.insert(key.clone(), panel_result_to_series_json(&trimmed, &visible));
-        }
-        Some(json!({
-            "symbol": data.symbol,
-            "interval": data.interval,
-            "chart_style": chart_style,
-            "bars": bars_arr,
-            "indicators": Value::Object(indicators_json),
-            "has_more": has_more,
-        }))
-    } else {
-        None
-    };
+    let series_value = want_series.then(|| {
+        series_json(
+            &data,
+            &computed,
+            &panel_indicators,
+            bars,
+            chart_style,
+            has_more,
+        )
+    });
 
     let mut content: Vec<Value> = Vec::new();
 
@@ -463,6 +449,172 @@ fn generate_chart(id: Option<Value>, args: &Value, source: fetch::DataSource) ->
         "id": id,
         "result": { "content": content }
     })
+}
+
+// Build series payload: full OHLCV bars plus per-indicator per-bar values.
+// Indicators ran over warmup + visible bars; only the last `bars` are
+// emitted, with every index-based channel re-based to match.
+fn series_json(
+    data: &chartgen::data::OhlcvData,
+    computed: &[(String, chartgen::indicator::PanelResult)],
+    panel_indicators: &[Box<dyn Indicator>],
+    bars: usize,
+    chart_style: &str,
+    has_more: bool,
+) -> Value {
+    let offset = data.len().saturating_sub(bars);
+    let visible = chartgen::data::OhlcvData {
+        bars: data.bars[offset..].to_vec(),
+        symbol: data.symbol.clone(),
+        interval: data.interval.clone(),
+    };
+    let bars_arr: Vec<Value> = visible
+        .bars
+        .iter()
+        .map(|b| {
+            json!({
+                "t": bar_t(b),
+                "o": finite_or_null(b.open),
+                "h": finite_or_null(b.high),
+                "l": finite_or_null(b.low),
+                "c": finite_or_null(b.close),
+                "v": finite_or_null(b.volume),
+            })
+        })
+        .collect();
+    let mut indicators_json = serde_json::Map::new();
+    for ((key, pr), ind) in computed.iter().zip(panel_indicators.iter()) {
+        let mut trimmed = trim_panel_result(pr, offset);
+        // Volume/time profiles aggregate over the whole input window,
+        // not per bar: recompute their profile-derived channels (hbars
+        // and POC/VA/node hlines) over the visible window so warmup bars
+        // don't leak into the profile.
+        if offset > 0 && ind.windowed_profile() {
+            let profile = ind.compute(&visible);
+            trimmed.hbars = profile.hbars;
+            trimmed.hlines = profile.hlines;
+        }
+        indicators_json.insert(key.clone(), panel_result_to_series_json(&trimmed, &visible));
+    }
+    json!({
+        "symbol": data.symbol,
+        "interval": data.interval,
+        "chart_style": chart_style,
+        "bars": bars_arr,
+        "indicators": Value::Object(indicators_json),
+        "has_more": has_more,
+    })
+}
+
+/// The `format=series` payload for the newest `bars` of `raw` (symbol and
+/// interval set, `bars` + warmup long), computed exactly like
+/// `generate_chart`: Heikin Ashi first, then indicators over every bar, then
+/// trimmed. Chart push (ADR-0021) builds its tails with this.
+pub(crate) fn series_tail(
+    raw: &chartgen::data::OhlcvData,
+    indicators: &Value,
+    chart_style: &str,
+    bars: usize,
+) -> Result<Value, String> {
+    let (panel_indicators, keys, unknown, invalid) = parse_panels(indicators);
+    check_panels(&unknown, &invalid)?;
+    let ha;
+    let data = if chart_style == "heikin_ashi" {
+        ha = raw.heikin_ashi();
+        &ha
+    } else {
+        raw
+    };
+    let computed: Vec<_> = keys
+        .into_iter()
+        .zip(panel_indicators.iter())
+        .map(|(key, ind)| (key, ind.compute(data)))
+        .collect();
+    let has_more = data.len() > bars;
+    Ok(series_json(
+        data,
+        &computed,
+        &panel_indicators,
+        bars,
+        chart_style,
+        has_more,
+    ))
+}
+
+/// `subscribe_chart`: push `generate_chart(format=series, bars=2, warmup)`
+/// tails of a chart over the caller's SSE stream (ADR-0021).
+fn tool_subscribe_chart(
+    id: Option<Value>,
+    args: &Value,
+    push: Option<&PushCtx>,
+    token: Option<&str>,
+) -> Value {
+    let (Some(push), Some(token)) = (push, token) else {
+        return no_push_transport(id);
+    };
+    let Some(ticker) = args
+        .get("ticker")
+        .or_else(|| args.get("symbol"))
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+    else {
+        return tool_err(id, "ticker is required.");
+    };
+    let timeframe = args
+        .get("timeframe")
+        .or_else(|| args.get("interval"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("4h");
+    if let Err(e) = check_interval(timeframe) {
+        return tool_err(id, &e);
+    }
+    let chart_style = match chart_style_arg(args) {
+        Ok(s) => s,
+        Err(e) => return tool_err(id, e),
+    };
+    let indicators = indicators_arg(args);
+    let (_, _, unknown, invalid) = parse_panels(&indicators);
+    if let Err(e) = check_panels(&unknown, &invalid) {
+        return tool_err(id, &e);
+    }
+    let warmup =
+        (args.get("warmup").and_then(|v| v.as_u64()).unwrap_or(0) as usize).min(MAX_WARMUP);
+    let req = ChartRequest {
+        ticker: ticker.to_string(),
+        timeframe: timeframe.to_string(),
+        indicators: indicators.to_string(),
+        chart_style: chart_style.to_string(),
+        warmup,
+    };
+    match push.hub.subscribe(token, &push.stream, req) {
+        Ok(sub) => tool_ok(id, json!({ "subscription_id": sub })),
+        Err(e) => tool_err(id, &e),
+    }
+}
+
+fn tool_unsubscribe_chart(
+    id: Option<Value>,
+    args: &Value,
+    push: Option<&PushCtx>,
+    token: Option<&str>,
+) -> Value {
+    let (Some(push), Some(token)) = (push, token) else {
+        return no_push_transport(id);
+    };
+    let Some(sub) = args.get("subscription_id").and_then(|v| v.as_str()) else {
+        return tool_err(id, "subscription_id is required.");
+    };
+    tool_ok(
+        id,
+        json!({ "unsubscribed": push.hub.unsubscribe(token, sub) }),
+    )
+}
+
+fn no_push_transport(id: Option<Value>) -> Value {
+    tool_err(
+        id,
+        "Chart push needs the HTTP transport: an authenticated POST /mcp with an open GET /mcp SSE stream.",
+    )
 }
 
 fn tool_list_indicators(id: Option<Value>) -> Value {
@@ -1846,7 +1998,7 @@ mod tests {
 
     #[test]
     fn handle_mcp_tools_list_includes_trading_tools() {
-        let resp = handle_mcp_request("tools/list", Some(json!(1)), None, None, None);
+        let resp = handle_mcp_request("tools/list", Some(json!(1)), None, None, None, None);
         let tools = resp["result"]["tools"].as_array().unwrap();
         let names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
         assert!(names.contains(&"get_indicators"));
@@ -3236,7 +3388,7 @@ mod tests {
 
     #[test]
     fn get_quotes_is_dispatched_and_listed() {
-        let resp = handle_mcp_request("tools/list", Some(json!(1)), None, None, None);
+        let resp = handle_mcp_request("tools/list", Some(json!(1)), None, None, None, None);
         let tools = resp["result"]["tools"].as_array().unwrap();
         let tool = tools.iter().find(|t| t["name"] == "get_quotes").unwrap();
         assert_eq!(tool["inputSchema"]["required"], json!(["symbols"]));
@@ -3246,6 +3398,7 @@ mod tests {
             "tools/call",
             Some(json!(2)),
             Some(&json!({ "name": "get_quotes", "arguments": {} })),
+            None,
             None,
             None,
         );
@@ -3303,7 +3456,7 @@ mod tests {
 
     #[test]
     fn search_symbols_is_dispatched_and_listed() {
-        let resp = handle_mcp_request("tools/list", Some(json!(1)), None, None, None);
+        let resp = handle_mcp_request("tools/list", Some(json!(1)), None, None, None, None);
         let tools = resp["result"]["tools"].as_array().unwrap();
         let tool = tools
             .iter()
@@ -3317,7 +3470,138 @@ mod tests {
             Some(&json!({ "name": "search_symbols", "arguments": {} })),
             None,
             None,
+            None,
         );
         assert!(response_text(&resp).contains("query is required"));
+    }
+
+    // --- subscribe_chart / unsubscribe_chart (ADR-0021) ---
+
+    fn call(name: &str, args: Value, push: Option<&PushCtx>, token: Option<&str>) -> Value {
+        handle_mcp_request(
+            "tools/call",
+            Some(json!(1)),
+            Some(&json!({ "name": name, "arguments": args })),
+            None,
+            token,
+            push,
+        )
+    }
+
+    #[test]
+    fn subscribe_chart_needs_the_http_transport() {
+        let resp = call(
+            "subscribe_chart",
+            json!({ "ticker": "BTCUSDT" }),
+            None,
+            None,
+        );
+        assert!(is_error(&resp));
+        assert!(response_text(&resp).contains("HTTP transport"));
+        let resp = call(
+            "unsubscribe_chart",
+            json!({ "subscription_id": "x" }),
+            None,
+            None,
+        );
+        assert!(is_error(&resp));
+    }
+
+    #[tokio::test]
+    async fn subscribe_chart_validates_and_round_trips() {
+        let hub = crate::chart_push::ChartHub::new(
+            Arc::new(crate::chart_push::SampleSource),
+            crate::chart_push::Limits::default(),
+        );
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        hub.link_stream("s", tx);
+        let push = PushCtx {
+            hub: hub.clone(),
+            stream: "s".into(),
+        };
+        let ok = |args: Value| {
+            let resp = call("subscribe_chart", args, Some(&push), Some("tok"));
+            (is_error(&resp), response_text(&resp))
+        };
+        for (args, needle) in [
+            (json!({}), "ticker is required"),
+            (
+                json!({ "ticker": "BTCUSDT", "timeframe": "7x" }),
+                "Unsupported timeframe",
+            ),
+            (
+                json!({ "ticker": "BTCUSDT", "indicators": ["nope"] }),
+                "Unknown indicator",
+            ),
+            (
+                json!({ "ticker": "BTCUSDT", "chart_style": "renko" }),
+                "chart_style",
+            ),
+            (json!({ "ticker": "AAPL" }), "not pushable"),
+        ] {
+            let (err, text) = ok(args.clone());
+            assert!(err && text.contains(needle), "{args}: {text}");
+        }
+
+        let (err, text) = ok(json!({
+            "ticker": "BTCUSDT", "timeframe": "1m", "indicators": ["rsi"], "warmup": 50,
+            "chart_style": "heikin_ashi"
+        }));
+        assert!(!err, "{text}");
+        let id = serde_json::from_str::<Value>(&text).unwrap()["subscription_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let note: Value = serde_json::from_str(
+            &tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
+                .await
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(note["params"]["subscription_id"], id.as_str());
+        assert_eq!(note["params"]["series"]["chart_style"], "heikin_ashi");
+        assert!(note["params"]["series"]["indicators"]["rsi"].is_object());
+
+        let resp = call(
+            "unsubscribe_chart",
+            json!({ "subscription_id": id }),
+            Some(&push),
+            Some("tok"),
+        );
+        assert_eq!(
+            serde_json::from_str::<Value>(&response_text(&resp)).unwrap()["unsubscribed"],
+            true
+        );
+        assert_eq!(hub.counts().0, 0);
+    }
+
+    #[test]
+    fn series_tail_matches_generate_chart() {
+        // The pushed tail is the generate_chart tail for the same window.
+        let args = json!({
+            "ticker": "ETHUSDT", "timeframe": "4h", "bars": 2, "warmup": 40,
+            "end_time": END_4H_MS, "indicators": ["rsi", "macd"], "format": "series",
+            "chart_style": "heikin_ashi"
+        });
+        let polled: Value = serde_json::from_str(&response_text(&generate_chart(
+            Some(json!(1)),
+            &args,
+            fetch::DataSource::Sample,
+        )))
+        .unwrap();
+        let mut raw = fetch::fetch_ohlcv(
+            fetch::DataSource::Sample,
+            "ETHUSDT",
+            "4h",
+            42,
+            Some(END_4H_MS),
+        )
+        .unwrap()
+        .data;
+        raw.symbol = Some("ETHUSDT".into());
+        raw.interval = Some("4h".into());
+        let pushed = series_tail(&raw, &json!(["rsi", "macd"]), "heikin_ashi", 2).unwrap();
+        assert_eq!(pushed, polled);
     }
 }

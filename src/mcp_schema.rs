@@ -308,6 +308,68 @@ pub fn tools_list_result() -> Value {
                     "type": "object",
                     "properties": {}
                 }
+            },
+            {
+                "name": "subscribe_chart",
+                "description": "Push live updates of a chart over the caller's SSE stream (GET /mcp with the same token and Mcp-Session-Id). Each update is a notifications/chart_tick notification with params {subscription_id, series}, where series is exactly the generate_chart(format=series, bars=2, warmup) tail for these arguments: the last closed bar and the forming bar with indicators recomputed. Pushes follow the market (sub-second for active Binance symbols), at most 4 per second. Only Binance symbols are pushable; any other symbol returns an error starting with 'not pushable', and the client should poll generate_chart instead. At most 4 subscriptions per token. A subscription ends with unsubscribe_chart or when its SSE stream closes. HTTP transport only; works without --trade.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "ticker": {
+                            "type": "string",
+                            "description": "Binance symbol, e.g. BTCUSDT."
+                        },
+                        "timeframe": {
+                            "type": "string",
+                            "description": "Candlestick timeframe, as for generate_chart: 1m, 5m, 15m, 30m, 1h, 4h, 1d, 1wk, 1mo.",
+                            "default": "4h"
+                        },
+                        "indicators": {
+                            "type": "array",
+                            "items": {
+                                "oneOf": [
+                                    { "type": "string" },
+                                    {
+                                        "type": "object",
+                                        "properties": {
+                                            "name": { "type": "string" }
+                                        },
+                                        "required": ["name"],
+                                        "additionalProperties": true
+                                    }
+                                ]
+                            },
+                            "description": "Indicators, as for generate_chart.",
+                            "default": ["ema_stack", "cipher_b", "macd"]
+                        },
+                        "chart_style": {
+                            "type": "string",
+                            "enum": ["candles", "heikin_ashi"],
+                            "description": "Price series style, as for generate_chart.",
+                            "default": "candles"
+                        },
+                        "warmup": {
+                            "type": "integer",
+                            "description": "Extra older bars (max 1000) the server keeps and feeds to indicator computation, as for generate_chart(format=series).",
+                            "default": 0
+                        }
+                    },
+                    "required": ["ticker"]
+                }
+            },
+            {
+                "name": "unsubscribe_chart",
+                "description": "End a subscribe_chart subscription. Returns {unsubscribed: false} if it was already gone (e.g. its SSE stream closed).",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "subscription_id": {
+                            "type": "string",
+                            "description": "The subscription_id returned by subscribe_chart."
+                        }
+                    },
+                    "required": ["subscription_id"]
+                }
             }
         ]
     })

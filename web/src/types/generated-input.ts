@@ -180,6 +180,35 @@ export interface SetAlertInput {
   symbol: string;
 }
 
+export interface SubscribeChartInput {
+  /**
+   * Price series style, as for generate_chart.
+   */
+  chart_style?: "candles" | "heikin_ashi";
+  /**
+   * Indicators, as for generate_chart.
+   */
+  indicators?: (
+    | string
+    | {
+        name: string;
+        [k: string]: unknown;
+      }
+  )[];
+  /**
+   * Binance symbol, e.g. BTCUSDT.
+   */
+  ticker: string;
+  /**
+   * Candlestick timeframe, as for generate_chart: 1m, 5m, 15m, 30m, 1h, 4h, 1d, 1wk, 1mo.
+   */
+  timeframe?: string;
+  /**
+   * Extra older bars (max 1000) the server keeps and feeds to indicator computation, as for generate_chart(format=series).
+   */
+  warmup?: number;
+}
+
 export interface SubscribeNotificationsInput {
   /**
    * Filter by alert types: price_above, price_below, indicator_signal. Omit for all.
@@ -189,6 +218,13 @@ export interface SubscribeNotificationsInput {
    * Filter by trading pairs (e.g. ["BTCUSDT"]). Omit for all.
    */
   symbols?: string[];
+}
+
+export interface UnsubscribeChartInput {
+  /**
+   * The subscription_id returned by subscribe_chart.
+   */
+  subscription_id: string;
 }
 
 export interface UnsubscribeNotificationsInput {}

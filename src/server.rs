@@ -14,6 +14,7 @@ use std::time::{Duration, Instant};
 use tower_http::cors::CorsLayer;
 use uuid::Uuid;
 
+use crate::chart_push::{ChartHub, PushCtx};
 use crate::mcp::handle_mcp_request;
 use chartgen::engine::Engine as TradingEngine;
 
@@ -72,6 +73,8 @@ impl OAuthStore {
 struct AppState {
     oauth: Mutex<OAuthStore>,
     engine: Option<Arc<RwLock<TradingEngine>>>,
+    /// Chart push subscriptions (ADR-0021); runs with or without the engine.
+    charts: Arc<ChartHub>,
 }
 
 type SharedState = Arc<AppState>;
@@ -449,6 +452,14 @@ fn extract_bearer_token(headers: &HeaderMap) -> Option<&str> {
         .and_then(|v| v.strip_prefix("Bearer "))
 }
 
+/// Identifies one client's SSE stream for chart push (ADR-0021): the bearer
+/// token plus the `Mcp-Session-Id` (minted on `initialize`, then sent by the
+/// client on every request). The token part keeps one user from addressing
+/// another user's stream.
+fn stream_key(token: &str, session_id: Option<&str>) -> String {
+    format!("{token}\n{}", session_id.unwrap_or(""))
+}
+
 /// Check whether the client's Accept header allows an `application/json`
 /// response. Missing Accept is tolerated (treated as "accepts anything").
 /// Returns `true` if JSON is acceptable; `false` means the server should
@@ -538,8 +549,11 @@ fn streamable_http_json_response(
 /// - `initialize` and `tools/list` are accepted without auth (tool
 ///   discovery); everything else requires a valid bearer token.
 /// - The `Mcp-Session-Id` header, if present, is echoed back unchanged.
-///   chartgen does not track server-side session state.
-/// - Notifications return `204 No Content`.
+///   `initialize` without one gets a fresh id. chartgen keeps no session
+///   state beyond scoping chart push subscriptions to the client's SSE
+///   stream with it.
+/// - Notifications return `202 Accepted` (the SDK opens its GET SSE stream
+///   only after a 202 for `notifications/initialized`).
 /// - Successful responses set `Content-Type: application/json`.
 async fn mcp_handler(
     State(state): State<SharedState>,
@@ -581,6 +595,10 @@ async fn mcp_handler(
     };
 
     let method = body.get("method").and_then(|m| m.as_str()).unwrap_or("");
+    let session_id = match session_id {
+        None if method == "initialize" => Some(Uuid::new_v4().to_string()),
+        sid => sid,
+    };
     let has_auth = extract_bearer_token(&headers).is_some();
     eprintln!("[MCP] POST /mcp method={} has_auth={}", method, has_auth);
 
@@ -621,7 +639,7 @@ async fn mcp_handler(
     if (method == "initialized" || method == "notifications/initialized")
         && body.get("id").is_none()
     {
-        let mut resp = StatusCode::NO_CONTENT.into_response();
+        let mut resp = StatusCode::ACCEPTED.into_response();
         if let Some(sid) = session_id.as_deref() {
             if let Ok(val) = sid.parse() {
                 resp.headers_mut().insert("Mcp-Session-Id", val);
@@ -637,6 +655,10 @@ async fn mcp_handler(
     let method_owned = method.to_string();
     let params_owned = params.cloned();
     let engine = state.engine.clone();
+    let push = token_owned.as_deref().map(|t| PushCtx {
+        hub: state.charts.clone(),
+        stream: stream_key(t, session_id.as_deref()),
+    });
     let result = tokio::task::spawn_blocking(move || {
         handle_mcp_request(
             &method_owned,
@@ -644,6 +666,7 @@ async fn mcp_handler(
             params_owned.as_ref(),
             engine.as_ref(),
             token_owned.as_deref(),
+            push.as_ref(),
         )
     })
     .await
@@ -675,8 +698,9 @@ async fn health_handler() -> Json<Value> {
 /// Unlike the legacy 2024-11-05 HTTP+SSE transport, this endpoint does **not**
 /// emit an `event: endpoint` frame or rotate a `session_id` — the client sends
 /// every JSON-RPC request to `POST /mcp` and reads server-initiated
-/// notifications (e.g. `notifications/alert_triggered`) from this stream
-/// directly as JSON-RPC notification frames.
+/// notifications (e.g. `notifications/alert_triggered`,
+/// `notifications/chart_tick`) from this stream directly as JSON-RPC
+/// notification frames.
 async fn sse_handler(State(state): State<SharedState>, headers: HeaderMap) -> Response {
     eprintln!("[MCP] GET /mcp (Streamable HTTP SSE stream requested)");
 
@@ -693,14 +717,18 @@ async fn sse_handler(State(state): State<SharedState>, headers: HeaderMap) -> Re
 
     // Echo the client-supplied Mcp-Session-Id if present, else mint one so
     // clients that expect the header on the SSE response still get a value.
-    let session_id = headers
+    let client_session = headers
         .get("Mcp-Session-Id")
         .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| Uuid::new_v4().to_string());
+        .map(|s| s.to_string());
+    let chart_stream = stream_key(&token, client_session.as_deref());
+    let session_id = client_session.unwrap_or_else(|| Uuid::new_v4().to_string());
 
     // Create notification channel
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+
+    // Chart ticks for this stream's subscriptions (ADR-0021).
+    let chart_link = state.charts.link_stream(&chart_stream, tx.clone());
 
     // Link sender to subscription registry if engine is available
     if let Some(ref engine) = state.engine {
@@ -747,6 +775,9 @@ async fn sse_handler(State(state): State<SharedState>, headers: HeaderMap) -> Re
         inner: Box::pin(stream),
         token: token_cleanup,
         engine: engine_cleanup,
+        charts: state.charts.clone(),
+        chart_stream,
+        chart_link,
         cleaned_up: false,
     };
 
@@ -767,6 +798,9 @@ struct CleanupStream {
     >,
     token: String,
     engine: Option<Arc<RwLock<TradingEngine>>>,
+    charts: Arc<ChartHub>,
+    chart_stream: String,
+    chart_link: u64,
     cleaned_up: bool,
 }
 
@@ -785,6 +819,10 @@ impl Drop for CleanupStream {
     fn drop(&mut self) {
         if !self.cleaned_up {
             self.cleaned_up = true;
+            // Ends this stream's chart subscriptions, and their feeds when
+            // nobody else watches them.
+            self.charts
+                .unlink_stream(&self.chart_stream, self.chart_link);
             if let Some(ref engine) = self.engine {
                 match engine.write() {
                     Ok(mut e) => {
@@ -808,6 +846,7 @@ pub async fn run_server(port: u16, engine: Option<Arc<RwLock<TradingEngine>>>) {
     let state = Arc::new(AppState {
         oauth: Mutex::new(OAuthStore::new()),
         engine,
+        charts: ChartHub::from_env(),
     });
 
     // Store port for metadata endpoint
@@ -851,10 +890,18 @@ mod tests {
     use http_body_util::BodyExt;
     use tower::ServiceExt;
 
+    fn sample_hub() -> Arc<ChartHub> {
+        ChartHub::new(
+            Arc::new(crate::chart_push::SampleSource),
+            crate::chart_push::Limits::default(),
+        )
+    }
+
     fn test_app() -> Router {
         let state = Arc::new(AppState {
             oauth: Mutex::new(OAuthStore::new()),
             engine: None,
+            charts: sample_hub(),
         });
         Router::new()
             .route("/", get(health_handler).post(mcp_handler))
@@ -1111,7 +1158,7 @@ mod tests {
         let resp = app.oneshot(req).await.unwrap();
         assert_ne!(
             resp.status(),
-            StatusCode::NO_CONTENT,
+            StatusCode::ACCEPTED,
             "requests (id present) must not be treated as notifications"
         );
         assert_eq!(
@@ -1163,6 +1210,7 @@ mod tests {
         let state = Arc::new(AppState {
             oauth: Mutex::new(OAuthStore::new()),
             engine: None,
+            charts: sample_hub(),
         });
         // Seed a valid token.
         {
@@ -1249,5 +1297,119 @@ mod tests {
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
         let parsed: Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(parsed["protocolVersion"], "2025-03-26");
+    }
+
+    // --- Chart push (ADR-0021) ---
+
+    fn rpc(body: Value, session: Option<&str>) -> Request<Body> {
+        let mut b = Request::builder()
+            .method("POST")
+            .uri("/mcp")
+            .header("accept", "application/json, text/event-stream")
+            .header("content-type", "application/json")
+            .header("authorization", "Bearer push-token");
+        if let Some(sid) = session {
+            b = b.header("Mcp-Session-Id", sid);
+        }
+        b.body(Body::from(body.to_string())).unwrap()
+    }
+
+    async fn tool_text(
+        app: &Router,
+        name: &str,
+        args: Value,
+        session: Option<&str>,
+    ) -> (bool, String) {
+        let body = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": {"name": name, "arguments": args}});
+        let resp = app.clone().oneshot(rpc(body, session)).await.unwrap();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let v: Value = serde_json::from_slice(&bytes).unwrap();
+        let text = v["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        (v["result"]["isError"] == true, text)
+    }
+
+    #[tokio::test]
+    async fn chart_ticks_flow_over_the_sse_stream_until_it_closes() {
+        let state = Arc::new(AppState {
+            oauth: Mutex::new(OAuthStore::new()),
+            engine: None,
+            charts: sample_hub(),
+        });
+        state.oauth.lock().unwrap().tokens.insert(
+            "push-token".to_string(),
+            AccessToken {
+                _token: "push-token".to_string(),
+                _client_id: "test".to_string(),
+                created_at: Instant::now(),
+                expires_in: Duration::from_secs(3600),
+            },
+        );
+        let app: Router = Router::new()
+            .route("/mcp", get(sse_handler).post(mcp_handler))
+            .with_state(state.clone());
+
+        // initialize mints the session id that scopes the subscriptions.
+        let init = json!({"jsonrpc": "2.0", "id": 0, "method": "initialize", "params": {}});
+        let resp = app.clone().oneshot(rpc(init, None)).await.unwrap();
+        let sid = resp.headers()["Mcp-Session-Id"]
+            .to_str()
+            .unwrap()
+            .to_string();
+
+        let args =
+            json!({"ticker": "BTCUSDT", "timeframe": "1m", "indicators": ["rsi"], "warmup": 20});
+        let (err, text) = tool_text(&app, "subscribe_chart", args.clone(), Some(&sid)).await;
+        assert!(err && text.contains("no open SSE stream"), "{text}");
+
+        let sse = Request::builder()
+            .method("GET")
+            .uri("/mcp")
+            .header("authorization", "Bearer push-token")
+            .header("Mcp-Session-Id", &sid)
+            .body(Body::empty())
+            .unwrap();
+        let mut body = app.clone().oneshot(sse).await.unwrap().into_body();
+
+        let (err, text) = tool_text(&app, "subscribe_chart", args.clone(), Some(&sid)).await;
+        assert!(!err, "{text}");
+        let sub: Value = serde_json::from_str(&text).unwrap();
+        // Another session of the same token has no stream of its own.
+        let (err, _) = tool_text(&app, "subscribe_chart", args, Some("other")).await;
+        assert!(err);
+        // Not pushable: the client polls instead.
+        let (err, text) = tool_text(
+            &app,
+            "subscribe_chart",
+            json!({"ticker": "AAPL"}),
+            Some(&sid),
+        )
+        .await;
+        assert!(err && text.starts_with("not pushable"), "{text}");
+
+        let mut ticks = Vec::new();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while ticks.len() < 3 {
+            let frame = tokio::time::timeout_at(deadline, body.frame())
+                .await
+                .expect("three ticks within 5 s")
+                .unwrap()
+                .unwrap();
+            let chunk = String::from_utf8_lossy(frame.data_ref().unwrap()).to_string();
+            if let Some(data) = chunk.strip_prefix("event: message\ndata: ") {
+                let n: Value = serde_json::from_str(data.trim()).unwrap();
+                assert_eq!(n["method"], "notifications/chart_tick");
+                assert_eq!(n["params"]["subscription_id"], sub["subscription_id"]);
+                assert_eq!(n["params"]["series"]["bars"].as_array().unwrap().len(), 2);
+                ticks.push(n["params"]["series"]["bars"][1]["c"].as_f64().unwrap());
+            }
+        }
+
+        // Closing the stream ends its subscriptions and the feed.
+        drop(body);
+        assert_eq!(state.charts.counts(), (0, 0, 0));
     }
 }
