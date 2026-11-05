@@ -1,9 +1,10 @@
 import { describe, expect, it } from "vitest";
-import type { KLineData } from "klinecharts";
+import type { IndicatorDrawParams, KLineData } from "klinecharts";
 
 import {
   barRect,
   baselineValue,
+  drawSeries,
   drawSpan,
   hiddenCandleStyle,
   isSeriesType,
@@ -12,6 +13,89 @@ import {
   stepPoints,
 } from "./chartTypes";
 import { CHART_TYPES } from "../stores/layout";
+
+// A y axis at BTC-like prices that rounds to whole pixels as klinecharts does:
+// 2000 price units over 400px, so one unit is 0.2px.
+const HEIGHT = 400;
+const LO = 99_000;
+const SPAN = 2000;
+const mockYAxis = (inverted: boolean) =>
+  ({
+    convertToPixel: (v: number) => {
+      const f = (v - LO) / SPAN;
+      return Math.round((inverted ? f : 1 - f) * HEIGHT);
+    },
+    convertFromPixel: (p: number) => {
+      const f = p / HEIGHT;
+      return LO + (inverted ? f : 1 - f) * SPAN;
+    },
+  }) as unknown as IndicatorDrawParams["yAxis"];
+
+/** Run drawSeries on a recording canvas; returns what it filled and stroked. */
+function paint(type: "columns" | "baseline", inverted: boolean) {
+  const fills: { y: number; h: number }[] = [];
+  const strokes: { color: string; clip: [number, number] }[] = [];
+  let rect: [number, number] = [0, 0];
+  let clip: [number, number] = [0, 0];
+  const ctx = {
+    fillStyle: "",
+    strokeStyle: "",
+    setLineDash() {},
+    save() {},
+    restore() {},
+    beginPath() {},
+    moveTo() {},
+    lineTo() {},
+    closePath() {},
+    arc() {},
+    fill() {},
+    createLinearGradient: () => ({ addColorStop() {} }),
+    rect: (_x: number, y: number, _w: number, h: number) => (rect = [y, h]),
+    clip: () => (clip = rect),
+    stroke() {
+      strokes.push({ color: ctx.strokeStyle, clip });
+    },
+    fillRect: (_x: number, y: number, _w: number, h: number) => fills.push({ y, h }),
+  };
+  const bars = [100_000, 100_400, 99_800, 100_200].map((c) => bar(c - 50, c));
+  drawSeries({
+    ctx: ctx as unknown as CanvasRenderingContext2D,
+    kLineDataList: bars,
+    indicator: { extendData: { type, up: "#26a69a", down: "#ef5350", line: "#2196f3" } },
+    visibleRange: { from: 0, to: 4, realFrom: 0, realTo: 4 },
+    bounding: { width: 600, height: HEIGHT, left: 0, top: 0, right: 600, bottom: HEIGHT },
+    barSpace: { bar: 8, halfBar: 4, gapBar: 6, halfGapBar: 3 },
+    xAxis: { convertToPixel: (i: number) => 20 + i * 10, convertFromPixel: () => 0 },
+    yAxis: mockYAxis(inverted),
+  } as unknown as IndicatorDrawParams);
+  return { fills, strokes };
+}
+
+describe("series types on a rounding axis at high prices", () => {
+  it("Columns hang from the bottom edge on a normal axis", () => {
+    const { fills } = paint("columns", false);
+    expect(fills.length).toBe(4);
+    for (const f of fills) expect(f.y + f.h).toBe(HEIGHT);
+  });
+
+  it("Columns hang from the top edge on an inverted axis", () => {
+    const { fills } = paint("columns", true);
+    for (const f of fills) expect(f.y).toBe(0);
+  });
+
+  it("Baseline paints the up color above the base line on a normal axis", () => {
+    const { strokes } = paint("baseline", false);
+    const up = strokes.find((s) => s.color === "#26a69a")!;
+    expect(up.clip[0]).toBe(0);
+  });
+
+  it("Baseline paints the up color below the base line when inverted", () => {
+    const { strokes } = paint("baseline", true);
+    const up = strokes.find((s) => s.color === "#26a69a")!;
+    expect(up.clip[0]).toBeGreaterThan(0);
+    expect(up.clip[0] + up.clip[1]).toBe(HEIGHT);
+  });
+});
 
 const bar = (open: number, close: number): KLineData => ({
   timestamp: 0,

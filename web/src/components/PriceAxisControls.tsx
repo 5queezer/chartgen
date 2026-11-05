@@ -135,6 +135,10 @@ export function PriceAxisControls(props: PriceAxisControlsProps): JSX.Element {
   let ratio: number | null = null;
   let gap: Gap = DEFAULT_GAP;
   let lockKey = "";
+  // Bar space when the ratio was captured; a different one means the user
+  // (wheel, keys, date-range buttons) zoomed, which ends the load-time re-fit.
+  let capturedSpace = 0;
+  let zoomed = false;
   const resetGap = (c: KLineChart) => {
     ratio = null;
     gap = DEFAULT_GAP;
@@ -170,7 +174,10 @@ export function PriceAxisControls(props: PriceAxisControlsProps): JSX.Element {
     const vMax = Math.max(a, b);
     const barSpace = c.getBarSpace();
     if (!(vMax > vMin) || !(barSpace > 0)) return;
-    ratio ??= lockRatioOf(vMax - vMin, height, barSpace);
+    if (ratio === null) {
+      ratio = lockRatioOf(vMax - vMin, height, barSpace);
+      capturedSpace = barSpace;
+    }
     const last = data[Math.min(c.getVisibleRange().to, data.length) - 1]?.close;
     const next = lockedGaps({
       vMin,
@@ -200,6 +207,10 @@ export function PriceAxisControls(props: PriceAxisControlsProps): JSX.Element {
     lockQueued = true;
     queueMicrotask(() => {
       lockQueued = false;
+      const c = props.chart;
+      if (c && ratio !== null && Math.abs(c.getBarSpace() - capturedSpace) > 1e-6) {
+        zoomed = true;
+      }
       applyLock();
     });
   };
@@ -242,14 +253,6 @@ export function PriceAxisControls(props: PriceAxisControlsProps): JSX.Element {
   // at the new size, so the price range on screen is kept; before the user
   // has zoomed it is captured from a fresh fit instead, because the layout
   // is still settling at load (panes appear, sidebars open).
-  let zoomed = false;
-  createEffect(() => {
-    const c = props.chart;
-    if (!c) return;
-    const onZoom = () => (zoomed = true);
-    c.subscribeAction("onZoom" as never, onZoom);
-    onCleanup(() => c.unsubscribeAction("onZoom" as never, onZoom));
-  });
   createEffect(() => {
     const c = props.chart;
     const el = c?.getDom(CANDLE_PANE_ID, "main" as never);

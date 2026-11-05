@@ -197,6 +197,9 @@ export function drawSeries({
     x: xAxis.convertToPixel(i),
     y: yAxis.convertToPixel(v),
   });
+  // Compare prices, not pixels: klinecharts rounds pixels to whole numbers,
+  // so one price unit can map to the same pixel at high prices.
+  const inverted = yAxis.convertFromPixel(0) < yAxis.convertFromPixel(bounding.height);
   const closes: Point[] = [];
   for (let i = start; i < end; i++) closes.push(point(i, bars[i]!.close));
   // The context carries over the dash of klinecharts' last price line.
@@ -210,8 +213,7 @@ export function drawSeries({
       const up = ext.type === "high_low" ? ext.line : withAlpha(ext.up, 0.5);
       const down = ext.type === "high_low" ? ext.line : withAlpha(ext.down, 0.5);
       // Columns grow from the bottom edge, or from the top on an inverted axis.
-      const ref = bars[start]!.close;
-      const columnBase = yAxis.convertToPixel(ref + 1) < yAxis.convertToPixel(ref) ? bounding.height : 0;
+      const columnBase = inverted ? 0 : bounding.height;
       for (let i = start; i < end; i++) {
         const b = bars[i]!;
         const x = xAxis.convertToPixel(i);
@@ -249,7 +251,7 @@ export function drawSeries({
       if (base === null) break;
       const baseY = yAxis.convertToPixel(base);
       // On an inverted axis higher prices are below the base line.
-      const rev = yAxis.convertToPixel(base + 1) > baseY;
+      const rev = inverted;
       const above = { clip: [0, baseY], edge: 0 } as const;
       const below = { clip: [baseY, bounding.height], edge: bounding.height } as const;
       const halves = rev
