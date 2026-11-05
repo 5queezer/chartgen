@@ -4,7 +4,7 @@
 
 import type { Chart as KLineChart } from "klinecharts";
 
-import { setAutoScale } from "../stores/layout";
+import { invertScale, setAutoScale, setInvertScale } from "../stores/layout";
 
 export type ChartAction =
   | "scrollLeft"
@@ -13,15 +13,19 @@ export type ChartAction =
   | "zoomOut"
   | "home"
   | "end"
-  | "reset";
+  | "reset"
+  | "invertScale";
 
 /** klinecharts' default bar width in px; "reset chart" restores it. */
 export const DEFAULT_BAR_SPACE = 8;
 const ZOOM_STEP = 1.2;
 
-/** Map a keystroke to a chart action; modifiers other than Alt+R disqualify. */
+/** Map a keystroke to a chart action; modifiers other than Alt+R and Alt+I disqualify. */
 export function chartKeyAction(e: KeyboardEvent): ChartAction | null {
   if (e.altKey && !e.ctrlKey && !e.metaKey && e.code === "KeyR") return "reset";
+  if (e.altKey && !e.ctrlKey && !e.metaKey && e.code === "KeyI") {
+    return e.repeat ? null : "invertScale";
+  }
   if (e.altKey || e.ctrlKey || e.metaKey) return null;
   switch (e.key) {
     case "ArrowLeft":
@@ -71,6 +75,9 @@ export function applyChartAction(chart: KLineChart, action: ChartAction): void {
       break;
     case "reset":
       resetChart(chart);
+      break;
+    case "invertScale":
+      setInvertScale(!invertScale());
       break;
   }
 }

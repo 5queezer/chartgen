@@ -5,6 +5,7 @@
 
 import { createMemo, Index, Show, type JSX } from "solid-js";
 
+import { chipName } from "../lib/indicatorNames";
 import {
   indicatorName,
   instanceKey,
@@ -42,6 +43,7 @@ export function IndicatorChips(props: IndicatorChipsProps): JSX.Element {
         <Index each={props.entries}>
           {(entry, index) => {
             const params = () => labels().get(instanceKey(entry()));
+            const shown = () => chipName(indicatorName(entry()), params());
             const name = () =>
               [indicatorName(entry()), params()].filter(Boolean).join(" ");
             return (
@@ -64,7 +66,12 @@ export function IndicatorChips(props: IndicatorChipsProps): JSX.Element {
                     </Show>
                   </svg>
                 </button>
-                <span classList={{ "line-through": isHidden(entry()) }}>{name()}</span>
+                <span
+                  title={name()}
+                  classList={{ "line-through": isHidden(entry()) }}
+                >
+                  {shown()}
+                </span>
                 <button
                   type="button"
                   aria-label={`Settings for ${name()}`}

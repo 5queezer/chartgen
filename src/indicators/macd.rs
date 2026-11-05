@@ -47,6 +47,11 @@ impl Indicator for Macd {
         }
     }
 
+    fn warmup_bars(&self) -> usize {
+        use super::pine::ma_warmup;
+        ma_warmup("ema", self.fast.max(self.slow)) + ma_warmup("ema", self.signal)
+    }
+
     fn compute(&self, data: &OhlcvData) -> PanelResult {
         // TV: macd = ta.ema(close, fast) - ta.ema(close, slow),
         // signal = ta.ema(macd, signal), hist = macd - signal.
@@ -71,12 +76,14 @@ impl Indicator for Macd {
         PanelResult {
             lines: vec![
                 Line {
+                    breaks: false,
                     y: macd_line,
                     color: rgba(0x2962ff, 1.0),
                     width: 2,
                     label: Some("MACD".into()),
                 },
                 Line {
+                    breaks: false,
                     y: sig,
                     color: rgba(0xff6d00, 1.0),
                     width: 2,

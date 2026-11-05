@@ -60,7 +60,7 @@ export function ColorPicker(props: ColorPickerProps): JSX.Element {
               )}
             </For>
           </div>
-          <label class="flex items-center gap-2 text-xs text-[color:var(--color-fg-muted)]">
+          <label class="flex items-center gap-2 min-w-0 text-xs text-[color:var(--color-fg-muted)]">
             Opacity
             <input
               type="range"
@@ -73,9 +73,9 @@ export function ColorPicker(props: ColorPickerProps): JSX.Element {
                   formatColor(parsed().hex, Number(e.currentTarget.value) / 100),
                 )
               }
-              class="flex-1"
+              class="flex-1 min-w-0"
             />
-            <span class="w-8 text-right tabular-nums">
+            <span class="w-10 shrink-0 text-right tabular-nums">
               {Math.round(parsed().alpha * 100)}%
             </span>
           </label>

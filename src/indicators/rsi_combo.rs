@@ -119,18 +119,21 @@ impl Indicator for RsiMfiStochCombo {
         // Lines
         let mut lines = vec![
             Line {
+                breaks: false,
                 y: rsi.clone(),
                 color: rgba(0x26a69a, 1.0),
                 width: 2,
                 label: Some("RSI".into()),
             },
             Line {
+                breaks: false,
                 y: mfi.clone(),
                 color: rgba(0x2962FF, 1.0),
                 width: 2,
                 label: Some("MFI".into()),
             },
             Line {
+                breaks: false,
                 y: k_smooth.clone(),
                 color: rgba(0xAB47BC, 1.0),
                 width: 2,
@@ -140,6 +143,7 @@ impl Indicator for RsiMfiStochCombo {
 
         // Optionally show Stoch D as a thinner reference line
         lines.push(Line {
+            breaks: false,
             y: d_smooth.clone(),
             color: rgba(0xAB47BC, 0.4),
             width: 1,

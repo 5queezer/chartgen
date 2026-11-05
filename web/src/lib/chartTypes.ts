@@ -197,6 +197,9 @@ export function drawSeries({
     x: xAxis.convertToPixel(i),
     y: yAxis.convertToPixel(v),
   });
+  // Compare prices, not pixels: klinecharts rounds pixels to whole numbers,
+  // so one price unit can map to the same pixel at high prices.
+  const inverted = yAxis.convertFromPixel(0) < yAxis.convertFromPixel(bounding.height);
   const closes: Point[] = [];
   for (let i = start; i < end; i++) closes.push(point(i, bars[i]!.close));
   // The context carries over the dash of klinecharts' last price line.
@@ -209,12 +212,14 @@ export function drawSeries({
     case "high_low": {
       const up = ext.type === "high_low" ? ext.line : withAlpha(ext.up, 0.5);
       const down = ext.type === "high_low" ? ext.line : withAlpha(ext.down, 0.5);
+      // Columns grow from the bottom edge, or from the top on an inverted axis.
+      const columnBase = inverted ? 0 : bounding.height;
       for (let i = start; i < end; i++) {
         const b = bars[i]!;
         const x = xAxis.convertToPixel(i);
         const r =
           ext.type === "columns"
-            ? barRect(x, yAxis.convertToPixel(b.close), bounding.height, barSpace.gapBar)
+            ? barRect(x, yAxis.convertToPixel(b.close), columnBase, barSpace.gapBar)
             : barRect(x, yAxis.convertToPixel(b.high), yAxis.convertToPixel(b.low), barSpace.gapBar);
         ctx.fillStyle = ext.type === "columns" && !isUpBar(bars, i) ? down : up;
         ctx.fillRect(r.x, r.y, r.width, r.height);
@@ -245,10 +250,13 @@ export function drawSeries({
       const base = baselineValue(visible);
       if (base === null) break;
       const baseY = yAxis.convertToPixel(base);
-      const halves = [
-        { color: ext.up, clip: [0, baseY], edge: 0 },
-        { color: ext.down, clip: [baseY, bounding.height], edge: bounding.height },
-      ] as const;
+      // On an inverted axis higher prices are below the base line.
+      const rev = inverted;
+      const above = { clip: [0, baseY], edge: 0 } as const;
+      const below = { clip: [baseY, bounding.height], edge: bounding.height } as const;
+      const halves = rev
+        ? ([{ color: ext.up, ...below }, { color: ext.down, ...above }] as const)
+        : ([{ color: ext.up, ...above }, { color: ext.down, ...below }] as const);
       // Lines first (on top), then the fills beneath them.
       for (const h of halves) {
         ctx.save();

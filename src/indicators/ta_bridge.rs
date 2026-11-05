@@ -22,6 +22,10 @@ impl Indicator for EmaStack {
         "EMA Stack — 4 exponential moving averages (8/21/50/200)"
     }
 
+    fn warmup_bars(&self) -> usize {
+        super::pine::ma_warmup("ema", 200)
+    }
+
     fn compute(&self, data: &OhlcvData) -> PanelResult {
         let closes = data.closes();
         let ema8 = ema(&closes, 8);
@@ -32,24 +36,28 @@ impl Indicator for EmaStack {
         PanelResult {
             lines: vec![
                 Line {
+                    breaks: false,
                     y: ema8,
                     color: rgba(0xFFEB3B, 0.9),
                     width: 1,
                     label: Some("EMA 8".into()),
                 },
                 Line {
+                    breaks: false,
                     y: ema21,
                     color: rgba(0xFF9800, 0.9),
                     width: 1,
                     label: Some("EMA 21".into()),
                 },
                 Line {
+                    breaks: false,
                     y: ema50,
                     color: rgba(0x2196F3, 0.9),
                     width: 1,
                     label: Some("EMA 50".into()),
                 },
                 Line {
+                    breaks: false,
                     y: ema200,
                     color: rgba(0xF44336, 0.9),
                     width: 2,
@@ -115,18 +123,21 @@ impl Indicator for BollingerBandsInd {
         PanelResult {
             lines: vec![
                 Line {
+                    breaks: false,
                     y: upper.clone(),
                     color: rgba(0x787B86, 0.7),
                     width: 1,
                     label: Some("BB Upper".into()),
                 },
                 Line {
+                    breaks: false,
                     y: middle,
                     color: rgba(0x2196F3, 0.8),
                     width: 1,
                     label: Some("BB Mid".into()),
                 },
                 Line {
+                    breaks: false,
                     y: lower.clone(),
                     color: rgba(0x787B86, 0.7),
                     width: 1,
@@ -195,6 +206,11 @@ impl Indicator for KeltnerChannels {
         }
     }
 
+    fn warmup_bars(&self) -> usize {
+        let ema = super::pine::ma_warmup("ema", self.period);
+        ema.max(super::pine::ma_warmup("rma", self.atr_length))
+    }
+
     fn compute(&self, data: &OhlcvData) -> PanelResult {
         // TV (Bands Style "Average True Range"):
         // ta.ema(close, period) +/- mult * ta.atr(atr_length).
@@ -206,18 +222,21 @@ impl Indicator for KeltnerChannels {
         PanelResult {
             lines: vec![
                 Line {
+                    breaks: false,
                     y: upper.clone(),
                     color: rgba(0x787B86, 0.7),
                     width: 1,
                     label: Some("KC Upper".into()),
                 },
                 Line {
+                    breaks: false,
                     y: middle,
                     color: rgba(0x2196F3, 0.8),
                     width: 1,
                     label: Some("KC Mid".into()),
                 },
                 Line {
+                    breaks: false,
                     y: lower.clone(),
                     color: rgba(0x787B86, 0.7),
                     width: 1,
@@ -268,12 +287,17 @@ impl Indicator for Atr {
         }
     }
 
+    fn warmup_bars(&self) -> usize {
+        super::pine::ma_warmup("rma", self.period)
+    }
+
     fn compute(&self, data: &OhlcvData) -> PanelResult {
         // TV: ta.rma(ta.tr(true), n).
         let vals = atr(data, self.period);
 
         PanelResult {
             lines: vec![Line {
+                breaks: false,
                 y: vals,
                 color: rgba(0xFF9800, 0.9),
                 width: 2,
@@ -324,6 +348,7 @@ impl Indicator for Obv {
 
         PanelResult {
             lines: vec![Line {
+                breaks: false,
                 y: vals,
                 color: rgba(0x2196F3, 0.9),
                 width: 2,
@@ -375,6 +400,7 @@ impl Indicator for Cci {
 
         PanelResult {
             lines: vec![Line {
+                breaks: false,
                 y: vals,
                 color: rgba(0x2196F3, 0.9),
                 width: 2,
@@ -435,6 +461,7 @@ impl Indicator for Roc {
 
         PanelResult {
             lines: vec![Line {
+                breaks: false,
                 y: vals,
                 color: rgba(0x2196F3, 0.9),
                 width: 2,
@@ -491,6 +518,7 @@ impl Indicator for Mfi {
 
         PanelResult {
             lines: vec![Line {
+                breaks: false,
                 y: vals,
                 color: rgba(0x2196F3, 0.9),
                 width: 2,
@@ -571,12 +599,14 @@ impl Indicator for Stochastic {
         PanelResult {
             lines: vec![
                 Line {
+                    breaks: false,
                     y: k_vals.clone(),
                     color: rgba(0x2196F3, 0.9),
                     width: 2,
                     label: Some("%K".into()),
                 },
                 Line {
+                    breaks: false,
                     y: d_vals.clone(),
                     color: rgba(0xFF9800, 0.9),
                     width: 2,
@@ -648,6 +678,7 @@ impl Indicator for WilliamsR {
 
         PanelResult {
             lines: vec![Line {
+                breaks: false,
                 y: vals,
                 color: rgba(0x2196F3, 0.9),
                 width: 2,
@@ -719,18 +750,21 @@ impl Indicator for Donchian {
         PanelResult {
             lines: vec![
                 Line {
+                    breaks: false,
                     y: upper.clone(),
                     color: rgba(0x787B86, 0.7),
                     width: 1,
                     label: Some("DC Upper".into()),
                 },
                 Line {
+                    breaks: false,
                     y: middle,
                     color: rgba(0x2196F3, 0.8),
                     width: 1,
                     label: Some("DC Mid".into()),
                 },
                 Line {
+                    breaks: false,
                     y: lower.clone(),
                     color: rgba(0x787B86, 0.7),
                     width: 1,
@@ -809,6 +843,7 @@ impl Indicator for Cmf {
 
         PanelResult {
             lines: vec![Line {
+                breaks: false,
                 y: vals,
                 color: rgba(0x2196F3, 0.9),
                 width: 2,

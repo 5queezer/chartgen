@@ -29,6 +29,15 @@ describe("chartKeyAction", () => {
     );
     expect(chartKeyAction(key({ key: "r", code: "KeyR" }))).toBeNull();
   });
+  it("maps Alt+I to invertScale, not when held or without Alt", () => {
+    const i = { key: "i", code: "KeyI" } as const;
+    expect(chartKeyAction(key({ ...i, altKey: true }))).toBe("invertScale");
+    expect(
+      chartKeyAction({ ...key({ ...i, altKey: true }), repeat: true } as KeyboardEvent),
+    ).toBeNull();
+    expect(chartKeyAction(key(i))).toBeNull();
+    expect(chartKeyAction(key({ ...i, altKey: true, ctrlKey: true }))).toBeNull();
+  });
   it("ignores other modified keys and unrelated keys", () => {
     expect(chartKeyAction(key({ key: "ArrowLeft", ctrlKey: true }))).toBeNull();
     expect(chartKeyAction(key({ key: "Home", altKey: true }))).toBeNull();

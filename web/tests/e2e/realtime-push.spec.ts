@@ -170,7 +170,7 @@ test("losing the push falls back to polling, and push resumes", async ({
 
   // The watchdog notices and the feed polls again.
   await expect(badge).toHaveAttribute("data-state", "live", { timeout: 10_000 });
-  await expect(badge).toHaveText("live (polling)");
+  await expect(badge).toHaveText("polling");
   await expect.poll(() => calls.filter(isTailPoll).length, { timeout: 5_000 }).toBeGreaterThan(0);
   const before = await lastClose(page);
   await expect.poll(() => lastClose(page), { timeout: 6_000 }).not.toBe(before);

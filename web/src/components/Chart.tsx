@@ -1077,11 +1077,16 @@ export function Chart(props: ChartProps): JSX.Element {
       if ((ind.lines?.length ?? 0) + (ind.histogram?.length ?? 0) === 0) continue;
       const style = props.styles?.[name];
       const headerLines: PaneHeaderLine[] = legendPlots(name, ind, style).map((p) => {
-        const values =
-          (p.kind === "line" ? ind.lines![p.index] : ind.histogram![p.index])!
-            .values;
-        // A histogram's legend takes the color of the bar it reads.
-        const at = xi !== null ? xi : lastFiniteIndex(values);
+        const plot =
+          p.kind === "line" ? ind.lines![p.index]! : ind.histogram![p.index]!;
+        const values = plot.values;
+        // At rest a plot reads its last finite value; a line that breaks at
+        // trend flips (Supertrend, SAR) reads the bar the price legend reads,
+        // so its inactive side shows none rather than a stale one. A
+        // histogram's legend takes the color of the bar it reads.
+        const breaks = p.kind === "line" && "breaks" in plot && plot.breaks === true;
+        const at =
+          xi !== null ? xi : breaks ? legendIndex : lastFiniteIndex(values);
         return {
           label: p.label,
           value: valueAt(values, at),

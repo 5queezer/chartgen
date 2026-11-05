@@ -27,7 +27,7 @@ Status legend:
 | Price legend (OHLC, change, volume) | ✅ | ✅ | Follows the crosshair. [Chart conveniences](/chartgen/guides/web/#chart-conveniences) |
 | Bar-close countdown | ✅ | ◐ | Only for 24/7 symbols (the Binance rule). Hidden for stocks, FX and futures, because the session close cannot be derived from the interval. [Chart conveniences](/chartgen/guides/web/#chart-conveniences) |
 | %, log and auto price scale | ✅ | ✅ | [Chart conveniences](/chartgen/guides/web/#chart-conveniences) |
-| Inverted scale, lock scale to bars | ✅ | ❌ | Not in the web guide. |
+| Inverted scale, lock scale to bars | ✅ | ◐ | Invert (`Alt+I`) and lock price to bar ratio. "Scale price chart only" is not offered. [Chart conveniences](/chartgen/guides/web/#chart-conveniences) |
 | Date-range buttons | ✅ | ✅ | `1D 5D 1M 3M 6M YTD 1Y 5Y All`. Each range uses TradingView's interval (6M is 2h). A range is capped by the history limit. [Bottom bar](/chartgen/guides/web/#bottom-bar) |
 | Time zone selector and clock | ✅ | ◐ | UTC, Exchange, Local and common IANA zones. "Exchange" is a heuristic on the ticker suffix. [Bottom bar](/chartgen/guides/web/#bottom-bar) |
 | Go to date | ✅ | ✅ | `Alt+G`. [Bottom bar](/chartgen/guides/web/#bottom-bar) |
@@ -101,7 +101,7 @@ Status legend:
 | Live forming candle, crypto | ✅ | ✅ | Server push over MCP SSE, up to 4 per second, polling fallback. [ADR-0021](/chartgen/decisions/0021-realtime-chart-push/), [Live updates](/chartgen/guides/web/#live-updates-and-history) |
 | Live forming candle, stocks and others | ✅ | ◐ | Polled every 15 s, and Yahoo data is delayed. [Live updates](/chartgen/guides/web/#live-updates-and-history) |
 | Scroll-back history paging | ✅ | ◐ | 500 bars per page, capped at 20,000 loaded bars. [ADR-0009](/chartgen/decisions/0009-live-tail-polling-and-history-paging/) |
-| Seamless indicator values at page seams | ✅ | ◐ | Recursive and cumulative indicators can step slightly at a seam or on the live bar. [ADR-0009](/chartgen/decisions/0009-live-tail-polling-and-history-paging/) |
+| Seamless indicator values at page seams | ✅ | ◐ | The server warms each request up until EMAs converge (EMA 200 within 0.01%). Running sums (OBV, CVD, A/D) can differ by a constant, VWAP until its next reset, and EMAs longer than 224 (RMAs longer than 126) still step slightly. [ADR-0032](/chartgen/decisions/0032-indicator-aware-warmup/) |
 | Volume profiles on live bars | ✅ | ◐ | Keep the profile of the full load. Divergence lines that form live usually appear on the next full load. [Live updates](/chartgen/guides/web/#live-updates-and-history) |
 | Extended hours and exchange sessions | ✅ | ❌ | Not described; sessions are UTC calendar periods. |
 | Real-time stock quotes | ✅ | ❌ | Yahoo is delayed. |
@@ -110,8 +110,8 @@ Status legend:
 
 | Feature | TradingView | chartgen | Notes / links |
 |---|---|---|---|
-| Watchlist with last, change, change % | ✅ | ◐ | One list, polled every 5 s, max 50 symbols. Crypto change is rolling 24 h. [Watchlist](/chartgen/guides/web/#watchlist), [ADR-0011](/chartgen/decisions/0011-watchlist-quotes/) |
-| Multiple named watchlists, sections, flags | ✅ | ❌ | A single list. |
+| Watchlist with last, change, change % | ✅ | ◐ | Polled every 5 s for the active list, max 50 symbols per list. Crypto change is rolling 24 h. [Watchlist](/chartgen/guides/web/#watchlist), [ADR-0011](/chartgen/decisions/0011-watchlist-quotes/) |
+| Multiple named watchlists, sections, flags | ✅ | ◐ | Named lists (create, rename, duplicate, delete), collapsible sections, drag and Alt+Arrow reordering, seven flag colors and one Flagged view across lists. No separate list per flag color, no nested sections, no sync across devices; at most 20 lists and 20 sections per list. [Watchlist](/chartgen/guides/web/#watchlist), [ADR-0031](/chartgen/decisions/0031-multiple-watchlists/) |
 | Price alerts (crossing, up, down, greater, less) | ✅ | ◐ | Same conditions, once or every time, toast, beep and browser notification. Evaluated in the browser. [Sidebar and price alerts](/chartgen/guides/web/#sidebar-and-price-alerts), [ADR-0020](/chartgen/decisions/0020-client-side-price-alerts/) |
 | Alerts that fire with no tab open | ✅ | ❌ | Fire only while chartgen is open in a visible tab. The server alert tools exist for `--trade` users but are not wired to the web app. [ADR-0020](/chartgen/decisions/0020-client-side-price-alerts/) |
 | Alerts synced across devices | ✅ | ❌ | Stored per browser profile. |
@@ -192,10 +192,14 @@ oversight.
   weeks, months and years, not exchange sessions. Pivots use the loaded
   bars as the higher-timeframe source.
   [Differences list](/chartgen/reference/indicators/#values-match-tradingview)
-- **Recursive indicators depend on where the series starts.** EMA, RSI, ATR,
-  OBV, CVD and VWAP can step at a history-page seam or on a live bar. The
-  `warmup` of 300 keeps the step small.
-  [ADR-0009](/chartgen/decisions/0009-live-tail-polling-and-history-paging/)
+- **Running sums depend on where the series starts.** OBV, CVD and the A/D
+  line can differ by a constant at a history-page seam or on a live bar,
+  VWAP until its next session reset.
+  The built-in EMA- and RMA-based indicators (EMA, RSI, ATR, MACD, ...) are
+  warmed up until they converge, up to 1000 bars, so only EMAs longer than
+  224 and RMAs longer than 126 still step slightly, as can the community
+  composites (Cipher B, WaveTrend).
+  [ADR-0032](/chartgen/decisions/0032-indicator-aware-warmup/)
 - **History is capped at 20,000 bars**, because every live update
   recalculates the indicators over all loaded bars.
 - **Bar replay recomputes only the last 500 bars** before the cursor for

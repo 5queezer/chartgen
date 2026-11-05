@@ -58,3 +58,5 @@ one and link both ways.
 | [0028](/chartgen/decisions/0028-multiple-indicator-instances/) | Several instances of one indicator | Accepted | 2026-11-05 |
 | [0029](/chartgen/decisions/0029-shareable-chart-links/) | Shareable chart links as query parameters | Accepted | 2026-11-05 |
 | [0030](/chartgen/decisions/0030-custom-chart-types/) | Chart types klinecharts does not draw | Accepted | 2026-11-05 |
+| [0031](/chartgen/decisions/0031-multiple-watchlists/) | Multiple named watchlists, sections and flags | Accepted | 2026-11-05 |
+| [0032](/chartgen/decisions/0032-indicator-aware-warmup/) | Indicator-aware warmup | Accepted | 2026-11-05 |

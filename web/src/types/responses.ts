@@ -44,6 +44,9 @@ export const SeriesLineSchema = z.object({
   values: z.array(FiniteOrNull),
   color: z.string().optional(),
   width: z.number().int().optional(),
+  // Only on lines that break at trend flips (Supertrend, SAR): their legend
+  // at rest reads the last bar, not the last finite value.
+  breaks: z.boolean().optional(),
 });
 
 export const SeriesHistogramBucketSchema = z.object({

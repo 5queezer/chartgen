@@ -1,6 +1,6 @@
 // Status indicator next to the form. Pure presentational — the state
 // machine lives in App.tsx. v0.1 statuses: ready, authenticating...,
-// loading..., loaded, error: <message> (with a Retry action), sign-in
+// loading..., loaded, error (message in the tooltip), sign-in
 // failed: <message> (with a Sign in again action). After it, a
 // small live-feed badge: live, paused (hidden tab), retrying, resyncing.
 
@@ -20,8 +20,6 @@ export interface StatusLineProps {
   status: Status;
   /** Live tail polling state; nothing is shown while it is off. */
   live?: PollStatus;
-  /** Called when the user clicks Retry on the error status. */
-  onRetry: () => void;
   /** Called when the user clicks Sign in again on the auth-error status. */
   onSignIn: () => void;
 }
@@ -37,7 +35,7 @@ function formatStatus(s: Status): string {
     case "loaded":
       return "loaded";
     case "error":
-      return `error: ${s.message}`;
+      return "error";
     case "auth-error":
       return `sign-in failed: ${s.message}`;
   }
@@ -63,7 +61,7 @@ function liveBadge(s: PollStatus): { text: string; title: string } | null {
     case "push":
       return { text: "live", title: "Streaming updates from the server" };
     case "live":
-      return { text: "live (polling)", title: `Updating every ${s.everyMs / 1000}s` };
+      return { text: "polling", title: `Updating every ${s.everyMs / 1000}s` };
     case "paused":
       return { text: "paused", title: "Live updates pause while the tab is hidden" };
     case "retrying":
@@ -79,17 +77,23 @@ function liveBadge(s: PollStatus): { text: string; title: string } | null {
 export function StatusLine(props: StatusLineProps): JSX.Element {
   const badge = () => (props.live ? liveBadge(props.live) : null);
   return (
-    <span class={`text-sm font-mono ${colorFor(props.status)}`}>
-      {formatStatus(props.status)}
-      <Show when={props.status.kind === "error"}>
-        <button
-          type="button"
-          onClick={props.onRetry}
-          class="ml-2 underline cursor-pointer hover:opacity-80"
-        >
-          Retry
-        </button>
-      </Show>
+    // One line whatever the text, so the header never grows. An error is a
+    // compact badge: the full message is its tooltip (the chart area shows
+    // the explanation and the Retry).
+    <span
+      class={`text-sm font-mono whitespace-nowrap shrink-0 inline-flex items-center ${colorFor(props.status)}`}
+    >
+      <span
+        data-testid="status-text"
+        title={
+          props.status.kind === "error" || props.status.kind === "auth-error"
+            ? props.status.message
+            : undefined
+        }
+        class="max-w-[28ch] truncate max-[899px]:hidden"
+      >
+        {formatStatus(props.status)}
+      </span>
       <Show when={props.status.kind === "auth-error"}>
         <button
           type="button"

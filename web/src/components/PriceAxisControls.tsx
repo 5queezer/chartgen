@@ -11,6 +11,7 @@
 import type { Chart as KLineChart } from "klinecharts";
 import {
   Show,
+  batch,
   createEffect,
   createMemo,
   createSignal,
@@ -19,11 +20,22 @@ import {
   type JSX,
 } from "solid-js";
 
+import {
+  DEFAULT_GAP,
+  lockRatio as lockRatioOf,
+  lockedGaps,
+  toPaneGap,
+  type Gap,
+} from "../lib/priceRatio";
 import { barCountdown, isContinuousMarket } from "../lib/countdown";
 import {
   autoScale,
+  invertScale,
+  lockRatio,
   scaleMode,
   setAutoScale,
+  setInvertScale,
+  setLockRatio,
   setScaleMode,
   type ScaleMode,
 } from "../stores/layout";
@@ -108,6 +120,156 @@ export function PriceAxisControls(props: PriceAxisControlsProps): JSX.Element {
     requestAnimationFrame(reposition);
   });
 
+  // Inverted scale: klinecharts maps every price<->pixel conversion
+  // (crosshair, drawings, alert lines) through `yAxis.reverse`.
+  createEffect(() => {
+    const c = props.chart;
+    if (!c) return;
+    c.setStyles({ yAxis: { reverse: invertScale() } } as never);
+    requestAnimationFrame(reposition);
+  });
+
+  // Lock price to bar ratio: see lib/priceRatio.ts. `ratio` is captured the
+  // first time the lock applies with data, and dropped when it is released or
+  // the symbol or interval changes (a new instrument has its own scale).
+  let ratio: number | null = null;
+  let gap: Gap = DEFAULT_GAP;
+  let lockKey = "";
+  // Bar space when the ratio was captured; a different one means the user
+  // (wheel, keys, date-range buttons) zoomed, which ends the load-time re-fit.
+  let capturedSpace = 0;
+  let zoomed = false;
+  const resetGap = (c: KLineChart) => {
+    ratio = null;
+    gap = DEFAULT_GAP;
+    c.setPaneOptions({ id: CANDLE_PANE_ID, gap: DEFAULT_GAP });
+  };
+  const applyLock = () => {
+    const c = props.chart;
+    if (!c || !untrack(lockRatio)) return;
+    const data = c.getDataList();
+    // Without data klinecharts fits a 0..10 range, which must not become the ratio.
+    if (data.length === 0) return;
+    // The chart may still hold the previous symbol's bars; the visible
+    // range of those must not become the ratio of the new one.
+    const lastT = props.series?.bars.at(-1)?.t;
+    if (lastT != null && data.at(-1)?.timestamp !== lastT * 1000) return;
+    const key = `${props.series?.symbol}|${props.series?.interval}`;
+    if (key !== lockKey) {
+      lockKey = key;
+      resetGap(c);
+      // Read the fresh fit on the next turn, once klinecharts has laid out.
+      scheduleLock();
+      return;
+    }
+    const height = c.getSize(CANDLE_PANE_ID, "yAxis" as never)?.height;
+    if (!height) return;
+    const [top, bottom] = c.convertFromPixel([{ y: 0 }, { y: height }], {
+      paneId: CANDLE_PANE_ID,
+    }) as { value?: number }[];
+    if (top?.value === undefined || bottom?.value === undefined) return;
+    const tf = untrack(scaleMode) === "log" ? Math.log10 : (v: number) => v;
+    const [a, b] = [tf(top.value), tf(bottom.value)];
+    const vMin = Math.min(a, b);
+    const vMax = Math.max(a, b);
+    const barSpace = c.getBarSpace();
+    if (!(vMax > vMin) || !(barSpace > 0)) return;
+    if (ratio === null) {
+      ratio = lockRatioOf(vMax - vMin, height, barSpace);
+      capturedSpace = barSpace;
+    }
+    const last = data[Math.min(c.getVisibleRange().to, data.length) - 1]?.close;
+    const next = lockedGaps({
+      vMin,
+      vMax,
+      gap,
+      height,
+      barSpace,
+      ratio,
+      anchor: last === undefined ? undefined : tf(last),
+    });
+    if (
+      Math.abs(next.top - gap.top) < 1e-4 &&
+      Math.abs(next.bottom - gap.bottom) < 1e-4
+    ) {
+      return;
+    }
+    gap = next;
+    c.setPaneOptions({ id: CANDLE_PANE_ID, gap: toPaneGap(next, height) });
+  };
+
+  // klinecharts fires onVisibleRangeChange before it has adjusted the
+  // visible data, so updates wait for the end of the current task and
+  // coalesce.
+  let lockQueued = false;
+  const scheduleLock = () => {
+    if (lockQueued) return;
+    lockQueued = true;
+    queueMicrotask(() => {
+      lockQueued = false;
+      const c = props.chart;
+      if (c && ratio !== null && Math.abs(c.getBarSpace() - capturedSpace) > 1e-6) {
+        zoomed = true;
+      }
+      applyLock();
+    });
+  };
+
+  // Lock or mode change: back to the default gap, re-capture the ratio. A
+  // manual axis drag leaves klinecharts ignoring the gap; re-applying the
+  // style type when the lock goes on returns it to auto-fit.
+  let wasLocked = false;
+  createEffect(() => {
+    const c = props.chart;
+    if (!c) return;
+    const locked = lockRatio();
+    scaleMode();
+    resetGap(c);
+    zoomed = false;
+    if (locked && !wasLocked) {
+      c.setStyles({ yAxis: { type: untrack(scaleMode) } } as never);
+    }
+    wasLocked = locked;
+    scheduleLock();
+    requestAnimationFrame(reposition);
+  });
+
+  createEffect(() => {
+    props.series;
+    requestAnimationFrame(scheduleLock);
+  });
+
+  createEffect(() => {
+    const c = props.chart;
+    if (!c) return;
+    const actions = ["onScroll", "onZoom", "onVisibleRangeChange"] as const;
+    for (const a of actions) c.subscribeAction(a as never, scheduleLock);
+    onCleanup(() => {
+      for (const a of actions) c.unsubscribeAction(a as never, scheduleLock);
+    });
+  });
+
+  // A resize changes the price range per pixel. The ratio is re-captured
+  // at the new size, so the price range on screen is kept; before the user
+  // has zoomed it is captured from a fresh fit instead, because the layout
+  // is still settling at load (panes appear, sidebars open).
+  createEffect(() => {
+    const c = props.chart;
+    const el = c?.getDom(CANDLE_PANE_ID, "main" as never);
+    if (!c || !el || typeof ResizeObserver === "undefined") return;
+    const ro = new ResizeObserver(() => {
+      if (!untrack(lockRatio)) return;
+      ratio = null;
+      if (!zoomed) {
+        gap = DEFAULT_GAP;
+        c.setPaneOptions({ id: CANDLE_PANE_ID, gap: DEFAULT_GAP });
+      }
+      scheduleLock();
+    });
+    ro.observe(el);
+    onCleanup(() => ro.disconnect());
+  });
+
   createEffect(() => {
     const c = props.chart;
     if (!c || !autoScale()) return;
@@ -124,7 +286,12 @@ export function PriceAxisControls(props: PriceAxisControlsProps): JSX.Element {
     let pressed = false;
     const onDown = () => (pressed = true);
     const onMove = () => {
-      if (pressed && autoScale()) setAutoScale(false);
+      if (!pressed) return;
+      // A manual scale ends the ratio lock, which only works in auto-fit.
+      batch(() => {
+        if (lockRatio()) setLockRatio(false);
+        if (autoScale()) setAutoScale(false);
+      });
     };
     const onUp = () => (pressed = false);
     const onDblClick = () => setAutoScale(true);
@@ -217,6 +384,15 @@ export function PriceAxisControls(props: PriceAxisControlsProps): JSX.Element {
           onClick={() => toggle("log")}
         >
           log
+        </button>
+        <button
+          type="button"
+          class={btn(invertScale())}
+          aria-pressed={invertScale()}
+          title="Invert scale (Alt+I)"
+          onClick={() => setInvertScale(!invertScale())}
+        >
+          inv
         </button>
         <button
           type="button"

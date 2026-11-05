@@ -349,6 +349,24 @@ fn parse_panels(panels_value: &Value, user: Option<&str>) -> ParsedPanels {
 const MAX_BARS: usize = 5000;
 /// Upper bound for `warmup` (ADR-0009).
 const MAX_WARMUP: usize = 1000;
+
+/// The `warmup` argument as the client sent it, capped.
+fn asked_warmup(args: &Value) -> usize {
+    (args.get("warmup").and_then(|v| v.as_u64()).unwrap_or(0) as usize).min(MAX_WARMUP)
+}
+
+/// The `warmup` argument, capped. A non-zero one is raised to what the
+/// indicators need to converge, so values at a page seam or on a tail match
+/// the history loaded before (ADR-0032).
+fn warmup_arg(args: &Value, panels: &[Box<dyn Indicator>]) -> usize {
+    let asked = asked_warmup(args);
+    if asked == 0 {
+        return 0;
+    }
+    let need = panels.iter().map(|i| i.warmup_bars()).max().unwrap_or(0);
+    asked.max(need).min(MAX_WARMUP)
+}
+
 /// Oldest accepted `end_time`: 1900-01-01 (index histories predate 1970).
 const MIN_END_TIME_MS: i64 = -2_208_988_800_000;
 /// Newest accepted `end_time`, relative to now.
@@ -484,7 +502,7 @@ fn generate_chart(
     // Warmup bars feed indicator computation but are trimmed from the series
     // payload. png/summary ignore it and render exactly `bars` (ADR-0009).
     let warmup = if want_series {
-        (args.get("warmup").and_then(|v| v.as_u64()).unwrap_or(0) as usize).min(MAX_WARMUP)
+        warmup_arg(args, &panel_indicators)
     } else {
         0
     };
@@ -505,7 +523,13 @@ fn generate_chart(
         }
         (sym, _) => {
             match fetch::fetch_ohlcv(source, sym.unwrap_or(""), interval, requested, end_time) {
-                Ok(f) => (f.data, f.has_more),
+                // Warmup bars are trimmed from the payload. When history ran
+                // out they are still older bars the client has not seen, so
+                // it must page on to get them (ADR-0032).
+                Ok(f) => {
+                    let more = f.has_more || f.data.len() > bars;
+                    (f.data, more)
+                }
                 Err(e) => return tool_err(id, &format!("Data fetch failed: {e}")),
             }
         }
@@ -658,7 +682,14 @@ fn series_json(
     chart_style: &str,
     has_more: bool,
 ) -> Value {
-    let offset = data.len().saturating_sub(bars);
+    // Trimming must never leave an empty page that claims more history: the
+    // client pages on bars[0].t, so with nothing to read it would be stuck.
+    // Return the fetched bars (indicators null where unconverged) instead.
+    let offset = if bars == 0 {
+        0
+    } else {
+        data.len().saturating_sub(bars)
+    };
     let visible = chartgen::data::OhlcvData {
         bars: data.bars[offset..].to_vec(),
         symbol: data.symbol.clone(),
@@ -678,6 +709,7 @@ fn series_json(
             })
         })
         .collect();
+    let bars_arr_empty = bars_arr.is_empty();
     let mut indicators_json = serde_json::Map::new();
     for ((key, pr), ind) in computed.iter().zip(panel_indicators.iter()) {
         let mut trimmed = trim_panel_result(pr, offset);
@@ -698,7 +730,7 @@ fn series_json(
         "chart_style": chart_style,
         "bars": bars_arr,
         "indicators": Value::Object(indicators_json),
-        "has_more": has_more,
+        "has_more": has_more && bars > 0 && !bars_arr_empty,
     })
 }
 
@@ -775,18 +807,17 @@ fn tool_subscribe_chart(
             &format!("{PUSH_LIMIT}: at most {MAX_INDICATORS} indicators per subscription"),
         );
     }
-    let (_, _, unknown, invalid) = parse_panels(&indicators, None);
+    let (panels, _, unknown, invalid) = parse_panels(&indicators, None);
     if let Err(e) = check_panels(&unknown, &invalid) {
         return tool_err(id, &e);
     }
-    let warmup =
-        (args.get("warmup").and_then(|v| v.as_u64()).unwrap_or(0) as usize).min(MAX_WARMUP);
     let req = ChartRequest {
         ticker: ticker.to_string(),
         timeframe: timeframe.to_string(),
         indicators: indicators.to_string(),
         chart_style: chart_style.to_string(),
-        warmup,
+        warmup: warmup_arg(args, &panels),
+        asked_warmup: asked_warmup(args),
     };
     match push.hub.subscribe(token, &push.client, &push.stream, req) {
         Ok(sub) => tool_ok(id, json!({ "subscription_id": sub })),
@@ -1189,13 +1220,17 @@ fn panel_result_to_series_json(
             .enumerate()
             .map(|(i, line)| {
                 let values: Vec<Value> = line.y.iter().map(|v| finite_or_null(*v)).collect();
-                json!({
+                let mut j = json!({
                     "index": i,
                     "label": line.label,
                     "values": values,
                     "color": css_rgba(&line.color),
                     "width": line.width,
-                })
+                });
+                if line.breaks {
+                    j["breaks"] = json!(true);
+                }
+                j
             })
             .collect();
         out["lines"] = json!(lines);
@@ -1356,21 +1391,25 @@ fn panel_result_to_json(pr: &chartgen::indicator::PanelResult) -> Value {
         out["y_range"] = json!([finite_or_null(lo), finite_or_null(hi)]);
     }
 
-    // Lines: last finite y-value for each
+    // Lines: the last finite value. Lines that break at trend flips read the
+    // last bar instead: null where the line has none there (an inactive
+    // Supertrend line), not a stale one from an earlier bar.
     if !pr.lines.is_empty() {
         let lines: Vec<Value> = pr
             .lines
             .iter()
             .enumerate()
             .map(|(i, line)| {
-                let last_val = line
-                    .y
-                    .iter()
-                    .rev()
-                    .find(|v| v.is_finite())
-                    .copied()
-                    .map(|v| json!(v))
-                    .unwrap_or(Value::Null);
+                let last_val = finite_or_null(if line.breaks {
+                    line.y.last().copied().unwrap_or(f64::NAN)
+                } else {
+                    line.y
+                        .iter()
+                        .rev()
+                        .find(|v| v.is_finite())
+                        .copied()
+                        .unwrap_or(f64::NAN)
+                });
                 json!({
                     "index": i,
                     "label": line.label,
@@ -2748,6 +2787,7 @@ mod tests {
         let c = RGBAColor(255, 0, 0, 1.0);
         let pr = PanelResult {
             lines: vec![Line {
+                breaks: false,
                 y: vec![f64::NAN, 1.0, 2.0, 3.5],
                 color: c,
                 width: 1,
@@ -2903,6 +2943,7 @@ mod tests {
         };
         let pr = PanelResult {
             lines: vec![Line {
+                breaks: false,
                 y: vec![f64::NAN, f64::NAN, 1.0, 2.0, 3.0],
                 color: RGBAColor(0, 0, 0, 1.0),
                 width: 1,
@@ -2946,6 +2987,7 @@ mod tests {
         let red = RGBAColor(239, 83, 80, 0.5);
         let pr = PanelResult {
             lines: vec![Line {
+                breaks: false,
                 y: vec![1.0; 4],
                 color: RGBAColor(41, 98, 255, 1.0),
                 width: 2,
@@ -2987,6 +3029,7 @@ mod tests {
         use plotters::style::RGBAColor;
 
         let line = |label: &str| Line {
+            breaks: false,
             y: vec![],
             color: RGBAColor(0, 0, 0, 1.0),
             width: 1,
@@ -3535,6 +3578,7 @@ mod tests {
         };
         let pr = PanelResult {
             lines: vec![Line {
+                breaks: false,
                 y: ys.clone(),
                 color: c,
                 width: 1,
@@ -3848,6 +3892,225 @@ mod tests {
             .collect();
         assert_eq!(overlap.len(), 30);
         assert_eq!(c_bars[30..], a_bars[..30]);
+    }
+
+    /// EMA 200 of ema_stack over `pages` history pages of 500 bars, fetched
+    /// like the web client (initial load, then `end_time` = oldest bar, each
+    /// with `warmup`), against one long, converged call. Returns the largest
+    /// relative deviation from the converged values and the largest
+    /// relative extra step at a page seam.
+    fn ema200_paging_error(warmup: u64, pages: usize) -> (f64, f64) {
+        const PAGE: usize = 500;
+        let call = |bars: usize, warmup: u64, end: i64| {
+            series_payload(
+                json!({ "ticker": "BTCUSDT", "timeframe": "1m", "bars": bars,
+                        "warmup": warmup, "end_time": end,
+                        "indicators": ["ema_stack"], "format": "series" }),
+                fetch::DataSource::Sample,
+            )
+        };
+        let ema200 = |p: &Value| -> Vec<f64> {
+            let line = &p["indicators"]["ema_stack"]["lines"][3];
+            assert_eq!(line["label"], "EMA 200");
+            line["values"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|v| v.as_f64().unwrap_or(f64::NAN))
+                .collect()
+        };
+        let mut merged = Vec::new();
+        let mut seams = Vec::new();
+        let mut end = END_4H_MS;
+        for _ in 0..pages {
+            let p = call(PAGE, warmup, end);
+            end = bar_ts(&p)[0] * 1000;
+            let mut v = ema200(&p);
+            seams.push(v.len());
+            v.extend(merged);
+            merged = v;
+        }
+        // A seam follows each page but the newest; walk them oldest first.
+        seams.remove(0);
+        seams.reverse();
+        // 4000 bars of history before the paged window: converged far
+        // beyond any bound tested here.
+        let reference = ema200(&call(PAGE * pages + 4000, 0, END_4H_MS));
+        let reference = &reference[reference.len() - merged.len()..];
+        let rel = |a: f64, b: f64| (a - b).abs() / b.abs();
+        let dev = merged
+            .iter()
+            .zip(reference)
+            .map(|(&a, &b)| rel(a, b))
+            .fold(0.0, f64::max);
+        let mut seam_step = 0.0f64;
+        let mut s = 0;
+        for len in seams {
+            s += len;
+            let step = (merged[s] - merged[s - 1]) - (reference[s] - reference[s - 1]);
+            seam_step = seam_step.max(step.abs() / reference[s].abs());
+        }
+        (dev, seam_step)
+    }
+
+    #[test]
+    fn ema_stack_pages_join_without_a_step() {
+        // QA: on 1m BTCUSDT the EMA 200 stepped ~0.3% at history seams with
+        // the web's warmup of 300 (1.9% on this sample data). The server now
+        // raises it to ema_stack's 891 bars, after which the SMA seed weighs
+        // < 0.1%: a seed a few % off leaves < 0.01%. Bound: 0.05%.
+        let (dev, step) = ema200_paging_error(300, 4);
+        eprintln!("EMA 200 paged with warmup 300: max dev {dev:e}, max seam step {step:e}");
+        assert!(step < 5e-4, "seam step {step}");
+        assert!(dev < 5e-4, "deviation {dev}");
+    }
+
+    #[test]
+    fn per_bar_plots_reach_the_series_wire() {
+        // Unlabeled dots are not serialized, so these plot lines instead.
+        let p = series_payload(
+            json!({ "ticker": "BTCUSDT", "timeframe": "1h", "bars": 100, "warmup": 300,
+                    "end_time": END_4H_MS, "format": "series",
+                    "indicators": ["sar", "kalman_volume", "heikin_ashi", "supertrend"] }),
+            fetch::DataSource::Sample,
+        );
+        for (name, labels) in [
+            ("sar", vec!["SAR Up", "SAR Down"]),
+            ("kalman_volume", vec!["KVF", "Signal"]),
+            ("heikin_ashi", vec!["HA Close"]),
+            ("supertrend", vec!["Up Trend", "Down Trend"]),
+        ] {
+            let lines = p["indicators"][name]["lines"].as_array().unwrap();
+            let got: Vec<&str> = lines.iter().map(|l| l["label"].as_str().unwrap()).collect();
+            assert_eq!(got, labels, "{name}");
+            for l in lines {
+                let values = l["values"].as_array().unwrap();
+                assert_eq!(values.len(), 100);
+                assert!(values.iter().any(Value::is_number), "{name} {}", l["label"]);
+            }
+        }
+    }
+
+    #[test]
+    fn summary_inactive_trend_line_has_no_last_value() {
+        // Exactly one Supertrend line has a value at the last bar; the other
+        // reports null, not the value it had when its trend ended.
+        let pr = indicators::by_name("supertrend")
+            .unwrap()
+            .compute(&data::sample_data(200));
+        let j = panel_result_to_json(&pr);
+        let last = |i: usize| j["lines"][i]["last_value"].clone();
+        assert_eq!([last(0), last(1)].iter().filter(|v| v.is_null()).count(), 1);
+    }
+
+    #[test]
+    fn summary_ichimoku_lagging_span_keeps_last_finite_value() {
+        // The lagging span is shifted back, so it ends in NaN by design; its
+        // last_value is the last finite one. Only trend lines read the last bar.
+        let pr = indicators::by_name("ichimoku")
+            .unwrap()
+            .compute(&data::sample_data(200));
+        assert!(pr
+            .lines
+            .iter()
+            .any(|l| l.y.last().is_some_and(|v| v.is_nan())));
+        let j = panel_result_to_json(&pr);
+        for (i, l) in pr.lines.iter().enumerate() {
+            assert!(!l.breaks);
+            if l.y.iter().any(|v| v.is_finite()) {
+                assert!(j["lines"][i]["last_value"].is_number(), "line {i}");
+            }
+        }
+    }
+
+    #[test]
+    fn warmup_bars_stay_reachable_when_history_runs_out() {
+        // 10 bars of history, 5 asked for, warmup raised to 891: the 5
+        // trimmed warmup bars are older history the client must page to.
+        let page = |end: i64| {
+            series_payload(
+                json!({ "timeframe": "1h", "bars": 5, "warmup": 20, "end_time": end,
+                        "indicators": ["ema_stack"], "format": "series" }),
+                fetch::DataSource::Sample,
+            )
+        };
+        let newest = page(10 * HOUR_MS);
+        assert_eq!(
+            bar_ts(&newest),
+            (5..10).map(|h| h * 3_600).collect::<Vec<_>>()
+        );
+        assert_eq!(newest["has_more"], true);
+        let oldest = page(bar_ts(&newest)[0] * 1000);
+        assert_eq!(
+            bar_ts(&oldest),
+            (0..5).map(|h| h * 3_600).collect::<Vec<_>>()
+        );
+        assert_eq!(oldest["has_more"], false);
+    }
+
+    #[test]
+    fn has_more_never_comes_with_empty_bars() {
+        // bars=0 with the warmup raised: trimming would leave nothing. The
+        // fetched bars come back instead, with no cursor to page on.
+        let p = series_payload(
+            json!({ "timeframe": "1h", "bars": 0, "warmup": 20, "end_time": 10 * HOUR_MS,
+                    "indicators": ["ema_stack"], "format": "series" }),
+            fetch::DataSource::Sample,
+        );
+        assert!(!bar_ts(&p).is_empty());
+        assert_eq!(p["has_more"], false);
+    }
+
+    #[test]
+    fn warmup_is_raised_to_the_indicators_need() {
+        let panels = |names: Value| parse_panels(&names, None).0;
+        let w =
+            |warmup: u64, names: Value| warmup_arg(&json!({ "warmup": warmup }), &panels(names));
+        let need = |name: &str| indicators::by_name(name).unwrap().warmup_bars();
+        let declared: Vec<(&str, usize)> = indicators::registry()
+            .iter()
+            .map(|i| (i.name, need(i.name)))
+            .filter(|&(_, n)| n > 0)
+            .collect();
+        // At their defaults only ema_stack and kalman_volume need more than
+        // the web's 300.
+        assert_eq!(
+            declared,
+            [
+                ("ema_stack", 891),
+                ("keltner", 90),
+                ("supertrend", 76),
+                ("macd", 156),
+                ("rsi", 109),
+                ("atr", 108),
+                ("adx", 216),
+                ("kalman_volume", 399),
+                ("ma", 9),
+                ("vwma", 9),
+                ("hma", 11),
+                ("ma_ribbon", 200),
+                ("envelopes", 20),
+                ("stoch_rsi", 129),
+                ("trix", 244),
+                ("ppo", 94),
+                ("elder_force_index", 59),
+                ("tsi", 229),
+                ("volume_oscillator", 45),
+                ("smi_ergodic", 137),
+                ("connors_rsi", 101),
+            ]
+        );
+        // Parameters count: RSI 50 needs more than 300.
+        let rsi50 = parse_panels(&json!([{ "name": "rsi", "length": 50 }]), None).0;
+        assert_eq!(rsi50[0].warmup_bars(), 393);
+        assert_eq!(w(300, json!(["ema_stack", "rsi"])), 891);
+        assert_eq!(w(950, json!(["ema_stack"])), 950);
+        assert_eq!(w(300, json!(["rsi"])), 300);
+        // Capped, and warmup 0 (no warmup asked) stays 0.
+        let long_ema = json!([{ "name": "ma", "type": "ema", "length": 1000 }]);
+        assert_eq!(w(300, long_ema.clone()), MAX_WARMUP);
+        assert_eq!(w(0, long_ema), 0);
+        assert_eq!(w(5000, json!([])), MAX_WARMUP);
     }
 
     #[test]
@@ -4373,18 +4636,21 @@ mod tests {
             None,
         )))
         .unwrap();
+        // The group's window: the tail plus the raised warmup (ADR-0032).
+        let indicators = json!(["rsi", "macd"]);
+        let warmup = warmup_arg(&args, &parse_panels(&indicators, None).0);
         let mut raw = fetch::fetch_ohlcv(
             fetch::DataSource::Sample,
             "ETHUSDT",
             "4h",
-            42,
+            2 + warmup,
             Some(END_4H_MS),
         )
         .unwrap()
         .data;
         raw.symbol = Some("ETHUSDT".into());
         raw.interval = Some("4h".into());
-        let pushed = series_tail(&raw, &json!(["rsi", "macd"]), "heikin_ashi", 2).unwrap();
+        let pushed = series_tail(&raw, &indicators, "heikin_ashi", 2).unwrap();
         assert_eq!(pushed, polled);
     }
 
@@ -4404,11 +4670,15 @@ mod tests {
             None,
         )))
         .unwrap();
+        // A group's window is the tail plus the effective warmup (ADR-0032):
+        // ema needs more than the 40 asked.
+        let warmup = warmup_arg(&args, &parse_panels(&indicators, None).0);
+        assert!(warmup > 40);
         let mut raw = fetch::fetch_ohlcv(
             fetch::DataSource::Sample,
             "ETHUSDT",
             "4h",
-            42,
+            2 + warmup,
             Some(END_4H_MS),
         )
         .unwrap()

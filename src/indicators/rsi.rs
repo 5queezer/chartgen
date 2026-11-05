@@ -42,11 +42,17 @@ impl Indicator for Rsi {
         }
     }
 
+    fn warmup_bars(&self) -> usize {
+        // ta.rma of the changes, which start a bar in.
+        super::pine::ma_warmup("rma", self.length) + 1
+    }
+
     fn compute(&self, data: &OhlcvData) -> PanelResult {
         let rsi = compute_rsi(&data.closes(), self.length);
 
         PanelResult {
             lines: vec![Line {
+                breaks: false,
                 y: rsi,
                 color: rgba(0xc33ee1, 0.8),
                 width: 2,

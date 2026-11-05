@@ -41,8 +41,9 @@ export const PAGE_BARS = 500;
 /**
  * Extra bars each request computes indicators over and then trims
  * (`warmup`), so values at a page seam or on a tail are warmed up. Covers
- * the longest common lookbacks (SMA/EMA 200) with room for EMA-style
- * recursions to converge.
+ * the longest common lookbacks (SMA 200); the server raises it for
+ * indicators whose EMAs need more to converge, such as ema_stack's EMA 200
+ * (ADR-0032).
  */
 export const WARMUP = 300;
 /** A tail poll: the last closed bar and the forming one. */

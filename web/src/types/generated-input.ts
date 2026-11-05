@@ -87,7 +87,7 @@ export interface GenerateChartInput {
    */
   timeframe?: string;
   /**
-   * format=series only: extra older bars (max 1000) fetched and fed to indicator computation, then trimmed, so the first returned bars carry warmed-up indicator values. Ignored by png/summary/both.
+   * format=series only: extra older bars (max 1000) fetched and fed to indicator computation, then trimmed, so the first returned bars carry warmed-up indicator values. A non-zero warmup is raised to what the indicators need to converge (891 for ema_stack's EMA 200). Ignored by png/summary/both.
    */
   warmup?: number;
   /**
@@ -216,7 +216,7 @@ export interface SubscribeChartInput {
    */
   timeframe?: string;
   /**
-   * Extra older bars (max 1000) the server keeps and feeds to indicator computation, as for generate_chart(format=series).
+   * Extra older bars (max 1000) the server keeps and feeds to indicator computation, as for generate_chart(format=series), and raised the same way.
    */
   warmup?: number;
 }

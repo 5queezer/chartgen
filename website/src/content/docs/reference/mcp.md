@@ -156,7 +156,12 @@ Summary payload shape (for `format=summary` or `format=both`):
 ```
 
 Fields are keyed by the name each indicator was requested with, so
-`{"name": "rsi", "length": 21}` comes back as `indicators.rsi`.
+`{"name": "rsi", "length": 21}` comes back as `indicators.rsi`. A line's
+`last_value` is its last finite value. Lines that break at a trend flip
+(Supertrend's and Parabolic SAR's up and down lines) report their value at
+the last bar instead, `null` when they have none there: only the active one
+has a value. In `format=series` those lines carry `"breaks": true`, which the
+web legend uses the same way.
 
 ##### Several instances of one indicator
 
@@ -360,11 +365,27 @@ interpolated. For windowed profiles (`vpvr`, `hvn_lvn`, `tpo`), `hbars`
 and `hlines` are recomputed over the returned bars only. `y_range` and the
 `hlines` of every other indicator don't change.
 
-Cumulative or recursive indicators (EMA, RSI, ATR, OBV, CVD, VWAP) don't
-fully converge with a finite `warmup`. At a page seam, values from two
-requests can differ slightly, or by a constant offset for running sums.
-Finite-window indicators (SMA, Bollinger Bands, Donchian) match exactly
-once `warmup` covers their lookback.
+A non-zero `warmup` is raised to what the requested indicators need to
+converge, up to 1000
+([ADR-0032](/chartgen/decisions/0032-indicator-aware-warmup/)). `ema_stack`
+needs 891 bars, so its EMA 200 is computed over at least that many and
+matches one long request to within 0.01% at a page seam or on a tail. The
+other EMA/RMA-based built-ins (`ma`, `ma_ribbon`, `envelopes`, `keltner`,
+`rsi`, `atr`, `adx`, `supertrend`, `macd`, `stoch_rsi`, `trix`, `ppo`,
+`tsi`, `smi_ergodic`, `elder_force_index`, `volume_oscillator`,
+`connors_rsi`, `kalman_volume`) declare it from their parameters. The
+community composites (`cipher_b`, `wavetrend`, `rsi_mfi_stoch`) and user
+scripts keep the `warmup` you send. `warmup: 0` is never raised.
+Smoothings beyond the cap (an EMA longer than 224, an RMA longer than 126)
+can still differ slightly at a seam, running sums (OBV, CVD, A/D line) by a
+constant offset, and VWAP until its next session reset. Finite-window
+indicators (SMA, Bollinger Bands, Donchian) match exactly once `warmup`
+covers their lookback. When history runs out, `has_more` stays `true` as
+long as the response fetched more bars than it returned, so the next page
+brings the trimmed warmup bars. `has_more` is never `true` with an empty
+`bars`: if trimming would leave no bar (`bars: 0`), the fetched bars come
+back instead, with indicator values `null` where they have not converged,
+and `has_more` is `false`.
 
 Upstream limits: Binance requests are paginated at 1000 bars per call.
 Yahoo intraday history ends after about 30 days for 1m, 60 days for other

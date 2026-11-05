@@ -2,7 +2,8 @@
 //! built-ins (Pine v5 semantics). Warmup values are NaN.
 
 use super::pine::{
-    line, linfit, ma_by_type, rma_n, shift, sma_n, source_series, true_range, volumes, windowed,
+    line, linfit, ma_by_type, ma_warmup, rma_n, shift, sma_n, source_series, true_range, volumes,
+    windowed,
 };
 use crate::data::OhlcvData;
 use crate::indicator::{rgba, Bars, DivLine, Fill, Indicator, PanelResult};
@@ -179,6 +180,9 @@ impl Indicator for Ma {
             self.offset = v;
         }
     }
+    fn warmup_bars(&self) -> usize {
+        ma_warmup(&self.kind, self.length)
+    }
     fn compute(&self, data: &OhlcvData) -> PanelResult {
         let src = source_series(data, &self.source);
         let y = shift(
@@ -242,6 +246,10 @@ impl Indicator for MaRibbon {
                 self.lengths[i] = v;
             }
         }
+    }
+    fn warmup_bars(&self) -> usize {
+        let need = self.lengths.iter().map(|&n| ma_warmup(&self.kind, n));
+        need.max().unwrap_or(0)
     }
     fn compute(&self, data: &OhlcvData) -> PanelResult {
         let src = source_series(data, &self.source);
@@ -313,6 +321,9 @@ impl Indicator for Envelopes {
         if let Some(s) = get_str(p, "source", SOURCES) {
             self.source = s;
         }
+    }
+    fn warmup_bars(&self) -> usize {
+        ma_warmup(&self.kind, self.length)
     }
     fn compute(&self, data: &OhlcvData) -> PanelResult {
         let src = source_series(data, &self.source);

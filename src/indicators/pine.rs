@@ -226,6 +226,36 @@ pub fn ma_by_type(kind: &str, x: &[f64], vol: &[f64], n: usize) -> Vec<f64> {
     }
 }
 
+/// Bars after which the start of an exponential smoothing with `alpha`
+/// weighs < 0.1%. 0 for alpha outside (0, 1): no smoothing, or none decays.
+/// Capped at `MAX_DECAY_BARS` so tiny alphas cannot overflow callers' sums.
+pub fn decay_bars(alpha: f64) -> usize {
+    const MAX_DECAY_BARS: f64 = 100_000.0;
+    if !(alpha > 0.0 && alpha < 1.0) {
+        return 0;
+    }
+    // ln_1p keeps precision where `1.0 - alpha` would round to 1.0.
+    (1000f64.ln() / -(-alpha).ln_1p())
+        .ceil()
+        .min(MAX_DECAY_BARS) as usize
+}
+
+/// `Indicator::warmup_bars` of `ma_by_type(kind, .., n)`: the seed window
+/// plus the bars after which the seed of an exponential kind weighs < 0.1%
+/// (dema/tema chain two/three EMAs). Window kinds are exact after their
+/// lookback (hma: the full WMA, then a sqrt-length one).
+pub fn ma_warmup(kind: &str, n: usize) -> usize {
+    let ema = || n + decay_bars(2.0 / (n as f64 + 1.0));
+    match kind {
+        "ema" => ema(),
+        "dema" => 2 * ema(),
+        "tema" => 3 * ema(),
+        "rma" | "smma" => n + decay_bars(1.0 / n.max(1) as f64),
+        "hma" => n + ((n as f64).sqrt().floor() as usize).max(1) - 1,
+        _ => n,
+    }
+}
+
 /// Chart offset: the value computed at bar i is drawn at bar i + off.
 pub fn shift(x: &[f64], off: i64) -> Vec<f64> {
     let mut out = vec![f64::NAN; x.len()];
@@ -244,6 +274,7 @@ pub fn volumes(data: &OhlcvData) -> Vec<f64> {
 
 pub fn line(y: Vec<f64>, color: u32, width: u32, label: &str) -> Line {
     Line {
+        breaks: false,
         y,
         color: rgba(color, 0.9),
         width,
@@ -644,6 +675,18 @@ pub(crate) mod test_util {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn decay_bars_is_capped_and_survives_tiny_alphas() {
+        use super::decay_bars;
+        assert_eq!(decay_bars(1e-20), 100_000);
+        assert_eq!(decay_bars(f64::MIN_POSITIVE), 100_000);
+        assert_eq!(decay_bars(f64::NAN), 0);
+        assert_eq!(decay_bars(-1.0), 0);
+        assert_eq!(decay_bars(0.0), 0);
+        assert_eq!(decay_bars(1.0), 0);
+        assert_eq!(decay_bars(0.5), 10);
+    }
+
     use super::test_util::{bars, eq, NAN};
     use super::*;
 

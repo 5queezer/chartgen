@@ -15,6 +15,12 @@ import {
 } from "solid-js";
 import type { Chart as KLineChart } from "klinecharts";
 
+import {
+  invertScale,
+  lockRatio,
+  setInvertScale,
+  setLockRatio,
+} from "../stores/layout";
 import { openAlertDialog } from "./AlertDialog";
 import type { DrawingsApi } from "./DrawingToolbar";
 
@@ -142,6 +148,24 @@ export function ChartContextMenu(props: ChartContextMenuProps): JSX.Element {
               </>
             )}
           </Show>
+          <ContextMenu.Separator class="my-1 border-t border-[color:var(--color-border)]" />
+          <ContextMenu.CheckboxItem
+            closeOnSelect
+            class={itemClass}
+            checked={invertScale()}
+            onChange={setInvertScale}
+          >
+            Invert scale
+            <span class="text-[color:var(--color-fg-muted)] text-xs">Alt+I</span>
+          </ContextMenu.CheckboxItem>
+          <ContextMenu.CheckboxItem
+            closeOnSelect
+            class={itemClass}
+            checked={lockRatio()}
+            onChange={setLockRatio}
+          >
+            Lock price to bar ratio
+          </ContextMenu.CheckboxItem>
           <ContextMenu.Separator class="my-1 border-t border-[color:var(--color-border)]" />
           <ContextMenu.Item
             class={itemClass}

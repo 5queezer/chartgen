@@ -16,7 +16,8 @@ async function addSecondRsi(page: Page): Promise<void> {
   // The default set already has RSI: its row says "added" but still adds.
   const rsi = dialog
     .locator("li button[type='button']")
-    .filter({ has: page.locator(".font-mono", { hasText: /^rsi\s*added$/ }) });
+    .filter({ has: page.locator('[title="rsi"]') })
+    .filter({ hasText: /added/ });
   await expect(rsi).toBeEnabled();
   await rsi.click();
   await dialog.getByRole("button", { name: "Close" }).click();

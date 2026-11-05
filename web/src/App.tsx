@@ -7,6 +7,7 @@ import {
   onCleanup,
   untrack,
   onMount,
+  Show,
   type JSX,
 } from "solid-js";
 import { useQueryClient } from "@tanstack/solid-query";
@@ -18,6 +19,7 @@ import { AlertDialog, AlertButton } from "./components/AlertDialog";
 import { AlertLines } from "./components/AlertLines";
 import { Chart, paletteColor } from "./components/Chart";
 import { ChartContextMenu } from "./components/ChartContextMenu";
+import { ChartLoadError } from "./components/ChartLoadError";
 import { ChartSettings } from "./components/ChartSettings";
 import { DrawingToolbar, type DrawingsApi } from "./components/DrawingToolbar";
 import { IndicatorChips } from "./components/IndicatorChips";
@@ -25,6 +27,7 @@ import { IndicatorPicker } from "./components/IndicatorPicker";
 import { IndicatorSettings } from "./components/IndicatorSettings";
 import { LayoutMenu } from "./components/LayoutMenu";
 import { ReplayBar } from "./components/ReplayBar";
+import { rememberLabels } from "./lib/indicatorNames";
 import { mergeParams } from "./lib/paramForm";
 import { resolveColors } from "./lib/chartStyle";
 import { PALETTES } from "./lib/theme";
@@ -104,6 +107,7 @@ import {
 import {
   addRecent,
   chartStyleOf,
+  setSymbol,
   chartType,
   theme,
   symbol,
@@ -432,12 +436,20 @@ export function App(): JSX.Element {
   }
 
   // A symbol only becomes a "recent" once its data actually loaded, so
-  // typos never end up in the list.
+  // typos never end up in the list. The last one that loaded is also what
+  // a failed load offers to go back to.
+  const [lastLoaded, setLastLoaded] = createSignal<string | null>(null);
   createEffect(() => {
     const loaded = query.isSuccess && !query.isPlaceholderData;
     const current = symbol();
-    if (loaded) untrack(() => addRecent(current));
+    if (loaded) {
+      setLastLoaded(current);
+      untrack(() => addRecent(current));
+    }
   });
+
+  // Chips and picker show the legend's names (EMA, BB), not registry ids.
+  createEffect(() => rememberLabels(live()?.series.indicators));
 
   // The indicator registry only changes between deploys, so this query
   // is cached forever. It fires as soon as auth is ready.
@@ -493,8 +505,10 @@ export function App(): JSX.Element {
 
   return (
     <div class="flex flex-col h-screen w-screen">
-      <header class="flex items-center gap-4 px-4 py-3 border-b border-[color:var(--color-border)]">
-        <h1 class="text-lg font-semibold mr-4 leading-none">chartgen</h1>
+      <header class="flex flex-nowrap items-center gap-2 min-[1280px]:gap-3 px-4 h-[52px] shrink-0 overflow-hidden border-b border-[color:var(--color-border)]">
+        <h1 class="text-lg font-semibold mr-1 min-[1280px]:mr-2 leading-none max-[639px]:hidden">
+          chartgen
+        </h1>
         <Toolbar
           session={session}
           onReselect={() => void query.refetch()}
@@ -517,9 +531,13 @@ export function App(): JSX.Element {
         <button
           type="button"
           onClick={() => setPickerOpen(true)}
-          class="bg-[color:var(--color-bg-elev)] border border-[color:var(--color-border)] text-[color:var(--color-fg)] px-3 py-1.5 rounded-md text-sm hover:border-[color:var(--color-accent)] cursor-pointer inline-flex items-center gap-2"
+          class="bg-[color:var(--color-bg-elev)] border border-[color:var(--color-border)] text-[color:var(--color-fg)] px-3 py-1.5 rounded-md text-sm hover:border-[color:var(--color-accent)] cursor-pointer inline-flex items-center gap-2 shrink-0"
+          title="Indicators"
         >
-          Indicators
+          <span class="max-[1399px]:sr-only">Indicators</span>
+          <svg aria-hidden="true" viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" class="min-[1400px]:hidden">
+            <path d="M1 11 L5 7 L8 9 L15 3" />
+          </svg>
           <span class="inline-flex items-center justify-center min-w-[1.25rem] h-5 px-1 rounded-full bg-[color:var(--color-accent)] text-black text-xs font-semibold">
             {activeIndicators().length}
           </span>
@@ -528,14 +546,13 @@ export function App(): JSX.Element {
         <StatusLine
           status={status()}
           live={replay.mode() === "off" ? pollStatus() : { kind: "off" }}
-          onRetry={() => void query.refetch()}
           onSignIn={() =>
             void startSignIn().catch((e: unknown) =>
               setAuthError(e instanceof Error ? e.message : String(e)),
             )
           }
         />
-        <div class="ml-auto">
+        <div class="ml-auto min-w-0">
           <LayoutMenu />
         </div>
       </header>
@@ -610,6 +627,19 @@ export function App(): JSX.Element {
           onRemoveAllIndicators={() => setActiveIndicators([])}
           onSettings={() => setSettingsOpen(true)}
         >
+          <Show when={query.isError && !query.isFetching}>
+            <ChartLoadError
+              symbol={symbol()}
+              message={
+                query.error instanceof Error
+                  ? query.error.message
+                  : String(query.error)
+              }
+              previousSymbol={lastLoaded() === symbol() ? null : lastLoaded()}
+              onRetry={() => void query.refetch()}
+              onBack={setSymbol}
+            />
+          </Show>
           <Chart
             series={shown()?.series ?? null}
             update={shown()?.update ?? null}

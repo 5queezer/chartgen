@@ -10,6 +10,10 @@ pub struct Line {
     pub width: u32,
     #[allow(dead_code)]
     pub label: Option<String>,
+    /// The line breaks where its trend flips (Supertrend, SAR): it is NaN by
+    /// design while the other trend is on, so its legend and `last_value`
+    /// read the last bar. Other lines read their last finite value.
+    pub breaks: bool,
 }
 
 /// A filled region between two series.
@@ -163,6 +167,13 @@ pub trait Indicator {
     /// only (ADR-0009).
     fn windowed_profile(&self) -> bool {
         false
+    }
+
+    /// Bars of history the values need before they converge (an SMA-seeded
+    /// EMA's seed weighs < 0.1% after them). A non-zero series `warmup` is
+    /// raised to this, up to its cap (ADR-0032). 0: no extra need.
+    fn warmup_bars(&self) -> usize {
+        0
     }
 }
 

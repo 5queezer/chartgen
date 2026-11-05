@@ -17,8 +17,27 @@ until the core loop is solid.
 
 The chart loads automatically as soon as sign-in finishes and reloads
 whenever the symbol, timeframe, or indicator set changes. The previous
-chart stays on screen while the new one loads. There is no Load button; if a load fails, use **Retry** in the status line
-  or re-pick the current symbol or timeframe.
+chart stays on screen while the new one loads. There is no Load button.
+
+If a load fails (a mistyped symbol, a provider outage), the header shows a
+compact red `error` badge (the full message is its tooltip) and the chart
+area shows "Couldn't load SYMBOL — symbol not found" with **Retry** and, when
+another chart loaded before, **Back to PREVIOUS**. The failed symbol stays
+active, as on TradingView, and is not saved to your recents.
+
+The header has a fixed height and never scrolls the page sideways. As the
+window narrows, lower-priority items collapse:
+
+- below 1400 px the **Replay** and **Indicators** labels become icon-only;
+- below 1280 px screenshot, copy link, chart settings and fullscreen move
+  into the **⋯** menu, and the timeframe buttons collapse into the timeframe
+  dropdown below 1200 px;
+- below 900 px compare, reset chart and the theme toggle join the **⋯** menu;
+- below 640 px the wordmark is dropped and **Bar replay** joins the menu too.
+
+The status text stays on one line (the live badge reads `live`, `polling`,
+`paused`...); the layout name truncates, and its unsaved-changes dot always
+stays visible.
 
 - **Symbol** — the button shows the current ticker and opens the search
   dialog. Typing searches every Binance spot pair and Yahoo Finance
@@ -38,7 +57,8 @@ chart stays on screen while the new one loads. There is no Load button; if a loa
   or `FDUSD` are fetched from Binance, everything else from Yahoo
   Finance. The watchlist **+** button opens the same dialog.
 - **Timeframe** — one-click buttons for 1m, 5m, 15m, 1h, 4h, 1D and 1W,
-  with the active one highlighted. The dropdown holds the rest, grouped as
+  with the active one highlighted (below 1200 px they all move into the
+  dropdown, which then lists every timeframe). The dropdown holds the rest, grouped as
   on TradingView: Minutes (3m, 30m), Hours (2h, 6h, 12h) and Days (3D, 1M),
   and ends with **Custom interval...**, which opens the same popup as the
   keyboard entry (see [Keyboard shortcuts](#keyboard-shortcuts)).
@@ -100,7 +120,21 @@ Symbol, timeframe, chart type, price-scale mode, theme, time zone and recent sym
   default) keeps the axis fitted to the visible bars. Dragging the price
   axis scales it by hand and turns `auto` off; double-clicking the axis or
   clicking `auto` turns it back on, and `Alt+R` (reset chart) does too.
-  The scale mode persists across reloads; `auto` always starts on.
+  The scale mode persists across reloads; `auto` starts on, unless the
+  price-to-bar ratio is locked.
+  `inv` (or `Alt+I`) inverts the price pane's axis so higher prices are at
+  the bottom (indicator panes keep their own direction); labels, crosshair,
+  drawings and alert lines all follow. **Lock price to bar ratio** (chart
+  context menu or Settings, Scales) keeps the candle aspect fixed while you
+  zoom horizontally: the visible price range scales with the bar width, and
+  when zoomed in the window slides to keep the last visible close in view.
+  The ratio is taken when you turn the lock on, and again for a new symbol
+  or timeframe; after a window resize it keeps the price range on screen.
+  Locking turns `auto` off; clicking `auto`, double-clicking the axis,
+  dragging the axis or `Alt+R` releases the lock. While it is locked the
+  price axis cannot be panned vertically (TradingView allows it). Invert
+  and lock are saved per chart, like the scale mode, and are part of named
+  layouts. "Scale price chart only" is not offered.
 
 ## Bottom bar
 
@@ -232,15 +266,18 @@ polled.
   "History limit reached" (every live update recalculates the indicators
   over all loaded bars, so the history is capped).
 - **Status.** A badge after the status text shows `live` (server push),
-  `live (polling)`, `paused` (tab hidden), `live: retry in Ns` after a
+  `polling`, `paused` (tab hidden), `live: retry in Ns` after a
   failed poll, or `resyncing...` while the chart reloads to catch up.
 
 How it works: the first load asks `generate_chart` for 500 bars with a
 `warmup` of 300. The app then polls the last two bars (`bars: 2`,
 `warmup: 300`) and merges them in by timestamp. A history page is
-`bars: 500, warmup: 300, end_time: <oldest bar × 1000>`. 800 bars fit in
-one Binance request, and a warmup of 300 covers the usual lookbacks (up to
-SMA/EMA 200) so values at a page seam line up. Changing the symbol,
+`bars: 500, warmup: 300, end_time: <oldest bar × 1000>`. A warmup of 300
+covers the usual lookbacks (up to SMA 200), and the server raises it for
+indicators that need more to converge, such as the EMA 200 of `ema_stack`
+(891 bars) or an RSI with a long length
+([ADR-0032](/chartgen/decisions/0032-indicator-aware-warmup/)), so values
+at a page seam and on the live bar line up. Changing the symbol,
 timeframe or indicators cancels every pending poll and page and does a
 full reload.
 
@@ -285,10 +322,14 @@ then polls until the next chart change.
   `hvn_lvn`) keep the profile of the full load and are not recomputed for
   live bars or older pages. A divergence line that forms while the chart
   is open usually shows up only on the next full load, and a line crossing
-  a page boundary starts at that boundary. Recursive and cumulative indicators (EMA, RSI,
-  ATR, OBV, CVD, VWAP) can step slightly at a page seam or on the live
-  bar compared with one long request, because each request warms up
-  independently. Yahoo data is delayed, so its live bar moves only as
+  a page boundary starts at that boundary. Running sums (OBV, CVD, A/D
+  line) can differ by a constant at a page seam or on the live bar
+  compared with one long request, because each request starts its sum
+  independently. VWAP can differ until its next session reset. The
+  built-in EMA- and RMA-based indicators (EMA, RSI, ATR, MACD, ...) match
+  it, except an EMA longer than 224 bars or an RMA longer than 126, which
+  converge beyond the 1000-bar warmup cap; the community composites
+  (Cipher B, WaveTrend) can still step slightly. Yahoo data is delayed, so its live bar moves only as
   often as Yahoo updates it.
 
 ### Keyboard shortcuts
@@ -307,7 +348,9 @@ while typing in a field or while a dialog or menu is open.
 | `Home` / `End` | Jump to the first bar / to real time |
 | `Alt+R` | Reset chart (scroll to real time, default zoom) |
 | `Alt+G` | Go to date |
+| `Alt+I` | Invert the price scale |
 | `Alt+A` | Add a price alert at the last price |
+| `Alt+↑` / `Alt+↓` | Watchlist: move the focused row or section up / down |
 | `Shift+→` | Bar replay: forward one bar |
 | `Shift+↓` | Bar replay: play / pause |
 | `Esc` | Bar replay: jump to real time |
@@ -394,7 +437,10 @@ menu) opens the chart settings dialog with four tabs:
 - **Status line** — show or hide the OHLC values, the bar change, the volume
   and the indicator values in the legends.
 - **Scales** — last price line, last price label, high and low price labels,
-  and the price scale placement (right or left).
+  the price scale placement (right or left), and the invert and lock price to
+  bar ratio switches. Those two belong to the chart's scale state rather than
+  to the settings: they apply at once, **Cancel** puts them back and
+  **Reset settings** turns both off.
 - **Appearance** — background color, vertical and horizontal grid lines and
   grid color, crosshair style (dashed, dotted, solid) and color.
 
@@ -403,7 +449,7 @@ reverts, and **Reset settings** puts the options and the current theme's colors
 back to the defaults (still previewed until OK; the other theme is untouched). Colors and the candle part toggles are stored per
 theme, so the light and dark themes can look different; the other options are
 shared. Everything is saved in `localStorage` under `chartgen.chartSettings`
-and validated on load. Settings are not part of named layouts. See
+and validated on load. Settings are not part of named layouts (invert and lock, which are, are not stored there). See
 [ADR-0019](/chartgen/decisions/0019-chart-settings/).
 
 ## Chart context menu
@@ -415,6 +461,8 @@ Right-clicking the chart (outside a drawing) opens a menu:
 | Reset chart view (`Alt+R`) | Scroll to real time at the default zoom |
 | Copy link to chart | Copy a [shareable link](#sharing-a-chart) |
 | Copy price | Copy the price under the cursor, in the chart's precision |
+| Invert scale (`Alt+I`) | Flip the price axis |
+| Lock price to bar ratio | Keep the candle aspect while zooming horizontally |
 | Add horizontal line at | Add a horizontal line at that price; it is saved like any drawing |
 | Add alert at | Open the alert dialog at that price |
 | Remove all drawings | Asks for confirmation |
@@ -484,11 +532,41 @@ TradingView's change since the daily open
 ([ADR-0011](/chartgen/decisions/0011-watchlist-quotes/)). A symbol that
 fails to load shows dashes; hover the row for the reason.
 
-The list (default: BTCUSDT, ETHUSDT, SOLUSDT, AAPL, MSFT, NVDA, SPY) and
-the collapsed state are saved in `localStorage` under
-`chartgen.watchlist.symbols` and `chartgen.watchlist.collapsed`. On load,
-entries are trimmed, uppercased and deduplicated, and invalid ones are
-dropped. The list holds at most 50 symbols, the `get_quotes` limit.
+### Lists, sections and flags
+
+The name in the panel header opens the list switcher. It lists your
+watchlists, **Flagged**, and the actions **Create new list…**, **Rename…**,
+**Duplicate** and **Delete…** (which asks first). The last list cannot be
+deleted. The list you are viewing is remembered. Quotes are polled for that
+list only, so each list holds up to 50 symbols; you can have up to 20 lists.
+
+- **Add section** (the button next to **+**) appends a named divider. The
+  symbols under a divider belong to that section. Click the section name to
+  collapse or expand it; hover it to rename it (✎) or remove it (×, which keeps
+  its symbols). Up to 20 sections per list.
+- **Reorder** by dragging a row or section by its grip (⋮⋮, shown on hover), or
+  focus a row and press **Alt+ArrowUp** / **Alt+ArrowDown**. A section moves
+  together with its symbols.
+- **Flags**: right-click a row, or use the flag button shown on hover, to pick
+  one of seven colors (red, orange, yellow, green, cyan, blue, purple) or **No
+  flag**. A flagged row has a colored mark at its left edge. A flag belongs to
+  the symbol, so it shows in every list that holds it.
+- **Flagged** in the switcher is a read-only view of every flagged symbol across
+  all lists. You can still change flags there; a symbol disappears from the view
+  when you clear its flag. It shows at most 50 symbols, the quotes limit, and
+  there is no separate list per color.
+
+The lists, sections, flags and the active list are saved as one versioned
+document in `localStorage` under `chartgen.watchlist.v2`, and the collapsed
+state under `chartgen.watchlist.collapsed`
+([ADR-0031](/chartgen/decisions/0031-multiple-watchlists/)). Changes made in
+another tab of the same browser show up here without a reload; each tab keeps
+its own active list. A list from an
+earlier version (`chartgen.watchlist.symbols`, default: BTCUSDT, ETHUSDT,
+SOLUSDT, AAPL, MSFT, NVDA, SPY) becomes the list "Watchlist" with no sections
+the first time you open the new version, and the old key is left in place. On
+load, symbols are trimmed, uppercased and deduplicated per list, and invalid
+entries are dropped.
 
 ## Sidebar and price alerts
 

@@ -22,7 +22,15 @@ import {
   type PartKey,
   type ThemeOverrides,
 } from "../stores/chartSettings";
-import { theme } from "../stores/layout";
+import {
+  autoScale,
+  invertScale,
+  lockRatio,
+  setAutoScale,
+  setInvertScale,
+  setLockRatio,
+  theme,
+} from "../stores/layout";
 import { ColorPicker } from "./ColorPicker";
 
 export interface ChartSettingsProps {
@@ -54,8 +62,15 @@ function SettingsForm(props: { onClose: () => void }): JSX.Element {
   const [draft, setDraft] = createSignal<Settings>(snapshot);
   const [tab, setTab] = createSignal<string>("symbol");
   let committed = false;
+  // Invert and lock take effect at once (they are layout state, not
+  // settings), so Cancel puts back whichever of them changed.
+  const scale = { invert: invertScale(), lock: lockRatio(), auto: autoScale() };
   onCleanup(() => {
-    if (!committed) previewChartSettings(snapshot);
+    if (committed) return;
+    previewChartSettings(snapshot);
+    if (invertScale() !== scale.invert) setInvertScale(scale.invert);
+    if (lockRatio() !== scale.lock) setLockRatio(scale.lock);
+    if (!scale.lock && autoScale() !== scale.auto) setAutoScale(scale.auto);
   });
 
   const edit = (next: Settings) => {
@@ -177,6 +192,25 @@ function SettingsForm(props: { onClose: () => void }): JSX.Element {
             <Toggle label="Last price line" option="lastPriceLine" />
             <Toggle label="Last price label" option="lastPriceLabel" />
             <Toggle label="High and low price labels" option="highLowMarks" />
+            {/* Per-chart scale state (like %/log), applied at once rather than by OK. */}
+            <label class={`${rowClass} text-sm cursor-pointer`}>
+              Invert scale
+              <input
+                type="checkbox"
+                aria-label="Invert scale"
+                checked={invertScale()}
+                onChange={(e) => setInvertScale(e.currentTarget.checked)}
+              />
+            </label>
+            <label class={`${rowClass} text-sm cursor-pointer`}>
+              Lock price to bar ratio
+              <input
+                type="checkbox"
+                aria-label="Lock price to bar ratio"
+                checked={lockRatio()}
+                onChange={(e) => setLockRatio(e.currentTarget.checked)}
+              />
+            </label>
             <div class={rowClass}>
               <label for="scale-placement" class="text-sm">
                 Scale placement
@@ -242,13 +276,15 @@ function SettingsForm(props: { onClose: () => void }): JSX.Element {
           type="button"
           class={buttonClass}
           title="Reset the options and the current theme's colors to the defaults"
-          onClick={() =>
+          onClick={() => {
             edit({
               ...draft(),
               themes: { ...draft().themes, [theme()]: {} },
               options: defaultSettings().options,
-            })
-          }
+            });
+            setInvertScale(false);
+            setLockRatio(false);
+          }}
         >
           Reset settings
         </button>
