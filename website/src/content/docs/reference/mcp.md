@@ -595,6 +595,17 @@ user may store 50 scripts. Scripts are stored in SQLite at `CHARTGEN_DB`
 (default `~/.chartgen/chartgen.db`), see the
 [persistence reference](/chartgen/reference/persistence/#chartgendb-scripted-indicators).
 
+A `generate_chart` call computes at most 3 scripted indicators, sharing one
+1 s budget; further ones fail with an `indicator_errors` entry. At most 4
+script evaluations run on the server at once and one per user; a caller
+waits for a slot until its deadline, then gets "server busy".
+`subscribe_chart` pushes compute built-ins only.
+
+Scripting is meant for trusted or single-user deployments: a script's
+owner is an OAuth client registration, and `/authorize` approves
+automatically (threat model in
+[ADR-0025](/chartgen/decisions/0025-user-indicator-registry/)).
+
 ### Orders & positions (require `--trade`)
 
 | Tool | Purpose | Required args |

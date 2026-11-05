@@ -87,6 +87,30 @@ would re-register with new ids, and their scripts would be orphaned.
 Tokens stay in memory, so after a restart a client re-authorizes with the
 same `client_id`.
 
+**Threat model: ownership is bound to a client registration, not a
+person.** The `client_id` is not a secret: it is sent in the clear in
+`/authorize` URLs and token requests, and public clients have no secret
+(`token_endpoint_auth_method: none`). `/authorize` approves without asking
+anyone. So anyone who knows a `client_id` and can receive a redirect to
+one of its registered redirect URIs (for example a loopback URI such as
+`http://localhost/cb`, which any local process can serve) can obtain a
+token for that client and read, replace or delete its scripts. Scripts
+are therefore only as private as client ids are, and that is not very.
+**Proper user login (an authenticating `/authorize` with real user
+accounts) is required before multi-user public use**; until then the
+feature is meant for trusted or single-user deployments. To limit the
+damage, the server no longer logs client ids, codes or verifiers, and the
+database file is owner-only (0600 in a 0700 directory).
+
+**Registration limits.** Because `/register` is open, it is bounded
+whether or not scripting is on: 1–5 redirect URIs of at most 512
+characters, a client name of at most 256, 20 registrations per peer
+address per 10 minutes (loopback peers are exempt, so local tests and a
+reverse proxy on the same host are not throttled; then only the total cap
+applies), and at most 1000 clients. A client that never receives a token
+within 24 hours is forgotten, in memory and, with scripting on, in the
+database (`last_token_at`, migration 2).
+
 **SQLite store.** `CHARTGEN_DB` sets the file, default
 `~/.chartgen/chartgen.db`. Migrations run on first open, at server startup
 when scripting is on, and are tracked in `PRAGMA user_version`. The
@@ -100,8 +124,15 @@ library or musl/ARM cross-compile setup is needed (about 1 MB). The
 connection is a `Mutex<Connection>`; script access is low-rate.
 
 **Compile cache.** Frozen modules are cached in process, LRU with 1024
-entries, keyed by `(user, name, source_hash)`. Re-registering changes the
-hash, so a stale entry is never served.
+entries and at most 64 MiB in total (a module keeping over 1 MiB alive is
+rejected at compile), keyed by `(user, name, source_hash)`.
+Re-registering changes the hash, so a stale entry is never served.
+
+**Concurrency.** At most 4 script evaluations (compile, dry run, compute)
+run at once, and at most one per user; a caller waits up to its deadline
+for a slot, then gets "server busy". A chart computes at most 3 scripted
+indicators, all sharing one 1 s budget, so a request cannot multiply the
+per-script limit by its panel count.
 
 **MCP surface.** Four tools, listed in `tools/list` and dispatched only
 when `CHARTGEN_SCRIPTING=1`:
@@ -153,8 +184,14 @@ a frontend editor needs them (Phase 2).
   additions are optional fields.
 - Good: a broken script cannot take down a chart.
 - Bad: the identity is a client registration, not a person, and is weak
-  because `/authorize` auto-approves. Sharing scripts across a person's
-  clients needs a real account model later.
+  because `/authorize` auto-approves (see the threat model). Public
+  multi-user use needs real user login, and sharing scripts across a
+  person's clients needs a real account model.
+- Bad: behind a reverse proxy that is not on the same host, every client
+  shares the proxy's address, so the per-address registration limit is
+  effectively global.
+- Bad: `subscribe_chart` pushes (ADR-0021) compute built-ins only; a
+  user script in a pushed chart is unknown there.
 - Bad: with scripting on, `/register` writes to disk, and clients that
   never come back are never cleaned up.
 - Bad: `get_indicators` and the trading engine's indicator state still

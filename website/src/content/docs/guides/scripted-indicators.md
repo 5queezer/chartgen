@@ -14,6 +14,17 @@ code. Design records: [ADR-0024](/chartgen/decisions/0024-starlark-script-runtim
 
 ## Enabling it
 
+:::caution[Trusted or single-user deployments only]
+Scripts run inside the server process, and their owner is an OAuth client
+registration, not an authenticated person: anyone who learns a client's
+`client_id` can act as it, because `/authorize` approves automatically.
+Enable scripting only where you trust everyone who can reach the server
+(your own machine, a private or single-user deployment). A public,
+multi-user host needs real user login and the worker-subprocess sandbox
+recorded in [ADR-0024](/chartgen/decisions/0024-starlark-script-runtime/#required-before-public-hosting-a-worker-subprocess)
+first.
+:::
+
 Scripting is off by default. Start the HTTP server with it on:
 
 ```bash
@@ -249,25 +260,37 @@ for that indicator, never a crash:
 
 | Limit | Value |
 |---|---|
-| Wall clock | 1 s per chart (200 ms for the register dry run) |
+| Wall clock | 1 s per chart request, shared by all its scripts (200 ms for the register dry run) |
+| Scripted indicators per chart | 3 |
 | Steps (function calls + loop iterations) | 20 million |
 | Call depth (recursion) | 64 |
 | Script heap | 64 MiB |
-| Series data allocated per call | 32 million values (256 MiB) |
-| One string, list, tuple or `range` | 20 000 elements |
-| Integers | 64-bit; overflow is an error |
+| Memory held by one evaluation (heap, dicts, series, strings) | 256 MiB |
+| One string, list, tuple, dict or `range` | 20 000 elements |
+| A series | exactly one value per bar (`ta.series` included) |
+| Integers | 64-bit; overflow and larger literals are errors |
+| Top-level values (module constants) | 1 MiB |
+| Concurrent evaluations | 4 on the server, 1 per user (others wait, then "server busy") |
 | Plot objects | 64 lines, fills, bar series or hlines; 10 000 dots, hbars or divlines |
 | Scripts per user | 50; names `^[a-z][a-z0-9_]{0,47}$` |
 
 Not available: `load`, `print`, file or network access, `getattr`, and
-the string and list methods `.join`, `.format`, `.replace` and `.extend`,
-whose output can outgrow their input many times over in one step. Build
-strings with `+` or `%`, and lists with `+` or `.append`.
+the methods `.join`, `.format`, `.replace`, `.extend`, `.update` and
+`.setdefault`, whose output can outgrow their input many times over in one
+step. Build strings with `+` or `%`, lists with `+` or `.append`, and dicts
+with `d[k] = v`. Augmented assignment (`+=` etc.) needs a plain name:
+write `x[i] = x[i] + 1`, and assign list or dict items one at a time.
 
-The limits make runaway scripts fail cleanly. They are not a hard memory
-sandbox against deliberately hostile code
-([ADR-0024](/chartgen/decisions/0024-starlark-script-runtime/#consequences)),
-so a public deployment should also run chartgen under an OS memory limit.
+`if`, `and`, `or`, `not`, `x if c else y` and comprehension filters are
+rejected when applied directly to a series (`if ohlcv.close > ohlcv.open:`),
+because a series is always truthy. The check only sees expressions it can
+recognise as series; one stored in a variable first is not detected.
+
+The limits make runaway scripts fail cleanly. They are not a security
+boundary against deliberately hostile code
+([ADR-0024](/chartgen/decisions/0024-starlark-script-runtime/#sandbox)), so
+even a trusted deployment should run chartgen under an OS memory limit
+(cgroup `MemoryMax`, a container limit).
 
 ## Managing scripts
 

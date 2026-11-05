@@ -106,19 +106,27 @@ or a loop over `series.list()`.
 
 ### Sandbox
 
-Several limits each cover one cause. None of them is a complete memory
-sandbox on its own.
+Several limits each cover one cause. None of them is a security
+boundary. The tick limit in particular is not: starlark-rust's own
+documentation of `set_max_tick_count` says it "should absolutely not be
+treated as a way to guarantee bounded runtime" and of `set_max_heap_size`
+that it "should absolutely not be treated as a way to guarantee bounded
+memory use of an evaluation", and points to OS-level limits in a subprocess for that.
 
 | Limit | Mechanism | Value |
 |---|---|---|
 | No load or I/O | `Dialect { enable_load: false }`; the standard globals have no I/O | — |
 | CPU, deterministic | `Evaluator::set_max_tick_count` (calls + loop iterations) | 20 M ticks |
-| CPU, wall clock | `set_check_cancelled` (every 1000 ticks) plus a deadline check in every native `ta.*` / series call | 1000 ms per `compute`, 200 ms at register |
+| CPU, wall clock | `set_check_cancelled` (every 1000 ticks) plus a deadline check before every native `ta.*`, series and guarded-operator call | 1000 ms per chart request (shared by its scripts), 200 ms at register |
+| Cost of one native call | every series has exactly the chart's bar count (`ta.series` included), so a window helper does at most bars²/4 steps (about 60 ms for `ta.highest(close, 3000)` on 6000 bars in a debug build) | ≤ 6000 bars |
+| Arbitrary-precision ints | every `_op_*` rejects ints outside i64; `int()` is a 64-bit override; out-of-range int literals fail the static check; `+ - * <<` are overflow-checked | 64-bit |
 | Recursion | `set_max_callstack_size` | 64 frames |
 | Starlark heap | `set_max_heap_size` (checked every 1000 ticks) | 64 MiB |
-| Series data | exact per-evaluation counter on series allocation (series data lives outside the Starlark heap, so the heap limit does not see it) | 32 Mi values (256 MiB) |
-| One-step growth | the `_op_*` guards: `+` and `*` on strings, lists and tuples, `%` formatting, `range`, `zip`, `str` and `repr` refuse results over 20 000 elements; ints are 64-bit with overflow errors; `<<` is capped | 20 000 |
-| Growth methods | static check rejects `.join`, `.format`, `.replace`, `.extend` and `getattr` | — |
+| Memory, total | a counting global allocator (`scripting::alloc`) tracks each thread's net bytes; an evaluation may hold this much — Starlark heap chunks, dict tables, series data, strings — checked on every native call and every 1000 ticks | 256 MiB |
+| One-step growth | the `_op_*` guards: `+`, `*` and `\|` on strings, lists, tuples and dicts, `%` formatting, `range`, `zip`, `str` and `repr` refuse results over 20 000 elements | 20 000 |
+| Container growth | `.append`, `.insert` and `d[k] = v` are rewritten (in the source, line numbers kept) to size-checked natives; `.extend`, `.join`, `.format`, `.replace`, `.update`, `.setdefault` and `getattr` are rejected statically; index targets in tuple assignments, `for` and comprehensions are rejected | 20 000 entries |
+| Frozen modules | a module whose top level keeps over 1 MiB alive is rejected; the compile cache holds at most 1024 modules and 64 MiB | 1 MiB / 64 MiB |
+| Concurrency | at most 4 evaluations (compile, dry run, compute) at once and one per user; at most 3 scripted indicators per chart | 4 / 1 / 3 |
 | Shadowing | static check rejects top-level definitions that shadow a global (`ta`, `len`, the `_op_*` functions, ...) | — |
 | Inputs | source size, bars per request (5000 + 1000 warmup), plot objects per chart | 64 KiB, 6000, 64 / 10 000 |
 | Panics | `catch_unwind` around each evaluation | — |
@@ -128,7 +136,28 @@ and one Starlark step can allocate a lot. For example, `[0] * 10**9` is a
 single 8 GB allocation, and a few `s = s + s` doublings reach gigabytes
 between two checks. Rust aborts the process when an allocation fails
 (`set_alloc_error_hook` is unstable), so the bound must apply before the
-allocation, not after it.
+allocation, not after it. The counting allocator only observes
+allocations; it cannot refuse one without aborting the process.
+
+Why no `bool(series)` error: `StarlarkValue::to_bool` returns a plain
+`bool` and cannot fail, so `if close > open:` would silently be always
+true. The static check rejects `if`, `and`, `or`, `not`, conditional
+expressions and comprehension filters applied to a recognisable series (an
+`ohlcv` column, a `ta.*` call, or arithmetic, comparison or indexing on
+one). A series stored in a variable first is not detected; the guide
+documents this.
+
+### Required before public hosting: a worker subprocess
+
+The limits above make accidents fail cleanly. They do not contain a
+hostile script, and a script that finds a gap runs inside the server
+process. **Before scripting is enabled on a public, multi-user host,
+evaluation must move to a worker subprocess** with `RLIMIT_AS` and
+`RLIMIT_CPU` set, killed at the deadline by the parent, returning the
+`PanelResult` over a pipe. A crash, an abort on allocation failure or a
+runaway native loop then costs one worker, not the server. This is the
+open follow-up of this ADR; Phase 1 does not implement it, so the feature
+is for trusted or single-user deployments (and is off by default).
 
 The register-time pipeline is: parse → static check → evaluate the top
 level and presence check → dry run of `compute` on 100 synthetic bars
@@ -149,15 +178,15 @@ within 200 ms. Each failure is a structured `{step, line, message}`
   for vectorized scripts and noticeable for long per-bar loops.
 - Bad: the dependency is heavy. starlark-rust adds about 115 crates
   (including `rustyline` and `lsp-types`, which are not optional) and
-  build time.
-- Bad: **memory limits are best effort.** Upstream says starlark-rust
-  "should not be considered secure against truly malicious code". The
-  guards cover the known amplification paths, but a determined user can
-  still make the server allocate up to roughly a gigabyte between two
-  heap checks, for example by copying lists of 20 000 elements in a
-  loop. A hostile multi-tenant deployment should run chartgen under an OS
+  build time. It sits behind the default cargo feature `scripting`, so
+  `cargo build --no-default-features` builds without it (and without
+  rusqlite); CI checks that build.
+- Bad: **the limits are best effort, not a security bound** (see above).
+  Until the worker subprocess exists, a public deployment must not enable
+  scripting; a trusted deployment should still run chartgen under an OS
   memory limit (cgroup `MemoryMax`, a container limit) as the backstop.
-  The feature is off by default for this reason.
+- Bad: the counting global allocator adds a thread-local update to every
+  allocation of the process (in builds with the `scripting` feature).
 - Bad: pivot tie-breaking (`ta.pivot_high` / `pivot_low`) is unverified
   against a live TradingView chart.
 

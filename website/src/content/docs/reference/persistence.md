@@ -124,9 +124,14 @@ CREATE TABLE user_indicators (
 CREATE TABLE oauth_clients (
     client_id      TEXT    PRIMARY KEY,
     redirect_uris  TEXT    NOT NULL, -- JSON array
-    created_at     INTEGER NOT NULL
+    created_at     INTEGER NOT NULL,
+    last_token_at  INTEGER           -- migration 2; NULL = never got a token
 );
 ```
+
+The directory is created owner-only (0700) and the file 0600. Clients with
+no token 24 hours after registering are deleted at startup and on each
+registration.
 
 `oauth_clients` keeps dynamically registered OAuth clients across restarts,
 so a client keeps its `client_id`, and with it its scripts. Access tokens stay
