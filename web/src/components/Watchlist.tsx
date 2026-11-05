@@ -101,7 +101,7 @@ export function Watchlist(props: WatchlistProps): JSX.Element {
         class="watchlist flex flex-col min-h-0"
         classList={{
           "flex-1": props.embedded,
-          "w-72 shrink-0 border-l border-[color:var(--color-border)]":
+          "w-80 shrink-0 border-l border-[color:var(--color-border)]":
             !props.embedded,
         }}
         aria-label="Watchlist"
@@ -127,7 +127,7 @@ export function Watchlist(props: WatchlistProps): JSX.Element {
             <span aria-hidden="true">»</span>
           </button>
         </div>
-        <div role="table" aria-label="Watchlist" class="flex-1 min-h-0 overflow-y-auto">
+        <div role="table" aria-label="Watchlist" class="wl-table flex-1 min-h-0 overflow-y-auto">
           <div
             role="row"
             class="wl-grid px-3 py-1 text-xs text-[color:var(--color-fg-muted)]"
@@ -147,7 +147,7 @@ export function Watchlist(props: WatchlistProps): JSX.Element {
             )}
           </For>
           <Show when={query.isError}>
-            <p class="px-3 py-2 text-xs text-[color:var(--color-danger)]">
+            <p class="col-span-full px-3 py-2 text-xs text-[color:var(--color-danger)]">
               Quotes unavailable: {query.error?.message}
             </p>
           </Show>
@@ -211,7 +211,7 @@ function WatchlistRow(props: WatchlistRowProps): JSX.Element {
       onClick={() => setSymbol(props.symbol)}
       title={error() ?? undefined}
     >
-      <span role="cell" class="truncate">
+      <span role="cell" class="min-w-0 truncate" title={props.symbol}>
         <button
           type="button"
           class="font-semibold cursor-pointer text-left truncate max-w-full"

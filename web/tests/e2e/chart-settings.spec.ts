@@ -16,7 +16,7 @@ const MID = { x: (A.x + B.x) / 2, y: (A.y + B.y) / 2 };
 
 // Same viewport as drawing.spec.ts: the coordinates above sit inside the plot.
 test.use({
-  viewport: { width: 1280 + 288, height: 720 },
+  viewport: { width: 1280 + 320, height: 720 },
   permissions: ["clipboard-read", "clipboard-write"],
 });
 

@@ -111,7 +111,7 @@ test.describe("sidebar panels", () => {
   test("Object Tree: drawings are listed and selectable", async ({
     bootedApp: page,
   }) => {
-    await page.setViewportSize({ width: 1280 + 288, height: 720 });
+    await page.setViewportSize({ width: 1280 + 320, height: 720 });
     await drawTrendLine(page);
     await tab(page, "Object Tree").click();
     const row = page.locator("[data-testid^=tree-drawing-]");
@@ -134,7 +134,7 @@ test.describe("sidebar panels", () => {
   test("selecting from the tree never alters the stored drawing", async ({
     bootedApp: page,
   }) => {
-    await page.setViewportSize({ width: 1280 + 288, height: 720 });
+    await page.setViewportSize({ width: 1280 + 320, height: 720 });
     await drawTrendLine(page);
     await tab(page, "Object Tree").click();
     const stored = () =>
@@ -151,7 +151,7 @@ test.describe("sidebar panels", () => {
   test("selecting a drawing whose point is in the future scrolls to the latest bars", async ({
     bootedApp: page,
   }) => {
-    await page.setViewportSize({ width: 1280 + 288, height: 720 });
+    await page.setViewportSize({ width: 1280 + 320, height: 720 });
     await page.getByRole("button", { name: "Trend line" }).click();
     await clickAt(page, { x: 1100, y: 200 });
     await clickAt(page, { x: 700, y: 260 });
@@ -193,7 +193,7 @@ test.describe("sidebar panels", () => {
   test("Object Tree rows keep focus across drawing commits", async ({
     bootedApp: page,
   }) => {
-    await page.setViewportSize({ width: 1280 + 288, height: 720 });
+    await page.setViewportSize({ width: 1280 + 320, height: 720 });
     await drawTrendLine(page);
     await tab(page, "Object Tree").click();
     const row = page.locator("[data-testid^=tree-drawing-]");
@@ -202,7 +202,7 @@ test.describe("sidebar panels", () => {
   });
 
   test("Object Tree: drawing hide, lock and remove", async ({ bootedApp: page }) => {
-    await page.setViewportSize({ width: 1280 + 288, height: 720 });
+    await page.setViewportSize({ width: 1280 + 320, height: 720 });
     await drawTrendLine(page);
     await tab(page, "Object Tree").click();
     const row = page.locator("[data-testid^=tree-drawing-]");
