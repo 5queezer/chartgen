@@ -195,6 +195,22 @@ describe("indicator store visibility and params", () => {
     ]);
   });
 
+  it("paramLabels keeps repeated labels short", async () => {
+    stubStorage();
+    const { paramLabels } = await loadStore();
+    const defaults = { cb: { a: 1, b: 2, c: 3, d: 4, e: 5 } };
+    // Only the params that differ between the instances.
+    expect([...paramLabels(["cb", { name: "cb", id: "cb#2", d: 9 }], defaults)]).toEqual([
+      ["cb", "(4)"],
+      ["cb#2", "(9)"],
+    ]);
+    // Identical instances: the first three params.
+    expect([...paramLabels(["cb", { name: "cb", id: "cb#2" }], defaults)]).toEqual([
+      ["cb", "(1, 2, 3)"],
+      ["cb#2", "(1, 2, 3)"],
+    ]);
+  });
+
   it("loads the pre-ADR-0013 format unchanged", async () => {
     stubStorage(JSON.stringify(["macd", { name: "rsi", length: 9 }]));
     const s = await loadStore();

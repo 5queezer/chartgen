@@ -397,7 +397,7 @@ export function fillColors(
   const c = wireColor(fill.color);
   return c
     ? { up: c, down: wireColor(fill.color_below) ?? c }
-    : fillTheme(name, index);
+    : fillTheme(keyName(name), index);
 }
 
 export type HBarTier = "poc" | "va" | "out";

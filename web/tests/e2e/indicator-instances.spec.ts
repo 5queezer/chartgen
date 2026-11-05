@@ -41,6 +41,13 @@ test.describe("indicator instances", () => {
     await setLength(page, "rsi#2", "21");
     await expect(legend(page, "rsi")).toContainText("(14)");
     await expect(legend(page, "rsi#2")).toContainText("(21)");
+    // The settings dialog names the instance it edits.
+    await legend(page, "rsi#2").hover();
+    await legend(page, "rsi#2").getByRole("button", { name: "Settings for RSI" }).click();
+    const dialog = page.getByRole("dialog");
+    await expect(dialog.getByRole("heading")).toHaveText("RSI (21)");
+    await dialog.getByRole("button", { name: "Close" }).click();
+    await expect(dialog).toHaveCount(0);
     // Each pane reads its own series.
     await expect.poll(async () => (await value(page, "rsi")) !== (await value(page, "rsi#2"))).toBe(true);
 

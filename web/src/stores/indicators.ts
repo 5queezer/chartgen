@@ -348,33 +348,49 @@ export function toWire(entries: ActiveIndicator[]): ActiveIndicator[] {
     );
 }
 
+/** Most params a repeated instance's label shows when its instances share them all. */
+const MAX_LABEL_PARAMS = 3;
+
+const isScalar = (v: unknown): boolean =>
+  typeof v === "number" || typeof v === "string" || typeof v === "boolean";
+
 /**
  * Params label of every entry by instance key, e.g. `(21)`; undefined when
- * there is nothing to show. An entry shows its own params; when its
- * indicator is active more than once, `defaults` (schema defaults by name)
- * fill in the rest, so the instances read apart: `(14)` and `(21)`. With
- * `repeatsOnly`, an indicator active once gets no label.
+ * there is nothing to show. An entry active once shows its own params. When
+ * its indicator is active more than once, `defaults` (schema defaults by
+ * name) fill in the rest and the label keeps the params that differ between
+ * the instances, so they read apart (`(14)` and `(21)`); instances that
+ * differ in nothing show their first three params. With `repeatsOnly`, an
+ * indicator active once gets no label.
  */
 export function paramLabels(
   entries: readonly ActiveIndicator[],
   defaults: Readonly<Record<string, Record<string, unknown>>> = {},
   repeatsOnly = false,
 ): Map<string, string | undefined> {
-  const count = new Map<string, number>();
-  for (const e of entries) {
-    count.set(indicatorName(e), (count.get(indicatorName(e)) ?? 0) + 1);
-  }
+  const label = (values: unknown[]) => {
+    const parts = values.filter(isScalar).map(String);
+    return parts.length > 0 ? `(${parts.join(", ")})` : undefined;
+  };
+  // Merged params of every instance, grouped by indicator name.
+  const groups = new Map<string, Array<Record<string, unknown>>>();
+  const merged = entries.map((e) => {
+    const name = indicatorName(e);
+    const params = { ...defaults[name], ...indicatorParams(e) };
+    groups.set(name, [...(groups.get(name) ?? []), params]);
+    return params;
+  });
   return new Map(
-    entries.map((e) => {
-      const name = indicatorName(e);
-      const own = indicatorParams(e);
-      const repeated = (count.get(name) ?? 0) > 1;
-      if (repeatsOnly && !repeated) return [instanceKey(e), undefined];
-      const params = repeated ? { ...defaults[name], ...own } : own;
-      const parts = Object.values(params)
-        .filter((v) => ["number", "string", "boolean"].includes(typeof v))
-        .map(String);
-      return [instanceKey(e), parts.length > 0 ? `(${parts.join(", ")})` : undefined];
+    entries.map((e, i) => {
+      const group = groups.get(indicatorName(e))!;
+      if (group.length === 1) {
+        return [instanceKey(e), repeatsOnly ? undefined : label(Object.values(indicatorParams(e)))];
+      }
+      const params = merged[i]!;
+      const keys = Object.keys(params).filter((k) => isScalar(params[k]));
+      const differ = keys.filter((k) => group.some((g) => g[k] !== params[k]));
+      const shown = differ.length > 0 ? differ : keys.slice(0, MAX_LABEL_PARAMS);
+      return [instanceKey(e), label(shown.map((k) => params[k]))];
     }),
   );
 }

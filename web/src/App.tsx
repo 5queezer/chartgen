@@ -77,6 +77,7 @@ import {
   indicatorStyle,
   instanceKey,
   isHidden,
+  paramLabels,
   removeIndicator,
   setActiveIndicators,
   toggleIndicatorHidden,
@@ -90,7 +91,11 @@ import {
   removeCompare,
 } from "./stores/compare";
 import { chartSettings } from "./stores/chartSettings";
-import { setParamDefaults, type ParamDefaults } from "./stores/layouts";
+import {
+  paramDefaults,
+  setParamDefaults,
+  type ParamDefaults,
+} from "./stores/layouts";
 import {
   addRecent,
   chartStyleOf,
@@ -174,16 +179,21 @@ export function App(): JSX.Element {
   // not reset a form in progress.
   const settingsTarget = createMemo(() => {
     const i = settingsIndex();
-    const entry = i === null ? undefined : untrack(activeIndicators)[i];
-    return entry === undefined
-      ? null
-      : {
-          name: indicatorName(entry),
-          key: instanceKey(entry),
-          params: indicatorParams(entry),
-          style: indicatorStyle(entry),
-          hidden: isHidden(entry),
-        };
+    const entries = untrack(activeIndicators);
+    const entry = i === null ? undefined : entries[i];
+    if (entry === undefined) return null;
+    const key = instanceKey(entry);
+    // A repeated indicator's title says which instance it is (ADR-0028).
+    const params = paramLabels(entries, untrack(paramDefaults), true).get(key);
+    const label = untrack(() => query.data?.indicators[key]?.label) || indicatorName(entry);
+    return {
+      name: indicatorName(entry),
+      title: params ? `${label} ${params}` : undefined,
+      key,
+      params: indicatorParams(entry),
+      style: indicatorStyle(entry),
+      hidden: isHidden(entry),
+    };
   });
 
   // Plot styles are client-only (ADR-0017): they reach the chart separately
@@ -528,9 +538,10 @@ export function App(): JSX.Element {
         }
         onClose={() => setSettingsIndex(null)}
         onSubmit={(params, fields, style) => {
-          const i = settingsIndex();
           const target = settingsTarget();
-          if (i !== null && target) {
+          // By key: the entry may have moved while the dialog was open.
+          const i = target ? indexOf(target.key) : -1;
+          if (i >= 0 && target) {
             // A style-only OK must not rewrite the params: dropping a
             // value equal to its default would change the wire entry and
             // refetch.
