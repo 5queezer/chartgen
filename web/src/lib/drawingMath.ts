@@ -80,11 +80,14 @@ export interface AnglePoint {
  * The moving point of a line, snapped to the nearest of horizontal, vertical
  * and 45° as seen on screen from `anchor` (`mouse` in the same pixels).
  * `moving` is the point as the chart placed it: on a bar, magnet applied.
- * Horizontal keeps its bar and takes the anchor's value; vertical keeps its
- * value and takes the anchor's bar, both exactly, without going through pixels.
+ * Horizontal keeps its bar and takes the anchor's value, exactly, without going
+ * through pixels. Vertical takes the anchor's bar, and its value from `mouse`
+ * through `magnet`, because the chart's magnet read the bar under the mouse.
  * A diagonal keeps its bar and derives y from that bar's x, so `toValue` makes
  * it right on any axis (log, percent, inverted). Mouse on the anchor counts as
- * horizontal, which gives a zero-length line.
+ * horizontal, which gives a zero-length line. `moving` comes back unchanged
+ * when it has no bar (over the price axis) or the anchor has no pixel (a value
+ * at or below zero on a log axis).
  */
 export function snapToAngle(
   anchor: AnglePoint,
@@ -92,14 +95,26 @@ export function snapToAngle(
   mouse: Px,
   toPx: (p: AnglePoint) => Px,
   toValue: (y: number) => number | undefined,
+  magnet: (value: number) => number = (value) => value,
 ): AnglePoint {
+  if (moving.dataIndex === undefined && moving.timestamp === undefined) return moving;
   const a = toPx(anchor);
+  const dx = mouse.x - a.x;
   const dy = mouse.y - a.y;
-  const deg = (Math.atan2(Math.abs(dy), Math.abs(mouse.x - a.x)) * 180) / Math.PI;
+  if (!Number.isFinite(dx) || !Number.isFinite(dy)) return moving;
+  const deg = (Math.atan2(Math.abs(dy), Math.abs(dx)) * 180) / Math.PI;
   if (deg < 22.5) return { ...moving, value: anchor.value };
-  if (deg > 67.5) return { ...moving, timestamp: anchor.timestamp, dataIndex: anchor.dataIndex };
+  if (deg > 67.5) {
+    const value = toValue(mouse.y);
+    return {
+      ...moving,
+      timestamp: anchor.timestamp,
+      dataIndex: anchor.dataIndex,
+      value: value === undefined ? moving.value : magnet(value),
+    };
+  }
   const run = Math.abs(toPx(moving).x - a.x);
-  return { ...moving, value: toValue(a.y + Math.sign(dy) * run) };
+  return { ...moving, value: toValue(a.y + Math.sign(dy) * run) ?? moving.value };
 }
 
 /** TradingView's default levels of the trend-based fib extension. */

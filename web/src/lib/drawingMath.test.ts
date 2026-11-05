@@ -229,6 +229,46 @@ describe("snapToAngle", () => {
     expect(snap(157.6).value).toBe(anchor.value);
   });
 
+  it("a vertical takes its value from the mouse, through the magnet", () => {
+    const { toPx, toValue } = axis();
+    const moving = { timestamp: 5300, dataIndex: 53, value: 777 }; // magnet read bar 53
+    const mouse = { x: 520, y: 300 };
+    expect(snapToAngle(anchor, moving, mouse, toPx, toValue).value).toBe(700);
+    const pulled = snapToAngle(anchor, moving, mouse, toPx, toValue, (v) => v + 1);
+    expect(pulled).toEqual({ timestamp: 5000, dataIndex: 50, value: 701 });
+  });
+
+  it("the magnet does not act on a horizontal or a diagonal", () => {
+    const { toPx, toValue } = axis();
+    const magnet = () => 1;
+    const level = { timestamp: 7000, dataIndex: 70, value: 450 };
+    expect(snapToAngle(anchor, level, { x: 700, y: 550 }, toPx, toValue, magnet).value).toBe(500);
+    const slope = { timestamp: 6000, dataIndex: 60, value: 450 };
+    expect(snapToAngle(anchor, slope, { x: 600, y: 600 }, toPx, toValue, magnet).value).toBe(400);
+  });
+
+  it("keeps the point's value when the axis has none to give", () => {
+    const { toPx } = axis();
+    const moving = { timestamp: 6000, dataIndex: 60, value: 450 };
+    const none = () => undefined;
+    expect(snapToAngle(anchor, moving, { x: 600, y: 600 }, toPx, none).value).toBe(450);
+    expect(snapToAngle(anchor, moving, { x: 510, y: 300 }, toPx, none).value).toBe(450);
+  });
+
+  it("does not snap a point without a bar", () => {
+    const { toPx, toValue } = axis();
+    const moving = { value: 450 };
+    expect(snapToAngle(anchor, moving, { x: 600, y: 600 }, toPx, toValue)).toBe(moving);
+  });
+
+  it.each([NaN, Infinity, -Infinity])("does not snap against an anchor at pixel y %d", (y) => {
+    const { toPx, toValue } = axis();
+    const moving = { timestamp: 6000, dataIndex: 60, value: 450 };
+    const px = (p: { dataIndex?: number; value?: number }) =>
+      p === anchor ? { x: 500, y } : toPx(p);
+    expect(snapToAngle(anchor, moving, { x: 600, y: 600 }, px, toValue)).toBe(moving);
+  });
+
   it("the mouse on the anchor gives a finite zero-length line", () => {
     const { toPx, toValue } = axis();
     const out = snapToAngle(anchor, { ...anchor }, { x: 500, y: 500 }, toPx, toValue);

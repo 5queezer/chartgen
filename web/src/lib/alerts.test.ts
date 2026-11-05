@@ -8,6 +8,7 @@ import {
   fires,
   indicatorReading,
   isDrawingAlertTool,
+  isVerticalLine,
   rearmedReading,
   type Alert,
   type AlertSource,
@@ -197,6 +198,17 @@ describe("drawingLevels (ADR-0034)", () => {
       }
     },
   );
+
+  it("isVerticalLine: both anchors on one bar, on a future bar too", () => {
+    expect(isVerticalLine({ points: [p(5 * H, 100), p(5 * H, 200)] })).toBe(true);
+    expect(isVerticalLine({ points: [p(5 * H, 100), p(6 * H, 200)] })).toBe(false);
+    expect(isVerticalLine({ points: [p(5 * H, 100)] })).toBe(false);
+    expect(isVerticalLine({ points: [] })).toBe(false);
+    expect(isVerticalLine({ points: [{ dataIndex: 900 }, { dataIndex: 900 }] })).toBe(true);
+    expect(isVerticalLine({ points: [{ dataIndex: 900 }, { dataIndex: 901 }] })).toBe(false);
+    expect(isVerticalLine({ points: [{ timestamp: 5 * H, dataIndex: 900 }, { dataIndex: 900 }] })).toBe(true);
+    expect(isVerticalLine({ points: [{}, {}] })).toBe(false);
+  });
 
   it("a ray only runs from its start towards its second point", () => {
     const right = { name: "rayLine" as const, points: [p(10 * H, 100), p(20 * H, 200)] };

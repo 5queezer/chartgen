@@ -32,7 +32,7 @@ import {
   DrawingToolbar,
   type DrawingsApi,
 } from "./components/DrawingToolbar";
-import { isDrawingAlertTool, isHorizontalTool } from "./lib/alerts";
+import { isDrawingAlertTool, isHorizontalTool, isVerticalLine } from "./lib/alerts";
 import { forgetReadings, setIndicatorSignatures } from "./stores/alerts";
 import { IndicatorChips } from "./components/IndicatorChips";
 import { IndicatorPicker } from "./components/IndicatorPicker";
@@ -422,7 +422,7 @@ export function App(): JSX.Element {
   // --- Drawing and indicator alerts (ADR-0034) ---------------------------
   const alertDrawings = createMemo(() =>
     (drawings()?.list() ?? []).flatMap((d) =>
-      isDrawingAlertTool(d.name)
+      isDrawingAlertTool(d.name) && !isVerticalLine(d)
         ? [{ id: d.id, label: DRAWING_LABELS[d.name], sloped: !isHorizontalTool(d.name) }]
         : [],
     ),

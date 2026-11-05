@@ -27,9 +27,9 @@ import {
   type Point,
 } from "klinecharts";
 
-import { isDrawingAlertTool } from "../lib/alerts";
+import { isDrawingAlertTool, isVerticalLine } from "../lib/alerts";
 import { isTypingContext, undoRedoKey } from "../lib/keys";
-import { effectiveMagnet, type Magnet } from "../lib/magnet";
+import { effectiveMagnet, magnetValue, type Magnet } from "../lib/magnet";
 import { syncDrawingAlerts } from "../stores/alerts";
 import { createHistory } from "../stores/drawingHistory";
 import {
@@ -558,8 +558,12 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
     pendingSave = null;
     if (!p) return;
     setSaveFailed(!saveDrawings(p.symbol, p.records));
-    // Alerts on a drawing that is gone are switched off (ADR-0034).
-    syncDrawingAlerts(p.symbol, p.records.map((r) => r.id));
+    // Alerts on a drawing that is gone or vertical are switched off (ADR-0034).
+    syncDrawingAlerts(
+      p.symbol,
+      p.records.map((r) => r.id),
+      p.records.filter(isVerticalLine).map((r) => r.id),
+    );
   };
   const persist = () => {
     pendingSave = { symbol: props.symbol, records: current };
@@ -635,14 +639,24 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
     const anchor = overlay.points[1 - index];
     if (!chart || !moving || !anchor) return;
     const paneId = overlay.paneId;
+    const toPx = (p: Partial<Point>) => chart.convertToPixel(p, { paneId }) as Px;
     Object.assign(
       moving,
       snapToAngle(
         anchor,
         moving,
         mouse,
-        (p) => chart.convertToPixel(p, { paneId }) as Px,
+        toPx,
         (y) => (chart.convertFromPixel([{ y }], { paneId }) as Partial<Point>[])[0]?.value,
+        (value) => {
+          // The anchor's bar, as drawn; none on a future bar. As in klinecharts,
+          // the magnet only acts on the price pane.
+          const [at] = chart.convertFromPixel([{ x: toPx(anchor).x }], { paneId }) as Partial<Point>[];
+          const bar = paneId === "candle_pane" ? chart.getDataList()[at?.dataIndex ?? -1] : undefined;
+          return bar
+            ? magnetValue(value, bar, overlay.mode as never, overlay.modeSensitivity, (v) => toPx({ value: v }).y)
+            : value;
+        },
       ),
     );
   };
@@ -1092,6 +1106,7 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
                 name: o.name,
                 lock: o.lock,
                 visible: o.visible,
+                mode: o.mode,
                 offRange: offRange.has(id),
                 paneId: o.paneId,
                 styles: o.styles,
@@ -1106,9 +1121,11 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
           : [];
       });
     w.__chartgenPositionSize = () => (props.chart ? readPositionSize(props.chart) : null);
+    w.__chartgenShiftHeld = () => shiftHeld;
     onCleanup(() => {
       delete w.__chartgenDrawings;
       delete w.__chartgenPositionSize;
+      delete w.__chartgenShiftHeld;
     });
   }
 
@@ -1420,7 +1437,7 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
             </button>
             <Show when={canon.get(m().id)?.name}>
               {(name) => (
-                <Show when={isDrawingAlertTool(name())}>
+                <Show when={isDrawingAlertTool(name()) && !isVerticalLine(canon.get(m().id) ?? { points: [] })}>
                   <button type="button" role="menuitem" class={menuItemClass} onClick={() => menuAction("alert")}>
                     Add alert on {DRAWING_LABELS[name()]}…
                   </button>

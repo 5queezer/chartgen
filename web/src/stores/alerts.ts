@@ -17,6 +17,7 @@ import {
   drawingLevels,
   fires,
   indicatorReading,
+  isVerticalLine,
   needsRearm,
   rearmedReading,
   sourceOf,
@@ -36,6 +37,8 @@ const MAX_NAME = 80;
 const KEY = "chartgen.alerts.list";
 /** The note of a drawing alert whose drawing was deleted. */
 export const DRAWING_DELETED = "drawing deleted";
+/** The note of a drawing alert whose line was dragged vertical: it has no value to read. */
+export const LINE_VERTICAL = "line is vertical";
 
 const isFinitePositive = (v: unknown): v is number =>
   typeof v === "number" && Number.isFinite(v) && v > 0;
@@ -371,24 +374,24 @@ export function updateAlert(
   );
 }
 
-/** A drawing alert whose drawing is not in its symbol's stored drawings. */
-function drawingMissing(a: Alert): boolean {
+/** Why a drawing alert's stored drawing cannot be read, or null when it can. */
+function deadDrawingNote(a: Alert): string | null {
   const src = a.source;
-  return (
-    src?.kind === "drawing" &&
-    !loadDrawings(a.symbol, false).some((d) => d.id === src.drawingId)
-  );
+  if (src?.kind !== "drawing") return null;
+  const rec = loadDrawings(a.symbol, false).find((d) => d.id === src.drawingId);
+  return !rec ? DRAWING_DELETED : isVerticalLine(rec) ? LINE_VERTICAL : null;
 }
 
 /**
- * `a` made active and re-armed; a drawing alert whose drawing is gone
- * stays off, with the note, instead (it could never fire).
+ * `a` made active and re-armed; a drawing alert whose drawing is gone or
+ * vertical stays off, with the note, instead (it could never fire).
  */
 function switchOn(a: Alert): Alert {
   const next: Alert = { ...a, active: true };
   delete next.disarmed;
   delete next.note;
-  return drawingMissing(a) ? { ...next, active: false, note: DRAWING_DELETED } : next;
+  const note = deadDrawingNote(a);
+  return note ? { ...next, active: false, note } : next;
 }
 
 /**
@@ -434,28 +437,35 @@ export function removeAlert(id: string): void {
 /**
  * The drawings of `symbol` are now `ids` (called when they are saved, and
  * with none when the symbol's drawings are evicted). Active alerts on a
- * drawing that is gone are switched off with a note, not deleted, so the
- * user sees what happened; when the drawing comes back (undo) they are
- * switched on again.
+ * drawing that is gone, or in `verticalIds` (a line with no value to read), are
+ * switched off with a note, not deleted, so the user sees what happened; when
+ * the drawing comes back (undo) or stops being vertical they are switched on again.
  */
 export function syncDrawingAlerts(
   symbol: string,
   ids: readonly (string | undefined)[],
+  verticalIds: readonly (string | undefined)[] = [],
 ): void {
   const have = new Set(ids);
+  const vertical = new Set(verticalIds);
   const list = fresh();
   let changed = false;
   const next = list.map((a) => {
     const src = a.source;
     if (a.symbol !== symbol || src?.kind !== "drawing") return a;
-    const present = have.has(src.drawingId);
-    if (!present && a.active) {
+    const note = !have.has(src.drawingId)
+      ? DRAWING_DELETED
+      : vertical.has(src.drawingId)
+        ? LINE_VERTICAL
+        : null;
+    const ours = a.note === DRAWING_DELETED || a.note === LINE_VERTICAL;
+    if (note !== null && (a.active || (ours && a.note !== note))) {
       changed = true;
-      const off: Alert = { ...a, active: false, note: DRAWING_DELETED };
+      const off: Alert = { ...a, active: false, note };
       delete off.disarmed;
       return off;
     }
-    if (present && a.note === DRAWING_DELETED) {
+    if (note === null && ours) {
       changed = true;
       baselines.delete(symbol);
       const on: Alert = { ...a, active: true };
