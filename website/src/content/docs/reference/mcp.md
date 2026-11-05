@@ -1,6 +1,6 @@
 ---
 title: MCP Integration
-description: Connect chartgen to Claude Desktop or Claude.ai — 17 tools across charting, orders, alerts, and notifications.
+description: Connect chartgen to Claude Desktop or Claude.ai — 19 tools across charting, live chart push, orders, alerts, and notifications.
 ---
 
 chartgen speaks the Model Context Protocol over both stdio (Claude Desktop)
@@ -45,15 +45,20 @@ The connector uses a single endpoint — `/mcp` — in two modes:
   (e.g. `Accept: text/plain`) receives `406 Not Acceptable`. A missing
   `Accept` header is tolerated and treated as `application/json`.
 - **`GET /mcp`** — optional server-initiated SSE stream. Used to deliver
-  push notifications such as `notifications/alert_triggered` as raw JSON-RPC
-  notification frames — see [push notifications](/chartgen/guides/notifications/).
-  Requires the Bearer token in the `Authorization` header.
+  push notifications such as `notifications/alert_triggered` and
+  `notifications/chart_tick` as raw JSON-RPC notification frames — see
+  [push notifications](/chartgen/guides/notifications/) and
+  [`subscribe_chart`](#subscribe_chart--unsubscribe_chart). Requires the
+  Bearer token in the `Authorization` header.
 
 `Mcp-Session-Id` is supported: if a client sends the header on a `POST /mcp`
-request, the server echoes it back unchanged. chartgen's tool calls are
-stateless (auth is per-request via the Bearer token), so no server-side
-session state is tracked — the header is surfaced only for clients that
-correlate on it.
+request, the server echoes it back unchanged. An `initialize` request without
+one gets a freshly minted id, which spec-compliant clients then send on every
+request, including `GET /mcp`. chartgen's tool calls are stateless (auth is
+per-request via the Bearer token). The only state keyed on the session is
+chart push: `subscribe_chart` pushes over the SSE stream opened with the same
+token and session id. Notifications such as `notifications/initialized` are
+answered with `202 Accepted`.
 
 `POST /` and `POST /message` are retained as aliases of `POST /mcp`, and
 `GET /sse` is retained as an alias of `GET /mcp`, for backwards compatibility
@@ -61,7 +66,7 @@ with existing Claude.ai connector deployments that predate Streamable HTTP.
 
 ## Tool catalog
 
-17 tools. The 12 trading tools require `--trade`; attempting to call them
+19 tools. The 12 trading tools require `--trade`; attempting to call them
 without it returns an error.
 
 ### Charting (always available)
@@ -245,6 +250,8 @@ indicator emits none — matching the existing convention for `lines`,
 ##### Live tail and history paging
 
 See [ADR-0009](/chartgen/decisions/0009-live-tail-polling-and-history-paging/).
+For Binance symbols over HTTP, [`subscribe_chart`](#subscribe_chart--unsubscribe_chart)
+pushes the same tail instead of you polling for it.
 
 - **Live tail.** Poll `{ "format": "series", "bars": 2, "warmup": 200 }`
   every few seconds. The last bar is the candle still forming, and the one
@@ -474,6 +481,56 @@ Upstream protection:
 The Yahoo cache holds at most 500 queries and drops the oldest first. Its
 key is the query lowercased with inner whitespace collapsed. Each upstream
 request times out after 10 s.
+
+#### `subscribe_chart` / `unsubscribe_chart`
+
+Server push of the live tail, so a chart updates as the market trades
+instead of once per poll. See
+[ADR-0021](/chartgen/decisions/0021-realtime-chart-push/). HTTP transport
+only (stdio returns an error); works without `--trade`.
+
+`subscribe_chart` takes the chart's `generate_chart` arguments: `ticker`
+(required), `timeframe` (default `4h`), `indicators`, `chart_style` and
+`warmup` (default 0, max 1000). Validation and error messages are the same
+as for `generate_chart`. It returns:
+
+```json
+{ "subscription_id": "cs-0b7f…" }
+```
+
+From then on the SSE stream (`GET /mcp`) opened with the same Bearer token
+and `Mcp-Session-Id` receives:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "method": "notifications/chart_tick",
+  "params": { "subscription_id": "cs-0b7f…", "series": { "…": "…" } }
+}
+```
+
+`series` is exactly what `generate_chart(format=series, bars=2, warmup)`
+returns for the same arguments at that moment: the last closed bar and the
+forming bar, with every indicator recomputed. Merge it like a polled tail.
+
+- **Pushable symbols.** Binance symbols only. Any other symbol fails with
+  an error that starts with `not pushable`: poll `generate_chart` instead.
+  With `CHARTGEN_DATA_SOURCE=sample` the same symbols are pushable and a
+  synthetic feed ticks every ~500 ms.
+- **Cadence.** The server follows Binance's kline stream (every 2 s) and
+  its aggTrade stream (each trade), and pushes at most 4 tails per second
+  per chart. The first tail is pushed right after subscribing.
+- **Sharing.** Subscriptions with equal arguments share one rolling window
+  and one recompute. Every chart of a symbol and interval shares one Binance
+  WebSocket.
+- **Limits.** At most 4 subscriptions per token and 64 per server. Over a
+  limit, or without an open SSE stream for the session, the call fails.
+- **Lifetime.** A subscription ends with `unsubscribe_chart`, or when its
+  SSE stream closes. A WebSocket closes when its last chart goes.
+
+`unsubscribe_chart` takes `subscription_id` and returns
+`{ "unsubscribed": true }`, or `false` if the subscription was already gone
+(or belongs to another token).
 
 ### Orders & positions (require `--trade`)
 

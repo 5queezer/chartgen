@@ -73,9 +73,9 @@ Symbol, timeframe, chart type, price-scale mode, theme, time zone and recent sym
   for symbols that trade around the clock (the Binance rule: tickers ending
   in `USDT`, `BUSD`, `BTC`, `ETH`, `BNB`, `USDC` or `FDUSD`). Stocks, FX and
   futures have trading sessions, so their bar close cannot be derived from the
-  interval and the badge is hidden. At the close it disappears for up to one
-  poll period (2 s) until the live update brings the next bar, and it hides
-  when the last price is scrolled out of view.
+  interval and the badge is hidden. At the close it disappears until the
+  live update brings the next bar (a moment with push, up to one 2 s poll
+  period without), and it hides when the last price is scrolled out of view.
 - **Price scale** — the `%`, `log` and `auto` buttons in the bottom-right
   corner of the price axis. `%` shows percent change from the first
   visible bar and `log` a logarithmic scale; they are mutually exclusive
@@ -152,7 +152,10 @@ The compare list is saved with the rest of the chart state
 ## Live updates and history
 
 The chart stays live while the page is open, as in TradingView
-([ADR-0009](/chartgen/decisions/0009-live-tail-polling-and-history-paging/)).
+([ADR-0009](/chartgen/decisions/0009-live-tail-polling-and-history-paging/),
+[ADR-0021](/chartgen/decisions/0021-realtime-chart-push/)). Binance symbols
+are pushed by the server and tick several times a second; other symbols are
+polled.
 
 - **Live candle.** The forming candle, every indicator on it, the legend,
   the last-price badge and the countdown update continuously. When the
@@ -166,9 +169,9 @@ The chart stays live while the page is open, as in TradingView
   no older bars, or at 20,000 loaded bars, where the left edge shows
   "History limit reached" (every live update recalculates the indicators
   over all loaded bars, so the history is capped).
-- **Status.** A badge after the status text shows `live`, `paused` (tab
-  hidden), `live: retry in Ns` after a failed update, or `resyncing...`
-  while the chart reloads to catch up.
+- **Status.** A badge after the status text shows `live` (server push),
+  `live (polling)`, `paused` (tab hidden), `live: retry in Ns` after a
+  failed poll, or `resyncing...` while the chart reloads to catch up.
 
 How it works: the first load asks `generate_chart` for 500 bars with a
 `warmup` of 300. The app then polls the last two bars (`bars: 2`,
@@ -179,9 +182,30 @@ SMA/EMA 200) so values at a page seam line up. Changing the symbol,
 timeframe or indicators cancels every pending poll and page and does a
 full reload.
 
+**Push.** After each full load the app calls `subscribe_chart` with the
+same arguments and `warmup: 300`. For a Binance symbol the server then
+pushes the same two-bar tail over the MCP SSE stream (`GET /mcp`) whenever
+the market moves, at most 4 times a second, and the app merges it exactly
+like a polled tail. Polling stops while pushes arrive. The server answers
+"not pushable" for other symbols, which simply keep polling.
+
+- **Fallback.** No push for 6 s (three times the 2 s Binance kline
+  cadence), or a dropped SSE stream, which ends the subscription on the
+  server, puts the chart back on polling at once. The app then retries the
+  subscription after 2 s, doubling up to 60 s, and stops polling again once
+  pushes resume. A failed subscribe backs off the same way.
+- **Chart changes.** Changing the symbol, timeframe, indicators or chart
+  type unsubscribes and subscribes the new chart.
+- **Hidden tab.** A hidden tab unsubscribes, as it stops polling, and
+  subscribes again (after a catch-up poll) when visible. A background tab
+  costs the server nothing.
+- **Gaps.** A pushed tail that does not line up with the chart (bars
+  missed while the stream stalled) triggers one poll, which catches up or
+  reloads as described below.
+
 | | 24/7 symbols (Binance rule) | Other symbols (Yahoo) |
 |---|---|---|
-| Poll period | 2 s | 15 s |
+| Updates | pushed (polled every 2 s as fallback) | polled every 15 s |
 | After a failed poll | doubles, up to 60 s | doubles, up to 60 s |
 
 - Polling pauses while the tab is hidden and catches up as soon as it is
@@ -470,7 +494,7 @@ domain) leave `VITE_CHARTGEN_BASE_URL` unset — the app will hit
   up). The query never goes stale and does not refetch on focus or
   reconnect, because the live feed keeps the data fresh.
 - **Live feed** — `web/src/lib/liveFeed.ts` takes over each full load,
-  polls the tail and pages in history. The merge rules live in
+  applies pushed tails or polls the tail, and pages in history. The merge rules live in
   `web/src/lib/seriesMerge.ts` (unit-tested): bars and every per-bar
   channel are joined by timestamp, signals and divergence lines are
   re-indexed, and anything that does not line up (another symbol or
@@ -478,9 +502,10 @@ domain) leave `VITE_CHARTGEN_BASE_URL` unset — the app will hit
   shape) is rejected and leads to a longer tail or a full reload.
 - **[`@modelcontextprotocol/sdk`](https://www.npmjs.com/package/@modelcontextprotocol/sdk)**
   with `StreamableHTTPClientTransport`. Bearer tokens flow through
-  `requestInit.headers`; `fallbackNotificationHandler` taps into
-  `notifications/alert_triggered` frames on the GET SSE stream
-  (dormant logging in v0.1).
+  `requestInit.headers`; `fallbackNotificationHandler` receives the frames
+  of the GET SSE stream. `notifications/chart_tick` is validated with Zod
+  and handed to the live feed; `notifications/alert_triggered` is only
+  logged (dormant in v0.1).
 - **[Kobalte](https://kobalte.dev/)** — WAI-ARIA-correct headless
   primitives (`Dialog`, `DropdownMenu`, `Accordion`). Visual styling via Tailwind.
 - **[Tailwind v4](https://tailwindcss.com/)** — CSS-first config
