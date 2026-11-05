@@ -47,6 +47,11 @@ impl Indicator for Macd {
         }
     }
 
+    fn warmup_bars(&self) -> usize {
+        use super::pine::ma_warmup;
+        ma_warmup("ema", self.fast.max(self.slow)) + ma_warmup("ema", self.signal)
+    }
+
     fn compute(&self, data: &OhlcvData) -> PanelResult {
         // TV: macd = ta.ema(close, fast) - ta.ema(close, slow),
         // signal = ta.ema(macd, signal), hist = macd - signal.

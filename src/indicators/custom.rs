@@ -141,6 +141,11 @@ impl Indicator for Adx {
         }
     }
 
+    fn warmup_bars(&self) -> usize {
+        // DI smooths with ta.rma, then ADX smooths DX with it again.
+        2 * super::pine::ma_warmup("rma", self.period)
+    }
+
     fn compute(&self, data: &OhlcvData) -> PanelResult {
         use super::pine::{change_n, div, fixnan, rma_n, true_range, zip};
         // TradingView ADX / DMI (DI length = ADX smoothing = period):
@@ -216,6 +221,21 @@ impl Indicator for Adx {
 const UP_COLOR: u32 = 0x26a69a;
 const DOWN_COLOR: u32 = 0xef5350;
 
+/// An up- and a down-trend line, each NaN while the other trend is on, like
+/// two TradingView plots with plot.style_linebr: a flip breaks the line
+/// instead of drawing a connector between the two levels.
+fn trend_lines(up: Vec<f64>, down: Vec<f64>, labels: [&str; 2]) -> Vec<Line> {
+    [(up, UP_COLOR, labels[0]), (down, DOWN_COLOR, labels[1])]
+        .into_iter()
+        .map(|(y, color, label)| Line {
+            y,
+            color: rgba(color, 0.9),
+            width: 1,
+            label: Some(label.into()),
+        })
+        .collect()
+}
+
 pub struct Supertrend {
     pub period: usize,
     pub multiplier: f64,
@@ -253,6 +273,10 @@ impl Indicator for Supertrend {
         if let Some(v) = params.get("multiplier").and_then(|v| v.as_f64()) {
             self.multiplier = v;
         }
+    }
+
+    fn warmup_bars(&self) -> usize {
+        super::pine::ma_warmup("rma", self.period)
     }
 
     fn compute(&self, data: &OhlcvData) -> PanelResult {
@@ -338,20 +362,7 @@ impl Indicator for Supertrend {
         }
 
         PanelResult {
-            lines: vec![
-                Line {
-                    y: up,
-                    color: rgba(UP_COLOR, 0.9),
-                    width: 1,
-                    label: Some("Up Trend".into()),
-                },
-                Line {
-                    y: down,
-                    color: rgba(DOWN_COLOR, 0.9),
-                    width: 1,
-                    label: Some("Down Trend".into()),
-                },
-            ],
+            lines: trend_lines(up, down, ["Up Trend", "Down Trend"]),
             dots,
             is_overlay: true,
             label: "Supertrend".into(),
@@ -410,14 +421,7 @@ impl Indicator for ParabolicSar {
     fn compute(&self, data: &OhlcvData) -> PanelResult {
         let n = data.len();
         let mut dots = Vec::new();
-
-        if n < 2 {
-            return PanelResult {
-                is_overlay: true,
-                label: "SAR".into(),
-                ..Default::default()
-            };
-        }
+        let (mut up, mut down) = (vec![f64::NAN; n], vec![f64::NAN; n]);
 
         // Port of Pine's `ta.sar` reference implementation. Bar 0 is na; bar 1
         // seeds the trend from close vs close[1].
@@ -493,31 +497,29 @@ impl Indicator for ParabolicSar {
                 }
             }
 
-            let color = if trend_up {
-                rgba(0x26a69a, 0.9)
+            let (color, label) = if trend_up {
+                up[i] = sar;
+                (UP_COLOR, signals::FLIP_UP)
             } else {
-                rgba(0xef5350, 0.9)
+                down[i] = sar;
+                (DOWN_COLOR, signals::FLIP_DOWN)
             };
-            // Label only the flip bars (direction reversal = signal event).
-            let label = if flipped {
-                if trend_up {
-                    Some(signals::FLIP_UP.to_string())
-                } else {
-                    Some(signals::FLIP_DOWN.to_string())
-                }
-            } else {
-                None
-            };
-            dots.push(Dot {
-                x: i,
-                y: sar,
-                color,
-                size: 2,
-                label,
-            });
+            // A dot marks only a flip bar (direction reversal = signal event).
+            if flipped {
+                dots.push(Dot {
+                    x: i,
+                    y: sar,
+                    color: rgba(color, 0.9),
+                    size: 2,
+                    label: Some(label.to_string()),
+                });
+            }
         }
 
         PanelResult {
+            // TradingView draws a cross per bar; two lines that break at a
+            // flip draw the same points on the series wire and the web chart.
+            lines: trend_lines(up, down, ["SAR Up", "SAR Down"]),
             dots,
             is_overlay: true,
             label: "SAR".into(),
@@ -733,15 +735,7 @@ impl Indicator for HeikinAshi {
 
     fn compute(&self, data: &OhlcvData) -> PanelResult {
         let n = data.len();
-        let mut dots = Vec::with_capacity(n);
-
-        if n == 0 {
-            return PanelResult {
-                is_overlay: true,
-                label: "HA".into(),
-                ..Default::default()
-            };
-        }
+        let mut dots = Vec::new();
 
         let ha = data.heikin_ashi();
         let ha_open: Vec<f64> = ha.bars.iter().map(|b| b.open).collect();
@@ -769,16 +763,26 @@ impl Indicator for HeikinAshi {
             } else {
                 None
             };
-            dots.push(Dot {
-                x: i,
-                y: ha_close[i],
-                color,
-                size: 3,
-                label,
-            });
+            if label.is_some() {
+                dots.push(Dot {
+                    x: i,
+                    y: ha_close[i],
+                    color,
+                    size: 3,
+                    label,
+                });
+            }
         }
 
         PanelResult {
+            // The HA close as a line, so the series wire and the web chart
+            // carry it; dots mark only the color flips.
+            lines: vec![Line {
+                y: ha_close,
+                color: rgba(0x787B86, 0.9),
+                width: 1,
+                label: Some("HA Close".into()),
+            }],
             dots,
             is_overlay: true,
             label: "HA".into(),
@@ -1291,16 +1295,15 @@ impl Indicator for KalmanVolume {
         }
     }
 
+    fn warmup_bars(&self) -> usize {
+        // HMA, its 200-bar stdev, the Kalman smoothing (alpha k), the SMA.
+        use super::pine::{decay_bars, ma_warmup};
+        ma_warmup("hma", self.vzo_length) + 200 + decay_bars(self.k) + self.sig_length
+    }
+
     fn compute(&self, data: &OhlcvData) -> PanelResult {
         use super::pine::{div, hma_n, stdev};
         let n = data.len();
-        if n < 3 {
-            return PanelResult {
-                label: "KVF".into(),
-                ..Default::default()
-            };
-        }
-
         let closes = data.closes();
         let volumes: Vec<f64> = data.bars.iter().map(|b| b.volume).collect();
 
@@ -1356,42 +1359,30 @@ impl Indicator for KalmanVolume {
             }
         }
 
-        // Build dots for Kalman line (colored per bar)
+        // Kalman line and its signal as lines (the series wire carries no
+        // unlabeled dots); the bull/bear fills between them keep the colors.
         let mut dots = Vec::new();
         let cyan = 0x00BCD4;
         let red = 0xFF1744;
-
-        for i in 0..n {
-            if m_n[i].is_nan() || signal[i].is_nan() {
-                continue;
-            }
-            let bullish = m_n[i] > signal[i];
-            let color = if bullish {
-                rgba(cyan, 0.9)
-            } else {
-                rgba(red, 0.9)
-            };
-            dots.push(Dot {
-                x: i,
-                y: m_n[i],
-                color,
-                size: 2,
-                label: None,
-            });
-            // Signal dot (fainter)
-            let sig_color = if bullish {
-                rgba(cyan, 0.4)
-            } else {
-                rgba(red, 0.4)
-            };
-            dots.push(Dot {
-                x: i,
-                y: signal[i],
-                color: sig_color,
-                size: 1,
-                label: None,
-            });
-        }
+        let both = |i: usize| !m_n[i].is_nan() && !signal[i].is_nan();
+        let kvf_lines = vec![
+            Line {
+                y: (0..n)
+                    .map(|i| if both(i) { m_n[i] } else { f64::NAN })
+                    .collect(),
+                color: rgba(cyan, 0.9),
+                width: 2,
+                label: Some("KVF".into()),
+            },
+            Line {
+                y: (0..n)
+                    .map(|i| if both(i) { signal[i] } else { f64::NAN })
+                    .collect(),
+                color: rgba(red, 0.6),
+                width: 1,
+                label: Some("Signal".into()),
+            },
+        ];
 
         // Signal crossover/crossunder dots (at offset -1)
         for i in 2..n {
@@ -1485,7 +1476,7 @@ impl Indicator for KalmanVolume {
         let neg_y: Vec<f64> = neg_heights.iter().map(|v| -v).collect();
 
         PanelResult {
-            lines: vec![],
+            lines: kvf_lines,
             fills: vec![
                 Fill {
                     y1: bull_m,
@@ -2454,9 +2445,6 @@ mod tests {
     use crate::data::sample_data;
     use crate::indicators::pine::test_util::{bars, closes, eq, ohlc, NAN};
 
-    fn dot_ys(r: &PanelResult) -> Vec<f64> {
-        r.dots.iter().map(|d| d.y).collect()
-    }
     fn flips(r: &PanelResult) -> Vec<(usize, &str)> {
         r.dots
             .iter()
@@ -2493,15 +2481,15 @@ mod tests {
         );
         assert_eq!(flips(&r), vec![(6, signals::FLIP_UP)]);
         assert_eq!(r.dots.len(), 1, "a dot marks only a flip");
+        assert_eq!(r.lines[0].label.as_deref(), Some("Up Trend"));
+        assert_eq!(r.lines[1].label.as_deref(), Some("Down Trend"));
         assert_breaks_at_flips(&r);
         eq(&r.lines[0].y[5..], &[NAN, 0.09375, 1.796875]);
     }
 
-    /// Supertrend per bar from its Up/Down Trend lines, of which at most
-    /// one has a value at any bar.
+    /// Supertrend / SAR per bar from its up and down trend lines, of which
+    /// at most one has a value at any bar.
     fn st_ys(r: &PanelResult) -> Vec<f64> {
-        assert_eq!(r.lines[0].label.as_deref(), Some("Up Trend"));
-        assert_eq!(r.lines[1].label.as_deref(), Some("Down Trend"));
         let (up, down) = (&r.lines[0].y, &r.lines[1].y);
         up.iter()
             .zip(down)
@@ -2570,12 +2558,37 @@ mod tests {
     fn sar_matches_pine_reference() {
         let r = ParabolicSar::default().compute(&ohlc());
         // Bar 0 is na; bar 1 seeds an uptrend at low[0] = 0.
-        assert_eq!(r.dots[0].x, 1);
-        eq(&dot_ys(&r), &[0.0, 0.0, 0.2, 0.392, 5.0, 4.91, 0.5]);
+        eq(&st_ys(&r), &[NAN, 0.0, 0.0, 0.2, 0.392, 5.0, 4.91, 0.5]);
         assert_eq!(
             flips(&r),
             vec![(5, signals::FLIP_DOWN), (7, signals::FLIP_UP)]
         );
+        // SAR Up / SAR Down break at a flip; dots mark only the flips.
+        assert_eq!(r.lines[0].label.as_deref(), Some("SAR Up"));
+        assert_eq!(r.dots.len(), 2);
+        assert_breaks_at_flips(&r);
+        let r = ParabolicSar::default().compute(&closes(&[1.0]));
+        assert!(r.lines.iter().all(|l| l.y.len() == 1 && l.y[0].is_nan()));
+    }
+
+    #[test]
+    fn heikin_ashi_and_kvf_plot_lines() {
+        // The series wire drops unlabeled dots, so these plot lines.
+        let ha = HeikinAshi.compute(&ohlc());
+        assert_eq!(ha.lines[0].label.as_deref(), Some("HA Close"));
+        assert_eq!(ha.lines[0].y[0], (1.0 + 2.0 + 0.0 + 1.0) / 4.0);
+        assert!(ha.dots.iter().all(|d| d.label.is_some()));
+        let kvf = KalmanVolume::default().compute(&crate::data::sample_data(500));
+        let labels: Vec<_> = kvf.lines.iter().map(|l| l.label.as_deref()).collect();
+        assert_eq!(labels, [Some("KVF"), Some("Signal")]);
+        assert!(kvf.lines.iter().all(|l| l.y[499].is_finite()));
+        assert!(kvf.dots.iter().all(|d| d.label.is_some()));
+        // Short windows keep one shape.
+        for bars in 0..3 {
+            let r = KalmanVolume::default().compute(&closes(&vec![1.0; bars]));
+            assert_eq!(r.lines.len(), 2);
+            assert_eq!(HeikinAshi.compute(&closes(&vec![1.0; bars])).lines.len(), 1);
+        }
     }
 
     #[test]
@@ -2660,11 +2673,12 @@ mod tests {
             ..Default::default()
         };
         // hma4 is valid from bar 4, ta.stdev(vzo, 200) from bar 203, the
-        // 10-bar signal from bar 212: no dot (and no 0 placeholder) before.
+        // 10-bar signal from bar 212: no value (and no 0 placeholder) before.
         let r = ind.compute(&sample_data(300));
-        assert_eq!(r.dots.iter().map(|d| d.x).min(), Some(212));
-        let first: Vec<f64> = r.dots.iter().filter(|d| d.x == 212).map(|d| d.y).collect();
-        assert!(first.iter().all(|y| y.is_finite() && *y != 0.0));
+        for line in &r.lines {
+            assert_eq!(line.y.iter().position(|y| y.is_finite()), Some(212));
+            assert_ne!(line.y[212], 0.0);
+        }
     }
 
     #[test]

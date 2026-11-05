@@ -350,17 +350,23 @@ const MAX_BARS: usize = 5000;
 /// Upper bound for `warmup` (ADR-0009).
 const MAX_WARMUP: usize = 1000;
 
+/// The `warmup` argument as the client sent it, capped.
+fn asked_warmup(args: &Value) -> usize {
+    (args.get("warmup").and_then(|v| v.as_u64()).unwrap_or(0) as usize).min(MAX_WARMUP)
+}
+
 /// The `warmup` argument, capped. A non-zero one is raised to what the
 /// indicators need to converge, so values at a page seam or on a tail match
 /// the history loaded before (ADR-0032).
 fn warmup_arg(args: &Value, panels: &[Box<dyn Indicator>]) -> usize {
-    let asked = args.get("warmup").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+    let asked = asked_warmup(args);
     if asked == 0 {
         return 0;
     }
     let need = panels.iter().map(|i| i.warmup_bars()).max().unwrap_or(0);
     asked.max(need).min(MAX_WARMUP)
 }
+
 /// Oldest accepted `end_time`: 1900-01-01 (index histories predate 1970).
 const MIN_END_TIME_MS: i64 = -2_208_988_800_000;
 /// Newest accepted `end_time`, relative to now.
@@ -517,7 +523,13 @@ fn generate_chart(
         }
         (sym, _) => {
             match fetch::fetch_ohlcv(source, sym.unwrap_or(""), interval, requested, end_time) {
-                Ok(f) => (f.data, f.has_more),
+                // Warmup bars are trimmed from the payload. When history ran
+                // out they are still older bars the client has not seen, so
+                // it must page on to get them (ADR-0032).
+                Ok(f) => {
+                    let more = f.has_more || f.data.len() > bars;
+                    (f.data, more)
+                }
                 Err(e) => return tool_err(id, &format!("Data fetch failed: {e}")),
             }
         }
@@ -791,13 +803,13 @@ fn tool_subscribe_chart(
     if let Err(e) = check_panels(&unknown, &invalid) {
         return tool_err(id, &e);
     }
-    let warmup = warmup_arg(args, &panels);
     let req = ChartRequest {
         ticker: ticker.to_string(),
         timeframe: timeframe.to_string(),
         indicators: indicators.to_string(),
         chart_style: chart_style.to_string(),
-        warmup,
+        warmup: warmup_arg(args, &panels),
+        asked_warmup: asked_warmup(args),
     };
     match push.hub.subscribe(token, &push.client, &push.stream, req) {
         Ok(sub) => tool_ok(id, json!({ "subscription_id": sub })),
@@ -1367,21 +1379,15 @@ fn panel_result_to_json(pr: &chartgen::indicator::PanelResult) -> Value {
         out["y_range"] = json!([finite_or_null(lo), finite_or_null(hi)]);
     }
 
-    // Lines: last finite y-value for each
+    // Lines: the value at the last bar, null where the line has none there
+    // (an inactive Supertrend line), not a stale one from an earlier bar.
     if !pr.lines.is_empty() {
         let lines: Vec<Value> = pr
             .lines
             .iter()
             .enumerate()
             .map(|(i, line)| {
-                let last_val = line
-                    .y
-                    .iter()
-                    .rev()
-                    .find(|v| v.is_finite())
-                    .copied()
-                    .map(|v| json!(v))
-                    .unwrap_or(Value::Null);
+                let last_val = finite_or_null(line.y.last().copied().unwrap_or(f64::NAN));
                 json!({
                     "index": i,
                     "label": line.label,
@@ -3933,11 +3939,110 @@ mod tests {
     }
 
     #[test]
+    fn per_bar_plots_reach_the_series_wire() {
+        // Unlabeled dots are not serialized, so these plot lines instead.
+        let p = series_payload(
+            json!({ "ticker": "BTCUSDT", "timeframe": "1h", "bars": 100, "warmup": 300,
+                    "end_time": END_4H_MS, "format": "series",
+                    "indicators": ["sar", "kalman_volume", "heikin_ashi", "supertrend"] }),
+            fetch::DataSource::Sample,
+        );
+        for (name, labels) in [
+            ("sar", vec!["SAR Up", "SAR Down"]),
+            ("kalman_volume", vec!["KVF", "Signal"]),
+            ("heikin_ashi", vec!["HA Close"]),
+            ("supertrend", vec!["Up Trend", "Down Trend"]),
+        ] {
+            let lines = p["indicators"][name]["lines"].as_array().unwrap();
+            let got: Vec<&str> = lines.iter().map(|l| l["label"].as_str().unwrap()).collect();
+            assert_eq!(got, labels, "{name}");
+            for l in lines {
+                let values = l["values"].as_array().unwrap();
+                assert_eq!(values.len(), 100);
+                assert!(values.iter().any(Value::is_number), "{name} {}", l["label"]);
+            }
+        }
+    }
+
+    #[test]
+    fn summary_inactive_trend_line_has_no_last_value() {
+        // Exactly one Supertrend line has a value at the last bar; the other
+        // reports null, not the value it had when its trend ended.
+        let pr = indicators::by_name("supertrend")
+            .unwrap()
+            .compute(&data::sample_data(200));
+        let j = panel_result_to_json(&pr);
+        let last = |i: usize| j["lines"][i]["last_value"].clone();
+        assert_eq!([last(0), last(1)].iter().filter(|v| v.is_null()).count(), 1);
+    }
+
+    #[test]
+    fn warmup_bars_stay_reachable_when_history_runs_out() {
+        // 10 bars of history, 5 asked for, warmup raised to 891: the 5
+        // trimmed warmup bars are older history the client must page to.
+        let page = |end: i64| {
+            series_payload(
+                json!({ "timeframe": "1h", "bars": 5, "warmup": 20, "end_time": end,
+                        "indicators": ["ema_stack"], "format": "series" }),
+                fetch::DataSource::Sample,
+            )
+        };
+        let newest = page(10 * HOUR_MS);
+        assert_eq!(
+            bar_ts(&newest),
+            (5..10).map(|h| h * 3_600).collect::<Vec<_>>()
+        );
+        assert_eq!(newest["has_more"], true);
+        let oldest = page(bar_ts(&newest)[0] * 1000);
+        assert_eq!(
+            bar_ts(&oldest),
+            (0..5).map(|h| h * 3_600).collect::<Vec<_>>()
+        );
+        assert_eq!(oldest["has_more"], false);
+    }
+
+    #[test]
     fn warmup_is_raised_to_the_indicators_need() {
         let panels = |names: Value| parse_panels(&names, None).0;
         let w =
             |warmup: u64, names: Value| warmup_arg(&json!({ "warmup": warmup }), &panels(names));
-        assert_eq!(indicators::by_name("ema_stack").unwrap().warmup_bars(), 891);
+        let need = |name: &str| indicators::by_name(name).unwrap().warmup_bars();
+        let declared: Vec<(&str, usize)> = indicators::registry()
+            .iter()
+            .map(|i| (i.name, need(i.name)))
+            .filter(|&(_, n)| n > 0)
+            .collect();
+        // At their defaults only ema_stack and kalman_volume need more than
+        // the web's 300.
+        assert_eq!(
+            declared,
+            [
+                ("ema_stack", 891),
+                ("keltner", 90),
+                ("supertrend", 76),
+                ("macd", 156),
+                ("rsi", 109),
+                ("atr", 108),
+                ("adx", 216),
+                ("kalman_volume", 399),
+                ("ma", 9),
+                ("vwma", 9),
+                ("hma", 11),
+                ("ma_ribbon", 200),
+                ("envelopes", 20),
+                ("stoch_rsi", 129),
+                ("trix", 244),
+                ("ppo", 94),
+                ("elder_force_index", 59),
+                ("tsi", 229),
+                ("volume_oscillator", 45),
+                ("smi_ergodic", 137),
+                ("connors_rsi", 101),
+            ]
+        );
+        // Parameters count: RSI 50 needs more than 300.
+        let rsi50 = parse_panels(&json!([{ "name": "rsi", "length": 50 }]), None).0;
+        assert_eq!(rsi50[0].warmup_bars(), 393);
         assert_eq!(w(300, json!(["ema_stack", "rsi"])), 891);
         assert_eq!(w(950, json!(["ema_stack"])), 950);
         assert_eq!(w(300, json!(["rsi"])), 300);
@@ -4471,18 +4576,21 @@ mod tests {
             None,
         )))
         .unwrap();
+        // The group's window: the tail plus the raised warmup (ADR-0032).
+        let indicators = json!(["rsi", "macd"]);
+        let warmup = warmup_arg(&args, &parse_panels(&indicators, None).0);
         let mut raw = fetch::fetch_ohlcv(
             fetch::DataSource::Sample,
             "ETHUSDT",
             "4h",
-            42,
+            2 + warmup,
             Some(END_4H_MS),
         )
         .unwrap()
         .data;
         raw.symbol = Some("ETHUSDT".into());
         raw.interval = Some("4h".into());
-        let pushed = series_tail(&raw, &json!(["rsi", "macd"]), "heikin_ashi", 2).unwrap();
+        let pushed = series_tail(&raw, &indicators, "heikin_ashi", 2).unwrap();
         assert_eq!(pushed, polled);
     }
 

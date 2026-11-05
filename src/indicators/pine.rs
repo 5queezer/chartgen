@@ -226,17 +226,27 @@ pub fn ma_by_type(kind: &str, x: &[f64], vol: &[f64], n: usize) -> Vec<f64> {
     }
 }
 
+/// Bars after which the start of an exponential smoothing with `alpha`
+/// weighs < 0.1%. 0 for alpha outside (0, 1): no smoothing, or none decays.
+pub fn decay_bars(alpha: f64) -> usize {
+    if !(alpha > 0.0 && alpha < 1.0) {
+        return 0;
+    }
+    (1000f64.ln() / -(1.0 - alpha).ln()).ceil() as usize
+}
+
 /// `Indicator::warmup_bars` of `ma_by_type(kind, .., n)`: the seed window
 /// plus the bars after which the seed of an exponential kind weighs < 0.1%
-/// (dema/tema chain two/three EMAs). Window kinds are exact after `n` bars.
+/// (dema/tema chain two/three EMAs). Window kinds are exact after their
+/// lookback (hma: the full WMA, then a sqrt-length one).
 pub fn ma_warmup(kind: &str, n: usize) -> usize {
-    let decay = |alpha: f64| n + (1000f64.ln() / -(1.0 - alpha).ln()).ceil() as usize;
-    let ema = || decay(2.0 / (n as f64 + 1.0));
+    let ema = || n + decay_bars(2.0 / (n as f64 + 1.0));
     match kind {
         "ema" => ema(),
         "dema" => 2 * ema(),
         "tema" => 3 * ema(),
-        "rma" | "smma" => decay(1.0 / n.max(1) as f64),
+        "rma" | "smma" => n + decay_bars(1.0 / n.max(1) as f64),
+        "hma" => n + ((n as f64).sqrt().floor() as usize).max(1) - 1,
         _ => n,
     }
 }

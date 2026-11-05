@@ -233,7 +233,19 @@ pub struct ChartRequest {
     /// The `indicators` array as JSON (object keys sorted, so canonical).
     pub indicators: String,
     pub chart_style: String,
+    /// Warmup the group computes with: the client's, raised to what the
+    /// indicators need (ADR-0032).
     pub warmup: usize,
+    /// The client's `warmup` before that raise. The push cadence follows
+    /// it, so the server's own raise does not slow pushes down.
+    pub asked_warmup: usize,
+}
+
+impl ChartRequest {
+    /// Shortest gap between two pushes of this chart's group.
+    fn push_interval(&self, base: Duration) -> Duration {
+        push_interval(base, self.asked_warmup)
+    }
 }
 
 /// What `subscribe_chart`/`unsubscribe_chart` need from the HTTP request.
@@ -512,7 +524,7 @@ impl ChartHub {
                 req.clone(),
                 id,
                 events,
-                push_interval(limits.min_push_interval, req.warmup),
+                req.push_interval(limits.min_push_interval),
             ));
             st.groups.insert(
                 req.clone(),
@@ -781,6 +793,18 @@ mod tests {
         let base = Duration::from_millis(250);
         assert_eq!(push_interval(base, 300), base);
         assert_eq!(push_interval(base, 1000), base * 2);
+        // A server-raised warmup (ADR-0032) keeps the client's cadence.
+        let raised = ChartRequest {
+            warmup: 891,
+            asked_warmup: 300,
+            ..req("BTCUSDT", r#"["ema_stack"]"#)
+        };
+        assert_eq!(raised.push_interval(base), base);
+        let asked = ChartRequest {
+            asked_warmup: 1000,
+            ..raised
+        };
+        assert_eq!(asked.push_interval(base), base * 2);
     }
 
     /// Feeds that the test drives by hand, counting how many are running.
@@ -865,6 +889,7 @@ mod tests {
             indicators: indicators.into(),
             chart_style: "candles".into(),
             warmup: 30,
+            asked_warmup: 30,
         }
     }
 

@@ -12,8 +12,9 @@
 //! Warmup values are NaN (serialized as null), never 0.
 
 use super::pine::{
-    change_n, div, ema_n, finite_or_nan, gains_losses, highest, hist, line, lowest, nan_max,
-    nan_min, percentrank, roc, rsi, sma_n, stdev, stoch, sum_n, swma, true_range, wma_n, zip,
+    change_n, div, ema_n, finite_or_nan, gains_losses, highest, hist, line, lowest, ma_warmup,
+    nan_max, nan_min, percentrank, roc, rsi, sma_n, stdev, stoch, sum_n, swma, true_range, wma_n,
+    zip,
 };
 use crate::data::OhlcvData;
 use crate::indicator::{rgba, Bars, HLine, Indicator, PanelResult};
@@ -431,6 +432,22 @@ impl Indicator for Osc {
                     self.vals[i] = v.clamp(min, max);
                 }
             }
+        }
+    }
+
+    fn warmup_bars(&self) -> usize {
+        let u = |i| self.u(i);
+        let ema = |n| ma_warmup("ema", n);
+        // Chained smoothings add up; a change or difference adds a bar.
+        match self.kind {
+            Kind::StochRsi => ma_warmup("rma", u(2)) + 1 + u(3) + u(0) + u(1),
+            Kind::Trix => 3 * ema(u(0)) + 1,
+            Kind::Ppo if self.ma_type == "ema" => ema(u(0).max(u(1))),
+            Kind::ElderForceIndex => ema(u(0)) + 1,
+            Kind::Tsi | Kind::SmiErgodic => ema(u(0)) + ema(u(1)) + ema(u(2)) + 1,
+            Kind::VolumeOscillator => ema(u(0).max(u(1))),
+            Kind::ConnorsRsi => (ma_warmup("rma", u(0).max(u(1))) + 1).max(u(2) + 1),
+            _ => 0,
         }
     }
 

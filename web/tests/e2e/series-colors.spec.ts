@@ -162,4 +162,40 @@ test.describe("series colors", () => {
     );
     await page.screenshot({ path: `${SHOTS}/volume-macd-ema.png` });
   });
+
+  test("per-bar plots draw as lines: Supertrend, SAR, HA, KVF", async ({ page }) => {
+    // Their per-bar points used to be unlabeled dots, which the series
+    // wire drops: the chart showed no plot at all.
+    await openWith(page, ["supertrend", "sar", "heikin_ashi", "kalman_volume"]);
+    // [legend name, line labels, lines with a value at the last bar]
+    const plots: Array<[string, string[], number]> = [
+      ["Supertrend", ["Up Trend", "Down Trend"], 1],
+      ["SAR", ["SAR Up", "SAR Down"], 1],
+      ["HA", ["HA Close"], 1],
+      ["KVF", ["KVF", "Signal"], 2],
+    ];
+    for (const [name, labels, valued] of plots) {
+      // Lines come first in the legend (KVF's volume histograms follow).
+      const values = header(page, name).locator(".pane-header-value");
+      await expect(values.nth(labels.length - 1)).toBeVisible({ timeout: 15_000 });
+      const texts = (await values.allTextContents()).slice(0, labels.length);
+      const read = texts.map((t, i) => {
+        expect(t.startsWith(`${labels[i]} `), t).toBe(true);
+        return t.slice(labels[i]!.length + 1);
+      });
+      // At rest the legend reads the last bar: of a trend pair only the
+      // active line has a value there, the other shows none, not a stale one.
+      const numbers = read.filter((v) => /\d/.test(v)).length;
+      expect(numbers, `${name}: ${texts.join(" | ")}`).toBe(valued);
+      if (numbers < read.length) expect(read).toContain("—");
+    }
+    // The KVF line is drawn in its pane (cyan, opaque; the fills are faint).
+    await expect
+      .poll(
+        async () =>
+          (await paneCounts(page, "KVF", { kvf: { r: 0x00, g: 0xbc, b: 0xd4, a: 0.9 } }, 150)).kvf,
+        { timeout: 15_000 },
+      )
+      .toBeGreaterThan(50);
+  });
 });

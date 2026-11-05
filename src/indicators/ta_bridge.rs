@@ -199,6 +199,11 @@ impl Indicator for KeltnerChannels {
         }
     }
 
+    fn warmup_bars(&self) -> usize {
+        let ema = super::pine::ma_warmup("ema", self.period);
+        ema.max(super::pine::ma_warmup("rma", self.atr_length))
+    }
+
     fn compute(&self, data: &OhlcvData) -> PanelResult {
         // TV (Bands Style "Average True Range"):
         // ta.ema(close, period) +/- mult * ta.atr(atr_length).
@@ -270,6 +275,10 @@ impl Indicator for Atr {
         if let Some(v) = params.get("period").and_then(|v| v.as_u64()) {
             self.period = v as usize;
         }
+    }
+
+    fn warmup_bars(&self) -> usize {
+        super::pine::ma_warmup("rma", self.period)
     }
 
     fn compute(&self, data: &OhlcvData) -> PanelResult {

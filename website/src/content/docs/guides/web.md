@@ -275,8 +275,9 @@ How it works: the first load asks `generate_chart` for 500 bars with a
 `bars: 500, warmup: 300, end_time: <oldest bar × 1000>`. A warmup of 300
 covers the usual lookbacks (up to SMA 200), and the server raises it for
 indicators that need more to converge, such as the EMA 200 of `ema_stack`
-(891 bars, [ADR-0032](/chartgen/decisions/0032-indicator-aware-warmup/)),
-so values at a page seam and on the live bar line up. Changing the symbol,
+(891 bars) or an RSI with a long length
+([ADR-0032](/chartgen/decisions/0032-indicator-aware-warmup/)), so values
+at a page seam and on the live bar line up. Changing the symbol,
 timeframe or indicators cancels every pending poll and page and does a
 full reload.
 
@@ -324,9 +325,11 @@ then polls until the next chart change.
   a page boundary starts at that boundary. Running sums (OBV, CVD, A/D
   line) can differ by a constant at a page seam or on the live bar
   compared with one long request, because each request starts its sum
-  independently. VWAP can differ until its next session reset. Recursive indicators (EMA, RSI, ATR) match it, except an
-  EMA longer than 224 bars, which converges beyond the 1000-bar warmup
-  cap. Yahoo data is delayed, so its live bar moves only as
+  independently. VWAP can differ until its next session reset. The
+  built-in EMA- and RMA-based indicators (EMA, RSI, ATR, MACD, ...) match
+  it, except an EMA longer than 224 bars or an RMA longer than 126, which
+  converge beyond the 1000-bar warmup cap; the community composites
+  (Cipher B, WaveTrend) can still step slightly. Yahoo data is delayed, so its live bar moves only as
   often as Yahoo updates it.
 
 ### Keyboard shortcuts

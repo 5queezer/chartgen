@@ -322,6 +322,9 @@ impl Indicator for Envelopes {
             self.source = s;
         }
     }
+    fn warmup_bars(&self) -> usize {
+        ma_warmup(&self.kind, self.length)
+    }
     fn compute(&self, data: &OhlcvData) -> PanelResult {
         let src = source_series(data, &self.source);
         let basis = ma_by_type(&self.kind, &src, &volumes(data), self.length);

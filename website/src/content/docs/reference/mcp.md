@@ -156,7 +156,10 @@ Summary payload shape (for `format=summary` or `format=both`):
 ```
 
 Fields are keyed by the name each indicator was requested with, so
-`{"name": "rsi", "length": 21}` comes back as `indicators.rsi`.
+`{"name": "rsi", "length": 21}` comes back as `indicators.rsi`. A line's
+`last_value` is its value at the last bar, `null` when it has none there:
+of Supertrend's `Up Trend` / `Down Trend` lines only the active one has a
+value.
 
 ##### Several instances of one indicator
 
@@ -364,12 +367,20 @@ A non-zero `warmup` is raised to what the requested indicators need to
 converge, up to 1000
 ([ADR-0032](/chartgen/decisions/0032-indicator-aware-warmup/)). `ema_stack`
 needs 891 bars, so its EMA 200 is computed over at least that many and
-matches one long request to within 0.01% at a page seam or on a tail. `ma`
-and `ma_ribbon` declare it for their type and lengths. `warmup: 0` is never
-raised. Recursive indicators beyond that cap (an EMA longer than 224) can
-still differ slightly at a seam, running sums (OBV, CVD, A/D line) by a
-constant offset, and VWAP until its next session reset. Finite-window indicators (SMA, Bollinger Bands, Donchian)
-match exactly once `warmup` covers their lookback.
+matches one long request to within 0.01% at a page seam or on a tail. The
+other EMA/RMA-based built-ins (`ma`, `ma_ribbon`, `envelopes`, `keltner`,
+`rsi`, `atr`, `adx`, `supertrend`, `macd`, `stoch_rsi`, `trix`, `ppo`,
+`tsi`, `smi_ergodic`, `elder_force_index`, `volume_oscillator`,
+`connors_rsi`, `kalman_volume`) declare it from their parameters. The
+community composites (`cipher_b`, `wavetrend`, `rsi_mfi_stoch`) and user
+scripts keep the `warmup` you send. `warmup: 0` is never raised.
+Smoothings beyond the cap (an EMA longer than 224, an RMA longer than 126)
+can still differ slightly at a seam, running sums (OBV, CVD, A/D line) by a
+constant offset, and VWAP until its next session reset. Finite-window
+indicators (SMA, Bollinger Bands, Donchian) match exactly once `warmup`
+covers their lookback. When history runs out, `has_more` stays `true` as
+long as the response fetched more bars than it returned, so the next page
+brings the trimmed warmup bars.
 
 Upstream limits: Binance requests are paginated at 1000 bars per call.
 Yahoo intraday history ends after about 30 days for 1m, 60 days for other

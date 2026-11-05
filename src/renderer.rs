@@ -224,15 +224,9 @@ pub fn render_results(
             // Pine's plot.style_linebr), so a gap draws no connector.
             for line in &overlay.lines {
                 let draw_width = if line.width <= 1 { 2 } else { line.width };
-                let points: Vec<_> = line
-                    .y
-                    .iter()
-                    .enumerate()
-                    .map(|(i, y)| (i as f64, *y))
-                    .collect();
-                for run in points.split(|(_, y)| y.is_nan()).filter(|r| !r.is_empty()) {
+                for run in line_runs(&line.y) {
                     chart.draw_series(std::iter::once(PathElement::new(
-                        run.to_vec(),
+                        run,
                         line.color.stroke_width(draw_width),
                     )))?;
                 }
@@ -307,8 +301,8 @@ pub fn render_results(
                 }
                 for line in &overlay.lines {
                     if let Some(ref lbl) = line.label {
-                        if let Some(val) = line.y.iter().rev().find(|v| !v.is_nan()) {
-                            let text = format!("{}: {:.2}", lbl, val);
+                        if let Some(val) = legend_value(&line.y) {
+                            let text = format!("{}: {}", lbl, val);
                             let RGBAColor(r, g, b, _) = line.color;
                             candle_area.draw_text(
                                 &text,
@@ -402,15 +396,9 @@ pub fn render_results(
         // Pine's plot.style_linebr), so a gap draws no connector.
         for line in &result.lines {
             let draw_width = if line.width <= 1 { 2 } else { line.width };
-            let points: Vec<_> = line
-                .y
-                .iter()
-                .enumerate()
-                .map(|(i, y)| (i as f64, *y))
-                .collect();
-            for run in points.split(|(_, y)| y.is_nan()).filter(|r| !r.is_empty()) {
+            for run in line_runs(&line.y) {
                 chart.draw_series(std::iter::once(PathElement::new(
-                    run.to_vec(),
+                    run,
                     line.color.stroke_width(draw_width),
                 )))?;
             }
@@ -478,9 +466,9 @@ pub fn render_results(
             let mut ann_y = 22; // below the panel label
             for line in &result.lines {
                 if let Some(ref lbl) = line.label {
-                    // Find last non-NaN value
-                    if let Some(val) = line.y.iter().rev().find(|v| !v.is_nan()) {
-                        let text = format!("{}: {:.2}", lbl, val);
+                    // Value at the last bar
+                    if let Some(val) = legend_value(&line.y) {
+                        let text = format!("{}: {}", lbl, val);
                         let RGBAColor(r, g, b, _) = line.color;
                         area.draw_text(
                             &text,
@@ -521,6 +509,30 @@ pub fn render_results(
 
     root.present()?;
     Ok(())
+}
+
+/// The points of a line as runs between NaN values, each drawn as its own
+/// path: a gap breaks the line like Pine's plot.style_linebr and the web
+/// chart, instead of a connector across it.
+fn line_runs(y: &[f64]) -> Vec<Vec<(f64, f64)>> {
+    let points: Vec<(f64, f64)> = y.iter().enumerate().map(|(i, v)| (i as f64, *v)).collect();
+    points
+        .split(|(_, v)| v.is_nan())
+        .filter(|run| !run.is_empty())
+        .map(<[_]>::to_vec)
+        .collect()
+}
+
+/// Legend text of a line: its value at the last bar, "n/a" when it has none
+/// there (the inactive Supertrend line), None when it has no value at all.
+fn legend_value(y: &[f64]) -> Option<String> {
+    if y.iter().all(|v| v.is_nan()) {
+        return None;
+    }
+    Some(match y.last() {
+        Some(v) if !v.is_nan() => format!("{v:.2}"),
+        _ => "n/a".into(),
+    })
 }
 
 fn auto_range(r: &PanelResult) -> (f64, f64) {
@@ -564,4 +576,35 @@ fn auto_range(r: &PanelResult) -> (f64, f64) {
     }
     let margin = (hi - lo).max(1.0) * 0.1;
     (lo - margin, hi + margin)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    const NAN: f64 = f64::NAN;
+
+    #[test]
+    fn lines_break_at_nan() {
+        // A flip of linebr lines: no point joins the runs across the gap.
+        let runs = line_runs(&[NAN, 1.0, 2.0, NAN, NAN, 3.0, NAN, 4.0, 5.0]);
+        assert_eq!(
+            runs,
+            vec![
+                vec![(1.0, 1.0), (2.0, 2.0)],
+                vec![(5.0, 3.0)],
+                vec![(7.0, 4.0), (8.0, 5.0)],
+            ]
+        );
+        assert!(line_runs(&[NAN, NAN]).is_empty());
+        assert_eq!(line_runs(&[1.0, 2.0]), vec![vec![(0.0, 1.0), (1.0, 2.0)]]);
+    }
+
+    #[test]
+    fn legend_shows_the_last_bar() {
+        assert_eq!(legend_value(&[1.0, 2.5]).as_deref(), Some("2.50"));
+        // The inactive trend line: no stale value from an earlier bar.
+        assert_eq!(legend_value(&[1.0, NAN]).as_deref(), Some("n/a"));
+        assert_eq!(legend_value(&[NAN, NAN]), None);
+        assert_eq!(legend_value(&[]), None);
+    }
 }

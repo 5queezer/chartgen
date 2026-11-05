@@ -27,8 +27,10 @@ error against the history it is merged into.
 
 An SMA-seeded EMA of length N needs N bars for the seed and about
 ln(1000) / −ln(1 − α) more until the seed weighs under 0.1%. For EMA 200
-that is 200 + 691 = 891 bars. RSI, ATR, ADX, MACD and Supertrend at their
-default lengths converge within 300.
+that is 200 + 691 = 891 bars. Wilder's RMA (α = 1/N) needs about 7.9 N:
+RSI, ATR, ADX, MACD and Supertrend converge within 300 at their default
+lengths, but not an RSI 50 (393 bars), and `kalman_volume` needs 399 even at
+its defaults.
 
 ## Decision Drivers
 
@@ -59,16 +61,31 @@ Chosen: **option 4.**
 
 - `Indicator::warmup_bars()` returns the bars of history an indicator needs
   before its values converge (an SMA-seeded EMA's seed weighs under 0.1%).
-  The default is 0. `ema_stack` declares 891 (EMA 200). `ma` and
-  `ma_ribbon` declare it for their type and lengths: EMA-type kinds as
-  above, DEMA and TEMA two and three times that, RMA/SMMA with α = 1/N,
-  window kinds their length (`pine::ma_warmup`).
+  The default is 0. `pine::ma_warmup` gives it per moving-average type: the
+  seed window plus `pine::decay_bars(α)` for EMA (DEMA and TEMA two and
+  three times that) and RMA/SMMA, the lookback for window kinds (HMA
+  n + ⌊√n⌋ − 1). Chained smoothings add up. Declared, from their
+  parameters: `ema_stack` (891), `ma`, `ma_ribbon`, `envelopes`, `keltner`,
+  `atr`, `rsi`, `adx` (two RMAs), `supertrend`, `macd`, `stoch_rsi`,
+  `trix`, `ppo` (EMA type), `elder_force_index`, `tsi`, `smi_ergodic`,
+  `volume_oscillator`, `connors_rsi` and `kalman_volume` (HMA, 200-bar
+  stdev, the Kalman smoothing, the signal SMA).
 - `generate_chart(format=series)` and `subscribe_chart` raise a non-zero
   `warmup` to the largest `warmup_bars()` of the requested indicators,
   still capped at 1000. `warmup: 0` (or none) stays 0, so a caller asking
   for the bare window still gets it.
-- The payload is unchanged: warmup bars are trimmed as before. `has_more`
-  compares against the raised `bars + warmup`.
+- The payload is unchanged: warmup bars are trimmed as before.
+- **`has_more` stays true while trimmed bars remain.** ADR-0009 sets
+  `has_more` from the upstream fetch (the full `bars + warmup` came back,
+  or Yahoo's window was not cut). When history runs out, the warmup bars
+  that did come back are still older bars the client has not seen, and
+  with up to 891 of them (all the history of a young symbol on 1d, or the
+  first two years of a Yahoo 6h series cut at Yahoo's 730-day 1h limit)
+  they must stay reachable. So `has_more` is also true when more bars were
+  fetched than returned; the next page returns them and ends the history.
+- The push cadence (ADR-0021: half the rate for a warmup above 300) follows
+  the client's `warmup`, not the raised one, so the server's own raise does
+  not slow pushes down. A group still recomputes over the raised window.
 - The web app keeps sending `warmup: 300` and does not change its merge.
 
 ## Consequences
@@ -80,14 +97,20 @@ under 0.05%. Charts without long EMAs fetch exactly what they did before.
 
 **Negative.**
 
-- A chart with `ema_stack` fetches up to 891 + `bars` bars per request: a
-  tail poll is two Binance requests instead of one, and its push group
-  recomputes 893 bars, so it pushes at most every 500 ms instead of 250 ms
-  (ADR-0021's rule for windows above 300).
-- The 1000 cap still limits user-configured long EMAs: an `ma` of type EMA
-  converges to 0.1% only up to length 224 (RMA: 126). Longer ones step
-  less than before but still visibly.
-- Only built-in indicators declare a need. User scripts
+- A chart with `ema_stack` fetches up to 891 + `bars` bars per request. On
+  Binance a tail poll (893 bars) is still one request; a full load or a
+  history page (1391) is two instead of one. Its push group recomputes 893
+  bars per push instead of 302.
+- On Yahoo the request window grows with the bar count: a 1h tail poll asks
+  for about 220 calendar days (one request, roughly 1100 hourly bars of a
+  stock)
+  instead of 10, every 15 s; a 4h one is cut at Yahoo's 730-day limit. The
+  responses are larger, the request count is unchanged.
+- The 1000 cap still limits user-configured long smoothings: an EMA
+  converges to 0.1% only up to length 224, an RMA (RSI, ATR) up to 126.
+  Longer ones step less than before but still visibly.
+- Only the built-ins listed above declare a need. The community composites
+  (`cipher_b`, `wavetrend`, `rsi_mfi_stoch`) and user scripts
   ([ADR-0025](/chartgen/decisions/0025-user-indicator-registry/)) report 0
   and get the client's warmup.
 - Running sums (OBV, CVD, A/D line) and VWAP sessions are unaffected:

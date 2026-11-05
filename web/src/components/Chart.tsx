@@ -612,15 +612,6 @@ function seriesToKLines(
   return klines;
 }
 
-/** Index of the last finite value, or -1. */
-function lastFiniteIndex(values: Array<number | null>): number {
-  for (let i = values.length - 1; i >= 0; i--) {
-    const v = values[i];
-    if (typeof v === "number" && Number.isFinite(v)) return i;
-  }
-  return -1;
-}
-
 function valueAt(
   values: Array<number | null>,
   index: number,
@@ -1080,12 +1071,13 @@ export function Chart(props: ChartProps): JSX.Element {
         const values =
           (p.kind === "line" ? ind.lines![p.index] : ind.histogram![p.index])!
             .values;
-        // A histogram's legend takes the color of the bar it reads.
-        const at = xi !== null ? xi : lastFiniteIndex(values);
+        // The bar the price legend reads: at rest the last one, so a plot
+        // without a value there (the inactive Supertrend line) shows none
+        // rather than a stale one. A histogram's legend takes its bar's color.
         return {
           label: p.label,
-          value: valueAt(values, at),
-          color: plotColorAt(p, ind, style, at),
+          value: valueAt(values, legendIndex),
+          color: plotColorAt(p, ind, style, legendIndex),
         };
       });
 
