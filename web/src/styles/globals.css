@@ -85,6 +85,11 @@ body {
   background: color-mix(in srgb, var(--legend-bg, var(--color-bg)) 72%, transparent);
   border-radius: 3px;
   padding: 1px 4px;
+  /* Never wider than the pane (minus the price axis): clip, don't spill
+   * under the sidebar. */
+  box-sizing: border-box;
+  max-width: calc(100% - 8px - var(--axis-inset, 0px) - 72px);
+  overflow: hidden;
 }
 
 .pane-header-label {

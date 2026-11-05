@@ -155,3 +155,107 @@ describe("tryHandlePendingRedirect", () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 });
+
+describe("registration rate limit", () => {
+  beforeEach(() => {
+    vi.resetModules();
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it("backs off with Retry-After, else 2s, 4s, 8s", async () => {
+    const { retryDelayMs } = await import("./oauth");
+    expect(retryDelayMs(0, "7")).toBe(7000);
+    expect(retryDelayMs(0, "9999")).toBe(60000);
+    expect(retryDelayMs(0, null)).toBe(2000);
+    expect(retryDelayMs(1, "soon")).toBe(4000);
+    expect(retryDelayMs(2, null)).toBe(8000);
+  });
+
+  it("parses an HTTP-date Retry-After and clamps to [0, 60 s]", async () => {
+    const { retryDelayMs } = await import("./oauth");
+    const at = (ms: number) => new Date(Date.now() + ms).toUTCString();
+    expect(retryDelayMs(0, at(20_000))).toBeGreaterThan(18_000);
+    expect(retryDelayMs(0, at(20_000))).toBeLessThanOrEqual(20_000);
+    expect(retryDelayMs(0, at(600_000))).toBe(60000);
+    expect(retryDelayMs(0, at(-5_000))).toBe(0);
+    expect(retryDelayMs(0, "-3")).toBe(0);
+  });
+
+  it("clears the notice when a retry fetch rejects", async () => {
+    boot("http://app.test/");
+    localStorage.removeItem("chartgen.oauth.client_id");
+    localStorage.removeItem("chartgen.oauth.client_secret");
+    let registrations = 0;
+    const base = fetchMock.getMockImplementation()!;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string, init?: RequestInit) => {
+        if (input !== DISCOVERY.registration_endpoint) return base(input, init);
+        if (++registrations > 1) throw new TypeError("network down");
+        return new Response("{}", { status: 429, headers: { "Retry-After": "2" } });
+      }),
+    );
+    const { startSignIn, subscribeSignInNotice } = await import("./oauth");
+    const notices: (string | null)[] = [];
+    subscribeSignInNotice((n) => notices.push(n));
+    const result = startSignIn().catch((e: Error) => e.message);
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(await result).toMatch(/network down/);
+    expect(notices.some((n) => n?.includes("retrying"))).toBe(true);
+    expect(notices.at(-1)).toBeNull();
+  });
+
+  it("retries a 429 registration, shows a countdown and stores the client", async () => {
+    boot("http://app.test/");
+    localStorage.removeItem("chartgen.oauth.client_id");
+    localStorage.removeItem("chartgen.oauth.client_secret");
+    let registrations = 0;
+    const base = fetchMock.getMockImplementation()!;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string, init?: RequestInit) => {
+        if (input !== DISCOVERY.registration_endpoint) return base(input, init);
+        registrations++;
+        return registrations < 3
+          ? new Response("{}", { status: 429, headers: { "Retry-After": "3" } })
+          : new Response(JSON.stringify({ client_id: "new" }), { status: 201 });
+      }),
+    );
+    const { startSignIn, subscribeSignInNotice } = await import("./oauth");
+    const notices: (string | null)[] = [];
+    subscribeSignInNotice((n) => notices.push(n));
+
+    void startSignIn();
+    await vi.advanceTimersByTimeAsync(10_000);
+
+    expect(registrations).toBe(3);
+    expect(notices.some((n) => n?.includes("retrying in 3 s"))).toBe(true);
+    expect(notices.at(-1)).toBeNull();
+    expect(localStorage.getItem("chartgen.oauth.client_id")).toBe("new");
+    await vi.waitFor(() => expect(assign).toHaveBeenCalled());
+  });
+
+  it("gives up with a clear message after the retries", async () => {
+    boot("http://app.test/");
+    localStorage.removeItem("chartgen.oauth.client_id");
+    localStorage.removeItem("chartgen.oauth.client_secret");
+    const base = fetchMock.getMockImplementation()!;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string, init?: RequestInit) =>
+        input === DISCOVERY.registration_endpoint
+          ? new Response("{}", { status: 429, headers: { "Retry-After": "1" } })
+          : base(input, init),
+      ),
+    );
+    const { startSignIn } = await import("./oauth");
+    const result = startSignIn().catch((e: Error) => e.message);
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(await result).toMatch(/Too many sign-ins from this network/);
+  });
+});

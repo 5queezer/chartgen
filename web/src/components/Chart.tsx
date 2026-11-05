@@ -67,6 +67,8 @@ import {
   type PlotInfo,
 } from "../lib/plotStyle";
 import { keyName } from "../lib/instances";
+import { withoutParamNumber } from "../lib/indicatorNames";
+import { fitSubPanes } from "../lib/paneLayout";
 import {
   applyFill,
   divColor,
@@ -231,7 +233,7 @@ function extendFor(
   style: IndicatorStyle | undefined,
 ): FigureExtend {
   if (!ind) return NO_STYLE;
-  const plots = plotsOf(ind, (n) => paletteColor(name, n));
+  const plots = plotsOf(ind, (n) => paletteColor(name, n), name);
   const defaults = Object.fromEntries(
     plots.map((p) => [
       plotKey(p.kind, p.index),
@@ -250,7 +252,7 @@ function legendPlots(
   ind: NonNullable<SeriesPayload["indicators"][string]>,
   style: IndicatorStyle | undefined,
 ): PlotInfo[] {
-  return plotsOf(ind, (n) => paletteColor(name, n)).filter(
+  return plotsOf(ind, (n) => paletteColor(name, n), name).filter(
     (p) => resolvePlot(p, style).visible,
   );
 }
@@ -1048,6 +1050,7 @@ export function Chart(props: ChartProps): JSX.Element {
   };
   let crosshairFrame: number | null = null;
   let layoutFrame: number | null = null;
+  let layoutTimer: ReturnType<typeof setTimeout> | null = null;
   let styleFrame: number | null = null;
   let pendingStyles: object = {};
   // Width of the price axis when it sits on the left; pane headers start
@@ -1274,8 +1277,11 @@ export function Chart(props: ChartProps): JSX.Element {
         };
       });
 
-      const displayName = ind.label && ind.label.length > 0 ? ind.label : keyName(name);
       const params = paramsByKey.get(name);
+      const displayName = withoutParamNumber(
+        ind.label && ind.label.length > 0 ? ind.label : keyName(name),
+        params,
+      );
 
       if (ind.is_overlay) {
         overlayRow += 1;
@@ -1634,13 +1640,37 @@ export function Chart(props: ChartProps): JSX.Element {
     }
     setPaneIds(nextPanes);
 
+    // Keep the price pane usable: shrink the sub-panes first.
+    const fitPanes = () => {
+      const subIds = wantedOsc.map((n) => nextPanes[n]).filter((id) => !!id);
+      const candle = c.getSize(CANDLE_PANE_ID)?.height;
+      if (candle === undefined) return;
+      const subs = subIds.map((id) => c.getSize(id)?.height ?? 0);
+      const fit = fitSubPanes(candle, subs);
+      if (fit) subIds.forEach((id, i) => c.setPaneOptions({ id, height: fit[i]! }));
+    };
+    fitPanes();
+
     // klinecharts lays out panes synchronously inside createIndicator,
     // but getSize reads through the renderer — one microtask is enough
     // for pane heights to settle before we position the DOM headers.
     queueMicrotask(recomputeHeaders);
     // Pane tops are not final yet in the microtask (the RSI legend landed
     // on the price row); re-measure once the layout has settled.
-    layoutFrame = requestAnimationFrame(recomputeHeaders);
+    if (layoutFrame !== null) cancelAnimationFrame(layoutFrame);
+    if (layoutTimer !== null) clearTimeout(layoutTimer);
+    layoutFrame = requestAnimationFrame(() => {
+      layoutFrame = null;
+      fitPanes();
+      recomputeHeaders();
+    });
+    // At first load the container is still settling; fit once more after.
+    layoutTimer = setTimeout(() => {
+      layoutTimer = null;
+      if (untrack(chart) !== c) return;
+      fitPanes();
+      recomputeHeaders();
+    }, 300);
   });
 
   // Compare lines. A change of the compare data stashes the aligned closes on
@@ -1742,6 +1772,7 @@ export function Chart(props: ChartProps): JSX.Element {
 
   onCleanup(() => {
     if (layoutFrame !== null) cancelAnimationFrame(layoutFrame);
+    if (layoutTimer !== null) clearTimeout(layoutTimer);
     if (styleFrame !== null) cancelAnimationFrame(styleFrame);
     if (container) dispose(container);
   });

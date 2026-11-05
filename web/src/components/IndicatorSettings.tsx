@@ -19,7 +19,7 @@ import {
   type PlotLineStyle,
   type PlotStyle,
 } from "../stores/indicators";
-import { ColorPicker } from "./ColorPicker";
+import { closeColorPopover, ColorPicker } from "./ColorPicker";
 
 import {
   buildFields,
@@ -456,7 +456,14 @@ function SettingsForm(props: {
         </Dialog.CloseButton>
       </div>
       <Tabs.Root value={tab()} onChange={setTab}>
-        <Tabs.List class="flex px-2 border-b border-[color:var(--color-border)]">
+        {/* Kobalte's tab list marks Escape as handled before the
+            dialog sees it, and keeps focus there while a palette is open. */}
+        <Tabs.List
+          class="flex px-2 border-b border-[color:var(--color-border)]"
+          onKeyDown={(e: KeyboardEvent) => {
+            if (e.key === "Escape" && !closeColorPopover()) props.onClose();
+          }}
+        >
           <Tabs.Trigger value="inputs" class={tabClass}>
             Inputs
           </Tabs.Trigger>

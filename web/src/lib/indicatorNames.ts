@@ -47,7 +47,18 @@ export function displayName(id: string): string {
   return labels()[id] ?? prettifyId(id);
 }
 
+/**
+ * A server label like `SMA 20` carries the length of the instance it came
+ * from; when the instance's own params `(50)` are shown next to it, drop the
+ * number so it is neither said twice nor wrong for another instance.
+ */
+export function withoutParamNumber(label: string, params?: string): string {
+  return params ? label.replace(/\s+\d+(?:\.\d+)?$/, "") : label;
+}
+
 /** Chip text: the display name of the registry id, then the param label. */
 export function chipName(id: string, params?: string): string {
-  return [displayName(id), params].filter(Boolean).join(" ");
+  return [withoutParamNumber(displayName(id), params), params]
+    .filter(Boolean)
+    .join(" ");
 }

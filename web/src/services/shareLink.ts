@@ -90,6 +90,8 @@ export function applyShareLink(): void {
   if (patch.indicators !== undefined) {
     savePending(patch.indicators);
     setPending(patch.indicators);
+    // An explicit empty `ind=` clears; nothing to validate, so apply now.
+    if (patch.indicators.length === 0) setActiveIndicators([]);
   }
   // Skip an unchanged list: replacing it would reset the scale mode.
   if (

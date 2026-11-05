@@ -4,7 +4,7 @@
 // forms the store accepts (ADR-0017).
 
 import { Popover } from "@kobalte/core";
-import { For, type JSX } from "solid-js";
+import { createSignal, For, type JSX } from "solid-js";
 
 import { formatColor, parseColor } from "../lib/color";
 
@@ -17,6 +17,18 @@ const PRESETS = [
   "#b2ebf2", "#bbd9fb", "#d1c4e9", "#e1bee7", "#f8bbd0",
 ] as const;
 
+let closeOpenPopover: (() => void) | null = null;
+
+/**
+ * Close the open palette popover; false when none is open. For callers whose
+ * Escape handling runs ahead of Kobalte's (a focused tab swallows the key).
+ */
+export function closeColorPopover(): boolean {
+  if (closeOpenPopover === null) return false;
+  closeOpenPopover();
+  return true;
+}
+
 export interface ColorPickerProps {
   /** Current color (`#rgb`, `#rrggbb`, `#rrggbbaa` or `rgba()`). */
   value: string;
@@ -27,9 +39,24 @@ export interface ColorPickerProps {
 
 export function ColorPicker(props: ColorPickerProps): JSX.Element {
   const parsed = () => parseColor(props.value);
+  const [open, setOpen] = createSignal(false);
+  const close = () => {
+    setOpen(false);
+    closeOpenPopover = null;
+  };
 
   return (
-    <Popover.Root placement="bottom-start" gutter={6}>
+    <Popover.Root
+      placement="bottom-start"
+      gutter={6}
+      open={open()}
+      onOpenChange={(o) => {
+        if (o) {
+          setOpen(true);
+          closeOpenPopover = close;
+        } else close();
+      }}
+    >
       <Popover.Trigger
         aria-label={props.label}
         class="w-6 h-6 rounded border border-[color:var(--color-border)] cursor-pointer p-0 overflow-hidden"

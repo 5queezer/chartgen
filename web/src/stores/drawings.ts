@@ -306,7 +306,8 @@ export function toChartPoint(
   p: DrawingPoint,
 ): ChartPoint | null {
   if (p.timestamp < axis.firstTs) return null;
-  if (p.timestamp <= axis.lastTs) return p;
+  // A copy: klinecharts mutates the points it is given while dragging.
+  if (p.timestamp <= axis.lastTs) return { ...p };
   return {
     dataIndex:
       axis.count -

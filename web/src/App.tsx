@@ -537,7 +537,7 @@ export function App(): JSX.Element {
     const ind = key === undefined ? undefined : query.data?.indicators[key];
     return key === undefined || !ind
       ? null
-      : plotsOf(ind, (n) => paletteColor(key, n));
+      : plotsOf(ind, (n) => paletteColor(key, n), key);
   });
 
   const settingsGeometry = createMemo(() => {
@@ -601,17 +601,23 @@ export function App(): JSX.Element {
             {activeIndicators().length}
           </span>
         </button>
-        <AlertButton />
-        <StatusLine
-          status={status()}
-          live={replay.mode() === "off" ? pollStatus() : { kind: "off" }}
-          onSignIn={() =>
-            void startSignIn().catch((e: unknown) =>
-              setAuthError(e instanceof Error ? e.message : String(e)),
-            )
-          }
-        />
-        <div class="ml-auto min-w-0">
+        {/* Below 480px the header has no room: alerts stay reachable from the
+         * sidebar panel, the status text drops (the sign-in recovery stays) and the layout name collapses. */}
+        <div class="max-[479px]:hidden">
+          <AlertButton />
+        </div>
+        <div>
+          <StatusLine
+            status={status()}
+            live={replay.mode() === "off" ? pollStatus() : { kind: "off" }}
+            onSignIn={() =>
+              void startSignIn().catch((e: unknown) =>
+                setAuthError(e instanceof Error ? e.message : String(e)),
+              )
+            }
+          />
+        </div>
+        <div class="ml-auto min-w-0 max-[479px]:[&_[data-testid=layout-name]]:hidden">
           <LayoutMenu />
         </div>
       </header>
