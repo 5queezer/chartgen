@@ -46,14 +46,15 @@ pub fn tools_list_result() -> Value {
                                     {
                                         "type": "object",
                                         "properties": {
-                                            "name": { "type": "string" }
+                                            "name": { "type": "string" },
+                                            "id": { "type": "string", "minLength": 1, "maxLength": 64, "description": "Instance key (ADR-0028): the response keys this entry by id instead of name, so one indicator can be requested several times with different parameters." }
                                         },
                                         "required": ["name"],
                                         "additionalProperties": true
                                     }
                                 ]
                             },
-                            "description": "Technical indicators to render on the chart. Each element is a name string (e.g. 'rsi') or an object with 'name' and optional parameters (e.g. {\"name\": \"rsi\", \"length\": 21}). Overlays draw on the price chart, panels draw below. Call list_indicators for the full list of 33 available indicators.",
+                            "description": "Technical indicators to render on the chart. Each element is a name string (e.g. 'rsi') or an object with 'name' and optional parameters (e.g. {\"name\": \"rsi\", \"length\": 21}). Results are keyed by name; give an object an 'id' to key it by that instead. The same indicator may appear several times (e.g. RSI 14 and RSI 21): a repeat without an id is keyed name#2, name#3, and so on; an id must not equal the name of an entry without one. At most 50 entries. Overlays draw on the price chart, panels draw below. Call list_indicators for the full list of 33 available indicators.",
                             "default": ["ema_stack", "cipher_b", "macd"]
                         },
                         "panels": {
@@ -64,7 +65,8 @@ pub fn tools_list_result() -> Value {
                                     {
                                         "type": "object",
                                         "properties": {
-                                            "name": { "type": "string" }
+                                            "name": { "type": "string" },
+                                            "id": { "type": "string", "minLength": 1, "maxLength": 64, "description": "Instance key (ADR-0028): the response keys this entry by id instead of name, so one indicator can be requested several times with different parameters." }
                                         },
                                         "required": ["name"],
                                         "additionalProperties": true
@@ -332,7 +334,8 @@ pub fn tools_list_result() -> Value {
                                     {
                                         "type": "object",
                                         "properties": {
-                                            "name": { "type": "string" }
+                                            "name": { "type": "string" },
+                                            "id": { "type": "string", "minLength": 1, "maxLength": 64, "description": "Instance key (ADR-0028): the response keys this entry by id instead of name, so one indicator can be requested several times with different parameters." }
                                         },
                                         "required": ["name"],
                                         "additionalProperties": true

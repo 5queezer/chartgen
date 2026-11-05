@@ -293,6 +293,18 @@ fn pipeline_reports_step_and_line() {
     assert!(e.message.contains("PARAMS"), "{e}");
     let e = validate_err("PARAMS = [{\"name\": \"n\", \"type\": \"int\", \"default\": 1.5}]\nMETA = {}\ndef compute(ohlcv, params, chart):\n    pass\n");
     assert!(e.message.contains("default must be a integer"), "{e}");
+    // Entry keys of the wire and the web client are not params (ADR-0028).
+    for reserved in ["name", "id", "hidden", "style"] {
+        let e = validate_err(&format!(
+            "PARAMS = [{{\"name\": \"{reserved}\", \"type\": \"int\", \"default\": 1}}]\nMETA = {{}}\ndef compute(ohlcv, params, chart):\n    pass\n"
+        ));
+        assert_eq!(e.step, "presence");
+        assert!(
+            e.message
+                .contains(&format!("cannot be called \"{reserved}\" (reserved)")),
+            "{e}"
+        );
+    }
 
     let e = validate_err(&script("x = 1\nchart.line(ohlcv.close * \"a\")"));
     assert_eq!(e.step, "dry_run");

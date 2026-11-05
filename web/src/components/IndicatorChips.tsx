@@ -1,18 +1,23 @@
 // Row of chips, one per active indicator, with hide/show, settings and
 // remove buttons. Hidden indicators are dimmed. Rendered beneath the header.
-// The empty state is a muted hint pointing at the picker button.
+// The empty state is a muted hint pointing at the picker button. A repeated
+// indicator (ADR-0028) shows its params so its chips read apart.
 
-import { Index, Show, type JSX } from "solid-js";
+import { createMemo, Index, Show, type JSX } from "solid-js";
 
 import {
   indicatorName,
+  instanceKey,
   isHidden,
+  paramLabels,
   type ActiveIndicator,
 } from "../stores/indicators";
+import { paramDefaults } from "../stores/layouts";
 
 export interface IndicatorChipsProps {
   entries: ActiveIndicator[];
-  onRemove: (name: string) => void;
+  /** Remove the instance with this key. */
+  onRemove: (key: string) => void;
   /** Toggle visibility of the entry at `index`. */
   onToggleHidden: (index: number) => void;
   /** Open settings for the entry at `index`. */
@@ -23,6 +28,7 @@ const chipButton =
   "inline-flex items-center justify-center w-4 h-4 rounded-full text-[color:var(--color-fg-muted)] hover:text-[color:var(--color-fg)] hover:bg-[color:var(--color-bg)] cursor-pointer";
 
 export function IndicatorChips(props: IndicatorChipsProps): JSX.Element {
+  const labels = createMemo(() => paramLabels(props.entries, paramDefaults(), true));
   return (
     <div class="flex flex-wrap items-center gap-2 px-4 py-2 border-b border-[color:var(--color-border)] min-h-[2.5rem]">
       <Show
@@ -35,7 +41,9 @@ export function IndicatorChips(props: IndicatorChipsProps): JSX.Element {
       >
         <Index each={props.entries}>
           {(entry, index) => {
-            const name = () => indicatorName(entry());
+            const params = () => labels().get(instanceKey(entry()));
+            const name = () =>
+              [indicatorName(entry()), params()].filter(Boolean).join(" ");
             return (
               <span
                 class="inline-flex items-center gap-1 bg-[color:var(--color-bg-elev)] border border-[color:var(--color-border)] rounded-full pl-1.5 pr-1 py-0.5 text-xs font-mono text-[color:var(--color-fg)]"
@@ -71,7 +79,7 @@ export function IndicatorChips(props: IndicatorChipsProps): JSX.Element {
                 <button
                   type="button"
                   aria-label={`Remove ${name()}`}
-                  onClick={() => props.onRemove(name())}
+                  onClick={() => props.onRemove(instanceKey(entry()))}
                   class={`${chipButton} hover:!text-[color:var(--color-danger)]`}
                 >
                   ×

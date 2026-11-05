@@ -158,6 +158,39 @@ Summary payload shape (for `format=summary` or `format=both`):
 Fields are keyed by the name each indicator was requested with, so
 `{"name": "rsi", "length": 21}` comes back as `indicators.rsi`.
 
+##### Several instances of one indicator
+
+The same indicator may be requested more than once, with different
+parameters ([ADR-0028](/chartgen/decisions/0028-multiple-indicator-instances/)).
+Each entry gets its own key in `indicators` and `indicator_errors` (every
+format), so results map back to their entries whatever the order:
+
+- An object entry with an `id` (a string of 1 to 64 characters) is keyed
+  by its id. The id only names the result and is not a parameter.
+- An entry without an id is keyed by its name. A name that is already
+  taken gets `name#2`, `name#3`, and so on. Explicit ids are reserved
+  first, so an automatic key never takes one.
+- A repeated id, or an id that is not a 1 to 64 character string, is a
+  tool error (`Duplicate indicator id: …`, `Invalid indicator id: …`).
+- An id equal to the name of an entry without an id is a tool error, since
+  both would get that key (`Indicator id macd is also the name of an entry
+  without an id; give that entry an id too`).
+- `generate_chart` takes at most 50 entries (`At most 50 indicators per
+  chart.`); `subscribe_chart` at most 10.
+
+```json
+"indicators": [
+  { "name": "rsi", "length": 14 },
+  { "name": "rsi", "length": 21, "id": "rsi#2" },
+  { "name": "ma", "type": "ema", "length": 20 },
+  { "name": "ma", "type": "ema", "length": 50 }
+]
+```
+
+comes back keyed `rsi`, `rsi#2`, `ma` and `ma#2`. The web app sends
+`<name>#<n>` ids for every instance after the first. Push tails
+(`subscribe_chart`) use the same keys.
+
 Series payload shape (for `format=series`):
 
 ```json
@@ -573,7 +606,8 @@ only (stdio returns an error); works without `--trade`.
 
 `subscribe_chart` takes the chart's `generate_chart` arguments: `ticker`
 (required, 2-20 letters or digits), `timeframe` (default `4h`),
-`indicators` (at most 10), `chart_style` and `warmup` (default 0, max
+`indicators` (at most 10, with [instance ids](#several-instances-of-one-indicator)
+as for `generate_chart`), `chart_style` and `warmup` (default 0, max
 1000). Validation and error messages are otherwise the same as for
 `generate_chart`. It returns:
 

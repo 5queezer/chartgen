@@ -106,6 +106,21 @@ describe("dataWindowRows", () => {
     expect(d.indicators.map((s) => s.key)).toEqual(["rsi"]);
   });
 
+  it("maps every instance of an indicator by its key (ADR-0028)", () => {
+    const rsi2 = { ...series.indicators.rsi!, label: "", lines: [{ index: 0, label: "RSI", values: [null, 40, 45] }] };
+    const two: SeriesPayload = { ...series, indicators: { rsi: series.indicators.rsi!, "rsi#2": rsi2 } };
+    const styles = { "rsi#2": { plots: { "l:RSI": { color: "#ff0000" } } } };
+    const d = dataWindowRows(two, 1, styles, [], { ...opts, visible: new Set(["rsi", "rsi#2"]) });
+    expect(d.indicators.map((s) => [s.key, s.title, s.rows[0]!.value])).toEqual([
+      ["rsi", "RSI", "55.12"],
+      ["rsi#2", "rsi", "40.00"],
+    ]);
+    expect(d.indicators[0]!.rows[0]!.color).not.toBe("#ff0000");
+    expect(d.indicators[1]!.rows[0]!.color).toBe("#ff0000");
+    const one = dataWindowRows(two, 1, {}, [], { ...opts, visible: new Set(["rsi#2"]) });
+    expect(one.indicators.map((s) => s.key)).toEqual(["rsi#2"]);
+  });
+
   it("reads compare symbols with their own precision, value and percent", () => {
     const eth = { symbol: "ETHUSDT", color: "#f23645", values: [100, 110, 121] };
     expect(dataWindowRows(series, 2, {}, [eth], opts).compare).toEqual([

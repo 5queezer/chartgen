@@ -797,8 +797,10 @@ fn normalize_param(p: &Json) -> Result<Json, String> {
         .and_then(|v| v.as_str())
         .filter(|n| n.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') && !n.is_empty())
         .ok_or("every entry needs a \"name\" (letters, digits, _)")?;
-    if name == "name" {
-        return Err("a param cannot be called \"name\"".into());
+    // Keys of an indicator entry on the wire (`name`, the instance `id`,
+    // ADR-0028) and on the web client (`hidden`, `style`).
+    if matches!(name, "name" | "id" | "hidden" | "style") {
+        return Err(format!("a param cannot be called \"{name}\" (reserved)"));
     }
     let ty = match p.get("type").and_then(|v| v.as_str()) {
         Some("int" | "integer") => "integer",

@@ -89,8 +89,31 @@ describe("parseLayouts", () => {
     const f = parseLayouts(raw, base, "x", 1);
     expect(f.items.map((l) => l.id)).toEqual(["d"]);
     expect(f.active).toBe("d");
-    expect(f.items[0]!.state.indicators).toEqual(["rsi"]);
+    // A repeated name is a second instance (ADR-0028).
+    expect(f.items[0]!.state.indicators).toEqual(["rsi", { name: "rsi", id: "rsi#2" }]);
     expect(f.items[0]!.state).not.toHaveProperty("drawingsBySymbol");
+  });
+
+  it("keeps indicator instances and their ids (ADR-0028)", () => {
+    const good = file().items[0]!;
+    const indicators = [
+      { name: "rsi", length: 14 },
+      { name: "rsi", id: "rsi#2", length: 21, hidden: true },
+      { name: "rsi", id: "rsi#2" },
+    ];
+    const state = parseState({ ...good.state, indicators })!;
+    expect(state.indicators).toEqual([
+      { name: "rsi", length: 14 },
+      { name: "rsi", id: "rsi#2", length: 21, hidden: true },
+      { name: "rsi", id: "rsi#3" },
+    ]);
+    // Instances are part of the layout: a new or edited one is a change.
+    expect(isDirty(state, { ...state, indicators: state.indicators.slice(0, 2) })).toBe(true);
+    const renumbered = state.indicators.map((e, i) =>
+      i === 2 ? { name: "rsi", id: "rsi#4" } : e,
+    );
+    expect(isDirty(state, { ...state, indicators: renumbered })).toBe(true);
+    expect(isDirty(state, { ...state, indicators: [...state.indicators] })).toBe(false);
   });
 
   it("caps at MAX_LAYOUTS", () => {

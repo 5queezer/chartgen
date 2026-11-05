@@ -5,9 +5,14 @@ sidebar:
   order: 13
 ---
 
-**Status:** Accepted
+**Status:** Accepted; superseded in part by [ADR-0028](/chartgen/decisions/0028-multiple-indicator-instances/)
 **Date:** 2026-11-04
 **Amends:** [ADR-0005](./0005-client-indicator-state/) (stored shape only; 0005 stays in force and is not superseded)
+
+> **Superseded in part by [ADR-0028](/chartgen/decisions/0028-multiple-indicator-instances/).**
+> The one-instance-per-name rule and the deduplication by name on load no
+> longer apply: entries carry an instance id, and the series payload is
+> keyed by it. The hidden flag and parameter editing stay in force.
 
 ## Context and Problem Statement
 

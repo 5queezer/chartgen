@@ -944,6 +944,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn tails_key_each_indicator_instance() {
+        // ADR-0028: two RSIs in one subscription, each under its own key.
+        let fake = Arc::new(Fake::default());
+        let hub = hub(&fake, quick());
+        let (tx, mut rx) = stream();
+        hub.link_stream("s1", tx);
+        let indicators = r#"["rsi",{"id":"rsi#2","length":21,"name":"rsi"}]"#;
+        hub.subscribe("tok", "ip", "s1", req("BTCUSDT", indicators))
+            .unwrap();
+        let seed = next(&mut rx, 2_000).await.expect("seed push");
+        fake.send(FeedEvent::Tick(bar(1_704_067_200, 123.0))).await;
+        let tick = next(&mut rx, 2_000).await.expect("tick push");
+        for n in [seed, tick] {
+            let ind = &n["params"]["series"]["indicators"];
+            assert_eq!(ind.as_object().unwrap().len(), 2);
+            let last = |k: &str| ind[k]["lines"][0]["values"][1].as_f64().unwrap();
+            assert_ne!(last("rsi"), last("rsi#2"));
+        }
+    }
+
+    #[tokio::test]
     async fn a_lingering_feed_is_reused() {
         let fake = Arc::new(Fake::default());
         let hub = hub(

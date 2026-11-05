@@ -62,20 +62,32 @@ describe("indicator store load()", () => {
 });
 
 describe("indicator store mutations", () => {
-  it("add is idempotent by name and persists", async () => {
+  it("adding an active name adds another instance and persists", async () => {
     const data = stubStorage("[]");
     const { addIndicator, activeIndicators } = await loadStore();
-    addIndicator("macd");
-    addIndicator({ name: "macd", fast: 8 });
-    expect(activeIndicators()).toEqual(["macd"]);
-    expect(JSON.parse(data.get(KEY)!)).toEqual(["macd"]);
+    expect(addIndicator("macd")).toBe("macd");
+    expect(addIndicator({ name: "macd", fast: 8 })).toBe("macd#2");
+    expect(addIndicator("macd")).toBe("macd#3");
+    const want = ["macd", { name: "macd", id: "macd#2", fast: 8 }, { name: "macd", id: "macd#3" }];
+    expect(activeIndicators()).toEqual(want);
+    expect(JSON.parse(data.get(KEY)!)).toEqual(want);
   });
 
-  it("remove drops entries by name regardless of form", async () => {
-    stubStorage();
+  it("a new instance takes the smallest free key", async () => {
+    stubStorage(JSON.stringify(["rsi", { name: "rsi", id: "rsi#3" }]));
+    const s = await loadStore();
+    expect(s.addIndicator("rsi")).toBe("rsi#2");
+    s.removeIndicator("rsi");
+    expect(s.addIndicator("rsi")).toBe("rsi");
+  });
+
+  it("remove drops only the instance with that key", async () => {
+    stubStorage(JSON.stringify(["rsi", { name: "rsi", id: "rsi#2", length: 21 }, "macd"]));
     const { removeIndicator, activeIndicators } = await loadStore();
+    removeIndicator("rsi#2");
+    expect(activeIndicators()).toEqual(["rsi", "macd"]);
     removeIndicator("rsi");
-    expect(activeIndicators()).toEqual(["ema_stack", "volume"]);
+    expect(activeIndicators()).toEqual(["macd"]);
   });
 
   it("activeIndicatorsKey keeps a __proto__ key as data", async () => {
@@ -98,7 +110,7 @@ describe("indicator store mutations", () => {
 });
 
 describe("indicator store visibility and params", () => {
-  it("dedupes by name on load, keeping the first entry", async () => {
+  it("keeps repeated names on load, numbering the instances", async () => {
     stubStorage(
       JSON.stringify([
         { name: "rsi", length: 9 },
@@ -110,6 +122,92 @@ describe("indicator store visibility and params", () => {
     expect((await loadStore()).activeIndicators()).toEqual([
       { name: "rsi", length: 9 },
       "macd",
+      { name: "rsi", id: "rsi#2" },
+      { name: "macd", id: "macd#2", fast: 5, hidden: true },
+    ]);
+  });
+
+  it("keeps valid ids and repairs malformed or repeated ones on load", async () => {
+    stubStorage(
+      JSON.stringify([
+        { name: "rsi", id: "rsi#5", length: 21 },
+        { name: "rsi", id: "rsi#5" },
+        { name: "rsi", id: "macd#2" },
+        { name: "rsi", id: "rsi" },
+        { name: "rsi", id: 7 },
+      ]),
+    );
+    const s = await loadStore();
+    expect(s.activeIndicators().map(s.instanceKey)).toEqual([
+      "rsi#5",
+      "rsi",
+      "rsi#2",
+      "rsi#3",
+      "rsi#4",
+    ]);
+    expect(s.activeIndicators()[0]).toEqual({ name: "rsi", id: "rsi#5", length: 21 });
+    expect(s.activeIndicators()[1]).toBe("rsi");
+  });
+
+  it("edits one instance by index and keeps its id", async () => {
+    stubStorage(JSON.stringify(["rsi", { name: "rsi", id: "rsi#2" }]));
+    const s = await loadStore();
+    s.updateIndicatorParams(1, { length: 21 });
+    s.toggleIndicatorHidden(1);
+    expect(s.activeIndicators()).toEqual([
+      "rsi",
+      { name: "rsi", id: "rsi#2", length: 21, hidden: true },
+    ]);
+    s.toggleIndicatorHidden(1);
+    s.updateIndicatorParams(1, {});
+    expect(s.activeIndicators()[1]).toEqual({ name: "rsi", id: "rsi#2" });
+  });
+
+  it("toWire keeps the instance id of every visible instance", async () => {
+    stubStorage();
+    const s = await loadStore();
+    expect(
+      s.toWire([
+        { name: "rsi", length: 14 },
+        { name: "rsi", id: "rsi#2", length: 21, style: { plots: {} } },
+        { name: "rsi", id: "rsi#3", hidden: true },
+      ]),
+    ).toEqual([
+      { name: "rsi", length: 14 },
+      { name: "rsi", id: "rsi#2", length: 21 },
+    ]);
+  });
+
+  it("paramLabels tells repeated instances apart with their defaults", async () => {
+    stubStorage();
+    const { paramLabels } = await loadStore();
+    const defaults = { rsi: { length: 14 }, macd: { fast: 12, slow: 26 } };
+    const entries = ["rsi", { name: "rsi", id: "rsi#2", length: 21 }, { name: "macd", fast: 8 }];
+    expect([...paramLabels(entries, defaults)]).toEqual([
+      ["rsi", "(14)"],
+      ["rsi#2", "(21)"],
+      ["macd", "(8)"],
+    ]);
+    expect([...paramLabels(entries, defaults, true)]).toEqual([
+      ["rsi", "(14)"],
+      ["rsi#2", "(21)"],
+      ["macd", undefined],
+    ]);
+  });
+
+  it("paramLabels keeps repeated labels short", async () => {
+    stubStorage();
+    const { paramLabels } = await loadStore();
+    const defaults = { cb: { a: 1, b: 2, c: 3, d: 4, e: 5 } };
+    // Only the params that differ between the instances.
+    expect([...paramLabels(["cb", { name: "cb", id: "cb#2", d: 9 }], defaults)]).toEqual([
+      ["cb", "(4)"],
+      ["cb#2", "(9)"],
+    ]);
+    // Identical instances: the first three params.
+    expect([...paramLabels(["cb", { name: "cb", id: "cb#2" }], defaults)]).toEqual([
+      ["cb", "(1, 2, 3)"],
+      ["cb#2", "(1, 2, 3)"],
     ]);
   });
 

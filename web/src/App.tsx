@@ -80,7 +80,9 @@ import {
   indicatorName,
   indicatorParams,
   indicatorStyle,
+  instanceKey,
   isHidden,
+  paramLabels,
   removeIndicator,
   setActiveIndicators,
   toggleIndicatorHidden,
@@ -94,7 +96,11 @@ import {
   removeCompare,
 } from "./stores/compare";
 import { chartSettings } from "./stores/chartSettings";
-import { setParamDefaults, type ParamDefaults } from "./stores/layouts";
+import {
+  paramDefaults,
+  setParamDefaults,
+  type ParamDefaults,
+} from "./stores/layouts";
 import {
   addRecent,
   chartStyleOf,
@@ -170,29 +176,36 @@ export function App(): JSX.Element {
   // Hidden indicators are client-only and never requested from the server.
   const wireIndicators = createMemo(() => toWire(activeIndicators()));
 
-  const indexOf = (name: string) =>
-    activeIndicators().findIndex((e) => indicatorName(e) === name);
+  // Chart legends and the object tree address an instance by its key (ADR-0028).
+  const indexOf = (key: string) =>
+    activeIndicators().findIndex((e) => instanceKey(e) === key);
 
   // Only re-evaluates when the dialog opens/closes, so edits elsewhere do
   // not reset a form in progress.
   const settingsTarget = createMemo(() => {
     const i = settingsIndex();
-    const entry = i === null ? undefined : untrack(activeIndicators)[i];
-    return entry === undefined
-      ? null
-      : {
-          name: indicatorName(entry),
-          params: indicatorParams(entry),
-          style: indicatorStyle(entry),
-          hidden: isHidden(entry),
-        };
+    const entries = untrack(activeIndicators);
+    const entry = i === null ? undefined : entries[i];
+    if (entry === undefined) return null;
+    const key = instanceKey(entry);
+    // A repeated indicator's title says which instance it is (ADR-0028).
+    const params = paramLabels(entries, untrack(paramDefaults), true).get(key);
+    const label = untrack(() => query.data?.indicators[key]?.label) || indicatorName(entry);
+    return {
+      name: indicatorName(entry),
+      title: params ? `${label} ${params}` : undefined,
+      key,
+      params: indicatorParams(entry),
+      style: indicatorStyle(entry),
+      hidden: isHidden(entry),
+    };
   });
 
   // Plot styles are client-only (ADR-0017): they reach the chart separately
   // from the wire indicators, so a style change never refetches.
   const plotStyles = createMemo(() =>
     Object.fromEntries(
-      activeIndicators().map((e) => [indicatorName(e), indicatorStyle(e)]),
+      activeIndicators().map((e) => [instanceKey(e), indicatorStyle(e)]),
     ),
   );
 
@@ -455,11 +468,11 @@ export function App(): JSX.Element {
 
   // Plots of the open dialog's indicator, from the last series payload.
   const settingsPlots = createMemo(() => {
-    const name = settingsTarget()?.name;
-    const ind = name === undefined ? undefined : query.data?.indicators[name];
-    return name === undefined || !ind
+    const key = settingsTarget()?.key;
+    const ind = key === undefined ? undefined : query.data?.indicators[key];
+    return key === undefined || !ind
       ? null
-      : plotsOf(ind, (n) => paletteColor(name, n));
+      : plotsOf(ind, (n) => paletteColor(key, n));
   });
 
   const status = createMemo<Status>(() => {
@@ -543,9 +556,10 @@ export function App(): JSX.Element {
         }
         onClose={() => setSettingsIndex(null)}
         onSubmit={(params, fields, style) => {
-          const i = settingsIndex();
           const target = settingsTarget();
-          if (i !== null && target) {
+          // By key: the entry may have moved while the dialog was open.
+          const i = target ? indexOf(target.key) : -1;
+          if (i >= 0 && target) {
             // A style-only OK must not rewrite the params: dropping a
             // value equal to its default would change the wire entry and
             // refetch.

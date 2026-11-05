@@ -68,7 +68,7 @@ Status legend:
 | Indicator picker | ✅ | ✅ | By name, server default parameters. [Managing indicators](/chartgen/guides/web/#managing-indicators) |
 | Settings dialog with Inputs and Style tabs | ✅ | ◐ | The Inputs form is generated from the server schema (numbers, switches, text; no enums). The Style tab sets visibility, color, opacity, width and line style. No per-timeframe visibility tab. [ADR-0017](/chartgen/decisions/0017-indicator-plot-styles/) |
 | Hide and remove from the pane legend | ✅ | ✅ | [Managing indicators](/chartgen/guides/web/#managing-indicators), [ADR-0013](/chartgen/decisions/0013-indicator-visibility-and-instances/) |
-| Several instances of one indicator (RSI 14 and RSI 21) | ✅ | ❌ | Needs a wire change. [ADR-0013](/chartgen/decisions/0013-indicator-visibility-and-instances/) |
+| Several instances of one indicator (RSI 14 and RSI 21) | ✅ | ✅ | Each with its own params, style, visibility and pane. [Managing indicators](/chartgen/guides/web/#managing-indicators), [ADR-0028](/chartgen/decisions/0028-multiple-indicator-instances/) |
 | Fills, hlines, volume profile, divergence lines | ✅ | ✅ | Server colors on the wire. The VPVR up/down split cannot be colored. [ADR-0007](/chartgen/decisions/0007-complete-series-serialization/), [ADR-0010](/chartgen/decisions/0010-overlay-geometry-rendering/), [ADR-0012](/chartgen/decisions/0012-geometry-colors-on-the-wire/) |
 | Ichimoku cloud | ✅ | ◐ | Cloud is drawn over the bars; the projection past the last bar is not drawn yet. [Differences list](/chartgen/reference/indicators/#values-match-tradingview) |
 | Geometry colors editable in Style | ✅ | ❌ | Fill, profile and divergence colors are not styleable. [ADR-0017](/chartgen/decisions/0017-indicator-plot-styles/) |
@@ -204,9 +204,6 @@ oversight.
 - **Compare costs up to five extra requests per poll.** It relies on
   klinecharts' percent axis behavior, pinned by a unit test.
   [ADR-0022](/chartgen/decisions/0022-compare-symbols/)
-- **One instance per indicator.** Two RSIs with different lengths need a wire
-  change.
-  [ADR-0013](/chartgen/decisions/0013-indicator-visibility-and-instances/)
 - **Client state is local.** Indicators, layouts, drawings, alerts and the
   watchlist live in `localStorage`: no sync, links carry only the
   chart setup, and clearing browser data wipes them.

@@ -129,7 +129,7 @@ export const IndicatorErrorSchema = z.object({
 });
 export type IndicatorError = z.infer<typeof IndicatorErrorSchema>;
 
-// Request key → error, for indicators left out of `indicators` because
+// Instance key → error, for indicators left out of `indicators` because
 // they failed. Absent when every indicator computed (always, for
 // built-ins); servers that predate user scripts never send it.
 export const IndicatorErrorsSchema = z
@@ -143,6 +143,8 @@ export const SeriesPayloadSchema = z.object({
   // Absent from servers that predate it: raw candles.
   chart_style: z.enum(["candles", "heikin_ashi"]).optional(),
   bars: z.array(SeriesBarSchema),
+  // Keyed by instance (ADR-0028): the entry's `id`, else its name; a
+  // repeat of a name without an id is `name#2`, `name#3`...
   indicators: z.record(z.string(), SeriesIndicatorSchema),
   indicator_errors: IndicatorErrorsSchema,
   // True when older bars may exist before `bars[0]`: request them with
@@ -241,6 +243,7 @@ export const SummaryPayloadSchema = z.object({
   symbol: z.string().nullable(),
   interval: z.string().nullable(),
   price: OhlcvSummarySchema,
+  // Same instance keys as the series payload (ADR-0028).
   indicators: z.record(z.string(), SummaryIndicatorSchema),
   indicator_errors: IndicatorErrorsSchema,
 });

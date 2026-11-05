@@ -185,7 +185,8 @@ export function IndicatorPicker(props: IndicatorPickerProps): JSX.Element {
 
   const handleAdd = (info: IndicatorInfo) => {
     // Bare name: the server applies schema defaults, and only non-default
-    // params are ever stored on an entry.
+    // params are ever stored on an entry. An indicator already on the chart
+    // gets another instance (ADR-0028).
     addIndicator(info.name);
   };
 
@@ -280,9 +281,8 @@ export function IndicatorPicker(props: IndicatorPickerProps): JSX.Element {
                                     <li>
                                       <button
                                         type="button"
-                                        disabled={isActive()}
                                         onClick={() => handleAdd(info)}
-                                        class="w-full flex items-start gap-2 px-6 py-2 text-left text-sm hover:bg-[color:var(--color-bg-elev)] disabled:opacity-50 disabled:cursor-default cursor-pointer"
+                                        class="w-full flex items-start gap-2 px-6 py-2 text-left text-sm hover:bg-[color:var(--color-bg-elev)] cursor-pointer"
                                       >
                                         <span class="pt-0.5 flex-shrink-0">
                                           <CategoryIcon category={info.type} />

@@ -10,10 +10,12 @@ import { dataWindowRows } from "../lib/dataWindow";
 import type { SeriesPayload } from "../types/responses";
 import {
   activeIndicators,
-  indicatorName,
+  instanceKey,
   isHidden,
+  paramLabels,
   type IndicatorStyle,
 } from "../stores/indicators";
+import { paramDefaults } from "../stores/layouts";
 import { paletteColor, type CompareLine } from "./Chart";
 
 export interface DataWindowProps {
@@ -73,9 +75,11 @@ export function DataWindow(props: DataWindowProps): JSX.Element {
       new Set(
         activeIndicators()
           .filter((e) => !isHidden(e))
-          .map(indicatorName),
+          .map(instanceKey),
       ),
   );
+  // A repeated indicator shows its params, so its sections read apart (ADR-0028).
+  const params = createMemo(() => paramLabels(activeIndicators(), paramDefaults(), true));
   const data = createMemo(() =>
     props.series
       ? dataWindowRows(props.series, props.crosshair, props.styles, props.compare, {
@@ -128,7 +132,9 @@ export function DataWindow(props: DataWindowProps): JSX.Element {
             <For each={d().indicators}>
               {(s) => (
                 <section aria-label={s.title} data-testid={`dw-ind-${s.key}`}>
-                  <Heading>{s.title}</Heading>
+                  <Heading>
+                    {[s.title, params().get(s.key)].filter(Boolean).join(" ")}
+                  </Heading>
                   <For each={s.rows}>{(r) => <Row {...r} />}</For>
                 </section>
               )}
