@@ -15,6 +15,8 @@ All URLs are built from `CHARTGEN_BASE_URL` (falls back to
 
 | Method | Path | Purpose |
 |--------|------|---------|
+| `GET` | `/.well-known/oauth-protected-resource/mcp` | RFC 9728 protected-resource metadata for `/mcp`: `resource` is `<base>/mcp`, `authorization_servers` is `[<base>]`. |
+| `GET` | `/.well-known/oauth-protected-resource` | The same for the deprecated root alias (`resource` is `<base>`). |
 | `GET` | `/.well-known/oauth-authorization-server` | RFC 8414 metadata document. |
 | `POST` | `/register` | Dynamic client registration (RFC 7591). Returns a `client_id`/`client_secret`. |
 | `GET` | `/authorize` | Authorization endpoint. Requires `client_id`, `redirect_uri`, `response_type=code`, `code_challenge`, `code_challenge_method=S256`, optional `state`. |
@@ -36,6 +38,12 @@ All URLs are built from `CHARTGEN_BASE_URL` (falls back to
   "logo_uri": "https://chartgen.example.com/favicon.svg"
 }
 ```
+
+A `401` from `POST /mcp` or `GET /mcp` carries
+`WWW-Authenticate: Bearer resource_metadata="<base>/.well-known/oauth-protected-resource/mcp"`,
+so a client given `https://<domain>/mcp` finds the protected-resource
+document and from it the authorization server. A `401` from the root and
+`/message`/`/sse` aliases points at the root document instead.
 
 Only `authorization_code` with PKCE S256 is supported — there is no
 `refresh_token` or `client_credentials` path.
@@ -67,8 +75,8 @@ The HTTP transport is **MCP Streamable HTTP (spec 2025-03-26)**. See the
 
 | Endpoint | Behavior |
 |----------|----------|
-| `GET /` | Health / discovery JSON. Unauthenticated. |
-| `POST /mcp` (aliases: `POST /`, `POST /message`) | JSON-RPC 2.0 over HTTP. `tools/list` and `initialize` are accepted unauthenticated so the connector can enumerate tools before OAuth completes; every other method requires a valid bearer token. Response `Content-Type: application/json`. Clients that send `Accept` without `application/json` receive `406 Not Acceptable`. An optional `Mcp-Session-Id` header is echoed back unchanged; `initialize` without one gets a fresh id. chartgen keeps no session state beyond scoping [chart push](/chartgen/reference/mcp/#subscribe_chart--unsubscribe_chart) subscriptions to the session's SSE stream. |
+| `GET /` | Health / discovery JSON. Unauthenticated. With `CHARTGEN_WEB_DIR` set, a request whose `Accept` contains `text/html` gets the [web app](/chartgen/guides/web/) instead (also the OAuth callback `/?code=…`). |
+| `POST /mcp` (deprecated aliases: `POST /`, `POST /message`) | JSON-RPC 2.0 over HTTP. `tools/list` and `initialize` are accepted unauthenticated so the connector can enumerate tools before OAuth completes; every other method requires a valid bearer token. Response `Content-Type: application/json`. Clients that send `Accept` without `application/json` receive `406 Not Acceptable`. An optional `Mcp-Session-Id` header is echoed back unchanged; `initialize` without one gets a fresh id. chartgen keeps no session state beyond scoping [chart push](/chartgen/reference/mcp/#subscribe_chart--unsubscribe_chart) subscriptions to the session's SSE stream. |
 | `GET /mcp` (alias: `GET /sse`) | Persistent SSE stream for server-initiated messages. Pushes `notifications/alert_triggered` JSON-RPC notification frames to [subscribed clients](/chartgen/guides/notifications/) and `notifications/chart_tick` frames for [chart push](/chartgen/reference/mcp/#subscribe_chart--unsubscribe_chart). No legacy `event: endpoint` frame is emitted — clients POST to `/mcp` directly. |
 
 ## Debugging
