@@ -23,7 +23,7 @@ Status legend:
 | Feature | TradingView | chartgen | Notes / links |
 |---|---|---|---|
 | Symbol search | ✅ | ✅ | Binance spot pairs and Yahoo instruments, type tabs, recent symbols. [Toolbar](/chartgen/guides/web/#toolbar), [`search_symbols`](/chartgen/reference/mcp/#search_symbols) |
-| Timeframe buttons and keyboard entry | ✅ | ✅ | 1m, 3m, 5m, 15m, 30m, 1h, 2h, 4h, 6h, 12h, 1D, 3D, 1W, 1M; typing a digit or **Custom interval...** opens a popup that accepts any of them (`2h`, `120`, `3D`). Other multiples and seconds intervals are not served. [Keyboard shortcuts](/chartgen/guides/web/#keyboard-shortcuts) |
+| Timeframe buttons and keyboard entry | ✅ | ◐ | A fixed set of 14 intervals (1m, 3m, 5m, 15m, 30m, 1h, 2h, 4h, 6h, 12h, 1D, 3D, 1W, 1M); typing a digit or **Custom interval...** opens a popup that accepts any of them (`2h`, `120`, `3D`). No arbitrary multiples (7m, 2D) or seconds. [Keyboard shortcuts](/chartgen/guides/web/#keyboard-shortcuts) |
 | Price legend (OHLC, change, volume) | ✅ | ✅ | Follows the crosshair. [Chart conveniences](/chartgen/guides/web/#chart-conveniences) |
 | Bar-close countdown | ✅ | ◐ | Only for 24/7 symbols (the Binance rule). Hidden for stocks, FX and futures, because the session close cannot be derived from the interval. [Chart conveniences](/chartgen/guides/web/#chart-conveniences) |
 | %, log and auto price scale | ✅ | ✅ | [Chart conveniences](/chartgen/guides/web/#chart-conveniences) |

@@ -180,10 +180,13 @@ pub fn bar_interval_secs(interval: &str) -> Option<i64> {
 }
 
 /// Offset of the bar grid from the epoch: weekly bars open on Monday
-/// (1970-01-01 was a Thursday), everything else is epoch-aligned.
+/// (1970-01-01 was a Thursday) and Binance's 3d bars on epoch days with
+/// `day % 3 == 1`; everything else is epoch-aligned.
 fn grid_offset_ms(step: i64) -> i64 {
     if step == 7 * 86_400 {
         4 * 86_400_000
+    } else if step == 3 * 86_400 {
+        86_400_000
     } else {
         0
     }
@@ -384,7 +387,9 @@ mod tests {
             assert_eq!(d.len(), 20, "{tf}");
             let ts: Vec<i64> = d.bars.iter().map(|b| b.date.parse().unwrap()).collect();
             assert!(ts.windows(2).all(|w| w[1] - w[0] == secs), "{tf} spacing");
-            assert!(ts.iter().all(|t| t % secs == 0), "{tf} grid");
+            // Binance's 3d klines open on epoch days with day % 3 == 1.
+            let off = if tf == "3d" { 86_400 } else { 0 };
+            assert!(ts.iter().all(|t| (t - off) % secs == 0), "{tf} grid");
         }
     }
 
