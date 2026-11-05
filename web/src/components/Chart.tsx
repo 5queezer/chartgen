@@ -1164,8 +1164,11 @@ export function Chart(props: ChartProps): JSX.Element {
   // The axis and crosshair labels are klinecharts' own; the legend's time
   // is ours.
   createEffect(() => {
-    chart()?.setTimezone(props.timeZone);
-    recomputeHeaders();
+    const tz = props.timeZone;
+    const c = chart();
+    if (!c) return;
+    c.setTimezone(tz);
+    untrack(recomputeHeaders);
   });
 
   createEffect(() => props.onCrosshair?.(crosshairIndex()));

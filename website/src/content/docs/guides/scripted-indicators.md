@@ -255,8 +255,9 @@ See the [MCP reference](/chartgen/reference/mcp/#scripted-indicators-chartgen_sc
 
 ## Limits
 
-Each `compute` call runs under these limits; going over one is an error
-for that indicator, never a crash:
+Each `compute` call runs under these limits; a detected
+violation returns an indicator error. Limits are best effort, not a
+guarantee against crashes (see [ADR-0024](/chartgen/decisions/0024-starlark-script-runtime/)):
 
 | Limit | Value |
 |---|---|

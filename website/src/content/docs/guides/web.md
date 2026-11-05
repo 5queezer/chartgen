@@ -9,7 +9,7 @@ chart with an RSI panel. It implements
 [ADR-0003](/chartgen/decisions/0003-web-frontend-stack/).
 
 The scope is deliberately narrow: a top toolbar (symbol, timeframe,
-chart type), the indicator picker, the chart and a watchlist. Alerts UI, order
+chart type), the indicator picker, the chart and a watchlist. Order
 entry, multi-chart layouts, and LLM chat are explicitly out of scope
 until the core loop is solid.
 
@@ -686,8 +686,9 @@ etc. on the current origin.
     with width proportional to volume. The widest row (the POC) is gold,
     and rows inside the value area are brighter.
   - *divlines* — straight segments between two bars, dashed when the
-    payload says so. Bullish divergences are green and bearish ones red.
-    The kind is inferred from the slope, because the wire carries no color.
+    payload says so. Each line carries a server-assigned color
+    ([ADR-0012](/chartgen/decisions/0012-geometry-colors-on-the-wire/)); only for older servers that omit it
+    is the kind inferred from the slope (bullish green, bearish red).
 
   Colors come from the wire
   ([ADR-0012](/chartgen/decisions/0012-geometry-colors-on-the-wire/));

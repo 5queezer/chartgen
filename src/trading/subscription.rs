@@ -141,15 +141,18 @@ impl SubscriptionRegistry {
     pub fn link_sender(&mut self, token: &str, stream: &str, sender: mpsc::Sender<String>) {
         if let Some(sub) = self.subscriptions.get_mut(token) {
             // Flush offline queue through the sender
-            let queue = std::mem::take(&mut sub.offline_queue);
-            for (alert, _instant) in queue {
-                let json = format_notification(&alert);
-                if sender.try_send(json).is_err() {
-                    // Sender broken immediately — stop flushing
+            let mut queue = std::mem::take(&mut sub.offline_queue).into_iter();
+            for (alert, at) in queue.by_ref() {
+                if sender.try_send(format_notification(&alert)).is_err() {
+                    // Full or closed: keep this alert and the rest queued.
+                    sub.offline_queue.push((alert, at));
                     break;
                 }
             }
-            sub.senders.insert(stream.to_string(), sender);
+            sub.offline_queue.extend(queue);
+            if !sender.is_closed() {
+                sub.senders.insert(stream.to_string(), sender);
+            }
         }
     }
 
@@ -480,6 +483,61 @@ mod tests {
         let info = reg.list("tok1").unwrap();
         assert_eq!(info.offline_queue_size, 3);
 
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn link_sender_keeps_overflow_queued_in_order() {
+        let dir = temp_dir("link_overflow");
+        let mut reg = make_registry(&dir);
+        reg.subscribe("tok1", None, None);
+        let alerts: Vec<_> = (0..300)
+            .map(|i| {
+                make_alert(
+                    &format!("a{i}"),
+                    "BTCUSDT",
+                    AlertCondition::PriceAbove(1.0),
+                    2.0,
+                )
+            })
+            .collect();
+        reg.dispatch(&alerts);
+        assert_eq!(reg.list("tok1").unwrap().offline_queue_size, 300);
+
+        let (tx, mut rx) = mpsc::channel(256);
+        reg.link_sender("tok1", "s1", tx);
+
+        let mut delivered = 0;
+        while rx.try_recv().is_ok() {
+            delivered += 1;
+        }
+        assert_eq!(delivered, 256);
+        let sub = reg.subscriptions.get("tok1").unwrap();
+        assert_eq!(sub.offline_queue.len(), 44);
+        assert_eq!(sub.offline_queue[0].0.alert.id, "a256");
+        assert_eq!(sub.offline_queue[43].0.alert.id, "a299");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn link_sender_ignores_closed_receiver() {
+        let dir = temp_dir("link_closed");
+        let mut reg = make_registry(&dir);
+        reg.subscribe("tok1", None, None);
+        reg.dispatch(&[make_alert(
+            "a1",
+            "BTCUSDT",
+            AlertCondition::PriceAbove(1.0),
+            2.0,
+        )]);
+
+        let (tx, rx) = mpsc::channel(8);
+        drop(rx);
+        reg.link_sender("tok1", "s1", tx);
+
+        let info = reg.list("tok1").unwrap();
+        assert!(!info.connected);
+        assert_eq!(info.offline_queue_size, 1);
         let _ = fs::remove_dir_all(&dir);
     }
 
