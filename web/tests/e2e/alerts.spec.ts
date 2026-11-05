@@ -91,15 +91,9 @@ async function createAlert(
     price?: number;
     trigger?: string;
     message?: string;
-    /** Open with the header bell instead of Alt+A. */
-    bell?: boolean;
   },
 ) {
-  // After a dialog closes, Chromium drops key events until the next click
-  // (the focus is on a body it no longer delivers to), so a second alert in
-  // a test opens through the bell.
-  if (opts.bell) await page.getByRole("button", { name: "Add alert" }).click();
-  else await page.keyboard.press("Alt+KeyA");
+  await page.keyboard.press("Alt+KeyA");
   await expect(dialog(page)).toBeVisible();
   if (opts.condition) await dialog(page).getByLabel("Condition").selectOption(opts.condition);
   if (opts.price !== undefined) await priceInput(page).fill(String(opts.price));
@@ -189,7 +183,7 @@ test.describe("price alerts", () => {
     await mockNotifications(page);
     const L = await lowLevel(page);
     await createAlert(page, { condition: "crossing_up", price: L, message: "first" });
-    await createAlert(page, { condition: "crossing_up", price: L + 2, message: "second", bell: true });
+    await createAlert(page, { condition: "crossing_up", price: L + 2, message: "second" });
     await feed(page, [L - 1, L + 5]);
     expect(await notes(page)).toHaveLength(2);
     await expect(toasts(page).filter({ hasText: /^Alert: .*first/ })).toBeVisible();

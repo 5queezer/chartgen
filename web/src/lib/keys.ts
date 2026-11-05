@@ -13,3 +13,22 @@ export function isTypingContext(e: KeyboardEvent): boolean {
   }
   return document.querySelector("[role=dialog], [role=menu]") !== null;
 }
+
+/**
+ * Chromium delivers no key events to a page whose focused element was removed
+ * (a closed dialog's content) and fell back to `<body>`, until the next click.
+ * Moves focus to the chart host whenever DOM removal leaves it on `<body>`, so
+ * shortcuts keep working right after a dialog or menu closes.
+ */
+export function keepKeyboardFocus(): () => void {
+  const observer = new MutationObserver((records) => {
+    if (!records.some((r) => r.removedNodes.length > 0)) return;
+    const a = document.activeElement;
+    if (a && a !== document.body) return;
+    document
+      .querySelector<HTMLElement>(".chart-host")
+      ?.focus({ preventScroll: true });
+  });
+  observer.observe(document.body, { childList: true, subtree: true });
+  return () => observer.disconnect();
+}

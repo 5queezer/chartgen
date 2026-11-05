@@ -38,7 +38,7 @@ import {
   resetChart,
   screenshotFilename,
 } from "./lib/chartActions";
-import { isTypingContext } from "./lib/keys";
+import { isTypingContext, keepKeyboardFocus } from "./lib/keys";
 import { alignAsOf, COMPARE_PALETTE } from "./lib/compare";
 import { createCompareFeed, type CompareData } from "./lib/compareFeed";
 import { barCloseMs, isContinuousMarket } from "./lib/countdown";
@@ -102,6 +102,8 @@ export function App(): JSX.Element {
   // Index (into the active set) of the indicator whose settings dialog is open.
   const [settingsIndex, setSettingsIndex] = createSignal<number | null>(null);
   const [chart, setChart] = createSignal<KLineChart | null>(null);
+
+  onMount(() => onCleanup(keepKeyboardFocus()));
 
   // Chart keyboard navigation: never while typing or a dialog/menu is open.
   onMount(() => {
