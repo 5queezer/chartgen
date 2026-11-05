@@ -43,6 +43,7 @@ chart stays on screen while the new one loads. There is no Load button; if a loa
   Heikin-Ashi is not offered because it needs client-side math
   ([ADR-0003](/chartgen/decisions/0003-web-frontend-stack/)).
 
+- **Replay** (rewind) — starts and ends [bar replay](#bar-replay).
 - **Screenshot** (camera) — downloads the chart canvas, overlays included,
   as a PNG on the chart background, named
   `<SYMBOL>_<TF>_<yyyy-mm-dd_HHMM>.png` (local time). The DOM legend
@@ -149,6 +150,47 @@ The compare list is saved with the rest of the chart state
 (`chartgen.layout.compare`) and is part of a [layout](#layouts). See
 [ADR-0022](/chartgen/decisions/0022-compare-symbols/).
 
+## Bar replay
+
+The **Replay** button (rewind icon) in the toolbar replays the chart from a
+past bar, as TradingView's Bar Replay does. Live updates stop while
+replaying, and a control bar floats over the bottom of the chart.
+
+1. **Pick the start.** After **Replay**, a vertical line follows the mouse
+   and dims the bars to its right. Click a bar to start there; dragging still
+   scrolls the chart, so you can scroll back first. Or use the calendar
+   button (**Select date**) to start at the bar of a date and time, read in
+   the bottom bar's time zone; older history is loaded first if needed.
+   **Select bar** picks a new start at any time.
+2. **Replay.** Bars after the start are hidden. **Forward** (`Shift+→`)
+   adds the next bar. **Play** / **Pause** (`Shift+↓`) adds bars at the
+   speed of the `1x` menu: 1, 3 or 10 bars per second. Playback stops at
+   the newest loaded bar.
+3. **Back to live.** **Jump to real time**, the **×** or `Esc` shows the
+   whole chart again and restarts live updates, which catch up the bars
+   that formed meanwhile.
+
+While replaying:
+
+- Indicators show what they showed at the replay bar. Most are cut at it.
+  Those whose values change with later bars are recomputed on the server up
+  to the replay bar: volume and time profiles (`volume_profile`/VPVR,
+  `session_vp`, `hvn_lvn`, `naked_poc`, `tpo`), ZigZag, the linear
+  regression channel and Ichimoku. While playing that happens at most twice a
+  second and again on pause, so these lag a little and their newest bars are
+  briefly blank. Divergence lines and signals appear once their last bar is
+  reached.
+- Scrolling back still loads older history. Drawings work as usual; ones
+  placed after the replay bar are drawn past the last bar. Compare lines
+  are cut at the replay bar too.
+- Changing the symbol, timeframe or indicators keeps the replay time: the
+  new chart shows every bar that had closed by then, loading older history
+  if needed.
+- Price alerts keep checking live prices (the chart symbol is checked through
+  the watchlist quotes meanwhile) and never fire on replayed bars.
+
+See [ADR-0023](/chartgen/decisions/0023-bar-replay/).
+
 ## Live updates and history
 
 The chart stays live while the page is open, as in TradingView
@@ -246,6 +288,9 @@ while typing in a field or while a dialog or menu is open.
 | `Alt+R` | Reset chart (scroll to real time, default zoom) |
 | `Alt+G` | Go to date |
 | `Alt+A` | Add a price alert at the last price |
+| `Shift+→` | Bar replay: forward one bar |
+| `Shift+↓` | Bar replay: play / pause |
+| `Esc` | Bar replay: jump to real time |
 
 The timeframe popup accepts a number of minutes (`5`, `15`, `60`, `240`)
 or a number with a unit `m`, `h`, `d`, `w` (`1h`, `4H`, `1D`); an
