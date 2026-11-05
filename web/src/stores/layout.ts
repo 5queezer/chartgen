@@ -56,7 +56,7 @@ const DEFAULT_TIMEFRAME: Timeframe = "1h";
 export const DEFAULT_CHART_TYPE: ChartType = "candles";
 export const DEFAULT_SCALE_MODE: ScaleMode = "normal";
 
-function read(key: string): unknown {
+export function read(key: string): unknown {
   if (typeof localStorage === "undefined") return undefined;
   try {
     const raw = localStorage.getItem(PREFIX + key);
@@ -66,7 +66,7 @@ function read(key: string): unknown {
   }
 }
 
-function persist(key: string, value: unknown): void {
+export function persist(key: string, value: unknown): void {
   if (typeof localStorage === "undefined") return;
   try {
     localStorage.setItem(PREFIX + key, JSON.stringify(value));
@@ -90,7 +90,7 @@ function isChartType(x: unknown): x is ChartType {
   return (CHART_TYPES as readonly unknown[]).includes(x);
 }
 
-function isScaleMode(x: unknown): x is ScaleMode {
+export function isScaleMode(x: unknown): x is ScaleMode {
   return (SCALE_MODES as readonly unknown[]).includes(x);
 }
 

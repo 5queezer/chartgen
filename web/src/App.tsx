@@ -25,6 +25,7 @@ import { PALETTES } from "./lib/theme";
 import { resolveTimeZone } from "./lib/timezone";
 import { plotsOf } from "./lib/plotStyle";
 import { StatusLine, type Status } from "./components/StatusLine";
+import { SymbolSearch } from "./components/SymbolSearch";
 import { Toolbar } from "./components/Toolbar";
 import { Watchlist } from "./components/Watchlist";
 import {
@@ -35,6 +36,9 @@ import {
   screenshotFilename,
 } from "./lib/chartActions";
 import { isTypingContext } from "./lib/keys";
+import { alignAsOf, COMPARE_PALETTE } from "./lib/compare";
+import { createCompareFeed, type CompareData } from "./lib/compareFeed";
+import { isContinuousMarket } from "./lib/countdown";
 import { createMcpSession } from "./mcp";
 import { tryHandlePendingRedirect } from "./oauth";
 import {
@@ -44,6 +48,8 @@ import {
 } from "./queries";
 import {
   createLiveFeed,
+  FAST_POLL_MS,
+  SLOW_POLL_MS,
   type HistoryStatus,
   type LiveRequest,
   type LiveSnapshot,
@@ -62,6 +68,7 @@ import {
   toWire,
   updateIndicatorSettings,
 } from "./stores/indicators";
+import { addCompare, compareSymbols, removeCompare } from "./stores/compare";
 import { setParamDefaults, type ParamDefaults } from "./stores/layouts";
 import {
   addRecent,
@@ -224,6 +231,49 @@ export function App(): JSX.Element {
     });
   });
 
+  // --- Compare symbols (ADR-0022) -------------------------------------
+  const [compareOpen, setCompareOpen] = createSignal(false);
+  const [compareData, setCompareData] = createSignal(
+    new Map<string, CompareData>(),
+  );
+  const compareFeed = createCompareFeed({
+    fetch: (request, { signal, ...args }) =>
+      session.callGenerateChart(
+        { ...request, indicators: [], chart_style: "candles", ...args },
+        signal,
+      ),
+    onChange: setCompareData,
+    pollMs: () => (isContinuousMarket(symbol()) ? FAST_POLL_MS : SLOW_POLL_MS),
+  });
+  onCleanup(compareFeed.dispose);
+  const comparing = createMemo(() =>
+    compareSymbols().filter((s) => s !== symbol()),
+  );
+  // Sized to the main series once it matches the timeframe (a kept previous
+  // chart of another timeframe must not size the loads).
+  createEffect(() => {
+    const s = live()?.series;
+    const ready = authReady() && s?.interval === timeframe();
+    compareFeed.sync({
+      symbols: authReady() ? comparing() : [],
+      timeframe: timeframe(),
+      mainCount: ready ? s.bars.length : 0,
+      mainFirst: ready ? (s.bars[0]?.t ?? null) : null,
+    });
+  });
+  const compareLines = createMemo(() => {
+    const times = live()?.series.bars.map((b) => b.t) ?? [];
+    return comparing().map((sym, i) => {
+      const data = compareData().get(sym);
+      return {
+        symbol: sym,
+        color: COMPARE_PALETTE[i % COMPARE_PALETTE.length]!,
+        values: data ? alignAsOf(times, data.bars) : times.map(() => null),
+      };
+    });
+  });
+  // ---------------------------------------------------------------------
+
   if (import.meta.env.DEV) {
     // E2E hook (tests/e2e/live-paging.spec.ts): what the chart holds.
     (window as unknown as Record<string, unknown>).__chartgenTest = {
@@ -291,6 +341,14 @@ export function App(): JSX.Element {
             const c = chart();
             if (c) resetChart(c);
           }}
+          onCompare={() => setCompareOpen(true)}
+        />
+        <SymbolSearch
+          open={compareOpen()}
+          onOpenChange={setCompareOpen}
+          initialQuery=""
+          onSelect={(ticker) => addCompare(ticker, symbol())}
+          session={session}
         />
         <button
           type="button"
@@ -374,6 +432,8 @@ export function App(): JSX.Element {
             onSettings={(n) => setSettingsIndex(indexOf(n))}
             onRemove={removeIndicator}
             onChartReady={setChart}
+            compare={compareLines()}
+            onRemoveCompare={removeCompare}
           />
         </div>
         <Watchlist session={session} enabled={authReady()} />

@@ -124,6 +124,28 @@ date** button, a clock and the time zone selector.
   bar. A date before the start of history goes to the first bar and says so
   in the bar; at the history limit it goes to the oldest loaded bar.
 
+## Compare symbols
+
+The **Compare** button (two overlapping circles) in the toolbar opens the
+symbol search; pick a symbol and it is drawn as a line over the price
+series. Add up to five. The first one switches the price axis to percent,
+so every line starts from the same point: the axis shows each symbol's own
+percent change since the first visible bar, and the lines move with scroll
+and zoom. Removing the last compare symbol restores the scale mode you had
+before.
+
+Each compare symbol has a legend row under the indicator rows with its
+name, its close (at the crosshair bar, or the last bar at rest), the percent
+change since the first visible bar, and a **×** on hover to remove it. The
+lines follow the main chart: the same loaded range, older history when you
+scroll back, the live tail, and a refetch on a timeframe change. A compare
+symbol has bars on its own schedule, so each main bar shows the last close
+at or before it.
+
+The compare list is saved with the rest of the chart state
+(`chartgen.layout.compare`) and is part of a [layout](#layouts). See
+[ADR-0022](/chartgen/decisions/0022-compare-symbols/).
+
 ## Live updates and history
 
 The chart stays live while the page is open, as in TradingView
@@ -279,7 +301,7 @@ dropped. The list holds at most 50 symbols, the `get_quotes` limit.
 ## Layouts
 
 A layout is a named bundle of symbol, timeframe, chart type, scale mode,
-and the indicator set (including hidden and edited ones). Drawings are
+compare symbols and the indicator set (including hidden and edited ones). Drawings are
 not part of a layout: they stay per symbol and look the same in every
 layout. The layout menu sits at the right end of the top bar and shows the active
 layout's name. A dot next to the name means the chart differs from the

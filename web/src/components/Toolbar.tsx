@@ -141,6 +141,8 @@ export interface ToolbarProps {
   onScreenshot: () => void;
   /** Scroll to real time and restore the default bar spacing. */
   onResetChart: () => void;
+  /** Open the symbol search in "add compare symbol" mode. */
+  onCompare: () => void;
 }
 
 export function Toolbar(props: ToolbarProps): JSX.Element {
@@ -299,6 +301,18 @@ export function Toolbar(props: ToolbarProps): JSX.Element {
 
       <span class="w-px h-5 bg-[color:var(--color-border)] mx-1" />
 
+      <button
+        type="button"
+        class={buttonClass}
+        onClick={props.onCompare}
+        aria-label="Compare symbol"
+        title="Compare symbol"
+      >
+        <svg {...iconProps}>
+          <circle cx="6.5" cy="9" r="4.5" />
+          <circle cx="11.5" cy="9" r="4.5" />
+        </svg>
+      </button>
       <button
         type="button"
         class={buttonClass}
