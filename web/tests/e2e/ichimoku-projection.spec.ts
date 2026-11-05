@@ -7,7 +7,7 @@
 
 import type { Page } from "@playwright/test";
 
-import { formatValue } from "../../src/lib/format";
+import { formatIndicatorValue, pricePrecision } from "../../src/lib/format";
 import { test, expect, gotoApp, expectChartRendered } from "./fixtures/app";
 
 const SHOTS = "/tmp/claude-1000/chartgen-shots/ichimoku";
@@ -30,6 +30,7 @@ interface Hook {
   series: () => {
     symbol: string | null;
     indicators: Record<string, { future?: Future }>;
+    bars: Array<{ c: number }>;
   } | null;
 }
 
@@ -46,6 +47,7 @@ const hook = (page: Page) =>
       offset: c.getOffsetRightDistance(),
       barSpace: c.getBarSpace(),
       future: h.series()?.indicators.ichimoku?.future ?? null,
+      closes: (h.series()?.bars ?? []).slice(-50).map((b) => b.c),
     };
   });
 
@@ -159,10 +161,10 @@ test("the legend reads the projected spans over the future bars", async ({ page 
   const legend = page.getByTestId("price-legend").first();
   await expect(page.getByTestId("legend-c").first()).toHaveText("—");
   await expect(legend).toBeVisible();
-  const f = (await hook(page)).future!;
-  const spanA = f.lines.find((l) => l.index === 2)!.values[9]!;
+  const { future: f, closes } = await hook(page);
+  const spanA = f!.lines.find((l) => l.index === 2)!.values[9]!;
   await expect(page.locator(".pane-header").filter({ hasText: "Ichimoku" })).toContainText(
-    `Senkou A ${formatValue(spanA)}`,
+    `Senkou A ${formatIndicatorValue(spanA, "overlay", pricePrecision(closes))}`,
   );
   await page.screenshot({ path: `${SHOTS}/crosshair.png` });
 });
