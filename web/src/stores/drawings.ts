@@ -72,6 +72,11 @@ export const MAX_WIDTH = 4;
 export const FONT_SIZES = [10, 12, 14, 18, 24] as const;
 
 export interface DrawingRecord {
+  /**
+   * The drawing's overlay id, kept across reloads so alerts can refer to
+   * it (ADR-0034). Records saved before that have none until re-saved.
+   */
+  id?: string;
   name: DrawingName;
   points: DrawingPoint[];
   styles?: Record<string, unknown>;
@@ -219,6 +224,7 @@ export function parseRecord(x: unknown): DrawingRecord | null {
   const points = x.points.map(parsePoint);
   if (points.some((p) => p === null)) return null;
   const rec: DrawingRecord = {
+    ...(typeof x.id === "string" && x.id !== "" && x.id.length <= 64 ? { id: x.id } : {}),
     name: x.name,
     points: points as DrawingPoint[],
     lock: x.lock === true,
@@ -312,6 +318,7 @@ export function toChartPoint(
 
 /** Minimal shape of a klinecharts overlay that we serialize. */
 export interface OverlayLike {
+  id?: string;
   name: string;
   points: ReadonlyArray<{
     timestamp?: number;
@@ -343,6 +350,7 @@ export function serialize(
 ): DrawingRecord[] {
   return parseRecords(
     overlays.map((o) => ({
+      id: o.id,
       name: o.name,
       points: o.points.map((p) => ({
         timestamp: pointTimestamp(p, axis),
@@ -377,12 +385,14 @@ function touch(symbol: string, keep: boolean): void {
   localStorage.setItem(INDEX_KEY, JSON.stringify(index));
 }
 
-export function loadDrawings(symbol: string): DrawingRecord[] {
+/** A symbol's stored drawings. `touch: false` reads without marking the symbol as used (alert evaluation). */
+export function loadDrawings(symbol: string, touchIndex = true): DrawingRecord[] {
   if (typeof localStorage === "undefined") return [];
   try {
     const raw = localStorage.getItem(storageKey(symbol));
     if (raw === null) return [];
     const records = parseRecords(JSON.parse(raw));
+    if (!touchIndex) return records;
     try {
       touch(symbol, true);
     } catch {

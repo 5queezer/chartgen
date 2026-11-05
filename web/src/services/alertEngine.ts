@@ -1,6 +1,8 @@
 // Client-side alert evaluation and delivery (ADR-0020). Prices come from
 // two places and both end in `deliver`:
-//   - the chart symbol: the live feed's tail polls, via `feedChartSnapshot`;
+//   - the chart symbol: the live feed's tail polls, via `feedChartSnapshot`,
+//     which also carry the indicator values indicator alerts read (ADR-0034:
+//     those only run while the chart shows their symbol and interval);
 //   - every other symbol with an active alert: its own `get_quotes` poll
 //     (`createAlertQuotes`), at the watchlist's 5 s cadence. The chart
 //     symbol is left out of that poll so one price is never counted twice.
@@ -16,7 +18,7 @@ import {
   type Accessor,
 } from "solid-js";
 
-import { CONDITION_LABELS, type Alert } from "../lib/alerts";
+import { CONDITION_LABELS, describeAlert, type Alert } from "../lib/alerts";
 import type { LiveSnapshot } from "../lib/liveFeed";
 import { formatPrice } from "../lib/quote";
 import type { McpSession } from "../mcp";
@@ -26,6 +28,8 @@ import {
   forgetBaseline,
   observePrice,
   processPrice,
+  setChartContext,
+  type Tick,
 } from "../stores/alerts";
 
 const TOAST_MS = 5_000;
@@ -54,9 +58,14 @@ export function dismissToast(id: number): void {
   setToasts((list) => list.filter((t) => t.id !== id));
 }
 
-/** "BTCUSDT crossing 65000.00" plus the user's message, if any. */
+/**
+ * "BTCUSDT crossing 65000.00" (or "BTCUSDT RSI (14) crossing up 70") plus
+ * the user's message, if any.
+ */
 export function alertText(a: Alert): string {
-  const head = `${a.symbol} ${CONDITION_LABELS[a.condition].toLowerCase()} ${formatPrice(a.price)}`;
+  const head = a.source
+    ? `${a.symbol} ${describeAlert(a)}`
+    : `${a.symbol} ${CONDITION_LABELS[a.condition].toLowerCase()} ${formatPrice(a.price)}`;
   return a.message ? `${head} — ${a.message}` : head;
 }
 
@@ -182,29 +191,41 @@ function startLeaderElection(): () => void {
 }
 
 /** Evaluate and deliver for one live price (in the leading tab). */
-export function feedPrice(symbol: string, price: number | null | undefined): void {
+export function feedPrice(
+  symbol: string,
+  price: number | null | undefined,
+  tick?: Tick,
+): void {
   if (price == null) return;
   if (!leader()) {
     observePrice(symbol, price);
     return;
   }
-  deliver(processPrice(symbol, price));
+  deliver(processPrice(symbol, price, Date.now(), tick));
 }
 
 /**
  * What the chart's live feed emitted for the chart symbol. Only a `tail`
- * poll is a new price. A `reset` (also a cached load replayed when switching
- * back to a symbol) may hold a close minutes old: it only restarts the
- * crossing baseline. `older` pages leave the last close untouched.
+ * poll is a new price; it also carries the indicators' forming-bar values
+ * (ADR-0034) and the bar time a drawing's line is read at. A `reset` (also
+ * a cached load replayed when switching back to a symbol) may hold a close
+ * minutes old: it only restarts the crossing baselines. `older` pages leave
+ * the last close untouched.
  */
 export function feedChartSnapshot(symbol: string, snapshot: LiveSnapshot): void {
-  const bars = snapshot.series.bars;
-  const close = bars[bars.length - 1]?.c;
+  const { bars, indicators } = snapshot.series;
+  const interval = snapshot.series.interval ?? "";
+  const last = bars[bars.length - 1];
+  const close = last?.c;
+  setChartContext({ symbol, interval, keys: Object.keys(indicators) });
   if (snapshot.update.kind === "reset") {
     forgetBaseline(symbol);
     if (close != null) observePrice(symbol, close);
   } else if (snapshot.update.kind === "tail") {
-    feedPrice(symbol, close);
+    feedPrice(symbol, close, {
+      time: last?.t != null ? last.t * 1000 : undefined,
+      chart: { interval, indicators },
+    });
   }
 }
 

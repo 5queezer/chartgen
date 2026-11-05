@@ -363,3 +363,210 @@ describe("several tabs", () => {
     expect(s.alerts()).toEqual([]);
   });
 });
+
+// --- Drawing and indicator alerts (ADR-0034) ---------------------------
+
+const H = 3_600_000;
+const DRAWINGS_KEY = "chartgen.drawings.AAPL";
+const trendLine = {
+  id: "d1",
+  name: "segment",
+  points: [
+    { timestamp: 0, value: 100 },
+    { timestamp: 10 * H, value: 200 },
+  ],
+  lock: false,
+  visible: true,
+};
+const drawingAlert = {
+  symbol: "AAPL",
+  condition: "crossing_up" as const,
+  trigger: "once" as const,
+  source: { kind: "drawing" as const, drawingId: "d1", label: "Trend line" },
+};
+const rsiAlert = {
+  symbol: "AAPL",
+  condition: "crossing_up" as const,
+  trigger: "every" as const,
+  source: {
+    kind: "indicator" as const,
+    interval: "1h",
+    instanceKey: "rsi",
+    line: 0,
+    name: "RSI (14)",
+    against: { kind: "value" as const, value: 70 },
+  },
+};
+const rsiChart = (...values: (number | null)[]) => ({
+  chart: { interval: "1h", indicators: { rsi: { lines: [{ values }] } } },
+});
+
+describe("sources: migration and validation", () => {
+  it("an old record without a source is a price alert", async () => {
+    stubStorage({ [KEY]: JSON.stringify([valid]) });
+    const s = await load();
+    expect(s.alerts()[0]).not.toHaveProperty("source");
+    expect(s.alerts()[0]!.price).toBe(100);
+  });
+
+  it("keeps valid sources and drops invalid ones", async () => {
+    stubStorage();
+    const { sanitizeAlerts } = await load();
+    const out = sanitizeAlerts([
+      { ...valid, id: "p", source: { kind: "price" } },
+      { ...valid, id: "d", price: 0, source: drawingAlert.source, note: "drawing deleted" },
+      { ...valid, id: "i", price: 0, source: rsiAlert.source },
+      { ...valid, id: "bad-kind", source: { kind: "nope" } },
+      { ...valid, id: "bad-drawing", source: { kind: "drawing", label: "x" } },
+      {
+        ...valid,
+        id: "bad-against",
+        source: { ...rsiAlert.source, against: { kind: "value", value: "70" } },
+      },
+      { ...valid, id: "bad-line", source: { ...rsiAlert.source, line: -1 } },
+    ])!;
+    expect(out.map((a) => a.id)).toEqual(["p", "d", "i"]);
+    expect(out[0]).not.toHaveProperty("source");
+    expect(out[1]).toMatchObject({ source: drawingAlert.source, note: "drawing deleted" });
+    expect(out[2]!.source).toEqual(rsiAlert.source);
+  });
+
+  it("an indicator alert can compare with zero or a negative value", async () => {
+    stubStorage();
+    const s = await load();
+    const a = s.addAlert({
+      ...rsiAlert,
+      source: { ...rsiAlert.source, against: { kind: "value", value: -1.5 } },
+    });
+    expect(a).not.toBeNull();
+    expect(a!.price).toBe(0);
+    s.updateAlert(a!.id, { value: 0 });
+    expect(s.alerts()[0]!.source).toMatchObject({ against: { kind: "value", value: 0 } });
+  });
+});
+
+describe("drawing alerts", () => {
+  it("fire when the price crosses the line's value at the bar time", async () => {
+    stubStorage({ [DRAWINGS_KEY]: JSON.stringify([trendLine]) });
+    const s = await load();
+    s.addAlert(drawingAlert);
+    // The line is 150 at 5 h and 160 at 6 h: 149 → 159 stays below it.
+    expect(s.processPrice("AAPL", 149, 1, { time: 5 * H })).toEqual([]);
+    expect(s.processPrice("AAPL", 159, 2, { time: 6 * H })).toEqual([]);
+    expect(s.processPrice("AAPL", 161, 3, { time: 6 * H })).toHaveLength(1);
+    expect(s.alerts()[0]).toMatchObject({ active: false, lastTriggeredAt: 3 });
+  });
+
+  it("moving the drawing over the price does not fire it", async () => {
+    const data = stubStorage({ [DRAWINGS_KEY]: JSON.stringify([trendLine]) });
+    const s = await load();
+    s.addAlert(drawingAlert);
+    s.processPrice("AAPL", 140, 1, { time: 5 * H });
+    const lower = { ...trendLine, points: trendLine.points.map((p) => ({ ...p, value: p.value - 50 })) };
+    data.set(DRAWINGS_KEY, JSON.stringify([lower]));
+    expect(s.processPrice("AAPL", 140, 2, { time: 5 * H })).toEqual([]);
+  });
+
+  it("are skipped while the drawing is missing", async () => {
+    stubStorage();
+    const s = await load();
+    s.addAlert({ ...drawingAlert, condition: "greater" });
+    expect(s.processPrice("AAPL", 1e9, 1)).toEqual([]);
+    expect(s.alerts()[0]!.active).toBe(true);
+  });
+
+  it("deleting the drawing disables its alerts with a note", async () => {
+    stubStorage({ [DRAWINGS_KEY]: JSON.stringify([trendLine]) });
+    const s = await load();
+    const a = s.addAlert(drawingAlert)!;
+    const other = s.addAlert({ ...drawingAlert, symbol: "MSFT" })!;
+    const price = s.addAlert({ symbol: "AAPL", condition: "greater", price: 5, trigger: "once" })!;
+    s.syncDrawingAlerts("AAPL", ["d1"]);
+    expect(s.alerts().every((x) => x.active)).toBe(true);
+
+    s.syncDrawingAlerts("AAPL", []);
+    const byId = (id: string) => s.alerts().find((x) => x.id === id)!;
+    expect(byId(a.id)).toMatchObject({ active: false, note: s.DRAWING_DELETED });
+    expect(s.inactiveReason(byId(a.id))).toBe(s.DRAWING_DELETED);
+    expect(byId(other.id).active).toBe(true);
+    expect(byId(price.id).active).toBe(true);
+    // Still there, not deleted; resuming clears the note.
+    s.setAlertActive(a.id, true);
+    expect(byId(a.id)).not.toHaveProperty("note");
+  });
+});
+
+describe("indicator alerts", () => {
+  it("cross on the forming bar's values between ticks", async () => {
+    stubStorage();
+    const s = await load();
+    s.addAlert(rsiAlert);
+    expect(s.processPrice("AAPL", 1, 1, rsiChart(60, 68))).toEqual([]);
+    expect(s.processPrice("AAPL", 1, 2, rsiChart(60, 71))).toHaveLength(1);
+    expect(s.processPrice("AAPL", 1, 3, rsiChart(60, 72))).toEqual([]);
+    expect(s.processPrice("AAPL", 1, 4, rsiChart(60, 69))).toEqual([]);
+    expect(s.processPrice("AAPL", 1, 5, rsiChart(60, 70))).toHaveLength(1);
+  });
+
+  it("price against a plot: close crossing the EMA", async () => {
+    stubStorage();
+    const s = await load();
+    s.addAlert({
+      ...rsiAlert,
+      condition: "crossing",
+      trigger: "once",
+      source: { ...rsiAlert.source, instanceKey: "ema", name: "EMA 200", against: { kind: "price" } },
+    });
+    const ema = (v: number) => ({
+      chart: { interval: "1h", indicators: { ema: { lines: [{ values: [v] }] } } },
+    });
+    expect(s.processPrice("AAPL", 99, 1, ema(100))).toEqual([]);
+    expect(s.processPrice("AAPL", 101, 2, ema(100.5))).toHaveLength(1);
+  });
+
+  it("are not evaluated without the chart, nor across a gap", async () => {
+    stubStorage();
+    const s = await load();
+    s.addAlert(rsiAlert);
+    s.processPrice("AAPL", 1, 1, rsiChart(68));
+    // A quotes poll (no series) breaks the continuity.
+    s.processPrice("AAPL", 1, 2);
+    expect(s.processPrice("AAPL", 1, 3, rsiChart(71))).toEqual([]);
+    s.processPrice("AAPL", 1, 4, rsiChart(68));
+    s.forgetBaseline("AAPL");
+    expect(s.processPrice("AAPL", 1, 5, rsiChart(71))).toEqual([]);
+    // Another interval.
+    s.processPrice("AAPL", 1, 6, rsiChart(68));
+    expect(
+      s.processPrice("AAPL", 1, 7, { chart: { ...rsiChart(71).chart, interval: "4h" } }),
+    ).toEqual([]);
+  });
+
+  it("a greater-than alert fires on the first reading", async () => {
+    stubStorage();
+    const s = await load();
+    s.addAlert({
+      ...rsiAlert,
+      condition: "greater",
+      trigger: "once",
+      source: { ...rsiAlert.source, against: { kind: "value", value: 0 } },
+    });
+    expect(s.processPrice("AAPL", 1, 1, rsiChart(null))).toEqual([]);
+    expect(s.processPrice("AAPL", 1, 2, rsiChart(55))).toHaveLength(1);
+  });
+
+  it("say why they are inactive and are left out of the quotes poll", async () => {
+    stubStorage();
+    const s = await load();
+    const a = s.addAlert(rsiAlert)!;
+    expect(s.activeAlertSymbols()).toEqual([]);
+    expect(s.inactiveReason(a, null)).toBe("open AAPL 1h");
+    expect(s.inactiveReason(a, { symbol: "AAPL", interval: "4h", keys: ["rsi"] })).toBe(
+      "open AAPL 1h",
+    );
+    expect(s.inactiveReason(a, { symbol: "AAPL", interval: "1h", keys: [] })).toBe(
+      "indicator not on the chart",
+    );
+    expect(s.inactiveReason(a, { symbol: "AAPL", interval: "1h", keys: ["rsi"] })).toBeNull();
+  });
+});

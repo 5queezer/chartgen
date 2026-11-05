@@ -25,7 +25,9 @@ import {
   type OverlayEvent,
 } from "klinecharts";
 
+import { isDrawingAlertTool } from "../lib/alerts";
 import { isTypingContext, undoRedoKey } from "../lib/keys";
+import { syncDrawingAlerts } from "../stores/alerts";
 import { createHistory } from "../stores/drawingHistory";
 import {
   loadDrawings,
@@ -41,6 +43,7 @@ import {
   type DrawingStyle,
   type TimeAxis,
 } from "../stores/drawings";
+import { openAlertDialog } from "./AlertDialog";
 import { DrawingStyleBar } from "./DrawingStyleBar";
 import { overlayLabels, setOverlayAxis, setPositionSize } from "./drawingOverlays";
 import { ToolGroup } from "./ToolGroup";
@@ -545,7 +548,10 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
     window.clearTimeout(saveTimer);
     const p = pendingSave;
     pendingSave = null;
-    if (p) setSaveFailed(!saveDrawings(p.symbol, p.records));
+    if (!p) return;
+    setSaveFailed(!saveDrawings(p.symbol, p.records));
+    // Alerts on a drawing that is gone are switched off (ADR-0034).
+    syncDrawingAlerts(p.symbol, p.records.map((r) => r.id));
   };
   const persist = () => {
     pendingSave = { symbol: props.symbol, records: current };
@@ -682,7 +688,10 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
   /** Add a stored drawing to the chart; needs loaded data. */
   const create = (rec: DrawingRecord, ax: TimeAxis) => {
     const { points, off } = place(rec, ax);
+    // The stored id is kept, so alerts on the drawing survive reloads (ADR-0034).
+    const keep = rec.id !== undefined && !props.chart?.getOverlayById(rec.id);
     const id = props.chart?.createOverlay({
+      ...(keep ? { id: rec.id } : {}),
       name: rec.name,
       points,
       styles: liveStyles(rec, false) as never,
@@ -694,7 +703,7 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
     });
     if (typeof id !== "string") return;
     ids.push(id);
-    canon.set(id, rec);
+    canon.set(id, { ...rec, id });
     if (off) offRange.add(id);
   };
 
@@ -715,6 +724,8 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
       pending = null;
       records.forEach((r) => create(r, ax));
       current = ids.flatMap((id) => canon.get(id) ?? []);
+      // Records saved before drawings had ids get theirs stored now.
+      if (records.some((r) => r.id === undefined)) persist();
     }
     syncFlags();
   };
@@ -956,11 +967,12 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
     if (!(x !== undefined && x >= 0 && x <= width)) chart.scrollToTimestamp(p.timestamp);
   };
 
-  const menuAction = (action: "remove" | "lock") => {
+  const menuAction = (action: "remove" | "lock" | "alert") => {
     const m = menu();
     setMenu(null);
     if (!m) return;
-    if (action === "remove") removeIds([m.id]);
+    if (action === "alert") openAlertDialog({ symbol: props.symbol, drawingId: m.id });
+    else if (action === "remove") removeIds([m.id]);
     else {
       const locked = props.chart?.getOverlayById(m.id)?.lock ?? false;
       props.chart?.overrideOverlay({ id: m.id, lock: !locked });
@@ -1318,6 +1330,15 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
             <button type="button" role="menuitem" class={menuItemClass} onClick={() => menuAction("lock")}>
               {props.chart?.getOverlayById(m().id)?.lock ? "Unlock" : "Lock"}
             </button>
+            <Show when={canon.get(m().id)?.name}>
+              {(name) => (
+                <Show when={isDrawingAlertTool(name())}>
+                  <button type="button" role="menuitem" class={menuItemClass} onClick={() => menuAction("alert")}>
+                    Add alert on {DRAWING_LABELS[name()]}…
+                  </button>
+                </Show>
+              )}
+            </Show>
           </div>
         )}
       </Show>

@@ -32,6 +32,14 @@ describe("parseRecord", () => {
     expect(parseRecord(good)).toEqual(good);
   });
 
+  it("keeps a valid id (alerts refer to it, ADR-0034)", () => {
+    expect(parseRecord({ ...good, id: "overlay_1_1" })).toEqual({ ...good, id: "overlay_1_1" });
+    expect(parseRecord({ ...good, id: 5 })).toEqual(good);
+    expect(parseRecord({ ...good, id: "x".repeat(65) })).toEqual(good);
+    const [rec] = serialize([{ ...good, id: "overlay_2_1" }], null);
+    expect(rec?.id).toBe("overlay_2_1");
+  });
+
   it("defaults flags and drops extra fields", () => {
     const r = parseRecord({ ...good, lock: "yes", visible: undefined, x: 1 });
     expect(r).toEqual({ ...good, lock: false, visible: true });

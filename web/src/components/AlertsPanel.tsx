@@ -1,7 +1,8 @@
-// Alerts tab of the right sidebar: alerts grouped by symbol with their
-// status (active, triggered, paused) and edit / pause-resume / delete
-// actions. Clicking a row switches the chart to that symbol; "+" opens the
-// create dialog.
+// Alerts tab of the right sidebar: alerts grouped by symbol with what they
+// watch, their status (active, triggered, paused, or inactive with the
+// reason: a deleted drawing, an indicator alert whose chart is not open)
+// and edit / pause-resume / delete actions. Clicking a row switches the
+// chart to that symbol; "+" opens the create dialog.
 
 import { For, Show, createMemo, type JSX } from "solid-js";
 
@@ -9,10 +10,16 @@ import {
   CONDITION_LABELS,
   TRIGGER_LABELS,
   alertStatus,
+  describeAlert,
   type Alert,
 } from "../lib/alerts";
 import { formatPrice } from "../lib/quote";
-import { alerts, removeAlert, setAlertActive } from "../stores/alerts";
+import {
+  alerts,
+  inactiveReason,
+  removeAlert,
+  setAlertActive,
+} from "../stores/alerts";
 import { setSymbol, symbol } from "../stores/layout";
 import { setWatchlistCollapsed } from "../stores/watchlist";
 import { openAlertDialog } from "./AlertDialog";
@@ -91,6 +98,7 @@ export function AlertsPanel(): JSX.Element {
 function AlertRow(props: { alert: Alert }): JSX.Element {
   const a = () => props.alert;
   const status = () => alertStatus(a());
+  const reason = () => inactiveReason(a());
   const stop = (fn: () => void) => (e: MouseEvent) => {
     e.stopPropagation();
     fn();
@@ -99,18 +107,30 @@ function AlertRow(props: { alert: Alert }): JSX.Element {
   return (
     <div
       data-alert-id={a().id}
-      data-status={status()}
+      data-status={reason() === null ? status() : "inactive"}
       class="wl-row group flex items-center gap-2 px-3 py-1.5 text-sm cursor-pointer"
       onClick={() => setSymbol(a().symbol)}
     >
       <div class="flex-1 min-w-0">
-        <div class="truncate">
-          {CONDITION_LABELS[a().condition]}{" "}
-          <span class="font-semibold tabular-nums">{formatPrice(a().price)}</span>
+        <div class="truncate" data-role="description">
+          <Show
+            when={a().source}
+            fallback={
+              <>
+                {CONDITION_LABELS[a().condition]}{" "}
+                <span class="font-semibold tabular-nums">{formatPrice(a().price)}</span>
+              </>
+            }
+          >
+            {describeAlert(a())}
+          </Show>
         </div>
         <div class="text-xs text-[color:var(--color-fg-muted)] truncate">
-          <span data-role="status" class={STATUS_CLASS[status()]}>
-            {status()}
+          <span
+            data-role="status"
+            class={reason() === null ? STATUS_CLASS[status()] : STATUS_CLASS.paused}
+          >
+            {reason() === null ? status() : `inactive: ${reason()}`}
           </span>
           {" · "}
           {TRIGGER_LABELS[a().trigger]}

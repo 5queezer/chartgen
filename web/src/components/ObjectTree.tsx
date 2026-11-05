@@ -6,7 +6,7 @@
 
 import { For, Show, type JSX } from "solid-js";
 
-import { CONDITION_LABELS, alertStatus } from "../lib/alerts";
+import { CONDITION_LABELS, alertStatus, describeAlert } from "../lib/alerts";
 import { COMPARE_PALETTE } from "../lib/compare";
 import { pricePrecision } from "../lib/format";
 import { describeDrawing } from "../lib/objectTree";
@@ -247,8 +247,14 @@ export function ObjectTree(props: ObjectTreeProps): JSX.Element {
                 dim={!a.active}
                 label={
                   <>
-                    {CONDITION_LABELS[a.condition]}{" "}
-                    <span class="tabular-nums">{formatPrice(a.price)}</span>
+                    {a.source ? (
+                      describeAlert(a)
+                    ) : (
+                      <>
+                        {CONDITION_LABELS[a.condition]}{" "}
+                        <span class="tabular-nums">{formatPrice(a.price)}</span>
+                      </>
+                    )}
                     <span class="ml-1 text-xs text-[color:var(--color-fg-muted)]">
                       {alertStatus(a)}
                     </span>

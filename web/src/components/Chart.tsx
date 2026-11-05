@@ -956,6 +956,8 @@ export interface ChartProps {
   onToggleHidden?: (name: string) => void;
   onSettings?: (name: string) => void;
   onRemove?: (name: string) => void;
+  /** Alert on an indicator's plots (ADR-0034); offered on rows with lines. */
+  onAddAlert?: (name: string) => void;
   onChartReady?: (chart: KChart) => void;
   /** Bar index under the crosshair (one update per frame); null when it is off the chart. */
   onCrosshair?: (index: number | null) => void;
@@ -1699,6 +1701,13 @@ export function Chart(props: ChartProps): JSX.Element {
             onSettings={
               h().key !== undefined && props.onSettings
                 ? () => props.onSettings!(h().key!)
+                : undefined
+            }
+            onAddAlert={
+              h().key !== undefined &&
+              props.onAddAlert &&
+              (props.series?.indicators[h().key!]?.lines?.length ?? 0) > 0
+                ? () => props.onAddAlert!(h().key!)
                 : undefined
             }
             onRemove={

@@ -15,13 +15,23 @@ import { useQueryClient } from "@tanstack/solid-query";
 import type { Chart as KLineChart } from "klinecharts";
 
 import { BottomBar } from "./components/BottomBar";
-import { AlertDialog, AlertButton } from "./components/AlertDialog";
+import {
+  AlertDialog,
+  AlertButton,
+  openAlertDialog,
+  plotRef,
+} from "./components/AlertDialog";
 import { AlertLines } from "./components/AlertLines";
 import { Chart, paletteColor } from "./components/Chart";
 import { ChartContextMenu } from "./components/ChartContextMenu";
 import { ChartLoadError } from "./components/ChartLoadError";
 import { ChartSettings } from "./components/ChartSettings";
-import { DrawingToolbar, type DrawingsApi } from "./components/DrawingToolbar";
+import {
+  DRAWING_LABELS,
+  DrawingToolbar,
+  type DrawingsApi,
+} from "./components/DrawingToolbar";
+import { isDrawingAlertTool } from "./lib/alerts";
 import { IndicatorChips } from "./components/IndicatorChips";
 import { IndicatorPicker } from "./components/IndicatorPicker";
 import { IndicatorSettings } from "./components/IndicatorSettings";
@@ -402,6 +412,29 @@ export function App(): JSX.Element {
   const [drawings, setDrawings] = createSignal<DrawingsApi | null>(null);
   // ---------------------------------------------------------------------
 
+  // --- Drawing and indicator alerts (ADR-0034) ---------------------------
+  const alertDrawings = createMemo(() =>
+    (drawings()?.list() ?? []).flatMap((d) =>
+      isDrawingAlertTool(d.name) ? [{ id: d.id, label: DRAWING_LABELS[d.name] }] : [],
+    ),
+  );
+  const alertParams = createMemo(() => paramLabels(wireIndicators(), paramDefaults()));
+  // From a legend row: an overlay (EMA) is the level the price crosses, an
+  // oscillator (RSI) the source, prefilled with its last value.
+  const addIndicatorAlert = (key: string) => {
+    const ind = live()?.series.indicators[key];
+    const values = ind?.lines?.[0]?.values;
+    if (!ind || !values) return;
+    if (ind.is_overlay) {
+      openAlertDialog({ level: plotRef(key, 0) });
+      return;
+    }
+    let last: number | null = null;
+    for (let i = values.length - 1; i >= 0 && last === null; i--) last = values[i] ?? null;
+    openAlertDialog({ source: plotRef(key, 0), price: last ?? undefined });
+  };
+  // ---------------------------------------------------------------------
+
   // --- Bar replay (ADR-0023) ------------------------------------------
   // Compare lines as of the cursor: their values align with the full series,
   // whose prefix the frame is.
@@ -660,6 +693,7 @@ export function App(): JSX.Element {
             onToggleHidden={(n) => toggleIndicatorHidden(indexOf(n))}
             onSettings={(n) => setSettingsIndex(indexOf(n))}
             onRemove={removeIndicator}
+            onAddAlert={addIndicatorAlert}
             onChartReady={setChart}
             onCrosshair={setCrosshair}
             onCompareFrom={setCompareFrom}
@@ -691,7 +725,11 @@ export function App(): JSX.Element {
         />
       </main>
       <BottomBar chart={chart()} series={shown()?.series ?? null} loadUntil={feed.loadUntil} />
-      <AlertDialog />
+      <AlertDialog
+        series={live()?.series ?? null}
+        params={alertParams()}
+        drawings={alertDrawings()}
+      />
       <Toasts />
     </div>
   );
