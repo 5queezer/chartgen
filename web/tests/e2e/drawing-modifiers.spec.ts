@@ -19,6 +19,9 @@ interface TestChart {
   getDataList: () => { timestamp: number; open: number; high: number; low: number; close: number }[];
   convertFromPixel: (c: { x?: number; y?: number }[], f: { paneId: string }) => Point[];
   convertToPixel: (p: Point, f: { paneId: string }) => { y: number };
+  applyNewData: (data: unknown[]) => void;
+  overrideOverlay: (o: { id: string; points: Point[] }) => void;
+  getOverlayById: (id: string) => { points: Point[] };
   subscribeAction: (type: string, fn: () => void) => void;
   unsubscribeAction: (type: string, fn: () => void) => void;
 }
@@ -128,9 +131,10 @@ const nextDataTick = (page: Page) =>
  * redraw after hovering: a point's figure only exists to be hit once the hover has
  * drawn it. A press then starts moving after 5 px (`_mouseMoveWithDownHandler`).
  *
- * The drag starts right after a live tick, because a tick between the last move and
- * the release puts the point back: DrawingToolbar's `refresh` restores every drawing
- * from its last committed state, also the one being dragged, with or without Shift.
+ * The press waits for a live tick: without it, about 1 run in 40 the first drag after
+ * a reload left the point where it was. The chart is still taking its first data then;
+ * the exact cause is not pinned down. It is not the tick that used to undo a drag on
+ * release, which DrawingToolbar's `refresh` now prevents (tests under "a live tick").
  */
 async function dragTo(page: Page, from: At, to: At, keys: string[] = []): Promise<void> {
   const box = (await host(page).boundingBox())!;
@@ -573,6 +577,159 @@ test.describe("drawing modifiers", () => {
     const next = await dragPoint(page, 0, 1, 200, 15, []);
     expect(next.points[1]!.value).not.toBe(next.points[0]!.value);
     expect(Math.abs(next.pixels[1]!.y! - next.pixels[0]!.y! - 15)).toBeLessThan(2);
+  });
+
+  test.describe("a live tick during a press", () => {
+    /** Fires what a live tick fires: `OnDataReady`, so DrawingToolbar's `refresh`. */
+    const tick = (page: Page) =>
+      page.evaluate(() => {
+        const chart = (window as unknown as TestWindow).__chartgenTest.chart();
+        chart.applyNewData(chart.getDataList());
+      });
+
+    /** Moves drawing `n` off its committed record; only a `refresh` puts it back. */
+    const knockOff = (page: Page, n: number) =>
+      page.evaluate((i) => {
+        const w = window as unknown as TestWindow & {
+          __chartgenDrawings: () => { id: string }[];
+        };
+        const chart = w.__chartgenTest.chart();
+        const { id } = w.__chartgenDrawings()[i]!;
+        const points = chart.getOverlayById(id).points.map((p) => ({ ...p, value: 1 }));
+        chart.overrideOverlay({ id, points });
+      }, n);
+
+    /** A tick still reaches drawing `n`, and places it from its stored record. */
+    const expectFollowsTicks = async (page: Page, n: number) => {
+      await knockOff(page, n);
+      expect((await overlays(page))[n]!.points[0]!.value).toBe(1);
+      await tick(page);
+      const live = (await overlays(page))[n]!.points;
+      const stored = (await storedRecords(page))![n]!.points;
+      expect(live.map((p) => p.value)).toEqual(stored.map((p) => p.value));
+    };
+
+    /** Two free lines, with the mouse pressed on the end point of the first. */
+    const pressOnLine = async (page: Page) => {
+      await page.getByRole("button", { name: "Trend line" }).click();
+      await clickAt(page, { x: 300, y: 130 });
+      await clickAt(page, { x: 560, y: 260 });
+      await page.getByRole("button", { name: "Trend line" }).click();
+      await clickAt(page, { x: 700, y: 130 });
+      await clickAt(page, { x: 900, y: 260 });
+      await expect.poll(async () => (await overlays(page)).length).toBe(2);
+      const box = (await host(page).boundingBox())!;
+      const [anchor, end] = (await overlays(page))[0]!.pixels;
+      await page.mouse.move(box.x + end!.x!, box.y + end!.y!, { steps: 5 });
+      await page.waitForTimeout(60);
+      await page.mouse.down();
+      return { box, anchor: anchor!, end: end! };
+    };
+
+    for (const keys of [[], ["Shift"]]) {
+      test(`just before the release keeps the drag, keys [${keys.join()}]`, async ({
+        bootedApp: page,
+      }) => {
+        const { box, anchor } = await pressOnLine(page);
+        for (const k of keys) await page.keyboard.down(k);
+        await page.mouse.move(box.x + anchor.x! + 200, box.y + anchor.y! + 40, { steps: 8 });
+        const moved = (await overlays(page))[0]!.points.map((p) => p.value);
+
+        // The other drawing is still refreshed, the pressed one is not.
+        await knockOff(page, 1);
+        await tick(page);
+        expect((await overlays(page))[1]!.points[0]!.value).not.toBe(1);
+        expect((await overlays(page))[0]!.points.map((p) => p.value)).toEqual(moved);
+
+        await page.mouse.up();
+        for (const k of keys) await page.keyboard.up(k);
+        await page.waitForTimeout(100);
+
+        const line = (await overlays(page))[0]!;
+        expect(line.points.map((p) => p.value)).toEqual(moved);
+        expect((await storedRecords(page))![0]!.points.map((p) => p.value)).toEqual(moved);
+        // Shift or not, this is the drag, not the record from before it.
+        const dy = line.pixels[1]!.y! - line.pixels[0]!.y!;
+        expect(Math.abs(dy - (keys.length > 0 ? 0 : 40))).toBeLessThan(2);
+
+        // Released: it follows ticks again, from the new record.
+        await expectFollowsTicks(page, 0);
+        expect((await overlays(page))[0]!.points.map((p) => p.value)).toEqual(moved);
+      });
+    }
+
+    test("a press without a move, then ticks", async ({ bootedApp: page }) => {
+      await pressOnLine(page);
+      await page.mouse.up();
+      await expectFollowsTicks(page, 0);
+    });
+
+    test("a release outside the pane, then ticks", async ({ bootedApp: page }) => {
+      const { box, end } = await pressOnLine(page);
+      const before = (await storedRecords(page))![0]!.points;
+      await page.mouse.move(box.x + end.x! + 30, box.y + end.y! - 30, { steps: 4 });
+      // Over the drawing toolbar, left of the chart: klinecharts finds no pane there.
+      await page.mouse.move(box.x - 20, box.y + end.y!, { steps: 4 });
+      await page.mouse.up();
+      await expectFollowsTicks(page, 0);
+      expect((await storedRecords(page))![0]!.points).toEqual(before);
+    });
+
+    test("a release outside the window, then ticks", async ({ bootedApp: page }) => {
+      const { box, end } = await pressOnLine(page);
+      await page.mouse.move(box.x + end.x! + 30, box.y + end.y! - 30, { steps: 4 });
+      await page.mouse.move(-20, -20, { steps: 4 });
+      await page.mouse.up();
+      await expectFollowsTicks(page, 0);
+    });
+
+    for (const type of ["blur", "touchend", "touchcancel"]) {
+      test(`${type} ends the press, without a mouseup`, async ({ bootedApp: page }) => {
+        await pressOnLine(page);
+        await page.evaluate((t) => window.dispatchEvent(new Event(t)), type);
+        await expectFollowsTicks(page, 0);
+        await page.mouse.up();
+      });
+    }
+
+    test("an undo during the press, then ticks", async ({ bootedApp: page }) => {
+      await pressOnLine(page);
+      await page.keyboard.press("Control+z");
+      await expect.poll(async () => (await overlays(page)).length).toBe(1);
+      // Still pressed, on a drawing the undo has replaced.
+      await expectFollowsTicks(page, 0);
+      await page.mouse.up();
+      await expectFollowsTicks(page, 0);
+    });
+
+    test("an interval change during the press, then ticks", async ({ bootedApp: page }) => {
+      const { box, anchor } = await pressOnLine(page);
+      await page.mouse.move(box.x + anchor.x! + 200, box.y + anchor.y! + 40, { steps: 8 });
+      await page.getByRole("button", { name: "15m", exact: true }).evaluate((b) => (b as HTMLElement).click());
+      await expect(page.getByRole("button", { name: "15m", exact: true })).toHaveAttribute("aria-pressed", "true");
+      await page.waitForTimeout(300);
+      await page.mouse.up();
+      await page.waitForTimeout(100);
+      await expectFollowsTicks(page, 0);
+      await expectFollowsTicks(page, 1);
+    });
+
+    test("a symbol change during the press, then ticks", async ({ bootedApp: page }) => {
+      const { box, anchor } = await pressOnLine(page);
+      await page.mouse.move(box.x + anchor.x! + 200, box.y + anchor.y! + 40, { steps: 8 });
+      const row = page.locator('[role=row][data-symbol="ETHUSDT"]');
+      await row.evaluate((r) => (r as HTMLElement).click());
+      await expect.poll(async () => (await overlays(page)).length).toBe(0);
+      await page.mouse.up();
+
+      // Back on the first symbol, its drawings are there and follow ticks.
+      await page
+        .locator('[role=row][data-symbol="BTCUSDT"]')
+        .evaluate((r) => (r as HTMLElement).click());
+      await expect.poll(async () => (await overlays(page)).length).toBe(2);
+      await expectFollowsTicks(page, 0);
+      await expectFollowsTicks(page, 1);
+    });
   });
 
   test("no alert is offered on a vertical line", async ({ bootedApp: page }) => {

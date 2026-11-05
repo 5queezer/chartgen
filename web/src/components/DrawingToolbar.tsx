@@ -517,6 +517,8 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
   let rightClickHit = false;
   // klinecharts passes no modifier keys to overlay callbacks.
   let shiftHeld = false;
+  // The drawing under a press: `refresh` leaves it alone until the release commits it.
+  let pressedId: string | null = null;
 
   const axis = (): TimeAxis | null =>
     timeAxisOf(props.chart?.getDataList().map((d) => d.timestamp) ?? []);
@@ -672,6 +674,10 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
       if (selectedId() === overlay.id) highlight(overlay.id, true);
       return false;
     },
+    onPressedMoveStart: ({ overlay }: OverlayEvent) => {
+      pressedId = overlay.id;
+      return false;
+    },
     // Fires after klinecharts has set the moving point, also on the placing click.
     onDrawing: ({ overlay, x, y }: OverlayEvent) => {
       if (shiftHeld && SNAP_TOOLS.has(overlay.name) && overlay.points.length === 2 && x !== undefined && y !== undefined) {
@@ -776,6 +782,7 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
 
   /** Replace everything on the chart with `records` (restore / undo). */
   const rebuild = (records: DrawingRecord[]) => {
+    pressedId = null;
     cancelArmed();
     for (const id of [...ids]) props.chart?.removeOverlay(id);
     ids = [];
@@ -812,7 +819,7 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
     if (ax === null) return;
     for (const id of ids) {
       const rec = canon.get(id);
-      if (!rec) continue;
+      if (!rec || id === pressedId) continue;
       const { points, off } = place(rec, ax);
       if (off) offRange.add(id);
       else offRange.delete(id);
@@ -1242,6 +1249,17 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
     for (const type of modifierEvents) window.removeEventListener(type, syncModifiers, true);
     window.removeEventListener("blur", releaseModifiers);
     document.removeEventListener("visibilitychange", releaseModifiers);
+  });
+
+  // Any release ends a press. Not onPressedMoveEnd: klinecharts only fires it when the
+  // release lands on a pane. Capture, so this runs before it, in the same event.
+  const endPress = () => {
+    pressedId = null;
+  };
+  const endPressEvents = ["mouseup", "touchend", "touchcancel", "blur"] as const;
+  for (const type of endPressEvents) window.addEventListener(type, endPress, true);
+  onCleanup(() => {
+    for (const type of endPressEvents) window.removeEventListener(type, endPress, true);
   });
 
   const resetRightClick = () => {
