@@ -171,14 +171,30 @@ Series payload shape (for `format=series`):
       "is_overlay": false,
       "y_range": [0.0, 100.0],
       "lines": [
-        { "index": 0, "label": "RSI", "values": [null, null, 68.2, 72.1] }
+        { "index": 0, "label": "RSI", "values": [null, null, 68.2, 72.1], "color": "rgba(195,62,225,0.8)", "width": 2 }
       ],
       "signals": [
-        { "x": 3, "t": 1713430800, "y": 72.1, "label": "rsi_overbought" }
+        { "x": 3, "t": 1713430800, "y": 72.1, "label": "rsi_overbought", "color": "rgba(225,62,62,1)" }
       ],
       "hlines": [
         { "y": 30.0, "color": "rgba(62,225,69,0.3)" },
         { "y": 70.0, "color": "rgba(225,62,62,0.3)" }
+      ]
+    },
+    "volume": {
+      "label": "Volume",
+      "is_overlay": false,
+      "lines": [
+        { "index": 0, "label": "Volume MA", "values": [null, null, null, 114.5], "color": "rgba(41,98,255,1)", "width": 1 }
+      ],
+      "histogram": [
+        {
+          "index": 0,
+          "label": "Volume",
+          "values": [128.4, 96.2, 104.8, 128.4],
+          "palette": ["rgba(38,166,154,0.5)", "rgba(239,83,80,0.5)"],
+          "color_idx": [0, 0, 0, 0]
+        }
       ]
     },
     "bbands": {
@@ -242,8 +258,27 @@ uses, so clients can match the PNG exactly
 ([ADR-0012](/chartgen/decisions/0012-geometry-colors-on-the-wire/)).
 A fill may also carry `color_below`, used where `y1 < y2` (`color`
 applies where `y1 >= y2`); it is omitted when the fill has one color.
-`lines` and `histogram` carry no color. Older servers omit `color`;
+Older servers omit `color`;
 clients should fall back to their own theme.
+
+Plots carry their colors too
+([ADR-0026](/chartgen/decisions/0026-line-and-histogram-colors/)):
+
+- Each item of `lines` has `color` (same CSS form) and `width`, the
+  stroke width in px.
+- Each item of `histogram` has a `label` for legends. It is the
+  indicator's label (`"Volume"`, `"AO"`), or `"Histogram"` when a line
+  already has that name (MACD), numbered when there are several.
+- Each histogram also has per-bar colors in compact form: `palette`
+  lists each distinct color once, in order of first appearance, and
+  `color_idx[i]` is the index into `palette` of bar `i`'s color, aligned
+  1:1 with `values`. It is `null` where the value is `null` or the bar
+  has no color. Palettes are per response, so a client joining two
+  responses (a history page, a tail) remaps the indices rather than
+  concatenating them.
+- Each signal has the `color` of its dot.
+
+All of these are omitted by older servers.
 
 All three channels are omitted from the per-indicator object when the
 indicator emits none — matching the existing convention for `lines`,
@@ -278,8 +313,8 @@ pushes the same tail instead of you polling for it.
   the initial full load, and ignore them on tail-poll and history-page
   responses, which cover only a slice of the chart.
 
-How `warmup` trims the channels: `bars[]`, `lines`, `histogram`, and
-`fills` keep only their last `bars` entries. Signal `x` values are shifted
+How `warmup` trims the channels: `bars[]`, `lines`, `histogram` (with
+its `color_idx`), and `fills` keep only their last `bars` entries. Signal `x` values are shifted
 to the trimmed window, and signals inside the warmup are dropped. Divlines
 that end at or before the first returned bar are dropped. Divlines that
 cross into the window are clipped to start at bar 0, with `y1`

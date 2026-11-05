@@ -1054,6 +1054,27 @@ fn css_rgba(c: &plotters::style::RGBAColor) -> String {
     format!("rgba({},{},{},{})", c.0, c.1, c.2, c.3)
 }
 
+// Legend label of histogram `i` (ADR-0026). `Bars` carry no label: the
+// panel name labels it (Volume, AO) unless a line already has that name
+// (MACD's "MACD" line), then "Histogram"; numbered when there are several.
+fn histogram_label(pr: &chartgen::indicator::PanelResult, i: usize) -> String {
+    let taken = pr.label.is_empty()
+        || pr
+            .lines
+            .iter()
+            .any(|l| l.label.as_deref() == Some(pr.label.as_str()));
+    let base = if taken {
+        "Histogram"
+    } else {
+        pr.label.as_str()
+    };
+    if pr.bars.len() > 1 {
+        format!("{base} {}", i + 1)
+    } else {
+        base.to_string()
+    }
+}
+
 // Series-shape serializer: full per-bar values for each line, signals with
 // bar timestamps, and the same metadata (label/is_overlay/y_range/hlines)
 // that summary exposes. Pulls directly from the PanelResult — no
@@ -1079,6 +1100,8 @@ fn panel_result_to_series_json(
                     "index": i,
                     "label": line.label,
                     "values": values,
+                    "color": css_rgba(&line.color),
+                    "width": line.width,
                 })
             })
             .collect();
@@ -1086,7 +1109,9 @@ fn panel_result_to_series_json(
     }
 
     // Histogram (bar-style) series — e.g. MACD histogram, volume. Same
-    // 1:1 alignment with bars as `lines`.
+    // 1:1 alignment with bars as `lines`. Per-bar colors (ADR-0026) are
+    // `color_idx` into `palette`, which lists each distinct color once;
+    // null where the bar has no value or no color.
     if !pr.bars.is_empty() {
         let histogram: Vec<Value> = pr
             .bars
@@ -1094,9 +1119,29 @@ fn panel_result_to_series_json(
             .enumerate()
             .map(|(i, b)| {
                 let values: Vec<Value> = b.y.iter().map(|v| finite_or_null(*v)).collect();
+                let mut palette: Vec<String> = Vec::new();
+                let color_idx: Vec<Value> = b
+                    .y
+                    .iter()
+                    .enumerate()
+                    .map(|(k, v)| match b.colors.get(k) {
+                        Some(c) if v.is_finite() => {
+                            let css = css_rgba(c);
+                            let idx = palette.iter().position(|p| *p == css).unwrap_or_else(|| {
+                                palette.push(css);
+                                palette.len() - 1
+                            });
+                            json!(idx)
+                        }
+                        _ => Value::Null,
+                    })
+                    .collect();
                 json!({
                     "index": i,
+                    "label": histogram_label(pr, i),
                     "values": values,
+                    "palette": palette,
+                    "color_idx": color_idx,
                 })
             })
             .collect();
@@ -1118,6 +1163,7 @@ fn panel_result_to_series_json(
                 "t": t,
                 "y": d.y,
                 "label": label,
+                "color": css_rgba(&d.color),
             }));
         }
     }
@@ -2782,6 +2828,126 @@ mod tests {
     }
 
     #[test]
+    fn panel_result_to_series_json_carries_plot_colors() {
+        // ADR-0026: lines carry color + width, histograms a label and
+        // per-bar colors as palette indices, signals their dot color.
+        use chartgen::data::{Bar, OhlcvData};
+        use chartgen::indicator::{Bars, Dot, Line, PanelResult};
+        use plotters::style::RGBAColor;
+
+        let data = OhlcvData {
+            bars: (0..4)
+                .map(|i| Bar {
+                    open: 1.0,
+                    high: 1.0,
+                    low: 1.0,
+                    close: 1.0,
+                    volume: 1.0,
+                    date: format!("{}", 1_700_000_000_u64 + i * 3600),
+                })
+                .collect(),
+            symbol: None,
+            interval: None,
+        };
+        let green = RGBAColor(38, 166, 154, 0.5);
+        let red = RGBAColor(239, 83, 80, 0.5);
+        let pr = PanelResult {
+            lines: vec![Line {
+                y: vec![1.0; 4],
+                color: RGBAColor(41, 98, 255, 1.0),
+                width: 2,
+                label: Some("Volume MA".into()),
+            }],
+            bars: vec![Bars {
+                y: vec![f64::NAN, 1.0, 2.0, 3.0],
+                colors: vec![green, green, red, green],
+                bottom: 0.0,
+            }],
+            dots: vec![Dot {
+                x: 2,
+                y: 1.0,
+                color: red,
+                size: 3,
+                label: Some("sell".into()),
+            }],
+            label: "Volume".into(),
+            ..Default::default()
+        };
+
+        let j = panel_result_to_series_json(&pr, &data);
+        assert_eq!(j["lines"][0]["color"], "rgba(41,98,255,1)");
+        assert_eq!(j["lines"][0]["width"], 2);
+        let h = &j["histogram"][0];
+        assert_eq!(h["label"], "Volume");
+        assert_eq!(
+            h["palette"],
+            json!(["rgba(38,166,154,0.5)", "rgba(239,83,80,0.5)"])
+        );
+        // The warmup bar has no value, so no color either.
+        assert_eq!(h["color_idx"], json!([null, 0, 1, 0]));
+        assert_eq!(j["signals"][0]["color"], "rgba(239,83,80,0.5)");
+    }
+
+    #[test]
+    fn histogram_label_falls_back_when_a_line_has_the_panel_name() {
+        use chartgen::indicator::{Bars, Line, PanelResult};
+        use plotters::style::RGBAColor;
+
+        let line = |label: &str| Line {
+            y: vec![],
+            color: RGBAColor(0, 0, 0, 1.0),
+            width: 1,
+            label: Some(label.into()),
+        };
+        let bars = || Bars {
+            y: vec![],
+            colors: vec![],
+            bottom: 0.0,
+        };
+        let volume = PanelResult {
+            lines: vec![line("Volume MA")],
+            bars: vec![bars()],
+            label: "Volume".into(),
+            ..Default::default()
+        };
+        assert_eq!(histogram_label(&volume, 0), "Volume");
+        let macd = PanelResult {
+            lines: vec![line("MACD"), line("Signal")],
+            bars: vec![bars()],
+            label: "MACD".into(),
+            ..Default::default()
+        };
+        assert_eq!(histogram_label(&macd, 0), "Histogram");
+        let two = PanelResult {
+            bars: vec![bars(), bars()],
+            label: "KVF".into(),
+            ..Default::default()
+        };
+        assert_eq!(histogram_label(&two, 1), "KVF 2");
+    }
+
+    #[test]
+    fn generate_chart_series_volume_has_up_and_down_colors() {
+        let args = json!({ "bars": 120, "indicators": ["volume"], "format": "series" });
+        let resp = tool_generate_chart(Some(json!(1)), &args, None);
+        let parsed: Value =
+            serde_json::from_str(chart_content(&resp)[0]["text"].as_str().unwrap()).unwrap();
+        let h = &parsed["indicators"]["volume"]["histogram"][0];
+        assert_eq!(h["label"], "Volume");
+        let palette: Vec<&str> = h["palette"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c.as_str().unwrap())
+            .collect();
+        assert!(palette.contains(&"rgba(38,166,154,0.5)"), "{palette:?}");
+        assert!(palette.contains(&"rgba(239,83,80,0.5)"), "{palette:?}");
+        let idx = h["color_idx"].as_array().unwrap();
+        assert_eq!(idx.len(), h["values"].as_array().unwrap().len());
+        assert!(idx.iter().all(|i| i.as_u64().is_some_and(|i| i < 2)));
+    }
+
+    #[test]
     fn generate_chart_series_signals_align_with_bars() {
         // cipher_b emits labeled dots; assert every signal.x is in range
         // and when signal.t is non-null it matches bars[x].t.
@@ -3181,6 +3347,46 @@ mod tests {
         assert_eq!(same.lines[0].y, ys);
         assert_eq!(same.dots.len(), 3);
         assert_eq!(same.divlines.len(), 5);
+    }
+
+    #[test]
+    fn series_warmup_keeps_histogram_colors_aligned() {
+        // ADR-0026: warmup trimming cuts the per-bar colors with the values,
+        // so a warmed volume histogram equals the tail of an unwarmed one.
+        let call = |bars: u64, warmup: u64| -> Value {
+            let args = json!({
+                "ticker": "ETHUSDT", "timeframe": "4h", "bars": bars, "warmup": warmup,
+                "end_time": END_4H_MS, "indicators": ["volume"], "format": "series"
+            });
+            serde_json::from_str(&response_text(&generate_chart(
+                Some(json!(1)),
+                &args,
+                fetch::DataSource::Sample,
+                None,
+            )))
+            .unwrap()
+        };
+        let colors = |p: &Value| -> Vec<Value> {
+            let h = &p["indicators"]["volume"]["histogram"][0];
+            h["color_idx"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|i| h["palette"][i.as_u64().unwrap() as usize].clone())
+                .collect()
+        };
+        let warmed = call(20, 30);
+        let full = call(50, 0);
+        let all = colors(&full);
+        assert_eq!(colors(&warmed), all[30..].to_vec());
+        assert_eq!(
+            warmed["indicators"]["volume"]["histogram"][0]["values"],
+            json!(
+                full["indicators"]["volume"]["histogram"][0]["values"]
+                    .as_array()
+                    .unwrap()[30..]
+            )
+        );
     }
 
     #[test]
@@ -3907,6 +4113,47 @@ mod tests {
         let pushed = series_tail(&raw, &json!(["rsi", "macd"]), "heikin_ashi", 2).unwrap();
         assert_eq!(pushed, polled);
     }
+
+    #[test]
+    fn series_tail_carries_plot_colors_like_generate_chart() {
+        // ADR-0026: pushed tails carry the same line colors and per-bar
+        // histogram colors as polled ones.
+        let indicators = json!(["volume", "macd", "ema"]);
+        let args = json!({
+            "ticker": "ETHUSDT", "timeframe": "4h", "bars": 2, "warmup": 40,
+            "end_time": END_4H_MS, "indicators": indicators, "format": "series"
+        });
+        let polled: Value = serde_json::from_str(&response_text(&generate_chart(
+            Some(json!(1)),
+            &args,
+            fetch::DataSource::Sample,
+            None,
+        )))
+        .unwrap();
+        let mut raw = fetch::fetch_ohlcv(
+            fetch::DataSource::Sample,
+            "ETHUSDT",
+            "4h",
+            42,
+            Some(END_4H_MS),
+        )
+        .unwrap()
+        .data;
+        raw.symbol = Some("ETHUSDT".into());
+        raw.interval = Some("4h".into());
+        let pushed = series_tail(&raw, &indicators, "candles", 2).unwrap();
+        assert_eq!(pushed, polled);
+        let ind = &pushed["indicators"];
+        for h in [&ind["volume"]["histogram"][0], &ind["macd"]["histogram"][0]] {
+            assert_eq!(h["color_idx"].as_array().unwrap().len(), 2);
+            assert!(!h["palette"].as_array().unwrap().is_empty());
+        }
+        assert_eq!(ind["macd"]["histogram"][0]["label"], "Histogram");
+        assert!(ind["ema"]["lines"][0]["color"]
+            .as_str()
+            .unwrap()
+            .starts_with("rgba("));
+    }
 }
 
 /// Scripted indicators over MCP (ADR-0025): register → list → chart →
@@ -4065,6 +4312,38 @@ def compute(ohlcv, params, chart):
         assert!(text(&resp, 0).contains("Unknown indicator"));
         let resp = call("delete_indicator", json!({"name": "my_momentum"}), Some(&u));
         assert!(text(&resp, 0).contains("no indicator named"));
+    }
+
+    #[test]
+    fn script_plot_colors_reach_the_series_wire() {
+        // ADR-0026: a script's chart.line / chart.bars colors serialize like
+        // a built-in's.
+        let u = user();
+        let source = r##"
+PARAMS = []
+META = {"title": "Colored", "overlay": False}
+
+def compute(ohlcv, params, chart):
+    m = ohlcv.close - ohlcv.close[3]
+    chart.line(m, title = "MOM", color = "teal", width = 3)
+    chart.bars(m, color = "#ff00ff", alpha = 0.5)
+"##;
+        payload(&call(
+            "register_indicator",
+            json!({"name": "colored", "source": source}),
+            Some(&u),
+        ));
+        let p = payload(&chart(&u, json!(["colored"]), "series"));
+        let ind = &p["indicators"]["colored"];
+        assert_eq!(ind["lines"][0]["color"], "rgba(0,137,123,0.9)");
+        assert_eq!(ind["lines"][0]["width"], 3);
+        let h = &ind["histogram"][0];
+        assert_eq!(h["label"], "Colored");
+        assert_eq!(h["palette"], json!(["rgba(255,0,255,0.5)"]));
+        let idx = h["color_idx"].as_array().unwrap();
+        assert_eq!(idx.len(), 200);
+        assert!(idx[..3].iter().all(|i| i.is_null()));
+        assert!(idx[3..].iter().all(|i| *i == json!(0)));
     }
 
     #[test]
