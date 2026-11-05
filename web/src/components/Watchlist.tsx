@@ -156,6 +156,7 @@ export function Watchlist(props: WatchlistProps): JSX.Element {
           open={searchOpen()}
           onOpenChange={setSearchOpen}
           initialQuery=""
+          title="Add symbol"
           onSelect={addToWatchlist}
           session={props.session}
         />

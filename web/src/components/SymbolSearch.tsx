@@ -40,6 +40,8 @@ export interface SymbolSearchProps {
   onOpenChange: (open: boolean) => void;
   /** Text the input starts with (e.g. the letter that opened the dialog). */
   initialQuery: string;
+  /** Dialog title; defaults to "Symbol search". */
+  title?: string;
   onSelect: (ticker: string) => void;
   session: Pick<McpSession, "callSearchSymbols">;
 }
@@ -182,7 +184,7 @@ export function SymbolSearch(props: SymbolSearchProps): JSX.Element {
           >
             <div class="flex items-center justify-between px-4 pt-3">
               <Dialog.Title class="text-sm font-semibold">
-                Symbol search
+                {props.title ?? "Symbol search"}
               </Dialog.Title>
               <Dialog.CloseButton
                 class="text-[color:var(--color-fg-muted)] hover:text-[color:var(--color-fg)] cursor-pointer text-lg leading-none"

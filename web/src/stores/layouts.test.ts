@@ -372,7 +372,7 @@ describe("live bindings", () => {
       symbol: "BTCUSDT",
       timeframe: "4h",
       chartType: "candles",
-      indicators: ["ema_stack", { name: "rsi", length: 14 }],
+      indicators: ["ema_stack", "volume", { name: "rsi", length: 14 }],
     });
 
     lay.setTimeframe("15m");

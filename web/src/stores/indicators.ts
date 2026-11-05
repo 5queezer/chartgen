@@ -53,6 +53,7 @@ const STORAGE_KEY = "chartgen.indicators.active";
 
 export const DEFAULT_SET: ActiveIndicator[] = [
   "ema_stack",
+  "volume",
   { name: "rsi", length: 14 },
 ];
 

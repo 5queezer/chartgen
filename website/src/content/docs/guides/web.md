@@ -570,6 +570,9 @@ legend shows controls on hover (or keyboard focus):
   their legend value is omitted. **Defaults** resets the tab being shown.
 - **×** removes the indicator. The price pane legend cannot be removed.
 
+A fresh install starts with the EMA stack, Volume and RSI, like a new
+TradingView chart with its Volume pane. Stored sets are never changed.
+
 The set, parameters and hidden state persist in `localStorage`
 ([ADR-0013](/chartgen/decisions/0013-indicator-visibility-and-instances/)),
 and so do the plot styles

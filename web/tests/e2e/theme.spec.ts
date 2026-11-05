@@ -30,6 +30,12 @@ test.describe("theme", () => {
   test("toggle switches to light and persists across reload", async ({
     bootedApp: page,
   }) => {
+    // The Volume pane's bars are bright in both themes and would swamp the
+    // luminance probe, which is about the theme's empty chart area.
+    await page.getByRole("button", { name: "Remove volume", exact: true }).click();
+    await expect(
+      page.locator(".pane-header").filter({ hasText: "Volume" }),
+    ).toHaveCount(0);
     expect(await bodyBackground(page)).toBe("rgb(19, 23, 34)");
     expect(await chartLuminance(page)).toBeLessThan(80);
 
