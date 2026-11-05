@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 const KEY = "chartgen.indicators.active";
-const DEFAULTS = ["ema_stack", { name: "rsi", length: 14 }];
+const DEFAULTS = ["ema_stack", "volume", { name: "rsi", length: 14 }];
 
 function stubStorage(initial?: string) {
   const data = new Map<string, string>();
@@ -75,7 +75,7 @@ describe("indicator store mutations", () => {
     stubStorage();
     const { removeIndicator, activeIndicators } = await loadStore();
     removeIndicator("rsi");
-    expect(activeIndicators()).toEqual(["ema_stack"]);
+    expect(activeIndicators()).toEqual(["ema_stack", "volume"]);
   });
 
   it("activeIndicatorsKey keeps a __proto__ key as data", async () => {
@@ -126,21 +126,22 @@ describe("indicator store visibility and params", () => {
   it("persists hidden state and reloads it", async () => {
     const data = stubStorage();
     const s = await loadStore();
-    s.toggleIndicatorHidden(1);
+    s.toggleIndicatorHidden(2);
     expect(JSON.parse(data.get(KEY)!)).toEqual([
       "ema_stack",
+      "volume",
       { name: "rsi", length: 14, hidden: true },
     ]);
     const s2 = await loadStore();
-    expect(s2.isHidden(s2.activeIndicators()[1]!)).toBe(true);
+    expect(s2.isHidden(s2.activeIndicators()[2]!)).toBe(true);
   });
 
   it("updates params by index, keeping name and visibility", async () => {
     stubStorage();
     const s = await loadStore();
-    s.toggleIndicatorHidden(1);
-    s.updateIndicatorParams(1, { length: 21 });
-    expect(s.activeIndicators()[1]).toEqual({
+    s.toggleIndicatorHidden(2);
+    s.updateIndicatorParams(2, { length: 21 });
+    expect(s.activeIndicators()[2]).toEqual({
       name: "rsi",
       length: 21,
       hidden: true,
