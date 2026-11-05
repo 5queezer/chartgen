@@ -49,12 +49,14 @@ Chosen: option 1.
 
 - **Record.** An alert gets an optional `source`. Absent (every record from
   before this ADR) means a price alert, so no migration is needed. Otherwise:
-  - `{kind: "drawing", drawingId, label}`: the drawing's record id on the
-    alert's symbol, and its display name for the Alerts tab.
-  - `{kind: "indicator", interval, instanceKey, line, name, against}`: the
-    instance key of the indicator in the series payload
+  - `{kind: "drawing", drawingId, label, interval?}`: the drawing's record
+    id on the alert's symbol, its display name for the Alerts tab and, for a
+    sloped line, the chart interval it was created on.
+  - `{kind: "indicator", interval, instanceKey, signature, line, name,
+    against}`: the instance key of the indicator in the series payload
     ([ADR-0028](/chartgen/decisions/0028-multiple-indicator-instances/)),
-    the index of the plot in its `lines`, a display name, and the right
+    the instance's name and params at creation (`signature`), the index of
+    the plot in its `lines`, a display name, and the right
     operand: `{kind: "value", value}`, `{kind: "plot", line, name}` (another
     plot of the same indicator) or `{kind: "price"}`. With `price` the price
     is the left operand and the plot the level: "Close crossing EMA 200".
@@ -67,28 +69,46 @@ Chosen: option 1.
   consecutive readings, which is ADR-0020's rule when there is one level.
   A parallel channel has two levels: crossing either line fires, greater
   means above both, less means below both.
-- **Drawing levels.** A line's value at the current bar's time, linear in
-  time/value space between its two points and extended past them (a trend
-  line counts as extended both ways, as in TradingView). A ray has no value
-  before its start; horizontal lines are constant. The price is the live
-  close. The previous reading uses the line as it is now at the previous
-  tick's bar time, so moving a drawing over the price does not fire it.
-  Drawing alerts work for any symbol: the drawing is read from its stored
-  record, and symbols off the chart are fed by the quotes poll at the time
-  of the quote.
+- **Drawing levels.** Horizontal lines are constant (a horizontal ray only
+  from its start on). A sloped line is read the way klinecharts draws it:
+  straight in bar-index space, so nights, weekends and other gaps take no
+  room, and straight in log(value) on a log price axis. Its points map to
+  bar indices as the chart places them (the nearest bar inside the data,
+  whole bar intervals beyond it), and its value at the current bar is
+  interpolated, or extrapolated past the points (a trend line counts as
+  extended both ways, as in TradingView). A ray has no value before its
+  start, a vertical line none at all. A channel's third point is offset in
+  the same space. The price is the live close. The previous reading uses
+  the line as it is now at the previous tick's bar, so moving a drawing
+  over the price does not fire it.
+- **Where drawing alerts run.** The drawing is read from its stored record,
+  so a horizontal line's alert works for any symbol, off the chart from the
+  quotes poll. A sloped line needs the bars it is drawn on: its alert only
+  runs while the chart shows its symbol at the interval it was created on,
+  and the Alerts tab says *inactive: open AAPL 1h* otherwise.
 - **Drawing ids.** Drawing records gain an `id` (the klinecharts overlay id),
   kept across reloads and undo. Older records get one the next time their
   symbol is loaded.
 - **Deleted drawings.** When a symbol's drawings are saved without a drawing
   an alert watches, the alert is switched off with the note
   "drawing deleted", not deleted. The Alerts tab shows it as
-  *inactive: drawing deleted*; it can be edited, resumed or deleted.
+  *inactive: drawing deleted*. Resuming or editing it keeps it off while the
+  drawing is missing; when the drawing comes back (undo) the alert is
+  switched on again. Drawings the per-symbol storage limit evicts count as
+  deleted.
 - **Indicator alerts** are evaluated on each live tail of the chart, with the
   indicator's values on the forming (last) bar: a crossing is detected
   between the previous and the current tick, like TradingView's "every
   tick". Once / every time work as for price alerts. They only run while the
-  chart shows that symbol at that interval with that indicator. The Alerts
-  tab says *inactive: open BTCUSDT 1h* (or *indicator not on the chart*) otherwise.
+  chart shows that symbol at that interval with the same instance: its key,
+  name and params must match what the alert was created on, so a removed
+  RSI (14) whose key a new RSI (21) reuses does not carry the alert over.
+  The Alerts tab says *inactive: open BTCUSDT 1h*, *indicator not on the
+  chart* or *indicator changed* otherwise. Readings are forgotten when the
+  chart reloads or bar replay ends, so a crossing is never measured across
+  that gap.
+- **Several tabs.** One tab evaluates (ADR-0020); the Alerts tab of the
+  others says so ("evaluated in another open chartgen tab").
 - **Entry points.** A drawing's right-click menu has **Add alert on
   &lt;tool&gt;** for trend line, ray, extended line, horizontal line,
   horizontal ray and parallel channel. Indicator legend rows have a bell
@@ -105,11 +125,10 @@ Chosen: option 1.
 - A crossing is seen between ticks on the forming bar, so a plot that
   crosses and crosses back within one poll interval is missed, as for
   price alerts. There is no "once per bar close" option yet.
-- A changed indicator setting keeps the alert on the same instance key and
-  plot index: an alert on RSI (14) follows the RSI to length 21. The stored
-  display name keeps the old parameters.
-- Lines are read in time, not bar-index, space: on markets with gaps
-  (weekends) a sloped line's alert value can differ slightly from where
-  the line is drawn, which uses bar indices.
+- Changing an indicator's settings makes its alerts inactive ("indicator
+  changed"); setting them back revives them. To alert on the new settings,
+  create a new alert.
+- A sloped line's alert needs its symbol and interval on the chart, like an
+  indicator alert; only horizontal lines are watched for other symbols.
 - Webhooks, email and SMS stay out of scope. Server-side alerts that run
   with no tab open would supersede this ADR and ADR-0020 together.

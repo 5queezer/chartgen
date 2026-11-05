@@ -652,12 +652,16 @@ compared with (a value, or a plot).
 - **Drawings.** Right-click a trend line, ray, extended line, horizontal line,
   horizontal ray or parallel channel and pick **Add alert on …**, or choose
   the drawing as the source in the dialog. The alert compares the live close
-  with the line's value at the current bar: a sloped line is extended past its
-  points (a ray only from its start on). A channel has two lines: crossing
-  either one fires, *greater than* means above both and *less than* below
-  both. The Alerts tab reads *Close crossing Trend line*. Deleting the drawing
-  does not delete its alerts: they switch off and read *inactive: drawing
-  deleted*.
+  with the line's value at the current bar, where the chart draws it (gaps such
+  as nights and weekends take no room; on a log scale the line is straight in
+  log price). A sloped line is extended past its points (a ray only from its
+  start on). A channel has two lines: crossing either one fires, *greater
+  than* means above both and *less than* below both. The Alerts tab reads
+  *Close crossing Trend line*. A sloped line's alert only runs while the chart
+  shows its symbol at the interval it was created on (otherwise *inactive:
+  open AAPL 1h*); horizontal lines and rays are watched for any symbol.
+  Deleting the drawing does not delete its alerts: they switch off and read
+  *inactive: drawing deleted* until the drawing is back (undo).
 - **Indicators.** Hover an indicator's legend row and click the bell
   (**Add alert on RSI**). For an overlay such as EMA the dialog opens as the
   price crossing its first plot (pick another one, e.g. EMA 200, under
@@ -666,12 +670,12 @@ compared with (a value, or a plot).
   also be another plot of the same indicator (*MACD crossing Signal*). The
   values are those of the forming bar, checked on every live update.
   Indicator alerts only run while the chart shows that symbol at that interval
-  with the indicator on it; otherwise the Alerts tab reads *inactive: open
-  BTCUSDT 1h* (or *indicator not on the chart*).
+  with the same indicator settings; otherwise the Alerts tab reads *inactive:
+  open BTCUSDT 1h*, *indicator not on the chart* or *indicator changed* (after
+  you changed its parameters: create a new alert for the new ones).
 
-Only price alerts are drawn as lines on the chart. Drawing alerts also work
-for symbols that are not on the chart (from the quotes poll); indicator alerts
-do not.
+Only price alerts are drawn as lines on the chart. With several chartgen tabs
+open, one evaluates the alerts and the Alerts tab of the others says so.
 
 ### Data Window
 
