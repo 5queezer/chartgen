@@ -61,4 +61,5 @@ one and link both ways.
 | [0031](/chartgen/decisions/0031-multiple-watchlists/) | Multiple named watchlists, sections and flags | Accepted | 2026-11-05 |
 | [0032](/chartgen/decisions/0032-indicator-aware-warmup/) | Indicator-aware warmup | Accepted | 2026-11-05 |
 | [0033](/chartgen/decisions/0033-indicator-projection-past-last-bar/) | Indicator projection past the last bar | Accepted | 2026-11-05 |
+| [0034](/chartgen/decisions/0034-drawing-and-indicator-alerts/) | Drawing and indicator alerts | Accepted | 2026-11-05 |
 | [0035](/chartgen/decisions/0035-styleable-geometry/) | Styleable indicator geometry colors | Accepted | 2026-11-05 |

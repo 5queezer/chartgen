@@ -409,7 +409,8 @@ to cancel. Drawings pan and zoom with the chart.
   part of the box that is on screen. The style bar's color is the entry line.
 - **Select** a drawing by clicking it, then press `Delete` or
   `Backspace` to remove it.
-- **Right-click** a drawing for Remove and Lock/Unlock. Locked drawings
+- **Right-click** a drawing for Remove and Lock/Unlock, and on lines and
+  channels **Add alert on …** ([drawing alerts](#drawing-and-indicator-alerts)). Locked drawings
   cannot be dragged but still answer right-click, so they can be
   unlocked there. Right-clicking while a drawing is in progress cancels
   it. Hide is only available for all drawings at once (toolbar eye).
@@ -621,13 +622,14 @@ other side of the level before it can fire again.
 
 Create an alert with the bell button in the header, `Alt+A` (an alert at the
 last price, ignored while typing in a field or with a dialog open), or **+** in
-the Alerts tab. The dialog takes the condition, price, trigger and an optional
-message. Active alerts for the chart symbol are drawn as dashed lines with a
+the Alerts tab. The dialog takes the source, condition, price, trigger and an
+optional message. Active alerts for the chart symbol are drawn as dashed lines with a
 bell label; drag a line to move the level, or double-click it to edit.
 
-In the Alerts tab alerts are grouped by symbol with their status (*active*,
-*triggered*, *paused*). Hover a row for edit, pause / resume and delete;
-clicking the row switches the chart to that symbol.
+In the Alerts tab alerts are grouped by symbol with what they watch and their
+status (*active*, *triggered*, *paused*, or *inactive* with the reason). Hover
+a row for edit, pause / resume and delete; clicking the row switches the chart
+to that symbol.
 
 When an alert fires you get a toast, a short beep and, if you allow it, a
 browser notification. The browser is asked for notification permission when
@@ -638,6 +640,38 @@ the chart symbol from the live feed, other symbols from their own quotes poll
 every 5 s. **They only fire while chartgen is open in a visible tab** (with several tabs open, one of them evaluates). They
 are saved in `localStorage` under `chartgen.alerts.list` (at most 200;
 invalid entries are dropped on load) and are not shared between browsers.
+
+### Drawing and indicator alerts
+
+An alert can also watch a drawing or an indicator plot
+([ADR-0034](/chartgen/decisions/0034-drawing-and-indicator-alerts/)), with the
+same conditions and triggers. In the dialog, **Source** is what is compared
+(the symbol's price, a drawing, or an indicator plot) and **Level** what it is
+compared with (a value, or a plot).
+
+- **Drawings.** Right-click a trend line, ray, extended line, horizontal line,
+  horizontal ray or parallel channel and pick **Add alert on …**, or choose
+  the drawing as the source in the dialog. The alert compares the live close
+  with the line's value at the current bar: a sloped line is extended past its
+  points (a ray only from its start on). A channel has two lines: crossing
+  either one fires, *greater than* means above both and *less than* below
+  both. The Alerts tab reads *Close crossing Trend line*. Deleting the drawing
+  does not delete its alerts: they switch off and read *inactive: drawing
+  deleted*.
+- **Indicators.** Hover an indicator's legend row and click the bell
+  (**Add alert on RSI**). For an overlay such as EMA the dialog opens as the
+  price crossing its first plot (pick another one, e.g. EMA 200, under
+  **Level**: *Close crossing EMA 200*). For an oscillator such as RSI it
+  opens as the plot against a value (*RSI (14) crossing up 70*); **Level** can
+  also be another plot of the same indicator (*MACD crossing Signal*). The
+  values are those of the forming bar, checked on every live update.
+  Indicator alerts only run while the chart shows that symbol at that interval
+  with the indicator on it; otherwise the Alerts tab reads *inactive: open
+  BTCUSDT 1h* (or *indicator not on the chart*).
+
+Only price alerts are drawn as lines on the chart. Drawing alerts also work
+for symbols that are not on the chart (from the quotes poll); indicator alerts
+do not.
 
 ### Data Window
 
@@ -740,6 +774,8 @@ sections show the parameters of each instance (`RSI (14)`, `RSI (21)`)
 ([ADR-0028](/chartgen/decisions/0028-multiple-indicator-instances/)).
 Each indicator pane legend shows controls on hover (or keyboard focus):
 
+- **Bell** opens the alert dialog on the indicator's plots
+  ([indicator alerts](#drawing-and-indicator-alerts)).
 - **Eye** hides the indicator. It disappears from the chart immediately and
   is no longer requested from the server; its chip stays, dimmed, with an eye button to
   show it again.

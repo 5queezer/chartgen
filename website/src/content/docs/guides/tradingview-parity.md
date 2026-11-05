@@ -119,7 +119,7 @@ Status legend:
 | Price alerts (crossing, up, down, greater, less) | ✅ | ◐ | Same conditions, once or every time, toast, beep and browser notification. Evaluated in the browser. [Sidebar and price alerts](/chartgen/guides/web/#sidebar-and-price-alerts), [ADR-0020](/chartgen/decisions/0020-client-side-price-alerts/) |
 | Alerts that fire with no tab open | ✅ | ❌ | Fire only while chartgen is open in a visible tab. The server alert tools exist for `--trade` users but are not wired to the web app. [ADR-0020](/chartgen/decisions/0020-client-side-price-alerts/) |
 | Alerts synced across devices | ✅ | ❌ | Stored per browser profile. |
-| Indicator and drawing alerts, webhooks, email, SMS | ✅ | ❌ | Price alerts only in the web app. [Push notifications](/chartgen/guides/notifications/) covers the server side. |
+| Indicator and drawing alerts, webhooks, email, SMS | ✅ | ◐ | Alerts on trend lines, rays, horizontal lines and channels, and on indicator plots against a value, another plot or the price. Indicator alerts only run while the chart shows their symbol and interval. No webhooks, email or SMS. [Drawing and indicator alerts](/chartgen/guides/web/#drawing-and-indicator-alerts), [ADR-0034](/chartgen/decisions/0034-drawing-and-indicator-alerts/). [Push notifications](/chartgen/guides/notifications/) covers the server side. |
 | Alert lines on the chart (drag to move) | ✅ | ✅ | [Sidebar and price alerts](/chartgen/guides/web/#sidebar-and-price-alerts) |
 
 ## Layouts & settings
