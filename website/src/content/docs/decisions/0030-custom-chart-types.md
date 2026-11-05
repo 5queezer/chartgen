@@ -35,7 +35,7 @@ lines. How should the new types be drawn?
 klinecharts keeps drawing one of its own types with fully transparent
 colors: `area` for the close-based types (its autoscale spans the closes,
 as TradingView's does for them) and `candle_solid` for High-low (it spans
-high and low). A registered indicator, `chartgen_series`, with no figures
+high and low). A registered indicator, `chartgen__series`, with no figures
 paints the visible series in its `draw` callback from the bars, mapping
 through klinecharts' own `xAxis` and `yAxis`, so pan, zoom, the percent and
 log axes and live data need nothing extra. Its negative `zLevel` makes
@@ -79,7 +79,11 @@ brings the built-in series back; picking a built-in type again re-applies
 its own style. The indicator is created when a custom type is chosen and
 removed when a built-in one is. Its `extendData` carries the type and the
 resolved up, down and line colors, so a theme or settings change is one
-`overrideIndicator`.
+`overrideIndicator`. The registry name has a double underscore because
+server indicators register as `chartgen_<name>` with names that start with a
+letter, so no user script can take it; the compare indicator
+([ADR-0022](./0022-compare-symbols/)) is renamed to `chartgen__compare` for
+the same reason.
 
 ## Consequences
 
@@ -91,12 +95,16 @@ new client-drawn type is one more case in `drawSeries`.
 **Negative.** The series is drawn every frame in JavaScript, not by
 klinecharts' own views (cheap: only the visible bars). It relies on
 klinecharts 9.8 behaviour: indicators with a negative `zLevel` are painted
-with `destination-over`, the `area` type autoscales on its value key only,
-and the candle pane uses the lowest indicator precision for the price axis
-(the indicator declares precision 10 so it never lowers it). The package is
-pinned to `~9.8.12`, and the chart-types E2E spec counts each type's pixels,
-so an upgrade that changes this fails the suite. The Baseline base level is
-not configurable yet.
+with `destination-over`, and the `area` type autoscales on its value key
+only. (The indicator declares precision 10: on the candle pane the lowest
+indicator precision sets how far a flat value range is padded, never the
+axis labels, so a high value leaves that at the price precision.) The
+package is pinned to `~9.8.12`. The chart-types E2E spec counts each type's
+pixels and checks that the last price line stays on top where it crosses a
+column, so an upgrade that stops drawing the series or changes its z-order
+fails the suite; a change to the autoscale rules would only show in the
+screenshots. The Baseline base level is not configurable yet, and there are
+no per-type style settings.
 
 ## More Information
 

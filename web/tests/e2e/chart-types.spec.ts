@@ -102,10 +102,68 @@ test.describe("chart types", () => {
     await page.screenshot({ path: `${SHOTS}/candles.png` });
   });
 
+  test("the series sits beneath the last price line", async ({ bootedApp: page }) => {
+    await pickChartType(page, "Columns");
+    // In the price line's row (the row with the most opaque up/down pixels:
+    // columns are half transparent), count line pixels over a column of the
+    // other color. Painted beneath the line, the column leaves them opaque
+    // and unblended; painted over it, they would be a mix of both colors.
+    const crossings = () =>
+      page.evaluate(
+        ({ up, down }) => {
+          const label = document.querySelector(".pane-header-label");
+          if (!label) return 0;
+          const y = label.getBoundingClientRect().bottom + 20;
+          const near = (d: Uint8ClampedArray, i: number, c: number[], tol: number) =>
+            Math.abs(d[i]! - c[0]!) <= tol &&
+            Math.abs(d[i + 1]! - c[1]!) <= tol &&
+            Math.abs(d[i + 2]! - c[2]!) <= tol;
+          let best = 0;
+          for (const canvas of document.querySelectorAll<HTMLCanvasElement>(
+            ".chart-container canvas",
+          )) {
+            const rect = canvas.getBoundingClientRect();
+            if (rect.width < 300 || y < rect.top || y >= rect.bottom) continue;
+            const ctx = canvas.getContext("2d");
+            if (!ctx || canvas.width === 0 || canvas.height === 0) continue;
+            const w = canvas.width;
+            const d = ctx.getImageData(0, 0, w, canvas.height).data;
+            const opaque = (i: number, c: number[]) => d[i + 3]! >= 250 && near(d, i, c, 8);
+            let lineRow = -1;
+            let lineColor = up;
+            let most = 0;
+            for (let row = 0; row < canvas.height; row++) {
+              for (const c of [up, down]) {
+                let n = 0;
+                for (let x = 0; x < w; x++) if (opaque((row * w + x) * 4, c)) n++;
+                if (n > most) [most, lineRow, lineColor] = [n, row, c];
+              }
+            }
+            if (lineRow < 0 || lineRow + 4 >= canvas.height) continue;
+            const other = lineColor === up ? down : up;
+            let n = 0;
+            for (let x = 0; x < w; x++) {
+              const below = ((lineRow + 4) * w + x) * 4;
+              const columnBelow = Math.abs(d[below + 3]! - 128) <= 8 && near(d, below, other, 8);
+              if (columnBelow && opaque((lineRow * w + x) * 4, lineColor)) n++;
+            }
+            best = Math.max(best, n);
+          }
+          return best;
+        },
+        { up: [0x26, 0xa6, 0x9a], down: [0xef, 0x53, 0x50] },
+      );
+    await expect.poll(crossings, { timeout: 15_000 }).toBeGreaterThan(20);
+  });
+
   for (const c of CASES) {
     test(`${c.label}: draws, keeps the legend, persists, and gives candles back`, async ({
       bootedApp: page,
     }) => {
+      // Sample the baseline only once the candles are painted.
+      await expect
+        .poll(async () => (await priceCounts(page, [BULL]))[0], { timeout: 15_000 })
+        .toBeGreaterThan(1000);
       const base = await priceCounts(page, c.probes);
       const [candles] = await priceCounts(page, [BULL]);
       await pickChartType(page, c.label);

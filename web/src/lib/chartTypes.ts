@@ -36,7 +36,10 @@ export function isSeriesType(t: ChartType): t is SeriesType {
   return SERIES_TYPES.includes(t);
 }
 
-export const SERIES_REG_NAME = "chartgen_series";
+// Double underscore: server indicators register as `chartgen_<name>` and
+// their names start with a letter, so a user script named `series` cannot
+// collide with it.
+export const SERIES_REG_NAME = "chartgen__series";
 
 const TRANSPARENT = "rgba(0, 0, 0, 0)";
 // TradingView's neutral gray, readable on both themes.
@@ -46,9 +49,10 @@ let registered = false;
 
 /**
  * Register (once) the series indicator. No figures, so it adds nothing to
- * the autoscale; a negative zLevel puts it beneath the other indicators. Its
- * precision only has to be above any price precision: klinecharts uses the
- * lowest precision of a pane's indicators for the price axis.
+ * the autoscale; a negative zLevel puts it beneath the other indicators. The
+ * candle pane's axis labels always use the price precision; an indicator's
+ * precision only sets how far klinecharts pads a flat value range, so 10
+ * keeps it from widening that padding beyond the price precision.
  */
 export function ensureSeriesRegistered(): void {
   if (registered) return;
@@ -203,6 +207,8 @@ export function drawSeries({
   switch (ext.type) {
     case "columns":
     case "high_low": {
+      const up = ext.type === "high_low" ? ext.line : withAlpha(ext.up, 0.5);
+      const down = ext.type === "high_low" ? ext.line : withAlpha(ext.down, 0.5);
       for (let i = start; i < end; i++) {
         const b = bars[i]!;
         const x = xAxis.convertToPixel(i);
@@ -210,10 +216,7 @@ export function drawSeries({
           ext.type === "columns"
             ? barRect(x, yAxis.convertToPixel(b.close), bounding.height, barSpace.gapBar)
             : barRect(x, yAxis.convertToPixel(b.high), yAxis.convertToPixel(b.low), barSpace.gapBar);
-        ctx.fillStyle =
-          ext.type === "high_low"
-            ? ext.line
-            : withAlpha(isUpBar(bars, i) ? ext.up : ext.down, 0.5);
+        ctx.fillStyle = ext.type === "columns" && !isUpBar(bars, i) ? down : up;
         ctx.fillRect(r.x, r.y, r.width, r.height);
       }
       break;
@@ -223,11 +226,12 @@ export function drawSeries({
       if (ext.type === "line_markers") {
         ctx.fillStyle = ext.line;
         const r = markerRadius(barSpace.bar);
+        ctx.beginPath();
         for (const p of closes) {
-          ctx.beginPath();
+          ctx.moveTo(p.x + r, p.y);
           ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
-          ctx.fill();
         }
+        ctx.fill();
       }
       ctx.strokeStyle = ext.line;
       ctx.lineWidth = 2;

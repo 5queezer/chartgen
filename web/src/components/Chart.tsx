@@ -466,7 +466,9 @@ function ensureRegistered(name: string, shape: IndicatorShape): void {
 }
 
 // --- Compare lines (ADR-0022) ------------------------------------------
-const COMPARE_REG_NAME = "chartgen_compare";
+// Double underscore: server indicators register as `chartgen_<name>` and
+// their names start with a letter, so this can never be one of them.
+const COMPARE_REG_NAME = "chartgen__compare";
 const compareStashKey = (slot: number) => `chartgen_cmp_${slot}`;
 
 /**
