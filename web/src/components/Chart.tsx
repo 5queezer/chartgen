@@ -44,9 +44,11 @@ import {
 } from "solid-js";
 import {
   dispose,
+  FormatDateType,
   init,
   LoadDataType,
   registerIndicator,
+  utils,
   type Chart as KChart,
   type IndicatorDrawCallback,
   type KLineData,
@@ -107,12 +109,19 @@ import {
 import { FONT_FAMILY, PALETTES, type Palette } from "../lib/theme";
 import type { SeriesPayload } from "../types/responses";
 import {
+  abbreviate,
   barLegend,
+  formatIndicatorValue,
+  formatPrice,
+  hasNoVolume,
+  indicatorValueKind,
+  isVolumeIndicator,
   lastFiniteCloseIndex,
   pricePrecision,
   type BarLegend,
 } from "../lib/format";
-import { formatBarTime } from "../lib/timezone";
+import { readableOn } from "../lib/color";
+import { formatBarTime, isDateBar } from "../lib/timezone";
 import {
   divlineSegments,
   fillColors,
@@ -524,6 +533,7 @@ function ensureRegistered(name: string, shape: IndicatorShape): void {
     name: regName,
     shortName: name.toUpperCase(),
     precision: 2,
+    shouldFormatBigNumber: isVolumeIndicator(keyName(name)),
     figures: figures as never,
     draw: drawGeometry(name),
     calc: (dataList: KLineData[], indicator) => {
@@ -728,16 +738,16 @@ function valueAt(
 
 /**
  * Compact K/M/B formatter used for y-axis ticks and the right-axis
- * volume readout. Two decimals above 10k; unchanged below.
+ * volume readout of volume-type panes: at most two decimals, no `.00`.
  */
 function formatBigNumber(value: string | number): string {
   const n = typeof value === "string" ? Number(value) : value;
-  if (!Number.isFinite(n)) return String(value);
-  const abs = Math.abs(n);
-  if (abs >= 1_000_000_000) return `${(n / 1_000_000_000).toFixed(2)}B`;
-  if (abs >= 1_000_000) return `${(n / 1_000_000).toFixed(2)}M`;
-  if (abs >= 10_000) return `${(n / 1_000).toFixed(2)}K`;
-  return String(value);
+  return Number.isFinite(n) ? abbreviate(n) : String(value);
+}
+
+/** The default Volume pane is skipped for symbols without any traded volume (Yahoo FX). */
+function noVolumePane(series: SeriesPayload, key: string): boolean {
+  return keyName(key) === "volume" && hasNoVolume(series.bars);
 }
 
 /** TradingView-style setStyles payload for a palette. Kept as one function so
@@ -1016,6 +1026,17 @@ export function Chart(props: ChartProps): JSX.Element {
   const pricePrecisionForSeries = createMemo(() =>
     pricePrecision(props.series?.bars.slice(-50).map((b) => b.c) ?? []),
   );
+  // True while the series is daily or longer: the crosshair label then shows
+  // the date alone. Read by klinecharts' formatDate below.
+  let dateBars = false;
+  // Oscillator pane keys, top to bottom, as klinecharts stacks them.
+  let paneStack: string[] = [];
+  // Indicator keys of the payload that are shown, in the stored order
+  // (ADR-0028) rather than the payload's.
+  const shownNames = (series: SeriesPayload): string[] => {
+    const visible = visibleKey().split("\n");
+    return visible.filter((k) => k in series.indicators && !noVolumePane(series, k));
+  };
   let crosshairFrame: number | null = null;
   let layoutFrame: number | null = null;
   let styleFrame: number | null = null;
@@ -1046,7 +1067,13 @@ export function Chart(props: ChartProps): JSX.Element {
       // DeepPartial on purpose — we only override the leaves we care
       // about. klinecharts merges the rest from its default theme.
       styles: tvStyles(PALETTES[untrack(theme)]) as never,
-      customApi: { formatBigNumber },
+      customApi: {
+        formatBigNumber,
+        formatDate: (dtf, ts, fmt, type) =>
+          dateBars && type !== FormatDateType.XAxis
+            ? new Date(ts).toISOString().slice(0, 10)
+            : utils.formatDate(dtf, ts, fmt),
+      },
     });
     setChart(c);
     if (c) props.onChartReady?.(c);
@@ -1141,6 +1168,11 @@ export function Chart(props: ChartProps): JSX.Element {
     }
   });
 
+  // Legend text must stay readable on the chart background: light plot
+  // colors are darkened on a light background (the swatches keep theirs).
+  const legendTextColor = (color: string) =>
+    readableOn(color, chartSettings().themes[theme()].background ?? PALETTES[theme()].bg);
+
   const recomputeHeaders = () => {
     const c = chart();
     setAxisInset(
@@ -1192,7 +1224,7 @@ export function Chart(props: ChartProps): JSX.Element {
     const paramsByKey = paramLabels(props.activeIndicators, paramDefaults());
     let overlayRow = 0;
 
-    for (const name of Object.keys(series.indicators)) {
+    for (const name of shownNames(series)) {
       const ind = series.indicators[name]!;
       if (!paneMap[name]) continue; // pane not yet created (or skipped)
 
@@ -1202,10 +1234,18 @@ export function Chart(props: ChartProps): JSX.Element {
         const plot =
           p.kind === "line" ? ind.lines![p.index]! : ind.histogram![p.index]!;
         const values = plot.values;
+        const kind = indicatorValueKind(name, ind.is_overlay);
+        const text = (value: number | null) =>
+          formatIndicatorValue(value, kind, pricePrecisionForSeries());
         // Over the projection (ADR-0033) a line reads its projected value.
         if (future !== null) {
           const value = p.kind === "line" ? futureValue(ind, p.index, bars.length, future) : null;
-          return { label: p.label, value, color: plotColorAt(p, ind, style, legendIndex) };
+          return {
+            label: p.label,
+            value,
+            text: text(value),
+            color: legendTextColor(plotColorAt(p, ind, style, legendIndex)),
+          };
         }
         // At rest a plot reads its last finite value; a line that breaks at
         // trend flips (Supertrend, SAR) reads the bar the price legend reads,
@@ -1214,10 +1254,12 @@ export function Chart(props: ChartProps): JSX.Element {
         const breaks = p.kind === "line" && "breaks" in plot && plot.breaks === true;
         const at =
           xi !== null ? xi : breaks ? legendIndex : lastFiniteIndex(values);
+        const value = valueAt(values, at);
         return {
           label: p.label,
-          value: valueAt(values, at),
-          color: plotColorAt(p, ind, style, at),
+          value,
+          text: text(value),
+          color: legendTextColor(plotColorAt(p, ind, style, at)),
         };
       });
 
@@ -1247,12 +1289,17 @@ export function Chart(props: ChartProps): JSX.Element {
       next.push({
         name: line.symbol,
         lines: [
-          { label: "", value: reading?.value ?? null, color: line.color },
+          {
+            label: "",
+            value: reading?.value ?? null,
+            text: formatPrice(reading?.value ?? null, pricePrecision(line.values)),
+            color: legendTextColor(line.color),
+          },
           {
             label: "",
             value: null,
             text: reading ? formatPct(reading.pct) : undefined,
-            color: line.color,
+            color: legendTextColor(line.color),
           },
         ],
         top: 4 + 20 * (overlayRow + 1 + i),
@@ -1460,13 +1507,14 @@ export function Chart(props: ChartProps): JSX.Element {
         geometryStore.delete(indicatorRegName(name));
       }
       setPaneIds({});
+      paneStack = [];
       setHeaders([]);
       return;
     }
 
     appliedCompare = compare;
-    const visible = new Set(visibleKey().split("\n"));
-    const names = Object.keys(series.indicators).filter((n) => visible.has(n));
+    dateBars = isDateBar(series.interval);
+    const names = shownNames(series);
     // Axis ticks, the last-price badge and the legend share one precision.
     const precision = pricePrecisionForSeries();
 
@@ -1507,18 +1555,34 @@ export function Chart(props: ChartProps): JSX.Element {
     c.applyNewData(klines, canPageBefore(series));
     c.setPriceVolumePrecision(precision, VOLUME_PRECISION);
 
-    // 3. Pane lifecycle. Create for new indicators, remove for dropped.
+    // 3. Pane lifecycle. klinecharts stacks new panes at the bottom and
+    // cannot move one, so the oscillator panes are kept in the stored order
+    // by keeping the longest matching prefix of the stack and recreating
+    // the panes after it.
     // untrack: this effect writes paneIds below, so reading it tracked
     // would re-run the effect forever (stack overflow).
     const currentPanes = untrack(paneIds);
     const nextPanes: Record<string, string> = {};
-    const activeNames = new Set<string>();
+    const wanted: string[] = [];
     for (const name of names) {
-      const shape = shapeFromPayload(series, name);
-      if (isEmptyShape(shape)) continue; // skip empty
-      activeNames.add(name);
+      if (!isEmptyShape(shapeFromPayload(series, name))) wanted.push(name);
+    }
+    const isOscillator = (n: string) => !series.indicators[n]!.is_overlay;
+    const wantedOsc = wanted.filter(isOscillator);
+    const stack = paneStack.filter((n) => wantedOsc.includes(n));
+    let keep = 0;
+    while (keep < stack.length && stack[keep] === wantedOsc[keep]) keep++;
+    const rebuilt = new Set([...stack.slice(keep)]);
+    for (const name of Object.keys(currentPanes)) {
+      if (!wanted.includes(name) || rebuilt.has(name)) {
+        c.removeIndicator(currentPanes[name]!, indicatorRegName(name));
+        if (!wanted.includes(name)) geometryStore.delete(indicatorRegName(name));
+      }
+    }
+    paneStack = wantedOsc.slice(0, keep);
+    for (const name of wanted) {
       const regName = indicatorRegName(name);
-      if (currentPanes[name]) {
+      if (currentPanes[name] && !rebuilt.has(name)) {
         nextPanes[name] = currentPanes[name]!;
         continue;
       }
@@ -1540,12 +1604,9 @@ export function Chart(props: ChartProps): JSX.Element {
         true,
         paneOptions,
       );
-      if (newPaneId !== null) nextPanes[name] = newPaneId;
-    }
-    for (const name of Object.keys(currentPanes)) {
-      if (!activeNames.has(name)) {
-        c.removeIndicator(currentPanes[name]!, indicatorRegName(name));
-        geometryStore.delete(indicatorRegName(name));
+      if (newPaneId !== null) {
+        nextPanes[name] = newPaneId;
+        if (!ind.is_overlay) paneStack.push(name);
       }
     }
     setPaneIds(nextPanes);
@@ -1670,6 +1731,7 @@ export function Chart(props: ChartProps): JSX.Element {
       style={{
         "background-color": chartSettings().themes[theme()].background,
         "--axis-inset": `${axisInset()}px`,
+        "--legend-bg": chartSettings().themes[theme()].background ?? PALETTES[theme()].bg,
       }}
     >
       <div ref={container} class="chart-container" />

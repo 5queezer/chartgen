@@ -4,8 +4,12 @@ import {
   barLegend,
   lastFiniteCloseIndex,
   formatChange,
+  abbreviate,
+  formatIndicatorValue,
   formatPrice,
   formatVolume,
+  hasNoVolume,
+  indicatorValueKind,
   pricePrecision,
 } from "./format";
 
@@ -27,6 +31,10 @@ describe("pricePrecision", () => {
     expect(pricePrecision([1.234e-9])).toBe(12);
     expect(pricePrecision([0.000001234])).toBe(9);
   });
+  it("ignores float32 noise (Yahoo equities get 2 decimals)", () => {
+    expect(pricePrecision([385.19000244, 384.5, 386.12000122])).toBe(2);
+    expect(pricePrecision([1.1238500118, 1.12360002])).toBe(5);
+  });
   it("never goes below 2", () => {
     expect(pricePrecision([1500, 1510])).toBe(2);
   });
@@ -43,8 +51,10 @@ describe("formatPrice", () => {
 describe("formatVolume", () => {
   it.each([
     [12.345, "12.35"],
-    [999, "999.00"],
-    [1_000, "1.00K"],
+    [999, "999"],
+    [1_000, "1K"],
+    [4_200, "4.2K"],
+    [180_000_000, "180M"],
     [12_345, "12.35K"],
     [3_450_000, "3.45M"],
     [7_890_000_000, "7.89B"],
@@ -96,7 +106,7 @@ describe("barLegend", () => {
       h: "13.00",
       l: "10.00",
       c: "10.50",
-      v: "2.50M",
+      v: "2.5M",
       change: { abs: "-0.50", pct: "-4.55%", direction: "down" },
     });
   });
@@ -124,5 +134,40 @@ describe("lastFiniteCloseIndex", () => {
     ];
     expect(lastFiniteCloseIndex(bars)).toBe(0);
     expect(lastFiniteCloseIndex([])).toBe(-1);
+  });
+});
+
+describe("abbreviate", () => {
+  it.each([
+    [0, "0"],
+    [4200, "4.2K"],
+    [180_000_000, "180M"],
+    [1_234_567, "1.23M"],
+    [2_500_000_000, "2.5B"],
+    [-4200, "-4.2K"],
+    [12.5, "12.5"],
+  ])("%d -> %s", (v, out) => expect(abbreviate(v)).toBe(out));
+});
+
+describe("formatIndicatorValue", () => {
+  it("uses the price precision for overlays, never K", () => {
+    expect(formatIndicatorValue(80452.1234, "overlay", 2)).toBe("80452.12");
+    expect(formatIndicatorValue(1.1238512, "overlay", 5)).toBe("1.12385");
+  });
+  it("abbreviates volume and keeps oscillator precision", () => {
+    expect(formatIndicatorValue(1_500_000, "volume", 2)).toBe("1.5M");
+    expect(formatIndicatorValue(47.5678, "oscillator", 5)).toBe("47.57");
+  });
+  it("picks the kind from the instance key", () => {
+    expect(indicatorValueKind("volume#2", false)).toBe("volume");
+    expect(indicatorValueKind("ema_stack", true)).toBe("overlay");
+    expect(indicatorValueKind("rsi", false)).toBe("oscillator");
+  });
+});
+
+describe("hasNoVolume", () => {
+  it("is true for all-zero or null volume", () => {
+    expect(hasNoVolume([{ v: 0 }, { v: null }])).toBe(true);
+    expect(hasNoVolume([{ v: 0 }, { v: 3 }])).toBe(false);
   });
 });

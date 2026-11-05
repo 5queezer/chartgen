@@ -2,6 +2,7 @@
 // No DOM or klinecharts imports so it stays trivially unit-testable.
 
 import type { SeriesPayload } from "../types/responses";
+import { keyName } from "./instances";
 
 type SeriesBar = SeriesPayload["bars"][number];
 
@@ -9,15 +10,23 @@ const MAX_PRECISION = 12;
 const MIN_PRECISION = 2;
 const SAMPLE_BARS = 50;
 
+/** Relative error below which a decimal expansion counts as exact (float32 noise is ~6e-8). */
+const REL_TOLERANCE = 2e-7;
+
 /**
- * Decimals needed to print `v` exactly, but at least enough for three
+ * Decimals needed to print `v`, ignoring float noise (Yahoo sends float32,
+ * so 385.19 arrives as 385.19000244), but at least enough for three
  * significant digits so tiny prices (1.234e-9) do not collapse to 0.00.
  * Capped at MAX_PRECISION.
  */
 function decimalsOf(v: number): number {
-  const s = v.toFixed(MAX_PRECISION).replace(/0+$/, "");
-  const dot = s.indexOf(".");
-  const fixed = dot === -1 ? 0 : s.length - dot - 1;
+  let fixed = MAX_PRECISION;
+  for (let d = 0; d <= MAX_PRECISION; d++) {
+    if (Math.abs(Number(v.toFixed(d)) - v) <= Math.abs(v) * REL_TOLERANCE) {
+      fixed = d;
+      break;
+    }
+  }
   const significant = v === 0 ? 0 : -Math.floor(Math.log10(Math.abs(v))) + 3;
   return Math.min(MAX_PRECISION, Math.max(fixed, significant));
 }
@@ -50,14 +59,57 @@ export function formatPrice(v: number | null, precision: number): string {
   return v === null || !Number.isFinite(v) ? "—" : v.toFixed(precision);
 }
 
-/** Compact volume: 1.23K / 4.56M / 7.89B, two decimals, plain below 1000. */
-export function formatVolume(v: number | null): string {
-  if (v === null || !Number.isFinite(v)) return "—";
+/**
+ * Compact K/M/B number: at most two decimals, no trailing zeros, so
+ * 180000000 reads "180M" and 4200 reads "4.2K". Plain below 1000.
+ */
+export function abbreviate(v: number): string {
   const abs = Math.abs(v);
-  if (abs >= 1e9) return `${(v / 1e9).toFixed(2)}B`;
-  if (abs >= 1e6) return `${(v / 1e6).toFixed(2)}M`;
-  if (abs >= 1e3) return `${(v / 1e3).toFixed(2)}K`;
-  return v.toFixed(2);
+  const trim = (n: number) => String(Number(n.toFixed(2)));
+  if (abs >= 1e9) return `${trim(v / 1e9)}B`;
+  if (abs >= 1e6) return `${trim(v / 1e6)}M`;
+  if (abs >= 1e3) return `${trim(v / 1e3)}K`;
+  return trim(v);
+}
+
+/** Compact volume: 1.23K / 4.56M / 7.89B, at most two decimals. */
+export function formatVolume(v: number | null): string {
+  return v === null || !Number.isFinite(v) ? "—" : abbreviate(v);
+}
+
+/** True when `bars` carry no traded volume at all (Yahoo FX): all 0 or null. */
+export function hasNoVolume(bars: ReadonlyArray<{ v: number | null }>): boolean {
+  return bars.every((b) => b.v === null || b.v === 0 || !Number.isFinite(b.v));
+}
+
+/** Indicators whose values are traded quantities, not prices or bounded oscillators. */
+const VOLUME_INDICATORS = new Set(["volume", "obv", "ad", "vpt", "nvi", "pvi"]);
+
+export function isVolumeIndicator(name: string): boolean {
+  return VOLUME_INDICATORS.has(name.toLowerCase());
+}
+
+export type IndicatorValueKind = "overlay" | "volume" | "oscillator";
+
+/** Value kind of the indicator with instance key `key`. */
+export function indicatorValueKind(key: string, isOverlay: boolean): IndicatorValueKind {
+  if (isVolumeIndicator(keyName(key))) return "volume";
+  return isOverlay ? "overlay" : "oscillator";
+}
+
+/**
+ * Legend text of one indicator value. Overlays are in price units and share
+ * the symbol's price precision; volume-type indicators use K/M/B; the rest
+ * (oscillators) keep their own precision.
+ */
+export function formatIndicatorValue(
+  v: number | null,
+  kind: IndicatorValueKind,
+  pricePrec: number,
+): string {
+  if (kind === "overlay") return formatPrice(v, pricePrec);
+  if (kind === "volume") return formatVolume(v);
+  return formatValue(v);
 }
 
 export type Direction = "up" | "down" | "flat";

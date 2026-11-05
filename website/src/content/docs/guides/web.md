@@ -103,7 +103,13 @@ Symbol, timeframe, chart type, price-scale mode, theme, time zone and recent sym
   interval, **O H L C**, the change versus the previous close (absolute
   and percent, green for up, red for down) and the volume (compact
   `K`/`M`/`B`). It follows the crosshair bar while you hover and shows the
-  last bar otherwise. Price precision is derived from the data.
+  last bar otherwise. Price precision is derived from the data (float noise
+  such as `385.19000244` is ignored, so equities get two decimals). Overlay
+  indicator values in the legends and the Data Window use the same price
+  precision; oscillators keep their own, and volume-type values and axes use
+  `K`/`M`/`B` with at most two decimals. Legend rows have a translucent
+  background, and light plot colors are darkened on a light theme so the
+  text stays readable.
 - **Bar-close countdown** — a badge under the last-price label on the price
   axis counts down to the close of the current bar (`MM:SS`, `HH:MM:SS`, or
   `Nd HH:MM` for long intervals) and ticks every second. It is shown only
@@ -164,6 +170,7 @@ date** button, a clock and the time zone selector.
   axis labels, the crosshair time label, the time in the price legend and
   the clock beside it (shown with its UTC offset). The choice persists
   across reloads and is part of a named layout. The default is Local.
+  Daily, weekly and monthly bars show the date alone in the crosshair label.
   The series payload carries no exchange, so **Exchange** is a heuristic
   on the symbol: crypto and `=X` pairs are UTC, `.DE` is Europe/Berlin,
   `.L` Europe/London, `.TO` America/Toronto, and everything else is
@@ -831,6 +838,9 @@ the chart falls back to its own rotating palette.
 
 A fresh install starts with the EMA stack, Volume and RSI, like a new
 TradingView chart with its Volume pane. Stored sets are never changed.
+Panes follow the stored indicator order, also after a reload. Symbols with no
+traded volume at all (Yahoo FX pairs) show no Volume pane; the indicator stays
+in the set.
 
 The set, parameters and hidden state persist in `localStorage`
 ([ADR-0013](/chartgen/decisions/0013-indicator-visibility-and-instances/)),

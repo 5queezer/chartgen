@@ -37,8 +37,20 @@ describe("dataWindowRows", () => {
     expect(d.symbol).toBe("BTCUSDT");
     expect(d.interval).toBe("1h");
     expect(d.time).toBe("2026-11-03 13:00");
-    expect(d.bar).toMatchObject({ o: "11.00", h: "14.00", l: "10.00", c: "13.00", v: "2.50M" });
+    expect(d.bar).toMatchObject({ o: "11.00", h: "14.00", l: "10.00", c: "13.00", v: "2.5M" });
     expect(d.bar?.change).toMatchObject({ abs: "+2.00", pct: "+18.18%" });
+  });
+
+  it("formats overlays with the price precision, not K", () => {
+    const fx: SeriesPayload = {
+      ...series,
+      bars: series.bars.map((b, i) => ({ ...b, o: 1.1236, h: 1.1239, l: 1.1233, c: 1.12385 + i * 0.00001, v: 0 })),
+      indicators: {
+        ema: { label: "EMA", is_overlay: true, lines: [{ index: 0, label: "EMA 8", values: [1.12, 1.1234, 1.12345] }] },
+      },
+    };
+    const d = dataWindowRows(fx, 2, {}, [], opts);
+    expect(d.indicators[0]!.rows[0]!.value).toBe("1.12345");
   });
 
   it("falls back to the last bar without a crosshair or with a stale index", () => {

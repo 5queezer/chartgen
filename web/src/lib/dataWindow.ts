@@ -8,7 +8,8 @@ import { compareReading, formatPct } from "./compare";
 import {
   barLegend,
   formatPrice,
-  formatValue,
+  formatIndicatorValue,
+  indicatorValueKind,
   lastFiniteCloseIndex,
   pricePrecision,
   type BarLegend,
@@ -82,6 +83,7 @@ export function dataWindowRows(
   const indicators: DataWindowSection[] = [];
   for (const [key, ind] of Object.entries(series.indicators)) {
     if (opts.visible && !opts.visible.has(key)) continue;
+    const kind = indicatorValueKind(key, ind.is_overlay);
     const rows = plotsOf(ind, (n) => opts.colorAt(key, n)).flatMap((p) => {
       if (!resolvePlot(p, styles[key]).visible) return [];
       const plot = p.kind === "line" ? ind.lines?.[p.index] : ind.histogram?.[p.index];
@@ -94,7 +96,7 @@ export function dataWindowRows(
       return [
         {
           label: p.label,
-          value: formatValue(value),
+          value: formatIndicatorValue(value, kind, precision),
           color: plotColorAt(p, ind, styles[key], at),
         },
       ];

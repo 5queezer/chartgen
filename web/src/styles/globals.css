@@ -80,6 +80,11 @@ body {
   color: var(--color-fg);
   pointer-events: none;
   white-space: nowrap;
+  /* Translucent chart background keeps the text readable over plots, the
+   * volume profile and its POC line. */
+  background: color-mix(in srgb, var(--legend-bg, var(--color-bg)) 72%, transparent);
+  border-radius: 3px;
+  padding: 1px 4px;
 }
 
 .pane-header-label {
