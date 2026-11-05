@@ -35,7 +35,7 @@ export interface GenerateChartInput {
    */
   end_time?: number;
   /**
-   * Output format. 'png' (default) returns a rendered chart image. 'summary' returns a compact JSON summary (OHLCV stats, last indicator values, signals, divergences, levels) — typically 10-50x fewer tokens than a PNG and ideal for automated analysis without vision. 'both' returns the PNG plus the JSON summary. 'series' returns a full per-bar time-series JSON payload (every OHLCV bar plus 1:1 aligned indicator value arrays with NaN→null for pre-warmup, signals with bar timestamps, hlines, and y_range, plus has_more=true when older history may exist) — ideal for downstream numeric computation.
+   * Output format. 'png' (default) returns a rendered chart image. 'summary' returns a compact JSON summary (OHLCV stats, last indicator values, signals, divergences, levels) — typically 10-50x fewer tokens than a PNG and ideal for automated analysis without vision. 'both' returns the PNG plus the JSON summary. 'series' returns a full per-bar time-series JSON payload (every OHLCV bar plus 1:1 aligned indicator value arrays with NaN→null for pre-warmup, signals with bar timestamps, hlines, and y_range, a per-indicator future block with the values plotted past the last bar (Ichimoku cloud), plus has_more=true when older history may exist) — ideal for downstream numeric computation.
    */
   format?: "png" | "summary" | "both" | "series";
   /**

@@ -101,6 +101,18 @@ pub struct PanelResult {
     pub is_overlay: bool,
 }
 
+/// Values an indicator plots past the last bar (ADR-0033), e.g. the
+/// Ichimoku cloud's leading spans. `(i, values)` in `lines` continues
+/// `PanelResult::lines[i]` and `(i, y1, y2)` in `fills` continues
+/// `PanelResult::fills[i]`; every vector holds `bars` values, one per bar
+/// after the last one.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Projection {
+    pub bars: usize,
+    pub lines: Vec<(usize, Vec<f64>)>,
+    pub fills: Vec<(usize, Vec<f64>, Vec<f64>)>,
+}
+
 /// A failed indicator computation (only user scripts fail, ADR-0025):
 /// the pipeline `step` (`parse`, `static`, `presence`, `dry_run`,
 /// `runtime`), the 1-based source line when known, and a message.
@@ -174,6 +186,12 @@ pub trait Indicator {
     /// raised to this, up to its cap (ADR-0032). 0: no extra need.
     fn warmup_bars(&self) -> usize {
         0
+    }
+
+    /// What `compute` over `data` plots past the last bar (ADR-0033);
+    /// `None` for indicators that plot nothing there.
+    fn projection(&self, _data: &OhlcvData) -> Option<Projection> {
+        None
     }
 }
 

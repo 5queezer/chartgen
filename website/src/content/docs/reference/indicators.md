@@ -54,8 +54,10 @@ the community composites and user scripts keep the `warmup` you send. Known diff
   chart bars. Every period is drawn (TradingView shows the last 15), and only
   P, R1, S1, R2 and S2.
 - **Ichimoku.** The leading spans are shifted `displacement - 1` bars forward,
-  and the lagging span the same distance back. The cloud projected past the
-  last bar is not drawn yet.
+  and the lagging span the same distance back. The web chart draws the cloud
+  `displacement - 1` bars past the last bar, from the series `future` block
+  ([ADR-0033](/chartgen/decisions/0033-indicator-projection-past-last-bar/));
+  the PNG chart ends at the last bar.
 - **Intrabar data.** The volume profiles (`volume_profile`, `session_vp`,
   `hvn_lvn`, `naked_poc`, `tpo`) and `cvd` spread each bar's volume over its
   range. TradingView builds them from lower-timeframe data, so they are

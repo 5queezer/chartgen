@@ -85,8 +85,10 @@ fn main() {
          \x20 chart bars. Every period is drawn (TradingView shows the last 15), and only\n\
          \x20 P, R1, S1, R2 and S2.\n\
          - **Ichimoku.** The leading spans are shifted `displacement - 1` bars forward,\n\
-         \x20 and the lagging span the same distance back. The cloud projected past the\n\
-         \x20 last bar is not drawn yet.\n\
+         \x20 and the lagging span the same distance back. The web chart draws the cloud\n\
+         \x20 `displacement - 1` bars past the last bar, from the series `future` block\n\
+         \x20 ([ADR-0033](/chartgen/decisions/0033-indicator-projection-past-last-bar/));\n\
+         \x20 the PNG chart ends at the last bar.\n\
          - **Intrabar data.** The volume profiles (`volume_profile`, `session_vp`,\n\
          \x20 `hvn_lvn`, `naked_poc`, `tpo`) and `cvd` spread each bar's volume over its\n\
          \x20 range. TradingView builds them from lower-timeframe data, so they are\n\

@@ -1571,6 +1571,31 @@ impl Default for Ichimoku {
     }
 }
 
+impl Ichimoku {
+    /// Bars the leading spans are drawn ahead: Pine's `displacement - 1`.
+    fn lead(&self) -> usize {
+        self.displacement.saturating_sub(1)
+    }
+
+    /// Tenkan, Kijun and the unshifted Senkou A / B of every bar.
+    fn spans(&self, data: &OhlcvData) -> [Vec<f64>; 4] {
+        let highs = data.highs();
+        let lows = data.lows();
+        let mid = |len: usize| -> Vec<f64> {
+            let (hh, ll) = (highest(&highs, len), lowest(&lows, len));
+            hh.iter().zip(&ll).map(|(h, l)| (h + l) / 2.0).collect()
+        };
+        let (tenkan, kijun) = (mid(self.tenkan), mid(self.kijun));
+        let senkou_a = tenkan
+            .iter()
+            .zip(&kijun)
+            .map(|(t, k)| (t + k) / 2.0)
+            .collect();
+        let senkou_b = mid(self.senkou_b);
+        [tenkan, kijun, senkou_a, senkou_b]
+    }
+}
+
 impl Indicator for Ichimoku {
     fn name(&self) -> &str {
         "Ichimoku"
@@ -1605,42 +1630,39 @@ impl Indicator for Ichimoku {
         }
     }
 
-    fn compute(&self, data: &OhlcvData) -> PanelResult {
-        let highs = data.highs();
-        let lows = data.lows();
-        let n = data.len();
+    fn warmup_bars(&self) -> usize {
+        // The leading spans at a bar come from the windows `lead` bars back.
+        self.tenkan.max(self.kijun).max(self.senkou_b) + self.lead()
+    }
 
-        let hh_tenkan = highest(&highs, self.tenkan);
-        let ll_tenkan = lowest(&lows, self.tenkan);
-        let hh_kijun = highest(&highs, self.kijun);
-        let ll_kijun = lowest(&lows, self.kijun);
-        let hh_senkou_b = highest(&highs, self.senkou_b);
-        let ll_senkou_b = lowest(&lows, self.senkou_b);
-
-        let mut tenkan_sen = vec![f64::NAN; n];
-        let mut kijun_sen = vec![f64::NAN; n];
-        let mut senkou_a = vec![f64::NAN; n];
-        let mut senkou_b = vec![f64::NAN; n];
-
-        for i in 0..n {
-            if !hh_tenkan[i].is_nan() && !ll_tenkan[i].is_nan() {
-                tenkan_sen[i] = (hh_tenkan[i] + ll_tenkan[i]) / 2.0;
-            }
-            if !hh_kijun[i].is_nan() && !ll_kijun[i].is_nan() {
-                kijun_sen[i] = (hh_kijun[i] + ll_kijun[i]) / 2.0;
-            }
-            if !tenkan_sen[i].is_nan() && !kijun_sen[i].is_nan() {
-                senkou_a[i] = (tenkan_sen[i] + kijun_sen[i]) / 2.0;
-            }
-            if !hh_senkou_b[i].is_nan() && !ll_senkou_b[i].is_nan() {
-                senkou_b[i] = (hh_senkou_b[i] + ll_senkou_b[i]) / 2.0;
-            }
+    fn projection(&self, data: &OhlcvData) -> Option<Projection> {
+        let off = self.lead();
+        if off == 0 || data.bars.is_empty() {
+            return None;
         }
+        // Future bar k (index n + k) shows the spans of bar n + k - off.
+        let [_, _, a, b] = self.spans(data);
+        let n = data.len();
+        let tail = |v: &[f64]| -> Vec<f64> {
+            (0..off)
+                .map(|k| (n + k).checked_sub(off).map_or(f64::NAN, |j| v[j]))
+                .collect()
+        };
+        let (a, b) = (tail(&a), tail(&b));
+        Some(Projection {
+            bars: off,
+            lines: vec![(2, a.clone()), (3, b.clone())],
+            fills: vec![(0, a, b)],
+        })
+    }
+
+    fn compute(&self, data: &OhlcvData) -> PanelResult {
+        let [tenkan_sen, kijun_sen, senkou_a, senkou_b] = self.spans(data);
         // TV plots the leading spans with `offset = displacement - 1`: bar i
         // shows the value computed displacement - 1 bars earlier. Values
-        // projected past the last bar have no x position yet and are dropped.
+        // past the last bar are `projection` (ADR-0033).
         // The lagging span is the close with `offset = -displacement + 1`.
-        let off = self.displacement.saturating_sub(1) as i64;
+        let off = self.lead() as i64;
         let senkou_a = super::pine::shift(&senkou_a, off);
         let senkou_b = super::pine::shift(&senkou_b, off);
         let lagging = super::pine::shift(&data.closes(), -off);
@@ -2658,6 +2680,49 @@ mod tests {
         let r = ind.compute(&closes(&[1.0, 2.0, 3.0, 4.0]));
         eq(&r.lines[2].y, &[NAN, NAN, NAN, 1.75]);
         eq(&r.lines[4].y, &[3.0, 4.0, NAN, NAN]);
+    }
+
+    #[test]
+    fn ichimoku_projection_continues_the_shifted_spans() {
+        // ADR-0033: the leading spans shifted over n + off bars are the
+        // plotted values followed by the projection.
+        let ind = Ichimoku::default();
+        let data = sample_data(120);
+        let (n, off) = (data.len(), 25);
+        let r = ind.compute(&data);
+        let p = ind.projection(&data).unwrap();
+        assert_eq!(p.bars, off);
+        let [_, _, a, b] = ind.spans(&data);
+        let full = |v: &[f64]| {
+            let mut ext = v.to_vec();
+            ext.extend(vec![NAN; off]);
+            crate::indicators::pine::shift(&ext, off as i64)
+        };
+        let (fa, fb) = (full(&a), full(&b));
+        eq(&r.lines[2].y, &fa[..n]);
+        eq(&r.lines[3].y, &fb[..n]);
+        assert_eq!(p.lines.len(), 2);
+        assert_eq!((p.lines[0].0, p.lines[1].0), (2, 3));
+        eq(&p.lines[0].1, &fa[n..]);
+        eq(&p.lines[1].1, &fb[n..]);
+        assert_eq!(p.fills.len(), 1);
+        assert_eq!(p.fills[0].0, 0);
+        eq(&p.fills[0].1, &fa[n..]);
+        eq(&p.fills[0].2, &fb[n..]);
+        assert!(p.lines[0].1.iter().all(|v| v.is_finite()));
+        // displacement 1 draws nothing ahead; fewer bars than the lead pad
+        // the start with NaN.
+        let mut d1 = Ichimoku::default();
+        d1.configure(&json!({"displacement": 1}));
+        assert!(d1.projection(&data).is_none());
+        let short = Ichimoku {
+            tenkan: 1,
+            kijun: 1,
+            senkou_b: 1,
+            displacement: 4,
+        };
+        let p = short.projection(&closes(&[1.0, 2.0])).unwrap();
+        eq(&p.lines[0].1, &[NAN, 1.0, 2.0]);
     }
 
     #[test]
