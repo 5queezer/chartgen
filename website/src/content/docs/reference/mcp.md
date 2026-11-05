@@ -57,8 +57,9 @@ one gets a freshly minted id, which spec-compliant clients then send on every
 request, including `GET /mcp`. chartgen's tool calls are stateless (auth is
 per-request via the Bearer token). The only state keyed on the session is
 chart push: `subscribe_chart` pushes over the SSE stream opened with the same
-token and session id. Notifications such as `notifications/initialized` are
-answered with `202 Accepted`.
+token and session id. A POST made only of notifications or responses (one, or a
+batch), such as `notifications/initialized` or `notifications/cancelled`, is
+answered with `202 Accepted` and no body.
 
 `POST /` and `POST /message` are retained as aliases of `POST /mcp`, and
 `GET /sse` is retained as an alias of `GET /mcp`, for backwards compatibility
@@ -490,9 +491,10 @@ instead of once per poll. See
 only (stdio returns an error); works without `--trade`.
 
 `subscribe_chart` takes the chart's `generate_chart` arguments: `ticker`
-(required), `timeframe` (default `4h`), `indicators`, `chart_style` and
-`warmup` (default 0, max 1000). Validation and error messages are the same
-as for `generate_chart`. It returns:
+(required, 2-20 letters or digits), `timeframe` (default `4h`),
+`indicators` (at most 10), `chart_style` and `warmup` (default 0, max
+1000). Validation and error messages are otherwise the same as for
+`generate_chart`. It returns:
 
 ```json
 { "subscription_id": "cs-0b7f…" }
@@ -519,14 +521,20 @@ forming bar, with every indicator recomputed. Merge it like a polled tail.
   synthetic feed ticks every ~500 ms.
 - **Cadence.** The server follows Binance's kline stream (every 2 s) and
   its aggTrade stream (each trade), and pushes at most 4 tails per second
-  per chart. The first tail is pushed right after subscribing.
+  per chart (2 per second when `warmup` is above 300). The first tail is
+  pushed right after subscribing.
 - **Sharing.** Subscriptions with equal arguments share one rolling window
   and one recompute. Every chart of a symbol and interval shares one Binance
   WebSocket.
-- **Limits.** At most 4 subscriptions per token and 64 per server. Over a
-  limit, or without an open SSE stream for the session, the call fails.
-- **Lifetime.** A subscription ends with `unsubscribe_chart`, or when its
-  SSE stream closes. A WebSocket closes when its last chart goes.
+- **Limits.** At most 4 subscriptions per token, 8 per client address
+  (the TCP peer; behind a reverse proxy that is the proxy) and 64 per
+  server, and 10 `subscribe_chart` calls per token per minute. Over a
+  limit the call fails with an error starting with `push limit reached`;
+  poll that chart instead. Without an open SSE stream for the session it
+  fails too, and can be retried once the stream is open.
+- **Lifetime.** A subscription ends with `unsubscribe_chart`, when its
+  SSE stream closes, or when the stream falls 256 frames behind (the stream
+  is then unlinked). A WebSocket closes 30 s after its last chart goes.
 
 `unsubscribe_chart` takes `subscription_id` and returns
 `{ "unsubscribed": true }`, or `false` if the subscription was already gone

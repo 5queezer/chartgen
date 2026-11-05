@@ -311,13 +311,13 @@ pub fn tools_list_result() -> Value {
             },
             {
                 "name": "subscribe_chart",
-                "description": "Push live updates of a chart over the caller's SSE stream (GET /mcp with the same token and Mcp-Session-Id). Each update is a notifications/chart_tick notification with params {subscription_id, series}, where series is exactly the generate_chart(format=series, bars=2, warmup) tail for these arguments: the last closed bar and the forming bar with indicators recomputed. Pushes follow the market (sub-second for active Binance symbols), at most 4 per second. Only Binance symbols are pushable; any other symbol returns an error starting with 'not pushable', and the client should poll generate_chart instead. At most 4 subscriptions per token. A subscription ends with unsubscribe_chart or when its SSE stream closes. HTTP transport only; works without --trade.",
+                "description": "Push live updates of a chart over the caller's SSE stream (GET /mcp with the same token and Mcp-Session-Id). Each update is a notifications/chart_tick notification with params {subscription_id, series}, where series is exactly the generate_chart(format=series, bars=2, warmup) tail for these arguments: the last closed bar and the forming bar with indicators recomputed. Pushes follow the market (sub-second for active Binance symbols), at most 4 per second (2 when warmup > 300). Only Binance symbols are pushable; any other symbol returns an error starting with 'not pushable', and the client should poll generate_chart instead. Limits (4 subscriptions per token, 8 per client address, 64 per server, 10 subscribe_chart calls per token per minute, 10 indicators) fail with an error starting with 'push limit reached': poll that chart instead. A subscription ends with unsubscribe_chart or when its SSE stream closes. HTTP transport only; works without --trade.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "ticker": {
                             "type": "string",
-                            "description": "Binance symbol, e.g. BTCUSDT."
+                            "description": "Binance symbol, 2-20 letters or digits, e.g. BTCUSDT."
                         },
                         "timeframe": {
                             "type": "string",
@@ -339,7 +339,7 @@ pub fn tools_list_result() -> Value {
                                     }
                                 ]
                             },
-                            "description": "Indicators, as for generate_chart.",
+                            "description": "Indicators, as for generate_chart; at most 10.",
                             "default": ["ema_stack", "cipher_b", "macd"]
                         },
                         "chart_style": {

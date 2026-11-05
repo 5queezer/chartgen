@@ -187,7 +187,10 @@ same arguments and `warmup: 300`. For a Binance symbol the server then
 pushes the same two-bar tail over the MCP SSE stream (`GET /mcp`) whenever
 the market moves, at most 4 times a second, and the app merges it exactly
 like a polled tail. Polling stops while pushes arrive. The server answers
-"not pushable" for other symbols, which simply keep polling.
+"not pushable" for other symbols, which simply keep polling, and "push
+limit reached" when a server limit (subscriptions per token or address,
+subscribes per minute, at most 10 indicators) refuses the chart, which
+then polls until the next chart change.
 
 - **Fallback.** No push for 6 s (three times the 2 s Binance kline
   cadence), or a dropped SSE stream, which ends the subscription on the
@@ -201,7 +204,8 @@ like a polled tail. Polling stops while pushes arrive. The server answers
   costs the server nothing.
 - **Gaps.** A pushed tail that does not line up with the chart (bars
   missed while the stream stalled) triggers one poll, which catches up or
-  reloads as described below.
+  reloads as described below. Any other poll that lands while pushes are
+  on is dropped, so it cannot put an older value on the forming candle.
 
 | | 24/7 symbols (Binance rule) | Other symbols (Yahoo) |
 |---|---|---|

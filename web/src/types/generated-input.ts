@@ -186,7 +186,7 @@ export interface SubscribeChartInput {
    */
   chart_style?: "candles" | "heikin_ashi";
   /**
-   * Indicators, as for generate_chart.
+   * Indicators, as for generate_chart; at most 10.
    */
   indicators?: (
     | string
@@ -196,7 +196,7 @@ export interface SubscribeChartInput {
       }
   )[];
   /**
-   * Binance symbol, e.g. BTCUSDT.
+   * Binance symbol, 2-20 letters or digits, e.g. BTCUSDT.
    */
   ticker: string;
   /**
