@@ -4,12 +4,17 @@
 
 export const TIMEFRAME_OPTIONS = [
   "1m",
+  "3m",
   "5m",
   "15m",
   "30m",
   "1h",
+  "2h",
   "4h",
+  "6h",
+  "12h",
   "1d",
+  "3d",
   "1wk",
   "1mo",
 ] as const;
@@ -28,18 +33,32 @@ export const FAVOURITE_TIMEFRAMES: readonly Timeframe[] = [
 
 const LABELS: Record<Timeframe, string> = {
   "1m": "1m",
+  "3m": "3m",
   "5m": "5m",
   "15m": "15m",
   "30m": "30m",
   "1h": "1h",
+  "2h": "2h",
   "4h": "4h",
+  "6h": "6h",
+  "12h": "12h",
   "1d": "1D",
+  "3d": "3D",
   "1wk": "1W",
   "1mo": "1M",
 };
 
 export function timeframeLabel(tf: Timeframe): string {
   return LABELS[tf];
+}
+
+export type TimeframeGroup = "Minutes" | "Hours" | "Days";
+
+/** Menu section of a timeframe, as TradingView groups its interval list. */
+export function timeframeGroup(tf: Timeframe): TimeframeGroup {
+  if (tf.endsWith("m")) return "Minutes";
+  if (tf.endsWith("h")) return "Hours";
+  return "Days";
 }
 
 export function isTimeframe(x: unknown): x is Timeframe {
@@ -56,19 +75,24 @@ const MINUTES_PER_UNIT = {
 
 const BY_MINUTES = new Map<number, Timeframe>([
   [1, "1m"],
+  [3, "3m"],
   [5, "5m"],
   [15, "15m"],
   [30, "30m"],
   [60, "1h"],
+  [120, "2h"],
   [240, "4h"],
+  [360, "6h"],
+  [720, "12h"],
   [1440, "1d"],
+  [4320, "3d"],
   [10080, "1wk"],
   [43200, "1mo"],
 ]);
 
 /**
  * Parse what the user typed into the timeframe-entry popup. A bare
- * number means minutes (TradingView convention: `60` = 1h, `240` = 4h);
+ * number means minutes (TradingView convention: `60` = 1h, `120` = 2h);
  * an optional unit m/h/d/w follows (case-insensitive), except that an
  * uppercase `M` (or `mo`) means month, as in TradingView. A lone `D`,
  * `W` or `M` means one day / week / month. Returns null for anything

@@ -7,13 +7,13 @@ const at = (y: number, mo: number, d: number, h = 0, mi = 0) =>
   Date.UTC(y, mo - 1, d, h, mi);
 
 describe("RANGE_TIMEFRAME", () => {
-  it("uses TradingView's intervals (6M is 4h, no 2h)", () => {
+  it("uses TradingView's intervals (6M is 2h)", () => {
     expect(RANGE_TIMEFRAME).toEqual({
       "1D": "1m",
       "5D": "5m",
       "1M": "30m",
       "3M": "1h",
-      "6M": "4h",
+      "6M": "2h",
       YTD: "1d",
       "1Y": "1d",
       "5Y": "1wk",

@@ -23,12 +23,12 @@ Status legend:
 | Feature | TradingView | chartgen | Notes / links |
 |---|---|---|---|
 | Symbol search | ✅ | ✅ | Binance spot pairs and Yahoo instruments, type tabs, recent symbols. [Toolbar](/chartgen/guides/web/#toolbar), [`search_symbols`](/chartgen/reference/mcp/#search_symbols) |
-| Timeframe buttons and keyboard entry | ✅ | ◐ | 1m, 5m, 15m, 30m, 1h, 4h, 1D, 1W, 1M; typing a digit opens a popup. No 2h and no custom or seconds intervals. [Keyboard shortcuts](/chartgen/guides/web/#keyboard-shortcuts) |
+| Timeframe buttons and keyboard entry | ✅ | ◐ | A fixed set of 14 intervals (1m, 3m, 5m, 15m, 30m, 1h, 2h, 4h, 6h, 12h, 1D, 3D, 1W, 1M); typing a digit or **Custom interval...** opens a popup that accepts any of them (`2h`, `120`, `3D`). No arbitrary multiples (7m, 2D) or seconds. [Keyboard shortcuts](/chartgen/guides/web/#keyboard-shortcuts) |
 | Price legend (OHLC, change, volume) | ✅ | ✅ | Follows the crosshair. [Chart conveniences](/chartgen/guides/web/#chart-conveniences) |
 | Bar-close countdown | ✅ | ◐ | Only for 24/7 symbols (the Binance rule). Hidden for stocks, FX and futures, because the session close cannot be derived from the interval. [Chart conveniences](/chartgen/guides/web/#chart-conveniences) |
 | %, log and auto price scale | ✅ | ✅ | [Chart conveniences](/chartgen/guides/web/#chart-conveniences) |
 | Inverted scale, lock scale to bars | ✅ | ❌ | Not in the web guide. |
-| Date-range buttons | ✅ | ◐ | `1D 5D 1M 3M 6M YTD 1Y 5Y All`. 6M uses 4h because there is no 2h. A range is capped by the history limit. [Bottom bar](/chartgen/guides/web/#bottom-bar) |
+| Date-range buttons | ✅ | ✅ | `1D 5D 1M 3M 6M YTD 1Y 5Y All`. Each range uses TradingView's interval (6M is 2h). A range is capped by the history limit. [Bottom bar](/chartgen/guides/web/#bottom-bar) |
 | Time zone selector and clock | ✅ | ◐ | UTC, Exchange, Local and common IANA zones. "Exchange" is a heuristic on the ticker suffix. [Bottom bar](/chartgen/guides/web/#bottom-bar) |
 | Go to date | ✅ | ✅ | `Alt+G`. [Bottom bar](/chartgen/guides/web/#bottom-bar) |
 | Scroll, zoom, keyboard navigation | ✅ | ✅ | Arrow keys, `Home`/`End`, `Alt+R` reset. [Keyboard shortcuts](/chartgen/guides/web/#keyboard-shortcuts) |

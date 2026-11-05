@@ -38,7 +38,10 @@ chart stays on screen while the new one loads. There is no Load button; if a loa
   or `FDUSD` are fetched from Binance, everything else from Yahoo
   Finance. The watchlist **+** button opens the same dialog.
 - **Timeframe** — one-click buttons for 1m, 5m, 15m, 1h, 4h, 1D and 1W,
-  with the active one highlighted; the dropdown holds the rest (30m, 1M).
+  with the active one highlighted. The dropdown holds the rest, grouped as
+  on TradingView: Minutes (3m, 30m), Hours (2h, 6h, 12h) and Days (3D, 1M),
+  and ends with **Custom interval...**, which opens the same popup as the
+  keyboard entry (see [Keyboard shortcuts](#keyboard-shortcuts)).
 - **Chart type** — Candles, Hollow candles (only up candles hollow), Bars (OHLC), Line, Line with markers, Step line, Area, Baseline, Columns, High-low, Heikin Ashi. Heikin Ashi is computed on the server (the web app sends `chart_style: "heikin_ashi"` with every load, tail poll and history page), so the legend shows Heikin Ashi OHLC values and indicators are calculated on them, as on TradingView. Switching to or from it reloads the chart. The other types are drawn in the browser from the same bars, so switching between them needs no reload, and the legend keeps showing the bar's OHLC:
   - **Line with markers** — the close line with a dot on every bar.
   - **Step line** — the closes joined by horizontal-then-vertical steps.
@@ -115,10 +118,9 @@ date** button, a clock and the time zone selector.
   | 5D | 5m | 1Y | 1d |
   | 1M | 30m | 5Y | 1wk |
   | 3M | 1h | All | 1mo |
-  | 6M | 4h | | |
+  | 6M | 2h | | |
 
-  TradingView uses 2h for 6M; chartgen has no 2h timeframe. The range ends
-  at the newest bar. Month ranges are calendar months, and YTD starts on
+  The range ends at the newest bar. Month ranges are calendar months, and YTD starts on
   1 January 00:00 in the selected time zone. A range with more bars than
   pixels is shown at the minimum bar width, so only its newest part is
   visible. Paging respects the history limit (see below); "All" loads as
@@ -310,11 +312,13 @@ while typing in a field or while a dialog or menu is open.
 | `Shift+↓` | Bar replay: play / pause |
 | `Esc` | Bar replay: jump to real time |
 
-The timeframe popup accepts a number of minutes (`5`, `15`, `60`, `240`)
-or a number with a unit `m`, `h`, `d`, `w` (`1h`, `4H`, `1D`); an
-uppercase `M` means month (`1M`), lowercase `m` minutes. A lone `D`, `W`
-or `M` means one day, week or month. Only timeframes the backend serves are
-accepted.
+The timeframe popup accepts a number of minutes (`5`, `15`, `60`, `120`,
+`240`) or a number with a unit `m`, `h`, `d`, `w` (`1h`, `2h`, `4H`, `3D`);
+an uppercase `M` means month (`1M`), lowercase `m` minutes. A lone `D`, `W`
+or `M` means one day, week or month. `1`, `2`, `0` then `Enter` selects 2h.
+The supported set is 1m, 3m, 5m, 15m, 30m, 1h, 2h, 4h, 6h, 12h, 1D, 3D, 1W
+and 1M, for Binance and Yahoo symbols alike; anything else (7m, 2D, seconds)
+is rejected and the field turns red.
 
 ## Drawing tools
 

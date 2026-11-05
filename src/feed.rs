@@ -584,6 +584,15 @@ mod tests {
             Some(1_735_689_600_000)
         );
         assert_eq!(next_open_ms(0, "1h"), Some(3_600_000));
+        for (tf, secs) in [
+            ("3m", 180),
+            ("2h", 7_200),
+            ("6h", 21_600),
+            ("12h", 43_200),
+            ("3d", 259_200),
+        ] {
+            assert_eq!(next_open_ms(0, tf), Some(secs * 1000), "{tf}");
+        }
     }
 
     #[test]

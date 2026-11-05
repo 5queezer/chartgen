@@ -335,14 +335,34 @@ once `warmup` covers their lookback.
 
 Upstream limits: Binance requests are paginated at 1000 bars per call.
 Yahoo intraday history ends after about 30 days for 1m, 60 days for other
-sub-hour intervals, and 730 days for 1h/4h. Yahoo has no native 4h, so
-chartgen builds it from 1h bars. For exchange-traded symbols the buckets
-are anchored at each trading day's session open, like TradingView: a US
-stock gets 09:30–13:30 and 13:30–16:00 ET, the second one shorter. Each
-bucket's `t` is its first 1h bar. Crypto (`BTC-USD`) and FX (`EURUSD=X`)
-trade around the clock and use the UTC 4h grid instead. Each upstream
-request times out after 10 s, and a paginated Binance fetch gives up after
-20 s.
+sub-hour intervals, and 730 days for 1h and the intervals built from it.
+Each upstream request times out after 10 s, and a paginated Binance fetch
+gives up after 20 s.
+
+Yahoo has no native 3m, 2h, 4h, 6h, 12h or 3d, so chartgen builds them from
+1m, 1h and 1d bars (Binance serves all of them natively):
+
+- **2h, 4h, 6h, 12h** are anchored at each session's open, like TradingView:
+  a US stock gets 09:30–13:30 and 13:30–16:00 ET at 4h, the second one
+  shorter; at 12h each session is one bar. A session ends where two
+  consecutive source bars are more than an hour apart, so the overnight gap,
+  a futures daily break (ES=F trades 18:00–17:00 ET and restarts its buckets
+  at 18:00) and a lunch break that leaves a gap in the hourly bars each start
+  a new session. A market with such a break therefore anchors its afternoon
+  separately. Each bucket's `t` is its first source bar. Crypto (`BTC-USD`)
+  and FX (`EURUSD=X`) trade around the clock and use the UTC grid instead,
+  with `t` at the grid start.
+- **3m** uses the UTC grid for every symbol (exchanges open on 15-minute
+  boundaries, so it matches the session grid). It inherits the 1m limits:
+  about 30 days of history and 7 days per request, so the first load of a
+  stock covers roughly 4 to 5 sessions.
+- **3d** groups three calendar days counted from the Unix epoch, on the same
+  grid as Binance's 3d klines (epoch days with `day % 3 == 1`). For stocks
+  this means calendar-day buckets that can hold fewer than three trading
+  days. TradingView likely buckets by trading sessions, a known divergence.
+- A zero-volume 1m or 1h print outside the regular session (Yahoo's phantom
+  print at the close) is merged into the previous bar instead of becoming a
+  bar of its own.
 
 ##### Per-indicator errors
 

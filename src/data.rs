@@ -180,10 +180,13 @@ pub fn bar_interval_secs(interval: &str) -> Option<i64> {
 }
 
 /// Offset of the bar grid from the epoch: weekly bars open on Monday
-/// (1970-01-01 was a Thursday), everything else is epoch-aligned.
+/// (1970-01-01 was a Thursday) and Binance's 3d bars on epoch days with
+/// `day % 3 == 1`; everything else is epoch-aligned.
 fn grid_offset_ms(step: i64) -> i64 {
     if step == 7 * 86_400 {
         4 * 86_400_000
+    } else if step == 3 * 86_400 {
+        86_400_000
     } else {
         0
     }
@@ -367,6 +370,27 @@ mod tests {
         let d = sample_ohlcv("BTCUSDT", "4h", 3, Some(on_grid), now).unwrap();
         let last: i64 = d.bars.last().unwrap().date.parse().unwrap();
         assert_eq!(last * 1000, on_grid - 4 * HOUR_MS);
+    }
+
+    #[test]
+    fn sample_ohlcv_serves_every_supported_interval() {
+        let now = 1_750_000_123_456;
+        for (tf, secs) in [
+            ("3m", 180),
+            ("2h", 7_200),
+            ("6h", 21_600),
+            ("12h", 43_200),
+            ("3d", 259_200),
+            ("1mo", 2_592_000),
+        ] {
+            let d = sample_ohlcv("BTCUSDT", tf, 20, None, now).unwrap();
+            assert_eq!(d.len(), 20, "{tf}");
+            let ts: Vec<i64> = d.bars.iter().map(|b| b.date.parse().unwrap()).collect();
+            assert!(ts.windows(2).all(|w| w[1] - w[0] == secs), "{tf} spacing");
+            // Binance's 3d klines open on epoch days with day % 3 == 1.
+            let off = if tf == "3d" { 86_400 } else { 0 };
+            assert!(ts.iter().all(|t| (t - off) % secs == 0), "{tf} grid");
+        }
     }
 
     #[test]

@@ -111,6 +111,19 @@ test.describe("bottom bar", () => {
     });
   });
 
+  test("6M uses 2h bars", async ({ bootedApp: page }) => {
+    const load = chartResponse(
+      page,
+      (a) => a.timeframe === "2h" && a.bars !== 2 && a.end_time === undefined,
+    );
+    await page.getByTestId("range-6M").click();
+    await load;
+    await expect.poll(async () => (await hook(page)).interval).toBe("2h");
+    const h = await hook(page);
+    const gaps = new Set(h.timestamps.slice(1).map((t, i) => t - h.timestamps[i]!));
+    expect([...gaps]).toEqual([2 * 3600_000]);
+  });
+
   test("the time zone moves the legend time and the axis", async ({ bootedApp: page }) => {
     const lastBar = async () => (await hook(page)).timestamps.at(-1)!;
     await page.getByTestId("tz-select").selectOption("utc");

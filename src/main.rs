@@ -40,7 +40,7 @@ struct Cli {
     #[arg(short, long)]
     symbol: Option<String>,
 
-    /// Candle interval (e.g., 1m, 5m, 15m, 1h, 4h, 1d, 1wk)
+    /// Candle interval (e.g., 1m, 3m, 5m, 15m, 1h, 2h, 4h, 1d, 3d, 1wk)
     #[arg(short, long, default_value = "4h")]
     interval: String,
 
