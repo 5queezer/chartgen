@@ -107,10 +107,10 @@ test.describe("series colors", () => {
     await expect
       .poll(() => legendColors(page, "EMA"), { timeout: 15_000 })
       .toEqual([
-        "rgba(255, 235, 59, 0.9)",
-        "rgba(255, 152, 0, 0.9)",
-        "rgba(33, 150, 243, 0.9)",
-        "rgba(244, 67, 54, 0.9)",
+        "rgb(255, 235, 59)",
+        "rgb(255, 152, 0)",
+        "rgb(33, 150, 243)",
+        "rgb(244, 67, 54)",
       ]);
     const n = await paneCounts(page, "EMA", { ema50: EMA50 }, 150);
     expect(n.ema50).toBeGreaterThan(50);
@@ -145,7 +145,7 @@ test.describe("series colors", () => {
     expect(left.up! + left.down!).toBeLessThan(20);
     await expect(row.locator(".pane-header-value").last()).toHaveCSS(
       "color",
-      "rgba(156, 39, 176, 0.5)",
+      "rgb(156, 39, 176)",
     );
   });
 

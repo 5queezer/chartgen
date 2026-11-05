@@ -61,8 +61,8 @@ test.describe("indicator style tab", () => {
     await dialog.getByRole("button", { name: "OK" }).click();
     await expect(dialog).toHaveCount(0);
 
-    // The preset keeps the opacity of RSI's server color (0.8, ADR-0026).
-    await expect(legendValue).toHaveCSS("color", "rgba(242, 54, 69, 0.8)");
+    // The preset keeps RSI's server color; legend text is opaque so it stays readable.
+    await expect(legendValue).toHaveCSS("color", "rgb(242, 54, 69)");
     await page.screenshot({ path: "/tmp/claude-1000/chartgen-shots/style/applied.png" });
     expect(before).not.toBe("rgba(242, 54, 69, 0.8)");
     expect(chartRequests).toEqual([]);
