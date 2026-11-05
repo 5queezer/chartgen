@@ -27,6 +27,7 @@ import {
 
 import { isDrawingAlertTool } from "../lib/alerts";
 import { isTypingContext, undoRedoKey } from "../lib/keys";
+import { effectiveMagnet, type Magnet } from "../lib/magnet";
 import { syncDrawingAlerts } from "../stores/alerts";
 import { createHistory } from "../stores/drawingHistory";
 import {
@@ -128,8 +129,6 @@ registerOverlay({
     };
   },
 });
-
-type Magnet ="normal" | "weak_magnet" | "strong_magnet";
 
 interface ToolDef {
   name: DrawingName;
@@ -461,6 +460,9 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
   // ---------------------------------------------------------------------
   const [lastTool, setLastTool] = createSignal(loadLast());
   const [magnet, setMagnet] = createSignal<Magnet>("normal");
+  // Ctrl/Cmd held inverts the magnet until release; `magnet` stays the user's choice.
+  const [invertMagnet, setInvertMagnet] = createSignal(false);
+  const magnetMode = () => effectiveMagnet(magnet(), invertMagnet());
   const [crosshair, setCrosshair] = createSignal(true);
   const [lockAll, setLockAll] = createSignal(false);
   const [hideAll, setHideAll] = createSignal(false);
@@ -698,7 +700,7 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
       extendData: rec.extendData,
       lock: off || rec.lock,
       visible: !off && rec.visible,
-      mode: magnet() as never,
+      mode: untrack(magnetMode) as never,
       ...handlers(),
     });
     if (typeof id !== "string") return;
@@ -810,7 +812,7 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
       name,
       extendData: name === "cgText" ? DEFAULT_TEXT : undefined,
       styles: name === "cgRect" ? (RECT_STYLES as never) : undefined,
-      mode: magnet() as never,
+      mode: untrack(magnetMode) as never,
       ...handlers(),
     });
     if (typeof id === "string") {
@@ -841,9 +843,21 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
           ? "strong_magnet"
           : "normal";
     setMagnet(next);
-    for (const id of ids) {
-      props.chart?.overrideOverlay({ id, mode: next as never });
+    applyMagnet();
+  };
+
+  /** Push the effective magnet to every drawing, the one being drawn included. */
+  function applyMagnet() {
+    const mode = magnetMode();
+    for (const id of armedId === null ? ids : [...ids, armedId]) {
+      props.chart?.overrideOverlay({ id, mode: mode as never });
     }
+  }
+
+  const setInverted = (on: boolean) => {
+    if (on === invertMagnet()) return;
+    setInvertMagnet(on);
+    applyMagnet();
   };
 
   const toggleCrosshair = () => {
@@ -1139,6 +1153,25 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
   window.addEventListener("keydown", onKey);
   onCleanup(() => window.removeEventListener("keydown", onKey));
 
+  // Modifier state is read from every key and mouse event (capture, so before
+  // klinecharts sees the move). That covers a key pressed before the chart had
+  // focus and makes auto-repeat a no-op. Blur clears it: keyup never comes.
+  const syncModifiers = (e: KeyboardEvent | MouseEvent) => {
+    const ctrl = e.ctrlKey || e.metaKey;
+    if (ctrl && e instanceof KeyboardEvent && isTypingContext(e)) return;
+    setInverted(ctrl);
+  };
+  const releaseModifiers = () => setInverted(false);
+  const modifierEvents = ["keydown", "keyup", "mousemove", "mousedown"] as const;
+  for (const type of modifierEvents) window.addEventListener(type, syncModifiers, true);
+  window.addEventListener("blur", releaseModifiers);
+  document.addEventListener("visibilitychange", releaseModifiers);
+  onCleanup(() => {
+    for (const type of modifierEvents) window.removeEventListener(type, syncModifiers, true);
+    window.removeEventListener("blur", releaseModifiers);
+    document.removeEventListener("visibilitychange", releaseModifiers);
+  });
+
   const resetRightClick = () => {
     rightClickHit = false;
   };
@@ -1172,9 +1205,9 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
   };
 
   const magnetLabel = () =>
-    magnet() === "normal"
+    magnetMode() === "normal"
       ? "Magnet: off"
-      : magnet() === "weak_magnet"
+      : magnetMode() === "weak_magnet"
         ? "Magnet: weak"
         : "Magnet: strong";
 
@@ -1236,15 +1269,15 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
         class={btnClass}
         aria-label={magnetLabel()}
         title={`${magnetLabel()} (click to cycle)`}
-        aria-pressed={magnet() !== "normal"}
+        aria-pressed={magnetMode() !== "normal"}
         onClick={cycleMagnet}
       >
         <svg {...svgProps}>
           <path d="M6 3v8a6 6 0 0 0 12 0V3h-4v8a2 2 0 0 1-4 0V3z" />
         </svg>
-        <Show when={magnet() !== "normal"}>
+        <Show when={magnetMode() !== "normal"}>
           <span class="absolute bottom-0.5 right-0.5 text-[9px] leading-none font-semibold">
-            {magnet() === "weak_magnet" ? "W" : "S"}
+            {magnetMode() === "weak_magnet" ? "W" : "S"}
           </span>
         </Show>
       </button>

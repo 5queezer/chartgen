@@ -391,6 +391,10 @@ A tool is armed for exactly one drawing: pick it, click the chart to
 place the points, and the tool is released. Pick it again or press `Esc`
 to cancel. Drawings pan and zoom with the chart.
 
+Hold `Ctrl` (`Cmd` on Mac) while placing or dragging a point to invert the
+magnet temporarily: off becomes strong, weak or strong becomes off. The magnet
+button shows the state in effect, and releasing the key restores your setting.
+
 - **Measure tools** take two clicks. Price range shows a vertical arrow
   and `+1,234.50 (+2.31%)`; date range a horizontal arrow and
   `12 bars, 3d 4h`; date and price range a box with both. The band is
