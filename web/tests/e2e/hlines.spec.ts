@@ -3,7 +3,7 @@
 // for a row whose pixels (almost) all carry the line color, which pins both
 // the color and that the line spans the pane width.
 
-import { test, expect, expectChartRendered, type Page } from "./fixtures/app";
+import { test, expect, gotoApp, type Page } from "./fixtures/app";
 
 type Rgba = { r: number; g: number; b: number; a: number };
 
@@ -11,11 +11,7 @@ async function openWith(page: Page, active: unknown[]) {
   await page.addInitScript((a) => {
     localStorage.setItem("chartgen.indicators.active", JSON.stringify(a));
   }, active);
-  await page.goto("/");
-  await expect(page.locator("text=authenticating...")).toHaveCount(0, {
-    timeout: 30_000,
-  });
-  await expectChartRendered(page);
+  await gotoApp(page);
 }
 
 // Returns, per line, the widest fraction of any canvas row whose pixels

@@ -8,7 +8,7 @@
 // Bollinger Bands and asserts that the band fill really shows on the
 // canvas and differs from the page background.
 
-import { test, expect, expectChartRendered } from "./fixtures/app";
+import { test, expect, gotoApp } from "./fixtures/app";
 
 // fillTheme("bbands", 0) in web/src/components/geometry.ts.
 const FILL = { r: 33, g: 150, b: 243, a: 0.1 };
@@ -19,11 +19,7 @@ test("bbands fill is visible above the background (destination-over z-order)", a
   await page.addInitScript(() => {
     localStorage.setItem("chartgen.indicators.active", JSON.stringify(["bbands"]));
   });
-  await page.goto("/");
-  await expect(page.locator("text=authenticating...")).toHaveCount(0, {
-    timeout: 30_000,
-  });
-  await expectChartRendered(page);
+  await gotoApp(page);
 
   const probe = () =>
     page.evaluate((fill) => {

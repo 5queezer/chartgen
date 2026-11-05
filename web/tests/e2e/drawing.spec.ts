@@ -3,7 +3,7 @@
 
 import type { Page } from "@playwright/test";
 
-import { test, expect, expectChartRendered } from "./fixtures/app";
+import { test, expect, reloadApp } from "./fixtures/app";
 
 const KEY = "chartgen.drawings.BTCUSDT";
 const A = { x: 300, y: 160 };
@@ -87,8 +87,7 @@ test.describe("drawing tools", () => {
       "false",
     );
 
-    await page.reload();
-    await expectChartRendered(page);
+    await reloadApp(page);
     await expect.poll(() => overlays(page)).toHaveLength(1);
 
     await page.getByRole("button", { name: "15m", exact: true }).click();
@@ -111,8 +110,7 @@ test.describe("drawing tools", () => {
     bootedApp: page,
   }) => {
     await drawTrendLine(page);
-    await page.reload();
-    await expectChartRendered(page);
+    await reloadApp(page);
     await expect.poll(() => overlays(page)).toHaveLength(1);
     await clickAt(page, MID);
     await page.keyboard.press("Backspace");
@@ -178,8 +176,7 @@ test.describe("drawing tools", () => {
 
     // Reload, then force a re-serialization (lock + unlock): the future
     // timestamp must come back unchanged.
-    await page.reload();
-    await expectChartRendered(page);
+    await reloadApp(page);
     await expect.poll(() => overlays(page)).toHaveLength(1);
     await page.getByRole("button", { name: "Lock all drawings" }).click();
     await page.getByRole("button", { name: "Lock all drawings" }).click();
@@ -206,8 +203,7 @@ test.describe("drawing tools", () => {
       (o) => localStorage.setItem("chartgen.drawings.BTCUSDT", JSON.stringify(o)),
       old,
     );
-    await page.reload();
-    await expectChartRendered(page);
+    await reloadApp(page);
     await expect
       .poll(() => overlays(page))
       .toMatchObject([{ offRange: true, visible: false, lock: true }]);

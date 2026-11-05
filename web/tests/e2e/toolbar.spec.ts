@@ -3,7 +3,12 @@
 
 import type { Page, Response } from "@playwright/test";
 
-import { test, expect, expectChartRendered } from "./fixtures/app";
+import {
+  test,
+  expect,
+  expectChartRendered,
+  reloadApp,
+} from "./fixtures/app";
 
 /** Resolve on the next full-load generate_chart tools/call whose args match. */
 function chartCall(page: Page, match: { ticker?: string; timeframe?: string }) {
@@ -121,8 +126,7 @@ test.describe("toolbar", () => {
       page.getByRole("button", { name: "Chart type: Area" }),
     ).toBeVisible();
 
-    await page.reload();
-    await expectChartRendered(page);
+    await reloadApp(page);
     await expect(symbolButton(page)).toContainText("AAPL");
     await expect(activeTimeframe(page)).toHaveText("5m");
     await expect(

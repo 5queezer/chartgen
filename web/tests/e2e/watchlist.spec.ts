@@ -4,7 +4,12 @@
 
 import type { Page, Request } from "@playwright/test";
 
-import { test, expect, expectChartRendered } from "./fixtures/app";
+import {
+  test,
+  expect,
+  expectChartRendered,
+  reloadApp,
+} from "./fixtures/app";
 
 const table = (page: Page) => page.getByRole("table", { name: "Watchlist" });
 const row = (page: Page, sym: string) =>
@@ -60,15 +65,25 @@ test.describe("watchlist", () => {
       /color-(bull|bear)/,
     );
 
-    // The sample source moves every second; the 5 s poll picks it up and
-    // flashes the Last cell.
-    const first = await lastCell(page, "BTCUSDT").textContent();
-    await expect(lastCell(page, "BTCUSDT")).not.toHaveText(first ?? "", {
-      timeout: 15_000,
-    });
-    await expect(table(page).locator("[data-flash]").first()).toBeAttached({
-      timeout: 15_000,
-    });
+    // The sample source moves every second, so each 5 s poll brings a new
+    // Last and flashes the cell. Wait on the polls themselves, not on a
+    // fixed window: a starved browser or server can delay a poll well past
+    // its period. The flash lasts 700 ms, so it is watched in the page on
+    // every frame from before the tick.
+    const flashed = page.waitForFunction(
+      () =>
+        document.querySelector(
+          '[role="table"][aria-label="Watchlist"] [data-flash]',
+        ) !== null,
+    );
+    const first = (await lastCell(page, "BTCUSDT").textContent()) ?? "";
+    await expect(async () => {
+      await page.waitForResponse((res) => isQuotesRequest(res.request()));
+      await expect(lastCell(page, "BTCUSDT")).not.toHaveText(first, {
+        timeout: 1_000,
+      });
+    }).toPass();
+    await flashed;
   });
 
   test("polling pauses while the tab is hidden and resumes when visible", async ({
@@ -146,8 +161,7 @@ test.describe("watchlist", () => {
     // Removing never switches the chart.
     await expect(symbolButton(page)).toContainText("ETHUSDT");
 
-    await page.reload();
-    await expectChartRendered(page);
+    await reloadApp(page);
     await expect(rows(page)).toHaveCount(7);
     await expect(row(page, "DOGEUSDT")).toHaveCount(1);
     await expect(row(page, "AAPL")).toHaveCount(0);
@@ -157,11 +171,19 @@ test.describe("watchlist", () => {
   test("collapse resizes the chart and persists across reload", async ({
     bootedApp: page,
   }) => {
+    // Span of all chart canvases. Not one pane canvas: the split between
+    // pane and price axis follows the axis label width, which moves with
+    // the ticking price.
     const chartWidth = () =>
-      page
-        .locator(".chart-host canvas")
-        .first()
-        .evaluate((c) => c.getBoundingClientRect().width);
+      page.locator(".chart-host").evaluate((host) => {
+        const rects = Array.from(host.querySelectorAll("canvas"))
+          .map((c) => c.getBoundingClientRect())
+          .filter((r) => r.width > 0);
+        return (
+          Math.max(...rects.map((r) => r.right)) -
+          Math.min(...rects.map((r) => r.left))
+        );
+      });
     const expandedWidth = await chartWidth();
 
     await page.getByRole("button", { name: "Collapse watchlist" }).click();
@@ -171,8 +193,7 @@ test.describe("watchlist", () => {
     // The chart takes over the panel's width.
     await expect.poll(chartWidth).toBeGreaterThan(expandedWidth + 200);
 
-    await page.reload();
-    await expectChartRendered(page);
+    await reloadApp(page);
     await expect(expand).toBeVisible();
     await expect(table(page)).toHaveCount(0);
 

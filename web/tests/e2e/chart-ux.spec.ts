@@ -3,7 +3,7 @@
 
 import type { Page } from "@playwright/test";
 
-import { test, expect, expectChartRendered } from "./fixtures/app";
+import { test, expect, reloadApp } from "./fixtures/app";
 
 const PRICE = /^\d+\.\d+$/;
 
@@ -64,8 +64,7 @@ test.describe("chart ux", () => {
       await page.evaluate(() => localStorage.getItem("chartgen.layout.scaleMode")),
     ).toBe('"log"');
 
-    await page.reload();
-    await expectChartRendered(page);
+    await reloadApp(page);
     await expect(scaleButton(page, "log")).toHaveAttribute(
       "aria-pressed",
       "true",
@@ -119,8 +118,7 @@ test.describe("chart ux", () => {
     await page.evaluate(() =>
       localStorage.setItem("chartgen.layout.symbol", '"AAPL"'),
     );
-    await page.reload();
-    await expectChartRendered(page);
+    await reloadApp(page);
     await expect(page.getByTestId("price-legend")).toBeVisible();
     await expect(countdown(page)).toHaveCount(0);
   });
@@ -156,8 +154,7 @@ test.describe("chart ux", () => {
     await page.addInitScript(() => {
       Object.defineProperty(document, "fullscreenEnabled", { get: () => false });
     });
-    await page.reload();
-    await expectChartRendered(page);
+    await reloadApp(page);
     await expect(page.getByRole("button", { name: "Take screenshot" })).toBeVisible();
     await expect(page.getByRole("button", { name: "Fullscreen" })).toHaveCount(0);
   });

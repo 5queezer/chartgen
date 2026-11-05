@@ -3,7 +3,7 @@
 
 import type { Page } from "@playwright/test";
 
-import { test, expect, expectChartRendered } from "./fixtures/app";
+import { test, expect, reloadApp } from "./fixtures/app";
 
 const rsiRow = (page: Page) =>
   page.locator(".pane-header", { hasText: "RSI" }).first();
@@ -21,10 +21,29 @@ test.describe("indicator style tab", () => {
   test("color and visibility apply without a refetch and persist", async ({
     bootedApp: page,
   }) => {
+    // Full chart loads only: the live feed keeps polling the tail (and a
+    // catch-up after a stall polls a longer one) whatever the style does.
+    // A full load asks for INITIAL_BARS (500, src/lib/liveFeed.ts) with no
+    // end_time.
     const chartRequests: string[] = [];
     page.on("request", (req) => {
-      if ((req.postData() ?? "").includes('"generate_chart"')) {
-        chartRequests.push(req.url());
+      try {
+        const b = req.postDataJSON() as {
+          params?: {
+            name?: string;
+            arguments?: { bars?: number; end_time?: number };
+          };
+        } | null;
+        const a = b?.params?.arguments;
+        if (
+          b?.params?.name === "generate_chart" &&
+          a?.bars === 500 &&
+          a.end_time === undefined
+        ) {
+          chartRequests.push(req.url());
+        }
+      } catch {
+        // Not a JSON body: not an MCP call.
       }
     });
 
@@ -69,8 +88,7 @@ test.describe("indicator style tab", () => {
         },
       },
     });
-    await page.reload();
-    await expectChartRendered(page);
+    await reloadApp(page);
     await expect(rsiRow(page)).toBeVisible();
     await expect(legendValue).toHaveCount(0);
 

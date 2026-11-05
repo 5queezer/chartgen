@@ -1,6 +1,6 @@
 // Indicator settings / visibility / removal via the pane legend and chips.
 
-import { test, expect, expectChartRendered } from "./fixtures/app";
+import { test, expect, reloadApp } from "./fixtures/app";
 
 const rsiRow = (page: import("@playwright/test").Page) =>
   page.locator(".pane-header", { hasText: "RSI" }).first();
@@ -42,9 +42,8 @@ test.describe("indicator settings", () => {
     const show = page.getByRole("button", { name: "Show rsi", exact: true });
     await expect(show).toBeVisible();
 
-    await page.reload();
+    await reloadApp(page);
     await expect(show).toBeVisible();
-    await expectChartRendered(page);
     await expect(page.locator(".pane-header", { hasText: "RSI" })).toHaveCount(0);
 
     await show.click();
@@ -60,8 +59,7 @@ test.describe("indicator settings", () => {
 
     const chipRemove = page.getByRole("button", { name: "Remove rsi", exact: true });
     await expect(chipRemove).toHaveCount(0);
-    await page.reload();
-    await expectChartRendered(page);
+    await reloadApp(page);
     await expect(chipRemove).toHaveCount(0);
     await expect(page.locator(".pane-header", { hasText: "RSI" })).toHaveCount(0);
   });
