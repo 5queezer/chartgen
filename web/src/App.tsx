@@ -22,6 +22,7 @@ import { IndicatorChips } from "./components/IndicatorChips";
 import { IndicatorPicker } from "./components/IndicatorPicker";
 import { IndicatorSettings } from "./components/IndicatorSettings";
 import { LayoutMenu } from "./components/LayoutMenu";
+import { ReplayBar } from "./components/ReplayBar";
 import { mergeParams } from "./lib/paramForm";
 import { PALETTES } from "./lib/theme";
 import { resolveTimeZone } from "./lib/timezone";
@@ -60,6 +61,7 @@ import {
 } from "./lib/liveFeed";
 import type { SeriesPayload } from "./types/responses";
 import { createAlertLogger } from "./services/notifications";
+import { createReplay } from "./services/replay";
 import {
   createAlertQuotes,
   feedChartSnapshot,
@@ -194,6 +196,38 @@ export function App(): JSX.Element {
     kind: "idle",
   });
   let feedTicker = "";
+
+  // --- Bar replay (ADR-0023) ------------------------------------------
+  // The request of the series the feed holds (set where it is adopted).
+  let feedRequest: LiveRequest | null = null;
+  // True while exiting replay restarts the feed from its series: that reset
+  // holds the close of the replay start, older than the prices the alerts
+  // saw meanwhile (quotes poll), so it must not become their baseline.
+  let resuming = false;
+  // Whether a drawing tool is armed (Esc then cancels only the tool).
+  const [drawingArmed, setDrawingArmed] = createSignal(false);
+  const replay = createReplay({
+    live,
+    request: () => feedRequest,
+    suspendLive: () => feed.suspend(),
+    // Only when the feed still holds the current request's series: if a
+    // new load is in flight, adopting it restarts the feed.
+    resumeLive: () => {
+      const s = untrack(live)?.series;
+      if (s && feedRequest && JSON.stringify(chartQueryKey(feedRequest)) === feedKey) {
+        resuming = true;
+        feed.reset(s, feedRequest);
+        resuming = false;
+      }
+    },
+    loadUntil: (ts, isCurrent) => feed.loadUntil(ts, isCurrent),
+    fetch: (request, { signal, ...args }) =>
+      session.callGenerateChart({ ...request, ...args }, signal),
+  });
+  // What the chart shows: the live snapshot, or the replay frame.
+  const shown = replay.snapshot;
+  // ---------------------------------------------------------------------
+
   const feed = createLiveFeed({
     fetch: (request, { signal, ...args }) =>
       session.callGenerateChart({ ...request, ...args }, signal),
@@ -206,11 +240,14 @@ export function App(): JSX.Element {
     },
     onSnapshot: (snapshot) => {
       setLive(snapshot);
-      // Price alerts (ADR-0020) on the chart symbol's last close.
-      if (snapshot) feedChartSnapshot(feedTicker, snapshot);
+      // Price alerts (ADR-0020) on the chart symbol's last close. Replay
+      // frames never pass here: while replaying the feed only pages.
+      if (snapshot && !resuming) feedChartSnapshot(feedTicker, snapshot);
     },
     onPollStatus: setPollStatus,
     onHistoryStatus: setHistoryStatus,
+    // Replay (ADR-0023) reads as a hidden tab: no polls, no pushes.
+    doc: replay.liveDoc,
   });
   session.onChartTick(feed.applyPush);
   onCleanup(feed.dispose);
@@ -257,6 +294,7 @@ export function App(): JSX.Element {
         adoptedAt = state.dataUpdatedAt;
         // A copy: the feed updates its series in place, the cache stays as loaded.
         feedTicker = request.ticker;
+        feedRequest = request;
         feed.reset(structuredClone(state.data), request);
       } else if (state?.status === "error" && adoptedAt !== -1) {
         adoptedAt = -1;
@@ -278,6 +316,8 @@ export function App(): JSX.Element {
       ),
     onChange: setCompareData,
     pollMs: (s) => (isContinuousMarket(s) ? FAST_POLL_MS : SLOW_POLL_MS),
+    // No compare tail polls while replaying (ADR-0023).
+    doc: replay.liveDoc,
   });
   onCleanup(compareFeed.dispose);
   // The main symbol is never one of its own compare symbols: pick it as the
@@ -326,8 +366,22 @@ export function App(): JSX.Element {
   const [compareFrom, setCompareFrom] = createSignal(0);
   const [drawings, setDrawings] = createSignal<DrawingsApi | null>(null);
   // ---------------------------------------------------------------------
+
+  // --- Bar replay (ADR-0023) ------------------------------------------
+  // Compare lines as of the cursor: their values align with the full series,
+  // whose prefix the frame is.
+  const shownCompare = createMemo(() => {
+    const lines = compareLines();
+    if (replay.mode() !== "active") return lines;
+    const n = shown()?.series.bars.length ?? 0;
+    return lines.map((l) => ({ ...l, values: l.values.slice(0, n) }));
+  });
+  // ---------------------------------------------------------------------
+
   // Other symbols with active alerts are evaluated from their own quotes poll.
-  createAlertQuotes(session, authReady, symbol);
+  // While replaying the chart symbol is polled there too (ADR-0023): the
+  // feed is suspended, and its alerts still need real prices.
+  createAlertQuotes(session, authReady, () => (replay.mode() === "off" ? symbol() : ""));
 
   if (import.meta.env.DEV) {
     // E2E hook (tests/e2e/live-paging.spec.ts): what the chart holds.
@@ -336,6 +390,14 @@ export function App(): JSX.Element {
       series: () => live()?.series ?? null,
       // Alert e2e (tests/e2e/alerts.spec.ts): inject a live price.
       feedPrice,
+      // Bar replay e2e (tests/e2e/bar-replay.spec.ts): the frame on screen
+      // and the replay state.
+      shownSeries: () => shown()?.series ?? null,
+      replay: () => ({
+        mode: replay.mode(),
+        playing: replay.playing(),
+        cursorTime: replay.cursorTime(),
+      }),
     };
   }
 
@@ -401,6 +463,8 @@ export function App(): JSX.Element {
             if (c) resetChart(c);
           }}
           onCompare={() => setCompareOpen(true)}
+          replay={replay.mode() !== "off"}
+          onReplay={() => (replay.mode() === "off" ? replay.enter() : replay.exit())}
         />
         <SymbolSearch
           open={compareOpen()}
@@ -422,7 +486,7 @@ export function App(): JSX.Element {
         <AlertButton />
         <StatusLine
           status={status()}
-          live={pollStatus()}
+          live={replay.mode() === "off" ? pollStatus() : { kind: "off" }}
           onRetry={() => void query.refetch()}
           onSignIn={() =>
             void startSignIn().catch((e: unknown) =>
@@ -482,12 +546,18 @@ export function App(): JSX.Element {
         active={activeIndicators()}
       />
       <main class="flex flex-1 min-h-0">
-        <DrawingToolbar chart={chart()} symbol={symbol()} onApi={setDrawings} />
+        <DrawingToolbar
+          chart={chart()}
+          symbol={symbol()}
+          onApi={setDrawings}
+          onArmedChange={setDrawingArmed}
+          disarm={replay.mode() === "select"}
+        />
         <AlertLines chart={chart()} symbol={symbol()} />
-        <div class="flex-1 min-w-0">
+        <div class="flex-1 min-w-0 relative">
           <Chart
-            series={live()?.series ?? null}
-            update={live()?.update ?? null}
+            series={shown()?.series ?? null}
+            update={shown()?.update ?? null}
             history={historyStatus()}
             onLoadOlder={feed.loadOlder}
             activeIndicators={wireIndicators()}
@@ -500,18 +570,26 @@ export function App(): JSX.Element {
             onChartReady={setChart}
             onCrosshair={setCrosshair}
             onCompareFrom={setCompareFrom}
-            compare={compareLines()}
+            compare={shownCompare()}
             onRemoveCompare={removeCompare}
+          />
+          {/* Bar replay controls and start picker (ADR-0023). */}
+          <ReplayBar
+            replay={replay}
+            chart={chart()}
+            drawingArmed={drawingArmed()}
+            timeZone={resolveTimeZone(timeZone(), symbol())}
           />
         </div>
         <Sidebar
           session={session}
           enabled={authReady()}
           panels={{
-            series: live()?.series ?? null,
+            // The frame on screen: in replay, never a bar after the cursor.
+            series: shown()?.series ?? null,
             crosshair: crosshair(),
             styles: plotStyles(),
-            compare: compareLines(),
+            compare: shownCompare(),
             compareFrom: compareFrom(),
             timeZone: resolveTimeZone(timeZone(), symbol()),
             drawings: drawings(),
@@ -519,7 +597,7 @@ export function App(): JSX.Element {
           }}
         />
       </main>
-      <BottomBar chart={chart()} series={live()?.series ?? null} loadUntil={feed.loadUntil} />
+      <BottomBar chart={chart()} series={shown()?.series ?? null} loadUntil={feed.loadUntil} />
       <AlertDialog />
       <Toasts />
     </div>

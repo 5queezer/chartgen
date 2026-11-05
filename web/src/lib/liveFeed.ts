@@ -136,7 +136,8 @@ export type HistoryStatus =
   /** MAX_HISTORY_BARS are loaded; paging stopped. */
   | { kind: "limit" };
 
-type VisibilityDoc = Pick<
+/** The page visibility the feed follows (`document`, or bar replay's stand-in). */
+export type VisibilityDoc = Pick<
   Document,
   "visibilityState" | "addEventListener" | "removeEventListener"
 >;

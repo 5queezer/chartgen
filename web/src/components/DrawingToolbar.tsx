@@ -12,6 +12,7 @@ import {
   on,
   onCleanup,
   Show,
+  untrack,
   type JSX,
 } from "solid-js";
 import { Dialog } from "@kobalte/core";
@@ -294,10 +295,20 @@ export interface DrawingToolbarProps {
   symbol: string;
   /** Receives the drawings API once, at mount. */
   onApi?: (api: DrawingsApi) => void;
+  /** Bar replay (ADR-0023): told whether a tool is armed (Esc is then the tool's). */
+  onArmedChange?: (armed: boolean) => void;
+  /** Bar replay (ADR-0023): turning true cancels an armed tool (picking a start bar). */
+  disarm?: boolean;
 }
 
 export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
   const [armed, setArmed] = createSignal<DrawingName | null>(null);
+  // --- Bar replay (ADR-0023) ------------------------------------------
+  createEffect(() => props.onArmedChange?.(armed() !== null));
+  createEffect(() => {
+    if (props.disarm) untrack(cancelArmed);
+  });
+  // ---------------------------------------------------------------------
   const [magnet, setMagnet] = createSignal<Magnet>("normal");
   const [crosshair, setCrosshair] = createSignal(true);
   const [lockAll, setLockAll] = createSignal(false);
