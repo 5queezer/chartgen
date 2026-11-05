@@ -408,7 +408,13 @@ fn parse_yahoo_chart(
     }
 
     if let Some(step) = data::interval_secs(window.api_interval) {
-        snap_live_bar(&mut bars, step, session_start, session_end);
+        // Today's session bounds only describe the live tail, not a history page.
+        let (open, close) = if end_time_ms.is_none() {
+            (session_start, session_end)
+        } else {
+            (None, None)
+        };
+        snap_live_bar(&mut bars, step, open, close);
     }
 
     if needs_aggregation {

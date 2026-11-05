@@ -19,7 +19,9 @@ import {
 import {
   activeIndicators,
   instanceKey,
+  normalizeInstances,
   setActiveIndicators,
+  type ActiveIndicator,
 } from "../stores/indicators";
 import {
   chartType,
@@ -34,31 +36,38 @@ import {
 import { paramDefaults } from "../stores/layouts";
 import { showToast } from "./alertEngine";
 
-// Instance keys a link brought in, checked against the indicator registry once it is
-// known. In sessionStorage so they survive the OAuth redirect of the tab.
+// Raw indicator entries a link brought in, untyped and unchecked. Kept only in
+// sessionStorage (survives the OAuth redirect of the tab) and written to the
+// indicator store once `reconcileImported` has validated them against the
+// registry, so another tab or a closed tab never loads unvalidated entries.
 const PENDING_KEY = "chartgen.share.pending";
 
-function loadPending(): string[] {
+function loadPending(): ActiveIndicator[] {
   try {
     const raw: unknown = JSON.parse(sessionStorage.getItem(PENDING_KEY) ?? "[]");
     return Array.isArray(raw)
-      ? raw.filter((n): n is string => typeof n === "string")
+      ? normalizeInstances(
+          raw.filter(
+            (e): e is ActiveIndicator =>
+              typeof e === "string" || (typeof e === "object" && e !== null),
+          ),
+        )
       : [];
   } catch {
     return [];
   }
 }
 
-function savePending(names: string[]): void {
+function savePending(entries: ActiveIndicator[]): void {
   try {
-    if (names.length === 0) sessionStorage.removeItem(PENDING_KEY);
-    else sessionStorage.setItem(PENDING_KEY, JSON.stringify(names));
+    if (entries.length === 0) sessionStorage.removeItem(PENDING_KEY);
+    else sessionStorage.setItem(PENDING_KEY, JSON.stringify(entries));
   } catch {
-    // Storage unavailable: the names are still checked in this page.
+    // Storage unavailable: the entries are still checked in this page.
   }
 }
 
-const [pending, setPending] = createSignal<string[]>(loadPending());
+const [pending, setPending] = createSignal<ActiveIndicator[]>(loadPending());
 
 /** True while imported indicators wait for the registry; hold the chart query. */
 export const importPending = (): boolean => pending().length > 0;
@@ -79,10 +88,8 @@ export function applyShareLink(): void {
   if (patch.chartType !== undefined) setChartType(patch.chartType);
   if (patch.timeZone !== undefined) setTimeZone(patch.timeZone);
   if (patch.indicators !== undefined) {
-    setActiveIndicators(patch.indicators);
-    const names = patch.indicators.map(instanceKey);
-    savePending(names);
-    setPending(names);
+    savePending(patch.indicators);
+    setPending(patch.indicators);
   }
   // Skip an unchanged list: replacing it would reset the scale mode.
   if (
@@ -104,11 +111,11 @@ export function applyShareLink(): void {
 export function reconcileImported(
   registry: readonly RegistryEntry[] | undefined,
 ): void {
-  const names = pending();
-  if (names.length === 0) return;
+  const raw = pending();
+  if (raw.length === 0) return;
   const { entries, unknown, invalid } = reconcileIndicators(
-    activeIndicators(),
-    names,
+    raw,
+    raw.map(instanceKey),
     registry,
   );
   setActiveIndicators(entries);

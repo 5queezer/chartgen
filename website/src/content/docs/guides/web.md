@@ -440,7 +440,7 @@ https://chartgen.vasudev.xyz/?symbol=ETHUSDT&interval=4h&type=candles&ind=rsi(le
 |---|---|
 | `symbol` | Chart symbol |
 | `interval` | Timeframe (`4h`, `240`, `1d`, ...) |
-| `type` | Chart type: `candles`, `hollow`, `bars`, `line`, `area`, `heikin_ashi` |
+| `type` | Chart type: `candles`, `hollow`, `bars`, `line`, `line_markers`, `step_line`, `area`, `baseline`, `columns`, `high_low`, `heikin_ashi` |
 | `ind` | Indicators, comma separated (at most 50, 2 KB). Non-default parameters go in parentheses, separated by `;`: `macd(fast:8;slow:20)`; characters outside letters, digits, `.`, `_` and `-` in a text value are percent-encoded. Visible indicators only; `ind=` means none. A repeated name is another instance: `rsi,rsi(length:21)` shows two RSIs |
 | `compare` | Compare symbols, comma separated; always written, `compare=` clears them |
 | `tz` | One of the time zones in the time-zone menu: `utc`, `exchange`, `local` or a listed IANA name such as `Europe/Berlin` |

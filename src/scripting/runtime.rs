@@ -797,9 +797,10 @@ fn normalize_param(p: &Json) -> Result<Json, String> {
         .and_then(|v| v.as_str())
         .filter(|n| n.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') && !n.is_empty())
         .ok_or("every entry needs a \"name\" (letters, digits, _)")?;
-    // Keys of an indicator entry on the wire (`name`, the instance `id`,
-    // ADR-0028) and on the web client (`hidden`, `style`).
-    if matches!(name, "name" | "id" | "hidden" | "style") {
+    // `name` is the entry key on the wire. The other entry keys (`id`,
+    // `hidden`, `style`) are only rejected at registration (`scripting::validate`),
+    // so scripts stored before they were reserved keep compiling.
+    if name == "name" {
         return Err(format!("a param cannot be called \"{name}\" (reserved)"));
     }
     let ty = match p.get("type").and_then(|v| v.as_str()) {

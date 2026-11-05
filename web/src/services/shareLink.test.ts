@@ -54,17 +54,18 @@ beforeEach(() => {
 
 describe("applyShareLink", () => {
   it("applies params, cleans only share params and holds the chart query", async () => {
-    const { history } = stub(
+    const { history, local } = stub(
       "http://x/?symbol=ethusdt&interval=4h&ind=rsi,bogus&code=c1&state=s1",
     );
     const { svc, ind, layout } = await load();
     svc.applyShareLink();
     expect(layout.symbol()).toBe("ETHUSDT");
     expect(layout.timeframe()).toBe("4h");
-    expect(ind.activeIndicators().map(ind.indicatorName)).toEqual([
-      "rsi",
+    // Raw entries stay out of the store (and localStorage) until reconciled.
+    expect(ind.activeIndicators().map(ind.indicatorName)).not.toContain("bogus");
+    expect(local.getItem("chartgen.indicators.active") ?? "").not.toContain(
       "bogus",
-    ]);
+    );
     expect(svc.importPending()).toBe(true);
     expect(history.replaceState).toHaveBeenCalledWith(
       {},
@@ -109,6 +110,23 @@ describe("applyShareLink", () => {
     b.svc.reconcileImported([{ name: "rsi" }]);
     expect(b.ind.activeIndicators()).toEqual(["rsi"]);
     expect(b.svc.importPending()).toBe(false);
+  });
+
+  it("never writes unvalidated entries to localStorage before reconcile", async () => {
+    const first = stub("http://x/?ind=rsi(length:0),bogus_xyz");
+    const a = await load();
+    const before = a.ind.activeIndicators();
+    a.svc.applyShareLink();
+    expect(a.ind.activeIndicators()).toEqual(before);
+    expect(first.local.getItem("chartgen.indicators.active") ?? "").not.toContain(
+      "bogus_xyz",
+    );
+    // A second tab (same localStorage, own sessionStorage) is not gated and
+    // sees the previous set only.
+    stub("http://x/", first.local);
+    const b = await load();
+    expect(b.svc.importPending()).toBe(false);
+    expect(b.ind.activeIndicators()).toEqual(before);
   });
 
   it("keeps everything when the registry is unavailable", async () => {

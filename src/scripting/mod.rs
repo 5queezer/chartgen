@@ -50,8 +50,22 @@ pub fn source_hash(source: &str) -> String {
 
 /// The full register-time pipeline: parse → static check → presence check
 /// (all in `runtime::compile`) → dry run on synthetic bars within 200 ms.
+///
+/// Param names that collide with other indicator-entry keys (`id`, `hidden`,
+/// `style`; the wire strips or consumes them, so they can never be set) are
+/// rejected here only: stored scripts that already use them still compile.
 pub fn validate(name: &str, source: &str) -> Result<Compiled, ScriptError> {
     let compiled = runtime::compile(name, source)?;
+    for p in &compiled.info.params {
+        let n = p["name"].as_str().unwrap_or_default();
+        if matches!(n, "id" | "hidden" | "style") {
+            return Err(ScriptError::new(
+                "presence",
+                None,
+                format!("PARAMS: a param cannot be called \"{n}\" (reserved)"),
+            ));
+        }
+    }
     let sample = crate::data::sample_data(runtime::DRY_RUN_BARS);
     runtime::run(
         &compiled,
