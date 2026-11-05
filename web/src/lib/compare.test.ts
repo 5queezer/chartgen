@@ -122,6 +122,11 @@ describe("compareReading", () => {
     expect(compareReading([100, 110, 121], 0, 1)!.value).toBe(110);
   });
 
+  it("has no reading at a crosshair bar without a value", () => {
+    expect(compareReading([null, 5, 10], 0, 0)).toBeNull();
+    expect(compareReading([5, null, 10], 0, 1)).toBeNull();
+  });
+
   it("is null without values", () => {
     expect(compareReading([null, null], 0, null)).toBeNull();
   });

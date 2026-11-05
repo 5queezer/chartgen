@@ -7,6 +7,7 @@
 import {
   createEffect,
   createSignal,
+  type Accessor,
   For,
   on,
   onCleanup,
@@ -14,6 +15,7 @@ import {
   type JSX,
 } from "solid-js";
 import { Dialog } from "@kobalte/core";
+import { createStore, reconcile } from "solid-js/store";
 import {
   ActionType,
   registerOverlay,
@@ -251,6 +253,11 @@ const TOOLS: readonly ToolDef[] = [
   },
 ];
 
+/** Display name of each drawing tool. */
+export const DRAWING_LABELS = Object.fromEntries(
+  TOOLS.map((t) => [t.name, t.label]),
+) as Record<DrawingName, string>;
+
 const SHORTCUTS: Record<string, DrawingName> = Object.fromEntries(
   TOOLS.filter((t) => t.code).map((t) => [t.code, t.name]),
 );
@@ -263,11 +270,30 @@ const menuItemClass =
 const LIMIT_NOTICE = `Drawing limit reached (${MAX_DRAWINGS})`;
 const SAVE_ERROR = "Drawings not saved: storage full";
 
+/** A drawing of the current symbol, as the Object Tree lists it. */
+export interface DrawingItem extends DrawingRecord {
+  id: string;
+  /** A point precedes the first loaded bar: the drawing is hidden and locked until bars cover it. */
+  offRange: boolean;
+}
+
+/** What the Object Tree needs from the drawing controller. */
+export interface DrawingsApi {
+  list: Accessor<DrawingItem[]>;
+  /** Select the drawing (highlighted, Delete removes it) and scroll to it if it is out of view. */
+  select: (id: string) => void;
+  setVisible: (id: string, visible: boolean) => void;
+  setLocked: (id: string, lock: boolean) => void;
+  remove: (id: string) => void;
+}
+
 export interface DrawingToolbarProps {
   /** The klinecharts instance; null until the chart has mounted. */
   chart: KChart | null;
   /** Active symbol — selects which stored drawings are shown. */
   symbol: string;
+  /** Receives the drawings API once, at mount. */
+  onApi?: (api: DrawingsApi) => void;
 }
 
 export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
@@ -276,6 +302,9 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
   const [crosshair, setCrosshair] = createSignal(true);
   const [lockAll, setLockAll] = createSignal(false);
   const [hideAll, setHideAll] = createSignal(false);
+  // Keyed by id so a row keeps its identity (and focus) across commits.
+  const [items, setItems] = createStore<DrawingItem[]>([]);
+  const [selectedId, setSelectedId] = createSignal<string | null>(null);
   const [saveFailed, setSaveFailed] = createSignal(false);
   const [limitHit, setLimitHit] = createSignal(false);
   const [menu, setMenu] = createSignal<{
@@ -302,7 +331,9 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
   // Restored drawings waiting for the first data load.
   let pending: DrawingRecord[] | null = null;
   let armedId: string | null = null;
-  let selectedId: string | null = null;
+  // Drawings that have worn the selection highlight: their live styles are
+  // not the stored ones, so serialization takes the canonical styles.
+  const highlighted = new Set<string>();
   let current: DrawingRecord[] = [];
   let history: DrawingRecord[][] = [];
   let limitTimer: number | undefined;
@@ -313,6 +344,14 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
   const syncFlags = () => {
     setLockAll(current.length > 0 && current.every((r) => r.lock));
     setHideAll(current.length > 0 && current.every((r) => !r.visible));
+    setItems(
+      reconcile(
+        ids.flatMap((id) =>
+          canon.has(id) ? [{ id, ...canon.get(id)!, offRange: offRange.has(id) }] : [],
+        ),
+        { key: "id" },
+      ),
+    );
   };
 
   const persist = () => setSaveFailed(!saveDrawings(props.symbol, current));
@@ -326,7 +365,10 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
       if (!offRange.has(id)) {
         const o = chart.getOverlayById(id);
         const [rec] = o ? serialize([o], ax) : [];
-        if (rec) canon.set(id, rec);
+        if (rec) {
+          const styles = highlighted.has(id) ? canon.get(id)?.styles : rec.styles;
+          canon.set(id, { ...rec, styles });
+        }
       }
       const rec = canon.get(id);
       return rec ? [rec] : [];
@@ -371,11 +413,11 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
       return false;
     },
     onSelected: ({ overlay }: OverlayEvent) => {
-      selectedId = overlay.id;
+      setSelectedId(overlay.id);
       return false;
     },
     onDeselected: ({ overlay }: OverlayEvent) => {
-      if (selectedId === overlay.id) selectedId = null;
+      if (selectedId() === overlay.id) setSelectedId(null);
       return false;
     },
     onRightClick: ({ overlay, pageX, pageY }: OverlayEvent) => {
@@ -398,7 +440,8 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
       ids = ids.filter((id) => id !== overlay.id);
       canon.delete(overlay.id);
       offRange.delete(overlay.id);
-      if (selectedId === overlay.id) selectedId = null;
+      highlighted.delete(overlay.id);
+      if (selectedId() === overlay.id) setSelectedId(null);
       return false;
     },
   });
@@ -429,7 +472,8 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
     ids = [];
     canon.clear();
     offRange.clear();
-    selectedId = null;
+    highlighted.clear();
+    setSelectedId(null);
     const ax = axis();
     if (ax === null) {
       // No bars yet; refresh() restores them once data is ready.
@@ -469,6 +513,7 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
         lock: off || rec.lock,
       });
     }
+    syncFlags();
   };
 
   function cancelArmed() {
@@ -552,6 +597,61 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
     if (prev === undefined) return;
     rebuild(prev);
     persist();
+  };
+
+  const patchOne = (id: string, patch: { lock: boolean } | { visible: boolean }) => {
+    if (offRange.has(id)) return;
+    props.chart?.overrideOverlay({ id, ...patch });
+    commit();
+  };
+
+  // klinecharts has no select call, so the selection is ours: set by its
+  // select events and by the tree, drawn as a thicker stroke.
+  const highlight = (id: string, on: boolean) => {
+    if (!props.chart?.getOverlayById(id)) return;
+    const border = (canon.get(id)?.styles?.polygon as { borderSize?: number } | undefined)?.borderSize;
+    highlighted.add(id);
+    props.chart.overrideOverlay({
+      id,
+      styles: { line: { size: on ? 3 : 1 }, polygon: { borderSize: on ? 3 : (border ?? 1) } } as never,
+    });
+  };
+  createEffect(
+    on(selectedId, (id, prev) => {
+      if (prev != null) highlight(prev, false);
+      if (id !== null) highlight(id, true);
+    }),
+  );
+  // A press anywhere on the chart ends a selection made from the tree (one
+  // klinecharts does not know of); the capture phase runs before klinecharts
+  // selects what the press landed on. Its own selections end with its events.
+  let fromTree: string | null = null;
+  createEffect(() => {
+    const dom = props.chart?.getDom();
+    if (!dom) return;
+    const clear = () => {
+      if (fromTree !== null && selectedId() === fromTree) setSelectedId(null);
+      fromTree = null;
+    };
+    dom.addEventListener("mousedown", clear, true);
+    onCleanup(() => dom.removeEventListener("mousedown", clear, true));
+  });
+
+  const select = (id: string) => {
+    const chart = props.chart;
+    // The stored point has a timestamp even where the live one (a point past
+    // the last bar) only has a data index.
+    const p = canon.get(id)?.points[0];
+    if (!chart || !p || !chart.getOverlayById(id)?.visible) return;
+    cancelArmed();
+    fromTree = id;
+    setSelectedId(id);
+    const x = (chart.convertToPixel(
+      { timestamp: p.timestamp, value: p.value },
+      { paneId: "candle_pane" },
+    ) as { x?: number }).x;
+    const width = chart.getSize("candle_pane", "main" as never)?.width ?? 0;
+    if (!(x !== undefined && x >= 0 && x <= width)) chart.scrollToTimestamp(p.timestamp);
   };
 
   const menuAction = (action: "remove" | "lock") => {
@@ -638,6 +738,7 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
     if (isTypingContext(e)) return;
     if (e.key === "Escape") {
       cancelArmed();
+      setSelectedId(null);
       return;
     }
     const mod = e.ctrlKey || e.metaKey;
@@ -653,10 +754,10 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
     } else if (
       !mod &&
       (e.key === "Delete" || e.key === "Backspace") &&
-      selectedId !== null
+      selectedId() !== null
     ) {
       e.preventDefault();
-      removeIds([selectedId]);
+      removeIds([selectedId()!]);
     }
   };
   window.addEventListener("keydown", onKey);
@@ -680,6 +781,14 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
       : magnet() === "weak_magnet"
         ? "Magnet: weak"
         : "Magnet: strong";
+
+  props.onApi?.({
+    list: () => items,
+    select,
+    setVisible: (id, visible) => patchOne(id, { visible }),
+    setLocked: (id, lock) => patchOne(id, { lock }),
+    remove: (id) => removeIds([id]),
+  });
 
   return (
     <div
