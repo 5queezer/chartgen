@@ -103,6 +103,12 @@ pub trait Indicator {
     fn name(&self) -> &str;
     fn compute(&self, data: &OhlcvData) -> PanelResult;
 
+    /// `compute` for indicators that can fail (user scripts, ADR-0025): the
+    /// error fails only this indicator, not the chart. Built-ins never fail.
+    fn try_compute(&self, data: &OhlcvData) -> Result<PanelResult, crate::scripting::ScriptError> {
+        Ok(self.compute(data))
+    }
+
     /// Human-readable description for tool discovery.
     fn description(&self) -> &str {
         ""

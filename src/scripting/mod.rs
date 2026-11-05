@@ -1,0 +1,221 @@
+//! User-authored indicators in Starlark: proposal 0001, ADR-0024 (runtime)
+//! and ADR-0025 (per-user registry + MCP surface).
+//!
+//! A script defines `PARAMS`, `META` and `compute(ohlcv, params, chart)`.
+//! Scripts are stored per user (`persistence`), compiled once per source
+//! (LRU cache below) and run through `ScriptIndicator`, which implements the
+//! `Indicator` trait like any built-in.
+
+pub mod chart_builder;
+pub mod persistence;
+pub mod runtime;
+pub mod series;
+pub mod ta;
+#[cfg(test)]
+mod tests;
+
+use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, OnceLock};
+
+use crate::data::OhlcvData;
+use crate::indicator::{Indicator, PanelResult};
+pub use runtime::{Compiled, ScriptInfo};
+
+/// Scripting is opt-in: `CHARTGEN_SCRIPTING=1` lists and serves the
+/// scripting MCP tools and resolves user scripts in `generate_chart`.
+pub fn enabled() -> bool {
+    std::env::var("CHARTGEN_SCRIPTING").is_ok_and(|v| v == "1")
+}
+
+/// Most scripts one user may store.
+pub const MAX_SCRIPTS_PER_USER: usize = 50;
+
+/// A structured script error: the pipeline `step` (`parse`, `static`,
+/// `presence`, `dry_run`, `runtime`), the 1-based source line when known,
+/// and a message.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ScriptError {
+    pub step: &'static str,
+    pub line: Option<usize>,
+    pub message: String,
+}
+
+impl ScriptError {
+    pub fn new(step: &'static str, line: Option<usize>, message: impl Into<String>) -> Self {
+        Self {
+            step,
+            line,
+            message: message.into(),
+        }
+    }
+
+    pub fn to_json(&self) -> Value {
+        json!({ "step": self.step, "line": self.line, "message": self.message })
+    }
+}
+
+impl std::fmt::Display for ScriptError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.line {
+            Some(l) => write!(f, "{} error at line {l}: {}", self.step, self.message),
+            None => write!(f, "{} error: {}", self.step, self.message),
+        }
+    }
+}
+
+/// `^[a-z][a-z0-9_]{0,47}$`: the same shape as built-in names.
+pub fn valid_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    chars.next().is_some_and(|c| c.is_ascii_lowercase())
+        && name.len() <= 48
+        && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+}
+
+pub fn source_hash(source: &str) -> String {
+    hex::encode(Sha256::digest(source.as_bytes()))
+}
+
+/// The full register-time pipeline: parse → static check → presence check
+/// (all in `runtime::compile`) → dry run on synthetic bars within 200 ms.
+pub fn validate(name: &str, source: &str) -> Result<Compiled, ScriptError> {
+    let compiled = runtime::compile(name, source)?;
+    let sample = crate::data::sample_data(runtime::DRY_RUN_BARS);
+    runtime::run(
+        &compiled,
+        &sample,
+        &json!({}),
+        runtime::DRY_RUN_TIMEOUT,
+        "dry_run",
+    )?;
+    Ok(compiled)
+}
+
+// ---- Compile cache: (user, name, source_hash) → frozen module, LRU ----
+
+const CACHE_SIZE: usize = 1024;
+type CacheKey = (String, String, String);
+
+#[derive(Default)]
+struct Cache {
+    map: HashMap<CacheKey, (Arc<Compiled>, u64)>,
+    clock: u64,
+}
+
+fn cache() -> &'static Mutex<Cache> {
+    static C: OnceLock<Mutex<Cache>> = OnceLock::new();
+    C.get_or_init(Mutex::default)
+}
+
+/// Compile `source` or reuse the cached module for the same key.
+pub fn compiled(user: &str, name: &str, source: &str) -> Result<Arc<Compiled>, ScriptError> {
+    let key = (user.to_owned(), name.to_owned(), source_hash(source));
+    {
+        let mut c = cache().lock().unwrap_or_else(|e| e.into_inner());
+        c.clock += 1;
+        let now = c.clock;
+        if let Some(entry) = c.map.get_mut(&key) {
+            entry.1 = now;
+            return Ok(entry.0.clone());
+        }
+    }
+    let fresh = Arc::new(runtime::compile(name, source)?);
+    let mut c = cache().lock().unwrap_or_else(|e| e.into_inner());
+    if c.map.len() >= CACHE_SIZE {
+        if let Some(oldest) = c
+            .map
+            .iter()
+            .min_by_key(|(_, v)| v.1)
+            .map(|(k, _)| k.clone())
+        {
+            c.map.remove(&oldest);
+        }
+    }
+    let now = c.clock;
+    c.map.insert(key, (fresh.clone(), now));
+    Ok(fresh)
+}
+
+// ---- Indicator adapter ----
+
+/// A user script behind the `Indicator` trait. A script that no longer
+/// compiles still resolves, so the chart reports its error instead of
+/// "unknown indicator".
+pub struct ScriptIndicator {
+    name: String,
+    compiled: Result<Arc<Compiled>, ScriptError>,
+    params: Value,
+}
+
+impl ScriptIndicator {
+    pub fn new(user: &str, name: &str, source: &str) -> Self {
+        Self {
+            name: name.to_owned(),
+            compiled: compiled(user, name, source),
+            params: json!({}),
+        }
+    }
+}
+
+impl Indicator for ScriptIndicator {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn description(&self) -> &str {
+        match &self.compiled {
+            Ok(c) if !c.info.description.is_empty() => &c.info.description,
+            Ok(c) => &c.info.title,
+            Err(_) => "",
+        }
+    }
+
+    fn params(&self) -> Value {
+        match &self.compiled {
+            Ok(c) => json!(c.info.params),
+            Err(_) => json!([]),
+        }
+    }
+
+    fn configure(&mut self, params: &Value) {
+        self.params = params.clone();
+    }
+
+    fn compute(&self, data: &OhlcvData) -> PanelResult {
+        self.try_compute(data).unwrap_or_else(|_| PanelResult {
+            label: self.name.clone(),
+            ..Default::default()
+        })
+    }
+
+    fn try_compute(&self, data: &OhlcvData) -> Result<PanelResult, ScriptError> {
+        let compiled = self.compiled.as_ref().map_err(Clone::clone)?;
+        runtime::run(
+            compiled,
+            data,
+            &self.params,
+            runtime::COMPUTE_TIMEOUT,
+            "runtime",
+        )
+    }
+}
+
+/// `user`'s script `name` as an indicator, if they stored one.
+pub fn lookup(user: &str, name: &str) -> Option<Box<dyn Indicator>> {
+    let row = persistence::global()?.get(user, name).ok()??;
+    Some(Box::new(ScriptIndicator::new(user, name, &row.source)))
+}
+
+// ---- Reference implementations of forkable built-ins ----
+
+/// Built-ins with a `.star` reference implementation, parity-tested against
+/// the Rust indicator (`fork_indicator` returns it).
+pub const REFIMPLS: &[(&str, &str)] = &[("wavetrend", include_str!("refimpl/wavetrend.star"))];
+
+pub fn refimpl(builtin: &str) -> Option<&'static str> {
+    REFIMPLS
+        .iter()
+        .find(|(n, _)| *n == builtin)
+        .map(|(_, src)| *src)
+}

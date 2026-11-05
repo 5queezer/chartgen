@@ -76,6 +76,15 @@ pub fn by_name(name: &str) -> Option<Box<dyn Indicator>> {
     }
 }
 
+/// Resolve `name` for a caller: `user`'s own scripts first (a script shadows
+/// the built-in of the same name for that user only), then the built-ins.
+/// `None` user (CLI, stdio MCP, scripting disabled) sees built-ins only.
+/// See ADR-0025.
+pub fn by_name_for(name: &str, user: Option<&str>) -> Option<Box<dyn Indicator>> {
+    user.and_then(|u| crate::scripting::lookup(u, name))
+        .or_else(|| by_name(name))
+}
+
 /// Check `params` against the indicator's declared schema (`Indicator::params`).
 /// Only declared params are inspected; `null` means "use the default".
 /// Integers must be whole numbers, floats must be finite, and both must respect
@@ -136,7 +145,16 @@ pub fn by_name_configured(
     name: &str,
     params: &Value,
 ) -> Result<Option<Box<dyn Indicator>>, String> {
-    let Some(mut ind) = by_name(name) else {
+    by_name_configured_for(name, params, None)
+}
+
+/// `by_name_configured` resolved for `user` (see `by_name_for`).
+pub fn by_name_configured_for(
+    name: &str,
+    params: &Value,
+    user: Option<&str>,
+) -> Result<Option<Box<dyn Indicator>>, String> {
+    let Some(mut ind) = by_name_for(name, user) else {
         return Ok(None);
     };
     validate_params(name, ind.as_ref(), params)?;

@@ -73,6 +73,21 @@ pub fn render_chart(
     width: u32,
     height: u32,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    // Compute all indicators
+    let results: Vec<PanelResult> = panels.iter().map(|p| p.compute(data)).collect();
+    let refs: Vec<&PanelResult> = results.iter().collect();
+    render_results(data, &refs, output, width, height)
+}
+
+/// `render_chart` for indicator results computed by the caller (so each
+/// indicator runs once, and a failed one can be left out).
+pub fn render_results(
+    data: &OhlcvData,
+    results: &[&PanelResult],
+    output: &str,
+    width: u32,
+    height: u32,
+) -> Result<(), Box<dyn std::error::Error>> {
     let n = data.len();
     if n == 0 {
         // Nothing to render -- write a blank image
@@ -82,12 +97,10 @@ pub fn render_chart(
         return Ok(());
     }
 
-    // Compute all indicators
-    let results: Vec<PanelResult> = panels.iter().map(|p| p.compute(data)).collect();
-
     // Separate overlays from panels
-    let overlays: Vec<&PanelResult> = results.iter().filter(|r| r.is_overlay).collect();
-    let panel_results: Vec<&PanelResult> = results.iter().filter(|r| !r.is_overlay).collect();
+    let overlays: Vec<&PanelResult> = results.iter().copied().filter(|r| r.is_overlay).collect();
+    let panel_results: Vec<&PanelResult> =
+        results.iter().copied().filter(|r| !r.is_overlay).collect();
     let n_panels = panel_results.len();
 
     // Price range

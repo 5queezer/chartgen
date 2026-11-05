@@ -17,6 +17,7 @@ use uuid::Uuid;
 use crate::chart_push::{ChartHub, PushCtx, STREAM_BUFFER};
 use crate::mcp::handle_mcp_request;
 use chartgen::engine::Engine as TradingEngine;
+use chartgen::scripting;
 
 // --- OAuth 2.1 PKCE in-memory store ---
 
@@ -36,7 +37,7 @@ struct AuthCode {
 
 struct AccessToken {
     _token: String,
-    _client_id: String,
+    client_id: String,
     created_at: Instant,
     expires_in: Duration,
 }
@@ -67,6 +68,13 @@ impl OAuthStore {
     fn validate_token(&mut self, token: &str) -> bool {
         self.cleanup_expired();
         self.tokens.contains_key(token)
+    }
+
+    /// The OAuth client a valid token was issued to: the owner of that
+    /// caller's scripted indicators (ADR-0025).
+    fn client_for_token(&mut self, token: &str) -> Option<String> {
+        self.cleanup_expired();
+        self.tokens.get(token).map(|t| t.client_id.clone())
     }
 }
 
@@ -140,6 +148,15 @@ async fn oauth_register(
         .unwrap()
         .clients
         .insert(client_id.clone(), client);
+    // With scripting on, the client id owns stored indicators, so it must
+    // survive restarts: persist the registration (ADR-0025).
+    if scripting::enabled() {
+        if let Some(store) = scripting::persistence::global() {
+            if let Err(e) = store.save_oauth_client(&client_id, &body.redirect_uris) {
+                eprintln!("[OAuth] could not persist client {client_id}: {e}");
+            }
+        }
+    }
 
     (
         StatusCode::CREATED,
@@ -359,7 +376,7 @@ async fn oauth_token(
         token.clone(),
         AccessToken {
             _token: token.clone(),
-            _client_id: body.client_id.clone(),
+            client_id: body.client_id.clone(),
             created_at: Instant::now(),
             expires_in,
         },
@@ -677,6 +694,11 @@ async fn mcp_handler(
 
     // Extract token for subscription tools
     let token_owned = extract_bearer_token(&headers).map(|t| t.to_string());
+    // Scripted indicators belong to the token's OAuth client (ADR-0025).
+    let user = match &token_owned {
+        Some(t) if scripting::enabled() => state.oauth.lock().unwrap().client_for_token(t),
+        _ => None,
+    };
 
     // Run MCP handler in a blocking task (chart rendering + data fetching use blocking I/O)
     let method_owned = method.to_string();
@@ -695,6 +717,7 @@ async fn mcp_handler(
             engine.as_ref(),
             token_owned.as_deref(),
             push.as_ref(),
+            user.as_deref(),
         )
     })
     .await
@@ -877,8 +900,34 @@ impl Drop for CleanupStream {
 // --- Server startup ---
 
 pub async fn run_server(port: u16, engine: Option<Arc<RwLock<TradingEngine>>>) {
+    let mut oauth = OAuthStore::new();
+    // Scripting: open (and migrate) the store at startup and restore the
+    // registered OAuth clients, so their scripts stay theirs (ADR-0025).
+    if scripting::enabled() {
+        let path = scripting::persistence::db_path();
+        match scripting::persistence::global().map(|s| s.oauth_clients()) {
+            Some(Ok(clients)) => {
+                println!(
+                    "Scripting enabled: {} ({} OAuth clients restored)",
+                    path.display(),
+                    clients.len()
+                );
+                for (id, redirect_uris) in clients {
+                    oauth.clients.insert(
+                        id,
+                        OAuthClient {
+                            _client_secret: None,
+                            redirect_uris,
+                        },
+                    );
+                }
+            }
+            Some(Err(e)) => eprintln!("[scripting] cannot read OAuth clients: {e}"),
+            None => eprintln!("[scripting] store unavailable at {}", path.display()),
+        }
+    }
     let state = Arc::new(AppState {
-        oauth: Mutex::new(OAuthStore::new()),
+        oauth: Mutex::new(oauth),
         engine,
         charts: ChartHub::from_env(),
     });
@@ -1258,7 +1307,7 @@ mod tests {
                 "test-token".to_string(),
                 AccessToken {
                     _token: "test-token".to_string(),
-                    _client_id: "test".to_string(),
+                    client_id: "test".to_string(),
                     created_at: Instant::now(),
                     expires_in: Duration::from_secs(3600),
                 },
@@ -1372,7 +1421,7 @@ mod tests {
             "push-token".to_string(),
             AccessToken {
                 _token: "push-token".to_string(),
-                _client_id: "test".to_string(),
+                client_id: "test".to_string(),
                 created_at: Instant::now(),
                 expires_in: Duration::from_secs(3600),
             },
@@ -1433,7 +1482,7 @@ mod tests {
             "push-token".to_string(),
             AccessToken {
                 _token: "push-token".to_string(),
-                _client_id: "test".to_string(),
+                client_id: "test".to_string(),
                 created_at: Instant::now(),
                 expires_in: Duration::from_secs(3600),
             },

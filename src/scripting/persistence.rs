@@ -1,0 +1,204 @@
+//! SQLite store for user indicators and registered OAuth clients (ADR-0025).
+//!
+//! One file, `CHARTGEN_DB` (default `~/.chartgen/chartgen.db`), migrated on
+//! open. OAuth clients are stored so a client keeps its `client_id` (the
+//! script owner's identity) across server restarts.
+
+use rusqlite::{params, Connection, OptionalExtension};
+use serde_json::Value;
+use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
+
+/// Schema migrations; `PRAGMA user_version` is the number applied.
+const MIGRATIONS: &[&str] = &["
+    CREATE TABLE user_indicators (
+        user_id      TEXT    NOT NULL,
+        name         TEXT    NOT NULL,
+        source       TEXT    NOT NULL,
+        meta_json    TEXT    NOT NULL,
+        source_hash  TEXT    NOT NULL,
+        created_at   INTEGER NOT NULL,
+        updated_at   INTEGER NOT NULL,
+        PRIMARY KEY (user_id, name)
+    );
+    CREATE TABLE oauth_clients (
+        client_id      TEXT    PRIMARY KEY,
+        redirect_uris  TEXT    NOT NULL,
+        created_at     INTEGER NOT NULL
+    );
+"];
+
+/// A stored script. `meta` is the `ScriptInfo` snapshot taken at register.
+#[derive(Clone, Debug, PartialEq)]
+pub struct StoredScript {
+    pub name: String,
+    pub source: String,
+    pub meta: Value,
+    pub source_hash: String,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+pub struct Store {
+    conn: Mutex<Connection>,
+}
+
+fn row_to_script(r: &rusqlite::Row) -> rusqlite::Result<StoredScript> {
+    let meta: String = r.get(2)?;
+    Ok(StoredScript {
+        name: r.get(0)?,
+        source: r.get(1)?,
+        meta: serde_json::from_str(&meta).unwrap_or(Value::Null),
+        source_hash: r.get(3)?,
+        created_at: r.get(4)?,
+        updated_at: r.get(5)?,
+    })
+}
+
+const COLUMNS: &str = "name, source, meta_json, source_hash, created_at, updated_at";
+
+impl Store {
+    /// Open (creating the file and its directory) and migrate.
+    pub fn open(path: &Path) -> rusqlite::Result<Self> {
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let mut conn = Connection::open(path)?;
+        conn.busy_timeout(std::time::Duration::from_secs(5))?;
+        let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+        for (i, sql) in MIGRATIONS.iter().enumerate().skip(version as usize) {
+            let tx = conn.transaction()?;
+            tx.execute_batch(sql)?;
+            tx.pragma_update(None, "user_version", i as i64 + 1)?;
+            tx.commit()?;
+        }
+        Ok(Self {
+            conn: Mutex::new(conn),
+        })
+    }
+
+    fn conn(&self) -> std::sync::MutexGuard<'_, Connection> {
+        self.conn.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Insert or replace `(user, name)`; keeps the original `created_at`.
+    pub fn upsert(
+        &self,
+        user: &str,
+        name: &str,
+        source: &str,
+        meta: &Value,
+        source_hash: &str,
+    ) -> rusqlite::Result<()> {
+        let now = chrono::Utc::now().timestamp();
+        self.conn().execute(
+            "INSERT INTO user_indicators
+                 (user_id, name, source, meta_json, source_hash, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)
+             ON CONFLICT (user_id, name) DO UPDATE SET
+                 source = excluded.source, meta_json = excluded.meta_json,
+                 source_hash = excluded.source_hash, updated_at = excluded.updated_at",
+            params![user, name, source, meta.to_string(), source_hash, now],
+        )?;
+        Ok(())
+    }
+
+    pub fn get(&self, user: &str, name: &str) -> rusqlite::Result<Option<StoredScript>> {
+        self.conn()
+            .query_row(
+                &format!("SELECT {COLUMNS} FROM user_indicators WHERE user_id = ?1 AND name = ?2"),
+                params![user, name],
+                row_to_script,
+            )
+            .optional()
+    }
+
+    /// The user's scripts, by name.
+    pub fn list(&self, user: &str) -> rusqlite::Result<Vec<StoredScript>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {COLUMNS} FROM user_indicators WHERE user_id = ?1 ORDER BY name"
+        ))?;
+        let rows = stmt.query_map(params![user], row_to_script)?;
+        rows.collect()
+    }
+
+    /// True when a row was removed.
+    pub fn delete(&self, user: &str, name: &str) -> rusqlite::Result<bool> {
+        let n = self.conn().execute(
+            "DELETE FROM user_indicators WHERE user_id = ?1 AND name = ?2",
+            params![user, name],
+        )?;
+        Ok(n > 0)
+    }
+
+    pub fn count(&self, user: &str) -> rusqlite::Result<usize> {
+        let n: i64 = self.conn().query_row(
+            "SELECT COUNT(*) FROM user_indicators WHERE user_id = ?1",
+            params![user],
+            |r| r.get(0),
+        )?;
+        Ok(n as usize)
+    }
+
+    pub fn save_oauth_client(
+        &self,
+        client_id: &str,
+        redirect_uris: &[String],
+    ) -> rusqlite::Result<()> {
+        self.conn().execute(
+            "INSERT OR REPLACE INTO oauth_clients (client_id, redirect_uris, created_at)
+             VALUES (?1, ?2, ?3)",
+            params![
+                client_id,
+                serde_json::to_string(redirect_uris).unwrap_or_default(),
+                chrono::Utc::now().timestamp()
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Every stored OAuth client as `(client_id, redirect_uris)`.
+    pub fn oauth_clients(&self) -> rusqlite::Result<Vec<(String, Vec<String>)>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare("SELECT client_id, redirect_uris FROM oauth_clients")?;
+        let rows = stmt.query_map([], |r| {
+            let uris: String = r.get(1)?;
+            Ok((r.get(0)?, serde_json::from_str(&uris).unwrap_or_default()))
+        })?;
+        rows.collect()
+    }
+}
+
+/// `CHARTGEN_DB`, else `~/.chartgen/chartgen.db`.
+pub fn db_path() -> PathBuf {
+    if let Ok(p) = std::env::var("CHARTGEN_DB") {
+        return PathBuf::from(p);
+    }
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .unwrap_or_else(|_| ".".to_string());
+    PathBuf::from(home).join(".chartgen").join("chartgen.db")
+}
+
+static STORE: OnceLock<Option<Store>> = OnceLock::new();
+
+/// The process-wide store at `path`, opened (and migrated) on first use;
+/// later calls return that same store whatever `path` they pass. `None`
+/// (logged once) when it cannot be opened.
+pub fn open_global(path: &Path) -> Option<&'static Store> {
+    STORE
+        .get_or_init(|| match Store::open(path) {
+            Ok(s) => Some(s),
+            Err(e) => {
+                eprintln!("[scripting] cannot open {}: {e}", path.display());
+                None
+            }
+        })
+        .as_ref()
+}
+
+/// The process-wide store at `db_path()`.
+pub fn global() -> Option<&'static Store> {
+    open_global(&db_path())
+}
