@@ -700,3 +700,223 @@ fn test_nan_inf_floats_are_not_representable_or_rejected() {
         "huge float must exceed max"
     );
 }
+
+// ===========================================================================
+// 13. HTTP server: web app on the same origin, OAuth discovery (ADR-0027)
+// ===========================================================================
+
+/// A `chartgen --serve` child on a free port, killed on drop.
+struct Server {
+    child: std::process::Child,
+    port: u16,
+}
+
+impl Drop for Server {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+fn spawn_server(web_dir: Option<&std::path::Path>) -> Server {
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_chartgen"));
+    cmd.args(["--serve", "--port", &port.to_string()])
+        .env_remove("CHARTGEN_WEB_DIR")
+        .env_remove("CHARTGEN_BASE_URL")
+        .env_remove("CHARTGEN_SCRIPTING")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    if let Some(dir) = web_dir {
+        cmd.env("CHARTGEN_WEB_DIR", dir);
+    }
+    let server = Server {
+        child: cmd.spawn().unwrap(),
+        port,
+    };
+    for _ in 0..200 {
+        if std::net::TcpStream::connect(("127.0.0.1", port)).is_ok() {
+            return server;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    panic!("chartgen --serve did not listen on {port}");
+}
+
+/// Raw HTTP/1.1 exchange, so paths like `/../x` reach the server verbatim.
+/// Returns (status, lower-cased head, body).
+fn http(
+    port: u16,
+    method: &str,
+    path: &str,
+    headers: &[&str],
+    body: &str,
+) -> (u16, String, String) {
+    use std::io::{Read, Write};
+    let mut s = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+    let mut req = format!("{method} {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n");
+    for h in headers {
+        req.push_str(&format!("{h}\r\n"));
+    }
+    req.push_str(&format!("Content-Length: {}\r\n\r\n{body}", body.len()));
+    s.write_all(req.as_bytes()).unwrap();
+    let mut resp = String::new();
+    s.read_to_string(&mut resp).unwrap();
+    let (head, body) = resp.split_once("\r\n\r\n").unwrap();
+    let status = head.split(' ').nth(1).unwrap().parse().unwrap();
+    (status, head.to_ascii_lowercase(), body.to_string())
+}
+
+const HTML: &str = "Accept: text/html,application/xhtml+xml,*/*;q=0.8";
+const JSON_POST: [&str; 2] = ["Content-Type: application/json", "Accept: application/json"];
+
+fn initialize(port: u16, path: &str) -> (u16, String, String) {
+    http(
+        port,
+        "POST",
+        path,
+        &JSON_POST,
+        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"t","version":"0"}}}"#,
+    )
+}
+
+#[test]
+fn test_server_serves_web_app_same_origin() {
+    let root = std::env::temp_dir().join(format!("chartgen-web-{}", std::process::id()));
+    let web = root.join("dist");
+    std::fs::create_dir_all(web.join("assets")).unwrap();
+    std::fs::write(web.join("index.html"), "<!doctype html><title>app</title>").unwrap();
+    std::fs::write(web.join("assets/x.js"), "console.log(1)").unwrap();
+    std::fs::write(root.join("secret.txt"), "TOPSECRET").unwrap();
+    let srv = spawn_server(Some(&web));
+    let p = srv.port;
+
+    // `/` for browsers: the app, never cached.
+    let (st, head, body) = http(p, "GET", "/", &[HTML], "");
+    assert_eq!(st, 200);
+    assert!(body.contains("<title>app</title>"), "{body}");
+    assert!(head.contains("cache-control: no-cache"), "{head}");
+    assert!(head.contains("x-content-type-options: nosniff"), "{head}");
+
+    // `/` for everyone else (health checks, MCP probes): the JSON.
+    let (st, _, body) = http(p, "GET", "/", &[], "");
+    assert_eq!(st, 200);
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(v["status"], "ok");
+    assert_eq!(v["protocol"], "MCP");
+
+    // Hashed assets: long-lived cache.
+    let (st, head, body) = http(p, "GET", "/assets/x.js", &[], "");
+    assert_eq!(st, 200);
+    assert_eq!(body, "console.log(1)");
+    assert!(
+        head.contains("cache-control: public, max-age=31536000, immutable"),
+        "{head}"
+    );
+    assert!(head.contains("x-content-type-options: nosniff"), "{head}");
+
+    // SPA fallback for browser navigations only.
+    let (st, head, body) = http(p, "GET", "/some/client/route?x=1", &[HTML], "");
+    assert_eq!(st, 200);
+    assert!(body.contains("<title>app</title>"));
+    assert!(head.contains("cache-control: no-cache"), "{head}");
+    assert_eq!(http(p, "GET", "/nope.json", &[], "").0, 404);
+    assert_eq!(http(p, "GET", "/assets/missing.js", &[HTML], "").0, 404);
+    assert_eq!(http(p, "POST", "/nope", &[], "").0, 404);
+
+    // No path traversal out of the web dir (browsers get the app instead).
+    for path in [
+        "/../secret.txt",
+        "/assets/../../secret.txt",
+        "/%2e%2e/secret.txt",
+    ] {
+        let (st, _, body) = http(p, "GET", path, &[], "");
+        assert_eq!(st, 404, "{path}");
+        assert!(!body.contains("TOPSECRET"), "{path} leaked");
+        let (st, _, body) = http(p, "GET", path, &[HTML], "");
+        assert!(!body.contains("TOPSECRET"), "{path} leaked ({st})");
+    }
+
+    // MCP keeps working next to the app, at /mcp and the POST / alias.
+    for path in ["/mcp", "/"] {
+        let (st, _, body) = initialize(p, path);
+        assert_eq!(st, 200, "{path}: {body}");
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["result"]["serverInfo"]["name"], "chartgen", "{body}");
+    }
+    let (st, _, body) = http(
+        p,
+        "GET",
+        "/.well-known/oauth-authorization-server",
+        &[HTML],
+        "",
+    );
+    assert_eq!(st, 200);
+    assert!(body.contains("\"token_endpoint\""), "{body}");
+
+    drop(srv);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn test_server_without_web_dir_keeps_root_json() {
+    let srv = spawn_server(None);
+    let (st, head, body) = http(srv.port, "GET", "/", &[HTML], "");
+    assert_eq!(st, 200);
+    assert!(head.contains("content-type: application/json"), "{head}");
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(v["status"], "ok");
+    assert_eq!(http(srv.port, "GET", "/index.html", &[HTML], "").0, 404);
+}
+
+/// A connector added at `/mcp` finds its RFC 9728 metadata, and from it the
+/// authorization server, starting from the 401 hint alone.
+#[test]
+fn test_oauth_discovery_from_mcp() {
+    let srv = spawn_server(None);
+    let p = srv.port;
+    let base = format!("http://localhost:{p}");
+    let call = r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"x"}}"#;
+
+    let hint = format!(
+        "www-authenticate: bearer resource_metadata=\"{base}/.well-known/oauth-protected-resource/mcp\""
+    );
+    let (st, head, _) = http(p, "POST", "/mcp", &JSON_POST, call);
+    assert_eq!(st, 401);
+    assert!(head.contains(&hint), "{head}");
+    let (st, head, _) = http(p, "GET", "/mcp", &[], "");
+    assert_eq!(st, 401);
+    assert!(head.contains(&hint), "{head}");
+
+    let (st, _, body) = http(
+        p,
+        "GET",
+        "/.well-known/oauth-protected-resource/mcp",
+        &[],
+        "",
+    );
+    assert_eq!(st, 200);
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(v["resource"], format!("{base}/mcp"));
+    assert_eq!(v["authorization_servers"][0], base);
+
+    // Root document: the deprecated `POST /` alias.
+    let (st, _, body) = http(p, "GET", "/.well-known/oauth-protected-resource", &[], "");
+    assert_eq!(st, 200);
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(v["resource"], base);
+    let (st, head, _) = http(p, "POST", "/", &JSON_POST, call);
+    assert_eq!(st, 401);
+    let root_hint = format!("resource_metadata=\"{base}/.well-known/oauth-protected-resource\"");
+    assert!(head.contains(&root_hint), "{head}");
+
+    // The authorization server named there is discoverable.
+    let (st, _, body) = http(p, "GET", "/.well-known/oauth-authorization-server", &[], "");
+    assert_eq!(st, 200);
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(v["issuer"], base);
+}

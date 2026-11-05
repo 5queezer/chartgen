@@ -1,5 +1,5 @@
-use axum::extract::{Query, State};
-use axum::http::{header, HeaderMap, StatusCode};
+use axum::extract::{Query, Request, State};
+use axum::http::{header, HeaderMap, HeaderValue, Method, StatusCode, Uri};
 use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -9,9 +9,11 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 use tower_http::cors::CorsLayer;
+use tower_http::services::{ServeDir, ServeFile};
 use uuid::Uuid;
 
 use crate::chart_push::{ChartHub, PushCtx, STREAM_BUFFER};
@@ -202,6 +204,35 @@ async fn oauth_metadata(State(state): State<SharedState>) -> Json<Value> {
         "token_endpoint_auth_methods_supported": ["none", "client_secret_post"],
         "logo_uri": format!("{}/favicon.svg", base)
     }))
+}
+
+/// RFC 9728 protected-resource metadata. `/mcp` is the canonical MCP
+/// endpoint (path-suffixed document); the root document covers the
+/// deprecated `POST /` alias (ADR-0027).
+async fn oauth_protected_resource(uri: Uri) -> Json<Value> {
+    let base = base_url();
+    let suffix = uri
+        .path()
+        .strip_prefix("/.well-known/oauth-protected-resource")
+        .unwrap_or("");
+    Json(json!({
+        "resource": format!("{base}{suffix}"),
+        "authorization_servers": [base],
+        "bearer_methods_supported": ["header"]
+    }))
+}
+
+/// Adds the RFC 9728 `resource_metadata` hint to a 401 from an MCP endpoint.
+fn with_resource_metadata(mut resp: Response, path: &str) -> Response {
+    let suffix = if path == "/mcp" { "/mcp" } else { "" };
+    let value = format!(
+        "Bearer resource_metadata=\"{}/.well-known/oauth-protected-resource{suffix}\"",
+        base_url()
+    );
+    if let Ok(v) = HeaderValue::from_str(&value) {
+        resp.headers_mut().insert(header::WWW_AUTHENTICATE, v);
+    }
+    resp
 }
 
 #[derive(Deserialize)]
@@ -703,6 +734,7 @@ fn streamable_http_json_response(
 /// - Successful responses set `Content-Type: application/json`.
 async fn mcp_handler(
     State(state): State<SharedState>,
+    uri: Uri,
     headers: HeaderMap,
     ext: axum::http::Extensions,
     body_bytes: axum::body::Bytes,
@@ -759,19 +791,21 @@ async fn mcp_handler(
                     -32000,
                     "Missing Authorization header",
                 );
-                return streamable_http_json_response(
-                    StatusCode::UNAUTHORIZED,
-                    err,
-                    session_id.as_deref(),
+                return with_resource_metadata(
+                    streamable_http_json_response(
+                        StatusCode::UNAUTHORIZED,
+                        err,
+                        session_id.as_deref(),
+                    ),
+                    uri.path(),
                 );
             }
         };
         if !state.oauth.lock().unwrap().validate_token(&token) {
             let err = jsonrpc_error(body.get("id").cloned(), -32000, "Invalid or expired token");
-            return streamable_http_json_response(
-                StatusCode::UNAUTHORIZED,
-                err,
-                session_id.as_deref(),
+            return with_resource_metadata(
+                streamable_http_json_response(StatusCode::UNAUTHORIZED, err, session_id.as_deref()),
+                uri.path(),
             );
         }
     }
@@ -843,6 +877,57 @@ async fn health_handler() -> Json<Value> {
     }))
 }
 
+// --- Web app (ADR-0027) ---
+
+fn accepts_html(headers: &HeaderMap) -> bool {
+    headers
+        .get(header::ACCEPT)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|a| a.contains("text/html"))
+}
+
+/// `GET /`: the web app for browsers, the health JSON for everyone else.
+async fn root_handler(dir: PathBuf, req: Request) -> Response {
+    if accepts_html(req.headers()) {
+        serve_web(dir, req).await
+    } else {
+        health_handler().await.into_response()
+    }
+}
+
+/// Serves the built web app in `dir` (router fallback). A missing path is
+/// answered with `index.html` when the client accepts HTML (SPA routing);
+/// otherwise it is a 404, as are non-GET/HEAD requests.
+async fn serve_web(dir: PathBuf, req: Request) -> Response {
+    if !matches!(*req.method(), Method::GET | Method::HEAD) {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    let assets = req.uri().path().starts_with("/assets/");
+    let mut resp = if accepts_html(req.headers()) && !assets {
+        let index = ServeFile::new(dir.join("index.html"));
+        ServeDir::new(&dir).fallback(index).try_call(req).await
+    } else {
+        ServeDir::new(&dir).try_call(req).await
+    }
+    .map_or_else(
+        |_| StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+        IntoResponse::into_response,
+    );
+    let cache = if assets && resp.status().is_success() {
+        // Vite content-hashes everything under /assets/.
+        "public, max-age=31536000, immutable"
+    } else {
+        "no-cache"
+    };
+    let h = resp.headers_mut();
+    h.insert(header::CACHE_CONTROL, HeaderValue::from_static(cache));
+    h.insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        HeaderValue::from_static("nosniff"),
+    );
+    resp
+}
+
 // --- SSE Transport handler ---
 
 /// Streamable HTTP (MCP 2025-03-26) server-initiated SSE stream.
@@ -856,18 +941,20 @@ async fn health_handler() -> Json<Value> {
 /// notifications (e.g. `notifications/alert_triggered`,
 /// `notifications/chart_tick`) from this stream directly as JSON-RPC
 /// notification frames.
-async fn sse_handler(State(state): State<SharedState>, headers: HeaderMap) -> Response {
+async fn sse_handler(State(state): State<SharedState>, uri: Uri, headers: HeaderMap) -> Response {
     eprintln!("[MCP] GET /mcp (Streamable HTTP SSE stream requested)");
 
     // Validate bearer token
     let token = match extract_bearer_token(&headers) {
         Some(t) => t.to_string(),
         None => {
-            return (StatusCode::UNAUTHORIZED, "Missing Authorization header").into_response();
+            let resp = (StatusCode::UNAUTHORIZED, "Missing Authorization header").into_response();
+            return with_resource_metadata(resp, uri.path());
         }
     };
     if !state.oauth.lock().unwrap().validate_token(&token) {
-        return (StatusCode::UNAUTHORIZED, "Invalid or expired token").into_response();
+        let resp = (StatusCode::UNAUTHORIZED, "Invalid or expired token").into_response();
+        return with_resource_metadata(resp, uri.path());
     }
 
     // Echo the client-supplied Mcp-Session-Id if present, else mint one so
@@ -1052,10 +1139,25 @@ pub async fn run_server(port: u16, engine: Option<Arc<RwLock<TradingEngine>>>) {
 
     let cors = CorsLayer::permissive();
 
-    let app = Router::new()
+    // Built web app (ADR-0027); unset keeps the server API-only.
+    let web_dir = std::env::var_os("CHARTGEN_WEB_DIR").map(PathBuf::from);
+    let root_get = match web_dir.clone() {
+        Some(dir) => get(move |req: Request| root_handler(dir.clone(), req)),
+        None => get(health_handler),
+    };
+
+    let mut app = Router::new()
         .route(
             "/.well-known/oauth-authorization-server",
             get(oauth_metadata),
+        )
+        .route(
+            "/.well-known/oauth-protected-resource",
+            get(oauth_protected_resource),
+        )
+        .route(
+            "/.well-known/oauth-protected-resource/mcp",
+            get(oauth_protected_resource),
         )
         .route("/register", post(oauth_register))
         .route("/authorize", get(oauth_authorize))
@@ -1063,12 +1165,17 @@ pub async fn run_server(port: u16, engine: Option<Arc<RwLock<TradingEngine>>>) {
         .route("/favicon.ico", get(favicon_handler))
         .route("/favicon.svg", get(favicon_handler))
         // MCP endpoints — Claude.ai may try root, /mcp, /message, or /sse
-        .route("/", get(health_handler).post(mcp_handler))
+        // /mcp is canonical; POST /, /message and /sse are deprecated
+        // aliases for older connectors (ADR-0027).
+        .route("/", root_get.post(mcp_handler))
         .route("/mcp", get(sse_handler).post(mcp_handler))
         .route("/message", post(mcp_handler))
-        .route("/sse", get(sse_handler))
-        .layer(cors)
-        .with_state(state);
+        .route("/sse", get(sse_handler));
+    if let Some(dir) = web_dir {
+        println!("Serving web app from {}", dir.display());
+        app = app.fallback(move |req: Request| serve_web(dir.clone(), req));
+    }
+    let app = app.layer(cors).with_state(state);
 
     let addr = format!("0.0.0.0:{}", port);
     println!("MCP server listening on {}", addr);
