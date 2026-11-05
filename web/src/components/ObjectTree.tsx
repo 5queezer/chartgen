@@ -43,11 +43,17 @@ const LOCK = "M4 7h8v6H4zM5.5 7V5a2.5 2.5 0 0 1 5 0v2";
 const UNLOCK = "M4 7h8v6H4zM5.5 7V5a2.5 2.5 0 0 1 4.8-1";
 const CLOSE = "M3.5 3.5L12.5 12.5M12.5 3.5L3.5 12.5";
 
-function Action(props: { label: string; path: string; onClick: () => void }): JSX.Element {
+function Action(props: {
+  label: string;
+  path: string;
+  disabled?: boolean;
+  onClick: () => void;
+}): JSX.Element {
   return (
     <button
       type="button"
-      class="inline-flex items-center justify-center w-6 h-6 rounded-md cursor-pointer text-[color:var(--color-fg-muted)] hover:text-[color:var(--color-fg)] hover:bg-[color:var(--color-bg-elev)]"
+      class="inline-flex items-center justify-center w-6 h-6 rounded-md cursor-pointer disabled:cursor-default disabled:opacity-40 text-[color:var(--color-fg-muted)] hover:text-[color:var(--color-fg)] hover:bg-[color:var(--color-bg-elev)]"
+      disabled={props.disabled}
       aria-label={props.label}
       title={props.label}
       onClick={(e) => {
@@ -86,6 +92,7 @@ function Group(props: { title: string; children: JSX.Element }): JSX.Element {
 function Item(props: {
   testId: string;
   dim?: boolean;
+  title?: string;
   swatch?: string;
   label: JSX.Element;
   onClick?: () => void;
@@ -94,6 +101,7 @@ function Item(props: {
   return (
     <div
       data-testid={props.testId}
+      title={props.title}
       class="wl-row flex items-center gap-2 px-3 py-1 text-sm"
       classList={{ "cursor-pointer": !!props.onClick, "opacity-50": props.dim }}
       onClick={() => props.onClick?.()}
@@ -187,18 +195,21 @@ export function ObjectTree(props: ObjectTreeProps): JSX.Element {
               return (
                 <Item
                   testId={`tree-drawing-${d.id}`}
-                  dim={!d.visible}
+                  dim={!d.visible || d.offRange}
+                  title={d.offRange ? "Not in loaded range" : undefined}
                   label={text()}
                   onClick={() => props.drawings?.select(d.id)}
                 >
                   <Action
                     label={`${d.visible ? "Hide" : "Show"} ${text()}`}
                     path={d.visible ? EYE : EYE_OFF}
+                    disabled={d.offRange}
                     onClick={() => props.drawings?.setVisible(d.id, !d.visible)}
                   />
                   <Action
                     label={`${d.lock ? "Unlock" : "Lock"} ${text()}`}
                     path={d.lock ? LOCK : UNLOCK}
+                    disabled={d.offRange}
                     onClick={() => props.drawings?.setLocked(d.id, !d.lock)}
                   />
                   <Action

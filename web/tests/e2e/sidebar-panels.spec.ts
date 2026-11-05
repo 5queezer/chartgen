@@ -4,7 +4,7 @@
 
 import type { Page } from "@playwright/test";
 
-import { test, expect } from "./fixtures/app";
+import { test, expect, reloadApp } from "./fixtures/app";
 
 const shot = async (page: Page, name: string) => {
   const dir = process.env.SIDEBAR_SHOTS_DIR;
@@ -124,12 +124,81 @@ test.describe("sidebar panels", () => {
     await page.keyboard.press("Delete");
     await expect.poll(() => overlays(page)).toHaveLength(1);
 
-    // Selecting from the tree is what a click on the line does: Delete then removes it.
+    // A tree selection is ours, not klinecharts': Delete acts on it at once.
     await row.click();
-    await page.waitForTimeout(300);
     await page.keyboard.press("Delete");
     await expect.poll(() => overlays(page)).toHaveLength(0);
     await expect(row).toHaveCount(0);
+  });
+
+  test("selecting from the tree never alters the stored drawing", async ({
+    bootedApp: page,
+  }) => {
+    await page.setViewportSize({ width: 1280 + 288, height: 720 });
+    await drawTrendLine(page);
+    await tab(page, "Object Tree").click();
+    const stored = () =>
+      page.evaluate(() => localStorage.getItem("chartgen.drawings.BTCUSDT"));
+    const before = await stored();
+    await page.locator("[data-testid^=tree-drawing-]").click();
+    // A press on the empty chart ends the selection; the highlight leaves no trace.
+    await clickAt(page, { x: 900, y: 400 });
+    await page.keyboard.press("Delete");
+    await expect.poll(() => overlays(page)).toHaveLength(1);
+    expect(await stored()).toBe(before);
+  });
+
+  test("selecting a drawing whose point is in the future scrolls to the latest bars", async ({
+    bootedApp: page,
+  }) => {
+    await page.setViewportSize({ width: 1280 + 288, height: 720 });
+    await page.getByRole("button", { name: "Trend line" }).click();
+    await clickAt(page, { x: 1100, y: 200 });
+    await clickAt(page, { x: 700, y: 260 });
+    await expect.poll(() => overlays(page)).toHaveLength(1);
+    await tab(page, "Object Tree").click();
+
+    const range = () =>
+      page.evaluate(() => {
+        const t = (
+          window as unknown as {
+            __chartgenTest: {
+              chart: () => {
+                getVisibleRange: () => { to: number };
+                getDataList: () => unknown[];
+              };
+            };
+          }
+        ).__chartgenTest;
+        return {
+          to: t.chart().getVisibleRange().to,
+          last: t.chart().getDataList().length - 1,
+        };
+      });
+    // Drag the view back in time so the future point is off screen.
+    const box = (await host(page).boundingBox())!;
+    await page.mouse.move(box.x + 300, box.y + 400);
+    await page.mouse.down();
+    await page.mouse.move(box.x + 900, box.y + 400, { steps: 10 });
+    await page.mouse.up();
+    const away = await range();
+    expect(away.to).toBeLessThan(away.last - 20);
+
+    await page.locator("[data-testid^=tree-drawing-]").click();
+    await expect
+      .poll(async () => (await range()).to)
+      .toBeGreaterThanOrEqual(away.last - 1);
+  });
+
+  test("Object Tree rows keep focus across drawing commits", async ({
+    bootedApp: page,
+  }) => {
+    await page.setViewportSize({ width: 1280 + 288, height: 720 });
+    await drawTrendLine(page);
+    await tab(page, "Object Tree").click();
+    const row = page.locator("[data-testid^=tree-drawing-]");
+    await row.getByRole("button", { name: /^Lock / }).click();
+    await expect(row.getByRole("button", { name: /^Unlock / })).toBeFocused();
   });
 
   test("Object Tree: drawing hide, lock and remove", async ({ bootedApp: page }) => {
@@ -174,10 +243,10 @@ test.describe("sidebar panels", () => {
     bootedApp: page,
   }) => {
     await tab(page, "Data Window").click();
-    await page.reload();
+    await reloadApp(page);
     await expect(tab(page, "Data Window")).toHaveAttribute("aria-selected", "true");
     await page.evaluate(() => localStorage.setItem("chartgen.sidebar.tab", "alerts"));
-    await page.reload();
+    await reloadApp(page);
     await expect(tab(page, /^Alerts/)).toHaveAttribute("aria-selected", "true");
   });
 });

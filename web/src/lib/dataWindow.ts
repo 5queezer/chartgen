@@ -54,6 +54,8 @@ export interface DataWindowOptions {
   colorAt: (name: string, n: number) => string;
   /** Series keys of the visible indicators; every payload indicator when omitted. */
   visible?: ReadonlySet<string>;
+  /** Bar the compare percent is measured from, as in the legend; 0 when omitted. */
+  compareFrom?: number;
 }
 
 export function dataWindowRows(
@@ -99,11 +101,15 @@ export function dataWindowRows(
     bar: barLegend(bars, at, precision),
     indicators,
     compare: compare.map((line) => {
-      const reading = compareReading(line.values, 0, index);
+      const reading = compareReading(
+        line.values,
+        opts.compareFrom ?? 0,
+        at === index ? at : null,
+      );
       return {
         label: line.symbol,
         value: reading
-          ? `${formatPrice(reading.value, precision)} (${formatPct(reading.pct)})`
+          ? `${formatPrice(reading.value, pricePrecision(line.values))} (${formatPct(reading.pct)})`
           : "—",
         color: line.color,
       };

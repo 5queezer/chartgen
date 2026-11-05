@@ -22,6 +22,8 @@ export interface DataWindowProps {
   crosshair: number | null;
   styles: Record<string, IndicatorStyle | undefined>;
   compare: CompareLine[];
+  /** Bar the compare percent is measured from; as in the legend. */
+  compareFrom: number;
   timeZone: string;
 }
 
@@ -80,6 +82,7 @@ export function DataWindow(props: DataWindowProps): JSX.Element {
           timeZone: props.timeZone,
           colorAt: paletteColor,
           visible: visible(),
+          compareFrom: props.compareFrom,
         })
       : null,
   );

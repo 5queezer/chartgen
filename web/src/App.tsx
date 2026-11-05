@@ -323,6 +323,7 @@ export function App(): JSX.Element {
   // ---------------------------------------------------------------------
   // Sidebar tabs: Data Window (crosshair bar) and Object Tree (drawings).
   const [crosshair, setCrosshair] = createSignal<number | null>(null);
+  const [compareFrom, setCompareFrom] = createSignal(0);
   const [drawings, setDrawings] = createSignal<DrawingsApi | null>(null);
   // ---------------------------------------------------------------------
   // Other symbols with active alerts are evaluated from their own quotes poll.
@@ -498,6 +499,7 @@ export function App(): JSX.Element {
             onRemove={removeIndicator}
             onChartReady={setChart}
             onCrosshair={setCrosshair}
+            onCompareFrom={setCompareFrom}
             compare={compareLines()}
             onRemoveCompare={removeCompare}
           />
@@ -510,6 +512,7 @@ export function App(): JSX.Element {
             crosshair: crosshair(),
             styles: plotStyles(),
             compare: compareLines(),
+            compareFrom: compareFrom(),
             timeZone: resolveTimeZone(timeZone(), symbol()),
             drawings: drawings(),
             onSettings: (n) => setSettingsIndex(indexOf(n)),

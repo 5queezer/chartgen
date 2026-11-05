@@ -823,6 +823,8 @@ export interface ChartProps {
   onChartReady?: (chart: KChart) => void;
   /** Bar index under the crosshair (one update per frame); null when it is off the chart. */
   onCrosshair?: (index: number | null) => void;
+  /** Bar the compare percent is measured from (the view start on a percent axis, else 0). */
+  onCompareFrom?: (index: number) => void;
   /**
    * Compare symbols (ADR-0022): one line per entry, `values` aligned to
    * `series.bars` (null where the symbol has no close yet).
@@ -1105,6 +1107,9 @@ export function Chart(props: ChartProps): JSX.Element {
   });
 
   createEffect(() => props.onCrosshair?.(crosshairIndex()));
+  createEffect(() =>
+    props.onCompareFrom?.(scaleMode() === "percentage" ? firstVisible() : 0),
+  );
 
   // React to crosshair changes by recomputing header values only.
   createEffect(() => {

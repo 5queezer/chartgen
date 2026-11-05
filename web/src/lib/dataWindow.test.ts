@@ -82,11 +82,32 @@ describe("dataWindowRows", () => {
     expect(d.indicators.map((s) => s.key)).toEqual(["rsi"]);
   });
 
-  it("reads compare symbols with value and percent", () => {
-    const d = dataWindowRows(series, 2, {}, [{ symbol: "ETHUSDT", color: "#f23645", values: [100, 110, 121] }], opts);
-    expect(d.compare).toEqual([{ label: "ETHUSDT", value: "121.00 (+21.00%)", color: "#f23645" }]);
-    const none = dataWindowRows(series, 2, {}, [{ symbol: "X", color: "#fff", values: [null, null, null] }], opts);
-    expect(none.compare[0]!.value).toBe("—");
+  it("reads compare symbols with their own precision, value and percent", () => {
+    const eth = { symbol: "ETHUSDT", color: "#f23645", values: [100, 110, 121] };
+    expect(dataWindowRows(series, 2, {}, [eth], opts).compare).toEqual([
+      { label: "ETHUSDT", value: "121.00 (+21.00%)", color: "#f23645" },
+    ]);
+    const doge = { symbol: "DOGE", color: "#fff", values: [0.12345, 0.2, 0.3] };
+    expect(dataWindowRows(series, 2, {}, [doge], opts).compare[0]!.value).toBe(
+      "0.30000 (+143.01%)",
+    );
+  });
+
+  it("measures the percent from the given bar", () => {
+    const eth = { symbol: "E", color: "#fff", values: [100, 110, 121] };
+    const d = dataWindowRows(series, 2, {}, [eth], { ...opts, compareFrom: 1 });
+    expect(d.compare[0]!.value).toBe("121.00 (+10.00%)");
+  });
+
+  it("shows a dash where the compare has no value at the crosshair bar", () => {
+    const line = { symbol: "X", color: "#fff", values: [null, 110, 121] };
+    expect(dataWindowRows(series, 0, {}, [line], opts).compare[0]!.value).toBe("—");
+    // At rest it reads the last value.
+    expect(dataWindowRows(series, null, {}, [line], opts).compare[0]!.value).toBe(
+      "121.00 (+10.00%)",
+    );
+    const none = { symbol: "X", color: "#fff", values: [null, null, null] };
+    expect(dataWindowRows(series, 2, {}, [none], opts).compare[0]!.value).toBe("—");
   });
 
   it("handles a series without bars", () => {

@@ -141,8 +141,10 @@ export interface CompareReading {
 }
 
 /**
- * Legend reading of a line: its value at `at` (the last finite one when null
- * or without a value) and the percent change since the first value from `from`.
+ * Legend reading of a line: its value at `at` and the percent change since
+ * the first value from `from`. Without a crosshair (`at` null) it reads the
+ * last finite value; with one, a line that has no value at that bar has no
+ * reading.
  */
 export function compareReading(
   raw: ReadonlyArray<number | null | undefined>,
@@ -157,8 +159,11 @@ export function compareReading(
     }
   }
   if (start < 0) return null;
-  let end = at !== null && finite(raw[at]) ? at : -1;
-  if (end < 0) {
+  let end = -1;
+  if (at !== null) {
+    if (!finite(raw[at])) return null;
+    end = at;
+  } else {
     for (let i = raw.length - 1; i >= 0; i--) {
       if (finite(raw[i])) {
         end = i;

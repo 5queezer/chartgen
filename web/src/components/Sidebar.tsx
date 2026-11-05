@@ -1,9 +1,8 @@
-// Right sidebar with TradingView-style icon tabs: Watchlist | Alerts | Data
-// Window | Object Tree. The
-// collapsed state is the watchlist store's, so the edge strip is the
-// Watchlist's own and expanding it returns to the last tab. The tab is kept
-// in localStorage. Switching tabs unmounts the other panel, so the
-// watchlist only polls quotes while its tab is showing.
+// Right sidebar with TradingView-style icon tabs: Watchlist, Alerts, Data
+// Window and Object Tree. The collapsed state is the watchlist store's, so
+// the edge strip is the Watchlist's own and expanding it returns to the last
+// tab. The tab is kept in localStorage. Switching tabs unmounts the other
+// panel, so the watchlist only polls quotes while its tab is showing.
 
 import { For, Show, createSignal, type JSX } from "solid-js";
 
