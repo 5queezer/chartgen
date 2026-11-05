@@ -16,6 +16,42 @@ interface AppFixtures {
   bootedApp: Page;
 }
 
+interface AppOptions {
+  /**
+   * Server push (ADR-0021). On by default; specs about the polling path
+   * opt out with `test.use({ push: false })`.
+   */
+  push: boolean;
+}
+
+/**
+ * Answer every `subscribe_chart` in the page with "not pushable", so the
+ * live feed polls as it does for a non-Binance symbol. Done in the page's
+ * fetch, not with page.route, so a spec's own routes cannot let one
+ * through. Call before the first navigation.
+ */
+export async function disablePush(page: Page): Promise<void> {
+  await page.addInitScript(() => {
+    const realFetch = window.fetch.bind(window);
+    window.fetch = (input, init) => {
+      const body = typeof init?.body === "string" ? init.body : "";
+      if (init?.method === "POST" && body.includes('"subscribe_chart"')) {
+        const { id } = JSON.parse(body) as { id: unknown };
+        const result = {
+          content: [{ type: "text", text: "not pushable: disabled by the E2E fixture" }],
+          isError: true,
+        };
+        return Promise.resolve(
+          new Response(JSON.stringify({ jsonrpc: "2.0", id, result }), {
+            headers: { "content-type": "application/json" },
+          }),
+        );
+      }
+      return realFetch(input, init);
+    };
+  });
+}
+
 /**
  * Wait until the klinecharts canvas inside `.chart-host` has a
  * non-zero-sized canvas rendered by the library. We intentionally do
@@ -98,8 +134,10 @@ export function reloadApp(page: Page): Promise<void> {
   return bootApp(page, () => page.reload());
 }
 
-export const test = base.extend<AppFixtures>({
-  bootedApp: async ({ page }, use) => {
+export const test = base.extend<AppOptions & AppFixtures>({
+  push: [true, { option: true }],
+  bootedApp: async ({ page, push }, use) => {
+    if (!push) await disablePush(page);
     await gotoApp(page);
     await use(page);
   },
