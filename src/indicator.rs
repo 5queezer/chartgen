@@ -105,13 +105,16 @@ pub struct PanelResult {
 /// Ichimoku cloud's leading spans. `(i, values)` in `lines` continues
 /// `PanelResult::lines[i]` and `(i, y1, y2)` in `fills` continues
 /// `PanelResult::fills[i]`; every vector holds `bars` values, one per bar
-/// after the last one.
+/// after the last one, at most `MAX_PROJECTION_BARS`.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Projection {
     pub bars: usize,
     pub lines: Vec<(usize, Vec<f64>)>,
     pub fills: Vec<(usize, Vec<f64>, Vec<f64>)>,
 }
+
+/// Most bars a projection reaches: Pine's limit on a plot `offset`.
+pub const MAX_PROJECTION_BARS: usize = 500;
 
 /// A failed indicator computation (only user scripts fail, ADR-0025):
 /// the pipeline `step` (`parse`, `static`, `presence`, `dry_run`,

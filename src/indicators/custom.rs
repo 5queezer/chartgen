@@ -1643,14 +1643,15 @@ impl Indicator for Ichimoku {
         // Future bar k (index n + k) shows the spans of bar n + k - off.
         let [_, _, a, b] = self.spans(data);
         let n = data.len();
+        let bars = off.min(MAX_PROJECTION_BARS);
         let tail = |v: &[f64]| -> Vec<f64> {
-            (0..off)
+            (0..bars)
                 .map(|k| (n + k).checked_sub(off).map_or(f64::NAN, |j| v[j]))
                 .collect()
         };
         let (a, b) = (tail(&a), tail(&b));
         Some(Projection {
-            bars: off,
+            bars,
             lines: vec![(2, a.clone()), (3, b.clone())],
             fills: vec![(0, a, b)],
         })
@@ -2723,6 +2724,16 @@ mod tests {
         };
         let p = short.projection(&closes(&[1.0, 2.0])).unwrap();
         eq(&p.lines[0].1, &[NAN, 1.0, 2.0]);
+        // Pine's offset limit caps the projection at 500 bars.
+        let mut far = Ichimoku::default();
+        far.configure(&json!({"displacement": 10000}));
+        let p = far.projection(&data).unwrap();
+        assert_eq!(p.bars, MAX_PROJECTION_BARS);
+        assert_eq!((p.lines[0].1.len(), p.fills[0].2.len()), (500, 500));
+        assert!(
+            p.lines[0].1.iter().all(|v| v.is_nan()),
+            "120 bars reach no slot"
+        );
     }
 
     #[test]

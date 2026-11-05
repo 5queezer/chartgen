@@ -1389,9 +1389,8 @@ fn panel_result_to_series_json(
 }
 
 // `future` block of a series indicator (ADR-0033): the values plotted on the
-// `bars` bars after the last one. `t` steps on from the last bar by the
-// interval (calendar time, so session markets' closed hours are not
-// skipped); absent when the last bar or the interval has no time.
+// `bars` bars after the last one. `t` are their open times
+// (`data::future_bar_times`); absent when the bars have no time.
 fn projection_to_json(
     p: &chartgen::indicator::Projection,
     data: &chartgen::data::OhlcvData,
@@ -1402,12 +1401,8 @@ fn projection_to_json(
         "lines": p.lines.iter().map(|(i, v)| json!({ "index": i, "values": vals(v) })).collect::<Vec<_>>(),
         "fills": p.fills.iter().map(|(i, y1, y2)| json!({ "index": i, "y1": vals(y1), "y2": vals(y2) })).collect::<Vec<_>>(),
     });
-    let last = data.bars.last().and_then(|b| b.date.parse::<i64>().ok());
-    let step = data.interval.as_deref().and_then(data::interval_secs);
-    if let (Some(last), Some(step)) = (last, step) {
-        out["t"] = json!((1..=p.bars as i64)
-            .map(|k| last + k * step)
-            .collect::<Vec<_>>());
+    if let Some(t) = data::future_bar_times(data, p.bars) {
+        out["t"] = json!(t);
     }
     out
 }

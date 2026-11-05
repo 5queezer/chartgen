@@ -149,6 +149,46 @@ pub fn interval_secs(interval: &str) -> Option<i64> {
     })
 }
 
+/// Open times (unix s) of the `n` bars after the last bar of `data`, for a
+/// projection past it (ADR-0033). Monthly and quarterly bars step by
+/// calendar months. Day-based bars (1d and up) skip Saturday and Sunday
+/// when no loaded bar falls on a weekend (a stock); exchange sessions and
+/// holidays are not modelled. `None` without bar times or a known interval.
+pub fn future_bar_times(data: &OhlcvData, n: usize) -> Option<Vec<i64>> {
+    use chrono::{DateTime, Datelike, Months, Weekday};
+    let last = data.bars.last()?.date.parse::<i64>().ok()?;
+    let interval = data.interval.as_deref()?;
+    let months = match interval {
+        "1M" | "1mo" => Some(1),
+        "3mo" => Some(3),
+        _ => None,
+    };
+    if let Some(m) = months {
+        let start = DateTime::from_timestamp(last, 0)?;
+        return (1..=n as u32)
+            .map(|k| Some(start.checked_add_months(Months::new(m * k))?.timestamp()))
+            .collect();
+    }
+    let step = interval_secs(interval)?;
+    let weekend = |t: i64| {
+        DateTime::from_timestamp(t, 0)
+            .is_some_and(|d| matches!(d.weekday(), Weekday::Sat | Weekday::Sun))
+    };
+    let skip = step >= 86_400 && !data.bars.iter().any(|b| b.date.parse().is_ok_and(weekend));
+    let mut t = last;
+    Some(
+        (0..n)
+            .map(|_| {
+                t += step;
+                while skip && weekend(t) {
+                    t += 86_400;
+                }
+                t
+            })
+            .collect(),
+    )
+}
+
 /// Bar length in seconds for indicator math (HV annualization, VWAP and
 /// pivot anchoring). Unlike the strict `interval_secs` (which gates what the
 /// data sources accept), this takes any multiple and any letter case:
@@ -310,6 +350,75 @@ mod tests {
     use super::*;
 
     const HOUR_MS: i64 = 3_600_000;
+
+    fn at(times: &[i64], interval: &str) -> OhlcvData {
+        OhlcvData {
+            bars: times
+                .iter()
+                .map(|t| Bar {
+                    open: 1.0,
+                    high: 1.0,
+                    low: 1.0,
+                    close: 1.0,
+                    volume: 1.0,
+                    date: t.to_string(),
+                })
+                .collect(),
+            symbol: None,
+            interval: Some(interval.into()),
+        }
+    }
+
+    #[test]
+    fn future_bar_times_follow_the_calendar() {
+        const DAY: i64 = 86_400;
+        let ts = |s: &str| chrono::DateTime::parse_from_rfc3339(s).unwrap().timestamp();
+        // 4h: plain steps.
+        let t = ts("2026-11-05T00:00:00Z");
+        assert_eq!(
+            future_bar_times(&at(&[t], "4h"), 2),
+            Some(vec![t + 14_400, t + 28_800])
+        );
+        // 1M: calendar months, so slot 2 is the start of the month after next.
+        let nov = ts("2026-11-01T00:00:00Z");
+        let m = future_bar_times(&at(&[nov], "1M"), 3).unwrap();
+        assert_eq!(m[0], ts("2026-12-01T00:00:00Z"));
+        assert_eq!(m[1], ts("2027-01-01T00:00:00Z"));
+        assert_eq!(m[2], ts("2027-02-01T00:00:00Z"));
+        // 3mo: quarters.
+        let q = future_bar_times(&at(&[nov], "3mo"), 2).unwrap();
+        assert_eq!(
+            q,
+            vec![ts("2027-02-01T00:00:00Z"), ts("2027-05-01T00:00:00Z")]
+        );
+        // 1d without weekend bars (a stock): Thu, Fri, then Mon.
+        let wed = ts("2026-11-04T14:30:00Z");
+        let thu = wed + DAY;
+        let stock = at(&[wed - DAY, wed], "1d");
+        assert_eq!(
+            future_bar_times(&stock, 3),
+            Some(vec![thu, thu + DAY, thu + 4 * DAY])
+        );
+        // 1d with weekend bars (crypto): every day.
+        let sun = ts("2026-11-01T00:00:00Z");
+        let crypto = at(&[sun, sun + DAY], "1d");
+        assert_eq!(
+            future_bar_times(&crypto, 6),
+            Some((2..=7).map(|k| sun + k * DAY).collect()),
+            "Saturday and Sunday stay"
+        );
+        // Intraday bars never skip.
+        let fri = ts("2026-11-06T20:00:00Z");
+        assert_eq!(
+            future_bar_times(&at(&[fri], "4h"), 1),
+            Some(vec![fri + 14_400])
+        );
+        // No time or unknown interval: none.
+        assert_eq!(future_bar_times(&at(&[t], "7m"), 2), None);
+        let mut untimed = at(&[t], "1d");
+        untimed.bars[0].date = "D0".into();
+        assert_eq!(future_bar_times(&untimed, 2), None);
+    }
 
     #[test]
     fn bar_interval_secs_is_case_insensitive_and_strict_about_unknowns() {
