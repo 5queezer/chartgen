@@ -753,6 +753,18 @@ Each indicator pane legend shows controls on hover (or keyboard focus):
   style (solid, dashed, dotted). Style changes apply instantly on the client,
   never refetch, and also recolor the legend; hidden plots are not drawn and
   their legend value is omitted. **Defaults** resets the tab being shown.
+  Below the plots the Style tab lists the indicator's other colors, each
+  with a visibility checkbox and a color swatch (opacity included): every
+  fill (**Fill 1**, ...; two swatches where the fill has an above and a
+  below color, like the Ichimoku cloud), every horizontal level (**Level
+  70**, with a line style), the volume-profile bars and their point of
+  control, and the divergence lines (bullish and bearish). A histogram with
+  a per-bar palette (Volume, MACD) shows one swatch per palette color
+  instead of a single one. These overrides sit on top of the server colors
+  at draw time: live ticks and theme switches keep them, and colors you
+  did not touch still follow the server and the theme. They are stored in
+  the indicator's `style.geometry` next to the plot styles, so layouts keep
+  them too.
 - **×** removes the indicator. Other instances of the same indicator stay.
   The price pane legend cannot be removed.
 

@@ -77,6 +77,8 @@ export interface DivSegment {
 export interface HLineStroke {
   y: number;
   color: string;
+  /** Position in the payload's `hlines`. */
+  index: number;
 }
 
 const isNum = (v: number | null | undefined): v is number =>
@@ -334,12 +336,12 @@ export function hlineStrokes(
   mapY: (value: number) => number,
 ): HLineStroke[] {
   const out: HLineStroke[] = [];
-  for (const h of hlines) {
-    if (!isNum(h.y)) continue;
+  hlines.forEach((h, index) => {
+    if (!isNum(h.y)) return;
     const y = mapY(h.y);
-    if (y < 0 || y > paneHeight) continue;
-    out.push({ y, color: wireColor(h.color) ?? HLINE_FALLBACK });
-  }
+    if (y < 0 || y > paneHeight) return;
+    out.push({ y, color: wireColor(h.color) ?? HLINE_FALLBACK, index });
+  });
   return out;
 }
 

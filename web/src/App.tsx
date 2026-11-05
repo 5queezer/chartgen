@@ -32,6 +32,7 @@ import { mergeParams } from "./lib/paramForm";
 import { resolveColors } from "./lib/chartStyle";
 import { PALETTES } from "./lib/theme";
 import { resolveTimeZone } from "./lib/timezone";
+import { geometryOf } from "./lib/geometryStyle";
 import { plotsOf } from "./lib/plotStyle";
 import { StatusLine, type Status } from "./components/StatusLine";
 import { SymbolSearch } from "./components/SymbolSearch";
@@ -487,6 +488,12 @@ export function App(): JSX.Element {
       : plotsOf(ind, (n) => paletteColor(key, n));
   });
 
+  const settingsGeometry = createMemo(() => {
+    const key = settingsTarget()?.key;
+    const ind = key === undefined ? undefined : query.data?.indicators[key];
+    return key === undefined || !ind ? null : geometryOf(key, ind);
+  });
+
   const status = createMemo<Status>(() => {
     const authFailed = authError();
     if (authFailed !== null) return { kind: "auth-error", message: authFailed };
@@ -565,6 +572,7 @@ export function App(): JSX.Element {
       <IndicatorSettings
         target={settingsTarget()}
         plots={settingsPlots()}
+        geometry={settingsGeometry()}
         specs={
           listIndicators.data?.indicators.find((i) => {
             const n = settingsTarget()?.name;

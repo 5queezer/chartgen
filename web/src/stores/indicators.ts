@@ -44,6 +44,11 @@ export interface PlotStyle {
   lineStyle?: PlotLineStyle;
   visible?: boolean;
   /**
+   * Histogram bar colors, parallel to the payload's `palette` (a bar takes
+   * the entry at the index of its server color). Ignored once `color` is set.
+   */
+  palette?: string[];
+  /**
    * Server label of the line this entry was saved for. Only set on
    * index-keyed entries (`line<i>`): the entry is ignored once the line at
    * that index has a different label.
@@ -51,9 +56,30 @@ export interface PlotStyle {
   label?: string;
 }
 
+/** Override of one fill (`color`, `colorBelow`) or horizontal level (`color`, `lineStyle`). */
+export interface GeoItemStyle {
+  color?: string;
+  /** Fills only: the color where the first edge is below the second. */
+  colorBelow?: string;
+  lineStyle?: PlotLineStyle;
+  visible?: boolean;
+}
+
+/**
+ * Overrides of an indicator's geometry channels (fills, hlines, volume
+ * profile bars, divergence lines), keyed by position in the payload.
+ */
+export interface GeometryStyle {
+  fills?: Record<string, GeoItemStyle>;
+  hlines?: Record<string, GeoItemStyle>;
+  hbars?: { color?: string; pocColor?: string; visible?: boolean };
+  divlines?: { bullColor?: string; bearColor?: string; visible?: boolean };
+}
+
 /** Per-indicator style overrides, keyed by `plotKey`. */
 export interface IndicatorStyle {
   plots: Record<string, PlotStyle>;
+  geometry?: GeometryStyle;
 }
 
 const STORAGE_KEY = "chartgen.indicators.active";
@@ -99,6 +125,8 @@ function persist(value: ActiveIndicator[]): void {
 const MAX_LABEL = 64;
 // `line<i>` / `hist<i>` (index-keyed) or `l:<label>` (label-keyed line).
 const PLOT_KEY_RE = new RegExp(`^((line|hist)\\d+|l:.{1,${MAX_LABEL}})$`);
+const MAX_PALETTE = 16;
+const GEO_INDEX_RE = /^\d{1,3}$/;
 const LINE_STYLES: readonly string[] = ["solid", "dashed", "dotted"];
 
 /**
@@ -116,7 +144,7 @@ export function labelKey(label: string): string {
 
 function sanitizePlot(x: unknown): PlotStyle | undefined {
   if (!x || typeof x !== "object" || Array.isArray(x)) return undefined;
-  const { color, width, lineStyle, visible, label } = x as Record<
+  const { color, width, lineStyle, visible, label, palette } = x as Record<
     string,
     unknown
   >;
@@ -134,9 +162,65 @@ function sanitizePlot(x: unknown): PlotStyle | undefined {
     out.lineStyle = lineStyle as PlotLineStyle;
   }
   if (typeof visible === "boolean") out.visible = visible;
+  if (
+    Array.isArray(palette) &&
+    palette.length > 0 &&
+    palette.length <= MAX_PALETTE &&
+    palette.every(isColor)
+  ) {
+    out.palette = [...palette];
+  }
   if (typeof label === "string" && label.length > 0 && label.length <= MAX_LABEL) {
     out.label = label;
   }
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
+function isRecord(x: unknown): x is Record<string, unknown> {
+  return !!x && typeof x === "object" && !Array.isArray(x);
+}
+
+/** Copy the valid fields of `x` among `colors`, `lineStyle` and `visible`. */
+function pickGeo(
+  x: unknown,
+  colors: readonly string[],
+  lineStyle = false,
+): Record<string, unknown> | undefined {
+  if (!isRecord(x)) return undefined;
+  const out: Record<string, unknown> = {};
+  for (const k of colors) if (isColor(x[k])) out[k] = x[k];
+  if (lineStyle && typeof x.lineStyle === "string" && LINE_STYLES.includes(x.lineStyle)) {
+    out.lineStyle = x.lineStyle;
+  }
+  if (typeof x.visible === "boolean") out.visible = x.visible;
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
+function sanitizeGeoMap(
+  x: unknown,
+  colors: readonly string[],
+  lineStyle: boolean,
+): Record<string, GeoItemStyle> | undefined {
+  if (!isRecord(x)) return undefined;
+  const out: Record<string, GeoItemStyle> = {};
+  for (const [k, v] of Object.entries(x)) {
+    const item = GEO_INDEX_RE.test(k) ? pickGeo(v, colors, lineStyle) : undefined;
+    if (item) out[k] = item as GeoItemStyle;
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
+function sanitizeGeometry(x: unknown): GeometryStyle | undefined {
+  if (!isRecord(x)) return undefined;
+  const out: GeometryStyle = {};
+  const fills = sanitizeGeoMap(x.fills, ["color", "colorBelow"], false);
+  if (fills) out.fills = fills;
+  const hlines = sanitizeGeoMap(x.hlines, ["color"], true);
+  if (hlines) out.hlines = hlines;
+  const hbars = pickGeo(x.hbars, ["color", "pocColor"]);
+  if (hbars) out.hbars = hbars as GeometryStyle["hbars"];
+  const divlines = pickGeo(x.divlines, ["bullColor", "bearColor"]);
+  if (divlines) out.divlines = divlines as GeometryStyle["divlines"];
   return Object.keys(out).length > 0 ? out : undefined;
 }
 
@@ -145,15 +229,17 @@ function sanitizePlot(x: unknown): PlotStyle | undefined {
  * plots are dropped. Returns undefined when nothing valid remains.
  */
 export function sanitizeStyle(x: unknown): IndicatorStyle | undefined {
-  if (!x || typeof x !== "object" || Array.isArray(x)) return undefined;
-  const raw = (x as { plots?: unknown }).plots;
-  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined;
+  if (!isRecord(x)) return undefined;
   const plots: Record<string, PlotStyle> = {};
-  for (const [key, value] of Object.entries(raw)) {
-    const plot = PLOT_KEY_RE.test(key) ? sanitizePlot(value) : undefined;
-    if (plot) plots[key] = plot;
+  if (isRecord(x.plots)) {
+    for (const [key, value] of Object.entries(x.plots)) {
+      const plot = PLOT_KEY_RE.test(key) ? sanitizePlot(value) : undefined;
+      if (plot) plots[key] = plot;
+    }
   }
-  return Object.keys(plots).length > 0 ? { plots } : undefined;
+  const geometry = sanitizeGeometry(x.geometry);
+  if (Object.keys(plots).length === 0 && !geometry) return undefined;
+  return { plots, ...(geometry ? { geometry } : {}) };
 }
 
 /** Entry with a validated `style`; the field is dropped when nothing valid remains. */

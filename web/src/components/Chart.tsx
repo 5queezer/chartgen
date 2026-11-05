@@ -55,7 +55,9 @@ import {
 import {
   barColor,
   figureOverrides,
+  DASH,
   figureStyle,
+  paletteBarColor,
   plotColorAt,
   plotsOf,
   resolveOverride,
@@ -63,11 +65,13 @@ import {
   type PlotInfo,
 } from "../lib/plotStyle";
 import { keyName } from "../lib/instances";
+import { applyFill, divColor, shown } from "../lib/geometryStyle";
 import {
   instanceKey,
   paramLabels,
   plotKey,
   type ActiveIndicator,
+  type GeometryStyle,
   type IndicatorStyle,
 } from "../stores/indicators";
 import { paramDefaults } from "../stores/layouts";
@@ -107,6 +111,7 @@ import {
   fillColors,
   fillPolygons,
   hbarRects,
+  hbarTiers,
   hlineStrokes,
   payloadToDataIndex,
   toDataSpace,
@@ -175,9 +180,11 @@ function plotFigureStyle(
   const ext = indicator.extendData as FigureExtend | undefined;
   const key = plotKey(kind, plotIndex);
   const d = ext?.defaults[key];
+  const o = ext?.plots[key];
+  const server = bar === undefined ? undefined : paletteBarColor(bar, d?.palette, o?.palette);
   return figureStyle(
     kind,
-    resolveOverride(ext?.plots[key], bar ?? d?.color ?? paletteColor(name, colorIdx), d?.width),
+    resolveOverride(o, server ?? d?.color ?? paletteColor(name, colorIdx), d?.width),
   );
 }
 
@@ -187,7 +194,7 @@ function plotFigureStyle(
  * by figure key for the plots of the current payload (labels already matched).
  */
 interface FigureExtend extends IndicatorStyle {
-  defaults: Record<string, { color: string; width: number }>;
+  defaults: Record<string, { color: string; width: number; palette?: readonly string[] }>;
 }
 
 function extendFor(
@@ -198,7 +205,10 @@ function extendFor(
   if (!ind) return NO_STYLE;
   const plots = plotsOf(ind, (n) => paletteColor(name, n));
   const defaults = Object.fromEntries(
-    plots.map((p) => [plotKey(p.kind, p.index), { color: p.defaultColor, width: p.defaultWidth }]),
+    plots.map((p) => [
+      plotKey(p.kind, p.index),
+      { color: p.defaultColor, width: p.defaultWidth, palette: p.palette },
+    ]),
   );
   return { ...figureOverrides(plots, style), defaults };
 }
@@ -300,8 +310,11 @@ function drawGeometry(name: string): IndicatorDrawCallback {
     // the server's paint order. klinecharts restores the context after draw.
     ctx.globalCompositeOperation = "destination-over";
     const fills = ind.fills ?? [];
+    const geo = (indicator.extendData as FigureExtend | undefined)?.geometry;
     const paint = (polys: ReturnType<typeof fillPolygons>, fi: number) => {
-      const theme = fillColors(fills[fi]!, name, fi);
+      const o = geo?.fills?.[fi];
+      if (!shown(o)) return;
+      const theme = applyFill(fillColors(fills[fi]!, name, fi), o);
       for (const poly of polys) {
         ctx.fillStyle = poly.up ? theme.up : theme.down;
         ctx.beginPath();
@@ -326,34 +339,33 @@ function drawGeometry(name: string): IndicatorDrawCallback {
     ctx.globalCompositeOperation = "source-over";
     drawFutureLines(ctx, name, ind, length, indicator, map);
 
-    if (ind.hbars && ind.hbars.length > 0) {
+    if (ind.hbars && ind.hbars.length > 0 && shown(geo?.hbars)) {
+      const poc = hbarTiers(ind.hbars, ind.hlines ?? []).indexOf("poc");
       for (const r of hbarRects(
         ind.hbars,
         bounding.width,
         bounding.height,
         map.y,
       )) {
-        ctx.fillStyle = ind.hbars[r.index]!.color!;
+        const own = r.index === poc ? geo?.hbars?.pocColor : geo?.hbars?.color;
+        ctx.fillStyle = own ?? ind.hbars[r.index]!.color!;
         ctx.fillRect(r.x, r.y, r.width, r.height);
       }
     }
 
-    const segments = divlineSegments(
-      ind.divlines ?? [],
-      visibleRange,
-      map,
-      ind.is_overlay,
-    );
+    const segments = shown(geo?.divlines)
+      ? divlineSegments(ind.divlines ?? [], visibleRange, map, ind.is_overlay)
+      : [];
     ctx.lineWidth = 2;
     for (const s of segments) {
-      ctx.strokeStyle = s.color;
+      ctx.strokeStyle = divColor(s.kind, s.color, geo?.divlines);
       ctx.setLineDash(s.dashed ? [4, 4] : []);
       ctx.beginPath();
       ctx.moveTo(s.from.x, s.from.y);
       ctx.lineTo(s.to.x, s.to.y);
       ctx.stroke();
     }
-    drawHLines(ctx, ind, bounding, map.y);
+    drawHLines(ctx, ind, bounding, map.y, geo?.hlines);
     return false;
   };
 }
@@ -410,11 +422,14 @@ function drawHLines(
   ind: SeriesIndicator,
   bounding: { width: number; height: number },
   mapY: (value: number) => number,
+  overrides: GeometryStyle["hlines"],
 ): void {
   ctx.lineWidth = 1;
-  ctx.setLineDash([]);
   for (const h of hlineStrokes(ind.hlines ?? [], bounding.height, mapY)) {
-    ctx.strokeStyle = h.color;
+    const o = overrides?.[h.index];
+    if (!shown(o)) continue;
+    ctx.strokeStyle = o?.color ?? h.color;
+    ctx.setLineDash(o?.lineStyle && o.lineStyle !== "solid" ? DASH[o.lineStyle] : []);
     // Snap to the pixel center so a 1px line is not blurred over two rows.
     const y = Math.round(h.y) + 0.5;
     ctx.beginPath();
@@ -1279,7 +1294,7 @@ export function Chart(props: ChartProps): JSX.Element {
       Object.entries(props.series?.indicators ?? {}).map(([n, i]) => [
         n,
         i.lines?.map((l) => [l.label, l.color, l.width]),
-        i.histogram?.map((h) => [h.label, h.palette?.[0]]) ?? 0,
+        i.histogram?.map((h) => [h.label, h.palette]) ?? 0,
       ]),
     ),
   );
