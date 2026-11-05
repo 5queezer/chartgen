@@ -58,12 +58,21 @@ repainting indicators.
   but not the clock; a symbol, timeframe or indicator change reloads and the
   new data is cut at the same clock (a 1h cursor on 15m bars ends with the
   last 15m bar closed by the 1h bar's close). If the new data starts after
-  the clock, history is paged back to it first.
+  the clock, history is paged back to it first. While no bar is closed by the
+  clock the frame is empty (never a later bar), and the replay bar says "No
+  data before the replay start", or why paging failed.
 - **Slice** (`web/src/lib/replay.ts`, `sliceSeries`). Bars and every per-bar
   array (lines, histograms, fill edges) are cut at the cursor; signals on or
   before it are kept; a divergence line is kept only if it ends on or before
   the cursor (it is known once its end bar has printed, so it is dropped, not
-  clipped). hlines, hbars and `y_range` pass through. Indices are those of the
+  clipped). Some indicators place a marker before the bar that confirms it:
+  Cipher B centers its fractal dots and divergence ends two bars back
+  (`center = i - 2`), the Kalman volume filter marks a cross on the bar
+  before. Their markers wait that many bars (`x + lag` must be on or before
+  the cursor). A moving average (`ma`, `vwma`, `hma`) with a negative
+  `offset` plots later bars' values on its newest bars, so its last
+  |offset| values are blank. These lags are listed per indicator in
+  `replayLags`. hlines, hbars and `y_range` pass through. Indices are those of the
   full series, so the result has the shape of a live series and the chart's
   geometry code ([ADR-0010](./0010-overlay-geometry-rendering/)) needs no
   change.
@@ -75,11 +84,16 @@ repainting indicators.
   server already recomputes windowed profiles over the visible bars when
   `warmup` is set ([ADR-0009](./0009-live-tail-polling-and-history-paging/)).
   It runs at most once per 500 ms while the cursor moves (leading and
-  trailing), and again on pause. A recompute is used only for the same
-  request and only if it ends at or before the clock. In the window, bars it
+  trailing), and again on pause, one at a time: a recompute is never aborted
+  for a newer cursor (while playing, each would be outrun by the next step
+  and none would land); a call meanwhile waits and runs once the one in
+  flight settles. A result is used only for the same request and only if it
+  ends at or before the clock, even when the cursor has moved on since. In the window, bars it
   does not cover yet (none has landed, or the cursor has moved on) have no
   value: a repainting value from the full series would show the future.
-  Before the window the full series' values stay. hbars and hlines of these
+  Before the window the full series' values stay; a full-series line that
+  crosses into the window (ZigZag's leg into it) is clipped at the window
+  start, where the recompute's lines take over. hbars and hlines of these
   indicators come only from the recompute.
 - **Chart updates.** Frames carry the live feed's `SeriesUpdate` contract: a
   step is a `tail` from the previous cursor (from the start of the recompute
@@ -93,12 +107,21 @@ repainting indicators.
   compare feed get a `doc` whose `visibilityState` reads `hidden` while
   replaying, so neither restarts polling or a push subscription on a
   visibility change or after a reload; paging older history still works.
+  Entering also ends a push subscription
+  ([ADR-0021](./0021-realtime-chart-push/)), so no pushed tick is applied.
   Exiting resets the feed with its full series (paged history included),
-  which restarts polling and catches up any gap.
+  which subscribes again (or polls) and catches up any gap.
 - **Alerts.** Price alerts are fed from the live feed's snapshots only
   ([ADR-0020](./0020-client-side-price-alerts/)), never from frames. While
   replaying, the chart symbol is evaluated from the `get_quotes` poll like any
-  other symbol, so its alerts still see real prices.
+  other symbol, so its alerts still see real prices. The feed reset on exit
+  holds the close of the replay start, older than those prices, so it is not
+  taken as the alerts' baseline (it would fire an "every" crossing again).
+- **Input.** While picking a start, a layer over the chart takes the mouse:
+  the pick click never reaches klinecharts, so an armed drawing tool gets no
+  point, and drags and the wheel are passed on as scroll and zoom. Entering
+  that mode cancels an armed tool. `Esc` cancels an armed tool first and
+  exits replay only when none is armed.
 
 ### Consequences
 
@@ -111,9 +134,9 @@ working. No wire or Rust change.
 the throttle plus one round trip, and bars after the last recompute are blank
 meanwhile. Only the last 500 bars before the cursor are recomputed; further
 back the full series' values stay, which is what ZigZag and Ichimoku showed
-anyway once those bars were 500 bars old. Signals and divergence lines are
-assumed to be known at their bar; one confirmed some bars later (a pivot
-needing right-hand bars) appears that much early. Drawings anchored after the
+anyway once those bars were 500 bars old. Marker lags are listed by hand:
+an indicator added later that marks a bar before confirming it needs an
+entry in `replayLags`, or its markers show early. Drawings anchored after the
 cursor are drawn past the last bar, where klinecharts places future points.
 A timeframe change to coarser bars shows the bar holding the clock only once
 it closes, so the frame can end up to one coarse bar earlier.

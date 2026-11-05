@@ -158,7 +158,8 @@ replaying, and a control bar floats over the bottom of the chart.
 
 1. **Pick the start.** After **Replay**, a vertical line follows the mouse
    and dims the bars to its right. Click a bar to start there; dragging still
-   scrolls the chart, so you can scroll back first. Or use the calendar
+   scrolls the chart and the wheel zooms, so you can scroll back first.
+   Picking cancels an armed drawing tool and never places a drawing point. Or use the calendar
    button (**Select date**) to start at the bar of a date and time, read in
    the bottom bar's time zone; older history is loaded first if needed.
    **Select bar** picks a new start at any time.
@@ -168,7 +169,8 @@ replaying, and a control bar floats over the bottom of the chart.
    the newest loaded bar.
 3. **Back to live.** **Jump to real time**, the **×** or `Esc` shows the
    whole chart again and restarts live updates, which catch up the bars
-   that formed meanwhile.
+   that formed meanwhile. With a drawing tool armed, `Esc` first cancels
+   the tool.
 
 While replaying:
 
@@ -178,14 +180,16 @@ While replaying:
   `session_vp`, `hvn_lvn`, `naked_poc`, `tpo`), ZigZag, the linear
   regression channel and Ichimoku. While playing that happens at most twice a
   second and again on pause, so these lag a little and their newest bars are
-  briefly blank. Divergence lines and signals appear once their last bar is
-  reached.
+  briefly blank. Divergence lines and signals appear once they are
+  confirmed: Cipher B's two bars after the bar they mark. A moving average
+  with a negative offset leaves its newest values blank.
 - Scrolling back still loads older history. Drawings work as usual; ones
   placed after the replay bar are drawn past the last bar. Compare lines
   are cut at the replay bar too.
 - Changing the symbol, timeframe or indicators keeps the replay time: the
   new chart shows every bar that had closed by then, loading older history
-  if needed.
+  if needed. If there is none, the chart stays empty and the replay bar says
+  so (or that the history failed to load).
 - Price alerts keep checking live prices (the chart symbol is checked through
   the watchlist quotes meanwhile) and never fire on replayed bars.
 
