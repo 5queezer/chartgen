@@ -14,8 +14,8 @@ const MID = { x: (A.x + B.x) / 2, y: (A.y + B.y) / 2 };
 
 // The coordinates above assume the chart is as wide as a 1280 px viewport
 // without the right-side watchlist; widen the viewport by the panel's
-// 288 px (w-72) so FUTURE stays inside the plot.
-test.use({ viewport: { width: 1280 + 288, height: 720 } });
+// 320 px (w-80) so FUTURE stays inside the plot.
+test.use({ viewport: { width: 1280 + 320, height: 720 } });
 
 const host = (page: Page) => page.locator(".chart-container");
 
@@ -48,6 +48,9 @@ const overlays = (page: Page) =>
             lock: boolean;
             visible: boolean;
             offRange: boolean;
+            paneId: string;
+            styles: { polygon?: Record<string, unknown> } | null;
+            points: { timestamp?: number; value?: number }[];
           }[];
         }
       ).__chartgenDrawings(),
@@ -67,6 +70,65 @@ async function drawTrendLine(page: Page): Promise<void> {
 }
 
 test.describe("drawing tools", () => {
+  test("rectangle keeps its translucent fill and border after a reload", async ({
+    bootedApp: page,
+  }) => {
+    await page.getByRole("button", { name: "Rectangle" }).click();
+    await clickAt(page, A);
+    await clickAt(page, B);
+    await expect.poll(() => overlays(page)).toHaveLength(1);
+    const polygon = async () => (await overlays(page))[0]?.styles?.polygon;
+    const fresh = await polygon();
+    expect(fresh).toMatchObject({
+      style: "stroke_fill",
+      color: "rgba(41, 98, 255, 0.15)",
+      borderColor: "#2962ff",
+    });
+
+    // Records saved without styles (older versions) must get the defaults too.
+    await page.evaluate((k) => {
+      const recs = JSON.parse(localStorage.getItem(k) ?? "[]") as Record<string, unknown>[];
+      for (const r of recs) delete r.styles;
+      localStorage.setItem(k, JSON.stringify(recs));
+    }, KEY);
+    await reloadApp(page);
+    await expect.poll(() => overlays(page)).toHaveLength(1);
+    expect(await polygon()).toMatchObject({
+      style: "stroke_fill",
+      color: "rgba(41, 98, 255, 0.15)",
+      borderColor: "#2962ff",
+    });
+  });
+
+  test("horizontal ray: one click places it", async ({ bootedApp: page }) => {
+    await page.getByRole("button", { name: "Horizontal ray" }).click();
+    await clickAt(page, A);
+    await expect.poll(() => overlays(page)).toHaveLength(1);
+    const [o] = await overlays(page);
+    expect(o?.points).toHaveLength(1);
+    await expect(
+      page.getByRole("button", { name: "Horizontal ray" }),
+    ).toHaveAttribute("aria-pressed", "false");
+    expect(await stored(page)).toHaveLength(1);
+  });
+
+  test("a drawing started in the price pane stays there", async ({
+    bootedApp: page,
+  }) => {
+    const hdr = await page
+      .locator(".pane-header", { hasText: "RSI" })
+      .first()
+      .boundingBox();
+    const box = await host(page).boundingBox();
+    if (!hdr || !box) throw new Error("RSI pane not laid out");
+    const inRsi = { x: B.x, y: hdr.y - box.y + 40 };
+    await page.getByRole("button", { name: "Fib retracement" }).click();
+    await clickAt(page, A);
+    await clickAt(page, inRsi);
+    await expect.poll(() => overlays(page)).toHaveLength(1);
+    expect((await overlays(page))[0]?.paneId).toBe("candle_pane");
+  });
+
   test("trend line: draw, persist, restore, survive timeframe change", async ({
     bootedApp: page,
   }) => {
@@ -292,5 +354,129 @@ test.describe("drawing tools", () => {
     await page.keyboard.press("Enter");
     await expect.poll(() => overlays(page)).toHaveLength(0);
     expect(await stored(page)).toHaveLength(1);
+  });
+
+  test.describe("styling", () => {
+    const bar = (page: Page) => page.getByRole("toolbar", { name: "Drawing style" });
+    const style = async (page: Page) =>
+      ((await stored(page))?.[0] as { style?: Record<string, unknown> } | undefined)?.style;
+
+    /** Draw a trend line, select it, set red + width 3 + dashed. */
+    async function styleLine(page: Page): Promise<void> {
+      await drawTrendLine(page);
+      await clickAt(page, MID);
+      await expect(bar(page)).toBeVisible();
+      await bar(page).getByRole("button", { name: "Line color" }).click();
+      await page.getByRole("button", { name: "Color #f23645" }).click();
+      await page.keyboard.press("Escape");
+      await bar(page).getByRole("button", { name: "Width 3" }).click();
+      await bar(page).getByRole("button", { name: "Line style dashed" }).click();
+      await expect.poll(() => style(page)).toEqual({
+        color: "#f23645",
+        width: 3,
+        dash: "dashed",
+      });
+    }
+
+    test("color, width and dash persist across reload", async ({
+      bootedApp: page,
+    }) => {
+      await styleLine(page);
+      await reloadApp(page);
+      await expect.poll(() => overlays(page)).toHaveLength(1);
+      expect(await style(page)).toEqual({ color: "#f23645", width: 3, dash: "dashed" });
+      await clickAt(page, MID);
+      await expect(
+        bar(page).getByRole("button", { name: "Width 3" }),
+      ).toHaveAttribute("aria-pressed", "true");
+    });
+
+    test("bar hides on Escape and is disabled for locked drawings", async ({
+      bootedApp: page,
+    }) => {
+      await drawTrendLine(page);
+      await clickAt(page, MID);
+      await expect(bar(page)).toBeVisible();
+      await page.getByRole("button", { name: "Lock all drawings" }).click();
+      await expect(bar(page).getByRole("button", { name: "Width 2" })).toBeDisabled();
+      await page.keyboard.press("Escape");
+      await expect(bar(page)).toHaveCount(0);
+    });
+
+    test("the bar does not cover the legend", async ({ bootedApp: page }) => {
+      await drawTrendLine(page);
+      await clickAt(page, MID);
+      await expect(bar(page)).toBeVisible();
+      const b = (await bar(page).boundingBox())!;
+      const rows = await page.locator(".pane-header").evaluateAll((els) =>
+        els.map((e) => e.getBoundingClientRect().toJSON() as DOMRect),
+      );
+      for (const r of rows) {
+        const apart =
+          r.right <= b.x || b.x + b.width <= r.left || r.bottom <= b.y || b.y + b.height <= r.top;
+        expect(apart).toBe(true);
+      }
+    });
+
+    test("undo keeps the drawing selected", async ({ bootedApp: page }) => {
+      await styleLine(page);
+      await page.keyboard.press("Control+z");
+      await expect.poll(() => style(page)).toEqual({ color: "#f23645", width: 3 });
+      await expect(bar(page)).toBeVisible();
+      await expect(bar(page).getByRole("button", { name: "Width 3" })).toHaveAttribute(
+        "aria-pressed",
+        "true",
+      );
+    });
+
+    test("undo and redo buttons", async ({ bootedApp: page }) => {
+      const undoBtn = page.getByRole("button", { name: "Undo", exact: true });
+      const redoBtn = page.getByRole("button", { name: "Redo", exact: true });
+      await expect(undoBtn).toBeDisabled();
+      await expect(redoBtn).toBeDisabled();
+      await drawTrendLine(page);
+      await expect(undoBtn).toBeEnabled();
+      await undoBtn.click();
+      await expect.poll(() => overlays(page)).toHaveLength(0);
+      await expect(redoBtn).toBeEnabled();
+      await redoBtn.click();
+      await expect.poll(() => overlays(page)).toHaveLength(1);
+      await expect(redoBtn).toBeDisabled();
+    });
+
+    test("hiding all drawings closes the bar", async ({ bootedApp: page }) => {
+      await drawTrendLine(page);
+      await clickAt(page, MID);
+      await expect(bar(page)).toBeVisible();
+      await page.getByRole("button", { name: "Hide all drawings" }).click();
+      await expect(bar(page)).toHaveCount(0);
+    });
+
+    test("undo reverts style steps, redo reapplies", async ({ bootedApp: page }) => {
+      await styleLine(page);
+      await page.keyboard.press("Control+z");
+      await expect.poll(() => style(page)).toEqual({ color: "#f23645", width: 3 });
+      await page.keyboard.press("Control+z");
+      await expect.poll(() => style(page)).toEqual({ color: "#f23645" });
+      await page.keyboard.press("Control+z");
+      await expect.poll(async () => await style(page)).toBeUndefined();
+      await page.keyboard.press("Control+Shift+z");
+      await expect.poll(() => style(page)).toEqual({ color: "#f23645" });
+      await page.keyboard.press("Control+y");
+      await expect.poll(() => style(page)).toEqual({ color: "#f23645", width: 3 });
+    });
+
+    test("undo after remove restores the drawing with its style", async ({
+      bootedApp: page,
+    }) => {
+      await styleLine(page);
+      await page.keyboard.press("Delete");
+      await expect.poll(() => overlays(page)).toHaveLength(0);
+      await page.keyboard.press("Control+z");
+      await expect.poll(() => overlays(page)).toHaveLength(1);
+      expect(await style(page)).toEqual({ color: "#f23645", width: 3, dash: "dashed" });
+      await page.keyboard.press("Control+Shift+z");
+      await expect.poll(() => overlays(page)).toHaveLength(0);
+    });
   });
 });

@@ -797,8 +797,11 @@ fn normalize_param(p: &Json) -> Result<Json, String> {
         .and_then(|v| v.as_str())
         .filter(|n| n.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') && !n.is_empty())
         .ok_or("every entry needs a \"name\" (letters, digits, _)")?;
+    // `name` is the entry key on the wire. The other entry keys (`id`,
+    // `hidden`, `style`) are only rejected at registration (`scripting::validate`),
+    // so scripts stored before they were reserved keep compiling.
     if name == "name" {
-        return Err("a param cannot be called \"name\"".into());
+        return Err(format!("a param cannot be called \"{name}\" (reserved)"));
     }
     let ty = match p.get("type").and_then(|v| v.as_str()) {
         Some("int" | "integer") => "integer",

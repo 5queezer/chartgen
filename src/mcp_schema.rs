@@ -17,7 +17,7 @@ pub fn tools_list_result() -> Value {
         "tools": [
             {
                 "name": "generate_chart",
-                "description": "Generate a financial candlestick or OHLCV chart for a given stock or crypto ticker symbol. Supports multiple timeframes (1m, 5m, 15m, 1h, 4h, 1d, 1wk) and 33 technical indicators including RSI, MACD, EMA, Bollinger Bands, Ichimoku Cloud, Stochastic, ATR, OBV, VWAP, Supertrend, and more. Returns a rendered PNG chart with price action and indicator panels by default. Set format='summary' to instead receive a compact JSON summary (OHLCV stats, last indicator values, signals, divergences, levels) — much cheaper in tokens and ideal for automated reasoning without vision. Set format='series' to receive a full per-bar time-series JSON payload (every OHLCV bar plus 1:1 aligned indicator value arrays, signals with bar timestamps, hlines, y_range) — useful for downstream numeric computation that needs raw arrays rather than last values. Use when the user asks to plot, chart, visualize, render, or analyze price action, candlesticks, or technical signals. Data sourced from Yahoo Finance (stocks like AAPL, MSFT, TSLA) and Binance (crypto like BTCUSDT, ETHUSDT). Call list_indicators first to discover all available indicator names and their configurable parameters.",
+                "description": "Generate a financial candlestick or OHLCV chart for a given stock or crypto ticker symbol. Supports multiple timeframes (1m, 3m, 5m, 15m, 30m, 1h, 2h, 4h, 6h, 12h, 1d, 3d, 1wk, 1mo) and 33 technical indicators including RSI, MACD, EMA, Bollinger Bands, Ichimoku Cloud, Stochastic, ATR, OBV, VWAP, Supertrend, and more. Returns a rendered PNG chart with price action and indicator panels by default. Set format='summary' to instead receive a compact JSON summary (OHLCV stats, last indicator values, signals, divergences, levels) — much cheaper in tokens and ideal for automated reasoning without vision. Set format='series' to receive a full per-bar time-series JSON payload (every OHLCV bar plus 1:1 aligned indicator value arrays, signals with bar timestamps, hlines, y_range) — useful for downstream numeric computation that needs raw arrays rather than last values. Use when the user asks to plot, chart, visualize, render, or analyze price action, candlesticks, or technical signals. Data sourced from Yahoo Finance (stocks like AAPL, MSFT, TSLA) and Binance (crypto like BTCUSDT, ETHUSDT). Call list_indicators first to discover all available indicator names and their configurable parameters.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -31,7 +31,7 @@ pub fn tools_list_result() -> Value {
                         },
                         "timeframe": {
                             "type": "string",
-                            "description": "Candlestick timeframe / interval: 1m, 5m, 15m, 1h, 4h, 1d, 1wk",
+                            "description": "Candlestick timeframe / interval: 1m, 3m, 5m, 15m, 30m, 1h, 2h, 4h, 6h, 12h, 1d, 3d, 1wk, 1mo",
                             "default": "4h"
                         },
                         "interval": {
@@ -46,14 +46,15 @@ pub fn tools_list_result() -> Value {
                                     {
                                         "type": "object",
                                         "properties": {
-                                            "name": { "type": "string" }
+                                            "name": { "type": "string" },
+                                            "id": { "type": "string", "minLength": 1, "maxLength": 64, "description": "Instance key (ADR-0028): the response keys this entry by id instead of name, so one indicator can be requested several times with different parameters." }
                                         },
                                         "required": ["name"],
                                         "additionalProperties": true
                                     }
                                 ]
                             },
-                            "description": "Technical indicators to render on the chart. Each element is a name string (e.g. 'rsi') or an object with 'name' and optional parameters (e.g. {\"name\": \"rsi\", \"length\": 21}). Overlays draw on the price chart, panels draw below. Call list_indicators for the full list of 33 available indicators.",
+                            "description": "Technical indicators to render on the chart. Each element is a name string (e.g. 'rsi') or an object with 'name' and optional parameters (e.g. {\"name\": \"rsi\", \"length\": 21}). Results are keyed by name; give an object an 'id' to key it by that instead. The same indicator may appear several times (e.g. RSI 14 and RSI 21): a repeat without an id is keyed name#2, name#3, and so on; an id must not equal the name of an entry without one. At most 50 entries. Overlays draw on the price chart, panels draw below. Call list_indicators for the full list of 33 available indicators.",
                             "default": ["ema_stack", "cipher_b", "macd"]
                         },
                         "panels": {
@@ -64,7 +65,8 @@ pub fn tools_list_result() -> Value {
                                     {
                                         "type": "object",
                                         "properties": {
-                                            "name": { "type": "string" }
+                                            "name": { "type": "string" },
+                                            "id": { "type": "string", "minLength": 1, "maxLength": 64, "description": "Instance key (ADR-0028): the response keys this entry by id instead of name, so one indicator can be requested several times with different parameters." }
                                         },
                                         "required": ["name"],
                                         "additionalProperties": true
@@ -132,7 +134,7 @@ pub fn tools_list_result() -> Value {
                         },
                         "interval": {
                             "type": "string",
-                            "description": "Candle interval (e.g. 1m, 5m, 15m, 1h, 4h, 1d)",
+                            "description": "Candle interval (e.g. 1m, 3m, 5m, 15m, 1h, 2h, 4h, 1d, 3d)",
                             "default": "4h"
                         },
                         "indicators": {
@@ -321,7 +323,7 @@ pub fn tools_list_result() -> Value {
                         },
                         "timeframe": {
                             "type": "string",
-                            "description": "Candlestick timeframe, as for generate_chart: 1m, 5m, 15m, 30m, 1h, 4h, 1d, 1wk, 1mo.",
+                            "description": "Candlestick timeframe, as for generate_chart: 1m, 3m, 5m, 15m, 30m, 1h, 2h, 4h, 6h, 12h, 1d, 3d, 1wk, 1mo.",
                             "default": "4h"
                         },
                         "indicators": {
@@ -332,7 +334,8 @@ pub fn tools_list_result() -> Value {
                                     {
                                         "type": "object",
                                         "properties": {
-                                            "name": { "type": "string" }
+                                            "name": { "type": "string" },
+                                            "id": { "type": "string", "minLength": 1, "maxLength": 64, "description": "Instance key (ADR-0028): the response keys this entry by id instead of name, so one indicator can be requested several times with different parameters." }
                                         },
                                         "required": ["name"],
                                         "additionalProperties": true

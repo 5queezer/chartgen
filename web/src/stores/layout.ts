@@ -18,15 +18,26 @@ export type ChartType =
   | "hollow"
   | "bars"
   | "line"
+  | "line_markers"
+  | "step_line"
   | "area"
+  | "baseline"
+  | "columns"
+  | "high_low"
   | "heikin_ashi";
 
+/** Menu order, as in TradingView. */
 export const CHART_TYPES: readonly ChartType[] = [
   "candles",
   "hollow",
   "bars",
   "line",
+  "line_markers",
+  "step_line",
   "area",
+  "baseline",
+  "columns",
+  "high_low",
   "heikin_ashi",
 ];
 

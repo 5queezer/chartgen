@@ -12,8 +12,9 @@
 // geometry.ts primitives before the default line/bar figures (ADR-0010).
 //
 // Pane lifecycle: we track created panes in a signal keyed by indicator
-// name. When a new indicator shows up we `createIndicator`; when one
-// drops out of the payload we `removeIndicator` and delete the entry.
+// instance (the payload key: the name, or `rsi#2` for a repeat, ADR-0028).
+// When a new instance shows up we `createIndicator`; when one drops out of
+// the payload we `removeIndicator` and delete the entry.
 //
 // Tooltip: klinecharts's canvas-drawn candle tooltip is suppressed and
 // the DOM PaneHeader becomes the single source of truth. When the
@@ -61,12 +62,15 @@ import {
   resolvePlot,
   type PlotInfo,
 } from "../lib/plotStyle";
+import { keyName } from "../lib/instances";
 import {
-  indicatorName,
+  instanceKey,
+  paramLabels,
   plotKey,
   type ActiveIndicator,
   type IndicatorStyle,
 } from "../stores/indicators";
+import { paramDefaults } from "../stores/layouts";
 import {
   canPageBefore,
   type HistoryStatus,
@@ -80,7 +84,15 @@ import {
   rebaseScale,
 } from "../lib/compare";
 import { chartSettings } from "../stores/chartSettings";
-import { composeStyles, settingsStyles } from "../lib/chartStyle";
+import { composeStyles, resolveColors, settingsStyles } from "../lib/chartStyle";
+import {
+  ensureSeriesRegistered,
+  hiddenCandleStyle,
+  isSeriesType,
+  SERIES_REG_NAME,
+  type SeriesExtend,
+  type SeriesType,
+} from "../lib/chartTypes";
 import { PALETTES, type Palette } from "../lib/theme";
 import type { SeriesPayload } from "../types/responses";
 import {
@@ -458,7 +470,9 @@ function ensureRegistered(name: string, shape: IndicatorShape): void {
 }
 
 // --- Compare lines (ADR-0022) ------------------------------------------
-const COMPARE_REG_NAME = "chartgen_compare";
+// Double underscore: server indicators register as `chartgen_<name>` and
+// their names start with a letter, so this can never be one of them.
+const COMPARE_REG_NAME = "chartgen__compare";
 const compareStashKey = (slot: number) => `chartgen_cmp_${slot}`;
 
 /**
@@ -629,25 +643,6 @@ function formatBigNumber(value: string | number): string {
   return String(value);
 }
 
-/**
- * Format an indicator's parameter object in the TradingView style,
- * e.g. `{ length: 14 }` → `(14)`. Only scalar values are included
- * (numbers, strings, booleans) — objects/arrays are skipped. The
- * `name` key itself is filtered out.
- */
-function formatIndicatorParams(entry: ActiveIndicator): string | undefined {
-  if (typeof entry === "string") return undefined;
-  const parts: string[] = [];
-  for (const k of Object.keys(entry)) {
-    if (k === "name") continue;
-    const v = entry[k];
-    if (typeof v === "number" || typeof v === "string" || typeof v === "boolean") {
-      parts.push(String(v));
-    }
-  }
-  return parts.length > 0 ? `(${parts.join(", ")})` : undefined;
-}
-
 /** TradingView-style setStyles payload for a palette. Kept as one function so
  *  future readers can see the whole styled surface in one place. */
 function tvStyles(p: Palette) {
@@ -810,8 +805,8 @@ interface HeaderState {
   compare?: string;
 }
 
-/** klinecharts `candle` style overrides per toolbar chart type. */
-const CHART_TYPE_STYLES: Record<ChartType, object> = {
+/** klinecharts `candle` style overrides per toolbar chart type it draws itself. */
+const CHART_TYPE_STYLES: Record<Exclude<ChartType, SeriesType>, object> = {
   candles: { type: "candle_solid" },
   heikin_ashi: { type: "candle_solid" },
   hollow: { type: "candle_up_stroke" },
@@ -848,13 +843,13 @@ export interface ChartProps {
    * client asked for.
    */
   activeIndicators: ActiveIndicator[];
-  /** Client-side plot style overrides (ADR-0017), keyed by indicator name. */
+  /** Client-side plot style overrides (ADR-0017), keyed by instance key. */
   styles?: Record<string, IndicatorStyle | undefined>;
   /** Price rendering style chosen in the toolbar. */
   chartType: ChartType;
   /** IANA zone of the axis, crosshair and legend times. */
   timeZone: string;
-  /** Legend controls, keyed by indicator name (series key). */
+  /** Legend controls, keyed by instance key (series key, ADR-0028). */
   onToggleHidden?: (name: string) => void;
   onSettings?: (name: string) => void;
   onRemove?: (name: string) => void;
@@ -890,7 +885,7 @@ export function Chart(props: ChartProps): JSX.Element {
   let host!: HTMLDivElement;
   let container!: HTMLDivElement;
   const [chart, setChart] = createSignal<KChart | null>(null);
-  // Map of indicator name → klinecharts pane id. Drives create/remove
+  // Map of instance key → klinecharts pane id. Drives create/remove
   // decisions across effect runs.
   const [paneIds, setPaneIds] = createSignal<Record<string, string>>({});
   const [headers, setHeaders] = createSignal<HeaderState[]>([]);
@@ -932,11 +927,13 @@ export function Chart(props: ChartProps): JSX.Element {
     null;
   // True once the compare indicator sits on the candle pane.
   let compareCreated = false;
-  // Names of the indicators currently requested (visible). Panes and legends
-  // of anything else are dropped right away, before a refetch lands. A string
-  // so param-only changes do not re-run the pane effect.
+  // True once the series indicator of a client-drawn chart type is on it.
+  let seriesCreated = false;
+  // Instance keys of the indicators currently requested (visible). Panes and
+  // legends of anything else are dropped right away, before a refetch lands.
+  // A string so param-only changes do not re-run the pane effect.
   const visibleKey = createMemo(() =>
-    props.activeIndicators.map(indicatorName).join("\n"),
+    props.activeIndicators.map(instanceKey).join("\n"),
   );
 
   onMount(() => {
@@ -1068,10 +1065,9 @@ export function Chart(props: ChartProps): JSX.Element {
     // Per-indicator headers. Overlays stack below the price-pane row
     // on the candle pane; oscillators anchor at their pane's top.
     const paneMap = paneIds();
-    const paramsByName = new Map<string, string | undefined>();
-    for (const entry of props.activeIndicators) {
-      paramsByName.set(indicatorName(entry), formatIndicatorParams(entry));
-    }
+    // TradingView-style params, e.g. `(14)`; repeated indicators show their
+    // defaults too, so the instances read apart (ADR-0028).
+    const paramsByKey = paramLabels(props.activeIndicators, paramDefaults());
     let overlayRow = 0;
 
     for (const name of Object.keys(series.indicators)) {
@@ -1093,8 +1089,8 @@ export function Chart(props: ChartProps): JSX.Element {
         };
       });
 
-      const displayName = ind.label && ind.label.length > 0 ? ind.label : name;
-      const params = paramsByName.get(name);
+      const displayName = ind.label && ind.label.length > 0 ? ind.label : keyName(name);
+      const params = paramsByKey.get(name);
 
       if (ind.is_overlay) {
         overlayRow += 1;
@@ -1144,15 +1140,13 @@ export function Chart(props: ChartProps): JSX.Element {
     const settings = chartSettings();
     // One setStyles call (one relayout), coalesced to a frame: a color drag
     // fires this on every input event.
+    const t = props.chartType;
     pendingStyles = composeStyles(
       tvStyles(palette),
-      { candle: CHART_TYPE_STYLES[props.chartType] },
-      settingsStyles(
-        palette,
-        settings.themes[theme()],
-        settings.options,
-        props.chartType,
-      ),
+      { candle: isSeriesType(t) ? {} : CHART_TYPE_STYLES[t] },
+      settingsStyles(palette, settings.themes[theme()], settings.options, t),
+      // Last, so no setting brings back the series a custom type hides.
+      { candle: isSeriesType(t) ? hiddenCandleStyle(t) : {} },
     );
     styleFrame ??= requestAnimationFrame(() => {
       styleFrame = null;
@@ -1491,6 +1485,36 @@ export function Chart(props: ChartProps): JSX.Element {
     }
   });
 
+  // Chart types klinecharts does not draw (ADR-0030): one indicator on the
+  // candle pane paints the series over klinecharts' hidden one. Colors follow
+  // the theme and the chart settings like the candles do.
+  createEffect(() => {
+    const c = chart();
+    const t = props.chartType;
+    if (!c) return;
+    if (!isSeriesType(t)) {
+      if (seriesCreated) c.removeIndicator(CANDLE_PANE_ID, SERIES_REG_NAME);
+      seriesCreated = false;
+      return;
+    }
+    const colors = resolveColors(PALETTES[theme()], chartSettings().themes[theme()]);
+    const extendData: SeriesExtend = {
+      type: t,
+      up: colors.bodyUp,
+      down: colors.bodyDown,
+      line: colors.line,
+    };
+    ensureSeriesRegistered();
+    if (seriesCreated) {
+      c.overrideIndicator({ name: SERIES_REG_NAME, extendData }, CANDLE_PANE_ID);
+    } else {
+      c.createIndicator({ name: SERIES_REG_NAME, extendData }, true, {
+        id: CANDLE_PANE_ID,
+      });
+      seriesCreated = true;
+    }
+  });
+
   onCleanup(() => {
     if (layoutFrame !== null) cancelAnimationFrame(layoutFrame);
     if (styleFrame !== null) cancelAnimationFrame(styleFrame);
@@ -1524,7 +1548,9 @@ export function Chart(props: ChartProps): JSX.Element {
             testId={
               h().compare !== undefined
                 ? `compare-legend-${h().compare}`
-                : undefined
+                : h().key !== undefined
+                  ? `indicator-legend-${h().key}`
+                  : undefined
             }
             onToggleHidden={
               h().key !== undefined && props.onToggleHidden

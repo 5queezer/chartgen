@@ -7,8 +7,14 @@
 //
 // Client-only state: an entry may also carry `hidden: true` (ADR-0013). It is
 // persisted with the entry but never sent to the server — `toWire` drops
-// hidden entries and strips the field from the rest. Entries are unique by
-// name because the server keys its response by indicator name.
+// hidden entries and strips the field from the rest.
+//
+// Instances (ADR-0028): the same indicator may be active several times. Each
+// entry has an instance key, unique in the set: the first instance of a name
+// is keyed by the name itself, later ones carry `id: "<name>#<n>"`. The id is
+// sent on the wire and the server keys its response by it, so results map
+// back to their instance whatever the order. Sets saved before instances
+// existed have no ids and load unchanged.
 //
 // An entry may also carry a client-only `style` (ADR-0017): per-plot color,
 // width, line style and visibility. It is validated on load and, like
@@ -17,6 +23,7 @@
 import { createSignal } from "solid-js";
 
 import { isColor } from "../lib/color";
+import { keyName } from "../lib/instances";
 
 /**
  * Wire shape for a single indicator request. Matches the `indicators` field
@@ -71,15 +78,10 @@ function load(): ActiveIndicator[] {
     //    stored data as corrupted and fall back to DEFAULT_SET rather
     //    than presenting an empty chart silently.
     if (parsed.length === 0) return [];
-    // Entries are unique by name (the server keys its response by name);
-    // keep the first of any duplicates.
-    const seen = new Set<string>();
-    const valid = parsed.filter((e) => {
-      if (!isActiveIndicator(e) || seen.has(indicatorName(e))) return false;
-      seen.add(indicatorName(e));
-      return true;
-    });
-    return valid.length > 0 ? valid.map(sanitizeEntry) : [...DEFAULT_SET];
+    const valid = parsed.filter(isActiveIndicator);
+    return valid.length > 0
+      ? normalizeInstances(valid.map(sanitizeEntry))
+      : [...DEFAULT_SET];
   } catch {
     return [...DEFAULT_SET];
   }
@@ -162,7 +164,70 @@ function sanitizeEntry(entry: ActiveIndicator): ActiveIndicator {
     indicatorParams(entry),
     isHidden(entry),
     sanitizeStyle(entry.style),
+    instanceId(entry),
   );
+}
+
+const MAX_ID = 64;
+
+/** The entry's own `id` field, if it is a string. */
+function instanceId(entry: ActiveIndicator): string | undefined {
+  return typeof entry !== "string" && typeof entry.id === "string"
+    ? entry.id
+    : undefined;
+}
+
+/** Instance key of an entry: its `id`, else its name (ADR-0028). */
+export function instanceKey(entry: ActiveIndicator): string {
+  return instanceId(entry) ?? indicatorName(entry);
+}
+
+/** Smallest free instance key for `name`: the name itself, else `name#2`, `name#3`... */
+export function nextInstanceKey(
+  entries: readonly ActiveIndicator[],
+  name: string,
+): string {
+  const taken = new Set(entries.map(instanceKey));
+  let key = name;
+  for (let n = 2; taken.has(key); n++) key = `${name}#${n}`;
+  return key;
+}
+
+/** The entry's id when it is a well-formed `<name>#<n>` key of its own name. */
+function validId(entry: ActiveIndicator): string | undefined {
+  const id = instanceId(entry);
+  const name = indicatorName(entry);
+  return id !== undefined && id.length <= MAX_ID && id !== name && keyName(id) === name
+    ? id
+    : undefined;
+}
+
+/**
+ * Give every entry a unique instance key (ADR-0028). Valid ids keep their
+ * key; a malformed or repeated id, or a repeated name without one, gets the
+ * next free key. Sets without ids (saved before instances) come back
+ * unchanged.
+ */
+export function normalizeInstances(
+  entries: readonly ActiveIndicator[],
+): ActiveIndicator[] {
+  const reserved = new Set(entries.map(validId));
+  const taken = new Set<string>();
+  return entries.map((e) => {
+    const name = indicatorName(e);
+    let key = validId(e);
+    if (key === undefined || taken.has(key)) {
+      key = name;
+      for (let n = 2; taken.has(key) || (key !== name && reserved.has(key)); n++) {
+        key = `${name}#${n}`;
+      }
+    }
+    taken.add(key);
+    const id = key === name ? undefined : key;
+    return id === (typeof e === "string" ? undefined : e.id)
+      ? e
+      : makeEntry(name, indicatorParams(e), isHidden(e), indicatorStyle(e), id);
+  });
 }
 
 export function isActiveIndicator(x: unknown): x is ActiveIndicator {
@@ -188,21 +253,23 @@ export function indicatorStyle(
     : (entry.style as IndicatorStyle | undefined);
 }
 
-/** Parameters of an entry, without `name` and the client-only `hidden` and `style`. */
+/** Parameters of an entry, without `name`, the instance `id` and the client-only `hidden` and `style`. */
 export function indicatorParams(entry: ActiveIndicator): Record<string, unknown> {
   if (typeof entry === "string") return {};
-  const { name: _name, hidden: _hidden, style: _style, ...params } = entry;
+  const { name: _name, id: _id, hidden: _hidden, style: _style, ...params } = entry;
   return params;
 }
 
-/** Build an entry from a name and params; a param-less entry stays a bare name. */
+/** Build an entry from a name and params; a param-less first instance stays a bare name. */
 function makeEntry(
   name: string,
   params: Record<string, unknown>,
   hidden: boolean,
   style?: IndicatorStyle,
+  id?: string,
 ): ActiveIndicator {
   const extra = {
+    ...(id === undefined ? {} : { id }),
     ...(hidden ? { hidden: true } : {}),
     ...(style ? { style } : {}),
   };
@@ -222,7 +289,7 @@ export function withParams(
   if (entry === undefined) return entries;
   return entries.map((e, i) =>
     i === index
-      ? makeEntry(indicatorName(e), params, isHidden(e), indicatorStyle(e))
+      ? makeEntry(indicatorName(e), params, isHidden(e), indicatorStyle(e), instanceId(e))
       : e,
   );
 }
@@ -237,7 +304,13 @@ export function withHidden(
   if (entry === undefined) return entries;
   return entries.map((e, i) =>
     i === index
-      ? makeEntry(indicatorName(e), indicatorParams(e), hidden, indicatorStyle(e))
+      ? makeEntry(
+          indicatorName(e),
+          indicatorParams(e),
+          hidden,
+          indicatorStyle(e),
+          instanceId(e),
+        )
       : e,
   );
 }
@@ -257,16 +330,69 @@ export function withStyle(
           indicatorParams(e),
           isHidden(e),
           sanitizeStyle(style),
+          instanceId(e),
         )
       : e,
   );
 }
 
-/** Request payload for `generate_chart`: visible entries, client-only fields stripped. */
+/**
+ * Request payload for `generate_chart`: visible entries, client-only fields
+ * stripped. The instance `id` stays: the server keys the response by it.
+ */
 export function toWire(entries: ActiveIndicator[]): ActiveIndicator[] {
   return entries
     .filter((e) => !isHidden(e))
-    .map((e) => makeEntry(indicatorName(e), indicatorParams(e), false));
+    .map((e) =>
+      makeEntry(indicatorName(e), indicatorParams(e), false, undefined, instanceId(e)),
+    );
+}
+
+/** Most params a repeated instance's label shows when its instances share them all. */
+const MAX_LABEL_PARAMS = 3;
+
+const isScalar = (v: unknown): boolean =>
+  typeof v === "number" || typeof v === "string" || typeof v === "boolean";
+
+/**
+ * Params label of every entry by instance key, e.g. `(21)`; undefined when
+ * there is nothing to show. An entry active once shows its own params. When
+ * its indicator is active more than once, `defaults` (schema defaults by
+ * name) fill in the rest and the label keeps the params that differ between
+ * the instances, so they read apart (`(14)` and `(21)`); instances that
+ * differ in nothing show their first three params. With `repeatsOnly`, an
+ * indicator active once gets no label.
+ */
+export function paramLabels(
+  entries: readonly ActiveIndicator[],
+  defaults: Readonly<Record<string, Record<string, unknown>>> = {},
+  repeatsOnly = false,
+): Map<string, string | undefined> {
+  const label = (values: unknown[]) => {
+    const parts = values.filter(isScalar).map(String);
+    return parts.length > 0 ? `(${parts.join(", ")})` : undefined;
+  };
+  // Merged params of every instance, grouped by indicator name.
+  const groups = new Map<string, Array<Record<string, unknown>>>();
+  const merged = entries.map((e) => {
+    const name = indicatorName(e);
+    const params = { ...defaults[name], ...indicatorParams(e) };
+    groups.set(name, [...(groups.get(name) ?? []), params]);
+    return params;
+  });
+  return new Map(
+    entries.map((e, i) => {
+      const group = groups.get(indicatorName(e))!;
+      if (group.length === 1) {
+        return [instanceKey(e), repeatsOnly ? undefined : label(Object.values(indicatorParams(e)))];
+      }
+      const params = merged[i]!;
+      const keys = Object.keys(params).filter((k) => isScalar(params[k]));
+      const differ = keys.filter((k) => group.some((g) => g[k] !== params[k]));
+      const shown = differ.length > 0 ? differ : keys.slice(0, MAX_LABEL_PARAMS);
+      return [instanceKey(e), label(shown.map((k) => params[k]))];
+    }),
+  );
 }
 
 /** Extract the indicator name from an entry regardless of its form. */
@@ -285,12 +411,29 @@ export function setActiveIndicators(next: ActiveIndicator[]): void {
   persist(next);
 }
 
-/** Append an indicator. No-op if an entry with the same name is already active. */
-export function addIndicator(entry: ActiveIndicator): void {
+/** Most indicators on a chart; the server rejects more (ADR-0028). */
+export const MAX_ACTIVE_INDICATORS = 50;
+
+/**
+ * Append an indicator as a new instance (ADR-0028): an already active name
+ * gets the next free instance key. Returns that key, or null at the cap.
+ */
+export function addIndicator(entry: ActiveIndicator): string | null {
   const current = activeIndicators();
+  if (current.length >= MAX_ACTIVE_INDICATORS) return null;
   const name = indicatorName(entry);
-  if (current.some((e) => indicatorName(e) === name)) return;
-  setActiveIndicators([...current, entry]);
+  const key = nextInstanceKey(current, name);
+  setActiveIndicators([
+    ...current,
+    makeEntry(
+      name,
+      indicatorParams(entry),
+      isHidden(entry),
+      indicatorStyle(entry),
+      key === name ? undefined : key,
+    ),
+  ]);
+  return key;
 }
 
 /** Replace the parameters of the entry at `index`. */
@@ -331,10 +474,10 @@ export function toggleIndicatorHidden(index: number): void {
   setActiveIndicators(withHidden(entries, index, !isHidden(entry)));
 }
 
-/** Remove every entry whose name matches. */
-export function removeIndicator(name: string): void {
+/** Remove the instance with this key (ADR-0028); other instances of the indicator stay. */
+export function removeIndicator(key: string): void {
   setActiveIndicators(
-    activeIndicators().filter((e) => indicatorName(e) !== name),
+    activeIndicators().filter((e) => instanceKey(e) !== key),
   );
 }
 

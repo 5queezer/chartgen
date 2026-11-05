@@ -18,6 +18,7 @@ import {
   FAVOURITE_TIMEFRAMES,
   TIMEFRAME_OPTIONS,
   parseTimeframe,
+  timeframeGroup,
   timeframeLabel,
   type Timeframe,
 } from "../lib/timeframe";
@@ -43,7 +44,12 @@ const CHART_TYPE_LABELS: Record<ChartType, string> = {
   hollow: "Hollow candles",
   bars: "Bars",
   line: "Line",
+  line_markers: "Line with markers",
+  step_line: "Step line",
   area: "Area",
+  baseline: "Baseline",
+  columns: "Columns",
+  high_low: "High-low",
   heikin_ashi: "Heikin Ashi",
 };
 
@@ -106,6 +112,47 @@ function ChartTypeIcon(props: { type: ChartType }): JSX.Element {
           />
         </svg>
       );
+    case "line_markers":
+      return (
+        <svg {...common}>
+          <path d="M2 13l4-5 3 3 7-8" stroke-linejoin="round" />
+          <g fill="currentColor" stroke="none">
+            <circle cx="2" cy="13" r="1.6" />
+            <circle cx="6" cy="8" r="1.6" />
+            <circle cx="9" cy="11" r="1.6" />
+            <circle cx="16" cy="3" r="1.6" />
+          </g>
+        </svg>
+      );
+    case "step_line":
+      return (
+        <svg {...common}>
+          <path d="M1 14h4V9h4v3h4V4h4" stroke-linejoin="round" />
+        </svg>
+      );
+    case "baseline":
+      return (
+        <svg {...common}>
+          <path d="M1 9h16" stroke-dasharray="1 2" stroke-width="1" />
+          <path d="M2 6l4-3 3 4 3 5 4 2" stroke-linejoin="round" />
+        </svg>
+      );
+    case "columns":
+      return (
+        <svg {...common} fill="currentColor" stroke="none">
+          <rect x="2" y="9" width="3" height="7" />
+          <rect x="7.5" y="5" width="3" height="11" />
+          <rect x="13" y="2" width="3" height="14" />
+        </svg>
+      );
+    case "high_low":
+      return (
+        <svg {...common} fill="currentColor" stroke="none">
+          <rect x="2" y="6" width="3" height="8" />
+          <rect x="7.5" y="2" width="3" height="9" />
+          <rect x="13" y="5" width="3" height="11" />
+        </svg>
+      );
   }
 }
 
@@ -123,6 +170,7 @@ const buttonClass =
   "px-2.5 py-1.5 rounded-md text-sm cursor-pointer text-[color:var(--color-fg)] hover:bg-[color:var(--color-bg-elev)] inline-flex items-center gap-1.5";
 const activeClass =
   "bg-[color:var(--color-bg-elev)] text-[color:var(--color-accent)]";
+const TIMEFRAME_GROUPS = ["Minutes", "Hours", "Days"] as const;
 const menuClass =
   "bg-[color:var(--color-bg-elev)] border border-[color:var(--color-border)] rounded-md shadow-lg z-50 py-1 min-w-36";
 const itemClass =
@@ -139,6 +187,7 @@ export interface ToolbarProps {
   onReselect: () => void;
   /** Download the chart as a PNG. */
   onScreenshot: () => void;
+  onCopyLink: () => void;
   /** Scroll to real time and restore the default bar spacing. */
   onResetChart: () => void;
   /** Open the symbol search in "add compare symbol" mode. */
@@ -255,16 +304,35 @@ export function Toolbar(props: ToolbarProps): JSX.Element {
           </DropdownMenu.Trigger>
           <DropdownMenu.Portal>
             <DropdownMenu.Content class={menuClass}>
-              <For each={overflow}>
-                {(tf: Timeframe) => (
-                  <DropdownMenu.Item
-                    class={itemClass}
-                    onSelect={() => setTimeframe(tf)}
-                  >
-                    {timeframeLabel(tf)}
-                  </DropdownMenu.Item>
+              <For each={TIMEFRAME_GROUPS}>
+                {(group) => (
+                  <DropdownMenu.Group>
+                    <DropdownMenu.GroupLabel class="px-3 py-1 text-[10px] uppercase tracking-wide text-[color:var(--color-fg-muted)]">
+                      {group}
+                    </DropdownMenu.GroupLabel>
+                    <For each={overflow.filter((tf) => timeframeGroup(tf) === group)}>
+                      {(tf: Timeframe) => (
+                        <DropdownMenu.Item
+                          class={itemClass}
+                          onSelect={() => setTimeframe(tf)}
+                        >
+                          {timeframeLabel(tf)}
+                        </DropdownMenu.Item>
+                      )}
+                    </For>
+                  </DropdownMenu.Group>
                 )}
               </For>
+              <DropdownMenu.Separator class="my-1 h-px bg-[color:var(--color-border)]" />
+              <DropdownMenu.Item
+                class={itemClass}
+                onSelect={() => {
+                  setTfSeed("");
+                  setTfOpen(true);
+                }}
+              >
+                Custom interval…
+              </DropdownMenu.Item>
             </DropdownMenu.Content>
           </DropdownMenu.Portal>
         </DropdownMenu.Root>
@@ -347,6 +415,21 @@ export function Toolbar(props: ToolbarProps): JSX.Element {
       <button
         type="button"
         class={buttonClass}
+        onClick={props.onCopyLink}
+        aria-label="Copy link to chart"
+        title="Copy link to chart"
+        data-testid="toolbar-copy-link"
+      >
+        <svg {...iconProps}>
+          <path
+            d="M7.5 10.5a3 3 0 0 0 4.2 0l2.8-2.8a3 3 0 0 0-4.2-4.2l-.8.8M10.5 7.5a3 3 0 0 0-4.2 0L3.5 10.3a3 3 0 0 0 4.2 4.2l.8-.8"
+            stroke-linecap="round"
+          />
+        </svg>
+      </button>
+      <button
+        type="button"
+        class={buttonClass}
         onClick={props.onResetChart}
         aria-label="Reset chart"
         title="Reset chart (Alt+R)"
@@ -363,8 +446,8 @@ export function Toolbar(props: ToolbarProps): JSX.Element {
         title="Chart settings"
       >
         <svg {...iconProps}>
-          <circle cx="9" cy="9" r="2.5" />
-          <path d="M9 1.5v2.5M9 14v2.5M1.5 9H4M14 9h2.5M3.7 3.7l1.8 1.8M12.5 12.5l1.8 1.8M3.7 14.3l1.8-1.8M12.5 5.5l1.8-1.8" />
+          <path d="M7.6 3.2L7.8 1.3L10.2 1.3L10.4 3.2L12.1 3.9L13.6 2.7L15.3 4.4L14.1 5.9L14.8 7.6L16.7 7.8L16.7 10.2L14.8 10.4L14.1 12.1L15.3 13.6L13.6 15.3L12.1 14.1L10.4 14.8L10.2 16.7L7.8 16.7L7.6 14.8L5.9 14.1L4.4 15.3L2.7 13.6L3.9 12.1L3.2 10.4L1.3 10.2L1.3 7.8L3.2 7.6L3.9 5.9L2.7 4.4L4.4 2.7L5.9 3.9z" stroke-linejoin="round" />
+          <circle cx="9" cy="9" r="2.3" />
         </svg>
       </button>
       <button
@@ -428,7 +511,7 @@ interface TimeframeEntryProps {
   onSelect: (tf: Timeframe) => void;
 }
 
-/** Small popup: type `15`, `4h`, `D`... and press Enter to switch timeframe. */
+/** Small popup: type `15`, `2h`, `3D`... and press Enter to switch timeframe. */
 function TimeframeEntry(props: TimeframeEntryProps): JSX.Element {
   let input!: HTMLInputElement;
   let previouslyFocused: HTMLElement | null = null;
@@ -464,7 +547,7 @@ function TimeframeEntry(props: TimeframeEntryProps): JSX.Element {
             <input
               ref={input}
               type="text"
-              aria-label="Timeframe, for example 15, 4h, D"
+              aria-label="Timeframe, for example 15, 2h, 3D"
               autocomplete="off"
               spellcheck={false}
               value={value()}
@@ -486,7 +569,7 @@ function TimeframeEntry(props: TimeframeEntryProps): JSX.Element {
             <p class="mt-2 text-xs text-[color:var(--color-fg-muted)]">
               <Show
                 when={parsed()}
-                fallback="Examples: 5, 15, 60, 4h, D, W"
+                fallback="Examples: 5, 15, 60, 2h, 3D, W"
               >
                 {(tf) => `Enter to switch to ${timeframeLabel(tf())}`}
               </Show>

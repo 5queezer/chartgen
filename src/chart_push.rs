@@ -723,6 +723,17 @@ mod tests {
     }
 
     #[test]
+    fn new_intervals_are_pushable() {
+        for tf in ["3m", "2h", "6h", "12h", "3d", "1wk", "1mo"] {
+            assert!(BinanceSource.feed_interval("BTCUSDT", tf).is_ok(), "{tf}");
+            assert!(SampleSource.feed_interval("BTCUSDT", tf).is_ok(), "{tf}");
+        }
+        assert_eq!(BinanceSource.feed_interval("BTCUSDT", "3d").unwrap(), "3d");
+        assert_eq!(BinanceSource.feed_interval("BTCUSDT", "1mo").unwrap(), "1M");
+        assert!(BinanceSource.feed_interval("BTCUSDT", "2m").is_err());
+    }
+
+    #[test]
     fn upsert_replaces_appends_and_rolls() {
         let mut w = vec![bar(60, 1.0), bar(120, 2.0)];
         assert!(upsert_bar(&mut w, bar(120, 2.5), 2));
@@ -930,6 +941,27 @@ mod tests {
         settle().await;
         assert_eq!(hub.counts(), (0, 0, 0));
         assert_eq!(fake.running.load(Ordering::SeqCst), 0, "feed task stopped");
+    }
+
+    #[tokio::test]
+    async fn tails_key_each_indicator_instance() {
+        // ADR-0028: two RSIs in one subscription, each under its own key.
+        let fake = Arc::new(Fake::default());
+        let hub = hub(&fake, quick());
+        let (tx, mut rx) = stream();
+        hub.link_stream("s1", tx);
+        let indicators = r#"["rsi",{"id":"rsi#2","length":21,"name":"rsi"}]"#;
+        hub.subscribe("tok", "ip", "s1", req("BTCUSDT", indicators))
+            .unwrap();
+        let seed = next(&mut rx, 2_000).await.expect("seed push");
+        fake.send(FeedEvent::Tick(bar(1_704_067_200, 123.0))).await;
+        let tick = next(&mut rx, 2_000).await.expect("tick push");
+        for n in [seed, tick] {
+            let ind = &n["params"]["series"]["indicators"];
+            assert_eq!(ind.as_object().unwrap().len(), 2);
+            let last = |k: &str| ind[k]["lines"][0]["values"][1].as_f64().unwrap();
+            assert_ne!(last("rsi"), last("rsi#2"));
+        }
     }
 
     #[tokio::test]

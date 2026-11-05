@@ -23,12 +23,12 @@ Status legend:
 | Feature | TradingView | chartgen | Notes / links |
 |---|---|---|---|
 | Symbol search | ✅ | ✅ | Binance spot pairs and Yahoo instruments, type tabs, recent symbols. [Toolbar](/chartgen/guides/web/#toolbar), [`search_symbols`](/chartgen/reference/mcp/#search_symbols) |
-| Timeframe buttons and keyboard entry | ✅ | ◐ | 1m, 5m, 15m, 30m, 1h, 4h, 1D, 1W, 1M; typing a digit opens a popup. No 2h and no custom or seconds intervals. [Keyboard shortcuts](/chartgen/guides/web/#keyboard-shortcuts) |
+| Timeframe buttons and keyboard entry | ✅ | ◐ | A fixed set of 14 intervals (1m, 3m, 5m, 15m, 30m, 1h, 2h, 4h, 6h, 12h, 1D, 3D, 1W, 1M); typing a digit or **Custom interval...** opens a popup that accepts any of them (`2h`, `120`, `3D`). No arbitrary multiples (7m, 2D) or seconds. [Keyboard shortcuts](/chartgen/guides/web/#keyboard-shortcuts) |
 | Price legend (OHLC, change, volume) | ✅ | ✅ | Follows the crosshair. [Chart conveniences](/chartgen/guides/web/#chart-conveniences) |
 | Bar-close countdown | ✅ | ◐ | Only for 24/7 symbols (the Binance rule). Hidden for stocks, FX and futures, because the session close cannot be derived from the interval. [Chart conveniences](/chartgen/guides/web/#chart-conveniences) |
 | %, log and auto price scale | ✅ | ✅ | [Chart conveniences](/chartgen/guides/web/#chart-conveniences) |
 | Inverted scale, lock scale to bars | ✅ | ❌ | Not in the web guide. |
-| Date-range buttons | ✅ | ◐ | `1D 5D 1M 3M 6M YTD 1Y 5Y All`. 6M uses 4h because there is no 2h. A range is capped by the history limit. [Bottom bar](/chartgen/guides/web/#bottom-bar) |
+| Date-range buttons | ✅ | ✅ | `1D 5D 1M 3M 6M YTD 1Y 5Y All`. Each range uses TradingView's interval (6M is 2h). A range is capped by the history limit. [Bottom bar](/chartgen/guides/web/#bottom-bar) |
 | Time zone selector and clock | ✅ | ◐ | UTC, Exchange, Local and common IANA zones. "Exchange" is a heuristic on the ticker suffix. [Bottom bar](/chartgen/guides/web/#bottom-bar) |
 | Go to date | ✅ | ✅ | `Alt+G`. [Bottom bar](/chartgen/guides/web/#bottom-bar) |
 | Scroll, zoom, keyboard navigation | ✅ | ✅ | Arrow keys, `Home`/`End`, `Alt+R` reset. [Keyboard shortcuts](/chartgen/guides/web/#keyboard-shortcuts) |
@@ -53,7 +53,7 @@ Status legend:
 | Line | ✅ | ✅ | |
 | Area | ✅ | ✅ | |
 | Heikin Ashi | ✅ | ✅ | Computed on the server, so indicators run on the HA values as on TradingView. [`chart_style`](/chartgen/reference/mcp/) |
-| Baseline, columns, high-low, step line | ✅ | ❌ | Not offered. |
+| Baseline, columns, high-low, step line, line with markers | ✅ | ◐ | Drawn in the browser from the bars. Baseline's base level is fixed at TradingView's default (50% of the visible range) and not configurable. No per-type style settings (TradingView's Baseline, Columns and High-low style tabs); the types take the line and up/down body colors, and the body/border toggles do not apply to Columns or Baseline. [Toolbar](/chartgen/guides/web/#toolbar), [ADR-0030](/chartgen/decisions/0030-custom-chart-types/) |
 | Renko, Kagi, Line break, Point & figure | ✅ | ❌ | Not offered. |
 | Range bars and other non-time bars | ✅ | ❌ | Not offered. |
 
@@ -68,7 +68,7 @@ Status legend:
 | Indicator picker | ✅ | ✅ | By name, server default parameters. [Managing indicators](/chartgen/guides/web/#managing-indicators) |
 | Settings dialog with Inputs and Style tabs | ✅ | ◐ | The Inputs form is generated from the server schema (numbers, switches, text; no enums). The Style tab sets visibility, color, opacity, width and line style. No per-timeframe visibility tab. [ADR-0017](/chartgen/decisions/0017-indicator-plot-styles/) |
 | Hide and remove from the pane legend | ✅ | ✅ | [Managing indicators](/chartgen/guides/web/#managing-indicators), [ADR-0013](/chartgen/decisions/0013-indicator-visibility-and-instances/) |
-| Several instances of one indicator (RSI 14 and RSI 21) | ✅ | ❌ | Needs a wire change. [ADR-0013](/chartgen/decisions/0013-indicator-visibility-and-instances/) |
+| Several instances of one indicator (RSI 14 and RSI 21) | ✅ | ✅ | Each with its own params, style, visibility and pane. [Managing indicators](/chartgen/guides/web/#managing-indicators), [ADR-0028](/chartgen/decisions/0028-multiple-indicator-instances/) |
 | Fills, hlines, volume profile, divergence lines | ✅ | ✅ | Server colors on the wire. The VPVR up/down split cannot be colored. [ADR-0007](/chartgen/decisions/0007-complete-series-serialization/), [ADR-0010](/chartgen/decisions/0010-overlay-geometry-rendering/), [ADR-0012](/chartgen/decisions/0012-geometry-colors-on-the-wire/) |
 | Ichimoku cloud | ✅ | ◐ | Cloud is drawn over the bars; the projection past the last bar is not drawn yet. [Differences list](/chartgen/reference/indicators/#values-match-tradingview) |
 | Geometry colors editable in Style | ✅ | ❌ | Fill, profile and divergence colors are not styleable. [ADR-0017](/chartgen/decisions/0017-indicator-plot-styles/) |
@@ -89,8 +89,8 @@ Status legend:
 | Rectangle | ✅ | ✅ | |
 | Text annotation, price label | ✅ | ✅ | |
 | Magnet (off, weak, strong), lock all, hide all, remove all | ✅ | ✅ | |
-| Undo | ✅ | ◐ | `Ctrl+Z` undoes the last drawing action. No redo is documented. |
-| Per-drawing styling (color, width, line style) | ✅ | ❌ | Not described in the guide. |
+| Undo and redo | ✅ | ◐ | `Ctrl+Z` undoes, `Ctrl+Shift+Z` / `Ctrl+Y` redoes, 100 steps. Drawings only; resets on symbol switch. [Drawing tools](/chartgen/guides/web/#drawing-tools) |
+| Per-drawing styling (color, width, line style) | ✅ | ✅ | Floating style bar; rectangle fill and text color/size too. Missing vs TradingView: style templates, extend-left/right and arrow options, text bold/italic/background, per-timeframe visibility. [Drawing tools](/chartgen/guides/web/#drawing-tools) |
 | Gann, pitchfork, Elliott and chart patterns, measure, other fib tools | ✅ | ❌ | Only the eleven tools above. |
 | Drawings stored per symbol | ✅ | ◐ | `localStorage`, per browser, max 500 per symbol. Shared across layouts. [Drawing tools](/chartgen/guides/web/#drawing-tools) |
 
@@ -125,7 +125,7 @@ Status legend:
 | Named layouts (save, copy, rename, load, delete) | ✅ | ◐ | Symbol, timeframe, chart type, scale, compare symbols and indicators. Drawings are not part of a layout. Stored in `localStorage`, max 50. [Layouts](/chartgen/guides/web/#layouts), [ADR-0015](/chartgen/decisions/0015-named-layouts/) |
 | Layout export and import | ✅ | ✅ | JSON file, validated on import. [Layouts](/chartgen/guides/web/#layouts) |
 | Cloud sync of layouts and settings | ✅ | ❌ | [ADR-0005](/chartgen/decisions/0005-client-indicator-state/) |
-| Shareable chart links | ✅ | ❌ | [ADR-0005](/chartgen/decisions/0005-client-indicator-state/) |
+| Shareable chart links | ✅ | ◐ | Query-param links for symbol, timeframe, chart type, indicators, compare symbols and time zone; no drawings, no short links. [Sharing a chart](/chartgen/guides/web/#sharing-a-chart), [ADR-0029](/chartgen/decisions/0029-shareable-chart-links/) |
 | Chart settings (colors, grid, scales) | ✅ | ◐ | Saved in `localStorage` under `chartgen.chartSettings`, not synced and not in named layouts. [Chart settings](/chartgen/guides/web/#chart-settings), [ADR-0019](/chartgen/decisions/0019-chart-settings/) |
 | Keyboard shortcuts | ✅ | ◐ | A documented subset with `Alt` modifiers for tools. [Keyboard shortcuts](/chartgen/guides/web/#keyboard-shortcuts) |
 
@@ -204,12 +204,9 @@ oversight.
 - **Compare costs up to five extra requests per poll.** It relies on
   klinecharts' percent axis behavior, pinned by a unit test.
   [ADR-0022](/chartgen/decisions/0022-compare-symbols/)
-- **One instance per indicator.** Two RSIs with different lengths need a wire
-  change.
-  [ADR-0013](/chartgen/decisions/0013-indicator-visibility-and-instances/)
 - **Client state is local.** Indicators, layouts, drawings, alerts and the
-  watchlist live in `localStorage`: no sync, no shareable links, and
-  clearing browser data wipes them.
+  watchlist live in `localStorage`: no sync, links carry only the
+  chart setup, and clearing browser data wipes them.
   [ADR-0005](/chartgen/decisions/0005-client-indicator-state/)
 - **Visual parity drifts.** TradingView changes its look over time, so the
   match is periodically revisited.

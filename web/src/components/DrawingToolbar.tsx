@@ -25,10 +25,12 @@ import {
   type OverlayEvent,
 } from "klinecharts";
 
-import { isTypingContext } from "../lib/keys";
+import { isTypingContext, undoRedoKey } from "../lib/keys";
+import { createHistory } from "../stores/drawingHistory";
 import {
   loadDrawings,
   MAX_DRAWINGS,
+  overlayStyles,
   saveDrawings,
   serialize,
   timeAxisOf,
@@ -36,8 +38,10 @@ import {
   type ChartPoint,
   type DrawingName,
   type DrawingRecord,
+  type DrawingStyle,
   type TimeAxis,
 } from "../stores/drawings";
+import { DrawingStyleBar } from "./DrawingStyleBar";
 import { PALETTES } from "../lib/theme";
 import { theme } from "../stores/layout";
 
@@ -66,6 +70,24 @@ registerOverlay({
   },
 });
 
+// klinecharts' horizontalRayLine takes two clicks and points toward the
+// second one. TradingView places it with one click, extending right.
+registerOverlay({
+  name: "horizontalRayLine",
+  totalStep: 2,
+  needDefaultPointFigure: true,
+  needDefaultXAxisFigure: true,
+  needDefaultYAxisFigure: true,
+  createPointFigures: ({ coordinates, bounding }) => {
+    const a = coordinates[0];
+    if (!a) return [];
+    return {
+      type: "line",
+      attrs: { coordinates: [a, { x: bounding.width, y: a.y }] },
+    };
+  },
+});
+
 // klinecharts' simpleAnnotation ignores all mouse events, so it could be
 // neither selected nor edited. This label can; its text is `extendData`.
 registerOverlay({
@@ -77,6 +99,7 @@ registerOverlay({
   createPointFigures: ({ overlay, coordinates }) => {
     const c = coordinates[0];
     if (!c) return [];
+    const own = (overlay.styles as { text?: { color?: string; size?: number } } | null)?.text;
     return {
       type: "text",
       attrs: {
@@ -87,10 +110,10 @@ registerOverlay({
       },
       styles: {
         style: "stroke_fill",
-        color: PALETTES[theme()].fg,
+        color: own?.color ?? PALETTES[theme()].fg,
         backgroundColor: PALETTES[theme()].surface,
         borderColor: "#2962ff",
-        size: 12,
+        size: own?.size ?? 12,
         paddingLeft: 6,
         paddingRight: 6,
         paddingTop: 3,
@@ -118,7 +141,6 @@ const RECT_STYLES = {
   },
 };
 
-const MAX_HISTORY = 100;
 const DEFAULT_TEXT = "Text";
 
 const svgProps = {
@@ -264,7 +286,7 @@ const SHORTCUTS: Record<string, DrawingName> = Object.fromEntries(
 );
 
 const btnClass =
-  "relative w-9 h-9 inline-flex items-center justify-center rounded-md cursor-pointer text-[color:var(--color-fg-muted)] hover:bg-[color:var(--color-border)] hover:text-[color:var(--color-fg)] aria-pressed:bg-[color:var(--color-border)] aria-pressed:text-[color:var(--color-accent)]";
+  "relative disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-transparent w-9 h-9 inline-flex items-center justify-center rounded-md cursor-pointer text-[color:var(--color-fg-muted)] hover:bg-[color:var(--color-border)] hover:text-[color:var(--color-fg)] aria-pressed:bg-[color:var(--color-border)] aria-pressed:text-[color:var(--color-accent)]";
 const menuItemClass =
   "w-full text-left px-3 py-1.5 text-sm cursor-pointer hover:bg-[color:var(--color-border)] outline-none focus:bg-[color:var(--color-border)]";
 
@@ -290,6 +312,8 @@ export interface DrawingsApi {
   addHorizontalLine: (price: number) => void;
   /** Remove every drawing after a confirm. */
   removeAll: () => void;
+  undo: () => void;
+  redo: () => void;
   /** True when the latest right-click landed on a drawing (its own menu wins). */
   rightClickedDrawing: () => boolean;
 }
@@ -310,7 +334,8 @@ export interface DrawingToolbarProps {
 export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
   const [armed, setArmed] = createSignal<DrawingName | null>(null);
   // --- Bar replay (ADR-0023) ------------------------------------------
-  createEffect(() => props.onArmedChange?.(armed() !== null));
+  // Armed tool or a selected drawing: either way Esc is the drawing's, not replay's.
+  createEffect(() => props.onArmedChange?.(armed() !== null || selectedId() !== null));
   createEffect(() => {
     if (props.disarm) untrack(cancelArmed);
   });
@@ -348,11 +373,18 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
   // Restored drawings waiting for the first data load.
   let pending: DrawingRecord[] | null = null;
   let armedId: string | null = null;
-  // Drawings that have worn the selection highlight: their live styles are
-  // not the stored ones, so serialization takes the canonical styles.
-  const highlighted = new Set<string>();
   let current: DrawingRecord[] = [];
-  let history: DrawingRecord[][] = [];
+  const history = createHistory<DrawingRecord[]>();
+  const [canUndo, setCanUndo] = createSignal(false);
+  const [canRedo, setCanRedo] = createSignal(false);
+  const syncHistory = () => {
+    setCanUndo(history.canUndo());
+    setCanRedo(history.canRedo());
+  };
+  // Storage writes of a slider drag are debounced; `symbol` is captured so a
+  // symbol switch cannot send them to the wrong key.
+  let saveTimer: number | undefined;
+  let pendingSave: { symbol: string; records: DrawingRecord[] } | null = null;
   let limitTimer: number | undefined;
   // klinecharts fires an overlay's onRightClick on mousedown, before the
   // browser's contextmenu event; the flag lets the chart menu stand down.
@@ -367,17 +399,43 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
     setItems(
       reconcile(
         ids.flatMap((id) =>
-          canon.has(id) ? [{ id, ...canon.get(id)!, offRange: offRange.has(id) }] : [],
+          // Cloned: reconcile edits the objects it is given in place, which
+          // would rewrite the snapshots held by canon and the undo history.
+          canon.has(id)
+            ? [{ id, ...structuredClone(canon.get(id)!), offRange: offRange.has(id) }]
+            : [],
         ),
         { key: "id" },
       ),
     );
   };
 
-  const persist = () => setSaveFailed(!saveDrawings(props.symbol, current));
+  const flushSave = () => {
+    window.clearTimeout(saveTimer);
+    const p = pendingSave;
+    pendingSave = null;
+    if (p) setSaveFailed(!saveDrawings(p.symbol, p.records));
+  };
+  const persist = () => {
+    pendingSave = { symbol: props.symbol, records: current };
+    flushSave();
+  };
+  const persistSoon = () => {
+    pendingSave = { symbol: props.symbol, records: current };
+    window.clearTimeout(saveTimer);
+    saveTimer = window.setTimeout(flushSave, 300);
+  };
+  window.addEventListener("pagehide", flushSave);
+  onCleanup(() => {
+    window.removeEventListener("pagehide", flushSave);
+    flushSave();
+  });
 
-  /** Record the chart's present state: history for undo, then storage. */
-  const commit = () => {
+  /**
+   * Record the chart's present state: history for undo, then storage.
+   * Commits with the same `key` in quick succession are one undo step.
+   */
+  const commit = (key?: string) => {
     const chart = props.chart;
     if (!chart) return;
     const ax = axis();
@@ -386,18 +444,24 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
         const o = chart.getOverlayById(id);
         const [rec] = o ? serialize([o], ax) : [];
         if (rec) {
-          const styles = highlighted.has(id) ? canon.get(id)?.styles : rec.styles;
-          canon.set(id, { ...rec, styles });
+          // Live styles carry the selection highlight; the stored ones do not.
+          const old = canon.get(id);
+          canon.set(id, {
+            ...rec,
+            styles: old ? old.styles : rec.styles,
+            style: old?.style,
+          });
         }
       }
       const rec = canon.get(id);
       return rec ? [rec] : [];
     });
     if (JSON.stringify(next) === JSON.stringify(current)) return;
-    history.push(current);
-    if (history.length > MAX_HISTORY) history.shift();
+    history.record(current, key);
+    syncHistory();
     current = next;
-    persist();
+    if (key === undefined) persist();
+    else persistSoon();
     syncFlags();
   };
 
@@ -426,6 +490,8 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
       ids.push(overlay.id);
       if (lockAll()) props.chart?.overrideOverlay({ id: overlay.id, lock: true });
       commit();
+      // onSelected fires before the drawing is registered, so highlight now.
+      if (selectedId() === overlay.id) highlight(overlay.id, true);
       return false;
     },
     onPressedMoveEnd: () => {
@@ -461,11 +527,26 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
       ids = ids.filter((id) => id !== overlay.id);
       canon.delete(overlay.id);
       offRange.delete(overlay.id);
-      highlighted.delete(overlay.id);
       if (selectedId() === overlay.id) setSelectedId(null);
       return false;
     },
   });
+
+  /** Stored `styles` overlaid with the user's style (plus the selection thickening). */
+  const liveStyles = (rec: DrawingRecord, selected: boolean) => {
+    const own = overlayStyles(rec.name, rec.style, selected);
+    const base = (rec.styles ?? {}) as Record<string, Record<string, unknown>>;
+    // Per-tool defaults first, so older records without stored styles
+    // still get them on restore.
+    const dflt = (rec.name === "cgRect" ? RECT_STYLES : {}) as Record<
+      string,
+      Record<string, unknown>
+    >;
+    return {
+      ...own,
+      polygon: { ...dflt.polygon, ...base.polygon, ...own.polygon },
+    };
+  };
 
   /** Add a stored drawing to the chart; needs loaded data. */
   const create = (rec: DrawingRecord, ax: TimeAxis) => {
@@ -473,7 +554,7 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
     const id = props.chart?.createOverlay({
       name: rec.name,
       points,
-      styles: rec.styles as never,
+      styles: liveStyles(rec, false) as never,
       extendData: rec.extendData,
       lock: off || rec.lock,
       visible: !off && rec.visible,
@@ -493,7 +574,6 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
     ids = [];
     canon.clear();
     offRange.clear();
-    highlighted.clear();
     setSelectedId(null);
     const ax = axis();
     if (ax === null) {
@@ -582,6 +662,7 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
   };
 
   function toggleHide() {
+    if (!hideAll()) setSelectedId(null);
     setAll({ visible: hideAll() });
   }
 
@@ -639,11 +720,34 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
     commit();
   };
 
-  const undo = () => {
-    const prev = history.pop();
-    if (prev === undefined) return;
-    rebuild(prev);
+  const travel = (to: DrawingRecord[] | undefined) => {
+    if (to === undefined) return;
+    // Keep the selection on the same drawing (by position) if it survives.
+    const at = ids.indexOf(selectedId() ?? "");
+    const name = at >= 0 ? canon.get(ids[at]!)?.name : undefined;
+    rebuild(to);
+    const again = at >= 0 ? ids[at] : undefined;
+    if (again !== undefined && canon.get(again)?.name === name) {
+      fromTree = again;
+      setSelectedId(again);
+    }
+    syncHistory();
     persist();
+  };
+  const undo = () => travel(history.undo(current));
+  const redo = () => travel(history.redo(current));
+
+  /** Change a drawing's look; locked or off-range drawings keep theirs. */
+  const setStyle = (id: string, patch: Partial<DrawingStyle>, key: string) => {
+    const rec = canon.get(id);
+    if (!rec || rec.lock || offRange.has(id)) return;
+    const style = { ...rec.style, ...patch };
+    canon.set(id, { ...rec, style });
+    props.chart?.overrideOverlay({
+      id,
+      styles: liveStyles({ ...rec, style }, selectedId() === id) as never,
+    });
+    commit(`${id}:${key}`);
   };
 
   const patchOne = (id: string, patch: { lock: boolean } | { visible: boolean }) => {
@@ -656,12 +760,9 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
   // select events and by the tree, drawn as a thicker stroke.
   const highlight = (id: string, on: boolean) => {
     if (!props.chart?.getOverlayById(id)) return;
-    const border = (canon.get(id)?.styles?.polygon as { borderSize?: number } | undefined)?.borderSize;
-    highlighted.add(id);
-    props.chart.overrideOverlay({
-      id,
-      styles: { line: { size: on ? 3 : 1 }, polygon: { borderSize: on ? 3 : (border ?? 1) } } as never,
-    });
+    const rec = canon.get(id);
+    if (!rec) return;
+    props.chart.overrideOverlay({ id, styles: liveStyles(rec, on) as never });
   };
   createEffect(
     on(selectedId, (id, prev) => {
@@ -730,8 +831,10 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
       () => [props.chart, props.symbol] as const,
       ([chart, symbol]) => {
         if (!chart) return;
+        flushSave();
         rebuild(loadDrawings(symbol));
-        history = [];
+        history.clear();
+        syncHistory();
         setSaveFailed(false);
       },
     ),
@@ -759,6 +862,9 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
                 lock: o.lock,
                 visible: o.visible,
                 offRange: offRange.has(id),
+                paneId: o.paneId,
+                styles: o.styles,
+                points: o.points,
               },
             ]
           : [];
@@ -775,6 +881,52 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
     onCleanup(() => dom.removeEventListener("contextmenu", stop));
   });
 
+  // klinecharts ignores the pointer in any pane but the one a drawing was
+  // started in, so a second click over an indicator pane stalls the
+  // drawing. Clamp the pointer into the start pane instead.
+  let pinning = false;
+  const pinToStartPane = (e: MouseEvent) => {
+    const chart = props.chart;
+    if (pinning || armedId === null || !chart) return;
+    if (!(e.target instanceof Node) || !chart.getDom()?.contains(e.target)) return;
+    const o = chart.getOverlayById(armedId) as unknown as {
+      paneId: string;
+      currentStep: number;
+    } | null;
+    if (!o || o.currentStep < 2) return;
+    const r = chart.getDom(o.paneId, "main" as never)?.getBoundingClientRect();
+    if (!r || (e.clientY >= r.top && e.clientY <= r.bottom)) return;
+    e.stopImmediatePropagation();
+    pinning = true;
+    try {
+      e.target.dispatchEvent(
+        new MouseEvent(e.type, {
+          bubbles: true,
+          cancelable: true,
+          view: window,
+          detail: e.detail,
+          screenX: e.screenX,
+          screenY: e.screenY,
+          shiftKey: e.shiftKey,
+          ctrlKey: e.ctrlKey,
+          altKey: e.altKey,
+          metaKey: e.metaKey,
+          button: e.button,
+          buttons: e.buttons,
+          clientX: e.clientX,
+          clientY: Math.min(Math.max(e.clientY, r.top + 4), r.bottom - 4),
+        }),
+      );
+    } finally {
+      pinning = false;
+    }
+  };
+  const pinEvents = ["mousemove", "mousedown", "mouseup", "click"] as const;
+  for (const type of pinEvents) document.addEventListener(type, pinToStartPane, true);
+  onCleanup(() => {
+    for (const type of pinEvents) document.removeEventListener(type, pinToStartPane, true);
+  });
+
   const onKey = (e: KeyboardEvent) => {
     if (e.defaultPrevented) return;
     // Our own menu has role=menu, so it is handled before the guard.
@@ -789,9 +941,11 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
       return;
     }
     const mod = e.ctrlKey || e.metaKey;
-    if (mod && !e.altKey && !e.shiftKey && e.code === "KeyZ") {
+    const ur = undoRedoKey(e);
+    if (ur !== null) {
       e.preventDefault();
-      undo();
+      if (ur === "redo") redo();
+      else undo();
     } else if (e.altKey && !mod) {
       const tool = SHORTCUTS[e.code];
       if (tool) {
@@ -837,6 +991,11 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
     <hr class="w-6 border-0 border-t border-[color:var(--color-border)] my-1" />
   );
 
+  const selectedItem = () => {
+    const id = selectedId();
+    return id === null ? undefined : items.find((i) => i.id === id);
+  };
+
   const magnetLabel = () =>
     magnet() === "normal"
       ? "Magnet: off"
@@ -852,6 +1011,8 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
     remove: (id) => removeIds([id]),
     addHorizontalLine,
     removeAll,
+    undo,
+    redo,
     rightClickedDrawing: () => rightClickHit,
   });
 
@@ -944,6 +1105,32 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
       <button
         type="button"
         class={btnClass}
+        aria-label="Undo"
+        title="Undo (Ctrl+Z)"
+        disabled={!canUndo()}
+        onClick={undo}
+      >
+        <svg {...svgProps}>
+          <path d="M9 14L4 9l5-5" />
+          <path d="M4 9h10a6 6 0 0 1 0 12h-3" />
+        </svg>
+      </button>
+      <button
+        type="button"
+        class={btnClass}
+        aria-label="Redo"
+        title="Redo (Ctrl+Shift+Z)"
+        disabled={!canRedo()}
+        onClick={redo}
+      >
+        <svg {...svgProps}>
+          <path d="M15 14l5-5-5-5" />
+          <path d="M20 9H10a6 6 0 0 0 0 12h3" />
+        </svg>
+      </button>
+      <button
+        type="button"
+        class={btnClass}
         aria-label="Remove all drawings"
         title="Remove all drawings"
         onClick={removeAll}
@@ -969,6 +1156,16 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
               {props.chart?.getOverlayById(m().id)?.lock ? "Unlock" : "Lock"}
             </button>
           </div>
+        )}
+      </Show>
+
+      <Show when={selectedItem()}>
+        {(item) => (
+          <DrawingStyleBar
+            chart={props.chart}
+            drawing={item()}
+            onChange={(patch, key) => setStyle(item().id, patch, key)}
+          />
         )}
       </Show>
 

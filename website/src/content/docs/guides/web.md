@@ -38,8 +38,26 @@ chart stays on screen while the new one loads. There is no Load button; if a loa
   or `FDUSD` are fetched from Binance, everything else from Yahoo
   Finance. The watchlist **+** button opens the same dialog.
 - **Timeframe** — one-click buttons for 1m, 5m, 15m, 1h, 4h, 1D and 1W,
-  with the active one highlighted; the dropdown holds the rest (30m, 1M).
-- **Chart type** — Candles, Hollow candles (only up candles hollow), Bars (OHLC), Line, Area, Heikin Ashi. Heikin Ashi is computed on the server (the web app sends `chart_style: "heikin_ashi"` with every load, tail poll and history page), so the legend shows Heikin Ashi OHLC values and indicators are calculated on them, as on TradingView. Switching to or from it reloads the chart.
+  with the active one highlighted. The dropdown holds the rest, grouped as
+  on TradingView: Minutes (3m, 30m), Hours (2h, 6h, 12h) and Days (3D, 1M),
+  and ends with **Custom interval...**, which opens the same popup as the
+  keyboard entry (see [Keyboard shortcuts](#keyboard-shortcuts)).
+- **Chart type** — Candles, Hollow candles (only up candles hollow), Bars (OHLC), Line, Line with markers, Step line, Area, Baseline, Columns, High-low, Heikin Ashi. Heikin Ashi is computed on the server (the web app sends `chart_style: "heikin_ashi"` with every load, tail poll and history page), so the legend shows Heikin Ashi OHLC values and indicators are calculated on them, as on TradingView. Switching to or from it reloads the chart. The other types are drawn in the browser from the same bars, so switching between them needs no reload, and the legend keeps showing the bar's OHLC:
+  - **Line with markers** — the close line with a dot on every bar.
+  - **Step line** — the closes joined by horizontal-then-vertical steps.
+  - **Baseline** — the close line and fill, in the up color above a base
+    level and the down color below it. The base level is the middle of the
+    visible close range (TradingView's default of 50%) and follows the view.
+  - **Columns** — a column from the bottom of the pane to each close, in
+    the up color when the bar closed at or above the previous close, else
+    in the down color.
+  - **High-low** — one bar from each bar's low to its high, no open or close.
+
+  Line with markers, Step line and High-low use the line color of the
+  [chart settings](#chart-settings); Baseline and Columns use the up and down
+  body colors. Close-based types scale the price axis to the closes, High-low
+  to the highs and lows
+  ([ADR-0030](/chartgen/decisions/0030-custom-chart-types/)).
 
 - **Replay** (rewind) — starts and ends [bar replay](#bar-replay).
 - **Screenshot** (camera) — downloads the chart canvas, overlays included,
@@ -100,10 +118,9 @@ date** button, a clock and the time zone selector.
   | 5D | 5m | 1Y | 1d |
   | 1M | 30m | 5Y | 1wk |
   | 3M | 1h | All | 1mo |
-  | 6M | 4h | | |
+  | 6M | 2h | | |
 
-  TradingView uses 2h for 6M; chartgen has no 2h timeframe. The range ends
-  at the newest bar. Month ranges are calendar months, and YTD starts on
+  The range ends at the newest bar. Month ranges are calendar months, and YTD starts on
   1 January 00:00 in the selected time zone. A range with more bars than
   pixels is shown at the minimum bar width, so only its newest part is
   visible. Paging respects the history limit (see below); "All" loads as
@@ -295,11 +312,13 @@ while typing in a field or while a dialog or menu is open.
 | `Shift+↓` | Bar replay: play / pause |
 | `Esc` | Bar replay: jump to real time |
 
-The timeframe popup accepts a number of minutes (`5`, `15`, `60`, `240`)
-or a number with a unit `m`, `h`, `d`, `w` (`1h`, `4H`, `1D`); an
-uppercase `M` means month (`1M`), lowercase `m` minutes. A lone `D`, `W`
-or `M` means one day, week or month. Only timeframes the backend serves are
-accepted.
+The timeframe popup accepts a number of minutes (`5`, `15`, `60`, `120`,
+`240`) or a number with a unit `m`, `h`, `d`, `w` (`1h`, `2h`, `4H`, `3D`);
+an uppercase `M` means month (`1M`), lowercase `m` minutes. A lone `D`, `W`
+or `M` means one day, week or month. `1`, `2`, `0` then `Enter` selects 2h.
+The supported set is 1m, 3m, 5m, 15m, 30m, 1h, 2h, 4h, 6h, 12h, 1D, 3D, 1W
+and 1M, for Binance and Yahoo symbols alike; anything else (7m, 2D, seconds)
+is rejected and the field turns red.
 
 ## Drawing tools
 
@@ -321,6 +340,21 @@ to cancel. Drawings pan and zoom with the chart.
   unlocked there. Right-clicking while a drawing is in progress cancels
   it. Hide is only available for all drawings at once (toolbar eye).
 - **Double-click** a text annotation to edit its text in a dialog.
+- **Style** a selected drawing with the bar at the top-right of the
+  chart (below the legend when the chart is too narrow): color, width
+  (1 to 4 px) and line style (solid, dashed, dotted); a rectangle also has
+  a fill color with opacity, a text annotation its text color and size.
+  The bar is disabled while the drawing is locked and hides on `Esc`, when
+  you click elsewhere or when you hide all drawings. Unstyled lines keep
+  klinecharts' default blue in both themes; unstyled text follows the
+  theme. The style is saved with the drawing (`style` field, optional, so
+  older stored drawings load unchanged).
+- **Undo and redo** (keys, or the arrow buttons above the trash button)
+  cover creating, moving, editing, styling, locking, hiding and removing
+  drawings (also remove all), up to 100 steps. The selection stays on the
+  drawing. Drawings only, not indicators or settings; the history resets
+  when you switch symbol. The shortcuts follow the typed letter, so they
+  work on QWERTZ and AZERTY layouts.
 
 Drawings are saved per symbol in `localStorage` under
 `chartgen.drawings.<SYMBOL>` as time and price points, so they survive
@@ -343,6 +377,7 @@ full); hover it for details.
 | `Esc` | Cancel the armed tool or close the drawing menu |
 | `Delete` / `Backspace` | Remove the selected drawing |
 | `Ctrl+Z` / `Cmd+Z` | Undo the last drawing action |
+| `Ctrl+Shift+Z` / `Ctrl+Y` | Redo (`Cmd+Shift+Z` on macOS) |
 
 The shortcuts use modifiers so they do not clash with the letter and
 digit shortcuts above.
@@ -353,8 +388,9 @@ The gear button in the top toolbar (or **Settings…** in the chart context
 menu) opens the chart settings dialog with four tabs:
 
 - **Symbol** — body, borders and wick of the candles, each with an on/off
-  checkbox and an up and a down color, plus the line/area color. Border and
-  wick follow the body color until you pick one for them.
+  checkbox and an up and a down color, plus the line/area color (also used
+  by Line with markers, Step line and High-low). Border and wick follow the
+  body color until you pick one for them.
 - **Status line** — show or hide the OHLC values, the bar change, the volume
   and the indicator values in the legends.
 - **Scales** — last price line, last price label, high and low price labels,
@@ -377,6 +413,7 @@ Right-clicking the chart (outside a drawing) opens a menu:
 | Item | Action |
 |---|---|
 | Reset chart view (`Alt+R`) | Scroll to real time at the default zoom |
+| Copy link to chart | Copy a [shareable link](#sharing-a-chart) |
 | Copy price | Copy the price under the cursor, in the chart's precision |
 | Add horizontal line at | Add a horizontal line at that price; it is saved like any drawing |
 | Add alert at | Open the alert dialog at that price |
@@ -388,6 +425,39 @@ Copy price, Add horizontal line and Add alert only appear when the click is in t
 pane. Right-clicking a drawing opens the drawing menu instead. TradingView's
 "Lock vertical cursor line by time" is not offered because klinecharts has no
 pinned crosshair.
+
+## Sharing a chart
+
+The link icon in the toolbar ("Copy link to chart", also in the chart context
+menu) puts a URL on the clipboard and shows a "Link copied" toast. Opening it
+reproduces the chart:
+
+```text
+https://chartgen.vasudev.xyz/?symbol=ETHUSDT&interval=4h&type=candles&ind=rsi(length:21),ema_stack&compare=BTCUSDT&tz=UTC
+```
+
+| Parameter | Meaning |
+|---|---|
+| `symbol` | Chart symbol |
+| `interval` | Timeframe (`4h`, `240`, `1d`, ...) |
+| `type` | Chart type: `candles`, `hollow`, `bars`, `line`, `line_markers`, `step_line`, `area`, `baseline`, `columns`, `high_low`, `heikin_ashi` |
+| `ind` | Indicators, comma separated (at most 50, 2 KB). Non-default parameters go in parentheses, separated by `;`: `macd(fast:8;slow:20)`; characters outside letters, digits, `.`, `_` and `-` in a text value are percent-encoded. Visible indicators only; `ind=` means none. A repeated name is another instance: `rsi,rsi(length:21)` shows two RSIs |
+| `compare` | Compare symbols, comma separated; always written, `compare=` clears them |
+| `tz` | One of the time zones in the time-zone menu: `utc`, `exchange`, `local` or a listed IANA name such as `Europe/Berlin` |
+
+Every parameter is optional. The app reads them once on load, saves them like a
+manual change and removes them from the address bar. An invalid value (unknown
+interval, empty symbol) is ignored and the stored value stays.
+Indicators from a link are checked against the server's indicator list before
+the first chart request: names it does not know and parameters it rejects
+(wrong type, outside min/max, not a parameter of that indicator) are left out
+with a toast, so the indicator uses its default. Only what came from the link is
+checked; your other indicators are never removed. If the list cannot be loaded,
+the link's indicators are kept as they are. A link carries the chart setup only,
+not drawings, alerts, colors or indicator styles. The parameters survive the
+sign-in redirect. If the browser blocks the clipboard API (plain HTTP), the link
+is copied through a hidden text field instead.
+[ADR-0029](/chartgen/decisions/0029-shareable-chart-links/)
 
 ## Watchlist
 
@@ -551,8 +621,15 @@ loop.
 ## Managing indicators
 
 Indicators are added from the **Indicators** picker (by name, with the
-server's default parameters) and listed as chips under the toolbar. Each indicator pane
-legend shows controls on hover (or keyboard focus):
+server's default parameters) and listed as chips under the toolbar.
+Picking an indicator that is already on the chart (marked **added**) adds
+another instance with the default parameters, so RSI 14 and RSI 21, or EMA
+20 and EMA 50 as two `ma` instances, can sit side by side. Each instance has
+its own parameters, style, visibility and pane. When an indicator is on the
+chart more than once, its legends, chips, Object Tree rows and Data Window
+sections show the parameters of each instance (`RSI (14)`, `RSI (21)`)
+([ADR-0028](/chartgen/decisions/0028-multiple-indicator-instances/)).
+Each indicator pane legend shows controls on hover (or keyboard focus):
 
 - **Eye** hides the indicator. It disappears from the chart immediately and
   is no longer requested from the server; its chip stays, dimmed, with an eye button to
@@ -567,7 +644,8 @@ legend shows controls on hover (or keyboard focus):
   style (solid, dashed, dotted). Style changes apply instantly on the client,
   never refetch, and also recolor the legend; hidden plots are not drawn and
   their legend value is omitted. **Defaults** resets the tab being shown.
-- **×** removes the indicator. The price pane legend cannot be removed.
+- **×** removes the indicator. Other instances of the same indicator stay.
+  The price pane legend cannot be removed.
 
 Lines and histograms are drawn in the colors of the PNG renderer, which
 the server sends with the series. Line widths come from the server too
@@ -589,8 +667,9 @@ The set, parameters and hidden state persist in `localStorage`
 ([ADR-0013](/chartgen/decisions/0013-indicator-visibility-and-instances/)),
 and so do the plot styles
 ([ADR-0017](/chartgen/decisions/0017-indicator-plot-styles/)).
-Each indicator can be added once; two instances with different parameters
-are not supported yet.
+Every instance after the first is stored with an instance id
+(`{ "name": "rsi", "id": "rsi#2", "length": 21 }`). Sets and layouts saved
+before instances existed load unchanged.
 
 ## Build and deploy
 

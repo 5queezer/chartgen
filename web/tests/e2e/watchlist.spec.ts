@@ -4,12 +4,7 @@
 
 import type { Page, Request } from "@playwright/test";
 
-import {
-  test,
-  expect,
-  expectChartRendered,
-  reloadApp,
-} from "./fixtures/app";
+import { test, expect, expectChartRendered, reloadApp } from "./fixtures/app";
 
 const table = (page: Page) => page.getByRole("table", { name: "Watchlist" });
 const row = (page: Page, sym: string) =>
@@ -84,6 +79,104 @@ test.describe("watchlist", () => {
       });
     }).toPass();
     await flashed;
+  });
+
+  test("columns stay separate and aligned with large values", async ({
+    bootedApp: page,
+  }) => {
+    const LONG = "VERYLONGSYMBOLNAME1234567890USDT";
+    const syms = ["BTCUSDT", LONG, "AAPL"];
+    await page.route("**/mcp", async (route) => {
+      const req = route.request();
+      if (!isQuotesRequest(req)) return route.continue();
+      const body = req.postDataJSON() as { id: number };
+      const quotes = syms.map((symbol) => ({
+        symbol,
+        last: 80424.01,
+        change: 2062.0,
+        change_pct: 2.63,
+        prev_close: 78362.01,
+        high: 81000,
+        low: 78000,
+        volume: 1,
+        source: "sample",
+      }));
+      await route.fulfill({
+        contentType: "application/json",
+        json: {
+          jsonrpc: "2.0",
+          id: body.id,
+          result: {
+            content: [{ type: "text", text: JSON.stringify({ quotes }) }],
+          },
+        },
+      });
+    });
+    await page.evaluate(
+      (v) => localStorage.setItem("chartgen.watchlist.symbols", v),
+      JSON.stringify(syms),
+    );
+    await reloadApp(page);
+    await expect(lastCell(page, LONG)).toHaveText("80424.01", {
+      timeout: 15_000,
+    });
+    await expect(row(page, "BTCUSDT").getByRole("cell").nth(2)).toHaveText(
+      /2062\.00/,
+    );
+
+    type Box = { l: number; r: number; fits: boolean };
+    const measureAll = (els: Element[]): Box[] =>
+      els.map((el) => {
+        const b = el.getBoundingClientRect();
+        return {
+          l: b.left,
+          r: b.right,
+          fits: el.scrollWidth <= el.clientWidth,
+        };
+      });
+    const header = await table(page)
+      .getByRole("columnheader")
+      .evaluateAll(measureAll);
+    expect(header).toHaveLength(4);
+
+    for (const sym of syms) {
+      const r = row(page, sym);
+      const [rowBox] = await r.evaluateAll(measureAll);
+      const cells = await r.getByRole("cell").evaluateAll(measureAll);
+      expect(cells).toHaveLength(4);
+      for (const c of cells) {
+        expect(c.fits, `${sym}: cell content fits`).toBe(true);
+        expect(c.l).toBeGreaterThanOrEqual(rowBox.l - 1);
+        expect(c.r).toBeLessThanOrEqual(rowBox.r + 1);
+      }
+      if (sym !== LONG) {
+        // The ellipsis is on the symbol button inside the cell.
+        const [label] = await r
+          .getByRole("button", { name: /^Show / })
+          .evaluateAll(measureAll);
+        expect(label.fits, `${sym}: symbol not truncated`).toBe(true);
+      }
+      for (let i = 1; i < 4; i++) {
+        expect(
+          cells[i - 1].r,
+          `${sym}: column ${i} clear of ${i - 1}`,
+        ).toBeLessThanOrEqual(cells[i].l);
+        expect(
+          Math.abs(cells[i].r - header[i].r),
+          `${sym}: header ${i} aligned`,
+        ).toBeLessThanOrEqual(1);
+      }
+    }
+  });
+
+  test("the settings icon differs from the theme icon", async ({
+    bootedApp: page,
+  }) => {
+    const svg = (name: RegExp | string) =>
+      page.getByRole("button", { name }).locator("svg").innerHTML();
+    expect(await svg("Chart settings")).not.toBe(
+      await svg(/^Switch to (light|dark) theme$/),
+    );
   });
 
   test("polling pauses while the tab is hidden and resumes when visible", async ({

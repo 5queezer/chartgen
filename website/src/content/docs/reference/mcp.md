@@ -158,6 +158,39 @@ Summary payload shape (for `format=summary` or `format=both`):
 Fields are keyed by the name each indicator was requested with, so
 `{"name": "rsi", "length": 21}` comes back as `indicators.rsi`.
 
+##### Several instances of one indicator
+
+The same indicator may be requested more than once, with different
+parameters ([ADR-0028](/chartgen/decisions/0028-multiple-indicator-instances/)).
+Each entry gets its own key in `indicators` and `indicator_errors` (every
+format), so results map back to their entries whatever the order:
+
+- An object entry with an `id` (a string of 1 to 64 characters) is keyed
+  by its id. The id only names the result and is not a parameter.
+- An entry without an id is keyed by its name. A name that is already
+  taken gets `name#2`, `name#3`, and so on. Explicit ids are reserved
+  first, so an automatic key never takes one.
+- A repeated id, or an id that is not a 1 to 64 character string, is a
+  tool error (`Duplicate indicator id: …`, `Invalid indicator id: …`).
+- An id equal to the name of an entry without an id is a tool error, since
+  both would get that key (`Indicator id macd is also the name of an entry
+  without an id; give that entry an id too`).
+- `generate_chart` takes at most 50 entries (`At most 50 indicators per
+  chart.`); `subscribe_chart` at most 10.
+
+```json
+"indicators": [
+  { "name": "rsi", "length": 14 },
+  { "name": "rsi", "length": 21, "id": "rsi#2" },
+  { "name": "ma", "type": "ema", "length": 20 },
+  { "name": "ma", "type": "ema", "length": 50 }
+]
+```
+
+comes back keyed `rsi`, `rsi#2`, `ma` and `ma#2`. The web app sends
+`<name>#<n>` ids for every instance after the first. Push tails
+(`subscribe_chart`) use the same keys.
+
 Series payload shape (for `format=series`):
 
 ```json
@@ -335,14 +368,34 @@ once `warmup` covers their lookback.
 
 Upstream limits: Binance requests are paginated at 1000 bars per call.
 Yahoo intraday history ends after about 30 days for 1m, 60 days for other
-sub-hour intervals, and 730 days for 1h/4h. Yahoo has no native 4h, so
-chartgen builds it from 1h bars. For exchange-traded symbols the buckets
-are anchored at each trading day's session open, like TradingView: a US
-stock gets 09:30–13:30 and 13:30–16:00 ET, the second one shorter. Each
-bucket's `t` is its first 1h bar. Crypto (`BTC-USD`) and FX (`EURUSD=X`)
-trade around the clock and use the UTC 4h grid instead. Each upstream
-request times out after 10 s, and a paginated Binance fetch gives up after
-20 s.
+sub-hour intervals, and 730 days for 1h and the intervals built from it.
+Each upstream request times out after 10 s, and a paginated Binance fetch
+gives up after 20 s.
+
+Yahoo has no native 3m, 2h, 4h, 6h, 12h or 3d, so chartgen builds them from
+1m, 1h and 1d bars (Binance serves all of them natively):
+
+- **2h, 4h, 6h, 12h** are anchored at each session's open, like TradingView:
+  a US stock gets 09:30–13:30 and 13:30–16:00 ET at 4h, the second one
+  shorter; at 12h each session is one bar. A session ends where two
+  consecutive source bars are more than an hour apart, so the overnight gap,
+  a futures daily break (ES=F trades 18:00–17:00 ET and restarts its buckets
+  at 18:00) and a lunch break that leaves a gap in the hourly bars each start
+  a new session. A market with such a break therefore anchors its afternoon
+  separately. Each bucket's `t` is its first source bar. Crypto (`BTC-USD`)
+  and FX (`EURUSD=X`) trade around the clock and use the UTC grid instead,
+  with `t` at the grid start.
+- **3m** uses the UTC grid for every symbol (exchanges open on 15-minute
+  boundaries, so it matches the session grid). It inherits the 1m limits:
+  about 30 days of history and 7 days per request, so the first load of a
+  stock covers roughly 4 to 5 sessions.
+- **3d** groups three calendar days counted from the Unix epoch, on the same
+  grid as Binance's 3d klines (epoch days with `day % 3 == 1`). For stocks
+  this means calendar-day buckets that can hold fewer than three trading
+  days. TradingView likely buckets by trading sessions, a known divergence.
+- A zero-volume 1m or 1h print outside the regular session (Yahoo's phantom
+  print at the close) is merged into the previous bar instead of becoming a
+  bar of its own.
 
 ##### Per-indicator errors
 
@@ -553,7 +606,8 @@ only (stdio returns an error); works without `--trade`.
 
 `subscribe_chart` takes the chart's `generate_chart` arguments: `ticker`
 (required, 2-20 letters or digits), `timeframe` (default `4h`),
-`indicators` (at most 10), `chart_style` and `warmup` (default 0, max
+`indicators` (at most 10, with [instance ids](#several-instances-of-one-indicator)
+as for `generate_chart`), `chart_style` and `warmup` (default 0, max
 1000). Validation and error messages are otherwise the same as for
 `generate_chart`. It returns:
 

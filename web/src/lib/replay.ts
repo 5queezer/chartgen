@@ -17,6 +17,7 @@
 import type { ActiveIndicator } from "../stores/indicators";
 import type { SeriesPayload } from "../types/responses";
 import { barCloseMs } from "./countdown";
+import { keyName } from "./instances";
 import { INITIAL_BARS, type SeriesUpdate } from "./liveFeed";
 import { colorIdxInto } from "./seriesMerge";
 
@@ -59,8 +60,12 @@ const REPAINTING = new Set([
   "ichimoku",
 ]);
 
-/** True when indicator `name`'s output at a bar depends on later bars. */
-export const isRepainting = (name: string): boolean => REPAINTING.has(name.toLowerCase());
+/**
+ * True when indicator `name`'s output at a bar depends on later bars. Takes
+ * a payload key too: `zigzag#2` is a ZigZag (ADR-0028).
+ */
+export const isRepainting = (name: string): boolean =>
+  REPAINTING.has(keyName(name).toLowerCase());
 
 /**
  * Bars after its own bar at which an indicator's signals and divergence
@@ -81,17 +86,18 @@ export interface Lag {
 }
 export type Lags = Record<string, Lag>;
 
-/** `Lag` per payload key (the request name) of the requested indicators. */
+/** `Lag` per payload key (the request name, or the instance id) of the requested indicators. */
 export function replayLags(entries: readonly ActiveIndicator[]): Lags {
   const out: Lags = {};
   for (const e of entries) {
     const name = typeof e === "string" ? e : e.name;
+    const id = typeof e !== "string" && typeof e.id === "string" ? e.id : undefined;
     const key = name.toLowerCase();
     const offset = typeof e === "string" ? undefined : e.offset;
     const lag: Lag = {};
     if (MARKER_LAG[key]) lag.markers = MARKER_LAG[key];
     if (OFFSET_MAS.has(key) && typeof offset === "number" && offset < 0) lag.tail = -offset;
-    if (lag.markers || lag.tail) out[name] = lag;
+    if (lag.markers || lag.tail) out[id ?? name] = lag;
   }
   return out;
 }

@@ -447,6 +447,14 @@ describe("wire colors vs theme fallback", () => {
     );
   });
 
+  it("themes a repeated instance like its indicator (ADR-0028)", () => {
+    const bar = (y: number, width: number) => ({ y, height: 1, width, offset: 0, left: true });
+    const bars = [bar(1, 1), bar(2, 0.2)];
+    expect(fillColors(fill, "ichimoku#2", 0)).toEqual(fillTheme("ichimoku", 0));
+    expect(hbarColors(bars, [], "tpo#2")).toEqual(hbarColors(bars, [], "tpo"));
+    expect(hbarColors(bars, [], "tpo#2")).not.toEqual(hbarColors(bars, [], "vpvr"));
+  });
+
   it("fillColors uses color_below for the y1 < y2 orientation", () => {
     const f = { ...fill, color: "rgba(1,2,3,0.2)", color_below: "rgba(4,5,6,0.2)" };
     expect(fillColors(f, "ichimoku", 0)).toEqual({

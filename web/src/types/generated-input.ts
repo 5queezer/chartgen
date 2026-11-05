@@ -43,11 +43,15 @@ export interface GenerateChartInput {
    */
   height?: number;
   /**
-   * Technical indicators to render on the chart. Each element is a name string (e.g. 'rsi') or an object with 'name' and optional parameters (e.g. {"name": "rsi", "length": 21}). Overlays draw on the price chart, panels draw below. Call list_indicators for the full list of 33 available indicators.
+   * Technical indicators to render on the chart. Each element is a name string (e.g. 'rsi') or an object with 'name' and optional parameters (e.g. {"name": "rsi", "length": 21}). Results are keyed by name; give an object an 'id' to key it by that instead. The same indicator may appear several times (e.g. RSI 14 and RSI 21): a repeat without an id is keyed name#2, name#3, and so on; an id must not equal the name of an entry without one. At most 50 entries. Overlays draw on the price chart, panels draw below. Call list_indicators for the full list of 33 available indicators.
    */
   indicators?: (
     | string
     | {
+        /**
+         * Instance key (ADR-0028): the response keys this entry by id instead of name, so one indicator can be requested several times with different parameters.
+         */
+        id?: string;
         name: string;
         [k: string]: unknown;
       }
@@ -62,6 +66,10 @@ export interface GenerateChartInput {
   panels?: (
     | string
     | {
+        /**
+         * Instance key (ADR-0028): the response keys this entry by id instead of name, so one indicator can be requested several times with different parameters.
+         */
+        id?: string;
         name: string;
         [k: string]: unknown;
       }
@@ -75,7 +83,7 @@ export interface GenerateChartInput {
    */
   ticker?: string;
   /**
-   * Candlestick timeframe / interval: 1m, 5m, 15m, 1h, 4h, 1d, 1wk
+   * Candlestick timeframe / interval: 1m, 3m, 5m, 15m, 30m, 1h, 2h, 4h, 6h, 12h, 1d, 3d, 1wk, 1mo
    */
   timeframe?: string;
   /**
@@ -96,7 +104,7 @@ export interface GetIndicatorsInput {
    */
   indicators: string[];
   /**
-   * Candle interval (e.g. 1m, 5m, 15m, 1h, 4h, 1d)
+   * Candle interval (e.g. 1m, 3m, 5m, 15m, 1h, 2h, 4h, 1d, 3d)
    */
   interval?: string;
   /**
@@ -191,6 +199,10 @@ export interface SubscribeChartInput {
   indicators?: (
     | string
     | {
+        /**
+         * Instance key (ADR-0028): the response keys this entry by id instead of name, so one indicator can be requested several times with different parameters.
+         */
+        id?: string;
         name: string;
         [k: string]: unknown;
       }
@@ -200,7 +212,7 @@ export interface SubscribeChartInput {
    */
   ticker: string;
   /**
-   * Candlestick timeframe, as for generate_chart: 1m, 5m, 15m, 30m, 1h, 4h, 1d, 1wk, 1mo.
+   * Candlestick timeframe, as for generate_chart: 1m, 3m, 5m, 15m, 30m, 1h, 2h, 4h, 6h, 12h, 1d, 3d, 1wk, 1mo.
    */
   timeframe?: string;
   /**

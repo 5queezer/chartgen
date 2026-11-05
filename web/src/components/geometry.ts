@@ -13,6 +13,7 @@
 // older servers that omit `color`.
 
 import type { SeriesPayload } from "../types/responses";
+import { keyName } from "../lib/instances";
 import { PALETTES } from "../lib/theme";
 import { theme } from "../stores/layout";
 
@@ -396,7 +397,7 @@ export function fillColors(
   const c = wireColor(fill.color);
   return c
     ? { up: c, down: wireColor(fill.color_below) ?? c }
-    : fillTheme(name, index);
+    : fillTheme(keyName(name), index);
 }
 
 export type HBarTier = "poc" | "va" | "out";
@@ -451,7 +452,7 @@ export function hbarColors(
   name: string,
 ): string[] {
   const tiers = hbarTiers(hbars, hlines);
-  const theme = hbarTheme(name);
+  const theme = hbarTheme(keyName(name));
   return hbars.map((h, i) => wireColor(h.color) ?? theme[tiers[i]!]);
 }
 

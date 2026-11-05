@@ -69,7 +69,7 @@ export function Sidebar(props: SidebarProps): JSX.Element {
       fallback={<Watchlist session={props.session} enabled={props.enabled} />}
     >
       <aside
-        class="w-72 shrink-0 flex flex-col min-h-0 border-l border-[color:var(--color-border)]"
+        class="w-80 shrink-0 flex flex-col min-h-0 border-l border-[color:var(--color-border)]"
         aria-label="Sidebar"
       >
         <div
