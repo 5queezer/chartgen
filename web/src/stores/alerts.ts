@@ -99,7 +99,8 @@ export { alerts };
 function fresh(): Alert[] {
   if (typeof localStorage === "undefined") return alerts();
   const list = load();
-  setAlertsSignal(list);
+  // Same content: keep the signal (and what renders from it) untouched.
+  if (JSON.stringify(list) !== JSON.stringify(alerts())) setAlertsSignal(list);
   return list;
 }
 
