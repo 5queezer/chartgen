@@ -9,7 +9,7 @@ import { For, Show, type JSX } from "solid-js";
 import { CONDITION_LABELS, alertStatus, describeAlert } from "../lib/alerts";
 import { COMPARE_PALETTE } from "../lib/compare";
 import { pricePrecision } from "../lib/format";
-import { displayName } from "../lib/indicatorNames";
+import { displayName, withoutParamNumber } from "../lib/indicatorNames";
 import { describeDrawing } from "../lib/objectTree";
 import { formatPrice } from "../lib/quote";
 import type { SeriesPayload } from "../types/responses";
@@ -168,7 +168,8 @@ export function ObjectTree(props: ObjectTreeProps): JSX.Element {
               const key = () => instanceKey(entry);
               const label = () =>
                 [
-                  props.series?.indicators[key()]?.label || displayName(indicatorName(entry)),
+                  props.series?.indicators[key()]?.label ||
+                    withoutParamNumber(displayName(indicatorName(entry)), params().get(key())),
                   params().get(key()),
                 ]
                   .filter(Boolean)

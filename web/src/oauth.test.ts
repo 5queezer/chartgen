@@ -176,6 +176,40 @@ describe("registration rate limit", () => {
     expect(retryDelayMs(2, null)).toBe(8000);
   });
 
+  it("parses an HTTP-date Retry-After and clamps to [0, 60 s]", async () => {
+    const { retryDelayMs } = await import("./oauth");
+    const at = (ms: number) => new Date(Date.now() + ms).toUTCString();
+    expect(retryDelayMs(0, at(20_000))).toBeGreaterThan(18_000);
+    expect(retryDelayMs(0, at(20_000))).toBeLessThanOrEqual(20_000);
+    expect(retryDelayMs(0, at(600_000))).toBe(60000);
+    expect(retryDelayMs(0, at(-5_000))).toBe(0);
+    expect(retryDelayMs(0, "-3")).toBe(0);
+  });
+
+  it("clears the notice when a retry fetch rejects", async () => {
+    boot("http://app.test/");
+    localStorage.removeItem("chartgen.oauth.client_id");
+    localStorage.removeItem("chartgen.oauth.client_secret");
+    let registrations = 0;
+    const base = fetchMock.getMockImplementation()!;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string, init?: RequestInit) => {
+        if (input !== DISCOVERY.registration_endpoint) return base(input, init);
+        if (++registrations > 1) throw new TypeError("network down");
+        return new Response("{}", { status: 429, headers: { "Retry-After": "2" } });
+      }),
+    );
+    const { startSignIn, subscribeSignInNotice } = await import("./oauth");
+    const notices: (string | null)[] = [];
+    subscribeSignInNotice((n) => notices.push(n));
+    const result = startSignIn().catch((e: Error) => e.message);
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(await result).toMatch(/network down/);
+    expect(notices.some((n) => n?.includes("retrying"))).toBe(true);
+    expect(notices.at(-1)).toBeNull();
+  });
+
   it("retries a 429 registration, shows a countdown and stores the client", async () => {
     boot("http://app.test/");
     localStorage.removeItem("chartgen.oauth.client_id");

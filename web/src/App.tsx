@@ -602,11 +602,11 @@ export function App(): JSX.Element {
           </span>
         </button>
         {/* Below 480px the header has no room: alerts stay reachable from the
-         * sidebar panel, the status text drops and the layout name collapses. */}
+         * sidebar panel, the status text drops (the sign-in recovery stays) and the layout name collapses. */}
         <div class="max-[479px]:hidden">
           <AlertButton />
         </div>
-        <div class="max-[479px]:hidden">
+        <div>
           <StatusLine
             status={status()}
             live={replay.mode() === "off" ? pollStatus() : { kind: "off" }}

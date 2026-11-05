@@ -1050,6 +1050,7 @@ export function Chart(props: ChartProps): JSX.Element {
   };
   let crosshairFrame: number | null = null;
   let layoutFrame: number | null = null;
+  let layoutTimer: ReturnType<typeof setTimeout> | null = null;
   let styleFrame: number | null = null;
   let pendingStyles: object = {};
   // Width of the price axis when it sits on the left; pane headers start
@@ -1656,12 +1657,16 @@ export function Chart(props: ChartProps): JSX.Element {
     queueMicrotask(recomputeHeaders);
     // Pane tops are not final yet in the microtask (the RSI legend landed
     // on the price row); re-measure once the layout has settled.
+    if (layoutFrame !== null) cancelAnimationFrame(layoutFrame);
+    if (layoutTimer !== null) clearTimeout(layoutTimer);
     layoutFrame = requestAnimationFrame(() => {
+      layoutFrame = null;
       fitPanes();
       recomputeHeaders();
     });
     // At first load the container is still settling; fit once more after.
-    setTimeout(() => {
+    layoutTimer = setTimeout(() => {
+      layoutTimer = null;
       if (untrack(chart) !== c) return;
       fitPanes();
       recomputeHeaders();
@@ -1767,6 +1772,7 @@ export function Chart(props: ChartProps): JSX.Element {
 
   onCleanup(() => {
     if (layoutFrame !== null) cancelAnimationFrame(layoutFrame);
+    if (layoutTimer !== null) clearTimeout(layoutTimer);
     if (styleFrame !== null) cancelAnimationFrame(styleFrame);
     if (container) dispose(container);
   });

@@ -99,8 +99,12 @@ const MAX_REGISTRATION_RETRIES = 4;
 
 /** Wait before retry `attempt` (0-based): Retry-After seconds (max 60), else 2s, 4s, 8s... */
 export function retryDelayMs(attempt: number, retryAfter: string | null): number {
-  const secs = retryAfter === null ? NaN : Number(retryAfter);
-  if (Number.isFinite(secs) && secs >= 0) return Math.min(secs, 60) * 1000;
+  // Retry-After is delta-seconds or an HTTP-date.
+  let secs = retryAfter === null || retryAfter.trim() === "" ? NaN : Number(retryAfter);
+  if (retryAfter !== null && !Number.isFinite(secs)) {
+    secs = (Date.parse(retryAfter) - Date.now()) / 1000;
+  }
+  if (Number.isFinite(secs)) return Math.min(Math.max(secs, 0), 60) * 1000;
   return Math.min(2 ** (attempt + 1), 60) * 1000;
 }
 
@@ -139,28 +143,31 @@ async function registerClient(registration_endpoint: string): Promise<{
 }> {
   const redirectUri = window.location.origin + "/";
   let res: Response;
-  for (let attempt = 0; ; attempt++) {
-    res = await fetch(registration_endpoint, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        client_name: "chartgen-web",
-        redirect_uris: [redirectUri],
-        grant_types: ["authorization_code"],
-        response_types: ["code"],
-        token_endpoint_auth_method: "none",
-      }),
-    });
-    if (res.status !== 429) break;
-    if (attempt >= MAX_REGISTRATION_RETRIES) {
-      setNotice(null);
-      throw new Error(
-        "Too many sign-ins from this network. Try again in a minute.",
-      );
+  try {
+    for (let attempt = 0; ; attempt++) {
+      res = await fetch(registration_endpoint, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          client_name: "chartgen-web",
+          redirect_uris: [redirectUri],
+          grant_types: ["authorization_code"],
+          response_types: ["code"],
+          token_endpoint_auth_method: "none",
+        }),
+      });
+      if (res.status !== 429) break;
+      if (attempt >= MAX_REGISTRATION_RETRIES) {
+        setNotice(null);
+        throw new Error(
+          "Too many sign-ins from this network. Try again in a minute.",
+        );
+      }
+      await waitWithNotice(retryDelayMs(attempt, res.headers.get("Retry-After")));
     }
-    await waitWithNotice(retryDelayMs(attempt, res.headers.get("Retry-After")));
+  } finally {
+    setNotice(null);
   }
-  setNotice(null);
   if (!res.ok) {
     throw new Error(`registration failed: ${res.status}`);
   }

@@ -108,7 +108,7 @@ export function StatusLine(props: StatusLineProps): JSX.Element {
           <span
             data-testid="live-status"
             data-state={props.live?.kind}
-            class={`live-status is-${props.live?.kind}`}
+            class={`live-status is-${props.live?.kind} max-[479px]:hidden`}
             title={b().title}
           >
             {b().text}
