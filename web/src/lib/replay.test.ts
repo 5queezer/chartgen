@@ -216,6 +216,16 @@ describe("lags", () => {
     ).toEqual({ cipher_b: { markers: 2 }, kvf: { markers: 1 }, ma: { tail: 3 } });
   });
 
+  it("are keyed by instance (ADR-0028)", () => {
+    expect(
+      replayLags([
+        { name: "ma", offset: -2 },
+        { name: "ma", id: "ma#2", offset: -5 },
+        { name: "cipher_b", id: "cipher_b#2" },
+      ]),
+    ).toEqual({ ma: { tail: 2 }, "ma#2": { tail: 5 }, "cipher_b#2": { markers: 2 } });
+  });
+
   it("hold signals and divergences back until confirmed", () => {
     const full = series(10);
     // rsi: signals at 1 and 9; divlines 0→2 and 1→9.
@@ -457,6 +467,11 @@ describe("isRepainting", () => {
     for (const n of ["rsi", "ema", "macd", "pivot", "cipher_b"]) {
       expect(isRepainting(n)).toBe(false);
     }
+  });
+
+  it("takes instance keys (ADR-0028)", () => {
+    expect(isRepainting("zigzag#2")).toBe(true);
+    expect(isRepainting("rsi#2")).toBe(false);
   });
 });
 

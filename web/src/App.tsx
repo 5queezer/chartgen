@@ -75,6 +75,7 @@ import {
   indicatorName,
   indicatorParams,
   indicatorStyle,
+  instanceKey,
   isHidden,
   removeIndicator,
   setActiveIndicators,
@@ -165,8 +166,9 @@ export function App(): JSX.Element {
   // Hidden indicators are client-only and never requested from the server.
   const wireIndicators = createMemo(() => toWire(activeIndicators()));
 
-  const indexOf = (name: string) =>
-    activeIndicators().findIndex((e) => indicatorName(e) === name);
+  // Chart legends and the object tree address an instance by its key (ADR-0028).
+  const indexOf = (key: string) =>
+    activeIndicators().findIndex((e) => instanceKey(e) === key);
 
   // Only re-evaluates when the dialog opens/closes, so edits elsewhere do
   // not reset a form in progress.
@@ -177,6 +179,7 @@ export function App(): JSX.Element {
       ? null
       : {
           name: indicatorName(entry),
+          key: instanceKey(entry),
           params: indicatorParams(entry),
           style: indicatorStyle(entry),
           hidden: isHidden(entry),
@@ -187,7 +190,7 @@ export function App(): JSX.Element {
   // from the wire indicators, so a style change never refetches.
   const plotStyles = createMemo(() =>
     Object.fromEntries(
-      activeIndicators().map((e) => [indicatorName(e), indicatorStyle(e)]),
+      activeIndicators().map((e) => [instanceKey(e), indicatorStyle(e)]),
     ),
   );
 
@@ -438,11 +441,11 @@ export function App(): JSX.Element {
 
   // Plots of the open dialog's indicator, from the last series payload.
   const settingsPlots = createMemo(() => {
-    const name = settingsTarget()?.name;
-    const ind = name === undefined ? undefined : query.data?.indicators[name];
-    return name === undefined || !ind
+    const key = settingsTarget()?.key;
+    const ind = key === undefined ? undefined : query.data?.indicators[key];
+    return key === undefined || !ind
       ? null
-      : plotsOf(ind, (n) => paletteColor(name, n));
+      : plotsOf(ind, (n) => paletteColor(key, n));
   });
 
   const status = createMemo<Status>(() => {

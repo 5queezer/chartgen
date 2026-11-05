@@ -25,8 +25,10 @@ import {
   indicatorName,
   indicatorParams,
   indicatorStyle,
+  instanceKey,
   isHidden,
   isActiveIndicator,
+  normalizeInstances,
   sanitizeStyle,
   setActiveIndicators,
   type ActiveIndicator,
@@ -117,8 +119,8 @@ export function uniqueName(
 
 /**
  * Keep an indicator entry's name and its primitive params (number, string,
- * boolean), the hidden flag and the validated plot style (ADR-0017);
- * prototype-polluting keys are dropped.
+ * boolean), the instance id (ADR-0028), the hidden flag and the validated
+ * plot style (ADR-0017); prototype-polluting keys are dropped.
  */
 function sanitizeEntry(e: ActiveIndicator): ActiveIndicator {
   if (typeof e === "string") return e;
@@ -151,16 +153,14 @@ export function parseState(x: unknown): LayoutState | null {
   ) {
     return null;
   }
-  // Same rule as the indicator store: valid entries, unique by name.
-  const seen = new Set<string>();
-  const indicators = x.indicators
-    .filter((e): e is ActiveIndicator => {
-      if (!isActiveIndicator(e) || seen.has(indicatorName(e))) return false;
-      seen.add(indicatorName(e));
-      return true;
-    })
-    .slice(0, MAX_INDICATORS)
-    .map(sanitizeEntry);
+  // Same rule as the indicator store: valid entries, each with a unique
+  // instance key (ADR-0028; older layouts have none and load unchanged).
+  const indicators = normalizeInstances(
+    x.indicators
+      .filter((e): e is ActiveIndicator => isActiveIndicator(e))
+      .slice(0, MAX_INDICATORS)
+      .map(sanitizeEntry),
+  );
   // Any leftover `drawingsBySymbol` key is ignored.
   return {
     symbol: sym,
@@ -259,9 +259,11 @@ export function normalizeIndicators(
     const params = Object.entries(indicatorParams(e))
       .filter(([k, v]) => defaults[name]?.[k] !== v)
       .sort(([a], [b]) => (a < b ? -1 : 1));
+    const key = instanceKey(e);
+    const id = key === name ? [] : [["id", key]];
     const hidden = isHidden(e) ? [["hidden", true]] : [];
     const style = canonicalStyle(indicatorStyle(e));
-    const extra = [...hidden, ...(style ? [["style", style]] : [])];
+    const extra = [...id, ...hidden, ...(style ? [["style", style]] : [])];
     return params.length + extra.length === 0
       ? name
       : Object.fromEntries([["name", name], ...params, ...extra]);
@@ -467,7 +469,8 @@ export const activeLayout = (): Layout =>
   file().items.find((l) => l.id === file().active) ?? file().items[0]!;
 
 const [paramDefaults, setParamDefaults] = createSignal<ParamDefaults>({});
-export { setParamDefaults };
+// Registry param defaults; also fill the legends of repeated indicators (ADR-0028).
+export { paramDefaults, setParamDefaults };
 
 /** True when the live state differs from the active layout's saved snapshot. */
 export const layoutDirty = (): boolean =>

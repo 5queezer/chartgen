@@ -15,6 +15,7 @@ import {
 } from "./format";
 import { plotColorAt, plotsOf, resolvePlot } from "./plotStyle";
 import type { IndicatorStyle } from "../stores/indicators";
+import { keyName } from "./instances";
 import { formatBarTime } from "./timezone";
 
 export interface DataWindowRow {
@@ -87,7 +88,7 @@ export function dataWindowRows(
         },
       ];
     });
-    if (rows.length > 0) indicators.push({ key, title: ind.label || key, rows });
+    if (rows.length > 0) indicators.push({ key, title: ind.label || keyName(key), rows });
   }
 
   return {

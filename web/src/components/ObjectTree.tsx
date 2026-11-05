@@ -17,11 +17,14 @@ import { compareEntries, removeCompare } from "../stores/compare";
 import {
   activeIndicators,
   indicatorName,
+  instanceKey,
   isHidden,
+  paramLabels,
   removeIndicator,
   toggleIndicatorHidden,
 } from "../stores/indicators";
 import { symbol } from "../stores/layout";
+import { paramDefaults } from "../stores/layouts";
 import { openAlertDialog } from "./AlertDialog";
 import { DRAWING_LABELS, type DrawingsApi } from "./DrawingToolbar";
 
@@ -122,6 +125,8 @@ export function ObjectTree(props: ObjectTreeProps): JSX.Element {
     pricePrecision(props.series?.bars.slice(-50).map((b) => b.c) ?? []);
   const drawings = () => props.drawings?.list() ?? [];
   const symbolAlerts = () => alerts().filter((a) => a.symbol === symbol());
+  // A repeated indicator shows its params, so its rows read apart (ADR-0028).
+  const params = () => paramLabels(activeIndicators(), paramDefaults(), true);
 
   return (
     <div class="flex-1 min-h-0 overflow-y-auto pb-2" role="region" aria-label="Object Tree">
@@ -158,10 +163,17 @@ export function ObjectTree(props: ObjectTreeProps): JSX.Element {
         >
           <For each={activeIndicators()}>
             {(entry, index) => {
-              const name = () => indicatorName(entry);
-              const label = () => props.series?.indicators[name()]?.label || name();
+              // Payload and callbacks address the instance (ADR-0028).
+              const key = () => instanceKey(entry);
+              const label = () =>
+                [
+                  props.series?.indicators[key()]?.label || indicatorName(entry),
+                  params().get(key()),
+                ]
+                  .filter(Boolean)
+                  .join(" ");
               return (
-                <Item testId={`tree-ind-${name()}`} dim={isHidden(entry)} label={label()}>
+                <Item testId={`tree-ind-${key()}`} dim={isHidden(entry)} label={label()}>
                   <Action
                     label={`${isHidden(entry) ? "Show" : "Hide"} ${label()}`}
                     path={isHidden(entry) ? EYE_OFF : EYE}
@@ -170,12 +182,12 @@ export function ObjectTree(props: ObjectTreeProps): JSX.Element {
                   <Action
                     label={`Settings for ${label()}`}
                     path={GEAR}
-                    onClick={() => props.onSettings(name())}
+                    onClick={() => props.onSettings(key())}
                   />
                   <Action
                     label={`Remove ${label()}`}
                     path={CLOSE}
-                    onClick={() => removeIndicator(name())}
+                    onClick={() => removeIndicator(key())}
                   />
                 </Item>
               );
