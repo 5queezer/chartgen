@@ -1089,8 +1089,8 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
       <button
         type="button"
         class={btnClass}
-        aria-label="Hide all drawings"
-        title="Hide all drawings"
+        aria-label={hideAll() ? "Show all drawings" : "Hide all drawings"}
+        title={hideAll() ? "Show all drawings" : "Hide all drawings"}
         aria-pressed={hideAll()}
         onClick={toggleHide}
       >

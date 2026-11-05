@@ -150,13 +150,13 @@ export function LayoutMenu(): JSX.Element {
   };
 
   return (
-    <div class="flex items-center gap-2" role="group" aria-label="Layout">
+    <div class="flex items-center gap-2 min-w-0" role="group" aria-label="Layout">
       <Show when={notice()}>
         {(n) => (
           <span
             role={n().error ? "alert" : "status"}
             data-testid="layout-notice"
-            class={`text-xs ${n().error ? "text-[color:var(--color-danger)]" : "text-[color:var(--color-fg-muted)]"}`}
+            class={`text-xs whitespace-nowrap ${n().error ? "text-[color:var(--color-danger)]" : "text-[color:var(--color-fg-muted)]"}`}
           >
             {n().text}
           </span>
@@ -164,21 +164,21 @@ export function LayoutMenu(): JSX.Element {
       </Show>
       <DropdownMenu.Root>
         <DropdownMenu.Trigger
-          class={buttonClass}
+          class={`${buttonClass} min-w-0 max-w-full`}
           aria-label={`Layout: ${activeLayout().name}${layoutDirty() ? " (unsaved changes)" : ""}`}
           title="Layouts"
         >
-          <span class="max-w-40 truncate" data-testid="layout-name">
+          <span class="min-w-0 max-w-40 truncate" data-testid="layout-name">
             {activeLayout().name}
           </span>
           <Show when={layoutDirty()}>
             <span
               data-testid="layout-dirty"
               title="Unsaved changes"
-              class="inline-block w-2 h-2 rounded-full bg-[color:var(--color-accent)]"
+              class="inline-block w-2 h-2 shrink-0 rounded-full bg-[color:var(--color-accent)]"
             />
           </Show>
-          <DropdownMenu.Icon aria-hidden="true">▾</DropdownMenu.Icon>
+          <DropdownMenu.Icon aria-hidden="true" class="shrink-0">▾</DropdownMenu.Icon>
         </DropdownMenu.Trigger>
         <DropdownMenu.Portal>
           <DropdownMenu.Content class={menuClass}>

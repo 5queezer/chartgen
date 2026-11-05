@@ -1,5 +1,6 @@
-// Transient notices (alert triggers, confirmations), bottom-left, newest
-// last. Dismissed on click or after a few seconds (services/alertEngine).
+// Transient notices (alert triggers, confirmations), bottom-left above the
+// bottom bar, newest last, at most three. Dismissed on click or after a few
+// seconds (services/alertEngine).
 
 import { For, type JSX } from "solid-js";
 
@@ -9,8 +10,9 @@ export function Toasts(): JSX.Element {
   return (
     <div
       role="status"
+      data-testid="toasts"
       aria-live="polite"
-      class="fixed bottom-4 left-16 z-[60] flex flex-col gap-2 pointer-events-none"
+      class="fixed bottom-12 left-16 z-[60] flex flex-col gap-2 pointer-events-none"
     >
       <For each={toasts()}>
         {(t) => (

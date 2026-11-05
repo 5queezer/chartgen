@@ -271,8 +271,10 @@ test.describe("drawing tools", () => {
       .toMatchObject([{ offRange: true, visible: false, lock: true }]);
 
     // Toolbar actions must neither reveal it nor touch its points.
-    await page.getByRole("button", { name: "Hide all drawings" }).click();
-    await page.getByRole("button", { name: "Hide all drawings" }).click();
+    // The off-range drawing is already hidden, so the label may be either.
+    const hideToggle = page.getByRole("button", { name: /^(Hide|Show) all drawings$/ });
+    await hideToggle.click();
+    await hideToggle.click();
     await page.getByRole("button", { name: "Lock all drawings" }).click();
     await page.getByRole("button", { name: "Lock all drawings" }).click();
     expect(await overlays(page)).toMatchObject([{ visible: false }]);
@@ -335,7 +337,7 @@ test.describe("drawing tools", () => {
 
     await page.getByRole("button", { name: "Hide all drawings" }).click();
     expect(await overlays(page)).toMatchObject([{ visible: false }]);
-    await page.getByRole("button", { name: "Hide all drawings" }).click();
+    await page.getByRole("button", { name: "Show all drawings" }).click();
     expect(await overlays(page)).toMatchObject([{ visible: true }]);
 
     await page.getByRole("button", { name: "Lock all drawings" }).click();

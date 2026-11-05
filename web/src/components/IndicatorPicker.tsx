@@ -17,6 +17,7 @@ import {
   type JSX,
 } from "solid-js";
 
+import { displayName } from "../lib/indicatorNames";
 import {
   addIndicator,
   indicatorName,
@@ -64,6 +65,7 @@ function matches(info: IndicatorInfo, query: string): boolean {
   if (!query) return true;
   const q = query.toLowerCase();
   if (info.name.toLowerCase().includes(q)) return true;
+  if (displayName(info.name).toLowerCase().includes(q)) return true;
   // Zod marks description as required, but an empty string survives the
   // parse — guard defensively so a future relaxation does not crash the
   // filter.
@@ -298,8 +300,16 @@ export function IndicatorPicker(props: IndicatorPickerProps): JSX.Element {
                                           <ExternalIcon category={info.type} />
                                         </span>
                                         <span class="flex flex-col gap-0.5 min-w-0">
-                                          <span class="font-mono text-[color:var(--color-fg)]">
-                                            {info.name}
+                                          <span
+                                            class="text-[color:var(--color-fg)]"
+                                            title={info.name}
+                                          >
+                                            {displayName(info.name)}
+                                            <Show when={displayName(info.name) !== info.name}>
+                                              <span class="ml-2 font-mono text-xs text-[color:var(--color-fg-muted)]">
+                                                {info.name}
+                                              </span>
+                                            </Show>
                                             <Show when={isActive()}>
                                               <span class="ml-2 text-xs text-[color:var(--color-accent)]">
                                                 added

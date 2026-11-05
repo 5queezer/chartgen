@@ -28,7 +28,11 @@ import {
   processPrice,
 } from "../stores/alerts";
 
-const TOAST_MS = 8_000;
+const TOAST_MS = 5_000;
+// A triggered alert is worth reading; it stays longer than a confirmation.
+const ALERT_TOAST_MS = 8_000;
+/** Toasts visible at once; a new one pushes the oldest out. */
+const MAX_TOASTS = 3;
 
 export interface Toast {
   id: number;
@@ -40,10 +44,10 @@ export { toasts };
 
 let toastId = 0;
 
-export function showToast(text: string): void {
+export function showToast(text: string, ms = TOAST_MS): void {
   const id = ++toastId;
-  setToasts((list) => [...list, { id, text }]);
-  setTimeout(() => dismissToast(id), TOAST_MS);
+  setToasts((list) => [...list, { id, text }].slice(-MAX_TOASTS));
+  setTimeout(() => dismissToast(id), ms);
 }
 
 export function dismissToast(id: number): void {
@@ -115,7 +119,7 @@ function deliver(fired: Alert[]): void {
   if (fired.length === 0) return;
   for (const a of fired) {
     const text = alertText(a);
-    showToast(`Alert: ${text}`);
+    showToast(`Alert: ${text}`, ALERT_TOAST_MS);
     try {
       if (typeof Notification !== "undefined" && Notification.permission === "granted") {
         new Notification("chartgen alert", { body: text, tag: a.id });

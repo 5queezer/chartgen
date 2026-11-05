@@ -41,6 +41,8 @@ body,
 
 body {
   margin: 0;
+  /* The header collapses instead of scrolling the page sideways. */
+  overflow-x: hidden;
   background-color: var(--color-bg);
   color: var(--color-fg);
   font-family: var(--font-sans);
@@ -291,6 +293,7 @@ body {
 
 /* Live-feed badge after the status text (StatusLine). */
 .live-status {
+  white-space: nowrap;
   margin-left: 10px;
   font-size: 12px;
   color: var(--color-fg-muted);

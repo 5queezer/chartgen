@@ -218,7 +218,7 @@ test.describe("toolbar", () => {
     });
 
     await page.getByRole("button", { name: "5m", exact: true }).click();
-    await expect(page.getByText(/^error:/)).toBeVisible({ timeout: 15_000 });
+    await expect(page.getByTestId("status-text").filter({ hasText: /^error$/ })).toBeVisible({ timeout: 15_000 });
     // The failed key has no data, so the old candles must not linger.
     await expect(page.locator(".pane-header")).toHaveCount(0);
 
@@ -226,7 +226,7 @@ test.describe("toolbar", () => {
     await page.getByRole("button", { name: "Retry" }).click();
     await call;
     await expectChartRendered(page);
-    await expect(page.getByText(/^error:/)).toHaveCount(0);
+    await expect(page.getByTestId("status-text").filter({ hasText: /^error$/ })).toHaveCount(0);
   });
 
   test("re-picking the active timeframe refetches", async ({
@@ -260,7 +260,7 @@ test.describe("toolbar", () => {
     await symbolButton(page).click();
     await page.getByRole("combobox").fill("typousdt");
     await page.keyboard.press("Enter");
-    await expect(page.getByText(/^error:/)).toBeVisible({ timeout: 15_000 });
+    await expect(page.getByTestId("status-text").filter({ hasText: /^error$/ })).toBeVisible({ timeout: 15_000 });
     await symbolButton(page).click();
     await expect(page.getByRole("option", { name: /TYPOUSDT/ })).toHaveCount(0);
   });

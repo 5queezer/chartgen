@@ -37,6 +37,13 @@ import {
   type ChartType,
 } from "../stores/layout";
 import type { McpSession } from "../mcp";
+import {
+  BP_FULL,
+  BP_NARROW,
+  BP_TIMEFRAMES,
+  BP_TINY,
+  createViewportWidth,
+} from "../lib/viewport";
 import { SymbolSearch } from "./SymbolSearch";
 
 const CHART_TYPE_LABELS: Record<ChartType, string> = {
@@ -166,8 +173,68 @@ const iconProps = {
   "aria-hidden": true,
 } as const;
 
+const CompareIcon = () => (
+  <svg {...iconProps}>
+    <circle cx="6.5" cy="9" r="4.5" />
+    <circle cx="11.5" cy="9" r="4.5" />
+  </svg>
+);
+const ReplayIcon = () => (
+  <svg {...iconProps}>
+    <path d="M9 4.5v9L3 9zM15.5 4.5v9L9.5 9z" fill="currentColor" stroke-linejoin="round" />
+  </svg>
+);
+const ScreenshotIcon = () => (
+  <svg {...iconProps}>
+    <path d="M2 5.5h3l1-2h6l1 2h3v9H2z" stroke-linejoin="round" />
+    <circle cx="9" cy="10" r="2.5" />
+  </svg>
+);
+const LinkIcon = () => (
+  <svg {...iconProps}>
+    <path
+      d="M7.5 10.5a3 3 0 0 0 4.2 0l2.8-2.8a3 3 0 0 0-4.2-4.2l-.8.8M10.5 7.5a3 3 0 0 0-4.2 0L3.5 10.3a3 3 0 0 0 4.2 4.2l.8-.8"
+      stroke-linecap="round"
+    />
+  </svg>
+);
+const ResetIcon = () => (
+  <svg {...iconProps}>
+    <path d="M3 9a6 6 0 1 0 2-4.5M3 2.5v3h3" stroke-linejoin="round" />
+  </svg>
+);
+const SettingsIcon = () => (
+  <svg {...iconProps}>
+    <path d="M7.6 3.2L7.8 1.3L10.2 1.3L10.4 3.2L12.1 3.9L13.6 2.7L15.3 4.4L14.1 5.9L14.8 7.6L16.7 7.8L16.7 10.2L14.8 10.4L14.1 12.1L15.3 13.6L13.6 15.3L12.1 14.1L10.4 14.8L10.2 16.7L7.8 16.7L7.6 14.8L5.9 14.1L4.4 15.3L2.7 13.6L3.9 12.1L3.2 10.4L1.3 10.2L1.3 7.8L3.2 7.6L3.9 5.9L2.7 4.4L4.4 2.7L5.9 3.9z" stroke-linejoin="round" />
+    <circle cx="9" cy="9" r="2.3" />
+  </svg>
+);
+const ThemeIcon = () => (
+  <svg {...iconProps}>
+    <Show
+      when={theme() === "dark"}
+      fallback={<path d="M14.5 10.5A6 6 0 0 1 7.5 3.5a6 6 0 1 0 7 7z" stroke-linejoin="round" />}
+    >
+      <circle cx="9" cy="9" r="3" />
+      <path d="M9 1.5v2M9 14.5v2M1.5 9h2M14.5 9h2M3.7 3.7l1.4 1.4M12.9 12.9l1.4 1.4M3.7 14.3l1.4-1.4M12.9 5.1l1.4-1.4" />
+    </Show>
+  </svg>
+);
+const FullscreenIcon = (props: { on: boolean }) => (
+  <svg {...iconProps}>
+    <Show
+      when={props.on}
+      fallback={<path d="M2 6V2h4M12 2h4v4M16 12v4h-4M6 16H2v-4" />}
+    >
+      <path d="M6 2v4H2M16 6h-4V2M12 16v-4h4M2 12h4v4" />
+    </Show>
+  </svg>
+);
+const toggleTheme = () => setTheme(theme() === "dark" ? "light" : "dark");
+const themeLabel = () => `Switch to ${theme() === "dark" ? "light" : "dark"} theme`;
+
 const buttonClass =
-  "px-2.5 py-1.5 rounded-md text-sm cursor-pointer text-[color:var(--color-fg)] hover:bg-[color:var(--color-bg-elev)] inline-flex items-center gap-1.5";
+  "px-2 py-1.5 rounded-md text-sm cursor-pointer text-[color:var(--color-fg)] hover:bg-[color:var(--color-bg-elev)] inline-flex items-center gap-1.5 shrink-0";
 const activeClass =
   "bg-[color:var(--color-bg-elev)] text-[color:var(--color-accent)]";
 const TIMEFRAME_GROUPS = ["Minutes", "Hours", "Days"] as const;
@@ -243,12 +310,25 @@ export function Toolbar(props: ToolbarProps): JSX.Element {
     });
   });
 
-  const overflow = TIMEFRAME_OPTIONS.filter(
-    (tf) => !FAVOURITE_TIMEFRAMES.includes(tf),
-  );
+  // Lower-priority items collapse as the window narrows (see lib/viewport).
+  const width = createViewportWidth();
+  const showTimeframes = () => width() >= BP_TIMEFRAMES;
+  const showMisc = () => width() >= BP_FULL;
+  const showTools = () => width() >= BP_NARROW;
+  const showReplay = () => width() >= BP_TINY;
+  const hasFullscreen = document.fullscreenEnabled;
+  // Timeframes in the dropdown: the favourites join it once their buttons go.
+  const overflow = () =>
+    showTimeframes()
+      ? TIMEFRAME_OPTIONS.filter((tf) => !FAVOURITE_TIMEFRAMES.includes(tf))
+      : TIMEFRAME_OPTIONS;
 
   return (
-    <div class="flex items-center gap-1" role="toolbar" aria-label="Chart toolbar">
+    <div
+      class="flex items-center gap-1 shrink-0"
+      role="toolbar"
+      aria-label="Chart toolbar"
+    >
       <button
         type="button"
         onClick={() => openSearch()}
@@ -274,30 +354,32 @@ export function Toolbar(props: ToolbarProps): JSX.Element {
       <span class="w-px h-5 bg-[color:var(--color-border)] mx-1" />
 
       <div class="flex items-center" role="group" aria-label="Timeframe">
-        <For each={FAVOURITE_TIMEFRAMES}>
-          {(tf) => (
-            <button
-              type="button"
-              onClick={() => setTimeframe(tf)}
-              aria-pressed={timeframe() === tf}
-              class={`${buttonClass} ${timeframe() === tf ? activeClass : ""}`}
-            >
-              {timeframeLabel(tf)}
-            </button>
-          )}
-        </For>
+        <Show when={showTimeframes()}>
+          <For each={FAVOURITE_TIMEFRAMES}>
+            {(tf) => (
+              <button
+                type="button"
+                onClick={() => setTimeframe(tf)}
+                aria-pressed={timeframe() === tf}
+                class={`${buttonClass} ${timeframe() === tf ? activeClass : ""}`}
+              >
+                {timeframeLabel(tf)}
+              </button>
+            )}
+          </For>
+        </Show>
         <DropdownMenu.Root>
           <DropdownMenu.Trigger
             class={`${buttonClass} ${
-              overflow.includes(timeframe()) ? activeClass : ""
+              overflow().includes(timeframe()) ? activeClass : ""
             }`}
             aria-label={
-              overflow.includes(timeframe())
+              overflow().includes(timeframe())
                 ? `More timeframes (current: ${timeframeLabel(timeframe())})`
                 : "More timeframes"
             }
           >
-            <Show when={overflow.includes(timeframe())}>
+            <Show when={overflow().includes(timeframe())}>
               {timeframeLabel(timeframe())}
             </Show>
             <span aria-hidden="true">▾</span>
@@ -310,7 +392,7 @@ export function Toolbar(props: ToolbarProps): JSX.Element {
                     <DropdownMenu.GroupLabel class="px-3 py-1 text-[10px] uppercase tracking-wide text-[color:var(--color-fg-muted)]">
                       {group}
                     </DropdownMenu.GroupLabel>
-                    <For each={overflow.filter((tf) => timeframeGroup(tf) === group)}>
+                    <For each={overflow().filter((tf) => timeframeGroup(tf) === group)}>
                       {(tf: Timeframe) => (
                         <DropdownMenu.Item
                           class={itemClass}
@@ -374,100 +456,86 @@ export function Toolbar(props: ToolbarProps): JSX.Element {
 
       <span class="w-px h-5 bg-[color:var(--color-border)] mx-1" />
 
-      <button
-        type="button"
-        class={buttonClass}
-        onClick={props.onCompare}
-        aria-label="Compare symbol"
-        title="Compare symbol"
-      >
-        <svg {...iconProps}>
-          <circle cx="6.5" cy="9" r="4.5" />
-          <circle cx="11.5" cy="9" r="4.5" />
-        </svg>
-      </button>
-      <button
-        type="button"
-        class={`${buttonClass} ${props.replay ? activeClass : ""}`}
-        onClick={props.onReplay}
-        aria-pressed={props.replay}
-        aria-label="Bar replay"
-        title="Bar replay"
-        data-testid="toolbar-replay"
-      >
-        <svg {...iconProps}>
-          <path d="M9 4.5v9L3 9zM15.5 4.5v9L9.5 9z" fill="currentColor" stroke-linejoin="round" />
-        </svg>
-        Replay
-      </button>
-      <button
-        type="button"
-        class={buttonClass}
-        onClick={props.onScreenshot}
-        aria-label="Take screenshot"
-        title="Download chart screenshot (PNG)"
-      >
-        <svg {...iconProps}>
-          <path d="M2 5.5h3l1-2h6l1 2h3v9H2z" stroke-linejoin="round" />
-          <circle cx="9" cy="10" r="2.5" />
-        </svg>
-      </button>
-      <button
-        type="button"
-        class={buttonClass}
-        onClick={props.onCopyLink}
-        aria-label="Copy link to chart"
-        title="Copy link to chart"
-        data-testid="toolbar-copy-link"
-      >
-        <svg {...iconProps}>
-          <path
-            d="M7.5 10.5a3 3 0 0 0 4.2 0l2.8-2.8a3 3 0 0 0-4.2-4.2l-.8.8M10.5 7.5a3 3 0 0 0-4.2 0L3.5 10.3a3 3 0 0 0 4.2 4.2l.8-.8"
-            stroke-linecap="round"
-          />
-        </svg>
-      </button>
-      <button
-        type="button"
-        class={buttonClass}
-        onClick={props.onResetChart}
-        aria-label="Reset chart"
-        title="Reset chart (Alt+R)"
-      >
-        <svg {...iconProps}>
-          <path d="M3 9a6 6 0 1 0 2-4.5M3 2.5v3h3" stroke-linejoin="round" />
-        </svg>
-      </button>
-      <button
-        type="button"
-        class={buttonClass}
-        onClick={props.onSettings}
-        aria-label="Chart settings"
-        title="Chart settings"
-      >
-        <svg {...iconProps}>
-          <path d="M7.6 3.2L7.8 1.3L10.2 1.3L10.4 3.2L12.1 3.9L13.6 2.7L15.3 4.4L14.1 5.9L14.8 7.6L16.7 7.8L16.7 10.2L14.8 10.4L14.1 12.1L15.3 13.6L13.6 15.3L12.1 14.1L10.4 14.8L10.2 16.7L7.8 16.7L7.6 14.8L5.9 14.1L4.4 15.3L2.7 13.6L3.9 12.1L3.2 10.4L1.3 10.2L1.3 7.8L3.2 7.6L3.9 5.9L2.7 4.4L4.4 2.7L5.9 3.9z" stroke-linejoin="round" />
-          <circle cx="9" cy="9" r="2.3" />
-        </svg>
-      </button>
-      <button
-        type="button"
-        class={buttonClass}
-        onClick={() => setTheme(theme() === "dark" ? "light" : "dark")}
-        aria-label={`Switch to ${theme() === "dark" ? "light" : "dark"} theme`}
-        title="Toggle light/dark theme"
-      >
-        <svg {...iconProps}>
-          <Show
-            when={theme() === "dark"}
-            fallback={<path d="M14.5 10.5A6 6 0 0 1 7.5 3.5a6 6 0 1 0 7 7z" stroke-linejoin="round" />}
-          >
-            <circle cx="9" cy="9" r="3" />
-            <path d="M9 1.5v2M9 14.5v2M1.5 9h2M14.5 9h2M3.7 3.7l1.4 1.4M12.9 12.9l1.4 1.4M3.7 14.3l1.4-1.4M12.9 5.1l1.4-1.4" />
-          </Show>
-        </svg>
-      </button>
-      <Show when={document.fullscreenEnabled}>
+      <Show when={showTools()}>
+        <button
+          type="button"
+          class={buttonClass}
+          onClick={props.onCompare}
+          aria-label="Compare symbol"
+          title="Compare symbol"
+        >
+          <CompareIcon />
+        </button>
+      </Show>
+      <Show when={showReplay()}>
+        <button
+          type="button"
+          class={`${buttonClass} ${props.replay ? activeClass : ""}`}
+          onClick={props.onReplay}
+          aria-pressed={props.replay}
+          aria-label="Bar replay"
+          title="Bar replay"
+          data-testid="toolbar-replay"
+        >
+          <ReplayIcon />
+          <span class="max-[1399px]:sr-only">Replay</span>
+        </button>
+      </Show>
+      <Show when={showMisc()}>
+        <button
+          type="button"
+          class={buttonClass}
+          onClick={props.onScreenshot}
+          aria-label="Take screenshot"
+          title="Download chart screenshot (PNG)"
+        >
+          <ScreenshotIcon />
+        </button>
+        <button
+          type="button"
+          class={buttonClass}
+          onClick={props.onCopyLink}
+          aria-label="Copy link to chart"
+          title="Copy link to chart"
+          data-testid="toolbar-copy-link"
+        >
+          <LinkIcon />
+        </button>
+      </Show>
+      <Show when={showTools()}>
+        <button
+          type="button"
+          class={buttonClass}
+          onClick={props.onResetChart}
+          aria-label="Reset chart"
+          title="Reset chart (Alt+R)"
+        >
+          <ResetIcon />
+        </button>
+      </Show>
+      <Show when={showMisc()}>
+        <button
+          type="button"
+          class={buttonClass}
+          onClick={props.onSettings}
+          aria-label="Chart settings"
+          title="Chart settings"
+        >
+          <SettingsIcon />
+        </button>
+      </Show>
+      <Show when={showTools()}>
+        <button
+          type="button"
+          class={buttonClass}
+          onClick={toggleTheme}
+          aria-label={themeLabel()}
+          title="Toggle light/dark theme"
+        >
+          <ThemeIcon />
+        </button>
+      </Show>
+      <Show when={showMisc() && hasFullscreen}>
         <button
           type="button"
           class={buttonClass}
@@ -476,15 +544,71 @@ export function Toolbar(props: ToolbarProps): JSX.Element {
           aria-label="Fullscreen"
           title="Toggle fullscreen"
         >
-          <svg {...iconProps}>
-            <Show
-              when={fullscreen()}
-              fallback={<path d="M2 6V2h4M12 2h4v4M16 12v4h-4M6 16H2v-4" />}
-            >
-              <path d="M6 2v4H2M16 6h-4V2M12 16v-4h4M2 12h4v4" />
-            </Show>
-          </svg>
+          <FullscreenIcon on={fullscreen()} />
         </button>
+      </Show>
+
+      <Show when={!showMisc() || !showTools() || !showReplay()}>
+        <DropdownMenu.Root>
+          <DropdownMenu.Trigger
+            class={buttonClass}
+            aria-label="More tools"
+            title="More tools"
+            data-testid="toolbar-more"
+          >
+            <svg {...iconProps}>
+              <g fill="currentColor" stroke="none">
+                <circle cx="3.5" cy="9" r="1.5" />
+                <circle cx="9" cy="9" r="1.5" />
+                <circle cx="14.5" cy="9" r="1.5" />
+              </g>
+            </svg>
+          </DropdownMenu.Trigger>
+          <DropdownMenu.Portal>
+            <DropdownMenu.Content class={menuClass}>
+              <Show when={!showReplay()}>
+                <DropdownMenu.Item class={itemClass} onSelect={props.onReplay}>
+                  <ReplayIcon />
+                  Bar replay
+                </DropdownMenu.Item>
+              </Show>
+              <Show when={!showTools()}>
+                <DropdownMenu.Item class={itemClass} onSelect={props.onCompare}>
+                  <CompareIcon />
+                  Compare symbol
+                </DropdownMenu.Item>
+                <DropdownMenu.Item class={itemClass} onSelect={props.onResetChart}>
+                  <ResetIcon />
+                  Reset chart
+                </DropdownMenu.Item>
+                <DropdownMenu.Item class={itemClass} onSelect={toggleTheme}>
+                  <ThemeIcon />
+                  Toggle theme
+                </DropdownMenu.Item>
+              </Show>
+              <Show when={!showMisc()}>
+                <DropdownMenu.Item class={itemClass} onSelect={props.onScreenshot}>
+                  <ScreenshotIcon />
+                  Take screenshot
+                </DropdownMenu.Item>
+                <DropdownMenu.Item class={itemClass} onSelect={props.onCopyLink}>
+                  <LinkIcon />
+                  Copy link to chart
+                </DropdownMenu.Item>
+                <DropdownMenu.Item class={itemClass} onSelect={props.onSettings}>
+                  <SettingsIcon />
+                  Chart settings
+                </DropdownMenu.Item>
+                <Show when={hasFullscreen}>
+                  <DropdownMenu.Item class={itemClass} onSelect={toggleFullscreen}>
+                    <FullscreenIcon on={fullscreen()} />
+                    Fullscreen
+                  </DropdownMenu.Item>
+                </Show>
+              </Show>
+            </DropdownMenu.Content>
+          </DropdownMenu.Portal>
+        </DropdownMenu.Root>
       </Show>
 
       <SymbolSearch

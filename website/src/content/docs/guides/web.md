@@ -17,8 +17,27 @@ until the core loop is solid.
 
 The chart loads automatically as soon as sign-in finishes and reloads
 whenever the symbol, timeframe, or indicator set changes. The previous
-chart stays on screen while the new one loads. There is no Load button; if a load fails, use **Retry** in the status line
-  or re-pick the current symbol or timeframe.
+chart stays on screen while the new one loads. There is no Load button.
+
+If a load fails (a mistyped symbol, a provider outage), the header shows a
+compact red `error` badge (the full message is its tooltip) and the chart
+area shows "Couldn't load SYMBOL — symbol not found" with **Retry** and, when
+another chart loaded before, **Back to PREVIOUS**. The failed symbol stays
+active, as on TradingView, and is not saved to your recents.
+
+The header has a fixed height and never scrolls the page sideways. As the
+window narrows, lower-priority items collapse:
+
+- below 1400 px the **Replay** and **Indicators** labels become icon-only;
+- below 1280 px screenshot, copy link, chart settings and fullscreen move
+  into the **⋯** menu, and the timeframe buttons collapse into the timeframe
+  dropdown below 1200 px;
+- below 900 px compare, reset chart and the theme toggle join the **⋯** menu;
+- below 640 px the wordmark is dropped and **Bar replay** joins the menu too.
+
+The status text stays on one line (the live badge reads `live`, `polling`,
+`paused`...); the layout name truncates, and its unsaved-changes dot always
+stays visible.
 
 - **Symbol** — the button shows the current ticker and opens the search
   dialog. Typing searches every Binance spot pair and Yahoo Finance
@@ -38,7 +57,8 @@ chart stays on screen while the new one loads. There is no Load button; if a loa
   or `FDUSD` are fetched from Binance, everything else from Yahoo
   Finance. The watchlist **+** button opens the same dialog.
 - **Timeframe** — one-click buttons for 1m, 5m, 15m, 1h, 4h, 1D and 1W,
-  with the active one highlighted. The dropdown holds the rest, grouped as
+  with the active one highlighted (below 1200 px they all move into the
+  dropdown, which then lists every timeframe). The dropdown holds the rest, grouped as
   on TradingView: Minutes (3m, 30m), Hours (2h, 6h, 12h) and Days (3D, 1M),
   and ends with **Custom interval...**, which opens the same popup as the
   keyboard entry (see [Keyboard shortcuts](#keyboard-shortcuts)).
@@ -232,7 +252,7 @@ polled.
   "History limit reached" (every live update recalculates the indicators
   over all loaded bars, so the history is capped).
 - **Status.** A badge after the status text shows `live` (server push),
-  `live (polling)`, `paused` (tab hidden), `live: retry in Ns` after a
+  `polling`, `paused` (tab hidden), `live: retry in Ns` after a
   failed poll, or `resyncing...` while the chart reloads to catch up.
 
 How it works: the first load asks `generate_chart` for 500 bars with a
