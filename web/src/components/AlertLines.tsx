@@ -85,6 +85,8 @@ export interface AlertLinesProps {
 export function AlertLines(props: AlertLinesProps): null {
   // alert id -> overlay id
   const lines = new Map<string, string>();
+  // Alert whose line is being dragged right now.
+  let dragging: string | null = null;
 
   const drop = (alertId: string) => {
     const id = lines.get(alertId);
@@ -107,7 +109,13 @@ export function AlertLines(props: AlertLinesProps): null {
       const existing = lines.get(a.id);
       if (existing !== undefined) {
         const o = chart.getOverlayById(existing);
-        if (o && o.points[0]?.value !== a.price) {
+        // Not the line being dragged: the store only learns the level at
+        // drag end, and repricing now would snap the line back.
+        if (
+          o &&
+          a.id !== dragging &&
+          (o.points[0]?.value !== a.price || o.extendData !== labelOf(a))
+        ) {
           chart.overrideOverlay({
             id: existing,
             points: [{ timestamp, value: a.price }],
@@ -120,7 +128,12 @@ export function AlertLines(props: AlertLinesProps): null {
         name: "cgAlert",
         points: [{ timestamp, value: a.price }],
         extendData: labelOf(a),
+        onPressedMoveStart: () => {
+          dragging = a.id;
+          return false;
+        },
         onPressedMoveEnd: ({ overlay }: OverlayEvent) => {
+          dragging = null;
           const v = overlay.points[0]?.value;
           if (v !== undefined) moveAlert(a.id, +v.toFixed(priceDecimals(v)));
           return false;

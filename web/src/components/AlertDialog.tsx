@@ -27,6 +27,7 @@ import { symbol as chartSymbol } from "../stores/layout";
 import {
   requestNotificationPermission,
   showToast,
+  unlockAudio,
 } from "../services/alertEngine";
 
 interface Draft {
@@ -146,6 +147,7 @@ export function AlertDialog(): JSX.Element {
 
   const submit = (e: SubmitEvent) => {
     e.preventDefault();
+    unlockAudio();
     const d = draft();
     if (!d) return;
     const price = Number(d.price);

@@ -1,20 +1,32 @@
 // Client-side alert evaluation and delivery (ADR-0020). Prices come from
 // two places and both end in `deliver`:
-//   - the chart symbol: the live feed's last close, via `feedChartPrice`;
+//   - the chart symbol: the live feed's tail polls, via `feedChartSnapshot`;
 //   - every other symbol with an active alert: its own `get_quotes` poll
 //     (`createAlertQuotes`), at the watchlist's 5 s cadence. The chart
 //     symbol is left out of that poll so one price is never counted twice.
 // Delivery is a toast, a short WebAudio beep and, if the user granted the
-// permission, a browser Notification.
+// permission, a browser Notification. Only one open tab evaluates and
+// delivers (see `leader`).
 
-import { createEffect, createMemo, createSignal, type Accessor } from "solid-js";
+import {
+  createEffect,
+  createMemo,
+  createSignal,
+  onCleanup,
+  type Accessor,
+} from "solid-js";
 
 import { CONDITION_LABELS, type Alert } from "../lib/alerts";
+import type { LiveSnapshot } from "../lib/liveFeed";
 import { formatPrice } from "../lib/quote";
 import type { McpSession } from "../mcp";
 import { createQuotesQuery } from "../queries";
-import { activeAlertSymbols, processPrice } from "../stores/alerts";
-import type { SeriesPayload } from "../types/responses";
+import {
+  activeAlertSymbols,
+  forgetBaseline,
+  observePrice,
+  processPrice,
+} from "../stores/alerts";
 
 const TOAST_MS = 8_000;
 
@@ -46,10 +58,38 @@ export function alertText(a: Alert): string {
 
 let audio: AudioContext | undefined;
 
-function beep(): void {
+/**
+ * Create and resume the AudioContext. Browsers only allow that after a user
+ * gesture, so this runs from the dialog submit and the first pointerdown /
+ * keydown (`installAudioUnlock`); `beep` only uses the context that exists.
+ */
+export function unlockAudio(): void {
   try {
     audio ??= new AudioContext();
     void audio.resume();
+  } catch {
+    // No audio support.
+  }
+}
+
+/** Unlock audio on the first user gesture. Returns the uninstall function. */
+function installAudioUnlock(): () => void {
+  const off = () => {
+    window.removeEventListener("pointerdown", unlock, true);
+    window.removeEventListener("keydown", unlock, true);
+  };
+  const unlock = () => {
+    unlockAudio();
+    off();
+  };
+  window.addEventListener("pointerdown", unlock, true);
+  window.addEventListener("keydown", unlock, true);
+  return off;
+}
+
+function beep(): void {
+  if (!audio || audio.state !== "running") return;
+  try {
     const osc = audio.createOscillator();
     const gain = audio.createGain();
     const t = audio.currentTime;
@@ -60,7 +100,7 @@ function beep(): void {
     osc.start(t);
     osc.stop(t + 0.4);
   } catch {
-    // No audio device or autoplay policy: the toast still shows.
+    // The toast still shows.
   }
 }
 
@@ -76,33 +116,107 @@ function deliver(fired: Alert[]): void {
   for (const a of fired) {
     const text = alertText(a);
     showToast(`Alert: ${text}`);
-    if (typeof Notification !== "undefined" && Notification.permission === "granted") {
-      new Notification("chartgen alert", { body: text, tag: a.id });
+    try {
+      if (typeof Notification !== "undefined" && Notification.permission === "granted") {
+        new Notification("chartgen alert", { body: text, tag: a.id });
+      }
+    } catch {
+      // Some browsers throw (e.g. Android Chrome wants a service worker):
+      // the toast and the beep still happen.
     }
   }
   beep();
 }
 
-/** Evaluate and deliver for one live price. */
+// Only one tab evaluates and delivers, or every open tab would fire the
+// same alert. Tabs hold the Web Lock "chartgen-alerts" while visible; the
+// others just mirror the store through its `storage` listener. A hidden tab
+// does not poll, so it gives the lock up. Without Web Locks every tab
+// evaluates (the store re-reads storage, which limits but does not rule
+// out duplicates).
+const LOCK = "chartgen-alerts";
+const hasLocks = typeof navigator !== "undefined" && "locks" in navigator;
+const [leader, setLeader] = createSignal(!hasLocks);
+export { leader };
+
+/** Take part in the election while the page is visible. Returns the stop function. */
+function startLeaderElection(): () => void {
+  if (!hasLocks) return () => {};
+  let release: (() => void) | undefined;
+  let abort: AbortController | undefined;
+
+  const acquire = () => {
+    if (abort) return;
+    const mine = (abort = new AbortController());
+    navigator.locks
+      .request(LOCK, { signal: mine.signal }, () => {
+        // Prices seen while not leading are not a baseline.
+        forgetBaseline();
+        setLeader(true);
+        return new Promise<void>((resolve) => (release = resolve));
+      })
+      .catch(() => {
+        // Aborted while waiting.
+      });
+  };
+  const relinquish = () => {
+    abort?.abort();
+    abort = undefined;
+    release?.();
+    release = undefined;
+    setLeader(false);
+  };
+  const onVisibility = () =>
+    document.visibilityState === "hidden" ? relinquish() : acquire();
+
+  if (document.visibilityState !== "hidden") acquire();
+  document.addEventListener("visibilitychange", onVisibility);
+  return () => {
+    document.removeEventListener("visibilitychange", onVisibility);
+    relinquish();
+  };
+}
+
+/** Evaluate and deliver for one live price (in the leading tab). */
 export function feedPrice(symbol: string, price: number | null | undefined): void {
   if (price == null) return;
+  if (!leader()) {
+    observePrice(symbol, price);
+    return;
+  }
   deliver(processPrice(symbol, price));
 }
 
-/** Last close of a live series, the chart symbol's current price. */
-export function feedChartPrice(symbol: string, series: SeriesPayload): void {
-  feedPrice(symbol, series.bars[series.bars.length - 1]?.c);
+/**
+ * What the chart's live feed emitted for the chart symbol. Only a `tail`
+ * poll is a new price. A `reset` (also a cached load replayed when switching
+ * back to a symbol) may hold a close minutes old: it only restarts the
+ * crossing baseline. `older` pages leave the last close untouched.
+ */
+export function feedChartSnapshot(symbol: string, snapshot: LiveSnapshot): void {
+  const bars = snapshot.series.bars;
+  const close = bars[bars.length - 1]?.c;
+  if (snapshot.update.kind === "reset") {
+    forgetBaseline(symbol);
+    if (close != null) observePrice(symbol, close);
+  } else if (snapshot.update.kind === "tail") {
+    feedPrice(symbol, close);
+  }
 }
 
 /**
  * Poll `get_quotes` for the symbols that have active alerts, except the
- * chart symbol. Call inside a component.
+ * chart symbol, in the leading tab. Also starts the leader election and the
+ * audio unlock. Call inside a component.
  */
 export function createAlertQuotes(
   session: McpSession,
   enabled: Accessor<boolean>,
   chartSymbol: Accessor<string>,
 ): void {
+  onCleanup(startLeaderElection());
+  onCleanup(installAudioUnlock());
+
   const symbols = createMemo(
     () => activeAlertSymbols().filter((s) => s !== chartSymbol()),
     [],
@@ -110,9 +224,14 @@ export function createAlertQuotes(
   );
   const query = createQuotesQuery(session, () => ({
     symbols: symbols(),
-    enabled: enabled(),
+    enabled: enabled() && leader(),
   }));
+  // Each fetched response is fed once. keepPreviousData serves the previous
+  // symbol set's quotes as a placeholder while a new set loads: not a price.
+  let fed = 0;
   createEffect(() => {
+    if (query.isPlaceholderData || query.dataUpdatedAt === fed) return;
+    fed = query.dataUpdatedAt;
     for (const q of query.data?.quotes ?? []) {
       if (!("error" in q) && symbols().includes(q.symbol)) feedPrice(q.symbol, q.last);
     }

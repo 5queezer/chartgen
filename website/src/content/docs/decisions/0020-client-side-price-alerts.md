@@ -67,6 +67,9 @@ Chosen: client-side alerts.
   pause in a hidden tab. A browser that was asleep or closed misses crossings;
   on return only the current price is seen, so a "crossing" that happened and
   reverted in the gap is lost, while "greater / less" alerts fire if still true.
+- With several tabs open, one visible tab evaluates and delivers (a Web Lock,
+  `chartgen-alerts`); the others mirror the list through `storage` events.
+  Without Web Locks every tab evaluates and an alert can fire once per tab.
 - Alerts are per browser profile; they do not sync across devices.
 - Crossings are detected between ticks, so a price that spikes through a level
   between two polls is seen as a crossing only if the polled prices straddle it.

@@ -273,7 +273,7 @@ you create your first alert, not on load.
 
 Alerts are evaluated in the browser ([ADR-0020](/chartgen/decisions/0020-client-side-price-alerts/)):
 the chart symbol from the live feed, other symbols from their own quotes poll
-every 5 s. **They only fire while chartgen is open in a visible tab.** They
+every 5 s. **They only fire while chartgen is open in a visible tab** (with several tabs open, one of them evaluates). They
 are saved in `localStorage` under `chartgen.alerts.list` (at most 200;
 invalid entries are dropped on load) and are not shared between browsers.
 

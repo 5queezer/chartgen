@@ -52,7 +52,11 @@ import {
 } from "./lib/liveFeed";
 import type { SeriesPayload } from "./types/responses";
 import { createAlertLogger } from "./services/notifications";
-import { createAlertQuotes, feedChartPrice } from "./services/alertEngine";
+import {
+  createAlertQuotes,
+  feedChartSnapshot,
+  feedPrice,
+} from "./services/alertEngine";
 import {
   activeIndicators,
   indicatorName,
@@ -174,7 +178,7 @@ export function App(): JSX.Element {
     onSnapshot: (snapshot) => {
       setLive(snapshot);
       // Price alerts (ADR-0020) on the chart symbol's last close.
-      if (snapshot) feedChartPrice(feedTicker, snapshot.series);
+      if (snapshot) feedChartSnapshot(feedTicker, snapshot);
     },
     onPollStatus: setPollStatus,
     onHistoryStatus: setHistoryStatus,
@@ -239,6 +243,8 @@ export function App(): JSX.Element {
     (window as unknown as Record<string, unknown>).__chartgenTest = {
       chart,
       series: () => live()?.series ?? null,
+      // Alert e2e (tests/e2e/alerts.spec.ts): inject a live price.
+      feedPrice,
     };
   }
 

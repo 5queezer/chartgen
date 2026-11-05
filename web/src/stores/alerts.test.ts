@@ -228,3 +228,138 @@ describe("processPrice", () => {
     expect(s.lastPrice("AAPL")).toBeNull();
   });
 });
+
+describe("persisted re-arm state", () => {
+  const input = {
+    symbol: "AAPL",
+    condition: "greater" as const,
+    price: 100,
+    trigger: "every" as const,
+  };
+
+  it("a fired every-time greater alert stays disarmed across a reload", async () => {
+    const data = stubStorage();
+    const s = await load();
+    s.addAlert(input);
+    expect(s.processPrice("AAPL", 101)).toHaveLength(1);
+    expect(s.alerts()[0]!.disarmed).toBe(true);
+
+    // Reload: the condition still holds, so it must not fire again.
+    const reloaded = await load();
+    expect(reloaded.alerts()[0]!.disarmed).toBe(true);
+    expect(reloaded.processPrice("AAPL", 102)).toEqual([]);
+    expect(reloaded.processPrice("AAPL", 99)).toEqual([]);
+    expect(reloaded.alerts()[0]!.disarmed).toBeUndefined();
+    expect(JSON.parse(data.get(KEY)!)[0].disarmed).toBeUndefined();
+    expect(reloaded.processPrice("AAPL", 101)).toHaveLength(1);
+  });
+
+  it("sanitize keeps disarmed only when true", async () => {
+    stubStorage();
+    const { sanitizeAlerts } = await load();
+    const [a, b] = sanitizeAlerts([
+      { ...valid, disarmed: true },
+      { ...valid, id: "a2", disarmed: "yes" },
+    ])!;
+    expect(a!.disarmed).toBe(true);
+    expect(b).not.toHaveProperty("disarmed");
+  });
+});
+
+describe("baselines", () => {
+  const input = {
+    symbol: "AAPL",
+    condition: "crossing" as const,
+    price: 100,
+    trigger: "once" as const,
+  };
+
+  it("a forgotten baseline cannot produce a crossing", async () => {
+    stubStorage();
+    const s = await load();
+    s.addAlert(input);
+    s.processPrice("AAPL", 99);
+    s.forgetBaseline("AAPL");
+    expect(s.processPrice("AAPL", 101)).toEqual([]);
+    expect(s.lastPrice("AAPL")).toBe(101);
+    // The next price has a baseline again.
+    expect(s.processPrice("AAPL", 99)).toHaveLength(1);
+  });
+
+  it("observePrice records for display only", async () => {
+    stubStorage();
+    const s = await load();
+    s.addAlert(input);
+    s.processPrice("AAPL", 99);
+    s.observePrice("AAPL", 150);
+    expect(s.lastPrice("AAPL")).toBe(150);
+    expect(s.processPrice("AAPL", 101)).toHaveLength(1);
+  });
+
+  it("resuming an alert forgets the stale baseline", async () => {
+    stubStorage();
+    const s = await load();
+    const a = s.addAlert(input)!;
+    s.processPrice("AAPL", 99);
+    s.setAlertActive(a.id, false);
+    s.setAlertActive(a.id, true);
+    expect(s.processPrice("AAPL", 101)).toEqual([]);
+  });
+});
+
+describe("several tabs", () => {
+  const input = {
+    symbol: "AAPL",
+    condition: "less" as const,
+    price: 100,
+    trigger: "once" as const,
+  };
+
+  it("a mutation keeps alerts another tab stored meanwhile", async () => {
+    const data = stubStorage();
+    const s = await load();
+    s.addAlert(input);
+    const other = { ...valid, id: "from-other-tab", symbol: "MSFT" };
+    data.set(KEY, JSON.stringify([...JSON.parse(data.get(KEY)!), other]));
+
+    s.addAlert({ ...input, symbol: "NVDA" });
+    expect(s.alerts().map((a) => a.id)).toContain("from-other-tab");
+    expect(JSON.parse(data.get(KEY)!)).toHaveLength(3);
+  });
+
+  it("processPrice works on top of the other tab's state", async () => {
+    const data = stubStorage();
+    const s = await load();
+    s.addAlert(input);
+    const stored = JSON.parse(data.get(KEY)!);
+    // The other tab paused our alert and added one.
+    stored[0].active = false;
+    const added = { ...valid, id: "x", symbol: "AAPL", condition: "less" };
+    data.set(KEY, JSON.stringify([...stored, added]));
+
+    const fired = s.processPrice("AAPL", 50);
+    expect(fired.map((a) => a.id)).toEqual(["x"]);
+    const after = JSON.parse(data.get(KEY)!);
+    expect(after).toHaveLength(2);
+    expect(after[0].active).toBe(false);
+  });
+
+  it("a storage event refreshes the list", async () => {
+    const data = stubStorage();
+    const listeners: Record<string, (e: { key: string | null }) => void> = {};
+    vi.stubGlobal("window", {
+      addEventListener: (t: string, f: (e: { key: string | null }) => void) =>
+        void (listeners[t] = f),
+    });
+    const s = await load();
+    expect(s.alerts()).toEqual([]);
+    data.set(KEY, JSON.stringify([valid]));
+    listeners.storage!({ key: "unrelated" });
+    expect(s.alerts()).toEqual([]);
+    listeners.storage!({ key: KEY });
+    expect(s.alerts().map((a) => a.id)).toEqual(["a1"]);
+    data.delete(KEY);
+    listeners.storage!({ key: null });
+    expect(s.alerts()).toEqual([]);
+  });
+});

@@ -36,6 +36,11 @@ export interface Alert {
   createdAt: number;
   /** Epoch ms of the last time it fired. */
   lastTriggeredAt?: number;
+  /**
+   * A fired "every" greater/less alert waiting for `rearmed`. Persisted so
+   * a reload does not fire it again while the condition still holds.
+   */
+  disarmed?: boolean;
 }
 
 export const CONDITION_LABELS: Record<AlertCondition, string> = {

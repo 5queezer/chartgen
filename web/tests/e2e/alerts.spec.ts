@@ -2,9 +2,12 @@
 // ticks of the sample source (toast + Notification), once vs every-time,
 // edit / pause / delete, dragging the chart line, and persistence.
 //
-// The sample source's forming bar wobbles by ±0.3 % every second, so a
-// "crossing" alert at the current price fires within a few ticks.
-// Set ALERT_SHOTS_DIR to also write screenshots there.
+// Prices are injected through the DEV hook window.__chartgenTest.feedPrice,
+// so every case is deterministic. The sample source's live ticks (~the last
+// close) keep arriving too, so levels are chosen where they cannot matter:
+// crossing-up alerts sit far below the sample price (the price is above the
+// level and stays there), greater alerts far above it. Set ALERT_SHOTS_DIR to
+// also write screenshots there.
 
 import type { Page } from "@playwright/test";
 
@@ -41,19 +44,21 @@ async function lastClose(page: Page): Promise<number> {
   );
 }
 
-/**
- * A level inside the forming bar's wobble: the mean of a few ticks. A level
- * taken from one tick can sit at the extreme of the wobble and never be
- * crossed again.
- */
-async function wobbleMid(page: Page): Promise<number> {
-  const samples: number[] = [];
-  for (let i = 0; i < 4; i++) {
-    samples.push(await lastClose(page));
-    await page.waitForTimeout(2_100);
-  }
-  return samples.reduce((a, b) => a + b, 0) / samples.length;
-}
+/** Inject prices, in order, in one synchronous step (no live tick in between). */
+const feed = (page: Page, prices: number[]) =>
+  page.evaluate((ps) => {
+    const w = window as unknown as {
+      __chartgenTest: { feedPrice: (s: string, p: number) => void };
+    };
+    for (const p of ps) w.__chartgenTest.feedPrice("BTCUSDT", p);
+  }, prices);
+
+/** Level well below the sample price, for crossing-up alerts. */
+const lowLevel = async (page: Page) =>
+  +((await lastClose(page)) / 10).toFixed(2);
+
+const notes = (page: Page) =>
+  page.evaluate(() => (window as unknown as { __notes: string[] }).__notes);
 
 const lineCount = (page: Page) =>
   page.evaluate(
@@ -81,9 +86,20 @@ async function mockNotifications(page: Page) {
 
 async function createAlert(
   page: Page,
-  opts: { condition?: string; price?: number; trigger?: string; message?: string },
+  opts: {
+    condition?: string;
+    price?: number;
+    trigger?: string;
+    message?: string;
+    /** Open with the header bell instead of Alt+A. */
+    bell?: boolean;
+  },
 ) {
-  await page.keyboard.press("Alt+KeyA");
+  // After a dialog closes, Chromium drops key events until the next click
+  // (the focus is on a body it no longer delivers to), so a second alert in
+  // a test opens through the bell.
+  if (opts.bell) await page.getByRole("button", { name: "Add alert" }).click();
+  else await page.keyboard.press("Alt+KeyA");
   await expect(dialog(page)).toBeVisible();
   if (opts.condition) await dialog(page).getByLabel("Condition").selectOption(opts.condition);
   if (opts.price !== undefined) await priceInput(page).fill(String(opts.price));
@@ -123,9 +139,9 @@ test.describe("price alerts", () => {
   test("a once alert fires with a toast and a notification, then deactivates", async ({
     bootedApp: page,
   }) => {
-    test.setTimeout(120_000);
     await mockNotifications(page);
-    await createAlert(page, { price: await wobbleMid(page), message: "level hit" });
+    const L = await lowLevel(page);
+    await createAlert(page, { condition: "crossing_up", price: L, message: "level hit" });
     await expect(toasts(page).filter({ hasText: "Alert created" })).toBeVisible();
     await expect.poll(() => lineCount(page)).toBe(1);
     await shot(page, "alert-line");
@@ -135,44 +151,76 @@ test.describe("price alerts", () => {
     await expect(rows(page)).toHaveAttribute("data-status", "active");
     await shot(page, "alerts-tab");
 
-    await expect(toasts(page).filter({ hasText: /^Alert: .*level hit/ })).toBeVisible({
-      timeout: 60_000,
-    });
+    await feed(page, [L - 1, L + 1]);
+    await expect(toasts(page).filter({ hasText: /^Alert: .*level hit/ })).toBeVisible();
     await shot(page, "toast");
     await expect(rows(page)).toHaveAttribute("data-status", "triggered");
     await expect.poll(() => lineCount(page)).toBe(0);
-    const notes = await page.evaluate(
-      () => (window as unknown as { __notes: string[] }).__notes,
-    );
-    expect(notes).toHaveLength(1);
-    expect(notes[0]).toContain("level hit");
+    expect(await notes(page)).toHaveLength(1);
+    expect((await notes(page))[0]).toContain("level hit");
 
-    // Once: it does not fire again.
-    await page.waitForTimeout(5_000);
-    await expect(toasts(page).filter({ hasText: /^Alert: / })).toHaveCount(0);
+    // Once: crossing again does not fire.
+    await feed(page, [L - 1, L + 1]);
+    expect(await notes(page)).toHaveLength(1);
+    await expect(rows(page)).toHaveAttribute("data-status", "triggered");
   });
 
-  test("an every-time alert keeps firing and stays active", async ({
+  test("a gap through the level fires", async ({ bootedApp: page }) => {
+    await mockNotifications(page);
+    const L = await lowLevel(page);
+    await createAlert(page, { condition: "crossing_up", price: L });
+    await feed(page, [L - 5, L + 5]);
+    await expect.poll(async () => (await notes(page)).length).toBe(1);
+  });
+
+  test("landing on the level fires, moving on does not fire again", async ({
     bootedApp: page,
   }) => {
-    test.setTimeout(150_000);
-    await createAlert(page, { price: await wobbleMid(page), trigger: "every" });
+    await mockNotifications(page);
+    const L = await lowLevel(page);
+    await createAlert(page, { condition: "crossing_up", price: L, trigger: "every" });
+    await feed(page, [L - 1, L]);
+    expect(await notes(page)).toHaveLength(1);
+    await feed(page, [L + 1]);
+    expect(await notes(page)).toHaveLength(1);
+  });
+
+  test("two alerts fire on the same tick", async ({ bootedApp: page }) => {
+    await mockNotifications(page);
+    const L = await lowLevel(page);
+    await createAlert(page, { condition: "crossing_up", price: L, message: "first" });
+    await createAlert(page, { condition: "crossing_up", price: L + 2, message: "second", bell: true });
+    await feed(page, [L - 1, L + 5]);
+    expect(await notes(page)).toHaveLength(2);
+    await expect(toasts(page).filter({ hasText: /^Alert: .*first/ })).toBeVisible();
+    await expect(toasts(page).filter({ hasText: /^Alert: .*second/ })).toBeVisible();
+  });
+
+  test("an every-time crossing alert fires on each cross and stays active", async ({
+    bootedApp: page,
+  }) => {
+    await mockNotifications(page);
+    const L = await lowLevel(page);
+    await createAlert(page, { condition: "crossing_up", price: L, trigger: "every" });
     await alertsTab(page).click();
-    await expect(toasts(page).filter({ hasText: /^Alert: / }).first()).toBeVisible({
-      timeout: 60_000,
-    });
+    await feed(page, [L - 1, L + 1, L + 2, L - 1, L + 1]);
+    expect(await notes(page)).toHaveLength(2);
     await expect(rows(page)).toHaveAttribute("data-status", "active");
     await expect.poll(() => lineCount(page)).toBe(1);
-    // It fires again on a later cross: lastTriggeredAt advances.
-    const triggeredAt = () =>
-      page.evaluate(
-        () =>
-          (JSON.parse(localStorage.getItem("chartgen.alerts.list")!) as {
-            lastTriggeredAt: number;
-          }[])[0]!.lastTriggeredAt,
-      );
-    const first = await triggeredAt();
-    await expect.poll(triggeredAt, { timeout: 60_000 }).toBeGreaterThan(first);
+  });
+
+  test("an every-time greater alert re-arms below the level", async ({
+    bootedApp: page,
+  }) => {
+    await mockNotifications(page);
+    const H = Math.round((await lastClose(page)) * 10);
+    await createAlert(page, { condition: "greater", price: H, trigger: "every" });
+    await feed(page, [H + 1, H + 2, H + 3]);
+    expect(await notes(page)).toHaveLength(1);
+    await feed(page, [H - 1, H + 1]);
+    expect(await notes(page)).toHaveLength(2);
+    await feed(page, [H + 5]);
+    expect(await notes(page)).toHaveLength(2);
   });
 
   test("edit, pause, resume and delete from the Alerts tab", async ({
