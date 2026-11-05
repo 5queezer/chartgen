@@ -6,9 +6,9 @@
 // ready-to-use app depend on it; specs that need to observe the boot
 // itself (smoke.spec.ts) skip it and drive `page` directly.
 //
-// localStorage is cleared for every test — chartgen's OAuth store
-// persists `client_id`/`client_secret` there, and a stale pair causes
-// weird cross-test behavior when the backing server restarts.
+// Every test gets a fresh browser context, so localStorage and
+// sessionStorage start empty: no OAuth `client_id`/`client_secret` pair
+// leaks in from an earlier test.
 
 import { expect, test as base, type Page } from "@playwright/test";
 
@@ -59,42 +59,48 @@ export async function expectChartRendered(page: Page): Promise<void> {
   await expect(page.locator(".pane-header").first()).toBeVisible();
 }
 
+/**
+ * Run `navigate` and wait until the app has booted: OAuth done and chart
+ * rendered. Every document load runs the whole PKCE redirect again (the
+ * access token lives in memory only), so a reload is a boot too: two
+ * document loads of the Vite dev app plus the token exchange.
+ *
+ * The waits are on the boot's own events (the token exchange response,
+ * then the URL losing `?code`), bounded only by the test timeout. A fixed
+ * window per step is a guess at page-load time that a loaded machine
+ * easily exceeds.
+ */
+async function boot(
+  page: Page,
+  navigate: () => Promise<unknown>,
+): Promise<void> {
+  const exchanged = page.waitForResponse(
+    (res) =>
+      res.request().method() === "POST" &&
+      new URL(res.url()).pathname === "/token",
+  );
+  await navigate();
+  const token = await exchanged;
+  expect(token.ok(), `token exchange answered ${token.status()}`).toBe(true);
+  // The app scrubs `?code`/`?state` from the URL once it holds the token.
+  await page.waitForURL((url) => !url.searchParams.has("code"));
+  // The chart loads on its own once auth is ready.
+  await expectChartRendered(page);
+}
+
+/** Open `path` and wait for the booted app (OAuth done, chart rendered). */
+export function gotoApp(page: Page, path = "/"): Promise<void> {
+  return boot(page, () => page.goto(path));
+}
+
+/** Reload and wait for the booted app (OAuth done, chart rendered). */
+export function reloadApp(page: Page): Promise<void> {
+  return boot(page, () => page.reload());
+}
+
 export const test = base.extend<AppFixtures>({
   bootedApp: async ({ page }, use) => {
-    // Visit once to establish the origin so we can reset storage. The
-    // MCP SDK writes to localStorage via the dynamic-client-registration
-    // cache, so this also prevents stale `client_id` leaking across tests.
-    await page.goto("/");
-    const clearError = await page.evaluate(() => {
-      try {
-        localStorage.clear();
-        sessionStorage.clear();
-        return null;
-      } catch (err) {
-        return err instanceof Error ? err.message : String(err);
-      }
-    });
-    if (clearError !== null) {
-      // Surface the failure rather than silently continuing with
-      // whatever leftover state the previous test left behind.
-      console.warn(`[fixture] failed to reset browser storage: ${clearError}`);
-    }
-
-    await page.goto("/");
-
-    // The first paint triggers the OAuth redirect chain: /authorize on
-    // the backend round-trips to / with ?code=...&state=..., which the
-    // app consumes in onMount. Wait for the post-redirect "ready" or
-    // "loaded" status, not the URL — the app scrubs code/state from the
-    // URL once the exchange finishes.
-    await page.waitForURL(/\/(?:\?.*)?$/, { timeout: 30_000 });
-    await expect(page.locator("text=authenticating...")).toHaveCount(0, {
-      timeout: 30_000,
-    });
-
-    // The chart loads on its own once auth is ready.
-    await expectChartRendered(page);
-
+    await gotoApp(page);
     await use(page);
   },
 });

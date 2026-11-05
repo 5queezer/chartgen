@@ -23,6 +23,8 @@ const REUSE_SERVER = !process.env.CI && process.env.PW_REUSE_SERVER === "1";
 
 export default defineConfig({
   testDir: "./tests/e2e",
+  // Boots the app once so the first test doesn't pay for cold servers.
+  globalSetup: "./tests/e2e/global-setup.ts",
   fullyParallel: false,
   workers: 1,
   // Retry once in CI to smooth over first-run OAuth redirect timing.

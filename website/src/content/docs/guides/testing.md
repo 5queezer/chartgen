@@ -102,6 +102,19 @@ test.describe("my feature", () => {
 Skip the fixture when you want to observe the boot itself — see
 `smoke.spec.ts` for how to run the OAuth redirect from scratch.
 
+Every page load runs the OAuth redirect again, because the access
+token lives in memory only. Navigate with `gotoApp(page)` and reload
+with `reloadApp(page)` from `fixtures/app.ts`, never bare `page.goto`
+or `page.reload`: they wait for the token exchange and the chart
+instead of a fixed time. Each test starts with a fresh browser context,
+so storage is already empty. A global setup (`global-setup.ts`) boots
+the app once before the first test, so no test pays for the cold Vite
+and chartgen servers.
+
+Wait on events, not on time windows: a loaded machine can stall the
+browser or the server for many seconds. For example, wait for the next
+`get_quotes` response rather than for a value to change within 15 s.
+
 The suite runs with `workers: 1` because chartgen's OAuth store is
 process-global and two tests racing through PKCE will collide on
 state. Don't set `fullyParallel: true`.

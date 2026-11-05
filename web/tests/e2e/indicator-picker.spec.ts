@@ -6,7 +6,12 @@
 
 import type { Response } from "@playwright/test";
 
-import { test, expect, expectChartRendered } from "./fixtures/app";
+import {
+  test,
+  expect,
+  expectChartRendered,
+  reloadApp,
+} from "./fixtures/app";
 
 /**
  * Match only POST /mcp responses that carry a `tools/call` for
@@ -88,19 +93,13 @@ test.describe("indicator picker", () => {
     await refetchAfterAdd;
     await expectChartRendered(page);
 
-    // Reload and confirm localStorage persisted the chip. Active-set
-    // restoration happens synchronously at module load, so the chip
-    // row shows before the first network request returns. Wait
-    // directly for the positive "remove chip" assertion — that implies
-    // both the page has rendered and the active set rehydrated.
-    await page.reload();
+    // Reload and confirm localStorage persisted the chip. The chart
+    // auto-loads after reload; once it has rendered, remove the chip and
+    // expect another refetch.
+    await reloadApp(page);
     await expect(
       page.getByRole("button", { name: `Remove ${newIndicatorName}` }),
-    ).toBeVisible({ timeout: 30_000 });
-
-    // The chart auto-loads after reload; once it has rendered, remove
-    // the chip and expect another refetch.
-    await expectChartRendered(page);
+    ).toBeVisible();
 
     const refetchAfterRemove = page.waitForResponse(isGenerateChartCall, {
       timeout: 30_000,

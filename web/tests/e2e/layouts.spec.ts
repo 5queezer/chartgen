@@ -3,7 +3,7 @@
 
 import type { Page } from "@playwright/test";
 
-import { test, expect } from "./fixtures/app";
+import { test, expect, reloadApp } from "./fixtures/app";
 
 const layoutButton = (page: Page) =>
   page.getByRole("button", { name: /^Layout:/ });
@@ -52,7 +52,7 @@ test.describe("layouts", () => {
     await expect(dirtyDot(page)).toHaveCount(0);
     expect(downloads).toBe(0);
 
-    await page.reload();
+    await reloadApp(page);
     await expect(layoutName(page)).toHaveText("Unnamed");
     await expect(activeTimeframe(page)).toHaveText("15m");
     await expect(dirtyDot(page)).toHaveCount(0);
@@ -127,7 +127,7 @@ test.describe("layouts", () => {
     await expect(dirtyDot(page)).toHaveCount(0);
 
     // The active layout survives a reload, clean.
-    await page.reload();
+    await reloadApp(page);
     await expect(layoutName(page)).toHaveText("Alpha");
     await expect(activeTimeframe(page)).toHaveText("4h");
     await expect(dirtyDot(page)).toHaveCount(0);

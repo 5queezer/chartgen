@@ -9,7 +9,7 @@
 
 import type { Page, Request } from "@playwright/test";
 
-import { test, expect, expectChartRendered } from "./fixtures/app";
+import { test, expect, gotoApp } from "./fixtures/app";
 
 interface ChartArgs {
   ticker?: string;
@@ -381,10 +381,7 @@ test("a catch-up after missed bars keeps the scrolled-back view", async ({ page 
   });
   const calls = recordCalls(page);
 
-  await page.goto("/");
-  await page.evaluate(() => localStorage.clear());
-  await page.goto("/");
-  await expectChartRendered(page);
+  await gotoApp(page);
   expect((await timestamps(page)).length).toBe(500 - MISSING);
 
   await dragRight(page);

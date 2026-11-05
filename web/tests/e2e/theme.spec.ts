@@ -3,7 +3,7 @@
 
 import type { Page } from "@playwright/test";
 
-import { test, expect, expectChartRendered } from "./fixtures/app";
+import { test, expect, reloadApp } from "./fixtures/app";
 
 const bodyBackground = (page: Page) =>
   page.evaluate(() => getComputedStyle(document.body).backgroundColor);
@@ -42,8 +42,7 @@ test.describe("theme", () => {
       page.getByRole("button", { name: "Switch to dark theme" }),
     ).toBeVisible();
 
-    await page.reload();
-    await expectChartRendered(page);
+    await reloadApp(page);
     expect(await bodyBackground(page)).toBe("rgb(255, 255, 255)");
     await expect
       .poll(() => chartLuminance(page))
