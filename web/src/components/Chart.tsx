@@ -114,6 +114,16 @@ import {
   type Mapper,
   type SeriesIndicator,
 } from "./geometry";
+import {
+  FUTURE_LEGEND,
+  futureFills,
+  futureLines,
+  futureTime,
+  futureValue,
+  inProjection,
+  projectionBars,
+  rightOffset,
+} from "../lib/projection";
 import { PaneHeader, type PaneHeaderLine } from "./PaneHeader";
 import { PriceAxisControls } from "./PriceAxisControls";
 
@@ -275,7 +285,7 @@ function storeGeometry(
  */
 function drawGeometry(name: string): IndicatorDrawCallback {
   const regName = indicatorRegName(name);
-  return ({ ctx, visibleRange, bounding, xAxis, yAxis }) => {
+  return ({ ctx, kLineDataList, indicator, visibleRange, bounding, xAxis, yAxis }) => {
     const ind = geometryStore.get(regName);
     if (!ind) return false;
     const map: Mapper = {
@@ -291,10 +301,9 @@ function drawGeometry(name: string): IndicatorDrawCallback {
     // the server's paint order. klinecharts restores the context after draw.
     ctx.globalCompositeOperation = "destination-over";
     const fills = ind.fills ?? [];
-    for (let fi = fills.length - 1; fi >= 0; fi--) {
-      const fill = fills[fi]!;
-      const theme = fillColors(fill, name, fi);
-      for (const poly of fillPolygons(fill.y1, fill.y2, visibleRange, map)) {
+    const paint = (polys: ReturnType<typeof fillPolygons>, fi: number) => {
+      const theme = fillColors(fills[fi]!, name, fi);
+      for (const poly of polys) {
         ctx.fillStyle = poly.up ? theme.up : theme.down;
         ctx.beginPath();
         poly.points.forEach((p, k) =>
@@ -303,8 +312,20 @@ function drawGeometry(name: string): IndicatorDrawCallback {
         ctx.closePath();
         ctx.fill();
       }
+    };
+    for (let fi = fills.length - 1; fi >= 0; fi--) {
+      paint(fillPolygons(fills[fi]!.y1, fills[fi]!.y2, visibleRange, map), fi);
+    }
+    // The cloud past the last bar (ADR-0033), joined to it at the last bar.
+    const length = kLineDataList.length;
+    for (const run of futureFills(ind, length)) {
+      if (!fills[run.index]) continue;
+      const at: Mapper = { x: (i) => map.x(run.from + i), y: map.y };
+      const all = { from: 0, to: run.values.y1.length };
+      paint(fillPolygons(run.values.y1, run.values.y2, all, at), run.index);
     }
     ctx.globalCompositeOperation = "source-over";
+    drawFutureLines(ctx, name, ind, length, indicator, map);
 
     if (ind.hbars && ind.hbars.length > 0) {
       for (const r of hbarRects(
@@ -336,6 +357,48 @@ function drawGeometry(name: string): IndicatorDrawCallback {
     drawHLines(ctx, ind, bounding, map.y);
     return false;
   };
+}
+
+/**
+ * Projected lines past the last bar (ADR-0033) in their plot's style; the
+ * line figures klinecharts draws stop at the last bar. Hidden plots are
+ * skipped.
+ */
+function drawFutureLines(
+  ctx: CanvasRenderingContext2D,
+  name: string,
+  ind: SeriesIndicator,
+  length: number,
+  indicator: { extendData?: unknown },
+  map: Mapper,
+): void {
+  const ext = indicator.extendData as FigureExtend | undefined;
+  for (const run of futureLines(ind, length)) {
+    if (ext?.plots[plotKey("line", run.index)]?.visible === false) continue;
+    const style = plotFigureStyle(name, "line", run.index, run.index, indicator) as {
+      color: string;
+      size: number;
+      dashedValue?: number[];
+    };
+    ctx.strokeStyle = style.color;
+    ctx.lineWidth = style.size;
+    ctx.setLineDash(style.dashedValue ?? []);
+    ctx.beginPath();
+    let pen = false;
+    run.values.forEach((v, i) => {
+      if (v === null) {
+        pen = false;
+        return;
+      }
+      const x = map.x(run.from + i);
+      const y = map.y(v);
+      if (pen) ctx.lineTo(x, y);
+      else ctx.moveTo(x, y);
+      pen = true;
+    });
+    ctx.stroke();
+  }
+  ctx.setLineDash([]);
 }
 
 /**
@@ -973,15 +1036,24 @@ export function Chart(props: ChartProps): JSX.Element {
     const onCrosshair = (data?: unknown) => {
       if (crosshairFrame !== null) return;
       const payload = data as
-        | { dataIndex?: number; paneId?: string }
+        | { dataIndex?: number; realDataIndex?: number; paneId?: string }
         | undefined;
       crosshairFrame = requestAnimationFrame(() => {
         crosshairFrame = null;
         if (!payload || typeof payload.dataIndex !== "number") {
           setCrosshairIndex(null);
-        } else {
-          setCrosshairIndex(payload.dataIndex);
+          return;
         }
+        // Right of the last bar klinecharts clamps `dataIndex` to it; over
+        // a projection (ADR-0033) the real index reads the future values.
+        const real = payload.realDataIndex;
+        const series = props.series;
+        const shown = Object.keys(untrack(paneIds));
+        setCrosshairIndex(
+          typeof real === "number" && series && inProjection(series, shown, real)
+            ? real
+            : payload.dataIndex,
+        );
       });
     };
     // Use the string form of the action type to avoid pulling in the
@@ -1045,12 +1117,21 @@ export function Chart(props: ChartProps): JSX.Element {
     // Price pane header: symbol, interval and the OHLC legend of the
     // crosshair bar, or of the last bar at rest.
     const bars = series.bars;
+    const paneMap = paneIds();
+    // Over the projection past the last bar (ADR-0033) the legend reads the
+    // projected values at the future bar's time; there is no OHLC there.
+    const shown = Object.keys(paneMap);
+    const future = xi !== null && inProjection(series, shown, xi) ? xi : null;
     const legendIndex =
       xi !== null && xi >= 0 && xi < bars.length
         ? xi
         : lastFiniteCloseIndex(bars);
-    const priceLegend = barLegend(bars, legendIndex, pricePrecisionForSeries());
-    const barTime = bars[legendIndex]?.t;
+    const priceLegend =
+      future !== null
+        ? FUTURE_LEGEND
+        : barLegend(bars, legendIndex, pricePrecisionForSeries());
+    const barTime =
+      future !== null ? futureTime(series, shown, future) : bars[legendIndex]?.t;
     next.push({
       name: series.symbol ?? "price",
       params: series.interval ? `· ${series.interval}` : undefined,
@@ -1064,7 +1145,6 @@ export function Chart(props: ChartProps): JSX.Element {
 
     // Per-indicator headers. Overlays stack below the price-pane row
     // on the candle pane; oscillators anchor at their pane's top.
-    const paneMap = paneIds();
     // TradingView-style params, e.g. `(14)`; repeated indicators show their
     // defaults too, so the instances read apart (ADR-0028).
     const paramsByKey = paramLabels(props.activeIndicators, paramDefaults());
@@ -1080,6 +1160,11 @@ export function Chart(props: ChartProps): JSX.Element {
         const plot =
           p.kind === "line" ? ind.lines![p.index]! : ind.histogram![p.index]!;
         const values = plot.values;
+        // Over the projection (ADR-0033) a line reads its projected value.
+        if (future !== null) {
+          const value = p.kind === "line" ? futureValue(ind, p.index, bars.length, future) : null;
+          return { label: p.label, value, color: plotColorAt(p, ind, style, legendIndex) };
+        }
         // At rest a plot reads its last finite value; a line that breaks at
         // trend flips (Supertrend, SAR) reads the bar the price legend reads,
         // so its inactive side shows none rather than a stale one. A
@@ -1258,8 +1343,12 @@ export function Chart(props: ChartProps): JSX.Element {
       const stored = geometryStore.get(indicatorRegName(name));
       // Bar replay (ADR-0023): a replay frame (lib/replay.ts) is a new slice
       // per step, so its fills and hlines are new arrays too and re-store.
+      // A tail brings a new projection past the last bar too (ADR-0033).
       const replaced =
-        ind !== undefined && (stored?.fills !== ind.fills || stored?.hlines !== ind.hlines);
+        ind !== undefined &&
+        (stored?.fills !== ind.fills ||
+          stored?.hlines !== ind.hlines ||
+          stored?.future !== ind.future);
       if (ind && stored && (stored.divlines !== ind.divlines || replaced)) {
         storeGeometry(series, [name], true);
       }
@@ -1368,6 +1457,9 @@ export function Chart(props: ChartProps): JSX.Element {
     //    the left edge.
     pendingOlder = null;
     const klines = seriesToKLines(series, 0, series.bars.length, compare);
+    // Room right of the last bar for any projection (Ichimoku's cloud), as
+    // TradingView extends its right margin; applyNewData scrolls to it.
+    c.setOffsetRightDistance(rightOffset(projectionBars(series, names), c.getBarSpace()));
     c.applyNewData(klines, canPageBefore(series));
     c.setPriceVolumePrecision(precision, VOLUME_PRECISION);
 

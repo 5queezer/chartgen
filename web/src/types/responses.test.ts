@@ -52,6 +52,30 @@ describe("indicator_errors (ADR-0025)", () => {
   });
 });
 
+describe("future (ADR-0033)", () => {
+  const future = {
+    bars: 2,
+    t: [100, 200],
+    lines: [{ index: 2, values: [1.5, null] }],
+    fills: [{ index: 0, y1: [1.5, null], y2: [1, 1] }],
+  };
+  const withFuture = (f: unknown) => ({
+    ...series,
+    indicators: { ichimoku: { label: "Ichimoku", is_overlay: true, future: f } },
+  });
+
+  it("parses the projection past the last bar, with or without times", () => {
+    const p = SeriesPayloadSchema.parse(withFuture(future));
+    expect(p.indicators.ichimoku?.future?.lines[0]?.values).toEqual([1.5, null]);
+    const { t: _t, ...untimed } = future;
+    expect(SeriesPayloadSchema.parse(withFuture(untimed)).indicators.ichimoku?.future?.t).toBeUndefined();
+  });
+
+  it("rejects a malformed projection", () => {
+    expect(() => SeriesPayloadSchema.parse(withFuture({ bars: 2, lines: [] }))).toThrow();
+  });
+});
+
 describe("list_indicators source tag", () => {
   it("tags user scripts and leaves built-ins untagged", () => {
     const p = ListIndicatorsPayloadSchema.parse({

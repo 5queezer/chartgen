@@ -185,6 +185,16 @@ export function valueExtents(
     }
     out.push({ lo, hi });
   }
+  // A projection past the last bar (ADR-0033) scales with the last bar, so
+  // the cloud ahead stays on the axis while the last bar is in view.
+  const last = out[length - 1];
+  for (const f of last ? (ind.future?.fills ?? []) : []) {
+    for (const v of [...f.y1, ...f.y2]) {
+      if (!isNum(v)) continue;
+      last!.lo = last!.lo === null ? v : Math.min(last!.lo, v);
+      last!.hi = last!.hi === null ? v : Math.max(last!.hi, v);
+    }
+  }
   return out;
 }
 

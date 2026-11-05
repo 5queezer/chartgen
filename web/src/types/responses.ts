@@ -105,6 +105,24 @@ export const SeriesDivLineSchema = z.object({
 
 export const YRangeSchema = z.tuple([FiniteOrNull, FiniteOrNull]);
 
+// Values plotted on the `bars` bars after the last one (ADR-0033), e.g. the
+// Ichimoku cloud's leading spans. `index` names the line / fill they
+// continue; `t` are the future bar times (absent without bar timestamps).
+export const SeriesFutureSchema = z.object({
+  bars: z.number().int(),
+  t: z.array(z.number().int()).optional(),
+  lines: z.array(
+    z.object({ index: z.number().int(), values: z.array(FiniteOrNull) }),
+  ),
+  fills: z.array(
+    z.object({
+      index: z.number().int(),
+      y1: z.array(FiniteOrNull),
+      y2: z.array(FiniteOrNull),
+    }),
+  ),
+});
+
 export const SeriesIndicatorSchema = z.object({
   label: z.string(),
   is_overlay: z.boolean(),
@@ -116,6 +134,7 @@ export const SeriesIndicatorSchema = z.object({
   fills: z.array(SeriesFillSchema).optional(),
   hbars: z.array(SeriesHBarSchema).optional(),
   divlines: z.array(SeriesDivLineSchema).optional(),
+  future: SeriesFutureSchema.optional(),
 });
 
 // Merging contract (ADR-0009): volume/time profiles (vpvr, hvn_lvn, tpo)

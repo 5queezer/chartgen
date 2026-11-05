@@ -15,6 +15,8 @@
 //   the current series. Profile hbars/hlines (vpvr, hvn_lvn, tpo) on a page
 //   or tail cover only that slice, so ADR-0009 says to keep the full load's.
 //   Every other indicator's hlines and y_range do not depend on the window.
+// - `future`, the values past the last bar (ADR-0033), belongs to the newest
+//   bar: a tail's replaces ours, an older page's is ignored.
 // - Anything that does not line up (other symbol or interval, a bar
 //   without a timestamp, unordered or overlapping bars, a different
 //   indicator set or channel count) is rejected with a reason instead of
@@ -371,6 +373,8 @@ export function mergeTail(
       const added = shifted.filter((d) => startOf(d) >= 0);
       for (const d of dedupeDivlines([...touching, ...added], bars)) div.push(d);
     }
+    if (tl.future) cur.future = tl.future;
+    else delete cur.future;
   }
   return { ok: true, from, series: { ...current } };
 }

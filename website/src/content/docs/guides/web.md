@@ -835,7 +835,12 @@ etc. on the current origin.
     Keltner, Donchian, Stochastic, Cipher B / WaveTrend, the Kalman
     Volume Filter bands and OB/OS zones). The band breaks where either
     series is `null`. The Ichimoku cloud switches between green and red
-    where Senkou A and Senkou B cross. Oscillator panes always include
+    where Senkou A and Senkou B cross, and runs `displacement - 1` bars
+    past the last bar as on TradingView. The chart widens its right
+    margin to make room, and the legend and Data Window show the
+    projected spans with the future bar's time when you hover there
+    ([ADR-0033](/chartgen/decisions/0033-indicator-projection-past-last-bar/)).
+    Oscillator panes always include
     the indicator's `y_range` (e.g. RSI 0–100) and every fill edge, so
     zones at the pane edge stay visible.
   - *hbars* — volume-profile rows (`volume_profile`, `tpo`), anchored
