@@ -370,6 +370,25 @@ mod tests {
     }
 
     #[test]
+    fn sample_ohlcv_serves_every_supported_interval() {
+        let now = 1_750_000_123_456;
+        for (tf, secs) in [
+            ("3m", 180),
+            ("2h", 7_200),
+            ("6h", 21_600),
+            ("12h", 43_200),
+            ("3d", 259_200),
+            ("1mo", 2_592_000),
+        ] {
+            let d = sample_ohlcv("BTCUSDT", tf, 20, None, now).unwrap();
+            assert_eq!(d.len(), 20, "{tf}");
+            let ts: Vec<i64> = d.bars.iter().map(|b| b.date.parse().unwrap()).collect();
+            assert!(ts.windows(2).all(|w| w[1] - w[0] == secs), "{tf} spacing");
+            assert!(ts.iter().all(|t| t % secs == 0), "{tf} grid");
+        }
+    }
+
+    #[test]
     fn sample_ohlcv_overlapping_pages_agree() {
         let now = 1_750_000_000_000;
         let end_a = 1_700_000_000_000;

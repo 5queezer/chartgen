@@ -286,7 +286,7 @@ pub fn fetch_yahoo(
 
 /// Turn a Yahoo chart response into at most `limit` bars of `interval`:
 /// drops bars at or after `end_time_ms`, snaps the live bar onto its period,
-/// and aggregates 1h → 4h. Pure, so fixture JSON can drive it in tests.
+/// and resamples the intervals Yahoo lacks (see `yahoo_api_interval`). Pure, so fixture JSON can drive it in tests.
 fn parse_yahoo_chart(
     body: &serde_json::Value,
     interval: &str,
@@ -294,7 +294,8 @@ fn parse_yahoo_chart(
     end_time_ms: Option<i64>,
     window: &YahooWindow,
 ) -> Result<Fetched, String> {
-    let needs_aggregation = interval == "4h" && window.api_interval == "1h";
+    let needs_aggregation = window.api_interval != interval
+        && matches!(interval, "3m" | "2h" | "4h" | "6h" | "12h" | "3d");
     let empty = Fetched {
         data: OhlcvData {
             bars: Vec::new(),
@@ -411,10 +412,18 @@ fn parse_yahoo_chart(
     }
 
     if needs_aggregation {
-        bars = if all_day {
-            aggregate_bars(&bars, 4 * 3600, window.period1)
+        let secs = data::interval_secs(interval).unwrap_or(DAY);
+        bars = if interval == "3d" {
+            aggregate_days(
+                &bars,
+                3,
+                if all_day { 0 } else { gmtoffset },
+                window.period1,
+            )
+        } else if all_day {
+            aggregate_bars(&bars, secs, window.period1)
         } else {
-            aggregate_sessions(&bars, 4 * 3600, gmtoffset, window.period1)
+            aggregate_sessions(&bars, secs, gmtoffset, window.period1)
         };
     }
 
@@ -501,14 +510,24 @@ struct YahooWindow<'a> {
 
 const DAY: i64 = 86_400;
 
+/// Yahoo interval that `interval` is fetched as. Yahoo has no native 3m, 2h,
+/// 4h, 6h, 12h or 3d, so those are resampled from 1m, 1h and 1d bars.
+fn yahoo_api_interval(interval: &str) -> &str {
+    match interval {
+        "3m" => "1m",
+        "2h" | "4h" | "6h" | "12h" => "1h",
+        "3d" => "1d",
+        other => other,
+    }
+}
+
 fn yahoo_window(
     interval: &str,
     limit: usize,
     end_time_ms: Option<i64>,
     now_s: i64,
 ) -> YahooWindow<'_> {
-    // 4h is aggregated from 1h (Yahoo has no native 4h).
-    let api_interval = if interval == "4h" { "1h" } else { interval };
+    let api_interval = yahoo_api_interval(interval);
     let step = data::interval_secs(interval).unwrap_or(DAY);
     // Calendar time per bar is longer than the bar itself for exchange-
     // traded symbols: ~6.5 trading hours per day, 5 days per week, holidays.
@@ -634,6 +653,18 @@ fn aggregate_sessions(bars: &[Bar], bucket_secs: i64, gmtoffset: i64, min_start:
         out.extend(session.chunk_by(|a, b| slot(a) == slot(b)).map(merge_bars));
     }
     out
+}
+
+/// Buckets of `n` consecutive calendar days (exchange-local, via `gmtoffset`
+/// seconds), keyed by `local_day / n` so bucket boundaries stay identical
+/// across overlapping requests. The bucket holding `min_start` may be missing
+/// older members and is dropped; the last bucket may be partial (still forming).
+fn aggregate_days(bars: &[Bar], n: i64, gmtoffset: i64, min_start: i64) -> Vec<Bar> {
+    let key = |b: &Bar| bar_ts(b).map(|t| (t + gmtoffset).div_euclid(DAY).div_euclid(n));
+    bars.chunk_by(|a, b| key(a) == key(b))
+        .filter(|chunk| key(&chunk[0]).is_some_and(|k| k * n * DAY - gmtoffset >= min_start))
+        .map(merge_bars)
+        .collect()
 }
 
 fn merge_bars(chunk: &[Bar]) -> Bar {
@@ -1047,7 +1078,10 @@ mod tests {
         assert_eq!(binance_interval("1wk"), "1w");
         assert_eq!(binance_interval("1mo"), "1M");
         assert_eq!(binance_interval("60m"), "1h");
-        for native in ["1m", "5m", "15m", "30m", "1h", "4h", "1d", "1w", "1M"] {
+        for native in [
+            "1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "8h", "12h", "1d", "3d", "1w",
+            "1M",
+        ] {
             assert_eq!(binance_interval(native), native);
         }
         assert!(binance_klines_url("BTCUSDT", "1wk", 10, None).contains("&interval=1w&"));
@@ -1360,6 +1394,133 @@ mod tests {
                 "{symbol}"
             );
         }
+    }
+
+    #[test]
+    fn yahoo_resampled_intervals_fetch_a_native_one() {
+        let now = 1_750_000_000;
+        for (tf, api) in [
+            ("3m", "1m"),
+            ("2h", "1h"),
+            ("4h", "1h"),
+            ("6h", "1h"),
+            ("12h", "1h"),
+            ("3d", "1d"),
+            ("5m", "5m"),
+            ("60m", "60m"),
+            ("1wk", "1wk"),
+        ] {
+            assert_eq!(yahoo_window(tf, 100, None, now).api_interval, api, "{tf}");
+        }
+    }
+
+    #[test]
+    fn yahoo_2h_6h_12h_equity_buckets_anchor_at_session_open() {
+        // Nov 3 has 7 hourly bars (09:30..15:30 ET); Nov 4 the forming 3.
+        let run = |tf| {
+            let f = parse_yahoo_chart(&fixture(), tf, 100, None, &win("1h", 0)).unwrap();
+            (dates(&f), f)
+        };
+        let (d, f) = run("2h");
+        assert_eq!(
+            d,
+            vec![
+                NOV3_OPEN,
+                NOV3_OPEN + 2 * H,
+                NOV3_OPEN + 4 * H,
+                NOV3_OPEN + 6 * H, // the session's last bar stands alone
+                NOV4_OPEN,
+                NOV4_OPEN + 2 * H,
+            ]
+        );
+        assert_eq!(f.data.bars[0].volume, 1000.0 + 1001.0);
+        assert_eq!(f.data.bars[3].volume, 1006.0);
+
+        let (d, f) = run("6h");
+        assert_eq!(d, vec![NOV3_OPEN, NOV3_OPEN + 6 * H, NOV4_OPEN]);
+        assert_eq!(f.data.bars[0].volume, (1000..1006).sum::<i32>() as f64);
+
+        // 12h: one bar per session; the forming one keeps the live close.
+        let (d, f) = run("12h");
+        assert_eq!(d, vec![NOV3_OPEN, NOV4_OPEN]);
+        assert_eq!(f.data.bars[0].volume, (1000..1007).sum::<i32>() as f64);
+        assert_eq!(f.data.bars[1].close, 209.0);
+
+        // A window starting mid-session drops that day, as for 4h.
+        let f = parse_yahoo_chart(&fixture(), "2h", 100, None, &win("1h", NOV3_OPEN + H)).unwrap();
+        assert_eq!(dates(&f), vec![NOV4_OPEN, NOV4_OPEN + 2 * H]);
+    }
+
+    /// Yahoo body with distinct OHLCV per timestamp: o = i, h = i + 5,
+    /// l = 100 - i, c = i + 0.5, v = 10.
+    fn ohlc_body(ts: &[i64], symbol: &str, instrument: &str) -> serde_json::Value {
+        let col =
+            |f: &dyn Fn(f64) -> f64| -> Vec<f64> { (0..ts.len()).map(|i| f(i as f64)).collect() };
+        serde_json::json!({ "chart": { "result": [{
+            "meta": { "symbol": symbol, "instrumentType": instrument, "gmtoffset": 0 },
+            "timestamp": ts,
+            "indicators": { "quote": [{
+                "open": col(&|i| i), "high": col(&|i| i + 5.0), "low": col(&|i| 100.0 - i),
+                "close": col(&|i| i + 0.5), "volume": col(&|_| 10.0),
+            }] }
+        }]}})
+    }
+
+    fn ohlcv(b: &Bar) -> (f64, f64, f64, f64, f64) {
+        (b.open, b.high, b.low, b.close, b.volume)
+    }
+
+    #[test]
+    fn yahoo_3m_aggregates_one_minute_bars() {
+        let base = 1_700_006_400; // multiple of 3m
+        assert_eq!(base % 180, 0);
+        // Seven minutes starting one minute into the first bucket.
+        let ts: Vec<i64> = (0..7).map(|i| base + 60 + i * 60).collect();
+        let body = ohlc_body(&ts, "BTC-USD", "CRYPTOCURRENCY");
+        let f = parse_yahoo_chart(&body, "3m", 100, None, &win("1m", base)).unwrap();
+        // Buckets (dated by their first bar): 2, 3 and 2 bars; the last is forming.
+        assert_eq!(dates(&f), vec![base + 60, base + 180, base + 360]);
+        let b = &f.data.bars;
+        assert_eq!(ohlcv(&b[0]), (0.0, 6.0, 99.0, 1.5, 20.0));
+        assert_eq!(ohlcv(&b[1]), (2.0, 9.0, 96.0, 4.5, 30.0));
+        assert_eq!(ohlcv(&b[2]), (5.0, 11.0, 94.0, 6.5, 20.0));
+        // A window starting inside a bucket drops it.
+        let f = parse_yahoo_chart(&body, "3m", 100, None, &win("1m", base + 1)).unwrap();
+        assert_eq!(dates(&f), vec![base + 180, base + 360]);
+    }
+
+    #[test]
+    fn yahoo_3m_snaps_the_live_bar_before_aggregating() {
+        let base = 1_700_006_400;
+        // The last print at base + 125 s belongs to the 1m bar at base + 120,
+        // which falls in the first 3m bucket.
+        let ts = vec![base, base + 60, base + 125];
+        let body = ohlc_body(&ts, "BTC-USD", "CRYPTOCURRENCY");
+        let f = parse_yahoo_chart(&body, "3m", 100, None, &win("1m", 0)).unwrap();
+        assert_eq!(dates(&f), vec![base]);
+        assert_eq!(f.data.bars[0].close, 2.5);
+        assert_eq!(f.data.bars[0].volume, 30.0);
+    }
+
+    #[test]
+    fn yahoo_3d_aggregates_daily_bars() {
+        // UTC-midnight bars bucket on a 3-day grid counted from the epoch.
+        let day = |d: i64| d * DAY;
+        let d0 = 20_000 - 20_000 % 3;
+        let ts: Vec<i64> = (d0..d0 + 8).map(day).collect();
+        let body = ohlc_body(&ts, "BTC-USD", "CRYPTOCURRENCY");
+        let f = parse_yahoo_chart(&body, "3d", 100, None, &win("1d", 0)).unwrap();
+        assert_eq!(dates(&f), vec![day(d0), day(d0 + 3), day(d0 + 6)]);
+        let b = &f.data.bars;
+        assert_eq!(ohlcv(&b[0]), (0.0, 7.0, 98.0, 2.5, 30.0));
+        // Partial last bucket (2 of 3 days).
+        assert_eq!(ohlcv(&b[2]), (6.0, 12.0, 93.0, 7.5, 20.0));
+        // A window starting inside the first bucket drops it.
+        let f = parse_yahoo_chart(&body, "3d", 100, None, &win("1d", day(d0) + 1)).unwrap();
+        assert_eq!(dates(&f), vec![day(d0 + 3), day(d0 + 6)]);
+        // limit keeps the newest bars.
+        let f = parse_yahoo_chart(&body, "3d", 1, None, &win("1d", 0)).unwrap();
+        assert_eq!(dates(&f), vec![day(d0 + 6)]);
     }
 
     #[test]

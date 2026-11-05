@@ -112,6 +112,74 @@ test.describe("toolbar", () => {
     await expect(activeTimeframe(page)).toHaveText("4h");
   });
 
+  /** Timestamps (ms) of the bars on the chart and the series interval. */
+  const barSpacing = (page: Page) =>
+    page.evaluate(() => {
+      const h = (
+        window as unknown as {
+          __chartgenTest: {
+            chart: () => { getDataList: () => Array<{ timestamp: number }> } | null;
+            series: () => { interval: string | null } | null;
+          };
+        }
+      ).__chartgenTest;
+      const ts = (h.chart()?.getDataList() ?? []).map((d) => d.timestamp);
+      return {
+        interval: h.series()?.interval ?? null,
+        count: ts.length,
+        gaps: [...new Set(ts.slice(1).map((t, i) => t - ts[i]!))],
+      };
+    });
+
+  test("2h from the dropdown loads a 2h chart", async ({ bootedApp: page }) => {
+    const call = chartCall(page, { timeframe: "2h" });
+    await page.getByRole("button", { name: "More timeframes" }).click();
+    await expect(page.getByRole("group", { name: "Hours" })).toBeVisible();
+    await page.getByRole("menuitem", { name: "2h", exact: true }).click();
+    await call;
+    await expect(
+      page.getByRole("button", { name: /^More timeframes \(current: 2h\)/ }),
+    ).toBeVisible();
+    await expectChartRendered(page);
+    await expect
+      .poll(async () => (await barSpacing(page)).interval)
+      .toBe("2h");
+    const s = await barSpacing(page);
+    expect(s.count).toBeGreaterThan(10);
+    expect(s.gaps).toEqual([7_200_000]);
+  });
+
+  test("Custom interval entry accepts 3D", async ({ bootedApp: page }) => {
+    await page.getByRole("button", { name: "More timeframes" }).click();
+    await page.getByRole("menuitem", { name: /Custom interval/ }).click();
+    const input = page.getByRole("dialog").getByRole("textbox");
+    await expect(input).toBeFocused();
+    await page.keyboard.type("bogus");
+    await expect(page.getByRole("dialog")).toContainText("Examples");
+    await input.fill("3D");
+    await expect(page.getByRole("dialog")).toContainText("switch to 3D");
+    const call = chartCall(page, { timeframe: "3d" });
+    await page.keyboard.press("Enter");
+    await call;
+    await expect
+      .poll(async () => (await barSpacing(page)).interval)
+      .toBe("3d");
+    expect((await barSpacing(page)).gaps).toEqual([3 * 86_400_000]);
+  });
+
+  test("typing 1, 2, 0 and Enter switches to 2h", async ({
+    bootedApp: page,
+  }) => {
+    await page.locator("main").click({ position: { x: 200, y: 200 } });
+    await page.keyboard.type("120");
+    const call = chartCall(page, { timeframe: "2h" });
+    await page.keyboard.press("Enter");
+    await call;
+    await expect
+      .poll(async () => (await barSpacing(page)).interval)
+      .toBe("2h");
+  });
+
   test("symbol, timeframe and chart type persist across reload", async ({
     bootedApp: page,
   }) => {

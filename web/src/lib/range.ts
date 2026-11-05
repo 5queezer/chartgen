@@ -7,16 +7,13 @@ import { wallClock, zonedToUtc } from "./timezone";
 export const RANGES = ["1D", "5D", "1M", "3M", "6M", "YTD", "1Y", "5Y", "All"] as const;
 export type RangeId = (typeof RANGES)[number];
 
-/**
- * TradingView's interval per range. 6M is 4h here because TradingView's
- * 2h is not a backend timeframe.
- */
+/** TradingView's interval per range. */
 export const RANGE_TIMEFRAME: Record<RangeId, Timeframe> = {
   "1D": "1m",
   "5D": "5m",
   "1M": "30m",
   "3M": "1h",
-  "6M": "4h",
+  "6M": "2h",
   YTD: "1d",
   "1Y": "1d",
   "5Y": "1wk",

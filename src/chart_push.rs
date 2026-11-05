@@ -723,6 +723,17 @@ mod tests {
     }
 
     #[test]
+    fn new_intervals_are_pushable() {
+        for tf in ["3m", "2h", "6h", "12h", "3d", "1wk", "1mo"] {
+            assert!(BinanceSource.feed_interval("BTCUSDT", tf).is_ok(), "{tf}");
+            assert!(SampleSource.feed_interval("BTCUSDT", tf).is_ok(), "{tf}");
+        }
+        assert_eq!(BinanceSource.feed_interval("BTCUSDT", "3d").unwrap(), "3d");
+        assert_eq!(BinanceSource.feed_interval("BTCUSDT", "1mo").unwrap(), "1M");
+        assert!(BinanceSource.feed_interval("BTCUSDT", "2m").is_err());
+    }
+
+    #[test]
     fn upsert_replaces_appends_and_rolls() {
         let mut w = vec![bar(60, 1.0), bar(120, 2.0)];
         assert!(upsert_bar(&mut w, bar(120, 2.5), 2));

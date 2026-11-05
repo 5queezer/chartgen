@@ -75,7 +75,7 @@ export interface GenerateChartInput {
    */
   ticker?: string;
   /**
-   * Candlestick timeframe / interval: 1m, 5m, 15m, 1h, 4h, 1d, 1wk
+   * Candlestick timeframe / interval: 1m, 3m, 5m, 15m, 30m, 1h, 2h, 4h, 6h, 12h, 1d, 3d, 1wk, 1mo
    */
   timeframe?: string;
   /**
@@ -96,7 +96,7 @@ export interface GetIndicatorsInput {
    */
   indicators: string[];
   /**
-   * Candle interval (e.g. 1m, 5m, 15m, 1h, 4h, 1d)
+   * Candle interval (e.g. 1m, 3m, 5m, 15m, 1h, 2h, 4h, 1d, 3d)
    */
   interval?: string;
   /**
@@ -200,7 +200,7 @@ export interface SubscribeChartInput {
    */
   ticker: string;
   /**
-   * Candlestick timeframe, as for generate_chart: 1m, 5m, 15m, 30m, 1h, 4h, 1d, 1wk, 1mo.
+   * Candlestick timeframe, as for generate_chart: 1m, 3m, 5m, 15m, 30m, 1h, 2h, 4h, 6h, 12h, 1d, 3d, 1wk, 1mo.
    */
   timeframe?: string;
   /**

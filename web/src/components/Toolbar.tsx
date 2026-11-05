@@ -18,6 +18,7 @@ import {
   FAVOURITE_TIMEFRAMES,
   TIMEFRAME_OPTIONS,
   parseTimeframe,
+  timeframeGroup,
   timeframeLabel,
   type Timeframe,
 } from "../lib/timeframe";
@@ -123,6 +124,7 @@ const buttonClass =
   "px-2.5 py-1.5 rounded-md text-sm cursor-pointer text-[color:var(--color-fg)] hover:bg-[color:var(--color-bg-elev)] inline-flex items-center gap-1.5";
 const activeClass =
   "bg-[color:var(--color-bg-elev)] text-[color:var(--color-accent)]";
+const TIMEFRAME_GROUPS = ["Minutes", "Hours", "Days"] as const;
 const menuClass =
   "bg-[color:var(--color-bg-elev)] border border-[color:var(--color-border)] rounded-md shadow-lg z-50 py-1 min-w-36";
 const itemClass =
@@ -255,16 +257,35 @@ export function Toolbar(props: ToolbarProps): JSX.Element {
           </DropdownMenu.Trigger>
           <DropdownMenu.Portal>
             <DropdownMenu.Content class={menuClass}>
-              <For each={overflow}>
-                {(tf: Timeframe) => (
-                  <DropdownMenu.Item
-                    class={itemClass}
-                    onSelect={() => setTimeframe(tf)}
-                  >
-                    {timeframeLabel(tf)}
-                  </DropdownMenu.Item>
+              <For each={TIMEFRAME_GROUPS}>
+                {(group) => (
+                  <DropdownMenu.Group>
+                    <DropdownMenu.GroupLabel class="px-3 py-1 text-[10px] uppercase tracking-wide text-[color:var(--color-fg-muted)]">
+                      {group}
+                    </DropdownMenu.GroupLabel>
+                    <For each={overflow.filter((tf) => timeframeGroup(tf) === group)}>
+                      {(tf: Timeframe) => (
+                        <DropdownMenu.Item
+                          class={itemClass}
+                          onSelect={() => setTimeframe(tf)}
+                        >
+                          {timeframeLabel(tf)}
+                        </DropdownMenu.Item>
+                      )}
+                    </For>
+                  </DropdownMenu.Group>
                 )}
               </For>
+              <DropdownMenu.Separator class="my-1 h-px bg-[color:var(--color-border)]" />
+              <DropdownMenu.Item
+                class={itemClass}
+                onSelect={() => {
+                  setTfSeed("");
+                  setTfOpen(true);
+                }}
+              >
+                Custom interval…
+              </DropdownMenu.Item>
             </DropdownMenu.Content>
           </DropdownMenu.Portal>
         </DropdownMenu.Root>
@@ -428,7 +449,7 @@ interface TimeframeEntryProps {
   onSelect: (tf: Timeframe) => void;
 }
 
-/** Small popup: type `15`, `4h`, `D`... and press Enter to switch timeframe. */
+/** Small popup: type `15`, `2h`, `3D`... and press Enter to switch timeframe. */
 function TimeframeEntry(props: TimeframeEntryProps): JSX.Element {
   let input!: HTMLInputElement;
   let previouslyFocused: HTMLElement | null = null;
@@ -464,7 +485,7 @@ function TimeframeEntry(props: TimeframeEntryProps): JSX.Element {
             <input
               ref={input}
               type="text"
-              aria-label="Timeframe, for example 15, 4h, D"
+              aria-label="Timeframe, for example 15, 2h, 3D"
               autocomplete="off"
               spellcheck={false}
               value={value()}
@@ -486,7 +507,7 @@ function TimeframeEntry(props: TimeframeEntryProps): JSX.Element {
             <p class="mt-2 text-xs text-[color:var(--color-fg-muted)]">
               <Show
                 when={parsed()}
-                fallback="Examples: 5, 15, 60, 4h, D, W"
+                fallback="Examples: 5, 15, 60, 2h, 3D, W"
               >
                 {(tf) => `Enter to switch to ${timeframeLabel(tf())}`}
               </Show>

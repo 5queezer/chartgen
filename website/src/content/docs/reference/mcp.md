@@ -335,12 +335,16 @@ once `warmup` covers their lookback.
 
 Upstream limits: Binance requests are paginated at 1000 bars per call.
 Yahoo intraday history ends after about 30 days for 1m, 60 days for other
-sub-hour intervals, and 730 days for 1h/4h. Yahoo has no native 4h, so
-chartgen builds it from 1h bars. For exchange-traded symbols the buckets
-are anchored at each trading day's session open, like TradingView: a US
-stock gets 09:30–13:30 and 13:30–16:00 ET, the second one shorter. Each
-bucket's `t` is its first 1h bar. Crypto (`BTC-USD`) and FX (`EURUSD=X`)
-trade around the clock and use the UTC 4h grid instead. Each upstream
+sub-hour intervals, and 730 days for 1h and the intervals built from it. Yahoo has no native
+3m, 2h, 4h, 6h, 12h or 3d, so chartgen builds them from 1m, 1h and 1d bars
+(Binance serves all of them natively). For exchange-traded symbols the
+hourly buckets are anchored at each trading day's session open, like
+TradingView: a US stock gets 09:30–13:30 and 13:30–16:00 ET at 4h, the
+second one shorter; at 12h each session is one bar. Each bucket's `t` is
+its first source bar. Crypto (`BTC-USD`) and FX (`EURUSD=X`) trade around
+the clock and use the UTC grid instead. 3d buckets group three calendar
+days counted from the Unix epoch, so a bucket can hold fewer than three
+trading days. Each upstream
 request times out after 10 s, and a paginated Binance fetch gives up after
 20 s.
 
