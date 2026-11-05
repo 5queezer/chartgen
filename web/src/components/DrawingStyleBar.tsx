@@ -12,6 +12,7 @@ import {
   DASH_STYLES,
   FONT_SIZES,
   MAX_WIDTH,
+  FILLED,
   type DrawingStyle,
 } from "../stores/drawings";
 import { ColorPicker } from "./ColorPicker";
@@ -78,6 +79,7 @@ export function DrawingStyleBar(props: DrawingStyleBarProps): JSX.Element {
   const style = () => d().style ?? {};
   const isText = () => d().name === "cgText";
   const isRect = () => d().name === "cgRect";
+  const hasFill = () => FILLED.includes(d().name);
   const disabled = () => d().lock || d().offRange;
   const stored = (k: "borderColor" | "color") =>
     (d().styles?.polygon as Record<string, string> | undefined)?.[k];
@@ -108,7 +110,7 @@ export function DrawingStyleBar(props: DrawingStyleBarProps): JSX.Element {
           label={isText() ? "Text color" : "Line color"}
           onChange={(c) => props.onChange({ color: c }, "color")}
         />
-        <Show when={isRect()}>
+        <Show when={hasFill()}>
           <ColorPicker
             value={fill()}
             label="Fill color"

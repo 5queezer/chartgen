@@ -367,8 +367,10 @@ is rejected and the field turns red.
 
 The vertical toolbar on the left of the chart holds the drawing tools:
 trend line, ray, extended line, horizontal line, horizontal ray,
-vertical line, parallel channel, fib retracement, rectangle, text
-annotation and price label. Below them are a magnet toggle (off, weak,
+vertical line, parallel channel, fib retracement, fib extension,
+rectangle, text annotation and price label, then three groups set off by
+dividers: **Measure** (price range, date range, date and price range),
+**Pitchfork** and **Forecasting** (long and short position). Below them are a magnet toggle (off, weak,
 strong), lock all, hide all and remove all (asks for confirmation). The
 button at the top switches the cursor between crosshair and arrow.
 
@@ -376,6 +378,24 @@ A tool is armed for exactly one drawing: pick it, click the chart to
 place the points, and the tool is released. Pick it again or press `Esc`
 to cancel. Drawings pan and zoom with the chart.
 
+- **Measure tools** take two clicks. Price range shows a vertical arrow
+  and `+1,234.50 (+2.31%)`; date range a horizontal arrow and
+  `12 bars, 3d 4h`; date and price range a box with both. The band is
+  blue when price (date range: time) moves up or right, red otherwise. The
+  fill color is editable in the style bar.
+- **Fib extension (trend-based)** takes three clicks (A, B, C) and draws
+  the levels 0, 0.236, 0.382, 0.5, 0.618, 0.786, 1, 1.618, 2.618, 3.618
+  and 4.236 from C, offset by the A to B move, each labelled
+  `level (price)`.
+- **Pitchfork** (Andrews) takes three clicks. The median line runs from
+  the first point through the midpoint of the second and third; parallels
+  run through those two. All extend to the right edge of the chart.
+- **Long position / Short position** take one click, placing the entry
+  with a target at +2% (short: -2%) and a stop at -1% (short: +1%) over 20
+  bars. Drag the entry, target or stop handle; target and stop share the
+  right edge, and each stays on its side of the entry. Labels show price
+  and percent, and `Risk/Reward Ratio: 2.00` updates while you drag. The
+  zones are green (reward) and red (risk).
 - **Select** a drawing by clicking it, then press `Delete` or
   `Backspace` to remove it.
 - **Right-click** a drawing for Remove and Lock/Unlock. Locked drawings

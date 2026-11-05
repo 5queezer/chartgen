@@ -61,6 +61,23 @@ describe("parseRecord", () => {
   });
 });
 
+describe("parseRecord: multi-point tools", () => {
+  const pt = (i: number) => ({ timestamp: 1000 * i, value: 10 * i });
+  it.each([
+    ["cgPriceRange", 2],
+    ["cgDateRange", 2],
+    ["cgDatePriceRange", 2],
+    ["cgFibExt", 3],
+    ["cgPitchfork", 3],
+    ["cgLong", 3],
+    ["cgShort", 3],
+  ])("%s needs %i points", (name, n) => {
+    const pts = (k: number) => Array.from({ length: k }, (_, i) => pt(i + 1));
+    expect(parseRecord({ ...good, name, points: pts(n) })?.name).toBe(name);
+    expect(parseRecord({ ...good, name, points: pts(n - 1) })).toBeNull();
+  });
+});
+
 describe("sanitizeStyles", () => {
   it("strips unknown keys and bad values", () => {
     expect(

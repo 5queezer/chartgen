@@ -42,6 +42,7 @@ import {
   type TimeAxis,
 } from "../stores/drawings";
 import { DrawingStyleBar } from "./DrawingStyleBar";
+import { overlayLabels, setOverlayAxis } from "./drawingOverlays";
 import { PALETTES } from "../lib/theme";
 import { theme } from "../stores/layout";
 
@@ -130,6 +131,8 @@ interface ToolDef {
   label: string;
   /** Alt+<code> shortcut, using TradingView's key where one exists. */
   code?: string;
+  /** Tools of one group sit together, set off from the next group by a divider. */
+  group?: string;
   icon: () => JSX.Element;
 }
 
@@ -248,6 +251,16 @@ const TOOLS: readonly ToolDef[] = [
     ),
   },
   {
+    name: "cgFibExt",
+    label: "Fib extension (trend-based)",
+    icon: () => (
+      <svg {...svgProps}>
+        <path d="M3 4h18M3 9h18M3 14h18M3 20h18" />
+        <path d="M4 20L9 12L12 16" stroke-dasharray="2 2" />
+      </svg>
+    ),
+  },
+  {
     name: "cgRect",
     label: "Rectangle",
     icon: () => (
@@ -271,6 +284,76 @@ const TOOLS: readonly ToolDef[] = [
     icon: () => (
       <svg {...svgProps}>
         <path d="M3 12l5-5h13v10H8z" />
+      </svg>
+    ),
+  },
+  {
+    name: "cgPriceRange",
+    label: "Price range",
+    group: "Measure",
+    icon: () => (
+      <svg {...svgProps}>
+        <rect x="5" y="4" width="14" height="16" fill="currentColor" fill-opacity="0.15" />
+        <path d="M12 6v12M9.5 8.5L12 6l2.5 2.5M9.5 15.5L12 18l2.5-2.5" />
+      </svg>
+    ),
+  },
+  {
+    name: "cgDateRange",
+    label: "Date range",
+    group: "Measure",
+    icon: () => (
+      <svg {...svgProps}>
+        <rect x="3" y="7" width="18" height="10" fill="currentColor" fill-opacity="0.15" />
+        <path d="M6 12h12M8.5 9.5L6 12l2.5 2.5M15.5 9.5L18 12l-2.5 2.5" />
+      </svg>
+    ),
+  },
+  {
+    name: "cgDatePriceRange",
+    label: "Date and price range",
+    group: "Measure",
+    icon: () => (
+      <svg {...svgProps}>
+        <rect x="4" y="5" width="16" height="14" fill="currentColor" fill-opacity="0.15" />
+        <path d="M12 7v10M8 12h8" />
+        <path d="M10 9l2-2 2 2M10 15l2 2 2-2M10 10l-2 2 2 2M14 10l2 2-2 2" />
+      </svg>
+    ),
+  },
+  {
+    name: "cgPitchfork",
+    label: "Pitchfork",
+    group: "Pitchfork",
+    icon: () => (
+      <svg {...svgProps}>
+        <path d="M4 19L21 6M9 8L22 9M9 8L21 6M12 21L22 9" />
+        <path d="M9 8l3 13" stroke-dasharray="2 2" />
+        <Dot x={4} y={19} />
+        <Dot x={9} y={8} />
+        <Dot x={12} y={21} />
+      </svg>
+    ),
+  },
+  {
+    name: "cgLong",
+    label: "Long position",
+    group: "Forecasting",
+    icon: () => (
+      <svg {...svgProps}>
+        <rect x="4" y="4" width="16" height="8" fill="#089981" fill-opacity="0.35" stroke="#089981" />
+        <rect x="4" y="12" width="16" height="8" fill="#f23645" fill-opacity="0.35" stroke="#f23645" />
+      </svg>
+    ),
+  },
+  {
+    name: "cgShort",
+    label: "Short position",
+    group: "Forecasting",
+    icon: () => (
+      <svg {...svgProps}>
+        <rect x="4" y="4" width="16" height="8" fill="#f23645" fill-opacity="0.35" stroke="#f23645" />
+        <rect x="4" y="12" width="16" height="8" fill="#089981" fill-opacity="0.35" stroke="#089981" />
       </svg>
     ),
   },
@@ -392,6 +475,20 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
 
   const axis = (): TimeAxis | null =>
     timeAxisOf(props.chart?.getDataList().map((d) => d.timestamp) ?? []);
+  // The overlays ask for the bar timing on every frame; recompute it only
+  // when the loaded bars change.
+  let axisKey: { list: unknown; n: number; last: number } | null = null;
+  let axisCache: TimeAxis | null = null;
+  setOverlayAxis(() => {
+    const list = props.chart?.getDataList();
+    if (!list) return null;
+    const last = list.at(-1)?.timestamp ?? 0;
+    if (axisKey?.list !== list || axisKey.n !== list.length || axisKey.last !== last) {
+      axisKey = { list, n: list.length, last };
+      axisCache = axis();
+    }
+    return axisCache;
+  });
 
   const syncFlags = () => {
     setLockAll(current.length > 0 && current.every((r) => r.lock));
@@ -865,6 +962,11 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
                 paneId: o.paneId,
                 styles: o.styles,
                 points: o.points,
+                labels: overlayLabels.get(id),
+                precision: props.chart?.getPriceVolumePrecision().price,
+                pixels: o.points.map(
+                  (pt) => props.chart?.convertToPixel(pt, { paneId: o.paneId }) as { x?: number; y?: number },
+                ),
               },
             ]
           : [];
@@ -1042,10 +1144,15 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
       </button>
       <Separator />
       <For each={TOOLS}>
-        {(tool) => (
+        {(tool, i) => (
+          <>
+            <Show when={tool.group && tool.group !== TOOLS[i() - 1]?.group}>
+              <Separator />
+            </Show>
           <button
             type="button"
             class={btnClass}
+            data-group={tool.group}
             aria-label={tool.label}
             title={tool.code ? `${tool.label} (Alt+${tool.code.slice(3)})` : tool.label}
             aria-pressed={armed() === tool.name}
@@ -1053,6 +1160,7 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
           >
             {tool.icon()}
           </button>
+          </>
         )}
       </For>
       <Separator />

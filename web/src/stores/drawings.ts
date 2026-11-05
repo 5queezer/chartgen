@@ -19,9 +19,35 @@ export const DRAWING_NAMES = [
   "cgRect",
   "cgText",
   "simpleTag",
+  "cgFibExt",
+  "cgPitchfork",
+  "cgPriceRange",
+  "cgDateRange",
+  "cgDatePriceRange",
+  "cgLong",
+  "cgShort",
 ] as const;
 
 export type DrawingName = (typeof DRAWING_NAMES)[number];
+
+/** Points a drawing needs to be valid (default 1); shorter stored records are dropped. */
+const MIN_POINTS: Partial<Record<DrawingName, number>> = {
+  cgFibExt: 3,
+  cgPitchfork: 3,
+  cgPriceRange: 2,
+  cgDateRange: 2,
+  cgDatePriceRange: 2,
+  cgLong: 3,
+  cgShort: 3,
+};
+
+/** Drawings with a translucent fill the user can recolor. */
+export const FILLED: readonly DrawingName[] = [
+  "cgRect",
+  "cgPriceRange",
+  "cgDateRange",
+  "cgDatePriceRange",
+];
 
 export interface DrawingPoint {
   timestamp: number;
@@ -172,7 +198,7 @@ export function overlayStyles(
   if (s.color !== undefined) {
     line.color = s.color;
     polygon.borderColor = s.color;
-    if (name === "cgText" || name === "fibonacciLine") text.color = s.color;
+    if (name === "cgText" || name === "fibonacciLine" || name === "cgFibExt") text.color = s.color;
     if (name === "simpleTag") {
       text.backgroundColor = s.color;
       text.borderColor = s.color;
@@ -188,6 +214,7 @@ export function parseRecord(x: unknown): DrawingRecord | null {
   if (!isPlainObject(x) || !isDrawingName(x.name)) return null;
   if (!Array.isArray(x.points) || x.points.length === 0) return null;
   if (x.points.length > MAX_POINTS) return null;
+  if (x.points.length < (MIN_POINTS[x.name] ?? 1)) return null;
   const points = x.points.map(parsePoint);
   if (points.some((p) => p === null)) return null;
   const rec: DrawingRecord = {
@@ -293,7 +320,7 @@ export interface OverlayLike {
   visible: boolean;
 }
 
-function pointTimestamp(
+export function pointTimestamp(
   p: { timestamp?: number; dataIndex?: number },
   axis: TimeAxis | null,
 ): number | undefined {
