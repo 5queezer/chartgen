@@ -101,4 +101,59 @@ describe("compare store", () => {
     compare.setCompareSymbols(undefined);
     expect(compare.compareSymbols()).toEqual([]);
   });
+
+  it("keeps a scale mode the user picked while comparing", async () => {
+    stubStorage({ "chartgen.layout.scaleMode": '"log"' });
+    const { layout, compare } = await load();
+    compare.addCompare("ETHUSDT", "BTCUSDT");
+    layout.setScaleMode("normal");
+    compare.removeCompare("ETHUSDT");
+    expect(layout.scaleMode()).toBe("normal");
+  });
+
+  it("does not leak the restore target into a layout switch", async () => {
+    stubStorage({ "chartgen.layout.scaleMode": '"log"' });
+    const { layout, compare } = await load();
+    compare.addCompare("ETHUSDT", "BTCUSDT");
+    // A layout with its own compare list and percent scale is applied.
+    layout.setScaleMode("percentage");
+    compare.setCompareSymbols(["SOLUSDT"]);
+    compare.removeCompare("SOLUSDT");
+    expect(layout.scaleMode()).toBe("normal");
+  });
+
+  it("keeps each symbol's color slot when another is removed", async () => {
+    stubStorage();
+    const { compare } = await load();
+    for (const s of ["A", "B", "C"]) compare.addCompare(s, "BTCUSDT");
+    compare.removeCompare("A");
+    expect(compare.compareEntries()).toEqual([
+      { symbol: "B", slot: 1 },
+      { symbol: "C", slot: 2 },
+    ]);
+    compare.addCompare("D", "BTCUSDT");
+    expect(compare.compareEntries().at(-1)).toEqual({ symbol: "D", slot: 0 });
+    compare.setCompareSymbols(["C", "E"]);
+    expect(compare.compareEntries()).toEqual([
+      { symbol: "C", slot: 2 },
+      { symbol: "E", slot: 0 },
+    ]);
+  });
+
+  it("restores slots from storage and rebuilds invalid ones", async () => {
+    stubStorage({
+      "chartgen.layout.compare": '["A","B"]',
+      "chartgen.layout.compareSlots": "[3,1]",
+    });
+    expect((await load()).compare.compareEntries().map((e) => e.slot)).toEqual([
+      3, 1,
+    ]);
+    stubStorage({
+      "chartgen.layout.compare": '["A","B"]',
+      "chartgen.layout.compareSlots": "[1,1]",
+    });
+    expect((await load()).compare.compareEntries().map((e) => e.slot)).toEqual([
+      0, 1,
+    ]);
+  });
 });

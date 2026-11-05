@@ -28,6 +28,35 @@ describe("alignAsOf", () => {
   it("is all null for an empty compare series", () => {
     expect(alignAsOf([1, 2], [])).toEqual([null, null]);
   });
+
+  const DAY = 86_400;
+  const HOUR = 3_600;
+
+  it("joins a Binance 1D main bar to the Yahoo bar of the same session", () => {
+    // BTCUSDT daily bars open 00:00 UTC; AAPL's open at 14:30 UTC.
+    const d0 = 1_700_006_400 - (1_700_006_400 % DAY);
+    const btc = [d0, d0 + DAY, d0 + 2 * DAY];
+    const aapl = bars(
+      [d0 - DAY + 14.5 * HOUR, 10],
+      [d0 + 14.5 * HOUR, 11],
+      [d0 + DAY + 14.5 * HOUR, 12],
+    );
+    expect(alignAsOf(btc, aapl, DAY)).toEqual([11, 12, 12]);
+    // Joining on the open would lag one session.
+    expect(alignAsOf(btc, aapl)).toEqual([10, 11, 12]);
+  });
+
+  it("joins a 1W main bar to the weekly bar of the same week", () => {
+    const WEEK = 7 * DAY;
+    const mon = 1_700_006_400 - (1_700_006_400 % WEEK);
+    const btc = [mon, mon + WEEK];
+    const aapl = bars([mon + 13.5 * HOUR, 5], [mon + WEEK + 13.5 * HOUR, 6]);
+    expect(alignAsOf(btc, aapl, WEEK)).toEqual([5, 6]);
+  });
+
+  it("does not take a bar that opens at the end of the main bar", () => {
+    expect(alignAsOf([0, 60], bars([0, 1], [60, 2]), 60)).toEqual([1, 2]);
+  });
 });
 
 describe("mergeBars", () => {
@@ -64,6 +93,15 @@ describe("rebase", () => {
 
   it("anchors at the first bar with a value and keeps nulls", () => {
     expect(rebase([null, 5, 10], [100, 100, 100], 0)).toEqual([null, 100, 200]);
+  });
+
+  it("starts a late line at 0% on the axis, like the legend", () => {
+    const closes = [100, 120, 130];
+    const out = rebase([null, 5, 10], closes, 0);
+    const axisPct = (v: number) => ((v - closes[0]!) / closes[0]!) * 100;
+    expect(axisPct(out[1]!)).toBeCloseTo(0);
+    expect(axisPct(out[2]!)).toBeCloseTo(100);
+    expect(compareReading([null, 5, 10], 0, null)!.pct).toBeCloseTo(100);
   });
 
   it("is all null without any anchor", () => {

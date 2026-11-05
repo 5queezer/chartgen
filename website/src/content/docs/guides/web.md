@@ -132,7 +132,8 @@ series. Add up to five. The first one switches the price axis to percent,
 so every line starts from the same point: the axis shows each symbol's own
 percent change since the first visible bar, and the lines move with scroll
 and zoom. Removing the last compare symbol restores the scale mode you had
-before.
+before, unless you picked another one meanwhile. Outside percent mode the
+lines stay anchored at the first loaded bar.
 
 Each compare symbol has a legend row under the indicator rows with its
 name, its close (at the crosshair bar, or the last bar at rest), the percent
@@ -140,7 +141,9 @@ change since the first visible bar, and a **×** on hover to remove it. The
 lines follow the main chart: the same loaded range, older history when you
 scroll back, the live tail, and a refetch on a timeframe change. A compare
 symbol has bars on its own schedule, so each main bar shows the last close
-at or before it.
+of a bar that opened before the main bar ended (a daily Binance bar matches the
+Yahoo bar of the same session). Each symbol keeps its color until removed, and
+choosing a compare symbol as the main symbol removes it from the list.
 
 The compare list is saved with the rest of the chart state
 (`chartgen.layout.compare`) and is part of a [layout](#layouts). See

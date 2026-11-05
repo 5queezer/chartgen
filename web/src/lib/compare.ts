@@ -6,9 +6,9 @@
 // the candle pane, indicators included, to (v - c0) / c0 * 100, where c0 is the
 // MAIN series' close at the first visible bar. A compare close in its own price
 // units would therefore be normalised by the wrong base. `rebase` puts the line
-// in the main series' price space, scaled so that its first visible value sits
-// at the main close of that bar; the axis then shows exactly the compare
-// symbol's own percent change since that bar.
+// in the main series' price space, scaled so that it starts at the main close
+// of the first visible bar (0%); the axis then shows exactly the compare
+// symbol's own percent change from where it starts.
 
 import type { SeriesPayload } from "../types/responses";
 
@@ -71,12 +71,17 @@ export function mergeBars(
 }
 
 /**
- * As-of join: for each main bar time, the close of the last compare bar at or
- * before it; null before the compare series starts. Both inputs are sorted.
+ * As-of join: for each main bar, the close of the last compare bar that
+ * opened before the main bar ends (`t < t_main + step`); null before the
+ * compare series starts. Joining on the end, not the open, matters when the
+ * two sources stamp the same session differently (Binance daily bars open
+ * at 00:00 UTC, Yahoo's at the exchange open, hours later). `step` is the
+ * main interval in seconds; 1 joins on "at or before". Both inputs are sorted.
  */
 export function alignAsOf(
   times: ReadonlyArray<number | null>,
   bars: readonly CompareBar[],
+  step = 1,
 ): Array<number | null> {
   const out: Array<number | null> = [];
   let j = -1;
@@ -85,7 +90,7 @@ export function alignAsOf(
       out.push(null);
       continue;
     }
-    while (j + 1 < bars.length && bars[j + 1]!.t <= t) j++;
+    while (j + 1 < bars.length && bars[j + 1]!.t < t + step) j++;
     out.push(j >= 0 ? bars[j]!.c : null);
   }
   return out;
@@ -95,26 +100,38 @@ const finite = (v: number | null | undefined): v is number =>
   typeof v === "number" && Number.isFinite(v);
 
 /**
- * Scale `raw` into the main series' price space so the klinecharts percent
- * axis reads the compare symbol's own change since bar `from` (the first
- * visible bar). Anchored at the first bar from `from` where the line and the
- * main close both have a value; all null when there is none.
+ * Factor that puts a compare line into the main series' price space for the
+ * klinecharts percent axis: `closeAt(from) / rawAt(a)`, where `a` is the
+ * first bar at or after `from` with a value. The axis reads the main close at
+ * `from` as 0%, so the line starts at 0% at `a` and shows the compare symbol's
+ * own change from there on, which is also what the legend reports. Null when
+ * the line has no value from `from` on.
  */
+export function rebaseScale(
+  n: number,
+  rawAt: (i: number) => number | null | undefined,
+  closeAt: (i: number) => number | null | undefined,
+  from: number,
+): number | null {
+  const f = Math.min(Math.max(0, from), n - 1);
+  for (let a = f; a < n; a++) {
+    const v = rawAt(a);
+    if (!finite(v) || v === 0) continue;
+    const base = closeAt(f);
+    const close = finite(base) ? base : closeAt(a);
+    return finite(close) ? close / v : null;
+  }
+  return null;
+}
+
+/** `raw` scaled by `rebaseScale`; all null when there is no scale. */
 export function rebase(
   raw: ReadonlyArray<number | null | undefined>,
   closes: ReadonlyArray<number | null | undefined>,
   from: number,
 ): Array<number | null> {
-  let a = -1;
-  for (let i = Math.max(0, from); i < raw.length; i++) {
-    if (finite(raw[i]) && raw[i] !== 0 && finite(closes[i])) {
-      a = i;
-      break;
-    }
-  }
-  if (a < 0) return raw.map(() => null);
-  const scale = closes[a]! / raw[a]!;
-  return raw.map((v) => (finite(v) ? v * scale : null));
+  const scale = rebaseScale(raw.length, (i) => raw[i], (i) => closes[i], from);
+  return raw.map((v) => (scale !== null && finite(v) ? v * scale : null));
 }
 
 export interface CompareReading {

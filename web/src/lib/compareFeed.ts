@@ -46,8 +46,8 @@ export interface CompareFeedOptions {
     args: CompareFetchArgs,
   ) => Promise<SeriesPayload>;
   onChange: (data: Map<string, CompareData>) => void;
-  /** Poll period, the main feed's. */
-  pollMs: () => number;
+  /** Poll period of a symbol's market: fast for 24/7 symbols, slow for sessions. */
+  pollMs: (symbol: string) => number;
   doc?: Pick<Document, "visibilityState">;
 }
 
@@ -61,19 +61,22 @@ interface Entry {
   data: CompareData;
   abort: AbortController;
   busy: boolean;
+  timer: ReturnType<typeof setTimeout> | null;
 }
 
 export function createCompareFeed(opts: CompareFeedOptions): CompareFeed {
   const doc = opts.doc ?? document;
   const entries = new Map<string, Entry>();
   let want: CompareSync | null = null;
-  let timer: ReturnType<typeof setTimeout> | null = null;
 
   const publish = () =>
     opts.onChange(new Map([...entries].map(([s, e]) => [s, e.data])));
 
   const drop = (symbol: string) => {
-    entries.get(symbol)?.abort.abort();
+    const e = entries.get(symbol);
+    if (!e) return;
+    e.abort.abort();
+    if (e.timer !== null) clearTimeout(e.timer);
     entries.delete(symbol);
   };
 
@@ -155,16 +158,15 @@ export function createCompareFeed(opts: CompareFeedOptions): CompareFeed {
     );
   }
 
-  const poll = () => {
-    timer = null;
-    if (entries.size === 0) return;
-    if (doc.visibilityState !== "hidden") {
-      for (const [symbol, e] of entries) {
-        if (e.busy) continue;
-        if (e.data.state !== "ready") {
-          step(symbol);
-          continue;
-        }
+  /** One poll of `symbol`, then the next after its own period. */
+  const poll = (symbol: string) => {
+    const e = entries.get(symbol);
+    if (!e) return;
+    e.timer = null;
+    if (doc.visibilityState !== "hidden" && !e.busy) {
+      if (e.data.state !== "ready") {
+        step(symbol);
+      } else {
         run(
           symbol,
           e,
@@ -182,7 +184,7 @@ export function createCompareFeed(opts: CompareFeedOptions): CompareFeed {
         );
       }
     }
-    timer = setTimeout(poll, opts.pollMs());
+    e.timer = setTimeout(() => poll(symbol), opts.pollMs(symbol));
   };
 
   return {
@@ -206,23 +208,16 @@ export function createCompareFeed(opts: CompareFeedOptions): CompareFeed {
             data: { bars: [], hasMore: false, state: "loading" },
             abort: new AbortController(),
             busy: false,
+            timer: setTimeout(() => poll(symbol), opts.pollMs(symbol)),
           });
         }
       }
       if (changed) publish();
       for (const symbol of entries.keys()) step(symbol);
-      if (entries.size === 0) {
-        if (timer !== null) clearTimeout(timer);
-        timer = null;
-      } else if (timer === null) {
-        timer = setTimeout(poll, opts.pollMs());
-      }
     },
 
     dispose() {
       for (const symbol of [...entries.keys()]) drop(symbol);
-      if (timer !== null) clearTimeout(timer);
-      timer = null;
     },
   };
 }

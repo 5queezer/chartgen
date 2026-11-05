@@ -149,4 +149,19 @@ test.describe("compare symbols", () => {
       .poll(() => calls.filter((c) => c.bars === 2).length, { timeout: 15_000 })
       .toBeGreaterThanOrEqual(2);
   });
+
+  test("making a compare symbol the main symbol removes it from the list", async ({
+    bootedApp: page,
+  }) => {
+    await addCompare(page, "ETHUSDT");
+    await expect(legend(page, "ETHUSDT")).toHaveText(VALUE_ROW, {
+      timeout: 15_000,
+    });
+    await page.getByRole("button", { name: /^Symbol:/ }).click();
+    await dialog(page).getByRole("combobox").fill("ETHUSDT");
+    await expect(page.getByRole("option").first()).toContainText("ETHUSDT");
+    await page.keyboard.press("Enter");
+    await expect(legend(page, "ETHUSDT")).toHaveCount(0);
+    await expect(scaleButton(page, "%")).toHaveAttribute("aria-pressed", "false");
+  });
 });

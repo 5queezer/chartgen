@@ -38,7 +38,7 @@ import {
 import { isTypingContext } from "./lib/keys";
 import { alignAsOf, COMPARE_PALETTE } from "./lib/compare";
 import { createCompareFeed, type CompareData } from "./lib/compareFeed";
-import { isContinuousMarket } from "./lib/countdown";
+import { barCloseMs, isContinuousMarket } from "./lib/countdown";
 import { createMcpSession } from "./mcp";
 import { tryHandlePendingRedirect } from "./oauth";
 import {
@@ -68,7 +68,12 @@ import {
   toWire,
   updateIndicatorSettings,
 } from "./stores/indicators";
-import { addCompare, compareSymbols, removeCompare } from "./stores/compare";
+import {
+  addCompare,
+  compareEntries,
+  compareSymbols,
+  removeCompare,
+} from "./stores/compare";
 import { setParamDefaults, type ParamDefaults } from "./stores/layouts";
 import {
   addRecent,
@@ -243,11 +248,17 @@ export function App(): JSX.Element {
         signal,
       ),
     onChange: setCompareData,
-    pollMs: () => (isContinuousMarket(symbol()) ? FAST_POLL_MS : SLOW_POLL_MS),
+    pollMs: (s) => (isContinuousMarket(s) ? FAST_POLL_MS : SLOW_POLL_MS),
   });
   onCleanup(compareFeed.dispose);
+  // The main symbol is never one of its own compare symbols: pick it as the
+  // main symbol and it leaves the list.
+  createEffect(() => {
+    const main = symbol();
+    if (untrack(compareSymbols).includes(main)) removeCompare(main);
+  });
   const comparing = createMemo(() =>
-    compareSymbols().filter((s) => s !== symbol()),
+    compareEntries().filter((e) => e.symbol !== symbol()),
   );
   // Sized to the main series once it matches the timeframe (a kept previous
   // chart of another timeframe must not size the loads).
@@ -255,20 +266,28 @@ export function App(): JSX.Element {
     const s = live()?.series;
     const ready = authReady() && s?.interval === timeframe();
     compareFeed.sync({
-      symbols: authReady() ? comparing() : [],
+      symbols: authReady() ? comparing().map((e) => e.symbol) : [],
       timeframe: timeframe(),
       mainCount: ready ? s.bars.length : 0,
       mainFirst: ready ? (s.bars[0]?.t ?? null) : null,
     });
   });
   const compareLines = createMemo(() => {
-    const times = live()?.series.bars.map((b) => b.t) ?? [];
-    return comparing().map((sym, i) => {
+    const series = live()?.series;
+    const times = series?.bars.map((b) => b.t) ?? [];
+    // Join on the main bar's end (see alignAsOf); 1 s when the interval is unknown.
+    const last = times.at(-1);
+    const close =
+      last != null && series?.interval
+        ? barCloseMs(last, series.interval)
+        : null;
+    const step = last != null && close !== null ? close / 1000 - last : 1;
+    return comparing().map(({ symbol: sym, slot }) => {
       const data = compareData().get(sym);
       return {
         symbol: sym,
-        color: COMPARE_PALETTE[i % COMPARE_PALETTE.length]!,
-        values: data ? alignAsOf(times, data.bars) : times.map(() => null),
+        color: COMPARE_PALETTE[slot]!,
+        values: data ? alignAsOf(times, data.bars, step) : times.map(() => null),
       };
     });
   });

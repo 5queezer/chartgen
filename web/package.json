@@ -16,7 +16,7 @@
     "@kobalte/core": "^0.13.7",
     "@modelcontextprotocol/sdk": "^1.0.4",
     "@tanstack/solid-query": "^5.62.0",
-    "klinecharts": "^9.8.10",
+    "klinecharts": "~9.8.12",
     "solid-js": "^1.9.3",
     "zod": "^3.23.8"
   },
