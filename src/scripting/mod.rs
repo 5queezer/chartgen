@@ -23,6 +23,7 @@ use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use crate::data::OhlcvData;
+pub use crate::indicator::IndicatorError as ScriptError;
 use crate::indicator::{Indicator, PanelResult};
 pub use runtime::{Compiled, ScriptInfo};
 
@@ -34,39 +35,6 @@ pub fn enabled() -> bool {
 
 /// Most scripts one user may store.
 pub const MAX_SCRIPTS_PER_USER: usize = 50;
-
-/// A structured script error: the pipeline `step` (`parse`, `static`,
-/// `presence`, `dry_run`, `runtime`), the 1-based source line when known,
-/// and a message.
-#[derive(Clone, Debug, PartialEq)]
-pub struct ScriptError {
-    pub step: &'static str,
-    pub line: Option<usize>,
-    pub message: String,
-}
-
-impl ScriptError {
-    pub fn new(step: &'static str, line: Option<usize>, message: impl Into<String>) -> Self {
-        Self {
-            step,
-            line,
-            message: message.into(),
-        }
-    }
-
-    pub fn to_json(&self) -> Value {
-        json!({ "step": self.step, "line": self.line, "message": self.message })
-    }
-}
-
-impl std::fmt::Display for ScriptError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self.line {
-            Some(l) => write!(f, "{} error at line {l}: {}", self.step, self.message),
-            None => write!(f, "{} error: {}", self.step, self.message),
-        }
-    }
-}
 
 /// `^[a-z][a-z0-9_]{0,47}$`: the same shape as built-in names.
 pub fn valid_name(name: &str) -> bool {

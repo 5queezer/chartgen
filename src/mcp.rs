@@ -13,7 +13,16 @@ use chartgen::engine::Engine;
 use chartgen::indicator::Indicator;
 use chartgen::indicators;
 use chartgen::renderer;
+#[cfg(feature = "scripting")]
 use chartgen::scripting;
+
+/// `CHARTGEN_SCRIPTING=1` in a build with the `scripting` feature.
+fn scripting_enabled() -> bool {
+    #[cfg(feature = "scripting")]
+    return scripting::enabled();
+    #[cfg(not(feature = "scripting"))]
+    false
+}
 
 pub fn run() {
     let stdin = io::stdin();
@@ -76,7 +85,7 @@ pub fn handle_mcp_request(
 ) -> Value {
     match method {
         "initialize" => handle_initialize(id),
-        "tools/list" => handle_tools_list(id, scripting::enabled()),
+        "tools/list" => handle_tools_list(id, scripting_enabled()),
         "tools/call" => handle_tools_call(id, params, engine, token, push, user),
         "ping" => json!({ "jsonrpc": "2.0", "id": id, "result": {} }),
         _ => json!({
@@ -145,12 +154,13 @@ fn handle_tools_call(
         token,
         push,
         user,
-        scripting::enabled(),
+        scripting_enabled(),
     )
 }
 
 /// Dispatch one tool call. The scripting tools exist only when `scripting`.
 #[allow(clippy::too_many_arguments)]
+#[cfg_attr(not(feature = "scripting"), allow(unused_variables))]
 fn call_tool(
     tool_name: &str,
     id: Option<Value>,
@@ -181,9 +191,13 @@ fn call_tool(
         "list_subscriptions" => tool_list_subscriptions(id, engine, token),
         "subscribe_chart" => tool_subscribe_chart(id, &arguments, push, token),
         "unsubscribe_chart" => tool_unsubscribe_chart(id, &arguments, push, token),
+        #[cfg(feature = "scripting")]
         "register_indicator" if scripting => tool_register_indicator(id, &arguments, user),
+        #[cfg(feature = "scripting")]
         "fork_indicator" if scripting => tool_fork_indicator(id, &arguments),
+        #[cfg(feature = "scripting")]
         "list_my_indicators" if scripting => tool_list_my_indicators(id, user),
+        #[cfg(feature = "scripting")]
         "delete_indicator" if scripting => tool_delete_indicator(id, &arguments, user),
         _ => json!({
             "jsonrpc": "2.0",
@@ -518,8 +532,7 @@ fn compute_panels<'a>(
 ) -> Computed<'a> {
     let (mut computed, mut inds) = (Vec::new(), Vec::new());
     let mut errors = serde_json::Map::new();
-    // One script budget for the whole chart (ADR-0025).
-    scripting::with_chart_budget(|| {
+    let compute = || {
         for (key, ind) in keys.iter().zip(panels) {
             match ind.try_compute(data) {
                 Ok(pr) => {
@@ -531,7 +544,12 @@ fn compute_panels<'a>(
                 }
             }
         }
-    });
+    };
+    // One script budget for the whole chart (ADR-0025).
+    #[cfg(feature = "scripting")]
+    scripting::with_chart_budget(compute);
+    #[cfg(not(feature = "scripting"))]
+    ({ compute })();
     let errors = (!errors.is_empty()).then_some(Value::Object(errors));
     (computed, inds, errors)
 }
@@ -712,12 +730,18 @@ fn no_push_transport(id: Option<Value>) -> Value {
 /// replaces the built-in entry it shadows.
 fn tool_list_indicators(id: Option<Value>, user: Option<&str>) -> Value {
     let reg = indicators::registry();
+    #[cfg(feature = "scripting")]
     let mine: Vec<Value> = user
         .and_then(|u| scripting::persistence::global()?.list(u).ok())
         .unwrap_or_default()
         .iter()
         .map(user_indicator_entry)
         .collect();
+    #[cfg(not(feature = "scripting"))]
+    let mine: Vec<Value> = {
+        let _ = user;
+        Vec::new()
+    };
     let mut indicator_list: Vec<Value> = reg
         .iter()
         .filter(|info| !mine.iter().any(|m| m["name"] == info.name))
@@ -758,6 +782,7 @@ fn tool_list_indicators(id: Option<Value>, user: Option<&str>) -> Value {
 // User indicators: Starlark scripts (ADR-0024, ADR-0025)
 // ---------------------------------------------------------------------------
 
+#[cfg(feature = "scripting")]
 /// `list_indicators` entry for a stored script.
 fn user_indicator_entry(s: &scripting::persistence::StoredScript) -> Value {
     let m = &s.meta;
@@ -779,6 +804,7 @@ fn user_indicator_entry(s: &scripting::persistence::StoredScript) -> Value {
     entry
 }
 
+#[cfg(feature = "scripting")]
 /// The store and user for a scripting tool, or the error response.
 fn scripting_session<'u>(
     id: &Option<Value>,
@@ -802,6 +828,7 @@ fn scripting_session<'u>(
     }
 }
 
+#[cfg(feature = "scripting")]
 fn tool_register_indicator(id: Option<Value>, args: &Value, user: Option<&str>) -> Value {
     let (store, user) = match scripting_session(&id, user, "register_indicator") {
         Ok(s) => s,
@@ -853,6 +880,7 @@ fn tool_register_indicator(id: Option<Value>, args: &Value, user: Option<&str>) 
     )
 }
 
+#[cfg(feature = "scripting")]
 fn tool_fork_indicator(id: Option<Value>, args: &Value) -> Value {
     let name = args
         .get("builtin_name")
@@ -877,6 +905,7 @@ fn tool_fork_indicator(id: Option<Value>, args: &Value) -> Value {
     )
 }
 
+#[cfg(feature = "scripting")]
 fn tool_list_my_indicators(id: Option<Value>, user: Option<&str>) -> Value {
     let (store, user) = match scripting_session(&id, user, "list_my_indicators") {
         Ok(s) => s,
@@ -899,6 +928,7 @@ fn tool_list_my_indicators(id: Option<Value>, user: Option<&str>) -> Value {
     tool_ok(id, json!({ "total": list.len(), "indicators": list }))
 }
 
+#[cfg(feature = "scripting")]
 fn tool_delete_indicator(id: Option<Value>, args: &Value, user: Option<&str>) -> Value {
     let (store, user) = match scripting_session(&id, user, "delete_indicator") {
         Ok(s) => s,
@@ -3881,7 +3911,7 @@ mod tests {
 
 /// Scripted indicators over MCP (ADR-0025): register → list → chart →
 /// delete, per-user isolation, shadowing and per-indicator errors.
-#[cfg(test)]
+#[cfg(all(test, feature = "scripting"))]
 mod scripting_tests {
     use super::*;
 

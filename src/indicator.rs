@@ -97,6 +97,39 @@ pub struct PanelResult {
     pub is_overlay: bool,
 }
 
+/// A failed indicator computation (only user scripts fail, ADR-0025):
+/// the pipeline `step` (`parse`, `static`, `presence`, `dry_run`,
+/// `runtime`), the 1-based source line when known, and a message.
+#[derive(Clone, Debug, PartialEq)]
+pub struct IndicatorError {
+    pub step: &'static str,
+    pub line: Option<usize>,
+    pub message: String,
+}
+
+impl IndicatorError {
+    pub fn new(step: &'static str, line: Option<usize>, message: impl Into<String>) -> Self {
+        Self {
+            step,
+            line,
+            message: message.into(),
+        }
+    }
+
+    pub fn to_json(&self) -> Value {
+        json!({ "step": self.step, "line": self.line, "message": self.message })
+    }
+}
+
+impl std::fmt::Display for IndicatorError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.line {
+            Some(l) => write!(f, "{} error at line {l}: {}", self.step, self.message),
+            None => write!(f, "{} error: {}", self.step, self.message),
+        }
+    }
+}
+
 /// Trait every indicator implements.
 pub trait Indicator {
     #[allow(dead_code)]
@@ -105,7 +138,7 @@ pub trait Indicator {
 
     /// `compute` for indicators that can fail (user scripts, ADR-0025): the
     /// error fails only this indicator, not the chart. Built-ins never fail.
-    fn try_compute(&self, data: &OhlcvData) -> Result<PanelResult, crate::scripting::ScriptError> {
+    fn try_compute(&self, data: &OhlcvData) -> Result<PanelResult, IndicatorError> {
         Ok(self.compute(data))
     }
 

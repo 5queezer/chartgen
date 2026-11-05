@@ -81,8 +81,13 @@ pub fn by_name(name: &str) -> Option<Box<dyn Indicator>> {
 /// `None` user (CLI, stdio MCP, scripting disabled) sees built-ins only.
 /// See ADR-0025.
 pub fn by_name_for(name: &str, user: Option<&str>) -> Option<Box<dyn Indicator>> {
-    user.and_then(|u| crate::scripting::lookup(u, name))
-        .or_else(|| by_name(name))
+    #[cfg(feature = "scripting")]
+    if let Some(ind) = user.and_then(|u| crate::scripting::lookup(u, name)) {
+        return Some(ind);
+    }
+    #[cfg(not(feature = "scripting"))]
+    let _ = user;
+    by_name(name)
 }
 
 /// Check `params` against the indicator's declared schema (`Indicator::params`).

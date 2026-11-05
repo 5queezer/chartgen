@@ -7,5 +7,6 @@ pub mod indicators;
 pub mod mcp_schema;
 pub mod mtf;
 pub mod renderer;
+#[cfg(feature = "scripting")]
 pub mod scripting;
 pub mod trading;

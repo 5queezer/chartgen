@@ -31,11 +31,18 @@ hmac = "0.12"
 hex = "0.4"
 chrono = { version = "0.4", features = ["serde"] }
 async-stream = "0.3"
-starlark = "0.14"
-rusqlite = { version = "0.41", features = ["bundled"] }
-allocative = "0.3"
-anyhow = "1"
-starlark_syntax = "0.14"
+starlark = { version = "0.14", optional = true }
+rusqlite = { version = "0.41", features = ["bundled"], optional = true }
+allocative = { version = "0.3", optional = true }
+anyhow = { version = "1", optional = true }
+starlark_syntax = { version = "0.14", optional = true }
+
+[features]
+default = ["scripting"]
+# User-authored Starlark indicators (ADR-0024, ADR-0025); runtime-gated by
+# CHARTGEN_SCRIPTING=1. `--no-default-features` builds without starlark
+# and rusqlite.
+scripting = ["dep:starlark", "dep:starlark_syntax", "dep:allocative", "dep:anyhow", "dep:rusqlite"]
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
