@@ -424,6 +424,13 @@ sub-hour intervals, and 730 days for 1h and the intervals built from it.
 Each upstream request times out after 10 s, and a paginated Binance fetch
 gives up after 20 s.
 
+Daily and longer Yahoo bars (`1d`, `3d`, `5d`, `1wk`, `1mo`, `3mo`) are
+stamped at 00:00 UTC of the exchange-local date, using the exchange's
+`gmtoffset`. Yahoo itself stamps them at the session open, which for ASX in
+AEDT or NZX falls on the previous UTC day, so a UTC date read from the stamp
+would be one day early. Binance date bars already open at 00:00 UTC. A
+history page's `end_time` is compared against these stamps.
+
 Yahoo has no native 3m, 2h, 4h, 6h, 12h or 3d, so chartgen builds them from
 1m, 1h and 1d bars (Binance serves all of them natively):
 
