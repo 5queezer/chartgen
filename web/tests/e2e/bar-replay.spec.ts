@@ -234,6 +234,27 @@ test.describe("bar replay", () => {
     expect(await drawings(page)).toBe(0);
   });
 
+  test("the Data Window shows the replay bar, never a later one", async ({ bootedApp: page }) => {
+    await page.getByRole("tab", { name: "Data Window" }).click();
+    const dwClose = async () => Number(await page.getByTestId("dw-c").textContent());
+    const liveTime = await page.getByTestId("dw-time").textContent();
+    await startInMiddle(page);
+    // At rest (mouse off the chart) it shows the last bar of the frame.
+    await page.mouse.move(5, 5);
+    await expect(page.getByTestId("dw-time")).not.toHaveText(liveTime!);
+    const frameClose = () =>
+      page.evaluate(
+        () =>
+          (window as unknown as { __chartgenTest: Hook }).__chartgenTest.shownSeries()!.bars.at(-1)! as unknown as {
+            c: number;
+          },
+      );
+    await expect.poll(async () => Math.abs((await dwClose()) - (await frameClose()).c)).toBeLessThan(0.01);
+    // A step moves it on by exactly that bar.
+    await page.keyboard.press("Shift+ArrowRight");
+    await expect.poll(async () => Math.abs((await dwClose()) - (await frameClose()).c)).toBeLessThan(0.01);
+  });
+
   test("missing history shows an empty frame and the failure", async ({ bootedApp: page }) => {
     await startInMiddle(page);
     // 500 1m bars (8 h) end after the cursor (the middle of the 1h view, days
