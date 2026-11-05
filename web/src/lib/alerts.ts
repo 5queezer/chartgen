@@ -266,6 +266,19 @@ export function indicatorReading(
   return level === null ? null : [plot - level];
 }
 
+/**
+ * Both anchors on one bar: `drawingLevels` has no value for it, so it cannot be
+ * alerted on. A point on a future bar may carry only its `dataIndex`.
+ */
+export function isVerticalLine(rec: {
+  points: readonly { timestamp?: number; dataIndex?: number }[];
+}): boolean {
+  const [a, b] = rec.points;
+  if (!a || !b) return false;
+  if (a.timestamp !== undefined && b.timestamp !== undefined) return a.timestamp === b.timestamp;
+  return a.dataIndex !== undefined && a.dataIndex === b.dataIndex;
+}
+
 /** Horizontal tools: their level needs no bars, so they are evaluated off the chart too. */
 export const isHorizontalTool = (name: string): boolean =>
   name === "horizontalStraightLine" || name === "horizontalRayLine";
@@ -289,6 +302,14 @@ export function barIndexOf(axis: TimeAxis, ts: number): number {
     else hi = mid;
   }
   return ts - times[lo]! <= times[hi]! - ts ? lo : hi;
+}
+
+/** Bar index of a drawing point: its time when it has one, as klinecharts draws it. */
+export function pointBarIndex(
+  axis: TimeAxis,
+  p: { timestamp?: number; dataIndex?: number },
+): number | undefined {
+  return p.timestamp !== undefined ? barIndexOf(axis, p.timestamp) : p.dataIndex;
 }
 
 /** How the chart draws: its bars, and whether the price axis is logarithmic. */

@@ -391,6 +391,16 @@ A tool is armed for exactly one drawing: pick it, click the chart to
 place the points, and the tool is released. Pick it again or press `Esc`
 to cancel. Drawings pan and zoom with the chart.
 
+Hold `Ctrl` (`Cmd` on Mac) while placing or dragging a point to invert the
+magnet temporarily: off becomes strong, weak or strong becomes off. The magnet
+button shows the state in effect, and releasing the key restores your setting.
+
+Hold `Shift` while placing or dragging a point of a trend line, ray or extended
+line to snap the line to horizontal, vertical or 45°, whichever is nearest. The
+snap wins over the magnet on the axis it fixes. The 45° is a screen angle at that
+moment, so zooming later changes it. A vertical line has no single price to
+cross, so alerts are not offered on it.
+
 - **Measure tools** take two clicks. Price range shows a vertical arrow
   and `+1,234.50 (+2.31%)`; date range a horizontal arrow and
   `12 bars, 3d 4h`; date and price range a box with both. The band is
@@ -668,7 +678,9 @@ compared with (a value, or a plot).
   shows its symbol at the interval it was created on (otherwise *inactive:
   open AAPL 1h*); horizontal lines and rays are watched for any symbol.
   Deleting the drawing does not delete its alerts: they switch off and read
-  *inactive: drawing deleted* until the drawing is back (undo).
+  *inactive: drawing deleted* until the drawing is back (undo). Alerts are not
+  offered on a vertical line, and those on a line dragged vertical read
+  *inactive: line is vertical* until it no longer is.
 - **Indicators.** Hover an indicator's legend row and click the bell
   (**Add alert on RSI**). For an overlay such as EMA the dialog opens as the
   price crossing its first plot (pick another one, e.g. EMA 200, under

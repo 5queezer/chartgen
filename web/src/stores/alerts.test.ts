@@ -573,6 +573,66 @@ describe("drawing alerts", () => {
     expect(byId(a.id)).not.toHaveProperty("note");
   });
 
+  it("a line dragged vertical disables its alerts with a note, until it stops being vertical", async () => {
+    const vertical = {
+      ...trendLine,
+      points: [trendLine.points[0]!, { ...trendLine.points[1]!, timestamp: trendLine.points[0]!.timestamp }],
+    };
+    const data = stubStorage({ [DRAWINGS_KEY]: JSON.stringify([trendLine]) });
+    const s = await load();
+    const a = s.addAlert(drawingAlert)!;
+    const paused = s.addAlert(drawingAlert)!;
+    s.setAlertActive(paused.id, false);
+    const byId = (id: string) => s.alerts().find((x) => x.id === id)!;
+
+    data.set(DRAWINGS_KEY, JSON.stringify([vertical]));
+    s.syncDrawingAlerts("AAPL", ["d1"], ["d1"]);
+    expect(byId(a.id)).toMatchObject({ active: false, note: s.LINE_VERTICAL });
+    expect(s.inactiveReason(byId(a.id))).toBe(s.LINE_VERTICAL);
+    expect(byId(paused.id)).not.toHaveProperty("note");
+
+    // Resuming or editing while it is vertical keeps it off, with the note.
+    s.setAlertActive(a.id, true);
+    expect(byId(a.id)).toMatchObject({ active: false, note: s.LINE_VERTICAL });
+    s.updateAlert(a.id, { condition: "crossing" });
+    expect(byId(a.id)).toMatchObject({ active: false, note: s.LINE_VERTICAL });
+    s.setAlertActive(paused.id, true);
+    expect(byId(paused.id)).toMatchObject({ active: false, note: s.LINE_VERTICAL });
+    s.setAlertActive(paused.id, false);
+
+    // Deleted while vertical says so, and undo brings the vertical note back.
+    s.syncDrawingAlerts("AAPL", []);
+    expect(byId(a.id)).toMatchObject({ active: false, note: s.DRAWING_DELETED });
+    s.syncDrawingAlerts("AAPL", ["d1"], ["d1"]);
+    expect(byId(a.id)).toMatchObject({ active: false, note: s.LINE_VERTICAL });
+
+    // No longer vertical: on again, and the paused one stays paused.
+    data.set(DRAWINGS_KEY, JSON.stringify([trendLine]));
+    s.syncDrawingAlerts("AAPL", ["d1"], []);
+    expect(byId(a.id).active).toBe(true);
+    expect(byId(a.id)).not.toHaveProperty("note");
+    expect(byId(paused.id).active).toBe(false);
+  });
+
+  it("passing through vertical does not re-arm a fired every-time alert", async () => {
+    stubStorage({ [DRAWINGS_KEY]: JSON.stringify([hline]) });
+    const s = await load();
+    s.addAlert({ ...hlineAlert, condition: "greater", trigger: "every" });
+    const level = hline.points[0]!.value;
+    expect(s.processPrice("AAPL", level + 1)).toHaveLength(1);
+    expect(s.alerts()[0]!.disarmed).toBe(true);
+
+    s.syncDrawingAlerts("AAPL", ["h1"], ["h1"]);
+    expect(s.alerts()[0]).toMatchObject({ active: false, note: s.LINE_VERTICAL, disarmed: true });
+    s.syncDrawingAlerts("AAPL", ["h1"], []);
+    expect(s.alerts()[0]).toMatchObject({ active: true, disarmed: true });
+
+    // Still above the level: no second firing until the price has been back below.
+    expect(s.processPrice("AAPL", level + 2)).toEqual([]);
+    expect(s.processPrice("AAPL", level - 1)).toEqual([]);
+    expect(s.processPrice("AAPL", level + 1)).toHaveLength(1);
+  });
+
   it("a paused alert on a deleted drawing gets the note when resumed", async () => {
     stubStorage();
     const s = await load();

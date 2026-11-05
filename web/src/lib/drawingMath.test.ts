@@ -10,6 +10,7 @@ import {
   fibExtensionLevels,
   formatDuration,
   pitchforkLines,
+  snapToAngle,
   positionBars,
   positionLabels,
   positionReward,
@@ -169,5 +170,144 @@ describe("positions", () => {
     expect(clampPosition("short", [100, 105, 102], 1)).toEqual([100, 100, 102]);
     expect(clampPosition("short", [100, 95, 99], 2)).toEqual([100, 95, 100]);
     expect(clampPosition("short", [90, 95, 102], 0)).toEqual([95, 95, 102]);
+  });
+});
+
+describe("snapToAngle", () => {
+  // 10 px per bar; value = 1000 - y, or value = y on an inverted axis.
+  const axis = (inverted = false) => ({
+    toPx: (p: { dataIndex?: number; value?: number }) => ({
+      x: p.dataIndex! * 10,
+      y: inverted ? p.value! : 1000 - p.value!,
+    }),
+    toValue: (y: number) => (inverted ? y : 1000 - y),
+  });
+  const anchor = { timestamp: 5000, dataIndex: 50, value: 500 }; // at x=500, y=500
+
+  /** The mouse 100 px away at an angle, counter-clockwise on screen; the point on the bar under it. */
+  const snap = (deg: number, inverted = false) => {
+    const { toPx, toValue } = axis(inverted);
+    const rad = (deg * Math.PI) / 180;
+    const mouse = { x: 500 + 100 * Math.cos(rad), y: 500 - 100 * Math.sin(rad) };
+    const dataIndex = Math.round(mouse.x / 10);
+    const moving = { timestamp: dataIndex * 100, dataIndex, value: toValue(mouse.y) };
+    return snapToAngle(anchor, moving, mouse, toPx, toValue);
+  };
+
+  it.each([0, 180, 10, -10, 170, 190])("%d degrees is horizontal: the anchor's value, its own bar", (deg) => {
+    const out = snap(deg);
+    expect(out.value).toBe(anchor.value);
+    expect(out.dataIndex).not.toBe(anchor.dataIndex);
+  });
+
+  it.each([90, 270, 80, 100, 260, 280])("%d degrees is vertical: the anchor's bar, its own value", (deg) => {
+    const out = snap(deg);
+    expect(out.timestamp).toBe(anchor.timestamp);
+    expect(out.dataIndex).toBe(anchor.dataIndex);
+    expect(out.value).not.toBe(anchor.value);
+  });
+
+  it.each([
+    [45, 1, -1],
+    [135, -1, -1],
+    [225, -1, 1],
+    [315, 1, 1],
+  ])("%d degrees is diagonal: |dy| is the |dx| of the bar", (deg, sx, sy) => {
+    const px = axis().toPx(snap(deg));
+    const dx = px.x - 500;
+    expect(Math.sign(dx)).toBe(sx);
+    expect(px.y - 500).toBeCloseTo(sy * Math.abs(dx));
+  });
+
+  it("switches at the 22.5 degree boundaries", () => {
+    expect(snap(22.4).value).toBe(anchor.value);
+    expect(snap(22.6).value).not.toBe(anchor.value);
+    expect(snap(22.6).dataIndex).not.toBe(anchor.dataIndex);
+    expect(snap(67.4).dataIndex).not.toBe(anchor.dataIndex);
+    expect(snap(67.6).dataIndex).toBe(anchor.dataIndex);
+    expect(snap(157.4).value).not.toBe(anchor.value);
+    expect(snap(157.6).value).toBe(anchor.value);
+  });
+
+  it("a vertical takes its value from the mouse, through the magnet", () => {
+    const { toPx, toValue } = axis();
+    const moving = { timestamp: 5300, dataIndex: 53, value: 777 }; // magnet read bar 53
+    const mouse = { x: 520, y: 300 };
+    expect(snapToAngle(anchor, moving, mouse, toPx, toValue).value).toBe(700);
+    const pulled = snapToAngle(anchor, moving, mouse, toPx, toValue, (v) => v + 1);
+    expect(pulled).toEqual({ timestamp: 5000, dataIndex: 50, value: 701 });
+  });
+
+  it("the magnet does not act on a horizontal or a diagonal", () => {
+    const { toPx, toValue } = axis();
+    const magnet = () => 1;
+    const level = { timestamp: 7000, dataIndex: 70, value: 450 };
+    expect(snapToAngle(anchor, level, { x: 700, y: 550 }, toPx, toValue, magnet).value).toBe(500);
+    const slope = { timestamp: 6000, dataIndex: 60, value: 450 };
+    expect(snapToAngle(anchor, slope, { x: 600, y: 600 }, toPx, toValue, magnet).value).toBe(400);
+  });
+
+  it("keeps the point's value when the axis has none to give", () => {
+    const { toPx } = axis();
+    const moving = { timestamp: 6000, dataIndex: 60, value: 450 };
+    const none = () => undefined;
+    expect(snapToAngle(anchor, moving, { x: 600, y: 600 }, toPx, none).value).toBe(450);
+    expect(snapToAngle(anchor, moving, { x: 510, y: 300 }, toPx, none).value).toBe(450);
+  });
+
+  it("does not snap a point without a bar", () => {
+    const { toPx, toValue } = axis();
+    const moving = { value: 450 };
+    expect(snapToAngle(anchor, moving, { x: 600, y: 600 }, toPx, toValue)).toBe(moving);
+  });
+
+  it.each([NaN, Infinity, -Infinity])("does not snap against an anchor at pixel y %d", (y) => {
+    const { toPx, toValue } = axis();
+    const moving = { timestamp: 6000, dataIndex: 60, value: 450 };
+    const px = (p: { dataIndex?: number; value?: number }) =>
+      p === anchor ? { x: 500, y } : toPx(p);
+    expect(snapToAngle(anchor, moving, { x: 600, y: 600 }, px, toValue)).toBe(moving);
+  });
+
+  it("the mouse on the anchor gives a finite zero-length line", () => {
+    const { toPx, toValue } = axis();
+    const out = snapToAngle(anchor, { ...anchor }, { x: 500, y: 500 }, toPx, toValue);
+    expect(out).toEqual(anchor);
+  });
+
+  it("a diagonal whose bar is the anchor's gives a finite zero-length line", () => {
+    const { toPx, toValue } = axis();
+    const out = snapToAngle(anchor, { ...anchor, value: 503 }, { x: 503, y: 497 }, toPx, toValue);
+    expect(out.value).toBe(anchor.value);
+    expect(out.dataIndex).toBe(anchor.dataIndex);
+  });
+
+  it("keeps the screen direction on an inverted axis", () => {
+    const out = snap(45, true);
+    const px = axis(true).toPx(out);
+    expect(px.y).toBeLessThan(500);
+    expect(px.y - 500).toBeCloseTo(-(px.x - 500));
+    expect(out.value).toBeLessThan(anchor.value);
+    expect(snap(0, true).value).toBe(anchor.value);
+    expect(snap(90, true).dataIndex).toBe(anchor.dataIndex);
+  });
+
+  it("derives a diagonal through the axis, so a log scale stays 45 degrees on screen", () => {
+    const toPx = (p: { dataIndex?: number; value?: number }) => ({
+      x: p.dataIndex! * 10,
+      y: 1000 - 100 * Math.log(p.value!),
+    });
+    const toValue = (y: number) => Math.exp((1000 - y) / 100);
+    const logAnchor = { dataIndex: 50, value: 100 };
+    const a = toPx(logAnchor);
+    const out = snapToAngle(
+      logAnchor,
+      { dataIndex: 55, value: 1 },
+      { x: a.x + 50, y: a.y - 50 },
+      toPx,
+      toValue,
+    );
+    expect(toPx(out).y).toBeCloseTo(a.y - 50);
+    expect(out.value).toBeCloseTo(100 * Math.E ** 0.5);
   });
 });

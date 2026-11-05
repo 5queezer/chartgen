@@ -22,11 +22,14 @@ import {
   registerOverlay,
   type Chart as KChart,
   type OverlayCreate,
+  type Overlay,
   type OverlayEvent,
+  type Point,
 } from "klinecharts";
 
-import { isDrawingAlertTool } from "../lib/alerts";
+import { isDrawingAlertTool, isVerticalLine, pointBarIndex } from "../lib/alerts";
 import { isTypingContext, undoRedoKey } from "../lib/keys";
+import { effectiveMagnet, magnetValue, type Magnet } from "../lib/magnet";
 import { syncDrawingAlerts } from "../stores/alerts";
 import { createHistory } from "../stores/drawingHistory";
 import {
@@ -47,7 +50,7 @@ import { openAlertDialog } from "./AlertDialog";
 import { DrawingStyleBar } from "./DrawingStyleBar";
 import { overlayLabels, setOverlayAxis, setPositionSize } from "./drawingOverlays";
 import { ToolGroup } from "./ToolGroup";
-import { positionReward } from "../lib/drawingMath";
+import { positionReward, snapToAngle, type Px } from "../lib/drawingMath";
 import { PALETTES } from "../lib/theme";
 import { theme } from "../stores/layout";
 
@@ -129,8 +132,6 @@ registerOverlay({
   },
 });
 
-type Magnet ="normal" | "weak_magnet" | "strong_magnet";
-
 interface ToolDef {
   name: DrawingName;
   label: string;
@@ -148,6 +149,8 @@ const RECT_STYLES = {
 };
 
 const DEFAULT_TEXT = "Text";
+/** Two-point lines that Shift snaps to horizontal, vertical or 45°. */
+const SNAP_TOOLS: ReadonlySet<string> = new Set(["segment", "rayLine", "straightLine"]);
 
 const svgProps = {
   width: 20,
@@ -461,6 +464,9 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
   // ---------------------------------------------------------------------
   const [lastTool, setLastTool] = createSignal(loadLast());
   const [magnet, setMagnet] = createSignal<Magnet>("normal");
+  // Ctrl/Cmd held inverts the magnet until release; `magnet` stays the user's choice.
+  const [invertMagnet, setInvertMagnet] = createSignal(false);
+  const magnetMode = () => effectiveMagnet(magnet(), invertMagnet());
   const [crosshair, setCrosshair] = createSignal(true);
   const [lockAll, setLockAll] = createSignal(false);
   const [hideAll, setHideAll] = createSignal(false);
@@ -509,6 +515,12 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
   // klinecharts fires an overlay's onRightClick on mousedown, before the
   // browser's contextmenu event; the flag lets the chart menu stand down.
   let rightClickHit = false;
+  // klinecharts passes no modifier keys to overlay callbacks.
+  let shiftHeld = false;
+  // The drawing under a press: `refresh` leaves it alone until the release commits it.
+  let pressedId: string | null = null;
+  // The bars that press is on.
+  let pressedAxis: TimeAxis | null = null;
 
   const axis = (): TimeAxis | null =>
     timeAxisOf(props.chart?.getDataList().map((d) => d.timestamp) ?? []);
@@ -550,8 +562,12 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
     pendingSave = null;
     if (!p) return;
     setSaveFailed(!saveDrawings(p.symbol, p.records));
-    // Alerts on a drawing that is gone are switched off (ADR-0034).
-    syncDrawingAlerts(p.symbol, p.records.map((r) => r.id));
+    // Alerts on a drawing that is gone or vertical are switched off (ADR-0034).
+    syncDrawingAlerts(
+      p.symbol,
+      p.records.map((r) => r.id),
+      p.records.filter(isVerticalLine).map((r) => r.id),
+    );
   };
   const persist = () => {
     pendingSave = { symbol: props.symbol, records: current };
@@ -620,6 +636,36 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
     return { points, off };
   };
 
+  /** Shift on a line: its moving point snaps to horizontal, vertical or 45° from the other. */
+  const snapMovingPoint = (overlay: Overlay, index: number, mouse: Px) => {
+    const chart = props.chart;
+    const moving = overlay.points[index];
+    const anchor = overlay.points[1 - index];
+    if (!chart || !moving || !anchor) return;
+    const paneId = overlay.paneId;
+    const toPx = (p: Partial<Point>) => chart.convertToPixel(p, { paneId }) as Px;
+    Object.assign(
+      moving,
+      snapToAngle(
+        anchor,
+        moving,
+        mouse,
+        toPx,
+        (y) => (chart.convertFromPixel([{ y }], { paneId }) as Partial<Point>[])[0]?.value,
+        (value) => {
+          // The anchor's bar; none on a future bar. As in klinecharts, the magnet only
+          // acts on the price pane.
+          const ax = axis();
+          const i = ax ? pointBarIndex(ax, anchor) : undefined;
+          const bar = paneId === "candle_pane" && i !== undefined ? chart.getDataList()[i] : undefined;
+          return bar
+            ? magnetValue(value, bar, overlay.mode as never, overlay.modeSensitivity, (v) => toPx({ value: v }).y)
+            : value;
+        },
+      ),
+    );
+  };
+
   const handlers = (): Partial<OverlayCreate> => ({
     onDrawEnd: ({ overlay }: OverlayEvent) => {
       armedId = null;
@@ -629,6 +675,37 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
       commit();
       // onSelected fires before the drawing is registered, so highlight now.
       if (selectedId() === overlay.id) highlight(overlay.id, true);
+      return false;
+    },
+    onPressedMoveStart: ({ overlay }: OverlayEvent) => {
+      pressedId = overlay.id;
+      pressedAxis = axis();
+      return false;
+    },
+    // Fires after klinecharts has set the moving point, also on the placing click.
+    onDrawing: ({ overlay, x, y }: OverlayEvent) => {
+      if (shiftHeld && SNAP_TOOLS.has(overlay.name) && overlay.points.length === 2 && x !== undefined && y !== undefined) {
+        snapMovingPoint(overlay, 1, { x, y });
+      }
+      return false;
+    },
+    // Fires before klinecharts moves the point, and the only hook after the move
+    // is the template's perform one, which these lines leave null: borrow it for
+    // this move. Dragging the body stays untouched.
+    onPressedMoving: ({ overlay, figureKey, figureIndex, x, y }: OverlayEvent) => {
+      if (
+        shiftHeld &&
+        SNAP_TOOLS.has(overlay.name) &&
+        figureIndex !== undefined &&
+        figureKey === `overlay_figure_point_${figureIndex}` &&
+        x !== undefined &&
+        y !== undefined
+      ) {
+        overlay.performEventPressedMove = () => {
+          overlay.performEventPressedMove = null;
+          snapMovingPoint(overlay, figureIndex, { x, y });
+        };
+      }
       return false;
     },
     onPressedMoveEnd: () => {
@@ -698,7 +775,7 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
       extendData: rec.extendData,
       lock: off || rec.lock,
       visible: !off && rec.visible,
-      mode: magnet() as never,
+      mode: untrack(magnetMode) as never,
       ...handlers(),
     });
     if (typeof id !== "string") return;
@@ -709,6 +786,7 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
 
   /** Replace everything on the chart with `records` (restore / undo). */
   const rebuild = (records: DrawingRecord[]) => {
+    pressedId = null;
     cancelArmed();
     for (const id of [...ids]) props.chart?.removeOverlay(id);
     ids = [];
@@ -743,9 +821,13 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
     }
     const ax = axis();
     if (ax === null) return;
+    // New bars under a press leave the bar indices of its future points meaning other
+    // times, so the pressed drawing is placed too, once; the press goes on with these bars.
+    const sameBars = pressedAxis?.firstTs === ax.firstTs && pressedAxis.intervalMs === ax.intervalMs;
+    pressedAxis = ax;
     for (const id of ids) {
       const rec = canon.get(id);
-      if (!rec) continue;
+      if (!rec || (id === pressedId && sameBars)) continue;
       const { points, off } = place(rec, ax);
       if (off) offRange.add(id);
       else offRange.delete(id);
@@ -810,7 +892,7 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
       name,
       extendData: name === "cgText" ? DEFAULT_TEXT : undefined,
       styles: name === "cgRect" ? (RECT_STYLES as never) : undefined,
-      mode: magnet() as never,
+      mode: untrack(magnetMode) as never,
       ...handlers(),
     });
     if (typeof id === "string") {
@@ -841,9 +923,21 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
           ? "strong_magnet"
           : "normal";
     setMagnet(next);
-    for (const id of ids) {
-      props.chart?.overrideOverlay({ id, mode: next as never });
+    applyMagnet();
+  };
+
+  /** Push the effective magnet to every drawing, the one being drawn included. */
+  function applyMagnet() {
+    const mode = magnetMode();
+    for (const id of armedId === null ? ids : [...ids, armedId]) {
+      props.chart?.overrideOverlay({ id, mode: mode as never });
     }
+  }
+
+  const setInverted = (on: boolean) => {
+    if (on === invertMagnet()) return;
+    setInvertMagnet(on);
+    applyMagnet();
   };
 
   const toggleCrosshair = () => {
@@ -1027,6 +1121,7 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
                 name: o.name,
                 lock: o.lock,
                 visible: o.visible,
+                mode: o.mode,
                 offRange: offRange.has(id),
                 paneId: o.paneId,
                 styles: o.styles,
@@ -1041,9 +1136,11 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
           : [];
       });
     w.__chartgenPositionSize = () => (props.chart ? readPositionSize(props.chart) : null);
+    w.__chartgenShiftHeld = () => shiftHeld;
     onCleanup(() => {
       delete w.__chartgenDrawings;
       delete w.__chartgenPositionSize;
+      delete w.__chartgenShiftHeld;
     });
   }
 
@@ -1139,6 +1236,44 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
   window.addEventListener("keydown", onKey);
   onCleanup(() => window.removeEventListener("keydown", onKey));
 
+  // Modifier state is read from every key and mouse event (capture, so before
+  // klinecharts sees the move). That covers a key pressed before the chart had
+  // focus and makes auto-repeat a no-op. Blur clears it: keyup never comes.
+  const syncModifiers = (e: KeyboardEvent | MouseEvent) => {
+    const ctrl = e.ctrlKey || e.metaKey;
+    if ((ctrl || e.shiftKey) && e instanceof KeyboardEvent && isTypingContext(e)) return;
+    setInverted(ctrl);
+    shiftHeld = e.shiftKey;
+  };
+  const releaseModifiers = () => {
+    setInverted(false);
+    shiftHeld = false;
+  };
+  const modifierEvents = ["keydown", "keyup", "mousemove", "mousedown"] as const;
+  for (const type of modifierEvents) window.addEventListener(type, syncModifiers, true);
+  window.addEventListener("blur", releaseModifiers);
+  document.addEventListener("visibilitychange", releaseModifiers);
+  onCleanup(() => {
+    for (const type of modifierEvents) window.removeEventListener(type, syncModifiers, true);
+    window.removeEventListener("blur", releaseModifiers);
+    document.removeEventListener("visibilitychange", releaseModifiers);
+  });
+
+  // Any left release ends a press. Not onPressedMoveEnd: klinecharts only fires it when
+  // the release lands on a pane. Capture, so this runs before it, in the same event. The
+  // window's blur is not: an element's blur passes through capture too, and pressing on
+  // the chart takes the focus from whatever had it.
+  const endPress = (e: Event) => {
+    if (!(e instanceof MouseEvent) || e.button === 0) pressedId = null;
+  };
+  const endPressEvents = ["mouseup", "touchend", "touchcancel"] as const;
+  for (const type of endPressEvents) window.addEventListener(type, endPress, true);
+  window.addEventListener("blur", endPress);
+  onCleanup(() => {
+    for (const type of endPressEvents) window.removeEventListener(type, endPress, true);
+    window.removeEventListener("blur", endPress);
+  });
+
   const resetRightClick = () => {
     rightClickHit = false;
   };
@@ -1172,9 +1307,9 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
   };
 
   const magnetLabel = () =>
-    magnet() === "normal"
+    magnetMode() === "normal"
       ? "Magnet: off"
-      : magnet() === "weak_magnet"
+      : magnetMode() === "weak_magnet"
         ? "Magnet: weak"
         : "Magnet: strong";
 
@@ -1236,15 +1371,15 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
         class={btnClass}
         aria-label={magnetLabel()}
         title={`${magnetLabel()} (click to cycle)`}
-        aria-pressed={magnet() !== "normal"}
+        aria-pressed={magnetMode() !== "normal"}
         onClick={cycleMagnet}
       >
         <svg {...svgProps}>
           <path d="M6 3v8a6 6 0 0 0 12 0V3h-4v8a2 2 0 0 1-4 0V3z" />
         </svg>
-        <Show when={magnet() !== "normal"}>
+        <Show when={magnetMode() !== "normal"}>
           <span class="absolute bottom-0.5 right-0.5 text-[9px] leading-none font-semibold">
-            {magnet() === "weak_magnet" ? "W" : "S"}
+            {magnetMode() === "weak_magnet" ? "W" : "S"}
           </span>
         </Show>
       </button>
@@ -1332,7 +1467,7 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
             </button>
             <Show when={canon.get(m().id)?.name}>
               {(name) => (
-                <Show when={isDrawingAlertTool(name())}>
+                <Show when={isDrawingAlertTool(name()) && !isVerticalLine(canon.get(m().id) ?? { points: [] })}>
                   <button type="button" role="menuitem" class={menuItemClass} onClick={() => menuAction("alert")}>
                     Add alert on {DRAWING_LABELS[name()]}…
                   </button>

@@ -82,13 +82,13 @@ Status legend:
 
 | Feature | TradingView | chartgen | Notes / links |
 |---|---|---|---|
-| Trend line, ray, extended line | ✅ | ✅ | [Drawing tools](/chartgen/guides/web/#drawing-tools) |
+| Trend line, ray, extended line | ✅ | ✅ | Hold `Shift` to snap a line to horizontal, vertical or 45°. [Drawing tools](/chartgen/guides/web/#drawing-tools) |
 | Horizontal line and ray, vertical line | ✅ | ✅ | |
 | Parallel channel | ✅ | ✅ | |
 | Fib retracement | ✅ | ✅ | |
 | Rectangle | ✅ | ✅ | |
 | Text annotation, price label | ✅ | ✅ | |
-| Magnet (off, weak, strong), lock all, hide all, remove all | ✅ | ✅ | |
+| Magnet (off, weak, strong), lock all, hide all, remove all | ✅ | ✅ | Hold `Ctrl`/`Cmd` to invert the magnet temporarily. |
 | Undo and redo | ✅ | ◐ | `Ctrl+Z` undoes, `Ctrl+Shift+Z` / `Ctrl+Y` redoes, 100 steps. Drawings only; resets on symbol switch. [Drawing tools](/chartgen/guides/web/#drawing-tools) |
 | Per-drawing styling (color, width, line style) | ✅ | ✅ | Floating style bar; fill color for the rectangle and the measure bands, text color/size, and the entry line color of positions. Missing vs TradingView: style templates, extend-left/right and arrow options, text bold/italic/background, per-timeframe visibility. [Drawing tools](/chartgen/guides/web/#drawing-tools) |
 | Measure tools (price range, date range, date and price range) | ✅ | ✅ | No volume sum. [Drawing tools](/chartgen/guides/web/#drawing-tools) |

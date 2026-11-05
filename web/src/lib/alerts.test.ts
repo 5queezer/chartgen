@@ -8,6 +8,8 @@ import {
   fires,
   indicatorReading,
   isDrawingAlertTool,
+  isVerticalLine,
+  pointBarIndex,
   rearmedReading,
   type Alert,
   type AlertSource,
@@ -177,6 +179,44 @@ describe("drawingLevels (ADR-0034)", () => {
   it("a vertical line has no value", () => {
     const rec = { name: "straightLine" as const, points: [p(5 * H, 100), p(5 * H, 200)] };
     expect(drawingLevels(rec, 5 * H, flat)).toEqual([]);
+  });
+
+  it.each(["segment", "rayLine", "straightLine"] as const)(
+    "a %s with both points on one bar reads nothing and never fires",
+    (name) => {
+      for (const points of [
+        [p(5 * H, 100), p(5 * H, 200)],
+        [p(5 * H, 100), p(5 * H, 100)],
+      ]) {
+        for (const view of [flat, { ...flat, log: true }]) {
+          const cur = drawingLevels({ name, points }, 5 * H, view);
+          expect(cur).toEqual([]);
+          for (const condition of ["crossing", "greater", "less"] as const) {
+            expect(fires(condition, null, cur)).toBe(false);
+            expect(fires(condition, [1], cur)).toBe(false);
+          }
+        }
+      }
+    },
+  );
+
+  it("pointBarIndex: exact from the point, a time over an index, nothing without either", () => {
+    expect(pointBarIndex(flat.axis, { timestamp: 10 * H })).toBe(10);
+    expect(pointBarIndex(flat.axis, { timestamp: 10 * H, dataIndex: 1 })).toBe(10);
+    expect(pointBarIndex(flat.axis, { dataIndex: 3 })).toBe(3);
+    expect(pointBarIndex(flat.axis, { dataIndex: 900 })).toBe(900);
+    expect(pointBarIndex(flat.axis, {})).toBeUndefined();
+  });
+
+  it("isVerticalLine: both anchors on one bar, on a future bar too", () => {
+    expect(isVerticalLine({ points: [p(5 * H, 100), p(5 * H, 200)] })).toBe(true);
+    expect(isVerticalLine({ points: [p(5 * H, 100), p(6 * H, 200)] })).toBe(false);
+    expect(isVerticalLine({ points: [p(5 * H, 100)] })).toBe(false);
+    expect(isVerticalLine({ points: [] })).toBe(false);
+    expect(isVerticalLine({ points: [{ dataIndex: 900 }, { dataIndex: 900 }] })).toBe(true);
+    expect(isVerticalLine({ points: [{ dataIndex: 900 }, { dataIndex: 901 }] })).toBe(false);
+    expect(isVerticalLine({ points: [{ timestamp: 5 * H, dataIndex: 900 }, { dataIndex: 900 }] })).toBe(true);
+    expect(isVerticalLine({ points: [{}, {}] })).toBe(false);
   });
 
   it("a ray only runs from its start towards its second point", () => {
