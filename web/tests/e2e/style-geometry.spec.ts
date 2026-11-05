@@ -156,9 +156,9 @@ test.describe("geometry colors in the Style tab", () => {
     const slider = page.getByLabel("Opacity");
     await expect(slider).toBeVisible();
     await slider.fill("40");
-    await expect(page.getByText("40%")).toBeVisible();
+    await expect(slider.locator("xpath=..").getByText("40%", { exact: true })).toBeVisible();
     await slider.fill("60");
-    await expect(page.getByText("60%")).toBeVisible();
+    await expect(slider.locator("xpath=..").getByText("60%", { exact: true })).toBeVisible();
     await page.getByLabel("Color #f23645").click();
     await expect(slider).toBeVisible();
     await page.keyboard.press("Escape");
