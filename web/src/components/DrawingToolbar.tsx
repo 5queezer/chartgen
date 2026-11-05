@@ -70,6 +70,24 @@ registerOverlay({
   },
 });
 
+// klinecharts' horizontalRayLine takes two clicks and points toward the
+// second one. TradingView places it with one click, extending right.
+registerOverlay({
+  name: "horizontalRayLine",
+  totalStep: 2,
+  needDefaultPointFigure: true,
+  needDefaultXAxisFigure: true,
+  needDefaultYAxisFigure: true,
+  createPointFigures: ({ coordinates, bounding }) => {
+    const a = coordinates[0];
+    if (!a) return [];
+    return {
+      type: "line",
+      attrs: { coordinates: [a, { x: bounding.width, y: a.y }] },
+    };
+  },
+});
+
 // klinecharts' simpleAnnotation ignores all mouse events, so it could be
 // neither selected nor edited. This label can; its text is `extendData`.
 registerOverlay({
@@ -518,9 +536,15 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
   const liveStyles = (rec: DrawingRecord, selected: boolean) => {
     const own = overlayStyles(rec.name, rec.style, selected);
     const base = (rec.styles ?? {}) as Record<string, Record<string, unknown>>;
+    // Per-tool defaults first, so older records without stored styles
+    // still get them on restore.
+    const dflt = (rec.name === "cgRect" ? RECT_STYLES : {}) as Record<
+      string,
+      Record<string, unknown>
+    >;
     return {
       ...own,
-      polygon: { ...base.polygon, ...own.polygon },
+      polygon: { ...dflt.polygon, ...base.polygon, ...own.polygon },
     };
   };
 
@@ -838,6 +862,9 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
                 lock: o.lock,
                 visible: o.visible,
                 offRange: offRange.has(id),
+                paneId: o.paneId,
+                styles: o.styles,
+                points: o.points,
               },
             ]
           : [];
@@ -852,6 +879,45 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
     const stop = (e: Event) => e.preventDefault();
     dom.addEventListener("contextmenu", stop);
     onCleanup(() => dom.removeEventListener("contextmenu", stop));
+  });
+
+  // klinecharts ignores the pointer in any pane but the one a drawing was
+  // started in, so a second click over an indicator pane stalls the
+  // drawing. Clamp the pointer into the start pane instead.
+  let pinning = false;
+  const pinToStartPane = (e: MouseEvent) => {
+    const chart = props.chart;
+    if (pinning || armedId === null || !chart) return;
+    if (!(e.target instanceof Node) || !chart.getDom()?.contains(e.target)) return;
+    const o = chart.getOverlayById(armedId) as unknown as {
+      paneId: string;
+      currentStep: number;
+    } | null;
+    if (!o || o.currentStep < 2) return;
+    const r = chart.getDom(o.paneId, "main" as never)?.getBoundingClientRect();
+    if (!r || (e.clientY >= r.top && e.clientY <= r.bottom)) return;
+    e.stopImmediatePropagation();
+    pinning = true;
+    try {
+      e.target.dispatchEvent(
+        new MouseEvent(e.type, {
+          bubbles: true,
+          cancelable: true,
+          view: window,
+          button: e.button,
+          buttons: e.buttons,
+          clientX: e.clientX,
+          clientY: Math.min(Math.max(e.clientY, r.top + 4), r.bottom - 4),
+        }),
+      );
+    } finally {
+      pinning = false;
+    }
+  };
+  const pinEvents = ["mousemove", "mousedown", "mouseup", "click"] as const;
+  for (const type of pinEvents) document.addEventListener(type, pinToStartPane, true);
+  onCleanup(() => {
+    for (const type of pinEvents) document.removeEventListener(type, pinToStartPane, true);
   });
 
   const onKey = (e: KeyboardEvent) => {

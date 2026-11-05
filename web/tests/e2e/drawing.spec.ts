@@ -48,6 +48,9 @@ const overlays = (page: Page) =>
             lock: boolean;
             visible: boolean;
             offRange: boolean;
+            paneId: string;
+            styles: { polygon?: Record<string, unknown> } | null;
+            points: { timestamp?: number; value?: number }[];
           }[];
         }
       ).__chartgenDrawings(),
@@ -67,6 +70,65 @@ async function drawTrendLine(page: Page): Promise<void> {
 }
 
 test.describe("drawing tools", () => {
+  test("rectangle keeps its translucent fill and border after a reload", async ({
+    bootedApp: page,
+  }) => {
+    await page.getByRole("button", { name: "Rectangle" }).click();
+    await clickAt(page, A);
+    await clickAt(page, B);
+    await expect.poll(() => overlays(page)).toHaveLength(1);
+    const polygon = async () => (await overlays(page))[0]?.styles?.polygon;
+    const fresh = await polygon();
+    expect(fresh).toMatchObject({
+      style: "stroke_fill",
+      color: "rgba(41, 98, 255, 0.15)",
+      borderColor: "#2962ff",
+    });
+
+    // Records saved without styles (older versions) must get the defaults too.
+    await page.evaluate((k) => {
+      const recs = JSON.parse(localStorage.getItem(k) ?? "[]") as Record<string, unknown>[];
+      for (const r of recs) delete r.styles;
+      localStorage.setItem(k, JSON.stringify(recs));
+    }, KEY);
+    await reloadApp(page);
+    await expect.poll(() => overlays(page)).toHaveLength(1);
+    expect(await polygon()).toMatchObject({
+      style: "stroke_fill",
+      color: "rgba(41, 98, 255, 0.15)",
+      borderColor: "#2962ff",
+    });
+  });
+
+  test("horizontal ray: one click places it", async ({ bootedApp: page }) => {
+    await page.getByRole("button", { name: "Horizontal ray" }).click();
+    await clickAt(page, A);
+    await expect.poll(() => overlays(page)).toHaveLength(1);
+    const [o] = await overlays(page);
+    expect(o?.points).toHaveLength(1);
+    await expect(
+      page.getByRole("button", { name: "Horizontal ray" }),
+    ).toHaveAttribute("aria-pressed", "false");
+    expect(await stored(page)).toHaveLength(1);
+  });
+
+  test("a drawing started in the price pane stays there", async ({
+    bootedApp: page,
+  }) => {
+    const hdr = await page
+      .locator(".pane-header", { hasText: "RSI" })
+      .first()
+      .boundingBox();
+    const box = await host(page).boundingBox();
+    if (!hdr || !box) throw new Error("RSI pane not laid out");
+    const inRsi = { x: B.x, y: hdr.y - box.y + 40 };
+    await page.getByRole("button", { name: "Fib retracement" }).click();
+    await clickAt(page, A);
+    await clickAt(page, inRsi);
+    await expect.poll(() => overlays(page)).toHaveLength(1);
+    expect((await overlays(page))[0]?.paneId).toBe("candle_pane");
+  });
+
   test("trend line: draw, persist, restore, survive timeframe change", async ({
     bootedApp: page,
   }) => {
