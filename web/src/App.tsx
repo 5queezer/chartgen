@@ -479,6 +479,7 @@ export function App(): JSX.Element {
           open={compareOpen()}
           onOpenChange={setCompareOpen}
           initialQuery=""
+          title="Compare symbol"
           onSelect={(ticker) => addCompare(ticker, symbol())}
           session={session}
         />
