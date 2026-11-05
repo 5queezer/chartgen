@@ -1,16 +1,20 @@
 // Indicator settings dialog (TradingView-style "Inputs" and "Style" tabs).
 // The Inputs fields are generated from the indicator's `configurable_params`
 // schema by lib/paramForm; the Style tab edits per-plot color, width, line
-// style and visibility (ADR-0017). OK validates and hands both back to the
+// style and visibility (ADR-0017) and the colors of its fills, levels,
+// volume-profile bars, divergence lines and histogram palettes. OK validates and hands both back to the
 // caller; Defaults restores the defaults of the tab being shown in the form
 // (not yet applied).
 
 import { Dialog, Switch, Tabs } from "@kobalte/core";
-import { For, Show, createMemo, createSignal, type JSX } from "solid-js";
+import { For, Index, Show, createMemo, createSignal, type JSX } from "solid-js";
 
+import { pruneGeometry, type GeometryInfo } from "../lib/geometryStyle";
 import { rekeyPlots, resolvePlot, type PlotInfo } from "../lib/plotStyle";
 import {
   sanitizeStyle,
+  type GeoItemStyle,
+  type GeometryStyle,
   type IndicatorStyle,
   type PlotLineStyle,
   type PlotStyle,
@@ -42,6 +46,8 @@ export interface IndicatorSettingsProps {
    * colors; null when the payload has no entry for it (e.g. it is hidden).
    */
   plots: readonly PlotInfo[] | null;
+  /** Fills, levels, profile bars and divergence lines of the indicator; null like `plots`. */
+  geometry: GeometryInfo | null;
   /** `configurable_params` for the target; undefined while the registry is unavailable. */
   specs: readonly ParamSpec[] | undefined;
   onClose: () => void;
@@ -66,14 +72,65 @@ const selectClass =
 const tabClass =
   "px-3 py-2 text-sm cursor-pointer border-b-2 border-transparent text-[color:var(--color-fg-muted)] data-[selected]:text-[color:var(--color-fg)] data-[selected]:border-[color:var(--color-accent)]";
 
+// More palette colors than this: one swatch for the whole histogram.
+const MAX_PALETTE_SWATCHES = 16;
 const LINE_STYLES: readonly PlotLineStyle[] = ["solid", "dashed", "dotted"];
+
+interface Swatch {
+  label: string;
+  value: string;
+  onChange: (color: string) => void;
+}
+
+/** One Style tab row: visibility checkbox, label, color swatches and extra controls. */
+function GeoRow(props: {
+  testId: string;
+  label: string;
+  visible: boolean;
+  onVisible: (visible: boolean) => void;
+  swatches: Swatch[];
+  children?: JSX.Element;
+}): JSX.Element {
+  return (
+    <div class="flex items-center gap-3" data-testid={props.testId}>
+      <input
+        type="checkbox"
+        aria-label={`Show ${props.label}`}
+        checked={props.visible}
+        onChange={(e) => props.onVisible(e.currentTarget.checked)}
+        class="cursor-pointer"
+      />
+      <span class="flex-1 min-w-0 truncate text-sm font-mono">{props.label}</span>
+      {/* Index, not For: the swatches are rebuilt on every change, and a
+          remounted ColorPicker would close its popover. */}
+      <Index each={props.swatches}>
+        {(sw) => (
+          <ColorPicker
+            label={sw().label}
+            value={sw().value}
+            onChange={sw().onChange}
+          />
+        )}
+      </Index>
+      {props.children}
+    </div>
+  );
+}
 
 function StyleRows(props: {
   plots: readonly PlotInfo[] | null;
+  geometry: GeometryInfo | null;
   hidden: boolean;
   styles: Record<string, PlotStyle>;
+  geo: GeometryStyle;
   onChange: (plot: PlotInfo, patch: PlotStyle) => void;
+  onGeo: (patch: (g: GeometryStyle) => GeometryStyle) => void;
 }): JSX.Element {
+  const item = (group: "fills" | "hlines", i: number, patch: GeoItemStyle) =>
+    props.onGeo((g) => ({
+      ...g,
+      [group]: { ...g[group], [i]: { ...g[group]?.[i], ...patch } },
+    }));
   return (
     <Show
       when={!props.hidden && props.plots}
@@ -85,7 +142,14 @@ function StyleRows(props: {
     >
       {(plots) => (
         <Show
-          when={plots().length > 0}
+          when={
+            plots().length > 0 ||
+            (props.geometry &&
+              (props.geometry.fills.length > 0 ||
+                props.geometry.hlines.length > 0 ||
+                props.geometry.hbars ||
+                props.geometry.divlines))
+          }
           fallback={
             <p class="text-sm text-[color:var(--color-fg-muted)]">
               This indicator has no lines to style.
@@ -95,39 +159,57 @@ function StyleRows(props: {
           <p class="text-xs text-[color:var(--color-fg-muted)]">
             Changes to the lines on the Inputs tab apply after OK.
           </p>
-          <For each={plots()}>
-            {(plot) => {
-              const r = () => resolvePlot(plot, { plots: props.styles });
-              const isLine = plot.kind === "line";
+          {/* Index throughout: the plots and geometry are rebuilt on every
+              payload (live ticks), which must not remount an open popover. */}
+          <Index each={plots()}>
+            {(plotAcc) => {
+              const plot = () => plotAcc();
+              const r = () => resolvePlot(plot(), { plots: props.styles });
+              const isLine = () => plot().kind === "line";
+              const own = () => props.styles[plot().key];
+              const swatches = (): Swatch[] => {
+                const defaults = plot().palette;
+                if (
+                  isLine() ||
+                  !defaults ||
+                  defaults.length < 2 ||
+                  defaults.length > MAX_PALETTE_SWATCHES
+                ) {
+                  return [
+                    {
+                      label: `${plot().label} color`,
+                      value: r().color,
+                      onChange: (color) => props.onChange(plot(), { color }),
+                    },
+                  ];
+                }
+                // A legacy single color recolors every bar and wins over the
+                // palette; editing a palette color replaces it.
+                return defaults.map((d, k) => ({
+                  label: `${plot().label} color ${k + 1}`,
+                  value: own()?.color ?? own()?.palette?.[d] ?? d,
+                  onChange: (color) =>
+                    props.onChange(plot(), {
+                      palette: { ...own()?.palette, [d]: color },
+                      color: undefined,
+                    }),
+                }));
+              };
               return (
-                <div
-                  class="flex items-center gap-3"
-                  data-testid={`style-row-${plot.key}`}
+                <GeoRow
+                  testId={`style-row-${plot().key}`}
+                  label={plot().label}
+                  visible={r().visible}
+                  onVisible={(visible) => props.onChange(plot(), { visible })}
+                  swatches={swatches()}
                 >
-                  <input
-                    type="checkbox"
-                    aria-label={`Show ${plot.label}`}
-                    checked={r().visible}
-                    onChange={(e) =>
-                      props.onChange(plot, { visible: e.currentTarget.checked })
-                    }
-                    class="cursor-pointer"
-                  />
-                  <span class="flex-1 min-w-0 truncate text-sm font-mono">
-                    {plot.label}
-                  </span>
-                  <ColorPicker
-                    label={`${plot.label} color`}
-                    value={r().color}
-                    onChange={(color) => props.onChange(plot, { color })}
-                  />
                   <select
-                    aria-label={`${plot.label} width`}
+                    aria-label={`${plot().label} width`}
                     class={selectClass}
-                    disabled={!isLine}
+                    disabled={!isLine()}
                     value={r().width}
                     onChange={(e) =>
-                      props.onChange(plot, {
+                      props.onChange(plot(), {
                         width: Number(e.currentTarget.value),
                       })
                     }
@@ -137,12 +219,12 @@ function StyleRows(props: {
                     </For>
                   </select>
                   <select
-                    aria-label={`${plot.label} line style`}
+                    aria-label={`${plot().label} line style`}
                     class={selectClass}
-                    disabled={!isLine}
+                    disabled={!isLine()}
                     value={r().lineStyle}
                     onChange={(e) =>
-                      props.onChange(plot, {
+                      props.onChange(plot(), {
                         lineStyle: e.currentTarget.value as PlotLineStyle,
                       })
                     }
@@ -151,10 +233,149 @@ function StyleRows(props: {
                       {(l) => <option value={l}>{l}</option>}
                     </For>
                   </select>
-                </div>
+                </GeoRow>
               );
             }}
-          </For>
+          </Index>
+          <Show when={props.geometry}>
+            {(geometry) => (
+              <>
+                <Index each={geometry().fills}>
+                  {(f, i) => {
+                    const o = () => props.geo.fills?.[i];
+                    const guard = () => ({ ref: f().ref });
+                    return (
+                      <GeoRow
+                        testId={`style-fill-${i}`}
+                        label={f().label}
+                        visible={o()?.visible !== false}
+                        onVisible={(visible) => item("fills", i, { visible, ...guard() })}
+                        swatches={[
+                          {
+                            label: `${f().label} color`,
+                            value: o()?.color ?? f().up,
+                            onChange: (color) => item("fills", i, { color, ...guard() }),
+                          },
+                          ...(f().twoTone
+                            ? [
+                                {
+                                  label: `${f().label} color below`,
+                                  value: o()?.colorBelow ?? f().down,
+                                  onChange: (colorBelow: string) =>
+                                    item("fills", i, { colorBelow, ...guard() }),
+                                },
+                              ]
+                            : []),
+                        ]}
+                      />
+                    );
+                  }}
+                </Index>
+                <Index each={geometry().hlines}>
+                  {(h, i) => {
+                    const o = () => props.geo.hlines?.[i];
+                    // Profile levels move with every payload: no `y` guard.
+                    const guard = () => ({
+                      ref: h().ref,
+                      ...(geometry().hbars ? {} : { y: h().y }),
+                    });
+                    return (
+                      <GeoRow
+                        testId={`style-hline-${i}`}
+                        label={`Level ${h().label}`}
+                        visible={o()?.visible !== false}
+                        onVisible={(visible) => item("hlines", i, { visible, ...guard() })}
+                        swatches={[
+                          {
+                            label: `Level ${h().label} color`,
+                            value: o()?.color ?? h().color,
+                            onChange: (color) => item("hlines", i, { color, ...guard() }),
+                          },
+                        ]}
+                      >
+                        <select
+                          aria-label={`Level ${h().label} line style`}
+                          class={selectClass}
+                          value={o()?.lineStyle ?? "solid"}
+                          onChange={(e) =>
+                            item("hlines", i, {
+                              lineStyle: e.currentTarget.value as PlotLineStyle,
+                              ...guard(),
+                            })
+                          }
+                        >
+                          <For each={LINE_STYLES}>
+                            {(l) => <option value={l}>{l}</option>}
+                          </For>
+                        </select>
+                      </GeoRow>
+                    );
+                  }}
+                </Index>
+                <Show when={geometry().hbars}>
+                  {(b) => {
+                    const setBars = (patch: NonNullable<GeometryStyle["hbars"]>) =>
+                      props.onGeo((g) => ({ ...g, hbars: { ...g.hbars, ...patch } }));
+                    return (
+                      <GeoRow
+                        testId="style-hbars"
+                        label="Profile bars"
+                        visible={props.geo.hbars?.visible !== false}
+                        onVisible={(visible) => setBars({ visible })}
+                        swatches={[
+                          {
+                            label: "Profile bars color",
+                            value: props.geo.hbars?.color ?? b().color,
+                            onChange: (color) => setBars({ color }),
+                          },
+                          ...(b().va !== null
+                            ? [
+                                {
+                                  label: "Profile value area color",
+                                  value: props.geo.hbars?.vaColor ?? b().va!,
+                                  onChange: (vaColor: string) => setBars({ vaColor }),
+                                },
+                              ]
+                            : []),
+                          {
+                            label: "Profile POC color",
+                            value: props.geo.hbars?.pocColor ?? b().pocColor,
+                            onChange: (pocColor) => setBars({ pocColor }),
+                          },
+                        ]}
+                      />
+                    );
+                  }}
+                </Show>
+                <Show when={geometry().divlines}>
+                  {(d) => {
+                    const setDiv = (patch: NonNullable<GeometryStyle["divlines"]>) =>
+                      props.onGeo((g) => ({ ...g, divlines: { ...g.divlines, ...patch } }));
+                    return (
+                      <GeoRow
+                        testId="style-divlines"
+                        label="Divergence lines"
+                        visible={props.geo.divlines?.visible !== false}
+                        onVisible={(visible) => setDiv({ visible })}
+                        swatches={[
+                          {
+                            label: "Bullish divergence color",
+                            value: props.geo.divlines?.bullColor ?? d().bull,
+                            onChange: (bullColor) => setDiv({ bullColor }),
+                          },
+                          {
+                            label: "Bearish divergence color",
+                            value: props.geo.divlines?.bearColor ?? d().bear,
+                            onChange: (bearColor) => setDiv({ bearColor }),
+                          },
+                        ]}
+                      />
+                    );
+                  }}
+                </Show>
+              </>
+            )}
+          </Show>
         </Show>
       )}
     </Show>
@@ -167,6 +388,7 @@ function SettingsForm(props: {
   style: IndicatorStyle | undefined;
   hidden: boolean;
   plots: readonly PlotInfo[] | null;
+  geometry: GeometryInfo | null;
   specs: readonly ParamSpec[];
   onClose: () => void;
   onSubmit: IndicatorSettingsProps["onSubmit"];
@@ -181,6 +403,13 @@ function SettingsForm(props: {
     props.plots
       ? rekeyPlots(props.plots, props.style)
       : (props.style?.plots ?? {}),
+  );
+
+  // Overrides for fills, levels or groups the payload no longer has are dropped.
+  const [geoStyle, setGeoStyle] = createSignal<GeometryStyle>(
+    props.style?.geometry && props.geometry
+      ? pruneGeometry(props.style.geometry, props.geometry)
+      : (props.style?.geometry ?? {}),
   );
 
   const setValue = (name: string, value: string | boolean) =>
@@ -211,7 +440,7 @@ function SettingsForm(props: {
     props.onSubmit(
       result.params,
       fields(),
-      sanitizeStyle({ plots: plotStyles() }),
+      sanitizeStyle({ plots: plotStyles(), geometry: geoStyle() }),
     );
   };
 
@@ -308,9 +537,12 @@ function SettingsForm(props: {
           <div class="flex flex-col gap-3 p-4 max-h-[60vh] overflow-y-auto">
             <StyleRows
               plots={props.plots}
+              geometry={props.geometry}
               hidden={props.hidden}
               styles={plotStyles()}
+              geo={geoStyle()}
               onChange={setPlot}
+              onGeo={(patch) => setGeoStyle(patch(geoStyle()))}
             />
           </div>
         </Tabs.Content>
@@ -322,7 +554,8 @@ function SettingsForm(props: {
           disabled={
             tab() === "inputs"
               ? fields().length === 0
-              : Object.keys(plotStyles()).length === 0
+              : Object.keys(plotStyles()).length === 0 &&
+                Object.keys(geoStyle()).length === 0
           }
           onClick={() => {
             if (tab() === "inputs") {
@@ -330,6 +563,7 @@ function SettingsForm(props: {
               setErrors({});
             } else {
               setPlotStyles({});
+              setGeoStyle({});
             }
           }}
         >
@@ -402,6 +636,7 @@ export function IndicatorSettings(props: IndicatorSettingsProps): JSX.Element {
                       style={t.style}
                       hidden={t.hidden}
                       plots={props.plots}
+                      geometry={props.geometry}
                       specs={specs()}
                       onClose={props.onClose}
                       onSubmit={props.onSubmit}

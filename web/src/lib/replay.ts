@@ -19,6 +19,7 @@ import type { SeriesPayload } from "../types/responses";
 import { barCloseMs } from "./countdown";
 import { keyName } from "./instances";
 import { INITIAL_BARS, type SeriesUpdate } from "./liveFeed";
+import { sliceFuture } from "./projection";
 import { colorIdxInto } from "./seriesMerge";
 
 type Indicator = SeriesPayload["indicators"][string];
@@ -168,7 +169,12 @@ export const windowStart = (cursor: number): number =>
 const startOf = (d: { x1: number; x2: number }) => Math.min(d.x1, d.x2);
 const endOf = (d: { x1: number; x2: number }) => Math.max(d.x1, d.x2);
 
-function sliceIndicator(ind: Indicator, n: number, lag: Lag = {}): Indicator {
+function sliceIndicator(
+  ind: Indicator,
+  n: number,
+  bars: SeriesPayload["bars"],
+  lag: Lag = {},
+): Indicator {
   // Values from later bars (a negative MA offset) are not known yet.
   const cut = (v: Values) => {
     const out = v.slice(0, n);
@@ -198,6 +204,8 @@ function sliceIndicator(ind: Indicator, n: number, lag: Lag = {}): Indicator {
   // indicator's geometry when these arrays change identity.
   if (ind.hlines) out.hlines = ind.hlines.slice();
   if (ind.hbars) out.hbars = ind.hbars.slice();
+  // The cloud past the cursor (ADR-0033).
+  if (ind.future) out.future = sliceFuture(ind, n, bars);
   return out;
 }
 
@@ -219,7 +227,7 @@ export function sliceSeries(
   const n = Math.max(0, Math.min(cursorIndex, series.bars.length - 1) + 1);
   const indicators: SeriesPayload["indicators"] = {};
   for (const [name, ind] of Object.entries(series.indicators)) {
-    indicators[name] = sliceIndicator(ind, n, lags[name]);
+    indicators[name] = sliceIndicator(ind, n, series.bars, lags[name]);
   }
   return { ...series, bars: series.bars.slice(0, n), indicators };
 }

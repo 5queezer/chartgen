@@ -295,6 +295,35 @@ Three additional channels round out the payload so the full set of
   carries both `x` (bar index) and `t` (unix seconds, or `null` for
   synthetic sample data), mirroring the signal shape, plus `dashed`.
 
+An indicator that plots past the last bar also carries a **`future`**
+block ([ADR-0033](/chartgen/decisions/0033-indicator-projection-past-last-bar/)).
+Today that is `ichimoku`: TradingView draws its cloud `displacement - 1`
+bars ahead of price.
+
+```json
+"future": {
+  "bars": 25,
+  "t": [1713571200, 1713585600, ...],
+  "lines": [{ "index": 2, "values": [67120.4, ...] }, { "index": 3, "values": [66410.0, ...] }],
+  "fills": [{ "index": 0, "y1": [67120.4, ...], "y2": [66410.0, ...] }]
+}
+```
+
+- `bars` is the number of bars after the last one, at most 500. Value `j` of every
+  array belongs to the `j`-th of them.
+- `lines[k].index` and `fills[k].index` name the line or fill the values
+  continue: Senkou A (line 2), Senkou B (line 3) and the cloud (fill 0).
+- `t` is those bars' open times: the last bar's time plus `j + 1`
+  intervals. Monthly (`1M`, `1mo`) and quarterly (`3mo`) bars step by
+  calendar months. Daily and longer bars skip Saturday and Sunday when the
+  loaded bars have none on a weekend (stocks); exchange holidays and
+  intraday closed hours are not skipped. It is absent when the bars have
+  no timestamps.
+- The per-bar arrays are unchanged, so clients that ignore `future` keep
+  working. Every series response carries the block, tails and pushes
+  included: the forming bar moves the newest projected values. Take it
+  from your newest response and ignore the one on older history pages.
+
 Every item of `fills`, `hbars`, `divlines` and `hlines` also carries a
 `color`: a CSS `"rgba(r,g,b,a)"` string with the color the PNG renderer
 uses, so clients can match the PNG exactly
@@ -375,7 +404,9 @@ other EMA/RMA-based built-ins (`ma`, `ma_ribbon`, `envelopes`, `keltner`,
 `tsi`, `smi_ergodic`, `elder_force_index`, `volume_oscillator`,
 `connors_rsi`, `kalman_volume`) declare it from their parameters. The
 community composites (`cipher_b`, `wavetrend`, `rsi_mfi_stoch`) and user
-scripts keep the `warmup` you send. `warmup: 0` is never raised.
+scripts keep the `warmup` you send. `ichimoku` declares its longest window
+plus `displacement - 1` (77 bars at the defaults), so a tail's leading
+spans and `future` block match one long request. `warmup: 0` is never raised.
 Smoothings beyond the cap (an EMA longer than 224, an RMA longer than 126)
 can still differ slightly at a seam, running sums (OBV, CVD, A/D line) by a
 constant offset, and VWAP until its next session reset. Finite-window
@@ -392,6 +423,13 @@ Yahoo intraday history ends after about 30 days for 1m, 60 days for other
 sub-hour intervals, and 730 days for 1h and the intervals built from it.
 Each upstream request times out after 10 s, and a paginated Binance fetch
 gives up after 20 s.
+
+Daily and longer Yahoo bars (`1d`, `3d`, `5d`, `1wk`, `1mo`, `3mo`) are
+stamped at 00:00 UTC of the exchange-local date, using the exchange's
+`gmtoffset`. Yahoo itself stamps them at the session open, which for ASX in
+AEDT or NZX falls on the previous UTC day, so a UTC date read from the stamp
+would be one day early. Binance date bars already open at 00:00 UTC. A
+history page's `end_time` is compared against these stamps.
 
 Yahoo has no native 3m, 2h, 4h, 6h, 12h or 3d, so chartgen builds them from
 1m, 1h and 1d bars (Binance serves all of them natively):

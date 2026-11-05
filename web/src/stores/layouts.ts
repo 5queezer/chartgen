@@ -242,15 +242,27 @@ export function parseLayouts(
 /** Param defaults per indicator name (and alias), as the registry reports them. */
 export type ParamDefaults = Record<string, Record<string, unknown>>;
 
-/** A plot style with plots and fields in sorted order, so equal styles compare equal. */
+/** Object keys sorted at every level, so equal styles compare equal. */
+function sortedKeys(x: unknown): unknown {
+  if (Array.isArray(x)) return x.map(sortedKeys);
+  if (x && typeof x === "object") {
+    return Object.fromEntries(
+      Object.entries(x)
+        .sort(([a], [b]) => (a < b ? -1 : 1))
+        .map(([k, v]) => [k, sortedKeys(v)]),
+    );
+  }
+  return x;
+}
+
+/** A plot style (plots and geometry) in sorted order, or undefined when empty. */
 function canonicalStyle(style: ReturnType<typeof indicatorStyle>): unknown {
-  const plots = Object.entries(style?.plots ?? {})
-    .sort(([a], [b]) => (a < b ? -1 : 1))
-    .map(([k, v]) => [
-      k,
-      Object.fromEntries(Object.entries(v).sort(([a], [b]) => (a < b ? -1 : 1))),
-    ]);
-  return plots.length > 0 ? Object.fromEntries(plots) : undefined;
+  const { plots = {}, geometry } = style ?? {};
+  if (Object.keys(plots).length === 0 && !geometry) return undefined;
+  return sortedKeys({
+    ...plots,
+    ...(geometry ? { geometry } : {}),
+  });
 }
 
 /**

@@ -19,9 +19,35 @@ export const DRAWING_NAMES = [
   "cgRect",
   "cgText",
   "simpleTag",
+  "cgFibExt",
+  "cgPitchfork",
+  "cgPriceRange",
+  "cgDateRange",
+  "cgDatePriceRange",
+  "cgLong",
+  "cgShort",
 ] as const;
 
 export type DrawingName = (typeof DRAWING_NAMES)[number];
+
+/** Exact point count of the multi-point tools; stored records with another count are dropped. */
+const EXACT_POINTS: Partial<Record<DrawingName, number>> = {
+  cgFibExt: 3,
+  cgPitchfork: 3,
+  cgPriceRange: 2,
+  cgDateRange: 2,
+  cgDatePriceRange: 2,
+  cgLong: 3,
+  cgShort: 3,
+};
+
+/** Drawings with a translucent fill the user can recolor. */
+export const FILLED: readonly DrawingName[] = [
+  "cgRect",
+  "cgPriceRange",
+  "cgDateRange",
+  "cgDatePriceRange",
+];
 
 export interface DrawingPoint {
   timestamp: number;
@@ -46,6 +72,11 @@ export const MAX_WIDTH = 4;
 export const FONT_SIZES = [10, 12, 14, 18, 24] as const;
 
 export interface DrawingRecord {
+  /**
+   * The drawing's overlay id, kept across reloads so alerts can refer to
+   * it (ADR-0034). Records saved before that have none until re-saved.
+   */
+  id?: string;
   name: DrawingName;
   points: DrawingPoint[];
   styles?: Record<string, unknown>;
@@ -172,7 +203,7 @@ export function overlayStyles(
   if (s.color !== undefined) {
     line.color = s.color;
     polygon.borderColor = s.color;
-    if (name === "cgText" || name === "fibonacciLine") text.color = s.color;
+    if (name === "cgText" || name === "fibonacciLine" || name === "cgFibExt") text.color = s.color;
     if (name === "simpleTag") {
       text.backgroundColor = s.color;
       text.borderColor = s.color;
@@ -188,9 +219,12 @@ export function parseRecord(x: unknown): DrawingRecord | null {
   if (!isPlainObject(x) || !isDrawingName(x.name)) return null;
   if (!Array.isArray(x.points) || x.points.length === 0) return null;
   if (x.points.length > MAX_POINTS) return null;
+  const exact = EXACT_POINTS[x.name];
+  if (exact !== undefined && x.points.length !== exact) return null;
   const points = x.points.map(parsePoint);
   if (points.some((p) => p === null)) return null;
   const rec: DrawingRecord = {
+    ...(typeof x.id === "string" && x.id !== "" && x.id.length <= 64 ? { id: x.id } : {}),
     name: x.name,
     points: points as DrawingPoint[],
     lock: x.lock === true,
@@ -224,6 +258,8 @@ export interface TimeAxis {
   firstTs: number;
   lastTs: number;
   count: number;
+  /** The loaded bar timestamps: real times for indices inside the data (gaps included). */
+  timestamps: readonly number[];
   /** Most common recent bar spacing in ms (robust against weekend gaps). */
   intervalMs: number;
 }
@@ -250,6 +286,7 @@ export function timeAxisOf(timestamps: readonly number[]): TimeAxis | null {
     firstTs: timestamps[0] as number,
     lastTs: timestamps[n - 1] as number,
     count: n,
+    timestamps,
     intervalMs,
   };
 }
@@ -281,6 +318,7 @@ export function toChartPoint(
 
 /** Minimal shape of a klinecharts overlay that we serialize. */
 export interface OverlayLike {
+  id?: string;
   name: string;
   points: ReadonlyArray<{
     timestamp?: number;
@@ -293,12 +331,14 @@ export interface OverlayLike {
   visible: boolean;
 }
 
-function pointTimestamp(
+export function pointTimestamp(
   p: { timestamp?: number; dataIndex?: number },
   axis: TimeAxis | null,
 ): number | undefined {
   if (p.timestamp !== undefined) return p.timestamp;
   if (axis === null || p.dataIndex === undefined) return undefined;
+  const real = axis.timestamps[p.dataIndex];
+  if (real !== undefined && Number.isInteger(p.dataIndex)) return real;
   if (p.dataIndex < 0) return axis.firstTs + p.dataIndex * axis.intervalMs;
   return axis.lastTs + (p.dataIndex - (axis.count - 1)) * axis.intervalMs;
 }
@@ -310,6 +350,7 @@ export function serialize(
 ): DrawingRecord[] {
   return parseRecords(
     overlays.map((o) => ({
+      id: o.id,
       name: o.name,
       points: o.points.map((p) => ({
         timestamp: pointTimestamp(p, axis),
@@ -334,22 +375,32 @@ function readIndex(): string[] {
   }
 }
 
+let onEvict: ((symbol: string) => void) | undefined;
+
+/** Called with each symbol whose drawings the LRU drops (the alerts store switches their alerts off). */
+export function setEvictionListener(fn: (symbol: string) => void): void {
+  onEvict = fn;
+}
+
 /** Move `symbol` to the front of the LRU index (or drop it); evict beyond MAX_SYMBOLS. */
 function touch(symbol: string, keep: boolean): void {
   const rest = readIndex().filter((s) => s !== symbol);
   const index = keep ? [symbol, ...rest] : rest;
   for (const evicted of index.splice(MAX_SYMBOLS)) {
     localStorage.removeItem(storageKey(evicted));
+    onEvict?.(evicted);
   }
   localStorage.setItem(INDEX_KEY, JSON.stringify(index));
 }
 
-export function loadDrawings(symbol: string): DrawingRecord[] {
+/** A symbol's stored drawings. `touch: false` reads without marking the symbol as used (alert evaluation). */
+export function loadDrawings(symbol: string, touchIndex = true): DrawingRecord[] {
   if (typeof localStorage === "undefined") return [];
   try {
     const raw = localStorage.getItem(storageKey(symbol));
     if (raw === null) return [];
     const records = parseRecords(JSON.parse(raw));
+    if (!touchIndex) return records;
     try {
       touch(symbol, true);
     } catch {

@@ -25,7 +25,9 @@ import {
   type OverlayEvent,
 } from "klinecharts";
 
+import { isDrawingAlertTool } from "../lib/alerts";
 import { isTypingContext, undoRedoKey } from "../lib/keys";
+import { syncDrawingAlerts } from "../stores/alerts";
 import { createHistory } from "../stores/drawingHistory";
 import {
   loadDrawings,
@@ -41,7 +43,11 @@ import {
   type DrawingStyle,
   type TimeAxis,
 } from "../stores/drawings";
+import { openAlertDialog } from "./AlertDialog";
 import { DrawingStyleBar } from "./DrawingStyleBar";
+import { overlayLabels, setOverlayAxis, setPositionSize } from "./drawingOverlays";
+import { ToolGroup } from "./ToolGroup";
+import { positionReward } from "../lib/drawingMath";
 import { PALETTES } from "../lib/theme";
 import { theme } from "../stores/layout";
 
@@ -248,6 +254,16 @@ const TOOLS: readonly ToolDef[] = [
     ),
   },
   {
+    name: "cgFibExt",
+    label: "Fib extension (trend-based)",
+    icon: () => (
+      <svg {...svgProps}>
+        <path d="M3 4h18M3 9h18M3 14h18M3 20h18" />
+        <path d="M4 20L9 12L12 16" stroke-dasharray="2 2" />
+      </svg>
+    ),
+  },
+  {
     name: "cgRect",
     label: "Rectangle",
     icon: () => (
@@ -274,6 +290,70 @@ const TOOLS: readonly ToolDef[] = [
       </svg>
     ),
   },
+  {
+    name: "cgPriceRange",
+    label: "Price range",
+    icon: () => (
+      <svg {...svgProps}>
+        <rect x="5" y="4" width="14" height="16" fill="currentColor" fill-opacity="0.15" />
+        <path d="M12 6v12M9.5 8.5L12 6l2.5 2.5M9.5 15.5L12 18l2.5-2.5" />
+      </svg>
+    ),
+  },
+  {
+    name: "cgDateRange",
+    label: "Date range",
+    icon: () => (
+      <svg {...svgProps}>
+        <rect x="3" y="7" width="18" height="10" fill="currentColor" fill-opacity="0.15" />
+        <path d="M6 12h12M8.5 9.5L6 12l2.5 2.5M15.5 9.5L18 12l-2.5 2.5" />
+      </svg>
+    ),
+  },
+  {
+    name: "cgDatePriceRange",
+    label: "Date and price range",
+    icon: () => (
+      <svg {...svgProps}>
+        <rect x="4" y="5" width="16" height="14" fill="currentColor" fill-opacity="0.15" />
+        <path d="M12 7v10M8 12h8" />
+        <path d="M10 9l2-2 2 2M10 15l2 2 2-2M10 10l-2 2 2 2M14 10l2 2-2 2" />
+      </svg>
+    ),
+  },
+  {
+    name: "cgPitchfork",
+    label: "Pitchfork",
+    icon: () => (
+      <svg {...svgProps}>
+        <path d="M4 19L21 6M9 8L22 9M9 8L21 6M12 21L22 9" />
+        <path d="M9 8l3 13" stroke-dasharray="2 2" />
+        <Dot x={4} y={19} />
+        <Dot x={9} y={8} />
+        <Dot x={12} y={21} />
+      </svg>
+    ),
+  },
+  {
+    name: "cgLong",
+    label: "Long position",
+    icon: () => (
+      <svg {...svgProps}>
+        <rect x="4" y="4" width="16" height="8" fill="#089981" fill-opacity="0.35" stroke="#089981" />
+        <rect x="4" y="12" width="16" height="8" fill="#f23645" fill-opacity="0.35" stroke="#f23645" />
+      </svg>
+    ),
+  },
+  {
+    name: "cgShort",
+    label: "Short position",
+    icon: () => (
+      <svg {...svgProps}>
+        <rect x="4" y="4" width="16" height="8" fill="#f23645" fill-opacity="0.35" stroke="#f23645" />
+        <rect x="4" y="12" width="16" height="8" fill="#089981" fill-opacity="0.35" stroke="#089981" />
+      </svg>
+    ),
+  },
 ];
 
 /** Display name of each drawing tool. */
@@ -285,8 +365,47 @@ const SHORTCUTS: Record<string, DrawingName> = Object.fromEntries(
   TOOLS.filter((t) => t.code).map((t) => [t.code, t.name]),
 );
 
+/** Toolbar groups in display order; each shows one button with a flyout of its tools. */
+const GROUPS: readonly { name: string; tools: readonly DrawingName[] }[] = [
+  {
+    name: "Lines",
+    tools: [
+      "segment",
+      "rayLine",
+      "straightLine",
+      "horizontalStraightLine",
+      "horizontalRayLine",
+      "verticalStraightLine",
+      "parallelStraightLine",
+    ],
+  },
+  { name: "Fib", tools: ["fibonacciLine", "cgFibExt"] },
+  { name: "Pitchfork", tools: ["cgPitchfork"] },
+  { name: "Shapes and text", tools: ["cgRect", "cgText", "simpleTag"] },
+  { name: "Measure", tools: ["cgPriceRange", "cgDateRange", "cgDatePriceRange"] },
+  { name: "Forecasting", tools: ["cgLong", "cgShort"] },
+];
+const TOOL_BY_NAME = new Map(TOOLS.map((t) => [t.name, t]));
+const GROUP_OF = new Map(GROUPS.flatMap((g) => g.tools.map((t) => [t, g.name] as const)));
+
+const LAST_KEY = "chartgen.drawingTools.last";
+/** Last-used tool per group, from storage; unknown names are ignored. */
+function loadLast(): Record<string, DrawingName> {
+  const out = Object.fromEntries(GROUPS.map((g) => [g.name, g.tools[0]!])) as Record<string, DrawingName>;
+  try {
+    const raw = JSON.parse(localStorage.getItem(LAST_KEY) ?? "{}") as Record<string, unknown>;
+    for (const g of GROUPS) {
+      const v = raw[g.name];
+      if (typeof v === "string" && (g.tools as readonly string[]).includes(v)) out[g.name] = v as DrawingName;
+    }
+  } catch {
+    // Unreadable storage: the defaults stand.
+  }
+  return out;
+}
+
 const btnClass =
-  "relative disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-transparent w-9 h-9 inline-flex items-center justify-center rounded-md cursor-pointer text-[color:var(--color-fg-muted)] hover:bg-[color:var(--color-border)] hover:text-[color:var(--color-fg)] aria-pressed:bg-[color:var(--color-border)] aria-pressed:text-[color:var(--color-accent)]";
+  "relative shrink-0 disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-transparent w-9 h-9 inline-flex items-center justify-center rounded-md cursor-pointer text-[color:var(--color-fg-muted)] hover:bg-[color:var(--color-border)] hover:text-[color:var(--color-fg)] aria-pressed:bg-[color:var(--color-border)] aria-pressed:text-[color:var(--color-accent)]";
 const menuItemClass =
   "w-full text-left px-3 py-1.5 text-sm cursor-pointer hover:bg-[color:var(--color-border)] outline-none focus:bg-[color:var(--color-border)]";
 
@@ -340,6 +459,7 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
     if (props.disarm) untrack(cancelArmed);
   });
   // ---------------------------------------------------------------------
+  const [lastTool, setLastTool] = createSignal(loadLast());
   const [magnet, setMagnet] = createSignal<Magnet>("normal");
   const [crosshair, setCrosshair] = createSignal(true);
   const [lockAll, setLockAll] = createSignal(false);
@@ -392,6 +512,20 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
 
   const axis = (): TimeAxis | null =>
     timeAxisOf(props.chart?.getDataList().map((d) => d.timestamp) ?? []);
+  // The overlays ask for the bar timing on every frame; recompute it only
+  // when the loaded bars change.
+  let axisKey: { list: unknown; n: number; last: number } | null = null;
+  let axisCache: TimeAxis | null = null;
+  setOverlayAxis(() => {
+    const list = props.chart?.getDataList();
+    if (!list) return null;
+    const last = list.at(-1)?.timestamp ?? 0;
+    if (axisKey?.list !== list || axisKey.n !== list.length || axisKey.last !== last) {
+      axisKey = { list, n: list.length, last };
+      axisCache = axis();
+    }
+    return axisCache;
+  });
 
   const syncFlags = () => {
     setLockAll(current.length > 0 && current.every((r) => r.lock));
@@ -414,7 +548,10 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
     window.clearTimeout(saveTimer);
     const p = pendingSave;
     pendingSave = null;
-    if (p) setSaveFailed(!saveDrawings(p.symbol, p.records));
+    if (!p) return;
+    setSaveFailed(!saveDrawings(p.symbol, p.records));
+    // Alerts on a drawing that is gone are switched off (ADR-0034).
+    syncDrawingAlerts(p.symbol, p.records.map((r) => r.id));
   };
   const persist = () => {
     pendingSave = { symbol: props.symbol, records: current };
@@ -551,7 +688,10 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
   /** Add a stored drawing to the chart; needs loaded data. */
   const create = (rec: DrawingRecord, ax: TimeAxis) => {
     const { points, off } = place(rec, ax);
+    // The stored id is kept, so alerts on the drawing survive reloads (ADR-0034).
+    const keep = rec.id !== undefined && !props.chart?.getOverlayById(rec.id);
     const id = props.chart?.createOverlay({
+      ...(keep ? { id: rec.id } : {}),
       name: rec.name,
       points,
       styles: liveStyles(rec, false) as never,
@@ -563,7 +703,7 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
     });
     if (typeof id !== "string") return;
     ids.push(id);
-    canon.set(id, rec);
+    canon.set(id, { ...rec, id });
     if (off) offRange.add(id);
   };
 
@@ -584,6 +724,8 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
       pending = null;
       records.forEach((r) => create(r, ax));
       current = ids.flatMap((id) => canon.get(id) ?? []);
+      // Records saved before drawings had ids get theirs stored now.
+      if (records.some((r) => r.id === undefined)) persist();
     }
     syncFlags();
   };
@@ -629,6 +771,19 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
     limitTimer = window.setTimeout(() => setLimitHit(false), 4000);
   };
 
+  /** What a fresh position is sized from: the visible price span and bar count, read via the axis. */
+  const readPositionSize = (chart: KChart) => {
+    const h = chart.getSize("candle_pane", "main" as never)?.height ?? 0;
+    const [top, bottom] = chart.convertFromPixel(
+      [{ y: 0 }, { y: h }],
+      { paneId: "candle_pane" },
+    ) as { value?: number }[];
+    const span =
+      top?.value !== undefined && bottom?.value !== undefined ? Math.abs(top.value - bottom.value) : null;
+    const range = chart.getVisibleRange();
+    return { reward: positionReward(span), bars: range.to - range.from };
+  };
+
   const arm = (name: DrawingName) => {
     const chart = props.chart;
     if (!chart) return;
@@ -641,6 +796,16 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
     }
     // Drawing on a hidden chart would be invisible, so show everything.
     if (hideAll()) toggleHide();
+    const group = GROUP_OF.get(name);
+    if (group !== undefined && lastTool()[group] !== name) {
+      setLastTool({ ...lastTool(), [group]: name });
+      try {
+        localStorage.setItem(LAST_KEY, JSON.stringify(lastTool()));
+      } catch {
+        // Not persisted; the choice still holds for this session.
+      }
+    }
+    if (name === "cgLong" || name === "cgShort") setPositionSize(readPositionSize(chart));
     const id = chart.createOverlay({
       name,
       extendData: name === "cgText" ? DEFAULT_TEXT : undefined,
@@ -802,11 +967,12 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
     if (!(x !== undefined && x >= 0 && x <= width)) chart.scrollToTimestamp(p.timestamp);
   };
 
-  const menuAction = (action: "remove" | "lock") => {
+  const menuAction = (action: "remove" | "lock" | "alert") => {
     const m = menu();
     setMenu(null);
     if (!m) return;
-    if (action === "remove") removeIds([m.id]);
+    if (action === "alert") openAlertDialog({ symbol: props.symbol, drawingId: m.id });
+    else if (action === "remove") removeIds([m.id]);
     else {
       const locked = props.chart?.getOverlayById(m.id)?.lock ?? false;
       props.chart?.overrideOverlay({ id: m.id, lock: !locked });
@@ -865,11 +1031,20 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
                 paneId: o.paneId,
                 styles: o.styles,
                 points: o.points,
+                labels: overlayLabels.get(id),
+                precision: props.chart?.getPriceVolumePrecision().price,
+                pixels: o.points.map(
+                  (pt) => props.chart?.convertToPixel(pt, { paneId: o.paneId }) as { x?: number; y?: number },
+                ),
               },
             ]
           : [];
       });
-    onCleanup(() => delete w.__chartgenDrawings);
+    w.__chartgenPositionSize = () => (props.chart ? readPositionSize(props.chart) : null);
+    onCleanup(() => {
+      delete w.__chartgenDrawings;
+      delete w.__chartgenPositionSize;
+    });
   }
 
   // Native context menu would sit on top of ours.
@@ -1021,7 +1196,7 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
       role="toolbar"
       aria-label="Drawing tools"
       aria-orientation="vertical"
-      class="w-12 shrink-0 flex flex-col items-center gap-0.5 py-2 border-r border-[color:var(--color-border)] bg-[color:var(--color-bg)] overflow-y-auto"
+      class="w-12 shrink-0 flex flex-col items-center gap-0.5 py-2 border-r border-[color:var(--color-border)] bg-[color:var(--color-bg)] min-h-0"
     >
       <button
         type="button"
@@ -1041,20 +1216,20 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
         </svg>
       </button>
       <Separator />
-      <For each={TOOLS}>
-        {(tool) => (
-          <button
-            type="button"
-            class={btnClass}
-            aria-label={tool.label}
-            title={tool.code ? `${tool.label} (Alt+${tool.code.slice(3)})` : tool.label}
-            aria-pressed={armed() === tool.name}
-            onClick={() => arm(tool.name)}
-          >
-            {tool.icon()}
-          </button>
-        )}
-      </For>
+      <div class="flex-1 min-h-0 w-full overflow-y-auto flex flex-col items-center gap-0.5">
+        <For each={GROUPS}>
+          {(g) => (
+            <ToolGroup
+              group={g.name}
+              tools={g.tools.map((n) => TOOL_BY_NAME.get(n)!)}
+              last={lastTool()[g.name]!}
+              armed={armed()}
+              onArm={(n) => arm(n as DrawingName)}
+              btnClass={btnClass}
+            />
+          )}
+        </For>
+      </div>
       <Separator />
       <button
         type="button"
@@ -1155,6 +1330,15 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
             <button type="button" role="menuitem" class={menuItemClass} onClick={() => menuAction("lock")}>
               {props.chart?.getOverlayById(m().id)?.lock ? "Unlock" : "Lock"}
             </button>
+            <Show when={canon.get(m().id)?.name}>
+              {(name) => (
+                <Show when={isDrawingAlertTool(name())}>
+                  <button type="button" role="menuitem" class={menuItemClass} onClick={() => menuAction("alert")}>
+                    Add alert on {DRAWING_LABELS[name()]}…
+                  </button>
+                </Show>
+              )}
+            </Show>
           </div>
         )}
       </Show>

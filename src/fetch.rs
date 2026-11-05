@@ -369,6 +369,7 @@ fn parse_yahoo_chart(
         .and_then(|v| v.as_array())
         .ok_or("Missing volume array")?;
 
+    let date_bars = is_date_interval(interval);
     let mut bars = Vec::new();
     #[allow(clippy::needless_range_loop)] // indexing 6 parallel arrays
     for i in 0..timestamps.len() {
@@ -376,7 +377,14 @@ fn parse_yahoo_chart(
             Some(v) => v,
             None => continue,
         };
-        if end_time_ms.is_some_and(|e| ts.saturating_mul(1000) >= e) {
+        // A date bar is compared by its stamp (see `local_date_stamp`), so a
+        // history page that ends at a bar's stamp does not return it again.
+        let stamp = if date_bars {
+            local_date_stamp(ts, gmtoffset)
+        } else {
+            ts
+        };
+        if end_time_ms.is_some_and(|e| stamp.saturating_mul(1000) >= e) {
             continue;
         }
         let open = match opens.get(i).and_then(|v| v.as_f64()) {
@@ -437,6 +445,14 @@ fn parse_yahoo_chart(
         };
     }
 
+    if date_bars {
+        for b in &mut bars {
+            if let Some(t) = bar_ts(b) {
+                b.date = local_date_stamp(t, gmtoffset).to_string();
+            }
+        }
+    }
+
     if bars.is_empty() {
         return match end_time_ms {
             Some(_) => Ok(empty),
@@ -457,6 +473,19 @@ fn parse_yahoo_chart(
         },
         has_more,
     })
+}
+
+/// Daily, multi-day, weekly and monthly bars stand for a date, not a time.
+fn is_date_interval(interval: &str) -> bool {
+    data::interval_secs(interval).is_some_and(|s| s >= DAY)
+}
+
+/// Stamp of a date bar: 00:00 UTC of the exchange-local date of `ts`.
+/// Yahoo stamps these bars at the session open (10:00 AEDT is the previous
+/// day in UTC), so reading the stamp as a UTC date would show the date one
+/// day early for ASX or NZX. Binance date bars already open at 00:00 UTC.
+fn local_date_stamp(ts: i64, gmtoffset: i64) -> i64 {
+    (ts + gmtoffset).div_euclid(DAY) * DAY
 }
 
 /// Yahoo stamps the live bar with the last trade time instead of its period
@@ -2011,5 +2040,68 @@ mod tests {
             .contains("/chart/..%2Fv7%2Fx?"));
         assert!(yahoo_chart_url("..", &w).is_err());
         assert!(binance_ticker_url(&["A\"B"]).contains("%22A%22B%22"));
+    }
+
+    fn daily_dates(
+        symbol: &str,
+        gmtoffset: i64,
+        open_tod: i64,
+        days: &[i64],
+        end: Option<i64>,
+    ) -> Vec<i64> {
+        // Session-open stamps on the exchange-local days `days` (days since epoch).
+        let ts: Vec<i64> = days
+            .iter()
+            .map(|d| d * DAY + open_tod - gmtoffset)
+            .collect();
+        let body = yahoo_body(&ts, symbol, "EQUITY", gmtoffset);
+        let f = parse_yahoo_chart(&body, "1d", 100, end, &win("1d", 0)).unwrap();
+        dates(&f)
+    }
+
+    #[test]
+    fn yahoo_date_bars_are_stamped_at_the_exchange_local_date() {
+        let days = [20_000, 20_001, 20_002];
+        let want: Vec<i64> = days.iter().map(|d| d * DAY).collect();
+        // ASX in AEDT (+11h) opens 10:00 local = 23:00 UTC the day before.
+        assert_eq!(
+            daily_dates("BHP.AX", 11 * 3_600, 10 * 3_600, &days, None),
+            want
+        );
+        // NZX in NZDT (+13h) opens 10:00 local = 21:00 UTC the day before.
+        assert_eq!(
+            daily_dates("AIR.NZ", 13 * 3_600, 10 * 3_600, &days, None),
+            want
+        );
+        // NYSE (EST, -5h) opens 09:30 local = 14:30 UTC the same day.
+        assert_eq!(
+            daily_dates("AAPL", -5 * 3_600, 9 * 3_600 + 1_800, &days, None),
+            want
+        );
+    }
+
+    #[test]
+    fn yahoo_date_bar_history_pages_do_not_repeat_the_boundary_bar() {
+        let days = [20_000, 20_001, 20_002];
+        // The client pages with the oldest bar's stamp as end_time.
+        let end = Some(20_002 * DAY * 1000);
+        assert_eq!(
+            daily_dates("BHP.AX", 11 * 3_600, 10 * 3_600, &days, end),
+            vec![20_000 * DAY, 20_001 * DAY]
+        );
+        assert_eq!(
+            daily_dates("AAPL", -5 * 3_600, 9 * 3_600 + 1_800, &days, end),
+            vec![20_000 * DAY, 20_001 * DAY]
+        );
+    }
+
+    #[test]
+    fn date_intervals() {
+        for i in ["1d", "3d", "5d", "1wk", "1w", "1mo", "1M"] {
+            assert!(is_date_interval(i), "{i}");
+        }
+        for i in ["1m", "15m", "1h", "4h", "", "d"] {
+            assert!(!is_date_interval(i), "{i}");
+        }
     }
 }

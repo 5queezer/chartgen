@@ -211,9 +211,8 @@ test.describe("price alerts", () => {
     await createAlert(page, { condition: "greater", price: H, trigger: "every" });
     await feed(page, [H + 1, H + 2, H + 3]);
     expect(await notes(page)).toHaveLength(1);
-    await feed(page, [H - 1, H + 1]);
-    expect(await notes(page)).toHaveLength(2);
-    await feed(page, [H + 5]);
+    // One synchronous step: a live tick (far below H) between the feeds would re-arm the alert.
+    await feed(page, [H - 1, H + 1, H + 5]);
     expect(await notes(page)).toHaveLength(2);
   });
 

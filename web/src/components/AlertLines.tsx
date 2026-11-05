@@ -97,7 +97,10 @@ export function AlertLines(props: AlertLinesProps): null {
   const sync = () => {
     const chart = props.chart;
     if (!chart) return;
-    const wanted = alerts().filter((a) => a.active && a.symbol === props.symbol);
+    // Drawing and indicator alerts (ADR-0034) have no level of their own to draw.
+    const wanted = alerts().filter(
+      (a) => a.active && a.symbol === props.symbol && a.source === undefined,
+    );
     const keep = new Set(wanted.map((a) => a.id));
     for (const alertId of [...lines.keys()]) if (!keep.has(alertId)) drop(alertId);
 

@@ -10,7 +10,7 @@
 // app (Inter + tabular-nums). Native tooltip is kept for crosshair
 // hover; this header is the resting-state "current value" row.
 //
-// Indicator rows can also carry hover controls (hide, settings, remove) and
+// Indicator rows can also carry hover controls (add alert, hide, settings, remove) and
 // open settings on double-click, like TradingView. Rows without callbacks
 // (the price pane) stay non-interactive.
 //
@@ -56,6 +56,8 @@ export interface PaneHeaderProps {
   onSettings?: () => void;
   /** Remove the indicator. Omit for the price pane. */
   onRemove?: () => void;
+  /** Open the alert dialog on the indicator's plots (ADR-0034). */
+  onAddAlert?: () => void;
 }
 
 function Icon(props: { children: JSX.Element }): JSX.Element {
@@ -156,8 +158,16 @@ export function PaneHeader(props: PaneHeaderProps): JSX.Element {
           </span>
         )}
       </For>
-      <Show when={props.onToggleHidden || props.onSettings || props.onRemove}>
+      <Show when={props.onToggleHidden || props.onSettings || props.onRemove || props.onAddAlert}>
         <span class="pane-header-controls">
+          <Show when={props.onAddAlert}>
+            {(cb) => (
+              <ControlButton label={`Add alert on ${props.name}`} onClick={cb()}>
+                <path d="M4 11 V7.5 a4 4 0 0 1 8 0 V11 l1.5 1.5 h-11 z" />
+                <path d="M6.5 14 a1.5 1.5 0 0 0 3 0" />
+              </ControlButton>
+            )}
+          </Show>
           <Show when={props.onToggleHidden}>
             {(cb) => (
               <ControlButton label={`Hide ${props.name}`} onClick={cb()}>

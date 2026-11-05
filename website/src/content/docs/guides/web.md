@@ -103,7 +103,13 @@ Symbol, timeframe, chart type, price-scale mode, theme, time zone and recent sym
   interval, **O H L C**, the change versus the previous close (absolute
   and percent, green for up, red for down) and the volume (compact
   `K`/`M`/`B`). It follows the crosshair bar while you hover and shows the
-  last bar otherwise. Price precision is derived from the data.
+  last bar otherwise. Price precision is derived from the data (float noise
+  such as `385.19000244` is ignored, so equities get two decimals). Overlay
+  indicator values in the legends and the Data Window use the same price
+  precision; oscillators keep their own, and volume-type values and axes use
+  `K`/`M`/`B` with at most two decimals. Legend rows have a translucent
+  background, and light plot colors are darkened on a light theme so the
+  text stays readable.
 - **Bar-close countdown** — a badge under the last-price label on the price
   axis counts down to the close of the current bar (`MM:SS`, `HH:MM:SS`, or
   `Nd HH:MM` for long intervals) and ticks every second. It is shown only
@@ -164,6 +170,7 @@ date** button, a clock and the time zone selector.
   axis labels, the crosshair time label, the time in the price legend and
   the clock beside it (shown with its UTC offset). The choice persists
   across reloads and is part of a named layout. The default is Local.
+  Daily, weekly and monthly bars show the date alone in the crosshair label.
   The series payload carries no exchange, so **Exchange** is a heuristic
   on the symbol: crypto and `=X` pairs are UTC, `.DE` is Europe/Berlin,
   `.L` Europe/London, `.TO` America/Toronto, and everything else is
@@ -365,20 +372,52 @@ is rejected and the field turns red.
 
 ## Drawing tools
 
-The vertical toolbar on the left of the chart holds the drawing tools:
-trend line, ray, extended line, horizontal line, horizontal ray,
-vertical line, parallel channel, fib retracement, rectangle, text
-annotation and price label. Below them are a magnet toggle (off, weak,
-strong), lock all, hide all and remove all (asks for confirmation). The
-button at the top switches the cursor between crosshair and arrow.
+The vertical toolbar on the left of the chart holds the drawing tools in
+six groups, one button each: **Lines** (trend line, ray, extended line,
+horizontal line, horizontal ray, vertical line, parallel channel), **Fib**
+(retracement, trend-based extension), **Pitchfork**, **Shapes and text**
+(rectangle, text annotation, price label), **Measure** (price range, date
+range, date and price range) and **Forecasting** (long and short position).
+A group button shows the tool you used last and arms it on click. Open the
+flyout with the small chevron at its corner, or press and hold the button,
+to see every tool of the group by name; arrow keys move, `Enter` picks and
+`Esc` closes it. The last tool of each group is remembered in the browser,
+and the `Alt` shortcuts below update it too. Below the groups, always
+visible, are a magnet toggle (off, weak, strong), lock all, hide all, undo,
+redo and remove all (asks for confirmation). The button at the top switches
+the cursor between crosshair and arrow.
 
 A tool is armed for exactly one drawing: pick it, click the chart to
 place the points, and the tool is released. Pick it again or press `Esc`
 to cancel. Drawings pan and zoom with the chart.
 
+- **Measure tools** take two clicks. Price range shows a vertical arrow
+  and `+1,234.50 (+2.31%)`; date range a horizontal arrow and
+  `12 bars, 3d 4h`; date and price range a box with both. The band is
+  blue when price (date range: time) moves up or right, red otherwise. The
+  style bar shows that color and a fill color you can change. Labels move
+  below the band when there is no room above it.
+- **Fib extension (trend-based)** takes three clicks (A, B, C) and draws
+  the levels 0, 0.236, 0.382, 0.5, 0.618, 0.786, 1, 1.618, 2.618, 3.618
+  and 4.236 from C, offset by the A to B move, each labelled
+  `level (price)`. Colors are lighter in the dark theme.
+- **Pitchfork** (Andrews) takes three clicks. The median line runs from
+  the first point through the midpoint of the second and third; parallels
+  run through those two. All three lines extend along the median's
+  direction to the edge of the pane.
+- **Long position / Short position** take one click, placing the entry.
+  The reward (target) is 10% of the price span visible when you pick the
+  tool and the stop is half of that, so the ratio starts at 2.00 (with no
+  usable span: +2% and -1%, mirrored for a short). The box is 10% of the
+  visible bars wide, at least 20. Drag the entry, target or stop handle; target and stop share the
+  right edge, and each stays on its side of the entry. Labels show price
+  and percent, and `Risk/Reward Ratio: 2.00` updates while you drag. The
+  zones are green (reward) and red (risk); the labels stay centered on the
+  part of the box that is on screen. The style bar's color is the entry line.
 - **Select** a drawing by clicking it, then press `Delete` or
   `Backspace` to remove it.
-- **Right-click** a drawing for Remove and Lock/Unlock. Locked drawings
+- **Right-click** a drawing for Remove and Lock/Unlock, and on lines and
+  channels **Add alert on …** ([drawing alerts](#drawing-and-indicator-alerts)). Locked drawings
   cannot be dragged but still answer right-click, so they can be
   unlocked there. Right-clicking while a drawing is in progress cancels
   it. Hide is only available for all drawings at once (toolbar eye).
@@ -590,13 +629,14 @@ other side of the level before it can fire again.
 
 Create an alert with the bell button in the header, `Alt+A` (an alert at the
 last price, ignored while typing in a field or with a dialog open), or **+** in
-the Alerts tab. The dialog takes the condition, price, trigger and an optional
-message. Active alerts for the chart symbol are drawn as dashed lines with a
+the Alerts tab. The dialog takes the source, condition, price, trigger and an
+optional message. Active alerts for the chart symbol are drawn as dashed lines with a
 bell label; drag a line to move the level, or double-click it to edit.
 
-In the Alerts tab alerts are grouped by symbol with their status (*active*,
-*triggered*, *paused*). Hover a row for edit, pause / resume and delete;
-clicking the row switches the chart to that symbol.
+In the Alerts tab alerts are grouped by symbol with what they watch and their
+status (*active*, *triggered*, *paused*, or *inactive* with the reason). Hover
+a row for edit, pause / resume and delete; clicking the row switches the chart
+to that symbol.
 
 When an alert fires you get a toast, a short beep and, if you allow it, a
 browser notification. The browser is asked for notification permission when
@@ -607,6 +647,42 @@ the chart symbol from the live feed, other symbols from their own quotes poll
 every 5 s. **They only fire while chartgen is open in a visible tab** (with several tabs open, one of them evaluates). They
 are saved in `localStorage` under `chartgen.alerts.list` (at most 200;
 invalid entries are dropped on load) and are not shared between browsers.
+
+### Drawing and indicator alerts
+
+An alert can also watch a drawing or an indicator plot
+([ADR-0034](/chartgen/decisions/0034-drawing-and-indicator-alerts/)), with the
+same conditions and triggers. In the dialog, **Source** is what is compared
+(the symbol's price, a drawing, or an indicator plot) and **Level** what it is
+compared with (a value, or a plot).
+
+- **Drawings.** Right-click a trend line, ray, extended line, horizontal line,
+  horizontal ray or parallel channel and pick **Add alert on …**, or choose
+  the drawing as the source in the dialog. The alert compares the live close
+  with the line's value at the current bar, where the chart draws it (gaps such
+  as nights and weekends take no room; on a log scale the line is straight in
+  log price). A sloped line is extended past its points (a ray only from its
+  start on). A channel has two lines: crossing either one fires, *greater
+  than* means above both and *less than* below both. The Alerts tab reads
+  *Close crossing Trend line*. A sloped line's alert only runs while the chart
+  shows its symbol at the interval it was created on (otherwise *inactive:
+  open AAPL 1h*); horizontal lines and rays are watched for any symbol.
+  Deleting the drawing does not delete its alerts: they switch off and read
+  *inactive: drawing deleted* until the drawing is back (undo).
+- **Indicators.** Hover an indicator's legend row and click the bell
+  (**Add alert on RSI**). For an overlay such as EMA the dialog opens as the
+  price crossing its first plot (pick another one, e.g. EMA 200, under
+  **Level**: *Close crossing EMA 200*). For an oscillator such as RSI it
+  opens as the plot against a value (*RSI (14) crossing up 70*); **Level** can
+  also be another plot of the same indicator (*MACD crossing Signal*). The
+  values are those of the forming bar, checked on every live update.
+  Indicator alerts only run while the chart shows that symbol at that interval
+  with the same indicator settings; otherwise the Alerts tab reads *inactive:
+  open BTCUSDT 1h*, *indicator not on the chart* or *indicator changed* (after
+  you changed its parameters: create a new alert for the new ones).
+
+Only price alerts are drawn as lines on the chart. With several chartgen tabs
+open, one evaluates the alerts and the Alerts tab of the others says so.
 
 ### Data Window
 
@@ -709,6 +785,8 @@ sections show the parameters of each instance (`RSI (14)`, `RSI (21)`)
 ([ADR-0028](/chartgen/decisions/0028-multiple-indicator-instances/)).
 Each indicator pane legend shows controls on hover (or keyboard focus):
 
+- **Bell** opens the alert dialog on the indicator's plots
+  ([indicator alerts](#drawing-and-indicator-alerts)).
 - **Eye** hides the indicator. It disappears from the chart immediately and
   is no longer requested from the server; its chip stays, dimmed, with an eye button to
   show it again.
@@ -722,6 +800,26 @@ Each indicator pane legend shows controls on hover (or keyboard focus):
   style (solid, dashed, dotted). Style changes apply instantly on the client,
   never refetch, and also recolor the legend; hidden plots are not drawn and
   their legend value is omitted. **Defaults** resets the tab being shown.
+  Below the plots the Style tab lists the indicator's other colors, each
+  with a visibility checkbox and a color swatch (opacity included): every
+  fill (**Fill 1**, ...; two swatches where the fill has an above and a
+  below color, like the Ichimoku cloud), every horizontal level (**Level
+  70**, with a line style), the volume-profile bars (outside the value
+  area, inside it where the profile has one, and the point of control), and
+  the divergence lines (bullish and bearish, one visibility toggle). A
+  histogram with a per-bar palette (Volume, MACD) shows one swatch per
+  server color instead of a single one; a color you pick applies to that
+  server color wherever it appears, so it stays on the up bars when the
+  server lists the colors in another order. These overrides sit on top of
+  the server colors at draw time: live ticks and theme switches keep them,
+  and colors you did not touch still follow the server and the theme. They
+  are stored in the indicator's `style.geometry` (histogram palettes in the
+  plot's `palette`) next to the plot styles, so layouts keep them too
+  ([ADR-0035](/chartgen/decisions/0035-styleable-geometry/)). A fill or
+  level override applies only while the payload still has the same fill
+  color at that position (and, outside volume profiles, the same level
+  value); otherwise it is ignored and dropped when the dialog opens. Hidden
+  fills do not scale the price axis.
 - **×** removes the indicator. Other instances of the same indicator stay.
   The price pane legend cannot be removed.
 
@@ -740,6 +838,9 @@ the chart falls back to its own rotating palette.
 
 A fresh install starts with the EMA stack, Volume and RSI, like a new
 TradingView chart with its Volume pane. Stored sets are never changed.
+Panes follow the stored indicator order, also after a reload. Symbols with no
+traded volume at all (Yahoo FX pairs) show no Volume pane; the indicator stays
+in the set.
 
 The set, parameters and hidden state persist in `localStorage`
 ([ADR-0013](/chartgen/decisions/0013-indicator-visibility-and-instances/)),
@@ -835,7 +936,12 @@ etc. on the current origin.
     Keltner, Donchian, Stochastic, Cipher B / WaveTrend, the Kalman
     Volume Filter bands and OB/OS zones). The band breaks where either
     series is `null`. The Ichimoku cloud switches between green and red
-    where Senkou A and Senkou B cross. Oscillator panes always include
+    where Senkou A and Senkou B cross, and runs `displacement - 1` bars
+    past the last bar as on TradingView. The chart widens its right
+    margin to make room, and the legend and Data Window show the
+    projected spans with the future bar's time when you hover there
+    ([ADR-0033](/chartgen/decisions/0033-indicator-projection-past-last-bar/)).
+    Oscillator panes always include
     the indicator's `y_range` (e.g. RSI 0–100) and every fill edge, so
     zones at the pane edge stay visible.
   - *hbars* — volume-profile rows (`volume_profile`, `tpo`), anchored

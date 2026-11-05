@@ -7,6 +7,7 @@ import {
   MAX_SYMBOLS,
   parseRecord,
   parseRecords,
+  pointTimestamp,
   sanitizeStyles,
   saveDrawings,
   serialize,
@@ -29,6 +30,14 @@ const good = {
 describe("parseRecord", () => {
   it("accepts a well-formed record", () => {
     expect(parseRecord(good)).toEqual(good);
+  });
+
+  it("keeps a valid id (alerts refer to it, ADR-0034)", () => {
+    expect(parseRecord({ ...good, id: "overlay_1_1" })).toEqual({ ...good, id: "overlay_1_1" });
+    expect(parseRecord({ ...good, id: 5 })).toEqual(good);
+    expect(parseRecord({ ...good, id: "x".repeat(65) })).toEqual(good);
+    const [rec] = serialize([{ ...good, id: "overlay_2_1" }], null);
+    expect(rec?.id).toBe("overlay_2_1");
   });
 
   it("defaults flags and drops extra fields", () => {
@@ -58,6 +67,24 @@ describe("parseRecord", () => {
     ["string timestamp", { ...good, points: [{ timestamp: "1", value: 1 }] }],
   ])("rejects %s", (_, input) => {
     expect(parseRecord(input)).toBeNull();
+  });
+});
+
+describe("parseRecord: multi-point tools", () => {
+  const pt = (i: number) => ({ timestamp: 1000 * i, value: 10 * i });
+  it.each([
+    ["cgPriceRange", 2],
+    ["cgDateRange", 2],
+    ["cgDatePriceRange", 2],
+    ["cgFibExt", 3],
+    ["cgPitchfork", 3],
+    ["cgLong", 3],
+    ["cgShort", 3],
+  ])("%s needs exactly %i points", (name, n) => {
+    const pts = (k: number) => Array.from({ length: k }, (_, i) => pt(i + 1));
+    expect(parseRecord({ ...good, name, points: pts(n) })?.name).toBe(name);
+    expect(parseRecord({ ...good, name, points: pts(n - 1) })).toBeNull();
+    if (n < 3) expect(parseRecord({ ...good, name, points: pts(n + 1) })).toBeNull();
   });
 });
 
@@ -108,6 +135,7 @@ describe("timeAxisOf", () => {
       firstTs: 1000,
       lastTs: 10000,
       count: 10,
+      timestamps: bars,
       intervalMs: 1000,
     });
   });
@@ -268,5 +296,26 @@ describe("storage", () => {
     expect(store.has(storageKey("S1"))).toBe(false);
     expect(store.has(storageKey("S0"))).toBe(true);
     expect(store.has(storageKey("NEW"))).toBe(true);
+  });
+});
+
+describe("pointTimestamp on a gapped market", () => {
+  // Hourly bars with a 64 h weekend gap after every 5th bar.
+  const H = 3_600_000;
+  const gapped = Array.from({ length: 30 }, (_, i) => (i + Math.floor(i / 5) * 64) * H);
+  const ax = timeAxisOf(gapped)!;
+
+  it("uses the real bar time for an index inside the data", () => {
+    expect(pointTimestamp({ dataIndex: 12 }, ax)).toBe(gapped[12]);
+    expect(pointTimestamp({ dataIndex: 0 }, ax)).toBe(gapped[0]);
+  });
+
+  it("extrapolates only beyond the last bar", () => {
+    expect(pointTimestamp({ dataIndex: 31 }, ax)).toBe(gapped[29]! + 2 * H);
+    expect(pointTimestamp({ dataIndex: -2 }, ax)).toBe(gapped[0]! - 2 * H);
+  });
+
+  it("keeps an explicit timestamp", () => {
+    expect(pointTimestamp({ timestamp: 5, dataIndex: 12 }, ax)).toBe(5);
   });
 });

@@ -70,8 +70,8 @@ Status legend:
 | Hide and remove from the pane legend | ✅ | ✅ | [Managing indicators](/chartgen/guides/web/#managing-indicators), [ADR-0013](/chartgen/decisions/0013-indicator-visibility-and-instances/) |
 | Several instances of one indicator (RSI 14 and RSI 21) | ✅ | ✅ | Each with its own params, style, visibility and pane. [Managing indicators](/chartgen/guides/web/#managing-indicators), [ADR-0028](/chartgen/decisions/0028-multiple-indicator-instances/) |
 | Fills, hlines, volume profile, divergence lines | ✅ | ✅ | Server colors on the wire. The VPVR up/down split cannot be colored. [ADR-0007](/chartgen/decisions/0007-complete-series-serialization/), [ADR-0010](/chartgen/decisions/0010-overlay-geometry-rendering/), [ADR-0012](/chartgen/decisions/0012-geometry-colors-on-the-wire/) |
-| Ichimoku cloud | ✅ | ◐ | Cloud is drawn over the bars; the projection past the last bar is not drawn yet. [Differences list](/chartgen/reference/indicators/#values-match-tradingview) |
-| Geometry colors editable in Style | ✅ | ❌ | Fill, profile and divergence colors are not styleable. [ADR-0017](/chartgen/decisions/0017-indicator-plot-styles/) |
+| Ichimoku cloud | ✅ | ✅ | The cloud runs `displacement - 1` bars past the last bar, with a widened right margin, and moves with live ticks. The legend and Data Window read the projected spans there. [ADR-0033](/chartgen/decisions/0033-indicator-projection-past-last-bar/) |
+| Geometry colors editable in Style | ✅ | ✅ | Fill, level, histogram-palette, profile and divergence colors, each with a visibility toggle, in `style.geometry` ([ADR-0035](/chartgen/decisions/0035-styleable-geometry/)). |
 | Indicator on indicator (apply to another indicator's output) | ✅ | ❌ | Every indicator reads the price bars. |
 | Indicators on Heikin Ashi values | ✅ | ✅ | [`chart_style`](/chartgen/reference/mcp/) |
 | Profiles from lower-timeframe data | ✅ | ◐ | Volume and time profiles and CVD spread each bar's volume over its range. [Differences list](/chartgen/reference/indicators/#values-match-tradingview) |
@@ -90,8 +90,12 @@ Status legend:
 | Text annotation, price label | ✅ | ✅ | |
 | Magnet (off, weak, strong), lock all, hide all, remove all | ✅ | ✅ | |
 | Undo and redo | ✅ | ◐ | `Ctrl+Z` undoes, `Ctrl+Shift+Z` / `Ctrl+Y` redoes, 100 steps. Drawings only; resets on symbol switch. [Drawing tools](/chartgen/guides/web/#drawing-tools) |
-| Per-drawing styling (color, width, line style) | ✅ | ✅ | Floating style bar; rectangle fill and text color/size too. Missing vs TradingView: style templates, extend-left/right and arrow options, text bold/italic/background, per-timeframe visibility. [Drawing tools](/chartgen/guides/web/#drawing-tools) |
-| Gann, pitchfork, Elliott and chart patterns, measure, other fib tools | ✅ | ❌ | Only the eleven tools above. |
+| Per-drawing styling (color, width, line style) | ✅ | ✅ | Floating style bar; fill color for the rectangle and the measure bands, text color/size, and the entry line color of positions. Missing vs TradingView: style templates, extend-left/right and arrow options, text bold/italic/background, per-timeframe visibility. [Drawing tools](/chartgen/guides/web/#drawing-tools) |
+| Measure tools (price range, date range, date and price range) | ✅ | ✅ | No volume sum. [Drawing tools](/chartgen/guides/web/#drawing-tools) |
+| Fib extension (trend-based) | ✅ | ◐ | TradingView's default levels, not editable; no fill between levels. |
+| Pitchfork (Andrews) | ✅ | ◐ | Original pitchfork only; no Schiff or modified Schiff variants, no inner levels. |
+| Long and short position | ✅ | ◐ | Entry, target and stop handles with risk/reward; no account size, quantity or P&L. |
+| Gann, Elliott and chart patterns, other fib tools | ✅ | ❌ | Not implemented. |
 | Drawings stored per symbol | ✅ | ◐ | `localStorage`, per browser, max 500 per symbol. Shared across layouts. [Drawing tools](/chartgen/guides/web/#drawing-tools) |
 
 ## Data & live updates
@@ -115,7 +119,7 @@ Status legend:
 | Price alerts (crossing, up, down, greater, less) | ✅ | ◐ | Same conditions, once or every time, toast, beep and browser notification. Evaluated in the browser. [Sidebar and price alerts](/chartgen/guides/web/#sidebar-and-price-alerts), [ADR-0020](/chartgen/decisions/0020-client-side-price-alerts/) |
 | Alerts that fire with no tab open | ✅ | ❌ | Fire only while chartgen is open in a visible tab. The server alert tools exist for `--trade` users but are not wired to the web app. [ADR-0020](/chartgen/decisions/0020-client-side-price-alerts/) |
 | Alerts synced across devices | ✅ | ❌ | Stored per browser profile. |
-| Indicator and drawing alerts, webhooks, email, SMS | ✅ | ❌ | Price alerts only in the web app. [Push notifications](/chartgen/guides/notifications/) covers the server side. |
+| Indicator and drawing alerts, webhooks, email, SMS | ✅ | ◐ | Alerts on trend lines, rays, horizontal lines and channels, and on indicator plots against a value, another plot or the price. Indicator and sloped-line alerts only run while the chart shows their symbol and interval. No webhooks, email or SMS. [Drawing and indicator alerts](/chartgen/guides/web/#drawing-and-indicator-alerts), [ADR-0034](/chartgen/decisions/0034-drawing-and-indicator-alerts/). [Push notifications](/chartgen/guides/notifications/) covers the server side. |
 | Alert lines on the chart (drag to move) | ✅ | ✅ | [Sidebar and price alerts](/chartgen/guides/web/#sidebar-and-price-alerts) |
 
 ## Layouts & settings

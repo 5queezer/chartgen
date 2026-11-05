@@ -722,7 +722,11 @@ fn series_json(
             trimmed.hbars = profile.hbars;
             trimmed.hlines = profile.hlines;
         }
-        indicators_json.insert(key.clone(), panel_result_to_series_json(&trimmed, &visible));
+        let mut entry = panel_result_to_series_json(&trimmed, &visible);
+        if let Some(p) = ind.projection(data) {
+            entry["future"] = projection_to_json(&p, &visible);
+        }
+        indicators_json.insert(key.clone(), entry);
     }
     json!({
         "symbol": data.symbol,
@@ -1381,6 +1385,25 @@ fn panel_result_to_series_json(
         out["divlines"] = json!(divlines);
     }
 
+    out
+}
+
+// `future` block of a series indicator (ADR-0033): the values plotted on the
+// `bars` bars after the last one. `t` are their open times
+// (`data::future_bar_times`); absent when the bars have no time.
+fn projection_to_json(
+    p: &chartgen::indicator::Projection,
+    data: &chartgen::data::OhlcvData,
+) -> Value {
+    let vals = |v: &[f64]| v.iter().map(|x| finite_or_null(*x)).collect::<Vec<_>>();
+    let mut out = json!({
+        "bars": p.bars,
+        "lines": p.lines.iter().map(|(i, v)| json!({ "index": i, "values": vals(v) })).collect::<Vec<_>>(),
+        "fills": p.fills.iter().map(|(i, y1, y2)| json!({ "index": i, "y1": vals(y1), "y2": vals(y2) })).collect::<Vec<_>>(),
+    });
+    if let Some(t) = data::future_bar_times(data, p.bars) {
+        out["t"] = json!(t);
+    }
     out
 }
 
@@ -4080,6 +4103,7 @@ mod tests {
                 ("ema_stack", 891),
                 ("keltner", 90),
                 ("supertrend", 76),
+                ("ichimoku", 77),
                 ("macd", 156),
                 ("rsi", 109),
                 ("atr", 108),
@@ -4652,6 +4676,72 @@ mod tests {
         raw.interval = Some("4h".into());
         let pushed = series_tail(&raw, &indicators, "heikin_ashi", 2).unwrap();
         assert_eq!(pushed, polled);
+    }
+
+    #[test]
+    fn series_tail_carries_the_ichimoku_projection() {
+        // ADR-0033: polled and pushed tails carry the cloud past the last
+        // bar, and a forming-bar update moves it.
+        let indicators = json!(["ichimoku"]);
+        let args = json!({
+            "ticker": "ETHUSDT", "timeframe": "4h", "bars": 2, "warmup": 40,
+            "end_time": END_4H_MS, "indicators": indicators, "format": "series"
+        });
+        let polled: Value = serde_json::from_str(&response_text(&generate_chart(
+            Some(json!(1)),
+            &args,
+            fetch::DataSource::Sample,
+            None,
+        )))
+        .unwrap();
+        let warmup = warmup_arg(&args, &parse_panels(&indicators, None).0);
+        assert_eq!(warmup, 52 + 25, "ichimoku raises the warmup to its lead");
+        let mut raw = fetch::fetch_ohlcv(
+            fetch::DataSource::Sample,
+            "ETHUSDT",
+            "4h",
+            2 + warmup,
+            Some(END_4H_MS),
+        )
+        .unwrap()
+        .data;
+        raw.symbol = Some("ETHUSDT".into());
+        raw.interval = Some("4h".into());
+        let pushed = series_tail(&raw, &indicators, "candles", 2).unwrap();
+        assert_eq!(pushed, polled);
+        let ichimoku = indicators::by_name("ichimoku").unwrap();
+        let want = |data: &chartgen::data::OhlcvData| {
+            let p = ichimoku.projection(data).unwrap();
+            let vals = |v: &[f64]| v.iter().map(|x| finite_or_null(*x)).collect::<Vec<_>>();
+            (vals(&p.lines[0].1), vals(&p.lines[1].1))
+        };
+        let fut = &pushed["indicators"]["ichimoku"]["future"];
+        assert_eq!(fut["bars"], 25);
+        let (a, b) = want(&raw);
+        assert_eq!(fut["lines"][0]["index"], 2);
+        assert_eq!(fut["lines"][0]["values"], json!(a));
+        assert_eq!(fut["lines"][1]["values"], json!(b));
+        assert_eq!(fut["fills"][0]["y1"], json!(a));
+        assert_eq!(fut["fills"][0]["y2"], json!(b));
+        // The whole window ends on the same bar: same projection.
+        let full = series_tail(&raw, &indicators, "candles", raw.len()).unwrap();
+        assert_eq!(&full["indicators"]["ichimoku"]["future"], fut);
+        let last: i64 = raw.bars.last().unwrap().date.parse().unwrap();
+        let t = fut["t"].as_array().unwrap();
+        assert_eq!(t.len(), 25);
+        assert_eq!(
+            (t[0].as_i64(), t[24].as_i64()),
+            (Some(last + 14_400), Some(last + 25 * 14_400))
+        );
+        // A forming bar that makes a new high moves the newest projected spans.
+        raw.bars.last_mut().unwrap().high *= 1.5;
+        let moved = series_tail(&raw, &indicators, "candles", 2).unwrap();
+        let fut2 = &moved["indicators"]["ichimoku"]["future"];
+        assert_ne!(
+            fut2["lines"][0]["values"][24],
+            fut["lines"][0]["values"][24]
+        );
+        assert_eq!(fut2["lines"][0]["values"], json!(want(&raw).0));
     }
 
     #[test]

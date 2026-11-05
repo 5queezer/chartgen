@@ -600,3 +600,39 @@ describe("histogram colors (ADR-0026)", () => {
     expect(barColors(merged).slice(10)).toEqual(barColors(cur));
   });
 });
+
+describe("projection past the last bar (ADR-0033)", () => {
+  const project = (s: SeriesPayload, v: number): SeriesPayload => {
+    const last = s.bars.at(-1)!.t!;
+    s.indicators.sma!.future = {
+      bars: 2,
+      t: [last + STEP, last + 2 * STEP],
+      lines: [{ index: 0, values: [v, v + 1] }],
+      fills: [],
+    };
+    return s;
+  };
+
+  it("takes the tail's projection, which follows the forming bar", () => {
+    const cur = project(serve({ bars: 30, now: 100 }), 1);
+    const merged = tail(cur, project(serve({ bars: 2, now: 101 }), 7));
+    expect(merged.indicators.sma!.future).toEqual({
+      bars: 2,
+      t: [tOf(102), tOf(103)],
+      lines: [{ index: 0, values: [7, 8] }],
+      fills: [],
+    });
+  });
+
+  it("drops ours when the tail has none", () => {
+    const cur = project(serve({ bars: 30, now: 100 }), 1);
+    const merged = tail(cur, serve({ bars: 2, now: 100, tick: 1 }));
+    expect(merged.indicators.sma!.future).toBeUndefined();
+  });
+
+  it("keeps ours over an older page's", () => {
+    const cur = project(serve({ bars: 30, now: 100 }), 1);
+    const merged = older(cur, project(serve({ bars: 20, end: 71, now: 100 }), 9));
+    expect(merged.indicators.sma!.future!.lines[0]!.values).toEqual([1, 2]);
+  });
+});

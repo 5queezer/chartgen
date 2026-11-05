@@ -8,7 +8,9 @@ import { compareReading, formatPct } from "./compare";
 import {
   barLegend,
   formatPrice,
-  formatValue,
+  formatIndicatorValue,
+  isEmptyVolumePane,
+  indicatorValueKind,
   lastFiniteCloseIndex,
   pricePrecision,
   type BarLegend,
@@ -17,6 +19,7 @@ import { plotColorAt, plotsOf, resolvePlot } from "./plotStyle";
 import type { IndicatorStyle } from "../stores/indicators";
 import { keyName } from "./instances";
 import { formatBarTime } from "./timezone";
+import { FUTURE_LEGEND, futureTime, futureValue, inProjection } from "./projection";
 
 export interface DataWindowRow {
   label: string;
@@ -72,18 +75,34 @@ export function dataWindowRows(
       ? index
       : lastFiniteCloseIndex(bars);
   const precision = pricePrecision(bars.slice(-50).map((b) => b.c));
-  const barTime = bars[at]?.t;
+  // A bar of a projection past the last one (ADR-0033): projected values at
+  // its future time, no OHLC.
+  const shown = Object.keys(series.indicators).filter((k) => !opts.visible || opts.visible.has(k));
+  const future = index !== null && inProjection(series, shown, index) ? index : null;
+  const barTime = future !== null ? futureTime(series, shown, future) : bars[at]?.t;
 
   const indicators: DataWindowSection[] = [];
-  for (const [key, ind] of Object.entries(series.indicators)) {
-    if (opts.visible && !opts.visible.has(key)) continue;
+  // Legend order: the visible set holds the stored order.
+  const keys = opts.visible
+    ? [...opts.visible].filter((k) => k in series.indicators)
+    : Object.keys(series.indicators);
+  for (const key of keys) {
+    const ind = series.indicators[key]!;
+    if (isEmptyVolumePane(bars, key)) continue;
+    const kind = indicatorValueKind(key, ind.is_overlay);
     const rows = plotsOf(ind, (n) => opts.colorAt(key, n)).flatMap((p) => {
       if (!resolvePlot(p, styles[key]).visible) return [];
       const plot = p.kind === "line" ? ind.lines?.[p.index] : ind.histogram?.[p.index];
+      const value =
+        future === null
+          ? (plot?.values[at] ?? null)
+          : p.kind === "line"
+            ? futureValue(ind, p.index, bars.length, future)
+            : null;
       return [
         {
           label: p.label,
-          value: formatValue(plot?.values[at] ?? null),
+          value: formatIndicatorValue(value, kind, precision),
           color: plotColorAt(p, ind, styles[key], at),
         },
       ];
@@ -98,7 +117,7 @@ export function dataWindowRows(
       barTime != null
         ? formatBarTime(barTime * 1000, opts.timeZone, series.interval)
         : null,
-    bar: barLegend(bars, at, precision),
+    bar: future !== null ? FUTURE_LEGEND : barLegend(bars, at, precision),
     indicators,
     compare: compare.map((line) => {
       const reading = compareReading(

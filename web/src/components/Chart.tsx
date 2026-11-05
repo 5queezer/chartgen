@@ -44,9 +44,11 @@ import {
 } from "solid-js";
 import {
   dispose,
+  FormatDateType,
   init,
   LoadDataType,
   registerIndicator,
+  utils,
   type Chart as KChart,
   type IndicatorDrawCallback,
   type KLineData,
@@ -55,7 +57,9 @@ import {
 import {
   barColor,
   figureOverrides,
+  DASH,
   figureStyle,
+  paletteBarColor,
   plotColorAt,
   plotsOf,
   resolveOverride,
@@ -64,10 +68,19 @@ import {
 } from "../lib/plotStyle";
 import { keyName } from "../lib/instances";
 import {
+  applyFill,
+  divColor,
+  matchFill,
+  matchLevel,
+  shown,
+  visibleFills,
+} from "../lib/geometryStyle";
+import {
   instanceKey,
   paramLabels,
   plotKey,
   type ActiveIndicator,
+  type GeometryStyle,
   type IndicatorStyle,
 } from "../stores/indicators";
 import { paramDefaults } from "../stores/layouts";
@@ -93,20 +106,28 @@ import {
   type SeriesExtend,
   type SeriesType,
 } from "../lib/chartTypes";
-import { PALETTES, type Palette } from "../lib/theme";
+import { FONT_FAMILY, PALETTES, type Palette } from "../lib/theme";
 import type { SeriesPayload } from "../types/responses";
 import {
+  abbreviate,
   barLegend,
+  formatIndicatorValue,
+  formatPrice,
+  isEmptyVolumePane,
+  indicatorValueKind,
+  isVolumeIndicator,
   lastFiniteCloseIndex,
   pricePrecision,
   type BarLegend,
 } from "../lib/format";
-import { formatBarTime } from "../lib/timezone";
+import { readableOn } from "../lib/color";
+import { formatBarTime, isDateBar } from "../lib/timezone";
 import {
   divlineSegments,
   fillColors,
   fillPolygons,
   hbarRects,
+  hbarTiers,
   hlineStrokes,
   payloadToDataIndex,
   toDataSpace,
@@ -114,10 +135,31 @@ import {
   type Mapper,
   type SeriesIndicator,
 } from "./geometry";
+import {
+  FUTURE_LEGEND,
+  fitProjection,
+  futureFills,
+  futureLines,
+  futureTime,
+  futureValue,
+  inProjection,
+  projectionBars,
+  setShownProjection,
+} from "../lib/projection";
 import { PaneHeader, type PaneHeaderLine } from "./PaneHeader";
 import { PriceAxisControls } from "./PriceAxisControls";
 
-const FONT_FAMILY = "Inter, system-ui, sans-serif";
+// klinecharts' own date format options, in UTC.
+const UTC_FORMAT = new Intl.DateTimeFormat("en", {
+  hour12: false,
+  timeZone: "UTC",
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit",
+  hour: "2-digit",
+  minute: "2-digit",
+  second: "2-digit",
+});
 
 // TradingView-aligned rotating palette for indicator line/bar series.
 // Color assignment is deterministic per (indicator name, series index)
@@ -166,9 +208,11 @@ function plotFigureStyle(
   const ext = indicator.extendData as FigureExtend | undefined;
   const key = plotKey(kind, plotIndex);
   const d = ext?.defaults[key];
+  const o = ext?.plots[key];
+  const server = bar === undefined ? undefined : paletteBarColor(bar, o?.palette);
   return figureStyle(
     kind,
-    resolveOverride(ext?.plots[key], bar ?? d?.color ?? paletteColor(name, colorIdx), d?.width),
+    resolveOverride(o, server ?? d?.color ?? paletteColor(name, colorIdx), d?.width),
   );
 }
 
@@ -189,7 +233,10 @@ function extendFor(
   if (!ind) return NO_STYLE;
   const plots = plotsOf(ind, (n) => paletteColor(name, n));
   const defaults = Object.fromEntries(
-    plots.map((p) => [plotKey(p.kind, p.index), { color: p.defaultColor, width: p.defaultWidth }]),
+    plots.map((p) => [
+      plotKey(p.kind, p.index),
+      { color: p.defaultColor, width: p.defaultWidth },
+    ]),
   );
   return { ...figureOverrides(plots, style), defaults };
 }
@@ -275,7 +322,7 @@ function storeGeometry(
  */
 function drawGeometry(name: string): IndicatorDrawCallback {
   const regName = indicatorRegName(name);
-  return ({ ctx, visibleRange, bounding, xAxis, yAxis }) => {
+  return ({ ctx, kLineDataList, indicator, visibleRange, bounding, xAxis, yAxis }) => {
     const ind = geometryStore.get(regName);
     if (!ind) return false;
     const map: Mapper = {
@@ -291,10 +338,12 @@ function drawGeometry(name: string): IndicatorDrawCallback {
     // the server's paint order. klinecharts restores the context after draw.
     ctx.globalCompositeOperation = "destination-over";
     const fills = ind.fills ?? [];
-    for (let fi = fills.length - 1; fi >= 0; fi--) {
-      const fill = fills[fi]!;
-      const theme = fillColors(fill, name, fi);
-      for (const poly of fillPolygons(fill.y1, fill.y2, visibleRange, map)) {
+    const geo = (indicator.extendData as FigureExtend | undefined)?.geometry;
+    const paint = (polys: ReturnType<typeof fillPolygons>, fi: number) => {
+      const o = matchFill(geo?.fills?.[fi], fills[fi]!);
+      if (!shown(o)) return;
+      const theme = applyFill(fillColors(fills[fi]!, name, fi), o);
+      for (const poly of polys) {
         ctx.fillStyle = poly.up ? theme.up : theme.down;
         ctx.beginPath();
         poly.points.forEach((p, k) =>
@@ -303,39 +352,98 @@ function drawGeometry(name: string): IndicatorDrawCallback {
         ctx.closePath();
         ctx.fill();
       }
+    };
+    for (let fi = fills.length - 1; fi >= 0; fi--) {
+      paint(fillPolygons(fills[fi]!.y1, fills[fi]!.y2, visibleRange, map), fi);
+    }
+    // The cloud past the last bar (ADR-0033), joined to it at the last bar.
+    const length = kLineDataList.length;
+    for (const run of futureFills(ind, length)) {
+      if (!fills[run.index]) continue;
+      const at: Mapper = { x: (i) => map.x(run.from + i), y: map.y };
+      const all = { from: 0, to: run.values.y1.length };
+      paint(fillPolygons(run.values.y1, run.values.y2, all, at), run.index);
     }
     ctx.globalCompositeOperation = "source-over";
+    drawFutureLines(ctx, name, ind, length, indicator, map);
 
-    if (ind.hbars && ind.hbars.length > 0) {
+    if (ind.hbars && ind.hbars.length > 0 && shown(geo?.hbars)) {
+      const tiers = hbarTiers(ind.hbars, ind.hlines ?? []);
       for (const r of hbarRects(
         ind.hbars,
         bounding.width,
         bounding.height,
         map.y,
       )) {
-        ctx.fillStyle = ind.hbars[r.index]!.color!;
+        const tier = tiers[r.index];
+        const own =
+          tier === "poc"
+            ? geo?.hbars?.pocColor
+            : tier === "va"
+              ? geo?.hbars?.vaColor
+              : geo?.hbars?.color;
+        ctx.fillStyle = own ?? ind.hbars[r.index]!.color!;
         ctx.fillRect(r.x, r.y, r.width, r.height);
       }
     }
 
-    const segments = divlineSegments(
-      ind.divlines ?? [],
-      visibleRange,
-      map,
-      ind.is_overlay,
-    );
+    const segments = shown(geo?.divlines)
+      ? divlineSegments(ind.divlines ?? [], visibleRange, map, ind.is_overlay)
+      : [];
     ctx.lineWidth = 2;
     for (const s of segments) {
-      ctx.strokeStyle = s.color;
+      ctx.strokeStyle = divColor(s.kind, s.color, geo?.divlines);
       ctx.setLineDash(s.dashed ? [4, 4] : []);
       ctx.beginPath();
       ctx.moveTo(s.from.x, s.from.y);
       ctx.lineTo(s.to.x, s.to.y);
       ctx.stroke();
     }
-    drawHLines(ctx, ind, bounding, map.y);
+    drawHLines(ctx, ind, bounding, map.y, geo?.hlines);
     return false;
   };
+}
+
+/**
+ * Projected lines past the last bar (ADR-0033) in their plot's style; the
+ * line figures klinecharts draws stop at the last bar. Hidden plots are
+ * skipped.
+ */
+function drawFutureLines(
+  ctx: CanvasRenderingContext2D,
+  name: string,
+  ind: SeriesIndicator,
+  length: number,
+  indicator: { extendData?: unknown },
+  map: Mapper,
+): void {
+  const ext = indicator.extendData as FigureExtend | undefined;
+  for (const run of futureLines(ind, length)) {
+    if (ext?.plots[plotKey("line", run.index)]?.visible === false) continue;
+    const style = plotFigureStyle(name, "line", run.index, run.index, indicator) as {
+      color: string;
+      size: number;
+      dashedValue?: number[];
+    };
+    ctx.strokeStyle = style.color;
+    ctx.lineWidth = style.size;
+    ctx.setLineDash(style.dashedValue ?? []);
+    ctx.beginPath();
+    let pen = false;
+    run.values.forEach((v, i) => {
+      if (v === null) {
+        pen = false;
+        return;
+      }
+      const x = map.x(run.from + i);
+      const y = map.y(v);
+      if (pen) ctx.lineTo(x, y);
+      else ctx.moveTo(x, y);
+      pen = true;
+    });
+    ctx.stroke();
+  }
+  ctx.setLineDash([]);
 }
 
 /**
@@ -348,11 +456,18 @@ function drawHLines(
   ind: SeriesIndicator,
   bounding: { width: number; height: number },
   mapY: (value: number) => number,
+  overrides: GeometryStyle["hlines"],
 ): void {
   ctx.lineWidth = 1;
-  ctx.setLineDash([]);
   for (const h of hlineStrokes(ind.hlines ?? [], bounding.height, mapY)) {
-    ctx.strokeStyle = h.color;
+    const o = matchLevel(
+      overrides?.[h.index],
+      ind.hlines![h.index]!,
+      (ind.hbars?.length ?? 0) > 0,
+    );
+    if (!shown(o)) continue;
+    ctx.strokeStyle = o?.color ?? h.color;
+    ctx.setLineDash(o?.lineStyle && o.lineStyle !== "solid" ? DASH[o.lineStyle] : []);
     // Snap to the pixel center so a 1px line is not blurred over two rows.
     const y = Math.round(h.y) + 0.5;
     ctx.beginPath();
@@ -430,13 +545,17 @@ function ensureRegistered(name: string, shape: IndicatorShape): void {
     name: regName,
     shortName: name.toUpperCase(),
     precision: 2,
+    shouldFormatBigNumber: isVolumeIndicator(keyName(name)),
     figures: figures as never,
     draw: drawGeometry(name),
     calc: (dataList: KLineData[], indicator) => {
       const geo = geometryStore.get(regName);
-      const extents = geo ? valueExtents(geo, dataList.length) : [];
       // A hidden plot's value is null, so nothing is drawn for it.
       const ext = indicator.extendData as IndicatorStyle | undefined;
+      // Hidden fills do not scale the axis.
+      const extents = geo
+        ? valueExtents(visibleFills(geo, ext?.geometry?.fills), dataList.length)
+        : [];
       const shown = (key: string) => ext?.plots[key]?.visible !== false;
       const lineShown = Array.from({ length: shape.lines }, (_, i) => shown(`line${i}`));
       const histShown = Array.from({ length: shape.hist }, (_, i) => shown(`hist${i}`));
@@ -631,16 +750,11 @@ function valueAt(
 
 /**
  * Compact K/M/B formatter used for y-axis ticks and the right-axis
- * volume readout. Two decimals above 10k; unchanged below.
+ * volume readout of volume-type panes: at most two decimals, no `.00`.
  */
 function formatBigNumber(value: string | number): string {
   const n = typeof value === "string" ? Number(value) : value;
-  if (!Number.isFinite(n)) return String(value);
-  const abs = Math.abs(n);
-  if (abs >= 1_000_000_000) return `${(n / 1_000_000_000).toFixed(2)}B`;
-  if (abs >= 1_000_000) return `${(n / 1_000_000).toFixed(2)}M`;
-  if (abs >= 10_000) return `${(n / 1_000).toFixed(2)}K`;
-  return String(value);
+  return Number.isFinite(n) ? abbreviate(n) : String(value);
 }
 
 /** TradingView-style setStyles payload for a palette. Kept as one function so
@@ -777,6 +891,12 @@ function tvStyles(p: Palette) {
         },
       },
     },
+    // klinecharts' default overlay text family is "Helvetica Neue", which
+    // falls back to a serif face where it is not installed.
+    overlay: {
+      text: { family: FONT_FAMILY },
+      rectText: { family: FONT_FAMILY },
+    },
     separator: {
       size: 1,
       color: p.border,
@@ -853,6 +973,8 @@ export interface ChartProps {
   onToggleHidden?: (name: string) => void;
   onSettings?: (name: string) => void;
   onRemove?: (name: string) => void;
+  /** Alert on an indicator's plots (ADR-0034); offered on rows with lines. */
+  onAddAlert?: (name: string) => void;
   onChartReady?: (chart: KChart) => void;
   /** Bar index under the crosshair (one update per frame); null when it is off the chart. */
   onCrosshair?: (index: number | null) => void;
@@ -911,6 +1033,19 @@ export function Chart(props: ChartProps): JSX.Element {
   const pricePrecisionForSeries = createMemo(() =>
     pricePrecision(props.series?.bars.slice(-50).map((b) => b.c) ?? []),
   );
+  // True while the series is daily or longer: the crosshair label then shows
+  // the date alone. Read by klinecharts' formatDate below.
+  let dateBars = false;
+  // Oscillator pane keys, top to bottom, as klinecharts stacks them.
+  let paneStack: string[] = [];
+  // Shown indicator keys of the last applied snapshot.
+  let appliedNames = "";
+  // Indicator keys of the payload that are shown, in the stored order
+  // (ADR-0028) rather than the payload's.
+  const shownNames = (series: SeriesPayload): string[] => {
+    const visible = visibleKey().split("\n");
+    return visible.filter((k) => k in series.indicators && !isEmptyVolumePane(series.bars, k));
+  };
   let crosshairFrame: number | null = null;
   let layoutFrame: number | null = null;
   let styleFrame: number | null = null;
@@ -941,7 +1076,15 @@ export function Chart(props: ChartProps): JSX.Element {
       // DeepPartial on purpose — we only override the leaves we care
       // about. klinecharts merges the rest from its default theme.
       styles: tvStyles(PALETTES[untrack(theme)]) as never,
-      customApi: { formatBigNumber },
+      customApi: {
+        formatBigNumber,
+        // Date bars stand for a UTC date: crosshair and axis ticks read it
+        // in UTC whatever the selected zone, so they agree with the legend.
+        formatDate: (dtf, ts, fmt, type) =>
+          dateBars
+            ? utils.formatDate(UTC_FORMAT, ts, type === FormatDateType.XAxis ? fmt : "YYYY-MM-DD")
+            : utils.formatDate(dtf, ts, fmt),
+      },
     });
     setChart(c);
     if (c) props.onChartReady?.(c);
@@ -973,15 +1116,24 @@ export function Chart(props: ChartProps): JSX.Element {
     const onCrosshair = (data?: unknown) => {
       if (crosshairFrame !== null) return;
       const payload = data as
-        | { dataIndex?: number; paneId?: string }
+        | { dataIndex?: number; realDataIndex?: number; paneId?: string }
         | undefined;
       crosshairFrame = requestAnimationFrame(() => {
         crosshairFrame = null;
         if (!payload || typeof payload.dataIndex !== "number") {
           setCrosshairIndex(null);
-        } else {
-          setCrosshairIndex(payload.dataIndex);
+          return;
         }
+        // Right of the last bar klinecharts clamps `dataIndex` to it; over
+        // a projection (ADR-0033) the real index reads the future values.
+        const real = payload.realDataIndex;
+        const series = props.series;
+        const shown = Object.keys(untrack(paneIds));
+        setCrosshairIndex(
+          typeof real === "number" && series && inProjection(series, shown, real)
+            ? real
+            : payload.dataIndex,
+        );
       });
     };
     // Use the string form of the action type to avoid pulling in the
@@ -1027,6 +1179,11 @@ export function Chart(props: ChartProps): JSX.Element {
     }
   });
 
+  // Legend text must stay readable on the chart background: light plot
+  // colors are darkened on a light background (the swatches keep theirs).
+  const legendTextColor = (color: string) =>
+    readableOn(color, chartSettings().themes[theme()].background ?? PALETTES[theme()].bg);
+
   const recomputeHeaders = () => {
     const c = chart();
     setAxisInset(
@@ -1045,12 +1202,21 @@ export function Chart(props: ChartProps): JSX.Element {
     // Price pane header: symbol, interval and the OHLC legend of the
     // crosshair bar, or of the last bar at rest.
     const bars = series.bars;
+    const paneMap = paneIds();
+    // Over the projection past the last bar (ADR-0033) the legend reads the
+    // projected values at the future bar's time; there is no OHLC there.
+    const shown = Object.keys(paneMap);
+    const future = xi !== null && inProjection(series, shown, xi) ? xi : null;
     const legendIndex =
       xi !== null && xi >= 0 && xi < bars.length
         ? xi
         : lastFiniteCloseIndex(bars);
-    const priceLegend = barLegend(bars, legendIndex, pricePrecisionForSeries());
-    const barTime = bars[legendIndex]?.t;
+    const priceLegend =
+      future !== null
+        ? FUTURE_LEGEND
+        : barLegend(bars, legendIndex, pricePrecisionForSeries());
+    const barTime =
+      future !== null ? futureTime(series, shown, future) : bars[legendIndex]?.t;
     next.push({
       name: series.symbol ?? "price",
       params: series.interval ? `· ${series.interval}` : undefined,
@@ -1064,13 +1230,12 @@ export function Chart(props: ChartProps): JSX.Element {
 
     // Per-indicator headers. Overlays stack below the price-pane row
     // on the candle pane; oscillators anchor at their pane's top.
-    const paneMap = paneIds();
     // TradingView-style params, e.g. `(14)`; repeated indicators show their
     // defaults too, so the instances read apart (ADR-0028).
     const paramsByKey = paramLabels(props.activeIndicators, paramDefaults());
     let overlayRow = 0;
 
-    for (const name of Object.keys(series.indicators)) {
+    for (const name of shownNames(series)) {
       const ind = series.indicators[name]!;
       if (!paneMap[name]) continue; // pane not yet created (or skipped)
 
@@ -1080,6 +1245,19 @@ export function Chart(props: ChartProps): JSX.Element {
         const plot =
           p.kind === "line" ? ind.lines![p.index]! : ind.histogram![p.index]!;
         const values = plot.values;
+        const kind = indicatorValueKind(name, ind.is_overlay);
+        const text = (value: number | null) =>
+          formatIndicatorValue(value, kind, pricePrecisionForSeries());
+        // Over the projection (ADR-0033) a line reads its projected value.
+        if (future !== null) {
+          const value = p.kind === "line" ? futureValue(ind, p.index, bars.length, future) : null;
+          return {
+            label: p.label,
+            value,
+            text: text(value),
+            color: legendTextColor(plotColorAt(p, ind, style, legendIndex)),
+          };
+        }
         // At rest a plot reads its last finite value; a line that breaks at
         // trend flips (Supertrend, SAR) reads the bar the price legend reads,
         // so its inactive side shows none rather than a stale one. A
@@ -1087,10 +1265,12 @@ export function Chart(props: ChartProps): JSX.Element {
         const breaks = p.kind === "line" && "breaks" in plot && plot.breaks === true;
         const at =
           xi !== null ? xi : breaks ? legendIndex : lastFiniteIndex(values);
+        const value = valueAt(values, at);
         return {
           label: p.label,
-          value: valueAt(values, at),
-          color: plotColorAt(p, ind, style, at),
+          value,
+          text: text(value),
+          color: legendTextColor(plotColorAt(p, ind, style, at)),
         };
       });
 
@@ -1120,12 +1300,17 @@ export function Chart(props: ChartProps): JSX.Element {
       next.push({
         name: line.symbol,
         lines: [
-          { label: "", value: reading?.value ?? null, color: line.color },
+          {
+            label: "",
+            value: reading?.value ?? null,
+            text: formatPrice(reading?.value ?? null, pricePrecision(line.values)),
+            color: legendTextColor(line.color),
+          },
           {
             label: "",
             value: null,
             text: reading ? formatPct(reading.pct) : undefined,
-            color: line.color,
+            color: legendTextColor(line.color),
           },
         ],
         top: 4 + 20 * (overlayRow + 1 + i),
@@ -1189,7 +1374,7 @@ export function Chart(props: ChartProps): JSX.Element {
       Object.entries(props.series?.indicators ?? {}).map(([n, i]) => [
         n,
         i.lines?.map((l) => [l.label, l.color, l.width]),
-        i.histogram?.map((h) => [h.label, h.palette?.[0]]) ?? 0,
+        i.histogram?.map((h) => [h.label, h.palette]) ?? 0,
       ]),
     ),
   );
@@ -1258,8 +1443,12 @@ export function Chart(props: ChartProps): JSX.Element {
       const stored = geometryStore.get(indicatorRegName(name));
       // Bar replay (ADR-0023): a replay frame (lib/replay.ts) is a new slice
       // per step, so its fills and hlines are new arrays too and re-store.
+      // A tail brings a new projection past the last bar too (ADR-0033).
       const replaced =
-        ind !== undefined && (stored?.fills !== ind.fills || stored?.hlines !== ind.hlines);
+        ind !== undefined &&
+        (stored?.fills !== ind.fills ||
+          stored?.hlines !== ind.hlines ||
+          stored?.future !== ind.future);
       if (ind && stored && (stored.divlines !== ind.divlines || replaced)) {
         storeGeometry(series, [name], true);
       }
@@ -1322,19 +1511,22 @@ export function Chart(props: ChartProps): JSX.Element {
       appliedCompare = null;
       pendingOlder = null;
       c.clearData();
+      setShownProjection(0);
       const stale = untrack(paneIds);
       for (const name of Object.keys(stale)) {
         c.removeIndicator(stale[name]!, indicatorRegName(name));
         geometryStore.delete(indicatorRegName(name));
       }
       setPaneIds({});
+      paneStack = [];
+      appliedNames = "";
       setHeaders([]);
       return;
     }
 
     appliedCompare = compare;
-    const visible = new Set(visibleKey().split("\n"));
-    const names = Object.keys(series.indicators).filter((n) => visible.has(n));
+    dateBars = isDateBar(series.interval);
+    const names = shownNames(series);
     // Axis ticks, the last-price badge and the legend share one precision.
     const precision = pricePrecisionForSeries();
 
@@ -1346,7 +1538,12 @@ export function Chart(props: ChartProps): JSX.Element {
       appliedVersion !== null &&
       update.version === appliedVersion + 1;
     appliedVersion = update?.version ?? null;
-    if (follows && applyIncremental(c, series, update, names, compare)) {
+    // A pane that appears or goes away with the data (Volume once volume
+    // arrives) needs the full path.
+    const namesKey = names.join("\n");
+    const sameNames = namesKey === appliedNames;
+    appliedNames = namesKey;
+    if (follows && sameNames && applyIncremental(c, series, update, names, compare)) {
       c.setPriceVolumePrecision(precision, VOLUME_PRECISION);
       return;
     }
@@ -1368,21 +1565,47 @@ export function Chart(props: ChartProps): JSX.Element {
     //    the left edge.
     pendingOlder = null;
     const klines = seriesToKLines(series, 0, series.bars.length, compare);
+    // Room right of the last bar for any projection (Ichimoku's cloud), as
+    // TradingView extends its right margin; applyNewData scrolls to it.
+    setShownProjection(projectionBars(series, names));
+    fitProjection(c);
     c.applyNewData(klines, canPageBefore(series));
     c.setPriceVolumePrecision(precision, VOLUME_PRECISION);
 
-    // 3. Pane lifecycle. Create for new indicators, remove for dropped.
+    // 3. Pane lifecycle. klinecharts stacks new panes at the bottom and
+    // cannot move one, so the oscillator panes are kept in the stored order
+    // by keeping the longest matching prefix of the stack and recreating
+    // the panes after it.
     // untrack: this effect writes paneIds below, so reading it tracked
     // would re-run the effect forever (stack overflow).
     const currentPanes = untrack(paneIds);
     const nextPanes: Record<string, string> = {};
-    const activeNames = new Set<string>();
+    const wanted: string[] = [];
     for (const name of names) {
-      const shape = shapeFromPayload(series, name);
-      if (isEmptyShape(shape)) continue; // skip empty
-      activeNames.add(name);
+      if (!isEmptyShape(shapeFromPayload(series, name))) wanted.push(name);
+    }
+    const isOscillator = (n: string) => !series.indicators[n]!.is_overlay;
+    const wantedOsc = wanted.filter(isOscillator);
+    const stack = paneStack.filter((n) => wantedOsc.includes(n));
+    let keep = 0;
+    while (keep < stack.length && stack[keep] === wantedOsc[keep]) keep++;
+    const rebuilt = new Set([...stack.slice(keep)]);
+    // A rebuilt pane keeps the height it had.
+    const heights: Record<string, number> = {};
+    for (const name of rebuilt) {
+      const h = c.getSize(currentPanes[name]!)?.height;
+      if (h) heights[name] = h;
+    }
+    for (const name of Object.keys(currentPanes)) {
+      if (!wanted.includes(name) || rebuilt.has(name)) {
+        c.removeIndicator(currentPanes[name]!, indicatorRegName(name));
+        if (!wanted.includes(name)) geometryStore.delete(indicatorRegName(name));
+      }
+    }
+    paneStack = wantedOsc.slice(0, keep);
+    for (const name of wanted) {
       const regName = indicatorRegName(name);
-      if (currentPanes[name]) {
+      if (currentPanes[name] && !rebuilt.has(name)) {
         nextPanes[name] = currentPanes[name]!;
         continue;
       }
@@ -1391,7 +1614,7 @@ export function Chart(props: ChartProps): JSX.Element {
       // pane (isStack=true stacks panes bottom-up).
       const paneOptions = ind.is_overlay
         ? { id: CANDLE_PANE_ID }
-        : { height: 120 };
+        : { height: heights[name] ?? 120 };
       const newPaneId = c.createIndicator(
         {
           name: regName,
@@ -1404,12 +1627,9 @@ export function Chart(props: ChartProps): JSX.Element {
         true,
         paneOptions,
       );
-      if (newPaneId !== null) nextPanes[name] = newPaneId;
-    }
-    for (const name of Object.keys(currentPanes)) {
-      if (!activeNames.has(name)) {
-        c.removeIndicator(currentPanes[name]!, indicatorRegName(name));
-        geometryStore.delete(indicatorRegName(name));
+      if (newPaneId !== null) {
+        nextPanes[name] = newPaneId;
+        if (!ind.is_overlay) paneStack.push(name);
       }
     }
     setPaneIds(nextPanes);
@@ -1534,6 +1754,7 @@ export function Chart(props: ChartProps): JSX.Element {
       style={{
         "background-color": chartSettings().themes[theme()].background,
         "--axis-inset": `${axisInset()}px`,
+        "--legend-bg": chartSettings().themes[theme()].background ?? PALETTES[theme()].bg,
       }}
     >
       <div ref={container} class="chart-container" />
@@ -1565,6 +1786,13 @@ export function Chart(props: ChartProps): JSX.Element {
             onSettings={
               h().key !== undefined && props.onSettings
                 ? () => props.onSettings!(h().key!)
+                : undefined
+            }
+            onAddAlert={
+              h().key !== undefined &&
+              props.onAddAlert &&
+              (props.series?.indicators[h().key!]?.lines?.length ?? 0) > 0
+                ? () => props.onAddAlert!(h().key!)
                 : undefined
             }
             onRemove={

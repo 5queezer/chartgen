@@ -4,6 +4,9 @@
 // properties via `applyTheme`. globals.css keeps the dark values as the
 // pre-JS default, and theme.test.ts asserts the two agree.
 
+/** App font, also used by the canvas text (chart axes, overlays). */
+export const FONT_FAMILY = "Inter, system-ui, sans-serif";
+
 export type ThemeName = "dark" | "light";
 
 export const THEME_NAMES: readonly ThemeName[] = ["dark", "light"];

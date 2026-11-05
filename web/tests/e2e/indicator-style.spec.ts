@@ -52,7 +52,7 @@ test.describe("indicator style tab", () => {
     const before = await legendValue.evaluate((el) => getComputedStyle(el).color);
 
     let dialog = await openStyleTab(page);
-    await dialog.getByRole("button", { name: /color$/ }).click();
+    await dialog.getByRole("button", { name: "RSI color", exact: true }).click();
     await page.getByLabel("Color #f23645").click();
     await page.screenshot({ path: "/tmp/claude-1000/chartgen-shots/style/style-tab.png" });
     await page.keyboard.press("Escape");
@@ -61,8 +61,8 @@ test.describe("indicator style tab", () => {
     await dialog.getByRole("button", { name: "OK" }).click();
     await expect(dialog).toHaveCount(0);
 
-    // The preset keeps the opacity of RSI's server color (0.8, ADR-0026).
-    await expect(legendValue).toHaveCSS("color", "rgba(242, 54, 69, 0.8)");
+    // The preset keeps RSI's server color; legend text is opaque so it stays readable.
+    await expect(legendValue).toHaveCSS("color", "rgb(242, 54, 69)");
     await page.screenshot({ path: "/tmp/claude-1000/chartgen-shots/style/applied.png" });
     expect(before).not.toBe("rgba(242, 54, 69, 0.8)");
     expect(chartRequests).toEqual([]);
@@ -111,7 +111,7 @@ test.describe("indicator style tab", () => {
     const before = await legendValue.evaluate((el) => getComputedStyle(el).color);
 
     const dialog = await openStyleTab(page);
-    await dialog.getByRole("button", { name: /color$/ }).click();
+    await dialog.getByRole("button", { name: "RSI color", exact: true }).click();
     await page.getByLabel("Color #f23645").click();
     await page.keyboard.press("Escape");
     await dialog.getByLabel("RSI width").selectOption("4");

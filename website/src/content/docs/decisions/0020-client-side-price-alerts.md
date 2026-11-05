@@ -7,6 +7,8 @@ sidebar:
 
 **Status:** Accepted
 **Date:** 2026-11-05
+**Amended by:** [ADR-0034](/chartgen/decisions/0034-drawing-and-indicator-alerts/)
+(alerts can watch a drawing or an indicator plot)
 
 ## Context and Problem Statement
 

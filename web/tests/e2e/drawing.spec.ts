@@ -3,7 +3,7 @@
 
 import type { Page } from "@playwright/test";
 
-import { test, expect, reloadApp } from "./fixtures/app";
+import { test, expect, pickTool, reloadApp } from "./fixtures/app";
 
 const KEY = "chartgen.drawings.BTCUSDT";
 const A = { x: 300, y: 160 };
@@ -101,7 +101,7 @@ test.describe("drawing tools", () => {
   });
 
   test("horizontal ray: one click places it", async ({ bootedApp: page }) => {
-    await page.getByRole("button", { name: "Horizontal ray" }).click();
+    await pickTool(page, "Horizontal ray");
     await clickAt(page, A);
     await expect.poll(() => overlays(page)).toHaveLength(1);
     const [o] = await overlays(page);
@@ -196,7 +196,8 @@ test.describe("drawing tools", () => {
     await drawTrendLine(page);
     await clickAt(page, MID, "right");
     const menu = page.getByRole("menu", { name: "Drawing actions" });
-    await expect(menu.getByRole("menuitem")).toHaveCount(2);
+    // Remove, Lock and (a trend line can be alerted on) Add alert.
+    await expect(menu.getByRole("menuitem")).toHaveCount(3);
     await menu.getByRole("menuitem", { name: "Lock" }).click();
     expect((await stored(page))?.[0]).toMatchObject({ lock: true });
 
@@ -294,7 +295,7 @@ test.describe("drawing tools", () => {
   });
 
   test("annotation text is edited in a dialog", async ({ bootedApp: page }) => {
-    await page.getByRole("button", { name: "Text annotation" }).click();
+    await pickTool(page, "Text annotation");
     await clickAt(page, A);
     await expect.poll(() => overlays(page)).toHaveLength(1);
     const box = (await host(page).boundingBox())!;
@@ -309,8 +310,8 @@ test.describe("drawing tools", () => {
   test("Esc cancels an armed tool and keyboard shortcuts arm tools", async ({
     bootedApp: page,
   }) => {
+    await pickTool(page, "Horizontal line");
     const hline = page.getByRole("button", { name: "Horizontal line" });
-    await hline.click();
     await expect(hline).toHaveAttribute("aria-pressed", "true");
     await page.keyboard.press("Escape");
     await expect(hline).toHaveAttribute("aria-pressed", "false");

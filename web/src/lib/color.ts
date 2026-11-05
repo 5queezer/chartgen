@@ -41,3 +41,39 @@ export function formatColor(hex: string, alpha: number): string {
   const n = parseInt(hex.slice(1), 16);
   return `rgba(${(n >> 16) & 255}, ${(n >> 8) & 255}, ${n & 255}, ${a})`;
 }
+
+/** WCAG relative luminance of an `#rrggbb` color. */
+function luminance(hex: string): number {
+  const n = parseInt(hex.slice(1), 16);
+  const lin = (c: number) => {
+    const v = c / 255;
+    return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4;
+  };
+  return 0.2126 * lin((n >> 16) & 255) + 0.7152 * lin((n >> 8) & 255) + 0.0722 * lin(n & 255);
+}
+
+/** WCAG contrast ratio (1-21) of two `#rrggbb` colors. */
+export function contrastRatio(a: string, b: string): number {
+  const [hi, lo] = [luminance(a), luminance(b)].sort((x, y) => y - x) as [number, number];
+  return (hi + 0.05) / (lo + 0.05);
+}
+
+/**
+ * `color` made legible as text on `bg`, and opaque (a translucent plot color
+ * would blend into the background). On a light background a color with
+ * under 3:1 contrast is darkened (toward black, hue kept) until it reaches
+ * it. Unparsable colors are left as they are.
+ */
+export function readableOn(color: string, bg: string, min = 3): string {
+  if (!isColor(color) || !isColor(bg)) return color;
+  const back = parseColor(bg).hex;
+  const { hex } = parseColor(color);
+  if (luminance(back) <= 0.5) return hex;
+  const n = parseInt(hex.slice(1), 16);
+  const rgb = [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+  for (let k = 1; k >= 0; k -= 0.05) {
+    const out = `#${rgb.map((c) => hex2(c * k)).join("")}`;
+    if (contrastRatio(out, back) >= min) return out;
+  }
+  return "#000000";
+}

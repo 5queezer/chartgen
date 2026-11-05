@@ -510,8 +510,8 @@ describe("wire colors vs theme fallback", () => {
       (v) => 100 - v,
     );
     expect(out).toEqual([
-      { y: 70, color: "rgba(1,2,3,0.3)" },
-      { y: 30, color: "rgba(120, 123, 134, 0.80)" },
+      { y: 70, color: "rgba(1,2,3,0.3)", index: 0 },
+      { y: 30, color: "rgba(120, 123, 134, 0.80)", index: 1 },
     ]);
   });
 

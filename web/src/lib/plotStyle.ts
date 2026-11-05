@@ -31,6 +31,8 @@ export interface PlotInfo {
   defaultColor: string;
   /** Line width used when the user has not overridden it. */
   defaultWidth: number;
+  /** Histograms: the server's per-bar palette, if any (ADR-0026). */
+  palette?: readonly string[];
 }
 
 export interface ResolvedPlot {
@@ -90,6 +92,7 @@ export function plotsOf(
       label: h.label ?? `hist${i}`,
       defaultColor: h.palette?.[0] ?? colorAt(lines.length + i),
       defaultWidth: DEFAULT_WIDTH,
+      palette: h.palette,
     }),
   );
   return plots;
@@ -144,7 +147,7 @@ export function figureOverrides(
     const o = plotOverride(p, style);
     if (o) out[plotKey(p.kind, p.index)] = o;
   }
-  return { plots: out };
+  return { plots: out, ...(style?.geometry ? { geometry: style.geometry } : {}) };
 }
 
 /** An override over the defaults. */
@@ -179,8 +182,20 @@ export function barColor(
 }
 
 /**
+ * Color of a histogram bar whose server color is `server`: the user's color
+ * for that server color, else `server` itself.
+ */
+export function paletteBarColor(
+  server: string,
+  user: Readonly<Record<string, string>> | undefined,
+): string {
+  return user?.[server] ?? server;
+}
+
+/**
  * Color of a plot at bar `at`: the user's color, else (histograms) the
- * server's color of that bar, else the plot's default.
+ * server's color of that bar (through the user's palette), else the plot's
+ * default.
  */
 export function plotColorAt(
   plot: PlotInfo,
@@ -188,13 +203,13 @@ export function plotColorAt(
   style: IndicatorStyle | undefined,
   at: number,
 ): string {
-  const own = plotOverride(plot, style)?.color;
-  if (own !== undefined) return own;
+  const o = plotOverride(plot, style);
+  if (o?.color !== undefined) return o.color;
   const bar = plot.kind === "hist" ? barColor(ind.histogram?.[plot.index], at) : undefined;
-  return bar ?? plot.defaultColor;
+  return bar === undefined ? plot.defaultColor : paletteBarColor(bar, o?.palette);
 }
 
-const DASH: Record<Exclude<PlotLineStyle, "solid">, number[]> = {
+export const DASH: Record<Exclude<PlotLineStyle, "solid">, number[]> = {
   dashed: [6, 4],
   dotted: [2, 3],
 };

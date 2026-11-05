@@ -304,6 +304,23 @@ describe("export", () => {
     expect(isDirty(withStyle(a), withStyle({ plots: { "l:RSI": { width: 3 } } }))).toBe(true);
   });
 
+  it("keeps geometry styles on import and a geometry change marks the layout dirty", () => {
+    const geo = (color: string) => ({
+      plots: {},
+      geometry: { fills: { "0": { color, visible: false } }, hbars: { color } },
+    });
+    const withStyle = (style: unknown) => ({
+      ...base,
+      indicators: ["ema_stack", { name: "bbands", style }],
+    });
+    expect(parseExport(exportOf(withStyle(geo("#f00"))))!.state.indicators).toContainEqual({
+      name: "bbands",
+      style: geo("#f00"),
+    });
+    expect(isDirty(withStyle(geo("#f00")), withStyle(geo("#f00")))).toBe(false);
+    expect(isDirty(withStyle(geo("#f00")), withStyle(geo("#0f0")))).toBe(true);
+  });
+
   it("drops prototype-polluting keys", () => {
     const text = exportOf(base).replace(
       '"indicators":[',
