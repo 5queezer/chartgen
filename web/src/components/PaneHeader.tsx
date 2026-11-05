@@ -28,6 +28,8 @@ export interface PaneHeaderLine {
   value: number | null;
   /** Display color matching the series stroke. */
   color: string;
+  /** Shown instead of the formatted `value` (e.g. a percent change). */
+  text?: string;
 }
 
 export interface PaneHeaderProps {
@@ -44,6 +46,8 @@ export interface PaneHeaderProps {
   legend?: BarLegend;
   /** Distance from the top of the chart host in pixels. */
   top: number;
+  /** `data-testid` of the row. */
+  testId?: string;
   /** Hide the indicator (client-side only). Omit for rows that cannot be hidden. */
   onToggleHidden?: () => void;
   /** Open the indicator's settings dialog. */
@@ -106,7 +110,10 @@ export function PaneHeader(props: PaneHeaderProps): JSX.Element {
   return (
     <div
       class="pane-header"
-      classList={{ "pane-header-interactive": !!props.onSettings }}
+      classList={{
+        "pane-header-interactive": !!props.onSettings || !!props.onRemove,
+      }}
+      data-testid={props.testId}
       style={{ top: `${props.top}px` }}
       onDblClick={() => props.onSettings?.()}
     >
@@ -147,7 +154,7 @@ export function PaneHeader(props: PaneHeaderProps): JSX.Element {
       <For each={props.lines}>
         {(line) => (
           <span class="pane-header-value" style={{ color: line.color }}>
-            {line.label} {formatValue(line.value)}
+            {line.label} {line.text ?? formatValue(line.value)}
           </span>
         )}
       </For>

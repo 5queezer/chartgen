@@ -15,6 +15,11 @@ import {
   type TimeZoneChoice,
 } from "../lib/timezone";
 import {
+  compareSymbols,
+  parseCompare,
+  setCompareSymbols,
+} from "./compare";
+import {
   activeIndicators,
   DEFAULT_SET,
   indicatorName,
@@ -65,6 +70,8 @@ export interface LayoutState {
   scaleMode: ScaleMode;
   timeZone: TimeZoneChoice;
   indicators: ActiveIndicator[];
+  /** Compare symbols (ADR-0022); layouts saved before it have none. */
+  compare: string[];
 }
 
 export interface Layout {
@@ -163,6 +170,7 @@ export function parseState(x: unknown): LayoutState | null {
     // Layouts saved before time zones existed keep the current zone.
     timeZone: isTimeZoneChoice(x.timeZone) ? x.timeZone : timeZone(),
     indicators,
+    compare: parseCompare(x.compare),
   };
 }
 
@@ -268,6 +276,7 @@ function comparable(s: LayoutState, defaults: ParamDefaults): string {
     s.scaleMode,
     s.timeZone,
     normalizeIndicators(s.indicators, defaults),
+    s.compare,
   ]);
 }
 
@@ -378,6 +387,7 @@ function liveState(): LayoutState {
     scaleMode: scaleMode(),
     timeZone: timeZone(),
     indicators: activeIndicators(),
+    compare: compareSymbols(),
   };
 }
 
@@ -488,6 +498,7 @@ function applyState(state: LayoutState): void {
     setScaleMode(state.scaleMode);
     setTimeZone(state.timeZone);
     setActiveIndicators(state.indicators);
+    setCompareSymbols(state.compare);
   });
 }
 
@@ -510,6 +521,7 @@ export function createLayout(name: string): boolean {
     scaleMode: DEFAULT_SCALE_MODE,
     timeZone: timeZone(),
     indicators: [...DEFAULT_SET],
+    compare: [],
   };
   return batch(() => {
     const ok = update((f) => withAdded(f, name, state, newId(), Date.now()));

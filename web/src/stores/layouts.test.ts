@@ -25,6 +25,7 @@ const base: LayoutState = {
   chartType: "candles",
   scaleMode: "normal",
   timeZone: "local",
+  compare: [],
   indicators: ["ema_stack", { name: "rsi", length: 14 }],
 };
 
@@ -165,6 +166,14 @@ describe("snapshot and dirty", () => {
     expect(isDirty(base, { ...base, scaleMode: "log" })).toBe(true);
     expect(isDirty(base, { ...base, timeZone: "utc" })).toBe(true);
     expect(isDirty(base, { ...base, symbol: "ETHUSDT" })).toBe(true);
+    expect(isDirty(base, { ...base, compare: ["ETHUSDT"] })).toBe(true);
+  });
+
+  it("keeps validated compare symbols and defaults to none for older layouts", () => {
+    const withCompare = parseState({ ...base, compare: ["ethusdt", "x!", "SOLUSDT"] });
+    expect(withCompare?.compare).toEqual(["ETHUSDT", "SOLUSDT"]);
+    const { compare: _omit, ...older } = base;
+    expect(parseState(older)?.compare).toEqual([]);
   });
 
   it("parses a state saved before time zones as the live zone", () => {

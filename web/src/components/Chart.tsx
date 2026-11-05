@@ -28,6 +28,7 @@
 // Visual styling is driven by ADR-0006 (TradingView visual parity).
 
 import {
+  batch,
   createEffect,
   createSignal,
   createMemo,
@@ -67,7 +68,13 @@ import {
   type HistoryStatus,
   type SeriesUpdate,
 } from "../lib/liveFeed";
-import { theme, type ChartType } from "../stores/layout";
+import { scaleMode, theme, type ChartType } from "../stores/layout";
+import {
+  compareReading,
+  formatPct,
+  MAX_COMPARE,
+  rebaseScale,
+} from "../lib/compare";
 import { PALETTES, type Palette } from "../lib/theme";
 import type { SeriesPayload } from "../types/responses";
 import {
@@ -415,6 +422,85 @@ function ensureRegistered(name: string, shape: IndicatorShape): void {
   });
 }
 
+// --- Compare lines (ADR-0022) ------------------------------------------
+const COMPARE_REG_NAME = "chartgen_compare";
+const compareStashKey = (slot: number) => `chartgen_cmp_${slot}`;
+
+/**
+ * Extend data of the compare indicator: the bar the lines start at (0%), the
+ * bar window `calc` fills (the visible bars plus a margin, so a scroll or a
+ * new bar needs no recalculation of its own) and the line colors.
+ */
+interface CompareExtend {
+  from: number;
+  lo: number;
+  hi: number;
+  colors: string[];
+}
+
+let compareRegistered = false;
+
+/**
+ * Register (once) the indicator drawing every compare line on the candle
+ * pane. Each bar carries the symbol's as-of aligned close under
+ * `chartgen_cmp_<slot>`; `calc` only rescales it into the main series' price
+ * space (`rebaseScale`) from the first visible bar, which is what makes the
+ * klinecharts percent axis (normalised by the main close at that bar) read the
+ * compare symbol's own percent change. Display normalisation, no indicator
+ * maths (ADR-0003). Only the window of `extendData` is filled; klinecharts
+ * reads a missing row as no value.
+ */
+function ensureCompareRegistered(): void {
+  if (compareRegistered) return;
+  compareRegistered = true;
+  type Row = Record<string, number | null>;
+  const figures = Array.from({ length: MAX_COMPARE }, (_, i) => ({
+    key: `cmp${i}`,
+    title: "",
+    type: "line" as const,
+    styles: (_d: unknown, ind: { extendData?: unknown }) => ({
+      color: (ind.extendData as CompareExtend | undefined)?.colors[i],
+      size: 2,
+      style: "solid",
+    }),
+  }));
+  registerIndicator<Row>({
+    name: COMPARE_REG_NAME,
+    shortName: "COMPARE",
+    precision: 2,
+    figures: figures as never,
+    calc: (dataList: KLineData[], indicator) => {
+      const ext = indicator.extendData as CompareExtend | undefined;
+      const n = dataList.length;
+      const out: Row[] = new Array(n);
+      if (!ext || n === 0) return out;
+      const keys = ext.colors.map((_, k) => compareStashKey(k));
+      const scales = keys.map((key) =>
+        rebaseScale(
+          n,
+          (i) => dataList[i]![key] as number | null | undefined,
+          (i) => dataList[i]!.close,
+          ext.from,
+        ),
+      );
+      const hi = Math.min(n - 1, ext.hi);
+      for (let i = Math.max(0, ext.lo); i <= hi; i++) {
+        const row: Row = {};
+        keys.forEach((key, k) => {
+          const v = dataList[i]![key];
+          row[`cmp${k}`] =
+            scales[k] !== null && typeof v === "number" && Number.isFinite(v)
+              ? v * scales[k]!
+              : null;
+        });
+        out[i] = row;
+      }
+      return out;
+    },
+  });
+}
+// ------------------------------------------------------------------------
+
 function shapeFromPayload(
   series: SeriesPayload,
   name: string,
@@ -436,6 +522,7 @@ function seriesToKLines(
   series: SeriesPayload,
   from = 0,
   to = series.bars.length,
+  compare: readonly CompareLine[] = [],
 ): KLineData[] {
   const names = Object.keys(series.indicators);
   const klines: KLineData[] = [];
@@ -466,6 +553,9 @@ function seriesToKLines(
         kline[histStashKey(name, hi)] = values[i] ?? null;
       }
     }
+    compare.forEach((line, k) => {
+      kline[compareStashKey(k)] = line.values[i] ?? null;
+    });
     klines.push(kline);
   }
   return klines;
@@ -678,6 +768,8 @@ interface HeaderState {
   lines: PaneHeaderLine[];
   legend?: BarLegend;
   top: number;
+  /** Compare symbol this legend row belongs to. */
+  compare?: string;
 }
 
 /** klinecharts `candle` style overrides per toolbar chart type. */
@@ -702,6 +794,12 @@ const CHART_TYPE_STYLES: Record<ChartType, object> = {
   },
 };
 
+export interface CompareLine {
+  symbol: string;
+  color: string;
+  values: Array<number | null>;
+}
+
 export interface ChartProps {
   /** Current series payload; `null` before the first load. */
   series: SeriesPayload | null;
@@ -723,6 +821,12 @@ export interface ChartProps {
   onSettings?: (name: string) => void;
   onRemove?: (name: string) => void;
   onChartReady?: (chart: KChart) => void;
+  /**
+   * Compare symbols (ADR-0022): one line per entry, `values` aligned to
+   * `series.bars` (null where the symbol has no close yet).
+   */
+  compare?: CompareLine[];
+  onRemoveCompare?: (symbol: string) => void;
   /**
    * What changed since the previous `series` (lib/liveFeed.ts). A
    * prepended page or a tail update that directly follows the last
@@ -755,6 +859,15 @@ export function Chart(props: ChartProps): JSX.Element {
   );
   // True while the oldest loaded bar is in view.
   const [atOldest, setAtOldest] = createSignal(false);
+  // Visible bars, one animation frame behind klinecharts: the base of the
+  // percent axis and the window of the compare lines.
+  const [firstVisible, setFirstVisible] = createSignal(0);
+  const [lastVisible, setLastVisible] = createSignal(0);
+  // Compare lines already stashed on klinecharts's bars, and the extend data
+  // the indicator was last calculated with.
+  let appliedCompare: readonly CompareLine[] | null = null;
+  let compareExt: CompareExtend | null = null;
+  let rangeFrame: number | null = null;
   // Computed once per series, not per crosshair frame. pricePrecision
   // samples the last 50 closes, so only those are mapped: this reruns on
   // every live tick.
@@ -770,6 +883,8 @@ export function Chart(props: ChartProps): JSX.Element {
   // page loads one at a time; an error keeps it held until Retry.
   let pendingOlder: ((data: KLineData[], more?: boolean) => void) | null =
     null;
+  // True once the compare indicator sits on the candle pane.
+  let compareCreated = false;
   // Names of the indicators currently requested (visible). Panes and legends
   // of anything else are dropped right away, before a refetch lands. A string
   // so param-only changes do not re-run the pane effect.
@@ -829,8 +944,21 @@ export function Chart(props: ChartProps): JSX.Element {
     // runtime enum (TS-only import-elision friendly).
     c!.subscribeAction("onCrosshairChange" as never, onCrosshair);
     // The history-limit notice shows only while the oldest bar is in view.
-    const onRange = (range?: unknown) =>
-      setAtOldest((range as { from?: number } | undefined)?.from === 0);
+    const onRange = (range?: unknown) => {
+      const r = range as { from?: number; to?: number } | undefined;
+      setAtOldest(r?.from === 0);
+      if (typeof r?.from !== "number" || typeof r.to !== "number") return;
+      const { from, to } = r;
+      // One update per frame however many range events a drag fires.
+      if (rangeFrame !== null) cancelAnimationFrame(rangeFrame);
+      rangeFrame = requestAnimationFrame(() => {
+        rangeFrame = null;
+        batch(() => {
+          setFirstVisible(from);
+          setLastVisible(to);
+        });
+      });
+    };
     c!.subscribeAction("onVisibleRangeChange" as never, onRange);
     const onLeave = () => setCrosshairIndex(null);
     host.addEventListener("mouseleave", onLeave);
@@ -839,6 +967,7 @@ export function Chart(props: ChartProps): JSX.Element {
       c!.unsubscribeAction("onVisibleRangeChange" as never, onRange);
       host.removeEventListener("mouseleave", onLeave);
       if (crosshairFrame !== null) cancelAnimationFrame(crosshairFrame);
+      if (rangeFrame !== null) cancelAnimationFrame(rangeFrame);
     });
 
     // Re-layout pane headers when the chart resizes. A ResizeObserver
@@ -929,6 +1058,29 @@ export function Chart(props: ChartProps): JSX.Element {
       }
     }
 
+    // Compare legend rows stack below the overlay rows.
+    (props.compare ?? []).forEach((line, i) => {
+      const reading = compareReading(
+        line.values,
+        scaleMode() === "percentage" ? firstVisible() : 0,
+        xi,
+      );
+      next.push({
+        name: line.symbol,
+        lines: [
+          { label: "", value: reading?.value ?? null, color: line.color },
+          {
+            label: "",
+            value: null,
+            text: reading ? formatPct(reading.pct) : undefined,
+            color: line.color,
+          },
+        ],
+        top: 4 + 20 * (overlayRow + 1 + i),
+        compare: line.symbol,
+      });
+    });
+
     setHeaders(next);
   };
 
@@ -1000,6 +1152,7 @@ export function Chart(props: ChartProps): JSX.Element {
     series: SeriesPayload,
     update: SeriesUpdate,
     names: string[],
+    compare: readonly CompareLine[],
   ): boolean => {
     if (update.kind === "older") {
       // Prepend through the held "load older" callback: klinecharts keeps
@@ -1012,7 +1165,7 @@ export function Chart(props: ChartProps): JSX.Element {
       pendingOlder = null;
       storeGeometry(series, names);
       done(
-        seriesToKLines(series, 0, update.count),
+        seriesToKLines(series, 0, update.count, compare),
         update.count > 0 && canPageBefore(series),
       );
       return true;
@@ -1033,7 +1186,7 @@ export function Chart(props: ChartProps): JSX.Element {
         storeGeometry(series, [name], true);
       }
     }
-    const klines = seriesToKLines(series, from);
+    const klines = seriesToKLines(series, from, series.bars.length, compare);
     const kept = prevLength - from;
     const added = klines.length - kept;
     if (added > MAX_INCREMENTAL_BARS) {
@@ -1054,7 +1207,10 @@ export function Chart(props: ChartProps): JSX.Element {
       const x = xOf();
       // A held "load older" callback stays valid: it prepends to whatever
       // list klinecharts holds, which is still this series.
-      c.applyNewData(seriesToKLines(series), canPageBefore(series));
+      c.applyNewData(
+        seriesToKLines(series, 0, series.bars.length, compare),
+        canPageBefore(series),
+      );
       const x2 = xOf();
       if (!following && x !== undefined && x2 !== undefined) {
         c.scrollByDistance(x - x2);
@@ -1077,10 +1233,15 @@ export function Chart(props: ChartProps): JSX.Element {
     const c = chart();
     const series = props.series;
     const update = props.update ?? null;
+    // Compare values ride on the bars, so a data change needs no second
+    // calculation of the compare indicator. Read untracked: a compare-only
+    // change is the compare effect's.
+    const compare = untrack(() => props.compare ?? []);
     if (!c) return;
     if (!series) {
       // Failed or cleared load: drop the stale candles and panes.
       appliedVersion = null;
+      appliedCompare = null;
       pendingOlder = null;
       c.clearData();
       const stale = untrack(paneIds);
@@ -1093,6 +1254,7 @@ export function Chart(props: ChartProps): JSX.Element {
       return;
     }
 
+    appliedCompare = compare;
     const visible = new Set(visibleKey().split("\n"));
     const names = Object.keys(series.indicators).filter((n) => visible.has(n));
     // Axis ticks, the last-price badge and the legend share one precision.
@@ -1106,7 +1268,7 @@ export function Chart(props: ChartProps): JSX.Element {
       appliedVersion !== null &&
       update.version === appliedVersion + 1;
     appliedVersion = update?.version ?? null;
-    if (follows && applyIncremental(c, series, update, names)) {
+    if (follows && applyIncremental(c, series, update, names, compare)) {
       c.setPriceVolumePrecision(precision, VOLUME_PRECISION);
       return;
     }
@@ -1127,7 +1289,7 @@ export function Chart(props: ChartProps): JSX.Element {
     //    under the cap) tells klinecharts whether to ask for older bars at
     //    the left edge.
     pendingOlder = null;
-    const klines = seriesToKLines(series);
+    const klines = seriesToKLines(series, 0, series.bars.length, compare);
     c.applyNewData(klines, canPageBefore(series));
     c.setPriceVolumePrecision(precision, VOLUME_PRECISION);
 
@@ -1183,6 +1345,73 @@ export function Chart(props: ChartProps): JSX.Element {
     layoutFrame = requestAnimationFrame(recomputeHeaders);
   });
 
+  // Compare lines. A change of the compare data stashes the aligned closes on
+  // the bars (the series effect does that itself for a data change); a change
+  // of the first visible bar re-anchors the indicator. Outside percent mode
+  // the lines are anchored at the first loaded bar and nothing here runs per
+  // frame. Declared after the series effect, so a new series is in
+  // klinecharts before its values are stashed.
+  createEffect(() => {
+    const c = chart();
+    const lines = props.compare ?? [];
+    const percent = scaleMode() === "percentage";
+    const from = percent ? firstVisible() : 0;
+    const to = percent ? lastVisible() : Infinity;
+    if (!c) return;
+    if (lines.length === 0) {
+      if (compareCreated) c.removeIndicator(CANDLE_PANE_ID, COMPARE_REG_NAME);
+      compareCreated = false;
+      appliedCompare = null;
+      compareExt = null;
+      return;
+    }
+    const series = untrack(() => props.series);
+    const list = c.getDataList();
+    // Not in step with the series yet (a load in flight): a later run stashes.
+    if (!series || list.length !== series.bars.length) return;
+    const stash = lines !== appliedCompare;
+    if (stash) {
+      lines.forEach((line, k) => {
+        const key = compareStashKey(k);
+        for (let i = 0; i < list.length; i++) {
+          list[i]![key] = line.values[i] ?? null;
+        }
+      });
+      appliedCompare = lines;
+    }
+    const colors = lines.map((l) => l.color);
+    const prev = compareExt;
+    if (
+      !stash &&
+      compareCreated &&
+      prev &&
+      prev.from === from &&
+      prev.lo <= from &&
+      prev.hi >= to + 1 &&
+      prev.colors.join() === colors.join()
+    ) {
+      return;
+    }
+    // The visible bars plus one screen on each side.
+    const span = Math.max(1, to - from);
+    const extendData: CompareExtend = {
+      from,
+      lo: percent ? Math.max(0, from - span) : 0,
+      hi: percent ? to + span : Infinity,
+      colors,
+    };
+    compareExt = extendData;
+    ensureCompareRegistered();
+    if (compareCreated) {
+      c.overrideIndicator({ name: COMPARE_REG_NAME, extendData }, CANDLE_PANE_ID);
+    } else {
+      c.createIndicator({ name: COMPARE_REG_NAME, extendData }, true, {
+        id: CANDLE_PANE_ID,
+      });
+      compareCreated = true;
+    }
+  });
+
   onCleanup(() => {
     if (layoutFrame !== null) cancelAnimationFrame(layoutFrame);
     if (container) dispose(container);
@@ -1199,6 +1428,11 @@ export function Chart(props: ChartProps): JSX.Element {
             lines={h().lines}
             legend={h().legend}
             top={h().top}
+            testId={
+              h().compare !== undefined
+                ? `compare-legend-${h().compare}`
+                : undefined
+            }
             onToggleHidden={
               h().key !== undefined && props.onToggleHidden
                 ? () => props.onToggleHidden!(h().key!)
@@ -1210,9 +1444,11 @@ export function Chart(props: ChartProps): JSX.Element {
                 : undefined
             }
             onRemove={
-              h().key !== undefined && props.onRemove
-                ? () => props.onRemove!(h().key!)
-                : undefined
+              h().compare !== undefined && props.onRemoveCompare
+                ? () => props.onRemoveCompare!(h().compare!)
+                : h().key !== undefined && props.onRemove
+                  ? () => props.onRemove!(h().key!)
+                  : undefined
             }
           />
         )}
