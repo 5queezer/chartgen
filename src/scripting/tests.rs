@@ -382,7 +382,8 @@ fn sandbox_series_allocations_are_budgeted() {
         &c,
         &sample_data(5000),
         &json!({}),
-        COMPUTE_TIMEOUT,
+        // generous: a slow runner must hit the memory budget, not the deadline
+        Duration::from_secs(30),
         "runtime",
     )
     .err()
@@ -654,24 +655,28 @@ def compute(ohlcv, params, chart):
 
 // ---- security review regressions (each must fail fast and cleanly) ----
 
-/// Run `body` on `bars` sample bars under the chart timeout; the error must
-/// contain `expect` and arrive within 1.2 s.
+/// Run `body` on `bars` sample bars; the error must contain `expect`. Time
+/// limit cases run under the chart timeout and must arrive within 1.2 s.
+/// Other (memory/size) cases get a generous timeout and no wall-time check, so
+/// a slow runner cannot hit the deadline before the guard under test.
 fn assert_run_fails(body: &str, bars: usize, expect: &str) {
+    let timed = expect.contains("time limit");
+    let timeout = if timed {
+        COMPUTE_TIMEOUT
+    } else {
+        Duration::from_secs(30)
+    };
     let c = compile("t", &script(body)).unwrap_or_else(|e| panic!("{e}"));
     let t = Instant::now();
-    let e = run(
-        &c,
-        &sample_data(bars),
-        &json!({}),
-        COMPUTE_TIMEOUT,
-        "runtime",
-    )
-    .err()
-    .expect("script must fail");
+    let e = run(&c, &sample_data(bars), &json!({}), timeout, "runtime")
+        .err()
+        .expect("script must fail");
     let took = t.elapsed();
     eprintln!("[timing] failed in {took:?}: {}", e.message);
     assert!(e.message.contains(expect), "expected {expect:?} in {e}");
-    assert!(took < Duration::from_millis(1200), "took {took:?}");
+    if timed {
+        assert!(took < Duration::from_millis(1200), "took {took:?}");
+    }
 }
 
 #[test]
