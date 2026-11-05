@@ -821,6 +821,8 @@ export interface ChartProps {
   onSettings?: (name: string) => void;
   onRemove?: (name: string) => void;
   onChartReady?: (chart: KChart) => void;
+  /** Bar index under the crosshair (one update per frame); null when it is off the chart. */
+  onCrosshair?: (index: number | null) => void;
   /**
    * Compare symbols (ADR-0022): one line per entry, `values` aligned to
    * `series.bars` (null where the symbol has no close yet).
@@ -1101,6 +1103,8 @@ export function Chart(props: ChartProps): JSX.Element {
     chart()?.setTimezone(props.timeZone);
     recomputeHeaders();
   });
+
+  createEffect(() => props.onCrosshair?.(crosshairIndex()));
 
   // React to crosshair changes by recomputing header values only.
   createEffect(() => {

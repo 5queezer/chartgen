@@ -332,9 +332,9 @@ dropped. The list holds at most 50 symbols, the `get_quotes` limit.
 
 ## Sidebar and price alerts
 
-The right sidebar has two tabs, **Watchlist** and **Alerts**; the tab you
-last used is remembered, and **»** collapses the whole sidebar. The Alerts
-tab shows the number of active alerts. The watchlist polls quotes only while
+The right sidebar has four icon tabs, **Watchlist**, **Alerts**, **Data
+Window** and **Object Tree**; the tab you last used is remembered, and **»**
+collapses the whole sidebar. The Alerts tab shows the number of active alerts. The watchlist polls quotes only while
 its tab is showing.
 
 An alert watches one symbol's price. The conditions follow TradingView:
@@ -369,6 +369,30 @@ the chart symbol from the live feed, other symbols from their own quotes poll
 every 5 s. **They only fire while chartgen is open in a visible tab** (with several tabs open, one of them evaluates). They
 are saved in `localStorage` under `chartgen.alerts.list` (at most 200;
 invalid entries are dropped on load) and are not shared between browsers.
+
+### Data Window
+
+The **Data Window** tab lists everything the legend knows about one bar: the
+symbol and interval, the bar's date and time, open, high, low, close, change
+(absolute and percent) and volume, then one section per visible indicator with
+each plot's value in its plot color (plots hidden in the Style tab are left
+out), then the compare symbols with their value and percent change. The values
+follow the crosshair and show the last bar while the crosshair is off the
+chart. The time uses the time zone chosen in the bottom bar; daily, weekly
+and monthly bars show the date only.
+
+### Object Tree
+
+The **Object Tree** tab lists what is on the chart:
+
+- **Main series**: the symbol and interval.
+- **Compare**: each compare symbol, with remove.
+- **Indicators**: hide / show, settings and remove, like the legend controls.
+- **Drawings**: each with a short description (for example
+  `Trend line 2026-11-03 → 11-04`) and hide / show, lock / unlock and remove.
+  Clicking a row scrolls the chart to the drawing if it is out of view and
+  selects it, so Delete removes it.
+- **Alerts**: the chart symbol's alerts; clicking one opens it for editing.
 
 ## Layouts
 

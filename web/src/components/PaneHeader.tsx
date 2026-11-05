@@ -19,7 +19,7 @@
 
 import { For, Show, type JSX } from "solid-js";
 
-import type { BarLegend } from "../lib/format";
+import { formatValue, type BarLegend } from "../lib/format";
 
 export interface PaneHeaderLine {
   /** Series label, e.g. "Money Flow" or "RSI". */
@@ -94,16 +94,6 @@ function ControlButton(props: {
       <Icon>{props.children}</Icon>
     </button>
   );
-}
-
-function formatValue(v: number | null): string {
-  if (v === null || !Number.isFinite(v)) return "—";
-  const abs = Math.abs(v);
-  // Four decimals under 1, two decimals between 1-10_000, K/M above.
-  if (abs >= 1_000_000) return `${(v / 1_000_000).toFixed(2)}M`;
-  if (abs >= 10_000) return `${(v / 1_000).toFixed(2)}K`;
-  if (abs >= 1) return v.toFixed(2);
-  return v.toFixed(4);
 }
 
 export function PaneHeader(props: PaneHeaderProps): JSX.Element {

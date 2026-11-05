@@ -1,4 +1,5 @@
-// Right sidebar with TradingView-style tabs: Watchlist | Alerts. The
+// Right sidebar with TradingView-style icon tabs: Watchlist | Alerts | Data
+// Window | Object Tree. The
 // collapsed state is the watchlist store's, so the edge strip is the
 // Watchlist's own and expanding it returns to the last tab. The tab is kept
 // in localStorage. Switching tabs unmounts the other panel, so the
@@ -10,17 +11,31 @@ import type { McpSession } from "../mcp";
 import { alerts } from "../stores/alerts";
 import { watchlistCollapsed } from "../stores/watchlist";
 import { AlertsPanel } from "./AlertsPanel";
+import { DataWindow, type DataWindowProps } from "./DataWindow";
+import { ObjectTree, type ObjectTreeProps } from "./ObjectTree";
 import { Watchlist } from "./Watchlist";
 
-const TABS = ["watchlist", "alerts"] as const;
+const TABS = ["watchlist", "alerts", "data", "tree"] as const;
 type Tab = (typeof TABS)[number];
-const LABELS: Record<Tab, string> = { watchlist: "Watchlist", alerts: "Alerts" };
+const LABELS: Record<Tab, string> = {
+  watchlist: "Watchlist",
+  alerts: "Alerts",
+  data: "Data Window",
+  tree: "Object Tree",
+};
+// 16x16 stroke paths.
+const ICONS: Record<Tab, string> = {
+  watchlist: "M2 4h12M2 8h12M2 12h8",
+  alerts: "M8 2a4 4 0 0 0-4 4v3l-1.5 2.5h11L12 9V6a4 4 0 0 0-4-4zM6.5 13.5a1.5 1.5 0 0 0 3 0",
+  data: "M2 3h12v10H2zM2 6.5h12M6 6.5V13",
+  tree: "M3 3h4M6 8h4M6 13h4M4.5 4v9M4.5 8H6M4.5 13H6",
+};
 const KEY = "chartgen.sidebar.tab";
 
 function loadTab(): Tab {
   try {
     const v = typeof localStorage === "undefined" ? null : localStorage.getItem(KEY);
-    return v === "alerts" ? "alerts" : "watchlist";
+    return TABS.find((t) => t === v) ?? "watchlist";
   } catch {
     return "watchlist";
   }
@@ -42,6 +57,8 @@ export interface SidebarProps {
   session: McpSession;
   /** Gates polling — true once auth is ready. */
   enabled: boolean;
+  /** What the Data Window and Object Tree read from the chart. */
+  panels: DataWindowProps & ObjectTreeProps;
 }
 
 export function Sidebar(props: SidebarProps): JSX.Element {
@@ -67,10 +84,24 @@ export function Sidebar(props: SidebarProps): JSX.Element {
                 type="button"
                 role="tab"
                 aria-selected={tab() === t}
-                class="flex-1 px-3 py-2 text-sm cursor-pointer border-b-2 border-transparent text-[color:var(--color-fg-muted)] aria-selected:text-[color:var(--color-fg)] aria-selected:border-[color:var(--color-accent)]"
+                class="flex-1 px-3 py-2 text-sm cursor-pointer inline-flex items-center justify-center border-b-2 border-transparent text-[color:var(--color-fg-muted)] aria-selected:text-[color:var(--color-fg)] aria-selected:border-[color:var(--color-accent)]"
+                title={LABELS[t]}
                 onClick={() => setSidebarTab(t)}
               >
-                {LABELS[t]}
+                <svg
+                  aria-hidden="true"
+                  viewBox="0 0 16 16"
+                  width="16"
+                  height="16"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="1.5"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                >
+                  <path d={ICONS[t]} />
+                </svg>
+                <span class="sr-only">{LABELS[t]}</span>
                 <Show when={t === "alerts" && activeCount() > 0}>
                   <span class="ml-1.5 text-xs text-[color:var(--color-fg-muted)]">
                     {activeCount()}
@@ -80,8 +111,17 @@ export function Sidebar(props: SidebarProps): JSX.Element {
             )}
           </For>
         </div>
-        <Show when={tab() === "alerts"} fallback={<Watchlist embedded session={props.session} enabled={props.enabled} />}>
+        <Show when={tab() === "watchlist"}>
+          <Watchlist embedded session={props.session} enabled={props.enabled} />
+        </Show>
+        <Show when={tab() === "alerts"}>
           <AlertsPanel />
+        </Show>
+        <Show when={tab() === "data"}>
+          <DataWindow {...props.panels} />
+        </Show>
+        <Show when={tab() === "tree"}>
+          <ObjectTree {...props.panels} />
         </Show>
       </aside>
     </Show>

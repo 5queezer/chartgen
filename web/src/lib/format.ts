@@ -146,3 +146,13 @@ export function barLegend(
     change: formatChange(bar.c, prevClose, precision),
   };
 }
+
+export function formatValue(v: number | null): string {
+  if (v === null || !Number.isFinite(v)) return "—";
+  const abs = Math.abs(v);
+  // Four decimals under 1, two decimals between 1-10_000, K/M above.
+  if (abs >= 1_000_000) return `${(v / 1_000_000).toFixed(2)}M`;
+  if (abs >= 10_000) return `${(v / 1_000).toFixed(2)}K`;
+  if (abs >= 1) return v.toFixed(2);
+  return v.toFixed(4);
+}

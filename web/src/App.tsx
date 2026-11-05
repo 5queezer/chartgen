@@ -17,7 +17,7 @@ import { BottomBar } from "./components/BottomBar";
 import { AlertDialog, AlertButton } from "./components/AlertDialog";
 import { AlertLines } from "./components/AlertLines";
 import { Chart, paletteColor } from "./components/Chart";
-import { DrawingToolbar } from "./components/DrawingToolbar";
+import { DrawingToolbar, type DrawingsApi } from "./components/DrawingToolbar";
 import { IndicatorChips } from "./components/IndicatorChips";
 import { IndicatorPicker } from "./components/IndicatorPicker";
 import { IndicatorSettings } from "./components/IndicatorSettings";
@@ -321,6 +321,10 @@ export function App(): JSX.Element {
     });
   });
   // ---------------------------------------------------------------------
+  // Sidebar tabs: Data Window (crosshair bar) and Object Tree (drawings).
+  const [crosshair, setCrosshair] = createSignal<number | null>(null);
+  const [drawings, setDrawings] = createSignal<DrawingsApi | null>(null);
+  // ---------------------------------------------------------------------
   // Other symbols with active alerts are evaluated from their own quotes poll.
   createAlertQuotes(session, authReady, symbol);
 
@@ -477,7 +481,7 @@ export function App(): JSX.Element {
         active={activeIndicators()}
       />
       <main class="flex flex-1 min-h-0">
-        <DrawingToolbar chart={chart()} symbol={symbol()} />
+        <DrawingToolbar chart={chart()} symbol={symbol()} onApi={setDrawings} />
         <AlertLines chart={chart()} symbol={symbol()} />
         <div class="flex-1 min-w-0">
           <Chart
@@ -493,11 +497,24 @@ export function App(): JSX.Element {
             onSettings={(n) => setSettingsIndex(indexOf(n))}
             onRemove={removeIndicator}
             onChartReady={setChart}
+            onCrosshair={setCrosshair}
             compare={compareLines()}
             onRemoveCompare={removeCompare}
           />
         </div>
-        <Sidebar session={session} enabled={authReady()} />
+        <Sidebar
+          session={session}
+          enabled={authReady()}
+          panels={{
+            series: live()?.series ?? null,
+            crosshair: crosshair(),
+            styles: plotStyles(),
+            compare: compareLines(),
+            timeZone: resolveTimeZone(timeZone(), symbol()),
+            drawings: drawings(),
+            onSettings: (n) => setSettingsIndex(indexOf(n)),
+          }}
+        />
       </main>
       <BottomBar chart={chart()} series={live()?.series ?? null} loadUntil={feed.loadUntil} />
       <AlertDialog />

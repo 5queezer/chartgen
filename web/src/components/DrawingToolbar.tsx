@@ -7,6 +7,7 @@
 import {
   createEffect,
   createSignal,
+  type Accessor,
   For,
   on,
   onCleanup,
@@ -251,6 +252,11 @@ const TOOLS: readonly ToolDef[] = [
   },
 ];
 
+/** Display name of each drawing tool. */
+export const DRAWING_LABELS = Object.fromEntries(
+  TOOLS.map((t) => [t.name, t.label]),
+) as Record<DrawingName, string>;
+
 const SHORTCUTS: Record<string, DrawingName> = Object.fromEntries(
   TOOLS.filter((t) => t.code).map((t) => [t.code, t.name]),
 );
@@ -263,11 +269,28 @@ const menuItemClass =
 const LIMIT_NOTICE = `Drawing limit reached (${MAX_DRAWINGS})`;
 const SAVE_ERROR = "Drawings not saved: storage full";
 
+/** A drawing of the current symbol, as the Object Tree lists it. */
+export interface DrawingItem extends DrawingRecord {
+  id: string;
+}
+
+/** What the Object Tree needs from the drawing controller. */
+export interface DrawingsApi {
+  list: Accessor<DrawingItem[]>;
+  /** Scroll to the drawing and select it as a click on it would. */
+  select: (id: string) => void;
+  setVisible: (id: string, visible: boolean) => void;
+  setLocked: (id: string, lock: boolean) => void;
+  remove: (id: string) => void;
+}
+
 export interface DrawingToolbarProps {
   /** The klinecharts instance; null until the chart has mounted. */
   chart: KChart | null;
   /** Active symbol — selects which stored drawings are shown. */
   symbol: string;
+  /** Receives the drawings API once, at mount. */
+  onApi?: (api: DrawingsApi) => void;
 }
 
 export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
@@ -276,6 +299,7 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
   const [crosshair, setCrosshair] = createSignal(true);
   const [lockAll, setLockAll] = createSignal(false);
   const [hideAll, setHideAll] = createSignal(false);
+  const [items, setItems] = createSignal<DrawingItem[]>([]);
   const [saveFailed, setSaveFailed] = createSignal(false);
   const [limitHit, setLimitHit] = createSignal(false);
   const [menu, setMenu] = createSignal<{
@@ -313,6 +337,7 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
   const syncFlags = () => {
     setLockAll(current.length > 0 && current.every((r) => r.lock));
     setHideAll(current.length > 0 && current.every((r) => !r.visible));
+    setItems(ids.flatMap((id) => (canon.has(id) ? [{ id, ...canon.get(id)! }] : [])));
   };
 
   const persist = () => setSaveFailed(!saveDrawings(props.symbol, current));
@@ -553,6 +578,52 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
     rebuild(prev);
     persist();
   };
+
+  const patchOne = (id: string, patch: { lock: boolean } | { visible: boolean }) => {
+    if (offRange.has(id)) return;
+    props.chart?.overrideOverlay({ id, ...patch });
+    commit();
+  };
+
+  // klinecharts has no select call: scroll the first point into view, then
+  // send the mouse events a click on that point would.
+  const select = (id: string) => {
+    const chart = props.chart;
+    const o = chart?.getOverlayById(id);
+    const dom = chart?.getDom("candle_pane", "main" as never);
+    const p = o?.points[0];
+    if (!chart || !o || !dom || p?.timestamp === undefined || p.value === undefined || !o.visible) return;
+    const { from, to } = chart.getVisibleRange();
+    const index = chart.getDataList().findIndex((d) => d.timestamp >= p.timestamp!);
+    if (index < from || index > to) {
+      chart.scrollToDataIndex(index + Math.round((to - from) / 2));
+    }
+    const at = chart.convertToPixel(
+      { timestamp: p.timestamp, value: p.value },
+      { paneId: "candle_pane" },
+    ) as { x?: number; y?: number };
+    const box = dom.getBoundingClientRect();
+    const clientX = box.left + (at.x ?? 0);
+    const clientY = box.top + (at.y ?? 0);
+    const target = document.elementFromPoint(clientX, clientY) ?? dom;
+    const fire = (type: string) =>
+      target.dispatchEvent(
+        new MouseEvent(type, { bubbles: true, clientX, clientY, button: 0 }),
+      );
+    // klinecharts hit-tests and detects clicks across events, not within
+    // one task, so the three are spaced out.
+    ["mousemove", "mousedown", "mouseup"].forEach((type, i) =>
+      window.setTimeout(() => fire(type), i * 50),
+    );
+  };
+
+  props.onApi?.({
+    list: items,
+    select,
+    setVisible: (id, visible) => patchOne(id, { visible }),
+    setLocked: (id, lock) => patchOne(id, { lock }),
+    remove: (id) => removeIds([id]),
+  });
 
   const menuAction = (action: "remove" | "lock") => {
     const m = menu();
