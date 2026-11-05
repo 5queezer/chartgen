@@ -97,7 +97,10 @@ A script defines three things at the top level:
   `type` (`int`, `float`, `bool` or `string`), a `default` of that type,
   and optional `min`, `max`, `desc`, and `options` (a list of allowed
   strings, for string params). Chart requests are validated against it,
-  like the built-ins' parameters. Use `PARAMS = []` for none.
+  like the built-ins' parameters. Use `PARAMS = []` for none. A param
+  cannot be called `name`, `id`, `hidden` or `style`: those are keys of an
+  indicator entry on the wire and in the web app
+  ([ADR-0028](/chartgen/decisions/0028-multiple-indicator-instances/)).
 - **`META`**: a dict with `title` (the panel label, default: the name),
   `overlay` (`True` draws on the price chart, default `False`) or
   `category` (`"overlay"` / `"panel"`), and an optional `description`.

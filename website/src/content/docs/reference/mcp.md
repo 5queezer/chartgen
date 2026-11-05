@@ -172,6 +172,11 @@ format), so results map back to their entries whatever the order:
   first, so an automatic key never takes one.
 - A repeated id, or an id that is not a 1 to 64 character string, is a
   tool error (`Duplicate indicator id: …`, `Invalid indicator id: …`).
+- An id equal to the name of an entry without an id is a tool error, since
+  both would get that key (`Indicator id macd is also the name of an entry
+  without an id; give that entry an id too`).
+- `generate_chart` takes at most 50 entries (`At most 50 indicators per
+  chart.`); `subscribe_chart` at most 10.
 
 ```json
 "indicators": [

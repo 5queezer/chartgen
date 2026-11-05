@@ -42,7 +42,15 @@ keyed by the id instead of the name in `indicators` and `indicator_errors`.
 Entries without an id keep their name as key. A name requested again
 without an id is keyed `name#2`, `name#3`, and so on. Explicit ids are
 reserved first, so an automatic key never takes one. A repeated or invalid
-id is a tool error. The id is not passed to the indicator as a parameter.
+id is a tool error, and so is an id equal to the name of an entry without
+one (`[{"name": "rsi", "id": "macd"}, "macd"]`): both would claim the
+key `macd`. The id is not passed to the indicator as a parameter, and a
+scripted indicator may not declare a param called `name`, `id`, `hidden` or
+`style` (keys of an entry on the wire and in the web app).
+Key assignment keeps a next-free counter per name, so it is linear in the
+number of entries. `generate_chart` accepts at most 50 entries (the web
+app's layout cap; `subscribe_chart` keeps its limit of 10); more is a tool
+error.
 
 **Return an array in request order.** This also separates instances, but it
 changes the payload shape for every client and makes the client depend on
@@ -77,9 +85,11 @@ merge, and replay lags and recomputes.
   schema defaults.
 - Settings, hide and remove act on a single instance.
 - Legends show each instance's params. When an indicator is active more
-  than once, its legends, chips, object-tree rows and data-window sections
-  fill in the schema defaults so the instances read apart, for example
-  `RSI (14)` and `RSI (21)`.
+  than once, its legends, chips, object-tree rows, data-window sections and
+  settings dialog title fill in the schema defaults and show the params
+  that differ between the instances, so they read apart: `RSI (14)` and
+  `RSI (21)`. Instances that differ in nothing show their first three
+  params, so an indicator with many inputs (Cipher B) keeps a short label.
 
 Loading is a transparent migration. Sets and layouts saved before this ADR
 have no ids, and their names are unique (ADR-0013 deduplicated them), so
