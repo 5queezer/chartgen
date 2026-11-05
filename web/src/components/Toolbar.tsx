@@ -363,8 +363,8 @@ export function Toolbar(props: ToolbarProps): JSX.Element {
         title="Chart settings"
       >
         <svg {...iconProps}>
-          <circle cx="9" cy="9" r="2.5" />
-          <path d="M9 1.5v2.5M9 14v2.5M1.5 9H4M14 9h2.5M3.7 3.7l1.8 1.8M12.5 12.5l1.8 1.8M3.7 14.3l1.8-1.8M12.5 5.5l1.8-1.8" />
+          <path d="M7.6 3.2L7.8 1.3L10.2 1.3L10.4 3.2L12.1 3.9L13.6 2.7L15.3 4.4L14.1 5.9L14.8 7.6L16.7 7.8L16.7 10.2L14.8 10.4L14.1 12.1L15.3 13.6L13.6 15.3L12.1 14.1L10.4 14.8L10.2 16.7L7.8 16.7L7.6 14.8L5.9 14.1L4.4 15.3L2.7 13.6L3.9 12.1L3.2 10.4L1.3 10.2L1.3 7.8L3.2 7.6L3.9 5.9L2.7 4.4L4.4 2.7L5.9 3.9z" stroke-linejoin="round" />
+          <circle cx="9" cy="9" r="2.3" />
         </svg>
       </button>
       <button
