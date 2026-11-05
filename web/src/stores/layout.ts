@@ -3,7 +3,7 @@
 // `chartgen.layout.` prefix; every value is validated on load and falls
 // back to its default if missing or corrupt.
 
-import { createSignal } from "solid-js";
+import { batch, createSignal } from "solid-js";
 
 import { applyTheme, THEME_NAMES, type ThemeName } from "../lib/theme";
 import { isTimeframe, type Timeframe } from "../lib/timeframe";
@@ -181,15 +181,24 @@ export {
 
 /** Auto-fit on or off; turning it on releases the price-to-bar ratio lock. */
 export function setAutoScale(next: boolean): void {
-  setAutoScaleSignal(next);
-  if (next && lockRatio()) setLockRatio(false);
+  batch(() => {
+    setAutoScaleSignal(next);
+    if (next && lockRatio()) {
+      setLockRatioSignal(false);
+      persist("lockRatio", false);
+    }
+  });
 }
 
-/** Lock the price-to-bar ratio; locking turns auto-fit off. */
+/** Lock the price-to-bar ratio; locking turns auto-fit off, releasing it turns it back on. */
 export function setLockRatio(next: boolean): void {
-  setLockRatioSignal(next);
-  persist("lockRatio", next);
-  if (next) setAutoScaleSignal(false);
+  const was = lockRatio();
+  batch(() => {
+    setLockRatioSignal(next);
+    persist("lockRatio", next);
+    if (next) setAutoScaleSignal(false);
+    else if (was) setAutoScaleSignal(true);
+  });
 }
 
 /** Flip the price axis so higher prices are at the bottom. */

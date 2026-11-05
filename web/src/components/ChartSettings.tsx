@@ -23,8 +23,10 @@ import {
   type ThemeOverrides,
 } from "../stores/chartSettings";
 import {
+  autoScale,
   invertScale,
   lockRatio,
+  setAutoScale,
   setInvertScale,
   setLockRatio,
   theme,
@@ -60,8 +62,15 @@ function SettingsForm(props: { onClose: () => void }): JSX.Element {
   const [draft, setDraft] = createSignal<Settings>(snapshot);
   const [tab, setTab] = createSignal<string>("symbol");
   let committed = false;
+  // Invert and lock take effect at once (they are layout state, not
+  // settings), so Cancel puts back whichever of them changed.
+  const scale = { invert: invertScale(), lock: lockRatio(), auto: autoScale() };
   onCleanup(() => {
-    if (!committed) previewChartSettings(snapshot);
+    if (committed) return;
+    previewChartSettings(snapshot);
+    if (invertScale() !== scale.invert) setInvertScale(scale.invert);
+    if (lockRatio() !== scale.lock) setLockRatio(scale.lock);
+    if (!scale.lock && autoScale() !== scale.auto) setAutoScale(scale.auto);
   });
 
   const edit = (next: Settings) => {
@@ -267,13 +276,15 @@ function SettingsForm(props: { onClose: () => void }): JSX.Element {
           type="button"
           class={buttonClass}
           title="Reset the options and the current theme's colors to the defaults"
-          onClick={() =>
+          onClick={() => {
             edit({
               ...draft(),
               themes: { ...draft().themes, [theme()]: {} },
               options: defaultSettings().options,
-            })
-          }
+            });
+            setInvertScale(false);
+            setLockRatio(false);
+          }}
         >
           Reset settings
         </button>

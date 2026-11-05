@@ -120,14 +120,21 @@ Symbol, timeframe, chart type, price-scale mode, theme, time zone and recent sym
   default) keeps the axis fitted to the visible bars. Dragging the price
   axis scales it by hand and turns `auto` off; double-clicking the axis or
   clicking `auto` turns it back on, and `Alt+R` (reset chart) does too.
-  The scale mode persists across reloads; `auto` always starts on.
-  `inv` (or `Alt+I`) inverts the axis so higher prices are at the bottom;
-  labels, crosshair, drawings and alert lines all follow. **Lock price to
-  bar ratio** (chart context menu or Settings, Scales) keeps the candle
-  aspect fixed while you zoom horizontally: the visible price range
-  scales with the bar width. It turns `auto` off, and turning `auto` on
-  releases it. Both are saved per chart, like the scale mode, and are
-  part of named layouts. "Scale price chart only" is not offered.
+  The scale mode persists across reloads; `auto` starts on, unless the
+  price-to-bar ratio is locked.
+  `inv` (or `Alt+I`) inverts the price pane's axis so higher prices are at
+  the bottom (indicator panes keep their own direction); labels, crosshair,
+  drawings and alert lines all follow. **Lock price to bar ratio** (chart
+  context menu or Settings, Scales) keeps the candle aspect fixed while you
+  zoom horizontally: the visible price range scales with the bar width, and
+  when zoomed in the window slides to keep the last visible close in view.
+  The ratio is taken when you turn the lock on, and again for a new symbol
+  or timeframe; after a window resize it keeps the price range on screen.
+  Locking turns `auto` off; clicking `auto`, double-clicking the axis,
+  dragging the axis or `Alt+R` releases the lock. While it is locked the
+  price axis cannot be panned vertically (TradingView allows it). Invert
+  and lock are saved per chart, like the scale mode, and are part of named
+  layouts. "Scale price chart only" is not offered.
 
 ## Bottom bar
 
@@ -423,7 +430,10 @@ menu) opens the chart settings dialog with four tabs:
 - **Status line** — show or hide the OHLC values, the bar change, the volume
   and the indicator values in the legends.
 - **Scales** — last price line, last price label, high and low price labels,
-  and the price scale placement (right or left).
+  the price scale placement (right or left), and the invert and lock price to
+  bar ratio switches. Those two belong to the chart's scale state rather than
+  to the settings: they apply at once, **Cancel** puts them back and
+  **Reset settings** turns both off.
 - **Appearance** — background color, vertical and horizontal grid lines and
   grid color, crosshair style (dashed, dotted, solid) and color.
 
@@ -432,7 +442,7 @@ reverts, and **Reset settings** puts the options and the current theme's colors
 back to the defaults (still previewed until OK; the other theme is untouched). Colors and the candle part toggles are stored per
 theme, so the light and dark themes can look different; the other options are
 shared. Everything is saved in `localStorage` under `chartgen.chartSettings`
-and validated on load. Settings are not part of named layouts. See
+and validated on load. Settings are not part of named layouts (invert and lock, which are, are not stored there). See
 [ADR-0019](/chartgen/decisions/0019-chart-settings/).
 
 ## Chart context menu

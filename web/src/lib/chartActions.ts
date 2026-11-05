@@ -24,7 +24,7 @@ const ZOOM_STEP = 1.2;
 export function chartKeyAction(e: KeyboardEvent): ChartAction | null {
   if (e.altKey && !e.ctrlKey && !e.metaKey && e.code === "KeyR") return "reset";
   if (e.altKey && !e.ctrlKey && !e.metaKey && e.code === "KeyI") {
-    return "invertScale";
+    return e.repeat ? null : "invertScale";
   }
   if (e.altKey || e.ctrlKey || e.metaKey) return null;
   switch (e.key) {
