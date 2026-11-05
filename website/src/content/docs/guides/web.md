@@ -39,7 +39,22 @@ chart stays on screen while the new one loads. There is no Load button; if a loa
   Finance. The watchlist **+** button opens the same dialog.
 - **Timeframe** — one-click buttons for 1m, 5m, 15m, 1h, 4h, 1D and 1W,
   with the active one highlighted; the dropdown holds the rest (30m, 1M).
-- **Chart type** — Candles, Hollow candles (only up candles hollow), Bars (OHLC), Line, Area, Heikin Ashi. Heikin Ashi is computed on the server (the web app sends `chart_style: "heikin_ashi"` with every load, tail poll and history page), so the legend shows Heikin Ashi OHLC values and indicators are calculated on them, as on TradingView. Switching to or from it reloads the chart.
+- **Chart type** — Candles, Hollow candles (only up candles hollow), Bars (OHLC), Line, Line with markers, Step line, Area, Baseline, Columns, High-low, Heikin Ashi. Heikin Ashi is computed on the server (the web app sends `chart_style: "heikin_ashi"` with every load, tail poll and history page), so the legend shows Heikin Ashi OHLC values and indicators are calculated on them, as on TradingView. Switching to or from it reloads the chart. The other types are drawn in the browser from the same bars, so switching between them needs no reload, and the legend keeps showing the bar's OHLC:
+  - **Line with markers** — the close line with a dot on every bar.
+  - **Step line** — the closes joined by horizontal-then-vertical steps.
+  - **Baseline** — the close line and fill, in the up color above a base
+    level and the down color below it. The base level is the middle of the
+    visible close range (TradingView's default of 50%) and follows the view.
+  - **Columns** — a column from the bottom of the pane to each close, in
+    the up color when the bar closed at or above the previous close, else
+    in the down color.
+  - **High-low** — one bar from each bar's low to its high, no open or close.
+
+  Line with markers, Step line and High-low use the line color of the
+  [chart settings](#chart-settings); Baseline and Columns use the up and down
+  body colors. Close-based types scale the price axis to the closes, High-low
+  to the highs and lows
+  ([ADR-0030](/chartgen/decisions/0030-custom-chart-types/)).
 
 - **Replay** (rewind) — starts and ends [bar replay](#bar-replay).
 - **Screenshot** (camera) — downloads the chart canvas, overlays included,
@@ -353,8 +368,9 @@ The gear button in the top toolbar (or **Settings…** in the chart context
 menu) opens the chart settings dialog with four tabs:
 
 - **Symbol** — body, borders and wick of the candles, each with an on/off
-  checkbox and an up and a down color, plus the line/area color. Border and
-  wick follow the body color until you pick one for them.
+  checkbox and an up and a down color, plus the line/area color (also used
+  by Line with markers, Step line and High-low). Border and wick follow the
+  body color until you pick one for them.
 - **Status line** — show or hide the OHLC values, the bar change, the volume
   and the indicator values in the legends.
 - **Scales** — last price line, last price label, high and low price labels,

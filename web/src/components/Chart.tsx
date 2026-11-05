@@ -80,7 +80,15 @@ import {
   rebaseScale,
 } from "../lib/compare";
 import { chartSettings } from "../stores/chartSettings";
-import { composeStyles, settingsStyles } from "../lib/chartStyle";
+import { composeStyles, resolveColors, settingsStyles } from "../lib/chartStyle";
+import {
+  ensureSeriesRegistered,
+  hiddenCandleStyle,
+  isSeriesType,
+  SERIES_REG_NAME,
+  type SeriesExtend,
+  type SeriesType,
+} from "../lib/chartTypes";
 import { PALETTES, type Palette } from "../lib/theme";
 import type { SeriesPayload } from "../types/responses";
 import {
@@ -810,8 +818,8 @@ interface HeaderState {
   compare?: string;
 }
 
-/** klinecharts `candle` style overrides per toolbar chart type. */
-const CHART_TYPE_STYLES: Record<ChartType, object> = {
+/** klinecharts `candle` style overrides per toolbar chart type it draws itself. */
+const CHART_TYPE_STYLES: Record<Exclude<ChartType, SeriesType>, object> = {
   candles: { type: "candle_solid" },
   heikin_ashi: { type: "candle_solid" },
   hollow: { type: "candle_up_stroke" },
@@ -932,6 +940,8 @@ export function Chart(props: ChartProps): JSX.Element {
     null;
   // True once the compare indicator sits on the candle pane.
   let compareCreated = false;
+  // True once the series indicator of a client-drawn chart type is on it.
+  let seriesCreated = false;
   // Names of the indicators currently requested (visible). Panes and legends
   // of anything else are dropped right away, before a refetch lands. A string
   // so param-only changes do not re-run the pane effect.
@@ -1144,15 +1154,13 @@ export function Chart(props: ChartProps): JSX.Element {
     const settings = chartSettings();
     // One setStyles call (one relayout), coalesced to a frame: a color drag
     // fires this on every input event.
+    const t = props.chartType;
     pendingStyles = composeStyles(
       tvStyles(palette),
-      { candle: CHART_TYPE_STYLES[props.chartType] },
-      settingsStyles(
-        palette,
-        settings.themes[theme()],
-        settings.options,
-        props.chartType,
-      ),
+      { candle: isSeriesType(t) ? {} : CHART_TYPE_STYLES[t] },
+      settingsStyles(palette, settings.themes[theme()], settings.options, t),
+      // Last, so no setting brings back the series a custom type hides.
+      { candle: isSeriesType(t) ? hiddenCandleStyle(t) : {} },
     );
     styleFrame ??= requestAnimationFrame(() => {
       styleFrame = null;
@@ -1488,6 +1496,36 @@ export function Chart(props: ChartProps): JSX.Element {
         id: CANDLE_PANE_ID,
       });
       compareCreated = true;
+    }
+  });
+
+  // Chart types klinecharts does not draw (ADR-0030): one indicator on the
+  // candle pane paints the series over klinecharts' hidden one. Colors follow
+  // the theme and the chart settings like the candles do.
+  createEffect(() => {
+    const c = chart();
+    const t = props.chartType;
+    if (!c) return;
+    if (!isSeriesType(t)) {
+      if (seriesCreated) c.removeIndicator(CANDLE_PANE_ID, SERIES_REG_NAME);
+      seriesCreated = false;
+      return;
+    }
+    const colors = resolveColors(PALETTES[theme()], chartSettings().themes[theme()]);
+    const extendData: SeriesExtend = {
+      type: t,
+      up: colors.bodyUp,
+      down: colors.bodyDown,
+      line: colors.line,
+    };
+    ensureSeriesRegistered();
+    if (seriesCreated) {
+      c.overrideIndicator({ name: SERIES_REG_NAME, extendData }, CANDLE_PANE_ID);
+    } else {
+      c.createIndicator({ name: SERIES_REG_NAME, extendData }, true, {
+        id: CANDLE_PANE_ID,
+      });
+      seriesCreated = true;
     }
   });
 

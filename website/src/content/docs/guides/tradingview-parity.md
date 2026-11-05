@@ -53,7 +53,7 @@ Status legend:
 | Line | ✅ | ✅ | |
 | Area | ✅ | ✅ | |
 | Heikin Ashi | ✅ | ✅ | Computed on the server, so indicators run on the HA values as on TradingView. [`chart_style`](/chartgen/reference/mcp/) |
-| Baseline, columns, high-low, step line | ✅ | ❌ | Not offered. |
+| Baseline, columns, high-low, step line, line with markers | ✅ | ✅ | Drawn in the browser from the bars; Baseline's base level is fixed at TradingView's default (50% of the visible range) and not configurable. [Toolbar](/chartgen/guides/web/#toolbar), [ADR-0030](/chartgen/decisions/0030-custom-chart-types/) |
 | Renko, Kagi, Line break, Point & figure | ✅ | ❌ | Not offered. |
 | Range bars and other non-time bars | ✅ | ❌ | Not offered. |
 

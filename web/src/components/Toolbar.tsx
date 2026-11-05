@@ -43,7 +43,12 @@ const CHART_TYPE_LABELS: Record<ChartType, string> = {
   hollow: "Hollow candles",
   bars: "Bars",
   line: "Line",
+  line_markers: "Line with markers",
+  step_line: "Step line",
   area: "Area",
+  baseline: "Baseline",
+  columns: "Columns",
+  high_low: "High-low",
   heikin_ashi: "Heikin Ashi",
 };
 
@@ -104,6 +109,47 @@ function ChartTypeIcon(props: { type: ChartType }): JSX.Element {
             fill-opacity="0.25"
             stroke-linejoin="round"
           />
+        </svg>
+      );
+    case "line_markers":
+      return (
+        <svg {...common}>
+          <path d="M2 13l4-5 3 3 7-8" stroke-linejoin="round" />
+          <g fill="currentColor" stroke="none">
+            <circle cx="2" cy="13" r="1.6" />
+            <circle cx="6" cy="8" r="1.6" />
+            <circle cx="9" cy="11" r="1.6" />
+            <circle cx="16" cy="3" r="1.6" />
+          </g>
+        </svg>
+      );
+    case "step_line":
+      return (
+        <svg {...common}>
+          <path d="M1 14h4V9h4v3h4V4h4" stroke-linejoin="round" />
+        </svg>
+      );
+    case "baseline":
+      return (
+        <svg {...common}>
+          <path d="M1 9h16" stroke-dasharray="1 2" stroke-width="1" />
+          <path d="M2 6l4-3 3 4 3 5 4 2" stroke-linejoin="round" />
+        </svg>
+      );
+    case "columns":
+      return (
+        <svg {...common} fill="currentColor" stroke="none">
+          <rect x="2" y="9" width="3" height="7" />
+          <rect x="7.5" y="5" width="3" height="11" />
+          <rect x="13" y="2" width="3" height="14" />
+        </svg>
+      );
+    case "high_low":
+      return (
+        <svg {...common} fill="currentColor" stroke="none">
+          <rect x="2" y="6" width="3" height="8" />
+          <rect x="7.5" y="2" width="3" height="9" />
+          <rect x="13" y="5" width="3" height="11" />
         </svg>
       );
   }
