@@ -130,7 +130,7 @@ test.describe("series colors", () => {
       await dialog.getByRole("button", { name: `Volume color ${k}`, exact: true }).click();
       // Presets keep the current opacity: the bars' 0.5.
       await page.getByLabel("Color #9c27b0").click();
-      await dialog.getByRole("tab", { name: "Style" }).click();
+      await page.keyboard.press("Escape");
     }
     await dialog.getByRole("button", { name: "OK" }).click();
     await expect(dialog).toHaveCount(0);

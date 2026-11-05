@@ -44,10 +44,10 @@ export interface PlotStyle {
   lineStyle?: PlotLineStyle;
   visible?: boolean;
   /**
-   * Histogram bar colors, parallel to the payload's `palette` (a bar takes
-   * the entry at the index of its server color). Ignored once `color` is set.
+   * Histogram bar colors by server color: a bar whose server color is a key
+   * takes the value. Only touched colors are stored. A set `color` wins.
    */
-  palette?: string[];
+  palette?: Record<string, string>;
   /**
    * Server label of the line this entry was saved for. Only set on
    * index-keyed entries (`line<i>`): the entry is ignored once the line at
@@ -63,6 +63,13 @@ export interface GeoItemStyle {
   colorBelow?: string;
   lineStyle?: PlotLineStyle;
   visible?: boolean;
+  /**
+   * What the override was saved for: the server color of the fill / level
+   * and the level's `y`. It is ignored once the payload entry at that index
+   * differs.
+   */
+  ref?: string;
+  y?: number;
 }
 
 /**
@@ -72,7 +79,8 @@ export interface GeoItemStyle {
 export interface GeometryStyle {
   fills?: Record<string, GeoItemStyle>;
   hlines?: Record<string, GeoItemStyle>;
-  hbars?: { color?: string; pocColor?: string; visible?: boolean };
+  /** `color`: bars outside the value area; `vaColor`: inside it; `pocColor`: the widest bar. */
+  hbars?: { color?: string; vaColor?: string; pocColor?: string; visible?: boolean };
   divlines?: { bullColor?: string; bearColor?: string; visible?: boolean };
 }
 
@@ -162,13 +170,15 @@ function sanitizePlot(x: unknown): PlotStyle | undefined {
     out.lineStyle = lineStyle as PlotLineStyle;
   }
   if (typeof visible === "boolean") out.visible = visible;
-  if (
-    Array.isArray(palette) &&
-    palette.length > 0 &&
-    palette.length <= MAX_PALETTE &&
-    palette.every(isColor)
-  ) {
-    out.palette = [...palette];
+  if (isRecord(palette)) {
+    const entries = Object.entries(palette);
+    if (
+      entries.length > 0 &&
+      entries.length <= MAX_PALETTE &&
+      entries.every(([k, v]) => isColor(k) && isColor(v))
+    ) {
+      out.palette = Object.fromEntries(entries) as Record<string, string>;
+    }
   }
   if (typeof label === "string" && label.length > 0 && label.length <= MAX_LABEL) {
     out.label = label;
@@ -185,6 +195,7 @@ function pickGeo(
   x: unknown,
   colors: readonly string[],
   lineStyle = false,
+  guard = false,
 ): Record<string, unknown> | undefined {
   if (!isRecord(x)) return undefined;
   const out: Record<string, unknown> = {};
@@ -193,6 +204,10 @@ function pickGeo(
     out.lineStyle = x.lineStyle;
   }
   if (typeof x.visible === "boolean") out.visible = x.visible;
+  if (guard && Object.keys(out).length > 0) {
+    if (isColor(x.ref)) out.ref = x.ref;
+    if (typeof x.y === "number" && Number.isFinite(x.y)) out.y = x.y;
+  }
   return Object.keys(out).length > 0 ? out : undefined;
 }
 
@@ -204,7 +219,7 @@ function sanitizeGeoMap(
   if (!isRecord(x)) return undefined;
   const out: Record<string, GeoItemStyle> = {};
   for (const [k, v] of Object.entries(x)) {
-    const item = GEO_INDEX_RE.test(k) ? pickGeo(v, colors, lineStyle) : undefined;
+    const item = GEO_INDEX_RE.test(k) ? pickGeo(v, colors, lineStyle, true) : undefined;
     if (item) out[k] = item as GeoItemStyle;
   }
   return Object.keys(out).length > 0 ? out : undefined;
@@ -217,7 +232,7 @@ function sanitizeGeometry(x: unknown): GeometryStyle | undefined {
   if (fills) out.fills = fills;
   const hlines = sanitizeGeoMap(x.hlines, ["color"], true);
   if (hlines) out.hlines = hlines;
-  const hbars = pickGeo(x.hbars, ["color", "pocColor"]);
+  const hbars = pickGeo(x.hbars, ["color", "vaColor", "pocColor"]);
   if (hbars) out.hbars = hbars as GeometryStyle["hbars"];
   const divlines = pickGeo(x.divlines, ["bullColor", "bearColor"]);
   if (divlines) out.divlines = divlines as GeometryStyle["divlines"];

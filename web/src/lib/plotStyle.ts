@@ -182,17 +182,14 @@ export function barColor(
 }
 
 /**
- * Color of a histogram bar whose server color is `server`: the user's
- * palette entry for that color (`defaults` is the server palette), else
- * `server` itself.
+ * Color of a histogram bar whose server color is `server`: the user's color
+ * for that server color, else `server` itself.
  */
 export function paletteBarColor(
   server: string,
-  defaults: readonly string[] | undefined,
-  user: readonly string[] | undefined,
+  user: Readonly<Record<string, string>> | undefined,
 ): string {
-  const k = defaults?.indexOf(server) ?? -1;
-  return (k >= 0 ? user?.[k] : undefined) ?? server;
+  return user?.[server] ?? server;
 }
 
 /**
@@ -209,7 +206,7 @@ export function plotColorAt(
   const o = plotOverride(plot, style);
   if (o?.color !== undefined) return o.color;
   const bar = plot.kind === "hist" ? barColor(ind.histogram?.[plot.index], at) : undefined;
-  return bar === undefined ? plot.defaultColor : paletteBarColor(bar, plot.palette, o?.palette);
+  return bar === undefined ? plot.defaultColor : paletteBarColor(bar, o?.palette);
 }
 
 export const DASH: Record<Exclude<PlotLineStyle, "solid">, number[]> = {

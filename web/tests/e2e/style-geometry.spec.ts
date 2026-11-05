@@ -57,8 +57,8 @@ async function openStyleTab(page: Page, chip: string) {
 async function pick(page: Page, dialog: ReturnType<Page["getByRole"]>, label: string, color: string) {
   await dialog.getByRole("button", { name: label, exact: true }).click();
   await page.getByLabel(`Color ${color}`).click();
-  // Close the popover with an outside click: Escape would close the dialog.
-  await dialog.getByRole("tab", { name: "Style" }).click();
+  // Escape closes only the popover; the dialog stays open.
+  await page.keyboard.press("Escape");
   await expect(page.getByLabel(`Color ${color}`)).toHaveCount(0);
 }
 
@@ -97,7 +97,11 @@ test.describe("geometry colors in the Style tab", () => {
       name: "bbands",
       style: {
         plots: {},
-        geometry: { fills: { "0": { color: "rgba(242, 54, 69, 0.1)", visible: false } } },
+        geometry: {
+          fills: {
+            "0": { color: "rgba(242, 54, 69, 0.1)", visible: false, ref: "rgba(33,150,243,0.1)" },
+          },
+        },
       },
     });
     await reloadApp(page);
@@ -145,7 +149,55 @@ test.describe("geometry colors in the Style tab", () => {
     expect(entry.style.geometry.hlines["0"]).toMatchObject({ lineStyle: "dashed" });
   });
 
-  test("MACD histogram palette and Volume bars recolor", async ({ page }) => {
+  test("the color popover survives edits; Escape closes only the popover", async ({ page }) => {
+    await useIndicators(page, ["bbands"]);
+    const dialog = await openStyleTab(page, "bbands");
+    await dialog.getByRole("button", { name: "Fill 1 color", exact: true }).click();
+    const slider = page.getByLabel("Opacity");
+    await expect(slider).toBeVisible();
+    await slider.fill("40");
+    await expect(page.getByText("40%")).toBeVisible();
+    await slider.fill("60");
+    await expect(page.getByText("60%")).toBeVisible();
+    await page.getByLabel("Color #f23645").click();
+    await expect(slider).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(slider).toHaveCount(0);
+    await expect(dialog).toBeVisible();
+  });
+
+  test("a histogram color follows the server color, not the palette position", async ({
+    page,
+  }) => {
+    await useIndicators(page, ["volume"]);
+    const GREEN: Rgb = [38, 166, 154];
+    const PINK: Rgb = [233, 30, 99];
+    const green = () => countPixels(page, GREEN, [60, 255], 12);
+    const pink = () => countPixels(page, PINK, [60, 255], 12);
+    await expect.poll(green, { timeout: 15_000 }).toBeGreaterThan(200);
+
+    // Recolor only the second palette color (the one the swatch labels 2).
+    const dialog = await openStyleTab(page, "volume");
+    await pick(page, dialog, "Volume color 2", "#e91e63");
+    await dialog.getByRole("button", { name: "OK" }).click();
+    await expect.poll(pink).toBeGreaterThan(100);
+    const entry = (await stored(page)).find((e: { name?: string }) => e.name === "volume");
+    const palette = entry.style.plots.hist0.palette as Record<string, string>;
+    expect(Object.keys(palette)).toHaveLength(1);
+    expect(Object.keys(palette)[0]).toMatch(/^rgba\(/);
+    expect(entry.style.plots.hist0.color).toBeUndefined();
+
+    // Another window (the first bar, so the server's palette order, differs):
+    // the same server color is still pink, the other one stays green.
+    for (const tf of ["4h", "15m"]) {
+      await page.getByRole("button", { name: tf, exact: true }).click();
+      await page.waitForTimeout(1500);
+      await expect.poll(pink).toBeGreaterThan(50);
+      expect(await green()).toBeGreaterThan(50);
+    }
+  });
+
+  test("MACD histogram palette and Volume bars recolor",async ({ page }) => {
     await useIndicators(page, ["macd", "volume"]);
     const ORANGE: Rgb = [255, 152, 0];
     const PINK: Rgb = [233, 30, 99];

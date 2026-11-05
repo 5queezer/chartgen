@@ -757,14 +757,22 @@ Each indicator pane legend shows controls on hover (or keyboard focus):
   with a visibility checkbox and a color swatch (opacity included): every
   fill (**Fill 1**, ...; two swatches where the fill has an above and a
   below color, like the Ichimoku cloud), every horizontal level (**Level
-  70**, with a line style), the volume-profile bars and their point of
-  control, and the divergence lines (bullish and bearish). A histogram with
-  a per-bar palette (Volume, MACD) shows one swatch per palette color
-  instead of a single one. These overrides sit on top of the server colors
-  at draw time: live ticks and theme switches keep them, and colors you
-  did not touch still follow the server and the theme. They are stored in
-  the indicator's `style.geometry` next to the plot styles, so layouts keep
-  them too.
+  70**, with a line style), the volume-profile bars (outside the value
+  area, inside it where the profile has one, and the point of control), and
+  the divergence lines (bullish and bearish, one visibility toggle). A
+  histogram with a per-bar palette (Volume, MACD) shows one swatch per
+  server color instead of a single one; a color you pick applies to that
+  server color wherever it appears, so it stays on the up bars when the
+  server lists the colors in another order. These overrides sit on top of
+  the server colors at draw time: live ticks and theme switches keep them,
+  and colors you did not touch still follow the server and the theme. They
+  are stored in the indicator's `style.geometry` (histogram palettes in the
+  plot's `palette`) next to the plot styles, so layouts keep them too
+  ([ADR-0035](/chartgen/decisions/0035-styleable-geometry/)). A fill or
+  level override applies only while the payload still has the same fill
+  color at that position (and, outside volume profiles, the same level
+  value); otherwise it is ignored and dropped when the dialog opens. Hidden
+  fills do not scale the price axis.
 - **×** removes the indicator. Other instances of the same indicator stay.
   The price pane legend cannot be removed.
 

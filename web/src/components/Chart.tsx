@@ -65,7 +65,14 @@ import {
   type PlotInfo,
 } from "../lib/plotStyle";
 import { keyName } from "../lib/instances";
-import { applyFill, divColor, shown } from "../lib/geometryStyle";
+import {
+  applyFill,
+  divColor,
+  matchFill,
+  matchLevel,
+  shown,
+  visibleFills,
+} from "../lib/geometryStyle";
 import {
   instanceKey,
   paramLabels,
@@ -181,7 +188,7 @@ function plotFigureStyle(
   const key = plotKey(kind, plotIndex);
   const d = ext?.defaults[key];
   const o = ext?.plots[key];
-  const server = bar === undefined ? undefined : paletteBarColor(bar, d?.palette, o?.palette);
+  const server = bar === undefined ? undefined : paletteBarColor(bar, o?.palette);
   return figureStyle(
     kind,
     resolveOverride(o, server ?? d?.color ?? paletteColor(name, colorIdx), d?.width),
@@ -194,7 +201,7 @@ function plotFigureStyle(
  * by figure key for the plots of the current payload (labels already matched).
  */
 interface FigureExtend extends IndicatorStyle {
-  defaults: Record<string, { color: string; width: number; palette?: readonly string[] }>;
+  defaults: Record<string, { color: string; width: number }>;
 }
 
 function extendFor(
@@ -207,7 +214,7 @@ function extendFor(
   const defaults = Object.fromEntries(
     plots.map((p) => [
       plotKey(p.kind, p.index),
-      { color: p.defaultColor, width: p.defaultWidth, palette: p.palette },
+      { color: p.defaultColor, width: p.defaultWidth },
     ]),
   );
   return { ...figureOverrides(plots, style), defaults };
@@ -312,7 +319,7 @@ function drawGeometry(name: string): IndicatorDrawCallback {
     const fills = ind.fills ?? [];
     const geo = (indicator.extendData as FigureExtend | undefined)?.geometry;
     const paint = (polys: ReturnType<typeof fillPolygons>, fi: number) => {
-      const o = geo?.fills?.[fi];
+      const o = matchFill(geo?.fills?.[fi], fills[fi]!);
       if (!shown(o)) return;
       const theme = applyFill(fillColors(fills[fi]!, name, fi), o);
       for (const poly of polys) {
@@ -340,14 +347,20 @@ function drawGeometry(name: string): IndicatorDrawCallback {
     drawFutureLines(ctx, name, ind, length, indicator, map);
 
     if (ind.hbars && ind.hbars.length > 0 && shown(geo?.hbars)) {
-      const poc = hbarTiers(ind.hbars, ind.hlines ?? []).indexOf("poc");
+      const tiers = hbarTiers(ind.hbars, ind.hlines ?? []);
       for (const r of hbarRects(
         ind.hbars,
         bounding.width,
         bounding.height,
         map.y,
       )) {
-        const own = r.index === poc ? geo?.hbars?.pocColor : geo?.hbars?.color;
+        const tier = tiers[r.index];
+        const own =
+          tier === "poc"
+            ? geo?.hbars?.pocColor
+            : tier === "va"
+              ? geo?.hbars?.vaColor
+              : geo?.hbars?.color;
         ctx.fillStyle = own ?? ind.hbars[r.index]!.color!;
         ctx.fillRect(r.x, r.y, r.width, r.height);
       }
@@ -426,7 +439,11 @@ function drawHLines(
 ): void {
   ctx.lineWidth = 1;
   for (const h of hlineStrokes(ind.hlines ?? [], bounding.height, mapY)) {
-    const o = overrides?.[h.index];
+    const o = matchLevel(
+      overrides?.[h.index],
+      ind.hlines![h.index]!,
+      (ind.hbars?.length ?? 0) > 0,
+    );
     if (!shown(o)) continue;
     ctx.strokeStyle = o?.color ?? h.color;
     ctx.setLineDash(o?.lineStyle && o.lineStyle !== "solid" ? DASH[o.lineStyle] : []);
@@ -511,9 +528,12 @@ function ensureRegistered(name: string, shape: IndicatorShape): void {
     draw: drawGeometry(name),
     calc: (dataList: KLineData[], indicator) => {
       const geo = geometryStore.get(regName);
-      const extents = geo ? valueExtents(geo, dataList.length) : [];
       // A hidden plot's value is null, so nothing is drawn for it.
       const ext = indicator.extendData as IndicatorStyle | undefined;
+      // Hidden fills do not scale the axis.
+      const extents = geo
+        ? valueExtents(visibleFills(geo, ext?.geometry?.fills), dataList.length)
+        : [];
       const shown = (key: string) => ext?.plots[key]?.visible !== false;
       const lineShown = Array.from({ length: shape.lines }, (_, i) => shown(`line${i}`));
       const histShown = Array.from({ length: shape.hist }, (_, i) => shown(`hist${i}`));

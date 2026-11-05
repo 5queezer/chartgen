@@ -71,7 +71,7 @@ Status legend:
 | Several instances of one indicator (RSI 14 and RSI 21) | ✅ | ✅ | Each with its own params, style, visibility and pane. [Managing indicators](/chartgen/guides/web/#managing-indicators), [ADR-0028](/chartgen/decisions/0028-multiple-indicator-instances/) |
 | Fills, hlines, volume profile, divergence lines | ✅ | ✅ | Server colors on the wire. The VPVR up/down split cannot be colored. [ADR-0007](/chartgen/decisions/0007-complete-series-serialization/), [ADR-0010](/chartgen/decisions/0010-overlay-geometry-rendering/), [ADR-0012](/chartgen/decisions/0012-geometry-colors-on-the-wire/) |
 | Ichimoku cloud | ✅ | ✅ | The cloud runs `displacement - 1` bars past the last bar, with a widened right margin, and moves with live ticks. The legend and Data Window read the projected spans there. [ADR-0033](/chartgen/decisions/0033-indicator-projection-past-last-bar/) |
-| Geometry colors editable in Style | ✅ | ✅ | Fill, level, histogram-palette, profile and divergence colors, each with a visibility toggle, in `style.geometry` ([ADR-0017](/chartgen/decisions/0017-indicator-plot-styles/) store). |
+| Geometry colors editable in Style | ✅ | ✅ | Fill, level, histogram-palette, profile and divergence colors, each with a visibility toggle, in `style.geometry` ([ADR-0035](/chartgen/decisions/0035-styleable-geometry/)). |
 | Indicator on indicator (apply to another indicator's output) | ✅ | ❌ | Every indicator reads the price bars. |
 | Indicators on Heikin Ashi values | ✅ | ✅ | [`chart_style`](/chartgen/reference/mcp/) |
 | Profiles from lower-timeframe data | ✅ | ◐ | Volume and time profiles and CVD spread each bar's volume over its range. [Differences list](/chartgen/reference/indicators/#values-match-tradingview) |

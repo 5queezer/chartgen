@@ -55,7 +55,7 @@ test.describe("indicator style tab", () => {
     await dialog.getByRole("button", { name: "RSI color", exact: true }).click();
     await page.getByLabel("Color #f23645").click();
     await page.screenshot({ path: "/tmp/claude-1000/chartgen-shots/style/style-tab.png" });
-    await dialog.getByRole("tab", { name: "Style" }).click();
+    await page.keyboard.press("Escape");
     await dialog.getByLabel("RSI width").selectOption("3");
     await dialog.getByLabel("RSI line style").selectOption("dashed");
     await dialog.getByRole("button", { name: "OK" }).click();
@@ -113,7 +113,7 @@ test.describe("indicator style tab", () => {
     const dialog = await openStyleTab(page);
     await dialog.getByRole("button", { name: "RSI color", exact: true }).click();
     await page.getByLabel("Color #f23645").click();
-    await dialog.getByRole("tab", { name: "Style" }).click();
+    await page.keyboard.press("Escape");
     await dialog.getByLabel("RSI width").selectOption("4");
     await dialog.getByRole("button", { name: "Cancel" }).click();
     await expect(dialog).toHaveCount(0);
