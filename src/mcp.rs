@@ -349,6 +349,18 @@ fn parse_panels(panels_value: &Value, user: Option<&str>) -> ParsedPanels {
 const MAX_BARS: usize = 5000;
 /// Upper bound for `warmup` (ADR-0009).
 const MAX_WARMUP: usize = 1000;
+
+/// The `warmup` argument, capped. A non-zero one is raised to what the
+/// indicators need to converge, so values at a page seam or on a tail match
+/// the history loaded before (ADR-0032).
+fn warmup_arg(args: &Value, panels: &[Box<dyn Indicator>]) -> usize {
+    let asked = args.get("warmup").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+    if asked == 0 {
+        return 0;
+    }
+    let need = panels.iter().map(|i| i.warmup_bars()).max().unwrap_or(0);
+    asked.max(need).min(MAX_WARMUP)
+}
 /// Oldest accepted `end_time`: 1900-01-01 (index histories predate 1970).
 const MIN_END_TIME_MS: i64 = -2_208_988_800_000;
 /// Newest accepted `end_time`, relative to now.
@@ -484,7 +496,7 @@ fn generate_chart(
     // Warmup bars feed indicator computation but are trimmed from the series
     // payload. png/summary ignore it and render exactly `bars` (ADR-0009).
     let warmup = if want_series {
-        (args.get("warmup").and_then(|v| v.as_u64()).unwrap_or(0) as usize).min(MAX_WARMUP)
+        warmup_arg(args, &panel_indicators)
     } else {
         0
     };
@@ -775,12 +787,11 @@ fn tool_subscribe_chart(
             &format!("{PUSH_LIMIT}: at most {MAX_INDICATORS} indicators per subscription"),
         );
     }
-    let (_, _, unknown, invalid) = parse_panels(&indicators, None);
+    let (panels, _, unknown, invalid) = parse_panels(&indicators, None);
     if let Err(e) = check_panels(&unknown, &invalid) {
         return tool_err(id, &e);
     }
-    let warmup =
-        (args.get("warmup").and_then(|v| v.as_u64()).unwrap_or(0) as usize).min(MAX_WARMUP);
+    let warmup = warmup_arg(args, &panels);
     let req = ChartRequest {
         ticker: ticker.to_string(),
         timeframe: timeframe.to_string(),
@@ -3850,6 +3861,93 @@ mod tests {
         assert_eq!(c_bars[30..], a_bars[..30]);
     }
 
+    /// EMA 200 of ema_stack over `pages` history pages of 500 bars, fetched
+    /// like the web client (initial load, then `end_time` = oldest bar, each
+    /// with `warmup`), against one long, converged call. Returns the largest
+    /// relative deviation from the converged values and the largest
+    /// relative extra step at a page seam.
+    fn ema200_paging_error(warmup: u64, pages: usize) -> (f64, f64) {
+        const PAGE: usize = 500;
+        let call = |bars: usize, warmup: u64, end: i64| {
+            series_payload(
+                json!({ "ticker": "BTCUSDT", "timeframe": "1m", "bars": bars,
+                        "warmup": warmup, "end_time": end,
+                        "indicators": ["ema_stack"], "format": "series" }),
+                fetch::DataSource::Sample,
+            )
+        };
+        let ema200 = |p: &Value| -> Vec<f64> {
+            let line = &p["indicators"]["ema_stack"]["lines"][3];
+            assert_eq!(line["label"], "EMA 200");
+            line["values"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|v| v.as_f64().unwrap_or(f64::NAN))
+                .collect()
+        };
+        let mut merged = Vec::new();
+        let mut seams = Vec::new();
+        let mut end = END_4H_MS;
+        for _ in 0..pages {
+            let p = call(PAGE, warmup, end);
+            end = bar_ts(&p)[0] * 1000;
+            let mut v = ema200(&p);
+            seams.push(v.len());
+            v.extend(merged);
+            merged = v;
+        }
+        // A seam follows each page but the newest; walk them oldest first.
+        seams.remove(0);
+        seams.reverse();
+        // 4000 bars of history before the paged window: converged far
+        // beyond any bound tested here.
+        let reference = ema200(&call(PAGE * pages + 4000, 0, END_4H_MS));
+        let reference = &reference[reference.len() - merged.len()..];
+        let rel = |a: f64, b: f64| (a - b).abs() / b.abs();
+        let dev = merged
+            .iter()
+            .zip(reference)
+            .map(|(&a, &b)| rel(a, b))
+            .fold(0.0, f64::max);
+        let mut seam_step = 0.0f64;
+        let mut s = 0;
+        for len in seams {
+            s += len;
+            let step = (merged[s] - merged[s - 1]) - (reference[s] - reference[s - 1]);
+            seam_step = seam_step.max(step.abs() / reference[s].abs());
+        }
+        (dev, seam_step)
+    }
+
+    #[test]
+    fn ema_stack_pages_join_without_a_step() {
+        // QA: on 1m BTCUSDT the EMA 200 stepped ~0.3% at history seams with
+        // the web's warmup of 300 (1.9% on this sample data). The server now
+        // raises it to ema_stack's 891 bars, after which the SMA seed weighs
+        // < 0.1%: a seed a few % off leaves < 0.01%. Bound: 0.05%.
+        let (dev, step) = ema200_paging_error(300, 4);
+        eprintln!("EMA 200 paged with warmup 300: max dev {dev:e}, max seam step {step:e}");
+        assert!(step < 5e-4, "seam step {step}");
+        assert!(dev < 5e-4, "deviation {dev}");
+    }
+
+    #[test]
+    fn warmup_is_raised_to_the_indicators_need() {
+        let panels = |names: Value| parse_panels(&names, None).0;
+        let w =
+            |warmup: u64, names: Value| warmup_arg(&json!({ "warmup": warmup }), &panels(names));
+        assert_eq!(indicators::by_name("ema_stack").unwrap().warmup_bars(), 891);
+        assert_eq!(w(300, json!(["ema_stack", "rsi"])), 891);
+        assert_eq!(w(950, json!(["ema_stack"])), 950);
+        assert_eq!(w(300, json!(["rsi"])), 300);
+        // Capped, and warmup 0 (no warmup asked) stays 0.
+        let long_ema = json!([{ "name": "ma", "type": "ema", "length": 1000 }]);
+        assert_eq!(w(300, long_ema.clone()), MAX_WARMUP);
+        assert_eq!(w(0, long_ema), 0);
+        assert_eq!(w(5000, json!([])), MAX_WARMUP);
+    }
+
     #[test]
     fn series_has_more_false_when_history_runs_out() {
         let p = series_payload(
@@ -4404,11 +4502,15 @@ mod tests {
             None,
         )))
         .unwrap();
+        // A group's window is the tail plus the effective warmup (ADR-0032):
+        // ema needs more than the 40 asked.
+        let warmup = warmup_arg(&args, &parse_panels(&indicators, None).0);
+        assert!(warmup > 40);
         let mut raw = fetch::fetch_ohlcv(
             fetch::DataSource::Sample,
             "ETHUSDT",
             "4h",
-            42,
+            2 + warmup,
             Some(END_4H_MS),
         )
         .unwrap()

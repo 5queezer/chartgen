@@ -22,6 +22,10 @@ impl Indicator for EmaStack {
         "EMA Stack — 4 exponential moving averages (8/21/50/200)"
     }
 
+    fn warmup_bars(&self) -> usize {
+        super::pine::ma_warmup("ema", 200)
+    }
+
     fn compute(&self, data: &OhlcvData) -> PanelResult {
         let closes = data.closes();
         let ema8 = ema(&closes, 8);

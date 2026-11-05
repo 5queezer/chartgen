@@ -63,7 +63,7 @@ interface Hook {
   } | null;
   series: () => {
     interval: string | null;
-    bars: Array<{ t: number }>;
+    bars: Array<{ t: number; c: number }>;
     indicators: Record<string, { lines?: Array<{ values: Array<number | null> }> }>;
   } | null;
 }
@@ -226,6 +226,25 @@ test.describe("history paging", () => {
         .bars.map((b) => b.t * 1000),
     );
     expect(seriesTs).toEqual(ts);
+
+    // The EMA 200 joins the pages without a step (ADR-0032): across each
+    // seam it still follows its recursion ema = prev + α (close − prev),
+    // which holds exactly inside a page, to within 0.01% of its value.
+    // With the 300-bar warmup alone it missed by about 0.05% here.
+    const { ema200, closes } = await page.evaluate(() => {
+      const s = (window as unknown as { __chartgenTest: Hook }).__chartgenTest.series()!;
+      return {
+        ema200: s.indicators.ema_stack!.lines![3]!.values,
+        closes: s.bars.map((b) => b.c),
+      };
+    });
+    const alpha = 2 / 201;
+    for (const s of [500, 1000]) {
+      const prev = ema200[s - 1]!;
+      const want = prev + alpha * (closes[s]! - prev);
+      const miss = Math.abs(ema200[s]! - want) / want;
+      expect(miss, `EMA 200 step at seam ${s}`).toBeLessThan(1e-4);
+    }
   });
 
   test("a failed page shows a retry that loads it", async ({ bootedApp: page }) => {

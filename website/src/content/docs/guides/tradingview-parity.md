@@ -101,7 +101,7 @@ Status legend:
 | Live forming candle, crypto | ✅ | ✅ | Server push over MCP SSE, up to 4 per second, polling fallback. [ADR-0021](/chartgen/decisions/0021-realtime-chart-push/), [Live updates](/chartgen/guides/web/#live-updates-and-history) |
 | Live forming candle, stocks and others | ✅ | ◐ | Polled every 15 s, and Yahoo data is delayed. [Live updates](/chartgen/guides/web/#live-updates-and-history) |
 | Scroll-back history paging | ✅ | ◐ | 500 bars per page, capped at 20,000 loaded bars. [ADR-0009](/chartgen/decisions/0009-live-tail-polling-and-history-paging/) |
-| Seamless indicator values at page seams | ✅ | ◐ | Recursive and cumulative indicators can step slightly at a seam or on the live bar. [ADR-0009](/chartgen/decisions/0009-live-tail-polling-and-history-paging/) |
+| Seamless indicator values at page seams | ✅ | ◐ | The server warms each request up until EMAs converge (EMA 200 within 0.01%). Running sums (OBV, CVD, A/D) can differ by a constant, VWAP until its next reset, and EMAs longer than 224 still step slightly. [ADR-0032](/chartgen/decisions/0032-indicator-aware-warmup/) |
 | Volume profiles on live bars | ✅ | ◐ | Keep the profile of the full load. Divergence lines that form live usually appear on the next full load. [Live updates](/chartgen/guides/web/#live-updates-and-history) |
 | Extended hours and exchange sessions | ✅ | ❌ | Not described; sessions are UTC calendar periods. |
 | Real-time stock quotes | ✅ | ❌ | Yahoo is delayed. |
@@ -192,10 +192,12 @@ oversight.
   weeks, months and years, not exchange sessions. Pivots use the loaded
   bars as the higher-timeframe source.
   [Differences list](/chartgen/reference/indicators/#values-match-tradingview)
-- **Recursive indicators depend on where the series starts.** EMA, RSI, ATR,
-  OBV, CVD and VWAP can step at a history-page seam or on a live bar. The
-  `warmup` of 300 keeps the step small.
-  [ADR-0009](/chartgen/decisions/0009-live-tail-polling-and-history-paging/)
+- **Running sums depend on where the series starts.** OBV, CVD and the A/D
+  line can differ by a constant at a history-page seam or on a live bar,
+  VWAP until its next session reset.
+  Recursive indicators (EMA, RSI, ATR) are warmed up until they converge,
+  up to 1000 bars, so only EMAs longer than 224 still step slightly.
+  [ADR-0032](/chartgen/decisions/0032-indicator-aware-warmup/)
 - **History is capped at 20,000 bars**, because every live update
   recalculates the indicators over all loaded bars.
 - **Bar replay recomputes only the last 500 bars** before the cursor for

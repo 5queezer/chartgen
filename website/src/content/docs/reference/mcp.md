@@ -360,11 +360,16 @@ interpolated. For windowed profiles (`vpvr`, `hvn_lvn`, `tpo`), `hbars`
 and `hlines` are recomputed over the returned bars only. `y_range` and the
 `hlines` of every other indicator don't change.
 
-Cumulative or recursive indicators (EMA, RSI, ATR, OBV, CVD, VWAP) don't
-fully converge with a finite `warmup`. At a page seam, values from two
-requests can differ slightly, or by a constant offset for running sums.
-Finite-window indicators (SMA, Bollinger Bands, Donchian) match exactly
-once `warmup` covers their lookback.
+A non-zero `warmup` is raised to what the requested indicators need to
+converge, up to 1000
+([ADR-0032](/chartgen/decisions/0032-indicator-aware-warmup/)). `ema_stack`
+needs 891 bars, so its EMA 200 is computed over at least that many and
+matches one long request to within 0.01% at a page seam or on a tail. `ma`
+and `ma_ribbon` declare it for their type and lengths. `warmup: 0` is never
+raised. Recursive indicators beyond that cap (an EMA longer than 224) can
+still differ slightly at a seam, running sums (OBV, CVD, A/D line) by a
+constant offset, and VWAP until its next session reset. Finite-window indicators (SMA, Bollinger Bands, Donchian)
+match exactly once `warmup` covers their lookback.
 
 Upstream limits: Binance requests are paginated at 1000 bars per call.
 Yahoo intraday history ends after about 30 days for 1m, 60 days for other

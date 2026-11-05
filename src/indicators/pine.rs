@@ -226,6 +226,21 @@ pub fn ma_by_type(kind: &str, x: &[f64], vol: &[f64], n: usize) -> Vec<f64> {
     }
 }
 
+/// `Indicator::warmup_bars` of `ma_by_type(kind, .., n)`: the seed window
+/// plus the bars after which the seed of an exponential kind weighs < 0.1%
+/// (dema/tema chain two/three EMAs). Window kinds are exact after `n` bars.
+pub fn ma_warmup(kind: &str, n: usize) -> usize {
+    let decay = |alpha: f64| n + (1000f64.ln() / -(1.0 - alpha).ln()).ceil() as usize;
+    let ema = || decay(2.0 / (n as f64 + 1.0));
+    match kind {
+        "ema" => ema(),
+        "dema" => 2 * ema(),
+        "tema" => 3 * ema(),
+        "rma" | "smma" => decay(1.0 / n.max(1) as f64),
+        _ => n,
+    }
+}
+
 /// Chart offset: the value computed at bar i is drawn at bar i + off.
 pub fn shift(x: &[f64], off: i64) -> Vec<f64> {
     let mut out = vec![f64::NAN; x.len()];

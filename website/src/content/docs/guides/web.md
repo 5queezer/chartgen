@@ -272,9 +272,11 @@ polled.
 How it works: the first load asks `generate_chart` for 500 bars with a
 `warmup` of 300. The app then polls the last two bars (`bars: 2`,
 `warmup: 300`) and merges them in by timestamp. A history page is
-`bars: 500, warmup: 300, end_time: <oldest bar × 1000>`. 800 bars fit in
-one Binance request, and a warmup of 300 covers the usual lookbacks (up to
-SMA/EMA 200) so values at a page seam line up. Changing the symbol,
+`bars: 500, warmup: 300, end_time: <oldest bar × 1000>`. A warmup of 300
+covers the usual lookbacks (up to SMA 200), and the server raises it for
+indicators that need more to converge, such as the EMA 200 of `ema_stack`
+(891 bars, [ADR-0032](/chartgen/decisions/0032-indicator-aware-warmup/)),
+so values at a page seam and on the live bar line up. Changing the symbol,
 timeframe or indicators cancels every pending poll and page and does a
 full reload.
 
@@ -319,10 +321,12 @@ then polls until the next chart change.
   `hvn_lvn`) keep the profile of the full load and are not recomputed for
   live bars or older pages. A divergence line that forms while the chart
   is open usually shows up only on the next full load, and a line crossing
-  a page boundary starts at that boundary. Recursive and cumulative indicators (EMA, RSI,
-  ATR, OBV, CVD, VWAP) can step slightly at a page seam or on the live
-  bar compared with one long request, because each request warms up
-  independently. Yahoo data is delayed, so its live bar moves only as
+  a page boundary starts at that boundary. Running sums (OBV, CVD, A/D
+  line) can differ by a constant at a page seam or on the live bar
+  compared with one long request, because each request starts its sum
+  independently. VWAP can differ until its next session reset. Recursive indicators (EMA, RSI, ATR) match it, except an
+  EMA longer than 224 bars, which converges beyond the 1000-bar warmup
+  cap. Yahoo data is delayed, so its live bar moves only as
   often as Yahoo updates it.
 
 ### Keyboard shortcuts

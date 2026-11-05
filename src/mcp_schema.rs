@@ -86,7 +86,7 @@ pub fn tools_list_result() -> Value {
                         },
                         "warmup": {
                             "type": "integer",
-                            "description": "format=series only: extra older bars (max 1000) fetched and fed to indicator computation, then trimmed, so the first returned bars carry warmed-up indicator values. Ignored by png/summary/both.",
+                            "description": "format=series only: extra older bars (max 1000) fetched and fed to indicator computation, then trimmed, so the first returned bars carry warmed-up indicator values. A non-zero warmup is raised to what the indicators need to converge (891 for ema_stack's EMA 200). Ignored by png/summary/both.",
                             "default": 0
                         },
                         "chart_style": {
@@ -353,7 +353,7 @@ pub fn tools_list_result() -> Value {
                         },
                         "warmup": {
                             "type": "integer",
-                            "description": "Extra older bars (max 1000) the server keeps and feeds to indicator computation, as for generate_chart(format=series).",
+                            "description": "Extra older bars (max 1000) the server keeps and feeds to indicator computation, as for generate_chart(format=series), and raised the same way.",
                             "default": 0
                         }
                     },
