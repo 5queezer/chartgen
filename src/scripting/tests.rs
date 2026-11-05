@@ -264,7 +264,7 @@ fn length_mismatch_is_an_error() {
     let e = exec("chart.line(ohlcv.close + ta.series([1, 2]))", 10)
         .err()
         .unwrap();
-    assert!(e.message.contains("length mismatch"), "{e}");
+    assert!(e.message.contains("one value per bar"), "{e}");
 }
 
 // ---- validation pipeline ----
@@ -318,11 +318,9 @@ fn assert_rejected(src: &str, expect: &str) {
         e.message.to_lowercase().contains(expect),
         "expected {expect:?} in {e}"
     );
-    assert!(
-        t.elapsed() < Duration::from_secs(3),
-        "took {:?}",
-        t.elapsed()
-    );
+    let took = t.elapsed();
+    eprintln!("[timing] rejected in {took:?}: {}", e.message);
+    assert!(took < Duration::from_secs(1), "took {took:?}");
 }
 
 #[test]
@@ -626,4 +624,186 @@ def compute(ohlcv, params, chart):
     let pr = run(&c, &d, &json!({}), COMPUTE_TIMEOUT, "runtime").unwrap();
     let cl = closes(&d);
     assert_eq!(pr.bars[0].y[1], if cl[1] > cl[0] { 1.0 } else { 0.0 });
+}
+
+// ---- security review regressions (each must fail fast and cleanly) ----
+
+/// Run `body` on `bars` sample bars under the chart timeout; the error must
+/// contain `expect` and arrive within 1.2 s.
+fn assert_run_fails(body: &str, bars: usize, expect: &str) {
+    let c = compile("t", &script(body)).unwrap_or_else(|e| panic!("{e}"));
+    let t = Instant::now();
+    let e = run(
+        &c,
+        &sample_data(bars),
+        &json!({}),
+        COMPUTE_TIMEOUT,
+        "runtime",
+    )
+    .err()
+    .expect("script must fail");
+    let took = t.elapsed();
+    eprintln!("[timing] failed in {took:?}: {}", e.message);
+    assert!(e.message.contains(expect), "expected {expect:?} in {e}");
+    assert!(took < Duration::from_millis(1200), "took {took:?}");
+}
+
+#[test]
+fn bigints_never_reach_arithmetic() {
+    assert_rejected(&script("x = int(1e300)"), "64-bit");
+    assert_rejected(&script("x = int(\"9\" * 400)"), "64-bit");
+    assert_rejected(&script("x = 123456789012345678901234567890"), "64-bit");
+    assert_rejected(
+        &script("x = 2147483647\nfor i in range(16):\n    x = x * x"),
+        "overflow",
+    );
+    // -(-2**63) is the one way to make a bigint; no operator accepts it.
+    assert_rejected(
+        &script("x = -9223372036854775807 - 1\ny = -x\nz = y // 3"),
+        "64-bit",
+    );
+    // 64-bit ints still work, and float conversion truncates
+    let pr = exec(
+        "chart.hline(int(2.9) + int(\"40\") + int(\"ff\", 16) + 9000000000 // 3)",
+        5,
+    )
+    .unwrap();
+    assert_eq!(pr.hlines[0].y, (2 + 40 + 255 + 3_000_000_000i64) as f64);
+}
+
+#[test]
+fn ta_work_is_bounded_by_the_bar_count() {
+    // A series is exactly one value per bar, so a list of 1M values (the
+    // 13.9 s report) never reaches ta.*.
+    assert_rejected(&script("s = ta.series([1.0] * 20000)"), "one value per bar");
+    assert_rejected(&script("s = ta.series(list(range(1000000)))"), "range");
+    // The worst single call (window = half the bars) is milliseconds, so
+    // the per-call deadline check stops a loop of them on time.
+    let d = sample_data(6000);
+    let c = compile("t", &script("x = ta.highest(ohlcv.close, 3000)")).unwrap();
+    let t = Instant::now();
+    run(&c, &d, &json!({}), COMPUTE_TIMEOUT, "runtime").unwrap();
+    eprintln!(
+        "[timing] worst-case ta.highest on 6000 bars: {:?}",
+        t.elapsed()
+    );
+    assert!(t.elapsed() < Duration::from_millis(200));
+    assert_run_fails(
+        "for i in range(20000):\n    x = ta.stdev(ohlcv.close, 3000)",
+        6000,
+        "time limit",
+    );
+    assert_run_fails(
+        "for i in range(20000):\n    x = ta.pivot_high(ohlcv.close, 1500, 1500)",
+        6000,
+        "time limit",
+    );
+}
+
+#[test]
+fn list_and_dict_growth_is_capped() {
+    assert_rejected(&script("a = [0] * 20000\na.append(1)"), "list too large");
+    assert_rejected(&script("a = [0] * 20000\na.insert(0, 1)"), "list too large");
+    assert_rejected(
+        &script("d = {i: 0 for i in range(20000)}\nd[-1] = 0"),
+        "dict too large",
+    );
+    assert_rejected(&script("d = {}\nd.update({1: 2})"), "not available");
+    assert_rejected(&script("d = {}\nd.setdefault(1, 2)"), "not available");
+    // Memory outside the Starlark heap (series data here; dict tables
+    // likewise) is counted on every native call.
+    assert_run_fails(
+        "keep = []\nfor i in range(20000):\n    keep.append(ohlcv.close + i)",
+        6000,
+        "memory limit",
+    );
+    // the rewrites keep normal semantics
+    let pr = exec(
+        "a = [1]\na.append(len(a))\na.insert(0, 7)\nd = {}\nd[\"k\"] = 2\nd[\"k\"] = d[\"k\"] + 1\na[0] = d[\"k\"]\nchart.hline(a[0] * 100 + a[1] * 10 + a[2])",
+        5,
+    )
+    .unwrap();
+    assert_eq!(pr.hlines[0].y, 311.0);
+}
+
+#[test]
+fn large_top_level_modules_are_rejected() {
+    assert_rejected(
+        &format!(
+            "BIG = [[{}] * 20000 for _ in range(10)]\n{}",
+            "0.5",
+            script("pass")
+        ),
+        "top-level values",
+    );
+}
+
+#[test]
+fn operator_rewrite_edge_cases() {
+    assert_rejected(&script("x = [0]\nx[0] += 1"), "plain name");
+    assert_rejected(&script("x = [0, 0]\nx[0], x[1] = 1, 2"), "one at a time");
+    for cond in [
+        "if ohlcv.close > ohlcv.open:\n    pass",
+        "x = 1 if ohlcv.close[1] < 3 else 2",
+        "x = not ta.crossover(ohlcv.close, 3)",
+        "x = ohlcv.close > 1 and True",
+        "x = [1 for i in range(3) if ta.rsi(ohlcv.close, 3) > 50]",
+    ] {
+        assert_rejected(&script(cond), "not a bool");
+    }
+    // // | & ^ >> go through the guards, on series and on plain values
+    let c = closes(&sample_data(50));
+    let y = line("chart.line(ohlcv.close // 2)");
+    assert_eq!(y[5], (c[5] / 2.0).floor());
+    let y = line("up = ohlcv.close > ohlcv.open\nchart.line(up | True)");
+    assert!(y.iter().all(|v| *v == 1.0));
+    let y = line("up = ohlcv.close > ohlcv.open\nchart.line(False & up)");
+    assert!(y.iter().all(|v| *v == 0.0));
+    let y = line("up = ohlcv.close > ohlcv.open\nchart.line(up ^ up)");
+    assert!(y.iter().all(|v| *v == 0.0));
+    let pr = exec(
+        "n = (12 >> 2) | 8\nn ^= 1\nn //= 2\nd = {1: 2} | {3: 4}\nchart.hline(n + len(d))",
+        5,
+    )
+    .unwrap();
+    assert_eq!(pr.hlines[0].y, ((((12 >> 2) | 8) ^ 1) / 2 + 2) as f64);
+}
+
+#[test]
+fn concurrency_and_chart_budget() {
+    use crate::indicator::Indicator;
+    let far = || Instant::now() + Duration::from_millis(50);
+    // one evaluation per user, four in total
+    let a = acquire("conc-a", far(), "runtime").unwrap();
+    let busy = acquire("conc-a", far(), "runtime").err().unwrap();
+    assert!(busy.message.contains("busy"), "{busy}");
+    let others: Vec<_> = (0..3)
+        .map(|i| acquire(&format!("conc-{i}"), far(), "runtime").unwrap())
+        .collect();
+    assert!(acquire("conc-z", far(), "runtime").is_err(), "fifth slot");
+    drop(others);
+    drop(a);
+    assert!(acquire("conc-a", far(), "runtime").is_ok());
+
+    // At most 3 scripts per chart, sharing one wall-clock budget.
+    let slow = script("for i in range(20000):\n    for j in range(20000):\n        x = i");
+    let inds: Vec<ScriptIndicator> = (0..4)
+        .map(|i| ScriptIndicator::new("conc-chart", &format!("s{i}"), &slow))
+        .collect();
+    let d = sample_data(20);
+    let t = Instant::now();
+    let results: Vec<_> = with_chart_budget(|| inds.iter().map(|i| i.try_compute(&d)).collect());
+    let took = t.elapsed();
+    eprintln!("[timing] 4 slow scripts in one chart: {took:?}");
+    assert!(took < Duration::from_millis(1300), "took {took:?}");
+    let msgs: Vec<String> = results
+        .into_iter()
+        .map(|r| r.err().unwrap().message)
+        .collect();
+    assert!(msgs[0].contains("time limit"), "{msgs:?}");
+    assert!(
+        msgs[1..3].iter().all(|m| m.contains("time limit")),
+        "{msgs:?}"
+    );
+    assert!(msgs[3].contains("at most 3"), "{msgs:?}");
 }

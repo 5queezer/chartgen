@@ -2,16 +2,22 @@
 //! register-time validation pipeline and `compute()` execution (ADR-0024).
 
 use serde_json::{json, Value as Json};
+use starlark::codemap::Span;
 use starlark::environment::{FrozenModule, Globals, GlobalsBuilder, Module};
 use starlark::eval::Evaluator;
 use starlark::starlark_module;
-use starlark::syntax::ast::{AssignOp, AstNoPayload, ExprP, Stmt};
+use starlark::syntax::ast::{
+    AssignTargetP, AstAssignTarget, AstExpr, AstLiteral, AstNoPayload, BinOp, ClauseP, ExprP, Stmt,
+};
 use starlark::syntax::{AstModule, Dialect};
 use starlark::values::dict::DictRef;
+use starlark::values::float::UnpackFloat;
 use starlark::values::list::{AllocList, ListRef};
+use starlark::values::none::NoneType;
 use starlark::values::range::Range;
 use starlark::values::tuple::{AllocTuple, TupleRef, UnpackTuple};
-use starlark::values::{Heap, Value};
+use starlark::values::{Heap, UnpackValue, Value};
+use starlark_syntax::lexer::TokenInt;
 use starlark_syntax::syntax::uniplate::Visit;
 use std::cell::Cell;
 use std::collections::HashMap;
@@ -27,8 +33,9 @@ use crate::indicator::PanelResult;
 
 /// Largest accepted script source, in bytes.
 pub const MAX_SOURCE: usize = 64 * 1024;
-/// Largest string, list or tuple an operator (`+`, `*`, `%`), `range`, `str`
-/// or `zip` may produce. Bounds what one step can allocate.
+/// Largest string, list, tuple or dict an operator (`+`, `*`, `%`, `|`),
+/// `range`, `str`, `zip`, `.append`, `.insert` or `d[k] = v` may produce.
+/// Bounds what one step can allocate.
 pub const MAX_SEQ: usize = 20_000;
 /// Starlark ticks (function calls + loop iterations) per evaluation.
 const MAX_TICKS: u64 = 20_000_000;
@@ -36,77 +43,118 @@ const MAX_TICKS: u64 = 20_000_000;
 const MAX_HEAP: usize = 64 << 20;
 /// Nested calls; recursion bombs stop here.
 const MAX_CALLSTACK: usize = 64;
-/// f64 values all series of one evaluation may allocate (256 MiB). Series
-/// data lives outside the Starlark heap, so it is counted exactly here.
-const MAX_SERIES_VALUES: usize = 32 << 20;
+/// Net memory one evaluation may hold: every allocation of the evaluating
+/// thread (Starlark heap chunks, dict tables, series data, strings), counted
+/// by `alloc::Counting` and checked on every native call and every 1000
+/// ticks.
+const MAX_MEMORY: isize = 256 << 20;
 /// Wall-clock cap for `compute()` on a chart request.
 pub const COMPUTE_TIMEOUT: Duration = Duration::from_millis(1000);
 /// Wall-clock cap for the register-time dry run and module top level.
 pub const DRY_RUN_TIMEOUT: Duration = Duration::from_millis(200);
 /// Bars of synthetic OHLCV the register-time dry run uses.
 pub const DRY_RUN_BARS: usize = 100;
-/// Attribute names rejected statically: string/list methods whose output can
-/// outgrow their inputs many times over in one step.
-const BANNED_ATTRS: &[&str] = &["extend", "format", "join", "replace"];
+/// Largest frozen module (top-level values) a script may leave behind; it
+/// stays in the compile cache.
+pub const MAX_MODULE_BYTES: usize = 1 << 20;
+/// Attribute names rejected statically: string/list/dict methods whose
+/// output can outgrow their inputs many times over in one step, or that
+/// grow a dict past the `_setitem` cap.
+const BANNED_ATTRS: &[&str] = &[
+    "extend",
+    "format",
+    "join",
+    "replace",
+    "update",
+    "setdefault",
+];
 /// Globals rejected statically (dynamic attribute access would bypass
 /// `BANNED_ATTRS`).
 const BANNED_IDENTS: &[&str] = &["getattr"];
 
-// ---- Budget: deadline + series allocation, checked by every native call ----
+// ---- Budget: deadline, memory and bar count, checked by every native call ----
 
 #[derive(Clone, Copy)]
 struct Budget {
     deadline: Instant,
-    series_values_left: usize,
+    mem_base: isize,
+    /// Bar count of the chart; every series must have exactly this length
+    /// (0 outside `compute`, where no series may be made).
+    bars: usize,
+}
+
+#[derive(Clone, Copy)]
+enum Stop {
+    Time,
+    Memory,
+}
+
+impl Stop {
+    fn message(self) -> String {
+        match self {
+            Stop::Time => "time limit exceeded".into(),
+            Stop::Memory => format!("memory limit exceeded ({} MiB)", MAX_MEMORY >> 20),
+        }
+    }
 }
 
 thread_local! {
     static BUDGET: Cell<Option<Budget>> = const { Cell::new(None) };
+    static STOPPED: Cell<Option<Stop>> = const { Cell::new(None) };
 }
 
-/// Charge `values` f64s of series data to the running evaluation and check
-/// its deadline. Every `ta.*` function and series operator calls this, so a
-/// slow native call cannot run past the deadline by more than itself.
-pub(crate) fn charge(values: usize) -> starlark::Result<()> {
-    let Some(mut b) = BUDGET.with(Cell::get) else {
-        return Ok(());
-    };
+fn over(b: &Budget) -> Option<Stop> {
     if Instant::now() > b.deadline {
-        return err("time limit exceeded");
+        Some(Stop::Time)
+    } else if super::alloc::thread_net() - b.mem_base > MAX_MEMORY {
+        Some(Stop::Memory)
+    } else {
+        None
     }
-    if values > b.series_values_left {
-        return err(format!(
-            "memory limit exceeded: series data over {} MiB",
-            (MAX_SERIES_VALUES * 8) >> 20
-        ));
-    }
-    b.series_values_left -= values;
-    BUDGET.with(|c| c.set(Some(b)));
-    Ok(())
 }
 
-/// Run `f` with an evaluator limited to `timeout`, the tick, heap and call
-/// stack caps, and a fresh series budget. Panics become errors.
+/// Check the running evaluation's deadline and memory. Every `ta.*`
+/// function, series operation and guarded operator calls this before its
+/// work, so a native call overshoots by at most its own cost.
+pub(crate) fn check() -> starlark::Result<()> {
+    match BUDGET.with(Cell::get).as_ref().and_then(over) {
+        Some(stop) => err(stop.message()),
+        None => Ok(()),
+    }
+}
+
+/// Bar count every series of the running evaluation must have.
+pub(crate) fn bars() -> usize {
+    BUDGET.with(Cell::get).map_or(0, |b| b.bars)
+}
+
+/// Run `f` with an evaluator limited to `timeout`, the tick, heap, call
+/// stack and memory caps, for a chart of `bars` bars. Panics become errors.
 fn limited<'v, 'a, R>(
     module: &'a Module<'v>,
     timeout: Duration,
+    bars: usize,
     f: impl FnOnce(&mut Evaluator<'v, 'a, '_>) -> starlark::Result<R>,
 ) -> Result<R, String> {
-    let deadline = Instant::now() + timeout;
-    BUDGET.with(|c| {
-        c.set(Some(Budget {
-            deadline,
-            series_values_left: MAX_SERIES_VALUES,
-        }))
-    });
+    let budget = Budget {
+        deadline: Instant::now() + timeout,
+        mem_base: super::alloc::thread_net(),
+        bars,
+    };
+    BUDGET.with(|c| c.set(Some(budget)));
+    STOPPED.with(|c| c.set(None));
     let out = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let mut eval = Evaluator::new(module);
         eval.set_max_tick_count(MAX_TICKS)
             .and_then(|_| eval.set_max_heap_size(MAX_HEAP))
             .and_then(|_| eval.set_max_callstack_size(MAX_CALLSTACK))
             .map_err(|e| e.to_string())?;
-        eval.set_check_cancelled(Box::new(move || Instant::now() > deadline));
-        f(&mut eval).map_err(|e| describe(&e, deadline))
+        eval.set_check_cancelled(Box::new(move || {
+            let stop = over(&budget);
+            STOPPED.with(|c| c.set(stop));
+            stop.is_some()
+        }));
+        f(&mut eval).map_err(|e| describe(&e))
     }));
     BUDGET.with(|c| c.set(None));
     match out {
@@ -115,12 +163,13 @@ fn limited<'v, 'a, R>(
     }
 }
 
-/// `message (line N)` → split later by `error_from`; keeps the timeout cause.
-fn describe(e: &starlark::Error, deadline: Instant) -> String {
+/// `message (line N)` → split later by `error_from`; a cancellation says
+/// which limit stopped it.
+fn describe(e: &starlark::Error) -> String {
     let line = error_line(e);
     let mut msg = e.without_diagnostic().to_string();
-    if Instant::now() > deadline && msg.contains("ancel") {
-        msg = "time limit exceeded".into();
+    if let Some(stop) = STOPPED.with(Cell::get).filter(|_| msg.contains("ancel")) {
+        msg = stop.message();
     }
     match line {
         Some(l) => format!("{l}\u{0}{msg}"),
@@ -189,6 +238,19 @@ pub(crate) fn repr_len(v: Value, limit: usize) -> starlark::Result<usize> {
     }
 }
 
+/// Length of a list or dict that `_append` / `_insert` / `_setitem` may
+/// grow; `None` for other values.
+fn growable_len(v: Value) -> Option<usize> {
+    if let Some(l) = ListRef::from_value(v) {
+        return Some(l.len());
+    }
+    DictRef::from_value(v).map(|d| d.len())
+}
+
+fn too_big<T>(what: &str) -> starlark::Result<T> {
+    err(format!("{what} too large (limit {MAX_SEQ} entries)"))
+}
+
 #[starlark_module]
 fn guards(builder: &mut GlobalsBuilder) {
     /// `str(x)`, refusing results over `MAX_SEQ` characters.
@@ -196,6 +258,7 @@ fn guards(builder: &mut GlobalsBuilder) {
         #[starlark(require = pos)] x: Value<'v>,
         heap: Heap<'v>,
     ) -> starlark::Result<Value<'v>> {
+        check()?;
         if x.unpack_str().is_some() {
             return Ok(x);
         }
@@ -208,8 +271,92 @@ fn guards(builder: &mut GlobalsBuilder) {
         #[starlark(require = pos)] x: Value<'v>,
         heap: Heap<'v>,
     ) -> starlark::Result<Value<'v>> {
+        check()?;
         repr_len(x, MAX_SEQ)?;
         Ok(heap.alloc(x.to_repr()))
+    }
+
+    /// `int(x)` / `int(s, base)` limited to 64-bit results: scripts never
+    /// see arbitrary-precision ints, whose arithmetic is unbounded in cost.
+    fn int(
+        #[starlark(require = pos)] x: Value,
+        #[starlark(require = pos)] base: Option<i32>,
+    ) -> starlark::Result<i64> {
+        let out_of_range = || err("int() result out of the 64-bit range");
+        if let Some(base) = base {
+            let Some(s) = x.unpack_str() else {
+                return err("int() with a base needs a string");
+            };
+            if !(2..=36).contains(&base) {
+                return err("int() base must be in 2..36");
+            }
+            return i64::from_str_radix(s.trim(), base as u32).or_else(|_| out_of_range());
+        }
+        if let Some(b) = x.unpack_bool() {
+            return Ok(i64::from(b));
+        }
+        if let Some(s) = x.unpack_str() {
+            return s
+                .trim()
+                .parse::<i64>()
+                .or_else(|_| err(format!("int(): invalid 64-bit integer {s:?}")));
+        }
+        if x.get_type() == "int" {
+            return i64::unpack_value(x)
+                .ok()
+                .flatten()
+                .map_or_else(out_of_range, Ok);
+        }
+        match UnpackFloat::unpack_value_opt(x).map(|f| f.0.trunc()) {
+            Some(f) if f.is_finite() && f.abs() < 9.2e18 => Ok(f as i64),
+            Some(_) => out_of_range(),
+            None => err(format!("int() of a `{}`", x.get_type())),
+        }
+    }
+
+    /// `l.append(x)`, after a size check (the static pass rewrites calls).
+    fn _append<'v>(
+        #[starlark(require = pos)] list: Value<'v>,
+        #[starlark(require = pos)] x: Value<'v>,
+        eval: &mut Evaluator<'v, '_, '_>,
+    ) -> starlark::Result<Value<'v>> {
+        check()?;
+        if growable_len(list).is_some_and(|n| n >= MAX_SEQ) {
+            return too_big("list");
+        }
+        let m = list.get_attr_error("append", eval.heap())?;
+        eval.eval_function(m, &[x], &[])
+    }
+
+    /// `l.insert(i, x)`, after a size check.
+    fn _insert<'v>(
+        #[starlark(require = pos)] list: Value<'v>,
+        #[starlark(require = pos)] i: Value<'v>,
+        #[starlark(require = pos)] x: Value<'v>,
+        eval: &mut Evaluator<'v, '_, '_>,
+    ) -> starlark::Result<Value<'v>> {
+        check()?;
+        if growable_len(list).is_some_and(|n| n >= MAX_SEQ) {
+            return too_big("list");
+        }
+        let m = list.get_attr_error("insert", eval.heap())?;
+        eval.eval_function(m, &[i, x], &[])
+    }
+
+    /// `obj[k] = v`, refusing to grow a dict past `MAX_SEQ` entries.
+    fn _setitem<'v>(
+        #[starlark(require = pos)] obj: Value<'v>,
+        #[starlark(require = pos)] k: Value<'v>,
+        #[starlark(require = pos)] v: Value<'v>,
+    ) -> starlark::Result<NoneType> {
+        check()?;
+        if let Some(d) = DictRef::from_value(obj) {
+            if d.len() >= MAX_SEQ && d.get(k)?.is_none() {
+                return too_big("dict");
+            }
+        }
+        obj.set_at(k, v)?;
+        Ok(NoneType)
     }
 
     /// `range(stop)` / `range(start, stop[, step])`, at most `MAX_SEQ` long.
@@ -218,6 +365,7 @@ fn guards(builder: &mut GlobalsBuilder) {
         #[starlark(require = pos)] b: Option<i32>,
         #[starlark(require = pos, default = 1)] step: i32,
     ) -> starlark::Result<Range> {
+        check()?;
         let (start, stop) = match b {
             Some(b) => (a, b),
             None => (0, a),
@@ -238,6 +386,7 @@ fn guards(builder: &mut GlobalsBuilder) {
         #[starlark(args)] args: UnpackTuple<Value<'v>>,
         heap: Heap<'v>,
     ) -> starlark::Result<Value<'v>> {
+        check()?;
         let limit = 4 * MAX_SEQ;
         let mut cols = Vec::with_capacity(args.items.len());
         let mut total = 0;
@@ -306,6 +455,8 @@ impl ScriptInfo {
 pub struct Compiled {
     module: FrozenModule,
     pub info: ScriptInfo,
+    /// Memory the frozen module holds (counted for the compile cache).
+    pub bytes: usize,
 }
 
 fn parse(name: &str, source: &str) -> Result<AstModule, ScriptError> {
@@ -315,13 +466,13 @@ fn parse(name: &str, source: &str) -> Result<AstModule, ScriptError> {
     })
 }
 
-/// Static check over the AST; returns the byte-offset edits that turn each
-/// `x op= y` into `x = x op (y)`, so augmented assignments also go through
-/// the guarded `_op_*` operators.
-fn static_check(ast: &AstModule, source: &str) -> Result<Vec<(usize, usize, String)>, ScriptError> {
+/// Static check over the AST; returns the byte-offset source edits that
+/// route augmented assignment and list/dict growth through the guarded
+/// natives (see `walk`).
+fn static_check(ast: &AstModule, source: &str) -> Result<Vec<Edit>, ScriptError> {
     let reserved: std::collections::HashSet<String> =
         globals().names().map(|n| n.as_str().to_owned()).collect();
-    let fail = |span: starlark::codemap::Span, msg: String| {
+    let fail = |span: Span, msg: String| {
         let line = ast.file_span(span).resolve_span().begin.line + 1;
         Err(ScriptError::new("static", Some(line), msg))
     };
@@ -350,64 +501,8 @@ fn static_check(ast: &AstModule, source: &str) -> Result<Vec<(usize, usize, Stri
         }
     }
 
-    let mut problem: Option<(starlark::codemap::Span, String)> = None;
+    let mut problem: Option<(Span, String)> = None;
     let mut edits = Vec::new();
-    fn walk<'a>(
-        v: Visit<'a, AstNoPayload>,
-        problem: &mut Option<(starlark::codemap::Span, String)>,
-        edits: &mut Vec<(usize, usize, String)>,
-        source: &str,
-    ) {
-        if problem.is_some() {
-            return;
-        }
-        match &v {
-            Visit::Stmt(s) => match &s.node {
-                Stmt::Load(_) => *problem = Some((s.span, "load() is not allowed".into())),
-                Stmt::AssignModify(lhs, op, rhs) => {
-                    let sym = match op {
-                        AssignOp::Add => "+",
-                        AssignOp::Subtract => "-",
-                        AssignOp::Multiply => "*",
-                        AssignOp::Divide => "/",
-                        AssignOp::Percent => "%",
-                        AssignOp::LeftShift => "<<",
-                        _ => "",
-                    };
-                    if !sym.is_empty() {
-                        let (l0, l1) = (
-                            lhs.span.begin().get() as usize,
-                            lhs.span.end().get() as usize,
-                        );
-                        let (r0, r1) = (
-                            rhs.span.begin().get() as usize,
-                            rhs.span.end().get() as usize,
-                        );
-                        let lhs_src = &source[l0..l1];
-                        edits.push((l1, r0, format!(" = {lhs_src} {sym} (")));
-                        edits.push((r1, r1, ")".into()));
-                    }
-                }
-                _ => {}
-            },
-            Visit::Expr(e) => match &e.node {
-                ExprP::Dot(_, attr) if BANNED_ATTRS.contains(&attr.node.as_str()) => {
-                    *problem = Some((
-                        e.span,
-                        format!("`.{}()` is not available in scripts", attr.node),
-                    ))
-                }
-                ExprP::Identifier(id) if BANNED_IDENTS.contains(&id.ident.as_str()) => {
-                    *problem = Some((
-                        e.span,
-                        format!("`{}` is not available in scripts", id.ident),
-                    ))
-                }
-                _ => {}
-            },
-        }
-        v.visit_children(|c| walk(c, problem, edits, source));
-    }
     walk(
         Visit::Stmt(ast.statement()),
         &mut problem,
@@ -420,11 +515,167 @@ fn static_check(ast: &AstModule, source: &str) -> Result<Vec<(usize, usize, Stri
     Ok(edits)
 }
 
-/// Apply `(start, end, replacement)` byte edits (non-overlapping).
-fn apply_edits(source: &str, mut edits: Vec<(usize, usize, String)>) -> String {
-    edits.sort_by_key(|e| std::cmp::Reverse((e.0, e.1)));
+type Edit = (usize, usize, String);
+
+fn pos(p: starlark::codemap::Pos) -> usize {
+    p.get() as usize
+}
+
+/// Whether `e` is recognisably a series: an `ohlcv` column, a `ta.*` call,
+/// or arithmetic, comparison or indexing on one. Variables are not tracked.
+fn seriesish(e: &AstExpr) -> bool {
+    match &e.node {
+        ExprP::Dot(obj, attr) => {
+            matches!(&obj.node, ExprP::Identifier(id) if id.ident == "ohlcv")
+                && super::chart_builder::COLUMNS.contains(&attr.node.as_str())
+        }
+        ExprP::Call(callee, _) => matches!(&callee.node,
+            ExprP::Dot(obj, f) if f.node != "nan"
+                && matches!(&obj.node, ExprP::Identifier(id) if id.ident == "ta")),
+        ExprP::Index(b) => seriesish(&b.0),
+        ExprP::Op(l, op, r) => {
+            !matches!(op, BinOp::And | BinOp::Or | BinOp::In | BinOp::NotIn)
+                && (seriesish(l) || seriesish(r))
+        }
+        ExprP::Minus(x) | ExprP::Plus(x) | ExprP::BitNot(x) => seriesish(x),
+        _ => false,
+    }
+}
+
+const NOT_A_BOOL: &str = "a series is not a bool (it is always true); use chart.dot(cond, ...) for per-bar conditions or loop over series.list()";
+
+fn index_target(t: &AstAssignTarget) -> bool {
+    match &t.node {
+        AssignTargetP::Index(_) => true,
+        AssignTargetP::Tuple(xs) => xs.iter().any(index_target),
+        _ => false,
+    }
+}
+
+/// Static check of one AST node and its children. Records the first
+/// problem, and the source edits that route growth and augmented
+/// assignment through the guarded natives:
+/// `x op= y` → `x = x op (y)`, `a.append(x)` → `_append(a, x)`,
+/// `a.insert(i, x)` → `_insert(a, i, x)`, `d[k] = v` → `_setitem(d, k, (v))`.
+fn walk(
+    v: Visit<'_, AstNoPayload>,
+    problem: &mut Option<(Span, String)>,
+    edits: &mut Vec<Edit>,
+    source: &str,
+) {
+    if problem.is_some() {
+        return;
+    }
+    let mut flag = |span: Span, msg: &str| *problem = Some((span, msg.to_owned()));
+    match &v {
+        Visit::Stmt(s) => match &s.node {
+            Stmt::Load(_) => flag(s.span, "load() is not allowed"),
+            Stmt::If(c, _) | Stmt::IfElse(c, _) if seriesish(c) => flag(c.span, NOT_A_BOOL),
+            Stmt::For(f) if index_target(&f.var) => {
+                flag(f.var.span, "a for loop cannot assign to an index")
+            }
+            Stmt::AssignModify(lhs, op, rhs) => {
+                if !matches!(lhs.node, AssignTargetP::Identifier(_)) {
+                    flag(
+                        lhs.span,
+                        "augmented assignment (`+=` etc.) needs a plain name; write `x[i] = x[i] + v`",
+                    );
+                    return;
+                }
+                let sym = op.to_string();
+                let sym = sym.trim().trim_end_matches('=');
+                let (l0, l1) = (pos(lhs.span.begin()), pos(lhs.span.end()));
+                let (r0, r1) = (pos(rhs.span.begin()), pos(rhs.span.end()));
+                let lhs_src = &source[l0..l1];
+                edits.push((l1, r0, format!(" = {lhs_src} {sym} (")));
+                edits.push((r1, r1, ")".into()));
+            }
+            Stmt::Assign(a) => match &a.lhs.node {
+                AssignTargetP::Index(ix) => {
+                    let (obj, key) = (&ix.0, &ix.1);
+                    let start = pos(a.lhs.span.begin());
+                    edits.push((start, start, "_setitem(".into()));
+                    edits.push((pos(obj.span.end()), pos(key.span.begin()), ", ".into()));
+                    edits.push((pos(key.span.end()), pos(a.rhs.span.begin()), ", (".into()));
+                    let end = pos(a.rhs.span.end());
+                    edits.push((end, end, "))".into()));
+                }
+                AssignTargetP::Tuple(_) if index_target(&a.lhs) => flag(
+                    a.lhs.span,
+                    "assign list or dict items one at a time: `d[k] = v`",
+                ),
+                _ => {}
+            },
+            _ => {}
+        },
+        Visit::Expr(e) => match &e.node {
+            ExprP::Dot(_, attr) if BANNED_ATTRS.contains(&attr.node.as_str()) => flag(
+                e.span,
+                &format!("`.{}()` is not available in scripts", attr.node),
+            ),
+            ExprP::Identifier(id) if BANNED_IDENTS.contains(&id.ident.as_str()) => flag(
+                e.span,
+                &format!("`{}` is not available in scripts", id.ident),
+            ),
+            ExprP::Literal(AstLiteral::Int(i)) => {
+                if let TokenInt::BigInt(b) = &i.node {
+                    if i64::try_from(b).is_err() {
+                        flag(e.span, "integer literal out of the 64-bit range");
+                    }
+                }
+            }
+            ExprP::If(b) if seriesish(&b.0) => flag(b.0.span, NOT_A_BOOL),
+            ExprP::Not(x) if seriesish(x) => flag(x.span, NOT_A_BOOL),
+            ExprP::Op(l, BinOp::And | BinOp::Or, r) if seriesish(l) || seriesish(r) => {
+                flag(e.span, NOT_A_BOOL)
+            }
+            ExprP::ListComprehension(_, first, rest) | ExprP::DictComprehension(_, first, rest) => {
+                let mut fors =
+                    std::iter::once(&**first).chain(rest.iter().filter_map(|c| match c {
+                        ClauseP::For(f) => Some(f),
+                        ClauseP::If(_) => None,
+                    }));
+                if fors.any(|f| index_target(&f.var)) {
+                    flag(e.span, "a comprehension cannot assign to an index");
+                } else if rest
+                    .iter()
+                    .any(|c| matches!(c, ClauseP::If(x) if seriesish(x)))
+                {
+                    flag(e.span, NOT_A_BOOL);
+                }
+            }
+            ExprP::Call(callee, args) => {
+                if let ExprP::Dot(obj, name) = &callee.node {
+                    let f = match name.node.as_str() {
+                        "append" => Some("_append("),
+                        "insert" => Some("_insert("),
+                        _ => None,
+                    };
+                    if let Some(f) = f {
+                        let call_end = pos(e.span.end());
+                        let args_begin = args
+                            .args
+                            .first()
+                            .map_or(call_end - 1, |a| pos(a.span.begin()));
+                        let start = pos(obj.span.begin());
+                        edits.push((start, start, f.into()));
+                        edits.push((pos(obj.span.end()), args_begin, ", ".into()));
+                    }
+                }
+            }
+            _ => {}
+        },
+    }
+    v.visit_children(|c| walk(c, problem, edits, source));
+}
+
+/// Apply `(start, end, replacement)` byte edits (non-overlapping). At one
+/// position, edits recorded first (outer nodes) end up leftmost.
+fn apply_edits(source: &str, edits: Vec<Edit>) -> String {
+    let mut edits: Vec<(usize, Edit)> = edits.into_iter().enumerate().collect();
+    edits.sort_by_key(|(seq, e)| std::cmp::Reverse((e.0, e.1, *seq)));
     let mut out = source.to_owned();
-    for (a, b, text) in edits {
+    for (_, (a, b, text)) in edits {
         out.replace_range(a..b, &text);
     }
     out
@@ -453,8 +704,9 @@ pub fn compile(name: &str, source: &str) -> Result<Compiled, ScriptError> {
         .collect();
     ast.replace_binary_operators(&ops);
 
+    let before = super::alloc::thread_net();
     let module = Module::with_temp_heap(|module| {
-        limited(&module, DRY_RUN_TIMEOUT, |eval| {
+        limited(&module, DRY_RUN_TIMEOUT, 0, |eval| {
             eval.eval_module(ast, globals()).map(|_| ())
         })
         .map_err(|e| error_from("static", e))?;
@@ -462,8 +714,25 @@ pub fn compile(name: &str, source: &str) -> Result<Compiled, ScriptError> {
             .freeze()
             .map_err(|e| ScriptError::new("static", None, format!("{e:?}")))
     })?;
+    // What the frozen module keeps alive once the temporary heap is gone.
+    let bytes = (super::alloc::thread_net() - before).max(0) as usize;
+    if bytes > MAX_MODULE_BYTES {
+        return Err(ScriptError::new(
+            "static",
+            None,
+            format!(
+                "top-level values take {} KiB (limit {} KiB); build large data inside compute()",
+                bytes >> 10,
+                MAX_MODULE_BYTES >> 10
+            ),
+        ));
+    }
     let info = presence(name, &module)?;
-    Ok(Compiled { module, info })
+    Ok(Compiled {
+        module,
+        info,
+        bytes,
+    })
 }
 
 fn presence(name: &str, module: &FrozenModule) -> Result<ScriptInfo, ScriptError> {
@@ -619,7 +888,7 @@ pub fn run(
         let compute = heap.access_owned_frozen_value(&compute);
         let chart = heap.alloc(Chart::new(data.len(), &compiled.info));
         let args = [heap.alloc(Ohlcv::new(data)), heap.alloc(params), chart];
-        limited(&module, timeout, |eval| {
+        limited(&module, timeout, data.len(), |eval| {
             let ret = eval.eval_function(compute, &args, &[])?;
             if !ret.is_none() {
                 return err("compute() must not return a value; draw with chart.line(...) etc.");

@@ -27,7 +27,7 @@ const MAX_MARKS: usize = 10_000;
 
 // ---- ohlcv ----
 
-const COLUMNS: &[&str] = &[
+pub const COLUMNS: &[&str] = &[
     "open", "high", "low", "close", "volume", "time", "hl2", "hlc3", "ohlc4", "hlcc4",
 ];
 

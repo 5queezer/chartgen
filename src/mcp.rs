@@ -518,17 +518,20 @@ fn compute_panels<'a>(
 ) -> Computed<'a> {
     let (mut computed, mut inds) = (Vec::new(), Vec::new());
     let mut errors = serde_json::Map::new();
-    for (key, ind) in keys.iter().zip(panels) {
-        match ind.try_compute(data) {
-            Ok(pr) => {
-                computed.push((key.clone(), pr));
-                inds.push(ind.as_ref());
-            }
-            Err(e) => {
-                errors.insert(key.clone(), e.to_json());
+    // One script budget for the whole chart (ADR-0025).
+    scripting::with_chart_budget(|| {
+        for (key, ind) in keys.iter().zip(panels) {
+            match ind.try_compute(data) {
+                Ok(pr) => {
+                    computed.push((key.clone(), pr));
+                    inds.push(ind.as_ref());
+                }
+                Err(e) => {
+                    errors.insert(key.clone(), e.to_json());
+                }
             }
         }
-    }
+    });
     let errors = (!errors.is_empty()).then_some(Value::Object(errors));
     (computed, inds, errors)
 }
@@ -824,7 +827,7 @@ fn tool_register_indicator(id: Option<Value>, args: &Value, user: Option<&str>) 
             ),
         );
     }
-    let compiled = match scripting::validate(name, source) {
+    let compiled = match scripting::validate_as(user, name, source) {
         Ok(c) => c,
         Err(e) => {
             let payload = json!({ "ok": false, "errors": [e.to_json()] });

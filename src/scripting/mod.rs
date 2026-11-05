@@ -6,6 +6,7 @@
 //! (LRU cache below) and run through `ScriptIndicator`, which implements the
 //! `Indicator` trait like any built-in.
 
+pub mod alloc;
 pub mod chart_builder;
 pub mod persistence;
 pub mod runtime;
@@ -16,8 +17,10 @@ mod tests;
 
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::cell::Cell;
+use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use crate::data::OhlcvData;
 use crate::indicator::{Indicator, PanelResult};
@@ -92,15 +95,100 @@ pub fn validate(name: &str, source: &str) -> Result<Compiled, ScriptError> {
     Ok(compiled)
 }
 
+// ---- Concurrency: at most 4 evaluations at once, one per user ----
+
+/// Script evaluations (compile, dry run or compute) running at once.
+const MAX_CONCURRENT: usize = 4;
+/// Scripted indicators one chart request may compute.
+pub const MAX_SCRIPTS_PER_CHART: usize = 3;
+/// Wall-clock budget shared by every script of one chart request.
+pub const CHART_BUDGET: Duration = runtime::COMPUTE_TIMEOUT;
+/// How long registering waits for a free slot.
+const REGISTER_WAIT: Duration = Duration::from_secs(1);
+
+#[derive(Default)]
+struct Slots {
+    running: usize,
+    users: HashSet<String>,
+}
+
+fn slots() -> &'static (Mutex<Slots>, Condvar) {
+    static S: OnceLock<(Mutex<Slots>, Condvar)> = OnceLock::new();
+    S.get_or_init(Default::default)
+}
+
+/// A held evaluation slot; dropping it frees the slot.
+struct Permit(String);
+
+impl Drop for Permit {
+    fn drop(&mut self) {
+        let (m, cv) = slots();
+        let mut s = m.lock().unwrap_or_else(|e| e.into_inner());
+        s.running -= 1;
+        s.users.remove(&self.0);
+        cv.notify_all();
+    }
+}
+
+/// Wait until fewer than `MAX_CONCURRENT` evaluations run and none of
+/// `user`'s, or fail at `deadline`.
+fn acquire(user: &str, deadline: Instant, step: &'static str) -> Result<Permit, ScriptError> {
+    let (m, cv) = slots();
+    let mut s = m.lock().unwrap_or_else(|e| e.into_inner());
+    loop {
+        if s.running < MAX_CONCURRENT && !s.users.contains(user) {
+            s.running += 1;
+            s.users.insert(user.to_owned());
+            return Ok(Permit(user.to_owned()));
+        }
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return Err(ScriptError::new(
+                step,
+                None,
+                "server busy: too many scripts running (one at a time per user); try again",
+            ));
+        }
+        s = cv
+            .wait_timeout(s, left)
+            .unwrap_or_else(|e| e.into_inner())
+            .0;
+    }
+}
+
+/// `validate` while holding one of `user`'s evaluation slots.
+pub fn validate_as(user: &str, name: &str, source: &str) -> Result<Compiled, ScriptError> {
+    let _permit = acquire(user, Instant::now() + REGISTER_WAIT, "dry_run")?;
+    validate(name, source)
+}
+
+thread_local! {
+    /// Deadline and scripts started of the chart request on this thread.
+    static CHART: Cell<Option<(Instant, usize)>> = const { Cell::new(None) };
+}
+
+/// Run `f` (one chart request's indicator computations) with one shared
+/// script budget: `CHART_BUDGET` of wall clock and `MAX_SCRIPTS_PER_CHART`
+/// scripts, over all its scripted indicators together.
+pub fn with_chart_budget<R>(f: impl FnOnce() -> R) -> R {
+    CHART.with(|c| c.set(Some((Instant::now() + CHART_BUDGET, 0))));
+    let out = f();
+    CHART.with(|c| c.set(None));
+    out
+}
+
 // ---- Compile cache: (user, name, source_hash) → frozen module, LRU ----
 
 const CACHE_SIZE: usize = 1024;
+/// Memory the cached modules may hold in total.
+const CACHE_BYTES: usize = 64 << 20;
 type CacheKey = (String, String, String);
 
 #[derive(Default)]
 struct Cache {
     map: HashMap<CacheKey, (Arc<Compiled>, u64)>,
     clock: u64,
+    bytes: usize,
 }
 
 fn cache() -> &'static Mutex<Cache> {
@@ -120,20 +208,26 @@ pub fn compiled(user: &str, name: &str, source: &str) -> Result<Arc<Compiled>, S
             return Ok(entry.0.clone());
         }
     }
-    let fresh = Arc::new(runtime::compile(name, source)?);
+    let fresh = {
+        let _permit = acquire(user, Instant::now() + REGISTER_WAIT, "static")?;
+        Arc::new(runtime::compile(name, source)?)
+    };
     let mut c = cache().lock().unwrap_or_else(|e| e.into_inner());
-    if c.map.len() >= CACHE_SIZE {
-        if let Some(oldest) = c
+    while !c.map.is_empty() && (c.map.len() >= CACHE_SIZE || c.bytes + fresh.bytes > CACHE_BYTES) {
+        let oldest = c
             .map
             .iter()
             .min_by_key(|(_, v)| v.1)
-            .map(|(k, _)| k.clone())
-        {
-            c.map.remove(&oldest);
+            .map(|(k, _)| k.clone());
+        if let Some((old, _)) = oldest.and_then(|k| c.map.remove(&k)) {
+            c.bytes -= old.bytes;
         }
     }
     let now = c.clock;
-    c.map.insert(key, (fresh.clone(), now));
+    c.bytes += fresh.bytes;
+    if let Some((old, _)) = c.map.insert(key, (fresh.clone(), now)) {
+        c.bytes -= old.bytes;
+    }
     Ok(fresh)
 }
 
@@ -143,6 +237,7 @@ pub fn compiled(user: &str, name: &str, source: &str) -> Result<Arc<Compiled>, S
 /// compiles still resolves, so the chart reports its error instead of
 /// "unknown indicator".
 pub struct ScriptIndicator {
+    user: String,
     name: String,
     compiled: Result<Arc<Compiled>, ScriptError>,
     params: Value,
@@ -151,6 +246,7 @@ pub struct ScriptIndicator {
 impl ScriptIndicator {
     pub fn new(user: &str, name: &str, source: &str) -> Self {
         Self {
+            user: user.to_owned(),
             name: name.to_owned(),
             compiled: compiled(user, name, source),
             params: json!({}),
@@ -191,13 +287,24 @@ impl Indicator for ScriptIndicator {
 
     fn try_compute(&self, data: &OhlcvData) -> Result<PanelResult, ScriptError> {
         let compiled = self.compiled.as_ref().map_err(Clone::clone)?;
-        runtime::run(
-            compiled,
-            data,
-            &self.params,
-            runtime::COMPUTE_TIMEOUT,
-            "runtime",
-        )
+        let fail = |msg: String| Err(ScriptError::new("runtime", None, msg));
+        // Outside a chart request (e.g. `compute` called directly) the
+        // script gets its own budget.
+        let (deadline, started) = CHART
+            .with(Cell::get)
+            .unwrap_or((Instant::now() + runtime::COMPUTE_TIMEOUT, 0));
+        if started >= MAX_SCRIPTS_PER_CHART {
+            return fail(format!(
+                "at most {MAX_SCRIPTS_PER_CHART} scripted indicators per chart"
+            ));
+        }
+        CHART.with(|c| c.set(c.get().map(|(d, n)| (d, n + 1))));
+        let _permit = acquire(&self.user, deadline, "runtime")?;
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return fail("time limit exceeded (the chart's script budget is used up)".into());
+        }
+        runtime::run(compiled, data, &self.params, left, "runtime")
     }
 }
 

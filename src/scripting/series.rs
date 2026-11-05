@@ -28,7 +28,7 @@ use std::cmp::Ordering;
 use std::fmt;
 use std::sync::Arc;
 
-use super::runtime::{charge, MAX_SEQ};
+use super::runtime::{bars, check, MAX_SEQ};
 
 /// One value per bar. `boolean` marks a condition series (values 1.0 / 0.0).
 #[derive(Debug, ProvidesStaticType, NoSerialize, Allocative, StarlarkPagablePanic)]
@@ -53,7 +53,9 @@ impl fmt::Display for Series {
     }
 }
 
-/// Allocate a numeric series, charged against the evaluation's budget.
+/// Allocate a numeric series after the deadline and memory check. Every
+/// series has exactly the chart's bar count, which bounds the cost of each
+/// `ta.*` call (a window over at most `bars` values per bar).
 pub fn alloc<'v>(heap: Heap<'v>, v: Vec<f64>) -> starlark::Result<Value<'v>> {
     alloc_kind(heap, v, false)
 }
@@ -64,7 +66,18 @@ pub fn alloc_bool<'v>(heap: Heap<'v>, v: Vec<f64>) -> starlark::Result<Value<'v>
 }
 
 fn alloc_kind<'v>(heap: Heap<'v>, v: Vec<f64>, boolean: bool) -> starlark::Result<Value<'v>> {
-    charge(v.len())?;
+    check()?;
+    let n = bars();
+    if v.len() != n {
+        return err(if n == 0 {
+            "series can only be made inside compute()".to_string()
+        } else {
+            format!(
+                "a series needs one value per bar: {} values for {n} bars",
+                v.len()
+            )
+        });
+    }
     Ok(heap.alloc(Series {
         v: v.into(),
         boolean,
@@ -230,6 +243,19 @@ fn compare<'v>(a: Value<'v>, b: Value<'v>, heap: Heap<'v>, c: Cmp) -> starlark::
     Ok(Value::new_bool(r))
 }
 
+/// Every `_op_*` starts here: the deadline and memory check, and no
+/// arbitrary-precision ints (only reachable as `-(-2**63)`): their
+/// arithmetic cost grows with their size, which no tick counts.
+fn guard<'v>(a: Value<'v>, b: Value<'v>) -> starlark::Result<()> {
+    check()?;
+    for v in [a, b] {
+        if v.get_type() == "int" && i64::unpack_value(v).ok().flatten().is_none() {
+            return err("integer out of the 64-bit range");
+        }
+    }
+    Ok(())
+}
+
 /// Integer operands for the overflow-checked int paths (`None` otherwise).
 fn ints(a: Value, b: Value) -> Option<(i64, i64)> {
     let int = |v: Value| {
@@ -269,6 +295,7 @@ fn too_long<T>(n: usize) -> starlark::Result<T> {
 #[starlark_module]
 pub fn operators(builder: &mut GlobalsBuilder) {
     fn _op_add<'v>(a: Value<'v>, b: Value<'v>, heap: Heap<'v>) -> starlark::Result<Value<'v>> {
+        guard(a, b)?;
         if is_series(a) || is_series(b) {
             return series_arith(a, b, heap, "+", |x, y| x + y);
         }
@@ -284,6 +311,7 @@ pub fn operators(builder: &mut GlobalsBuilder) {
     }
 
     fn _op_sub<'v>(a: Value<'v>, b: Value<'v>, heap: Heap<'v>) -> starlark::Result<Value<'v>> {
+        guard(a, b)?;
         if is_series(a) || is_series(b) {
             return series_arith(a, b, heap, "-", |x, y| x - y);
         }
@@ -294,6 +322,7 @@ pub fn operators(builder: &mut GlobalsBuilder) {
     }
 
     fn _op_mul<'v>(a: Value<'v>, b: Value<'v>, heap: Heap<'v>) -> starlark::Result<Value<'v>> {
+        guard(a, b)?;
         if is_series(a) || is_series(b) {
             return series_arith(a, b, heap, "*", |x, y| x * y);
         }
@@ -313,6 +342,7 @@ pub fn operators(builder: &mut GlobalsBuilder) {
     }
 
     fn _op_div<'v>(a: Value<'v>, b: Value<'v>, heap: Heap<'v>) -> starlark::Result<Value<'v>> {
+        guard(a, b)?;
         if is_series(a) || is_series(b) {
             return series_arith(a, b, heap, "/", pine_div);
         }
@@ -320,6 +350,7 @@ pub fn operators(builder: &mut GlobalsBuilder) {
     }
 
     fn _op_mod<'v>(a: Value<'v>, b: Value<'v>, heap: Heap<'v>) -> starlark::Result<Value<'v>> {
+        guard(a, b)?;
         if let Some(fmt) = a.unpack_str() {
             // `"%s" % x`: bound the output by the format plus its arguments.
             if DictRef::from_value(b).is_some() {
@@ -334,6 +365,7 @@ pub fn operators(builder: &mut GlobalsBuilder) {
     }
 
     fn _op_lshift<'v>(a: Value<'v>, b: Value<'v>, heap: Heap<'v>) -> starlark::Result<Value<'v>> {
+        guard(a, b)?;
         match ints(a, b) {
             Some((x, s)) if (0..63).contains(&s) => checked(x.checked_mul(1i64 << s), heap),
             Some(_) => err("shift count must be in 0..62"),
@@ -341,27 +373,76 @@ pub fn operators(builder: &mut GlobalsBuilder) {
         }
     }
 
+    fn _op_floordiv<'v>(a: Value<'v>, b: Value<'v>, heap: Heap<'v>) -> starlark::Result<Value<'v>> {
+        guard(a, b)?;
+        if is_series(a) || is_series(b) {
+            return series_arith(a, b, heap, "//", |x, y| pine_div(x, y).floor());
+        }
+        a.floor_div(b, heap)
+    }
+
+    fn _op_rshift<'v>(a: Value<'v>, b: Value<'v>, heap: Heap<'v>) -> starlark::Result<Value<'v>> {
+        guard(a, b)?;
+        a.right_shift(b, heap)
+    }
+
+    fn _op_bitand<'v>(a: Value<'v>, b: Value<'v>, heap: Heap<'v>) -> starlark::Result<Value<'v>> {
+        guard(a, b)?;
+        if is_series(a) || is_series(b) {
+            return logic(a, b, heap, |x, y| x && y);
+        }
+        a.bit_and(b, heap)
+    }
+
+    fn _op_bitor<'v>(a: Value<'v>, b: Value<'v>, heap: Heap<'v>) -> starlark::Result<Value<'v>> {
+        guard(a, b)?;
+        if is_series(a) || is_series(b) {
+            return logic(a, b, heap, |x, y| x || y);
+        }
+        // Dict union: bound the result.
+        if let (Some(x), Some(y)) = (DictRef::from_value(a), DictRef::from_value(b)) {
+            if x.len() + y.len() > MAX_SEQ {
+                return too_long(x.len() + y.len());
+            }
+        }
+        a.bit_or(b, heap)
+    }
+
+    fn _op_bitxor<'v>(a: Value<'v>, b: Value<'v>, heap: Heap<'v>) -> starlark::Result<Value<'v>> {
+        guard(a, b)?;
+        if is_series(a) || is_series(b) {
+            return logic(a, b, heap, |x, y| x != y);
+        }
+        a.bit_xor(b, heap)
+    }
+
     fn _op_lt<'v>(a: Value<'v>, b: Value<'v>, heap: Heap<'v>) -> starlark::Result<Value<'v>> {
+        guard(a, b)?;
         compare(a, b, heap, Cmp::Lt)
     }
 
     fn _op_le<'v>(a: Value<'v>, b: Value<'v>, heap: Heap<'v>) -> starlark::Result<Value<'v>> {
+        guard(a, b)?;
         compare(a, b, heap, Cmp::Le)
     }
 
     fn _op_gt<'v>(a: Value<'v>, b: Value<'v>, heap: Heap<'v>) -> starlark::Result<Value<'v>> {
+        guard(a, b)?;
         compare(a, b, heap, Cmp::Gt)
     }
 
     fn _op_ge<'v>(a: Value<'v>, b: Value<'v>, heap: Heap<'v>) -> starlark::Result<Value<'v>> {
+        guard(a, b)?;
         compare(a, b, heap, Cmp::Ge)
     }
 
     fn _op_eq<'v>(a: Value<'v>, b: Value<'v>, heap: Heap<'v>) -> starlark::Result<Value<'v>> {
+        guard(a, b)?;
         compare(a, b, heap, Cmp::Eq)
     }
 
     fn _op_ne<'v>(a: Value<'v>, b: Value<'v>, heap: Heap<'v>) -> starlark::Result<Value<'v>> {
+        guard(a, b)?;
         compare(a, b, heap, Cmp::Ne)
     }
 }
@@ -374,6 +455,11 @@ pub const OPERATOR_FUNCTIONS: &[(&str, &str)] = &[
     ("/", "_op_div"),
     ("%", "_op_mod"),
     ("<<", "_op_lshift"),
+    (">>", "_op_rshift"),
+    ("//", "_op_floordiv"),
+    ("&", "_op_bitand"),
+    ("|", "_op_bitor"),
+    ("^", "_op_bitxor"),
     ("<", "_op_lt"),
     ("<=", "_op_le"),
     (">", "_op_gt"),
@@ -383,14 +469,14 @@ pub const OPERATOR_FUNCTIONS: &[(&str, &str)] = &[
 ];
 
 fn logic<'v>(
-    me: &Series,
-    other: Value<'v>,
+    a: Value<'v>,
+    b: Value<'v>,
     heap: Heap<'v>,
     f: fn(bool, bool) -> bool,
 ) -> starlark::Result<Value<'v>> {
     let v = zip_with(
-        Operand::S(&me.v),
-        operand(other, "logical operator")?,
+        operand(a, "logical operator")?,
+        operand(b, "logical operator")?,
         |x, y| b2f(f(truth(x), truth(y))),
     )?;
     alloc_bool(heap, v)
@@ -427,18 +513,6 @@ impl<'v> StarlarkValue<'v> for Series {
         alloc_kind(heap, self.v.to_vec(), self.boolean)
     }
 
-    fn bit_and(&self, other: Value<'v>, heap: Heap<'v>) -> starlark::Result<Value<'v>> {
-        logic(self, other, heap, |a, b| a && b)
-    }
-
-    fn bit_or(&self, other: Value<'v>, heap: Heap<'v>) -> starlark::Result<Value<'v>> {
-        logic(self, other, heap, |a, b| a || b)
-    }
-
-    fn bit_xor(&self, other: Value<'v>, heap: Heap<'v>) -> starlark::Result<Value<'v>> {
-        logic(self, other, heap, |a, b| a != b)
-    }
-
     fn bit_not(&self, heap: Heap<'v>) -> starlark::Result<Value<'v>> {
         alloc_bool(heap, self.v.iter().map(|&x| b2f(!truth(x))).collect())
     }
@@ -459,7 +533,7 @@ fn series_methods(builder: &mut MethodsBuilder) {
 
     /// All values as a list of floats (na is `nan`), for per-bar loops.
     fn list<'v>(this: &Series, heap: Heap<'v>) -> starlark::Result<Value<'v>> {
-        charge(this.v.len())?;
+        check()?;
         Ok(heap.alloc(AllocList(this.v.iter().copied())))
     }
 }

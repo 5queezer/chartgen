@@ -10,7 +10,7 @@ use starlark::values::tuple::AllocTuple;
 use starlark::values::{Heap, Value};
 
 use super::chart_builder::Ohlcv;
-use super::runtime::charge;
+use super::runtime::check;
 use super::series::{
     alloc, alloc_bool, common_len, err, map_value, operand, pine_div, zip_with, Operand, Series,
 };
@@ -36,7 +36,7 @@ fn out<'v>(
     src: &Series,
     f: impl FnOnce(&[f64]) -> Vec<f64>,
 ) -> starlark::Result<Value<'v>> {
-    charge(0)?;
+    check()?;
     alloc(heap, f(&src.v))
 }
 
@@ -162,7 +162,7 @@ pub fn ta_module(builder: &mut GlobalsBuilder) {
             self::length(slow, "ta.macd")?,
             self::length(signal, "ta.macd")?,
         );
-        charge(0)?;
+        check()?;
         let line: Vec<f64> = pine::ema_n(&src.v, f)
             .iter()
             .zip(pine::ema_n(&src.v, s))
