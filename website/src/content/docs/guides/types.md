@@ -49,6 +49,8 @@ shape the frontend consumes:
   embedded in `format=both`).
 - `ListIndicatorsPayloadSchema` — `list_indicators`.
 - `GetIndicatorsPayloadSchema` — `get_indicators`.
+- `QuotesPayloadSchema` — `get_quotes`.
+- `SearchSymbolsPayloadSchema` — `search_symbols`.
 
 Each schema is paired with a `z.infer<>` TS type. Where the Rust side
 emits `null` for NaN via `finite_or_null`, the Zod schema uses

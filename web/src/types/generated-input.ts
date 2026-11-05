@@ -23,11 +23,19 @@ export interface CancelOrderInput {
 
 export interface GenerateChartInput {
   /**
-   * Number of OHLCV candlestick bars to display
+   * Number of OHLCV candlestick bars to display (max 5000, all formats)
    */
   bars?: number;
   /**
-   * Output format. 'png' (default) returns a rendered chart image. 'summary' returns a compact JSON summary (OHLCV stats, last indicator values, signals, divergences, levels) — typically 10-50x fewer tokens than a PNG and ideal for automated analysis without vision. 'both' returns the PNG plus the JSON summary. 'series' returns a full per-bar time-series JSON payload (every OHLCV bar plus 1:1 aligned indicator value arrays with NaN→null for pre-warmup, signals with bar timestamps, hlines, and y_range) — ideal for downstream numeric computation.
+   * Price series style. 'candles' (default) uses the raw OHLC bars. 'heikin_ashi' replaces them with Heikin Ashi bars (haClose = ohlc4, haOpen = (prev haOpen + prev haClose) / 2, seeded with (open+close)/2) in every format. Like TradingView, indicators are then computed on the Heikin Ashi values. The transform runs over bars+warmup before trimming, so pages and tail polls converge after warmup. format=series echoes the applied style as chart_style.
+   */
+  chart_style?: "candles" | "heikin_ashi";
+  /**
+   * History paging: return only bars whose open time (ms since epoch) is strictly before end_time — pass the oldest loaded bar's t × 1000 to fetch the page before it. Omit (or null) for the newest bars, including the still-forming one. Must be an integer between -2208988800000 (1900-01-01) and one year from now.
+   */
+  end_time?: number;
+  /**
+   * Output format. 'png' (default) returns a rendered chart image. 'summary' returns a compact JSON summary (OHLCV stats, last indicator values, signals, divergences, levels) — typically 10-50x fewer tokens than a PNG and ideal for automated analysis without vision. 'both' returns the PNG plus the JSON summary. 'series' returns a full per-bar time-series JSON payload (every OHLCV bar plus 1:1 aligned indicator value arrays with NaN→null for pre-warmup, signals with bar timestamps, hlines, and y_range, plus has_more=true when older history may exist) — ideal for downstream numeric computation.
    */
   format?: "png" | "summary" | "both" | "series";
   /**
@@ -63,13 +71,17 @@ export interface GenerateChartInput {
    */
   symbol?: string;
   /**
-   * Stock or crypto ticker symbol. Stocks: AAPL, MSFT, TSLA, GOOGL, AMZN (Yahoo Finance). Crypto: BTCUSDT, ETHUSDT, SOLUSDT (Binance). If omitted, uses random sample data.
+   * Stock or crypto ticker symbol. Stocks: AAPL, MSFT, TSLA, GOOGL, AMZN (Yahoo Finance). Crypto: BTCUSDT, ETHUSDT, SOLUSDT (Binance). If omitted, uses random sample data. If given and the upstream fetch fails, the call returns an error.
    */
   ticker?: string;
   /**
    * Candlestick timeframe / interval: 1m, 5m, 15m, 1h, 4h, 1d, 1wk
    */
   timeframe?: string;
+  /**
+   * format=series only: extra older bars (max 1000) fetched and fed to indicator computation, then trimmed, so the first returned bars carry warmed-up indicator values. Ignored by png/summary/both.
+   */
+  warmup?: number;
   /**
    * Chart image width in pixels
    */
@@ -104,6 +116,15 @@ export interface GetOrdersInput {
 
 export interface GetPositionsInput {}
 
+export interface GetQuotesInput {
+  /**
+   * Ticker symbols (e.g. ["BTCUSDT", "AAPL", "^GSPC"]). At most 50 entries; trimmed, uppercased and deduplicated.
+   *
+   * @maxItems 50
+   */
+  symbols: string[];
+}
+
 export interface ListAlertsInput {}
 
 export interface ListIndicatorsInput {}
@@ -133,6 +154,21 @@ export interface PlaceOrderInput {
   type: "market" | "limit";
 }
 
+export interface SearchSymbolsInput {
+  /**
+   * Maximum number of results
+   */
+  limit?: number;
+  /**
+   * Text to search for in tickers and names. Trimmed; 1-40 characters, no control characters.
+   */
+  query: string;
+  /**
+   * Only return these instrument types. Omit for all types.
+   */
+  types?: ("crypto" | "stock" | "etf" | "fund" | "index" | "forex" | "future")[];
+}
+
 export interface SetAlertInput {
   /**
    * Alert condition. One of: {"price_above": 0.85}, {"price_below": 0.805}, or {"indicator_signal": {"indicator": "cipher_b", "signal": "green_dot"}}
@@ -144,6 +180,35 @@ export interface SetAlertInput {
   symbol: string;
 }
 
+export interface SubscribeChartInput {
+  /**
+   * Price series style, as for generate_chart.
+   */
+  chart_style?: "candles" | "heikin_ashi";
+  /**
+   * Indicators, as for generate_chart; at most 10.
+   */
+  indicators?: (
+    | string
+    | {
+        name: string;
+        [k: string]: unknown;
+      }
+  )[];
+  /**
+   * Binance symbol, 2-20 letters or digits, e.g. BTCUSDT.
+   */
+  ticker: string;
+  /**
+   * Candlestick timeframe, as for generate_chart: 1m, 5m, 15m, 30m, 1h, 4h, 1d, 1wk, 1mo.
+   */
+  timeframe?: string;
+  /**
+   * Extra older bars (max 1000) the server keeps and feeds to indicator computation, as for generate_chart(format=series).
+   */
+  warmup?: number;
+}
+
 export interface SubscribeNotificationsInput {
   /**
    * Filter by alert types: price_above, price_below, indicator_signal. Omit for all.
@@ -153,6 +218,13 @@ export interface SubscribeNotificationsInput {
    * Filter by trading pairs (e.g. ["BTCUSDT"]). Omit for all.
    */
   symbols?: string[];
+}
+
+export interface UnsubscribeChartInput {
+  /**
+   * The subscription_id returned by subscribe_chart.
+   */
+  subscription_id: string;
 }
 
 export interface UnsubscribeNotificationsInput {}

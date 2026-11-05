@@ -13,6 +13,12 @@ import { z } from "zod";
 const LS_CLIENT_ID = "chartgen.oauth.client_id";
 const LS_CLIENT_SECRET = "chartgen.oauth.client_secret";
 const SS_PKCE = "chartgen.oauth.pkce";
+/**
+ * Set when a failed redirect consumption started one automatic retry of
+ * the flow; cleared by the next successful exchange. A second failure in
+ * the same tab stops there and asks the user instead of looping.
+ */
+const SS_RETRIED = "chartgen.oauth.retried";
 
 const BASE_URL =
   (import.meta.env.VITE_CHARTGEN_BASE_URL as string | undefined) ?? "";
@@ -194,13 +200,22 @@ async function exchangeCode(
  * Consume a pending redirect result from the URL, if present.
  * Returns `true` if this call handled a redirect (access token set),
  * `false` if no redirect was in progress. Throws if the state check
- * fails — the caller should surface the error.
+ * or the exchange fails — the caller should surface the error.
  */
 async function tryConsumeRedirect(): Promise<boolean> {
   const params = new URLSearchParams(window.location.search);
   const code = params.get("code");
   const returnedState = params.get("state");
   if (code === null) return false;
+
+  // Scrub `code`/`state` from the URL before anything can fail: a code is
+  // single-use, so a refresh must start a new flow instead of retrying
+  // this one. Preserve the hash so any in-page anchor/route survives.
+  window.history.replaceState(
+    {},
+    "",
+    window.location.origin + window.location.pathname + window.location.hash,
+  );
 
   const pending = consumePkce();
   if (pending === null) {
@@ -221,15 +236,18 @@ async function tryConsumeRedirect(): Promise<boolean> {
     pending.code_verifier,
   );
   cachedAccessToken = token;
-
-  // Scrub `code`/`state` from the URL so a refresh doesn't retrigger.
-  // Preserve the hash so any in-page anchor/route survives the scrub.
-  const cleanUrl =
-    window.location.origin +
-    window.location.pathname +
-    window.location.hash;
-  window.history.replaceState({}, "", cleanUrl);
+  sessionStorage.removeItem(SS_RETRIED);
   return true;
+}
+
+/**
+ * Start a new PKCE flow: navigates to the authorization endpoint and
+ * never resolves. Also the "Sign in again" action after a failed sign-in.
+ */
+export async function startSignIn(): Promise<never> {
+  const discovery = await discover();
+  const { client_id } = await ensureClient(discovery);
+  return redirectToAuthorize(discovery, client_id);
 }
 
 /**
@@ -247,11 +265,7 @@ export async function getAccessToken(): Promise<string> {
   }
 
   // Step 2: no token and no in-flight redirect — start a new flow.
-  const discovery = await discover();
-  const { client_id } = await ensureClient(discovery);
-  await redirectToAuthorize(discovery, client_id);
-  // unreachable
-  throw new Error("oauth: redirect did not happen");
+  return startSignIn();
 }
 
 /** Drop the cached token, e.g. on a 401 from the MCP call. */
@@ -262,14 +276,30 @@ export function clearAccessToken(): void {
 /**
  * If the URL on load already carries `?code=...`, run the exchange
  * eagerly so the rest of the app sees a token immediately.
- * Swallows errors and leaves `cachedAccessToken` null — the first
- * `getAccessToken()` will surface the failure.
+ *
+ * Resolves `null` when there was nothing to consume or the exchange
+ * worked. When it fails, the first time in this tab it restarts the flow
+ * once by itself (navigates away, never resolves); after that it resolves
+ * with the error, and the caller must not request a token again on its
+ * own — that would redirect in a loop — but offer `startSignIn()`.
  */
-export async function tryHandlePendingRedirect(): Promise<void> {
+export async function tryHandlePendingRedirect(): Promise<Error | null> {
   try {
     await tryConsumeRedirect();
+    return null;
   } catch (err) {
-    // Surface via console but do not throw during boot.
     console.error("[oauth] redirect handler failed:", err);
+    if (sessionStorage.getItem(SS_RETRIED) === null) {
+      sessionStorage.setItem(SS_RETRIED, "1");
+      try {
+        return await startSignIn();
+      } catch (retryErr) {
+        return toError(retryErr);
+      }
+    }
+    return toError(err);
   }
 }
+
+const toError = (err: unknown): Error =>
+  err instanceof Error ? err : new Error(String(err));

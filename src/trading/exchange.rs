@@ -56,6 +56,8 @@ pub struct Balance {
     pub locked: f64,
 }
 
+// async_trait expands to #[must_use] on fns returning an already must_use Future.
+#[allow(clippy::double_must_use)]
 #[async_trait::async_trait]
 pub trait Exchange: Send + Sync {
     async fn submit_order(&self, req: &OrderRequest) -> Result<OrderId, String>;

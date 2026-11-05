@@ -73,6 +73,21 @@ pub fn render_chart(
     width: u32,
     height: u32,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    // Compute all indicators
+    let results: Vec<PanelResult> = panels.iter().map(|p| p.compute(data)).collect();
+    let refs: Vec<&PanelResult> = results.iter().collect();
+    render_results(data, &refs, output, width, height)
+}
+
+/// `render_chart` for indicator results computed by the caller (so each
+/// indicator runs once, and a failed one can be left out).
+pub fn render_results(
+    data: &OhlcvData,
+    results: &[&PanelResult],
+    output: &str,
+    width: u32,
+    height: u32,
+) -> Result<(), Box<dyn std::error::Error>> {
     let n = data.len();
     if n == 0 {
         // Nothing to render -- write a blank image
@@ -82,12 +97,10 @@ pub fn render_chart(
         return Ok(());
     }
 
-    // Compute all indicators
-    let results: Vec<PanelResult> = panels.iter().map(|p| p.compute(data)).collect();
-
     // Separate overlays from panels
-    let overlays: Vec<&PanelResult> = results.iter().filter(|r| r.is_overlay).collect();
-    let panel_results: Vec<&PanelResult> = results.iter().filter(|r| !r.is_overlay).collect();
+    let overlays: Vec<&PanelResult> = results.iter().copied().filter(|r| r.is_overlay).collect();
+    let panel_results: Vec<&PanelResult> =
+        results.iter().copied().filter(|r| !r.is_overlay).collect();
     let n_panels = panel_results.len();
 
     // Price range
@@ -200,7 +213,7 @@ pub fn render_chart(
                         let (lo, hi) = if a < b { (*a, *b) } else { (*b, *a) };
                         Rectangle::new(
                             [(i as f64 - 0.4, lo), (i as f64 + 0.4, hi)],
-                            fill.color.filled(),
+                            fill.color_for(*a, *b).filled(),
                         )
                     })
                     .collect();
@@ -232,6 +245,24 @@ pub fn render_chart(
                     dot.size,
                     dot.color.filled(),
                 )))?;
+            }
+
+            // Segments on overlay (e.g. zigzag)
+            for d in &overlay.divlines {
+                let (x1, y1, x2, y2) = (d.x1 as f64, d.y1, d.x2 as f64, d.y2);
+                // Dashed: 20 steps, every other one drawn (same as the panel path)
+                let steps = if d.dashed { 20 } else { 1 };
+                let (dx, dy) = ((x2 - x1) / steps as f64, (y2 - y1) / steps as f64);
+                let stride = if d.dashed { 2 } else { 1 };
+                for s in (0..steps).step_by(stride) {
+                    chart.draw_series(LineSeries::new(
+                        [
+                            (x1 + dx * s as f64, y1 + dy * s as f64),
+                            (x1 + dx * (s + 1) as f64, y1 + dy * (s + 1) as f64),
+                        ],
+                        d.color.stroke_width(2),
+                    ))?;
+                }
             }
 
             // HLines on overlay
@@ -339,7 +370,7 @@ pub fn render_chart(
                     let (lo, hi) = if a < b { (*a, *b) } else { (*b, *a) };
                     Rectangle::new(
                         [(i as f64 - 0.4, lo), (i as f64 + 0.4, hi)],
-                        fill.color.filled(),
+                        fill.color_for(*a, *b).filled(),
                     )
                 })
                 .collect();

@@ -2,9 +2,12 @@ pub mod cipher_b;
 pub mod custom;
 pub mod external;
 pub mod macd;
+pub mod oscillators;
+pub mod pine;
 pub mod rsi;
 pub mod rsi_combo;
 pub mod ta_bridge;
+pub mod trend;
 pub mod wavetrend;
 
 use crate::indicator::Indicator;
@@ -29,7 +32,7 @@ pub fn by_name(name: &str) -> Option<Box<dyn Indicator>> {
         "williams_r" | "willr" => Some(Box::new(ta_bridge::WilliamsR::default())),
         "donchian" => Some(Box::new(ta_bridge::Donchian::default())),
         "cmf" => Some(Box::new(ta_bridge::Cmf::default())),
-        "vwap" => Some(Box::new(custom::Vwap)),
+        "vwap" => Some(Box::new(custom::Vwap::default())),
         "adx" => Some(Box::new(custom::Adx::default())),
         "supertrend" => Some(Box::new(custom::Supertrend::default())),
         "sar" | "parabolic_sar" => Some(Box::new(custom::ParabolicSar::default())),
@@ -55,15 +58,113 @@ pub fn by_name(name: &str) -> Option<Box<dyn Indicator>> {
         "oi" | "open_interest" => Some(Box::new(external::OpenInterestHist)),
         "long_short" | "ls_ratio" => Some(Box::new(external::LongShortRatio)),
         "fear_greed" | "fng" => Some(Box::new(external::FearGreed)),
+        "volume" => Some(Box::new(trend::Volume::default())),
+        "ma" => Some(Box::new(trend::Ma::default())),
+        "vwma" => Some(Box::new(trend::Ma::fixed("vwma"))),
+        "hma" => Some(Box::new(trend::Ma::fixed("hma"))),
+        "ma_ribbon" => Some(Box::new(trend::MaRibbon::default())),
+        "envelopes" => Some(Box::new(trend::Envelopes::default())),
+        "linreg_channel" => Some(Box::new(trend::LinRegChannel::default())),
+        "aroon" => Some(Box::new(trend::Aroon::default())),
+        "vortex" => Some(Box::new(trend::Vortex::default())),
+        "chande_kroll_stop" => Some(Box::new(trend::ChandeKrollStop::default())),
+        "zigzag" => Some(Box::new(trend::ZigZag::default())),
+        n if oscillators::Kind::from_name(n).is_some() => {
+            oscillators::by_name(n).map(|o| Box::new(o) as Box<dyn Indicator>)
+        }
         _ => None,
     }
 }
 
+/// Resolve `name` for a caller: `user`'s own scripts first (a script shadows
+/// the built-in of the same name for that user only), then the built-ins.
+/// `None` user (CLI, stdio MCP, scripting disabled) sees built-ins only.
+/// See ADR-0025.
+pub fn by_name_for(name: &str, user: Option<&str>) -> Option<Box<dyn Indicator>> {
+    #[cfg(feature = "scripting")]
+    if let Some(ind) = user.and_then(|u| crate::scripting::lookup(u, name)) {
+        return Some(ind);
+    }
+    #[cfg(not(feature = "scripting"))]
+    let _ = user;
+    by_name(name)
+}
+
+/// Check `params` against the indicator's declared schema (`Indicator::params`).
+/// Only declared params are inspected; `null` means "use the default".
+/// Integers must be whole numbers, floats must be finite, and both must respect
+/// the optional `min`/`max` of the schema entry.
+pub fn validate_params(name: &str, ind: &dyn Indicator, params: &Value) -> Result<(), String> {
+    let Some(obj) = params.as_object() else {
+        return Ok(());
+    };
+    let schema = ind.params();
+    for spec in schema.as_array().into_iter().flatten() {
+        let Some(pname) = spec.get("name").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        let Some(v) = obj.get(pname).filter(|v| !v.is_null()) else {
+            continue;
+        };
+        let bad = |why: &str| Err(format!("Invalid parameter for {name}: {pname} {why}"));
+        let ty = spec.get("type").and_then(|v| v.as_str()).unwrap_or("");
+        if let (Some(allowed), Some(s)) = (spec.get("enum").and_then(|v| v.as_array()), v.as_str())
+        {
+            if !allowed.iter().any(|a| a.as_str() == Some(s)) {
+                let list: Vec<&str> = allowed.iter().filter_map(|a| a.as_str()).collect();
+                return bad(&format!("must be one of: {}", list.join(", ")));
+            }
+        }
+        let num = match ty {
+            "integer" => match (v.as_i64(), v.as_u64()) {
+                (Some(i), _) => i as f64,
+                (None, Some(u)) => u as f64,
+                _ => return bad("must be an integer"),
+            },
+            "number" => match v.as_f64() {
+                Some(f) if f.is_finite() => f,
+                Some(_) => return bad("must be a finite number"),
+                None => return bad("must be a number"),
+            },
+            "boolean" if !v.is_boolean() => return bad("must be a boolean"),
+            "string" if !v.is_string() => return bad("must be a string"),
+            _ => continue,
+        };
+        if let Some(min) = spec.get("min").and_then(|v| v.as_f64()) {
+            if num < min {
+                return bad(&format!("must be >= {min}"));
+            }
+        }
+        if let Some(max) = spec.get("max").and_then(|v| v.as_f64()) {
+            if num > max {
+                return bad(&format!("must be <= {max}"));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Create an indicator by name and apply configuration params.
-pub fn by_name_configured(name: &str, params: &Value) -> Option<Box<dyn Indicator>> {
-    let mut ind = by_name(name)?;
+/// `Ok(None)` = unknown indicator; `Err` = a param failed validation.
+pub fn by_name_configured(
+    name: &str,
+    params: &Value,
+) -> Result<Option<Box<dyn Indicator>>, String> {
+    by_name_configured_for(name, params, None)
+}
+
+/// `by_name_configured` resolved for `user` (see `by_name_for`).
+pub fn by_name_configured_for(
+    name: &str,
+    params: &Value,
+    user: Option<&str>,
+) -> Result<Option<Box<dyn Indicator>>, String> {
+    let Some(mut ind) = by_name_for(name, user) else {
+        return Ok(None);
+    };
+    validate_params(name, ind.as_ref(), params)?;
     ind.configure(params);
-    Some(ind)
+    Ok(Some(ind))
 }
 
 pub fn available() -> &'static [&'static str] {
@@ -106,6 +207,40 @@ pub fn available() -> &'static [&'static str] {
         "oi",
         "long_short",
         "fear_greed",
+        "volume",
+        "ma",
+        "vwma",
+        "hma",
+        "ma_ribbon",
+        "envelopes",
+        "linreg_channel",
+        "aroon",
+        "vortex",
+        "chande_kroll_stop",
+        "zigzag",
+        "stoch_rsi",
+        "awesome_oscillator",
+        "momentum",
+        "trix",
+        "ultimate_oscillator",
+        "ppo",
+        "cmo",
+        "dpo",
+        "elder_force_index",
+        "tsi",
+        "kst",
+        "coppock",
+        "mass_index",
+        "bb_percent_b",
+        "bb_width",
+        "choppiness",
+        "fisher_transform",
+        "ease_of_movement",
+        "volume_oscillator",
+        "balance_of_power",
+        "rvi",
+        "smi_ergodic",
+        "connors_rsi",
     ]
 }
 
@@ -152,7 +287,7 @@ pub fn registry() -> Vec<IndicatorInfo> {
         ta_bridge::KeltnerChannels::default()
     );
     reg!("donchian", &[], "overlay", ta_bridge::Donchian::default());
-    reg!("vwap", &[], "overlay", custom::Vwap);
+    reg!("vwap", &[], "overlay", custom::Vwap::default());
     reg!("vwap_bands", &[], "overlay", custom::VwapBands::default());
     reg!("supertrend", &[], "overlay", custom::Supertrend::default());
     reg!(
@@ -233,6 +368,33 @@ pub fn registry() -> Vec<IndicatorInfo> {
         "panel",
         rsi_combo::RsiMfiStochCombo::default()
     );
+
+    // Trend / moving averages / volume
+    reg!("ma", &[], "overlay", trend::Ma::default());
+    reg!("vwma", &[], "overlay", trend::Ma::fixed("vwma"));
+    reg!("hma", &[], "overlay", trend::Ma::fixed("hma"));
+    reg!("ma_ribbon", &[], "overlay", trend::MaRibbon::default());
+    reg!("envelopes", &[], "overlay", trend::Envelopes::default());
+    reg!(
+        "linreg_channel",
+        &[],
+        "overlay",
+        trend::LinRegChannel::default()
+    );
+    reg!(
+        "chande_kroll_stop",
+        &[],
+        "overlay",
+        trend::ChandeKrollStop::default()
+    );
+    reg!("zigzag", &[], "overlay", trend::ZigZag::default());
+    reg!("volume", &[], "panel", trend::Volume::default());
+    reg!("aroon", &[], "panel", trend::Aroon::default());
+    reg!("vortex", &[], "panel", trend::Vortex::default());
+    // TradingView-parity oscillators
+    for k in oscillators::ALL {
+        reg!(k.name(), k.aliases(), "panel", oscillators::Osc::new(k));
+    }
 
     // External API
     reg!("cvd", &[], "external", external::Cvd);

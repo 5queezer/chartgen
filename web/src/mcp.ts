@@ -9,12 +9,28 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import type { Notification } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 
-import type { GenerateChartInput } from "./types/generated-input";
+import type {
+  GenerateChartInput,
+  GetQuotesInput,
+  SearchSymbolsInput,
+  SubscribeChartInput,
+  UnsubscribeChartInput,
+} from "./types/generated-input";
 import {
+  CHART_TICK_METHOD,
+  ChartTickParamsSchema,
   ListIndicatorsPayloadSchema,
+  QuotesPayloadSchema,
+  SearchSymbolsPayloadSchema,
   SeriesPayloadSchema,
+  SubscribeChartPayloadSchema,
+  UnsubscribeChartPayloadSchema,
   type ListIndicatorsPayload,
+  type QuotesPayload,
+  type SearchSymbolsPayload,
   type SeriesPayload,
+  type SubscribeChartPayload,
+  type UnsubscribeChartPayload,
 } from "./types/responses";
 import { clearAccessToken, getAccessToken } from "./oauth";
 
@@ -43,16 +59,47 @@ export type AlertNotificationHandler = (
   notification: Notification,
 ) => void | Promise<void>;
 
+/** Receives each `notifications/chart_tick` (ADR-0021), already validated. */
+export type ChartTickHandler = (subscriptionId: string, series: SeriesPayload) => void;
+
 export interface McpSession {
-  /** Invoke `generate_chart` with `format: 'series'` and parse the response. */
-  callGenerateChart: (args: {
-    ticker: string;
-    timeframe: string;
-    indicators: GenerateChartInput["indicators"];
-  }) => Promise<SeriesPayload>;
+  /**
+   * Invoke `generate_chart` with `format: 'series'` and parse the response.
+   * `bars`, `warmup` and `end_time` page and poll the series (ADR-0009);
+   * omitted ones take the server defaults. `signal` aborts the call.
+   */
+  callGenerateChart: (
+    args: {
+      ticker: string;
+      timeframe: string;
+      indicators: GenerateChartInput["indicators"];
+    } & Pick<GenerateChartInput, "bars" | "warmup" | "end_time" | "chart_style">,
+    signal?: AbortSignal,
+  ) => Promise<SeriesPayload>;
   /** Invoke `list_indicators` and parse the response. */
   callListIndicators: () => Promise<ListIndicatorsPayload>;
-  /** Install a handler invoked for every `notifications/*` frame. */
+  /** Invoke `get_quotes` for the watchlist and parse the response. */
+  callGetQuotes: (symbols: string[]) => Promise<QuotesPayload>;
+  /**
+   * Invoke `search_symbols` for the symbol search dialog. Aborting `signal`
+   * cancels the in-flight request.
+   */
+  callSearchSymbols: (
+    args: SearchSymbolsInput,
+    signal?: AbortSignal,
+  ) => Promise<SearchSymbolsPayload>;
+  /**
+   * Invoke `subscribe_chart`: pushed tails of this chart arrive at the
+   * `onChartTick` handler. Rejects for charts that cannot be pushed.
+   */
+  callSubscribeChart: (args: SubscribeChartInput) => Promise<SubscribeChartPayload>;
+  /** Invoke `unsubscribe_chart`. */
+  callUnsubscribeChart: (
+    args: UnsubscribeChartInput,
+  ) => Promise<UnsubscribeChartPayload>;
+  /** Install the handler for `notifications/chart_tick`. */
+  onChartTick: (handler: ChartTickHandler) => void;
+  /** Install a handler invoked for every other `notifications/*` frame. */
   onNotification: (handler: AlertNotificationHandler) => void;
   /** Close the underlying transport. */
   close: () => Promise<void>;
@@ -66,7 +113,7 @@ interface ConnectedTransport {
 
 async function connectWithToken(
   token: string,
-  onNotification: AlertNotificationHandler | null,
+  onNotification: AlertNotificationHandler,
 ): Promise<ConnectedTransport> {
   const transport = new StreamableHTTPClientTransport(mcpUrl(), {
     requestInit: {
@@ -79,19 +126,26 @@ async function connectWithToken(
     { capabilities: {} },
   );
 
-  if (onNotification) {
-    client.fallbackNotificationHandler = async (n: Notification) => {
-      await onNotification(n);
-    };
-  }
+  client.fallbackNotificationHandler = async (n: Notification) => {
+    await onNotification(n);
+  };
 
-  await client.connect(transport);
+  try {
+    await client.connect(transport);
+  } catch (err) {
+    // Don't leak a half-open client when the handshake fails.
+    await client.close().catch(() => {});
+    throw err;
+  }
   return { client, transport, token };
 }
 
 interface McpSessionInternalState {
   connected: ConnectedTransport | null;
+  /** In-flight connect shared by concurrent callers; cleared on settle. */
+  connecting: Promise<ConnectedTransport> | null;
   notificationHandler: AlertNotificationHandler | null;
+  chartTickHandler: ChartTickHandler | null;
 }
 
 /**
@@ -132,56 +186,101 @@ function isUnauthorized(err: unknown): boolean {
 export function createMcpSession(): McpSession {
   const state: McpSessionInternalState = {
     connected: null,
+    connecting: null,
     notificationHandler: null,
+    chartTickHandler: null,
   };
 
-  async function ensureConnected(): Promise<ConnectedTransport> {
-    if (state.connected) return state.connected;
-    const token = await getAccessToken();
-    state.connected = await connectWithToken(token, state.notificationHandler);
-    return state.connected;
+  // Every connection dispatches through the current handlers, so they can
+  // be installed or swapped at any time. Chart ticks are validated at the
+  // boundary (ADR-0004); a malformed one is dropped.
+  const dispatch = async (n: Notification) => {
+    if (n.method === CHART_TICK_METHOD) {
+      const p = ChartTickParamsSchema.safeParse(n.params);
+      if (p.success) state.chartTickHandler?.(p.data.subscription_id, p.data.series);
+      return;
+    }
+    await state.notificationHandler?.(n);
+  };
+
+  function ensureConnected(): Promise<ConnectedTransport> {
+    if (state.connected) return Promise.resolve(state.connected);
+    // Concurrent callers share one in-flight connect. The memo is cleared
+    // on settle, so a failed attempt is retried by the next call.
+    state.connecting ??= (async () => {
+      try {
+        const token = await getAccessToken();
+        const conn = await connectWithToken(token, dispatch);
+        state.connected = conn;
+        return conn;
+      } finally {
+        state.connecting = null;
+      }
+    })();
+    return state.connecting;
   }
 
-  async function dropConnection(): Promise<void> {
-    if (!state.connected) return;
+  /** Close `stale` (default: the current connection) and reset state. */
+  async function dropConnection(stale?: ConnectedTransport): Promise<void> {
+    const target = stale ?? state.connected;
+    if (!target) return;
+    // A concurrent caller may already have replaced it; only reset state
+    // if it is still the current one.
+    if (state.connected === target) state.connected = null;
     try {
-      await state.connected.client.close();
+      await target.client.close();
     } catch {
       // best-effort; close errors after a 401 are not actionable.
     }
-    state.connected = null;
   }
 
   async function callToolWithAuthRetry(
     name: string,
     args: Record<string, unknown>,
+    signal?: AbortSignal,
   ): Promise<unknown> {
     let conn = await ensureConnected();
     try {
-      const result = await conn.client.callTool({ name, arguments: args });
+      const result = await conn.client.callTool(
+        { name, arguments: args },
+        undefined,
+        { signal },
+      );
       return extractJsonFromResult(CallToolResultSchema.parse(result));
     } catch (err) {
       if (!isUnauthorized(err)) throw err;
       // Re-auth once, then retry.
       clearAccessToken();
-      await dropConnection();
+      await dropConnection(conn);
       conn = await ensureConnected();
-      const result = await conn.client.callTool({ name, arguments: args });
+      const result = await conn.client.callTool(
+        { name, arguments: args },
+        undefined,
+        { signal },
+      );
       return extractJsonFromResult(CallToolResultSchema.parse(result));
     }
   }
 
   return {
-    async callGenerateChart({ ticker, timeframe, indicators }) {
+    async callGenerateChart(
+      { ticker, timeframe, indicators, bars, warmup, end_time, chart_style },
+      signal,
+    ) {
       const args: GenerateChartInput = {
         ticker,
         timeframe,
         format: "series",
         indicators,
+        ...(bars !== undefined && { bars }),
+        ...(warmup !== undefined && { warmup }),
+        ...(end_time !== undefined && { end_time }),
+        ...(chart_style !== undefined && { chart_style }),
       };
       const json = await callToolWithAuthRetry(
         "generate_chart",
         args as unknown as Record<string, unknown>,
+        signal,
       );
       return SeriesPayloadSchema.parse(json);
     },
@@ -189,17 +288,45 @@ export function createMcpSession(): McpSession {
       const json = await callToolWithAuthRetry("list_indicators", {});
       return ListIndicatorsPayloadSchema.parse(json);
     },
+    async callGetQuotes(symbols) {
+      const args: GetQuotesInput = { symbols };
+      const json = await callToolWithAuthRetry(
+        "get_quotes",
+        args as unknown as Record<string, unknown>,
+      );
+      return QuotesPayloadSchema.parse(json);
+    },
+    async callSearchSymbols(args, signal) {
+      const json = await callToolWithAuthRetry(
+        "search_symbols",
+        args as unknown as Record<string, unknown>,
+        signal,
+      );
+      return SearchSymbolsPayloadSchema.parse(json);
+    },
+    async callSubscribeChart(args) {
+      const json = await callToolWithAuthRetry(
+        "subscribe_chart",
+        args as unknown as Record<string, unknown>,
+      );
+      return SubscribeChartPayloadSchema.parse(json);
+    },
+    async callUnsubscribeChart(args) {
+      const json = await callToolWithAuthRetry(
+        "unsubscribe_chart",
+        args as unknown as Record<string, unknown>,
+      );
+      return UnsubscribeChartPayloadSchema.parse(json);
+    },
+    onChartTick(handler) {
+      state.chartTickHandler = handler;
+    },
     onNotification(handler) {
       state.notificationHandler = handler;
-      if (state.connected) {
-        state.connected.client.fallbackNotificationHandler = async (
-          n: Notification,
-        ) => {
-          await handler(n);
-        };
-      }
     },
     async close() {
+      // Let an in-flight connect settle first so its client is not leaked.
+      await state.connecting?.catch(() => {});
       await dropConnection();
     },
   };

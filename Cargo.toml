@@ -18,12 +18,11 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 base64 = "0.22"
 reqwest = { version = "0.12", features = ["blocking", "json"] }
-ta = "0.5"
 axum = "0.8"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time"] }
 tokio-tungstenite = { version = "0.26", features = ["native-tls"] }
 futures-util = "0.3"
-tower-http = { version = "0.6", features = ["cors"] }
+tower-http = { version = "0.6", features = ["cors", "fs"] }
 sha2 = "0.10"
 rand = "0.9"
 uuid = { version = "1", features = ["v4"] }
@@ -32,6 +31,18 @@ hmac = "0.12"
 hex = "0.4"
 chrono = { version = "0.4", features = ["serde"] }
 async-stream = "0.3"
+starlark = { version = "0.14", optional = true }
+rusqlite = { version = "0.41", features = ["bundled"], optional = true }
+allocative = { version = "0.3", optional = true }
+anyhow = { version = "1", optional = true }
+starlark_syntax = { version = "0.14", optional = true }
+
+[features]
+default = ["scripting"]
+# User-authored Starlark indicators (ADR-0024, ADR-0025); runtime-gated by
+# CHARTGEN_SCRIPTING=1. `--no-default-features` builds without starlark
+# and rusqlite.
+scripting = ["dep:starlark", "dep:starlark_syntax", "dep:allocative", "dep:anyhow", "dep:rusqlite"]
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }

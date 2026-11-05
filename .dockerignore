@@ -2,3 +2,10 @@ target/
 .claude/
 *.png
 .git/
+web/node_modules/
+web/dist/
+web/.env*
+web/playwright-report/
+web/test-results/
+website/
+graphify-out/

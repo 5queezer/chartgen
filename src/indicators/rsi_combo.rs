@@ -32,57 +32,10 @@ impl Default for RsiMfiStochCombo {
     }
 }
 
-/// Compute the real Money Flow Index from OHLCV data.
+/// Compute the real Money Flow Index from OHLCV data (Pine `ta.mfi(hlc3, length)`).
 fn compute_mfi(data: &OhlcvData, length: usize) -> Vec<f64> {
-    let n = data.len();
-    let mut out = vec![f64::NAN; n];
-    if n <= length || length == 0 {
-        return out;
-    }
-
-    // Typical price for each bar
-    let tp: Vec<f64> = data
-        .bars
-        .iter()
-        .map(|b| (b.high + b.low + b.close) / 3.0)
-        .collect();
-
-    // Raw money flow = typical_price * volume
-    let raw_mf: Vec<f64> = tp
-        .iter()
-        .zip(data.bars.iter())
-        .map(|(&t, b)| t * b.volume)
-        .collect();
-
-    // For each bar starting at index `length`, sum positive and negative flows
-    // over the lookback window.
-    for (i, val) in out.iter_mut().enumerate().skip(length) {
-        let mut pos_flow = 0.0;
-        let mut neg_flow = 0.0;
-
-        for j in (i + 1 - length)..=i {
-            // Compare tp[j] to tp[j-1]; skip j==0 since there's no prior bar
-            if j == 0 {
-                continue;
-            }
-            if tp[j] > tp[j - 1] {
-                pos_flow += raw_mf[j];
-            } else {
-                neg_flow += raw_mf[j];
-            }
-        }
-
-        if neg_flow > 0.0 {
-            let ratio = pos_flow / neg_flow;
-            *val = 100.0 - (100.0 / (1.0 + ratio));
-        } else if pos_flow > 0.0 {
-            *val = 100.0;
-        } else {
-            *val = 50.0;
-        }
-    }
-
-    out
+    use super::pine::{mfi, source_series, volumes};
+    mfi(&source_series(data, "hlc3"), &volumes(data), length)
 }
 
 impl Indicator for RsiMfiStochCombo {
@@ -96,11 +49,11 @@ impl Indicator for RsiMfiStochCombo {
 
     fn params(&self) -> Value {
         json!([
-            {"name": "rsi_length", "type": "integer", "default": 14},
-            {"name": "mfi_length", "type": "integer", "default": 14},
-            {"name": "stoch_k", "type": "integer", "default": 14},
-            {"name": "stoch_d", "type": "integer", "default": 3},
-            {"name": "stoch_smooth", "type": "integer", "default": 3},
+            {"name": "rsi_length", "type": "integer", "min": 1, "max": 10000, "default": 14},
+            {"name": "mfi_length", "type": "integer", "min": 1, "max": 10000, "default": 14},
+            {"name": "stoch_k", "type": "integer", "min": 1, "max": 10000, "default": 14},
+            {"name": "stoch_d", "type": "integer", "min": 1, "max": 10000, "default": 3},
+            {"name": "stoch_smooth", "type": "integer", "min": 1, "max": 10000, "default": 3},
             {"name": "overbought", "type": "number", "default": 70},
             {"name": "oversold", "type": "number", "default": 30},
             {"name": "show_entry_dots", "type": "boolean", "default": true},
@@ -314,5 +267,29 @@ impl Indicator for RsiMfiStochCombo {
             label: "RSI/MFI/Stoch".into(),
             ..Default::default()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::indicators::pine::test_util::{closes, eq, NAN};
+
+    #[test]
+    fn combo_lines_follow_pine() {
+        let mut ind = RsiMfiStochCombo::default();
+        ind.configure(&json!({"rsi_length": 2, "mfi_length": 2, "stoch_k": 2,
+                              "stoch_smooth": 2, "stoch_d": 2}));
+        let r = ind.compute(&closes(&[1.0, 2.0, 1.0, 2.0, 3.0, 2.0]));
+        // ta.rsi(2): RMA seeded with the SMA of the first 2 changes
+        eq(&r.lines[0].y, &[NAN, NAN, 50.0, 75.0, 87.5, 43.75]);
+        // ta.mfi(hlc3, 2): upper sums [_, 3, 2, 2, 5, 3], lower [_, 1, 1, 1, 0, 2]
+        eq(
+            &r.lines[1].y,
+            &[NAN, 75.0, 200.0 / 3.0, 200.0 / 3.0, NAN, 60.0],
+        );
+        // raw stoch = [_, 100, 0, 100, 100, 0]; K = sma2, D = sma2(K)
+        eq(&r.lines[2].y, &[NAN, NAN, 50.0, 50.0, 100.0, 50.0]);
+        eq(&r.lines[3].y, &[NAN, NAN, NAN, 50.0, 75.0, 75.0]);
     }
 }

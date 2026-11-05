@@ -47,6 +47,8 @@ For Claude.ai (HTTP + OAuth 2.1 PKCE):
 cargo run -- --serve --port 9315
 ```
 
+Add `https://<your-domain>/mcp` as the remote connector URL.
+
 ## Run in trading mode
 
 `--trade` streams a live Binance WebSocket feed, runs the alert engine, and
@@ -75,7 +77,7 @@ cargo clippy -- -D warnings
 
 - [CLI reference](/chartgen/reference/cli/) — every flag.
 - [Indicators](/chartgen/reference/indicators/) — all 38 with sample renders and parameters.
-- [MCP integration](/chartgen/reference/mcp/) — the 15 tools exposed over stdio and HTTP.
+- [MCP integration](/chartgen/reference/mcp/) — the 19 tools exposed over stdio and HTTP.
 - [Trading](/chartgen/guides/trading/) — alerts, orders, and the live engine.
 - [Push notifications](/chartgen/guides/notifications/) — SSE subscriptions for triggered alerts.
 - [Deployment](/chartgen/guides/deploy/) — Docker, Coolify, release binaries, reverse proxy.

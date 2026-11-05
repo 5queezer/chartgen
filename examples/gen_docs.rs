@@ -46,6 +46,52 @@ fn main() {
          the `generate_chart` MCP tool's `indicators` parameter. Screenshots are\n\
          rendered from `AAPL` daily data (overlays and panels) and `BTCUSDT` daily\n\
          data (external) — regenerate with `./scripts/gen_screenshots.sh`.\n\
+         \n\
+         ## Values match TradingView\n\
+         \n\
+         Indicator math follows Pine Script v5 semantics, implemented once in\n\
+         `src/indicators/pine.rs` ([ADR-0018](/chartgen/decisions/0018-pine-semantics-for-indicators/)).\n\
+         `ta.ema` and `ta.rma` seed with the SMA of the first `length` values. RSI, ATR\n\
+         and DMI/ADX use Wilder's RMA. Bollinger Bands use the population standard\n\
+         deviation. Defaults are TradingView's. Bars before an indicator has seen\n\
+         `length` valid values are `null` (NaN), not partial values. With the same\n\
+         parameters and the same first bar, the values equal TradingView's built-ins.\n\
+         The community composites (`cipher_b`, `wavetrend`, `rsi_mfi_stoch`,\n\
+         `kalman_volume`) follow the Pine semantics of the `ta.*` calls in the scripts\n\
+         they port.\n\
+         \n\
+         Missing values (`na`) follow the Pine reference. Window functions (`sma`,\n\
+         `sum`, `stdev`, `highest`, `lowest`, ...) skip them and use the last `length`\n\
+         valid values, so a flat stochastic or a zero-range bar leaves no gap. EMA and\n\
+         RMA keep their state across a missing value and repeat the previous value;\n\
+         that case is not yet verified against a live TradingView chart.\n\
+         \n\
+         EMA and RMA are recursive, so a value depends on where the series starts.\n\
+         Load enough history before the bars you compare (`warmup` in series mode)\n\
+         so the start-up effect has decayed. Known differences:\n\
+         \n\
+         - **WaveTrend lengths.** `wavetrend` is the WaveTrend inside VuManChu Cipher B\n\
+         \x20 and keeps its lengths 9 / 12 / 3 (LazyBear's script: 10 / 21 / 4).\n\
+         - **Calendar periods.** `vwap` / `vwap_bands` anchors and `pivot` periods\n\
+         \x20 are UTC days, ISO weeks, months and years of the bar times. TradingView\n\
+         \x20 uses the exchange session and time zone, which can differ for non-UTC\n\
+         \x20 markets. On daily and higher charts the `session` anchor resets on every\n\
+         \x20 bar, as TradingView's `timeframe.change(\"D\")` does. Without bar timestamps\n\
+         \x20 VWAP never resets and pivots stay empty.\n\
+         - **Pivots.** The higher-timeframe high / low / close comes from the loaded\n\
+         \x20 chart bars. Every period is drawn (TradingView shows the last 15), and only\n\
+         \x20 P, R1, S1, R2 and S2.\n\
+         - **Ichimoku.** The leading spans are shifted `displacement - 1` bars forward,\n\
+         \x20 and the lagging span the same distance back. The cloud projected past the\n\
+         \x20 last bar is not drawn yet.\n\
+         - **Intrabar data.** The volume profiles (`volume_profile`, `session_vp`,\n\
+         \x20 `hvn_lvn`, `naked_poc`, `tpo`) and `cvd` spread each bar's volume over its\n\
+         \x20 range. TradingView builds them from lower-timeframe data, so they are\n\
+         \x20 approximations.\n\
+         - **Long warmups.** `kalman_volume` normalises by a 200-bar standard deviation\n\
+         \x20 and needs about 280 bars before its first value.\n\
+         - **Unknown timeframe.** `histvol` needs the timeframe to annualize. When it\n\
+         \x20 is unknown, the line stays empty.\n\
          \n",
     );
 

@@ -1,0 +1,16 @@
+{
+  "explains": [],
+  "count": 9,
+  "quotes": [
+    {"exchange": "NMS", "shortname": "Apple Inc.", "quoteType": "EQUITY", "symbol": "AAPL", "index": "quotes", "score": 30001.0, "typeDisp": "Equity", "longname": "Apple Inc.", "exchDisp": "NASDAQ", "isYahooFinance": true},
+    {"exchange": "PCX", "shortname": "State Street SPDR S&P 500 ETF T", "quoteType": "ETF", "symbol": "SPY", "index": "quotes", "score": 28000.0, "typeDisp": "ETF", "longname": "State Street SPDR S&P 500 ETF Trust", "exchDisp": "NYSEArca", "isYahooFinance": true},
+    {"exchange": "CCC", "shortname": "Bitcoin USD", "quoteType": "CRYPTOCURRENCY", "symbol": "BTC-USD", "index": "quotes", "score": 20000.0, "typeDisp": "Cryptocurrency", "longname": "Bitcoin USD", "exchDisp": "CCC", "isYahooFinance": true},
+    {"exchange": "CCY", "shortname": "EUR/USD", "quoteType": "CURRENCY", "symbol": "EURUSD=X", "index": "quotes", "score": 10000.0, "typeDisp": "Currency", "exchDisp": "CCY", "isYahooFinance": true},
+    {"exchange": "CME", "shortname": "E-Mini S&P 500 Dec 26", "quoteType": "FUTURE", "symbol": "ES=F", "index": "quotes", "score": 9000.0, "typeDisp": "Futures", "exchDisp": "Chicago Mercantile Exchange", "isYahooFinance": true},
+    {"exchange": "SNP", "shortname": "S&P 500", "quoteType": "INDEX", "symbol": "^GSPC", "index": "quotes", "score": 8000.0, "typeDisp": "Index", "exchDisp": "S&P Indices", "isYahooFinance": true},
+    {"exchange": "NAS", "shortname": "Vanguard 500 Index Fund", "quoteType": "MUTUALFUND", "symbol": "vfiax", "index": "quotes", "score": 7000.0, "typeDisp": "Mutual Fund", "exchDisp": "NASDAQ", "isYahooFinance": true},
+    {"exchange": "OPR", "shortname": "AAPL option", "quoteType": "OPTION", "symbol": "AAPL261218C00300000", "index": "quotes", "score": 100.0, "exchDisp": "OPR"},
+    {"exchange": "XXX", "shortname": "Slash pair", "quoteType": "EQUITY", "symbol": "A/B", "index": "quotes", "score": 100.0, "exchDisp": "X"}
+  ],
+  "news": []
+}

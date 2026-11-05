@@ -1,10 +1,9 @@
 @import "tailwindcss";
 
 /*
- * Dark-only theme per ADR-0003, with TradingView visual parity per
- * ADR-0006. Palette mirrors TradingView's dark theme (#131722 family)
- * so the UI reads as familiar to traders rather than as a generic
- * SaaS dashboard.
+ * TradingView visual parity per ADR-0006. These are the dark defaults
+ * (#131722 family); lib/theme.ts is the source of truth and overrides them
+ * at runtime for the light theme (ADR-0016). theme.test.ts keeps them in sync.
  */
 @theme {
   --color-bg: #131722;           /* chart + page background */
@@ -15,6 +14,11 @@
   --color-accent: #2962ff;       /* TV blue — primary buttons */
   --color-bull: #26a69a;         /* candle up */
   --color-bear: #ef5350;         /* candle down */
+  --color-grid: #2a2e39;         /* chart grid */
+  --color-crosshair: #787b86;    /* crosshair lines */
+  --color-label-bg: #1e222d;     /* crosshair axis labels */
+  --color-label-fg: #ffffff;
+  --color-neutral-fill: rgba(255, 255, 255, 0.15); /* neutral overlay fill */
 
   /* Back-compat aliases for components written against the v0.1 tokens. */
   --color-bg-elev: var(--color-surface);
@@ -63,7 +67,7 @@ body {
  * change. */
 .pane-header {
   position: absolute;
-  left: 8px;
+  left: calc(8px + var(--axis-inset, 0px));
   z-index: 2;
   display: flex;
   align-items: center;
@@ -87,4 +91,259 @@ body {
 
 .pane-header-value {
   font-variant-numeric: tabular-nums;
+}
+
+/* Indicator rows are interactive (hover controls, double-click for
+ * settings); the price row stays click-through. */
+.pane-header-interactive {
+  pointer-events: auto;
+}
+
+.pane-header-controls {
+  display: inline-flex;
+  gap: 2px;
+  opacity: 0;
+  transition: opacity 0.1s;
+}
+
+.pane-header:hover .pane-header-controls,
+.pane-header:focus-within .pane-header-controls {
+  opacity: 1;
+}
+
+.pane-header-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 4px;
+  color: var(--color-fg-muted);
+  background: transparent;
+  cursor: pointer;
+}
+
+.pane-header-btn:hover,
+.pane-header-btn:focus-visible {
+  color: var(--color-fg);
+  background: var(--color-bg-elev);
+}
+
+/* Price-legend change/volume colors (PaneHeader). */
+.pane-header-up {
+  color: var(--color-bull);
+}
+
+.pane-header-down {
+  color: var(--color-bear);
+}
+
+.pane-header-flat {
+  color: var(--color-fg-muted);
+}
+
+/* Bar-close countdown, aligned under the last-price badge by
+ * PriceAxisControls. */
+.price-countdown {
+  position: absolute;
+  z-index: 3;
+  box-sizing: border-box;
+  padding: 2px 0;
+  text-align: center;
+  font-family: var(--font-sans);
+  font-size: 11px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  line-height: 14px;
+  color: #ffffff;
+  border-radius: 2px;
+  pointer-events: none;
+}
+
+/* %, log, auto buttons in the bottom-right corner of the price axis. */
+.price-scale-controls {
+  position: absolute;
+  z-index: 3;
+  right: 0;
+  bottom: 0;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
+}
+
+.price-scale-btn {
+  padding: 2px 1px;
+  border-radius: 3px;
+  font-family: var(--font-sans);
+  font-size: 9px;
+  line-height: 14px;
+  color: var(--color-fg-muted);
+  cursor: pointer;
+}
+
+.price-scale-btn:hover {
+  background-color: var(--color-surface);
+  color: var(--color-fg);
+}
+
+.price-scale-btn.is-active {
+  color: var(--color-accent);
+}
+
+.chart-host:focus {
+  outline: none;
+}
+
+.pane-header-ohlc {
+  display: inline-flex;
+  gap: 8px;
+}
+
+.pane-header-ohlc b {
+  font-weight: 400;
+}
+
+.pane-header-vol {
+  color: var(--color-fg-muted);
+}
+
+/* Watchlist panel: four right-aligned numeric columns with tabular
+ * numerals, TradingView-style tick flash on the Last cell, and a remove
+ * button that appears over the row's right edge on hover. */
+.wl-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.3fr) repeat(3, minmax(0, 1fr));
+  column-gap: 8px;
+  align-items: center;
+  font-variant-numeric: tabular-nums;
+}
+
+.wl-row {
+  position: relative;
+  border-left: 2px solid transparent;
+}
+
+.wl-row:hover {
+  background: var(--color-bg-elev);
+}
+
+.wl-row[aria-current="true"] {
+  background: var(--color-bg-elev);
+  border-left-color: var(--color-accent);
+}
+
+.wl-last {
+  border-radius: 2px;
+  transition: background-color 0.5s ease-out;
+}
+
+.wl-flash-up {
+  background-color: color-mix(in srgb, var(--color-bull) 35%, transparent);
+  transition: none;
+}
+
+.wl-flash-down {
+  background-color: color-mix(in srgb, var(--color-bear) 35%, transparent);
+  transition: none;
+}
+
+.wl-remove {
+  position: absolute;
+  right: 4px;
+  top: 50%;
+  transform: translateY(-50%);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 4px;
+  font-size: 16px;
+  line-height: 1;
+  color: var(--color-fg-muted);
+  background: var(--color-border);
+  cursor: pointer;
+  opacity: 0;
+}
+
+.wl-row:hover .wl-remove,
+.wl-remove:focus-visible {
+  opacity: 1;
+}
+
+.wl-remove:hover {
+  color: var(--color-fg);
+}
+
+/* Live-feed badge after the status text (StatusLine). */
+.live-status {
+  margin-left: 10px;
+  font-size: 12px;
+  color: var(--color-fg-muted);
+}
+
+.live-status::before {
+  content: "";
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  margin-right: 5px;
+  border-radius: 50%;
+  vertical-align: middle;
+  background-color: currentColor;
+}
+
+.live-status.is-live,
+.live-status.is-push {
+  color: var(--color-bull);
+}
+
+.live-status.is-retrying {
+  color: #f0b90b;
+}
+
+/* History paging state at the chart's left edge (Chart). */
+.history-status {
+  position: absolute;
+  z-index: 3;
+  top: 50%;
+  left: 8px;
+  transform: translateY(-50%);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  border: 1px solid var(--color-border);
+  border-radius: 4px;
+  background-color: var(--color-surface);
+  font-family: var(--font-sans);
+  font-size: 11px;
+  color: var(--color-fg-muted);
+}
+
+.history-status.is-error {
+  color: var(--color-danger);
+}
+
+.history-status button {
+  color: var(--color-fg);
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.history-spinner {
+  width: 10px;
+  height: 10px;
+  border: 2px solid var(--color-border);
+  border-top-color: var(--color-accent);
+  border-radius: 50%;
+  animation: history-spin 0.8s linear infinite;
+}
+
+@keyframes history-spin {
+  to {
+    transform: rotate(360deg);
+  }
 }

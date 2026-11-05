@@ -16,6 +16,52 @@ the `generate_chart` MCP tool's `indicators` parameter. Screenshots are
 rendered from `AAPL` daily data (overlays and panels) and `BTCUSDT` daily
 data (external) — regenerate with `./scripts/gen_screenshots.sh`.
 
+## Values match TradingView
+
+Indicator math follows Pine Script v5 semantics, implemented once in
+`src/indicators/pine.rs` ([ADR-0018](/chartgen/decisions/0018-pine-semantics-for-indicators/)).
+`ta.ema` and `ta.rma` seed with the SMA of the first `length` values. RSI, ATR
+and DMI/ADX use Wilder's RMA. Bollinger Bands use the population standard
+deviation. Defaults are TradingView's. Bars before an indicator has seen
+`length` valid values are `null` (NaN), not partial values. With the same
+parameters and the same first bar, the values equal TradingView's built-ins.
+The community composites (`cipher_b`, `wavetrend`, `rsi_mfi_stoch`,
+`kalman_volume`) follow the Pine semantics of the `ta.*` calls in the scripts
+they port.
+
+Missing values (`na`) follow the Pine reference. Window functions (`sma`,
+`sum`, `stdev`, `highest`, `lowest`, ...) skip them and use the last `length`
+valid values, so a flat stochastic or a zero-range bar leaves no gap. EMA and
+RMA keep their state across a missing value and repeat the previous value;
+that case is not yet verified against a live TradingView chart.
+
+EMA and RMA are recursive, so a value depends on where the series starts.
+Load enough history before the bars you compare (`warmup` in series mode)
+so the start-up effect has decayed. Known differences:
+
+- **WaveTrend lengths.** `wavetrend` is the WaveTrend inside VuManChu Cipher B
+  and keeps its lengths 9 / 12 / 3 (LazyBear's script: 10 / 21 / 4).
+- **Calendar periods.** `vwap` / `vwap_bands` anchors and `pivot` periods
+  are UTC days, ISO weeks, months and years of the bar times. TradingView
+  uses the exchange session and time zone, which can differ for non-UTC
+  markets. On daily and higher charts the `session` anchor resets on every
+  bar, as TradingView's `timeframe.change("D")` does. Without bar timestamps
+  VWAP never resets and pivots stay empty.
+- **Pivots.** The higher-timeframe high / low / close comes from the loaded
+  chart bars. Every period is drawn (TradingView shows the last 15), and only
+  P, R1, S1, R2 and S2.
+- **Ichimoku.** The leading spans are shifted `displacement - 1` bars forward,
+  and the lagging span the same distance back. The cloud projected past the
+  last bar is not drawn yet.
+- **Intrabar data.** The volume profiles (`volume_profile`, `session_vp`,
+  `hvn_lvn`, `naked_poc`, `tpo`) and `cvd` spread each bar's volume over its
+  range. TradingView builds them from lower-timeframe data, so they are
+  approximations.
+- **Long warmups.** `kalman_volume` normalises by a 200-bar standard deviation
+  and needs about 280 bars before its first value.
+- **Unknown timeframe.** `histvol` needs the timeframe to annualize. When it
+  is unknown, the line stays empty.
+
 ## Overlays
 
 ### Summary
@@ -38,6 +84,14 @@ data (external) — regenerate with `./scripts/gen_screenshots.sh`.
 | [`hvn_lvn`](#hvn_lvn) | `vp_nodes`, `volume_nodes` |
 | [`naked_poc`](#naked_poc) | `npoc` |
 | [`tpo`](#tpo) | `market_profile` |
+| [`ma`](#ma) |  |
+| [`vwma`](#vwma) |  |
+| [`hma`](#hma) |  |
+| [`ma_ribbon`](#ma_ribbon) |  |
+| [`envelopes`](#envelopes) |  |
+| [`linreg_channel`](#linreg_channel) |  |
+| [`chande_kroll_stop`](#chande_kroll_stop) |  |
+| [`zigzag`](#zigzag) |  |
 
 ### `ema_stack`
 
@@ -71,7 +125,8 @@ Keltner Channels — ATR-based volatility bands
 | Param | Type | Default | Description |
 |-------|------|---------|-------------|
 | `period` | `integer` | `20` |  |
-| `multiplier` | `number` | `1.5` |  |
+| `multiplier` | `number` | `2.0` |  |
+| `atr_length` | `integer` | `10` | ATR length for the band width |
 
 ![keltner sample render](../../../assets/indicators/keltner.png)
 
@@ -89,7 +144,13 @@ Donchian Channels — breakout trading bands
 
 ### `vwap`
 
-Volume Weighted Average Price — intraday anchor
+Volume Weighted Average Price — anchored to the session, week or month
+
+**Parameters:**
+
+| Param | Type | Default | Description |
+|-------|------|---------|-------------|
+| `anchor` | `string` | `session` | Reset period: UTC day (session), ISO week, calendar month, or never |
 
 ![vwap sample render](../../../assets/indicators/vwap.png)
 
@@ -101,7 +162,8 @@ VWAP Bands — standard deviation bands around VWAP
 
 | Param | Type | Default | Description |
 |-------|------|---------|-------------|
-| `std_dev` | `number` | `2.0` |  |
+| `std_dev` | `number` | `1.0` |  |
+| `anchor` | `string` | `session` | Reset period: UTC day (session), ISO week, calendar month, or never |
 
 ![vwap_bands sample render](../../../assets/indicators/vwap_bands.png)
 
@@ -145,6 +207,7 @@ Ichimoku Cloud — trend, support/resistance, momentum
 | `tenkan` | `integer` | `9` |  |
 | `kijun` | `integer` | `26` |  |
 | `senkou_b` | `integer` | `52` |  |
+| `displacement` | `integer` | `26` | Leading spans are drawn displacement - 1 bars ahead, the lagging span (close) as many bars back |
 
 ![ichimoku sample render](../../../assets/indicators/ichimoku.png)
 
@@ -158,7 +221,7 @@ Heikin Ashi — smoothed trend candles
 
 ### `pivot`
 
-Pivot Points — support/resistance from prior bar
+Pivot Points Standard (Traditional) — levels from the previous higher-timeframe period
 
 **Aliases:** `pivot_points`
 
@@ -256,6 +319,123 @@ Time Price Opportunity — time-based market profile with POC/VAH/VAL
 
 ![tpo sample render](../../../assets/indicators/tpo.png)
 
+### `ma`
+
+Moving Average (sma, ema, wma, hma, vwma, rma, alma, dema, tema, lsma)
+
+**Parameters:**
+
+| Param | Type | Default | Description |
+|-------|------|---------|-------------|
+| `type` | `string` | `sma` | Moving average type |
+| `length` | `integer` | `9` | MA length |
+| `source` | `string` | `close` | Price source |
+| `offset` | `integer` | `0` | Shift the line by this many bars (negative = left). Values shifted past the last bar are dropped |
+
+![ma sample render](../../../assets/indicators/ma.png)
+
+### `vwma`
+
+Volume Weighted Moving Average (ta.vwma)
+
+**Parameters:**
+
+| Param | Type | Default | Description |
+|-------|------|---------|-------------|
+| `length` | `integer` | `9` | MA length |
+| `source` | `string` | `close` | Price source |
+| `offset` | `integer` | `0` | Shift the line by this many bars (negative = left). Values shifted past the last bar are dropped |
+
+![vwma sample render](../../../assets/indicators/vwma.png)
+
+### `hma`
+
+Hull Moving Average (ta.hma)
+
+**Parameters:**
+
+| Param | Type | Default | Description |
+|-------|------|---------|-------------|
+| `length` | `integer` | `9` | MA length |
+| `source` | `string` | `close` | Price source |
+| `offset` | `integer` | `0` | Shift the line by this many bars (negative = left). Values shifted past the last bar are dropped |
+
+![hma sample render](../../../assets/indicators/hma.png)
+
+### `ma_ribbon`
+
+Moving Average Ribbon — four moving averages (20/50/100/200 by default)
+
+**Parameters:**
+
+| Param | Type | Default | Description |
+|-------|------|---------|-------------|
+| `type` | `string` | `sma` | Moving average type |
+| `source` | `string` | `close` | Price source |
+| `length1` | `integer` | `20` | MA 1 length |
+| `length2` | `integer` | `50` | MA 2 length |
+| `length3` | `integer` | `100` | MA 3 length |
+| `length4` | `integer` | `200` | MA 4 length |
+
+![ma_ribbon sample render](../../../assets/indicators/ma_ribbon.png)
+
+### `envelopes`
+
+Envelopes — moving-average basis with upper/lower bands at a fixed percentage
+
+**Parameters:**
+
+| Param | Type | Default | Description |
+|-------|------|---------|-------------|
+| `type` | `string` | `sma` | Moving average type |
+| `length` | `integer` | `20` | Basis MA length |
+| `percent` | `number` | `10.0` | Band distance in percent of the basis |
+| `source` | `string` | `close` | Price source |
+
+![envelopes sample render](../../../assets/indicators/envelopes.png)
+
+### `linreg_channel`
+
+Linear Regression Channel — regression line over the last N bars with standard-deviation bands
+
+**Parameters:**
+
+| Param | Type | Default | Description |
+|-------|------|---------|-------------|
+| `length` | `integer` | `100` | Number of bars in the regression (uses fewer if less data) |
+| `upper_dev` | `number` | `2.0` | Upper deviation multiplier |
+| `lower_dev` | `number` | `2.0` | Lower deviation multiplier |
+| `source` | `string` | `close` | Price source |
+
+![linreg_channel sample render](../../../assets/indicators/linreg_channel.png)
+
+### `chande_kroll_stop`
+
+Chande Kroll Stop — ATR-based long and short trailing stops
+
+**Parameters:**
+
+| Param | Type | Default | Description |
+|-------|------|---------|-------------|
+| `atr_length` | `integer` | `10` | ATR / first high-low stop length (p) |
+| `atr_mult` | `number` | `1.0` | ATR multiplier (x) |
+| `stop_length` | `integer` | `9` | Stop smoothing length (q) |
+
+![chande_kroll_stop sample render](../../../assets/indicators/chande_kroll_stop.png)
+
+### `zigzag`
+
+ZigZag — connects confirmed swing pivots that differ by at least the deviation %
+
+**Parameters:**
+
+| Param | Type | Default | Description |
+|-------|------|---------|-------------|
+| `deviation` | `number` | `5.0` | Minimum price change between pivots in percent |
+| `depth` | `integer` | `10` | Pivot legs: bars on each side of a swing high/low |
+
+![zigzag sample render](../../../assets/indicators/zigzag.png)
+
 ## Panels
 
 ### Summary
@@ -279,6 +459,32 @@ Time Price Opportunity — time-based market profile with POC/VAH/VAL
 | [`histvol`](#histvol) | `hv` |
 | [`kalman_volume`](#kalman_volume) | `kalman`, `kvf` |
 | [`rsi_mfi_stoch`](#rsi_mfi_stoch) | `rsi_combo`, `combo` |
+| [`volume`](#volume) |  |
+| [`aroon`](#aroon) |  |
+| [`vortex`](#vortex) |  |
+| [`stoch_rsi`](#stoch_rsi) | `stochrsi` |
+| [`awesome_oscillator`](#awesome_oscillator) | `ao` |
+| [`momentum`](#momentum) | `mom` |
+| [`trix`](#trix) |  |
+| [`ultimate_oscillator`](#ultimate_oscillator) | `uo` |
+| [`ppo`](#ppo) | `price_oscillator` |
+| [`cmo`](#cmo) |  |
+| [`dpo`](#dpo) |  |
+| [`elder_force_index`](#elder_force_index) | `efi` |
+| [`tsi`](#tsi) |  |
+| [`kst`](#kst) |  |
+| [`coppock`](#coppock) | `coppock_curve` |
+| [`mass_index`](#mass_index) | `mi` |
+| [`bb_percent_b`](#bb_percent_b) | `percent_b`, `bbp` |
+| [`bb_width`](#bb_width) | `bbw`, `bandwidth` |
+| [`choppiness`](#choppiness) | `chop` |
+| [`fisher_transform`](#fisher_transform) | `fisher` |
+| [`ease_of_movement`](#ease_of_movement) | `eom` |
+| [`volume_oscillator`](#volume_oscillator) | `vol_osc` |
+| [`balance_of_power`](#balance_of_power) | `bop` |
+| [`rvi`](#rvi) | `relative_vigor_index` |
+| [`smi_ergodic`](#smi_ergodic) | `smi` |
+| [`connors_rsi`](#connors_rsi) | `crsi`, `connors` |
 
 ### `cipher_b`
 
@@ -347,7 +553,7 @@ Slow Stochastic — overbought/oversold oscillator
 | Param | Type | Default | Description |
 |-------|------|---------|-------------|
 | `period` | `integer` | `14` |  |
-| `k_smooth` | `integer` | `3` |  |
+| `k_smooth` | `integer` | `1` |  |
 | `d_smooth` | `integer` | `3` |  |
 
 ![stoch sample render](../../../assets/indicators/stoch.png)
@@ -390,7 +596,7 @@ Rate of Change — momentum percentage
 
 | Param | Type | Default | Description |
 |-------|------|---------|-------------|
-| `period` | `integer` | `14` |  |
+| `period` | `integer` | `9` |  |
 
 ![roc sample render](../../../assets/indicators/roc.png)
 
@@ -462,7 +668,7 @@ Historical Volatility — annualized log-return std dev
 
 | Param | Type | Default | Description |
 |-------|------|---------|-------------|
-| `period` | `integer` | `20` |  |
+| `period` | `integer` | `10` |  |
 
 ![histvol sample render](../../../assets/indicators/histvol.png)
 
@@ -503,6 +709,378 @@ RSI + Money Flow Index + Stochastic combo panel (all 0-100)
 | `show_trend_bars` | `boolean` | `true` |  |
 
 ![rsi_mfi_stoch sample render](../../../assets/indicators/rsi_mfi_stoch.png)
+
+### `volume`
+
+Volume histogram colored by candle direction, with optional volume MA (TradingView Volume)
+
+**Parameters:**
+
+| Param | Type | Default | Description |
+|-------|------|---------|-------------|
+| `ma_length` | `integer` | `20` | Volume SMA length (0 = off) |
+
+![volume sample render](../../../assets/indicators/volume.png)
+
+### `aroon`
+
+Aroon Up/Down — bars since the highest high / lowest low over length+1 bars
+
+**Parameters:**
+
+| Param | Type | Default | Description |
+|-------|------|---------|-------------|
+| `length` | `integer` | `14` | Aroon length |
+
+![aroon sample render](../../../assets/indicators/aroon.png)
+
+### `vortex`
+
+Vortex Indicator — VI+ and VI- trend direction lines
+
+**Parameters:**
+
+| Param | Type | Default | Description |
+|-------|------|---------|-------------|
+| `length` | `integer` | `14` | Vortex length |
+
+![vortex sample render](../../../assets/indicators/vortex.png)
+
+### `stoch_rsi`
+
+Stochastic RSI (TradingView): ta.stoch of RSI, smoothed K and D (0-100)
+
+**Aliases:** `stochrsi`
+
+**Parameters:**
+
+| Param | Type | Default | Description |
+|-------|------|---------|-------------|
+| `smooth_k` | `integer` | `3` | %K smoothing (SMA) |
+| `smooth_d` | `integer` | `3` | %D smoothing (SMA of %K) |
+| `rsi_length` | `integer` | `14` | RSI period |
+| `stoch_length` | `integer` | `14` | Stochastic lookback applied to RSI |
+
+![stoch_rsi sample render](../../../assets/indicators/stoch_rsi.png)
+
+### `awesome_oscillator`
+
+Awesome Oscillator: SMA(hl2,5) - SMA(hl2,34) histogram, green when rising
+
+**Aliases:** `ao`
+
+**Parameters:**
+
+| Param | Type | Default | Description |
+|-------|------|---------|-------------|
+| `fast` | `integer` | `5` | Fast SMA of hl2 |
+| `slow` | `integer` | `34` | Slow SMA of hl2 |
+
+![awesome_oscillator sample render](../../../assets/indicators/awesome_oscillator.png)
+
+### `momentum`
+
+Momentum: close - close[length]
+
+**Aliases:** `mom`
+
+**Parameters:**
+
+| Param | Type | Default | Description |
+|-------|------|---------|-------------|
+| `length` | `integer` | `10` | Bars back |
+
+![momentum sample render](../../../assets/indicators/momentum.png)
+
+### `trix`
+
+TRIX: 10000 * change of triple-smoothed EMA of log(close)
+
+**Parameters:**
+
+| Param | Type | Default | Description |
+|-------|------|---------|-------------|
+| `length` | `integer` | `18` | EMA length (applied three times) |
+
+![trix sample render](../../../assets/indicators/trix.png)
+
+### `ultimate_oscillator`
+
+Ultimate Oscillator (Larry Williams): weighted 7/14/28 buying-pressure ratios (0-100)
+
+**Aliases:** `uo`
+
+**Parameters:**
+
+| Param | Type | Default | Description |
+|-------|------|---------|-------------|
+| `fast` | `integer` | `7` | Fast length |
+| `middle` | `integer` | `14` | Middle length |
+| `slow` | `integer` | `28` | Slow length |
+
+![ultimate_oscillator sample render](../../../assets/indicators/ultimate_oscillator.png)
+
+### `ppo`
+
+Price Oscillator (TradingView): (short MA - long MA) / long MA * 100, MA type ema or sma
+
+**Aliases:** `price_oscillator`
+
+**Parameters:**
+
+| Param | Type | Default | Description |
+|-------|------|---------|-------------|
+| `short` | `integer` | `10` | Short moving-average length |
+| `long` | `integer` | `21` | Long moving-average length |
+| `type` | `string` | `ema` | Moving average type |
+
+![ppo sample render](../../../assets/indicators/ppo.png)
+
+### `cmo`
+
+Chande Momentum Oscillator (-100 to 100)
+
+**Parameters:**
+
+| Param | Type | Default | Description |
+|-------|------|---------|-------------|
+| `length` | `integer` | `9` | Lookback |
+
+![cmo sample render](../../../assets/indicators/cmo.png)
+
+### `dpo`
+
+Detrended Price Oscillator: close - SMA shifted back length/2+1 bars
+
+**Parameters:**
+
+| Param | Type | Default | Description |
+|-------|------|---------|-------------|
+| `length` | `integer` | `21` | SMA length |
+
+![dpo sample render](../../../assets/indicators/dpo.png)
+
+### `elder_force_index`
+
+Elder Force Index: EMA of change(close) * volume
+
+**Aliases:** `efi`
+
+**Parameters:**
+
+| Param | Type | Default | Description |
+|-------|------|---------|-------------|
+| `length` | `integer` | `13` | EMA length |
+
+![elder_force_index sample render](../../../assets/indicators/elder_force_index.png)
+
+### `tsi`
+
+True Strength Index: double-smoothed momentum ratio (x100) with signal
+
+**Parameters:**
+
+| Param | Type | Default | Description |
+|-------|------|---------|-------------|
+| `long` | `integer` | `25` | Long (first) smoothing |
+| `short` | `integer` | `13` | Short (second) smoothing |
+| `signal` | `integer` | `13` | Signal EMA length |
+
+![tsi sample render](../../../assets/indicators/tsi.png)
+
+### `kst`
+
+Know Sure Thing: weighted sum of four smoothed rates of change, with signal
+
+**Parameters:**
+
+| Param | Type | Default | Description |
+|-------|------|---------|-------------|
+| `roc1` | `integer` | `10` | ROC length 1 |
+| `roc2` | `integer` | `15` | ROC length 2 |
+| `roc3` | `integer` | `20` | ROC length 3 |
+| `roc4` | `integer` | `30` | ROC length 4 |
+| `sma1` | `integer` | `10` | SMA length 1 |
+| `sma2` | `integer` | `10` | SMA length 2 |
+| `sma3` | `integer` | `10` | SMA length 3 |
+| `sma4` | `integer` | `15` | SMA length 4 |
+| `signal` | `integer` | `9` | Signal SMA length |
+
+![kst sample render](../../../assets/indicators/kst.png)
+
+### `coppock`
+
+Coppock Curve: WMA of ROC(long) + ROC(short)
+
+**Aliases:** `coppock_curve`
+
+**Parameters:**
+
+| Param | Type | Default | Description |
+|-------|------|---------|-------------|
+| `wma_length` | `integer` | `10` | WMA length |
+| `long_roc` | `integer` | `14` | Long ROC length |
+| `short_roc` | `integer` | `11` | Short ROC length |
+
+![coppock sample render](../../../assets/indicators/coppock.png)
+
+### `mass_index`
+
+Mass Index: rolling sum of EMA(high-low,9) / EMA(EMA(high-low,9),9)
+
+**Aliases:** `mi`
+
+**Parameters:**
+
+| Param | Type | Default | Description |
+|-------|------|---------|-------------|
+| `length` | `integer` | `10` | Summation length |
+
+![mass_index sample render](../../../assets/indicators/mass_index.png)
+
+### `bb_percent_b`
+
+Bollinger %B: (close - lower) / (upper - lower)
+
+**Aliases:** `percent_b`, `bbp`
+
+**Parameters:**
+
+| Param | Type | Default | Description |
+|-------|------|---------|-------------|
+| `length` | `integer` | `20` | SMA / stdev length |
+| `mult` | `number` | `2.0` | Standard deviation multiplier |
+
+![bb_percent_b sample render](../../../assets/indicators/bb_percent_b.png)
+
+### `bb_width`
+
+Bollinger Bands Width: 100 * (upper - lower) / basis, with Highest Expansion and Lowest Contraction
+
+**Aliases:** `bbw`, `bandwidth`
+
+**Parameters:**
+
+| Param | Type | Default | Description |
+|-------|------|---------|-------------|
+| `length` | `integer` | `20` | SMA / stdev length |
+| `mult` | `number` | `2.0` | Standard deviation multiplier |
+| `highest_expansion` | `integer` | `125` | Highest Expansion lookback |
+| `lowest_contraction` | `integer` | `125` | Lowest Contraction lookback |
+
+![bb_width sample render](../../../assets/indicators/bb_width.png)
+
+### `choppiness`
+
+Choppiness Index (0-100): high = sideways, low = trending
+
+**Aliases:** `chop`
+
+**Parameters:**
+
+| Param | Type | Default | Description |
+|-------|------|---------|-------------|
+| `length` | `integer` | `14` | Lookback |
+
+![choppiness sample render](../../../assets/indicators/choppiness.png)
+
+### `fisher_transform`
+
+Fisher Transform of hl2 with trigger line
+
+**Aliases:** `fisher`
+
+**Parameters:**
+
+| Param | Type | Default | Description |
+|-------|------|---------|-------------|
+| `length` | `integer` | `9` | Highest/lowest lookback of hl2 |
+
+![fisher_transform sample render](../../../assets/indicators/fisher_transform.png)
+
+### `ease_of_movement`
+
+Ease of Movement: SMA of 10000 * change(hl2) * (high-low) / volume
+
+**Aliases:** `eom`
+
+**Parameters:**
+
+| Param | Type | Default | Description |
+|-------|------|---------|-------------|
+| `length` | `integer` | `14` | SMA length |
+| `divisor` | `integer` | `10000` | Scaling divisor |
+
+![ease_of_movement sample render](../../../assets/indicators/ease_of_movement.png)
+
+### `volume_oscillator`
+
+Volume Oscillator: 100 * (EMA fast vol - EMA slow vol) / EMA slow vol
+
+**Aliases:** `vol_osc`
+
+**Parameters:**
+
+| Param | Type | Default | Description |
+|-------|------|---------|-------------|
+| `short` | `integer` | `5` | Short volume EMA |
+| `long` | `integer` | `10` | Long volume EMA |
+
+![volume_oscillator sample render](../../../assets/indicators/volume_oscillator.png)
+
+### `balance_of_power`
+
+Balance of Power: (close - open) / (high - low)
+
+**Aliases:** `bop`
+
+![balance_of_power sample render](../../../assets/indicators/balance_of_power.png)
+
+### `rvi`
+
+Relative Vigor Index: SWMA(close-open) / SWMA(high-low) sums, with signal
+
+**Aliases:** `relative_vigor_index`
+
+**Parameters:**
+
+| Param | Type | Default | Description |
+|-------|------|---------|-------------|
+| `length` | `integer` | `10` | Summation length |
+
+![rvi sample render](../../../assets/indicators/rvi.png)
+
+### `smi_ergodic`
+
+SMI Ergodic Indicator: ta.tsi ratio with signal and oscillator histogram
+
+**Aliases:** `smi`
+
+**Parameters:**
+
+| Param | Type | Default | Description |
+|-------|------|---------|-------------|
+| `long` | `integer` | `20` | Long (first) smoothing |
+| `short` | `integer` | `5` | Short (second) smoothing |
+| `signal` | `integer` | `5` | Signal EMA length |
+
+![smi_ergodic sample render](../../../assets/indicators/smi_ergodic.png)
+
+### `connors_rsi`
+
+Connors RSI: average of RSI, streak RSI and percent rank of ROC(1) (0-100)
+
+**Aliases:** `crsi`, `connors`
+
+**Parameters:**
+
+| Param | Type | Default | Description |
+|-------|------|---------|-------------|
+| `rsi_length` | `integer` | `3` | RSI length |
+| `updown_length` | `integer` | `2` | Streak RSI length |
+| `roc_length` | `integer` | `100` | Percent-rank lookback |
+
+![connors_rsi sample render](../../../assets/indicators/connors_rsi.png)
 
 ## External
 

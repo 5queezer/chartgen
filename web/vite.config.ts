@@ -5,7 +5,7 @@ import tailwindcss from "@tailwindcss/vite";
 // Dev proxy targets the local chartgen HTTP server (default port 9315).
 // This keeps OAuth + MCP on the same origin as the Vite dev server so
 // localStorage + CORS are non-issues during development.
-const CHARTGEN_DEV_TARGET = "http://localhost:9315";
+const CHARTGEN_DEV_TARGET = process.env.CHARTGEN_DEV_TARGET ?? "http://localhost:9315";
 
 export default defineConfig({
   plugins: [solid(), tailwindcss()],

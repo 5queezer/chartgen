@@ -5,12 +5,24 @@ use std::collections::HashSet;
 use std::io::{self, BufRead, Write};
 use std::sync::{Arc, RwLock};
 
+use crate::chart_push::{ChartRequest, PushCtx, MAX_INDICATORS, PUSH_LIMIT};
 use crate::fetch;
+use crate::search;
 use chartgen::data;
 use chartgen::engine::Engine;
 use chartgen::indicator::Indicator;
 use chartgen::indicators;
 use chartgen::renderer;
+#[cfg(feature = "scripting")]
+use chartgen::scripting;
+
+/// `CHARTGEN_SCRIPTING=1` in a build with the `scripting` feature.
+fn scripting_enabled() -> bool {
+    #[cfg(feature = "scripting")]
+    return scripting::enabled();
+    #[cfg(not(feature = "scripting"))]
+    false
+}
 
 pub fn run() {
     let stdin = io::stdin();
@@ -48,7 +60,7 @@ pub fn run() {
             continue;
         }
 
-        let response = handle_mcp_request(method, id, req.get("params"), None, None);
+        let response = handle_mcp_request(method, id, req.get("params"), None, None, None, None);
 
         writeln!(stdout, "{}", response).ok();
         stdout.flush().ok();
@@ -59,17 +71,22 @@ pub fn run() {
 /// When `engine` is `Some`, trading tools are available; otherwise they return
 /// an error indicating that the trading engine is not running.
 /// `token` is the client's Bearer token (if any), used for subscription identity.
+/// `push` is set on the HTTP transport, for the chart push tools (ADR-0021).
+/// `user` owns the caller's scripted indicators (the OAuth client id, ADR-0025);
+/// `None` on stdio and whenever scripting is disabled.
 pub fn handle_mcp_request(
     method: &str,
     id: Option<Value>,
     params: Option<&Value>,
     engine: Option<&Arc<RwLock<Engine>>>,
     token: Option<&str>,
+    push: Option<&PushCtx>,
+    user: Option<&str>,
 ) -> Value {
     match method {
         "initialize" => handle_initialize(id),
-        "tools/list" => handle_tools_list(id),
-        "tools/call" => handle_tools_call(id, params, engine, token),
+        "tools/list" => handle_tools_list(id, scripting_enabled()),
+        "tools/call" => handle_tools_call(id, params, engine, token, push, user),
         "ping" => json!({ "jsonrpc": "2.0", "id": id, "result": {} }),
         _ => json!({
             "jsonrpc": "2.0",
@@ -96,11 +113,18 @@ fn handle_initialize(id: Option<Value>) -> Value {
     })
 }
 
-fn handle_tools_list(id: Option<Value>) -> Value {
+/// The scripting tools are listed only when `scripting` (CHARTGEN_SCRIPTING=1).
+fn handle_tools_list(id: Option<Value>, scripting: bool) -> Value {
+    let mut result = chartgen::mcp_schema::tools_list_result();
+    if scripting {
+        if let Some(tools) = result["tools"].as_array_mut() {
+            tools.extend(chartgen::mcp_schema::scripting_tools());
+        }
+    }
     json!({
         "jsonrpc": "2.0",
         "id": id,
-        "result": chartgen::mcp_schema::tools_list_result()
+        "result": result
     })
 }
 
@@ -109,6 +133,8 @@ fn handle_tools_call(
     params: Option<&Value>,
     engine: Option<&Arc<RwLock<Engine>>>,
     token: Option<&str>,
+    push: Option<&PushCtx>,
+    user: Option<&str>,
 ) -> Value {
     let tool_name = params
         .and_then(|p| p.get("name"))
@@ -120,10 +146,37 @@ fn handle_tools_call(
         .cloned()
         .unwrap_or(json!({}));
 
+    call_tool(
+        tool_name,
+        id,
+        arguments,
+        engine,
+        token,
+        push,
+        user,
+        scripting_enabled(),
+    )
+}
+
+/// Dispatch one tool call. The scripting tools exist only when `scripting`.
+#[allow(clippy::too_many_arguments)]
+#[cfg_attr(not(feature = "scripting"), allow(unused_variables))]
+fn call_tool(
+    tool_name: &str,
+    id: Option<Value>,
+    arguments: Value,
+    engine: Option<&Arc<RwLock<Engine>>>,
+    token: Option<&str>,
+    push: Option<&PushCtx>,
+    user: Option<&str>,
+    scripting: bool,
+) -> Value {
     match tool_name {
-        "generate_chart" => tool_generate_chart(id, &arguments),
-        "list_indicators" => tool_list_indicators(id),
+        "generate_chart" => tool_generate_chart(id, &arguments, user),
+        "list_indicators" => tool_list_indicators(id, user),
         "get_indicators" => tool_get_indicators(id, &arguments, engine),
+        "get_quotes" => tool_get_quotes(id, &arguments),
+        "search_symbols" => tool_search_symbols(id, &arguments),
         "place_order" => tool_place_order(id, &arguments, engine),
         "cancel_order" => tool_cancel_order(id, &arguments, engine),
         "get_orders" => tool_get_orders(id, &arguments, engine),
@@ -136,6 +189,16 @@ fn handle_tools_call(
         "subscribe_notifications" => tool_subscribe_notifications(id, &arguments, engine, token),
         "unsubscribe_notifications" => tool_unsubscribe_notifications(id, engine, token),
         "list_subscriptions" => tool_list_subscriptions(id, engine, token),
+        "subscribe_chart" => tool_subscribe_chart(id, &arguments, push, token),
+        "unsubscribe_chart" => tool_unsubscribe_chart(id, &arguments, push, token),
+        #[cfg(feature = "scripting")]
+        "register_indicator" if scripting => tool_register_indicator(id, &arguments, user),
+        #[cfg(feature = "scripting")]
+        "fork_indicator" if scripting => tool_fork_indicator(id, &arguments),
+        #[cfg(feature = "scripting")]
+        "list_my_indicators" if scripting => tool_list_my_indicators(id, user),
+        #[cfg(feature = "scripting")]
+        "delete_indicator" if scripting => tool_delete_indicator(id, &arguments, user),
         _ => json!({
             "jsonrpc": "2.0",
             "id": id,
@@ -148,12 +211,20 @@ fn handle_tools_call(
 }
 
 /// Parse panels array: each element can be a string ("rsi") or an object ({"name": "rsi", "length": 21}).
-/// Returns (indicators, request-keys-in-order, unknown-names).
-fn parse_panels(panels_value: &Value) -> (Vec<Box<dyn Indicator>>, Vec<String>, Vec<String>) {
+/// Returns (indicators, request-keys-in-order, unknown-names, invalid-parameter messages).
+type ParsedPanels = (
+    Vec<Box<dyn Indicator>>,
+    Vec<String>,
+    Vec<String>,
+    Vec<String>,
+);
+
+fn parse_panels(panels_value: &Value, user: Option<&str>) -> ParsedPanels {
     let arr = match panels_value.as_array() {
         Some(a) => a,
-        None => return (vec![], vec![], vec![]),
+        None => return (vec![], vec![], vec![], vec![]),
     };
+    let mut invalid = Vec::new();
 
     let mut result: Vec<Box<dyn Indicator>> = Vec::new();
     let mut keys: Vec<String> = Vec::new();
@@ -162,7 +233,7 @@ fn parse_panels(panels_value: &Value) -> (Vec<Box<dyn Indicator>>, Vec<String>, 
     for item in arr {
         if let Some(name) = item.as_str() {
             // Simple string: "rsi"
-            match indicators::by_name(name) {
+            match indicators::by_name_for(name, user) {
                 Some(ind) => {
                     result.push(ind);
                     keys.push(name.to_string());
@@ -175,23 +246,106 @@ fn parse_panels(panels_value: &Value) -> (Vec<Box<dyn Indicator>>, Vec<String>, 
                 Some(n) => n,
                 None => continue,
             };
-            match indicators::by_name_configured(name, &Value::Object(obj.clone())) {
-                Some(ind) => {
+            match indicators::by_name_configured_for(name, &Value::Object(obj.clone()), user) {
+                Ok(Some(ind)) => {
                     result.push(ind);
                     keys.push(name.to_string());
                 }
-                None => errors.push(name.to_string()),
+                Ok(None) => errors.push(name.to_string()),
+                Err(msg) => invalid.push(msg),
             }
         }
     }
 
-    (result, keys, errors)
+    (result, keys, errors, invalid)
 }
 
-fn tool_generate_chart(id: Option<Value>, args: &Value) -> Value {
-    let bars = args.get("bars").and_then(|v| v.as_u64()).unwrap_or(200) as usize;
+/// Upper bound for `bars`: Binance pagination costs one upstream request per
+/// 1000 bars.
+const MAX_BARS: usize = 5000;
+/// Upper bound for `warmup` (ADR-0009).
+const MAX_WARMUP: usize = 1000;
+/// Oldest accepted `end_time`: 1900-01-01 (index histories predate 1970).
+const MIN_END_TIME_MS: i64 = -2_208_988_800_000;
+/// Newest accepted `end_time`, relative to now.
+const MAX_END_TIME_AHEAD_MS: i64 = 366 * 86_400_000;
+
+fn chart_style_arg(args: &Value) -> Result<&'static str, &'static str> {
+    match args.get("chart_style") {
+        None | Some(Value::Null) => Ok("candles"),
+        Some(v) => match v.as_str() {
+            Some("candles") => Ok("candles"),
+            Some("heikin_ashi") => Ok("heikin_ashi"),
+            _ => Err("chart_style must be one of 'candles' or 'heikin_ashi'."),
+        },
+    }
+}
+
+fn check_interval(interval: &str) -> Result<(), String> {
+    match data::interval_secs(interval) {
+        Some(_) => Ok(()),
+        None => Err(format!(
+            "Unsupported timeframe: {interval}. Use e.g. 1m, 5m, 15m, 30m, 1h, 4h, 1d, 1wk, 1mo."
+        )),
+    }
+}
+
+/// Accept both "indicators" and "panels" parameter names
+fn indicators_arg(args: &Value) -> Value {
+    args.get("indicators")
+        .or_else(|| args.get("panels"))
+        .cloned()
+        .unwrap_or_else(|| json!(["ema_stack", "cipher_b", "macd"]))
+}
+
+fn check_panels(unknown: &[String], invalid: &[String]) -> Result<(), String> {
+    if !invalid.is_empty() {
+        return Err(invalid.join("; "));
+    }
+    if !unknown.is_empty() {
+        return Err(format!(
+            "Unknown indicator(s): {}. Call list_indicators to see available indicators.",
+            unknown.join(", ")
+        ));
+    }
+    Ok(())
+}
+
+/// `user` resolves the caller's scripted indicators first (ADR-0025).
+fn tool_generate_chart(id: Option<Value>, args: &Value, user: Option<&str>) -> Value {
+    generate_chart(id, args, fetch::DataSource::from_env(), user)
+}
+
+fn generate_chart(
+    id: Option<Value>,
+    args: &Value,
+    source: fetch::DataSource,
+    user: Option<&str>,
+) -> Value {
+    let bars = (args.get("bars").and_then(|v| v.as_u64()).unwrap_or(200) as usize).min(MAX_BARS);
+    // Exclusive upper bound (ms since epoch) on bar open time — history paging.
+    // JSON null counts as absent; anything else must be an in-range integer.
+    let end_time = match args.get("end_time") {
+        None | Some(Value::Null) => None,
+        Some(v) => {
+            let max = fetch::now_ms().saturating_add(MAX_END_TIME_AHEAD_MS);
+            match v.as_i64().filter(|t| (MIN_END_TIME_MS..=max).contains(t)) {
+                Some(t) => Some(t),
+                None => {
+                    return tool_err(
+                        id,
+                        "end_time must be an integer (ms since epoch) between 1900-01-01 and one year from now.",
+                    )
+                }
+            }
+        }
+    };
     let width = args.get("width").and_then(|v| v.as_u64()).unwrap_or(1920) as u32;
     let height = args.get("height").and_then(|v| v.as_u64()).unwrap_or(1080) as u32;
+    let chart_style = match chart_style_arg(args) {
+        Ok(s) => s,
+        Err(e) => return tool_err(id, e),
+    };
 
     // Accept both "symbol" and "ticker" parameter names
     let symbol = args
@@ -205,13 +359,11 @@ fn tool_generate_chart(id: Option<Value>, args: &Value) -> Value {
         .or_else(|| args.get("interval"))
         .and_then(|v| v.as_str())
         .unwrap_or("4h");
+    if let Err(e) = check_interval(interval) {
+        return tool_err(id, &e);
+    }
 
-    // Accept both "indicators" and "panels" parameter names
-    let panels_value = args
-        .get("indicators")
-        .or_else(|| args.get("panels"))
-        .cloned()
-        .unwrap_or_else(|| json!(["ema_stack", "cipher_b", "macd"]));
+    let panels_value = indicators_arg(args);
 
     // Output format: "png" (default), "summary" (JSON only), "both",
     // or "series" (full per-bar JSON time-series).
@@ -231,43 +383,54 @@ fn tool_generate_chart(id: Option<Value>, args: &Value) -> Value {
         );
     }
 
-    let (panel_indicators, indicator_keys, unknown) = parse_panels(&panels_value);
-
-    if !unknown.is_empty() {
-        return tool_err(
-            id,
-            &format!(
-                "Unknown indicator(s): {}. Call list_indicators to see available indicators.",
-                unknown.join(", ")
-            ),
-        );
+    let (panel_indicators, indicator_keys, unknown, invalid) = parse_panels(&panels_value, user);
+    if let Err(e) = check_panels(&unknown, &invalid) {
+        return tool_err(id, &e);
     }
 
-    let mut data = if let Some(sym) = symbol {
-        let source = fetch::detect_source(sym);
-        match source {
-            "binance" => fetch::fetch_binance(sym, interval, bars),
-            _ => fetch::fetch_yahoo(sym, interval, bars),
-        }
-        .unwrap_or_else(|_| data::sample_data(bars))
+    // Warmup bars feed indicator computation but are trimmed from the series
+    // payload. png/summary ignore it and render exactly `bars` (ADR-0009).
+    let warmup = if want_series {
+        (args.get("warmup").and_then(|v| v.as_u64()).unwrap_or(0) as usize).min(MAX_WARMUP)
     } else {
-        data::sample_data(bars)
+        0
+    };
+    let requested = bars + warmup;
+
+    // Without a ticker the live source serves the synthetic demo series
+    // (no timestamps, so nothing to page). With one, a fetch failure is an
+    // error in every format: sample bars would masquerade as market data.
+    let (mut data, has_more) = match (symbol, source) {
+        (None, fetch::DataSource::Live) if end_time.is_none() => {
+            (data::sample_data(requested), false)
+        }
+        (None, fetch::DataSource::Live) => {
+            return tool_err(
+                id,
+                "end_time requires a ticker (or CHARTGEN_DATA_SOURCE=sample).",
+            )
+        }
+        (sym, _) => {
+            match fetch::fetch_ohlcv(source, sym.unwrap_or(""), interval, requested, end_time) {
+                Ok(f) => (f.data, f.has_more),
+                Err(e) => return tool_err(id, &format!("Data fetch failed: {e}")),
+            }
+        }
     };
     data.symbol = symbol.map(|s| s.to_string());
     data.interval = Some(interval.to_string());
+    // Heikin Ashi runs over bars+warmup, before indicators and trimming, so
+    // indicators see the same values TradingView computes on an HA chart.
+    if chart_style == "heikin_ashi" {
+        data = data.heikin_ashi();
+    }
 
     // Compute indicators up-front (once) so both the summary and the series
     // payloads can reuse the same PanelResult values — no recomputation,
-    // values already aligned 1:1 with bars.
-    let computed: Vec<(String, chartgen::indicator::PanelResult)> = if want_summary || want_series {
-        indicator_keys
-            .iter()
-            .zip(panel_indicators.iter())
-            .map(|(key, ind)| (key.clone(), ind.compute(&data)))
-            .collect()
-    } else {
-        Vec::new()
-    };
+    // values already aligned 1:1 with bars. The PNG renders from them too.
+    // An indicator that fails (a user script, ADR-0025) is left out and
+    // reported under `indicator_errors`; the rest of the chart still renders.
+    let (computed, inds, errors_value) = compute_panels(&data, &indicator_keys, &panel_indicators);
 
     // Build summary payload keyed by request name so the LLM can correlate
     // output with the names it passed in.
@@ -276,45 +439,27 @@ fn tool_generate_chart(id: Option<Value>, args: &Value) -> Value {
         for (key, pr) in &computed {
             indicators_json.insert(key.clone(), panel_result_to_json(pr));
         }
-        Some(json!({
+        let mut summary = json!({
             "symbol": data.symbol,
             "interval": data.interval,
             "price": ohlcv_summary(&data),
             "indicators": Value::Object(indicators_json),
-        }))
+        });
+        if let Some(errors) = &errors_value {
+            summary["indicator_errors"] = errors.clone();
+        }
+        Some(summary)
     } else {
         None
     };
 
-    // Build series payload: full OHLCV bars plus per-indicator per-bar values.
-    let series_value = if want_series {
-        let bars_arr: Vec<Value> = data
-            .bars
-            .iter()
-            .map(|b| {
-                json!({
-                    "t": bar_t(b),
-                    "o": finite_or_null(b.open),
-                    "h": finite_or_null(b.high),
-                    "l": finite_or_null(b.low),
-                    "c": finite_or_null(b.close),
-                    "v": finite_or_null(b.volume),
-                })
-            })
-            .collect();
-        let mut indicators_json = serde_json::Map::new();
-        for (key, pr) in &computed {
-            indicators_json.insert(key.clone(), panel_result_to_series_json(pr, &data));
+    let series_value = want_series.then(|| {
+        let mut series = series_json(&data, &computed, &inds, bars, chart_style, has_more);
+        if let Some(errors) = &errors_value {
+            series["indicator_errors"] = errors.clone();
         }
-        Some(json!({
-            "symbol": data.symbol,
-            "interval": data.interval,
-            "bars": bars_arr,
-            "indicators": Value::Object(indicators_json),
-        }))
-    } else {
-        None
-    };
+        series
+    });
 
     let mut content: Vec<Value> = Vec::new();
 
@@ -325,7 +470,9 @@ fn tool_generate_chart(id: Option<Value>, args: &Value) -> Value {
             uuid::Uuid::new_v4()
         );
 
-        if let Err(e) = renderer::render_chart(&data, &panel_indicators, &tmp_path, width, height) {
+        let results: Vec<&chartgen::indicator::PanelResult> =
+            computed.iter().map(|(_, pr)| pr).collect();
+        if let Err(e) = renderer::render_results(&data, &results, &tmp_path, width, height) {
             return tool_err(id, &format!("Render error: {}", e));
         }
 
@@ -354,6 +501,14 @@ fn tool_generate_chart(id: Option<Value>, args: &Value) -> Value {
         }));
     }
 
+    // format=png has no JSON payload to carry the errors: add a text item.
+    if let (Some(errors), "png") = (&errors_value, format.as_str()) {
+        content.push(json!({
+            "type": "text",
+            "text": serde_json::to_string_pretty(&json!({ "indicator_errors": errors })).unwrap(),
+        }));
+    }
+
     json!({
         "jsonrpc": "2.0",
         "id": id,
@@ -361,10 +516,235 @@ fn tool_generate_chart(id: Option<Value>, args: &Value) -> Value {
     })
 }
 
-fn tool_list_indicators(id: Option<Value>) -> Value {
-    let reg = indicators::registry();
-    let indicator_list: Vec<Value> = reg
+/// Computed panels for a chart: `(key, result)` and the indicator of each
+/// success, plus the `indicator_errors` map of the failures (`None` when all
+/// succeeded).
+type Computed<'a> = (
+    Vec<(String, chartgen::indicator::PanelResult)>,
+    Vec<&'a dyn Indicator>,
+    Option<Value>,
+);
+
+fn compute_panels<'a>(
+    data: &chartgen::data::OhlcvData,
+    keys: &[String],
+    panels: &'a [Box<dyn Indicator>],
+) -> Computed<'a> {
+    let (mut computed, mut inds) = (Vec::new(), Vec::new());
+    let mut errors = serde_json::Map::new();
+    let compute = || {
+        for (key, ind) in keys.iter().zip(panels) {
+            match ind.try_compute(data) {
+                Ok(pr) => {
+                    computed.push((key.clone(), pr));
+                    inds.push(ind.as_ref());
+                }
+                Err(e) => {
+                    errors.insert(key.clone(), e.to_json());
+                }
+            }
+        }
+    };
+    // One script budget for the whole chart (ADR-0025).
+    #[cfg(feature = "scripting")]
+    scripting::with_chart_budget(compute);
+    #[cfg(not(feature = "scripting"))]
+    ({ compute })();
+    let errors = (!errors.is_empty()).then_some(Value::Object(errors));
+    (computed, inds, errors)
+}
+
+// Build series payload: full OHLCV bars plus per-indicator per-bar values.
+// Indicators ran over warmup + visible bars; only the last `bars` are
+// emitted, with every index-based channel re-based to match.
+fn series_json(
+    data: &chartgen::data::OhlcvData,
+    computed: &[(String, chartgen::indicator::PanelResult)],
+    panel_indicators: &[&dyn Indicator],
+    bars: usize,
+    chart_style: &str,
+    has_more: bool,
+) -> Value {
+    let offset = data.len().saturating_sub(bars);
+    let visible = chartgen::data::OhlcvData {
+        bars: data.bars[offset..].to_vec(),
+        symbol: data.symbol.clone(),
+        interval: data.interval.clone(),
+    };
+    let bars_arr: Vec<Value> = visible
+        .bars
         .iter()
+        .map(|b| {
+            json!({
+                "t": bar_t(b),
+                "o": finite_or_null(b.open),
+                "h": finite_or_null(b.high),
+                "l": finite_or_null(b.low),
+                "c": finite_or_null(b.close),
+                "v": finite_or_null(b.volume),
+            })
+        })
+        .collect();
+    let mut indicators_json = serde_json::Map::new();
+    for ((key, pr), ind) in computed.iter().zip(panel_indicators.iter()) {
+        let mut trimmed = trim_panel_result(pr, offset);
+        // Volume/time profiles aggregate over the whole input window,
+        // not per bar: recompute their profile-derived channels (hbars
+        // and POC/VA/node hlines) over the visible window so warmup bars
+        // don't leak into the profile.
+        if offset > 0 && ind.windowed_profile() {
+            let profile = ind.compute(&visible);
+            trimmed.hbars = profile.hbars;
+            trimmed.hlines = profile.hlines;
+        }
+        indicators_json.insert(key.clone(), panel_result_to_series_json(&trimmed, &visible));
+    }
+    json!({
+        "symbol": data.symbol,
+        "interval": data.interval,
+        "chart_style": chart_style,
+        "bars": bars_arr,
+        "indicators": Value::Object(indicators_json),
+        "has_more": has_more,
+    })
+}
+
+/// The `format=series` payload for the newest `bars` of `raw` (symbol and
+/// interval set, `bars` + warmup long), computed exactly like
+/// `generate_chart`: Heikin Ashi first, then indicators over every bar, then
+/// trimmed. Chart push (ADR-0021) builds its tails with this.
+pub(crate) fn series_tail(
+    raw: &chartgen::data::OhlcvData,
+    indicators: &Value,
+    chart_style: &str,
+    bars: usize,
+) -> Result<Value, String> {
+    let (panel_indicators, keys, unknown, invalid) = parse_panels(indicators, None);
+    check_panels(&unknown, &invalid)?;
+    let ha;
+    let data = if chart_style == "heikin_ashi" {
+        ha = raw.heikin_ashi();
+        &ha
+    } else {
+        raw
+    };
+    let (computed, inds, _) = compute_panels(data, &keys, &panel_indicators);
+    let has_more = data.len() > bars;
+    Ok(series_json(
+        data,
+        &computed,
+        &inds,
+        bars,
+        chart_style,
+        has_more,
+    ))
+}
+
+/// `subscribe_chart`: push `generate_chart(format=series, bars=2, warmup)`
+/// tails of a chart over the caller's SSE stream (ADR-0021).
+fn tool_subscribe_chart(
+    id: Option<Value>,
+    args: &Value,
+    push: Option<&PushCtx>,
+    token: Option<&str>,
+) -> Value {
+    let (Some(push), Some(token)) = (push, token) else {
+        return no_push_transport(id);
+    };
+    let Some(ticker) = args
+        .get("ticker")
+        .or_else(|| args.get("symbol"))
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+    else {
+        return tool_err(id, "ticker is required.");
+    };
+    let timeframe = args
+        .get("timeframe")
+        .or_else(|| args.get("interval"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("4h");
+    if let Err(e) = check_interval(timeframe) {
+        return tool_err(id, &e);
+    }
+    let chart_style = match chart_style_arg(args) {
+        Ok(s) => s,
+        Err(e) => return tool_err(id, e),
+    };
+    let indicators = indicators_arg(args);
+    // Every push recomputes every indicator.
+    if indicators
+        .as_array()
+        .is_some_and(|a| a.len() > MAX_INDICATORS)
+    {
+        return tool_err(
+            id,
+            &format!("{PUSH_LIMIT}: at most {MAX_INDICATORS} indicators per subscription"),
+        );
+    }
+    let (_, _, unknown, invalid) = parse_panels(&indicators, None);
+    if let Err(e) = check_panels(&unknown, &invalid) {
+        return tool_err(id, &e);
+    }
+    let warmup =
+        (args.get("warmup").and_then(|v| v.as_u64()).unwrap_or(0) as usize).min(MAX_WARMUP);
+    let req = ChartRequest {
+        ticker: ticker.to_string(),
+        timeframe: timeframe.to_string(),
+        indicators: indicators.to_string(),
+        chart_style: chart_style.to_string(),
+        warmup,
+    };
+    match push.hub.subscribe(token, &push.client, &push.stream, req) {
+        Ok(sub) => tool_ok(id, json!({ "subscription_id": sub })),
+        Err(e) => tool_err(id, &e),
+    }
+}
+
+fn tool_unsubscribe_chart(
+    id: Option<Value>,
+    args: &Value,
+    push: Option<&PushCtx>,
+    token: Option<&str>,
+) -> Value {
+    let (Some(push), Some(token)) = (push, token) else {
+        return no_push_transport(id);
+    };
+    let Some(sub) = args.get("subscription_id").and_then(|v| v.as_str()) else {
+        return tool_err(id, "subscription_id is required.");
+    };
+    tool_ok(
+        id,
+        json!({ "unsubscribed": push.hub.unsubscribe(token, sub) }),
+    )
+}
+
+fn no_push_transport(id: Option<Value>) -> Value {
+    tool_err(
+        id,
+        "Chart push needs the HTTP transport: an authenticated POST /mcp with an open GET /mcp SSE stream.",
+    )
+}
+
+/// Built-ins plus the caller's scripts (tagged `source: "user"`); a script
+/// replaces the built-in entry it shadows.
+fn tool_list_indicators(id: Option<Value>, user: Option<&str>) -> Value {
+    let reg = indicators::registry();
+    #[cfg(feature = "scripting")]
+    let mine: Vec<Value> = user
+        .and_then(|u| scripting::persistence::global()?.list(u).ok())
+        .unwrap_or_default()
+        .iter()
+        .map(user_indicator_entry)
+        .collect();
+    #[cfg(not(feature = "scripting"))]
+    let mine: Vec<Value> = {
+        let _ = user;
+        Vec::new()
+    };
+    let mut indicator_list: Vec<Value> = reg
+        .iter()
+        .filter(|info| !mine.iter().any(|m| m["name"] == info.name))
         .map(|info| {
             let mut entry = json!({
                 "name": info.name,
@@ -381,6 +761,7 @@ fn tool_list_indicators(id: Option<Value>) -> Value {
             entry
         })
         .collect();
+    indicator_list.extend(mine);
 
     json!({
         "jsonrpc": "2.0",
@@ -395,6 +776,170 @@ fn tool_list_indicators(id: Option<Value>) -> Value {
             }]
         }
     })
+}
+
+// ---------------------------------------------------------------------------
+// User indicators: Starlark scripts (ADR-0024, ADR-0025)
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "scripting")]
+/// `list_indicators` entry for a stored script.
+fn user_indicator_entry(s: &scripting::persistence::StoredScript) -> Value {
+    let m = &s.meta;
+    let overlay = m["overlay"].as_bool().unwrap_or(false);
+    let description = match m["description"].as_str() {
+        Some(d) if !d.is_empty() => d,
+        _ => m["title"].as_str().unwrap_or(&s.name),
+    };
+    let mut entry = json!({
+        "name": s.name,
+        "description": description,
+        "type": if overlay { "overlay" } else { "panel" },
+        "overlay": overlay,
+        "source": "user",
+    });
+    if m["params"].as_array().is_some_and(|p| !p.is_empty()) {
+        entry["configurable_params"] = m["params"].clone();
+    }
+    entry
+}
+
+#[cfg(feature = "scripting")]
+/// The store and user for a scripting tool, or the error response.
+fn scripting_session<'u>(
+    id: &Option<Value>,
+    user: Option<&'u str>,
+    tool: &str,
+) -> Result<(&'static scripting::persistence::Store, &'u str), Value> {
+    let Some(user) = user else {
+        return Err(tool_err(
+            id.clone(),
+            &format!(
+                "{tool} needs an authenticated HTTP session: user indicators belong to the OAuth client. The stdio server has no user."
+            ),
+        ));
+    };
+    match scripting::persistence::global() {
+        Some(store) => Ok((store, user)),
+        None => Err(tool_err(
+            id.clone(),
+            "The indicator store is unavailable (see the server log for CHARTGEN_DB).",
+        )),
+    }
+}
+
+#[cfg(feature = "scripting")]
+fn tool_register_indicator(id: Option<Value>, args: &Value, user: Option<&str>) -> Value {
+    let (store, user) = match scripting_session(&id, user, "register_indicator") {
+        Ok(s) => s,
+        Err(resp) => return resp,
+    };
+    let name = args.get("name").and_then(|v| v.as_str()).unwrap_or("");
+    let Some(source) = args.get("source").and_then(|v| v.as_str()) else {
+        return tool_err(id, "source is required");
+    };
+    if !scripting::valid_name(name) {
+        return tool_err(
+            id,
+            "name must be 1-48 lowercase letters, digits or _, starting with a letter",
+        );
+    }
+    let is_new = matches!(store.get(user, name), Ok(None));
+    if is_new && store.count(user).unwrap_or(0) >= scripting::MAX_SCRIPTS_PER_USER {
+        return tool_err(
+            id,
+            &format!(
+                "You have {} indicators, the limit; delete one first.",
+                scripting::MAX_SCRIPTS_PER_USER
+            ),
+        );
+    }
+    let compiled = match scripting::validate_as(user, name, source) {
+        Ok(c) => c,
+        Err(e) => {
+            let payload = json!({ "ok": false, "errors": [e.to_json()] });
+            return tool_err(id, &serde_json::to_string_pretty(&payload).unwrap());
+        }
+    };
+    let info = &compiled.info;
+    let hash = scripting::source_hash(source);
+    if let Err(e) = store.upsert(user, name, source, &info.to_json(), &hash) {
+        return tool_err(id, &format!("Could not store the indicator: {e}"));
+    }
+    tool_ok(
+        id,
+        json!({
+            "ok": true,
+            "name": name,
+            "title": info.title,
+            "overlay": info.overlay,
+            "configurable_params": info.params,
+            "replaced": !is_new,
+            "shadows_builtin": indicators::by_name(name).is_some(),
+        }),
+    )
+}
+
+#[cfg(feature = "scripting")]
+fn tool_fork_indicator(id: Option<Value>, args: &Value) -> Value {
+    let name = args
+        .get("builtin_name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let Some(source) = scripting::refimpl(name) else {
+        let forkable: Vec<&str> = scripting::REFIMPLS.iter().map(|(n, _)| *n).collect();
+        return tool_err(
+            id,
+            &format!(
+                "No Starlark reference implementation for `{name}`. Forkable built-ins: {}. Others can be rebuilt from ta.* functions.",
+                forkable.join(", ")
+            ),
+        );
+    };
+    let params = scripting::runtime::compile(name, source)
+        .map(|c| json!(c.info.params))
+        .unwrap_or(json!([]));
+    tool_ok(
+        id,
+        json!({ "name": name, "source": source, "configurable_params": params }),
+    )
+}
+
+#[cfg(feature = "scripting")]
+fn tool_list_my_indicators(id: Option<Value>, user: Option<&str>) -> Value {
+    let (store, user) = match scripting_session(&id, user, "list_my_indicators") {
+        Ok(s) => s,
+        Err(resp) => return resp,
+    };
+    let scripts = match store.list(user) {
+        Ok(s) => s,
+        Err(e) => return tool_err(id, &format!("Could not read your indicators: {e}")),
+    };
+    let list: Vec<Value> = scripts
+        .iter()
+        .map(|s| {
+            let mut e = user_indicator_entry(s);
+            e["title"] = s.meta["title"].clone();
+            e["created_at"] = json!(s.created_at);
+            e["updated_at"] = json!(s.updated_at);
+            e
+        })
+        .collect();
+    tool_ok(id, json!({ "total": list.len(), "indicators": list }))
+}
+
+#[cfg(feature = "scripting")]
+fn tool_delete_indicator(id: Option<Value>, args: &Value, user: Option<&str>) -> Value {
+    let (store, user) = match scripting_session(&id, user, "delete_indicator") {
+        Ok(s) => s,
+        Err(resp) => return resp,
+    };
+    let name = args.get("name").and_then(|v| v.as_str()).unwrap_or("");
+    match store.delete(user, name) {
+        Ok(true) => tool_ok(id, json!({ "ok": true, "name": name })),
+        Ok(false) => tool_err(id, &format!("You have no indicator named `{name}`.")),
+        Err(e) => tool_err(id, &format!("Could not delete the indicator: {e}")),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -452,10 +997,82 @@ fn finite_or_null(v: f64) -> Value {
 // possible; fall back to JSON null so fixtures still produce valid output.
 fn bar_t(bar: &chartgen::data::Bar) -> Value {
     bar.date
-        .parse::<u64>()
+        .parse::<i64>()
         .ok()
         .map(|n| json!(n))
         .unwrap_or(Value::Null)
+}
+
+// Drop the first `offset` (warmup) bars from every index-based channel and
+// re-base indices onto the remaining bars. Dots inside the warmup are
+// dropped; divlines wholly inside it are dropped, and ones straddling the
+// boundary are clipped to start at bar 0 with y interpolated (lines that
+// only touch bar 0 would collapse to a point and are dropped too). hlines, hbars
+// and y_range are price-based and pass through unchanged.
+fn trim_panel_result(
+    pr: &chartgen::indicator::PanelResult,
+    offset: usize,
+) -> chartgen::indicator::PanelResult {
+    fn tail<T: Clone>(v: &[T], offset: usize) -> Vec<T> {
+        v.get(offset..).unwrap_or(&[]).to_vec()
+    }
+    let mut out = pr.clone();
+    for line in &mut out.lines {
+        line.y = tail(&line.y, offset);
+    }
+    for fill in &mut out.fills {
+        fill.y1 = tail(&fill.y1, offset);
+        fill.y2 = tail(&fill.y2, offset);
+    }
+    for b in &mut out.bars {
+        b.y = tail(&b.y, offset);
+        b.colors = tail(&b.colors, offset);
+    }
+    out.dots.retain(|d| d.x >= offset);
+    for d in &mut out.dots {
+        d.x -= offset;
+    }
+    out.divlines.retain(|d| d.x1.max(d.x2) > offset);
+    for d in &mut out.divlines {
+        if d.x1 < offset {
+            d.y1 += (d.y2 - d.y1) * (offset - d.x1) as f64 / (d.x2 - d.x1) as f64;
+            d.x1 = offset;
+        }
+        if d.x2 < offset {
+            d.y2 += (d.y1 - d.y2) * (offset - d.x2) as f64 / (d.x1 - d.x2) as f64;
+            d.x2 = offset;
+        }
+        d.x1 -= offset;
+        d.x2 -= offset;
+    }
+    out
+}
+
+// CSS color string for the wire; the PNG renderer's colors are the source of
+// truth, so the web chart draws overlay geometry with exactly these.
+fn css_rgba(c: &plotters::style::RGBAColor) -> String {
+    format!("rgba({},{},{},{})", c.0, c.1, c.2, c.3)
+}
+
+// Legend label of histogram `i` (ADR-0026). `Bars` carry no label: the
+// panel name labels it (Volume, AO) unless a line already has that name
+// (MACD's "MACD" line), then "Histogram"; numbered when there are several.
+fn histogram_label(pr: &chartgen::indicator::PanelResult, i: usize) -> String {
+    let taken = pr.label.is_empty()
+        || pr
+            .lines
+            .iter()
+            .any(|l| l.label.as_deref() == Some(pr.label.as_str()));
+    let base = if taken {
+        "Histogram"
+    } else {
+        pr.label.as_str()
+    };
+    if pr.bars.len() > 1 {
+        format!("{base} {}", i + 1)
+    } else {
+        base.to_string()
+    }
 }
 
 // Series-shape serializer: full per-bar values for each line, signals with
@@ -483,6 +1100,8 @@ fn panel_result_to_series_json(
                     "index": i,
                     "label": line.label,
                     "values": values,
+                    "color": css_rgba(&line.color),
+                    "width": line.width,
                 })
             })
             .collect();
@@ -490,7 +1109,9 @@ fn panel_result_to_series_json(
     }
 
     // Histogram (bar-style) series — e.g. MACD histogram, volume. Same
-    // 1:1 alignment with bars as `lines`.
+    // 1:1 alignment with bars as `lines`. Per-bar colors (ADR-0026) are
+    // `color_idx` into `palette`, which lists each distinct color once;
+    // null where the bar has no value or no color.
     if !pr.bars.is_empty() {
         let histogram: Vec<Value> = pr
             .bars
@@ -498,9 +1119,29 @@ fn panel_result_to_series_json(
             .enumerate()
             .map(|(i, b)| {
                 let values: Vec<Value> = b.y.iter().map(|v| finite_or_null(*v)).collect();
+                let mut palette: Vec<String> = Vec::new();
+                let color_idx: Vec<Value> = b
+                    .y
+                    .iter()
+                    .enumerate()
+                    .map(|(k, v)| match b.colors.get(k) {
+                        Some(c) if v.is_finite() => {
+                            let css = css_rgba(c);
+                            let idx = palette.iter().position(|p| *p == css).unwrap_or_else(|| {
+                                palette.push(css);
+                                palette.len() - 1
+                            });
+                            json!(idx)
+                        }
+                        _ => Value::Null,
+                    })
+                    .collect();
                 json!({
                     "index": i,
+                    "label": histogram_label(pr, i),
                     "values": values,
+                    "palette": palette,
+                    "color_idx": color_idx,
                 })
             })
             .collect();
@@ -522,6 +1163,7 @@ fn panel_result_to_series_json(
                 "t": t,
                 "y": d.y,
                 "label": label,
+                "color": css_rgba(&d.color),
             }));
         }
     }
@@ -530,7 +1172,11 @@ fn panel_result_to_series_json(
     }
 
     if !pr.hlines.is_empty() {
-        let hlines: Vec<Value> = pr.hlines.iter().map(|h| json!({ "y": h.y })).collect();
+        let hlines: Vec<Value> = pr
+            .hlines
+            .iter()
+            .map(|h| json!({ "y": h.y, "color": css_rgba(&h.color) }))
+            .collect();
         out["hlines"] = json!(hlines);
     }
 
@@ -543,15 +1189,19 @@ fn panel_result_to_series_json(
             .map(|f| {
                 let y1: Vec<Value> = f.y1.iter().map(|v| finite_or_null(*v)).collect();
                 let y2: Vec<Value> = f.y2.iter().map(|v| finite_or_null(*v)).collect();
-                json!({ "y1": y1, "y2": y2 })
+                let mut fill = json!({ "y1": y1, "y2": y2, "color": css_rgba(&f.color) });
+                if let Some(below) = &f.color_below {
+                    fill["color_below"] = json!(css_rgba(below));
+                }
+                fill
             })
             .collect();
         out["fills"] = json!(fills);
     }
 
     // Horizontal bars (VPVR, Session VP, HVN/LVN, Naked POC, TPO). Axis-
-    // relative numerics preserved from the struct; color is dropped — the
-    // client themes per indicator.
+    // relative numerics preserved from the struct; color is the renderer's
+    // (ADR-0012).
     if !pr.hbars.is_empty() {
         let hbars: Vec<Value> = pr
             .hbars
@@ -563,6 +1213,7 @@ fn panel_result_to_series_json(
                     "width": h.width,
                     "offset": h.offset,
                     "left": h.left,
+                    "color": css_rgba(&h.color),
                 })
             })
             .collect();
@@ -571,7 +1222,7 @@ fn panel_result_to_series_json(
 
     // Divergence lines: two-point segments (WaveTrend, RSI divs in Cipher B).
     // Each endpoint carries both `x` (bar index) and `t` (unix seconds) to
-    // mirror the signal pattern; color is dropped.
+    // mirror the signal pattern; color is the renderer's (ADR-0012).
     if !pr.divlines.is_empty() {
         let divlines: Vec<Value> = pr
             .divlines
@@ -595,6 +1246,7 @@ fn panel_result_to_series_json(
                     "t2": t2,
                     "y2": d.y2,
                     "dashed": d.dashed,
+                    "color": css_rgba(&d.color),
                 })
             })
             .collect();
@@ -825,11 +1477,9 @@ fn tool_get_indicators(
 
     // Fetch data and compute from scratch
     let bars = 200;
-    let source = fetch::detect_source(symbol);
-    let fetch_result = match source {
-        "binance" => fetch::fetch_binance(symbol, interval, bars),
-        _ => fetch::fetch_yahoo(symbol, interval, bars),
-    };
+    let fetch_result =
+        fetch::fetch_ohlcv(fetch::DataSource::from_env(), symbol, interval, bars, None)
+            .map(|f| f.data);
     let mut ohlcv = match fetch_result {
         Ok(d) => d,
         Err(e) => return tool_err(id, &format!("Failed to fetch data: {e}")),
@@ -847,6 +1497,133 @@ fn tool_get_indicators(
     }
     output["indicators"] = ind_results;
     tool_ok(id, output)
+}
+
+// ---------------------------------------------------------------------------
+// get_quotes (watchlist, ADR-0011)
+// ---------------------------------------------------------------------------
+
+/// Most symbols one `get_quotes` call accepts (the schema's `maxItems`).
+const MAX_QUOTE_SYMBOLS: usize = 50;
+
+/// Trim + uppercase a ticker; `None` unless it is 1–32 characters of
+/// `A-Z 0-9 . ^ = - _` (the web client's `normalizeSymbol` rules) with at
+/// least one letter or digit, so it can never be a `.`/`..` path segment.
+pub(crate) fn normalize_quote_symbol(raw: &str) -> Option<String> {
+    let s = raw.trim().to_uppercase();
+    let ok = (1..=32).contains(&s.len())
+        && s.chars().any(|c| c.is_ascii_alphanumeric())
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || ".^=-_".contains(c));
+    ok.then_some(s)
+}
+
+fn tool_get_quotes(id: Option<Value>, args: &Value) -> Value {
+    get_quotes(id, args, fetch::DataSource::from_env())
+}
+
+fn get_quotes(id: Option<Value>, args: &Value, source: fetch::DataSource) -> Value {
+    let Some(raw) = args.get("symbols").and_then(|v| v.as_array()) else {
+        return tool_err(id, "symbols is required and must be an array of strings");
+    };
+    if raw.len() > MAX_QUOTE_SYMBOLS {
+        return tool_err(id, &format!("At most {MAX_QUOTE_SYMBOLS} symbols per call"));
+    }
+    let mut seen = HashSet::new();
+    let mut valid = Vec::new();
+    // Requested order after dedupe; `Err` holds the rejected input.
+    let mut order: Vec<Result<String, String>> = Vec::new();
+    for v in raw {
+        let Some(text) = v.as_str() else {
+            return tool_err(id, "symbols must be an array of strings");
+        };
+        match normalize_quote_symbol(text) {
+            Some(s) if seen.insert(s.clone()) => {
+                valid.push(s.clone());
+                order.push(Ok(s));
+            }
+            Some(_) => {}
+            None => order.push(Err(text.to_string())),
+        }
+    }
+
+    // One result per valid symbol, in the same order as the `Ok` entries.
+    let mut fetched = fetch::fetch_quotes(source, &valid).into_iter();
+    let quotes: Vec<Value> = order
+        .into_iter()
+        .map(|entry| match entry {
+            Err(text) => json!({ "symbol": text, "error": "invalid symbol" }),
+            Ok(sym) => match fetched.next() {
+                Some(Ok(q)) => {
+                    let change = q.last - q.prev_close;
+                    let change_pct = change / q.prev_close * 100.0;
+                    json!({
+                        "symbol": sym,
+                        "last": finite_or_null(q.last),
+                        "change": finite_or_null(change),
+                        "change_pct": finite_or_null(change_pct),
+                        "prev_close": finite_or_null(q.prev_close),
+                        "high": q.high.map_or(Value::Null, finite_or_null),
+                        "low": q.low.map_or(Value::Null, finite_or_null),
+                        "volume": q.volume.map_or(Value::Null, finite_or_null),
+                        "source": q.source,
+                    })
+                }
+                Some(Err(e)) => json!({ "symbol": sym, "error": e }),
+                None => json!({ "symbol": sym, "error": "quote missing" }),
+            },
+        })
+        .collect();
+    tool_ok(id, json!({ "quotes": quotes }))
+}
+
+// ---------------------------------------------------------------------------
+// search_symbols (symbol search dialog)
+// ---------------------------------------------------------------------------
+
+fn tool_search_symbols(id: Option<Value>, args: &Value) -> Value {
+    search_symbols(id, args, fetch::DataSource::from_env())
+}
+
+fn search_symbols(id: Option<Value>, args: &Value, source: fetch::DataSource) -> Value {
+    let Some(query) = args.get("query").and_then(|v| v.as_str()) else {
+        return tool_err(id, "query is required and must be a string");
+    };
+    let limit = match args.get("limit") {
+        None | Some(Value::Null) => search::DEFAULT_LIMIT,
+        Some(v) => match v.as_u64() {
+            Some(n) if (1..=search::MAX_LIMIT as u64).contains(&n) => n as usize,
+            _ => {
+                return tool_err(
+                    id,
+                    &format!("limit must be an integer 1-{}", search::MAX_LIMIT),
+                )
+            }
+        },
+    };
+    let types: Vec<String> = match args.get("types") {
+        None | Some(Value::Null) => Vec::new(),
+        Some(v) => {
+            let strings: Option<Vec<String>> = v
+                .as_array()
+                .and_then(|a| a.iter().map(|t| t.as_str().map(str::to_string)).collect());
+            match strings {
+                Some(types) => types,
+                None => return tool_err(id, "types must be an array of strings"),
+            }
+        }
+    };
+    match search::search_symbols(source, query, limit, &types) {
+        Ok(out) => {
+            let results: Vec<Value> = out.results.iter().map(|r| r.to_json()).collect();
+            let mut payload = json!({ "results": results });
+            if !out.warnings.is_empty() {
+                payload["warnings"] = json!(out.warnings);
+            }
+            tool_ok(id, payload)
+        }
+        Err(e) => tool_err(id, &e),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1247,7 +2024,7 @@ fn tool_subscribe_notifications(
                 .filter_map(|v| v.as_str().map(String::from))
                 .collect::<HashSet<_>>()
         })
-        .and_then(|s| if s.is_empty() { None } else { Some(s) });
+        .filter(|s| !s.is_empty());
 
     let alert_types: Option<HashSet<String>> = args
         .get("alert_types")
@@ -1257,7 +2034,7 @@ fn tool_subscribe_notifications(
                 .filter_map(|v| v.as_str().map(String::from))
                 .collect::<HashSet<_>>()
         })
-        .and_then(|s| if s.is_empty() { None } else { Some(s) });
+        .filter(|s| !s.is_empty());
 
     let mut e = engine.write().unwrap();
     e.subscription_registry
@@ -1556,7 +2333,7 @@ mod tests {
 
     #[test]
     fn handle_mcp_tools_list_includes_trading_tools() {
-        let resp = handle_mcp_request("tools/list", Some(json!(1)), None, None, None);
+        let resp = handle_mcp_request("tools/list", Some(json!(1)), None, None, None, None, None);
         let tools = resp["result"]["tools"].as_array().unwrap();
         let names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
         assert!(names.contains(&"get_indicators"));
@@ -1692,7 +2469,7 @@ mod tests {
             "indicators": ["rsi", "macd"],
             "format": "summary"
         });
-        let resp = tool_generate_chart(Some(json!(1)), &args);
+        let resp = tool_generate_chart(Some(json!(1)), &args, None);
         assert!(!is_error(&resp));
 
         let content = chart_content(&resp);
@@ -1715,7 +2492,7 @@ mod tests {
             "indicators": ["rsi"],
             "format": "summary"
         });
-        let resp = tool_generate_chart(Some(json!(1)), &args);
+        let resp = tool_generate_chart(Some(json!(1)), &args, None);
         let content = chart_content(&resp);
         let text = content[0]["text"].as_str().unwrap();
         let parsed: Value = serde_json::from_str(text).unwrap();
@@ -1740,7 +2517,7 @@ mod tests {
             "width": 400,
             "height": 300
         });
-        let resp = tool_generate_chart(Some(json!(1)), &args);
+        let resp = tool_generate_chart(Some(json!(1)), &args, None);
         assert!(!is_error(&resp));
 
         let content = chart_content(&resp);
@@ -1757,7 +2534,7 @@ mod tests {
     #[test]
     fn generate_chart_unknown_format_errors() {
         let args = json!({ "bars": 20, "format": "svg" });
-        let resp = tool_generate_chart(Some(json!(1)), &args);
+        let resp = tool_generate_chart(Some(json!(1)), &args, None);
         assert!(is_error(&resp));
         assert!(response_text(&resp).contains("Unknown format"));
     }
@@ -1771,11 +2548,103 @@ mod tests {
             "width": 400,
             "height": 300
         });
-        let resp = tool_generate_chart(Some(json!(1)), &args);
+        let resp = tool_generate_chart(Some(json!(1)), &args, None);
         assert!(!is_error(&resp));
         let content = chart_content(&resp);
         assert_eq!(content.len(), 1);
         assert_eq!(content[0]["type"], "image");
+    }
+
+    #[test]
+    fn css_rgba_formats_color() {
+        assert_eq!(
+            css_rgba(&plotters::style::RGBAColor(1, 2, 3, 0.5)),
+            "rgba(1,2,3,0.5)"
+        );
+        assert_eq!(
+            css_rgba(&plotters::style::RGBAColor(255, 0, 0, 1.0)),
+            "rgba(255,0,0,1)"
+        );
+    }
+
+    #[test]
+    fn series_json_carries_geometry_colors() {
+        use chartgen::indicator::{DivLine, Fill, HBar, HLine, PanelResult};
+        use plotters::style::RGBAColor;
+
+        let c = RGBAColor(10, 20, 30, 0.25);
+        let pr = PanelResult {
+            lines: vec![],
+            fills: vec![Fill {
+                y1: vec![0.0],
+                y2: vec![1.0],
+                color: c,
+                color_below: None,
+            }],
+            bars: vec![],
+            dots: vec![],
+            hlines: vec![HLine { y: 30.0, color: c }],
+            hbars: vec![HBar {
+                y: 1.0,
+                height: 1.0,
+                width: 0.5,
+                offset: 0.0,
+                color: c,
+                left: false,
+            }],
+            divlines: vec![DivLine {
+                x1: 0,
+                y1: 1.0,
+                x2: 1,
+                y2: 2.0,
+                color: c,
+                dashed: true,
+            }],
+            y_range: None,
+            label: "T".into(),
+            is_overlay: false,
+        };
+        let data = chartgen::data::OhlcvData {
+            bars: vec![],
+            symbol: None,
+            interval: None,
+        };
+        let j = panel_result_to_series_json(&pr, &data);
+        let want = "rgba(10,20,30,0.25)";
+        assert_eq!(j["fills"][0]["color"], want);
+        assert_eq!(j["hbars"][0]["color"], want);
+        assert_eq!(j["divlines"][0]["color"], want);
+        assert_eq!(j["divlines"][0]["dashed"], true);
+        assert_eq!(j["hlines"][0]["color"], want);
+        assert_eq!(j["hlines"][0]["y"], 30.0);
+    }
+
+    #[test]
+    fn series_json_serializes_fill_color_below_only_when_set() {
+        use chartgen::indicator::{Fill, PanelResult};
+        use plotters::style::RGBAColor;
+
+        let mk = |below| Fill {
+            y1: vec![1.0],
+            y2: vec![0.0],
+            color: RGBAColor(76, 175, 80, 0.2),
+            color_below: below,
+        };
+        let pr = PanelResult {
+            fills: vec![mk(Some(RGBAColor(239, 83, 80, 0.2))), mk(None)],
+            label: "T".into(),
+            is_overlay: true,
+            ..Default::default()
+        };
+        let data = chartgen::data::OhlcvData {
+            bars: vec![],
+            symbol: None,
+            interval: None,
+        };
+        let j = panel_result_to_series_json(&pr, &data);
+        assert_eq!(j["fills"][0]["color"], "rgba(76,175,80,0.2)");
+        assert_eq!(j["fills"][0]["color_below"], "rgba(239,83,80,0.2)");
+        assert!(j["fills"][1].get("color_below").is_none());
     }
 
     #[test]
@@ -1795,6 +2664,7 @@ mod tests {
                 y1: vec![0.0],
                 y2: vec![1.0],
                 color: c,
+                color_below: None,
             }],
             bars: vec![],
             dots: vec![
@@ -1872,6 +2742,12 @@ mod tests {
             date: "D5".into(),
         };
         assert_eq!(bar_t(&synthetic), Value::Null);
+
+        let pre_epoch = Bar {
+            date: "-631152000".into(), // 1950-01-01
+            ..numeric
+        };
+        assert_eq!(bar_t(&pre_epoch), json!(-631_152_000_i64));
     }
 
     #[test]
@@ -1881,7 +2757,7 @@ mod tests {
             "indicators": ["rsi"],
             "format": "series"
         });
-        let resp = tool_generate_chart(Some(json!(1)), &args);
+        let resp = tool_generate_chart(Some(json!(1)), &args, None);
         assert!(!is_error(&resp));
 
         let content = chart_content(&resp);
@@ -1952,6 +2828,126 @@ mod tests {
     }
 
     #[test]
+    fn panel_result_to_series_json_carries_plot_colors() {
+        // ADR-0026: lines carry color + width, histograms a label and
+        // per-bar colors as palette indices, signals their dot color.
+        use chartgen::data::{Bar, OhlcvData};
+        use chartgen::indicator::{Bars, Dot, Line, PanelResult};
+        use plotters::style::RGBAColor;
+
+        let data = OhlcvData {
+            bars: (0..4)
+                .map(|i| Bar {
+                    open: 1.0,
+                    high: 1.0,
+                    low: 1.0,
+                    close: 1.0,
+                    volume: 1.0,
+                    date: format!("{}", 1_700_000_000_u64 + i * 3600),
+                })
+                .collect(),
+            symbol: None,
+            interval: None,
+        };
+        let green = RGBAColor(38, 166, 154, 0.5);
+        let red = RGBAColor(239, 83, 80, 0.5);
+        let pr = PanelResult {
+            lines: vec![Line {
+                y: vec![1.0; 4],
+                color: RGBAColor(41, 98, 255, 1.0),
+                width: 2,
+                label: Some("Volume MA".into()),
+            }],
+            bars: vec![Bars {
+                y: vec![f64::NAN, 1.0, 2.0, 3.0],
+                colors: vec![green, green, red, green],
+                bottom: 0.0,
+            }],
+            dots: vec![Dot {
+                x: 2,
+                y: 1.0,
+                color: red,
+                size: 3,
+                label: Some("sell".into()),
+            }],
+            label: "Volume".into(),
+            ..Default::default()
+        };
+
+        let j = panel_result_to_series_json(&pr, &data);
+        assert_eq!(j["lines"][0]["color"], "rgba(41,98,255,1)");
+        assert_eq!(j["lines"][0]["width"], 2);
+        let h = &j["histogram"][0];
+        assert_eq!(h["label"], "Volume");
+        assert_eq!(
+            h["palette"],
+            json!(["rgba(38,166,154,0.5)", "rgba(239,83,80,0.5)"])
+        );
+        // The warmup bar has no value, so no color either.
+        assert_eq!(h["color_idx"], json!([null, 0, 1, 0]));
+        assert_eq!(j["signals"][0]["color"], "rgba(239,83,80,0.5)");
+    }
+
+    #[test]
+    fn histogram_label_falls_back_when_a_line_has_the_panel_name() {
+        use chartgen::indicator::{Bars, Line, PanelResult};
+        use plotters::style::RGBAColor;
+
+        let line = |label: &str| Line {
+            y: vec![],
+            color: RGBAColor(0, 0, 0, 1.0),
+            width: 1,
+            label: Some(label.into()),
+        };
+        let bars = || Bars {
+            y: vec![],
+            colors: vec![],
+            bottom: 0.0,
+        };
+        let volume = PanelResult {
+            lines: vec![line("Volume MA")],
+            bars: vec![bars()],
+            label: "Volume".into(),
+            ..Default::default()
+        };
+        assert_eq!(histogram_label(&volume, 0), "Volume");
+        let macd = PanelResult {
+            lines: vec![line("MACD"), line("Signal")],
+            bars: vec![bars()],
+            label: "MACD".into(),
+            ..Default::default()
+        };
+        assert_eq!(histogram_label(&macd, 0), "Histogram");
+        let two = PanelResult {
+            bars: vec![bars(), bars()],
+            label: "KVF".into(),
+            ..Default::default()
+        };
+        assert_eq!(histogram_label(&two, 1), "KVF 2");
+    }
+
+    #[test]
+    fn generate_chart_series_volume_has_up_and_down_colors() {
+        let args = json!({ "bars": 120, "indicators": ["volume"], "format": "series" });
+        let resp = tool_generate_chart(Some(json!(1)), &args, None);
+        let parsed: Value =
+            serde_json::from_str(chart_content(&resp)[0]["text"].as_str().unwrap()).unwrap();
+        let h = &parsed["indicators"]["volume"]["histogram"][0];
+        assert_eq!(h["label"], "Volume");
+        let palette: Vec<&str> = h["palette"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c.as_str().unwrap())
+            .collect();
+        assert!(palette.contains(&"rgba(38,166,154,0.5)"), "{palette:?}");
+        assert!(palette.contains(&"rgba(239,83,80,0.5)"), "{palette:?}");
+        let idx = h["color_idx"].as_array().unwrap();
+        assert_eq!(idx.len(), h["values"].as_array().unwrap().len());
+        assert!(idx.iter().all(|i| i.as_u64().is_some_and(|i| i < 2)));
+    }
+
+    #[test]
     fn generate_chart_series_signals_align_with_bars() {
         // cipher_b emits labeled dots; assert every signal.x is in range
         // and when signal.t is non-null it matches bars[x].t.
@@ -1960,7 +2956,7 @@ mod tests {
             "indicators": ["cipher_b"],
             "format": "series"
         });
-        let resp = tool_generate_chart(Some(json!(1)), &args);
+        let resp = tool_generate_chart(Some(json!(1)), &args, None);
         let text = chart_content(&resp)[0]["text"].as_str().unwrap();
         let parsed: Value = serde_json::from_str(text).unwrap();
 
@@ -1988,7 +2984,7 @@ mod tests {
             "indicators": ["macd"],
             "format": "series"
         });
-        let resp = tool_generate_chart(Some(json!(1)), &args);
+        let resp = tool_generate_chart(Some(json!(1)), &args, None);
         let text = chart_content(&resp)[0]["text"].as_str().unwrap();
         let parsed: Value = serde_json::from_str(text).unwrap();
 
@@ -2011,7 +3007,7 @@ mod tests {
             "width": 400,
             "height": 300
         });
-        let resp = tool_generate_chart(Some(json!(1)), &args);
+        let resp = tool_generate_chart(Some(json!(1)), &args, None);
         let content = chart_content(&resp);
         assert_eq!(content.len(), 1);
         assert_eq!(content[0]["type"], "text");
@@ -2021,7 +3017,7 @@ mod tests {
     fn generate_chart_unknown_format_lists_series() {
         // Regression: ensure the error message now advertises 'series'.
         let args = json!({ "bars": 20, "format": "svg" });
-        let resp = tool_generate_chart(Some(json!(1)), &args);
+        let resp = tool_generate_chart(Some(json!(1)), &args, None);
         assert!(is_error(&resp));
         let text = response_text(&resp);
         assert!(text.contains("Unknown format"));
@@ -2046,7 +3042,7 @@ mod tests {
             "indicators": ["bbands"],
             "format": "series"
         });
-        let resp = tool_generate_chart(Some(json!(1)), &args);
+        let resp = tool_generate_chart(Some(json!(1)), &args, None);
         let text = chart_content(&resp)[0]["text"].as_str().unwrap();
         let parsed: Value = serde_json::from_str(text).unwrap();
 
@@ -2075,7 +3071,7 @@ mod tests {
             "indicators": ["vpvr"],
             "format": "series"
         });
-        let resp = tool_generate_chart(Some(json!(1)), &args);
+        let resp = tool_generate_chart(Some(json!(1)), &args, None);
         let text = chart_content(&resp)[0]["text"].as_str().unwrap();
         let parsed: Value = serde_json::from_str(text).unwrap();
 
@@ -2152,7 +3148,7 @@ mod tests {
             "indicators": ["rsi"],
             "format": "series"
         });
-        let resp = tool_generate_chart(Some(json!(1)), &args);
+        let resp = tool_generate_chart(Some(json!(1)), &args, None);
         let text = chart_content(&resp)[0]["text"].as_str().unwrap();
         let parsed: Value = serde_json::from_str(text).unwrap();
 
@@ -2181,7 +3177,7 @@ mod tests {
             "indicators": ["rsi"],
             "format": "summary"
         });
-        let resp = tool_generate_chart(Some(json!(1)), &args);
+        let resp = tool_generate_chart(Some(json!(1)), &args, None);
         let actual = chart_content(&resp)[0]["text"]
             .as_str()
             .unwrap()
@@ -2191,5 +3187,1293 @@ mod tests {
             actual, EXPECTED,
             "summary output must remain byte-identical"
         );
+    }
+
+    #[test]
+    fn generate_chart_invalid_param_returns_tool_error() {
+        for (ind, msg) in [
+            (
+                json!({"name": "rsi", "length": 0}),
+                "Invalid parameter for rsi: length must be >= 1",
+            ),
+            (
+                json!({"name": "macd", "fast": 0}),
+                "Invalid parameter for macd: fast must be >= 1",
+            ),
+            (
+                json!({"name": "rsi", "length": -3}),
+                "Invalid parameter for rsi: length must be >= 1",
+            ),
+        ] {
+            let args = json!({"indicators": [ind], "bars": 50, "format": "summary"});
+            let resp = tool_generate_chart(Some(json!(1)), &args, None);
+            assert_eq!(resp["result"]["isError"], true);
+            assert_eq!(resp["result"]["content"][0]["text"], msg);
+        }
+    }
+
+    // --- warmup / end_time / paging (ADR-0009) ---
+
+    const HOUR_MS: i64 = 3_600_000;
+    const END_4H_MS: i64 = 1_700_006_400_000; // on the 4h grid
+
+    fn series_payload(args: Value, source: fetch::DataSource) -> Value {
+        let resp = generate_chart(Some(json!(1)), &args, source, None);
+        assert!(
+            !is_error(&resp),
+            "unexpected error: {}",
+            response_text(&resp)
+        );
+        serde_json::from_str(chart_content(&resp)[0]["text"].as_str().unwrap()).unwrap()
+    }
+
+    fn bar_ts(p: &Value) -> Vec<i64> {
+        p["bars"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|b| b["t"].as_i64().unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn trim_panel_result_rebases_every_channel() {
+        use chartgen::data::{Bar, OhlcvData};
+        use chartgen::indicator::{Bars, DivLine, Dot, Fill, HBar, HLine, Line, PanelResult};
+        use plotters::style::RGBAColor;
+
+        let c = RGBAColor(0, 0, 0, 1.0);
+        let ys: Vec<f64> = (0..8).map(|i| i as f64).collect();
+        let dot = |x: usize| Dot {
+            x,
+            y: x as f64,
+            color: c,
+            size: 1,
+            label: Some(format!("d{x}")),
+        };
+        let div = |x1: usize, y1: f64, x2: usize, y2: f64| DivLine {
+            x1,
+            y1,
+            x2,
+            y2,
+            color: c,
+            dashed: false,
+        };
+        let pr = PanelResult {
+            lines: vec![Line {
+                y: ys.clone(),
+                color: c,
+                width: 1,
+                label: None,
+            }],
+            fills: vec![Fill {
+                y1: ys.clone(),
+                y2: ys.iter().map(|v| -v).collect(),
+                color: c,
+                color_below: None,
+            }],
+            bars: vec![Bars {
+                y: ys.clone(),
+                colors: vec![c; 8],
+                bottom: 0.0,
+            }],
+            dots: vec![dot(1), dot(3), dot(7)],
+            hlines: vec![HLine { y: 70.0, color: c }],
+            hbars: vec![HBar {
+                y: 5.0,
+                height: 1.0,
+                width: 0.5,
+                offset: 0.0,
+                color: c,
+                left: false,
+            }],
+            divlines: vec![
+                div(0, 0.0, 2, 20.0),  // wholly inside warmup
+                div(1, 10.0, 5, 50.0), // straddles the boundary
+                div(4, 40.0, 7, 70.0), // fully visible
+                div(6, 60.0, 2, 20.0), // reversed, straddling
+                div(1, 10.0, 3, 30.0), // ends exactly on visible bar 0
+            ],
+            y_range: Some((0.0, 100.0)),
+            label: "T".into(),
+            is_overlay: false,
+        };
+
+        let t = trim_panel_result(&pr, 3);
+        assert_eq!(t.lines[0].y, vec![3.0, 4.0, 5.0, 6.0, 7.0]);
+        assert_eq!(t.fills[0].y1, vec![3.0, 4.0, 5.0, 6.0, 7.0]);
+        assert_eq!(t.fills[0].y2, vec![-3.0, -4.0, -5.0, -6.0, -7.0]);
+        assert_eq!(t.bars[0].y, vec![3.0, 4.0, 5.0, 6.0, 7.0]);
+        assert_eq!(t.bars[0].colors.len(), 5);
+        let xs: Vec<(usize, f64)> = t.dots.iter().map(|d| (d.x, d.y)).collect();
+        assert_eq!(xs, vec![(0, 3.0), (4, 7.0)]);
+        let divs: Vec<(usize, f64, usize, f64)> = t
+            .divlines
+            .iter()
+            .map(|d| (d.x1, d.y1, d.x2, d.y2))
+            .collect();
+        assert_eq!(
+            divs,
+            vec![(0, 30.0, 2, 50.0), (1, 40.0, 4, 70.0), (3, 60.0, 0, 30.0)]
+        );
+        assert_eq!(t.hlines.len(), 1);
+        assert_eq!(t.hbars.len(), 1);
+        assert_eq!(t.y_range, Some((0.0, 100.0)));
+
+        // Serialized against the trimmed bars, t fields resolve to visible bars.
+        let visible = OhlcvData {
+            bars: (3..8)
+                .map(|i| Bar {
+                    open: 1.0,
+                    high: 1.0,
+                    low: 1.0,
+                    close: 1.0,
+                    volume: 1.0,
+                    date: format!("{}", 1_000 + i),
+                })
+                .collect(),
+            symbol: None,
+            interval: None,
+        };
+        let j = panel_result_to_series_json(&t, &visible);
+        assert_eq!(j["signals"][0]["t"], json!(1_003));
+        assert_eq!(j["signals"][1]["t"], json!(1_007));
+        assert_eq!(j["divlines"][0]["t1"], json!(1_003));
+        assert_eq!(j["divlines"][0]["t2"], json!(1_005));
+        assert_eq!(j["lines"][0]["values"].as_array().unwrap().len(), 5);
+
+        // offset 0 is the identity.
+        let same = trim_panel_result(&pr, 0);
+        assert_eq!(same.lines[0].y, ys);
+        assert_eq!(same.dots.len(), 3);
+        assert_eq!(same.divlines.len(), 5);
+    }
+
+    #[test]
+    fn series_warmup_keeps_histogram_colors_aligned() {
+        // ADR-0026: warmup trimming cuts the per-bar colors with the values,
+        // so a warmed volume histogram equals the tail of an unwarmed one.
+        let call = |bars: u64, warmup: u64| -> Value {
+            let args = json!({
+                "ticker": "ETHUSDT", "timeframe": "4h", "bars": bars, "warmup": warmup,
+                "end_time": END_4H_MS, "indicators": ["volume"], "format": "series"
+            });
+            serde_json::from_str(&response_text(&generate_chart(
+                Some(json!(1)),
+                &args,
+                fetch::DataSource::Sample,
+                None,
+            )))
+            .unwrap()
+        };
+        let colors = |p: &Value| -> Vec<Value> {
+            let h = &p["indicators"]["volume"]["histogram"][0];
+            h["color_idx"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|i| h["palette"][i.as_u64().unwrap() as usize].clone())
+                .collect()
+        };
+        let warmed = call(20, 30);
+        let full = call(50, 0);
+        let all = colors(&full);
+        assert_eq!(colors(&warmed), all[30..].to_vec());
+        assert_eq!(
+            warmed["indicators"]["volume"]["histogram"][0]["values"],
+            json!(
+                full["indicators"]["volume"]["histogram"][0]["values"]
+                    .as_array()
+                    .unwrap()[30..]
+            )
+        );
+    }
+
+    #[test]
+    fn series_warmup_trims_to_bars_and_warms_indicators() {
+        let args = |warmup: u64| {
+            json!({
+                "ticker": "BTCUSDT",
+                "timeframe": "4h",
+                "bars": 50,
+                "warmup": warmup,
+                "end_time": END_4H_MS,
+                "indicators": ["rsi", "macd", "bbands", "donchian", "cipher_b"],
+                "format": "series"
+            })
+        };
+        let p = series_payload(args(100), fetch::DataSource::Sample);
+        let ts = bar_ts(&p);
+        assert_eq!(ts.len(), 50);
+        assert!(ts.iter().all(|t| t % 14_400 == 0), "bars on the 4h grid");
+        assert!(ts.windows(2).all(|w| w[1] - w[0] == 14_400));
+        assert_eq!(*ts.last().unwrap() * 1000, END_4H_MS - 4 * HOUR_MS);
+        assert_eq!(p["has_more"], true);
+
+        let ind = &p["indicators"];
+        let rsi = ind["rsi"]["lines"][0]["values"].as_array().unwrap();
+        assert_eq!(rsi.len(), 50);
+        assert!(rsi.iter().all(|v| v.is_number()));
+        assert_eq!(
+            ind["macd"]["histogram"][0]["values"]
+                .as_array()
+                .unwrap()
+                .len(),
+            50
+        );
+        let y1 = ind["bbands"]["fills"][0]["y1"].as_array().unwrap();
+        assert_eq!(y1.len(), 50);
+        assert!(
+            y1[0].is_number(),
+            "warmup must fill the first visible value"
+        );
+        for sig in ind["cipher_b"]["signals"].as_array().into_iter().flatten() {
+            let x = sig["x"].as_u64().unwrap() as usize;
+            assert!(x < 50);
+            assert_eq!(sig["t"].as_i64().unwrap(), ts[x]);
+        }
+
+        // Without warmup the same window starts with pre-warmup nulls.
+        let cold = series_payload(args(0), fetch::DataSource::Sample);
+        assert_eq!(bar_ts(&cold), ts);
+        assert!(cold["indicators"]["donchian"]["lines"][0]["values"][0].is_null());
+        assert_ne!(
+            cold["indicators"]["rsi"]["lines"][0]["values"][0],
+            ind["rsi"]["lines"][0]["values"][0]
+        );
+    }
+
+    fn ha_args(style: Value, warmup: u64, end: i64) -> Value {
+        json!({
+            "ticker": "ETHUSDT", "timeframe": "4h", "bars": 40, "warmup": warmup,
+            "end_time": end, "indicators": ["rsi"], "format": "series",
+            "chart_style": style
+        })
+    }
+
+    #[test]
+    fn chart_style_default_is_candles_and_unchanged() {
+        let none = series_payload(
+            json!({ "ticker": "ETHUSDT", "timeframe": "4h", "bars": 40,
+                    "end_time": END_4H_MS, "indicators": ["rsi"], "format": "series" }),
+            fetch::DataSource::Sample,
+        );
+        let candles = series_payload(
+            ha_args(json!("candles"), 0, END_4H_MS),
+            fetch::DataSource::Sample,
+        );
+        assert_eq!(none["chart_style"], "candles");
+        assert_eq!(none, candles);
+    }
+
+    #[test]
+    fn chart_style_heikin_ashi_transforms_bars_and_echoes() {
+        let real = series_payload(
+            ha_args(json!("candles"), 0, END_4H_MS),
+            fetch::DataSource::Sample,
+        );
+        let ha = series_payload(
+            ha_args(json!("heikin_ashi"), 0, END_4H_MS),
+            fetch::DataSource::Sample,
+        );
+        assert_eq!(ha["chart_style"], "heikin_ashi");
+        let (rb, hb) = (
+            real["bars"].as_array().unwrap(),
+            ha["bars"].as_array().unwrap(),
+        );
+        assert_eq!(rb.len(), hb.len());
+        let f = |b: &Value, k: &str| b[k].as_f64().unwrap();
+        // Seed bar and recurrence.
+        assert!((f(&hb[0], "o") - (f(&rb[0], "o") + f(&rb[0], "c")) / 2.0).abs() < 1e-9);
+        for i in 0..hb.len() {
+            let r = &rb[i];
+            let c = (f(r, "o") + f(r, "h") + f(r, "l") + f(r, "c")) / 4.0;
+            assert!((f(&hb[i], "c") - c).abs() < 1e-9);
+            if i > 0 {
+                let o = (f(&hb[i - 1], "o") + f(&hb[i - 1], "c")) / 2.0;
+                assert!((f(&hb[i], "o") - o).abs() < 1e-9);
+            }
+            assert_eq!(hb[i]["t"], r["t"]);
+            assert_eq!(hb[i]["v"], r["v"]);
+            assert!(f(&hb[i], "h") >= f(&hb[i], "o").max(f(&hb[i], "c")));
+            assert!(f(&hb[i], "l") <= f(&hb[i], "o").min(f(&hb[i], "c")));
+        }
+        assert_ne!(real["bars"], ha["bars"]);
+    }
+
+    #[test]
+    fn chart_style_heikin_ashi_pages_converge_after_warmup() {
+        // Same window fetched as a tail (warmup 200) and as an older page
+        // (shifted end_time): the HA seed difference decays by 1/2 per bar.
+        let a = series_payload(
+            ha_args(json!("heikin_ashi"), 200, END_4H_MS),
+            fetch::DataSource::Sample,
+        );
+        let b = series_payload(
+            ha_args(json!("heikin_ashi"), 60, END_4H_MS),
+            fetch::DataSource::Sample,
+        );
+        assert_eq!(a["bars"].as_array().unwrap().len(), 40);
+        for (x, y) in a["bars"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .zip(b["bars"].as_array().unwrap())
+        {
+            for k in ["o", "h", "l", "c"] {
+                let d = (x[k].as_f64().unwrap() - y[k].as_f64().unwrap()).abs();
+                assert!(d < 1e-6, "{k} differs by {d}");
+            }
+        }
+    }
+
+    #[test]
+    fn chart_style_rejects_unknown_value() {
+        let resp = generate_chart(
+            Some(json!(1)),
+            &json!({ "chart_style": "renko", "format": "series" }),
+            fetch::DataSource::Sample,
+            None,
+        );
+        assert!(is_error(&resp));
+        assert!(response_text(&resp).contains("chart_style"));
+    }
+
+    #[test]
+    fn series_end_time_is_exclusive_and_pages_agree() {
+        let page = |bars: u64, end: i64| {
+            series_payload(
+                json!({
+                    "ticker": "ETHUSDT",
+                    "timeframe": "4h",
+                    "bars": bars,
+                    "warmup": 30,
+                    "end_time": end,
+                    "indicators": ["rsi"],
+                    "format": "series"
+                }),
+                fetch::DataSource::Sample,
+            )
+        };
+        let a = page(60, END_4H_MS);
+        let a_ts = bar_ts(&a);
+        assert!(a_ts.iter().all(|t| t * 1000 < END_4H_MS));
+
+        // Paging from the oldest loaded bar continues seamlessly.
+        let b = page(60, a_ts[0] * 1000);
+        let b_ts = bar_ts(&b);
+        assert_eq!(*b_ts.last().unwrap() + 14_400, a_ts[0]);
+
+        // Overlapping requests agree exactly on OHLCV.
+        let c = page(60, END_4H_MS - 30 * 4 * HOUR_MS);
+        let a_bars = a["bars"].as_array().unwrap();
+        let c_bars = c["bars"].as_array().unwrap();
+        let overlap: Vec<&Value> = c_bars
+            .iter()
+            .filter(|cb| a_bars.iter().any(|ab| ab == *cb))
+            .collect();
+        assert_eq!(overlap.len(), 30);
+        assert_eq!(c_bars[30..], a_bars[..30]);
+    }
+
+    #[test]
+    fn series_has_more_false_when_history_runs_out() {
+        let p = series_payload(
+            json!({
+                "timeframe": "1h",
+                "bars": 50,
+                "warmup": 20,
+                "end_time": 10 * HOUR_MS,
+                "indicators": ["rsi"],
+                "format": "series"
+            }),
+            fetch::DataSource::Sample,
+        );
+        assert_eq!(bar_ts(&p), (0..10).map(|h| h * 3_600).collect::<Vec<_>>());
+        assert_eq!(p["has_more"], false);
+
+        // Past the start of history: empty payload, not an error.
+        let p = series_payload(
+            json!({ "timeframe": "1h", "bars": 5, "end_time": 0,
+                    "indicators": ["rsi", "vpvr"], "format": "series" }),
+            fetch::DataSource::Sample,
+        );
+        assert!(p["bars"].as_array().unwrap().is_empty());
+        assert_eq!(p["has_more"], false);
+
+        // Exactly the requested count available → more may exist.
+        let p = series_payload(
+            json!({ "timeframe": "1h", "bars": 6, "warmup": 4, "end_time": 10 * HOUR_MS,
+                    "indicators": ["rsi"], "format": "series" }),
+            fetch::DataSource::Sample,
+        );
+        assert_eq!(p["bars"].as_array().unwrap().len(), 6);
+        assert_eq!(p["has_more"], true);
+    }
+
+    #[test]
+    fn series_tail_poll_returns_forming_bar() {
+        let before = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
+        let p = series_payload(
+            json!({ "ticker": "BTCUSDT", "timeframe": "1h", "bars": 2, "warmup": 50,
+                    "indicators": ["rsi"], "format": "series" }),
+            fetch::DataSource::Sample,
+        );
+        let ts = bar_ts(&p);
+        assert_eq!(ts.len(), 2);
+        // Newest bar is the one forming now (allow an hour rollover mid-test).
+        let current = before / HOUR_MS * HOUR_MS / 1000;
+        assert!(ts[1] == current || ts[1] == current + 3_600);
+        let rsi = p["indicators"]["rsi"]["lines"][0]["values"]
+            .as_array()
+            .unwrap();
+        assert!(rsi.iter().all(|v| v.is_number()));
+        assert_eq!(p["has_more"], true);
+    }
+
+    #[test]
+    fn series_hbars_cover_visible_window_only() {
+        let args = |warmup: u64| {
+            json!({ "ticker": "BTCUSDT", "timeframe": "4h", "bars": 40, "warmup": warmup,
+                    "end_time": END_4H_MS, "indicators": ["vpvr"], "format": "series" })
+        };
+        let warm = series_payload(args(200), fetch::DataSource::Sample);
+        let cold = series_payload(args(0), fetch::DataSource::Sample);
+        let hbars = &warm["indicators"]["vpvr"]["hbars"];
+        assert!(!hbars.as_array().unwrap().is_empty());
+        assert_eq!(hbars, &cold["indicators"]["vpvr"]["hbars"]);
+        assert_eq!(
+            warm["indicators"]["vpvr"]["hlines"],
+            cold["indicators"]["vpvr"]["hlines"]
+        );
+    }
+
+    #[test]
+    fn series_profile_hlines_cover_visible_window_without_hbars() {
+        // hvn_lvn derives node hlines from a volume profile but emits no hbars.
+        let args = |warmup: u64| {
+            json!({ "ticker": "BTCUSDT", "timeframe": "4h", "bars": 60, "warmup": warmup,
+                    "end_time": END_4H_MS, "indicators": ["hvn_lvn", "rsi"], "format": "series" })
+        };
+        let warm = series_payload(args(300), fetch::DataSource::Sample);
+        let cold = series_payload(args(0), fetch::DataSource::Sample);
+        let nodes = &warm["indicators"]["hvn_lvn"]["hlines"];
+        assert!(!nodes.as_array().unwrap().is_empty());
+        assert_eq!(nodes, &cold["indicators"]["hvn_lvn"]["hlines"]);
+        // Non-profile hlines (RSI 30/70) are untouched.
+        assert_eq!(
+            warm["indicators"]["rsi"]["hlines"],
+            cold["indicators"]["rsi"]["hlines"]
+        );
+        let windowed: Vec<&str> = indicators::registry()
+            .iter()
+            .filter(|i| indicators::by_name(i.name).is_some_and(|ind| ind.windowed_profile()))
+            .map(|i| i.name)
+            .collect();
+        assert_eq!(windowed, vec!["volume_profile", "hvn_lvn", "tpo"]);
+    }
+
+    #[test]
+    fn end_time_must_be_an_in_range_integer() {
+        for bad in [
+            json!("1700000000000"),
+            json!(1.7e12),
+            json!(1_700_000_000_000.5),
+            json!(u64::MAX),
+            json!(-2_208_988_800_001_i64),
+            json!(fetch::now_ms() + 400 * 86_400_000),
+        ] {
+            let resp = generate_chart(
+                Some(json!(1)),
+                &json!({ "ticker": "BTCUSDT", "end_time": bad, "format": "series" }),
+                fetch::DataSource::Sample,
+                None,
+            );
+            assert!(is_error(&resp), "end_time {bad} must be rejected");
+            assert!(response_text(&resp).contains("end_time"));
+        }
+        // Boundaries and null are accepted (pre-1970 just has no sample bars).
+        for ok in [json!(null), json!(-2_208_988_800_000_i64), json!(END_4H_MS)] {
+            series_payload(
+                json!({ "ticker": "BTCUSDT", "end_time": ok, "bars": 5, "format": "series" }),
+                fetch::DataSource::Sample,
+            );
+        }
+    }
+
+    #[test]
+    fn unsupported_timeframe_is_a_tool_error() {
+        for tf in ["4611686018427387904m", "0h", "7h", "1x"] {
+            let resp = generate_chart(
+                Some(json!(1)),
+                &json!({ "ticker": "BTCUSDT", "timeframe": tf, "format": "series" }),
+                fetch::DataSource::Sample,
+                None,
+            );
+            assert!(is_error(&resp), "timeframe {tf} must be rejected");
+            assert!(response_text(&resp).contains("Unsupported timeframe"));
+        }
+    }
+
+    #[test]
+    fn fetch_failure_with_ticker_errors_in_every_format() {
+        for format in ["png", "summary", "both", "series"] {
+            for end_time in [Value::Null, json!(END_4H_MS)] {
+                let resp = generate_chart(
+                    Some(json!(1)),
+                    &json!({ "ticker": "AAPL", "bars": 20, "format": format,
+                             "end_time": end_time, "width": 200, "height": 100 }),
+                    fetch::DataSource::Unavailable,
+                    None,
+                );
+                assert!(
+                    is_error(&resp),
+                    "{format}: must not fall back to sample data"
+                );
+                assert!(response_text(&resp).contains("upstream unavailable"));
+            }
+        }
+    }
+
+    #[test]
+    fn warmup_ignored_for_non_series_formats() {
+        let text = |args: Value| {
+            let resp = generate_chart(Some(json!(1)), &args, fetch::DataSource::Live, None);
+            chart_content(&resp)[0]["text"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        };
+        let base = json!({ "bars": 30, "indicators": ["rsi"], "format": "summary" });
+        let mut warm = base.clone();
+        warm["warmup"] = json!(500);
+        assert_eq!(text(base), text(warm));
+    }
+
+    #[test]
+    fn end_time_without_ticker_errors_on_live_source() {
+        let resp = generate_chart(
+            Some(json!(1)),
+            &json!({ "end_time": 1_700_000_000_000_i64, "format": "series" }),
+            fetch::DataSource::Live,
+            None,
+        );
+        assert!(is_error(&resp));
+        assert!(response_text(&resp).contains("end_time"));
+    }
+
+    #[test]
+    fn legacy_sample_series_has_more_false_and_bars_clamped() {
+        // No ticker, live source: synthetic sample_data has no timestamps to page from.
+        let p = series_payload(
+            json!({ "bars": 20, "warmup": 10, "indicators": ["rsi"], "format": "series" }),
+            fetch::DataSource::Live,
+        );
+        assert_eq!(p["bars"].as_array().unwrap().len(), 20);
+        assert_eq!(p["has_more"], false);
+
+        let p = series_payload(
+            json!({ "timeframe": "1m", "bars": 100_000, "indicators": [], "format": "series" }),
+            fetch::DataSource::Sample,
+        );
+        assert_eq!(p["bars"].as_array().unwrap().len(), MAX_BARS);
+    }
+
+    // --- get_quotes ---
+
+    fn quotes(args: Value, source: fetch::DataSource) -> Vec<Value> {
+        let resp = get_quotes(Some(json!(1)), &args, source);
+        assert!(!is_error(&resp), "{}", response_text(&resp));
+        let p: Value = serde_json::from_str(&response_text(&resp)).unwrap();
+        p["quotes"].as_array().unwrap().clone()
+    }
+
+    #[test]
+    fn get_quotes_sample_normalizes_dedupes_and_computes_change() {
+        let q = quotes(
+            json!({ "symbols": [" btcusdt", "AAPL", "BTCUSDT"] }),
+            fetch::DataSource::Sample,
+        );
+        assert_eq!(q.len(), 2);
+        assert_eq!(q[0]["symbol"], "BTCUSDT");
+        assert_eq!(q[1]["symbol"], "AAPL");
+        for e in &q {
+            assert_eq!(e["source"], "sample");
+            let (last, prev) = (
+                e["last"].as_f64().unwrap(),
+                e["prev_close"].as_f64().unwrap(),
+            );
+            let change = e["change"].as_f64().unwrap();
+            assert!((change - (last - prev)).abs() < 1e-9);
+            assert!((e["change_pct"].as_f64().unwrap() - change / prev * 100.0).abs() < 1e-9);
+            for k in ["high", "low", "volume"] {
+                assert!(e[k].is_f64(), "{k}");
+            }
+        }
+    }
+
+    #[test]
+    fn get_quotes_errors_per_symbol_without_failing_the_call() {
+        let q = quotes(
+            json!({ "symbols": ["BTCUSDT", "not a symbol!", ""] }),
+            fetch::DataSource::Sample,
+        );
+        assert_eq!(q.len(), 3);
+        assert!(q[0]["last"].is_f64());
+        assert_eq!(q[1]["symbol"], "not a symbol!");
+        assert_eq!(q[1]["error"], "invalid symbol");
+        assert_eq!(q[2]["error"], "invalid symbol");
+
+        // No path separators, and never a dot-only (`.`/`..`) segment.
+        let q = quotes(
+            json!({ "symbols": ["../../X", "A/B", "..", "BRK.B", "^GSPC", "EURUSD=X"] }),
+            fetch::DataSource::Sample,
+        );
+        for bad in &q[..3] {
+            assert_eq!(bad["error"], "invalid symbol", "{bad}");
+        }
+        for good in &q[3..] {
+            assert!(good["last"].is_f64(), "{good}");
+        }
+
+        let q = quotes(
+            json!({ "symbols": ["BTCUSDT", "AAPL"] }),
+            fetch::DataSource::Unavailable,
+        );
+        assert_eq!(q.len(), 2);
+        assert!(q
+            .iter()
+            .all(|e| e["error"] == "upstream unavailable" && e.get("last").is_none()));
+    }
+
+    #[test]
+    fn get_quotes_rejects_bad_input_and_more_than_fifty_symbols() {
+        for args in [
+            json!({}),
+            json!({ "symbols": "BTCUSDT" }),
+            json!({ "symbols": [1] }),
+        ] {
+            let resp = get_quotes(Some(json!(1)), &args, fetch::DataSource::Sample);
+            assert!(is_error(&resp), "{args}");
+        }
+        let many: Vec<String> = (0..51).map(|i| format!("S{i}")).collect();
+        let resp = get_quotes(
+            Some(json!(1)),
+            &json!({ "symbols": many }),
+            fetch::DataSource::Sample,
+        );
+        assert!(is_error(&resp));
+        assert!(response_text(&resp).contains("At most 50"));
+        // The cap applies to the raw array, before any entry is processed:
+        // an oversized array is rejected even if it is all duplicates or
+        // holds a non-string entry past the limit.
+        let mut dupes: Vec<Value> = std::iter::repeat_n(json!("BTCUSDT"), 60).collect();
+        dupes.push(json!(1));
+        let resp = get_quotes(
+            Some(json!(1)),
+            &json!({ "symbols": dupes }),
+            fetch::DataSource::Sample,
+        );
+        assert!(response_text(&resp).contains("At most 50"));
+        let fifty: Vec<&str> = std::iter::repeat_n("BTCUSDT", 50).collect();
+        assert_eq!(
+            quotes(json!({ "symbols": fifty }), fetch::DataSource::Sample).len(),
+            1
+        );
+        assert!(quotes(json!({ "symbols": [] }), fetch::DataSource::Sample).is_empty());
+    }
+
+    #[test]
+    fn get_quotes_is_dispatched_and_listed() {
+        let resp = handle_mcp_request("tools/list", Some(json!(1)), None, None, None, None, None);
+        let tools = resp["result"]["tools"].as_array().unwrap();
+        let tool = tools.iter().find(|t| t["name"] == "get_quotes").unwrap();
+        assert_eq!(tool["inputSchema"]["required"], json!(["symbols"]));
+        assert_eq!(tool["inputSchema"]["properties"]["symbols"]["maxItems"], 50);
+
+        let resp = handle_mcp_request(
+            "tools/call",
+            Some(json!(2)),
+            Some(&json!({ "name": "get_quotes", "arguments": {} })),
+            None,
+            None,
+            None,
+            None,
+        );
+        assert!(response_text(&resp).contains("symbols is required"));
+    }
+
+    // --- search_symbols ---
+
+    fn search(args: Value) -> Value {
+        search_symbols(Some(json!(1)), &args, fetch::DataSource::Sample)
+    }
+
+    #[test]
+    fn search_symbols_returns_ranked_results_with_contract_fields() {
+        let resp = search(json!({ "query": " spy " }));
+        assert!(!is_error(&resp), "{}", response_text(&resp));
+        let p: Value = serde_json::from_str(&response_text(&resp)).unwrap();
+        let first = &p["results"][0];
+        assert_eq!(first["symbol"], "SPY");
+        assert_eq!(first["type"], "etf");
+        assert_eq!(first["source"], "sample");
+        assert!(first["name"].is_string() && first["exchange"].is_string());
+        assert!(p.get("warnings").is_none());
+    }
+
+    #[test]
+    fn search_symbols_honours_limit_and_types() {
+        let resp = search(json!({ "query": "a", "limit": 2 }));
+        let p: Value = serde_json::from_str(&response_text(&resp)).unwrap();
+        assert_eq!(p["results"].as_array().unwrap().len(), 2);
+
+        let resp = search(json!({ "query": "e", "types": ["forex"] }));
+        let p: Value = serde_json::from_str(&response_text(&resp)).unwrap();
+        let r = p["results"].as_array().unwrap();
+        assert!(!r.is_empty() && r.iter().all(|x| x["type"] == "forex"));
+    }
+
+    #[test]
+    fn search_symbols_rejects_bad_input() {
+        for args in [
+            json!({}),
+            json!({ "query": 5 }),
+            json!({ "query": "" }),
+            json!({ "query": "a\u{7}" }),
+            json!({ "query": "a", "limit": 0 }),
+            json!({ "query": "a", "limit": 51 }),
+            json!({ "query": "a", "limit": "x" }),
+            json!({ "query": "a", "types": "etf" }),
+            json!({ "query": "a", "types": [1] }),
+            json!({ "query": "a", "types": ["bogus"] }),
+        ] {
+            assert!(is_error(&search(args.clone())), "{args}");
+        }
+    }
+
+    #[test]
+    fn search_symbols_is_dispatched_and_listed() {
+        let resp = handle_mcp_request("tools/list", Some(json!(1)), None, None, None, None, None);
+        let tools = resp["result"]["tools"].as_array().unwrap();
+        let tool = tools
+            .iter()
+            .find(|t| t["name"] == "search_symbols")
+            .unwrap();
+        assert_eq!(tool["inputSchema"]["required"], json!(["query"]));
+
+        let resp = handle_mcp_request(
+            "tools/call",
+            Some(json!(2)),
+            Some(&json!({ "name": "search_symbols", "arguments": {} })),
+            None,
+            None,
+            None,
+            None,
+        );
+        assert!(response_text(&resp).contains("query is required"));
+    }
+
+    // --- subscribe_chart / unsubscribe_chart (ADR-0021) ---
+
+    fn call(name: &str, args: Value, push: Option<&PushCtx>, token: Option<&str>) -> Value {
+        handle_mcp_request(
+            "tools/call",
+            Some(json!(1)),
+            Some(&json!({ "name": name, "arguments": args })),
+            None,
+            token,
+            push,
+            None,
+        )
+    }
+
+    #[test]
+    fn subscribe_chart_needs_the_http_transport() {
+        let resp = call(
+            "subscribe_chart",
+            json!({ "ticker": "BTCUSDT" }),
+            None,
+            None,
+        );
+        assert!(is_error(&resp));
+        assert!(response_text(&resp).contains("HTTP transport"));
+        let resp = call(
+            "unsubscribe_chart",
+            json!({ "subscription_id": "x" }),
+            None,
+            None,
+        );
+        assert!(is_error(&resp));
+    }
+
+    #[tokio::test]
+    async fn subscribe_chart_validates_and_round_trips() {
+        let hub = crate::chart_push::ChartHub::new(
+            Arc::new(crate::chart_push::SampleSource),
+            crate::chart_push::Limits::default(),
+        );
+        let (tx, mut rx) = tokio::sync::mpsc::channel(crate::chart_push::STREAM_BUFFER);
+        hub.link_stream("s", tx);
+        let push = PushCtx {
+            hub: hub.clone(),
+            stream: "s".into(),
+            client: "127.0.0.1".into(),
+        };
+        let ok = |args: Value| {
+            let resp = call("subscribe_chart", args, Some(&push), Some("tok"));
+            (is_error(&resp), response_text(&resp))
+        };
+        for (args, needle) in [
+            (json!({}), "ticker is required"),
+            (
+                json!({ "ticker": "BTCUSDT", "timeframe": "7x" }),
+                "Unsupported timeframe",
+            ),
+            (
+                json!({ "ticker": "BTCUSDT", "indicators": ["nope"] }),
+                "Unknown indicator",
+            ),
+            (
+                json!({ "ticker": "BTCUSDT", "chart_style": "renko" }),
+                "chart_style",
+            ),
+            (json!({ "ticker": "AAPL" }), "not pushable"),
+            (
+                json!({ "ticker": "BTCUSDT", "indicators": vec!["rsi"; 11] }),
+                "at most 10 indicators",
+            ),
+        ] {
+            let (err, text) = ok(args.clone());
+            assert!(err && text.contains(needle), "{args}: {text}");
+        }
+
+        let (err, text) = ok(json!({
+            "ticker": "BTCUSDT", "timeframe": "1m", "indicators": ["rsi"], "warmup": 50,
+            "chart_style": "heikin_ashi"
+        }));
+        assert!(!err, "{text}");
+        let id = serde_json::from_str::<Value>(&text).unwrap()["subscription_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let note: Value = serde_json::from_str(
+            &tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
+                .await
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(note["params"]["subscription_id"], id.as_str());
+        assert_eq!(note["params"]["series"]["chart_style"], "heikin_ashi");
+        assert!(note["params"]["series"]["indicators"]["rsi"].is_object());
+
+        let resp = call(
+            "unsubscribe_chart",
+            json!({ "subscription_id": id }),
+            Some(&push),
+            Some("tok"),
+        );
+        assert_eq!(
+            serde_json::from_str::<Value>(&response_text(&resp)).unwrap()["unsubscribed"],
+            true
+        );
+        assert_eq!(hub.counts().0, 0);
+    }
+
+    #[test]
+    fn series_tail_matches_generate_chart() {
+        // The pushed tail is the generate_chart tail for the same window.
+        let args = json!({
+            "ticker": "ETHUSDT", "timeframe": "4h", "bars": 2, "warmup": 40,
+            "end_time": END_4H_MS, "indicators": ["rsi", "macd"], "format": "series",
+            "chart_style": "heikin_ashi"
+        });
+        let polled: Value = serde_json::from_str(&response_text(&generate_chart(
+            Some(json!(1)),
+            &args,
+            fetch::DataSource::Sample,
+            None,
+        )))
+        .unwrap();
+        let mut raw = fetch::fetch_ohlcv(
+            fetch::DataSource::Sample,
+            "ETHUSDT",
+            "4h",
+            42,
+            Some(END_4H_MS),
+        )
+        .unwrap()
+        .data;
+        raw.symbol = Some("ETHUSDT".into());
+        raw.interval = Some("4h".into());
+        let pushed = series_tail(&raw, &json!(["rsi", "macd"]), "heikin_ashi", 2).unwrap();
+        assert_eq!(pushed, polled);
+    }
+
+    #[test]
+    fn series_tail_carries_plot_colors_like_generate_chart() {
+        // ADR-0026: pushed tails carry the same line colors and per-bar
+        // histogram colors as polled ones.
+        let indicators = json!(["volume", "macd", "ema"]);
+        let args = json!({
+            "ticker": "ETHUSDT", "timeframe": "4h", "bars": 2, "warmup": 40,
+            "end_time": END_4H_MS, "indicators": indicators, "format": "series"
+        });
+        let polled: Value = serde_json::from_str(&response_text(&generate_chart(
+            Some(json!(1)),
+            &args,
+            fetch::DataSource::Sample,
+            None,
+        )))
+        .unwrap();
+        let mut raw = fetch::fetch_ohlcv(
+            fetch::DataSource::Sample,
+            "ETHUSDT",
+            "4h",
+            42,
+            Some(END_4H_MS),
+        )
+        .unwrap()
+        .data;
+        raw.symbol = Some("ETHUSDT".into());
+        raw.interval = Some("4h".into());
+        let pushed = series_tail(&raw, &indicators, "candles", 2).unwrap();
+        assert_eq!(pushed, polled);
+        let ind = &pushed["indicators"];
+        for h in [&ind["volume"]["histogram"][0], &ind["macd"]["histogram"][0]] {
+            assert_eq!(h["color_idx"].as_array().unwrap().len(), 2);
+            assert!(!h["palette"].as_array().unwrap().is_empty());
+        }
+        assert_eq!(ind["macd"]["histogram"][0]["label"], "Histogram");
+        assert!(ind["ema"]["lines"][0]["color"]
+            .as_str()
+            .unwrap()
+            .starts_with("rgba("));
+    }
+}
+
+/// Scripted indicators over MCP (ADR-0025): register → list → chart →
+/// delete, per-user isolation, shadowing and per-indicator errors.
+#[cfg(all(test, feature = "scripting"))]
+mod scripting_tests {
+    use super::*;
+
+    /// One store per test process (the store is process-wide); tests use
+    /// distinct users, so they don't see each other's scripts.
+    fn user() -> String {
+        let path = std::env::temp_dir().join(format!("chartgen-mcp-{}.db", std::process::id()));
+        scripting::persistence::open_global(&path).expect("test store");
+        format!("client-{}", uuid::Uuid::new_v4())
+    }
+
+    fn call(tool: &str, args: Value, user: Option<&str>) -> Value {
+        call_tool(tool, Some(json!(1)), args, None, None, None, user, true)
+    }
+
+    fn text(resp: &Value, i: usize) -> &str {
+        resp["result"]["content"][i]["text"].as_str().unwrap_or("")
+    }
+
+    fn payload(resp: &Value) -> Value {
+        assert!(
+            !resp["result"]["isError"].as_bool().unwrap_or(false),
+            "unexpected error: {}",
+            text(resp, 0)
+        );
+        serde_json::from_str(text(resp, 0)).unwrap()
+    }
+
+    fn chart(user: &str, indicators: Value, format: &str) -> Value {
+        let args = json!({ "bars": 200, "indicators": indicators, "format": format });
+        generate_chart(Some(json!(1)), &args, fetch::DataSource::Sample, Some(user))
+    }
+
+    const MOMENTUM: &str = r#"
+PARAMS = [{"name": "length", "type": "int", "default": 10, "min": 1, "max": 500}]
+META = {"title": "Momentum", "overlay": False}
+
+def compute(ohlcv, params, chart):
+    m = ohlcv.close - ohlcv.close[params["length"]]
+    chart.line(m, title = "MOM", color = "teal")
+    chart.dot(ta.crossover(m, 0), m, color = "green", label = "up")
+    chart.hline(0)
+"#;
+
+    #[test]
+    fn tools_listed_only_when_enabled() {
+        let names = |on: bool| -> Vec<String> {
+            handle_tools_list(Some(json!(1)), on)["result"]["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|t| t["name"].as_str().unwrap().to_string())
+                .collect()
+        };
+        let scripting = [
+            "register_indicator",
+            "fork_indicator",
+            "list_my_indicators",
+            "delete_indicator",
+        ];
+        assert!(scripting
+            .iter()
+            .all(|t| !names(false).contains(&t.to_string())));
+        assert!(scripting
+            .iter()
+            .all(|t| names(true).contains(&t.to_string())));
+        // codegen input never has them
+        let base = chartgen::mcp_schema::tools_list_result().to_string();
+        assert!(!base.contains("register_indicator"));
+        // disabled: the tools are unknown
+        let u = user();
+        let resp = call_tool(
+            "register_indicator",
+            None,
+            json!({"name": "x", "source": MOMENTUM}),
+            None,
+            None,
+            None,
+            Some(&u),
+            false,
+        );
+        assert!(text(&resp, 0).contains("Unknown tool"));
+    }
+
+    #[test]
+    fn register_list_chart_delete() {
+        let u = user();
+        let reg = payload(&call(
+            "register_indicator",
+            json!({"name": "my_momentum", "source": MOMENTUM}),
+            Some(&u),
+        ));
+        assert_eq!(reg["ok"], true);
+        assert_eq!(reg["replaced"], false);
+        assert_eq!(reg["configurable_params"][0]["type"], "integer");
+
+        let mine = payload(&call("list_my_indicators", json!({}), Some(&u)));
+        assert_eq!(mine["total"], 1);
+        assert_eq!(mine["indicators"][0]["name"], "my_momentum");
+        assert_eq!(mine["indicators"][0]["source"], "user");
+
+        let all = payload(&tool_list_indicators(Some(json!(1)), Some(&u)));
+        let entry = all["indicators"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|i| i["name"] == "my_momentum")
+            .expect("listed for its owner");
+        assert_eq!(entry["source"], "user");
+        assert_eq!(entry["type"], "panel");
+        assert_eq!(
+            all["total"].as_u64().unwrap() as usize,
+            indicators::registry().len() + 1
+        );
+
+        // used like a built-in, with params, next to a built-in
+        let resp = chart(
+            &u,
+            json!([{"name": "my_momentum", "length": 3}, "rsi"]),
+            "series",
+        );
+        let p = payload(&resp);
+        let mom = &p["indicators"]["my_momentum"];
+        assert_eq!(mom["label"], "Momentum");
+        let values = mom["lines"][0]["values"].as_array().unwrap();
+        assert_eq!(values.len(), 200);
+        assert!(values[..3].iter().all(|v| v.is_null()));
+        let c: Vec<f64> = p["bars"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|b| b["c"].as_f64().unwrap())
+            .collect();
+        assert!((values[10].as_f64().unwrap() - (c[10] - c[7])).abs() < 1e-9);
+        assert!(p["indicators"]["rsi"].is_object());
+        assert!(p.get("indicator_errors").is_none());
+        // invalid params are checked against PARAMS like a built-in
+        let resp = chart(&u, json!([{"name": "my_momentum", "length": 0}]), "series");
+        assert!(text(&resp, 0).contains("must be >= 1"));
+        // png renders it too
+        let resp = chart(&u, json!(["my_momentum"]), "png");
+        assert_eq!(resp["result"]["content"][0]["type"], "image");
+
+        let del = payload(&call(
+            "delete_indicator",
+            json!({"name": "my_momentum"}),
+            Some(&u),
+        ));
+        assert_eq!(del["ok"], true);
+        let resp = chart(&u, json!(["my_momentum"]), "series");
+        assert!(text(&resp, 0).contains("Unknown indicator"));
+        let resp = call("delete_indicator", json!({"name": "my_momentum"}), Some(&u));
+        assert!(text(&resp, 0).contains("no indicator named"));
+    }
+
+    #[test]
+    fn script_plot_colors_reach_the_series_wire() {
+        // ADR-0026: a script's chart.line / chart.bars colors serialize like
+        // a built-in's.
+        let u = user();
+        let source = r##"
+PARAMS = []
+META = {"title": "Colored", "overlay": False}
+
+def compute(ohlcv, params, chart):
+    m = ohlcv.close - ohlcv.close[3]
+    chart.line(m, title = "MOM", color = "teal", width = 3)
+    chart.bars(m, color = "#ff00ff", alpha = 0.5)
+"##;
+        payload(&call(
+            "register_indicator",
+            json!({"name": "colored", "source": source}),
+            Some(&u),
+        ));
+        let p = payload(&chart(&u, json!(["colored"]), "series"));
+        let ind = &p["indicators"]["colored"];
+        assert_eq!(ind["lines"][0]["color"], "rgba(0,137,123,0.9)");
+        assert_eq!(ind["lines"][0]["width"], 3);
+        let h = &ind["histogram"][0];
+        assert_eq!(h["label"], "Colored");
+        assert_eq!(h["palette"], json!(["rgba(255,0,255,0.5)"]));
+        let idx = h["color_idx"].as_array().unwrap();
+        assert_eq!(idx.len(), 200);
+        assert!(idx[..3].iter().all(|i| i.is_null()));
+        assert!(idx[3..].iter().all(|i| *i == json!(0)));
+    }
+
+    #[test]
+    fn scripts_are_per_user() {
+        let (a, b) = (user(), user());
+        payload(&call(
+            "register_indicator",
+            json!({"name": "secret_sauce", "source": MOMENTUM}),
+            Some(&a),
+        ));
+        assert_eq!(
+            payload(&call("list_my_indicators", json!({}), Some(&b)))["total"],
+            0
+        );
+        let all_b = payload(&tool_list_indicators(Some(json!(1)), Some(&b)));
+        assert!(!all_b.to_string().contains("secret_sauce"));
+        let resp = chart(&b, json!(["secret_sauce"]), "series");
+        assert!(text(&resp, 0).contains("Unknown indicator"));
+        let resp = call(
+            "delete_indicator",
+            json!({"name": "secret_sauce"}),
+            Some(&b),
+        );
+        assert!(resp["result"]["isError"].as_bool().unwrap());
+        // no user (stdio): built-ins only, scripting tools refuse
+        let resp = generate_chart(
+            Some(json!(1)),
+            &json!({"indicators": ["secret_sauce"], "format": "series"}),
+            fetch::DataSource::Sample,
+            None,
+        );
+        assert!(text(&resp, 0).contains("Unknown indicator"));
+        let resp = call("list_my_indicators", json!({}), None);
+        assert!(text(&resp, 0).contains("authenticated"));
+        assert!(payload(&call("list_my_indicators", json!({}), Some(&a)))["total"] == 1);
+    }
+
+    #[test]
+    fn fork_shadows_the_builtin_for_its_owner_only() {
+        let (a, b) = (user(), user());
+        let fork = payload(&call(
+            "fork_indicator",
+            json!({"builtin_name": "wavetrend"}),
+            None,
+        ));
+        let source = fork["source"].as_str().unwrap().replace(
+            "chart.set_y_range(-105, 105)",
+            "chart.set_y_range(-105, 105)\n    chart.set_label(\"My WaveTrend\")",
+        );
+        assert_eq!(fork["configurable_params"][0]["name"], "ch_len");
+        let reg = payload(&call(
+            "register_indicator",
+            json!({"name": "wavetrend", "source": source}),
+            Some(&a),
+        ));
+        assert_eq!(reg["shadows_builtin"], true);
+        let label = |u: &str| {
+            payload(&chart(u, json!(["wavetrend"]), "series"))["indicators"]["wavetrend"]["label"]
+                .clone()
+        };
+        assert_eq!(label(&a), "My WaveTrend");
+        assert_eq!(label(&b), "WaveTrend");
+        let all = payload(&tool_list_indicators(Some(json!(1)), Some(&a)));
+        let wt: Vec<&Value> = all["indicators"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|i| i["name"] == "wavetrend")
+            .collect();
+        assert_eq!(wt.len(), 1, "the fork replaces the built-in entry");
+        assert_eq!(wt[0]["source"], "user");
+
+        let resp = call("fork_indicator", json!({"builtin_name": "rsi"}), None);
+        assert!(resp["result"]["isError"].as_bool().unwrap());
+        assert!(text(&resp, 0).contains("Forkable built-ins: wavetrend"));
+    }
+
+    #[test]
+    fn register_returns_structured_errors() {
+        let u = user();
+        let resp = call(
+            "register_indicator",
+            json!({"name": "bad", "source": "PARAMS = []\nMETA = {}\ndef compute(ohlcv, params, chart):\n    chart.line(ohlcv.close + \"x\")\n"}),
+            Some(&u),
+        );
+        assert!(resp["result"]["isError"].as_bool().unwrap());
+        let p: Value = serde_json::from_str(text(&resp, 0)).unwrap();
+        assert_eq!(p["ok"], false);
+        assert_eq!(p["errors"][0]["step"], "dry_run");
+        assert_eq!(p["errors"][0]["line"], 4);
+        assert!(p["errors"][0]["message"].is_string());
+        assert_eq!(
+            payload(&call("list_my_indicators", json!({}), Some(&u)))["total"],
+            0
+        );
+        let resp = call(
+            "register_indicator",
+            json!({"name": "Bad-Name", "source": MOMENTUM}),
+            Some(&u),
+        );
+        assert!(text(&resp, 0).contains("lowercase"));
+    }
+
+    #[test]
+    fn a_failing_script_fails_only_its_indicator() {
+        let u = user();
+        // Passes the 100-bar dry run, fails on the 200-bar chart.
+        let source = MOMENTUM.replace(
+            "    m = ohlcv.close",
+            "    if len(ohlcv.close) > 150:\n        fail(\"too many bars\")\n    m = ohlcv.close",
+        );
+        payload(&call(
+            "register_indicator",
+            json!({"name": "fragile", "source": source}),
+            Some(&u),
+        ));
+        for format in ["series", "summary", "both"] {
+            let resp = chart(&u, json!(["fragile", "rsi"]), format);
+            let i = usize::from(format == "both");
+            let p: Value = serde_json::from_str(text(&resp, i)).unwrap();
+            assert!(p["indicators"]["rsi"].is_object(), "{format}");
+            assert!(p["indicators"].get("fragile").is_none(), "{format}");
+            let e = &p["indicator_errors"]["fragile"];
+            assert_eq!(e["step"], "runtime");
+            assert!(e["message"].as_str().unwrap().contains("too many bars"));
+            assert_eq!(e["line"], 7);
+        }
+        let resp = chart(&u, json!(["fragile", "rsi"]), "png");
+        assert_eq!(resp["result"]["content"][0]["type"], "image");
+        let p: Value = serde_json::from_str(text(&resp, 1)).unwrap();
+        assert_eq!(p["indicator_errors"]["fragile"]["step"], "runtime");
     }
 }

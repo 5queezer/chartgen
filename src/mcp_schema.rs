@@ -23,7 +23,7 @@ pub fn tools_list_result() -> Value {
                     "properties": {
                         "ticker": {
                             "type": "string",
-                            "description": "Stock or crypto ticker symbol. Stocks: AAPL, MSFT, TSLA, GOOGL, AMZN (Yahoo Finance). Crypto: BTCUSDT, ETHUSDT, SOLUSDT (Binance). If omitted, uses random sample data."
+                            "description": "Stock or crypto ticker symbol. Stocks: AAPL, MSFT, TSLA, GOOGL, AMZN (Yahoo Finance). Crypto: BTCUSDT, ETHUSDT, SOLUSDT (Binance). If omitted, uses random sample data. If given and the upstream fetch fails, the call returns an error."
                         },
                         "symbol": {
                             "type": "string",
@@ -75,8 +75,23 @@ pub fn tools_list_result() -> Value {
                         },
                         "bars": {
                             "type": "integer",
-                            "description": "Number of OHLCV candlestick bars to display",
+                            "description": "Number of OHLCV candlestick bars to display (max 5000, all formats)",
                             "default": 200
+                        },
+                        "end_time": {
+                            "type": "integer",
+                            "description": "History paging: return only bars whose open time (ms since epoch) is strictly before end_time — pass the oldest loaded bar's t × 1000 to fetch the page before it. Omit (or null) for the newest bars, including the still-forming one. Must be an integer between -2208988800000 (1900-01-01) and one year from now."
+                        },
+                        "warmup": {
+                            "type": "integer",
+                            "description": "format=series only: extra older bars (max 1000) fetched and fed to indicator computation, then trimmed, so the first returned bars carry warmed-up indicator values. Ignored by png/summary/both.",
+                            "default": 0
+                        },
+                        "chart_style": {
+                            "type": "string",
+                            "enum": ["candles", "heikin_ashi"],
+                            "description": "Price series style. 'candles' (default) uses the raw OHLC bars. 'heikin_ashi' replaces them with Heikin Ashi bars (haClose = ohlc4, haOpen = (prev haOpen + prev haClose) / 2, seeded with (open+close)/2) in every format. Like TradingView, indicators are then computed on the Heikin Ashi values. The transform runs over bars+warmup before trimming, so pages and tail polls converge after warmup. format=series echoes the applied style as chart_style.",
+                            "default": "candles"
                         },
                         "width": {
                             "type": "integer",
@@ -91,7 +106,7 @@ pub fn tools_list_result() -> Value {
                         "format": {
                             "type": "string",
                             "enum": ["png", "summary", "both", "series"],
-                            "description": "Output format. 'png' (default) returns a rendered chart image. 'summary' returns a compact JSON summary (OHLCV stats, last indicator values, signals, divergences, levels) — typically 10-50x fewer tokens than a PNG and ideal for automated analysis without vision. 'both' returns the PNG plus the JSON summary. 'series' returns a full per-bar time-series JSON payload (every OHLCV bar plus 1:1 aligned indicator value arrays with NaN→null for pre-warmup, signals with bar timestamps, hlines, and y_range) — ideal for downstream numeric computation.",
+                            "description": "Output format. 'png' (default) returns a rendered chart image. 'summary' returns a compact JSON summary (OHLCV stats, last indicator values, signals, divergences, levels) — typically 10-50x fewer tokens than a PNG and ideal for automated analysis without vision. 'both' returns the PNG plus the JSON summary. 'series' returns a full per-bar time-series JSON payload (every OHLCV bar plus 1:1 aligned indicator value arrays with NaN→null for pre-warmup, signals with bar timestamps, hlines, and y_range, plus has_more=true when older history may exist) — ideal for downstream numeric computation.",
                             "default": "png"
                         }
                     }
@@ -127,6 +142,50 @@ pub fn tools_list_result() -> Value {
                         }
                     },
                     "required": ["symbol", "indicators"]
+                }
+            },
+            {
+                "name": "get_quotes",
+                "description": "Get the last price and change for many symbols in one call (watchlist). Returns one entry per distinct symbol, in request order: {symbol, last, change, change_pct, prev_close, high, low, volume, source}, or {symbol, error} when that symbol fails; one bad symbol never fails the call. Stocks/ETFs/indices/FX (Yahoo): change vs the previous session's close, like TradingView. Crypto (Binance, symbols ending in USDT, BTC, ETH, ...): change over the rolling 24 h window, as Binance's own ticker reports it.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "symbols": {
+                            "type": "array",
+                            "items": { "type": "string" },
+                            "maxItems": 50,
+                            "description": "Ticker symbols (e.g. [\"BTCUSDT\", \"AAPL\", \"^GSPC\"]). At most 50 entries; trimmed, uppercased and deduplicated."
+                        }
+                    },
+                    "required": ["symbols"]
+                }
+            },
+            {
+                "name": "search_symbols",
+                "description": "Search symbols by ticker or name across all Binance spot pairs and Yahoo Finance instruments (stocks, ETFs, funds, indices, FX, futures), like TradingView's symbol search. Returns {results: [{symbol, name, exchange, type, source}], warnings?}, ranked: exact symbol match first, then prefix, then contains, then name match. type is one of crypto, stock, etf, fund, index, forex, future; source is binance, yahoo or sample. Crypto comes from Binance only (e.g. BTCUSDT); Yahoo's own crypto listings are dropped. If one source fails its results are omitted and a warning is added; the call fails only when every queried source fails.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 40,
+                            "description": "Text to search for in tickers and names. Trimmed; 1-40 characters, no control characters."
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 50,
+                            "default": 30,
+                            "description": "Maximum number of results"
+                        },
+                        "types": {
+                            "type": "array",
+                            "items": { "type": "string", "enum": ["crypto", "stock", "etf", "fund", "index", "forex", "future"] },
+                            "description": "Only return these instrument types. Omit for all types."
+                        }
+                    },
+                    "required": ["query"]
                 }
             },
             {
@@ -249,7 +308,119 @@ pub fn tools_list_result() -> Value {
                     "type": "object",
                     "properties": {}
                 }
+            },
+            {
+                "name": "subscribe_chart",
+                "description": "Push live updates of a chart over the caller's SSE stream (GET /mcp with the same token and Mcp-Session-Id). Each update is a notifications/chart_tick notification with params {subscription_id, series}, where series is exactly the generate_chart(format=series, bars=2, warmup) tail for these arguments: the last closed bar and the forming bar with indicators recomputed. Pushes follow the market (sub-second for active Binance symbols), at most 4 per second (2 when warmup > 300). Only Binance symbols are pushable; any other symbol returns an error starting with 'not pushable', and the client should poll generate_chart instead. Limits (4 subscriptions per token, 8 per client address, 64 per server, 10 subscribe_chart calls per token per minute, 10 indicators) fail with an error starting with 'push limit reached': poll that chart instead. A subscription ends with unsubscribe_chart or when its SSE stream closes. HTTP transport only; works without --trade.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "ticker": {
+                            "type": "string",
+                            "description": "Binance symbol, 2-20 letters or digits, e.g. BTCUSDT."
+                        },
+                        "timeframe": {
+                            "type": "string",
+                            "description": "Candlestick timeframe, as for generate_chart: 1m, 5m, 15m, 30m, 1h, 4h, 1d, 1wk, 1mo.",
+                            "default": "4h"
+                        },
+                        "indicators": {
+                            "type": "array",
+                            "items": {
+                                "oneOf": [
+                                    { "type": "string" },
+                                    {
+                                        "type": "object",
+                                        "properties": {
+                                            "name": { "type": "string" }
+                                        },
+                                        "required": ["name"],
+                                        "additionalProperties": true
+                                    }
+                                ]
+                            },
+                            "description": "Indicators, as for generate_chart; at most 10.",
+                            "default": ["ema_stack", "cipher_b", "macd"]
+                        },
+                        "chart_style": {
+                            "type": "string",
+                            "enum": ["candles", "heikin_ashi"],
+                            "description": "Price series style, as for generate_chart.",
+                            "default": "candles"
+                        },
+                        "warmup": {
+                            "type": "integer",
+                            "description": "Extra older bars (max 1000) the server keeps and feeds to indicator computation, as for generate_chart(format=series).",
+                            "default": 0
+                        }
+                    },
+                    "required": ["ticker"]
+                }
+            },
+            {
+                "name": "unsubscribe_chart",
+                "description": "End a subscribe_chart subscription. Returns {unsubscribed: false} if it was already gone (e.g. its SSE stream closed).",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "subscription_id": {
+                            "type": "string",
+                            "description": "The subscription_id returned by subscribe_chart."
+                        }
+                    },
+                    "required": ["subscription_id"]
+                }
             }
         ]
     })
+}
+
+/// Tools for user-authored Starlark indicators (ADR-0025). `tools/list`
+/// appends them only when `CHARTGEN_SCRIPTING=1`; `tools_list_result()`
+/// (and so the generated TypeScript input types) never includes them.
+pub fn scripting_tools() -> Vec<Value> {
+    vec![
+        json!({
+            "name": "register_indicator",
+            "description": "Register (or replace) one of your own indicators, written in Starlark (a Python dialect; Pine Script-like). The source defines PARAMS = [{\"name\", \"type\": int|float|bool|string, \"default\", \"min\"?, \"max\"?, \"desc\"?}], META = {\"title\", \"overlay\": bool, \"description\"?} and def compute(ohlcv, params, chart). ohlcv.open/high/low/close/volume/time/hl2/hlc3/ohlc4 are series; series support + - * / and comparisons (giving bool series), & | ~, and close[1] for the previous bar. ta.* has sma, ema, wma, rma, rsi, stoch, atr, macd, highest, lowest, stdev, change, roc, crossover, crossunder, pivot_high, pivot_low and element-wise math. Draw with chart.line/fill/bars/dot/hline/hbar/divline/set_y_range/set_label. The script is parsed, statically checked and dry-run on 100 synthetic bars; a failure returns {ok: false, errors: [{step, line, message}]}. Once registered, use the name in generate_chart like a built-in; it shadows a built-in of the same name for you only. Call fork_indicator to start from a built-in's source.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "pattern": "^[a-z][a-z0-9_]{0,47}$", "description": "Indicator name: lowercase letters, digits and _, starting with a letter." },
+                    "source": { "type": "string", "maxLength": 65536, "description": "Starlark source defining PARAMS, META and compute(ohlcv, params, chart)." }
+                },
+                "required": ["name", "source"]
+            }
+        }),
+        json!({
+            "name": "fork_indicator",
+            "description": "Get the Starlark source of a built-in indicator, to edit and register under your account with register_indicator (keep the name to replace the built-in for you, or pick a new one). Only built-ins with a reference implementation can be forked; the error lists them.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "builtin_name": { "type": "string", "description": "Built-in indicator name, e.g. wavetrend." }
+                },
+                "required": ["builtin_name"]
+            }
+        }),
+        json!({
+            "name": "list_my_indicators",
+            "description": "List the indicators you registered: name, title, description, overlay, configurable_params, created_at and updated_at (unix seconds). list_indicators also includes them, tagged source: \"user\".",
+            "inputSchema": {
+                "type": "object",
+                "properties": {}
+            }
+        }),
+        json!({
+            "name": "delete_indicator",
+            "description": "Delete one of your registered indicators. A built-in it shadowed becomes visible again.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "Name of your indicator." }
+                },
+                "required": ["name"]
+            }
+        }),
+    ]
 }

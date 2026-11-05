@@ -136,11 +136,11 @@ Auto-detection: `USDT`/`BTC`/`ETH` suffixes → Binance, everything else → Yah
 
 ### Claude.ai
 
-Add `https://chartgen.vasudev.xyz` as a remote MCP connector. OAuth 2.1 PKCE is handled automatically.
+Add `https://chartgen.vasudev.xyz/mcp` as a remote MCP connector. OAuth 2.1 PKCE is handled automatically. (`POST /` still works as a deprecated alias for connectors added with the root URL.)
 
 ### Web frontend
 
-A SolidJS browser SPA lives in [`web/`](web/) — one-screen chart viewer with the same OAuth PKCE flow. See the [Web frontend guide](https://5queezer.github.io/chartgen/guides/web/).
+A SolidJS browser SPA lives in [`web/`](web/) — one-screen chart viewer with the same OAuth PKCE flow. The Docker image serves it at [chartgen.vasudev.xyz](https://chartgen.vasudev.xyz/) on the same origin as `/mcp`. See the [Web frontend guide](https://5queezer.github.io/chartgen/guides/web/).
 
 ### Tools
 
@@ -148,6 +148,7 @@ Charting:
 - **`generate_chart`** — render a chart. `format` can be `png` (default), `summary` (compact JSON with OHLCV stats, last indicator values, signals, divergences, and levels — 10–50× cheaper in tokens than a PNG), or `both`.
 - **`list_indicators`** — discover all 37 indicators with parameters.
 - **`get_indicators`** — compute indicators and return raw numeric values as JSON.
+- **`get_quotes`** — last price and change (vs previous close; rolling 24 h for Binance) for up to 50 symbols in one call (watchlist).
 
 Trading (require `--trade`):
 - **`place_order`**, **`cancel_order`**, **`get_orders`** — order lifecycle
@@ -168,7 +169,8 @@ src/
 ├── mtf.rs               Multi-timeframe aggregation
 ├── indicators/
 │   ├── mod.rs           Registry (by_name, available, registry)
-│   ├── ta_bridge.rs     ta-rs wrappers
+│   ├── pine.rs          Pine v5 semantics helpers (ADR-0018)
+│   ├── ta_bridge.rs     classic built-ins (EMA, BB, KC, ATR, Stoch, ...)
 │   ├── custom.rs        custom indicators (incl. volume-profile family)
 │   ├── cipher_b.rs      Cipher B (Pine Script port)
 │   ├── external.rs      API-based indicators
@@ -201,7 +203,7 @@ docker build -t chartgen .
 docker run -p 9315:9315 -e CHARTGEN_BASE_URL=https://your-domain.com chartgen
 ```
 
-2-stage build: `rust:1.86-slim` → `debian:bookworm-slim` (~93MB).
+3-stage build: `rust:1.95-slim-bookworm` (binary) + `node:22-bookworm-slim` (web app) → `debian:bookworm-slim`. The image sets `CHARTGEN_WEB_DIR=/usr/share/chartgen/web`, so browsers opening `/` get the web app while health checks and MCP clients get the JSON at `/` and MCP at `/mcp` ([ADR-0027](https://5queezer.github.io/chartgen/decisions/0027-serve-web-app-same-origin/)). Without `CHARTGEN_WEB_DIR` (e.g. `cargo run -- --serve`) no static files are served.
 
 ### CI/CD
 

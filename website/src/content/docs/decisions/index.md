@@ -36,3 +36,22 @@ one and link both ways.
 | [0005](/chartgen/decisions/0005-client-indicator-state/) | Client-side indicator state with localStorage persistence | Accepted | 2026-04-20 |
 | [0006](/chartgen/decisions/0006-tradingview-visual-parity/) | TradingView visual parity for the web frontend | Accepted | 2026-04-19 |
 | [0007](/chartgen/decisions/0007-complete-series-serialization/) | Complete series serialization: fills, hbars, divlines | Accepted | 2026-04-19 |
+| [0008](/chartgen/decisions/0008-e2e-playwright/) | End-to-end tests with Playwright + CI integration | Accepted | 2026-11-04 |
+| [0009](/chartgen/decisions/0009-live-tail-polling-and-history-paging/) | Live tail polling and history paging | Accepted | 2026-11-04 |
+| [0010](/chartgen/decisions/0010-overlay-geometry-rendering/) | Overlay geometry rendering via klinecharts indicator draw callbacks | Accepted | 2026-11-04 |
+| [0011](/chartgen/decisions/0011-watchlist-quotes/) | Watchlist quotes: batched get_quotes, rolling 24 h change for Binance | Accepted | 2026-11-04 |
+| [0012](/chartgen/decisions/0012-geometry-colors-on-the-wire/) | Geometry colors on the wire | Accepted | 2026-11-04 |
+| [0013](/chartgen/decisions/0013-indicator-visibility-and-instances/) | Indicator visibility, parameter editing and one instance per indicator | Accepted | 2026-11-04 |
+| [0015](/chartgen/decisions/0015-named-layouts/) | Named chart layouts | Accepted | 2026-11-04 |
+| [0016](/chartgen/decisions/0016-light-theme/) | Light theme with a single TypeScript token source | Accepted | 2026-11-04 |
+| [0017](/chartgen/decisions/0017-indicator-plot-styles/) | Indicator plot styles | Accepted | 2026-11-05 |
+| [0018](/chartgen/decisions/0018-pine-semantics-for-indicators/) | Pine v5 semantics for indicator math | Accepted | 2026-11-05 |
+| [0019](/chartgen/decisions/0019-chart-settings/) | Chart settings: per-theme overrides over the palette | Accepted | 2026-11-05 |
+| [0020](/chartgen/decisions/0020-client-side-price-alerts/) | Client-side price alerts | Accepted | 2026-11-05 |
+| [0021](/chartgen/decisions/0021-realtime-chart-push/) | Real-time chart push over the MCP SSE stream | Accepted | 2026-11-05 |
+| [0022](/chartgen/decisions/0022-compare-symbols/) | Compare symbols | Accepted | 2026-11-05 |
+| [0023](/chartgen/decisions/0023-bar-replay/) | Bar replay: client slice, server recompute of repainting indicators | Accepted | 2026-11-05 |
+| [0024](/chartgen/decisions/0024-starlark-script-runtime/) | Starlark as the script runtime for user indicators | Accepted | 2026-11-05 |
+| [0025](/chartgen/decisions/0025-user-indicator-registry/) | Per-user indicator registry and MCP surface | Accepted | 2026-11-05 |
+| [0026](/chartgen/decisions/0026-line-and-histogram-colors/) | Line and histogram colors on the wire | Accepted | 2026-11-05 |
+| [0027](/chartgen/decisions/0027-serve-web-app-same-origin/) | Serve the web app from the MCP server's origin | Accepted | 2026-11-05 |

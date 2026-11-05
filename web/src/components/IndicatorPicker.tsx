@@ -1,7 +1,7 @@
 // "Add Indicator" modal. Kobalte Dialog hosts a search input and a
 // per-category Accordion listing every indicator returned by
-// `list_indicators`. Clicking a row adds the indicator with its default
-// parameters (from `configurable_params`) and leaves the modal open for
+// `list_indicators`. Clicking a row adds the indicator by name (default
+// parameters; edit them via the settings dialog) and leaves the modal open for
 // multi-add; removal happens via the chip row, not here.
 //
 // The accordion is normally all-collapsed. When the search field is
@@ -55,30 +55,6 @@ const CATEGORY_LABEL: Record<string, string> = {
 
 function categoryLabel(category: string): string {
   return CATEGORY_LABEL[category] ?? category;
-}
-
-/**
- * Build the default-parameter entry for an indicator. If the registry
- * publishes `configurable_params` as an object, merge its defaults into
- * `{ name, ... }`. Otherwise fall back to the bare name.
- */
-function toActiveEntry(info: IndicatorInfo): ActiveIndicator {
-  const params = info.configurable_params;
-  if (params && typeof params === "object" && !Array.isArray(params)) {
-    const defaults: Record<string, unknown> = {};
-    // Expect `{ param: { default: value, ... } }` — the registry's shape
-    // varies, so we defensively accept either a nested `default` or a
-    // bare value.
-    for (const [k, v] of Object.entries(params as Record<string, unknown>)) {
-      if (v && typeof v === "object" && "default" in (v as object)) {
-        defaults[k] = (v as { default: unknown }).default;
-      }
-    }
-    if (Object.keys(defaults).length > 0) {
-      return { name: info.name, ...defaults };
-    }
-  }
-  return info.name;
 }
 
 function matches(info: IndicatorInfo, query: string): boolean {
@@ -208,7 +184,9 @@ export function IndicatorPicker(props: IndicatorPickerProps): JSX.Element {
   });
 
   const handleAdd = (info: IndicatorInfo) => {
-    addIndicator(toActiveEntry(info));
+    // Bare name: the server applies schema defaults, and only non-default
+    // params are ever stored on an entry.
+    addIndicator(info.name);
   };
 
   return (

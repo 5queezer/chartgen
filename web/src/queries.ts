@@ -2,9 +2,11 @@
 // server-state query for v0.1; alerts, positions, and orders will grow
 // their own hooks here as they land.
 
-import { createQuery } from "@tanstack/solid-query";
+import { createQuery, keepPreviousData } from "@tanstack/solid-query";
 import type { Accessor } from "solid-js";
 
+import { INITIAL_BARS, WARMUP } from "./lib/liveFeed";
+import type { ChartStyle } from "./stores/layout";
 import type { McpSession } from "./mcp";
 import { clearAccessToken } from "./oauth";
 import {
@@ -13,15 +15,33 @@ import {
 } from "./stores/indicators";
 import type {
   ListIndicatorsPayload,
+  QuotesPayload,
   SeriesPayload,
 } from "./types/responses";
+
+/** Watchlist poll period while the tab is visible. */
+export const QUOTES_POLL_MS = 5_000;
 
 export interface ChartQueryInput {
   ticker: string;
   timeframe: string;
   indicators: ActiveIndicator[];
-  /** Gates the query — flip to true when the user clicks Load. */
+  chart_style: ChartStyle;
+  /** Gates the query — true once auth is ready. */
   enabled: boolean;
+}
+
+/** Query key of the chart query for a request. */
+export function chartQueryKey(
+  input: Pick<ChartQueryInput, "ticker" | "timeframe" | "indicators" | "chart_style">,
+) {
+  return [
+    "generate_chart",
+    input.ticker,
+    input.timeframe,
+    activeIndicatorsKey(input.indicators),
+    input.chart_style,
+  ] as const;
 }
 
 /**
@@ -40,23 +60,50 @@ export function createChartQuery(
   input: Accessor<ChartQueryInput>,
 ) {
   return createQuery<SeriesPayload, Error>(() => {
-    const { ticker, timeframe, indicators, enabled } = input();
-    const indicatorsKey = activeIndicatorsKey(indicators);
+    const { ticker, timeframe, indicators, chart_style, enabled } = input();
+    const queryKey = chartQueryKey({
+      ticker,
+      timeframe,
+      indicators,
+      chart_style,
+    });
     return {
-      queryKey: [
-        "generate_chart",
-        ticker,
-        timeframe,
-        indicatorsKey,
-      ] as const,
+      queryKey,
+      // Warmed up like every page and tail (ADR-0009), so the first page
+      // seam has no null-indicator gap.
       queryFn: () =>
-        session.callGenerateChart({ ticker, timeframe, indicators }),
-      staleTime: 60_000,
+        session.callGenerateChart({
+          ticker,
+          timeframe,
+          indicators,
+          chart_style,
+          bars: INITIAL_BARS,
+          warmup: WARMUP,
+        }),
+      // Every fetch result is stored as it came in, never merged into the
+      // previous one (replaceEqualDeep). App adopts a load by the cache
+      // entry's dataUpdatedAt (App.tsx), not by object identity; this just
+      // keeps each load a distinct object.
+      structuralSharing: false,
+      // This query is only the full load. The live feed (lib/liveFeed.ts)
+      // keeps the data fresh from there and pages history into its own
+      // merged copy, so a background refetch would only throw that away
+      // and snap the view back to the newest bars. Hence: never stale, no
+      // refetch on focus or reconnect. Data is refetched on a key change
+      // (symbol, timeframe, indicator set or params), an explicit
+      // refetch() (Retry, re-selecting the symbol), or when the feed asks
+      // for a full reload after a gap it cannot bridge.
+      staleTime: Infinity,
+      refetchOnWindowFocus: false,
+      refetchOnReconnect: false,
+      // Keep the previous chart on screen while a new symbol/timeframe
+      // loads. The feed only adopts the current key's cache entry (App.tsx).
+      placeholderData: keepPreviousData,
       enabled,
       retry: (failureCount: number, error: Error) => {
         // The MCP wrapper re-auths once on 401, so any 401 that bubbles
         // out has already survived a retry. Drop the token defensively
-        // and let the user re-trigger manually.
+        // and let the user retry from the status line.
         if (/401|unauthoriz/i.test(error.message)) {
           clearAccessToken();
           return false;
@@ -91,4 +138,36 @@ export function createListIndicatorsQuery(
       return failureCount < 0;
     },
   }));
+}
+
+/**
+ * Create a TanStack Solid Query for `get_quotes` (the watchlist). The
+ * interval timer keeps running at `QUOTES_POLL_MS`; with the default
+ * `refetchIntervalInBackground: false` each tick is skipped while the tab
+ * is hidden, so polling resumes on the first tick after the tab is
+ * visible again. (`refetchOnWindowFocus` is off globally, so no refetch
+ * fires on the return itself.) The caller stops polling through
+ * `enabled`, e.g. while the panel is collapsed. The previous quotes stay
+ * on screen while a changed list loads.
+ */
+export function createQuotesQuery(
+  session: McpSession,
+  input: Accessor<{ symbols: string[]; enabled: boolean }>,
+) {
+  return createQuery<QuotesPayload, Error>(() => {
+    const { symbols, enabled } = input();
+    return {
+      queryKey: ["get_quotes", ...symbols] as const,
+      queryFn: () => session.callGetQuotes(symbols),
+      enabled: enabled && symbols.length > 0,
+      staleTime: QUOTES_POLL_MS - 1_000,
+      refetchInterval: QUOTES_POLL_MS,
+      placeholderData: keepPreviousData,
+      retry: (_failureCount: number, error: Error) => {
+        if (/401|unauthoriz/i.test(error.message)) clearAccessToken();
+        // The next poll is the retry.
+        return false;
+      },
+    };
+  });
 }

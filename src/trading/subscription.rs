@@ -27,7 +27,10 @@ struct PersistedSubscription {
 pub struct ClientSubscription {
     pub symbols: Option<HashSet<String>>,
     pub alert_types: Option<HashSet<String>>,
-    pub sender: Option<mpsc::UnboundedSender<String>>,
+    /// SSE streams of this token, by stream key (token + `Mcp-Session-Id`,
+    /// see `server::stream_key`), so every tab receives the alerts and one
+    /// tab closing does not unlink another.
+    pub senders: HashMap<String, mpsc::Sender<String>>,
     pub offline_queue: Vec<(TriggeredAlert, Instant)>,
 }
 
@@ -50,7 +53,7 @@ impl SubscriptionRegistry {
                         ClientSubscription {
                             symbols: p.symbols,
                             alert_types: p.alert_types,
-                            sender: None,
+                            senders: HashMap::new(),
                             offline_queue: Vec::new(),
                         },
                     )
@@ -83,7 +86,7 @@ impl SubscriptionRegistry {
                 ClientSubscription {
                     symbols,
                     alert_types,
-                    sender: None,
+                    senders: HashMap::new(),
                     offline_queue: Vec::new(),
                 },
             );
@@ -101,12 +104,14 @@ impl SubscriptionRegistry {
             symbols: sub.symbols.clone(),
             alert_types: sub.alert_types.clone(),
             offline_queue_size: sub.offline_queue.len(),
-            connected: sub.sender.is_some(),
+            connected: !sub.senders.is_empty(),
         })
     }
 
     /// Dispatch triggered alerts to all matching subscriptions.
-    /// Connected subscribers receive JSON via sender; offline subscribers get queued.
+    /// Connected subscribers receive JSON on every linked stream; a stream
+    /// that is closed or full is unlinked. Subscribers left without a stream
+    /// get the alert queued.
     pub fn dispatch(&mut self, alerts: &[TriggeredAlert]) {
         for alert in alerts {
             let alert_type = condition_type_name(&alert.alert.condition);
@@ -122,39 +127,39 @@ impl SubscriptionRegistry {
 
                 let json = format_notification(alert);
 
-                if let Some(ref sender) = sub.sender {
-                    if sender.send(json).is_err() {
-                        // Sender disconnected — queue instead
-                        sub.sender = None;
-                        push_to_queue(&mut sub.offline_queue, alert.clone(), self.max_queue_size);
-                    }
-                } else {
+                sub.senders
+                    .retain(|_, sender| sender.try_send(json.clone()).is_ok());
+                if sub.senders.is_empty() {
                     push_to_queue(&mut sub.offline_queue, alert.clone(), self.max_queue_size);
                 }
             }
         }
     }
 
-    /// Associate an SSE sender with a subscription. Flushes the offline queue.
-    pub fn link_sender(&mut self, token: &str, sender: mpsc::UnboundedSender<String>) {
+    /// Associate the SSE stream `stream` with a subscription. Flushes the
+    /// offline queue.
+    pub fn link_sender(&mut self, token: &str, stream: &str, sender: mpsc::Sender<String>) {
         if let Some(sub) = self.subscriptions.get_mut(token) {
             // Flush offline queue through the sender
-            let queue = std::mem::take(&mut sub.offline_queue);
-            for (alert, _instant) in queue {
-                let json = format_notification(&alert);
-                if sender.send(json).is_err() {
-                    // Sender broken immediately — stop flushing
+            let mut queue = std::mem::take(&mut sub.offline_queue).into_iter();
+            for (alert, at) in queue.by_ref() {
+                if sender.try_send(format_notification(&alert)).is_err() {
+                    // Full or closed: keep this alert and the rest queued.
+                    sub.offline_queue.push((alert, at));
                     break;
                 }
             }
-            sub.sender = Some(sender);
+            sub.offline_queue.extend(queue);
+            if !sender.is_closed() {
+                sub.senders.insert(stream.to_string(), sender);
+            }
         }
     }
 
-    /// Set sender to None (client disconnected).
-    pub fn unlink_sender(&mut self, token: &str) {
+    /// Unlink the SSE stream `stream` (client disconnected).
+    pub fn unlink_sender(&mut self, token: &str, stream: &str) {
         if let Some(sub) = self.subscriptions.get_mut(token) {
-            sub.sender = None;
+            sub.senders.remove(stream);
         }
     }
 
@@ -345,16 +350,16 @@ mod tests {
         let dir = temp_dir("sub_preserves_sender");
         let mut reg = make_registry(&dir);
 
-        let (tx, _rx) = mpsc::unbounded_channel();
+        let (tx, _rx) = mpsc::channel(16);
         reg.subscribe("tok1", None, None);
-        reg.link_sender("tok1", tx);
+        reg.link_sender("tok1", "s1", tx);
 
         // Re-subscribe with new filters
         let syms = Some(HashSet::from(["BTCUSDT".to_string()]));
         reg.subscribe("tok1", syms, None);
 
         // Sender should still be present
-        assert!(reg.subscriptions.get("tok1").unwrap().sender.is_some());
+        assert!(!reg.subscriptions.get("tok1").unwrap().senders.is_empty());
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -482,6 +487,61 @@ mod tests {
     }
 
     #[test]
+    fn link_sender_keeps_overflow_queued_in_order() {
+        let dir = temp_dir("link_overflow");
+        let mut reg = make_registry(&dir);
+        reg.subscribe("tok1", None, None);
+        let alerts: Vec<_> = (0..300)
+            .map(|i| {
+                make_alert(
+                    &format!("a{i}"),
+                    "BTCUSDT",
+                    AlertCondition::PriceAbove(1.0),
+                    2.0,
+                )
+            })
+            .collect();
+        reg.dispatch(&alerts);
+        assert_eq!(reg.list("tok1").unwrap().offline_queue_size, 300);
+
+        let (tx, mut rx) = mpsc::channel(256);
+        reg.link_sender("tok1", "s1", tx);
+
+        let mut delivered = 0;
+        while rx.try_recv().is_ok() {
+            delivered += 1;
+        }
+        assert_eq!(delivered, 256);
+        let sub = reg.subscriptions.get("tok1").unwrap();
+        assert_eq!(sub.offline_queue.len(), 44);
+        assert_eq!(sub.offline_queue[0].0.alert.id, "a256");
+        assert_eq!(sub.offline_queue[43].0.alert.id, "a299");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn link_sender_ignores_closed_receiver() {
+        let dir = temp_dir("link_closed");
+        let mut reg = make_registry(&dir);
+        reg.subscribe("tok1", None, None);
+        reg.dispatch(&[make_alert(
+            "a1",
+            "BTCUSDT",
+            AlertCondition::PriceAbove(1.0),
+            2.0,
+        )]);
+
+        let (tx, rx) = mpsc::channel(8);
+        drop(rx);
+        reg.link_sender("tok1", "s1", tx);
+
+        let info = reg.list("tok1").unwrap();
+        assert!(!info.connected);
+        assert_eq!(info.offline_queue_size, 1);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn ttl_expiry() {
         let dir = temp_dir("ttl");
         let mut reg = SubscriptionRegistry::new(
@@ -577,9 +637,9 @@ mod tests {
         let dir = temp_dir("dispatch_connected");
         let mut reg = make_registry(&dir);
 
-        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (tx, mut rx) = mpsc::channel(16);
         reg.subscribe("tok1", None, None);
-        reg.link_sender("tok1", tx);
+        reg.link_sender("tok1", "s1", tx);
 
         let alert = make_alert("a1", "BTCUSDT", AlertCondition::PriceAbove(100.0), 105.0);
         reg.dispatch(&[alert]);
@@ -627,8 +687,8 @@ mod tests {
         assert_eq!(reg.list("tok1").unwrap().offline_queue_size, 2);
 
         // Link sender — should flush queue
-        let (tx, mut rx) = mpsc::unbounded_channel();
-        reg.link_sender("tok1", tx);
+        let (tx, mut rx) = mpsc::channel(16);
+        reg.link_sender("tok1", "s1", tx);
 
         assert_eq!(reg.list("tok1").unwrap().offline_queue_size, 0);
 
@@ -646,14 +706,14 @@ mod tests {
         let dir = temp_dir("unlink");
         let mut reg = make_registry(&dir);
 
-        let (tx, _rx) = mpsc::unbounded_channel();
+        let (tx, _rx) = mpsc::channel(16);
         reg.subscribe("tok1", None, None);
-        reg.link_sender("tok1", tx);
+        reg.link_sender("tok1", "s1", tx);
 
-        assert!(reg.subscriptions.get("tok1").unwrap().sender.is_some());
+        assert!(!reg.subscriptions.get("tok1").unwrap().senders.is_empty());
 
-        reg.unlink_sender("tok1");
-        assert!(reg.subscriptions.get("tok1").unwrap().sender.is_none());
+        reg.unlink_sender("tok1", "s1");
+        assert!(reg.subscriptions.get("tok1").unwrap().senders.is_empty());
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -663,9 +723,9 @@ mod tests {
         let dir = temp_dir("broken_sender");
         let mut reg = make_registry(&dir);
 
-        let (tx, rx) = mpsc::unbounded_channel();
+        let (tx, rx) = mpsc::channel(16);
         reg.subscribe("tok1", None, None);
-        reg.link_sender("tok1", tx);
+        reg.link_sender("tok1", "s1", tx);
 
         // Drop receiver to break the channel
         drop(rx);
@@ -674,7 +734,50 @@ mod tests {
         reg.dispatch(&[alert]);
 
         // Sender should be cleared and alert queued
-        assert!(reg.subscriptions.get("tok1").unwrap().sender.is_none());
+        assert!(reg.subscriptions.get("tok1").unwrap().senders.is_empty());
+        assert_eq!(reg.list("tok1").unwrap().offline_queue_size, 1);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn every_stream_of_a_token_gets_alerts_and_unlinks_alone() {
+        let dir = temp_dir("two_streams");
+        let mut reg = make_registry(&dir);
+        reg.subscribe("tok1", None, None);
+        let (t1, mut r1) = mpsc::channel(16);
+        let (t2, mut r2) = mpsc::channel(16);
+        reg.link_sender("tok1", "tab1", t1);
+        // A second tab does not steal the first one's alerts.
+        reg.link_sender("tok1", "tab2", t2);
+        let alert = || make_alert("a1", "BTCUSDT", AlertCondition::PriceAbove(100.0), 105.0);
+        reg.dispatch(&[alert()]);
+        assert!(r1.try_recv().unwrap().contains("a1"));
+        assert!(r2.try_recv().unwrap().contains("a1"));
+
+        // The first tab closing leaves the second linked.
+        reg.unlink_sender("tok1", "tab1");
+        reg.dispatch(&[alert()]);
+        assert!(r1.try_recv().is_err());
+        assert!(r2.try_recv().unwrap().contains("a1"));
+        assert!(reg.list("tok1").unwrap().connected);
+        assert_eq!(reg.list("tok1").unwrap().offline_queue_size, 0);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_full_stream_is_unlinked_and_alerts_queue() {
+        let dir = temp_dir("full_stream");
+        let mut reg = make_registry(&dir);
+        reg.subscribe("tok1", None, None);
+        let (tx, _rx) = mpsc::channel(1);
+        reg.link_sender("tok1", "s1", tx);
+        let alert = || make_alert("a1", "BTCUSDT", AlertCondition::PriceAbove(100.0), 105.0);
+        reg.dispatch(&[alert()]);
+        // Nobody reads: the second alert finds the channel full.
+        reg.dispatch(&[alert()]);
+        assert!(!reg.list("tok1").unwrap().connected);
         assert_eq!(reg.list("tok1").unwrap().offline_queue_size, 1);
 
         let _ = fs::remove_dir_all(&dir);

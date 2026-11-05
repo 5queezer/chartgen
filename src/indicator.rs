@@ -1,8 +1,6 @@
 use crate::data::OhlcvData;
 use plotters::style::RGBAColor;
 use serde_json::{json, Value};
-use ta::indicators::{ExponentialMovingAverage, SimpleMovingAverage};
-use ta::Next;
 
 /// A line to draw on the panel.
 #[derive(Clone)]
@@ -20,6 +18,19 @@ pub struct Fill {
     pub y1: Vec<f64>,
     pub y2: Vec<f64>,
     pub color: RGBAColor,
+    /// Optional color used where `y1 < y2` (e.g. a red Ichimoku cloud);
+    /// `color` then applies where `y1 >= y2`. `None` uses `color` everywhere.
+    pub color_below: Option<RGBAColor>,
+}
+
+impl Fill {
+    /// Color for a bar with edges `y1`/`y2`.
+    pub fn color_for(&self, y1: f64, y2: f64) -> RGBAColor {
+        match self.color_below {
+            Some(below) if y1 < y2 => below,
+            _ => self.color,
+        }
+    }
 }
 
 /// Histogram bars.
@@ -86,11 +97,50 @@ pub struct PanelResult {
     pub is_overlay: bool,
 }
 
+/// A failed indicator computation (only user scripts fail, ADR-0025):
+/// the pipeline `step` (`parse`, `static`, `presence`, `dry_run`,
+/// `runtime`), the 1-based source line when known, and a message.
+#[derive(Clone, Debug, PartialEq)]
+pub struct IndicatorError {
+    pub step: &'static str,
+    pub line: Option<usize>,
+    pub message: String,
+}
+
+impl IndicatorError {
+    pub fn new(step: &'static str, line: Option<usize>, message: impl Into<String>) -> Self {
+        Self {
+            step,
+            line,
+            message: message.into(),
+        }
+    }
+
+    pub fn to_json(&self) -> Value {
+        json!({ "step": self.step, "line": self.line, "message": self.message })
+    }
+}
+
+impl std::fmt::Display for IndicatorError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.line {
+            Some(l) => write!(f, "{} error at line {l}: {}", self.step, self.message),
+            None => write!(f, "{} error: {}", self.step, self.message),
+        }
+    }
+}
+
 /// Trait every indicator implements.
 pub trait Indicator {
     #[allow(dead_code)]
     fn name(&self) -> &str;
     fn compute(&self, data: &OhlcvData) -> PanelResult;
+
+    /// `compute` for indicators that can fail (user scripts, ADR-0025): the
+    /// error fails only this indicator, not the chart. Built-ins never fail.
+    fn try_compute(&self, data: &OhlcvData) -> Result<PanelResult, IndicatorError> {
+        Ok(self.compute(data))
+    }
 
     /// Human-readable description for tool discovery.
     fn description(&self) -> &str {
@@ -106,6 +156,14 @@ pub trait Indicator {
     /// Apply custom configuration from JSON object. Called before compute().
     /// Only needs to handle the params declared by params().
     fn configure(&mut self, _params: &Value) {}
+
+    /// True for profiles aggregated over the whole input window (volume /
+    /// time profiles). Their `hbars` and `hlines` are profile-derived, so
+    /// series output with `warmup` recomputes them over the visible bars
+    /// only (ADR-0009).
+    fn windowed_profile(&self) -> bool {
+        false
+    }
 }
 
 // ---- Helpers ----
@@ -117,89 +175,51 @@ pub fn rgba(hex: u32, alpha: f64) -> RGBAColor {
     RGBAColor(r, g, b, alpha)
 }
 
+// The moving-average and window helpers below delegate to
+// `indicators::pine`, the single source of Pine v5 semantics (SMA-seeded
+// EMA, NaN warmup, NaN-aware windows). See ADR-0018.
+
+/// Pine `ta.ema`: seeded with the SMA of the first `period` values.
 pub fn ema(data: &[f64], period: usize) -> Vec<f64> {
-    let mut out = vec![f64::NAN; data.len()];
-    if data.is_empty() || period == 0 {
-        return out;
-    }
-    let mut ind = ExponentialMovingAverage::new(period).unwrap();
-    for (i, &v) in data.iter().enumerate() {
-        if v.is_nan() {
-            continue;
-        }
-        out[i] = ind.next(v);
-    }
-    out
+    crate::indicators::pine::ema_n(data, period)
 }
 
+/// Pine `ta.sma`: NaN until `period` consecutive valid values exist.
 pub fn sma(data: &[f64], period: usize) -> Vec<f64> {
-    let mut out = vec![f64::NAN; data.len()];
-    if data.is_empty() || period == 0 {
-        return out;
-    }
-    let mut ind = SimpleMovingAverage::new(period).unwrap();
-    for (i, &v) in data.iter().enumerate() {
-        if v.is_nan() {
-            continue;
-        }
-        out[i] = ind.next(v);
-    }
-    out
+    crate::indicators::pine::sma_n(data, period)
 }
 
-/// Rolling lowest value over `period` bars.
-pub fn lowest(data: &[f64], period: usize) -> Vec<f64> {
-    let n = data.len();
-    let mut out = vec![f64::NAN; n];
-    if n == 0 || period == 0 {
-        return out;
-    }
-    for i in (period - 1)..n {
-        let lo = data[(i + 1 - period)..=i]
-            .iter()
-            .filter(|v| !v.is_nan())
-            .copied()
-            .fold(f64::INFINITY, f64::min);
-        out[i] = if lo.is_infinite() { f64::NAN } else { lo };
-    }
-    out
-}
+/// Rolling lowest value over `period` bars (Pine `ta.lowest`).
+pub use crate::indicators::pine::lowest;
 
-/// Rolling highest value over `period` bars.
-pub fn highest(data: &[f64], period: usize) -> Vec<f64> {
-    let n = data.len();
-    let mut out = vec![f64::NAN; n];
-    if n == 0 || period == 0 {
-        return out;
-    }
-    for i in (period - 1)..n {
-        let hi = data[(i + 1 - period)..=i]
-            .iter()
-            .filter(|v| !v.is_nan())
-            .copied()
-            .fold(f64::NEG_INFINITY, f64::max);
-        out[i] = if hi.is_infinite() { f64::NAN } else { hi };
-    }
-    out
-}
+/// Rolling highest value over `period` bars (Pine `ta.highest`).
+pub use crate::indicators::pine::highest;
 
 /// Stochastic: 100 * (src - lowest(low, len)) / (highest(high, len) - lowest(low, len)).
-/// For stoch RSI, src=high=low=rsi values.
-pub fn stoch(src: &[f64], high: &[f64], low: &[f64], period: usize) -> Vec<f64> {
-    let lo = lowest(low, period);
-    let hi = highest(high, period);
-    let n = src.len();
-    let mut out = vec![f64::NAN; n];
-    for i in 0..n {
-        if src[i].is_nan() || lo[i].is_nan() || hi[i].is_nan() {
-            continue;
-        }
-        let range = hi[i] - lo[i];
-        out[i] = if range > 0.0 {
-            100.0 * (src[i] - lo[i]) / range
-        } else {
-            0.0
+/// For stoch RSI, src=high=low=rsi values. A zero range is NaN (Pine `ta.stoch`).
+pub use crate::indicators::pine::stoch;
+
+#[cfg(test)]
+mod fill_tests {
+    use super::*;
+
+    #[test]
+    fn fill_color_for_uses_below_color_only_where_y1_lt_y2() {
+        let up = RGBAColor(0, 255, 0, 0.2);
+        let down = RGBAColor(255, 0, 0, 0.2);
+        let f = Fill {
+            y1: vec![],
+            y2: vec![],
+            color: up,
+            color_below: Some(down),
         };
+        assert_eq!(f.color_for(2.0, 1.0), up);
+        assert_eq!(f.color_for(1.0, 1.0), up);
+        assert_eq!(f.color_for(1.0, 2.0), down);
+        let single = Fill {
+            color_below: None,
+            ..f
+        };
+        assert_eq!(single.color_for(1.0, 2.0), up);
     }
-    out
 }
