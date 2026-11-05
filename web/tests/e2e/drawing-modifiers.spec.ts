@@ -609,8 +609,11 @@ test.describe("drawing modifiers", () => {
       expect(live.map((p) => p.value)).toEqual(stored.map((p) => p.value));
     };
 
-    /** Two free lines, with the mouse pressed on the end point of the first. */
-    const pressOnLine = async (page: Page) => {
+    /**
+     * Two free lines, with the mouse pressed on the end point of the first. `beforePress`
+     * runs right before the press, once the mouse is on the point.
+     */
+    const pressOnLine = async (page: Page, beforePress?: () => Promise<void>) => {
       await page.getByRole("button", { name: "Trend line" }).click();
       await clickAt(page, { x: 300, y: 130 });
       await clickAt(page, { x: 560, y: 260 });
@@ -622,9 +625,87 @@ test.describe("drawing modifiers", () => {
       const [anchor, end] = (await overlays(page))[0]!.pixels;
       await page.mouse.move(box.x + end!.x!, box.y + end!.y!, { steps: 5 });
       await page.waitForTimeout(60);
+      await beforePress?.();
       await page.mouse.down();
       return { box, anchor: anchor!, end: end! };
     };
+
+    /** Moves the pressed point, ticks, and asserts the tick left it and the release saved it. */
+    const expectDragSurvivesTick = async (
+      page: Page,
+      { box, anchor }: Awaited<ReturnType<typeof pressOnLine>>,
+    ) => {
+      await page.mouse.move(box.x + anchor.x! + 200, box.y + anchor.y! + 40, { steps: 8 });
+      const moved = (await overlays(page))[0]!.points.map((p) => p.value);
+      await tick(page);
+      expect((await overlays(page))[0]!.points.map((p) => p.value)).toEqual(moved);
+      await page.mouse.up();
+      await page.waitForTimeout(100);
+      expect((await storedRecords(page))![0]!.points.map((p) => p.value)).toEqual(moved);
+    };
+
+    test("pressing takes the focus from a toolbar button, and the press goes on", async ({
+      bootedApp: page,
+    }) => {
+      const magnet = magnetButton(page, "off");
+      const press = await pressOnLine(page, () => magnet.focus());
+      await expect(magnet).not.toBeFocused();
+      await expectDragSurvivesTick(page, press);
+    });
+
+    test("a right-button release does not end a left press", async ({ bootedApp: page }) => {
+      const press = await pressOnLine(page);
+      await page.mouse.up({ button: "right" });
+      await expectDragSurvivesTick(page, press);
+    });
+
+    /** A line ending on a future bar, with the mouse pressed on that end. */
+    const pressOnFuturePoint = async (page: Page) => {
+      await page.getByRole("button", { name: "Trend line" }).click();
+      await clickAt(page, { x: 700, y: 130 });
+      await clickAt(page, { x: 1100, y: 200 });
+      await expect.poll(async () => (await overlays(page)).length).toBe(1);
+      const lastBar = await page.evaluate(() =>
+        (window as unknown as TestWindow).__chartgenTest.chart().getDataList().at(-1)!.timestamp,
+      );
+      const stored = (await storedRecords(page))![0]!.points;
+      expect(stored[1]!.timestamp).toBeGreaterThan(lastBar);
+      const box = (await host(page).boundingBox())!;
+      const end = (await overlays(page))[0]!.pixels[1]!;
+      await page.mouse.move(box.x + end.x!, box.y + end.y!, { steps: 5 });
+      await page.waitForTimeout(60);
+      await page.mouse.down();
+      return { box, end, stored };
+    };
+
+    /** Replaces the bars, as a full load does: other bars, and the indices do not shift. */
+    const replaceBars = (page: Page) =>
+      page.evaluate(() => {
+        const chart = (window as unknown as TestWindow).__chartgenTest.chart();
+        chart.applyNewData(chart.getDataList().slice(50));
+      });
+
+    test("new bars during a press keep the time of a future point", async ({ bootedApp: page }) => {
+      const { stored } = await pressOnFuturePoint(page);
+      await replaceBars(page);
+      await page.mouse.up();
+      await page.waitForTimeout(100);
+      expect((await storedRecords(page))![0]!.points).toEqual(stored);
+    });
+
+    test("after new bars, the press goes on and a tick leaves it alone again", async ({
+      bootedApp: page,
+    }) => {
+      const { box, end } = await pressOnFuturePoint(page);
+      await replaceBars(page);
+      await page.mouse.move(box.x + end.x! - 60, box.y + end.y! + 30, { steps: 8 });
+      const moved = (await overlays(page))[0]!.points[1]!.value;
+      await tick(page);
+      expect((await overlays(page))[0]!.points[1]!.value).toBe(moved);
+      await page.mouse.up();
+      await page.waitForTimeout(100);
+      expect((await storedRecords(page))![0]!.points[1]!.value).toBe(moved);
+    });
 
     for (const keys of [[], ["Shift"]]) {
       test(`just before the release keeps the drag, keys [${keys.join()}]`, async ({

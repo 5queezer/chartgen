@@ -27,7 +27,7 @@ import {
   type Point,
 } from "klinecharts";
 
-import { isDrawingAlertTool, isVerticalLine } from "../lib/alerts";
+import { isDrawingAlertTool, isVerticalLine, pointBarIndex } from "../lib/alerts";
 import { isTypingContext, undoRedoKey } from "../lib/keys";
 import { effectiveMagnet, magnetValue, type Magnet } from "../lib/magnet";
 import { syncDrawingAlerts } from "../stores/alerts";
@@ -519,6 +519,8 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
   let shiftHeld = false;
   // The drawing under a press: `refresh` leaves it alone until the release commits it.
   let pressedId: string | null = null;
+  // The bars that press is on.
+  let pressedAxis: TimeAxis | null = null;
 
   const axis = (): TimeAxis | null =>
     timeAxisOf(props.chart?.getDataList().map((d) => d.timestamp) ?? []);
@@ -651,10 +653,11 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
         toPx,
         (y) => (chart.convertFromPixel([{ y }], { paneId }) as Partial<Point>[])[0]?.value,
         (value) => {
-          // The anchor's bar, as drawn; none on a future bar. As in klinecharts,
-          // the magnet only acts on the price pane.
-          const [at] = chart.convertFromPixel([{ x: toPx(anchor).x }], { paneId }) as Partial<Point>[];
-          const bar = paneId === "candle_pane" ? chart.getDataList()[at?.dataIndex ?? -1] : undefined;
+          // The anchor's bar; none on a future bar. As in klinecharts, the magnet only
+          // acts on the price pane.
+          const ax = axis();
+          const i = ax ? pointBarIndex(ax, anchor) : undefined;
+          const bar = paneId === "candle_pane" && i !== undefined ? chart.getDataList()[i] : undefined;
           return bar
             ? magnetValue(value, bar, overlay.mode as never, overlay.modeSensitivity, (v) => toPx({ value: v }).y)
             : value;
@@ -676,6 +679,7 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
     },
     onPressedMoveStart: ({ overlay }: OverlayEvent) => {
       pressedId = overlay.id;
+      pressedAxis = axis();
       return false;
     },
     // Fires after klinecharts has set the moving point, also on the placing click.
@@ -817,9 +821,13 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
     }
     const ax = axis();
     if (ax === null) return;
+    // New bars under a press leave the bar indices of its future points meaning other
+    // times, so the pressed drawing is placed too, once; the press goes on with these bars.
+    const sameBars = pressedAxis?.firstTs === ax.firstTs && pressedAxis.intervalMs === ax.intervalMs;
+    pressedAxis = ax;
     for (const id of ids) {
       const rec = canon.get(id);
-      if (!rec || id === pressedId) continue;
+      if (!rec || (id === pressedId && sameBars)) continue;
       const { points, off } = place(rec, ax);
       if (off) offRange.add(id);
       else offRange.delete(id);
@@ -1251,15 +1259,19 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
     document.removeEventListener("visibilitychange", releaseModifiers);
   });
 
-  // Any release ends a press. Not onPressedMoveEnd: klinecharts only fires it when the
-  // release lands on a pane. Capture, so this runs before it, in the same event.
-  const endPress = () => {
-    pressedId = null;
+  // Any left release ends a press. Not onPressedMoveEnd: klinecharts only fires it when
+  // the release lands on a pane. Capture, so this runs before it, in the same event. The
+  // window's blur is not: an element's blur passes through capture too, and pressing on
+  // the chart takes the focus from whatever had it.
+  const endPress = (e: Event) => {
+    if (!(e instanceof MouseEvent) || e.button === 0) pressedId = null;
   };
-  const endPressEvents = ["mouseup", "touchend", "touchcancel", "blur"] as const;
+  const endPressEvents = ["mouseup", "touchend", "touchcancel"] as const;
   for (const type of endPressEvents) window.addEventListener(type, endPress, true);
+  window.addEventListener("blur", endPress);
   onCleanup(() => {
     for (const type of endPressEvents) window.removeEventListener(type, endPress, true);
+    window.removeEventListener("blur", endPress);
   });
 
   const resetRightClick = () => {

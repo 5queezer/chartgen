@@ -9,6 +9,7 @@ import {
   indicatorReading,
   isDrawingAlertTool,
   isVerticalLine,
+  pointBarIndex,
   rearmedReading,
   type Alert,
   type AlertSource,
@@ -198,6 +199,14 @@ describe("drawingLevels (ADR-0034)", () => {
       }
     },
   );
+
+  it("pointBarIndex: exact from the point, a time over an index, nothing without either", () => {
+    expect(pointBarIndex(flat.axis, { timestamp: 10 * H })).toBe(10);
+    expect(pointBarIndex(flat.axis, { timestamp: 10 * H, dataIndex: 1 })).toBe(10);
+    expect(pointBarIndex(flat.axis, { dataIndex: 3 })).toBe(3);
+    expect(pointBarIndex(flat.axis, { dataIndex: 900 })).toBe(900);
+    expect(pointBarIndex(flat.axis, {})).toBeUndefined();
+  });
 
   it("isVerticalLine: both anchors on one bar, on a future bar too", () => {
     expect(isVerticalLine({ points: [p(5 * H, 100), p(5 * H, 200)] })).toBe(true);

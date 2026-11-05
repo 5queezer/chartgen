@@ -304,6 +304,14 @@ export function barIndexOf(axis: TimeAxis, ts: number): number {
   return ts - times[lo]! <= times[hi]! - ts ? lo : hi;
 }
 
+/** Bar index of a drawing point: its time when it has one, as klinecharts draws it. */
+export function pointBarIndex(
+  axis: TimeAxis,
+  p: { timestamp?: number; dataIndex?: number },
+): number | undefined {
+  return p.timestamp !== undefined ? barIndexOf(axis, p.timestamp) : p.dataIndex;
+}
+
 /** How the chart draws: its bars, and whether the price axis is logarithmic. */
 export interface ChartView {
   axis: TimeAxis;

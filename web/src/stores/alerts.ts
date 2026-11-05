@@ -462,7 +462,9 @@ export function syncDrawingAlerts(
     if (note !== null && (a.active || (ours && a.note !== note))) {
       changed = true;
       const off: Alert = { ...a, active: false, note };
-      delete off.disarmed;
+      // A line passing through vertical comes back as it was: a fired "every" alert
+      // still has to re-arm.
+      if (note === DRAWING_DELETED) delete off.disarmed;
       return off;
     }
     if (note === null && ours) {

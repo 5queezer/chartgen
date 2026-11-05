@@ -614,6 +614,25 @@ describe("drawing alerts", () => {
     expect(byId(paused.id).active).toBe(false);
   });
 
+  it("passing through vertical does not re-arm a fired every-time alert", async () => {
+    stubStorage({ [DRAWINGS_KEY]: JSON.stringify([hline]) });
+    const s = await load();
+    s.addAlert({ ...hlineAlert, condition: "greater", trigger: "every" });
+    const level = hline.points[0]!.value;
+    expect(s.processPrice("AAPL", level + 1)).toHaveLength(1);
+    expect(s.alerts()[0]!.disarmed).toBe(true);
+
+    s.syncDrawingAlerts("AAPL", ["h1"], ["h1"]);
+    expect(s.alerts()[0]).toMatchObject({ active: false, note: s.LINE_VERTICAL, disarmed: true });
+    s.syncDrawingAlerts("AAPL", ["h1"], []);
+    expect(s.alerts()[0]).toMatchObject({ active: true, disarmed: true });
+
+    // Still above the level: no second firing until the price has been back below.
+    expect(s.processPrice("AAPL", level + 2)).toEqual([]);
+    expect(s.processPrice("AAPL", level - 1)).toEqual([]);
+    expect(s.processPrice("AAPL", level + 1)).toHaveLength(1);
+  });
+
   it("a paused alert on a deleted drawing gets the note when resumed", async () => {
     stubStorage();
     const s = await load();
