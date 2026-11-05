@@ -27,7 +27,7 @@ Status legend:
 | Price legend (OHLC, change, volume) | ✅ | ✅ | Follows the crosshair. [Chart conveniences](/chartgen/guides/web/#chart-conveniences) |
 | Bar-close countdown | ✅ | ◐ | Only for 24/7 symbols (the Binance rule). Hidden for stocks, FX and futures, because the session close cannot be derived from the interval. [Chart conveniences](/chartgen/guides/web/#chart-conveniences) |
 | %, log and auto price scale | ✅ | ✅ | [Chart conveniences](/chartgen/guides/web/#chart-conveniences) |
-| Inverted scale, lock scale to bars | ✅ | ❌ | Not in the web guide. |
+| Inverted scale, lock scale to bars | ✅ | ◐ | Invert (`Alt+I`) and lock price to bar ratio. "Scale price chart only" is not offered. [Chart conveniences](/chartgen/guides/web/#chart-conveniences) |
 | Date-range buttons | ✅ | ✅ | `1D 5D 1M 3M 6M YTD 1Y 5Y All`. Each range uses TradingView's interval (6M is 2h). A range is capped by the history limit. [Bottom bar](/chartgen/guides/web/#bottom-bar) |
 | Time zone selector and clock | ✅ | ◐ | UTC, Exchange, Local and common IANA zones. "Exchange" is a heuristic on the ticker suffix. [Bottom bar](/chartgen/guides/web/#bottom-bar) |
 | Go to date | ✅ | ✅ | `Alt+G`. [Bottom bar](/chartgen/guides/web/#bottom-bar) |

@@ -121,6 +121,13 @@ Symbol, timeframe, chart type, price-scale mode, theme, time zone and recent sym
   axis scales it by hand and turns `auto` off; double-clicking the axis or
   clicking `auto` turns it back on, and `Alt+R` (reset chart) does too.
   The scale mode persists across reloads; `auto` always starts on.
+  `inv` (or `Alt+I`) inverts the axis so higher prices are at the bottom;
+  labels, crosshair, drawings and alert lines all follow. **Lock price to
+  bar ratio** (chart context menu or Settings, Scales) keeps the candle
+  aspect fixed while you zoom horizontally: the visible price range
+  scales with the bar width. It turns `auto` off, and turning `auto` on
+  releases it. Both are saved per chart, like the scale mode, and are
+  part of named layouts. "Scale price chart only" is not offered.
 
 ## Bottom bar
 
@@ -327,6 +334,7 @@ while typing in a field or while a dialog or menu is open.
 | `Home` / `End` | Jump to the first bar / to real time |
 | `Alt+R` | Reset chart (scroll to real time, default zoom) |
 | `Alt+G` | Go to date |
+| `Alt+I` | Invert the price scale |
 | `Alt+A` | Add a price alert at the last price |
 | `Alt+↑` / `Alt+↓` | Watchlist: move the focused row or section up / down |
 | `Shift+→` | Bar replay: forward one bar |
@@ -436,6 +444,8 @@ Right-clicking the chart (outside a drawing) opens a menu:
 | Reset chart view (`Alt+R`) | Scroll to real time at the default zoom |
 | Copy link to chart | Copy a [shareable link](#sharing-a-chart) |
 | Copy price | Copy the price under the cursor, in the chart's precision |
+| Invert scale (`Alt+I`) | Flip the price axis |
+| Lock price to bar ratio | Keep the candle aspect while zooming horizontally |
 | Add horizontal line at | Add a horizontal line at that price; it is saved like any drawing |
 | Add alert at | Open the alert dialog at that price |
 | Remove all drawings | Asks for confirmation |

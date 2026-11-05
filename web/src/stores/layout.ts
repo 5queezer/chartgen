@@ -156,7 +156,13 @@ const [timeZone, setTimeZoneSignal] = createSignal<TimeZoneChoice>(
 // Auto-fit keeps the price axis fitted to the visible bars; it turns off
 // when the user drags the axis. Session-only: it starts on at every load
 // because a manual scale does not survive a reload.
-const [autoScale, setAutoScale] = createSignal(true);
+// A locked price-to-bar ratio (persisted) implies auto-fit is off.
+const storedLockRatio = read("lockRatio") === true;
+const [lockRatio, setLockRatioSignal] = createSignal(storedLockRatio);
+const [invertScale, setInvertScaleSignal] = createSignal(
+  read("invertScale") === true,
+);
+const [autoScale, setAutoScaleSignal] = createSignal(!storedLockRatio);
 const [recentSymbols, setRecentSymbolsSignal] =
   createSignal<string[]>(loadRecents());
 
@@ -168,9 +174,29 @@ export {
   theme,
   timeZone,
   autoScale,
-  setAutoScale,
+  lockRatio,
+  invertScale,
   recentSymbols,
 };
+
+/** Auto-fit on or off; turning it on releases the price-to-bar ratio lock. */
+export function setAutoScale(next: boolean): void {
+  setAutoScaleSignal(next);
+  if (next && lockRatio()) setLockRatio(false);
+}
+
+/** Lock the price-to-bar ratio; locking turns auto-fit off. */
+export function setLockRatio(next: boolean): void {
+  setLockRatioSignal(next);
+  persist("lockRatio", next);
+  if (next) setAutoScaleSignal(false);
+}
+
+/** Flip the price axis so higher prices are at the bottom. */
+export function setInvertScale(next: boolean): void {
+  setInvertScaleSignal(next);
+  persist("invertScale", next);
+}
 
 /** Select a symbol; invalid input is ignored. Recents are added separately. */
 export function setSymbol(next: string): void {

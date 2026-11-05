@@ -22,7 +22,13 @@ import {
   type PartKey,
   type ThemeOverrides,
 } from "../stores/chartSettings";
-import { theme } from "../stores/layout";
+import {
+  invertScale,
+  lockRatio,
+  setInvertScale,
+  setLockRatio,
+  theme,
+} from "../stores/layout";
 import { ColorPicker } from "./ColorPicker";
 
 export interface ChartSettingsProps {
@@ -177,6 +183,25 @@ function SettingsForm(props: { onClose: () => void }): JSX.Element {
             <Toggle label="Last price line" option="lastPriceLine" />
             <Toggle label="Last price label" option="lastPriceLabel" />
             <Toggle label="High and low price labels" option="highLowMarks" />
+            {/* Per-chart scale state (like %/log), applied at once rather than by OK. */}
+            <label class={`${rowClass} text-sm cursor-pointer`}>
+              Invert scale
+              <input
+                type="checkbox"
+                aria-label="Invert scale"
+                checked={invertScale()}
+                onChange={(e) => setInvertScale(e.currentTarget.checked)}
+              />
+            </label>
+            <label class={`${rowClass} text-sm cursor-pointer`}>
+              Lock price to bar ratio
+              <input
+                type="checkbox"
+                aria-label="Lock price to bar ratio"
+                checked={lockRatio()}
+                onChange={(e) => setLockRatio(e.currentTarget.checked)}
+              />
+            </label>
             <div class={rowClass}>
               <label for="scale-placement" class="text-sm">
                 Scale placement

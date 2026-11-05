@@ -41,7 +41,11 @@ import {
   normalizeSymbol,
   SCALE_MODES,
   scaleMode,
+  invertScale,
+  lockRatio,
   setChartType,
+  setInvertScale,
+  setLockRatio,
   setScaleMode,
   setSymbol,
   setTimeframe,
@@ -70,6 +74,9 @@ export interface LayoutState {
   timeframe: Timeframe;
   chartType: ChartType;
   scaleMode: ScaleMode;
+  /** Only present when on; layouts saved before they existed are off. */
+  invertScale?: boolean;
+  lockRatio?: boolean;
   timeZone: TimeZoneChoice;
   indicators: ActiveIndicator[];
   /** Compare symbols (ADR-0022); layouts saved before it have none. */
@@ -167,6 +174,8 @@ export function parseState(x: unknown): LayoutState | null {
     timeframe: x.timeframe,
     chartType: x.chartType as ChartType,
     scaleMode: x.scaleMode as ScaleMode,
+    ...(x.invertScale === true ? { invertScale: true } : {}),
+    ...(x.lockRatio === true ? { lockRatio: true } : {}),
     // Layouts saved before time zones existed keep the current zone.
     timeZone: isTimeZoneChoice(x.timeZone) ? x.timeZone : timeZone(),
     indicators,
@@ -276,6 +285,8 @@ function comparable(s: LayoutState, defaults: ParamDefaults): string {
     s.timeframe,
     s.chartType,
     s.scaleMode,
+    !!s.invertScale,
+    !!s.lockRatio,
     s.timeZone,
     normalizeIndicators(s.indicators, defaults),
     s.compare,
@@ -387,6 +398,8 @@ function liveState(): LayoutState {
     timeframe: timeframe(),
     chartType: chartType(),
     scaleMode: scaleMode(),
+    ...(invertScale() ? { invertScale: true } : {}),
+    ...(lockRatio() ? { lockRatio: true } : {}),
     timeZone: timeZone(),
     indicators: activeIndicators(),
     compare: compareSymbols(),
@@ -499,6 +512,8 @@ function applyState(state: LayoutState): void {
     setTimeframe(state.timeframe);
     setChartType(state.chartType);
     setScaleMode(state.scaleMode);
+    setInvertScale(!!state.invertScale);
+    setLockRatio(!!state.lockRatio);
     setTimeZone(state.timeZone);
     setActiveIndicators(state.indicators);
     setCompareSymbols(state.compare);

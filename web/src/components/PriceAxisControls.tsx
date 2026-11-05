@@ -19,11 +19,15 @@ import {
   type JSX,
 } from "solid-js";
 
+import { DEFAULT_GAP, lockRatio as lockRatioOf, lockedGap } from "../lib/priceRatio";
 import { barCountdown, isContinuousMarket } from "../lib/countdown";
 import {
   autoScale,
+  invertScale,
+  lockRatio,
   scaleMode,
   setAutoScale,
+  setInvertScale,
   setScaleMode,
   type ScaleMode,
 } from "../stores/layout";
@@ -106,6 +110,70 @@ export function PriceAxisControls(props: PriceAxisControlsProps): JSX.Element {
     const mode = scaleMode();
     c.setStyles({ yAxis: { type: mode } } as never);
     requestAnimationFrame(reposition);
+  });
+
+  // Inverted scale: klinecharts maps every price<->pixel conversion
+  // (crosshair, drawings, alert lines) through `yAxis.reverse`.
+  createEffect(() => {
+    const c = props.chart;
+    if (!c) return;
+    c.setStyles({ yAxis: { reverse: invertScale() } } as never);
+    requestAnimationFrame(reposition);
+  });
+
+  // Lock price to bar ratio: see lib/priceRatio.ts. `ratio` is captured the
+  // first time the lock applies and dropped when it is released.
+  let ratio: number | null = null;
+  let gap = DEFAULT_GAP;
+  const applyLock = () => {
+    const c = props.chart;
+    if (!c) return;
+    if (!untrack(lockRatio)) return;
+    const height = c.getSize(CANDLE_PANE_ID, "yAxis" as never)?.height;
+    if (!height) return;
+    const [top, bottom] = c.convertFromPixel([{ y: 0 }, { y: height }], {
+      paneId: CANDLE_PANE_ID,
+    }) as { value?: number }[];
+    if (top?.value === undefined || bottom?.value === undefined) return;
+    const tf = untrack(scaleMode) === "log" ? Math.log10 : (v: number) => v;
+    const range = Math.abs(tf(top.value) - tf(bottom.value));
+    const barSpace = c.getBarSpace();
+    if (!(range > 0) || !(barSpace > 0)) return;
+    ratio ??= lockRatioOf(range, height, barSpace);
+    const g = lockedGap({ range, gap, height, barSpace, ratio });
+    if (Math.abs(g - gap.top) < 1e-4) return;
+    gap = { top: g, bottom: g };
+    c.setPaneOptions({ id: CANDLE_PANE_ID, gap });
+  };
+
+  // Lock or mode change: back to the default gap, re-capture the ratio.
+  createEffect(() => {
+    const c = props.chart;
+    if (!c) return;
+    lockRatio();
+    scaleMode();
+    ratio = null;
+    gap = DEFAULT_GAP;
+    c.setPaneOptions({ id: CANDLE_PANE_ID, gap: DEFAULT_GAP });
+    requestAnimationFrame(() => {
+      applyLock();
+      reposition();
+    });
+  });
+
+  createEffect(() => {
+    props.series;
+    requestAnimationFrame(applyLock);
+  });
+
+  createEffect(() => {
+    const c = props.chart;
+    if (!c) return;
+    const actions = ["onScroll", "onZoom", "onVisibleRangeChange"] as const;
+    for (const a of actions) c.subscribeAction(a as never, applyLock);
+    onCleanup(() => {
+      for (const a of actions) c.unsubscribeAction(a as never, applyLock);
+    });
   });
 
   createEffect(() => {
@@ -217,6 +285,15 @@ export function PriceAxisControls(props: PriceAxisControlsProps): JSX.Element {
           onClick={() => toggle("log")}
         >
           log
+        </button>
+        <button
+          type="button"
+          class={btn(invertScale())}
+          aria-pressed={invertScale()}
+          title="Invert scale (Alt+I)"
+          onClick={() => setInvertScale(!invertScale())}
+        >
+          inv
         </button>
         <button
           type="button"

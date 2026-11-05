@@ -199,6 +199,15 @@ describe("snapshot and dirty", () => {
     expect(parseState(older)?.compare).toEqual([]);
   });
 
+  it("keeps invert and lock only when true and counts them as changes", () => {
+    const on = parseState({ ...base, invertScale: true, lockRatio: true });
+    expect(on?.invertScale).toBe(true);
+    expect(on?.lockRatio).toBe(true);
+    expect(parseState({ ...base, invertScale: "yes" })).not.toHaveProperty("invertScale");
+    expect(isDirty(base, { ...base, invertScale: true })).toBe(true);
+    expect(isDirty(base, { ...base, lockRatio: true })).toBe(true);
+  });
+
   it("parses a state saved before time zones as the live zone", () => {
     const { timeZone: _omit, ...old } = base;
     expect(parseState(old)?.timeZone).toBe("local");
