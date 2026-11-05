@@ -398,6 +398,14 @@ discovery → dynamic client registration → redirect to
 the `client_id`/`client_secret` pair persists in `localStorage` so
 subsequent sessions skip registration.
 
+The app removes `?code=…&state=…` from the URL as soon as it reads
+them, so a refresh never replays a used code. If the token exchange
+fails (for example an expired code or a network error), the app starts
+the flow over once by itself. If that fails too, the status line shows
+`sign-in failed: <reason>` with a **Sign in again** button, and the
+chart does not load until you use it. The app never redirects in a
+loop.
+
 ## Managing indicators
 
 Indicators are added from the **Indicators** picker (by name, with the

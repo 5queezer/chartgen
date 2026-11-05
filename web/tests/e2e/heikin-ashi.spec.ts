@@ -5,7 +5,12 @@
 
 import type { Page, Request } from "@playwright/test";
 
-import { test, expect, expectChartRendered } from "./fixtures/app";
+import {
+  test,
+  expect,
+  expectChartRendered,
+  reloadApp,
+} from "./fixtures/app";
 
 interface ChartArgs {
   bars?: number;
@@ -29,14 +34,15 @@ function chartArgs(req: Request): ChartArgs | null {
   }
 }
 
-function recordCalls(page: Page): ChartArgs[] {
-  const calls: ChartArgs[] = [];
-  page.on("request", (req) => {
+/** The next generate_chart request whose arguments match `match`. */
+const chartRequest = (page: Page, match: (a: ChartArgs) => boolean) =>
+  page.waitForRequest((req) => {
     const a = chartArgs(req);
-    if (a) calls.push(a);
+    return a !== null && match(a);
   });
-  return calls;
-}
+
+const isTail = (a: ChartArgs) => a.bars === 2 && a.end_time === undefined;
+const isFullLoad = (a: ChartArgs) => !isTail(a) && a.end_time === undefined;
 
 const legendOpen = (page: Page) =>
   page.getByTestId("legend-o").first().innerText();
@@ -61,37 +67,33 @@ async function pickChartType(page: Page, name: string): Promise<void> {
   await page.getByRole("menuitemradio", { name, exact: true }).click();
 }
 
-const fullLoadWith = (calls: ChartArgs[], style: string) =>
-  calls.some((c) => c.chart_style === style && c.bars !== 2);
-
 test.describe("heikin ashi", () => {
   test("selecting it reloads with chart_style and changes the legend OHLC", async ({
     bootedApp: page,
   }) => {
     const candlesOpen = await legendOpen(page);
-    const calls = recordCalls(page);
 
+    const haLoad = chartRequest(
+      page,
+      (a) => isFullLoad(a) && a.chart_style === "heikin_ashi",
+    );
     await pickChartType(page, "Heikin Ashi");
     await expect(
       page.getByRole("button", { name: "Chart type: Heikin Ashi" }),
     ).toBeVisible();
-    await expect.poll(() => fullLoadWith(calls, "heikin_ashi")).toBe(true);
+    await haLoad;
     await expectChartRendered(page);
     await expect.poll(() => legendOpen(page)).not.toBe(candlesOpen);
 
     // Back to candles: the cached candle load is adopted (the query key
     // includes the style) and the next tail poll carries the default style.
-    calls.length = 0;
+    const candleTail = chartRequest(
+      page,
+      (a) => isTail(a) && a.chart_style === "candles",
+    );
     await pickChartType(page, "Candles");
     await expect.poll(() => legendOpen(page)).toBe(candlesOpen);
-    await expect
-      .poll(
-        () => calls.some((c) => c.bars === 2 && c.chart_style === "candles"),
-        {
-          timeout: 15_000,
-        },
-      )
-      .toBe(true);
+    await candleTail;
   });
 
   test("the style persists across reload and live ticks keep carrying it", async ({
@@ -100,27 +102,27 @@ test.describe("heikin ashi", () => {
     await pickChartType(page, "Heikin Ashi");
     await expectChartRendered(page);
 
-    const calls = recordCalls(page);
-    await page.reload();
-    await expectChartRendered(page);
+    const load = chartRequest(page, isFullLoad);
+    await reloadApp(page);
     await expect(
       page.getByRole("button", { name: "Chart type: Heikin Ashi" }),
     ).toBeVisible();
-    expect(calls.find((c) => c.bars !== 2)?.chart_style).toBe("heikin_ashi");
+    expect(chartArgs(await load)?.chart_style).toBe("heikin_ashi");
 
     // The forming bar keeps moving: tail polls carry the style and the
-    // rendered close changes.
+    // rendered close changes. Each check waits for the next tail poll, not
+    // for a fixed window.
     const before = await lastClose(page);
-    await expect
-      .poll(() => calls.filter((c) => c.bars === 2).length, { timeout: 15_000 })
-      .toBeGreaterThanOrEqual(2);
-    expect(
-      calls
-        .filter((c) => c.bars === 2)
-        .every((c) => c.chart_style === "heikin_ashi"),
-    ).toBe(true);
-    await expect
-      .poll(() => lastClose(page), { timeout: 15_000 })
-      .not.toBe(before);
+    for (let i = 0; i < 2; i++) {
+      const tail = await chartRequest(page, isTail);
+      expect(chartArgs(tail)?.chart_style).toBe("heikin_ashi");
+    }
+    await expect(async () => {
+      await page.waitForResponse((res) => {
+        const a = chartArgs(res.request());
+        return a !== null && isTail(a);
+      });
+      expect(await lastClose(page)).not.toBe(before);
+    }).toPass();
   });
 });

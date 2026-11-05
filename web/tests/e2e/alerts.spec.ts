@@ -11,7 +11,7 @@
 
 import type { Page } from "@playwright/test";
 
-import { test, expect } from "./fixtures/app";
+import { test, expect, reloadApp } from "./fixtures/app";
 
 const shot = async (page: Page, name: string) => {
   const dir = process.env.ALERT_SHOTS_DIR;
@@ -261,14 +261,12 @@ test.describe("price alerts", () => {
     await alertsTab(page).click();
     await expect(rows(page)).toHaveCount(1);
 
-    await page.reload();
-    await expect(alertsTab(page)).toHaveAttribute("aria-selected", "true", {
-      timeout: 30_000,
-    });
+    await reloadApp(page);
+    await expect(alertsTab(page)).toHaveAttribute("aria-selected", "true");
     await expect(rows(page)).toHaveCount(1);
     await expect(rows(page)).toContainText("far away");
     await expect(rows(page)).toHaveAttribute("data-status", "active");
-    await expect.poll(() => lineCount(page), { timeout: 20_000 }).toBe(1);
+    await expect.poll(() => lineCount(page)).toBe(1);
   });
 
   test("dragging an alert line moves its level; clicking a row switches symbol", async ({
