@@ -331,3 +331,31 @@ export const SearchSymbolsPayloadSchema = z.object({
   warnings: z.array(z.string()).optional(),
 });
 export type SearchSymbolsPayload = z.infer<typeof SearchSymbolsPayloadSchema>;
+
+// ---------------------------------------------------------------------------
+// subscribe_chart / unsubscribe_chart — `tool_subscribe_chart` and
+//   `tool_unsubscribe_chart` in `src/mcp.rs`; pushes come from
+//   `src/chart_push.rs` (ADR-0021).
+// ---------------------------------------------------------------------------
+
+export const SubscribeChartPayloadSchema = z.object({
+  subscription_id: z.string(),
+});
+export type SubscribeChartPayload = z.infer<typeof SubscribeChartPayloadSchema>;
+
+export const UnsubscribeChartPayloadSchema = z.object({
+  // False when the subscription was already gone (e.g. its SSE stream closed).
+  unsubscribed: z.boolean(),
+});
+export type UnsubscribeChartPayload = z.infer<typeof UnsubscribeChartPayloadSchema>;
+
+/** Method of a pushed chart tail on the SSE stream. */
+export const CHART_TICK_METHOD = "notifications/chart_tick";
+
+// `params` of `notifications/chart_tick`: `series` is exactly the
+// generate_chart(format=series, bars=2, warmup) tail of the subscribed chart.
+export const ChartTickParamsSchema = z.object({
+  subscription_id: z.string(),
+  series: SeriesPayloadSchema,
+});
+export type ChartTickParams = z.infer<typeof ChartTickParamsSchema>;

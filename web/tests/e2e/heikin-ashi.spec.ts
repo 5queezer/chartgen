@@ -1,7 +1,9 @@
 // Heikin Ashi chart type. The transform runs server-side (ADR-0003): the
 // client only sends `chart_style` with every generate_chart request and
 // renders the returned bars. The suite's server serves deterministic
-// sample bars; BTCUSDT is 24/7, so the tail is polled every 2 s.
+// sample bars; BTCUSDT is 24/7, so the tail is polled every 2 s. Server
+// push (ADR-0021) is off so tail polls can be inspected; realtime-push
+// covers chart_style on subscribe_chart.
 
 import type { Page, Request } from "@playwright/test";
 
@@ -11,6 +13,8 @@ import {
   expectChartRendered,
   reloadApp,
 } from "./fixtures/app";
+
+test.use({ push: false });
 
 interface ChartArgs {
   bars?: number;

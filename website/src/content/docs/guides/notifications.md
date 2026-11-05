@@ -11,6 +11,10 @@ back-compat alias). This is an alternative to polling
 A subscription is bound to the access token in use, so each Claude.ai
 connection has its own filters and offline queue.
 
+The same stream also carries live chart updates
+(`notifications/chart_tick`), which work without `--trade`; see
+[`subscribe_chart`](/chartgen/reference/mcp/#subscribe_chart--unsubscribe_chart).
+
 :::note
 The server uses the **MCP Streamable HTTP transport (spec 2025-03-26)**.
 `GET /mcp` does **not** emit a legacy `event: endpoint` frame or rotate a

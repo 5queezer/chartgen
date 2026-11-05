@@ -60,8 +60,10 @@ function liveBadge(s: PollStatus): { text: string; title: string } | null {
   switch (s.kind) {
     case "off":
       return null;
+    case "push":
+      return { text: "live", title: "Streaming updates from the server" };
     case "live":
-      return { text: "live", title: `Updating every ${s.everyMs / 1000}s` };
+      return { text: "live (polling)", title: `Updating every ${s.everyMs / 1000}s` };
     case "paused":
       return { text: "paused", title: "Live updates pause while the tab is hidden" };
     case "retrying":

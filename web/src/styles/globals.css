@@ -295,7 +295,8 @@ body {
   background-color: currentColor;
 }
 
-.live-status.is-live {
+.live-status.is-live,
+.live-status.is-push {
   color: var(--color-bull);
 }
 

@@ -6,10 +6,16 @@
 //
 // The chart is observed through the DEV-only `window.__chartgenTest`
 // hook (App.tsx) and the MCP request log.
+//
+// These specs cover the polling path, so server push (ADR-0021) is off:
+// every subscribe_chart answers "not pushable", as for a Yahoo symbol.
+// realtime-push.spec.ts covers push and its fallback to polling.
 
 import type { Page, Request } from "@playwright/test";
 
-import { test, expect, gotoApp } from "./fixtures/app";
+import { test, expect, gotoApp, disablePush } from "./fixtures/app";
+
+test.use({ push: false });
 
 interface ChartArgs {
   ticker?: string;
@@ -341,6 +347,7 @@ test.describe("refetch of the current key", () => {
 });
 
 test("a catch-up after missed bars keeps the scrolled-back view", async ({ page }) => {
+  await disablePush(page);
   // The full load arrives 10 bars short, and tail polls are held until the
   // view is scrolled back: the first poll then finds a gap and catches up
   // with a longer tail, more bars than are appended one by one.

@@ -98,6 +98,37 @@ describe("createMcpSession connection lifecycle", () => {
     expect(cl(1).close).not.toHaveBeenCalled();
   });
 
+  it("routes validated chart ticks and other notifications to their handlers", async () => {
+    const s = createMcpSession();
+    const ticks: Array<[string, unknown]> = [];
+    const others: string[] = [];
+    // Handlers installed before or after connecting both apply.
+    s.onChartTick((id, series) => ticks.push([id, series.symbol]));
+    await call(s);
+    s.onNotification((n) => {
+      others.push(n.method);
+    });
+    const deliver = (cl(0) as unknown as {
+      fallbackNotificationHandler: (n: { method: string; params?: unknown }) => Promise<void>;
+    }).fallbackNotificationHandler;
+    const series = {
+      symbol: "BTCUSDT",
+      interval: "1m",
+      bars: [{ t: 60, o: 1, h: 1, l: 1, c: 1, v: 1 }],
+      indicators: {},
+      has_more: true,
+    };
+    await deliver({
+      method: "notifications/chart_tick",
+      params: { subscription_id: "cs-1", series },
+    });
+    // Malformed: dropped at the boundary.
+    await deliver({ method: "notifications/chart_tick", params: { series } });
+    await deliver({ method: "notifications/alert_triggered", params: {} });
+    expect(ticks).toEqual([["cs-1", "BTCUSDT"]]);
+    expect(others).toEqual(["notifications/alert_triggered"]);
+  });
+
   it("close() closes the shared client and allows reconnecting", async () => {
     const s = createMcpSession();
     await call(s);

@@ -47,4 +47,5 @@ one and link both ways.
 | [0017](/chartgen/decisions/0017-indicator-plot-styles/) | Indicator plot styles | Accepted | 2026-11-05 |
 | [0018](/chartgen/decisions/0018-pine-semantics-for-indicators/) | Pine v5 semantics for indicator math | Accepted | 2026-11-05 |
 | [0020](/chartgen/decisions/0020-client-side-price-alerts/) | Client-side price alerts | Accepted | 2026-11-05 |
+| [0021](/chartgen/decisions/0021-realtime-chart-push/) | Real-time chart push over the MCP SSE stream | Accepted | 2026-11-05 |
 | [0022](/chartgen/decisions/0022-compare-symbols/) | Compare symbols | Accepted | 2026-11-05 |

@@ -198,6 +198,12 @@ export function App(): JSX.Element {
     fetch: (request, { signal, ...args }) =>
       session.callGenerateChart({ ...request, ...args }, signal),
     reload: () => query.refetch(),
+    // Server push over the SSE stream (ADR-0021); polling is the fallback.
+    push: {
+      subscribe: async (request, warmup) =>
+        (await session.callSubscribeChart({ ...request, warmup })).subscription_id,
+      unsubscribe: (subscription_id) => session.callUnsubscribeChart({ subscription_id }),
+    },
     onSnapshot: (snapshot) => {
       setLive(snapshot);
       // Price alerts (ADR-0020) on the chart symbol's last close.
@@ -206,6 +212,7 @@ export function App(): JSX.Element {
     onPollStatus: setPollStatus,
     onHistoryStatus: setHistoryStatus,
   });
+  session.onChartTick(feed.applyPush);
   onCleanup(feed.dispose);
 
   // Hand each full load to the feed. A request change (symbol, timeframe,

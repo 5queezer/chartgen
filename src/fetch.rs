@@ -90,7 +90,7 @@ fn bar_open_ms(bar: &Bar) -> Option<i64> {
 
 /// Binance REST interval for a Yahoo-style timeframe the frontend may send
 /// ("1wk" → "1w", "1mo" → "1M", "60m" → "1h"). Binance names pass through.
-fn binance_interval(interval: &str) -> &str {
+pub(crate) fn binance_interval(interval: &str) -> &str {
     match interval {
         "1wk" => "1w",
         "1mo" => "1M",
