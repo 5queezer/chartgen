@@ -8,14 +8,15 @@
 //! share one feed, so one Binance WebSocket serves every chart of it.
 //!
 //! After a feed event the group recomputes the tail exactly like
-//! `generate_chart(format=series, bars=TAIL_BARS, warmup)` and pushes it as
-//! `notifications/chart_tick`, at most once per `Limits::min_push_interval`.
-//! The last subscriber leaving (unsubscribe, or its SSE stream closing)
-//! stops the group; the last group leaving stops the feed.
+//! `generate_chart(format=series, bars=TAIL_BARS, warmup)`, on the blocking
+//! pool, and pushes it as `notifications/chart_tick`, at most once per
+//! `push_interval`. The last subscriber leaving (unsubscribe, or its SSE
+//! stream closing or falling behind) stops the group; a feed without groups
+//! lingers for `Limits::feed_linger`, then closes.
 //!
 //! Independent of the trading engine, so it also runs under plain `--serve`.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use std::time::Duration;
@@ -34,6 +35,15 @@ use crate::fetch::{self, DataSource};
 pub const TAIL_BARS: usize = 2;
 /// JSON-RPC method of a pushed tail.
 pub const CHART_TICK: &str = "notifications/chart_tick";
+/// Most indicators one subscription may ask for.
+pub const MAX_INDICATORS: usize = 10;
+/// Frames buffered per SSE stream. A stream that falls this far behind is
+/// unlinked (see `ChartHub::send`).
+pub const STREAM_BUFFER: usize = 256;
+/// Prefix of errors for a chart the server will not push; clients poll.
+pub const NOT_PUSHABLE: &str = "not pushable";
+/// Prefix of errors for a cap or rate limit; clients poll this chart.
+pub const PUSH_LIMIT: &str = "push limit reached";
 /// Cadence of the sample source's synthetic ticks.
 const SAMPLE_TICK: Duration = Duration::from_millis(500);
 /// Feed events buffered per group before it lags (and skips some).
@@ -47,19 +57,40 @@ const BINANCE_KLINES: [&str; 15] = [
 pub struct Limits {
     /// Subscriptions one bearer token may hold, across its streams.
     pub per_token: usize,
+    /// Subscriptions one client address may hold, across its tokens.
+    pub per_client: usize,
     /// Subscriptions the server holds in total.
     pub total: usize,
-    /// Shortest gap between two pushes of one group.
+    /// `subscribe_chart` calls one token may make per minute.
+    pub subscribes_per_minute: usize,
+    /// Shortest gap between two pushes of a group with warmup ≤ 300; twice
+    /// that above (see `push_interval`).
     pub min_push_interval: Duration,
+    /// How long a feed without groups stays connected, so a quick
+    /// unsubscribe/subscribe does not reconnect the WebSocket.
+    pub feed_linger: Duration,
 }
 
 impl Default for Limits {
     fn default() -> Self {
         Self {
             per_token: 4,
+            per_client: 8,
             total: 64,
+            subscribes_per_minute: 10,
             min_push_interval: Duration::from_millis(250),
+            feed_linger: Duration::from_secs(30),
         }
+    }
+}
+
+/// The recompute costs about linearly in `TAIL_BARS + warmup`, so large
+/// windows push half as often.
+fn push_interval(base: Duration, warmup: usize) -> Duration {
+    if warmup <= 300 {
+        base
+    } else {
+        base * 2
     }
 }
 
@@ -85,7 +116,20 @@ fn binance_only(symbol: &str) -> Result<(), String> {
         Ok(())
     } else {
         Err(format!(
-            "not pushable: {symbol} is not a Binance symbol; poll generate_chart instead"
+            "{NOT_PUSHABLE}: {symbol} is not a Binance symbol; poll generate_chart instead"
+        ))
+    }
+}
+
+/// The ticker as it goes into a feed (and the Binance WebSocket URL):
+/// uppercase ASCII letters and digits, 2 to 20 of them.
+fn feed_symbol(ticker: &str) -> Result<String, String> {
+    let t = ticker.to_ascii_uppercase();
+    if (2..=20).contains(&t.len()) && t.bytes().all(|b| b.is_ascii_alphanumeric()) {
+        Ok(t)
+    } else {
+        Err(format!(
+            "{NOT_PUSHABLE}: the ticker must be 2-20 letters or digits"
         ))
     }
 }
@@ -101,7 +145,7 @@ impl PushSource for BinanceSource {
             Ok(interval.to_string())
         } else {
             Err(format!(
-                "not pushable: Binance has no {timeframe} kline stream; poll generate_chart instead"
+                "{NOT_PUSHABLE}: Binance has no {timeframe} kline stream; poll generate_chart instead"
             ))
         }
     }
@@ -197,22 +241,27 @@ pub struct PushCtx {
     pub hub: Arc<ChartHub>,
     /// Identifies the caller's SSE stream; see `server::stream_key`.
     pub stream: String,
+    /// The caller's network address, for the per-client cap.
+    pub client: String,
 }
 
 type FeedKey = (String, String);
 
 struct StreamSlot {
     id: u64,
-    tx: mpsc::UnboundedSender<String>,
+    tx: mpsc::Sender<String>,
 }
 
 struct Sub {
     token: String,
+    client: String,
     stream: String,
     group: ChartRequest,
 }
 
 struct Group {
+    /// Tells this group apart from a later one for the same chart.
+    id: u64,
     subs: HashSet<String>,
     feed: FeedKey,
     task: JoinHandle<()>,
@@ -220,8 +269,13 @@ struct Group {
 
 struct Feed {
     groups: usize,
-    events: broadcast::Sender<FeedEvent>,
+    /// Only the feed task holds the sender, so its groups see `Closed` when
+    /// the feed ends.
+    events: broadcast::WeakSender<FeedEvent>,
     task: JoinHandle<()>,
+    /// Bumped whenever `groups` drops to 0 or leaves it; a pending linger
+    /// closes the feed only if it is unchanged.
+    epoch: u64,
 }
 
 #[derive(Default)]
@@ -230,34 +284,38 @@ struct State {
     subs: HashMap<String, Sub>,
     groups: HashMap<ChartRequest, Group>,
     feeds: HashMap<FeedKey, Feed>,
+    /// Recent `subscribe_chart` calls per token.
+    attempts: HashMap<String, VecDeque<std::time::Instant>>,
 }
 
 impl State {
-    /// Remove a subscription, then its group and feed if it was their last.
-    fn remove_sub(&mut self, id: &str) {
-        let Some(sub) = self.subs.remove(id) else {
-            return;
-        };
-        let Some(group) = self.groups.get_mut(&sub.group) else {
-            return;
-        };
+    /// Remove a subscription, then its group if it was the last. Returns a
+    /// feed that has no groups left, with its epoch, to close after the
+    /// linger.
+    fn remove_sub(&mut self, id: &str) -> Option<(FeedKey, u64)> {
+        let sub = self.subs.remove(id)?;
+        let group = self.groups.get_mut(&sub.group)?;
         group.subs.remove(id);
         if !group.subs.is_empty() {
-            return;
+            return None;
         }
-        let Some(group) = self.groups.remove(&sub.group) else {
-            return;
-        };
+        let group = self.groups.remove(&sub.group)?;
         group.task.abort();
-        let Some(feed) = self.feeds.get_mut(&group.feed) else {
-            return;
-        };
+        let feed = self.feeds.get_mut(&group.feed)?;
         feed.groups -= 1;
-        if feed.groups == 0 {
-            if let Some(feed) = self.feeds.remove(&group.feed) {
-                feed.task.abort();
-            }
+        if feed.groups > 0 {
+            return None;
         }
+        feed.epoch += 1;
+        Some((group.feed, feed.epoch))
+    }
+
+    fn subs_of(&self, keep: impl Fn(&Sub) -> bool) -> Vec<String> {
+        self.subs
+            .iter()
+            .filter(|(_, s)| keep(s))
+            .map(|(id, _)| id.clone())
+            .collect()
     }
 }
 
@@ -268,7 +326,7 @@ pub struct ChartHub {
     limits: Limits,
     runtime: tokio::runtime::Handle,
     state: Mutex<State>,
-    next_stream: AtomicU64,
+    next_id: AtomicU64,
     me: Weak<ChartHub>,
 }
 
@@ -280,7 +338,7 @@ impl ChartHub {
             limits,
             runtime: tokio::runtime::Handle::current(),
             state: Mutex::default(),
-            next_stream: AtomicU64::new(1),
+            next_id: AtomicU64::new(1),
             me: me.clone(),
         })
     }
@@ -298,11 +356,15 @@ impl ChartHub {
         self.state.lock().unwrap_or_else(|p| p.into_inner())
     }
 
+    fn id(&self) -> u64 {
+        self.next_id.fetch_add(1, Ordering::Relaxed)
+    }
+
     /// Attach an SSE stream under `key` and return its id. A stream that
     /// already had the key (a client reconnect) is replaced, and its
     /// subscriptions now push to the new one.
-    pub fn link_stream(&self, key: &str, tx: mpsc::UnboundedSender<String>) -> u64 {
-        let id = self.next_stream.fetch_add(1, Ordering::Relaxed);
+    pub fn link_stream(&self, key: &str, tx: mpsc::Sender<String>) -> u64 {
+        let id = self.id();
         self.lock()
             .streams
             .insert(key.to_string(), StreamSlot { id, tx });
@@ -313,77 +375,149 @@ impl ChartHub {
     /// has replaced it.
     pub fn unlink_stream(&self, key: &str, id: u64) {
         let mut st = self.lock();
-        if !st.streams.get(key).is_some_and(|s| s.id == id) {
-            return;
-        }
-        st.streams.remove(key);
-        let ids: Vec<String> = st
-            .subs
-            .iter()
-            .filter(|(_, s)| s.stream == key)
-            .map(|(id, _)| id.clone())
-            .collect();
-        for id in ids {
-            st.remove_sub(&id);
+        if st.streams.get(key).is_some_and(|s| s.id == id) {
+            self.drop_stream(&mut st, key);
         }
     }
 
-    /// Subscribe `stream` (owned by `token`) to pushed tails of `req`.
-    /// `req` must already be validated as a `generate_chart` request.
+    fn drop_stream(&self, st: &mut State, key: &str) {
+        st.streams.remove(key);
+        for id in st.subs_of(|s| s.stream == key) {
+            self.remove_sub(st, &id);
+        }
+    }
+
+    fn remove_sub(&self, st: &mut State, id: &str) {
+        if let Some((feed, epoch)) = st.remove_sub(id) {
+            self.close_later(feed, epoch);
+        }
+    }
+
+    /// Close an idle feed after the linger, unless a group took it again.
+    fn close_later(&self, key: FeedKey, epoch: u64) {
+        let hub = self.me.clone();
+        let linger = self.limits.feed_linger;
+        self.runtime.spawn(async move {
+            tokio::time::sleep(linger).await;
+            let Some(hub) = hub.upgrade() else { return };
+            let mut st = hub.lock();
+            if st
+                .feeds
+                .get(&key)
+                .is_some_and(|f| f.groups == 0 && f.epoch == epoch)
+            {
+                if let Some(feed) = st.feeds.remove(&key) {
+                    feed.task.abort();
+                }
+            }
+        });
+    }
+
+    /// Subscribe `stream` (owned by `token`, from `client`) to pushed tails
+    /// of `req`. `req` must already be validated as a `generate_chart`
+    /// request.
     pub fn subscribe(
         &self,
         token: &str,
+        client: &str,
         stream: &str,
         req: ChartRequest,
     ) -> Result<String, String> {
         let interval = self.source.feed_interval(&req.ticker, &req.timeframe)?;
+        let symbol = feed_symbol(&req.ticker)?;
+        let limits = &self.limits;
         let mut guard = self.lock();
         let st = &mut *guard;
+
+        let now = std::time::Instant::now();
+        let minute = Duration::from_secs(60);
+        st.attempts.retain(|_, calls| {
+            while calls.front().is_some_and(|t| now - *t >= minute) {
+                calls.pop_front();
+            }
+            !calls.is_empty()
+        });
+        let calls = st.attempts.entry(token.to_string()).or_default();
+        if calls.len() >= limits.subscribes_per_minute {
+            return Err(format!(
+                "{PUSH_LIMIT}: at most {} subscribe_chart calls per minute per token",
+                limits.subscribes_per_minute
+            ));
+        }
+        calls.push_back(now);
+
         if !st.streams.contains_key(stream) {
             return Err("no open SSE stream: open GET /mcp (same token and Mcp-Session-Id) before subscribe_chart".into());
         }
-        if st.subs.values().filter(|s| s.token == token).count() >= self.limits.per_token {
+        let count = |keep: &dyn Fn(&Sub) -> bool| st.subs.values().filter(|s| keep(s)).count();
+        if count(&|s| s.token == token) >= limits.per_token {
             return Err(format!(
-                "too many chart subscriptions: at most {} per token",
-                self.limits.per_token
+                "{PUSH_LIMIT}: at most {} chart subscriptions per token",
+                limits.per_token
             ));
         }
-        if st.subs.len() >= self.limits.total {
-            return Err(
-                "the server is at its chart subscription limit; poll generate_chart instead".into(),
-            );
+        if count(&|s| s.client == client) >= limits.per_client {
+            return Err(format!(
+                "{PUSH_LIMIT}: at most {} chart subscriptions per client address",
+                limits.per_client
+            ));
         }
+        if st.subs.len() >= limits.total {
+            return Err(format!(
+                "{PUSH_LIMIT}: the server holds its maximum of {} chart subscriptions",
+                limits.total
+            ));
+        }
+
         if !st.groups.contains_key(&req) {
-            let feed = (req.ticker.to_lowercase(), interval);
+            let feed = (symbol, interval);
             let events = match st.feeds.get_mut(&feed) {
-                Some(f) => {
-                    f.groups += 1;
-                    f.events.subscribe()
-                }
+                Some(f) => match f.events.upgrade() {
+                    Some(events) => {
+                        if f.groups == 0 {
+                            f.epoch += 1;
+                        }
+                        f.groups += 1;
+                        Some(events.subscribe())
+                    }
+                    None => None,
+                },
+                None => None,
+            };
+            let events = match events {
+                Some(rx) => rx,
                 None => {
+                    // New, or its task ended: start it (again). Groups still
+                    // on the ended feed see `Closed` and leave.
+                    let groups = st.feeds.remove(&feed).map_or(0, |f| f.groups);
                     let (events, rx) = broadcast::channel(FEED_BUFFER);
-                    let task = self.spawn_feed(&feed, events.clone());
+                    let weak = events.downgrade();
+                    let task = self.spawn_feed(&feed, events);
                     st.feeds.insert(
                         feed.clone(),
                         Feed {
-                            groups: 1,
-                            events,
+                            groups: groups + 1,
+                            events: weak,
                             task,
+                            epoch: 0,
                         },
                     );
                     rx
                 }
             };
+            let id = self.id();
             let task = self.runtime.spawn(run_group(
                 self.me.clone(),
                 self.source.clone(),
                 req.clone(),
+                id,
                 events,
-                self.limits.min_push_interval,
+                push_interval(limits.min_push_interval, req.warmup),
             ));
             st.groups.insert(
                 req.clone(),
                 Group {
+                    id,
                     subs: HashSet::new(),
                     feed,
                     task,
@@ -398,6 +532,7 @@ impl ChartHub {
             id.clone(),
             Sub {
                 token: token.to_string(),
+                client: client.to_string(),
                 stream: stream.to_string(),
                 group: req,
             },
@@ -411,7 +546,7 @@ impl ChartHub {
         if !st.subs.get(id).is_some_and(|s| s.token == token) {
             return false;
         }
-        st.remove_sub(id);
+        self.remove_sub(&mut st, id);
         true
     }
 
@@ -427,7 +562,7 @@ impl ChartHub {
         self.runtime.spawn(async move {
             let forward = async {
                 while let Some(event) = rx.recv().await {
-                    // No receivers only while the last group is going away.
+                    // No receivers while the feed lingers without groups.
                     let _ = events.send(event);
                 }
             };
@@ -435,83 +570,80 @@ impl ChartHub {
         })
     }
 
-    /// End a group that cannot push (seeding failed, feed gone). Its
-    /// subscribers stop receiving ticks and fall back to polling.
-    fn drop_group(&self, req: &ChartRequest) {
+    /// End group `id` of `req` that cannot push (seeding or a recompute
+    /// failed, the feed ended). Its subscribers stop receiving ticks and
+    /// fall back to polling.
+    fn drop_group(&self, req: &ChartRequest, id: u64) {
         let mut st = self.lock();
-        let ids: Vec<String> = st
-            .groups
-            .get(req)
-            .map(|g| g.subs.iter().cloned().collect())
-            .unwrap_or_default();
+        let ids: Vec<String> = match st.groups.get(req) {
+            Some(g) if g.id == id => g.subs.iter().cloned().collect(),
+            _ => return,
+        };
         for id in ids {
-            st.remove_sub(&id);
+            self.remove_sub(&mut st, &id);
         }
     }
 
-    /// Compute the tail of `window` and send it to every subscriber.
-    fn push(&self, req: &ChartRequest, window: &[Bar], indicators: &Value) {
-        let raw = OhlcvData {
-            bars: window.to_vec(),
-            symbol: Some(req.ticker.clone()),
-            interval: Some(req.timeframe.clone()),
-        };
-        let series = match crate::mcp::series_tail(&raw, indicators, &req.chart_style, TAIL_BARS) {
-            Ok(s) => s,
-            Err(e) => {
-                eprintln!("[push] {} {}: {e}", req.ticker, req.timeframe);
-                return;
-            }
-        };
-        let st = self.lock();
+    /// Send a computed tail to every subscriber of `req`. A stream whose
+    /// buffer is full (a stalled or dead peer) or closed is unlinked with
+    /// all its subscriptions; without the trading engine that also ends the
+    /// SSE response, and a live client reconnects.
+    fn send(&self, req: &ChartRequest, series: &Value) {
+        let mut st = self.lock();
         let Some(group) = st.groups.get(req) else {
             return;
         };
+        let mut dead = Vec::new();
         for id in &group.subs {
-            let Some(stream) = st.subs.get(id).and_then(|s| st.streams.get(&s.stream)) else {
+            let Some(sub) = st.subs.get(id) else { continue };
+            let Some(stream) = st.streams.get(&sub.stream) else {
                 continue;
             };
             let note = json!({
                 "jsonrpc": "2.0",
                 "method": CHART_TICK,
-                "params": { "subscription_id": id, "series": &series },
+                "params": { "subscription_id": id, "series": series },
             });
-            // A closed stream is unlinked by its own cleanup.
-            let _ = stream.tx.send(note.to_string());
+            if stream.tx.try_send(note.to_string()).is_err() {
+                dead.push(sub.stream.clone());
+            }
+        }
+        dead.sort();
+        dead.dedup();
+        for key in dead {
+            eprintln!("[push] SSE stream full or closed; dropping its subscriptions");
+            self.drop_stream(&mut st, &key);
         }
     }
 }
 
 /// A group's task: seed the window, then apply feed events and push the
-/// recomputed tail, throttled to one push per `min_interval`.
+/// recomputed tail, throttled to one push per `min_interval`. Seeding and
+/// recomputes run on the blocking pool; one that fails or panics ends the
+/// group.
 async fn run_group(
     hub: Weak<ChartHub>,
     source: Arc<dyn PushSource>,
     req: ChartRequest,
+    id: u64,
     mut events: broadcast::Receiver<FeedEvent>,
     min_interval: Duration,
 ) {
+    let fail = |why: String| {
+        eprintln!("[push] {} {}: {why}", req.ticker, req.timeframe);
+        if let Some(hub) = hub.upgrade() {
+            hub.drop_group(&req, id);
+        }
+    };
     let len = TAIL_BARS + req.warmup;
     let (symbol, timeframe) = (req.ticker.clone(), req.timeframe.clone());
     // Subscribed to the feed before seeding, so no event in between is lost.
     let seeded = tokio::task::spawn_blocking(move || source.seed(&symbol, &timeframe, len)).await;
     let mut window = match seeded {
         Ok(Ok(d)) if !d.is_empty() => d.bars,
-        other => {
-            let why = match other {
-                Ok(Err(e)) => e,
-                Err(e) => e.to_string(),
-                Ok(Ok(_)) => "no bars".into(),
-            };
-            eprintln!(
-                "[push] seeding {} {} failed: {why}",
-                req.ticker, req.timeframe
-            );
-            if let Some(hub) = hub.upgrade() {
-                hub.drop_group(&req);
-            }
-            return;
-        }
+        Ok(Ok(_)) => return fail("seeding returned no bars".into()),
+        Ok(Err(e)) => return fail(format!("seeding failed: {e}")),
+        Err(e) => return fail(format!("seeding failed: {e}")),
     };
     let indicators: Value = serde_json::from_str(&req.indicators).unwrap_or(Value::Null);
     // Push the seeded window right away.
@@ -524,16 +656,26 @@ async fn run_group(
                     dirty |= upsert_bar(&mut window, bar, len);
                 }
                 Err(broadcast::error::RecvError::Lagged(_)) => {}
-                Err(broadcast::error::RecvError::Closed) => {
-                    if let Some(hub) = hub.upgrade() {
-                        hub.drop_group(&req);
-                    }
-                    return;
-                }
+                Err(broadcast::error::RecvError::Closed) => return fail("feed ended".into()),
             },
             _ = tokio::time::sleep_until(next), if dirty => {
+                let raw = OhlcvData {
+                    bars: window.clone(),
+                    symbol: Some(req.ticker.clone()),
+                    interval: Some(req.timeframe.clone()),
+                };
+                let (indicators, style) = (indicators.clone(), req.chart_style.clone());
+                let computed = tokio::task::spawn_blocking(move || {
+                    crate::mcp::series_tail(&raw, &indicators, &style, TAIL_BARS)
+                })
+                .await;
+                let series = match computed {
+                    Ok(Ok(series)) => series,
+                    Ok(Err(e)) => return fail(format!("recompute failed: {e}")),
+                    Err(e) => return fail(format!("recompute panicked: {e}")),
+                };
                 let Some(hub) = hub.upgrade() else { return };
-                hub.push(&req, &window, &indicators);
+                hub.send(&req, &series);
                 dirty = false;
                 next = Instant::now() + min_interval;
             }
@@ -567,7 +709,7 @@ fn upsert_bar(window: &mut Vec<Bar>, bar: Bar, cap: usize) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::{AtomicBool, AtomicUsize};
 
     fn bar(t: i64, close: f64) -> Bar {
         Bar {
@@ -609,12 +751,36 @@ mod tests {
         assert!(upsert_bar(&mut empty, bar(60, 1.0), 2));
     }
 
+    #[test]
+    fn tickers_and_push_intervals() {
+        assert_eq!(feed_symbol("btcUSDT").unwrap(), "BTCUSDT");
+        for bad in [
+            "B",
+            "BTC/USDT",
+            "btcusdt@trade",
+            "../x",
+            "",
+            &"A".repeat(21),
+        ] {
+            assert!(
+                feed_symbol(bad).unwrap_err().starts_with(NOT_PUSHABLE),
+                "{bad}"
+            );
+        }
+        let base = Duration::from_millis(250);
+        assert_eq!(push_interval(base, 300), base);
+        assert_eq!(push_interval(base, 1000), base * 2);
+    }
+
     /// Feeds that the test drives by hand, counting how many are running.
     #[derive(Default)]
     struct Fake {
         started: AtomicUsize,
         running: Arc<AtomicUsize>,
-        senders: Mutex<Vec<mpsc::Sender<FeedEvent>>>,
+        senders: Mutex<Vec<mpsc::WeakSender<FeedEvent>>>,
+        /// Ends every running feed.
+        stop: Arc<tokio::sync::Notify>,
+        panic_on_seed: AtomicBool,
     }
 
     struct Running(Arc<AtomicUsize>);
@@ -629,6 +795,7 @@ mod tests {
             binance_only(symbol).map(|_| timeframe.to_string())
         }
         fn seed(&self, symbol: &str, timeframe: &str, count: usize) -> Result<OhlcvData, String> {
+            assert!(!self.panic_on_seed.load(Ordering::SeqCst), "seed exploded");
             // 2024-01-01T00:00Z, so the forming bar is fixed.
             data::sample_ohlcv(symbol, timeframe, count, None, 1_704_067_200_000)
         }
@@ -640,20 +807,39 @@ mod tests {
         ) -> BoxFuture<'static, ()> {
             self.started.fetch_add(1, Ordering::SeqCst);
             self.running.fetch_add(1, Ordering::SeqCst);
-            self.senders.lock().unwrap().push(tx);
+            self.senders.lock().unwrap().push(tx.downgrade());
             let guard = Running(self.running.clone());
+            let stop = self.stop.clone();
+            // The feed owns the only strong sender, like a real one: when it
+            // ends, its groups see the channel close.
             Box::pin(async move {
                 let _guard = guard;
-                std::future::pending::<()>().await
+                let _tx = tx;
+                stop.notified().await
             })
         }
     }
 
     impl Fake {
-        /// Send `bar` on the newest feed.
+        /// Send `event` on the newest feed.
         async fn send(&self, event: FeedEvent) {
-            let tx = self.senders.lock().unwrap().last().unwrap().clone();
+            let tx = self
+                .senders
+                .lock()
+                .unwrap()
+                .last()
+                .unwrap()
+                .upgrade()
+                .unwrap();
             tx.send(event).await.unwrap();
+        }
+    }
+
+    /// Default limits, but feeds close right after their last group.
+    fn quick() -> Limits {
+        Limits {
+            feed_linger: Duration::from_millis(20),
+            ..Limits::default()
         }
     }
 
@@ -671,8 +857,12 @@ mod tests {
         }
     }
 
+    fn stream() -> (mpsc::Sender<String>, mpsc::Receiver<String>) {
+        mpsc::channel(STREAM_BUFFER)
+    }
+
     /// Next notification on `rx` within `ms`, parsed.
-    async fn next(rx: &mut mpsc::UnboundedReceiver<String>, ms: u64) -> Option<Value> {
+    async fn next(rx: &mut mpsc::Receiver<String>, ms: u64) -> Option<Value> {
         tokio::time::timeout(Duration::from_millis(ms), rx.recv())
             .await
             .ok()
@@ -681,21 +871,21 @@ mod tests {
     }
 
     async fn settle() {
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
     }
 
     #[tokio::test]
     async fn pushes_tails_and_shares_one_feed() {
         let fake = Arc::new(Fake::default());
-        let hub = hub(&fake, Limits::default());
-        let (tx, mut rx) = mpsc::unbounded_channel();
+        let hub = hub(&fake, quick());
+        let (tx, mut rx) = stream();
         hub.link_stream("s1", tx);
 
         let a = hub
-            .subscribe("tok", "s1", req("BTCUSDT", r#"["rsi"]"#))
+            .subscribe("tok", "ip", "s1", req("BTCUSDT", r#"["rsi"]"#))
             .unwrap();
         let b = hub
-            .subscribe("tok", "s1", req("BTCUSDT", r#"["macd"]"#))
+            .subscribe("tok", "ip", "s1", req("BTCUSDT", r#"["macd"]"#))
             .unwrap();
         assert_eq!(hub.counts(), (2, 2, 1));
         assert_eq!(
@@ -728,7 +918,7 @@ mod tests {
             assert!(series["indicators"].as_object().unwrap().len() == 1);
         }
 
-        // Unsubscribing the last group tears the feed down.
+        // Unsubscribing the last group tears the feed down after the linger.
         assert!(
             !hub.unsubscribe("other-token", &a),
             "only the owner may unsubscribe"
@@ -736,23 +926,57 @@ mod tests {
         assert!(hub.unsubscribe("tok", &a));
         assert_eq!(hub.counts(), (1, 1, 1));
         assert!(hub.unsubscribe("tok", &b));
+        assert_eq!(hub.counts(), (0, 0, 1), "the feed lingers");
         settle().await;
         assert_eq!(hub.counts(), (0, 0, 0));
         assert_eq!(fake.running.load(Ordering::SeqCst), 0, "feed task stopped");
     }
 
     #[tokio::test]
+    async fn a_lingering_feed_is_reused() {
+        let fake = Arc::new(Fake::default());
+        let hub = hub(
+            &fake,
+            Limits {
+                feed_linger: Duration::from_millis(300),
+                ..Limits::default()
+            },
+        );
+        let (tx, mut rx) = stream();
+        hub.link_stream("s1", tx);
+        let a = hub
+            .subscribe("tok", "ip", "s1", req("BTCUSDT", "[]"))
+            .unwrap();
+        hub.unsubscribe("tok", &a);
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        // Back within the linger: same WebSocket, and its timer is void.
+        hub.subscribe("tok", "ip", "s1", req("BTCUSDT", "[]"))
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(fake.started.load(Ordering::SeqCst), 1);
+        assert_eq!(hub.counts(), (1, 1, 1));
+        while next(&mut rx, 50).await.is_some() {}
+        fake.send(FeedEvent::Tick(bar(1_704_067_200, 7.0))).await;
+        assert_eq!(
+            next(&mut rx, 2_000).await.unwrap()["params"]["series"]["bars"][1]["c"],
+            7.0
+        );
+    }
+
+    #[tokio::test]
     async fn same_chart_shares_a_group() {
         let fake = Arc::new(Fake::default());
-        let hub = hub(&fake, Limits::default());
-        let (t1, mut r1) = mpsc::unbounded_channel();
-        let (t2, mut r2) = mpsc::unbounded_channel();
+        let hub = hub(&fake, quick());
+        let (t1, mut r1) = stream();
+        let (t2, mut r2) = stream();
         hub.link_stream("s1", t1);
         hub.link_stream("s2", t2);
-        hub.subscribe("u1", "s1", req("BTCUSDT", "[]")).unwrap();
+        hub.subscribe("u1", "ip1", "s1", req("BTCUSDT", "[]"))
+            .unwrap();
         // Seeded before the second subscriber joins.
         assert!(next(&mut r1, 2_000).await.is_some());
-        hub.subscribe("u2", "s2", req("BTCUSDT", "[]")).unwrap();
+        hub.subscribe("u2", "ip2", "s2", req("BTCUSDT", "[]"))
+            .unwrap();
         assert_eq!(hub.counts(), (2, 1, 1));
         fake.send(FeedEvent::Tick(bar(1_704_067_200, 5.0))).await;
         assert_eq!(
@@ -770,12 +994,12 @@ mod tests {
         let fake = Arc::new(Fake::default());
         let limits = Limits {
             min_push_interval: Duration::from_millis(200),
-            ..Limits::default()
+            ..quick()
         };
         let hub = hub(&fake, limits);
-        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (tx, mut rx) = stream();
         hub.link_stream("s1", tx);
-        hub.subscribe("tok", "s1", req("BTCUSDT", r#"["rsi"]"#))
+        hub.subscribe("tok", "ip", "s1", req("BTCUSDT", r#"["rsi"]"#))
             .unwrap();
         next(&mut rx, 2_000).await.expect("seed push");
 
@@ -795,42 +1019,85 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn caps_streams_and_pushability() {
+    async fn caps_rate_limit_and_pushability() {
         let fake = Arc::new(Fake::default());
         let limits = Limits {
             per_token: 2,
-            total: 3,
-            ..Limits::default()
+            per_client: 3,
+            total: 4,
+            subscribes_per_minute: 4,
+            ..quick()
         };
         let hub = hub(&fake, limits);
-        let (tx, _rx) = mpsc::unbounded_channel();
-        hub.link_stream("s1", tx.clone());
-        hub.link_stream("s2", tx);
+        let (tx, _rx) = stream();
+        for s in ["s1", "s2", "s3", "s4"] {
+            hub.link_stream(s, tx.clone());
+        }
 
         let err = hub
-            .subscribe("tok", "nope", req("BTCUSDT", "[]"))
+            .subscribe("tok", "ip", "nope", req("BTCUSDT", "[]"))
             .unwrap_err();
         assert!(err.contains("no open SSE stream"), "{err}");
-        let err = hub.subscribe("tok", "s1", req("AAPL", "[]")).unwrap_err();
-        assert!(err.starts_with("not pushable"), "{err}");
+        let err = hub
+            .subscribe("tok", "ip", "s1", req("AAPL", "[]"))
+            .unwrap_err();
+        assert!(err.starts_with(NOT_PUSHABLE), "{err}");
+        let err = hub
+            .subscribe("tok", "ip", "s1", req("X/BTCUSDT", "[]"))
+            .unwrap_err();
+        assert!(err.starts_with(NOT_PUSHABLE), "{err}");
 
-        hub.subscribe("a", "s1", req("BTCUSDT", "[]")).unwrap();
-        hub.subscribe("a", "s1", req("ETHUSDT", "[]")).unwrap();
-        let err = hub.subscribe("a", "s1", req("SOLUSDT", "[]")).unwrap_err();
-        assert!(err.contains("per token"), "{err}");
-        hub.subscribe("b", "s2", req("BTCUSDT", "[]")).unwrap();
-        let err = hub.subscribe("c", "s2", req("BTCUSDT", "[]")).unwrap_err();
-        assert!(err.contains("subscription limit"), "{err}");
-        assert_eq!(hub.counts(), (3, 2, 2));
+        hub.subscribe("a", "ip1", "s1", req("BTCUSDT", "[]"))
+            .unwrap();
+        hub.subscribe("a", "ip1", "s1", req("ETHUSDT", "[]"))
+            .unwrap();
+        let err = hub
+            .subscribe("a", "ip1", "s1", req("SOLUSDT", "[]"))
+            .unwrap_err();
+        assert!(
+            err.starts_with(PUSH_LIMIT) && err.contains("per token"),
+            "{err}"
+        );
+        // A fresh token from the same address hits the per-client cap.
+        hub.subscribe("b", "ip1", "s2", req("BTCUSDT", "[]"))
+            .unwrap();
+        let err = hub
+            .subscribe("c", "ip1", "s3", req("BTCUSDT", "[]"))
+            .unwrap_err();
+        assert!(err.contains("per client address"), "{err}");
+        hub.subscribe("d", "ip2", "s4", req("BTCUSDT", "[]"))
+            .unwrap();
+        let err = hub
+            .subscribe("e", "ip3", "s4", req("BTCUSDT", "[]"))
+            .unwrap_err();
+        assert!(err.contains("maximum of 4"), "{err}");
+        assert_eq!(hub.counts(), (4, 2, 2));
+
+        // Calls that get past the pushability check count, failed or not:
+        // "tok" made one above, three more fill its minute.
+        for _ in 0..3 {
+            let err = hub
+                .subscribe("tok", "ip9", "nope", req("BTCUSDT", "[]"))
+                .unwrap_err();
+            assert!(err.contains("no open SSE stream"), "{err}");
+        }
+        let err = hub
+            .subscribe("tok", "ip9", "s1", req("BTCUSDT", "[]"))
+            .unwrap_err();
+        assert!(
+            err.starts_with(PUSH_LIMIT) && err.contains("per minute"),
+            "{err}"
+        );
     }
 
     #[tokio::test]
     async fn closing_a_stream_drops_its_subscriptions() {
         let fake = Arc::new(Fake::default());
-        let hub = hub(&fake, Limits::default());
-        let (tx, _rx) = mpsc::unbounded_channel();
+        let hub = hub(&fake, quick());
+        let (tx, _rx) = stream();
         let old = hub.link_stream("s1", tx.clone());
-        hub.subscribe("tok", "s1", req("BTCUSDT", "[]")).unwrap();
+        hub.subscribe("tok", "ip", "s1", req("BTCUSDT", "[]"))
+            .unwrap();
 
         // A reconnect replaces the stream; the old one's cleanup is a no-op.
         let new = hub.link_stream("s1", tx);
@@ -841,6 +1108,63 @@ mod tests {
         settle().await;
         assert_eq!(hub.counts(), (0, 0, 0));
         assert_eq!(fake.running.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn a_stalled_stream_is_dropped_when_its_buffer_fills() {
+        let fake = Arc::new(Fake::default());
+        let hub = hub(
+            &fake,
+            Limits {
+                min_push_interval: Duration::from_millis(1),
+                ..quick()
+            },
+        );
+        // Nobody reads this stream; a 2-frame buffer fills at once.
+        let (stalled, _keep) = mpsc::channel(2);
+        let (tx, mut rx) = stream();
+        hub.link_stream("stalled", stalled);
+        hub.link_stream("ok", tx);
+        hub.subscribe("u1", "ip1", "stalled", req("BTCUSDT", "[]"))
+            .unwrap();
+        hub.subscribe("u2", "ip2", "ok", req("BTCUSDT", "[]"))
+            .unwrap();
+        for i in 0..5 {
+            fake.send(FeedEvent::Tick(bar(1_704_067_200, i as f64)))
+                .await;
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(hub.counts().0, 1, "only the reading stream is left");
+        assert!(next(&mut rx, 500).await.is_some());
+    }
+
+    #[tokio::test]
+    async fn failed_groups_and_ended_feeds_are_removed() {
+        let fake = Arc::new(Fake::default());
+        let hub = hub(&fake, quick());
+        let (tx, _rx) = stream();
+        hub.link_stream("s1", tx);
+
+        // A seed that panics ends its group instead of leaving a zombie.
+        fake.panic_on_seed.store(true, Ordering::SeqCst);
+        hub.subscribe("tok", "ip", "s1", req("BTCUSDT", "[]"))
+            .unwrap();
+        settle().await;
+        assert_eq!(hub.counts(), (0, 0, 0));
+        fake.panic_on_seed.store(false, Ordering::SeqCst);
+
+        // The feed ending reaches its groups, which leave.
+        hub.subscribe("tok", "ip", "s1", req("ETHUSDT", "[]"))
+            .unwrap();
+        settle().await;
+        fake.stop.notify_waiters();
+        settle().await;
+        assert_eq!(hub.counts(), (0, 0, 0));
+        // The next subscription starts the feed again.
+        hub.subscribe("tok", "ip", "s1", req("ETHUSDT", "[]"))
+            .unwrap();
+        assert_eq!(hub.counts(), (1, 1, 1));
+        assert_eq!(fake.started.load(Ordering::SeqCst), 3);
     }
 
     #[tokio::test]

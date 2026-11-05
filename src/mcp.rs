@@ -5,7 +5,7 @@ use std::collections::HashSet;
 use std::io::{self, BufRead, Write};
 use std::sync::{Arc, RwLock};
 
-use crate::chart_push::{ChartRequest, PushCtx};
+use crate::chart_push::{ChartRequest, PushCtx, MAX_INDICATORS, PUSH_LIMIT};
 use crate::fetch;
 use crate::search;
 use chartgen::data;
@@ -573,6 +573,16 @@ fn tool_subscribe_chart(
         Err(e) => return tool_err(id, e),
     };
     let indicators = indicators_arg(args);
+    // Every push recomputes every indicator.
+    if indicators
+        .as_array()
+        .is_some_and(|a| a.len() > MAX_INDICATORS)
+    {
+        return tool_err(
+            id,
+            &format!("{PUSH_LIMIT}: at most {MAX_INDICATORS} indicators per subscription"),
+        );
+    }
     let (_, _, unknown, invalid) = parse_panels(&indicators);
     if let Err(e) = check_panels(&unknown, &invalid) {
         return tool_err(id, &e);
@@ -586,7 +596,7 @@ fn tool_subscribe_chart(
         chart_style: chart_style.to_string(),
         warmup,
     };
-    match push.hub.subscribe(token, &push.stream, req) {
+    match push.hub.subscribe(token, &push.client, &push.stream, req) {
         Ok(sub) => tool_ok(id, json!({ "subscription_id": sub })),
         Err(e) => tool_err(id, &e),
     }
@@ -3513,11 +3523,12 @@ mod tests {
             Arc::new(crate::chart_push::SampleSource),
             crate::chart_push::Limits::default(),
         );
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(crate::chart_push::STREAM_BUFFER);
         hub.link_stream("s", tx);
         let push = PushCtx {
             hub: hub.clone(),
             stream: "s".into(),
+            client: "127.0.0.1".into(),
         };
         let ok = |args: Value| {
             let resp = call("subscribe_chart", args, Some(&push), Some("tok"));
@@ -3538,6 +3549,10 @@ mod tests {
                 "chart_style",
             ),
             (json!({ "ticker": "AAPL" }), "not pushable"),
+            (
+                json!({ "ticker": "BTCUSDT", "indicators": vec!["rsi"; 11] }),
+                "at most 10 indicators",
+            ),
         ] {
             let (err, text) = ok(args.clone());
             assert!(err && text.contains(needle), "{args}: {text}");
