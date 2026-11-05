@@ -13,6 +13,22 @@ pub enum FeedEvent {
     Tick(Bar),
 }
 
+/// Trades buffered for re-folding at most (about 2 s of trades, the gap
+/// between two kline updates, on a busy pair).
+const MAX_PENDING_TRADES: usize = 10_000;
+
+/// The candle that trades fold into (`with_trades`).
+#[derive(Default)]
+struct Forming {
+    bar: Option<Bar>,
+    /// Event time of the kline `bar` came from: trades up to then are in it.
+    synced_ms: i64,
+    /// Trades (price, qty, trade time) newer than `synced_ms`. A kline can
+    /// arrive after trades it does not include yet; these are folded in
+    /// again once it has replaced the candle.
+    trades: Vec<(f64, f64, i64)>,
+}
+
 /// Binance WebSocket kline feed for a single symbol/interval pair.
 pub struct BinanceFeed {
     symbol: String,
@@ -60,9 +76,7 @@ impl BinanceFeed {
 
         loop {
             let url = self.url();
-            // Forming candle that trades fold into, and the event time of
-            // the kline it came from: trades up to then are already in it.
-            let mut forming: Option<(Bar, i64)> = None;
+            let mut forming = Forming::default();
 
             match tokio_tungstenite::connect_async(&url).await {
                 Ok((ws_stream, _)) => {
@@ -86,13 +100,14 @@ impl BinanceFeed {
                         match read.next().await {
                             Some(Ok(Message::Text(text))) => {
                                 match self.parse_event(&text, &mut forming) {
-                                    Ok(Some(event)) => {
-                                        if tx.send(event).await.is_err() {
-                                            // Receiver dropped.
-                                            return Ok(());
+                                    Ok(events) => {
+                                        for event in events {
+                                            if tx.send(event).await.is_err() {
+                                                // Receiver dropped.
+                                                return Ok(());
+                                            }
                                         }
                                     }
-                                    Ok(None) => {} // not a kline event
                                     Err(e) => {
                                         eprintln!("[feed] parse error: {e}");
                                     }
@@ -137,12 +152,9 @@ impl BinanceFeed {
 
     /// Parse a raw or combined-stream (`{"stream", "data"}`) message. A
     /// kline replaces the forming candle; with `with_trades`, an `aggTrade`
-    /// newer than it is folded in and emitted as a `Tick`.
-    fn parse_event(
-        &self,
-        text: &str,
-        forming: &mut Option<(Bar, i64)>,
-    ) -> Result<Option<FeedEvent>, String> {
+    /// newer than it is folded in and emitted as a `Tick`. Trades newer
+    /// than a kline are folded in again after it, as a second `Tick`.
+    fn parse_event(&self, text: &str, forming: &mut Forming) -> Result<Vec<FeedEvent>, String> {
         let mut v: serde_json::Value =
             serde_json::from_str(text).map_err(|e| format!("json parse: {e}"))?;
         if let Some(data) = v.get_mut("data") {
@@ -150,20 +162,33 @@ impl BinanceFeed {
         }
         match v.get("e").and_then(|e| e.as_str()) {
             Some("kline") => {
-                let event = self.kline_event(&v)?;
-                if let Some(event) = &event {
-                    let (FeedEvent::Bar(bar) | FeedEvent::Tick(bar)) = event;
-                    let at = v.get("E").and_then(|e| e.as_i64()).unwrap_or(0);
-                    // A late close of the previous candle must not replace
-                    // a newer candle that trades already started.
-                    let newer = forming
-                        .as_ref()
-                        .is_none_or(|(f, _)| bar_secs(bar) >= bar_secs(f));
-                    if newer {
-                        *forming = Some((bar.clone(), at));
-                    }
+                let Some(event) = self.kline_event(&v)? else {
+                    return Ok(Vec::new());
+                };
+                let (FeedEvent::Bar(bar) | FeedEvent::Tick(bar)) = &event;
+                let at = v.get("E").and_then(|e| e.as_i64()).unwrap_or(0);
+                // A late close of the previous candle must not replace
+                // a newer candle that trades already started.
+                let newer = forming
+                    .bar
+                    .as_ref()
+                    .is_none_or(|f| bar_secs(bar) >= bar_secs(f));
+                let mut events = Vec::new();
+                if newer {
+                    forming.bar = Some(bar.clone());
+                    forming.synced_ms = at;
+                    forming.trades.retain(|&(_, _, t)| t > at);
+                    let pending = forming.trades.clone();
+                    let refolded = pending
+                        .into_iter()
+                        .filter_map(|(p, q, t)| fold_trade(forming, &self.interval, p, q, t))
+                        .last();
+                    events.push(event);
+                    events.extend(refolded.map(FeedEvent::Tick));
+                } else {
+                    events.push(event);
                 }
-                Ok(event)
+                Ok(events)
             }
             Some("aggTrade") if self.trades => {
                 let num = |k: &str| {
@@ -176,9 +201,15 @@ impl BinanceFeed {
                 else {
                     return Err("malformed aggTrade".into());
                 };
-                Ok(fold_trade(forming, &self.interval, price, qty, t).map(FeedEvent::Tick))
+                if t > forming.synced_ms && forming.trades.len() < MAX_PENDING_TRADES {
+                    forming.trades.push((price, qty, t));
+                }
+                Ok(fold_trade(forming, &self.interval, price, qty, t)
+                    .map(FeedEvent::Tick)
+                    .into_iter()
+                    .collect())
             }
-            _ => Ok(None),
+            _ => Ok(Vec::new()),
         }
     }
 
@@ -186,7 +217,10 @@ impl BinanceFeed {
     /// Returns `Ok(None)` when the message is not a kline event.
     #[cfg(test)]
     fn parse_kline_event(&self, text: &str) -> Result<Option<FeedEvent>, String> {
-        self.parse_event(text, &mut None)
+        Ok(self
+            .parse_event(text, &mut Forming::default())?
+            .into_iter()
+            .next())
     }
 
     fn kline_event(&self, v: &serde_json::Value) -> Result<Option<FeedEvent>, String> {
@@ -247,15 +281,16 @@ fn next_open_ms(open_ms: i64, interval: &str) -> Option<i64> {
 /// last kline already covered, trades before its open, and trades more than
 /// one candle ahead (wait for the kline) are skipped.
 fn fold_trade(
-    forming: &mut Option<(Bar, i64)>,
+    forming: &mut Forming,
     interval: &str,
     price: f64,
     qty: f64,
     t_ms: i64,
 ) -> Option<Bar> {
-    let (bar, synced_ms) = forming.as_mut()?;
+    let synced_ms = forming.synced_ms;
+    let bar = forming.bar.as_mut()?;
     let open_ms = bar_secs(bar).checked_mul(1000)?;
-    if t_ms <= *synced_ms || t_ms < open_ms {
+    if t_ms <= synced_ms || t_ms < open_ms {
         return None;
     }
     let end = next_open_ms(open_ms, interval)?;
@@ -510,7 +545,11 @@ mod tests {
     #[test]
     fn fold_trade_updates_forming_and_rolls_over() {
         // 1m candle opening at 60 s, last kline event at 70 s.
-        let mut forming = Some((bar_at(60, 100.0), 70_000));
+        let mut forming = Forming {
+            bar: Some(bar_at(60, 100.0)),
+            synced_ms: 70_000,
+            trades: Vec::new(),
+        };
         // Already covered by the kline: skipped.
         assert!(fold_trade(&mut forming, "1m", 105.0, 1.0, 69_000).is_none());
         let b = fold_trade(&mut forming, "1m", 102.5, 2.0, 71_000).unwrap();
@@ -530,7 +569,7 @@ mod tests {
         // More than one candle ahead: wait for the kline.
         assert!(fold_trade(&mut forming, "1m", 97.0, 0.5, 300_000).is_none());
         // No kline yet: nothing to fold into.
-        assert!(fold_trade(&mut None, "1m", 1.0, 1.0, 1).is_none());
+        assert!(fold_trade(&mut Forming::default(), "1m", 1.0, 1.0, 1).is_none());
     }
 
     #[test]
@@ -553,29 +592,61 @@ mod tests {
         assert!(feed
             .url()
             .ends_with("streams=btcusdt@kline_1m/btcusdt@aggTrade"));
-        let mut forming = None;
+        let mut forming = Forming::default();
         let kline = r#"{"stream":"btcusdt@kline_1m","data":{"e":"kline","E":70000,
             "k":{"t":60000,"o":"1","h":"2","l":"0.5","c":"1.5","v":"3","x":false}}}"#;
         assert!(matches!(
-            feed.parse_event(kline, &mut forming).unwrap(),
-            Some(FeedEvent::Tick(_))
+            feed.parse_event(kline, &mut forming).unwrap()[..],
+            [FeedEvent::Tick(_)]
         ));
         let trade = r#"{"stream":"btcusdt@aggTrade","data":{"e":"aggTrade","E":71000,
             "p":"2.5","q":"1","T":71000}}"#;
-        match feed.parse_event(trade, &mut forming).unwrap() {
-            Some(FeedEvent::Tick(b)) => assert_eq!((b.close, b.high, b.volume), (2.5, 2.5, 4.0)),
+        match &feed.parse_event(trade, &mut forming).unwrap()[..] {
+            [FeedEvent::Tick(b)] => assert_eq!((b.close, b.high, b.volume), (2.5, 2.5, 4.0)),
             other => panic!("expected a trade tick, got {other:?}"),
         }
         // A late close of an older candle does not replace the forming one.
         let late = r#"{"e":"kline","E":72000,
             "k":{"t":0,"o":"1","h":"1","l":"1","c":"1","v":"1","x":true}}"#;
         assert!(matches!(
-            feed.parse_event(late, &mut forming).unwrap(),
-            Some(FeedEvent::Bar(_))
+            feed.parse_event(late, &mut forming).unwrap()[..],
+            [FeedEvent::Bar(_)]
         ));
-        assert_eq!(forming.unwrap().0.date, "60");
+        assert_eq!(forming.bar.unwrap().date, "60");
         // Without with_trades, aggTrade frames are ignored.
         let plain = BinanceFeed::new("BTCUSDT", "1m");
-        assert!(plain.parse_event(trade, &mut None).unwrap().is_none());
+        assert!(plain
+            .parse_event(trade, &mut Forming::default())
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn trades_newer_than_a_late_kline_are_folded_in_again() {
+        let feed = BinanceFeed::new("BTCUSDT", "1m").with_trades();
+        let kline = |e: i64, c: &str| {
+            format!(
+                r#"{{"e":"kline","E":{e},"k":{{"t":60000,"o":"1","h":"{c}","l":"1","c":"{c}","v":"3","x":false}}}}"#
+            )
+        };
+        let trade = |t: i64, p: &str| format!(r#"{{"e":"aggTrade","p":"{p}","q":"1","T":{t}}}"#);
+        let mut f = Forming::default();
+        feed.parse_event(&kline(70_000, "2"), &mut f).unwrap();
+        feed.parse_event(&trade(72_000, "5"), &mut f).unwrap();
+        // A kline stamped before that trade arrives after it: its values
+        // win, then the trade is applied on top again.
+        match &feed.parse_event(&kline(71_000, "2.5"), &mut f).unwrap()[..] {
+            [FeedEvent::Tick(k), FeedEvent::Tick(b)] => {
+                assert_eq!(k.close, 2.5);
+                assert_eq!((b.close, b.high, b.volume), (5.0, 5.0, 4.0));
+            }
+            other => panic!("expected the kline and a re-folded tick, got {other:?}"),
+        }
+        // A kline that covers the trade drops it from the buffer.
+        match &feed.parse_event(&kline(73_000, "5"), &mut f).unwrap()[..] {
+            [FeedEvent::Tick(k)] => assert_eq!((k.close, k.volume), (5.0, 3.0)),
+            other => panic!("expected the kline alone, got {other:?}"),
+        }
+        assert!(f.trades.is_empty());
     }
 }
