@@ -73,6 +73,15 @@ describe("indicator store mutations", () => {
     expect(JSON.parse(data.get(KEY)!)).toEqual(want);
   });
 
+  it("addIndicator stops at 50 entries", async () => {
+    stubStorage(JSON.stringify(Array.from({ length: 49 }, () => "rsi")));
+    const { addIndicator, activeIndicators } = await loadStore();
+    expect(addIndicator("macd")).toBe("macd");
+    expect(activeIndicators()).toHaveLength(50);
+    expect(addIndicator("macd")).toBeNull();
+    expect(activeIndicators()).toHaveLength(50);
+  });
+
   it("a new instance takes the smallest free key", async () => {
     stubStorage(JSON.stringify(["rsi", { name: "rsi", id: "rsi#3" }]));
     const s = await loadStore();

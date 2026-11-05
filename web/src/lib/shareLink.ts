@@ -6,7 +6,8 @@
 //   ?symbol=ETHUSDT&interval=4h&type=candles&ind=rsi(length:21),ema_stack
 //    &compare=BTCUSDT,SOLUSDT&tz=Europe/Berlin
 //
-// `ind` is a comma list of names with optional `(key:value;key:value)`
+// `ind` is a comma list of names (a repeated name is another instance of the
+// indicator, ADR-0028) with optional `(key:value;key:value)`
 // params (only non-default ones are written). Values are written as plain
 // numbers (no exponent), `true`/`false`, or text with everything outside
 // [A-Za-z0-9._-] percent-encoded. Decoding keeps every value as the raw
@@ -22,7 +23,9 @@ import {
 import {
   indicatorName,
   indicatorParams,
+  instanceKey,
   isHidden,
+  normalizeInstances,
   type ActiveIndicator,
 } from "../stores/indicators";
 import type { ParamDefaults } from "../stores/layouts";
@@ -60,7 +63,7 @@ const MAX_VALUE_LENGTH = 200;
 const NAME = /^[A-Za-z0-9_]{1,40}$/;
 const KEY = /^[A-Za-z_][A-Za-z0-9_]{0,40}$/;
 /** Client-only fields and the name never come from a link. */
-const RESERVED_KEYS = new Set(["name", "hidden", "style"]);
+const RESERVED_KEYS = new Set(["name", "id", "hidden", "style"]);
 
 /** Split on commas outside parentheses. */
 function splitTop(s: string): string[] {
@@ -116,24 +119,21 @@ function decodeIndicator(part: string): ActiveIndicator | null {
 }
 
 /**
- * Indicators of an `ind` value, params as raw strings. Malformed items and
- * duplicate names are skipped; a value over MAX_IND_LENGTH is ignored whole
- * and at most MAX_INDICATORS entries are kept.
+ * Indicators of an `ind` value, params as raw strings. Malformed items are
+ * skipped; a repeated name becomes another instance with its own id. A value
+ * over MAX_IND_LENGTH is ignored whole and at most MAX_INDICATORS entries are
+ * kept.
  */
 export function decodeIndicators(raw: string): ActiveIndicator[] {
   if (raw.length > MAX_IND_LENGTH) return [];
-  const seen = new Set<string>();
   const out: ActiveIndicator[] = [];
   for (const part of splitTop(raw)) {
     if (out.length >= MAX_INDICATORS) break;
     const entry = decodeIndicator(part);
     if (entry === null) continue;
-    const name = indicatorName(entry);
-    if (seen.has(name)) continue;
-    seen.add(name);
     out.push(entry);
   }
-  return out;
+  return normalizeInstances(out);
 }
 
 /** Decimal text of a finite number, never in exponent notation. */
@@ -305,7 +305,7 @@ export interface Reconciled {
 }
 
 /**
- * Check the entries named in `pending` (what a link brought in) against the
+ * Check the entries whose instance key is in `pending` (what a link brought in) against the
  * registry: unknown names are removed, params are typed by their spec and
  * the ones that fail (or are not params of the indicator) are dropped. Other
  * entries are untouched. Without a registry (`undefined`, the list could not
@@ -321,7 +321,7 @@ export function reconcileIndicators(
   const invalid: string[] = [];
   for (const entry of entries) {
     const name = indicatorName(entry);
-    if (!pending.includes(name)) {
+    if (!pending.includes(instanceKey(entry))) {
       out.push(entry);
       continue;
     }
@@ -350,7 +350,12 @@ export function reconcileIndicators(
         });
       }
     }
-    out.push(Object.keys(params).length === 0 ? name : { name, ...params });
+    const id = instanceKey(entry) === name ? undefined : instanceKey(entry);
+    out.push(
+      id === undefined && Object.keys(params).length === 0
+        ? name
+        : { name, ...(id === undefined ? {} : { id }), ...params },
+    );
   }
   return { entries: out, unknown, invalid };
 }

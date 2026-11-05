@@ -411,12 +411,16 @@ export function setActiveIndicators(next: ActiveIndicator[]): void {
   persist(next);
 }
 
+/** Most indicators on a chart; the server rejects more (ADR-0028). */
+export const MAX_ACTIVE_INDICATORS = 50;
+
 /**
  * Append an indicator as a new instance (ADR-0028): an already active name
- * gets the next free instance key. Returns that key.
+ * gets the next free instance key. Returns that key, or null at the cap.
  */
-export function addIndicator(entry: ActiveIndicator): string {
+export function addIndicator(entry: ActiveIndicator): string | null {
   const current = activeIndicators();
+  if (current.length >= MAX_ACTIVE_INDICATORS) return null;
   const name = indicatorName(entry);
   const key = nextInstanceKey(current, name);
   setActiveIndicators([

@@ -18,7 +18,7 @@ import {
 } from "../stores/compare";
 import {
   activeIndicators,
-  indicatorName,
+  instanceKey,
   setActiveIndicators,
 } from "../stores/indicators";
 import {
@@ -34,7 +34,7 @@ import {
 import { paramDefaults } from "../stores/layouts";
 import { showToast } from "./alertEngine";
 
-// Names a link brought in, checked against the indicator registry once it is
+// Instance keys a link brought in, checked against the indicator registry once it is
 // known. In sessionStorage so they survive the OAuth redirect of the tab.
 const PENDING_KEY = "chartgen.share.pending";
 
@@ -80,7 +80,7 @@ export function applyShareLink(): void {
   if (patch.timeZone !== undefined) setTimeZone(patch.timeZone);
   if (patch.indicators !== undefined) {
     setActiveIndicators(patch.indicators);
-    const names = patch.indicators.map(indicatorName);
+    const names = patch.indicators.map(instanceKey);
     savePending(names);
     setPending(names);
   }

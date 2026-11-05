@@ -20,8 +20,11 @@ import {
 import {
   addIndicator,
   indicatorName,
+  MAX_ACTIVE_INDICATORS,
+  activeIndicators,
   type ActiveIndicator,
 } from "../stores/indicators";
+import { showToast } from "../services/alertEngine";
 import type {
   IndicatorInfoSchema,
   ListIndicatorsPayload,
@@ -183,11 +186,15 @@ export function IndicatorPicker(props: IndicatorPickerProps): JSX.Element {
     return filteredGroups().map((g) => g.category);
   });
 
+  const atCap = () => activeIndicators().length >= MAX_ACTIVE_INDICATORS;
+
   const handleAdd = (info: IndicatorInfo) => {
     // Bare name: the server applies schema defaults, and only non-default
     // params are ever stored on an entry. An indicator already on the chart
     // gets another instance (ADR-0028).
-    addIndicator(info.name);
+    if (addIndicator(info.name) === null) {
+      showToast("At most 50 indicators per chart");
+    }
   };
 
   return (
@@ -282,7 +289,8 @@ export function IndicatorPicker(props: IndicatorPickerProps): JSX.Element {
                                       <button
                                         type="button"
                                         onClick={() => handleAdd(info)}
-                                        class="w-full flex items-start gap-2 px-6 py-2 text-left text-sm hover:bg-[color:var(--color-bg-elev)] cursor-pointer"
+                                        aria-disabled={atCap()}
+                                        class="w-full flex items-start gap-2 px-6 py-2 text-left text-sm hover:bg-[color:var(--color-bg-elev)] cursor-pointer aria-disabled:opacity-50"
                                       >
                                         <span class="pt-0.5 flex-shrink-0">
                                           <CategoryIcon category={info.type} />

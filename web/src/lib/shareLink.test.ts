@@ -36,6 +36,28 @@ describe("share links", () => {
     });
   });
 
+  it("round-trips two instances of one indicator", () => {
+    const entries = ["rsi", { name: "rsi", id: "rsi#2", length: 21 }];
+    const ind = encodeIndicators(entries, { rsi: { length: 14 } });
+    expect(ind).toBe("rsi,rsi(length:21)");
+    expect(decodeIndicators(ind)).toEqual([
+      "rsi",
+      { name: "rsi", id: "rsi#2", length: "21" },
+    ]);
+  });
+
+  it("reconciles each instance on its own", () => {
+    const decoded = decodeIndicators("rsi(length:0),rsi(length:21)");
+    const r = reconcileIndicators(decoded, ["rsi", "rsi#2"], [
+      {
+        name: "rsi",
+        configurable_params: [{ name: "length", type: "integer" } as never],
+      },
+    ]);
+    expect(r.entries).toEqual(["rsi", { name: "rsi", id: "rsi#2", length: 21 }]);
+    expect(r.invalid).toEqual(["rsi.length"]);
+  });
+
   it("omits default params and hidden entries", () => {
     const out = encodeIndicators(
       [
@@ -112,12 +134,10 @@ describe("share links", () => {
   });
 
   it("is tolerant of bad indicator input", () => {
-    expect(decodeIndicators("rsi(length:),,a b,rsi,ok")).toEqual([
-      "rsi",
-      "ok",
-    ]);
+    expect(decodeIndicators("rsi(length:),,a b,ok")).toEqual(["rsi", "ok"]);
     expect(decodeIndicators("rsi(length:21),rsi(length:5)")).toEqual([
       { name: "rsi", length: "21" },
+      { name: "rsi", id: "rsi#2", length: "5" },
     ]);
   });
 

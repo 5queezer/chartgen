@@ -30,6 +30,14 @@ test.describe("share links", () => {
     await expect(symbolButton(page)).toContainText("ETHUSDT");
   });
 
+  test("a repeated name in ind makes two instances", async ({ page }) => {
+    await gotoApp(page, "/?ind=rsi,rsi(length:21)");
+
+    await expect(pane(page, "RSI")).toHaveCount(2);
+    await expect(page.getByTestId("indicator-legend-rsi")).toContainText("(14)");
+    await expect(page.getByTestId("indicator-legend-rsi#2")).toContainText("(21)");
+  });
+
   test("share params are stripped before the sign-in redirect", async ({
     page,
   }) => {

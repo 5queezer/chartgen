@@ -87,9 +87,10 @@ well and are easy to write by hand.
 - Bad: opening a link overwrites the receiver's stored symbol, timeframe,
   chart type, indicators, compare symbols and time zone, as a manual change
   would. A named layout is the way to keep the old setup.
-- Bad: one instance per indicator
-  ([ADR-0013](/chartgen/decisions/0013-indicator-visibility-and-instances/))
-  means a repeated name in `ind` keeps only its first entry; the encoding can
-  carry instances later because it is a list.
+- Good: a repeated name in `ind` is another instance of the indicator
+  ([ADR-0028](/chartgen/decisions/0028-multiple-indicator-instances/)):
+  `ind=rsi,rsi(length:21)` yields `rsi` and `rsi#2`. Decoding runs the list
+  through `normalizeInstances`, so ids are valid and unique, and the check
+  against the registry runs per instance (by instance key).
 - Bad: the first chart load waits for `list_indicators` when the link
   carries indicators.
