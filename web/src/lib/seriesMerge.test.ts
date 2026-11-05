@@ -56,6 +56,7 @@ function serve({ bars, end, now, tick = 0, has_more = true }: Req): SeriesPayloa
       t2: tOf(j),
       y2: c(j),
       dashed: i % 20 === 3,
+      color: "#abcdef",
     });
   }
   const closes = idx.map(c);
@@ -92,7 +93,14 @@ function serve({ bars, end, now, tick = 0, has_more = true }: Req): SeriesPayloa
         signals: idx
           .filter((i) => i % 7 === 0)
           .map((i) => ({ x: at(i), t: tOf(i), y: c(i), label: "buy" })),
-        fills: [{ y1: closes.map((v) => v + 2), y2: closes.map((v) => v - 2) }],
+        fills: [
+          {
+            y1: closes.map((v) => v + 2),
+            y2: closes.map((v) => v - 2),
+            color: "#00ff00",
+            color_below: "#ff0000",
+          },
+        ],
         divlines,
       },
       // A windowed profile: hbars/hlines depend on the bars in the response.
@@ -242,6 +250,37 @@ describe("mergeOlder", () => {
     const page = serve({ bars: 30, end: 71, now: 100 });
     page.bars[3] = { ...page.bars[3]!, t: null };
     expect(mergeOlder(cur, page)).toEqual({ ok: false, reason: "untimed" });
+  });
+});
+
+describe("optional fields survive merges", () => {
+  const colors = (s: SeriesPayload) => {
+    const macd = s.indicators.macd!;
+    return {
+      fill: [macd.fills![0]!.color, macd.fills![0]!.color_below],
+      div: new Set(macd.divlines!.map((d) => d.color)),
+    };
+  };
+
+  it("mergeOlder keeps fill and divline colors", () => {
+    const cur = serve({ bars: 30, now: 100 });
+    const page = serve({ bars: 30, end: 71, now: 100 });
+    const r = mergeOlder(cur, page);
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const c = colors(r.series);
+    expect(c.fill).toEqual(["#00ff00", "#ff0000"]);
+    expect([...c.div]).toEqual(["#abcdef"]);
+  });
+
+  it("mergeTail keeps fill and divline colors", () => {
+    const cur = serve({ bars: 30, now: 100 });
+    const r = mergeTail(cur, serve({ bars: 3, now: 102 }));
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const c = colors(r.series);
+    expect(c.fill).toEqual(["#00ff00", "#ff0000"]);
+    expect([...c.div]).toEqual(["#abcdef"]);
   });
 });
 

@@ -209,6 +209,7 @@ export function mergeOlder(
     }
     if (cur.fills) {
       merged.fills = cur.fills.map((f, i) => ({
+        ...f,
         y1: [...pg.fills![i]!.y1, ...f.y1],
         y2: [...pg.fills![i]!.y2, ...f.y2],
       }));
