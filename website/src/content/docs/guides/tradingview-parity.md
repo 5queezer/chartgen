@@ -82,7 +82,7 @@ Status legend:
 
 | Feature | TradingView | chartgen | Notes / links |
 |---|---|---|---|
-| Trend line, ray, extended line | ✅ | ✅ | [Drawing tools](/chartgen/guides/web/#drawing-tools) |
+| Trend line, ray, extended line | ✅ | ✅ | Hold `Shift` to snap a line to horizontal, vertical or 45°. [Drawing tools](/chartgen/guides/web/#drawing-tools) |
 | Horizontal line and ray, vertical line | ✅ | ✅ | |
 | Parallel channel | ✅ | ✅ | |
 | Fib retracement | ✅ | ✅ | |

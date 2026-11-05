@@ -22,7 +22,9 @@ import {
   registerOverlay,
   type Chart as KChart,
   type OverlayCreate,
+  type Overlay,
   type OverlayEvent,
+  type Point,
 } from "klinecharts";
 
 import { isDrawingAlertTool } from "../lib/alerts";
@@ -48,7 +50,7 @@ import { openAlertDialog } from "./AlertDialog";
 import { DrawingStyleBar } from "./DrawingStyleBar";
 import { overlayLabels, setOverlayAxis, setPositionSize } from "./drawingOverlays";
 import { ToolGroup } from "./ToolGroup";
-import { positionReward } from "../lib/drawingMath";
+import { positionReward, snapToAngle, type Px } from "../lib/drawingMath";
 import { PALETTES } from "../lib/theme";
 import { theme } from "../stores/layout";
 
@@ -147,6 +149,8 @@ const RECT_STYLES = {
 };
 
 const DEFAULT_TEXT = "Text";
+/** Two-point lines that Shift snaps to horizontal, vertical or 45°. */
+const SNAP_TOOLS: ReadonlySet<string> = new Set(["segment", "rayLine", "straightLine"]);
 
 const svgProps = {
   width: 20,
@@ -511,6 +515,8 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
   // klinecharts fires an overlay's onRightClick on mousedown, before the
   // browser's contextmenu event; the flag lets the chart menu stand down.
   let rightClickHit = false;
+  // klinecharts passes no modifier keys to overlay callbacks.
+  let shiftHeld = false;
 
   const axis = (): TimeAxis | null =>
     timeAxisOf(props.chart?.getDataList().map((d) => d.timestamp) ?? []);
@@ -622,6 +628,25 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
     return { points, off };
   };
 
+  /** Shift on a line: its moving point snaps to horizontal, vertical or 45° from the other. */
+  const snapMovingPoint = (overlay: Overlay, index: number, mouse: Px) => {
+    const chart = props.chart;
+    const moving = overlay.points[index];
+    const anchor = overlay.points[1 - index];
+    if (!chart || !moving || !anchor) return;
+    const paneId = overlay.paneId;
+    Object.assign(
+      moving,
+      snapToAngle(
+        anchor,
+        moving,
+        mouse,
+        (p) => chart.convertToPixel(p, { paneId }) as Px,
+        (y) => (chart.convertFromPixel([{ y }], { paneId }) as Partial<Point>[])[0]?.value,
+      ),
+    );
+  };
+
   const handlers = (): Partial<OverlayCreate> => ({
     onDrawEnd: ({ overlay }: OverlayEvent) => {
       armedId = null;
@@ -631,6 +656,32 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
       commit();
       // onSelected fires before the drawing is registered, so highlight now.
       if (selectedId() === overlay.id) highlight(overlay.id, true);
+      return false;
+    },
+    // Fires after klinecharts has set the moving point, also on the placing click.
+    onDrawing: ({ overlay, x, y }: OverlayEvent) => {
+      if (shiftHeld && SNAP_TOOLS.has(overlay.name) && overlay.points.length === 2 && x !== undefined && y !== undefined) {
+        snapMovingPoint(overlay, 1, { x, y });
+      }
+      return false;
+    },
+    // Fires before klinecharts moves the point, and the only hook after the move
+    // is the template's perform one, which these lines leave null: borrow it for
+    // this move. Dragging the body stays untouched.
+    onPressedMoving: ({ overlay, figureKey, figureIndex, x, y }: OverlayEvent) => {
+      if (
+        shiftHeld &&
+        SNAP_TOOLS.has(overlay.name) &&
+        figureIndex !== undefined &&
+        figureKey === `overlay_figure_point_${figureIndex}` &&
+        x !== undefined &&
+        y !== undefined
+      ) {
+        overlay.performEventPressedMove = () => {
+          overlay.performEventPressedMove = null;
+          snapMovingPoint(overlay, figureIndex, { x, y });
+        };
+      }
       return false;
     },
     onPressedMoveEnd: () => {
@@ -1158,10 +1209,14 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
   // focus and makes auto-repeat a no-op. Blur clears it: keyup never comes.
   const syncModifiers = (e: KeyboardEvent | MouseEvent) => {
     const ctrl = e.ctrlKey || e.metaKey;
-    if (ctrl && e instanceof KeyboardEvent && isTypingContext(e)) return;
+    if ((ctrl || e.shiftKey) && e instanceof KeyboardEvent && isTypingContext(e)) return;
     setInverted(ctrl);
+    shiftHeld = e.shiftKey;
   };
-  const releaseModifiers = () => setInverted(false);
+  const releaseModifiers = () => {
+    setInverted(false);
+    shiftHeld = false;
+  };
   const modifierEvents = ["keydown", "keyup", "mousemove", "mousedown"] as const;
   for (const type of modifierEvents) window.addEventListener(type, syncModifiers, true);
   window.addEventListener("blur", releaseModifiers);

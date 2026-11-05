@@ -395,6 +395,12 @@ Hold `Ctrl` (`Cmd` on Mac) while placing or dragging a point to invert the
 magnet temporarily: off becomes strong, weak or strong becomes off. The magnet
 button shows the state in effect, and releasing the key restores your setting.
 
+Hold `Shift` while placing or dragging a point of a trend line, ray or extended
+line to snap the line to horizontal, vertical or 45°, whichever is nearest. The
+snap wins over the magnet on the axis it fixes. The 45° is a screen angle at that
+moment, so zooming later changes it. An alert on a vertical line never fires,
+because such a line has no single price to cross.
+
 - **Measure tools** take two clicks. Price range shows a vertical arrow
   and `+1,234.50 (+2.31%)`; date range a horizontal arrow and
   `12 bars, 3d 4h`; date and price range a box with both. The band is

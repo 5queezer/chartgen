@@ -69,6 +69,39 @@ export function arrowHead(from: Px, to: Px, size = 7): [Px, Px][] {
   ];
 }
 
+/** A point of a drawing as the chart holds it. */
+export interface AnglePoint {
+  timestamp?: number;
+  dataIndex?: number;
+  value?: number;
+}
+
+/**
+ * The moving point of a line, snapped to the nearest of horizontal, vertical
+ * and 45° as seen on screen from `anchor` (`mouse` in the same pixels).
+ * `moving` is the point as the chart placed it: on a bar, magnet applied.
+ * Horizontal keeps its bar and takes the anchor's value; vertical keeps its
+ * value and takes the anchor's bar, both exactly, without going through pixels.
+ * A diagonal keeps its bar and derives y from that bar's x, so `toValue` makes
+ * it right on any axis (log, percent, inverted). Mouse on the anchor counts as
+ * horizontal, which gives a zero-length line.
+ */
+export function snapToAngle(
+  anchor: AnglePoint,
+  moving: AnglePoint,
+  mouse: Px,
+  toPx: (p: AnglePoint) => Px,
+  toValue: (y: number) => number | undefined,
+): AnglePoint {
+  const a = toPx(anchor);
+  const dy = mouse.y - a.y;
+  const deg = (Math.atan2(Math.abs(dy), Math.abs(mouse.x - a.x)) * 180) / Math.PI;
+  if (deg < 22.5) return { ...moving, value: anchor.value };
+  if (deg > 67.5) return { ...moving, timestamp: anchor.timestamp, dataIndex: anchor.dataIndex };
+  const run = Math.abs(toPx(moving).x - a.x);
+  return { ...moving, value: toValue(a.y + Math.sign(dy) * run) };
+}
+
 /** TradingView's default levels of the trend-based fib extension. */
 export const FIB_EXT_LEVELS = [
   0, 0.236, 0.382, 0.5, 0.618, 0.786, 1, 1.618, 2.618, 3.618, 4.236,

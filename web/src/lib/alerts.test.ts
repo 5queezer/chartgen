@@ -179,6 +179,25 @@ describe("drawingLevels (ADR-0034)", () => {
     expect(drawingLevels(rec, 5 * H, flat)).toEqual([]);
   });
 
+  it.each(["segment", "rayLine", "straightLine"] as const)(
+    "a %s with both points on one bar reads nothing and never fires",
+    (name) => {
+      for (const points of [
+        [p(5 * H, 100), p(5 * H, 200)],
+        [p(5 * H, 100), p(5 * H, 100)],
+      ]) {
+        for (const view of [flat, { ...flat, log: true }]) {
+          const cur = drawingLevels({ name, points }, 5 * H, view);
+          expect(cur).toEqual([]);
+          for (const condition of ["crossing", "greater", "less"] as const) {
+            expect(fires(condition, null, cur)).toBe(false);
+            expect(fires(condition, [1], cur)).toBe(false);
+          }
+        }
+      }
+    },
+  );
+
   it("a ray only runs from its start towards its second point", () => {
     const right = { name: "rayLine" as const, points: [p(10 * H, 100), p(20 * H, 200)] };
     expect(drawingLevels(right, 15 * H, flat)).toEqual([150]);
