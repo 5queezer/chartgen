@@ -146,6 +146,12 @@ describe("abbreviate", () => {
     [2_500_000_000, "2.5B"],
     [-4200, "-4.2K"],
     [12.5, "12.5"],
+    [999_995, "1M"],
+    [999_999_999, "1B"],
+    [999.996, "1K"],
+    [999_994, "999.99K"],
+    [0.0004, "0.0004"],
+    [-0.00031, "-0.00031"],
   ])("%d -> %s", (v, out) => expect(abbreviate(v)).toBe(out));
 });
 
@@ -158,7 +164,16 @@ describe("formatIndicatorValue", () => {
     expect(formatIndicatorValue(1_500_000, "volume", 2)).toBe("1.5M");
     expect(formatIndicatorValue(47.5678, "oscillator", 5)).toBe("47.57");
   });
+  it("price-unit panes use the price precision, with significant digits for tiny values", () => {
+    expect(formatIndicatorValue(0.00083, "priceUnit", 5)).toBe("0.00083");
+    // ATR of a SHIB-like coin: a 6-decimal price would print 0.000000.
+    expect(formatIndicatorValue(3.456e-7, "priceUnit", 6)).toBe("0.00000035");
+    expect(formatIndicatorValue(123.456, "priceUnit", 2)).toBe("123.46");
+  });
   it("picks the kind from the instance key", () => {
+    expect(indicatorValueKind("atr", false)).toBe("priceUnit");
+    expect(indicatorValueKind("macd#2", false)).toBe("priceUnit");
+    for (const k of ["obv", "cvd", "oi", "elder_force_index"]) expect(indicatorValueKind(k, false)).toBe("volume");
     expect(indicatorValueKind("volume#2", false)).toBe("volume");
     expect(indicatorValueKind("ema_stack", true)).toBe("overlay");
     expect(indicatorValueKind("rsi", false)).toBe("oscillator");

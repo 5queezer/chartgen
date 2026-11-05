@@ -59,20 +59,21 @@ export function contrastRatio(a: string, b: string): number {
 }
 
 /**
- * `color` made legible as text on `bg`: on a light background a color with
+ * `color` made legible as text on `bg`, and opaque (a translucent plot color
+ * would blend into the background). On a light background a color with
  * under 3:1 contrast is darkened (toward black, hue kept) until it reaches
- * it. Dark backgrounds and unparsable colors are left as they are.
+ * it. Unparsable colors are left as they are.
  */
 export function readableOn(color: string, bg: string, min = 3): string {
   if (!isColor(color) || !isColor(bg)) return color;
   const back = parseColor(bg).hex;
-  if (luminance(back) <= 0.5) return color;
-  const { hex, alpha } = parseColor(color);
+  const { hex } = parseColor(color);
+  if (luminance(back) <= 0.5) return hex;
   const n = parseInt(hex.slice(1), 16);
   const rgb = [(n >> 16) & 255, (n >> 8) & 255, n & 255];
   for (let k = 1; k >= 0; k -= 0.05) {
     const out = `#${rgb.map((c) => hex2(c * k)).join("")}`;
-    if (contrastRatio(out, back) >= min) return k === 1 ? color : formatColor(out, alpha);
+    if (contrastRatio(out, back) >= min) return out;
   }
   return "#000000";
 }

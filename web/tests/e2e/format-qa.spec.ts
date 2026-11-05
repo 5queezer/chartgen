@@ -95,7 +95,7 @@ test.describe("format qa", () => {
     await dialog.getByPlaceholder("Search indicators...").fill("macd");
     await dialog
       .locator("li button[type='button']")
-      .filter({ has: page.locator(".font-mono", { hasText: /^macd(\s*added)?$/ }) })
+      .filter({ has: page.locator('[title="macd"]') })
       .first()
       .click();
     await dialog.getByRole("button", { name: "Close" }).click();

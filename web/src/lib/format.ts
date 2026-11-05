@@ -61,15 +61,22 @@ export function formatPrice(v: number | null, precision: number): string {
 
 /**
  * Compact K/M/B number: at most two decimals, no trailing zeros, so
- * 180000000 reads "180M" and 4200 reads "4.2K". Plain below 1000.
+ * 180000000 reads "180M" and 4200 reads "4.2K". The value is rounded before
+ * the unit is picked (999995 reads "1M", not "1000K"). Plain below 1000;
+ * values under 0.005 keep their significant digits instead of reading "0".
  */
 export function abbreviate(v: number): string {
   const abs = Math.abs(v);
-  const trim = (n: number) => String(Number(n.toFixed(2)));
-  if (abs >= 1e9) return `${trim(v / 1e9)}B`;
-  if (abs >= 1e6) return `${trim(v / 1e6)}M`;
-  if (abs >= 1e3) return `${trim(v / 1e3)}K`;
-  return trim(v);
+  const units: ReadonlyArray<readonly [number, string]> = [[1, ""], [1e3, "K"], [1e6, "M"], [1e9, "B"]];
+  let i = abs >= 1e9 ? 3 : abs >= 1e6 ? 2 : abs >= 1e3 ? 1 : 0;
+  const hundredths = (u: number) => Math.round(abs / (units[u]![0] / 100));
+  let cents = hundredths(i);
+  if (cents >= 100_000 && i < 3) cents = hundredths(++i);
+  if (abs > 0 && abs < 0.005) {
+    const decimals = Math.min(MAX_PRECISION, -Math.floor(Math.log10(abs)) + 1);
+    return String(Number(v.toFixed(decimals)));
+  }
+  return `${v < 0 && cents > 0 ? "-" : ""}${cents / 100}${units[i]![1]}`;
 }
 
 /** Compact volume: 1.23K / 4.56M / 7.89B, at most two decimals. */
@@ -83,18 +90,28 @@ export function hasNoVolume(bars: ReadonlyArray<{ v: number | null }>): boolean 
 }
 
 /** Indicators whose values are traded quantities, not prices or bounded oscillators. */
-const VOLUME_INDICATORS = new Set(["volume", "obv", "ad", "vpt", "nvi", "pvi"]);
+const VOLUME_INDICATORS = new Set(["volume", "obv", "ad", "cvd", "oi", "elder_force_index"]);
+
+/** Panel indicators measured in price units (differences of prices, ranges). */
+const PRICE_UNIT_INDICATORS = new Set(["atr", "macd", "momentum", "dpo", "awesome_oscillator"]);
 
 export function isVolumeIndicator(name: string): boolean {
   return VOLUME_INDICATORS.has(name.toLowerCase());
 }
 
-export type IndicatorValueKind = "overlay" | "volume" | "oscillator";
+/** True when the default Volume pane would be empty: a "volume" key and bars with no volume. */
+export function isEmptyVolumePane(bars: ReadonlyArray<{ v: number | null }>, key: string): boolean {
+  return keyName(key) === "volume" && hasNoVolume(bars);
+}
+
+export type IndicatorValueKind = "overlay" | "priceUnit" | "volume" | "oscillator";
 
 /** Value kind of the indicator with instance key `key`. */
 export function indicatorValueKind(key: string, isOverlay: boolean): IndicatorValueKind {
-  if (isVolumeIndicator(keyName(key))) return "volume";
-  return isOverlay ? "overlay" : "oscillator";
+  const name = keyName(key).toLowerCase();
+  if (VOLUME_INDICATORS.has(name)) return "volume";
+  if (isOverlay) return "overlay";
+  return PRICE_UNIT_INDICATORS.has(name) ? "priceUnit" : "oscillator";
 }
 
 /**
@@ -108,6 +125,13 @@ export function formatIndicatorValue(
   pricePrec: number,
 ): string {
   if (kind === "overlay") return formatPrice(v, pricePrec);
+  if (kind === "priceUnit") {
+    // Price precision, widened to two significant digits for values far
+    // below the price (ATR of a 0.00001 coin).
+    if (v === null || !Number.isFinite(v) || v === 0) return formatPrice(v, pricePrec);
+    const significant = Math.min(MAX_PRECISION, -Math.floor(Math.log10(Math.abs(v))) + 1);
+    return formatPrice(v, Math.max(pricePrec, significant));
+  }
   if (kind === "volume") return formatVolume(v);
   return formatValue(v);
 }

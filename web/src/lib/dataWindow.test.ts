@@ -53,6 +53,19 @@ describe("dataWindowRows", () => {
     expect(d.indicators[0]!.rows[0]!.value).toBe("1.12345");
   });
 
+  it("follows the legend order and skips an empty Volume pane", () => {
+    const withVolume: SeriesPayload = {
+      ...series,
+      bars: series.bars.map((b) => ({ ...b, v: 0 })),
+      indicators: {
+        ...series.indicators,
+        volume: { label: "Volume", is_overlay: false, histogram: [{ index: 0, label: "Volume", values: [0, 0, 0] }] },
+      },
+    };
+    const d = dataWindowRows(withVolume, 1, {}, [], { ...opts, visible: new Set(["macd", "volume", "rsi"]) });
+    expect(d.indicators.map((s) => s.key)).toEqual(["macd", "rsi"]);
+  });
+
   it("falls back to the last bar without a crosshair or with a stale index", () => {
     const rest = dataWindowRows(series, null, {}, [], opts);
     expect(rest.bar?.c).toBe("12.50");
@@ -77,7 +90,7 @@ describe("dataWindowRows", () => {
       ["macd", "MACD"],
     ]);
     expect(d.indicators[0]!.rows).toEqual([{ label: "RSI", value: "—", color: "#000000" }]);
-    expect(d.indicators[1]!.rows.map((r) => r.value)).toEqual(["0.1000", "1.00"]);
+    expect(d.indicators[1]!.rows.map((r) => r.value)).toEqual(["0.10", "1.00"]);
     expect(dataWindowRows(series, 1, {}, [], opts).indicators[0]!.rows[0]!.value).toBe("55.12");
   });
 

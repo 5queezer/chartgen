@@ -113,7 +113,7 @@ import {
   barLegend,
   formatIndicatorValue,
   formatPrice,
-  hasNoVolume,
+  isEmptyVolumePane,
   indicatorValueKind,
   isVolumeIndicator,
   lastFiniteCloseIndex,
@@ -148,6 +148,18 @@ import {
 } from "../lib/projection";
 import { PaneHeader, type PaneHeaderLine } from "./PaneHeader";
 import { PriceAxisControls } from "./PriceAxisControls";
+
+// klinecharts' own date format options, in UTC.
+const UTC_FORMAT = new Intl.DateTimeFormat("en", {
+  hour12: false,
+  timeZone: "UTC",
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit",
+  hour: "2-digit",
+  minute: "2-digit",
+  second: "2-digit",
+});
 
 // TradingView-aligned rotating palette for indicator line/bar series.
 // Color assignment is deterministic per (indicator name, series index)
@@ -745,11 +757,6 @@ function formatBigNumber(value: string | number): string {
   return Number.isFinite(n) ? abbreviate(n) : String(value);
 }
 
-/** The default Volume pane is skipped for symbols without any traded volume (Yahoo FX). */
-function noVolumePane(series: SeriesPayload, key: string): boolean {
-  return keyName(key) === "volume" && hasNoVolume(series.bars);
-}
-
 /** TradingView-style setStyles payload for a palette. Kept as one function so
  *  future readers can see the whole styled surface in one place. */
 function tvStyles(p: Palette) {
@@ -1031,11 +1038,13 @@ export function Chart(props: ChartProps): JSX.Element {
   let dateBars = false;
   // Oscillator pane keys, top to bottom, as klinecharts stacks them.
   let paneStack: string[] = [];
+  // Shown indicator keys of the last applied snapshot.
+  let appliedNames = "";
   // Indicator keys of the payload that are shown, in the stored order
   // (ADR-0028) rather than the payload's.
   const shownNames = (series: SeriesPayload): string[] => {
     const visible = visibleKey().split("\n");
-    return visible.filter((k) => k in series.indicators && !noVolumePane(series, k));
+    return visible.filter((k) => k in series.indicators && !isEmptyVolumePane(series.bars, k));
   };
   let crosshairFrame: number | null = null;
   let layoutFrame: number | null = null;
@@ -1069,9 +1078,11 @@ export function Chart(props: ChartProps): JSX.Element {
       styles: tvStyles(PALETTES[untrack(theme)]) as never,
       customApi: {
         formatBigNumber,
+        // Date bars stand for a UTC date: crosshair and axis ticks read it
+        // in UTC whatever the selected zone, so they agree with the legend.
         formatDate: (dtf, ts, fmt, type) =>
-          dateBars && type !== FormatDateType.XAxis
-            ? new Date(ts).toISOString().slice(0, 10)
+          dateBars
+            ? utils.formatDate(UTC_FORMAT, ts, type === FormatDateType.XAxis ? fmt : "YYYY-MM-DD")
             : utils.formatDate(dtf, ts, fmt),
       },
     });
@@ -1508,6 +1519,7 @@ export function Chart(props: ChartProps): JSX.Element {
       }
       setPaneIds({});
       paneStack = [];
+      appliedNames = "";
       setHeaders([]);
       return;
     }
@@ -1526,7 +1538,12 @@ export function Chart(props: ChartProps): JSX.Element {
       appliedVersion !== null &&
       update.version === appliedVersion + 1;
     appliedVersion = update?.version ?? null;
-    if (follows && applyIncremental(c, series, update, names, compare)) {
+    // A pane that appears or goes away with the data (Volume once volume
+    // arrives) needs the full path.
+    const namesKey = names.join("\n");
+    const sameNames = namesKey === appliedNames;
+    appliedNames = namesKey;
+    if (follows && sameNames && applyIncremental(c, series, update, names, compare)) {
       c.setPriceVolumePrecision(precision, VOLUME_PRECISION);
       return;
     }
@@ -1573,6 +1590,12 @@ export function Chart(props: ChartProps): JSX.Element {
     let keep = 0;
     while (keep < stack.length && stack[keep] === wantedOsc[keep]) keep++;
     const rebuilt = new Set([...stack.slice(keep)]);
+    // A rebuilt pane keeps the height it had.
+    const heights: Record<string, number> = {};
+    for (const name of rebuilt) {
+      const h = c.getSize(currentPanes[name]!)?.height;
+      if (h) heights[name] = h;
+    }
     for (const name of Object.keys(currentPanes)) {
       if (!wanted.includes(name) || rebuilt.has(name)) {
         c.removeIndicator(currentPanes[name]!, indicatorRegName(name));
@@ -1591,7 +1614,7 @@ export function Chart(props: ChartProps): JSX.Element {
       // pane (isStack=true stacks panes bottom-up).
       const paneOptions = ind.is_overlay
         ? { id: CANDLE_PANE_ID }
-        : { height: 120 };
+        : { height: heights[name] ?? 120 };
       const newPaneId = c.createIndicator(
         {
           name: regName,

@@ -9,6 +9,7 @@ import {
   barLegend,
   formatPrice,
   formatIndicatorValue,
+  isEmptyVolumePane,
   indicatorValueKind,
   lastFiniteCloseIndex,
   pricePrecision,
@@ -81,8 +82,13 @@ export function dataWindowRows(
   const barTime = future !== null ? futureTime(series, shown, future) : bars[at]?.t;
 
   const indicators: DataWindowSection[] = [];
-  for (const [key, ind] of Object.entries(series.indicators)) {
-    if (opts.visible && !opts.visible.has(key)) continue;
+  // Legend order: the visible set holds the stored order.
+  const keys = opts.visible
+    ? [...opts.visible].filter((k) => k in series.indicators)
+    : Object.keys(series.indicators);
+  for (const key of keys) {
+    const ind = series.indicators[key]!;
+    if (isEmptyVolumePane(bars, key)) continue;
     const kind = indicatorValueKind(key, ind.is_overlay);
     const rows = plotsOf(ind, (n) => opts.colorAt(key, n)).flatMap((p) => {
       if (!resolvePlot(p, styles[key]).visible) return [];

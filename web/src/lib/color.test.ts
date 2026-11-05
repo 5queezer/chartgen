@@ -35,6 +35,12 @@ describe("readableOn", () => {
     expect(readableOn("#2962ff", "#ffffff")).toBe("#2962ff");
     expect(readableOn("#ffeb3b", "#131722")).toBe("#ffeb3b");
   });
+  it("drops the alpha so the contrast holds", () => {
+    const out = readableOn("rgba(255, 235, 59, 0.4)", "#ffffff");
+    expect(out).toMatch(/^#[0-9a-f]{6}$/);
+    expect(contrastRatio(out, "#ffffff")).toBeGreaterThanOrEqual(3);
+    expect(readableOn("rgba(41, 98, 255, 0.5)", "#131722")).toBe("#2962ff");
+  });
   it("leaves unparsable colors alone", () => {
     expect(readableOn("red", "#ffffff")).toBe("red");
   });
