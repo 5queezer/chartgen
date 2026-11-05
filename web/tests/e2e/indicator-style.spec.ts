@@ -106,6 +106,23 @@ test.describe("indicator style tab", () => {
     await expect(legendValue).toHaveCSS("color", before);
   });
 
+  test("Escape closes the dialog from the Style tab, a popover first", async ({
+    bootedApp: page,
+  }) => {
+    const dialog = await openStyleTab(page);
+    await page.keyboard.press("Escape");
+    await expect(dialog).toHaveCount(0);
+
+    const again = await openStyleTab(page);
+    await again.getByRole("button", { name: "RSI color", exact: true }).click();
+    await expect(page.getByLabel("Color #f23645")).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(page.getByLabel("Color #f23645")).toHaveCount(0);
+    await expect(again).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(again).toHaveCount(0);
+  });
+
   test("Cancel discards style edits", async ({ bootedApp: page }) => {
     const legendValue = rsiRow(page).locator(".pane-header-value");
     const before = await legendValue.evaluate((el) => getComputedStyle(el).color);

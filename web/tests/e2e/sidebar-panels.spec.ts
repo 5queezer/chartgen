@@ -95,6 +95,9 @@ test.describe("sidebar panels", () => {
     await row.getByRole("button", { name: /^Hide / }).click();
     await expect(legend).toHaveCount(0);
     await expect(row.getByRole("button", { name: /^Show / })).toBeVisible();
+    // A hidden instance keeps its display name, as the chips do.
+    await expect(row).toContainText("RSI");
+    await expect(row).not.toContainText("rsi");
 
     await row.getByRole("button", { name: /^Show / }).click();
     await expect(legend).toHaveCount(1);

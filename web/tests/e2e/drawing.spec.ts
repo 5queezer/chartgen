@@ -326,6 +326,42 @@ test.describe("drawing tools", () => {
     });
   });
 
+  test("undo and redo of an endpoint drag", async ({ bootedApp: page }) => {
+    await drawTrendLine(page);
+    const before = (await stored(page))![0]!.points;
+    const box = (await host(page).boundingBox())!;
+    await page.mouse.move(box.x + B.x, box.y + B.y, { steps: 5 });
+    await page.mouse.down();
+    await page.mouse.move(box.x + B.x - 60, box.y + B.y + 40, { steps: 8 });
+    await page.mouse.up();
+    await page.waitForTimeout(500);
+    const after = (await stored(page))![0]!.points;
+    expect(after).not.toEqual(before);
+    await page.keyboard.press("Control+z");
+    await expect.poll(async () => (await stored(page))?.[0]?.points).toEqual(before);
+    await page.keyboard.press("Control+Shift+z");
+    await expect.poll(async () => (await stored(page))?.[0]?.points).toEqual(after);
+  });
+
+  test("undo of a horizontal line body drag", async ({ bootedApp: page }) => {
+    await pickTool(page, "Horizontal line");
+    await clickAt(page, A);
+    await expect.poll(() => overlays(page)).toHaveLength(1);
+    const before = (await stored(page))![0]!.points;
+    const box = (await host(page).boundingBox())!;
+    await page.mouse.move(box.x + 700, box.y + A.y, { steps: 5 });
+    await page.mouse.down();
+    await page.mouse.move(box.x + 700, box.y + A.y + 50, { steps: 8 });
+    await page.mouse.up();
+    await page.waitForTimeout(500);
+    const after = (await stored(page))![0]!.points;
+    expect(after).not.toEqual(before);
+    await page.keyboard.press("Control+z");
+    await expect.poll(async () => (await stored(page))?.[0]?.points).toEqual(before);
+    await page.keyboard.press("Control+Shift+z");
+    await expect.poll(async () => (await stored(page))?.[0]?.points).toEqual(after);
+  });
+
   test("Ctrl+Z undoes the last drawing", async ({ bootedApp: page }) => {
     await drawTrendLine(page);
     await page.keyboard.press("Control+z");
