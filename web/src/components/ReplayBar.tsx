@@ -2,6 +2,9 @@
 // bottom of the chart, the cut line that picks the start bar in "select"
 // mode, the "Select date" dialog and the replay shortcuts (Shift+→ step,
 // Shift+↓ play/pause, Esc exit). The state lives in services/replay.ts.
+// While picking, a layer over the chart takes the mouse: the pick click
+// never reaches klinecharts (so no drawing tool gets a point), and drags
+// and the wheel are passed on as scroll and zoom.
 // Mounted inside the chart's (relatively positioned) wrapper.
 
 import { Dialog, DropdownMenu } from "@kobalte/core";
@@ -24,6 +27,8 @@ import { GoToDateForm } from "./BottomBar";
 const CANDLE_PANE_ID = "candle_pane";
 /** A press that moves further than this is a drag (pan), not a pick. */
 const CLICK_SLOP_PX = 4;
+/** Zoom per wheel notch while picking, as klinecharts' own wheel zoom. */
+const WHEEL_ZOOM = 1.1;
 
 const buttonClass =
   "px-2 py-1.5 rounded text-sm cursor-pointer text-[color:var(--color-fg)] hover:bg-[color:var(--color-border)] inline-flex items-center gap-1.5 disabled:opacity-40 disabled:cursor-default";
@@ -44,6 +49,8 @@ const iconProps = {
 export interface ReplayBarProps {
   replay: Replay;
   chart: KLineChart | null;
+  /** A drawing tool is armed: Esc cancels it rather than ending replay. */
+  drawingArmed: boolean;
   /** Time zone of the "Select date" form. */
   timeZone: string;
 }
@@ -66,8 +73,7 @@ export function ReplayBar(props: ReplayBarProps): JSX.Element {
       } else if (e.shiftKey && e.key === "ArrowDown") {
         e.preventDefault();
         r().togglePlay();
-      } else if (e.key === "Escape" && !e.shiftKey) {
-        // Not prevented: Esc still cancels an armed drawing tool as well.
+      } else if (e.key === "Escape" && !e.shiftKey && !props.drawingArmed) {
         r().exit();
       }
     };
@@ -206,6 +212,13 @@ export function ReplayBar(props: ReplayBarProps): JSX.Element {
             Click a bar to start
           </span>
         </Show>
+        <Show when={r().notice()}>
+          {(text) => (
+            <span class="px-2 text-xs text-[color:var(--color-danger)]" role="status" data-testid="replay-notice">
+              {text()}
+            </span>
+          )}
+        </Show>
       </div>
 
       <Dialog.Root open={dateOpen()} onOpenChange={setDateOpen} modal>
@@ -240,8 +253,9 @@ interface CutPosition {
 
 /**
  * The vertical cut line under the mouse in "select" mode, with the bars
- * right of it dimmed, as TradingView draws it. A click (not a drag, which
- * pans the chart) starts the replay at that bar.
+ * right of it dimmed, as TradingView draws it. A click starts the replay at
+ * that bar. The layer takes the mouse from the chart: a drag scrolls it and
+ * the wheel zooms it instead.
  */
 function CutLine(props: { chart: KLineChart; onPick: (index: number) => void }): JSX.Element {
   let layer!: HTMLDivElement;
@@ -255,8 +269,10 @@ function CutLine(props: { chart: KLineChart; onPick: (index: number) => void }):
     const indexAt = (e: MouseEvent): number | null => {
       const dom = props.chart.getDom();
       const n = props.chart.getDataList().length;
-      if (!dom || n === 0 || !(e.target instanceof Node) || !dom.contains(e.target)) return null;
-      const x = e.clientX - dom.getBoundingClientRect().left;
+      if (!dom || n === 0) return null;
+      const rect = dom.getBoundingClientRect();
+      if (e.clientY < rect.top || e.clientY > rect.bottom) return null;
+      const x = e.clientX - rect.left;
       if (x < 0 || x > paneWidth()) return null;
       const [p] = props.chart.convertFromPixel([{ x }], { paneId: CANDLE_PANE_ID }) as Array<
         Partial<Point>
@@ -264,7 +280,13 @@ function CutLine(props: { chart: KLineChart; onPick: (index: number) => void }):
       return typeof p?.dataIndex === "number" ? Math.max(0, Math.min(n - 1, p.dataIndex)) : null;
     };
 
+    // Press position, and the last x a drag scrolled the chart to.
+    let down: { x: number; y: number; lastX: number } | null = null;
     const onMove = (e: MouseEvent) => {
+      if (down && e.buttons & 1) {
+        props.chart.scrollByDistance(e.clientX - down.lastX);
+        down.lastX = e.clientX;
+      }
       const i = indexAt(e);
       const dom = props.chart.getDom();
       if (i === null || !dom) return setPos(null);
@@ -275,32 +297,48 @@ function CutLine(props: { chart: KLineChart; onPick: (index: number) => void }):
       const left = rect.left - origin.left;
       setPos({ x: left + c.x, right: left + paneWidth(), top: rect.top - origin.top, height: rect.height });
     };
-    let down: { x: number; y: number } | null = null;
     const onDown = (e: MouseEvent) => {
-      down = { x: e.clientX, y: e.clientY };
+      if (e.button !== 0) return;
+      e.preventDefault();
+      down = { x: e.clientX, y: e.clientY, lastX: e.clientX };
     };
-    const onClick = (e: MouseEvent) => {
+    const onUp = (e: MouseEvent) => {
       const start = down;
       down = null;
       if (!start || Math.hypot(e.clientX - start.x, e.clientY - start.y) > CLICK_SLOP_PX) return;
       const i = indexAt(e);
       if (i !== null) props.onPick(i);
     };
-    const onLeave = () => setPos(null);
-    host.addEventListener("mousemove", onMove);
-    host.addEventListener("mousedown", onDown, true);
-    host.addEventListener("click", onClick, true);
-    host.addEventListener("mouseleave", onLeave);
+    const onWheel = (e: WheelEvent) => {
+      e.preventDefault();
+      const dom = props.chart.getDom();
+      if (!dom || e.deltaY === 0) return;
+      const rect = dom.getBoundingClientRect();
+      props.chart.zoomAtCoordinate(e.deltaY < 0 ? WHEEL_ZOOM : 1 / WHEEL_ZOOM, {
+        x: e.clientX - rect.left,
+        y: e.clientY - rect.top,
+      });
+    };
+    const onLeave = () => {
+      down = null;
+      setPos(null);
+    };
+    layer.addEventListener("mousemove", onMove);
+    layer.addEventListener("mousedown", onDown);
+    layer.addEventListener("mouseup", onUp);
+    layer.addEventListener("wheel", onWheel, { passive: false });
+    layer.addEventListener("mouseleave", onLeave);
     onCleanup(() => {
-      host.removeEventListener("mousemove", onMove);
-      host.removeEventListener("mousedown", onDown, true);
-      host.removeEventListener("click", onClick, true);
-      host.removeEventListener("mouseleave", onLeave);
+      layer.removeEventListener("mousemove", onMove);
+      layer.removeEventListener("mousedown", onDown);
+      layer.removeEventListener("mouseup", onUp);
+      layer.removeEventListener("wheel", onWheel);
+      layer.removeEventListener("mouseleave", onLeave);
     });
   });
 
   return (
-    <div ref={layer} class="absolute inset-0 pointer-events-none z-10" data-testid="replay-cutline">
+    <div ref={layer} class="absolute inset-0 z-10 cursor-crosshair" data-testid="replay-cutline">
       <Show when={pos()}>
         {(p) => (
           <>

@@ -200,6 +200,12 @@ export function App(): JSX.Element {
   // --- Bar replay (ADR-0023) ------------------------------------------
   // The request of the series the feed holds (set where it is adopted).
   let feedRequest: LiveRequest | null = null;
+  // True while exiting replay restarts the feed from its series: that reset
+  // holds the close of the replay start, older than the prices the alerts
+  // saw meanwhile (quotes poll), so it must not become their baseline.
+  let resuming = false;
+  // Whether a drawing tool is armed (Esc then cancels only the tool).
+  const [drawingArmed, setDrawingArmed] = createSignal(false);
   const replay = createReplay({
     live,
     request: () => feedRequest,
@@ -209,7 +215,9 @@ export function App(): JSX.Element {
     resumeLive: () => {
       const s = untrack(live)?.series;
       if (s && feedRequest && JSON.stringify(chartQueryKey(feedRequest)) === feedKey) {
+        resuming = true;
         feed.reset(s, feedRequest);
+        resuming = false;
       }
     },
     loadUntil: (ts, isCurrent) => feed.loadUntil(ts, isCurrent),
@@ -234,7 +242,7 @@ export function App(): JSX.Element {
       setLive(snapshot);
       // Price alerts (ADR-0020) on the chart symbol's last close. Replay
       // frames never pass here: while replaying the feed only pages.
-      if (snapshot) feedChartSnapshot(feedTicker, snapshot);
+      if (snapshot && !resuming) feedChartSnapshot(feedTicker, snapshot);
     },
     onPollStatus: setPollStatus,
     onHistoryStatus: setHistoryStatus,
@@ -538,7 +546,13 @@ export function App(): JSX.Element {
         active={activeIndicators()}
       />
       <main class="flex flex-1 min-h-0">
-        <DrawingToolbar chart={chart()} symbol={symbol()} onApi={setDrawings} />
+        <DrawingToolbar
+          chart={chart()}
+          symbol={symbol()}
+          onApi={setDrawings}
+          onArmedChange={setDrawingArmed}
+          disarm={replay.mode() === "select"}
+        />
         <AlertLines chart={chart()} symbol={symbol()} />
         <div class="flex-1 min-w-0 relative">
           <Chart
@@ -563,6 +577,7 @@ export function App(): JSX.Element {
           <ReplayBar
             replay={replay}
             chart={chart()}
+            drawingArmed={drawingArmed()}
             timeZone={resolveTimeZone(timeZone(), symbol())}
           />
         </div>
