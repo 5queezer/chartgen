@@ -9,21 +9,31 @@ const bodyBackground = (page: Page) =>
   page.evaluate(() => getComputedStyle(document.body).backgroundColor);
 
 /** Mean luminance (0-255) of the chart's wide canvases (candle + indicator
- *  panes, excluding the price axis), composited over the body background and
- *  averaged down to one pixel. Mostly empty area, so it tracks the theme. */
+ *  panes, excluding the price axis), each averaged over all its pixels and
+ *  composited over the body background. Mostly empty area, so it tracks the
+ *  theme. (A `drawImage` down to one pixel samples only the canvas center,
+ *  so a plot line crossing it would swing the result.) */
 const chartLuminance = (page: Page) =>
   page.evaluate(() => {
     const host = document.querySelector(".chart-host")!;
-    const out = document.createElement("canvas");
-    out.width = out.height = 1;
-    const ctx = out.getContext("2d")!;
-    ctx.fillStyle = getComputedStyle(document.body).backgroundColor;
-    ctx.fillRect(0, 0, 1, 1);
+    const bg = getComputedStyle(document.body).backgroundColor.match(/\d+/g)!.map(Number);
+    let [r, g, b] = bg as [number, number, number];
     for (const c of host.querySelectorAll("canvas")) {
-      if (c.width > 500) ctx.drawImage(c, 0, 0, 1, 1);
+      if (c.width <= 500) continue;
+      const d = c.getContext("2d")!.getImageData(0, 0, c.width, c.height).data;
+      let sa = 0, sr = 0, sg = 0, sb = 0;
+      for (let i = 0; i < d.length; i += 4) {
+        const a = d[i + 3]! / 255;
+        sa += a; sr += d[i]! * a; sg += d[i + 1]! * a; sb += d[i + 2]! * a;
+      }
+      // Source-over of the canvas' mean (premultiplied) color.
+      const a = sa / (d.length / 4);
+      if (sa === 0) continue;
+      r = (sr / sa) * a + r * (1 - a);
+      g = (sg / sa) * a + g * (1 - a);
+      b = (sb / sa) * a + b * (1 - a);
     }
-    const [r, g, b] = ctx.getImageData(0, 0, 1, 1).data;
-    return 0.299 * r! + 0.587 * g! + 0.114 * b!;
+    return 0.299 * r + 0.587 * g + 0.114 * b;
   });
 
 test.describe("theme", () => {

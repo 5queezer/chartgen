@@ -9,6 +9,8 @@ sidebar:
 **Date:** 2026-11-04
 **Supersedes:** the "client themes per indicator" part of
 [ADR-0007](/chartgen/decisions/0007-complete-series-serialization/)
+**Amended by:** [ADR-0026](/chartgen/decisions/0026-line-and-histogram-colors/)
+(lines and histograms carry colors too)
 
 ## Context and Problem Statement
 

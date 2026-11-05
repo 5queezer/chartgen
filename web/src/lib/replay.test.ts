@@ -38,7 +38,15 @@ function series(n: number, first = 0): SeriesPayload {
         is_overlay: false,
         y_range: [0, 100],
         lines: [{ index: 0, label: "RSI", values: v((i) => i % 100) }],
-        histogram: [{ index: 0, values: v((i) => -i) }],
+        histogram: [
+          {
+            index: 0,
+            label: "Hist",
+            values: v((i) => -i),
+            palette: ["#0f0", "#f00"],
+            color_idx: v((i) => i % 2),
+          },
+        ],
         fills: [{ y1: v((i) => i + 2), y2: v((i) => i - 2), color: "rgba(1,2,3,0.5)" }],
         hlines: [{ y: 70 }, { y: 30 }],
         signals: [
@@ -114,6 +122,14 @@ describe("sliceSeries", () => {
     expect(rsi.y_range).toEqual([0, 100]);
     expect(s.has_more).toBe(true);
     expect(s.symbol).toBe("BTCUSDT");
+  });
+
+  it("cuts per-bar histogram colors with the values and copies the palette", () => {
+    const h = sliceSeries(full, 4, { rsi: { tail: 1 } }).indicators.rsi!.histogram![0]!;
+    expect(h.color_idx).toEqual([0, 1, 0, 1, null]);
+    expect(h.palette).toEqual(["#0f0", "#f00"]);
+    expect(h.palette).not.toBe(full.indicators.rsi!.histogram![0]!.palette);
+    expect(h.label).toBe("Hist");
   });
 
   it("keeps signals on or before the cursor", () => {
@@ -386,6 +402,25 @@ describe("replayFrame", () => {
     expect(ich.histogram![0]!.values).toEqual([null, 8, 9, null]);
     expect(ich.fills![0]!.y1).toEqual([null, 5, 6, null]);
     expect(ich.fills![0]!.y2).toEqual([null, 7, 8, null]);
+  });
+
+  it("maps recompute histogram colors into the frame's palette", () => {
+    const s = series(4);
+    s.indicators.ichimoku = {
+      label: "Ichimoku",
+      is_overlay: true,
+      histogram: [{ index: 0, values: [1, 2, 3, 4], palette: ["#0f0"], color_idx: [0, 0, 0, 0] }],
+    };
+    const rc = series(2, 1);
+    rc.indicators.ichimoku = {
+      label: "Ichimoku",
+      is_overlay: true,
+      histogram: [{ index: 0, values: [8, 9], palette: ["#00f", "#0f0"], color_idx: [1, 0] }],
+    };
+    const h = replayFrame(s, 3, rc).indicators.ichimoku!.histogram![0]!;
+    expect(h.color_idx).toEqual([null, 0, 1, null]);
+    expect(h.palette).toEqual(["#0f0", "#00f"]);
+    expect(s.indicators.ichimoku.histogram![0]!.palette).toEqual(["#0f0"]);
   });
 
   it("does not modify its inputs", () => {

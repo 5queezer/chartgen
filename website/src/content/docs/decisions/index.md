@@ -53,3 +53,4 @@ one and link both ways.
 | [0023](/chartgen/decisions/0023-bar-replay/) | Bar replay: client slice, server recompute of repainting indicators | Accepted | 2026-11-05 |
 | [0024](/chartgen/decisions/0024-starlark-script-runtime/) | Starlark as the script runtime for user indicators | Accepted | 2026-11-05 |
 | [0025](/chartgen/decisions/0025-user-indicator-registry/) | Per-user indicator registry and MCP surface | Accepted | 2026-11-05 |
+| [0026](/chartgen/decisions/0026-line-and-histogram-colors/) | Line and histogram colors on the wire | Accepted | 2026-11-05 |

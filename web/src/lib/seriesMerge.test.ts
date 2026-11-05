@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { SeriesPayload } from "../types/responses";
+import { barColor } from "./plotStyle";
 import {
   dedupeDivlines,
   mergeOlder,
@@ -523,5 +524,79 @@ describe("paging then live", () => {
     expect(withoutProfile(s)).toEqual(
       withoutProfile(serve({ bars: 152, now: now + 2, tick: 1 })),
     );
+  });
+});
+
+describe("histogram colors (ADR-0026)", () => {
+  const UP = "rgba(38,166,154,0.5)";
+  const DOWN = "rgba(239,83,80,0.5)";
+  const NEW = "rgba(0,0,255,1)";
+  // Bar i's color is a function of i (none every 11th bar, NEW from bar
+  // 101 on). The palette lists colors in first-appearance order, as the
+  // server's does, so it differs between responses.
+  const colorOf = (i: number) =>
+    i % 11 === 0 ? null : i >= 101 ? NEW : i % 5 < 2 ? DOWN : UP;
+  function colored(s: SeriesPayload): SeriesPayload {
+    const h = s.indicators.macd!.histogram![0]!;
+    const palette: string[] = [];
+    h.color_idx = s.bars.map((b) => {
+      const c = colorOf((b.t! - BASE) / STEP);
+      if (c === null) return null;
+      if (!palette.includes(c)) palette.push(c);
+      return palette.indexOf(c);
+    });
+    h.palette = palette;
+    return s;
+  }
+  const barColors = (s: SeriesPayload) => {
+    const h = s.indicators.macd!.histogram![0]!;
+    return s.bars.map((_, i) => barColor(h, i) ?? null);
+  };
+
+  it("mergeOlder remaps the page's indices into the current palette", () => {
+    const cur = colored(serve({ bars: 30, now: 100 })); // bars 71..100
+    const page = colored(serve({ bars: 29, end: 71, now: 100 })); // bars 42..70
+    expect(cur.indicators.macd!.histogram![0]!.palette).toEqual([DOWN, UP]);
+    expect(page.indicators.macd!.histogram![0]!.palette).toEqual([UP, DOWN]);
+    const [c0, p0] = [clone(cur), clone(page)];
+    const merged = older(cur, page);
+    expect(merged.indicators.macd!.histogram![0]!.palette).toEqual([DOWN, UP]);
+    expect(barColors(merged)).toEqual(barColors(colored(serve({ bars: 59, now: 100 }))));
+    expect(cur).toEqual(c0);
+    expect(page).toEqual(p0);
+  });
+
+  it("mergeTail overwrites colors in place and grows the palette", () => {
+    const cur = colored(serve({ bars: 30, now: 100 }));
+    const idx = cur.indicators.macd!.histogram![0]!.color_idx;
+    const merged = tail(cur, colored(serve({ bars: 2, now: 101 })));
+    const h = merged.indicators.macd!.histogram![0]!;
+    expect(h.color_idx).toBe(idx);
+    expect(h.color_idx).toHaveLength(31);
+    expect(h.palette).toEqual([DOWN, UP, NEW]);
+    expect(barColors(merged)).toEqual(barColors(colored(serve({ bars: 31, now: 101 }))));
+  });
+
+  it("pages, tails and a fresh load agree on every bar's color", () => {
+    let s = colored(serve({ bars: 50, now: 100 })); // bars 51..100
+    s = tail(s, colored(serve({ bars: 3, now: 102 })));
+    const end = (s.bars[0]!.t! - BASE) / STEP;
+    s = older(s, colored(serve({ bars: 40, end, now: 102 })));
+    expect(s.bars).toHaveLength(92);
+    expect(barColors(s)).toEqual(barColors(colored(serve({ bars: 92, now: 102 }))));
+  });
+
+  it("rejects colors that are not one per bar", () => {
+    const cur = colored(serve({ bars: 30, now: 100 }));
+    const t = colored(serve({ bars: 2, now: 101 }));
+    t.indicators.macd!.histogram![0]!.color_idx!.push(0);
+    expect(mergeTail(cur, t)).toEqual({ ok: false, reason: "shape" });
+  });
+
+  it("reads a side without colors (an older server) as uncolored bars", () => {
+    const cur = colored(serve({ bars: 30, now: 100 }));
+    const merged = older(cur, serve({ bars: 10, end: 71, now: 100 }));
+    expect(barColors(merged).slice(0, 10)).toEqual(new Array(10).fill(null));
+    expect(barColors(merged).slice(10)).toEqual(barColors(cur));
   });
 });

@@ -5,7 +5,10 @@
 //
 // Rules shared by both merges:
 // - Per-bar channels (`lines`, `histogram`, `fills`) are joined by bar
-//   timestamp; every array stays 1:1 aligned with `bars`.
+//   timestamp; every array stays 1:1 aligned with `bars`. A histogram's
+//   per-bar `color_idx` (ADR-0026) is joined the same way, its incoming
+//   indices remapped into the current `palette`, which grows by any color
+//   it lacks.
 // - `signals` and `divlines` carry bar indices; the incoming side is
 //   shifted into the merged index space.
 // - `hbars`, `hlines`, `y_range`, `label` and `is_overlay` always come from
@@ -24,6 +27,25 @@ import type { SeriesPayload } from "../types/responses";
 type Indicator = SeriesPayload["indicators"][string];
 type DivLine = NonNullable<Indicator["divlines"]>[number];
 type Signal = NonNullable<Indicator["signals"]>[number];
+type Histogram = NonNullable<Indicator["histogram"]>[number];
+
+/**
+ * The per-bar colors of `src` as indices into `palette`, which gains (in
+ * place) every color of `src` it lacks. Bars without a color are null, all
+ * of them when `src` has no per-bar colors (an older server).
+ */
+export function colorIdxInto(
+  palette: string[],
+  src: Histogram,
+): Array<number | null> {
+  const map = (src.palette ?? []).map((c) => {
+    const k = palette.indexOf(c);
+    return k >= 0 ? k : palette.push(c) - 1;
+  });
+  return src.color_idx
+    ? src.color_idx.map((k) => (k === null ? null : (map[k] ?? null)))
+    : src.values.map(() => null);
+}
 
 export type MergeFailure =
   /** Different `symbol` or `interval` than the current series. */
@@ -85,7 +107,8 @@ function sameShape(cur: SeriesPayload, inc: SeriesPayload): boolean {
     if (al.length !== bl.length || ah.length !== bh.length) return false;
     if (af.length !== bf.length) return false;
     if (bl.some((l) => l.values.length !== n)) return false;
-    if (bh.some((h) => h.values.length !== n)) return false;
+    if (bh.some((h) => h.values.length !== n || (h.color_idx && h.color_idx.length !== n)))
+      return false;
     if (bf.some((f) => f.y1.length !== n || f.y2.length !== n)) return false;
   }
   return true;
@@ -202,10 +225,16 @@ export function mergeOlder(
       }));
     }
     if (cur.histogram) {
-      merged.histogram = cur.histogram.map((h, i) => ({
-        ...h,
-        values: [...pg.histogram![i]!.values, ...h.values],
-      }));
+      merged.histogram = cur.histogram.map((h, i) => {
+        const ph = pg.histogram![i]!;
+        const out: Histogram = { ...h, values: [...ph.values, ...h.values] };
+        if (h.color_idx) {
+          const palette = [...(h.palette ?? [])];
+          out.color_idx = [...colorIdxInto(palette, ph), ...h.color_idx];
+          out.palette = palette;
+        }
+        return out;
+      });
     }
     if (cur.fills) {
       merged.fills = cur.fills.map((f, i) => ({
@@ -303,9 +332,11 @@ export function mergeTail(
     cur.lines?.forEach((l, i) =>
       overwrite(l.values, from, tl.lines![i]!.values, skip),
     );
-    cur.histogram?.forEach((h, i) =>
-      overwrite(h.values, from, tl.histogram![i]!.values, skip),
-    );
+    cur.histogram?.forEach((h, i) => {
+      const th = tl.histogram![i]!;
+      overwrite(h.values, from, th.values, skip);
+      if (h.color_idx) overwrite(h.color_idx, from, colorIdxInto((h.palette ??= []), th), skip);
+    });
     cur.fills?.forEach((f, i) => {
       overwrite(f.y1, from, tl.fills![i]!.y1, skip);
       overwrite(f.y2, from, tl.fills![i]!.y2, skip);

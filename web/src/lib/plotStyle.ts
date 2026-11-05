@@ -24,8 +24,13 @@ export interface PlotInfo {
   index: number;
   /** Legend / Style tab label. */
   label: string;
-  /** Color used when the user has not overridden it. */
+  /**
+   * Color used when the user has not overridden it: the server's (ADR-0026),
+   * else the palette's. Per-bar histogram colors take precedence over it.
+   */
   defaultColor: string;
+  /** Line width used when the user has not overridden it. */
+  defaultWidth: number;
 }
 
 export interface ResolvedPlot {
@@ -39,13 +44,21 @@ export const DEFAULT_WIDTH = 1;
 
 /** The subset of a series indicator the Style tab and legend need. */
 interface PayloadPlots {
-  lines?: ReadonlyArray<{ label: string | null }>;
-  histogram?: ReadonlyArray<unknown>;
+  lines?: ReadonlyArray<{ label: string | null; color?: string; width?: number }>;
+  histogram?: ReadonlyArray<PayloadHistogram>;
+}
+
+/** Label and per-bar colors of a payload histogram (ADR-0026). */
+interface PayloadHistogram {
+  label?: string;
+  palette?: readonly string[];
+  color_idx?: ReadonlyArray<number | null>;
 }
 
 /**
  * Plots of a payload indicator in drawing order (lines, then histograms).
- * `colorAt` gives the default color for the n-th plot of the indicator.
+ * `colorAt` gives the fallback color for the n-th plot of the indicator,
+ * used where the server sends none.
  */
 export function plotsOf(
   ind: PayloadPlots,
@@ -64,17 +77,19 @@ export function plotsOf(
       kind: "line",
       index: i,
       label: line.label ?? `line${i}`,
-      defaultColor: colorAt(i),
+      defaultColor: line.color ?? colorAt(i),
+      defaultWidth: line.width ?? DEFAULT_WIDTH,
     };
   });
-  (ind.histogram ?? []).forEach((_, i) =>
+  (ind.histogram ?? []).forEach((h, i) =>
     plots.push({
       key: plotKey("hist", i),
       indexKeyed: true,
       kind: "hist",
       index: i,
-      label: `hist${i}`,
-      defaultColor: colorAt(lines.length + i),
+      label: h.label ?? `hist${i}`,
+      defaultColor: h.palette?.[0] ?? colorAt(lines.length + i),
+      defaultWidth: DEFAULT_WIDTH,
     }),
   );
   return plots;
@@ -136,10 +151,11 @@ export function figureOverrides(
 export function resolveOverride(
   o: PlotStyle | undefined,
   defaultColor: string,
+  defaultWidth = DEFAULT_WIDTH,
 ): ResolvedPlot {
   return {
     color: o?.color ?? defaultColor,
-    width: o?.width ?? DEFAULT_WIDTH,
+    width: o?.width ?? defaultWidth,
     lineStyle: o?.lineStyle ?? "solid",
     visible: o?.visible ?? true,
   };
@@ -150,7 +166,32 @@ export function resolvePlot(
   plot: PlotInfo,
   style: IndicatorStyle | undefined,
 ): ResolvedPlot {
-  return resolveOverride(plotOverride(plot, style), plot.defaultColor);
+  return resolveOverride(plotOverride(plot, style), plot.defaultColor, plot.defaultWidth);
+}
+
+/** Server color of bar `i` of a histogram, if the payload has one. */
+export function barColor(
+  h: PayloadHistogram | undefined,
+  i: number,
+): string | undefined {
+  const k = h?.color_idx?.[i];
+  return k == null ? undefined : h?.palette?.[k];
+}
+
+/**
+ * Color of a plot at bar `at`: the user's color, else (histograms) the
+ * server's color of that bar, else the plot's default.
+ */
+export function plotColorAt(
+  plot: PlotInfo,
+  ind: PayloadPlots,
+  style: IndicatorStyle | undefined,
+  at: number,
+): string {
+  const own = plotOverride(plot, style)?.color;
+  if (own !== undefined) return own;
+  const bar = plot.kind === "hist" ? barColor(ind.histogram?.[plot.index], at) : undefined;
+  return bar ?? plot.defaultColor;
 }
 
 const DASH: Record<Exclude<PlotLineStyle, "solid">, number[]> = {

@@ -36,15 +36,25 @@ export const SeriesBarSchema = z.object({
   v: FiniteOrNull,
 });
 
+// Plot colors (ADR-0026) are the PNG renderer's CSS "rgba(r,g,b,a)"
+// strings; optional so payloads from older servers still parse.
 export const SeriesLineSchema = z.object({
   index: z.number().int(),
   label: z.string().nullable(),
   values: z.array(FiniteOrNull),
+  color: z.string().optional(),
+  width: z.number().int().optional(),
 });
 
 export const SeriesHistogramBucketSchema = z.object({
   index: z.number().int(),
+  // Legend label, e.g. "Volume" or "Histogram".
+  label: z.string().optional(),
   values: z.array(FiniteOrNull),
+  // Per-bar colors: `color_idx[i]` indexes `palette` (each distinct color
+  // once), 1:1 aligned with `values`; null where the bar has no color.
+  palette: z.array(z.string()).optional(),
+  color_idx: z.array(z.number().int().nullable()).optional(),
 });
 
 export const SeriesSignalSchema = z.object({
@@ -52,6 +62,7 @@ export const SeriesSignalSchema = z.object({
   t: z.number().nullable(),
   y: z.number(),
   label: z.string(),
+  color: z.string().optional(),
 });
 
 // `color` is a CSS "rgba(r,g,b,a)" string from the server's renderer

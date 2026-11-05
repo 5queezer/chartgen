@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  barColor,
   figureOverrides,
   figureStyle,
+  plotColorAt,
   plotsOf,
   rekeyPlots,
   resolvePlot,
@@ -110,5 +112,54 @@ describe("resolvePlot / figureStyle", () => {
       dashedValue: [2, 3],
     });
     expect(figureStyle("hist", { ...r, lineStyle: "dotted" })).toEqual({ color: "#fff" });
+  });
+});
+
+describe("server colors (ADR-0026)", () => {
+  const UP = "rgba(38,166,154,0.5)";
+  const DOWN = "rgba(239,83,80,0.5)";
+  const ind = {
+    lines: [
+      { label: "EMA", color: "rgba(41,98,255,1)", width: 2 },
+      { label: "Old" }, // an older server: no color, no width
+    ],
+    histogram: [{ label: "Volume", palette: [UP, DOWN], color_idx: [null, 0, 1] }],
+  };
+  const plots = plotsOf(ind, colorAt);
+
+  it("plot defaults are the server's, else the palette's", () => {
+    expect(plots.map((p) => [p.label, p.defaultColor, p.defaultWidth])).toEqual([
+      ["EMA", "rgba(41,98,255,1)", 2],
+      ["Old", "#000001", 1],
+      ["Volume", UP, 1],
+    ]);
+    expect(plotsOf({ histogram: [{}] }, colorAt)[0]).toMatchObject({
+      label: "hist0",
+      defaultColor: "#000000",
+    });
+  });
+
+  it("resolves user override > server > palette for lines", () => {
+    expect(resolvePlot(plots[0]!, undefined)).toMatchObject({ color: "rgba(41,98,255,1)", width: 2 });
+    const style = { plots: { "l:EMA": { color: "#fff", width: 4 } } };
+    expect(resolvePlot(plots[0]!, style)).toMatchObject({ color: "#fff", width: 4 });
+    expect(resolvePlot(plots[0]!, { plots: { "l:EMA": { width: 3 } } })).toMatchObject({
+      color: "rgba(41,98,255,1)",
+      width: 3,
+    });
+  });
+
+  it("colors a histogram per bar unless the user set its color", () => {
+    const vol = plots[2]!;
+    expect(barColor(ind.histogram[0], 1)).toBe(UP);
+    expect(barColor(ind.histogram[0], 0)).toBeUndefined();
+    expect(barColor({}, 1)).toBeUndefined();
+    expect([0, 1, 2].map((i) => plotColorAt(vol, ind, undefined, i))).toEqual([UP, UP, DOWN]);
+    const style = { plots: { hist0: { color: "#ffeb3b" } } };
+    expect(plotColorAt(vol, ind, style, 2)).toBe("#ffeb3b");
+    // Hiding is not a color: per-bar colors stay.
+    expect(plotColorAt(vol, ind, { plots: { hist0: { visible: false } } }, 2)).toBe(DOWN);
+    // Lines have one color whatever the bar.
+    expect(plotColorAt(plots[0]!, ind, undefined, 2)).toBe("rgba(41,98,255,1)");
   });
 });

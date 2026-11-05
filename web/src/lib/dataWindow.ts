@@ -13,7 +13,7 @@ import {
   pricePrecision,
   type BarLegend,
 } from "./format";
-import { plotsOf, resolvePlot } from "./plotStyle";
+import { plotColorAt, plotsOf, resolvePlot } from "./plotStyle";
 import type { IndicatorStyle } from "../stores/indicators";
 import { formatBarTime } from "./timezone";
 
@@ -50,7 +50,7 @@ export interface CompareInput {
 
 export interface DataWindowOptions {
   timeZone: string;
-  /** Default color of the n-th plot of indicator `name`. */
+  /** Fallback color of the n-th plot of indicator `name` (no server color). */
   colorAt: (name: string, n: number) => string;
   /** Series keys of the visible indicators; every payload indicator when omitted. */
   visible?: ReadonlySet<string>;
@@ -77,14 +77,13 @@ export function dataWindowRows(
   for (const [key, ind] of Object.entries(series.indicators)) {
     if (opts.visible && !opts.visible.has(key)) continue;
     const rows = plotsOf(ind, (n) => opts.colorAt(key, n)).flatMap((p) => {
-      const r = resolvePlot(p, styles[key]);
-      if (!r.visible) return [];
+      if (!resolvePlot(p, styles[key]).visible) return [];
       const plot = p.kind === "line" ? ind.lines?.[p.index] : ind.histogram?.[p.index];
       return [
         {
           label: p.label,
           value: formatValue(plot?.values[at] ?? null),
-          color: r.color,
+          color: plotColorAt(p, ind, styles[key], at),
         },
       ];
     });

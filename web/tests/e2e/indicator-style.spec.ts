@@ -61,9 +61,10 @@ test.describe("indicator style tab", () => {
     await dialog.getByRole("button", { name: "OK" }).click();
     await expect(dialog).toHaveCount(0);
 
-    await expect(legendValue).toHaveCSS("color", "rgb(242, 54, 69)");
+    // The preset keeps the opacity of RSI's server color (0.8, ADR-0026).
+    await expect(legendValue).toHaveCSS("color", "rgba(242, 54, 69, 0.8)");
     await page.screenshot({ path: "/tmp/claude-1000/chartgen-shots/style/applied.png" });
-    expect(before).not.toBe("rgb(242, 54, 69)");
+    expect(before).not.toBe("rgba(242, 54, 69, 0.8)");
     expect(chartRequests).toEqual([]);
 
     // Hide the plot: its legend value disappears, the legend row stays.
@@ -84,7 +85,12 @@ test.describe("indicator style tab", () => {
       length: 14,
       style: {
         plots: {
-          "l:RSI": { color: "#f23645", width: 3, lineStyle: "dashed", visible: false },
+          "l:RSI": {
+            color: "rgba(242, 54, 69, 0.8)",
+            width: 3,
+            lineStyle: "dashed",
+            visible: false,
+          },
         },
       },
     });
@@ -119,20 +125,22 @@ test.describe("indicator style tab", () => {
     expect(stored ?? "").not.toContain("style");
 
     const reopened = await openStyleTab(page);
-    await expect(reopened.getByLabel("RSI width")).toHaveValue("1");
+    // RSI's server width (ADR-0026).
+    await expect(reopened.getByLabel("RSI width")).toHaveValue("2");
   });
 
   test("reopening shows the saved width and line style", async ({
     bootedApp: page,
   }) => {
     let dialog = await openStyleTab(page);
-    await dialog.getByLabel("RSI width").selectOption("2");
+    // Not 2: that is RSI's server width, so it would read back unsaved too.
+    await dialog.getByLabel("RSI width").selectOption("3");
     await dialog.getByLabel("RSI line style").selectOption("dotted");
     await dialog.getByRole("button", { name: "OK" }).click();
     await expect(dialog).toHaveCount(0);
 
     dialog = await openStyleTab(page);
-    await expect(dialog.getByLabel("RSI width")).toHaveValue("2");
+    await expect(dialog.getByLabel("RSI width")).toHaveValue("3");
     await expect(dialog.getByLabel("RSI line style")).toHaveValue("dotted");
     await expect(dialog.getByRole("button", { name: "Defaults" })).toBeEnabled();
   });
