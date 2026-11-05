@@ -301,7 +301,7 @@ pub fn render_results(
                 }
                 for line in &overlay.lines {
                     if let Some(ref lbl) = line.label {
-                        if let Some(val) = legend_value(&line.y) {
+                        if let Some(val) = legend_value(&line.y, line.breaks) {
                             let text = format!("{}: {}", lbl, val);
                             let RGBAColor(r, g, b, _) = line.color;
                             candle_area.draw_text(
@@ -467,7 +467,7 @@ pub fn render_results(
             for line in &result.lines {
                 if let Some(ref lbl) = line.label {
                     // Value at the last bar
-                    if let Some(val) = legend_value(&line.y) {
+                    if let Some(val) = legend_value(&line.y, line.breaks) {
                         let text = format!("{}: {}", lbl, val);
                         let RGBAColor(r, g, b, _) = line.color;
                         area.draw_text(
@@ -523,16 +523,19 @@ fn line_runs(y: &[f64]) -> Vec<Vec<(f64, f64)>> {
         .collect()
 }
 
-/// Legend text of a line: its value at the last bar, "n/a" when it has none
-/// there (the inactive Supertrend line), None when it has no value at all.
-fn legend_value(y: &[f64]) -> Option<String> {
+/// Legend text of a line: its last finite value. A line that breaks at trend
+/// flips (`breaks`) reads the last bar instead, "n/a" when it has none there
+/// (the inactive Supertrend line). None when it has no value at all.
+fn legend_value(y: &[f64], breaks: bool) -> Option<String> {
     if y.iter().all(|v| v.is_nan()) {
         return None;
     }
-    Some(match y.last() {
-        Some(v) if !v.is_nan() => format!("{v:.2}"),
-        _ => "n/a".into(),
-    })
+    let v = if breaks {
+        y.last().copied().filter(|v| !v.is_nan())
+    } else {
+        y.iter().rev().find(|v| !v.is_nan()).copied()
+    };
+    Some(v.map_or_else(|| "n/a".into(), |v| format!("{v:.2}")))
 }
 
 fn auto_range(r: &PanelResult) -> (f64, f64) {
@@ -601,10 +604,11 @@ mod tests {
 
     #[test]
     fn legend_shows_the_last_bar() {
-        assert_eq!(legend_value(&[1.0, 2.5]).as_deref(), Some("2.50"));
+        assert_eq!(legend_value(&[1.0, 2.5], false).as_deref(), Some("2.50"));
         // The inactive trend line: no stale value from an earlier bar.
-        assert_eq!(legend_value(&[1.0, NAN]).as_deref(), Some("n/a"));
-        assert_eq!(legend_value(&[NAN, NAN]), None);
-        assert_eq!(legend_value(&[]), None);
+        assert_eq!(legend_value(&[1.0, NAN], true).as_deref(), Some("n/a"));
+        assert_eq!(legend_value(&[1.0, NAN], false).as_deref(), Some("1.00"));
+        assert_eq!(legend_value(&[NAN, NAN], true), None);
+        assert_eq!(legend_value(&[], false), None);
     }
 }

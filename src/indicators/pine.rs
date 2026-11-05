@@ -228,11 +228,16 @@ pub fn ma_by_type(kind: &str, x: &[f64], vol: &[f64], n: usize) -> Vec<f64> {
 
 /// Bars after which the start of an exponential smoothing with `alpha`
 /// weighs < 0.1%. 0 for alpha outside (0, 1): no smoothing, or none decays.
+/// Capped at `MAX_DECAY_BARS` so tiny alphas cannot overflow callers' sums.
 pub fn decay_bars(alpha: f64) -> usize {
+    const MAX_DECAY_BARS: f64 = 100_000.0;
     if !(alpha > 0.0 && alpha < 1.0) {
         return 0;
     }
-    (1000f64.ln() / -(1.0 - alpha).ln()).ceil() as usize
+    // ln_1p keeps precision where `1.0 - alpha` would round to 1.0.
+    (1000f64.ln() / -(-alpha).ln_1p())
+        .ceil()
+        .min(MAX_DECAY_BARS) as usize
 }
 
 /// `Indicator::warmup_bars` of `ma_by_type(kind, .., n)`: the seed window
@@ -269,6 +274,7 @@ pub fn volumes(data: &OhlcvData) -> Vec<f64> {
 
 pub fn line(y: Vec<f64>, color: u32, width: u32, label: &str) -> Line {
     Line {
+        breaks: false,
         y,
         color: rgba(color, 0.9),
         width,
@@ -669,6 +675,18 @@ pub(crate) mod test_util {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn decay_bars_is_capped_and_survives_tiny_alphas() {
+        use super::decay_bars;
+        assert_eq!(decay_bars(1e-20), 100_000);
+        assert_eq!(decay_bars(f64::MIN_POSITIVE), 100_000);
+        assert_eq!(decay_bars(f64::NAN), 0);
+        assert_eq!(decay_bars(-1.0), 0);
+        assert_eq!(decay_bars(0.0), 0);
+        assert_eq!(decay_bars(1.0), 0);
+        assert_eq!(decay_bars(0.5), 10);
+    }
+
     use super::test_util::{bars, eq, NAN};
     use super::*;
 

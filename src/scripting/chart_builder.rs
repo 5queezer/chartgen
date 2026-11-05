@@ -229,6 +229,7 @@ fn chart_methods(builder: &mut MethodsBuilder) {
         this.with(|pr| {
             room(&pr.lines, MAX_LINES, "lines")?;
             pr.lines.push(Line {
+                breaks: false,
                 y,
                 color,
                 width: width.clamp(1, 10) as u32,

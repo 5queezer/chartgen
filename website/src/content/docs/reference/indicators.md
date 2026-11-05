@@ -40,7 +40,7 @@ Load enough history before the bars you compare (`warmup` in series mode)
 so the start-up effect has decayed. A non-zero `warmup` is raised to what
 the EMA- and RMA-based built-ins need to converge, from their parameters, up
 to 1000 bars ([ADR-0032](/chartgen/decisions/0032-indicator-aware-warmup/));
-the community composites keep the `warmup` you send. Known differences:
+the community composites and user scripts keep the `warmup` you send. Known differences:
 
 - **WaveTrend lengths.** `wavetrend` is the WaveTrend inside VuManChu Cipher B
   and keeps its lengths 9 / 12 / 3 (LazyBear's script: 10 / 21 / 4).

@@ -157,9 +157,11 @@ Summary payload shape (for `format=summary` or `format=both`):
 
 Fields are keyed by the name each indicator was requested with, so
 `{"name": "rsi", "length": 21}` comes back as `indicators.rsi`. A line's
-`last_value` is its value at the last bar, `null` when it has none there:
-of Supertrend's `Up Trend` / `Down Trend` lines only the active one has a
-value.
+`last_value` is its last finite value. Lines that break at a trend flip
+(Supertrend's and Parabolic SAR's up and down lines) report their value at
+the last bar instead, `null` when they have none there: only the active one
+has a value. In `format=series` those lines carry `"breaks": true`, which the
+web legend uses the same way.
 
 ##### Several instances of one indicator
 
@@ -380,7 +382,10 @@ constant offset, and VWAP until its next session reset. Finite-window
 indicators (SMA, Bollinger Bands, Donchian) match exactly once `warmup`
 covers their lookback. When history runs out, `has_more` stays `true` as
 long as the response fetched more bars than it returned, so the next page
-brings the trimmed warmup bars.
+brings the trimmed warmup bars. `has_more` is never `true` with an empty
+`bars`: if trimming would leave no bar (`bars: 0`), the fetched bars come
+back instead, with indicator values `null` where they have not converged,
+and `has_more` is `false`.
 
 Upstream limits: Binance requests are paginated at 1000 bars per call.
 Yahoo intraday history ends after about 30 days for 1m, 60 days for other

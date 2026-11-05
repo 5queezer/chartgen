@@ -92,6 +92,7 @@ impl Indicator for Cvd {
 
         PanelResult {
             lines: vec![Line {
+                breaks: false,
                 y: cvd,
                 color: rgba(0x2196F3, 1.0),
                 width: 1,
@@ -299,6 +300,7 @@ impl Indicator for OpenInterestHist {
 
         PanelResult {
             lines: vec![Line {
+                breaks: false,
                 y: aligned.clone(),
                 color: rgba(0x2196F3, 1.0),
                 width: 1,
@@ -404,12 +406,14 @@ impl Indicator for LongShortRatio {
         PanelResult {
             lines: vec![
                 Line {
+                    breaks: false,
                     y: long_aligned.clone(),
                     color: rgba(0x26A69A, 1.0),
                     width: 1,
                     label: Some("Long".into()),
                 },
                 Line {
+                    breaks: false,
                     y: short_aligned.clone(),
                     color: rgba(0xEF5350, 1.0),
                     width: 1,
@@ -530,6 +534,7 @@ impl Indicator for FearGreed {
 
         PanelResult {
             lines: vec![Line {
+                breaks: false,
                 y: aligned,
                 color: rgba(0x888888, 0.5),
                 width: 1,

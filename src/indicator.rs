@@ -10,6 +10,10 @@ pub struct Line {
     pub width: u32,
     #[allow(dead_code)]
     pub label: Option<String>,
+    /// The line breaks where its trend flips (Supertrend, SAR): it is NaN by
+    /// design while the other trend is on, so its legend and `last_value`
+    /// read the last bar. Other lines read their last finite value.
+    pub breaks: bool,
 }
 
 /// A filled region between two series.

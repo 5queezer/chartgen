@@ -5,7 +5,7 @@
 
 import { createMemo, Index, Show, type JSX } from "solid-js";
 
-import { displayName } from "../lib/indicatorNames";
+import { chipName } from "../lib/indicatorNames";
 import {
   indicatorName,
   instanceKey,
@@ -43,6 +43,7 @@ export function IndicatorChips(props: IndicatorChipsProps): JSX.Element {
         <Index each={props.entries}>
           {(entry, index) => {
             const params = () => labels().get(instanceKey(entry()));
+            const shown = () => chipName(indicatorName(entry()), params());
             const name = () =>
               [indicatorName(entry()), params()].filter(Boolean).join(" ");
             return (
@@ -69,7 +70,7 @@ export function IndicatorChips(props: IndicatorChipsProps): JSX.Element {
                   title={name()}
                   classList={{ "line-through": isHidden(entry()) }}
                 >
-                  {displayName(name())}
+                  {shown()}
                 </span>
                 <button
                   type="button"

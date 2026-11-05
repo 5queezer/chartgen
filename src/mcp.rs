@@ -682,7 +682,14 @@ fn series_json(
     chart_style: &str,
     has_more: bool,
 ) -> Value {
-    let offset = data.len().saturating_sub(bars);
+    // Trimming must never leave an empty page that claims more history: the
+    // client pages on bars[0].t, so with nothing to read it would be stuck.
+    // Return the fetched bars (indicators null where unconverged) instead.
+    let offset = if bars == 0 {
+        0
+    } else {
+        data.len().saturating_sub(bars)
+    };
     let visible = chartgen::data::OhlcvData {
         bars: data.bars[offset..].to_vec(),
         symbol: data.symbol.clone(),
@@ -702,6 +709,7 @@ fn series_json(
             })
         })
         .collect();
+    let bars_arr_empty = bars_arr.is_empty();
     let mut indicators_json = serde_json::Map::new();
     for ((key, pr), ind) in computed.iter().zip(panel_indicators.iter()) {
         let mut trimmed = trim_panel_result(pr, offset);
@@ -722,7 +730,7 @@ fn series_json(
         "chart_style": chart_style,
         "bars": bars_arr,
         "indicators": Value::Object(indicators_json),
-        "has_more": has_more,
+        "has_more": has_more && bars > 0 && !bars_arr_empty,
     })
 }
 
@@ -1212,13 +1220,17 @@ fn panel_result_to_series_json(
             .enumerate()
             .map(|(i, line)| {
                 let values: Vec<Value> = line.y.iter().map(|v| finite_or_null(*v)).collect();
-                json!({
+                let mut j = json!({
                     "index": i,
                     "label": line.label,
                     "values": values,
                     "color": css_rgba(&line.color),
                     "width": line.width,
-                })
+                });
+                if line.breaks {
+                    j["breaks"] = json!(true);
+                }
+                j
             })
             .collect();
         out["lines"] = json!(lines);
@@ -1379,15 +1391,25 @@ fn panel_result_to_json(pr: &chartgen::indicator::PanelResult) -> Value {
         out["y_range"] = json!([finite_or_null(lo), finite_or_null(hi)]);
     }
 
-    // Lines: the value at the last bar, null where the line has none there
-    // (an inactive Supertrend line), not a stale one from an earlier bar.
+    // Lines: the last finite value. Lines that break at trend flips read the
+    // last bar instead: null where the line has none there (an inactive
+    // Supertrend line), not a stale one from an earlier bar.
     if !pr.lines.is_empty() {
         let lines: Vec<Value> = pr
             .lines
             .iter()
             .enumerate()
             .map(|(i, line)| {
-                let last_val = finite_or_null(line.y.last().copied().unwrap_or(f64::NAN));
+                let last_val = finite_or_null(if line.breaks {
+                    line.y.last().copied().unwrap_or(f64::NAN)
+                } else {
+                    line.y
+                        .iter()
+                        .rev()
+                        .find(|v| v.is_finite())
+                        .copied()
+                        .unwrap_or(f64::NAN)
+                });
                 json!({
                     "index": i,
                     "label": line.label,
@@ -2765,6 +2787,7 @@ mod tests {
         let c = RGBAColor(255, 0, 0, 1.0);
         let pr = PanelResult {
             lines: vec![Line {
+                breaks: false,
                 y: vec![f64::NAN, 1.0, 2.0, 3.5],
                 color: c,
                 width: 1,
@@ -2920,6 +2943,7 @@ mod tests {
         };
         let pr = PanelResult {
             lines: vec![Line {
+                breaks: false,
                 y: vec![f64::NAN, f64::NAN, 1.0, 2.0, 3.0],
                 color: RGBAColor(0, 0, 0, 1.0),
                 width: 1,
@@ -2963,6 +2987,7 @@ mod tests {
         let red = RGBAColor(239, 83, 80, 0.5);
         let pr = PanelResult {
             lines: vec![Line {
+                breaks: false,
                 y: vec![1.0; 4],
                 color: RGBAColor(41, 98, 255, 1.0),
                 width: 2,
@@ -3004,6 +3029,7 @@ mod tests {
         use plotters::style::RGBAColor;
 
         let line = |label: &str| Line {
+            breaks: false,
             y: vec![],
             color: RGBAColor(0, 0, 0, 1.0),
             width: 1,
@@ -3552,6 +3578,7 @@ mod tests {
         };
         let pr = PanelResult {
             lines: vec![Line {
+                breaks: false,
                 y: ys.clone(),
                 color: c,
                 width: 1,
@@ -3977,6 +4004,26 @@ mod tests {
     }
 
     #[test]
+    fn summary_ichimoku_lagging_span_keeps_last_finite_value() {
+        // The lagging span is shifted back, so it ends in NaN by design; its
+        // last_value is the last finite one. Only trend lines read the last bar.
+        let pr = indicators::by_name("ichimoku")
+            .unwrap()
+            .compute(&data::sample_data(200));
+        assert!(pr
+            .lines
+            .iter()
+            .any(|l| l.y.last().is_some_and(|v| v.is_nan())));
+        let j = panel_result_to_json(&pr);
+        for (i, l) in pr.lines.iter().enumerate() {
+            assert!(!l.breaks);
+            if l.y.iter().any(|v| v.is_finite()) {
+                assert!(j["lines"][i]["last_value"].is_number(), "line {i}");
+            }
+        }
+    }
+
+    #[test]
     fn warmup_bars_stay_reachable_when_history_runs_out() {
         // 10 bars of history, 5 asked for, warmup raised to 891: the 5
         // trimmed warmup bars are older history the client must page to.
@@ -3999,6 +4046,19 @@ mod tests {
             (0..5).map(|h| h * 3_600).collect::<Vec<_>>()
         );
         assert_eq!(oldest["has_more"], false);
+    }
+
+    #[test]
+    fn has_more_never_comes_with_empty_bars() {
+        // bars=0 with the warmup raised: trimming would leave nothing. The
+        // fetched bars come back instead, with no cursor to page on.
+        let p = series_payload(
+            json!({ "timeframe": "1h", "bars": 0, "warmup": 20, "end_time": 10 * HOUR_MS,
+                    "indicators": ["ema_stack"], "format": "series" }),
+            fetch::DataSource::Sample,
+        );
+        assert!(!bar_ts(&p).is_empty());
+        assert_eq!(p["has_more"], false);
     }
 
     #[test]

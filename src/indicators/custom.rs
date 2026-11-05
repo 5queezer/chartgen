@@ -98,6 +98,7 @@ impl Indicator for Vwap {
 
         PanelResult {
             lines: vec![Line {
+                breaks: false,
                 y: vals,
                 color: rgba(0xFF9800, 0.9),
                 width: 2,
@@ -187,18 +188,21 @@ impl Indicator for Adx {
         PanelResult {
             lines: vec![
                 Line {
+                    breaks: false,
                     y: adx_vals,
                     color: rgba(0xFFFFFF, 0.9),
                     width: 2,
                     label: Some("ADX".into()),
                 },
                 Line {
+                    breaks: false,
                     y: plus_di_vals,
                     color: rgba(0x26a69a, 0.9),
                     width: 1,
                     label: Some("+DI".into()),
                 },
                 Line {
+                    breaks: false,
                     y: minus_di_vals,
                     color: rgba(0xef5350, 0.9),
                     width: 1,
@@ -232,6 +236,7 @@ fn trend_lines(up: Vec<f64>, down: Vec<f64>, labels: [&str; 2]) -> Vec<Line> {
             color: rgba(color, 0.9),
             width: 1,
             label: Some(label.into()),
+            breaks: true,
         })
         .collect()
 }
@@ -559,6 +564,7 @@ impl Indicator for AdLine {
 
         PanelResult {
             lines: vec![Line {
+                breaks: false,
                 y: vals,
                 color: rgba(0x2196F3, 0.9),
                 width: 2,
@@ -630,6 +636,7 @@ impl Indicator for HistVol {
 
         PanelResult {
             lines: vec![Line {
+                breaks: false,
                 y: vals,
                 color: rgba(0xFF9800, 0.9),
                 width: 2,
@@ -689,18 +696,21 @@ impl Indicator for VwapBands {
         PanelResult {
             lines: vec![
                 Line {
+                    breaks: false,
                     y: upper.clone(),
                     color: rgba(0x787B86, 0.5),
                     width: 1,
                     label: Some("VWAP Upper".into()),
                 },
                 Line {
+                    breaks: false,
                     y: vwap_vals,
                     color: rgba(0xFF9800, 0.9),
                     width: 2,
                     label: Some("VWAP".into()),
                 },
                 Line {
+                    breaks: false,
                     y: lower.clone(),
                     color: rgba(0x787B86, 0.5),
                     width: 1,
@@ -778,6 +788,7 @@ impl Indicator for HeikinAshi {
             // The HA close as a line, so the series wire and the web chart
             // carry it; dots mark only the color flips.
             lines: vec![Line {
+                breaks: false,
                 y: ha_close,
                 color: rgba(0x787B86, 0.9),
                 width: 1,
@@ -868,30 +879,35 @@ impl Indicator for PivotPoints {
         PanelResult {
             lines: vec![
                 Line {
+                    breaks: false,
                     y: pivot,
                     color: rgba(0xFFEB3B, 0.6),
                     width: 1,
                     label: Some("Pivot".into()),
                 },
                 Line {
+                    breaks: false,
                     y: r1,
                     color: rgba(0xef5350, 0.4),
                     width: 1,
                     label: Some("R1".into()),
                 },
                 Line {
+                    breaks: false,
                     y: s1,
                     color: rgba(0x26a69a, 0.4),
                     width: 1,
                     label: Some("S1".into()),
                 },
                 Line {
+                    breaks: false,
                     y: r2,
                     color: rgba(0xef5350, 0.3),
                     width: 1,
                     label: Some("R2".into()),
                 },
                 Line {
+                    breaks: false,
                     y: s2,
                     color: rgba(0x26a69a, 0.3),
                     width: 1,
@@ -1298,7 +1314,10 @@ impl Indicator for KalmanVolume {
     fn warmup_bars(&self) -> usize {
         // HMA, its 200-bar stdev, the Kalman smoothing (alpha k), the SMA.
         use super::pine::{decay_bars, ma_warmup};
-        ma_warmup("hma", self.vzo_length) + 200 + decay_bars(self.k) + self.sig_length
+        ma_warmup("hma", self.vzo_length)
+            .saturating_add(200)
+            .saturating_add(decay_bars(self.k))
+            .saturating_add(self.sig_length)
     }
 
     fn compute(&self, data: &OhlcvData) -> PanelResult {
@@ -1367,6 +1386,7 @@ impl Indicator for KalmanVolume {
         let both = |i: usize| !m_n[i].is_nan() && !signal[i].is_nan();
         let kvf_lines = vec![
             Line {
+                breaks: false,
                 y: (0..n)
                     .map(|i| if both(i) { m_n[i] } else { f64::NAN })
                     .collect(),
@@ -1375,6 +1395,7 @@ impl Indicator for KalmanVolume {
                 label: Some("KVF".into()),
             },
             Line {
+                breaks: false,
                 y: (0..n)
                     .map(|i| if both(i) { signal[i] } else { f64::NAN })
                     .collect(),
@@ -1627,30 +1648,35 @@ impl Indicator for Ichimoku {
         PanelResult {
             lines: vec![
                 Line {
+                    breaks: false,
                     y: tenkan_sen,
                     color: rgba(0x0095ff, 0.9),
                     width: 1,
                     label: Some("Tenkan".into()),
                 },
                 Line {
+                    breaks: false,
                     y: kijun_sen,
                     color: rgba(0xff0044, 0.9),
                     width: 1,
                     label: Some("Kijun".into()),
                 },
                 Line {
+                    breaks: false,
                     y: senkou_a.clone(),
                     color: rgba(0x26a69a, 0.5),
                     width: 1,
                     label: Some("Senkou A".into()),
                 },
                 Line {
+                    breaks: false,
                     y: senkou_b.clone(),
                     color: rgba(0xef5350, 0.5),
                     width: 1,
                     label: Some("Senkou B".into()),
                 },
                 Line {
+                    breaks: false,
                     y: lagging,
                     color: rgba(0x43A047, 0.9),
                     width: 1,
@@ -1958,6 +1984,7 @@ impl Indicator for SessionVolumeProfile {
             }
 
             out.lines.push(Line {
+                breaks: false,
                 y: poc_line,
                 color: rgba(0xFFD700, 0.9),
                 width: 2,
@@ -1965,12 +1992,14 @@ impl Indicator for SessionVolumeProfile {
             });
             if self.show_value_area {
                 out.lines.push(Line {
+                    breaks: false,
                     y: vah_line,
                     color: rgba(0x787B86, 0.7),
                     width: 1,
                     label: Some("VAH".into()),
                 });
                 out.lines.push(Line {
+                    breaks: false,
                     y: val_line,
                     color: rgba(0x787B86, 0.7),
                     width: 1,
@@ -2274,6 +2303,7 @@ impl Indicator for NakedPoc {
                     *slot = poc;
                 }
                 out.lines.push(Line {
+                    breaks: false,
                     y,
                     color: rgba(0xFFD700, 0.7),
                     width: 2,
@@ -2297,6 +2327,7 @@ impl Indicator for NakedPoc {
                 *slot = poc;
             }
             out.lines.push(Line {
+                breaks: false,
                 y,
                 color: rgba(0xFF9800, 0.85),
                 width: 2,
@@ -2441,6 +2472,15 @@ impl Indicator for Tpo {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn kalman_volume_warmup_survives_extreme_k() {
+        for k in [0.0, 1e-20, 1000.0] {
+            let mut kv = KalmanVolume::default();
+            kv.configure(&json!({ "k": k, "vzo_length": 10000, "sig_length": 10000 }));
+            assert!(kv.warmup_bars() >= 20_200);
+        }
+    }
+
     use super::*;
     use crate::data::sample_data;
     use crate::indicators::pine::test_util::{bars, closes, eq, ohlc, NAN};

@@ -126,12 +126,14 @@ impl Indicator for WaveTrend {
         PanelResult {
             lines: vec![
                 Line {
+                    breaks: false,
                     y: wt1.clone(),
                     color: rgba(0x4994ec, 0.8),
                     width: 2,
                     label: Some("WT1".into()),
                 },
                 Line {
+                    breaks: false,
                     y: wt2.clone(),
                     color: rgba(0x1f1559, 0.8),
                     width: 2,

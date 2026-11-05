@@ -493,12 +493,14 @@ impl Indicator for CipherB {
 
         if cfg.wt_show {
             lines.push(Line {
+                breaks: false,
                 y: wt1.clone(),
                 color: rgba(0x4994ec, 0.8),
                 width: 2,
                 label: Some("WT1".into()),
             });
             lines.push(Line {
+                breaks: false,
                 y: wt2.clone(),
                 color: rgba(0x1f1559, 0.8),
                 width: 2,
@@ -527,6 +529,7 @@ impl Indicator for CipherB {
         if cfg.rsi_show {
             // RSI as line (base purple) + colored dots at OB/OS zones
             lines.push(Line {
+                breaks: false,
                 y: rsi_vals.clone(),
                 color: rgba(0xc33ee1, 0.75),
                 width: 2,
@@ -655,12 +658,14 @@ impl Indicator for CipherB {
 
             if cfg.stoch_show {
                 lines.push(Line {
+                    breaks: false,
                     y: stoch_k.clone(),
                     color: rgba(0x21baf3, 0.3),
                     width: 2,
                     label: Some("Stoch K".into()),
                 });
                 lines.push(Line {
+                    breaks: false,
                     y: stoch_d.clone(),
                     color: rgba(0x673ab7, 0.1),
                     width: 1,
@@ -788,6 +793,7 @@ impl Indicator for CipherB {
                 cfg.tc_factor,
             );
             lines.push(Line {
+                breaks: false,
                 y: stc,
                 color: rgba(0x673ab7, 0.75),
                 width: 2,

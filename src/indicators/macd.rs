@@ -76,12 +76,14 @@ impl Indicator for Macd {
         PanelResult {
             lines: vec![
                 Line {
+                    breaks: false,
                     y: macd_line,
                     color: rgba(0x2962ff, 1.0),
                     width: 2,
                     label: Some("MACD".into()),
                 },
                 Line {
+                    breaks: false,
                     y: sig,
                     color: rgba(0xff6d00, 1.0),
                     width: 2,

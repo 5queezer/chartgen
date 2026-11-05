@@ -46,3 +46,8 @@ export function rememberLabels(
 export function displayName(id: string): string {
   return labels()[id] ?? prettifyId(id);
 }
+
+/** Chip text: the display name of the registry id, then the param label. */
+export function chipName(id: string, params?: string): string {
+  return [displayName(id), params].filter(Boolean).join(" ");
+}

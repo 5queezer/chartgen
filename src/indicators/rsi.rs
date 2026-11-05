@@ -52,6 +52,7 @@ impl Indicator for Rsi {
 
         PanelResult {
             lines: vec![Line {
+                breaks: false,
                 y: rsi,
                 color: rgba(0xc33ee1, 0.8),
                 width: 2,
