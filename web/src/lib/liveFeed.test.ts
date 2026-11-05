@@ -6,6 +6,8 @@ import {
   MAX_CATCHUP_BARS,
   MAX_HISTORY_BARS,
   PAGE_BARS,
+  PUSH_RETRY_MS,
+  PUSH_WATCHDOG_MS,
   SLOW_POLL_MS,
   TAIL_BARS,
   WARMUP,
@@ -16,6 +18,7 @@ import {
   type LiveRequest,
   type LiveSnapshot,
   type PollStatus,
+  type PushApi,
 } from "./liveFeed";
 
 // A 1m market whose forming bar is `now` (a bar index) and whose history
@@ -76,6 +79,7 @@ const REQ: LiveRequest = {
 function setup(
   fetchImpl = serve,
   reloadImpl: (feed: LiveFeed) => Promise<void> = () => Promise.resolve(),
+  push?: PushApi,
 ) {
   const doc = new FakeDoc();
   const snapshots: Array<LiveSnapshot | null> = [];
@@ -86,6 +90,7 @@ function setup(
   const feed = createLiveFeed({
     fetch,
     reload,
+    push,
     onSnapshot: (s) => snapshots.push(s),
     onPollStatus: (s) => polls.push(s),
     onHistoryStatus: (s) => history.push(s),
@@ -425,5 +430,155 @@ describe("history paging", () => {
     await vi.advanceTimersByTimeAsync(0);
     expect(t.last()!.update.kind).toBe("reset");
     expect(t.last()!.series.bars).toHaveLength(500);
+  });
+});
+
+/** subscribe_chart stand-in: ids s1, s2, ...; `error` makes subscribes fail. */
+function fakePush() {
+  const f = {
+    error: null as Error | null,
+    hold: null as Promise<void> | null,
+    count: 0,
+    subscribe: vi.fn(async (_req: LiveRequest, _warmup: number) => {
+      if (f.hold) await f.hold;
+      if (f.error) throw f.error;
+      return `s${++f.count}`;
+    }),
+    unsubscribe: vi.fn((_id: string) => Promise.resolve()),
+  };
+  return f;
+}
+
+function setupPush() {
+  const push = fakePush();
+  const t = setup(serve, () => Promise.resolve(), push);
+  return { ...t, push };
+}
+
+describe("push mode", () => {
+  it("subscribes after a full load, stops polling and merges pushed tails", async () => {
+    const t = setupPush();
+    t.feed.reset(payload(501, 1000), REQ);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(t.push.subscribe).toHaveBeenCalledWith(REQ, WARMUP);
+    expect(t.polls.at(-1)).toEqual({ kind: "push" });
+
+    for (let i = 1; i <= 6; i++) {
+      market.tick = i / 10;
+      t.feed.applyPush("s1", payload(999, 1000));
+      expect(t.last()!.update).toMatchObject({ kind: "tail", from: 498 });
+      expect(t.last()!.series.bars.at(-1)!.c).toBeCloseTo(1000 + i / 10);
+      await vi.advanceTimersByTimeAsync(1_000);
+    }
+    // Six seconds of pushes, not a single poll.
+    expect(t.fetch).not.toHaveBeenCalled();
+
+    // A rollover arrives as a two-bar tail too.
+    t.feed.applyPush("s1", payload(1000, 1001));
+    expect(t.last()!.series.bars).toHaveLength(501);
+    // Ticks of another subscription are not ours.
+    const n = t.snapshots.length;
+    t.feed.applyPush("s9", payload(1000, 1001));
+    expect(t.snapshots).toHaveLength(n);
+  });
+
+  it("falls back to polling when pushes stop, and resubscribes with backoff", async () => {
+    const t = setupPush();
+    t.feed.reset(payload(501, 1000), REQ);
+    await vi.advanceTimersByTimeAsync(0);
+    t.push.error = new Error("MCP tool error: no open SSE stream");
+
+    await vi.advanceTimersByTimeAsync(PUSH_WATCHDOG_MS);
+    expect(t.push.unsubscribe).toHaveBeenCalledWith("s1");
+    // Caught up at once, then polled on the usual period.
+    expect(t.fetch).toHaveBeenCalledTimes(1);
+    expect(t.polls.at(-1)).toEqual({ kind: "live", everyMs: FAST_POLL_MS });
+
+    await vi.advanceTimersByTimeAsync(PUSH_RETRY_MS);
+    expect(t.push.subscribe).toHaveBeenCalledTimes(2);
+    // Failed again: the next retry waits twice as long.
+    await vi.advanceTimersByTimeAsync(PUSH_RETRY_MS * 2 - 1);
+    expect(t.push.subscribe).toHaveBeenCalledTimes(2);
+    t.push.error = null;
+    await vi.advanceTimersByTimeAsync(1);
+    expect(t.push.subscribe).toHaveBeenCalledTimes(3);
+    expect(t.polls.at(-1)).toEqual({ kind: "push" });
+    const polled = t.fetch.mock.calls.length;
+    t.feed.applyPush("s2", payload(999, 1000));
+    await vi.advanceTimersByTimeAsync(FAST_POLL_MS * 2);
+    expect(t.fetch.mock.calls.length).toBe(polled);
+  });
+
+  it("keeps polling a chart the server cannot push, without retrying", async () => {
+    const t = setupPush();
+    t.push.error = new Error("MCP tool error: not pushable: AAPL is not a Binance symbol");
+    t.feed.reset(payload(501, 1000), { ...REQ, ticker: "AAPL" });
+    await vi.advanceTimersByTimeAsync(SLOW_POLL_MS * 4);
+    expect(t.push.subscribe).toHaveBeenCalledTimes(1);
+    expect(t.fetch).toHaveBeenCalledTimes(4);
+    expect(t.polls.at(-1)).toEqual({ kind: "live", everyMs: SLOW_POLL_MS });
+  });
+
+  it("a generation change unsubscribes and subscribes the new chart", async () => {
+    const t = setupPush();
+    t.feed.reset(payload(501, 1000), REQ);
+    await vi.advanceTimersByTimeAsync(0);
+    const m5 = { ...REQ, timeframe: "5m" };
+    t.feed.reset(payload(501, 1000), m5);
+    expect(t.push.unsubscribe).toHaveBeenCalledWith("s1");
+    await vi.advanceTimersByTimeAsync(0);
+    expect(t.push.subscribe).toHaveBeenLastCalledWith(m5, WARMUP);
+    // A late tick of the old subscription is dropped.
+    const n = t.snapshots.length;
+    t.feed.applyPush("s1", payload(999, 1000));
+    expect(t.snapshots).toHaveLength(n);
+    t.feed.dispose();
+    expect(t.push.unsubscribe).toHaveBeenLastCalledWith("s2");
+  });
+
+  it("undoes a subscribe that lands after the chart changed", async () => {
+    const t = setupPush();
+    let release!: () => void;
+    t.push.hold = new Promise((r) => (release = r));
+    t.feed.reset(payload(501, 1000), REQ);
+    t.feed.suspend();
+    release();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(t.push.unsubscribe).toHaveBeenCalledWith("s1");
+    expect(t.polls.at(-1)).toEqual({ kind: "off" });
+  });
+
+  it("a hidden tab unsubscribes and resubscribes when visible", async () => {
+    const t = setupPush();
+    t.feed.reset(payload(501, 1000), REQ);
+    await vi.advanceTimersByTimeAsync(0);
+    t.doc.set("hidden");
+    expect(t.push.unsubscribe).toHaveBeenCalledWith("s1");
+    expect(t.polls.at(-1)).toEqual({ kind: "paused" });
+    await vi.advanceTimersByTimeAsync(PUSH_WATCHDOG_MS * 3);
+    expect(t.push.subscribe).toHaveBeenCalledTimes(1);
+    expect(t.fetch).not.toHaveBeenCalled();
+
+    t.doc.set("visible");
+    await vi.advanceTimersByTimeAsync(0);
+    // Catches up with a poll and subscribes again.
+    expect(t.fetch).toHaveBeenCalledTimes(1);
+    expect(t.push.subscribe).toHaveBeenCalledTimes(2);
+    expect(t.polls.at(-1)).toEqual({ kind: "push" });
+  });
+
+  it("a pushed tail after missed bars catches up with a poll", async () => {
+    const t = setupPush();
+    t.feed.reset(payload(501, 1000), REQ);
+    await vi.advanceTimersByTimeAsync(0);
+    market.now = 1010;
+    t.feed.applyPush("s1", payload(1009, 1010));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(t.fetch.mock.calls.map((c) => c[1].bars)).toEqual([2, 8 + TAIL_BARS + 3]);
+    expect(t.last()!.series.bars.at(-1)!.t).toBe(tOf(1010));
+    expect(t.polls.at(-1)).toEqual({ kind: "push" });
+    // Still pushing: no polls follow.
+    await vi.advanceTimersByTimeAsync(FAST_POLL_MS * 2);
+    expect(t.fetch).toHaveBeenCalledTimes(2);
   });
 });

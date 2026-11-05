@@ -2,6 +2,17 @@
 // and merges it in, and loads older history pages on request. The merged
 // series it emits is what the chart renders.
 //
+// Push mode (ADR-0021): after a full load the feed also subscribes to
+// server-pushed tails (`subscribe_chart`). While a subscription is live,
+// interval polling stops and each pushed tail goes through the same
+// `mergeTail` path a poll uses. A tail that does not line up (a gap after
+// a stalled stream) triggers one poll, which catches up or reloads as
+// usual. No push for PUSH_WATCHDOG_MS (or a dropped SSE stream, which ends
+// the server-side subscription) falls back to polling and retries the
+// subscription with backoff. A hidden tab unsubscribes, like it stops
+// polling, and subscribes again when visible. Charts the server cannot
+// push (non-Binance symbols) just keep polling.
+//
 // Lifecycle: `reset(base, request)` adopts a full load (from the TanStack
 // chart query) and starts a new generation; `suspend()` stops one while
 // the next full load is in flight. Every request carries the generation
@@ -42,6 +53,15 @@ export const FAST_POLL_MS = 2_000;
 export const SLOW_POLL_MS = 15_000;
 /** Ceiling for the error backoff. */
 export const MAX_BACKOFF_MS = 60_000;
+/**
+ * Longest expected gap between pushes: Binance sends a kline update at
+ * least every 2 s, trades in between.
+ */
+export const PUSH_CADENCE_MS = 2_000;
+/** No push for this long: presume the subscription dead and poll again. */
+export const PUSH_WATCHDOG_MS = 3 * PUSH_CADENCE_MS;
+/** First retry of a failed subscription; doubles up to MAX_BACKOFF_MS. */
+export const PUSH_RETRY_MS = 2_000;
 /**
  * Largest catch-up tail after missed bars (sleep, hidden tab); with
  * WARMUP still one Binance call. A longer gap reloads the chart.
@@ -99,7 +119,10 @@ export interface LiveSnapshot {
 
 export type PollStatus =
   | { kind: "off" }
+  /** Polling the tail every `everyMs`. */
   | { kind: "live"; everyMs: number }
+  /** Applying server-pushed tails. */
+  | { kind: "push" }
   | { kind: "paused" }
   | { kind: "retrying"; inMs: number; message: string }
   | { kind: "reloading" };
@@ -118,8 +141,23 @@ type VisibilityDoc = Pick<
   "visibilityState" | "addEventListener" | "removeEventListener"
 >;
 
+/** Server push (`subscribe_chart`); without it the feed only polls. */
+export interface PushApi {
+  /**
+   * Subscribe to pushed tails of `request` computed with `warmup`; resolves
+   * to the subscription id. Rejects with a message containing "not
+   * pushable" for charts the server cannot push.
+   */
+  subscribe: (request: LiveRequest, warmup: number) => Promise<string>;
+  unsubscribe: (subscriptionId: string) => Promise<unknown>;
+}
+
+/** True when `err` says the chart cannot be pushed: poll, don't retry. */
+export const isNotPushable = (err: unknown) => /not pushable/i.test(message(err));
+
 export interface LiveFeedOptions {
   fetch: (request: LiveRequest, args: FetchArgs) => Promise<SeriesPayload>;
+  push?: PushApi;
   /** Full reload through the chart query; ends in `reset` on success. */
   reload: () => Promise<unknown>;
   onSnapshot: (snapshot: LiveSnapshot | null) => void;
@@ -148,6 +186,8 @@ export interface LiveFeed {
    * (checked before each page) turned false.
    */
   loadUntil: (ts: number, isCurrent?: () => boolean) => Promise<LoadUntilResult>;
+  /** A pushed tail arrived for `subscriptionId`. */
+  applyPush: (subscriptionId: string, tail: SeriesPayload) => void;
   dispose: () => void;
 }
 
@@ -169,6 +209,14 @@ export function createLiveFeed(opts: LiveFeedOptions): LiveFeed {
   let failures = 0;
   // Bars for the next poll: TAIL_BARS, or more to catch up after a gap.
   let nextBars = TAIL_BARS;
+  // Push: the live subscription, a subscribe in flight, failed subscribes
+  // since the last push, whether this generation's chart is pushable, and
+  // the watchdog or subscribe-retry timer.
+  let sub: string | null = null;
+  let subscribing = false;
+  let pushFailures = 0;
+  let pushable = true;
+  let pushTimer: ReturnType<typeof setTimeout> | null = null;
 
   const hidden = () => doc.visibilityState === "hidden";
   const period = () =>
@@ -183,17 +231,33 @@ export function createLiveFeed(opts: LiveFeedOptions): LiveFeed {
     timer = null;
   };
 
+  const clearPushTimer = () => {
+    if (pushTimer !== null) clearTimeout(pushTimer);
+    pushTimer = null;
+  };
+
+  /** Forget the subscription and end it on the server (best effort). */
+  const dropSubscription = () => {
+    clearPushTimer();
+    if (sub !== null) void opts.push?.unsubscribe(sub).catch(() => {});
+    sub = null;
+  };
+
   /** End the generation: abort its requests and drop their responses. */
   const endGeneration = () => {
     gen++;
     abort.abort();
     abort = new AbortController();
     clearTimer();
+    dropSubscription();
     polling = false;
     reloading = false;
     pageLoading = false;
     failures = 0;
     nextBars = TAIL_BARS;
+    subscribing = false;
+    pushFailures = 0;
+    pushable = true;
   };
 
   const schedule = (ms: number) => {
@@ -226,6 +290,59 @@ export function createLiveFeed(opts: LiveFeedOptions): LiveFeed {
     opts.reload().then(resume, resume);
   };
 
+  const retrySubscribe = () => {
+    const inMs = Math.min(PUSH_RETRY_MS * 2 ** pushFailures, MAX_BACKOFF_MS);
+    pushFailures++;
+    clearPushTimer();
+    pushTimer = setTimeout(() => void subscribe(), inMs);
+  };
+
+  const armWatchdog = () => {
+    clearPushTimer();
+    pushTimer = setTimeout(pushLost, PUSH_WATCHDOG_MS);
+  };
+
+  /** Pushes stopped: poll (catching up at once) and subscribe again. */
+  const pushLost = () => {
+    dropSubscription();
+    if (!polling && !reloading) {
+      clearTimer();
+      void poll();
+    }
+    retrySubscribe();
+  };
+
+  async function subscribe(): Promise<void> {
+    pushTimer = null;
+    const push = opts.push;
+    if (!push || !pushable || sub !== null || subscribing) return;
+    if (!series || !request || hidden()) return;
+    const my = gen;
+    subscribing = true;
+    let id: string;
+    try {
+      id = await push.subscribe(request, WARMUP);
+    } catch (err) {
+      if (my !== gen) return;
+      subscribing = false;
+      if (isNotPushable(err)) pushable = false;
+      else retrySubscribe();
+      return;
+    }
+    if (my !== gen || hidden()) {
+      // Too late: the chart changed or the tab was hidden meanwhile.
+      void push.unsubscribe(id).catch(() => {});
+      if (my === gen) subscribing = false;
+      return;
+    }
+    subscribing = false;
+    sub = id;
+    // Pushes replace polling; an in-flight poll lands and stops there.
+    clearTimer();
+    armWatchdog();
+    if (!polling && !reloading) opts.onPollStatus({ kind: "push" });
+  }
+
   async function poll(): Promise<void> {
     timer = null;
     if (!series || !request || polling || reloading) return;
@@ -246,7 +363,8 @@ export function createLiveFeed(opts: LiveFeedOptions): LiveFeed {
     } catch (err) {
       if (my !== gen) return;
       polling = false;
-      backoff(err);
+      // Pushes keep the chart live; the next misfit tail polls again.
+      if (sub === null) backoff(err);
       return;
     }
     if (my !== gen || !series) return;
@@ -284,17 +402,30 @@ export function createLiveFeed(opts: LiveFeedOptions): LiveFeed {
       // up with ours: start over from a full load.
       return reload(my);
     }
+    if (sub !== null) {
+      opts.onPollStatus({ kind: "push" });
+      return;
+    }
     opts.onPollStatus({ kind: "live", everyMs: period() });
     schedule(period());
   }
 
   const onVisibility = () => {
-    if (hidden() || !series || reloading) return;
+    if (hidden()) {
+      // A hidden tab holds no subscription, as it does not poll.
+      if (sub !== null || subscribing || pushTimer !== null) {
+        dropSubscription();
+        if (series) opts.onPollStatus({ kind: "paused" });
+      }
+      return;
+    }
+    if (!series || reloading) return;
     // Catch up right away; an in-flight poll reschedules itself.
     if (!polling) {
       clearTimer();
       void poll();
     }
+    void subscribe();
   };
   doc.addEventListener("visibilitychange", onVisibility);
 
@@ -358,6 +489,7 @@ export function createLiveFeed(opts: LiveFeedOptions): LiveFeed {
       } else {
         opts.onPollStatus({ kind: "live", everyMs: period() });
         schedule(period());
+        void subscribe();
       }
     },
 
@@ -389,6 +521,24 @@ export function createLiveFeed(opts: LiveFeedOptions): LiveFeed {
         if (series.bars.length >= MAX_HISTORY_BARS) return "limit";
         if (!pageLoading) void loadPage(request!, first);
         if (!(await inflight)) return my !== gen ? "aborted" : "error";
+      }
+    },
+
+    applyPush(id, tail) {
+      if (id !== sub || !series || !request) return;
+      armWatchdog();
+      pushFailures = 0;
+      if (reloading) return;
+      const prevLength = series.bars.length;
+      const r = mergeTail(series, tail);
+      if (r.ok) {
+        series = r.series;
+        emit({ version: ++version, kind: "tail", from: r.from, prevLength });
+      } else if (r.reason !== "stale" && !polling) {
+        // Missed bars or data that does not line up: a poll catches up
+        // (or reloads) exactly as when polling.
+        clearTimer();
+        void poll();
       }
     },
 

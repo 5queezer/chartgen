@@ -13,16 +13,24 @@ import type {
   GenerateChartInput,
   GetQuotesInput,
   SearchSymbolsInput,
+  SubscribeChartInput,
+  UnsubscribeChartInput,
 } from "./types/generated-input";
 import {
+  CHART_TICK_METHOD,
+  ChartTickParamsSchema,
   ListIndicatorsPayloadSchema,
   QuotesPayloadSchema,
   SearchSymbolsPayloadSchema,
   SeriesPayloadSchema,
+  SubscribeChartPayloadSchema,
+  UnsubscribeChartPayloadSchema,
   type ListIndicatorsPayload,
   type QuotesPayload,
   type SearchSymbolsPayload,
   type SeriesPayload,
+  type SubscribeChartPayload,
+  type UnsubscribeChartPayload,
 } from "./types/responses";
 import { clearAccessToken, getAccessToken } from "./oauth";
 
@@ -51,6 +59,9 @@ export type AlertNotificationHandler = (
   notification: Notification,
 ) => void | Promise<void>;
 
+/** Receives each `notifications/chart_tick` (ADR-0021), already validated. */
+export type ChartTickHandler = (subscriptionId: string, series: SeriesPayload) => void;
+
 export interface McpSession {
   /**
    * Invoke `generate_chart` with `format: 'series'` and parse the response.
@@ -77,7 +88,18 @@ export interface McpSession {
     args: SearchSymbolsInput,
     signal?: AbortSignal,
   ) => Promise<SearchSymbolsPayload>;
-  /** Install a handler invoked for every `notifications/*` frame. */
+  /**
+   * Invoke `subscribe_chart`: pushed tails of this chart arrive at the
+   * `onChartTick` handler. Rejects for charts that cannot be pushed.
+   */
+  callSubscribeChart: (args: SubscribeChartInput) => Promise<SubscribeChartPayload>;
+  /** Invoke `unsubscribe_chart`. */
+  callUnsubscribeChart: (
+    args: UnsubscribeChartInput,
+  ) => Promise<UnsubscribeChartPayload>;
+  /** Install the handler for `notifications/chart_tick`. */
+  onChartTick: (handler: ChartTickHandler) => void;
+  /** Install a handler invoked for every other `notifications/*` frame. */
   onNotification: (handler: AlertNotificationHandler) => void;
   /** Close the underlying transport. */
   close: () => Promise<void>;
@@ -91,7 +113,7 @@ interface ConnectedTransport {
 
 async function connectWithToken(
   token: string,
-  onNotification: AlertNotificationHandler | null,
+  onNotification: AlertNotificationHandler,
 ): Promise<ConnectedTransport> {
   const transport = new StreamableHTTPClientTransport(mcpUrl(), {
     requestInit: {
@@ -104,11 +126,9 @@ async function connectWithToken(
     { capabilities: {} },
   );
 
-  if (onNotification) {
-    client.fallbackNotificationHandler = async (n: Notification) => {
-      await onNotification(n);
-    };
-  }
+  client.fallbackNotificationHandler = async (n: Notification) => {
+    await onNotification(n);
+  };
 
   try {
     await client.connect(transport);
@@ -125,6 +145,7 @@ interface McpSessionInternalState {
   /** In-flight connect shared by concurrent callers; cleared on settle. */
   connecting: Promise<ConnectedTransport> | null;
   notificationHandler: AlertNotificationHandler | null;
+  chartTickHandler: ChartTickHandler | null;
 }
 
 /**
@@ -167,6 +188,19 @@ export function createMcpSession(): McpSession {
     connected: null,
     connecting: null,
     notificationHandler: null,
+    chartTickHandler: null,
+  };
+
+  // Every connection dispatches through the current handlers, so they can
+  // be installed or swapped at any time. Chart ticks are validated at the
+  // boundary (ADR-0004); a malformed one is dropped.
+  const dispatch = async (n: Notification) => {
+    if (n.method === CHART_TICK_METHOD) {
+      const p = ChartTickParamsSchema.safeParse(n.params);
+      if (p.success) state.chartTickHandler?.(p.data.subscription_id, p.data.series);
+      return;
+    }
+    await state.notificationHandler?.(n);
   };
 
   function ensureConnected(): Promise<ConnectedTransport> {
@@ -176,7 +210,7 @@ export function createMcpSession(): McpSession {
     state.connecting ??= (async () => {
       try {
         const token = await getAccessToken();
-        const conn = await connectWithToken(token, state.notificationHandler);
+        const conn = await connectWithToken(token, dispatch);
         state.connected = conn;
         return conn;
       } finally {
@@ -270,15 +304,25 @@ export function createMcpSession(): McpSession {
       );
       return SearchSymbolsPayloadSchema.parse(json);
     },
+    async callSubscribeChart(args) {
+      const json = await callToolWithAuthRetry(
+        "subscribe_chart",
+        args as unknown as Record<string, unknown>,
+      );
+      return SubscribeChartPayloadSchema.parse(json);
+    },
+    async callUnsubscribeChart(args) {
+      const json = await callToolWithAuthRetry(
+        "unsubscribe_chart",
+        args as unknown as Record<string, unknown>,
+      );
+      return UnsubscribeChartPayloadSchema.parse(json);
+    },
+    onChartTick(handler) {
+      state.chartTickHandler = handler;
+    },
     onNotification(handler) {
       state.notificationHandler = handler;
-      if (state.connected) {
-        state.connected.client.fallbackNotificationHandler = async (
-          n: Notification,
-        ) => {
-          await handler(n);
-        };
-      }
     },
     async close() {
       // Let an in-flight connect settle first so its client is not leaked.
