@@ -551,8 +551,15 @@ loop.
 ## Managing indicators
 
 Indicators are added from the **Indicators** picker (by name, with the
-server's default parameters) and listed as chips under the toolbar. Each indicator pane
-legend shows controls on hover (or keyboard focus):
+server's default parameters) and listed as chips under the toolbar.
+Picking an indicator that is already on the chart (marked **added**) adds
+another instance with the default parameters, so RSI 14 and RSI 21, or EMA
+20 and EMA 50 as two `ma` instances, can sit side by side. Each instance has
+its own parameters, style, visibility and pane. When an indicator is on the
+chart more than once, its legends, chips, Object Tree rows and Data Window
+sections show the parameters of each instance (`RSI (14)`, `RSI (21)`)
+([ADR-0028](/chartgen/decisions/0028-multiple-indicator-instances/)).
+Each indicator pane legend shows controls on hover (or keyboard focus):
 
 - **Eye** hides the indicator. It disappears from the chart immediately and
   is no longer requested from the server; its chip stays, dimmed, with an eye button to
@@ -567,7 +574,8 @@ legend shows controls on hover (or keyboard focus):
   style (solid, dashed, dotted). Style changes apply instantly on the client,
   never refetch, and also recolor the legend; hidden plots are not drawn and
   their legend value is omitted. **Defaults** resets the tab being shown.
-- **×** removes the indicator. The price pane legend cannot be removed.
+- **×** removes the indicator. Other instances of the same indicator stay.
+  The price pane legend cannot be removed.
 
 Lines and histograms are drawn in the colors of the PNG renderer, which
 the server sends with the series. Line widths come from the server too
@@ -589,8 +597,9 @@ The set, parameters and hidden state persist in `localStorage`
 ([ADR-0013](/chartgen/decisions/0013-indicator-visibility-and-instances/)),
 and so do the plot styles
 ([ADR-0017](/chartgen/decisions/0017-indicator-plot-styles/)).
-Each indicator can be added once; two instances with different parameters
-are not supported yet.
+Every instance after the first is stored with an instance id
+(`{ "name": "rsi", "id": "rsi#2", "length": 21 }`). Sets and layouts saved
+before instances existed load unchanged.
 
 ## Build and deploy
 

@@ -41,7 +41,7 @@ one and link both ways.
 | [0010](/chartgen/decisions/0010-overlay-geometry-rendering/) | Overlay geometry rendering via klinecharts indicator draw callbacks | Accepted | 2026-11-04 |
 | [0011](/chartgen/decisions/0011-watchlist-quotes/) | Watchlist quotes: batched get_quotes, rolling 24 h change for Binance | Accepted | 2026-11-04 |
 | [0012](/chartgen/decisions/0012-geometry-colors-on-the-wire/) | Geometry colors on the wire | Accepted | 2026-11-04 |
-| [0013](/chartgen/decisions/0013-indicator-visibility-and-instances/) | Indicator visibility, parameter editing and one instance per indicator | Accepted | 2026-11-04 |
+| [0013](/chartgen/decisions/0013-indicator-visibility-and-instances/) | Indicator visibility, parameter editing and one instance per indicator | Accepted; superseded in part by [0028](/chartgen/decisions/0028-multiple-indicator-instances/) | 2026-11-04 |
 | [0015](/chartgen/decisions/0015-named-layouts/) | Named chart layouts | Accepted | 2026-11-04 |
 | [0016](/chartgen/decisions/0016-light-theme/) | Light theme with a single TypeScript token source | Accepted | 2026-11-04 |
 | [0017](/chartgen/decisions/0017-indicator-plot-styles/) | Indicator plot styles | Accepted | 2026-11-05 |
@@ -55,3 +55,4 @@ one and link both ways.
 | [0025](/chartgen/decisions/0025-user-indicator-registry/) | Per-user indicator registry and MCP surface | Accepted | 2026-11-05 |
 | [0026](/chartgen/decisions/0026-line-and-histogram-colors/) | Line and histogram colors on the wire | Accepted | 2026-11-05 |
 | [0027](/chartgen/decisions/0027-serve-web-app-same-origin/) | Serve the web app from the MCP server's origin | Accepted | 2026-11-05 |
+| [0028](/chartgen/decisions/0028-multiple-indicator-instances/) | Several instances of one indicator | Accepted | 2026-11-05 |
