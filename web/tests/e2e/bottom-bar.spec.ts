@@ -87,7 +87,10 @@ const afterChartResponses = (page: Page, check: () => Promise<void>) =>
   }).toPass();
 
 test.describe("bottom bar", () => {
-  test.use({ viewport: { width: 2400, height: 900 } });
+  // `afterChartResponses` retries on generate_chart answers, which tail
+  // polls keep coming; with server push (ADR-0021) there are none after
+  // the last history page, so these specs run on the polling path.
+  test.use({ viewport: { width: 2400, height: 900 }, push: false });
 
   test("5D switches to 5m and fits about five days", async ({ bootedApp: page }) => {
     const load = chartResponse(
