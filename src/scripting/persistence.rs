@@ -10,7 +10,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
 /// Schema migrations; `PRAGMA user_version` is the number applied.
-const MIGRATIONS: &[&str] = &["
+const MIGRATIONS: &[&str] = &[
+    "
     CREATE TABLE user_indicators (
         user_id      TEXT    NOT NULL,
         name         TEXT    NOT NULL,
@@ -26,7 +27,11 @@ const MIGRATIONS: &[&str] = &["
         redirect_uris  TEXT    NOT NULL,
         created_at     INTEGER NOT NULL
     );
-"];
+",
+    "
+    ALTER TABLE oauth_clients ADD COLUMN last_token_at INTEGER;
+",
+];
 
 /// A stored script. `meta` is the `ScriptInfo` snapshot taken at register.
 #[derive(Clone, Debug, PartialEq)]
@@ -37,6 +42,16 @@ pub struct StoredScript {
     pub source_hash: String,
     pub created_at: i64,
     pub updated_at: i64,
+}
+
+/// A stored OAuth client registration.
+#[derive(Clone, Debug, PartialEq)]
+pub struct StoredClient {
+    pub client_id: String,
+    pub redirect_uris: Vec<String>,
+    pub created_at: i64,
+    /// When it last received a token; `None` if it never did.
+    pub last_token_at: Option<i64>,
 }
 
 pub struct Store {
@@ -58,11 +73,11 @@ fn row_to_script(r: &rusqlite::Row) -> rusqlite::Result<StoredScript> {
 const COLUMNS: &str = "name, source, meta_json, source_hash, created_at, updated_at";
 
 impl Store {
-    /// Open (creating the file and its directory) and migrate.
+    /// Open (creating the file and its directory) and migrate. The
+    /// directory is made owner-only (0700) and the file 0600: it holds
+    /// users' scripts and the OAuth client ids that own them.
     pub fn open(path: &Path) -> rusqlite::Result<Self> {
-        if let Some(dir) = path.parent() {
-            let _ = std::fs::create_dir_all(dir);
-        }
+        restrict(path);
         let mut conn = Connection::open(path)?;
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
         let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
@@ -158,15 +173,62 @@ impl Store {
         Ok(())
     }
 
-    /// Every stored OAuth client as `(client_id, redirect_uris)`.
-    pub fn oauth_clients(&self) -> rusqlite::Result<Vec<(String, Vec<String>)>> {
+    /// Every stored OAuth client.
+    pub fn oauth_clients(&self) -> rusqlite::Result<Vec<StoredClient>> {
         let conn = self.conn();
-        let mut stmt = conn.prepare("SELECT client_id, redirect_uris FROM oauth_clients")?;
+        let mut stmt = conn.prepare(
+            "SELECT client_id, redirect_uris, created_at, last_token_at FROM oauth_clients",
+        )?;
         let rows = stmt.query_map([], |r| {
             let uris: String = r.get(1)?;
-            Ok((r.get(0)?, serde_json::from_str(&uris).unwrap_or_default()))
+            Ok(StoredClient {
+                client_id: r.get(0)?,
+                redirect_uris: serde_json::from_str(&uris).unwrap_or_default(),
+                created_at: r.get(2)?,
+                last_token_at: r.get(3)?,
+            })
         })?;
         rows.collect()
+    }
+
+    /// Record that `client_id` received a token now.
+    pub fn mark_oauth_client_used(&self, client_id: &str) -> rusqlite::Result<()> {
+        self.conn().execute(
+            "UPDATE oauth_clients SET last_token_at = ?2 WHERE client_id = ?1",
+            params![client_id, chrono::Utc::now().timestamp()],
+        )?;
+        Ok(())
+    }
+
+    /// Delete clients registered over `max_age_secs` ago that never received
+    /// a token; returns how many.
+    pub fn gc_oauth_clients(&self, max_age_secs: i64) -> rusqlite::Result<usize> {
+        self.conn().execute(
+            "DELETE FROM oauth_clients WHERE last_token_at IS NULL AND created_at < ?1",
+            params![chrono::Utc::now().timestamp() - max_age_secs],
+        )
+    }
+}
+
+/// Create `path`'s directory (0700) and the file (0600) before SQLite opens
+/// it, and tighten them if they already exist.
+fn restrict(path: &Path) {
+    let dir = path.parent().filter(|d| !d.as_os_str().is_empty());
+    if let Some(dir) = dir {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        if let Some(dir) = dir {
+            let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
+        }
+        let _ = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .mode(0o600)
+            .open(path);
+        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
     }
 }
 

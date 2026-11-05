@@ -460,15 +460,41 @@ fn store_round_trip_on_a_temp_db() {
     store
         .save_oauth_client("c1", &["https://x/cb".into()])
         .unwrap();
+    store.save_oauth_client("c2", &[]).unwrap();
+    store.mark_oauth_client_used("c1").unwrap();
     drop(store);
     // reopening runs no migration twice and keeps the data
     let store = persistence::Store::open(&path).unwrap();
     assert_eq!(store.count("u1").unwrap(), 1);
-    assert_eq!(
-        store.oauth_clients().unwrap(),
-        [("c1".to_string(), vec!["https://x/cb".to_string()])]
-    );
+    let clients = store.oauth_clients().unwrap();
+    assert_eq!(clients.len(), 2);
+    let c1 = clients.iter().find(|c| c.client_id == "c1").unwrap();
+    assert_eq!(c1.redirect_uris, ["https://x/cb"]);
+    assert!(c1.last_token_at.is_some());
+    // clients that never got a token are collected once old enough
+    assert_eq!(store.gc_oauth_clients(86_400).unwrap(), 0);
+    assert_eq!(store.gc_oauth_clients(-10).unwrap(), 1);
+    let left: Vec<String> = store
+        .oauth_clients()
+        .unwrap()
+        .into_iter()
+        .map(|c| c.client_id)
+        .collect();
+    assert_eq!(left, ["c1"]);
     let _ = std::fs::remove_file(&path);
+}
+
+#[cfg(unix)]
+#[test]
+fn store_files_are_owner_only() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = std::env::temp_dir().join(format!("chartgen-perm-{}", uuid::Uuid::new_v4()));
+    let path = dir.join("nested").join("x.db");
+    persistence::Store::open(&path).unwrap();
+    let mode = |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode(path.parent().unwrap()), 0o700);
+    assert_eq!(mode(&path), 0o600);
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 // ---- refimpl parity ----
