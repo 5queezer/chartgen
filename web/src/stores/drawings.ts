@@ -5,6 +5,8 @@
 // the chart pages bars in and out, so an index is meaningless across
 // loads, while a timestamp maps onto any timeframe.
 
+import { isColor } from "../lib/color";
+
 export const DRAWING_NAMES = [
   "segment",
   "rayLine",
@@ -26,10 +28,29 @@ export interface DrawingPoint {
   value: number;
 }
 
+export const DASH_STYLES = ["solid", "dashed", "dotted"] as const;
+export type DashStyle = (typeof DASH_STYLES)[number];
+
+export interface DrawingStyle {
+  color?: string;
+  /** Line width in px, 1-4. */
+  width?: number;
+  dash?: DashStyle;
+  /** Fill of a rectangle (may carry alpha). */
+  fill?: string;
+  /** Text size in px. */
+  fontSize?: number;
+}
+
+export const MAX_WIDTH = 4;
+export const FONT_SIZES = [10, 12, 14, 18, 24] as const;
+
 export interface DrawingRecord {
   name: DrawingName;
   points: DrawingPoint[];
   styles?: Record<string, unknown>;
+  /** User-chosen look; absent fields follow the chart's defaults and theme. */
+  style?: DrawingStyle;
   extendData?: string;
   lock: boolean;
   visible: boolean;
@@ -102,6 +123,66 @@ export function sanitizeStyles(
   return Object.keys(polygon).length > 0 ? { polygon } : undefined;
 }
 
+/** Keep only valid style fields; undefined when none is left. */
+export function sanitizeStyle(x: unknown): DrawingStyle | undefined {
+  if (!isPlainObject(x)) return undefined;
+  const out: DrawingStyle = {};
+  for (const k of ["color", "fill"] as const) {
+    const v = x[k];
+    if (isColor(v)) out[k] = v;
+  }
+  if (
+    typeof x.width === "number" &&
+    Number.isInteger(x.width) &&
+    x.width >= 1 &&
+    x.width <= MAX_WIDTH
+  ) {
+    out.width = x.width;
+  }
+  if (DASH_STYLES.includes(x.dash as DashStyle)) out.dash = x.dash as DashStyle;
+  if (typeof x.fontSize === "number" && (FONT_SIZES as readonly number[]).includes(x.fontSize)) {
+    out.fontSize = x.fontSize;
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
+/**
+ * klinecharts overlay styles for a drawing's look. `selected` thickens
+ * strokes by 2 px (the selection highlight). Unset fields are omitted so
+ * the chart's themed defaults apply.
+ */
+export function overlayStyles(
+  name: DrawingName,
+  style: DrawingStyle | undefined,
+  selected: boolean,
+): Record<string, Record<string, unknown>> {
+  const s = style ?? {};
+  const size = (s.width ?? 1) + (selected ? 2 : 0);
+  const line: Record<string, unknown> = { size };
+  const polygon: Record<string, unknown> = { borderSize: size };
+  const text: Record<string, unknown> = {};
+  if (s.dash !== undefined) {
+    const dashedValue = s.dash === "dotted" ? [1, 3] : [6, 4];
+    const kind = s.dash === "solid" ? "solid" : "dashed";
+    line.style = kind;
+    line.dashedValue = dashedValue;
+    polygon.borderStyle = kind;
+    polygon.borderDashedValue = dashedValue;
+  }
+  if (s.color !== undefined) {
+    line.color = s.color;
+    polygon.borderColor = s.color;
+    if (name === "cgText" || name === "fibonacciLine") text.color = s.color;
+    if (name === "simpleTag") {
+      text.backgroundColor = s.color;
+      text.borderColor = s.color;
+    }
+  }
+  if (s.fill !== undefined) polygon.color = s.fill;
+  if (s.fontSize !== undefined) text.size = s.fontSize;
+  return { line, polygon, text };
+}
+
 /** Validate one stored entry; null if malformed. */
 export function parseRecord(x: unknown): DrawingRecord | null {
   if (!isPlainObject(x) || !isDrawingName(x.name)) return null;
@@ -117,6 +198,8 @@ export function parseRecord(x: unknown): DrawingRecord | null {
   };
   const styles = sanitizeStyles(x.styles);
   if (styles) rec.styles = styles;
+  const style = sanitizeStyle(x.style);
+  if (style) rec.style = style;
   if (typeof x.extendData === "string" && x.extendData.length <= MAX_TEXT) {
     rec.extendData = x.extendData;
   }

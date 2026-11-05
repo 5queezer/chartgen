@@ -321,6 +321,21 @@ to cancel. Drawings pan and zoom with the chart.
   unlocked there. Right-clicking while a drawing is in progress cancels
   it. Hide is only available for all drawings at once (toolbar eye).
 - **Double-click** a text annotation to edit its text in a dialog.
+- **Style** a selected drawing with the bar at the top-right of the
+  chart (below the legend when the chart is too narrow): color, width
+  (1 to 4 px) and line style (solid, dashed, dotted); a rectangle also has
+  a fill color with opacity, a text annotation its text color and size.
+  The bar is disabled while the drawing is locked and hides on `Esc`, when
+  you click elsewhere or when you hide all drawings. Unstyled lines keep
+  klinecharts' default blue in both themes; unstyled text follows the
+  theme. The style is saved with the drawing (`style` field, optional, so
+  older stored drawings load unchanged).
+- **Undo and redo** (keys, or the arrow buttons above the trash button)
+  cover creating, moving, editing, styling, locking, hiding and removing
+  drawings (also remove all), up to 100 steps. The selection stays on the
+  drawing. Drawings only, not indicators or settings; the history resets
+  when you switch symbol. The shortcuts follow the typed letter, so they
+  work on QWERTZ and AZERTY layouts.
 
 Drawings are saved per symbol in `localStorage` under
 `chartgen.drawings.<SYMBOL>` as time and price points, so they survive
@@ -343,6 +358,7 @@ full); hover it for details.
 | `Esc` | Cancel the armed tool or close the drawing menu |
 | `Delete` / `Backspace` | Remove the selected drawing |
 | `Ctrl+Z` / `Cmd+Z` | Undo the last drawing action |
+| `Ctrl+Shift+Z` / `Ctrl+Y` | Redo (`Cmd+Shift+Z` on macOS) |
 
 The shortcuts use modifiers so they do not clash with the letter and
 digit shortcuts above.

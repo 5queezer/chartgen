@@ -293,4 +293,128 @@ test.describe("drawing tools", () => {
     await expect.poll(() => overlays(page)).toHaveLength(0);
     expect(await stored(page)).toHaveLength(1);
   });
+
+  test.describe("styling", () => {
+    const bar = (page: Page) => page.getByRole("toolbar", { name: "Drawing style" });
+    const style = async (page: Page) =>
+      ((await stored(page))?.[0] as { style?: Record<string, unknown> } | undefined)?.style;
+
+    /** Draw a trend line, select it, set red + width 3 + dashed. */
+    async function styleLine(page: Page): Promise<void> {
+      await drawTrendLine(page);
+      await clickAt(page, MID);
+      await expect(bar(page)).toBeVisible();
+      await bar(page).getByRole("button", { name: "Line color" }).click();
+      await page.getByRole("button", { name: "Color #f23645" }).click();
+      await page.keyboard.press("Escape");
+      await bar(page).getByRole("button", { name: "Width 3" }).click();
+      await bar(page).getByRole("button", { name: "Line style dashed" }).click();
+      await expect.poll(() => style(page)).toEqual({
+        color: "#f23645",
+        width: 3,
+        dash: "dashed",
+      });
+    }
+
+    test("color, width and dash persist across reload", async ({
+      bootedApp: page,
+    }) => {
+      await styleLine(page);
+      await reloadApp(page);
+      await expect.poll(() => overlays(page)).toHaveLength(1);
+      expect(await style(page)).toEqual({ color: "#f23645", width: 3, dash: "dashed" });
+      await clickAt(page, MID);
+      await expect(
+        bar(page).getByRole("button", { name: "Width 3" }),
+      ).toHaveAttribute("aria-pressed", "true");
+    });
+
+    test("bar hides on Escape and is disabled for locked drawings", async ({
+      bootedApp: page,
+    }) => {
+      await drawTrendLine(page);
+      await clickAt(page, MID);
+      await expect(bar(page)).toBeVisible();
+      await page.getByRole("button", { name: "Lock all drawings" }).click();
+      await expect(bar(page).getByRole("button", { name: "Width 2" })).toBeDisabled();
+      await page.keyboard.press("Escape");
+      await expect(bar(page)).toHaveCount(0);
+    });
+
+    test("the bar does not cover the legend", async ({ bootedApp: page }) => {
+      await drawTrendLine(page);
+      await clickAt(page, MID);
+      await expect(bar(page)).toBeVisible();
+      const b = (await bar(page).boundingBox())!;
+      const rows = await page.locator(".pane-header").evaluateAll((els) =>
+        els.map((e) => e.getBoundingClientRect().toJSON() as DOMRect),
+      );
+      for (const r of rows) {
+        const apart =
+          r.right <= b.x || b.x + b.width <= r.left || r.bottom <= b.y || b.y + b.height <= r.top;
+        expect(apart).toBe(true);
+      }
+    });
+
+    test("undo keeps the drawing selected", async ({ bootedApp: page }) => {
+      await styleLine(page);
+      await page.keyboard.press("Control+z");
+      await expect.poll(() => style(page)).toEqual({ color: "#f23645", width: 3 });
+      await expect(bar(page)).toBeVisible();
+      await expect(bar(page).getByRole("button", { name: "Width 3" })).toHaveAttribute(
+        "aria-pressed",
+        "true",
+      );
+    });
+
+    test("undo and redo buttons", async ({ bootedApp: page }) => {
+      const undoBtn = page.getByRole("button", { name: "Undo", exact: true });
+      const redoBtn = page.getByRole("button", { name: "Redo", exact: true });
+      await expect(undoBtn).toBeDisabled();
+      await expect(redoBtn).toBeDisabled();
+      await drawTrendLine(page);
+      await expect(undoBtn).toBeEnabled();
+      await undoBtn.click();
+      await expect.poll(() => overlays(page)).toHaveLength(0);
+      await expect(redoBtn).toBeEnabled();
+      await redoBtn.click();
+      await expect.poll(() => overlays(page)).toHaveLength(1);
+      await expect(redoBtn).toBeDisabled();
+    });
+
+    test("hiding all drawings closes the bar", async ({ bootedApp: page }) => {
+      await drawTrendLine(page);
+      await clickAt(page, MID);
+      await expect(bar(page)).toBeVisible();
+      await page.getByRole("button", { name: "Hide all drawings" }).click();
+      await expect(bar(page)).toHaveCount(0);
+    });
+
+    test("undo reverts style steps, redo reapplies", async ({ bootedApp: page }) => {
+      await styleLine(page);
+      await page.keyboard.press("Control+z");
+      await expect.poll(() => style(page)).toEqual({ color: "#f23645", width: 3 });
+      await page.keyboard.press("Control+z");
+      await expect.poll(() => style(page)).toEqual({ color: "#f23645" });
+      await page.keyboard.press("Control+z");
+      await expect.poll(async () => await style(page)).toBeUndefined();
+      await page.keyboard.press("Control+Shift+z");
+      await expect.poll(() => style(page)).toEqual({ color: "#f23645" });
+      await page.keyboard.press("Control+y");
+      await expect.poll(() => style(page)).toEqual({ color: "#f23645", width: 3 });
+    });
+
+    test("undo after remove restores the drawing with its style", async ({
+      bootedApp: page,
+    }) => {
+      await styleLine(page);
+      await page.keyboard.press("Delete");
+      await expect.poll(() => overlays(page)).toHaveLength(0);
+      await page.keyboard.press("Control+z");
+      await expect.poll(() => overlays(page)).toHaveLength(1);
+      expect(await style(page)).toEqual({ color: "#f23645", width: 3, dash: "dashed" });
+      await page.keyboard.press("Control+Shift+z");
+      await expect.poll(() => overlays(page)).toHaveLength(0);
+    });
+  });
 });
