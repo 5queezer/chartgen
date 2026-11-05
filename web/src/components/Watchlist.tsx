@@ -179,6 +179,9 @@ export function Watchlist(props: WatchlistProps): JSX.Element {
     });
   });
   const indexOf = (item: WatchItem) => items().indexOf(item);
+  /** A drop at the very end is drawn under the last row on screen. */
+  const isLastDrop = (item: WatchItem) =>
+    dropBefore() === items().length && visible().at(-1) === item;
   const readOnly = () => isFlaggedView();
   const listName = () =>
     readOnly() ? "Flagged" : activeList().name;
@@ -214,18 +217,27 @@ export function Watchlist(props: WatchlistProps): JSX.Element {
       return i + 1;
     };
     const move = (ev: PointerEvent) => setDropBefore(target(ev));
-    const end = (ev: PointerEvent) => {
+    // One teardown for every way a drag ends; only a pointerup commits.
+    const finish = (ev: Event) => {
       grip.removeEventListener("pointermove", move);
-      grip.removeEventListener("pointerup", end);
-      grip.removeEventListener("pointercancel", cancel);
-      const before = ev.type === "pointerup" ? target(ev) : null;
+      grip.removeEventListener("pointerup", finish);
+      grip.removeEventListener("pointercancel", finish);
+      grip.removeEventListener("lostpointercapture", finish);
+      window.removeEventListener("keydown", onKey, true);
+      const before = ev.type === "pointerup" ? target(ev as PointerEvent) : null;
       setDropBefore(null);
       if (before !== null) moveItem(from, before);
     };
-    const cancel = (ev: PointerEvent) => end(ev);
+    const onKey = (ev: KeyboardEvent) => {
+      if (ev.key !== "Escape") return;
+      ev.stopPropagation();
+      finish(ev);
+    };
     grip.addEventListener("pointermove", move);
-    grip.addEventListener("pointerup", end);
-    grip.addEventListener("pointercancel", cancel);
+    grip.addEventListener("pointerup", finish);
+    grip.addEventListener("pointercancel", finish);
+    grip.addEventListener("lostpointercapture", finish);
+    window.addEventListener("keydown", onKey, true);
   }
 
   function onRowKeyDown(e: KeyboardEvent, item: WatchItem) {
@@ -420,6 +432,7 @@ export function Watchlist(props: WatchlistProps): JSX.Element {
                   index={indexOf(item)}
                   readOnly={readOnly()}
                   dropBefore={dropBefore() === indexOf(item)}
+                  dropAfter={isLastDrop(item)}
                   onGrip={startDrag}
                   onKeyDown={(e) => onRowKeyDown(e, item)}
                   onRename={() =>
@@ -437,6 +450,7 @@ export function Watchlist(props: WatchlistProps): JSX.Element {
                   flag={flags()[item.symbol]}
                   readOnly={readOnly()}
                   dropBefore={dropBefore() === indexOf(item)}
+                  dropAfter={isLastDrop(item)}
                   onGrip={startDrag}
                   onKeyDown={(e) => onRowKeyDown(e, item)}
                   onFlagMenu={openFlagMenu}
@@ -501,7 +515,7 @@ export function Watchlist(props: WatchlistProps): JSX.Element {
                         </button>
                         <button
                           type="button"
-                          class={primaryClass}
+                          class="px-3 py-1.5 rounded-md text-sm cursor-pointer bg-[color:var(--color-danger)] text-white font-semibold"
                           onClick={() => {
                             deleteList(d.id);
                             setDialogue(null);
@@ -578,8 +592,38 @@ function FlagMenu(props: {
   const onDown = (e: PointerEvent) => {
     if (!el.contains(e.target as Node)) props.close();
   };
+  // Closing by keyboard or pick returns focus to the row; an outside press
+  // keeps the focus where the user clicked.
+  const closeAndRefocus = () => {
+    const symbol = props.menu.symbol;
+    props.close();
+    // After the app's own "focus fell to <body>" recovery (keys.ts).
+    setTimeout(() => {
+      document
+        .querySelector<HTMLElement>(
+          `.wl-row[data-symbol="${CSS.escape(symbol)}"]`,
+        )
+        ?.focus();
+    }, 0);
+  };
   const onKey = (e: KeyboardEvent) => {
-    if (e.key === "Escape") props.close();
+    if (e.key === "Escape") closeAndRefocus();
+  };
+  const onMenuKey = (e: KeyboardEvent) => {
+    const keys = ["ArrowRight", "ArrowDown", "ArrowLeft", "ArrowUp", "Home", "End"];
+    if (!keys.includes(e.key)) return;
+    e.preventDefault();
+    const items = [...el.querySelectorAll<HTMLElement>("button")];
+    const at = items.indexOf(document.activeElement as HTMLElement);
+    const next =
+      e.key === "Home"
+        ? 0
+        : e.key === "End"
+          ? items.length - 1
+          : (at + (e.key === "ArrowRight" || e.key === "ArrowDown" ? 1 : -1) +
+              items.length) %
+            items.length;
+    items[next]?.focus();
   };
   window.addEventListener("pointerdown", onDown, true);
   window.addEventListener("keydown", onKey);
@@ -589,7 +633,7 @@ function FlagMenu(props: {
   });
   const pick = (color: FlagColor | null) => {
     setFlag(props.menu.symbol, color);
-    props.close();
+    closeAndRefocus();
   };
   return (
     <div
@@ -599,6 +643,7 @@ function FlagMenu(props: {
       }}
       role="menu"
       aria-label={`Flag ${props.menu.symbol}`}
+      onKeyDown={onMenuKey}
       class="fixed z-50 flex items-center gap-1.5 p-2 rounded-md shadow-lg bg-[color:var(--color-bg-elev)] border border-[color:var(--color-border)]"
       style={{
         left: `${Math.min(props.menu.x, window.innerWidth - 240)}px`,
@@ -637,6 +682,7 @@ interface SectionRowProps {
   index: number;
   readOnly: boolean;
   dropBefore: boolean;
+  dropAfter: boolean;
   onGrip: (e: PointerEvent, index: number) => void;
   onKeyDown: (e: KeyboardEvent) => void;
   onRename: () => void;
@@ -650,9 +696,13 @@ function SectionRow(props: SectionRowProps): JSX.Element {
       data-wl-index={props.index}
       tabindex="0"
       class="wl-section"
-      classList={{ "wl-drop-before": props.dropBefore }}
+      classList={{
+        "wl-drop-before": props.dropBefore,
+        "wl-drop-after": props.dropAfter,
+      }}
       onKeyDown={props.onKeyDown}
     >
+      <span role="cell" aria-colspan="4" class="wl-section-cell">
       <button
         type="button"
         class="wl-section-toggle"
@@ -681,6 +731,7 @@ function SectionRow(props: SectionRowProps): JSX.Element {
       >
         ×
       </button>
+      </span>
       <Show when={!props.readOnly}>
         <button
           type="button"
@@ -705,6 +756,7 @@ interface WatchlistRowProps {
   flag: FlagColor | undefined;
   readOnly: boolean;
   dropBefore: boolean;
+  dropAfter: boolean;
   onGrip: (e: PointerEvent, index: number) => void;
   onKeyDown: (e: KeyboardEvent) => void;
   onFlagMenu: (symbol: string, x: number, y: number) => void;
@@ -750,7 +802,10 @@ function WatchlistRow(props: WatchlistRowProps): JSX.Element {
       tabindex="0"
       aria-current={props.active ? "true" : undefined}
       class="wl-row wl-grid px-3 py-1.5 text-sm cursor-pointer"
-      classList={{ "wl-drop-before": props.dropBefore }}
+      classList={{
+        "wl-drop-before": props.dropBefore,
+        "wl-drop-after": props.dropAfter,
+      }}
       onClick={() => setSymbol(props.symbol)}
       onKeyDown={props.onKeyDown}
       onContextMenu={(e) => {

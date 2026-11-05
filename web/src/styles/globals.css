@@ -403,6 +403,18 @@ body {
   box-shadow: inset 0 2px 0 var(--color-accent);
 }
 
+.wl-drop-after {
+  box-shadow: inset 0 -2px 0 var(--color-accent);
+}
+
+.wl-section-cell {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
 /* Live-feed badge after the status text (StatusLine). */
 .live-status {
   white-space: nowrap;

@@ -328,6 +328,7 @@ while typing in a field or while a dialog or menu is open.
 | `Alt+R` | Reset chart (scroll to real time, default zoom) |
 | `Alt+G` | Go to date |
 | `Alt+A` | Add a price alert at the last price |
+| `Alt+↑` / `Alt+↓` | Watchlist: move the focused row or section up / down |
 | `Shift+→` | Bar replay: forward one bar |
 | `Shift+↓` | Bar replay: play / pause |
 | `Esc` | Bar replay: jump to real time |
@@ -525,12 +526,15 @@ list only, so each list holds up to 50 symbols; you can have up to 20 lists.
   the symbol, so it shows in every list that holds it.
 - **Flagged** in the switcher is a read-only view of every flagged symbol across
   all lists. You can still change flags there; a symbol disappears from the view
-  when you clear its flag. There is no separate list per color.
+  when you clear its flag. It shows at most 50 symbols, the quotes limit, and
+  there is no separate list per color.
 
 The lists, sections, flags and the active list are saved as one versioned
 document in `localStorage` under `chartgen.watchlist.v2`, and the collapsed
 state under `chartgen.watchlist.collapsed`
-([ADR-0031](/chartgen/decisions/0031-multiple-watchlists/)). A list from an
+([ADR-0031](/chartgen/decisions/0031-multiple-watchlists/)). Changes made in
+another tab of the same browser show up here without a reload; each tab keeps
+its own active list. A list from an
 earlier version (`chartgen.watchlist.symbols`, default: BTCUSDT, ETHUSDT,
 SOLUSDT, AAPL, MSFT, NVDA, SPY) becomes the list "Watchlist" with no sections
 the first time you open the new version, and the old key is left in place. On

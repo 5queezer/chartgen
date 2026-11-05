@@ -236,6 +236,34 @@ test.describe("multiple watchlists", () => {
     await expect.poll(() => order(page)).toEqual(["BTCUSDT"]);
   });
 
+  test("Escape cancels a drag; the flag menu is keyboard-operable and returns focus", async ({
+    bootedApp: page,
+  }) => {
+    const before = await order(page);
+    await row(page, "AAPL").hover();
+    const g = (await row(page, "AAPL")
+      .getByRole("button", { name: "Drag AAPL to reorder" })
+      .boundingBox())!;
+    const top = (await row(page, "BTCUSDT").boundingBox())!;
+    await page.mouse.move(g.x + g.width / 2, g.y + g.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(top.x + 40, top.y + 2, { steps: 6 });
+    await expect(row(page, "BTCUSDT")).toHaveClass(/wl-drop-before/);
+    await page.keyboard.press("Escape");
+    await page.mouse.up();
+    await expect(row(page, "BTCUSDT")).not.toHaveClass(/wl-drop-before/);
+    expect(await order(page)).toEqual(before);
+
+    await row(page, "ETHUSDT").focus();
+    await row(page, "ETHUSDT").click({ button: "right" });
+    await expect(page.getByRole("menuitem", { name: "Flag red" })).toBeFocused();
+    await page.keyboard.press("ArrowRight");
+    await expect(page.getByRole("menuitem", { name: "Flag orange" })).toBeFocused();
+    await page.keyboard.press("Enter");
+    await expect(row(page, "ETHUSDT")).toHaveAttribute("data-flag", "orange");
+    await expect(row(page, "ETHUSDT")).toBeFocused();
+  });
+
   test("the old single-list storage migrates into 'Watchlist'", async ({
     bootedApp: page,
   }) => {

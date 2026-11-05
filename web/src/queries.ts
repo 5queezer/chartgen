@@ -157,7 +157,7 @@ export function createQuotesQuery(
   return createQuery<QuotesPayload, Error>(() => {
     const { symbols, enabled } = input();
     return {
-      queryKey: ["get_quotes", ...symbols] as const,
+      queryKey: ["get_quotes", ...[...symbols].sort()] as const,
       queryFn: () => session.callGetQuotes(symbols),
       enabled: enabled && symbols.length > 0,
       staleTime: QUOTES_POLL_MS - 1_000,

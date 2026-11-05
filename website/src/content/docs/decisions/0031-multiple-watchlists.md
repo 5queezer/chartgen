@@ -52,14 +52,21 @@ Chosen option: **one versioned document**, because every change is one
   `blue` or `purple`. A flag belongs to the symbol, not to a list, so it shows
   in every list that holds the symbol. A flag is dropped when no list holds
   the symbol any more.
-- `active` is a list id, or the reserved id `flagged`, a virtual read-only
-  view of every flagged symbol across lists. It is derived, never stored, so
-  it cannot go out of date.
+- `active` is stored: a list id, or the reserved id `flagged`, a virtual
+  read-only view of every flagged symbol across lists. The contents of that
+  view are derived from the lists and flags, never stored, so they cannot go
+  out of date. It shows at most 50 symbols.
 - Limits: 20 lists, 20 sections per list, 50 symbols per list (the
   `get_quotes` limit), names up to 40 characters. The last list cannot be
   deleted.
 - Quotes are polled for the symbols of the active view only, so the 50-symbol
   cap applies per list and switching lists changes the poll.
+- Another tab's write (the `storage` event) replaces the lists in this tab,
+  which keeps its own active list while that list still exists.
+- A symbol never lands hidden: when a move or a section removal puts a
+  symbol under a collapsed section, that section is expanded in the same
+  save. A section never moves above the first section, so the ungrouped
+  symbols at the top stay ungrouped.
 - Moving is by index in the flat `items` array. A section moves together with
   the symbols under it and snaps to a block boundary. Drag and drop is
   pointer-based on a grip button and Alt+ArrowUp/Down moves the focused row,
@@ -82,6 +89,8 @@ Chosen option: **one versioned document**, because every change is one
 - Bad: only one Flagged view; TradingView also has one list per flag color.
   Adding a color filter later needs no format change.
 - Bad: a downgrade to an older build ignores `v2` and shows the old list.
+- A document with a `version` above 2 is never overwritten: that session
+  starts from the old list and keeps its changes in memory only.
 
 ## More Information
 

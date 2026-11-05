@@ -187,9 +187,19 @@ function sanitizeState(raw: unknown): State | null {
   return prune({ lists, active, flags });
 }
 
+/**
+ * True when storage holds a document from a newer version. It is never
+ * overwritten: this session starts from the old list and keeps changes in
+ * memory only.
+ */
+let locked = false;
+
 function loadState(): State {
-  const v2 = sanitizeState(read("v2"));
+  const raw = read("v2");
+  const v2 = sanitizeState(raw);
   if (v2 !== null) return v2;
+  const version = (raw as { version?: unknown } | null | undefined)?.version;
+  if (typeof version === "number" && version > 2) locked = true;
   const id = newId("l");
   return {
     lists: [{ id, name: DEFAULT_LIST_NAME, items: symbolItems(loadSymbols()) }],
@@ -208,7 +218,20 @@ export { watchlistCollapsed };
 function commit(next: State): void {
   const pruned = prune(next);
   setStateSignal(pruned);
-  persist("v2", { version: 2, ...pruned });
+  if (!locked) persist("v2", { version: 2, ...pruned });
+}
+
+// Another tab wrote the lists: pick them up, keeping this tab's active list
+// while it still exists.
+if (typeof window !== "undefined") {
+  window.addEventListener("storage", (e) => {
+    if (e.key !== PREFIX + "v2" && e.key !== null) return;
+    const fresh = sanitizeState(read("v2"));
+    if (fresh === null) return;
+    const mine = state().active;
+    const keep = mine === FLAGGED_ID || fresh.lists.some((l) => l.id === mine);
+    setStateSignal(keep ? { ...fresh, active: mine } : fresh);
+  });
 }
 
 export const watchlists = (): readonly WatchList[] => state().lists;
@@ -357,9 +380,31 @@ export function toggleSection(id: string): void {
   editSection(id, (s) => ({ ...s, collapsed: !s.collapsed }));
 }
 
-/** Remove the divider only; its symbols fall into the section above. */
+/** Expand the section a symbol at `index` sits under, so it never lands hidden. */
+function expandAbove(items: WatchItem[], index: number): WatchItem[] {
+  for (let i = index; i >= 0; i--) {
+    const it = items[i]!;
+    if (it.kind !== "section") continue;
+    if (!it.collapsed) return items;
+    const next = [...items];
+    next[i] = { ...it, collapsed: false };
+    return next;
+  }
+  return items;
+}
+
+/**
+ * Remove the divider only; its symbols fall into the section above, which is
+ * expanded if collapsed so they do not vanish.
+ */
 export function removeSection(id: string): void {
-  editSection(id, () => null);
+  editActive((items) => {
+    const at = items.findIndex((i) => i.kind === "section" && i.id === id);
+    if (at < 0) return null;
+    const next = items.filter((_, i) => i !== at);
+    const hasSymbols = items[at + 1]?.kind === "symbol";
+    return hasSymbols && at > 0 ? expandAbove(next, at - 1) : next;
+  });
 }
 
 /** [start, end) of the block (a section header and the symbols under it) containing `index`. */
@@ -383,11 +428,16 @@ export function moveItem(from: number, before: number): void {
     if (items[from]!.kind === "symbol") {
       if (target === from || target === from + 1) return null;
       const next = items.filter((_, i) => i !== from);
-      next.splice(target > from ? target - 1 : target, 0, items[from]!);
-      return next;
+      const at = target > from ? target - 1 : target;
+      next.splice(at, 0, items[from]!);
+      return expandAbove(next, at);
     }
     const [start, end] = blockOf(items, from);
-    const t = target < items.length ? blockOf(items, target)[0] : target;
+    let t = target < items.length ? blockOf(items, target)[0] : target;
+    // Sections never go above the first one: that would swallow the
+    // ungrouped symbols at the top into the moved section.
+    const first = items.findIndex((i) => i.kind === "section");
+    if (first > 0 && t < first) t = first;
     // A drop inside the block (or on its own header) changes nothing.
     if (t >= start && t <= end) return null;
     const block = items.slice(start, end);

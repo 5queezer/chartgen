@@ -315,4 +315,94 @@ describe("watchlist store", () => {
     s.setFlag("GHOST", "red");
     expect(s.flags()).toEqual({});
   });
+
+  it("a symbol never lands hidden: moves and section removal expand the section", async () => {
+    // Alt+Up: E is the first row under Y; it goes above Y, into collapsed X.
+    let s = await sectioned();
+    s.toggleSection(sectionId(s, 2));
+    s.moveItemBy(6, -1);
+    expect(order(s)).toEqual(["A", "B", "[X]", "C", "D", "E", "[Y]"]);
+    expect(s.activeItems()[2]).toMatchObject({ collapsed: false });
+
+    // Dropping on a collapsed header (end of its block) opens it too.
+    s = await sectioned();
+    s.toggleSection(sectionId(s, 2));
+    s.moveItem(0, 5);
+    expect(order(s)).toEqual(["B", "[X]", "C", "D", "A", "[Y]", "E"]);
+    expect(s.activeItems()[1]).toMatchObject({ collapsed: false });
+
+    // Removing a section folds its symbols into a collapsed one above.
+    s = await sectioned();
+    s.toggleSection(sectionId(s, 2));
+    s.removeSection(sectionId(s, 5));
+    expect(order(s)).toEqual(["A", "B", "[X]", "C", "D", "E"]);
+    expect(s.activeItems()[2]).toMatchObject({ collapsed: false });
+  });
+
+  it("Alt+Down with two collapsed sections in a row ends up visible", async () => {
+    const s = await sectioned();
+    s.toggleSection(sectionId(s, 2));
+    s.toggleSection(sectionId(s, 5));
+    s.moveItemBy(1, 1); // B over collapsed X, into collapsed Y
+    expect(order(s)).toEqual(["A", "[X]", "C", "D", "[Y]", "B", "E"]);
+    expect(s.activeItems()[4]).toMatchObject({ collapsed: false });
+  });
+
+  it("a section never goes above the first one or swallows the ungrouped head", async () => {
+    const s = await sectioned();
+    s.moveItem(5, 0); // Y to the very top: clamped below the head
+    expect(order(s)).toEqual(["A", "B", "[Y]", "E", "[X]", "C", "D"]);
+    s.moveItem(2, 0); // first section to the top: no-op
+    expect(order(s)).toEqual(["A", "B", "[Y]", "E", "[X]", "C", "D"]);
+    s.moveItemBy(2, -1);
+    expect(order(s)).toEqual(["A", "B", "[Y]", "E", "[X]", "C", "D"]);
+  });
+
+  it("a section can lead a list that has no ungrouped head", async () => {
+    stubStorage();
+    const s = await load();
+    s.setActiveList(s.createList("L")!);
+    s.addSection("X");
+    s.addToWatchlist("A");
+    s.addSection("Y");
+    s.moveItem(2, 0);
+    expect(order(s)).toEqual(["[Y]", "[X]", "A"]);
+  });
+
+  it("picks up another tab's write and keeps this tab's active list", async () => {
+    type Handler = (e: { key: string | null }) => void;
+    const handlers: Handler[] = [];
+    vi.stubGlobal("window", {
+      addEventListener: (_: string, fn: Handler) => void handlers.push(fn),
+    });
+    const data = stubStorage();
+    const s = await load();
+    const mine = s.createList("Mine")!;
+    const other = JSON.parse(data.get("chartgen.watchlist.v2")!);
+    other.lists.push({ id: "t", name: "Theirs", items: [sym("ZZZ")] });
+    other.active = "t";
+    data.set("chartgen.watchlist.v2", JSON.stringify(other));
+    handlers.forEach((h) => h({ key: "chartgen.watchlist.v2" }));
+    expect(s.watchlists().map((l) => l.name)).toEqual([
+      "Watchlist",
+      "Mine",
+      "Theirs",
+    ]);
+    expect(s.activeListId()).toBe(mine);
+    // Unrelated keys and corrupt documents are ignored.
+    data.set("chartgen.watchlist.v2", "{bad");
+    handlers.forEach((h) => h({ key: "chartgen.watchlist.v2" }));
+    handlers.forEach((h) => h({ key: "other" }));
+    expect(s.watchlists()).toHaveLength(3);
+  });
+
+  it("never overwrites a document from a newer version", async () => {
+    const future = JSON.stringify({ version: 3, lists: [], extra: true });
+    const data = stubStorage({ "chartgen.watchlist.v2": future });
+    const s = await load();
+    expect(s.watchlist()).toEqual([...s.DEFAULT_WATCHLIST]);
+    s.addToWatchlist("AAPL");
+    s.createList("X");
+    expect(data.get("chartgen.watchlist.v2")).toBe(future);
+  });
 });
