@@ -14,26 +14,46 @@ import {
 } from "./fixtures/app";
 
 /**
- * Match only POST /mcp responses that carry a `tools/call` for
- * `generate_chart`. Anything else (list_indicators, initialize,
- * notifications/*) is ignored so waiters don't accidentally resolve on
- * the wrong MCP frame.
+ * Match only a successful full chart load (`generate_chart` with no
+ * `end_time` and more than the 2 bars of a live tail poll) whose
+ * indicator list does or does not include `name`. Live tail polls run
+ * every 2 s and carry the old list, so a bare `generate_chart` match
+ * would resolve on one of them.
  */
-function isGenerateChartCall(res: Response): boolean {
-  if (res.request().method() !== "POST") return false;
-  if (!res.url().endsWith("/mcp")) return false;
-  if (res.status() >= 400) return false;
-  let body: unknown;
-  try {
-    body = res.request().postDataJSON();
-  } catch {
-    return false;
-  }
-  const b = body as
-    | { method?: string; params?: { name?: string } }
-    | null
-    | undefined;
-  return b?.method === "tools/call" && b?.params?.name === "generate_chart";
+function isFullLoad(name: string, included: boolean) {
+  return (res: Response): boolean => {
+    if (res.request().method() !== "POST") return false;
+    if (!res.url().endsWith("/mcp")) return false;
+    if (res.status() >= 400) return false;
+    try {
+      const b = res.request().postDataJSON() as {
+        method?: string;
+        params?: {
+          name?: string;
+          arguments?: {
+            bars?: number;
+            end_time?: number;
+            indicators?: Array<string | { name: string }>;
+          };
+        };
+      } | null;
+      const a = b?.params?.arguments;
+      if (
+        b?.method !== "tools/call" ||
+        b.params?.name !== "generate_chart" ||
+        a?.end_time !== undefined ||
+        (a?.bars ?? 0) <= 2
+      ) {
+        return false;
+      }
+      const names = (a?.indicators ?? []).map((e) =>
+        typeof e === "string" ? e : e.name,
+      );
+      return names.includes(name) === included;
+    } catch {
+      return false;
+    }
+  };
 }
 
 test.describe("indicator picker", () => {
@@ -68,11 +88,11 @@ test.describe("indicator picker", () => {
     expect(newIndicatorName.length).toBeGreaterThan(0);
 
     // Intercept the refetch that should fire once the active set
-    // changes. The active set drives the TanStack query key, so any
-    // change causes a POST /mcp for `generate_chart` specifically.
-    const refetchAfterAdd = page.waitForResponse(isGenerateChartCall, {
-      timeout: 30_000,
-    });
+    // changes. The active set drives the TanStack query key, so the
+    // change causes a full `generate_chart` load with the new indicator.
+    const refetchAfterAdd = page.waitForResponse(
+      isFullLoad(newIndicatorName, true),
+    );
 
     await available.first().click();
 
@@ -101,9 +121,9 @@ test.describe("indicator picker", () => {
       page.getByRole("button", { name: `Remove ${newIndicatorName}` }),
     ).toBeVisible();
 
-    const refetchAfterRemove = page.waitForResponse(isGenerateChartCall, {
-      timeout: 30_000,
-    });
+    const refetchAfterRemove = page.waitForResponse(
+      isFullLoad(newIndicatorName, false),
+    );
     await page
       .getByRole("button", { name: `Remove ${newIndicatorName}` })
       .click();

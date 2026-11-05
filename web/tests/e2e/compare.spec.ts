@@ -6,7 +6,7 @@
 
 import type { Page, Request } from "@playwright/test";
 
-import { test, expect } from "./fixtures/app";
+import { test, expect, reloadApp } from "./fixtures/app";
 
 const scaleButton = (page: Page, name: string) =>
   page
@@ -16,46 +16,62 @@ const legend = (page: Page, sym: string) =>
   page.getByTestId(`compare-legend-${sym}`);
 const dialog = (page: Page) => page.getByRole("dialog");
 
-async function addCompare(page: Page, query: string): Promise<void> {
-  await page.getByRole("button", { name: "Compare symbol" }).click();
-  await dialog(page).getByRole("combobox").fill(query);
-  await expect(page.getByRole("option").first()).toContainText(query);
-  await page.keyboard.press("Enter");
-  await expect(dialog(page)).toHaveCount(0);
+
+interface ChartArgs {
+  ticker?: string;
+  timeframe?: string;
+  bars?: number;
+  end_time?: number;
 }
 
-/** generate_chart calls for `ticker` from now on (resolves with `timeframe`). */
-function chartCalls(page: Page, ticker: string) {
-  const calls: Array<{ timeframe?: string; bars?: number; end_time?: number }> =
-    [];
-  page.on("request", (req: Request) => {
-    if (req.method() !== "POST" || !req.url().endsWith("/mcp")) return;
-    try {
-      const b = req.postDataJSON() as {
-        method?: string;
-        params?: {
-          name?: string;
-          arguments?: {
-            ticker?: string;
-            timeframe?: string;
-            bars?: number;
-            end_time?: number;
-          };
-        };
-      };
-      const a = b.params?.arguments;
-      if (
-        b.method === "tools/call" &&
-        b.params?.name === "generate_chart" &&
-        a?.ticker === ticker
-      ) {
-        calls.push(a);
-      }
-    } catch {
-      // Not JSON: not ours.
-    }
+/** generate_chart arguments of an MCP request, or null for anything else. */
+function chartArgs(req: Request): ChartArgs | null {
+  if (req.method() !== "POST" || !req.url().endsWith("/mcp")) return null;
+  try {
+    const b = req.postDataJSON() as {
+      method?: string;
+      params?: { name?: string; arguments?: ChartArgs };
+    };
+    return b.method === "tools/call" && b.params?.name === "generate_chart"
+      ? (b.params.arguments ?? {})
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The server's answer to the next full load of `ticker` (not a tail poll
+ * or history page), optionally for one timeframe. Waiting on it instead of
+ * a fixed window keeps the specs independent of how slow the machine is.
+ */
+const loaded = (page: Page, ticker: string, timeframe?: string) =>
+  page.waitForResponse((res) => {
+    const a = chartArgs(res.request());
+    return (
+      a?.ticker === ticker &&
+      a.end_time === undefined &&
+      (a.bars ?? 0) > 2 &&
+      (timeframe === undefined || a.timeframe === timeframe)
+    );
   });
-  return calls;
+
+/** The next live tail poll (2 bars) of `ticker`. */
+const tailPolled = (page: Page, ticker: string) =>
+  page.waitForRequest((req) => {
+    const a = chartArgs(req);
+    return a?.ticker === ticker && a.bars === 2 && a.end_time === undefined;
+  });
+
+/** Add `ticker` as a compare symbol and wait for the server to answer its load. */
+async function addCompare(page: Page, ticker: string): Promise<void> {
+  await page.getByRole("button", { name: "Compare symbol" }).click();
+  await dialog(page).getByRole("combobox").fill(ticker);
+  await expect(page.getByRole("option").first()).toContainText(ticker);
+  const load = loaded(page, ticker);
+  await page.keyboard.press("Enter");
+  await expect(dialog(page)).toHaveCount(0);
+  await load;
 }
 
 const VALUE_ROW = /\d+\.\d+\s+[+-]\d+\.\d\d%/;
@@ -69,9 +85,7 @@ test.describe("compare symbols", () => {
 
     await expect(scaleButton(page, "%")).toHaveAttribute("aria-pressed", "true");
     await expect(legend(page, "ETHUSDT")).toContainText("ETHUSDT");
-    await expect(legend(page, "ETHUSDT")).toHaveText(VALUE_ROW, {
-      timeout: 15_000,
-    });
+    await expect(legend(page, "ETHUSDT")).toHaveText(VALUE_ROW);
 
     await legend(page, "ETHUSDT").hover();
     await legend(page, "ETHUSDT")
@@ -102,17 +116,16 @@ test.describe("compare symbols", () => {
   }) => {
     await addCompare(page, "ETHUSDT");
     await addCompare(page, "SOLUSDT");
-    await expect(legend(page, "ETHUSDT")).toHaveText(VALUE_ROW, {
-      timeout: 15_000,
-    });
-    await expect(legend(page, "SOLUSDT")).toHaveText(VALUE_ROW, {
-      timeout: 15_000,
-    });
+    await expect(legend(page, "ETHUSDT")).toHaveText(VALUE_ROW);
+    await expect(legend(page, "SOLUSDT")).toHaveText(VALUE_ROW);
 
-    await page.reload();
-    await expect(legend(page, "ETHUSDT")).toHaveText(VALUE_ROW, {
-      timeout: 30_000,
-    });
+    const reloaded = Promise.all([
+      loaded(page, "ETHUSDT"),
+      loaded(page, "SOLUSDT"),
+    ]);
+    await reloadApp(page);
+    await reloaded;
+    await expect(legend(page, "ETHUSDT")).toHaveText(VALUE_ROW);
     await expect(legend(page, "SOLUSDT")).toHaveText(VALUE_ROW);
     await expect(scaleButton(page, "%")).toHaveAttribute("aria-pressed", "true");
   });
@@ -120,43 +133,30 @@ test.describe("compare symbols", () => {
   test("a timeframe switch refetches the compare symbol", async ({
     bootedApp: page,
   }) => {
-    const calls = chartCalls(page, "ETHUSDT");
+    const first = loaded(page, "ETHUSDT", "1h");
     await addCompare(page, "ETHUSDT");
-    await expect(legend(page, "ETHUSDT")).toHaveText(VALUE_ROW, {
-      timeout: 15_000,
-    });
-    await expect.poll(() => calls.some((c) => c.timeframe === "1h" && c.bars! > 2)).toBe(true);
+    await first;
+    await expect(legend(page, "ETHUSDT")).toHaveText(VALUE_ROW);
 
+    const refetched = loaded(page, "ETHUSDT", "15m");
     await page.getByRole("button", { name: "15m", exact: true }).click();
-    await expect
-      .poll(() => calls.some((c) => c.timeframe === "15m" && c.bars! > 2), {
-        timeout: 15_000,
-      })
-      .toBe(true);
-    await expect(legend(page, "ETHUSDT")).toHaveText(VALUE_ROW, {
-      timeout: 15_000,
-    });
+    await refetched;
+    await expect(legend(page, "ETHUSDT")).toHaveText(VALUE_ROW);
   });
 
   test("the compare symbol follows live ticks", async ({ bootedApp: page }) => {
-    const calls = chartCalls(page, "ETHUSDT");
     await addCompare(page, "ETHUSDT");
-    await expect(legend(page, "ETHUSDT")).toHaveText(VALUE_ROW, {
-      timeout: 15_000,
-    });
-    // 24/7 symbol: tail polls of 2 bars every 2 s.
-    await expect
-      .poll(() => calls.filter((c) => c.bars === 2).length, { timeout: 15_000 })
-      .toBeGreaterThanOrEqual(2);
+    await expect(legend(page, "ETHUSDT")).toHaveText(VALUE_ROW);
+    // 24/7 symbol: tail polls of 2 bars every 2 s; wait for two of them.
+    await tailPolled(page, "ETHUSDT");
+    await tailPolled(page, "ETHUSDT");
   });
 
   test("making a compare symbol the main symbol removes it from the list", async ({
     bootedApp: page,
   }) => {
     await addCompare(page, "ETHUSDT");
-    await expect(legend(page, "ETHUSDT")).toHaveText(VALUE_ROW, {
-      timeout: 15_000,
-    });
+    await expect(legend(page, "ETHUSDT")).toHaveText(VALUE_ROW);
     await page.getByRole("button", { name: /^Symbol:/ }).click();
     await dialog(page).getByRole("combobox").fill("ETHUSDT");
     await expect(page.getByRole("option").first()).toContainText("ETHUSDT");

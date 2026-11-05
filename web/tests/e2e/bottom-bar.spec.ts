@@ -5,7 +5,7 @@
 
 import type { Page, Request } from "@playwright/test";
 
-import { test, expect } from "./fixtures/app";
+import { test, expect, reloadApp } from "./fixtures/app";
 
 interface Hook {
   chart: () => {
@@ -43,38 +43,69 @@ const DAY = 86_400_000;
 
 const utcLabel = (ms: number) => new Date(ms).toISOString().slice(0, 16).replace("T", " ");
 
-function pageCalls(page: Page): Array<{ end_time?: number }> {
-  const calls: Array<{ end_time?: number }> = [];
-  page.on("request", (req: Request) => {
-    if (req.method() !== "POST" || !req.url().endsWith("/mcp")) return;
-    try {
-      const b = req.postDataJSON() as {
-        method?: string;
-        params?: { name?: string; arguments?: { end_time?: number } };
-      };
-      if (b.method === "tools/call" && b.params?.name === "generate_chart") {
-        calls.push(b.params.arguments ?? {});
-      }
-    } catch {
-      // Not a JSON-RPC call.
-    }
-  });
-  return calls;
+interface ChartArgs {
+  timeframe?: string;
+  bars?: number;
+  end_time?: number;
 }
+
+/** generate_chart arguments of an MCP request, or null for anything else. */
+function chartArgs(req: Request): ChartArgs | null {
+  if (req.method() !== "POST" || !req.url().endsWith("/mcp")) return null;
+  try {
+    const b = req.postDataJSON() as {
+      method?: string;
+      params?: { name?: string; arguments?: ChartArgs };
+    };
+    return b.method === "tools/call" && b.params?.name === "generate_chart"
+      ? (b.params.arguments ?? {})
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+/** The server's answer to the next generate_chart call matching `match`. */
+const chartResponse = (
+  page: Page,
+  match: (a: ChartArgs) => boolean = () => true,
+) =>
+  page.waitForResponse((res) => {
+    const a = chartArgs(res.request());
+    return a !== null && match(a);
+  });
+
+/**
+ * Retry `check` after each generate_chart answer until it passes: loads,
+ * history pages and the 2 s tail polls of BTCUSDT drive the chart, so the
+ * wait follows the server instead of a fixed window.
+ */
+const afterChartResponses = (page: Page, check: () => Promise<void>) =>
+  expect(async () => {
+    await chartResponse(page);
+    await check();
+  }).toPass();
 
 test.describe("bottom bar", () => {
   test.use({ viewport: { width: 2400, height: 900 } });
 
   test("5D switches to 5m and fits about five days", async ({ bootedApp: page }) => {
+    const load = chartResponse(
+      page,
+      (a) => a.timeframe === "5m" && a.bars !== 2 && a.end_time === undefined,
+    );
     await page.getByTestId("range-5D").click();
-    await expect.poll(async () => (await hook(page)).interval, { timeout: 20_000 }).toBe("5m");
+    await load;
+    await expect.poll(async () => (await hook(page)).interval).toBe("5m");
     // Loading ends when the range is paged in and fitted.
-    await expect(page.getByTestId("bottom-notice")).not.toHaveText("Loading…", {
-      timeout: 30_000,
+    await afterChartResponses(page, async () => {
+      await expect(page.getByTestId("bottom-notice")).not.toHaveText("Loading…", {
+        timeout: 1_000,
+      });
+      const span = await visibleSpan(page);
+      expect(span).toBeGreaterThan(4.5 * DAY);
+      expect(span).toBeLessThan(5.5 * DAY);
     });
-    const span = await visibleSpan(page);
-    expect(span).toBeGreaterThan(4.5 * DAY);
-    expect(span).toBeLessThan(5.5 * DAY);
   });
 
   test("the time zone moves the legend time and the axis", async ({ bootedApp: page }) => {
@@ -94,7 +125,6 @@ test.describe("bottom bar", () => {
   test("Go to date 30 days back pages in history and shows the bar", async ({
     bootedApp: page,
   }) => {
-    const calls = pageCalls(page);
     await page.getByTestId("tz-select").selectOption("utc");
     const before = await hook(page);
     expect(before.interval).toBe("1h");
@@ -107,22 +137,23 @@ test.describe("bottom bar", () => {
     const day = new Date(target).toISOString().slice(0, 10);
     await dialog.getByLabel("Date").fill(day);
     await dialog.getByLabel("Time (optional)").fill("12:00");
+    const paged = chartResponse(page, (a) => a.end_time !== undefined);
     await dialog.getByRole("button", { name: "OK" }).click();
+    await paged;
 
-    await expect.poll(() => calls.some((c) => c.end_time !== undefined)).toBe(true);
     const noon = Date.parse(`${day}T12:00:00Z`);
-    await expect
-      .poll(async () => {
-        const h = await hook(page);
-        const idx = h.timestamps.findIndex((t) => t >= noon);
-        return idx !== -1 && idx >= h.range.from && idx < h.range.to;
-      }, { timeout: 30_000 })
-      .toBe(true);
+    await afterChartResponses(page, async () => {
+      const h = await hook(page);
+      const idx = h.timestamps.findIndex((t) => t >= noon);
+      expect(idx).not.toBe(-1);
+      expect(idx).toBeGreaterThanOrEqual(h.range.from);
+      expect(idx).toBeLessThan(h.range.to);
+    });
   });
 
   test("the time zone persists across reload", async ({ bootedApp: page }) => {
     await page.getByTestId("tz-select").selectOption("Asia/Tokyo");
-    await page.reload();
+    await reloadApp(page);
     await expect(page.getByTestId("tz-select")).toHaveValue("Asia/Tokyo");
     await expect.poll(async () => (await hook(page)).timezone).toBe("Asia/Tokyo");
   });
