@@ -791,6 +791,7 @@ fn test_server_serves_web_app_same_origin() {
     std::fs::create_dir_all(web.join("assets")).unwrap();
     std::fs::write(web.join("index.html"), "<!doctype html><title>app</title>").unwrap();
     std::fs::write(web.join("assets/x.js"), "console.log(1)").unwrap();
+    std::fs::write(web.join(".env"), "DOTSECRET").unwrap();
     std::fs::write(root.join("secret.txt"), "TOPSECRET").unwrap();
     let srv = spawn_server(Some(&web));
     let p = srv.port;
@@ -818,6 +819,26 @@ fn test_server_serves_web_app_same_origin() {
         "{head}"
     );
     assert!(head.contains("x-content-type-options: nosniff"), "{head}");
+
+    // Revalidation keeps `immutable` (a 304 must not downgrade to no-cache).
+    let (st, head, _) = http(
+        p,
+        "GET",
+        "/assets/x.js",
+        &["If-Modified-Since: Fri, 01 Jan 2100 00:00:00 GMT"],
+        "",
+    );
+    assert_eq!(st, 304, "{head}");
+    assert!(head.contains("immutable"), "{head}");
+
+    // Dotfiles and protocol-relative paths never reach ServeDir.
+    for path in ["/.env", "/%2eenv", "/assets/.env", "//assets", "//"] {
+        for accept in [&[][..], &[HTML][..]] {
+            let (st, head, body) = http(p, "GET", path, accept, "");
+            assert_eq!(st, 404, "{path}: {head}");
+            assert!(!body.contains("DOTSECRET"), "{path} leaked");
+        }
+    }
 
     // SPA fallback for browser navigations only.
     let (st, head, body) = http(p, "GET", "/some/client/route?x=1", &[HTML], "");

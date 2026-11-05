@@ -65,12 +65,16 @@ Chosen option: same origin, served by chartgen.
     the root URL, like the older `/message` and `/sse` aliases. It is kept
     and not advertised.
   - All explicit routes (`/mcp`, `/sse`, `/message`, `/register`,
-    `/authorize`, `/token`, `/.well-known/*`, `/favicon.*`) take
+    `/authorize`, `/token`, `/.well-known/oauth-authorization-server`,
+    `/.well-known/oauth-protected-resource`,
+    `/.well-known/oauth-protected-resource/mcp`, `/favicon.*`) take
     precedence. Static files are the router fallback, served by
     tower-http `ServeDir`, which rejects `..` paths. An unknown `GET` that
     accepts `text/html` gets `index.html` (SPA routing). Other unknown
     paths, including missing `/assets/*` files and non-GET requests, stay
-    404.
+    404. Paths with a dot-prefixed segment (`/.env`, `/.git/…`) or a
+    leading `//` are refused with 404 before `ServeDir`. `CHARTGEN_WEB_DIR`
+    must hold only the build output: symlinks inside it are followed.
 - Cache headers: hashed files under `/assets/` get
   `public, max-age=31536000, immutable`. Everything else, including
   `index.html`, gets `no-cache`. All static responses carry
@@ -87,7 +91,10 @@ Chosen option: same origin, served by chartgen.
 
 - Good: one image, one origin, one deploy. Opening the public URL shows
   the app, and the OAuth redirect stays on the same origin.
-- Good: health checks, MCP probes and root-URL connectors see no change.
+- Good: health checks and MCP probes see no change. Root-URL connectors
+  keep working, but 401s from `/`, `/sse` and `/message` now carry a
+  `WWW-Authenticate: Bearer resource_metadata="…"` hint pointing at the
+  root document (`resource` = base URL).
 - Good: connectors starting at `/mcp` find the authorization server
   through the 401 hint or the path-suffixed metadata.
 - Bad: the image build now also needs Node and `npm ci`, which makes it

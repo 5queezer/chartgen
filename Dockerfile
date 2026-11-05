@@ -1,4 +1,15 @@
-# Stage 1: Build (Debian for glibc + freetype/fontconfig dev libs).
+# Stage 1: Web app (SolidJS, ADR-0027)
+FROM node:22-bookworm-slim AS web
+
+WORKDIR /web
+COPY web/package.json web/package-lock.json ./
+RUN npm ci
+COPY web/ ./
+# Empty base URL: the bundle calls MCP/OAuth on its own origin.
+ENV VITE_CHARTGEN_BASE_URL=""
+RUN npm run build
+
+# Stage 2: Build (Debian for glibc + freetype/fontconfig dev libs).
 # Same Debian release as the runtime stage so the binary's glibc matches.
 FROM rust:1.95-slim-bookworm AS builder
 
@@ -10,19 +21,11 @@ WORKDIR /app
 COPY Cargo.toml Cargo.lock ./
 COPY src/ src/
 COPY tests/ tests/
+# Serialize with the web stage: BuildKit would otherwise run Vite and the LTO
+# Rust build in parallel and risk OOM on the 4 GB arm64 host.
+COPY --from=web /web/dist/index.html /tmp/web-built
 
 RUN cargo build --release && strip target/release/chartgen
-
-# Stage 2: Web app (SolidJS, ADR-0027)
-FROM node:22-bookworm-slim AS web
-
-WORKDIR /web
-COPY web/package.json web/package-lock.json ./
-RUN npm ci
-COPY web/ ./
-# Empty base URL: the bundle calls MCP/OAuth on its own origin.
-ENV VITE_CHARTGEN_BASE_URL=""
-RUN npm run build
 
 # Stage 3: Slim runtime
 FROM debian:bookworm-slim

@@ -610,8 +610,14 @@ serves both on the same origin:
 - `GET /` from a browser (`Accept: text/html`) returns the app, as does
   the OAuth callback `/?code=…`. Other `GET /` requests keep returning
   the JSON health document.
-- `/mcp`, `/register`, `/authorize`, `/token` and `/.well-known/*` are
-  the server's own routes and take precedence over static files.
+- `/mcp`, `/register`, `/authorize`, `/token`, `/favicon.*` and the three
+  explicit `/.well-known/oauth-authorization-server`,
+  `/.well-known/oauth-protected-resource` and
+  `/.well-known/oauth-protected-resource/mcp` routes are the server's own
+  and take precedence over static files.
+- `CHARTGEN_WEB_DIR` must contain only the build output. Dotfiles and
+  paths starting with `//` are refused with 404; symlinks are followed,
+  so do not put any in the directory.
 - Other browser paths that match no file return `index.html`.
 - `/assets/*` (content-hashed) is cached as `immutable`, and
   `index.html` as `no-cache`.

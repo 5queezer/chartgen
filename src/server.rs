@@ -902,7 +902,17 @@ async fn serve_web(dir: PathBuf, req: Request) -> Response {
     if !matches!(*req.method(), Method::GET | Method::HEAD) {
         return StatusCode::NOT_FOUND.into_response();
     }
-    let assets = req.uri().path().starts_with("/assets/");
+    let path = req.uri().path();
+    // No dotfiles (`/.env`, `/.git/…`) and no `//` (ServeDir would redirect
+    // `//assets` to the protocol-relative `//assets/`).
+    if path.starts_with("//")
+        || urlencoding_decode(path)
+            .split('/')
+            .any(|seg| seg.starts_with('.'))
+    {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    let assets = path.starts_with("/assets/");
     let mut resp = if accepts_html(req.headers()) && !assets {
         let index = ServeFile::new(dir.join("index.html"));
         ServeDir::new(&dir).fallback(index).try_call(req).await
@@ -913,12 +923,13 @@ async fn serve_web(dir: PathBuf, req: Request) -> Response {
         |_| StatusCode::INTERNAL_SERVER_ERROR.into_response(),
         IntoResponse::into_response,
     );
-    let cache = if assets && resp.status().is_success() {
-        // Vite content-hashes everything under /assets/.
-        "public, max-age=31536000, immutable"
-    } else {
-        "no-cache"
-    };
+    let cache =
+        if assets && (resp.status().is_success() || resp.status() == StatusCode::NOT_MODIFIED) {
+            // Vite content-hashes everything under /assets/.
+            "public, max-age=31536000, immutable"
+        } else {
+            "no-cache"
+        };
     let h = resp.headers_mut();
     h.insert(header::CACHE_CONTROL, HeaderValue::from_static(cache));
     h.insert(
