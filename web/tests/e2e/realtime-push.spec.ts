@@ -38,7 +38,14 @@ function recordCalls(page: Page): ToolCall[] {
 }
 
 interface Hook {
-  chart: () => { getDataList: () => Array<{ close: number }> } | null;
+  chart: () => {
+    getDataList: () => Array<{ timestamp: number; close: number }>;
+    convertToPixel: (
+      point: { timestamp: number },
+      finder: { paneId: string },
+    ) => { x?: number };
+  } | null;
+  series: () => { bars: Array<{ t: number }> } | null;
 }
 
 const lastClose = (page: Page) =>
@@ -49,6 +56,30 @@ const lastClose = (page: Page) =>
         ?.getDataList()
         .at(-1)?.close ?? null,
   );
+
+const timestamps = (page: Page) =>
+  page.evaluate(() =>
+    ((window as unknown as { __chartgenTest: Hook }).__chartgenTest
+      .chart()
+      ?.getDataList() ?? []).map((d) => d.timestamp),
+  );
+
+/** Pixel x of the bar opening at `timestamp`. */
+const xOf = (page: Page, timestamp: number) =>
+  page.evaluate((ts) => {
+    const c = (window as unknown as { __chartgenTest: Hook }).__chartgenTest.chart()!;
+    return c.convertToPixel({ timestamp: ts }, { paneId: "candle_pane" }).x ?? null;
+  }, timestamp);
+
+/** Drag the chart rightwards (towards older bars). */
+async function dragRight(page: Page): Promise<void> {
+  const box = (await page.locator(".chart-container").boundingBox())!;
+  const y = box.y + box.height * 0.3;
+  await page.mouse.move(box.x + 80, y);
+  await page.mouse.down();
+  await page.mouse.move(box.x + box.width - 120, y, { steps: 8 });
+  await page.mouse.up();
+}
 
 test("pushed ticks move the chart faster than polling, with no tail polls", async ({
   bootedApp: page,
@@ -151,4 +182,50 @@ test("losing the push falls back to polling, and push resumes", async ({
   await page.waitForTimeout(4_000);
   // At most one poll that was already in flight when push came back.
   expect(calls.filter(isTailPoll).length).toBeLessThanOrEqual(polls + 1);
+});
+
+test("older pages load in place while pushes arrive", async ({ bootedApp: page }) => {
+  await expect(page.getByTestId("live-status")).toHaveAttribute("data-state", "push");
+  // Hold pages back so pushes land while each one is in flight.
+  await page.route("**/mcp", async (route) => {
+    if (toolCall(route.request())?.arguments?.end_time !== undefined) {
+      await new Promise((r) => setTimeout(r, 1_200));
+    }
+    return route.fallback();
+  });
+  const status = page.getByTestId("history-status");
+  const closes = new Set<number | null>();
+
+  let pages = 0;
+  for (let i = 0; i < 40 && pages < 2; i++) {
+    await dragRight(page);
+    if (!(await status.isVisible())) continue;
+    const before = await timestamps(page);
+    const oldest = before[0]!;
+    const x = await xOf(page, oldest);
+    // Pushes keep ticking while the page is out.
+    while (await status.isVisible()) {
+      closes.add(await lastClose(page));
+      await page.waitForTimeout(100);
+    }
+    await expect.poll(async () => (await timestamps(page)).length).toBe(before.length + 500);
+    // The bar that was oldest has not moved; the page filled in to its left.
+    expect(await xOf(page, oldest)).toBe(x);
+    pages++;
+  }
+  expect(pages).toBe(2);
+  closes.delete(null);
+  expect(closes.size).toBeGreaterThanOrEqual(3);
+
+  // No gaps, no duplicates: 1h apart throughout, seams included.
+  const ts = await timestamps(page);
+  expect(ts.length).toBe(1500);
+  expect(ts.every((t, i) => i === 0 || t - ts[i - 1]! === 3_600_000)).toBe(true);
+  const seriesTs = await page.evaluate(() =>
+    (window as unknown as { __chartgenTest: Hook }).__chartgenTest
+      .series()!
+      .bars.map((b) => b.t * 1000),
+  );
+  expect(seriesTs).toEqual(ts);
+  await expect(page.getByTestId("live-status")).toHaveAttribute("data-state", "push");
 });
