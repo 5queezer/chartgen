@@ -379,11 +379,12 @@ Right-clicking the chart (outside a drawing) opens a menu:
 | Reset chart view (`Alt+R`) | Scroll to real time at the default zoom |
 | Copy price | Copy the price under the cursor, in the chart's precision |
 | Add horizontal line at | Add a horizontal line at that price; it is saved like any drawing |
+| Add alert at | Open the alert dialog at that price |
 | Remove all drawings | Asks for confirmation |
 | Remove all indicators | Asks for confirmation |
 | Settings… | Open the chart settings dialog |
 
-Copy price and Add horizontal line only appear when the click is in the price
+Copy price, Add horizontal line and Add alert only appear when the click is in the price
 pane. Right-clicking a drawing opens the drawing menu instead. TradingView's
 "Lock vertical cursor line by time" is not offered because klinecharts has no
 pinned crosshair.

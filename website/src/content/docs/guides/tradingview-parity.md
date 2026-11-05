@@ -36,7 +36,10 @@ Status legend:
 | Fullscreen | ✅ | ✅ | Hidden when the browser lacks the Fullscreen API. [Toolbar](/chartgen/guides/web/#toolbar) |
 | Light and dark theme | ✅ | ✅ | Follows the OS on first visit. Server-sent colors stay as sent. [ADR-0016](/chartgen/decisions/0016-light-theme/) |
 | Custom theme editor | ✅ | ❌ | Out of scope of [ADR-0006](/chartgen/decisions/0006-tradingview-visual-parity/). |
-| Chart settings dialog and right-click context menu | ✅ | 🚧 | Planned as ADR-0019. Not on this branch. |
+| Chart settings dialog | ✅ | ◐ | Symbol, Status line, Scales and Appearance tabs with live preview, Cancel and Reset. Colors per theme, not part of layouts. No trading, events or alerts tabs. [Chart settings](/chartgen/guides/web/#chart-settings), [ADR-0019](/chartgen/decisions/0019-chart-settings/) |
+| Right-click context menu | ✅ | ◐ | Reset view, copy price, add horizontal line, remove all drawings or indicators, settings. "Lock vertical cursor line by time" is not offered. [Chart context menu](/chartgen/guides/web/#chart-context-menu) |
+| Add alert at the clicked price (context menu) | ✅ | ✅ | "Add alert at price" opens the alert dialog at that price. [Chart context menu](/chartgen/guides/web/#chart-context-menu), [Alerts](/chartgen/guides/web/#sidebar-and-price-alerts) |
+| Titled dialogs (symbol search, compare, add symbol) | ✅ | ✅ | The compare and watchlist dialogs say "Compare symbol" and "Add symbol". [Compare symbols](/chartgen/guides/web/#compare-symbols), [Watchlist](/chartgen/guides/web/#watchlist) |
 | Mobile and touch layout | ✅ | ❌ | The web guide describes a desktop layout only. |
 | Multi-chart layouts (several charts in one view) | ✅ | ❌ | One chart per screen. [Web guide scope](/chartgen/guides/web/) |
 
@@ -72,6 +75,7 @@ Status legend:
 | Indicator on indicator (apply to another indicator's output) | ✅ | ❌ | Every indicator reads the price bars. |
 | Indicators on Heikin Ashi values | ✅ | ✅ | [`chart_style`](/chartgen/reference/mcp/) |
 | Profiles from lower-timeframe data | ✅ | ◐ | Volume and time profiles and CVD spread each bar's volume over its range. [Differences list](/chartgen/reference/indicators/#values-match-tradingview) |
+| Volume in the default set | ✅ | ✅ | A fresh install starts with the EMA stack, Volume and RSI. Stored sets are never changed. [Managing indicators](/chartgen/guides/web/#managing-indicators) |
 | Persisted indicator set | ✅ (cloud) | ◐ | Saved in `localStorage` per browser, not synced. [ADR-0005](/chartgen/decisions/0005-client-indicator-state/) |
 
 ## Drawing tools
@@ -122,7 +126,7 @@ Status legend:
 | Layout export and import | ✅ | ✅ | JSON file, validated on import. [Layouts](/chartgen/guides/web/#layouts) |
 | Cloud sync of layouts and settings | ✅ | ❌ | [ADR-0005](/chartgen/decisions/0005-client-indicator-state/) |
 | Shareable chart links | ✅ | ❌ | [ADR-0005](/chartgen/decisions/0005-client-indicator-state/) |
-| Chart settings (colors, grid, scales) | ✅ | 🚧 | With the context menu, planned as ADR-0019. |
+| Chart settings (colors, grid, scales) | ✅ | ◐ | Saved in `localStorage` under `chartgen.chartSettings`, not synced and not in named layouts. [Chart settings](/chartgen/guides/web/#chart-settings), [ADR-0019](/chartgen/decisions/0019-chart-settings/) |
 | Keyboard shortcuts | ✅ | ◐ | A documented subset with `Alt` modifiers for tools. [Keyboard shortcuts](/chartgen/guides/web/#keyboard-shortcuts) |
 
 ## Analysis tools
@@ -142,8 +146,11 @@ Status legend:
 | Feature | TradingView | chartgen | Notes / links |
 |---|---|---|---|
 | Pine Script indicators | ✅ | ❌ | Built-in indicators are Rust ports of Pine v5 semantics. No Pine interpreter. [ADR-0018](/chartgen/decisions/0018-pine-semantics-for-indicators/) |
-| Pine editor UI | ✅ | ❌ | No script editor in the web app. |
-| Scripted indicators via Starlark, a Pine counterpart | n/a | 🚧 | ADR-0024 and ADR-0025 are in progress, not on this branch. [Proposal](/chartgen/proposals/0001-python-indicators/) |
+| Pine editor UI | ✅ | ❌ | No script editor in the web app, and no Pine parser. |
+| Scripted indicators via Starlark over MCP | n/a | ◐ | `register_indicator` and `generate_chart` accept your scripts. Phase 1: feature-flagged off by default (`CHARTGEN_SCRIPTING=1`), for trusted or single-user deployments only, since scripts run in the server process, ownership is an auto-approved OAuth client, and the limits are not a security boundary. At most 3 scripts per chart. Scripts are not computed in `subscribe_chart` pushes. [Scripted indicators](/chartgen/guides/scripted-indicators/), [ADR-0024](/chartgen/decisions/0024-starlark-script-runtime/), [ADR-0025](/chartgen/decisions/0025-user-indicator-registry/) |
+| Pine-like series operators and `ta.*` functions in scripts | ✅ | ✅ | Element-wise operators, `close[1]`, comparisons, `ta.sma/ema/rsi/atr/macd/crossover` and more, with the Pine v5 code the built-ins use. Pivot tie rule is unverified against TradingView. [Series](/chartgen/guides/scripted-indicators/#series), [`ta.*`](/chartgen/guides/scripted-indicators/#ta-functions) |
+| Fork a built-in as a script | ✅ (open source scripts) | ◐ | `fork_indicator` works for `wavetrend` only. [Forking](/chartgen/guides/scripted-indicators/#forking-a-built-in) |
+| Script editor in the web app | ✅ | ❌ | No editor UI; scripts are registered over MCP. |
 | Programmatic access (API, agents) | partial | ✅ | The MCP server exposes 19 tools, including chart generation, quotes and symbol search. [MCP reference](/chartgen/reference/mcp/) |
 
 ## Data sources
