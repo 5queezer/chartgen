@@ -213,6 +213,9 @@ impl Indicator for Adx {
 
 // ---- Supertrend (overlay) ----
 
+const UP_COLOR: u32 = 0x26a69a;
+const DOWN_COLOR: u32 = 0xef5350;
+
 pub struct Supertrend {
     pub period: usize,
     pub multiplier: f64,
@@ -233,7 +236,7 @@ impl Indicator for Supertrend {
     }
 
     fn description(&self) -> &str {
-        "Supertrend — ATR-based trend follower"
+        "Supertrend — ATR-based trend follower (Up Trend / Down Trend lines that break at a flip)"
     }
 
     fn params(&self) -> Value {
@@ -256,14 +259,6 @@ impl Indicator for Supertrend {
         let n = data.len();
         let mut dots = Vec::new();
 
-        if n < 2 {
-            return PanelResult {
-                is_overlay: true,
-                label: "Supertrend".into(),
-                ..Default::default()
-            };
-        }
-
         // ta.supertrend: ATR is ta.atr (RMA of the true range).
         let atr_vals = super::pine::atr(data, self.period);
 
@@ -276,6 +271,11 @@ impl Indicator for Supertrend {
         // true = UP (direction -1), false = DOWN (direction 1)
         let mut trend = vec![false; n];
         let mut st_val = vec![f64::NAN; n];
+        // TradingView plots the active band as "Up Trend" or "Down Trend"
+        // with plot.style_linebr: the other one is na, so a flip breaks the
+        // line instead of drawing a vertical connector.
+        let mut up = vec![f64::NAN; n];
+        let mut down = vec![f64::NAN; n];
 
         for i in 0..n {
             let hl2 = (b[i].high + b[i].low) / 2.0;
@@ -318,32 +318,40 @@ impl Indicator for Supertrend {
                 continue;
             }
             let val = st_val[i];
-
-            let color = if trend[i] {
-                rgba(0x26a69a, 0.9)
+            let (color, label) = if trend[i] {
+                up[i] = val;
+                (UP_COLOR, signals::FLIP_UP)
             } else {
-                rgba(0xef5350, 0.9)
+                down[i] = val;
+                (DOWN_COLOR, signals::FLIP_DOWN)
             };
-            // Label the bar only when the trend flips (signal event).
-            let label = if i > 0 && !atr_vals[i - 1].is_nan() && trend[i] != trend[i - 1] {
-                if trend[i] {
-                    Some(signals::FLIP_UP.to_string())
-                } else {
-                    Some(signals::FLIP_DOWN.to_string())
-                }
-            } else {
-                None
-            };
-            dots.push(Dot {
-                x: i,
-                y: val,
-                color,
-                size: 2,
-                label,
-            });
+            // A dot marks only a flip (signal event).
+            if !atr_vals[i - 1].is_nan() && trend[i] != trend[i - 1] {
+                dots.push(Dot {
+                    x: i,
+                    y: val,
+                    color: rgba(color, 0.9),
+                    size: 2,
+                    label: Some(label.to_string()),
+                });
+            }
         }
 
         PanelResult {
+            lines: vec![
+                Line {
+                    y: up,
+                    color: rgba(UP_COLOR, 0.9),
+                    width: 1,
+                    label: Some("Up Trend".into()),
+                },
+                Line {
+                    y: down,
+                    color: rgba(DOWN_COLOR, 0.9),
+                    width: 1,
+                    label: Some("Down Trend".into()),
+                },
+            ],
             dots,
             is_overlay: true,
             label: "Supertrend".into(),
@@ -2479,12 +2487,49 @@ mod tests {
         let r = ind.compute(&ohlc());
         // ATR2 = [_, 2, 2.5, 1.75, 2.125, 1.8125, 2.40625, ...]; bar 1 is the
         // first ATR bar, where ta.supertrend's direction is down (upper band).
-        assert_eq!(r.dots[0].x, 1);
         eq(
-            &dot_ys(&r),
-            &[4.0, 4.0, 4.0, 4.0, 3.0625, 0.09375, 1.796875],
+            &st_ys(&r),
+            &[NAN, 4.0, 4.0, 4.0, 4.0, 3.0625, 0.09375, 1.796875],
         );
         assert_eq!(flips(&r), vec![(6, signals::FLIP_UP)]);
+        assert_eq!(r.dots.len(), 1, "a dot marks only a flip");
+        assert_breaks_at_flips(&r);
+        eq(&r.lines[0].y[5..], &[NAN, 0.09375, 1.796875]);
+    }
+
+    /// Supertrend per bar from its Up/Down Trend lines, of which at most
+    /// one has a value at any bar.
+    fn st_ys(r: &PanelResult) -> Vec<f64> {
+        assert_eq!(r.lines[0].label.as_deref(), Some("Up Trend"));
+        assert_eq!(r.lines[1].label.as_deref(), Some("Down Trend"));
+        let (up, down) = (&r.lines[0].y, &r.lines[1].y);
+        up.iter()
+            .zip(down)
+            .map(|(&u, &d)| {
+                assert!(u.is_nan() || d.is_nan(), "both trend lines at one bar");
+                if u.is_nan() {
+                    d
+                } else {
+                    u
+                }
+            })
+            .collect()
+    }
+
+    /// Like TradingView's plot.style_linebr: at a flip bar the line of the
+    /// new trend starts and the old one has no value (it ended a bar
+    /// before), so nothing connects the two bands.
+    fn assert_breaks_at_flips(r: &PanelResult) {
+        for (x, label) in flips(r) {
+            let (new, old) = if label == signals::FLIP_UP {
+                (0, 1)
+            } else {
+                (1, 0)
+            };
+            assert!(r.lines[new].y[x].is_finite(), "flip at {x}");
+            assert!(r.lines[old].y[x].is_nan(), "flip at {x}");
+            assert!(r.lines[old].y[x - 1].is_finite(), "flip at {x}");
+        }
     }
 
     #[test]
@@ -2496,7 +2541,7 @@ mod tests {
             multiplier: 0.0,
         };
         let r = ind.compute(&ohlc());
-        eq(&dot_ys(&r), &[2.0, 3.5, 3.5, 2.25, 1.25, 2.5, 4.5]);
+        eq(&st_ys(&r), &[NAN, 2.0, 3.5, 3.5, 2.25, 1.25, 2.5, 4.5]);
         assert_eq!(
             flips(&r),
             vec![
@@ -2505,13 +2550,20 @@ mod tests {
                 (6, signals::FLIP_UP)
             ]
         );
+        assert_breaks_at_flips(&r);
         // bar 0 is never drawn, even when the ATR is valid there
         let r = Supertrend {
             period: 1,
             multiplier: 1.0,
         }
         .compute(&ohlc());
-        assert_eq!(r.dots[0].x, 1);
+        assert!(st_ys(&r)[0].is_nan() && st_ys(&r)[1].is_finite());
+        // Too short a window still has both lines, so pages keep one shape.
+        for bars in [0, 1] {
+            let r = Supertrend::default().compute(&closes(&vec![1.0; bars]));
+            assert!(r.lines.iter().all(|l| l.y.len() == bars));
+            assert_eq!(st_ys(&r).len(), bars);
+        }
     }
 
     #[test]

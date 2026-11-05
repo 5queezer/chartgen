@@ -220,19 +220,19 @@ pub fn render_results(
                 chart.draw_series(pairs)?;
             }
 
-            // Lines
+            // Lines, broken where a value is NaN (as on the web chart and with
+            // Pine's plot.style_linebr), so a gap draws no connector.
             for line in &overlay.lines {
+                let draw_width = if line.width <= 1 { 2 } else { line.width };
                 let points: Vec<_> = line
                     .y
                     .iter()
                     .enumerate()
-                    .filter(|(_, y)| !y.is_nan())
                     .map(|(i, y)| (i as f64, *y))
                     .collect();
-                if !points.is_empty() {
-                    let draw_width = if line.width <= 1 { 2 } else { line.width };
+                for run in points.split(|(_, y)| y.is_nan()).filter(|r| !r.is_empty()) {
                     chart.draw_series(std::iter::once(PathElement::new(
-                        points,
+                        run.to_vec(),
                         line.color.stroke_width(draw_width),
                     )))?;
                 }
@@ -398,19 +398,19 @@ pub fn render_results(
             chart.draw_series(rects)?;
         }
 
-        // Lines
+        // Lines, broken where a value is NaN (as on the web chart and with
+        // Pine's plot.style_linebr), so a gap draws no connector.
         for line in &result.lines {
+            let draw_width = if line.width <= 1 { 2 } else { line.width };
             let points: Vec<_> = line
                 .y
                 .iter()
                 .enumerate()
-                .filter(|(_, y)| !y.is_nan())
                 .map(|(i, y)| (i as f64, *y))
                 .collect();
-            if !points.is_empty() {
-                let draw_width = if line.width <= 1 { 2 } else { line.width };
+            for run in points.split(|(_, y)| y.is_nan()).filter(|r| !r.is_empty()) {
                 chart.draw_series(std::iter::once(PathElement::new(
-                    points,
+                    run.to_vec(),
                     line.color.stroke_width(draw_width),
                 )))?;
             }

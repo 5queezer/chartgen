@@ -37,7 +37,10 @@ that case is not yet verified against a live TradingView chart.
 
 EMA and RMA are recursive, so a value depends on where the series starts.
 Load enough history before the bars you compare (`warmup` in series mode)
-so the start-up effect has decayed. Known differences:
+so the start-up effect has decayed. A non-zero `warmup` is raised to what
+`ema_stack`, `ma` and `ma_ribbon` need for their EMAs to converge, up to 1000
+bars ([ADR-0032](/chartgen/decisions/0032-indicator-aware-warmup/)). Known
+differences:
 
 - **WaveTrend lengths.** `wavetrend` is the WaveTrend inside VuManChu Cipher B
   and keeps its lengths 9 / 12 / 3 (LazyBear's script: 10 / 21 / 4).
@@ -169,7 +172,7 @@ VWAP Bands — standard deviation bands around VWAP
 
 ### `supertrend`
 
-Supertrend — ATR-based trend follower
+Supertrend — ATR-based trend follower (Up Trend / Down Trend lines that break at a flip)
 
 **Parameters:**
 

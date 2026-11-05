@@ -68,7 +68,10 @@ fn main() {
          \n\
          EMA and RMA are recursive, so a value depends on where the series starts.\n\
          Load enough history before the bars you compare (`warmup` in series mode)\n\
-         so the start-up effect has decayed. Known differences:\n\
+         so the start-up effect has decayed. A non-zero `warmup` is raised to what\n\
+         `ema_stack`, `ma` and `ma_ribbon` need for their EMAs to converge, up to 1000\n\
+         bars ([ADR-0032](/chartgen/decisions/0032-indicator-aware-warmup/)). Known\n\
+         differences:\n\
          \n\
          - **WaveTrend lengths.** `wavetrend` is the WaveTrend inside VuManChu Cipher B\n\
          \x20 and keeps its lengths 9 / 12 / 3 (LazyBear's script: 10 / 21 / 4).\n\
