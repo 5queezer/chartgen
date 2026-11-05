@@ -45,7 +45,7 @@ Status legend:
 | Feature | TradingView | chartgen | Notes / links |
 |---|---|---|---|
 | Candles | ✅ | ✅ | [Toolbar](/chartgen/guides/web/#toolbar) |
-| Hollow candles | ✅ | ◐ | Only up candles are hollow. |
+| Hollow candles | ✅ | ✅ | Up candles hollow, down candles filled, as in TradingView. |
 | Bars (OHLC) | ✅ | ✅ | |
 | Line | ✅ | ✅ | |
 | Area | ✅ | ✅ | |
