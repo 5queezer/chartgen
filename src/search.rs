@@ -191,11 +191,29 @@ fn kind_rank(r: &SymbolResult) -> u8 {
     }
 }
 
+/// Crypto pairs of one base that rank among the other exact matches; the
+/// rest of that base's pairs come after them (`BTC=F` and the BTC ETF
+/// must not be buried under dozens of `BTC*` pairs).
+const MAX_PAIRS_PER_BASE: usize = 4;
+
+/// Kind rank of the pairs past the cap: behind every other exact match.
+const OVER_CAP: u8 = 6;
+
+/// Position of a quote among the preferred ones, `quotes.len()` for any other.
+fn quote_rank(symbol: &str, quotes: &[&str]) -> u8 {
+    quotes
+        .iter()
+        .position(|q| symbol.ends_with(q))
+        .unwrap_or(quotes.len()) as u8
+}
+
+type RankKey = (u8, u8, u8, usize);
+
 /// Sort key for `r` against the uppercased query `q`: match tier (0 exact
 /// symbol or root, 1 prefix, 2 contains, 3 name match, 4 no match), kind
-/// among exact matches, then USDT/USD quotes before other quotes, then
-/// shorter symbols.
-fn rank_key(r: &SymbolResult, q: &str) -> (u8, u8, bool, usize) {
+/// among exact matches, then USDT/USDC/FDUSD/USD quotes before other
+/// quotes, then shorter symbols.
+fn rank_key(r: &SymbolResult, q: &str) -> RankKey {
     let tier = if r.symbol == q || root(r) == q {
         0
     } else if r.symbol.starts_with(q) {
@@ -207,17 +225,32 @@ fn rank_key(r: &SymbolResult, q: &str) -> (u8, u8, bool, usize) {
     } else {
         4
     };
-    let other_quote = match r.kind {
-        "crypto" => !r.symbol.ends_with("USDT"),
-        "forex" => !r.symbol.ends_with("USD=X"),
-        _ => false,
+    let quote = match r.kind {
+        "crypto" => quote_rank(&r.symbol, &["USDT", "USDC", "FDUSD", "USD"]),
+        "forex" => quote_rank(&r.symbol, &["USD=X"]),
+        _ => 0,
     };
     (
         tier,
         if tier == 0 { kind_rank(r) } else { 0 },
-        other_quote,
+        quote,
         if tier < 3 { r.symbol.len() } else { 0 },
     )
+}
+
+/// Demote the exact-match coin pairs past the cap per base. `ranked` must
+/// be sorted by key; the caller sorts again afterwards.
+fn cap_pairs_per_base(ranked: &mut [(RankKey, &SymbolResult)]) {
+    let mut per_base: HashMap<&str, usize> = HashMap::new();
+    for (k, r) in ranked.iter_mut() {
+        if k.0 == 0 && k.1 == 0 {
+            let n = per_base.entry(root(r)).or_default();
+            *n += 1;
+            if *n > MAX_PAIRS_PER_BASE {
+                k.1 = OVER_CAP;
+            }
+        }
+    }
 }
 
 /// Union of all sources ranked by `rank_key` (ties keep source order, so
@@ -240,6 +273,8 @@ fn merge(
         .map(|r| (rank_key(r, q), r))
         .filter(|&(k, r)| (r.source != "binance" || k.0 < 4) && seen.insert(r.symbol.as_str()))
         .collect();
+    ranked.sort_by_key(|a| a.0);
+    cap_pairs_per_base(&mut ranked);
     ranked.sort_by_key(|a| a.0);
     ranked
         .into_iter()
@@ -839,6 +874,22 @@ mod tests {
             "BTC",
         );
         assert_eq!(r, ["BTCUSDT", "BTCEUR", "BTC=F", "BTC", "BTCS", "WBTCBTC"]);
+    }
+
+    #[test]
+    fn btc_caps_pairs_per_base_before_futures_and_etf() {
+        let mut items: Vec<_> = ["EUR", "TRY", "USDC", "USDT", "FDUSD", "BRL", "JPY", "USD"]
+            .iter()
+            .map(|q| pair("BTC", q))
+            .collect();
+        items.push(mk("BTC=F", "Bitcoin Futures", "future"));
+        items.push(mk("BTC", "Grayscale Bitcoin Mini Trust", "etf"));
+        items.push(mk("BTCS", "Bitcoin Depot", "stock"));
+        let out = merge(&items, &[], "BTC", &[], 8);
+        assert_eq!(
+            symbols(&out),
+            ["BTCUSDT", "BTCUSDC", "BTCFDUSD", "BTCUSD", "BTC=F", "BTC", "BTCEUR", "BTCTRY"]
+        );
     }
 
     #[test]
