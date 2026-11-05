@@ -7,6 +7,7 @@ import {
   MAX_SYMBOLS,
   parseRecord,
   parseRecords,
+  pointTimestamp,
   sanitizeStyles,
   saveDrawings,
   serialize,
@@ -71,10 +72,11 @@ describe("parseRecord: multi-point tools", () => {
     ["cgPitchfork", 3],
     ["cgLong", 3],
     ["cgShort", 3],
-  ])("%s needs %i points", (name, n) => {
+  ])("%s needs exactly %i points", (name, n) => {
     const pts = (k: number) => Array.from({ length: k }, (_, i) => pt(i + 1));
     expect(parseRecord({ ...good, name, points: pts(n) })?.name).toBe(name);
     expect(parseRecord({ ...good, name, points: pts(n - 1) })).toBeNull();
+    if (n < 3) expect(parseRecord({ ...good, name, points: pts(n + 1) })).toBeNull();
   });
 });
 
@@ -125,6 +127,7 @@ describe("timeAxisOf", () => {
       firstTs: 1000,
       lastTs: 10000,
       count: 10,
+      timestamps: bars,
       intervalMs: 1000,
     });
   });
@@ -285,5 +288,26 @@ describe("storage", () => {
     expect(store.has(storageKey("S1"))).toBe(false);
     expect(store.has(storageKey("S0"))).toBe(true);
     expect(store.has(storageKey("NEW"))).toBe(true);
+  });
+});
+
+describe("pointTimestamp on a gapped market", () => {
+  // Hourly bars with a 64 h weekend gap after every 5th bar.
+  const H = 3_600_000;
+  const gapped = Array.from({ length: 30 }, (_, i) => (i + Math.floor(i / 5) * 64) * H);
+  const ax = timeAxisOf(gapped)!;
+
+  it("uses the real bar time for an index inside the data", () => {
+    expect(pointTimestamp({ dataIndex: 12 }, ax)).toBe(gapped[12]);
+    expect(pointTimestamp({ dataIndex: 0 }, ax)).toBe(gapped[0]);
+  });
+
+  it("extrapolates only beyond the last bar", () => {
+    expect(pointTimestamp({ dataIndex: 31 }, ax)).toBe(gapped[29]! + 2 * H);
+    expect(pointTimestamp({ dataIndex: -2 }, ax)).toBe(gapped[0]! - 2 * H);
+  });
+
+  it("keeps an explicit timestamp", () => {
+    expect(pointTimestamp({ timestamp: 5, dataIndex: 12 }, ax)).toBe(5);
   });
 });

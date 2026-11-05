@@ -10,7 +10,9 @@ import {
   fibExtensionLevels,
   formatDuration,
   pitchforkLines,
+  positionBars,
   positionLabels,
+  positionReward,
   positionStats,
   priceRangeLabel,
 } from "./drawingMath";
@@ -124,6 +126,21 @@ describe("positions", () => {
     const s = defaultPosition("short", 100);
     expect(s.target).toBeCloseTo(98);
     expect(s.stop).toBeCloseTo(101);
+  });
+  it("sizes a fresh position from the visible span: reward 10%, stop half", () => {
+    expect(positionReward(200)).toBe(20);
+    expect(positionReward(null)).toBeNull();
+    expect(positionReward(0)).toBeNull();
+    const l = defaultPosition("long", 100, 20);
+    expect(l).toEqual({ target: 120, stop: 90 });
+    expect(defaultPosition("short", 100, 20)).toEqual({ target: 80, stop: 110 });
+    // A stop that would reach zero falls back to the percent default.
+    expect(defaultPosition("long", 5, 20).stop).toBeCloseTo(4.95);
+  });
+  it("widens a fresh position with the visible bars, 20 at least", () => {
+    expect(positionBars(100)).toBe(20);
+    expect(positionBars(400)).toBe(40);
+    expect(positionBars(null)).toBe(20);
   });
   it("computes risk/reward for both sides", () => {
     const l = positionStats("long", 100, 104, 98);

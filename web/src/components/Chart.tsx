@@ -93,7 +93,7 @@ import {
   type SeriesExtend,
   type SeriesType,
 } from "../lib/chartTypes";
-import { PALETTES, type Palette } from "../lib/theme";
+import { FONT_FAMILY, PALETTES, type Palette } from "../lib/theme";
 import type { SeriesPayload } from "../types/responses";
 import {
   barLegend,
@@ -127,8 +127,6 @@ import {
 } from "../lib/projection";
 import { PaneHeader, type PaneHeaderLine } from "./PaneHeader";
 import { PriceAxisControls } from "./PriceAxisControls";
-
-const FONT_FAMILY = "Inter, system-ui, sans-serif";
 
 // TradingView-aligned rotating palette for indicator line/bar series.
 // Color assignment is deterministic per (indicator name, series index)
@@ -840,6 +838,12 @@ function tvStyles(p: Palette) {
           borderColor: p.border,
         },
       },
+    },
+    // klinecharts' default overlay text family is "Helvetica Neue", which
+    // falls back to a serif face where it is not installed.
+    overlay: {
+      text: { family: FONT_FAMILY },
+      rectText: { family: FONT_FAMILY },
     },
     separator: {
       size: 1,

@@ -168,14 +168,41 @@ export function positionLabels(
 /** Default target/stop of a fresh position: +2% / -1% for a long, mirrored for a short. */
 export const DEFAULT_TARGET_PCT = 2;
 export const DEFAULT_STOP_PCT = 1;
-/** Default width of a position, in bars. */
+/** Minimum width of a position, in bars. */
 export const DEFAULT_POSITION_BARS = 20;
+/** Share of the visible price span a fresh position's reward covers. */
+export const POSITION_SPAN_SHARE = 0.1;
+/** Share of the visible bars a fresh position spans (at least DEFAULT_POSITION_BARS). */
+export const POSITION_BARS_SHARE = 0.1;
 
+/** Width of a fresh position: 10% of the visible bars, at least 20. */
+export function positionBars(visibleBars: number | null): number {
+  const share =
+    visibleBars !== null && Number.isFinite(visibleBars) ? visibleBars * POSITION_BARS_SHARE : 0;
+  return Math.max(DEFAULT_POSITION_BARS, Math.round(share));
+}
+
+/** Reward of a fresh position: 10% of the visible price span, or null without a usable span. */
+export function positionReward(span: number | null): number | null {
+  return span !== null && Number.isFinite(span) && span > 0 ? span * POSITION_SPAN_SHARE : null;
+}
+
+/**
+ * Default target and stop: reward = `reward` (see positionReward) and
+ * stop = half of it, for a 2:1 ratio. Without a reward, or when the stop
+ * would fall to zero or below, +2% / -1% of the entry (mirrored for a short).
+ */
 export function defaultPosition(
   kind: PositionKind,
   entry: number,
+  reward: number | null = null,
 ): { target: number; stop: number } {
   const dir = kind === "long" ? 1 : -1;
+  if (reward !== null && reward > 0) {
+    const target = entry + dir * reward;
+    const stop = entry - (dir * reward) / 2;
+    if (target > 0 && stop > 0) return { target, stop };
+  }
   return {
     target: entry * (1 + (dir * DEFAULT_TARGET_PCT) / 100),
     stop: entry * (1 - (dir * DEFAULT_STOP_PCT) / 100),

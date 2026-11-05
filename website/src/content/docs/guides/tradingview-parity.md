@@ -90,9 +90,9 @@ Status legend:
 | Text annotation, price label | ✅ | ✅ | |
 | Magnet (off, weak, strong), lock all, hide all, remove all | ✅ | ✅ | |
 | Undo and redo | ✅ | ◐ | `Ctrl+Z` undoes, `Ctrl+Shift+Z` / `Ctrl+Y` redoes, 100 steps. Drawings only; resets on symbol switch. [Drawing tools](/chartgen/guides/web/#drawing-tools) |
-| Per-drawing styling (color, width, line style) | ✅ | ✅ | Floating style bar; rectangle fill and text color/size too. Missing vs TradingView: style templates, extend-left/right and arrow options, text bold/italic/background, per-timeframe visibility. [Drawing tools](/chartgen/guides/web/#drawing-tools) |
+| Per-drawing styling (color, width, line style) | ✅ | ✅ | Floating style bar; fill color for the rectangle and the measure bands, text color/size, and the entry line color of positions. Missing vs TradingView: style templates, extend-left/right and arrow options, text bold/italic/background, per-timeframe visibility. [Drawing tools](/chartgen/guides/web/#drawing-tools) |
 | Measure tools (price range, date range, date and price range) | ✅ | ✅ | No volume sum. [Drawing tools](/chartgen/guides/web/#drawing-tools) |
-| Fib extension (trend-based) | ✅ | ✅ | TradingView's default levels; levels are not editable. |
+| Fib extension (trend-based) | ✅ | ◐ | TradingView's default levels, not editable; no fill between levels. |
 | Pitchfork (Andrews) | ✅ | ◐ | Original pitchfork only; no Schiff or modified Schiff variants, no inner levels. |
 | Long and short position | ✅ | ◐ | Entry, target and stop handles with risk/reward; no account size, quantity or P&L. |
 | Gann, Elliott and chart patterns, other fib tools | ✅ | ❌ | Not implemented. |

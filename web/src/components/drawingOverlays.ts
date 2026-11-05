@@ -8,26 +8,31 @@
 
 import {
   registerOverlay,
+  utils,
+  type Bounding,
   type Coordinate,
   type OverlayCreateFiguresCallbackParams,
   type OverlayFigure,
 } from "klinecharts";
 
+import { formatColor } from "../lib/color";
 import {
   arrowHead,
   barsBetween,
   clampPosition,
   dateRangeLabel,
-  DEFAULT_POSITION_BARS,
   defaultPosition,
   FIB_EXT_LEVELS,
   fibExtensionLevels,
   formatAmount,
   pitchforkLines,
+  positionBars,
   positionLabels,
   priceRangeLabel,
   type PositionKind,
 } from "../lib/drawingMath";
+import { FONT_FAMILY, PALETTES } from "../lib/theme";
+import { theme } from "../stores/layout";
 import { pointTimestamp, type TimeAxis } from "../stores/drawings";
 
 type Params = OverlayCreateFiguresCallbackParams;
@@ -37,7 +42,9 @@ const UP = { fill: "rgba(41, 98, 255, 0.15)", line: "#2962ff" };
 const DOWN = { fill: "rgba(242, 54, 69, 0.15)", line: "#f23645" };
 const GREEN = { fill: "rgba(8, 153, 129, 0.22)", line: "#089981" };
 const RED = { fill: "rgba(242, 54, 69, 0.22)", line: "#f23645" };
-const FIB_COLORS = [
+// Level colors in TradingView's order; the dark theme gets lighter blue and
+// purple so they stay readable on the dark background.
+const FIB_COLORS_LIGHT = [
   "#787b86",
   "#f23645",
   "#ff9800",
@@ -50,11 +57,34 @@ const FIB_COLORS = [
   "#f23645",
   "#ff5252",
 ];
+const FIB_COLORS_DARK = FIB_COLORS_LIGHT.map((c) =>
+  c === "#2962ff" ? "#5b8cff" : c === "#9c27b0" ? "#ba68c8" : c,
+);
 
 let axisOf: () => TimeAxis | null = () => null;
 /** Bar timing for the time span of points beyond the last bar. */
 export function setOverlayAxis(fn: () => TimeAxis | null): void {
   axisOf = fn;
+}
+
+// What a fresh long/short position is sized from, read once when the tool is armed.
+let positionSize: { reward: number | null; bars: number | null } = { reward: null, bars: null };
+export function setPositionSize(size: { reward: number | null; bars: number | null }): void {
+  positionSize = size;
+}
+
+const TEXT_PAD = 6;
+/**
+ * Center of a box [left, right] for a label: the middle of the part inside
+ * the pane (so it stays readable when the box runs off an edge), then
+ * clamped so a label of `text` fits inside the pane.
+ */
+function labelX(left: number, right: number, text: string, size: number, b: Bounding): number {
+  const lo = Math.max(left, 0);
+  const hi = Math.min(right, b.width);
+  const mid = lo <= hi ? (lo + hi) / 2 : (left + right) / 2;
+  const half = (utils.calcTextWidth(text, size, "normal", FONT_FAMILY) + 2 * TEXT_PAD) / 2;
+  return Math.min(Math.max(mid, half), Math.max(half, b.width - half));
 }
 
 /** Latest labels each overlay drew, read by the E2E suite (DEV builds only). */
@@ -115,7 +145,6 @@ function label(
   baseline: "top" | "bottom" | "middle",
   o: Params["overlay"],
 ): OverlayFigure {
-  const size = (o.styles as { text?: { size?: number } } | null)?.text?.size;
   return {
     type: "text",
     attrs: { x, y, text, align: "center", baseline },
@@ -123,9 +152,10 @@ function label(
       style: "fill",
       color: "#ffffff",
       backgroundColor: bg,
-      size: size ?? 12,
-      paddingLeft: 6,
-      paddingRight: 6,
+      size: textSize(o),
+      family: FONT_FAMILY,
+      paddingLeft: TEXT_PAD,
+      paddingRight: TEXT_PAD,
       paddingTop: 3,
       paddingBottom: 3,
       borderRadius: 3,
@@ -133,6 +163,11 @@ function label(
     ignoreEvent: true,
   };
 }
+
+const textSize = (o: Params["overlay"], fallback = 12): number =>
+  (o.styles as { text?: { size?: number } } | null)?.text?.size ?? fallback;
+
+const LABEL_H = 22;
 
 const pricePrecision = ({ precision, yAxis }: Params) =>
   (yAxis?.isInCandle() ?? true) ? precision.price : precision.excludePriceVolumeMax;
@@ -181,12 +216,17 @@ const measure = (name: string, price: boolean, date: boolean) =>
       if (price) figs.push(arrow({ x: xm, y: a.y }, { x: xm, y: b.y }, line));
       if (date) figs.push(arrow({ x: a.x, y: ym }, { x: b.x, y: ym }, line));
       const top = Math.min(a.y, b.y);
+      const bottom = Math.max(a.y, b.y);
       const texts: string[] = [];
       if (price) texts.push(priceRangeLabel(val(pa) ?? 0, val(pb) ?? 0, pricePrecision(p)));
       if (date) texts.push(span(p, pa, pb, a, b));
-      // Stacked above the band: the last text sits closest to it.
+      // Stacked above the band (the last text closest to it); below it when
+      // there is no room above, e.g. a band at the top of the pane.
+      const below = top - 4 - texts.length * LABEL_H < 0;
       texts.forEach((text, i) => {
-        figs.push(label(xm, top - 4 - (texts.length - 1 - i) * 22, text, line, "bottom", overlay));
+        const x = labelX(Math.min(a.x, b.x), Math.max(a.x, b.x), text, textSize(overlay), p.bounding);
+        const y = below ? bottom + 4 + i * LABEL_H : top - 4 - (texts.length - 1 - i) * LABEL_H;
+        figs.push(label(x, y, text, line, below ? "top" : "bottom", overlay));
       });
       logLabels(overlay.id, texts);
       return figs;
@@ -216,9 +256,11 @@ registerOverlay({
     const prec = pricePrecision(p);
     const text = (overlay.styles as { text?: { color?: string; size?: number } } | null)?.text;
     const labels: string[] = [];
+    const colors = theme() === "dark" ? FIB_COLORS_DARK : FIB_COLORS_LIGHT;
+    const capBg = formatColor(PALETTES[theme()].bg, 0.85);
     const figs = fibExtensionLevels(a, b, k).flatMap(({ level, value }) => {
       const y = yAxis?.convertToPixel(value) ?? ck.y + (c[1]!.y - c[0]!.y) * level;
-      const color = userOr(overlay, "line", "color", FIB_COLORS[FIB_EXT_LEVELS.indexOf(level as never)] ?? "#787b86");
+      const color = userOr(overlay, "line", "color", colors[FIB_EXT_LEVELS.indexOf(level as never)] ?? "#787b86");
       const caption = `${level} (${formatAmount(value, prec)})`;
       labels.push(caption);
       return [
@@ -230,7 +272,18 @@ registerOverlay({
         {
           type: "text",
           attrs: { x: ck.x + 4, y, text: caption, baseline: "bottom" },
-          styles: { color: text?.color ?? color, size: text?.size ?? 11, backgroundColor: "transparent" },
+          styles: {
+            style: "fill",
+            color: text?.color ?? color,
+            size: text?.size ?? 12,
+            weight: "500",
+            family: FONT_FAMILY,
+            backgroundColor: capBg,
+            paddingLeft: 2,
+            paddingRight: 2,
+            paddingTop: 2,
+            paddingBottom: 2,
+          },
           ignoreEvent: true,
         },
       ] as OverlayFigure[];
@@ -279,7 +332,8 @@ for (const [name, kind] of Object.entries(POSITION_KINDS)) {
       if (!e || !t || !s || pe == null || pt == null || ps == null) return [];
       const left = Math.min(e.x, t.x);
       const right = Math.max(e.x, t.x);
-      const mid = (left + right) / 2;
+      // Labels sit on the visible part of the box.
+      const at = (text: string) => labelX(left, right, text, textSize(overlay), p.bounding);
       const rect = (y0: number, y1: number, look: typeof GREEN): OverlayFigure => ({
         type: "polygon",
         attrs: {
@@ -299,9 +353,9 @@ for (const [name, kind] of Object.entries(POSITION_KINDS)) {
         rect(e.y, t.y, GREEN),
         rect(e.y, s.y, RED),
         { type: "line", attrs: { coordinates: [{ x: left, y: e.y }, { x: right, y: e.y }] }, styles: { color: line } },
-        label(mid, t.y, text.target, GREEN.line, t.y <= e.y ? "bottom" : "top", overlay),
-        label(mid, s.y, text.stop, RED.line, s.y >= e.y ? "top" : "bottom", overlay),
-        label(mid, e.y, text.ratio, line, "middle", overlay),
+        label(at(text.target), t.y, text.target, GREEN.line, t.y <= e.y ? "bottom" : "top", overlay),
+        label(at(text.stop), s.y, text.stop, RED.line, s.y >= e.y ? "top" : "bottom", overlay),
+        label(at(text.ratio), e.y, text.ratio, line, "middle", overlay),
       ];
     },
     performEventMoveForDrawing: ({ currentStep, points, performPoint }) => {
@@ -310,8 +364,8 @@ for (const [name, kind] of Object.entries(POSITION_KINDS)) {
       const entry = performPoint.value;
       const at = performPoint.dataIndex;
       if (typeof entry !== "number" || typeof at !== "number") return;
-      const d = defaultPosition(kind, entry);
-      const x = at + DEFAULT_POSITION_BARS;
+      const d = defaultPosition(kind, entry, positionSize.reward);
+      const x = at + positionBars(positionSize.bars);
       points[1] = { dataIndex: x, value: d.target };
       points[2] = { dataIndex: x, value: d.stop };
     },
@@ -325,11 +379,13 @@ for (const [name, kind] of Object.entries(POSITION_KINDS)) {
         other.dataIndex = performPoint.dataIndex;
       }
       if (e.value === undefined || t.value === undefined || s.value === undefined) return;
-      [e.value, t.value, s.value] = clampPosition(
-        kind,
-        [e.value, t.value, s.value],
-        performPointIndex as 0 | 1 | 2,
-      );
+      // The dragged value first, then both others, so a restored record
+      // with any value on the wrong side of the entry is repaired too.
+      let v: [number, number, number] = [e.value, t.value, s.value];
+      for (const moved of [performPointIndex, 1, 2] as const) {
+        v = clampPosition(kind, v, moved as 0 | 1 | 2);
+      }
+      [e.value, t.value, s.value] = v;
     },
   });
 }

@@ -6,7 +6,7 @@
 
 import type { Page } from "@playwright/test";
 
-import { test, expect, reloadApp } from "./fixtures/app";
+import { test, expect, pickTool, reloadApp } from "./fixtures/app";
 import {
   dateRangeLabel,
   fibExtensionLevels,
@@ -58,7 +58,7 @@ async function clickAt(page: Page, at: At): Promise<void> {
 }
 
 async function place(page: Page, tool: string, clicks: At[]): Promise<void> {
-  await page.getByRole("button", { name: tool, exact: true }).click();
+  await pickTool(page, tool);
   for (const c of clicks) await clickAt(page, c);
 }
 
@@ -133,7 +133,7 @@ const CASES: Case[] = [
   {
     name: "cgShort",
     tool: "Short position",
-    clicks: [{ x: 1100, y: 280 }],
+    clicks: [{ x: 60, y: 130 }],
     points: 3,
     expected: (o) => {
       const [e, t, s] = o.points.map((p) => p.value) as [number, number, number];
@@ -187,15 +187,20 @@ test.describe("drawing tools 2", () => {
     await expect.poll(() => overlays(page)).toHaveLength(1);
     const first = (await overlays(page))[0]!;
     const [e, t, s] = first.points.map((p) => p.value) as [number, number, number];
-    expect((t - e) / e).toBeCloseTo(0.02, 4);
-    expect((e - s) / e).toBeCloseTo(0.01, 4);
+    // Sized from the visible price span: reward 10% of it, stop half of that.
+    const size = await page.evaluate(() =>
+      (window as unknown as { __chartgenPositionSize: () => { reward: number } }).__chartgenPositionSize(),
+    );
+    expect(Math.abs((t - e) / size.reward - 1)).toBeLessThan(0.02);
+    expect(e - s).toBeCloseTo((t - e) / 2, 6);
     await expect.poll(async () => (await overlays(page))[0]?.labels?.[2]).toBe(
       "Risk/Reward Ratio: 2.00",
     );
 
     // Hover the zone first so the handles become active, then drag the target.
     const target = first.pixels[1]!;
-    await move(page, { x: target.x - 40, y: target.y + 10 });
+    const entry = first.pixels[0]!;
+    await move(page, { x: target.x - 10, y: (entry.y + target.y) / 2 });
     await move(page, target);
     const box = (await host(page).boundingBox())!;
     await page.mouse.down();
@@ -225,8 +230,73 @@ test.describe("drawing tools 2", () => {
       await place(page, c.tool, c.clicks);
     }
     await expect.poll(() => overlays(page)).toHaveLength(CASES.length);
+    expect((await stored(page))?.map((r) => r.name)).toEqual(CASES.map((c) => c.name));
     await move(page, { x: 20, y: 20 });
     const dir = process.env.DRAWING_SHOTS_DIR;
     if (dir) await page.screenshot({ path: `${dir}/all-tools.png` });
+  });
+
+  test("toolbar fits at 1280x720, in both themes", async ({ bootedApp: page }) => {
+    await page.setViewportSize({ width: 1280, height: 720 });
+    const dir = process.env.DRAWING_SHOTS_DIR;
+    for (const scheme of ["dark", "light"] as const) {
+      await page.emulateMedia({ colorScheme: scheme });
+      await reloadApp(page);
+      // The footer stays on screen, the tools section scrolls only as a fallback.
+      for (const name of ["Remove all drawings", "Undo", "Lock all drawings"]) {
+        const box = await page.getByRole("button", { name }).boundingBox();
+        expect(box, name).not.toBeNull();
+        expect(box!.y + box!.height, name).toBeLessThanOrEqual(720);
+      }
+      const bar = page.getByRole("toolbar", { name: "Drawing tools" });
+      expect(await bar.evaluate((el) => el.scrollHeight <= el.clientHeight)).toBe(true);
+      await page.getByRole("button", { name: "Measure tools" }).click();
+      await expect(page.getByRole("menuitem")).toHaveCount(3);
+      if (dir) await page.screenshot({ path: `${dir}/toolbar-${scheme}.png` });
+      await page.keyboard.press("Escape");
+    }
+  });
+
+  test("group flyouts: keyboard, last-used tool, Esc, shortcuts", async ({ bootedApp: page }) => {
+    // Chevron opens the menu on the group's current tool; arrows move, Enter arms.
+    await page.getByRole("button", { name: "Lines tools" }).click();
+    await expect(page.getByRole("menuitem", { name: "Trend line", exact: true })).toBeFocused();
+    await page.keyboard.press("ArrowDown");
+    await expect(page.getByRole("menuitem", { name: "Ray", exact: true })).toBeFocused();
+    await page.keyboard.press("Enter");
+    await expect(page.getByRole("menu")).toHaveCount(0);
+    const ray = page.getByRole("button", { name: "Ray", exact: true });
+    await expect(ray).toHaveAttribute("aria-pressed", "true");
+
+    // Esc inside the flyout closes only the flyout.
+    await page.getByRole("button", { name: "Lines tools" }).click();
+    await page.keyboard.press("Escape");
+    await expect(page.getByRole("menu")).toHaveCount(0);
+    await expect(ray).toHaveAttribute("aria-pressed", "true");
+    await page.keyboard.press("Escape");
+    await expect(ray).toHaveAttribute("aria-pressed", "false");
+
+    // The group remembers the last tool across a reload.
+    await reloadApp(page);
+    await expect(page.getByRole("button", { name: "Ray", exact: true })).toBeVisible();
+
+    // Alt+T arms the trend line and the group follows.
+    await page.keyboard.press("Alt+KeyT");
+    await expect(page.getByRole("button", { name: "Trend line", exact: true })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+  });
+
+  test("press and hold on a group button opens its flyout", async ({ bootedApp: page }) => {
+    const btn = page.getByRole("button", { name: "Price range", exact: true });
+    const box = (await btn.boundingBox())!;
+    await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+    await page.mouse.down();
+    await expect(page.getByRole("menuitem", { name: "Date range", exact: true })).toBeVisible();
+    await page.mouse.up();
+    // The release is not a click: nothing got armed.
+    await expect(page.getByRole("menuitem", { name: "Date range", exact: true })).toBeVisible();
+    await expect(btn).toHaveAttribute("aria-pressed", "false");
   });
 });

@@ -134,6 +134,31 @@ export function reloadApp(page: Page): Promise<void> {
   return bootApp(page, () => page.reload());
 }
 
+/**
+ * Arm a drawing tool by its name. The toolbar shows one button per group (the
+ * group's last-used tool), so any other tool is picked from the group's
+ * flyout; the group button then shows that tool.
+ */
+export async function pickTool(page: Page, label: string): Promise<void> {
+  const direct = page.getByRole("button", { name: label, exact: true });
+  if ((await direct.count()) > 0) {
+    await direct.click();
+    return;
+  }
+  const chevrons = page.locator("[data-testid^=tool-group-more-]");
+  const n = await chevrons.count();
+  for (let i = 0; i < n; i++) {
+    await chevrons.nth(i).click();
+    const item = page.getByRole("menuitem", { name: label, exact: true });
+    if ((await item.count()) > 0) {
+      await item.click();
+      return;
+    }
+    await page.keyboard.press("Escape");
+  }
+  throw new Error(`no drawing tool named ${label}`);
+}
+
 export const test = base.extend<AppOptions & AppFixtures>({
   push: [true, { option: true }],
   bootedApp: async ({ page, push }, use) => {

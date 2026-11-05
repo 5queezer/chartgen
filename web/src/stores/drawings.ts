@@ -30,8 +30,8 @@ export const DRAWING_NAMES = [
 
 export type DrawingName = (typeof DRAWING_NAMES)[number];
 
-/** Points a drawing needs to be valid (default 1); shorter stored records are dropped. */
-const MIN_POINTS: Partial<Record<DrawingName, number>> = {
+/** Exact point count of the multi-point tools; stored records with another count are dropped. */
+const EXACT_POINTS: Partial<Record<DrawingName, number>> = {
   cgFibExt: 3,
   cgPitchfork: 3,
   cgPriceRange: 2,
@@ -214,7 +214,8 @@ export function parseRecord(x: unknown): DrawingRecord | null {
   if (!isPlainObject(x) || !isDrawingName(x.name)) return null;
   if (!Array.isArray(x.points) || x.points.length === 0) return null;
   if (x.points.length > MAX_POINTS) return null;
-  if (x.points.length < (MIN_POINTS[x.name] ?? 1)) return null;
+  const exact = EXACT_POINTS[x.name];
+  if (exact !== undefined && x.points.length !== exact) return null;
   const points = x.points.map(parsePoint);
   if (points.some((p) => p === null)) return null;
   const rec: DrawingRecord = {
@@ -251,6 +252,8 @@ export interface TimeAxis {
   firstTs: number;
   lastTs: number;
   count: number;
+  /** The loaded bar timestamps: real times for indices inside the data (gaps included). */
+  timestamps: readonly number[];
   /** Most common recent bar spacing in ms (robust against weekend gaps). */
   intervalMs: number;
 }
@@ -277,6 +280,7 @@ export function timeAxisOf(timestamps: readonly number[]): TimeAxis | null {
     firstTs: timestamps[0] as number,
     lastTs: timestamps[n - 1] as number,
     count: n,
+    timestamps,
     intervalMs,
   };
 }
@@ -326,6 +330,8 @@ export function pointTimestamp(
 ): number | undefined {
   if (p.timestamp !== undefined) return p.timestamp;
   if (axis === null || p.dataIndex === undefined) return undefined;
+  const real = axis.timestamps[p.dataIndex];
+  if (real !== undefined && Number.isInteger(p.dataIndex)) return real;
   if (p.dataIndex < 0) return axis.firstTs + p.dataIndex * axis.intervalMs;
   return axis.lastTs + (p.dataIndex - (axis.count - 1)) * axis.intervalMs;
 }

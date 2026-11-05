@@ -22,6 +22,9 @@ import type { DrawingItem } from "./DrawingToolbar";
 const DEFAULT_LINE = "#1677ff";
 const DEFAULT_FILL = "rgba(41, 98, 255, 0.15)";
 const GAP = 8;
+const MEASURE: readonly string[] = ["cgPriceRange", "cgDateRange", "cgDatePriceRange"];
+const MEASURE_DOWN = { line: "#f23645", fill: "rgba(242, 54, 69, 0.15)" };
+const POSITION_LINE = "#787b86";
 
 const seg =
   "min-w-7 h-7 px-1 inline-flex items-center justify-center rounded cursor-pointer text-xs text-[color:var(--color-fg-muted)] hover:bg-[color:var(--color-border)] aria-pressed:bg-[color:var(--color-border)] aria-pressed:text-[color:var(--color-accent)] disabled:opacity-40 disabled:cursor-not-allowed";
@@ -83,10 +86,27 @@ export function DrawingStyleBar(props: DrawingStyleBarProps): JSX.Element {
   const disabled = () => d().lock || d().offRange;
   const stored = (k: "borderColor" | "color") =>
     (d().styles?.polygon as Record<string, string> | undefined)?.[k];
+  const isMeasure = () => MEASURE.includes(d().name);
+  const isPosition = () => d().name === "cgLong" || d().name === "cgShort";
+  // Measure bands are blue when price (date range: time) moves up or right, else red.
+  const down = () => {
+    const [a, b] = [d().points[0], d().points.at(-1)];
+    if (!a || !b) return false;
+    return d().name === "cgDateRange" ? b.timestamp < a.timestamp : b.value < a.value;
+  };
   const color = () =>
     style().color ??
-    (isText() ? PALETTES[theme()].fg : (isRect() ? stored("borderColor") : undefined) ?? DEFAULT_LINE);
-  const fill = () => style().fill ?? stored("color") ?? DEFAULT_FILL;
+    (isText()
+      ? PALETTES[theme()].fg
+      : isMeasure()
+        ? down()
+          ? MEASURE_DOWN.line
+          : DEFAULT_LINE
+        : isPosition()
+          ? POSITION_LINE
+          : (isRect() ? stored("borderColor") : undefined) ?? DEFAULT_LINE);
+  const fill = () =>
+    style().fill ?? stored("color") ?? (isMeasure() && down() ? MEASURE_DOWN.fill : DEFAULT_FILL);
 
   const divider = () => <span class="w-px h-5 bg-[color:var(--color-border)] mx-1" />;
 
@@ -107,7 +127,7 @@ export function DrawingStyleBar(props: DrawingStyleBarProps): JSX.Element {
       <fieldset disabled={disabled()} class="contents">
         <ColorPicker
           value={color()}
-          label={isText() ? "Text color" : "Line color"}
+          label={isText() ? "Text color" : isPosition() ? "Entry line color" : "Line color"}
           onChange={(c) => props.onChange({ color: c }, "color")}
         />
         <Show when={hasFill()}>

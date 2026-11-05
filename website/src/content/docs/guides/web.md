@@ -365,14 +365,20 @@ is rejected and the field turns red.
 
 ## Drawing tools
 
-The vertical toolbar on the left of the chart holds the drawing tools:
-trend line, ray, extended line, horizontal line, horizontal ray,
-vertical line, parallel channel, fib retracement, fib extension,
-rectangle, text annotation and price label, then three groups set off by
-dividers: **Measure** (price range, date range, date and price range),
-**Pitchfork** and **Forecasting** (long and short position). Below them are a magnet toggle (off, weak,
-strong), lock all, hide all and remove all (asks for confirmation). The
-button at the top switches the cursor between crosshair and arrow.
+The vertical toolbar on the left of the chart holds the drawing tools in
+six groups, one button each: **Lines** (trend line, ray, extended line,
+horizontal line, horizontal ray, vertical line, parallel channel), **Fib**
+(retracement, trend-based extension), **Pitchfork**, **Shapes and text**
+(rectangle, text annotation, price label), **Measure** (price range, date
+range, date and price range) and **Forecasting** (long and short position).
+A group button shows the tool you used last and arms it on click. Open the
+flyout with the small chevron at its corner, or press and hold the button,
+to see every tool of the group by name; arrow keys move, `Enter` picks and
+`Esc` closes it. The last tool of each group is remembered in the browser,
+and the `Alt` shortcuts below update it too. Below the groups, always
+visible, are a magnet toggle (off, weak, strong), lock all, hide all, undo,
+redo and remove all (asks for confirmation). The button at the top switches
+the cursor between crosshair and arrow.
 
 A tool is armed for exactly one drawing: pick it, click the chart to
 place the points, and the tool is released. Pick it again or press `Esc`
@@ -382,20 +388,25 @@ to cancel. Drawings pan and zoom with the chart.
   and `+1,234.50 (+2.31%)`; date range a horizontal arrow and
   `12 bars, 3d 4h`; date and price range a box with both. The band is
   blue when price (date range: time) moves up or right, red otherwise. The
-  fill color is editable in the style bar.
+  style bar shows that color and a fill color you can change. Labels move
+  below the band when there is no room above it.
 - **Fib extension (trend-based)** takes three clicks (A, B, C) and draws
   the levels 0, 0.236, 0.382, 0.5, 0.618, 0.786, 1, 1.618, 2.618, 3.618
   and 4.236 from C, offset by the A to B move, each labelled
-  `level (price)`.
+  `level (price)`. Colors are lighter in the dark theme.
 - **Pitchfork** (Andrews) takes three clicks. The median line runs from
   the first point through the midpoint of the second and third; parallels
-  run through those two. All extend to the right edge of the chart.
-- **Long position / Short position** take one click, placing the entry
-  with a target at +2% (short: -2%) and a stop at -1% (short: +1%) over 20
-  bars. Drag the entry, target or stop handle; target and stop share the
+  run through those two. All three lines extend along the median's
+  direction to the edge of the pane.
+- **Long position / Short position** take one click, placing the entry.
+  The reward (target) is 10% of the price span visible when you pick the
+  tool and the stop is half of that, so the ratio starts at 2.00 (with no
+  usable span: +2% and -1%, mirrored for a short). The box is 10% of the
+  visible bars wide, at least 20. Drag the entry, target or stop handle; target and stop share the
   right edge, and each stays on its side of the entry. Labels show price
   and percent, and `Risk/Reward Ratio: 2.00` updates while you drag. The
-  zones are green (reward) and red (risk).
+  zones are green (reward) and red (risk); the labels stay centered on the
+  part of the box that is on screen. The style bar's color is the entry line.
 - **Select** a drawing by clicking it, then press `Delete` or
   `Backspace` to remove it.
 - **Right-click** a drawing for Remove and Lock/Unlock. Locked drawings
