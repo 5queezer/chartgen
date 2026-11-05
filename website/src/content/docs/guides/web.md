@@ -185,7 +185,8 @@ While replaying:
   with a negative offset leaves its newest values blank.
 - Scrolling back still loads older history. Drawings work as usual; ones
   placed after the replay bar are drawn past the last bar. Compare lines
-  are cut at the replay bar too.
+  are cut at the replay bar too, and the Data Window shows the replay bar
+  (or the one under the crosshair), never a later one.
 - Changing the symbol, timeframe or indicators keeps the replay time: the
   new chart shows every bar that had closed by then, loading older history
   if needed. If there is none, the chart stays empty and the replay bar says
