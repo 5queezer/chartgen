@@ -570,6 +570,19 @@ legend shows controls on hover (or keyboard focus):
   their legend value is omitted. **Defaults** resets the tab being shown.
 - **×** removes the indicator. The price pane legend cannot be removed.
 
+Lines and histograms are drawn in the colors of the PNG renderer, which
+the server sends with the series. Line widths come from the server too
+([ADR-0026](/chartgen/decisions/0026-line-and-histogram-colors/)).
+Histograms are colored per bar, as on TradingView: Volume is green on up
+candles and red on down candles, MACD green above zero and red below,
+and the Awesome Oscillator green while rising. The legend and the Data
+Window show a histogram's value in the color of that bar, and label it
+by name (`Volume`, MACD's `Histogram`). A color set in the Style tab
+wins over the server's. For a histogram it recolors every bar, and a
+width set there wins over the server's line width. Clicking **Defaults**
+goes back to the server's colors. With a server older than the web app
+the chart falls back to its own rotating palette.
+
 A fresh install starts with the EMA stack, Volume and RSI, like a new
 TradingView chart with its Volume pane. Stored sets are never changed.
 
@@ -656,8 +669,10 @@ domain) leave `VITE_CHARTGEN_BASE_URL` unset — the app will hit
     payload says so. Bullish divergences are green and bearish ones red.
     The kind is inferred from the slope, because the wire carries no color.
 
-  The wire drops server-side colors, so the frontend mirrors the Rust
-  palette per indicator. The geometry code is pure TypeScript in
+  Colors come from the wire
+  ([ADR-0012](/chartgen/decisions/0012-geometry-colors-on-the-wire/));
+  the per-indicator themes above are the fallback for servers that send
+  none. The geometry code is pure TypeScript in
   `web/src/components/geometry.ts` (unit-tested), and klinecharts
   `draw` callbacks paint it. See
   [ADR-0010](/chartgen/decisions/0010-overlay-geometry-rendering/).

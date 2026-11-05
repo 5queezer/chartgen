@@ -18,6 +18,7 @@ import type { ActiveIndicator } from "../stores/indicators";
 import type { SeriesPayload } from "../types/responses";
 import { barCloseMs } from "./countdown";
 import { INITIAL_BARS, type SeriesUpdate } from "./liveFeed";
+import { colorIdxInto } from "./seriesMerge";
 
 type Indicator = SeriesPayload["indicators"][string];
 type DivLine = NonNullable<Indicator["divlines"]>[number];
@@ -171,7 +172,13 @@ function sliceIndicator(ind: Indicator, n: number, lag: Lag = {}): Indicator {
   const out: Indicator = { ...ind };
   if (ind.lines) out.lines = ind.lines.map((l) => ({ ...l, values: cut(l.values) }));
   if (ind.histogram) {
-    out.histogram = ind.histogram.map((h) => ({ ...h, values: cut(h.values) }));
+    // Per-bar colors (ADR-0026) are cut with the values; the palette is
+    // copied because `replayFrame` may add recompute colors to it.
+    out.histogram = ind.histogram.map((h) => ({
+      ...h,
+      values: cut(h.values),
+      ...(h.color_idx && { color_idx: cut(h.color_idx), palette: [...(h.palette ?? [])] }),
+    }));
   }
   if (ind.fills) {
     out.fills = ind.fills.map((f) => ({ ...f, y1: cut(f.y1), y2: cut(f.y2) }));
@@ -280,7 +287,11 @@ export function replayFrame(
       }
     };
     ind.lines?.forEach((l, k) => pick(l.values, r?.lines?.[k]?.values));
-    ind.histogram?.forEach((h, k) => pick(h.values, r?.histogram?.[k]?.values));
+    ind.histogram?.forEach((h, k) => {
+      const rh = r?.histogram?.[k];
+      pick(h.values, rh?.values);
+      if (h.color_idx) pick(h.color_idx, rh && colorIdxInto(h.palette!, rh));
+    });
     ind.fills?.forEach((f, k) => {
       pick(f.y1, r?.fills?.[k]?.y1);
       pick(f.y2, r?.fills?.[k]?.y2);

@@ -77,6 +77,30 @@ describe("dataWindowRows", () => {
     expect(d.indicators[1]!.rows[0]!.value).toBe("-2.00");
   });
 
+  it("uses server colors: a line's, and a histogram's per bar unless overridden", () => {
+    const colored: SeriesPayload = {
+      ...series,
+      indicators: {
+        volume: {
+          label: "Volume",
+          is_overlay: false,
+          lines: [{ index: 0, label: "Volume MA", values: [1, 2, 3], color: "rgba(41,98,255,1)" }],
+          histogram: [
+            { index: 0, label: "Volume", values: [1, 2, 3], palette: ["#0f0", "#f00"], color_idx: [0, 1, 0] },
+          ],
+        },
+      },
+    };
+    const rows = (at: number, styles = {}) =>
+      dataWindowRows(colored, at, styles, [], opts).indicators[0]!.rows;
+    expect(rows(1).map((r) => [r.label, r.color])).toEqual([
+      ["Volume MA", "rgba(41,98,255,1)"],
+      ["Volume", "#f00"],
+    ]);
+    expect(rows(2)[1]!.color).toBe("#0f0");
+    expect(rows(1, { volume: { plots: { hist0: { color: "#ffeb3b" } } } })[1]!.color).toBe("#ffeb3b");
+  });
+
   it("skips indicators outside the visible set", () => {
     const d = dataWindowRows(series, 1, {}, [], { ...opts, visible: new Set(["rsi"]) });
     expect(d.indicators.map((s) => s.key)).toEqual(["rsi"]);

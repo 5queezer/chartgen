@@ -52,14 +52,18 @@ import {
 } from "klinecharts";
 
 import {
+  barColor,
   figureOverrides,
   figureStyle,
+  plotColorAt,
   plotsOf,
   resolveOverride,
   resolvePlot,
+  type PlotInfo,
 } from "../lib/plotStyle";
 import {
   indicatorName,
+  plotKey,
   type ActiveIndicator,
   type IndicatorStyle,
 } from "../stores/indicators";
@@ -131,10 +135,13 @@ export function paletteColor(name: string, index: number): string {
 }
 
 /**
- * Figure-style mapping for user plot overrides (ADR-0017). The user's
- * `IndicatorStyle` rides on the klinecharts indicator instance as its
- * `extendData`, so a style change is one `overrideIndicator` (which
- * recalculates and repaints) and never touches the data or the server.
+ * Figure-style mapping for user plot overrides (ADR-0017) over the server's
+ * plot colors (ADR-0026). The user's `IndicatorStyle` and the plots'
+ * defaults ride on the klinecharts indicator instance as its `extendData`,
+ * so a style change is one `overrideIndicator` (which recalculates and
+ * repaints) and never touches the data or the server. `bar` is the server
+ * color of the histogram bar being drawn: it beats the plot default, not
+ * the user's color.
  */
 function plotFigureStyle(
   name: string,
@@ -142,43 +149,51 @@ function plotFigureStyle(
   plotIndex: number,
   colorIdx: number,
   indicator: { extendData?: unknown },
+  bar?: string,
 ): Record<string, unknown> {
-  const ext = indicator.extendData as IndicatorStyle | undefined;
+  const ext = indicator.extendData as FigureExtend | undefined;
+  const key = plotKey(kind, plotIndex);
+  const d = ext?.defaults[key];
   return figureStyle(
     kind,
-    resolveOverride(ext?.plots[`${kind}${plotIndex}`], paletteColor(name, colorIdx)),
+    resolveOverride(ext?.plots[key], bar ?? d?.color ?? paletteColor(name, colorIdx), d?.width),
   );
 }
 
 /**
- * klinecharts `extendData` of an indicator: the user's overrides keyed by
- * figure key for the plots of the current payload (labels already matched).
+ * klinecharts `extendData` of an indicator: the user's overrides and the
+ * plots' default color and width (server's, else the palette's), both keyed
+ * by figure key for the plots of the current payload (labels already matched).
  */
+interface FigureExtend extends IndicatorStyle {
+  defaults: Record<string, { color: string; width: number }>;
+}
+
 function extendFor(
   name: string,
   ind: NonNullable<SeriesPayload["indicators"][string]> | undefined,
   style: IndicatorStyle | undefined,
-): IndicatorStyle {
-  return ind
-    ? figureOverrides(plotsOf(ind, (n) => paletteColor(name, n)), style)
-    : NO_STYLE;
+): FigureExtend {
+  if (!ind) return NO_STYLE;
+  const plots = plotsOf(ind, (n) => paletteColor(name, n));
+  const defaults = Object.fromEntries(
+    plots.map((p) => [plotKey(p.kind, p.index), { color: p.defaultColor, width: p.defaultWidth }]),
+  );
+  return { ...figureOverrides(plots, style), defaults };
 }
 
 /** Extend data of an indicator without overrides; klinecharts ignores an undefined override. */
-const NO_STYLE: IndicatorStyle = { plots: {} };
+const NO_STYLE: FigureExtend = { plots: {}, defaults: {} };
 
-/** Legend entries of an indicator with the user's overrides applied; hidden plots are omitted. */
+/** Plots of an indicator the legend shows: hidden plots are omitted. */
 function legendPlots(
   name: string,
   ind: NonNullable<SeriesPayload["indicators"][string]>,
   style: IndicatorStyle | undefined,
-): Array<{ label: string; color: string; kind: "line" | "hist"; index: number }> {
-  return plotsOf(ind, (n) => paletteColor(name, n)).flatMap((p) => {
-    const r = resolvePlot(p, style);
-    return r.visible
-      ? [{ label: p.label, color: r.color, kind: p.kind, index: p.index }]
-      : [];
-  });
+): PlotInfo[] {
+  return plotsOf(ind, (n) => paletteColor(name, n)).filter(
+    (p) => resolvePlot(p, style).visible,
+  );
 }
 
 function indicatorRegName(name: string): string {
@@ -191,6 +206,11 @@ function lineStashKey(name: string, i: number): string {
 
 function histStashKey(name: string, i: number): string {
   return `chartgen_${name}_hist${i}`;
+}
+
+/** Stash key of a histogram bar's server color (ADR-0026). */
+function histColorStashKey(name: string, i: number): string {
+  return `chartgen_${name}_hist${i}_color`;
 }
 
 const registeredIndicators = new Set<string>();
@@ -349,7 +369,10 @@ function ensureRegistered(name: string, shape: IndicatorShape): void {
     title: string;
     type?: "line" | "bar";
     baseValue?: number;
-    styles?: (data: unknown, indicator: { extendData?: unknown }) => Record<string, unknown>;
+    styles?: (
+      data: { current: { kLineData?: KLineData } },
+      indicator: { extendData?: unknown },
+    ) => Record<string, unknown>;
   }> = [
     // Typeless figures draw nothing but feed klinecharts's y-axis
     // auto-scale: fill edges and the payload y_range (`valueExtents`).
@@ -372,12 +395,22 @@ function ensureRegistered(name: string, shape: IndicatorShape): void {
     // Histograms are placed after lines in the palette rotation so a
     // MACD-style (2 lines + 1 hist) keeps line0/line1/hist0 distinct.
     const colorIdx = shape.lines + i;
+    // Each bar takes its server color (stashed on its KLineData) unless the
+    // user set the histogram's color.
     figures.push({
       key: `hist${i}`,
       title: "",
       type: "bar",
       baseValue: 0,
-      styles: (_d, ind) => plotFigureStyle(name, "hist", i, colorIdx, ind),
+      styles: (d, ind) =>
+        plotFigureStyle(
+          name,
+          "hist",
+          i,
+          colorIdx,
+          ind,
+          d.current.kLineData?.[histColorStashKey(name, i)] as string | undefined,
+        ),
     });
   }
 
@@ -553,6 +586,8 @@ function seriesToKLines(
         const values = hist[hi]?.values;
         if (!values) continue;
         kline[histStashKey(name, hi)] = values[i] ?? null;
+        const color = barColor(hist[hi], i);
+        if (color !== undefined) kline[histColorStashKey(name, hi)] = color;
       }
     }
     compare.forEach((line, k) => {
@@ -563,12 +598,13 @@ function seriesToKLines(
   return klines;
 }
 
-function lastFinite(values: Array<number | null>): number | null {
+/** Index of the last finite value, or -1. */
+function lastFiniteIndex(values: Array<number | null>): number {
   for (let i = values.length - 1; i >= 0; i--) {
     const v = values[i];
-    if (typeof v === "number" && Number.isFinite(v)) return v;
+    if (typeof v === "number" && Number.isFinite(v)) return i;
   }
-  return null;
+  return -1;
 }
 
 function valueAt(
@@ -1043,18 +1079,17 @@ export function Chart(props: ChartProps): JSX.Element {
       if (!paneMap[name]) continue; // pane not yet created (or skipped)
 
       if ((ind.lines?.length ?? 0) + (ind.histogram?.length ?? 0) === 0) continue;
-      const headerLines: PaneHeaderLine[] = legendPlots(
-        name,
-        ind,
-        props.styles?.[name],
-      ).map((p) => {
+      const style = props.styles?.[name];
+      const headerLines: PaneHeaderLine[] = legendPlots(name, ind, style).map((p) => {
         const values =
           (p.kind === "line" ? ind.lines![p.index] : ind.histogram![p.index])!
             .values;
+        // A histogram's legend takes the color of the bar it reads.
+        const at = xi !== null ? xi : lastFiniteIndex(values);
         return {
           label: p.label,
-          value: xi !== null ? valueAt(values, xi) : lastFinite(values),
-          color: p.color,
+          value: valueAt(values, at),
+          color: plotColorAt(p, ind, style, at),
         };
       });
 
@@ -1145,13 +1180,14 @@ export function Chart(props: ChartProps): JSX.Element {
   });
 
   // Line labels per indicator: overrides are matched by label (ADR-0017), so
-  // they are re-applied only when a payload changes the labels.
+  // they are re-applied only when a payload changes the labels. The server's
+  // line colors and widths (ADR-0026) ride along in `extendData` too.
   const labelSignature = createMemo(() =>
     JSON.stringify(
       Object.entries(props.series?.indicators ?? {}).map(([n, i]) => [
         n,
-        i.lines?.map((l) => l.label),
-        i.histogram?.length ?? 0,
+        i.lines?.map((l) => [l.label, l.color, l.width]),
+        i.histogram?.map((h) => [h.label, h.palette?.[0]]) ?? 0,
       ]),
     ),
   );
