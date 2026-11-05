@@ -5,6 +5,8 @@
 // the chart pages bars in and out, so an index is meaningless across
 // loads, while a timestamp maps onto any timeframe.
 
+import { isColor } from "../lib/color";
+
 export const DRAWING_NAMES = [
   "segment",
   "rayLine",
@@ -127,7 +129,7 @@ export function sanitizeStyle(x: unknown): DrawingStyle | undefined {
   const out: DrawingStyle = {};
   for (const k of ["color", "fill"] as const) {
     const v = x[k];
-    if (typeof v === "string" && v.length <= 64 && COLOR.test(v)) out[k] = v;
+    if (isColor(v)) out[k] = v;
   }
   if (
     typeof x.width === "number" &&
@@ -138,7 +140,7 @@ export function sanitizeStyle(x: unknown): DrawingStyle | undefined {
     out.width = x.width;
   }
   if (DASH_STYLES.includes(x.dash as DashStyle)) out.dash = x.dash as DashStyle;
-  if (typeof x.fontSize === "number" && x.fontSize >= 8 && x.fontSize <= 48) {
+  if (typeof x.fontSize === "number" && (FONT_SIZES as readonly number[]).includes(x.fontSize)) {
     out.fontSize = x.fontSize;
   }
   return Object.keys(out).length > 0 ? out : undefined;

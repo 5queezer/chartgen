@@ -25,7 +25,7 @@ import {
   type OverlayEvent,
 } from "klinecharts";
 
-import { isTypingContext } from "../lib/keys";
+import { isTypingContext, undoRedoKey } from "../lib/keys";
 import { createHistory } from "../stores/drawingHistory";
 import {
   loadDrawings,
@@ -268,7 +268,7 @@ const SHORTCUTS: Record<string, DrawingName> = Object.fromEntries(
 );
 
 const btnClass =
-  "relative w-9 h-9 inline-flex items-center justify-center rounded-md cursor-pointer text-[color:var(--color-fg-muted)] hover:bg-[color:var(--color-border)] hover:text-[color:var(--color-fg)] aria-pressed:bg-[color:var(--color-border)] aria-pressed:text-[color:var(--color-accent)]";
+  "relative disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-transparent w-9 h-9 inline-flex items-center justify-center rounded-md cursor-pointer text-[color:var(--color-fg-muted)] hover:bg-[color:var(--color-border)] hover:text-[color:var(--color-fg)] aria-pressed:bg-[color:var(--color-border)] aria-pressed:text-[color:var(--color-accent)]";
 const menuItemClass =
   "w-full text-left px-3 py-1.5 text-sm cursor-pointer hover:bg-[color:var(--color-border)] outline-none focus:bg-[color:var(--color-border)]";
 
@@ -316,7 +316,8 @@ export interface DrawingToolbarProps {
 export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
   const [armed, setArmed] = createSignal<DrawingName | null>(null);
   // --- Bar replay (ADR-0023) ------------------------------------------
-  createEffect(() => props.onArmedChange?.(armed() !== null));
+  // Armed tool or a selected drawing: either way Esc is the drawing's, not replay's.
+  createEffect(() => props.onArmedChange?.(armed() !== null || selectedId() !== null));
   createEffect(() => {
     if (props.disarm) untrack(cancelArmed);
   });
@@ -356,9 +357,16 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
   let armedId: string | null = null;
   let current: DrawingRecord[] = [];
   const history = createHistory<DrawingRecord[]>();
-  // Rapid edits of one style field (a slider drag) share one undo step.
-  let lastKey: string | undefined;
-  let lastAt = 0;
+  const [canUndo, setCanUndo] = createSignal(false);
+  const [canRedo, setCanRedo] = createSignal(false);
+  const syncHistory = () => {
+    setCanUndo(history.canUndo());
+    setCanRedo(history.canRedo());
+  };
+  // Storage writes of a slider drag are debounced; `symbol` is captured so a
+  // symbol switch cannot send them to the wrong key.
+  let saveTimer: number | undefined;
+  let pendingSave: { symbol: string; records: DrawingRecord[] } | null = null;
   let limitTimer: number | undefined;
   // klinecharts fires an overlay's onRightClick on mousedown, before the
   // browser's contextmenu event; the flag lets the chart menu stand down.
@@ -384,11 +392,30 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
     );
   };
 
-  const persist = () => setSaveFailed(!saveDrawings(props.symbol, current));
+  const flushSave = () => {
+    window.clearTimeout(saveTimer);
+    const p = pendingSave;
+    pendingSave = null;
+    if (p) setSaveFailed(!saveDrawings(p.symbol, p.records));
+  };
+  const persist = () => {
+    pendingSave = { symbol: props.symbol, records: current };
+    flushSave();
+  };
+  const persistSoon = () => {
+    pendingSave = { symbol: props.symbol, records: current };
+    window.clearTimeout(saveTimer);
+    saveTimer = window.setTimeout(flushSave, 300);
+  };
+  window.addEventListener("pagehide", flushSave);
+  onCleanup(() => {
+    window.removeEventListener("pagehide", flushSave);
+    flushSave();
+  });
 
   /**
    * Record the chart's present state: history for undo, then storage.
-   * Commits with the same `key` within 800 ms are one undo step.
+   * Commits with the same `key` in quick succession are one undo step.
    */
   const commit = (key?: string) => {
     const chart = props.chart;
@@ -412,14 +439,11 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
       return rec ? [rec] : [];
     });
     if (JSON.stringify(next) === JSON.stringify(current)) return;
-    const now = Date.now();
-    if (!(key !== undefined && key === lastKey && now - lastAt < 800)) {
-      history.record(current);
-    }
-    lastKey = key;
-    lastAt = now;
+    history.record(current, key);
+    syncHistory();
     current = next;
-    persist();
+    if (key === undefined) persist();
+    else persistSoon();
     syncFlags();
   };
 
@@ -448,6 +472,8 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
       ids.push(overlay.id);
       if (lockAll()) props.chart?.overrideOverlay({ id: overlay.id, lock: true });
       commit();
+      // onSelected fires before the drawing is registered, so highlight now.
+      if (selectedId() === overlay.id) highlight(overlay.id, true);
       return false;
     },
     onPressedMoveEnd: () => {
@@ -612,6 +638,7 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
   };
 
   function toggleHide() {
+    if (!hideAll()) setSelectedId(null);
     setAll({ visible: hideAll() });
   }
 
@@ -671,13 +698,19 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
 
   const travel = (to: DrawingRecord[] | undefined) => {
     if (to === undefined) return;
-    lastKey = undefined;
+    // Keep the selection on the same drawing (by position) if it survives.
+    const at = ids.indexOf(selectedId() ?? "");
+    const name = at >= 0 ? canon.get(ids[at]!)?.name : undefined;
     rebuild(to);
+    const again = at >= 0 ? ids[at] : undefined;
+    if (again !== undefined && canon.get(again)?.name === name) {
+      fromTree = again;
+      setSelectedId(again);
+    }
+    syncHistory();
     persist();
   };
-  const undo = () => {
-    travel(history.undo(current));
-  };
+  const undo = () => travel(history.undo(current));
   const redo = () => travel(history.redo(current));
 
   /** Change a drawing's look; locked or off-range drawings keep theirs. */
@@ -774,8 +807,10 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
       () => [props.chart, props.symbol] as const,
       ([chart, symbol]) => {
         if (!chart) return;
+        flushSave();
         rebuild(loadDrawings(symbol));
         history.clear();
+        syncHistory();
         setSaveFailed(false);
       },
     ),
@@ -833,13 +868,11 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
       return;
     }
     const mod = e.ctrlKey || e.metaKey;
-    if (mod && !e.altKey && e.code === "KeyZ") {
+    const ur = undoRedoKey(e);
+    if (ur !== null) {
       e.preventDefault();
-      if (e.shiftKey) redo();
+      if (ur === "redo") redo();
       else undo();
-    } else if (mod && !e.altKey && !e.shiftKey && e.code === "KeyY") {
-      e.preventDefault();
-      redo();
     } else if (e.altKey && !mod) {
       const tool = SHORTCUTS[e.code];
       if (tool) {
@@ -994,6 +1027,32 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
           <Show when={hideAll()}>
             <path d="M4 4l16 16" />
           </Show>
+        </svg>
+      </button>
+      <button
+        type="button"
+        class={btnClass}
+        aria-label="Undo"
+        title="Undo (Ctrl+Z)"
+        disabled={!canUndo()}
+        onClick={undo}
+      >
+        <svg {...svgProps}>
+          <path d="M9 14L4 9l5-5" />
+          <path d="M4 9h10a6 6 0 0 1 0 12h-3" />
+        </svg>
+      </button>
+      <button
+        type="button"
+        class={btnClass}
+        aria-label="Redo"
+        title="Redo (Ctrl+Shift+Z)"
+        disabled={!canRedo()}
+        onClick={redo}
+      >
+        <svg {...svgProps}>
+          <path d="M15 14l5-5-5-5" />
+          <path d="M20 9H10a6 6 0 0 0 0 12h3" />
         </svg>
       </button>
       <button

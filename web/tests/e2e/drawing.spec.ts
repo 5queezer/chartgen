@@ -341,6 +341,55 @@ test.describe("drawing tools", () => {
       await expect(bar(page)).toHaveCount(0);
     });
 
+    test("the bar does not cover the legend", async ({ bootedApp: page }) => {
+      await drawTrendLine(page);
+      await clickAt(page, MID);
+      await expect(bar(page)).toBeVisible();
+      const b = (await bar(page).boundingBox())!;
+      const rows = await page.locator(".pane-header").evaluateAll((els) =>
+        els.map((e) => e.getBoundingClientRect().toJSON() as DOMRect),
+      );
+      for (const r of rows) {
+        const apart =
+          r.right <= b.x || b.x + b.width <= r.left || r.bottom <= b.y || b.y + b.height <= r.top;
+        expect(apart).toBe(true);
+      }
+    });
+
+    test("undo keeps the drawing selected", async ({ bootedApp: page }) => {
+      await styleLine(page);
+      await page.keyboard.press("Control+z");
+      await expect.poll(() => style(page)).toEqual({ color: "#f23645", width: 3 });
+      await expect(bar(page)).toBeVisible();
+      await expect(bar(page).getByRole("button", { name: "Width 3" })).toHaveAttribute(
+        "aria-pressed",
+        "true",
+      );
+    });
+
+    test("undo and redo buttons", async ({ bootedApp: page }) => {
+      const undoBtn = page.getByRole("button", { name: "Undo", exact: true });
+      const redoBtn = page.getByRole("button", { name: "Redo", exact: true });
+      await expect(undoBtn).toBeDisabled();
+      await expect(redoBtn).toBeDisabled();
+      await drawTrendLine(page);
+      await expect(undoBtn).toBeEnabled();
+      await undoBtn.click();
+      await expect.poll(() => overlays(page)).toHaveLength(0);
+      await expect(redoBtn).toBeEnabled();
+      await redoBtn.click();
+      await expect.poll(() => overlays(page)).toHaveLength(1);
+      await expect(redoBtn).toBeDisabled();
+    });
+
+    test("hiding all drawings closes the bar", async ({ bootedApp: page }) => {
+      await drawTrendLine(page);
+      await clickAt(page, MID);
+      await expect(bar(page)).toBeVisible();
+      await page.getByRole("button", { name: "Hide all drawings" }).click();
+      await expect(bar(page)).toHaveCount(0);
+    });
+
     test("undo reverts style steps, redo reapplies", async ({ bootedApp: page }) => {
       await styleLine(page);
       await page.keyboard.press("Control+z");

@@ -48,6 +48,44 @@ describe("createHistory", () => {
     expect(seen).toEqual([9, 8, 7]);
   });
 
+  it("merges same-key changes within the window, not after it", () => {
+    let t = 0;
+    const h = createHistory<number>(100, () => t);
+    h.record(1, "color");
+    t = 300;
+    h.record(2, "color");
+    t = 600;
+    h.record(3, "color");
+    expect(h.undo(4)).toBe(1);
+    expect(h.canUndo()).toBe(false);
+    h.record(1, "color");
+    t = 5000;
+    h.record(2, "color");
+    expect(h.undo(3)).toBe(2);
+    expect(h.undo(2)).toBe(1);
+  });
+
+  it("different keys and unkeyed changes never merge", () => {
+    let t = 0;
+    const h = createHistory<number>(100, () => t);
+    h.record(1, "color");
+    h.record(2, "width");
+    h.record(3);
+    h.record(4);
+    expect(h.undo(5)).toBe(4);
+    expect(h.undo(4)).toBe(3);
+    expect(h.undo(3)).toBe(2);
+    expect(h.undo(2)).toBe(1);
+  });
+
+  it("reports canUndo and canRedo", () => {
+    const h = createHistory<number>();
+    expect([h.canUndo(), h.canRedo()]).toEqual([false, false]);
+    h.record(1);
+    h.undo(2);
+    expect([h.canUndo(), h.canRedo()]).toEqual([false, true]);
+  });
+
   it("clear forgets both sides", () => {
     const h = createHistory<number>();
     h.record(1);

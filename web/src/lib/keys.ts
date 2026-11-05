@@ -32,3 +32,18 @@ export function keepKeyboardFocus(): () => void {
   observer.observe(document.body, { childList: true, subtree: true });
   return () => observer.disconnect();
 }
+
+/**
+ * Undo/redo meaning of a Ctrl/Cmd keystroke, by the typed letter so QWERTZ
+ * and AZERTY work. `e.code` is the fallback only for non-Latin layouts.
+ */
+export function undoRedoKey(
+  e: Pick<KeyboardEvent, "key" | "code" | "ctrlKey" | "metaKey" | "altKey" | "shiftKey">,
+): "undo" | "redo" | null {
+  if (!(e.ctrlKey || e.metaKey) || e.altKey) return null;
+  const k = e.key.toLowerCase();
+  const letter = /^[a-z]$/.test(k) ? k : e.code === "KeyZ" ? "z" : e.code === "KeyY" ? "y" : "";
+  if (letter === "z") return e.shiftKey ? "redo" : "undo";
+  if (letter === "y" && !e.shiftKey) return "redo";
+  return null;
+}

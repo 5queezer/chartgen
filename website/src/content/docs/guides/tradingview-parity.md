@@ -89,8 +89,8 @@ Status legend:
 | Rectangle | ✅ | ✅ | |
 | Text annotation, price label | ✅ | ✅ | |
 | Magnet (off, weak, strong), lock all, hide all, remove all | ✅ | ✅ | |
-| Undo and redo | ✅ | ✅ | `Ctrl+Z` undoes, `Ctrl+Shift+Z` / `Ctrl+Y` redoes, 100 steps. [Drawing tools](/chartgen/guides/web/#drawing-tools) |
-| Per-drawing styling (color, width, line style) | ✅ | ✅ | Floating style bar on the selected drawing; rectangle fill and text size too. [Drawing tools](/chartgen/guides/web/#drawing-tools) |
+| Undo and redo | ✅ | ◐ | `Ctrl+Z` undoes, `Ctrl+Shift+Z` / `Ctrl+Y` redoes, 100 steps. Drawings only; resets on symbol switch. [Drawing tools](/chartgen/guides/web/#drawing-tools) |
+| Per-drawing styling (color, width, line style) | ✅ | ✅ | Floating style bar; rectangle fill and text color/size too. Missing vs TradingView: style templates, extend-left/right and arrow options, text bold/italic/background, per-timeframe visibility. [Drawing tools](/chartgen/guides/web/#drawing-tools) |
 | Gann, pitchfork, Elliott and chart patterns, measure, other fib tools | ✅ | ❌ | Only the eleven tools above. |
 | Drawings stored per symbol | ✅ | ◐ | `localStorage`, per browser, max 500 per symbol. Shared across layouts. [Drawing tools](/chartgen/guides/web/#drawing-tools) |
 
