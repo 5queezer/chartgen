@@ -89,8 +89,8 @@ Status legend:
 | Rectangle | ✅ | ✅ | |
 | Text annotation, price label | ✅ | ✅ | |
 | Magnet (off, weak, strong), lock all, hide all, remove all | ✅ | ✅ | |
-| Undo | ✅ | ◐ | `Ctrl+Z` undoes the last drawing action. No redo is documented. |
-| Per-drawing styling (color, width, line style) | ✅ | ❌ | Not described in the guide. |
+| Undo and redo | ✅ | ✅ | `Ctrl+Z` undoes, `Ctrl+Shift+Z` / `Ctrl+Y` redoes, 100 steps. [Drawing tools](/chartgen/guides/web/#drawing-tools) |
+| Per-drawing styling (color, width, line style) | ✅ | ✅ | Floating style bar on the selected drawing; rectangle fill and text size too. [Drawing tools](/chartgen/guides/web/#drawing-tools) |
 | Gann, pitchfork, Elliott and chart patterns, measure, other fib tools | ✅ | ❌ | Only the eleven tools above. |
 | Drawings stored per symbol | ✅ | ◐ | `localStorage`, per browser, max 500 per symbol. Shared across layouts. [Drawing tools](/chartgen/guides/web/#drawing-tools) |
 

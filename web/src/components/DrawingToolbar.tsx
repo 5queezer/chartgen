@@ -26,9 +26,11 @@ import {
 } from "klinecharts";
 
 import { isTypingContext } from "../lib/keys";
+import { createHistory } from "../stores/drawingHistory";
 import {
   loadDrawings,
   MAX_DRAWINGS,
+  overlayStyles,
   saveDrawings,
   serialize,
   timeAxisOf,
@@ -36,8 +38,10 @@ import {
   type ChartPoint,
   type DrawingName,
   type DrawingRecord,
+  type DrawingStyle,
   type TimeAxis,
 } from "../stores/drawings";
+import { DrawingStyleBar } from "./DrawingStyleBar";
 import { PALETTES } from "../lib/theme";
 import { theme } from "../stores/layout";
 
@@ -77,6 +81,7 @@ registerOverlay({
   createPointFigures: ({ overlay, coordinates }) => {
     const c = coordinates[0];
     if (!c) return [];
+    const own = (overlay.styles as { text?: { color?: string; size?: number } } | null)?.text;
     return {
       type: "text",
       attrs: {
@@ -87,10 +92,10 @@ registerOverlay({
       },
       styles: {
         style: "stroke_fill",
-        color: PALETTES[theme()].fg,
+        color: own?.color ?? PALETTES[theme()].fg,
         backgroundColor: PALETTES[theme()].surface,
         borderColor: "#2962ff",
-        size: 12,
+        size: own?.size ?? 12,
         paddingLeft: 6,
         paddingRight: 6,
         paddingTop: 3,
@@ -118,7 +123,6 @@ const RECT_STYLES = {
   },
 };
 
-const MAX_HISTORY = 100;
 const DEFAULT_TEXT = "Text";
 
 const svgProps = {
@@ -290,6 +294,8 @@ export interface DrawingsApi {
   addHorizontalLine: (price: number) => void;
   /** Remove every drawing after a confirm. */
   removeAll: () => void;
+  undo: () => void;
+  redo: () => void;
   /** True when the latest right-click landed on a drawing (its own menu wins). */
   rightClickedDrawing: () => boolean;
 }
@@ -348,11 +354,11 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
   // Restored drawings waiting for the first data load.
   let pending: DrawingRecord[] | null = null;
   let armedId: string | null = null;
-  // Drawings that have worn the selection highlight: their live styles are
-  // not the stored ones, so serialization takes the canonical styles.
-  const highlighted = new Set<string>();
   let current: DrawingRecord[] = [];
-  let history: DrawingRecord[][] = [];
+  const history = createHistory<DrawingRecord[]>();
+  // Rapid edits of one style field (a slider drag) share one undo step.
+  let lastKey: string | undefined;
+  let lastAt = 0;
   let limitTimer: number | undefined;
   // klinecharts fires an overlay's onRightClick on mousedown, before the
   // browser's contextmenu event; the flag lets the chart menu stand down.
@@ -367,7 +373,11 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
     setItems(
       reconcile(
         ids.flatMap((id) =>
-          canon.has(id) ? [{ id, ...canon.get(id)!, offRange: offRange.has(id) }] : [],
+          // Cloned: reconcile edits the objects it is given in place, which
+          // would rewrite the snapshots held by canon and the undo history.
+          canon.has(id)
+            ? [{ id, ...structuredClone(canon.get(id)!), offRange: offRange.has(id) }]
+            : [],
         ),
         { key: "id" },
       ),
@@ -376,8 +386,11 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
 
   const persist = () => setSaveFailed(!saveDrawings(props.symbol, current));
 
-  /** Record the chart's present state: history for undo, then storage. */
-  const commit = () => {
+  /**
+   * Record the chart's present state: history for undo, then storage.
+   * Commits with the same `key` within 800 ms are one undo step.
+   */
+  const commit = (key?: string) => {
     const chart = props.chart;
     if (!chart) return;
     const ax = axis();
@@ -386,16 +399,25 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
         const o = chart.getOverlayById(id);
         const [rec] = o ? serialize([o], ax) : [];
         if (rec) {
-          const styles = highlighted.has(id) ? canon.get(id)?.styles : rec.styles;
-          canon.set(id, { ...rec, styles });
+          // Live styles carry the selection highlight; the stored ones do not.
+          const old = canon.get(id);
+          canon.set(id, {
+            ...rec,
+            styles: old ? old.styles : rec.styles,
+            style: old?.style,
+          });
         }
       }
       const rec = canon.get(id);
       return rec ? [rec] : [];
     });
     if (JSON.stringify(next) === JSON.stringify(current)) return;
-    history.push(current);
-    if (history.length > MAX_HISTORY) history.shift();
+    const now = Date.now();
+    if (!(key !== undefined && key === lastKey && now - lastAt < 800)) {
+      history.record(current);
+    }
+    lastKey = key;
+    lastAt = now;
     current = next;
     persist();
     syncFlags();
@@ -461,11 +483,20 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
       ids = ids.filter((id) => id !== overlay.id);
       canon.delete(overlay.id);
       offRange.delete(overlay.id);
-      highlighted.delete(overlay.id);
       if (selectedId() === overlay.id) setSelectedId(null);
       return false;
     },
   });
+
+  /** Stored `styles` overlaid with the user's style (plus the selection thickening). */
+  const liveStyles = (rec: DrawingRecord, selected: boolean) => {
+    const own = overlayStyles(rec.name, rec.style, selected);
+    const base = (rec.styles ?? {}) as Record<string, Record<string, unknown>>;
+    return {
+      ...own,
+      polygon: { ...base.polygon, ...own.polygon },
+    };
+  };
 
   /** Add a stored drawing to the chart; needs loaded data. */
   const create = (rec: DrawingRecord, ax: TimeAxis) => {
@@ -473,7 +504,7 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
     const id = props.chart?.createOverlay({
       name: rec.name,
       points,
-      styles: rec.styles as never,
+      styles: liveStyles(rec, false) as never,
       extendData: rec.extendData,
       lock: off || rec.lock,
       visible: !off && rec.visible,
@@ -493,7 +524,6 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
     ids = [];
     canon.clear();
     offRange.clear();
-    highlighted.clear();
     setSelectedId(null);
     const ax = axis();
     if (ax === null) {
@@ -639,11 +669,28 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
     commit();
   };
 
-  const undo = () => {
-    const prev = history.pop();
-    if (prev === undefined) return;
-    rebuild(prev);
+  const travel = (to: DrawingRecord[] | undefined) => {
+    if (to === undefined) return;
+    lastKey = undefined;
+    rebuild(to);
     persist();
+  };
+  const undo = () => {
+    travel(history.undo(current));
+  };
+  const redo = () => travel(history.redo(current));
+
+  /** Change a drawing's look; locked or off-range drawings keep theirs. */
+  const setStyle = (id: string, patch: Partial<DrawingStyle>, key: string) => {
+    const rec = canon.get(id);
+    if (!rec || rec.lock || offRange.has(id)) return;
+    const style = { ...rec.style, ...patch };
+    canon.set(id, { ...rec, style });
+    props.chart?.overrideOverlay({
+      id,
+      styles: liveStyles({ ...rec, style }, selectedId() === id) as never,
+    });
+    commit(`${id}:${key}`);
   };
 
   const patchOne = (id: string, patch: { lock: boolean } | { visible: boolean }) => {
@@ -656,12 +703,9 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
   // select events and by the tree, drawn as a thicker stroke.
   const highlight = (id: string, on: boolean) => {
     if (!props.chart?.getOverlayById(id)) return;
-    const border = (canon.get(id)?.styles?.polygon as { borderSize?: number } | undefined)?.borderSize;
-    highlighted.add(id);
-    props.chart.overrideOverlay({
-      id,
-      styles: { line: { size: on ? 3 : 1 }, polygon: { borderSize: on ? 3 : (border ?? 1) } } as never,
-    });
+    const rec = canon.get(id);
+    if (!rec) return;
+    props.chart.overrideOverlay({ id, styles: liveStyles(rec, on) as never });
   };
   createEffect(
     on(selectedId, (id, prev) => {
@@ -731,7 +775,7 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
       ([chart, symbol]) => {
         if (!chart) return;
         rebuild(loadDrawings(symbol));
-        history = [];
+        history.clear();
         setSaveFailed(false);
       },
     ),
@@ -789,9 +833,13 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
       return;
     }
     const mod = e.ctrlKey || e.metaKey;
-    if (mod && !e.altKey && !e.shiftKey && e.code === "KeyZ") {
+    if (mod && !e.altKey && e.code === "KeyZ") {
       e.preventDefault();
-      undo();
+      if (e.shiftKey) redo();
+      else undo();
+    } else if (mod && !e.altKey && !e.shiftKey && e.code === "KeyY") {
+      e.preventDefault();
+      redo();
     } else if (e.altKey && !mod) {
       const tool = SHORTCUTS[e.code];
       if (tool) {
@@ -837,6 +885,11 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
     <hr class="w-6 border-0 border-t border-[color:var(--color-border)] my-1" />
   );
 
+  const selectedItem = () => {
+    const id = selectedId();
+    return id === null ? undefined : items.find((i) => i.id === id);
+  };
+
   const magnetLabel = () =>
     magnet() === "normal"
       ? "Magnet: off"
@@ -852,6 +905,8 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
     remove: (id) => removeIds([id]),
     addHorizontalLine,
     removeAll,
+    undo,
+    redo,
     rightClickedDrawing: () => rightClickHit,
   });
 
@@ -969,6 +1024,16 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
               {props.chart?.getOverlayById(m().id)?.lock ? "Unlock" : "Lock"}
             </button>
           </div>
+        )}
+      </Show>
+
+      <Show when={selectedItem()}>
+        {(item) => (
+          <DrawingStyleBar
+            chart={props.chart}
+            drawing={item()}
+            onChange={(patch, key) => setStyle(item().id, patch, key)}
+          />
         )}
       </Show>
 
