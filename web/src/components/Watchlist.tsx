@@ -42,6 +42,8 @@ export interface WatchlistProps {
   session: McpSession;
   /** Gates polling — true once auth is ready. */
   enabled: boolean;
+  /** Inside the sidebar: it supplies the width and left border. */
+  embedded?: boolean;
 }
 
 const iconButtonClass =
@@ -96,7 +98,12 @@ export function Watchlist(props: WatchlistProps): JSX.Element {
       }
     >
       <aside
-        class="watchlist w-72 shrink-0 flex flex-col min-h-0 border-l border-[color:var(--color-border)]"
+        class="watchlist flex flex-col min-h-0"
+        classList={{
+          "flex-1": props.embedded,
+          "w-72 shrink-0 border-l border-[color:var(--color-border)]":
+            !props.embedded,
+        }}
         aria-label="Watchlist"
       >
         <div class="flex items-center gap-1 px-3 py-2 border-b border-[color:var(--color-border)]">

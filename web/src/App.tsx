@@ -14,6 +14,8 @@ import { useQueryClient } from "@tanstack/solid-query";
 import type { Chart as KLineChart } from "klinecharts";
 
 import { BottomBar } from "./components/BottomBar";
+import { AlertDialog, AlertButton } from "./components/AlertDialog";
+import { AlertLines } from "./components/AlertLines";
 import { Chart, paletteColor } from "./components/Chart";
 import { DrawingToolbar } from "./components/DrawingToolbar";
 import { IndicatorChips } from "./components/IndicatorChips";
@@ -26,8 +28,9 @@ import { resolveTimeZone } from "./lib/timezone";
 import { plotsOf } from "./lib/plotStyle";
 import { StatusLine, type Status } from "./components/StatusLine";
 import { SymbolSearch } from "./components/SymbolSearch";
+import { Toasts } from "./components/Toasts";
 import { Toolbar } from "./components/Toolbar";
-import { Watchlist } from "./components/Watchlist";
+import { Sidebar } from "./components/Sidebar";
 import {
   applyChartAction,
   chartKeyAction,
@@ -57,6 +60,11 @@ import {
 } from "./lib/liveFeed";
 import type { SeriesPayload } from "./types/responses";
 import { createAlertLogger } from "./services/notifications";
+import {
+  createAlertQuotes,
+  feedChartSnapshot,
+  feedPrice,
+} from "./services/alertEngine";
 import {
   activeIndicators,
   indicatorName,
@@ -177,11 +185,16 @@ export function App(): JSX.Element {
   const [historyStatus, setHistoryStatus] = createSignal<HistoryStatus>({
     kind: "idle",
   });
+  let feedTicker = "";
   const feed = createLiveFeed({
     fetch: (request, { signal, ...args }) =>
       session.callGenerateChart({ ...request, ...args }, signal),
     reload: () => query.refetch(),
-    onSnapshot: setLive,
+    onSnapshot: (snapshot) => {
+      setLive(snapshot);
+      // Price alerts (ADR-0020) on the chart symbol's last close.
+      if (snapshot) feedChartSnapshot(feedTicker, snapshot);
+    },
     onPollStatus: setPollStatus,
     onHistoryStatus: setHistoryStatus,
   });
@@ -228,6 +241,7 @@ export function App(): JSX.Element {
         if (state.dataUpdatedAt === adoptedAt) return;
         adoptedAt = state.dataUpdatedAt;
         // A copy: the feed updates its series in place, the cache stays as loaded.
+        feedTicker = request.ticker;
         feed.reset(structuredClone(state.data), request);
       } else if (state?.status === "error" && adoptedAt !== -1) {
         adoptedAt = -1;
@@ -292,12 +306,16 @@ export function App(): JSX.Element {
     });
   });
   // ---------------------------------------------------------------------
+  // Other symbols with active alerts are evaluated from their own quotes poll.
+  createAlertQuotes(session, authReady, symbol);
 
   if (import.meta.env.DEV) {
     // E2E hook (tests/e2e/live-paging.spec.ts): what the chart holds.
     (window as unknown as Record<string, unknown>).__chartgenTest = {
       chart,
       series: () => live()?.series ?? null,
+      // Alert e2e (tests/e2e/alerts.spec.ts): inject a live price.
+      feedPrice,
     };
   }
 
@@ -379,6 +397,7 @@ export function App(): JSX.Element {
             {activeIndicators().length}
           </span>
         </button>
+        <AlertButton />
         <StatusLine
           status={status()}
           live={pollStatus()}
@@ -437,6 +456,7 @@ export function App(): JSX.Element {
       />
       <main class="flex flex-1 min-h-0">
         <DrawingToolbar chart={chart()} symbol={symbol()} />
+        <AlertLines chart={chart()} symbol={symbol()} />
         <div class="flex-1 min-w-0">
           <Chart
             series={live()?.series ?? null}
@@ -455,9 +475,11 @@ export function App(): JSX.Element {
             onRemoveCompare={removeCompare}
           />
         </div>
-        <Watchlist session={session} enabled={authReady()} />
+        <Sidebar session={session} enabled={authReady()} />
       </main>
       <BottomBar chart={chart()} series={live()?.series ?? null} loadUntil={feed.loadUntil} />
+      <AlertDialog />
+      <Toasts />
     </div>
   );
 }
