@@ -125,7 +125,7 @@ Status legend:
 | Named layouts (save, copy, rename, load, delete) | ✅ | ◐ | Symbol, timeframe, chart type, scale, compare symbols and indicators. Drawings are not part of a layout. Stored in `localStorage`, max 50. [Layouts](/chartgen/guides/web/#layouts), [ADR-0015](/chartgen/decisions/0015-named-layouts/) |
 | Layout export and import | ✅ | ✅ | JSON file, validated on import. [Layouts](/chartgen/guides/web/#layouts) |
 | Cloud sync of layouts and settings | ✅ | ❌ | [ADR-0005](/chartgen/decisions/0005-client-indicator-state/) |
-| Shareable chart links | ✅ | ❌ | [ADR-0005](/chartgen/decisions/0005-client-indicator-state/) |
+| Shareable chart links | ✅ | ◐ | Query-param links for symbol, timeframe, chart type, indicators, compare symbols and time zone; no drawings, no short links. [Sharing a chart](/chartgen/guides/web/#sharing-a-chart), [ADR-0029](/chartgen/decisions/0029-shareable-chart-links/) |
 | Chart settings (colors, grid, scales) | ✅ | ◐ | Saved in `localStorage` under `chartgen.chartSettings`, not synced and not in named layouts. [Chart settings](/chartgen/guides/web/#chart-settings), [ADR-0019](/chartgen/decisions/0019-chart-settings/) |
 | Keyboard shortcuts | ✅ | ◐ | A documented subset with `Alt` modifiers for tools. [Keyboard shortcuts](/chartgen/guides/web/#keyboard-shortcuts) |
 
@@ -208,8 +208,8 @@ oversight.
   change.
   [ADR-0013](/chartgen/decisions/0013-indicator-visibility-and-instances/)
 - **Client state is local.** Indicators, layouts, drawings, alerts and the
-  watchlist live in `localStorage`: no sync, no shareable links, and
-  clearing browser data wipes them.
+  watchlist live in `localStorage`: no sync, links carry only the
+  chart setup, and clearing browser data wipes them.
   [ADR-0005](/chartgen/decisions/0005-client-indicator-state/)
 - **Visual parity drifts.** TradingView changes its look over time, so the
   match is periodically revisited.

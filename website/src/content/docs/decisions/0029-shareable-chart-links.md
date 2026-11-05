@@ -1,0 +1,83 @@
+---
+title: "0029 — Shareable chart links as query parameters"
+description: "A chart link is the app URL with symbol, interval, type, ind, compare and tz query parameters, applied once on load and then removed from the address bar."
+sidebar:
+  order: 29
+---
+
+**Status:** Accepted
+**Date:** 2026-11-05
+
+## Context and Problem Statement
+
+All chart state lives in `localStorage`
+([ADR-0005](/chartgen/decisions/0005-client-indicator-state/),
+[ADR-0015](/chartgen/decisions/0015-named-layouts/)), so there is no way to
+send someone the chart you are looking at. TradingView has shareable chart
+links and the [parity matrix](/chartgen/guides/tradingview-parity/) lists the
+gap. The app is served from the MCP server's origin
+([ADR-0027](/chartgen/decisions/0027-serve-web-app-same-origin/)), so a link
+is just a URL to that origin.
+
+The OAuth redirect also lands on `/?code=...&state=...`, so share parameters
+must not collide with it and must survive the round trip.
+
+## Decision Drivers
+
+- No new server state or endpoints.
+- Readable, hand-editable URLs.
+- Tolerant of bad input and of indicators this server lacks.
+- Works with the sign-in redirect and with other work on indicator instances.
+
+## Considered Options
+
+**Query parameters (chosen).** `?symbol=ETHUSDT&interval=4h&type=candles&ind=rsi(length:21),ema_stack&compare=BTCUSDT&tz=UTC`.
+
+**URL hash.** `#symbol=...`. Never sent to the server and out of the way of
+`?code`, but it needs a second parser path next to the OAuth query handling,
+and hashes are not what other chart tools or people expect to edit.
+
+**Server-side short links.** `/s/abc123` resolved by chartgen. Short and able
+to carry drawings and styles, but it needs storage, ids, expiry and abuse
+handling on a server that is otherwise stateless for the web app.
+
+## Decision Outcome
+
+Chosen option: **query parameters**, because they need no server change, read
+well and are easy to write by hand.
+
+- Parameters: `symbol`, `interval`, `type`, `ind`, `compare`, `tz`, all
+  optional. `ind` is a comma list of names with optional `(key:value;...)`
+  parameters, written only when they differ from the registry default.
+  Hidden indicators are left out; `ind=` is an explicit empty list.
+- The app reads them once, before the first render (`applyShareLink`), through
+  the normal store setters, so they persist like a manual change. It then
+  removes only the share parameters from the address bar with
+  `history.replaceState`; there is no live URL syncing.
+- Because the values are written to the stores before any sign-in redirect,
+  they survive the OAuth round trip without being stashed. `code` and
+  `state` are never touched.
+- Invalid values fall back to the stored state and decoding never throws.
+  Indicator names are checked against `list_indicators` once it loads and
+  unknown ones are removed.
+- "Copy link to chart" in the toolbar and the chart context menu builds the
+  URL from the current state, uses `navigator.clipboard` and falls back to a
+  hidden readonly input with `execCommand("copy")`, then shows a toast.
+- The parsing and encoding is one module, `web/src/lib/shareLink.ts`, with unit
+  tests.
+
+### Consequences
+
+- Good: no server work; links are readable and diffable.
+- Good: unknown or malformed input degrades to the stored chart.
+- Bad: links carry the chart setup only. Drawings, alerts, indicator styles
+  and chart colors are not shared.
+- Bad: opening a link overwrites the receiver's stored symbol, timeframe,
+  chart type, indicators, compare symbols and time zone, as a manual change
+  would. A named layout is the way to keep the old setup.
+- Bad: one instance per indicator
+  ([ADR-0013](/chartgen/decisions/0013-indicator-visibility-and-instances/))
+  means a repeated name in `ind` keeps only its first entry; the encoding can
+  carry instances later because it is a list.
+- Bad: the first chart request may include a name the server lacks and fail
+  before the registry loads and the name is dropped.

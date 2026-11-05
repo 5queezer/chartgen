@@ -33,6 +33,7 @@ export interface ChartContextMenuProps {
   drawings: DrawingsApi | null;
   hasIndicators: boolean;
   onResetView: () => void;
+  onCopyLink: () => void;
   onRemoveAllIndicators: () => void;
   onSettings: () => void;
   children: JSX.Element;
@@ -114,6 +115,9 @@ export function ChartContextMenu(props: ChartContextMenuProps): JSX.Element {
           <ContextMenu.Item class={itemClass} onSelect={props.onResetView}>
             Reset chart view
             <span class="text-[color:var(--color-fg-muted)] text-xs">Alt+R</span>
+          </ContextMenu.Item>
+          <ContextMenu.Item class={itemClass} onSelect={props.onCopyLink}>
+            Copy link to chart
           </ContextMenu.Item>
           <Show when={at()}>
             {(p) => (
