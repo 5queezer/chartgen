@@ -3,7 +3,7 @@
 
 import type { Page } from "@playwright/test";
 
-import { test, expect, expectChartRendered } from "./fixtures/app";
+import { test, expect, reloadApp } from "./fixtures/app";
 
 const DRAWINGS_KEY = "chartgen.drawings.BTCUSDT";
 const SETTINGS_KEY = "chartgen.chartSettings";
@@ -109,8 +109,7 @@ test.describe("chart settings dialog", () => {
     await expect(dialog(page)).toHaveCount(0);
     expect(await countPixels(page, UP)).toBeLessThan(tealBefore / 2);
 
-    await page.reload();
-    await expectChartRendered(page);
+    await reloadApp(page);
     await chartPainted(page, YELLOW);
     const saved = await page.evaluate(
       (k) => JSON.parse(localStorage.getItem(k)!),
@@ -150,8 +149,7 @@ test.describe("chart settings dialog", () => {
     await expect.poll(() => countPixels(page, GRID)).toBeLessThan(grid / 4);
     await dialog(page).getByRole("button", { name: "OK" }).click();
 
-    await page.reload();
-    await expectChartRendered(page);
+    await reloadApp(page);
     await expect.poll(() => countPixels(page, UP)).toBeGreaterThan(200);
     await expect.poll(() => countPixels(page, GRID)).toBeLessThan(grid / 4);
 
@@ -224,9 +222,25 @@ test.describe("chart context menu", () => {
     expect(saved[0].name).toBe("horizontalStraightLine");
     expect(saved[0].points[0].value).toBeCloseTo(price, 1);
 
-    await page.reload();
-    await expectChartRendered(page);
+    await reloadApp(page);
     await expect.poll(() => overlays(page)).toHaveLength(1);
+  });
+
+  test("Add alert opens the alert dialog at the clicked price", async ({
+    bootedApp: page,
+  }) => {
+    await pressAt(page, A, "right");
+    const item = chartMenu(page).getByRole("menuitem", {
+      name: /^Add alert at/,
+    });
+    const price = Number((await item.innerText()).match(/[\d.]+\d/)![0]);
+    await item.click();
+    const alert = page.getByRole("dialog", { name: /Create alert on/ });
+    await expect(alert).toBeVisible();
+    expect(Number(await alert.getByLabel("Price").inputValue())).toBeCloseTo(
+      price,
+      1,
+    );
   });
 
   test("Remove all drawings asks first", async ({ bootedApp: page }) => {
