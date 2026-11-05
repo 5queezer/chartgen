@@ -51,3 +51,5 @@ one and link both ways.
 | [0021](/chartgen/decisions/0021-realtime-chart-push/) | Real-time chart push over the MCP SSE stream | Accepted | 2026-11-05 |
 | [0022](/chartgen/decisions/0022-compare-symbols/) | Compare symbols | Accepted | 2026-11-05 |
 | [0023](/chartgen/decisions/0023-bar-replay/) | Bar replay: client slice, server recompute of repainting indicators | Accepted | 2026-11-05 |
+| [0024](/chartgen/decisions/0024-starlark-script-runtime/) | Starlark as the script runtime for user indicators | Accepted | 2026-11-05 |
+| [0025](/chartgen/decisions/0025-user-indicator-registry/) | Per-user indicator registry and MCP surface | Accepted | 2026-11-05 |

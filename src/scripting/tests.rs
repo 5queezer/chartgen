@@ -580,3 +580,50 @@ fn names() {
     assert!(!valid_name("2x") && !valid_name("A") && !valid_name("") && !valid_name("a-b"));
     assert!(!valid_name(&"a".repeat(49)));
 }
+
+/// The examples in website/src/content/docs/guides/scripted-indicators.md.
+#[test]
+fn guide_examples_validate() {
+    let rsi_bands = r#"
+PARAMS = [
+    {"name": "length", "type": "int", "default": 14, "min": 2, "max": 200, "desc": "RSI length"},
+    {"name": "smooth", "type": "int", "default": 5, "min": 1, "max": 50, "desc": "Signal EMA"},
+    {"name": "ob", "type": "float", "default": 70.0, "desc": "Overbought"},
+    {"name": "os", "type": "float", "default": 30.0, "desc": "Oversold"},
+]
+META = {"title": "RSI + signal", "overlay": False, "description": "RSI with an EMA signal and band crosses"}
+
+def compute(ohlcv, params, chart):
+    r = ta.rsi(ohlcv.close, params["length"])
+    sig = ta.ema(r, params["smooth"])
+    chart.line(r, title = "RSI", color = "purple")
+    chart.line(sig, title = "Signal", color = "orange", width = 1)
+    chart.fill(r, sig, color = "green", color_below = "red", alpha = 0.15)
+    chart.dot(ta.crossover(r, params["os"]), r, color = "lime", size = 5, label = "rsi_oversold_exit")
+    chart.dot(ta.crossunder(r, params["ob"]), r, color = "red", size = 5, label = "rsi_overbought_exit")
+    chart.hline(params["ob"], color = "gray")
+    chart.hline(params["os"], color = "gray")
+    chart.set_y_range(0, 100)
+"#;
+    validate("rsi_bands", rsi_bands).unwrap_or_else(|e| panic!("{e}"));
+    let streak = r#"PARAMS = []
+META = {"title": "Streak"}
+
+def compute(ohlcv, params, chart):
+    out = []
+    streak = 0
+    closes = ohlcv.close.list()
+    for i in range(len(closes)):
+        if i > 0 and closes[i] > closes[i - 1]:
+            streak += 1
+        else:
+            streak = 0
+        out.append(streak)
+    chart.bars(ta.series(out), color = "teal")
+"#;
+    let c = validate("streak", streak).unwrap_or_else(|e| panic!("{e}"));
+    let d = sample_data(30);
+    let pr = run(&c, &d, &json!({}), COMPUTE_TIMEOUT, "runtime").unwrap();
+    let cl = closes(&d);
+    assert_eq!(pr.bars[0].y[1], if cl[1] > cl[0] { 1.0 } else { 0.0 });
+}

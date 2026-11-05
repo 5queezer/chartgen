@@ -68,7 +68,8 @@ with existing Claude.ai connector deployments that predate Streamable HTTP.
 ## Tool catalog
 
 19 tools. The 12 trading tools require `--trade`; attempting to call them
-without it returns an error.
+without it returns an error. With `CHARTGEN_SCRIPTING=1` the server also
+lists the 4 [scripted-indicator tools](#scripted-indicators-chartgen_scripting1).
 
 ### Charting (always available)
 
@@ -303,10 +304,30 @@ trade around the clock and use the UTC 4h grid instead. Each upstream
 request times out after 10 s, and a paginated Binance fetch gives up after
 20 s.
 
+##### Per-indicator errors
+
+A built-in never fails, but a [scripted indicator](#scripted-indicators-chartgen_scripting1)
+can, for example by hitting its time limit. A failing indicator is left out of
+`indicators`, the rest of the chart renders, and the payload (`summary`,
+`series`, `both`) gets a top-level map keyed like `indicators`:
+
+```json
+"indicator_errors": {
+  "my_osc": { "step": "runtime", "line": 7, "message": "time limit exceeded" }
+}
+```
+
+`line` is 1-based, or `null` when unknown. With `format=png` the map comes
+as a second text content item, `{"indicator_errors": {...}}`. The field is
+absent when every indicator computed
+([ADR-0025](/chartgen/decisions/0025-user-indicator-registry/)).
+
 #### `list_indicators`
 
 Return the full indicator catalog with descriptions, aliases, and configurable
-parameters. Call before `generate_chart` to discover valid names.
+parameters. Call before `generate_chart` to discover valid names. With
+scripting on, the caller's own scripts are included, tagged `"source": "user"`;
+a script replaces the entry of the built-in it shadows.
 
 #### `get_indicators`
 
@@ -539,6 +560,40 @@ forming bar, with every indicator recomputed. Merge it like a polled tail.
 `unsubscribe_chart` takes `subscription_id` and returns
 `{ "unsubscribed": true }`, or `false` if the subscription was already gone
 (or belongs to another token).
+
+### Scripted indicators (`CHARTGEN_SCRIPTING=1`)
+
+User-authored Starlark indicators
+([guide](/chartgen/guides/scripted-indicators/),
+[ADR-0024](/chartgen/decisions/0024-starlark-script-runtime/),
+[ADR-0025](/chartgen/decisions/0025-user-indicator-registry/)). These tools
+are listed and served only when the server runs with
+`CHARTGEN_SCRIPTING=1`. Scripts belong to the OAuth client of the bearer
+token, so the tools that store or read scripts need the HTTP transport
+(stdio has no user). Once registered, a script's name works in
+`generate_chart` (resolved before built-ins, so it can shadow one for its
+owner) and shows up in `list_indicators`. The generated TypeScript input
+types do not include these tools.
+
+| Tool | Arguments | Result |
+|---|---|---|
+| `register_indicator` | `name` (`^[a-z][a-z0-9_]{0,47}$`), `source` (≤ 64 KiB) | `{ok: true, name, title, overlay, configurable_params, replaced, shadows_builtin}` |
+| `fork_indicator` | `builtin_name` | `{name, source, configurable_params}` for a built-in with a reference implementation (`wavetrend`); otherwise an error listing the forkable ones |
+| `list_my_indicators` | — | `{total, indicators: [{name, title, description, type, overlay, configurable_params?, source: "user", created_at, updated_at}]}` |
+| `delete_indicator` | `name` | `{ok: true, name}`; an error if you have no such script |
+
+`register_indicator` validates in four steps: `parse`, `static`, `presence`,
+and `dry_run` (100 synthetic bars, 200 ms). A failure returns `isError: true`
+with:
+
+```json
+{ "ok": false, "errors": [{ "step": "static", "line": 3, "message": "`len` shadows a builtin; pick another name" }] }
+```
+
+Registering an existing name replaces the script (`"replaced": true`). Each
+user may store 50 scripts. Scripts are stored in SQLite at `CHARTGEN_DB`
+(default `~/.chartgen/chartgen.db`), see the
+[persistence reference](/chartgen/reference/persistence/#chartgendb-scripted-indicators).
 
 ### Orders & positions (require `--trade`)
 

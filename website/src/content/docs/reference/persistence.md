@@ -12,6 +12,7 @@ before launch.
 | `alerts.json` | `set_alert`, `cancel_alert`, fired alerts | JSON array, atomic replace |
 | `trades.log` | Order lifecycle + alert triggers | Append-only text |
 | `subscriptions.json` | `subscribe_notifications`, `unsubscribe_notifications` | JSON map keyed by token |
+| `chartgen.db` | Scripted indicators, with `CHARTGEN_SCRIPTING=1` (any mode) | SQLite, path from `CHARTGEN_DB` |
 
 ## `alerts.json`
 
@@ -99,3 +100,35 @@ in-memory and rebuilt on reconnect.
 Both fields may be `null`, meaning "match any". Restarting the server
 preserves filters so clients keep their filters across chartgen restarts, but
 queued alerts are lost.
+
+## `chartgen.db` (scripted indicators)
+
+Only used with `CHARTGEN_SCRIPTING=1`
+([guide](/chartgen/guides/scripted-indicators/),
+[ADR-0025](/chartgen/decisions/0025-user-indicator-registry/)). The path is
+`CHARTGEN_DB`, default `~/.chartgen/chartgen.db`. The HTTP server opens it at
+startup, creating the file and its directory, and applies pending migrations.
+`PRAGMA user_version` counts the migrations applied.
+
+```sql
+CREATE TABLE user_indicators (
+    user_id      TEXT    NOT NULL,   -- OAuth client_id of the owner
+    name         TEXT    NOT NULL,
+    source       TEXT    NOT NULL,   -- Starlark source as registered
+    meta_json    TEXT    NOT NULL,   -- {title, description, overlay, params} at register
+    source_hash  TEXT    NOT NULL,   -- SHA-256 hex of source (compile-cache key)
+    created_at   INTEGER NOT NULL,   -- unix seconds
+    updated_at   INTEGER NOT NULL,
+    PRIMARY KEY (user_id, name)
+);
+CREATE TABLE oauth_clients (
+    client_id      TEXT    PRIMARY KEY,
+    redirect_uris  TEXT    NOT NULL, -- JSON array
+    created_at     INTEGER NOT NULL
+);
+```
+
+`oauth_clients` keeps dynamically registered OAuth clients across restarts,
+so a client keeps its `client_id`, and with it its scripts. Access tokens stay
+in memory: after a restart, clients re-authorize. Back up the file like any
+SQLite database (`sqlite3 chartgen.db ".backup copy.db"`).

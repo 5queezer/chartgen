@@ -48,6 +48,10 @@ client re-runs the authorization code dance when a token expires.
 
 Clients and tokens are held in memory — a process restart invalidates every
 registration and token, and Claude.ai will re-register transparently.
+With `CHARTGEN_SCRIPTING=1` registered clients are also stored in
+`CHARTGEN_DB` and restored at startup, because the `client_id` owns that
+client's [scripted indicators](/chartgen/guides/scripted-indicators/); tokens
+are still lost on restart ([ADR-0025](/chartgen/decisions/0025-user-indicator-registry/)).
 
 ## MCP handler behavior
 

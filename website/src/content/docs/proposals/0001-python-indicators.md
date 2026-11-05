@@ -3,9 +3,19 @@ title: Python-authored indicators
 description: Proposal to let chartgen users register sandboxed, Starlark-based indicators alongside the Rust builtins.
 ---
 
-**Status:** proposed
+**Status:** accepted (Phase 1 implemented)
 **Authors:** christian.pojoni@gmail.com (via brainstorming session, 2026-04-21)
-**Relates to:** future ADRs — (a) Starlark as script runtime, (b) per-user indicator registry + MCP surface.
+**Relates to:** [ADR-0024](/chartgen/decisions/0024-starlark-script-runtime/) (Starlark as script runtime) and [ADR-0025](/chartgen/decisions/0025-user-indicator-registry/) (per-user indicator registry + MCP surface). User guide: [Scripted indicators](/chartgen/guides/scripted-indicators/).
+
+:::note[Implementation notes]
+Phase 1 shipped with these differences from the text below; the ADRs are authoritative.
+
+- Starlark *does* allow operator overloading on custom values, so series math reads like Pine (`a - b`, `close[1]`, `a > b`); the `ta.*` function forms remain. See ADR-0024.
+- `delete_indicator` moved into Phase 1. `update_indicator` is `register_indicator` with an existing name.
+- WaveTrend is the first reference implementation; the Cipher B refimpl is deferred.
+- `by_name(name)` keeps its signature; the user-aware seam is `indicators::by_name_for(name, user)`. See ADR-0025.
+- The timeout uses starlark-rust's tick limit plus a wall-clock check, not `set_max_callstack_size` (that bounds recursion).
+:::
 
 ## Understanding summary
 
