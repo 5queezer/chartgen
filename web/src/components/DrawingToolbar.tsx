@@ -286,6 +286,12 @@ export interface DrawingsApi {
   setVisible: (id: string, visible: boolean) => void;
   setLocked: (id: string, lock: boolean) => void;
   remove: (id: string) => void;
+  /** Add a persisted horizontal line at `price`, at the last bar. */
+  addHorizontalLine: (price: number) => void;
+  /** Remove every drawing after a confirm. */
+  removeAll: () => void;
+  /** True when the latest right-click landed on a drawing (its own menu wins). */
+  rightClickedDrawing: () => boolean;
 }
 
 export interface DrawingToolbarProps {
@@ -348,6 +354,9 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
   let current: DrawingRecord[] = [];
   let history: DrawingRecord[][] = [];
   let limitTimer: number | undefined;
+  // klinecharts fires an overlay's onRightClick on mousedown, before the
+  // browser's contextmenu event; the flag lets the chart menu stand down.
+  let rightClickHit = false;
 
   const axis = (): TimeAxis | null =>
     timeAxisOf(props.chart?.getDataList().map((d) => d.timestamp) ?? []);
@@ -432,6 +441,7 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
       return false;
     },
     onRightClick: ({ overlay, pageX, pageY }: OverlayEvent) => {
+      rightClickHit = true;
       if (overlay.id === armedId) {
         cancelArmed();
       } else if (pageX !== undefined && pageY !== undefined) {
@@ -533,6 +543,12 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
     setArmed(null);
   }
 
+  const showLimitNotice = () => {
+    setLimitHit(true);
+    window.clearTimeout(limitTimer);
+    limitTimer = window.setTimeout(() => setLimitHit(false), 4000);
+  };
+
   const arm = (name: DrawingName) => {
     const chart = props.chart;
     if (!chart) return;
@@ -540,9 +556,7 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
     cancelArmed();
     if (same) return;
     if (ids.length >= MAX_DRAWINGS) {
-      setLimitHit(true);
-      window.clearTimeout(limitTimer);
-      limitTimer = window.setTimeout(() => setLimitHit(false), 4000);
+      showLimitNotice();
       return;
     }
     // Drawing on a hidden chart would be invisible, so show everything.
@@ -601,6 +615,28 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
   const removeAll = () => {
     if (ids.length === 0) return;
     if (window.confirm("Remove all drawings?")) removeIds([...ids]);
+  };
+
+  const addHorizontalLine = (price: number) => {
+    const last = props.chart?.getDataList().at(-1);
+    const ax = axis();
+    if (!last || ax === null) return;
+    if (ids.length >= MAX_DRAWINGS) {
+      showLimitNotice();
+      return;
+    }
+    // A line on a hidden chart would be invisible, so show everything.
+    if (hideAll()) toggleHide();
+    create(
+      {
+        name: "horizontalStraightLine",
+        points: [{ timestamp: last.timestamp, value: price }],
+        lock: lockAll(),
+        visible: true,
+      },
+      ax,
+    );
+    commit();
   };
 
   const undo = () => {
@@ -774,6 +810,21 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
   window.addEventListener("keydown", onKey);
   onCleanup(() => window.removeEventListener("keydown", onKey));
 
+  const resetRightClick = () => {
+    rightClickHit = false;
+  };
+  // A keyboard-opened menu or a macOS Ctrl+click has no right mousedown, so
+  // any other input also clears a stale flag.
+  const resetEvents = ["mousedown", "pointerdown", "keydown"] as const;
+  for (const type of resetEvents) {
+    window.addEventListener(type, resetRightClick, true);
+  }
+  onCleanup(() => {
+    for (const type of resetEvents) {
+      window.removeEventListener(type, resetRightClick, true);
+    }
+  });
+
   const closeMenu = (e: PointerEvent) => {
     if (!(e.target instanceof Element && e.target.closest("[data-drawing-menu]"))) {
       setMenu(null);
@@ -799,6 +850,9 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
     setVisible: (id, visible) => patchOne(id, { visible }),
     setLocked: (id, lock) => patchOne(id, { lock }),
     remove: (id) => removeIds([id]),
+    addHorizontalLine,
+    removeAll,
+    rightClickedDrawing: () => rightClickHit,
   });
 
   return (

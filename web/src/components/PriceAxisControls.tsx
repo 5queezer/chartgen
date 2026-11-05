@@ -27,6 +27,7 @@ import {
   setScaleMode,
   type ScaleMode,
 } from "../stores/layout";
+import { chartSettings } from "../stores/chartSettings";
 import type { SeriesPayload } from "../types/responses";
 
 const CANDLE_PANE_ID = "candle_pane";
@@ -192,7 +193,12 @@ export function PriceAxisControls(props: PriceAxisControlsProps): JSX.Element {
         class="price-scale-controls"
         role="group"
         aria-label="Price scale"
-        style={{ width: `${axisWidth()}px` }}
+        style={{
+          width: `${axisWidth()}px`,
+          ...(chartSettings().options.scalePlacement === "left"
+            ? { left: "0", right: "auto" }
+            : {}),
+        }}
       >
         <button
           type="button"

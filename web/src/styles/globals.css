@@ -67,7 +67,7 @@ body {
  * change. */
 .pane-header {
   position: absolute;
-  left: 8px;
+  left: calc(8px + var(--axis-inset, 0px));
   z-index: 2;
   display: flex;
   align-items: center;

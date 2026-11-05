@@ -146,6 +146,8 @@ export interface ToolbarProps {
   /** Bar replay (ADR-0023): whether it is on, and the button's toggle. */
   replay: boolean;
   onReplay: () => void;
+  /** Open the chart settings dialog. */
+  onSettings: () => void;
 }
 
 export function Toolbar(props: ToolbarProps): JSX.Element {
@@ -351,6 +353,18 @@ export function Toolbar(props: ToolbarProps): JSX.Element {
       >
         <svg {...iconProps}>
           <path d="M3 9a6 6 0 1 0 2-4.5M3 2.5v3h3" stroke-linejoin="round" />
+        </svg>
+      </button>
+      <button
+        type="button"
+        class={buttonClass}
+        onClick={props.onSettings}
+        aria-label="Chart settings"
+        title="Chart settings"
+      >
+        <svg {...iconProps}>
+          <circle cx="9" cy="9" r="2.5" />
+          <path d="M9 1.5v2.5M9 14v2.5M1.5 9H4M14 9h2.5M3.7 3.7l1.8 1.8M12.5 12.5l1.8 1.8M3.7 14.3l1.8-1.8M12.5 5.5l1.8-1.8" />
         </svg>
       </button>
       <button
