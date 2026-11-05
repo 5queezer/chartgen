@@ -1191,7 +1191,11 @@ export function Chart(props: ChartProps): JSX.Element {
     for (const name of names) {
       const ind = series.indicators[name];
       const stored = geometryStore.get(indicatorRegName(name));
-      if (ind && stored && stored.divlines !== ind.divlines) {
+      // Bar replay (ADR-0023): a replay frame (lib/replay.ts) is a new slice
+      // per step, so its fills and hlines are new arrays too and re-store.
+      const replaced =
+        ind !== undefined && (stored?.fills !== ind.fills || stored?.hlines !== ind.hlines);
+      if (ind && stored && (stored.divlines !== ind.divlines || replaced)) {
         storeGeometry(series, [name], true);
       }
     }

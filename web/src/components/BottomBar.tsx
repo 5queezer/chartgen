@@ -288,8 +288,10 @@ export function BottomBar(props: BottomBarProps): JSX.Element {
   );
 }
 
-function GoToDateForm(props: {
+/** Date and optional time in `tz`; also the replay's "Select date" (ReplayBar). */
+export function GoToDateForm(props: {
   tz: string;
+  title?: string;
   onSubmit: (ms: number) => void;
   onCancel: () => void;
 }): JSX.Element {
@@ -324,7 +326,9 @@ function GoToDateForm(props: {
         if (ms !== null) props.onSubmit(ms);
       }}
     >
-      <Dialog.Title class="text-sm font-semibold mb-2">Go to date</Dialog.Title>
+      <Dialog.Title class="text-sm font-semibold mb-2">
+        {props.title ?? "Go to date"}
+      </Dialog.Title>
       <div class="flex gap-2">
         <input
           type="date"

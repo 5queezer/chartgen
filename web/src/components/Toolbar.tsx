@@ -143,6 +143,9 @@ export interface ToolbarProps {
   onResetChart: () => void;
   /** Open the symbol search in "add compare symbol" mode. */
   onCompare: () => void;
+  /** Bar replay (ADR-0023): whether it is on, and the button's toggle. */
+  replay: boolean;
+  onReplay: () => void;
 }
 
 export function Toolbar(props: ToolbarProps): JSX.Element {
@@ -312,6 +315,20 @@ export function Toolbar(props: ToolbarProps): JSX.Element {
           <circle cx="6.5" cy="9" r="4.5" />
           <circle cx="11.5" cy="9" r="4.5" />
         </svg>
+      </button>
+      <button
+        type="button"
+        class={`${buttonClass} ${props.replay ? activeClass : ""}`}
+        onClick={props.onReplay}
+        aria-pressed={props.replay}
+        aria-label="Bar replay"
+        title="Bar replay"
+        data-testid="toolbar-replay"
+      >
+        <svg {...iconProps}>
+          <path d="M9 4.5v9L3 9zM15.5 4.5v9L9.5 9z" fill="currentColor" stroke-linejoin="round" />
+        </svg>
+        Replay
       </button>
       <button
         type="button"
