@@ -1347,6 +1347,83 @@ test.describe("drawing modifiers", () => {
         return { x: b!.x!, y: b!.y! };
       };
 
+      test.describe("quick taps while a tool is armed", () => {
+        const tap = async (touch: Awaited<ReturnType<typeof toucher>>, at: At) => {
+          await touch.start(at);
+          await touch.end();
+        };
+
+        test("two taps place both points", async ({ bootedApp: page }) => {
+          const touch = await toucher(page);
+          await page.getByRole("button", { name: "Trend line" }).click();
+          await tap(touch, { x: 500, y: 200 });
+          await page.waitForTimeout(60);
+          await tap(touch, { x: 700, y: 120 });
+          await expect.poll(async () => (await overlays(page)).length).toBe(1);
+          const { pixels } = (await overlays(page))[0]!;
+          expect(Math.abs(pixels[0]!.x! - 500)).toBeLessThan(10);
+          expect(Math.abs(pixels[1]!.x! - 700)).toBeLessThan(10);
+          expect(Math.abs(pixels[1]!.y! - 120)).toBeLessThan(1);
+          expect(await storedRecords(page)).toHaveLength(1);
+        });
+
+        test("two taps 30 px apart are two points, as klinecharts measures it", async ({ bootedApp: page }) => {
+          const touch = await toucher(page);
+          await page.getByRole("button", { name: "Trend line" }).click();
+          await tap(touch, { x: 500, y: 200 });
+          await page.waitForTimeout(60);
+          await tap(touch, { x: 515, y: 215 });
+          await expect.poll(async () => (await overlays(page)).length).toBe(1);
+          expect(Math.abs((await overlays(page))[0]!.pixels[1]!.y! - 215)).toBeLessThan(1);
+        });
+
+        test("a double tap places the first point only", async ({ bootedApp: page }) => {
+          const touch = await toucher(page);
+          const line = page.getByRole("button", { name: "Trend line" });
+          await line.click();
+          await tap(touch, { x: 500, y: 200 });
+          await page.waitForTimeout(60);
+          await tap(touch, { x: 510, y: 205 });
+          await page.waitForTimeout(700);
+          expect(await overlays(page)).toHaveLength(0);
+          await expect(line).toHaveAttribute("aria-pressed", "true");
+          await tap(touch, { x: 700, y: 120 });
+          await expect.poll(async () => (await overlays(page)).length).toBe(1);
+          const { pixels } = (await overlays(page))[0]!;
+          expect(Math.abs(pixels[0]!.x! - 500)).toBeLessThan(10);
+          expect(Math.abs(pixels[1]!.x! - 700)).toBeLessThan(10);
+        });
+
+        test("three taps place all three points of a channel", async ({ bootedApp: page }) => {
+          const touch = await toucher(page);
+          await pickTool(page, "Parallel channel");
+          await tap(touch, { x: 500, y: 200 });
+          await page.waitForTimeout(60);
+          await tap(touch, { x: 700, y: 120 });
+          await page.waitForTimeout(60);
+          await tap(touch, { x: 600, y: 260 });
+          await expect.poll(async () => (await overlays(page)).length).toBe(1);
+          const { pixels } = (await overlays(page))[0]!;
+          expect(pixels).toHaveLength(3);
+          expect(Math.abs(pixels[2]!.y! - 260)).toBeLessThan(1);
+        });
+
+        test("a pan right after the first tap places nothing", async ({ bootedApp: page }) => {
+          const touch = await toucher(page);
+          const line = page.getByRole("button", { name: "Trend line" });
+          await line.click();
+          await tap(touch, { x: 500, y: 200 });
+          await page.waitForTimeout(60);
+          await touch.start({ x: 700, y: 120 });
+          await touch.move({ x: 700, y: 120 }, { x: 640, y: 120 });
+          await touch.move({ x: 640, y: 120 }, { x: 700, y: 120 });
+          await touch.end();
+          await page.waitForTimeout(300);
+          expect(await overlays(page)).toHaveLength(0);
+          await expect(line).toHaveAttribute("aria-pressed", "true");
+        });
+      });
+
       test("a touch drag survives a live tick, and the release saves it once", async ({
         bootedApp: page,
       }) => {
