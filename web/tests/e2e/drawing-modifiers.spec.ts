@@ -4,7 +4,7 @@
 
 import type { Page } from "@playwright/test";
 
-import { test, expect, pickTool, reloadApp } from "./fixtures/app";
+import { test, expect, gotoApp, pickTool, reloadApp } from "./fixtures/app";
 
 test.use({ viewport: { width: 1280 + 320, height: 720 } });
 
@@ -205,6 +205,49 @@ function expectDiagonal(pixels: { x?: number; y?: number }[]): void {
   expect(dx).toBeGreaterThan(0);
   expect(Math.abs(dx - dy)).toBeLessThan(1);
 }
+
+/** Switch the chart's interval and wait for its bars. */
+async function showInterval(page: Page, name: string): Promise<void> {
+  await page.getByRole("button", { name, exact: true }).click();
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () => (window as unknown as { __chartgenTest: { series: () => { interval?: string } | null } })
+          .__chartgenTest.series()?.interval,
+      ),
+    )
+    .toBe(name);
+  // The chart has the new bars once a drawing's pixels are refreshed from them.
+  await page.waitForTimeout(500);
+}
+
+/** On 15m, an extended line between the :00 and :15 bars of an hour: one bar of 1h, not exactly vertical. */
+async function drawLineWithinAnHour(page: Page): Promise<void> {
+  const [x0, x1] = await page.evaluate(() => {
+    const chart = (window as unknown as TestWindow).__chartgenTest.chart() as unknown as {
+      getDataList: () => { timestamp: number }[];
+      convertToPixel: (p: { dataIndex: number }, f: { paneId: string }) => { x: number };
+    };
+    const list = chart.getDataList();
+    const px = (dataIndex: number) => chart.convertToPixel({ dataIndex }, { paneId: "candle_pane" }).x;
+    const i = list.findLastIndex((d, n) => d.timestamp % 3_600_000 === 0 && n < list.length - 2);
+    return [px(i), px(i + 1)];
+  });
+  await pickTool(page, "Extended line");
+  await clickAt(page, { x: x0!, y: 100 });
+  await clickAt(page, { x: x1!, y: 260 });
+  await expect.poll(async () => (await overlays(page)).length).toBe(1);
+}
+
+/** Point the stored drawing alerts at `interval`, as if they had been made there. */
+const bindAlertsTo = (page: Page, interval: string) =>
+  page.evaluate((iv) => {
+    const list = JSON.parse(localStorage.getItem("chartgen.alerts.list")!) as {
+      source: { interval: string };
+    }[];
+    for (const a of list) a.source.interval = iv;
+    localStorage.setItem("chartgen.alerts.list", JSON.stringify(list));
+  }, interval);
 
 const magnetButton = (page: Page, state: "off" | "weak" | "strong") =>
   page.getByRole("button", { name: `Magnet: ${state}` });
@@ -1266,19 +1309,7 @@ test.describe("drawing modifiers", () => {
   test("a line on one bar of the interval: no alert offered, its alert says so, until the interval changes", async ({
     bootedApp: page,
   }) => {
-    const interval = async (name: string) => {
-      await page.getByRole("button", { name, exact: true }).click();
-      await expect
-        .poll(() =>
-          page.evaluate(
-            () => (window as unknown as { __chartgenTest: { series: () => { interval?: string } | null } })
-              .__chartgenTest.series()?.interval,
-          ),
-        )
-        .toBe(name);
-      // The chart has the new bars once a drawing's pixels are refreshed from them.
-      await page.waitForTimeout(500);
-    };
+    const interval = (name: string) => showInterval(page, name);
     /** Whether the drawing's menu and the dialog's Source list offer an alert on the line. */
     const offered = async () => {
       const { pixels } = (await overlays(page))[0]!;
@@ -1304,20 +1335,7 @@ test.describe("drawing modifiers", () => {
 
     // On 15m, between the :00 and :15 bars of an hour: one bar of 1h, not exactly vertical.
     await interval("15m");
-    const [x0, x1] = await page.evaluate(() => {
-      const chart = (window as unknown as TestWindow).__chartgenTest.chart() as unknown as {
-        getDataList: () => { timestamp: number }[];
-        convertToPixel: (p: { dataIndex: number }, f: { paneId: string }) => { x: number };
-      };
-      const list = chart.getDataList();
-      const px = (dataIndex: number) => chart.convertToPixel({ dataIndex }, { paneId: "candle_pane" }).x;
-      const i = list.findLastIndex((d, n) => d.timestamp % 3_600_000 === 0 && n < list.length - 2);
-      return [px(i), px(i + 1)];
-    });
-    await pickTool(page, "Extended line");
-    await clickAt(page, { x: x0!, y: 100 });
-    await clickAt(page, { x: x1!, y: 260 });
-    await expect.poll(async () => (await overlays(page)).length).toBe(1);
+    await drawLineWithinAnHour(page);
     expect(await offered()).toBe(true);
 
     // Two alerts on it, one paused.
@@ -1347,13 +1365,7 @@ test.describe("drawing modifiers", () => {
     expect(await offered()).toBe(true);
 
     // An alert made on 1h before it stopped being offered there: dead on 1h, and says so.
-    await page.evaluate(() => {
-      const list = JSON.parse(localStorage.getItem("chartgen.alerts.list")!) as {
-        source: { interval: string };
-      }[];
-      for (const a of list) a.source.interval = "1h";
-      localStorage.setItem("chartgen.alerts.list", JSON.stringify(list));
-    });
+    await bindAlertsTo(page, "1h");
     await reloadApp(page);
     await page.getByRole("tab", { name: /^Alerts/ }).click();
     await expect(status).toHaveText("inactive: open BTCUSDT 1h");
@@ -1369,6 +1381,65 @@ test.describe("drawing modifiers", () => {
     await interval("1h");
     await expect(status).toHaveText("inactive: line is vertical");
     await expect(paused).toHaveAttribute("data-status", "paused");
+  });
+
+  test("two windows on different intervals each say what holds for them, and write nothing", async ({
+    bootedApp: page,
+    context,
+  }) => {
+    const stored = () => page.evaluate(() => localStorage.getItem("chartgen.alerts.list"));
+
+    await showInterval(page, "15m");
+    await drawLineWithinAnHour(page);
+    await page.getByRole("tab", { name: /^Alerts/ }).click();
+    await page.keyboard.press("Alt+KeyA");
+    await dialog(page).getByLabel("Source").selectOption({ label: "Extended line" });
+    await dialog(page).getByRole("button", { name: "Create" }).click();
+    await expect(dialog(page)).toHaveCount(0);
+    await bindAlertsTo(page, "1h");
+    await reloadApp(page);
+    await page.getByRole("tab", { name: /^Alerts/ }).click();
+    await showInterval(page, "1h");
+
+    const statusIn = (p: Page) => alertRows(p).first().locator("[data-role=status]");
+    await expect(statusIn(page)).toHaveText("inactive: line is vertical");
+    const list = await stored();
+    const [alert] = JSON.parse(list!) as { active: boolean; note?: string }[];
+    expect(alert!.active).toBe(true);
+    expect(alert).not.toHaveProperty("note");
+
+    // The second window, on another interval, shares the storage and not the verdict.
+    const other = await context.newPage();
+    await gotoApp(other);
+    await other.getByRole("tab", { name: /^Alerts/ }).click();
+    await showInterval(other, "15m");
+    await expect(statusIn(other)).toHaveText("inactive: open BTCUSDT 1h");
+    await page.waitForTimeout(1500);
+    await expect(statusIn(page)).toHaveText("inactive: line is vertical");
+    expect(await stored()).toBe(list);
+
+    // Each keeps its own through more changes on the other side.
+    await showInterval(page, "15m");
+    await expect(statusIn(page)).toHaveText("inactive: open BTCUSDT 1h");
+    await showInterval(other, "1h");
+    await expect(statusIn(other)).toHaveText("inactive: line is vertical");
+    await page.waitForTimeout(1500);
+    await expect(statusIn(page)).toHaveText("inactive: open BTCUSDT 1h");
+    expect(await stored()).toBe(list);
+
+    // The line widened here: the other window's reason goes, through the storage event.
+    await dragPoint(page, 0, 1, -260, 150, []);
+    await expect(statusIn(other)).not.toContainText("inactive");
+    await expect(statusIn(page)).toHaveText("inactive: open BTCUSDT 1h");
+    expect(await stored()).toBe(list);
+
+    // Undone on the interval it runs on: this window's reason is back, with no alert changed.
+    await showInterval(page, "1h");
+    await expect(statusIn(page)).not.toContainText("inactive");
+    await page.keyboard.press("Control+z");
+    await expect(statusIn(page)).toHaveText("inactive: line is vertical");
+    await expect(statusIn(other)).toHaveText("inactive: line is vertical");
+    expect(await stored()).toBe(list);
   });
 
   test("blur or a hidden tab while a modifier is held restores it", async ({ bootedApp: page }) => {

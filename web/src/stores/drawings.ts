@@ -87,8 +87,8 @@ export interface DrawingRecord {
   visible: boolean;
 }
 
-const PREFIX = "chartgen.drawings.";
-const INDEX_KEY = PREFIX + "index";
+export const DRAWINGS_PREFIX = "chartgen.drawings.";
+const INDEX_KEY = DRAWINGS_PREFIX + "index";
 const MAX_POINTS = 3;
 /** Applied on load only; arming a tool refuses to go past it. */
 export const MAX_DRAWINGS = 500;
@@ -99,7 +99,7 @@ export const MAX_BYTES = 200_000;
 export const MAX_SYMBOLS = 100;
 
 export function storageKey(symbol: string): string {
-  return PREFIX + symbol;
+  return DRAWINGS_PREFIX + symbol;
 }
 
 function isDrawingName(x: unknown): x is DrawingName {

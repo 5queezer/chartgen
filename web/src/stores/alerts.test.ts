@@ -614,7 +614,7 @@ describe("drawing alerts", () => {
     expect(byId(paused.id).active).toBe(false);
   });
 
-  it("a line on one bar of the alert's interval gets the note, only while the chart shows it", async () => {
+  it("a line on one bar of the alert's interval is a reason in this tab, never stored", async () => {
     // Ten 1-minute bars apart: not vertical by its points.
     const steep = {
       ...trendLine,
@@ -625,56 +625,66 @@ describe("drawing alerts", () => {
     const { timeAxisOf } = await import("./drawings");
     const hourly = timeAxisOf(Array.from({ length: 30 }, (_, i) => i * H));
     const minutes = timeAxisOf(Array.from({ length: 30 }, (_, i) => i * 60_000));
-    const ctx = (interval: string, axis: typeof hourly) =>
-      s.setChartContext({ symbol: "AAPL", interval, keys: [], axis });
+    const ctx = (interval: string, axis: typeof hourly) => ({ symbol: "AAPL", interval, keys: [], axis });
     const a = s.addAlert(drawingAlert)!;
     const paused = s.addAlert(drawingAlert)!;
     s.setAlertActive(paused.id, false);
+    const finer = s.addAlert({ ...drawingAlert, source: { ...drawingAlert.source, interval: "1m" } })!;
     const byId = (id: string) => s.alerts().find((x) => x.id === id)!;
+    const stored = () => data.get("chartgen.alerts.list");
+    const before = stored();
 
-    // The chart on another interval: not evaluated there, not called vertical either.
-    ctx("1m", minutes);
-    expect(byId(a.id).active).toBe(true);
+    // Each tab judges by its own chart, and showing a chart stores nothing.
+    expect(s.inactiveReason(byId(a.id), ctx("1h", hourly))).toBe(s.LINE_VERTICAL);
+    expect(s.inactiveReason(byId(a.id), ctx("1m", minutes))).toBe("open AAPL 1h");
+    s.setChartContext(ctx("1h", hourly));
+    expect(s.inactiveReason(byId(a.id))).toBe(s.LINE_VERTICAL);
+    s.setChartContext(ctx("1m", minutes));
     expect(s.inactiveReason(byId(a.id))).toBe("open AAPL 1h");
-
-    // Its own interval: dead, says so, and resuming the paused one keeps it off.
-    ctx("1h", hourly);
-    expect(byId(a.id)).toMatchObject({ active: false, note: s.LINE_VERTICAL });
-    expect(byId(paused.id).active).toBe(false);
-    expect(byId(paused.id)).not.toHaveProperty("note");
-    s.setAlertActive(paused.id, true);
-    expect(byId(paused.id)).toMatchObject({ active: false, note: s.LINE_VERTICAL });
-    s.setAlertActive(paused.id, false);
-
-    // A save on these bars judges it the same way.
-    data.set(DRAWINGS_KEY, JSON.stringify([trendLine]));
-    s.syncDrawingAlerts("AAPL", [trendLine]);
-    expect(byId(a.id).active).toBe(true);
-    s.syncDrawingAlerts("AAPL", [steep]);
-    expect(byId(a.id)).toMatchObject({ active: false, note: s.LINE_VERTICAL });
-    data.set(DRAWINGS_KEY, JSON.stringify([steep]));
-
-    // An alert on another interval is not judged on these bars: one bar here, but alive.
-    const finer = s.addAlert({
-      ...drawingAlert,
-      source: { ...drawingAlert.source, interval: "1m" },
-    })!;
-    s.syncDrawingAlerts("AAPL", [steep]);
-    expect(byId(finer.id).active).toBe(true);
-    expect(s.inactiveReason(byId(finer.id))).toBe("open AAPL 1m");
-
-    // Interval changed: the note clears, the paused one stays paused.
-    ctx("1m", minutes);
+    s.setChartContext(ctx("1h", hourly));
+    expect(stored()).toBe(before);
     expect(byId(a.id).active).toBe(true);
     expect(byId(a.id)).not.toHaveProperty("note");
-    expect(byId(paused.id).active).toBe(false);
-    expect(byId(paused.id)).not.toHaveProperty("note");
-    expect(s.inactiveReason(byId(a.id))).toBe("open AAPL 1h");
 
-    // And back.
-    ctx("1h", hourly);
-    expect(byId(a.id)).toMatchObject({ active: false, note: s.LINE_VERTICAL });
+    // Paused stays paused, and an alert on another interval is not judged on these bars.
+    expect(s.inactiveReason(byId(paused.id))).toBeNull();
     expect(byId(paused.id).active).toBe(false);
+    expect(s.inactiveReason(byId(finer.id))).toBe("open AAPL 1m");
+    expect(byId(finer.id).active).toBe(true);
+
+    // A save does not store it either, and the reason follows the drawing.
+    s.syncDrawingAlerts("AAPL", [steep]);
+    expect(stored()).toBe(before);
+    data.set(DRAWINGS_KEY, JSON.stringify([trendLine]));
+    s.syncDrawingAlerts("AAPL", [trendLine]);
+    expect(s.inactiveReason(byId(a.id))).toBeNull();
+    expect(stored()).toBe(before);
+  });
+
+  it("a line on one bar of the chart is not evaluated: it neither fires nor re-arms", async () => {
+    const steep = {
+      ...trendLine,
+      points: [trendLine.points[0]!, { ...trendLine.points[1]!, timestamp: 10 * 60_000 }],
+    };
+    const data = stubStorage({ [DRAWINGS_KEY]: JSON.stringify([trendLine]) });
+    const s = await load();
+    const { timeAxisOf } = await import("./drawings");
+    const view = { axis: timeAxisOf(Array.from({ length: 30 }, (_, i) => i * H))!, log: false };
+    const tick = (i: number) => ({ time: i * H, chart: { interval: "1h", indicators: {}, view } });
+    s.addAlert({ ...drawingAlert, trigger: "every" });
+
+    // On the line it fires, and an "every" crossing stays armed; now disarm it by hand.
+    s.processPrice("AAPL", 100, 0, tick(5));
+    expect(s.processPrice("AAPL", 400, 0, tick(6))).toHaveLength(1);
+    const stored = JSON.parse(data.get("chartgen.alerts.list")!) as { disarmed?: boolean }[];
+    stored[0]!.disarmed = true;
+    data.set("chartgen.alerts.list", JSON.stringify(stored));
+
+    // One bar: nothing happens to it, whatever the price does.
+    data.set(DRAWINGS_KEY, JSON.stringify([steep]));
+    expect(s.processPrice("AAPL", 1, 0, tick(7))).toEqual([]);
+    expect(s.processPrice("AAPL", 900, 0, tick(8))).toEqual([]);
+    expect(s.alerts()[0]).toMatchObject({ active: true, disarmed: true });
   });
 
   it("passing through vertical does not re-arm a fired every-time alert", async () => {

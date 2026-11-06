@@ -28,7 +28,13 @@ import {
   type ChartView,
   type Reading,
 } from "../lib/alerts";
-import { loadDrawings, setEvictionListener, type DrawingRecord, type TimeAxis } from "./drawings";
+import {
+  DRAWINGS_PREFIX,
+  loadDrawings,
+  setEvictionListener,
+  type DrawingRecord,
+  type TimeAxis,
+} from "./drawings";
 import { normalizeSymbol, symbol as chartSymbol } from "./layout";
 
 export const MAX_ALERTS = 200;
@@ -37,7 +43,7 @@ const MAX_NAME = 80;
 const KEY = "chartgen.alerts.list";
 /** The note of a drawing alert whose drawing was deleted. */
 export const DRAWING_DELETED = "drawing deleted";
-/** The note of a drawing alert whose line was dragged vertical: it has no value to read. */
+/** Why a drawing alert's line has no value to read; stored as a note only if vertical by its points. */
 export const LINE_VERTICAL = "line is vertical";
 
 /** What the alerts need of a stored drawing to tell if it can be read. */
@@ -192,9 +198,14 @@ function fresh(): Alert[] {
   return list;
 }
 
+// `inactiveReason` reads the stored drawings: bumped when they change, here or in another tab.
+const [drawingsRevision, setDrawingsRevision] = createSignal(0);
+const drawingsChanged = () => setDrawingsRevision((n) => n + 1);
+
 if (typeof window !== "undefined") {
   window.addEventListener("storage", (e) => {
     if (e.key === KEY || e.key === null) setAlertsSignal(load());
+    if (e.key === null || e.key.startsWith(DRAWINGS_PREFIX)) drawingsChanged();
   });
 }
 
@@ -291,19 +302,17 @@ const [chartContext, setChartContextSignal] = createSignal<ChartContext | null>(
   },
 );
 export { chartContext };
-export const setChartContext = (ctx: ChartContext | null): void => {
-  const before = chartContext();
-  setChartContextSignal(ctx);
-  // Other bars: a line can start or stop falling on one bar of them.
-  if (ctx && chartContext() !== before) syncDrawingAlerts(ctx.symbol, loadDrawings(ctx.symbol, false));
-};
+export const setChartContext = (ctx: ChartContext | null): void =>
+  void setChartContextSignal(ctx);
 
 /**
  * Why an alert cannot fire right now, for the Alerts tab and Object Tree:
  * its note ("drawing deleted"), "open BTCUSDT 1h" (an indicator or sloped
- * drawing alert while the chart shows something else), "indicator not on
- * the chart" or "indicator changed" (other name or params under its key).
- * Null when it is evaluated, or simply paused or triggered.
+ * drawing alert while the chart shows something else), "line is vertical" (both
+ * points on one bar of these bars, which only holds in this tab, so it is never
+ * stored as a note), "indicator not on the chart" or "indicator changed" (other
+ * name or params under its key). Null when it is evaluated, or simply paused or
+ * triggered.
  */
 export function inactiveReason(
   a: Alert,
@@ -318,7 +327,11 @@ export function inactiveReason(
   if (ctx?.symbol !== a.symbol || ctx.interval !== interval) {
     return `open ${a.symbol} ${interval}`;
   }
-  if (src.kind === "drawing") return null;
+  if (src.kind === "drawing") {
+    void drawingsRevision();
+    const rec = loadDrawings(a.symbol, false).find((d) => d.id === src.drawingId);
+    return rec && isVerticalLine(rec, ctx.axis) ? LINE_VERTICAL : null;
+  }
   if (!ctx.keys.includes(src.instanceKey)) return "indicator not on the chart";
   return signatures[src.instanceKey] === src.signature ? null : "indicator changed";
 }
@@ -386,17 +399,14 @@ export function updateAlert(
 }
 
 /**
- * Why the drawing `rec` cannot be read for alert `a`, or null when it can: judged on
- * the chart's bars while they are the ones the alert runs on. On any other interval it
- * is not evaluated at all ("open BTCUSDT 1h"), so only the points themselves count.
+ * Why the drawing `rec` cannot be read for alert `a` in any tab, or null: it is gone, or
+ * vertical by its points. The note is stored and all tabs share it, so a line falling on
+ * one bar of the bars on screen does not count here (`inactiveReason` says that one).
  */
 function drawingNote(a: Alert, rec: DrawingRecordRef | undefined): string | null {
-  const src = a.source;
-  if (src?.kind !== "drawing") return null;
+  if (a.source?.kind !== "drawing") return null;
   if (!rec) return DRAWING_DELETED;
-  const ctx = chartContext();
-  const own = ctx?.symbol === a.symbol && ctx.interval === src.interval;
-  return isVerticalLine(rec, own ? ctx.axis : undefined) ? LINE_VERTICAL : null;
+  return isVerticalLine(rec) ? LINE_VERTICAL : null;
 }
 
 /** Why a drawing alert's stored drawing cannot be read, or null when it can. */
@@ -459,13 +469,14 @@ export function removeAlert(id: string): void {
 }
 
 /**
- * The drawings of `symbol` are now `records` (called when they are saved, when the
- * chart's bars change, and with none when the symbol's drawings are evicted). Active
- * alerts on a drawing that is gone, or on a line with no value to read (`drawingNote`),
- * are switched off with a note, not deleted, so the user sees what happened; when the
- * drawing comes back (undo) or stops being vertical they are switched on again.
+ * The drawings of `symbol` are now `records` (called when they are saved, and with
+ * none when the symbol's drawings are evicted). Active alerts on a drawing that is
+ * gone, or on a line with no value to read (`drawingNote`), are switched off with a
+ * note, not deleted, so the user sees what happened; when the drawing comes back
+ * (undo) or stops being vertical they are switched on again.
  */
 export function syncDrawingAlerts(symbol: string, records: readonly DrawingRecordRef[]): void {
+  drawingsChanged();
   const list = fresh();
   let changed = false;
   const next = list.map((a) => {
@@ -561,6 +572,8 @@ export function processPrice(
         if (src.interval !== undefined && (!view || tick.chart?.interval !== src.interval)) {
           return null;
         }
+        // Both points on one bar of these bars: no value, and no re-arming from having none.
+        if (view && isVerticalLine(rec, view.axis)) return null;
         // The line as it is now, at the previous and the current bar time:
         // moving a drawing over the price does not fire it.
         return {
