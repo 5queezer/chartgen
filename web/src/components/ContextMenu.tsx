@@ -178,11 +178,9 @@ export function ContextMenuHost(): JSX.Element {
                       item={item}
                       onSelect={() => {
                         // Closed first: the action may be a confirm or open a
-                        // dialog, which takes the focus this would hand back. And on
-                        // the next task, or the Enter that chose it would also press
-                        // the first button the action focuses.
+                        // dialog, which takes the focus this would hand back.
                         close();
-                        setTimeout(item.onSelect);
+                        item.onSelect();
                       }}
                     />
                   )

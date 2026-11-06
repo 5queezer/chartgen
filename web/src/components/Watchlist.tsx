@@ -654,7 +654,9 @@ function FlagMenu(props: {
     <div
       ref={(n) => {
         el = n;
-        queueMicrotask(() => n.querySelector<HTMLElement>("button")?.focus());
+        // On the next task: opened by Enter on a menu item, focused any sooner its
+        // first swatch would get that key's click.
+        setTimeout(() => n.querySelector<HTMLElement>("button")?.focus());
       }}
       role="menu"
       aria-label={`Flag ${props.menu.symbol}`}
