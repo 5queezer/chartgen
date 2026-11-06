@@ -220,10 +220,19 @@ test.describe("chart canvas", () => {
     await expect(anyItem(page, "Invert scale")).toHaveCount(0);
     await expect(anyItem(page, /^Copy value/)).toBeVisible();
 
-    // The value is the one on this pane's own scale.
+    await page.keyboard.press("Escape");
+
+    // The value is the one at that height on this pane's own scale, where the chart draws 50.
+    const fifty = await page.evaluate(() => {
+      const c = window.__chartgenTest.chart();
+      const paneId = document.querySelector<HTMLElement>('[data-indicator="rsi"]')!.dataset.paneId!;
+      const y = c.convertToPixel({ value: 50 }, { paneId, absolute: true }).y!;
+      const [one, two] = c.convertFromPixel([{ y }, { y: y + 1 }], { paneId, absolute: true });
+      return { y, perPixel: Math.abs(one!.value! - two!.value!) };
+    });
+    await rightClick(page, { x: at.x, y: fifty.y });
     const shown = Number((await anyItem(page, /^Copy value/).textContent())!.replace("Copy value ", ""));
-    expect(shown).toBeGreaterThan(0);
-    expect(shown).toBeLessThan(100);
+    expect(Math.abs(shown - 50)).toBeLessThan(fifty.perPixel * 2 + 0.01);
 
     await anyItem(page, /^Hide RSI/).click();
     await expect(page.getByTestId("indicator-legend-rsi")).toHaveCount(0);
@@ -477,6 +486,64 @@ test.describe("indicators", () => {
     await expect(page.getByTestId("tree-compare-ETHUSDT")).toHaveCount(0);
   });
 
+  test("several instances: each menu reaches its own", async ({ bootedApp: page }) => {
+    await page.getByRole("button", { name: /Indicators/ }).click();
+    const picker = page.getByRole("dialog");
+    await picker.getByPlaceholder("Search indicators...").fill("rsi");
+    await picker
+      .locator("li button[type='button']")
+      .filter({ has: page.locator('[title="rsi"]') })
+      .filter({ hasText: /added/ })
+      .click();
+    await picker.getByRole("button", { name: "Close" }).click();
+    const first = page.getByTestId("indicator-legend-rsi");
+    const second = page.getByTestId("indicator-legend-rsi#2");
+    await expect(second).toBeVisible();
+
+    // Its sub-pane, then its legend row.
+    const box = (await second.boundingBox())!;
+    await page.mouse.click(box.x + 400, box.y + 30, { button: "right" });
+    await expect(menu(page, "Pane actions")).toBeVisible();
+    await anyItem(page, /^Hide /).click();
+    await expect(second).toHaveCount(0);
+    await expect(first).toBeVisible();
+
+    // Hidden, it has no legend: its tree row brings it back, by key.
+    await page.getByRole("tab", { name: "Object Tree" }).click();
+    await page.getByTestId("tree-ind-rsi#2").click({ button: "right" });
+    await anyItem(page, /^Show /).click();
+    await expect(second).toBeVisible();
+
+    await page.getByTestId("tree-ind-rsi").click({ button: "right" });
+    await anyItem(page, /^Remove /).click();
+    await expect(first).toHaveCount(0);
+    await expect(second).toBeVisible();
+
+    // A legend row builds its menu from its own callbacks.
+    await second.click({ button: "right", position: { x: 10, y: 8 } });
+    await anyItem(page, /^Remove /).click();
+    await expect(second).toHaveCount(0);
+    await expect(page.getByTestId("indicator-legend-volume")).toBeVisible();
+  });
+
+  test("Hide finds its instance when chosen, whatever moved since the menu opened", async ({ bootedApp: page }) => {
+    await page.getByRole("tab", { name: "Object Tree" }).click();
+    await page.getByTestId("tree-ind-rsi").click({ button: "right" });
+    await expect(menu(page, /^RSI.* actions$/)).toBeVisible();
+    // No user path moves the list under an open menu: the store is moved by hand.
+    await page.evaluate(async () => {
+      const path = "/src/stores/indicators.ts";
+      const { activeIndicators, setActiveIndicators } = (await import(/* @vite-ignore */ path)) as {
+        activeIndicators: () => unknown[];
+        setActiveIndicators: (next: unknown[]) => void;
+      };
+      setActiveIndicators([...activeIndicators()].reverse());
+    });
+    await anyItem(page, /^Hide RSI/).click();
+    await expect(page.getByTestId("indicator-legend-rsi")).toHaveCount(0);
+    await expect(page.getByTestId("indicator-legend-volume")).toBeVisible();
+  });
+
   test("a chip's menu acts on that chip", async ({ bootedApp: page }) => {
     // Not the legend row, which has a Remove button of the same name.
     const chip = page.locator("span.rounded-full", { has: page.getByRole("button", { name: /^Remove volume/i }) });
@@ -675,7 +742,7 @@ test.describe("the menu itself", () => {
     await expect(page.getByRole("menu").first()).toBeVisible();
   });
 
-  test("Escape and an outside click close it; Escape leaves the selection and the tool alone", async ({
+  test("Escape and an outside click close it; Escape leaves the selection and an armed tool alone", async ({
     bootedApp: page,
   }) => {
     await rightClick(page, A);
@@ -698,6 +765,116 @@ test.describe("the menu itself", () => {
     await page.keyboard.press("Escape");
     await expect(chartMenu(page)).toHaveCount(0);
     await expect(styleBar).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(styleBar).toHaveCount(0);
+
+    // A legend row's menu leaves a tool armed; closing it must too.
+    const tool = page.getByRole("button", { name: "Trend line" });
+    await tool.click();
+    await page.getByTestId("indicator-legend-rsi").click({ button: "right", position: { x: 10, y: 8 } });
+    await expect(menu(page, /^RSI.* actions$/)).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(page.getByRole("menu")).toHaveCount(0);
+    await expect(tool).toHaveAttribute("aria-pressed", "true");
+  });
+
+  test.describe("a click that closes it does nothing else", () => {
+    const current = (page: Page) => page.locator('.wl-row[aria-current="true"]');
+    const row = (page: Page, sym: string) => page.locator(`.wl-row[data-symbol="${sym}"]`);
+    const replayMode = (page: Page) =>
+      page.evaluate(() => (window as unknown as { __chartgenTest: { replay(): { mode: string } } }).__chartgenTest.replay().mode);
+    const openChartMenu = async (page: Page) => {
+      await rightClick(page, A);
+      await expect(chartMenu(page)).toBeVisible();
+    };
+
+    test("no replay start", async ({ bootedApp: page }) => {
+      await page.getByRole("button", { name: /replay/i }).first().click();
+      await page.getByTestId("replay-select-bar").click();
+      await expect(page.getByTestId("replay-cutline")).toBeVisible();
+      await openChartMenu(page);
+      await leftClick(page, { x: 900, y: 200 });
+      await expect(chartMenu(page)).toHaveCount(0);
+      expect(await replayMode(page)).toBe("select");
+      // Only that press: the next one is the pick.
+      await leftClick(page, { x: 900, y: 200 });
+      await expect.poll(() => replayMode(page)).toBe("active");
+    });
+
+    test("no drawing point", async ({ bootedApp: page }) => {
+      const tool = page.getByRole("button", { name: "Trend line" });
+      await tool.click();
+      await page.getByTestId("indicator-legend-rsi").click({ button: "right", position: { x: 10, y: 8 } });
+      await expect(menu(page, /^RSI.* actions$/)).toBeVisible();
+      await leftClick(page, A);
+      await expect(page.getByRole("menu")).toHaveCount(0);
+      await expect(tool).toHaveAttribute("aria-pressed", "true");
+      // Two points are still to come: had the closing click counted, this one would finish it.
+      await leftClick(page, B);
+      expect(await drawings(page)).toHaveLength(0);
+      await expect(tool).toHaveAttribute("aria-pressed", "true");
+      await leftClick(page, { x: 700, y: 180 });
+      await expect.poll(async () => (await drawings(page)).length).toBe(1);
+    });
+
+    test("no symbol change from a watchlist row", async ({ bootedApp: page }) => {
+      await expect(current(page)).toHaveAttribute("data-symbol", "BTCUSDT");
+      await openChartMenu(page);
+      await row(page, "ETHUSDT").click();
+      await expect(chartMenu(page)).toHaveCount(0);
+      await page.waitForTimeout(200);
+      await expect(current(page)).toHaveAttribute("data-symbol", "BTCUSDT");
+      await row(page, "ETHUSDT").click();
+      await expect(current(page)).toHaveAttribute("data-symbol", "ETHUSDT");
+    });
+
+    test("no row removed by its ×", async ({ bootedApp: page }) => {
+      await openChartMenu(page);
+      await row(page, "AAPL").hover();
+      const remove = page.getByRole("button", { name: "Remove AAPL from watchlist" });
+      await remove.click();
+      await expect(chartMenu(page)).toHaveCount(0);
+      await page.waitForTimeout(200);
+      await expect(row(page, "AAPL")).toBeVisible();
+      await remove.click();
+      await expect(row(page, "AAPL")).toHaveCount(0);
+    });
+
+    test("no stuck state when the press does not end in a click on it", async ({ bootedApp: page }) => {
+      const eth = (await row(page, "ETHUSDT").boundingBox())!;
+      const onEth = { x: eth.x + 40, y: eth.y + eth.height / 2 };
+
+      // Released somewhere else, and the next click is a click.
+      await openChartMenu(page);
+      await page.mouse.move(onEth.x, onEth.y);
+      await page.mouse.down();
+      await page.mouse.move(600, 20, { steps: 3 });
+      await page.mouse.up();
+      await expect(chartMenu(page)).toHaveCount(0);
+      await expect(current(page)).toHaveAttribute("data-symbol", "BTCUSDT");
+      await page.mouse.click(onEth.x, onEth.y);
+      await expect(current(page)).toHaveAttribute("data-symbol", "ETHUSDT");
+
+      // Never released here: a key ends it, and what follows is no longer stopped.
+      const sol = (await row(page, "SOLUSDT").boundingBox())!;
+      await openChartMenu(page);
+      await page.mouse.move(sol.x + 40, sol.y + sol.height / 2);
+      await page.mouse.down();
+      await page.keyboard.press("Shift");
+      await page.mouse.up();
+      await expect(current(page)).toHaveAttribute("data-symbol", "SOLUSDT");
+
+      // Nor does a new press find anything left: as if the release was lost outside the window.
+      await openChartMenu(page);
+      const aapl = (await row(page, "AAPL").boundingBox())!;
+      await page.mouse.move(aapl.x + 40, aapl.y + aapl.height / 2);
+      await page.mouse.down();
+      await page.evaluate(() =>
+        document.body.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, pointerType: "mouse", button: 0 })),
+      );
+      await page.mouse.up();
+      await expect(current(page)).toHaveAttribute("data-symbol", "AAPL");
+    });
   });
 
   test("the keyboard drives it, and focus goes back to the row", async ({ bootedApp: page }) => {
