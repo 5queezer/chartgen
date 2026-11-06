@@ -723,12 +723,22 @@ impl Drop for Server {
     }
 }
 
+/// A port nothing listens on, below the OS's ephemeral range (32768 and up on
+/// Linux), each handed out once and spread by process id so parallel runs stay
+/// apart. It must not open a listener to find one: a test forking at that moment
+/// inherits the socket until its `exec`, so the wait in `spawn_server_on` connects
+/// to that instead of the server, and the first request gets a reset or refusal.
+/// The range also keeps the port clear of the many client sockets tests open.
 fn free_port() -> u16 {
-    std::net::TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port()
+    static OFFSET: std::sync::atomic::AtomicU16 = std::sync::atomic::AtomicU16::new(0);
+    let base = 20_000 + (std::process::id() % 120) as u16 * 100;
+    loop {
+        let offset = OFFSET.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let port = base + offset % 12_000;
+        if std::net::TcpStream::connect(("127.0.0.1", port)).is_err() {
+            return port;
+        }
+    }
 }
 
 /// A server with an empty store of its own, never the user's real one.
@@ -1275,11 +1285,11 @@ fn test_busy_store_does_not_stall_authenticated_calls_during_token() {
     let started = std::time::Instant::now();
     assert_eq!(ping_status(port, &token), 200);
     let waited = started.elapsed();
+    assert!(waited.as_secs() < 2, "ping waited {waited:?}");
     assert!(
         !exchange.is_finished(),
         "/token should still be on the store"
     );
-    assert!(waited.as_secs() < 2, "ping waited {waited:?}");
 
     conn.execute_batch("COMMIT").unwrap();
     assert_eq!(exchange.join().unwrap(), 200);
