@@ -1163,6 +1163,56 @@ async fn a_client_is_held_to_its_share_of_the_slots() {
     assert_eq!(seen.lock().unwrap().len(), 1, "a second went at once");
 }
 
+/// A receiver that accepts and never answers drains slowly, so what its client fires
+/// must wait in the queue, where the cap applies, and not pile up in started tasks
+/// until nobody else has room.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_silent_receiver_cannot_fill_the_global_queue() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        let mut held = Vec::new();
+        while let Ok((s, _)) = listener.accept().await {
+            held.push(s);
+        }
+    });
+    let (store, _) = store_at("silent");
+    let limits = Limits {
+        fires_per_alert_per_minute: 100_000,
+        webhooks_per_client_per_minute: 1000,
+        webhooks_total_per_minute: 1000,
+        deliveries_in_flight_per_client: 1,
+        pending_deliveries_per_client: 5,
+        pending_deliveries: 20,
+        ..Limits::default()
+    };
+    let timing = Timing {
+        total: Duration::from_secs(30),
+        ..quick_timing()
+    };
+    let hub = hub_with(Arc::new(Fake::default()));
+    let a = ServerAlerts::new(store, hub, local(port), Access::Open, limits, timing);
+    create(&a, hooked(port, "crossing", "every"), "hog").await;
+    tick(&a, BASE, 99.0);
+    // Fires faster than anything drains, for several dispatch ticks.
+    let mut most = 0;
+    for i in 0..30 {
+        tick(&a, BASE, if i % 2 == 0 { 101.0 } else { 99.0 });
+        most = most.max(a.lock().pending);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(most <= 6, "the queue's 5 and the one started: {most}");
+
+    let victim = create(&a, hooked(port, "greater", "once"), "victim").await;
+    tick(&a, BASE, 101.0);
+    let error = a.lock().alerts[&victim]
+        .last_delivery
+        .as_ref()
+        .and_then(|d| d.error.clone());
+    assert_eq!(error, None, "the victim's webhook was refused");
+    assert_eq!(a.lock().queues["victim"].len(), 1);
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn the_total_budget_holds_across_clients() {
     let (port, seen) = receiver(OK).await;
@@ -1311,6 +1361,63 @@ async fn a_client_taken_off_the_list_stops_running() {
     assert!(seen.lock().unwrap().is_empty());
 }
 
+/// A delivery waiting in the store when the server restarted, for a client the new
+/// setting no longer allows: it is dropped, not sent.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_queued_delivery_of_a_client_no_longer_allowed_is_dropped_on_restart() {
+    for (name, access) in [
+        ("off-list", Access::parse(Some("someone-else"))),
+        ("unset", Access::NoWebhooks),
+    ] {
+        let (port, seen) = receiver(OK).await;
+        let (store, path) = store_at(&format!("revoked-queue-{name}"));
+        let a = with_access(store, Access::Open, local(port));
+        let id = create(&a, hooked(port, "greater", "once"), "gone").await;
+        let record = a.lock().alerts[&id].json();
+        drop(a);
+        let event = StoredEvent {
+            id: "queued".into(),
+            alert_id: id.clone(),
+            body: "{}".into(),
+            created_at: chrono::Utc::now().timestamp(),
+        };
+        store
+            .record_server_alert_fire(&id, "gone", &record, Some(&event))
+            .unwrap();
+
+        let store = reopen(&path);
+        let a = with_access(store, access, local(port));
+        assert_eq!(a.lock().pending, 0, "{name}");
+        assert!(store.server_alert_events().unwrap().is_empty(), "{name}");
+        // A dispatch or two, in case it was queued anyway.
+        tokio::time::sleep(Duration::from_millis(700)).await;
+        assert!(seen.lock().unwrap().is_empty(), "{name}");
+    }
+}
+
+/// The same event for a client still allowed is sent, so the drop above is the rule
+/// at work and not something else losing it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_queued_delivery_of_a_client_still_allowed_is_sent_after_a_restart() {
+    let (port, seen) = receiver(OK).await;
+    let (store, path) = store_at("allowed-queue");
+    let a = with_access(store, Access::parse(Some("friend")), local(port));
+    let id = create(&a, hooked(port, "greater", "once"), "friend").await;
+    let record = a.lock().alerts[&id].json();
+    drop(a);
+    let event = StoredEvent {
+        id: "queued".into(),
+        alert_id: id.clone(),
+        body: "{}".into(),
+        created_at: chrono::Utc::now().timestamp(),
+    };
+    store
+        .record_server_alert_fire(&id, "friend", &record, Some(&event))
+        .unwrap();
+    let _a = with_access(reopen(&path), Access::parse(Some("friend")), local(port));
+    until("the delivery", || seen.lock().unwrap().len() == 1).await;
+}
+
 /// Going from `*` to unset: alerts run on, and what was stored sends nothing.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_stored_webhook_stops_when_the_setting_no_longer_allows_it() {
@@ -1354,6 +1461,51 @@ async fn spent_alerts_do_not_count_toward_the_total_but_rows_stay_bounded() {
         .await
         .unwrap_err();
     assert!(e.contains("maximum"), "rows: {e}");
+}
+
+/// Bringing a spent alert back takes a place among the live ones, as creating does.
+#[tokio::test(flavor = "multi_thread")]
+async fn re_arming_a_spent_alert_is_held_to_the_total() {
+    let (store, _) = store_at("rearm-total");
+    let limits = Limits {
+        alerts_total: 2,
+        changes_per_minute: 1000,
+        ..Limits::default()
+    };
+    let a = alerts_on(store, Policy::default(), limits);
+    let by_level = create(&a, spec("greater", "once", 1.0), "a").await;
+    let by_resume = create(&a, spec("greater", "once", 1.0), "b").await;
+    tick(&a, BASE, 101.0);
+    create(&a, spec("less", "once", 1.0), "c").await;
+    let live = create(&a, spec("less", "once", 2.0), "d").await;
+
+    // Two are live, which is the total, and two are spent.
+    let by_level_args = json!({"alert_id": by_level, "level": 50.0});
+    let e = call(&a, "update_server_alert", by_level_args.clone(), "a")
+        .await
+        .unwrap_err();
+    assert!(e.contains("maximum of 2"), "{e}");
+    let by_resume_args = json!({"alert_id": by_resume, "active": true});
+    let e = call(&a, "update_server_alert", by_resume_args, "b")
+        .await
+        .unwrap_err();
+    assert!(e.contains("maximum of 2"), "{e}");
+    let active = a.lock().alerts.values().filter(|r| r.active).count();
+    assert_eq!(active, 2, "the refused ones stay spent");
+
+    // What keeps a spent alert spent is still free, and so is changing a live one.
+    let args = json!({"alert_id": by_level, "message": "note"});
+    call(&a, "update_server_alert", args, "a").await.unwrap();
+    let args = json!({"alert_id": live, "level": 3.0});
+    call(&a, "update_server_alert", args, "d").await.unwrap();
+
+    // With a place free it comes back.
+    call(&a, "delete_server_alert", json!({"alert_id": live}), "d")
+        .await
+        .unwrap();
+    call(&a, "update_server_alert", by_level_args, "a")
+        .await
+        .unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread")]

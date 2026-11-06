@@ -474,7 +474,11 @@ impl ServerAlerts {
         let oldest = chrono::Utc::now().timestamp() - EVENT_MAX_AGE_SECS;
         for event in events {
             let owner = st.alerts.get(&event.alert_id).map(|a| a.owner.clone());
-            match owner.filter(|_| event.created_at >= oldest) {
+            // The list is read at startup, so this is where a removed client's
+            // deliveries stop, and what it queued goes with them.
+            let may_send =
+                |owner: &String| event.created_at >= oldest && self.access.may_use_webhooks(owner);
+            match owner.filter(may_send) {
                 Some(owner) => Self::enqueue(&mut st, owner, event),
                 None => {
                     let _ = self.store.delete_server_alert_event(&event.id);
@@ -487,7 +491,8 @@ impl ServerAlerts {
         self.state.lock().unwrap_or_else(|p| p.into_inner())
     }
 
-    /// A client the operator took off the list stops running at once.
+    /// A client the operator took off the list does not run, from the restart that
+    /// read the new list.
     fn runs(&self, a: &Record) -> bool {
         a.active && self.access.may_create(&a.owner)
     }
@@ -772,6 +777,11 @@ impl ServerAlerts {
             {
                 continue;
             }
+            // Busy: it stays queued, where its cap and its age limit apply. A started
+            // delivery counts toward neither, and a silent receiver drains slowly.
+            if self.client_slot(st, &owner).available_permits() == 0 {
+                continue;
+            }
             let Some(event) = st.queues.get_mut(&owner).and_then(VecDeque::pop_front) else {
                 continue;
             };
@@ -840,6 +850,14 @@ impl ServerAlerts {
         Ok(())
     }
 
+    fn client_slot(&self, st: &mut State, owner: &str) -> Arc<Semaphore> {
+        let per_client = self.limits.deliveries_in_flight_per_client;
+        st.client_slots
+            .entry(owner.to_string())
+            .or_insert_with(|| Arc::new(Semaphore::new(per_client)))
+            .clone()
+    }
+
     /// Send one event, then record how it went and forget it.
     async fn deliver(self: Arc<Self>, event: StoredEvent) {
         let (hook, client) = {
@@ -847,13 +865,7 @@ impl ServerAlerts {
             let alert = st.alerts.get(&event.alert_id);
             let hook = alert.and_then(|a| a.webhook.clone());
             let owner = alert.map(|a| a.owner.clone()).unwrap_or_default();
-            let per_client = self.limits.deliveries_in_flight_per_client;
-            let client = st
-                .client_slots
-                .entry(owner)
-                .or_insert_with(|| Arc::new(Semaphore::new(per_client)))
-                .clone();
-            (hook, client)
+            (hook, self.client_slot(&mut st, &owner))
         };
         let outcome = match hook {
             // One client's dead host cannot hold every slot.
@@ -969,15 +981,27 @@ impl ServerAlerts {
                 limits.alerts_per_client
             ));
         }
-        let spent = |a: &&Record| !a.active && a.last_triggered_at.is_some();
-        let live = st.alerts.values().filter(|a| !spent(a)).count();
-        if live >= limits.alerts_total || st.alerts.len() >= limits.rows_total {
-            return Err(format!(
-                "Limit reached: this server holds its maximum of {} server alerts",
-                limits.alerts_total
-            ));
+        if st.alerts.len() >= limits.rows_total {
+            return Err(self.total_reached());
         }
+        self.check_live_total(st)?;
         self.check_feed_room(st, owner, feed)
+    }
+
+    fn total_reached(&self) -> String {
+        format!(
+            "Limit reached: this server holds its maximum of {} server alerts",
+            self.limits.alerts_total
+        )
+    }
+
+    /// Room for one more alert that is not spent, new or brought back?
+    fn check_live_total(&self, st: &State) -> Result<(), String> {
+        let live = st.alerts.values().filter(|a| !is_spent(a)).count();
+        if live >= self.limits.alerts_total {
+            return Err(self.total_reached());
+        }
+        Ok(())
     }
 
     fn check_feed_room(&self, st: &State, owner: &str, feed: &FeedKey) -> Result<(), String> {
@@ -1142,6 +1166,7 @@ impl ServerAlerts {
             .filter(|a| a.owner == owner)
             .cloned()
             .ok_or("No such alert")?;
+        let was_spent = is_spent(&next);
         // What decides when it fires: a note or a webhook does not bring a spent alert
         // back, and neither does the dialog sending the same values again.
         let redefined = condition.is_some_and(|c| c != next.condition)
@@ -1188,6 +1213,9 @@ impl ServerAlerts {
             let hook = next.webhook.as_mut().ok_or("sign needs a webhook")?;
             hook.secret = sign.then(new_secret);
             new_secret_text = hook.secret.clone();
+        }
+        if was_spent && !is_spent(&next) {
+            self.check_live_total(&st)?;
         }
         if next.active {
             self.check_feed_room(&st, owner, &next.feed())?;
@@ -1290,6 +1318,11 @@ impl ServerAlerts {
             "last_price": watch.and_then(|w| w.last_price),
         })
     }
+}
+
+/// A `once` alert that fired: it holds no place among the live ones until re-armed.
+fn is_spent(a: &Record) -> bool {
+    !a.active && a.last_triggered_at.is_some()
 }
 
 /// `7m`, `1h`, `1mo`: digits then letters, short enough to show.
