@@ -35,7 +35,7 @@ export interface IndicatorSettingsProps {
   /** Indicator being edited, or null when the dialog is closed. */
   target: {
     name: string;
-    /** Dialog title when it differs from `name`, e.g. `RSI (21)` for a repeated indicator. */
+    /** Dialog title when it differs from `name`, e.g. `BB`, or `RSI (21)` for a repeated indicator. */
     title?: string;
     params: Record<string, unknown>;
     style: IndicatorStyle | undefined;

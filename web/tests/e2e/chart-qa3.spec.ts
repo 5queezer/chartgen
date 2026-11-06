@@ -4,7 +4,7 @@
 
 import type { Page } from "@playwright/test";
 
-import { test, expect, reloadApp } from "./fixtures/app";
+import { test, expect, gotoApp, reloadApp } from "./fixtures/app";
 
 type Hook = {
   chart: () => {
@@ -325,5 +325,19 @@ test.describe("watchlist hover buttons", () => {
     });
     const result = await overlaps(page, "BTCUSDT");
     expect(result.numbers).toEqual([]);
+  });
+});
+
+test.describe("indicator settings title", () => {
+  test("shows the chip's name, not the raw id", async ({ page }) => {
+    await gotoApp(page, "/?ind=bbands,ema_stack");
+    for (const id of ["bbands", "ema_stack"]) {
+      const shown = await page.locator(`[title="${id}"]`).first().innerText();
+      await page.getByRole("button", { name: `Settings for ${id}`, exact: true }).click();
+      const heading = page.getByRole("dialog").getByRole("heading");
+      await expect(heading).toHaveText(shown);
+      await expect(heading).not.toHaveText(id);
+      await page.getByRole("dialog").getByRole("button", { name: "Cancel" }).click();
+    }
   });
 });
