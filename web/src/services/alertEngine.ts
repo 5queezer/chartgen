@@ -35,10 +35,12 @@ import { scaleMode } from "../stores/layout";
 import type { SeriesPayload } from "../types/responses";
 import {
   activeAlertSymbols,
+  chartContext,
   forgetBaseline,
   observePrice,
   processPrice,
   setChartContext,
+  setEvaluatingChart,
   type Tick,
 } from "../stores/alerts";
 
@@ -200,6 +202,43 @@ function startLeaderElection(): () => void {
   };
 }
 
+// An alert bound to a chart only runs while the leading tab shows that chart. The leading
+// tab says which one it shows, so that another tab does not read such an alert as running.
+const LEADING_CHART_KEY = "chartgen.alerts.leadingChart";
+
+function readLeadingChart(): string | null {
+  try {
+    return localStorage.getItem(LEADING_CHART_KEY);
+  } catch {
+    return null;
+  }
+}
+
+/** Call inside a component. */
+function shareLeadingChart(): void {
+  createEffect(() => {
+    if (!leader()) {
+      setEvaluatingChart(readLeadingChart());
+      return;
+    }
+    setEvaluatingChart(null);
+    const ctx = chartContext();
+    try {
+      if (ctx) localStorage.setItem(LEADING_CHART_KEY, `${ctx.symbol} ${ctx.interval}`);
+      else localStorage.removeItem(LEADING_CHART_KEY);
+    } catch {
+      // Not shared: other tabs go by their own chart, as without a leader.
+    }
+  });
+  const onStorage = (e: StorageEvent) => {
+    if ((e.key === LEADING_CHART_KEY || e.key === null) && !leader()) {
+      setEvaluatingChart(readLeadingChart());
+    }
+  };
+  window.addEventListener("storage", onStorage);
+  onCleanup(() => window.removeEventListener("storage", onStorage));
+}
+
 /** Evaluate and deliver for one live price (in the leading tab). */
 export function feedPrice(
   symbol: string,
@@ -294,6 +333,7 @@ export function createAlertQuotes(
 ): void {
   onCleanup(startLeaderElection());
   onCleanup(installAudioUnlock());
+  shareLeadingChart();
 
   const symbols = createMemo(
     () => activeAlertSymbols().filter((s) => s !== chartSymbol()),

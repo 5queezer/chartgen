@@ -112,6 +112,18 @@ describe("tryHandlePendingRedirect", () => {
     );
   });
 
+  it("a failed exchange is logged as an error, also when it can retry", async () => {
+    boot("http://app.test/?code=c1&state=s1");
+    tokenStatus = 400;
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { tryHandlePendingRedirect } = await import("./oauth");
+
+    void tryHandlePendingRedirect();
+    await vi.waitFor(() => expect(assign).toHaveBeenCalledOnce());
+
+    expect(error).toHaveBeenCalledOnce();
+  });
+
   it("after the retry, a second failure resolves with the error and does not redirect", async () => {
     boot("http://app.test/?code=c2&state=s1");
     tokenStatus = 400;
@@ -341,6 +353,61 @@ describe("stale client (?error=invalid_client)", () => {
     await vi.waitFor(() => expect(assign).toHaveBeenCalledOnce());
 
     expect(authorizedClient()).toBe("new");
+  });
+
+  describe("what it logs", () => {
+    let error: ReturnType<typeof vi.spyOn>;
+    let info: ReturnType<typeof vi.spyOn>;
+    const seedPkce = () =>
+      sessionStorage.setItem(
+        "chartgen.oauth.pkce",
+        JSON.stringify({ code_verifier: "v", state: "s1", client_id: "client" }),
+      );
+
+    beforeEach(() => {
+      error = vi.spyOn(console, "error").mockImplementation(() => {});
+      info = vi.spyOn(console, "info").mockImplementation(() => {});
+    });
+    afterEach(() => {
+      error.mockRestore();
+      info.mockRestore();
+    });
+
+    it("recovering from a stale client is not an error", async () => {
+      boot("http://app.test/?error=invalid_client&state=s1");
+      seedPkce();
+      const { tryHandlePendingRedirect } = await import("./oauth");
+
+      void tryHandlePendingRedirect();
+      await vi.waitFor(() => expect(assign).toHaveBeenCalledOnce());
+
+      expect(error).not.toHaveBeenCalled();
+      expect(info).toHaveBeenCalledOnce();
+    });
+
+    it("a stale client it cannot recover from is an error", async () => {
+      boot("http://app.test/?error=invalid_client&state=s1");
+      seedPkce();
+      sessionStorage.setItem(RETRIED, "1");
+      const { tryHandlePendingRedirect } = await import("./oauth");
+
+      await tryHandlePendingRedirect();
+
+      expect(error).toHaveBeenCalledOnce();
+      expect(info).not.toHaveBeenCalled();
+    });
+
+    it("a restart that fails after a stale client is an error", async () => {
+      boot("http://app.test/?error=invalid_client&state=s1");
+      seedPkce();
+      fetchMock.mockRejectedValue(new Error("network down"));
+      const { tryHandlePendingRedirect } = await import("./oauth");
+
+      const err = await tryHandlePendingRedirect();
+
+      expect(err?.message).toBe("network down");
+      expect(error).toHaveBeenCalledOnce();
+    });
   });
 
   it("a second failure stops with the error, and Sign in again registers", async () => {

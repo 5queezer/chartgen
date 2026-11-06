@@ -685,6 +685,26 @@ describe("drawing alerts", () => {
     expect(stored()).toBe(before);
   });
 
+  it("goes by the chart of the tab that evaluates, when that is another tab", async () => {
+    stubStorage({ [DRAWINGS_KEY]: JSON.stringify([trendLine]) });
+    const s = await load();
+    const a = s.addAlert(drawingAlert)!;
+    const price = s.addAlert({ symbol: "AAPL", condition: "crossing", trigger: "once", price: 100 })!;
+    const byId = (id: string) => s.alerts().find((x) => x.id === id)!;
+    const here = { symbol: "AAPL", interval: "1h", keys: [] };
+
+    s.setEvaluatingChart("AAPL 15m");
+    expect(s.inactiveReason(byId(a.id), here)).toBe("open AAPL 1h in the other tab");
+    expect(s.inactiveReason(byId(price.id), here)).toBeNull();
+    s.setEvaluatingChart("MSFT 1h");
+    expect(s.inactiveReason(byId(a.id), here)).toBe("open AAPL 1h in the other tab");
+    s.setEvaluatingChart("AAPL 1h");
+    expect(s.inactiveReason(byId(a.id), here)).toBeNull();
+    expect(s.inactiveReason(byId(a.id), { ...here, interval: "15m" })).toBe("open AAPL 1h");
+    s.setEvaluatingChart(null);
+    expect(s.inactiveReason(byId(a.id), here)).toBeNull();
+  });
+
   it("a line on one bar of the chart is not evaluated: it neither fires nor re-arms", async () => {
     const steep = {
       ...trendLine,
