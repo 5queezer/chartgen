@@ -83,6 +83,8 @@ export interface GeometryStyle {
   /** `color`: bars outside the value area; `vaColor`: inside it; `pocColor`: the widest bar. */
   hbars?: { color?: string; vaColor?: string; pocColor?: string; visible?: boolean };
   divlines?: { bullColor?: string; bearColor?: string; visible?: boolean };
+  /** Pattern labels and outlines (ADR-0046). */
+  marks?: { bullColor?: string; bearColor?: string; neutralColor?: string; visible?: boolean };
 }
 
 /** Per-indicator style overrides, keyed by `plotKey`. */
@@ -237,6 +239,8 @@ function sanitizeGeometry(x: unknown): GeometryStyle | undefined {
   if (hbars) out.hbars = hbars as GeometryStyle["hbars"];
   const divlines = pickGeo(x.divlines, ["bullColor", "bearColor"]);
   if (divlines) out.divlines = divlines as GeometryStyle["divlines"];
+  const marks = pickGeo(x.marks, ["bullColor", "bearColor", "neutralColor"]);
+  if (marks) out.marks = marks as GeometryStyle["marks"];
   return Object.keys(out).length > 0 ? out : undefined;
 }
 
