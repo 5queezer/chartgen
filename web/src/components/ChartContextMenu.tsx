@@ -21,6 +21,7 @@ import {
   setInvertScale,
   setLockRatio,
 } from "../stores/layout";
+import { compareSymbols } from "../stores/compare";
 import { openAlertDialog } from "./AlertDialog";
 import type { DrawingsApi } from "./DrawingToolbar";
 
@@ -165,6 +166,7 @@ export function ChartContextMenu(props: ChartContextMenuProps): JSX.Element {
             onChange={setLockRatio}
           >
             Lock price to bar ratio
+            {lockRatio() && compareSymbols().length > 0 ? " (paused while comparing)" : ""}
           </ContextMenu.CheckboxItem>
           <ContextMenu.Separator class="my-1 border-t border-[color:var(--color-border)]" />
           <ContextMenu.Item

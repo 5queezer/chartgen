@@ -145,6 +145,33 @@ test.describe("lock price to bar ratio with compare", () => {
     await expect.poll(() => offScreen(page)).toMatchObject({ bars: 0, lines: 0 });
   });
 
+  test("the context menu says when the lock is paused", async ({ bootedApp: page }) => {
+    const item = async () => {
+      const box = (await page.locator(".chart-host").boundingBox())!;
+      await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2, { button: "right" });
+      const entry = page.getByRole("menuitemcheckbox", { name: /Lock price to bar ratio/ });
+      const text = (await entry.innerText()).trim();
+      await page.keyboard.press("Escape");
+      await expect(page.getByRole("menu")).toBeHidden();
+      return text;
+    };
+    const plain = "Lock price to bar ratio";
+    const paused = `${plain} (paused while comparing)`;
+
+    // Compare alone: nothing is paused while the lock is off.
+    await addCompare(page, "ETHUSDT");
+    await expect(compareLegend(page, "ETHUSDT")).toBeVisible();
+    expect(await item()).toBe(plain);
+
+    await lockViaMenu(page);
+    expect(await item()).toBe(paused);
+
+    await compareLegend(page, "ETHUSDT").hover();
+    await compareLegend(page, "ETHUSDT").getByRole("button", { name: "Remove ETHUSDT" }).click();
+    await expect(compareLegend(page, "ETHUSDT")).toHaveCount(0);
+    expect(await item()).toBe(plain);
+  });
+
   test("already on the percent axis: compare still drops a zoomed-in lock", async ({
     bootedApp: page,
   }) => {

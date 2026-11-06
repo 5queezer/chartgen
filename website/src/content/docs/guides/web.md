@@ -138,7 +138,8 @@ Symbol, timeframe, chart type, price-scale mode, theme, time zone and recent sym
   or timeframe; after a window resize it keeps the price range on screen.
   While compare symbols are shown the lock is paused and the axis fits every
   series, because a fixed price range would crop lines rebased to the first
-  visible bar; it resumes from a fresh fit when the last one is removed.
+  visible bar; the context menu item then reads "(paused while comparing)", and
+  the lock resumes from a fresh fit when the last one is removed.
   Locking turns `auto` off; clicking `auto`, double-clicking the axis,
   dragging the axis or `Alt+R` releases the lock. While it is locked the
   price axis cannot be panned vertically (TradingView allows it). Invert
