@@ -4131,8 +4131,9 @@ mod signin_server_alerts {
 
         drop(srv);
         let _srv = with_signin(&fake);
-        let answer = ann.authorize(&client, &redirect, "s");
-        let token = token_from(port, &client, &redirect, &answer.query()["code"]);
+        // Through another client: the old one would just claim it again, and hide a move
+        // that never reached the store.
+        let token = second_client(&mut ann);
         assert_eq!(listed(port, &token).len(), 1, "and it stays hers");
     }
 }
