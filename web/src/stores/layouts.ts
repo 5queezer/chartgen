@@ -15,6 +15,7 @@ import {
   type TimeZoneChoice,
 } from "../lib/timezone";
 import {
+  compareRestore,
   compareSymbols,
   parseCompare,
   setCompareSymbols,
@@ -81,6 +82,11 @@ export interface LayoutState {
   indicators: ActiveIndicator[];
   /** Compare symbols (ADR-0022); layouts saved before it have none. */
   compare: string[];
+  /**
+   * Scale mode to return to when the last compare symbol goes (ADR-0038). Not
+   * something the user set, so it never makes a layout dirty.
+   */
+  compareRestore?: ScaleMode;
 }
 
 export interface Layout {
@@ -180,6 +186,9 @@ export function parseState(x: unknown): LayoutState | null {
     timeZone: isTimeZoneChoice(x.timeZone) ? x.timeZone : timeZone(),
     indicators,
     compare: parseCompare(x.compare),
+    ...((SCALE_MODES as readonly unknown[]).includes(x.compareRestore)
+      ? { compareRestore: x.compareRestore as ScaleMode }
+      : {}),
   };
 }
 
@@ -405,6 +414,7 @@ function newId(): string {
 
 /** The live state as the other stores hold it right now. */
 function liveState(): LayoutState {
+  const restoreTo = compareRestore();
   return {
     symbol: symbol(),
     timeframe: timeframe(),
@@ -415,6 +425,7 @@ function liveState(): LayoutState {
     timeZone: timeZone(),
     indicators: activeIndicators(),
     compare: compareSymbols(),
+    ...(restoreTo ? { compareRestore: restoreTo } : {}),
   };
 }
 
@@ -528,7 +539,7 @@ function applyState(state: LayoutState): void {
     setLockRatio(!!state.lockRatio);
     setTimeZone(state.timeZone);
     setActiveIndicators(state.indicators);
-    setCompareSymbols(state.compare);
+    setCompareSymbols(state.compare, state.compareRestore);
   });
 }
 

@@ -344,6 +344,93 @@ test.describe("loading the active layout", () => {
     ).toHaveAttribute("aria-pressed", "true");
   }
 
+  const scaleIs = (page: Page, mode: "normal" | "log") =>
+    expect
+      .poll(() => page.evaluate(() => localStorage.getItem("chartgen.layout.scaleMode")))
+      .toBe(JSON.stringify(mode));
+
+  async function removeCompare(page: Page, symbol: string): Promise<void> {
+    await compareLegend(page, symbol).hover();
+    await compareLegend(page, symbol).getByRole("button", { name: `Remove ${symbol}` }).click();
+    await expect(compareLegend(page, symbol)).toHaveCount(0);
+  }
+
+  /** Load a layout by name, leaving unsaved changes behind if there are any. */
+  async function loadDiscarding(page: Page, name: string): Promise<void> {
+    await layoutButton(page).click();
+    await page.getByRole("menuitem", { name: /^Load layout/ }).click();
+    await page.getByRole("button", { name: new RegExp(`^${name}`) }).click();
+    const discard = page.getByRole("dialog").getByRole("button", { name: "Don't save" });
+    if (await discard.isVisible().catch(() => false)) await discard.click();
+    await expect(page.getByTestId("layout-name")).toHaveText(name);
+    await expect(dirtyDot(page)).toHaveCount(0);
+  }
+
+  test("layouts with the same compare list each restore their own scale", async ({
+    bootedApp: page,
+  }) => {
+    // Unnamed: normal + ETHUSDT. Other: log + ETHUSDT.
+    await addCompare(page, "ETHUSDT");
+    await expect(compareLegend(page, "ETHUSDT")).toBeVisible();
+    await page.keyboard.press("Control+s");
+    await layoutButton(page).click();
+    await page.getByRole("menuitem", { name: /^Create new layout/ }).click();
+    const input = page.getByRole("textbox", { name: "Layout name" });
+    await input.fill("Other");
+    await input.press("Enter");
+    await expect(page.getByRole("dialog")).toHaveCount(0);
+    await saveLogWithCompare(page);
+
+    await loadDiscarding(page, "Unnamed");
+    await removeCompare(page, "ETHUSDT");
+    await scaleIs(page, "normal");
+
+    await loadDiscarding(page, "Other");
+    await removeCompare(page, "ETHUSDT");
+    await scaleIs(page, "log");
+
+    // Coming back to it from another layout does the same.
+    await loadDiscarding(page, "Unnamed");
+    await loadDiscarding(page, "Other");
+    await removeCompare(page, "ETHUSDT");
+    await scaleIs(page, "log");
+  });
+
+  test("Don't save restores the saved compare list with its scale to return to", async ({
+    bootedApp: page,
+  }) => {
+    await saveLogWithCompare(page);
+
+    // Another symbol added since the save.
+    await addCompare(page, "SOLUSDT");
+    await expect(compareLegend(page, "SOLUSDT")).toBeVisible();
+    await pickActive(page);
+    await page.getByRole("dialog").getByRole("button", { name: "Don't save" }).click();
+    await expect(compareLegend(page, "SOLUSDT")).toHaveCount(0);
+    await removeCompare(page, "ETHUSDT");
+    await scaleIs(page, "log");
+
+    // The saved symbol removed since the save.
+    await pickActive(page);
+    await page.getByRole("dialog").getByRole("button", { name: "Don't save" }).click();
+    await expect(compareLegend(page, "ETHUSDT")).toBeVisible();
+    await removeCompare(page, "ETHUSDT");
+    await scaleIs(page, "log");
+  });
+
+  test("a saved layout's scale to return to survives a reload and is no change", async ({
+    bootedApp: page,
+  }) => {
+    await saveLogWithCompare(page);
+    await reloadApp(page);
+    await expect(dirtyDot(page)).toHaveCount(0);
+    expect(
+      await page.evaluate(
+        () => JSON.parse(localStorage.getItem("chartgen.layouts")!).items[0].state.compareRestore,
+      ),
+    ).toBe("log");
+  });
+
   test("with nothing changed, the compare symbol still restores the log scale", async ({
     bootedApp: page,
   }) => {

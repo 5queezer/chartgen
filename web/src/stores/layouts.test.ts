@@ -192,6 +192,19 @@ describe("snapshot and dirty", () => {
     expect(isDirty(base, { ...base, compare: ["ETHUSDT"] })).toBe(true);
   });
 
+  it("keeps a valid compareRestore, drops a bad one, and older layouts have none", () => {
+    expect(parseState({ ...base, compareRestore: "log" })?.compareRestore).toBe("log");
+    expect(parseState({ ...base, compareRestore: "nope" })).not.toHaveProperty("compareRestore");
+    expect(parseState(base)).not.toHaveProperty("compareRestore");
+  });
+
+  it("does not count compareRestore as a change", () => {
+    expect(isDirty(base, { ...base, compareRestore: "log" })).toBe(false);
+    expect(isDirty({ ...base, compareRestore: "normal" }, { ...base, compareRestore: "log" })).toBe(
+      false,
+    );
+  });
+
   it("keeps validated compare symbols and defaults to none for older layouts", () => {
     const withCompare = parseState({ ...base, compare: ["ethusdt", "x!", "SOLUSDT"] });
     expect(withCompare?.compare).toEqual(["ETHUSDT", "SOLUSDT"]);
@@ -391,6 +404,35 @@ describe("live bindings", () => {
       expect(JSON.parse(data.get(KEY)!).items[0].name).toBe("Fresh");
       expect(data.get(KEY + ".bak")).toBe(bad);
     }
+  });
+
+  it("each layout with the same list keeps its own scale to return to", async () => {
+    stub({
+      [KEY]: JSON.stringify({
+        version: 1,
+        active: "a",
+        items: [
+          { id: "a", name: "A", updatedAt: 1, state: { ...base, scaleMode: "percentage", compare: ["ETHUSDT"], compareRestore: "log" } },
+          { id: "b", name: "B", updatedAt: 1, state: { ...base, scaleMode: "percentage", compare: ["ETHUSDT"], compareRestore: "normal" } },
+          // Saved before the field existed.
+          { id: "c", name: "C", updatedAt: 1, state: { ...base, scaleMode: "percentage", compare: ["ETHUSDT"] } },
+        ],
+      }),
+    });
+    vi.resetModules();
+    const l = await import("./layouts");
+    const lay = await import("./layout");
+    const cmp = await import("./compare");
+    const removedTo = (id: string) => {
+      l.switchLayout(id);
+      expect(l.layoutDirty()).toBe(false);
+      cmp.removeCompare("ETHUSDT");
+      return lay.scaleMode();
+    };
+    expect(removedTo("a")).toBe("log");
+    expect(removedTo("b")).toBe("normal");
+    expect(removedTo("a")).toBe("log");
+    expect(removedTo("c")).toBe("normal");
   });
 
   it("keeps an existing backup instead of replacing it", async () => {

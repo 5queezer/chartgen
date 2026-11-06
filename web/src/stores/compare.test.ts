@@ -122,15 +122,28 @@ describe("compare store", () => {
     expect(layout.scaleMode()).toBe("normal");
   });
 
-  it("keeps the restore target when the list stays the same", async () => {
+  it("takes the restore target it is given, whatever the list was", async () => {
     stubStorage({ "chartgen.layout.scaleMode": '"log"' });
     const { layout, compare } = await load();
     compare.addCompare("ETHUSDT", "BTCUSDT");
-    compare.addCompare("SOLUSDT", "BTCUSDT");
-    compare.setCompareSymbols(["SOLUSDT", "ETHUSDT"]);
+    compare.setCompareSymbols(["ETHUSDT"], "normal");
     compare.removeCompare("ETHUSDT");
+    expect(layout.scaleMode()).toBe("normal");
+
+    compare.addCompare("ETHUSDT", "BTCUSDT");
+    layout.setScaleMode("percentage");
+    compare.setCompareSymbols(["SOLUSDT"], "log");
     compare.removeCompare("SOLUSDT");
     expect(layout.scaleMode()).toBe("log");
+  });
+
+  it("falls back to the default scale for a layout saved without a target", async () => {
+    stubStorage({ "chartgen.layout.scaleMode": '"log"' });
+    const { layout, compare } = await load();
+    compare.addCompare("ETHUSDT", "BTCUSDT");
+    compare.setCompareSymbols(["ETHUSDT"]);
+    compare.removeCompare("ETHUSDT");
+    expect(layout.scaleMode()).toBe("normal");
   });
 
   it("keeps each symbol's color slot when another is removed", async () => {

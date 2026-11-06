@@ -760,9 +760,15 @@ does not.
 If you use several tabs, each tab keeps its own open layout; saving in
 one tab does not discard layouts created in another.
 
+A layout with compare symbols also remembers the scale mode to return to when
+the last one is removed, so layouts with the same compare list each go back to
+their own mode. A layout saved before this returns to the normal scale until it
+is saved again.
+
 Layouts are stored in `localStorage` under `chartgen.layouts` (at most
 50, validated on load, malformed ones dropped). See
-[ADR-0015](/chartgen/decisions/0015-named-layouts/).
+[ADR-0015](/chartgen/decisions/0015-named-layouts/) and
+[ADR-0038](/chartgen/decisions/0038-layout-compare-restore/).
 
 ## Getting started
 
