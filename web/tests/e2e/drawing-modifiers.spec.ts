@@ -1,10 +1,20 @@
-// Drawing modifier keys, as in TradingView: Ctrl/Cmd held inverts the magnet and
+// Drawing modifier keys, as in TradingView: Ctrl (Cmd on Mac) held inverts the magnet and
 // Shift held snaps a line to horizontal, vertical or 45 degrees, while placing or
 // dragging a point.
 
 import type { Page } from "@playwright/test";
 
-import { test, expect, pickTool, reloadApp } from "./fixtures/app";
+import { test as appTest, expect, gotoApp, pickTool, reloadApp } from "./fixtures/app";
+
+/** Not Mac, whatever the host: there Cmd inverts the magnet, and these tests hold Ctrl. */
+const test = appTest.extend({
+  page: async ({ page }, use) => {
+    await page.addInitScript(() =>
+      Object.defineProperty(navigator, "platform", { get: () => "Linux x86_64", configurable: true }),
+    );
+    await use(page);
+  },
+});
 
 test.use({ viewport: { width: 1280 + 320, height: 720 } });
 
@@ -24,6 +34,8 @@ interface TestChart {
   getOverlayById: (id: string) => { points: Point[] };
   subscribeAction: (type: string, fn: () => void) => void;
   unsubscribeAction: (type: string, fn: () => void) => void;
+  getVisibleRange: () => { from: number };
+  getSize: (paneId: string, position: string) => { top: number; height: number };
 }
 type TestWindow = {
   __chartgenTest: { chart: () => TestChart };
@@ -85,6 +97,18 @@ const valueAtY = (page: Page, y: number) =>
 const nearest = (values: number[], to: number) =>
   values.reduce((best, v) => (Math.abs(v - to) < Math.abs(best - to) ? v : best));
 
+/**
+ * A trusted window blur. Bringing another page to the front fires none here: Chromium
+ * headless keeps both pages visible and focused, also with focus emulation off.
+ * Focus moving into an iframe is a real one.
+ */
+const loseFocus = (page: Page) =>
+  page.evaluate(() => {
+    const frame = document.createElement("iframe");
+    document.body.append(frame);
+    frame.contentWindow!.focus();
+  });
+
 const shiftHeld = (page: Page) =>
   page.evaluate(() => (window as unknown as TestWindow).__chartgenShiftHeld());
 
@@ -135,6 +159,9 @@ const nextDataTick = (page: Page) =>
  * a reload left the point where it was. The chart is still taking its first data then;
  * the exact cause is not pinned down. It is not the tick that used to undo a drag on
  * release, which DrawingToolbar's `refresh` now prevents (tests under "a live tick").
+ * One lead: a press on the line's body moves both points, which leaves a vertical line
+ * as long as it was. Forcing that took delayed animation frames; 224 drags without
+ * this wait, under CPU throttling and long tasks too, all took the point.
  */
 async function dragTo(page: Page, from: At, to: At, keys: string[] = []): Promise<void> {
   const box = (await host(page).boundingBox())!;
@@ -189,6 +216,62 @@ function expectDiagonal(pixels: { x?: number; y?: number }[]): void {
   expect(Math.abs(dx - dy)).toBeLessThan(1);
 }
 
+/** Switch the chart's interval and wait for its bars. */
+async function showInterval(page: Page, name: string): Promise<void> {
+  await page.getByRole("button", { name, exact: true }).click();
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () => (window as unknown as { __chartgenTest: { series: () => { interval?: string } | null } })
+          .__chartgenTest.series()?.interval,
+      ),
+    )
+    .toBe(name);
+  // The chart holds them too, not only the feed.
+  await expect
+    .poll(() =>
+      page.evaluate(() => {
+        const w = window as unknown as TestWindow & {
+          __chartgenTest: { series: () => { bars: { t: number }[] } | null };
+        };
+        const times = (ts: number[]) => ts.slice(-2).join();
+        return (
+          times(w.__chartgenTest.chart().getDataList().map((d) => d.timestamp)) ===
+          times((w.__chartgenTest.series()?.bars ?? []).map((b) => b.t * 1000))
+        );
+      }),
+    )
+    .toBe(true);
+}
+
+/** On 15m, an extended line between the :00 and :15 bars of an hour: one bar of 1h, not exactly vertical. */
+async function drawLineWithinAnHour(page: Page): Promise<void> {
+  const [x0, x1] = await page.evaluate(() => {
+    const chart = (window as unknown as TestWindow).__chartgenTest.chart() as unknown as {
+      getDataList: () => { timestamp: number }[];
+      convertToPixel: (p: { dataIndex: number }, f: { paneId: string }) => { x: number };
+    };
+    const list = chart.getDataList();
+    const px = (dataIndex: number) => chart.convertToPixel({ dataIndex }, { paneId: "candle_pane" }).x;
+    const i = list.findLastIndex((d, n) => d.timestamp % 3_600_000 === 0 && n < list.length - 2);
+    return [px(i), px(i + 1)];
+  });
+  await pickTool(page, "Extended line");
+  await clickAt(page, { x: x0!, y: 100 });
+  await clickAt(page, { x: x1!, y: 260 });
+  await expect.poll(async () => (await overlays(page)).length).toBe(1);
+}
+
+/** Point the stored drawing alerts at `interval`, as if they had been made there. */
+const bindAlertsTo = (page: Page, interval: string) =>
+  page.evaluate((iv) => {
+    const list = JSON.parse(localStorage.getItem("chartgen.alerts.list")!) as {
+      source: { interval: string };
+    }[];
+    for (const a of list) a.source.interval = iv;
+    localStorage.setItem("chartgen.alerts.list", JSON.stringify(list));
+  }, interval);
+
 const magnetButton = (page: Page, state: "off" | "weak" | "strong") =>
   page.getByRole("button", { name: `Magnet: ${state}` });
 
@@ -234,6 +317,222 @@ test.describe("drawing modifiers", () => {
     expect((await overlays(page))[1]!.mode).toBe("normal");
   });
 
+  test("two quick clicks at different places place both points", async ({ bootedApp: page }) => {
+    const box = (await host(page).boundingBox())!;
+    const quickClick = async (at: At) => {
+      await page.mouse.move(box.x + at.x, box.y + at.y);
+      await page.mouse.down();
+      await page.mouse.up();
+    };
+
+    await page.getByRole("button", { name: "Trend line" }).click();
+    await quickClick({ x: 300, y: 130 });
+    await page.waitForTimeout(100);
+    await quickClick({ x: 560, y: 260 });
+    await expect.poll(async () => (await overlays(page)).length).toBe(1);
+    const { pixels } = (await overlays(page))[0]!;
+    expect(Math.abs(pixels[1]!.x! - 560)).toBeLessThan(10);
+    expect(Math.abs(pixels[1]!.y! - 260)).toBeLessThan(1);
+    await expect(page.getByRole("button", { name: "Trend line" })).toHaveAttribute("aria-pressed", "false");
+    expect((await storedRecords(page))![0]!.points).toHaveLength(2);
+
+    // One step of undo removes it: the extra click makes no extra commit.
+    await page.keyboard.press("Control+z");
+    await expect.poll(async () => (await overlays(page)).length).toBe(0);
+
+    // A quick press that moves is a pan, not a point.
+    await page.getByRole("button", { name: "Trend line" }).click();
+    await quickClick({ x: 300, y: 130 });
+    await page.mouse.move(box.x + 700, box.y + 200);
+    await page.mouse.down();
+    await page.mouse.move(box.x + 760, box.y + 240, { steps: 4 });
+    await page.mouse.up();
+    await page.waitForTimeout(100);
+    expect(await overlays(page)).toHaveLength(0);
+    await expect(page.getByRole("button", { name: "Trend line" })).toHaveAttribute("aria-pressed", "true");
+    await page.keyboard.press("Escape");
+
+    // Three points, all quick.
+    await pickTool(page, "Parallel channel");
+    await quickClick({ x: 300, y: 130 });
+    await page.waitForTimeout(50);
+    await quickClick({ x: 560, y: 180 });
+    await page.waitForTimeout(50);
+    await quickClick({ x: 400, y: 260 });
+    await expect.poll(async () => (await overlays(page)).length).toBe(1);
+    expect((await overlays(page))[0]!.points).toHaveLength(3);
+    expect(Math.abs((await overlays(page))[0]!.pixels[2]!.y! - 260)).toBeLessThan(1);
+  });
+
+  test.describe("a press that moves while a tool is armed places no point", () => {
+    const trendLine = (page: Page) => page.getByRole("button", { name: "Trend line" });
+    const visibleFrom = (page: Page) =>
+      page.evaluate(() => (window as unknown as TestWindow).__chartgenTest.chart().getVisibleRange().from);
+
+    /** Press at `at`, go `away` px right and come back to `back` px from it, then release. */
+    const pressAwayAndBack = async (page: Page, at: At, away: number, back = 0) => {
+      const box = (await host(page).boundingBox())!;
+      await page.mouse.move(box.x + at.x, box.y + at.y);
+      await page.mouse.down();
+      await page.mouse.move(box.x + at.x + away, box.y + at.y, { steps: 6 });
+      const during = await visibleFrom(page);
+      await page.mouse.move(box.x + at.x + back, box.y + at.y, { steps: 6 });
+      await page.mouse.up();
+      await page.waitForTimeout(100);
+      return during;
+    };
+
+    /** Nothing placed: still armed, nothing drawn or stored. */
+    const expectNothingPlaced = async (page: Page) => {
+      expect(await overlays(page)).toHaveLength(0);
+      expect(await storedRecords(page)).toBeNull();
+      await expect(trendLine(page)).toHaveAttribute("aria-pressed", "true");
+    };
+
+    test("a pan and return before the first point", async ({ bootedApp: page }) => {
+      await trendLine(page).click();
+      const before = await visibleFrom(page);
+      const during = await pressAwayAndBack(page, { x: 500, y: 200 }, 120);
+      expect(during).toBeLessThan(before);
+      await expectNothingPlaced(page);
+
+      // The next clicks are the line's two points, not its second and a new line.
+      await clickAt(page, { x: 800, y: 100 });
+      await expectNothingPlaced(page);
+      await clickAt(page, { x: 900, y: 220 });
+      await expect.poll(async () => (await overlays(page)).length).toBe(1);
+      const { pixels } = (await overlays(page))[0]!;
+      expect(Math.abs(pixels[0]!.y! - 100)).toBeLessThan(1);
+      expect(Math.abs(pixels[1]!.y! - 220)).toBeLessThan(1);
+    });
+
+    test("a pan and return before the second point", async ({ bootedApp: page }) => {
+      await trendLine(page).click();
+      await clickAt(page, { x: 300, y: 130 });
+      const before = await visibleFrom(page);
+      const during = await pressAwayAndBack(page, { x: 700, y: 200 }, 120);
+      expect(during).toBeLessThan(before);
+      await expectNothingPlaced(page);
+
+      await clickAt(page, { x: 900, y: 260 });
+      await expect.poll(async () => (await overlays(page)).length).toBe(1);
+      expect(Math.abs((await overlays(page))[0]!.pixels[1]!.y! - 260)).toBeLessThan(1);
+    });
+
+    test("a jiggle of 5 px or more, ending within 5 px", async ({ bootedApp: page }) => {
+      await trendLine(page).click();
+      await clickAt(page, { x: 300, y: 130 });
+      await pressAwayAndBack(page, { x: 700, y: 200 }, 6, 1);
+      await expectNothingPlaced(page);
+    });
+
+    test("a quick click that shifts less than 5 px still places its point", async ({ bootedApp: page }) => {
+      const box = (await host(page).boundingBox())!;
+      await trendLine(page).click();
+      await page.mouse.move(box.x + 300, box.y + 130);
+      await page.mouse.down();
+      await page.mouse.up();
+      await page.mouse.move(box.x + 700, box.y + 200);
+      await page.mouse.down();
+      await page.mouse.move(box.x + 703, box.y + 200);
+      await page.mouse.up();
+      await expect.poll(async () => (await overlays(page)).length).toBe(1);
+      expect(Math.abs((await overlays(page))[0]!.pixels[1]!.y! - 200)).toBeLessThan(1);
+    });
+
+    test("a blur during the press places nothing", async ({ bootedApp: page }) => {
+      const box = (await host(page).boundingBox())!;
+      await trendLine(page).click();
+      await clickAt(page, { x: 300, y: 130 });
+      await page.mouse.move(box.x + 700, box.y + 200);
+      await page.mouse.down();
+      await loseFocus(page);
+      await page.waitForTimeout(100);
+      await page.mouse.up();
+      await page.waitForTimeout(100);
+      await expectNothingPlaced(page);
+    });
+
+    test("a quick second click pinned from another pane still places its point", async ({
+      bootedApp: page,
+    }) => {
+      // Settled first: right after boot this click can be lost, cause not found.
+      await page.waitForTimeout(1500);
+      const box = (await host(page).boundingBox())!;
+      const hdr = await page.locator(".pane-header", { hasText: "RSI" }).first().boundingBox();
+      const paneBottom = await page.evaluate(() => {
+        const pane = (window as unknown as TestWindow).__chartgenTest.chart().getSize("candle_pane", "root");
+        return pane.top + pane.height;
+      });
+      await trendLine(page).click();
+      await page.mouse.move(box.x + 300, box.y + 130);
+      await page.mouse.down();
+      await page.mouse.up();
+      await page.waitForTimeout(80);
+      await page.mouse.move(box.x + 700, hdr!.y + 30);
+      await page.mouse.down();
+      await page.mouse.up();
+      await expect.poll(async () => (await overlays(page)).length).toBe(1);
+      const { pixels } = (await overlays(page))[0]!;
+      expect(Math.abs(pixels[1]!.x! - 700)).toBeLessThan(10);
+      expect(pixels[1]!.y!).toBeLessThan(paneBottom);
+    });
+  });
+
+  test.describe("a double click while a tool is armed", () => {
+    const pressTwice = async (page: Page, at: At, then: At = at) => {
+      const box = (await host(page).boundingBox())!;
+      await page.mouse.move(box.x + at.x, box.y + at.y);
+      await page.mouse.down();
+      await page.mouse.up();
+      await page.waitForTimeout(60);
+      await page.mouse.move(box.x + then.x, box.y + then.y);
+      await page.mouse.down();
+      await page.mouse.up();
+      await page.waitForTimeout(200);
+    };
+
+    /** Off the pane klinecharts sends a double click nowhere: it must not become a second click. */
+    for (const [name, spot] of [
+      ["y-axis", (w: number, _h: number) => ({ x: w - 20, y: 200 })],
+      ["x-axis", (_w: number, h: number) => ({ x: 700, y: h - 8 })],
+    ] as const) {
+      test(`on the ${name}: not sent again, so no drawing`, async ({ bootedApp: page }) => {
+        // Settled first: right after boot a quick click can be lost, cause not found.
+        await page.waitForTimeout(1500);
+        const box = (await host(page).boundingBox())!;
+        await page.getByRole("button", { name: "Trend line" }).click();
+        await pressTwice(page, spot(box.width, box.height));
+        expect(await overlays(page)).toHaveLength(0);
+        await expect(page.getByRole("button", { name: "Trend line" })).toHaveAttribute("aria-pressed", "true");
+      });
+    }
+
+    test("is measured as klinecharts does: 4 px on both axes is two clicks", async ({ bootedApp: page }) => {
+      await page.waitForTimeout(1500);
+      await page.getByRole("button", { name: "Trend line" }).click();
+      await pressTwice(page, { x: 500, y: 200 }, { x: 504, y: 204 });
+      await expect.poll(async () => (await overlays(page)).length).toBe(1);
+      expect(Math.abs((await overlays(page))[0]!.pixels[1]!.y! - 204)).toBeLessThan(1);
+    });
+  });
+
+  test("a quick Shift click snaps its point like a slow one", async ({ bootedApp: page }) => {
+    const box = (await host(page).boundingBox())!;
+    await page.getByRole("button", { name: "Trend line" }).click();
+    await page.mouse.move(box.x + 300, box.y + 130);
+    await page.mouse.down();
+    await page.mouse.up();
+    await page.keyboard.down("Shift");
+    await page.mouse.move(box.x + 560, box.y + 150);
+    await page.mouse.down();
+    await page.mouse.up();
+    await page.keyboard.up("Shift");
+    await expect.poll(async () => (await overlays(page)).length).toBe(1);
+    const { points } = (await overlays(page))[0]!;
+    expect(points[1]!.value).toBe(points[0]!.value);
+  });
+
   test("Ctrl pressed mid-drawing applies to the moving point", async ({ bootedApp: page }) => {
     await page.getByRole("button", { name: "Trend line" }).click();
     await clickAt(page, { x: 300, y: 165 });
@@ -257,11 +556,26 @@ test.describe("drawing modifiers", () => {
     await expect(magnetButton(page, "weak")).toBeVisible();
   });
 
-  test("the Meta key inverts the magnet too", async ({ bootedApp: page }) => {
+  test("the Meta key does not invert the magnet off Mac", async ({ bootedApp: page }) => {
+    await page.keyboard.down("Meta");
+    await page.waitForTimeout(100);
+    await expect(magnetButton(page, "off")).toHaveAttribute("aria-pressed", "false");
+    await page.keyboard.up("Meta");
+  });
+
+  test("on Mac, Cmd inverts the magnet and Ctrl does not", async ({ bootedApp: page }) => {
+    await page.addInitScript(() =>
+      Object.defineProperty(navigator, "platform", { get: () => "MacIntel" }),
+    );
+    await reloadApp(page);
     await page.keyboard.down("Meta");
     await expect(magnetButton(page, "strong")).toHaveAttribute("aria-pressed", "true");
     await page.keyboard.up("Meta");
     await expect(magnetButton(page, "off")).toHaveAttribute("aria-pressed", "false");
+    await page.keyboard.down("Control");
+    await page.waitForTimeout(100);
+    await expect(magnetButton(page, "off")).toHaveAttribute("aria-pressed", "false");
+    await page.keyboard.up("Control");
   });
 
   test("drawings rebuilt while Ctrl is held get the held magnet, corrected on release", async ({
@@ -609,11 +923,7 @@ test.describe("drawing modifiers", () => {
       expect(live.map((p) => p.value)).toEqual(stored.map((p) => p.value));
     };
 
-    /**
-     * Two free lines, with the mouse pressed on the end point of the first. `beforePress`
-     * runs right before the press, once the mouse is on the point.
-     */
-    const pressOnLine = async (page: Page, beforePress?: () => Promise<void>) => {
+    const drawTwoLines = async (page: Page) => {
       await page.getByRole("button", { name: "Trend line" }).click();
       await clickAt(page, { x: 300, y: 130 });
       await clickAt(page, { x: 560, y: 260 });
@@ -621,6 +931,14 @@ test.describe("drawing modifiers", () => {
       await clickAt(page, { x: 700, y: 130 });
       await clickAt(page, { x: 900, y: 260 });
       await expect.poll(async () => (await overlays(page)).length).toBe(2);
+    };
+
+    /**
+     * Two free lines, with the mouse pressed on the end point of the first. `beforePress`
+     * runs right before the press, once the mouse is on the point.
+     */
+    const pressOnLine = async (page: Page, beforePress?: () => Promise<void>) => {
+      await drawTwoLines(page);
       const box = (await host(page).boundingBox())!;
       const [anchor, end] = (await overlays(page))[0]!.pixels;
       await page.mouse.move(box.x + end!.x!, box.y + end!.y!, { steps: 5 });
@@ -697,6 +1015,9 @@ test.describe("drawing modifiers", () => {
       bootedApp: page,
     }) => {
       const { box, end } = await pressOnFuturePoint(page);
+      // A real tick puts the full bars back, which places the drawing once more: start
+      // right after one, so that none comes before the assertions.
+      await nextDataTick(page);
       await replaceBars(page);
       await page.mouse.move(box.x + end.x! - 60, box.y + end.y! + 30, { steps: 8 });
       const moved = (await overlays(page))[0]!.points[1]!.value;
@@ -756,6 +1077,69 @@ test.describe("drawing modifiers", () => {
       expect((await storedRecords(page))![0]!.points).toEqual(before);
     });
 
+    /** Pans on empty chart and asserts drawing 0 stayed on its record while the chart scrolled. */
+    const expectPanLeavesLine = async (page: Page, box: { x: number; y: number }) => {
+      const record = (await storedRecords(page))![0]!.points;
+      const from = () =>
+        page.evaluate(() =>
+          (window as unknown as { __chartgenTest: { chart: () => { getVisibleRange: () => { from: number } } } })
+            .__chartgenTest.chart().getVisibleRange().from,
+        );
+      const before = await from();
+      // Far from both lines of `pressOnLine`.
+      await page.mouse.move(box.x + 150, box.y + 400, { steps: 4 });
+      await page.mouse.down();
+      await page.mouse.move(box.x + 330, box.y + 340, { steps: 8 });
+      await page.mouse.up();
+      await page.waitForTimeout(100);
+      expect((await overlays(page))[0]!.points.map((p) => p.value)).toEqual(record.map((p) => p.value));
+      expect((await storedRecords(page))![0]!.points).toEqual(record);
+      expect(await from()).toBeLessThan(before);
+    };
+
+    test("a release outside the pane is discarded at once, and a later pan leaves the drawing", async ({
+      bootedApp: page,
+    }) => {
+      const { box, end } = await pressOnLine(page);
+      const before = (await storedRecords(page))![0]!.points;
+      await page.mouse.move(box.x + end.x! + 30, box.y + end.y! - 30, { steps: 4 });
+      await page.mouse.move(box.x - 20, box.y + end.y!, { steps: 4 });
+      await page.mouse.up();
+      // No tick needed: right after the release it is back on its record.
+      expect((await overlays(page))[0]!.points.map((p) => p.value)).toEqual(before.map((p) => p.value));
+      await expectPanLeavesLine(page, box);
+    });
+
+    test("a release on a pane separator: a later pan leaves the drawing", async ({ bootedApp: page }) => {
+      const { box, end } = await pressOnLine(page);
+      await page.mouse.move(box.x + end.x! + 30, box.y + end.y! + 30, { steps: 4 });
+      const y = await page.evaluate(() => {
+        const chart = (window as unknown as { __chartgenTest: { chart: () => {
+          getSize: (id: string, pos: string) => { top: number; height: number };
+        } } }).__chartgenTest.chart();
+        const pane = chart.getSize("candle_pane", "root");
+        return pane.top + pane.height;
+      });
+      await page.mouse.move(box.x + end.x!, box.y + y, { steps: 4 });
+      await page.mouse.up();
+      await expectPanLeavesLine(page, box);
+    });
+
+    test("a blur during a press: later moves leave the drawing, without a button", async ({
+      bootedApp: page,
+    }) => {
+      const { box, end } = await pressOnLine(page);
+      const before = (await storedRecords(page))![0]!.points;
+      await page.mouse.move(box.x + end.x! + 30, box.y + end.y! + 30, { steps: 4 });
+      await page.evaluate(() => window.dispatchEvent(new Event("blur")));
+      expect((await overlays(page))[0]!.points.map((p) => p.value)).toEqual(before.map((p) => p.value));
+      // klinecharts no longer thinks the button is down.
+      await page.mouse.move(box.x + end.x! + 90, box.y + end.y! + 60, { steps: 4 });
+      expect((await overlays(page))[0]!.points.map((p) => p.value)).toEqual(before.map((p) => p.value));
+      await page.mouse.up();
+      await expectPanLeavesLine(page, box);
+    });
+
     test("a release outside the window, then ticks", async ({ bootedApp: page }) => {
       const { box, end } = await pressOnLine(page);
       await page.mouse.move(box.x + end.x! + 30, box.y + end.y! - 30, { steps: 4 });
@@ -772,6 +1156,204 @@ test.describe("drawing modifiers", () => {
         await page.mouse.up();
       });
     }
+
+    test("a real blur during a plain pan ends the pan", async ({ bootedApp: page }) => {
+      const box = (await host(page).boundingBox())!;
+      const from = () =>
+        page.evaluate(() => (window as unknown as TestWindow).__chartgenTest.chart().getVisibleRange().from);
+      const start = await from();
+      await page.mouse.move(box.x + 500, box.y + 300);
+      await page.mouse.down();
+      await page.mouse.move(box.x + 740, box.y + 300, { steps: 6 });
+      await loseFocus(page);
+      await page.waitForTimeout(50);
+      const stopped = await from();
+      expect(stopped).toBeLessThan(start);
+      await page.mouse.move(box.x + 1000, box.y + 300, { steps: 6 });
+      expect(await from()).toBe(stopped);
+      await page.mouse.up();
+      await page.waitForTimeout(100);
+      expect(await from()).toBe(stopped);
+    });
+
+    test("a real blur with nothing pressed changes nothing", async ({ bootedApp: page }) => {
+      await drawTwoLines(page);
+      const box = (await host(page).boundingBox())!;
+      const stateBefore = {
+        range: await page.evaluate(() => (window as unknown as TestWindow).__chartgenTest.chart().getVisibleRange().from),
+        stored: await storedRecords(page),
+        undo: await page.getByRole("button", { name: "Undo" }).isEnabled(),
+      };
+      // A tool armed, with one point placed.
+      await page.getByRole("button", { name: "Trend line" }).click();
+      await clickAt(page, { x: 200, y: 180 });
+
+      await loseFocus(page);
+      await page.mouse.move(box.x + 500, box.y + 300, { steps: 4 });
+      await page.waitForTimeout(100);
+
+      expect(await page.evaluate(() => (window as unknown as TestWindow).__chartgenTest.chart().getVisibleRange().from)).toBe(stateBefore.range);
+      expect(await storedRecords(page)).toEqual(stateBefore.stored);
+      expect(await page.getByRole("button", { name: "Undo" }).isEnabled()).toBe(stateBefore.undo);
+      await expect(page.getByRole("button", { name: "Trend line" })).toHaveAttribute("aria-pressed", "true");
+
+      // The tool still works: the next click is the line's second point.
+      await clickAt(page, { x: 400, y: 280 });
+      await expect.poll(async () => (await overlays(page)).length).toBe(3);
+      expect(Math.abs((await overlays(page))[2]!.pixels[0]!.y! - 180)).toBeLessThan(1);
+      expect(Math.abs((await overlays(page))[2]!.pixels[1]!.y! - 280)).toBeLessThan(1);
+    });
+
+    test("a stale press, its release never heard: the next press ends it, and the pan leaves the drawing", async ({
+      bootedApp: page,
+    }) => {
+      await drawTwoLines(page);
+      const box = (await host(page).boundingBox())!;
+      // What Firefox can leave behind on a release outside the window (klinecharts takes
+      // a mouseleave as the release, finds no pane, and no mouseup follows).
+      await page.evaluate(() => {
+        const w = window as unknown as TestWindow & { __chartgenDrawings: () => { id: string }[] };
+        const chart = w.__chartgenTest.chart() as unknown as TestChart & {
+          getChartStore: () => { getOverlayStore: () => { setPressedInstanceInfo: (i: unknown) => void } };
+        };
+        chart.getChartStore().getOverlayStore().setPressedInstanceInfo({
+          paneId: "candle_pane",
+          instance: chart.getOverlayById(w.__chartgenDrawings()[0]!.id),
+          figureType: 1,
+          figureKey: "overlay_figure_point_1",
+          figureIndex: 1,
+          attrsIndex: 0,
+        });
+      });
+      await expectPanLeavesLine(page, box);
+    });
+
+    test("a real blur ends the press: it stays discarded, and later moves leave the drawing", async ({
+      bootedApp: page,
+    }) => {
+      const { box, end } = await pressOnLine(page);
+      const before = (await storedRecords(page))![0]!.points.map((p) => p.value);
+      await page.mouse.move(box.x + end.x! + 30, box.y + end.y! + 30, { steps: 4 });
+      expect((await overlays(page))[0]!.points.map((p) => p.value)).not.toEqual(before);
+
+      await loseFocus(page);
+      await expect.poll(async () => (await overlays(page))[0]!.points.map((p) => p.value)).toEqual(before);
+      await page.mouse.move(box.x + end.x! + 90, box.y + end.y! + 60, { steps: 4 });
+      expect((await overlays(page))[0]!.points.map((p) => p.value)).toEqual(before);
+      await expectFollowsTicks(page, 0);
+
+      await page.mouse.up();
+      await page.waitForTimeout(100);
+      expect((await storedRecords(page))![0]!.points.map((p) => p.value)).toEqual(before);
+    });
+
+    test.describe("with real touches", () => {
+      test.use({ hasTouch: true });
+
+      /** Sends real touch input to the page: `at` in chart pixels, none to lift the finger. */
+      const toucher = async (page: Page) => {
+        const cdp = await page.context().newCDPSession(page);
+        const box = (await host(page).boundingBox())!;
+        const send = (type: string, at?: At) =>
+          cdp.send("Input.dispatchTouchEvent", {
+            type: type as "touchStart",
+            touchPoints: at ? [{ x: box.x + at.x, y: box.y + at.y }] : [],
+          });
+        return {
+          box,
+          start: (at: At) => send("touchStart", at),
+          end: () => send("touchEnd"),
+          cancel: () => send("touchCancel"),
+          move: async (from: At, to: At) => {
+            for (let i = 1; i <= 8; i++) {
+              await send("touchMove", {
+                x: from.x + ((to.x - from.x) * i) / 8,
+                y: from.y + ((to.y - from.y) * i) / 8,
+              });
+            }
+          },
+        };
+      };
+
+      /** Two lines, the first selected by a tap so its points can be pressed; its end point. */
+      const selectFirstLine = async (page: Page, touch: Awaited<ReturnType<typeof toucher>>) => {
+        await drawTwoLines(page);
+        await page.mouse.move(touch.box.x + 40, touch.box.y + 40);
+        const [a, b] = (await overlays(page))[0]!.pixels;
+        await touch.start({ x: (a!.x! + b!.x!) / 2, y: (a!.y! + b!.y!) / 2 });
+        await touch.end();
+        await page.waitForTimeout(100);
+        return { x: b!.x!, y: b!.y! };
+      };
+
+      test("a touch drag survives a live tick, and the release saves it once", async ({
+        bootedApp: page,
+      }) => {
+        const touch = await toucher(page);
+        const end = await selectFirstLine(page, touch);
+        const before = (await overlays(page))[0]!.points.map((p) => p.value);
+
+        await touch.start(end);
+        await touch.move(end, { x: end.x + 60, y: end.y + 40 });
+        const moved = (await overlays(page))[0]!.points.map((p) => p.value);
+        expect(moved).not.toEqual(before);
+        await tick(page);
+        expect((await overlays(page))[0]!.points.map((p) => p.value)).toEqual(moved);
+        await touch.end();
+        await page.waitForTimeout(100);
+        expect((await storedRecords(page))![0]!.points.map((p) => p.value)).toEqual(moved);
+        await expectFollowsTicks(page, 0);
+        expect((await overlays(page))[0]!.points.map((p) => p.value)).toEqual(moved);
+
+        // One undo step goes back to before the drag.
+        await page.keyboard.press("Control+z");
+        await expect.poll(async () => (await overlays(page))[0]!.points.map((p) => p.value)).toEqual(before);
+      });
+
+      test("a touch released off the panes is discarded, and a later touch pan leaves the drawing", async ({
+        bootedApp: page,
+      }) => {
+        const touch = await toucher(page);
+        const end = await selectFirstLine(page, touch);
+        const before = (await storedRecords(page))![0]!.points;
+
+        await touch.start(end);
+        await touch.move(end, { x: end.x + 30, y: end.y - 30 });
+        // Over the drawing toolbar, left of the chart.
+        await touch.move({ x: end.x + 30, y: end.y - 30 }, { x: -20, y: end.y });
+        await touch.end();
+        await expect
+          .poll(async () => (await overlays(page))[0]!.points.map((p) => p.value))
+          .toEqual(before.map((p) => p.value));
+
+        const from = { x: 150, y: 400 };
+        await touch.start(from);
+        await touch.move(from, { x: 330, y: 340 });
+        await touch.end();
+        await page.waitForTimeout(100);
+        expect((await overlays(page))[0]!.points.map((p) => p.value)).toEqual(before.map((p) => p.value));
+        expect((await storedRecords(page))![0]!.points).toEqual(before);
+      });
+
+      test("a cancelled touch is discarded", async ({ bootedApp: page }) => {
+        const touch = await toucher(page);
+        const end = await selectFirstLine(page, touch);
+        const before = (await storedRecords(page))![0]!.points;
+
+        await touch.start(end);
+        await touch.move(end, { x: end.x + 60, y: end.y + 40 });
+        await touch.cancel();
+        await expect
+          .poll(async () => (await overlays(page))[0]!.points.map((p) => p.value))
+          .toEqual(before.map((p) => p.value));
+        await expectFollowsTicks(page, 0);
+        expect((await storedRecords(page))![0]!.points).toEqual(before);
+
+        // klinecharts' own press ended too. It ignores mouse events for 500 ms after a touch.
+        await page.waitForTimeout(600);
+        await expectPanLeavesLine(page, touch.box);
+      });
+    });
 
     test("an undo during the press, then ticks", async ({ bootedApp: page }) => {
       await pressOnLine(page);
@@ -867,6 +1449,224 @@ test.describe("drawing modifiers", () => {
     await expect(alertRows(page).locator("[data-role=status]")).not.toContainText("inactive");
   });
 
+  test("a line on one bar of the interval: no alert offered, its alert says so, until the interval changes", async ({
+    bootedApp: page,
+  }) => {
+    const interval = (name: string) => showInterval(page, name);
+    /** Whether the drawing's menu and the dialog's Source list offer an alert on the line. */
+    const offered = async () => {
+      const { pixels } = (await overlays(page))[0]!;
+      // An extended line on one bar runs through the whole pane, wherever its points are.
+      const oneBar = pixels[0]!.x === pixels[1]!.x;
+      await clickAt(
+        page,
+        { x: (pixels[0]!.x! + pixels[1]!.x!) / 2, y: oneBar ? 165 : (pixels[0]!.y! + pixels[1]!.y!) / 2 },
+        "right",
+      );
+      await expect(drawingMenu(page).getByRole("menuitem", { name: "Remove" })).toBeVisible();
+      const menu = await drawingMenu(page).getByRole("menuitem", { name: /^Add alert/ }).count();
+      await page.keyboard.press("Escape");
+      await expect(drawingMenu(page)).toHaveCount(0);
+      await page.keyboard.press("Alt+KeyA");
+      await expect(dialog(page)).toBeVisible();
+      const source = await dialog(page).getByLabel("Source").locator("option", { hasText: "Extended line" }).count();
+      await page.keyboard.press("Escape");
+      await expect(dialog(page)).toHaveCount(0);
+      expect(source).toBe(menu);
+      return menu === 1;
+    };
+
+    // On 15m, between the :00 and :15 bars of an hour: one bar of 1h, not exactly vertical.
+    await interval("15m");
+    await drawLineWithinAnHour(page);
+    expect(await offered()).toBe(true);
+
+    // Two alerts on it, one paused.
+    await page.getByRole("tab", { name: /^Alerts/ }).click();
+    for (const _ of [0, 1]) {
+      await page.keyboard.press("Alt+KeyA");
+      await dialog(page).getByLabel("Source").selectOption({ label: "Extended line" });
+      await dialog(page).getByRole("button", { name: "Create" }).click();
+      await expect(dialog(page)).toHaveCount(0);
+    }
+    await expect(alertRows(page)).toHaveCount(2);
+    await alertRows(page).nth(1).hover();
+    await alertRows(page).nth(1).getByRole("button", { name: "Pause alert" }).click();
+    const live = alertRows(page).nth(0);
+    const paused = alertRows(page).nth(1);
+    const status = live.locator("[data-role=status]");
+    await expect(paused).toHaveAttribute("data-status", "paused");
+    await expect(status).not.toContainText("inactive");
+
+    // On 1h no new one is offered, and these are read on 15m: not dead, not called vertical.
+    await interval("1h");
+    expect(await offered()).toBe(false);
+    await expect(status).toHaveText("inactive: open BTCUSDT 15m");
+    await interval("15m");
+    await expect(status).not.toContainText("inactive");
+    await expect(paused).toHaveAttribute("data-status", "paused");
+    expect(await offered()).toBe(true);
+
+    // An alert made on 1h before it stopped being offered there: dead on 1h, and says so.
+    await bindAlertsTo(page, "1h");
+    await reloadApp(page);
+    await page.getByRole("tab", { name: /^Alerts/ }).click();
+    await expect(status).toHaveText("inactive: open BTCUSDT 1h");
+    await interval("1h");
+    await expect(live).toHaveAttribute("data-status", "inactive");
+    await expect(status).toHaveText("inactive: line is vertical");
+    await expect(paused).toHaveAttribute("data-status", "paused");
+
+    // Another interval gives its own reason, and the paused alert stays paused.
+    await interval("15m");
+    await expect(status).toHaveText("inactive: open BTCUSDT 1h");
+    await expect(paused).toHaveAttribute("data-status", "paused");
+    await interval("1h");
+    await expect(status).toHaveText("inactive: line is vertical");
+    await expect(paused).toHaveAttribute("data-status", "paused");
+  });
+
+  test.describe("a stored two-point horizontal ray, from when the tool took two clicks", () => {
+    /** Stores a ray with its second point `apart` ms after the first, with alerts on it, on 1h. */
+    const seedRay = async (page: Page, apart: number) => {
+      await showInterval(page, "1h");
+      const level = await page.evaluate((ms) => {
+        const bar = (window as unknown as TestWindow).__chartgenTest.chart().getDataList().at(-5)!;
+        localStorage.setItem(
+          "chartgen.drawings.BTCUSDT",
+          JSON.stringify([
+            {
+              id: "ray",
+              name: "horizontalRayLine",
+              points: [
+                { timestamp: bar.timestamp, value: bar.close },
+                { timestamp: bar.timestamp + ms, value: bar.close },
+              ],
+              lock: false,
+              visible: true,
+            },
+          ]),
+        );
+        const alert = { symbol: "BTCUSDT", condition: "crossing_up", trigger: "every", active: true, createdAt: 1 };
+        const source = { kind: "drawing", drawingId: "ray", label: "Horizontal ray" };
+        localStorage.setItem(
+          "chartgen.alerts.list",
+          JSON.stringify([
+            { ...alert, id: "plain", source },
+            // No dialog makes this one; it holds the bar check off the horizontal path too.
+            { ...alert, id: "bound", source: { ...source, interval: "1h" } },
+          ]),
+        );
+        return bar.close;
+      }, apart);
+      await reloadApp(page);
+      await expect.poll(async () => (await overlays(page)).length).toBe(1);
+      await page.getByRole("tab", { name: /^Alerts/ }).click();
+      return level;
+    };
+
+    const statuses = (page: Page) => alertRows(page).locator("[data-role=status]");
+
+    test("on one bar: offered, not called vertical, and it fires", async ({ bootedApp: page }) => {
+      const level = await seedRay(page, 15 * 60_000);
+      expect((await overlays(page))[0]!.points).toHaveLength(2);
+      await expect(statuses(page)).toHaveText(["active", "active"]);
+
+      const { x, y } = (await overlays(page))[0]!.pixels[0]!;
+      await clickAt(page, { x: x! + 15, y: y! }, "right");
+      await expect(drawingMenu(page).getByRole("menuitem", { name: /^Add alert on Horizontal ray/ })).toBeVisible();
+      await page.keyboard.press("Escape");
+      await page.keyboard.press("Alt+KeyA");
+      await expect(dialog(page).getByLabel("Source").locator("option", { hasText: "Horizontal ray" })).toHaveCount(1);
+      await page.keyboard.press("Escape");
+      await expect(dialog(page)).toHaveCount(0);
+
+      const fired = await page.evaluate((v) => {
+        const hook = (window as unknown as { __chartgenTest: { feedPrice: (s: string, p: number) => void } }).__chartgenTest;
+        hook.feedPrice("BTCUSDT", v - 1);
+        hook.feedPrice("BTCUSDT", v + 1);
+        return (JSON.parse(localStorage.getItem("chartgen.alerts.list")!) as { lastTriggeredAt?: number }[]).map(
+          (a) => a.lastTriggeredAt !== undefined,
+        );
+      }, level);
+      expect(fired).toEqual([true, true]);
+    });
+
+    test("with equal times: a save does not switch its alerts off", async ({ bootedApp: page }) => {
+      await seedRay(page, 0);
+      await expect(statuses(page)).toHaveText(["active", "active"]);
+      await page.keyboard.press("Alt+KeyA");
+      await expect(dialog(page).getByLabel("Source").locator("option", { hasText: "Horizontal ray" })).toHaveCount(1);
+      await page.keyboard.press("Escape");
+      await expect(dialog(page)).toHaveCount(0);
+
+      await page.getByRole("button", { name: "Lock all drawings" }).click();
+      await expect
+        .poll(async () => (await storedRecords(page))?.[0] as unknown as { lock: boolean })
+        .toMatchObject({ lock: true });
+      await expect(statuses(page)).toHaveText(["active", "active"]);
+    });
+  });
+
+  test("two windows on different intervals each say what holds for them, and write nothing", async ({
+    bootedApp: page,
+    context,
+  }) => {
+    const stored = () => page.evaluate(() => localStorage.getItem("chartgen.alerts.list"));
+
+    await showInterval(page, "15m");
+    await drawLineWithinAnHour(page);
+    await page.getByRole("tab", { name: /^Alerts/ }).click();
+    await page.keyboard.press("Alt+KeyA");
+    await dialog(page).getByLabel("Source").selectOption({ label: "Extended line" });
+    await dialog(page).getByRole("button", { name: "Create" }).click();
+    await expect(dialog(page)).toHaveCount(0);
+    await bindAlertsTo(page, "1h");
+    await reloadApp(page);
+    await page.getByRole("tab", { name: /^Alerts/ }).click();
+    await showInterval(page, "1h");
+
+    const statusIn = (p: Page) => alertRows(p).first().locator("[data-role=status]");
+    await expect(statusIn(page)).toHaveText("inactive: line is vertical");
+    const list = await stored();
+    const [alert] = JSON.parse(list!) as { active: boolean; note?: string }[];
+    expect(alert!.active).toBe(true);
+    expect(alert).not.toHaveProperty("note");
+
+    // The second window, on another interval, shares the storage and not the verdict.
+    const other = await context.newPage();
+    await gotoApp(other);
+    await other.getByRole("tab", { name: /^Alerts/ }).click();
+    await showInterval(other, "15m");
+    await expect(statusIn(other)).toHaveText("inactive: open BTCUSDT 1h");
+    await page.waitForTimeout(1500);
+    await expect(statusIn(page)).toHaveText("inactive: line is vertical");
+    expect(await stored()).toBe(list);
+
+    // Each keeps its own through more changes on the other side.
+    await showInterval(page, "15m");
+    await expect(statusIn(page)).toHaveText("inactive: open BTCUSDT 1h");
+    await showInterval(other, "1h");
+    await expect(statusIn(other)).toHaveText("inactive: line is vertical");
+    await page.waitForTimeout(1500);
+    await expect(statusIn(page)).toHaveText("inactive: open BTCUSDT 1h");
+    expect(await stored()).toBe(list);
+
+    // The line widened here: the other window's reason goes, through the storage event.
+    await dragPoint(page, 0, 1, -260, 150, []);
+    await expect(statusIn(other)).not.toContainText("inactive");
+    await expect(statusIn(page)).toHaveText("inactive: open BTCUSDT 1h");
+    expect(await stored()).toBe(list);
+
+    // Undone on the interval it runs on: this window's reason is back, with no alert changed.
+    await showInterval(page, "1h");
+    await expect(statusIn(page)).not.toContainText("inactive");
+    await page.keyboard.press("Control+z");
+    await expect(statusIn(page)).toHaveText("inactive: line is vertical");
+    await expect(statusIn(other)).toHaveText("inactive: line is vertical");
+    expect(await stored()).toBe(list);
+  });
+
   test("blur or a hidden tab while a modifier is held restores it", async ({ bootedApp: page }) => {
     for (const fire of [
       () => page.evaluate(() => window.dispatchEvent(new Event("blur"))),
@@ -884,6 +1684,19 @@ test.describe("drawing modifiers", () => {
       await expect(magnetButton(page, "off")).toBeVisible();
       expect(await shiftHeld(page)).toBe(false);
     }
+  });
+
+  test("a real blur while a modifier is held restores it", async ({ bootedApp: page }) => {
+    await page.keyboard.down("Control");
+    await page.keyboard.down("Shift");
+    await expect(magnetButton(page, "strong")).toBeVisible();
+    expect(await shiftHeld(page)).toBe(true);
+    await loseFocus(page);
+    await expect(magnetButton(page, "off")).toBeVisible();
+    expect(await shiftHeld(page)).toBe(false);
+    // The keys come up elsewhere; the page never sees it.
+    await page.keyboard.up("Shift");
+    await page.keyboard.up("Control");
   });
 
   test("a mouse event resyncs the modifiers", async ({ bootedApp: page }) => {

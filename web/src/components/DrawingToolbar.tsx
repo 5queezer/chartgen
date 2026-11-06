@@ -27,9 +27,9 @@ import {
   type Point,
 } from "klinecharts";
 
-import { isDrawingAlertTool, isVerticalLine, pointBarIndex } from "../lib/alerts";
-import { isTypingContext, undoRedoKey } from "../lib/keys";
-import { effectiveMagnet, magnetValue, type Magnet } from "../lib/magnet";
+import { isDrawingAlertTool, isHorizontalTool, isVerticalLine, pointBarIndex } from "../lib/alerts";
+import { isRelease, isTypingContext, undoRedoKey } from "../lib/keys";
+import { effectiveMagnet, magnetKeyHeld, magnetValue, type Magnet } from "../lib/magnet";
 import { syncDrawingAlerts } from "../stores/alerts";
 import { createHistory } from "../stores/drawingHistory";
 import {
@@ -391,6 +391,8 @@ const GROUPS: readonly { name: string; tools: readonly DrawingName[] }[] = [
 const TOOL_BY_NAME = new Map(TOOLS.map((t) => [t.name, t]));
 const GROUP_OF = new Map(GROUPS.flatMap((g) => g.tools.map((t) => [t, g.name] as const)));
 
+const isMac = typeof navigator !== "undefined" && /mac/i.test(navigator.platform);
+
 const LAST_KEY = "chartgen.drawingTools.last";
 /** Last-used tool per group, from storage; unknown names are ignored. */
 function loadLast(): Record<string, DrawingName> {
@@ -412,6 +414,26 @@ const btnClass =
 const menuItemClass =
   "w-full text-left px-3 py-1.5 text-sm cursor-pointer hover:bg-[color:var(--color-border)] outline-none focus:bg-[color:var(--color-border)]";
 
+/**
+ * The internals of klinecharts ~9.8 that hold the overlay under a press. Optional, so a
+ * version without them brings the stuck press back instead of throwing on every release.
+ */
+interface PressStoreOwner {
+  getChartStore?(): {
+    getOverlayStore?(): {
+      getPressedInstanceInfo?(): { instance: unknown };
+      setPressedInstanceInfo?(info: {
+        paneId: string;
+        instance: null;
+        figureType: 0;
+        figureKey: string;
+        figureIndex: number;
+        attrsIndex: number;
+      }): void;
+    };
+  };
+}
+
 const LIMIT_NOTICE = `Drawing limit reached (${MAX_DRAWINGS})`;
 const SAVE_ERROR = "Drawings not saved: storage full";
 
@@ -420,6 +442,8 @@ export interface DrawingItem extends DrawingRecord {
   id: string;
   /** A point precedes the first loaded bar: the drawing is hidden and locked until bars cover it. */
   offRange: boolean;
+  /** Both points on one bar of the chart: no value for an alert to read. */
+  vertical: boolean;
 }
 
 /** What the Object Tree needs from the drawing controller. */
@@ -464,7 +488,7 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
   // ---------------------------------------------------------------------
   const [lastTool, setLastTool] = createSignal(loadLast());
   const [magnet, setMagnet] = createSignal<Magnet>("normal");
-  // Ctrl/Cmd held inverts the magnet until release; `magnet` stays the user's choice.
+  // Ctrl (Cmd on Mac) held inverts the magnet until release; `magnet` stays the user's choice.
   const [invertMagnet, setInvertMagnet] = createSignal(false);
   const magnetMode = () => effectiveMagnet(magnet(), invertMagnet());
   const [crosshair, setCrosshair] = createSignal(true);
@@ -542,13 +566,21 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
   const syncFlags = () => {
     setLockAll(current.length > 0 && current.every((r) => r.lock));
     setHideAll(current.length > 0 && current.every((r) => !r.visible));
+    const ax = axis();
     setItems(
       reconcile(
         ids.flatMap((id) =>
           // Cloned: reconcile edits the objects it is given in place, which
           // would rewrite the snapshots held by canon and the undo history.
           canon.has(id)
-            ? [{ id, ...structuredClone(canon.get(id)!), offRange: offRange.has(id) }]
+            ? [
+                {
+                  id,
+                  ...structuredClone(canon.get(id)!),
+                  offRange: offRange.has(id),
+                  vertical: !isHorizontalTool(canon.get(id)!.name) && isVerticalLine(canon.get(id)!, ax),
+                },
+              ]
             : [],
         ),
         { key: "id" },
@@ -563,11 +595,7 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
     if (!p) return;
     setSaveFailed(!saveDrawings(p.symbol, p.records));
     // Alerts on a drawing that is gone or vertical are switched off (ADR-0034).
-    syncDrawingAlerts(
-      p.symbol,
-      p.records.map((r) => r.id),
-      p.records.filter(isVerticalLine).map((r) => r.id),
-    );
+    syncDrawingAlerts(p.symbol, p.records);
   };
   const persist = () => {
     pendingSave = { symbol: props.symbol, records: current };
@@ -1199,6 +1227,71 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
     for (const type of pinEvents) document.removeEventListener(type, pinToStartPane, true);
   });
 
+  // klinecharts drops a second click within 500 ms of the first press unless it is within
+  // 5 px of it, a double click (`_mouseUpHandler`), and the next point of a drawing with it.
+  // That also ends its click timer, so the same click sent again counts as a first one.
+  // A press that went 5 px or more is a cancelled click to klinecharts, wherever it ends.
+  // A real double click off the pane (an axis) reaches no drawing and leaves the step alone,
+  // so it is told apart by klinecharts' own measure: under 5 px, by x + y, within 500 ms.
+  let armedPress: {
+    step: number;
+    x: number;
+    y: number;
+    target: EventTarget;
+    moved: boolean;
+    double: boolean;
+  } | null = null;
+  let lastArmedPress: { x: number; y: number; time: number } | null = null;
+  let replaying = false;
+  const armedStep = () =>
+    armedId === null
+      ? undefined
+      : (props.chart?.getOverlayById(armedId) as unknown as { currentStep: number } | null)?.currentStep;
+  // Trusted events only here: `pinToStartPane`'s copies are clamped into the pane, so against
+  // the real press position a pinned click would look like it had moved.
+  const noteArmedPress = (e: MouseEvent) => {
+    if (!e.isTrusted) return;
+    const step = armedStep();
+    if (step === undefined || e.button !== 0 || !(e.target instanceof Node) || !props.chart?.getDom()?.contains(e.target)) {
+      armedPress = null;
+      return;
+    }
+    const last = lastArmedPress;
+    const double =
+      last !== null &&
+      e.timeStamp - last.time < 500 &&
+      Math.abs(e.clientX - last.x) + Math.abs(e.clientY - last.y) < 5;
+    lastArmedPress = { x: e.clientX, y: e.clientY, time: e.timeStamp };
+    armedPress = { step, x: e.clientX, y: e.clientY, target: e.target, moved: false, double };
+  };
+  const trackArmedPress = (e: MouseEvent) => {
+    if (e.isTrusted && armedPress && Math.abs(e.clientX - armedPress.x) + Math.abs(e.clientY - armedPress.y) >= 5) {
+      armedPress.moved = true;
+    }
+  };
+  // Bubble, so after klinecharts has had the release. A pinned release only gets here as a copy.
+  const replayDroppedClick = (e: MouseEvent) => {
+    const press = armedPress;
+    if (replaying || !press || e.button !== 0) return;
+    armedPress = null;
+    // The step moved on (the click counted), the press moved (a pan), or it was a double click.
+    if (armedStep() !== press.step || press.moved || press.double) return;
+    replaying = true;
+    press.target.dispatchEvent(new MouseEvent("mousedown", e));
+    (e.target ?? press.target).dispatchEvent(new MouseEvent("mouseup", e));
+    replaying = false;
+  };
+  window.addEventListener("mousedown", noteArmedPress, true);
+  window.addEventListener("mousemove", trackArmedPress, true);
+  window.addEventListener("mouseup", trackArmedPress, true);
+  window.addEventListener("mouseup", replayDroppedClick);
+  onCleanup(() => {
+    window.removeEventListener("mousedown", noteArmedPress, true);
+    window.removeEventListener("mousemove", trackArmedPress, true);
+    window.removeEventListener("mouseup", trackArmedPress, true);
+    window.removeEventListener("mouseup", replayDroppedClick);
+  });
+
   const onKey = (e: KeyboardEvent) => {
     if (e.defaultPrevented) return;
     // Our own menu has role=menu, so it is handled before the guard.
@@ -1240,7 +1333,7 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
   // klinecharts sees the move). That covers a key pressed before the chart had
   // focus and makes auto-repeat a no-op. Blur clears it: keyup never comes.
   const syncModifiers = (e: KeyboardEvent | MouseEvent) => {
-    const ctrl = e.ctrlKey || e.metaKey;
+    const ctrl = magnetKeyHeld(e, isMac);
     if ((ctrl || e.shiftKey) && e instanceof KeyboardEvent && isTypingContext(e)) return;
     setInverted(ctrl);
     shiftHeld = e.shiftKey;
@@ -1264,14 +1357,51 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
   // window's blur is not: an element's blur passes through capture too, and pressing on
   // the chart takes the focus from whatever had it.
   const endPress = (e: Event) => {
-    if (!(e instanceof MouseEvent) || e.button === 0) pressedId = null;
+    if (isRelease(e)) pressedId = null;
+  };
+  // A release that misses a pane (off the chart, on a separator) also leaves klinecharts'
+  // own press in place, and its next pan would move that drawing. No public call ends a
+  // press, so this does what its mouseUpEvent does, without onPressedMoveEnd: the drag is
+  // discarded, and the drawing goes back at once. Bubble, so after klinecharts has had the event.
+  // A new press also ends one, in capture, before klinecharts sees it: Firefox can take a
+  // mouseleave for the release outside the window, and no mouseup follows (not run on Firefox).
+  const dropStuckPress = (e: Event) => {
+    if (!isRelease(e)) return;
+    const store = (props.chart as unknown as PressStoreOwner | null)?.getChartStore?.().getOverlayStore?.();
+    if (!store?.getPressedInstanceInfo?.().instance) return;
+    pressedId = null;
+    store.setPressedInstanceInfo?.({
+      paneId: "",
+      instance: null,
+      figureType: 0,
+      figureKey: "",
+      figureIndex: -1,
+      attrsIndex: -1,
+    });
+    refresh();
+  };
+  // A blur has no release, and klinecharts would treat later moves as still pressed, drawing
+  // or plain pan: give it one, off the panes. With nothing pressed, nothing hears it.
+  const releaseOnBlur = () => {
+    armedPress = null;
+    document.documentElement.dispatchEvent(
+      new MouseEvent("mouseup", { bubbles: true, button: 0, clientX: -1, clientY: -1 }),
+    );
   };
   const endPressEvents = ["mouseup", "touchend", "touchcancel"] as const;
-  for (const type of endPressEvents) window.addEventListener(type, endPress, true);
-  window.addEventListener("blur", endPress);
+  for (const type of endPressEvents) {
+    window.addEventListener(type, endPress, true);
+    window.addEventListener(type, dropStuckPress);
+  }
+  window.addEventListener("mousedown", dropStuckPress, true);
+  window.addEventListener("blur", releaseOnBlur);
   onCleanup(() => {
-    for (const type of endPressEvents) window.removeEventListener(type, endPress, true);
-    window.removeEventListener("blur", endPress);
+    for (const type of endPressEvents) {
+      window.removeEventListener(type, endPress, true);
+      window.removeEventListener(type, dropStuckPress);
+    }
+    window.removeEventListener("mousedown", dropStuckPress, true);
+    window.removeEventListener("blur", releaseOnBlur);
   });
 
   const resetRightClick = () => {
@@ -1467,7 +1597,7 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
             </button>
             <Show when={canon.get(m().id)?.name}>
               {(name) => (
-                <Show when={isDrawingAlertTool(name()) && !isVerticalLine(canon.get(m().id) ?? { points: [] })}>
+                <Show when={isDrawingAlertTool(name()) && !items.find((i) => i.id === m().id)?.vertical}>
                   <button type="button" role="menuitem" class={menuItemClass} onClick={() => menuAction("alert")}>
                     Add alert on {DRAWING_LABELS[name()]}…
                   </button>

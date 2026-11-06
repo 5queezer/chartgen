@@ -268,13 +268,20 @@ export function indicatorReading(
 
 /**
  * Both anchors on one bar: `drawingLevels` has no value for it, so it cannot be
- * alerted on. A point on a future bar may carry only its `dataIndex`.
+ * alerted on. With `axis`, on that axis as `drawingLevels` reads it, so a line
+ * across several bars of a finer interval counts too. Without it, by the points
+ * alone. A point on a future bar may carry only its `dataIndex`.
  */
-export function isVerticalLine(rec: {
-  points: readonly { timestamp?: number; dataIndex?: number }[];
-}): boolean {
+export function isVerticalLine(
+  rec: { points: readonly { timestamp?: number; dataIndex?: number }[] },
+  axis?: TimeAxis | null,
+): boolean {
   const [a, b] = rec.points;
   if (!a || !b) return false;
+  if (axis) {
+    const i = pointBarIndex(axis, a);
+    return i !== undefined && i === pointBarIndex(axis, b);
+  }
   if (a.timestamp !== undefined && b.timestamp !== undefined) return a.timestamp === b.timestamp;
   return a.dataIndex !== undefined && a.dataIndex === b.dataIndex;
 }
