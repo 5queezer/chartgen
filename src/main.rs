@@ -3,6 +3,8 @@ mod fetch;
 mod mcp;
 mod search;
 mod server;
+#[cfg(feature = "scripting")]
+mod server_alerts;
 
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};

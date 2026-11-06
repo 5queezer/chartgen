@@ -97,6 +97,7 @@ import {
 } from "./services/shareLink";
 import {
   createAlertQuotes,
+  createServerAlertPoll,
   chartTick,
   feedChartSnapshot,
   feedPrice,
@@ -475,6 +476,7 @@ export function App(): JSX.Element {
   // While replaying the chart symbol is polled there too (ADR-0023): the
   // feed is suspended, and its alerts still need real prices.
   createAlertQuotes(session, authReady, () => (replay.mode() === "off" ? symbol() : ""));
+  createServerAlertPoll(session, authReady);
 
   if (import.meta.env.DEV) {
     // E2E hook (tests/e2e/live-paging.spec.ts): what the chart holds.

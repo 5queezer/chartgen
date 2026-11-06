@@ -470,3 +470,50 @@ export const ChartTickParamsSchema = z.object({
   series: SeriesPayloadSchema,
 });
 export type ChartTickParams = z.infer<typeof ChartTickParamsSchema>;
+
+// ---------------------------------------------------------------------------
+// Server alerts (ADR-0042)
+//   Produced by `ServerAlerts::view` and `ServerAlerts::list` in
+//   `src/server_alerts.rs`. A webhook shows its host and whether it signs, never
+//   its URL or secret. `webhook_secret` only appears in the response that made it.
+// ---------------------------------------------------------------------------
+
+export const ServerAlertSchema = z.object({
+  id: z.string(),
+  symbol: z.string(),
+  interval: z.string(),
+  evaluate_on: z.enum(["live", "close"]),
+  condition: z.enum(["crossing", "crossing_up", "crossing_down", "greater", "less"]),
+  level: z.number(),
+  trigger: z.enum(["once", "every"]),
+  message: z.string().nullable(),
+  active: z.boolean(),
+  disarmed: z.boolean(),
+  created_at: z.number(),
+  last_triggered_at: z.number().nullable(),
+  fire_count: z.number().int(),
+  webhook: z.object({ host: z.string(), signed: z.boolean() }).nullable(),
+  last_delivery_at: z.number().nullable(),
+  last_status: z.number().int().nullable(),
+  last_error: z.string().nullable(),
+  feed: z.enum(["live", "waiting"]),
+  last_price: z.number().nullable(),
+});
+export type ServerAlert = z.infer<typeof ServerAlertSchema>;
+
+export const ServerAlertsPayloadSchema = z.object({
+  enabled: z.boolean(),
+  // What this client may do; absent when the server has them off.
+  can_create: z.boolean().optional(),
+  webhooks: z.boolean().optional(),
+  alerts: z.array(ServerAlertSchema),
+});
+export type ServerAlertsPayload = z.infer<typeof ServerAlertsPayloadSchema>;
+
+export const ServerAlertChangePayloadSchema = ServerAlertSchema.extend({
+  webhook_secret: z.string().optional(),
+});
+export type ServerAlertChangePayload = z.infer<typeof ServerAlertChangePayloadSchema>;
+
+export const DeleteServerAlertPayloadSchema = z.object({ deleted: z.boolean() });
+export type DeleteServerAlertPayload = z.infer<typeof DeleteServerAlertPayloadSchema>;

@@ -14,7 +14,7 @@ export default async function globalSetup(config: FullConfig): Promise<void> {
   const browser = await chromium.launch();
   // Every project has its own dev server to warm (playwright.config.ts).
   await Promise.all(
-    config.projects.map(async ({ use: { baseURL } }) => {
+    [...new Set(config.projects.map((p) => p.use.baseURL))].map(async (baseURL) => {
       try {
         const page = await browser.newPage({ baseURL });
         page.setDefaultTimeout(WARMUP_TIMEOUT_MS);

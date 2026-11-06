@@ -9,6 +9,7 @@ import { For, Show, createEffect, createSignal, on, onCleanup, onMount, type JSX
 import type { McpSession } from "../mcp";
 import { compact } from "../lib/viewport";
 import { alerts } from "../stores/alerts";
+import { serverAlerts } from "../stores/serverAlerts";
 import { symbol } from "../stores/layout";
 import { setWatchlistCollapsed, watchlistCollapsed } from "../stores/watchlist";
 import { AlertsPanel } from "./AlertsPanel";
@@ -79,7 +80,8 @@ export interface SidebarProps {
 }
 
 export function Sidebar(props: SidebarProps): JSX.Element {
-  const activeCount = () => alerts().filter((a) => a.active).length;
+    const activeCount = () =>
+    alerts().filter((a) => a.active).length + serverAlerts().filter((a) => a.active).length;
   const sheetShown = () => compact() && !watchlistCollapsed();
   const closeSheet = () => setWatchlistCollapsed(true);
 

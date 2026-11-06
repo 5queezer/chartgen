@@ -8,7 +8,9 @@ sidebar:
 **Status:** Accepted
 **Date:** 2026-11-05
 **Amended by:** [ADR-0034](/chartgen/decisions/0034-drawing-and-indicator-alerts/)
-(alerts can watch a drawing or an indicator plot)
+(alerts can watch a drawing or an indicator plot),
+[ADR-0042](/chartgen/decisions/0042-server-side-alerts/) (a price alert can run on
+the server instead)
 
 ## Context and Problem Statement
 
