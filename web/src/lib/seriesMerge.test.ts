@@ -462,12 +462,20 @@ describe("a futures panel with and without data (Funding, OI, L/S)", () => {
     };
   };
 
-  it("takes values into an empty panel and keeps the label it was loaded with", () => {
+  it("asks for a reload when an empty panel gets values, and merges once reloads run out", () => {
     const cur = funding(serve({ bars: 30, now: 100 }), "Funding (unavailable)", null);
-    const r = mergeTail(cur, funding(serve({ bars: 2, now: 101 }), "Funding", 0.01));
-    expect(r.ok).toBe(true);
-    if (!r.ok) return;
-    const h = r.series.indicators.funding!;
+    const tail = funding(serve({ bars: 2, now: 101 }), "Funding", 0.01);
+    // The tail would fill 2 of 30 bars and keep the label: start over instead.
+    expect(mergeTail(cur, tail)).toEqual({ ok: false, reason: "shape" });
+    // A tail that is empty too, or a panel with values, merges as before.
+    const empty = funding(serve({ bars: 2, now: 101 }), "Funding (unavailable)", null);
+    expect(mergeTail(cur, empty).ok).toBe(true);
+    expect(mergeTail(funding(serve({ bars: 30, now: 100 }), "Funding", 0.01), tail).ok).toBe(true);
+    // With no reloads left the live feed merges what fits, the label staying.
+    const last = mergeTail(cur, tail, false);
+    expect(last.ok).toBe(true);
+    if (!last.ok) return;
+    const h = last.series.indicators.funding!;
     expect(h.label).toBe("Funding (unavailable)");
     expect(h.histogram![0]!.values.slice(-2)).toEqual([0.01, 0.01]);
     expect(h.histogram![0]!.values[0]).toBeNull();
