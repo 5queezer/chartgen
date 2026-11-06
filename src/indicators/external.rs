@@ -67,6 +67,7 @@ impl<T> SeriesCache<T> {
     /// The series for `symbol` and `period`: `fetch`ed at most once per
     /// `SERIES_REFRESH`, whether that worked or not, and otherwise the last good one
     /// while it lasts.
+    #[cfg(test)]
     fn get(
         &self,
         symbol: &str,
@@ -77,11 +78,8 @@ impl<T> SeriesCache<T> {
         self.get_waiting(symbol, period, now, SERIES_WAIT, fetch)
     }
 
-    /// `get`, with its wait as an argument. The refresh is claimed under the lock
-    /// before the fetch, so of the callers at an expiry only one sends a request. The
-    /// others get the last good series at once. With none held, as on a first read,
-    /// they wait up to `wait` for that request, so a chart loading at the same moment
-    /// is not left with a blank panel, and a failed read gives them its error.
+    /// `get`, with its wait as an argument.
+    #[cfg(test)]
     fn get_waiting(
         &self,
         symbol: &str,
@@ -93,8 +91,13 @@ impl<T> SeriesCache<T> {
         self.get_extending(symbol, period, now, wait, |_| fetch())
     }
 
-    /// `get_waiting`, where `fetch` is given the series it replaces (the last good
-    /// one, however old) so it can read only what is new.
+    /// `get` with its wait as an argument, and `fetch` given the series it replaces (the
+    /// last good one, however old) so it can read only what is new. The refresh is
+    /// claimed under the lock before the fetch, so of the callers at an expiry only one
+    /// sends a request. The others get the last good series at once. With none held, as
+    /// on a first read, they wait up to `wait` for that request, so a chart loading at
+    /// the same moment is not left with a blank panel, and a failed read gives them its
+    /// error.
     fn get_extending(
         &self,
         symbol: &str,
