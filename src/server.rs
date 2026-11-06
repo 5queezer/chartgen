@@ -223,12 +223,12 @@ impl OAuthStore {
         Ok(evicted)
     }
 
-    /// The answer to a registration that found no room. Nothing ends this by
-    /// itself (ADR-0036), so it is logged, but only so often.
+    /// The answer to a registration that found no room. It may clear by itself
+    /// or take an operator (ADR-0036), so it is logged, but only so often.
     fn refuse_full(&mut self) -> (StatusCode, Value) {
         if let Some(refused) = self.refusal_due_for_log(Instant::now()) {
             eprintln!(
-                "[OAuth] /register refused: client table full at {} clients, {refused} refusal(s) since the last line. New clients cannot sign in until an operator acts; see the OAuth reference.",
+                "[OAuth] /register refused: client table full at {} clients, {refused} refusal(s) since the last line. New clients cannot register right now; see the OAuth reference.",
                 self.clients.len()
             );
         }
