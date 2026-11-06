@@ -125,7 +125,14 @@ test.describe("indicator style tab", () => {
 
   test("Cancel discards style edits", async ({ bootedApp: page }) => {
     const legendValue = rsiRow(page).locator(".pane-header-value");
-    const before = await legendValue.evaluate((el) => getComputedStyle(el).color);
+    // Retried: a node the legend has just replaced has no computed color.
+    let before = "";
+    await expect
+      .poll(async () => {
+        before = await legendValue.evaluate((el) => getComputedStyle(el).color);
+        return before;
+      })
+      .not.toBe("");
 
     const dialog = await openStyleTab(page);
     await dialog.getByRole("button", { name: "RSI color", exact: true }).click();
