@@ -682,9 +682,12 @@ entries are dropped.
 ## Sidebar and price alerts
 
 The right sidebar has four icon tabs, **Watchlist**, **Alerts**, **Data
-Window** and **Object Tree**; the tab you last used is remembered, and **»**
-collapses the whole sidebar. The Alerts tab shows the number of active alerts. The watchlist polls quotes only while
-its tab is showing.
+Window** and **Object Tree**; the tab you last used is remembered. Click the
+selected tab again to collapse the sidebar into a narrow rail of the four icons
+(the Alerts icon shows the number of active alerts). Click an icon in the rail
+to open the sidebar on that tab. The collapsed state is remembered. On a narrow
+screen the sidebar is a sheet closed with **×**. The Alerts tab shows the number of
+active alerts. The watchlist polls quotes only while its tab is showing.
 
 An alert watches one symbol's price. The conditions follow TradingView:
 
