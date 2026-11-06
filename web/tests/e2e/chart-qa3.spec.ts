@@ -341,3 +341,52 @@ test.describe("indicator settings title", () => {
     }
   });
 });
+
+test.describe("x-axis labels", () => {
+  /** Label pixels in the x axis canvas: in its first columns, and overall. */
+  const labelPixels = (page: Page) =>
+    page.evaluate(() => {
+      const c = (window as unknown as { __chartgenTest: Hook }).__chartgenTest.chart()! as unknown as {
+        getDom: (id: string, w: string) => HTMLElement | null;
+      };
+      let edge = 0;
+      let all = 0;
+      for (const canvas of c.getDom("x_axis_pane", "main")!.querySelectorAll("canvas")) {
+        if (canvas.width === 0 || canvas.height === 0) continue;
+        const ctx = canvas.getContext("2d")!;
+        // Below the axis line and the tick marks.
+        const top = 6 * window.devicePixelRatio;
+        const { data, width, height } = ctx.getImageData(0, top, canvas.width, canvas.height - top);
+        for (let y = 0; y < height; y++) {
+          for (let x = 0; x < width; x++) {
+            if (data[(y * width + x) * 4 + 3]! === 0) continue;
+            all++;
+            if (x < 2) edge++;
+          }
+        }
+      }
+      return { edge, all };
+    });
+
+  test("no label is cut off at the left edge while scrolling", async ({ bootedApp: page }) => {
+    const scroll = () =>
+      page.evaluate(() => {
+        const c = (window as unknown as { __chartgenTest: Hook }).__chartgenTest.chart()! as unknown as {
+          scrollByDistance: (d: number) => void;
+        };
+        c.scrollByDistance(9);
+        return new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+      });
+    let cut = 0;
+    for (let i = 0; i < 40; i++) {
+      await scroll();
+      const { edge, all } = await labelPixels(page);
+      expect(all).toBeGreaterThan(0);
+      if (edge > 0) cut++;
+    }
+    expect(cut).toBe(0);
+    await page.locator(".chart-host").screenshot({
+      path: test.info().outputPath("x-axis-left-edge.png"),
+    });
+  });
+});

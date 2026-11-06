@@ -48,6 +48,7 @@ import {
   init,
   LoadDataType,
   registerIndicator,
+  registerXAxis,
   utils,
   type Chart as KChart,
   type IndicatorDrawCallback,
@@ -608,6 +609,19 @@ interface CompareExtend {
   colors: string[];
 }
 
+const X_AXIS_NAME = "chartgen_x";
+const X_TICK_SIZE = 11;
+
+// klinecharts centers an x-axis label on its tick and the canvas cuts off what
+// sticks out, so a label too close to the left edge is left out.
+registerXAxis({
+  name: X_AXIS_NAME,
+  createTicks: ({ defaultTicks }) =>
+    defaultTicks.filter(
+      (t) => t.coord >= utils.calcTextWidth(t.text, X_TICK_SIZE, "400", FONT_FAMILY) / 2,
+    ),
+});
+
 let compareRegistered = false;
 
 /**
@@ -838,7 +852,7 @@ function tvStyles(p: Palette) {
         color: p.fgMuted,
         family: FONT_FAMILY,
         weight: "400",
-        size: 11,
+        size: X_TICK_SIZE,
       },
     },
     yAxis: {
@@ -1089,6 +1103,7 @@ export function Chart(props: ChartProps): JSX.Element {
             : utils.formatDate(dtf, ts, fmt),
       },
     });
+    c?.setPaneOptions({ id: "x_axis_pane", axisOptions: { name: X_AXIS_NAME } });
     setChart(c);
     if (c) props.onChartReady?.(c);
 
