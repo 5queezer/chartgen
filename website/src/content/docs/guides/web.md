@@ -910,6 +910,32 @@ at that moment still lands on its chart
 This needs the app served by chartgen itself with `CHARTGEN_BASE_URL` set to
 its public URL; with the Vite dev server, clear `localStorage` by hand.
 
+### Signing in with GitHub or Google
+
+On a server with [sign-in](/chartgen/reference/oauth/#sign-in) configured, the first load
+without a session leads to a page offering each provider, or straight to the only one.
+After the provider, the app loads where it would have, and a
+[share link](#sharing-a-chart) still lands on its chart. Reloads and new tabs take no provider
+round trip while the session lasts, up to 30 days. A GitHub and a Google account are two
+separate users, each with their own scripts.
+
+The header shows the signed-in user at its right end: an initial, with the name on wider
+windows. Its menu says which provider it was, and has **Sign out**. A server without
+sign-in shows none of this.
+
+**Sign out** ends the session in this browser and leads to a page of its own, with
+**Sign in again**. Every other tab of the app in this browser follows. It does not sign you
+out at the provider, and tokens given to other applications, such as Claude, keep working
+until they expire.
+
+If a provider denies, fails or cannot be reached, the page says so and offers **Try again**
+and **Cancel**. Cancel returns to the app, which stops at `sign-in failed: you cancelled it`
+with **Sign in again**. A token that went stale signs in again by itself, and if the session
+is gone as well, the app lands on the sign-in page.
+
+Other applications are not trusted the way the app is: the first time one asks, a page shows
+its name and where it will send you, and only the address is reliable.
+
 ## Managing indicators
 
 Indicators are added from the **Indicators** picker (by name, with the

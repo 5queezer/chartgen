@@ -777,7 +777,8 @@ forming bar, with every indicator recomputed. Merge it like a polled tail.
   and one recompute. Every chart of a symbol and feed interval shares one Binance
   WebSocket, so `1m` and `7m` of a symbol use the same one.
 - **Limits.** At most 4 subscriptions per token, 8 per client address
-  (the TCP peer; behind a reverse proxy that is the proxy) and 64 per
+  (the TCP peer; behind a reverse proxy that is the proxy) or with
+  [sign-in](/chartgen/reference/oauth/#sign-in) per user, and 64 per
   server, and 10 `subscribe_chart` calls per token per minute. Over a
   limit the call fails with an error starting with `push limit reached`;
   poll that chart instead. Without an open SSE stream for the session it
@@ -798,7 +799,8 @@ User-authored Starlark indicators
 [ADR-0025](/chartgen/decisions/0025-user-indicator-registry/)). These tools
 are listed and served only when the server runs with
 `CHARTGEN_SCRIPTING=1`. Scripts belong to the OAuth client of the bearer
-token, so the tools that store or read scripts need the HTTP transport
+token, or with [sign-in](/chartgen/reference/oauth/#sign-in) to its user, so the
+tools that store or read scripts need the HTTP transport
 (stdio has no user). Once registered, a script's name works in
 `generate_chart` (resolved before built-ins, so it can shadow one for its
 owner) and shows up in `list_indicators`. The generated TypeScript input
@@ -830,10 +832,12 @@ script evaluations run on the server at once and one per user; a caller
 waits for a slot until its deadline, then gets "server busy".
 `subscribe_chart` pushes compute built-ins only.
 
-Scripting is meant for trusted or single-user deployments: a script's
-owner is an OAuth client registration, and `/authorize` approves
-automatically (threat model in
-[ADR-0025](/chartgen/decisions/0025-user-indicator-registry/)).
+Scripting is meant for trusted or single-user deployments: without sign-in a
+script's owner is an OAuth client registration and `/authorize` approves
+automatically, and with it anyone with an account can run scripts in the server
+process (threat model in
+[ADR-0025](/chartgen/decisions/0025-user-indicator-registry/) and
+[ADR-0044](/chartgen/decisions/0044-sign-in-through-github-and-google/)).
 
 ### Orders & positions (require `--trade`)
 

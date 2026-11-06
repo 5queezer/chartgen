@@ -119,6 +119,14 @@ The suite runs with `workers: 1` because chartgen's OAuth store is
 process-global and two tests racing through PKCE will collide on
 state. Don't set `fullyParallel: true`.
 
+The suite runs without sign-in. `signin.spec.ts` is its own project, `chromium-signin`,
+with a chartgen and a Vite of their own on `CHARTGEN_PORT - 3000` and `WEB_PORT - 3000`,
+against a fake GitHub and Google (`fixtures/fake-provider.mjs`) on `CHARTGEN_PORT - 4000`.
+`tests/e2e.rs` has a fake of its own, with the same shapes. Neither ever contacts the real
+providers: `CHARTGEN_SIGNIN_TEST_PROVIDER_ORIGIN` is honored only on the sample data source,
+and only for a loopback origin
+([ADR-0044](/chartgen/decisions/0044-sign-in-through-github-and-google/#testing)).
+
 ## Scope caveats
 
 The v0.2 suite is Chromium-only and targets desktop viewports. Visual

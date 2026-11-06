@@ -3356,6 +3356,23 @@ fn test_signin_scripts_follow_the_user_and_sessions_survive_restart() {
     );
     assert!(answer.contains("50"), "{answer}");
 
+    // The file holds a hash of the session, not what would open it.
+    {
+        use sha2::Digest as _;
+        let cookie = ann.cookies["chartgen_session"].clone();
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        let hashes: Vec<String> = conn
+            .prepare("SELECT token_hash FROM sessions")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert!(!hashes.contains(&cookie), "the raw value is stored");
+        let hashed = hex::encode(sha2::Sha256::digest(cookie.as_bytes()));
+        assert!(hashes.contains(&hashed), "{hashes:?}");
+    }
+
     // A restart: the session and user are back, the token is not, and signing the
     // app in again takes no provider.
     drop(srv);

@@ -12,7 +12,7 @@ before launch.
 | `alerts.json` | `set_alert`, `cancel_alert`, fired alerts | JSON array, atomic replace |
 | `trades.log` | Order lifecycle + alert triggers | Append-only text |
 | `subscriptions.json` | `subscribe_notifications`, `unsubscribe_notifications` | JSON map keyed by token |
-| `chartgen.db` | `/register` and `/token` on the HTTP server; scripted indicators, with `CHARTGEN_SCRIPTING=1` (any mode) | SQLite, path from `CHARTGEN_DB` |
+| `chartgen.db` | `/register` and `/token` on the HTTP server; sign-in, when configured; scripted indicators, with `CHARTGEN_SCRIPTING=1` (any mode) | SQLite, path from `CHARTGEN_DB` |
 
 ## `alerts.json`
 
@@ -116,7 +116,7 @@ default `scripting` cargo feature has no store at all.
 
 ```sql
 CREATE TABLE user_indicators (
-    user_id      TEXT    NOT NULL,   -- OAuth client_id of the owner
+    user_id      TEXT    NOT NULL,   -- owner: OAuth client_id, or with sign-in a users.id
     name         TEXT    NOT NULL,
     source       TEXT    NOT NULL,   -- Starlark source as registered
     meta_json    TEXT    NOT NULL,   -- {title, description, overlay, params} at register
@@ -129,7 +129,27 @@ CREATE TABLE oauth_clients (
     client_id      TEXT    PRIMARY KEY,
     redirect_uris  TEXT    NOT NULL, -- JSON array
     created_at     INTEGER NOT NULL,
-    last_token_at  INTEGER           -- migration 2; NULL = never got a token
+    last_token_at  INTEGER,          -- migration 2; NULL = never got a token
+    client_name    TEXT              -- migration 3; as registered, for the consent page
+);
+-- Migration 3, used with sign-in on (ADR-0044):
+CREATE TABLE users (
+    id             TEXT    PRIMARY KEY, -- github:<id> or google:<sub>
+    name           TEXT    NOT NULL,    -- display only, refreshed at each login
+    created_at     INTEGER NOT NULL,
+    last_login_at  INTEGER NOT NULL
+);
+CREATE TABLE sessions (
+    token_hash  TEXT    PRIMARY KEY,    -- SHA-256 hex of the cookie value
+    user_id     TEXT    NOT NULL,
+    created_at  INTEGER NOT NULL,
+    expires_at  INTEGER NOT NULL
+);
+CREATE TABLE client_grants (            -- clients a user approved
+    user_id     TEXT    NOT NULL,
+    client_id   TEXT    NOT NULL,
+    created_at  INTEGER NOT NULL,
+    PRIMARY KEY (user_id, client_id)
 );
 ```
 
@@ -151,3 +171,10 @@ are only deleted when a registration at the
 [1000 client limit](/chartgen/reference/oauth/#token-lifetime) evicts them, which
 spares any client with a live token or a row in `user_indicators`. Back up the file like any
 SQLite database (`sqlite3 chartgen.db ".backup copy.db"`).
+
+`users`, `sessions` and `client_grants` are empty until
+[sign-in](/chartgen/reference/oauth/#sign-in) is configured. Expired sessions, and
+approvals of clients no longer registered, are deleted at startup. Provider tokens and
+secrets are never stored, and neither are emails, except that a Google account without a
+name is shown by its verified email. Deleting a user is by hand, with the server stopped:
+their rows in these tables and `user_indicators`.

@@ -1852,6 +1852,54 @@ mod tests {
     }
 
     #[test]
+    fn an_expired_session_is_nobody() {
+        let c = config(&[
+            ("CHARTGEN_GITHUB_CLIENT_ID", "h"),
+            ("CHARTGEN_GITHUB_CLIENT_SECRET", "hs"),
+        ])
+        .unwrap()
+        .unwrap();
+        let mut s = SignIn::new(c);
+        let (token, _) = s.open_session("github:1", None);
+        let mut headers = HeaderMap::new();
+        let cookie = format!("{SESSION_COOKIE}={token}");
+        headers.insert(header::COOKIE, cookie.parse().unwrap());
+        assert_eq!(s.session_of(&headers).unwrap().1, "github:1");
+        s.sessions.get_mut(&hash_of(&token)).unwrap().expires_at = now_unix() - 1;
+        assert!(s.session_of(&headers).is_none());
+        assert!(s.sessions.is_empty(), "and it is forgotten");
+    }
+
+    #[test]
+    fn opening_a_session_replaces_the_old_one_and_keeps_to_the_limit() {
+        let c = config(&[
+            ("CHARTGEN_GITHUB_CLIENT_ID", "h"),
+            ("CHARTGEN_GITHUB_CLIENT_SECRET", "hs"),
+        ])
+        .unwrap()
+        .unwrap();
+        let mut s = SignIn::new(c);
+        let (first, _) = s.open_session("github:1", None);
+        let (_, writes) = s.open_session("github:1", Some(hash_of(&first)));
+        assert_eq!(
+            s.sessions.len(),
+            1,
+            "a new login replaces the session it came with"
+        );
+        assert!(matches!(&writes[0], Write::DeleteSession(h) if *h == hash_of(&first)));
+        for _ in 0..MAX_SESSIONS_PER_USER + 3 {
+            s.open_session("github:1", None);
+        }
+        assert_eq!(s.sessions.len(), MAX_SESSIONS_PER_USER);
+        s.open_session("github:2", None);
+        assert_eq!(
+            s.sessions.len(),
+            MAX_SESSIONS_PER_USER + 1,
+            "others are not touched"
+        );
+    }
+
+    #[test]
     fn login_hits_are_limited_per_address_except_loopback() {
         let c = config(&[
             ("CHARTGEN_GITHUB_CLIENT_ID", "h"),

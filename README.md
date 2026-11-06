@@ -136,7 +136,7 @@ Auto-detection: `USDT`/`BTC`/`ETH` suffixes → Binance, everything else → Yah
 
 ### Claude.ai
 
-Add `https://chartgen.vasudev.xyz/mcp` as a remote MCP connector. OAuth 2.1 PKCE is handled automatically. (`POST /` still works as a deprecated alias for connectors added with the root URL.)
+Add `https://chartgen.vasudev.xyz/mcp` as a remote MCP connector. OAuth 2.1 PKCE is handled automatically. (`POST /` still works as a deprecated alias for connectors added with the root URL.) A server can [require sign-in through GitHub or Google](https://5queezer.github.io/chartgen/guides/deploy/#sign-in-through-github-and-google); you then sign in once in the browser and approve the connector.
 
 ### Web frontend
 
@@ -191,7 +191,8 @@ src/
 │   └── persistence.rs   Alert/order persistence
 ├── renderer.rs          plotters-based chart rendering
 ├── mcp.rs               MCP JSON-RPC (stdio + HTTP shared)
-└── server.rs            axum HTTP, OAuth 2.1 PKCE, SSE
+├── server.rs            axum HTTP, OAuth 2.1 PKCE, SSE
+└── server/signin.rs     Sign-in through GitHub and Google
 ```
 
 ## Deployment
