@@ -65,10 +65,19 @@ Binance is loaded per symbol and interval, not per user
 ([ADR-0049](/chartgen/decisions/0049-one-kline-read-per-symbol/)). All readers of a chart share
 one window of klines: its first read costs one request per 1000 klines, and after that at most
 about one request a second, whatever the number of users. Identical history pages share a read
-as well. So a polled forming candle can be up to 3 s old. The cache holds at most about 31 MB,
-and idle windows go after 2 minutes. Each request still holds its own copy of its bars while it
-computes, which the bound does not cover: a burst of large custom-interval charts costs about
-2 MB each.
+as well. So a polled forming candle can be up to 3 s old. A push seed always reads for itself,
+about one request per subscribe.
+
+The cache holds at most about 31 MB of live klines. Expect more in resident memory: a review
+probe on a debug build measured about 2.3 times that, from transient JSON and malloc arenas. So
+watch RSS under load, and if it climbs, try `MALLOC_ARENA_MAX=2`. A window unused for 2 minutes
+goes at the next read of any Binance chart; with no traffic it stays, within the bound. Each
+request also holds its own copy of its bars while it computes, which the bound does not cover:
+a burst of large custom-interval charts costs about 2 MB each.
+
+More active windows than fit evict each other, and each poll then walks again: more than 12
+windows at 20,000 klines, or about 42 at 6000. While Binance answers 5xx, a failed read stores
+nothing and the next caller tries again, up to one request per round trip per chart.
 
 All of it answers to the rate gate of [ADR-0038](/chartgen/decisions/0038-custom-intervals/). When
 the gate refuses, clients see an error starting `Binance rate limit:`. Yahoo is not shared this
