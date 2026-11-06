@@ -912,11 +912,62 @@ def compute(ohlcv, params, chart):
       await expect(errors).toContainText("On the chart", { timeout: 30_000 });
       await expect(errors).toContainText("Line 6");
 
+      // A full load may be retried, since the script may have recovered, but the
+      // attempts run out: once for adding it, and the feed's bound of three.
       await page.waitForTimeout(8000);
-      expect(loads.count).toBeLessThanOrEqual(1);
+      const settled = loads.count;
+      expect(settled).toBeLessThanOrEqual(4);
+      await page.waitForTimeout(4000);
+      expect(loads.count).toBe(settled);
       await expect(page.getByTestId("chart-load-error")).toHaveCount(0);
     });
   }
+
+  test("a script whose plots depend on the bars keeps the rest of the chart live", async ({ page }) => {
+    test.setTimeout(60_000);
+    await gotoApp(page);
+    await openEditor(page);
+    await saveNew(
+      page,
+      "shape_shift",
+      script(`    chart.line(1.0, title = "One")
+    if len(ohlcv.close) > 1000:
+        chart.line(2.0, title = "Two")`),
+    );
+    const loads = countFullLoads(page);
+    await page.getByTestId("script-add").click();
+    await expect(errorChip(page)).toHaveCount(1, { timeout: 30_000 });
+    await expect(page.getByTestId("script-errors")).toContainText("Its plots keep changing");
+    const settled = loads.count;
+    expect(settled).toBeLessThanOrEqual(4);
+
+    // The candles and the built-ins go on, and no more full loads happen.
+    const newest = () =>
+      page.evaluate(() => {
+        const t = (window as unknown as {
+          __chartgenTest: { series: () => { bars: Array<{ t: number; c: number }> } | null };
+        }).__chartgenTest;
+        const bar = t.series()?.bars.at(-1);
+        return bar ? `${bar.t}:${bar.c}` : "";
+      });
+    const before = await newest();
+    await expect.poll(newest, { timeout: 15_000 }).not.toBe(before);
+    expect(loads.count).toBe(settled);
+    await expect(page.getByText("retry in")).toHaveCount(0);
+  });
+
+  test("a chip recovers when its script appears, without a page reload", async ({ page }) => {
+    await seedIndicators(page, ["rsi", "late_one"]);
+    await gotoApp(page);
+    await expect(errorChip(page)).toHaveCount(1, { timeout: 15_000 });
+
+    const other = await secondTab(page);
+    await saveNew(other, "late_one", script('    chart.line(4.0, title = "Late")'));
+    await other.close();
+
+    await expect.poll(() => plotted(page, "late_one"), { timeout: 15_000 }).toEqual({ label: "Late", last: 4 });
+    await expect(errorChip(page)).toHaveCount(0);
+  });
 });
 
 test.describe("panel size", () => {

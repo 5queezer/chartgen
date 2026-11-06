@@ -32,6 +32,7 @@ import {
   mergeTail,
   missingBars,
   sortChannels,
+  withoutMisfits,
 } from "./seriesMerge";
 
 /** Bars of the initial full load. */
@@ -294,7 +295,8 @@ export function createLiveFeed(opts: LiveFeedOptions): LiveFeed {
     schedule(inMs);
   };
 
-  const reload = (my: number) => {
+  /** Whether this chart may still ask for a full reload (MAX_RELOADS). */
+  const canReload = () => {
     const key = JSON.stringify(request);
     const now = Date.now();
     if (key !== reloadsOf) {
@@ -302,11 +304,23 @@ export function createLiveFeed(opts: LiveFeedOptions): LiveFeed {
       reloads = [];
     }
     reloads = reloads.filter((at) => now - at < RELOAD_WINDOW_MS);
-    if (reloads.length >= MAX_RELOADS) {
-      backoff(new Error("the chart's data keeps changing shape; reload the page to start over"));
+    return reloads.length < MAX_RELOADS;
+  };
+
+  /** Merge a tail. Out of reloads, what does not fit fails alone: the chart stays live. */
+  const merge = (cur: SeriesPayload, tail: SeriesPayload) => {
+    const r = mergeTail(cur, tail);
+    return !r.ok && r.reason === "shape" && !canReload()
+      ? mergeTail(cur, withoutMisfits(cur, tail))
+      : r;
+  };
+
+  const reload = (my: number) => {
+    if (!canReload()) {
+      backoff(new Error("the chart's data keeps not lining up; reload the page to start over"));
       return;
     }
-    reloads.push(now);
+    reloads.push(Date.now());
     clearTimer();
     reloading = true;
     opts.onPollStatus({ kind: "reloading" });
@@ -412,7 +426,7 @@ export function createLiveFeed(opts: LiveFeedOptions): LiveFeed {
 
     const prevLength = series.bars.length;
     const newest = series.bars[prevLength - 1]?.t ?? null;
-    const r = mergeTail(series, tail);
+    const r = merge(series, tail);
     if (r.ok) {
       series = r.series;
       failures = 0;
@@ -573,13 +587,14 @@ export function createLiveFeed(opts: LiveFeedOptions): LiveFeed {
       pushFailures = 0;
       if (reloading) return;
       const prevLength = series.bars.length;
-      const r = mergeTail(series, tail);
+      const r = merge(series, tail);
       if (r.ok) {
         series = r.series;
         emit({ version: ++version, kind: "tail", from: r.from, prevLength });
-      } else if (r.reason !== "stale" && !polling) {
+      } else if (r.reason !== "stale" && !polling && canReload()) {
         // Missed bars or data that does not line up: a poll catches up
-        // (or reloads) exactly as when polling.
+        // (or reloads) exactly as when polling. Out of reloads it could do
+        // neither, and pushes would turn into one poll each.
         clearTimer();
         catchUp = true;
         void poll();

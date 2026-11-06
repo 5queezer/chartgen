@@ -8,6 +8,7 @@ import {
   mergeTail,
   missingBars,
   sortChannels,
+  withoutMisfits,
 } from "./seriesMerge";
 
 // A hand-made stand-in for the server's sample source: bar i opens at
@@ -694,13 +695,49 @@ describe("indicators that fail on one side (indicator_errors)", () => {
     expect(r.ok && r.series.indicators.mine!.lines![0]!.values.at(-1)).toBe(14);
   });
 
-  it("a full load that failed ignores tail values and keeps its error", () => {
+  it("a tail with values for a key that failed on the full load asks for a reload", () => {
     const cur = series(range5(0), {}, { mine: error });
     const r = mergeTail(cur, series(range5(3), { mine: mine(range5(3)) } as never));
+    expect(r).toEqual({ ok: false, reason: "shape" });
+  });
+
+  it("an older page with values for such a key is merged without them", () => {
+    const cur = series(range5(5), {}, { mine: error });
+    const r = mergeOlder(cur, series(range5(0), { mine: mine(range5(0)) } as never));
+    expect(r.ok).toBe(true);
+    expect(r.ok && r.series.indicators.mine).toBeUndefined();
+    expect(r.ok && r.series.indicator_errors).toEqual({ mine: error });
+  });
+
+  it("withoutMisfits keeps what fits, and fails only what does not", () => {
+    const fine = () => mine(range5(3));
+    const cur = series(range5(0), {
+      steady: mine(range5(0)),
+      changed: mine(range5(0)),
+      silent: mine(range5(0)),
+    } as never, { failed: error });
+    const tail = series(range5(3), {
+      steady: fine(),
+      changed: { ...fine(), lines: [] },
+      failed: fine(),
+      added: fine(),
+    } as never);
+    expect(mergeTail(cur, tail).ok).toBe(false);
+
+    const r = mergeTail(cur, withoutMisfits(cur, tail));
     expect(r.ok).toBe(true);
     if (!r.ok) return;
-    expect(r.series.indicators.mine).toBeUndefined();
-    expect(r.series.indicator_errors).toEqual({ mine: error });
+    expect(r.series.bars).toHaveLength(8);
+    expect(r.series.indicators.steady!.lines![0]!.values.at(-1)).toBe(14);
+    // What did not fit keeps its values, stays aligned, and says why.
+    expect(r.series.indicators.changed!.lines![0]!.values).toEqual([0, 2, 4, 6, 8, null, null, null]);
+    expect(r.series.indicator_errors?.changed?.step).toBe("shape");
+    expect(r.series.indicator_errors?.silent?.step).toBe("shape");
+    // A key without values keeps its own reason, and nothing new appears.
+    expect(r.series.indicator_errors?.failed).toEqual(error);
+    expect(r.series.indicators.failed).toBeUndefined();
+    expect(r.series.indicators.added).toBeUndefined();
+    expect(r.series.indicator_errors?.steady).toBeUndefined();
   });
 
   it("an older page that failed pads the indicator so it stays aligned", () => {

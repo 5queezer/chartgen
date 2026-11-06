@@ -626,24 +626,51 @@ describe("reload bound", () => {
   // reload, and each reload lands in reset(): a new generation every time.
   const misfitTail = (req: LiveRequest, args: FetchArgs) =>
     serve(req, args).then((p) => ({ ...p, indicators: {} }));
+  const otherSymbol = (req: LiveRequest, args: FetchArgs) =>
+    serve(req, args).then((p) => ({ ...p, symbol: "OTHER" }));
   const landing = (feed: LiveFeed) => {
     feed.reset(payload(0, market.now), REQ);
     return Promise.resolve();
   };
 
-  it("holds across generations, then backs off and allows more after the window", async () => {
+  it("holds across generations, and allows more after the window", async () => {
     const t = setup(misfitTail, landing);
     t.feed.reset(payload(0, market.now), REQ);
     await vi.advanceTimersByTimeAsync(60_000);
     expect(t.reload).toHaveBeenCalledTimes(MAX_RELOADS);
-    const status = t.polls.at(-1);
-    expect(status?.kind).toBe("retrying");
-    expect(status?.kind === "retrying" && status.message).toMatch(/keeps changing shape/);
 
     await vi.advanceTimersByTimeAsync(RELOAD_WINDOW_MS);
     const later = t.reload.mock.calls.length;
     expect(later).toBeGreaterThan(MAX_RELOADS);
     expect(later).toBeLessThanOrEqual(MAX_RELOADS * 2);
+    t.feed.dispose();
+  });
+
+  it("out of reloads, a misfit keeps the bars live and fails only its indicator", async () => {
+    const t = setup(misfitTail, landing);
+    t.feed.reset(payload(0, market.now), REQ);
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(t.reload).toHaveBeenCalledTimes(MAX_RELOADS);
+
+    market.now += 3;
+    await vi.advanceTimersByTimeAsync(10_000);
+    const shown = t.last()!.series;
+    expect(shown.bars.at(-1)!.t).toBe(tOf(market.now));
+    expect(shown.indicator_errors?.sma?.step).toBe("shape");
+    // Aligned with the new bars, and live rather than backing off.
+    expect(shown.indicators.sma!.lines![0]!.values).toHaveLength(shown.bars.length);
+    expect(t.polls.at(-1)?.kind).toBe("live");
+    t.feed.dispose();
+  });
+
+  it("out of reloads, data that cannot merge at all backs off and says so", async () => {
+    const t = setup(otherSymbol, landing);
+    t.feed.reset(payload(0, market.now), REQ);
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(t.reload).toHaveBeenCalledTimes(MAX_RELOADS);
+    const status = t.polls.at(-1);
+    expect(status?.kind).toBe("retrying");
+    expect(status?.kind === "retrying" && status.message).toMatch(/not lining up/);
     t.feed.dispose();
   });
 
@@ -655,6 +682,32 @@ describe("reload bound", () => {
     t.feed.reset(payload(0, market.now), { ...REQ, timeframe: "5m" });
     await vi.advanceTimersByTimeAsync(SLOW_POLL_MS * 2);
     expect(t.reload.mock.calls.length).toBeGreaterThan(MAX_RELOADS);
+    t.feed.dispose();
+  });
+
+  it("out of reloads, pushes that cannot merge do not each cause a poll", async () => {
+    const push: PushApi = {
+      subscribe: () => Promise.resolve("sub"),
+      unsubscribe: () => Promise.resolve(),
+    };
+    const t = setup(otherSymbol, landing, push);
+    t.feed.reset(payload(0, market.now), REQ);
+    await vi.advanceTimersByTimeAsync(0);
+    const bad = () => t.feed.applyPush("sub", { ...payload(market.now - 1, market.now), symbol: "OTHER" });
+    // Use up the reloads: each lands in a new generation, which subscribes again.
+    for (let i = 0; i < MAX_RELOADS; i++) {
+      bad();
+      await vi.advanceTimersByTimeAsync(100);
+    }
+    expect(t.reload).toHaveBeenCalledTimes(MAX_RELOADS);
+
+    await vi.advanceTimersByTimeAsync(0);
+    const before = t.fetch.mock.calls.length;
+    for (let i = 0; i < 20; i++) {
+      bad();
+      await vi.advanceTimersByTimeAsync(100);
+    }
+    expect(t.fetch.mock.calls.length).toBe(before);
     t.feed.dispose();
   });
 });

@@ -105,20 +105,49 @@ function sameShape(cur: SeriesPayload, inc: SeriesPayload): boolean {
       if (inc.indicator_errors?.[name]) continue;
       return false;
     }
-    const al = a.lines ?? [];
-    const bl = b.lines ?? [];
-    const ah = a.histogram ?? [];
-    const bh = b.histogram ?? [];
-    const af = a.fills ?? [];
-    const bf = b.fills ?? [];
-    if (al.length !== bl.length || ah.length !== bh.length) return false;
-    if (af.length !== bf.length) return false;
-    if (bl.some((l) => l.values.length !== n)) return false;
-    if (bh.some((h) => h.values.length !== n || (h.color_idx && h.color_idx.length !== n)))
-      return false;
-    if (bf.some((f) => f.y1.length !== n || f.y2.length !== n)) return false;
+    if (!fits(a, b, n)) return false;
   }
   return true;
+}
+
+/** `b` has the channels of `a`, with one value per bar of a window of `n` bars. */
+function fits(a: Indicator, b: Indicator, n: number): boolean {
+  const al = a.lines ?? [];
+  const bl = b.lines ?? [];
+  const ah = a.histogram ?? [];
+  const bh = b.histogram ?? [];
+  const af = a.fills ?? [];
+  const bf = b.fills ?? [];
+  if (al.length !== bl.length || ah.length !== bh.length) return false;
+  if (af.length !== bf.length) return false;
+  if (bl.some((l) => l.values.length !== n)) return false;
+  if (bh.some((h) => h.values.length !== n || (h.color_idx && h.color_idx.length !== n)))
+    return false;
+  return !bf.some((f) => f.y1.length !== n || f.y2.length !== n);
+}
+
+/**
+ * `tail` with only the indicators that fit `cur`; the others become errors of
+ * their own. For when reloading is no longer an option (MAX_RELOADS): the bars and
+ * the rest of the chart stay live, and only what does not fit stops updating.
+ */
+export function withoutMisfits(cur: SeriesPayload, tail: SeriesPayload): SeriesPayload {
+  const misfit = {
+    step: "shape",
+    line: null,
+    message: "Its plots keep changing between updates; reload the page to start over.",
+  };
+  const errors = { ...tail.indicator_errors };
+  const indicators: SeriesPayload["indicators"] = {};
+  for (const [name, b] of Object.entries(tail.indicators)) {
+    const a = cur.indicators[name];
+    if (a && fits(a, b, tail.bars.length)) indicators[name] = b;
+    else errors[name] = cur.indicator_errors?.[name] ?? misfit;
+  }
+  for (const name of Object.keys(cur.indicators)) {
+    if (!indicators[name]) errors[name] ??= misfit;
+  }
+  return withErrors({ ...tail, indicators }, errors);
 }
 
 /**
@@ -379,6 +408,9 @@ export function mergeTail(
 ): MergeResult<{ from: number }> {
   const problem = headerProblem(current, tail, false);
   if (problem) return fail(problem);
+  // Values for a key we only hold an error for: it failed on the full load and
+  // works now. Only a full load can bring it back (MAX_RELOADS bounds the attempts).
+  if (Object.keys(tail.indicators).some((k) => !current.indicators[k])) return fail("shape");
   const bars = current.bars;
   const oldest = bars[0];
   const newest = bars.at(-1);
