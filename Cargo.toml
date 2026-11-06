@@ -47,6 +47,11 @@ default = ["scripting"]
 # and rusqlite.
 scripting = ["dep:starlark", "dep:starlark_syntax", "dep:allocative", "dep:anyhow", "dep:rusqlite"]
 
+# Published macOS binaries must start without Homebrew's OpenSSL, and nothing else brings
+# OpenSSL in there: `native-tls` uses the system's TLS (ADR-0045).
+[target.'cfg(target_os = "macos")'.dependencies]
+openssl = { version = "0.10", features = ["vendored"] }
+
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
