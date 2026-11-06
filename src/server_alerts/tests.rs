@@ -1969,3 +1969,110 @@ fn a_stored_alert_reads_back_with_its_secret() {
     let again: Record = serde_json::from_str(&record.json()).unwrap();
     assert_eq!(again.webhook.unwrap().url, "https://example.com/");
 }
+
+/// ADR-0044: a user is not in `oauth_clients`, and without their own activity every
+/// signed-in owner's alerts would look idle.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_users_alerts_live_on_that_users_activity() {
+    let (store, _) = store_at("expire-user");
+    store.save_user("github:1", "active").unwrap();
+    store.mark_user_used("github:1").unwrap();
+    let a = plain(store);
+    let kept = create(&a, spec("less", "once", 1.0), "github:1").await;
+    let gone = create(&a, spec("less", "once", 1.0), "github:2").await;
+    let now = now_ms();
+    let long_ago = now - IDLE_OWNER_TTL_MS - 60_000;
+    for id in [&kept, &gone] {
+        a.lock().alerts.get_mut(id).unwrap().created_at = long_ago;
+    }
+    a.sweep(&mut a.lock(), now);
+    assert!(a.lock().alerts.contains_key(&kept), "they are active");
+    assert!(!a.lock().alerts.contains_key(&gone), "they are not");
+    // And they do expire, like anyone's, once that activity is old.
+    a.sweep(&mut a.lock(), now + IDLE_OWNER_TTL_MS + 60_000);
+    assert!(!a.lock().alerts.contains_key(&kept));
+}
+
+/// ADR-0044: what a client owned goes to its first user, within their limit, and
+/// survives a restart there. Nothing is lost.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_clients_alerts_move_to_its_first_user() {
+    let (store, _) = store_at("claim-alerts");
+    let a = plain(store);
+    let first = create(&a, spec("less", "once", 1.0), "client").await;
+    let second = create(&a, spec("less", "once", 1.0), "client").await;
+
+    assert_eq!(a.claim("nobody", "github:1"), 0);
+    assert_eq!(a.claim("client", "github:1"), 2);
+    assert_eq!(a.lock().alerts[&first].owner, "github:1");
+    assert_eq!(a.lock().alerts[&second].owner, "github:1");
+    assert_eq!(
+        a.claim("client", "github:2"),
+        0,
+        "the next user gets nothing"
+    );
+    let owners = store.server_alert_owners().unwrap();
+    assert!(owners.contains("github:1") && !owners.contains("client"));
+    let stored = store.server_alerts().unwrap();
+    assert!(
+        stored.iter().all(|row| row.contains("github:1")),
+        "the record says so too, as a restart reads it"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn claiming_stops_at_the_users_limit_and_the_rest_stays() {
+    let (store, _) = store_at("claim-limit");
+    let a = plain(store);
+    let limit = a.limits.alerts_per_client;
+    let made = create(&a, spec("less", "once", 1.0), "client").await;
+    let template = a.lock().alerts[&made].clone();
+    // One slot left for the user, and three alerts of the client after the first.
+    for i in 0..limit - 1 + 2 {
+        let mut record = template.clone();
+        record.id = format!("copy-{i}");
+        record.owner = if i < limit - 1 { "github:1" } else { "client" }.to_string();
+        a.lock().alerts.insert(record.id.clone(), record);
+    }
+    let count = |owner: &str| {
+        a.lock()
+            .alerts
+            .values()
+            .filter(|r| r.owner == owner)
+            .count()
+    };
+    assert_eq!((count("github:1"), count("client")), (limit - 1, 3));
+
+    assert_eq!(a.claim("client", "github:1"), 1, "one slot was left");
+
+    assert_eq!(count("github:1"), limit);
+    assert_eq!(count("client"), 2, "the rest stays, not lost");
+}
+
+/// A delivery waiting when its alert moves goes along, or its old owner's queue would
+/// hold a delivery of someone else's alert.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_claimed_alert_takes_its_waiting_deliveries_along() {
+    let (store, _) = store_at("claim-queue");
+    let a = plain(store);
+    let moved = create(&a, spec("less", "once", 1.0), "client").await;
+    let event = |id: &str, alert: &str| StoredEvent {
+        id: id.to_string(),
+        alert_id: alert.to_string(),
+        body: "{}".to_string(),
+        created_at: 0,
+    };
+    {
+        let mut st = a.lock();
+        let queue = st.queues.entry("client".to_string()).or_default();
+        queue.push_back(event("e1", &moved));
+        queue.push_back(event("e2", "an-alert-it-keeps"));
+    }
+    // Only one alert may move here: the second event's alert is not in the table.
+    assert_eq!(a.claim("client", "github:1"), 1);
+    let st = a.lock();
+    assert_eq!(st.queues["github:1"].len(), 1);
+    assert_eq!(st.queues["github:1"][0].id, "e1");
+    assert_eq!(st.queues["client"].len(), 1);
+    assert_eq!(st.queues["client"][0].id, "e2");
+}

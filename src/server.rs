@@ -811,7 +811,7 @@ async fn oauth_token(
                 }
             }
             if let Some(user) = token_user {
-                signin::claim_scripts(&client_id, &user.id);
+                signin::after_token(&client_id, &user.id);
             }
         })
         .await;
@@ -1491,6 +1491,11 @@ pub async fn run_server(port: u16, engine: Option<Arc<RwLock<TradingEngine>>>) {
             }
             if signin::public_base_url().is_some_and(|b| !b.starts_with("https://")) {
                 eprintln!("[OAuth] WARNING: CHARTGEN_BASE_URL is not https: session cookies travel unprotected.");
+            }
+            let not_accounts = std::env::var("CHARTGEN_SERVER_ALERT_CLIENTS")
+                .map_or(0, |raw| signin::allowlist_entries_not_accounts(&raw));
+            if not_accounts > 0 {
+                eprintln!("[alerts] WARNING: {not_accounts} entries of CHARTGEN_SERVER_ALERT_CLIENTS are not accounts (github:<id>, google:<sub>), and with sign-in on they match nobody (ADR-0044).");
             }
             oauth.signin = Some(signin::SignIn::new(config));
         }

@@ -308,17 +308,41 @@ async fn persist(writes: Vec<Write>) {
     }
 }
 
-/// Scripts of a client from before sign-in go to the first user who gets a token
-/// through it (ADR-0044).
+/// A user got a token through a client: that keeps their server alerts alive, and
+/// scripts and alerts of the client from before sign-in go to the first user who does
+/// (ADR-0044). Blocking.
 #[cfg(feature = "scripting")]
-pub(super) fn claim_scripts(client: &str, user: &str) {
+pub(super) fn after_token(client: &str, user: &str) {
     if let Some(store) = scripting::persistence::global() {
+        if let Err(e) = store.mark_user_used(user) {
+            eprintln!("[OAuth] could not record user activity: {e}");
+        }
         match store.claim_scripts(client, user, scripting::MAX_SCRIPTS_PER_USER) {
             Ok(0) => {}
             Ok(n) => eprintln!("[OAuth] {n} script(s) moved from a client to its signed-in user"),
             Err(e) => eprintln!("[OAuth] could not move a client's scripts: {e}"),
         }
     }
+    if let Some(alerts) = crate::server_alerts::global() {
+        match alerts.claim(client, user) {
+            0 => {}
+            n => eprintln!("[OAuth] {n} server alert(s) moved from a client to its signed-in user"),
+        }
+    }
+}
+
+/// How many entries of `CHARTGEN_SERVER_ALERT_CLIENTS` can match nobody with sign-in
+/// on: owners are then accounts, so a client id on the list grants nothing.
+pub(super) fn allowlist_entries_not_accounts(raw: &str) -> usize {
+    raw.split(',')
+        .map(str::trim)
+        .filter(|id| !id.is_empty() && *id != "*")
+        .filter(|id| {
+            ![Provider::GitHub, Provider::Google]
+                .iter()
+                .any(|p| id.starts_with(&format!("{}:", p.slug())))
+        })
+        .count()
 }
 
 impl SignIn {
@@ -1849,6 +1873,17 @@ mod tests {
         token_for(&mut s, 0, "github:2", 5000);
         s.trim_user_tokens("github:1");
         assert!(keeps(&s, 0));
+    }
+
+    #[test]
+    fn an_allowlist_with_sign_in_on_names_accounts() {
+        assert_eq!(allowlist_entries_not_accounts(""), 0);
+        assert_eq!(allowlist_entries_not_accounts("*"), 0);
+        assert_eq!(allowlist_entries_not_accounts("github:1, google:abc"), 0);
+        assert_eq!(
+            allowlist_entries_not_accounts("github:1,3f2a-client-id, gitlab:9"),
+            2
+        );
     }
 
     #[test]

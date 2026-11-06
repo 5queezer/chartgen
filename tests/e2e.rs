@@ -1209,8 +1209,8 @@ mod server_alerts {
     use std::io::{Read, Write};
     use std::sync::{Arc, Mutex};
 
-    /// A webhook receiver answering 200; returns its port and what it received.
-    fn receiver() -> (u16, Arc<Mutex<Vec<String>>>) {
+    /// A webhook receiver answering 200; returns its port and the POSTs it received.
+    pub(super) fn receiver() -> (u16, Arc<Mutex<Vec<String>>>) {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         let seen = Arc::new(Mutex::new(Vec::new()));
@@ -1220,9 +1220,11 @@ mod server_alerts {
                 let Ok(mut s) = stream else { continue };
                 let mut buf = vec![0u8; 16384];
                 let n = s.read(&mut buf).unwrap_or(0);
-                log.lock()
-                    .unwrap()
-                    .push(String::from_utf8_lossy(&buf[..n]).to_string());
+                // Only deliveries: anything on this machine may probe an open port.
+                let request = String::from_utf8_lossy(&buf[..n]).to_string();
+                if request.starts_with("POST ") {
+                    log.lock().unwrap().push(request);
+                }
                 let _ = s.write_all(
                     b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
                 );
@@ -3880,4 +3882,248 @@ fn test_signin_existing_scripts_move_to_the_first_user_of_their_client() {
     let bob = token_from(port, &client, &redirect, &back.query()["code"]);
     assert!(!mine(&bob).contains("from_before"), "{}", mine(&bob));
     assert!(mine(&ann).contains("from_before"), "{}", mine(&ann));
+}
+
+/// ADR-0044 with server alerts (ADR-0042): an alert belongs to the user.
+#[cfg(feature = "scripting")]
+mod signin_server_alerts {
+    use super::server_alerts::receiver;
+    use super::*;
+
+    fn start(
+        test: &str,
+        fake: &FakeProvider,
+        allowed: &str,
+        hook: u16,
+        pairs: Option<&str>,
+    ) -> Server {
+        let port = free_port();
+        let db = store_path(test);
+        let mut cmd = signin_command(port, &db, fake, &["github"], None, false);
+        cmd.env("CHARTGEN_SERVER_ALERTS", "1")
+            .env("CHARTGEN_SERVER_ALERT_CLIENTS", allowed)
+            .env(
+                "CHARTGEN_WEBHOOK_TEST_ORIGIN",
+                format!("http://127.0.0.1:{hook}"),
+            );
+        if let Some(pairs) = pairs {
+            cmd.env("CHARTGEN_SERVER_ALERT_PAIRS_PER_CLIENT", pairs);
+        }
+        let mut srv = start_server(cmd, port);
+        srv.temp_db = Some(db);
+        srv
+    }
+
+    fn alert(symbol: &str) -> serde_json::Value {
+        serde_json::json!({
+            "symbol": symbol, "condition": "less", "trigger": "once", "level": 0.01,
+        })
+    }
+
+    fn listed(port: u16, token: &str) -> Vec<serde_json::Value> {
+        let list = call_tool(port, token, "list_server_alerts", serde_json::json!({})).unwrap();
+        list["alerts"].as_array().unwrap().clone()
+    }
+
+    /// Another client of the signed-in `b`, with a token.
+    fn second_client(b: &mut Browser) -> String {
+        let (port, redirect) = (b.port, web_redirect(b.port));
+        let client = register_client(port, &redirect);
+        let answer = b.authorize(&client, &redirect, "s");
+        token_from(port, &client, &redirect, &answer.query()["code"])
+    }
+
+    /// Ownership and quotas are the user's, not the client's: more clients buy no more.
+    #[test]
+    fn test_alerts_and_their_limits_follow_the_user_across_clients() {
+        let fake = FakeProvider::start();
+        let srv = start("signin-alerts-owner", &fake, "*", 1, Some("1"));
+        let p = srv.port;
+        let mut ann = Browser::new(p);
+        let first = web_sign_in(&mut ann, &fake, "github", profile_of("github", 1, "ann"));
+        let second = second_client(&mut ann);
+        let mut bob = Browser::new(p);
+        let theirs = web_sign_in(&mut bob, &fake, "github", profile_of("github", 2, "bob"));
+
+        call_tool(p, &first, "create_server_alert", alert("BTCUSDT")).unwrap();
+        assert_eq!(listed(p, &second).len(), 1, "from her other client too");
+        assert_eq!(listed(p, &theirs).len(), 0, "and not for anyone else");
+
+        // One pair per owner: her second client is still her.
+        let refused = call_tool(p, &second, "create_server_alert", alert("ETHUSDT")).unwrap_err();
+        assert!(refused.contains("pair"), "{refused}");
+        call_tool(p, &theirs, "create_server_alert", alert("ETHUSDT")).unwrap();
+    }
+
+    /// The list names accounts once sign-in is on. A client id on it grants nothing,
+    /// because the client is not who owns anything now.
+    #[test]
+    fn test_the_allowlist_names_accounts() {
+        let fake = FakeProvider::start();
+        let (hook, _) = receiver();
+        let srv = start("signin-alerts-list", &fake, "github:1", hook, None);
+        let p = srv.port;
+        let mut ann = Browser::new(p);
+        let allowed = web_sign_in(&mut ann, &fake, "github", profile_of("github", 1, "ann"));
+        let mut bob = Browser::new(p);
+        let other = web_sign_in(&mut bob, &fake, "github", profile_of("github", 2, "bob"));
+
+        let mut with_hook = alert("BTCUSDT");
+        with_hook["webhook_url"] = format!("http://127.0.0.1:{hook}/hook").into();
+        call_tool(p, &allowed, "create_server_alert", with_hook.clone()).unwrap();
+        let refused = call_tool(p, &other, "create_server_alert", with_hook).unwrap_err();
+        assert!(refused.contains("operator allowed"), "{refused}");
+        let refused = call_tool(p, &other, "create_server_alert", alert("BTCUSDT")).unwrap_err();
+        assert!(refused.contains("operator allowed"), "{refused}");
+    }
+
+    #[test]
+    fn test_a_client_id_on_the_allowlist_grants_a_signed_in_stranger_nothing() {
+        let fake = FakeProvider::start();
+        let port = free_port();
+        let db = store_path("signin-alerts-client-id");
+        let id = "11111111-1111-4111-8111-111111111111";
+        // A client id an operator listed before turning sign-in on, in the store.
+        chartgen::scripting::persistence::Store::open(&db)
+            .unwrap()
+            .save_oauth_client(id, &[web_redirect(port)])
+            .unwrap();
+        let mut cmd = signin_command(port, &db, &fake, &["github"], None, false);
+        cmd.env("CHARTGEN_SERVER_ALERTS", "1")
+            .env("CHARTGEN_SERVER_ALERT_CLIENTS", id);
+        let mut srv = start_server(cmd, port);
+        srv.temp_db = Some(db);
+        let mut b = Browser::new(port);
+        let first = b.authorize(id, &web_redirect(port), "s");
+        let back = provider_round_trip(
+            &mut b,
+            &fake,
+            "github",
+            profile_of("github", 9, "x"),
+            &first,
+        );
+        let token = token_from(port, id, &web_redirect(port), &back.query()["code"]);
+        let refused = call_tool(port, &token, "create_server_alert", alert("BTCUSDT")).unwrap_err();
+        assert!(refused.contains("operator allowed"), "{refused}");
+    }
+
+    /// Logging out of a browser ends its token, and the alert goes on running with no
+    /// browser at all: the point of an alert on the server.
+    #[test]
+    fn test_logout_leaves_alerts_running() {
+        let fake = FakeProvider::start();
+        let (hook, seen) = receiver();
+        let srv = start("signin-alerts-logout", &fake, "*", hook, None);
+        let p = srv.port;
+        let mut b = Browser::new(p);
+        let token = web_sign_in(&mut b, &fake, "github", profile_of("github", 1, "ann"));
+        // Evaluated when the 1m bar closes, so it fires at the next minute boundary:
+        // after the logout below, with no token left and no browser connected. Too close
+        // to a boundary it could fire first and prove nothing.
+        let secs = || {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs()
+                % 60
+        };
+        while secs() > 50 {
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+        let spec = serde_json::json!({
+            "symbol": "BTCUSDT", "interval": "1m", "evaluate_on": "close",
+            "condition": "greater", "trigger": "once", "level": 0.01,
+            "webhook_url": format!("http://127.0.0.1:{hook}/hook"),
+        });
+        call_tool(p, &token, "create_server_alert", spec).unwrap();
+
+        assert_eq!(b.request("POST", "/oauth/logout", &[], "").status, 204);
+        assert_eq!(ping_status(p, &token), 401, "signed out");
+        assert!(seen.lock().unwrap().is_empty(), "it has not fired yet");
+
+        for _ in 0..800 {
+            if !seen.lock().unwrap().is_empty() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        assert!(
+            !seen.lock().unwrap().is_empty(),
+            "the alert must fire with its owner signed out"
+        );
+
+        // And it is still theirs when they come back.
+        let mut again = Browser::new(p);
+        let token = web_sign_in(&mut again, &fake, "github", profile_of("github", 1, "ann"));
+        let list = listed(p, &token);
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0]["fire_count"], 1, "and it is on record");
+    }
+
+    /// Alerts from before sign-in go to the first user through their client, keep
+    /// running, and stay theirs across a restart.
+    #[test]
+    fn test_existing_alerts_move_to_the_first_user_of_their_client() {
+        let fake = FakeProvider::start();
+        let port = free_port();
+        let db = store_path("signin-alerts-claim");
+        let redirect = web_redirect(port);
+        let alerts_on = |cmd: &mut std::process::Command| {
+            cmd.env("CHARTGEN_SERVER_ALERTS", "1")
+                .env("CHARTGEN_SERVER_ALERT_CLIENTS", "*")
+                .env("CHARTGEN_DATA_SOURCE", "sample");
+        };
+        let mut cmd = server_command(port, None, &db, false);
+        alerts_on(&mut cmd);
+        let old = start_server(cmd, port);
+        let client = register_client(port, &redirect);
+        let (_, head, _) = authorize(port, &client, &redirect);
+        let code = head
+            .split("code=")
+            .nth(1)
+            .unwrap()
+            .split(['&', '\r'])
+            .next()
+            .unwrap()
+            .to_string();
+        let token = token_from(port, &client, &redirect, &code);
+        call_tool(port, &token, "create_server_alert", alert("BTCUSDT")).unwrap();
+        drop(old);
+
+        let with_signin = |fake: &FakeProvider| {
+            let mut cmd = signin_command(port, &db, fake, &["github"], None, false);
+            alerts_on(&mut cmd);
+            start_server(cmd, port)
+        };
+        let srv = with_signin(&fake);
+        let mut ann = Browser::new(port);
+        let first = ann.authorize(&client, &redirect, "s");
+        let back = provider_round_trip(
+            &mut ann,
+            &fake,
+            "github",
+            profile_of("github", 1, "ann"),
+            &first,
+        );
+        let token = token_from(port, &client, &redirect, &back.query()["code"]);
+        assert_eq!(listed(port, &token).len(), 1, "hers now");
+
+        let mut bob = Browser::new(port);
+        let first = bob.authorize(&client, &redirect, "s");
+        let back = provider_round_trip(
+            &mut bob,
+            &fake,
+            "github",
+            profile_of("github", 2, "bob"),
+            &first,
+        );
+        let theirs = token_from(port, &client, &redirect, &back.query()["code"]);
+        assert_eq!(listed(port, &theirs).len(), 0, "the next user gets nothing");
+
+        drop(srv);
+        let _srv = with_signin(&fake);
+        let answer = ann.authorize(&client, &redirect, "s");
+        let token = token_from(port, &client, &redirect, &answer.query()["code"]);
+        assert_eq!(listed(port, &token).len(), 1, "and it stays hers");
+    }
 }

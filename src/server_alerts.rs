@@ -401,7 +401,7 @@ pub fn start(hub: &Arc<ChartHub>) {
     }
     let who = match &access {
         Access::NoWebhooks => "no webhooks: CHARTGEN_SERVER_ALERT_CLIENTS is unset".to_string(),
-        Access::Clients(ids) => format!("{} allowed clients", ids.len()),
+        Access::Clients(ids) => format!("{} allowed clients or accounts", ids.len()),
         Access::Open => "open to every client, with webhooks".to_string(),
     };
     let alerts = ServerAlerts::new(
@@ -798,12 +798,19 @@ impl ServerAlerts {
 
     /// Delete what expired, and try again to join feeds that were refused. A failure
     /// to read the clients keeps their alerts: an unknown owner is not an idle one.
+    /// A signed-in owner is a user, whose activity is theirs and not a client's
+    /// (ADR-0044).
     fn sweep(&self, st: &mut State, now: i64) {
-        let last_tokens: Option<HashMap<String, i64>> = match self.store.oauth_clients() {
-            Ok(clients) => Some(
+        let activity = self
+            .store
+            .oauth_clients()
+            .and_then(|clients| Ok((clients, self.store.user_activity()?)));
+        let last_tokens: Option<HashMap<String, i64>> = match activity {
+            Ok((clients, users)) => Some(
                 clients
                     .into_iter()
                     .filter_map(|c| Some((c.client_id, c.last_token_at?)))
+                    .chain(users)
                     .collect(),
             ),
             Err(e) => {
@@ -832,6 +839,50 @@ impl ServerAlerts {
             }
         }
         self.sync_feeds(st);
+    }
+
+    /// Alerts of a client from before sign-in go to the first user who gets a token
+    /// through it, oldest first and up to that user's limit, with their deliveries. The
+    /// rest stay with the client, and nothing is deleted (ADR-0044). Returns how many
+    /// moved. Blocking.
+    pub fn claim(&self, client: &str, user: &str) -> usize {
+        let mut guard = self.lock();
+        let st = &mut *guard;
+        let mine = st.alerts.values().filter(|a| a.owner == user).count();
+        let room = self.limits.alerts_per_client.saturating_sub(mine);
+        let mut ids: Vec<(i64, String)> = st
+            .alerts
+            .values()
+            .filter(|a| a.owner == client)
+            .map(|a| (a.created_at, a.id.clone()))
+            .collect();
+        ids.sort();
+        let mut moved = HashSet::new();
+        for (_, id) in ids.into_iter().take(room) {
+            let Some(alert) = st.alerts.get_mut(&id) else {
+                continue;
+            };
+            let mut updated = alert.clone();
+            updated.owner = user.to_string();
+            match self.store.save_server_alert(&id, user, &updated.json()) {
+                Ok(()) => {
+                    *alert = updated;
+                    moved.insert(id);
+                }
+                Err(e) => eprintln!("[alerts] cannot move an alert to its user: {e}"),
+            }
+        }
+        if let Some(queue) = st.queues.get_mut(client) {
+            let (theirs, stays): (VecDeque<_>, VecDeque<_>) = std::mem::take(queue)
+                .into_iter()
+                .partition(|e| moved.contains(&e.alert_id));
+            *queue = stays;
+            st.queues
+                .entry(user.to_string())
+                .or_default()
+                .extend(theirs);
+        }
+        moved.len()
     }
 
     /// Delete an alert, with what it still had to deliver.
@@ -926,7 +977,8 @@ impl ServerAlerts {
         self.sync_feeds(&mut st);
     }
 
-    /// Handle a tool call. `owner` is the caller's OAuth client. Blocking.
+    /// Handle a tool call. `owner` is the caller's user, or with sign-in off its OAuth
+    /// client (ADR-0044). Blocking.
     pub fn call_tool(
         &self,
         tool: &str,
@@ -953,7 +1005,7 @@ impl ServerAlerts {
     /// Check a webhook URL now, so a bad one is refused to the person typing it.
     fn check_webhook(&self, raw: &str, owner: &str) -> Result<(), String> {
         if !self.access.may_use_webhooks(owner) {
-            return Err("This server only sends webhooks for clients its operator allowed".into());
+            return Err("This server only sends webhooks for sign-ins its operator allowed".into());
         }
         let target = Target::parse(raw, &self.policy)?;
         self.runtime
@@ -1035,7 +1087,7 @@ impl ServerAlerts {
 
     fn create(&self, args: &Value, owner: &str) -> Result<Value, String> {
         if !self.access.may_create(owner) {
-            return Err("This server only runs alerts for clients its operator allowed".into());
+            return Err("This server only runs alerts for sign-ins its operator allowed".into());
         }
         self.admit_change(owner)?;
         let raw_symbol = args.get("symbol").and_then(Value::as_str).unwrap_or("");

@@ -1007,3 +1007,95 @@ fn claiming_scripts_moves_them_without_loss() {
     assert_eq!(store.claim_scripts("full", "other", 2).unwrap(), 0);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// The schema as each deployed version left it: migrations only append, so a file
+/// from any of these must arrive with every table and keep its rows. No version with
+/// sign-in in slot 3 ever shipped, so that order is not supported (ADR-0044).
+const SCHEMA_V2: &str = "
+    CREATE TABLE user_indicators (
+        user_id TEXT NOT NULL, name TEXT NOT NULL, source TEXT NOT NULL,
+        meta_json TEXT NOT NULL, source_hash TEXT NOT NULL,
+        created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+        PRIMARY KEY (user_id, name)
+    );
+    CREATE TABLE oauth_clients (
+        client_id TEXT PRIMARY KEY, redirect_uris TEXT NOT NULL,
+        created_at INTEGER NOT NULL, last_token_at INTEGER
+    );
+    INSERT INTO oauth_clients VALUES ('old-client', '[\"https://x/cb\"]', 1, 2);
+    INSERT INTO user_indicators VALUES ('old-client', 's', 'src', '{}', 'h', 1, 1);
+    PRAGMA user_version = 2;
+";
+const SCHEMA_V3_ALERTS: &str = "
+    CREATE TABLE server_alerts (
+        id TEXT PRIMARY KEY, owner TEXT NOT NULL, record_json TEXT NOT NULL
+    );
+    CREATE INDEX server_alerts_owner ON server_alerts (owner);
+    CREATE TABLE server_alert_events (
+        id TEXT PRIMARY KEY, alert_id TEXT NOT NULL, body TEXT NOT NULL,
+        created_at INTEGER NOT NULL
+    );
+    INSERT INTO server_alerts VALUES ('a1', 'old-client', '{}');
+    PRAGMA user_version = 3;
+";
+
+fn schema_is_complete(store: &persistence::Store) {
+    store.save_user("github:1", "octo").unwrap();
+    store.mark_user_used("github:1").unwrap();
+    assert_eq!(store.user_activity().unwrap().len(), 1);
+    store.save_grant("github:1", "old-client").unwrap();
+    assert!(store.live_sessions(0).unwrap().is_empty());
+    store.save_server_alert("a2", "github:1", "{}").unwrap();
+    assert!(store.server_alert_events().unwrap().is_empty());
+    assert!(store.server_alert_owners().unwrap().contains("github:1"));
+}
+
+fn upgraded(name: &str, setup: &[&str]) -> persistence::Store {
+    let dir = std::env::temp_dir().join(format!("chartgen-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("s.db");
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    for sql in setup {
+        conn.execute_batch(sql).unwrap();
+    }
+    drop(conn);
+    let store = persistence::Store::open(&path).unwrap();
+    // Reopening migrates nothing twice.
+    drop(store);
+    persistence::Store::open(&path).unwrap()
+}
+
+#[test]
+fn an_empty_file_gets_every_table() {
+    schema_is_complete(&upgraded("upgrade-empty", &[]));
+}
+
+#[test]
+fn a_file_from_before_alerts_upgrades_and_keeps_its_rows() {
+    let store = upgraded("upgrade-v2", &[SCHEMA_V2]);
+    schema_is_complete(&store);
+    let client = &store.oauth_clients().unwrap()[0];
+    assert_eq!(client.client_id, "old-client");
+    assert_eq!(client.client_name, None);
+    assert_eq!(store.get("old-client", "s").unwrap().unwrap().source, "src");
+}
+
+#[test]
+fn a_file_with_alerts_upgrades_and_keeps_them() {
+    let store = upgraded("upgrade-v3", &[SCHEMA_V2, SCHEMA_V3_ALERTS]);
+    schema_is_complete(&store);
+    assert!(store.server_alert_owners().unwrap().contains("old-client"));
+    assert_eq!(store.oauth_clients().unwrap().len(), 1);
+}
+
+/// What counts as a user's activity for their server alerts: a login or a token.
+#[test]
+fn user_activity_is_the_later_of_login_and_token() {
+    let store = upgraded("activity", &[]);
+    store.save_user("github:1", "a").unwrap();
+    let login = store.user_activity().unwrap()[0].1;
+    assert!(login > 0);
+    store.mark_user_used("github:1").unwrap();
+    assert!(store.user_activity().unwrap()[0].1 >= login);
+}
