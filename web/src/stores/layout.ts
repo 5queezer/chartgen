@@ -25,7 +25,10 @@ export type ChartType =
   | "baseline"
   | "columns"
   | "high_low"
-  | "heikin_ashi";
+  | "heikin_ashi"
+  | "volume_candles"
+  | "footprint"
+  | "tpo";
 
 /** Menu order, as in TradingView. */
 export const CHART_TYPES: readonly ChartType[] = [
@@ -40,6 +43,9 @@ export const CHART_TYPES: readonly ChartType[] = [
   "columns",
   "high_low",
   "heikin_ashi",
+  "volume_candles",
+  "footprint",
+  "tpo",
 ];
 
 /** Server price series style (`generate_chart.chart_style`) a chart type needs. */

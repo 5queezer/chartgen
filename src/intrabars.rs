@@ -251,19 +251,8 @@ pub fn load(
         return Ok(Vec::new());
     };
     if source != DataSource::Live {
-        let seed = sample_seed(symbol);
-        let taker = fetch::detect_source(symbol) == "binance";
-        let mut out = Vec::new();
-        for (k, (bar, &open)) in bars.iter().zip(&opens).enumerate() {
-            let end = opens.get(k + 1).copied().unwrap_or(last_end);
-            let slots = ((end - open) / secs).max(1) as usize;
-            // The forming bar has only what has passed of it.
-            let count = ((now_s.min(end) - open) / secs + 1).clamp(1, slots as i64) as usize;
-            out.extend(orderflow::sample_intrabars(
-                seed, open, bar, secs, slots, count, taker,
-            ));
-        }
-        return Ok(out);
+        let last_len = last_end - opens.last().copied().unwrap_or(from_s);
+        return Ok(sample_list(symbol, bars, &opens, last_len, secs, now_s));
     }
     let key = (symbol.to_uppercase(), interval.to_string());
     let held = lock().held.remove(&key);
@@ -281,6 +270,88 @@ pub fn load(
     c.held.insert(key, held);
     c.evict();
     Ok(out)
+}
+
+/// Bars of `block_secs` for a TPO: the source's own. The sample source draws each
+/// interval on its own, so there they are built from its 1h bars, which a default
+/// chart shows, or their prices would not be on that chart at all.
+pub fn tpo_blocks(
+    source: DataSource,
+    symbol: &str,
+    block: &str,
+    block_secs: i64,
+    limit: usize,
+    end_ms: Option<i64>,
+) -> Result<fetch::Fetched, String> {
+    if source == DataSource::Live {
+        return fetch::fetch_ohlcv(source, symbol, block, limit, end_ms);
+    }
+    const HOUR: i64 = 3_600;
+    let parents = (limit as i64 * block_secs / HOUR + 2) as usize;
+    let mut fetched = fetch::fetch_ohlcv(source, symbol, "1h", parents, end_ms)?;
+    let parent_bars = std::mem::take(&mut fetched.data.bars);
+    let now_s = fetch::now_ms() / 1000;
+    let mut blocks: Vec<Bar> = Vec::new();
+    if block_secs < HOUR {
+        let opens: Vec<i64> = parent_bars
+            .iter()
+            .filter_map(|b| b.date.parse().ok())
+            .collect();
+        let list = sample_list(symbol, &parent_bars, &opens, HOUR, block_secs, now_s);
+        blocks.extend(list.iter().map(|b| Bar {
+            open: b.open,
+            high: b.high,
+            low: b.low,
+            close: b.close,
+            volume: b.volume,
+            date: b.t.to_string(),
+        }));
+    } else {
+        for bar in &parent_bars {
+            let t: i64 = bar.date.parse().unwrap_or(0);
+            let start = t - t.rem_euclid(block_secs);
+            match blocks.last_mut() {
+                Some(last) if last.date.parse::<i64>().ok() == Some(start) => {
+                    last.high = last.high.max(bar.high);
+                    last.low = last.low.min(bar.low);
+                    last.close = bar.close;
+                    last.volume += bar.volume;
+                }
+                _ => blocks.push(Bar {
+                    date: start.to_string(),
+                    ..bar.clone()
+                }),
+            }
+        }
+    }
+    let excess = blocks.len().saturating_sub(limit);
+    blocks.drain(..excess);
+    fetched.data.bars = blocks;
+    Ok(fetched)
+}
+
+/// Sample intrabars for `bars`, each `chart_secs` long or up to the next.
+fn sample_list(
+    symbol: &str,
+    bars: &[Bar],
+    opens: &[i64],
+    last_len: i64,
+    secs: i64,
+    now_s: i64,
+) -> Vec<Intrabar> {
+    let seed = sample_seed(symbol);
+    let taker = fetch::detect_source(symbol) == "binance";
+    let mut out = Vec::new();
+    for (k, (bar, &open)) in bars.iter().zip(opens).enumerate() {
+        let end = opens.get(k + 1).copied().unwrap_or(open + last_len);
+        let slots = ((end - open) / secs).max(1) as usize;
+        // The forming bar has only what has passed of it.
+        let count = ((now_s.min(end) - open) / secs + 1).clamp(1, slots as i64) as usize;
+        out.extend(orderflow::sample_intrabars(
+            seed, open, bar, secs, slots, count, taker,
+        ));
+    }
+    out
 }
 
 fn lock() -> std::sync::MutexGuard<'static, Cache> {

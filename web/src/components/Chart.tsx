@@ -107,7 +107,9 @@ import { composeStyles, resolveColors, settingsStyles } from "../lib/chartStyle"
 import {
   ensureSeriesRegistered,
   hiddenCandleStyle,
+  isOrderFlowType,
   isSeriesType,
+  type OrderFlowType,
   SERIES_REG_NAME,
   type SeriesExtend,
   type SeriesType,
@@ -152,6 +154,17 @@ import {
   projectionBars,
   setShownProjection,
 } from "../lib/projection";
+import {
+  ensureOrderFlowRegistered,
+  FOOTPRINT_REG_NAME,
+  ORDER_FLOW_TABLE_AXIS,
+  ORDER_FLOW_TABLE_HEIGHT,
+  ORDER_FLOW_TABLE_PANE,
+  ORDER_FLOW_TABLE_REG_NAME,
+  TPO_REG_NAME,
+  type FootprintExtend,
+  type TpoExtend,
+} from "../lib/orderFlowDraw";
 import { PaneHeader, type PaneHeaderLine } from "./PaneHeader";
 import { PriceAxisControls } from "./PriceAxisControls";
 
@@ -283,6 +296,9 @@ function histColorStashKey(name: string, i: number): string {
 }
 
 const registeredIndicators = new Set<string>();
+
+/** klinecharts' widest bars: the most room a footprint's cells can get. */
+const FOOTPRINT_BAR_SPACE = 50;
 
 interface IndicatorShape {
   lines: number;
@@ -956,7 +972,7 @@ interface HeaderState {
 }
 
 /** klinecharts `candle` style overrides per toolbar chart type it draws itself. */
-const CHART_TYPE_STYLES: Record<Exclude<ChartType, SeriesType>, object> = {
+const CHART_TYPE_STYLES: Record<Exclude<ChartType, SeriesType | OrderFlowType>, object> = {
   candles: { type: "candle_solid" },
   heikin_ashi: { type: "candle_solid" },
   hollow: { type: "candle_up_stroke" },
@@ -1008,6 +1024,10 @@ export interface ChartProps {
   /** Alert on an indicator's plots (ADR-0034); offered on rows with lines. */
   onAddAlert?: (name: string) => void;
   onChartReady?: (chart: KChart) => void;
+  /** What the order-flow chart types draw (ADR-0048), once they have it. */
+  orderFlow?: FootprintExtend | TpoExtend | null;
+  /** The oldest bar on screen changed: unix seconds. */
+  onVisibleFrom?: (t: number) => void;
   /** One chart of several in a grid (ADR-0043): sub-panes fit its smaller height. */
   multi?: boolean;
   /** Bar index under the crosshair (one update per frame); null when it is off the chart. */
@@ -1261,6 +1281,8 @@ export function Chart(props: ChartProps): JSX.Element {
           setLastVisible(to);
           followCrosshair();
         });
+        const oldest = chart()?.getDataList()[from];
+        if (oldest) props.onVisibleFrom?.(oldest.timestamp / 1000);
       });
     };
     c!.subscribeAction("onVisibleRangeChange" as never, onRange);
@@ -1405,7 +1427,9 @@ export function Chart(props: ChartProps): JSX.Element {
       const ind = series.indicators[name]!;
       if (!paneMap[name]) continue; // pane not yet created (or skipped)
 
-      if ((ind.lines?.length ?? 0) + (ind.histogram?.length ?? 0) === 0) continue;
+      // A profile has no plots, but says what it was read from (ADR-0048).
+      const plots = (ind.lines?.length ?? 0) + (ind.histogram?.length ?? 0);
+      if (plots === 0 && !ind.profile_interval) continue;
       const style = props.styles?.[name];
       const headerLines: PaneHeaderLine[] = legendPlots(name, ind, style).map((p) => {
         const plot =
@@ -1440,7 +1464,11 @@ export function Chart(props: ChartProps): JSX.Element {
         };
       });
 
-      const params = paramsByKey.get(name);
+      // A profile read from finer bars says which (ADR-0048).
+      const params =
+        [paramsByKey.get(name), ind.profile_interval && `from ${ind.profile_interval} bars`]
+          .filter(Boolean)
+          .join(" ") || undefined;
       const displayName = withoutParamNumber(
         ind.label && ind.label.length > 0 ? ind.label : keyName(name),
         params,
@@ -1502,10 +1530,10 @@ export function Chart(props: ChartProps): JSX.Element {
     const t = props.chartType;
     pendingStyles = composeStyles(
       tvStyles(palette),
-      { candle: isSeriesType(t) ? {} : CHART_TYPE_STYLES[t] },
+      { candle: isSeriesType(t) || isOrderFlowType(t) ? {} : CHART_TYPE_STYLES[t] },
       settingsStyles(palette, settings.themes[theme()], settings.options, t),
       // Last, so no setting brings back the series a custom type hides.
-      { candle: isSeriesType(t) ? hiddenCandleStyle(t) : {} },
+      { candle: isSeriesType(t) || isOrderFlowType(t) ? hiddenCandleStyle(t) : {} },
     );
     styleFrame ??= requestAnimationFrame(() => {
       styleFrame = null;
@@ -1949,6 +1977,67 @@ export function Chart(props: ChartProps): JSX.Element {
       seriesCreated = true;
     }
   });
+
+  // Order-flow chart types (ADR-0048): one painter on the candle pane, and the
+  // summary table in a pane of its own.
+  let orderFlowCreated: string | null = null;
+  let tableCreated = false;
+  createEffect(() => {
+    const c = chart();
+    const view = props.orderFlow;
+    if (!c) return;
+    const name = !view ? null : view.kind === "footprint" ? FOOTPRINT_REG_NAME : TPO_REG_NAME;
+    if (orderFlowCreated && orderFlowCreated !== name) {
+      c.removeIndicator(CANDLE_PANE_ID, orderFlowCreated);
+      orderFlowCreated = null;
+    }
+    const wantTable =
+      view?.kind === "footprint" ? view.settings.summary === "table" : !!view?.settings.summary;
+    if (tableCreated && !wantTable) {
+      c.removeIndicator(ORDER_FLOW_TABLE_PANE, ORDER_FLOW_TABLE_REG_NAME);
+      tableCreated = false;
+    }
+    if (!view || !name) return;
+    ensureOrderFlowRegistered();
+    if (orderFlowCreated) {
+      c.overrideIndicator({ name, extendData: view }, CANDLE_PANE_ID);
+    } else {
+      c.createIndicator({ name, extendData: view }, true, { id: CANDLE_PANE_ID });
+      orderFlowCreated = name;
+    }
+    if (tableCreated) {
+      c.overrideIndicator(
+        { name: ORDER_FLOW_TABLE_REG_NAME, extendData: view },
+        ORDER_FLOW_TABLE_PANE,
+      );
+    } else if (wantTable) {
+      c.createIndicator({ name: ORDER_FLOW_TABLE_REG_NAME, extendData: view }, false, {
+        id: ORDER_FLOW_TABLE_PANE,
+        height: ORDER_FLOW_TABLE_HEIGHT,
+        axisOptions: { name: ORDER_FLOW_TABLE_AXIS },
+      });
+      tableCreated = true;
+    }
+  });
+
+  // A footprint needs wide bars. Going back gives the zoom it replaced back.
+  let barSpaceBefore: number | null = null;
+  createEffect(
+    on(
+      () => [chart(), props.chartType === "footprint"] as const,
+      ([c, footprint]) => {
+        if (!c) return;
+        if (footprint && barSpaceBefore === null) {
+          barSpaceBefore = c.getBarSpace();
+          c.setBarSpace(FOOTPRINT_BAR_SPACE);
+          c.scrollToRealTime();
+        } else if (!footprint && barSpaceBefore !== null) {
+          c.setBarSpace(barSpaceBefore);
+          barSpaceBefore = null;
+        }
+      },
+    ),
+  );
 
   onCleanup(() => {
     if (layoutFrame !== null) cancelAnimationFrame(layoutFrame);

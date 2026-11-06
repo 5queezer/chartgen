@@ -2035,6 +2035,9 @@ impl SessionVolumeProfile {
         let period_secs = parse_period_secs(&self.session);
         let ranges = session_ranges(data, period_secs, self.bars_per_session);
         let open_of = |i: usize| data.bars.get(i).and_then(|b| b.date.parse::<i64>().ok());
+        let mut poc_line = vec![f64::NAN; n];
+        let mut vah_line = vec![f64::NAN; n];
+        let mut val_line = vec![f64::NAN; n];
 
         for (s, e) in ranges {
             if e <= s {
@@ -2049,38 +2052,40 @@ impl SessionVolumeProfile {
                 continue;
             };
 
-            let mut poc_line = vec![f64::NAN; n];
-            let mut vah_line = vec![f64::NAN; n];
-            let mut val_line = vec![f64::NAN; n];
-            for i in s..e {
+            // The last bar of a session is left empty, so a line breaks between
+            // sessions rather than jumping, except on the newest, which is still open.
+            let until = if e == n { e } else { e - 1 };
+            for i in s..until.max(s + 1) {
                 poc_line[i] = prof.poc_price;
                 vah_line[i] = prof.vah_price;
                 val_line[i] = prof.val_price;
             }
+        }
 
+        // One line each, whatever the number of sessions in this window: a live tail
+        // holds fewer of them than a load, and must keep the load's shape.
+        out.lines.push(Line {
+            breaks: true,
+            y: poc_line,
+            color: rgba(0xFFD700, 0.9),
+            width: 2,
+            label: Some("POC".into()),
+        });
+        if self.show_value_area {
             out.lines.push(Line {
-                breaks: false,
-                y: poc_line,
-                color: rgba(0xFFD700, 0.9),
-                width: 2,
-                label: Some("POC".into()),
+                breaks: true,
+                y: vah_line,
+                color: rgba(0x787B86, 0.7),
+                width: 1,
+                label: Some("VAH".into()),
             });
-            if self.show_value_area {
-                out.lines.push(Line {
-                    breaks: false,
-                    y: vah_line,
-                    color: rgba(0x787B86, 0.7),
-                    width: 1,
-                    label: Some("VAH".into()),
-                });
-                out.lines.push(Line {
-                    breaks: false,
-                    y: val_line,
-                    color: rgba(0x787B86, 0.7),
-                    width: 1,
-                    label: Some("VAL".into()),
-                });
-            }
+            out.lines.push(Line {
+                breaks: true,
+                y: val_line,
+                color: rgba(0x787B86, 0.7),
+                width: 1,
+                label: Some("VAL".into()),
+            });
         }
 
         out

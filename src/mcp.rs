@@ -2040,7 +2040,7 @@ fn tpo_payload(args: &Value, source: fetch::DataSource) -> Result<Value, String>
     let per_period = (period.max_secs() / block_secs).max(1) as usize;
     let wanted = periods.saturating_mul(per_period);
     let limit = wanted.min(MAX_TPO_BLOCKS);
-    let fetched = fetch::fetch_ohlcv(source, symbol, &block, limit, end_time)
+    let fetched = intrabars::tpo_blocks(source, symbol, &block, block_secs, limit, end_time)
         .map_err(|e| format!("Data fetch failed: {e}"))?;
     let blocks: Vec<of::Intrabar> = fetched
         .data
@@ -2058,13 +2058,8 @@ fn tpo_payload(args: &Value, source: fetch::DataSource) -> Result<Value, String>
     let (asked, auto) = row_arg(args, tick, || {
         of::tpo_auto_row(&blocks, period, &sessions, &tz, tick)
     })?;
-    let high = prices.iter().cloned().fold(f64::MIN, f64::max);
-    let low = prices.iter().cloned().fold(f64::MAX, f64::min);
-    let row = if prices.is_empty() {
-        asked
-    } else {
-        of::bounded_row_size(asked, high - low, tick)
-    };
+    let widest = of::tpo_widest_range(&blocks, period, &sessions, &tz);
+    let row = of::bounded_row_size(asked, widest, tick);
     let options = of::TpoOptions {
         block_secs,
         row,
@@ -3583,6 +3578,14 @@ mod tests {
     }
 
     #[test]
+    fn an_auto_tpo_row_is_not_widened_by_the_range_of_all_periods_together() {
+        // Long enough for the price to wander far more than a day's range.
+        let args = json!({ "ticker": "BTCUSDT", "periods": 30, "end_time": 1_699_920_000_000i64 });
+        let tpo = tpo_payload(&args, Sample).unwrap();
+        assert_eq!(tpo["row_widened"], false, "{}", tpo["row_size"]);
+    }
+
+    #[test]
     fn a_long_period_of_short_blocks_is_cut_and_says_so() {
         let args = json!({ "ticker": "BTCUSDT", "period": "1M", "block": "5m", "periods": 12,
             "end_time": 1_699_920_000_000i64 });
@@ -3651,6 +3654,22 @@ mod tests {
         let real = vp.with_intrabars(&chart, &finer).unwrap();
         assert!(poc(&real) > 109.0, "{}", poc(&real));
         assert!(poc(&spread) != poc(&real));
+    }
+
+    #[test]
+    fn a_session_profile_keeps_its_shape_from_a_load_to_a_tail() {
+        let lines = |bars: u64| {
+            let s = series_of(
+                json!({ "ticker": "BTCUSDT", "timeframe": "1h", "bars": bars,
+                "format": "series", "indicators": ["session_vp"], "end_time": 1_699_920_000_000i64 }),
+            );
+            s["indicators"]["session_vp"]["lines"]
+                .as_array()
+                .unwrap()
+                .len()
+        };
+        assert_eq!(lines(200), 3);
+        assert_eq!(lines(2), 3);
     }
 
     #[test]

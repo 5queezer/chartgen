@@ -788,6 +788,23 @@ pub fn tpo_auto_row<Tz: TimeZone>(
     nice_row_size(median / 24.0, tick)
 }
 
+/// The widest range of a single profile, which is what a row size has to fit.
+pub fn tpo_widest_range<Tz: TimeZone>(
+    blocks: &[Intrabar],
+    period: Period,
+    sessions: &[DaySession],
+    tz: &Tz,
+) -> f64 {
+    tpo_groups(blocks, period, sessions, tz)
+        .iter()
+        .map(|g| {
+            let high = g.iter().map(|b| b.high).fold(f64::MIN, f64::max);
+            let low = g.iter().map(|b| b.low).fold(f64::MAX, f64::min);
+            high - low
+        })
+        .fold(0.0, f64::max)
+}
+
 /// The profiles of `blocks` (oldest first): one per period, or with `sessions` one
 /// per session of each period.
 pub fn tpo_profiles<Tz: TimeZone>(

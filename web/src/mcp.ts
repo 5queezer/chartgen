@@ -13,7 +13,9 @@ import type {
   CreateServerAlertInput,
   DeleteServerAlertInput,
   GenerateChartInput,
+  GetFootprintInput,
   GetQuotesInput,
+  GetTpoInput,
   SearchSymbolsInput,
   SubscribeChartInput,
   UnsubscribeChartInput,
@@ -27,7 +29,9 @@ import {
   ListIndicatorsPayloadSchema,
   MyIndicatorSourcePayloadSchema,
   MyIndicatorsPayloadSchema,
+  FootprintPayloadSchema,
   QuotesPayloadSchema,
+  TpoPayloadSchema,
   RegisteredIndicatorPayloadSchema,
   SearchSymbolsPayloadSchema,
   SeriesPayloadSchema,
@@ -40,7 +44,9 @@ import {
   type ListIndicatorsPayload,
   type MyIndicatorSourcePayload,
   type MyIndicatorsPayload,
+  type FootprintPayload,
   type QuotesPayload,
+  type TpoPayload,
   type RegisteredIndicatorPayload,
   type ScriptRejection,
   type SearchSymbolsPayload,
@@ -105,6 +111,10 @@ export interface McpSession {
     } & Pick<GenerateChartInput, "bars" | "warmup" | "end_time" | "chart_style">,
     signal?: AbortSignal,
   ) => Promise<SeriesPayload>;
+  /** Invoke `get_footprint` (ADR-0048). */
+  callGetFootprint: (args: GetFootprintInput, signal?: AbortSignal) => Promise<FootprintPayload>;
+  /** Invoke `get_tpo` (ADR-0048). */
+  callGetTpo: (args: GetTpoInput, signal?: AbortSignal) => Promise<TpoPayload>;
   /** Invoke `list_indicators` and parse the response. */
   callListIndicators: () => Promise<ListIndicatorsPayload>;
   /** Invoke `get_quotes` for the watchlist and parse the response. */
@@ -347,6 +357,22 @@ export function createMcpSession(): McpSession {
     async callListIndicators() {
       const json = await callToolWithAuthRetry("list_indicators", {});
       return ListIndicatorsPayloadSchema.parse(json);
+    },
+    async callGetFootprint(args, signal) {
+      const json = await callToolWithAuthRetry(
+        "get_footprint",
+        args as unknown as Record<string, unknown>,
+        signal,
+      );
+      return FootprintPayloadSchema.parse(json);
+    },
+    async callGetTpo(args, signal) {
+      const json = await callToolWithAuthRetry(
+        "get_tpo",
+        args as unknown as Record<string, unknown>,
+        signal,
+      );
+      return TpoPayloadSchema.parse(json);
     },
     async callGetQuotes(symbols) {
       const args: GetQuotesInput = { symbols };
