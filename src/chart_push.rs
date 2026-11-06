@@ -180,7 +180,8 @@ impl PushSource for BinanceSource {
     }
 
     fn seed(&self, symbol: &str, timeframe: &str, count: usize) -> Result<OhlcvData, String> {
-        fetch::fetch_ohlcv(DataSource::Live, symbol, timeframe, count, None).map(|f| f.data)
+        // `feed_interval` has turned away anything but a Binance symbol.
+        fetch::fetch_binance_seed(symbol, timeframe, count).map(|f| f.data)
     }
 
     fn run(
