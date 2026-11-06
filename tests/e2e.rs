@@ -1287,7 +1287,20 @@ mod server_alerts {
         let token = sign_in(port, &client);
         // Several of the sample feed's ticks, each above the level.
         std::thread::sleep(std::time::Duration::from_secs(3));
-        assert_eq!(seen.lock().unwrap().len(), 2, "fired again after a restart");
+        // Delivery is at least once: a kill just after the receiver got a request sends
+        // that event again. A new fire would have a new id.
+        let events: std::collections::HashSet<String> = seen
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|req| {
+                req.lines().find_map(|l| {
+                    let l = l.to_ascii_lowercase();
+                    l.strip_prefix("x-chartgen-event: ").map(str::to_string)
+                })
+            })
+            .collect();
+        assert_eq!(events.len(), 2, "fired again after a restart");
         let list = call_tool(port, &token, "list_server_alerts", serde_json::json!({})).unwrap();
         let alerts = list["alerts"].as_array().unwrap();
         assert_eq!(alerts.len(), 2);
