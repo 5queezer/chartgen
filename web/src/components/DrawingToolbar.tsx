@@ -1383,6 +1383,17 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
     if (!isRelease(e)) return;
     const store = (props.chart as unknown as PressStoreOwner | null)?.getChartStore?.().getOverlayStore?.();
     if (!store?.getPressedInstanceInfo?.().instance) return;
+    // A touch drag stops at its pane's edge, so a finger easily lifts on the separator,
+    // the only part of the chart where klinecharts leaves a release unanswered: keep that drag.
+    const touch = e.type === "touchend" ? (e as TouchEvent).changedTouches[0] : undefined;
+    const box = props.chart?.getDom()?.getBoundingClientRect();
+    const onSeparator =
+      touch !== undefined &&
+      box !== undefined &&
+      touch.clientX >= box.left &&
+      touch.clientX <= box.right &&
+      touch.clientY >= box.top &&
+      touch.clientY <= box.bottom;
     pressedId = null;
     store.setPressedInstanceInfo?.({
       paneId: "",
@@ -1392,7 +1403,8 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
       figureIndex: -1,
       attrsIndex: -1,
     });
-    refresh();
+    if (onSeparator) commit();
+    else refresh();
   };
   // A blur has no release, and klinecharts would treat later moves as still pressed, drawing
   // or plain pan: give it one, off the panes. With nothing pressed, nothing hears it.

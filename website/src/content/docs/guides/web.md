@@ -808,7 +808,8 @@ On any touch screen:
 | Tap an indicator's legend row | Shows its alert, hide, settings and remove buttons |
 
 The page itself does not scroll or pull to refresh, so gestures on the chart
-only reach the chart. Dragging an axis does nothing on touch, because klinecharts
+only reach the chart. A drawing dragged past its pane stops at the pane's edge, and
+lifting your finger on the separator there keeps the drag. Dragging an axis does nothing on touch, because klinecharts
 only scales axes for the mouse. Use a pinch for the time axis, and the `auto` and
 `log` buttons for the price axis.
 

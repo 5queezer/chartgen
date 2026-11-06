@@ -116,6 +116,37 @@ async function expectPriceShare(page: Page, share: number): Promise<void> {
     .toBe(true);
 }
 
+type DrawnLine = { points: { value: number }[]; pixels: { x: number; y: number }[] };
+const lineOf = (page: Page) =>
+  page.evaluate(
+    () => (window as unknown as { __chartgenDrawings: () => unknown[] }).__chartgenDrawings()[0] as DrawnLine,
+  );
+/** The stored value of the first drawing's second point. */
+const storedEndValue = (page: Page) =>
+  page.evaluate(() => {
+    const raw = Object.entries(localStorage).find(
+      ([k]) => k.startsWith("chartgen.drawings.") && !k.endsWith(".index"),
+    )?.[1];
+    const parsed = raw ? (JSON.parse(raw) as unknown) : null;
+    const list = (Array.isArray(parsed) ? parsed : (parsed as { drawings?: unknown[] } | null)?.drawings ?? []) as {
+      points: { value: number }[];
+    }[];
+    return list[0]?.points[1]?.value;
+  });
+
+/** A trend line placed with taps, high in the price pane. Returns the chart's box. */
+async function drawLineByTouch(page: Page) {
+  await dock(page, "Draw").tap();
+  await page.getByRole("button", { name: "Trend line" }).tap();
+  const box = (await page.locator(".chart-container").boundingBox())!;
+  await page.touchscreen.tap(box.x + box.width * 0.2, box.y + box.height * 0.1);
+  await page.waitForTimeout(700);
+  await page.touchscreen.tap(box.x + box.width * 0.5, box.y + box.height * 0.2);
+  await expect.poll(() => drawings(page)).toBe(1);
+  await page.waitForTimeout(700);
+  return box;
+}
+
 /** Nothing scrolls the page sideways, measured against the device's own width. */
 async function expectNoOverflow(page: Page): Promise<void> {
   const width = page.viewportSize()!.width;
@@ -555,6 +586,42 @@ test.describe("touch on a phone", () => {
     expect(await stored()).toContain(String(moved));
   });
 
+  test("a drag released on a pane separator keeps where it got to, as one undo step", async ({ page }) => {
+    await bootCompact(page);
+    const box = await drawLineByTouch(page);
+    const end = (await lineOf(page)).pixels[1]!;
+    const from = { x: box.x + end.x, y: box.y + end.y };
+    const start = (await lineOf(page)).points[1]!.value;
+    const paneBottom = (await paneHeights(page)).candle;
+
+    const t = await touch(page);
+    await t.start(from);
+    for (let i = 1; i <= 8; i++) {
+      await t.move({ x: from.x + i * 5, y: box.y + end.y + ((paneBottom - 10 - end.y) * i) / 8 });
+    }
+    const moved = (await lineOf(page)).points[1]!.value;
+    expect(moved).not.toBe(start);
+    // The separator's hit zone is 7 px around the pane's edge.
+    await t.move({ x: from.x + 40, y: box.y + paneBottom + 1 });
+    await t.end();
+    await page.waitForTimeout(300);
+
+    expect((await lineOf(page)).points[1]!.value).toBe(moved);
+    expect(await storedEndValue(page)).toBe(moved);
+
+    // klinecharts' press has ended: a pan leaves the drawing where it is.
+    await page.waitForTimeout(600);
+    const pan = await inChart(page, 0.7, 0.6);
+    await t.start(pan);
+    for (let i = 1; i <= 6; i++) await t.move({ x: pan.x - i * 10, y: pan.y });
+    await t.end();
+    await page.waitForTimeout(100);
+    expect((await lineOf(page)).points[1]!.value).toBe(moved);
+
+    await page.keyboard.press("Control+z");
+    await expect.poll(async () => (await lineOf(page)).points[1]!.value).toBe(start);
+  });
+
   test("Import layout opens the file picker on touch, and its ghost click stays guarded", async ({ page }) => {
     await bootCompact(page);
     await page.getByRole("button", { name: /^Layout:/ }).tap();
@@ -768,6 +835,35 @@ test.describe("a mouse window", () => {
     await expectPriceShare(page, 0.6);
     await page.setViewportSize({ width: 1280, height: 720 });
     await expect.poll(() => paneHeights(page)).toEqual(desktop);
+  });
+
+  test("a mouse drag released on a pane separator is still discarded", async ({ page }) => {
+    await page.setViewportSize({ width: 1280, height: 720 });
+    await gotoApp(page);
+    const box = (await page.locator(".chart-container").boundingBox())!;
+    const click = async (x: number, y: number) => {
+      await page.mouse.move(box.x + x, box.y + y, { steps: 5 });
+      await page.mouse.down();
+      await page.mouse.up();
+      await page.waitForTimeout(700);
+    };
+    await page.getByRole("button", { name: "Trend line" }).click();
+    await click(200, 60);
+    await click(400, 120);
+    await expect.poll(() => drawings(page)).toBe(1);
+    const end = (await lineOf(page)).pixels[1]!;
+    const start = (await lineOf(page)).points[1]!.value;
+    const paneBottom = (await paneHeights(page)).candle;
+
+    await page.mouse.move(box.x + end.x, box.y + end.y, { steps: 3 });
+    await page.mouse.down();
+    await page.mouse.move(box.x + end.x + 30, box.y + paneBottom - 10, { steps: 6 });
+    expect((await lineOf(page)).points[1]!.value).not.toBe(start);
+    await page.mouse.move(box.x + end.x + 30, box.y + paneBottom + 1, { steps: 2 });
+    await page.mouse.up();
+
+    await expect.poll(async () => (await lineOf(page)).points[1]!.value).toBe(start);
+    expect(await storedEndValue(page)).toBe(start);
   });
 
   test("keeps the desktop layout at desktop sizes", async ({ page }) => {
