@@ -57,7 +57,8 @@ is served from:
 - **A kline's close ends the window at once**, by this host's clock, so a poll sees the new
   kline at once. That does not say the closed kline is final. Its last trades can reach REST
   late, and this clock can be behind Binance's, so a poll can get a closed kline short of its
-  last trades for up to the 1 s window. The poll after that lays over it. On `1s` klines every
+  last trades for as long as that read is served, 1 s, or 3 s during a refresh. A later poll
+  lays over it. On `1s` klines every
   second is a close, so serving during a refresh does not apply: every caller after a close
   waits for the round trip.
 - **A push seed takes only a read sent after it asked**, refreshes included, so it gets what
