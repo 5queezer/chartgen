@@ -100,16 +100,52 @@ dispatch, because turning it on just to keep clients would expose them. A separa
 env var for client storage was rejected: it adds a switch with no use for off,
 since a store that cannot be opened is already logged and not fatal.
 
+### Eviction at the client limit
+
+Persisting clients would make the 1000 client limit permanent: clients that
+received a token are never collected, and sign-in is auto-approved. A restart
+used to empty the table; now a full table would leave `/register` at `503` for
+good.
+
+So when the table is full, `/register` evicts instead of refusing, from memory
+and from the store:
+
+1. Clients that never received a token, oldest registration first.
+2. Then the least recently tokened client. The in-memory table tracks the last
+   token time for this, restored from `last_token_at`.
+3. Never a client that owns stored scripts, whether or not
+   `CHARTGEN_SCRIPTING=1` is set now, because the `client_id` is the owner's only
+   identity. If every client owns scripts, or the owners cannot be read,
+   `/register` still answers `503` and evicts nobody.
+
+Eviction also drops the client's live tokens and pending codes. A surviving token
+would keep working for a client on no record, and could register scripts for an
+owner that nothing protects. An open SSE stream is left alone, as it is when a
+token expires, because streams are only checked when they connect.
+
+An evicted client recovers as after a restart without a volume: the web app
+through the redirect above, an MCP client by registering again. The registration
+rate limit runs first, so a limited caller cannot evict anyone.
+
+Refusing with `503` needs an operator to recover. Expiry by age alone would not
+stop the table filling quickly, and would log out clients that are merely idle
+even when there is room.
+
 ### Consequences
 
 - Good: redeploys no longer strand browsers, with or without a volume.
 - Good: with a volume, external MCP clients keep their `client_id` across a
   deploy. They re-authorize, because tokens stay in memory.
-- Bad: clients that received a token are never collected, and a restart no longer
-  clears them. Sign-in is auto-approved, so 1000 such clients, from real use or
-  from someone scripting the flow, leave `/register` at `503` until an operator
-  deletes rows. Clients already registered keep working. Before this, a deploy
-  emptied the table.
+- Good: registration keeps working at the client limit, with no operator action.
+- Bad: at the limit, anyone can push out idle clients by scripting the flow, at
+  the pace of the rate limit. Those clients must sign in again, and an MCP client
+  gets a new `client_id`. No scripts are lost, because their owners are spared.
+- Bad: at the limit, a client that just registered is the first to go until it
+  has a token, so a concurrent registration can evict it mid sign-in. It then
+  recovers like any other evicted client. Registrations without a token can evict
+  at most one tokened client this way, since each evicts the previous one.
+- Bad: 1000 clients that own scripts still leave `/register` at `503`. Script tools
+  are off by default, so this needs scripting turned on.
 - Neutral: every default `--serve` now creates `~/.chartgen/chartgen.db`.
 - Good: external MCP clients with their own redirect URIs, and API-only servers,
   still get the `400`.

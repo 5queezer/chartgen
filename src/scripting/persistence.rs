@@ -7,6 +7,7 @@
 
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::Value;
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
@@ -199,6 +200,22 @@ impl Store {
             params![client_id, chrono::Utc::now().timestamp()],
         )?;
         Ok(())
+    }
+
+    pub fn delete_oauth_client(&self, client_id: &str) -> rusqlite::Result<()> {
+        self.conn().execute(
+            "DELETE FROM oauth_clients WHERE client_id = ?1",
+            params![client_id],
+        )?;
+        Ok(())
+    }
+
+    /// The client ids that own at least one stored script.
+    pub fn script_owners(&self) -> rusqlite::Result<HashSet<String>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare("SELECT DISTINCT user_id FROM user_indicators")?;
+        let rows = stmt.query_map([], |r| r.get(0))?;
+        rows.collect()
     }
 
     /// Delete clients registered over `max_age_secs` ago that never received

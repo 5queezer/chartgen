@@ -8,7 +8,7 @@ use base64::Engine as Base64Engine;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
@@ -28,8 +28,9 @@ struct OAuthClient {
     _client_secret: Option<String>,
     redirect_uris: Vec<String>,
     created_at: Instant,
-    /// Received a token at least once (unused clients are collected).
-    tokened: bool,
+    /// When it last received a token; `None` if it never did (unused clients
+    /// are collected, and evicted first).
+    last_token: Option<Instant>,
 }
 
 /// Dynamic client registration limits: `/authorize` auto-approves, so
@@ -58,7 +59,6 @@ struct AuthCode {
 
 struct AccessToken {
     _token: String,
-    #[cfg_attr(not(feature = "scripting"), allow(dead_code))]
     client_id: String,
     created_at: Instant,
     expires_in: Duration,
@@ -132,15 +132,57 @@ impl OAuthStore {
             ));
         }
         hits.push(now);
-        self.clients
-            .retain(|_, c| c.tokened || now.duration_since(c.created_at) < UNUSED_CLIENT_TTL);
-        if self.clients.len() >= MAX_CLIENTS {
-            return Err((
+        self.clients.retain(|_, c| {
+            c.last_token.is_some() || now.duration_since(c.created_at) < UNUSED_CLIENT_TTL
+        });
+        Ok(())
+    }
+
+    /// Keep the table below `MAX_CLIENTS` for one more client by evicting
+    /// never-tokened clients, oldest first, then the least recently tokened
+    /// ones (ADR-0036). Their tokens and codes go too: a token outliving its
+    /// client could still register scripts for an owner no longer on record.
+    /// Returns the ids evicted. A client owning stored scripts is never
+    /// evicted, so `script_owners` (`None`: unknown) is only asked when full,
+    /// and without enough other clients this answers 503 and evicts nothing.
+    fn make_room(
+        &mut self,
+        script_owners: impl FnOnce() -> Option<HashSet<String>>,
+    ) -> Result<Vec<String>, (StatusCode, Value)> {
+        let excess = (self.clients.len() + 1).saturating_sub(MAX_CLIENTS);
+        if excess == 0 {
+            return Ok(Vec::new());
+        }
+        let full = || {
+            Err((
                 StatusCode::SERVICE_UNAVAILABLE,
                 json!({"error": "temporarily_unavailable", "error_description": "client registry is full"}),
-            ));
+            ))
+        };
+        let Some(owners) = script_owners() else {
+            return full();
+        };
+        let mut candidates: Vec<_> = self
+            .clients
+            .iter()
+            .filter(|(id, _)| !owners.contains(*id))
+            .map(|(id, c)| (c.last_token, c.created_at, id.clone()))
+            .collect();
+        if candidates.len() < excess {
+            return full();
         }
-        Ok(())
+        candidates.sort();
+        let evicted: Vec<String> = candidates
+            .into_iter()
+            .take(excess)
+            .map(|(_, _, id)| id)
+            .collect();
+        for id in &evicted {
+            self.clients.remove(id);
+        }
+        self.tokens.retain(|_, t| !evicted.contains(&t.client_id));
+        self.codes.retain(|_, c| !evicted.contains(&c.client_id));
+        Ok(evicted)
     }
 
     fn cleanup_expired(&mut self) {
@@ -235,6 +277,19 @@ fn with_resource_metadata(mut resp: Response, path: &str) -> Response {
     resp
 }
 
+/// The client ids owning stored scripts; `None` if that cannot be determined.
+/// Scripts live in the store, so without one nobody owns any.
+fn script_owners() -> Option<HashSet<String>> {
+    #[cfg(feature = "scripting")]
+    if let Some(store) = scripting::persistence::global() {
+        return store
+            .script_owners()
+            .map_err(|e| eprintln!("[OAuth] cannot read script owners: {e}"))
+            .ok();
+    }
+    Some(HashSet::new())
+}
+
 #[derive(Deserialize)]
 struct RegisterRequest {
     redirect_uris: Vec<String>,
@@ -251,13 +306,19 @@ async fn oauth_register(
         "[OAuth] POST /register redirect_uris={}",
         body.redirect_uris.len()
     );
-    if let Err((status, err)) = state
-        .oauth
-        .lock()
-        .unwrap()
+    let mut oauth = state.oauth.lock().unwrap();
+    let evicted = match oauth
         .admit_registration(&client_addr(&ext), &body)
+        .and_then(|()| oauth.make_room(script_owners))
     {
-        return (status, Json(err));
+        Ok(evicted) => evicted,
+        Err((status, err)) => return (status, Json(err)),
+    };
+    if !evicted.is_empty() {
+        eprintln!(
+            "[OAuth] client table full: evicted {} client(s)",
+            evicted.len()
+        );
     }
     let client_id = Uuid::new_v4().to_string();
     let client_secret = Uuid::new_v4().to_string();
@@ -266,20 +327,21 @@ async fn oauth_register(
         _client_secret: Some(client_secret.clone()),
         redirect_uris: body.redirect_uris.clone(),
         created_at: Instant::now(),
-        tokened: false,
+        last_token: None,
     };
 
-    state
-        .oauth
-        .lock()
-        .unwrap()
-        .clients
-        .insert(client_id.clone(), client);
+    oauth.clients.insert(client_id.clone(), client);
+    drop(oauth);
     // The client id must survive restarts: external MCP clients keep their
     // registration (ADR-0036), and with scripting on it owns stored
     // indicators (ADR-0025). Persist the registration.
     #[cfg(feature = "scripting")]
     if let Some(store) = scripting::persistence::global() {
+        for id in &evicted {
+            if let Err(e) = store.delete_oauth_client(id) {
+                eprintln!("[OAuth] could not delete an evicted client: {e}");
+            }
+        }
         let saved = store
             .gc_oauth_clients(UNUSED_CLIENT_TTL.as_secs() as i64)
             .and_then(|_| store.save_oauth_client(&client_id, &body.redirect_uris));
@@ -539,7 +601,7 @@ async fn oauth_token(
         },
     );
     if let Some(c) = s.clients.get_mut(&body.client_id) {
-        c.tokened = true;
+        c.last_token = Some(Instant::now());
     }
     #[cfg(feature = "scripting")]
     if let Some(store) = scripting::persistence::global() {
@@ -1158,17 +1220,18 @@ pub async fn run_server(port: u16, engine: Option<Arc<RwLock<TradingEngine>>>) {
                     println!("Scripting enabled");
                 }
                 let now_unix = chrono::Utc::now().timestamp();
+                let instant_of = |unix: i64| {
+                    let age = Duration::from_secs((now_unix - unix).max(0) as u64);
+                    Instant::now().checked_sub(age).unwrap_or_else(Instant::now)
+                };
                 for c in clients {
-                    let age = Duration::from_secs((now_unix - c.created_at).max(0) as u64);
                     oauth.clients.insert(
                         c.client_id,
                         OAuthClient {
                             _client_secret: None,
                             redirect_uris: c.redirect_uris,
-                            created_at: Instant::now()
-                                .checked_sub(age)
-                                .unwrap_or_else(Instant::now),
-                            tokened: c.last_token_at.is_some(),
+                            created_at: instant_of(c.created_at),
+                            last_token: c.last_token_at.map(instant_of),
                         },
                     );
                 }
@@ -1891,13 +1954,30 @@ mod tests {
         }
     }
 
-    fn client(age: Duration, tokened: bool) -> OAuthClient {
+    fn client(age: Duration, last_token_age: Option<Duration>) -> OAuthClient {
         OAuthClient {
             _client_secret: None,
             redirect_uris: vec![],
             created_at: Instant::now() - age,
-            tokened,
+            last_token: last_token_age.map(|a| Instant::now() - a),
         }
+    }
+
+    /// `MAX_CLIENTS` clients; the lower the index, the older its token.
+    fn full_table() -> OAuthStore {
+        let mut s = OAuthStore::new();
+        for i in 0..MAX_CLIENTS {
+            let token_age = Duration::from_secs((MAX_CLIENTS - i) as u64 * 60);
+            s.clients.insert(
+                format!("c{i}"),
+                client(Duration::from_secs(1), Some(token_age)),
+            );
+        }
+        s
+    }
+
+    fn nobody_owns_scripts() -> Option<HashSet<String>> {
+        Some(HashSet::new())
     }
 
     #[test]
@@ -1932,22 +2012,136 @@ mod tests {
     }
 
     #[test]
-    fn registry_is_bounded_and_unused_clients_expire() {
+    fn unused_clients_expire() {
         let mut s = OAuthStore::new();
-        for i in 0..MAX_CLIENTS {
-            s.clients
-                .insert(format!("c{i}"), client(Duration::from_secs(60), false));
-        }
         let ok = reg(&["http://localhost/cb"]);
-        let (status, _) = s.admit_registration("4.4.4.4", &ok).unwrap_err();
-        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
         // never-used clients older than a day are collected; used ones stay
         s.clients
-            .insert("c0".into(), client(UNUSED_CLIENT_TTL * 2, false));
-        s.clients
-            .insert("c1".into(), client(UNUSED_CLIENT_TTL * 2, true));
+            .insert("c0".into(), client(UNUSED_CLIENT_TTL * 2, None));
+        s.clients.insert(
+            "c1".into(),
+            client(UNUSED_CLIENT_TTL * 2, Some(UNUSED_CLIENT_TTL * 2)),
+        );
         assert!(s.admit_registration("4.4.4.4", &ok).is_ok());
         assert!(!s.clients.contains_key("c0"));
         assert!(s.clients.contains_key("c1"));
+    }
+
+    #[test]
+    fn make_room_needs_no_lookup_below_the_limit() {
+        let mut s = OAuthStore::new();
+        let evicted = s.make_room(|| panic!("no lookup when there is room"));
+        assert_eq!(evicted.unwrap(), Vec::<String>::new());
+    }
+
+    #[test]
+    fn make_room_evicts_never_tokened_oldest_first_then_least_recently_tokened() {
+        let mut s = full_table();
+        s.clients.remove("c500");
+        s.clients.remove("c501");
+        s.clients
+            .insert("new".into(), client(Duration::from_secs(1), None));
+        s.clients
+            .insert("old".into(), client(Duration::from_secs(60), None));
+
+        for expected in ["old", "new", "c0", "c1"] {
+            assert_eq!(s.make_room(nobody_owns_scripts).unwrap(), [expected]);
+            assert_eq!(s.clients.len(), MAX_CLIENTS - 1);
+            s.clients.insert(
+                format!("after-{expected}"),
+                client(Duration::ZERO, Some(Duration::ZERO)),
+            );
+        }
+    }
+
+    #[test]
+    fn make_room_shrinks_a_table_over_the_limit() {
+        let mut s = full_table();
+        s.clients
+            .insert("extra".into(), client(Duration::ZERO, Some(Duration::ZERO)));
+        let evicted = s.make_room(nobody_owns_scripts).unwrap();
+        assert_eq!(evicted.len(), 2);
+        assert!(evicted.contains(&"c0".to_string()) && evicted.contains(&"c1".to_string()));
+        assert_eq!(s.clients.len(), MAX_CLIENTS - 1);
+    }
+
+    #[test]
+    fn make_room_never_evicts_script_owners() {
+        let mut s = full_table();
+        let owners: HashSet<String> = ["c0".to_string(), "c1".to_string()].into();
+        assert_eq!(s.make_room(|| Some(owners)).unwrap(), ["c2"]);
+        assert!(s.clients.contains_key("c0") && s.clients.contains_key("c1"));
+
+        let mut s = full_table();
+        let all: HashSet<String> = s.clients.keys().cloned().collect();
+        let (status, _) = s.make_room(|| Some(all)).unwrap_err();
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(s.clients.len(), MAX_CLIENTS);
+    }
+
+    #[test]
+    fn make_room_evicts_nobody_when_owners_are_unknown() {
+        let mut s = full_table();
+        let (status, _) = s.make_room(|| None).unwrap_err();
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(s.clients.len(), MAX_CLIENTS);
+    }
+
+    #[test]
+    fn make_room_drops_the_tokens_and_codes_of_evicted_clients_only() {
+        let mut s = full_table();
+        for (key, client_id) in [("gone", "c0"), ("kept", "c1")] {
+            s.tokens.insert(
+                key.into(),
+                AccessToken {
+                    _token: key.into(),
+                    client_id: client_id.into(),
+                    created_at: Instant::now(),
+                    expires_in: Duration::from_secs(60),
+                },
+            );
+            s.codes.insert(
+                key.into(),
+                AuthCode {
+                    _code: key.into(),
+                    client_id: client_id.into(),
+                    redirect_uri: String::new(),
+                    code_challenge: String::new(),
+                    _code_challenge_method: String::new(),
+                    created_at: Instant::now(),
+                },
+            );
+        }
+        assert_eq!(s.make_room(nobody_owns_scripts).unwrap(), ["c0"]);
+        assert!(!s.tokens.contains_key("gone") && s.tokens.contains_key("kept"));
+        assert!(!s.codes.contains_key("gone") && s.codes.contains_key("kept"));
+    }
+
+    /// The rate limit runs first: a limited caller cannot evict anyone.
+    #[tokio::test]
+    async fn rate_limited_registration_evicts_nobody() {
+        let mut oauth = full_table();
+        oauth.registrations.insert(
+            "9.9.9.9".into(),
+            vec![Instant::now(); MAX_REGISTRATIONS_PER_IP],
+        );
+        let state = Arc::new(AppState {
+            oauth: Mutex::new(oauth),
+            engine: None,
+            charts: ChartHub::from_env(),
+        });
+        let mut ext = axum::http::Extensions::new();
+        ext.insert(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+            [9, 9, 9, 9],
+            1,
+        ))));
+        let (status, _) = oauth_register(
+            State(state.clone()),
+            ext,
+            Json(reg(&["http://localhost/cb"])),
+        )
+        .await;
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(state.oauth.lock().unwrap().clients.len(), MAX_CLIENTS);
     }
 }

@@ -785,7 +785,8 @@ chart does not load until you use it. The app never redirects in a
 loop.
 
 A server without persistent storage forgets every registered client when
-it restarts. The app notices that the stored `client_id` is no longer
+it restarts, and a server at its client limit can evict an idle one. The app
+notices that the stored `client_id` is no longer
 known, registers a new one and signs in again by itself, and a share link
 opened at that moment still lands on its chart
 ([ADR-0036](/chartgen/decisions/0036-own-origin-invalid-client-redirect/)).

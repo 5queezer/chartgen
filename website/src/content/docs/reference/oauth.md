@@ -92,14 +92,23 @@ recovers as described [above](#unknown-client_id).
 `/register` is bounded: 1–5 `redirect_uris` of at most 512 characters, a
 `client_name` of at most 256 (`400 invalid_client_metadata` otherwise), 20
 registrations per peer address per 10 minutes (`429 slow_down`; loopback
-peers are exempt) and 1000 registered clients (`503
-temporarily_unavailable`). A client that never receives a token within 24
-hours is forgotten. Logs never contain client ids, codes or verifiers.
+peers are exempt) and 1000 registered clients. A client that never receives a
+token within 24 hours is forgotten. Logs never contain client ids, codes or
+verifiers.
 
-A client that did receive a token is kept for good, and a restart no longer
-clears the table. Once 1000 such clients are stored, `/register` answers `503`
-across restarts, while clients already registered keep working. To recover, stop
-the server, delete rows from `oauth_clients`, and start it again.
+At 1000 clients, `/register` makes room instead of refusing
+([ADR-0036](/chartgen/decisions/0036-own-origin-invalid-client-redirect/)). It
+evicts a client that never received a token, oldest first, or else the one whose
+last token is the oldest, from memory and from `CHARTGEN_DB`. A client that owns
+stored [scripted indicators](/chartgen/guides/scripted-indicators/) is never
+evicted. `/register` answers `503 temporarily_unavailable` only when every client
+owns scripts, or when the owners cannot be read from the store.
+
+Eviction also drops the client's live tokens and pending codes, so its next call
+gets a `401` and its next `/authorize` the [unknown client](#unknown-client_id)
+answer. It recovers as after a restart without a volume: the web app re-registers
+by itself and an MCP client registers again. An SSE stream that is already open
+stays open until it disconnects, as it does when a token expires.
 
 ## MCP handler behavior
 

@@ -1013,6 +1013,8 @@ fn test_authorize_unknown_client_without_web_dir_stays_json() {
 }
 
 const EXTERNAL_REDIRECT: &str = "https://client.example/cb";
+/// `MAX_CLIENTS` in `src/server.rs`.
+const MAX_CLIENTS: usize = 1000;
 
 fn register_external(port: u16) -> String {
     let body = format!(r#"{{"redirect_uris":["{EXTERNAL_REDIRECT}"]}}"#);
@@ -1042,6 +1044,14 @@ fn sign_in(port: u16, client_id: &str) -> String {
     assert_eq!(st, 200, "{body}");
     let v: serde_json::Value = serde_json::from_str(&body).unwrap();
     v["access_token"].as_str().unwrap().to_string()
+}
+
+/// Status of an authenticated MCP call with `token`.
+fn ping_status(port: u16, token: &str) -> u16 {
+    let auth = format!("Authorization: Bearer {token}");
+    let headers = [JSON_POST[0], JSON_POST[1], auth.as_str()];
+    let call = r#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#;
+    http(port, "POST", "/mcp", &headers, call).0
 }
 
 fn tool_names(port: u16) -> Vec<String> {
@@ -1101,14 +1111,8 @@ fn test_registered_client_survives_restart_without_scripting() {
         let new_token = sign_in(port, &client);
         assert_ne!(new_token, token);
         // Tokens stay in memory: the old one is gone, the new one works.
-        let call = r#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#;
-        let with = |t: &str| format!("Authorization: Bearer {t}");
-        let (old, new) = (with(&token), with(&new_token));
-        let headers = |auth| [JSON_POST[0], JSON_POST[1], auth];
-        let (st, _, _) = http(port, "POST", "/mcp", &headers(old.as_str()), call);
-        assert_eq!(st, 401);
-        let (st, _, _) = http(port, "POST", "/mcp", &headers(new.as_str()), call);
-        assert_eq!(st, 200);
+        assert_eq!(ping_status(port, &token), 401);
+        assert_eq!(ping_status(port, &new_token), 200);
     } else {
         assert_unknown_client_json(authorize(port, &client, EXTERNAL_REDIRECT), "no store");
     }
@@ -1169,6 +1173,172 @@ fn test_unopenable_store_is_not_fatal() {
     let srv = spawn_server_on(port, None, &db.join("chartgen.db"), false);
     let client = register_external(port);
     sign_in(port, &client);
+    drop(srv);
+    let _ = std::fs::remove_dir_all(db.parent().unwrap());
+}
+
+/// With the table full, `/register` makes room instead of refusing, in any
+/// build, and a client that got a token outlasts one that never did.
+#[test]
+fn test_register_at_the_limit_evicts_never_tokened_clients_first() {
+    let srv = spawn_server(None);
+    let p = srv.port;
+    let used = register_external(p);
+    sign_in(p, &used);
+    let oldest_unused = register_external(p);
+    let next_unused = register_external(p);
+    for _ in 3..MAX_CLIENTS {
+        register_external(p);
+    }
+
+    register_external(p);
+
+    assert_unknown_client_json(authorize(p, &oldest_unused, EXTERNAL_REDIRECT), "oldest");
+    assert_eq!(authorize(p, &next_unused, EXTERNAL_REDIRECT).0, 307);
+    assert_eq!(authorize(p, &used, EXTERNAL_REDIRECT).0, 307);
+}
+
+/// Seed `oauth_clients` before a server starts. `c0000` has the oldest token
+/// but the newest registration and the last row, so the order can only come
+/// from `last_token_at`. Clients with an index below `owners` own a script.
+#[cfg(feature = "scripting")]
+fn seed_tokened_clients(db: &std::path::Path, count: usize, owners: usize) {
+    chartgen::scripting::persistence::Store::open(db).unwrap();
+    let mut conn = rusqlite::Connection::open(db).unwrap();
+    let tx = conn.transaction().unwrap();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    let uris = format!(r#"["{EXTERNAL_REDIRECT}"]"#);
+    for i in (0..count as i64).rev() {
+        let id = seeded_client(i as usize);
+        let token_at = now - (count as i64 - i) * 3600;
+        let created_at = token_at - i * 7200;
+        tx.execute(
+            "INSERT INTO oauth_clients (client_id, redirect_uris, created_at, last_token_at)
+             VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params![id, uris, created_at, token_at],
+        )
+        .unwrap();
+        if (i as usize) < owners {
+            tx.execute(
+                "INSERT INTO user_indicators
+                 (user_id, name, source, meta_json, source_hash, created_at, updated_at)
+                 VALUES (?1, 'x', '', '{}', '', 0, 0)",
+                [&id],
+            )
+            .unwrap();
+        }
+    }
+    tx.commit().unwrap();
+}
+
+#[cfg(feature = "scripting")]
+fn seeded_client(i: usize) -> String {
+    format!("c{i:04}")
+}
+
+#[cfg(feature = "scripting")]
+fn stored_clients(db: &std::path::Path) -> i64 {
+    rusqlite::Connection::open(db)
+        .unwrap()
+        .query_row("SELECT COUNT(*) FROM oauth_clients", [], |r| r.get(0))
+        .unwrap()
+}
+
+/// At the limit the least recently tokened client that owns no scripts goes,
+/// from memory and from the store, and that order holds after a restart.
+#[cfg(feature = "scripting")]
+#[test]
+fn test_full_table_evicts_least_recently_tokened_non_owner_across_restart() {
+    let db = store_path("evict");
+    seed_tokened_clients(&db, MAX_CLIENTS, 2);
+    let port = free_port();
+    let srv = spawn_server_on(port, None, &db, false);
+
+    // c0000 and c0001 own scripts, so c0002 is the first to go.
+    register_external(port);
+    assert_unknown_client_json(authorize(port, "c0002", EXTERNAL_REDIRECT), "evicted");
+    for kept in ["c0000", "c0001", "c0003"] {
+        assert_eq!(authorize(port, kept, EXTERNAL_REDIRECT).0, 307, "{kept}");
+    }
+    assert_eq!(stored_clients(&db), MAX_CLIENTS as i64);
+    drop(srv);
+
+    let port = free_port();
+    let srv = spawn_server_on(port, None, &db, false);
+    assert_unknown_client_json(authorize(port, "c0002", EXTERNAL_REDIRECT), "still gone");
+    // The new client above never got a token, so it goes before anyone else.
+    register_external(port);
+    assert_eq!(authorize(port, "c0003", EXTERNAL_REDIRECT).0, 307);
+    let tokened = register_external(port);
+    sign_in(port, &tokened);
+    // That took the unused client from the line above. Now only tokened
+    // clients are left, and the restored times decide.
+    register_external(port);
+    assert_unknown_client_json(authorize(port, "c0003", EXTERNAL_REDIRECT), "next oldest");
+    assert_eq!(authorize(port, "c0004", EXTERNAL_REDIRECT).0, 307);
+    assert_eq!(stored_clients(&db), MAX_CLIENTS as i64);
+    drop(srv);
+    let _ = std::fs::remove_dir_all(db.parent().unwrap());
+}
+
+/// Only a table of nothing but script owners still refuses.
+#[cfg(feature = "scripting")]
+#[test]
+fn test_full_table_of_script_owners_still_refuses() {
+    let db = store_path("evict-owners");
+    seed_tokened_clients(&db, MAX_CLIENTS, MAX_CLIENTS);
+    let port = free_port();
+    let srv = spawn_server_on(port, None, &db, false);
+
+    let body = format!(r#"{{"redirect_uris":["{EXTERNAL_REDIRECT}"]}}"#);
+    let (st, _, resp) = http(port, "POST", "/register", &JSON_POST, &body);
+    assert_eq!(st, 503, "{resp}");
+    assert!(resp.contains("client registry is full"), "{resp}");
+    assert_eq!(authorize(port, "c0000", EXTERNAL_REDIRECT).0, 307);
+    assert_eq!(stored_clients(&db), MAX_CLIENTS as i64);
+    drop(srv);
+    let _ = std::fs::remove_dir_all(db.parent().unwrap());
+}
+
+/// An evicted client loses its live token and pending code, and recovers by
+/// registering again.
+#[cfg(feature = "scripting")]
+#[test]
+fn test_evicted_client_loses_its_token_and_code() {
+    let db = store_path("evict-token");
+    seed_tokened_clients(&db, MAX_CLIENTS - 1, MAX_CLIENTS - 1);
+    let port = free_port();
+    let srv = spawn_server_on(port, None, &db, false);
+    let victim = register_external(port);
+    let token = sign_in(port, &victim);
+    assert_eq!(ping_status(port, &token), 200);
+    let (_, head, _) = authorize(port, &victim, EXTERNAL_REDIRECT);
+    let code = head
+        .split("code=")
+        .nth(1)
+        .and_then(|rest| rest.split(['&', '\r']).next())
+        .unwrap()
+        .to_string();
+
+    // Everyone else owns scripts, so this has to take the victim.
+    let successor = register_external(port);
+
+    assert_eq!(ping_status(port, &token), 401);
+    let body = serde_json::json!({
+        "grant_type": "authorization_code",
+        "code": code,
+        "redirect_uri": EXTERNAL_REDIRECT,
+        "client_id": victim,
+        "code_verifier": PKCE_VERIFIER,
+    });
+    let (st, _, resp) = http(port, "POST", "/token", &JSON_POST, &body.to_string());
+    assert_eq!(st, 400, "{resp}");
+    assert!(resp.contains("invalid_grant"), "{resp}");
+    assert_unknown_client_json(authorize(port, &victim, EXTERNAL_REDIRECT), "victim");
+    assert_eq!(ping_status(port, &sign_in(port, &successor)), 200);
     drop(srv);
     let _ = std::fs::remove_dir_all(db.parent().unwrap());
 }
