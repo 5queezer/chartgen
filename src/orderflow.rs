@@ -156,6 +156,33 @@ pub fn bounded_row_size(row: f64, range: f64, tick: f64) -> f64 {
     }
 }
 
+/// The row to use for `asked`: not under a tick, not over the highest price `top`, and
+/// fitting a bar of `widest` in `MAX_ROWS_PER_BAR`. What `widest` has to cover is what
+/// gets bucketed, so it includes the intrabars (`widest_group`).
+pub fn usable_row(asked: f64, widest: f64, top: f64, tick: f64) -> f64 {
+    bounded_row_size(asked.clamp(tick, top.max(tick)), widest, tick)
+}
+
+/// The widest high-low range of the intrabars of any one of `groups`.
+pub fn widest_group(intrabars: &[Intrabar], groups: &[std::ops::Range<usize>]) -> f64 {
+    groups
+        .iter()
+        .map(|g| extent(&intrabars[g.clone()]))
+        .fold(0.0, f64::max)
+}
+
+/// High minus low of `intrabars`, ignoring prices that are not numbers. 0 without any.
+fn extent(intrabars: &[Intrabar]) -> f64 {
+    let finite = || intrabars.iter().filter(|b| has_range(b));
+    let high = finite().map(|b| b.high).fold(f64::NEG_INFINITY, f64::max);
+    let low = finite().map(|b| b.low).fold(f64::INFINITY, f64::min);
+    (high - low).max(0.0)
+}
+
+fn has_range(bar: &Intrabar) -> bool {
+    bar.low.is_finite() && bar.high.is_finite()
+}
+
 /// Row of `price`: rows are multiples of the size, so they line up across bars.
 fn row_index(price: f64, row: f64) -> i64 {
     (price / row + 1e-9).floor() as i64
@@ -279,6 +306,8 @@ pub struct Stacked {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Footprint {
     pub t: i64,
+    /// Height of this bar's rows: the asked one unless it would not fit (`usable_row`).
+    pub row: f64,
     /// Ascending, contiguous from the bar's low to its high. Empty without intrabars.
     pub rows: Vec<Row>,
     pub buy: f64,
@@ -314,11 +343,14 @@ pub fn build_footprint(
     prev_close: Option<f64>,
     o: &FootprintOptions,
 ) -> Footprint {
+    // The hard cap: the caller bounds the row for all its bars, but no row size may
+    // ever size this bar's rows beyond the limit, whatever the data does.
+    let row = bounded_row_size(o.row, extent(intrabars), o.row);
     let mut levels: BTreeMap<i64, (f64, f64)> = BTreeMap::new();
     let (mut delta, mut min_delta, mut max_delta) = (0.0_f64, 0.0_f64, 0.0_f64);
     let (mut buy, mut sell) = (0.0, 0.0);
     let mut prev = prev_close;
-    for bar in intrabars {
+    for bar in intrabars.iter().filter(|b| has_range(b)) {
         let (share, _) = buy_share(bar, prev);
         prev = Some(bar.close);
         let (bought, sold) = (bar.volume * share, bar.volume * (1.0 - share));
@@ -327,7 +359,7 @@ pub fn build_footprint(
         delta += bought - sold;
         min_delta = min_delta.min(delta);
         max_delta = max_delta.max(delta);
-        for (index, part) in row_shares(bar.low, bar.high, o.row) {
+        for (index, part) in row_shares(bar.low, bar.high, row) {
             let level = levels.entry(index).or_default();
             level.0 += bought * part;
             level.1 += sold * part;
@@ -335,6 +367,7 @@ pub fn build_footprint(
     }
     let mut fp = Footprint {
         t,
+        row,
         rows: Vec::new(),
         buy,
         sell,
@@ -354,7 +387,7 @@ pub fn build_footprint(
         .map(|i| {
             let (b, s) = levels.get(&i).copied().unwrap_or((0.0, 0.0));
             Row {
-                price: row_price(i, o.row),
+                price: row_price(i, row),
                 buy: b,
                 sell: s,
             }
@@ -364,7 +397,7 @@ pub fn build_footprint(
     if let Some((low, high, poc)) = value_area(&totals, o.value_area) {
         fp.poc = Some(fp.rows[poc].price);
         fp.val = Some(fp.rows[low].price);
-        fp.vah = Some(round_sig(fp.rows[high].price + o.row, 12));
+        fp.vah = Some(round_sig(fp.rows[high].price + row, 12));
     }
     let (buys, sells) = imbalances(&fp.rows, o.imbalance);
     let prices = |flags: &[bool]| -> Vec<f64> {
@@ -382,7 +415,7 @@ pub fn build_footprint(
             fp.stacked.push(Stacked {
                 buy: is_buy,
                 low: fp.rows[a].price,
-                high: round_sig(fp.rows[b].price + o.row, 12),
+                high: round_sig(fp.rows[b].price + row, 12),
                 count: b - a + 1,
             });
         }
@@ -411,6 +444,7 @@ impl Footprint {
             .collect();
         json!({
             "t": self.t,
+            "row": self.row,
             "buy": round_sig(self.buy, 8),
             "sell": round_sig(self.sell, 8),
             "min_delta": round_sig(self.min_delta, 8),
@@ -1108,6 +1142,51 @@ mod tests {
     }
 
     // ---- value area, POC ----
+
+    #[test]
+    fn a_row_is_floored_at_a_tick_and_capped_at_the_price() {
+        assert_eq!(usable_row(1e-9, 0.0, 65_000.0, 0.01), 0.01);
+        assert_eq!(usable_row(5e-324, 0.0, 65_000.0, 0.01), 0.01);
+        assert_eq!(usable_row(1e308, 500.0, 65_000.0, 0.01), 65_000.0);
+        assert_eq!(usable_row(2.5, 100.0, 65_000.0, 0.01), 2.5);
+    }
+
+    /// The chart's bar read flat, so nothing bounded the row by it; its intrabars, read
+    /// a moment later, moved. Far more rows than this used to be asked for at once.
+    #[test]
+    fn a_tiny_row_cannot_size_a_bar_beyond_the_limit() {
+        let list = [ib(0, 65_000.0, 65_005.0, 65_000.0, 65_005.0, 10.0)];
+        let fp = build_footprint(0, &list, None, &opts(1e-5));
+        assert!(fp.rows.len() <= MAX_ROWS_PER_BAR + 1, "{}", fp.rows.len());
+        assert!(fp.row >= 5.0 / MAX_ROWS_PER_BAR as f64, "{}", fp.row);
+        let total: f64 = fp.rows.iter().map(|r| r.buy + r.sell).sum();
+        assert!((total - 10.0).abs() < 1e-9, "{total}");
+    }
+
+    #[test]
+    fn the_bound_takes_the_width_of_the_intrabars_not_only_of_the_bar() {
+        // Each intrabar is narrow; the bar they make up is 5 wide.
+        let list = [
+            ib(0, 65_000.0, 65_000.0, 65_000.0, 65_000.0, 1.0),
+            ib(1, 65_005.0, 65_005.0, 65_005.0, 65_005.0, 1.0),
+            ib(60, 7.0, 7.0, 7.0, 7.0, 1.0),
+        ];
+        let groups = group_by_bar(&[0, 60], 120, &list);
+        assert_eq!(widest_group(&list, &groups), 5.0);
+        let row = usable_row(1e-9, widest_group(&list, &groups), 65_005.0, 0.01);
+        assert!(5.0 / row <= MAX_ROWS_PER_BAR as f64, "{row}");
+    }
+
+    #[test]
+    fn a_price_that_is_no_number_sizes_nothing() {
+        let list = [
+            ib(0, 1.0, f64::INFINITY, f64::NAN, 1.0, 1.0),
+            ib(1, 100.0, 101.0, 100.0, 100.5, 2.0),
+        ];
+        let fp = build_footprint(0, &list, None, &opts(0.5));
+        assert_eq!(fp.rows.len(), 2);
+        assert_eq!(fp.buy + fp.sell, 2.0);
+    }
 
     #[test]
     fn value_area_grows_from_the_poc_by_the_busier_neighbour() {

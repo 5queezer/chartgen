@@ -1963,7 +1963,11 @@ fn footprint_payload(args: &Value, source: fetch::DataSource) -> Result<Value, S
             .collect(),
     };
 
-    let prices: Vec<f64> = visible.iter().flat_map(|b| [b.high, b.low]).collect();
+    let prices: Vec<f64> = visible
+        .iter()
+        .flat_map(|b| [b.high, b.low])
+        .chain(list.iter().flat_map(|b| [b.high, b.low]))
+        .collect();
     let tick = of::infer_tick(&prices);
     let (asked, auto) = row_arg(args, tick, || {
         of::atr(all, atr_length).map_or_else(
@@ -1974,8 +1978,15 @@ fn footprint_payload(args: &Value, source: fetch::DataSource) -> Result<Value, S
             |atr| of::auto_row_size(atr, tick),
         )
     })?;
-    let widest = visible.iter().map(|b| b.high - b.low).fold(0.0, f64::max);
-    let row = of::bounded_row_size(asked, widest, tick);
+    // Rows are built from the intrabars, read after the bars: a bar that read flat says
+    // nothing about how many rows they need.
+    let ranges = of::group_by_bar(&opens, last_end, &list);
+    let widest = visible
+        .iter()
+        .map(|b| b.high - b.low)
+        .fold(of::widest_group(&list, &ranges), f64::max);
+    let top = prices.iter().copied().fold(0.0, f64::max);
+    let row = of::usable_row(asked, widest, top, tick);
 
     let options = of::FootprintOptions {
         row,
@@ -1983,7 +1994,6 @@ fn footprint_payload(args: &Value, source: fetch::DataSource) -> Result<Value, S
         imbalance,
         stacked,
     };
-    let ranges = of::group_by_bar(&opens, last_end, &list);
     let without_data = ranges.iter().filter(|r| r.is_empty()).count();
     let footprints: Vec<Value> = ranges
         .into_iter()
@@ -2069,7 +2079,8 @@ fn tpo_payload(args: &Value, source: fetch::DataSource) -> Result<Value, String>
         of::tpo_auto_row(&blocks, period, &sessions, &tz, tick)
     })?;
     let widest = of::tpo_widest_range(&blocks, period, &sessions, &tz);
-    let row = of::bounded_row_size(asked, widest, tick);
+    let top = prices.iter().copied().fold(0.0, f64::max);
+    let row = of::usable_row(asked, widest, top, tick);
     let options = of::TpoOptions {
         block_secs,
         row,
@@ -3475,6 +3486,16 @@ mod tests {
         for f in fp["footprints"].as_array().unwrap() {
             assert!(f["rows"].as_array().unwrap().len() <= 210);
         }
+        // Larger than any price: no row of a whole chart at a POC of 0.
+        let huge = json!({ "ticker": "BTCUSDT", "timeframe": "1h", "bars": 2, "row_size": 1e308 });
+        let fp = footprint_payload(&huge, Sample).unwrap();
+        assert_eq!(fp["row_widened"], true);
+        assert!(fp["row_size"].as_f64().unwrap() < 1e9, "{}", fp["row_size"]);
+        let tpo = tpo_payload(
+            &json!({ "ticker": "BTCUSDT", "periods": 1, "row_size": 1e308 }),
+            Sample,
+        );
+        assert!(tpo.unwrap()["row_size"].as_f64().unwrap() < 1e9);
     }
 
     #[test]
