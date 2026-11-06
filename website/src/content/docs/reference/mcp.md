@@ -368,6 +368,8 @@ still names the bar. Take them from your newest response and ignore those on old
 history pages. A new swing moves a level on every bar, so rewrite that plot from `levels`
 instead of merging its values. These indicators raise `warmup` to their lookback.
 `signals` only hold detections on the newest closed bar, for `indicator_signal` alerts.
+`format=summary` and `png` take no warmup, so `chart_patterns` and `auto_fib` read only the
+`bars` you ask for: ask for 600 to match the web chart.
 
 An indicator that plots past the last bar also carries a **`future`**
 block ([ADR-0033](/chartgen/decisions/0033-indicator-projection-past-last-bar/)).

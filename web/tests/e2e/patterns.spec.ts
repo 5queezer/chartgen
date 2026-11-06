@@ -170,6 +170,21 @@ test.describe("candlestick patterns", () => {
     const px = await pixelOf(page, l.x, l.y);
     await page.mouse.move(px.x, px.y + (l.above ? 200 : -200), { steps: 2 });
     await expect(tooltip(page)).toHaveCount(0);
+
+    // A label on the forming bar reads differently: outlined, not filled.
+    const filled = await colorCount(page, BLUE);
+    await page.evaluate(() => {
+      const w = window as unknown as {
+        __chartgenTest: {
+          series: () => { indicators: Record<string, { labels: { bias: string; tentative?: boolean; x: number }[] }> };
+        };
+      };
+      for (const label of w.__chartgenTest.series().indicators.candlestick_patterns!.labels) {
+        if (label.bias === "bullish") label.tentative = true;
+      }
+    });
+    await expect.poll(() => colorCount(page, BLUE), { timeout: 10_000 }).toBeLessThan(filled / 2);
+    await shot(page, "candles-forming-outlined");
   });
 
   test("one pattern can be chosen, and the settings say what can change", async ({ page }) => {
@@ -288,6 +303,7 @@ test.describe("chart patterns", () => {
       },
       [Math.min(n - 1, p.label.x + 30)],
     );
+    await shot(page, "chart-patterns");
     const px = await pixelOf(page, p.label.x, p.label.y);
     await page.mouse.move(px.x, px.y + (p.label.above ? -12 : 12), { steps: 3 });
     await expect(tooltip(page)).toHaveText(p.tooltip);
