@@ -64,7 +64,7 @@ stays visible.
   **Custom interval...**, which opens the same popup as the keyboard entry (see
   [Keyboard shortcuts](#keyboard-shortcuts)). While a custom interval is
   active, the dropdown's button shows it.
-- **Chart type** — Candles, Hollow candles (only up candles hollow), Bars (OHLC), Line, Line with markers, Step line, Area, Baseline, Columns, High-low, Heikin Ashi. Heikin Ashi is computed on the server (the web app sends `chart_style: "heikin_ashi"` with every load, tail poll and history page), so the legend shows Heikin Ashi OHLC values and indicators are calculated on them, as on TradingView. Switching to or from it reloads the chart. The other types are drawn in the browser from the same bars, so switching between them needs no reload, and the legend keeps showing the bar's OHLC:
+- **Chart type** — Candles, Hollow candles (only up candles hollow), Bars (OHLC), Line, Line with markers, Step line, Area, Baseline, Columns, High-low, Heikin Ashi, and the [order-flow types](#order-flow): Volume candles, Volume footprint and TPO. Heikin Ashi is computed on the server (the web app sends `chart_style: "heikin_ashi"` with every load, tail poll and history page), so the legend shows Heikin Ashi OHLC values and indicators are calculated on them, as on TradingView. Switching to or from it reloads the chart. The other types are drawn in the browser from the same bars, so switching between them needs no reload, and the legend keeps showing the bar's OHLC:
   - **Line with markers** — the close line with a dot on every bar.
   - **Step line** — the closes joined by horizontal-then-vertical steps.
   - **Baseline** — the close line and fill, in the up color above a base
@@ -546,6 +546,57 @@ pane. Right-clicking a drawing opens the drawing menu instead. TradingView's
 "Lock vertical cursor line by time" is not offered because klinecharts has no
 pinned crosshair.
 
+## Order flow
+
+Three chart types in the chart-type menu, plus volume profiles read from finer bars
+([ADR-0048](/chartgen/decisions/0048-order-flow/)). The status at the bottom left of the chart
+says how it was made, and its ⚙ opens the settings, which apply to every chart and are not part
+of a layout.
+
+**What this data is.** Footprints are built from finer klines, not trades. On Binance the buy and
+sell of a bar are measured, from each kline's taker buy volume. On Yahoo there is no aggressor data,
+so each kline goes wholly to one side by close versus open, and the status says *close vs open*. On
+both, **a row's volume is an estimate**: a kline's volume spread over its high-low range. The finer
+the klines the better, and the status names them: *from 1m bars*, or coarser for long or daily charts.
+Older stock history gets coarser data, then none. The forming bar repaints as data arrives, and cells
+update every 10 seconds, while the price moves at once.
+
+**Volume candles.** Candle width follows volume, relative to the most on screen.
+
+**Volume footprint.** Choosing it zooms to the widest bars, and leaving gives the zoom back. When
+bars or rows are too small for cells, a bar draws as a candle and the status says to zoom in.
+
+- *Row size:* auto (0.2 x ATR on round numbers) or ticks per row, with the ATR length.
+- *Type:* Buy and Sell (sell left, buy right), Delta, Total, or Ladder, where the buy column sits half
+  a row up, so that a buy reads against the sell it is compared with. *Display:* Cluster (equal width)
+  or Profile (width by volume).
+- *Gradient:* 4 colours by the row's share of the bar's largest, changing at 0.25, 0.5 and 0.75.
+- *Value area* (70%) with its VAH and VAL, and the *POC*, outlined.
+- *Summary:* an info box under each footprint (total, buy, sell, delta), or a table pane: volume and its
+  change, buy, sell and delta with percentages, min and max delta, session CVD, POC and HL range. Session
+  CVD restarts each UTC day and counts from the first loaded bar of it.
+- *Imbalance* (300%): a buy against the sell one row below, a sell against the buy one row above, marked
+  at the cell's edge. A row with nothing to compare with is none. *Stacked* imbalances (3 rows) are bands
+  projected until price comes back, with their count.
+
+**TPO.** One profile per period over the chart's bars, so pick an interval below the period.
+
+- *Period* (1D, 2D, 1W, 1M), *block size* (5m to 4h), *row size* (auto or ticks), *value area* (70%).
+- *Draw as* letters, when they fit, or blocks; *split by blocks* places each block at its own time.
+  Letters run A-Z then a-z, in two colour ranges. Outside the value area they fade by the opacity you set.
+- *Lines:* POC, VAH and VAL, midpoint, open and close, initial balance with its block count, poor high and
+  low (more than one block at the extreme), single prints inside the profile.
+- *Volume profile* beside it, on the left or right, from block volume. *Summary pane:* HL and VA range, VAH,
+  VAL, POC, volume, blocks in all and above and below the POC, rotation factor, and the initial balance.
+- *Sessions:* up to five `HH:MM-HH:MM`, comma separated, in the exchange's time (UTC for crypto), one profile
+  each. A TPO is off in bar replay, as a profile holds its whole period: the chart shows candles and says so.
+
+**Volume profiles.** `volume_profile`, `fixed_range_vp` (from, to), `anchored_vp` (anchor) and `session_vp`
+read finer bars when a chart loads, and the legend says which: *from 15m bars*. With none to be had they spread
+the chart's own bars, and the legend says nothing. Times are `YYYY-MM-DD`, `YYYY-MM-DD HH:MM` in UTC, or unix
+seconds, and a range covers only the loaded bars. Fixed range and anchored profiles draw at the chart's edge,
+not over their range, and are typed rather than picked on the chart.
+
 ## Chart grid
 
 The grid button left of the layout menu shows 1 chart, 2 side by side, 2 stacked or
@@ -598,7 +649,7 @@ https://chartgen.vasudev.xyz/?symbol=ETHUSDT&interval=4h&type=candles&ind=rsi(le
 |---|---|
 | `symbol` | Chart symbol |
 | `interval` | Timeframe (`4h`, `240`, `1d`, `7m`, `2W`, ...) |
-| `type` | Chart type: `candles`, `hollow`, `bars`, `line`, `line_markers`, `step_line`, `area`, `baseline`, `columns`, `high_low`, `heikin_ashi` |
+| `type` | Chart type: `candles`, `hollow`, `bars`, `line`, `line_markers`, `step_line`, `area`, `baseline`, `columns`, `high_low`, `heikin_ashi`, `volume_candles`, `footprint`, `tpo` |
 | `ind` | Indicators, comma separated (at most 50, 2 KB). Non-default parameters go in parentheses, separated by `;`: `macd(fast:8;slow:20)`; characters outside letters, digits, `.`, `_` and `-` in a text value are percent-encoded. Visible indicators only; `ind=` means none. A repeated name is another instance: `rsi,rsi(length:21)` shows two RSIs |
 | `compare` | Compare symbols, comma separated; always written, `compare=` clears them |
 | `tz` | One of the time zones in the time-zone menu: `utc`, `exchange`, `local` or a listed IANA name such as `Europe/Berlin` |

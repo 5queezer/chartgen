@@ -72,7 +72,7 @@ everyone else ([ADR-0027](/chartgen/decisions/0027-serve-web-app-same-origin/)).
 
 ## Tool catalog
 
-19 tools. The 12 trading tools require `--trade`; attempting to call them
+21 tools. The 12 trading tools require `--trade`; attempting to call them
 without it returns an error. With `CHARTGEN_SCRIPTING=1` the server also
 lists the 4 [scripted-indicator tools](#scripted-indicators-chartgen_scripting1),
 and with `CHARTGEN_SERVER_ALERTS=1` the 4
@@ -340,6 +340,9 @@ Three additional channels round out the payload so the full set of
 - **`fills`** — shaded regions between two y-series (Bollinger Bands,
   Keltner Channels, Ichimoku cloud, VWAP bands). `y1` and `y2` are arrays
   aligned 1:1 with `bars[]`; pre-warmup values are `null`.
+- **`profile_interval`** — on a profile that read lower-timeframe bars on a full load
+  (`volume_profile`, `fixed_range_vp`, `anchored_vp`, `session_vp`), which ones. Absent means it
+  spread the chart's own bars ([ADR-0048](/chartgen/decisions/0048-order-flow/)).
 - **`hbars`** — horizontal bars at price levels, used by volume-profile
   indicators (VPVR, Session VP, HVN/LVN, Naked POC, TPO). Each bar has a
   price-space `y` and `height`, axis-relative `width` and `offset`
@@ -797,6 +800,74 @@ forming bar, with every indicator recomputed. Merge it like a polled tail.
 `unsubscribe_chart` takes `subscription_id` and returns
 `{ "unsubscribed": true }`, or `false` if the subscription was already gone
 (or belongs to another token).
+
+### Order flow
+
+Both are built from klines, not trades ([ADR-0048](/chartgen/decisions/0048-order-flow/)):
+**a row's volume is always an estimate**, each kline's volume spread over its high-low range.
+Compact JSON. Their forming bar or period repaints as data arrives.
+
+#### `get_footprint`
+
+Buy and sell volume per price row of each chart bar.
+
+| Argument | Default | Meaning |
+|---|---|---|
+| `ticker` | required | As `generate_chart`. |
+| `timeframe` | `1h` | Chart interval. |
+| `bars` | 60 | Newest bars, up to 200. |
+| `end_time` | | Exclusive bound on bar open time, ms. |
+| `row_size` | | Row height in price. Widened if a bar would have over 200 rows. |
+| `row_ticks` | | Row height in ticks. Without either: auto, 0.2 x ATR on round numbers. |
+| `atr_length` | 14 | ATR length of the auto row size. |
+| `value_area` | 70 | Percent of the volume. |
+| `imbalance` | 300 | Percent. Buy against the sell one row below, sell against the buy one row above. A row with nothing to compare with is none. |
+| `stacked` | 3 | Imbalances in a row that make a stack. |
+
+```json
+{
+  "symbol": "BTCUSDT", "interval": "1h",
+  "intrabar_interval": "1m", "side": "taker_volume",
+  "row_size": 5, "row_auto": true, "row_widened": false, "tick": 0.01,
+  "bars_without_data": 0, "has_more": true,
+  "footprints": [{
+    "t": 1762466400, "buy": 512.3, "sell": 488.1,
+    "min_delta": -40.2, "max_delta": 61.5,
+    "poc": 100000, "vah": 100015, "val": 99990,
+    "rows": [[99990, 12.5, 9.1], [99995, 31.0, 40.2]],
+    "buy_imbalances": [], "sell_imbalances": [99990],
+    "stacked": [{ "side": "buy", "low": 100000, "high": 100015, "count": 3 }]
+  }]
+}
+```
+
+`intrabar_interval` is what the bars were read from; null means nothing finer exists, and the
+bar is its own only intrabar. `side` is `taker_volume` (Binance's measured taker buy volume per
+kline) or `close_vs_open` (no aggressor data: each kline goes to one side, a doji by the previous
+close). A row is `[bottom price, buy, sell]`. `vah` is a row's top, `val` and `poc` a row's bottom.
+`bars_without_data` counts bars with nothing in them, whose `rows` are empty.
+
+#### `get_tpo`
+
+Time Price Opportunity (market profile): which blocks traded at each price row.
+
+| Argument | Default | Meaning |
+|---|---|---|
+| `ticker` | required | As `generate_chart`. |
+| `period` | `1D` | A count and D, W or M: `1D`, `2D`, `1W`, `1M`. |
+| `block` | `30m` | Block length, from 5m to 4h. |
+| `periods` | 10 | Newest periods, up to 60. Cut to 3000 blocks; `periods_cut` says so. |
+| `end_time` | | Exclusive bound on block open time, ms. |
+| `row_size`, `row_ticks` | | As `get_footprint`. Auto: a 24th of the median period range. |
+| `value_area` | 70 | Percent of the blocks. |
+| `ib_blocks` | 2 | Blocks of the initial balance. |
+| `sessions` | | Up to 5 `HH:MM-HH:MM` in the exchange's time (UTC for crypto): one profile per session of each period. |
+
+Each profile has `t`, `end`, `block_times`, `open`, `close`, `high`, `low`, `mid`, `poc`, `vah`, `val`,
+`poor_high`, `poor_low` (more than one block at the extreme), `single_prints` (`[low, high]` runs of one
+block inside the profile, tails excluded), `ib_high`, `ib_low`, `total_blocks`, `blocks_above_poc`,
+`blocks_below_poc`, `rotation_factor`, `volume`, and `rows` of `{ p, letters, blocks, v }`: bottom price,
+letters (`A`-`Z`, `a`-`z`, then around again), block indices, and volume, spread over each block's range.
 
 ### Server alerts (`CHARTGEN_SERVER_ALERTS=1`)
 

@@ -41,6 +41,9 @@ Status legend:
 | Add alert at the clicked price (context menu) | ✅ | ✅ | "Add alert at price" opens the alert dialog at that price. [Chart context menu](/chartgen/guides/web/#chart-context-menu), [Alerts](/chartgen/guides/web/#sidebar-and-price-alerts) |
 | Titled dialogs (symbol search, compare, add symbol) | ✅ | ✅ | The compare and watchlist dialogs say "Compare symbol" and "Add symbol". [Compare symbols](/chartgen/guides/web/#compare-symbols), [Watchlist](/chartgen/guides/web/#watchlist) |
 | Mobile and touch layout | ✅ | ◐ | Compact layout with a dock and bottom sheets, pan, pinch and long-press crosshair. No native app, no long-press menu with price actions, tested in device emulation only. [Phones and tablets](/chartgen/guides/web/#phones-and-tablets) |
+| Volume candles | ✅ | ✅ | No help page exists to compare with: width by volume on an even time axis. [Order flow](/chartgen/guides/web/#order-flow) |
+| Volume footprint chart type | ✅ | ◐ | Row size, Cluster and Profile, Buy and Sell, Delta, Total, Ladder, gradient, value area, POC, info box, table pane, imbalances, stacked imbalances. From klines only: no tick-based mode, so rows are estimates. Bars at most 50 px wide. No open interest or footprint alerts. [Order flow](/chartgen/guides/web/#order-flow), [ADR-0048](/chartgen/decisions/0048-order-flow/) |
+| TPO chart type | ✅ | ◐ | Period, block size, row size, value area, split by blocks, letters and blocks, POC, poor high and low, single prints, VAH, VAL, midpoint, open and close, initial balance, volume profile, summary pane, custom sessions. No pre and post market, no right click to split or merge. [Order flow](/chartgen/guides/web/#order-flow), [ADR-0048](/chartgen/decisions/0048-order-flow/) |
 | Multi-chart layouts (several charts in one view) | ✅ | ◐ | 1, 2 or 4 charts with their own symbol, interval and indicators, saved in layouts. No symbol or crosshair sync, no larger grids, no resizable splits. [Chart grid](/chartgen/guides/web/#chart-grid), [ADR-0043](/chartgen/decisions/0043-multi-chart-grid/) |
 
 ## Chart types
@@ -74,7 +77,8 @@ Status legend:
 | Geometry colors editable in Style | ✅ | ✅ | Fill, level, histogram-palette, profile and divergence colors, each with a visibility toggle, in `style.geometry` ([ADR-0035](/chartgen/decisions/0035-styleable-geometry/)). |
 | Indicator on indicator (apply to another indicator's output) | ✅ | ❌ | Every indicator reads the price bars. |
 | Indicators on Heikin Ashi values | ✅ | ✅ | [`chart_style`](/chartgen/reference/mcp/) |
-| Profiles from lower-timeframe data | ✅ | ◐ | Volume and time profiles and CVD spread each bar's volume over its range. [Differences list](/chartgen/reference/indicators/#values-match-tradingview) |
+| Profiles from lower-timeframe data | ✅ | ◐ | `volume_profile`, `fixed_range_vp`, `anchored_vp` and `session_vp` read finer klines on a chart load and say which. `hvn_lvn`, `naked_poc`, `tpo` and `cvd` still spread each bar's volume over its range. [ADR-0048](/chartgen/decisions/0048-order-flow/) |
+| Fixed range, anchored and session volume profile | ✅ | ◐ | Fixed and anchored take typed times and draw at the chart's edge, not over their range. Session draws POC, VAH and VAL lines, no histogram per session. [Order flow](/chartgen/guides/web/#order-flow) |
 | Volume in the default set | ✅ | ✅ | A fresh install starts with the EMA stack, Volume and RSI. Stored sets are never changed. [Managing indicators](/chartgen/guides/web/#managing-indicators) |
 | Persisted indicator set | ✅ (cloud) | ◐ | Saved in `localStorage` per browser, not synced. [ADR-0005](/chartgen/decisions/0005-client-indicator-state/) |
 
