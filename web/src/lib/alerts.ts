@@ -293,6 +293,17 @@ export function eventTime(src: IndicatorSource, chart: ChartValues | undefined):
 }
 
 /**
+ * Whether a detection reported at bar time `at` (seconds) is new. As the window of a
+ * chart pattern slides, the newest occurrence can fall back to an older bar or to none
+ * (0) and later return (ADR-0046), and that is no detection. So it must be newer than
+ * any seen, and on a bar no older than the one the previous reading was on
+ * (`prevBarMs`): nothing else can have closed since. Bars missed while asleep still
+ * count, being newer than that.
+ */
+export const isNewDetection = (at: number, seen: number, prevBarMs: number): boolean =>
+  at > seen && at * 1000 >= prevBarMs;
+
+/**
  * What an indicator's level plots stand on: a jump of a plot to a new swing
  * (ADR-0046) is no crossing, so a reading from another swing does not count.
  */

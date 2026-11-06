@@ -19,6 +19,7 @@ import {
   eventTime,
   indicatorReading,
   isHorizontalTool,
+  isNewDetection,
   levelsAnchor,
   isVerticalLine,
   needsRearm,
@@ -233,7 +234,10 @@ function commit(next: Alert[]): void {
 // is lost (see `forgetBaseline`).
 const lastPrices = new Map<string, number>();
 const baselines = new Map<string, { price: number; time: number }>();
-const readings = new Map<string, { symbol: string; reading: Reading; anchor?: string }>();
+const readings = new Map<
+  string,
+  { symbol: string; reading: Reading; anchor?: string; barMs?: number }
+>();
 
 /** Last live price seen for a symbol, or null. */
 export function lastPrice(symbol: string): number | null {
@@ -605,14 +609,18 @@ export function processPrice(
       case "indicator": {
         const same = indicatorSignatures()[src.instanceKey] === src.signature;
         if (src.against.kind === "event") {
-          // A newer bar than last seen is a crossing of "has happened". The first
-          // reading only sets the baseline: an old detection does not fire.
+          // A new detection is a crossing of "has happened". The first reading only
+          // sets the baseline, and the stored value never falls.
           const at = same ? eventTime(src, tick.chart) : null;
-          const seen = readings.get(a.id)?.reading[0];
-          if (at === null) readings.delete(a.id);
-          else readings.set(a.id, { symbol, reading: [at] });
-          if (at === null) return null;
-          return { prev: seen === undefined ? null : [-1], cur: [seen !== undefined && at > seen ? 1 : -1] };
+          const was = readings.get(a.id);
+          const seen = was?.reading[0];
+          if (at === null) {
+            readings.delete(a.id);
+            return null;
+          }
+          readings.set(a.id, { symbol, reading: [Math.max(at, seen ?? at)], barMs: time });
+          if (seen === undefined) return { prev: null, cur: [-1] };
+          return { prev: [-1], cur: [isNewDetection(at, seen, was!.barMs!) ? 1 : -1] };
         }
         const cur = same ? indicatorReading(src, price, tick.chart) : null;
         const anchor = levelsAnchor(src, tick.chart);

@@ -246,15 +246,20 @@ test.describe("candlestick patterns", () => {
       const w = window as unknown as {
         __chartgenTest: {
           feedPrice: (s: string, p: number) => void;
-          series: () => { indicators: Record<string, { events: { key: string; t: number | null }[] }> };
+          series: () => {
+            bars: { t: number }[];
+            indicators: Record<string, { events: { key: string; t: number | null }[] }>;
+          };
         };
       };
       const active = () =>
         (JSON.parse(localStorage.getItem("chartgen.alerts.list")!) as { active: boolean }[])[0]!.active;
       w.__chartgenTest.feedPrice("BTCUSDT", 100);
       const before = active();
-      const ev = w.__chartgenTest.series().indicators.candlestick_patterns!.events[0]!;
-      ev.t = (ev.t ?? 0) + 3600;
+      const series = w.__chartgenTest.series();
+      const ev = series.indicators.candlestick_patterns!.events[0]!;
+      // On a bar no older than the newest one read: a new detection.
+      ev.t = series.bars.at(-1)!.t;
       w.__chartgenTest.feedPrice("BTCUSDT", 100);
       return { before, after: active() };
     });

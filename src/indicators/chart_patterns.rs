@@ -1459,7 +1459,8 @@ mod tests {
         assert_eq!(f[0].confirmed_at, Some(rs + 4));
     }
 
-    /// `n` bars of a repeatable random walk, with no structure in it.
+    /// `n` bars of a repeatable random walk, with no structure in it. Only + and *:
+    /// no libm, so the fixture below is the same on every machine.
     fn walk(seed: u64, n: usize) -> Vec<Bar> {
         let mut state = seed;
         let mut unit = move || {
@@ -1470,9 +1471,10 @@ mod tests {
         };
         let mut close = 100.0_f64;
         (0..n)
-            .map(|_| {
+            .map(|i| {
                 let open = close;
-                let z = (-2.0 * unit().ln()).sqrt() * (std::f64::consts::TAU * unit()).cos();
+                // Near normal: the sum of twelve uniforms.
+                let z = (0..12).map(|_| unit()).sum::<f64>() - 6.0;
                 close = open * (1.0 + 0.01 * z);
                 Bar {
                     open,
@@ -1480,10 +1482,155 @@ mod tests {
                     low: open.min(close) * (1.0 - 0.005 * unit()),
                     close,
                     volume: 1.0,
-                    date: "x".into(),
+                    date: (EVENT_T0 + i as i64 * EVENT_STEP).to_string(),
                 }
             })
             .collect()
+    }
+
+    const EVENT_T0: i64 = 1_600_000_000;
+    const EVENT_STEP: i64 = 3_600;
+
+    /// What a live chart's `events` report as the 600-bar window slides one closed
+    /// bar at a time, from the real indicator: per instance and side, the newest
+    /// occurrence after each close, as [close index, bar time], only where it changed.
+    fn event_readings() -> Value {
+        let mut runs = vec![];
+        for seed in [11_u64, 23, 37, 53] {
+            let bars = walk(seed, LOOKBACK + 800);
+            for pattern in ["all", "rectangle"] {
+                let ind = ChartPatterns {
+                    pattern: pattern.into(),
+                    ..Default::default()
+                };
+                let mut sides: Vec<(String, Vec<Value>, Option<Value>)> = vec![];
+                for (close, end) in (LOOKBACK..bars.len()).enumerate() {
+                    let data = OhlcvData {
+                        bars: bars[end - LOOKBACK..end].to_vec(),
+                        symbol: None,
+                        interval: None,
+                        session: None,
+                    };
+                    let r = ind.compute(&data);
+                    if sides.is_empty() {
+                        sides = r
+                            .events
+                            .iter()
+                            .map(|e| (e.key.clone(), vec![], None))
+                            .collect();
+                    }
+                    for (e, side) in r.events.iter().zip(&mut sides) {
+                        let t = e.x.map_or(Value::Null, |x| {
+                            json!(data.bars[x as usize].date.parse::<i64>().unwrap())
+                        });
+                        if side.2.as_ref() != Some(&t) {
+                            side.1.push(json!([close, t]));
+                            side.2 = Some(t);
+                        }
+                    }
+                }
+                for (side, changes, _) in sides {
+                    runs.push(json!({
+                        "seed": seed,
+                        "pattern": pattern,
+                        "side": side,
+                        "first": bars[LOOKBACK - 1].date.parse::<i64>().unwrap(),
+                        "closes": bars.len() - LOOKBACK,
+                        "changes": changes,
+                    }));
+                }
+            }
+        }
+        json!({
+            "_comment": "What chart_patterns' events report as the window slides one closed bar at a time over seeded random walks. web/src/stores/alerts.test.ts feeds them to the real alert store. Regenerate with UPDATE_EVENT_READINGS=1 cargo test --lib event_readings",
+            "step": EVENT_STEP,
+            "runs": runs,
+        })
+    }
+
+    const EVENT_READINGS: &str = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/pattern_event_readings.json"
+    );
+
+    #[test]
+    fn event_readings_fixture_is_current_and_holds_the_hard_cases() {
+        let now = event_readings();
+        if std::env::var_os("UPDATE_EVENT_READINGS").is_some() {
+            let mut text = String::from("{\n");
+            text += &format!("  \"_comment\": {},\n", now["_comment"]);
+            text += &format!("  \"step\": {},\n  \"runs\": [\n", now["step"]);
+            let runs = now["runs"].as_array().unwrap();
+            for (i, r) in runs.iter().enumerate() {
+                let comma = if i + 1 < runs.len() { "," } else { "" };
+                text += &format!("    {r}{comma}\n");
+            }
+            text += "  ]\n}\n";
+            std::fs::write(EVENT_READINGS, text).unwrap();
+        }
+        let stored: Value =
+            serde_json::from_str(&std::fs::read_to_string(EVENT_READINGS).unwrap()).unwrap();
+        assert_eq!(stored, now, "regenerate: see the fixture's _comment");
+
+        // A value falling back, to an older bar or to none, then rising again is
+        // what fired stale alerts. The fixture has to hold it to test anything.
+        let (mut fell, mut none_after_some) = (0, 0);
+        for r in now["runs"].as_array().unwrap() {
+            let mut top = i64::MIN;
+            for c in r["changes"].as_array().unwrap() {
+                match c[1].as_i64() {
+                    Some(t) if t < top => fell += 1,
+                    Some(t) => top = t,
+                    None if top > i64::MIN => none_after_some += 1,
+                    None => {}
+                }
+            }
+        }
+        assert!(fell > 0, "no value fell back to an older bar");
+        assert!(none_after_some > 0, "no value fell back to none");
+    }
+
+    #[test]
+    fn sliding_the_window_leaves_the_newer_half_alone() {
+        // Unlike growing a series, sliding moves the first pivots, so the older half
+        // of the window gains and loses confirmed patterns (ADR-0046 says so). The
+        // newer half must not: that is what a reader of the newest bars relies on.
+        let s = Settings::default();
+        let half = LOOKBACK / 2;
+        let (mut fresh, mut late, mut gone) = (0, 0, 0);
+        for seed in [101_u64, 211, 307, 401] {
+            let bars = walk(seed, LOOKBACK + 700);
+            let mut before: std::collections::BTreeSet<(usize, &str)> = Default::default();
+            for end in LOOKBACK..bars.len() {
+                let from = end - LOOKBACK;
+                let now: std::collections::BTreeSet<(usize, &str)> =
+                    detect(&bars[from..end], &s, "all")
+                        .iter()
+                        .filter_map(|f| f.confirmed_at.map(|at| (at + from, f.kind.key())))
+                        .collect();
+                if end > LOOKBACK {
+                    let newest = end - 1;
+                    for k in now.difference(&before) {
+                        match newest - k.0 {
+                            0 | 1 => fresh += 1,
+                            a if a < half => late += 1,
+                            _ => {}
+                        }
+                    }
+                    for k in before.difference(&now) {
+                        if k.0 > from && newest - k.0 < half {
+                            gone += 1;
+                        }
+                    }
+                }
+                before = now;
+            }
+        }
+        assert!(fresh >= 15, "too few to mean anything: {fresh}");
+        assert!(
+            (late + gone) * 10 <= fresh,
+            "newer half moved: {late} late, {gone} gone, against {fresh} new"
+        );
     }
 
     #[test]

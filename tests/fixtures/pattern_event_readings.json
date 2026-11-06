@@ -1,0 +1,22 @@
+{
+  "_comment": "What chart_patterns' events report as the window slides one closed bar at a time over seeded random walks. web/src/stores/alerts.test.ts feeds them to the real alert store. Regenerate with UPDATE_EVENT_READINGS=1 cargo test --lib event_readings",
+  "step": 3600,
+  "runs": [
+    {"changes":[[0,1601706400],[80,1602444400],[318,1603301200],[371,1603492000],[780,1604964400]],"closes":800,"first":1602156400,"pattern":"all","seed":11,"side":"bullish"},
+    {"changes":[[0,1601875600],[459,null],[464,1601875600],[468,null],[671,1604572000]],"closes":800,"first":1602156400,"pattern":"all","seed":11,"side":"bearish"},
+    {"changes":[[0,null],[562,1602444400],[607,null],[614,1602444400],[627,null],[629,1602444400],[643,null]],"closes":800,"first":1602156400,"pattern":"rectangle","seed":11,"side":"bullish"},
+    {"changes":[[0,null]],"closes":800,"first":1602156400,"pattern":"rectangle","seed":11,"side":"bearish"},
+    {"changes":[[0,1601792800],[130,1602624400],[441,1603744000],[522,1604035600]],"closes":800,"first":1602156400,"pattern":"all","seed":23,"side":"bullish"},
+    {"changes":[[0,1601350000],[15,1602210400],[254,1603070800],[406,1603618000]],"closes":800,"first":1602156400,"pattern":"all","seed":23,"side":"bearish"},
+    {"changes":[[0,null],[539,1602188800],[547,null]],"closes":800,"first":1602156400,"pattern":"rectangle","seed":23,"side":"bullish"},
+    {"changes":[[0,null],[15,1602210400],[539,null],[547,1602210400],[565,null]],"closes":800,"first":1602156400,"pattern":"rectangle","seed":23,"side":"bearish"},
+    {"changes":[[0,1601612800],[109,1602548800],[142,1602667600],[221,1602952000],[516,1604014000]],"closes":800,"first":1602156400,"pattern":"all","seed":37,"side":"bullish"},
+    {"changes":[[0,1601908000],[68,1602401200],[292,1603207600],[646,1604482000]],"closes":800,"first":1602156400,"pattern":"all","seed":37,"side":"bearish"},
+    {"changes":[[0,null]],"closes":800,"first":1602156400,"pattern":"rectangle","seed":37,"side":"bullish"},
+    {"changes":[[0,null],[440,1601933200],[460,null]],"closes":800,"first":1602156400,"pattern":"rectangle","seed":37,"side":"bearish"},
+    {"changes":[[0,1601015200],[165,1601137600],[180,1601015200],[187,1601137600],[221,1602952000],[234,1602998800],[279,1603160800]],"closes":800,"first":1602156400,"pattern":"all","seed":53,"side":"bullish"},
+    {"changes":[[0,1601342800],[20,1602228400],[161,1602736000],[643,null],[649,1604492800],[770,1604928400]],"closes":800,"first":1602156400,"pattern":"all","seed":53,"side":"bearish"},
+    {"changes":[[0,null]],"closes":800,"first":1602156400,"pattern":"rectangle","seed":53,"side":"bullish"},
+    {"changes":[[0,null]],"closes":800,"first":1602156400,"pattern":"rectangle","seed":53,"side":"bearish"}
+  ]
+}

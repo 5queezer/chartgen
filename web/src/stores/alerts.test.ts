@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+import eventReadings from "../../../tests/fixtures/pattern_event_readings.json";
 import semantics from "../../../tests/fixtures/alert_semantics.json";
 
 function stubStorage(initial: Record<string, string> = {}) {
@@ -920,7 +921,10 @@ describe("indicator alerts", () => {
 
 describe("alerts on a detection (ADR-0046)", () => {
   const key = "chart_patterns";
-  const tick = (t: number | null) => ({
+  const H = 3600;
+  /** The chart at forming bar `bar` (seconds), with the newest detection at `t`. */
+  const tick = (t: number | null, bar: number) => ({
+    time: bar * 1000,
     chart: {
       interval: "1h",
       indicators: { [key]: { events: [{ key: "bullish", t }, { key: "bearish", t: null }] } },
@@ -947,45 +951,136 @@ describe("alerts on a detection (ADR-0046)", () => {
     expect(added).not.toBeNull();
     return s;
   }
+  /** Feed `(t, bar)` readings; the indexes that fired. */
+  const fires = (
+    s: Awaited<ReturnType<typeof withEvent>>,
+    readings: Array<[number | null, number]>,
+  ) =>
+    readings.flatMap(([t, bar], i) =>
+      s.processPrice("BTCUSDT", 1, 0, tick(t, bar)).length > 0 ? [i] : [],
+    );
 
   it("an old detection does not fire when the chart loads", async () => {
     const s = await withEvent();
-    expect(s.processPrice("BTCUSDT", 1, 0, tick(100))).toEqual([]);
-    expect(s.processPrice("BTCUSDT", 1, 0, tick(100))).toEqual([]);
+    expect(fires(s, [[100 * H, 500 * H], [100 * H, 500 * H]])).toEqual([]);
   });
 
   it("each newer detection fires once", async () => {
     const s = await withEvent();
-    s.processPrice("BTCUSDT", 1, 0, tick(100));
-    expect(s.processPrice("BTCUSDT", 1, 0, tick(160))).toHaveLength(1);
-    expect(s.processPrice("BTCUSDT", 1, 0, tick(160))).toEqual([]);
-    // On the very next bar too: nothing has to fall back first.
-    expect(s.processPrice("BTCUSDT", 1, 0, tick(220))).toHaveLength(1);
+    // Bar 501 closes while bar 502 forms, and then bar 502 on the very next bar:
+    // nothing has to fall back first.
+    expect(
+      fires(s, [
+        [100 * H, 501 * H],
+        [501 * H, 502 * H],
+        [501 * H, 502 * H],
+        [502 * H, 503 * H],
+      ]),
+    ).toEqual([1, 3]);
   });
 
-  it("the first detection ever fires too", async () => {
+  it("the first detection ever fires too, if it is new", async () => {
     const s = await withEvent();
-    s.processPrice("BTCUSDT", 1, 0, tick(null));
-    expect(s.processPrice("BTCUSDT", 1, 0, tick(160))).toHaveLength(1);
+    expect(fires(s, [[null, 500 * H], [500 * H, 501 * H]])).toEqual([1]);
+  });
+
+  it("a value falling back and returning does not fire: 100, 0, 90", async () => {
+    const s = await withEvent();
+    expect(fires(s, [[100 * H, 500 * H], [null, 501 * H], [90 * H, 502 * H]])).toEqual([]);
+  });
+
+  it("a value falling back and returning does not fire: 100, 90, 100", async () => {
+    const s = await withEvent();
+    expect(fires(s, [[100 * H, 500 * H], [90 * H, 501 * H], [100 * H, 502 * H]])).toEqual([]);
+  });
+
+  it("an old bar never seen before does not fire, the window only just showed it", async () => {
+    const s = await withEvent();
+    // None so far, then a pattern 400 bars back: the hole in "the first ever".
+    expect(fires(s, [[null, 500 * H], [100 * H, 501 * H]])).toEqual([]);
+    // Older than the bar last read, though newer than anything seen.
+    const t = await withEvent();
+    expect(fires(t, [[100 * H, 500 * H], [200 * H, 501 * H]])).toEqual([]);
+  });
+
+  it("after falling back, a really new detection still fires", async () => {
+    const s = await withEvent();
+    expect(
+      fires(s, [
+        [100 * H, 500 * H],
+        [null, 501 * H],
+        [501 * H, 502 * H],
+      ]),
+    ).toEqual([2]);
+  });
+
+  it("a catch-up after sleep still fires, once", async () => {
+    const s = await withEvent();
+    // Asleep from bar 500 to bar 540: a detection on bar 520 happened meanwhile.
+    expect(fires(s, [[100 * H, 500 * H], [520 * H, 540 * H], [520 * H, 541 * H]])).toEqual([1]);
+  });
+
+  describe("on the real indicator as its window slides (tests/fixtures/pattern_event_readings.json)", () => {
+    let firedInAll = 0;
+    for (const run of eventReadings.runs) {
+      it(`seed ${run.seed}, ${run.pattern}, ${run.side}`, async () => {
+        const s = await withEvent();
+        const stale: number[] = [];
+        let fired = 0;
+        let top = -Infinity;
+        let c = 0;
+        let value: number | null = null;
+        let prevBar = 0;
+        for (let i = 0; i < run.closes; i++) {
+          const change = run.changes[c] as [number, number | null] | undefined;
+          if (change && change[0] === i) {
+            value = change[1];
+            c++;
+          }
+          // Bar `first + i` has closed, and the next one is forming.
+          const bar = run.first + (i + 1) * eventReadings.step;
+          const hit = s.processPrice("BTCUSDT", 1, 0, tick(value, bar)).length > 0;
+          // No old bar and no bar twice. Without a previous reading, nothing fires.
+          if (hit) {
+            fired++;
+            if (value === null || value <= top || value < prevBar) stale.push(i);
+          }
+          // Anything else new, on a bar that just closed, must have fired.
+          if (i > 0 && !hit && value !== null && value > top && value >= prevBar) stale.push(-i);
+          if (value !== null) top = Math.max(top, value);
+          prevBar = bar;
+        }
+        expect(stale).toEqual([]);
+        firedInAll += fired;
+      });
+    }
+
+    it("fired on something", () => {
+      expect(firedInAll).toBeGreaterThan(5);
+    });
   });
 
   it("a once alert stops after firing", async () => {
     const s = await withEvent("once");
-    s.processPrice("BTCUSDT", 1, 0, tick(100));
-    expect(s.processPrice("BTCUSDT", 1, 0, tick(160))).toHaveLength(1);
-    expect(s.processPrice("BTCUSDT", 1, 0, tick(220))).toEqual([]);
+    expect(
+      fires(s, [
+        [100 * H, 500 * H],
+        [500 * H, 501 * H],
+        [501 * H, 502 * H],
+      ]),
+    ).toEqual([1]);
     expect(s.alerts()[0]!.active).toBe(false);
   });
 
   it("does not run with another interval or other settings on the chart", async () => {
     const s = await withEvent();
-    s.processPrice("BTCUSDT", 1, 0, tick(100));
-    const other = { chart: { ...tick(160).chart, interval: "4h" } };
+    s.processPrice("BTCUSDT", 1, 0, tick(100 * H, 500 * H));
+    const other = { ...tick(500 * H, 501 * H), chart: { ...tick(500 * H, 501 * H).chart, interval: "4h" } };
     expect(s.processPrice("BTCUSDT", 1, 0, other)).toEqual([]);
     // No value on that chart: the baseline starts over.
-    expect(s.processPrice("BTCUSDT", 1, 0, tick(160))).toEqual([]);
+    expect(s.processPrice("BTCUSDT", 1, 0, tick(501 * H, 502 * H))).toEqual([]);
     s.setIndicatorSignatures({ [key]: "changed" });
-    expect(s.processPrice("BTCUSDT", 1, 0, tick(220))).toEqual([]);
+    expect(s.processPrice("BTCUSDT", 1, 0, tick(502 * H, 503 * H))).toEqual([]);
   });
 
   it("survives a reload and rejects a detection without a key", async () => {
