@@ -3882,11 +3882,11 @@ mod tests {
                 key.clone(),
                 (800, None),
                 &clock,
-                far(),
+                Instant::now() + Duration::from_secs(5),
                 no_request,
             );
-            assert_eq!(small.unwrap().len(), 800);
             finish.wait();
+            assert_eq!(small.unwrap().len(), 800);
             assert_eq!(long.join().unwrap().err().unwrap(), "the walk fails");
         });
         // A failed walk kept its first page, and the next reads on from there.
