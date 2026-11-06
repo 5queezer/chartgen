@@ -94,22 +94,11 @@ fn bar_open_ms(bar: &Bar) -> Option<i64> {
     bar_ts(bar).map(|s| s.saturating_mul(1000))
 }
 
-/// Binance REST interval for a Yahoo-style timeframe the frontend may send
-/// ("1wk" → "1w", "1mo" → "1M", "60m" → "1h"). Binance names pass through.
-pub(crate) fn binance_interval(interval: &str) -> &str {
-    match interval {
-        "1wk" => "1w",
-        "1mo" => "1M",
-        "60m" => "1h",
-        other => other,
-    }
-}
-
 fn binance_klines_url(symbol: &str, interval: &str, limit: usize, end_ms: Option<i64>) -> String {
     let mut url = format!(
         "https://api.binance.com/api/v3/klines?symbol={}&interval={}&limit={}",
         percent_encode(&symbol.to_uppercase()),
-        binance_interval(interval),
+        interval,
         limit
     );
     if let Some(end) = end_ms {
@@ -1627,21 +1616,17 @@ mod tests {
     }
 
     #[test]
-    fn binance_interval_maps_yahoo_names() {
-        assert_eq!(binance_interval("1wk"), "1w");
-        assert_eq!(binance_interval("1mo"), "1M");
-        assert_eq!(binance_interval("60m"), "1h");
+    fn binance_urls_carry_the_kline_name() {
         for native in [
             "1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "8h", "12h", "1d", "3d", "1w",
             "1M",
         ] {
-            assert_eq!(binance_interval(native), native);
+            let url = binance_klines_url("BTCUSDT", native, 10, None);
+            assert!(url.contains(&format!("&interval={native}&")), "{url}");
         }
-        assert!(binance_klines_url("BTCUSDT", "1wk", 10, None).contains("&interval=1w&"));
         // A symbol cannot inject query parameters.
         let url = binance_klines_url("BTC&limit=1#x", "1h", 10, None);
         assert!(url.contains("symbol=BTC%26LIMIT%3D1%23X&interval=1h&limit=10"));
-        assert!(binance_klines_url("BTCUSDT", "1mo", 10, None).contains("&interval=1M&"));
         // Interval durations agree for both spellings (sample grid, Yahoo window).
         assert_eq!(data::interval_secs("1wk"), data::interval_secs("1w"));
         assert_eq!(data::interval_secs("1mo"), data::interval_secs("1M"));

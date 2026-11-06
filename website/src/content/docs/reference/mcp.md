@@ -501,9 +501,10 @@ Yahoo has no native 3m, 2h, 4h, 6h, 12h or 3d, so chartgen builds them from
   shorter; at 12h each session is one bar. A session ends where two
   consecutive source bars are more than an hour apart, so the overnight gap,
   a futures daily break (ES=F trades 18:00–17:00 ET and restarts its buckets
-  at 18:00) and a lunch break that leaves a gap in the hourly bars each start
-  a new session. A market with such a break therefore anchors its afternoon
-  separately. Each bucket's `t` is its first source bar. Crypto (`BTC-USD`)
+  at 18:00) and a lunch break that leaves a gap in Yahoo's rows each start
+  a new session, so such a market anchors its afternoon separately. Tokyo, Shanghai
+  and Hong Kong keep null rows through lunch, so theirs stays on the morning's grid.
+  Each bucket's `t` is its slot on the session's grid. Crypto (`BTC-USD`)
   and FX (`EURUSD=X`) trade around the clock and use the UTC grid instead,
   with `t` at the grid start.
 - **3m** uses the UTC grid for every symbol (exchanges open on 15-minute
@@ -760,7 +761,8 @@ forming bar, with every indicator recomputed. Merge it like a polled tail.
   synthetic feed ticks every ~500 ms.
 - **Cadence.** The server follows Binance's kline stream (every 2 s) and
   its aggTrade stream (each trade), and pushes at most 4 tails per second
-  per chart (2 per second when `warmup` is above 300). The first tail is
+  per chart (2 per second when `warmup` is above 300, or when an interval with no
+  stream of its own holds more than 302 native bars). The first tail is
   pushed right after subscribing.
 - **Sharing.** Subscriptions with equal arguments share one rolling window
   and one recompute. Every chart of a symbol and feed interval shares one Binance

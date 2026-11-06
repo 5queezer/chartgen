@@ -83,13 +83,35 @@ impl Default for Limits {
     }
 }
 
-/// The recompute costs about linearly in `TAIL_BARS + warmup`, so large
-/// windows push half as often.
-fn push_interval(base: Duration, warmup: usize) -> Duration {
-    if warmup <= 300 {
+/// The recompute costs about linearly in the bars of its window, native ones
+/// included, so large windows push half as often.
+fn push_interval(base: Duration, window: usize) -> Duration {
+    if window <= TAIL_BARS + 300 {
         base
     } else {
         base * 2
+    }
+}
+
+/// Bars of a feed that one bar of the chart takes: more than 1 when the chart has
+/// no stream of its own, and the window then holds native bars.
+fn per_bar(timeframe: &str, feed_interval: &str) -> usize {
+    match (
+        data::interval_secs(timeframe),
+        data::interval_secs(feed_interval),
+    ) {
+        (Some(chart), Some(feed)) if feed < chart => (chart / feed) as usize,
+        _ => 1,
+    }
+}
+
+/// Feed bars a window holds for a tail computed over `warmup`. One bar more than
+/// that when resampling, as the oldest may lack klines.
+fn window_bars(warmup: usize, per_bar: usize) -> usize {
+    if per_bar > 1 {
+        ((TAIL_BARS + warmup + 1) * per_bar).min(fetch::MAX_BASE_BARS)
+    } else {
+        TAIL_BARS + warmup
     }
 }
 
@@ -232,9 +254,11 @@ pub struct ChartRequest {
 }
 
 impl ChartRequest {
-    /// Shortest gap between two pushes of this chart's group.
-    fn push_interval(&self, base: Duration) -> Duration {
-        push_interval(base, self.asked_warmup)
+    /// Shortest gap between two pushes of this chart's group, on this feed. It
+    /// follows the client's warmup, so the server's own raise does not slow it.
+    fn push_interval(&self, base: Duration, feed_interval: &str) -> Duration {
+        let per_bar = per_bar(&self.timeframe, feed_interval);
+        push_interval(base, window_bars(self.asked_warmup, per_bar))
     }
 }
 
@@ -515,7 +539,7 @@ impl ChartHub {
                 id,
                 events,
                 feed.1.clone(),
-                req.push_interval(limits.min_push_interval),
+                req.push_interval(limits.min_push_interval, &feed.1),
             ));
             st.groups.insert(
                 req.clone(),
@@ -640,18 +664,9 @@ async fn run_group(
             hub.drop_group(&req, id);
         }
     };
-    let resample_to = Interval::parse(&req.timeframe)
-        .ok()
-        .filter(|iv| data::interval_secs(&feed_interval).is_some_and(|secs| secs < iv.secs()));
-    let len = match resample_to {
-        // One bar more than the window: its oldest may lack klines.
-        Some(iv) => {
-            let per_bar =
-                (iv.secs() / data::interval_secs(&feed_interval).unwrap_or(iv.secs())) as usize;
-            ((TAIL_BARS + req.warmup + 1) * per_bar).min(fetch::MAX_BASE_BARS)
-        }
-        None => TAIL_BARS + req.warmup,
-    };
+    let per_bar = per_bar(&req.timeframe, &feed_interval);
+    let resample_to = Interval::parse(&req.timeframe).ok().filter(|_| per_bar > 1);
+    let len = window_bars(req.warmup, per_bar);
     let symbol = req.ticker.clone();
     let seed_interval = match resample_to {
         Some(_) => feed_interval,
@@ -813,20 +828,28 @@ mod tests {
             );
         }
         let base = Duration::from_millis(250);
-        assert_eq!(push_interval(base, 300), base);
-        assert_eq!(push_interval(base, 1000), base * 2);
+        assert_eq!(push_interval(base, TAIL_BARS + 300), base);
+        assert_eq!(push_interval(base, TAIL_BARS + 301), base * 2);
         // A server-raised warmup (ADR-0032) keeps the client's cadence.
         let raised = ChartRequest {
             warmup: 891,
             asked_warmup: 300,
             ..req("BTCUSDT", r#"["ema_stack"]"#)
         };
-        assert_eq!(raised.push_interval(base), base);
+        assert_eq!(raised.push_interval(base, "1m"), base);
         let asked = ChartRequest {
             asked_warmup: 1000,
             ..raised
         };
-        assert_eq!(asked.push_interval(base), base * 2);
+        assert_eq!(asked.push_interval(base, "1m"), base * 2);
+        // A chart built from a finer feed pays for that feed's bars.
+        let custom = ChartRequest {
+            timeframe: "7m".into(),
+            asked_warmup: 300,
+            ..req("BTCUSDT", "[]")
+        };
+        assert_eq!(custom.push_interval(base, "7m"), base);
+        assert_eq!(custom.push_interval(base, "1m"), base * 2);
     }
 
     /// Feeds that the test drives by hand, counting how many are running.
