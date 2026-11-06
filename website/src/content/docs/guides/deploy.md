@@ -69,21 +69,38 @@ location / {
 
 ## Coolify auto-deploy
 
-`.github/workflows/deploy.yml` fires when `CI` finishes successfully on
-`master` and calls Coolify's deploy endpoint:
+A systemd timer on the Coolify host (`scripts/autodeploy/`) polls the GitHub
+API every 5 minutes. When `master` has a new head SHA and the `CI` workflow
+succeeded for it, the script calls Coolify's deploy endpoint locally:
 
 ```
-GET ${COOLIFY_BASE_URL}/api/v1/deploy?uuid=${COOLIFY_APP_UUID}&force=false
+POST ${COOLIFY_URL}/api/v1/deploy?uuid=${COOLIFY_APP_UUID}&force=false
 Authorization: Bearer ${COOLIFY_API_TOKEN}
 ```
 
-Required repository secrets:
+A pending CI run is retried on the next tick; a failed one is not deployed.
+A failed Coolify call keeps the old state, so the next tick retries. The
+first run only records the current SHA. A deploy takes 20–25 minutes.
+Nothing is exposed inbound and the repository holds no Coolify secrets; see
+[ADR-0037](/chartgen/decisions/0037-pull-based-deploy/).
 
-| Secret | What it is |
-|--------|------------|
-| `COOLIFY_BASE_URL` | Coolify instance root, e.g. `https://coolify.example.com`. |
+Install, pause and uninstall steps are in `scripts/autodeploy/README.md`.
+The token lives in `/etc/chartgen-autodeploy.env` on the host:
+
+| Variable | What it is |
+|----------|------------|
+| `COOLIFY_URL` | Coolify instance root, e.g. `http://192.168.1.242:8000`. |
 | `COOLIFY_APP_UUID` | UUID of the chartgen application in Coolify. |
 | `COOLIFY_API_TOKEN` | Coolify API token with deploy permission. |
+| `GITHUB_REPO` | `owner/name` to poll, default `5queezer/chartgen`. |
+
+### The old GitHub workflow
+
+`.github/workflows/deploy.yml` used to call a previous Coolify host with
+`GET` from a GitHub runner. That host returned 403 and the current Coolify
+is LAN-only, so GitHub-hosted runners cannot reach it. The workflow is
+removed; the `COOLIFY_BASE_URL`, `COOLIFY_APP_UUID` and `COOLIFY_API_TOKEN`
+repository secrets are unused and can be deleted.
 
 ## ARM cross-compilation
 
