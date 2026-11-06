@@ -1757,12 +1757,14 @@ mod interval_tests {
     #[test]
     fn a_catch_up_that_fills_a_page_is_read_afresh_not_left_with_a_hole() {
         // (d) The series was last read 700 hours ago: the rows since are more than a page.
+        let then = NOW - 700 * HOUR_MS;
         let mut fake = Fake {
-            rows: rows_every(HOUR_MS, NOW - 1500 * HOUR_MS, NOW),
+            rows: rows_every(HOUR_MS, NOW - 1500 * HOUR_MS, then),
             asked: vec![],
         };
-        let old = window(NOW - 1200 * HOUR_MS, NOW - 700 * HOUR_MS);
-        let held = collect_hourly(&mut fake, None, &old, NOW - 700 * HOUR_MS, 8);
+        let old = window(NOW - 1200 * HOUR_MS, then);
+        let held = collect_hourly(&mut fake, None, &old, then, 8);
+        fake.rows = rows_every(HOUR_MS, NOW - 1500 * HOUR_MS, NOW);
         let w = window(NOW - 1200 * HOUR_MS, NOW + HOUR_MS);
         let got = collect_hourly(&mut fake, Some((&held.rows, held.from)), &w, NOW, 8);
         assert!(
