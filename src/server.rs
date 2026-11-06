@@ -28,9 +28,10 @@ struct OAuthClient {
     _client_secret: Option<String>,
     redirect_uris: Vec<String>,
     created_at: Instant,
-    /// When it last received a token; `None` if it never did (unused clients
-    /// are collected, and evicted first).
-    last_token: Option<Instant>,
+    /// When it last received a token or made a call with one; `None` if it
+    /// never received one (unused clients are collected, and evicted first).
+    /// In memory only: a restart starts over from `last_token_at`.
+    last_used: Option<Instant>,
 }
 
 /// Dynamic client registration limits: `/authorize` auto-approves, so
@@ -133,18 +134,18 @@ impl OAuthStore {
         }
         hits.push(now);
         self.clients.retain(|_, c| {
-            c.last_token.is_some() || now.duration_since(c.created_at) < UNUSED_CLIENT_TTL
+            c.last_used.is_some() || now.duration_since(c.created_at) < UNUSED_CLIENT_TTL
         });
         Ok(())
     }
 
     /// Keep the table below `MAX_CLIENTS` for one more client by evicting
-    /// never-tokened clients, oldest first, then the least recently tokened
-    /// ones (ADR-0036). Their tokens and codes go too: a token outliving its
-    /// client could still register scripts for an owner no longer on record.
-    /// Returns the ids evicted. A client owning stored scripts is never
-    /// evicted, so `script_owners` (`None`: unknown) is only asked when full,
-    /// and without enough other clients this answers 503 and evicts nothing.
+    /// never-tokened clients, oldest first, then the ones longest out of use
+    /// (ADR-0036). Their pending codes go too. A client with a live token is
+    /// never evicted, so a stranger cannot revoke a session in use, and neither
+    /// is one owning stored scripts. `script_owners` (`None`: unknown) is only
+    /// asked when full. Returns the ids evicted; without enough evictable
+    /// clients this answers 503 and evicts nothing.
     fn make_room(
         &mut self,
         script_owners: impl FnOnce() -> Option<HashSet<String>>,
@@ -162,11 +163,13 @@ impl OAuthStore {
         let Some(owners) = script_owners() else {
             return full();
         };
+        self.cleanup_expired();
+        let live: HashSet<&str> = self.tokens.values().map(|t| t.client_id.as_str()).collect();
         let mut candidates: Vec<_> = self
             .clients
             .iter()
-            .filter(|(id, _)| !owners.contains(*id))
-            .map(|(id, c)| (c.last_token, c.created_at, id.clone()))
+            .filter(|(id, _)| !owners.contains(*id) && !live.contains(id.as_str()))
+            .map(|(id, c)| (c.last_used, c.created_at, id.clone()))
             .collect();
         if candidates.len() < excess {
             return full();
@@ -180,7 +183,6 @@ impl OAuthStore {
         for id in &evicted {
             self.clients.remove(id);
         }
-        self.tokens.retain(|_, t| !evicted.contains(&t.client_id));
         self.codes.retain(|_, c| !evicted.contains(&c.client_id));
         Ok(evicted)
     }
@@ -195,7 +197,13 @@ impl OAuthStore {
 
     fn validate_token(&mut self, token: &str) -> bool {
         self.cleanup_expired();
-        self.tokens.contains_key(token)
+        let Some(t) = self.tokens.get(token) else {
+            return false;
+        };
+        if let Some(c) = self.clients.get_mut(&t.client_id) {
+            c.last_used = Some(Instant::now());
+        }
+        true
     }
 
     /// The OAuth client a valid token was issued to: the owner of that
@@ -327,7 +335,7 @@ async fn oauth_register(
         _client_secret: Some(client_secret.clone()),
         redirect_uris: body.redirect_uris.clone(),
         created_at: Instant::now(),
-        last_token: None,
+        last_used: None,
     };
 
     oauth.clients.insert(client_id.clone(), client);
@@ -601,7 +609,7 @@ async fn oauth_token(
         },
     );
     if let Some(c) = s.clients.get_mut(&body.client_id) {
-        c.last_token = Some(Instant::now());
+        c.last_used = Some(Instant::now());
     }
     #[cfg(feature = "scripting")]
     if let Some(store) = scripting::persistence::global() {
@@ -1231,7 +1239,7 @@ pub async fn run_server(port: u16, engine: Option<Arc<RwLock<TradingEngine>>>) {
                             _client_secret: None,
                             redirect_uris: c.redirect_uris,
                             created_at: instant_of(c.created_at),
-                            last_token: c.last_token_at.map(instant_of),
+                            last_used: c.last_token_at.map(instant_of),
                         },
                     );
                 }
@@ -1954,27 +1962,42 @@ mod tests {
         }
     }
 
-    fn client(age: Duration, last_token_age: Option<Duration>) -> OAuthClient {
+    fn client(age: Duration, last_used_age: Option<Duration>) -> OAuthClient {
         OAuthClient {
             _client_secret: None,
             redirect_uris: vec![],
             created_at: Instant::now() - age,
-            last_token: last_token_age.map(|a| Instant::now() - a),
+            last_used: last_used_age.map(|a| Instant::now() - a),
         }
     }
 
-    /// `MAX_CLIENTS` clients; the lower the index, the older its token.
+    /// `MAX_CLIENTS` clients with no live token; the lower the index, the
+    /// longer out of use.
     fn full_table() -> OAuthStore {
         let mut s = OAuthStore::new();
         for i in 0..MAX_CLIENTS {
-            let token_age = Duration::from_secs((MAX_CLIENTS - i) as u64 * 60);
+            let unused_for = Duration::from_secs((MAX_CLIENTS - i) as u64 * 60);
             s.clients.insert(
                 format!("c{i}"),
-                client(Duration::from_secs(1), Some(token_age)),
+                client(Duration::from_secs(1), Some(unused_for)),
             );
         }
         s
     }
+
+    fn give_token(s: &mut OAuthStore, token: &str, client_id: &str, expires_in: Duration) {
+        s.tokens.insert(
+            token.into(),
+            AccessToken {
+                _token: token.into(),
+                client_id: client_id.into(),
+                created_at: Instant::now(),
+                expires_in,
+            },
+        );
+    }
+
+    const LIVE: Duration = Duration::from_secs(600);
 
     fn nobody_owns_scripts() -> Option<HashSet<String>> {
         Some(HashSet::new())
@@ -2035,7 +2058,7 @@ mod tests {
     }
 
     #[test]
-    fn make_room_evicts_never_tokened_oldest_first_then_least_recently_tokened() {
+    fn make_room_evicts_never_tokened_oldest_first_then_longest_out_of_use() {
         let mut s = full_table();
         s.clients.remove("c500");
         s.clients.remove("c501");
@@ -2088,18 +2111,48 @@ mod tests {
     }
 
     #[test]
-    fn make_room_drops_the_tokens_and_codes_of_evicted_clients_only() {
+    fn make_room_never_touches_a_live_session() {
+        let mut s = full_table();
+        give_token(&mut s, "t0", "c0", LIVE);
+        assert_eq!(s.make_room(nobody_owns_scripts).unwrap(), ["c1"]);
+        assert!(s.clients.contains_key("c0") && s.validate_token("t0"));
+    }
+
+    #[test]
+    fn make_room_refuses_when_everything_left_is_live_or_owned() {
+        let mut s = full_table();
+        let ids: Vec<String> = s.clients.keys().cloned().collect();
+        for (i, id) in ids.iter().enumerate().skip(1) {
+            give_token(&mut s, &format!("t{i}"), id, LIVE);
+        }
+        let owners: HashSet<String> = [ids[0].clone()].into();
+        let (status, _) = s.make_room(|| Some(owners)).unwrap_err();
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(s.clients.len(), MAX_CLIENTS);
+        assert_eq!(s.tokens.len(), MAX_CLIENTS - 1);
+    }
+
+    #[test]
+    fn make_room_does_not_count_an_expired_token_as_live() {
+        let mut s = full_table();
+        give_token(&mut s, "t0", "c0", Duration::ZERO);
+        assert_eq!(s.make_room(nobody_owns_scripts).unwrap(), ["c0"]);
+    }
+
+    #[test]
+    fn a_call_with_a_token_counts_as_use() {
+        let mut s = full_table();
+        give_token(&mut s, "t0", "c0", LIVE);
+        assert!(s.validate_token("t0"));
+        s.tokens.clear();
+        assert_eq!(s.make_room(nobody_owns_scripts).unwrap(), ["c1"]);
+        assert!(!s.validate_token("t0"));
+    }
+
+    #[test]
+    fn make_room_drops_the_codes_of_evicted_clients_only() {
         let mut s = full_table();
         for (key, client_id) in [("gone", "c0"), ("kept", "c1")] {
-            s.tokens.insert(
-                key.into(),
-                AccessToken {
-                    _token: key.into(),
-                    client_id: client_id.into(),
-                    created_at: Instant::now(),
-                    expires_in: Duration::from_secs(60),
-                },
-            );
             s.codes.insert(
                 key.into(),
                 AuthCode {
@@ -2113,7 +2166,6 @@ mod tests {
             );
         }
         assert_eq!(s.make_room(nobody_owns_scripts).unwrap(), ["c0"]);
-        assert!(!s.tokens.contains_key("gone") && s.tokens.contains_key("kept"));
         assert!(!s.codes.contains_key("gone") && s.codes.contains_key("kept"));
     }
 

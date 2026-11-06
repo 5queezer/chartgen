@@ -1247,11 +1247,11 @@ fn stored_clients(db: &std::path::Path) -> i64 {
         .unwrap()
 }
 
-/// At the limit the least recently tokened client that owns no scripts goes,
+/// At the limit the client longest out of use that owns no scripts goes,
 /// from memory and from the store, and that order holds after a restart.
 #[cfg(feature = "scripting")]
 #[test]
-fn test_full_table_evicts_least_recently_tokened_non_owner_across_restart() {
+fn test_full_table_evicts_longest_unused_non_owner_across_restart() {
     let db = store_path("evict");
     seed_tokened_clients(&db, MAX_CLIENTS, 2);
     let port = free_port();
@@ -1303,18 +1303,15 @@ fn test_full_table_of_script_owners_still_refuses() {
     let _ = std::fs::remove_dir_all(db.parent().unwrap());
 }
 
-/// An evicted client loses its live token and pending code, and recovers by
-/// registering again.
+/// An evicted client loses its pending code, and recovers by registering again.
 #[cfg(feature = "scripting")]
 #[test]
-fn test_evicted_client_loses_its_token_and_code() {
-    let db = store_path("evict-token");
+fn test_evicted_client_loses_its_pending_code() {
+    let db = store_path("evict-code");
     seed_tokened_clients(&db, MAX_CLIENTS - 1, MAX_CLIENTS - 1);
     let port = free_port();
     let srv = spawn_server_on(port, None, &db, false);
     let victim = register_external(port);
-    let token = sign_in(port, &victim);
-    assert_eq!(ping_status(port, &token), 200);
     let (_, head, _) = authorize(port, &victim, EXTERNAL_REDIRECT);
     let code = head
         .split("code=")
@@ -1326,7 +1323,6 @@ fn test_evicted_client_loses_its_token_and_code() {
     // Everyone else owns scripts, so this has to take the victim.
     let successor = register_external(port);
 
-    assert_eq!(ping_status(port, &token), 401);
     let body = serde_json::json!({
         "grant_type": "authorization_code",
         "code": code,
@@ -1341,6 +1337,28 @@ fn test_evicted_client_loses_its_token_and_code() {
     assert_eq!(ping_status(port, &sign_in(port, &successor)), 200);
     drop(srv);
     let _ = std::fs::remove_dir_all(db.parent().unwrap());
+}
+
+/// A stranger repeating the whole sign-in flow cannot end a session in use: once
+/// everything is live, `/register` refuses and the session keeps working.
+#[test]
+fn test_stranger_cannot_revoke_a_live_session_at_the_limit() {
+    let srv = spawn_server(None);
+    let p = srv.port;
+    let victim = register_external(p);
+    let token = sign_in(p, &victim);
+    for _ in 1..MAX_CLIENTS {
+        let client = register_external(p);
+        sign_in(p, &client);
+    }
+
+    let body = format!(r#"{{"redirect_uris":["{EXTERNAL_REDIRECT}"]}}"#);
+    let (st, _, resp) = http(p, "POST", "/register", &JSON_POST, &body);
+    assert_eq!(st, 503, "{resp}");
+    assert!(resp.contains("client registry is full"), "{resp}");
+
+    assert_eq!(ping_status(p, &token), 200);
+    assert_eq!(authorize(p, &victim, EXTERNAL_REDIRECT).0, 307);
 }
 
 /// A connector added at `/mcp` finds its RFC 9728 metadata, and from it the

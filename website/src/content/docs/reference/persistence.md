@@ -142,5 +142,5 @@ so a client keeps its `client_id`, and with it any scripts. Access tokens stay
 in memory: after a restart, clients re-authorize. Clients that received a token
 are only deleted when a registration at the
 [1000 client limit](/chartgen/reference/oauth/#token-lifetime) evicts them, which
-spares any client with a row in `user_indicators`. Back up the file like any
+spares any client with a live token or a row in `user_indicators`. Back up the file like any
 SQLite database (`sqlite3 chartgen.db ".backup copy.db"`).

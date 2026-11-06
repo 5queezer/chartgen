@@ -29,7 +29,9 @@ an open redirector. Any recovery by redirect has to be a deliberate exception.
 ## Decision Drivers
 
 - The app recovers with no user action, and share links survive it.
-- `/authorize` must not become an open redirector.
+- The new redirect must add no open redirect. `/authorize` already follows any
+  `redirect_uri` a registered client names, and registration is open and
+  auto-approved, so this path must not reach anywhere that does not.
 - External MCP clients get no redirect, and keep their registration across a
   deploy.
 - Script tools stay off unless `CHARTGEN_SCRIPTING=1`.
@@ -103,47 +105,59 @@ since a store that cannot be opened is already logged and not fatal.
 ### Eviction at the client limit
 
 Persisting clients would make the 1000 client limit permanent: clients that
-received a token are never collected, and sign-in is auto-approved. A restart
-used to empty the table; now a full table would leave `/register` at `503` for
-good.
+received a token are never collected, and sign-in is auto-approved. A restart used
+to empty the table; now a full table would leave `/register` at `503` for good.
 
-So when the table is full, `/register` evicts instead of refusing, from memory
-and from the store:
+So when the table is full, `/register` evicts where it can, from memory and from
+the store:
 
-1. Clients that never received a token, oldest registration first.
-2. Then the least recently tokened client. The in-memory table tracks the last
-   token time for this, restored from `last_token_at`.
-3. Never a client that owns stored scripts, whether or not
+1. A client with a live token is never evicted. A stranger must not be able to end
+   a session in use.
+2. A client that owns stored scripts is never evicted, whether or not
    `CHARTGEN_SCRIPTING=1` is set now, because the `client_id` is the owner's only
-   identity. If every client owns scripts, or the owners cannot be read,
-   `/register` still answers `503` and evicts nobody.
+   identity.
+3. Of the rest, clients that never received a token go first, oldest registration
+   first, then the client longest out of use. Last use is an in-memory field, set
+   when a token is issued and on each authenticated call, with no store write per
+   request. After a restart it starts from `last_token_at`.
+4. If nothing is left, or the owners cannot be read, `/register` answers `503` and
+   evicts nobody.
 
-Eviction also drops the client's live tokens and pending codes. A surviving token
-would keep working for a client on no record, and could register scripts for an
-owner that nothing protects. An open SSE stream is left alone, as it is when a
-token expires, because streams are only checked when they connect.
+Eviction drops the client's pending codes, so a code cannot mint a token for a
+client on no record. An evicted client recovers as after a restart without a volume:
+the web app through the redirect above, an MCP client by registering again.
 
-An evicted client recovers as after a restart without a volume: the web app
-through the redirect above, an MCP client by registering again. The registration
-rate limit runs first, so a limited caller cannot evict anyone.
+Rejected:
 
-Refusing with `503` needs an operator to recover. Expiry by age alone would not
-stop the table filling quickly, and would log out clients that are merely idle
-even when there is room.
+- **Evict by oldest token and revoke it.** The first version did this. A client
+  working daily on a 6-day-old token was first in line, and a stranger repeating
+  register, authorize and token emptied the table of everyone else's sessions: 1000
+  rounds took 1.7 s on a loopback peer.
+- **Always refuse with `503`.** Then only an operator can recover the table.
+- **Expiry by age alone.** It would not stop the table filling quickly, and would
+  drop idle clients even when there is room.
 
 ### Consequences
 
 - Good: redeploys no longer strand browsers, with or without a volume.
 - Good: with a volume, external MCP clients keep their `client_id` across a
   deploy. They re-authorize, because tokens stay in memory.
-- Good: registration keeps working at the client limit, with no operator action.
-- Bad: at the limit, anyone can push out idle clients by scripting the flow, at
-  the pace of the rate limit. Those clients must sign in again, and an MCP client
-  gets a new `client_id`. No scripts are lost, because their owners are spared.
-- Bad: at the limit, a client that just registered is the first to go until it
-  has a token, so a concurrent registration can evict it mid sign-in. It then
-  recovers like any other evicted client. Registrations without a token can evict
-  at most one tokened client this way, since each evicts the previous one.
+- Good: nobody can lose a session in use to a stranger. A client with a live token
+  sees no change, however full the table gets.
+- Good: registration keeps working at the limit while any client is evictable.
+- Bad: anyone scripting the flow can push out every client with no live token. That
+  means clients idle past the 7-day token lifetime, and right after a restart every
+  client that has not signed in again, because tokens are memory-only. The rate limit
+  does not bound this in general: loopback peers are exempt, so a same-host reverse
+  proxy has no limit, and the limit is per address, so many addresses get around it.
+  Those clients must sign in again, and an MCP client gets a new `client_id`. No
+  scripts are lost, because their owners are spared.
+- Bad: someone holding 1000 live tokens gets `503` for all new registrations, until
+  the tokens expire or a restart clears them.
+- Bad: at the limit, a client that just registered is the first to go until it has a
+  token, so a concurrent registration can evict it mid sign-in. It then recovers like
+  any other evicted client. Registrations without a token can evict at most one other
+  client this way, since each evicts the previous one.
 - Bad: 1000 clients that own scripts still leave `/register` at `503`. Script tools
   are off by default, so this needs scripting turned on.
 - Neutral: every default `--serve` now creates `~/.chartgen/chartgen.db`.
