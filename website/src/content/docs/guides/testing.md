@@ -65,6 +65,13 @@ PW_REUSE_SERVER=1 npm run test:e2e
 The first cold run builds chartgen, which takes a few minutes without
 a cache.
 
+Whether the server lists the scripting tools is fixed at startup, so the suite
+runs a second pair of servers 1000 ports above those two, with
+`CHARTGEN_SCRIPTING=1` and its own throwaway database. The `scripting` project
+runs only `script-editor-on.spec.ts` against it; every other spec is in the
+`chromium` project, with scripting off. To write the script editor's screenshots,
+set `SCRIPT_EDITOR_SHOTS` to a directory.
+
 ## How CI runs it
 
 The `web-unit` job runs `npm ci && npm test` in `web/`. The `e2e` job

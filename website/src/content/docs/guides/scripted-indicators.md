@@ -5,7 +5,9 @@ description: Write your own indicators in Starlark (a Python dialect with Pine-l
 
 chartgen can run indicators you write yourself, the way TradingView runs
 Pine Script. Scripts are written in [Starlark](https://github.com/bazelbuild/starlark/blob/master/spec.md),
-a small, deterministic dialect of Python. You register a script over MCP,
+a small, deterministic dialect of Python. You register a script over MCP
+or write it in the web app's
+[script editor](/chartgen/guides/web/#script-editor),
 and from then on `generate_chart` accepts its name like any built-in. It
 is sandboxed: a script cannot read files, use the network or load other
 code. Design records: [ADR-0024](/chartgen/decisions/0024-starlark-script-runtime/)
@@ -302,6 +304,7 @@ even a trusted deployment should run chartgen under an OS memory limit
 |---|---|
 | `register_indicator(name, source)` | Validate and store, or replace a script with the same name |
 | `list_my_indicators()` | Your scripts with params and timestamps |
+| `get_my_indicator(name)` | The stored source of one of your scripts |
 | `delete_indicator(name)` | Remove one; a built-in it shadowed is visible again |
 | `fork_indicator(builtin_name)` | The source of a forkable built-in |
 

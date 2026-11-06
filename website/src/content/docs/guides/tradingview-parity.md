@@ -150,11 +150,11 @@ Status legend:
 | Feature | TradingView | chartgen | Notes / links |
 |---|---|---|---|
 | Pine Script indicators | ✅ | ❌ | Built-in indicators are Rust ports of Pine v5 semantics. No Pine interpreter. [ADR-0018](/chartgen/decisions/0018-pine-semantics-for-indicators/) |
-| Pine editor UI | ✅ | ❌ | No script editor in the web app, and no Pine parser. |
+| Pine editor UI | ✅ | ◐ | A script editor for Starlark, not Pine: there is no Pine parser. [Script editor](/chartgen/guides/web/#script-editor) |
 | Scripted indicators via Starlark over MCP | n/a | ◐ | `register_indicator` and `generate_chart` accept your scripts. Phase 1: feature-flagged off by default (`CHARTGEN_SCRIPTING=1`), for trusted or single-user deployments only, since scripts run in the server process, ownership is an auto-approved OAuth client, and the limits are not a security boundary. At most 3 scripts per chart. Scripts are not computed in `subscribe_chart` pushes. [Scripted indicators](/chartgen/guides/scripted-indicators/), [ADR-0024](/chartgen/decisions/0024-starlark-script-runtime/), [ADR-0025](/chartgen/decisions/0025-user-indicator-registry/) |
 | Pine-like series operators and `ta.*` functions in scripts | ✅ | ✅ | Element-wise operators, `close[1]`, comparisons, `ta.sma/ema/rsi/atr/macd/crossover` and more, with the Pine v5 code the built-ins use. Pivot tie rule is unverified against TradingView. [Series](/chartgen/guides/scripted-indicators/#series), [`ta.*`](/chartgen/guides/scripted-indicators/#ta-functions) |
 | Fork a built-in as a script | ✅ (open source scripts) | ◐ | `fork_indicator` works for `wavetrend` only. [Forking](/chartgen/guides/scripted-indicators/#forking-a-built-in) |
-| Script editor in the web app | ✅ | ❌ | No editor UI; scripts are registered over MCP. |
+| Script editor in the web app | ✅ | ◐ | Create, edit, save, delete and add to the chart, with errors at their line. Only on servers with `CHARTGEN_SCRIPTING=1`. No autocomplete, no renaming and no fork button yet. [Script editor](/chartgen/guides/web/#script-editor), [ADR-0041](/chartgen/decisions/0041-script-editor-in-the-web-app/) |
 | Programmatic access (API, agents) | partial | ✅ | The MCP server exposes 19 tools, including chart generation, quotes and symbol search. [MCP reference](/chartgen/reference/mcp/) |
 
 ## Data sources

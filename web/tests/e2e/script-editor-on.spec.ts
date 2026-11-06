@@ -187,6 +187,12 @@ test("line numbers, highlighting, Tab and undo", async ({ page }) => {
   await expect(code(page)).toBeFocused();
   await page.keyboard.press("ControlOrMeta+z");
   await expect(lines(page).first()).toHaveText("def compute(a):");
+
+  // Esc then Tab leaves the editor, so the keyboard is not trapped in it.
+  await page.keyboard.press("Escape");
+  await page.keyboard.press("Tab");
+  await expect(code(page)).not.toBeFocused();
+  await expect(lines(page).first()).toHaveText("def compute(a):");
 });
 
 test("source, titles and server errors render as text", async ({ page }) => {

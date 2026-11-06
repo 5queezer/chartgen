@@ -876,6 +876,39 @@ Every instance after the first is stored with an instance id
 (`{ "name": "rsi", "id": "rsi#2", "length": 21 }`). Sets and layouts saved
 before instances existed load unchanged.
 
+## Script editor
+
+On a server started with `CHARTGEN_SCRIPTING=1`, a **Scripts** button (`{ }` on
+smaller windows) sits next to **Indicators**, and the indicator picker links to
+the same panel. Without that flag none of this appears
+([ADR-0041](/chartgen/decisions/0041-script-editor-in-the-web-app/)). The
+panel opens under the chart, or over the whole window below 768 px. See
+[Scripted indicators](/chartgen/guides/scripted-indicators/) for the language
+and for why scripting is for trusted deployments only.
+
+- **New** starts from a template that registers as it is. Name the script
+  (lowercase letters, digits and `_`, starting with a letter) and **Save**, or
+  press Ctrl/Cmd+S. A saved script keeps its name: to rename one, paste it into a
+  new script and delete the old one.
+- **Errors** from validation are listed under the code with their line and
+  step, and the line is marked. Click one to jump to it. The server reports
+  lines, not columns. A script that fails is not saved.
+- **Add to chart** adds the saved script as an indicator instance, and is off
+  while there are unsaved changes because the chart runs the saved text. Saving a
+  script the chart uses reloads the chart. If it fails on the real chart, which
+  has more bars than the dry run, the error appears here too and the other
+  indicators stay. A chart runs at most 3 scripts.
+- **Delete** asks first, and also removes the script from the chart, unless a
+  built-in of that name takes its place again.
+- **Unsaved text** is kept per script in this browser's localStorage, so closing
+  the panel or the tab loses nothing. It comes back when you reopen the script;
+  **Revert** returns to the saved text, and Ctrl/Cmd+Z undoes that.
+- **Tab** indents by four spaces. To leave the editor with the keyboard, press Esc
+  and then Tab.
+
+Scripts belong to the OAuth client of this browser. Another browser, or this one
+after clearing its site data, signs in as a new client and does not see them.
+
 ## Build and deploy
 
 ```bash
