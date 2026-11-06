@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { isRelease, isTypingContext, keepKeyboardFocus } from "./keys";
+import { isRelease, isTypingContext, keepKeyboardFocus, swallowMenuGhostClicks } from "./keys";
 
 class FakeEl {
   constructor(
@@ -97,5 +97,94 @@ describe("isRelease", () => {
     expect(isRelease(ev({ touches: [] }))).toBe(true);
     expect(isRelease(ev({ touches: [{}] }))).toBe(false);
     expect(isRelease(ev({}))).toBe(true);
+  });
+});
+
+describe("swallowMenuGhostClicks", () => {
+  class FakeNode {
+    contains(other: unknown): boolean {
+      return other === this;
+    }
+  }
+  class FakeElement extends FakeNode {
+    closest(): FakeElement | null {
+      return this;
+    }
+  }
+
+  function install() {
+    const listeners = new Map<string, (e: unknown) => void>();
+    vi.stubGlobal("Node", FakeNode);
+    vi.stubGlobal("Element", FakeElement);
+    vi.stubGlobal("document", {
+      addEventListener: (t: string, f: (e: unknown) => void) => listeners.set(t, f),
+      removeEventListener: (t: string) => listeners.delete(t),
+    });
+    const stop = swallowMenuGhostClicks();
+    const fire = (type: string, target: unknown, init: Record<string, unknown> = {}) => {
+      const e = {
+        type,
+        target,
+        isTrusted: true,
+        detail: 1,
+        pointerType: "touch",
+        preventDefault: vi.fn(),
+        stopPropagation: vi.fn(),
+        ...init,
+      };
+      listeners.get(type)?.(e);
+      return e;
+    };
+    return { listeners, stop, fire, item: new FakeElement(), elsewhere: new FakeNode() };
+  }
+
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("drops the tap's click when it lands outside the pressed item", () => {
+    const { fire, item, elsewhere } = install();
+    fire("pointerdown", item);
+    expect(fire("mousedown", elsewhere).preventDefault).toHaveBeenCalled();
+    expect(fire("click", elsewhere).preventDefault).toHaveBeenCalled();
+    // Only that one.
+    expect(fire("click", elsewhere).preventDefault).not.toHaveBeenCalled();
+  });
+
+  it("lets a click on the pressed item through", () => {
+    const { fire, item } = install();
+    fire("pointerdown", item);
+    expect(fire("click", item).preventDefault).not.toHaveBeenCalled();
+  });
+
+  it("leaves a mouse press alone", () => {
+    const { fire, item, elsewhere } = install();
+    fire("pointerdown", item, { pointerType: "mouse" });
+    expect(fire("click", elsewhere).preventDefault).not.toHaveBeenCalled();
+  });
+
+  it("lets a script's click() through, and still catches the real one after it", () => {
+    const { fire, item, elsewhere } = install();
+    fire("pointerdown", item);
+    expect(fire("click", elsewhere, { isTrusted: false }).preventDefault).not.toHaveBeenCalled();
+    expect(fire("click", elsewhere).preventDefault).toHaveBeenCalled();
+  });
+
+  it("lets a keyboard click through", () => {
+    const { fire, item, elsewhere } = install();
+    fire("pointerdown", item);
+    expect(fire("click", elsewhere, { detail: 0 }).preventDefault).not.toHaveBeenCalled();
+  });
+
+  it("forgets the press when the touch is cancelled", () => {
+    const { fire, item, elsewhere } = install();
+    fire("pointerdown", item);
+    fire("pointercancel", item);
+    expect(fire("click", elsewhere).preventDefault).not.toHaveBeenCalled();
+  });
+
+  it("removes every listener on cleanup", () => {
+    const { listeners, stop } = install();
+    expect([...listeners.keys()].sort()).toEqual(["click", "mousedown", "pointercancel", "pointerdown"]);
+    stop();
+    expect(listeners.size).toBe(0);
   });
 });
