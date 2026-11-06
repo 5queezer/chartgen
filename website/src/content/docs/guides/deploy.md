@@ -59,6 +59,21 @@ registrations of external MCP clients. See the [persistence reference](/chartgen
 | `HOME` / `USERPROFILE` | `src/main.rs` | Picks the data directory (`~/.chartgen/`). Override to relocate `alerts.json` / `trades.log` / `subscriptions.json` / `chartgen.db`. |
 | `_CHARTGEN_PORT` | `src/server.rs` | Internal — set by the process to its own bind port so `base_url()` can compose the fallback URL. Do not set by hand. |
 
+### Upstream load and memory
+
+Binance is loaded per symbol and interval, not per user
+([ADR-0050](/chartgen/decisions/0050-one-kline-read-per-symbol/)). All readers of a chart share
+one window of klines: its first read costs one request per 1000 klines, and after that at most
+about one request a second, whatever the number of users. Identical history pages share a read
+as well. So a polled forming candle can be up to 3 s old. The cache holds at most about 31 MB,
+and idle windows go after 2 minutes. Each request still holds its own copy of its bars while it
+computes, which the bound does not cover: a burst of large custom-interval charts costs about
+2 MB each.
+
+All of it answers to the rate gate of [ADR-0038](/chartgen/decisions/0038-custom-intervals/). When
+the gate refuses, clients see an error starting `Binance rate limit:`. Yahoo is not shared this
+way: every chart load and poll of a Yahoo symbol is its own request, with no gate in front.
+
 ### Server alerts
 
 `CHARTGEN_SERVER_ALERTS` is off by default. With open registration, leave it off, or turn it on

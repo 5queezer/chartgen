@@ -276,6 +276,8 @@ struct Now {
 
 type Clock<'a> = &'a (dyn Fn() -> Now + Send + Sync);
 
+/// The sharing below is ADR-0050.
+///
 /// How many symbol and kline pairs `newest_klines` holds, how many klines in all,
 /// and for how long since last used. A kline is about 96 bytes (64 for the `Bar`, 32
 /// for its date), so at most about 25 MB: 14 of the longest custom charts, or 256
@@ -3378,6 +3380,8 @@ mod tests {
 
     #[test]
     fn eviction_holds_the_memory_bound() {
+        // What the stated bound in bytes rests on, with 32 for the date's allocation.
+        assert_eq!(std::mem::size_of::<Bar>(), 64);
         let last = 1_700_000_000_000 / HOUR_MS * HOUR_MS;
         let cache = KlineCache::default();
         let t0 = Instant::now();
@@ -3437,6 +3441,45 @@ mod tests {
             let total: usize = st.held.values().map(|p| p.bars.len()).sum();
             assert!(total <= PAGE_CACHE_BARS, "{total}");
         }
+    }
+
+    #[test]
+    fn a_burst_does_not_starve_a_small_blocking_pool() {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .max_blocking_threads(4)
+            .enable_time()
+            .build()
+            .unwrap();
+        let fake = FakeBinance::new(600_000, 1);
+        let client: &'static BinanceClient = Box::leak(Box::new(client_of(&fake)));
+        let burst = || async {
+            let reads: Vec<_> = (0..200)
+                .map(|_| {
+                    rt.spawn_blocking(move || fetch_binance_via(client, "BTCUSDT", "1h", 800, None))
+                })
+                .collect();
+            for read in reads {
+                read.await.unwrap().unwrap();
+            }
+        };
+        // A cold burst, more callers than threads: the one reading already has a thread.
+        rt.block_on(burst());
+        assert_eq!(fake.requests(), 1);
+
+        // While a refresh hangs, on a thread of its own, the rest of the pool still
+        // serves a hot chart.
+        fake.advance(1);
+        fake.pause(true);
+        let refresh =
+            rt.spawn_blocking(move || fetch_binance_via(client, "BTCUSDT", "1h", 800, None));
+        fake.wait_for_requests(2);
+        let started = Instant::now();
+        rt.block_on(burst());
+        assert!(started.elapsed() < Duration::from_secs(5), "they waited");
+        assert_eq!(fake.requests(), 2);
+        fake.pause(false);
+        rt.block_on(refresh).unwrap().unwrap();
     }
 
     #[test]
