@@ -748,3 +748,64 @@ test.describe("multi-chart grid", () => {
     expect(calls).toEqual([]);
   });
 });
+
+test.describe("right-click menus in a grid", () => {
+  test.use({ viewport: { width: 1600, height: 800 } });
+
+  const chartMenu = (page: Page) => page.getByRole("menu", { name: "Chart actions" });
+
+  test("a menu acts on the chart it was opened on", async ({ bootedApp: page }) => {
+    await chooseGrid(page, "2h");
+    await expectLoaded(page, 2);
+    await activate(page, 1);
+    await page.locator('.wl-row[data-symbol="ETHUSDT"]').click();
+    await expect.poll(async () => (await panes(page))[1]!.symbol).toBe("ETHUSDT");
+    await expectLoaded(page, 2);
+    await activate(page, 0);
+
+    // A right click on the other chart: it takes the action, and becomes the active one.
+    const box = (await paneCell(page, 1).boundingBox())!;
+    const spot = { x: box.x + box.width * 0.4, y: box.y + box.height * 0.3 };
+    await page.mouse.click(spot.x, spot.y, { button: "right" });
+    await expect(paneCell(page, 1)).toHaveAttribute("data-active", "");
+    await chartMenu(page).getByRole("menuitem", { name: /^Add horizontal line at/ }).click();
+    await expect.poll(async () => (await panes(page))[1]!.drawings).toBe(1);
+    expect((await panes(page))[0]!.drawings).toBe(0);
+    const stored = (sym: string) =>
+      page.evaluate((k) => localStorage.getItem(`chartgen.drawings.${k}`), sym);
+    expect(await stored("ETHUSDT")).toContain("horizontalStraightLine");
+    expect(await stored("BTCUSDT")).toBeNull();
+
+    // Opened with no press (the keyboard's way), so the first chart stays active: still the
+    // second one's store that changes.
+    await activate(page, 0);
+    await paneCell(page, 1)
+      .locator(".chart-container canvas")
+      .first()
+      .evaluate((el, p) => {
+        el.dispatchEvent(
+          new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: p.x, clientY: p.y }),
+        );
+      }, spot);
+    await chartMenu(page).locator('[role^="menuitem"]', { hasText: "Invert scale" }).click();
+    await expect.poll(async () => (await panes(page))[1]!.invert).toBe(true);
+    expect((await panes(page))[0]!.invert).toBe(false);
+    await expect(paneCell(page, 0)).toHaveAttribute("data-active", "");
+  });
+
+  test("a sub-pane's menu removes the indicator of its own chart", async ({ bootedApp: page }) => {
+    await chooseGrid(page, "2h");
+    await expectLoaded(page, 2);
+    await activate(page, 0);
+    const before = await panes(page);
+    const legend = paneCell(page, 1).getByTestId("indicator-legend-rsi");
+    const box = (await legend.boundingBox())!;
+    await page.mouse.click(box.x + 300, box.y + 40, { button: "right" });
+    await page.getByRole("menu", { name: "Pane actions" }).getByRole("menuitem", { name: /^Remove RSI/ }).click();
+    await expect(legend).toHaveCount(0);
+    await expect(paneCell(page, 0).getByTestId("indicator-legend-rsi")).toBeVisible();
+    const after = await panes(page);
+    expect(after[1]!.indicators.length).toBe(before[1]!.indicators.length - 1);
+    expect(after[0]!.indicators.length).toBe(before[0]!.indicators.length);
+  });
+});

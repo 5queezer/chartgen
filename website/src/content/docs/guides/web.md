@@ -572,7 +572,8 @@ items (see below), Copy link and Settings.
 | Watchlist section | Collapse/Expand, Rename…, Remove section |
 
 Clone puts the copy just below the drawing; alerts on the original stay on the
-original.
+original. In a [chart grid](#chart-grid) a right click makes that chart the active
+one, and the menu acts on it.
 
 ## Chart grid
 
