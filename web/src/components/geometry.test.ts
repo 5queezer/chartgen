@@ -12,6 +12,10 @@ import {
   hbarTheme,
   hbarTiers,
   hlineStrokes,
+  labelBoxes,
+  markAt,
+  patternDrawings,
+  patternText,
   payloadToDataIndex,
   toDataSpace,
   valueExtents,
@@ -532,5 +536,122 @@ describe("wire colors vs theme fallback", () => {
     );
     expect(out.hbars![0]!.color).toBe("rgba(9,9,9,1)");
     expect(out.hbars![1]!.color).toBe(hbarTheme("vpvr").out);
+  });
+});
+
+describe("pattern marks (ADR-0046)", () => {
+  const map = { x: (i: number) => i * 10, y: (v: number) => 1000 - v };
+  const range = { from: 0, to: 50 };
+  const measure = (t: string) => t.length * 6;
+  const label = (x: number, above: boolean, text = "H") => ({
+    x,
+    t: x,
+    y: 100,
+    above,
+    text,
+    key: "k",
+    name: "N",
+    bias: above ? ("bearish" as const) : ("bullish" as const),
+    tooltip: `tip ${text}`,
+  });
+
+  it("a label sits past the bar's high or low, centered on the bar", () => {
+    const [up, down] = labelBoxes([label(5, true), label(5, false)], range, map, measure);
+    expect(up!.y + up!.height).toBeLessThan(map.y(100));
+    expect(down!.y).toBeGreaterThan(map.y(100));
+    expect(up!.x + up!.width / 2).toBe(50);
+    expect(up!.color).toBe("rgba(242,54,69,1)");
+    expect(down!.color).toBe("rgba(41,98,255,1)");
+  });
+
+  it("labels of one bar and side stack instead of covering each other", () => {
+    const [a, b, c] = labelBoxes(
+      [label(5, true, "A"), label(5, true, "B"), label(6, true, "C")],
+      range,
+      map,
+      measure,
+    );
+    expect(b!.y + b!.height).toBeLessThanOrEqual(a!.y);
+    expect(c!.y).toBe(a!.y);
+  });
+
+  it("only labels on visible bars are boxed", () => {
+    const got = labelBoxes([label(200, true)], range, map, measure);
+    expect(got).toEqual([]);
+  });
+
+  it("the forming bar's label is hollow and faint, a closed one is not", () => {
+    const [closed, forming] = labelBoxes(
+      [label(5, true), { ...label(6, true), tentative: true }],
+      range,
+      map,
+      measure,
+    );
+    expect(closed!.hollow).toBe(false);
+    expect(forming!.hollow).toBe(true);
+    expect(forming!.faint).toBe(true);
+  });
+
+  const pattern = (status: "forming" | "confirmed" | "failed", a = 2, b = 8) => ({
+    key: "double_top",
+    name: "Double Top",
+    bias: "bearish" as const,
+    status,
+    strokes: [{ x1: a, t1: a, y1: 100, x2: b, t2: b, y2: 110, dashed: true }],
+    label: { x: 5, t: 5, y: 110, above: true },
+    tooltip: "tip",
+  });
+
+  it("a pattern's label names its status", () => {
+    expect(patternText(pattern("forming"))).toBe("Double Top · forming");
+    expect(patternText(pattern("failed"))).toBe("Double Top · failed");
+    const [d] = patternDrawings([pattern("forming")], range, map, measure);
+    expect(d!.box.text).toBe("Double Top · forming");
+    expect(d!.box.faint).toBe(true);
+    expect(d!.strokes[0]).toEqual({
+      from: { x: 20, y: 900 },
+      to: { x: 80, y: 890 },
+      dashed: true,
+    });
+    const [ok] = patternDrawings([pattern("confirmed")], range, map, measure);
+    expect(ok!.box.faint).toBe(false);
+  });
+
+  it("a pattern off screen is skipped, one reaching into view is not", () => {
+    expect(patternDrawings([pattern("forming", -90, -80)], range, map, measure)).toEqual([]);
+    expect(patternDrawings([pattern("forming", -90, 3)], range, map, measure)).toHaveLength(1);
+  });
+
+  it("the topmost box under a point wins, and nothing outside any", () => {
+    const boxes = labelBoxes([label(5, true, "A"), label(5, false, "B")], range, map, measure);
+    const b = boxes[1]!;
+    expect(markAt(boxes, b.x + 1, b.y + 1)?.text).toBe("B");
+    expect(markAt(boxes, b.x - 50, b.y)).toBeNull();
+    const twin = [{ ...b, text: "under" }, { ...b, text: "over" }];
+    expect(markAt(twin, b.x + 1, b.y + 1)?.text).toBe("over");
+  });
+
+  it("untimed bars remap labels and strokes, and drop what lost its bar", () => {
+    const remap = [0, -1, 1, 2];
+    const out = toDataSpace(
+      {
+        label: "P",
+        is_overlay: true,
+        labels: [label(2, true), label(1, true)],
+        patterns: [
+          {
+            ...pattern("forming"),
+            strokes: [
+              { x1: 0, t1: 0, y1: 1, x2: 3, t2: 3, y2: 2, dashed: false },
+              { x1: 1, t1: 1, y1: 1, x2: 3, t2: 3, y2: 2, dashed: false },
+            ],
+          },
+        ],
+      },
+      remap,
+    );
+    expect(out.labels!.map((l) => l.x)).toEqual([1]);
+    expect(out.patterns![0]!.strokes).toHaveLength(1);
+    expect(out.patterns![0]!.strokes[0]).toMatchObject({ x1: 0, x2: 2 });
   });
 });

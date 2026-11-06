@@ -11,6 +11,8 @@ import { For, Index, Show, createMemo, createSignal, type JSX } from "solid-js";
 
 import { pruneGeometry, type GeometryInfo } from "../lib/geometryStyle";
 import { rekeyPlots, resolvePlot, type PlotInfo } from "../lib/plotStyle";
+import { repaintNote } from "../lib/indicatorNames";
+import { keyName } from "../lib/instances";
 import {
   sanitizeStyle,
   type GeoItemStyle,
@@ -148,7 +150,8 @@ function StyleRows(props: {
               (props.geometry.fills.length > 0 ||
                 props.geometry.hlines.length > 0 ||
                 props.geometry.hbars ||
-                props.geometry.divlines))
+                props.geometry.divlines ||
+                props.geometry.marks))
           }
           fallback={
             <p class="text-sm text-[color:var(--color-fg-muted)]">
@@ -347,6 +350,37 @@ function StyleRows(props: {
                     );
                   }}
                 </Show>
+                <Show when={geometry().marks}>
+                  {(m) => {
+                    const setMarks = (patch: NonNullable<GeometryStyle["marks"]>) =>
+                      props.onGeo((g) => ({ ...g, marks: { ...g.marks, ...patch } }));
+                    return (
+                      <GeoRow
+                        testId="style-marks"
+                        label="Patterns"
+                        visible={props.geo.marks?.visible !== false}
+                        onVisible={(visible) => setMarks({ visible })}
+                        swatches={[
+                          {
+                            label: "Bullish pattern color",
+                            value: props.geo.marks?.bullColor ?? m().bullish,
+                            onChange: (bullColor) => setMarks({ bullColor }),
+                          },
+                          {
+                            label: "Bearish pattern color",
+                            value: props.geo.marks?.bearColor ?? m().bearish,
+                            onChange: (bearColor) => setMarks({ bearColor }),
+                          },
+                          {
+                            label: "Neutral pattern color",
+                            value: props.geo.marks?.neutralColor ?? m().neutral,
+                            onChange: (neutralColor) => setMarks({ neutralColor }),
+                          },
+                        ]}
+                      />
+                    );
+                  }}
+                </Show>
                 <Show when={geometry().divlines}>
                   {(d) => {
                     const setDiv = (patch: NonNullable<GeometryStyle["divlines"]>) =>
@@ -384,6 +418,7 @@ function StyleRows(props: {
 
 function SettingsForm(props: {
   name: string;
+  note?: string;
   params: Record<string, unknown>;
   style: IndicatorStyle | undefined;
   hidden: boolean;
@@ -473,6 +508,11 @@ function SettingsForm(props: {
         </Tabs.List>
         <Tabs.Content value="inputs">
           <div class="flex flex-col gap-3 p-4 max-h-[60vh] overflow-y-auto">
+            <Show when={props.note}>
+              <p data-testid="repaint-note" class="text-xs text-[color:var(--color-fg-muted)]">
+                {props.note}
+              </p>
+            </Show>
             <Show
               when={fields().length > 0}
               fallback={
@@ -494,19 +534,40 @@ function SettingsForm(props: {
                       <Show
                         when={f.kind === "boolean"}
                         fallback={
-                          <input
-                            id={`param-${f.name}`}
-                            type={f.kind === "string" ? "text" : "number"}
-                            step={f.step}
-                            min={f.min}
-                            max={f.max}
-                            value={values()[f.name] as string}
-                            onInput={(e) =>
-                              setValue(f.name, e.currentTarget.value)
+                          <Show
+                            when={f.options}
+                            fallback={
+                              <input
+                                id={`param-${f.name}`}
+                                type={f.kind === "string" ? "text" : "number"}
+                                step={f.step}
+                                min={f.min}
+                                max={f.max}
+                                value={values()[f.name] as string}
+                                onInput={(e) =>
+                                  setValue(f.name, e.currentTarget.value)
+                                }
+                                aria-invalid={errors()[f.name] ? "true" : undefined}
+                                class={inputClass}
+                              />
                             }
-                            aria-invalid={errors()[f.name] ? "true" : undefined}
-                            class={inputClass}
-                          />
+                          >
+                            {(options) => (
+                              <select
+                                id={`param-${f.name}`}
+                                class={inputClass}
+                                onChange={(e) => setValue(f.name, e.currentTarget.value)}
+                              >
+                                <For each={options()}>
+                                  {(o) => (
+                                    <option value={o} selected={o === values()[f.name]}>
+                                      {o}
+                                    </option>
+                                  )}
+                                </For>
+                              </select>
+                            )}
+                          </Show>
                         }
                       >
                         <Switch.Root
@@ -639,6 +700,7 @@ export function IndicatorSettings(props: IndicatorSettingsProps): JSX.Element {
                   {(specs) => (
                     <SettingsForm
                       name={t.title}
+                      note={repaintNote(keyName(t.name))}
                       params={t.params}
                       style={t.style}
                       hidden={t.hidden}
