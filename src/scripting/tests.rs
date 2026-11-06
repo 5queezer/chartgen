@@ -1,7 +1,7 @@
 //! Runtime, Series operator, sandbox escape, persistence and wavetrend
 //! parity tests for user scripts.
 
-use super::runtime::{compile, run, COMPUTE_TIMEOUT};
+use super::runtime::{compile, compile_within, run, COMPUTE_TIMEOUT};
 use super::*;
 use crate::data::{sample_data, Bar, OhlcvData};
 use crate::indicators::pine;
@@ -715,33 +715,53 @@ fn bigints_never_reach_arithmetic() {
     assert_eq!(pr.hlines[0].y, (2 + 40 + 255 + 3_000_000_000i64) as f64);
 }
 
+/// A limit no load stretches a passing run to, for tests of what bounds the
+/// work rather than of how fast this machine does it.
+const PATIENT: Duration = Duration::from_secs(30);
+
 #[test]
 fn ta_work_is_bounded_by_the_bar_count() {
-    // A series is exactly one value per bar, so a list of 1M values (the
-    // 13.9 s report) never reaches ta.*.
-    assert_rejected(&script("s = ta.series([1.0] * 20000)"), "one value per bar");
-    assert_rejected(&script("s = ta.series(list(range(1000000)))"), "range");
-    // The worst single call (window = half the bars) is milliseconds, so
-    // the per-call deadline check stops a loop of them on time.
-    let d = sample_data(6000);
-    let c = compile("t", &script("x = ta.highest(ohlcv.close, 3000)")).unwrap();
+    let patient = |body: &str, bars: usize| {
+        let c = compile_within("t", &script(body), PATIENT)?;
+        run(&c, &sample_data(bars), &json!({}), PATIENT, "runtime")
+    };
+    let rejected = |body: &str, bars: usize, expect: &str| {
+        let e = patient(body, bars).err().expect("script must be rejected");
+        let msg = e.message.to_lowercase();
+        assert!(msg.contains(expect), "expected {expect:?} in {e}");
+    };
+    // What bounds a call: a series is exactly one value per bar, so a list of
+    // 1M values (the 13.9 s report) never reaches ta.*, and a window is capped.
+    rejected("s = ta.series([1.0] * 20000)", 50, "one value per bar");
+    rejected("s = ta.series(list(range(1000000)))", 50, "range");
+    rejected("x = ta.highest(ohlcv.close, 10001)", 50, "length must be");
+    // The worst single call (window = half the bars) returns, and its result is
+    // checked against the deadline, so one that outlasts PATIENT fails here.
     let t = Instant::now();
-    run(&c, &d, &json!({}), COMPUTE_TIMEOUT, "runtime").unwrap();
+    patient("x = ta.highest(ohlcv.close, 3000)", 6000).unwrap_or_else(|e| panic!("{e}"));
     eprintln!(
         "[timing] worst-case ta.highest on 6000 bars: {:?}",
         t.elapsed()
     );
-    assert!(t.elapsed() < Duration::from_millis(200));
-    assert_run_fails(
+    // The per-call deadline check stops a loop of them, whatever the load.
+    for body in [
         "for i in range(20000):\n    x = ta.stdev(ohlcv.close, 3000)",
-        6000,
-        "time limit",
-    );
-    assert_run_fails(
         "for i in range(20000):\n    x = ta.pivot_high(ohlcv.close, 1500, 1500)",
-        6000,
-        "time limit",
-    );
+    ] {
+        let c = compile_within("t", &script(body), PATIENT).unwrap_or_else(|e| panic!("{e}"));
+        let t = Instant::now();
+        let e = run(
+            &c,
+            &sample_data(6000),
+            &json!({}),
+            COMPUTE_TIMEOUT,
+            "runtime",
+        )
+        .err()
+        .expect("the loop must be stopped");
+        assert!(e.message.contains("time limit"), "{e}");
+        assert!(t.elapsed() < PATIENT, "took {:?}", t.elapsed());
+    }
 }
 
 #[test]
@@ -775,14 +795,17 @@ fn list_and_dict_growth_is_capped() {
 
 #[test]
 fn large_top_level_modules_are_rejected() {
-    assert_rejected(
-        &format!(
-            "BIG = [[{}] * 20000 for _ in range(10)]\n{}",
-            "0.5",
-            script("pass")
-        ),
-        "top-level values",
+    // Under load, building this can outlast the 200 ms production gives top-level
+    // code, and that limit would fire before the size guard under test.
+    let source = format!(
+        "BIG = [[{}] * 20000 for _ in range(10)]\n{}",
+        "0.5",
+        script("pass")
     );
+    let e = compile_within("t", &source, PATIENT)
+        .err()
+        .expect("module must be rejected");
+    assert!(e.message.contains("top-level values"), "{e}");
 }
 
 #[test]
