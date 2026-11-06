@@ -414,12 +414,15 @@ const btnClass =
 const menuItemClass =
   "w-full text-left px-3 py-1.5 text-sm cursor-pointer hover:bg-[color:var(--color-border)] outline-none focus:bg-[color:var(--color-border)]";
 
-/** The internals of klinecharts ~9.8 that hold the overlay under a press. */
+/**
+ * The internals of klinecharts ~9.8 that hold the overlay under a press. Optional, so a
+ * version without them brings the stuck press back instead of throwing on every release.
+ */
 interface PressStoreOwner {
-  getChartStore(): {
-    getOverlayStore(): {
-      getPressedInstanceInfo(): { instance: unknown };
-      setPressedInstanceInfo(info: {
+  getChartStore?(): {
+    getOverlayStore?(): {
+      getPressedInstanceInfo?(): { instance: unknown };
+      setPressedInstanceInfo?(info: {
         paneId: string;
         instance: null;
         figureType: 0;
@@ -1345,13 +1348,12 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
   // discarded, and the drawing goes back at once. Bubble, so after klinecharts has had the event.
   // A new press also ends one, in capture, before klinecharts sees it: Firefox can take a
   // mouseleave for the release outside the window, and no mouseup follows (not run on Firefox).
-  const pressStore = () =>
-    (props.chart as unknown as PressStoreOwner | null)?.getChartStore().getOverlayStore();
   const dropStuckPress = (e: Event) => {
-    const store = pressStore();
-    if (!isRelease(e) || !store?.getPressedInstanceInfo().instance) return;
+    if (!isRelease(e)) return;
+    const store = (props.chart as unknown as PressStoreOwner | null)?.getChartStore?.().getOverlayStore?.();
+    if (!store?.getPressedInstanceInfo?.().instance) return;
     pressedId = null;
-    store.setPressedInstanceInfo({
+    store.setPressedInstanceInfo?.({
       paneId: "",
       instance: null,
       figureType: 0,
