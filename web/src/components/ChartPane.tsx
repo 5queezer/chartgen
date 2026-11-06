@@ -352,6 +352,8 @@ export interface ChartPaneProps {
   rail: HTMLElement | undefined;
   /** More than one chart shows: its sub-panes share a smaller height. */
   multi: boolean;
+  /** A drawing tool was armed here. */
+  onToolArmed: () => void;
   /** Open the settings of an indicator of the active chart. */
   onIndicatorSettings: (key: string) => void;
   onAddAlert: (key: string) => void;
@@ -383,7 +385,11 @@ export function ChartPane(props: ChartPaneProps): JSX.Element {
               chart={s.chart()}
               symbol={symbol()}
               onApi={s.setDrawings}
-              onArmedChange={s.setDrawingArmed}
+              onArmedChange={(armed) => {
+                s.setDrawingArmed(armed);
+                // The chart needs the room to place the tool's points.
+                if (armed) props.onToolArmed();
+              }}
               disarm={s.replay.mode() === "select" || !s.isActive()}
               active={s.isActive()}
             />

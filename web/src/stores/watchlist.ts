@@ -9,6 +9,7 @@
 
 import { createSignal } from "solid-js";
 
+import { compact } from "../lib/viewport";
 import { normalizeSymbol } from "./layout";
 
 export const MAX_WATCHLIST = 50;
@@ -209,11 +210,15 @@ function loadState(): State {
 }
 
 const [state, setStateSignal] = createSignal<State>(loadState());
-const [watchlistCollapsed, setCollapsedSignal] = createSignal(
+const [storedCollapsed, setCollapsedSignal] = createSignal(
   read("collapsed") === true,
 );
+// On the compact shell the sidebar is a sheet that starts closed. Its state is
+// separate, so rotating a tablet never changes the desktop column's.
+const [sheetOpen, setSheetOpen] = createSignal(false);
 
-export { watchlistCollapsed };
+export const watchlistCollapsed = (): boolean =>
+  compact() ? !sheetOpen() : storedCollapsed();
 
 function commit(next: State): void {
   const pruned = prune(next);
@@ -499,6 +504,10 @@ export function setFlag(symbol: string, color: FlagColor | null): void {
 }
 
 export function setWatchlistCollapsed(next: boolean): void {
+  if (compact()) {
+    setSheetOpen(!next);
+    return;
+  }
   setCollapsedSignal(next);
   persist("collapsed", next);
 }

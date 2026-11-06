@@ -9,6 +9,7 @@ import {
   onCleanup,
   untrack,
   onMount,
+  Show,
   type JSX,
 } from "solid-js";
 
@@ -41,7 +42,7 @@ import { StatusLine, type Status } from "./components/StatusLine";
 import { SymbolSearch } from "./components/SymbolSearch";
 import { Toasts } from "./components/Toasts";
 import { Toolbar } from "./components/Toolbar";
-import { Sidebar } from "./components/Sidebar";
+import { Sidebar, SidebarDock } from "./components/Sidebar";
 import {
   applyChartAction,
   chartKeyAction,
@@ -49,8 +50,8 @@ import {
   resetChart,
   screenshotFilename,
 } from "./lib/chartActions";
-import { isTypingContext, keepKeyboardFocus } from "./lib/keys";
-import { BP_COMPACT, createViewportWidth } from "./lib/viewport";
+import { isTypingContext, keepKeyboardFocus, swallowMenuGhostClicks } from "./lib/keys";
+import { compact } from "./lib/viewport";
 import { createMcpSession } from "./mcp";
 import { startSignIn, tryHandlePendingRedirect } from "./oauth";
 import { createListIndicatorsQuery } from "./queries";
@@ -106,6 +107,7 @@ export function App(): JSX.Element {
   const [compareOpen, setCompareOpen] = createSignal(false);
 
   onMount(() => onCleanup(keepKeyboardFocus()));
+  onMount(() => onCleanup(swallowMenuGhostClicks()));
 
   // Chart keyboard navigation: never while typing or a dialog/menu is open.
   onMount(() => {
@@ -180,13 +182,12 @@ export function App(): JSX.Element {
   });
 
   // --- Charts of the grid (ADR-0043) ------------------------------------
-  // Below the compact breakpoint only the active chart shows; the grid and
-  // the other charts stay as they are, to come back when there is room.
-  const width = createViewportWidth();
-  const shape = () => (width() < BP_COMPACT ? "1" : grid());
+  // The compact shell shows only the active chart; the grid and the other
+  // charts stay as they are, to come back when there is room.
+  const shape = () => (compact() ? "1" : grid());
   const paneIds = createMemo(
     () =>
-      width() < BP_COMPACT
+      compact()
         ? [activePane()]
         : Array.from({ length: paneCount(grid()) }, (_, i) => i),
     [],
@@ -200,6 +201,8 @@ export function App(): JSX.Element {
     () => panes().find((p) => p.pane === activePane()) ?? panes()[0]!,
   );
   const [rail, setRail] = createSignal<HTMLElement>();
+  // Compact shell: the drawing toolbar behind the dock's Draw button.
+  const [drawOpen, setDrawOpen] = createSignal(false);
   const chart = () => view().chart();
   const live = () => view().live();
   const shown = () => view().shown();
@@ -330,6 +333,17 @@ export function App(): JSX.Element {
       : plotsOf(ind, (n) => paletteColor(key, n), key);
   });
 
+  // Undefined only while the registry cannot say. The server leaves out
+  // `configurable_params` for an indicator without params (EMA Stack), which
+  // is an empty form with its Style tab, not a failed load.
+  const settingsSpecs = createMemo(() => {
+    const n = settingsTarget()?.name;
+    const found = listIndicators.data?.indicators.find(
+      (i) => i.name === n || i.aliases?.includes(n ?? ""),
+    );
+    return found && (found.configurable_params ?? []);
+  });
+
   const settingsGeometry = createMemo(() => {
     const key = settingsTarget()?.key;
     const ind = key === undefined ? undefined : view().query.data?.indicators[key];
@@ -354,7 +368,7 @@ export function App(): JSX.Element {
   });
 
   return (
-    <div class="flex flex-col h-screen w-screen">
+    <div class="app-shell flex flex-col h-dvh w-screen">
       <header class="flex flex-nowrap items-center gap-2 min-[1280px]:gap-3 px-4 h-[52px] shrink-0 overflow-hidden border-b border-[color:var(--color-border)]">
         <h1 class="text-lg font-semibold mr-1 min-[1280px]:mr-2 leading-none max-[639px]:hidden">
           chartgen
@@ -394,7 +408,7 @@ export function App(): JSX.Element {
         </button>
         {/* Below 480px the header has no room: alerts stay reachable from the
          * sidebar panel, the status text drops (the sign-in recovery stays) and the layout name collapses. */}
-        <div class="max-[479px]:hidden">
+        <div class="max-[479px]:hidden compact:hidden">
           <AlertButton />
         </div>
         <div>
@@ -408,10 +422,10 @@ export function App(): JSX.Element {
             }
           />
         </div>
-        <div class="ml-auto max-[767px]:hidden">
+        <div class="ml-auto compact:hidden">
           <GridMenu />
         </div>
-        <div class="min-w-0 max-[767px]:ml-auto max-[479px]:[&_[data-testid=layout-name]]:hidden">
+        <div class="min-w-0 compact:ml-auto max-[479px]:[&_[data-testid=layout-name]]:hidden">
           <LayoutMenu />
         </div>
       </header>
@@ -425,12 +439,7 @@ export function App(): JSX.Element {
         target={settingsTarget()}
         plots={settingsPlots()}
         geometry={settingsGeometry()}
-        specs={
-          listIndicators.data?.indicators.find((i) => {
-            const n = settingsTarget()?.name;
-            return i.name === n || i.aliases?.includes(n ?? "");
-          })?.configurable_params
-        }
+        specs={settingsSpecs()}
         onClose={() => setSettingsIndex(null)}
         onSubmit={(params, fields, style) => {
           const target = settingsTarget();
@@ -468,7 +477,7 @@ export function App(): JSX.Element {
         open={settingsOpen()}
         onClose={() => setSettingsOpen(false)}
       />
-      <main class="flex flex-1 min-h-0">
+      <main class="flex flex-1 min-h-0" data-draw-open={drawOpen() ? "" : undefined}>
         <div ref={setRail} class="contents" />
         <div
           class="chart-grid"
@@ -485,6 +494,7 @@ export function App(): JSX.Element {
                 state={state}
                 rail={rail()}
                 multi={paneIds().length > 1}
+                onToolArmed={() => setDrawOpen(false)}
                 onIndicatorSettings={(key) => setSettingsIndex(indexOf(key))}
                 onAddAlert={addIndicatorAlert}
                 onResetView={resetView}
@@ -509,11 +519,19 @@ export function App(): JSX.Element {
           }}
         />
       </main>
-      <BottomBar
-        chart={chart()}
-        series={shown()?.series ?? null}
-        loadUntil={(ts, isCurrent) => view().feed.loadUntil(ts, isCurrent)}
-      />
+      <div class="bottom-rows flex flex-col shrink-0">
+        <BottomBar
+          chart={chart()}
+          series={shown()?.series ?? null}
+          loadUntil={(ts, isCurrent) => view().feed.loadUntil(ts, isCurrent)}
+        />
+        <Show when={compact()}>
+          <SidebarDock
+            drawActive={drawOpen() || view().drawingArmed()}
+            onDraw={() => setDrawOpen(!drawOpen())}
+          />
+        </Show>
+      </div>
       <AlertDialog
         series={live()?.series ?? null}
         params={alertParams()}

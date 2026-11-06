@@ -82,7 +82,7 @@ on the quotes poll, like any symbol not on the chart. Indicator and sloped-drawi
 alerts therefore only run while the active chart shows their symbol and interval;
 switching the active chart restarts the crossing baselines from its last close.
 
-**Compact layout.** Below 768 px only the active chart shows. The grid and the other
+**Compact layout.** The compact shell ([ADR-0039](/chartgen/decisions/0039-compact-layout/)) shows only the active chart. The grid and the other
 charts' state are untouched, so nothing is dirty and they come back when there is room.
 
 ### Consequences

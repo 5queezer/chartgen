@@ -1271,6 +1271,20 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
       pinning = false;
     }
   };
+  // klinecharts' touch path converts a drag with the axis of the pane under the
+  // finger, so crossing into a sub-pane moved a point to a volume-scale "price".
+  // Its mouse path stops at the pane's edge: this does the same for touch.
+  const keepTouchDragInPane = (e: TouchEvent) => {
+    const chart = props.chart;
+    const touch = e.touches[0];
+    if (pressedId === null || !chart || !touch) return;
+    const o = chart.getOverlayById(pressedId) as unknown as { paneId: string } | null;
+    const r = o && chart.getDom(o.paneId, "main" as never)?.getBoundingClientRect();
+    if (r && (touch.clientY < r.top || touch.clientY > r.bottom)) e.stopImmediatePropagation();
+  };
+  window.addEventListener("touchmove", keepTouchDragInPane, true);
+  onCleanup(() => window.removeEventListener("touchmove", keepTouchDragInPane, true));
+
   const pinEvents = ["mousemove", "mousedown", "mouseup", "click"] as const;
   for (const type of pinEvents) document.addEventListener(type, pinToStartPane, true);
   onCleanup(() => {
@@ -1474,6 +1488,17 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
     if (!isRelease(e)) return;
     const store = (props.chart as unknown as PressStoreOwner | null)?.getChartStore?.().getOverlayStore?.();
     if (!store?.getPressedInstanceInfo?.().instance) return;
+    // A touch drag stops at its pane's edge, so a finger easily lifts on the separator,
+    // the only part of the chart where klinecharts leaves a release unanswered: keep that drag.
+    const touch = e.type === "touchend" ? (e as TouchEvent).changedTouches[0] : undefined;
+    const box = props.chart?.getDom()?.getBoundingClientRect();
+    const onSeparator =
+      touch !== undefined &&
+      box !== undefined &&
+      touch.clientX >= box.left &&
+      touch.clientX <= box.right &&
+      touch.clientY >= box.top &&
+      touch.clientY <= box.bottom;
     pressedId = null;
     store.setPressedInstanceInfo?.({
       paneId: "",
@@ -1483,7 +1508,8 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
       figureIndex: -1,
       attrsIndex: -1,
     });
-    refresh();
+    if (onSeparator) commit();
+    else refresh();
   };
   // A blur has no release, and klinecharts would treat later moves as still pressed, drawing
   // or plain pan: give it one, off the panes. With nothing pressed, nothing hears it.

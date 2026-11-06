@@ -69,7 +69,8 @@ import {
 } from "../lib/plotStyle";
 import { keyName } from "../lib/instances";
 import { withoutParamNumber } from "../lib/indicatorNames";
-import { fitSubPanes } from "../lib/paneLayout";
+import { compactPaneHeights, fitSubPanes } from "../lib/paneLayout";
+import { compact } from "../lib/viewport";
 import {
   applyFill,
   divColor,
@@ -1071,7 +1072,8 @@ export function Chart(props: ChartProps): JSX.Element {
   // Oscillator pane keys, top to bottom, as klinecharts stacks them.
   let paneStack: string[] = [];
   let fitFrame: number | null = null;
-  // A chart of a grid (ADR-0043): the heights the sub-panes had before the grid shrank them.
+  // Compact shell or a chart of a grid (ADR-0043): the heights the sub-panes had before
+  // the screen or the grid shrank them.
   const naturalHeights = new Map<string, number>();
   // Before klinecharts' resize, which clamps panes that no longer fit.
   const rememberNaturalHeights = (c: KChart) => {
@@ -1101,18 +1103,23 @@ export function Chart(props: ChartProps): JSX.Element {
     };
     fitFrame = requestAnimationFrame(step);
   };
-  const fitPanesToCell = (c: KChart) => {
+  // Whether the sub-panes fit a smaller host: the compact shell, or a chart of a grid.
+  const fitsHost = () => compact() || !!props.multi;
+  const fitPanesToHost = (c: KChart) => {
     rememberNaturalHeights(c);
     const ids = untrack(paneIds);
     const names = paneStack.filter((n) => ids[n]);
     // The host, not getSize(): after a resize too short for the panes that reports
-    // a clamped total, which would make the heights depend on the path taken here.
+    // a clamped total, which made the heights depend on the path taken here.
     const stack = host.clientHeight - (c.getSize("x_axis_pane")?.height ?? 0);
-    const natural = names.map((n) => naturalHeights.get(n)!);
-    const fit = fitSubPanes(stack - natural.reduce((a, b) => a + b, 0), natural) ?? natural;
-    setPaneHeights(c, names.map((n, i) => [ids[n]!, fit[i]!]));
+    const fit = compactPaneHeights(stack, names.map((n) => naturalHeights.get(n)!));
+    if (untrack(() => props.multi)) {
+      setPaneHeights(c, names.map((n, i) => [ids[n]!, fit[i]!]));
+    } else {
+      names.forEach((n, i) => c.setPaneOptions({ id: ids[n]!, height: fit[i]! }));
+    }
   };
-  // Back to one chart the panes return to those heights.
+  // With room again the panes return to those heights.
   const restoreNaturalHeights = (c: KChart) => {
     const ids = untrack(paneIds);
     const targets = [...naturalHeights].flatMap(([n, height]): Array<[string, number]> =>
@@ -1266,6 +1273,18 @@ export function Chart(props: ChartProps): JSX.Element {
       if (!inMain && !(e.target as Element).closest(".pane-header")) onLeave();
     };
     host.addEventListener("mouseleave", onLeave);
+    // A touch away from the crosshair hides it, without an action or a
+    // mouseleave. This runs after klinecharts' own listener, on the bubble.
+    const onTouch = () => {
+      const store = (
+        c as unknown as {
+          getChartStore: () => { getTooltipStore: () => { getCrosshair: () => { x?: number } } };
+        }
+      ).getChartStore();
+      if (store.getTooltipStore().getCrosshair().x === undefined) setCrosshairIndex(null);
+    };
+    host.addEventListener("touchstart", onTouch, { passive: true });
+    host.addEventListener("touchend", onTouch, { passive: true });
     host.addEventListener("mousemove", onMove);
     // Panes changed under a still pointer (Remove in a header): klinecharts has no
     // crosshair, and no move will come to say so.
@@ -1277,6 +1296,8 @@ export function Chart(props: ChartProps): JSX.Element {
       c!.unsubscribeAction("onCrosshairChange" as never, onCrosshair);
       c!.unsubscribeAction("onVisibleRangeChange" as never, onRange);
       host.removeEventListener("mouseleave", onLeave);
+      host.removeEventListener("touchstart", onTouch);
+      host.removeEventListener("touchend", onTouch);
       host.removeEventListener("mousemove", onMove);
       if (crosshairFrame !== null) cancelAnimationFrame(crosshairFrame);
       if (rangeFrame !== null) cancelAnimationFrame(rangeFrame);
@@ -1288,9 +1309,9 @@ export function Chart(props: ChartProps): JSX.Element {
     if (host && typeof ResizeObserver !== "undefined") {
       const ro = new ResizeObserver(() => {
         const current = chart();
-        if (current && props.multi) rememberNaturalHeights(current);
+        if (current && fitsHost()) rememberNaturalHeights(current);
         current?.resize();
-        if (current && props.multi) fitPanesToCell(current);
+        if (current && fitsHost()) fitPanesToHost(current);
         else if (current) restoreNaturalHeights(current);
         recomputeHeaders();
       });
@@ -1730,8 +1751,8 @@ export function Chart(props: ChartProps): JSX.Element {
     // klinecharts can miss the resize of a pane changed right after its first
     // paint, and the canvas then stays blank at its old size.
     const startHeights = untrack(() => props.multi)
-      ? fitSubPanes(
-          host.clientHeight - (c.getSize("x_axis_pane")?.height ?? 0) - wantedOsc.length * 120,
+      ? compactPaneHeights(
+          host.clientHeight - (c.getSize("x_axis_pane")?.height ?? 0),
           wantedOsc.map(() => 120),
         )
       : null;
@@ -1768,13 +1789,16 @@ export function Chart(props: ChartProps): JSX.Element {
 
     // Keep the price pane usable: shrink the sub-panes first.
     const fitPanes = () => {
+      if (untrack(fitsHost)) {
+        fitPanesToHost(c);
+        return;
+      }
       const subIds = wantedOsc.map((n) => nextPanes[n]).filter((id) => !!id);
       const candle = c.getSize(CANDLE_PANE_ID)?.height;
       if (candle === undefined) return;
       const subs = subIds.map((id) => c.getSize(id)?.height ?? 0);
       const fit = fitSubPanes(candle, subs);
-      if (fit && untrack(() => props.multi)) setPaneHeights(c, subIds.map((id, i) => [id!, fit[i]!]));
-      else if (fit) subIds.forEach((id, i) => c.setPaneOptions({ id, height: fit[i]! }));
+      if (fit) subIds.forEach((id, i) => c.setPaneOptions({ id, height: fit[i]! }));
     };
     fitPanes();
 

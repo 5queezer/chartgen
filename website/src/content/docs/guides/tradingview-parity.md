@@ -40,7 +40,7 @@ Status legend:
 | Right-click context menu | ✅ | ◐ | Reset view, copy price, add horizontal line, remove all drawings or indicators, settings. "Lock vertical cursor line by time" is not offered. [Chart context menu](/chartgen/guides/web/#chart-context-menu) |
 | Add alert at the clicked price (context menu) | ✅ | ✅ | "Add alert at price" opens the alert dialog at that price. [Chart context menu](/chartgen/guides/web/#chart-context-menu), [Alerts](/chartgen/guides/web/#sidebar-and-price-alerts) |
 | Titled dialogs (symbol search, compare, add symbol) | ✅ | ✅ | The compare and watchlist dialogs say "Compare symbol" and "Add symbol". [Compare symbols](/chartgen/guides/web/#compare-symbols), [Watchlist](/chartgen/guides/web/#watchlist) |
-| Mobile and touch layout | ✅ | ❌ | The web guide describes a desktop layout only. |
+| Mobile and touch layout | ✅ | ◐ | Compact layout with a dock and bottom sheets, pan, pinch and long-press crosshair. No native app, no long-press menu with price actions, tested in device emulation only. [Phones and tablets](/chartgen/guides/web/#phones-and-tablets) |
 | Multi-chart layouts (several charts in one view) | ✅ | ◐ | 1, 2 or 4 charts with their own symbol, interval and indicators, saved in layouts. No symbol or crosshair sync, no larger grids, no resizable splits. [Chart grid](/chartgen/guides/web/#chart-grid), [ADR-0043](/chartgen/decisions/0043-multi-chart-grid/) |
 
 ## Chart types
