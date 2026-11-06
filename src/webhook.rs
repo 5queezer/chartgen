@@ -1033,13 +1033,16 @@ mod tests {
         let (seen2, hits2) = (seen.clone(), hits.clone());
         tokio::spawn(async move {
             while let Ok((mut s, _)) = listener.accept().await {
-                hits2.fetch_add(1, Ordering::SeqCst);
                 let mut buf = vec![0u8; 8192];
                 let n = s.read(&mut buf).await.unwrap_or(0);
-                seen2
-                    .lock()
-                    .unwrap()
-                    .push(String::from_utf8_lossy(&buf[..n]).to_string());
+                // Other programs on this host probe local ports: only a POST is a delivery.
+                if buf.starts_with(b"POST ") {
+                    hits2.fetch_add(1, Ordering::SeqCst);
+                    seen2
+                        .lock()
+                        .unwrap()
+                        .push(String::from_utf8_lossy(&buf[..n]).to_string());
+                }
                 let _ = s.write_all(reply.as_bytes()).await;
                 let _ = s.shutdown().await;
             }

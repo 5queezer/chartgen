@@ -1132,11 +1132,13 @@ fn store_path(test: &str) -> std::path::PathBuf {
     dir.join("chartgen.db")
 }
 
-const ALERT_TOOLS: [&str; 4] = [
+const ALERT_TOOLS: [&str; 6] = [
     "create_server_alert",
     "list_server_alerts",
     "update_server_alert",
     "delete_server_alert",
+    "subscribe_push",
+    "unsubscribe_push",
 ];
 
 /// Call a tool; `Err` is an `isError` result's text.
@@ -1204,9 +1206,12 @@ mod server_alerts {
                 let Ok(mut s) = stream else { continue };
                 let mut buf = vec![0u8; 16384];
                 let n = s.read(&mut buf).unwrap_or(0);
-                log.lock()
-                    .unwrap()
-                    .push(String::from_utf8_lossy(&buf[..n]).to_string());
+                // Other programs on this host probe local ports: only a POST is a delivery.
+                if buf.starts_with(b"POST ") {
+                    log.lock()
+                        .unwrap()
+                        .push(String::from_utf8_lossy(&buf[..n]).to_string());
+                }
                 let _ = s.write_all(
                     b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
                 );

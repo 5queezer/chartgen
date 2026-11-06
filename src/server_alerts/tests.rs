@@ -82,7 +82,15 @@ fn hub_with(fake: Arc<Fake>) -> Arc<ChartHub> {
 
 fn alerts_on(store: &'static Store, policy: Policy, limits: Limits) -> Arc<ServerAlerts> {
     let hub = hub_with(Arc::new(Fake::default()));
-    ServerAlerts::new(store, hub, policy, Access::Open, limits, quick_timing())
+    ServerAlerts::new(
+        store,
+        hub,
+        policy,
+        Access::Open,
+        None,
+        limits,
+        quick_timing(),
+    )
 }
 
 fn plain(store: &'static Store) -> Arc<ServerAlerts> {
@@ -292,6 +300,7 @@ async fn closes_fire_when_trades_roll_the_candle_first() {
         hub_with(fake.clone()),
         Policy::default(),
         Access::Open,
+        None,
         Limits::default(),
         quick_timing(),
     );
@@ -618,6 +627,7 @@ async fn on_the_real_source_a_new_symbol_asks_the_binance_gate() {
         hub,
         Policy::default(),
         Access::Open,
+        None,
         Limits::default(),
         quick_timing(),
     );
@@ -658,6 +668,7 @@ async fn a_symbol_new_to_the_server_is_checked_once() {
         hub_with(fake.clone()),
         Policy::default(),
         Access::Open,
+        None,
         Limits::default(),
         quick_timing(),
     );
@@ -882,10 +893,13 @@ async fn receiver(reply: &'static str) -> (u16, Arc<Mutex<Vec<String>>>) {
         while let Ok((mut s, _)) = listener.accept().await {
             let mut buf = vec![0u8; 16384];
             let n = s.read(&mut buf).await.unwrap_or(0);
-            seen2
-                .lock()
-                .unwrap()
-                .push(String::from_utf8_lossy(&buf[..n]).to_string());
+            // Other programs on this host probe local ports: only a POST is a delivery.
+            if buf.starts_with(b"POST ") {
+                seen2
+                    .lock()
+                    .unwrap()
+                    .push(String::from_utf8_lossy(&buf[..n]).to_string());
+            }
             let _ = s.write_all(reply.as_bytes()).await;
             let _ = s.shutdown().await;
         }
@@ -1112,7 +1126,7 @@ async fn a_backlog_does_not_keep_another_clients_delivery_waiting() {
         changes_per_minute: 1000,
         fires_per_alert_per_minute: 1000,
         webhooks_per_client_per_minute: 1000,
-        webhooks_total_per_minute: 1000,
+        deliveries_total_per_minute: 1000,
         ..Limits::default()
     };
     let a = alerts_on(store, local(port), limits);
@@ -1147,6 +1161,7 @@ async fn the_client_that_waited_longest_goes_first() {
             alert_id: "gone".into(),
             body: "{}".into(),
             created_at: chrono::Utc::now().timestamp(),
+            device: None,
         };
         let mut st = a.lock();
         ServerAlerts::enqueue(&mut st, owner.to_string(), event(1));
@@ -1213,7 +1228,7 @@ async fn a_client_is_held_to_its_share_of_the_slots() {
         ..quick_timing()
     };
     let hub = hub_with(Arc::new(Fake::default()));
-    let a = ServerAlerts::new(store, hub, local(port), Access::Open, limits, timing);
+    let a = ServerAlerts::new(store, hub, local(port), Access::Open, None, limits, timing);
     for _ in 0..3 {
         create(&a, hooked(port, "greater", "once"), "me").await;
     }
@@ -1241,7 +1256,7 @@ async fn a_silent_receiver_cannot_fill_the_global_queue() {
     let limits = Limits {
         fires_per_alert_per_minute: 100_000,
         webhooks_per_client_per_minute: 1000,
-        webhooks_total_per_minute: 1000,
+        deliveries_total_per_minute: 1000,
         deliveries_in_flight_per_client: 1,
         pending_deliveries_per_client: 5,
         pending_deliveries: 20,
@@ -1252,7 +1267,7 @@ async fn a_silent_receiver_cannot_fill_the_global_queue() {
         ..quick_timing()
     };
     let hub = hub_with(Arc::new(Fake::default()));
-    let a = ServerAlerts::new(store, hub, local(port), Access::Open, limits, timing);
+    let a = ServerAlerts::new(store, hub, local(port), Access::Open, None, limits, timing);
     create(&a, hooked(port, "crossing", "every"), "hog").await;
     tick(&a, BASE, 99.0);
     // Fires faster than anything drains, for several dispatch ticks.
@@ -1279,7 +1294,7 @@ async fn the_total_budget_holds_across_clients() {
     let (port, seen) = receiver(OK).await;
     let (store, _) = store_at("budget-total");
     let limits = Limits {
-        webhooks_total_per_minute: 2,
+        deliveries_total_per_minute: 2,
         ..Limits::default()
     };
     let a = alerts_on(store, local(port), limits);
@@ -1319,6 +1334,7 @@ fn with_access(store: &'static Store, access: Access, policy: Policy) -> Arc<Ser
         hub,
         policy,
         access,
+        None,
         Limits::default(),
         quick_timing(),
     )
@@ -1441,9 +1457,10 @@ async fn a_queued_delivery_of_a_client_no_longer_allowed_is_dropped_on_restart()
             alert_id: id.clone(),
             body: "{}".into(),
             created_at: chrono::Utc::now().timestamp(),
+            device: None,
         };
         store
-            .record_server_alert_fire(&id, "gone", &record, Some(&event))
+            .record_server_alert_fire(&id, "gone", &record, std::slice::from_ref(&event))
             .unwrap();
 
         let store = reopen(&path);
@@ -1471,9 +1488,10 @@ async fn a_queued_delivery_of_a_client_still_allowed_is_sent_after_a_restart() {
         alert_id: id.clone(),
         body: "{}".into(),
         created_at: chrono::Utc::now().timestamp(),
+        device: None,
     };
     store
-        .record_server_alert_fire(&id, "friend", &record, Some(&event))
+        .record_server_alert_fire(&id, "friend", &record, std::slice::from_ref(&event))
         .unwrap();
     let _a = with_access(reopen(&path), Access::parse(Some("friend")), local(port));
     until("the delivery", || seen.lock().unwrap().len() == 1).await;
@@ -1647,6 +1665,7 @@ async fn new_feeds_are_limited_however_fast_alerts_come_and_go() {
         hub,
         Policy::default(),
         Access::Open,
+        None,
         limits,
         quick_timing(),
     );
@@ -1693,6 +1712,7 @@ async fn a_refused_feed_is_tried_again() {
         hub,
         Policy::default(),
         Access::Open,
+        None,
         Limits::default(),
         quick_timing(),
     );
@@ -1855,9 +1875,10 @@ async fn a_delivery_interrupted_by_a_restart_resumes_under_the_same_id() {
         alert_id: id.clone(),
         body: r#"{"id":"event-1"}"#.into(),
         created_at: chrono::Utc::now().timestamp(),
+        device: None,
     };
     store
-        .record_server_alert_fire(&id, "me", &fired.json(), Some(&event))
+        .record_server_alert_fire(&id, "me", &fired.json(), std::slice::from_ref(&event))
         .unwrap();
     drop(a);
 
@@ -1890,14 +1911,15 @@ async fn a_stale_or_orphaned_delivery_is_dropped_on_restart() {
         alert_id: alert.into(),
         body: "{}".into(),
         created_at,
+        device: None,
     };
     let old = event("old", &id, at - EVENT_MAX_AGE_SECS - 10);
     let orphan = event("orphan", "gone", at);
     store
-        .record_server_alert_fire(&id, "me", &record, Some(&old))
+        .record_server_alert_fire(&id, "me", &record, std::slice::from_ref(&old))
         .unwrap();
     store
-        .record_server_alert_fire(&id, "me", &record, Some(&orphan))
+        .record_server_alert_fire(&id, "me", &record, std::slice::from_ref(&orphan))
         .unwrap();
     drop(a);
     let a = alerts_on(reopen(&path), local(port), Limits::default());
@@ -1918,9 +1940,10 @@ async fn a_deleted_alert_sends_nothing_more() {
         alert_id: id.clone(),
         body: "{}".into(),
         created_at: chrono::Utc::now().timestamp(),
+        device: None,
     };
     store
-        .record_server_alert_fire(&id, "me", &record, Some(&event))
+        .record_server_alert_fire(&id, "me", &record, std::slice::from_ref(&event))
         .unwrap();
     call(&a, "delete_server_alert", json!({"alert_id": id}), "me")
         .await
@@ -1968,4 +1991,513 @@ fn a_stored_alert_reads_back_with_its_secret() {
     assert_eq!(record.fire_count, 0);
     let again: Record = serde_json::from_str(&record.json()).unwrap();
     assert_eq!(again.webhook.unwrap().url, "https://example.com/");
+}
+
+// --- Push (ADR-0045) ---
+
+const UA_PUBLIC: &str =
+    "BCVxsr7N_eNgVRqvHtD0zTZsEc6-VV-JvLexhqUzORcxaOzi6-AYWXvTBHm4bjyPjs7Vd8pZGH6SRpkNtoIAiw4";
+const UA_AUTH: &str = "BTBZMqHH6r4Tts7J_aSIgg";
+const GONE: &str = "HTTP/1.1 410 Gone\r\ncontent-length: 0\r\nconnection: close\r\n\r\n";
+const NOT_FOUND: &str = "HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\nconnection: close\r\n\r\n";
+const BROKEN: &str = "HTTP/1.1 500 Oops\r\ncontent-length: 0\r\nconnection: close\r\n\r\n";
+
+fn vapid() -> Option<Vapid> {
+    Some(Vapid::from_secret(&Vapid::new_secret().unwrap(), "https://x.example").unwrap())
+}
+
+fn push_alerts(
+    store: &'static Store,
+    port: u16,
+    access: Access,
+    vapid: Option<Vapid>,
+    limits: Limits,
+) -> Arc<ServerAlerts> {
+    let hub = hub_with(Arc::new(Fake::default()));
+    ServerAlerts::new(
+        store,
+        hub,
+        local(port),
+        access,
+        vapid,
+        limits,
+        quick_timing(),
+    )
+}
+
+fn device(port: u16, name: &str) -> Value {
+    json!({
+        "endpoint": format!("http://127.0.0.1:{port}/push/{name}"),
+        "p256dh": UA_PUBLIC,
+        "auth": UA_AUTH,
+    })
+}
+
+async fn subscribe(a: &Arc<ServerAlerts>, port: u16, name: &str, owner: &str) -> Value {
+    call(a, "subscribe_push", device(port, name), owner)
+        .await
+        .unwrap()
+}
+
+fn pushed(condition: &str, trigger: &str) -> Value {
+    let mut args = spec(condition, trigger, 100.0);
+    args["push"] = json!(true);
+    args
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_push_reaches_the_service_encrypted_with_a_vapid_token() {
+    let (port, seen) = receiver(OK).await;
+    let (store, _) = store_at("push-send");
+    let a = push_alerts(store, port, Access::Open, vapid(), Limits::default());
+    subscribe(&a, port, "phone", "me").await;
+    let id = create(&a, pushed("greater", "once"), "me").await;
+    tick(&a, BASE, 101.0);
+    until("the push", || !seen.lock().unwrap().is_empty()).await;
+    until("its record", || a.lock().alerts[&id].last_push.is_some()).await;
+
+    let raw = seen.lock().unwrap()[0].clone();
+    assert!(raw.starts_with("POST /push/phone"), "{raw}");
+    let lower = raw.to_lowercase();
+    assert!(lower.contains("content-encoding: aes128gcm"), "{raw}");
+    assert!(lower.contains("authorization: vapid t="), "{raw}");
+    assert!(lower.contains("ttl: 3600"), "{raw}");
+    assert!(!raw.contains("BTCUSDT"), "the service must not read it");
+    assert!(!lower.contains("x-chartgen"), "no webhook headers: {raw}");
+
+    let view = get(&a, "me", &id).await;
+    assert_eq!(view["push"], true);
+    assert_eq!(view["last_push_status"], 200);
+    assert!(view["last_push_error"].is_null(), "{view}");
+    assert!(
+        view["last_delivery_at"].is_null(),
+        "not the webhook's: {view}"
+    );
+    until("the row to go", || {
+        store.server_alert_events().unwrap().is_empty()
+    })
+    .await;
+}
+
+/// All of a fire's rows are written with it, and carry one id, so that a device told
+/// twice and a webhook receiver can both recognise it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_fire_writes_one_row_per_device_and_webhook_with_one_id() {
+    let (port, seen) = receiver(OK).await;
+    let (store, _) = store_at("push-rows");
+    let limits = Limits {
+        webhooks_per_client_per_minute: 0,
+        pushes_per_client_per_minute: 0,
+        ..Limits::default()
+    };
+    let a = push_alerts(store, port, Access::Open, vapid(), limits);
+    subscribe(&a, port, "phone", "me").await;
+    subscribe(&a, port, "laptop", "me").await;
+    subscribe(&a, port, "not-mine", "other").await;
+    let mut args = hooked(port, "greater", "once");
+    args["push"] = json!(true);
+    create(&a, args, "me").await;
+    tick(&a, BASE, 101.0);
+
+    let rows = store.server_alert_events().unwrap();
+    assert_eq!(rows.len(), 3, "a webhook and two devices");
+    assert_eq!(rows.iter().filter(|e| e.device.is_none()).count(), 1);
+    let bodies: HashSet<&str> = rows.iter().map(|e| e.body.as_str()).collect();
+    assert_eq!(bodies.len(), 1, "one body");
+    let body: Value = serde_json::from_str(rows[0].body.as_str()).unwrap();
+    assert_eq!(body["fire_count"], 1);
+    let ids: HashSet<&str> = rows.iter().map(|e| e.id.as_str()).collect();
+    assert_eq!(ids.len(), 3, "each its own row");
+    assert_eq!(a.lock().pending, 3);
+    assert!(seen.lock().unwrap().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_404_or_410_forgets_the_device() {
+    for reply in [GONE, NOT_FOUND] {
+        let (port, seen) = receiver(reply).await;
+        let (store, _) = store_at(&format!("push-gone-{}", &reply[9..12]));
+        let a = push_alerts(store, port, Access::Open, vapid(), Limits::default());
+        subscribe(&a, port, "phone", "me").await;
+        let id = create(&a, pushed("greater", "once"), "me").await;
+        tick(&a, BASE, 101.0);
+        until("the record", || a.lock().alerts[&id].last_push.is_some()).await;
+        assert_eq!(seen.lock().unwrap().len(), 1, "final, not retried");
+        assert!(a.lock().devices.is_empty());
+        assert!(store.push_devices().unwrap().is_empty());
+        let view = get(&a, "me", &id).await;
+        assert!(view["last_push_error"]
+            .as_str()
+            .unwrap()
+            .starts_with("HTTP 4"));
+        let list = call(&a, "list_server_alerts", json!({}), "me")
+            .await
+            .unwrap();
+        assert_eq!(list["push"]["devices"], 0);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn other_failures_retry_and_keep_the_device() {
+    let (port, seen) = receiver(BROKEN).await;
+    let (store, _) = store_at("push-retry");
+    let a = push_alerts(store, port, Access::Open, vapid(), Limits::default());
+    subscribe(&a, port, "phone", "me").await;
+    let id = create(&a, pushed("greater", "once"), "me").await;
+    tick(&a, BASE, 101.0);
+    until("the record", || a.lock().alerts[&id].last_push.is_some()).await;
+    assert_eq!(
+        seen.lock().unwrap().len(),
+        3,
+        "the two retries of a webhook"
+    );
+    assert_eq!(a.lock().devices.len(), 1);
+    let view = get(&a, "me", &id).await;
+    assert_eq!(view["last_push_error"], "HTTP 500");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_queued_push_resumes_after_a_restart_unless_its_device_or_client_is_gone() {
+    let (port, seen) = receiver(OK).await;
+    let (store, path) = store_at("push-restart");
+    let limits = Limits {
+        pushes_per_client_per_minute: 0,
+        ..Limits::default()
+    };
+    let a = push_alerts(store, port, Access::Open, vapid(), limits);
+    subscribe(&a, port, "phone", "me").await;
+    let id = create(&a, pushed("greater", "once"), "me").await;
+    tick(&a, BASE, 101.0);
+    assert_eq!(store.server_alert_events().unwrap().len(), 1);
+    drop(a);
+
+    // Off the list now: dropped, as a webhook's is.
+    let (off_store, _) = store_at("push-restart-off");
+    let off = push_alerts(off_store, port, Access::Open, vapid(), limits);
+    subscribe(&off, port, "phone", "me").await;
+    create(&off, pushed("greater", "once"), "me").await;
+    tick(&off, BASE, 101.0);
+    drop(off);
+    let listed = Access::Clients(["someone-else".to_string()].into());
+    let off = push_alerts(off_store, port, listed, vapid(), limits);
+    assert!(off.lock().queues.is_empty());
+    assert!(off_store.server_alert_events().unwrap().is_empty());
+
+    // Its device gone: nothing to send it to.
+    let (gone_store, _) = store_at("push-restart-gone");
+    let gone = push_alerts(gone_store, port, Access::Open, vapid(), limits);
+    subscribe(&gone, port, "phone", "me").await;
+    create(&gone, pushed("greater", "once"), "me").await;
+    tick(&gone, BASE, 101.0);
+    drop(gone);
+    let device = gone_store.push_devices().unwrap().remove(0);
+    gone_store.delete_push_device(&device.id).unwrap();
+    assert!(gone_store.server_alert_events().unwrap().is_empty());
+
+    let store = reopen(&path);
+    let a = push_alerts(store, port, Access::Open, vapid(), Limits::default());
+    until("the resumed push", || !seen.lock().unwrap().is_empty()).await;
+    until("its record", || a.lock().alerts[&id].last_push.is_some()).await;
+    assert_eq!(seen.lock().unwrap().len(), 1);
+    assert!(seen.lock().unwrap()[0].starts_with("POST /push/phone"));
+    assert_eq!(a.lock().alerts[&id].fire_count, 1, "not fired again");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn push_is_allowed_where_webhooks_are_refused() {
+    let (port, _) = receiver(OK).await;
+    let (store, _) = store_at("push-access");
+    let a = push_alerts(store, port, Access::NoWebhooks, vapid(), Limits::default());
+    subscribe(&a, port, "phone", "stranger").await;
+    create(&a, pushed("greater", "once"), "stranger").await;
+    let e = call(
+        &a,
+        "create_server_alert",
+        hooked(port, "greater", "once"),
+        "stranger",
+    )
+    .await
+    .unwrap_err();
+    assert!(e.contains("operator allowed"), "{e}");
+    let list = call(&a, "list_server_alerts", json!({}), "stranger")
+        .await
+        .unwrap();
+    assert_eq!(list["webhooks"], false);
+    assert_eq!(list["push"]["devices"], 1);
+    assert!(list["push"]["public_key"].is_string());
+
+    // With a list, only those clients: push goes with being allowed alerts at all.
+    let (store, _) = store_at("push-access-list");
+    let listed = Access::Clients(["friend".to_string()].into());
+    let a = push_alerts(store, port, listed, vapid(), Limits::default());
+    subscribe(&a, port, "phone", "friend").await;
+    let e = call(&a, "subscribe_push", device(port, "phone"), "stranger")
+        .await
+        .unwrap_err();
+    assert!(e.contains("does not send push"), "{e}");
+    let list = call(&a, "list_server_alerts", json!({}), "stranger")
+        .await
+        .unwrap();
+    assert!(list["push"].is_null(), "{list}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn without_a_key_push_is_off_and_the_rest_runs() {
+    let (port, _) = receiver(OK).await;
+    let (store, _) = store_at("push-no-key");
+    let a = push_alerts(store, port, Access::Open, None, Limits::default());
+    let list = call(&a, "list_server_alerts", json!({}), "me")
+        .await
+        .unwrap();
+    assert!(list["push"].is_null());
+    for (tool, args) in [
+        ("subscribe_push", device(port, "phone")),
+        ("create_server_alert", pushed("greater", "once")),
+    ] {
+        let e = call(&a, tool, args, "me").await.unwrap_err();
+        assert!(e.contains("does not send push"), "{tool}: {e}");
+    }
+    create(&a, spec("greater", "once", 100.0), "me").await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_subscription_is_checked_and_stays_its_owners() {
+    let (port, _) = receiver(OK).await;
+    let (store, _) = store_at("push-check");
+    let limits = Limits {
+        changes_per_minute: 1000,
+        ..Limits::default()
+    };
+    let a = push_alerts(store, port, Access::Open, vapid(), limits);
+    let refused = |args: Value, needle: &'static str| {
+        let a = a.clone();
+        async move {
+            let e = call(&a, "subscribe_push", args, "me").await.unwrap_err();
+            assert!(e.contains(needle), "{e}");
+        }
+    };
+    for bad in [
+        "https://example.com/hook",
+        "https://evil.example/fcm.googleapis.com",
+        "https://169.254.169.254/latest",
+        "http://127.0.0.1:9/elsewhere",
+        "http://fcm.googleapis.com/fcm/send/a",
+    ] {
+        let mut args = device(port, "x");
+        args["endpoint"] = json!(bad);
+        refused(args, "not a known push service").await;
+    }
+    let mut args = device(port, "x");
+    args["p256dh"] = json!("AAAA");
+    refused(args, "push keys").await;
+    let mut args = device(port, "x");
+    args["auth"] = json!("AAAA");
+    refused(args, "push keys").await;
+    refused(json!({ "endpoint": "x" }), "p256dh is required").await;
+    assert!(store.push_devices().unwrap().is_empty());
+
+    // The same browser under two sign-ins is two devices: neither can take or remove
+    // the other's by knowing the endpoint.
+    subscribe(&a, port, "shared", "me").await;
+    assert_eq!(
+        subscribe(&a, port, "shared", "me").await["devices"],
+        1,
+        "same device"
+    );
+    subscribe(&a, port, "shared", "you").await;
+    assert_eq!(store.push_devices().unwrap().len(), 2);
+    let endpoint = json!({ "endpoint": device(port, "shared")["endpoint"] });
+    let out = call(&a, "unsubscribe_push", endpoint.clone(), "stranger")
+        .await
+        .unwrap();
+    assert_eq!(out["removed"], false);
+    let out = call(&a, "unsubscribe_push", endpoint.clone(), "me")
+        .await
+        .unwrap();
+    assert_eq!(
+        (&out["removed"], &out["devices"]),
+        (&json!(true), &json!(0))
+    );
+    let owners: Vec<String> = store
+        .push_devices()
+        .unwrap()
+        .into_iter()
+        .map(|d| d.owner)
+        .collect();
+    assert_eq!(owners, ["you"]);
+    // Nothing in what a client reads gives another's endpoint or keys.
+    let list = call(&a, "list_server_alerts", json!({}), "me")
+        .await
+        .unwrap();
+    assert!(!list.to_string().contains("/push/"), "{list}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn devices_are_limited_per_client_and_in_total() {
+    let (port, _) = receiver(OK).await;
+    let (store, _) = store_at("push-limits");
+    let limits = Limits {
+        changes_per_minute: 1000,
+        devices_per_client: 2,
+        devices_total: 3,
+        pushes_per_client_per_minute: 0,
+        ..Limits::default()
+    };
+    let a = push_alerts(store, port, Access::Open, vapid(), limits);
+    subscribe(&a, port, "one", "me").await;
+    tokio::time::sleep(Duration::from_millis(3)).await;
+    subscribe(&a, port, "two", "me").await;
+    // What the oldest was waiting for goes with it.
+    create(&a, pushed("greater", "once"), "me").await;
+    tick(&a, BASE, 101.0);
+    assert_eq!(a.lock().pending, 2);
+    tokio::time::sleep(Duration::from_millis(3)).await;
+    assert_eq!(subscribe(&a, port, "three", "me").await["devices"], 2);
+    let ends: HashSet<String> = store
+        .push_devices()
+        .unwrap()
+        .into_iter()
+        .map(|d| d.endpoint)
+        .collect();
+    assert!(!ends.iter().any(|e| e.ends_with("/one")), "{ends:?}");
+    assert_eq!(a.lock().pending, 1);
+    assert_eq!(store.server_alert_events().unwrap().len(), 1);
+
+    subscribe(&a, port, "theirs", "you").await;
+    let e = call(&a, "subscribe_push", device(port, "more"), "third")
+        .await
+        .unwrap_err();
+    assert!(e.contains("maximum of 3"), "{e}");
+    // Replacing one's own needs no room.
+    subscribe(&a, port, "four", "me").await;
+}
+
+/// A webhook's budget does not hold a push back, and each client's is its own.
+#[tokio::test(flavor = "multi_thread")]
+async fn pushes_have_a_budget_per_client() {
+    let (port, seen) = receiver(OK).await;
+    let (store, _) = store_at("push-budget");
+    let limits = Limits {
+        changes_per_minute: 1000,
+        fires_per_alert_per_minute: 1000,
+        pushes_per_client_per_minute: 2,
+        webhooks_per_client_per_minute: 0,
+        deliveries_total_per_minute: 1000,
+        ..Limits::default()
+    };
+    let a = push_alerts(store, port, Access::Open, vapid(), limits);
+    subscribe(&a, port, "phone", "me").await;
+    let id = create(&a, pushed("crossing", "every"), "me").await;
+    tick(&a, BASE, 99.0);
+    for i in 0..10 {
+        tick(&a, BASE, if i % 2 == 0 { 101.0 } else { 99.0 });
+    }
+    assert_eq!(a.lock().alerts[&id].fire_count, 10);
+    until("the budget's worth", || seen.lock().unwrap().len() == 2).await;
+    tokio::time::sleep(DISPATCH_EVERY * 3).await;
+    assert_eq!(seen.lock().unwrap().len(), 2, "the rest wait");
+    assert_eq!(a.lock().queues["me"].len(), 8);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_full_queue_or_no_device_says_why_and_the_fire_counts() {
+    let (port, _) = receiver(OK).await;
+    let (store, _) = store_at("push-full");
+    let limits = Limits {
+        fires_per_alert_per_minute: 1000,
+        pushes_per_client_per_minute: 0,
+        pending_deliveries_per_client: 3,
+        ..Limits::default()
+    };
+    let a = push_alerts(store, port, Access::Open, vapid(), limits);
+    let id = create(&a, pushed("crossing_up", "every"), "me").await;
+    tick(&a, BASE, 99.0);
+    tick(&a, BASE, 101.0);
+    let view = get(&a, "me", &id).await;
+    assert_eq!(view["fire_count"], 1);
+    assert_eq!(
+        view["last_push_error"],
+        "push skipped: no device has notifications on"
+    );
+
+    subscribe(&a, port, "phone", "me").await;
+    subscribe(&a, port, "laptop", "me").await;
+    tick(&a, BASE, 99.0);
+    tick(&a, BASE, 101.0);
+    assert_eq!(a.lock().queues["me"].len(), 2);
+    tick(&a, BASE, 99.0);
+    tick(&a, BASE, 101.0);
+    assert_eq!(
+        a.lock().queues["me"].len(),
+        3,
+        "bounded, for the one that fits"
+    );
+    assert_eq!(store.server_alert_events().unwrap().len(), 3);
+    let view = get(&a, "me", &id).await;
+    assert_eq!(view["fire_count"], 3);
+    assert_eq!(
+        view["last_push_error"],
+        "push skipped: too many deliveries waiting"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn turning_push_on_or_off_does_not_re_arm_a_spent_alert() {
+    let (port, seen) = receiver(OK).await;
+    let (store, _) = store_at("push-edit");
+    let a = push_alerts(store, port, Access::Open, vapid(), Limits::default());
+    subscribe(&a, port, "phone", "me").await;
+    let id = create(&a, spec("greater", "once", 100.0), "me").await;
+    tick(&a, BASE, 101.0);
+    assert_eq!(get(&a, "me", &id).await["active"], false);
+    let args = json!({ "alert_id": id, "push": true });
+    let view = call(&a, "update_server_alert", args, "me").await.unwrap();
+    assert_eq!(
+        (&view["active"], &view["push"]),
+        (&json!(false), &json!(true))
+    );
+    let args = json!({ "alert_id": id, "push": false });
+    let view = call(&a, "update_server_alert", args, "me").await.unwrap();
+    assert_eq!(view["push"], false);
+    assert!(seen.lock().unwrap().is_empty());
+    let e = call(
+        &a,
+        "update_server_alert",
+        json!({ "alert_id": id, "push": 1 }),
+        "me",
+    )
+    .await
+    .unwrap_err();
+    assert!(e.contains("push must be"), "{e}");
+}
+
+/// A row from before push reads as a webhook-only alert.
+#[test]
+fn an_alert_stored_before_push_reads_without_it() {
+    let old = r#"{"id":"a","owner":"o","symbol":"BTCUSDT","interval":"1m","evaluate_on":"live",
+        "feed_interval":"1m","condition":"greater","level":1.0,"trigger":"once","active":true,
+        "created_at":1}"#;
+    let r: Record = serde_json::from_str(old).unwrap();
+    assert!(!r.push && r.last_push.is_none());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_device_outlives_a_sign_in_but_not_the_idle_limit() {
+    let (port, _) = receiver(OK).await;
+    let (store, _) = store_at("push-idle");
+    let listed = Access::Clients(["friend".to_string()].into());
+    let a = push_alerts(store, port, listed.clone(), vapid(), Limits::default());
+    subscribe(&a, port, "phone", "friend").await;
+    let later = now_ms() + IDLE_OWNER_TTL_MS + 1000;
+    a.sweep(&mut a.lock(), later);
+    assert_eq!(a.lock().devices.len(), 1, "the operator listed it");
+
+    let (store, _) = store_at("push-idle-open");
+    let a = push_alerts(store, port, Access::Open, vapid(), Limits::default());
+    subscribe(&a, port, "phone", "stranger").await;
+    a.sweep(&mut a.lock(), now_ms() + 1000);
+    assert_eq!(a.lock().devices.len(), 1, "no token today is not idle");
+    a.sweep(&mut a.lock(), later);
+    assert!(a.lock().devices.is_empty());
+    assert!(store.push_devices().unwrap().is_empty());
 }
