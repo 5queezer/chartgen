@@ -1984,15 +1984,8 @@ fn footprint_payload(args: &Value, source: fetch::DataSource) -> Result<Value, S
             |atr| of::auto_row_size(atr, tick),
         )
     })?;
-    // Rows are built from the intrabars, read after the bars: a bar that read flat says
-    // nothing about how many rows they need.
     let ranges = of::group_by_bar(&opens, last_end, &list);
-    let widest = visible
-        .iter()
-        .map(|b| b.high - b.low)
-        .fold(of::widest_group(&list, &ranges), f64::max);
-    let top = prices.iter().copied().fold(0.0, f64::max);
-    let row = of::usable_row(asked, widest, top, tick);
+    let row = of::footprint_row(asked, visible, &list, &ranges, tick);
 
     let options = of::FootprintOptions {
         row,

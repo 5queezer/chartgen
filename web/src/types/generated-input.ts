@@ -166,7 +166,11 @@ export interface GetFootprintInput {
    */
   imbalance?: number;
   /**
-   * Row height in price. Widened if a bar would have over 200 rows. Omit for row_ticks or auto.
+   * For a poll of a chart already loaded: the intrabar_interval its load returned, or 'none' if that was null, so the few newest bars are read as the load's were. Falls back to what these bars can afford if they cannot have it. Omit to choose by the window.
+   */
+  intrabar_interval?: string;
+  /**
+   * Row height in price. Raised to a tick, lowered to the highest price, and widened if a bar would have over 200 rows; row_widened says so. Omit for row_ticks or auto.
    */
   row_size?: number;
   /**
@@ -174,7 +178,7 @@ export interface GetFootprintInput {
    */
   row_ticks?: number;
   /**
-   * Imbalances in a row that make a stacked imbalance.
+   * Imbalances in a row that make a stacked imbalance. A level counts only where at least 2 intrabars traded, on it and on the level it is compared with: one kline has one split, so its rows would all agree.
    */
   stacked?: number;
   /**
@@ -228,7 +232,7 @@ export interface GetQuotesInput {
 
 export interface GetTpoInput {
   /**
-   * Length of a block, from 5m to 4h.
+   * Length of a block, from 5m to 4h. If 3000 cannot hold a whole period, the next that can: the reply's block is that one, and block_widened says so. A period 4h blocks cannot cover is refused.
    */
   block?: string;
   /**
@@ -244,7 +248,7 @@ export interface GetTpoInput {
    */
   period?: string;
   /**
-   * Newest periods to return. Long periods of short blocks are cut to 3000 blocks; `periods_cut` then says so.
+   * Newest periods to return, whole ones within 3000 blocks; `periods_cut` says if that left some out.
    */
   periods?: number;
   /**

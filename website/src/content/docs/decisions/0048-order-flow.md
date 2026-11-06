@@ -60,6 +60,11 @@ the bar is its own only intrabar) and which side method (`side`), and the chart'
 shows both. The forming bar repaints as data arrives, and any bar can change if the source
 revises it, as TradingView also says of its footprint.
 
+A poll sends back the interval of its load, as a poll's few bars are younger and could read
+finer ones than the load's oldest could: a stock's load of 60 hourly bars reaches 12 days back
+and reads 5m, and its poll's cells would otherwise change to 1m. Only bars that cannot afford
+that interval, after a long gap, read a coarser one, and the status says so.
+
 Without trades there is no tick-based mode, so nothing is exact per price. It remains the
 way to add one, behind its own limits.
 
@@ -73,38 +78,90 @@ the 6000 per minute. A refusal is an error for that one call.
 |---|---|---|
 | `get_footprint`, cold: the chart's bars, and up to 6 pages of intrabars | 7 | 14 |
 | `get_footprint`, the same window again | 1 | 2 |
+| A footprint page of older bars, each as the chart scrolls to it | up to 7 | up to 14 |
 | Live poll per chart, every 10 s; intrabars at most once per 5 s per symbol and interval | 2 | 4 |
+| A poll after a gap: up to 200 bars, then a load instead | up to 7 | up to 14 |
 | `get_tpo`, cold: up to 3000 blocks | 3 | 6 |
-| Live TPO poll per chart, every 30 s | 1 | 2 |
-| A chart load with a volume profile: extra | 6 | 12 |
+| Live TPO poll per chart, every 30 s: two periods | 1 | 2 |
+| A chart load with `volume_profile`, `fixed_range_vp` or `anchored_vp`: extra | up to 6 | up to 12 |
+| A history page or a tail of such a chart: extra | 0 | 0 |
 
 So a grid of 4 footprints costs at most 56 weight to load and 96 per minute while live, of
-the 4800 the gate allows. Yahoo takes one request per load or poll. Pages only load for
-bars drawn as cells, a page at a time.
+the 4800 the gate allows.
+
+An interval Binance does not have is built from bars it does, and that counts as for any
+chart ([ADR-0038](/chartgen/decisions/0038-custom-intervals/)): a cold 59m footprint from the
+web chart reads 5 pages of 1m bars for its chart bars, on top of its intrabars, and an MCP caller
+asking for 200 bars and an ATR of 500 reads up to the 20 pages of that cap. Later reads without
+`end_time` refresh those from the kline cache.
+
+Only a request with `profile_intrabars` reads finer bars for a profile, and only the web
+chart's full load sends it. A page or a tail keeps its load's histogram, so reading them there
+would pay for what is thrown away. A bar count cannot tell them apart: a catch-up tail is up to
+700 bars, a load 500.
+
+Yahoo has no gate. It takes 2 requests per footprint load or poll, the chart's bars and the
+intrabars, up to 7 cold; closed, a poll's intrabars are cached and it takes 1. `get_tpo` takes 1.
 
 ### Memory
 
 The server holds 8 symbol and interval pairs of at most 6000 intrabars, about 3 MB, evicted
-by least recent use. A footprint has at most 200 bars and 200 rows per bar, and a row size
-that would give more is widened and reported as such. TPO requests read at most 3000 blocks,
-and report `periods_cut` when that shortens them. A browser chart keeps 600 items.
+by least recent use. A footprint has at most 200 bars and about 200 rows per bar, and a row size
+that would give more is widened and reported as such. The bound takes the width of the intrabars
+as well as of the bars, as rows are built from them and they are read later: a bar that read
+flat would otherwise leave any row size standing. `build_footprint` caps its rows whatever it is
+given, and a row size cannot go under a tick or over the highest price.
+
+TPO requests read at most 3000 blocks, and report `periods_cut` when that leaves out older
+periods. A block too short for even one period in that (a month of 5m) is widened to the next
+that fits, and reported in `block` and `block_widened`, or the request is refused beyond what 4h
+blocks can cover: the alternative was a profile with only the end of its period, with the wrong
+open, letters and initial balance. A browser chart keeps 600 items.
 
 ### Row size
 
 Auto is 0.2 times the ATR, rounded to 1, 2, 2.5 or 5 times a power of ten so that row
 prices read well and stay put. TradingView says 0.2 times a normalized ATR and does not
 publish the normalization, so this is not claimed to give the same rows. The first load
-fixes it, and pages and polls send it back, so rows do not move under a chart. A TPO's auto
-row is a 24th of the median period range; TradingView does not publish that one either.
+fixes it, and pages and polls send it back, so rows do not move under a chart. Each bar and
+profile carries the row it was built with and is drawn with that: one reply may have had to
+widen its own, which the status then says, and the others stay as they were.
+
+A TPO's auto row is a 24th of the median period range. This is a departure: see below.
 
 ### Imbalance and value area
 
 A buy compares with the sell one level below, a sell with the buy one level above, as
-TradingView documents. A level with nothing to compare with is **no** imbalance. TradingView
-does not say; at this data's resolution an empty edge row usually says nothing about the
-market. Stacked imbalances are per bar on the wire; the chart projects them until a later
-bar touches them, from the bars it has. The value area grows from the POC by the busier
-neighbour, like the volume profile's, one row at a time.
+TradingView documents. Stacked imbalances are per bar on the wire; the chart projects them until
+a later bar touches them, from the bars it has. A level counts towards a stack only where at
+least 2 klines with volume traded, on it and on the level it is compared with. One kline has one
+split, spread evenly, so past the ratio all its rows would pass together and a fast 1m wick would
+project a zone from arithmetic. Saying so on the status was the other option, but the status
+cannot sit on the zone, and the zone is what gets read. Imbalance markers on cells stay as they are.
+
+The value area grows from the POC by the busier neighbour, one row at a time; on a tie the row
+closest to the POC, and then the higher one, as TradingView documents for TPO and for its volume
+profiles. It adds whole rows until it reaches the target. The same tie rule holds in
+`volume_profile` and `compute_profile`.
+
+A TPO block prints at every row it touches, its exact high included; volume on such a row is
+zero, as a touch has no share of the range.
+
+### Departures from TradingView
+
+- **An empty level is no imbalance.** TradingView's test is `max >= pct/100 * min`, which read
+  literally makes an empty side an imbalance, though its guide does not address that case. At this
+  data's resolution an empty edge row usually says nothing about the market.
+- **A stack needs 2 klines per level.** It has no such rule, and reads trades in its tick mode.
+- **TPO auto row.** Its TPO indicator page publishes a rule: the latest 300 bars, their range in
+  ticks divided by 80 rows, rounded to an increment. Ours is a 24th of the median period range, so
+  that rows fit one profile rather than 300 bars. That page describes the indicator; the chart
+  type's rule may differ.
+- **Single prints.** It says non-extreme levels with one block. Ours leaves out a whole run that
+  reaches an extreme, as a tail, so a tail's inner rows do not count.
+- **A value area may pass its target.** Its volume profile page stops before a row would pass it;
+  its TPO page adds until it reaches it, which is what ours does for both.
+- **Blocks can be widened**, and rows in a reply can be, within the limits above.
 
 ### Rendering
 
@@ -112,18 +169,29 @@ Both chart types are painters on the hidden series of
 [ADR-0030](/chartgen/decisions/0030-chart-types-beyond-klinecharts/). klinecharts' widest
 bars are 50 px, so choosing a footprint zooms there and leaving gives the zoom back. Under
 22 px a bar, or under 2 px a row, cells give way to candles and the status says to zoom in.
-Numbers show from 34 px and only when they fit. Volume candles scale their width by volume
-within the bar's slot, as the time axis stays even; there is no help page for this type, so
-this is from general knowledge.
+Numbers show from 34 px and only when they fit. A TPO draws a candle for any bar no profile
+covers, as the series' own candles are hidden: older than the source has blocks, or a gap.
+Volume candles scale their width by volume within the bar's slot, as the time axis stays even;
+there is no help page for this type, so this is from general knowledge.
+
+A poll asks for what it missed since its last good read, so a hidden tab, sleep or errors leave
+no hole. Past 200 bars, or 10 periods of a TPO, the chart loads again. The time since its last
+read decides this and not its newest item, which stays put while a market is closed.
 
 ### Volume profiles
 
-`volume_profile`, the new `fixed_range_vp` and `anchored_vp`, and `session_vp` read finer
-bars on a chart load, and fall back to the chart's bars when none can be had. The series
-says which in `profile_interval`, and the legend shows it. A tail never pays for it, as a
-profile on live bars keeps its load ([ADR-0009](/chartgen/decisions/0009-live-tail-polling-and-history-paging/)).
-`session_vp` now has one line each for POC, VAH and VAL, broken between sessions: with a line
-per session, a tail had fewer lines than its load and failed to fit on every update.
+`volume_profile`, and the new `fixed_range_vp` and `anchored_vp`, read finer bars on a chart
+load, and fall back to the chart's bars when none can be had. The series says which in
+`profile_interval`, and the legend shows it. A tail or a page never pays for it, as these keep
+the histogram of their load ([ADR-0009](/chartgen/decisions/0009-live-tail-polling-and-history-paging/)).
+
+`session_vp` does not read them. Unlike those, its lines are per-bar values that every tail
+overwrites from the chart's bars, so a load from finer bars would step to another level at the
+first tick under a legend still naming them. It now has one line each for POC, VAH and VAL: with
+a line per session, a tail had fewer lines than its load and failed to fit on every update. It
+holds a value on every bar of a session, and `level_lines` tells both painters to draw nothing
+across a change of value, so sessions do not join. `hvn_lvn`, `naked_poc`, `tpo`, `cvd` and PNG
+and summary output also spread each chart bar's volume.
 
 ### Consequences
 
@@ -131,6 +199,7 @@ per session, a tail had fewer lines than its load and failed to fit on every upd
 - Good: every chart says how it was made.
 - Bad: rows are estimates. A footprint must not be read as exact per price.
 - Bad: settings the server computes with cost a reload, though from cached intrabars.
+- Bad: `session_vp` keeps spreading each bar's volume, as what could improve it cannot reach its tails.
 - Bad: live cells lag the candle by up to 10 s, while a pushed tail moves the bar at once.
 - Bad: a TPO is off in bar replay, as a profile holds its whole period.
 

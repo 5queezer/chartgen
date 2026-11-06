@@ -157,18 +157,32 @@ pub fn bounded_row_size(row: f64, range: f64, tick: f64) -> f64 {
 }
 
 /// The row to use for `asked`: not under a tick, not over the highest price `top`, and
-/// fitting a bar of `widest` in `MAX_ROWS_PER_BAR`. What `widest` has to cover is what
-/// gets bucketed, so it includes the intrabars (`widest_group`).
+/// fitting a bar of `widest` in `MAX_ROWS_PER_BAR`.
 pub fn usable_row(asked: f64, widest: f64, top: f64, tick: f64) -> f64 {
     bounded_row_size(asked.clamp(tick, top.max(tick)), widest, tick)
 }
 
-/// The widest high-low range of the intrabars of any one of `groups`.
-pub fn widest_group(intrabars: &[Intrabar], groups: &[std::ops::Range<usize>]) -> f64 {
-    groups
+/// The row of a footprint of `bars`, whose rows are built from `intrabars` in `groups`.
+/// Those are read after the bars, so a bar that read flat says nothing of how many rows
+/// they need: what has to fit is what gets bucketed.
+pub fn footprint_row(
+    asked: f64,
+    bars: &[Bar],
+    intrabars: &[Intrabar],
+    groups: &[std::ops::Range<usize>],
+    tick: f64,
+) -> f64 {
+    let widest = groups
         .iter()
         .map(|g| extent(&intrabars[g.clone()]))
-        .fold(0.0, f64::max)
+        .chain(bars.iter().map(|b| b.high - b.low))
+        .fold(0.0, f64::max);
+    let top = bars
+        .iter()
+        .map(|b| b.high)
+        .chain(intrabars.iter().map(|b| b.high))
+        .fold(0.0, f64::max);
+    usable_row(asked, widest, top, tick)
 }
 
 /// High minus low of `intrabars`, ignoring prices that are not numbers. 0 without any.
@@ -1238,18 +1252,28 @@ mod tests {
         assert!((total - 10.0).abs() < 1e-9, "{total}");
     }
 
+    /// The review's case: the chart's bar read flat, and each intrabar is narrow, but
+    /// the two together are 5 wide. Nothing may leave a row of 1e-9 standing for them.
     #[test]
-    fn the_bound_takes_the_width_of_the_intrabars_not_only_of_the_bar() {
-        // Each intrabar is narrow; the bar they make up is 5 wide.
+    fn a_flat_bar_with_wider_intrabars_gets_rows_that_fit_them() {
+        let flat = Bar {
+            open: 65_000.0,
+            high: 65_000.0,
+            low: 65_000.0,
+            close: 65_000.0,
+            volume: 1.0,
+            date: "0".into(),
+        };
         let list = [
             ib(0, 65_000.0, 65_000.0, 65_000.0, 65_000.0, 1.0),
             ib(1, 65_005.0, 65_005.0, 65_005.0, 65_005.0, 1.0),
-            ib(60, 7.0, 7.0, 7.0, 7.0, 1.0),
         ];
-        let groups = group_by_bar(&[0, 60], 120, &list);
-        assert_eq!(widest_group(&list, &groups), 5.0);
-        let row = usable_row(1e-9, widest_group(&list, &groups), 65_005.0, 0.01);
+        let groups = group_by_bar(&[0], 60, &list);
+        let row = footprint_row(1e-9, &[flat], &list, &groups, 0.01);
         assert!(5.0 / row <= MAX_ROWS_PER_BAR as f64, "{row}");
+        let fp = build_footprint(0, &list, None, &opts(row));
+        assert!(fp.rows.len() <= MAX_ROWS_PER_BAR + 1, "{}", fp.rows.len());
+        assert_eq!(fp.row, row);
     }
 
     #[test]

@@ -58,13 +58,13 @@ the community composites and user scripts keep the `warmup` you send. Known diff
   `displacement - 1` bars past the last bar, from the series `future` block
   ([ADR-0033](/chartgen/decisions/0033-indicator-projection-past-last-bar/));
   the PNG chart ends at the last bar.
-- **Intrabar data.** `volume_profile`, `fixed_range_vp`, `anchored_vp` and
-  `session_vp` read lower-timeframe bars on a web chart load, as TradingView
-  does; the series says which in `profile_interval`
+- **Intrabar data.** `volume_profile`, `fixed_range_vp` and `anchored_vp` read
+  lower-timeframe bars on a web chart load, as TradingView does; the series says
+  which in `profile_interval`
   ([ADR-0048](/chartgen/decisions/0048-order-flow/)). Each of those bars still
   spreads over its range, and a chart too long or too fine for it falls back
-  to its own bars. `hvn_lvn`, `naked_poc`, `tpo` and `cvd` spread each chart
-  bar's volume over its range, and PNG and summary output always does.
+  to its own bars. `session_vp`, `hvn_lvn`, `naked_poc`, `tpo` and `cvd` spread
+  each chart bar's volume over its range, and PNG and summary output always does.
 - **Long warmups.** `kalman_volume` normalises by a 200-bar standard deviation
   and needs about 280 bars before its first value.
 - **Unknown timeframe.** `histvol` needs the timeframe to annualize. When it

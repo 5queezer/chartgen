@@ -563,7 +563,8 @@ so each kline goes wholly to one side by close versus open, and the status says 
 both, **a row's volume is an estimate**: a kline's volume spread over its high-low range. The finer
 the klines the better, and the status names them: *from 1m bars*, or coarser for long or daily charts.
 Older stock history gets coarser data, then none. The forming bar repaints as data arrives, and cells
-update every 10 seconds, while the price moves at once.
+update every 10 seconds, while the price moves at once. After a hidden tab or sleep a chart reads what it
+missed, or loads again past 200 bars.
 
 **Volume candles.** Candle width follows volume, relative to the most on screen.
 
@@ -581,11 +582,14 @@ bars or rows are too small for cells, a bar draws as a candle and the status say
   CVD restarts each UTC day and counts from the first loaded bar of it.
 - *Imbalance* (300%): a buy against the sell one row below, a sell against the buy one row above, marked
   at the cell's edge. A row with nothing to compare with is none. *Stacked* imbalances (3 rows) are bands
-  projected until price comes back, with their count.
+  projected until price comes back, with their count. A level counts towards a stack only where at least
+  2 klines traded: one kline has one split, so all its rows would pass together.
 
 **TPO.** One profile per period over the chart's bars, so pick an interval below the period.
 
-- *Period* (1D, 2D, 1W, 1M), *block size* (5m to 4h), *row size* (auto or ticks), *value area* (70%).
+- *Period* (1D, 2D, 1W, 1M), *block size* (5m to 4h), *row size* (auto or ticks), *value area* (70%). A
+  month is too many 5m blocks to read: the chart uses 15m and the status says so. Bars no profile covers
+  draw as candles.
 - *Draw as* letters, when they fit, or blocks; *split by blocks* places each block at its own time.
   Letters run A-Z then a-z, in two colour ranges. Outside the value area they fade by the opacity you set.
 - *Lines:* POC, VAH and VAL, midpoint, open and close, initial balance with its block count, poor high and
@@ -595,9 +599,9 @@ bars or rows are too small for cells, a bar draws as a candle and the status say
 - *Sessions:* up to five `HH:MM-HH:MM`, comma separated, in the exchange's time (UTC for crypto), one profile
   each. A TPO is off in bar replay, as a profile holds its whole period: the chart shows candles and says so.
 
-**Volume profiles.** `volume_profile`, `fixed_range_vp` (from, to), `anchored_vp` (anchor) and `session_vp`
-read finer bars when a chart loads, and the legend says which: *from 15m bars*. With none to be had they spread
-the chart's own bars, and the legend says nothing. Times are `YYYY-MM-DD`, `YYYY-MM-DD HH:MM` in UTC, or unix
+**Volume profiles.** `volume_profile`, `fixed_range_vp` (from, to) and `anchored_vp` (anchor) read finer bars
+when a chart loads, and the legend says which: *from 15m bars*. With none to be had they spread the chart's own
+bars, and the legend says nothing. `session_vp` spreads them too, as its live updates do. Times are `YYYY-MM-DD`, `YYYY-MM-DD HH:MM` in UTC, or unix
 seconds, and a range covers only the loaded bars. Fixed range and anchored profiles draw at the chart's edge,
 not over their range, and are typed rather than picked on the chart.
 
