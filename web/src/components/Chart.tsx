@@ -1783,6 +1783,10 @@ export function Chart(props: ChartProps): JSX.Element {
       if (newPaneId !== null) {
         nextPanes[name] = newPaneId;
         if (!ind.is_overlay) paneStack.push(name);
+        // Created in a cell, it started small: with room it gets the usual height.
+        if (!ind.is_overlay && untrack(() => props.multi) && !naturalHeights.has(name)) {
+          naturalHeights.set(name, heights[name] ?? 120);
+        }
       }
     }
     setPaneIds(nextPanes);

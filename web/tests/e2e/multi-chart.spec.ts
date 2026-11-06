@@ -308,6 +308,17 @@ test.describe("multi-chart grid", () => {
     expect(second.bars).toBeLessThan((await panes(page))[0]!.bars);
   });
 
+  test("after loading on a grid, one chart gets the usual sub-pane heights", async ({ bootedApp: page }) => {
+    const fullCandle = (await panes(page))[0]!.candleHeight;
+    await chooseGrid(page, "4");
+    await expectLoaded(page, 4);
+    await reloadGrid(page, 4);
+    expect((await panes(page))[0]!.candleHeight).toBeLessThan(fullCandle!);
+    await chooseGrid(page, "1");
+    await expectLoaded(page, 1);
+    await expect.poll(async () => (await panes(page))[0]!.candleHeight).toBe(fullCandle);
+  });
+
   test("each chart registers its own indicators: geometry is kept by registered name", async ({
     bootedApp: page,
   }) => {
