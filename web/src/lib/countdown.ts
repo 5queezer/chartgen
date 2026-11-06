@@ -64,3 +64,27 @@ export function barCountdown(
   const close = barCloseMs(openSec, interval);
   return close === null || nowMs >= close ? null : formatCountdown(close, nowMs);
 }
+
+/** The countdown a chart shows for its last bar, or null if it shows none. */
+export function seriesCountdown(
+  series:
+    | {
+        symbol: string | null;
+        interval: string | null;
+        chart_params?: unknown;
+        bars: ReadonlyArray<{ t: number | null }>;
+      }
+    | null
+    | undefined,
+  nowMs: number,
+): string | null {
+  const bar = series?.bars.at(-1);
+  const interval = series?.interval;
+  // Only 24/7 symbols: session-based markets (Yahoo) close bars at
+  // times the interval alone cannot give.
+  if (!bar || bar.t === null || !interval) return null;
+  // A price-based bar closes on price, not on time (ADR-0047).
+  if (series?.chart_params) return null;
+  if (!isContinuousMarket(series?.symbol)) return null;
+  return barCountdown(bar.t, interval, nowMs);
+}

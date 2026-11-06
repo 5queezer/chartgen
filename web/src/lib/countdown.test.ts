@@ -6,6 +6,7 @@ import {
   formatCountdown,
   isContinuousMarket,
 } from "./countdown";
+import { seriesCountdown } from "./countdown";
 
 const T0 = Date.UTC(2026, 0, 5, 12, 0, 0) / 1000; // Monday 12:00 UTC
 
@@ -95,4 +96,23 @@ describe("isContinuousMarket", () => {
     "%s is not",
     (s) => expect(isContinuousMarket(s)).toBe(false),
   );
+});
+
+describe("seriesCountdown", () => {
+  const series = { symbol: "BTCUSDT", interval: "1h", bars: [{ t: 3600 }] };
+  const now = 3600 * 1000 + 60_000;
+
+  it("counts down the last bar of a time-based chart", () => {
+    expect(seriesCountdown(series, now)).toBe("59:00");
+  });
+
+  it("shows none on a price-based chart, whose bars close on price", () => {
+    expect(seriesCountdown({ ...series, chart_params: { box_size: 5 } }, now)).toBeNull();
+  });
+
+  it("shows none for a session market or without a timed bar", () => {
+    expect(seriesCountdown({ ...series, symbol: "AAPL" }, now)).toBeNull();
+    expect(seriesCountdown({ ...series, bars: [{ t: null }] }, now)).toBeNull();
+    expect(seriesCountdown(null, now)).toBeNull();
+  });
 });

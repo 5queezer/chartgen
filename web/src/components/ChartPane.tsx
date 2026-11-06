@@ -129,8 +129,6 @@ export function createChartPane(pane: number, deps: PaneDeps) {
   const replay = createReplay({
     live,
     request: () => feedRequest,
-    // Price-based bars have no times a replay clock could step by (ADR-0047).
-    refused: priceBased,
     suspendLive: () => feed.suspend(),
     // Only when the feed still holds the current request's series: if a
     // new load is in flight, adopting it restarts the feed.

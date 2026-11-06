@@ -259,7 +259,6 @@ test.describe("price-based chart types", () => {
 
     await pickChartType(page, "Renko");
     await expectBuilt(page, "renko");
-    await expect(page.getByTestId("bar-countdown")).toHaveCount(0);
     await expect(replay).toBeDisabled();
     await expect(replay).toHaveAttribute("title", /time grid/);
     await expect(compare).toBeDisabled();
@@ -349,7 +348,11 @@ test.describe("price-based chart types", () => {
     await expect(legendParams(page)).toHaveText(/Line Break 4/);
 
     await saveLayoutAs(page, "Breaks");
-    // Elsewhere, saved too so nothing prompts, then back to the layout.
+    // Other inputs and another type, saved too so nothing prompts, then back to the layout.
+    await openSettings(page, "Line break");
+    await dialog.getByLabel("Line count").fill("6");
+    await dialog.getByRole("button", { name: "OK" }).click();
+    await expect(legendParams(page)).toHaveText(/Line Break 6/);
     await pickChartType(page, "Candles");
     await saveLayoutAs(page, "Candles");
     await page.getByRole("button", { name: /^Layout:/ }).click();
