@@ -437,6 +437,49 @@ describe("mergeTail", () => {
   });
 });
 
+describe("a futures panel with and without data (Funding, OI, L/S)", () => {
+  /** The panel keeps its channels when it has no values, so a tail merges either way. */
+  const funding = (s: SeriesPayload, label: string, value: number | null): SeriesPayload => {
+    const n = s.bars.length;
+    return {
+      ...s,
+      indicators: {
+        funding: {
+          label,
+          is_overlay: false,
+          hlines: [{ y: 0 }],
+          histogram: [
+            {
+              index: 0,
+              label,
+              values: Array<number | null>(n).fill(value),
+              palette: value === null ? [] : ["rgba(38, 166, 154, 0.7)"],
+              color_idx: Array<number | null>(n).fill(value === null ? null : 0),
+            },
+          ],
+        },
+      },
+    };
+  };
+
+  it("takes values into an empty panel and keeps the label it was loaded with", () => {
+    const cur = funding(serve({ bars: 30, now: 100 }), "Funding (unavailable)", null);
+    const r = mergeTail(cur, funding(serve({ bars: 2, now: 101 }), "Funding", 0.01));
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const h = r.series.indicators.funding!;
+    expect(h.label).toBe("Funding (unavailable)");
+    expect(h.histogram![0]!.values.slice(-2)).toEqual([0.01, 0.01]);
+    expect(h.histogram![0]!.values[0]).toBeNull();
+  });
+
+  it("takes an empty tail into a panel with values", () => {
+    const cur = funding(serve({ bars: 30, now: 100 }), "Funding", 0.01);
+    const r = mergeTail(cur, funding(serve({ bars: 2, now: 101 }), "Funding (unavailable)", null));
+    expect(r.ok).toBe(true);
+  });
+});
+
 describe("divlines", () => {
   it("keeps the unclipped line when a tail repeats it clipped", () => {
     // Line 93→98 ends on the last closed bar; the tail [98, 99] sees it
