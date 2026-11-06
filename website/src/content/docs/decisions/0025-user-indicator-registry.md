@@ -7,6 +7,8 @@ sidebar:
 
 **Status:** Accepted
 **Date:** 2026-11-05
+**Amended by:** [ADR-0036](/chartgen/decisions/0036-own-origin-invalid-client-redirect/)
+(registered OAuth clients persist without `CHARTGEN_SCRIPTING=1`)
 **Implements:** [Proposal 0001](/chartgen/proposals/0001-python-indicators/) (Phase 1, registry half; the runtime is [ADR-0024](./0024-starlark-script-runtime/))
 
 ## Context and Problem Statement

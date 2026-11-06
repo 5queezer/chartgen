@@ -13,6 +13,8 @@ import { z } from "zod";
 const LS_CLIENT_ID = "chartgen.oauth.client_id";
 const LS_CLIENT_SECRET = "chartgen.oauth.client_secret";
 const SS_PKCE = "chartgen.oauth.pkce";
+/** Web Lock held while registering or removing the stored client. */
+const LOCK_CLIENT = "chartgen.oauth.client";
 /**
  * Set when a failed redirect consumption started one automatic retry of
  * the flow; cleared by the next successful exchange. A second failure in
@@ -53,6 +55,8 @@ const TokenResponseSchema = z.object({
 interface PkceState {
   code_verifier: string;
   state: string;
+  /** The client that asked; absent in entries saved by an older version. */
+  client_id?: string;
 }
 
 /** Cached in-memory access token. Cleared on 401 or full re-auth. */
@@ -179,30 +183,70 @@ async function registerClient(registration_endpoint: string): Promise<{
 async function ensureClient(
   discovery: DiscoveryDocument,
 ): Promise<{ client_id: string; client_secret: string }> {
-  const existingId = localStorage.getItem(LS_CLIENT_ID);
-  const existingSecret = localStorage.getItem(LS_CLIENT_SECRET);
-  if (existingId !== null && existingSecret !== null) {
-    return { client_id: existingId, client_secret: existingSecret };
+  const stored = () => {
+    const client_id = localStorage.getItem(LS_CLIENT_ID);
+    const client_secret = localStorage.getItem(LS_CLIENT_SECRET);
+    return client_id !== null && client_secret !== null
+      ? { client_id, client_secret }
+      : null;
+  };
+  const existing = stored();
+  if (existing !== null) return existing;
+
+  const register = async () => {
+    const meanwhile = stored();
+    if (meanwhile !== null) return meanwhile;
+    const registered = await registerClient(discovery.registration_endpoint);
+    localStorage.setItem(LS_CLIENT_ID, registered.client_id);
+    localStorage.setItem(LS_CLIENT_SECRET, registered.client_secret);
+    return registered;
+  };
+
+  return withClientLock(register);
+}
+
+/**
+ * Run `fn` while no other tab changes the stored client: tabs share it, so one
+ * registers and the others wait and use it. Without Web Locks (an insecure
+ * origin, an old browser) `fn` just runs: tabs may then each register, the last
+ * one stored wins, and each keeps working as its own client.
+ */
+async function withClientLock<T>(fn: () => T | Promise<T>): Promise<T> {
+  const locks =
+    typeof navigator === "undefined"
+      ? undefined
+      : (navigator.locks as LockManager | undefined);
+  if (locks === undefined) return fn();
+  let started = false;
+  try {
+    return await locks.request(LOCK_CLIENT, () => {
+      started = true;
+      return fn();
+    });
+  } catch (err) {
+    if (started) throw err;
+    return fn();
   }
-  const registered = await registerClient(discovery.registration_endpoint);
-  localStorage.setItem(LS_CLIENT_ID, registered.client_id);
-  localStorage.setItem(LS_CLIENT_SECRET, registered.client_secret);
-  return registered;
 }
 
 function savePkce(pkce: PkceState): void {
   sessionStorage.setItem(SS_PKCE, JSON.stringify(pkce));
 }
 
-function consumePkce(): PkceState | null {
+function readPkce(): PkceState | null {
   const raw = sessionStorage.getItem(SS_PKCE);
   if (raw === null) return null;
-  sessionStorage.removeItem(SS_PKCE);
   try {
     return JSON.parse(raw) as PkceState;
   } catch {
     return null;
   }
+}
+
+function consumePkce(): PkceState | null {
+  const pending = readPkce();
+  sessionStorage.removeItem(SS_PKCE);
+  return pending;
 }
 
 async function redirectToAuthorize(
@@ -212,7 +256,7 @@ async function redirectToAuthorize(
   const codeVerifier = generateCodeVerifier();
   const codeChallenge = await deriveCodeChallenge(codeVerifier);
   const state = generateState();
-  savePkce({ code_verifier: codeVerifier, state });
+  savePkce({ code_verifier: codeVerifier, state, client_id: clientId });
 
   const params = new URLSearchParams({
     response_type: "code",
@@ -285,7 +329,10 @@ async function tryConsumeRedirect(): Promise<boolean> {
   }
 
   const discovery = await discover();
-  const { client_id } = await ensureClient(discovery);
+  // The code belongs to the client that asked for it. Another tab may have
+  // replaced the stored one since.
+  const client_id =
+    pending.client_id ?? (await ensureClient(discovery)).client_id;
   const token = await exchangeCode(
     discovery,
     client_id,
@@ -295,6 +342,43 @@ async function tryConsumeRedirect(): Promise<boolean> {
   cachedAccessToken = token;
   sessionStorage.removeItem(SS_RETRIED);
   return true;
+}
+
+/**
+ * `/authorize` sends a client it does not know back to the app as
+ * `?error=invalid_client&state=...`: a redeploy without persistent storage
+ * forgets every registration (ADR-0036). Scrubs that from the URL and returns:
+ * - `"rejected"` if `state` is the pending one. Forgets the stored client so
+ *   that the next sign-in registers a new one, unless another tab has already
+ *   replaced it with a good one.
+ * - `"unmatched"` otherwise. Anyone can craft this URL, so it touches nothing
+ *   else, and starting over could loop where sessionStorage does not survive.
+ * - `null` if the URL carries no such answer.
+ */
+async function handleRejectedClient(): Promise<"rejected" | "unmatched" | null> {
+  const params = new URLSearchParams(window.location.search);
+  if (params.get("error") !== "invalid_client") return null;
+  window.history.replaceState(
+    {},
+    "",
+    window.location.origin + window.location.pathname + window.location.hash,
+  );
+
+  const pending = readPkce();
+  const returnedState = params.get("state");
+  if (!returnedState || pending?.state !== returnedState) return "unmatched";
+
+  await withClientLock(() => {
+    if (
+      pending.client_id === undefined ||
+      localStorage.getItem(LS_CLIENT_ID) === pending.client_id
+    ) {
+      localStorage.removeItem(LS_CLIENT_ID);
+      localStorage.removeItem(LS_CLIENT_SECRET);
+    }
+  });
+  sessionStorage.removeItem(SS_PKCE);
+  return "rejected";
 }
 
 /**
@@ -332,7 +416,10 @@ export function clearAccessToken(): void {
 
 /**
  * If the URL on load already carries `?code=...`, run the exchange
- * eagerly so the rest of the app sees a token immediately.
+ * eagerly so the rest of the app sees a token immediately. An
+ * `?error=invalid_client` answer to this tab's request counts as a failed
+ * exchange after dropping the stored client, so the restart registers anew;
+ * one that is not goes straight to the error, with no restart.
  *
  * Resolves `null` when there was nothing to consume or the exchange
  * worked. When it fails, the first time in this tab it restarts the flow
@@ -342,12 +429,26 @@ export function clearAccessToken(): void {
  */
 export async function tryHandlePendingRedirect(): Promise<Error | null> {
   try {
+    const rejection = await handleRejectedClient();
+    if (rejection === "unmatched") {
+      return new Error("this address is not a sign-in in progress");
+    }
+    if (rejection === "rejected") {
+      throw new Error("the server no longer knows this client");
+    }
     await tryConsumeRedirect();
     return null;
   } catch (err) {
     console.error("[oauth] redirect handler failed:", err);
-    if (sessionStorage.getItem(SS_RETRIED) === null) {
-      sessionStorage.setItem(SS_RETRIED, "1");
+    // Without a working guard, no retry: it could not stop a loop.
+    let mayRetry = false;
+    try {
+      mayRetry = sessionStorage.getItem(SS_RETRIED) === null;
+      if (mayRetry) sessionStorage.setItem(SS_RETRIED, "1");
+    } catch {
+      mayRetry = false;
+    }
+    if (mayRetry) {
       try {
         return await startSignIn();
       } catch (retryErr) {

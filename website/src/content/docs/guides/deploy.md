@@ -36,8 +36,10 @@ docker run -p 9315:9315 \
   chartgen --serve --trade --testnet
 ```
 
-The `~/.chartgen/` volume mount persists `alerts.json`, `trades.log`, and
-`subscriptions.json` across restarts. See the [persistence reference](/chartgen/reference/persistence/).
+Production must mount this volume. The `~/.chartgen/` mount persists
+`alerts.json`, `trades.log`, `subscriptions.json`, and in `chartgen.db` the
+registered OAuth clients, across restarts. Without it, every deploy forgets the
+registrations of external MCP clients. See the [persistence reference](/chartgen/reference/persistence/).
 
 ### Environment variables
 
@@ -47,8 +49,8 @@ The `~/.chartgen/` volume mount persists `alerts.json`, `trades.log`, and
 | `CHARTGEN_WEB_DIR` | `src/server.rs` | Directory of a built web app (`web/dist`). When set, `GET /` with `Accept: text/html` returns its `index.html`, other paths fall back to its static files (unknown browser paths get `index.html`), and `/assets/*` is cached as immutable. Non-browser `GET /` still returns the health JSON. Unset means no static files. The Docker image sets it to `/usr/share/chartgen/web`. |
 | `CHARTGEN_DATA_SOURCE` | `src/fetch.rs` | Set to `sample` to make `generate_chart`, `get_indicators` and `get_quotes` use a deterministic offline source and never call Binance or Yahoo. Bars follow the interval grid (weekly bars open on Monday), each bar's prices depend only on the symbol and its open time (so overlapping pages match exactly), and the forming candle moves every second. Intended for E2E tests and demos. Unset means live data. |
 | `CHARTGEN_SCRIPTING` | `src/scripting/mod.rs` | `1` enables [scripted indicators](/chartgen/guides/scripted-indicators/): the four scripting MCP tools and user scripts in `generate_chart` / `list_indicators`. Off when unset. |
-| `CHARTGEN_DB` | `src/scripting/persistence.rs` | SQLite file for scripted indicators and registered OAuth clients (only used with `CHARTGEN_SCRIPTING=1`). Default `~/.chartgen/chartgen.db`, inside the persisted volume. |
-| `HOME` / `USERPROFILE` | `src/main.rs` | Picks the data directory (`~/.chartgen/`). Override to relocate `alerts.json` / `trades.log` / `subscriptions.json`. |
+| `CHARTGEN_DB` | `src/scripting/persistence.rs` | SQLite file for registered OAuth clients, with or without `CHARTGEN_SCRIPTING=1`, and for scripted indicators. Opened at server startup; a failure is logged and leaves clients in memory only. Default `~/.chartgen/chartgen.db`, inside the persisted volume. |
+| `HOME` / `USERPROFILE` | `src/main.rs` | Picks the data directory (`~/.chartgen/`). Override to relocate `alerts.json` / `trades.log` / `subscriptions.json` / `chartgen.db`. |
 | `_CHARTGEN_PORT` | `src/server.rs` | Internal — set by the process to its own bind port so `base_url()` can compose the fallback URL. Do not set by hand. |
 
 ## Reverse proxy
