@@ -327,6 +327,7 @@ async fn persist(writes: Vec<Write>) {
 /// `CHARTGEN_CLAIM_OWNER`: the one account that inherits what clients owned before
 /// sign-in. Unset means nobody does. A client id travels in URLs, so holding one must
 /// never be what hands anything over (ADR-0044).
+#[cfg(feature = "scripting")]
 pub(super) fn claim_owner() -> Option<String> {
     std::env::var("CHARTGEN_CLAIM_OWNER")
         .ok()
@@ -593,7 +594,7 @@ impl OAuthStore {
                 web_clients.insert(t.client_id.clone());
             }
         }
-        let mut clients: Vec<(Instant, usize, Vec<(Instant, String)>)> = by_client
+        let mut clients: Vec<_> = by_client
             .into_iter()
             .map(|(client, mut tokens)| {
                 tokens.sort();
