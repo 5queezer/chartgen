@@ -540,9 +540,24 @@ test.describe("live price-based bars", () => {
     });
 
     const drawnClose = async () => (await drawnBars(page)).at(-1)?.close;
-    await expect.poll(drawnClose, { timeout: 15_000 }).toBeGreaterThan(1000);
-    const first = (await drawnClose())!;
-    await expect.poll(drawnClose, { timeout: 15_000 }).toBeGreaterThan(first);
+    // The first tail of the new build is on the chart at once, and the chart holds
+    // exactly its bars: the next poll would hide a list left too long.
+    await page.waitForFunction(
+      () =>
+        ((
+          window as unknown as {
+            __chartgenTest: { chart: () => { getDataList: () => Array<{ close: number }> } | null };
+          }
+        ).__chartgenTest
+          .chart()
+          ?.getDataList()
+          .at(-1)?.close ?? 0) > 1000,
+      undefined,
+      { polling: 100, timeout: 15_000 },
+    );
+    expect(await drawnClose()).toBe(1001);
+    expect((await drawnBars(page)).length).toBe((await series(page))!.bars.length);
+    await expect.poll(drawnClose, { timeout: 15_000 }).toBeGreaterThan(1001);
 
     const s = (await series(page))!;
     expect(s.bars.length).toBeLessThan(loaded.bars.length);

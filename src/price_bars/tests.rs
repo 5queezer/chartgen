@@ -683,3 +683,20 @@ fn labels_name_the_type_and_size() {
     assert_eq!(params(Kind::LineBreak, 1.0).label(0.0), "Line Break 3");
     assert_eq!(params(Kind::Range, 1.0).label(50.0), "Range 50");
 }
+
+/// The review's case: a last price of 106 under an extreme of 110. As the forming row
+/// closes, what alerts read must not jump to the extreme and back, over a level of 108
+/// that no source close crossed. `web/src/stores/alerts.test.ts` holds the other half:
+/// these two prices against the real alert rules.
+#[test]
+fn an_alert_level_between_the_last_price_and_the_extreme_sees_no_crossing() {
+    let source = closes(&[100.0, 110.0, 106.0]);
+    let p = params(Kind::Kagi, 5.0);
+    let mut forming = opts();
+    forming.now_ms = (2 * HOUR + 30) * 1000;
+    let while_forming = build(&source, &iv(), &p, &forming).unwrap().bars;
+    let once_closed = build(&source, &iv(), &p, &opts()).unwrap().bars;
+    assert_eq!(while_forming.last().unwrap().close, 106.0);
+    assert_eq!(once_closed.last().unwrap().close, 106.0);
+    assert_eq!(once_closed.last().unwrap().high, 110.0, "the extreme stays");
+}
