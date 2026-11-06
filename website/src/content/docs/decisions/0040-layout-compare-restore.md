@@ -1,8 +1,8 @@
 ---
-title: "0038 — A layout stores the scale mode its compare symbols return to"
+title: "0040 — A layout stores the scale mode its compare symbols return to"
 description: "A layout snapshot gains an optional compareRestore, left out of the dirty check, so applying a layout gives back the scale mode to return to when the last compare symbol is removed."
 sidebar:
-  order: 38
+  order: 40
 ---
 
 **Status:** Accepted

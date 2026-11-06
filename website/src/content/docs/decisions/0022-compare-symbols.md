@@ -8,7 +8,7 @@ sidebar:
 **Status:** Accepted
 **Date:** 2026-11-05
 **Amends:** [ADR-0015](./0015-named-layouts/) (a layout's state gains `compare`; layouts saved before it load with none)
-**Amended by:** [ADR-0038](/chartgen/decisions/0038-layout-compare-restore/) (a layout stores the mode to return to, so a layout switch no longer drops it)
+**Amended by:** [ADR-0040](/chartgen/decisions/0040-layout-compare-restore/) (a layout stores the mode to return to, so a layout switch no longer drops it)
 
 ## Context and Problem Statement
 

@@ -83,7 +83,7 @@ export interface LayoutState {
   /** Compare symbols (ADR-0022); layouts saved before it have none. */
   compare: string[];
   /**
-   * Scale mode to return to when the last compare symbol goes (ADR-0038). Not
+   * Scale mode to return to when the last compare symbol goes (ADR-0040). Not
    * something the user set, so it never makes a layout dirty.
    */
   compareRestore?: ScaleMode;

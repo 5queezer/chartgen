@@ -8,7 +8,7 @@ sidebar:
 **Status:** Accepted
 **Date:** 2026-11-04
 **Amends:** [ADR-0005](./0005-client-indicator-state/) and [ADR-0013](./0013-indicator-visibility-and-instances/) (adds a key; their stored shapes are unchanged)
-**Amended by:** [ADR-0038](/chartgen/decisions/0038-layout-compare-restore/) (a layout's state gains an optional `compareRestore`)
+**Amended by:** [ADR-0040](/chartgen/decisions/0040-layout-compare-restore/) (a layout's state gains an optional `compareRestore`)
 
 ## Context and Problem Statement
 

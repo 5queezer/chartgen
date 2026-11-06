@@ -770,7 +770,7 @@ is saved again.
 Layouts are stored in `localStorage` under `chartgen.layouts` (at most
 50, validated on load, malformed ones dropped). See
 [ADR-0015](/chartgen/decisions/0015-named-layouts/) and
-[ADR-0038](/chartgen/decisions/0038-layout-compare-restore/).
+[ADR-0040](/chartgen/decisions/0040-layout-compare-restore/).
 
 ## Getting started
 

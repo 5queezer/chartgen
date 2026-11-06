@@ -125,7 +125,7 @@ export function removeCompare(symbol: string): void {
  * Replace the list without touching the scale mode: a layout switch sets the
  * mode itself (a layout stores it with its compare symbols). Symbols already
  * shown keep their color slot. `restoreTo` is the layout's scale mode to return
- * to when the last compare symbol goes (ADR-0038); layouts saved without one
+ * to when the last compare symbol goes (ADR-0040); layouts saved without one
  * return to the default.
  */
 export function setCompareSymbols(next: unknown, restoreTo?: ScaleMode): void {
