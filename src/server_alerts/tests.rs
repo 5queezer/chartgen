@@ -2031,12 +2031,12 @@ async fn the_named_owner_collects_every_clients_alerts() {
     let other = create(&a, spec("less", "once", 1.0), "google:2").await;
     let device = create(&a, spec("less", "once", 1.0), "device:9").await;
 
-    assert_eq!(a.claim_waiting("github:1"), 2);
+    assert_eq!(a.claim_waiting("github:1"), (2, 0));
     assert_eq!(a.lock().alerts[&first].owner, "github:1");
     assert_eq!(a.lock().alerts[&second].owner, "github:1");
     assert_eq!(a.lock().alerts[&other].owner, "google:2");
     assert_eq!(a.lock().alerts[&device].owner, "device:9");
-    assert_eq!(a.claim_waiting("github:1"), 0, "once");
+    assert_eq!(a.claim_waiting("github:1"), (0, 0), "once");
     let owners = store.server_alert_owners().unwrap();
     assert!(owners.contains("github:1") && !owners.contains(CLIENT_1));
     let stored = store.server_alerts().unwrap();
@@ -2060,7 +2060,7 @@ async fn collecting_passes_the_limit_and_leaves_nothing_behind() {
         record.id = format!("copy-{i}");
         a.lock().alerts.insert(record.id.clone(), record);
     }
-    assert_eq!(a.claim_waiting("github:1"), limit + 3);
+    assert_eq!(a.claim_waiting("github:1"), (limit + 3, 0));
     let count = |owner: &str| {
         a.lock()
             .alerts
@@ -2083,6 +2083,7 @@ async fn a_collected_alert_takes_its_waiting_deliveries_along() {
         alert_id: alert.to_string(),
         body: "{}".to_string(),
         created_at: 0,
+        device: None,
     };
     {
         let mut st = a.lock();
@@ -2090,7 +2091,7 @@ async fn a_collected_alert_takes_its_waiting_deliveries_along() {
         queue.push_back(event("e1", &moved));
         queue.push_back(event("e2", "an-alert-not-in-the-table"));
     }
-    assert_eq!(a.claim_waiting("github:1"), 1);
+    assert_eq!(a.claim_waiting("github:1"), (1, 0));
     let st = a.lock();
     assert_eq!(st.queues["github:1"].len(), 1);
     assert_eq!(st.queues["github:1"][0].id, "e1");
@@ -2794,4 +2795,161 @@ async fn a_device_outlives_a_sign_in_but_not_the_idle_limit() {
     a.sweep(&mut a.lock(), later);
     assert!(a.lock().devices.is_empty());
     assert!(store.push_devices().unwrap().is_empty());
+}
+
+// --- Push with sign-in (ADR-0044) ---
+
+/// What clients held goes to the account named, from every client, and the rows follow.
+/// An endpoint the owner already holds stays put, and other kinds of owner are not clients.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_named_owner_collects_every_clients_devices() {
+    let (port, _) = receiver(OK).await;
+    let (store, _) = store_at("claim-devices");
+    let a = push_alerts(store, port, Access::Open, vapid(), Limits::default());
+    subscribe(&a, port, "laptop", CLIENT_1).await;
+    subscribe(&a, port, "phone", CLIENT_2).await;
+    subscribe(&a, port, "tablet", "device:9").await;
+    subscribe(&a, port, "shared", CLIENT_1).await;
+    subscribe(&a, port, "shared", "github:1").await;
+
+    assert_eq!(a.claim_waiting("github:1"), (0, 2));
+
+    let count = |owner: &str| {
+        a.lock()
+            .devices
+            .values()
+            .filter(|d| d.owner == owner)
+            .count()
+    };
+    assert_eq!(count("github:1"), 3, "the two, and the one it held");
+    assert_eq!(
+        count(CLIENT_1),
+        1,
+        "the endpoint it already holds stays put"
+    );
+    assert_eq!(count(CLIENT_2), 0);
+    assert_eq!(count("device:9"), 1);
+    let stored = store.push_devices().unwrap();
+    assert_eq!(
+        stored.iter().filter(|d| d.owner == "github:1").count(),
+        3,
+        "as a restart reads them"
+    );
+    assert_eq!(stored.len(), 5, "nothing deleted");
+    assert_eq!(a.claim_waiting("github:1"), (0, 0), "once");
+}
+
+/// The bound stays for what comes next: the owner's next device trims to the limit.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_new_device_trims_what_collecting_passed_the_limit_with() {
+    let (port, _) = receiver(OK).await;
+    let (store, _) = store_at("claim-devices-limit");
+    let limits = Limits::default();
+    let cap = limits.devices_per_client;
+    let a = push_alerts(store, port, Access::Open, vapid(), limits);
+    for i in 0..cap + 2 {
+        subscribe(&a, port, &format!("d{i}"), CLIENT_1).await;
+        // Five is a client's limit too, so these come from several.
+        let id = a
+            .lock()
+            .devices
+            .values()
+            .find(|d| d.endpoint.ends_with(&format!("d{i}")))
+            .unwrap()
+            .id
+            .clone();
+        a.lock().devices.get_mut(&id).unwrap().owner = format!("aaaaaaaa-aaaa-4aaa-8aaa-{i:012}");
+    }
+    assert_eq!(a.claim_waiting("github:1"), (0, cap + 2));
+    subscribe(&a, port, "new", "github:1").await;
+    let mine = a
+        .lock()
+        .devices
+        .values()
+        .filter(|d| d.owner == "github:1")
+        .count();
+    assert_eq!(mine, cap);
+}
+
+/// A user is not in `oauth_clients`, so a device of theirs lives on their activity, or
+/// every signed-in device would look idle and be forgotten.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_users_devices_live_on_that_users_activity() {
+    let (port, _) = receiver(OK).await;
+    let (store, _) = store_at("device-user");
+    store.save_user("github:1", "active").unwrap();
+    store.mark_user_used("github:1").unwrap();
+    let a = push_alerts(store, port, Access::Open, vapid(), Limits::default());
+    subscribe(&a, port, "phone", "github:1").await;
+    subscribe(&a, port, "other", "github:2").await;
+    let long_ago = now_ms() - IDLE_OWNER_TTL_MS - 60_000;
+    for d in a.lock().devices.values_mut() {
+        d.created_at = long_ago;
+    }
+    let now = now_ms();
+    a.sweep(&mut a.lock(), now);
+    let owners: Vec<String> = a.lock().devices.values().map(|d| d.owner.clone()).collect();
+    assert_eq!(owners, ["github:1"], "active, and not");
+    a.sweep(&mut a.lock(), now + IDLE_OWNER_TTL_MS + 60_000);
+    assert!(a.lock().devices.is_empty(), "and it does expire");
+}
+
+/// Each device's outcome is its own: named pending when the fire goes out, so a tab can
+/// tell "not yet" from "not sent here", and kept across a restart.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_last_fire_is_recorded_per_device() {
+    let (port, _) = receiver(OK).await;
+    let (store, _) = store_at("push-per-device");
+    let limits = Limits {
+        pushes_per_client_per_minute: 0,
+        ..Limits::default()
+    };
+    let a = push_alerts(store, port, Access::Open, vapid(), limits);
+    let phone = subscribe(&a, port, "phone", "me").await["device"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let id = create(&a, pushed("greater", "once"), "me").await;
+    tick(&a, BASE, 101.0);
+    until("the fire", || a.lock().alerts[&id].fire_count == 1).await;
+    let late = subscribe(&a, port, "late", "me").await["device"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_ne!(phone, late);
+
+    let view = get(&a, "me", &id).await;
+    let devices = view["last_push_devices"].as_object().unwrap();
+    assert!(devices[&phone].is_null(), "pending, not missing: {view}");
+    assert!(
+        !devices.contains_key(&late),
+        "it was not sent this one: {view}"
+    );
+
+    let stored = store.server_alerts().unwrap();
+    assert!(
+        stored[0].contains(&phone),
+        "it survives a restart: {}",
+        stored[0]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn each_devices_outcome_is_kept_with_a_status() {
+    let (port, _) = receiver(OK).await;
+    let (store, _) = store_at("push-per-device-ok");
+    let a = push_alerts(store, port, Access::Open, vapid(), Limits::default());
+    let phone = subscribe(&a, port, "phone", "me").await["device"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let id = create(&a, pushed("greater", "once"), "me").await;
+    tick(&a, BASE, 101.0);
+    until("the record", || a.lock().alerts[&id].last_push.is_some()).await;
+    let view = get(&a, "me", &id).await;
+    assert_eq!(view["last_push_devices"][&phone]["status"], 200, "{view}");
+    assert!(
+        view["last_push_devices"][&phone]["error"].is_null(),
+        "{view}"
+    );
 }

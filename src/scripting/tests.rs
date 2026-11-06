@@ -1066,6 +1066,18 @@ const SCHEMA_V2: &str = "
     INSERT INTO user_indicators VALUES ('old-client', 's', 'src', '{}', 'h', 1, 1);
     PRAGMA user_version = 2;
 ";
+const SCHEMA_V4_PUSH: &str = "
+    ALTER TABLE server_alert_events ADD COLUMN device TEXT;
+    CREATE TABLE push_devices (
+        id TEXT PRIMARY KEY, owner TEXT NOT NULL, endpoint TEXT NOT NULL,
+        p256dh TEXT NOT NULL, auth TEXT NOT NULL, created_at INTEGER NOT NULL,
+        UNIQUE (owner, endpoint)
+    );
+    CREATE TABLE server_settings (name TEXT PRIMARY KEY, value TEXT NOT NULL);
+    INSERT INTO push_devices VALUES
+        ('d1', 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1', 'https://x/1', 'k', 'a', 1);
+    PRAGMA user_version = 4;
+";
 const SCHEMA_V3_ALERTS: &str = "
     CREATE TABLE server_alerts (
         id TEXT PRIMARY KEY, owner TEXT NOT NULL, record_json TEXT NOT NULL
@@ -1128,6 +1140,17 @@ fn a_file_with_alerts_upgrades_and_keeps_them() {
     schema_is_complete(&store);
     assert!(store.server_alert_owners().unwrap().contains("old-client"));
     assert_eq!(store.oauth_clients().unwrap().len(), 1);
+}
+
+#[test]
+fn a_file_with_push_devices_upgrades_and_keeps_them() {
+    let store = upgraded("upgrade-v4", &[SCHEMA_V2, SCHEMA_V3_ALERTS, SCHEMA_V4_PUSH]);
+    schema_is_complete(&store);
+    let devices = store.push_devices().unwrap();
+    assert_eq!(devices.len(), 1);
+    assert_eq!(devices[0].endpoint, "https://x/1");
+    assert_eq!(store.waiting_rows(None).unwrap().devices, 1);
+    assert!(store.server_alert_owners().unwrap().contains("old-client"));
 }
 
 /// What counts as a user's activity for their server alerts: a login or a token.

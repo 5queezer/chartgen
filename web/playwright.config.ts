@@ -55,7 +55,10 @@ const SIGNIN_WEB_PORT = WEB_PORT - 3_000;
 const SIGNIN_DB = join(tmpdir(), `chartgen-e2e-${SIGNIN_CHARTGEN_PORT}.db`);
 const FAKE_PROVIDER_PORT = CHARTGEN_PORT - 4_000;
 const FAKE_PROVIDER_SECRET = "fake-provider-secret";
-const SIGNIN_SPECS = /signin\.spec\.ts$/;
+const SIGNIN_SPECS = /signin(-push)?\.spec\.ts$/;
+// The fake push service of signin-push.spec.ts. The server only accepts this local
+// origin because it runs on the sample source.
+const SIGNIN_PUSH_PORT = CHARTGEN_PORT - 5_000;
 
 export default defineConfig({
   testDir: "./tests/e2e",
@@ -200,6 +203,10 @@ export default defineConfig({
         CHARTGEN_GOOGLE_CLIENT_ID: "google-id",
         CHARTGEN_GOOGLE_CLIENT_SECRET: FAKE_PROVIDER_SECRET,
         CHARTGEN_SIGNIN_TEST_PROVIDER_ORIGIN: `http://127.0.0.1:${FAKE_PROVIDER_PORT}`,
+        CHARTGEN_SERVER_ALERTS: "1",
+        CHARTGEN_SERVER_ALERT_CLIENTS: "*",
+        CHARTGEN_VAPID_SUBJECT: "mailto:ops@example.com",
+        CHARTGEN_WEBHOOK_TEST_ORIGIN: `http://127.0.0.1:${SIGNIN_PUSH_PORT}`,
       },
       reuseExistingServer: REUSE_SERVER,
       timeout: 300_000,

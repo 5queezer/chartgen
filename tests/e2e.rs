@@ -1364,11 +1364,11 @@ mod server_alerts {
         assert_eq!(list["alerts"], serde_json::json!([]));
     }
 
-    type Bodies = Arc<Mutex<Vec<Vec<u8>>>>;
+    pub(super) type Bodies = Arc<Mutex<Vec<Vec<u8>>>>;
 
     /// A fake push service: what it was sent, whole. It holds its answer until told,
     /// so a delivery can be left unfinished.
-    fn push_service() -> (u16, Bodies, Arc<AtomicBool>) {
+    pub(super) fn push_service() -> (u16, Bodies, Arc<AtomicBool>) {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         let seen = Arc::new(Mutex::new(Vec::new()));
@@ -1418,7 +1418,7 @@ mod server_alerts {
 
     /// The browser's half of RFC 8291, written here from the RFC and not with the
     /// server's code, so that a mistake there cannot agree with itself.
-    fn open_push(message: &[u8], ua: &EcKey<Private>, auth: &[u8]) -> serde_json::Value {
+    pub(super) fn open_push(message: &[u8], ua: &EcKey<Private>, auth: &[u8]) -> serde_json::Value {
         let hkdf = |salt: &[u8], ikm: &[u8], info: &[u8], len: usize| -> Vec<u8> {
             let hmac = |key: &[u8], data: &[u8]| {
                 let key = PKey::hmac(key).unwrap();
@@ -1455,7 +1455,7 @@ mod server_alerts {
     }
 
     /// A browser's keys: the pair, and `subscribe_push`'s arguments for them.
-    fn browser(port: u16) -> (EcKey<Private>, Vec<u8>, serde_json::Value) {
+    pub(super) fn browser(port: u16) -> (EcKey<Private>, Vec<u8>, serde_json::Value) {
         let group = EcGroup::from_curve_name(Nid::X9_62_PRIME256V1).unwrap();
         let key = EcKey::generate(&group).unwrap();
         let mut ctx = BigNumContext::new().unwrap();
@@ -4608,7 +4608,7 @@ fn test_signin_named_owner_collects_everything_through_any_client_once() {
     );
     let logged = std::fs::read_to_string(&log_path).unwrap();
     assert!(
-        logged.contains("2 script(s) and 0 server alert(s)"),
+        logged.contains("2 script(s), 0 server alert(s) and 0 push device(s)"),
         "{logged}"
     );
     assert!(
@@ -4644,7 +4644,7 @@ fn test_signin_startup_counts_name_collisions() {
     drop(srv);
     let logged = std::fs::read_to_string(&log_path).unwrap();
     assert!(
-        logged.contains("1 script(s) and 0 server alert(s)"),
+        logged.contains("1 script(s), 0 server alert(s) and 0 push device(s)"),
         "the second client's copy stays: {logged}"
     );
     assert!(
@@ -4670,7 +4670,7 @@ fn test_signin_unnamed_owner_is_told_how_many_rows_wait() {
     drop(srv);
     let logged = std::fs::read_to_string(&log_path).unwrap();
     assert!(
-        logged.contains("1 script(s) and 0 server alert(s)"),
+        logged.contains("1 script(s), 0 server alert(s) and 0 push device(s)"),
         "{logged}"
     );
     assert!(
@@ -4684,8 +4684,9 @@ fn test_signin_unnamed_owner_is_told_how_many_rows_wait() {
 /// ADR-0044 with server alerts (ADR-0042): an alert belongs to the user.
 #[cfg(feature = "scripting")]
 mod signin_server_alerts {
-    use super::server_alerts::receiver;
+    use super::server_alerts::{browser, open_push, push_service, receiver};
     use super::*;
+    use std::sync::atomic::Ordering;
 
     fn start(
         test: &str,
@@ -4699,6 +4700,7 @@ mod signin_server_alerts {
         let mut cmd = signin_command(port, &db, fake, &["github"], None, false);
         cmd.env("CHARTGEN_SERVER_ALERTS", "1")
             .env("CHARTGEN_SERVER_ALERT_CLIENTS", allowed)
+            .env("CHARTGEN_VAPID_SUBJECT", "mailto:ops@example.com")
             .env(
                 "CHARTGEN_WEBHOOK_TEST_ORIGIN",
                 format!("http://127.0.0.1:{hook}"),
@@ -4920,5 +4922,179 @@ mod signin_server_alerts {
         // Through another client again: the move has to have reached the store.
         let token = second_client(&mut ann);
         assert_eq!(listed(port, &token).len(), 1, "and it stays hers");
+    }
+
+    /// Wait for what the fake service got, on the real clock.
+    fn until_received(what: &str, mut done: impl FnMut() -> bool) {
+        for _ in 0..200 {
+            if done() {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        panic!("timed out waiting for {what}");
+    }
+
+    fn fired_now() -> serde_json::Value {
+        // A level far below the sample price is simply greater, at once.
+        serde_json::json!({
+            "symbol": "BTCUSDT", "condition": "greater", "trigger": "once",
+            "level": 0.01, "push": true, "message": "from the desktop",
+        })
+    }
+
+    /// A phone gets an alert made on the desktop: two browsers, so two clients, one user.
+    /// Decrypted with the phone's own keys, as the phone would. Someone else's gets nothing.
+    #[test]
+    fn test_a_phone_gets_an_alert_made_on_the_desktop() {
+        let fake = FakeProvider::start();
+        let (service, bodies, answer) = push_service();
+        answer.store(true, Ordering::SeqCst);
+        let srv = start("signin-push-phone", &fake, "*", service, None);
+        let p = srv.port;
+        let mut desktop = Browser::new(p);
+        let at_desk = web_sign_in(
+            &mut desktop,
+            &fake,
+            "github",
+            profile_of("github", 1, "ann"),
+        );
+        let mut phone = Browser::new(p);
+        let on_phone = web_sign_in(&mut phone, &fake, "github", profile_of("github", 1, "ann"));
+        assert_ne!(at_desk, on_phone);
+
+        let (key, auth, device) = browser(service);
+        let answered = call_tool(p, &on_phone, "subscribe_push", device).unwrap();
+        assert_eq!(answered["devices"], 1);
+        let id = answered["device"].as_str().unwrap().to_string();
+        assert_eq!(
+            call_tool(p, &at_desk, "list_server_alerts", serde_json::json!({})).unwrap()["push"]
+                ["devices"],
+            1,
+            "the desktop sees the phone: one user"
+        );
+
+        let alert = call_tool(p, &at_desk, "create_server_alert", fired_now()).unwrap();
+        until_received("the push", || bodies.lock().unwrap().len() == 1);
+        let got = open_push(&bodies.lock().unwrap()[0], &key, &auth);
+        assert_eq!(got["alert_id"], alert["id"]);
+        assert_eq!(got["message"], "from the desktop");
+
+        // The outcome is recorded against that device.
+        until_received("its outcome", || {
+            let list = call_tool(p, &at_desk, "list_server_alerts", serde_json::json!({})).unwrap();
+            list["alerts"][0]["last_push_devices"][&id]["status"].is_number()
+        });
+
+        // Someone else's phone is another user's device.
+        let mut stranger = Browser::new(p);
+        let theirs = web_sign_in(
+            &mut stranger,
+            &fake,
+            "github",
+            profile_of("github", 2, "bob"),
+        );
+        let (_, _, device) = browser(service);
+        call_tool(p, &theirs, "subscribe_push", device).unwrap();
+        let again = call_tool(p, &at_desk, "create_server_alert", fired_now()).unwrap();
+        until_received("the second push", || bodies.lock().unwrap().len() == 2);
+        let got = open_push(&bodies.lock().unwrap()[1], &key, &auth);
+        assert_eq!(got["alert_id"], again["id"], "it went to her phone");
+        std::thread::sleep(std::time::Duration::from_millis(1500));
+        assert_eq!(bodies.lock().unwrap().len(), 2, "and to nobody else's");
+    }
+
+    /// Devices from before sign-in follow `CHARTGEN_CLAIM_OWNER`: not whoever holds their
+    /// client id, and the named owner's alerts reach them after collecting.
+    #[test]
+    fn test_existing_devices_go_to_the_named_owner_and_nobody_else() {
+        let fake = FakeProvider::start();
+        let (service, bodies, answer) = push_service();
+        answer.store(true, Ordering::SeqCst);
+        let port = free_port();
+        let db = store_path("signin-push-claim");
+        let redirect = web_redirect(port);
+        let alerts_on = |cmd: &mut std::process::Command| {
+            cmd.env("CHARTGEN_SERVER_ALERTS", "1")
+                .env("CHARTGEN_SERVER_ALERT_CLIENTS", "*")
+                .env("CHARTGEN_VAPID_SUBJECT", "mailto:ops@example.com")
+                .env("CHARTGEN_DATA_SOURCE", "sample")
+                .env(
+                    "CHARTGEN_WEBHOOK_TEST_ORIGIN",
+                    format!("http://127.0.0.1:{service}"),
+                );
+        };
+        let mut cmd = server_command(port, None, &db, false);
+        alerts_on(&mut cmd);
+        let old = start_server(cmd, port);
+        let client = register_client(port, &redirect);
+        let (_, head, _) = authorize(port, &client, &redirect);
+        let code = head
+            .split("code=")
+            .nth(1)
+            .unwrap()
+            .split(['&', '\r'])
+            .next()
+            .unwrap()
+            .to_string();
+        let token = token_from(port, &client, &redirect, &code);
+        let (key, auth, device) = browser(service);
+        call_tool(port, &token, "subscribe_push", device).unwrap();
+        drop(old);
+
+        let devices = |token: &str| {
+            call_tool(port, token, "list_server_alerts", serde_json::json!({})).unwrap()["push"]
+                ["devices"]
+                .clone()
+        };
+        let with_signin = |owner: Option<&str>| {
+            let mut cmd = signin_command(port, &db, &fake, &["github"], None, false);
+            if let Some(owner) = owner {
+                cmd.env("CHARTGEN_CLAIM_OWNER", owner);
+            }
+            alerts_on(&mut cmd);
+            start_server(cmd, port)
+        };
+        let through_client = |who: &mut Browser, id: u64| {
+            let first = who.authorize(&client, &redirect, "s");
+            let back =
+                provider_round_trip(who, &fake, "github", profile_of("github", id, "x"), &first);
+            token_from(port, &client, &redirect, &back.query()["code"])
+        };
+
+        // Nobody named, and a stranger through the very client: nothing, and no pushes.
+        let srv = with_signin(None);
+        let mut bob = Browser::new(port);
+        let theirs = through_client(&mut bob, 2);
+        assert_eq!(devices(&theirs), 0);
+        call_tool(port, &theirs, "create_server_alert", fired_now()).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(1500));
+        assert_eq!(
+            bodies.lock().unwrap().len(),
+            0,
+            "their alert does not reach it"
+        );
+        drop(srv);
+        let store = chartgen::scripting::persistence::Store::open(&db).unwrap();
+        assert_eq!(
+            store.waiting_rows(None).unwrap().devices,
+            1,
+            "still waiting"
+        );
+        drop(store);
+
+        // Named: a stranger first still gets nothing, and the owner collects it elsewhere.
+        let _srv = with_signin(Some("github:1"));
+        let mut carol = Browser::new(port);
+        let hers = through_client(&mut carol, 3);
+        assert_eq!(devices(&hers), 0);
+        let mut ann = Browser::new(port);
+        let owner = web_sign_in(&mut ann, &fake, "github", profile_of("github", 1, "ann"));
+        assert_eq!(devices(&owner), 1, "collected, through another client");
+        assert_eq!(devices(&hers), 0);
+        let alert = call_tool(port, &owner, "create_server_alert", fired_now()).unwrap();
+        until_received("the push", || bodies.lock().unwrap().len() == 1);
+        let got = open_push(&bodies.lock().unwrap()[0], &key, &auth);
+        assert_eq!(got["alert_id"], alert["id"]);
     }
 }

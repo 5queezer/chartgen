@@ -360,11 +360,9 @@ pub(super) fn after_token(user: &str) {
         Err(e) => eprintln!("[OAuth] could not move scripts to the named owner: {e}"),
     }
     if let Some(alerts) = crate::server_alerts::global() {
-        match alerts.claim_waiting(user) {
-            0 => {}
-            n => eprintln!(
-                "[OAuth] {n} server alert(s) from before sign-in moved to the named owner"
-            ),
+        let (moved_alerts, moved_devices) = alerts.claim_waiting(user);
+        if moved_alerts + moved_devices > 0 {
+            eprintln!("[OAuth] {moved_alerts} server alert(s) and {moved_devices} push device(s) from before sign-in moved to the named owner");
         }
     }
 }
@@ -375,11 +373,13 @@ pub(super) fn waiting_rows_notice(
     waiting: &scripting::persistence::WaitingRows,
     owner: Option<&str>,
 ) -> Option<String> {
-    let (scripts, alerts) = (waiting.scripts, waiting.alerts);
-    if scripts == 0 && alerts == 0 {
+    let (scripts, alerts, devices) = (waiting.scripts, waiting.alerts, waiting.devices);
+    if scripts == 0 && alerts == 0 && devices == 0 {
         return None;
     }
-    let rows = format!("{scripts} script(s) and {alerts} server alert(s) from before sign-in");
+    let rows = format!(
+        "{scripts} script(s), {alerts} server alert(s) and {devices} push device(s) from before sign-in"
+    );
     if owner.is_some() && waiting.name_collisions > 0 {
         return Some(format!(
             "{rows} wait for the owner CHARTGEN_CLAIM_OWNER names. {} of these scripts are name collisions: that account has a script of that name, so they stay with their clients until it renames or deletes its own and signs in again.",
@@ -2155,12 +2155,13 @@ mod tests {
         let rows = |scripts, alerts, name_collisions| WaitingRows {
             scripts,
             alerts,
+            devices: 1,
             name_collisions,
         };
-        assert_eq!(waiting_rows_notice(&rows(0, 0, 0), None), None);
+        assert_eq!(waiting_rows_notice(&WaitingRows::default(), None), None);
         let unset = waiting_rows_notice(&rows(2, 1, 0), None).unwrap();
         assert!(
-            unset.contains("2 script(s) and 1 server alert(s)"),
+            unset.contains("2 script(s), 1 server alert(s) and 1 push device(s)"),
             "{unset}"
         );
         assert!(

@@ -302,6 +302,11 @@ struct Record {
     push: bool,
     #[serde(default)]
     last_push: Option<Delivery>,
+    /// The devices the last fire went to, with each one's outcome once known. A device
+    /// not here was not sent that fire, and each tab reads its own: one user's several
+    /// browsers can fare differently (ADR-0044).
+    #[serde(default)]
+    device_pushes: HashMap<String, Option<Delivery>>,
 }
 
 impl Record {
@@ -818,6 +823,7 @@ impl ServerAlerts {
             }
         }
         let mut push_refusal = None;
+        alert.device_pushes.clear();
         if alert.push {
             let mut devices: Vec<&StoredDevice> = st
                 .devices
@@ -837,6 +843,7 @@ impl ServerAlerts {
                             format!("{id}:{}", device.id),
                             Some(device.id.clone()),
                         ));
+                        alert.device_pushes.insert(device.id.clone(), None);
                     } else {
                         push_refusal = Some(refused("push skipped: too many deliveries waiting"));
                     }
@@ -979,11 +986,12 @@ impl ServerAlerts {
         self.sync_feeds(st);
     }
 
-    /// Every alert owned by an OAuth client goes to `user`, the owner the operator named,
-    /// with its deliveries, whatever limit that passes: they are that person's already,
-    /// and nothing is deleted (ADR-0044). A webhook's secret moves with its alert.
-    /// Returns how many moved. Blocking.
-    pub fn claim_waiting(&self, user: &str) -> usize {
+    /// Every alert and push device owned by an OAuth client goes to `user`, the owner the
+    /// operator named, with waiting deliveries, whatever limit that passes: they are that
+    /// person's already, and nothing is deleted (ADR-0044). A webhook's secret moves with its
+    /// alert. An endpoint the user already holds stays with its client. Returns how many
+    /// alerts and devices moved. Blocking.
+    pub fn claim_waiting(&self, user: &str) -> (usize, usize) {
         let mut guard = self.lock();
         let st = &mut *guard;
         let ids: Vec<String> = st
@@ -1007,25 +1015,57 @@ impl ServerAlerts {
                 Err(e) => eprintln!("[alerts] cannot move an alert to its user: {e}"),
             }
         }
-        if moved.is_empty() {
-            return 0;
-        }
-        let mut theirs = VecDeque::new();
-        for (owner, queue) in st.queues.iter_mut() {
-            if persistence::is_client_id(owner) {
-                let (took, stays): (VecDeque<_>, VecDeque<_>) = std::mem::take(queue)
-                    .into_iter()
-                    .partition(|e| moved.contains(&e.alert_id));
-                *queue = stays;
-                theirs.extend(took);
+
+        let mut held: HashSet<String> = st
+            .devices
+            .values()
+            .filter(|d| d.owner == user)
+            .map(|d| d.endpoint.clone())
+            .collect();
+        let mut waiting: Vec<(i64, String)> = st
+            .devices
+            .values()
+            .filter(|d| persistence::is_client_id(&d.owner))
+            .map(|d| (d.created_at, d.id.clone()))
+            .collect();
+        waiting.sort();
+        let mut devices_moved = 0;
+        for (_, id) in waiting {
+            let Some(device) = st.devices.get_mut(&id) else {
+                continue;
+            };
+            if !held.insert(device.endpoint.clone()) {
+                continue;
+            }
+            let mut updated = device.clone();
+            updated.owner = user.to_string();
+            match self.store.save_push_device(&updated) {
+                Ok(()) => {
+                    *device = updated;
+                    devices_moved += 1;
+                }
+                Err(e) => eprintln!("[alerts] cannot move a push device to its user: {e}"),
             }
         }
-        st.queues
-            .entry(user.to_string())
-            .or_default()
-            .extend(theirs);
-        self.sync_feeds(st);
-        moved.len()
+
+        if !moved.is_empty() {
+            let mut theirs = VecDeque::new();
+            for (owner, queue) in st.queues.iter_mut() {
+                if persistence::is_client_id(owner) {
+                    let (took, stays): (VecDeque<_>, VecDeque<_>) = std::mem::take(queue)
+                        .into_iter()
+                        .partition(|e| moved.contains(&e.alert_id));
+                    *queue = stays;
+                    theirs.extend(took);
+                }
+            }
+            st.queues
+                .entry(user.to_string())
+                .or_default()
+                .extend(theirs);
+            self.sync_feeds(st);
+        }
+        (moved.len(), devices_moved)
     }
 
     /// Delete an alert, with what it still had to deliver.
@@ -1096,7 +1136,10 @@ impl ServerAlerts {
                 self.forget_device(&mut st, &device.id);
             }
             if let Some(alert) = st.alerts.get_mut(&event.alert_id) {
-                if event.device.is_some() {
+                if let Some(device) = &event.device {
+                    alert
+                        .device_pushes
+                        .insert(device.clone(), Some(outcome.clone()));
                     alert.last_push = Some(outcome);
                 } else {
                     alert.last_delivery = Some(outcome);
@@ -1293,8 +1336,11 @@ impl ServerAlerts {
             eprintln!("[alerts] cannot store a push device: {e}");
             "The alert store is unavailable".to_string()
         })?;
-        st.devices.insert(id, device);
-        Ok(json!({ "devices": st.devices.values().filter(|d| d.owner == owner).count() }))
+        st.devices.insert(id.clone(), device);
+        Ok(json!({
+            "devices": st.devices.values().filter(|d| d.owner == owner).count(),
+            "device": id,
+        }))
     }
 
     /// With the table full, whose device makes room: never a client the operator listed,
@@ -1514,6 +1560,7 @@ impl ServerAlerts {
             last_delivery: None,
             push,
             last_push: None,
+            device_pushes: HashMap::new(),
         };
         let mut st = self.lock();
         // The fetch and the lookup ran unlocked: another call may have filled up.
@@ -1727,6 +1774,7 @@ impl ServerAlerts {
             "last_push_at": a.last_push.as_ref().map(|d| d.at),
             "last_push_status": a.last_push.as_ref().and_then(|d| d.status),
             "last_push_error": a.last_push.as_ref().and_then(|d| d.error.clone()),
+            "last_push_devices": a.device_pushes,
             "feed": if live { "live" } else { "waiting" },
             "last_price": watch.and_then(|w| w.last_price),
         })

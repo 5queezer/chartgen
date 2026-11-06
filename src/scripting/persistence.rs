@@ -105,6 +105,7 @@ pub fn is_client_id(owner: &str) -> bool {
 pub struct WaitingRows {
     pub scripts: usize,
     pub alerts: usize,
+    pub devices: usize,
     /// Of `scripts`, those whose name the named owner already has, so they cannot move.
     pub name_collisions: usize,
 }
@@ -664,13 +665,17 @@ impl Store {
             .map(|(_, name)| name.as_str())
             .collect();
         let waiting = || scripts.iter().filter(|(o, _)| is_client_id(o));
-        let mut stmt = conn.prepare("SELECT owner FROM server_alerts")?;
-        let alerts: Vec<String> = stmt
-            .query_map([], |r| r.get(0))?
-            .collect::<rusqlite::Result<_>>()?;
+        let clients_in = |table: &str| -> rusqlite::Result<usize> {
+            let mut stmt = conn.prepare(&format!("SELECT owner FROM {table}"))?;
+            let owners: Vec<String> = stmt
+                .query_map([], |r| r.get(0))?
+                .collect::<rusqlite::Result<_>>()?;
+            Ok(owners.iter().filter(|o| is_client_id(o)).count())
+        };
         Ok(WaitingRows {
             scripts: waiting().count(),
-            alerts: alerts.iter().filter(|o| is_client_id(o)).count(),
+            alerts: clients_in("server_alerts")?,
+            devices: clients_in("push_devices")?,
             name_collisions: waiting()
                 .filter(|(_, name)| taken.contains(name.as_str()))
                 .count(),
