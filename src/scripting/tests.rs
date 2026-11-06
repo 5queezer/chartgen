@@ -746,10 +746,13 @@ fn ta_work_is_bounded_by_the_bar_count() {
 
 #[test]
 fn list_and_dict_growth_is_capped() {
-    assert_rejected(&script("a = [0] * 20000\na.append(1)"), "list too large");
-    assert_rejected(&script("a = [0] * 20000\na.insert(0, 1)"), "list too large");
-    assert_rejected(
-        &script("d = {i: 0 for i in range(20000)}\nd[-1] = 0"),
+    // Not `assert_rejected`: under load, building these can outlast its 200 ms
+    // dry run, and the deadline would fire before the guard under test.
+    assert_run_fails("a = [0] * 20000\na.append(1)", 50, "list too large");
+    assert_run_fails("a = [0] * 20000\na.insert(0, 1)", 50, "list too large");
+    assert_run_fails(
+        "d = {i: 0 for i in range(20000)}\nd[-1] = 0",
+        50,
         "dict too large",
     );
     assert_rejected(&script("d = {}\nd.update({1: 2})"), "not available");
