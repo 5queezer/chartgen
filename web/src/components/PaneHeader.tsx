@@ -17,7 +17,7 @@
 // Inputs are plain data derived from SeriesPayload — no klinecharts
 // imports here, which keeps this component cheap to re-render.
 
-import { For, Show, type JSX } from "solid-js";
+import { For, Show, createSignal, type JSX } from "solid-js";
 
 import { formatValue, type BarLegend } from "../lib/format";
 
@@ -101,14 +101,18 @@ function ControlButton(props: {
 }
 
 export function PaneHeader(props: PaneHeaderProps): JSX.Element {
+  // Without hover, tapping an indicator's row shows its controls (globals.css).
+  const [open, setOpen] = createSignal(false);
   return (
     <div
       class="pane-header"
       classList={{
         "pane-header-interactive": !!props.onSettings || !!props.onRemove,
+        "pane-header-open": open(),
       }}
       data-testid={props.testId}
       style={{ top: `${props.top}px` }}
+      onClick={() => setOpen(!open())}
       onDblClick={() => props.onSettings?.()}
     >
       <span class="pane-header-label">{props.name}</span>
