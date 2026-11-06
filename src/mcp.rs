@@ -3320,15 +3320,28 @@ mod tests {
             .unwrap()
             .contains("Double Top"));
         assert_eq!(j["events"][1]["key"], "bearish");
-        let ind = indicators::by_name("candlestick_patterns").unwrap();
+        // More labels than a summary lists: it keeps the newest, and counts them all.
+        let ind = indicators::by_name_configured(
+            "candlestick_patterns",
+            &json!({"pattern": "long_legged_doji", "trend": "none"}),
+        )
+        .unwrap()
+        .unwrap();
         let mut data = double_top_data(90);
         data.interval = None;
-        let pr = ind.compute(&data);
-        let j = panel_result_to_json(&pr);
-        if !pr.labels.is_empty() {
-            assert_eq!(j["labels_count"], pr.labels.len());
-            assert!(j["labels"].as_array().unwrap().len() <= MAX_SUMMARY_LABELS);
+        for bar in &mut data.bars {
+            bar.open = bar.close - 0.01;
+            bar.high = bar.close + 1.0;
+            bar.low = bar.close - 1.0;
         }
+        let pr = ind.compute(&data);
+        assert!(pr.labels.len() > MAX_SUMMARY_LABELS, "{}", pr.labels.len());
+        let j = panel_result_to_json(&pr);
+        assert_eq!(j["labels_count"], pr.labels.len());
+        let listed = j["labels"].as_array().unwrap();
+        assert_eq!(listed.len(), MAX_SUMMARY_LABELS);
+        assert_eq!(listed.last().unwrap()["x"], pr.labels.last().unwrap().x);
+        assert_eq!(listed[0]["key"], "long_legged_doji");
     }
 
     #[test]

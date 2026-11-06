@@ -107,7 +107,6 @@ pub struct AutoFib {
     pub deviation: f64,
     pub levels: [Option<f64>; SLOTS],
     pub reverse: bool,
-    pub lookback: usize,
 }
 
 impl Default for AutoFib {
@@ -117,7 +116,6 @@ impl Default for AutoFib {
             deviation: 3.0,
             levels: DEFAULTS,
             reverse: false,
-            lookback: LOOKBACK,
         }
     }
 }
@@ -177,11 +175,11 @@ impl Indicator for AutoFib {
 
     fn warmup_bars(&self) -> usize {
         // A live tail must see the same window as the full load (ADR-0046).
-        self.lookback
+        LOOKBACK
     }
 
     fn compute(&self, data: &OhlcvData) -> PanelResult {
-        let (window, base) = closed_window(data, self.lookback);
+        let (window, base) = closed_window(data, LOOKBACK);
         let swing = last_swing(window, self.depth, self.deviation);
         let n = data.len();
         let mut lines = Vec::with_capacity(SLOTS);

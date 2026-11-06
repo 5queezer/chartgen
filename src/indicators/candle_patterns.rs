@@ -11,6 +11,7 @@
 use super::pine::{ema_n, sma_n};
 use crate::data::{Bar, OhlcvData};
 use crate::indicator::*;
+use crate::interval::{Interval, Unit};
 use serde_json::{json, Value};
 
 /// Prior trend a pattern needs, read on the bar before the pattern starts.
@@ -305,6 +306,7 @@ pub static PATTERNS: &[Def] =
             1,
             "A small body between shadows on both sides: indecision.",
             |w| !w[0].doji_body()
+                && w[0].range > 0.0
                 && w[0].small()
                 && w[0].up >= w[0].range * 0.34
                 && w[0].dn >= w[0].range * 0.34
@@ -846,13 +848,7 @@ fn chosen(choice: &str, d: &Def) -> bool {
         "bullish" => d.bias == Bias::Bullish,
         "bearish" => d.bias == Bias::Bearish,
         "neutral" => d.bias == Bias::Neutral,
-        key => {
-            d.key == key
-                || d.key.strip_suffix("_bullish") == Some(key)
-                || d.key.strip_suffix("_bearish") == Some(key)
-                || d.key.strip_suffix("_white") == Some(key)
-                || d.key.strip_suffix("_black") == Some(key)
-        }
+        key => d.key == key,
     }
 }
 
@@ -886,14 +882,14 @@ pub fn detect(bars: &[Bar], choice: &str, trend: TrendRule) -> Vec<Hit> {
     for i in 0..n {
         w.clear();
         for k in 0..5.min(i + 1) {
-            // Newest-first; every measure on the pattern's last bar's average.
+            // Newest first, each candle against its own bar's average.
             w.push(C::new(&bars[i - k], avg[i - k]));
         }
         if w.iter().take(3).any(|c| !c.avg.is_finite()) {
             continue;
         }
         for &(id, d) in &defs {
-            if i + 1 < d.bars || (w.len() < d.bars) {
+            if w.len() < d.bars {
                 continue;
             }
             if d.bars == 5 && w.iter().any(|c| !c.avg.is_finite()) {
@@ -915,20 +911,23 @@ pub fn detect(bars: &[Bar], choice: &str, trend: TrendRule) -> Vec<Hit> {
 
 /// True while the newest bar of `data` can still change: a timed bar whose
 /// interval has not ended at `now_ms`. Bars without time (the demo data) or an
-/// interval count as closed. A daily bar counts as forming for its whole UTC day,
-/// also after its exchange closed: a label there is marked too early, not too late.
+/// interval count as closed. A month ends on the calendar, not 30 days on. A daily
+/// bar counts as forming for 24 hours from its open, also after its exchange
+/// closed: a label there is marked too early, not too late.
 pub fn newest_bar_forming(data: &OhlcvData, now_ms: i64) -> bool {
     let Some(open) = data.bars.last().and_then(|b| b.date.parse::<i64>().ok()) else {
         return false;
     };
-    let Some(len) = data
-        .interval
-        .as_deref()
-        .and_then(crate::data::bar_interval_secs)
-    else {
+    let Some(interval) = data.interval.as_deref() else {
         return false;
     };
-    now_ms < (open + len) * 1000
+    let end = match Interval::parse(interval) {
+        Ok(iv) if iv.unit == Unit::Month => Some(iv.grid_end(open)),
+        // Not `grid_end` here: a Sydney day bar opens at 23:00 UTC, an hour
+        // before its UTC day ends.
+        _ => crate::data::bar_interval_secs(interval).map(|len| open + len),
+    };
+    end.is_some_and(|end| now_ms < end * 1000)
 }
 
 /// Wall clock in unix ms, for `newest_bar_forming`.
@@ -1543,12 +1542,15 @@ mod tests {
         assert!(!keys("bearish").contains(&"hammer"));
         assert!(keys("bearish").contains(&"hanging_man"));
         assert!(keys("shooting_star").is_empty());
-        // A two-sided pattern is chosen by its plain name too.
-        let mut engulf = lead(0.0);
-        engulf.extend([b(100.5, 100.7, 99.8, 100.0), b(99.9, 101.6, 99.7, 101.5)]);
-        let found = detect(&engulf, "engulfing", TrendRule::None);
-        assert_eq!(found.len(), 1, "{found:?}");
-        assert_eq!(PATTERNS[found[0].def].key, "engulfing_bullish");
+    }
+
+    #[test]
+    fn a_flat_bar_is_no_pattern() {
+        // O = H = L = C on a thin pair, after bars with real bodies.
+        let flat = b(100.0, 100.0, 100.0, 100.0);
+        assert_eq!(hits(std::slice::from_ref(&flat)), Vec::<&str>::new());
+        // Nor is the second of two.
+        assert_eq!(hits(&[flat.clone(), flat]), Vec::<&str>::new());
     }
 
     #[test]
@@ -1628,6 +1630,37 @@ mod tests {
         // Untimed demo data, or no known interval: nothing to wait for.
         assert!(!newest_bar_forming(&data("D7", Some("1h")), 0));
         assert!(!newest_bar_forming(&data(&open.to_string(), None), 0));
+    }
+
+    #[test]
+    fn a_month_forms_until_the_calendar_ends_it() {
+        let ts = |s: &str| chrono::DateTime::parse_from_rfc3339(s).unwrap().timestamp();
+        let bar = |open: &str, iv: &str| OhlcvData {
+            bars: vec![Bar {
+                date: ts(open).to_string(),
+                ..b(1.0, 1.0, 1.0, 1.0)
+            }],
+            symbol: None,
+            interval: Some(iv.into()),
+            session: None,
+        };
+        let forming = |d: &OhlcvData, at: &str| newest_bar_forming(d, ts(at) * 1000);
+        // 31 days: past 30 days and still forming.
+        let oct = bar("2026-10-01T00:00:00Z", "1M");
+        assert!(forming(&oct, "2026-10-31T12:00:00Z"));
+        assert!(!forming(&oct, "2026-11-01T00:00:00Z"));
+        // 28 days: closed before 30 days are up.
+        let feb = bar("2027-02-01T00:00:00Z", "1mo");
+        assert!(forming(&feb, "2027-02-28T23:59:59Z"));
+        assert!(!forming(&feb, "2027-03-01T00:00:00Z"));
+        // A quarter of 92 days.
+        let q4 = bar("2026-10-01T00:00:00Z", "3mo");
+        assert!(forming(&q4, "2026-12-31T12:00:00Z"));
+        assert!(!forming(&q4, "2027-01-01T00:00:00Z"));
+        // A day bar still counts from its own open: this one opens in Sydney.
+        let day = bar("2026-11-05T23:00:00Z", "1d");
+        assert!(forming(&day, "2026-11-06T12:00:00Z"));
+        assert!(!forming(&day, "2026-11-06T23:00:00Z"));
     }
 
     #[test]

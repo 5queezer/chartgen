@@ -350,9 +350,16 @@ fn resolve(kind: Kind, w: &Watch, bars: &[Bar], known: usize) -> Outcome {
                 if expects.is_none() {
                     bias = if up { Bias::Bullish } else { Bias::Bearish };
                 }
-                target = Some(if up { c + w.height } else { c - w.height });
+                // Measured from the line, wherever the close already is: a pattern
+                // is only known `depth` bars after its last pivot.
+                target = Some(if up {
+                    w.upper.at(i) + w.height
+                } else {
+                    w.lower.at(i) - w.height
+                });
+            } else {
+                continue;
             }
-            continue;
         }
         let t = target.unwrap_or(f64::NAN);
         let up = bias == Bias::Bullish;
@@ -1382,6 +1389,49 @@ mod tests {
         assert!(f.confirmed_at.is_some());
         assert_eq!(f.status, PatternStatus::Failed);
         assert_eq!(f.failed_why, Some("reversed before its target"));
+    }
+
+    #[test]
+    fn the_measured_move_starts_from_the_line_not_the_close() {
+        // Neck 99.9, top 110.1, so a height of 10.2. Price is far under the neck
+        // by the bar that confirms: the target is still the neck minus the height.
+        let mut k = knots(10, &[90.0, 110.0, 100.0, 110.0]);
+        let (top, _) = *k.last().unwrap();
+        k.push((top + 2, 92.0));
+        k.push((top + 30, 91.0));
+        let s = Settings {
+            depth: 4,
+            ..settings()
+        };
+        let f = &detect(&path(&k), &s, "double_top")[0];
+        assert_eq!(f.confirmed_at, Some(top + 4));
+        assert!(path(&k)[top + 4].close < 92.0);
+        assert!((f.target.unwrap() - 89.7).abs() < 1e-9, "{:?}", f.target);
+        // A channel's line slopes: its value on the confirming bar counts.
+        let f = only(
+            &[100.0, 110.0, 105.0, 115.0, 110.0, 120.0, 115.0, 135.0],
+            Kind::ChannelUp,
+        );
+        let at = f.confirmed_at.unwrap();
+        let (up, lo) = (f.upper.unwrap(), f.lower.unwrap());
+        let height = up.at(f.start) - lo.at(f.start);
+        assert!((f.target.unwrap() - (up.at(at) + height)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn past_its_target_on_the_confirming_bar_it_cannot_fail_before_it() {
+        // Already under neck minus height when known, then back over the peaks.
+        let mut k = knots(10, &[90.0, 110.0, 100.0, 110.0]);
+        let (top, _) = *k.last().unwrap();
+        k.push((top + 3, 80.0));
+        k.push((top + 30, 125.0));
+        let s = Settings {
+            depth: 3,
+            ..settings()
+        };
+        let f = &detect(&path(&k), &s, "double_top")[0];
+        assert_eq!(f.confirmed_at, Some(top + 3));
+        assert_eq!(f.status, PatternStatus::Confirmed);
     }
 
     #[test]
