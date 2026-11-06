@@ -29,6 +29,7 @@ const BINANCE_INTRADAY: [(i64, &str); 11] = [
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Unit {
+    Second,
     Minute,
     Hour,
     Day,
@@ -45,8 +46,8 @@ pub struct Interval {
 }
 
 impl Interval {
-    /// Parse `<number><unit>`: `m` minutes, `M` or `mo` months, and `h`, `d`,
-    /// `w` or `wk` in any case.
+    /// Parse `<number><unit>`: `m` minutes, `M` or `mo` months, and `s`, `h`,
+    /// `d`, `w` or `wk` in any case.
     pub fn parse(text: &str) -> Result<Self, String> {
         let split = text
             .find(|c: char| !c.is_ascii_digit())
@@ -56,6 +57,7 @@ impl Interval {
             "m" => Some(Unit::Minute),
             "M" => Some(Unit::Month),
             u => match u.to_ascii_lowercase().as_str() {
+                "s" => Some(Unit::Second),
                 "h" => Some(Unit::Hour),
                 "d" => Some(Unit::Day),
                 "w" | "wk" => Some(Unit::Week),
@@ -65,11 +67,12 @@ impl Interval {
         };
         let (Some(unit), Some(n)) = (unit, num.parse::<u32>().ok().filter(|n| *n > 0)) else {
             return Err(format!(
-                "Unsupported timeframe: {text}. Use a number and a unit, e.g. 7m, 45m, 8h, 2D, 2W, 3M (m minutes, h hours, D days, W weeks, M months)."
+                "Unsupported timeframe: {text}. Use a number and a unit, e.g. 5s, 7m, 45m, 8h, 2D, 2W, 3M (s seconds, m minutes, h hours, D days, W weeks, M months)."
             ));
         };
         let iv = Self { n, unit }.normalized();
         let max = match iv.unit {
+            Unit::Second => 59,
             Unit::Minute => 1_439,
             Unit::Hour => 168,
             Unit::Day => 365,
@@ -78,7 +81,7 @@ impl Interval {
         };
         if iv.n > max {
             return Err(format!(
-                "Unsupported timeframe: {text}. The upper bounds are under 1440m, 168h, 365D, 52W and 12M."
+                "Unsupported timeframe: {text}. The upper bounds are under 60s, 1440m, 168h, 365D, 52W and 12M."
             ));
         }
         if matches!(iv.unit, Unit::Minute | Unit::Hour) {
@@ -95,6 +98,11 @@ impl Interval {
     fn normalized(self) -> Self {
         let Self { n, unit } = self;
         match unit {
+            Unit::Second if n % 60 == 0 => Self {
+                n: n / 60,
+                unit: Unit::Minute,
+            }
+            .normalized(),
             Unit::Minute if n % 60 == 0 => Self {
                 n: n / 60,
                 unit: Unit::Hour,
@@ -116,6 +124,7 @@ impl Interval {
     /// The canonical name: what clients are echoed and what keys a chart.
     pub fn canonical(&self) -> String {
         let unit = match self.unit {
+            Unit::Second => "s",
             Unit::Minute => "m",
             Unit::Hour => "h",
             Unit::Day => "d",
@@ -128,6 +137,7 @@ impl Interval {
     /// Bar length in seconds; a month counts as 30 days.
     pub fn secs(&self) -> i64 {
         let unit = match self.unit {
+            Unit::Second => 1,
             Unit::Minute => MINUTE,
             Unit::Hour => HOUR,
             Unit::Day => DAY,
@@ -167,7 +177,7 @@ impl Interval {
     pub fn grid_start(&self, t: i64) -> i64 {
         let floor = |offset: i64| offset + (t - offset).div_euclid(self.secs()) * self.secs();
         match self.unit {
-            Unit::Minute | Unit::Hour => floor(0),
+            Unit::Second | Unit::Minute | Unit::Hour => floor(0),
             Unit::Day => floor(DAY),
             Unit::Week => floor(4 * DAY),
             Unit::Month => {
@@ -195,6 +205,9 @@ impl Interval {
     pub fn binance_base(&self) -> (&'static str, i64) {
         let n = i64::from(self.n);
         match self.unit {
+            // Binance's finest, and spot only. Under a minute it always fits
+            // `MAX_BASE_PER_BAR`.
+            Unit::Second => ("1s", n),
             Unit::Minute | Unit::Hour => {
                 let minutes = self.secs() / MINUTE;
                 BINANCE_INTRADAY
@@ -263,6 +276,8 @@ mod tests {
     #[test]
     fn binance_base_keeps_native_klines_and_picks_the_coarsest_divisor() {
         for (tf, base, per_bar) in [
+            ("1s", "1s", 1),
+            ("5s", "1s", 5),
             ("1m", "1m", 1),
             ("3m", "3m", 1),
             ("1h", "1h", 1),
@@ -294,6 +309,8 @@ mod tests {
     fn only_native_intervals_have_a_stream_and_it_has_binances_name() {
         let stream = |s| Interval::parse(s).unwrap().binance_stream();
         for (tf, name) in [
+            ("1s", "1s"),
+            ("60s", "1m"),
             ("1m", "1m"),
             ("60m", "1h"),
             ("120m", "2h"),
@@ -310,7 +327,7 @@ mod tests {
         ] {
             assert_eq!(stream(tf), Some(name), "{tf}");
         }
-        for tf in ["7m", "45m", "7h", "2D", "2W", "3M"] {
+        for tf in ["5s", "7m", "45m", "7h", "2D", "2W", "3M"] {
             assert_eq!(stream(tf), None, "{tf}");
         }
     }

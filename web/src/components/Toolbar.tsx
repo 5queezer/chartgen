@@ -37,6 +37,7 @@ import {
   timeframe,
   type ChartType,
 } from "../stores/layout";
+import { isContinuousMarket } from "../lib/countdown";
 import type { McpSession } from "../mcp";
 import {
   BP_FULL,
@@ -239,7 +240,7 @@ const buttonClass =
   "px-2 py-1.5 rounded-md text-sm cursor-pointer text-[color:var(--color-fg)] hover:bg-[color:var(--color-bg-elev)] inline-flex items-center gap-1.5 shrink-0";
 const activeClass =
   "bg-[color:var(--color-bg-elev)] text-[color:var(--color-accent)]";
-const TIMEFRAME_GROUPS = ["Minutes", "Hours", "Days"] as const;
+const TIMEFRAME_GROUPS = ["Seconds", "Minutes", "Hours", "Days"] as const;
 const menuClass =
   "bg-[color:var(--color-bg-elev)] border border-[color:var(--color-border)] rounded-md shadow-lg z-50 py-1 min-w-36";
 const itemClass =
@@ -320,10 +321,13 @@ export function Toolbar(props: ToolbarProps): JSX.Element {
   const showReplay = () => width() >= BP_TINY && !compact();
   const hasFullscreen = document.fullscreenEnabled;
   // Timeframes in the dropdown: the favourites join it once their buttons go.
+  // Yahoo has no seconds data, so a stock's menu does not offer them.
   const overflow = (): readonly Timeframe[] =>
-    showTimeframes()
-      ? TIMEFRAME_OPTIONS.filter((tf) => !FAVOURITE_TIMEFRAMES.includes(tf))
-      : TIMEFRAME_OPTIONS;
+    TIMEFRAME_OPTIONS.filter(
+      (tf) =>
+        !(showTimeframes() && FAVOURITE_TIMEFRAMES.includes(tf)) &&
+        (isContinuousMarket(symbol()) || timeframeGroup(tf) !== "Seconds"),
+    );
   // The dropdown's button names the current timeframe unless a favourite does.
   const inDropdown = () => !showTimeframes() || !FAVOURITE_TIMEFRAMES.includes(timeframe());
 

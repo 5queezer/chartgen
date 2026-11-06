@@ -664,7 +664,13 @@ pub fn fetch_yahoo(
     limit: usize,
     end_time_ms: Option<i64>,
 ) -> Result<Fetched, String> {
-    let interval = Interval::parse(interval)?.canonical();
+    let iv = Interval::parse(interval)?;
+    if iv.unit == Unit::Second {
+        return Err(format!(
+            "Yahoo has no seconds data: {symbol} cannot be charted at {interval}. Seconds intervals need a Binance symbol."
+        ));
+    }
+    let interval = iv.canonical();
     let interval = interval.as_str();
     let window = yahoo_window(interval, limit, end_time_ms, now_ms() / 1000);
 
@@ -1055,7 +1061,8 @@ fn yahoo_api_interval(interval: &str) -> &str {
     };
     match iv.unit {
         Unit::Minute | Unit::Hour if iv.secs() == 5_400 => "90m",
-        Unit::Minute | Unit::Hour => {
+        // `fetch_yahoo` refuses seconds before any window is built.
+        Unit::Second | Unit::Minute | Unit::Hour => {
             let minutes = iv.secs() / 60;
             YAHOO_INTRADAY
                 .iter()
@@ -1775,6 +1782,21 @@ mod tests {
         // Paging past the listing date yields zero bars, not an error.
         let bars = paginate_backwards(10, Some(first), far(), fake_exchange(first, last)).unwrap();
         assert!(bars.is_empty());
+    }
+
+    #[test]
+    fn yahoo_refuses_seconds_before_any_request() {
+        let e = fetch_yahoo("AAPL", "5s", 10, None).err().unwrap();
+        assert!(e.contains("Yahoo has no seconds data"), "{e}");
+    }
+
+    #[test]
+    fn sample_seconds_resample_from_one_second_klines_on_their_grid() {
+        let f = fetch_ohlcv(DataSource::Sample, "BTCUSDT", "5s", 20, None).unwrap();
+        let ts: Vec<i64> = f.data.bars.iter().map(|b| bar_ts(b).unwrap()).collect();
+        assert!(ts.len() >= 19, "{}", ts.len());
+        assert!(ts.iter().all(|t| t % 5 == 0));
+        assert!(ts.windows(2).all(|w| w[1] - w[0] == 5));
     }
 
     #[test]
