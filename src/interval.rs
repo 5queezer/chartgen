@@ -208,6 +208,12 @@ impl Interval {
             Unit::Month => ("1M", n),
         }
     }
+
+    /// Binance's name for its kline stream of this interval, if it has one.
+    pub fn binance_stream(&self) -> Option<&'static str> {
+        let (base, per_bar) = self.binance_base();
+        (per_bar == 1).then_some(base)
+    }
 }
 
 #[cfg(test)]
@@ -281,6 +287,31 @@ mod tests {
                 (base, per_bar),
                 "{tf}"
             );
+        }
+    }
+
+    #[test]
+    fn only_native_intervals_have_a_stream_and_it_has_binances_name() {
+        let stream = |s| Interval::parse(s).unwrap().binance_stream();
+        for (tf, name) in [
+            ("1m", "1m"),
+            ("60m", "1h"),
+            ("120m", "2h"),
+            ("1H", "1h"),
+            ("4H", "4h"),
+            ("24h", "1d"),
+            ("1D", "1d"),
+            ("3D", "3d"),
+            ("7d", "1w"),
+            ("1W", "1w"),
+            ("1wk", "1w"),
+            ("1M", "1M"),
+            ("1mo", "1M"),
+        ] {
+            assert_eq!(stream(tf), Some(name), "{tf}");
+        }
+        for tf in ["7m", "45m", "7h", "2D", "2W", "3M"] {
+            assert_eq!(stream(tf), None, "{tf}");
         }
     }
 

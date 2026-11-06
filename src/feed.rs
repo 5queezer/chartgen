@@ -53,7 +53,7 @@ impl BinanceFeed {
         self
     }
 
-    fn url(&self) -> String {
+    pub(crate) fn url(&self) -> String {
         if self.trades {
             format!(
                 "wss://stream.binance.com:9443/stream?streams={0}@kline_{1}/{0}@aggTrade",

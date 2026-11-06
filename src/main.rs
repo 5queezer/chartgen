@@ -85,13 +85,17 @@ fn main() {
 
     if cli.trade {
         let symbol = cli.symbol.clone().unwrap_or_else(|| "BTCUSDT".to_string());
-        let interval = cli.interval.clone();
         // The engine folds the kline stream as it arrives, so it needs a real one.
-        if !chartgen::interval::Interval::parse(&interval).is_ok_and(|iv| iv.binance_base().1 == 1)
-        {
-            eprintln!("--trade needs an interval Binance streams natively, not {interval}");
-            std::process::exit(2);
-        }
+        let interval = match chartgen::interval::Interval::parse(&cli.interval) {
+            Ok(iv) if iv.binance_stream().is_some() => iv.canonical(),
+            _ => {
+                eprintln!(
+                    "--trade needs an interval Binance streams natively, not {}",
+                    cli.interval
+                );
+                std::process::exit(2);
+            }
+        };
         let indicators: Vec<String> = cli.panels.clone();
 
         let data_dir = dirs_data_dir();

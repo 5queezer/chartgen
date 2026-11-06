@@ -14,6 +14,8 @@ use crate::trading::subscription::SubscriptionRegistry;
 
 pub struct EngineConfig {
     pub symbol: String,
+    /// In canonical form: the key of the engine's state, which `get_indicators`
+    /// asks by. `feed_for` turns it into Binance's stream name.
     pub interval: String,
     pub indicators: Vec<String>,
     /// Data directory (e.g. ~/.chartgen/).
@@ -140,6 +142,14 @@ impl Engine {
 /// Connects to the WebSocket feed and processes bars through the engine.
 /// Uses `std::sync::RwLock` so the engine can also be accessed by the MCP
 /// handler without async infection.
+/// The feed for a canonical interval, under Binance's own stream name.
+fn feed_for(symbol: &str, interval: &str) -> Option<BinanceFeed> {
+    let stream = crate::interval::Interval::parse(interval)
+        .ok()?
+        .binance_stream()?;
+    Some(BinanceFeed::new(symbol, stream))
+}
+
 pub async fn run_engine(
     engine: Arc<RwLock<Engine>>,
     on_alert: impl Fn(TriggeredAlert) + Send + 'static,
@@ -149,7 +159,10 @@ pub async fn run_engine(
         (e.config.symbol.clone(), e.config.interval.clone())
     };
 
-    let feed = BinanceFeed::new(&symbol, &interval);
+    let Some(feed) = feed_for(&symbol, &interval) else {
+        eprintln!("[engine] Binance has no kline stream for {interval}");
+        return;
+    };
     let (tx, mut rx) = tokio::sync::mpsc::channel(100);
 
     tokio::spawn(async move {
@@ -192,6 +205,16 @@ pub async fn run_engine(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_feed_subscribes_to_binances_name_for_a_canonical_interval() {
+        for (canonical, stream) in [("1h", "1h"), ("1d", "1d"), ("1wk", "1w"), ("1mo", "1M")] {
+            let url = feed_for("BTCUSDT", canonical).unwrap().url();
+            assert!(url.ends_with(&format!("btcusdt@kline_{stream}")), "{url}");
+        }
+        assert!(feed_for("BTCUSDT", "7m").is_none());
+        assert!(feed_for("BTCUSDT", "2wk").is_none());
+    }
     use crate::trading::alert::AlertCondition;
     use std::fs;
 

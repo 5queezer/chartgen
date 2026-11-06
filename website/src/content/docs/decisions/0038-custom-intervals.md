@@ -190,7 +190,9 @@ to the nearest local midnight, which `2W` and `2M` need to bucket correctly.
 `feed_interval` returns the base stream. A group whose feed is finer than its
 chart seeds native bars, upserts feed events as before, and resamples on each
 recompute with `fetch::resample`. Groups on the same base share one WebSocket.
-`--trade` still needs a stream of its own, and refuses other intervals at startup.
+`--trade` still needs a stream of its own, and refuses other intervals at startup. It
+keys its state by the canonical form and subscribes under Binance's name for it, so
+`-i 1W` follows `1w` and `get_indicators` finds it by any spelling.
 
 ### Future bars
 

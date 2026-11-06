@@ -1596,6 +1596,11 @@ fn tool_get_indicators(
     if indicator_names.is_empty() {
         return tool_err(id, "indicators array is required and must not be empty");
     }
+    let interval = match check_interval(interval) {
+        Ok(canonical) => canonical,
+        Err(e) => return tool_err(id, &e),
+    };
+    let interval = interval.as_str();
 
     // Validate indicator names
     let mut unknown = Vec::new();
@@ -2347,6 +2352,31 @@ mod tests {
     }
 
     // --- set_alert / list_alerts / cancel_alert roundtrip ---
+
+    #[test]
+    fn get_indicators_takes_any_spelling_of_an_interval() {
+        // Under --trade -i 1h, 60m is the same chart and reads the engine's state.
+        let dir = temp_dir("get_ind_spelling");
+        let engine = make_engine(dir.clone());
+        {
+            let mut e = engine.write().unwrap();
+            for i in 0..20 {
+                e.on_bar(make_bar(100.0 + i as f64));
+            }
+        }
+        let args = json!({ "symbol": "BTCUSDT", "interval": "60m", "indicators": ["rsi"] });
+        let resp = tool_get_indicators(Some(json!(1)), &args, Some(&engine));
+        let parsed: Value = serde_json::from_str(&response_text(&resp)).unwrap();
+        assert_eq!(parsed["source"], "engine_cache");
+        assert_eq!(parsed["interval"], "1h");
+        std::fs::remove_dir_all(&dir).ok();
+
+        // What it cannot serve is the same tool error as for generate_chart.
+        let args = json!({ "symbol": "BTCUSDT", "interval": "61m", "indicators": ["rsi"] });
+        let resp = tool_get_indicators(Some(json!(1)), &args, None);
+        assert!(is_error(&resp));
+        assert!(response_text(&resp).contains("Unsupported timeframe"));
+    }
 
     #[test]
     fn alert_roundtrip() {
