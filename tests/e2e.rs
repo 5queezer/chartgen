@@ -3059,8 +3059,23 @@ fn test_signin_half_a_provider_refuses_to_start() {
     let db = store_path("signin-half");
     let mut cmd = server_command(port, None, &db, false);
     cmd.env("CHARTGEN_GITHUB_CLIENT_ID", "only-an-id");
-    let status = cmd.status().unwrap();
-    assert_eq!(status.code(), Some(1), "it must not start open");
+    // A server that started anyway never exits, so this must not wait for it alone.
+    let mut child = cmd.spawn().unwrap();
+    let mut status = None;
+    for _ in 0..400 {
+        status = child.try_wait().unwrap();
+        if status.is_some() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+    assert_eq!(
+        status.and_then(|s| s.code()),
+        Some(1),
+        "it must not start open"
+    );
 }
 
 /// The test provider is the only way past the real ones, and it takes the sample
