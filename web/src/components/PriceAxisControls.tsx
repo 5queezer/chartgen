@@ -144,6 +144,10 @@ export function PriceAxisControls(props: PriceAxisControlsProps): JSX.Element {
   // (wheel, keys, date-range buttons) zoomed, which ends the load-time re-fit.
   let capturedSpace = 0;
   let zoomed = false;
+  let fitFrame: number | null = null;
+  onCleanup(() => {
+    if (fitFrame !== null) cancelAnimationFrame(fitFrame);
+  });
   const resetGap = (c: KLineChart) => {
     ratio = null;
     gap = DEFAULT_GAP;
@@ -164,9 +168,16 @@ export function PriceAxisControls(props: PriceAxisControlsProps): JSX.Element {
       lockKey = key;
       resetGap(c);
       // Read the fresh fit on the next turn, once klinecharts has laid out.
-      scheduleLock();
+      // Not a microtask: new data recalculates the indicators in microtasks
+      // and only then rebuilds the axis, so until then the fit still holds
+      // the old series' indicator values, and a ratio taken from it crops.
+      fitFrame ??= requestAnimationFrame(() => {
+        fitFrame = null;
+        scheduleLock();
+      });
       return;
     }
+    if (fitFrame !== null) return;
     const height = c.getSize(CANDLE_PANE_ID, "yAxis" as never)?.height;
     if (!height) return;
     const [top, bottom] = c.convertFromPixel([{ y: 0 }, { y: height }], {
