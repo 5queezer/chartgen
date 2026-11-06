@@ -1,6 +1,87 @@
 use crate::data::{Bar, OhlcvData};
 use crate::indicator::{rgba, Bars as BarsSeries, Dot, Fill, HLine, Indicator, Line, PanelResult};
-use std::time::Duration;
+use std::collections::HashMap;
+use std::sync::{Arc, LazyLock, Mutex};
+use std::time::{Duration, Instant};
+
+/// How often one futures series is asked for. A push group recomputes up to 4 times
+/// a second, and these endpoints have limits of their own that the weight header does
+/// not show (fundingRate: 500 requests per 5 minutes per IP).
+const SERIES_REFRESH: Duration = Duration::from_secs(15);
+/// How long a series is served after its last good read, when a call fails or the gate
+/// refuses it, so the panel keeps its shape and the chart does not reload. Longer than
+/// the gate's default 60 s cooldown plus one `SERIES_REFRESH`.
+const SERIES_KEEP: Duration = Duration::from_secs(90);
+
+struct HeldSeries<T> {
+    tried: Instant,
+    good: Option<(Instant, Arc<Vec<T>>)>,
+    error: String,
+}
+
+/// Futures series by symbol and period.
+struct SeriesCache<T>(Mutex<HashMap<(String, String), HeldSeries<T>>>);
+
+impl<T> Default for SeriesCache<T> {
+    fn default() -> Self {
+        Self(Mutex::default())
+    }
+}
+
+impl<T> SeriesCache<T> {
+    /// The series for `symbol` and `period`: `fetch`ed at most once per
+    /// `SERIES_REFRESH`, whether that worked or not, and otherwise the last good one
+    /// while it lasts.
+    fn get(
+        &self,
+        symbol: &str,
+        period: &str,
+        now: Instant,
+        fetch: impl FnOnce() -> Result<Vec<T>, String>,
+    ) -> Result<Arc<Vec<T>>, String> {
+        let key = (symbol.to_uppercase(), period.to_string());
+        let lasting = |held: &HeldSeries<T>| {
+            held.good
+                .as_ref()
+                .filter(|(at, _)| now.saturating_duration_since(*at) < SERIES_KEEP)
+                .map(|(_, series)| series.clone())
+        };
+        let lock = || self.0.lock().unwrap_or_else(|e| e.into_inner());
+        {
+            let mut held = lock();
+            held.retain(|_, h| now.saturating_duration_since(h.tried) < SERIES_KEEP);
+            if let Some(h) = held
+                .get(&key)
+                .filter(|h| now.saturating_duration_since(h.tried) < SERIES_REFRESH)
+            {
+                return lasting(h).ok_or_else(|| h.error.clone());
+            }
+        }
+        let result = fetch();
+        let mut held = lock();
+        let entry = held.entry(key).or_insert_with(|| HeldSeries {
+            tried: now,
+            good: None,
+            error: String::new(),
+        });
+        entry.tried = now;
+        match result {
+            Ok(series) => {
+                let series = Arc::new(series);
+                entry.good = Some((now, series.clone()));
+                Ok(series)
+            }
+            Err(e) => {
+                entry.error = e.clone();
+                lasting(entry).ok_or(e)
+            }
+        }
+    }
+}
+
+static FUNDING: LazyLock<SeriesCache<(i64, f64)>> = LazyLock::new(SeriesCache::default);
+static OPEN_INTEREST: LazyLock<SeriesCache<(i64, f64)>> = LazyLock::new(SeriesCache::default);
+static LONG_SHORT: LazyLock<SeriesCache<(i64, f64, f64)>> = LazyLock::new(SeriesCache::default);
 
 fn http_client() -> reqwest::blocking::Client {
     reqwest::blocking::Client::builder()
@@ -185,7 +266,7 @@ impl Indicator for FundingRate {
             }
         };
 
-        let series = match fetch_funding_data(sym) {
+        let series = match FUNDING.get(sym, "", Instant::now(), || fetch_funding_data(sym)) {
             Ok(s) => s,
             Err(_) => {
                 return PanelResult {
@@ -296,7 +377,9 @@ impl Indicator for OpenInterestHist {
         };
         let interval = data.interval.as_deref().unwrap_or("4h");
 
-        let series = match fetch_oi_data(sym, interval) {
+        let series = match OPEN_INTEREST.get(sym, map_interval(interval), Instant::now(), || {
+            fetch_oi_data(sym, interval)
+        }) {
             Ok(s) => s,
             Err(_) => {
                 return PanelResult {
@@ -402,7 +485,9 @@ impl Indicator for LongShortRatio {
         };
         let interval = data.interval.as_deref().unwrap_or("4h");
 
-        let series = match fetch_ls_data(sym, interval) {
+        let series = match LONG_SHORT.get(sym, map_interval(interval), Instant::now(), || {
+            fetch_ls_data(sym, interval)
+        }) {
             Ok(s) => s,
             Err(_) => {
                 return PanelResult {
@@ -591,6 +676,135 @@ fn interval_to_max_gap_ms(interval: &str) -> i64 {
 #[cfg(test)]
 mod interval_tests {
     use super::*;
+
+    /// A cache read that counts its fetches.
+    fn read(
+        cache: &SeriesCache<i64>,
+        calls: &mut usize,
+        at: Instant,
+        answer: Result<Vec<i64>, String>,
+    ) -> Result<Vec<i64>, String> {
+        cache
+            .get("btcusdt", "1h", at, || {
+                *calls += 1;
+                answer
+            })
+            .map(|s| s.to_vec())
+    }
+
+    #[test]
+    fn a_series_is_asked_for_once_per_refresh_however_often_it_is_recomputed() {
+        let (cache, t0) = (SeriesCache::default(), Instant::now());
+        let mut calls = 0;
+        // Four recomputes a second, for most of the refresh: one call.
+        for tick in 0..50 {
+            let at = t0 + Duration::from_millis(250 * tick);
+            let got = read(&cache, &mut calls, at, Ok(vec![1]));
+            assert_eq!(got, Ok(vec![1]));
+        }
+        assert_eq!(calls, 1);
+        // Then a new one, and its answer replaces the old.
+        let got = read(&cache, &mut calls, t0 + SERIES_REFRESH, Ok(vec![2]));
+        assert_eq!((got, calls), (Ok(vec![2]), 2));
+        // Another symbol or period is its own series.
+        let other = cache
+            .get("ETHUSDT", "1h", t0, || {
+                calls += 1;
+                Ok(vec![3])
+            })
+            .unwrap();
+        assert_eq!((other.to_vec(), calls), (vec![3], 3));
+    }
+
+    #[test]
+    fn a_failed_call_serves_the_last_good_series_so_the_panel_keeps_its_shape() {
+        let (cache, t0) = (SeriesCache::default(), Instant::now());
+        let mut calls = 0;
+        read(&cache, &mut calls, t0, Ok(vec![1])).unwrap();
+
+        // Refused or failing past the refresh: still there, and not asked for on
+        // every recompute.
+        let refused = || Err("Binance rate limit: waiting 60s after HTTP 429".to_string());
+        let at = t0 + SERIES_REFRESH;
+        assert_eq!(read(&cache, &mut calls, at, refused()), Ok(vec![1]));
+        assert_eq!(calls, 2);
+        let soon = at + Duration::from_secs(1);
+        assert_eq!(read(&cache, &mut calls, soon, refused()), Ok(vec![1]));
+        assert_eq!(calls, 2);
+
+        // Through the gate's default cooldown and the refresh after it.
+        let during = t0 + Duration::from_secs(60) + SERIES_REFRESH;
+        assert_eq!(read(&cache, &mut calls, during, refused()), Ok(vec![1]));
+
+        // Past its life the error comes through, once per refresh too.
+        let late = t0 + SERIES_KEEP + SERIES_REFRESH;
+        let e = read(&cache, &mut calls, late, refused()).unwrap_err();
+        assert!(e.contains("rate limit"), "{e}");
+        let before = calls;
+        let again = read(
+            &cache,
+            &mut calls,
+            late + Duration::from_secs(1),
+            Ok(vec![9]),
+        );
+        assert!(again.unwrap_err().contains("rate limit"));
+        assert_eq!(calls, before);
+
+        // The next good read is the series again.
+        let healed = late + SERIES_REFRESH;
+        assert_eq!(read(&cache, &mut calls, healed, Ok(vec![5])), Ok(vec![5]));
+    }
+
+    #[test]
+    fn the_cache_forgets_series_nobody_asks_for() {
+        let (cache, t0) = (SeriesCache::default(), Instant::now());
+        let mut calls = 0;
+        read(&cache, &mut calls, t0, Ok(vec![1])).unwrap();
+        cache
+            .get("ETHUSDT", "1h", t0 + SERIES_KEEP, || Ok(vec![2]))
+            .unwrap();
+        assert_eq!(cache.0.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn panels_read_their_series_through_the_cache() {
+        let bars = vec![Bar {
+            open: 1.0,
+            high: 1.0,
+            low: 1.0,
+            close: 1.0,
+            volume: 1.0,
+            date: "1700000000".into(),
+        }];
+        let data = OhlcvData {
+            bars,
+            symbol: Some("TESTCACHEUSDT".into()),
+            interval: Some("1h".into()),
+            session: None,
+        };
+        let now = Instant::now();
+        let at = 1_700_000_000_000;
+        let held: Result<Vec<(i64, f64)>, String> = Ok(vec![(at, 0.5)]);
+        FUNDING
+            .get("TESTCACHEUSDT", "", now, || held.clone())
+            .unwrap();
+        OPEN_INTEREST
+            .get("TESTCACHEUSDT", "1h", now, || held.clone())
+            .unwrap();
+        LONG_SHORT
+            .get("TESTCACHEUSDT", "1h", now, || Ok(vec![(at, 0.5, 0.5)]))
+            .unwrap();
+        // Served from the cache, with no network behind it: the values arrive.
+        let funding = FundingRate.compute(&data);
+        assert_eq!(funding.label, "Funding");
+        assert_eq!(funding.bars[0].y, vec![50.0], "0.5 as a percentage");
+        let oi = OpenInterestHist.compute(&data);
+        assert_eq!(oi.label, "OI");
+        assert_eq!(oi.lines[0].y, vec![0.5]);
+        let long_short = LongShortRatio.compute(&data);
+        assert_eq!(long_short.label, "L/S");
+        assert!(long_short.lines.iter().any(|l| l.y[0].is_finite()));
+    }
 
     #[test]
     fn a_chart_interval_reads_the_longest_period_that_fits_in_a_bar() {

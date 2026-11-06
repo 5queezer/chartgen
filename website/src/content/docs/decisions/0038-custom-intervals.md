@@ -162,6 +162,13 @@ quotes, the symbol list and the feed's backfill included:
 - A refused call fails with an error starting `Binance rate limit:` and stores
   nothing, so no cache holds a partial read, and a symbol is not marked unknown.
 
+The futures panels (`funding`, `oi`, `long_short`) also have limits the weight header
+does not show: `fundingRate` allows 500 requests per 5 minutes per IP. So a series is
+asked for at most every 15 s, however often a push group recomputes, and when a call
+fails or is refused the last good series is served for up to 90 s. That outlasts the
+default cooldown, so the panel keeps its shape and the chart does not reload. A longer
+ban still empties the panel until it ends, and reloads the chart each way.
+
 At most 4 paged walks run at once (`Walks`). Concurrent first reads of one chart share
 a walk. Reads of the newest bars of any interval share `newest_klines`, so a push
 seed is one request after the first as well.
