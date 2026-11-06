@@ -184,8 +184,8 @@ oversight.
   against the previous close, like TradingView.
   [ADR-0011](/chartgen/decisions/0011-watchlist-quotes/)
 - **Push is capped per client address, and behind a proxy that is one
-  address.** chartgen trusts no forwarding header, so behind a reverse proxy
-  or tunnel every client shares the proxy's address and the cap of 32
+  address.** chartgen trusts no forwarding header unless the operator names one, so behind
+  a reverse proxy or tunnel every client shares the proxy's address and the cap of 32
   subscriptions (eight 4-chart grids) becomes a second server-wide cap. Fine for a
   personal deployment. Other symbols poll.
   [ADR-0021](/chartgen/decisions/0021-realtime-chart-push/),

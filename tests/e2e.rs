@@ -3693,6 +3693,23 @@ fn test_signin_a_flood_from_one_address_leaves_the_others_alone() {
     assert!(limited, "a flood from one address must be refused");
     let page = Browser::new(p).request("GET", &path, &["X-Test-Client: 203.0.113.5"], "");
     assert_eq!(page.status, 303, "another address: {}", page.body);
+    // Asking for consent creates state too, so a session does not get around the limit.
+    let mut signed_in = Browser::new(p);
+    web_sign_in(
+        &mut signed_in,
+        &fake,
+        "github",
+        profile_of("github", 1, "a"),
+    );
+    let external = register_external(p);
+    let from = "X-Test-Client: 198.51.100.8";
+    let limited = (0..125).any(|_| {
+        signed_in
+            .authorize_from(&external, EXTERNAL_REDIRECT, "s", &[from])
+            .status
+            == 429
+    });
+    assert!(limited, "a flood of consent requests must be refused too");
     // A malformed header is no address of its own: it falls back to the peer, here exempt.
     let page = Browser::new(p).request("GET", &path, &["X-Test-Client: not-an-ip"], "");
     assert_eq!(page.status, 303, "{}", page.body);

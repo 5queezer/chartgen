@@ -120,8 +120,8 @@ You can unset the variable afterwards.
 **On a public server, also name your proxy's address header.** With
 `CHARTGEN_TRUSTED_PROXY_HEADER=CF-Connecting-IP`, or whatever single-address header your proxy
 sets, each client gets its own limits on sign-in, registration and chart push. Without it every
-visitor is the proxy's address, and one person can use up everyone's: 120 sign-in steps and 20
-registrations a minute or ten for all, while a same-host proxy has neither limit. **Only set it if
+visitor is the proxy's address, and one person can use up everyone's: 120 sign-in steps a minute
+and 20 registrations per 10 minutes, shared by all, while a same-host proxy has neither limit. **Only set it if
 the server cannot be reached except through that proxy**, because anyone reaching it directly can
 write that header and claim any address. A list such as `X-Forwarded-For` will not do: a value
 that is not one address falls back to the peer.

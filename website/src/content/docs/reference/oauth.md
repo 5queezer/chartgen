@@ -157,7 +157,7 @@ schemes such as `cursor://` and `vscode://`. `/authorize` answers `400 invalid_r
 for such a URI on a client stored before these checks existed. `/register` is also
 bounded: 1–5 `redirect_uris` of at most 512 characters, a
 `client_name` of at most 256 (`400 invalid_client_metadata` otherwise), 20
-registrations per peer address per 10 minutes (`429 slow_down`; loopback
+registrations per client address per 10 minutes (`429 slow_down`; loopback
 peers are exempt) and 1000 registered clients. A client that never receives a
 token within 24 hours is forgotten, unless it owns scripts. Logs never contain client ids, codes or
 verifiers.
