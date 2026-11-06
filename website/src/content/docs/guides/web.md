@@ -290,7 +290,8 @@ covers the usual lookbacks (up to SMA 200), and the server raises it for
 indicators that need more to converge, such as the EMA 200 of `ema_stack`
 (891 bars) or an RSI with a long length
 ([ADR-0032](/chartgen/decisions/0032-indicator-aware-warmup/)), so values
-at a page seam and on the live bar line up. Changing the symbol,
+at a page seam and on the live bar line up. A custom interval on a Binance symbol can
+fall short of that ([Keyboard shortcuts](#keyboard-shortcuts) has the limit). Changing the symbol,
 timeframe or indicators cancels every pending poll and page and does a
 full reload.
 
@@ -385,7 +386,8 @@ from Yahoo's finest bars has as much history as they do: about 30 days for `7m`.
 A custom interval on a Binance symbol computes indicators over at most 20,000 native
 bars, however much warmup they ask for. A `59m` chart holds about 338 bars, while
 EMA 200 needs 891 to converge, so its live values and page seams can differ from a
-longer history until enough bars are loaded. [MCP reference](/chartgen/reference/mcp/#generate_chart)
+longer history. Scrolling back to load more does not change that: each page, poll and
+push computes over its own capped read. [MCP reference](/chartgen/reference/mcp/#generate_chart)
 gives the rule.
 
 ## Drawing tools

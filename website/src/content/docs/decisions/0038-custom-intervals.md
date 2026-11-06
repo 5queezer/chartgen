@@ -126,7 +126,7 @@ means one of that unit.
   returns the newest bars that fit with `has_more: true`, and the client pages
   on. The web app's first load of 500 bars plus 300 warmup fits up to about 25
   native bars per bar. Above that the first page is shorter and its oldest indicator
-  values are unconverged until the next page arrives.
+  values stay unconverged: a later page goes in front of them and does not recompute them.
 
 ### Tail polls
 

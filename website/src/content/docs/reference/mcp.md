@@ -135,10 +135,11 @@ A custom interval on Binance reads at most 20 requests' worth of native bars per
 call (20,000). That caps the bars fetched, which also supply `warmup`; the response
 returns at most `bars` of them. A `59m` call fetches about 338 bars, so one asking
 for `bars: 2` returns 2, computed over those 338, and one asking for `bars: 500`
-returns the 338 with `has_more: true`, and older bars come from paging. Warmup past
-the cap is simply shorter: with `warmup: 1000` on `59m`, an indicator with a very long
-window stays `null` or unconverged, and polls and pushes never page to make up for
-it. Calls for the newest bars share native
+returns the 338 with `has_more: true`, though it asked for more, and older bars come
+from paging. Warmup past the cap is simply shorter, and paging does not restore it: a
+page, a poll and a push each compute over their own capped read. With `warmup: 1000` on
+`59m`, an indicator with a very long window stays `null` or unconverged on every one of
+them. Calls for the newest bars share native
 klines read in the last 2 minutes, so after the first, polling a tail costs one
 request whatever its warmup.
 
@@ -435,7 +436,9 @@ pushes the same tail instead of you polling for it.
   duplicates.
 - **`has_more`** (boolean, always present in `format=series`) is `true`
   when older history may exist before `bars[0]`. For Binance and the
-  sample source that means the full `bars + warmup` count came back. For
+  sample source that means the read got all it asked for: the full `bars + warmup`
+  count or, for an interval built from finer bars, the 20,000-kline cap. So a capped
+  page can be shorter than `bars` and still report `true`. For
   Yahoo it means the request window was not cut off by Yahoo's lookback
   limit or the symbol's first trade date, so a short page (for example
   2000 1m bars when one 7-day window only holds about 1950) still reports
@@ -460,7 +463,9 @@ A non-zero `warmup` is raised to what the requested indicators need to
 converge, up to 1000
 ([ADR-0032](/chartgen/decisions/0032-indicator-aware-warmup/)). `ema_stack`
 needs 891 bars, so its EMA 200 is computed over at least that many and
-matches one long request to within 0.01% at a page seam or on a tail. The
+matches one long request to within 0.01% at a page seam or on a tail. The exception is
+a Binance interval built from finer bars when the 20,000-kline cap leaves fewer
+than that: a `59m` read holds about 338 bars, so these guarantees do not hold there. The
 other EMA/RMA-based built-ins (`ma`, `ma_ribbon`, `envelopes`, `keltner`,
 `rsi`, `atr`, `adx`, `supertrend`, `macd`, `stoch_rsi`, `trix`, `ppo`,
 `tsi`, `smi_ergodic`, `elder_force_index`, `volume_oscillator`,
@@ -735,7 +740,10 @@ as for `generate_chart`), `chart_style` and `warmup` (default 0, max
 `generate_chart`. An interval Binance has no stream for follows the coarsest
 stream that divides it (`7m` follows `1m`), and each tail is resampled from
 that stream's bars as a fetch would be, so a live bar is the bar a reload
-shows. It returns:
+shows. The exception is a reconnect short enough to fit inside one native kline whose
+REST backfill fails, as during a rate-limit cooldown: that kline's last updates are
+lost, and the bar stays wrong until it leaves the window
+([ADR-0038](/chartgen/decisions/0038-custom-intervals/)). It returns:
 
 ```json
 { "subscription_id": "cs-0b7f…" }
