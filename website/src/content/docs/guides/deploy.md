@@ -64,7 +64,7 @@ a token. See [what a signed-in stranger can still do](/chartgen/decisions/0044-s
 | `CHARTGEN_WEBHOOK_TEST_ORIGIN` | `src/webhook.rs` | Tests only. One loopback origin (`http://127.0.0.1:9000`) a webhook may reach. Ignored unless `CHARTGEN_DATA_SOURCE=sample`, so it does nothing on a live server. |
 | `CHARTGEN_GITHUB_CLIENT_ID`, `CHARTGEN_GITHUB_CLIENT_SECRET` | `src/server/signin.rs` | [Sign-in through GitHub](#sign-in-through-github-and-google). Unset: not offered. One without the other stops the server at startup. |
 | `CHARTGEN_GOOGLE_CLIENT_ID`, `CHARTGEN_GOOGLE_CLIENT_SECRET` | `src/server/signin.rs` | The same for Google. |
-| `CHARTGEN_CLAIM_OWNER` | `src/server/signin.rs` | The one account (`github:<id>`, `google:<sub>`) that [inherits](#sign-in-through-github-and-google) scripts and server alerts from before sign-in, with webhook secrets. Unset: nothing moves. |
+| `CHARTGEN_CLAIM_OWNER` | `src/server/signin.rs` | The one account (`github:<id>`, `google:<sub>`) that [inherits](#sign-in-through-github-and-google) scripts, server alerts and push devices from before sign-in, with webhook secrets. Unset: nothing moves. |
 | `CHARTGEN_TRUSTED_PROXY_HEADER` | `src/server.rs` | Header holding the client's address, such as `CF-Connecting-IP`, for the limits per address. Only if the server cannot be reached except through that proxy. Unset: no header is trusted, and the address is the TCP peer. |
 | `CHARTGEN_SIGNIN_TEST_PROVIDER_ORIGIN` | `src/server/signin.rs` | Tests only: a loopback `http` origin that replaces both providers. Honored only with `CHARTGEN_DATA_SOURCE=sample`, ignored on live data. Never set it in production. |
 | `HOME` / `USERPROFILE` | `src/main.rs` | Picks the data directory (`~/.chartgen/`). Override to relocate `alerts.json` / `trades.log` / `subscriptions.json` / `chartgen.db`. |
@@ -109,14 +109,14 @@ once after that restart; existing clients keep their `client_id`.
 
 Keep the volume at `~/.chartgen` mounted: sessions and users are stored there.
 
-**Existing scripts and server alerts stay where they are until you name who inherits them.** With
+**Existing scripts, server alerts and push devices stay where they are until you name who inherits them.** With
 sign-in on nobody can reach them, and startup says how many wait. To collect them, set
 `CHARTGEN_CLAIM_OWNER` to your own account, `github:<numeric id>` (the `id` in
 `https://api.github.com/users/<login>`) or `google:<sub>`, and sign in, through any client. You
 then own every client's rows, whichever client made them. **An alert's webhook and signing secret
-move with it**, so name only yourself. A script name you already have stays with its client, and
+move with it, and that account's alerts then notify those devices**, so name only yourself. A script name you already have stays with its client, and
 so does the second of two clients' scripts with one name: nothing is overwritten or deleted, and
-startup counts these name collisions. To move one, rename or delete your own and sign in again
+startup counts these name collisions. A push endpoint you already hold stays with its client the same way. To move one, rename or delete your own and sign in again
 ([ADR-0044](/chartgen/decisions/0044-sign-in-through-github-and-google/#existing-rows)). Scripts wait for as long as it takes. Alerts keep
 running meanwhile, and expire 30 days after their client last got a token, so do not leave it long.
 You can unset the variable afterwards.
@@ -262,15 +262,15 @@ mostly replaces itself, but it can push out a real user who has push on and no s
 browser next opens chartgen. The 120 deliveries a minute are shared in the same way, per client and not per
 person, and the real ceiling is about 360 requests, because retries do not count.
 
-**Recommended for this server until sign-in lands:** `CHARTGEN_SERVER_ALERT_CLIENTS`, and
-`CHARTGEN_VAPID_SUBJECT` with your address. **Each browser is its own client**, so list one id for each browser
-you use, and expect an alert to notify only the devices of the browser that made it: to get an alert on your
-phone, make it on your phone.
+**Recommended for this server:** [sign-in](#sign-in-through-github-and-google),
+`CHARTGEN_SERVER_ALERT_CLIENTS` listing the accounts you trust, and `CHARTGEN_VAPID_SUBJECT` with your address.
+With sign-in, devices belong to the user, so an alert made on the desktop also reaches the phone, and the 5 devices
+and 30 pushes a minute are per user. **Without sign-in each browser is its own client**, so list one id for each
+browser you use, and expect an alert to notify only the devices of the browser that made it.
 
-**A listed client id is a password, for push as well.** Whoever has it can get a token, replace that
+**Without sign-in, a listed client id is a password, for push as well.** Whoever has it can get a token, replace that
 client's devices with their own, and receive its fires and notes. It appears in `/authorize` URLs, so in browser
-history and in any proxy that logs query strings. Sign-in fixes this; until then, replace a leaked id as
-[above](#server-alerts).
+history and in any proxy that logs query strings. Replace a leaked id as [above](#server-alerts).
 
 Tests only use a fake push service. Before relying on it, check real delivery by hand:
 

@@ -769,8 +769,13 @@ on that symbol. With push on, the notification is the one report of that fire: t
 for it, unless the push failed or you first see the fire more than an hour later, when the notification may
 never have arrived. **Turn off** stops this device. Signing out does not, so alarms keep working.
 
-Each browser is its own sign-in for now, so **an alert notifies only the browser that made it**: to get an
-alert on your phone, make it on your phone. On iOS the Home Screen app probably counts as its own browser.
+Without [sign-in](/chartgen/reference/oauth/#sign-in) each browser is its own, so **an alert notifies only the
+browser that made it**: to get an alert on your phone, make it on your phone. On iOS the Home Screen app probably
+counts as its own browser. With sign-in an alert notifies every device of your account, so one made on the desktop
+reaches the phone. Each tab goes by how its own device fared, and tells you itself if that one's push failed.
+
+Signing out does not stop notifications to that device. **On a browser you share, use Turn off first**, or the next
+person there sees your alerts' notifications along with their own.
 
 A server alert belongs to the sign-in of this browser, so clearing its site data loses
 access to it while it keeps running. It has no line on the chart and is not in the

@@ -132,9 +132,9 @@ CREATE TABLE oauth_clients (
     redirect_uris  TEXT    NOT NULL, -- JSON array
     created_at     INTEGER NOT NULL,
     last_token_at  INTEGER,          -- migration 2; NULL = never got a token
-    client_name    TEXT              -- migration 4; as registered, for the consent page
+    client_name    TEXT              -- migration 5; as registered, for the consent page
 );
--- Migration 4, used with sign-in on (ADR-0044):
+-- Migration 5, used with sign-in on (ADR-0044):
 CREATE TABLE users (
     id             TEXT    PRIMARY KEY, -- github:<id> or google:<sub>
     name           TEXT    NOT NULL,    -- display only, refreshed at each login
@@ -170,7 +170,7 @@ CREATE TABLE server_alert_events (   -- deliveries not finished yet
 ALTER TABLE server_alert_events ADD COLUMN device TEXT; -- NULL: the webhook
 CREATE TABLE push_devices (
     id          TEXT    PRIMARY KEY,
-    owner       TEXT    NOT NULL,    -- OAuth client_id
+    owner       TEXT    NOT NULL,    -- OAuth client_id, or with sign-in a users.id
     endpoint    TEXT    NOT NULL,
     p256dh      TEXT    NOT NULL,
     auth        TEXT    NOT NULL,

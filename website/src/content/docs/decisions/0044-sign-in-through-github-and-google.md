@@ -7,7 +7,7 @@ sidebar:
 
 **Status:** Accepted
 **Date:** 2026-11-06
-**Amends:** [ADR-0025](/chartgen/decisions/0025-user-indicator-registry/) (with sign-in on, scripts belong to the user, not the client), [ADR-0036](/chartgen/decisions/0036-own-origin-invalid-client-redirect/) (a client's liveness is limited per user, which makes the lockout cost accounts), [ADR-0021](/chartgen/decisions/0021-realtime-chart-push/) (with sign-in on, the per-client push cap counts per user, and an operator can name a proxy's address header) and [ADR-0042](/chartgen/decisions/0042-server-side-alerts/) (with sign-in on, server alerts and their allowlist belong to accounts)
+**Amends:** [ADR-0025](/chartgen/decisions/0025-user-indicator-registry/) (with sign-in on, scripts belong to the user, not the client), [ADR-0036](/chartgen/decisions/0036-own-origin-invalid-client-redirect/) (a client's liveness is limited per user, which makes the lockout cost accounts), [ADR-0021](/chartgen/decisions/0021-realtime-chart-push/) (with sign-in on, the per-client push cap counts per user, and an operator can name a proxy's address header) [ADR-0042](/chartgen/decisions/0042-server-side-alerts/) (with sign-in on, server alerts and their allowlist belong to accounts) and [ADR-0045](/chartgen/decisions/0045-web-push-for-server-alerts/) (with sign-in on, push devices belong to the user, and the last outcome is kept per device)
 
 ## Context and Problem Statement
 
@@ -97,8 +97,8 @@ separate scripts.
 
 The id goes straight into the existing `user_indicators.user_id` and
 `server_alerts.owner`, so those tables need no change, and it cannot collide with a client
-id, which is a UUID. A new migration, the fourth, adds `users`, `sessions`, `client_grants`
-and `oauth_clients.client_name`. It follows the server alerts' migration, because that
+id, which is a UUID. A new migration, the fifth, adds `users`, `sessions`, `client_grants`
+and `oauth_clients.client_name`. It follows those of server alerts and push, because that
 order is the only one that ever shipped.
 
 ### Sessions
@@ -150,13 +150,14 @@ sites, so the code in its address stays there.
 
 **Rows from before sign-in go to one named account, and to nobody else.**
 `CHARTGEN_CLAIM_OWNER=github:<id>` or `google:<sub>` names it. When that user gets a token,
-through any client, they collect every script and server alert still owned by a client, with
-waiting deliveries, whatever their limits, because these are theirs already. An alert's webhook
+through any client, they collect every script, server alert and push device still owned by a
+client, with waiting deliveries, whatever their limits, because these are theirs already. An alert's webhook
 and its signing secret move with it. A client here means an owner shaped like the ids `/register`
 hands out, tested positively, so another kind of owner is never swept in.
 
 A script name they already have stays with its client, as does the second of two clients' scripts
-with one name, so nothing is overwritten. Startup counts these name collisions. To move one, the
+with one name, so nothing is overwritten. A push endpoint they already hold stays with its client
+likewise. Startup counts name collisions among the scripts. To move one, the
 owner renames or deletes their own script and signs in again, one at a time per name.
 
 **Unset, nothing moves.** The rows stay with their clients, where nobody can reach them, because
@@ -192,6 +193,15 @@ buy no more alerts or watched pairs.
   never matches them. A listed account's alerts are kept regardless, as before.
 - **Logging out leaves alerts running.** An alert is there to work with no browser open, so
   signing out ends tokens and nothing else. It keeps firing and delivering.
+- **Push devices belong to the user** too
+  ([ADR-0045](/chartgen/decisions/0045-web-push-for-server-alerts/)), so a phone gets the alert
+  made on the desktop, and the limits of 5 devices and 30 pushes a minute are per user. They live
+  on the same activity as alerts.
+- **The last outcome is kept per device.** With several devices one shared outcome is wrong: a
+  live device's 201 followed by a dead one's 410 made the tab report twice, and this device's 500
+  followed by another's 201 left it silent. Each fire now records the devices it goes to, pending
+  until each answers, and `subscribe_push` tells the tab its device's id. So a tab goes by its own
+  outcome, waits while that is pending, and knows at once if the fire was not sent to it.
 
 ### Limits, per user
 
@@ -289,6 +299,10 @@ Someone without an account can still:
 - Bad: first-time users of an MCP client see two new pages, the provider's and consent.
 - Bad: chartgen now holds provider client secrets, and user ids and names in its store.
 - Bad: another way to fail at startup, by design: half a provider stops the server.
+- Bad: signing out does not remove a push device, so that alerts keep reaching it. On a shared
+  browser the next person to sign in and turn notifications on holds the same endpoint under
+  their account, and the device then shows both people's alerts, notes included, until someone
+  presses **Turn off** first. The web guide says so.
 - Bad: **only what the server stores belongs to the user.** Watchlists, layouts, drawings,
   chart settings and browser-side alerts stay in the browser's `localStorage`, as before: not
   per account, not synced, and still there after signing out. The next person to sign in on

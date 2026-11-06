@@ -7,6 +7,7 @@ sidebar:
 
 **Status:** Accepted
 **Date:** 2026-11-06
+**Amended by:** [ADR-0044](/chartgen/decisions/0044-sign-in-through-github-and-google/) (with sign-in on, devices belong to the user, and the last outcome is kept per device)
 **Amends:** [ADR-0042](/chartgen/decisions/0042-server-side-alerts/) (a fire may also be delivered as a push, and push does not need webhook access)
 
 ## Context and Problem Statement
