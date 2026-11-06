@@ -14,7 +14,7 @@ sidebar:
 A server alert fires with no browser open
 ([ADR-0042](/chartgen/decisions/0042-server-side-alerts/)), but the only way it can tell anyone
 then is a webhook, which needs a receiver of your own. The panel only reports it when a tab
-opens. A user who closes chartgen wants the phone to buzz.
+opens. A user who closes chartgen wants this browser or phone to buzz.
 
 ## Decision Drivers
 
@@ -49,7 +49,8 @@ registers its subscription with `subscribe_push`, per owner.
 - **Delivery.** A fire writes its state and one row per delivery in one transaction: the webhook,
   and one per device. All of them carry one body with one event `id`. A restart resumes them.
   They wait in the owner's queue, with its cap and the hour's expiry, and go out through the
-  webhook path's pinning, slots and retries (twice, after 2 s and 8 s). Each message is encrypted
+  webhook path's pinning, slots and retries (twice, after 2 s and 8 s, or as long as a push service asks in
+  `Retry-After`, up to a minute; if it asks for longer, the delivery ends). Each message is encrypted
   under RFC 8291 (aes128gcm) with a new key and salt, and authorised with a VAPID token.
 - **A dead subscription.** 404 or 410 from the push service deletes the device, with what it still
   had queued. Any other failure retries, then is recorded on the alert, and the device stays.
@@ -64,12 +65,25 @@ registers its subscription with `subscribe_push`, per owner.
 - **Access.** Push goes with being allowed alerts at all: with `CHARTGEN_SERVER_ALERT_CLIENTS` unset,
   a stranger gets push where webhooks are refused, because there is no URL of their choosing. Keep
   the limits: 5 devices per client, 2000 in total, 30 pushes per client per minute, and 120 deliveries
-  of either kind per minute across the server. A new device over the limit replaces the client's oldest,
+  of either kind per minute across the server. A new device over the client's limit replaces its oldest,
   because a cleared site leaves a dead one behind that nobody can name.
+- **A full table.** Client ids are free, so strangers can fill the 2000. A refusal would then lock everyone
+  out for 30 days, so a new device replaces someone else's instead: never a listed client's, and first those
+  whose owner has no active alert that notifies, the one idle longest among them. Going by idleness alone would
+  let a flood push out real users, since junk clients hold fresh tokens. A key's text is limited too, before
+  it is decoded, because the raw text is what is stored.
 - **Owner.** A device has the same owner as an alert, the OAuth client of the token, and tool calls
   get it in one place (`server_alert_call`'s caller in `src/server.rs`). The same endpoint under two
   owners is two devices, so knowing an endpoint does not let anyone take or remove someone else's.
   Signing out does not remove a device, so alarms keep working; `unsubscribe_push` does, per device.
+  **The web app keeps one OAuth client per browser**, so a phone only gets the alerts made on that phone,
+  until sign-in moves `push_devices.owner` to users with the alerts. An iOS Home Screen app probably counts
+  as its own browser, which has not been tried.
+- **A leaked client id.** Whoever holds a client id can get a token for it
+  ([ADR-0036](/chartgen/decisions/0036-own-origin-invalid-client-redirect/)), so push is as open as the rest of
+  that client: they can replace its devices with their own, and then receive its fires and notes. Sign-in
+  fixes this. Until then a listed id is a password
+  ([ADR-0042](/chartgen/decisions/0042-server-side-alerts/)).
 - **Keys.** `CHARTGEN_VAPID_PRIVATE_KEY`, or one made once and kept in the store. A subscription is
   tied to it, so changing it stops every device until its browser next opens chartgen, which
   subscribes again. Without `CHARTGEN_VAPID_SUBJECT` or an https `CHARTGEN_BASE_URL`, push stays off,
@@ -79,16 +93,22 @@ registers its subscription with `subscribe_push`, per owner.
 
 An alert that notifies this device has one voice, the service worker, which always shows its
 notification. A browser may end the subscription of a site whose pushes show nothing, so it never
-stays silent, even with a tab open. The tab says nothing about that fire: it marks it as told, whether
-it is open then or opened hours later. It only speaks up if the push failed, and until the server
-knows the outcome it waits, so a tab that polls before the push arrives does not report it too. An
-alert without push, or a device with push off, is reported by the tab as before.
+stays silent, even with a tab open. The tab says nothing about that fire and marks it as told. It only
+speaks up if the push failed, and until the server knows the outcome it waits, so a tab that polls before
+the push arrives does not report it too. An alert without push, or a device with push off, is reported by
+the tab as before.
+
+A push service accepting a message is not the device getting it, and it drops one for a device that stays off
+longer than the hour the message lives. So a tab that first sees a fire more than an hour old reports it,
+though the device may have shown it already: a second report beats a silent alarm. The outcome the tab reads is
+the last one across the owner's devices, so with several devices it can also report twice, or stay quiet when
+only this device failed. Recording it per device matters once sign-in puts several browsers under one owner.
 
 ### The web app
 
 `/sw.js` and `/manifest.webmanifest` are served from the site root and, not being under `/assets/`,
-with `no-cache` ([ADR-0027](/chartgen/decisions/0027-serve-web-app-same-origin/)), so a new worker
-is picked up at once. The worker handles `push` and `notificationclick` and has no fetch handler, so
+with `no-cache` ([ADR-0027](/chartgen/decisions/0027-serve-web-app-same-origin/)), and a new worker takes
+over as soon as it installs. The worker handles `push` and `notificationclick` and has no fetch handler, so
 it caches nothing and cannot serve a stale app or stand between the page and `/mcp`. Clicking a
 notification shows that symbol in an open tab, or opens one at `/?symbol=…`. The permission is asked
 only from the enable button, whose states are unsupported, iOS not installed, blocked, off and on.
@@ -101,8 +121,9 @@ Nothing is registered until that click, so a server with alerts off costs nothin
 - Good, because push shares every limit and every test of the delivery path, and adds no crate.
 - Good, because a stranger's push cannot be aimed at a host of their choice.
 - Bad, because the server now sends requests to Google, Mozilla, Apple and Microsoft, who see its IP.
-- Bad, because `openssl` is now a direct dependency, where `native-tls` only needed it on Linux. A
-  build on macOS or Windows now needs it too.
+- Bad, because `openssl` is now a direct dependency, where `native-tls` only needed it on Linux. On macOS it is
+  vendored, so the published binaries do not need Homebrew's and their build compiles OpenSSL. A Windows
+  build, which is not published, would need it installed.
 - Bad, because a delivery still gives up after its retries, as a webhook's does: a push service that is
   down for a minute loses that fire's notification, and the alert says so.
 - Bad, because a client's deliveries stay in order across kinds: its webhook over budget holds back

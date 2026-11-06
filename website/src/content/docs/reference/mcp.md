@@ -955,9 +955,10 @@ RFC 8291. `push` in `list_server_alerts` is `null` where the server will not not
 else `{public_key, devices}`: subscribe in the browser with that key as `applicationServerKey`, then
 pass the subscription to `subscribe_push`. The endpoint must be `https` at a known push service
 (`fcm.googleapis.com`, `updates.push.services.mozilla.com`, `*.push.apple.com`,
-`*.notify.windows.com`). Registering the same endpoint again updates its keys. You may have 5 devices,
-and a new one over that replaces the oldest; at most 30 pushes per minute. A 404 or 410 from the push
-service removes the device. Delivery is at least once, so deduplicate on `id`; the app's worker uses it
+`*.notify.windows.com`), `p256dh` at most 88 characters and `auth` at most 24. Registering the same
+endpoint again updates its keys. You may have 5 devices, and a new one over that replaces the oldest; at
+most 30 pushes per minute. On a server whose 2000 devices are full, a new one replaces another client's,
+and a client's alerts only notify that client's devices. A 404 or 410 from the push service removes the device. Delivery is at least once, so deduplicate on `id`; the app's worker uses it
 as the notification's tag. Each alert also returns `push`, `last_push_at`, `last_push_status` and
 `last_push_error`, the last outcome across your devices.
 

@@ -168,10 +168,25 @@ the site on https, because browsers only allow push there and on localhost.
 host of their choice. Those services do see this server's IP, unless `CHARTGEN_WEBHOOK_PROXY` is set,
 which push also uses. If you filter outbound traffic, allow those hosts.
 
-With the list unset, a stranger can register up to 5 devices per client id, and client ids are free. The
-2000 devices in total and 120 deliveries a minute across the server bound what that costs, but they can
-use up the room for everyone. **Recommended for this server until sign-in lands:**
-`CHARTGEN_SERVER_ALERT_CLIENTS` with your own client id, and `CHARTGEN_VAPID_SUBJECT` with your address.
+With the list unset, a stranger can register up to 5 devices per client id, and client ids are free, so
+**the 2000 devices can be filled quickly**: 400 clients with made-up endpoints took 2.1 s in a review, from
+loopback, which the limit on registrations exempts. From any other address that limit (20 per 10 minutes
+per TCP peer) makes it about 3 h 20 min, and behind a tunnel all clients may share one peer, so real users
+then wait with the attacker. Check which peer yours presents. When full, a new device replaces someone
+else's: never a listed client's, and first those with no active alert that notifies, idle longest first. So a flood
+mostly replaces itself, but it can push out a real user who has push on and no such alert, until their
+browser next opens chartgen. The 120 deliveries a minute are shared in the same way, per client and not per
+person, and the real ceiling is about 360 requests, because retries do not count.
+
+**Recommended for this server until sign-in lands:** `CHARTGEN_SERVER_ALERT_CLIENTS`, and
+`CHARTGEN_VAPID_SUBJECT` with your address. **Each browser is its own client**, so list one id for each browser
+you use, and expect an alert to notify only the devices of the browser that made it: to get an alert on your
+phone, make it on your phone.
+
+**A listed client id is a password, for push as well.** Whoever has it can get a token, replace that
+client's devices with their own, and receive its fires and notes. It appears in `/authorize` URLs, so in browser
+history and in any proxy that logs query strings. Sign-in fixes this; until then, replace a leaked id as
+[above](#server-alerts).
 
 Tests only use a fake push service. Before relying on it, check real delivery by hand:
 
@@ -187,7 +202,8 @@ Tests only use a fake push service. Before relying on it, check real delivery by
 6. **iPhone or iPad, iOS 16.4 or later (Apple):** in Safari the control should say to add it to the Home
    Screen. Do that, open it from there, sign in, then as above. Lock the phone and wait.
 7. With a tab open and push on, check that one fire gives one notification and no toast.
-8. **Turn off** on one device: the next fire should reach the others but not that one.
+8. **Turn off**: the next fire should not notify this device, and its row should say that no device has
+   notifications on. Each browser is its own client, so two browsers cannot share an alert yet.
 
 If a row shows `HTTP 401` or `HTTP 403`, the push service refused the VAPID token: check the subject.
 
