@@ -325,11 +325,26 @@ test.describe("drawing modifiers", () => {
     await expect(magnetButton(page, "weak")).toBeVisible();
   });
 
-  test("the Meta key inverts the magnet too", async ({ bootedApp: page }) => {
+  test("the Meta key does not invert the magnet off Mac", async ({ bootedApp: page }) => {
+    await page.keyboard.down("Meta");
+    await page.waitForTimeout(100);
+    await expect(magnetButton(page, "off")).toHaveAttribute("aria-pressed", "false");
+    await page.keyboard.up("Meta");
+  });
+
+  test("on Mac, Cmd inverts the magnet and Ctrl does not", async ({ bootedApp: page }) => {
+    await page.addInitScript(() =>
+      Object.defineProperty(navigator, "platform", { get: () => "MacIntel" }),
+    );
+    await reloadApp(page);
     await page.keyboard.down("Meta");
     await expect(magnetButton(page, "strong")).toHaveAttribute("aria-pressed", "true");
     await page.keyboard.up("Meta");
     await expect(magnetButton(page, "off")).toHaveAttribute("aria-pressed", "false");
+    await page.keyboard.down("Control");
+    await page.waitForTimeout(100);
+    await expect(magnetButton(page, "off")).toHaveAttribute("aria-pressed", "false");
+    await page.keyboard.up("Control");
   });
 
   test("drawings rebuilt while Ctrl is held get the held magnet, corrected on release", async ({

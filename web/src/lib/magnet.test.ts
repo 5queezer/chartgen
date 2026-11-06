@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { effectiveMagnet, magnetValue } from "./magnet";
+import { effectiveMagnet, magnetKeyHeld, magnetValue } from "./magnet";
 
 describe("magnetValue", () => {
   const bar = { open: 100, high: 120, low: 90, close: 110 };
@@ -53,5 +53,21 @@ describe("effectiveMagnet", () => {
     expect(effectiveMagnet("normal", true)).toBe("strong_magnet");
     expect(effectiveMagnet("weak_magnet", true)).toBe("normal");
     expect(effectiveMagnet("strong_magnet", true)).toBe("normal");
+  });
+});
+
+describe("magnetKeyHeld", () => {
+  const keys = (ctrlKey: boolean, metaKey: boolean) => ({ ctrlKey, metaKey });
+
+  it("is Cmd only on Mac, where Ctrl+click is the context menu", () => {
+    expect(magnetKeyHeld(keys(false, true), true)).toBe(true);
+    expect(magnetKeyHeld(keys(true, false), true)).toBe(false);
+    expect(magnetKeyHeld(keys(false, false), true)).toBe(false);
+  });
+
+  it("is Ctrl only elsewhere", () => {
+    expect(magnetKeyHeld(keys(true, false), false)).toBe(true);
+    expect(magnetKeyHeld(keys(false, true), false)).toBe(false);
+    expect(magnetKeyHeld(keys(false, false), false)).toBe(false);
   });
 });

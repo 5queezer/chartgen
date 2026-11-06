@@ -29,7 +29,7 @@ import {
 
 import { isDrawingAlertTool, isVerticalLine, pointBarIndex } from "../lib/alerts";
 import { isRelease, isTypingContext, undoRedoKey } from "../lib/keys";
-import { effectiveMagnet, magnetValue, type Magnet } from "../lib/magnet";
+import { effectiveMagnet, magnetKeyHeld, magnetValue, type Magnet } from "../lib/magnet";
 import { syncDrawingAlerts } from "../stores/alerts";
 import { createHistory } from "../stores/drawingHistory";
 import {
@@ -391,6 +391,8 @@ const GROUPS: readonly { name: string; tools: readonly DrawingName[] }[] = [
 const TOOL_BY_NAME = new Map(TOOLS.map((t) => [t.name, t]));
 const GROUP_OF = new Map(GROUPS.flatMap((g) => g.tools.map((t) => [t, g.name] as const)));
 
+const isMac = typeof navigator !== "undefined" && /mac/i.test(navigator.platform);
+
 const LAST_KEY = "chartgen.drawingTools.last";
 /** Last-used tool per group, from storage; unknown names are ignored. */
 function loadLast(): Record<string, DrawingName> {
@@ -483,7 +485,7 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
   // ---------------------------------------------------------------------
   const [lastTool, setLastTool] = createSignal(loadLast());
   const [magnet, setMagnet] = createSignal<Magnet>("normal");
-  // Ctrl/Cmd held inverts the magnet until release; `magnet` stays the user's choice.
+  // Ctrl (Cmd on Mac) held inverts the magnet until release; `magnet` stays the user's choice.
   const [invertMagnet, setInvertMagnet] = createSignal(false);
   const magnetMode = () => effectiveMagnet(magnet(), invertMagnet());
   const [crosshair, setCrosshair] = createSignal(true);
@@ -1299,7 +1301,7 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
   // klinecharts sees the move). That covers a key pressed before the chart had
   // focus and makes auto-repeat a no-op. Blur clears it: keyup never comes.
   const syncModifiers = (e: KeyboardEvent | MouseEvent) => {
-    const ctrl = e.ctrlKey || e.metaKey;
+    const ctrl = magnetKeyHeld(e, isMac);
     if ((ctrl || e.shiftKey) && e instanceof KeyboardEvent && isTypingContext(e)) return;
     setInverted(ctrl);
     shiftHeld = e.shiftKey;
