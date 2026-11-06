@@ -1107,7 +1107,7 @@ Cumulative Volume Delta — buy vs sell pressure
 
 ### `funding`
 
-Funding Rate — crypto perpetual futures funding (Binance)
+Funding Rate — crypto perpetual futures funding (Binance futures)
 
 **Aliases:** `funding_rate`
 
@@ -1115,7 +1115,7 @@ Funding Rate — crypto perpetual futures funding (Binance)
 
 ### `oi`
 
-Open Interest — total outstanding futures contracts (Binance)
+Open Interest — total outstanding futures contracts (Binance futures, last 30 days only)
 
 **Aliases:** `open_interest`
 
@@ -1123,7 +1123,7 @@ Open Interest — total outstanding futures contracts (Binance)
 
 ### `long_short`
 
-Long/Short Ratio — account positioning (Binance)
+Long/Short Ratio — account positioning (Binance futures, last 30 days only)
 
 **Aliases:** `ls_ratio`
 
