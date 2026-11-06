@@ -226,18 +226,24 @@ test.describe("candlestick patterns", () => {
     await expect(rows(page)).toHaveAttribute("data-status", "active");
 
     // The next tail reports a newer bar.
-    await page.evaluate(() => {
+    // In one step, read at once: a real tail must not get a say in between.
+    const fired = await page.evaluate(() => {
       const w = window as unknown as {
         __chartgenTest: {
           feedPrice: (s: string, p: number) => void;
           series: () => { indicators: Record<string, { events: { key: string; t: number | null }[] }> };
         };
       };
+      const active = () =>
+        (JSON.parse(localStorage.getItem("chartgen.alerts.list")!) as { active: boolean }[])[0]!.active;
       w.__chartgenTest.feedPrice("BTCUSDT", 100);
+      const before = active();
       const ev = w.__chartgenTest.series().indicators.candlestick_patterns!.events[0]!;
       ev.t = (ev.t ?? 0) + 3600;
       w.__chartgenTest.feedPrice("BTCUSDT", 100);
+      return { before, after: active() };
     });
+    expect(fired).toEqual({ before: true, after: false });
     await expect(rows(page)).toHaveAttribute("data-status", "triggered");
     await expect(toasts(page).filter({ hasText: "Bullish pattern" })).toBeVisible();
     await shot(page, "alert-fired");
