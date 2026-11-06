@@ -1129,6 +1129,26 @@ fn yahoo_window(
     }
 }
 
+/// How far back a read of `limit` bars surely reaches, if that is bounded by more
+/// than its rows. Only Yahoo answers with a window of time: the smaller of the
+/// window it allows and the time its newest `limit` rows cover. A price-based
+/// build keeps its start inside this (ADR-0047).
+pub(crate) fn read_reach_secs(
+    source: DataSource,
+    symbol: &str,
+    iv: &Interval,
+    limit: usize,
+    session: bool,
+) -> Option<i64> {
+    if source != DataSource::Live || detect_source(symbol) == "binance" {
+        return None;
+    }
+    let canonical = iv.canonical();
+    let now = now_ms() / 1000;
+    let window = yahoo_window(&canonical, limit, None, now);
+    Some((now - window.period1).min(chartgen::price_bars::rows_reach_secs(iv, limit, session)))
+}
+
 /// `symbol` as exactly one URL path segment: everything but RFC 3986
 /// unreserved characters is percent-encoded, so `/`, `?` or `#` cannot
 /// change the request path. Dot-only input is rejected because URL
@@ -1782,6 +1802,62 @@ mod tests {
         // Paging past the listing date yields zero bars, not an error.
         let bars = paginate_backwards(10, Some(first), far(), fake_exchange(first, last)).unwrap();
         assert!(bars.is_empty());
+    }
+
+    #[test]
+    fn a_yahoo_build_starts_inside_what_yahoo_returns_for_every_interval() {
+        use chartgen::price_bars::{anchor, rows_reach_secs, source_bars, BuildOpts};
+        let now = 1_750_000_000;
+        for tf in [
+            "1m", "2m", "5m", "7m", "15m", "30m", "45m", "90m", "1h", "2h", "4h", "1d", "2d",
+            "1wk", "1mo", "3mo",
+        ] {
+            let iv = Interval::parse(tf).unwrap();
+            let limit = source_bars(&iv, MAX_BASE_BARS);
+            let canonical = iv.canonical();
+            let window = yahoo_window(&canonical, limit, None, now);
+            for session in [true, false] {
+                let reach = (now - window.period1).min(rows_reach_secs(&iv, limit, session));
+                let opts = BuildOpts {
+                    max_base: MAX_BASE_BARS,
+                    end_time_ms: None,
+                    now_ms: now * 1000,
+                    reach_secs: Some(reach),
+                };
+                // At every point of a chunk: on its edge and just before the next.
+                let chunk = reach / 6;
+                for last in [now, now - now % chunk, now - now % chunk - 1] {
+                    let start = anchor(last, &iv, &opts);
+                    assert!(start < last, "{tf}");
+                    let w = yahoo_window(&canonical, limit, None, last);
+                    assert!(
+                        start >= w.period1,
+                        "{tf} session={session}: before the window"
+                    );
+                    // The newest `limit` rows reach it too.
+                    let stretch = rows_reach_secs(&iv, 1, session) / iv.secs();
+                    let rows = (last - start) / iv.secs() / stretch;
+                    assert!(
+                        rows <= limit as i64,
+                        "{tf} session={session}: {rows} rows back against {limit}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn only_yahoo_has_a_reach() {
+        let iv = Interval::parse("1h").unwrap();
+        assert_eq!(
+            read_reach_secs(DataSource::Sample, "AAPL", &iv, 5000, true),
+            None
+        );
+        assert_eq!(
+            read_reach_secs(DataSource::Live, "BTCUSDT", &iv, 5000, false),
+            None
+        );
+        assert!(read_reach_secs(DataSource::Live, "AAPL", &iv, 5000, true).is_some());
     }
 
     #[test]

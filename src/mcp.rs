@@ -621,19 +621,29 @@ fn generate_chart(
     if chart_style == "heikin_ashi" {
         data = data.heikin_ashi();
     }
+    let mut build_anchor = None;
+    let mut style_label = None;
     let chart_params_json = match (&price_params, &parsed_interval) {
         (Some(params), Ok(iv)) => {
             let opts = price_bars::BuildOpts {
                 max_base: fetch::MAX_BASE_BARS,
                 end_time_ms: end_time,
                 now_ms: fetch::now_ms(),
-                session: data.session.is_some(),
+                reach_secs: fetch::read_reach_secs(
+                    source,
+                    symbol.unwrap_or(""),
+                    iv,
+                    requested,
+                    data.session.is_some(),
+                ),
             };
             let built = match price_bars::build(&data.bars, iv, params, &opts) {
                 Ok(b) => b,
                 Err(e) => return tool_err(id, &e),
             };
             data.bars = built.bars;
+            build_anchor = built.anchor;
+            style_label = Some(params.label(built.box_size));
             has_more |= data.len() > bars;
             // png and summary show exactly `bars`, as for every other style.
             if !want_series {
@@ -681,6 +691,7 @@ fn generate_chart(
         let mut series = series_json(&data, &computed, &inds, bars, chart_style, has_more);
         if let Some(chart_params) = &chart_params_json {
             series["chart_params"] = chart_params.clone();
+            series["anchor"] = json!(build_anchor);
         }
         if let Some(errors) = &errors_value {
             series["indicator_errors"] = errors.clone();
@@ -699,7 +710,14 @@ fn generate_chart(
 
         let results: Vec<&chartgen::indicator::PanelResult> =
             computed.iter().map(|(_, pr)| pr).collect();
-        if let Err(e) = renderer::render_results(&data, &results, &tmp_path, width, height) {
+        if let Err(e) = renderer::render_labeled(
+            &data,
+            &results,
+            &tmp_path,
+            width,
+            height,
+            style_label.as_deref(),
+        ) {
             return tool_err(id, &format!("Render error: {}", e));
         }
 
@@ -849,8 +867,12 @@ fn series_json(
         let mut entry = panel_result_to_series_json(&trimmed, &visible);
         add_marks_to_series_json(&mut entry, pr, data, offset);
         // Price-based bars have no next bar's time to project to (ADR-0047).
-        let projects = price_bars::Kind::from_style(chart_style).is_none();
-        if let Some(p) = ind.projection(data).filter(|_| projects) {
+        let projection = if price_bars::Kind::from_style(chart_style).is_none() {
+            ind.projection(data)
+        } else {
+            None
+        };
+        if let Some(p) = projection {
             // Every bar, not the visible ones: the times read closed days off
             // the loaded bars, and a two-bar tail shows too few.
             entry["future"] = projection_to_json(&p, data);
@@ -867,6 +889,13 @@ fn series_json(
     })
 }
 
+/// What a pushed price-based tail is built with: inputs with the box pinned, and
+/// the newest bar's time in the last tail sent, if there was one.
+pub(crate) struct PriceTail {
+    pub params: price_bars::Params,
+    pub since: Option<i64>,
+}
+
 /// The `format=series` payload for the newest `bars` of `raw` (symbol and
 /// interval set, `bars` + warmup long), computed exactly like
 /// `generate_chart`: Heikin Ashi first, then indicators over every bar, then
@@ -876,26 +905,40 @@ pub(crate) fn series_tail(
     raw: &chartgen::data::OhlcvData,
     indicators: &Value,
     chart_style: &str,
-    price: Option<&price_bars::Params>,
+    price: Option<&PriceTail>,
     bars: usize,
 ) -> Result<Value, String> {
     let (panel_indicators, keys, unknown, invalid, _) = parse_panels(indicators, None);
     check_panels(&unknown, &invalid)?;
     let derived;
     let mut echo = None;
+    let mut build_anchor = None;
+    let mut bars = bars;
     let data = if chart_style == "heikin_ashi" {
         derived = raw.heikin_ashi();
         &derived
-    } else if let Some(params) = price {
+    } else if let Some(PriceTail { params, since }) = price {
         let iv = chartgen::interval::Interval::parse(raw.interval.as_deref().unwrap_or(""))?;
         let opts = price_bars::BuildOpts {
             max_base: fetch::MAX_BASE_BARS,
             end_time_ms: None,
             now_ms: fetch::now_ms(),
-            session: raw.session.is_some(),
+            // Pushes are Binance only, whose reads are bounded by rows.
+            reach_secs: None,
         };
         let built = price_bars::build(&raw.bars, &iv, params, &opts)?;
         echo = Some(chart_params_echo(params, built.box_size));
+        build_anchor = built.anchor;
+        // A client that holds the last tail needs only what came since, and an overlap.
+        if let Some(since) = since {
+            let new = built
+                .bars
+                .iter()
+                .rev()
+                .take_while(|b| b.date.parse::<i64>().is_ok_and(|t| t >= *since))
+                .count();
+            bars = bars.min(new + 1).max(2);
+        }
         derived = chartgen::data::OhlcvData {
             bars: built.bars,
             symbol: raw.symbol.clone(),
@@ -911,6 +954,7 @@ pub(crate) fn series_tail(
     let mut series = series_json(data, &computed, &inds, bars, chart_style, has_more);
     if let Some(echo) = echo {
         series["chart_params"] = echo;
+        series["anchor"] = json!(build_anchor);
     }
     Ok(series)
 }
@@ -4575,6 +4619,20 @@ mod tests {
     }
 
     #[test]
+    fn a_price_series_names_its_build() {
+        for style in price_bars::STYLES {
+            let p = series_payload(price_args(style, json!({})), fetch::DataSource::Sample);
+            assert!(p["anchor"].as_i64().is_some(), "{style}: {}", p["anchor"]);
+        }
+        let candles = series_payload(
+            json!({ "ticker": "BTCUSDT", "timeframe": "1h", "bars": 5, "end_time": END_4H_MS,
+                    "indicators": [], "format": "series" }),
+            fetch::DataSource::Sample,
+        );
+        assert!(candles.get("anchor").is_none());
+    }
+
+    #[test]
     fn price_style_errors_say_what_is_wrong() {
         for (args, source, want) in [
             (
@@ -4619,6 +4677,10 @@ mod tests {
             Some(&json!({ "box": "percent", "percent": 0.5 })),
         )
         .unwrap();
+        let params = PriceTail {
+            params,
+            since: None,
+        };
         let mut raw = raw;
         raw.symbol = Some("BTCUSDT".into());
         raw.interval = Some("1h".into());
@@ -4629,6 +4691,23 @@ mod tests {
         let bars = full["bars"].as_array().unwrap();
         assert!(bars.len() > 8);
         assert_eq!(tail["bars"].as_array().unwrap()[..], bars[bars.len() - 8..]);
+        // After a tail, only what is new since it, and an overlap.
+        let newest = bars[bars.len() - 3]["t"].as_i64().unwrap();
+        let since = PriceTail {
+            params: params.params.clone(),
+            since: Some(newest),
+        };
+        let short = series_tail(&raw, &indicators, "renko", Some(&since), 64).unwrap();
+        assert_eq!(
+            short["bars"].as_array().unwrap()[..],
+            bars[bars.len() - 4..]
+        );
+        let at_end = PriceTail {
+            params: params.params.clone(),
+            since: Some(i64::MAX),
+        };
+        let least = series_tail(&raw, &indicators, "renko", Some(&at_end), 64).unwrap();
+        assert_eq!(least["bars"].as_array().unwrap().len(), 2);
     }
 
     #[test]

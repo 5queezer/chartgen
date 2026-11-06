@@ -8,7 +8,8 @@
 //! confirmed yet is the last bar, the open one, which keeps its time when it is
 //! confirmed, so a live tail replaces it in place and a reload shows the same
 //! bars. Several bars from one source bar take the next free second, so times
-//! always increase.
+//! always increase. The newest bar of a live build closes on the last price,
+//! whatever it is, as that is what alerts and the price line read.
 
 use crate::data::Bar;
 use crate::interval::Interval;
@@ -23,9 +24,12 @@ pub const MAX_PRICE_BARS: usize = 20_000;
 const CHUNKS: usize = 5;
 /// Source bars per chunk: one Binance page.
 const CHUNK_BARS: usize = 1_000;
-/// A session market has bars for about a fifth of the hours, so a chunk of time
-/// that holds as many of them is about that much longer.
+/// An intraday bar of a session market exists for about a fifth of the hours, so
+/// its rows cover about that much more time.
 const SESSION_STRETCH: i64 = 5;
+/// A box under this share of the last price is refused for every type. Grid levels
+/// would stop being exact integers well before prices lose their precision.
+const MIN_BOX_SHARE: f64 = 1e-6;
 
 pub const STYLES: [&str; 5] = ["renko", "kagi", "point_figure", "line_break", "range"];
 
@@ -148,6 +152,17 @@ impl Params {
         })
     }
 
+    /// How a chart's title names these bars: `P&F 3.4 x 3`.
+    pub fn label(&self, box_size: f64) -> String {
+        match self.kind {
+            Kind::Renko => format!("Renko {box_size}"),
+            Kind::Kagi => format!("Kagi {box_size}"),
+            Kind::PointFigure => format!("P&F {box_size} x {}", self.reversal),
+            Kind::LineBreak => format!("Line Break {}", self.lines),
+            Kind::Range => format!("Range {box_size}"),
+        }
+    }
+
     /// The inputs this type reads. With `box_size` set, this is what a response
     /// echoes and what a later request sends back.
     pub fn to_json(&self) -> Value {
@@ -236,6 +251,16 @@ fn atr(rows: &[Row], length: usize) -> f64 {
     value
 }
 
+/// The time a read of `limit` rows of `iv` covers at the least.
+pub fn rows_reach_secs(iv: &Interval, limit: usize, session: bool) -> i64 {
+    let stretch = if session && !iv.is_date_bar() {
+        SESSION_STRETCH
+    } else {
+        1
+    };
+    limit as i64 * iv.secs() * stretch
+}
+
 /// Source bars per read: five chunks, fewer for an interval resampled from finer
 /// klines so a read stays within `max_base` of them.
 pub fn source_bars(iv: &Interval, max_base: usize) -> usize {
@@ -255,14 +280,18 @@ pub struct BuildOpts {
     /// A history page: only bars before this, and no open bar of a brick type.
     pub end_time_ms: Option<i64>,
     pub now_ms: i64,
-    /// The market has sessions, so its chunks of time are longer.
-    pub session: bool,
+    /// How far back the source's read reaches, when that is a matter of time and
+    /// not only of rows (Yahoo's window). The build's start must stay inside it.
+    pub reach_secs: Option<i64>,
 }
 
 #[derive(Debug)]
 pub struct Built {
     pub bars: Vec<Bar>,
     pub box_size: f64,
+    /// Time of the first source bar the build started from. A different one is a
+    /// different build, whose bars need not line up with this one's.
+    pub anchor: Option<i64>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -283,11 +312,12 @@ fn rows(source: &[Bar]) -> Result<Vec<Row>, String> {
             .parse::<i64>()
             .map_err(|_| "Price-based charts need timed bars.".to_string())?;
         if b.close.is_finite() {
+            let or_close = |v: f64| if v.is_finite() { v } else { b.close };
             out.push(Row {
                 t,
-                open: b.open,
-                high: b.high,
-                low: b.low,
+                open: or_close(b.open),
+                high: or_close(b.high),
+                low: or_close(b.low),
                 close: b.close,
                 volume: if b.volume.is_finite() { b.volume } else { 0.0 },
             });
@@ -307,11 +337,19 @@ fn closed_len(rows: &[Row], iv: &Interval, end_time_ms: Option<i64>, now_ms: i64
     }
 }
 
+/// Length in seconds of a chunk: a fixed number of bars, or, where the source's
+/// read is bounded in time, a sixth of it, so five chunks always lie inside.
+fn chunk_secs(iv: &Interval, opts: &BuildOpts) -> i64 {
+    match opts.reach_secs {
+        Some(reach) => (reach / (CHUNKS as i64 + 1)).max(iv.secs()),
+        None => chunk_bars(iv, opts.max_base) as i64 * iv.secs(),
+    }
+}
+
 /// The first time a build starts at: the grid edge four chunks before the chunk
 /// holding the newest bar. Reads inside one chunk therefore give the same bars.
-fn anchor(last_t: i64, iv: &Interval, opts: &BuildOpts) -> i64 {
-    let stretch = if opts.session { SESSION_STRETCH } else { 1 };
-    let chunk = chunk_bars(iv, opts.max_base) as i64 * iv.secs() * stretch;
+pub fn anchor(last_t: i64, iv: &Interval, opts: &BuildOpts) -> i64 {
+    let chunk = chunk_secs(iv, opts);
     last_t.div_euclid(chunk) * chunk - (CHUNKS as i64 - 1) * chunk
 }
 
@@ -327,12 +365,20 @@ pub fn build(
         return Ok(Built {
             bars: Vec::new(),
             box_size: params.box_size.unwrap_or(0.0),
+            anchor: None,
         });
     };
     let from = anchor(last.t, iv, opts);
     let rows: Vec<Row> = all.into_iter().filter(|r| r.t >= from).collect();
     let closed = closed_len(&rows, iv, opts.end_time_ms, opts.now_ms);
     let box_size = params.resolve_box(&rows, closed)?;
+    let last_close = rows.last().map(|r| r.close);
+    if params.kind.uses_box() && box_size < last_close.unwrap_or(0.0).abs() * MIN_BOX_SHARE {
+        return Err(format!(
+            "Box size {box_size} is too small; choose a larger one."
+        ));
+    }
+    let start = rows.first().map(|r| r.t);
     let (done, forming) = rows.split_at(closed);
     let forming = forming.first();
     let page = opts.end_time_ms.is_some();
@@ -353,10 +399,16 @@ pub fn build(
                 .parse::<i64>()
                 .is_ok_and(|t| t.saturating_mul(1000) < end)
         });
+    } else if let (Some(newest), Some(close)) = (out.last_mut(), last_close) {
+        // What alerts and the price line read. The next tail replaces this bar.
+        newest.close = close;
+        newest.high = newest.high.max(close);
+        newest.low = newest.low.min(close);
     }
     Ok(Built {
         bars: out,
         box_size,
+        anchor: start,
     })
 }
 
@@ -680,13 +732,12 @@ fn kagi(rows: &[Row], forming: Option<&Row>, amount: f64) -> Result<Vec<Bar>, St
         }
         volume += r.volume;
     }
-    let close = forming.map_or(extreme, |f| f.close);
     let leg = Leg {
         t,
         open,
-        high: open.max(extreme).max(close),
-        low: open.min(extreme).min(close),
-        close,
+        high: open.max(extreme),
+        low: open.min(extreme),
+        close: extreme,
         volume: volume + forming.map_or(0.0, |f| f.volume),
     };
     push_leg(&mut bars, leg)?;
@@ -754,17 +805,14 @@ fn point_figure(
         }
         volume += r.volume;
     }
-    let mut leg = column(t, dir, top, bottom, volume);
-    if let Some(f) = forming {
-        // Only a closed source bar adds a box or turns the column, but the last price
-        // is what indicators and alerts read.
-        leg.close = f.close;
-        leg.volume += f.volume;
-        match dir {
-            Dir::Down => leg.low = leg.low.min(f.close),
-            _ => leg.high = leg.high.max(f.close),
-        }
-    }
+    // Only a closed source bar adds a box or turns the column.
+    let leg = column(
+        t,
+        dir,
+        top,
+        bottom,
+        volume + forming.map_or(0.0, |f| f.volume),
+    );
     push_leg(&mut bars, leg)?;
     Ok(bars)
 }

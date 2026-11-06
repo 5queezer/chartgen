@@ -12,7 +12,7 @@ fn opts() -> BuildOpts {
         max_base: 20_000,
         end_time_ms: None,
         now_ms: FAR_FUTURE_MS,
-        session: false,
+        reach_secs: None,
     }
 }
 
@@ -48,6 +48,13 @@ fn params(kind: Kind, size: f64) -> Params {
 
 fn run(source: &[Bar], p: &Params) -> Vec<Bar> {
     build(source, &iv(), p, &opts()).unwrap().bars
+}
+
+/// As a history page: the bars as confirmed, with no last price on the newest.
+fn run_page(source: &[Bar], p: &Params) -> Vec<Bar> {
+    let mut o = opts();
+    o.end_time_ms = Some(FAR_FUTURE_MS);
+    build(source, &iv(), p, &o).unwrap().bars
 }
 
 fn oc(bars: &[Bar]) -> Vec<(f64, f64)> {
@@ -154,7 +161,11 @@ fn the_open_brick_keeps_its_time_when_it_is_confirmed() {
     let source = closes(&[100.0, 125.0, 127.0, 131.0]);
     let later = build(&source, &iv(), &p, &o).unwrap().bars;
     assert_eq!(times(&later), vec![0, 2 * HOUR]);
-    assert_eq!((later[1].open, later[1].close), (120.0, 130.0));
+    assert_eq!((later[1].open, later[1].close), (120.0, 131.0));
+    let confirmed = closes(&[100.0, 125.0, 127.0, 131.0, 132.0]);
+    let bars = build(&confirmed, &iv(), &p, &opts()).unwrap().bars;
+    assert_eq!((bars[1].open, bars[1].close), (120.0, 130.0));
+    assert_eq!(times(&bars)[1], 2 * HOUR);
 }
 
 #[test]
@@ -255,15 +266,17 @@ fn point_and_figure_reversal_is_an_input() {
     p.reversal = 2;
     assert_eq!(oc(&run(&source, &p)), vec![(10.0, 13.0), (12.0, 11.0)]);
     p.reversal = 3;
-    assert_eq!(oc(&run(&source, &p)), vec![(10.0, 13.0)]);
+    assert_eq!(oc(&run_page(&source, &p)), vec![(10.0, 13.0)]);
 }
 
 #[test]
 fn point_and_figure_rounds_each_way_to_the_grid() {
-    // 13.9 fills no box above 13, and 10.1 still falls short of 10.
+    // 13.9 fills no box above 13, and 10.1 still falls short of 10. It closes on
+    // the last price, inside its range.
     let source = closes(&[10.0, 13.9, 10.1]);
     let bars = run(&source, &params(Kind::PointFigure, 1.0));
-    assert_eq!(oc(&bars), vec![(10.0, 13.0)]);
+    assert_eq!(oc(&bars), vec![(10.0, 10.1)]);
+    assert_eq!((bars[0].high, bars[0].low), (13.0, 10.0));
 }
 
 #[test]
@@ -274,7 +287,7 @@ fn range_bars_split_at_the_range_and_through_a_gap() {
         // A gap of 40: as many bars as it spans.
         row(2, 150.0, 151.0, 149.0, 150.0),
     ];
-    let bars = run(&source, &params(Kind::Range, 10.0));
+    let bars = run_page(&source, &params(Kind::Range, 10.0));
     assert_eq!(
         oc(&bars),
         vec![
@@ -298,7 +311,7 @@ fn range_bars_split_at_the_range_and_through_a_gap() {
 #[test]
 fn a_range_bar_closes_downward_too() {
     // Falls: open, high, low, close.
-    let bars = run(
+    let bars = run_page(
         &[row(0, 100.0, 103.0, 90.0, 95.0)],
         &params(Kind::Range, 10.0),
     );
@@ -565,4 +578,108 @@ fn params_are_checked_and_echoed() {
         let e = parse(Kind::Renko, v.clone()).unwrap_err();
         assert!(e.contains(want), "{v}: {e}");
     }
+}
+
+#[test]
+fn the_newest_bar_closes_on_the_last_price_with_no_source_bar_forming() {
+    // No row is forming: the market is shut, or a kline has just closed. These are
+    // the review's four cases.
+    let kagi = run(&closes(&[100.0, 110.0, 106.0]), &params(Kind::Kagi, 5.0));
+    let k = kagi.last().unwrap();
+    assert_eq!((k.close, k.high, k.low), (106.0, 110.0, 100.0));
+    let pnf = run(
+        &closes(&[100.0, 140.0, 136.0]),
+        &params(Kind::PointFigure, 10.0),
+    );
+    let p = pnf.last().unwrap();
+    assert_eq!((p.close, p.high, p.low), (136.0, 140.0, 100.0));
+    // Renko, where the last close itself confirms a brick.
+    let renko = run(&closes(&[95.0, 111.0]), &params(Kind::Renko, 10.0));
+    assert_eq!(renko.len(), 1);
+    let r = renko.last().unwrap();
+    assert_eq!((r.open, r.close, r.high), (100.0, 111.0, 111.0));
+    // Range: the last close is past the close of the bar it confirmed.
+    let range = run(
+        &[
+            row(0, 99.0, 99.0, 99.0, 99.0),
+            row(1, 99.0, 131.0, 99.0, 130.0),
+        ],
+        &params(Kind::Range, 5.0),
+    );
+    assert_eq!(range.last().unwrap().close, 130.0);
+    // A page is history, and keeps its levels.
+    let mut o = opts();
+    o.end_time_ms = Some(FAR_FUTURE_MS);
+    let page = build(
+        &closes(&[95.0, 111.0]),
+        &iv(),
+        &params(Kind::Renko, 10.0),
+        &o,
+    )
+    .unwrap();
+    assert_eq!(page.bars[0].close, 110.0);
+}
+
+#[test]
+fn a_forming_close_stays_inside_its_column() {
+    let mut o = opts();
+    o.now_ms = (3 * HOUR + 1) * 1000;
+    let source = closes(&[100.0, 140.0, 140.0, 75.0]);
+    let bars = build(&source, &iv(), &params(Kind::PointFigure, 10.0), &o)
+        .unwrap()
+        .bars;
+    assert_eq!(bars.len(), 1, "a forming bar turns nothing");
+    let b = &bars[0];
+    assert_eq!((b.open, b.high, b.low, b.close), (100.0, 140.0, 75.0, 75.0));
+}
+
+#[test]
+fn a_box_under_a_millionth_of_the_price_is_refused_for_every_type() {
+    let source = closes(&[50_000.0, 50_100.0]);
+    for kind in [Kind::Renko, Kind::Kagi, Kind::PointFigure, Kind::Range] {
+        for size in [0.04, 1e-7, 1e-9, 1e-16] {
+            let e = build(&source, &iv(), &params(kind, size), &opts()).unwrap_err();
+            assert!(
+                e.contains("is too small; choose a larger one"),
+                "{kind:?} {size}: {e}"
+            );
+        }
+    }
+    // Line Break has no box to refuse, and above the floor a column chart builds.
+    assert!(build(&source, &iv(), &params(Kind::LineBreak, 1e-16), &opts()).is_ok());
+    assert!(build(&source, &iv(), &params(Kind::PointFigure, 0.06), &opts()).is_ok());
+}
+
+#[test]
+fn a_build_names_the_first_bar_it_started_from() {
+    let source = walk(3_000, 0);
+    let all = build(&source, &iv(), &params(Kind::Renko, 10.0), &opts()).unwrap();
+    assert_eq!(all.anchor, Some(0));
+    // Past the grid: the bars before the anchor are dropped, and it says so.
+    let source = walk(5_500, 0);
+    let cut = build(&source, &iv(), &params(Kind::Renko, 10.0), &opts()).unwrap();
+    assert_eq!(cut.anchor, Some(1_000 * HOUR));
+}
+
+#[test]
+fn a_nan_open_takes_the_close_so_no_bar_carries_it() {
+    let mut first = row(0, 100.0, 100.0, 100.0, 100.0);
+    first.open = f64::NAN;
+    first.high = f64::NAN;
+    first.low = f64::NAN;
+    let source = vec![first, row(1, 100.0, 130.0, 100.0, 130.0)];
+    let bars = run(&source, &params(Kind::Range, 10.0));
+    assert!(bars
+        .iter()
+        .all(|b| b.open.is_finite() && b.high.is_finite() && b.low.is_finite()));
+    assert_eq!(bars[0].open, 100.0);
+}
+
+#[test]
+fn labels_name_the_type_and_size() {
+    assert_eq!(params(Kind::Renko, 1.0).label(3.4), "Renko 3.4");
+    assert_eq!(params(Kind::Kagi, 1.0).label(3.4), "Kagi 3.4");
+    assert_eq!(params(Kind::PointFigure, 1.0).label(3.4), "P&F 3.4 x 3");
+    assert_eq!(params(Kind::LineBreak, 1.0).label(0.0), "Line Break 3");
+    assert_eq!(params(Kind::Range, 1.0).label(50.0), "Range 50");
 }
