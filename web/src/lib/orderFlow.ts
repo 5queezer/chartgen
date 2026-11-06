@@ -2,7 +2,7 @@
 // cell shows, and what the summary tables read. The numbers come from the server;
 // this only derives what depends on the bars on screen.
 
-import type { FootprintBar, TpoProfile } from "../types/responses";
+import type { FootprintBar, FootprintMeta, TpoMeta, TpoProfile } from "../types/responses";
 
 /** Narrower than this a bar has no room for cells: it draws as a candle. */
 export const CELL_MIN_BAR = 22;
@@ -171,6 +171,7 @@ export function footprintMethod(meta: {
   row_auto: boolean;
   row_widened: boolean;
   bars_without_data: number;
+  coarser_older?: boolean;
 }): string {
   const parts = [
     meta.intrabar_interval ? `from ${meta.intrabar_interval} bars` : "from the bars themselves",
@@ -178,7 +179,26 @@ export function footprintMethod(meta: {
     `row ${meta.row_size}${meta.row_auto ? " auto" : ""}${meta.row_widened ? " (widened)" : ""}`,
   ];
   if (meta.bars_without_data > 0) parts.push(`${meta.bars_without_data} bars without data`);
+  if (meta.coarser_older) parts.push("older bars from coarser data");
   return parts.join(" · ");
+}
+
+/** A footprint poll or page over its load: only the load chose the row size. */
+export function mergeFootprintMeta(load: FootprintMeta, later: FootprintMeta): FootprintMeta {
+  return {
+    ...later,
+    row_auto: load.row_auto,
+    row_widened: load.row_widened,
+    intrabar_interval: load.intrabar_interval,
+    bars_without_data: Math.max(load.bars_without_data, later.bars_without_data),
+    coarser_older:
+      !!load.coarser_older || later.intrabar_interval !== load.intrabar_interval,
+  };
+}
+
+/** A TPO poll or page over its load: only the load chose the row size. */
+export function mergeTpoMeta(load: TpoMeta, later: TpoMeta): TpoMeta {
+  return { ...later, row_auto: load.row_auto, row_widened: load.row_widened, periods_cut: load.periods_cut };
 }
 
 /** What the status chip says about a TPO chart. */

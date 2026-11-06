@@ -21,7 +21,14 @@ import type { Chart as KLineChart } from "klinecharts";
 import { isOrderFlowType } from "../lib/chartTypes";
 import { resolveColors } from "../lib/chartStyle";
 import { rememberLabels } from "../lib/indicatorNames";
-import { CELL_MIN_BAR, footprintMethod, tpoMethod, type CellMode } from "../lib/orderFlow";
+import {
+  CELL_MIN_BAR,
+  footprintMethod,
+  mergeFootprintMeta,
+  mergeTpoMeta,
+  tpoMethod,
+  type CellMode,
+} from "../lib/orderFlow";
 import type { FootprintExtend, TpoExtend } from "../lib/orderFlowDraw";
 import { createFlowFeed, type FlowState } from "../lib/orderFlowFeed";
 import { PALETTES } from "../lib/theme";
@@ -387,6 +394,7 @@ export function createChartPane(pane: number, deps: PaneDeps) {
     pollMs: FOOTPRINT_POLL_MS,
     doc: replay.liveDoc,
     onChange: setFootprints,
+    mergeMeta: mergeFootprintMeta,
     fetch: async ({ tail, endTime, rowSize }, signal) => {
       const f = untrack(orderFlowSettings).footprint;
       const { footprints: items, has_more, ...meta } = await session.callGetFootprint(
@@ -412,6 +420,7 @@ export function createChartPane(pane: number, deps: PaneDeps) {
     pollMs: TPO_POLL_MS,
     doc: replay.liveDoc,
     onChange: setProfiles,
+    mergeMeta: mergeTpoMeta,
     fetch: async ({ tail, endTime, rowSize }, signal) => {
       const t = untrack(orderFlowSettings).tpo;
       const sessions = tpoSessions(t.sessions);

@@ -1851,6 +1851,7 @@ fn tool_get_indicators(
 
 /// Most bars of one `get_footprint`: a screen of the widest cells, and the padding.
 const MAX_FOOTPRINT_BARS: usize = 200;
+const DEFAULT_FOOTPRINT_BARS: usize = 60;
 /// Blocks of one `get_tpo`: 3 Binance requests at most.
 const MAX_TPO_BLOCKS: usize = 3_000;
 const MAX_TPO_PERIODS: usize = 60;
@@ -1921,7 +1922,13 @@ fn footprint_payload(args: &Value, source: fetch::DataSource) -> Result<Value, S
             .unwrap_or("1h"),
     )?;
     let iv = chartgen::interval::Interval::parse(&interval)?;
-    let bars = number_arg(args, "bars", 60.0, 1.0, MAX_FOOTPRINT_BARS as f64)? as usize;
+    let bars = number_arg(
+        args,
+        "bars",
+        DEFAULT_FOOTPRINT_BARS as f64,
+        1.0,
+        MAX_FOOTPRINT_BARS as f64,
+    )? as usize;
     let atr_length = number_arg(args, "atr_length", 14.0, 1.0, 500.0)? as usize;
     let end_time = end_time_arg(args)?;
     let value_area = number_arg(args, "value_area", 70.0, 1.0, 100.0)?;
@@ -1942,7 +1949,10 @@ fn footprint_payload(args: &Value, source: fetch::DataSource) -> Result<Value, S
     let last_end = iv.grid_end(last);
 
     let age = fetch::now_ms() / 1000 - first;
-    let plan = intrabars::plan(fetch::detect_source(symbol), iv.secs(), visible.len(), age);
+    // As for a load, whatever is asked now: a live tail must read what its load read,
+    // or a daily chart's tail would fetch days of 1m bars its load could not afford.
+    let plan_bars = visible.len().max(DEFAULT_FOOTPRINT_BARS);
+    let plan = intrabars::plan(fetch::detect_source(symbol), iv.secs(), plan_bars, age);
     let list = match plan {
         Some((name, secs)) => intrabars::load(source, symbol, name, secs, visible, last_end)
             .map_err(|e| format!("Intrabar fetch failed: {e}"))?,
@@ -3412,6 +3422,16 @@ mod tests {
             );
             assert!(val <= poc && poc < vah, "{val} {poc} {vah}");
         }
+    }
+
+    #[test]
+    fn a_tail_reads_the_same_interval_as_its_load() {
+        let interval = |bars: u64| {
+            let args = json!({ "ticker": "BTCUSDT", "timeframe": "1d", "bars": bars });
+            footprint_payload(&args, Sample).unwrap()["intrabar_interval"].clone()
+        };
+        assert_eq!(interval(60), "30m");
+        assert_eq!(interval(3), "30m");
     }
 
     #[test]
@@ -5041,7 +5061,16 @@ mod tests {
             .filter(|i| indicators::by_name(i.name).is_some_and(|ind| ind.windowed_profile()))
             .map(|i| i.name)
             .collect();
-        assert_eq!(windowed, vec!["volume_profile", "hvn_lvn", "tpo"]);
+        assert_eq!(
+            windowed,
+            vec![
+                "volume_profile",
+                "fixed_range_vp",
+                "anchored_vp",
+                "hvn_lvn",
+                "tpo"
+            ]
+        );
     }
 
     #[test]

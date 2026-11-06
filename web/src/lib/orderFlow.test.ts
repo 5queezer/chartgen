@@ -6,6 +6,8 @@ import {
   footprintMethod,
   footprintSummary,
   gradientIndex,
+  mergeFootprintMeta,
+  mergeTpoMeta,
   sessionCvd,
   shortNumber,
   stackedEnd,
@@ -15,7 +17,7 @@ import {
   tpoSummary,
   volumeCandleWidth,
 } from "./orderFlow";
-import type { FootprintBar, TpoProfile } from "../types/responses";
+import type { FootprintBar, FootprintMeta, TpoMeta, TpoProfile } from "../types/responses";
 
 const fp = (over: Partial<FootprintBar> = {}): FootprintBar => ({
   t: 0,
@@ -240,5 +242,43 @@ describe("the status says how it was made", () => {
     const tpo = { period: "1M", block: "5m", row_size: 2, row_auto: true, row_widened: false };
     expect(tpoMethod({ ...tpo, periods_cut: false })).toBe("1M from 5m blocks · row 2 auto");
     expect(tpoMethod({ ...tpo, periods_cut: true })).toContain("fewer periods");
+  });
+});
+
+describe("what a poll keeps of its load", () => {
+  const load = {
+    symbol: "BTCUSDT",
+    interval: "1h",
+    intrabar_interval: "1m",
+    side: "taker_volume",
+    row_size: 5,
+    row_auto: true,
+    row_widened: true,
+    tick: 0.01,
+    bars_without_data: 2,
+  } as FootprintMeta;
+
+  it("keeps saying the row was auto, though a poll sends it explicitly", () => {
+    const later = { ...load, row_auto: false, row_widened: false, bars_without_data: 0 };
+    const got = mergeFootprintMeta(load, later);
+    expect(got.row_auto).toBe(true);
+    expect(got.row_widened).toBe(true);
+    expect(got.bars_without_data).toBe(2);
+    expect(got.coarser_older).toBe(false);
+  });
+
+  it("says when an older page came from coarser data, and goes on saying it", () => {
+    const got = mergeFootprintMeta(load, { ...load, intrabar_interval: "1h" });
+    expect(got.intrabar_interval).toBe("1m");
+    expect(got.coarser_older).toBe(true);
+    expect(mergeFootprintMeta(got, load).coarser_older).toBe(true);
+    expect(footprintMethod(got)).toContain("older bars from coarser data");
+  });
+
+  it("does the same for a TPO", () => {
+    const tpo = { row_auto: true, row_widened: false, periods_cut: true } as TpoMeta;
+    const got = mergeTpoMeta(tpo, { ...tpo, row_auto: false, periods_cut: false });
+    expect(got.row_auto).toBe(true);
+    expect(got.periods_cut).toBe(true);
   });
 });

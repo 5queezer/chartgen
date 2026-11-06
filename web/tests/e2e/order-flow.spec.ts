@@ -83,6 +83,20 @@ const hasTablePane = (page: Page) =>
     return !!c.getIndicatorByPaneId("orderflow_table_pane", reg);
   }, TABLE);
 
+const tableIsLast = (page: Page) =>
+  page.evaluate(() => {
+    const c = (window as unknown as {
+      __chartgenTest: {
+        chart: () => {
+          getSize: (p?: string) => { top: number } | null;
+          getIndicatorByPaneId: () => Map<string, unknown>;
+        };
+      };
+    }).__chartgenTest.chart();
+    const tops = [...c.getIndicatorByPaneId().keys()].map((p) => c.getSize(p)?.top ?? 0);
+    return c.getSize("orderflow_table_pane")?.top === Math.max(...tops);
+  });
+
 /** Pixels the candle pane painted of colors close to `rgb`, at any opacity. */
 const paintedLike = (page: Page, rgb: [number, number, number]) =>
   page.evaluate(([r, g, b]) => {
@@ -263,6 +277,8 @@ test.describe("volume footprint", () => {
     // Settings last across a reload, and leave no pane when turned off.
     await reloadApp(page);
     await expect.poll(async () => (await painterExtend(page, FOOTPRINT))?.settings).toMatchObject({ type: "delta" });
+    // The table is the bottom pane, also when it was created before the sub-panes.
+    await expect.poll(() => tableIsLast(page)).toBe(true);
     const again = await openSettings(page);
     await again.getByRole("button", { name: "Reset" }).click();
     await closeSettings(page);
@@ -279,6 +295,45 @@ test.describe("volume footprint", () => {
     const tail = calls.find((c) => c.bars === 3)!;
     expect(tail.row_size).toBeGreaterThan(0);
     expect(tail.row_ticks).toBeUndefined();
+    // The poll sends the row size back, and it is still the auto one.
+    await page.waitForTimeout(500);
+    await expect(status(page)).toContainText(/row [\d.]+ auto/);
+    expect(errors).toEqual([]);
+  });
+
+  test("scrolling back pages in older bars", async ({ bootedApp: page }) => {
+    await pick(page, "Volume footprint");
+    await expect(status(page)).toContainText("from 1m bars");
+    const calls = recordCalls(page, "get_footprint");
+    const box = (await page.locator(".chart-container").boundingBox())!;
+    const y = box.y + box.height * 0.2;
+    await expect
+      .poll(
+        async () => {
+          await page.mouse.move(box.x + 60, y);
+          await page.mouse.down();
+          await page.mouse.move(box.x + box.width * 0.8, y, { steps: 8 });
+          await page.mouse.up();
+          return calls.filter((c) => c.end_time !== undefined).length;
+        },
+        { timeout: 20_000 },
+      )
+      .toBeGreaterThan(0);
+    const older = calls.find((c) => c.end_time !== undefined)!;
+    expect(older.bars).toBe(60);
+    expect(older.row_size).toBeGreaterThan(0);
+    await expect.poll(async () => (await painterExtend(page, FOOTPRINT))?.count ?? 0).toBeGreaterThan(60);
+  });
+
+  test("on a phone it is one chart and stays usable", async ({ bootedApp: page }) => {
+    const errors = recordErrors(page);
+    await page.evaluate(() => localStorage.setItem("chartgen.layout.chartType", '"footprint"'));
+    await page.setViewportSize({ width: 420, height: 800 });
+    await page.reload();
+    await expect(status(page)).toContainText("from 1m bars", { timeout: 30_000 });
+    await page.getByTestId("orderflow-settings-open").click();
+    await expect(page.getByTestId("orderflow-settings")).toBeVisible();
+    await closeSettings(page);
     expect(errors).toEqual([]);
   });
 

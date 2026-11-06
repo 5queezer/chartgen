@@ -1982,6 +1982,7 @@ export function Chart(props: ChartProps): JSX.Element {
   // summary table in a pane of its own.
   let orderFlowCreated: string | null = null;
   let tableCreated = false;
+  let tableAfter = "";
   createEffect(() => {
     const c = chart();
     const view = props.orderFlow;
@@ -1993,10 +1994,14 @@ export function Chart(props: ChartProps): JSX.Element {
     }
     const wantTable =
       view?.kind === "footprint" ? view.settings.summary === "table" : !!view?.settings.summary;
-    if (tableCreated && !wantTable) {
+    // Panes stack in the order they are created, and the table belongs at the bottom:
+    // a sub-pane added after it moves it back there.
+    const subPanes = Object.keys(paneIds()).join();
+    if (tableCreated && (!wantTable || subPanes !== tableAfter)) {
       c.removeIndicator(ORDER_FLOW_TABLE_PANE, ORDER_FLOW_TABLE_REG_NAME);
       tableCreated = false;
     }
+    tableAfter = subPanes;
     if (!view || !name) return;
     ensureOrderFlowRegistered();
     if (orderFlowCreated) {

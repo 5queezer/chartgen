@@ -560,7 +560,10 @@ export const FootprintPayloadSchema = z.object({
   has_more: z.boolean(),
 });
 export type FootprintPayload = z.infer<typeof FootprintPayloadSchema>;
-export type FootprintMeta = Omit<FootprintPayload, "footprints" | "has_more">;
+export type FootprintMeta = Omit<FootprintPayload, "footprints" | "has_more"> & {
+  /** A page of older bars was read from coarser data than the load. */
+  coarser_older?: boolean;
+};
 
 export const TpoProfileSchema = z.object({
   t: z.number(),

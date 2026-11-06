@@ -449,7 +449,7 @@ pushes the same tail instead of you polling for it.
   2000 1m bars when one 7-day window only holds about 1950) still reports
   `true`. It is `false` when history ran out (the page can be shorter or
   empty) and for the no-ticker demo series, which has no timestamps.
-- **Volume profiles on partial responses.** `vpvr`, `hvn_lvn`, and `tpo`
+- **Volume profiles on partial responses.** `vpvr`, `fixed_range_vp`, `anchored_vp`, `hvn_lvn`, and `tpo`
   are computed over the bars of the response they arrive in. Keep their
   `hbars` and profile-derived `hlines` (POC/VAH/VAL, HVN/LVN nodes) from
   the initial full load, and ignore them on tail-poll and history-page
@@ -460,7 +460,7 @@ its `color_idx`), and `fills` keep only their last `bars` entries. Signal `x` va
 to the trimmed window, and signals inside the warmup are dropped. Divlines
 that end at or before the first returned bar are dropped. Divlines that
 cross into the window are clipped to start at bar 0, with `y1`
-interpolated. For windowed profiles (`vpvr`, `hvn_lvn`, `tpo`), `hbars`
+interpolated. For windowed profiles (`vpvr`, `fixed_range_vp`, `anchored_vp`, `hvn_lvn`, `tpo`), `hbars`
 and `hlines` are recomputed over the returned bars only. `y_range` and the
 `hlines` of every other indicator don't change.
 

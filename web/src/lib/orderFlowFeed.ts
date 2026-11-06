@@ -34,6 +34,8 @@ export interface FlowState<T, M> {
 export interface FlowFeedOptions<T extends { t: number }, M extends { row_size: number }> {
   fetch: (request: FlowRequest, signal: AbortSignal) => Promise<FlowPage<T, M>>;
   onChange: (state: FlowState<T, M>) => void;
+  /** What a poll or page says over what the load said: they send its row size back. */
+  mergeMeta: (load: M, later: M) => M;
   pollMs: number;
   doc?: VisibilityDoc;
 }
@@ -82,7 +84,7 @@ export function createFlowFeed<T extends { t: number }, M extends { row_size: nu
     // Keep the newest: the oldest go first, and scrolling back reads them again.
     for (const t of sorted.slice(0, Math.max(0, sorted.length - MAX_ITEMS))) next.delete(t);
     items = next;
-    meta = page.meta;
+    meta = meta === null ? page.meta : opts.mergeMeta(meta, page.meta);
   };
 
   const failed = (err: unknown, signal: AbortSignal) => {

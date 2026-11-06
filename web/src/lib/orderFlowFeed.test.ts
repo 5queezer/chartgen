@@ -8,6 +8,7 @@ interface Item {
 }
 interface Meta {
   row_size: number;
+  auto?: boolean;
 }
 
 function setup(hidden = false) {
@@ -23,6 +24,7 @@ function setup(hidden = false) {
     pollMs: 10_000,
     doc: doc as never,
     onChange: (s) => states.push(s),
+    mergeMeta: (load, later) => ({ ...later, auto: load.auto }),
     fetch: async (r) => {
       requests.push(r);
       return next(r);
@@ -50,6 +52,22 @@ describe("order-flow feed", () => {
     expect(t.last().status).toBe("live");
     await vi.advanceTimersByTimeAsync(10_000);
     expect(t.requests[1]).toEqual({ tail: true, rowSize: 5 });
+    t.feed.dispose();
+  });
+
+  it("a poll does not undo what only the load knows", async () => {
+    const t = setup();
+    t.setNext(() => ({ items: [{ t: 100, v: 1 }], meta: { row_size: 5, auto: true }, hasMore: true }));
+    t.feed.restart();
+    await vi.advanceTimersByTimeAsync(0);
+    t.setNext(() => ({ items: [{ t: 100, v: 2 }], meta: { row_size: 5, auto: false }, hasMore: true }));
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(t.last().items.get(100)!.v).toBe(2);
+    expect(t.last().meta?.auto).toBe(true);
+    // A restart is a new load.
+    t.feed.restart();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(t.last().meta?.auto).toBe(false);
     t.feed.dispose();
   });
 
@@ -149,6 +167,7 @@ describe("order-flow feed", () => {
       pollMs: 10_000,
       doc: t.doc as never,
       onChange: (s) => t.states.push(s),
+      mergeMeta: (_load, later) => later,
       fetch: () => new Promise((r) => answers.push(r)),
     });
     feed.restart();
