@@ -846,7 +846,7 @@ body {
 }
 
 /* Dialogs and menus fit what is visible above the on-screen keyboard. */
-.compact div:has(> [role="dialog"]) {
+.compact div:not([data-popper-positioner]):has(> [role="dialog"]) {
   top: var(--vvt, 0px);
   bottom: auto;
   height: var(--vvh, 100dvh);

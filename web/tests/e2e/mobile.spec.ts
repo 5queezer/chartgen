@@ -325,6 +325,28 @@ for (const name of ["iPhone 13 landscape", "Pixel 7 landscape", "iPhone SE lands
   });
 }
 
+for (const name of ["iPhone 13 landscape", "iPhone SE landscape"]) {
+  test.describe(name, () => {
+    test.use(device(name));
+
+    test("a colour popover from a low swatch stays on screen", async ({ page }) => {
+      await bootCompact(page);
+      await page.locator(".pane-header-interactive", { hasText: "RSI" }).tap();
+      await page.getByRole("button", { name: /^Settings for RSI/ }).first().tap();
+      await page.getByRole("dialog").getByRole("tab", { name: "Style" }).tap();
+      const swatch = page.getByRole("dialog").getByTestId("color-swatch").last();
+      await swatch.scrollIntoViewIfNeeded();
+      await swatch.tap();
+      const popover = page.locator('[data-popper-positioner] [role="dialog"]');
+      await expect(popover).toBeVisible();
+      await expect(popover).toBeInViewport({ ratio: 1 });
+      await expect(popover.getByRole("slider", { name: "Opacity" })).toBeInViewport({ ratio: 1 });
+      const size = page.viewportSize()!;
+      expect(await page.evaluate(() => document.documentElement.scrollHeight)).toBeLessThanOrEqual(size.height);
+    });
+  });
+}
+
 for (const name of ["iPhone 13 landscape", "Pixel 7 landscape"]) {
   test.describe(name, () => {
     test.use(device(name));
