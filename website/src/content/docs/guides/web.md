@@ -1070,6 +1070,40 @@ Every instance after the first is stored with an instance id
 (`{ "name": "rsi", "id": "rsi#2", "length": 21 }`). Sets and layouts saved
 before instances existed load unchanged.
 
+### Funding, Open Interest and Long/Short panels
+
+These three panels read Binance futures data, so they have values for crypto
+symbols that Binance trades as a perpetual future. A bar with no value is left
+empty, not drawn as zero. When a panel has no values at all, its legend says why:
+
+| Legend | Why |
+|---|---|
+| `Funding (Binance futures only)` | The symbol is a stock, index or FX pair. |
+| `Funding (no futures market)` | Binance has no futures rows for it, as for a spot-only pair such as `BTCFDUSD`, or the futures market did not exist yet for these bars. |
+| `Funding (unavailable)` | The request failed or Binance's rate limit was reached. The server log has the reason (`[futures] ...`); the panel recovers on its own. |
+| `OI (last 30 days only)` | Every bar is older than the 30 days Binance keeps. |
+
+How far back the values go:
+
+- **Funding** has full history at Binance. The server reads back as far as the
+  visible bars need, newest first, up to 3000 rows (about 2.7 years at one payment
+  every 8 hours). Older bars stay empty. Scrolling back reads the older window
+  the same way.
+- **Open interest** and the **long/short ratio** are kept by Binance for the last
+  30 days only. Bars older than that are empty on any chart. Reading goes back up
+  to 4000 rows (about 14 days of 5 minute rows) in one chart, so a zoomed-out
+  5 minute chart can have empty bars before that.
+- A bar takes the nearest row within two bar lengths (funding: within 8 hours).
+  The data periods are 5m to 1d, so a 1m chart repeats each 5 minute row over its
+  bars.
+
+Cost: opening a chart reads each panel's series once, at most 6 requests for
+funding and 8 each for open interest and long/short, 22 in all. The server then
+asks for the newest rows only, one request per series every 15 seconds, however
+often the chart updates. Bars from a window that is not the newest are their own
+series, so scrolling back never replaces the newest. Binance allows 500 funding
+requests per 5 minutes per IP, shared by every chart on the server.
+
 ## Script editor
 
 On a server started with `CHARTGEN_SCRIPTING=1`, a **Scripts** button (`{ }` on

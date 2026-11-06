@@ -505,7 +505,53 @@ fn number(row: &serde_json::Value, key: &str) -> Option<f64> {
     row.get(key)?.as_str()?.parse().ok()
 }
 
+/// `CHARTGEN_DATA_SOURCE=sample`: the futures series come from `sample_times`, not
+/// from Binance, as the candles do. For E2E tests and demos.
+fn sampling() -> bool {
+    std::env::var("CHARTGEN_DATA_SOURCE").is_ok_and(|v| v == "sample")
+}
+
+/// The times of the rows Binance would return for `q` on a grid of `step_ms`: the
+/// latest `PAGE_ROWS` up to now, and for the history series (`kept` is how far back)
+/// no further back than Binance keeps them. A symbol ending in `FDUSD` has no futures
+/// market (no rows), and one ending in `ERRUSDT` fails.
+fn sample_times(
+    symbol: &str,
+    step_ms: i64,
+    kept: Option<i64>,
+    q: &Query,
+) -> Result<Vec<i64>, String> {
+    let sym = symbol.to_uppercase();
+    if sym.ends_with("ERRUSDT") {
+        return Err("sample source: this symbol always fails".into());
+    }
+    if sym.ends_with("FDUSD") {
+        return Ok(vec![]);
+    }
+    let now = now_ms();
+    let last = q.end.map_or(now, |e| e.min(now)).div_euclid(step_ms);
+    let first = [q.start, kept.map(|k| now - k)]
+        .into_iter()
+        .flatten()
+        .max()
+        .map_or(i64::MIN, |t| t.div_euclid(step_ms) + 1);
+    let first = first.max(last - PAGE_ROWS as i64 + 1);
+    Ok((first..=last).map(|i| i * step_ms).collect())
+}
+
+/// A deterministic wave in `0..1` for a row time, so a sample chart has a shape.
+fn sample_wave(ts: i64, step_ms: i64) -> f64 {
+    ((ts / step_ms) as f64 * 0.35).sin() * 0.5 + 0.5
+}
+
 fn funding_page(symbol: &str, q: &Query) -> Result<Vec<(i64, f64)>, String> {
+    if sampling() {
+        let step = FUNDING_GAP_MS;
+        return Ok(sample_times(symbol, step, None, q)?
+            .into_iter()
+            .map(|t| (t, (sample_wave(t, step) - 0.4) * 0.0004))
+            .collect());
+    }
     let url = format!(
         "https://fapi.binance.com/fapi/v1/fundingRate?symbol={}",
         symbol.to_uppercase()
@@ -516,7 +562,18 @@ fn funding_page(symbol: &str, q: &Query) -> Result<Vec<(i64, f64)>, String> {
         .collect())
 }
 
+fn period_ms(period: &str) -> i64 {
+    crate::data::interval_secs(period).unwrap_or(300) * 1000
+}
+
 fn oi_page(symbol: &str, period: &str, q: &Query) -> Result<Vec<(i64, f64)>, String> {
+    if sampling() {
+        let step = period_ms(period);
+        return Ok(sample_times(symbol, step, Some(RETENTION_MS), q)?
+            .into_iter()
+            .map(|t| (t, 2.0e9 + sample_wave(t, step) * 5.0e8))
+            .collect());
+    }
     let url = format!(
         "https://fapi.binance.com/futures/data/openInterestHist?symbol={}&period={period}",
         symbol.to_uppercase()
@@ -533,6 +590,16 @@ fn oi_page(symbol: &str, period: &str, q: &Query) -> Result<Vec<(i64, f64)>, Str
 }
 
 fn ls_page(symbol: &str, period: &str, q: &Query) -> Result<Vec<(i64, f64, f64)>, String> {
+    if sampling() {
+        let step = period_ms(period);
+        return Ok(sample_times(symbol, step, Some(RETENTION_MS), q)?
+            .into_iter()
+            .map(|t| {
+                let long = 0.4 + sample_wave(t, step) * 0.2;
+                (t, long, 1.0 - long)
+            })
+            .collect());
+    }
     let url = format!(
         "https://fapi.binance.com/futures/data/globalLongShortAccountRatio?symbol={}&period={period}",
         symbol.to_uppercase()
@@ -582,9 +649,8 @@ fn futures_symbol(data: &OhlcvData) -> Result<&str, Missing> {
 fn history_window(data: &OhlcvData, now: i64) -> Result<(Window, &str), Missing> {
     let interval = data.interval.as_deref().unwrap_or("4h");
     let period = map_interval(interval);
-    let period_ms = crate::data::interval_secs(period).unwrap_or(300) * 1000;
     let gap = interval_to_max_gap_ms(interval);
-    let Some(w) = Window::of(&data.bars, gap, 64 * period_ms, now) else {
+    let Some(w) = Window::of(&data.bars, gap, 64 * period_ms(period), now) else {
         return Err(Missing::NoMarket);
     };
     if w.to < now - RETENTION_MS {
@@ -1528,6 +1594,32 @@ mod interval_tests {
             .get("BTCUSDT", &newest.key(""), t, no_fetch_rows)
             .unwrap();
         assert_eq!(*held, vec![(now, 1.0)]);
+    }
+
+    #[test]
+    fn the_sample_source_answers_like_binance_without_a_request() {
+        let q = |start, end| Query { start, end };
+        let hour = HOUR_MS;
+        let now = now_ms();
+        // The latest page, on the grid, never in the future.
+        let t = sample_times("BTCUSDT", hour, None, &q(None, None)).unwrap();
+        assert_eq!(t.len(), PAGE_ROWS);
+        assert!(t.last().unwrap() <= &now && t.iter().all(|x| x % hour == 0));
+        // History series stop at the retention.
+        let kept = sample_times("BTCUSDT", 300_000, Some(RETENTION_MS), &q(None, None)).unwrap();
+        assert_eq!(kept.len(), PAGE_ROWS);
+        let far = sample_times(
+            "BTCUSDT",
+            hour,
+            Some(RETENTION_MS),
+            &q(None, Some(now - 40 * DAY_MS)),
+        );
+        assert!(far.unwrap().is_empty());
+        // Spot-only and failing symbols.
+        assert!(sample_times("BTCFDUSD", hour, None, &q(None, None))
+            .unwrap()
+            .is_empty());
+        assert!(sample_times("XERRUSDT", hour, None, &q(None, None)).is_err());
     }
 
     fn no_fetch_rows() -> Result<Vec<(i64, f64)>, String> {
