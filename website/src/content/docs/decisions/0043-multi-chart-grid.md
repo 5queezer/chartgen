@@ -95,6 +95,10 @@ charts' state are untouched, so nothing is dirty and they come back when there i
   contexts would need `chartContext` and its readers to become lists.
 - Bad: one chart's registered indicator names differ per pane
   (`chartgen_p<n>_<name>`), since geometry is keyed by name in klinecharts' global registry.
+- Bad: a cell is short enough to hit a klinecharts race: a pane resized while a redraw
+  of its canvas is pending keeps its old backing store, blank or stretched. In a grid,
+  new sub-panes start at a fitted height and later changes apply one pane per frame.
+- Bad: the Data Window reads the active chart, so hovering another chart shows nothing there.
 
 Not in this version: symbol or crosshair sync across charts, more than 4 charts,
 resizable splitters, and a grid in share links.
