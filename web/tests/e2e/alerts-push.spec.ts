@@ -363,12 +363,15 @@ test("a click on a notification, with a tab open, shows that symbol", async ({ b
     page.evaluate((d) => {
       navigator.serviceWorker.dispatchEvent(new MessageEvent("message", { data: d }));
     }, data);
+  const shown = (symbol: RegExp) => page.getByRole("button", { name: symbol });
+  await expect(shown(/^Symbol:.*BTCUSDT/)).toBeVisible();
   await send({ type: "chartgen.open-symbol", symbol: "<script>" });
+  await send({ type: "chartgen.open-symbol", symbol: 42 });
   await send({ type: "something else", symbol: "ETHUSDT" });
   await page.waitForTimeout(300);
-  expect(new URL(page.url()).search).not.toContain("ETHUSDT");
+  await expect(shown(/^Symbol:.*BTCUSDT/)).toBeVisible();
   await send({ type: "chartgen.open-symbol", symbol: "ETHUSDT" });
-  await expect(page.getByRole("button", { name: /ETHUSDT/ }).first()).toBeVisible({ timeout: 10_000 });
+  await expect(shown(/^Symbol:.*ETHUSDT/)).toBeVisible({ timeout: 10_000 });
 });
 
 test("turning it off stops this device, on the server too", async ({ page, context }) => {

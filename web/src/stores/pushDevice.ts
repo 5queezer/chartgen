@@ -10,7 +10,7 @@ import {
   pushSupport,
   readPushEnv,
 } from "../lib/pushDevice";
-import { normalizeSymbol, setSymbol } from "./layout";
+import { setSymbol } from "./layout";
 import {
   serverAlertError,
   serverPush,
@@ -154,9 +154,10 @@ export function installPushClicks(): () => void {
   if (typeof navigator === "undefined" || !("serviceWorker" in navigator)) return () => {};
   const onMessage = (e: MessageEvent<unknown>) => {
     const data = e.data as { type?: unknown; symbol?: unknown } | null;
-    if (data?.type !== "chartgen.open-symbol") return;
-    const symbol = normalizeSymbol(data.symbol);
-    if (symbol !== null) setSymbol(symbol);
+    // `setSymbol` refuses what is not a symbol.
+    if (data?.type === "chartgen.open-symbol" && typeof data.symbol === "string") {
+      setSymbol(data.symbol);
+    }
   };
   navigator.serviceWorker.addEventListener("message", onMessage);
   return () => navigator.serviceWorker.removeEventListener("message", onMessage);

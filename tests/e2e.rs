@@ -1347,9 +1347,11 @@ mod server_alerts {
         assert_eq!(list["alerts"], serde_json::json!([]));
     }
 
+    type Bodies = Arc<Mutex<Vec<Vec<u8>>>>;
+
     /// A fake push service: what it was sent, whole. It holds its answer until told,
     /// so a delivery can be left unfinished.
-    fn push_service() -> (u16, Arc<Mutex<Vec<Vec<u8>>>>, Arc<AtomicBool>) {
+    fn push_service() -> (u16, Bodies, Arc<AtomicBool>) {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         let seen = Arc::new(Mutex::new(Vec::new()));
