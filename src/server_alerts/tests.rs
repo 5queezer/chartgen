@@ -1,0 +1,958 @@
+use super::*;
+use crate::chart_push::{Limits as HubLimits, PushSource};
+use chartgen::data::{Bar, OhlcvData};
+use futures_util::future::BoxFuture;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+const BASE: i64 = 1_700_000_040;
+
+/// A source that never sends by itself: tests call `on_event`.
+#[derive(Default)]
+struct Fake {
+    seeds: AtomicUsize,
+}
+
+impl PushSource for Fake {
+    fn feed_interval(&self, symbol: &str, timeframe: &str) -> Result<String, String> {
+        if timeframe == "2m" || !symbol.ends_with("USDT") {
+            return Err("not pushable".into());
+        }
+        // An interval with no stream of its own is built from a finer one.
+        Ok(if timeframe == "7m" { "1m" } else { timeframe }.to_string())
+    }
+    fn seed(&self, symbol: &str, timeframe: &str, count: usize) -> Result<OhlcvData, String> {
+        self.seeds.fetch_add(1, Ordering::SeqCst);
+        if symbol == "NOSUCHUSDT" {
+            return Err("unknown symbol".into());
+        }
+        data::sample_ohlcv(symbol, timeframe, count, None, 1_704_067_200_000)
+    }
+    fn run(
+        &self,
+        _symbol: String,
+        _interval: String,
+        tx: mpsc::Sender<FeedEvent>,
+    ) -> BoxFuture<'static, ()> {
+        Box::pin(async move {
+            tx.closed().await;
+        })
+    }
+}
+
+fn store_at(name: &str) -> (&'static Store, std::path::PathBuf) {
+    let dir = std::env::temp_dir().join(format!(
+        "chartgen-server-alerts-{name}-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("store.db");
+    (reopen(&path), path)
+}
+
+fn reopen(path: &std::path::Path) -> &'static Store {
+    Box::leak(Box::new(Store::open(path).unwrap()))
+}
+
+fn quick_timing() -> Timing {
+    Timing {
+        connect: Duration::from_millis(300),
+        total: Duration::from_millis(500),
+        backoff: [Duration::from_millis(10), Duration::from_millis(10)],
+    }
+}
+
+fn hub_with(fake: Arc<Fake>) -> Arc<ChartHub> {
+    ChartHub::new(fake, HubLimits::default())
+}
+
+fn alerts_on(store: &'static Store, policy: Policy, limits: Limits) -> Arc<ServerAlerts> {
+    let hub = hub_with(Arc::new(Fake::default()));
+    ServerAlerts::new(store, hub, policy, limits, quick_timing())
+}
+
+fn plain(store: &'static Store) -> Arc<ServerAlerts> {
+    alerts_on(store, Policy::default(), Limits::default())
+}
+
+/// `call_tool` blocks on the runtime, so it runs where a real call does.
+async fn call(
+    a: &Arc<ServerAlerts>,
+    tool: &str,
+    args: Value,
+    owner: &str,
+) -> Result<Value, String> {
+    let (a, tool, owner) = (a.clone(), tool.to_string(), owner.to_string());
+    let resp = tokio::task::spawn_blocking(move || a.call_tool(&tool, None, &args, Some(&owner)))
+        .await
+        .unwrap();
+    let text = resp["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    if resp["result"]["isError"] == json!(true) {
+        Err(text)
+    } else {
+        Ok(serde_json::from_str(&text).unwrap())
+    }
+}
+
+fn spec(condition: &str, trigger: &str, level: f64) -> Value {
+    json!({ "symbol": "BTCUSDT", "condition": condition, "trigger": trigger, "level": level })
+}
+
+async fn create(a: &Arc<ServerAlerts>, args: Value, owner: &str) -> String {
+    call(a, "create_server_alert", args, owner).await.unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string()
+}
+
+fn bar(t: i64, close: f64) -> Bar {
+    Bar {
+        open: close,
+        high: close,
+        low: close,
+        close,
+        volume: 1.0,
+        date: t.to_string(),
+    }
+}
+
+fn key(interval: &str) -> FeedKey {
+    ("BTCUSDT".to_string(), interval.to_string())
+}
+
+fn tick(a: &ServerAlerts, t: i64, price: f64) {
+    a.on_event(&key("1m"), FeedEvent::Tick(bar(t, price)));
+}
+
+async fn get(a: &Arc<ServerAlerts>, owner: &str, id: &str) -> Value {
+    let list = call(a, "list_server_alerts", json!({}), owner)
+        .await
+        .unwrap();
+    list["alerts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|x| x["id"] == id)
+        .cloned()
+        .unwrap_or(Value::Null)
+}
+
+fn fixture() -> Value {
+    let raw = include_str!("../../tests/fixtures/alert_semantics.json");
+    serde_json::from_str(raw).unwrap()
+}
+
+/// The browser runs these same cases (`web/src/stores/alerts.test.ts`).
+#[tokio::test(flavor = "multi_thread")]
+async fn the_fire_rules_match_the_browser_fixture() {
+    for (i, case) in fixture()["cases"].as_array().unwrap().iter().enumerate() {
+        let name = case["name"].as_str().unwrap();
+        let (store, _) = store_at(&format!("fixture-{i}"));
+        let a = plain(store);
+        let id = create(
+            &a,
+            spec(
+                case["condition"].as_str().unwrap(),
+                case["trigger"].as_str().unwrap(),
+                case["level"].as_f64().unwrap(),
+            ),
+            "me",
+        )
+        .await;
+        let mut fired = Vec::new();
+        let mut count = 0;
+        for (n, price) in case["prices"].as_array().unwrap().iter().enumerate() {
+            match price.as_f64() {
+                Some(p) => tick(&a, BASE, p),
+                None => ServerAlerts::forget_baselines(&mut a.lock(), &key("1m")),
+            }
+            let now = a.lock().alerts[&id].fire_count;
+            if now > count {
+                fired.push(json!(n));
+                count = now;
+            }
+        }
+        assert_eq!(fired, case["fires"].as_array().unwrap().clone(), "{name}");
+        assert_eq!(a.lock().alerts[&id].active, case["active"], "{name}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_once_alert_does_not_fire_again_across_a_restart() {
+    let (store, path) = store_at("restart-once");
+    let a = plain(store);
+    let id = create(&a, spec("greater", "once", 100.0), "me").await;
+    tick(&a, BASE, 101.0);
+    assert_eq!(a.lock().alerts[&id].fire_count, 1);
+    drop(a);
+
+    let a = plain(reopen(&path));
+    assert!(!a.lock().alerts[&id].active);
+    assert!(a.lock().watches.is_empty(), "a spent alert holds no feed");
+    assert_eq!(a.lock().alerts[&id].fire_count, 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_every_alert_stays_disarmed_across_a_restart() {
+    let (store, path) = store_at("restart-every");
+    let a = plain(store);
+    let id = create(&a, spec("greater", "every", 100.0), "me").await;
+    tick(&a, BASE, 101.0);
+    assert!(a.lock().alerts[&id].disarmed);
+    drop(a);
+
+    let a = plain(reopen(&path));
+    tick(&a, BASE, 102.0);
+    assert_eq!(a.lock().alerts[&id].fire_count, 1, "still on that side");
+    tick(&a, BASE, 99.0);
+    tick(&a, BASE, 103.0);
+    assert_eq!(a.lock().alerts[&id].fire_count, 2, "re-armed and fired");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_crossing_needs_a_reading_taken_since_the_restart() {
+    let (store, path) = store_at("restart-cross");
+    let a = plain(store);
+    let id = create(&a, spec("crossing", "every", 100.0), "me").await;
+    tick(&a, BASE, 99.0);
+    drop(a);
+
+    let a = plain(reopen(&path));
+    tick(&a, BASE, 101.0);
+    assert_eq!(a.lock().alerts[&id].fire_count, 0, "99 is from before");
+    tick(&a, BASE, 99.0);
+    assert_eq!(a.lock().alerts[&id].fire_count, 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn replayed_bars_do_not_fire_and_restart_the_baseline() {
+    let (store, _) = store_at("replay");
+    let a = plain(store);
+    let id = create(&a, spec("crossing", "every", 100.0), "me").await;
+    tick(&a, BASE, 99.0);
+    // The backfill after a reconnect replays older closes.
+    a.on_event(&key("1m"), FeedEvent::Bar(bar(BASE - 120, 101.0)));
+    a.on_event(&key("1m"), FeedEvent::Bar(bar(BASE - 60, 99.0)));
+    assert_eq!(a.lock().alerts[&id].fire_count, 0);
+    // The next price is only a baseline, like a browser after a gap.
+    tick(&a, BASE, 101.0);
+    assert_eq!(a.lock().alerts[&id].fire_count, 0);
+    tick(&a, BASE, 99.0);
+    assert_eq!(a.lock().alerts[&id].fire_count, 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_close_alert_reads_only_finished_bars_once_each() {
+    let (store, _) = store_at("close");
+    let a = plain(store);
+    let mut args = spec("crossing", "every", 100.0);
+    args["interval"] = json!("1h");
+    args["evaluate_on"] = json!("close");
+    let id = create(&a, args, "me").await;
+    let k = key("1h");
+    assert_eq!(a.lock().alerts[&id].feed_interval, "1h");
+
+    a.on_event(&k, FeedEvent::Bar(bar(BASE - 7200, 99.0)));
+    // Ticks cross the level but no bar closed there.
+    a.on_event(&k, FeedEvent::Tick(bar(BASE - 3600, 101.0)));
+    assert_eq!(a.lock().alerts[&id].fire_count, 0);
+    a.on_event(&k, FeedEvent::Bar(bar(BASE - 3600, 101.0)));
+    assert_eq!(a.lock().alerts[&id].fire_count, 1);
+    // The same bar again, as a backfill sends it, changes nothing.
+    a.on_event(&k, FeedEvent::Bar(bar(BASE - 3600, 99.0)));
+    assert_eq!(a.lock().alerts[&id].fire_count, 1);
+    // A forming bar sent as a `Bar` by the backfill has not closed yet.
+    let now = chrono::Utc::now().timestamp();
+    a.on_event(&k, FeedEvent::Bar(bar(now, 99.0)));
+    assert_eq!(a.lock().alerts[&id].fire_count, 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn alerts_share_one_feed_per_symbol_when_live() {
+    let (store, _) = store_at("feeds");
+    let a = plain(store);
+    for interval in ["1m", "15m", "1h"] {
+        let mut args = spec("less", "every", 1.0);
+        args["interval"] = json!(interval);
+        create(&a, args, "me").await;
+    }
+    assert_eq!(
+        a.lock().watches.len(),
+        1,
+        "live alerts all read the 1m feed"
+    );
+    let mut args = spec("less", "every", 1.0);
+    args["interval"] = json!("1h");
+    args["evaluate_on"] = json!("close");
+    create(&a, args, "me").await;
+    assert_eq!(a.lock().watches.len(), 2);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_paused_or_spent_alert_lets_go_of_its_feed() {
+    let (store, _) = store_at("release");
+    let a = plain(store);
+    let id = create(&a, spec("greater", "once", 100.0), "me").await;
+    assert_eq!(a.lock().watches.len(), 1);
+    call(
+        &a,
+        "update_server_alert",
+        json!({"alert_id": id, "active": false}),
+        "me",
+    )
+    .await
+    .unwrap();
+    assert_eq!(a.lock().watches.len(), 0);
+    call(
+        &a,
+        "update_server_alert",
+        json!({"alert_id": id, "active": true}),
+        "me",
+    )
+    .await
+    .unwrap();
+    assert_eq!(a.lock().watches.len(), 1);
+    tick(&a, BASE, 101.0);
+    assert_eq!(a.lock().watches.len(), 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn update_and_resume_follow_the_browser() {
+    let (store, _) = store_at("update");
+    let a = plain(store);
+    let id = create(&a, spec("crossing", "once", 100.0), "me").await;
+    tick(&a, BASE, 99.0);
+    tick(&a, BASE, 101.0);
+    let view = get(&a, "me", &id).await;
+    assert_eq!(view["active"], false);
+    assert!(view["last_triggered_at"].is_i64());
+
+    // Resuming keeps when it last fired, re-arms and needs a new reading.
+    let args = json!({"alert_id": id, "active": true});
+    let view = call(&a, "update_server_alert", args, "me").await.unwrap();
+    assert_eq!(view["active"], true);
+    assert!(view["last_triggered_at"].is_i64());
+    tick(&a, BASE, 99.0);
+    assert_eq!(
+        a.lock().alerts[&id].fire_count,
+        1,
+        "the first is a baseline"
+    );
+
+    // Pausing forgets the past fire, so it reads as paused.
+    let args = json!({"alert_id": id, "active": false});
+    let view = call(&a, "update_server_alert", args, "me").await.unwrap();
+    assert!(view["last_triggered_at"].is_null());
+
+    // A new definition switches it on, without a fire behind it.
+    let args = json!({"alert_id": id, "level": 200.0, "message": " note "});
+    let view = call(&a, "update_server_alert", args, "me").await.unwrap();
+    assert_eq!(
+        (&view["active"], &view["level"]),
+        (&json!(true), &json!(200.0))
+    );
+    assert_eq!(view["message"], "note");
+    let args = json!({"alert_id": id, "message": ""});
+    let view = call(&a, "update_server_alert", args, "me").await.unwrap();
+    assert!(view["message"].is_null());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn another_client_sees_and_changes_nothing() {
+    let (store, _) = store_at("owner");
+    let a = plain(store);
+    let id = create(&a, spec("less", "once", 1.0), "me").await;
+    let theirs = call(&a, "list_server_alerts", json!({}), "them")
+        .await
+        .unwrap();
+    assert_eq!(theirs["alerts"], json!([]));
+    let args = json!({"alert_id": id, "active": false});
+    assert_eq!(
+        call(&a, "update_server_alert", args, "them")
+            .await
+            .unwrap_err(),
+        "No such alert"
+    );
+    let args = json!({"alert_id": id});
+    assert_eq!(
+        call(&a, "delete_server_alert", args.clone(), "them")
+            .await
+            .unwrap()["deleted"],
+        false
+    );
+    assert_eq!(get(&a, "me", &id).await["active"], true);
+    assert_eq!(
+        call(&a, "delete_server_alert", args, "me").await.unwrap()["deleted"],
+        true
+    );
+    assert!(a.lock().alerts.is_empty());
+    assert_eq!(a.lock().watches.len(), 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_call_without_a_client_is_refused() {
+    let (store, _) = store_at("no-owner");
+    let a = plain(store);
+    let args = json!({});
+    let b = a.clone();
+    let resp =
+        tokio::task::spawn_blocking(move || b.call_tool("list_server_alerts", None, &args, None))
+            .await
+            .unwrap();
+    assert_eq!(resp["result"]["isError"], true);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn bad_input_is_refused() {
+    let (store, _) = store_at("input");
+    let limits = Limits {
+        changes_per_minute: 100,
+        ..Limits::default()
+    };
+    let a = alerts_on(store, Policy::default(), limits);
+    let check = |args: Value, needle: &'static str| {
+        let a = a.clone();
+        async move {
+            let e = call(&a, "create_server_alert", args, "me")
+                .await
+                .unwrap_err();
+            assert!(e.contains(needle), "{e}");
+        }
+    };
+    check(
+        json!({"condition": "crossing", "trigger": "once", "level": 1}),
+        "symbol",
+    )
+    .await;
+    check(spec("sideways", "once", 1.0), "condition").await;
+    check(spec("crossing", "twice", 1.0), "trigger").await;
+    check(spec("crossing", "once", 0.0), "level").await;
+    check(spec("crossing", "once", -5.0), "level").await;
+    let mut args = spec("crossing", "once", 1.0);
+    args["symbol"] = json!("AAPL");
+    check(args, "Binance").await;
+    let mut args = spec("crossing", "once", 1.0);
+    args["sign"] = json!(true);
+    check(args, "sign needs webhook_url").await;
+    let mut args = spec("crossing", "once", 1.0);
+    args["interval"] = json!("2m");
+    check(args, "cannot watch").await;
+    let mut args = spec("crossing", "once", 1.0);
+    args["evaluate_on"] = json!("close");
+    args["interval"] = json!("7m");
+    check(args, "kline stream").await;
+    assert!(a.lock().alerts.is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_symbol_new_to_the_server_is_checked_once() {
+    let (store, _) = store_at("symbol");
+    let fake = Arc::new(Fake::default());
+    let a = ServerAlerts::new(
+        store,
+        hub_with(fake.clone()),
+        Policy::default(),
+        Limits::default(),
+        quick_timing(),
+    );
+    let mut args = spec("less", "once", 1.0);
+    args["symbol"] = json!("NOSUCHUSDT");
+    let e = call(&a, "create_server_alert", args, "me")
+        .await
+        .unwrap_err();
+    assert!(e.contains("Cannot watch NOSUCHUSDT"), "{e}");
+    assert_eq!(fake.seeds.load(Ordering::SeqCst), 1);
+    create(&a, spec("less", "once", 1.0), "me").await;
+    assert_eq!(fake.seeds.load(Ordering::SeqCst), 2);
+    create(&a, spec("less", "once", 2.0), "me").await;
+    assert_eq!(
+        fake.seeds.load(Ordering::SeqCst),
+        2,
+        "that feed already runs"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn each_ssrf_refusal_reaches_the_caller_and_stores_nothing() {
+    let (store, _) = store_at("ssrf");
+    let limits = Limits {
+        changes_per_minute: 1000,
+        ..Limits::default()
+    };
+    let a = alerts_on(store, Policy::default(), limits);
+    for url in [
+        "http://example.com/",
+        "https://127.0.0.1/",
+        "https://10.0.0.1/",
+        "https://100.64.0.1/",
+        "https://169.254.169.254/latest/meta-data/",
+        "https://[::1]/",
+        "https://[::ffff:127.0.0.1]/",
+        "https://[fd00::1]/",
+        "https://localhost/",
+        "https://2130706433/",
+        "https://example.com:8443/",
+        "https://u:p@example.com/",
+    ] {
+        let mut args = spec("less", "once", 1.0);
+        args["webhook_url"] = json!(url);
+        let e = call(&a, "create_server_alert", args, "me")
+            .await
+            .unwrap_err();
+        assert!(
+            e.starts_with("webhook") || e.contains("webhook URL"),
+            "{url}: {e}"
+        );
+    }
+    assert!(a.lock().alerts.is_empty());
+    assert!(store.server_alerts().unwrap().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_limits_hold() {
+    let (store, _) = store_at("limits");
+    let limits = Limits {
+        alerts_per_client: 2,
+        alerts_total: 3,
+        feeds: 2,
+        changes_per_minute: 1000,
+        ..Limits::default()
+    };
+    let a = alerts_on(store, Policy::default(), limits);
+    create(&a, spec("less", "once", 1.0), "a").await;
+    create(&a, spec("less", "once", 2.0), "a").await;
+    let e = call(&a, "create_server_alert", spec("less", "once", 3.0), "a")
+        .await
+        .unwrap_err();
+    assert!(e.contains("per client"), "{e}");
+
+    // A second symbol is a second feed; the third is over the limit.
+    let mut other = spec("less", "once", 1.0);
+    other["symbol"] = json!("ETHUSDT");
+    create(&a, other, "b").await;
+    let e = call(&a, "create_server_alert", spec("less", "once", 3.0), "b")
+        .await
+        .unwrap_err();
+    assert!(e.contains("maximum of 3"), "{e}");
+
+    let (store, _) = store_at("limits-feeds");
+    let a = alerts_on(store, Policy::default(), limits);
+    create(&a, spec("less", "once", 1.0), "a").await;
+    let mut other = spec("less", "once", 1.0);
+    other["symbol"] = json!("ETHUSDT");
+    create(&a, other, "b").await;
+    let mut third = spec("less", "once", 1.0);
+    third["symbol"] = json!("SOLUSDT");
+    let e = call(&a, "create_server_alert", third, "c")
+        .await
+        .unwrap_err();
+    assert!(e.contains("at most 2 symbol"), "{e}");
+    // On a symbol already watched there is room.
+    create(&a, spec("less", "once", 2.0), "c").await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn changes_per_minute_are_limited_per_client() {
+    let (store, _) = store_at("changes");
+    let limits = Limits {
+        changes_per_minute: 2,
+        ..Limits::default()
+    };
+    let a = alerts_on(store, Policy::default(), limits);
+    create(&a, spec("less", "once", 1.0), "a").await;
+    create(&a, spec("less", "once", 2.0), "a").await;
+    let e = call(&a, "create_server_alert", spec("less", "once", 3.0), "a")
+        .await
+        .unwrap_err();
+    assert!(e.contains("per minute"), "{e}");
+    create(&a, spec("less", "once", 1.0), "b").await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_flapping_every_alert_is_held_to_its_rate_and_says_so() {
+    let (store, _) = store_at("flap");
+    let limits = Limits {
+        fires_per_alert_per_minute: 3,
+        ..Limits::default()
+    };
+    let a = alerts_on(store, Policy::default(), limits);
+    let id = create(&a, spec("crossing", "every", 100.0), "me").await;
+    tick(&a, BASE, 99.0);
+    for i in 0..10 {
+        tick(&a, BASE, if i % 2 == 0 { 101.0 } else { 99.0 });
+    }
+    assert_eq!(a.lock().alerts[&id].fire_count, 3);
+    let view = get(&a, "me", &id).await;
+    assert_eq!(view["last_error"], "fires limited to 3 a minute");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_held_back_state_alert_fires_when_its_rate_allows() {
+    let (store, _) = store_at("held");
+    let limits = Limits {
+        fires_per_alert_per_minute: 1,
+        ..Limits::default()
+    };
+    let a = alerts_on(store, Policy::default(), limits);
+    let id = create(&a, spec("greater", "every", 100.0), "me").await;
+    tick(&a, BASE, 101.0);
+    tick(&a, BASE, 99.0);
+    tick(&a, BASE, 101.0);
+    assert_eq!(a.lock().alerts[&id].fire_count, 1);
+    assert!(
+        !a.lock().alerts[&id].disarmed,
+        "it stays armed while held back"
+    );
+    a.lock().fires = Window::default();
+    tick(&a, BASE, 102.0);
+    assert_eq!(a.lock().alerts[&id].fire_count, 2);
+    assert!(a.lock().alerts[&id].disarmed);
+}
+
+/// Answers each request with `reply`; records raw requests.
+async fn receiver(reply: &'static str) -> (u16, Arc<Mutex<Vec<String>>>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let seen2 = seen.clone();
+    tokio::spawn(async move {
+        while let Ok((mut s, _)) = listener.accept().await {
+            let mut buf = vec![0u8; 16384];
+            let n = s.read(&mut buf).await.unwrap_or(0);
+            seen2
+                .lock()
+                .unwrap()
+                .push(String::from_utf8_lossy(&buf[..n]).to_string());
+            let _ = s.write_all(reply.as_bytes()).await;
+            let _ = s.shutdown().await;
+        }
+    });
+    (port, seen)
+}
+
+const OK: &str = "HTTP/1.1 200 OK\r\ncontent-length: 0\r\nconnection: close\r\n\r\n";
+
+fn local(port: u16) -> Policy {
+    Policy {
+        test_origin: Some(format!("http://127.0.0.1:{port}")),
+    }
+}
+
+async fn until(what: &str, mut done: impl FnMut() -> bool) {
+    for _ in 0..200 {
+        if done() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("timed out waiting: {what}");
+}
+
+fn hooked(port: u16, condition: &str, trigger: &str) -> Value {
+    let mut args = spec(condition, trigger, 100.0);
+    args["webhook_url"] = json!(format!("http://127.0.0.1:{port}/hook?token=TOPSECRET"));
+    args["message"] = json!("hello");
+    args
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_fire_posts_the_documented_payload_and_records_the_status() {
+    let (port, seen) = receiver(OK).await;
+    let (store, _) = store_at("payload");
+    let a = alerts_on(store, local(port), Limits::default());
+    let id = create(&a, hooked(port, "crossing", "once"), "me").await;
+    tick(&a, BASE, 99.0);
+    tick(&a, BASE + 60, 101.0);
+    until("the delivery", || !seen.lock().unwrap().is_empty()).await;
+    until("its record", || {
+        a.lock().alerts[&id].last_delivery.is_some()
+    })
+    .await;
+
+    let raw = seen.lock().unwrap()[0].clone();
+    assert!(raw.starts_with("POST /hook?token=TOPSECRET"), "{raw}");
+    let body: Value = serde_json::from_str(raw.split_once("\r\n\r\n").unwrap().1).unwrap();
+    let event_id = body["id"].as_str().unwrap();
+    assert_eq!(body["type"], "alert.fired");
+    assert_eq!(body["alert_id"], id.as_str());
+    assert_eq!(body["symbol"], "BTCUSDT");
+    assert_eq!(body["interval"], "1m");
+    assert_eq!(body["evaluate_on"], "live");
+    assert_eq!(body["condition"], "crossing");
+    assert_eq!(body["trigger"], "once");
+    assert_eq!(body["level"], 100.0);
+    assert_eq!(body["price"], 101.0);
+    assert_eq!(body["message"], "hello");
+    assert_eq!(body["bar_time"], BASE + 60);
+    assert!(body["fired_at"].is_i64());
+    assert!(raw
+        .to_lowercase()
+        .contains(&format!("x-chartgen-event: {event_id}")));
+    assert!(!raw.to_lowercase().contains("x-chartgen-signature"));
+
+    let view = get(&a, "me", &id).await;
+    assert_eq!(view["last_status"], 200);
+    assert!(view["last_error"].is_null());
+    assert!(view["last_delivery_at"].is_i64());
+    assert!(store.server_alert_events().unwrap().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_secret_is_shown_once_and_signs_deliveries() {
+    let (port, seen) = receiver(OK).await;
+    let (store, _) = store_at("secret");
+    let a = alerts_on(store, local(port), Limits::default());
+    let mut args = hooked(port, "greater", "once");
+    args["sign"] = json!(true);
+    let created = call(&a, "create_server_alert", args, "me").await.unwrap();
+    let secret = created["webhook_secret"].as_str().unwrap().to_string();
+    assert_eq!(secret.len(), 64);
+    let id = created["id"].as_str().unwrap().to_string();
+    assert_eq!(created["webhook"]["signed"], true);
+    assert_eq!(created["webhook"]["host"], "127.0.0.1");
+
+    // Nothing later returns the secret or the URL.
+    let list = call(&a, "list_server_alerts", json!({}), "me")
+        .await
+        .unwrap();
+    let text = list.to_string();
+    for hidden in [secret.as_str(), "TOPSECRET", "/hook"] {
+        assert!(!text.contains(hidden), "{hidden} leaked: {text}");
+    }
+    assert!(list["alerts"][0].get("webhook_secret").is_none());
+    let args = json!({"alert_id": id, "message": "x"});
+    let updated = call(&a, "update_server_alert", args, "me").await.unwrap();
+    assert!(updated.get("webhook_secret").is_none());
+
+    tick(&a, BASE, 101.0);
+    until("the delivery", || !seen.lock().unwrap().is_empty()).await;
+    let raw = seen.lock().unwrap()[0].clone();
+    let (head, body) = raw.split_once("\r\n\r\n").unwrap();
+    let head = head.to_lowercase();
+    let header = |name: &str| {
+        head.lines()
+            .find_map(|l| l.strip_prefix(name))
+            .unwrap()
+            .trim()
+            .to_string()
+    };
+    let ts: i64 = header("x-chartgen-timestamp: ").parse().unwrap();
+    assert_eq!(
+        header("x-chartgen-signature: "),
+        webhook::signature(&secret, ts, body)
+    );
+
+    // Rotating gives a new one, once; turning it off leaves none.
+    let args = json!({"alert_id": id, "sign": true});
+    let rotated = call(&a, "update_server_alert", args, "me").await.unwrap();
+    assert_ne!(rotated["webhook_secret"].as_str().unwrap(), secret);
+    let args = json!({"alert_id": id, "sign": false});
+    let off = call(&a, "update_server_alert", args, "me").await.unwrap();
+    assert_eq!(off["webhook"]["signed"], false);
+    assert!(off.get("webhook_secret").is_none());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failed_delivery_shows_the_status_only() {
+    let reply = "HTTP/1.1 500 No\r\ncontent-length: 9\r\nconnection: close\r\n\r\nBODYLEAKS";
+    let (port, seen) = receiver(reply).await;
+    let (store, _) = store_at("failure");
+    let a = alerts_on(store, local(port), Limits::default());
+    let id = create(&a, hooked(port, "greater", "once"), "me").await;
+    tick(&a, BASE, 101.0);
+    until("the failure", || {
+        a.lock().alerts[&id].last_delivery.is_some()
+    })
+    .await;
+    assert_eq!(seen.lock().unwrap().len(), 3, "bounded retries");
+    let view = get(&a, "me", &id).await;
+    assert_eq!(view["last_status"], 500);
+    assert_eq!(view["last_error"], "HTTP 500");
+    assert!(!view.to_string().contains("BODYLEAKS"));
+    assert!(!view.to_string().contains("TOPSECRET"));
+    assert!(store.server_alert_events().unwrap().is_empty(), "given up");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_webhook_budget_skips_the_send_but_not_the_fire() {
+    let (port, seen) = receiver(OK).await;
+    let (store, _) = store_at("budget");
+    let limits = Limits {
+        webhooks_per_client_per_minute: 1,
+        ..Limits::default()
+    };
+    let a = alerts_on(store, local(port), limits);
+    let first = create(&a, hooked(port, "greater", "once"), "me").await;
+    let second = create(&a, hooked(port, "greater", "once"), "me").await;
+    let other = create(&a, hooked(port, "greater", "once"), "you").await;
+    tick(&a, BASE, 101.0);
+    until("two deliveries", || seen.lock().unwrap().len() == 2).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(seen.lock().unwrap().len(), 2, "one per client");
+    for id in [&first, &second, &other] {
+        assert_eq!(a.lock().alerts[id].fire_count, 1, "every alert fired");
+    }
+    let skipped = [&first, &second]
+        .iter()
+        .filter(|id| {
+            a.lock().alerts[**id]
+                .last_delivery
+                .as_ref()
+                .and_then(|d| d.error.clone())
+                .as_deref()
+                == Some("webhook skipped: rate limit reached")
+        })
+        .count();
+    assert_eq!(skipped, 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_total_budget_holds_across_clients() {
+    let (port, seen) = receiver(OK).await;
+    let (store, _) = store_at("budget-total");
+    let limits = Limits {
+        webhooks_total_per_minute: 2,
+        ..Limits::default()
+    };
+    let a = alerts_on(store, local(port), limits);
+    for owner in ["a", "b", "c", "d"] {
+        create(&a, hooked(port, "greater", "once"), owner).await;
+    }
+    tick(&a, BASE, 101.0);
+    until("two deliveries", || seen.lock().unwrap().len() == 2).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(seen.lock().unwrap().len(), 2);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_delivery_interrupted_by_a_restart_resumes_under_the_same_id() {
+    let (port, seen) = receiver(OK).await;
+    let (store, path) = store_at("resume");
+    let a = alerts_on(store, local(port), Limits::default());
+    let id = create(&a, hooked(port, "greater", "once"), "me").await;
+    // As if the process died right after writing the fire.
+    let mut fired = a.lock().alerts[&id].clone();
+    fired.active = false;
+    fired.fire_count = 1;
+    let event = StoredEvent {
+        id: "event-1".into(),
+        alert_id: id.clone(),
+        body: r#"{"id":"event-1"}"#.into(),
+        created_at: chrono::Utc::now().timestamp(),
+    };
+    store
+        .record_server_alert_fire(&id, "me", &fired.json(), Some(&event))
+        .unwrap();
+    drop(a);
+
+    let a = alerts_on(reopen(&path), local(port), Limits::default());
+    until("the delivery", || seen.lock().unwrap().len() == 1).await;
+    assert!(seen.lock().unwrap()[0].contains(r#"{"id":"event-1"}"#));
+    until("the row to clear", || {
+        a.store.server_alert_events().unwrap().is_empty()
+    })
+    .await;
+    assert_eq!(a.lock().alerts[&id].fire_count, 1, "no second fire");
+
+    // A later restart has nothing left to send.
+    let a = alerts_on(reopen(&path), local(port), Limits::default());
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(seen.lock().unwrap().len(), 1);
+    assert_eq!(a.lock().pending, 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stale_or_orphaned_delivery_is_dropped_on_restart() {
+    let (port, seen) = receiver(OK).await;
+    let (store, path) = store_at("stale");
+    let a = alerts_on(store, local(port), Limits::default());
+    let id = create(&a, hooked(port, "less", "once"), "me").await;
+    let record = a.lock().alerts[&id].json();
+    let at = chrono::Utc::now().timestamp();
+    let event = |eid: &str, alert: &str, created_at| StoredEvent {
+        id: eid.into(),
+        alert_id: alert.into(),
+        body: "{}".into(),
+        created_at,
+    };
+    let old = event("old", &id, at - EVENT_MAX_AGE_SECS - 10);
+    let orphan = event("orphan", "gone", at);
+    store
+        .record_server_alert_fire(&id, "me", &record, Some(&old))
+        .unwrap();
+    store
+        .record_server_alert_fire(&id, "me", &record, Some(&orphan))
+        .unwrap();
+    drop(a);
+    let a = alerts_on(reopen(&path), local(port), Limits::default());
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(seen.lock().unwrap().is_empty());
+    assert!(a.store.server_alert_events().unwrap().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_deleted_alert_sends_nothing_more() {
+    let (port, seen) = receiver(OK).await;
+    let (store, path) = store_at("delete");
+    let a = alerts_on(store, local(port), Limits::default());
+    let id = create(&a, hooked(port, "less", "once"), "me").await;
+    let record = a.lock().alerts[&id].json();
+    let event = StoredEvent {
+        id: "e".into(),
+        alert_id: id.clone(),
+        body: "{}".into(),
+        created_at: chrono::Utc::now().timestamp(),
+    };
+    store
+        .record_server_alert_fire(&id, "me", &record, Some(&event))
+        .unwrap();
+    call(&a, "delete_server_alert", json!({"alert_id": id}), "me")
+        .await
+        .unwrap();
+    assert!(store.server_alert_events().unwrap().is_empty());
+    drop(a);
+    let _a = alerts_on(reopen(&path), local(port), Limits::default());
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(seen.lock().unwrap().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_owner_of_alerts_is_not_collected_as_unused() {
+    let (store, _) = store_at("owners");
+    store.save_oauth_client("owner", &[]).unwrap();
+    store.save_oauth_client("nobody", &[]).unwrap();
+    let a = plain(store);
+    create(&a, spec("less", "once", 1.0), "owner").await;
+    assert!(store.script_owners().unwrap().contains("owner"));
+    assert_eq!(store.gc_oauth_clients(-10).unwrap(), 1, "only nobody");
+    let left: Vec<String> = store
+        .oauth_clients()
+        .unwrap()
+        .into_iter()
+        .map(|c| c.client_id)
+        .collect();
+    assert_eq!(left, ["owner"]);
+}
+
+#[test]
+fn a_stored_alert_reads_back_with_its_secret() {
+    let record: Record = serde_json::from_value(json!({
+        "id": "x", "owner": "o", "symbol": "BTCUSDT", "interval": "1h",
+        "evaluate_on": "close", "feed_interval": "1h", "condition": "crossing_up",
+        "level": 1.5, "trigger": "every", "active": true, "created_at": 1,
+        "webhook": { "url": "https://example.com/", "secret": "s" }
+    }))
+    .unwrap();
+    assert_eq!(record.condition, Condition::CrossingUp);
+    assert_eq!(
+        record.webhook.as_ref().unwrap().secret.as_deref(),
+        Some("s")
+    );
+    assert_eq!(record.fire_count, 0);
+    let again: Record = serde_json::from_str(&record.json()).unwrap();
+    assert_eq!(again.webhook.unwrap().url, "https://example.com/");
+}

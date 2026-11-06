@@ -19,6 +19,7 @@ use uuid::Uuid;
 use crate::chart_push::{ChartHub, PushCtx, STREAM_BUFFER};
 use crate::mcp::handle_mcp_request;
 use chartgen::engine::Engine as TradingEngine;
+use chartgen::mcp_schema::SERVER_ALERT_TOOLS;
 #[cfg(feature = "scripting")]
 use chartgen::scripting;
 
@@ -1065,6 +1066,24 @@ async fn mcp_handler(
 
     // Extract token for subscription tools
     let token_owned = extract_bearer_token(&headers).map(|t| t.to_string());
+    let alert_tool = params
+        .and_then(|p| p.get("name"))
+        .and_then(|n| n.as_str())
+        .filter(|n| method == "tools/call" && SERVER_ALERT_TOOLS.contains(n));
+    if let Some(tool) = alert_tool {
+        // An alert belongs to the token's OAuth client (ADR-0042).
+        let owner = token_owned
+            .as_deref()
+            .and_then(|t| state.oauth.lock().unwrap().client_for_token(t));
+        let (tool, id) = (tool.to_string(), id.clone());
+        let args = params.and_then(|p| p.get("arguments")).cloned();
+        let result = tokio::task::spawn_blocking(move || {
+            server_alert_call(&tool, id, args.unwrap_or(json!({})), owner.as_deref())
+        })
+        .await
+        .unwrap();
+        return streamable_http_json_response(StatusCode::OK, result, session_id.as_deref());
+    }
     // Scripted indicators belong to the token's OAuth client (ADR-0025).
     #[cfg(feature = "scripting")]
     let user = match &token_owned {
@@ -1097,7 +1116,37 @@ async fn mcp_handler(
     .await
     .unwrap();
 
+    let result = if method == "tools/list" {
+        with_server_alert_tools(result)
+    } else {
+        result
+    };
     streamable_http_json_response(StatusCode::OK, result, session_id.as_deref())
+}
+
+/// A server alert tool call; on a server without them only the list answers.
+#[cfg_attr(not(feature = "scripting"), allow(unused_variables))]
+fn server_alert_call(tool: &str, id: Option<Value>, args: Value, owner: Option<&str>) -> Value {
+    #[cfg(feature = "scripting")]
+    if let Some(alerts) = crate::server_alerts::global() {
+        return alerts.call_tool(tool, id, &args, owner);
+    }
+    if tool == "list_server_alerts" {
+        return crate::mcp::tool_ok(id, json!({ "enabled": false, "alerts": [] }));
+    }
+    crate::mcp::tool_err(id, "Server alerts are off on this server")
+}
+
+/// The alert tools are listed only where they run (`CHARTGEN_SERVER_ALERTS=1`).
+#[cfg_attr(not(feature = "scripting"), allow(unused_mut))]
+fn with_server_alert_tools(mut result: Value) -> Value {
+    #[cfg(feature = "scripting")]
+    if crate::server_alerts::global().is_some() {
+        if let Some(tools) = result["result"]["tools"].as_array_mut() {
+            tools.extend(chartgen::mcp_schema::server_alert_tools());
+        }
+    }
+    result
 }
 
 // --- Health / discovery handler (no auth) ---
@@ -1389,6 +1438,8 @@ pub async fn run_server(port: u16, engine: Option<Arc<RwLock<TradingEngine>>>) {
         engine,
         charts: ChartHub::from_env(),
     });
+    #[cfg(feature = "scripting")]
+    crate::server_alerts::start(&state.charts);
 
     // Store port for metadata endpoint
     std::env::set_var("_CHARTGEN_PORT", port.to_string());

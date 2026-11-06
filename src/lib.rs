@@ -10,3 +10,4 @@ pub mod renderer;
 #[cfg(feature = "scripting")]
 pub mod scripting;
 pub mod trading;
+pub mod webhook;

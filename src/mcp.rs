@@ -1085,7 +1085,7 @@ fn engine_not_running(id: Option<Value>) -> Value {
     })
 }
 
-fn tool_ok(id: Option<Value>, payload: Value) -> Value {
+pub(crate) fn tool_ok(id: Option<Value>, payload: Value) -> Value {
     json!({
         "jsonrpc": "2.0",
         "id": id,
@@ -1095,7 +1095,7 @@ fn tool_ok(id: Option<Value>, payload: Value) -> Value {
     })
 }
 
-fn tool_err(id: Option<Value>, msg: &str) -> Value {
+pub(crate) fn tool_err(id: Option<Value>, msg: &str) -> Value {
     json!({
         "jsonrpc": "2.0",
         "id": id,

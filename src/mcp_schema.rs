@@ -378,6 +378,86 @@ pub fn tools_list_result() -> Value {
     })
 }
 
+/// Names of the server alert tools (ADR-0042). They answer on the HTTP
+/// transport, where a call has an OAuth client to own the alert.
+pub const SERVER_ALERT_TOOLS: [&str; 4] = [
+    "create_server_alert",
+    "list_server_alerts",
+    "update_server_alert",
+    "delete_server_alert",
+];
+
+/// Tools for alerts that run on the server (ADR-0042). `tools/list` appends them
+/// only with `CHARTGEN_SERVER_ALERTS=1`; the generated TypeScript types always
+/// include them, because the web app handles both cases.
+pub fn server_alert_tools() -> Vec<Value> {
+    let condition = json!({
+        "type": "string",
+        "enum": ["crossing", "crossing_up", "crossing_down", "greater", "less"],
+        "description": "crossing: the price goes from one side of the level to the other, or onto it. crossing_up / crossing_down: only that way. greater / less: the price is above / below the level. A crossing needs a previous reading, so the first price the alert sees never fires one."
+    });
+    let trigger = json!({
+        "type": "string",
+        "enum": ["once", "every"],
+        "description": "once: switch off after firing. every: stay active; greater and less wait until the price is back on the other side."
+    });
+    vec![
+        json!({
+            "name": "create_server_alert",
+            "description": "Create a price alert that runs on the server, with no browser open, and optionally calls a webhook when it fires. It belongs to your OAuth client and survives restarts. Binance symbols only. Drawing and indicator alerts cannot run here. The webhook must be https on port 443 at a public address. With sign: true the response holds webhook_secret once; it cannot be read again. Returns the alert as list_server_alerts does.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "symbol": { "type": "string", "description": "Binance symbol, e.g. BTCUSDT." },
+                    "interval": { "type": "string", "description": "Bar interval with a Binance kline stream, e.g. 1m, 15m, 1h, 1d. With evaluate_on: close the alert reads the closes of these bars; with live it only labels the alert.", "default": "1m" },
+                    "evaluate_on": { "type": "string", "enum": ["live", "close"], "description": "live: every price update, like a browser alert. close: only when a bar of the interval closes.", "default": "live" },
+                    "condition": condition.clone(),
+                    "level": { "type": "number", "description": "The price level; greater than 0." },
+                    "trigger": trigger.clone(),
+                    "message": { "type": "string", "maxLength": 200, "description": "Your note, sent in the webhook payload." },
+                    "webhook_url": { "type": "string", "maxLength": 512, "description": "https URL to POST to when the alert fires." },
+                    "sign": { "type": "boolean", "description": "Sign deliveries with a per-alert secret (HMAC-SHA256). Needs webhook_url.", "default": false }
+                },
+                "required": ["symbol", "condition", "level", "trigger"]
+            }
+        }),
+        json!({
+            "name": "list_server_alerts",
+            "description": "List your server alerts with their state: active, disarmed, last_triggered_at, fire_count, feed (live or waiting), last_price and the last webhook delivery (status and error only). A webhook shows its host and whether it signs, never its URL or secret. On a server without server alerts this returns {enabled: false, alerts: []}.",
+            "inputSchema": { "type": "object", "properties": {} }
+        }),
+        json!({
+            "name": "update_server_alert",
+            "description": "Change one of your server alerts. Changing condition, level, trigger or message switches it on and re-arms it. active: false pauses it and active: true resumes it, re-armed. webhook_url replaces the webhook, an empty string removes it. With sign: true the response holds a new webhook_secret once. Symbol, interval and evaluate_on cannot change: delete and create instead.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "alert_id": { "type": "string", "description": "The alert's id." },
+                    "active": { "type": "boolean", "description": "Pause (false) or resume (true)." },
+                    "condition": condition,
+                    "level": { "type": "number", "description": "The price level; greater than 0." },
+                    "trigger": trigger,
+                    "message": { "type": "string", "maxLength": 200, "description": "Your note; an empty string removes it." },
+                    "webhook_url": { "type": "string", "maxLength": 512, "description": "New https URL, or an empty string to remove the webhook." },
+                    "sign": { "type": "boolean", "description": "true: sign with a new secret. false: stop signing." }
+                },
+                "required": ["alert_id"]
+            }
+        }),
+        json!({
+            "name": "delete_server_alert",
+            "description": "Delete one of your server alerts, with any delivery still pending. Returns {deleted: false} if you have no alert with that id.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "alert_id": { "type": "string", "description": "The alert's id." }
+                },
+                "required": ["alert_id"]
+            }
+        }),
+    ]
+}
+
 /// Tools for user-authored Starlark indicators (ADR-0025). `tools/list`
 /// appends them only when `CHARTGEN_SCRIPTING=1`; `tools_list_result()`
 /// (and so the generated TypeScript input types) never includes them.

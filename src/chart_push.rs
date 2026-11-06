@@ -257,7 +257,8 @@ pub struct PushCtx {
     pub client: String,
 }
 
-type FeedKey = (String, String);
+/// A feed: the symbol as it goes into the stream name, and its interval.
+pub type FeedKey = (String, String);
 
 struct StreamSlot {
     id: u64,
@@ -328,6 +329,30 @@ impl State {
             .filter(|(_, s)| keep(s))
             .map(|(id, _)| id.clone())
             .collect()
+    }
+}
+
+/// Keeps a feed running for `ChartHub::watch_feed`.
+pub struct FeedLease {
+    hub: Weak<ChartHub>,
+    key: FeedKey,
+}
+
+impl Drop for FeedLease {
+    fn drop(&mut self) {
+        let Some(hub) = self.hub.upgrade() else {
+            return;
+        };
+        let mut st = hub.lock();
+        let Some(feed) = st.feeds.get_mut(&self.key) else {
+            return;
+        };
+        feed.groups = feed.groups.saturating_sub(1);
+        if feed.groups == 0 {
+            feed.epoch += 1;
+            let epoch = feed.epoch;
+            hub.close_later(self.key.clone(), epoch);
+        }
     }
 }
 
@@ -483,40 +508,7 @@ impl ChartHub {
 
         if !st.groups.contains_key(&req) {
             let feed = (symbol, interval);
-            let events = match st.feeds.get_mut(&feed) {
-                Some(f) => match f.events.upgrade() {
-                    Some(events) => {
-                        if f.groups == 0 {
-                            f.epoch += 1;
-                        }
-                        f.groups += 1;
-                        Some(events.subscribe())
-                    }
-                    None => None,
-                },
-                None => None,
-            };
-            let events = match events {
-                Some(rx) => rx,
-                None => {
-                    // New, or its task ended: start it (again). Groups still
-                    // on the ended feed see `Closed` and leave.
-                    let groups = st.feeds.remove(&feed).map_or(0, |f| f.groups);
-                    let (events, rx) = broadcast::channel(FEED_BUFFER);
-                    let weak = events.downgrade();
-                    let task = self.spawn_feed(&feed, events);
-                    st.feeds.insert(
-                        feed.clone(),
-                        Feed {
-                            groups: groups + 1,
-                            events: weak,
-                            task,
-                            epoch: 0,
-                        },
-                    );
-                    rx
-                }
-            };
+            let events = self.join_feed(st, &feed);
             let id = self.id();
             let task = self.runtime.spawn(run_group(
                 self.me.clone(),
@@ -550,6 +542,64 @@ impl ChartHub {
             },
         );
         Ok(id)
+    }
+
+    /// One more user of `feed`, started if it is new or its task ended. Users
+    /// still on an ended feed see `Closed` and leave.
+    fn join_feed(&self, st: &mut State, feed: &FeedKey) -> broadcast::Receiver<FeedEvent> {
+        if let Some(f) = st.feeds.get_mut(feed) {
+            if let Some(events) = f.events.upgrade() {
+                if f.groups == 0 {
+                    f.epoch += 1;
+                }
+                f.groups += 1;
+                return events.subscribe();
+            }
+        }
+        let groups = st.feeds.remove(feed).map_or(0, |f| f.groups);
+        let (events, rx) = broadcast::channel(FEED_BUFFER);
+        let weak = events.downgrade();
+        let task = self.spawn_feed(feed, events);
+        st.feeds.insert(
+            feed.clone(),
+            Feed {
+                groups: groups + 1,
+                events: weak,
+                task,
+                epoch: 0,
+            },
+        );
+        rx
+    }
+
+    /// The feed serving `symbol` at `timeframe`, or why there is none.
+    pub fn feed_key(&self, symbol: &str, timeframe: &str) -> Result<FeedKey, String> {
+        let interval = self.source.feed_interval(symbol, timeframe)?;
+        Ok((feed_symbol(symbol)?, interval))
+    }
+
+    /// Does `symbol` have bars at `timeframe`? Blocking; one fetch.
+    pub fn check_symbol(&self, symbol: &str, timeframe: &str) -> Result<(), String> {
+        match self.source.seed(symbol, timeframe, 2) {
+            Ok(d) if !d.is_empty() => Ok(()),
+            Ok(_) => Err(format!("no bars for {symbol}")),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Listen to a feed without a chart (server alerts, ADR-0042): it shares the
+    /// WebSocket with every chart of that symbol and interval, and closes after
+    /// the linger once the lease and all charts are gone.
+    pub fn watch_feed(
+        self: &Arc<Self>,
+        key: &FeedKey,
+    ) -> (broadcast::Receiver<FeedEvent>, FeedLease) {
+        let rx = self.join_feed(&mut self.lock(), key);
+        let lease = FeedLease {
+            hub: Arc::downgrade(self),
+            key: key.clone(),
+        };
+        (rx, lease)
     }
 
     /// Drop subscription `id` if `token` owns it. True if it did.
@@ -1018,6 +1068,53 @@ mod tests {
             next(&mut rx, 2_000).await.unwrap()["params"]["series"]["bars"][1]["c"],
             7.0
         );
+    }
+
+    #[tokio::test]
+    async fn a_watcher_shares_the_charts_feed_and_holds_it_open() {
+        let fake = Arc::new(Fake::default());
+        let hub = hub(
+            &fake,
+            Limits {
+                feed_linger: Duration::from_millis(50),
+                ..Limits::default()
+            },
+        );
+        let (tx, mut rx) = stream();
+        hub.link_stream("s1", tx);
+        let sub = hub
+            .subscribe("tok", "ip", "s1", req("BTCUSDT", "[]"))
+            .unwrap();
+        let key = hub.feed_key("btcusdt", "1m").unwrap();
+        assert_eq!(key, ("BTCUSDT".to_string(), "1m".to_string()));
+        let (mut events, lease) = hub.watch_feed(&key);
+        assert_eq!(
+            fake.started.load(Ordering::SeqCst),
+            1,
+            "no second WebSocket"
+        );
+
+        fake.send(FeedEvent::Tick(bar(1_704_067_200, 7.0))).await;
+        let event = tokio::time::timeout(Duration::from_secs(2), events.recv());
+        let Ok(Ok(FeedEvent::Tick(seen))) = event.await else {
+            panic!("the watcher got no tick");
+        };
+        assert_eq!(seen.close, 7.0);
+
+        // The chart leaving does not close a feed that is watched.
+        hub.unsubscribe("tok", &sub);
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        assert_eq!(hub.counts(), (0, 0, 1));
+        assert_eq!(fake.running.load(Ordering::SeqCst), 1);
+
+        // The lease going closes it after the linger, if nobody came back.
+        drop(lease);
+        assert_eq!(hub.counts(), (0, 0, 1));
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        assert_eq!(hub.counts(), (0, 0, 0));
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(fake.running.load(Ordering::SeqCst), 0);
+        while next(&mut rx, 20).await.is_some() {}
     }
 
     #[tokio::test]

@@ -770,6 +770,8 @@ fn server_command(
         .env_remove("CHARTGEN_WEB_DIR")
         .env_remove("CHARTGEN_BASE_URL")
         .env_remove("CHARTGEN_SCRIPTING")
+        .env_remove("CHARTGEN_SERVER_ALERTS")
+        .env_remove("CHARTGEN_WEBHOOK_TEST_ORIGIN")
         .env("CHARTGEN_DB", db)
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
@@ -1124,6 +1126,193 @@ fn store_path(test: &str) -> std::path::PathBuf {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     dir.join("chartgen.db")
+}
+
+const ALERT_TOOLS: [&str; 4] = [
+    "create_server_alert",
+    "list_server_alerts",
+    "update_server_alert",
+    "delete_server_alert",
+];
+
+/// Call a tool; `Err` is an `isError` result's text.
+fn call_tool(
+    port: u16,
+    token: &str,
+    tool: &str,
+    args: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let auth = format!("Authorization: Bearer {token}");
+    let call = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {"name": tool, "arguments": args},
+    });
+    let headers = [JSON_POST[0], JSON_POST[1], auth.as_str()];
+    let (st, _, resp) = http(port, "POST", "/mcp", &headers, &call.to_string());
+    assert_eq!(st, 200, "{resp}");
+    let v: serde_json::Value = serde_json::from_str(&resp).unwrap();
+    let text = v["result"]["content"][0]["text"].as_str().unwrap();
+    if v["result"]["isError"] == true {
+        Err(text.to_string())
+    } else {
+        Ok(serde_json::from_str(text).unwrap())
+    }
+}
+
+/// Off unless asked for: not listed, and only the list answers, saying so.
+#[test]
+fn test_server_alerts_are_off_by_default() {
+    let db = store_path("alerts-off");
+    let port = free_port();
+    let srv = spawn_server_on(port, None, &db, false);
+    let tools = tool_names(port);
+    for tool in ALERT_TOOLS {
+        assert!(!tools.iter().any(|t| t == tool), "{tool} listed");
+    }
+    let client = register_external(port);
+    let token = sign_in(port, &client);
+    let list = call_tool(port, &token, "list_server_alerts", serde_json::json!({})).unwrap();
+    assert_eq!(list, serde_json::json!({"enabled": false, "alerts": []}));
+    let spec = serde_json::json!({
+        "symbol": "BTCUSDT", "condition": "greater", "trigger": "once", "level": 1,
+    });
+    let e = call_tool(port, &token, "create_server_alert", spec).unwrap_err();
+    assert!(e.contains("off on this server"), "{e}");
+    drop(srv);
+}
+
+#[cfg(feature = "scripting")]
+mod server_alerts {
+    use super::*;
+    use std::io::{Read, Write};
+    use std::sync::{Arc, Mutex};
+
+    /// A webhook receiver answering 200; returns its port and what it received.
+    fn receiver() -> (u16, Arc<Mutex<Vec<String>>>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let log = seen.clone();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut s) = stream else { continue };
+                let mut buf = vec![0u8; 16384];
+                let n = s.read(&mut buf).unwrap_or(0);
+                log.lock()
+                    .unwrap()
+                    .push(String::from_utf8_lossy(&buf[..n]).to_string());
+                let _ = s.write_all(
+                    b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
+                );
+            }
+        });
+        (port, seen)
+    }
+
+    fn alert_server(db: &std::path::Path, hook_port: u16, sample: bool) -> Server {
+        let port = free_port();
+        let mut cmd = server_command(port, None, db, false);
+        cmd.env("CHARTGEN_SERVER_ALERTS", "1").env(
+            "CHARTGEN_WEBHOOK_TEST_ORIGIN",
+            format!("http://127.0.0.1:{hook_port}"),
+        );
+        if sample {
+            cmd.env("CHARTGEN_DATA_SOURCE", "sample");
+        } else {
+            cmd.env_remove("CHARTGEN_DATA_SOURCE");
+        }
+        start_server(cmd, port)
+    }
+
+    fn wait_for(what: &str, mut done: impl FnMut() -> bool) {
+        for _ in 0..200 {
+            if done() {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        panic!("timed out waiting for {what}");
+    }
+
+    /// The real binary, killed and started again on the same store: the alerts
+    /// come back, and what fired before does not fire again.
+    #[test]
+    fn test_alerts_survive_a_restart_and_do_not_fire_again() {
+        let db = store_path("alerts-restart");
+        let (hook, seen) = receiver();
+        let srv = alert_server(&db, hook, true);
+        let port = srv.port;
+        for tool in ALERT_TOOLS {
+            assert!(tool_names(port).iter().any(|t| t == tool), "{tool}");
+        }
+        let client = register_external(port);
+        let token = sign_in(port, &client);
+        let url = format!("http://127.0.0.1:{hook}/hook");
+        // A level far below the sample price is simply greater, at once.
+        let create = |trigger: &str| {
+            call_tool(
+                port,
+                &token,
+                "create_server_alert",
+                serde_json::json!({
+                    "symbol": "BTCUSDT", "condition": "greater", "trigger": trigger,
+                    "level": 0.01, "webhook_url": url,
+                }),
+            )
+            .unwrap()
+        };
+        let once = create("once");
+        let every = create("every");
+        wait_for("both deliveries", || seen.lock().unwrap().len() == 2);
+        drop(srv);
+
+        let srv = alert_server(&db, hook, true);
+        let port = srv.port;
+        let token = sign_in(port, &client);
+        // Several of the sample feed's ticks, each above the level.
+        std::thread::sleep(std::time::Duration::from_secs(3));
+        assert_eq!(seen.lock().unwrap().len(), 2, "fired again after a restart");
+        let list = call_tool(port, &token, "list_server_alerts", serde_json::json!({})).unwrap();
+        let alerts = list["alerts"].as_array().unwrap();
+        assert_eq!(alerts.len(), 2);
+        let find = |id: &serde_json::Value| alerts.iter().find(|a| a["id"] == *id).unwrap();
+        let (o, e) = (find(&once["id"]), find(&every["id"]));
+        assert_eq!((&o["active"], &o["fire_count"]), (&false.into(), &1.into()));
+        assert_eq!((&e["active"], &e["fire_count"]), (&true.into(), &1.into()));
+        assert_eq!(e["disarmed"], true);
+        assert_eq!(e["feed"], "live", "the feed came back");
+        assert_eq!(e["last_status"], 200);
+
+        // Another client's list stays empty on the same server.
+        let other = sign_in(port, &register_external(port));
+        let list = call_tool(port, &other, "list_server_alerts", serde_json::json!({})).unwrap();
+        assert_eq!(list["alerts"], serde_json::json!([]));
+    }
+
+    /// The test receiver setting means nothing outside the sample source, so
+    /// a live server can never be pointed at loopback, however it is configured.
+    #[test]
+    fn test_loopback_is_refused_on_a_live_source_even_with_the_test_setting() {
+        let db = store_path("alerts-live");
+        let (hook, seen) = receiver();
+        let srv = alert_server(&db, hook, false);
+        let port = srv.port;
+        let token = sign_in(port, &register_external(port));
+        let e = call_tool(
+            port,
+            &token,
+            "create_server_alert",
+            serde_json::json!({
+                "symbol": "BTCUSDT", "condition": "greater", "trigger": "once", "level": 1,
+                "webhook_url": format!("http://127.0.0.1:{hook}/hook"),
+            }),
+        )
+        .unwrap_err();
+        assert!(e.contains("https"), "{e}");
+        assert!(seen.lock().unwrap().is_empty());
+    }
 }
 
 /// External MCP clients keep their registration across a restart without
