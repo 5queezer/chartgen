@@ -1,4 +1,5 @@
-//! SQLite store for user indicators and registered OAuth clients (ADR-0025).
+//! SQLite store for user indicators, registered OAuth clients (ADR-0025) and
+//! server alerts (ADR-0042).
 //!
 //! One file, `CHARTGEN_DB` (default `~/.chartgen/chartgen.db`), migrated on
 //! open. OAuth clients are stored so a client keeps its `client_id` (the
@@ -33,6 +34,20 @@ const MIGRATIONS: &[&str] = &[
     "
     ALTER TABLE oauth_clients ADD COLUMN last_token_at INTEGER;
 ",
+    "
+    CREATE TABLE server_alerts (
+        id           TEXT PRIMARY KEY,
+        owner        TEXT NOT NULL,
+        record_json  TEXT NOT NULL
+    );
+    CREATE INDEX server_alerts_owner ON server_alerts (owner);
+    CREATE TABLE server_alert_events (
+        id          TEXT    PRIMARY KEY,
+        alert_id    TEXT    NOT NULL,
+        body        TEXT    NOT NULL,
+        created_at  INTEGER NOT NULL
+    );
+",
 ];
 
 /// A stored script. `meta` is the `ScriptInfo` snapshot taken at register.
@@ -54,6 +69,16 @@ pub struct StoredClient {
     pub created_at: i64,
     /// When it last received a token; `None` if it never did.
     pub last_token_at: Option<i64>,
+}
+
+/// A webhook delivery not finished yet: written with the fire it reports, so a
+/// restart resumes it and never fires again to get it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct StoredEvent {
+    pub id: String,
+    pub alert_id: String,
+    pub body: String,
+    pub created_at: i64,
 }
 
 pub struct Store {
@@ -239,14 +264,99 @@ impl Store {
         rows.collect()
     }
 
+    /// The client ids that own at least one server alert.
+    pub fn server_alert_owners(&self) -> rusqlite::Result<HashSet<String>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare("SELECT DISTINCT owner FROM server_alerts")?;
+        let rows = stmt.query_map([], |r| r.get(0))?;
+        rows.collect()
+    }
+
     /// Delete clients registered over `max_age_secs` ago that never received
-    /// a token and own no scripts; returns how many.
+    /// a token and own no scripts; returns how many. An owner of a server alert
+    /// has received one.
     pub fn gc_oauth_clients(&self, max_age_secs: i64) -> rusqlite::Result<usize> {
         self.conn().execute(
             "DELETE FROM oauth_clients WHERE last_token_at IS NULL AND created_at < ?1
                  AND client_id NOT IN (SELECT user_id FROM user_indicators)",
             params![chrono::Utc::now().timestamp() - max_age_secs],
         )
+    }
+
+    /// Insert or replace a server alert; `record` is its JSON.
+    pub fn save_server_alert(&self, id: &str, owner: &str, record: &str) -> rusqlite::Result<()> {
+        self.conn().execute(
+            "INSERT OR REPLACE INTO server_alerts (id, owner, record_json) VALUES (?1, ?2, ?3)",
+            params![id, owner, record],
+        )?;
+        Ok(())
+    }
+
+    /// The JSON of every server alert.
+    pub fn server_alerts(&self) -> rusqlite::Result<Vec<String>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare("SELECT record_json FROM server_alerts")?;
+        let rows = stmt.query_map([], |r| r.get(0))?;
+        rows.collect()
+    }
+
+    /// Delete a server alert and whatever it still had to deliver.
+    pub fn delete_server_alert(&self, id: &str) -> rusqlite::Result<()> {
+        let mut conn = self.conn();
+        let tx = conn.transaction()?;
+        tx.execute("DELETE FROM server_alerts WHERE id = ?1", params![id])?;
+        tx.execute(
+            "DELETE FROM server_alert_events WHERE alert_id = ?1",
+            params![id],
+        )?;
+        tx.commit()
+    }
+
+    /// Write a fired alert's new state and, in one transaction, its delivery.
+    pub fn record_server_alert_fire(
+        &self,
+        id: &str,
+        owner: &str,
+        record: &str,
+        event: Option<&StoredEvent>,
+    ) -> rusqlite::Result<()> {
+        let mut conn = self.conn();
+        let tx = conn.transaction()?;
+        tx.execute(
+            "INSERT OR REPLACE INTO server_alerts (id, owner, record_json) VALUES (?1, ?2, ?3)",
+            params![id, owner, record],
+        )?;
+        if let Some(e) = event {
+            tx.execute(
+                "INSERT INTO server_alert_events (id, alert_id, body, created_at)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![e.id, e.alert_id, e.body, e.created_at],
+            )?;
+        }
+        tx.commit()
+    }
+
+    /// Deliveries not finished, oldest first.
+    pub fn server_alert_events(&self) -> rusqlite::Result<Vec<StoredEvent>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
+            "SELECT id, alert_id, body, created_at FROM server_alert_events ORDER BY created_at",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(StoredEvent {
+                id: r.get(0)?,
+                alert_id: r.get(1)?,
+                body: r.get(2)?,
+                created_at: r.get(3)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    pub fn delete_server_alert_event(&self, id: &str) -> rusqlite::Result<()> {
+        self.conn()
+            .execute("DELETE FROM server_alert_events WHERE id = ?1", params![id])?;
+        Ok(())
     }
 }
 

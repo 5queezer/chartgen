@@ -16,6 +16,7 @@ import {
   createMemo,
   createSignal,
   onCleanup,
+  untrack,
   type Accessor,
 } from "solid-js";
 
@@ -24,6 +25,13 @@ import type { LiveSnapshot } from "../lib/liveFeed";
 import { formatPrice } from "../lib/quote";
 import type { McpSession } from "../mcp";
 import { createQuotesQuery } from "../queries";
+import {
+  refreshServerAlerts,
+  serverAlertText,
+  serverAlertsEnabled,
+  setServerAlertSession,
+  takeNewFires,
+} from "../stores/serverAlerts";
 import { timeAxisOf } from "../stores/drawings";
 import { scaleMode } from "../stores/layout";
 import type { SeriesPayload } from "../types/responses";
@@ -39,6 +47,10 @@ import {
 } from "../stores/alerts";
 
 const TOAST_MS = 5_000;
+const SERVER_ALERT_POLL_MS = 5_000;
+/** How often a server without them is asked again, and how soon a focus may do so. */
+const SERVER_ALERT_RECHECK_MS = 300_000;
+const SERVER_ALERT_FOCUS_GAP_MS = 30_000;
 // A triggered alert is worth reading; it stays longer than a confirmation.
 const ALERT_TOAST_MS = 8_000;
 /** Toasts visible at once; a new one pushes the oldest out. */
@@ -130,14 +142,13 @@ export function requestNotificationPermission(): void {
   }
 }
 
-function deliver(fired: Alert[]): void {
+function deliver(fired: readonly { id: string; text: string }[]): void {
   if (fired.length === 0) return;
-  for (const a of fired) {
-    const text = alertText(a);
+  for (const { id, text } of fired) {
     showToast(`Alert: ${text}`, ALERT_TOAST_MS);
     try {
       if (typeof Notification !== "undefined" && Notification.permission === "granted") {
-        new Notification("chartgen alert", { body: text, tag: a.id });
+        new Notification("chartgen alert", { body: text, tag: id });
       }
     } catch {
       // Some browsers throw (e.g. Android Chrome wants a service worker):
@@ -244,7 +255,9 @@ export function feedPrice(
     observePrice(symbol, price);
     return;
   }
-  deliver(processPrice(symbol, price, Date.now(), tick));
+  deliver(
+    processPrice(symbol, price, Date.now(), tick).map((a) => ({ id: a.id, text: alertText(a) })),
+  );
 }
 
 /**
@@ -290,6 +303,62 @@ export function chartTick(series: SeriesPayload): Tick {
       view: axis ? { axis, log: scaleMode() === "log" } : undefined,
     },
   };
+}
+
+/**
+ * Keep the server's alerts (ADR-0042) up to date and tell the user what fired. They
+ * never enter the browser's own list, so no tab evaluates them; the server fires them.
+ * Only the leading tab asks and reports, and the others read the list it shares. While
+ * the server does not run them, this asks `tools/list` once, then on focus or every few
+ * minutes, in case the operator turned them on.
+ */
+export function createServerAlertPoll(session: McpSession, enabled: Accessor<boolean>): void {
+  createEffect(() => {
+    if (enabled()) setServerAlertSession(session);
+  });
+  // Outlives the leadership, so that switching tabs back and forth does not each ask.
+  let lastAsked = 0;
+  createEffect(() => {
+    if (!enabled() || !leader()) return;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let stopped = false;
+    let asking = false;
+    const every = () => (serverAlertsEnabled() ? SERVER_ALERT_POLL_MS : SERVER_ALERT_RECHECK_MS);
+    const ask = async () => {
+      if (asking) return;
+      clearTimeout(timer);
+      // Without Web Locks a hidden tab leads as well, and nobody is looking at it.
+      if (document.visibilityState === "hidden") {
+        timer = setTimeout(() => void ask(), every());
+        return;
+      }
+      asking = true;
+      lastAsked = Date.now();
+      const on = await refreshServerAlerts();
+      asking = false;
+      if (stopped) return;
+      if (on) deliver(takeNewFires().map((a) => ({ id: a.id, text: serverAlertText(a) })));
+      timer = setTimeout(() => void ask(), every());
+    };
+    /** Asked recently enough that a focus or a new leadership need not ask again? */
+    const askedLately = () =>
+      Date.now() - lastAsked <
+      (serverAlertsEnabled() ? SERVER_ALERT_POLL_MS : SERVER_ALERT_FOCUS_GAP_MS);
+    const onFocus = () => {
+      if (!serverAlertsEnabled() && !askedLately()) void ask();
+    };
+    window.addEventListener("focus", onFocus);
+    // Untracked: what it asks changes the store it reads, which must not restart this.
+    untrack(() => {
+      if (askedLately()) timer = setTimeout(() => void ask(), every() - (Date.now() - lastAsked));
+      else void ask();
+    });
+    onCleanup(() => {
+      stopped = true;
+      clearTimeout(timer);
+      window.removeEventListener("focus", onFocus);
+    });
+  });
 }
 
 /**

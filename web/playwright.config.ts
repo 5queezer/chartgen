@@ -32,6 +32,16 @@ const REUSE_SERVER = !process.env.CI && process.env.PW_REUSE_SERVER === "1";
 // is used: a reused server keeps its own store, which on a dev server is the
 // real ~/.chartgen/chartgen.db, and collects the test clients there.
 const CHARTGEN_DB = join(tmpdir(), `chartgen-e2e-${CHARTGEN_PORT}.db`);
+// The whole suite runs as production does, with server alerts off (ADR-0042). A
+// second pair of servers runs them on, for the specs below: all on hid a poll that
+// only misbehaved with the flag off.
+const ALERTS_CHARTGEN_PORT = CHARTGEN_PORT - 2_000;
+const ALERTS_WEB_PORT = WEB_PORT - 2_000;
+const ALERTS_DB = join(tmpdir(), `chartgen-e2e-${ALERTS_CHARTGEN_PORT}.db`);
+const ALERTS_SPECS = /(server-alerts|alerts|alerts-sources)\.spec\.ts$/;
+// The webhook receiver of server-alerts.spec.ts. The server only accepts this
+// local origin because it runs on the sample source.
+const WEBHOOK_PORT = CHARTGEN_PORT - 1_000;
 const SCRIPTING_CHARTGEN_PORT = CHARTGEN_PORT + 1000;
 const SCRIPTING_WEB_PORT = WEB_PORT + 1000;
 const SCRIPTING_DB = join(tmpdir(), `chartgen-e2e-${SCRIPTING_CHARTGEN_PORT}.db`);
@@ -58,8 +68,14 @@ export default defineConfig({
   projects: [
     {
       name: "chromium",
-      testIgnore: SCRIPTING_SPECS,
+      testIgnore: [/server-alerts\.spec\.ts$/, SCRIPTING_SPECS],
       use: { ...devices["Desktop Chrome"] },
+    },
+    {
+      name: "chromium-server-alerts",
+      testMatch: ALERTS_SPECS,
+      testIgnore: /server-alerts-off\.spec\.ts$/,
+      use: { ...devices["Desktop Chrome"], baseURL: `http://localhost:${ALERTS_WEB_PORT}` },
     },
     {
       name: "scripting",
@@ -85,6 +101,38 @@ export default defineConfig({
       // Cold build can chew several minutes on a slow CI runner.
       // Cached Swatinem builds drop this to seconds.
       timeout: 300_000,
+      stdout: "pipe",
+      stderr: "pipe",
+    },
+    {
+      command: `rm -f "${ALERTS_DB}" && cargo run -- --serve --port ${ALERTS_CHARTGEN_PORT}`,
+      cwd: "..",
+      port: ALERTS_CHARTGEN_PORT,
+      env: {
+        CHARTGEN_DATA_SOURCE: "sample",
+        CHARTGEN_DB: ALERTS_DB,
+        CHARTGEN_SERVER_ALERTS: "1",
+        CHARTGEN_SERVER_ALERT_CLIENTS: "*",
+        // Off even if the developer's shell turns scripting on.
+        CHARTGEN_SCRIPTING: "0",
+        CHARTGEN_WEBHOOK_TEST_ORIGIN: `http://127.0.0.1:${WEBHOOK_PORT}`,
+      },
+      reuseExistingServer: REUSE_SERVER,
+      timeout: 300_000,
+      stdout: "pipe",
+      stderr: "pipe",
+    },
+    {
+      command: `npm run dev -- --port ${ALERTS_WEB_PORT} --strictPort`,
+      cwd: ".",
+      port: ALERTS_WEB_PORT,
+      // Its own dep cache: two dev servers must not optimize into one directory.
+      env: {
+        CHARTGEN_DEV_TARGET: `http://localhost:${ALERTS_CHARTGEN_PORT}`,
+        VITE_CACHE_DIR: "node_modules/.vite-alerts",
+      },
+      reuseExistingServer: REUSE_SERVER,
+      timeout: 60_000,
       stdout: "pipe",
       stderr: "pipe",
     },

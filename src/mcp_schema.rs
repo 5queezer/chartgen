@@ -313,7 +313,7 @@ pub fn tools_list_result() -> Value {
             },
             {
                 "name": "subscribe_chart",
-                "description": "Push live updates of a chart over the caller's SSE stream (GET /mcp with the same token and Mcp-Session-Id). Each update is a notifications/chart_tick notification with params {subscription_id, series}, where series is exactly the generate_chart(format=series, bars=2, warmup) tail for these arguments: the last closed bar and the forming bar with indicators recomputed. Pushes follow the market (sub-second for active Binance symbols), at most 4 per second (2 when warmup > 300, or when an interval with no stream of its own holds more than 302 native bars). Only Binance symbols are pushable; any other symbol returns an error starting with 'not pushable', and the client should poll generate_chart instead. Limits (4 subscriptions per token, 32 per client address, 64 per server, 10 subscribe_chart calls per token per minute, 10 indicators) fail with an error starting with 'push limit reached': poll that chart instead. A subscription ends with unsubscribe_chart or when its SSE stream closes. HTTP transport only; works without --trade.",
+                "description": "Push live updates of a chart over the caller's SSE stream (GET /mcp with the same token and Mcp-Session-Id). Each update is a notifications/chart_tick notification with params {subscription_id, series}, where series is exactly the generate_chart(format=series, bars=2, warmup) tail for these arguments: the last closed bar and the forming bar with indicators recomputed. Pushes follow the market (sub-second for active Binance symbols), at most 4 per second (2 when warmup > 300, or when an interval with no stream of its own holds more than 302 native bars). Only Binance symbols are pushable; any other symbol returns an error starting with 'not pushable', and the client should poll generate_chart instead. Limits (4 subscriptions per token, 32 per client address, 64 per server, 10 subscribe_chart calls per token per minute, 10 indicators) fail with an error starting with 'push limit reached': poll that chart instead. An error starting with 'feeds busy' passes within a minute: poll meanwhile and try again. A subscription ends with unsubscribe_chart or when its SSE stream closes. HTTP transport only; works without --trade.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -376,6 +376,86 @@ pub fn tools_list_result() -> Value {
             }
         ]
     })
+}
+
+/// Names of the server alert tools (ADR-0042). They answer on the HTTP
+/// transport, where a call has an OAuth client to own the alert.
+pub const SERVER_ALERT_TOOLS: [&str; 4] = [
+    "create_server_alert",
+    "list_server_alerts",
+    "update_server_alert",
+    "delete_server_alert",
+];
+
+/// Tools for alerts that run on the server (ADR-0042). `tools/list` appends them
+/// only with `CHARTGEN_SERVER_ALERTS=1`; the generated TypeScript types always
+/// include them, because the web app handles both cases.
+pub fn server_alert_tools() -> Vec<Value> {
+    let condition = json!({
+        "type": "string",
+        "enum": ["crossing", "crossing_up", "crossing_down", "greater", "less"],
+        "description": "crossing: the price goes from one side of the level to the other, or onto it. crossing_up / crossing_down: only that way. greater / less: the price is above / below the level. A crossing needs a previous reading, so the first price the alert sees never fires one."
+    });
+    let trigger = json!({
+        "type": "string",
+        "enum": ["once", "every"],
+        "description": "once: switch off after firing. every: stay active; greater and less wait until the price is back on the other side."
+    });
+    vec![
+        json!({
+            "name": "create_server_alert",
+            "description": "Create a price alert that runs on the server, with no browser open, and optionally calls a webhook when it fires. It belongs to your OAuth client and survives restarts. Binance symbols only. Drawing and indicator alerts cannot run here. The server's operator decides which clients may create alerts and use webhooks (see can_create and webhooks in list_server_alerts). The webhook must be https on port 443 at a public address. With sign: true the response holds webhook_secret once; it cannot be read again. Returns the alert as list_server_alerts does.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "symbol": { "type": "string", "description": "Binance symbol, e.g. BTCUSDT." },
+                    "interval": { "type": "string", "description": "Bar interval, e.g. 1m, 15m, 1h, 1d. With evaluate_on: close the alert reads the closes of these bars, which need a Binance kline stream; with live it only labels the alert.", "default": "1m" },
+                    "evaluate_on": { "type": "string", "enum": ["live", "close"], "description": "live: every price update, like a browser alert. close: only when a bar of the interval closes.", "default": "live" },
+                    "condition": condition.clone(),
+                    "level": { "type": "number", "description": "The price level; greater than 0." },
+                    "trigger": trigger.clone(),
+                    "message": { "type": "string", "maxLength": 200, "description": "Your note, sent in the webhook payload." },
+                    "webhook_url": { "type": "string", "maxLength": 512, "description": "https URL to POST to when the alert fires." },
+                    "sign": { "type": "boolean", "description": "Sign deliveries with a per-alert secret (HMAC-SHA256). Needs webhook_url.", "default": false }
+                },
+                "required": ["symbol", "condition", "level", "trigger"]
+            }
+        }),
+        json!({
+            "name": "list_server_alerts",
+            "description": "List your server alerts with what your client may do (can_create, webhooks) and each alert's state: active, disarmed, last_triggered_at, fire_count, feed (live or waiting), last_price and the last webhook delivery (status and error only). A webhook shows its host and whether it signs, never its URL or secret. On a server without server alerts this returns {enabled: false, alerts: []}.",
+            "inputSchema": { "type": "object", "properties": {} }
+        }),
+        json!({
+            "name": "update_server_alert",
+            "description": "Change one of your server alerts. A new condition, level or trigger switches it on and re-arms it; a new message or webhook does not, so a spent alert stays spent. active: false pauses it and active: true resumes it, re-armed. webhook_url replaces the webhook, an empty string removes it; a new URL does not keep the old signing secret. With sign: true the response holds a new webhook_secret once. Symbol, interval and evaluate_on cannot change: delete and create instead.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "alert_id": { "type": "string", "description": "The alert's id." },
+                    "active": { "type": "boolean", "description": "Pause (false) or resume (true)." },
+                    "condition": condition,
+                    "level": { "type": "number", "description": "The price level; greater than 0." },
+                    "trigger": trigger,
+                    "message": { "type": "string", "maxLength": 200, "description": "Your note; an empty string removes it." },
+                    "webhook_url": { "type": "string", "maxLength": 512, "description": "New https URL, or an empty string to remove the webhook." },
+                    "sign": { "type": "boolean", "description": "true: sign with a new secret. false: stop signing." }
+                },
+                "required": ["alert_id"]
+            }
+        }),
+        json!({
+            "name": "delete_server_alert",
+            "description": "Delete one of your server alerts, with any delivery still pending. Returns {deleted: false} if you have no alert with that id.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "alert_id": { "type": "string", "description": "The alert's id." }
+                },
+                "required": ["alert_id"]
+            }
+        }),
+    ]
 }
 
 /// Tools for user-authored Starlark indicators (ADR-0025). `tools/list`

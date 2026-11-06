@@ -555,6 +555,24 @@ describe("push mode", () => {
     expect(t.push.subscribe).toHaveBeenCalledTimes(2);
   });
 
+  it("polls and tries again while the server's feeds are busy", async () => {
+    const t = setupPush();
+    t.push.error = new Error(
+      "MCP tool error: feeds busy: at most 40 new feeds per minute; try again shortly",
+    );
+    t.feed.reset(payload(501, 1000), REQ);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(t.push.subscribe).toHaveBeenCalledTimes(1);
+    expect(t.polls.at(-1)).toEqual({ kind: "live", everyMs: FAST_POLL_MS });
+    // Well inside a minute it is tried again, on the same chart, and recovers.
+    await vi.advanceTimersByTimeAsync(PUSH_RETRY_MS * 4);
+    expect(t.push.subscribe.mock.calls.length).toBeGreaterThan(1);
+    // The retries so far came at 2 s and 6 s; the next is at 14 s.
+    t.push.error = null;
+    await vi.advanceTimersByTimeAsync(PUSH_RETRY_MS * 3);
+    expect(t.polls.at(-1)).toEqual({ kind: "push" });
+  });
+
   it("drops a routine poll that lands after push took over", async () => {
     let release!: (s: SeriesPayload) => void;
     const push = fakePush();

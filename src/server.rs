@@ -19,6 +19,7 @@ use uuid::Uuid;
 use crate::chart_push::{ChartHub, PushCtx, STREAM_BUFFER};
 use crate::mcp::handle_mcp_request;
 use chartgen::engine::Engine as TradingEngine;
+use chartgen::mcp_schema::SERVER_ALERT_TOOLS;
 #[cfg(feature = "scripting")]
 use chartgen::scripting;
 
@@ -271,8 +272,7 @@ impl OAuthStore {
     }
 
     /// The OAuth client a valid token was issued to: the owner of that
-    /// caller's scripted indicators (ADR-0025).
-    #[cfg(feature = "scripting")]
+    /// caller's scripted indicators (ADR-0025) and server alerts (ADR-0042).
     fn client_for_token(&mut self, token: &str) -> Option<String> {
         self.cleanup_expired();
         self.tokens.get(token).map(|t| t.client_id.clone())
@@ -354,17 +354,29 @@ fn with_resource_metadata(mut resp: Response, path: &str) -> Response {
     resp
 }
 
-/// The client ids owning stored scripts; `None` if that cannot be determined.
-/// Scripts live in the store, so without one nobody owns any.
+/// The client ids owning stored scripts, and server alerts while those are on (an
+/// off feature has no one to run them for, so its rows pin nobody); `None` if that
+/// cannot be determined. Scripts live in the store, so without one nobody owns any.
 fn script_owners() -> Option<HashSet<String>> {
     #[cfg(feature = "scripting")]
     if let Some(store) = scripting::persistence::global() {
-        return store
-            .script_owners()
+        return pinned_clients(store, crate::server_alerts::enabled())
             .map_err(|e| eprintln!("[OAuth] cannot read script owners: {e}"))
             .ok();
     }
     Some(HashSet::new())
+}
+
+#[cfg(feature = "scripting")]
+fn pinned_clients(
+    store: &scripting::persistence::Store,
+    alerts_on: bool,
+) -> rusqlite::Result<HashSet<String>> {
+    let mut owners = store.script_owners()?;
+    if alerts_on {
+        owners.extend(store.server_alert_owners()?);
+    }
+    Ok(owners)
 }
 
 #[derive(Deserialize)]
@@ -1065,6 +1077,24 @@ async fn mcp_handler(
 
     // Extract token for subscription tools
     let token_owned = extract_bearer_token(&headers).map(|t| t.to_string());
+    let alert_tool = params
+        .and_then(|p| p.get("name"))
+        .and_then(|n| n.as_str())
+        .filter(|n| method == "tools/call" && SERVER_ALERT_TOOLS.contains(n));
+    if let Some(tool) = alert_tool {
+        // An alert belongs to the token's OAuth client (ADR-0042).
+        let owner = token_owned
+            .as_deref()
+            .and_then(|t| state.oauth.lock().unwrap().client_for_token(t));
+        let (tool, id) = (tool.to_string(), id.clone());
+        let args = params.and_then(|p| p.get("arguments")).cloned();
+        let result = tokio::task::spawn_blocking(move || {
+            server_alert_call(&tool, id, args.unwrap_or(json!({})), owner.as_deref())
+        })
+        .await
+        .unwrap();
+        return streamable_http_json_response(StatusCode::OK, result, session_id.as_deref());
+    }
     // Scripted indicators belong to the token's OAuth client (ADR-0025).
     #[cfg(feature = "scripting")]
     let user = match &token_owned {
@@ -1097,7 +1127,37 @@ async fn mcp_handler(
     .await
     .unwrap();
 
+    let result = if method == "tools/list" {
+        with_server_alert_tools(result)
+    } else {
+        result
+    };
     streamable_http_json_response(StatusCode::OK, result, session_id.as_deref())
+}
+
+/// A server alert tool call; on a server without them only the list answers.
+#[cfg_attr(not(feature = "scripting"), allow(unused_variables))]
+fn server_alert_call(tool: &str, id: Option<Value>, args: Value, owner: Option<&str>) -> Value {
+    #[cfg(feature = "scripting")]
+    if let Some(alerts) = crate::server_alerts::global() {
+        return alerts.call_tool(tool, id, &args, owner);
+    }
+    if tool == "list_server_alerts" {
+        return crate::mcp::tool_ok(id, json!({ "enabled": false, "alerts": [] }));
+    }
+    crate::mcp::tool_err(id, "Server alerts are off on this server")
+}
+
+/// The alert tools are listed only where they run (`CHARTGEN_SERVER_ALERTS=1`).
+#[cfg_attr(not(feature = "scripting"), allow(unused_mut))]
+fn with_server_alert_tools(mut result: Value) -> Value {
+    #[cfg(feature = "scripting")]
+    if crate::server_alerts::global().is_some() {
+        if let Some(tools) = result["result"]["tools"].as_array_mut() {
+            tools.extend(chartgen::mcp_schema::server_alert_tools());
+        }
+    }
+    result
 }
 
 // --- Health / discovery handler (no auth) ---
@@ -1389,6 +1449,8 @@ pub async fn run_server(port: u16, engine: Option<Arc<RwLock<TradingEngine>>>) {
         engine,
         charts: ChartHub::from_env(),
     });
+    #[cfg(feature = "scripting")]
+    crate::server_alerts::start(&state.charts);
 
     // Store port for metadata endpoint
     std::env::set_var("_CHARTGEN_PORT", port.to_string());
@@ -2347,6 +2409,19 @@ mod tests {
         let (status, _) = s.make_room(|| None).unwrap_err();
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(s.clients.len(), MAX_CLIENTS);
+    }
+
+    #[cfg(feature = "scripting")]
+    #[test]
+    fn an_alert_owner_is_pinned_only_while_alerts_are_on() {
+        let dir = std::env::temp_dir().join(format!("chartgen-pins-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = scripting::persistence::Store::open(&dir.join("s.db")).unwrap();
+        store.save_server_alert("a1", "owner", "{}").unwrap();
+        assert!(pinned_clients(&store, true).unwrap().contains("owner"));
+        assert!(pinned_clients(&store, false).unwrap().is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

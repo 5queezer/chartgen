@@ -94,6 +94,8 @@ escape the cap, so it is left out. The server total still bounds the load.
 on the quotes poll, like any symbol not on the chart. Indicator and sloped-drawing
 alerts therefore only run while the active chart shows their symbol and interval;
 switching the active chart restarts the crossing baselines from its last close.
+Server alerts ([ADR-0042](/chartgen/decisions/0042-server-side-alerts/)) are not bound to
+any chart: the server evaluates them, and the app polls for them once, not per chart.
 
 **Compact layout.** The compact shell ([ADR-0039](/chartgen/decisions/0039-compact-layout/)) shows only the active chart. The grid and the other
 charts' state are untouched, so nothing is dirty and they come back when there is room.

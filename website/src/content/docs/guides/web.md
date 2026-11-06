@@ -303,7 +303,9 @@ like a polled tail. Polling stops while pushes arrive. The server answers
 "not pushable" for other symbols, which simply keep polling, and "push
 limit reached" when a server limit (subscriptions per token or address,
 subscribes per minute, at most 10 indicators) refuses the chart, which
-then polls and tries push again every 5 minutes.
+then polls and tries push again every 5 minutes. "Feeds busy", when too many
+feeds are starting across the server, also means polling, but the app tries
+again sooner, with the backoff below.
 
 - **Fallback.** No push for 6 s (three times the 2 s Binance kline
   cadence), or a dropped SSE stream, which ends the subscription on the
@@ -571,7 +573,8 @@ indicators and bar replay, and its own live data.
   every 5 minutes. The status line shows the active chart's state.
 - **Alerts.** Lines show on every chart of their symbol. Price alerts run as usual.
   Indicator and sloped-drawing alerts only run while the **active** chart shows
-  their symbol and interval, and otherwise read *inactive: open AAPL 1h*.
+  their symbol and interval, and otherwise read *inactive: open AAPL 1h*. Server alerts
+  run whatever the charts show. Clicking an alert puts its symbol on the active chart.
 - **Scripts.** The editor's Add to chart and the error marks read the active chart.
   Saving a script reloads every chart using it, and deleting one takes it off all of them.
 - **Sub-panes** shrink to fit a smaller chart, and get their height back with one chart.
@@ -716,6 +719,46 @@ the chart symbol from the live feed, other symbols from their own quotes poll
 every 5 s. **They only fire while chartgen is open in a visible tab** (with several tabs open, one of them evaluates). They
 are saved in `localStorage` under `chartgen.alerts.list` (at most 200;
 invalid entries are dropped on load) and are not shared between browsers.
+
+### Alerts on the server
+
+On a server started with `CHARTGEN_SERVER_ALERTS=1`, a price alert can run on the
+server ([ADR-0042](/chartgen/decisions/0042-server-side-alerts/)): it fires with no
+browser open and can call a webhook. Tick **Run on server** in the dialog. On a
+server without them, or if its operator did not allow your sign-in, the dialog says the
+alert runs in this browser.
+
+- **Only price alerts on Binance symbols.** Drawing and indicator alerts run in the
+  browser, and the dialog says so when one is the source. A stock is refused with
+  the reason.
+- **Check on** is *Every tick*, like a browser alert, or *Bar close* of the chart's
+  interval, which reads only the closes of those bars. An interval with no Binance
+  stream of its own can only use *Every tick*.
+- **Webhook** is optional, and only offered if the server sends them for your sign-in. It
+  must be `https` on port 443 at a public address: local and private addresses, other ports
+  and redirects are refused, and so are hosts this server itself uses. **Sign webhook**
+  shows a secret once, when the alert is saved. Copy it then. See the
+  [payload and signature](/chartgen/reference/mcp/#webhook-payload).
+
+The conditions and triggers work as above, with one difference: changing a fired alert's
+message or webhook leaves it fired, and only a new condition, level or trigger brings it
+back. A crossing needs a previous reading, so a crossing that happens while the server is
+down is not reported. What already fired does not fire again after a restart.
+
+In the Alerts tab a server alert is marked **server**, with its status, the webhook's
+host and the last result: *webhook HTTP 200*, the error, or *waiting for prices*. Edit,
+pause / resume and delete act on the server. In the dialog a new webhook URL replaces
+the old one and drops its secret unless you sign again, and an empty field keeps it. When
+one fires, the tab that leads shows the toast, within 5 s, once however many tabs are open;
+a fire while no tab was open is reported when you next open one. A webhook over the server's
+budget waits its turn, so it can arrive later than the toast.
+
+A server alert belongs to the sign-in of this browser, so clearing its site data loses
+access to it while it keeps running. It has no line on the chart and is not in the
+Object Tree yet. Limits: 20 alerts and 2 symbol and interval pairs per sign-in, and an *Every
+time* alert fires at most 6 times a minute. A fired *Only once* alert is deleted after 7 days.
+On a server open to anyone, alerts are deleted once their sign-in has been unused for 30 days;
+one its operator allowed keeps them.
 
 ### Drawing and indicator alerts
 
