@@ -163,7 +163,20 @@ export const SeriesPayloadSchema = z.object({
   interval: z.string().nullable(),
   // Price style the server applied to `bars` (and computed indicators on).
   // Absent from servers that predate it: raw candles.
-  chart_style: z.enum(["candles", "heikin_ashi"]).optional(),
+  chart_style: z
+    .enum(["candles", "heikin_ashi", "renko", "kagi", "point_figure", "line_break", "range"])
+    .optional(),
+  // Inputs of a price-based style with the box its bars were built on (ADR-0047).
+  chart_params: z
+    .object({
+      box: z.enum(["atr", "fixed", "percent"]).optional(),
+      atr_length: z.number().optional(),
+      percent: z.number().optional(),
+      box_size: z.number().optional(),
+      reversal: z.number().optional(),
+      lines: z.number().optional(),
+    })
+    .optional(),
   bars: z.array(SeriesBarSchema),
   // Keyed by instance (ADR-0028): the entry's `id`, else its name; a
   // repeat of a name without an id is `name#2`, `name#3`...

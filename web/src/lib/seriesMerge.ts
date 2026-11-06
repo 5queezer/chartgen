@@ -65,7 +65,7 @@ export type MergeFailure =
   | "stale"
   /** A tail's timestamps do not line up with ours. */
   | "mismatch"
-  /** Different `chart_style`: real and Heikin Ashi bars must not mix. */
+  /** Different `chart_style` or box: bars of different builds must not mix. */
   | "style"
   /** Different indicators or channel counts, or misaligned arrays. */
   | "shape";
@@ -164,6 +164,7 @@ function headerProblem(
   if (cur.interval !== inc.interval) return "interval";
   if ((cur.chart_style ?? "candles") !== (inc.chart_style ?? "candles"))
     return "style";
+  if (cur.chart_params?.box_size !== inc.chart_params?.box_size) return "style";
   const own = checkCurrent
     ? barsProblem(cur)
     : cur.bars.at(-1)?.t === null

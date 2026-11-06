@@ -22,6 +22,7 @@ import {
 
 import { CONDITION_LABELS, describeAlert, type Alert } from "../lib/alerts";
 import type { LiveSnapshot } from "../lib/liveFeed";
+import { alertInterval } from "../lib/priceBars";
 import { formatPrice } from "../lib/quote";
 import type { McpSession } from "../mcp";
 import { createQuotesQuery } from "../queries";
@@ -274,7 +275,7 @@ export function feedChartSnapshot(symbol: string, snapshot: LiveSnapshot): void 
   const tick = chartTick(snapshot.series);
   setChartContext({
     symbol,
-    interval: snapshot.series.interval ?? "",
+    interval: alertInterval(snapshot.series),
     keys: Object.keys(indicators),
     axis: tick.chart?.view?.axis,
   });
@@ -298,7 +299,7 @@ export function chartTick(series: SeriesPayload): Tick {
   return {
     time: last === undefined || Number.isNaN(last) ? undefined : last,
     chart: {
-      interval: series.interval ?? "",
+      interval: alertInterval(series),
       indicators: series.indicators,
       view: axis ? { axis, log: scaleMode() === "log" } : undefined,
     },

@@ -352,11 +352,7 @@ pub fn tools_list_result() -> Value {
                             "description": "Price series style, as for generate_chart. Price-based tails carry up to 64 bars, as one closed source bar can confirm several.",
                             "default": "candles"
                         },
-                        "chart_params": {
-                            "type": "object",
-                            "description": "Inputs of a price-based chart_style, as for generate_chart. Without a box_size the subscription resolves its box once, from its first read.",
-                            "additionalProperties": true
-                        },
+                        "chart_params": chart_params_schema(),
                         "warmup": {
                             "type": "integer",
                             "description": "Extra older bars (max 1000) the server keeps and feeds to indicator computation, as for generate_chart(format=series), and raised the same way.",
@@ -531,7 +527,7 @@ pub fn scripting_tools() -> Vec<Value> {
 fn chart_params_schema() -> Value {
     json!({
         "type": "object",
-        "description": "Inputs of a price-based chart_style, refused for the others. Echoed in format=series and summary with the box_size the build used. Send that box_size back on later polls and pages to keep the same bars.",
+        "description": "Inputs of a price-based chart_style, refused for the others. Echoed in format=series and summary with the box_size the build used. Send that box_size back on later polls and pages to keep the same bars. A subscribe_chart without one resolves its box once, from its first read.",
         "properties": {
             "box": {
                 "type": "string",

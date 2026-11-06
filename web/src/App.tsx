@@ -24,6 +24,7 @@ import {
 import { paletteColor } from "./components/Chart";
 import { ChartPane, createChartPane } from "./components/ChartPane";
 import { ChartSettings } from "./components/ChartSettings";
+import { ChartTypeSettings } from "./components/ChartTypeSettings";
 import { DRAWING_LABELS } from "./components/DrawingToolbar";
 import { GridMenu } from "./components/GridMenu";
 import { isDrawingAlertTool, isHorizontalTool } from "./lib/alerts";
@@ -112,6 +113,7 @@ export function App(): JSX.Element {
   // Index (into the active set) of the indicator whose settings dialog is open.
   const [settingsIndex, setSettingsIndex] = createSignal<number | null>(null);
   const [settingsOpen, setSettingsOpen] = createSignal(false);
+  const [chartTypeSettingsOpen, setChartTypeSettingsOpen] = createSignal(false);
   const [compareOpen, setCompareOpen] = createSignal(false);
 
   onMount(() => onCleanup(keepKeyboardFocus()));
@@ -397,6 +399,7 @@ export function App(): JSX.Element {
           onResetChart={resetView}
           onSettings={() => setSettingsOpen(true)}
           onCompare={() => setCompareOpen(true)}
+          onChartTypeSettings={() => setChartTypeSettingsOpen(true)}
           replay={view().replay.mode() !== "off"}
           onReplay={() => (view().replay.mode() === "off" ? view().replay.enter() : view().replay.exit())}
         />
@@ -505,6 +508,11 @@ export function App(): JSX.Element {
               }
             : undefined
         }
+      />
+      <ChartTypeSettings
+        open={chartTypeSettingsOpen()}
+        currentBox={view().live()?.series.chart_params?.box_size}
+        onClose={() => setChartTypeSettingsOpen(false)}
       />
       <ChartSettings
         open={settingsOpen()}

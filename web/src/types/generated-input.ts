@@ -73,7 +73,7 @@ export interface GenerateChartInput {
    */
   bars?: number;
   /**
-   * Inputs of a price-based chart_style, refused for the others. Echoed in format=series and summary with the box_size the build used. Send that box_size back on later polls and pages to keep the same bars.
+   * Inputs of a price-based chart_style, refused for the others. Echoed in format=series and summary with the box_size the build used. Send that box_size back on later polls and pages to keep the same bars. A subscribe_chart without one resolves its box once, from its first read.
    */
   chart_params?: {
     /**
@@ -267,10 +267,33 @@ export interface SetAlertInput {
 
 export interface SubscribeChartInput {
   /**
-   * Inputs of a price-based chart_style, as for generate_chart. Without a box_size the subscription resolves its box once, from its first read.
+   * Inputs of a price-based chart_style, refused for the others. Echoed in format=series and summary with the box_size the build used. Send that box_size back on later polls and pages to keep the same bars. A subscribe_chart without one resolves its box once, from its first read.
    */
   chart_params?: {
-    [k: string]: unknown;
+    /**
+     * ATR length, 1 to 500.
+     */
+    atr_length?: number;
+    /**
+     * How the box is set, for renko, kagi (the reversal amount), point_figure and range (the range size). 'atr' (default): ATR of the closed source bars. 'fixed': box_size. 'percent': a percentage of the last price. ATR and percent are rounded to two significant digits.
+     */
+    box?: "atr" | "fixed" | "percent";
+    /**
+     * The size of a fixed box, or the resolved size of an atr or percent box to keep. A size that would make over 20,000 bars is refused.
+     */
+    box_size?: number;
+    /**
+     * line_break: how many lines a close must pass to reverse, 1 to 20.
+     */
+    lines?: number;
+    /**
+     * Percentage of the last price, above 0 and at most 100.
+     */
+    percent?: number;
+    /**
+     * point_figure: boxes the close must come back to start a new column, 1 to 20.
+     */
+    reversal?: number;
   };
   /**
    * Price series style, as for generate_chart. Price-based tails carry up to 64 bars, as one closed source bar can confirm several.

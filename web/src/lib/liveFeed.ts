@@ -25,6 +25,7 @@
 
 import type { SeriesPayload } from "../types/responses";
 import type { ActiveIndicator } from "../stores/indicators";
+import type { ChartParamsWire } from "./priceBars";
 import type { ChartStyle } from "../stores/layout";
 import { barCloseMs, isContinuousMarket } from "./countdown";
 import {
@@ -49,6 +50,12 @@ export const PAGE_BARS = 500;
 export const WARMUP = 300;
 /** A tail poll: the last closed bar and the forming one. */
 export const TAIL_BARS = 2;
+/**
+ * One closed source bar can confirm several price-based bars (ADR-0047), and how
+ * many is not known beforehand, so their tails are longer. It matches the
+ * server's `PRICE_TAIL_BARS`.
+ */
+export const PRICE_TAIL_BARS = 64;
 /** Poll period for 24/7 markets, where a bar can move every second. */
 export const FAST_POLL_MS = 2_000;
 /** Poll period for session markets (Yahoo data is delayed anyway). */
@@ -102,6 +109,8 @@ export interface LiveRequest {
   indicators: ActiveIndicator[];
   /** Sent with every poll and page, so merged bars share one style. */
   chart_style: ChartStyle;
+  /** Inputs of a price-based style (ADR-0047). */
+  chart_params?: ChartParamsWire;
 }
 
 export interface FetchArgs {
@@ -211,6 +220,14 @@ export interface LiveFeed {
 const message = (err: unknown) =>
   err instanceof Error ? err.message : String(err);
 
+/** `request` with the box its load was built on. */
+function withLoadedBox(request: LiveRequest | null, base: SeriesPayload): LiveRequest | null {
+  const box_size = base.chart_params?.box_size;
+  return request?.chart_params && box_size !== undefined
+    ? { ...request, chart_params: { ...request.chart_params, box_size } }
+    : request;
+}
+
 export function createLiveFeed(opts: LiveFeedOptions): LiveFeed {
   const doc = opts.doc ?? document;
   let gen = 0;
@@ -224,7 +241,8 @@ export function createLiveFeed(opts: LiveFeedOptions): LiveFeed {
   let reloading = false;
   let pageLoading = false;
   let failures = 0;
-  // Bars for the next poll: TAIL_BARS, or more to catch up after a gap.
+  // Bars for the next poll: the tail's, or more to catch up after a gap.
+  const tailBars = () => (request?.chart_params ? PRICE_TAIL_BARS : TAIL_BARS);
   let nextBars = TAIL_BARS;
   // Push: the live subscription, a subscribe in flight, failed subscribes
   // since the last push, whether this generation's chart is pushable, and
@@ -458,9 +476,14 @@ export function createLiveFeed(opts: LiveFeedOptions): LiveFeed {
     if (r.ok) {
       series = r.series;
       failures = 0;
-      nextBars = TAIL_BARS;
+      nextBars = tailBars();
       emit({ version: ++version, kind: "tail", from: r.from, prevLength });
-    } else if (r.reason === "gap" && bars === TAIL_BARS && newest !== null) {
+    } else if (
+      r.reason === "gap" &&
+      !request.chart_params &&
+      bars === TAIL_BARS &&
+      newest !== null
+    ) {
       // Missed bars (sleep, hidden tab): fetch enough to overlap again,
       // with margin for a rollover while that request runs.
       const head = tail.bars[0]!.t!;
@@ -561,7 +584,9 @@ export function createLiveFeed(opts: LiveFeedOptions): LiveFeed {
     reset(base, req) {
       endGeneration();
       series = base && sortChannels(base);
-      request = base ? req : null;
+      // Later polls, pages and pushes stay on the box this load resolved (ADR-0047).
+      request = base ? withLoadedBox(req, base) : null;
+      nextBars = tailBars();
       opts.onHistoryStatus(base ? historyStatusOf(base) : { kind: "idle" });
       if (!base) {
         opts.onPollStatus({ kind: "off" });

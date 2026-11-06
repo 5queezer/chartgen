@@ -60,6 +60,8 @@ export interface ReplayOptions {
   live: Accessor<LiveSnapshot | null>;
   /** The request the live series was loaded with; null before the first load. */
   request: () => LiveRequest | null;
+  /** This chart cannot be replayed at all. */
+  refused?: () => boolean;
   /** End the live feed's generation (polls, pushes, pages in flight). */
   suspendLive: () => void;
   /** Restart the live feed from its full series. */
@@ -354,6 +356,7 @@ export function createReplay(opts: ReplayOptions): Replay {
       const bars = untrack(opts.live)?.series.bars;
       // Untimed (no-ticker demo) bars have no times to replay by.
       if (untrack(mode) !== "off" || !bars?.length || bars.some((b) => b.t === null)) return false;
+      if (opts.refused?.()) return false;
       opts.suspendLive();
       setMode("select");
       return true;

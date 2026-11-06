@@ -74,6 +74,8 @@ export function PriceAxisControls(props: PriceAxisControlsProps): JSX.Element {
     // Only 24/7 symbols: session-based markets (Yahoo) close bars at
     // times the interval alone cannot give.
     if (!bar || bar.t === null || !interval) return null;
+    // A price-based bar closes on price, not on time (ADR-0047).
+    if (props.series?.chart_params) return null;
     if (!isContinuousMarket(props.series?.symbol)) return null;
     return barCountdown(bar.t, interval, now());
   });

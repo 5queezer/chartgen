@@ -26,7 +26,9 @@ import {
   type ActiveIndicator,
 } from "../stores/indicators";
 import {
+  chartParams,
   chartType,
+  setChartParams,
   setChartType,
   setSymbol,
   setTimeframe,
@@ -90,6 +92,7 @@ export function applyShareLink(): void {
   if (patch.symbol !== undefined) setSymbol(patch.symbol);
   if (patch.timeframe !== undefined) setTimeframe(patch.timeframe);
   if (patch.chartType !== undefined) setChartType(patch.chartType);
+  if (patch.chartParams !== undefined) setChartParams(patch.chartParams);
   if (patch.timeZone !== undefined) setTimeZone(patch.timeZone);
   if (patch.indicators !== undefined) {
     savePending(patch.indicators);
@@ -142,6 +145,7 @@ export function chartLink(): string {
       symbol: symbol(),
       timeframe: timeframe(),
       chartType: chartType(),
+      chartParams: chartParams(),
       indicators: activeIndicators(),
       compare: compareSymbols(),
       timeZone: timeZone(),

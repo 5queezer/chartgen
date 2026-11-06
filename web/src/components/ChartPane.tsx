@@ -31,6 +31,7 @@ import {
   type LiveSnapshot,
   type PollStatus,
 } from "../lib/liveFeed";
+import { chartParamsWire, isPriceBarType } from "../lib/priceBars";
 import { resolveTimeZone } from "../lib/timezone";
 import type { McpSession } from "../mcp";
 import { chartQueryKey, createChartQuery } from "../queries";
@@ -68,7 +69,7 @@ export function createChartPane(pane: number, deps: PaneDeps) {
   const layout = chartStoreOf(pane);
   const indicators = indicatorStoreOf(pane);
   const compare = compareStoreOf(pane);
-  const { symbol, timeframe, chartType } = layout;
+  const { symbol, timeframe, chartType, chartParams } = layout;
   const { activeIndicators } = indicators;
   const isActive = () => activePane() === pane;
 
@@ -85,11 +86,15 @@ export function createChartPane(pane: number, deps: PaneDeps) {
     ),
   );
 
+  const wireParams = createMemo(() => chartParamsWire(chartType(), chartParams()));
+  const priceBased = () => isPriceBarType(chartType());
+
   const query = createChartQuery(session, () => ({
     ticker: symbol(),
     timeframe: timeframe(),
     indicators: wireIndicators(),
     chart_style: chartStyleOf(chartType()),
+    chart_params: wireParams(),
     // Indicators from a share link wait for the registry check below.
     enabled: authReady() && !importPending(),
   }));
@@ -124,6 +129,8 @@ export function createChartPane(pane: number, deps: PaneDeps) {
   const replay = createReplay({
     live,
     request: () => feedRequest,
+    // Price-based bars have no times a replay clock could step by (ADR-0047).
+    refused: priceBased,
     suspendLive: () => feed.suspend(),
     // Only when the feed still holds the current request's series: if a
     // new load is in flight, adopting it restarts the feed.
@@ -171,6 +178,13 @@ export function createChartPane(pane: number, deps: PaneDeps) {
     doc: replay.liveDoc,
   });
   onCleanup(feed.dispose);
+
+  // Picking a price-based type during a replay ends the replay.
+  createEffect(
+    on(priceBased, (refused) => {
+      if (refused && untrack(replay.mode) !== "off") replay.exit();
+    }),
+  );
 
   // Becoming the active chart makes this the chart the alerts read (ADR-0043).
   createEffect(
@@ -227,6 +241,7 @@ export function createChartPane(pane: number, deps: PaneDeps) {
       timeframe: timeframe(),
       indicators: wireIndicators(),
       chart_style: chartStyleOf(chartType()),
+      chart_params: wireParams(),
     };
     // Re-run whenever the query publishes a result.
     void query.data;
@@ -282,8 +297,10 @@ export function createChartPane(pane: number, deps: PaneDeps) {
     const main = symbol();
     if (untrack(compare.compareSymbols).includes(main)) compare.removeCompare(main);
   });
+  // Price-based bars have no time grid to join another symbol on (ADR-0047): the
+  // list stays for when the chart type changes back, but nothing loads or draws.
   const comparing = createMemo(() =>
-    compare.compareEntries().filter((e) => e.symbol !== symbol()),
+    priceBased() ? [] : compare.compareEntries().filter((e) => e.symbol !== symbol()),
   );
   // Sized to the main series once it matches the timeframe (a kept previous
   // chart of another timeframe must not size the loads).
@@ -378,6 +395,7 @@ export function createChartPane(pane: number, deps: PaneDeps) {
     drawings,
     setDrawings,
     lastLoaded,
+    priceBased,
     timeZone: () => resolveTimeZone(timeZone(), symbol()),
   };
 }

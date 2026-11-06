@@ -104,6 +104,7 @@ import {
 } from "../lib/compare";
 import { chartSettings } from "../stores/chartSettings";
 import { composeStyles, resolveColors, settingsStyles } from "../lib/chartStyle";
+import { priceBarLabel } from "../lib/priceBars";
 import {
   ensureSeriesRegistered,
   hiddenCandleStyle,
@@ -959,6 +960,9 @@ interface HeaderState {
 const CHART_TYPE_STYLES: Record<Exclude<ChartType, SeriesType>, object> = {
   candles: { type: "candle_solid" },
   heikin_ashi: { type: "candle_solid" },
+  renko: { type: "candle_solid" },
+  line_break: { type: "candle_solid" },
+  range: { type: "candle_solid" },
   hollow: { type: "candle_up_stroke" },
   bars: { type: "ohlc" },
   line: {
@@ -1385,7 +1389,11 @@ export function Chart(props: ChartProps): JSX.Element {
       future !== null ? futureTime(series, shown, future) : bars[legendIndex]?.t;
     next.push({
       name: series.symbol ?? "price",
-      params: series.interval ? `· ${series.interval}` : undefined,
+      params: series.interval
+        ? [`· ${series.interval}`, priceBarLabel(series.chart_style, series.chart_params)]
+            .filter(Boolean)
+            .join(" · ")
+        : undefined,
       lines: [],
       legend:
         priceLegend && barTime != null
@@ -1923,6 +1931,7 @@ export function Chart(props: ChartProps): JSX.Element {
   // Chart types klinecharts does not draw (ADR-0030): one indicator on the
   // candle pane paints the series over klinecharts' hidden one. Colors follow
   // the theme and the chart settings like the candles do.
+  const boxSize = createMemo(() => props.series?.chart_params?.box_size);
   createEffect(() => {
     const c = chart();
     const t = props.chartType;
@@ -1938,6 +1947,7 @@ export function Chart(props: ChartProps): JSX.Element {
       up: colors.bodyUp,
       down: colors.bodyDown,
       line: colors.line,
+      boxSize: boxSize(),
     };
     ensureSeriesRegistered();
     if (seriesCreated) {
