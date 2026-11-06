@@ -286,6 +286,34 @@ test.describe("price scale invert and lock ratio", () => {
     await expect(scaleButton(page, "auto")).toHaveAttribute("aria-pressed", "false");
   });
 
+  test("a press that ends away from the window does not release the lock on the next hover", async ({
+    bootedApp: page,
+  }) => {
+    await lockViaMenu(page);
+    const box = await page.locator(".chart-host").boundingBox();
+    if (!box) throw new Error("chart host has no bounding box");
+    const x = box.x + box.width - 20;
+    const y = box.y + box.height / 3;
+    // Press on the axis, then the window loses focus and the release goes elsewhere:
+    // the page sees a pointerdown and never the pointerup.
+    await page.mouse.move(x, y);
+    await page.evaluate(
+      ([px, py]) => {
+        const target = document.elementFromPoint(px!, py!)!;
+        target.dispatchEvent(
+          new PointerEvent("pointerdown", { bubbles: true, buttons: 1, clientX: px, clientY: py }),
+        );
+        window.dispatchEvent(new Event("blur"));
+      },
+      [x, y],
+    );
+    // Back over the axis with no button down.
+    await page.mouse.move(x, y + 20, { steps: 5 });
+    await page.waitForTimeout(200);
+    expect(await storage(page, "lockRatio")).toBe("true");
+    await expect(scaleButton(page, "auto")).toHaveAttribute("aria-pressed", "false");
+  });
+
   test("Cancel in the settings dialog undoes invert and lock", async ({
     bootedApp: page,
   }) => {

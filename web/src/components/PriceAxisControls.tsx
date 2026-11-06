@@ -302,8 +302,13 @@ export function PriceAxisControls(props: PriceAxisControlsProps): JSX.Element {
     if (!axisDom) return;
     let pressed = false;
     const onDown = () => (pressed = true);
-    const onMove = () => {
+    const onMove = (e: PointerEvent) => {
       if (!pressed) return;
+      // No button down: the release happened away from the window, unseen.
+      if (e.buttons === 0) {
+        pressed = false;
+        return;
+      }
       // A manual scale ends the ratio lock, which only works in auto-fit.
       batch(() => {
         if (lockRatio()) setLockRatio(false);
