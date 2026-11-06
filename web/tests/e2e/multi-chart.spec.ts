@@ -13,6 +13,11 @@ interface PaneInfo {
   timeframe: string;
   indicators: unknown[];
   invert: boolean;
+  reverse: boolean | null;
+  candleIndicators: string[];
+  candleHeight: number | null;
+  stackHeight: number | null;
+  staleCanvases: number;
   bars: number;
   version: number | null;
   updateKind: string | null;
@@ -93,7 +98,7 @@ function recordErrors(page: Page): string[] {
 test.describe("multi-chart grid", () => {
   test("switches between 1, 2 horizontal, 2 vertical and 4 charts", async ({ bootedApp: page }, testInfo) => {
     const errors = recordErrors(page);
-    await expect(page.getByTestId("pane-tag")).toHaveCount(0);
+    const fullCandle = (await panes(page))[0]!.candleHeight;
 
     await chooseGrid(page, "2h");
     await expectLoaded(page, 2);
@@ -121,7 +126,17 @@ test.describe("multi-chart grid", () => {
       expect(canvas.width).toBeGreaterThan(cell.width * 0.5);
       expect(canvas.width).toBeLessThanOrEqual(cell.width);
     }
-    await expect(page.getByTestId("pane-tag")).toHaveCount(4);
+    // The first chart was at full height: its price pane must not end up crushed
+    // under sub-panes of their old height, and the new charts draw their candles.
+    await expect
+      .poll(async () =>
+        (await panes(page)).map((p) => (p.candleHeight ?? 0) >= (p.stackHeight ?? 1) * 0.4),
+      )
+      .toEqual([true, true, true, true]);
+    await expect
+      .poll(async () => (await panes(page)).map((p) => p.staleCanvases))
+      .toEqual([0, 0, 0, 0]);
+    await page.waitForTimeout(1500);
     await page.screenshot({ path: testInfo.outputPath("grid-4.png") });
 
     // Nothing was changed in the charts, so nothing asks.
@@ -133,7 +148,8 @@ test.describe("multi-chart grid", () => {
     await chooseGrid(page, "1");
     await expectLoaded(page, 1);
     expect(dialogs).toBe(0);
-    await expect(page.getByTestId("pane-tag")).toHaveCount(0);
+    // One chart again: the sub-panes get back the height they had.
+    await expect.poll(async () => (await panes(page))[0]!.candleHeight).toBe(fullCandle);
     expect(errors).toEqual([]);
   });
 
@@ -156,6 +172,9 @@ test.describe("multi-chart grid", () => {
     expect(first!.indicators.length).toBe(3);
     expect(second!.indicators.length).toBe(2);
     await expect(page.getByRole("button", { name: /^Symbol:/ })).toContainText("ETHUSDT");
+    // Each chart's legend says what it shows.
+    await expect(paneCell(page, 0).locator(".pane-header").first()).toContainText("BTCUSDT");
+    await expect(paneCell(page, 1).locator(".pane-header").first()).toContainText("ETHUSDT");
 
     // The header follows the active chart.
     await activate(page, 0);
@@ -168,12 +187,31 @@ test.describe("multi-chart grid", () => {
     await page.keyboard.press("Alt+i");
     await expect.poll(async () => (await panes(page))[1]!.invert).toBe(true);
     expect((await panes(page))[0]!.invert).toBe(false);
+    // What each chart's own axis does stays with it, whichever chart is active.
+    await expect.poll(async () => (await panes(page))[1]!.reverse).toBe(true);
+    expect((await panes(page))[0]!.reverse).toBe(false);
+    await activate(page, 0);
+    await page.waitForTimeout(100);
+    expect((await panes(page))[0]!.reverse).toBe(false);
+    expect((await panes(page))[1]!.reverse).toBe(true);
+    await activate(page, 1);
 
     // Same symbol in both: one change of interval still moves one chart.
     await pickSymbol(page, "BTCUSDT");
     await page.getByRole("button", { name: "4h", exact: true }).click();
     await expect.poll(async () => (await panes(page))[1]!.timeframe).toBe("4h");
     expect((await panes(page))[0]!.timeframe).toBe("1h");
+  });
+
+  test("each chart registers its own indicators: geometry is kept by registered name", async ({
+    bootedApp: page,
+  }) => {
+    await chooseGrid(page, "2h");
+    await expectLoaded(page, 2);
+    await expect
+      .poll(async () => (await panes(page)).map((p) => p.candleIndicators.includes("chartgen_ema_stack")))
+      .toEqual([true, false]);
+    expect((await panes(page))[1]!.candleIndicators).toContain("chartgen_p1_ema_stack");
   });
 
   test("drawing tools act on the active chart, drawings stay with their symbol", async ({

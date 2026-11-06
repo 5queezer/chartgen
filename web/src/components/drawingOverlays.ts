@@ -66,8 +66,9 @@ const axes = new Map<string, () => TimeAxis | null>();
 const axisOf = (group: string | undefined): TimeAxis | null =>
   (group !== undefined ? axes.get(group)?.() : null) ?? null;
 /** Bar timing for the time span of points beyond the last bar, for the overlays of `group`. */
-export function setOverlayAxis(group: string, fn: () => TimeAxis | null): void {
+export function setOverlayAxis(group: string, fn: () => TimeAxis | null): () => void {
   axes.set(group, fn);
+  return () => axes.delete(group);
 }
 
 // What a fresh long/short position is sized from, read once when the tool is armed.

@@ -559,7 +559,7 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
   // when the loaded bars change.
   let axisKey: { list: unknown; n: number; last: number } | null = null;
   let axisCache: TimeAxis | null = null;
-  setOverlayAxis(overlayGroup, () => {
+  onCleanup(setOverlayAxis(overlayGroup, () => {
     const list = props.chart?.getDataList();
     if (!list) return null;
     const last = list.at(-1)?.timestamp ?? 0;
@@ -568,7 +568,7 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
       axisCache = axis();
     }
     return axisCache;
-  });
+  }));
 
   const syncFlags = () => {
     setLockAll(current.length > 0 && current.every((r) => r.lock));

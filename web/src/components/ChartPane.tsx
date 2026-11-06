@@ -350,7 +350,7 @@ export interface ChartPaneProps {
   state: ChartPaneState;
   /** Where the drawing toolbars go: one rail, showing the active chart's. */
   rail: HTMLElement | undefined;
-  /** More than one chart shows, so each says what it is. */
+  /** More than one chart shows: its sub-panes share a smaller height. */
   multi: boolean;
   /** Open the settings of an indicator of the active chart. */
   onIndicatorSettings: (key: string) => void;
@@ -361,7 +361,7 @@ export interface ChartPaneProps {
 
 export function ChartPane(props: ChartPaneProps): JSX.Element {
   const s = props.state;
-  const { symbol, timeframe, chartType, setSymbol } = s.layout;
+  const { symbol, chartType, setSymbol } = s.layout;
   const { activeIndicators, removeIndicator, setActiveIndicators, toggleIndicatorHidden } = s.indicators;
   const indexOf = (key: string) =>
     activeIndicators().findIndex((e) => instanceKey(e) === key);
@@ -427,6 +427,7 @@ export function ChartPane(props: ChartPaneProps): JSX.Element {
             onRemove={removeIndicator}
             onAddAlert={props.onAddAlert}
             onChartReady={s.setChart}
+            multi={props.multi}
             onCrosshair={s.setCrosshair}
             onCompareFrom={s.setCompareFrom}
             compare={s.shownCompare()}
@@ -441,11 +442,6 @@ export function ChartPane(props: ChartPaneProps): JSX.Element {
             active={s.isActive()}
           />
         </ChartContextMenu>
-        <Show when={props.multi}>
-          <div class="pane-tag" data-testid="pane-tag">
-            {symbol()} · {timeframe()}
-          </div>
-        </Show>
       </div>
     </PaneProvider>
   );

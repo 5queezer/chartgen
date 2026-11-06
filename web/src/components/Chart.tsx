@@ -1004,6 +1004,8 @@ export interface ChartProps {
   /** Alert on an indicator's plots (ADR-0034); offered on rows with lines. */
   onAddAlert?: (name: string) => void;
   onChartReady?: (chart: KChart) => void;
+  /** One chart of several in a grid (ADR-0043): sub-panes fit its smaller height. */
+  multi?: boolean;
   /** Bar index under the crosshair (one update per frame); null when it is off the chart. */
   onCrosshair?: (index: number | null) => void;
   /** Bar the compare percent is measured from (the view start on a percent axis, else 0). */
@@ -1068,6 +1070,57 @@ export function Chart(props: ChartProps): JSX.Element {
   let dateBars = false;
   // Oscillator pane keys, top to bottom, as klinecharts stacks them.
   let paneStack: string[] = [];
+  let fitFrame: number | null = null;
+  // A chart of a grid (ADR-0043): the heights the sub-panes had before the grid shrank them.
+  const naturalHeights = new Map<string, number>();
+  // Before klinecharts' resize, which clamps panes that no longer fit.
+  const rememberNaturalHeights = (c: KChart) => {
+    const ids = untrack(paneIds);
+    const names = paneStack.filter((n) => ids[n]);
+    for (const n of naturalHeights.keys()) {
+      if (!names.includes(n)) naturalHeights.delete(n);
+    }
+    for (const n of names) {
+      if (!naturalHeights.has(n)) naturalHeights.set(n, c.getSize(ids[n]!)?.height ?? 120);
+    }
+  };
+  // One pane per frame: changing a pane queues a redraw of the panes it leaves alone,
+  // and klinecharts drops a canvas's own resize while one is pending. A pane changed
+  // in the same frame would keep a canvas of its old size, blank or stretched.
+  const setPaneHeights = (c: KChart, targets: Array<[string, number]>) => {
+    if (fitFrame !== null) cancelAnimationFrame(fitFrame);
+    const step = () => {
+      fitFrame = null;
+      const next = targets.shift();
+      if (!next) {
+        recomputeHeaders();
+        return;
+      }
+      if (c.getSize(next[0])?.height !== next[1]) c.setPaneOptions({ id: next[0], height: next[1] });
+      fitFrame = requestAnimationFrame(step);
+    };
+    fitFrame = requestAnimationFrame(step);
+  };
+  const fitPanesToCell = (c: KChart) => {
+    rememberNaturalHeights(c);
+    const ids = untrack(paneIds);
+    const names = paneStack.filter((n) => ids[n]);
+    // The host, not getSize(): after a resize too short for the panes that reports
+    // a clamped total, which would make the heights depend on the path taken here.
+    const stack = host.clientHeight - (c.getSize("x_axis_pane")?.height ?? 0);
+    const natural = names.map((n) => naturalHeights.get(n)!);
+    const fit = fitSubPanes(stack - natural.reduce((a, b) => a + b, 0), natural) ?? natural;
+    setPaneHeights(c, names.map((n, i) => [ids[n]!, fit[i]!]));
+  };
+  // Back to one chart the panes return to those heights.
+  const restoreNaturalHeights = (c: KChart) => {
+    const ids = untrack(paneIds);
+    const targets = [...naturalHeights].flatMap(([n, height]): Array<[string, number]> =>
+      ids[n] ? [[ids[n]!, height]] : [],
+    );
+    naturalHeights.clear();
+    if (targets.length > 0) setPaneHeights(c, targets);
+  };
   // Shown indicator keys of the last applied snapshot.
   let appliedNames = "";
   // Indicator keys of the payload that are shown, in the stored order
@@ -1234,7 +1287,11 @@ export function Chart(props: ChartProps): JSX.Element {
     // toggles.
     if (host && typeof ResizeObserver !== "undefined") {
       const ro = new ResizeObserver(() => {
-        chart()?.resize();
+        const current = chart();
+        if (current && props.multi) rememberNaturalHeights(current);
+        current?.resize();
+        if (current && props.multi) fitPanesToCell(current);
+        else if (current) restoreNaturalHeights(current);
         recomputeHeaders();
       });
       ro.observe(host);
@@ -1577,7 +1634,7 @@ export function Chart(props: ChartProps): JSX.Element {
       appliedCompare = null;
       pendingOlder = null;
       c.clearData();
-      setShownProjection(0);
+      setShownProjection(c, 0);
       const stale = untrack(paneIds);
       for (const name of Object.keys(stale)) {
         c.removeIndicator(stale[name]!, indicatorRegName(name, gridPane));
@@ -1633,7 +1690,7 @@ export function Chart(props: ChartProps): JSX.Element {
     const klines = seriesToKLines(series, 0, series.bars.length, compare);
     // Room right of the last bar for any projection (Ichimoku's cloud), as
     // TradingView extends its right margin; applyNewData scrolls to it.
-    setShownProjection(projectionBars(series, names));
+    setShownProjection(c, projectionBars(series, names));
     fitProjection(c);
     c.applyNewData(klines, canPageBefore(series));
     c.setPriceVolumePrecision(precision, VOLUME_PRECISION);
@@ -1669,6 +1726,15 @@ export function Chart(props: ChartProps): JSX.Element {
       }
     }
     paneStack = wantedOsc.slice(0, keep);
+    // A chart of a grid has little height: new sub-panes start at what fits there.
+    // klinecharts can miss the resize of a pane changed right after its first
+    // paint, and the canvas then stays blank at its old size.
+    const startHeights = untrack(() => props.multi)
+      ? fitSubPanes(
+          host.clientHeight - (c.getSize("x_axis_pane")?.height ?? 0) - wantedOsc.length * 120,
+          wantedOsc.map(() => 120),
+        )
+      : null;
     for (const name of wanted) {
       const regName = indicatorRegName(name, gridPane);
       if (currentPanes[name] && !rebuilt.has(name)) {
@@ -1680,7 +1746,7 @@ export function Chart(props: ChartProps): JSX.Element {
       // pane (isStack=true stacks panes bottom-up).
       const paneOptions = ind.is_overlay
         ? { id: CANDLE_PANE_ID }
-        : { height: heights[name] ?? 120 };
+        : { height: heights[name] ?? startHeights?.[wantedOsc.indexOf(name)] ?? 120 };
       const newPaneId = c.createIndicator(
         {
           name: regName,
@@ -1707,7 +1773,8 @@ export function Chart(props: ChartProps): JSX.Element {
       if (candle === undefined) return;
       const subs = subIds.map((id) => c.getSize(id)?.height ?? 0);
       const fit = fitSubPanes(candle, subs);
-      if (fit) subIds.forEach((id, i) => c.setPaneOptions({ id, height: fit[i]! }));
+      if (fit && untrack(() => props.multi)) setPaneHeights(c, subIds.map((id, i) => [id!, fit[i]!]));
+      else if (fit) subIds.forEach((id, i) => c.setPaneOptions({ id, height: fit[i]! }));
     };
     fitPanes();
 
@@ -1834,6 +1901,7 @@ export function Chart(props: ChartProps): JSX.Element {
     if (layoutFrame !== null) cancelAnimationFrame(layoutFrame);
     if (layoutTimer !== null) clearTimeout(layoutTimer);
     if (styleFrame !== null) cancelAnimationFrame(styleFrame);
+    if (fitFrame !== null) cancelAnimationFrame(fitFrame);
     for (const name of Object.keys(untrack(paneIds))) {
       geometryStore.delete(indicatorRegName(name, gridPane));
     }

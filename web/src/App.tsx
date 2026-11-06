@@ -260,6 +260,16 @@ export function App(): JSX.Element {
           timeframe: p.layout.timeframe(),
           indicators: p.wireIndicators(),
           invert: p.layout.invertScale(),
+          reverse: p.chart()?.getStyles().yAxis.reverse ?? null,
+          candleIndicators: [
+            ...((p.chart()?.getIndicatorByPaneId("candle_pane") as Map<string, unknown> | null)?.keys() ?? []),
+          ],
+          candleHeight: p.chart()?.getSize("candle_pane")?.height ?? null,
+          stackHeight: p.chart()?.getSize()?.height ?? null,
+          // Canvases whose backing store does not match their size draw blank or stretched.
+          staleCanvases: [...(p.chart()?.getDom()?.querySelectorAll("canvas") ?? [])].filter(
+            (el) => el.height !== Math.round(el.clientHeight * devicePixelRatio),
+          ).length,
           bars: p.live()?.series.bars.length ?? 0,
           version: p.live()?.update.version ?? null,
           updateKind: p.live()?.update.kind ?? null,

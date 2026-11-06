@@ -5,3 +5,6 @@
 .docs/
 graphify-out/
 scripts/gen-mcp-types/node_modules/
+
+# openlore analysis artifacts
+.openlore/
