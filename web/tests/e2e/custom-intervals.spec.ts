@@ -1,6 +1,6 @@
 // Custom intervals (ADR-0038): typed in the popup, served by the server's
 // grammar, and carried by everything keyed by an interval. The sample source
-// serves any interval on the same grid as the live resampling.
+// builds them from native bars and feeds, as the live resampling does.
 
 import type { Page } from "@playwright/test";
 
@@ -8,7 +8,10 @@ import { test, expect, gotoApp, reloadApp, expectChartRendered } from "./fixture
 
 interface Hook {
   chart: () => { getDataList: () => Array<{ timestamp: number; close: number }> } | null;
-  series: () => { interval: string | null } | null;
+  series: () => {
+    interval: string | null;
+    bars: Array<{ t: number; o: number; h: number; l: number; c: number; v: number }>;
+  } | null;
 }
 
 const trigger = (page: Page, label: string) =>
@@ -26,6 +29,13 @@ const bars = (page: Page) =>
       lastClose: h.chart()?.getDataList().at(-1)?.close ?? 0,
       gaps: [...new Set(ts.slice(1).map((t, i) => t - ts[i]!))],
     };
+  });
+
+/** Bars long closed whatever the wall clock does: all but the newest two. */
+const settled = (page: Page) =>
+  page.evaluate(() => {
+    const h = (window as unknown as { __chartgenTest: Hook }).__chartgenTest;
+    return (h.series()?.bars ?? []).slice(-12, -2);
   });
 
 async function typeInterval(page: Page, text: string): Promise<void> {
@@ -89,17 +99,45 @@ test.describe("custom intervals", () => {
     await expect.poll(async () => (await bars(page)).interval).toBe("7m");
   });
 
-  test("the live feed keeps 7m bars on their grid", async ({ bootedApp: page }) => {
+  test("the live feed resamples 7m from 1m, onto the bars a reload shows", async ({
+    bootedApp: page,
+  }) => {
     await typeInterval(page, "7m");
     await page.keyboard.press("Enter");
     await expect.poll(async () => (await bars(page)).interval).toBe("7m");
-    const first = await bars(page);
-    await expect
-      .poll(async () => (await bars(page)).lastClose, { timeout: 15_000 })
-      .not.toBe(first.lastClose);
+    const badge = page.getByTestId("live-status");
+    await expect(badge).toHaveAttribute("data-state", "push");
+
+    // Pushed tails are built from the 1m feed. One that did not line up with the
+    // chart's 7m bars would make the feed poll or reload to repair it, so while
+    // pushes land the chart must ask for nothing.
+    const loads: string[] = [];
+    page.on("request", (req) => {
+      if (req.method() === "POST" && req.url().endsWith("/mcp")) {
+        const body = req.postDataJSON() as { params?: { name?: string } };
+        if (body.params?.name === "generate_chart") loads.push(req.url());
+      }
+    });
+    for (let i = 0; i < 4; i++) {
+      const before = (await bars(page)).lastClose;
+      await expect
+        .poll(async () => (await bars(page)).lastClose, { timeout: 15_000 })
+        .not.toBe(before);
+    }
+    expect(loads).toEqual([]);
+    await expect(badge).toHaveAttribute("data-state", "push");
     const later = await bars(page);
     expect(later.gaps).toEqual([420_000]);
     expect(later.last % 420_000).toBe(0);
+
+    // Closed bars, as this tab's feed left them and as a fresh load reads them.
+    const closed = await settled(page);
+    await reloadApp(page);
+    await expect.poll(async () => (await bars(page)).interval).toBe("7m");
+    const reloaded = await settled(page);
+    const shared = closed.filter((b) => reloaded.some((r) => r.t === b.t));
+    expect(shared.length).toBeGreaterThan(0);
+    for (const b of shared) expect(reloaded.find((r) => r.t === b.t)).toEqual(b);
   });
 
   test("a share link carries one, and a bad one is ignored", async ({ page }) => {

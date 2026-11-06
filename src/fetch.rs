@@ -54,6 +54,24 @@ pub fn fetch_ohlcv(
 ) -> Result<Fetched, String> {
     match source {
         DataSource::Sample => {
+            // As Binance would: the bars a custom interval is built from. Sample
+            // months are a fixed 30 days, so they stay on their own grid.
+            let iv = Interval::parse(interval)?;
+            let (base, per_bar) = iv.binance_base();
+            if per_bar > 1 && iv.unit != Unit::Month {
+                let (want, end) = resample_window(&iv, per_bar, limit, end_time_ms);
+                let fetched = data::sample_ohlcv(symbol, base, want, end, now_ms())?;
+                let (bars, has_more) = resampled_bars(&fetched.bars, &iv, limit, want);
+                return Ok(Fetched {
+                    data: OhlcvData {
+                        bars,
+                        symbol: None,
+                        interval: None,
+                        session: None,
+                    },
+                    has_more,
+                });
+            }
             let data = data::sample_ohlcv(symbol, interval, limit, end_time_ms, now_ms())?;
             let has_more = data.len() >= limit;
             Ok(Fetched { data, has_more })
@@ -165,22 +183,10 @@ fn fetch_binance_via(
     let iv = Interval::parse(interval)?;
     let (base, per_bar) = iv.binance_base();
     let resampled = per_bar > 1;
-    // One bar more than asked: the oldest may be cut off by the window.
-    let want = if resampled {
-        limit
-            .saturating_add(1)
-            .saturating_mul(per_bar as usize)
-            .min(MAX_BASE_BARS)
+    let (want, end) = if resampled {
+        resample_window(&iv, per_bar, limit, end_time_ms)
     } else {
-        limit
-    };
-    // A bar opening before `end_time_ms` takes in klines up to its own end.
-    let end = match end_time_ms {
-        Some(e) if resampled => Some(
-            iv.grid_end(e.saturating_sub(1).div_euclid(1000))
-                .saturating_mul(1000),
-        ),
-        other => other,
+        (limit, end_time_ms)
     };
     let now = Instant::now();
     let deadline = now + BINANCE_DEADLINE;
@@ -202,16 +208,11 @@ fn fetch_binance_via(
         walk_klines(&client.walks, want, end, deadline, page)?
     };
 
-    let reached_want = fetched.len() >= want;
     let (bars, has_more) = if resampled {
-        let mut bars = resample(&fetched, &iv, reached_want);
-        let older = bars.len() > limit;
-        if older {
-            bars.drain(..bars.len() - limit);
-        }
-        (bars, reached_want || older)
+        resampled_bars(&fetched, &iv, limit, want)
     } else {
-        (fetched, reached_want)
+        let more = fetched.len() >= want;
+        (fetched, more)
     };
 
     if bars.is_empty() && end_time_ms.is_none() {
@@ -227,6 +228,38 @@ fn fetch_binance_via(
         },
         has_more,
     })
+}
+
+/// Native bars to read for `limit` bars of `iv`, and where they end.
+fn resample_window(
+    iv: &Interval,
+    per_bar: i64,
+    limit: usize,
+    end_time_ms: Option<i64>,
+) -> (usize, Option<i64>) {
+    // One bar more than asked: the oldest may be cut off by the window.
+    let want = limit
+        .saturating_add(1)
+        .saturating_mul(per_bar as usize)
+        .min(MAX_BASE_BARS);
+    // A bar opening before `end_time_ms` takes in klines up to its own end.
+    let end = end_time_ms.map(|e| {
+        iv.grid_end(e.saturating_sub(1).div_euclid(1000))
+            .saturating_mul(1000)
+    });
+    (want, end)
+}
+
+/// The newest `limit` bars of `iv` from the `want` native bars asked for, and
+/// whether older ones exist.
+fn resampled_bars(native: &[Bar], iv: &Interval, limit: usize, want: usize) -> (Vec<Bar>, bool) {
+    let reached_want = native.len() >= want;
+    let mut bars = resample(native, iv, reached_want);
+    let older = bars.len() > limit;
+    if older {
+        bars.drain(..bars.len() - limit);
+    }
+    (bars, reached_want || older)
 }
 
 /// How many symbol and kline pairs `newest_klines` holds, and for how long
@@ -1613,6 +1646,26 @@ mod tests {
             binance_klines_url("BTCUSDT", "4h", 1000, Some(1_700_000_000_000)),
             "https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=4h&limit=1000&endTime=1700000000000"
         );
+    }
+
+    #[test]
+    fn the_sample_source_builds_custom_intervals_from_native_bars() {
+        // A fixed end, so every bar is closed whatever the wall clock says.
+        let end_ms = 1_700_000_000_000 / 420_000 * 420_000;
+        let got = fetch_ohlcv(DataSource::Sample, "BTCUSDT", "7m", 3, Some(end_ms)).unwrap();
+        let native = data::sample_ohlcv("BTCUSDT", "1m", 21, Some(end_ms), now_ms()).unwrap();
+        assert_eq!(got.data.len(), 3);
+        for (i, bar) in got.data.bars.iter().enumerate() {
+            let bucket = &native.bars[i * 7..(i + 1) * 7];
+            assert_eq!(bar.date, bucket[0].date);
+            assert_eq!(bar.open, bucket[0].open);
+            assert_eq!(bar.close, bucket[6].close);
+            assert_eq!(bar.volume, bucket.iter().map(|b| b.volume).sum::<f64>());
+        }
+        // Their own months, on their own grid, as the sample source has always had.
+        let months = fetch_ohlcv(DataSource::Sample, "BTCUSDT", "2mo", 3, Some(end_ms)).unwrap();
+        let direct = data::sample_ohlcv("BTCUSDT", "2mo", 3, Some(end_ms), now_ms()).unwrap();
+        assert_eq!(months.data.bars[2].date, direct.bars[2].date);
     }
 
     #[test]

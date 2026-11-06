@@ -731,19 +731,85 @@ mod tests {
         assert_eq!(local_times(&d, tz, 1), ["Mon 01-01 09:30"]);
     }
 
+    /// The n-th (from 1) `weekday` of a month.
+    fn nth(year: i32, month: u32, weekday: chrono::Weekday, n: u8) -> NaiveDate {
+        NaiveDate::from_weekday_of_month_opt(year, month, weekday, n).unwrap()
+    }
+
+    /// Easter Sunday: the anonymous Gregorian computus.
+    fn easter(y: i32) -> NaiveDate {
+        let (a, b, c) = (y % 19, y / 100, y % 100);
+        let (d, e) = (b / 4, b % 4);
+        let g = (8 * b + 13) / 25;
+        let h = (19 * a + b - d - g + 15) % 30;
+        let (i, k) = (c / 4, c % 4);
+        let l = (32 + 2 * e + 2 * i - h - k) % 7;
+        let m = (a + 11 * h + 19 * l) / 433;
+        let month = (h + l - 7 * m + 90) / 25;
+        let day = (h + l - 7 * m + 33 * month + 19) % 32;
+        NaiveDate::from_ymd_opt(y, month as u32, day as u32).unwrap()
+    }
+
+    /// Saturday's holiday is observed on Friday, Sunday's on Monday.
+    fn observed(d: NaiveDate) -> NaiveDate {
+        match d.weekday() {
+            chrono::Weekday::Sat => d.pred_opt().unwrap(),
+            chrono::Weekday::Sun => d.succ_opt().unwrap(),
+            _ => d,
+        }
+    }
+
     #[test]
-    fn the_us_tables_hold_trading_weekdays_of_the_published_years() {
-        // Counts as NYSE publishes them: 2028 observes no New Year's Day, because
-        // it falls on a Saturday.
-        for (year, holidays) in [(2026, 10), (2027, 10), (2028, 9)] {
-            let n = US_HOLIDAYS.iter().filter(|d| d.0 == year).count();
-            assert_eq!(n, holidays, "{year}");
+    fn the_us_tables_match_the_rules_the_holidays_follow() {
+        use chrono::Weekday::{Mon, Thu};
+        // Derived independently of the table, so a wrong date cannot pass for being
+        // a weekday. New Year's Day on a Saturday is not observed, as its calendar says.
+        let mut want = Vec::new();
+        let mut early = Vec::new();
+        for y in 2026..=2028 {
+            let date = |m, d| NaiveDate::from_ymd_opt(y, m, d).unwrap();
+            if date(1, 1).weekday() != chrono::Weekday::Sat {
+                want.push(observed(date(1, 1)));
+            }
+            let thanksgiving = nth(y, 11, Thu, 4);
+            want.extend([
+                nth(y, 1, Mon, 3),
+                nth(y, 2, Mon, 3),
+                easter(y) - chrono::Days::new(2),
+                (25..=31)
+                    .rev()
+                    .map(|d| date(5, d))
+                    .find(|d| d.weekday() == Mon)
+                    .unwrap(),
+                observed(date(6, 19)),
+                observed(date(7, 4)),
+                nth(y, 9, Mon, 1),
+                thanksgiving,
+                observed(date(12, 25)),
+            ]);
+            early.push(thanksgiving + chrono::Days::new(1));
         }
-        for &(y, m, d) in US_HOLIDAYS.iter().chain(&US_EARLY_CLOSES) {
-            let date = NaiveDate::from_ymd_opt(y, m, d).unwrap();
-            assert!(date.weekday().num_days_from_monday() < 5, "{date}");
-        }
-        assert!(US_HOLIDAYS.is_sorted() && US_EARLY_CLOSES.is_sorted());
+        let table = |t: &[(i32, u32, u32)]| -> Vec<NaiveDate> {
+            t.iter()
+                .map(|&(y, m, d)| NaiveDate::from_ymd_opt(y, m, d).unwrap())
+                .collect()
+        };
+        want.sort();
+        assert_eq!(table(&US_HOLIDAYS), want);
+        // The day after Thanksgiving closes early every year. The others are the
+        // eve of a midweek holiday, which the calendar decides year by year.
+        let closes = table(&US_EARLY_CLOSES);
+        assert!(early.iter().all(|d| closes.contains(d)), "{closes:?}");
+        assert_eq!(
+            closes
+                .iter()
+                .filter(|d| !early.contains(d))
+                .collect::<Vec<_>>(),
+            vec![
+                &NaiveDate::from_ymd_opt(2026, 12, 24).unwrap(),
+                &NaiveDate::from_ymd_opt(2028, 7, 3).unwrap(),
+            ]
+        );
     }
 
     #[test]

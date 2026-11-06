@@ -191,6 +191,10 @@ to the nearest local midnight, which `2W` and `2M` need to bucket correctly.
 
 ### Push
 
+The sample source builds custom intervals the same way, from native bars and a native
+feed, except its months, which are a fixed 30 days. So the browser tests run the real
+resampling on load and on push, with no network.
+
 `feed_interval` returns the base stream. A group whose feed is finer than its
 chart seeds native bars, upserts feed events as before, and resamples on each
 recompute with `fetch::resample`. Groups on the same base share one WebSocket.

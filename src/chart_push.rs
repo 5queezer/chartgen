@@ -26,7 +26,7 @@ use std::time::Duration;
 
 use chartgen::data::{self, Bar, OhlcvData};
 use chartgen::feed::{BinanceFeed, FeedEvent};
-use chartgen::interval::Interval;
+use chartgen::interval::{Interval, Unit};
 use futures_util::future::BoxFuture;
 use serde_json::{json, Value};
 use tokio::sync::{broadcast, mpsc};
@@ -193,7 +193,13 @@ pub struct SampleSource;
 impl PushSource for SampleSource {
     fn feed_interval(&self, symbol: &str, timeframe: &str) -> Result<String, String> {
         binance_only(symbol)?;
-        Interval::parse(timeframe).map(|_| timeframe.to_string())
+        // As Binance would, but sample months are a fixed 30 days (`fetch_ohlcv`).
+        let iv = Interval::parse(timeframe)?;
+        Ok(if iv.unit == Unit::Month {
+            timeframe.to_string()
+        } else {
+            iv.binance_base().0.to_string()
+        })
     }
 
     fn seed(&self, symbol: &str, timeframe: &str, count: usize) -> Result<OhlcvData, String> {
@@ -814,7 +820,9 @@ mod tests {
             "15m"
         );
         assert_eq!(BinanceSource.feed_interval("BTCUSDT", "2wk").unwrap(), "1w");
-        assert_eq!(SampleSource.feed_interval("BTCUSDT", "7m").unwrap(), "7m");
+        assert_eq!(SampleSource.feed_interval("BTCUSDT", "7m").unwrap(), "1m");
+        assert_eq!(SampleSource.feed_interval("BTCUSDT", "45m").unwrap(), "15m");
+        assert_eq!(SampleSource.feed_interval("BTCUSDT", "3mo").unwrap(), "3mo");
         assert!(BinanceSource.feed_interval("BTCUSDT", "61m").is_err());
     }
 
