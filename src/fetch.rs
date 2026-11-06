@@ -276,12 +276,10 @@ struct Now {
 
 type Clock<'a> = &'a (dyn Fn() -> Now + Send + Sync);
 
-/// The sharing below is ADR-0050.
-///
 /// How many symbol and kline pairs `newest_klines` holds, how many klines in all,
-/// and for how long since last used. A kline is about 96 bytes (64 for the `Bar`, 32
-/// for its date), so at most about 25 MB: 14 of the longest custom charts, or 256
-/// ordinary ones, which read a page of 1000.
+/// and for how long since last used (ADR-0050). A kline is about 96 bytes (64 for the
+/// `Bar`, 32 for its date), so at most about 25 MB: 12 windows at the 20,000 cap, or
+/// 256 ordinary ones, which read a page of 1000.
 const KLINE_CACHE_ENTRIES: usize = 256;
 const KLINE_CACHE_BARS: usize = 256_000;
 const KLINE_CACHE_TTL: Duration = Duration::from_secs(120);
