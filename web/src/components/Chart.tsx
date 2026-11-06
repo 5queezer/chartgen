@@ -452,7 +452,8 @@ function drawMarks(
   ctx.textBaseline = "middle";
   for (const b of boxes) {
     const color = markColor(b.bias, b.color, style);
-    ctx.globalAlpha = b.faint ? 0.65 : 1;
+    // An outline has little ink as it is: only a filled box can afford to fade.
+    ctx.globalAlpha = b.faint && !b.hollow ? 0.65 : 1;
     ctx.beginPath();
     ctx.roundRect(b.x, b.y, b.width, b.height, 3);
     if (b.hollow) {
