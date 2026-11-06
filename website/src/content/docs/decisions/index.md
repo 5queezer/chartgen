@@ -70,3 +70,4 @@ one and link both ways.
 | [0040](/chartgen/decisions/0040-layout-compare-restore/) | A layout stores the scale mode its compare symbols return to | Accepted | 2026-11-06 |
 | [0041](/chartgen/decisions/0041-script-editor-in-the-web-app/) | Script editor in the web app | Accepted | 2026-11-06 |
 | [0042](/chartgen/decisions/0042-server-side-alerts/) | Alerts that run on the server, with webhooks | Accepted | 2026-11-06 |
+| [0045](/chartgen/decisions/0045-web-push-for-server-alerts/) | Browser push for server alerts | Accepted | 2026-11-06 |

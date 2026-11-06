@@ -54,6 +54,8 @@ registrations of external MCP clients. See the [persistence reference](/chartgen
 | `CHARTGEN_SERVER_ALERT_CLIENTS` | `src/server_alerts.rs` | Comma-separated OAuth client ids that may create server alerts and use webhooks. Unset: anyone may create alerts, nobody gets webhooks. `*`: anyone, with webhooks. |
 | `CHARTGEN_SERVER_ALERT_PAIRS_PER_CLIENT` | `src/server_alerts.rs` | Symbol and interval pairs one client may watch. Default 2. |
 | `CHARTGEN_WEBHOOK_PROXY` | `src/webhook.rs` | `http` or `https` URL of a proxy that sends the webhooks, so a receiver does not see this server's address. Unset means direct, ignoring `HTTPS_PROXY` and the like. |
+| `CHARTGEN_VAPID_SUBJECT` | `src/server_alerts.rs` | `mailto:` or `https:` URL where push services can reach you. Falls back to an https `CHARTGEN_BASE_URL`; with neither, [browser push](#browser-push) stays off. |
+| `CHARTGEN_VAPID_PRIVATE_KEY` | `src/server_alerts.rs` | Application server key for push, 32 bytes of base64url. Unset, one is made once and kept in `chartgen.db`. Changing it stops every device until its browser next opens chartgen. |
 | `CHARTGEN_WEBHOOK_BLOCKED_PREFIXES` | `src/webhook.rs` | Comma-separated addresses or prefixes a webhook may not reach besides the private ranges (`203.0.113.7,2001:db8:1::/48`). For this network's own public addresses. |
 | `CHARTGEN_WEBHOOK_TEST_ORIGIN` | `src/webhook.rs` | Tests only. One loopback origin (`http://127.0.0.1:9000`) a webhook may reach. Ignored unless `CHARTGEN_DATA_SOURCE=sample`, so it does nothing on a live server. |
 | `HOME` / `USERPROFILE` | `src/main.rs` | Picks the data directory (`~/.chartgen/`). Override to relocate `alerts.json` / `trades.log` / `subscriptions.json` / `chartgen.db`. |
@@ -147,6 +149,47 @@ To replace one that leaked:
    new signing secrets come with them.
 
 Whoever held the id may already have sent a webhook, so treat your IP as known to them.
+
+### Browser push
+
+An alert can notify a browser or phone with chartgen closed
+([ADR-0045](/chartgen/decisions/0045-web-push-for-server-alerts/)). It runs where server alerts do,
+needs no setting of its own beyond `CHARTGEN_VAPID_SUBJECT` or an https `CHARTGEN_BASE_URL`, and needs
+the site on https, because browsers only allow push there and on localhost.
+
+| `CHARTGEN_SERVER_ALERT_CLIENTS` | Who gets push |
+|---|---|
+| A list of ids (recommended) | Those clients |
+| Unset | Anyone, though nobody gets webhooks |
+| `*` | Anyone |
+
+**Requests go only to** `fcm.googleapis.com`, `updates.push.services.mozilla.com`, `*.push.apple.com` and
+`*.notify.windows.com`, after the same address checks as a webhook, so a stranger cannot aim one at a
+host of their choice. Those services do see this server's IP, unless `CHARTGEN_WEBHOOK_PROXY` is set,
+which push also uses. If you filter outbound traffic, allow those hosts.
+
+With the list unset, a stranger can register up to 5 devices per client id, and client ids are free. The
+2000 devices in total and 120 deliveries a minute across the server bound what that costs, but they can
+use up the room for everyone. **Recommended for this server until sign-in lands:**
+`CHARTGEN_SERVER_ALERT_CLIENTS` with your own client id, and `CHARTGEN_VAPID_SUBJECT` with your address.
+
+Tests only use a fake push service. Before relying on it, check real delivery by hand:
+
+1. On the server, set `CHARTGEN_SERVER_ALERTS=1`, `CHARTGEN_SERVER_ALERT_CLIENTS` and
+   `CHARTGEN_VAPID_SUBJECT`, and open the site over https.
+2. **Desktop Chrome (FCM):** in the Alerts tab press **Enable notifications** and allow. Create a
+   **Run on server** alert with **Send a notification** ticked, on a level the price will soon cross.
+   Close every chartgen tab, and wait. A notification should appear; clicking it should open the chart
+   on that symbol. The alert's row should then show no error.
+3. **Firefox (Mozilla):** the same.
+4. **Edge on Windows (Windows push):** the same.
+5. **Android Chrome:** the same, with the app closed and the screen off.
+6. **iPhone or iPad, iOS 16.4 or later (Apple):** in Safari the control should say to add it to the Home
+   Screen. Do that, open it from there, sign in, then as above. Lock the phone and wait.
+7. With a tab open and push on, check that one fire gives one notification and no toast.
+8. **Turn off** on one device: the next fire should reach the others but not that one.
+
+If a row shows `HTTP 401` or `HTTP 403`, the push service refused the VAPID token: check the subject.
 
 ## Reverse proxy
 
