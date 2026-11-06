@@ -480,8 +480,18 @@ test.describe("touch on a phone", () => {
     await bootCompact(page);
     const settings = page.getByRole("button", { name: /^Settings for RSI/ }).first();
     await expect(settings).toBeHidden();
-    await page.locator(".pane-header-interactive", { hasText: "RSI" }).tap();
+    const row = page.locator(".pane-header-interactive", { hasText: "RSI" });
+    await row.tap();
     await expect(settings).toBeVisible();
+
+    // A tap anywhere else closes it again, and the readings come back.
+    const c = await inChart(page);
+    await page.touchscreen.tap(c.x, c.y);
+    await expect(settings).toBeHidden();
+    await expect(row.locator(".pane-header-value").first()).toBeVisible();
+
+    await page.waitForTimeout(700);
+    await row.tap();
     await settings.tap();
     await expect(page.getByRole("dialog")).toBeVisible();
     await expectInView(page, "OK");
