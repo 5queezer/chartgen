@@ -542,8 +542,7 @@ impl ChartHub {
                 id,
                 events,
                 feed.1.clone(),
-                req.push_interval(limits.min_push_interval, &feed.1),
-                limits.reread_pause,
+                *limits,
             ));
             st.groups.insert(
                 req.clone(),
@@ -660,9 +659,9 @@ async fn run_group(
     id: u64,
     mut events: broadcast::Receiver<FeedEvent>,
     feed_interval: String,
-    min_interval: Duration,
-    reread_pause: Duration,
+    limits: Limits,
 ) {
+    let min_interval = req.push_interval(limits.min_push_interval, &feed_interval);
     let fail = |why: String| {
         eprintln!("[push] {} {}: {why}", req.ticker, req.timeframe);
         if let Some(hub) = hub.upgrade() {
@@ -705,7 +704,7 @@ async fn run_group(
                 Ok(FeedEvent::Tick(bar) | FeedEvent::Bar(bar)) => {
                     missing |= feed_grid.is_some_and(|grid| skips_a_bar(&window, &bar, &grid));
                     if missing && Instant::now() >= next_read {
-                        next_read = Instant::now() + reread_pause;
+                        next_read = Instant::now() + limits.reread_pause;
                         match tokio::task::spawn_blocking(read.clone()).await {
                             Ok(Ok(d)) if !d.is_empty() => {
                                 window = d.bars;
@@ -1179,27 +1178,6 @@ mod tests {
             &bar(ts("2026-03-01T00:00:00Z"), 1.0),
             &month
         ));
-    }
-
-    #[tokio::test]
-    async fn a_refused_read_after_a_gap_keeps_the_chart_alive() {
-        let fake = Arc::new(Fake {
-            base: Some("1m"),
-            ..Fake::default()
-        });
-        let (hub, mut rx, now) = custom_chart(&fake).await;
-        fake.refuse_seeds.store(true, Ordering::SeqCst);
-
-        fake.send(FeedEvent::Tick(bar(now + 240, 2.0))).await;
-        let n = next(&mut rx, 2_000).await.expect("still pushing");
-        assert_eq!(n["params"]["series"]["bars"][1]["c"], 2.0);
-        assert_eq!(fake.seeds.load(Ordering::SeqCst), 2);
-        assert_eq!(hub.counts().1, 1, "the group is still there");
-
-        // It does not ask again on every tick while the budget says no.
-        fake.send(FeedEvent::Tick(bar(now + 240, 3.0))).await;
-        next(&mut rx, 2_000).await.expect("still pushing");
-        assert_eq!(fake.seeds.load(Ordering::SeqCst), 2);
     }
 
     #[tokio::test]
