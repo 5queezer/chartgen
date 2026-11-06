@@ -197,6 +197,9 @@ jobs:
           key: playwright-${{ runner.os }}-${{ hashFiles('web/package-lock.json') }}
           restore-keys: |
             playwright-${{ runner.os }}-
+      # Playwright's --with-deps runs apt itself: fail a stalled mirror fast there too.
+      - name: Configure apt timeouts
+        run: printf 'Acquire::Retries "3";\nAcquire::http::Timeout "30";\nAcquire::https::Timeout "30";\n' | sudo tee /etc/apt/apt.conf.d/99ci-timeouts
       - name: Install Playwright Chromium
         timeout-minutes: 10
         working-directory: web
