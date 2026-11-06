@@ -308,6 +308,57 @@ export const ListIndicatorsPayloadSchema = z.object({
 export type ListIndicatorsPayload = z.infer<typeof ListIndicatorsPayloadSchema>;
 
 // ---------------------------------------------------------------------------
+// Scripted indicators (ADR-0025, ADR-0041): `tool_list_my_indicators`,
+// `tool_get_my_indicator`, `tool_register_indicator`, `tool_delete_indicator`.
+// ---------------------------------------------------------------------------
+
+export const MyIndicatorSchema = z.object({
+  name: z.string(),
+  title: z.string(),
+  description: z.string(),
+  overlay: z.boolean(),
+  updated_at: z.number().int(),
+});
+export type MyIndicator = z.infer<typeof MyIndicatorSchema>;
+
+export const MyIndicatorsPayloadSchema = z.object({
+  total: z.number().int(),
+  indicators: z.array(MyIndicatorSchema),
+});
+export type MyIndicatorsPayload = z.infer<typeof MyIndicatorsPayloadSchema>;
+
+export const MyIndicatorSourcePayloadSchema = z.object({
+  name: z.string(),
+  source: z.string(),
+  updated_at: z.number().int(),
+});
+export type MyIndicatorSourcePayload = z.infer<typeof MyIndicatorSourcePayloadSchema>;
+
+export const RegisteredIndicatorPayloadSchema = z.object({
+  ok: z.literal(true),
+  name: z.string(),
+  title: z.string(),
+  overlay: z.boolean(),
+  replaced: z.boolean(),
+  shadows_builtin: z.boolean(),
+});
+export type RegisteredIndicatorPayload = z.infer<typeof RegisteredIndicatorPayloadSchema>;
+
+// The `isError` body of a script that failed validation. Other rejections
+// (bad name, script limit) are plain text.
+export const ScriptRejectionSchema = z.object({
+  ok: z.literal(false),
+  errors: z.array(IndicatorErrorSchema),
+});
+export type ScriptRejection = z.infer<typeof ScriptRejectionSchema>;
+
+export const DeleteIndicatorPayloadSchema = z.object({
+  ok: z.literal(true),
+  name: z.string(),
+});
+export type DeleteIndicatorPayload = z.infer<typeof DeleteIndicatorPayloadSchema>;
+
+// ---------------------------------------------------------------------------
 // get_indicators — `tool_get_indicators` return shape.
 //   Per-indicator values are the same `panel_result_to_json` shape used
 //   by the summary payload; the top-level envelope also reports the data

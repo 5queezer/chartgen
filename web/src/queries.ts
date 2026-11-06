@@ -2,12 +2,13 @@
 // server-state query for v0.1; alerts, positions, and orders will grow
 // their own hooks here as they land.
 
-import { createQuery, keepPreviousData } from "@tanstack/solid-query";
+import { createQuery, keepPreviousData, type QueryClient } from "@tanstack/solid-query";
 import type { Accessor } from "solid-js";
 
 import { INITIAL_BARS, WARMUP } from "./lib/liveFeed";
+import { usesIndicator } from "./lib/scripts";
 import type { ChartStyle } from "./stores/layout";
-import type { McpSession } from "./mcp";
+import { McpToolError, type McpSession } from "./mcp";
 import { clearAccessToken } from "./oauth";
 import {
   activeIndicatorsKey,
@@ -18,6 +19,11 @@ import type {
   QuotesPayload,
   SeriesPayload,
 } from "./types/responses";
+
+/** A failed sign-in, not a tool's own error text that happens to say "401". */
+function isAuthError(error: Error): boolean {
+  return !(error instanceof McpToolError) && /401|unauthoriz/i.test(error.message);
+}
 
 /** Watchlist poll period while the tab is visible. */
 export const QUOTES_POLL_MS = 5_000;
@@ -104,7 +110,7 @@ export function createChartQuery(
         // The MCP wrapper re-auths once on 401, so any 401 that bubbles
         // out has already survived a retry. Drop the token defensively
         // and let the user retry from the status line.
-        if (/401|unauthoriz/i.test(error.message)) {
+        if (isAuthError(error)) {
           clearAccessToken();
           return false;
         }
@@ -118,7 +124,8 @@ export function createChartQuery(
 /**
  * Create a TanStack Solid Query for `list_indicators`. The registry does
  * not change at runtime, so we cache aggressively — `Infinity` for both
- * stale and gc time. `enabled` gates the fetch until auth is ready.
+ * stale and gc time. `enabled` gates the fetch until auth is ready. A user
+ * script changing it invalidates the query (`refreshIndicatorList`).
  */
 export function createListIndicatorsQuery(
   session: McpSession,
@@ -131,13 +138,47 @@ export function createListIndicatorsQuery(
     gcTime: Infinity,
     enabled: enabled(),
     retry: (failureCount: number, error: Error) => {
-      if (/401|unauthoriz/i.test(error.message)) {
+      if (isAuthError(error)) {
         clearAccessToken();
         return false;
       }
       return failureCount < 0;
     },
   }));
+}
+
+/**
+ * The tool names of `tools/list`, once per session: what the server lists does
+ * not change while it runs. A failure reads as "not listed" and is not retried.
+ */
+export function createToolNamesQuery(
+  session: McpSession,
+  enabled: Accessor<boolean>,
+) {
+  return createQuery<string[], Error>(() => ({
+    queryKey: ["tools_list"] as const,
+    queryFn: () => session.callListToolNames(),
+    staleTime: Infinity,
+    gcTime: Infinity,
+    enabled: enabled(),
+    retry: false,
+  }));
+}
+
+/** A user script was saved or deleted: reload the picker's list. */
+export function refreshIndicatorList(queryClient: QueryClient): Promise<void> {
+  return queryClient.invalidateQueries({ queryKey: ["list_indicators"] });
+}
+
+/**
+ * The script `name` changed: the chart reloads if it shows it, and other cached
+ * charts using it refetch when next shown. A chart without it keeps its view.
+ */
+export function refreshChartsUsing(queryClient: QueryClient, name: string): Promise<void> {
+  return queryClient.invalidateQueries({
+    queryKey: ["generate_chart"],
+    predicate: (q) => usesIndicator(String(q.queryKey[3]), name),
+  });
 }
 
 /**
@@ -164,7 +205,7 @@ export function createQuotesQuery(
       refetchInterval: QUOTES_POLL_MS,
       placeholderData: keepPreviousData,
       retry: (_failureCount: number, error: Error) => {
-        if (/401|unauthoriz/i.test(error.message)) clearAccessToken();
+        if (isAuthError(error)) clearAccessToken();
         // The next poll is the retry.
         return false;
       },
