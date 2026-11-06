@@ -101,9 +101,14 @@ charts' state are untouched, so nothing is dirty and they come back when there i
 ### Consequences
 
 - Good: one chart behaves as before, on the same keys. Existing e2e specs pass unmodified.
-- Good: a chart cannot reach another chart's state through its own effects.
+- Good: a chart cannot reach another chart's state through its own effects. Charts on
+  one request share a cache entry, so a chart only adopts a new result it asked for.
 - Bad: a module-level export read from code running for a non-active chart is a
   silent bug. Pane code must use the pane's instances; this rule is by review only.
+- Bad: after a rollback, or in a tab still on an older build, any layout action strips
+  `grid` and `panes` from every layout: that parser returns known fields only and writes
+  the file back. Grids are lost, nothing is misread, and shipped builds cannot be fixed.
+  Future parsers should keep unknown fields.
 - Bad: chart-bound alerts on a non-active chart do not run. Evaluating several chart
   contexts would need `chartContext` and its readers to become lists.
 - Bad: one chart's registered indicator names differ per pane

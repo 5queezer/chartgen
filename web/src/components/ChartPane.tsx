@@ -37,7 +37,7 @@ import { chartQueryKey, createChartQuery } from "../queries";
 import { copyChartLink, importPending } from "../services/shareLink";
 import { feedChartSnapshot } from "../services/alertEngine";
 import { createReplay } from "../services/replay";
-import { forgetReadings } from "../stores/alerts";
+import { forgetReadings, setChartContext } from "../stores/alerts";
 import { compareStoreOf } from "../stores/compare";
 import { activePane, PaneProvider, setActivePane } from "../stores/grid";
 import {
@@ -176,9 +176,13 @@ export function createChartPane(pane: number, deps: PaneDeps) {
     on(
       isActive,
       (active) => {
+        if (!active) return;
         const s = untrack(live)?.series;
-        if (active && s && untrack(replay.mode) === "off") {
+        if (s && untrack(replay.mode) === "off") {
           feedChartSnapshot(feedTicker, { series: s, update: { version: 0, kind: "reset" } });
+        } else {
+          // Nothing evaluates here yet: not the previous chart's alerts either.
+          setChartContext(null);
         }
       },
       { defer: true },

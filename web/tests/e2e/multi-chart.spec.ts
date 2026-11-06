@@ -319,6 +319,23 @@ test.describe("multi-chart grid", () => {
     await expect.poll(async () => (await panes(page))[0]!.candleHeight).toBe(fullCandle);
   });
 
+  test("activating a replaying chart leaves no other chart's context for alerts", async ({ bootedApp: page }) => {
+    const context = () =>
+      page.evaluate(() =>
+        (window as unknown as { __chartgenTest: { alertContext: () => { symbol: string } | null } })
+          .__chartgenTest.alertContext(),
+      );
+    await chooseGrid(page, "2h");
+    await expectLoaded(page, 2);
+    await expect.poll(async () => (await context())?.symbol).toBe("BTCUSDT");
+    await activate(page, 1);
+    await page.getByRole("button", { name: "Bar replay" }).click();
+    await activate(page, 0);
+    await expect.poll(async () => (await context())?.symbol).toBe("BTCUSDT");
+    await activate(page, 1);
+    await expect.poll(context).toBeNull();
+  });
+
   test("each chart registers its own indicators: geometry is kept by registered name", async ({
     bootedApp: page,
   }) => {

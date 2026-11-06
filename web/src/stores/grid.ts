@@ -1,6 +1,7 @@
 // Multi-chart grid (ADR-0043): how many charts show, and which one is active.
 // A pane is a number; pane 0 owns the storage keys the single-chart app has
-// always used, so nothing here is written until the user changes the grid.
+// always used, so nothing here is written until the user changes the grid or
+// the active chart, or a layout is created or switched to.
 // The chart stores (layout, indicators, compare) keep one instance per pane;
 // their module-level exports read the active pane.
 

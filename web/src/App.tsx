@@ -27,7 +27,7 @@ import { ChartSettings } from "./components/ChartSettings";
 import { DRAWING_LABELS } from "./components/DrawingToolbar";
 import { GridMenu } from "./components/GridMenu";
 import { isDrawingAlertTool, isHorizontalTool } from "./lib/alerts";
-import { setIndicatorSignatures } from "./stores/alerts";
+import { chartContext, setIndicatorSignatures } from "./stores/alerts";
 import { IndicatorChips } from "./components/IndicatorChips";
 import { IndicatorPicker } from "./components/IndicatorPicker";
 import { IndicatorSettings } from "./components/IndicatorSettings";
@@ -255,7 +255,8 @@ export function App(): JSX.Element {
     (window as unknown as Record<string, unknown>).__chartgenTest = {
       chart,
       series: () => live()?.series ?? null,
-      // Multi-chart e2e (tests/e2e/multi-chart.spec.ts): each chart of the grid.
+      // Multi-chart e2e (tests/e2e/multi-chart.spec.ts): what alerts read, and each chart of the grid.
+      alertContext: chartContext,
       panes: () =>
         panes().map((p) => ({
           pane: p.pane,

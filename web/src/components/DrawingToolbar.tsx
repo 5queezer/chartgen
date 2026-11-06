@@ -1164,6 +1164,9 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
         if (!saved || saved.pane === gridPane || saved.symbol !== props.symbol || !props.chart) return;
         const records = loadDrawings(saved.symbol, false);
         if (JSON.stringify(records) === JSON.stringify(current)) return;
+        // A debounced save from before would overwrite the one just made.
+        window.clearTimeout(saveTimer);
+        pendingSave = null;
         rebuild(records);
         history.clear();
         syncHistory();
