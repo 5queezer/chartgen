@@ -12,19 +12,19 @@ const WARMUP_TIMEOUT_MS = 180_000;
 
 export default async function globalSetup(config: FullConfig): Promise<void> {
   const browser = await chromium.launch();
-  try {
-    // Each project has its own servers.
-    for (const baseURL of new Set(config.projects.map((p) => p.use.baseURL))) {
-      const page = await browser.newPage({ baseURL });
-      page.setDefaultTimeout(WARMUP_TIMEOUT_MS);
-      page.setDefaultNavigationTimeout(WARMUP_TIMEOUT_MS);
-      await gotoApp(page);
-      await page.close();
-    }
-  } catch (err) {
-    // Only a warm-up: if it fails, the specs report the real problem.
-    console.warn(`[global-setup] warm-up boot failed: ${String(err)}`);
-  } finally {
-    await browser.close();
-  }
+  // Every project has its own dev server to warm (playwright.config.ts).
+  await Promise.all(
+    [...new Set(config.projects.map((p) => p.use.baseURL))].map(async (baseURL) => {
+      try {
+        const page = await browser.newPage({ baseURL });
+        page.setDefaultTimeout(WARMUP_TIMEOUT_MS);
+        page.setDefaultNavigationTimeout(WARMUP_TIMEOUT_MS);
+        await gotoApp(page);
+      } catch (err) {
+        // Only a warm-up: if it fails, the specs report the real problem.
+        console.warn(`[global-setup] warm-up boot failed: ${String(err)}`);
+      }
+    }),
+  );
+  await browser.close();
 }

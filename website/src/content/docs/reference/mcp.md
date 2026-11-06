@@ -739,7 +739,10 @@ only (stdio returns an error); works without `--trade`.
 `indicators` (at most 10, with [instance ids](#several-instances-of-one-indicator)
 as for `generate_chart`), `chart_style` and `warmup` (default 0, max
 1000). Validation and error messages are otherwise the same as for
-`generate_chart`. An interval Binance has no stream for follows the coarsest
+`generate_chart`, except that a chart using your scripts
+([`CHARTGEN_SCRIPTING=1`](#scripted-indicators-chartgen_scripting1)) answers
+`not pushable`, because pushed tails run without a user. Poll `generate_chart` for
+those. An interval Binance has no stream for follows the coarsest
 stream that divides it (`7m` follows `1m`), and each tail is resampled from
 that stream's bars as a fetch would be, so a live bar is the bar a reload
 shows. The exception is a reconnect short enough to fit inside one native kline whose
@@ -959,9 +962,10 @@ types do not include these tools.
 
 | Tool | Arguments | Result |
 |---|---|---|
-| `register_indicator` | `name` (`^[a-z][a-z0-9_]{0,47}$`), `source` (≤ 64 KiB) | `{ok: true, name, title, overlay, configurable_params, replaced, shadows_builtin}` |
+| `register_indicator` | `name` (`^[a-z][a-z0-9_]{0,47}$`), `source` (≤ 64 KiB), `create_only` (default `false`) | `{ok: true, name, title, overlay, configurable_params, replaced, shadows_builtin}` |
 | `fork_indicator` | `builtin_name` | `{name, source, configurable_params}` for a built-in with a reference implementation (`wavetrend`); otherwise an error listing the forkable ones |
 | `list_my_indicators` | — | `{total, indicators: [{name, title, description, type, overlay, configurable_params?, source: "user", created_at, updated_at}]}` |
+| `get_my_indicator` | `name` | `{name, source, updated_at}`: the stored Starlark source. With no such script: `isError: true` with `{ok: false, error: "not_found", message}`, which a failed read never has |
 | `delete_indicator` | `name` | `{ok: true, name}`; an error if you have no such script |
 
 `register_indicator` validates in four steps: `parse`, `static`, `presence`,
@@ -972,7 +976,9 @@ with:
 { "ok": false, "errors": [{ "step": "static", "line": 3, "message": "`len` shadows a builtin; pick another name" }] }
 ```
 
-Registering an existing name replaces the script (`"replaced": true`). Each
+Registering an existing name replaces the script (`"replaced": true`), unless
+`create_only` is `true`: then the store's insert refuses it, and the error has
+`"step": "exists"`. Each
 user may store 50 scripts. Scripts are stored in SQLite at `CHARTGEN_DB`
 (default `~/.chartgen/chartgen.db`), see the
 [persistence reference](/chartgen/reference/persistence/#chartgendb-oauth-clients-and-scripted-indicators).

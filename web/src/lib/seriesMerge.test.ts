@@ -8,6 +8,7 @@ import {
   mergeTail,
   missingBars,
   sortChannels,
+  withoutMisfits,
 } from "./seriesMerge";
 
 // A hand-made stand-in for the server's sample source: bar i opens at
@@ -634,5 +635,123 @@ describe("projection past the last bar (ADR-0033)", () => {
     const cur = project(serve({ bars: 30, now: 100 }), 1);
     const merged = older(cur, project(serve({ bars: 20, end: 71, now: 100 }), 9));
     expect(merged.indicators.sma!.future!.lines[0]!.values).toEqual([1, 2]);
+  });
+});
+
+describe("indicators that fail on one side (indicator_errors)", () => {
+  const STEP_BARS = 5;
+  const error = { step: "runtime", line: 7, message: "boom" };
+  const barsOf = (idx: number[]) =>
+    idx.map((i) => ({ t: tOf(i), o: 1, h: 1, l: 1, c: 1, v: 1 }));
+  const mine = (idx: number[]) => ({
+    label: "Mine",
+    is_overlay: false,
+    lines: [{ index: 0, label: null, values: idx.map((i) => i * 2) }],
+    histogram: [{ index: 0, values: idx.map(() => 1), color_idx: idx.map(() => 0), palette: ["#fff"] }],
+    fills: [{ y1: idx.map(() => 1), y2: idx.map(() => 2), color: "#fff" }],
+    signals: [{ x: 1, y: 1, label: "s", color: "#fff" }],
+  });
+  const range5 = (first: number, n = STEP_BARS) => Array.from({ length: n }, (_, k) => first + k);
+  const series = (
+    idx: number[],
+    indicators: SeriesPayload["indicators"],
+    indicator_errors?: SeriesPayload["indicator_errors"],
+  ) =>
+    ({
+      symbol: "X",
+      interval: "1m",
+      has_more: true,
+      bars: barsOf(idx),
+      indicators,
+      ...(indicator_errors ? { indicator_errors } : {}),
+    }) as unknown as SeriesPayload;
+
+  it("a key missing without an error is still a shape change", () => {
+    const cur = series(range5(0), { mine: mine(range5(0)) } as never);
+    const r = mergeTail(cur, series(range5(3), {}));
+    expect(r).toEqual({ ok: false, reason: "shape" });
+    const added = mergeTail(series(range5(0), {}), series(range5(3), { mine: mine(range5(3)) } as never));
+    expect(added).toEqual({ ok: false, reason: "shape" });
+  });
+
+  it("a tail that failed keeps the values and adds empty bars", () => {
+    const cur = series(range5(0), { mine: mine(range5(0)) } as never);
+    const r = mergeTail(cur, series(range5(3), {}, { mine: error }));
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const ind = r.series.indicators.mine!;
+    expect(r.series.bars).toHaveLength(8);
+    expect(ind.lines![0]!.values).toEqual([0, 2, 4, 6, 8, null, null, null]);
+    expect(ind.histogram![0]!.values).toHaveLength(8);
+    expect(ind.histogram![0]!.color_idx).toHaveLength(8);
+    expect(ind.fills![0]!.y1).toHaveLength(8);
+    expect(r.series.indicator_errors).toEqual({ mine: error });
+  });
+
+  it("a tail that works clears the error of a tail that failed", () => {
+    const cur = series(range5(0), { mine: mine(range5(0)) } as never, { mine: error });
+    const r = mergeTail(cur, series(range5(3), { mine: mine(range5(3)) } as never));
+    expect(r.ok && r.series.indicator_errors).toBeUndefined();
+    expect(r.ok && r.series.indicators.mine!.lines![0]!.values.at(-1)).toBe(14);
+  });
+
+  it("a tail with values for a key that failed on the full load asks for a reload", () => {
+    const cur = series(range5(0), {}, { mine: error });
+    const r = mergeTail(cur, series(range5(3), { mine: mine(range5(3)) } as never));
+    expect(r).toEqual({ ok: false, reason: "shape" });
+  });
+
+  it("an older page with values for such a key is merged without them", () => {
+    const cur = series(range5(5), {}, { mine: error });
+    const r = mergeOlder(cur, series(range5(0), { mine: mine(range5(0)) } as never));
+    expect(r.ok).toBe(true);
+    expect(r.ok && r.series.indicators.mine).toBeUndefined();
+    expect(r.ok && r.series.indicator_errors).toEqual({ mine: error });
+  });
+
+  it("withoutMisfits keeps what fits, and fails only what does not", () => {
+    const fine = () => mine(range5(3));
+    const cur = series(range5(0), {
+      steady: mine(range5(0)),
+      changed: mine(range5(0)),
+      silent: mine(range5(0)),
+    } as never, { failed: error });
+    const tail = series(range5(3), {
+      steady: fine(),
+      changed: { ...fine(), lines: [] },
+      failed: fine(),
+      added: fine(),
+    } as never);
+    expect(mergeTail(cur, tail).ok).toBe(false);
+
+    const r = mergeTail(cur, withoutMisfits(cur, tail));
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.series.bars).toHaveLength(8);
+    expect(r.series.indicators.steady!.lines![0]!.values.at(-1)).toBe(14);
+    // What did not fit keeps its values, stays aligned, and says why.
+    expect(r.series.indicators.changed!.lines![0]!.values).toEqual([0, 2, 4, 6, 8, null, null, null]);
+    expect(r.series.indicator_errors?.changed?.step).toBe("shape");
+    expect(r.series.indicator_errors?.silent?.step).toBe("shape");
+    // A key without values keeps its own reason, and nothing new appears.
+    expect(r.series.indicator_errors?.failed).toEqual(error);
+    expect(r.series.indicators.failed).toBeUndefined();
+    expect(r.series.indicators.added).toBeUndefined();
+    expect(r.series.indicator_errors?.steady).toBeUndefined();
+  });
+
+  it("an older page that failed pads the indicator so it stays aligned", () => {
+    const cur = series(range5(5), { mine: mine(range5(5)) } as never);
+    const r = mergeOlder(cur, series(range5(0), {}, { mine: error }));
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const ind = r.series.indicators.mine!;
+    expect(r.series.bars).toHaveLength(10);
+    expect(ind.lines![0]!.values.slice(0, 6)).toEqual([null, null, null, null, null, 10]);
+    expect(ind.histogram![0]!.values).toHaveLength(10);
+    expect(ind.histogram![0]!.color_idx).toHaveLength(10);
+    expect(ind.fills![0]!.y2).toHaveLength(10);
+    expect(ind.signals![0]!.x).toBe(6);
+    expect(r.series.indicator_errors).toEqual({ mine: error });
   });
 });
