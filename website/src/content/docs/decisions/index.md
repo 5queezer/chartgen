@@ -63,3 +63,4 @@ one and link both ways.
 | [0033](/chartgen/decisions/0033-indicator-projection-past-last-bar/) | Indicator projection past the last bar | Accepted | 2026-11-05 |
 | [0034](/chartgen/decisions/0034-drawing-and-indicator-alerts/) | Drawing and indicator alerts | Accepted | 2026-11-05 |
 | [0035](/chartgen/decisions/0035-styleable-geometry/) | Styleable indicator geometry colors | Accepted | 2026-11-05 |
+| [0037](/chartgen/decisions/0037-pull-based-deploy/) | Pull-based deploy from the Coolify host | Accepted | 2026-11-06 |
