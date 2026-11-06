@@ -42,8 +42,8 @@ registered OAuth clients, across restarts. Without it, every deploy forgets the
 registrations of external MCP clients. See the [persistence reference](/chartgen/reference/persistence/).
 
 The image's default command is `--serve`. Add `--trade` only on a server nobody else can
-reach: its order tools act on the one configured exchange account, for anyone with a
-token. See [what a signed-in stranger can still do](/chartgen/decisions/0044-sign-in-through-github-and-google/#what-a-signed-in-stranger-can-still-do).
+reach: its order tools and engine alerts are one shared set, not per user, for anyone with
+a token. See [what a signed-in stranger can still do](/chartgen/decisions/0044-sign-in-through-github-and-google/#what-a-signed-in-stranger-can-still-do).
 
 ### Environment variables
 

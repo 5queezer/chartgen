@@ -214,9 +214,11 @@ Anyone with a free GitHub or Google account can:
   make the server send webhooks, and each one shows the receiver this server's address.
   **Keep alerts off on a public server, or list the accounts you trust.**
 - **Use the order tools on a `--trade` server.** `place_order` and the other engine
-  tools are not per-user, and they act on the one configured exchange account. Startup
-  logs a warning. **Do not expose a `--trade` server with sign-in on.** The tools need
-  their own authorization first.
+  tools are not per-user: everyone shares one order book and one set of engine alerts, and
+  can read and cancel each other's. Orders are only recorded locally today, and nothing
+  reaches an exchange. Startup logs a warning. **Do not expose a `--trade` server with
+  sign-in on.** The tools need their own authorization first, certainly before they ever
+  send anything.
 - **Run scripts where `CHARTGEN_SCRIPTING=1`.** Sign-in supplies the login half of what
   [ADR-0024](/chartgen/decisions/0024-starlark-script-runtime/#required-before-public-hosting-a-worker-subprocess)
   requires before public hosting, not the worker-subprocess sandbox, which is still
