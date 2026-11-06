@@ -39,6 +39,10 @@ struct OAuthClient {
 const MAX_REDIRECT_URIS: usize = 5;
 const MAX_REDIRECT_URI_LEN: usize = 512;
 const MAX_CLIENT_NAME_LEN: usize = 256;
+/// Redirect URI schemes a browser would run or render instead of leaving for a
+/// client. Native schemes (`cursor://`, `vscode://`) are how MCP clients get
+/// their callback, so this is not an allow-list.
+const FORBIDDEN_REDIRECT_SCHEMES: [&str; 3] = ["javascript", "data", "vbscript"];
 const MAX_CLIENTS: usize = 1000;
 /// Registrations per client address (the TCP peer) per `REGISTER_WINDOW`.
 /// Loopback peers are exempt: local tests and dev clients register freely,
@@ -105,6 +109,16 @@ impl OAuthStore {
         {
             return bad(format!(
                 "redirect_uris are limited to {MAX_REDIRECT_URI_LEN} characters"
+            ));
+        }
+        // Parsed as a browser would, so case and stray whitespace don't hide it.
+        let forbidden = |u: &String| {
+            reqwest::Url::parse(u).is_ok_and(|u| FORBIDDEN_REDIRECT_SCHEMES.contains(&u.scheme()))
+        };
+        if body.redirect_uris.iter().any(forbidden) {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                json!({"error": "invalid_redirect_uri", "error_description": "javascript:, data: and vbscript: redirect_uris are not allowed"}),
             ));
         }
         if body
@@ -413,7 +427,8 @@ fn default_challenge_method() -> String {
 fn invalid_client_redirect(base: &str, redirect_uri: &str, state: Option<&str>) -> Option<String> {
     let base = reqwest::Url::parse(base).ok()?;
     let mut target = reqwest::Url::parse(redirect_uri).ok()?;
-    if target.origin() != base.origin()
+    if target.scheme() != base.scheme()
+        || target.origin() != base.origin()
         || !target.username().is_empty()
         || target.password().is_some()
         || target.fragment().is_some()
@@ -470,6 +485,14 @@ async fn oauth_authorize(
             .into_response();
     }
 
+    let Ok(mut redirect) = reqwest::Url::parse(&params.redirect_uri) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "invalid_request", "error_description": "redirect_uri is not an absolute URI"})),
+        )
+            .into_response();
+    };
+
     // Auto-approve: generate auth code
     let code = Uuid::new_v4().to_string();
     let auth_code = AuthCode {
@@ -483,14 +506,15 @@ async fn oauth_authorize(
     s.codes.insert(code.clone(), auth_code);
 
     // Build redirect URL
-    let mut redirect = params.redirect_uri.clone();
-    redirect.push_str(if redirect.contains('?') { "&" } else { "?" });
-    redirect.push_str(&format!("code={}", code));
-    if let Some(state) = &params.state {
-        redirect.push_str(&format!("&state={}", state));
+    {
+        let mut query = redirect.query_pairs_mut();
+        query.append_pair("code", &code);
+        if let Some(state) = &params.state {
+            query.append_pair("state", state);
+        }
     }
 
-    Redirect::temporary(&redirect).into_response()
+    Redirect::temporary(redirect.as_str()).into_response()
 }
 
 #[derive(Deserialize)]
@@ -1418,6 +1442,7 @@ mod tests {
             "https://chartgen.vasudev.xyz:8443/",
             "javascript:alert(1)//chartgen.vasudev.xyz/",
             "data:text/html,chartgen.vasudev.xyz",
+            "blob:https://chartgen.vasudev.xyz/abc",
             "ftp://chartgen.vasudev.xyz/",
             "//chartgen.vasudev.xyz/",
             "/",
@@ -2037,6 +2062,37 @@ mod tests {
         let mut named = reg(&["http://a/1"]);
         named.client_name = Some("n".repeat(MAX_CLIENT_NAME_LEN + 1));
         assert!(s.admit_registration("1.1.1.1", &named).is_err());
+    }
+
+    #[test]
+    fn registration_refuses_redirect_uris_a_browser_would_run() {
+        let mut s = OAuthStore::new();
+        for uri in [
+            "javascript:alert(1)",
+            "JavaScript:alert(1)",
+            " javascript:alert(1)",
+            "java\tscript:alert(1)",
+            "data:text/html,x",
+            "vbscript:msgbox(1)",
+        ] {
+            let (status, err) = s
+                .admit_registration("5.5.5.5", &reg(&["https://ok.example/cb", uri]))
+                .unwrap_err();
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{uri}");
+            assert_eq!(err["error"], "invalid_redirect_uri", "{uri}");
+        }
+        for uri in [
+            "https://ok.example/cb",
+            "http://localhost:1234/cb",
+            "cursor://anysphere.cursor-retrieval/oauth/callback",
+            "vscode://vscode.dev/redirect",
+            "com.example.app:/cb",
+        ] {
+            assert!(
+                s.admit_registration("6.6.6.6", &reg(&[uri])).is_ok(),
+                "{uri}"
+            );
+        }
     }
 
     #[test]

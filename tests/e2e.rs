@@ -927,9 +927,19 @@ const PKCE_CHALLENGE: &str = "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM";
 
 /// `GET /authorize` for `client_id`, returning (status, head, body).
 fn authorize(port: u16, client_id: &str, redirect_uri: &str) -> (u16, String, String) {
+    authorize_with_state(port, client_id, redirect_uri, "a%20b%26c")
+}
+
+/// `authorize` with `state` as it goes on the query string.
+fn authorize_with_state(
+    port: u16,
+    client_id: &str,
+    redirect_uri: &str,
+    state: &str,
+) -> (u16, String, String) {
     let redirect_uri: String = redirect_uri.bytes().map(|b| format!("%{b:02X}")).collect();
     let path = format!(
-        "/authorize?response_type=code&client_id={client_id}&redirect_uri={redirect_uri}&code_challenge={PKCE_CHALLENGE}&state=a%20b%26c"
+        "/authorize?response_type=code&client_id={client_id}&redirect_uri={redirect_uri}&code_challenge={PKCE_CHALLENGE}&state={state}"
     );
     http(port, "GET", &path, &[HTML], "")
 }
@@ -1044,6 +1054,12 @@ fn sign_in(port: u16, client_id: &str) -> String {
     assert_eq!(st, 200, "{body}");
     let v: serde_json::Value = serde_json::from_str(&body).unwrap();
     v["access_token"].as_str().unwrap().to_string()
+}
+
+fn register(port: u16, redirect_uri: &str) -> (u16, String) {
+    let body = format!(r#"{{"redirect_uris":["{redirect_uri}"]}}"#);
+    let (st, _, resp) = http(port, "POST", "/register", &JSON_POST, &body);
+    (st, resp)
 }
 
 /// Status of an authenticated MCP call with `token`.
@@ -1266,6 +1282,76 @@ fn test_unopenable_store_is_not_fatal() {
     sign_in(port, &client);
     drop(srv);
     let _ = std::fs::remove_dir_all(db.parent().unwrap());
+}
+
+/// `/register` refuses schemes a browser would run, and keeps the native ones
+/// MCP clients use for their callback, which `/authorize` then redirects to.
+#[test]
+fn test_register_refuses_script_redirect_uris_and_keeps_native_ones() {
+    let srv = spawn_server(None);
+    let p = srv.port;
+    for uri in [
+        "javascript:alert(1)",
+        "JAVASCRIPT:alert(1)",
+        "data:text/html,x",
+        "vbscript:x",
+    ] {
+        let (st, resp) = register(p, uri);
+        assert_eq!(st, 400, "{uri}: {resp}");
+        assert!(resp.contains("invalid_redirect_uri"), "{uri}: {resp}");
+    }
+    for uri in [
+        "cursor://anysphere.cursor-retrieval/oauth/callback",
+        "vscode://vscode.dev/redirect",
+    ] {
+        let (st, resp) = register(p, uri);
+        assert_eq!(st, 201, "{uri}: {resp}");
+        let v: serde_json::Value = serde_json::from_str(&resp).unwrap();
+        let (st, head, _) = authorize(p, v["client_id"].as_str().unwrap(), uri);
+        assert_eq!(st, 307, "{head}");
+        assert!(head.contains(&format!("location: {uri}?code=")), "{head}");
+    }
+}
+
+/// A known client's callback gets `state` encoded, so it can add no parameters
+/// and no headers, the same as the redirect for an unknown client.
+#[test]
+fn test_known_client_redirect_encodes_state() {
+    let srv = spawn_server(None);
+    let p = srv.port;
+    let client = register_external(p);
+    let (st, head, _) = authorize_with_state(p, &client, EXTERNAL_REDIRECT, "a%26admin%3D1%23frag");
+    assert_eq!(st, 307, "{head}");
+    assert!(head.contains("&state=a%26admin%3d1%23frag\r\n"), "{head}");
+
+    let (st, head, _) = authorize_with_state(
+        p,
+        &client,
+        EXTERNAL_REDIRECT,
+        "x%0D%0ASet-Cookie:%20pwned=1",
+    );
+    assert_eq!(st, 307, "{head}");
+    assert!(!head.contains("\r\nset-cookie"), "{head}");
+    assert!(
+        head.contains("&state=x%0d%0aset-cookie%3a+pwned%3d1\r\n"),
+        "{head}"
+    );
+
+    // An existing query stays, and the code goes in the query, not the fragment.
+    let (st, resp) = register(p, "https://client.example/cb?keep=1#frag");
+    assert_eq!(st, 201, "{resp}");
+    let v: serde_json::Value = serde_json::from_str(&resp).unwrap();
+    let (st, head, _) = authorize(
+        p,
+        v["client_id"].as_str().unwrap(),
+        "https://client.example/cb?keep=1#frag",
+    );
+    assert_eq!(st, 307, "{head}");
+    assert!(
+        head.contains("location: https://client.example/cb?keep=1&code="),
+        "{head}"
+    );
+    assert!(head.contains("&state=a+b%26c#frag\r\n"), "{head}");
 }
 
 /// With the table full, `/register` makes room instead of refusing, in any
