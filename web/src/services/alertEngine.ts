@@ -32,6 +32,7 @@ import {
   setServerAlertSession,
   takeNewFires,
 } from "../stores/serverAlerts";
+import { installPushClicks, pushOnHere, syncPushDevice } from "../stores/pushDevice";
 import { timeAxisOf } from "../stores/drawings";
 import { scaleMode } from "../stores/layout";
 import type { SeriesPayload } from "../types/responses";
@@ -316,6 +317,7 @@ export function createServerAlertPoll(session: McpSession, enabled: Accessor<boo
   createEffect(() => {
     if (enabled()) setServerAlertSession(session);
   });
+  onCleanup(installPushClicks());
   // Outlives the leadership, so that switching tabs back and forth does not each ask.
   let lastAsked = 0;
   createEffect(() => {
@@ -337,7 +339,12 @@ export function createServerAlertPoll(session: McpSession, enabled: Accessor<boo
       const on = await refreshServerAlerts();
       asking = false;
       if (stopped) return;
-      if (on) deliver(takeNewFires().map((a) => ({ id: a.id, text: serverAlertText(a) })));
+      if (on) {
+        void syncPushDevice();
+        deliver(
+          takeNewFires(pushOnHere()).map((a) => ({ id: a.id, text: serverAlertText(a) })),
+        );
+      }
       timer = setTimeout(() => void ask(), every());
     };
     /** Asked recently enough that a focus or a new leadership need not ask again? */
