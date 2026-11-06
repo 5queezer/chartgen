@@ -226,7 +226,7 @@ body {
 
 /* Watchlist panel: four right-aligned numeric columns with tabular
  * numerals, TradingView-style tick flash on the Last cell, and a remove
- * button that appears over the row's right edge on hover. */
+ * button that appears at the symbol cell's right edge on hover. */
 .wl-table {
   display: grid;
   grid-template-columns: minmax(4.75rem, 1fr) auto auto auto;
@@ -296,16 +296,16 @@ body {
 }
 
 .wl-remove {
-  right: 4px;
+  right: 0;
 }
 
 /* Flag button sits left of the remove button; the grip at the row start. */
 .wl-flag {
-  right: 28px;
+  right: 24px;
 }
 
 .wl-grip {
-  left: 2px;
+  left: -10px;
   width: 10px;
   font-size: 10px;
   letter-spacing: -2px;
@@ -319,6 +319,30 @@ body {
 .wl-remove:focus-visible,
 .wl-row-action:focus-visible {
   opacity: 1;
+}
+
+/* The buttons sit over this cell: the symbol truncates, the numbers stay clear. */
+.wl-symbol {
+  position: relative;
+}
+
+/* Keyboard focus on a button shows them too (above); a mouse click on the row does not. */
+.wl-row:hover .wl-symbol,
+.wl-row:has(.wl-remove:focus-visible, .wl-row-action:focus-visible) .wl-symbol {
+  padding-right: 48px;
+}
+
+/* No hover on a touch screen: a hidden button would still take the tap. That
+ * includes a touch laptop, whose primary pointer is a mouse and reports hover. */
+@media (hover: none), (any-pointer: coarse) {
+  .wl-remove,
+  .wl-row-action {
+    opacity: 1;
+  }
+
+  .wl-symbol {
+    padding-right: 48px;
+  }
 }
 
 .wl-remove:hover,

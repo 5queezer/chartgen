@@ -72,6 +72,9 @@ export { compareEntries };
 export const compareSymbols = (): string[] =>
   compareEntries().map((e) => e.symbol);
 
+/** Scale mode the last compare symbol will return to; null while there are none. */
+export const compareRestore = (): ScaleMode | null => restore;
+
 function commit(list: CompareEntry[]): void {
   setEntries(list);
   persist("compare", list.map((e) => e.symbol));
@@ -121,10 +124,11 @@ export function removeCompare(symbol: string): void {
 /**
  * Replace the list without touching the scale mode: a layout switch sets the
  * mode itself (a layout stores it with its compare symbols). Symbols already
- * shown keep their color slot, and a restore target left over from the
- * previous layout is dropped.
+ * shown keep their color slot. `restoreTo` is the layout's scale mode to return
+ * to when the last compare symbol goes (ADR-0040); layouts saved without one
+ * return to the default.
  */
-export function setCompareSymbols(next: unknown): void {
+export function setCompareSymbols(next: unknown, restoreTo?: ScaleMode): void {
   const symbols = parseCompare(next);
   const kept = compareEntries().filter((e) => symbols.includes(e.symbol));
   const used = kept.map((e) => e.slot);
@@ -135,6 +139,6 @@ export function setCompareSymbols(next: unknown): void {
     used.push(slot);
     return { symbol, slot };
   });
-  restore = list.length === 0 ? null : DEFAULT_SCALE_MODE;
+  restore = list.length === 0 ? null : (restoreTo ?? DEFAULT_SCALE_MODE);
   commit(list);
 }

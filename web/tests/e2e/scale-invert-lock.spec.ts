@@ -10,7 +10,7 @@ type Hook = {
     getSize: (id: string, w: string) => { height: number } | null;
     getBarSpace: () => number;
     setBarSpace: (n: number) => void;
-    getVisibleRange: () => { from: number; to: number };
+    getVisibleRange: () => { realFrom: number; to: number };
     getDataList: () => { high: number; low: number }[];
   } | null;
 };
@@ -23,8 +23,9 @@ const allVisibleInRange = (page: Page) =>
     const [a, b] = c.convertFromPixel([{ y: 0 }, { y: h }], { paneId: "candle_pane" });
     const lo = Math.min(a!.value, b!.value);
     const hi = Math.max(a!.value, b!.value);
-    const { from, to } = c.getVisibleRange();
-    const bars = c.getDataList().slice(from, to);
+    // The axis fits realFrom..to; `from` also holds off-screen bars to the left.
+    const { realFrom, to } = c.getVisibleRange();
+    const bars = c.getDataList().slice(Math.max(0, realFrom), to);
     return bars.length > 0 && bars.every((d) => d.low >= lo - 1e-9 && d.high <= hi + 1e-9);
   });
 
@@ -282,6 +283,34 @@ test.describe("price scale invert and lock ratio", () => {
     await page.mouse.up();
     await expect.poll(() => storage(page, "lockRatio")).toBe("false");
     // Manual scaling: auto stays off.
+    await expect(scaleButton(page, "auto")).toHaveAttribute("aria-pressed", "false");
+  });
+
+  test("a press that ends away from the window does not release the lock on the next hover", async ({
+    bootedApp: page,
+  }) => {
+    await lockViaMenu(page);
+    const box = await page.locator(".chart-host").boundingBox();
+    if (!box) throw new Error("chart host has no bounding box");
+    const x = box.x + box.width - 20;
+    const y = box.y + box.height / 3;
+    // Press on the axis, then the window loses focus and the release goes elsewhere:
+    // the page sees a pointerdown and never the pointerup.
+    await page.mouse.move(x, y);
+    await page.evaluate(
+      ([px, py]) => {
+        const target = document.elementFromPoint(px!, py!)!;
+        target.dispatchEvent(
+          new PointerEvent("pointerdown", { bubbles: true, buttons: 1, clientX: px, clientY: py }),
+        );
+        window.dispatchEvent(new Event("blur"));
+      },
+      [x, y],
+    );
+    // Back over the axis with no button down.
+    await page.mouse.move(x, y + 20, { steps: 5 });
+    await page.waitForTimeout(200);
+    expect(await storage(page, "lockRatio")).toBe("true");
     await expect(scaleButton(page, "auto")).toHaveAttribute("aria-pressed", "false");
   });
 
