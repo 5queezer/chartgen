@@ -43,5 +43,9 @@ Chosen: an optional `compareRestore` in a layout's state, one of the scale modes
 - Each layout returns to its own mode, however it was reached.
 - The stored format stays backward compatible: `version` stays 1, and older
   readers ignore the field.
-- A layout saved without the field returns to the normal scale until it is saved
-  again. This is what it did before, except when reverting with an unchanged list.
+- A layout saved without the field falls back to the normal scale when applied.
+  This is what it did before, except when reverting with an unchanged list.
+- Saving such a layout again does not recover a mode it has already lost: once it
+  has fallen back to normal, saving keeps normal. The mode is taken when the first
+  compare symbol is added, so to set it the user removes the symbols, picks the
+  mode before adding them back, then saves.

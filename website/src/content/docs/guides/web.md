@@ -764,8 +764,11 @@ one tab does not discard layouts created in another.
 
 A layout with compare symbols also remembers the scale mode to return to when
 the last one is removed, so layouts with the same compare list each go back to
-their own mode. A layout saved before this returns to the normal scale until it
-is saved again.
+their own mode. A layout saved before this has none, so opening it falls back to
+the normal scale, and saving it then keeps normal: saving does not bring back a
+mode it has already lost. The mode is taken when the first compare symbol is
+added, so to set it, remove the layout's compare symbols, pick the mode you want,
+add them back, then save.
 
 Layouts are stored in `localStorage` under `chartgen.layouts` (at most
 50, validated on load, malformed ones dropped). See
