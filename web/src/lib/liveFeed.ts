@@ -248,10 +248,23 @@ export function createLiveFeed(opts: LiveFeedOptions): LiveFeed {
     pushTimer = null;
   };
 
+  // Subscriptions still being ended on the server. The next subscribe waits for
+  // them: at a per-token cap it could otherwise overtake them and be refused.
+  let unsubscribing: Promise<void> | null = null;
+  const endSubscription = (id: string) => {
+    const done: Promise<void> = Promise.all([
+      unsubscribing,
+      opts.push?.unsubscribe(id).catch(() => {}),
+    ]).then(() => {
+      if (unsubscribing === done) unsubscribing = null;
+    });
+    unsubscribing = done;
+  };
+
   /** Forget the subscription and end it on the server (best effort). */
   const dropSubscription = () => {
     clearPushTimer();
-    if (sub !== null) void opts.push?.unsubscribe(sub).catch(() => {});
+    if (sub !== null) endSubscription(sub);
     sub = null;
   };
 
@@ -332,6 +345,13 @@ export function createLiveFeed(opts: LiveFeedOptions): LiveFeed {
     if (!series || !request || hidden()) return;
     const my = gen;
     subscribing = true;
+    if (unsubscribing) {
+      await unsubscribing;
+      if (my !== gen || hidden()) {
+        if (my === gen) subscribing = false;
+        return;
+      }
+    }
     let id: string;
     try {
       id = await push.subscribe(request, WARMUP);
@@ -350,7 +370,7 @@ export function createLiveFeed(opts: LiveFeedOptions): LiveFeed {
     }
     if (my !== gen || hidden()) {
       // Too late: the chart changed or the tab was hidden meanwhile.
-      void push.unsubscribe(id).catch(() => {});
+      endSubscription(id);
       if (my === gen) subscribing = false;
       return;
     }
