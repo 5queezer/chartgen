@@ -51,7 +51,8 @@ activates its chart in the capture phase, before anything it leads to runs.
 **Storage.** Pane 0 keeps the keys the single-chart app always used
 (`chartgen.layout.*`, `chartgen.indicators.active`). Others use
 `chartgen.pane.<n>.*`. `chartgen.layout.grid` and `chartgen.layout.activePane` are
-only written when the user changes them.
+written when the grid or the active chart changes, and the grid on a layout switch;
+absent, they mean one chart.
 
 **Layouts.** A layout keeps its first chart where it always did. `grid` and `panes`
 are optional and only present with more than one chart, and part of the dirty
