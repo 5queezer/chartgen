@@ -90,6 +90,17 @@ pub fn by_name_for(name: &str, user: Option<&str>) -> Option<Box<dyn Indicator>>
     by_name(name)
 }
 
+/// Whether `name` resolves to `user`'s own script rather than a built-in.
+pub fn is_user_script(name: &str, user: Option<&str>) -> bool {
+    #[cfg(feature = "scripting")]
+    return user.is_some_and(|u| crate::scripting::lookup(u, name).is_some());
+    #[cfg(not(feature = "scripting"))]
+    {
+        let _ = (name, user);
+        false
+    }
+}
+
 /// Check `params` against the indicator's declared schema (`Indicator::params`).
 /// Only declared params are inspected; `null` means "use the default".
 /// Integers must be whole numbers, floats must be finite, and both must respect
