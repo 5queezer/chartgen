@@ -194,15 +194,20 @@ function savePkce(pkce: PkceState): void {
   sessionStorage.setItem(SS_PKCE, JSON.stringify(pkce));
 }
 
-function consumePkce(): PkceState | null {
+function readPkce(): PkceState | null {
   const raw = sessionStorage.getItem(SS_PKCE);
   if (raw === null) return null;
-  sessionStorage.removeItem(SS_PKCE);
   try {
     return JSON.parse(raw) as PkceState;
   } catch {
     return null;
   }
+}
+
+function consumePkce(): PkceState | null {
+  const pending = readPkce();
+  sessionStorage.removeItem(SS_PKCE);
+  return pending;
 }
 
 async function redirectToAuthorize(
@@ -298,6 +303,31 @@ async function tryConsumeRedirect(): Promise<boolean> {
 }
 
 /**
+ * `/authorize` sends a client it does not know back to the app as
+ * `?error=invalid_client&state=...`: a redeploy without persistent storage
+ * forgets every registration (ADR-0036). Forgets the stored client so that
+ * the next sign-in registers a new one, and returns `true`. Anyone can craft
+ * this URL, so unless `state` is the pending one it touches nothing and
+ * returns `false`.
+ */
+function forgetRejectedClient(): boolean {
+  const params = new URLSearchParams(window.location.search);
+  const returnedState = params.get("state");
+  if (params.get("error") !== "invalid_client" || !returnedState) return false;
+  if (readPkce()?.state !== returnedState) return false;
+
+  localStorage.removeItem(LS_CLIENT_ID);
+  localStorage.removeItem(LS_CLIENT_SECRET);
+  sessionStorage.removeItem(SS_PKCE);
+  window.history.replaceState(
+    {},
+    "",
+    window.location.origin + window.location.pathname + window.location.hash,
+  );
+  return true;
+}
+
+/**
  * Start a new PKCE flow: navigates to the authorization endpoint and
  * never resolves. Also the "Sign in again" action after a failed sign-in.
  */
@@ -332,7 +362,9 @@ export function clearAccessToken(): void {
 
 /**
  * If the URL on load already carries `?code=...`, run the exchange
- * eagerly so the rest of the app sees a token immediately.
+ * eagerly so the rest of the app sees a token immediately. An
+ * `?error=invalid_client` answer to this tab's request counts as a failed
+ * exchange after dropping the stored client, so the restart registers anew.
  *
  * Resolves `null` when there was nothing to consume or the exchange
  * worked. When it fails, the first time in this tab it restarts the flow
@@ -342,6 +374,9 @@ export function clearAccessToken(): void {
  */
 export async function tryHandlePendingRedirect(): Promise<Error | null> {
   try {
+    if (forgetRejectedClient()) {
+      throw new Error("the server no longer knows this client");
+    }
     await tryConsumeRedirect();
     return null;
   } catch (err) {

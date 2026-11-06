@@ -321,6 +321,32 @@ fn default_challenge_method() -> String {
     "S256".to_string()
 }
 
+/// Where `/authorize` sends an unknown client back to, if anywhere: only to
+/// `redirect_uri` on the origin of `base`, which is this server's own web app
+/// and so not attacker-controlled (ADR-0036). Everything else, including a
+/// `redirect_uri` that cannot be parsed, gets `None`: RFC 6749 section 4.1.2.1
+/// forbids redirecting for an invalid client in general. The result is the
+/// re-serialized URL, so it cannot be read differently from the check.
+fn invalid_client_redirect(base: &str, redirect_uri: &str, state: Option<&str>) -> Option<String> {
+    let base = reqwest::Url::parse(base).ok()?;
+    let mut target = reqwest::Url::parse(redirect_uri).ok()?;
+    if target.origin() != base.origin()
+        || !target.username().is_empty()
+        || target.password().is_some()
+        || target.fragment().is_some()
+    {
+        return None;
+    }
+    {
+        let mut query = target.query_pairs_mut();
+        query.append_pair("error", "invalid_client");
+        if let Some(state) = state {
+            query.append_pair("state", state);
+        }
+    }
+    Some(target.into())
+}
+
 async fn oauth_authorize(
     State(state): State<SharedState>,
     Query(params): Query<AuthorizeQuery>,
@@ -333,6 +359,17 @@ async fn oauth_authorize(
     let client = match s.clients.get(&params.client_id) {
         Some(c) => c,
         None => {
+            // The web app remembers its client across redeploys that forget
+            // it; a JSON page here would strand it (ADR-0036).
+            if std::env::var_os("CHARTGEN_WEB_DIR").is_some() {
+                if let Some(target) = invalid_client_redirect(
+                    &base_url(),
+                    &params.redirect_uri,
+                    params.state.as_deref(),
+                ) {
+                    return (StatusCode::FOUND, [(header::LOCATION, target)]).into_response();
+                }
+            }
             return (
                 StatusCode::BAD_REQUEST,
                 Json(json!({"error": "invalid_client", "error_description": "Unknown client_id"})),
@@ -1241,6 +1278,65 @@ mod tests {
             );
         }
         h
+    }
+
+    // --- invalid_client_redirect unit tests ---
+
+    #[test]
+    fn invalid_client_redirect_stays_on_the_own_origin() {
+        const BASE: &str = "https://chartgen.vasudev.xyz";
+        let target = |uri, state| invalid_client_redirect(BASE, uri, state);
+
+        assert_eq!(
+            target("https://chartgen.vasudev.xyz/", Some("s1")).as_deref(),
+            Some("https://chartgen.vasudev.xyz/?error=invalid_client&state=s1")
+        );
+        // Without a state there is none to return.
+        assert_eq!(
+            target("https://chartgen.vasudev.xyz/", None).as_deref(),
+            Some("https://chartgen.vasudev.xyz/?error=invalid_client")
+        );
+        // An existing query string stays, and the state is encoded.
+        assert_eq!(
+            target("https://chartgen.vasudev.xyz/cb?a=1", Some("x y&z=1#f")).as_deref(),
+            Some("https://chartgen.vasudev.xyz/cb?a=1&error=invalid_client&state=x+y%26z%3D1%23f")
+        );
+        // An explicit default port and upper case are the same origin.
+        assert_eq!(
+            target("HTTPS://CHARTGEN.vasudev.xyz:443/", None).as_deref(),
+            Some("https://chartgen.vasudev.xyz/?error=invalid_client")
+        );
+        // Parsed like a browser would: the host is still ours, and the
+        // Location is the normalized form, not the input.
+        assert_eq!(
+            target("https://chartgen.vasudev.xyz\\@evil.com", None).as_deref(),
+            Some("https://chartgen.vasudev.xyz/@evil.com?error=invalid_client")
+        );
+
+        for uri in [
+            "https://chartgen.vasudev.xyz.evil.com/",
+            "https://chartgen.vasudev.xyz@evil.com/",
+            "https://evil.com/chartgen.vasudev.xyz/",
+            "https://evil.com#https://chartgen.vasudev.xyz/",
+            "https://user@chartgen.vasudev.xyz/",
+            "https://user:pw@chartgen.vasudev.xyz/",
+            "https://chartgen.vasudev.xyz/#fragment",
+            "https://sub.chartgen.vasudev.xyz/",
+            "http://chartgen.vasudev.xyz/",
+            "https://chartgen.vasudev.xyz:8443/",
+            "javascript:alert(1)//chartgen.vasudev.xyz/",
+            "data:text/html,chartgen.vasudev.xyz",
+            "ftp://chartgen.vasudev.xyz/",
+            "//chartgen.vasudev.xyz/",
+            "/",
+            "",
+        ] {
+            assert_eq!(target(uri, Some("s")), None, "{uri}");
+        }
+        assert_eq!(
+            invalid_client_redirect("not a url", "https://chartgen.vasudev.xyz/", None),
+            None
+        );
     }
 
     // --- accepts_json unit tests ---

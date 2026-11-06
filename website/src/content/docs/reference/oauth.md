@@ -48,6 +48,25 @@ document and from it the authorization server. A `401` from the root and
 Only `authorization_code` with PKCE S256 is supported — there is no
 `refresh_token` or `client_credentials` path.
 
+## Unknown `client_id`
+
+`GET /authorize` with a `client_id` the server does not know answers `400`
+with `{"error":"invalid_client","error_description":"Unknown client_id"}`,
+without redirecting. External MCP clients with their own redirect URIs always
+get this, as RFC 6749 section 4.1.2.1 requires.
+
+There is one narrow exception, so that the [web app](/chartgen/guides/web/)
+can recover from a stale client id after a restart
+([ADR-0036](/chartgen/decisions/0036-own-origin-invalid-client-redirect/)). The
+server answers `302` to `redirect_uri` with `error=invalid_client` and the
+original `state` added to its query string when all of these hold:
+
+- `CHARTGEN_WEB_DIR` is set, so the server serves the web app.
+- `redirect_uri` parses to exactly the origin (scheme, host, port) of
+  `CHARTGEN_BASE_URL`, or of the `http://localhost:<port>` fallback. The
+  `Host` header plays no part.
+- `redirect_uri` has no userinfo and no fragment.
+
 ## Token lifetime
 
 Access tokens are valid for **7 days** (`604800` seconds). Expired tokens are

@@ -894,6 +894,93 @@ fn test_server_without_web_dir_keeps_root_json() {
     assert_eq!(http(srv.port, "GET", "/index.html", &[HTML], "").0, 404);
 }
 
+/// `GET /authorize` for `client_id`, returning (status, head, body).
+fn authorize(port: u16, client_id: &str, redirect_uri: &str) -> (u16, String, String) {
+    let redirect_uri: String = redirect_uri.bytes().map(|b| format!("%{b:02X}")).collect();
+    let path = format!(
+        "/authorize?response_type=code&client_id={client_id}&redirect_uri={redirect_uri}&code_challenge=c&state=a%20b%26c"
+    );
+    http(port, "GET", &path, &[HTML], "")
+}
+
+fn assert_unknown_client_json(resp: (u16, String, String), case: &str) {
+    let (st, head, body) = resp;
+    assert_eq!(st, 400, "{case}: {head}");
+    assert!(!head.contains("location:"), "{case}: {head}");
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(v["error"], "invalid_client", "{case}");
+    assert_eq!(v["error_description"], "Unknown client_id", "{case}");
+}
+
+/// A stale client id in the browser must not strand the web app on a JSON
+/// page, and nothing but the server's own app may be redirected to (ADR-0036).
+#[test]
+fn test_authorize_unknown_client_returns_to_the_own_web_app_only() {
+    let web = std::env::temp_dir().join(format!("chartgen-web-authz-{}", std::process::id()));
+    std::fs::create_dir_all(&web).unwrap();
+    std::fs::write(web.join("index.html"), "<!doctype html>").unwrap();
+    let srv = spawn_server(Some(&web));
+    let p = srv.port;
+    let own = format!("http://localhost:{p}");
+
+    let (st, head, _) = authorize(p, "stale", &format!("{own}/"));
+    assert_eq!(st, 302, "{head}");
+    assert!(
+        head.contains(&format!(
+            "location: {own}/?error=invalid_client&state=a+b%26c\r\n"
+        )),
+        "{head}"
+    );
+    let (st, head, _) = authorize(p, "stale", &format!("{own}/cb?keep=1"));
+    assert_eq!(st, 302, "{head}");
+    assert!(
+        head.contains("/cb?keep=1&error=invalid_client&state=a+b%26c\r\n"),
+        "{head}"
+    );
+
+    for uri in [
+        format!("http://localhost.evil.com:{p}/"),
+        format!("http://localhost:{p}@evil.com/"),
+        format!("http://user@localhost:{p}/"),
+        format!("https://localhost:{p}/"),
+        format!("http://localhost:{}/", u32::from(p) + 1),
+        format!("ftp://localhost:{p}/"),
+        "javascript:alert(1)".to_string(),
+        "https://evil.com/".to_string(),
+    ] {
+        assert_unknown_client_json(authorize(p, "stale", &uri), &uri);
+    }
+
+    // A known client is unaffected: code + state, and its URIs are exact.
+    let (st, _, body) = http(
+        p,
+        "POST",
+        "/register",
+        &JSON_POST,
+        &format!(r#"{{"redirect_uris":["{own}/"]}}"#),
+    );
+    assert_eq!(st, 201, "{body}");
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let id = v["client_id"].as_str().unwrap();
+    let (st, head, _) = authorize(p, id, &format!("{own}/"));
+    assert_eq!(st, 307, "{head}");
+    assert!(head.contains(&format!("location: {own}/?code=")), "{head}");
+    let (st, _, body) = authorize(p, id, &format!("{own}/other"));
+    assert_eq!(st, 400);
+    assert!(body.contains("redirect_uri mismatch"), "{body}");
+
+    drop(srv);
+    let _ = std::fs::remove_dir_all(&web);
+}
+
+/// An API-only server has no web app to return to.
+#[test]
+fn test_authorize_unknown_client_without_web_dir_stays_json() {
+    let srv = spawn_server(None);
+    let own = format!("http://localhost:{}/", srv.port);
+    assert_unknown_client_json(authorize(srv.port, "stale", &own), "no web dir");
+}
+
 /// A connector added at `/mcp` finds its RFC 9728 metadata, and from it the
 /// authorization server, starting from the 401 hint alone.
 #[test]

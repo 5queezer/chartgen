@@ -784,6 +784,14 @@ the flow over once by itself. If that fails too, the status line shows
 chart does not load until you use it. The app never redirects in a
 loop.
 
+A server without persistent storage forgets every registered client when
+it restarts. The app notices that the stored `client_id` is no longer
+known, registers a new one and signs in again by itself, and a share link
+opened at that moment still lands on its chart
+([ADR-0036](/chartgen/decisions/0036-own-origin-invalid-client-redirect/)).
+This needs the app served by chartgen itself with `CHARTGEN_BASE_URL` set to
+its public URL; with the Vite dev server, clear `localStorage` by hand.
+
 ## Managing indicators
 
 Indicators are added from the **Indicators** picker (by name, with the
