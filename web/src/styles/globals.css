@@ -639,6 +639,17 @@ body {
   min-width: 0;
 }
 
+/* The symbol's and the layout's room on the narrowest phones. */
+.compact [aria-label^="Layout:"] > span[aria-hidden="true"] {
+  display: none;
+}
+
+@media (max-width: 380px) {
+  .compact header [role="toolbar"] > button:first-child > svg {
+    display: none;
+  }
+}
+
 /* The live badge reduces to its colored dot. */
 .compact .live-status {
   margin-left: 2px;
@@ -719,6 +730,14 @@ body {
 .compact [data-tool-flyout] {
   max-height: calc(var(--vvh, 100dvh) - 16px);
   overflow-y: auto;
+}
+
+/* Replay controls wrap inside the chart instead of running off both sides. */
+.compact [data-testid="replay-bar"] {
+  width: max-content;
+  max-width: calc(100% - 8px);
+  flex-wrap: wrap;
+  justify-content: center;
 }
 
 /* Sidebar: a bottom sheet, or a side panel when the phone lies on its side. */

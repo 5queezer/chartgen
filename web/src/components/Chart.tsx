@@ -1161,10 +1161,24 @@ export function Chart(props: ChartProps): JSX.Element {
     c!.subscribeAction("onVisibleRangeChange" as never, onRange);
     const onLeave = () => setCrosshairIndex(null);
     host.addEventListener("mouseleave", onLeave);
+    // A touch away from the crosshair hides it, without an action or a
+    // mouseleave. This runs after klinecharts' own listener, on the bubble.
+    const onTouch = () => {
+      const store = (
+        c as unknown as {
+          getChartStore: () => { getTooltipStore: () => { getCrosshair: () => { x?: number } } };
+        }
+      ).getChartStore();
+      if (store.getTooltipStore().getCrosshair().x === undefined) setCrosshairIndex(null);
+    };
+    host.addEventListener("touchstart", onTouch);
+    host.addEventListener("touchend", onTouch);
     onCleanup(() => {
       c!.unsubscribeAction("onCrosshairChange" as never, onCrosshair);
       c!.unsubscribeAction("onVisibleRangeChange" as never, onRange);
       host.removeEventListener("mouseleave", onLeave);
+      host.removeEventListener("touchstart", onTouch);
+      host.removeEventListener("touchend", onTouch);
       if (crosshairFrame !== null) cancelAnimationFrame(crosshairFrame);
       if (rangeFrame !== null) cancelAnimationFrame(rangeFrame);
     });

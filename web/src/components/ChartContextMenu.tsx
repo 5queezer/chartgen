@@ -75,7 +75,7 @@ export function ChartContextMenu(props: ChartContextMenuProps): JSX.Element {
   );
 
   // A touch long-press is the klinecharts crosshair, so the menu stays with
-  // the mouse. Everything in it is also in the toolbar menu or chart settings.
+  // the mouse. guides/web.md says where touch finds its actions.
   const [touchPress, setTouchPress] = createSignal(false);
 
   // Capture phase: runs before Kobalte opens the menu, so the price is known
