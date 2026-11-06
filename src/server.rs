@@ -340,15 +340,29 @@ async fn oauth_register(
         "[OAuth] POST /register redirect_uris={}",
         body.redirect_uris.len()
     );
-    let mut oauth = state.oauth.lock().unwrap();
-    let evicted = match oauth
-        .admit_registration(&client_addr(&ext), &body)
-        .and_then(|()| {
-            oauth.collect_unused(script_owners);
-            oauth.make_room(script_owners)
-        }) {
-        Ok(evicted) => evicted,
-        Err((status, err)) => return (status, Json(err)),
+    let client_id = Uuid::new_v4().to_string();
+    let client_secret = Uuid::new_v4().to_string();
+    let evicted = {
+        let mut oauth = state.oauth.lock().unwrap();
+        let evicted = match oauth
+            .admit_registration(&client_addr(&ext), &body)
+            .and_then(|()| {
+                oauth.collect_unused(script_owners);
+                oauth.make_room(script_owners)
+            }) {
+            Ok(evicted) => evicted,
+            Err((status, err)) => return (status, Json(err)),
+        };
+
+        let client = OAuthClient {
+            _client_secret: Some(client_secret.clone()),
+            redirect_uris: body.redirect_uris.clone(),
+            created_at: Instant::now(),
+            last_used: None,
+        };
+
+        oauth.clients.insert(client_id.clone(), client);
+        evicted
     };
     if !evicted.is_empty() {
         eprintln!(
@@ -356,34 +370,30 @@ async fn oauth_register(
             evicted.len()
         );
     }
-    let client_id = Uuid::new_v4().to_string();
-    let client_secret = Uuid::new_v4().to_string();
-
-    let client = OAuthClient {
-        _client_secret: Some(client_secret.clone()),
-        redirect_uris: body.redirect_uris.clone(),
-        created_at: Instant::now(),
-        last_used: None,
-    };
-
-    oauth.clients.insert(client_id.clone(), client);
-    drop(oauth);
     // The client id must survive restarts: external MCP clients keep their
     // registration (ADR-0036), and with scripting on it owns stored
-    // indicators (ADR-0025). Persist the registration.
+    // indicators (ADR-0025). Persist the registration, off the async workers:
+    // a busy store would stall whatever else a blocked worker holds.
     #[cfg(feature = "scripting")]
-    if let Some(store) = scripting::persistence::global() {
-        for id in &evicted {
-            if let Err(e) = store.delete_oauth_client(id) {
-                eprintln!("[OAuth] could not delete an evicted client: {e}");
+    {
+        let (id, uris) = (client_id.clone(), body.redirect_uris.clone());
+        let _ = tokio::task::spawn_blocking(move || {
+            let Some(store) = scripting::persistence::global() else {
+                return;
+            };
+            for evicted in &evicted {
+                if let Err(e) = store.delete_oauth_client(evicted) {
+                    eprintln!("[OAuth] could not delete an evicted client: {e}");
+                }
             }
-        }
-        let saved = store
-            .gc_oauth_clients(UNUSED_CLIENT_TTL.as_secs() as i64)
-            .and_then(|_| store.save_oauth_client(&client_id, &body.redirect_uris));
-        if let Err(e) = saved {
-            eprintln!("[OAuth] could not persist a client registration: {e}");
-        }
+            let saved = store
+                .gc_oauth_clients(UNUSED_CLIENT_TTL.as_secs() as i64)
+                .and_then(|_| store.save_oauth_client(&id, &uris));
+            if let Err(e) = saved {
+                eprintln!("[OAuth] could not persist a client registration: {e}");
+            }
+        })
+        .await;
     }
 
     (
@@ -581,81 +591,92 @@ async fn oauth_token(
             .into_response();
     }
 
-    let mut s = state.oauth.lock().unwrap();
-    s.cleanup_expired();
+    let token = {
+        let mut s = state.oauth.lock().unwrap();
+        s.cleanup_expired();
 
-    // Extract code data (clone to release borrow before mutating store)
-    let code_data = s.codes.get(&body.code).map(|c| {
-        (
-            c.client_id.clone(),
-            c.redirect_uri.clone(),
-            c.code_challenge.clone(),
-        )
-    });
+        // Extract code data (clone to release borrow before mutating store)
+        let code_data = s.codes.get(&body.code).map(|c| {
+            (
+                c.client_id.clone(),
+                c.redirect_uri.clone(),
+                c.code_challenge.clone(),
+            )
+        });
 
-    let (stored_client_id, stored_redirect_uri, stored_challenge) = match code_data {
-        Some(d) => d,
-        None => {
-            eprintln!("[OAuth] POST /token code not found (possibly already exchanged)");
-            return (
+        let (stored_client_id, stored_redirect_uri, stored_challenge) = match code_data {
+            Some(d) => d,
+            None => {
+                eprintln!("[OAuth] POST /token code not found (possibly already exchanged)");
+                return (
                 StatusCode::BAD_REQUEST,
                 Json(json!({"error": "invalid_grant", "error_description": "Invalid or expired code"})),
             )
                 .into_response();
+            }
+        };
+
+        // Validate client_id and redirect_uri
+        if stored_client_id != body.client_id {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": "invalid_grant", "error_description": "client_id mismatch"})),
+            )
+                .into_response();
         }
-    };
+        if stored_redirect_uri != body.redirect_uri {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(
+                    json!({"error": "invalid_grant", "error_description": "redirect_uri mismatch"}),
+                ),
+            )
+                .into_response();
+        }
 
-    // Validate client_id and redirect_uri
-    if stored_client_id != body.client_id {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({"error": "invalid_grant", "error_description": "client_id mismatch"})),
-        )
-            .into_response();
-    }
-    if stored_redirect_uri != body.redirect_uri {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({"error": "invalid_grant", "error_description": "redirect_uri mismatch"})),
-        )
-            .into_response();
-    }
-
-    // PKCE S256 verification
-    let pkce_ok = verify_pkce(&body.code_verifier, &stored_challenge);
-    eprintln!("[OAuth] POST /token PKCE verify: ok={}", pkce_ok);
-    if !pkce_ok {
-        return (
+        // PKCE S256 verification
+        let pkce_ok = verify_pkce(&body.code_verifier, &stored_challenge);
+        eprintln!("[OAuth] POST /token PKCE verify: ok={}", pkce_ok);
+        if !pkce_ok {
+            return (
             StatusCode::BAD_REQUEST,
             Json(
                 json!({"error": "invalid_grant", "error_description": "PKCE verification failed"}),
             ),
         )
             .into_response();
-    }
-
-    // Issue access token
-    let token = Uuid::new_v4().to_string();
-    let expires_in = Duration::from_secs(7 * 24 * 3600); // 7 days
-    s.tokens.insert(
-        token.clone(),
-        AccessToken {
-            _token: token.clone(),
-            client_id: body.client_id.clone(),
-            created_at: Instant::now(),
-            expires_in,
-        },
-    );
-    if let Some(c) = s.clients.get_mut(&body.client_id) {
-        c.last_used = Some(Instant::now());
-    }
-    // Every authenticated request needs this lock: not across a disk write.
-    drop(s);
-    #[cfg(feature = "scripting")]
-    if let Some(store) = scripting::persistence::global() {
-        if let Err(e) = store.mark_oauth_client_used(&body.client_id) {
-            eprintln!("[OAuth] could not record client use: {e}");
         }
+
+        // Issue access token
+        let token = Uuid::new_v4().to_string();
+        let expires_in = Duration::from_secs(7 * 24 * 3600); // 7 days
+        s.tokens.insert(
+            token.clone(),
+            AccessToken {
+                _token: token.clone(),
+                client_id: body.client_id.clone(),
+                created_at: Instant::now(),
+                expires_in,
+            },
+        );
+        if let Some(c) = s.clients.get_mut(&body.client_id) {
+            c.last_used = Some(Instant::now());
+        }
+        token
+    };
+    // Every authenticated request needs that lock, and an async worker may hold
+    // others' work: neither waits for a disk write.
+    #[cfg(feature = "scripting")]
+    {
+        let client_id = body.client_id.clone();
+        let _ = tokio::task::spawn_blocking(move || {
+            if let Some(store) = scripting::persistence::global() {
+                if let Err(e) = store.mark_oauth_client_used(&client_id) {
+                    eprintln!("[OAuth] could not record client use: {e}");
+                }
+            }
+        })
+        .await;
     }
 
     eprintln!(
