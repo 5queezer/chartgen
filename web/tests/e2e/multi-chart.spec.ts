@@ -435,6 +435,24 @@ test.describe("multi-chart grid", () => {
     expect(link).not.toContain("grid");
   });
 
+  test("opening a link applies it to the active chart and leaves the others", async ({ bootedApp: page }) => {
+    await chooseGrid(page, "2h");
+    await expectLoaded(page, 2);
+    await activate(page, 1);
+    const exchanged = page.waitForResponse(
+      (res) => res.request().method() === "POST" && new URL(res.url()).pathname === "/token",
+    );
+    await page.goto("/?symbol=SOLUSDT&interval=4h");
+    await exchanged;
+    await page.waitForURL((url) => !url.searchParams.has("code"));
+    await expectLoaded(page, 2);
+    const [first, second] = await panes(page);
+    expect(second!.symbol).toBe("SOLUSDT");
+    expect(second!.timeframe).toBe("4h");
+    expect(first!.symbol).toBe("BTCUSDT");
+    expect(first!.timeframe).toBe("1h");
+  });
+
   test("the compact layout shows one chart and keeps the grid", async ({ bootedApp: page }) => {
     await chooseGrid(page, "4");
     await expectLoaded(page, 4);
