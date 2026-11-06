@@ -2123,3 +2123,50 @@ fn test_oauth_discovery_from_mcp() {
     let v: serde_json::Value = serde_json::from_str(&body).unwrap();
     assert_eq!(v["issuer"], base);
 }
+
+/// TradingView's volume profile page: on equal volumes the row closer to the POC, and
+/// then the one above. Volumes `[0, 6, 10, 6, 0]`: the POC and the 6 above hold 16 of 22,
+/// past 70%, so the value area is bins 2 and 3 of 0..5.
+#[test]
+fn test_volume_profile_value_area_ties_go_up() {
+    let flat = |price: f64, volume: f64, t: i64| chartgen::data::Bar {
+        open: price,
+        high: price,
+        low: price,
+        close: price,
+        volume,
+        date: t.to_string(),
+    };
+    let bars = chartgen::data::OhlcvData {
+        bars: vec![
+            chartgen::data::Bar {
+                open: 0.0,
+                high: 5.0,
+                low: 0.0,
+                close: 5.0,
+                volume: 0.0,
+                date: "0".into(),
+            },
+            flat(1.5, 6.0, 1),
+            flat(2.5, 10.0, 2),
+            flat(3.5, 6.0, 3),
+        ],
+        symbol: None,
+        interval: None,
+        session: None,
+    };
+    let vp = indicators::by_name_configured("volume_profile", &serde_json::json!({"bins": 5}))
+        .unwrap()
+        .unwrap()
+        .compute(&bars);
+    assert_eq!((vp.hlines[1].y, vp.hlines[2].y), (4.0, 2.0), "VAH, VAL");
+    // `session_vp`, `hvn_lvn`, `naked_poc` and `tpo` share another implementation.
+    let session = indicators::by_name_configured(
+        "session_vp",
+        &serde_json::json!({"bins": 5, "bars_per_session": 4}),
+    )
+    .unwrap()
+    .unwrap()
+    .compute(&bars);
+    assert_eq!((session.lines[1].y[3], session.lines[2].y[3]), (4.0, 2.0));
+}

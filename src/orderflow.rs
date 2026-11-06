@@ -192,26 +192,49 @@ fn row_price(index: i64, row: f64) -> f64 {
     round_sig(index as f64 * row, 12)
 }
 
-/// `(row index, share of the range)` for a high-low range: by overlap, so a range
-/// clipping a row counts for that much of it.
-fn row_shares(low: f64, high: f64, row: f64) -> Vec<(i64, f64)> {
+/// `(row index, share of the range)` of every row a high-low range touches: by
+/// overlap, so a range clipping a row counts for that much of it. A high exactly on a
+/// row's bottom touches it, with a share of 0.
+fn rows_touched(low: f64, high: f64, row: f64) -> Vec<(i64, f64)> {
     let (first, last) = (row_index(low, row), row_index(high, row));
     let range = high - low;
     if first == last || range <= 0.0 {
         return vec![(first, 1.0)];
     }
-    let shares = (first..=last).map(|i| {
-        let lo = (i as f64 * row).max(low);
-        let hi = ((i + 1) as f64 * row).min(high);
-        (i, ((hi - lo) / range).max(0.0))
-    });
-    // A high exactly on a row's bottom touches it without any share.
-    shares.filter(|(_, s)| *s > 0.0).collect()
+    (first..=last)
+        .map(|i| {
+            let lo = (i as f64 * row).max(low);
+            let hi = ((i + 1) as f64 * row).min(high);
+            (i, ((hi - lo) / range).max(0.0))
+        })
+        .collect()
+}
+
+/// The rows a range holds volume on: a price touched is no volume traded there.
+fn row_shares(low: f64, high: f64, row: f64) -> Vec<(i64, f64)> {
+    let mut rows = rows_touched(low, high, row);
+    rows.retain(|(_, share)| *share > 0.0);
+    rows
+}
+
+/// Whether a value area grows down next, as TradingView documents for TPO and for its
+/// volume profiles: the busier row, on a tie the one closest to the POC, and then the
+/// higher one. `None`: no row left on that side. `reach`: rows from the POC to each.
+pub fn value_area_grows_down(
+    below: Option<f64>,
+    above: Option<f64>,
+    reach_below: usize,
+    reach_above: usize,
+) -> bool {
+    match (below, above) {
+        (Some(b), Some(a)) => b > a || (b == a && reach_below < reach_above),
+        (below, _) => below.is_some(),
+    }
 }
 
 /// `(low row, high row, row of most)` of the rows holding `pct` of the total: from
-/// the most traded row, adding the busier neighbour until they do, as the volume
-/// profile does. The tie for the most goes to the row nearest the middle.
+/// the most traded row, adding the busier neighbour until they do, ties as
+/// `value_area_grows_down` says. The tie for the most goes to the row nearest the middle.
 pub fn value_area(values: &[f64], pct: f64) -> Option<(usize, usize, usize)> {
     let total: f64 = values.iter().sum();
     if values.is_empty() || total <= 0.0 {
@@ -229,18 +252,14 @@ pub fn value_area(values: &[f64], pct: f64) -> Option<(usize, usize, usize)> {
     let target = total * pct / 100.0;
     let (mut low, mut high, mut sum) = (poc, poc, values[poc]);
     while sum < target && (low > 0 || high + 1 < values.len()) {
-        let below = if low > 0 { values[low - 1] } else { -1.0 };
-        let above = if high + 1 < values.len() {
-            values[high + 1]
-        } else {
-            -1.0
-        };
-        if above > below {
-            high += 1;
-            sum += values[high];
-        } else {
+        let below = low.checked_sub(1).map(|i| values[i]);
+        let above = values.get(high + 1).copied();
+        if value_area_grows_down(below, above, poc - low, high - poc) {
             low -= 1;
             sum += values[low];
+        } else {
+            high += 1;
+            sum += values[high];
         }
     }
     Some((low, high, poc))
@@ -292,6 +311,10 @@ pub fn stacked_runs(flags: &[bool], min: usize) -> Vec<(usize, usize)> {
     }
     out
 }
+
+/// Intrabars that must have traded on a level, and on the one it is compared with, for
+/// it to count towards a stacked imbalance.
+const MIN_STACKED_INTRABARS: usize = 2;
 
 /// A stack of imbalances in one bar: a zone that holds until price comes back.
 #[derive(Clone, Debug, PartialEq)]
@@ -346,7 +369,8 @@ pub fn build_footprint(
     // The hard cap: the caller bounds the row for all its bars, but no row size may
     // ever size this bar's rows beyond the limit, whatever the data does.
     let row = bounded_row_size(o.row, extent(intrabars), o.row);
-    let mut levels: BTreeMap<i64, (f64, f64)> = BTreeMap::new();
+    // Buy, sell, and how many intrabars traded there.
+    let mut levels: BTreeMap<i64, (f64, f64, usize)> = BTreeMap::new();
     let (mut delta, mut min_delta, mut max_delta) = (0.0_f64, 0.0_f64, 0.0_f64);
     let (mut buy, mut sell) = (0.0, 0.0);
     let mut prev = prev_close;
@@ -363,6 +387,7 @@ pub fn build_footprint(
             let level = levels.entry(index).or_default();
             level.0 += bought * part;
             level.1 += sold * part;
+            level.2 += usize::from(bar.volume > 0.0);
         }
     }
     let mut fp = Footprint {
@@ -385,7 +410,7 @@ pub fn build_footprint(
     };
     fp.rows = (first..=last)
         .map(|i| {
-            let (b, s) = levels.get(&i).copied().unwrap_or((0.0, 0.0));
+            let (b, s, _) = levels.get(&i).copied().unwrap_or_default();
             Row {
                 price: row_price(i, row),
                 buy: b,
@@ -410,7 +435,20 @@ pub fn build_footprint(
     };
     fp.buy_imbalances = prices(&buys);
     fp.sell_imbalances = prices(&sells);
-    for (flags, is_buy) in [(&buys, true), (&sells, false)] {
+    // One kline has one split and is spread evenly, so rows it alone reaches all agree
+    // whenever its split passes the ratio: that is arithmetic, not levels of aggression.
+    // A marker on a cell can say so much; a zone projected across the chart cannot.
+    let traded = |row_at: usize| {
+        let index = first + row_at as i64;
+        levels.get(&index).map_or(0, |l| l.2) >= MIN_STACKED_INTRABARS
+    };
+    let stacked_buys: Vec<bool> = (0..buys.len())
+        .map(|i| buys[i] && traded(i) && traded(i - 1))
+        .collect();
+    let stacked_sells: Vec<bool> = (0..sells.len())
+        .map(|i| sells[i] && traded(i) && traded(i + 1))
+        .collect();
+    for (flags, is_buy) in [(&stacked_buys, true), (&stacked_sells, false)] {
         for (a, b) in stacked_runs(flags, o.stacked) {
             fp.stacked.push(Stacked {
                 buy: is_buy,
@@ -562,7 +600,9 @@ pub fn build_tpo(
     let (first, last) = (blocks.first()?, blocks.last()?);
     let mut levels: BTreeMap<i64, TpoRow> = BTreeMap::new();
     for (k, block) in blocks.iter().enumerate() {
-        for (index, part) in row_shares(block.low, block.high, row) {
+        // A block prints wherever it traded, its high included, however little of its
+        // range that row has.
+        for (index, part) in rows_touched(block.low, block.high, row) {
             let level = levels.entry(index).or_insert_with(|| TpoRow {
                 price: row_price(index, row),
                 blocks: Vec::new(),
@@ -1225,10 +1265,35 @@ mod tests {
 
     #[test]
     fn value_area_grows_from_the_poc_by_the_busier_neighbour() {
-        // 100 in total, POC 40 at index 2: add 20 above, 20 below (tie goes down),
-        // and that is 80, past 70.
+        // 100 in total, POC 40 at index 2: 20 above (a tie goes up), then 20 below, the
+        // busier of it and 15, and that is 80, past 70.
         let (low, high, poc) = value_area(&[5.0, 20.0, 40.0, 20.0, 15.0], 70.0).unwrap();
         assert_eq!((low, high, poc), (1, 3, 2));
+    }
+
+    /// TradingView's TPO page: the busier row; on a tie the one closest to the POC; then
+    /// the higher one. By hand: `[1,5,10,5,1]` of 22 to 13.2 is 10, then the 5 above.
+    #[test]
+    fn a_value_area_tie_goes_to_the_closer_row_and_then_up() {
+        assert_eq!(value_area(&[1., 5., 10., 5., 1.], 60.0), Some((2, 3, 2)));
+        // 22 to 11: 6, the 3 above on the tie; the 3 below is closer than the next above.
+        assert_eq!(
+            value_area(&[2., 3., 3., 6., 3., 3., 2.], 50.0),
+            Some((2, 4, 3))
+        );
+    }
+
+    #[test]
+    fn a_value_area_takes_the_busier_row_before_any_tie_rule() {
+        assert!(value_area_grows_down(Some(5.0), Some(1.0), 3, 0));
+        assert!(!value_area_grows_down(Some(1.0), Some(5.0), 0, 3));
+        // A tie: closer first, up when they are as close.
+        assert!(value_area_grows_down(Some(2.0), Some(2.0), 0, 1));
+        assert!(!value_area_grows_down(Some(2.0), Some(2.0), 1, 0));
+        assert!(!value_area_grows_down(Some(2.0), Some(2.0), 1, 1));
+        // Only one side left.
+        assert!(value_area_grows_down(Some(0.0), None, 5, 0));
+        assert!(!value_area_grows_down(None, Some(0.0), 0, 5));
     }
 
     #[test]
@@ -1331,14 +1396,59 @@ mod tests {
         assert!(fp.stacked.is_empty());
     }
 
+    /// Taker buy of `share` on one kline spread over `rows` rows from 100.
+    fn spread(t: i64, rows: f64, share: f64) -> Intrabar {
+        let mut bar = ib(t, 100.0, 100.0 + rows, 100.0, 100.0 + rows, 100.0);
+        bar.taker_buy = Some(100.0 * share);
+        bar
+    }
+
+    #[test]
+    fn one_kline_marks_imbalances_but_makes_no_stacked_zone() {
+        // Its split is on every row, so it passes the ratio on all of them or none.
+        let fp = build_footprint(0, &[spread(0, 10.0, 0.80)], None, &opts(1.0));
+        assert_eq!(fp.buy_imbalances.len(), 9);
+        assert!(fp.stacked.is_empty(), "{:?}", fp.stacked);
+    }
+
+    #[test]
+    fn a_stack_counts_levels_where_two_klines_traded() {
+        let two = [spread(0, 10.0, 0.80), spread(60, 10.0, 0.80)];
+        let fp = build_footprint(0, &two, None, &opts(1.0));
+        assert_eq!(fp.stacked.len(), 1);
+        assert_eq!((fp.stacked[0].low, fp.stacked[0].high), (101.0, 110.0));
+        // Only rows 100 to 104 have the second kline: the wick above it is no zone. Row
+        // 105 is compared with 104, which has it, but it has only one of its own.
+        let wick = [spread(0, 10.0, 0.80), spread(60, 5.0, 0.80)];
+        let fp = build_footprint(0, &wick, None, &opts(1.0));
+        assert_eq!(fp.stacked.len(), 1);
+        assert_eq!((fp.stacked[0].low, fp.stacked[0].high), (101.0, 105.0));
+    }
+
+    #[test]
+    fn a_kline_with_no_volume_is_no_second_kline() {
+        let quiet = [
+            spread(0, 10.0, 0.80),
+            ib(60, 100.0, 110.0, 100.0, 110.0, 0.0),
+        ];
+        assert!(build_footprint(0, &quiet, None, &opts(1.0))
+            .stacked
+            .is_empty());
+    }
+
     #[test]
     fn stacked_zone_spans_from_its_first_row_to_the_top_of_its_last() {
         let mut bars = Vec::new();
-        // Sells on row 10; buys of 3x on rows 11, with sells to carry on the stack.
+        // Sells on row 10; buys of 3x on rows 11, with sells to carry on the stack. Two
+        // klines on each: one kline's rows are no zone.
         for (k, (row, buy, sell)) in [
             (10, 0.0, 10.0),
+            (10, 0.0, 10.0),
+            (11, 30.0, 10.0),
             (11, 30.0, 10.0),
             (12, 30.0, 10.0),
+            (12, 30.0, 10.0),
+            (13, 30.0, 0.0),
             (13, 30.0, 0.0),
         ]
         .into_iter()
@@ -1418,6 +1528,72 @@ mod tests {
             ]
         );
         assert_eq!(p.total_blocks, 6);
+    }
+
+    /// By hand, a block printing at each price it traded, its high included.
+    #[test]
+    fn a_block_prints_at_its_exact_high() {
+        let list = [
+            ib(0, 100.0, 102.0, 100.0, 101.0, 1.0),
+            ib(1800, 101.0, 103.0, 101.0, 102.0, 1.0),
+            ib(3600, 102.0, 104.0, 102.0, 104.0, 1.0),
+        ];
+        let p = build_tpo(0, 5400, &list, 1.0, 70.0, 2).unwrap();
+        let got: Vec<(f64, String)> = p
+            .rows
+            .iter()
+            .map(|r| {
+                (
+                    r.price,
+                    r.blocks.iter().map(|b| tpo_letter(*b as usize)).collect(),
+                )
+            })
+            .collect();
+        let want = [
+            (100.0, "A"),
+            (101.0, "AB"),
+            (102.0, "ABC"),
+            (103.0, "BC"),
+            (104.0, "C"),
+        ];
+        assert_eq!(got, want.map(|(p, l)| (p, l.to_string())));
+        assert_eq!(p.total_blocks, 9);
+        assert_eq!(p.poc, 102.0);
+        assert!(!p.poor_high);
+        // No volume on a row only touched: it all stays where the range is.
+        let volume: f64 = p.rows.iter().map(|r| r.volume).sum();
+        assert!((volume - 3.0).abs() < 1e-9, "{volume}");
+        assert_eq!(p.rows.last().unwrap().volume, 0.0);
+    }
+
+    #[test]
+    fn two_blocks_topping_on_a_row_edge_are_a_poor_high_and_one_is_not() {
+        let double = [
+            ib(0, 100.0, 104.0, 100.0, 104.0, 1.0),
+            ib(1800, 104.0, 104.0, 101.0, 102.0, 1.0),
+        ];
+        let p = build_tpo(0, 3600, &double, 1.0, 70.0, 1).unwrap();
+        assert_eq!(p.rows.last().unwrap().price, 104.0);
+        assert!(p.poor_high);
+        let single = [
+            ib(0, 100.0, 104.0, 100.0, 102.0, 1.0),
+            ib(1800, 102.0, 103.0, 101.0, 102.0, 1.0),
+        ];
+        let p = build_tpo(0, 3600, &single, 1.0, 70.0, 1).unwrap();
+        assert_eq!(p.rows.last().unwrap().price, 104.0);
+        assert!(!p.poor_high);
+    }
+
+    #[test]
+    fn a_footprint_only_counts_volume_on_rows_with_a_share() {
+        // The high is on row 104's bottom: no volume there, unlike a TPO's print.
+        let fp = build_footprint(
+            0,
+            &[ib(0, 100.0, 104.0, 100.0, 104.0, 4.0)],
+            None,
+            &opts(1.0),
+        );
+        assert_eq!(fp.rows.last().unwrap().price, 103.0);
     }
 
     #[test]

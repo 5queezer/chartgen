@@ -1,5 +1,6 @@
 use crate::data::OhlcvData;
 use crate::indicator::*;
+use crate::orderflow::value_area_grows_down;
 use crate::trading::signals;
 use serde_json::{json, Value};
 
@@ -1174,27 +1175,14 @@ impl Indicator for VolumeProfile {
         let mut va_high_idx = poc_idx;
 
         while va_vol < target_vol && (va_low_idx > 0 || va_high_idx < bins - 1) {
-            let try_low = if va_low_idx > 0 {
-                volume_bins[va_low_idx - 1]
-            } else {
-                0.0
-            };
-            let try_high = if va_high_idx < bins - 1 {
-                volume_bins[va_high_idx + 1]
-            } else {
-                0.0
-            };
-            if try_low >= try_high && va_low_idx > 0 {
+            let below = va_low_idx.checked_sub(1).map(|i| volume_bins[i]);
+            let above = volume_bins.get(va_high_idx + 1).copied();
+            if value_area_grows_down(below, above, poc_idx - va_low_idx, va_high_idx - poc_idx) {
                 va_low_idx -= 1;
                 va_vol += volume_bins[va_low_idx];
-            } else if va_high_idx < bins - 1 {
+            } else {
                 va_high_idx += 1;
                 va_vol += volume_bins[va_high_idx];
-            } else if va_low_idx > 0 {
-                va_low_idx -= 1;
-                va_vol += volume_bins[va_low_idx];
-            } else {
-                break;
             }
         }
 
@@ -1852,23 +1840,14 @@ fn compute_profile(
     let mut lo = poc_idx;
     let mut hi = poc_idx;
     while va_vol < target && (lo > 0 || hi < bins - 1) {
-        let try_lo = if lo > 0 { volume_bins[lo - 1] } else { 0.0 };
-        let try_hi = if hi < bins - 1 {
-            volume_bins[hi + 1]
-        } else {
-            0.0
-        };
-        if try_lo >= try_hi && lo > 0 {
+        let below = lo.checked_sub(1).map(|i| volume_bins[i]);
+        let above = volume_bins.get(hi + 1).copied();
+        if value_area_grows_down(below, above, poc_idx - lo, hi - poc_idx) {
             lo -= 1;
             va_vol += volume_bins[lo];
-        } else if hi < bins - 1 {
+        } else {
             hi += 1;
             va_vol += volume_bins[hi];
-        } else if lo > 0 {
-            lo -= 1;
-            va_vol += volume_bins[lo];
-        } else {
-            break;
         }
     }
 

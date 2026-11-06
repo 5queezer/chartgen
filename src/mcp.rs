@@ -3416,7 +3416,9 @@ mod tests {
     }
 
     #[test]
-    fn a_footprint_adds_up_to_its_bar() {
+    fn a_footprint_is_one_item_per_bar_with_its_rows_adding_up_to_its_totals() {
+        // Not to the chart bar's volume: sample intrabars are cut from it, so that would
+        // hold by construction here, and a real source's minutes need not sum to its hour.
         let args = json!({ "ticker": "BTCUSDT", "timeframe": "1h", "bars": 5, "end_time": 1_699_920_000_000i64 });
         let fp = footprint_payload(&args, Sample).unwrap();
         assert_eq!(fp["intrabar_interval"], "1m");
@@ -3429,7 +3431,6 @@ mod tests {
         for (f, bar) in list.iter().zip(chart["bars"].as_array().unwrap()) {
             assert_eq!(f["t"], bar["t"]);
             let total = f["buy"].as_f64().unwrap() + f["sell"].as_f64().unwrap();
-            assert!(close(total, bar["v"].as_f64().unwrap()), "{total} {bar}");
             let rows = f["rows"].as_array().unwrap();
             let in_rows: f64 = rows
                 .iter()
