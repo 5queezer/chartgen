@@ -34,7 +34,7 @@ import {
 } from "./components/DrawingToolbar";
 import { isDrawingAlertTool, isHorizontalTool } from "./lib/alerts";
 import { forgetReadings, setIndicatorSignatures } from "./stores/alerts";
-import { IndicatorChips } from "./components/IndicatorChips";
+import { CompactIndicatorErrors, IndicatorChips } from "./components/IndicatorChips";
 import { IndicatorPicker } from "./components/IndicatorPicker";
 import { IndicatorSettings } from "./components/IndicatorSettings";
 import { LayoutMenu } from "./components/LayoutMenu";
@@ -655,6 +655,11 @@ export function App(): JSX.Element {
         onToggleHidden={toggleIndicatorHidden}
         onSettings={setSettingsIndex}
         errors={live()?.series.indicator_errors}
+      />
+      <CompactIndicatorErrors
+        entries={activeIndicators()}
+        errors={live()?.series.indicator_errors}
+        onRemove={removeIndicator}
       />
       <IndicatorSettings
         target={settingsTarget()}

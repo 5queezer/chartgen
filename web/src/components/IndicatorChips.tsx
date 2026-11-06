@@ -3,7 +3,7 @@
 // The empty state is a muted hint pointing at the picker button. A repeated
 // indicator (ADR-0028) shows its params so its chips read apart.
 
-import { createMemo, Index, Show, type JSX } from "solid-js";
+import { createMemo, For, Index, Show, type JSX } from "solid-js";
 
 import { chipName } from "../lib/indicatorNames";
 import {
@@ -30,6 +30,50 @@ export interface IndicatorChipsProps {
 
 const chipButton =
   "chip-btn inline-flex items-center justify-center w-4 h-4 rounded-full text-[color:var(--color-fg-muted)] hover:text-[color:var(--color-fg)] hover:bg-[color:var(--color-bg)] cursor-pointer";
+
+/**
+ * The compact shell has no chip row, and touch has no tooltips: only the
+ * instances the chart reports as failed get a row here, with the reason as text
+ * and a way to remove them.
+ */
+export function CompactIndicatorErrors(
+  props: Pick<IndicatorChipsProps, "entries" | "errors" | "onRemove">,
+): JSX.Element {
+  const failed = createMemo(() =>
+    props.entries.flatMap((entry) => {
+      const key = instanceKey(entry);
+      const error = props.errors?.[key];
+      return error ? [{ key, name: indicatorName(entry), message: error.message }] : [];
+    }),
+  );
+  return (
+    <Show when={failed().length > 0}>
+      <ul
+        data-testid="indicator-errors"
+        class="hidden compact:block shrink-0 max-h-24 overflow-y-auto border-b border-[color:var(--color-danger)] text-xs"
+      >
+        <For each={failed()}>
+          {(item) => (
+            <li class="flex items-center gap-2 pl-3 pr-1">
+              <span class="min-w-0 flex-1 py-1 break-words">
+                <span class="font-mono text-[color:var(--color-fg)]">{chipName(item.name)}</span>
+                <span class="text-[color:var(--color-danger)]"> {item.message}</span>
+              </span>
+              <button
+                type="button"
+                aria-label={`Remove ${item.name}`}
+                onClick={() => props.onRemove(item.key)}
+                class="shrink-0 min-w-10 min-h-10 cursor-pointer text-[color:var(--color-fg-muted)]"
+              >
+                ×
+              </button>
+            </li>
+          )}
+        </For>
+      </ul>
+    </Show>
+  );
+}
 
 export function IndicatorChips(props: IndicatorChipsProps): JSX.Element {
   const labels = createMemo(() => paramLabels(props.entries, paramDefaults(), true));

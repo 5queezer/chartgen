@@ -651,6 +651,8 @@ test.describe("names and params the server cannot run", () => {
     await expect.poll(() => plotted(page, "rsi")).not.toBeNull();
     await expect(errorChip(page)).toHaveCount(1);
     await expect(errorChip(page).getByTitle(/Unknown indicator: gone_one/)).toBeVisible();
+    // The desktop has the chips: the compact row stays out of the way.
+    await expect(page.getByTestId("indicator-errors")).toBeHidden();
 
     await page.getByRole("button", { name: "Remove gone_one" }).click();
     await expect(errorChip(page)).toHaveCount(0, { timeout: 15_000 });
@@ -1026,6 +1028,48 @@ test.describe("on the compact shell", () => {
         await page.getByTestId("script-close").tap();
         await expect(panel).toHaveCount(0);
         await expect(page.locator(".chart-host")).toBeVisible();
+      });
+    });
+  }
+
+  for (const name of ["iPhone 13", "iPhone 13 landscape"]) {
+    test.describe(`${name}, failed indicators`, () => {
+      test.use(device(name));
+      const row = (page: Page) => page.getByTestId("indicator-errors");
+
+      test("an unknown name shows its reason as text, and can be removed", async ({ page }) => {
+        await seedIndicators(page, ["rsi", "gone_x"]);
+        await bootPhone(page);
+        await expect(row(page)).toBeVisible({ timeout: 15_000 });
+        await expect(row(page)).toContainText("Unknown indicator: gone_x");
+        // Only what failed: this is not the chip row.
+        await expect(row(page).locator("li")).toHaveCount(1);
+        await expect(row(page)).not.toContainText("RSI");
+        const box = (await row(page).boundingBox())!;
+        expect(box.y + box.height).toBeLessThanOrEqual(page.viewportSize()!.height);
+
+        await page.getByRole("button", { name: "Remove gone_x" }).tap();
+        await expect(row(page)).toHaveCount(0, { timeout: 15_000 });
+        expect(await plotted(page, "rsi")).not.toBeNull();
+      });
+
+      test("with nothing else on the chart it is still explained", async ({ page }) => {
+        await seedIndicators(page, ["gone_x"]);
+        await bootPhone(page);
+        await expect(row(page)).toContainText("Unknown indicator: gone_x", { timeout: 15_000 });
+      });
+
+      test("a script failing at runtime shows its message", async ({ page }) => {
+        await bootPhone(page);
+        await openOnPhone(page);
+        await page.getByTestId("script-name").fill("fails_late");
+        await setCode(page, script("    if len(ohlcv.close) > 100:\n        y = 1 // 0\n    chart.line(ohlcv.close)"));
+        await page.getByTestId("script-save").tap();
+        await expect(page.getByTestId("script-status")).toHaveText("Saved.");
+        await page.getByTestId("script-add").tap();
+        await expect(page.getByTestId("script-errors")).toContainText("On the chart", { timeout: 30_000 });
+        await page.getByTestId("script-close").tap();
+        await expect(row(page)).toContainText("Floor division by zero");
       });
     });
   }
