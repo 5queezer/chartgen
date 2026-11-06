@@ -249,6 +249,52 @@ test("a new script cannot overwrite a saved one by name", async ({ page }) => {
   await expect(code(page)).toContainText("# the original");
 });
 
+test("opening another script during a save leaves that script alone", async ({ page }) => {
+  await gotoApp(page);
+  await openEditor(page);
+  for (const name of ["race_a", "race_b"]) {
+    await page.getByTestId("script-new").click();
+    await page.getByTestId("script-name").fill(name);
+    await setCode(page, script(`    pass  # ${name} saved`));
+    await page.getByTestId("script-save").click();
+    await expect(page.getByTestId(`script-row-${name}`)).toBeVisible();
+  }
+
+  await page.getByTestId("script-row-race_a").click();
+  await expect(page.getByTestId("script-name")).toHaveValue("race_a");
+  await expect(code(page)).toContainText("# race_a saved");
+  await setCode(page, script("    pass  # race_a edited"));
+
+  // Hold the save until the other script is open.
+  let release = () => {};
+  const held = new Promise<void>((resolve) => (release = resolve));
+  let saving = () => {};
+  const saveSent = new Promise<void>((resolve) => (saving = resolve));
+  await page.route("**/mcp", async (route) => {
+    if (route.request().postData()?.includes('"register_indicator"')) {
+      saving();
+      await held;
+    }
+    await route.continue();
+  });
+  await page.getByTestId("script-save").click();
+  await saveSent;
+  await page.getByTestId("script-row-race_b").click();
+  await expect(code(page)).toContainText("# race_b saved");
+  const answered = page.waitForResponse((r) => r.request().postData()?.includes('"register_indicator"') ?? false);
+  release();
+  await answered;
+  await expect(page.getByText("Saved race_a.")).toBeVisible();
+
+  // Still race_b, by name and text, and saving it now writes race_b.
+  await expect(page.getByTestId("script-name")).toHaveValue("race_b");
+  await expect(code(page)).toContainText("# race_b saved");
+  await expect(page.getByTestId("script-row-race_b")).toHaveAttribute("aria-current", "true");
+  await page.getByTestId("script-row-race_a").click();
+  await expect(code(page)).toContainText("# race_a edited");
+  await expect(page.getByTestId("script-revert")).toHaveCount(0);
+});
+
 test("an error on line 401 does not read as an expired sign-in", async ({ page }) => {
   await gotoApp(page);
   await openEditor(page);

@@ -213,33 +213,49 @@ export default function ScriptEditor(props: ScriptEditorProps): JSX.Element {
     }
     setBusy(true);
     setStatus("Saving…");
+    // Another script may be opened while this waits: the answer is not about it.
+    const request = openRequest;
+    const key = selected() ?? NEW_DRAFT;
     try {
       const text = source();
       const result = await props.session.callRegisterIndicator({ name: target, source: text });
-      if (!result.ok) {
+      if (request !== openRequest) {
+        if (!result.ok) {
+          showToast(`${target} was not saved: ${result.errors[0]?.message ?? "refused"}`);
+          return;
+        }
+        if (stored.drafts[key]?.source === text) delete stored.drafts[key];
+        flushDraft();
+        showToast(`Saved ${target}.`);
+      } else if (!result.ok) {
         setErrors(result.errors);
         setStatus("Not saved.");
         const first = result.errors.find((e) => e.line !== null);
         if (first?.line != null) view?.reveal(first.line);
         return;
+      } else {
+        delete stored.drafts[key];
+        setSelected(result.name);
+        setName(result.name);
+        setSaved(text);
+        setErrors([]);
+        flushDraft();
+        setStatus(
+          result.shadows_builtin
+            ? `Saved. It replaces the built-in ${result.name} for you.`
+            : "Saved.",
+        );
       }
-      delete stored.drafts[selected() ?? NEW_DRAFT];
-      setSelected(result.name);
-      setName(result.name);
-      setSaved(text);
-      setErrors([]);
-      flushDraft();
-      setStatus(
-        result.shadows_builtin
-          ? `Saved. It replaces the built-in ${result.name} for you.`
-          : "Saved.",
-      );
       void list.refetch();
       void refreshIndicatorList(queryClient);
       void refreshChartsUsing(queryClient, result.name);
     } catch (err) {
-      setErrors([{ step: "save", line: null, message: messageOf(err) }]);
-      setStatus("Not saved.");
+      if (request === openRequest) {
+        setErrors([{ step: "save", line: null, message: messageOf(err) }]);
+        setStatus("Not saved.");
+      } else {
+        showToast(`${target} was not saved: ${messageOf(err)}`);
+      }
     } finally {
       setBusy(false);
     }
