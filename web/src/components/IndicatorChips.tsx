@@ -14,6 +14,7 @@ import {
   type ActiveIndicator,
 } from "../stores/indicators";
 import { paramDefaults } from "../stores/layouts";
+import { openContextMenu, type MenuSpec } from "./ContextMenu";
 
 export interface IndicatorChipsProps {
   entries: ActiveIndicator[];
@@ -23,6 +24,8 @@ export interface IndicatorChipsProps {
   onToggleHidden: (index: number) => void;
   /** Open settings for the entry at `index`. */
   onSettings: (index: number) => void;
+  /** Right-click menu of the instance with this key. */
+  menu: (key: string) => MenuSpec;
 }
 
 const chipButton =
@@ -50,6 +53,7 @@ export function IndicatorChips(props: IndicatorChipsProps): JSX.Element {
               <span
                 class="inline-flex items-center gap-1 bg-[color:var(--color-bg-elev)] border border-[color:var(--color-border)] rounded-full pl-1.5 pr-1 py-0.5 text-xs font-mono text-[color:var(--color-fg)]"
                 classList={{ "opacity-50": isHidden(entry()) }}
+                onContextMenu={(e) => openContextMenu(e, props.menu(instanceKey(entry())))}
               >
                 <button
                   type="button"

@@ -55,6 +55,13 @@ const actionClass =
 const primaryClass =
   "px-3 py-1.5 rounded-md text-sm cursor-pointer bg-[color:var(--color-accent)] text-black font-semibold disabled:opacity-50";
 
+const [dialogOpen, setDialogOpen] = createSignal(false);
+
+/** Open the go-to-date dialog, for the time axis menu. */
+export const openGoToDate = (): void => {
+  setDialogOpen(true);
+};
+
 export interface BottomBarProps {
   chart: KLineChart | null;
   series: SeriesPayload | null;
@@ -64,7 +71,6 @@ export interface BottomBarProps {
 
 export function BottomBar(props: BottomBarProps): JSX.Element {
   const [now, setNow] = createSignal(Date.now());
-  const [dialogOpen, setDialogOpen] = createSignal(false);
   const [busy, setBusy] = createSignal(false);
   const [notice, setNotice] = createSignal<string | null>(null);
   // Each navigation takes a number; a later one (or a new click) cancels the

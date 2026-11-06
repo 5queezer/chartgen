@@ -47,6 +47,7 @@ import {
   type TimeAxis,
 } from "../stores/drawings";
 import { openAlertDialog } from "./AlertDialog";
+import { setOverlayMenu, type MenuSpec } from "./ContextMenu";
 import { DrawingStyleBar } from "./DrawingStyleBar";
 import { overlayLabels, setOverlayAxis, setPositionSize } from "./drawingOverlays";
 import { ToolGroup } from "./ToolGroup";
@@ -409,10 +410,11 @@ function loadLast(): Record<string, DrawingName> {
   return out;
 }
 
+/** How far below its original a cloned drawing lands. */
+const CLONE_OFFSET_PX = 24;
+
 const btnClass =
   "relative shrink-0 disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-transparent w-9 h-9 inline-flex items-center justify-center rounded-md cursor-pointer text-[color:var(--color-fg-muted)] hover:bg-[color:var(--color-border)] hover:text-[color:var(--color-fg)] aria-pressed:bg-[color:var(--color-border)] aria-pressed:text-[color:var(--color-accent)]";
-const menuItemClass =
-  "w-full text-left px-3 py-1.5 text-sm cursor-pointer hover:bg-[color:var(--color-border)] outline-none focus:bg-[color:var(--color-border)]";
 
 /**
  * The internals of klinecharts ~9.8 that hold the overlay under a press. Optional, so a
@@ -460,8 +462,8 @@ export interface DrawingsApi {
   removeAll: () => void;
   undo: () => void;
   redo: () => void;
-  /** True when the latest right-click landed on a drawing (its own menu wins). */
-  rightClickedDrawing: () => boolean;
+  /** Right-click menu of the drawing: on the chart and in the Object Tree. */
+  menu: (id: string) => MenuSpec;
 }
 
 export interface DrawingToolbarProps {
@@ -499,11 +501,6 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
   const [selectedId, setSelectedId] = createSignal<string | null>(null);
   const [saveFailed, setSaveFailed] = createSignal(false);
   const [limitHit, setLimitHit] = createSignal(false);
-  const [menu, setMenu] = createSignal<{
-    x: number;
-    y: number;
-    id: string;
-  } | null>(null);
   // Annotation text being edited in the dialog.
   const [editing, setEditing] = createSignal<{
     id: string;
@@ -536,9 +533,6 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
   let saveTimer: number | undefined;
   let pendingSave: { symbol: string; records: DrawingRecord[] } | null = null;
   let limitTimer: number | undefined;
-  // klinecharts fires an overlay's onRightClick on mousedown, before the
-  // browser's contextmenu event; the flag lets the chart menu stand down.
-  let rightClickHit = false;
   // klinecharts passes no modifier keys to overlay callbacks.
   let shiftHeld = false;
   // The drawing under a press: `refresh` leaves it alone until the release commits it.
@@ -748,12 +742,12 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
       if (selectedId() === overlay.id) setSelectedId(null);
       return false;
     },
-    onRightClick: ({ overlay, pageX, pageY }: OverlayEvent) => {
-      rightClickHit = true;
+    onRightClick: ({ overlay }: OverlayEvent) => {
       if (overlay.id === armedId) {
         cancelArmed();
-      } else if (pageX !== undefined && pageY !== undefined) {
-        setMenu({ x: pageX, y: pageY, id: overlay.id });
+        setOverlayMenu(() => null);
+      } else {
+        setOverlayMenu(() => drawingMenu(overlay.id));
       }
       return true;
     },
@@ -1106,17 +1100,59 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
     if (!(x !== undefined && x >= 0 && x <= width)) chart.scrollToTimestamp(p.timestamp);
   };
 
-  const menuAction = (action: "remove" | "lock" | "alert") => {
-    const m = menu();
-    setMenu(null);
-    if (!m) return;
-    if (action === "alert") openAlertDialog({ symbol: props.symbol, drawingId: m.id });
-    else if (action === "remove") removeIds([m.id]);
-    else {
-      const locked = props.chart?.getOverlayById(m.id)?.lock ?? false;
-      props.chart?.overrideOverlay({ id: m.id, lock: !locked });
-      commit();
+  /** A copy just below the drawing, so it shows; its alerts stay with the original. */
+  const clone = (id: string) => {
+    const rec = canon.get(id);
+    const chart = props.chart;
+    const ax = axis();
+    if (!rec || !chart || ax === null) return;
+    if (ids.length >= MAX_DRAWINGS) {
+      showLimitNotice();
+      return;
     }
+    const lower = (value: number) => {
+      const { y } = chart.convertToPixel({ value }, { paneId: "candle_pane" }) as { y?: number };
+      if (y === undefined) return value;
+      const [p] = chart.convertFromPixel([{ y: y + CLONE_OFFSET_PX }], { paneId: "candle_pane" }) as Partial<Point>[];
+      return p?.value ?? value;
+    };
+    const { id: _original, ...copy } = structuredClone(rec);
+    create({ ...copy, points: copy.points.map((p) => ({ ...p, value: lower(p.value) })) }, ax);
+    commit();
+  };
+
+  const drawingMenu = (id: string): MenuSpec => {
+    const rec = canon.get(id);
+    const item = items.find((i) => i.id === id);
+    const off = offRange.has(id);
+    const hidden = rec?.visible === false;
+    return {
+      label: "Drawing actions",
+      items: [
+        ...(rec && isDrawingAlertTool(rec.name) && !item?.vertical
+          ? [
+              {
+                label: `Add alert on ${DRAWING_LABELS[rec.name]}…`,
+                onSelect: () => openAlertDialog({ symbol: props.symbol, drawingId: id }),
+              },
+            ]
+          : []),
+        { label: "Style…", disabled: off || hidden, onSelect: () => select(id) },
+        { label: "Clone", disabled: off, onSelect: () => clone(id) },
+        null,
+        { label: rec?.lock ? "Unlock" : "Lock", disabled: off, onSelect: () => patchOne(id, { lock: !rec?.lock }) },
+        {
+          label: hidden ? "Show" : "Hide",
+          disabled: off,
+          onSelect: () => {
+            if (selectedId() === id) setSelectedId(null);
+            patchOne(id, { visible: hidden });
+          },
+        },
+        null,
+        { label: "Remove", danger: true, onSelect: () => removeIds([id]) },
+      ],
+    };
   };
 
   const saveText = (e: SubmitEvent) => {
@@ -1188,15 +1224,6 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
       delete w.__chartgenShiftHeld;
     });
   }
-
-  // Native context menu would sit on top of ours.
-  createEffect(() => {
-    const dom = props.chart?.getDom();
-    if (!dom) return;
-    const stop = (e: Event) => e.preventDefault();
-    dom.addEventListener("contextmenu", stop);
-    onCleanup(() => dom.removeEventListener("contextmenu", stop));
-  });
 
   // klinecharts ignores the pointer in any pane but the one a drawing was
   // started in, so a second click over an indicator pane stalls the
@@ -1379,12 +1406,6 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
   });
 
   const onKey = (e: KeyboardEvent) => {
-    if (e.defaultPrevented) return;
-    // Our own menu has role=menu, so it is handled before the guard.
-    if (e.key === "Escape" && menu()) {
-      setMenu(null);
-      return;
-    }
     if (isTypingContext(e)) return;
     if (e.key === "Escape") {
       cancelArmed();
@@ -1503,29 +1524,6 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
     window.removeEventListener("blur", releaseOnBlur);
   });
 
-  const resetRightClick = () => {
-    rightClickHit = false;
-  };
-  // A keyboard-opened menu or a macOS Ctrl+click has no right mousedown, so
-  // any other input also clears a stale flag.
-  const resetEvents = ["mousedown", "pointerdown", "keydown"] as const;
-  for (const type of resetEvents) {
-    window.addEventListener(type, resetRightClick, true);
-  }
-  onCleanup(() => {
-    for (const type of resetEvents) {
-      window.removeEventListener(type, resetRightClick, true);
-    }
-  });
-
-  const closeMenu = (e: PointerEvent) => {
-    if (!(e.target instanceof Element && e.target.closest("[data-drawing-menu]"))) {
-      setMenu(null);
-    }
-  };
-  window.addEventListener("pointerdown", closeMenu);
-  onCleanup(() => window.removeEventListener("pointerdown", closeMenu));
-
   const Separator = () => (
     <hr class="w-6 border-0 border-t border-[color:var(--color-border)] my-1" />
   );
@@ -1552,7 +1550,7 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
     removeAll,
     undo,
     redo,
-    rightClickedDrawing: () => rightClickHit,
+    menu: drawingMenu,
   });
 
   return (
@@ -1678,34 +1676,6 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
           <path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13" />
         </svg>
       </button>
-
-      <Show when={menu()}>
-        {(m) => (
-          <div
-            role="menu"
-            data-drawing-menu
-            aria-label="Drawing actions"
-            class="fixed z-50 min-w-32 py-1 rounded-md border border-[color:var(--color-border)] bg-[color:var(--color-bg-elev)] shadow-lg text-sm"
-            style={{ left: `${m().x}px`, top: `${m().y}px` }}
-          >
-            <button type="button" role="menuitem" class={menuItemClass} onClick={() => menuAction("remove")}>
-              Remove
-            </button>
-            <button type="button" role="menuitem" class={menuItemClass} onClick={() => menuAction("lock")}>
-              {props.chart?.getOverlayById(m().id)?.lock ? "Unlock" : "Lock"}
-            </button>
-            <Show when={canon.get(m().id)?.name}>
-              {(name) => (
-                <Show when={isDrawingAlertTool(name()) && !items.find((i) => i.id === m().id)?.vertical}>
-                  <button type="button" role="menuitem" class={menuItemClass} onClick={() => menuAction("alert")}>
-                    Add alert on {DRAWING_LABELS[name()]}…
-                  </button>
-                </Show>
-              )}
-            </Show>
-          </div>
-        )}
-      </Show>
 
       <Show when={selectedItem()}>
         {(item) => (

@@ -20,6 +20,8 @@ import { PALETTES } from "../lib/theme";
 import { alerts, moveAlert } from "../stores/alerts";
 import { theme } from "../stores/layout";
 import { openAlertDialog } from "./AlertDialog";
+import { setOverlayMenu } from "./ContextMenu";
+import { alertMenu } from "./menus";
 
 const ALERT_COLOR = "#ff9800";
 
@@ -146,7 +148,13 @@ export function AlertLines(props: AlertLinesProps): null {
           openAlertDialog({ id: a.id });
           return true;
         },
-        onRightClick: () => true,
+        onRightClick: () => {
+          setOverlayMenu(() => {
+            const alert = alerts().find((x) => x.id === a.id);
+            return alert ? alertMenu(alert) : null;
+          });
+          return true;
+        },
       });
       if (typeof id === "string") lines.set(a.id, id);
     }

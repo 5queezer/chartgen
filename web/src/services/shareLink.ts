@@ -165,17 +165,19 @@ function copyViaInput(text: string): boolean {
   }
 }
 
-/** Put the chart's link on the clipboard and confirm with a toast. */
-export async function copyChartLink(): Promise<void> {
-  const link = chartLink();
-  let ok = false;
+/** Put text on the clipboard; false when the browser refuses. */
+export async function copyText(text: string): Promise<boolean> {
   try {
     // Undefined on non-secure origins; rejects without permission.
     if (!navigator.clipboard) throw new Error("clipboard unavailable");
-    await navigator.clipboard.writeText(link);
-    ok = true;
+    await navigator.clipboard.writeText(text);
+    return true;
   } catch {
-    ok = copyViaInput(link);
+    return copyViaInput(text);
   }
-  showToast(ok ? "Link copied" : "Copy failed");
+}
+
+/** Put the chart's link on the clipboard and confirm with a toast. */
+export async function copyChartLink(): Promise<void> {
+  showToast((await copyText(chartLink())) ? "Link copied" : "Copy failed");
 }

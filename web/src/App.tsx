@@ -25,6 +25,8 @@ import {
 import { AlertLines } from "./components/AlertLines";
 import { Chart, paletteColor } from "./components/Chart";
 import { ChartContextMenu } from "./components/ChartContextMenu";
+import { ContextMenuHost } from "./components/ContextMenu";
+import { indicatorItems, indicatorMenu, type IndicatorActions } from "./components/menus";
 import { ChartLoadError } from "./components/ChartLoadError";
 import { ChartSettings } from "./components/ChartSettings";
 import {
@@ -122,7 +124,15 @@ import {
 } from "./stores/layouts";
 import {
   addRecent,
+  autoScale,
   chartStyleOf,
+  invertScale,
+  lockRatio,
+  scaleMode,
+  setAutoScale,
+  setInvertScale,
+  setLockRatio,
+  setScaleMode,
   setSymbol,
   chartType,
   theme,
@@ -450,6 +460,29 @@ export function App(): JSX.Element {
     }
     openAlertDialog({ source: plotRef(key, 0), price: lastPlotValue(series, key, 0) ?? undefined });
   };
+  // The one indicator menu, wherever it opens: chip, tree row, sub-pane.
+  const indicatorMenuParts = (key: string): { name: string; actions: IndicatorActions } => {
+    const entries = activeIndicators();
+    const entry = entries.find((e) => instanceKey(e) === key);
+    return {
+      name: entry
+        ? chipName(indicatorName(entry), paramLabels(entries, paramDefaults(), true).get(key))
+        : key,
+      actions: {
+        hidden: entry !== undefined && isHidden(entry),
+        onAddAlert: live()?.series.indicators[key]?.lines?.length
+          ? () => addIndicatorAlert(key)
+          : undefined,
+        onSettings: () => setSettingsIndex(indexOf(key)),
+        onToggleHidden: () => toggleIndicatorHidden(indexOf(key)),
+        onRemove: () => removeIndicator(key),
+      },
+    };
+  };
+  const indicatorMenuOf = (key: string) => {
+    const { name, actions } = indicatorMenuParts(key);
+    return indicatorMenu(name, actions);
+  };
   // ---------------------------------------------------------------------
 
   // --- Bar replay (ADR-0023) ------------------------------------------
@@ -640,6 +673,7 @@ export function App(): JSX.Element {
         onRemove={removeIndicator}
         onToggleHidden={toggleIndicatorHidden}
         onSettings={setSettingsIndex}
+        menu={indicatorMenuOf}
       />
       <IndicatorSettings
         target={settingsTarget()}
@@ -699,9 +733,23 @@ export function App(): JSX.Element {
         <ChartContextMenu
           chart={chart()}
           symbol={symbol()}
+          scale={{
+            scaleMode,
+            autoScale,
+            lockRatio,
+            invertScale,
+            setScaleMode,
+            setAutoScale,
+            setLockRatio,
+            setInvertScale,
+          }}
+          comparing={compareSymbols().length > 0}
           drawings={drawings()}
           hasIndicators={activeIndicators().length > 0}
-          onResetView={resetView}
+          indicatorItems={(key) => {
+            const { name, actions } = indicatorMenuParts(key);
+            return indicatorItems(name, actions);
+          }}
           onCopyLink={() => void copyChartLink()}
           onRemoveAllIndicators={() => setActiveIndicators([])}
           onSettings={() => setSettingsOpen(true)}
@@ -759,6 +807,7 @@ export function App(): JSX.Element {
             timeZone: resolveTimeZone(timeZone(), symbol()),
             drawings: drawings(),
             onSettings: (n) => setSettingsIndex(indexOf(n)),
+            indicatorMenu: indicatorMenuOf,
           }}
         />
       </main>
@@ -777,6 +826,7 @@ export function App(): JSX.Element {
         drawings={alertDrawings()}
       />
       <Toasts />
+      <ContextMenuHost />
     </div>
   );
 }
