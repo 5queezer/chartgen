@@ -64,6 +64,65 @@ body {
   height: 100%;
 }
 
+/* The charts of a layout (ADR-0043); one chart fills it as ever. */
+.chart-grid {
+  display: grid;
+  flex: 1 1 0%;
+  min-width: 0;
+  min-height: 0;
+}
+
+.chart-pane {
+  position: relative;
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+}
+
+.chart-grid[data-multi] {
+  gap: 1px;
+  background-color: var(--color-border);
+}
+
+.chart-grid[data-multi] .chart-pane {
+  overflow: hidden;
+  background-color: var(--color-bg);
+}
+
+.chart-grid[data-multi] .chart-host {
+  min-height: 0;
+}
+
+/* Over the canvases, and never in the way of a press. */
+.chart-grid[data-multi] .chart-pane[data-active]::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border: 1px solid var(--color-accent);
+  pointer-events: none;
+  z-index: 30;
+}
+
+.pane-tag {
+  position: absolute;
+  top: 4px;
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 0 6px;
+  border-radius: 4px;
+  font-size: 11px;
+  line-height: 18px;
+  white-space: nowrap;
+  color: var(--color-fg-muted);
+  background-color: var(--color-bg-elev);
+  pointer-events: none;
+  z-index: 20;
+}
+
+.chart-pane[data-active] .pane-tag {
+  color: var(--color-fg);
+}
+
 /* Per-pane indicator header strip, absolutely positioned above each
  * pane's top-left. Tabular numerals keep columns aligned as values
  * change. */

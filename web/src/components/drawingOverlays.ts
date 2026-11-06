@@ -61,10 +61,13 @@ const FIB_COLORS_DARK = FIB_COLORS_LIGHT.map((c) =>
   c === "#2962ff" ? "#5b8cff" : c === "#9c27b0" ? "#ba68c8" : c,
 );
 
-let axisOf: () => TimeAxis | null = () => null;
-/** Bar timing for the time span of points beyond the last bar. */
-export function setOverlayAxis(fn: () => TimeAxis | null): void {
-  axisOf = fn;
+// Per chart of the grid (ADR-0043): an overlay's group says which chart it is on.
+const axes = new Map<string, () => TimeAxis | null>();
+const axisOf = (group: string | undefined): TimeAxis | null =>
+  (group !== undefined ? axes.get(group)?.() : null) ?? null;
+/** Bar timing for the time span of points beyond the last bar, for the overlays of `group`. */
+export function setOverlayAxis(group: string, fn: () => TimeAxis | null): void {
+  axes.set(group, fn);
 }
 
 // What a fresh long/short position is sized from, read once when the tool is armed.
@@ -174,18 +177,19 @@ const pricePrecision = ({ precision, yAxis }: Params) =>
 
 const val = (p: Pt | undefined) => (typeof p?.value === "number" ? p.value : null);
 
-function timeOf(p: Pt): number | undefined {
+function timeOf(p: Pt, group: string | undefined): number | undefined {
   if (typeof p.timestamp === "number") return p.timestamp;
-  return pointTimestamp(p, axisOf());
+  return pointTimestamp(p, axisOf(group));
 }
 
 /** Bars (from pixels) and time span (from timestamps) between two points. */
 function span(p: Params, a: Pt, b: Pt, ca: Coordinate, cb: Coordinate): string {
   const bars = barsBetween(ca.x, cb.x, p.barSpace.bar);
-  const ta = timeOf(a);
-  const tb = timeOf(b);
+  const group = p.overlay.groupId;
+  const ta = timeOf(a, group);
+  const tb = timeOf(b, group);
   const ms =
-    ta !== undefined && tb !== undefined ? Math.abs(tb - ta) : bars * (axisOf()?.intervalMs ?? 0);
+    ta !== undefined && tb !== undefined ? Math.abs(tb - ta) : bars * (axisOf(group)?.intervalMs ?? 0);
   return dateRangeLabel(bars, ms);
 }
 

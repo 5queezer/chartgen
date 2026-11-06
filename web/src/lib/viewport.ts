@@ -8,6 +8,7 @@ export const BP_FULL = 1280; // below: screenshot/share/fullscreen/settings -> �
 export const BP_TIMEFRAMES = 1200; // below: timeframe buttons -> dropdown
 export const BP_NARROW = 900; // below: compare/reset/theme -> ⋯
 export const BP_TINY = 640; // below: replay -> ⋯, no wordmark
+export const BP_COMPACT = 768; // below: one chart, whatever the grid (ADR-0043)
 
 /** Reactive `window.innerWidth`. */
 export function createViewportWidth(): () => number {

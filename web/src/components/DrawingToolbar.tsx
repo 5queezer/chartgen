@@ -33,6 +33,8 @@ import { effectiveMagnet, magnetKeyHeld, magnetValue, type Magnet } from "../lib
 import { syncDrawingAlerts } from "../stores/alerts";
 import { createHistory } from "../stores/drawingHistory";
 import {
+  announceDrawings,
+  drawingsSaved,
   loadDrawings,
   MAX_DRAWINGS,
   overlayStyles,
@@ -52,6 +54,7 @@ import { overlayLabels, setOverlayAxis, setPositionSize } from "./drawingOverlay
 import { ToolGroup } from "./ToolGroup";
 import { positionReward, snapToAngle, type Px } from "../lib/drawingMath";
 import { PALETTES } from "../lib/theme";
+import { usePane } from "../stores/grid";
 import { theme } from "../stores/layout";
 
 // klinecharts has no rectangle; two corner points, drawn as a polygon
@@ -475,9 +478,13 @@ export interface DrawingToolbarProps {
   onArmedChange?: (armed: boolean) => void;
   /** Bar replay (ADR-0023): turning true cancels an armed tool (picking a start bar). */
   disarm?: boolean;
+  /** Its chart is the active one of the grid (ADR-0043): only that one takes shortcuts. */
+  active?: boolean;
 }
 
 export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
+  const gridPane = usePane();
+  const overlayGroup = `pane${gridPane}`;
   const [armed, setArmed] = createSignal<DrawingName | null>(null);
   // --- Bar replay (ADR-0023) ------------------------------------------
   // Armed tool or a selected drawing: either way Esc is the drawing's, not replay's.
@@ -552,7 +559,7 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
   // when the loaded bars change.
   let axisKey: { list: unknown; n: number; last: number } | null = null;
   let axisCache: TimeAxis | null = null;
-  setOverlayAxis(() => {
+  setOverlayAxis(overlayGroup, () => {
     const list = props.chart?.getDataList();
     if (!list) return null;
     const last = list.at(-1)?.timestamp ?? 0;
@@ -594,6 +601,7 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
     pendingSave = null;
     if (!p) return;
     setSaveFailed(!saveDrawings(p.symbol, p.records));
+    announceDrawings(p.symbol, gridPane);
     // Alerts on a drawing that is gone or vertical are switched off (ADR-0034).
     syncDrawingAlerts(p.symbol, p.records);
   };
@@ -797,6 +805,7 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
     const keep = rec.id !== undefined && !props.chart?.getOverlayById(rec.id);
     const id = props.chart?.createOverlay({
       ...(keep ? { id: rec.id } : {}),
+      groupId: overlayGroup,
       name: rec.name,
       points,
       styles: liveStyles(rec, false) as never,
@@ -917,6 +926,7 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
     }
     if (name === "cgLong" || name === "cgShort") setPositionSize(readPositionSize(chart));
     const id = chart.createOverlay({
+      groupId: overlayGroup,
       name,
       extendData: name === "cgText" ? DEFAULT_TEXT : undefined,
       styles: name === "cgRect" ? (RECT_STYLES as never) : undefined,
@@ -1145,6 +1155,23 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
     ),
   );
 
+  // Another chart of the grid on this symbol saved its drawings (ADR-0043): undo
+  // history here was of the old ones, and replaying it would undo that save.
+  createEffect(
+    on(
+      drawingsSaved,
+      (saved) => {
+        if (!saved || saved.pane === gridPane || saved.symbol !== props.symbol || !props.chart) return;
+        const records = loadDrawings(saved.symbol, false);
+        if (JSON.stringify(records) === JSON.stringify(current)) return;
+        rebuild(records);
+        history.clear();
+        syncHistory();
+      },
+      { defer: true },
+    ),
+  );
+
   // Data was (re)loaded or older bars were paged in.
   createEffect(() => {
     const chart = props.chart;
@@ -1156,36 +1183,42 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
   // E2E hook: the overlays that actually exist on the chart right now.
   if (import.meta.env.DEV) {
     const w = window as unknown as Record<string, unknown>;
-    w.__chartgenDrawings = () =>
-      ids.flatMap((id) => {
-        const o = props.chart?.getOverlayById(id);
-        return o
-          ? [
-              {
-                id,
-                name: o.name,
-                lock: o.lock,
-                visible: o.visible,
-                mode: o.mode,
-                offRange: offRange.has(id),
-                paneId: o.paneId,
-                styles: o.styles,
-                points: o.points,
-                labels: overlayLabels.get(id),
-                precision: props.chart?.getPriceVolumePrecision().price,
-                pixels: o.points.map(
-                  (pt) => props.chart?.convertToPixel(pt, { paneId: o.paneId }) as { x?: number; y?: number },
-                ),
-              },
-            ]
-          : [];
+    // The active chart's: on a pane switch the new one takes the hooks over.
+    createEffect(() => {
+      if (props.active === false) return;
+      const hook = () =>
+        ids.flatMap((id) => {
+          const o = props.chart?.getOverlayById(id);
+          return o
+            ? [
+                {
+                  id,
+                  name: o.name,
+                  lock: o.lock,
+                  visible: o.visible,
+                  mode: o.mode,
+                  offRange: offRange.has(id),
+                  paneId: o.paneId,
+                  styles: o.styles,
+                  points: o.points,
+                  labels: overlayLabels.get(id),
+                  precision: props.chart?.getPriceVolumePrecision().price,
+                  pixels: o.points.map(
+                    (pt) => props.chart?.convertToPixel(pt, { paneId: o.paneId }) as { x?: number; y?: number },
+                  ),
+                },
+              ]
+            : [];
+        });
+      w.__chartgenDrawings = hook;
+      w.__chartgenPositionSize = () => (props.chart ? readPositionSize(props.chart) : null);
+      w.__chartgenShiftHeld = () => shiftHeld;
+      onCleanup(() => {
+        if (w.__chartgenDrawings !== hook) return;
+        delete w.__chartgenDrawings;
+        delete w.__chartgenPositionSize;
+        delete w.__chartgenShiftHeld;
       });
-    w.__chartgenPositionSize = () => (props.chart ? readPositionSize(props.chart) : null);
-    w.__chartgenShiftHeld = () => shiftHeld;
-    onCleanup(() => {
-      delete w.__chartgenDrawings;
-      delete w.__chartgenPositionSize;
-      delete w.__chartgenShiftHeld;
     });
   }
 
@@ -1371,7 +1404,7 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
       setMenu(null);
       return;
     }
-    if (isTypingContext(e)) return;
+    if (props.active === false || isTypingContext(e)) return;
     if (e.key === "Escape") {
       cancelArmed();
       setSelectedId(null);

@@ -92,7 +92,8 @@ import {
   type HistoryStatus,
   type SeriesUpdate,
 } from "../lib/liveFeed";
-import { scaleMode, theme, type ChartType } from "../stores/layout";
+import { usePane } from "../stores/grid";
+import { chartStoreOf, theme, type ChartType } from "../stores/layout";
 import {
   compareReading,
   formatPct,
@@ -258,8 +259,12 @@ function legendPlots(
   );
 }
 
-function indicatorRegName(name: string): string {
-  return `chartgen_${name}`;
+/**
+ * Registered name of an indicator, per grid pane (ADR-0043): `geometryStore` is
+ * keyed by it, and two charts can hold different geometry for the same name.
+ */
+function indicatorRegName(name: string, gridPane: number): string {
+  return gridPane === 0 ? `chartgen_${name}` : `chartgen_p${gridPane}_${name}`;
 }
 
 function lineStashKey(name: string, i: number): string {
@@ -292,7 +297,7 @@ const isEmptyShape = (s: IndicatorShape): boolean =>
  * space (`toDataSpace`). Written by the data effect before
  * `applyNewData`, whose recalc + repaint is what picks it up, so a new
  * payload costs no extra `overrideIndicator` pass. Module-level like
- * klinecharts's own indicator registry; the app mounts one Chart.
+ * klinecharts's own indicator registry; each grid pane registers its own names.
  */
 const geometryStore = new Map<string, SeriesIndicator>();
 
@@ -307,13 +312,14 @@ const geometryStore = new Map<string, SeriesIndicator>();
 function storeGeometry(
   series: SeriesPayload,
   names: string[],
+  gridPane: number,
   timed = series.bars.every((b) => b.t !== null),
 ): void {
   const remap = timed ? null : payloadToDataIndex(series.bars);
   for (const name of names) {
     const ind = series.indicators[name];
     if (!ind || isEmptyShape(shapeFromPayload(series, name))) continue;
-    geometryStore.set(indicatorRegName(name), toDataSpace(ind, remap, name));
+    geometryStore.set(indicatorRegName(name, gridPane), toDataSpace(ind, remap, name));
   }
 }
 
@@ -323,8 +329,8 @@ function storeGeometry(
  * follows pan/zoom/rescale. Returns false so the default line/bar
  * figures still draw on top.
  */
-function drawGeometry(name: string): IndicatorDrawCallback {
-  const regName = indicatorRegName(name);
+function drawGeometry(name: string, gridPane: number): IndicatorDrawCallback {
+  const regName = indicatorRegName(name, gridPane);
   return ({ ctx, kLineDataList, indicator, visibleRange, bounding, xAxis, yAxis }) => {
     const ind = geometryStore.get(regName);
     if (!ind) return false;
@@ -488,8 +494,8 @@ function drawHLines(
  * Each figure's `calc` just reads the stashed value back off the bar;
  * the Rust server has already done the math.
  */
-function ensureRegistered(name: string, shape: IndicatorShape): void {
-  const regName = indicatorRegName(name);
+function ensureRegistered(name: string, shape: IndicatorShape, gridPane: number): void {
+  const regName = indicatorRegName(name, gridPane);
   if (registeredIndicators.has(regName)) return;
   registeredIndicators.add(regName);
 
@@ -550,7 +556,7 @@ function ensureRegistered(name: string, shape: IndicatorShape): void {
     precision: 2,
     shouldFormatBigNumber: isVolumeIndicator(keyName(name)),
     figures: figures as never,
-    draw: drawGeometry(name),
+    draw: drawGeometry(name, gridPane),
     calc: (dataList: KLineData[], indicator) => {
       const geo = geometryStore.get(regName);
       // A hidden plot's value is null, so nothing is drawn for it.
@@ -1028,6 +1034,8 @@ export interface ChartProps {
 export function Chart(props: ChartProps): JSX.Element {
   let host!: HTMLDivElement;
   let container!: HTMLDivElement;
+  const gridPane = usePane();
+  const { scaleMode } = chartStoreOf(gridPane);
   const [chart, setChart] = createSignal<KChart | null>(null);
   // Map of instance key → klinecharts pane id. Drives create/remove
   // decisions across effect runs.
@@ -1450,7 +1458,7 @@ export function Chart(props: ChartProps): JSX.Element {
     for (const name of Object.keys(panes)) {
       c.overrideIndicator(
         {
-          name: indicatorRegName(name),
+          name: indicatorRegName(name, gridPane),
           extendData: extendFor(name, indicators?.[name], styles?.[name]),
         },
         panes[name],
@@ -1480,7 +1488,7 @@ export function Chart(props: ChartProps): JSX.Element {
       const done = pendingOlder;
       if (!done) return false;
       pendingOlder = null;
-      storeGeometry(series, names);
+      storeGeometry(series, names, gridPane);
       done(
         seriesToKLines(series, 0, update.count, compare),
         update.count > 0 && canPageBefore(series),
@@ -1498,7 +1506,7 @@ export function Chart(props: ChartProps): JSX.Element {
     // had to create is not shared yet. Merged data is always timed.
     for (const name of names) {
       const ind = series.indicators[name];
-      const stored = geometryStore.get(indicatorRegName(name));
+      const stored = geometryStore.get(indicatorRegName(name, gridPane));
       // Bar replay (ADR-0023): a replay frame (lib/replay.ts) is a new slice
       // per step, so its fills and hlines are new arrays too and re-store.
       // A tail brings a new projection past the last bar too (ADR-0033).
@@ -1508,7 +1516,7 @@ export function Chart(props: ChartProps): JSX.Element {
           stored?.hlines !== ind.hlines ||
           stored?.future !== ind.future);
       if (ind && stored && (stored.divlines !== ind.divlines || replaced)) {
-        storeGeometry(series, [name], true);
+        storeGeometry(series, [name], gridPane, true);
       }
     }
     const klines = seriesToKLines(series, from, series.bars.length, compare);
@@ -1572,8 +1580,8 @@ export function Chart(props: ChartProps): JSX.Element {
       setShownProjection(0);
       const stale = untrack(paneIds);
       for (const name of Object.keys(stale)) {
-        c.removeIndicator(stale[name]!, indicatorRegName(name));
-        geometryStore.delete(indicatorRegName(name));
+        c.removeIndicator(stale[name]!, indicatorRegName(name, gridPane));
+        geometryStore.delete(indicatorRegName(name, gridPane));
       }
       setPaneIds({});
       paneStack = [];
@@ -1613,9 +1621,9 @@ export function Chart(props: ChartProps): JSX.Element {
     for (const name of names) {
       const shape = shapeFromPayload(series, name);
       if (isEmptyShape(shape)) continue;
-      ensureRegistered(name, shape);
+      ensureRegistered(name, shape, gridPane);
     }
-    storeGeometry(series, names);
+    storeGeometry(series, names, gridPane);
 
     // 2. Push bar data with all per-indicator stashes applied. applyNewData
     //    drops any held "load older" request; `canPageBefore` (more history,
@@ -1656,13 +1664,13 @@ export function Chart(props: ChartProps): JSX.Element {
     }
     for (const name of Object.keys(currentPanes)) {
       if (!wanted.includes(name) || rebuilt.has(name)) {
-        c.removeIndicator(currentPanes[name]!, indicatorRegName(name));
-        if (!wanted.includes(name)) geometryStore.delete(indicatorRegName(name));
+        c.removeIndicator(currentPanes[name]!, indicatorRegName(name, gridPane));
+        if (!wanted.includes(name)) geometryStore.delete(indicatorRegName(name, gridPane));
       }
     }
     paneStack = wantedOsc.slice(0, keep);
     for (const name of wanted) {
-      const regName = indicatorRegName(name);
+      const regName = indicatorRegName(name, gridPane);
       if (currentPanes[name] && !rebuilt.has(name)) {
         nextPanes[name] = currentPanes[name]!;
         continue;
@@ -1826,6 +1834,9 @@ export function Chart(props: ChartProps): JSX.Element {
     if (layoutFrame !== null) cancelAnimationFrame(layoutFrame);
     if (layoutTimer !== null) clearTimeout(layoutTimer);
     if (styleFrame !== null) cancelAnimationFrame(styleFrame);
+    for (const name of Object.keys(untrack(paneIds))) {
+      geometryStore.delete(indicatorRegName(name, gridPane));
+    }
     if (container) dispose(container);
   });
 
