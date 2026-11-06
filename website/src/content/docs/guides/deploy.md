@@ -55,7 +55,7 @@ token. See [what a signed-in stranger can still do](/chartgen/decisions/0044-sig
 | `CHARTGEN_SCRIPTING` | `src/scripting/mod.rs` | `1` enables [scripted indicators](/chartgen/guides/scripted-indicators/): the four scripting MCP tools and user scripts in `generate_chart` / `list_indicators`. Off when unset. |
 | `CHARTGEN_DB` | `src/scripting/persistence.rs` | SQLite file for registered OAuth clients, with or without `CHARTGEN_SCRIPTING=1`, for scripted indicators, and with sign-in on for users and sessions. Opened at server startup; a failure is logged and leaves clients in memory only. Default `~/.chartgen/chartgen.db`, inside the persisted volume. |
 | `CHARTGEN_SERVER_ALERTS` | `src/server_alerts.rs` | `1` enables [alerts on the server](/chartgen/guides/web/#alerts-on-the-server): four MCP tools, and **Run on server** in the web app. Off when unset; alerts already stored wait in `chartgen.db`, and pin nobody. Needs a build with the `scripting` feature, which the Docker image has, and the store. Read [before turning it on](#server-alerts). |
-| `CHARTGEN_SERVER_ALERT_CLIENTS` | `src/server_alerts.rs` | Comma-separated OAuth client ids that may create server alerts and use webhooks. Unset: anyone may create alerts, nobody gets webhooks. `*`: anyone, with webhooks. |
+| `CHARTGEN_SERVER_ALERT_CLIENTS` | `src/server_alerts.rs` | Comma-separated OAuth client ids, or with [sign-in](#sign-in-through-github-and-google) on, accounts (`github:<id>`, `google:<sub>`), that may create server alerts and use webhooks. Unset: anyone may create alerts, nobody gets webhooks. `*`: anyone, with webhooks. |
 | `CHARTGEN_SERVER_ALERT_PAIRS_PER_CLIENT` | `src/server_alerts.rs` | Symbol and interval pairs one client may watch. Default 2. |
 | `CHARTGEN_WEBHOOK_PROXY` | `src/webhook.rs` | `http` or `https` URL of a proxy that sends the webhooks, so a receiver does not see this server's address. Unset means direct, ignoring `HTTPS_PROXY` and the like. |
 | `CHARTGEN_WEBHOOK_BLOCKED_PREFIXES` | `src/webhook.rs` | Comma-separated addresses or prefixes a webhook may not reach besides the private ranges (`203.0.113.7,2001:db8:1::/48`). For this network's own public addresses. |
@@ -72,7 +72,8 @@ Without sign-in, anyone who knows a `client_id` gets a token, and a public serve
 warning about that at startup. Configure one or both providers to require a login.
 **Anyone with an account can then sign in**; there is no allowlist. Read
 [what they can still do](/chartgen/decisions/0044-sign-in-through-github-and-google/#what-a-signed-in-stranger-can-still-do) first. In short, keep
-`CHARTGEN_SCRIPTING` off and do not use `--trade` on a public server.
+`CHARTGEN_SCRIPTING` off, do not use `--trade`, and keep `CHARTGEN_SERVER_ALERTS` off or list
+trusted accounts on a public server.
 
 Both callbacks are `<CHARTGEN_BASE_URL>/oauth/callback/<provider>`, and they must match
 exactly. `CHARTGEN_BASE_URL` must be the public https origin: session cookies are only
@@ -103,12 +104,13 @@ configured the choice of provider is skipped. Tokens are in memory, so clients s
 once after that restart; existing clients keep their `client_id`.
 
 Keep the volume at `~/.chartgen` mounted: sessions and users are stored there. Existing
-scripts move to the first user who signs in through their client, and nothing is deleted
+scripts and server alerts move to the first user who signs in through their client, and
+nothing is deleted
 ([ADR-0044](/chartgen/decisions/0044-sign-in-through-github-and-google/#existing-rows)). Check that the first person through a shared browser is
 the right one.
 
-Turning sign-in off again means removing the variables. Users' scripts stay in the file,
-out of reach until it is turned back on.
+Turning sign-in off again means removing the variables. Users' scripts and alerts stay in
+the file, out of reach until it is turned back on, and those alerts expire after 30 days.
 
 ### Server alerts
 
@@ -118,6 +120,13 @@ recommended setup**: client ids are free, so no limit per client can stand in fo
 client id is `chartgen.oauth.client_id` in that browser's local storage, and an MCP client's is
 what `/register` gave it. The list is read at startup, so a change takes a restart. From then on a
 client taken off it runs no alerts and sends no webhooks, and what it had queued is dropped.
+
+**With [sign-in](#sign-in-through-github-and-google) on, the list names accounts, not clients.**
+Replace each client id with `github:<numeric id>` or `google:<sub>`. A client id then matches
+nobody, and startup logs how many entries look like one. For GitHub the id is `id` in
+`https://api.github.com/users/<login>`; for either provider, once the person has signed in, it
+is in the file: `sqlite3 chartgen.db "SELECT id, name FROM users"`. An account is not a credential
+like a client id is, so the section on those below does not apply.
 
 Before turning it on:
 
@@ -138,7 +147,8 @@ Before turning it on:
 Unset, a stranger can hold alerts but cannot make the server send anything. Even then they can use
 up the 200 alerts or the 16 watched symbol and interval pairs until those expire, after which other
 people's new alerts are refused. Spent alerts are deleted after 7 days, and alerts whose owner had
-no token for 30 days are too, unless you listed that client. There is no command to list or delete
+no token for 30 days are too, unless you listed that client. For a signed-in owner a sign-in counts
+as well, and signing out does not stop their alerts. There is no command to list or delete
 someone's alerts yet: it takes SQL on `chartgen.db` and a restart.
 
 **One webhook reveals your IP.** A receiver sees where the request came from. A tunnel hides your

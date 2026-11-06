@@ -7,7 +7,7 @@ sidebar:
 
 **Status:** Accepted
 **Date:** 2026-11-06
-**Amends:** [ADR-0025](/chartgen/decisions/0025-user-indicator-registry/) (with sign-in on, scripts belong to the user, not the client), [ADR-0036](/chartgen/decisions/0036-own-origin-invalid-client-redirect/) (a client's liveness is limited per user, which makes the lockout cost accounts) and [ADR-0021](/chartgen/decisions/0021-realtime-chart-push/) (with sign-in on, the per-client push cap counts per user)
+**Amends:** [ADR-0025](/chartgen/decisions/0025-user-indicator-registry/) (with sign-in on, scripts belong to the user, not the client), [ADR-0036](/chartgen/decisions/0036-own-origin-invalid-client-redirect/) (a client's liveness is limited per user, which makes the lockout cost accounts), [ADR-0021](/chartgen/decisions/0021-realtime-chart-push/) (with sign-in on, the per-client push cap counts per user) and [ADR-0042](/chartgen/decisions/0042-server-side-alerts/) (with sign-in on, server alerts and their allowlist belong to accounts)
 
 ## Context and Problem Statement
 
@@ -95,9 +95,11 @@ are display only, and Google's email is used as a name only if `email_verified`.
 There is **no account linking**. One person with both accounts is two users with
 separate scripts.
 
-The id goes straight into the existing `user_indicators.user_id`, so that table needs
-no change, and it cannot collide with a client id, which is a UUID. A new migration
-adds `users`, `sessions`, `client_grants` and `oauth_clients.client_name`.
+The id goes straight into the existing `user_indicators.user_id` and
+`server_alerts.owner`, so those tables need no change, and it cannot collide with a client
+id, which is a UUID. A new migration, the fourth, adds `users`, `sessions`, `client_grants`
+and `oauth_clients.client_name`. It follows the server alerts' migration, because that
+order is the only one that ever shipped.
 
 ### Sessions
 
@@ -141,20 +143,36 @@ issue, and a third party never sees it.
 
 ### Existing rows
 
-**Scripts of a client move to the first user who gets a token through it.** Nothing is
-deleted. A name that user already has stays with the client, and so does whatever
-exceeds their limit of 50. The next user through the same client gets nothing, so a
-browser's scripts stay with the first person on that browser. Leftovers keep pinning
-their client against eviction, and stay claimable.
+**Scripts and server alerts of a client move to the first user who gets a token through
+it.** Nothing is deleted. A script name that user already has stays with the client, and
+so does whatever exceeds their limit, 50 scripts and 20 alerts. The next user through the
+same client gets nothing, so a browser's scripts stay with the first person on that
+browser. Leftovers keep pinning their client against eviction, and stay claimable.
 
-This relies on the `client_id` being unknown to others, which is what guarded those
-scripts until now, so no one gains access they lacked. The alternative, leaving rows
-orphaned with a recovery note, would have made every existing user lose their scripts
-until an operator ran SQL.
+This relies on the `client_id` being unknown to others, which is what guarded those rows
+until now, so no one gains access they lacked. The alternative, leaving rows orphaned with
+a recovery note, would have made every existing user lose them until an operator ran SQL.
 
-Turning sign-in off again leaves users' scripts in the file, but out of reach, because
-owners are then client ids again. Clients, sessions and users stay and work again when
-it is turned back on.
+Turning sign-in off again leaves users' scripts and alerts in the file, but out of reach,
+because owners are then client ids again. Clients, sessions and users stay and work again
+when it is turned back on. A user's alerts then count as idle, and are deleted once 30 days
+pass with no sign-in or token of theirs.
+
+### Server alerts
+
+With sign-in on, an alert ([ADR-0042](/chartgen/decisions/0042-server-side-alerts/)) belongs
+to the user: they see it from every client, and its limits add up per user, so more clients
+buy no more alerts or watched pairs.
+
+- **`CHARTGEN_SERVER_ALERT_CLIENTS` names accounts,** `github:<id>` or `google:<sub>`. A
+  client id on it matches nobody, because a client owns nothing now, and startup logs how
+  many entries look like that. An account on the list cannot be taken over by reading a URL,
+  so this closes what ADR-0042 calls a listed client id being a credential.
+- **Staying alive.** An alert is deleted after 30 days with no activity by its owner. A
+  user's activity is their last sign-in or token, kept on the user, since the client table
+  never matches them. A listed account's alerts are kept regardless, as before.
+- **Logging out leaves alerts running.** An alert is there to work with no browser open, so
+  signing out ends tokens and nothing else. It keeps firing and delivering.
 
 ### Limits, per user
 
@@ -189,6 +207,10 @@ Anyone with a free GitHub or Google account can:
 - **Fill the store slowly.** A user row per account, and with scripting on, 50 scripts
   per account.
 - **Hold the client table full** with 50 accounts: ADR-0036's lockout, at a higher price.
+- **Where `CHARTGEN_SERVER_ALERTS=1`:** with the allowlist unset, hold 20 alerts per account,
+  so 10 accounts use up the 200 and new ones are refused until they expire. Set to `*`, also
+  make the server send webhooks, and each one shows the receiver this server's address.
+  **Keep alerts off on a public server, or list the accounts you trust.**
 - **Use the order tools on a `--trade` server.** `place_order` and the other engine
   tools are not per-user, and they act on the one configured exchange account. Startup
   logs a warning. **Do not expose a `--trade` server with sign-in on.** The tools need
@@ -217,6 +239,10 @@ Someone without an account can still:
 - Bad: first-time users of an MCP client see two new pages, the provider's and consent.
 - Bad: chartgen now holds provider client secrets, and user ids and names in its store.
 - Bad: another way to fail at startup, by design: half a provider stops the server.
+- Bad: **only what the server stores belongs to the user.** Watchlists, layouts, drawings,
+  chart settings and browser-side alerts stay in the browser's `localStorage`, as before: not
+  per account, not synced, and still there after signing out. The next person to sign in on
+  that browser sees them. Syncing a workspace per user is a separate project.
 - Bad: behind a proxy all peers share one address, so 120 hits a minute comes to about
   40 sign-ins a minute for the whole server. chartgen trusts no forwarding header
   ([ADR-0021](/chartgen/decisions/0021-realtime-chart-push/)).

@@ -805,7 +805,8 @@ Price alerts that run on the server with no browser open, and can call a webhook
 ([guide](/chartgen/guides/web/#alerts-on-the-server),
 [ADR-0042](/chartgen/decisions/0042-server-side-alerts/)). These tools are listed only
 when the server runs with `CHARTGEN_SERVER_ALERTS=1` and answer only on the HTTP
-transport: an alert belongs to the OAuth client of the bearer token, and another client
+transport: an alert belongs to the OAuth client of the bearer token, or with
+[sign-in](/chartgen/reference/oauth/#sign-in) to its user, and another client or user
 cannot see or change it. They are unrelated to the `--trade` alert tools above. On a
 server without them `list_server_alerts` returns `{enabled: false, alerts: []}` and the
 others an error. The operator decides who may use them
@@ -869,7 +870,7 @@ Times are unix milliseconds. `webhook` shows the host only, never the URL or the
 HTTP status, and nothing else of its response is kept. `last_error` is why the last
 delivery failed or was skipped, or that fires are being limited.
 
-Limits: 20 alerts per client and 200 not yet spent in total, 16 symbol and interval pairs
+Limits, per user where there is sign-in: 20 alerts per client and 200 not yet spent in total, 16 symbol and interval pairs
 watched and 2 per client, 10 creates or updates per client per minute, 6 fires per `every` alert
 per minute, 30 webhooks per client and 120 in total per minute. A delivery over those waits its
 turn, up to 50 per client and for up to an hour, with the client that waited longest going first;

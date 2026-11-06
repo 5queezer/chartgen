@@ -130,14 +130,15 @@ CREATE TABLE oauth_clients (
     redirect_uris  TEXT    NOT NULL, -- JSON array
     created_at     INTEGER NOT NULL,
     last_token_at  INTEGER,          -- migration 2; NULL = never got a token
-    client_name    TEXT              -- migration 3; as registered, for the consent page
+    client_name    TEXT              -- migration 4; as registered, for the consent page
 );
--- Migration 3, used with sign-in on (ADR-0044):
+-- Migration 4, used with sign-in on (ADR-0044):
 CREATE TABLE users (
     id             TEXT    PRIMARY KEY, -- github:<id> or google:<sub>
     name           TEXT    NOT NULL,    -- display only, refreshed at each login
     created_at     INTEGER NOT NULL,
-    last_login_at  INTEGER NOT NULL
+    last_login_at  INTEGER NOT NULL,
+    last_token_at  INTEGER              -- with the login, what keeps their alerts alive
 );
 CREATE TABLE sessions (
     token_hash  TEXT    PRIMARY KEY,    -- SHA-256 hex of the cookie value
@@ -154,7 +155,7 @@ CREATE TABLE client_grants (            -- clients a user approved
 -- Migration 3: server alerts (ADR-0042).
 CREATE TABLE server_alerts (
     id           TEXT PRIMARY KEY,
-    owner        TEXT NOT NULL,      -- OAuth client_id
+    owner        TEXT NOT NULL,      -- OAuth client_id, or with sign-in a users.id
     record_json  TEXT NOT NULL       -- definition and state, webhook URL and secret
 );
 CREATE TABLE server_alert_events (   -- deliveries not finished yet
@@ -168,7 +169,7 @@ CREATE TABLE server_alert_events (   -- deliveries not finished yet
 A fire writes the alert's new state and its delivery in one transaction, before
 anything is sent, so a restart neither fires it again nor loses the delivery. A
 delivery older than an hour is dropped. Spent alerts are deleted after 7 days, and those of an
-owner with no token for 30 days too, unless the operator listed that client. `record_json` holds webhook URLs,
+owner with no token for 30 days too, unless the operator listed that owner. A user's sign-in counts as well. `record_json` holds webhook URLs,
 which may contain tokens, and signing secrets in clear text, because the server needs
 them to send and sign. They are never returned or logged, but treat a copy of this file
 as holding them.
@@ -198,4 +199,4 @@ SQLite database (`sqlite3 chartgen.db ".backup copy.db"`).
 approvals of clients no longer registered, are deleted at startup. Provider tokens and
 secrets are never stored, and neither are emails, except that a Google account without a
 name is shown by its verified email. Deleting a user is by hand, with the server stopped:
-their rows in these tables and `user_indicators`.
+their rows in these tables, `user_indicators` and `server_alerts`.

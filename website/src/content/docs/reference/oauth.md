@@ -95,7 +95,8 @@ A user is the provider plus its immutable id, `github:<id>` or `google:<sub>`. O
 with both accounts is two users with separate scripts; accounts are not linked.
 
 `POST /oauth/logout` ends the session and the web app's tokens from it. Tokens of other
-clients run until they expire.
+clients run until they expire, and [server alerts](/chartgen/guides/web/#alerts-on-the-server)
+keep running.
 
 Limits per user: 20 clients with live tokens and 20 tokens per client (past these the
 oldest are dropped), 20 pending codes, 20 sessions, 50 approved clients, 50

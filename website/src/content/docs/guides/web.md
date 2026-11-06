@@ -979,6 +979,11 @@ is gone as well, the app lands on the sign-in page.
 Other applications are not trusted the way the app is: the first time one asks, a page shows
 its name and where it will send you, and only the address is reliable.
 
+Only what is stored on the server follows the account: scripted indicators and
+[alerts on the server](#alerts-on-the-server), which keep running after signing out. Watchlists,
+layouts, drawings, chart settings and alerts in the browser stay in this browser, whoever signs
+in on it, and remain there after signing out.
+
 ## Managing indicators
 
 Indicators are added from the **Indicators** picker (by name, with the
