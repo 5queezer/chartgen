@@ -47,6 +47,9 @@ that pane's instances. Components inside a chart that can run while another char
 is active (`Chart`, `PriceAxisControls`) get the pane from a context with `usePane()`.
 `ChartContextMenu` and `chartActions` keep the active-chart exports: a press
 activates its chart in the capture phase, before anything it leads to runs.
+A key press has no such step, so a legend's Settings and Add alert activate their chart
+themselves. Focus does not activate: `keepKeyboardFocus` moves focus to the first chart
+when a dialog closes.
 
 **Storage.** Pane 0 keeps the keys the single-chart app always used
 (`chartgen.layout.*`, `chartgen.indicators.active`). Others use

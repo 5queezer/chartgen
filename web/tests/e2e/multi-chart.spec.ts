@@ -247,6 +247,30 @@ test.describe("multi-chart grid", () => {
     await expect.poll(async () => (await panes(page))[0]!.bars).toBe(initial);
   });
 
+  test("the keyboard on another chart's legend edits that chart", async ({ bootedApp: page }) => {
+    await chooseGrid(page, "2h");
+    await expectLoaded(page, 2);
+    await expect(paneCell(page, 0)).toHaveAttribute("data-active", "");
+
+    await paneCell(page, 1).getByRole("button", { name: "Settings for RSI" }).focus();
+    await page.keyboard.press("Enter");
+    const dialog = page.getByRole("dialog");
+    await expect(dialog).toBeVisible();
+    await expect(paneCell(page, 1)).toHaveAttribute("data-active", "");
+    await dialog.getByLabel("length").fill("21");
+    await dialog.getByRole("button", { name: "OK" }).click();
+    await expect(dialog).toHaveCount(0);
+    const rsi = (p: PaneInfo) => JSON.stringify(p.indicators.at(-1));
+    await expect.poll(async () => rsi((await panes(page))[1]!)).toContain("21");
+    expect(rsi((await panes(page))[0]!)).toContain("14");
+
+    await activate(page, 0);
+    await paneCell(page, 1).getByRole("button", { name: /^Add alert on RSI/ }).focus();
+    await page.keyboard.press("Enter");
+    await expect(dialog).toBeVisible();
+    await expect(paneCell(page, 1)).toHaveAttribute("data-active", "");
+  });
+
   test("each chart registers its own indicators: geometry is kept by registered name", async ({
     bootedApp: page,
   }) => {

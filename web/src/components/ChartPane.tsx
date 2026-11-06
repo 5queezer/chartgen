@@ -445,9 +445,16 @@ export function ChartPane(props: ChartPaneProps): JSX.Element {
             chartType={chartType()}
             timeZone={s.timeZone()}
             onToggleHidden={(n) => toggleIndicatorHidden(indexOf(n))}
-            onSettings={props.onIndicatorSettings}
+            // Both read the active chart. A press has activated this one, a key has not.
+            onSettings={(key) => {
+              setActivePane(s.pane);
+              props.onIndicatorSettings(key);
+            }}
             onRemove={removeIndicator}
-            onAddAlert={props.onAddAlert}
+            onAddAlert={(key) => {
+              setActivePane(s.pane);
+              props.onAddAlert(key);
+            }}
             onChartReady={s.setChart}
             multi={props.multi}
             onCrosshair={s.setCrosshair}
