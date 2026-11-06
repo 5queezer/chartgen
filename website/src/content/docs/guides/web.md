@@ -60,8 +60,10 @@ stays visible.
   with the active one highlighted (below 1200 px they all move into the
   dropdown, which then lists every timeframe). The dropdown holds the rest, grouped as
   on TradingView: Minutes (3m, 30m), Hours (2h, 6h, 12h) and Days (3D, 1M),
-  and ends with **Custom interval...**, which opens the same popup as the
-  keyboard entry (see [Keyboard shortcuts](#keyboard-shortcuts)).
+  then **Recent** with your last five custom intervals, and ends with
+  **Custom interval...**, which opens the same popup as the keyboard entry (see
+  [Keyboard shortcuts](#keyboard-shortcuts)). While a custom interval is
+  active, the dropdown's button shows it.
 - **Chart type** — Candles, Hollow candles (only up candles hollow), Bars (OHLC), Line, Line with markers, Step line, Area, Baseline, Columns, High-low, Heikin Ashi. Heikin Ashi is computed on the server (the web app sends `chart_style: "heikin_ashi"` with every load, tail poll and history page), so the legend shows Heikin Ashi OHLC values and indicators are calculated on them, as on TradingView. Switching to or from it reloads the chart. The other types are drawn in the browser from the same bars, so switching between them needs no reload, and the legend keeps showing the bar's OHLC:
   - **Line with markers** — the close line with a dot on every bar.
   - **Step line** — the closes joined by horizontal-then-vertical steps.
@@ -288,7 +290,8 @@ covers the usual lookbacks (up to SMA 200), and the server raises it for
 indicators that need more to converge, such as the EMA 200 of `ema_stack`
 (891 bars) or an RSI with a long length
 ([ADR-0032](/chartgen/decisions/0032-indicator-aware-warmup/)), so values
-at a page seam and on the live bar line up. Changing the symbol,
+at a page seam and on the live bar line up. A custom interval on a Binance symbol can
+fall short of that ([Keyboard shortcuts](#keyboard-shortcuts) has the limit). Changing the symbol,
 timeframe or indicators cancels every pending poll and page and does a
 full reload.
 
@@ -300,9 +303,9 @@ like a polled tail. Polling stops while pushes arrive. The server answers
 "not pushable" for other symbols, which simply keep polling, and "push
 limit reached" when a server limit (subscriptions per token or address,
 subscribes per minute, at most 10 indicators) refuses the chart, which
-then polls until the next chart change. "Feeds busy", when too many feeds are
-starting across the server, also means polling, but the app keeps trying to
-go back to push.
+then polls and tries push again every 5 minutes. "Feeds busy", when too many
+feeds are starting across the server, also means polling, but the app tries
+again sooner, with the backoff below.
 
 - **Fallback.** No push for 6 s (three times the 2 s Binance kline
   cadence), or a dropped SSE stream, which ends the subscription on the
@@ -368,13 +371,26 @@ while typing in a field or while a dialog or menu is open.
 | `Shift+↓` | Bar replay: play / pause |
 | `Esc` | Bar replay: jump to real time |
 
-The timeframe popup accepts a number of minutes (`5`, `15`, `60`, `120`,
-`240`) or a number with a unit `m`, `h`, `d`, `w` (`1h`, `2h`, `4H`, `3D`);
-an uppercase `M` means month (`1M`), lowercase `m` minutes. A lone `D`, `W`
+The timeframe popup accepts a number of minutes (`5`, `7`, `45`, `120`) or a
+number with a unit `m`, `h`, `d`, `w` (`7m`, `45m`, `8h`, `4H`, `2D`, `2W`);
+an uppercase `M` means month (`3M`), lowercase `m` minutes. A lone `D`, `W`
 or `M` means one day, week or month. `1`, `2`, `0` then `Enter` selects 2h.
-The supported set is 1m, 3m, 5m, 15m, 30m, 1h, 2h, 4h, 6h, 12h, 1D, 3D, 1W
-and 1M, for Binance and Yahoo symbols alike; anything else (7m, 2D, seconds)
-is rejected and the field turns red.
+This works for Binance and Yahoo symbols alike. Lengths are bounded at under 1440
+minutes, 168h, 365D, 52W and 12M, and above 60 minutes the length must be a round
+one (`65m` works, `61m` does not). The field turns red for anything else, including
+seconds, and says so. [MCP reference](/chartgen/reference/mcp/#generate_chart)
+lists how bars line up and what each source builds them from.
+
+A custom interval works like a preset everywhere: live updates, history paging,
+bar replay, alerts on it, layouts and share links. On a stock, an interval built
+from Yahoo's finest bars has as much history as they do: about 30 days for `7m`.
+
+A custom interval on a Binance symbol computes indicators over at most 20,000 native
+bars, however much warmup they ask for. A `59m` chart holds about 338 bars, while
+EMA 200 needs 891 to converge, so its live values and page seams can differ from a
+longer history. Scrolling back to load more does not change that: each page, poll and
+push computes over its own capped read. [MCP reference](/chartgen/reference/mcp/#generate_chart)
+gives the rule.
 
 ## Drawing tools
 
@@ -509,7 +525,8 @@ and validated on load. Settings are not part of named layouts (invert and lock, 
 
 ## Chart context menu
 
-Right-clicking the chart (outside a drawing) opens a menu:
+Right-clicking the chart (outside a drawing) opens a menu (mouse only, see
+[Phones and tablets](#phones-and-tablets) for touch):
 
 | Item | Action |
 |---|---|
@@ -542,7 +559,7 @@ https://chartgen.vasudev.xyz/?symbol=ETHUSDT&interval=4h&type=candles&ind=rsi(le
 | Parameter | Meaning |
 |---|---|
 | `symbol` | Chart symbol |
-| `interval` | Timeframe (`4h`, `240`, `1d`, ...) |
+| `interval` | Timeframe (`4h`, `240`, `1d`, `7m`, `2W`, ...) |
 | `type` | Chart type: `candles`, `hollow`, `bars`, `line`, `line_markers`, `step_line`, `area`, `baseline`, `columns`, `high_low`, `heikin_ashi` |
 | `ind` | Indicators, comma separated (at most 50, 2 KB). Non-default parameters go in parentheses, separated by `;`: `macd(fast:8;slow:20)`; characters outside letters, digits, `.`, `_` and `-` in a text value are percent-encoded. Visible indicators only; `ind=` means none. A repeated name is another instance: `rsi,rsi(length:21)` shows two RSIs |
 | `compare` | Compare symbols, comma separated; always written, `compare=` clears them |
@@ -818,6 +835,83 @@ Layouts are stored in `localStorage` under `chartgen.layouts` (at most
 50, validated on load, malformed ones dropped). See
 [ADR-0015](/chartgen/decisions/0015-named-layouts/) and
 [ADR-0040](/chartgen/decisions/0040-layout-compare-restore/).
+
+## Phones and tablets
+
+The app runs in a phone's browser without a separate mobile site
+([ADR-0039](/chartgen/decisions/0039-compact-layout/)). Rotating or
+resizing only moves the layout: the symbol, indicators and drawings stay, the
+chart is not reloaded and no data is fetched again.
+
+Windows narrower than 768 px get the compact layout. So do touch screens
+narrower than 1024 px or shorter than 500 px, which covers phones in both
+orientations and small tablets held upright. A tablet held sideways keeps the
+desktop layout with larger touch targets.
+
+In the compact layout:
+
+- **The chart takes the whole width.** The header keeps the symbol, the
+  interval, the chart type, the indicators and a `⋯` menu with the rest (replay,
+  compare, reset, theme, screenshot, link, settings, fullscreen), plus the
+  layout menu. The indicator chips and the clock go away.
+- **A dock at the bottom** opens the drawing tools, the watchlist, the alerts,
+  the Data Window and the Object Tree. The panels open as a bottom sheet, or as
+  a side panel when the phone is sideways, over the chart and without resizing
+  it. Tap outside the sheet or its `×` to close it. Picking a symbol in the
+  watchlist closes it too.
+- **The drawing toolbar** opens from the dock's pencil button and closes when
+  you pick a tool, so you can tap the tool's points on the chart. The button
+  stays highlighted while a tool is armed.
+- **Dialogs** fit the screen and shrink to what the on-screen keyboard leaves
+  visible, with their buttons always in view. They also stay clear of notches
+  and the home indicator.
+- **On a short screen** the price pane takes about two thirds of the height, and
+  the indicator panes shrink to fit. They return to their usual height when you
+  rotate back. In the compact layout any resize or indicator change resets pane
+  heights dragged with a mouse, and touch cannot drag pane separators at all.
+- **The range buttons** scroll sideways when they do not fit. On a phone held
+  sideways the time zone select is hidden, so hold it upright to change the time
+  zone.
+
+On any touch screen:
+
+| Gesture | What it does |
+| --- | --- |
+| One-finger drag | Pans the chart |
+| Pinch | Zooms the chart |
+| Tap, or long press | Shows the crosshair; the legend reads that bar |
+| Drag after a long press | Moves the crosshair instead of panning |
+| Tap elsewhere | Hides the crosshair |
+| Tap an indicator's legend row | Shows its alert, hide, settings and remove buttons |
+
+The page itself does not scroll or pull to refresh, so gestures on the chart
+only reach the chart. A drawing dragged past its pane stops at the pane's edge, and
+lifting your finger on the separator there keeps the drag. Dragging an axis does nothing on touch, because klinecharts
+only scales axes for the mouse. Use a pinch for the time axis, and the `auto` and
+`log` buttons for the price axis.
+
+Touch has no right-click, and a long press belongs to the crosshair, so the
+[chart context menu](#chart-context-menu) and the drawing menu open only with a
+mouse. Their actions are elsewhere on touch:
+
+- Reset view, copy link and settings are in the `⋯` menu. Invert scale and lock
+  ratio are in **Chart settings**.
+- Remove all drawings is in the drawing toolbar.
+- Remove or lock one drawing, and remove one indicator, are in the Object Tree.
+- Add an alert from the Alerts panel's `+`. Type the price, or pick a drawing or
+  indicator as the source.
+- Copy price, and adding an alert or a horizontal line at a tapped price, have
+  no touch equivalent. Use the horizontal line tool instead.
+
+Most targets are at least 40 px. These are smaller, because they sit on the
+chart or inside a row: the legend buttons (32 px), the `%`, `log`, `inv` and
+`auto` buttons (32 by 28 px), the indicator chip buttons (28 px), a watchlist row's
+buttons (20 px) and the arrow
+on a drawing tool group (20 px; holding the tool's button opens the same list).
+
+This layout has been tested in Chromium's device emulation only (iPhone 13,
+Pixel 7, iPad Mini and a 360 px phone), not on real phones or in Safari. The
+on-screen keyboard was simulated.
 
 ## Getting started
 

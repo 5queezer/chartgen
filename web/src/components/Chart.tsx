@@ -69,7 +69,8 @@ import {
 } from "../lib/plotStyle";
 import { keyName } from "../lib/instances";
 import { withoutParamNumber } from "../lib/indicatorNames";
-import { fitSubPanes } from "../lib/paneLayout";
+import { compactPaneHeights, fitSubPanes } from "../lib/paneLayout";
+import { compact } from "../lib/viewport";
 import {
   applyFill,
   divColor,
@@ -1060,6 +1061,37 @@ export function Chart(props: ChartProps): JSX.Element {
   let dateBars = false;
   // Oscillator pane keys, top to bottom, as klinecharts stacks them.
   let paneStack: string[] = [];
+  // Compact shell: the heights the sub-panes had before the screen shrank them.
+  const naturalHeights = new Map<string, number>();
+  // Before klinecharts' resize, which clamps panes that no longer fit.
+  const rememberNaturalHeights = (c: KChart) => {
+    const ids = untrack(paneIds);
+    const names = paneStack.filter((n) => ids[n]);
+    for (const n of naturalHeights.keys()) {
+      if (!names.includes(n)) naturalHeights.delete(n);
+    }
+    for (const n of names) {
+      if (!naturalHeights.has(n)) naturalHeights.set(n, c.getSize(ids[n]!)?.height ?? 120);
+    }
+  };
+  const fitPanesToScreen = (c: KChart) => {
+    rememberNaturalHeights(c);
+    const ids = untrack(paneIds);
+    const names = paneStack.filter((n) => ids[n]);
+    // The host, not getSize(): after a resize too short for the panes that reports
+    // a clamped total, which made the heights depend on the path taken here.
+    const stack = host.clientHeight - (c.getSize("x_axis_pane")?.height ?? 0);
+    const fit = compactPaneHeights(stack, names.map((n) => naturalHeights.get(n)!));
+    names.forEach((n, i) => c.setPaneOptions({ id: ids[n]!, height: fit[i]! }));
+  };
+  // Back on the desktop layout the panes return to those heights.
+  const restoreNaturalHeights = (c: KChart) => {
+    const ids = untrack(paneIds);
+    for (const [n, height] of naturalHeights) {
+      if (ids[n]) c.setPaneOptions({ id: ids[n]!, height });
+    }
+    naturalHeights.clear();
+  };
   // Shown indicator keys of the last applied snapshot.
   let appliedNames = "";
   // Indicator keys of the payload that are shown, in the stored order
@@ -1205,6 +1237,18 @@ export function Chart(props: ChartProps): JSX.Element {
       if (!inMain && !(e.target as Element).closest(".pane-header")) onLeave();
     };
     host.addEventListener("mouseleave", onLeave);
+    // A touch away from the crosshair hides it, without an action or a
+    // mouseleave. This runs after klinecharts' own listener, on the bubble.
+    const onTouch = () => {
+      const store = (
+        c as unknown as {
+          getChartStore: () => { getTooltipStore: () => { getCrosshair: () => { x?: number } } };
+        }
+      ).getChartStore();
+      if (store.getTooltipStore().getCrosshair().x === undefined) setCrosshairIndex(null);
+    };
+    host.addEventListener("touchstart", onTouch, { passive: true });
+    host.addEventListener("touchend", onTouch, { passive: true });
     host.addEventListener("mousemove", onMove);
     // Panes changed under a still pointer (Remove in a header): klinecharts has no
     // crosshair, and no move will come to say so.
@@ -1216,6 +1260,8 @@ export function Chart(props: ChartProps): JSX.Element {
       c!.unsubscribeAction("onCrosshairChange" as never, onCrosshair);
       c!.unsubscribeAction("onVisibleRangeChange" as never, onRange);
       host.removeEventListener("mouseleave", onLeave);
+      host.removeEventListener("touchstart", onTouch);
+      host.removeEventListener("touchend", onTouch);
       host.removeEventListener("mousemove", onMove);
       if (crosshairFrame !== null) cancelAnimationFrame(crosshairFrame);
       if (rangeFrame !== null) cancelAnimationFrame(rangeFrame);
@@ -1226,7 +1272,11 @@ export function Chart(props: ChartProps): JSX.Element {
     // toggles.
     if (host && typeof ResizeObserver !== "undefined") {
       const ro = new ResizeObserver(() => {
-        chart()?.resize();
+        const current = chart();
+        if (current && compact()) rememberNaturalHeights(current);
+        current?.resize();
+        if (current && compact()) fitPanesToScreen(current);
+        else if (current) restoreNaturalHeights(current);
         recomputeHeaders();
       });
       ro.observe(host);
@@ -1694,6 +1744,10 @@ export function Chart(props: ChartProps): JSX.Element {
 
     // Keep the price pane usable: shrink the sub-panes first.
     const fitPanes = () => {
+      if (untrack(compact)) {
+        fitPanesToScreen(c);
+        return;
+      }
       const subIds = wantedOsc.map((n) => nextPanes[n]).filter((id) => !!id);
       const candle = c.getSize(CANDLE_PANE_ID)?.height;
       if (candle === undefined) return;

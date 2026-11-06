@@ -75,15 +75,24 @@ export function ChartContextMenu(props: ChartContextMenuProps): JSX.Element {
     null,
   );
 
+  // A touch long-press is the klinecharts crosshair, so the menu stays with
+  // the mouse. guides/web.md says where touch finds its actions.
+  const [touchPress, setTouchPress] = createSignal(false);
+
   // Capture phase: runs before Kobalte opens the menu, so the price is known
   // when the items render.
   onMount(() => {
-    const onContextMenu = (e: MouseEvent) =>
+    const onContextMenu = (e: MouseEvent) => {
+      if (touchPress()) e.preventDefault();
       setAt(props.chart ? priceAt(props.chart, e.clientX, e.clientY) : null);
+    };
+    const onPointerDown = (e: PointerEvent) => setTouchPress(e.pointerType !== "mouse");
     trigger.addEventListener("contextmenu", onContextMenu, true);
-    onCleanup(() =>
-      trigger.removeEventListener("contextmenu", onContextMenu, true),
-    );
+    trigger.addEventListener("pointerdown", onPointerDown, true);
+    onCleanup(() => {
+      trigger.removeEventListener("contextmenu", onContextMenu, true);
+      trigger.removeEventListener("pointerdown", onPointerDown, true);
+    });
   });
 
   const [notice, setNotice] = createSignal<string | null>(null);
@@ -113,7 +122,7 @@ export function ChartContextMenu(props: ChartContextMenuProps): JSX.Element {
       <ContextMenu.Trigger
         ref={trigger}
         class="flex-1 min-w-0 relative"
-        disabled={props.drawings?.rightClickedDrawing() ?? false}
+        disabled={touchPress() || (props.drawings?.rightClickedDrawing() ?? false)}
       >
         {props.children}
       </ContextMenu.Trigger>

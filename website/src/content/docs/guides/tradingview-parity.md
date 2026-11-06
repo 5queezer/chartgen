@@ -23,7 +23,7 @@ Status legend:
 | Feature | TradingView | chartgen | Notes / links |
 |---|---|---|---|
 | Symbol search | ✅ | ✅ | Binance spot pairs and Yahoo instruments, type tabs, recent symbols. [Toolbar](/chartgen/guides/web/#toolbar), [`search_symbols`](/chartgen/reference/mcp/#search_symbols) |
-| Timeframe buttons and keyboard entry | ✅ | ◐ | A fixed set of 14 intervals (1m, 3m, 5m, 15m, 30m, 1h, 2h, 4h, 6h, 12h, 1D, 3D, 1W, 1M); typing a digit or **Custom interval...** opens a popup that accepts any of them (`2h`, `120`, `3D`). No arbitrary multiples (7m, 2D) or seconds. [Keyboard shortcuts](/chartgen/guides/web/#keyboard-shortcuts) |
+| Timeframe buttons and keyboard entry | ✅ | ◐ | Presets plus custom intervals: typing a digit or **Custom interval...** opens a popup that takes a number and a unit (`7m`, `45m`, `8h`, `2D`, `2W`, `3M`), and the last five stay in the menu. Above 60 minutes the length must be round (`61m` is rejected). No seconds, ranges or user-chosen favourite buttons. [Keyboard shortcuts](/chartgen/guides/web/#keyboard-shortcuts), [ADR-0038](/chartgen/decisions/0038-custom-intervals/) |
 | Price legend (OHLC, change, volume) | ✅ | ✅ | Follows the crosshair. [Chart conveniences](/chartgen/guides/web/#chart-conveniences) |
 | Bar-close countdown | ✅ | ◐ | Only for 24/7 symbols (the Binance rule). Hidden for stocks, FX and futures, because the session close cannot be derived from the interval. [Chart conveniences](/chartgen/guides/web/#chart-conveniences) |
 | %, log and auto price scale | ✅ | ✅ | [Chart conveniences](/chartgen/guides/web/#chart-conveniences) |
@@ -40,7 +40,7 @@ Status legend:
 | Right-click context menu | ✅ | ◐ | Reset view, copy price, add horizontal line, remove all drawings or indicators, settings. "Lock vertical cursor line by time" is not offered. [Chart context menu](/chartgen/guides/web/#chart-context-menu) |
 | Add alert at the clicked price (context menu) | ✅ | ✅ | "Add alert at price" opens the alert dialog at that price. [Chart context menu](/chartgen/guides/web/#chart-context-menu), [Alerts](/chartgen/guides/web/#sidebar-and-price-alerts) |
 | Titled dialogs (symbol search, compare, add symbol) | ✅ | ✅ | The compare and watchlist dialogs say "Compare symbol" and "Add symbol". [Compare symbols](/chartgen/guides/web/#compare-symbols), [Watchlist](/chartgen/guides/web/#watchlist) |
-| Mobile and touch layout | ✅ | ❌ | The web guide describes a desktop layout only. |
+| Mobile and touch layout | ✅ | ◐ | Compact layout with a dock and bottom sheets, pan, pinch and long-press crosshair. No native app, no long-press menu with price actions, tested in device emulation only. [Phones and tablets](/chartgen/guides/web/#phones-and-tablets) |
 | Multi-chart layouts (several charts in one view) | ✅ | ❌ | One chart per screen. [Web guide scope](/chartgen/guides/web/) |
 
 ## Chart types
@@ -70,7 +70,7 @@ Status legend:
 | Hide and remove from the pane legend | ✅ | ✅ | [Managing indicators](/chartgen/guides/web/#managing-indicators), [ADR-0013](/chartgen/decisions/0013-indicator-visibility-and-instances/) |
 | Several instances of one indicator (RSI 14 and RSI 21) | ✅ | ✅ | Each with its own params, style, visibility and pane. [Managing indicators](/chartgen/guides/web/#managing-indicators), [ADR-0028](/chartgen/decisions/0028-multiple-indicator-instances/) |
 | Fills, hlines, volume profile, divergence lines | ✅ | ✅ | Server colors on the wire. The VPVR up/down split cannot be colored. [ADR-0007](/chartgen/decisions/0007-complete-series-serialization/), [ADR-0010](/chartgen/decisions/0010-overlay-geometry-rendering/), [ADR-0012](/chartgen/decisions/0012-geometry-colors-on-the-wire/) |
-| Ichimoku cloud | ✅ | ✅ | The cloud runs `displacement - 1` bars past the last bar, with a widened right margin, and moves with live ticks. The legend and Data Window read the projected spans there. [ADR-0033](/chartgen/decisions/0033-indicator-projection-past-last-bar/) |
+| Ichimoku cloud | ✅ | ✅ | The cloud runs `displacement - 1` bars past the last bar, with a widened right margin, and moves with live ticks. The legend and Data Window read the projected spans there. On intraday bars their times stay inside the exchange's session, and intraday and day bars skip holidays for US listings through 2028. Weekly and monthly bars stay on their calendar grid. [ADR-0033](/chartgen/decisions/0033-indicator-projection-past-last-bar/), [ADR-0038](/chartgen/decisions/0038-custom-intervals/) |
 | Geometry colors editable in Style | ✅ | ✅ | Fill, level, histogram-palette, profile and divergence colors, each with a visibility toggle, in `style.geometry` ([ADR-0035](/chartgen/decisions/0035-styleable-geometry/)). |
 | Indicator on indicator (apply to another indicator's output) | ✅ | ❌ | Every indicator reads the price bars. |
 | Indicators on Heikin Ashi values | ✅ | ✅ | [`chart_style`](/chartgen/reference/mcp/) |

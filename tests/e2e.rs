@@ -229,6 +229,7 @@ fn test_all_indicators_0_bars() {
         bars: vec![],
         symbol: None,
         interval: None,
+        session: None,
     };
     for name in indicators::available() {
         let ind = indicators::by_name(name).unwrap();
@@ -391,6 +392,7 @@ fn test_render_empty_data() {
         bars: vec![],
         symbol: None,
         interval: None,
+        session: None,
     };
     let panels: Vec<Box<dyn Indicator>> = vec![indicators::by_name("rsi").unwrap()];
     // Should not panic -- may error but should not crash

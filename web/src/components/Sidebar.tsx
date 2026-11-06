@@ -4,12 +4,14 @@
 // tab. The tab is kept in localStorage. Switching tabs unmounts the other
 // panel, so the watchlist only polls quotes while its tab is showing.
 
-import { For, Show, createSignal, type JSX } from "solid-js";
+import { For, Show, createEffect, createSignal, on, onCleanup, onMount, type JSX } from "solid-js";
 
 import type { McpSession } from "../mcp";
+import { compact } from "../lib/viewport";
 import { alerts } from "../stores/alerts";
 import { serverAlerts } from "../stores/serverAlerts";
-import { watchlistCollapsed } from "../stores/watchlist";
+import { symbol } from "../stores/layout";
+import { setWatchlistCollapsed, watchlistCollapsed } from "../stores/watchlist";
 import { AlertsPanel } from "./AlertsPanel";
 import { DataWindow, type DataWindowProps } from "./DataWindow";
 import { ObjectTree, type ObjectTreeProps } from "./ObjectTree";
@@ -31,6 +33,22 @@ const ICONS: Record<Tab, string> = {
   tree: "M3 3h4M6 8h4M6 13h4M4.5 4v9M4.5 8H6M4.5 13H6",
 };
 const KEY = "chartgen.sidebar.tab";
+
+const SidebarIcon = (props: { tab: Tab }) => (
+  <svg
+    aria-hidden="true"
+    viewBox="0 0 16 16"
+    width="16"
+    height="16"
+    fill="none"
+    stroke="currentColor"
+    stroke-width="1.5"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+  >
+    <path d={ICONS[props.tab]} />
+  </svg>
+);
 
 function loadTab(): Tab {
   try {
@@ -62,16 +80,35 @@ export interface SidebarProps {
 }
 
 export function Sidebar(props: SidebarProps): JSX.Element {
-  const activeCount = () =>
+    const activeCount = () =>
     alerts().filter((a) => a.active).length + serverAlerts().filter((a) => a.active).length;
+  const sheetShown = () => compact() && !watchlistCollapsed();
+  const closeSheet = () => setWatchlistCollapsed(true);
+
+  // Picking a symbol in the sheet returns to the chart.
+  createEffect(on(symbol, () => sheetShown() && closeSheet(), { defer: true }));
+  onMount(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape" && !e.defaultPrevented && sheetShown()) closeSheet();
+    };
+    window.addEventListener("keydown", onKey);
+    onCleanup(() => window.removeEventListener("keydown", onKey));
+  });
 
   return (
     <Show
       when={!watchlistCollapsed()}
-      fallback={<Watchlist session={props.session} enabled={props.enabled} />}
+      fallback={
+        <Show when={!compact()}>
+          <Watchlist session={props.session} enabled={props.enabled} />
+        </Show>
+      }
     >
+      <Show when={compact()}>
+        <div class="sheet-backdrop" data-testid="sheet-backdrop" onClick={closeSheet} />
+      </Show>
       <aside
-        class="w-80 shrink-0 flex flex-col min-h-0 border-l border-[color:var(--color-border)]"
+        class="sidebar w-80 shrink-0 flex flex-col min-h-0 border-l border-[color:var(--color-border)]"
         aria-label="Sidebar"
       >
         <div
@@ -89,19 +126,7 @@ export function Sidebar(props: SidebarProps): JSX.Element {
                 title={LABELS[t]}
                 onClick={() => setSidebarTab(t)}
               >
-                <svg
-                  aria-hidden="true"
-                  viewBox="0 0 16 16"
-                  width="16"
-                  height="16"
-                  fill="none"
-                  stroke="currentColor"
-                  stroke-width="1.5"
-                  stroke-linecap="round"
-                  stroke-linejoin="round"
-                >
-                  <path d={ICONS[t]} />
-                </svg>
+                <SidebarIcon tab={t} />
                 <span class="sr-only">{LABELS[t]}</span>
                 <Show when={t === "alerts" && activeCount() > 0}>
                   <span class="ml-1.5 text-xs text-[color:var(--color-fg-muted)]">
@@ -111,6 +136,16 @@ export function Sidebar(props: SidebarProps): JSX.Element {
               </button>
             )}
           </For>
+          <Show when={compact()}>
+            <button
+              type="button"
+              class="px-3 cursor-pointer text-lg leading-none text-[color:var(--color-fg-muted)]"
+              aria-label="Close panel"
+              onClick={closeSheet}
+            >
+              ×
+            </button>
+          </Show>
         </div>
         <Show when={tab() === "watchlist"}>
           <Watchlist embedded session={props.session} enabled={props.enabled} />
@@ -126,5 +161,38 @@ export function Sidebar(props: SidebarProps): JSX.Element {
         </Show>
       </aside>
     </Show>
+  );
+}
+
+/** Compact shell: the row of buttons that opens the sheet's panels and the drawing tools. */
+export function SidebarDock(props: { drawActive: boolean; onDraw: () => void }): JSX.Element {
+  return (
+    <nav class="sidebar-dock flex items-center justify-around" aria-label="Panels">
+      <button
+        type="button"
+        aria-label="Draw"
+        aria-pressed={props.drawActive}
+        class="aria-pressed:text-[color:var(--color-accent)]"
+        onClick={props.onDraw}
+      >
+        <svg aria-hidden="true" viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M3 13l1-3.5L11 2.5 13.5 5l-7 7zM9.5 4l2.5 2.5" />
+        </svg>
+      </button>
+      <For each={TABS}>
+        {(t) => (
+          <button
+            type="button"
+            aria-label={LABELS[t]}
+            onClick={() => {
+              setSidebarTab(t);
+              setWatchlistCollapsed(false);
+            }}
+          >
+            <SidebarIcon tab={t} />
+          </button>
+        )}
+      </For>
+    </nav>
   );
 }

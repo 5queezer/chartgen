@@ -154,6 +154,13 @@ describe("share links", () => {
     expect(decodeShare("symbol=a%20b!&interval=").symbol).toBeUndefined();
   });
 
+  it("carries custom intervals in canonical form and drops bad ones", () => {
+    expect(decodeShare("interval=7m").timeframe).toBe("7m");
+    expect(decodeShare("interval=2W").timeframe).toBe("2wk");
+    expect(decodeShare("interval=120").timeframe).toBe("2h");
+    expect(decodeShare("interval=61m").timeframe).toBeUndefined();
+  });
+
   it("normalises symbol, interval and type", () => {
     expect(decodeShare("symbol=ethusdt&interval=240&type=Candles")).toEqual({
       symbol: "ETHUSDT",

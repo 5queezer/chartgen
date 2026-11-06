@@ -1,6 +1,6 @@
 // Indicator settings / visibility / removal via the pane legend and chips.
 
-import { test, expect, reloadApp } from "./fixtures/app";
+import { test, expect, gotoApp, reloadApp } from "./fixtures/app";
 
 const rsiRow = (page: import("@playwright/test").Page) =>
   page.locator(".pane-header", { hasText: "RSI" }).first();
@@ -75,5 +75,28 @@ test.describe("indicator settings", () => {
     await page.keyboard.press("Enter");
     await expect(rsiRow(page)).toBeVisible();
     await expect(eye).toBeFocused();
+  });
+
+  test("an indicator without params says so, and keeps its Style tab", async ({
+    bootedApp: page,
+  }) => {
+    await page.getByRole("button", { name: /^Settings for EMA/ }).first().click();
+    const dialog = page.getByRole("dialog");
+    await expect(dialog).toContainText("This indicator has no settings.");
+    await expect(dialog).not.toContainText("Settings unavailable");
+    await dialog.getByRole("tab", { name: "Style" }).click();
+    await expect(dialog.getByText("EMA 200")).toBeVisible();
+    await dialog.getByRole("button", { name: "OK" }).click();
+    await expect(dialog).toHaveCount(0);
+  });
+
+  test("a registry that cannot load still says the settings are unavailable", async ({ page }) => {
+    await page.route("**/mcp", async (route) => {
+      if (route.request().postData()?.includes('"list_indicators"')) await route.abort();
+      else await route.fallback();
+    });
+    await gotoApp(page);
+    await page.getByRole("button", { name: /^Settings for EMA/ }).first().click();
+    await expect(page.getByRole("dialog")).toContainText("Settings unavailable");
   });
 });

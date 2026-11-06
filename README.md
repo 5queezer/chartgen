@@ -31,7 +31,7 @@ cargo run -- --serve --trade --testnet
 | Flag | Description | Default |
 |------|-------------|---------|
 | `--symbol` / `-s` | Ticker (AAPL, BTCUSDT) | Sample data |
-| `--interval` / `-i` | 1m, 5m, 15m, 1h, 4h, 1d, 1wk | `4h` |
+| `--interval` / `-i` | A number and a unit: 1m, 7m, 45m, 4h, 8h, 1d, 2D, 2W, 1M | `4h` |
 | `-p` | Indicator (repeat for multiple) | `cipher_b`, `macd` |
 | `-n` / `--bars` | Number of bars | `120` |
 | `--width` / `--height` | Image dimensions | 1920 x 1080 |
