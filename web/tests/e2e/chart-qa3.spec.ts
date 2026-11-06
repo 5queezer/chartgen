@@ -262,6 +262,87 @@ test.describe("loading the active layout", () => {
     await page.waitForTimeout(500);
     expect(loads).toBe(0);
   });
+
+  test("Save with storage full keeps the chart as it is", async ({ bootedApp: page }) => {
+    await page.getByRole("button", { name: "15m", exact: true }).click();
+    await page.evaluate(() => {
+      const real = Storage.prototype.setItem;
+      Storage.prototype.setItem = function (key: string, value: string) {
+        if (key === "chartgen.layouts") throw new DOMException("full", "QuotaExceededError");
+        real.call(this, key, value);
+      };
+    });
+    await pickActive(page);
+    await page.getByRole("dialog").getByRole("button", { name: "Save", exact: true }).click();
+    await expect(page.getByRole("dialog")).toHaveCount(0);
+    await page.waitForTimeout(300);
+    await expect(activeTimeframe(page)).toHaveText("15m");
+  });
+
+  test("with nothing changed it writes nothing", async ({ bootedApp: page }) => {
+    await page.evaluate(() => {
+      const w = window as unknown as { layoutWrites: number };
+      w.layoutWrites = 0;
+      const real = Storage.prototype.setItem;
+      Storage.prototype.setItem = function (key: string, value: string) {
+        if (key === "chartgen.layouts") w.layoutWrites++;
+        real.call(this, key, value);
+      };
+    });
+    await pickActive(page);
+    await expect(page.getByRole("dialog")).toHaveCount(0);
+    expect(await page.evaluate(() => (window as unknown as { layoutWrites: number }).layoutWrites)).toBe(0);
+  });
+
+  /** Log scale, ETHUSDT added (percent axis, log to come back to), saved. */
+  async function saveLogWithCompare(page: Page): Promise<void> {
+    await page
+      .getByRole("group", { name: "Price scale" })
+      .getByRole("button", { name: "log", exact: true })
+      .click();
+    await addCompare(page, "ETHUSDT");
+    await expect(compareLegend(page, "ETHUSDT")).toBeVisible();
+    await page.keyboard.press("Control+s");
+    await expect(dirtyDot(page)).toHaveCount(0);
+  }
+
+  async function removeCompareExpectingLog(page: Page): Promise<void> {
+    await compareLegend(page, "ETHUSDT").hover();
+    await compareLegend(page, "ETHUSDT").getByRole("button", { name: "Remove ETHUSDT" }).click();
+    await expect(compareLegend(page, "ETHUSDT")).toHaveCount(0);
+    await expect(
+      page.getByRole("group", { name: "Price scale" }).getByRole("button", { name: "log", exact: true }),
+    ).toHaveAttribute("aria-pressed", "true");
+  }
+
+  test("with nothing changed, the compare symbol still restores the log scale", async ({
+    bootedApp: page,
+  }) => {
+    await saveLogWithCompare(page);
+    await pickActive(page);
+    await expect(page.getByRole("dialog")).toHaveCount(0);
+    await removeCompareExpectingLog(page);
+  });
+
+  test("Save in the prompt keeps the log scale to restore", async ({ bootedApp: page }) => {
+    await saveLogWithCompare(page);
+    await page.getByRole("button", { name: "15m", exact: true }).click();
+    await pickActive(page);
+    await page.getByRole("dialog").getByRole("button", { name: "Save", exact: true }).click();
+    await expect(activeTimeframe(page)).toHaveText("15m");
+    await removeCompareExpectingLog(page);
+  });
+
+  test("Don't save keeps the log scale to restore when the compare list is the same", async ({
+    bootedApp: page,
+  }) => {
+    await saveLogWithCompare(page);
+    await page.getByRole("button", { name: "15m", exact: true }).click();
+    await pickActive(page);
+    await page.getByRole("dialog").getByRole("button", { name: "Don't save" }).click();
+    await expect(activeTimeframe(page)).toHaveText("1h");
+    await removeCompareExpectingLog(page);
+  });
 });
 
 test.describe("legend after a keyboard zoom", () => {

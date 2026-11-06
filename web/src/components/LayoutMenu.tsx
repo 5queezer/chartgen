@@ -39,7 +39,7 @@ type Dialogue =
       submit: (name: string) => void;
     }
   | { kind: "load" }
-  | { kind: "unsaved"; proceed: () => void }
+  | { kind: "unsaved"; proceed: () => void; kept: () => void }
   | { kind: "delete"; id: string; name: string };
 
 const buttonClass =
@@ -112,10 +112,14 @@ export function LayoutMenu(): JSX.Element {
     });
   });
 
-  /** Run `proceed` now, or after the user decides what to do with unsaved changes. */
-  const leaving = (proceed: () => void) => {
-    if (layoutDirty()) setDialogue({ kind: "unsaved", proceed });
-    else proceed();
+  /**
+   * Run `proceed` now, or after the user decides what to do with unsaved
+   * changes. `kept` replaces it when no changes are thrown away: nothing was
+   * changed, or the user saved them.
+   */
+  const leaving = (proceed: () => void, kept: () => void = proceed) => {
+    if (layoutDirty()) setDialogue({ kind: "unsaved", proceed, kept });
+    else kept();
   };
 
   const askName = (
@@ -309,8 +313,12 @@ export function LayoutMenu(): JSX.Element {
                                   class="flex-1 min-w-0 text-left px-2 py-1.5 text-sm rounded-md cursor-pointer hover:bg-[color:var(--color-bg-elev)] aria-[current=true]:text-[color:var(--color-accent)] flex justify-between gap-4"
                                   onClick={() => {
                                     setDialogue(null);
-                                    // The active layout too: that reverts its unsaved changes.
-                                    leaving(() => switchLayout(l.id));
+                                    // The active layout too: "Don't save" reverts
+                                    // it; with nothing to revert there is nothing to do.
+                                    leaving(
+                                      () => switchLayout(l.id),
+                                      l.id === activeLayout().id ? () => {} : undefined,
+                                    );
                                   }}
                                 >
                                   <span class="truncate">{l.name}</span>
@@ -377,7 +385,7 @@ export function LayoutMenu(): JSX.Element {
                             onClick={() => {
                               save();
                               setDialogue(null);
-                              d.proceed();
+                              d.kept();
                             }}
                           >
                             Save

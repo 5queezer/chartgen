@@ -122,6 +122,17 @@ describe("compare store", () => {
     expect(layout.scaleMode()).toBe("normal");
   });
 
+  it("keeps the restore target when the list stays the same", async () => {
+    stubStorage({ "chartgen.layout.scaleMode": '"log"' });
+    const { layout, compare } = await load();
+    compare.addCompare("ETHUSDT", "BTCUSDT");
+    compare.addCompare("SOLUSDT", "BTCUSDT");
+    compare.setCompareSymbols(["SOLUSDT", "ETHUSDT"]);
+    compare.removeCompare("ETHUSDT");
+    compare.removeCompare("SOLUSDT");
+    expect(layout.scaleMode()).toBe("log");
+  });
+
   it("keeps each symbol's color slot when another is removed", async () => {
     stubStorage();
     const { compare } = await load();

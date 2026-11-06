@@ -122,11 +122,12 @@ export function removeCompare(symbol: string): void {
  * Replace the list without touching the scale mode: a layout switch sets the
  * mode itself (a layout stores it with its compare symbols). Symbols already
  * shown keep their color slot, and a restore target left over from the
- * previous layout is dropped.
+ * previous layout is dropped, unless the list stays the same.
  */
 export function setCompareSymbols(next: unknown): void {
   const symbols = parseCompare(next);
-  const kept = compareEntries().filter((e) => symbols.includes(e.symbol));
+  const current = compareEntries();
+  const kept = current.filter((e) => symbols.includes(e.symbol));
   const used = kept.map((e) => e.slot);
   const list = symbols.map((symbol) => {
     const had = kept.find((e) => e.symbol === symbol);
@@ -135,6 +136,8 @@ export function setCompareSymbols(next: unknown): void {
     used.push(slot);
     return { symbol, slot };
   });
-  restore = list.length === 0 ? null : DEFAULT_SCALE_MODE;
+  if (kept.length !== symbols.length || current.length !== symbols.length) {
+    restore = list.length === 0 ? null : DEFAULT_SCALE_MODE;
+  }
   commit(list);
 }
