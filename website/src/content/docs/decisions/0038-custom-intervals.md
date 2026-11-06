@@ -210,9 +210,13 @@ That includes Binance and the sample source.
 - **Days.** Next slot of the day grid, on its first open day.
 - **Weeks and months.** As before. They do not move for a closed day.
 
-Closed weekdays come from the bars. Across three weeks of dates, the weekdays that
-never occur are closed, which finds a Sunday to Thursday market without a list.
-With fewer dates, Saturday and Sunday are closed unless a bar falls on one.
+Closed weekdays come from the bars. Saturday and Sunday each close when no bar falls
+on them, and a Sunday with neither a Friday nor a Saturday is a Friday and Saturday
+weekend, which finds a Sunday to Thursday market without a list. Nothing else closes,
+so a Thursday holiday inside a one-week window does not close Thursdays. A market with
+a session is known to have closed days. Without one, crypto included, it takes bars
+that could show them: a span of 7 days of `1d` bars, or 5 cycles of 7 longer ones,
+so a few long bars do not read as a weekend.
 
 The block is computed from every loaded bar, warmup included. It used the visible
 bars before, so a two-bar tail of a daily crypto chart saw no weekend bar and

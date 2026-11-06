@@ -361,9 +361,11 @@ bars ahead of price.
   intervals, on 24/7 symbols. Month-based bars (`1M`, `3M`, `2mo`) step by
   calendar months. Exchange-traded symbols follow the exchange's regular session,
   from Yahoo's metadata, in its time zone: intraday bars stay between open and
-  close and restart at the next open, and day bars stay on trading days. Weekdays
-  with no bars in three or more weeks of loaded bars count as closed (with fewer,
-  Saturday and Sunday). US-listed equities, ETFs, indices and mutual funds also skip
+  close and restart at the next open, and day bars stay on trading days. Saturday and
+  Sunday each count as closed when no loaded bar falls on them, and a Sunday with
+  neither a Friday nor a Saturday means a Friday and Saturday weekend. Without a
+  session, as for crypto, a day closes only if the bars could have shown otherwise:
+  7 days of `1d` bars, or 5 cycles of 7 longer ones. US-listed equities, ETFs, indices and mutual funds also skip
   the holidays and early closes of the NYSE's published calendar, for 2026 to 2028.
   Other exchanges' holidays, and US dates past 2028, are not skipped. Futures step
   through their breaks. See

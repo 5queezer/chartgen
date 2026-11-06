@@ -201,11 +201,14 @@ impl Session {
     }
 }
 
-/// Which weekdays (Monday first) a market with these bar dates is closed. With
-/// three weeks of dates, those that never occur: this finds a Sunday to Thursday
-/// market without a list of them. With fewer, Saturday and Sunday unless a bar
-/// falls on one.
-fn closed_weekdays(days: &[NaiveDate]) -> [bool; 7] {
+/// Which weekdays (Monday first) a market with these bar dates is closed, for
+/// bars of `n` days. Saturday and Sunday each close when no bar falls on them, and
+/// a Sunday with neither a Friday nor a Saturday is a Friday and Saturday weekend,
+/// which finds such markets without a list of them. No other weekday ever closes,
+/// so a holiday in a short window stays a holiday. A market with a `session` is
+/// known to have closed days. Without one, as for 24/7 crypto, it takes bars that
+/// could have shown them: a week of daily bars, or five cycles of 7 longer ones.
+fn closed_weekdays(days: &[NaiveDate], n: u32, has_session: bool) -> [bool; 7] {
     let mut seen = [false; 7];
     for d in days {
         seen[d.weekday().num_days_from_monday() as usize] = true;
@@ -214,12 +217,13 @@ fn closed_weekdays(days: &[NaiveDate]) -> [bool; 7] {
         (Some(a), Some(b)) => (*b - *a).num_days(),
         _ => 0,
     };
-    if span >= 21 {
-        seen.map(|s| !s)
-    } else {
-        let weekend = !seen[5] && !seen[6];
-        [false, false, false, false, false, weekend, weekend]
+    let can_show = (n == 1 && span >= 7) || span >= 5 * 7 * i64::from(n);
+    if !has_session && !can_show {
+        return [false; 7];
     }
+    let (fri, sat, sun) = (seen[4], seen[5], seen[6]);
+    let friday = sun && !fri && !sat;
+    [false, false, false, false, friday, !sat, !sun]
 }
 
 /// Open times (unix s) of the `n` bars after the last bar of `data`, for a
@@ -263,7 +267,7 @@ fn date_bar_times(
     const DAY: i64 = 86_400;
     let date = |t: i64| chrono::DateTime::from_timestamp(t, 0).map(|d| d.date_naive());
     let days: Vec<NaiveDate> = times.iter().filter_map(|t| date(*t)).collect();
-    let closed_day = closed_weekdays(&days);
+    let closed_day = closed_weekdays(&days, iv.n, data.session.is_some());
     let us = data.session.is_some_and(|s| s.us_calendar);
     let closed = |t: i64| {
         date(t).is_some_and(|d| {
@@ -300,7 +304,7 @@ fn session_bar_times(
         .iter()
         .filter_map(|t| Some(local(*t)?.date()))
         .collect();
-    let closed_day = closed_weekdays(&days);
+    let closed_day = closed_weekdays(&days, 1, true);
     let closed = |d: NaiveDate| {
         closed_day[d.weekday().num_days_from_monday() as usize]
             || (s.us_calendar && listed(&US_HOLIDAYS, d))
@@ -532,10 +536,10 @@ mod tests {
             q,
             vec![ts("2027-02-01T00:00:00Z"), ts("2027-05-01T00:00:00Z")]
         );
-        // 1d without weekend bars (a stock): Thu, Fri, then Mon.
+        // 1d of a stock: Thu, Fri, then Mon.
         let wed = ts("2026-11-04T14:30:00Z");
         let thu = wed + DAY;
-        let stock = at(&[wed - DAY, wed], "1d");
+        let stock = ny(&[wed - DAY, wed], "1d");
         assert_eq!(
             future_bar_times(&stock, 3),
             Some(vec![thu, thu + DAY, thu + 4 * DAY])
@@ -783,6 +787,124 @@ mod tests {
     }
 
     #[test]
+    fn short_windows_of_a_sunday_to_thursday_market_keep_its_weekend() {
+        let tz = chrono_tz::Asia::Riyadh;
+        let riyadh = |t: &[i64]| in_session(at(t, "1h"), tz, (10, 0), (15, 0));
+        // A week of bars, as a 1m, 7m or 2m chart loads: Thursday leads to Sunday.
+        let thu = ts_in(tz, "2026-11-05 14:00");
+        let sun = ts_in(tz, "2026-11-01 14:00");
+        let week = [sun, sun + 86_400, sun + 2 * 86_400, sun + 3 * 86_400, thu];
+        assert_eq!(local_times(&riyadh(&week), tz, 1), ["Sun 11-08 10:00"]);
+        // A Sunday alone is enough to tell: no bar lands on a Friday or Saturday.
+        for t in local_times(&riyadh(&[sun - 4 * 3_600]), tz, 40) {
+            assert!(!t.starts_with("Fri") && !t.starts_with("Sat"), "{t}");
+        }
+        // A full load and a shorter tail of the same chart agree.
+        let load: Vec<i64> = (0..50)
+            .rev()
+            .map(|k| thu - k * 86_400)
+            .filter(|t| {
+                let d = tz.timestamp_opt(*t, 0).single().unwrap().weekday();
+                !matches!(d, chrono::Weekday::Fri | chrono::Weekday::Sat)
+            })
+            .collect();
+        let tail = &load[load.len() - 10..];
+        assert_eq!(
+            future_bar_times(&riyadh(&load), 12),
+            future_bar_times(&riyadh(tail), 12)
+        );
+    }
+
+    #[test]
+    fn saturday_and_sunday_close_independently() {
+        let tz = chrono_tz::America::New_York;
+        // A market seen trading on a Saturday keeps it, and closes Sunday.
+        let sat = ts_in(tz, "2026-11-07 15:30");
+        let d = ny(&[sat - 86_400, sat], "1h");
+        assert_eq!(local_times(&d, tz, 1), ["Mon 11-09 09:30"]);
+        let fri = ts_in(tz, "2026-11-13 15:30");
+        let d = ny(&[sat, fri], "1h");
+        assert_eq!(local_times(&d, tz, 1), ["Sat 11-14 09:30"]);
+        // One seen trading on a Sunday and a Friday closes Saturday alone.
+        let sun = ts_in(tz, "2026-11-08 15:30");
+        let d = ny(&[sun, fri], "1h");
+        assert_eq!(local_times(&d, tz, 1), ["Sun 11-15 09:30"]);
+    }
+
+    #[test]
+    fn a_holiday_inside_a_short_window_is_not_a_closed_weekday() {
+        // A week with Thanksgiving in it has no Thursday bar, and the Thursday
+        // after is open.
+        let tz = chrono_tz::America::New_York;
+        let times: Vec<i64> = [
+            "2026-11-23 15:30",
+            "2026-11-24 15:30",
+            "2026-11-25 15:30",
+            "2026-11-27 12:30",
+            "2026-11-30 15:30",
+            "2026-12-01 15:30",
+            "2026-12-02 15:30",
+        ]
+        .iter()
+        .map(|s| ts_in(tz, s))
+        .collect();
+        let d = ny(&times, "1h");
+        assert_eq!(local_times(&d, tz, 1), ["Thu 12-03 09:30"]);
+    }
+
+    #[test]
+    fn crypto_date_bars_stay_on_their_grid_however_few_are_loaded() {
+        const DAY: i64 = 86_400;
+        let ts = |s: &str| chrono::DateTime::parse_from_rfc3339(s).unwrap().timestamp();
+        let mon = ts("2026-11-02T00:00:00Z");
+        // Five 1d bars, Monday to Friday, with no session: Saturday is a bar.
+        let week: Vec<i64> = (0..5).map(|k| mon + k * DAY).collect();
+        assert_eq!(
+            future_bar_times(&at(&week, "1d"), 3),
+            Some(vec![mon + 5 * DAY, mon + 6 * DAY, mon + 7 * DAY])
+        );
+        // The two-bar tail CodeRabbit named.
+        let fri = mon + 4 * DAY;
+        assert_eq!(
+            future_bar_times(&at(&[fri - DAY, fri], "1d"), 2),
+            Some(vec![fri + DAY, fri + 2 * DAY])
+        );
+        // A few long bars show too few weekdays to judge any of them closed.
+        for (tf, step, bars) in [("5d", 5, 6), ("10d", 10, 4), ("30d", 30, 3)] {
+            let iv = Interval::parse(tf).unwrap();
+            let last = iv.grid_start(mon);
+            let times: Vec<i64> = (0..bars).rev().map(|k| last - k * step * DAY).collect();
+            let t = future_bar_times(&at(&times, tf), 8).unwrap();
+            assert_eq!(
+                t,
+                (1..=8).map(|k| last + k * step * DAY).collect::<Vec<_>>(),
+                "{tf}"
+            );
+        }
+    }
+
+    #[test]
+    fn without_a_session_only_enough_bars_can_close_a_day() {
+        const DAY: i64 = 86_400;
+        let ts = |s: &str| chrono::DateTime::parse_from_rfc3339(s).unwrap().timestamp();
+        // Two weeks of weekdays, with metadata missing: the bars show a weekend.
+        let mon = ts("2026-11-02T00:00:00Z");
+        let days: Vec<i64> = (0..12)
+            .map(|k| mon + k * DAY)
+            .filter(|t| {
+                let d = chrono::DateTime::from_timestamp(*t, 0).unwrap().weekday();
+                !matches!(d, chrono::Weekday::Sat | chrono::Weekday::Sun)
+            })
+            .collect();
+        assert_eq!(days.last(), Some(&(mon + 11 * DAY)));
+        assert_eq!(
+            future_bar_times(&at(&days, "1d"), 3),
+            Some(vec![mon + 14 * DAY, mon + 15 * DAY, mon + 16 * DAY]),
+            "Friday, then Monday and Tuesday"
+        );
+    }
+
+    #[test]
     fn multi_day_stock_bars_land_on_the_first_open_day_of_their_grid_slot() {
         const DAY: i64 = 86_400;
         let ts = |s: &str| chrono::DateTime::parse_from_rfc3339(s).unwrap().timestamp();
@@ -790,7 +912,7 @@ mod tests {
         // A stock's 3d bars with no weekend bars: each future bar is on the grid
         // or the first weekday of its slot, and none falls on a weekend.
         let wed = ts("2026-11-04T00:00:00Z");
-        let t = future_bar_times(&at(&[wed - DAY, wed], "3d"), 12).unwrap();
+        let t = future_bar_times(&ny(&[wed - DAY, wed], "3d"), 12).unwrap();
         let mut slots = std::collections::HashSet::new();
         for x in &t {
             let d = chrono::DateTime::from_timestamp(*x, 0).unwrap();
