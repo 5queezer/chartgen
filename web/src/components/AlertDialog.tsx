@@ -70,6 +70,9 @@ import {
 /** Value of the Source / Level select for a plot of an indicator instance. */
 export const plotRef = (key: string, line: number) =>
   `plot:${JSON.stringify([key, line])}`;
+/** Value of the Source select for a detection of an indicator (ADR-0046). */
+export const eventRef = (key: string, event: string) =>
+  `event:${JSON.stringify([key, event])}`;
 /** Value of the Source select for a drawing. */
 export const drawingRef = (id: string) => `drawing:${id}`;
 const PRICE = "price";
@@ -280,6 +283,33 @@ function plotOptions(
   });
 }
 
+/** A detection the dialog offers. */
+interface EventOption {
+  ref: string;
+  key: string;
+  event: string;
+  /** Option text and name in descriptions, e.g. "Chart Patterns: Bullish pattern". */
+  label: string;
+}
+
+/** Detections of the series' indicators, in legend order. */
+function eventOptions(
+  series: SeriesPayload | null,
+  params: ReadonlyMap<string, string | undefined>,
+): EventOption[] {
+  return Object.entries(series?.indicators ?? {}).flatMap(([key, ind]) => {
+    const p = params.get(key);
+    const base = ind.label || keyName(key);
+    const title = p ? `${base} ${p}` : base;
+    return (ind.events ?? []).map((e) => ({
+      ref: eventRef(key, e.key),
+      key,
+      event: e.key,
+      label: `${title}: ${e.name}`,
+    }));
+  });
+}
+
 /** Read-only text of a fixed source, for the edit dialog. */
 function sourceText(src: AlertSource, symbol: string): string {
   switch (src.kind) {
@@ -289,6 +319,7 @@ function sourceText(src: AlertSource, symbol: string): string {
       return src.label;
     case "indicator": {
       const ag = src.against;
+      if (ag.kind === "event") return src.name;
       if (ag.kind === "price") return `Close vs ${src.name}`;
       return ag.kind === "plot" ? `${src.name} vs ${ag.name}` : src.name;
     }
@@ -334,6 +365,22 @@ export function AlertDialog(props: AlertDialogProps): JSX.Element {
         a.length === b.length && a.every((p, i) => p.ref === b[i]!.ref && p.label === b[i]!.label),
     },
   );
+  const events = createMemo(
+    () => (onChart() ? eventOptions(props.series, props.params) : []),
+    [],
+    {
+      equals: (a, b) =>
+        a.length === b.length && a.every((e, i) => e.ref === b[i]!.ref && e.label === b[i]!.label),
+    },
+  );
+  /** The draft watches a detection: no condition, level or value to choose. */
+  const onEvent = () => {
+    const d = draft();
+    if (!d) return false;
+    return d.fixed
+      ? d.fixed.kind === "indicator" && d.fixed.against.kind === "event"
+      : d.source.startsWith("event:");
+  };
   const drawings = createMemo(() => {
     if (!onChart()) return [];
     // Same-named drawings are numbered, so they read apart.
@@ -347,7 +394,7 @@ export function AlertDialog(props: AlertDialogProps): JSX.Element {
   const sourcePlot = () => plots().find((p) => p.ref === draft()?.source);
   const levels = createMemo(() => {
     const d = draft();
-    if (!d || d.source.startsWith("drawing:")) return [];
+    if (!d || d.source.startsWith("drawing:") || d.source.startsWith("event:")) return [];
     const own = sourcePlot();
     if (d.source !== PRICE && !own) return [];
     return plots().filter((p) => (own ? p.key === own.key && p.line !== own.line : true));
@@ -361,7 +408,9 @@ export function AlertDialog(props: AlertDialogProps): JSX.Element {
       if (f.kind === "price") return "Price";
       return f.kind === "indicator" && f.against.kind === "value" ? "Value" : null;
     }
-    if (d.level !== VALUE || d.source.startsWith("drawing:")) return null;
+    if (d.level !== VALUE || d.source.startsWith("drawing:") || d.source.startsWith("event:")) {
+      return null;
+    }
     return d.source === PRICE ? "Price" : "Value";
   };
 
@@ -438,6 +487,20 @@ export function AlertDialog(props: AlertDialogProps): JSX.Element {
   /** The new alert's source from the selects; a string is an error. */
   const buildSource = (d: Draft, value: number): AlertSource | string => {
     const interval = props.series?.interval ?? "";
+    if (d.source.startsWith("event:")) {
+      const ev = events().find((x) => x.ref === d.source);
+      const signature = ev && indicatorSignatures()[ev.key];
+      if (!ev || !signature || interval === "") return "That indicator is no longer on the chart.";
+      return {
+        kind: "indicator",
+        interval,
+        instanceKey: ev.key,
+        signature,
+        line: 0,
+        name: ev.label,
+        against: { kind: "event", key: ev.event },
+      };
+    }
     if (d.source.startsWith("drawing:")) {
       const dr = drawings().find((x) => x.ref === d.source);
       if (!dr) return "That drawing is gone.";
@@ -505,7 +568,8 @@ export function AlertDialog(props: AlertDialogProps): JSX.Element {
     }
     const created = addAlert({
       symbol: d.symbol,
-      condition: d.condition,
+      // A detection only has one way to fire (see `AlertAgainst`).
+      condition: onEvent() ? "crossing_up" : d.condition,
       trigger: d.trigger,
       message: d.message,
       ...(source.kind === "price" ? { price: value } : { source }),
@@ -591,6 +655,17 @@ export function AlertDialog(props: AlertDialogProps): JSX.Element {
                               </For>
                             </optgroup>
                           </Show>
+                          <Show when={events().length > 0}>
+                            <optgroup label="Patterns">
+                              <For each={events()}>
+                                {(o) => (
+                                  <option value={o.ref} selected={o.ref === d().source}>
+                                    {o.label}
+                                  </option>
+                                )}
+                              </For>
+                            </optgroup>
+                          </Show>
                         </select>
                       </label>
                     }
@@ -604,20 +679,33 @@ export function AlertDialog(props: AlertDialogProps): JSX.Element {
                       </div>
                     )}
                   </Show>
-                  <label class="flex items-center justify-between gap-3 text-sm">
-                    Condition
-                    <select
-                      class={selectClass}
-                      value={d().condition}
-                      onChange={(e) =>
-                        patch({ condition: e.currentTarget.value as AlertCondition })
-                      }
-                    >
-                      <For each={CONDITIONS}>
-                        {(c) => <option value={c}>{CONDITION_LABELS[c]}</option>}
-                      </For>
-                    </select>
-                  </label>
+                  <Show
+                    when={!onEvent()}
+                    fallback={
+                      <p
+                        data-role="alert-event-note"
+                        class="text-xs text-[color:var(--color-fg-muted)]"
+                      >
+                        Fires when a bar closes with a new detection. Nothing on the forming bar
+                        fires it, and a pattern shown as forming has not fired.
+                      </p>
+                    }
+                  >
+                    <label class="flex items-center justify-between gap-3 text-sm">
+                      Condition
+                      <select
+                        class={selectClass}
+                        value={d().condition}
+                        onChange={(e) =>
+                          patch({ condition: e.currentTarget.value as AlertCondition })
+                        }
+                      >
+                        <For each={CONDITIONS}>
+                          {(c) => <option value={c}>{CONDITION_LABELS[c]}</option>}
+                        </For>
+                      </select>
+                    </label>
+                  </Show>
                   <Show when={!d().fixed && levels().length > 0}>
                     <label class="flex items-center justify-between gap-3 text-sm">
                       Level

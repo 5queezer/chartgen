@@ -21,6 +21,8 @@ export type SeriesIndicator = SeriesPayload["indicators"][string];
 export type SeriesFill = NonNullable<SeriesIndicator["fills"]>[number];
 export type SeriesHBar = NonNullable<SeriesIndicator["hbars"]>[number];
 export type SeriesDivLine = NonNullable<SeriesIndicator["divlines"]>[number];
+export type SeriesLabel = NonNullable<SeriesIndicator["labels"]>[number];
+export type SeriesPattern = NonNullable<SeriesIndicator["patterns"]>[number];
 
 export interface Point {
   x: number;
@@ -136,7 +138,20 @@ export function toDataSpace(
     const x2 = remap[d.x2] ?? -1;
     return x1 < 0 || x2 < 0 ? [] : [{ ...d, x1, x2 }];
   });
-  return { ...ind, fills, divlines, hbars };
+  const labels = ind.labels?.flatMap((l) => {
+    const x = remap[l.x] ?? -1;
+    return x < 0 ? [] : [{ ...l, x }];
+  });
+  const patterns = ind.patterns?.map((p) => ({
+    ...p,
+    strokes: p.strokes.flatMap((s) => {
+      const x1 = remap[s.x1] ?? -1;
+      const x2 = remap[s.x2] ?? -1;
+      return x1 < 0 || x2 < 0 ? [] : [{ ...s, x1, x2 }];
+    }),
+    label: { ...p.label, x: remap[p.label.x] ?? p.label.x },
+  }));
+  return { ...ind, fills, divlines, labels, patterns, hbars };
 }
 
 export interface ValueExtent {
@@ -327,6 +342,127 @@ export function divlineSegments(
     });
   }
   return out;
+}
+
+export type Bias = SeriesLabel["bias"];
+
+export const BIAS_COLORS: Record<Bias, string> = {
+  bullish: "rgba(41,98,255,1)",
+  bearish: "rgba(242,54,69,1)",
+  neutral: "rgba(120,123,134,1)",
+};
+
+/** A text mark on the chart (ADR-0046) and what its tooltip says. */
+export interface MarkBox extends Rect {
+  text: string;
+  bias: Bias;
+  /** Wire color when valid, else the bias's. */
+  color: string;
+  tooltip: string;
+  /** Faded: on the forming bar, or a pattern that is forming or failed. */
+  faint: boolean;
+  /** Open for a label on the forming bar: visibly not final. */
+  hollow: boolean;
+}
+
+export const MARK_HEIGHT = 15;
+const MARK_PAD = 3;
+const MARK_GAP = 5;
+
+/**
+ * Boxes of the labels on the visible bars, past the bar's high or low. Labels of
+ * one bar and side stack away from it, in server order.
+ */
+export function labelBoxes(
+  labels: readonly SeriesLabel[],
+  range: IndexRange,
+  map: Mapper,
+  measure: (text: string) => number,
+): MarkBox[] {
+  const out: MarkBox[] = [];
+  const stacks = new Map<string, number>();
+  for (const l of labels) {
+    if (l.x < range.from - 1 || l.x > range.to) continue;
+    const side = `${l.x}|${l.above}`;
+    const k = stacks.get(side) ?? 0;
+    stacks.set(side, k + 1);
+    const width = measure(l.text) + 2 * MARK_PAD;
+    const step = k * (MARK_HEIGHT + 1);
+    const py = map.y(l.y);
+    out.push({
+      x: map.x(l.x) - width / 2,
+      y: l.above ? py - MARK_GAP - MARK_HEIGHT - step : py + MARK_GAP + step,
+      width,
+      height: MARK_HEIGHT,
+      text: l.text,
+      bias: l.bias,
+      color: wireColor(l.color) ?? BIAS_COLORS[l.bias],
+      tooltip: l.tooltip,
+      faint: l.tentative === true,
+      hollow: l.tentative === true,
+    });
+  }
+  return out;
+}
+
+/** A pattern's strokes in pixels, for those reaching into the visible bars. */
+export interface PatternDrawing {
+  strokes: Array<{ from: Point; to: Point; dashed: boolean }>;
+  box: MarkBox;
+  bias: Bias;
+  status: SeriesPattern["status"];
+}
+
+/** The status in a label's words: nothing hides that a forming one can change. */
+export const patternText = (p: SeriesPattern): string =>
+  p.key === "fib_swing" ? p.name : `${p.name} · ${p.status}`;
+
+export function patternDrawings(
+  patterns: readonly SeriesPattern[],
+  range: IndexRange,
+  map: Mapper,
+  measure: (text: string) => number,
+): PatternDrawing[] {
+  const out: PatternDrawing[] = [];
+  for (const p of patterns) {
+    const xs = p.strokes.flatMap((s) => [s.x1, s.x2]);
+    if (xs.length === 0) continue;
+    if (Math.max(...xs) < range.from - 1 || Math.min(...xs) > range.to) continue;
+    const text = patternText(p);
+    const width = measure(text) + 2 * MARK_PAD;
+    const py = map.y(p.label.y);
+    out.push({
+      strokes: p.strokes.map((s) => ({
+        from: { x: map.x(s.x1), y: map.y(s.y1) },
+        to: { x: map.x(s.x2), y: map.y(s.y2) },
+        dashed: s.dashed,
+      })),
+      box: {
+        x: map.x(p.label.x) - width / 2,
+        y: p.label.above ? py - MARK_GAP - MARK_HEIGHT : py + MARK_GAP,
+        width,
+        height: MARK_HEIGHT,
+        text,
+        bias: p.bias,
+        color: wireColor(p.color) ?? BIAS_COLORS[p.bias],
+        tooltip: p.tooltip,
+        faint: p.status !== "confirmed",
+        hollow: false,
+      },
+      bias: p.bias,
+      status: p.status,
+    });
+  }
+  return out;
+}
+
+/** The topmost box under a point. Later boxes are drawn over earlier ones. */
+export function markAt(boxes: readonly MarkBox[], x: number, y: number): MarkBox | null {
+  for (let i = boxes.length - 1; i >= 0; i--) {
+    const b = boxes[i]!;
+    if (x >= b.x && x <= b.x + b.width && y >= b.y && y <= b.y + b.height) return b;
+  }
+  return null;
 }
 
 /** hlines inside the pane, with the wire color (gray fallback). */

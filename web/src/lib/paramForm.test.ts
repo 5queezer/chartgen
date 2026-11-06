@@ -123,3 +123,14 @@ describe("mergeParams", () => {
     expect(mergeParams(fields, { bars: 50 }, {})).toEqual({});
   });
 });
+
+describe("params with allowed values", () => {
+  it("carries them to the field, for a select", () => {
+    const [f, g] = buildFields([
+      { name: "pattern", type: "string", default: "all", enum: ["all", "hammer"] },
+      { name: "note", type: "string", default: "" },
+    ]);
+    expect(f!.options).toEqual(["all", "hammer"]);
+    expect(g!.options).toBeUndefined();
+  });
+});
