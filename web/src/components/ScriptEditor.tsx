@@ -123,6 +123,8 @@ export default function ScriptEditor(props: ScriptEditorProps): JSX.Element {
   let bufferOpen = false;
   let draftTimer: ReturnType<typeof setTimeout> | undefined;
   let openRequest = 0;
+  // The text this panel last stored, by draft key (see releaseDraft).
+  const written = new Map<string, string>();
 
   function storeDraft(key: string, draft: ScriptDraft | null): void {
     if (writeDraft(key, draft, selected())) {
@@ -138,8 +140,25 @@ export default function ScriptEditor(props: ScriptEditorProps): JSX.Element {
     clearTimeout(draftTimer);
     draftTimer = undefined;
     if (!bufferOpen) return;
-    const base = selected() === null ? {} : { base: draftBase() };
-    storeDraft(bufferKey(), dirty() ? { name: name(), source: source(), ...base } : null);
+    const key = bufferKey();
+    if (dirty()) {
+      const base = selected() === null ? {} : { base: draftBase() };
+      written.set(key, source());
+      storeDraft(key, { name: name(), source: source(), ...base });
+    } else {
+      releaseDraft(key);
+    }
+  }
+
+  /**
+   * This buffer has no unsaved text under `key`. Remove the stored draft only if
+   * this panel wrote it: a clean tab must not erase what another tab stored.
+   */
+  function releaseDraft(key: string): void {
+    const stored = draftOf(key) ?? null;
+    const mine = stored !== null && written.get(key) === stored.source;
+    if (mine) written.delete(key);
+    storeDraft(key, mine ? null : stored);
   }
 
   function scheduleDraft(): void {
@@ -200,6 +219,7 @@ export default function ScriptEditor(props: ScriptEditorProps): JSX.Element {
       const text = result.source;
       // A draft equal to the saved text is no draft; compared as text, because
       // `updated_at` only has a resolution of one second.
+      if (draft?.source === text) storeDraft(target, null);
       const open = draft && draft.source !== text ? draft : undefined;
       const changed = open !== undefined && open.base !== text;
       setStatus(open && !changed ? "Unsaved draft restored." : "");
@@ -301,7 +321,7 @@ export default function ScriptEditor(props: ScriptEditorProps): JSX.Element {
         if (first?.line != null) view?.reveal(first.line);
         return;
       } else {
-        storeDraft(key, null);
+        releaseDraft(key);
         setBufferKey(result.name);
         setSelected(result.name);
         setName(result.name);
@@ -346,7 +366,7 @@ export default function ScriptEditor(props: ScriptEditorProps): JSX.Element {
     const request = openRequest;
     try {
       await props.session.callDeleteIndicator(target);
-      storeDraft(target, null);
+      releaseDraft(target);
       if (request === openRequest) {
         // Its text is deleted with it: nothing to store from this buffer.
         bufferOpen = false;

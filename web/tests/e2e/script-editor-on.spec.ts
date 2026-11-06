@@ -518,6 +518,89 @@ test.describe("code is never lost", () => {
     expect(await storedDraft(page, "two")).toContain("# two drafted");
   });
 
+  test("a clean panel closing in another tab leaves a new-script draft alone", async ({ page }) => {
+    await gotoApp(page);
+    await openEditor(page);
+    const other = await secondTab(page);
+
+    await page.getByTestId("script-name").fill("precious");
+    await setCode(page, script("    pass  # precious text"));
+    await page.getByTestId("script-close").click();
+    expect(await storedDraft(page, "")).toContain("# precious text");
+
+    // The other tab has been clean on New all along.
+    await other.getByTestId("script-close").click();
+    expect(await storedDraft(other, "")).toContain("# precious text");
+
+    await openEditor(other);
+    await expect(code(other)).toContainText("# precious text");
+    await expect(other.getByTestId("script-name")).toHaveValue("precious");
+  });
+
+  test("an untouched tab reloading leaves another tab's draft of the same script alone", async ({ page }) => {
+    await gotoApp(page);
+    await openEditor(page);
+    await saveNew(page, "shared_two", script("    pass  # saved"));
+    const other = await secondTab(page);
+    await other.getByTestId("script-row-shared_two").click();
+    await expect(code(other)).toContainText("# saved");
+    await expect(other.getByTestId("script-revert")).toHaveCount(0);
+
+    await setCode(page, script("    pass  # drafted"));
+    await page.getByTestId("script-close").click();
+    expect(await storedDraft(page, "shared_two")).toContain("# drafted");
+
+    await reloadApp(other);
+    expect(await storedDraft(other, "shared_two")).toContain("# drafted");
+    await openEditor(other);
+    await expect(code(other)).toContainText("# drafted");
+  });
+
+  test("Revert and Save still end this panel's own draft", async ({ page }) => {
+    await gotoApp(page);
+    await openEditor(page);
+    await saveNew(page, "own_draft", script("    pass  # saved"));
+
+    await setCode(page, script("    pass  # edited"));
+    await expect.poll(() => storedDraft(page, "own_draft")).toContain("# edited");
+    await page.getByTestId("script-revert").click();
+    expect(await storedDraft(page, "own_draft")).toBeNull();
+
+    await setCode(page, script("    pass  # edited again"));
+    await expect.poll(() => storedDraft(page, "own_draft")).toContain("# edited again");
+    await page.getByTestId("script-save").click();
+    await expect(page.getByTestId("script-status")).toHaveText("Saved.");
+    expect(await storedDraft(page, "own_draft")).toBeNull();
+    await expect(page.getByTestId("script-row-own_draft")).not.toContainText("•");
+
+    // A draft restored from an earlier visit is this panel's to end, too.
+    await setCode(page, script("    pass  # from before"));
+    await expect.poll(() => storedDraft(page, "own_draft")).toContain("# from before");
+    await reloadApp(page);
+    await openEditor(page);
+    await expect(code(page)).toContainText("# from before");
+    await page.getByTestId("script-revert").click();
+    expect(await storedDraft(page, "own_draft")).toBeNull();
+  });
+
+  test("a stored draft equal to the saved text is cleared on opening", async ({ page }) => {
+    await gotoApp(page);
+    await openEditor(page);
+    await saveNew(page, "same_text", script("    pass  # same"));
+    const text = script("    pass  # same");
+    await page.getByTestId("script-close").click();
+    await page.evaluate((source) => {
+      localStorage.setItem(
+        "chartgen.scripts.drafts",
+        JSON.stringify({ selected: null, drafts: { same_text: { name: "same_text", source, base: source } } }),
+      );
+    }, text);
+    await openEditor(page);
+    await page.getByTestId("script-row-same_text").click();
+    await expect(code(page)).toContainText("# same");
+    await expect.poll(() => storedDraft(page, "same_text")).toBeNull();
+  });
+
   test("the draft of a vanished script keeps its name and spares the new-script draft", async ({ page }) => {
     await gotoApp(page);
     await openEditor(page);
