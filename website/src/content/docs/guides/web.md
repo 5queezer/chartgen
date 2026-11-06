@@ -298,7 +298,7 @@ like a polled tail. Polling stops while pushes arrive. The server answers
 "not pushable" for other symbols, which simply keep polling, and "push
 limit reached" when a server limit (subscriptions per token or address,
 subscribes per minute, at most 10 indicators) refuses the chart, which
-then polls until the next chart change.
+then polls and tries push again every 5 minutes.
 
 - **Fallback.** No push for 6 s (three times the 2 s Binance kline
   cadence), or a dropped SSE stream, which ends the subscription on the
