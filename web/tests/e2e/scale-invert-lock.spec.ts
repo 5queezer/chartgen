@@ -67,6 +67,51 @@ const setBarSpace = (page: Page, n: number) =>
     (window as unknown as { __chartgenTest: Hook }).__chartgenTest.chart()!.setBarSpace(v);
   }, n);
 
+test.describe("lock ratio on a new timeframe", () => {
+  test.use({ push: false });
+
+  test("is taken from the fit with the new indicators, whatever they do", async ({
+    bootedApp: page,
+  }) => {
+    // The sample data moves with the clock, so whether the new EMAs sit outside
+    // the candles depends on the time of day. Force it: on 5m they sit far below.
+    const lowered = 0.6;
+    await page.route("**/mcp", async (route) => {
+      const body = route.request().postData() ?? "";
+      if (!body.includes('"generate_chart"') || !body.includes('"5m"')) {
+        return route.continue().catch(() => {});
+      }
+      const res = await route.fetch();
+      const json = (await res.json()) as { result: { content: { text: string }[] } };
+      const content = json.result.content[0]!;
+      const series = JSON.parse(content.text) as {
+        indicators: Record<string, { lines?: { values: (number | null)[] }[] }>;
+      };
+      for (const line of series.indicators.ema_stack?.lines ?? []) {
+        line.values = line.values.map((v) => (v === null ? null : v * lowered));
+      }
+      content.text = JSON.stringify(series);
+      return route.fulfill({ response: res, json });
+    });
+    await setBarSpace(page, 8);
+    await lockViaMenu(page);
+    await setBarSpace(page, 20);
+    await page.keyboard.press("5");
+    await page.keyboard.press("Enter");
+    await expect
+      .poll(() =>
+        page.evaluate(
+          () =>
+            (window as unknown as { __chartgenTest: { series: () => { interval?: string } | null } })
+              .__chartgenTest.series()?.interval,
+        ),
+      )
+      .toBe("5m");
+    await page.waitForTimeout(300);
+    await expect.poll(() => allVisibleInRange(page)).toBe(true);
+  });
+});
+
 test.describe("price scale invert and lock ratio", () => {
   test("Alt+I inverts the axis, persists over reload, toggles back", async ({
     bootedApp: page,
@@ -212,8 +257,14 @@ test.describe("price scale invert and lock ratio", () => {
   }) => {
     await setBarSpace(page, 8);
     await lockViaMenu(page);
+    await expect.poll(() => span(page)).toBeGreaterThan(0);
+    const base = await span(page);
+    // Whether this crops any bars depends on the data, which moves with the
+    // clock; the lock holding does not: 2.5 times the bar width, 0.4 the range.
     await setBarSpace(page, 20);
-    await expect.poll(() => allVisibleInRange(page)).toBe(false);
+    await expect
+      .poll(async () => Math.abs((await span(page)) / base - 0.4) < 0.03)
+      .toBe(true);
     await page.keyboard.press("5");
     await page.keyboard.press("Enter");
     await expect.poll(() => allVisibleInRange(page), { timeout: 15_000 }).toBe(true);
