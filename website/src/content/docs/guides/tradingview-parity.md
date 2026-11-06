@@ -23,7 +23,7 @@ Status legend:
 | Feature | TradingView | chartgen | Notes / links |
 |---|---|---|---|
 | Symbol search | ✅ | ✅ | Binance spot pairs and Yahoo instruments, type tabs, recent symbols. [Toolbar](/chartgen/guides/web/#toolbar), [`search_symbols`](/chartgen/reference/mcp/#search_symbols) |
-| Timeframe buttons and keyboard entry | ✅ | ◐ | Presets plus custom intervals: typing a digit or **Custom interval...** opens a popup that takes a number and a unit (`7m`, `45m`, `8h`, `2D`, `2W`, `3M`), and the last five stay in the menu. Above 60 minutes the length must be round (`61m` is rejected). No seconds, ranges or user-chosen favourite buttons. [Keyboard shortcuts](/chartgen/guides/web/#keyboard-shortcuts), [ADR-0038](/chartgen/decisions/0038-custom-intervals/) |
+| Timeframe buttons and keyboard entry | ✅ | ◐ | Presets plus custom intervals: typing a digit or **Custom interval...** opens a popup that takes a number and a unit (`7m`, `45m`, `8h`, `2D`, `2W`, `3M`), and the last five stay in the menu. Above 60 minutes the length must be round (`61m` is rejected). Seconds (`1s`, `5s`, `15s`, `30s`) on Binance only, as Yahoo has none. No tick intervals or user-chosen favourite buttons. [Keyboard shortcuts](/chartgen/guides/web/#keyboard-shortcuts), [ADR-0038](/chartgen/decisions/0038-custom-intervals/) |
 | Price legend (OHLC, change, volume) | ✅ | ✅ | Follows the crosshair. [Chart conveniences](/chartgen/guides/web/#chart-conveniences) |
 | Bar-close countdown | ✅ | ◐ | Only for 24/7 symbols (the Binance rule). Hidden for stocks, FX and futures, because the session close cannot be derived from the interval. [Chart conveniences](/chartgen/guides/web/#chart-conveniences) |
 | %, log and auto price scale | ✅ | ✅ | [Chart conveniences](/chartgen/guides/web/#chart-conveniences) |
@@ -53,6 +53,8 @@ Status legend:
 | Line | ✅ | ✅ | |
 | Area | ✅ | ✅ | |
 | Heikin Ashi | ✅ | ✅ | Computed on the server, so indicators run on the HA values as on TradingView. [`chart_style`](/chartgen/reference/mcp/) |
+| Renko, Kagi, Point & Figure, Line Break, Range | ✅ | ◐ | Built on the server from the chart's timeframe, on intraday and daily data, so indicators run on them. ATR, fixed and percentage boxes, reversal and line count, kept in layouts and links. On closes only, with no separate source interval, Renko wicks or projection colors. Bar replay and compare are refused on them. [ADR-0047](/chartgen/decisions/0047-price-based-charts/) |
+| HLC area | ✅ | ✅ | Drawn in the browser. [ADR-0047](/chartgen/decisions/0047-price-based-charts/) |
 | Baseline, columns, high-low, step line, line with markers | ✅ | ◐ | Drawn in the browser from the bars. Baseline's base level is fixed at TradingView's default (50% of the visible range) and not configurable. No per-type style settings (TradingView's Baseline, Columns and High-low style tabs); the types take the line and up/down body colors, and the body/border toggles do not apply to Columns or Baseline. [Toolbar](/chartgen/guides/web/#toolbar), [ADR-0030](/chartgen/decisions/0030-custom-chart-types/) |
 | Renko, Kagi, Line break, Point & figure | ✅ | ❌ | Not offered. |
 | Range bars and other non-time bars | ✅ | ❌ | Not offered. |

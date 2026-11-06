@@ -755,3 +755,34 @@ describe("indicators that fail on one side (indicator_errors)", () => {
     expect(r.series.indicator_errors).toEqual({ mine: error });
   });
 });
+
+describe("a price-based series", () => {
+  const priced = (box: number): SeriesPayload => ({
+    symbol: "BTCUSDT",
+    interval: "1h",
+    chart_style: "renko",
+    chart_params: { box: "atr", box_size: box },
+    bars: [
+      { t: 100, o: 1, h: 2, l: 1, c: 2, v: 1 },
+      { t: 130, o: 2, h: 3, l: 2, c: 3, v: 1 },
+    ],
+    indicators: {},
+    has_more: false,
+  });
+
+  it("merges a tail on the same box, whose bars have no even spacing", () => {
+    const tail = priced(5);
+    tail.bars = [
+      { t: 130, o: 2, h: 3, l: 2, c: 3, v: 2 },
+      { t: 131, o: 3, h: 4, l: 3, c: 4, v: 2 },
+      { t: 400, o: 4, h: 4.5, l: 4, c: 4.5, v: 1 },
+    ];
+    const r = mergeTail(priced(5), tail);
+    expect(r.ok && r.series.bars.map((b) => b.t)).toEqual([100, 130, 131, 400]);
+  });
+
+  it("will not mix bars of two boxes", () => {
+    expect(mergeTail(priced(5), priced(6))).toEqual({ ok: false, reason: "style" });
+    expect(mergeOlder(priced(5), priced(6))).toEqual({ ok: false, reason: "style" });
+  });
+});

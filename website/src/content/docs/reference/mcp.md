@@ -84,24 +84,27 @@ and with `CHARTGEN_SERVER_ALERTS=1` the 4
 
 Render a chart for a symbol. Accepts `ticker`/`symbol`, `timeframe`/`interval`,
 `indicators` (string names or objects with overrides), `bars` (default 200),
-`width`, `height`, `format`, `end_time`, `warmup`, and `chart_style`.
+`width`, `height`, `format`, `end_time`, `warmup`, `chart_style` and `chart_params`.
 
 | Parameter | Meaning |
 |-----------|---------|
 | `bars` | Integer, default 200. Capped at 5000 in every format (`png`, `summary`, `both`, `series`); larger values are silently clamped. On Binance each 1000 bars is one upstream request. |
 | `end_time` | Integer, ms since epoch, between `-2208988800000` (1900-01-01; index histories predate 1970) and one year from now. Only bars whose open time is strictly before `end_time` are returned. To load the page before the oldest bar you have, pass that bar's `t × 1000`. Omit it (or send `null`) to get the newest bars, including the candle that is still forming. Applies to every format. A string, a float or an out-of-range value is a tool error. |
 | `warmup` | Integer, default 0, max 1000. `format=series` only. Fetches this many extra older bars and feeds them to the indicators, then trims them from the response, so the first returned bars have warmed-up values instead of `null`. `png`, `summary`, and `both` ignore it and render exactly `bars`. |
-| `chart_style` | `candles` (default) or `heikin_ashi`. `heikin_ashi` replaces the price bars with Heikin Ashi bars in every format: `haClose = (o+h+l+c)/4`, `haOpen = (prev haOpen + prev haClose)/2` (the first bar is seeded with `(o+c)/2`), `haHigh = max(h, haOpen, haClose)`, `haLow = min(l, haOpen, haClose)`; volume and timestamps are unchanged. Like TradingView, indicators are computed on the Heikin Ashi values, not the raw bars. The transform runs over `bars + warmup` before trimming, and because each `haOpen` is an exponentially decaying average, pages and tail polls with the same warmup agree after a few bars. `format=series` echoes the applied style as `chart_style`. Any other value is an error. |
+| `chart_style` | `candles` (default) or `heikin_ashi`. `heikin_ashi` replaces the price bars with Heikin Ashi bars in every format: `haClose = (o+h+l+c)/4`, `haOpen = (prev haOpen + prev haClose)/2` (the first bar is seeded with `(o+c)/2`), `haHigh = max(h, haOpen, haClose)`, `haLow = min(l, haOpen, haClose)`; volume and timestamps are unchanged. Like TradingView, indicators are computed on the Heikin Ashi values, not the raw bars. The transform runs over `bars + warmup` before trimming, and because each `haOpen` is an exponentially decaying average, pages and tail polls with the same warmup agree after a few bars. `format=series` echoes the applied style as `chart_style`. `renko`, `kagi`, `point_figure`, `line_break` and `range` are [price-based](#price-based-styles). Any other value is an error. |
+| `chart_params` | Inputs of a [price-based style](#price-based-styles), and an error with any other style. |
 
-`timeframe` is a number and a unit: `m` minutes, `h` hours, `d` or `D` days,
-`w`, `W` or `wk` weeks, and `M` or `mo` months (`7m`, `45m`, `90m`, `8h`, `2D`,
-`2W`, `3M`). Lowercase `m` is minutes and uppercase `M` months; the other units
+`timeframe` is a number and a unit: `s` seconds, `m` minutes, `h` hours, `d` or `D`
+days, `w`, `W` or `wk` weeks, and `M` or `mo` months (`5s`, `7m`, `45m`, `90m`, `8h`,
+`2D`, `2W`, `3M`). Lowercase `m` is minutes and uppercase `M` months; the other units
 take either case. Anything else is a tool error that says what is wrong.
 [ADR-0038](/chartgen/decisions/0038-custom-intervals/) explains the limits:
 
-- Upper bounds, after normalization: under 1440 minutes, then `168h`, `365D`, `52W`
-  and `12M`. Not every length below a bound parses, as the next rule says. `1440m`
-  is `1d`, and seconds are not offered.
+- Upper bounds, after normalization: under 60 seconds, under 1440 minutes, then `168h`,
+  `365D`, `52W` and `12M`. Not every length below a bound parses, as the next rule says.
+  `60s` is `1m` and `1440m` is `1d`.
+- Seconds need a Binance spot symbol: `1s` is its own kline, and the rest are resampled
+  from it. Yahoo has no seconds data, so a stock returns an error saying so.
 - A minute or hour interval may take at most 60 native bars per bar, counted on
   Binance's klines for every symbol. Every length up to 60 minutes qualifies; `61m`
   needs 61 `1m` klines and is rejected, while `65m` needs 13 `5m` klines and is
@@ -217,6 +220,44 @@ Fields are keyed by the name each indicator was requested with, so
 the last bar instead, `null` when they have none there: only the active one
 has a value. In `format=series` those lines carry `"breaks": true`, which the
 web legend uses the same way.
+
+##### Price-based styles
+
+`renko`, `kagi`, `point_figure`, `line_break` and `range` are built on the server from the
+bars of `timeframe`, and indicators run on them
+([ADR-0047](/chartgen/decisions/0047-price-based-charts/)). They are built from candles,
+not ticks, so they only approximate what the same types show on tick data: within one
+source bar the order of moves is unknown.
+
+| `chart_params` key | For | Default | Meaning |
+|---|---|---|---|
+| `box` | all but `line_break` | `atr` | `atr`, `fixed` or `percent`. The box of `renko` and `point_figure`, the reversal amount of `kagi`, the size of `range`. |
+| `atr_length` | `box: atr` | 14 | 1 to 500, over closed source bars. |
+| `percent` | `box: percent` | 1 | Of the last price, above 0 and at most 100. |
+| `box_size` | `box: fixed`, or to keep a box | | A `fixed` box's size, required. With `atr` or `percent`, the size to use instead of resolving one. |
+| `reversal` | `point_figure` | 3 | Boxes to start a new column, 1 to 20. |
+| `lines` | `line_break` | 3 | Lines a close must pass to reverse, 1 to 20. |
+
+Unknown keys are errors. `atr` and `percent` round to two significant digits.
+`format=series` and `summary` echo `chart_params` with the `box_size` used. **Send that
+`box_size` back on later polls and pages**, or each call may resolve another box and the
+bars will not line up.
+
+- **Times** are when a bar opened: the first source bar after the last confirmed one. Bars
+  from one source bar take the next free second, so times always increase and are not evenly
+  spaced. `end_time` works as for candles.
+- **The last bar is open.** Only closed source bars confirm a bar. The open bar closes on the
+  last price and keeps its `t` when confirmed, so overwrite by `t`. On `kagi` and
+  `point_figure` it is the current line or column.
+- **Reads** take a fixed window of source bars, up to 5000, within the 20,000 native bar limit,
+  from a start on a fixed grid of time. `warmup` does nothing here: every bar of the window
+  warms the indicators. A window may hold fewer bars than `bars`, with `has_more: true`.
+- **Tails:** ask for more than 2 bars, as one source bar can confirm several. `subscribe_chart`
+  pushes up to 64.
+- **Refused:** a box that would make over 20,000 bars, and any of these styles without a
+  ticker on the demo series.
+- Indicators that project past the last bar return no `future`. The PNG draws these bars as
+  candles, including `kagi` and `point_figure`.
 
 ##### Several instances of one indicator
 
@@ -737,7 +778,7 @@ only (stdio returns an error); works without `--trade`.
 `subscribe_chart` takes the chart's `generate_chart` arguments: `ticker`
 (required, 2-20 letters or digits), `timeframe` (default `4h`),
 `indicators` (at most 10, with [instance ids](#several-instances-of-one-indicator)
-as for `generate_chart`), `chart_style` and `warmup` (default 0, max
+as for `generate_chart`), `chart_style`, `chart_params` and `warmup` (default 0, max
 1000). Validation and error messages are otherwise the same as for
 `generate_chart`, except that a chart using your scripts
 ([`CHARTGEN_SCRIPTING=1`](#scripted-indicators-chartgen_scripting1)) answers

@@ -64,7 +64,7 @@ stays visible.
   **Custom interval...**, which opens the same popup as the keyboard entry (see
   [Keyboard shortcuts](#keyboard-shortcuts)). While a custom interval is
   active, the dropdown's button shows it.
-- **Chart type** — Candles, Hollow candles (only up candles hollow), Bars (OHLC), Line, Line with markers, Step line, Area, Baseline, Columns, High-low, Heikin Ashi. Heikin Ashi is computed on the server (the web app sends `chart_style: "heikin_ashi"` with every load, tail poll and history page), so the legend shows Heikin Ashi OHLC values and indicators are calculated on them, as on TradingView. Switching to or from it reloads the chart. The other types are drawn in the browser from the same bars, so switching between them needs no reload, and the legend keeps showing the bar's OHLC:
+- **Chart type** — Candles, Hollow candles (only up candles hollow), Bars (OHLC), Line, Line with markers, Step line, Area, Baseline, Columns, High-low, HLC area, Heikin Ashi, Renko, Line break, Kagi, Point & figure, Range. The last five are [price-based](#price-based-charts). Heikin Ashi is computed on the server (the web app sends `chart_style: "heikin_ashi"` with every load, tail poll and history page), so the legend shows Heikin Ashi OHLC values and indicators are calculated on them, as on TradingView. Switching to or from it reloads the chart. The other types are drawn in the browser from the same bars, so switching between them needs no reload, and the legend keeps showing the bar's OHLC:
   - **Line with markers** — the close line with a dot on every bar.
   - **Step line** — the closes joined by horizontal-then-vertical steps.
   - **Baseline** — the close line and fill, in the up color above a base
@@ -372,13 +372,14 @@ while typing in a field or while a dialog or menu is open.
 | `Esc` | Bar replay: jump to real time |
 
 The timeframe popup accepts a number of minutes (`5`, `7`, `45`, `120`) or a
-number with a unit `m`, `h`, `d`, `w` (`7m`, `45m`, `8h`, `4H`, `2D`, `2W`);
+number with a unit `s`, `m`, `h`, `d`, `w` (`5s`, `7m`, `45m`, `8h`, `4H`, `2D`, `2W`);
 an uppercase `M` means month (`3M`), lowercase `m` minutes. A lone `D`, `W`
 or `M` means one day, week or month. `1`, `2`, `0` then `Enter` selects 2h.
-This works for Binance and Yahoo symbols alike. Lengths are bounded at under 1440
-minutes, 168h, 365D, 52W and 12M, and above 60 minutes the length must be a round
-one (`65m` works, `61m` does not). The field turns red for anything else, including
-seconds, and says so. [MCP reference](/chartgen/reference/mcp/#generate_chart)
+This works for Binance and Yahoo symbols alike, except seconds: Yahoo has no seconds
+data, so a stock's menu does not offer them and typing one gives an error. Lengths are
+bounded at under 60 seconds, 1440 minutes, 168h, 365D, 52W and 12M, and above 60 minutes
+the length must be a round one (`65m` works, `61m` does not). The field turns red for
+anything else, and says so. [MCP reference](/chartgen/reference/mcp/#generate_chart)
 lists how bars line up and what each source builds them from.
 
 A custom interval works like a preset everywhere: live updates, history paging,
@@ -391,6 +392,42 @@ EMA 200 needs 891 to converge, so its live values and page seams can differ from
 longer history. Scrolling back to load more does not change that: each page, poll and
 push computes over its own capped read. [MCP reference](/chartgen/reference/mcp/#generate_chart)
 gives the rule.
+
+
+## Price-based charts
+
+Renko, Line break, Kagi, Point & figure and Range bars form when price moves, not when time
+passes. The server builds them from the chart's timeframe, so `1h` Renko is made of `1h`
+closes, and indicators run on them. They only approximate what the same types show on tick
+data: within one source bar the order of moves is unknown. A finer timeframe is closer to the
+tape, with less history. [ADR-0047](/chartgen/decisions/0047-price-based-charts/)
+
+**Settings for ...**, at the bottom of the chart-type menu, sets each chart's inputs:
+
+| Input | Type | Meaning |
+|---|---|---|
+| Box size, Reversal amount or Range size | All but Line break | **ATR** of a length (default 14), **Traditional** (a size you set), or **Percentage LTP** (default 1% of the last price). |
+| Reversal, in boxes | Point & figure | Boxes the close must come back to start a new column (default 3). |
+| Line count | Line break | Lines the close must pass to reverse (default 3). |
+
+An ATR or percentage box is worked out when the chart loads, rounded to two significant
+digits, and kept until the next load. The legend shows it, as `Renko 3.3`, except on a phone,
+whose legend is shorter. A box too small for the prices, over 20,000 bars, gives an error
+saying so.
+
+**The last bar is open.** Only a closed source bar confirms a bar, so a spike that fades makes
+none. The open bar runs from the last confirmed level to the last price and keeps its place
+when it is confirmed. Bars can be far apart in time, so the time axis is not linear, and there
+is no countdown.
+
+**What works:** indicators, drawings, history paging, price alerts, layouts, grids, share links
+(`type=renko&tp=box:fixed;size:50`) and the compact layout. Indicator and sloped-line alerts are
+tied to the chart type as well as the interval, because their values differ on these bars.
+Server alerts run on the interval's candles. Indicators that project past the last bar show
+nothing there.
+
+**Refused:** bar replay and compare, whose buttons are disabled and say why. Both need bars on a
+time grid. Your compare symbols come back when you pick a time-based type.
 
 ## Drawing tools
 

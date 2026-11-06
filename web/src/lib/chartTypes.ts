@@ -311,23 +311,24 @@ export function drawSeries({
       };
       const highs = line("high");
       const lows = line("low");
-      for (const [edge, color] of [
-        [highs, ext.up],
-        [lows, ext.down],
-      ] as const) {
-        ctx.fillStyle = withAlpha(color, 0.2);
-        tracePath(ctx, [...edge, ...[...closes].reverse()]);
-        ctx.closePath();
-        ctx.fill();
-        ctx.strokeStyle = color;
-        ctx.lineWidth = 1;
-        tracePath(ctx, edge);
-        ctx.stroke();
-      }
+      // Topmost first (see above): the close, the edges, then the fills beneath.
       ctx.strokeStyle = ext.line;
       ctx.lineWidth = 2;
       tracePath(ctx, closes);
       ctx.stroke();
+      for (const [edge, color] of [
+        [highs, ext.up],
+        [lows, ext.down],
+      ] as const) {
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 1;
+        tracePath(ctx, edge);
+        ctx.stroke();
+        ctx.fillStyle = withAlpha(color, 0.2);
+        tracePath(ctx, [...edge, ...[...closes].reverse()]);
+        ctx.closePath();
+        ctx.fill();
+      }
       break;
     }
     case "kagi": {

@@ -12,6 +12,7 @@ import {
   markerRadius,
   stepPoints,
 } from "./chartTypes";
+import { columnLevels, isKagiUp, isXColumn, kagiThick } from "./chartTypes";
 import { CHART_TYPES } from "../stores/layout";
 
 // A y axis at BTC-like prices that rounds to whole pixels as klinecharts does:
@@ -113,6 +114,9 @@ describe("chart types", () => {
       "baseline",
       "columns",
       "high_low",
+      "hlc_area",
+      "kagi",
+      "point_figure",
     ]);
   });
 
@@ -179,5 +183,56 @@ describe("chart types", () => {
     expect(markerRadius(2)).toBe(1.5);
     expect(markerRadius(8)).toBeCloseTo(2.4);
     expect(markerRadius(40)).toBe(3.5);
+  });
+});
+
+describe("Kagi and Point & Figure geometry", () => {
+  const b = (open: number, high: number, low: number, close: number) => ({ open, high, low, close });
+
+  it("reads a Kagi line's direction by its reach", () => {
+    expect(isKagiUp(b(100, 112, 100, 112))).toBe(true);
+    expect(isKagiUp(b(112, 112, 95, 95))).toBe(false);
+    // An up line whose last price fell back still reads as up.
+    expect(isKagiUp(b(100, 112, 98, 99))).toBe(true);
+  });
+
+  it("goes thick past a shoulder and thin past a waist", () => {
+    const lines = [
+      b(100, 110, 100, 110),
+      b(110, 110, 104, 104),
+      b(104, 108, 104, 108), // under the last top: stays as it was
+      b(108, 108, 100, 100), // under the last bottom: thin
+      b(100, 106, 100, 106), // under the last top: stays thin
+      b(106, 106, 102, 102),
+      b(102, 109, 102, 109), // over 106: thick
+    ];
+    expect(kagiThick(lines)).toEqual([true, false, false, false, false, false, true]);
+  });
+
+  it("finds the box levels inside a column", () => {
+    expect(columnLevels(10, 13, 1)).toEqual([10, 11, 12, 13]);
+    expect(columnLevels(10.5, 12.9, 1)).toEqual([11, 12]);
+    expect(columnLevels(0.3, 0.3, 0.1).length).toBe(1);
+    expect(columnLevels(5.1, 5.9, 1)).toEqual([]);
+  });
+
+  it("tells Xs from Os", () => {
+    const up = b(10, 13, 10, 13);
+    const down = b(12, 12, 8, 8);
+    expect(isXColumn([up], 0)).toBe(true);
+    expect(isXColumn([up, down], 1)).toBe(false);
+    // Up with the last price fallen under its open: still Xs.
+    expect(isXColumn([b(10, 13, 10, 9)], 0)).toBe(true);
+    // A single box goes against the column before it.
+    expect(isXColumn([up, b(12, 12, 12, 12)], 1)).toBe(false);
+    expect(isXColumn([down, b(9, 9, 9, 9)], 1)).toBe(true);
+  });
+
+  it("hides the series for a chart that draws its own, spanning highs and lows", () => {
+    for (const t of ["kagi", "point_figure", "hlc_area"] as const) {
+      expect(isSeriesType(t)).toBe(true);
+      expect(hiddenCandleStyle(t)).toMatchObject({ type: "candle_solid" });
+    }
+    expect(isSeriesType("renko")).toBe(false);
   });
 });
