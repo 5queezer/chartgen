@@ -1061,6 +1061,8 @@ and for why scripting is for trusted deployments only.
 
 Scripts belong to the OAuth client of this browser. Another browser, or this one
 after clearing its site data, signs in as a new client and does not see them.
+With [sign-in](/chartgen/reference/oauth/#sign-in) they belong to the signed-in user
+instead, and follow you to any browser.
 
 ## Build and deploy
 
