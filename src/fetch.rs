@@ -1,13 +1,19 @@
-use crate::data::{self, Bar, OhlcvData};
-use std::collections::HashMap;
+use crate::data::{self, Bar, OhlcvData, Session};
+use chartgen::binance_gate::{self, Gate};
+use chartgen::interval::{Interval, Unit};
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Condvar, Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
 
 /// Binance klines REST caps `limit` at 1000 per request.
 const BINANCE_MAX_LIMIT: usize = 1000;
 /// Overall budget for one paginated Binance fetch.
 const BINANCE_DEADLINE: Duration = Duration::from_secs(20);
+/// Most native bars one custom-interval fetch reads from Binance: 20 requests.
+/// A larger ask returns the newest bars that fit, with `has_more` set, and the
+/// client pages on (ADR-0038).
+pub(crate) const MAX_BASE_BARS: usize = 20 * BINANCE_MAX_LIMIT;
 
 /// Where OHLCV data comes from. `Sample` (env `CHARTGEN_DATA_SOURCE=sample`)
 /// never touches the network — see `data::sample_ohlcv`.
@@ -48,6 +54,24 @@ pub fn fetch_ohlcv(
 ) -> Result<Fetched, String> {
     match source {
         DataSource::Sample => {
+            // As Binance would: the bars a custom interval is built from. Sample
+            // months are a fixed 30 days, so they stay on their own grid.
+            let iv = Interval::parse(interval)?;
+            let (base, per_bar) = iv.binance_base();
+            if per_bar > 1 && iv.unit != Unit::Month {
+                let (want, end) = resample_window(&iv, per_bar, limit, end_time_ms);
+                let fetched = data::sample_ohlcv(symbol, base, want, end, now_ms())?;
+                let (bars, has_more) = resampled_bars(&fetched.bars, &iv, limit, want);
+                return Ok(Fetched {
+                    data: OhlcvData {
+                        bars,
+                        symbol: None,
+                        interval: None,
+                        session: None,
+                    },
+                    has_more,
+                });
+            }
             let data = data::sample_ohlcv(symbol, interval, limit, end_time_ms, now_ms())?;
             let has_more = data.len() >= limit;
             Ok(Fetched { data, has_more })
@@ -88,22 +112,11 @@ fn bar_open_ms(bar: &Bar) -> Option<i64> {
     bar_ts(bar).map(|s| s.saturating_mul(1000))
 }
 
-/// Binance REST interval for a Yahoo-style timeframe the frontend may send
-/// ("1wk" → "1w", "1mo" → "1M", "60m" → "1h"). Binance names pass through.
-pub(crate) fn binance_interval(interval: &str) -> &str {
-    match interval {
-        "1wk" => "1w",
-        "1mo" => "1M",
-        "60m" => "1h",
-        other => other,
-    }
-}
-
 fn binance_klines_url(symbol: &str, interval: &str, limit: usize, end_ms: Option<i64>) -> String {
     let mut url = format!(
         "https://api.binance.com/api/v3/klines?symbol={}&interval={}&limit={}",
         percent_encode(&symbol.to_uppercase()),
-        binance_interval(interval),
+        interval,
         limit
     );
     if let Some(end) = end_ms {
@@ -157,38 +170,441 @@ pub fn fetch_binance(
     limit: usize,
     end_time_ms: Option<i64>,
 ) -> Result<Fetched, String> {
-    let deadline = Instant::now() + BINANCE_DEADLINE;
-    let bars = paginate_backwards(limit, end_time_ms, deadline, |page_limit, end| {
-        fetch_binance_page(&binance_klines_url(symbol, interval, page_limit, end))
-    })?;
+    fetch_binance_via(binance(), symbol, interval, limit, end_time_ms)
+}
+
+fn fetch_binance_via(
+    client: &BinanceClient,
+    symbol: &str,
+    interval: &str,
+    limit: usize,
+    end_time_ms: Option<i64>,
+) -> Result<Fetched, String> {
+    let iv = Interval::parse(interval)?;
+    let (base, per_bar) = iv.binance_base();
+    let resampled = per_bar > 1;
+    let (want, end) = if resampled {
+        resample_window(&iv, per_bar, limit, end_time_ms)
+    } else {
+        (limit, end_time_ms)
+    };
+    let now = Instant::now();
+    let deadline = now + BINANCE_DEADLINE;
+    let page = |page_limit: usize, end: Option<i64>| {
+        fetch_binance_page(client, &binance_klines_url(symbol, base, page_limit, end))
+    };
+    let fetched = if end_time_ms.is_none() && want > BINANCE_MAX_LIMIT {
+        let key = (symbol.to_uppercase(), base);
+        newest_klines(
+            &client.klines,
+            &client.walks,
+            key,
+            want,
+            now,
+            deadline,
+            page,
+        )?
+    } else {
+        walk_klines(&client.walks, want, end, deadline, page)?
+    };
+
+    let (bars, has_more) = if resampled {
+        resampled_bars(&fetched, &iv, limit, want)
+    } else {
+        let more = fetched.len() >= want;
+        (fetched, more)
+    };
 
     if bars.is_empty() && end_time_ms.is_none() {
         return Err("Binance returned zero bars".into());
     }
 
-    let has_more = bars.len() >= limit;
     Ok(Fetched {
         data: OhlcvData {
             bars,
             symbol: None,
             interval: None,
+            session: None,
         },
         has_more,
     })
 }
 
-fn fetch_binance_page(url: &str) -> Result<Vec<Bar>, String> {
+/// Native bars to read for `limit` bars of `iv`, and where they end.
+fn resample_window(
+    iv: &Interval,
+    per_bar: i64,
+    limit: usize,
+    end_time_ms: Option<i64>,
+) -> (usize, Option<i64>) {
+    // One bar more than asked: the oldest may be cut off by the window.
+    let want = limit
+        .saturating_add(1)
+        .saturating_mul(per_bar as usize)
+        .min(MAX_BASE_BARS);
+    // A bar opening before `end_time_ms` takes in klines up to its own end.
+    let end = end_time_ms.map(|e| {
+        iv.grid_end(e.saturating_sub(1).div_euclid(1000))
+            .saturating_mul(1000)
+    });
+    (want, end)
+}
+
+/// The newest `limit` bars of `iv` from the `want` native bars asked for, and
+/// whether older ones exist.
+fn resampled_bars(native: &[Bar], iv: &Interval, limit: usize, want: usize) -> (Vec<Bar>, bool) {
+    let reached_want = native.len() >= want;
+    let mut bars = resample(native, iv, reached_want);
+    let older = bars.len() > limit;
+    if older {
+        bars.drain(..bars.len() - limit);
+    }
+    (bars, reached_want || older)
+}
+
+/// How many symbol and kline pairs `newest_klines` holds, and for how long
+/// since last used. A full entry is about 1.6 MB.
+const KLINE_CACHE_ENTRIES: usize = 8;
+const KLINE_CACHE_TTL: Duration = Duration::from_secs(120);
+/// Klines a refresh reads: enough to overlap after up to `KLINE_CACHE_TTL` on
+/// the finest kline, with the forming one.
+const KLINE_REFRESH: usize = 16;
+
+struct HeldKlines {
+    used: Instant,
+    bars: Vec<Bar>,
+    /// A full read found less than it asked for: nothing older exists.
+    complete: bool,
+}
+
+type KlineKey = (String, &'static str);
+
+#[derive(Default)]
+struct KlineState {
+    held: HashMap<KlineKey, HeldKlines>,
+    /// Keys a full read is walking now: others wait for its result.
+    walking: HashSet<KlineKey>,
+}
+
+#[derive(Default)]
+struct KlineCache {
+    state: Mutex<KlineState>,
+    walked: Condvar,
+}
+
+impl KlineCache {
+    fn lock(&self) -> MutexGuard<'_, KlineState> {
+        self.state.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Klines held for `want`, or this thread's turn to walk `key`, waiting up to
+    /// `deadline` for a read already under way and then looking again.
+    fn begin(
+        &self,
+        key: &KlineKey,
+        want: usize,
+        now: Instant,
+        deadline: Instant,
+        use_held: bool,
+    ) -> Result<KlineRead<'_>, String> {
+        let mut st = self.lock();
+        loop {
+            st.held
+                .retain(|_, h| now.duration_since(h.used) < KLINE_CACHE_TTL);
+            let usable = st
+                .held
+                .get(key)
+                .filter(|h| use_held && (h.complete || h.bars.len() >= want));
+            if let Some(h) = usable {
+                return Ok(KlineRead::Held(h.bars.clone(), h.complete));
+            }
+            if st.walking.insert(key.clone()) {
+                return Ok(KlineRead::Walk(WalkClaim {
+                    cache: self,
+                    key: key.clone(),
+                }));
+            }
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return Err(BUSY.into());
+            }
+            st = self
+                .walked
+                .wait_timeout(st, left)
+                .unwrap_or_else(|e| e.into_inner())
+                .0;
+        }
+    }
+}
+
+enum KlineRead<'a> {
+    Held(Vec<Bar>, bool),
+    Walk(WalkClaim<'a>),
+}
+
+/// The turn to walk a key. Ends however the walk does, so waiters never hang on
+/// a refused or failed read: the next one takes the turn, and is refused itself.
+struct WalkClaim<'a> {
+    cache: &'a KlineCache,
+    key: KlineKey,
+}
+
+impl Drop for WalkClaim<'_> {
+    fn drop(&mut self) {
+        self.cache.lock().walking.remove(&self.key);
+        self.cache.walked.notify_all();
+    }
+}
+
+/// Paged walks of Binance's history allowed at once. At about 0.3 s a page, four
+/// cost about 1600 weight a minute, well under the gate's threshold.
+const MAX_WALKS: usize = 4;
+/// Says a call gave up waiting; it spent no request. Not the rate limit: others'
+/// reads may just be slow, as in an outage.
+const BUSY: &str = "Binance: timed out waiting for other history reads; try again shortly";
+
+#[derive(Default)]
+struct Walks {
+    running: Mutex<usize>,
+    free: Condvar,
+}
+
+struct WalkPermit<'a>(&'a Walks);
+
+impl Drop for WalkPermit<'_> {
+    fn drop(&mut self) {
+        *self.0.running.lock().unwrap_or_else(|e| e.into_inner()) -= 1;
+        self.0.free.notify_one();
+    }
+}
+
+impl Walks {
+    fn enter(&self, deadline: Instant) -> Result<WalkPermit<'_>, String> {
+        let mut running = self.running.lock().unwrap_or_else(|e| e.into_inner());
+        while *running >= MAX_WALKS {
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return Err(BUSY.into());
+            }
+            running = self
+                .free
+                .wait_timeout(running, left)
+                .unwrap_or_else(|e| e.into_inner())
+                .0;
+        }
+        *running += 1;
+        Ok(WalkPermit(self))
+    }
+}
+
+/// `paginate_backwards`, holding a walk permit when it takes more than one page.
+/// The wait for one comes out of `deadline`, and the walk then gets its own.
+fn walk_klines<F>(
+    walks: &Walks,
+    want: usize,
+    end: Option<i64>,
+    deadline: Instant,
+    page: F,
+) -> Result<Vec<Bar>, String>
+where
+    F: FnMut(usize, Option<i64>) -> Result<Vec<Bar>, String>,
+{
+    if want <= BINANCE_MAX_LIMIT {
+        return paginate_backwards(want, end, deadline, page);
+    }
+    let _permit = walks.enter(deadline)?;
+    paginate_backwards(want, end, Instant::now() + BINANCE_DEADLINE, page)
+}
+
+/// Replace the end of `bars` with `fresh`, from its first bar on. False, leaving
+/// `bars` alone, if `fresh` does not reach them.
+fn lay_over(bars: &mut Vec<Bar>, fresh: &[Bar]) -> bool {
+    let reaches = fresh.first().and_then(bar_ts).filter(|first| {
+        bars.last()
+            .and_then(bar_ts)
+            .is_some_and(|last| last >= *first)
+    });
+    let Some(first) = reaches else {
+        return false;
+    };
+    bars.truncate(bars.partition_point(|b| bar_ts(b).is_some_and(|t| t < first)));
+    bars.extend_from_slice(fresh);
+    true
+}
+
+/// The newest `want` klines of `key`. A resampled chart's tail still needs every
+/// one of them, since indicators run over its warmup, but a closed kline never
+/// changes: only the first read walks the history, and a repeat reads one small
+/// page and lays it over the klines held. Concurrent first reads share one walk.
+/// A refused or failed read stores nothing. `page` is as for `paginate_backwards`.
+fn newest_klines<F>(
+    cache: &KlineCache,
+    walks: &Walks,
+    key: KlineKey,
+    want: usize,
+    now: Instant,
+    deadline: Instant,
+    mut page: F,
+) -> Result<Vec<Bar>, String>
+where
+    F: FnMut(usize, Option<i64>) -> Result<Vec<Bar>, String>,
+{
+    let mut joined = None;
+    let mut claim = None;
+    match cache.begin(&key, want, now, deadline, true)? {
+        KlineRead::Walk(c) => claim = Some(c),
+        KlineRead::Held(mut bars, complete) => {
+            let fresh = page(KLINE_REFRESH, None)?;
+            // A gap means the page does not reach what we hold: read it all again.
+            if lay_over(&mut bars, &fresh) {
+                joined = Some((bars, complete));
+            } else if let KlineRead::Walk(c) = cache.begin(&key, want, now, deadline, false)? {
+                claim = Some(c);
+            }
+        }
+    }
+    let (mut bars, complete) = match joined {
+        Some(j) => j,
+        None => {
+            let bars = walk_klines(walks, want, None, deadline, page)?;
+            let complete = bars.len() < want;
+            (bars, complete)
+        }
+    };
+    if bars.len() > MAX_BASE_BARS {
+        bars.drain(..bars.len() - MAX_BASE_BARS);
+    }
+    let out = bars[bars.len().saturating_sub(want)..].to_vec();
+    let mut st = cache.lock();
+    // Another read of this key may have stored a longer window meanwhile: a shorter
+    // one lies on top of it, so the next long read need not walk again.
+    let kept_longer = st.held.get_mut(&key).is_some_and(|h| {
+        let longer = h.bars.len() > bars.len() && lay_over(&mut h.bars, &bars);
+        if longer {
+            h.used = now;
+            let over = h.bars.len().saturating_sub(MAX_BASE_BARS);
+            h.bars.drain(..over);
+        }
+        longer
+    });
+    if !kept_longer {
+        st.held.insert(
+            key,
+            HeldKlines {
+                used: now,
+                bars,
+                complete,
+            },
+        );
+    }
+    while st.held.len() > KLINE_CACHE_ENTRIES {
+        let oldest = st
+            .held
+            .iter()
+            .min_by_key(|(_, h)| h.used)
+            .map(|(k, _)| k.clone());
+        let Some(k) = oldest else { break };
+        st.held.remove(&k);
+    }
+    drop(st);
+    drop(claim);
+    Ok(out)
+}
+
+/// Bars of `iv` from ascending native bars that lie on its grid (24/7 markets,
+/// so no sessions). `may_be_cut`: older klines may exist, so a first bar that
+/// does not start on its grid slot is incomplete and dropped. Otherwise it
+/// is the symbol's first and stays.
+pub(crate) fn resample(bars: &[Bar], iv: &Interval, may_be_cut: bool) -> Vec<Bar> {
+    let min_start = match bars.first().and_then(bar_ts) {
+        Some(first) if may_be_cut => first,
+        _ => i64::MIN,
+    };
+    if iv.is_date_bar() {
+        aggregate_calendar(bars, iv, 0, min_start)
+    } else {
+        aggregate_bars(bars, iv.secs(), min_start)
+    }
+}
+
+/// One REST response, whatever its status.
+pub(crate) struct BinanceResponse {
+    pub status: u16,
+    retry_after: Option<String>,
+    used_weight: Option<String>,
+    pub body: String,
+}
+
+type BinanceSend = Box<dyn Fn(&str) -> Result<BinanceResponse, String> + Send + Sync>;
+
+/// Every spot REST request goes through here, so all of them answer to one budget.
+pub(crate) struct BinanceClient {
+    gate: &'static Gate,
+    walks: Walks,
+    klines: KlineCache,
+    send: BinanceSend,
+}
+
+impl BinanceClient {
+    /// GET `url` if the gate admits it, and tell the gate how it went.
+    pub(crate) fn get(&self, url: &str) -> Result<BinanceResponse, String> {
+        let sent = self.gate.admit()?;
+        let resp = (self.send)(url)?;
+        self.gate.observe(
+            sent,
+            resp.status,
+            resp.retry_after.as_deref(),
+            resp.used_weight.as_deref(),
+        );
+        Ok(resp)
+    }
+}
+
+fn http_send(url: &str) -> Result<BinanceResponse, String> {
     let resp = http()
         .get(url)
         .send()
-        .map_err(|e| format!("Binance request failed: {}", e))?;
+        .map_err(|e| format!("Binance request failed: {e}"))?;
+    let header = |name: &str| {
+        resp.headers()
+            .get(name)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_string)
+    };
+    let (status, retry_after, used_weight) = (
+        resp.status().as_u16(),
+        header("retry-after"),
+        header("x-mbx-used-weight-1m"),
+    );
+    let body = resp
+        .text()
+        .map_err(|e| format!("Failed to read Binance response: {e}"))?;
+    Ok(BinanceResponse {
+        status,
+        retry_after,
+        used_weight,
+        body,
+    })
+}
 
-    if !resp.status().is_success() {
-        return Err(format!("Binance API returned status {}", resp.status()));
+pub(crate) fn binance() -> &'static BinanceClient {
+    static CLIENT: OnceLock<BinanceClient> = OnceLock::new();
+    CLIENT.get_or_init(|| BinanceClient {
+        gate: binance_gate::spot(),
+        walks: Walks::default(),
+        klines: KlineCache::default(),
+        send: Box::new(http_send),
+    })
+}
+
+fn fetch_binance_page(client: &BinanceClient, url: &str) -> Result<Vec<Bar>, String> {
+    let resp = client.get(url)?;
+
+    if !(200..300).contains(&resp.status) {
+        return Err(format!("Binance API returned status {}", resp.status));
     }
 
-    let body: serde_json::Value = resp
-        .json()
+    let body: serde_json::Value = serde_json::from_str(&resp.body)
         .map_err(|e| format!("Failed to parse Binance response: {}", e))?;
 
     let klines = body.as_array().ok_or("Binance response is not an array")?;
@@ -248,6 +664,8 @@ pub fn fetch_yahoo(
     limit: usize,
     end_time_ms: Option<i64>,
 ) -> Result<Fetched, String> {
+    let interval = Interval::parse(interval)?.canonical();
+    let interval = interval.as_str();
     let window = yahoo_window(interval, limit, end_time_ms, now_ms() / 1000);
 
     if window.period1 >= window.period2 {
@@ -258,6 +676,7 @@ pub fn fetch_yahoo(
                     bars: Vec::new(),
                     symbol: None,
                     interval: None,
+                    session: None,
                 },
                 has_more: false,
             }),
@@ -294,12 +713,14 @@ fn parse_yahoo_chart(
     end_time_ms: Option<i64>,
     window: &YahooWindow,
 ) -> Result<Fetched, String> {
-    let needs_aggregation = window.api_interval != interval;
+    let iv = Interval::parse(interval)?;
+    let needs_aggregation = data::interval_secs(window.api_interval) != Some(iv.secs());
     let empty = Fetched {
         data: OhlcvData {
             bars: Vec::new(),
             symbol: None,
             interval: None,
+            session: None,
         },
         has_more: false,
     };
@@ -369,7 +790,14 @@ fn parse_yahoo_chart(
         .and_then(|v| v.as_array())
         .ok_or("Missing volume array")?;
 
-    let date_bars = is_date_interval(interval);
+    let date_bars = iv.is_date_bar();
+    // Weekly and monthly bars are stamped at local midnight, in the offset of
+    // their own date: across a DST change the current offset reads that as
+    // 23:00 the day before. Rounding to the nearest midnight keeps the date.
+    let stamp_ts = |ts: i64| match iv.unit {
+        Unit::Week | Unit::Month => ts + DAY / 2,
+        _ => ts,
+    };
     let mut bars = Vec::new();
     #[allow(clippy::needless_range_loop)] // indexing 6 parallel arrays
     for i in 0..timestamps.len() {
@@ -380,7 +808,7 @@ fn parse_yahoo_chart(
         // A date bar is compared by its stamp (see `local_date_stamp`), so a
         // history page that ends at a bar's stamp does not return it again.
         let stamp = if date_bars {
-            local_date_stamp(ts, gmtoffset)
+            local_date_stamp(stamp_ts(ts), gmtoffset)
         } else {
             ts
         };
@@ -426,29 +854,33 @@ fn parse_yahoo_chart(
     }
 
     if needs_aggregation {
-        let secs = data::interval_secs(interval).unwrap_or(DAY);
+        let secs = iv.secs();
         // Session open as an exchange-local time of day.
         let open_tod = session_start.map(|s| (s + gmtoffset).rem_euclid(DAY));
-        bars = if interval == "3d" {
-            aggregate_days(
-                &bars,
-                3,
-                if all_day { 0 } else { gmtoffset },
-                window.period1,
-            )
-        } else if all_day || interval == "3m" {
+        bars = if iv.is_date_bar() {
+            let offset = if all_day { 0 } else { gmtoffset };
+            aggregate_calendar(&bars, &iv, offset, window.period1)
+        } else if all_day || 900 % secs == 0 {
             // 3m divides every exchange's 15-minute open, so the epoch grid
             // is the session grid.
             aggregate_bars(&bars, secs, window.period1)
         } else {
-            aggregate_sessions(&bars, secs, gmtoffset, window.period1, open_tod)
+            // Rows without a price still mark when the session opened.
+            let raw: Vec<i64> = timestamps.iter().filter_map(|t| t.as_i64()).collect();
+            let opens: Vec<i64> = raw
+                .iter()
+                .enumerate()
+                .filter(|(i, t)| *i == 0 || **t - raw[*i - 1] > SESSION_GAP)
+                .map(|(_, t)| *t)
+                .collect();
+            aggregate_sessions(&bars, secs, gmtoffset, window.period1, open_tod, &opens)
         };
     }
 
     if date_bars {
         for b in &mut bars {
             if let Some(t) = bar_ts(b) {
-                b.date = local_date_stamp(t, gmtoffset).to_string();
+                b.date = local_date_stamp(stamp_ts(t), gmtoffset).to_string();
             }
         }
     }
@@ -465,19 +897,57 @@ fn parse_yahoo_chart(
         bars = bars.split_off(bars.len() - limit);
     }
 
+    let session = if all_day {
+        None
+    } else {
+        meta.and_then(session_from_meta)
+    };
+
     Ok(Fetched {
         data: OhlcvData {
             bars,
             symbol: None,
             interval: None,
+            session,
         },
         has_more,
     })
 }
 
-/// Daily, multi-day, weekly and monthly bars stand for a date, not a time.
-fn is_date_interval(interval: &str) -> bool {
-    data::interval_secs(interval).is_some_and(|s| s >= DAY)
+/// The regular session from a Yahoo `meta`: exchange time zone, today's open,
+/// and the latest close among `tradingPeriods` (intraday responses list recent
+/// days), because today may be an early close. `None` for markets open all day
+/// (futures report 23 h 59 m), which then step through time like crypto, or for
+/// anything missing. US-listed means an instrument with New York's zone.
+fn session_from_meta(meta: &serde_json::Value) -> Option<Session> {
+    use chrono::TimeZone;
+    let regular = meta.get("currentTradingPeriod")?.get("regular")?;
+    let start = regular.get("start")?.as_i64()?;
+    let end = regular.get("end")?.as_i64()?;
+    if end - start >= 23 * 3_600 {
+        return None;
+    }
+    let tz: chrono_tz::Tz = meta.get("exchangeTimezoneName")?.as_str()?.parse().ok()?;
+    let local = |t: i64| tz.timestamp_opt(t, 0).single().map(|d| d.time());
+    let recent_ends = meta
+        .get("tradingPeriods")
+        .and_then(|p| p.as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|day| day.as_array())
+        .flatten()
+        .filter_map(|p| local(p.get("end")?.as_i64()?));
+    let close = recent_ends.fold(local(end)?, |a, b| a.max(b));
+    let listed_type = matches!(
+        meta.get("instrumentType").and_then(|v| v.as_str()),
+        Some("EQUITY" | "ETF" | "INDEX" | "MUTUALFUND")
+    );
+    Some(Session {
+        tz,
+        open: local(start)?,
+        close,
+        us_calendar: listed_type && tz == chrono_tz::America::New_York,
+    })
 }
 
 /// Stamp of a date bar: 00:00 UTC of the exchange-local date of `ts`.
@@ -565,14 +1035,37 @@ struct YahooWindow<'a> {
 
 const DAY: i64 = 86_400;
 
-/// Yahoo interval that `interval` is fetched as. Yahoo has no native 3m, 2h,
-/// 4h, 6h, 12h or 3d, so those are resampled from 1m, 1h and 1d bars.
+/// Yahoo's minute and hour intervals, coarsest first. Whole hours come from
+/// 1h, for its 730 days of history; 90m is exact only, so that 3h does not
+/// trade them for 90m's 60 days.
+const YAHOO_INTRADAY: [(i64, &str); 6] = [
+    (60, "1h"),
+    (30, "30m"),
+    (15, "15m"),
+    (5, "5m"),
+    (2, "2m"),
+    (1, "1m"),
+];
+
+/// Yahoo interval that `interval` is fetched as: itself where Yahoo has it,
+/// else the coarsest that divides it. Those are resampled from it.
 fn yahoo_api_interval(interval: &str) -> &str {
-    match interval {
-        "3m" => "1m",
-        "2h" | "4h" | "6h" | "12h" => "1h",
-        "3d" => "1d",
-        other => other,
+    let Ok(iv) = Interval::parse(interval) else {
+        return interval;
+    };
+    match iv.unit {
+        Unit::Minute | Unit::Hour if iv.secs() == 5_400 => "90m",
+        Unit::Minute | Unit::Hour => {
+            let minutes = iv.secs() / 60;
+            YAHOO_INTRADAY
+                .iter()
+                .find(|(m, _)| minutes % m == 0)
+                .map_or("1m", |(_, name)| name)
+        }
+        Unit::Day => "1d",
+        Unit::Week => "1wk",
+        // Not Yahoo's 3mo: its rows follow `period1`, not calendar quarters.
+        Unit::Month => "1mo",
     }
 }
 
@@ -694,12 +1187,18 @@ fn aggregate_bars(bars: &[Bar], bucket_secs: i64, min_start: i64) -> Vec<Bar> {
         .collect()
 }
 
+/// Bars more than this far apart (seconds) lie in different sessions.
+const SESSION_GAP: i64 = 3_600;
+
 /// Session-anchored buckets for exchange-traded symbols (TradingView style):
-/// buckets of `bucket_secs` start at a session's first bar, and a session's
-/// last bucket may be shorter. A session ends where consecutive bars are more
-/// than an hour apart: the overnight gap, a futures daily break, or a lunch
-/// break (so a Tokyo afternoon is anchored separately). Each bucket's `t` is
-/// its first bar. `gmtoffset` (seconds) maps UTC to exchange time; it is the
+/// buckets of `bucket_secs` start at a session's open, and a session's last
+/// bucket may be shorter. A session ends where consecutive bars are more than
+/// an hour apart: the overnight gap, a futures daily break, or a lunch break
+/// that leaves a gap in the rows. `opens` holds those starts from Yahoo's rows,
+/// priced or not: a first minute with no price (Yahoo sends nulls) must not shift
+/// the session's grid. Tokyo, Shanghai and Hong Kong keep null rows through lunch,
+/// so their afternoon stays on the morning's grid (ADR-0038). Each bucket's `t` is its slot on
+/// that grid. `gmtoffset` (seconds) maps UTC to exchange time; it is the
 /// current offset, but a DST shift of an hour never moves a session across a
 /// day boundary. The local day containing `min_start` may be cut off by the
 /// window and is dropped, unless the window starts at or before the session
@@ -710,6 +1209,7 @@ fn aggregate_sessions(
     gmtoffset: i64,
     min_start: i64,
     open_tod: Option<i64>,
+    opens: &[i64],
 ) -> Vec<Bar> {
     let day = |t: i64| (t + gmtoffset).div_euclid(DAY);
     let before_open = open_tod.is_some_and(|o| (min_start + gmtoffset).rem_euclid(DAY) <= o);
@@ -719,32 +1219,47 @@ fn aggregate_sessions(
         day(min_start.saturating_sub(1)) + 1
     };
     let same_session = |a: &Bar, b: &Bar| match (bar_ts(a), bar_ts(b)) {
-        (Some(x), Some(y)) => y - x <= 3_600,
+        (Some(x), Some(y)) => y - x <= SESSION_GAP,
         _ => false,
     };
     let mut out = Vec::new();
     for session in bars.chunk_by(same_session) {
-        let Some(open) = bar_ts(&session[0]) else {
+        let Some(first) = bar_ts(&session[0]) else {
             continue;
+        };
+        let open = match opens.partition_point(|o| *o <= first) {
+            0 => first,
+            i => opens[i - 1],
         };
         if day(open) < first_full_day {
             continue;
         }
         let slot = |b: &Bar| bar_ts(b).map(|t| (t - open).div_euclid(bucket_secs));
-        out.extend(session.chunk_by(|a, b| slot(a) == slot(b)).map(merge_bars));
+        out.extend(session.chunk_by(|a, b| slot(a) == slot(b)).map(|chunk| {
+            let mut bar = merge_bars(chunk);
+            if let Some(k) = slot(&chunk[0]) {
+                bar.date = (open + k * bucket_secs).to_string();
+            }
+            bar
+        }));
     }
     out
 }
 
-/// Buckets of `n` consecutive calendar days (exchange-local, via `gmtoffset`
-/// seconds), keyed by `(local_day - 1) / n` so bucket boundaries stay
-/// identical across overlapping requests and match Binance's 3d klines, which
-/// open on epoch days with `day % 3 == 1`. The bucket holding `min_start` may be missing
-/// older members and is dropped; the last bucket may be partial (still forming).
-fn aggregate_days(bars: &[Bar], n: i64, gmtoffset: i64, min_start: i64) -> Vec<Bar> {
-    let key = |b: &Bar| bar_ts(b).map(|t| ((t + gmtoffset).div_euclid(DAY) - 1).div_euclid(n));
+/// Date-bar buckets of `iv` on its calendar grid (`Interval::grid_start`,
+/// exchange-local via `gmtoffset` seconds), so boundaries stay identical across
+/// overlapping requests and match Binance's 3d and 1w klines. The bucket holding
+/// `min_start` may be missing older members and is dropped; the last bucket may
+/// be partial (still forming). Weekly and monthly members round to the nearest
+/// local midnight, as `parse_yahoo_chart` explains.
+fn aggregate_calendar(bars: &[Bar], iv: &Interval, gmtoffset: i64, min_start: i64) -> Vec<Bar> {
+    let round = match iv.unit {
+        Unit::Week | Unit::Month => DAY / 2,
+        _ => 0,
+    };
+    let key = |b: &Bar| bar_ts(b).map(|t| iv.grid_start(t + gmtoffset + round));
     bars.chunk_by(|a, b| key(a) == key(b))
-        .filter(|chunk| key(&chunk[0]).is_some_and(|k| (k * n + 1) * DAY - gmtoffset >= min_start))
+        .filter(|chunk| key(&chunk[0]).is_some_and(|k| k - gmtoffset >= min_start))
         .map(merge_bars)
         .collect()
 }
@@ -995,25 +1510,26 @@ fn binance_unknown_symbol(status: u16, body: &serde_json::Value) -> bool {
 /// GET a Binance JSON endpoint. On failure the flag is true when Binance
 /// rejected a symbol as unknown (see `binance_unknown_symbol`).
 fn binance_get(url: &str) -> Result<serde_json::Value, (bool, String)> {
-    let resp = http()
-        .get(url)
-        .send()
-        .map_err(|e| (false, format!("Binance request failed: {e}")))?;
-    let status = resp.status();
-    let body: serde_json::Value = resp.json().map_err(|e| {
+    binance_get_via(binance(), url)
+}
+
+fn binance_get_via(client: &BinanceClient, url: &str) -> Result<serde_json::Value, (bool, String)> {
+    let resp = client.get(url).map_err(|e| (false, e))?;
+    let status = resp.status;
+    let body: serde_json::Value = serde_json::from_str(&resp.body).map_err(|e| {
         (
             false,
             format!("Failed to parse Binance response ({status}): {e}"),
         )
     })?;
-    if status.is_success() {
+    if (200..300).contains(&status) {
         return Ok(body);
     }
     let msg = body.get("msg").and_then(|m| m.as_str()).map_or_else(
         || format!("Binance API returned status {status}"),
         |m| format!("Binance: {m}"),
     );
-    Err((binance_unknown_symbol(status.as_u16(), &body), msg))
+    Err((binance_unknown_symbol(status, &body), msg))
 }
 
 /// Match a `/ticker/24hr?symbols=` array to `symbols` (in order). Pure, so
@@ -1104,6 +1620,7 @@ fn parse_yahoo_quote(body: &serde_json::Value) -> Result<Quote, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
 
     const HOUR_MS: i64 = 3_600_000;
 
@@ -1156,21 +1673,37 @@ mod tests {
     }
 
     #[test]
-    fn binance_interval_maps_yahoo_names() {
-        assert_eq!(binance_interval("1wk"), "1w");
-        assert_eq!(binance_interval("1mo"), "1M");
-        assert_eq!(binance_interval("60m"), "1h");
+    fn the_sample_source_builds_custom_intervals_from_native_bars() {
+        // A fixed end, so every bar is closed whatever the wall clock says.
+        let end_ms = 1_700_000_000_000 / 420_000 * 420_000;
+        let got = fetch_ohlcv(DataSource::Sample, "BTCUSDT", "7m", 3, Some(end_ms)).unwrap();
+        let native = data::sample_ohlcv("BTCUSDT", "1m", 21, Some(end_ms), now_ms()).unwrap();
+        assert_eq!(got.data.len(), 3);
+        for (i, bar) in got.data.bars.iter().enumerate() {
+            let bucket = &native.bars[i * 7..(i + 1) * 7];
+            assert_eq!(bar.date, bucket[0].date);
+            assert_eq!(bar.open, bucket[0].open);
+            assert_eq!(bar.close, bucket[6].close);
+            assert_eq!(bar.volume, bucket.iter().map(|b| b.volume).sum::<f64>());
+        }
+        // Their own months, on their own grid, as the sample source has always had.
+        let months = fetch_ohlcv(DataSource::Sample, "BTCUSDT", "2mo", 3, Some(end_ms)).unwrap();
+        let direct = data::sample_ohlcv("BTCUSDT", "2mo", 3, Some(end_ms), now_ms()).unwrap();
+        assert_eq!(months.data.bars[2].date, direct.bars[2].date);
+    }
+
+    #[test]
+    fn binance_urls_carry_the_kline_name() {
         for native in [
             "1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "8h", "12h", "1d", "3d", "1w",
             "1M",
         ] {
-            assert_eq!(binance_interval(native), native);
+            let url = binance_klines_url("BTCUSDT", native, 10, None);
+            assert!(url.contains(&format!("&interval={native}&")), "{url}");
         }
-        assert!(binance_klines_url("BTCUSDT", "1wk", 10, None).contains("&interval=1w&"));
         // A symbol cannot inject query parameters.
         let url = binance_klines_url("BTC&limit=1#x", "1h", 10, None);
         assert!(url.contains("symbol=BTC%26LIMIT%3D1%23X&interval=1h&limit=10"));
-        assert!(binance_klines_url("BTCUSDT", "1mo", 10, None).contains("&interval=1M&"));
         // Interval durations agree for both spellings (sample grid, Yahoo window).
         assert_eq!(data::interval_secs("1wk"), data::interval_secs("1w"));
         assert_eq!(data::interval_secs("1mo"), data::interval_secs("1M"));
@@ -1505,11 +2038,751 @@ mod tests {
             ("12h", "1h"),
             ("3d", "1d"),
             ("5m", "5m"),
-            ("60m", "60m"),
+            ("60m", "1h"),
             ("1wk", "1wk"),
+            // Custom intervals: the coarsest that divides, for depth of history.
+            ("7m", "1m"),
+            ("6m", "2m"),
+            ("10m", "5m"),
+            ("45m", "15m"),
+            ("90m", "90m"),
+            ("150m", "30m"),
+            ("3h", "1h"),
+            ("8h", "1h"),
+            ("2d", "1d"),
+            ("5d", "1d"),
+            ("2wk", "1wk"),
+            ("2mo", "1mo"),
+            ("3mo", "1mo"),
         ] {
             assert_eq!(yahoo_window(tf, 100, None, now).api_interval, api, "{tf}");
         }
+    }
+
+    /// Reads through `newest_klines` against a fake exchange, counting requests.
+    fn cached_read(
+        cache: &KlineCache,
+        key: &str,
+        want: usize,
+        now: Instant,
+        (first_ms, last_ms): (i64, i64),
+    ) -> (Vec<Bar>, usize) {
+        let mut calls = 0;
+        let mut exchange = fake_exchange(first_ms, last_ms);
+        let bars = newest_klines(
+            cache,
+            &Walks::default(),
+            (key.to_string(), "1h"),
+            want,
+            now,
+            now + Duration::from_secs(60),
+            |limit, end| {
+                calls += 1;
+                exchange(limit, end)
+            },
+        )
+        .unwrap();
+        (bars, calls)
+    }
+
+    #[test]
+    fn a_repeat_read_takes_one_request_and_equals_a_full_one() {
+        // A 59m tail with warmup 300: 303 bars of 59 klines each.
+        let want = 303 * 59;
+        let last = 1_700_000_000_000 / HOUR_MS * HOUR_MS;
+        let history = (0, last);
+        let cache = KlineCache::default();
+        let t0 = Instant::now();
+
+        let (first, calls) = cached_read(&cache, "BTCUSDT", want, t0, history);
+        assert_eq!(calls, 18, "the first read walks the history");
+        assert_eq!(first.len(), want);
+
+        // The forming kline moved on by two klines since then.
+        let later = (0, last + 2 * HOUR_MS);
+        let (again, calls) = cached_read(&cache, "BTCUSDT", want, t0, later);
+        assert_eq!(calls, 1, "a repeat reads one page");
+        let full = paginate_backwards(want, None, far(), fake_exchange(0, later.1)).unwrap();
+        let key = |b: &[Bar]| {
+            b.iter()
+                .map(|x| (x.date.clone(), ohlcv(x)))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(key(&again), key(&full), "the same klines, oldest to newest");
+
+        // A smaller ask is served too, and a larger one reads it all again.
+        let (small, calls) = cached_read(&cache, "BTCUSDT", 2_000, t0, later);
+        assert_eq!((small.len(), calls), (2_000, 1));
+        let (big, calls) = cached_read(&cache, "BTCUSDT", want + 1_000, t0, later);
+        assert_eq!((big.len(), calls), (want + 1_000, 19));
+    }
+
+    #[test]
+    fn a_short_read_landing_after_a_long_walk_does_not_cut_its_window() {
+        let last = 1_700_000_000_000 / HOUR_MS * HOUR_MS;
+        let cache = KlineCache::default();
+        let t0 = Instant::now();
+        cached_read(&cache, "BTCUSDT", 1_500, t0, (0, last));
+
+        // A 7m chart's refresh is out while a 59m chart's walk finishes.
+        let mut exchange = fake_exchange(0, last);
+        let got = newest_klines(
+            &cache,
+            &Walks::default(),
+            ("BTCUSDT".to_string(), "1h"),
+            1_500,
+            t0,
+            far(),
+            |limit, end| {
+                cached_read(&cache, "BTCUSDT", 5_000, t0, (0, last));
+                exchange(limit, end)
+            },
+        )
+        .unwrap();
+        assert_eq!(got.len(), 1_500);
+        assert_eq!(
+            cache.lock().held[&("BTCUSDT".to_string(), "1h")].bars.len(),
+            5_000
+        );
+
+        // So the long chart's next read costs one page, not a walk.
+        let (long, calls) = cached_read(&cache, "BTCUSDT", 5_000, t0, (0, last + HOUR_MS));
+        assert_eq!((long.len(), calls), (5_000, 1));
+        assert_eq!(bar_open_ms(long.last().unwrap()), Some(last + HOUR_MS));
+        assert!(long
+            .windows(2)
+            .all(|w| { bar_open_ms(&w[1]).unwrap() - bar_open_ms(&w[0]).unwrap() == HOUR_MS }));
+    }
+
+    #[test]
+    fn the_kline_cache_reads_again_after_a_gap_or_its_lifetime() {
+        let want = 2_500;
+        let last = 1_700_000_000_000 / HOUR_MS * HOUR_MS;
+        let cache = KlineCache::default();
+        let t0 = Instant::now();
+        assert_eq!(cached_read(&cache, "A", want, t0, (0, last)).1, 3);
+        // More new klines than a refresh reads: the page does not reach ours.
+        let far_on = (0, last + (KLINE_REFRESH as i64 + 5) * HOUR_MS);
+        let (bars, calls) = cached_read(&cache, "A", want, t0, far_on);
+        assert_eq!(calls, 1 + 3, "the refresh, then a full read");
+        assert_eq!(bar_open_ms(bars.last().unwrap()), Some(far_on.1));
+        assert!(bars
+            .windows(2)
+            .all(|w| { bar_open_ms(&w[1]).unwrap() - bar_open_ms(&w[0]).unwrap() == HOUR_MS }));
+        // Past its lifetime an entry is gone.
+        let later = t0 + KLINE_CACHE_TTL + Duration::from_secs(1);
+        assert_eq!(cached_read(&cache, "A", want, later, far_on).1, 3);
+    }
+
+    #[test]
+    fn the_kline_cache_knows_a_short_history_and_stays_bounded() {
+        let last = 1_700_000_000_000 / HOUR_MS * HOUR_MS;
+        let cache = KlineCache::default();
+        let t0 = Instant::now();
+        // A symbol listed 1500 klines ago cannot fill the ask, yet only the first
+        // read walks it.
+        let listed = (last - 1_499 * HOUR_MS, last);
+        let (bars, calls) = cached_read(&cache, "NEW", 5_000, t0, listed);
+        assert_eq!((bars.len(), calls), (1_500, 2));
+        let (bars, calls) = cached_read(&cache, "NEW", 5_000, t0, listed);
+        assert_eq!((bars.len(), calls), (1_500, 1));
+        // The least recently used entry goes when the cache is full.
+        for i in 0..KLINE_CACHE_ENTRIES {
+            let at = t0 + Duration::from_secs(1 + i as u64);
+            cached_read(&cache, &format!("S{i}"), 1_500, at, (0, last));
+        }
+        let st = cache.lock();
+        assert_eq!(st.held.len(), KLINE_CACHE_ENTRIES);
+        assert!(!st.held.contains_key(&("NEW".to_string(), "1h")));
+    }
+
+    /// A pretend Binance behind `BinanceClient`'s HTTP boundary: real URLs in, real
+    /// JSON, statuses and weight headers out, with a clock the test moves.
+    struct FakeBinance {
+        now_s: Arc<std::sync::atomic::AtomicI64>,
+        /// Its weight per minute, and the gate's. Small, so a test stays cheap.
+        limit: u32,
+        minute_weight: Mutex<HashMap<i64, u32>>,
+        requests: AtomicUsize,
+        in_flight: AtomicUsize,
+        peak: AtomicUsize,
+        over_limit: AtomicUsize,
+        /// Answer the k-th request (counted from 1) with this status and Retry-After.
+        fail_at: Mutex<Option<(usize, u16, &'static str)>>,
+        delay: Duration,
+    }
+
+    impl FakeBinance {
+        fn new(limit: u32, delay_ms: u64) -> Arc<Self> {
+            Arc::new(Self {
+                now_s: Arc::new(std::sync::atomic::AtomicI64::new(1_700_000_040)),
+                limit,
+                minute_weight: Mutex::default(),
+                requests: AtomicUsize::new(0),
+                in_flight: AtomicUsize::new(0),
+                peak: AtomicUsize::new(0),
+                over_limit: AtomicUsize::new(0),
+                fail_at: Mutex::default(),
+                delay: Duration::from_millis(delay_ms),
+            })
+        }
+
+        fn requests(&self) -> usize {
+            self.requests.load(Ordering::SeqCst)
+        }
+
+        fn advance(&self, secs: i64) {
+            self.now_s.fetch_add(secs, Ordering::SeqCst);
+        }
+
+        fn most_in_a_minute(&self) -> u32 {
+            let weights = self.minute_weight.lock().unwrap();
+            weights.values().copied().max().unwrap_or(0)
+        }
+
+        fn answer(&self, url: &str) -> Result<BinanceResponse, String> {
+            let k = self.requests.fetch_add(1, Ordering::SeqCst) + 1;
+            let flying = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+            self.peak.fetch_max(flying, Ordering::SeqCst);
+            std::thread::sleep(self.delay);
+            self.in_flight.fetch_sub(1, Ordering::SeqCst);
+
+            let now_s = self.now_s.load(Ordering::SeqCst);
+            let used = {
+                let mut weights = self.minute_weight.lock().unwrap();
+                let w = weights.entry(now_s.div_euclid(60)).or_insert(0);
+                *w += 2;
+                *w
+            };
+            if used > self.limit {
+                self.over_limit.fetch_add(1, Ordering::SeqCst);
+            }
+            let reply = |status, retry: Option<&str>, body: String| {
+                Ok(BinanceResponse {
+                    status,
+                    retry_after: retry.map(str::to_string),
+                    used_weight: Some(used.to_string()),
+                    body,
+                })
+            };
+            let scripted = *self.fail_at.lock().unwrap();
+            if let Some((_, status, retry)) = scripted.filter(|(at, _, _)| *at == k) {
+                return reply(
+                    status,
+                    Some(retry),
+                    r#"{"code":-1003,"msg":"Too many"}"#.into(),
+                );
+            }
+            let param = |name: &str| {
+                url.split(['?', '&'])
+                    .find_map(|kv| kv.strip_prefix(name)?.strip_prefix('='))
+            };
+            let Some(interval) = param("interval") else {
+                return reply(200, None, "[]".into());
+            };
+            let step_ms = data::interval_secs(interval).unwrap() * 1000;
+            let limit: i64 = param("limit").unwrap().parse().unwrap();
+            let end: i64 = param("endTime").map_or(i64::MAX, |e| e.parse().unwrap());
+            // Binance's klines lie on the grid: weeks open on Monday, for example.
+            let grid = Interval::parse(interval).unwrap();
+            let newest = grid.grid_start(end.min(now_s * 1000).div_euclid(1000)) * 1000;
+            let rows: Vec<String> = (0..limit)
+                .rev()
+                .map(|i| newest - i * step_ms)
+                .filter(|t| *t >= 0)
+                .map(|t| {
+                    let p = 100.0 + (t / step_ms % 97) as f64;
+                    format!(r#"[{t},"{p}","{}","{}","{p}","1"]"#, p + 1.0, p - 1.0)
+                })
+                .collect();
+            reply(200, None, format!("[{}]", rows.join(",")))
+        }
+    }
+
+    fn client_of(fake: &Arc<FakeBinance>) -> BinanceClient {
+        let (wall, mono) = (fake.now_s.clone(), fake.now_s.clone());
+        let (start, base) = (fake.now_s.load(Ordering::SeqCst), Instant::now());
+        let exchange = fake.clone();
+        BinanceClient {
+            gate: Box::leak(Box::new(Gate::with_clocks(
+                fake.limit,
+                Box::new(move || wall.load(Ordering::SeqCst)),
+                Box::new(move || {
+                    base + Duration::from_secs((mono.load(Ordering::SeqCst) - start) as u64)
+                }),
+            ))),
+            walks: Walks::default(),
+            klines: KlineCache::default(),
+            send: Box::new(move |url| exchange.answer(url)),
+        }
+    }
+
+    /// A `59m` tail with warmup 300, as the web app polls it.
+    fn tail_59m(client: &BinanceClient, symbol: &str) -> Result<Fetched, String> {
+        fetch_binance_via(client, symbol, "59m", 302, None)
+    }
+
+    const REFUSED: &str = "Binance rate limit";
+
+    #[test]
+    fn failure_a_parallel_history_pages_stop_at_the_budget() {
+        // Parallel 20-request history reads, each with its own end_time, so no
+        // cache helps. Weight limit 600: the gate refuses from 480, 240 requests.
+        let fake = FakeBinance::new(600, 1);
+        let client = client_of(&fake);
+        let base_ms = fake.now_s.load(Ordering::SeqCst) * 1000;
+        let results: Vec<Result<Fetched, String>> = std::thread::scope(|s| {
+            let handles: Vec<_> = (0..10i64)
+                .flat_map(|i| (0..3i64).map(move |j| (i, j)))
+                .map(|(i, j)| {
+                    let (client, end) = (&client, base_ms - (i * 7 + j) * HOUR_MS);
+                    s.spawn(move || fetch_binance_via(client, "BTCUSDT", "59m", 5000, Some(end)))
+                })
+                .collect();
+            handles.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+        // 240 requests, and at most one more from each walk already past the gate.
+        let most = 240 + MAX_WALKS;
+        assert!(fake.requests() <= most, "{} requests", fake.requests());
+        assert_eq!(
+            fake.over_limit.load(Ordering::SeqCst),
+            0,
+            "Binance never said no"
+        );
+        assert!(
+            fake.peak.load(Ordering::SeqCst) <= MAX_WALKS,
+            "walks at once"
+        );
+        let refused: Vec<&String> = results.iter().filter_map(|r| r.as_ref().err()).collect();
+        assert!(!refused.is_empty());
+        let clear = |e: &&String| e.contains(REFUSED) || e.as_str() == BUSY;
+        assert!(refused.iter().all(clear), "{refused:?}");
+        // The next minute the budget is back.
+        fake.advance(60);
+        assert!(fetch_binance_via(&client, "BTCUSDT", "59m", 5000, Some(base_ms)).is_ok());
+    }
+
+    #[test]
+    fn failure_b_tail_polls_thrashing_the_cache_stop_at_the_budget() {
+        // One symbol more than the cache holds: every poll evicts the next one's
+        // klines, and each costs a full 18-request walk.
+        let fake = FakeBinance::new(600, 0);
+        let client = client_of(&fake);
+        let symbols: Vec<String> = (0..=KLINE_CACHE_ENTRIES)
+            .map(|i| format!("S{i}USDT"))
+            .collect();
+        let (mut ok, mut refused) = (0, 0);
+        for _round in 0..50 {
+            for s in &symbols {
+                match tail_59m(&client, s) {
+                    Ok(_) => ok += 1,
+                    Err(e) => {
+                        assert!(e.contains(REFUSED), "{e}");
+                        refused += 1;
+                    }
+                }
+            }
+            fake.advance(2);
+        }
+        assert!(ok > 0 && refused > 0, "ok {ok}, refused {refused}");
+        assert!(
+            fake.most_in_a_minute() <= 480 + 2,
+            "{}",
+            fake.most_in_a_minute()
+        );
+        assert_eq!(fake.over_limit.load(Ordering::SeqCst), 0);
+
+        // As many symbols as it holds cost one request a poll, after the first.
+        let fake = FakeBinance::new(6_000, 0);
+        let client = client_of(&fake);
+        for s in &symbols[..KLINE_CACHE_ENTRIES] {
+            tail_59m(&client, s).unwrap();
+        }
+        let first = fake.requests();
+        assert_eq!(first, KLINE_CACHE_ENTRIES * 18);
+        for s in &symbols[..KLINE_CACHE_ENTRIES] {
+            tail_59m(&client, s).unwrap();
+        }
+        assert_eq!(fake.requests(), first + KLINE_CACHE_ENTRIES);
+    }
+
+    #[test]
+    fn failure_c_subscribe_churn_seeds_share_the_klines() {
+        // A push seed of a 59m chart asks for its native 1m klines.
+        let want = 303 * 59;
+        let fake = FakeBinance::new(6_000, 0);
+        let client = client_of(&fake);
+        let seed = |c: &BinanceClient| fetch_binance_via(c, "BTCUSDT", "1m", want, None);
+        let first = seed(&client).unwrap();
+        assert_eq!(fake.requests(), 18);
+        for _ in 0..9 {
+            fake.advance(6);
+            seed(&client).unwrap();
+        }
+        assert_eq!(fake.requests(), 18 + 9, "ten subscribes, one walk");
+        assert_eq!(first.data.len(), want);
+    }
+
+    #[test]
+    fn every_binance_path_stops_after_a_429_or_418_until_retry_after() {
+        for status in [429, 418] {
+            let fake = FakeBinance::new(6_000, 0);
+            let client = client_of(&fake);
+            // The fifth page of a walk is answered with the status.
+            *fake.fail_at.lock().unwrap() = Some((5, status, "120"));
+            let e = tail_59m(&client, "BTCUSDT").err().unwrap();
+            assert!(e.contains(&status.to_string()), "{e}");
+            assert_eq!(fake.requests(), 5, "the walk stops there");
+
+            // Nothing leaves now: this chart, another, a native seed, a single
+            // page, the quotes and the symbol list's path.
+            for call in [
+                tail_59m(&client, "BTCUSDT").map(|_| ()),
+                tail_59m(&client, "ETHUSDT").map(|_| ()),
+                fetch_binance_via(&client, "BTCUSDT", "1m", 5000, None).map(|_| ()),
+                fetch_binance_via(&client, "BTCUSDT", "4h", 10, None).map(|_| ()),
+                client
+                    .get("https://api.binance.com/api/v3/exchangeInfo")
+                    .map(|_| ()),
+            ] {
+                let e = call.err().unwrap();
+                assert!(e.contains(REFUSED) && e.contains("120s"), "{e}");
+            }
+            // A refused quote is not a symbol Binance called unknown.
+            let (unknown, e) = binance_get_via(&client, &binance_ticker_url(&["BTCUSDT"]))
+                .err()
+                .unwrap();
+            assert!(!unknown && e.contains(REFUSED), "{e}");
+            assert_eq!(fake.requests(), 5, "not one request during the cooldown");
+
+            // The refused reads left nothing behind: the next is a full, right one.
+            assert!(client.klines.lock().held.is_empty());
+            assert!(client.klines.lock().walking.is_empty());
+            fake.advance(120);
+            let after = tail_59m(&client, "BTCUSDT").unwrap();
+            assert_eq!(fake.requests(), 5 + 18);
+            let clean = tail_59m(&client_of(&fake), "BTCUSDT").unwrap();
+            let key = |f: &Fetched| {
+                f.data
+                    .bars
+                    .iter()
+                    .map(|b| (b.date.clone(), ohlcv(b)))
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(key(&after), key(&clean));
+        }
+    }
+
+    #[test]
+    fn a_refused_refresh_keeps_the_klines_it_held() {
+        let fake = FakeBinance::new(6_000, 0);
+        let client = client_of(&fake);
+        let held = tail_59m(&client, "BTCUSDT").unwrap();
+        *fake.fail_at.lock().unwrap() = Some((19, 429, "30"));
+        assert!(tail_59m(&client, "BTCUSDT").is_err());
+        assert!(tail_59m(&client, "BTCUSDT")
+            .err()
+            .unwrap()
+            .contains(REFUSED));
+        fake.advance(30);
+        let again = tail_59m(&client, "BTCUSDT").unwrap();
+        assert_eq!(fake.requests(), 18 + 1 + 1, "one refresh, no new walk");
+        assert_eq!(again.data.len(), held.data.len());
+    }
+
+    #[test]
+    fn concurrent_first_reads_of_a_chart_share_one_walk() {
+        let fake = FakeBinance::new(6_000, 1);
+        let client = client_of(&fake);
+        let results: Vec<Result<Fetched, String>> = std::thread::scope(|s| {
+            let handles: Vec<_> = (0..6)
+                .map(|_| {
+                    let client = &client;
+                    s.spawn(move || tail_59m(client, "BTCUSDT"))
+                })
+                .collect();
+            handles.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+        assert!(results.iter().all(|r| r.is_ok()));
+        // One walk, and at most one refresh for each of the other five.
+        assert!(fake.requests() <= 18 + 5, "{} requests", fake.requests());
+        assert!(client.klines.lock().walking.is_empty());
+    }
+
+    #[test]
+    fn a_walk_waits_for_a_permit_and_gives_up_cleanly() {
+        let walks = Walks::default();
+        let permits: Vec<_> = (0..MAX_WALKS)
+            .map(|_| walks.enter(far()).unwrap())
+            .collect();
+        let soon = Instant::now() + Duration::from_millis(20);
+        let e = walk_klines(&walks, BINANCE_MAX_LIMIT + 1, None, soon, |_, _| {
+            panic!("a call that gave up sends nothing")
+        })
+        .err()
+        .unwrap();
+        // Others' reads may just be slow, so it does not blame the rate limit.
+        assert!(e.contains("timed out") && !e.contains(REFUSED), "{e}");
+        // One page needs no permit, and a freed permit is free again.
+        let one = walk_klines(&walks, 1, None, far(), fake_exchange(0, HOUR_MS * 3)).unwrap();
+        assert_eq!(one.len(), 1);
+        drop(permits);
+        assert!(walks.enter(far()).is_ok());
+    }
+
+    #[test]
+    fn binance_paging_a_custom_interval_joins_up_to_one_read() {
+        // The glue around the walk: want, end and has_more, against real URLs.
+        let fake = FakeBinance::new(600_000, 0);
+        let client = client_of(&fake);
+        let dates = |f: &Fetched| {
+            f.data
+                .bars
+                .iter()
+                .map(|b| b.date.clone())
+                .collect::<Vec<_>>()
+        };
+        for (tf, n) in [("7m", 60), ("45m", 40), ("7h", 30), ("2d", 20), ("2wk", 12)] {
+            let whole = fetch_binance_via(&client, "BTCUSDT", tf, n, None).unwrap();
+            assert!(whole.has_more, "{tf}");
+            assert_eq!(whole.data.len(), n, "{tf}");
+            let mid_ms = bar_open_ms(&whole.data.bars[n / 2]).unwrap();
+            let newer = fetch_binance_via(&client, "BTCUSDT", tf, n / 2, None).unwrap();
+            let older = fetch_binance_via(&client, "BTCUSDT", tf, n / 2, Some(mid_ms)).unwrap();
+            let mut joined = dates(&older);
+            joined.extend(dates(&newer));
+            assert_eq!(joined, dates(&whole), "{tf}");
+            let key = |f: &Fetched| f.data.bars.iter().map(ohlcv).collect::<Vec<_>>();
+            assert_eq!(key(&older), key(&whole)[..n / 2].to_vec(), "{tf}");
+        }
+    }
+
+    #[test]
+    fn binance_resample_is_stable_across_requests_and_keeps_only_whole_bars() {
+        let base = 1_700_006_400 / 420 * 420; // on the 7m grid
+        let bars: Vec<Bar> = (0..30)
+            .map(|i| bar_at(base + 60 + i * 60, i as f64))
+            .collect();
+        let iv = Interval::parse("7m").unwrap();
+        let all = resample(&bars, &iv, true);
+        // The first bucket lacks its first minute, so it goes.
+        assert_eq!(bar_ts(&all[0]), Some(base + 420));
+        assert!(all.iter().all(|b| bar_ts(b).unwrap() % 420 == 0));
+        let first = &all[0];
+        assert_eq!((first.open, first.close, first.volume), (6.0, 12.0, 7.0));
+        // A reload from a later start gives the same bars.
+        let reload = resample(&bars[10..], &iv, true);
+        for b in &reload {
+            let same = all.iter().find(|a| a.date == b.date).unwrap();
+            assert_eq!(ohlcv(same), ohlcv(b));
+        }
+        // The first bars of a symbol stay when nothing older exists.
+        let listed = resample(&bars, &iv, false);
+        assert_eq!(bar_ts(&listed[0]), Some(base));
+        assert_eq!(listed[0].volume, 6.0);
+    }
+
+    #[test]
+    fn binance_resample_two_weeks_and_two_months_follow_the_calendar() {
+        let w = |d: i64| (4 + d * 7) * DAY; // Mondays
+        let n = 2_900; // an even week from the Monday origin
+        let bars: Vec<Bar> = (n..n + 5).map(|i| bar_at(w(i), i as f64)).collect();
+        let f = resample(&bars, &Interval::parse("2W").unwrap(), true);
+        assert_eq!(
+            f.iter().map(|b| bar_ts(b).unwrap()).collect::<Vec<_>>(),
+            vec![w(n), w(n + 2), w(n + 4)]
+        );
+        assert_eq!(f[0].volume, 2.0);
+
+        let ts = |s: &str| chrono::DateTime::parse_from_rfc3339(s).unwrap().timestamp();
+        let months = [
+            "2026-01-01T00:00:00Z",
+            "2026-02-01T00:00:00Z",
+            "2026-03-01T00:00:00Z",
+            "2026-04-01T00:00:00Z",
+        ];
+        let bars: Vec<Bar> = months.iter().map(|m| bar_at(ts(m), 1.0)).collect();
+        let f = resample(&bars, &Interval::parse("2M").unwrap(), true);
+        assert_eq!(
+            f.iter().map(|b| bar_ts(b).unwrap()).collect::<Vec<_>>(),
+            vec![ts(months[0]), ts(months[2])]
+        );
+        assert!(f.iter().all(|b| b.volume == 2.0));
+    }
+
+    #[test]
+    fn yahoo_custom_intraday_buckets_anchor_at_session_open() {
+        // 1m bars of a 09:30 open and of the next day's: 45m stays anchored.
+        let mut ts: Vec<i64> = (0..390).map(|i| NOV3_OPEN + i * 60).collect();
+        ts.extend((0..100).map(|i| NOV4_OPEN + i * 60));
+        let body = yahoo_body(&ts, "AAPL", "EQUITY", -18_000);
+        let f = parse_yahoo_chart(&body, "45m", 100, None, &win("1m", 0)).unwrap();
+        let d = dates(&f);
+        assert_eq!(d[0], NOV3_OPEN);
+        assert_eq!(d[1], NOV3_OPEN + 45 * 60);
+        // 390 minutes make 8 full buckets and a short one, then the next day.
+        assert_eq!(d[9], NOV4_OPEN);
+        assert_eq!(f.data.bars[8].volume, (360..390).sum::<i32>() as f64);
+        // 7m on a crypto pair is the epoch grid, as Binance's would be.
+        let base = 1_700_006_400 / 420 * 420;
+        let ts: Vec<i64> = (0..20).map(|i| base + i * 60).collect();
+        let body = yahoo_body(&ts, "BTC-USD", "CRYPTOCURRENCY", 0);
+        let f = parse_yahoo_chart(&body, "7m", 100, None, &win("1m", 0)).unwrap();
+        assert_eq!(dates(&f), vec![base, base + 420, base + 840]);
+    }
+
+    #[test]
+    fn yahoo_meta_gives_the_regular_session() {
+        use chrono::Timelike;
+        // The AAPL fixture: 09:30 to 16:00 New York, a US listing.
+        let f = parse_yahoo_chart(&fixture(), "1h", 100, None, &win("1h", 0)).unwrap();
+        let s = f.data.session.expect("an equity has a session");
+        assert_eq!(s.tz, chrono_tz::America::New_York);
+        assert_eq!((s.open.hour(), s.open.minute()), (9, 30));
+        assert_eq!((s.close.hour(), s.close.minute()), (16, 0));
+        assert!(s.us_calendar);
+
+        let meta = |instrument: &str, tz: &str, start: i64, end: i64| {
+            serde_json::json!({
+                "instrumentType": instrument,
+                "exchangeTimezoneName": tz,
+                "currentTradingPeriod": { "regular": { "start": start, "end": end } },
+            })
+        };
+        // 09:00 to 15:30 in Tokyo: hours, and no US calendar.
+        let tokyo = 1_793_923_200;
+        let s = session_from_meta(&meta("EQUITY", "Asia/Tokyo", tokyo, tokyo + 23_400)).unwrap();
+        assert_eq!(
+            (s.open.hour(), s.close.hour(), s.close.minute()),
+            (9, 15, 30)
+        );
+        assert!(!s.us_calendar);
+        // A New York future runs all day, so it has no session.
+        let future = meta("FUTURE", "America/New_York", tokyo, tokyo + 86_340);
+        assert_eq!(session_from_meta(&future), None);
+        // Unknown zone: no session rather than a wrong one.
+        assert_eq!(
+            session_from_meta(&meta("EQUITY", "Mars/Base", tokyo, tokyo + 23_400)),
+            None
+        );
+
+        // Today an early close: the recent days say what a normal close is.
+        let open = NOV4_OPEN;
+        let mut early = meta("EQUITY", "America/New_York", open, open + 12_600);
+        assert_eq!(session_from_meta(&early).unwrap().close.hour(), 13);
+        early["tradingPeriods"] = serde_json::json!([
+            [{ "start": open - DAY, "end": open - DAY + 23_400 }],
+            [{ "start": open, "end": open + 12_600 }],
+        ]);
+        assert_eq!(session_from_meta(&early).unwrap().close.hour(), 16);
+
+        // 24/7 instruments have none, whatever their metadata says.
+        let body = yahoo_body(&[1_700_006_400], "BTC-USD", "CRYPTOCURRENCY", 0);
+        let f = parse_yahoo_chart(&body, "1h", 100, None, &win("1h", 0)).unwrap();
+        assert_eq!(f.data.session, None);
+    }
+
+    #[test]
+    fn yahoo_quarters_are_calendar_quarters_built_from_months() {
+        let ts = |s: &str| chrono::DateTime::parse_from_rfc3339(s).unwrap().timestamp();
+        // Yahoo's monthly stamps across a DST change, then its live print, which
+        // the snap merges into November's row.
+        let rows = [
+            "2026-07-01T04:00:00Z",
+            "2026-08-01T04:00:00Z",
+            "2026-09-01T04:00:00Z",
+            "2026-10-01T04:00:00Z",
+            "2026-11-01T04:00:00Z",
+            "2026-11-05T21:00:00Z",
+        ];
+        let stamps: Vec<i64> = rows.iter().map(|s| ts(s)).collect();
+        let body = yahoo_body(&stamps, "AAPL", "EQUITY", -18_000);
+        let window = yahoo_window("3mo", 40, None, ts("2026-11-06T00:00:00Z"));
+        assert_eq!(window.api_interval, "1mo");
+        let f = parse_yahoo_chart(&body, "3mo", 100, None, &win(window.api_interval, 0)).unwrap();
+        // Two quarters, with no bar for the month the live print falls in.
+        assert_eq!(
+            dates(&f),
+            vec![ts("2026-07-01T00:00:00Z"), ts("2026-10-01T00:00:00Z")]
+        );
+        // July to September, then October and November's row with the print.
+        assert_eq!(f.data.bars[0].volume, 0.0 + 1.0 + 2.0);
+        assert_eq!(f.data.bars[1].close, 5.0);
+    }
+
+    #[test]
+    fn yahoo_session_grid_ignores_rows_without_a_price() {
+        // Yahoo sends null prices for some minutes, here the first three.
+        let ts: Vec<i64> = (0..30).map(|i| NOV4_OPEN + i * 60).collect();
+        let mut body = yahoo_body(&ts, "AAPL", "EQUITY", -18_000);
+        for i in 0..3 {
+            body["chart"]["result"][0]["indicators"]["quote"][0]["close"][i] =
+                serde_json::Value::Null;
+        }
+        let f = parse_yahoo_chart(&body, "7m", 100, None, &win("1m", 0)).unwrap();
+        let d = dates(&f);
+        assert_eq!(d[0], NOV4_OPEN, "the first bar sits on the open");
+        assert_eq!(d[1], NOV4_OPEN + 420);
+        assert!(d.iter().all(|t| (t - NOV4_OPEN) % 420 == 0), "{d:?}");
+        // So do nulls in the middle of the session.
+        let mut body = yahoo_body(&ts, "AAPL", "EQUITY", -18_000);
+        for i in 8..16 {
+            body["chart"]["result"][0]["indicators"]["quote"][0]["close"][i] =
+                serde_json::Value::Null;
+        }
+        let f = parse_yahoo_chart(&body, "7m", 100, None, &win("1m", 0)).unwrap();
+        let d = dates(&f);
+        assert!(d.iter().all(|t| (t - NOV4_OPEN) % 420 == 0), "{d:?}");
+    }
+
+    #[test]
+    fn yahoo_two_week_and_two_month_bars_survive_a_dst_change() {
+        let ts = |s: &str| chrono::DateTime::parse_from_rfc3339(s).unwrap().timestamp();
+        // Yahoo's stamps: local midnight in the offset of that date. Today's
+        // gmtoffset is EST, so the EDT stamps read as 23:00 the evening before.
+        let weeks: Vec<i64> = [
+            "2026-10-12T04:00:00Z",
+            "2026-10-19T04:00:00Z",
+            "2026-10-26T04:00:00Z",
+            "2026-11-02T05:00:00Z",
+        ]
+        .iter()
+        .map(|s| ts(s))
+        .collect();
+        let body = yahoo_body(&weeks, "AAPL", "EQUITY", -18_000);
+        let f = parse_yahoo_chart(&body, "1wk", 100, None, &win("1wk", 0)).unwrap();
+        assert_eq!(
+            dates(&f),
+            vec![
+                ts("2026-10-12T00:00:00Z"),
+                ts("2026-10-19T00:00:00Z"),
+                ts("2026-10-26T00:00:00Z"),
+                ts("2026-11-02T00:00:00Z"),
+            ],
+            "weekly bars keep their Monday"
+        );
+        let f = parse_yahoo_chart(&body, "2wk", 100, None, &win("1wk", 0)).unwrap();
+        let d = dates(&f);
+        let two = Interval::parse("2wk").unwrap();
+        assert!(d.iter().all(|t| two.grid_start(*t) == *t), "{d:?}");
+        assert_eq!(f.data.bars.iter().map(|b| b.volume).sum::<f64>(), 6.0);
+
+        let months: Vec<i64> = [
+            "2026-09-01T04:00:00Z",
+            "2026-10-01T04:00:00Z",
+            "2026-11-01T04:00:00Z",
+        ]
+        .iter()
+        .map(|s| ts(s))
+        .collect();
+        let body = yahoo_body(&months, "AAPL", "EQUITY", -18_000);
+        let f = parse_yahoo_chart(&body, "1mo", 100, None, &win("1mo", 0)).unwrap();
+        assert_eq!(dates(&f)[2], ts("2026-11-01T00:00:00Z"), "not Oct 31");
+        let f = parse_yahoo_chart(&body, "2mo", 100, None, &win("1mo", 0)).unwrap();
+        assert_eq!(
+            dates(&f),
+            vec![ts("2026-09-01T00:00:00Z"), ts("2026-11-01T00:00:00Z")]
+        );
     }
 
     #[test]
@@ -2097,11 +3370,14 @@ mod tests {
 
     #[test]
     fn date_intervals() {
-        for i in ["1d", "3d", "5d", "1wk", "1w", "1mo", "1M"] {
-            assert!(is_date_interval(i), "{i}");
+        let is_date = |i| Interval::parse(i).is_ok_and(|iv| iv.is_date_bar());
+        for i in [
+            "1d", "2D", "3d", "5d", "1wk", "1w", "2W", "1mo", "1M", "24h",
+        ] {
+            assert!(is_date(i), "{i}");
         }
-        for i in ["1m", "15m", "1h", "4h", "", "d"] {
-            assert!(!is_date_interval(i), "{i}");
+        for i in ["1m", "7m", "15m", "1h", "4h", "36h", "", "d"] {
+            assert!(!is_date(i), "{i}");
         }
     }
 }

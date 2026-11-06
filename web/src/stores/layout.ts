@@ -7,7 +7,7 @@ import { batch, createSignal } from "solid-js";
 
 import { activePane } from "./grid";
 import { applyTheme, THEME_NAMES, type ThemeName } from "../lib/theme";
-import { isTimeframe, type Timeframe } from "../lib/timeframe";
+import { TIMEFRAME_OPTIONS, isTimeframe, type Timeframe } from "../lib/timeframe";
 import {
   DEFAULT_TIME_ZONE,
   isTimeZoneChoice,
@@ -60,6 +60,7 @@ export const SCALE_MODES: readonly ScaleMode[] = [
 ];
 
 export const MAX_RECENTS = 10;
+export const MAX_RECENT_TIMEFRAMES = 5;
 
 const PREFIX = "chartgen.layout.";
 
@@ -131,9 +132,22 @@ function loadRecents(): string[] {
   return [...new Set(normalized)].slice(0, MAX_RECENTS);
 }
 
+/** Custom intervals offered again in the timeframe menu, newest first. */
+function sanitizeRecentTimeframes(x: unknown): Timeframe[] {
+  if (!Array.isArray(x)) return [];
+  const valid = x.filter(
+    (tf): tf is Timeframe =>
+      isTimeframe(tf) && !TIMEFRAME_OPTIONS.includes(tf as (typeof TIMEFRAME_OPTIONS)[number]),
+  );
+  return [...new Set(valid)].slice(0, MAX_RECENT_TIMEFRAMES);
+}
+
 const storedTheme = read("theme");
 const storedTimeZone = read("timeZone");
 
+const [recentTimeframes, setRecentTimeframesSignal] = createSignal<Timeframe[]>(
+  sanitizeRecentTimeframes(read("recentTimeframes")),
+);
 const [theme, setThemeSignal] = createSignal<ThemeName>(
   initialTheme(storedTheme),
 );
@@ -228,6 +242,14 @@ function createChartStore(prefix: string) {
     setTimeframe(next: Timeframe): void {
       setTimeframeSignal(next);
       persistKey("timeframe", next);
+      if (!TIMEFRAME_OPTIONS.includes(next as (typeof TIMEFRAME_OPTIONS)[number])) {
+        const recents = [next, ...recentTimeframes().filter((tf) => tf !== next)].slice(
+          0,
+          MAX_RECENT_TIMEFRAMES,
+        );
+        setRecentTimeframesSignal(recents);
+        persist("recentTimeframes", recents);
+      }
     },
 
     setChartType(next: ChartType): void {
@@ -275,7 +297,7 @@ export const setTimeframe = (next: Timeframe): void => active().setTimeframe(nex
 export const setChartType = (next: ChartType): void => active().setChartType(next);
 export const setScaleMode = (next: ScaleMode): void => active().setScaleMode(next);
 
-export { theme, timeZone, recentSymbols };
+export { theme, timeZone, recentSymbols, recentTimeframes };
 
 /** Move a symbol that loaded successfully to the front of the recents. */
 export function addRecent(value: string): void {
