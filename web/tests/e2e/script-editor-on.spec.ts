@@ -594,6 +594,8 @@ test.describe("code is never lost", () => {
     await page.getByTestId("script-row-constructor").click();
     await expect(code(page)).toContainText("# odd name");
     await expect(page.getByTestId("script-status")).toHaveText("");
+    await expect(page.getByTestId("script-conflict")).toHaveCount(0);
+    await expect(page.getByTestId("script-revert")).toHaveCount(0);
   });
 
   test("the last keystrokes survive opening another script", async ({ page }) => {
@@ -841,7 +843,7 @@ test.describe("panel size", () => {
       return hit === el || el.contains(hit);
     });
 
-  for (const [width, height] of [[1280, 600], [1366, 650], [844, 390]] as const) {
+  for (const [width, height] of [[1280, 700], [1280, 600], [1366, 650], [844, 390]] as const) {
     test(`full screen when the window is short: ${width}x${height}`, async ({ page }) => {
       await gotoApp(page);
       await page.setViewportSize({ width, height });
@@ -861,7 +863,7 @@ test.describe("panel size", () => {
     });
   }
 
-  for (const [width, height] of [[1280, 700], [1440, 780], [1920, 950]] as const) {
+  for (const [width, height] of [[1280, 720], [1440, 780], [1920, 950]] as const) {
     test(`docked with room for the price pane: ${width}x${height}`, async ({ page }) => {
       await page.setViewportSize({ width, height });
       await gotoApp(page);
@@ -872,6 +874,9 @@ test.describe("panel size", () => {
       // Nothing of the chart's side reaches into the panel.
       const main = (await page.locator("main").boundingBox())!;
       expect(main.y + main.height).toBeLessThanOrEqual(panel.y);
+      // The drawing toolbar still fits: its last button is not cut off.
+      const last = (await page.getByRole("button", { name: "Remove all drawings" }).boundingBox())!;
+      expect(last.y + last.height).toBeLessThanOrEqual(main.y + main.height);
       for (const id of ["script-new", "script-name", "script-save", "script-close"]) {
         expect(await reachable(page, id), id).toBe(true);
       }

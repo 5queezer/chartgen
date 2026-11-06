@@ -132,7 +132,7 @@ reload starts a new generation, which resets the poll backoff, reloads are also
 capped per chart: 3 in 5 minutes.
 
 **Layout.** A dock below the bottom bar shrinks the chart, so the chart stays
-visible while editing, at up to 45% of the window. Below 768 px of width or 700 px
+visible while editing, at up to 45% of the window. Below 768 px of width or 720 px
 of height there is no room for both, and plain CSS makes it a full-screen panel.
 
 ### Consequences

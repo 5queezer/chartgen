@@ -21,12 +21,12 @@
 
 /* Docked under the chart: a part of the window, so the price pane keeps room. */
 .script-editor {
-  height: 42vh;
+  height: 41vh;
   min-height: 280px;
   max-height: 45vh;
 }
 
-@media (min-width: 768px) and (min-height: 700px) {
+@media (min-width: 768px) and (min-height: 720px) {
   /* The chart's usual minimum would push it over the panel. */
   body:has(.script-editor) .chart-host {
     min-height: 120px;
@@ -39,7 +39,7 @@
 
 /* No room for both, in width or in height (a landscape phone, a small laptop
    window): the panel takes the whole screen, and closing it brings the chart back. */
-@media (max-width: 767px), (max-height: 699px) {
+@media (max-width: 767px), (max-height: 719px) {
   .script-editor {
     position: fixed;
     inset: 0;

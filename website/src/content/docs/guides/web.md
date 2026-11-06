@@ -901,7 +901,7 @@ smaller windows) sits next to **Indicators**, and the indicator picker links to
 the same panel. Without that flag none of this appears
 ([ADR-0041](/chartgen/decisions/0041-script-editor-in-the-web-app/)). The
 panel opens under the chart, or over the whole window below 768 px of width
-or 700 px of height. See
+or 720 px of height. See
 [Scripted indicators](/chartgen/guides/scripted-indicators/) for the language
 and for why scripting is for trusted deployments only.
 
