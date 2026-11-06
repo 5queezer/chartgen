@@ -27,6 +27,7 @@ use std::time::Duration;
 use chartgen::data::{self, Bar, OhlcvData};
 use chartgen::feed::{BinanceFeed, FeedEvent};
 use chartgen::interval::{Interval, Unit};
+use chartgen::price_bars::{Kind, Params};
 use futures_util::future::BoxFuture;
 use serde_json::{json, Value};
 use tokio::sync::{broadcast, mpsc};
@@ -37,6 +38,9 @@ use crate::fetch::{self, DataSource};
 
 /// Bars per pushed tail: the last closed bar and the forming one.
 pub const TAIL_BARS: usize = 2;
+/// One closed source bar can confirm several price-based bars, so their tails are
+/// longer (ADR-0047). A jump past this reloads the chart.
+pub const PRICE_TAIL_BARS: usize = 64;
 /// JSON-RPC method of a pushed tail.
 pub const CHART_TICK: &str = "notifications/chart_tick";
 /// Most indicators one subscription may ask for.
@@ -267,6 +271,8 @@ pub struct ChartRequest {
     /// The `indicators` array as JSON (object keys sorted, so canonical).
     pub indicators: String,
     pub chart_style: String,
+    /// Inputs of a price-based style, canonical JSON, with any pinned box (ADR-0047).
+    pub chart_params: Option<String>,
     /// Warmup the group computes with: the client's, raised to what the
     /// indicators need (ADR-0032).
     pub warmup: usize,
@@ -812,6 +818,34 @@ async fn run_group(
         Err(e) => return fail(format!("seeding failed: {e}")),
     };
     let indicators: Value = serde_json::from_str(&req.indicators).unwrap_or(Value::Null);
+    // A price-based chart keeps the box it resolves now for as long as it lives.
+    let price = match Kind::from_style(&req.chart_style) {
+        Some(kind) => {
+            let args: Option<Value> = req
+                .chart_params
+                .as_deref()
+                .and_then(|p| serde_json::from_str(p).ok());
+            let Ok(chart_iv) = Interval::parse(&req.timeframe) else {
+                return fail(format!("{} is not an interval", req.timeframe));
+            };
+            let source = match &resample_to {
+                Some(iv) => fetch::resample(&window, iv, true),
+                None => window.clone(),
+            };
+            match Params::parse(kind, args.as_ref())
+                .and_then(|p| p.pinned(&source, &chart_iv, fetch::now_ms()))
+            {
+                Ok(p) => Some(p),
+                Err(e) => return fail(e),
+            }
+        }
+        None => None,
+    };
+    let tail_bars = if price.is_some() {
+        PRICE_TAIL_BARS
+    } else {
+        TAIL_BARS
+    };
     // Push the seeded window right away.
     let mut dirty = true;
     let mut next = Instant::now();
@@ -854,12 +888,13 @@ async fn run_group(
                     interval: Some(req.timeframe.clone()),
                     session: None,
                 };
-                let (indicators, style) = (indicators.clone(), req.chart_style.clone());
+                let (indicators, style, price) =
+                    (indicators.clone(), req.chart_style.clone(), price.clone());
                 let computed = tokio::task::spawn_blocking(move || {
                     if let Some(iv) = resample_to {
                         raw.bars = fetch::resample(&raw.bars, &iv, true);
                     }
-                    crate::mcp::series_tail(&raw, &indicators, &style, TAIL_BARS)
+                    crate::mcp::series_tail(&raw, &indicators, &style, price.as_ref(), tail_bars)
                 })
                 .await;
                 let series = match computed {
@@ -1114,6 +1149,7 @@ mod tests {
             timeframe: "1m".into(),
             indicators: indicators.into(),
             chart_style: "candles".into(),
+            chart_params: None,
             warmup: 30,
             asked_warmup: 30,
         }
@@ -1134,6 +1170,31 @@ mod tests {
 
     async fn settle() {
         tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    #[tokio::test]
+    async fn a_price_chart_pushes_a_long_tail_on_the_box_it_resolved_first() {
+        let fake = Arc::new(Fake::default());
+        let hub = hub(&fake, quick());
+        let (tx, mut rx) = stream();
+        hub.link_stream("s1", tx);
+        let r = ChartRequest {
+            chart_style: "line_break".into(),
+            chart_params: Some(json!({ "lines": 2 }).to_string()),
+            ..req("BTCUSDT", "[]")
+        };
+        hub.subscribe("tok", "ip", "s1", r.clone()).unwrap();
+        let n = next(&mut rx, 2_000).await.expect("seed push");
+        let series = &n["params"]["series"];
+        assert_eq!(series["chart_style"], "line_break");
+        assert_eq!(series["chart_params"], json!({ "lines": 2 }));
+        let t: Vec<i64> = series["bars"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|b| b["t"].as_i64().unwrap())
+            .collect();
+        assert!(t.windows(2).all(|w| w[1] > w[0]), "{t:?}");
     }
 
     #[tokio::test]
