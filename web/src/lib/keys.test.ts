@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { isTypingContext, keepKeyboardFocus } from "./keys";
+import { isRelease, isTypingContext, keepKeyboardFocus } from "./keys";
 
 class FakeEl {
   constructor(
@@ -80,5 +80,22 @@ describe("keepKeyboardFocus", () => {
     keepKeyboardFocus();
     fire(0);
     expect(host.focus).not.toHaveBeenCalled();
+  });
+});
+
+describe("isRelease", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("is the left button, or the last finger", () => {
+    class FakeMouse {
+      constructor(public button: number) {}
+    }
+    vi.stubGlobal("MouseEvent", FakeMouse);
+    const ev = (o: object) => o as unknown as Event;
+    expect(isRelease(ev(new FakeMouse(0)))).toBe(true);
+    expect(isRelease(ev(new FakeMouse(2)))).toBe(false);
+    expect(isRelease(ev({ touches: [] }))).toBe(true);
+    expect(isRelease(ev({ touches: [{}] }))).toBe(false);
+    expect(isRelease(ev({}))).toBe(true);
   });
 });

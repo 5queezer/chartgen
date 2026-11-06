@@ -6,7 +6,7 @@
 
 import { For, Show, type JSX } from "solid-js";
 
-import { CONDITION_LABELS, alertStatus, describeAlert } from "../lib/alerts";
+import { CONDITION_LABELS, alertStatus, describeAlert, type Alert } from "../lib/alerts";
 import { COMPARE_PALETTE } from "../lib/compare";
 import { pricePrecision } from "../lib/format";
 import { displayName, withoutParamNumber } from "../lib/indicatorNames";
@@ -46,6 +46,12 @@ const GEAR =
 const LOCK = "M4 7h8v6H4zM5.5 7V5a2.5 2.5 0 0 1 5 0v2";
 const UNLOCK = "M4 7h8v6H4zM5.5 7V5a2.5 2.5 0 0 1 4.8-1";
 const CLOSE = "M3.5 3.5L12.5 12.5M12.5 3.5L3.5 12.5";
+
+/** One read of `inactiveReason`, which reads the stored drawings. */
+function statusText(a: Alert): string {
+  const reason = inactiveReason(a);
+  return reason === null ? alertStatus(a) : `inactive: ${reason}`;
+}
 
 function Action(props: {
   label: string;
@@ -258,7 +264,7 @@ export function ObjectTree(props: ObjectTreeProps): JSX.Element {
                       </>
                     )}
                     <span class="ml-1 text-xs text-[color:var(--color-fg-muted)]">
-                      {inactiveReason(a) === null ? alertStatus(a) : `inactive: ${inactiveReason(a)}`}
+                      {statusText(a)}
                     </span>
                   </>
                 }
