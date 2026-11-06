@@ -151,7 +151,7 @@ export function AlertLines(props: AlertLinesProps): null {
         onRightClick: () => {
           setOverlayMenu(() => {
             const alert = alerts().find((x) => x.id === a.id);
-            return alert ? alertMenu(alert) : null;
+            return alert ? alertMenu(alert, props.symbol) : null;
           });
           return true;
         },

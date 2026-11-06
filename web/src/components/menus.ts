@@ -3,15 +3,25 @@
 // chip, tree row, sub-pane).
 
 import type { Alert } from "../lib/alerts";
+import { chipName } from "../lib/indicatorNames";
 import { showToast } from "../services/alertEngine";
 import { removeAlert, setAlertActive } from "../stores/alerts";
-import { setSymbol, symbol } from "../stores/layout";
+import {
+  indicatorName,
+  instanceKey,
+  isHidden,
+  paramLabels,
+  type IndicatorStore,
+} from "../stores/indicators";
+import { setSymbol } from "../stores/layout";
+import { paramDefaults } from "../stores/layouts";
 import { deleteServerAlert, serverAlertError, updateServerAlert } from "../stores/serverAlerts";
-import type { ServerAlert } from "../types/responses";
+import type { SeriesPayload, ServerAlert } from "../types/responses";
 import { openAlertDialog } from "./AlertDialog";
 import type { MenuItem, MenuSpec } from "./ContextMenu";
 
-export function alertMenu(a: Alert): MenuSpec {
+/** `chartSymbol`: what the chart shows, so another symbol's alert can offer to open it. */
+export function alertMenu(a: Alert, chartSymbol: string): MenuSpec {
   return {
     label: "Alert actions",
     items: [
@@ -20,7 +30,7 @@ export function alertMenu(a: Alert): MenuSpec {
         label: a.active ? "Pause" : "Resume",
         onSelect: () => setAlertActive(a.id, !a.active),
       },
-      ...(a.symbol === symbol()
+      ...(a.symbol === chartSymbol
         ? []
         : [{ label: `Open ${a.symbol} in chart`, onSelect: () => setSymbol(a.symbol) }]),
       null,
@@ -30,7 +40,7 @@ export function alertMenu(a: Alert): MenuSpec {
 }
 
 /** The same menu for an alert the server runs (ADR-0042). */
-export function serverAlertMenu(a: ServerAlert): MenuSpec {
+export function serverAlertMenu(a: ServerAlert, chartSymbol: string): MenuSpec {
   const send = (request: Promise<unknown>) =>
     void request.catch((err: unknown) => showToast(serverAlertError(err)));
   return {
@@ -41,7 +51,7 @@ export function serverAlertMenu(a: ServerAlert): MenuSpec {
         label: a.active ? "Pause" : "Resume",
         onSelect: () => send(updateServerAlert({ alert_id: a.id, active: !a.active })),
       },
-      ...(a.symbol === symbol()
+      ...(a.symbol === chartSymbol
         ? []
         : [{ label: `Open ${a.symbol} in chart`, onSelect: () => setSymbol(a.symbol) }]),
       null,
@@ -60,7 +70,7 @@ export interface IndicatorActions {
 }
 
 /** Items for what the row can do; a compare symbol's legend row can only be removed. */
-export function indicatorItems(name: string, a: IndicatorActions): (MenuItem | null)[] {
+export function indicatorMenu(name: string, a: IndicatorActions): MenuSpec {
   const open: MenuItem[] = [];
   if (a.onAddAlert) open.push({ label: `Add alert on ${name}…`, onSelect: a.onAddAlert });
   if (a.onSettings) open.push({ label: `Settings for ${name}…`, onSelect: a.onSettings });
@@ -70,9 +80,30 @@ export function indicatorItems(name: string, a: IndicatorActions): (MenuItem | n
   const remove: MenuItem[] = a.onRemove
     ? [{ label: `Remove ${name}`, danger: true, onSelect: a.onRemove }]
     : [];
-  return open.length > 0 && remove.length > 0 ? [...open, null, ...remove] : [...open, ...remove];
+  return {
+    label: `${name} actions`,
+    items: open.length > 0 && remove.length > 0 ? [...open, null, ...remove] : [...open, ...remove],
+  };
 }
 
-export function indicatorMenu(name: string, a: IndicatorActions): MenuSpec {
-  return { label: `${name} actions`, items: indicatorItems(name, a) };
+/** The menu of an indicator instance of the chart that owns `store`. */
+export function indicatorMenuOf(
+  store: IndicatorStore,
+  series: SeriesPayload | null | undefined,
+  key: string,
+  on: { onAddAlert: (key: string) => void; onSettings: (key: string) => void },
+): MenuSpec {
+  const entries = store.activeIndicators();
+  const index = entries.findIndex((e) => instanceKey(e) === key);
+  const entry = entries[index];
+  return indicatorMenu(
+    entry ? chipName(indicatorName(entry), paramLabels(entries, paramDefaults(), true).get(key)) : key,
+    {
+      hidden: entry !== undefined && isHidden(entry),
+      onAddAlert: series?.indicators[key]?.lines?.length ? () => on.onAddAlert(key) : undefined,
+      onSettings: () => on.onSettings(key),
+      onToggleHidden: () => store.toggleIndicatorHidden(index),
+      onRemove: () => store.removeIndicator(key),
+    },
+  );
 }

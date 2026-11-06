@@ -9,6 +9,7 @@ sidebar:
 **Date:** 2026-11-05
 **Amends:** [ADR-0020](/chartgen/decisions/0020-client-side-price-alerts/) (alerts get a source besides the price)
 **Amended by:** [ADR-0042](/chartgen/decisions/0042-server-side-alerts/) (price alerts can run on the server; these sources stay in the browser)
+**Amended by:** [ADR-0043](/chartgen/decisions/0043-multi-chart-grid/) (in a grid, chart-bound alerts read the active chart)
 
 ## Context and Problem Statement
 

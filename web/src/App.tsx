@@ -4,15 +4,14 @@ import {
   createEffect,
   createMemo,
   createSignal,
+  For,
+  mapArray,
   onCleanup,
   untrack,
   onMount,
   Show,
   type JSX,
 } from "solid-js";
-import { useQueryClient } from "@tanstack/solid-query";
-
-import type { Chart as KLineChart } from "klinecharts";
 
 import { BottomBar } from "./components/BottomBar";
 import {
@@ -22,20 +21,15 @@ import {
   openAlertDialog,
   plotRef,
 } from "./components/AlertDialog";
-import { AlertLines } from "./components/AlertLines";
-import { Chart, paletteColor } from "./components/Chart";
-import { ChartContextMenu } from "./components/ChartContextMenu";
+import { paletteColor } from "./components/Chart";
+import { ChartPane, createChartPane } from "./components/ChartPane";
 import { ContextMenuHost } from "./components/ContextMenu";
-import { indicatorItems, indicatorMenu, type IndicatorActions } from "./components/menus";
-import { ChartLoadError } from "./components/ChartLoadError";
+import { indicatorMenuOf } from "./components/menus";
 import { ChartSettings } from "./components/ChartSettings";
-import {
-  DRAWING_LABELS,
-  DrawingToolbar,
-  type DrawingsApi,
-} from "./components/DrawingToolbar";
+import { DRAWING_LABELS } from "./components/DrawingToolbar";
+import { GridMenu } from "./components/GridMenu";
 import { isDrawingAlertTool, isHorizontalTool } from "./lib/alerts";
-import { forgetReadings, setIndicatorSignatures } from "./stores/alerts";
+import { chartContext, setIndicatorSignatures } from "./stores/alerts";
 import { CompactIndicatorErrors, IndicatorChips } from "./components/IndicatorChips";
 import { IndicatorPicker } from "./components/IndicatorPicker";
 import { IndicatorSettings } from "./components/IndicatorSettings";
@@ -46,13 +40,11 @@ import {
   ScriptEditorButton,
   ScriptEditorDock,
 } from "./components/ScriptEditorDock";
-import { ReplayBar } from "./components/ReplayBar";
-import { chipName, rememberLabels } from "./lib/indicatorNames";
+import { chipName } from "./lib/indicatorNames";
 import { scriptingEnabled } from "./lib/scripts";
 import { mergeParams } from "./lib/paramForm";
 import { resolveColors } from "./lib/chartStyle";
 import { PALETTES } from "./lib/theme";
-import { resolveTimeZone } from "./lib/timezone";
 import { geometryOf } from "./lib/geometryStyle";
 import { plotsOf } from "./lib/plotStyle";
 import { StatusLine, type Status } from "./components/StatusLine";
@@ -69,39 +61,15 @@ import {
 } from "./lib/chartActions";
 import { isTypingContext, keepKeyboardFocus, swallowMenuGhostClicks } from "./lib/keys";
 import { compact } from "./lib/viewport";
-import { alignAsOf, COMPARE_PALETTE } from "./lib/compare";
-import { createCompareFeed, type CompareData } from "./lib/compareFeed";
-import { barCloseMs, isContinuousMarket } from "./lib/countdown";
 import { createMcpSession } from "./mcp";
 import { startSignIn, tryHandlePendingRedirect } from "./oauth";
-import {
-  chartQueryKey,
-  createChartQuery,
-  createListIndicatorsQuery,
-  createToolNamesQuery,
-} from "./queries";
-import {
-  createLiveFeed,
-  FAST_POLL_MS,
-  SLOW_POLL_MS,
-  type HistoryStatus,
-  type LiveRequest,
-  type LiveSnapshot,
-  type PollStatus,
-} from "./lib/liveFeed";
-import type { SeriesPayload } from "./types/responses";
+import { createListIndicatorsQuery, createToolNamesQuery } from "./queries";
 import { createAlertLogger } from "./services/notifications";
-import { createReplay } from "./services/replay";
-import {
-  copyChartLink,
-  importPending,
-  reconcileImported,
-} from "./services/shareLink";
+import { copyChartLink, reconcileImported } from "./services/shareLink";
 import {
   createAlertQuotes,
   createServerAlertPoll,
   chartTick,
-  feedChartSnapshot,
   feedPrice,
 } from "./services/alertEngine";
 import {
@@ -114,17 +82,16 @@ import {
   isHidden,
   paramLabels,
   removeIndicator,
-  setActiveIndicators,
   toggleIndicatorHidden,
-  toWire,
   updateIndicatorSettings,
 } from "./stores/indicators";
+import { addCompare } from "./stores/compare";
 import {
-  addCompare,
-  compareEntries,
-  compareSymbols,
-  removeCompare,
-} from "./stores/compare";
+  activePane,
+  grid,
+  GRID_SHAPES,
+  paneCount,
+} from "./stores/grid";
 import { chartSettings } from "./stores/chartSettings";
 import {
   paramDefaults,
@@ -132,22 +99,9 @@ import {
   type ParamDefaults,
 } from "./stores/layouts";
 import {
-  addRecent,
-  autoScale,
-  chartStyleOf,
-  invertScale,
-  lockRatio,
-  scaleMode,
-  setAutoScale,
-  setInvertScale,
-  setLockRatio,
-  setScaleMode,
-  setSymbol,
-  chartType,
   theme,
   symbol,
   timeframe,
-  timeZone,
 } from "./stores/layout";
 
 export function App(): JSX.Element {
@@ -159,8 +113,8 @@ export function App(): JSX.Element {
   const [pickerOpen, setPickerOpen] = createSignal(false);
   // Index (into the active set) of the indicator whose settings dialog is open.
   const [settingsIndex, setSettingsIndex] = createSignal<number | null>(null);
-  const [chart, setChart] = createSignal<KLineChart | null>(null);
   const [settingsOpen, setSettingsOpen] = createSignal(false);
+  const [compareOpen, setCompareOpen] = createSignal(false);
 
   onMount(() => onCleanup(keepKeyboardFocus()));
   onMount(() => onCleanup(swallowMenuGhostClicks()));
@@ -213,9 +167,6 @@ export function App(): JSX.Element {
     });
   });
 
-  // Hidden indicators are client-only and never requested from the server.
-  const wireIndicators = createMemo(() => toWire(activeIndicators()));
-
   // Chart legends and the object tree address an instance by its key (ADR-0028).
   const indexOf = (key: string) =>
     activeIndicators().findIndex((e) => instanceKey(e) === key);
@@ -240,205 +191,38 @@ export function App(): JSX.Element {
     };
   });
 
-  // Plot styles are client-only (ADR-0017): they reach the chart separately
-  // from the wire indicators, so a style change never refetches.
-  const plotStyles = createMemo(() =>
-    Object.fromEntries(
-      activeIndicators().map((e) => [instanceKey(e), indicatorStyle(e)]),
-    ),
+  // --- Charts of the grid (ADR-0043) ------------------------------------
+  // The compact shell shows only the active chart; the grid and the other
+  // charts stay as they are, to come back when there is room.
+  const shape = () => (compact() ? "1" : grid());
+  const paneIds = createMemo(
+    () =>
+      compact()
+        ? [activePane()]
+        : Array.from({ length: paneCount(grid()) }, (_, i) => i),
+    [],
+    { equals: (a, b) => a.join() === b.join() },
   );
-
-  const query = createChartQuery(session, () => ({
-    ticker: symbol(),
-    timeframe: timeframe(),
-    indicators: wireIndicators(),
-    chart_style: chartStyleOf(chartType()),
-    // Indicators from a share link wait for the registry check below.
-    enabled: authReady() && !importPending(),
-  }));
-
-  // The live feed owns the chart's data from each full load on: it polls
-  // the tail and pages in history, and the chart renders its snapshots.
-  const [live, setLive] = createSignal<LiveSnapshot | null>(null);
-  const [pollStatus, setPollStatus] = createSignal<PollStatus>({ kind: "off" });
-  const [historyStatus, setHistoryStatus] = createSignal<HistoryStatus>({
-    kind: "idle",
-  });
-  let feedTicker = "";
-
-  // --- Bar replay (ADR-0023) ------------------------------------------
-  // The request of the series the feed holds (set where it is adopted).
-  let feedRequest: LiveRequest | null = null;
-  // True while exiting replay restarts the feed from its series: that reset
-  // holds the close of the replay start, older than the prices the alerts
-  // saw meanwhile (quotes poll), so it must not become their baseline.
-  let resuming = false;
-  // Whether a drawing tool is armed (Esc then cancels only the tool).
-  const [drawingArmed, setDrawingArmed] = createSignal(false);
+  const panes = createMemo(
+    mapArray(paneIds, (pane) => createChartPane(pane, { session, authReady })),
+  );
+  // The chart the header, panels and shortcuts act on.
+  const view = createMemo(
+    () => panes().find((p) => p.pane === activePane()) ?? panes()[0]!,
+  );
+  const [rail, setRail] = createSignal<HTMLElement>();
   // Compact shell: the drawing toolbar behind the dock's Draw button.
   const [drawOpen, setDrawOpen] = createSignal(false);
-  const replay = createReplay({
-    live,
-    request: () => feedRequest,
-    suspendLive: () => feed.suspend(),
-    // Only when the feed still holds the current request's series: if a
-    // new load is in flight, adopting it restarts the feed.
-    resumeLive: () => {
-      const s = untrack(live)?.series;
-      if (s && feedRequest && JSON.stringify(chartQueryKey(feedRequest)) === feedKey) {
-        resuming = true;
-        feed.reset(s, feedRequest);
-        resuming = false;
-        // Indicator readings from before replay are no baseline for the
-        // live values that follow (ADR-0034).
-        forgetReadings(feedTicker);
-      }
-    },
-    loadUntil: (ts, isCurrent) => feed.loadUntil(ts, isCurrent),
-    fetch: (request, { signal, ...args }) =>
-      session.callGenerateChart({ ...request, ...args }, signal),
+  const chart = () => view().chart();
+  const live = () => view().live();
+  const shown = () => view().shown();
+  const drawings = () => view().drawings();
+  const wireIndicators = () => view().wireIndicators();
+  const plotStyles = () => view().plotStyles();
+  // Pushed tails carry their subscription id; each feed takes only its own.
+  session.onChartTick((id, tail) => {
+    for (const p of panes()) p.feed.applyPush(id, tail);
   });
-  // What the chart shows: the live snapshot, or the replay frame.
-  const shown = replay.snapshot;
-  // ---------------------------------------------------------------------
-
-  const feed = createLiveFeed({
-    fetch: (request, { signal, ...args }) =>
-      session.callGenerateChart({ ...request, ...args }, signal),
-    reload: () => query.refetch(),
-    // Server push over the SSE stream (ADR-0021); polling is the fallback.
-    push: {
-      subscribe: async (request, warmup) =>
-        (await session.callSubscribeChart({ ...request, warmup })).subscription_id,
-      unsubscribe: (subscription_id) => session.callUnsubscribeChart({ subscription_id }),
-    },
-    onSnapshot: (snapshot) => {
-      setLive(snapshot);
-      // Price alerts (ADR-0020) on the chart symbol's last close. Replay
-      // frames never pass here: while replaying the feed only pages.
-      if (snapshot && !resuming) feedChartSnapshot(feedTicker, snapshot);
-    },
-    onPollStatus: setPollStatus,
-    onHistoryStatus: setHistoryStatus,
-    // Replay (ADR-0023) reads as a hidden tab: no polls, no pushes.
-    doc: replay.liveDoc,
-  });
-  session.onChartTick(feed.applyPush);
-  onCleanup(feed.dispose);
-
-  // Hand each full load to the feed. A request change (symbol, timeframe,
-  // visible indicators, params) suspends the feed at once, which drops
-  // every in-flight poll and page of the old chart; the old chart stays on
-  // screen until the new load lands (keepPreviousData), and is cleared if
-  // that load fails.
-  //
-  // What gets adopted is read from the query cache entry of exactly the
-  // current key, not from `query.data`: that can still be the previous
-  // key's result (placeholder, or published a tick after the key changed).
-  // Each successful fetch stamps the entry with a new dataUpdatedAt, so a
-  // refetch of the same key (Retry, re-pick, the feed's own reload) is
-  // adopted even when the payload is equal, and switching back to a cached
-  // key adopts that key's own data.
-  const queryClient = useQueryClient();
-  let feedKey = "";
-  // dataUpdatedAt of the adopted entry; null: none yet, -1: cleared.
-  let adoptedAt: number | null = null;
-  createEffect(() => {
-    const request: LiveRequest = {
-      ticker: symbol(),
-      timeframe: timeframe(),
-      indicators: wireIndicators(),
-      chart_style: chartStyleOf(chartType()),
-    };
-    // Re-run whenever the query publishes a result.
-    void query.data;
-    void query.dataUpdatedAt;
-    void query.status;
-    untrack(() => {
-      const key = chartQueryKey(request);
-      const json = JSON.stringify(key);
-      if (json !== feedKey) {
-        feedKey = json;
-        adoptedAt = null;
-        feed.suspend();
-      }
-      const state = queryClient.getQueryState<SeriesPayload, Error>(key);
-      if (state?.data !== undefined) {
-        if (state.dataUpdatedAt === adoptedAt) return;
-        adoptedAt = state.dataUpdatedAt;
-        // A copy: the feed updates its series in place, the cache stays as loaded.
-        feedTicker = request.ticker;
-        feedRequest = request;
-        feed.reset(structuredClone(state.data), request);
-      } else if (state?.status === "error" && adoptedAt !== -1) {
-        adoptedAt = -1;
-        feed.reset(null, request);
-      }
-    });
-  });
-
-  // --- Compare symbols (ADR-0022) -------------------------------------
-  const [compareOpen, setCompareOpen] = createSignal(false);
-  const [compareData, setCompareData] = createSignal(
-    new Map<string, CompareData>(),
-  );
-  const compareFeed = createCompareFeed({
-    fetch: (request, { signal, ...args }) =>
-      session.callGenerateChart(
-        { ...request, indicators: [], chart_style: "candles", ...args },
-        signal,
-      ),
-    onChange: setCompareData,
-    pollMs: (s) => (isContinuousMarket(s) ? FAST_POLL_MS : SLOW_POLL_MS),
-    // No compare tail polls while replaying (ADR-0023).
-    doc: replay.liveDoc,
-  });
-  onCleanup(compareFeed.dispose);
-  // The main symbol is never one of its own compare symbols: pick it as the
-  // main symbol and it leaves the list.
-  createEffect(() => {
-    const main = symbol();
-    if (untrack(compareSymbols).includes(main)) removeCompare(main);
-  });
-  const comparing = createMemo(() =>
-    compareEntries().filter((e) => e.symbol !== symbol()),
-  );
-  // Sized to the main series once it matches the timeframe (a kept previous
-  // chart of another timeframe must not size the loads).
-  createEffect(() => {
-    const s = live()?.series;
-    const ready = authReady() && s?.interval === timeframe();
-    compareFeed.sync({
-      symbols: authReady() ? comparing().map((e) => e.symbol) : [],
-      timeframe: timeframe(),
-      mainCount: ready ? s.bars.length : 0,
-      mainFirst: ready ? (s.bars[0]?.t ?? null) : null,
-    });
-  });
-  const compareLines = createMemo(() => {
-    const series = live()?.series;
-    const times = series?.bars.map((b) => b.t) ?? [];
-    // Join on the main bar's end (see alignAsOf); 1 s when the interval is unknown.
-    const last = times.at(-1);
-    const close =
-      last != null && series?.interval
-        ? barCloseMs(last, series.interval)
-        : null;
-    const step = last != null && close !== null ? close / 1000 - last : 1;
-    return comparing().map(({ symbol: sym, slot }) => {
-      const data = compareData().get(sym);
-      return {
-        symbol: sym,
-        color: COMPARE_PALETTE[slot]!,
-        values: data ? alignAsOf(times, data.bars, step) : times.map(() => null),
-      };
-    });
-  });
-  // ---------------------------------------------------------------------
-  // Sidebar tabs: Data Window (crosshair bar) and Object Tree (drawings).
-  const [crosshair, setCrosshair] = createSignal<number | null>(null);
-  const [compareFrom, setCompareFrom] = createSignal(0);
-  const [drawings, setDrawings] = createSignal<DrawingsApi | null>(null);
   // ---------------------------------------------------------------------
 
   // --- Drawing and indicator alerts (ADR-0034) ---------------------------
@@ -469,46 +253,18 @@ export function App(): JSX.Element {
     }
     openAlertDialog({ source: plotRef(key, 0), price: lastPlotValue(series, key, 0) ?? undefined });
   };
-  // The one indicator menu, wherever it opens: chip, tree row, sub-pane.
-  const indicatorMenuParts = (key: string): { name: string; actions: IndicatorActions } => {
-    const entries = activeIndicators();
-    const entry = entries.find((e) => instanceKey(e) === key);
-    return {
-      name: entry
-        ? chipName(indicatorName(entry), paramLabels(entries, paramDefaults(), true).get(key))
-        : key,
-      actions: {
-        hidden: entry !== undefined && isHidden(entry),
-        onAddAlert: live()?.series.indicators[key]?.lines?.length
-          ? () => addIndicatorAlert(key)
-          : undefined,
-        onSettings: () => setSettingsIndex(indexOf(key)),
-        onToggleHidden: () => toggleIndicatorHidden(indexOf(key)),
-        onRemove: () => removeIndicator(key),
-      },
-    };
-  };
-  const indicatorMenuOf = (key: string) => {
-    const { name, actions } = indicatorMenuParts(key);
-    return indicatorMenu(name, actions);
-  };
-  // ---------------------------------------------------------------------
-
-  // --- Bar replay (ADR-0023) ------------------------------------------
-  // Compare lines as of the cursor: their values align with the full series,
-  // whose prefix the frame is.
-  const shownCompare = createMemo(() => {
-    const lines = compareLines();
-    if (replay.mode() !== "active") return lines;
-    const n = shown()?.series.bars.length ?? 0;
-    return lines.map((l) => ({ ...l, values: l.values.slice(0, n) }));
-  });
+  // Chips and tree rows follow the active chart; a sub-pane asks its own (ChartPane).
+  const indicatorMenu = (key: string) =>
+    indicatorMenuOf(view().indicators, live()?.series, key, {
+      onAddAlert: addIndicatorAlert,
+      onSettings: (k) => setSettingsIndex(indexOf(k)),
+    });
   // ---------------------------------------------------------------------
 
   // Other symbols with active alerts are evaluated from their own quotes poll.
   // While replaying the chart symbol is polled there too (ADR-0023): the
   // feed is suspended, and its alerts still need real prices.
-  createAlertQuotes(session, authReady, () => (replay.mode() === "off" ? symbol() : ""));
+  createAlertQuotes(session, authReady, () => (view().replay.mode() === "off" ? symbol() : ""));
   createServerAlertPoll(session, authReady);
 
   if (import.meta.env.DEV) {
@@ -516,39 +272,50 @@ export function App(): JSX.Element {
     (window as unknown as Record<string, unknown>).__chartgenTest = {
       chart,
       series: () => live()?.series ?? null,
+      // Multi-chart e2e (tests/e2e/multi-chart.spec.ts): what alerts read, and each chart of the grid.
+      alertContext: chartContext,
+      paneSeries: (pane: number) => panes().find((p) => p.pane === pane)?.live()?.series ?? null,
+      panes: () =>
+        panes().map((p) => ({
+          pane: p.pane,
+          symbol: p.layout.symbol(),
+          timeframe: p.layout.timeframe(),
+          indicators: p.wireIndicators(),
+          invert: p.layout.invertScale(),
+          reverse: p.chart()?.getStyles().yAxis.reverse ?? null,
+          candleIndicators: [
+            ...((p.chart()?.getIndicatorByPaneId("candle_pane") as Map<string, unknown> | null)?.keys() ?? []),
+          ],
+          visibleFrom: p.chart()?.getDataList()[p.chart()!.getVisibleRange().from]?.timestamp ?? null,
+          candleHeight: p.chart()?.getSize("candle_pane")?.height ?? null,
+          stackHeight: p.chart()?.getSize()?.height ?? null,
+          // Canvases whose backing store does not match their size draw blank or stretched.
+          staleCanvases: [...(p.chart()?.getDom()?.querySelectorAll("canvas") ?? [])].filter(
+            (el) => el.height !== Math.round(el.clientHeight * devicePixelRatio),
+          ).length,
+          bars: p.live()?.series.bars.length ?? 0,
+          version: p.live()?.update.version ?? null,
+          updateKind: p.live()?.update.kind ?? null,
+          poll: p.pollStatus().kind,
+          drawings: p.drawings()?.list().length ?? 0,
+        })),
       // Alert e2e (tests/e2e/alerts.spec.ts): inject a live price. For the
       // chart symbol it comes with the chart's bars and indicators, as a
       // live tail would (sloped drawing alerts need them).
       feedPrice: (sym: string, price: number) => {
         const s = live()?.series;
-        feedPrice(sym, price, s && sym === feedTicker ? chartTick(s) : undefined);
+        feedPrice(sym, price, s && sym === symbol() ? chartTick(s) : undefined);
       },
       // Bar replay e2e (tests/e2e/bar-replay.spec.ts): the frame on screen
       // and the replay state.
       shownSeries: () => shown()?.series ?? null,
       replay: () => ({
-        mode: replay.mode(),
-        playing: replay.playing(),
-        cursorTime: replay.cursorTime(),
+        mode: view().replay.mode(),
+        playing: view().replay.playing(),
+        cursorTime: view().replay.cursorTime(),
       }),
     };
   }
-
-  // A symbol only becomes a "recent" once its data actually loaded, so
-  // typos never end up in the list. The last one that loaded is also what
-  // a failed load offers to go back to.
-  const [lastLoaded, setLastLoaded] = createSignal<string | null>(null);
-  createEffect(() => {
-    const loaded = query.isSuccess && !query.isPlaceholderData;
-    const current = symbol();
-    if (loaded) {
-      setLastLoaded(current);
-      untrack(() => addRecent(current));
-    }
-  });
-
-  // Chips and picker show the legend's names (EMA, BB), not registry ids.
-  createEffect(() => rememberLabels(live()?.series.indicators));
 
   // The indicator registry only changes between deploys, so this query
   // is cached forever. It fires as soon as auth is ready.
@@ -584,7 +351,7 @@ export function App(): JSX.Element {
   // Plots of the open dialog's indicator, from the last series payload.
   const settingsPlots = createMemo(() => {
     const key = settingsTarget()?.key;
-    const ind = key === undefined ? undefined : query.data?.indicators[key];
+    const ind = key === undefined ? undefined : view().query.data?.indicators[key];
     return key === undefined || !ind
       ? null
       : plotsOf(ind, (n) => paletteColor(key, n), key);
@@ -603,7 +370,7 @@ export function App(): JSX.Element {
 
   const settingsGeometry = createMemo(() => {
     const key = settingsTarget()?.key;
-    const ind = key === undefined ? undefined : query.data?.indicators[key];
+    const ind = key === undefined ? undefined : view().query.data?.indicators[key];
     return key === undefined || !ind ? null : geometryOf(key, ind);
   });
 
@@ -611,6 +378,7 @@ export function App(): JSX.Element {
     const authFailed = authError();
     if (authFailed !== null) return { kind: "auth-error", message: authFailed };
     if (!authReady()) return { kind: "authenticating" };
+    const query = view().query;
     if (query.isFetching) return { kind: "loading" };
     if (query.isError) {
       const err = query.error;
@@ -631,14 +399,14 @@ export function App(): JSX.Element {
         </h1>
         <Toolbar
           session={session}
-          onReselect={() => void query.refetch()}
+          onReselect={() => void view().refetch()}
           onScreenshot={screenshot}
           onCopyLink={() => void copyChartLink()}
           onResetChart={resetView}
           onSettings={() => setSettingsOpen(true)}
           onCompare={() => setCompareOpen(true)}
-          replay={replay.mode() !== "off"}
-          onReplay={() => (replay.mode() === "off" ? replay.enter() : replay.exit())}
+          replay={view().replay.mode() !== "off"}
+          onReplay={() => (view().replay.mode() === "off" ? view().replay.enter() : view().replay.exit())}
         />
         <SymbolSearch
           open={compareOpen()}
@@ -673,7 +441,7 @@ export function App(): JSX.Element {
         <div>
           <StatusLine
             status={status()}
-            live={replay.mode() === "off" ? pollStatus() : { kind: "off" }}
+            live={view().replay.mode() === "off" ? view().pollStatus() : { kind: "off" }}
             onSignIn={() =>
               void startSignIn().catch((e: unknown) =>
                 setAuthError(e instanceof Error ? e.message : String(e)),
@@ -681,7 +449,10 @@ export function App(): JSX.Element {
             }
           />
         </div>
-        <div class="ml-auto min-w-0 max-[479px]:[&_[data-testid=layout-name]]:hidden">
+        <div class="ml-auto compact:hidden">
+          <GridMenu />
+        </div>
+        <div class="min-w-0 compact:ml-auto max-[479px]:[&_[data-testid=layout-name]]:hidden">
           <LayoutMenu />
         </div>
       </header>
@@ -690,7 +461,7 @@ export function App(): JSX.Element {
         onRemove={removeIndicator}
         onToggleHidden={toggleIndicatorHidden}
         onSettings={setSettingsIndex}
-        menu={indicatorMenuOf}
+        menu={indicatorMenu}
         errors={live()?.series.indicator_errors}
       />
       <CompactIndicatorErrors
@@ -749,110 +520,57 @@ export function App(): JSX.Element {
         onClose={() => setSettingsOpen(false)}
       />
       <main class="flex flex-1 min-h-0" data-draw-open={drawOpen() ? "" : undefined}>
-        <DrawingToolbar
-          chart={chart()}
-          symbol={symbol()}
-          onApi={setDrawings}
-          onArmedChange={(armed) => {
-            setDrawingArmed(armed);
-            // The chart needs the room to place the tool's points.
-            if (armed) setDrawOpen(false);
+        <div ref={setRail} class="contents" />
+        <div
+          class="chart-grid"
+          data-testid="chart-grid"
+          data-multi={paneIds().length > 1 ? "" : undefined}
+          style={{
+            "grid-template-columns": `repeat(${GRID_SHAPES[shape()].columns}, minmax(0, 1fr))`,
+            "grid-template-rows": `repeat(${GRID_SHAPES[shape()].rows}, minmax(0, 1fr))`,
           }}
-          disarm={replay.mode() === "select"}
-        />
-        <AlertLines chart={chart()} symbol={symbol()} />
-        <ChartContextMenu
-          chart={chart()}
-          symbol={symbol()}
-          scale={{
-            scaleMode,
-            autoScale,
-            lockRatio,
-            invertScale,
-            setScaleMode,
-            setAutoScale,
-            setLockRatio,
-            setInvertScale,
-          }}
-          comparing={compareSymbols().length > 0}
-          drawings={drawings()}
-          hasIndicators={activeIndicators().length > 0}
-          indicatorItems={(key) => {
-            const { name, actions } = indicatorMenuParts(key);
-            return indicatorItems(name, actions);
-          }}
-          onCopyLink={() => void copyChartLink()}
-          onRemoveAllIndicators={() => setActiveIndicators([])}
-          onSettings={() => setSettingsOpen(true)}
         >
-          <Show when={query.isError && !query.isFetching}>
-            <ChartLoadError
-              symbol={symbol()}
-              message={
-                query.error instanceof Error
-                  ? query.error.message
-                  : String(query.error)
-              }
-              previousSymbol={lastLoaded() === symbol() ? null : lastLoaded()}
-              onRetry={() => void query.refetch()}
-              onBack={setSymbol}
-              onRemoveIndicators={(names) =>
-                setActiveIndicators(
-                  activeIndicators().filter((e) => !names.includes(indicatorName(e))),
-                )
-              }
-            />
-          </Show>
-          <Chart
-            series={shown()?.series ?? null}
-            update={shown()?.update ?? null}
-            history={historyStatus()}
-            onLoadOlder={feed.loadOlder}
-            activeIndicators={wireIndicators()}
-            fitPanes={scriptEditorOpen()}
-            styles={plotStyles()}
-            chartType={chartType()}
-            timeZone={resolveTimeZone(timeZone(), symbol())}
-            onToggleHidden={(n) => toggleIndicatorHidden(indexOf(n))}
-            onSettings={(n) => setSettingsIndex(indexOf(n))}
-            onRemove={removeIndicator}
-            onAddAlert={addIndicatorAlert}
-            onChartReady={setChart}
-            onCrosshair={setCrosshair}
-            onCompareFrom={setCompareFrom}
-            compare={shownCompare()}
-            onRemoveCompare={removeCompare}
-          />
-          {/* Bar replay controls and start picker (ADR-0023). */}
-          <ReplayBar
-            replay={replay}
-            chart={chart()}
-            drawingArmed={drawingArmed()}
-            timeZone={resolveTimeZone(timeZone(), symbol())}
-          />
-        </ChartContextMenu>
+          <For each={panes()}>
+            {(state) => (
+              <ChartPane
+                state={state}
+                rail={rail()}
+                multi={paneIds().length > 1}
+                fitPanes={scriptEditorOpen()}
+                onToolArmed={() => setDrawOpen(false)}
+                onIndicatorSettings={(key) => setSettingsIndex(indexOf(key))}
+                onAddAlert={addIndicatorAlert}
+                onSettings={() => setSettingsOpen(true)}
+              />
+            )}
+          </For>
+        </div>
         <Sidebar
           session={session}
           enabled={authReady()}
           panels={{
             // The frame on screen: in replay, never a bar after the cursor.
             series: shown()?.series ?? null,
-            crosshair: crosshair(),
+            crosshair: view().crosshair(),
             styles: plotStyles(),
-            compare: shownCompare(),
-            compareFrom: compareFrom(),
-            timeZone: resolveTimeZone(timeZone(), symbol()),
+            compare: view().shownCompare(),
+            compareFrom: view().compareFrom(),
+            timeZone: view().timeZone(),
             drawings: drawings(),
             onSettings: (n) => setSettingsIndex(indexOf(n)),
-            indicatorMenu: indicatorMenuOf,
+            indicatorMenu,
           }}
         />
       </main>
       <div class="bottom-rows flex flex-col shrink-0">
-        <BottomBar chart={chart()} series={shown()?.series ?? null} loadUntil={feed.loadUntil} />
+        <BottomBar
+          chart={chart()}
+          series={shown()?.series ?? null}
+          loadUntil={(ts, isCurrent) => view().feed.loadUntil(ts, isCurrent)}
+        />
         <Show when={compact()}>
           <SidebarDock
-            drawActive={drawOpen() || drawingArmed()}
+            drawActive={drawOpen() || view().drawingArmed()}
             onDraw={() => setDrawOpen(!drawOpen())}
           />
         </Show>

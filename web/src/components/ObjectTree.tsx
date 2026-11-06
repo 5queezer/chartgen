@@ -286,7 +286,7 @@ export function ObjectTree(props: ObjectTreeProps): JSX.Element {
                   </>
                 }
                 onClick={() => openAlertDialog({ id: a.id })}
-                menu={() => alertMenu(a)}
+                menu={() => alertMenu(a, symbol())}
               >
                 <Action label="Delete alert" path={CLOSE} onClick={() => removeAlert(a.id)} />
               </Item>
