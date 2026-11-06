@@ -33,7 +33,7 @@ docker build -t chartgen .
 docker run -p 9315:9315 \
   -e CHARTGEN_BASE_URL=https://chartgen.example.com \
   -v chartgen-data:/root/.chartgen \
-  chartgen --serve --trade --testnet
+  chartgen --serve
 ```
 
 Production must mount this volume. The `~/.chartgen/` mount persists
