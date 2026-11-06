@@ -3474,9 +3474,8 @@ mod tests {
         let refresh =
             rt.spawn_blocking(move || fetch_binance_via(client, "BTCUSDT", "1h", 800, None));
         fake.wait_for_requests(2);
-        let started = Instant::now();
-        rt.block_on(burst());
-        assert!(started.elapsed() < Duration::from_secs(5), "they waited");
+        let served = rt.block_on(tokio::time::timeout(Duration::from_secs(5), burst()));
+        assert!(served.is_ok(), "they waited for the refresh");
         assert_eq!(fake.requests(), 2);
         fake.pause(false);
         rt.block_on(refresh).unwrap().unwrap();
