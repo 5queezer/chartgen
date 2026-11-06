@@ -755,6 +755,7 @@ mod tests {
                 .collect(),
             symbol: None,
             interval: None,
+            session: None,
         }
     }
     fn closes(c: &[f64]) -> OhlcvData {
@@ -1157,6 +1158,7 @@ mod tests {
                     bars: full.bars[..n].to_vec(),
                     symbol: None,
                     interval: None,
+                    session: None,
                 };
                 let r = run(k, json!({}), &d);
                 assert!(r.lines.iter().all(|l| l.y.len() == n));

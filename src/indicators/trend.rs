@@ -782,6 +782,7 @@ mod tests {
                 .collect(),
             symbol: None,
             interval: None,
+            session: None,
         }
     }
 

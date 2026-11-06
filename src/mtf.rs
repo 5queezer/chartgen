@@ -21,6 +21,7 @@ pub fn aggregate_bars(data: &OhlcvData, target_tf: &str) -> Option<(OhlcvData, V
                 bars: vec![],
                 symbol: data.symbol.clone(),
                 interval: Some(target_tf.to_string()),
+                session: None,
             },
             vec![],
         ));
@@ -62,6 +63,7 @@ pub fn aggregate_bars(data: &OhlcvData, target_tf: &str) -> Option<(OhlcvData, V
             bars: agg_bars,
             symbol: data.symbol.clone(),
             interval: Some(target_tf.to_string()),
+            session: None,
         },
         mapping,
     ))
@@ -145,6 +147,7 @@ mod tests {
         let data = OhlcvData {
             bars,
             interval: Some("1h".into()),
+            session: None,
             symbol: Some("TEST".into()),
         };
         let (agg, mapping) = aggregate_bars(&data, "4h").unwrap();
@@ -190,6 +193,7 @@ mod tests {
         let data = OhlcvData {
             bars,
             interval: Some("1m".into()),
+            session: None,
             symbol: None,
         };
         let (agg, mapping) = aggregate_bars(&data, "1h").unwrap();
@@ -210,6 +214,7 @@ mod tests {
         let data = OhlcvData {
             bars: vec![],
             interval: Some("1m".into()),
+            session: None,
             symbol: None,
         };
         let (agg, mapping) = aggregate_bars(&data, "1h").unwrap();
@@ -222,6 +227,7 @@ mod tests {
         let data = OhlcvData {
             bars: vec![],
             interval: None,
+            session: None,
             symbol: None,
         };
         assert!(aggregate_bars(&data, "3h").is_none());

@@ -53,7 +53,7 @@ impl BinanceFeed {
         self
     }
 
-    fn url(&self) -> String {
+    pub(crate) fn url(&self) -> String {
         if self.trades {
             format!(
                 "wss://stream.binance.com:9443/stream?streams={0}@kline_{1}/{0}@aggTrade",
@@ -375,9 +375,12 @@ async fn fetch_binance_async(
         limit
     );
 
+    let gate = crate::binance_gate::spot();
+    let sent = gate.admit()?;
     let resp = reqwest::get(&url)
         .await
         .map_err(|e| format!("Binance REST request failed: {e}"))?;
+    gate.observe_response(sent, resp.status().as_u16(), resp.headers());
 
     if !resp.status().is_success() {
         return Err(format!("Binance REST returned status {}", resp.status()));

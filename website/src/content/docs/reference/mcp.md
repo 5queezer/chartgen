@@ -91,9 +91,62 @@ Render a chart for a symbol. Accepts `ticker`/`symbol`, `timeframe`/`interval`,
 | `warmup` | Integer, default 0, max 1000. `format=series` only. Fetches this many extra older bars and feeds them to the indicators, then trims them from the response, so the first returned bars have warmed-up values instead of `null`. `png`, `summary`, and `both` ignore it and render exactly `bars`. |
 | `chart_style` | `candles` (default) or `heikin_ashi`. `heikin_ashi` replaces the price bars with Heikin Ashi bars in every format: `haClose = (o+h+l+c)/4`, `haOpen = (prev haOpen + prev haClose)/2` (the first bar is seeded with `(o+c)/2`), `haHigh = max(h, haOpen, haClose)`, `haLow = min(l, haOpen, haClose)`; volume and timestamps are unchanged. Like TradingView, indicators are computed on the Heikin Ashi values, not the raw bars. The transform runs over `bars + warmup` before trimming, and because each `haOpen` is an exponentially decaying average, pages and tail polls with the same warmup agree after a few bars. `format=series` echoes the applied style as `chart_style`. Any other value is an error. |
 
-`timeframe` must be one of `1m 2m 3m 5m 15m 30m 60m 90m 1h 2h 4h 6h 8h 12h
-1d 3d 5d 1w 1wk 1M 1mo 3mo`; anything else is a tool error. Yahoo-style names
-are translated for Binance (`1wk` → `1w`, `1mo` → `1M`).
+`timeframe` is a number and a unit: `m` minutes, `h` hours, `d` or `D` days,
+`w`, `W` or `wk` weeks, and `M` or `mo` months (`7m`, `45m`, `90m`, `8h`, `2D`,
+`2W`, `3M`). Lowercase `m` is minutes and uppercase `M` months; the other units
+take either case. Anything else is a tool error that says what is wrong.
+[ADR-0038](/chartgen/decisions/0038-custom-intervals/) explains the limits:
+
+- Upper bounds, after normalization: under 1440 minutes, then `168h`, `365D`, `52W`
+  and `12M`. Not every length below a bound parses, as the next rule says. `1440m`
+  is `1d`, and seconds are not offered.
+- A minute or hour interval may take at most 60 native bars per bar, counted on
+  Binance's klines for every symbol. Every length up to 60 minutes qualifies; `61m`
+  needs 61 `1m` klines and is rejected, while `65m` needs 13 `5m` klines and is
+  fine, and `1439m` is rejected. Days, weeks and months have no such rule: `365D`
+  takes 365 `1d` klines.
+
+The response's `interval` is the canonical form, and the same bars have one
+name: `120m` is `2h`, `24h` is `1d`, `7d` is `1wk`, `2W` is `2wk`, `1M` is
+`1mo`.
+
+Where a source has the interval, its own bars are served. Otherwise bars come
+from the coarsest native interval that divides it and are resampled:
+
+| Source | Native | Built from |
+|---|---|---|
+| Binance | `1m 3m 5m 15m 30m 1h 2h 4h 6h 8h 12h 1d 3d 1w 1M` | `7m` from `1m`, `45m` from `15m`, `90m` from `30m`, `10h` from `2h`, `6d` from `3d`, `2W` from `1w`, `3M` from `1M` |
+| Yahoo | `1m 2m 5m 15m 30m 1h 90m 1d 1wk 1mo` | `7m` from `1m`, `6m` from `2m`, `45m` from `15m`, `8h` from `1h`, `2D` from `1d`, `2W` from `1wk`, `2M` and `3M` from `1mo` |
+
+Bars land on a stable grid, so a reload gives the same bars:
+
+- **24/7 symbols, minutes and hours.** A grid counted from the unix epoch.
+  It agrees with Binance's klines at every interval Binance has.
+- **Exchange-traded symbols, minutes and hours.** Buckets start at each
+  session's open, and a session's last bucket may be shorter, as on TradingView.
+- **Days.** Calendar days counted from epoch day 1, where Binance's `3d` klines
+  open. A stock's `2D` bucket with no trading day in it has no bar, and one
+  with a single trading day holds that day alone.
+- **Weeks.** Counted from Monday 1970-01-05, so `2W` opens every second Monday.
+- **Months.** Counted from January 1970, so `3M` is a calendar quarter and
+  `12M` a calendar year.
+
+A custom interval on Binance reads at most 20 requests' worth of native bars per
+call (20,000). That caps the bars fetched, which also supply `warmup`; the response
+returns at most `bars` of them. A `59m` call fetches about 338 bars, so one asking
+for `bars: 2` returns 2, computed over those 338, and one asking for `bars: 500`
+returns the 338 with `has_more: true`, though it asked for more, and older bars come
+from paging. Warmup past the cap is simply shorter, and paging does not restore it: a
+page, a poll and a push each compute over their own capped read. With `warmup: 1000` on
+`59m`, an indicator with a very long window stays `null` or unconverged on every one of
+them. Calls for the newest bars share native
+klines read in the last 2 minutes, so after the first, polling a tail costs one
+request whatever its warmup.
+
+The server holds one budget for all its Binance requests. After Binance answers 429,
+418 or 403 nothing is sent until its `Retry-After` has passed, and nothing starts once
+80% of the weight for the minute is used. Such a call is a tool error starting
+`Binance rate limit:` that names the wait. Retry after it.
 
 With a `ticker`, a failed upstream fetch (network error, unknown symbol, rate
 limit) is a tool error in every format. Only a call without a ticker renders
@@ -314,11 +367,21 @@ bars ahead of price.
 - `lines[k].index` and `fills[k].index` name the line or fill the values
   continue: Senkou A (line 2), Senkou B (line 3) and the cloud (fill 0).
 - `t` is those bars' open times: the last bar's time plus `j + 1`
-  intervals. Monthly (`1M`, `1mo`) and quarterly (`3mo`) bars step by
-  calendar months. Daily and longer bars skip Saturday and Sunday when the
-  loaded bars have none on a weekend (stocks); exchange holidays and
-  intraday closed hours are not skipped. It is absent when the bars have
-  no timestamps.
+  intervals, on 24/7 symbols. Month-based bars (`1M`, `3M`, `2mo`) step by
+  calendar months. Exchange-traded symbols follow the exchange's regular session,
+  from Yahoo's metadata, in its time zone: intraday bars stay between open and
+  close and restart at the next open, and day bars stay on trading days. Saturday and
+  Sunday each count as closed when no loaded bar falls on them, and a Sunday with
+  neither a Friday nor a Saturday means a Friday and Saturday weekend. Without a
+  session, as for crypto, a day closes only if the bars could have shown otherwise:
+  7 days of `1d` bars, or 5 cycles of 7 longer ones. US-listed equities, ETFs, indices and mutual funds also skip
+  the holidays of the NYSE's published calendar, for 2026 to 2028, on intraday and day
+  bars. Weekly and monthly bars stay on their calendar grid, so one can fall on a
+  holiday. An early-close day is not skipped: its bars stop at the 13:00 New York close. Other exchanges' holidays,
+  US indices quoted from Chicago (`^VIX`, `^TNX`), and US dates past 2028 are not skipped. Futures step
+  through their breaks. See
+  [ADR-0038](/chartgen/decisions/0038-custom-intervals/). `t` is absent when the
+  bars have no timestamps.
 - The per-bar arrays are unchanged, so clients that ignore `future` keep
   working. Every series response carries the block, tails and pushes
   included: the forming bar moves the newest projected values. Take it
@@ -373,7 +436,9 @@ pushes the same tail instead of you polling for it.
   duplicates.
 - **`has_more`** (boolean, always present in `format=series`) is `true`
   when older history may exist before `bars[0]`. For Binance and the
-  sample source that means the full `bars + warmup` count came back. For
+  sample source that means the read got all it asked for: the full `bars + warmup`
+  count or, for an interval built from finer bars, the 20,000-kline cap. So a capped
+  page can be shorter than `bars` and still report `true`. For
   Yahoo it means the request window was not cut off by Yahoo's lookback
   limit or the symbol's first trade date, so a short page (for example
   2000 1m bars when one 7-day window only holds about 1950) still reports
@@ -398,7 +463,9 @@ A non-zero `warmup` is raised to what the requested indicators need to
 converge, up to 1000
 ([ADR-0032](/chartgen/decisions/0032-indicator-aware-warmup/)). `ema_stack`
 needs 891 bars, so its EMA 200 is computed over at least that many and
-matches one long request to within 0.01% at a page seam or on a tail. The
+matches one long request to within 0.01% at a page seam or on a tail. The exception is
+a Binance interval built from finer bars when the 20,000-kline cap leaves fewer
+than that: a `59m` read holds about 338 bars, so these guarantees do not hold there. The
 other EMA/RMA-based built-ins (`ma`, `ma_ribbon`, `envelopes`, `keltner`,
 `rsi`, `atr`, `adx`, `supertrend`, `macd`, `stoch_rsi`, `trix`, `ppo`,
 `tsi`, `smi_ergodic`, `elder_force_index`, `volume_oscillator`,
@@ -420,7 +487,8 @@ and `has_more` is `false`.
 
 Upstream limits: Binance requests are paginated at 1000 bars per call.
 Yahoo intraday history ends after about 30 days for 1m, 60 days for other
-sub-hour intervals, and 730 days for 1h and the intervals built from it.
+sub-hour intervals, and 730 days for 1h, and an interval built from one of them
+ends with it: `7m` has 30 days of history on a stock, `45m` 60 and `8h` 730.
 Each upstream request times out after 10 s, and a paginated Binance fetch
 gives up after 20 s.
 
@@ -439,9 +507,10 @@ Yahoo has no native 3m, 2h, 4h, 6h, 12h or 3d, so chartgen builds them from
   shorter; at 12h each session is one bar. A session ends where two
   consecutive source bars are more than an hour apart, so the overnight gap,
   a futures daily break (ES=F trades 18:00–17:00 ET and restarts its buckets
-  at 18:00) and a lunch break that leaves a gap in the hourly bars each start
-  a new session. A market with such a break therefore anchors its afternoon
-  separately. Each bucket's `t` is its first source bar. Crypto (`BTC-USD`)
+  at 18:00) and a lunch break that leaves a gap in Yahoo's rows each start
+  a new session, so such a market anchors its afternoon separately. Tokyo, Shanghai
+  and Hong Kong keep null rows through lunch, so theirs stays on the morning's grid.
+  Each bucket's `t` is its slot on the session's grid. Crypto (`BTC-USD`)
   and FX (`EURUSD=X`) trade around the clock and use the UTC grid instead,
   with `t` at the grid start.
 - **3m** uses the UTC grid for every symbol (exchanges open on 15-minute
@@ -668,7 +737,13 @@ only (stdio returns an error); works without `--trade`.
 `indicators` (at most 10, with [instance ids](#several-instances-of-one-indicator)
 as for `generate_chart`), `chart_style` and `warmup` (default 0, max
 1000). Validation and error messages are otherwise the same as for
-`generate_chart`. It returns:
+`generate_chart`. An interval Binance has no stream for follows the coarsest
+stream that divides it (`7m` follows `1m`), and each tail is resampled from
+that stream's bars as a fetch would be, so a live bar is the bar a reload
+shows. The exception is a reconnect short enough to fit inside one native kline whose
+REST backfill fails, as during a rate-limit cooldown: that kline's last updates are
+lost, and the bar stays wrong until it leaves the window
+([ADR-0038](/chartgen/decisions/0038-custom-intervals/)). It returns:
 
 ```json
 { "subscription_id": "cs-0b7f…" }
@@ -695,11 +770,12 @@ forming bar, with every indicator recomputed. Merge it like a polled tail.
   synthetic feed ticks every ~500 ms.
 - **Cadence.** The server follows Binance's kline stream (every 2 s) and
   its aggTrade stream (each trade), and pushes at most 4 tails per second
-  per chart (2 per second when `warmup` is above 300). The first tail is
+  per chart (2 per second when `warmup` is above 300, or when an interval with no
+  stream of its own holds more than 302 native bars). The first tail is
   pushed right after subscribing.
 - **Sharing.** Subscriptions with equal arguments share one rolling window
-  and one recompute. Every chart of a symbol and interval shares one Binance
-  WebSocket.
+  and one recompute. Every chart of a symbol and feed interval shares one Binance
+  WebSocket, so `1m` and `7m` of a symbol use the same one.
 - **Limits.** At most 4 subscriptions per token, 8 per client address
   (the TCP peer; behind a reverse proxy that is the proxy) and 64 per
   server, and 10 `subscribe_chart` calls per token per minute. Over a
