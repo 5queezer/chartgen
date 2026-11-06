@@ -196,7 +196,7 @@ impl PushSource for SampleSource {
 }
 
 /// The sample source's forming bar with a sub-second wobble on its close,
-/// and the completed bar when the interval rolls over.
+/// and the completed bar just after the interval rolls over.
 async fn sample_feed(symbol: String, interval: String, tx: mpsc::Sender<FeedEvent>) {
     let mut forming: Option<String> = None;
     let mut every = tokio::time::interval(SAMPLE_TICK);
@@ -210,15 +210,16 @@ async fn sample_feed(symbol: String, interval: String, tx: mpsc::Sender<FeedEven
             return;
         };
         let rolled = forming.as_ref().is_some_and(|f| *f != bar.date);
-        if rolled && d.bars.len() == 2 && tx.send(FeedEvent::Bar(d.bars[0].clone())).await.is_err()
-        {
-            return;
-        }
         forming = Some(bar.date.clone());
         bar.close += bar.open * 0.002 * (now as f64 / 350.0).sin();
         bar.high = bar.high.max(bar.close);
         bar.low = bar.low.min(bar.close);
         if tx.send(FeedEvent::Tick(bar)).await.is_err() {
+            return;
+        }
+        // After the next candle's first tick, as a feed with trades sends it.
+        if rolled && d.bars.len() == 2 && tx.send(FeedEvent::Bar(d.bars[0].clone())).await.is_err()
+        {
             return;
         }
     }

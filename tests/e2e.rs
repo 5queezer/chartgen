@@ -1291,6 +1291,37 @@ mod server_alerts {
         assert_eq!(list["alerts"], serde_json::json!([]));
     }
 
+    /// "Bar close" on the real binary, where the sample feed sends the next candle's
+    /// first tick before the close, as a busy pair does. Takes up to a minute.
+    #[test]
+    fn test_a_close_alert_fires_when_the_candle_rolls_first() {
+        let db = store_path("alerts-close");
+        let (hook, _) = receiver();
+        let srv = alert_server(&db, hook, true);
+        let token = sign_in(srv.port, &register_external(srv.port));
+        let args = serde_json::json!({
+            "symbol": "BTCUSDT", "condition": "greater", "trigger": "once", "level": 0.01,
+            "interval": "1m", "evaluate_on": "close",
+        });
+        call_tool(srv.port, &token, "create_server_alert", args).unwrap();
+        let fired = || {
+            let list = call_tool(
+                srv.port,
+                &token,
+                "list_server_alerts",
+                serde_json::json!({}),
+            );
+            list.unwrap()["alerts"][0]["fire_count"] == 1
+        };
+        for _ in 0..700 {
+            if fired() {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        panic!("no close alert fired within 70 s");
+    }
+
     /// The test receiver setting means nothing outside the sample source, so
     /// a live server can never be pointed at loopback, however it is configured.
     #[test]

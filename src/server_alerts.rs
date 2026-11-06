@@ -223,7 +223,8 @@ impl Record {
 struct Watch {
     task: JoinHandle<()>,
     _lease: FeedLease,
-    /// Open time of the newest bar seen, and of the newest closed one.
+    /// Open time of the newest bar seen, and of the newest closed one (or just
+    /// before the first bar seen, so that an older close reads as a replay).
     last_bar: Option<i64>,
     last_closed: Option<i64>,
     last_price: Option<f64>,
@@ -428,9 +429,12 @@ impl ServerAlerts {
         }
     }
 
-    /// A feed event: evaluate the alerts on this feed. A bar older than the
-    /// newest is the backfill replayed after a reconnect: it is ignored, and the
-    /// baselines start over, as the browser's do after a gap.
+    /// A feed event: evaluate the alerts on this feed. A feed with trades rolls
+    /// the forming candle on the first trade past the boundary, so the closing
+    /// kline usually arrives after the next candle's first tick. So an older bar
+    /// is a late close unless it closed before, or before this watch began: those
+    /// are a replay (the backfill after a reconnect), and the baselines start over,
+    /// as the browser's do after a gap. An older tick is simply stale.
     fn on_event(&self, key: &FeedKey, event: FeedEvent) {
         let (is_close, bar) = match event {
             FeedEvent::Bar(bar) => (true, bar),
@@ -449,19 +453,23 @@ impl ServerAlerts {
         let Some(watch) = st.watches.get_mut(key) else {
             return;
         };
-        if watch.last_bar.is_some_and(|last| bar_time < last) {
+        if watch.last_bar.is_none() {
+            watch.last_closed = Some(bar_time - 1);
+        }
+        if is_close && watch.last_closed.is_some_and(|c| bar_time <= c) {
             Self::forget_baselines(st, key);
             return;
         }
-        watch.last_bar = Some(bar_time);
-        watch.last_price = Some(price);
-        watch.last_at = Some(now);
-        // The backfill also sends the forming bar as a `Bar`: only one past its
-        // end has closed.
-        let over =
-            chrono::Utc::now().timestamp() >= bar_time + data::interval_secs(&key.1).unwrap_or(0);
-        let closes = is_close && over && watch.last_closed.is_none_or(|c| bar_time > c);
-        if closes {
+        let late = watch.last_bar.is_some_and(|last| bar_time < last);
+        if late && !is_close {
+            return;
+        }
+        if !late {
+            watch.last_bar = Some(bar_time);
+            watch.last_price = Some(price);
+            watch.last_at = Some(now);
+        }
+        if is_close {
             watch.last_closed = Some(bar_time);
         }
 
@@ -469,7 +477,12 @@ impl ServerAlerts {
             .alerts
             .values()
             .filter(|a| {
-                a.active && a.feed() == *key && (a.evaluate_on == EvaluateOn::Live || closes)
+                a.active
+                    && a.feed() == *key
+                    && match a.evaluate_on {
+                        EvaluateOn::Live => !late,
+                        EvaluateOn::Close => is_close,
+                    }
             })
             .map(|a| a.id.clone())
             .collect();
@@ -760,22 +773,25 @@ impl ServerAlerts {
         }
 
         let refuse = |_| format!("Server alerts cannot watch {symbol} at {interval}");
-        let own_feed = self.hub.feed_key(&symbol, &interval).map_err(refuse)?;
-        // The bars of the interval itself, not of a finer stream it is built from.
-        if evaluate_on == EvaluateOn::Close
-            && data::interval_secs(&own_feed.1)
-                .is_none_or(|s| data::interval_secs(&interval) != Some(s))
-        {
-            return Err(format!(
-                "{interval} has no kline stream, so its closes cannot be watched; use evaluate_on: live"
-            ));
-        }
         let feed = match evaluate_on {
-            EvaluateOn::Live => self
+            // Only a label here: the price is the same on every stream.
+            EvaluateOn::Live if is_interval_label(&interval) => self
                 .hub
                 .feed_key(&symbol, LIVE_FEED_INTERVAL)
                 .map_err(refuse)?,
-            EvaluateOn::Close => own_feed,
+            EvaluateOn::Live => return Err(format!("{interval} is not an interval")),
+            EvaluateOn::Close => {
+                let feed = self.hub.feed_key(&symbol, &interval).map_err(refuse)?;
+                // The bars of the interval itself, not of a finer stream it is built from.
+                if data::interval_secs(&feed.1)
+                    .is_none_or(|s| data::interval_secs(&interval) != Some(s))
+                {
+                    return Err(format!(
+                        "{interval} has no kline stream, so its closes cannot be watched; use evaluate_on: live"
+                    ));
+                }
+                feed
+            }
         };
         let new_feed = {
             let st = self.lock();
@@ -998,6 +1014,15 @@ impl ServerAlerts {
             "last_price": watch.and_then(|w| w.last_price),
         })
     }
+}
+
+/// `7m`, `1h`, `1mo`: digits then letters, short enough to show.
+fn is_interval_label(interval: &str) -> bool {
+    let letters = interval.trim_start_matches(|c: char| c.is_ascii_digit());
+    interval.len() <= 8
+        && letters.len() < interval.len()
+        && !letters.is_empty()
+        && letters.chars().all(|c| c.is_ascii_alphabetic())
 }
 
 fn enum_arg<T: serde::de::DeserializeOwned>(args: &Value, name: &str) -> Result<Option<T>, String> {

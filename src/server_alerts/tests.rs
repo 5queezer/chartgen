@@ -7,10 +7,21 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 const BASE: i64 = 1_700_000_040;
 
-/// A source that never sends by itself: tests call `on_event`.
+/// A source that sends only what a test tells it to, through the real hub. Most
+/// tests call `on_event` directly.
 #[derive(Default)]
 struct Fake {
     seeds: AtomicUsize,
+    feeds: Mutex<Vec<mpsc::Sender<FeedEvent>>>,
+}
+
+impl Fake {
+    async fn send(&self, event: FeedEvent) {
+        let feeds = self.feeds.lock().unwrap().clone();
+        for tx in feeds {
+            tx.send(event.clone()).await.unwrap();
+        }
+    }
 }
 
 impl PushSource for Fake {
@@ -34,6 +45,7 @@ impl PushSource for Fake {
         _interval: String,
         tx: mpsc::Sender<FeedEvent>,
     ) -> BoxFuture<'static, ()> {
+        self.feeds.lock().unwrap().push(tx.clone());
         Box::pin(async move {
             tx.closed().await;
         })
@@ -228,20 +240,22 @@ async fn a_crossing_needs_a_reading_taken_since_the_restart() {
     assert_eq!(a.lock().alerts[&id].fire_count, 1);
 }
 
+/// A replay is a bar at or before the last close: the backfill after a reconnect.
 #[tokio::test(flavor = "multi_thread")]
 async fn replayed_bars_do_not_fire_and_restart_the_baseline() {
     let (store, _) = store_at("replay");
     let a = plain(store);
     let id = create(&a, spec("crossing", "every", 100.0), "me").await;
     tick(&a, BASE, 99.0);
-    // The backfill after a reconnect replays older closes.
-    a.on_event(&key("1m"), FeedEvent::Bar(bar(BASE - 120, 101.0)));
-    a.on_event(&key("1m"), FeedEvent::Bar(bar(BASE - 60, 99.0)));
+    a.on_event(&key("1m"), FeedEvent::Bar(bar(BASE, 99.0)));
+    tick(&a, BASE + 60, 99.0);
+    a.on_event(&key("1m"), FeedEvent::Bar(bar(BASE - 60, 101.0)));
+    a.on_event(&key("1m"), FeedEvent::Bar(bar(BASE, 101.0)));
     assert_eq!(a.lock().alerts[&id].fire_count, 0);
     // The next price is only a baseline, like a browser after a gap.
-    tick(&a, BASE, 101.0);
+    tick(&a, BASE + 60, 101.0);
     assert_eq!(a.lock().alerts[&id].fire_count, 0);
-    tick(&a, BASE, 99.0);
+    tick(&a, BASE + 60, 99.0);
     assert_eq!(a.lock().alerts[&id].fire_count, 1);
 }
 
@@ -265,10 +279,133 @@ async fn a_close_alert_reads_only_finished_bars_once_each() {
     // The same bar again, as a backfill sends it, changes nothing.
     a.on_event(&k, FeedEvent::Bar(bar(BASE - 3600, 99.0)));
     assert_eq!(a.lock().alerts[&id].fire_count, 1);
-    // A forming bar sent as a `Bar` by the backfill has not closed yet.
-    let now = chrono::Utc::now().timestamp();
-    a.on_event(&k, FeedEvent::Bar(bar(now, 99.0)));
+}
+
+/// Busy pairs roll the candle on a trade before the closing kline arrives.
+#[tokio::test(flavor = "multi_thread")]
+async fn closes_fire_when_trades_roll_the_candle_first() {
+    let (store, _) = store_at("late-close");
+    let fake = Arc::new(Fake::default());
+    let a = ServerAlerts::new(
+        store,
+        hub_with(fake.clone()),
+        Policy::default(),
+        Limits::default(),
+        quick_timing(),
+    );
+    let mut crossing = spec("crossing", "every", 100.0);
+    crossing["interval"] = json!("1h");
+    crossing["evaluate_on"] = json!("close");
+    let crossing = create(&a, crossing, "me").await;
+    let mut greater = spec("greater", "once", 50.0);
+    greater["interval"] = json!("1h");
+    greater["evaluate_on"] = json!("close");
+    let greater = create(&a, greater, "me").await;
+
+    // Through the hub, as the real feed sends them.
+    let closes = [99.0, 101.0, 99.0, 101.0];
+    for (i, close) in closes.into_iter().enumerate() {
+        let open = BASE + 3600 * i as i64;
+        fake.send(FeedEvent::Tick(bar(open, close))).await;
+        fake.send(FeedEvent::Tick(bar(open + 3600, close))).await;
+        fake.send(FeedEvent::Bar(bar(open, close))).await;
+    }
+    until("every close to be read", || {
+        a.lock().alerts[&crossing].fire_count == 3
+    })
+    .await;
+    assert_eq!(a.lock().alerts[&greater].fire_count, 1);
+    // The newest price is the forming candle's, not the late close's.
+    let watch_last = a.lock().watches[&key("1h")].last_bar;
+    assert_eq!(watch_last, Some(BASE + 3600 * 4));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_late_close_leaves_live_alerts_alone() {
+    let (store, _) = store_at("late-live");
+    let a = plain(store);
+    let id = create(&a, spec("crossing", "every", 100.0), "me").await;
+    tick(&a, BASE, 99.0);
+    tick(&a, BASE + 60, 99.5);
+    // Above the level, but late: not a price now, and the baseline stays.
+    a.on_event(&key("1m"), FeedEvent::Bar(bar(BASE, 101.0)));
+    assert_eq!(a.lock().alerts[&id].fire_count, 0);
+    let last = a.lock().watches[&key("1m")].last_price;
+    assert_eq!(last, Some(99.5));
+    tick(&a, BASE + 60, 101.0);
     assert_eq!(a.lock().alerts[&id].fire_count, 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_late_tick_is_ignored_without_touching_the_baseline() {
+    let (store, _) = store_at("late-tick");
+    let a = plain(store);
+    let id = create(&a, spec("crossing", "every", 100.0), "me").await;
+    tick(&a, BASE + 60, 99.0);
+    tick(&a, BASE, 101.0);
+    assert_eq!(a.lock().alerts[&id].fire_count, 0);
+    assert_eq!(a.lock().watches[&key("1m")].last_price, Some(99.0));
+    tick(&a, BASE + 60, 101.0);
+    assert_eq!(a.lock().alerts[&id].fire_count, 1);
+}
+
+/// Closes from before the watch began are history, not news.
+#[tokio::test(flavor = "multi_thread")]
+async fn closes_older_than_the_watch_do_not_fire() {
+    let (store, _) = store_at("old-closes");
+    let a = plain(store);
+    let mut args = spec("greater", "once", 50.0);
+    args["interval"] = json!("1h");
+    args["evaluate_on"] = json!("close");
+    let id = create(&a, args, "me").await;
+    let k = key("1h");
+    a.on_event(&k, FeedEvent::Tick(bar(BASE, 60.0)));
+    a.on_event(&k, FeedEvent::Bar(bar(BASE - 7200, 60.0)));
+    a.on_event(&k, FeedEvent::Bar(bar(BASE - 3600, 60.0)));
+    assert_eq!(a.lock().alerts[&id].fire_count, 0);
+    a.on_event(&k, FeedEvent::Bar(bar(BASE, 60.0)));
+    assert_eq!(a.lock().alerts[&id].fire_count, 1);
+}
+
+/// The stream's closed flag decides, not the clock: a 28-day month is over when
+/// the kline says so, and so is an hour on a clock running behind.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_close_is_trusted_whatever_the_clock_says() {
+    let now = chrono::Utc::now().timestamp();
+    for (interval, age) in [("1M", 28 * 86_400), ("1M", 29 * 86_400), ("1h", 3598)] {
+        let (store, _) = store_at(&format!("clock-{interval}-{age}"));
+        let a = plain(store);
+        let mut args = spec("greater", "once", 50.0);
+        args["interval"] = json!(interval);
+        args["evaluate_on"] = json!("close");
+        let id = create(&a, args, "me").await;
+        a.on_event(&key(interval), FeedEvent::Bar(bar(now - age, 60.0)));
+        assert_eq!(a.lock().alerts[&id].fire_count, 1, "{interval} {age}");
+    }
+}
+
+/// `2m` and `90m` have no stream, but a live alert only reads the 1m feed.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_live_alert_takes_any_interval_as_its_label() {
+    let (store, _) = store_at("label");
+    let a = plain(store);
+    for interval in ["2m", "90m", "5d"] {
+        let mut args = spec("less", "once", 1.0);
+        args["interval"] = json!(interval);
+        let id = create(&a, args, "me").await;
+        assert_eq!(a.lock().alerts[&id].feed_interval, "1m");
+    }
+    let (store, _) = store_at("label-bad");
+    let a = plain(store);
+    for bad in ["", "m", "12", "1h/../x", "123456789m", "1 h"] {
+        let mut args = spec("less", "once", 1.0);
+        args["interval"] = json!(bad);
+        let e = call(&a, "create_server_alert", args, "me")
+            .await
+            .unwrap_err();
+        assert!(e.contains("not an interval"), "{bad}: {e}");
+        a.lock().changes = Window::default();
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -439,6 +576,7 @@ async fn bad_input_is_refused() {
     args["sign"] = json!(true);
     check(args, "sign needs webhook_url").await;
     let mut args = spec("crossing", "once", 1.0);
+    args["evaluate_on"] = json!("close");
     args["interval"] = json!("2m");
     check(args, "cannot watch").await;
     let mut args = spec("crossing", "once", 1.0);
