@@ -1203,8 +1203,8 @@ export function Chart(props: ChartProps): JSX.Element {
       ).getChartStore();
       if (store.getTooltipStore().getCrosshair().x === undefined) setCrosshairIndex(null);
     };
-    host.addEventListener("touchstart", onTouch);
-    host.addEventListener("touchend", onTouch);
+    host.addEventListener("touchstart", onTouch, { passive: true });
+    host.addEventListener("touchend", onTouch, { passive: true });
     onCleanup(() => {
       c!.unsubscribeAction("onCrosshairChange" as never, onCrosshair);
       c!.unsubscribeAction("onVisibleRangeChange" as never, onRange);

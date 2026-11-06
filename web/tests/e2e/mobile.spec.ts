@@ -798,6 +798,8 @@ test.describe("tablet rotation crosses the breakpoint", () => {
     await dock(page, "Alerts").tap();
     await expect(sidebar).toBeVisible();
     await page.getByRole("button", { name: "Close panel" }).tap();
+    await expect(sidebar).toHaveCount(0);
+    expect(await page.evaluate(() => localStorage.getItem("chartgen.watchlist.collapsed"))).toBeNull();
     await page.setViewportSize({ width: 1024, height: 768 });
     await expect(sidebar).toBeVisible();
     await expect(page.getByRole("tab", { name: "Alerts" })).toHaveAttribute("aria-selected", "true");

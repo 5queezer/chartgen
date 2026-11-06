@@ -49,7 +49,8 @@ loses its state and refetches its data, and they duplicate every panel.
 - Good: no second tree to keep in step with the desktop one.
 - Bad: the CSS reaches into components by ARIA label and test id. Renaming
   `Drawing tools`, for example, breaks the layout without a type error. The spec
-  in `tests/e2e/mobile.spec.ts` catches it.
+  in `tests/e2e/mobile.spec.ts` catches the ones it exercises, such as that one,
+  but not all: a renamed `max-h-[60vh]` or `Layout:` label would likely pass.
 - Bad: copy price, and adding an alert or line at a tapped price, have no touch
   equivalent.
 - Bad: emulation is not a real device. WebKit, a real on-screen keyboard and
