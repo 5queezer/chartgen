@@ -630,6 +630,208 @@ test.describe("code is never lost", () => {
   });
 });
 
+/** Start with these indicators on the chart. Call before the first navigation. */
+const seedIndicators = (page: Page, entries: unknown[]) =>
+  page.addInitScript((value) => {
+    if (localStorage.getItem("chartgen.indicators.active") === null) {
+      localStorage.setItem("chartgen.indicators.active", JSON.stringify(value));
+    }
+  }, entries);
+
+const errorChip = (page: Page) => page.locator("[data-chip-error]");
+
+test.describe("names and params the server cannot run", () => {
+  test("a name nobody knows fails only its chip, and removing it clears the error", async ({ page }) => {
+    // A script of a deleted OAuth client, or deleted from another browser.
+    await seedIndicators(page, ["rsi", "gone_one"]);
+    await gotoApp(page);
+    await expect(page.getByTestId("chart-load-error")).toHaveCount(0);
+    await expect.poll(() => plotted(page, "rsi")).not.toBeNull();
+    await expect(errorChip(page)).toHaveCount(1);
+    await expect(errorChip(page).getByTitle(/Unknown indicator: gone_one/)).toBeVisible();
+
+    await page.getByRole("button", { name: "Remove gone_one" }).click();
+    await expect(errorChip(page)).toHaveCount(0, { timeout: 15_000 });
+  });
+
+  test("a script deleted elsewhere leaves the running chart working", async ({ page }) => {
+    await gotoApp(page);
+    await openEditor(page);
+    await saveNew(page, "doomed_two", script('    chart.line(7.0, title = "Doomed")'));
+    await page.getByTestId("script-add").click();
+    await expect.poll(() => plotted(page, "doomed_two"), { timeout: 30_000 }).not.toBeNull();
+
+    const other = await secondTab(page);
+    await other.getByTestId("script-row-doomed_two").click();
+    await other.getByTestId("script-delete").click();
+    await other.getByTestId("script-delete-confirm").click();
+    await expect(other.getByTestId("script-status")).toHaveText("Deleted doomed_two.");
+
+    // The next tail reports it; the chart keeps polling, nothing blanks.
+    await expect(errorChip(page)).toHaveCount(1, { timeout: 15_000 });
+    await expect(page.getByTestId("chart-load-error")).toHaveCount(0);
+    await reloadApp(page);
+    await expect(page.getByTestId("chart-load-error")).toHaveCount(0);
+    await expect.poll(() => plotted(page, "rsi")).not.toBeNull();
+  });
+
+  test("a saved layout holding a deleted script still loads", async ({ page }) => {
+    const layoutMenu = async (item: RegExp) => {
+      await page.getByRole("button", { name: /^Layout:/ }).click();
+      await page.getByRole("menuitem", { name: item }).click();
+    };
+    const createLayout = async (name: string) => {
+      await layoutMenu(/^Create new layout/);
+      const input = page.getByRole("textbox", { name: "Layout name" });
+      await input.fill(name);
+      await input.press("Enter");
+      await expect(page.getByTestId("layout-name")).toHaveText(name);
+    };
+    await gotoApp(page);
+    await createLayout("Scripted");
+    await openEditor(page);
+    await saveNew(page, "in_layout", script('    chart.line(9.0, title = "Held")'));
+    await page.getByTestId("script-add").click();
+    await expect.poll(() => plotted(page, "in_layout"), { timeout: 30_000 }).not.toBeNull();
+    // Ctrl+S on the chart saves the layout, with the script in it.
+    await page.locator(".chart-container").click({ position: { x: 300, y: 60 } });
+    await page.keyboard.press("Control+s");
+    await expect(page.getByTestId("layout-dirty")).toHaveCount(0);
+
+    await createLayout("Plain");
+    await page.getByTestId("script-delete").click();
+    await page.getByTestId("script-delete-confirm").click();
+    await expect(page.getByTestId("script-status")).toHaveText("Deleted in_layout.");
+
+    await layoutMenu(/^Load layout/);
+    await page.getByRole("dialog").getByRole("button", { name: /^Scripted/ }).click();
+    await expect(page.getByTestId("layout-name")).toHaveText("Scripted");
+    await expect(errorChip(page)).toHaveCount(1, { timeout: 15_000 });
+    await expect(page.getByTestId("chart-load-error")).toHaveCount(0);
+  });
+
+  test("share links keep known scripts and leave out unknown names", async ({ page }) => {
+    await gotoApp(page);
+    await openEditor(page);
+    await saveNew(page, "linked", script('    chart.line(3.0, title = "Linked")'));
+
+    await gotoApp(page, "/?ind=linked,gone_link");
+    await expect(page.getByText("Unknown indicator(s) left out: gone_link")).toBeVisible();
+    await expect.poll(() => plotted(page, "linked"), { timeout: 30_000 }).toEqual({ label: "Linked", last: 3 });
+    await expect(errorChip(page)).toHaveCount(0);
+  });
+
+  test("params a saved script no longer allows show in the panel, not over the chart", async ({ page }) => {
+    await seedIndicators(page, ["rsi", { name: "narrow_me", length: 300 }]);
+    await gotoApp(page);
+    await openEditor(page);
+    const withMax = (max: number) => `PARAMS = [{"name": "length", "type": "int", "default": 5, "max": ${max}}]
+META = {"title": "Narrow", "overlay": False}
+
+def compute(ohlcv, params, chart):
+    chart.line(5.0, title = "Narrow")
+`;
+    await saveNew(page, "narrow_me", withMax(500));
+    await expect.poll(() => plotted(page, "narrow_me"), { timeout: 30_000 }).not.toBeNull();
+
+    await setCode(page, withMax(200));
+    await page.getByTestId("script-save").click();
+    await expect(page.getByTestId("script-status")).toHaveText("Saved.");
+    const errors = page.getByTestId("script-errors");
+    await expect(errors).toContainText("Parameters on the chart", { timeout: 30_000 });
+    await expect(errors).toContainText("length must be <= 200");
+    await expect(page.getByTestId("chart-load-error")).toHaveCount(0);
+    await expect(errorChip(page)).toHaveCount(1);
+    await expect.poll(() => plotted(page, "rsi")).not.toBeNull();
+  });
+
+  test("a chart reload that fails after a save shows in the panel", async ({ page }) => {
+    await gotoApp(page);
+    await openEditor(page);
+    await saveNew(page, "reload_me", script('    chart.line(1.0, title = "One")'));
+    await page.getByTestId("script-add").click();
+    await expect.poll(() => plotted(page, "reload_me"), { timeout: 30_000 }).not.toBeNull();
+
+    await failTool(page, "generate_chart", "upstream is down");
+    await setCode(page, script('    chart.line(2.0, title = "Two")'));
+    await page.getByTestId("script-save").click();
+    await expect(page.getByTestId("script-status")).toHaveText("Saved, but the chart did not reload.", {
+      timeout: 15_000,
+    });
+    await expect(page.getByTestId("script-errors")).toContainText("Chart reload");
+    await expect(page.getByTestId("script-errors")).toContainText("upstream is down");
+  });
+});
+
+test.describe("live updates of a chart with a script", () => {
+  test("a script shadowing a built-in keeps its values, and the chart polls", async ({ page }) => {
+    const subscribes: string[] = [];
+    page.on("request", (r) => {
+      if (r.postData()?.includes('"name":"subscribe_chart"')) subscribes.push(r.url());
+    });
+    await gotoApp(page);
+    await openEditor(page);
+    await saveNew(
+      page,
+      "rsi",
+      `PARAMS = [{"name": "length", "type": "int", "default": 14}]
+META = {"title": "Mine", "overlay": False}
+
+def compute(ohlcv, params, chart):
+    chart.line(12345.0, title = "Mine")
+`,
+    );
+    await expect(page.getByTestId("script-status")).toContainText("replaces the built-in rsi");
+    await expect.poll(() => plotted(page, "rsi"), { timeout: 30_000 }).toEqual({ label: "Mine", last: 12345 });
+
+    // Pushed tails came about once a second and carried the built-in's values.
+    const atStart = subscribes.length;
+    for (let i = 0; i < 16; i++) {
+      await page.waitForTimeout(500);
+      expect(await plotted(page, "rsi")).toEqual({ label: "Mine", last: 12345 });
+    }
+    // "not pushable" ends the attempts: no retry for this chart (first retry after 2 s).
+    expect(subscribes.length).toBe(atStart);
+    await expect(page.getByText("polling").first()).toBeVisible();
+  });
+
+  /** Big requests of generate_chart: full loads, not tail polls. */
+  const countFullLoads = (page: Page) => {
+    const loads = { count: 0 };
+    page.on("request", (r) => {
+      const body = r.postData();
+      if (body?.includes('"name":"generate_chart"') && body.includes('"bars":500')) loads.count++;
+    });
+    return loads;
+  };
+
+  for (const [title, condition] of [
+    ["only a full load", "len(ohlcv.close) > 1000"],
+    ["only a tail", "len(ohlcv.close) > 100 and len(ohlcv.close) < 1000"],
+  ] as const) {
+    test(`a script failing on ${title} does not reload the chart over and over`, async ({ page }) => {
+      await gotoApp(page);
+      await openEditor(page);
+      await saveNew(
+        page,
+        "one_window",
+        script(`    if ${condition}:\n        y = 1 // 0\n    chart.line(1.0, title = "Window")`),
+      );
+      const loads = countFullLoads(page);
+      await page.getByTestId("script-add").click();
+
+      // The panel knows, on either window.
+      const errors = page.getByTestId("script-errors");
+      await expect(errors).toContainText("On the chart", { timeout: 30_000 });
+      await expect(errors).toContainText("Line 6");
+
+      await page.waitForTimeout(8000);
+      expect(loads.count).toBeLessThanOrEqual(1);
+      await expect(page.getByTestId("chart-load-error")).toHaveCount(0);
+    });
+  }
+});
+
 test.describe("at 390 px", () => {
   test("the panel fits and works from the picker", async ({ page }) => {
     await gotoApp(page);

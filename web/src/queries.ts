@@ -2,7 +2,12 @@
 // server-state query for v0.1; alerts, positions, and orders will grow
 // their own hooks here as they land.
 
-import { createQuery, keepPreviousData, type QueryClient } from "@tanstack/solid-query";
+import {
+  createQuery,
+  keepPreviousData,
+  type Query,
+  type QueryClient,
+} from "@tanstack/solid-query";
 import type { Accessor } from "solid-js";
 
 import { INITIAL_BARS, WARMUP } from "./lib/liveFeed";
@@ -173,12 +178,22 @@ export function refreshIndicatorList(queryClient: QueryClient): Promise<void> {
 /**
  * The script `name` changed: the chart reloads if it shows it, and other cached
  * charts using it refetch when next shown. A chart without it keeps its view.
+ * Resolves to why the chart on screen failed to reload, or null.
  */
-export function refreshChartsUsing(queryClient: QueryClient, name: string): Promise<void> {
-  return queryClient.invalidateQueries({
+export async function refreshChartsUsing(
+  queryClient: QueryClient,
+  name: string,
+): Promise<string | null> {
+  const filter = {
     queryKey: ["generate_chart"],
-    predicate: (q) => usesIndicator(String(q.queryKey[3]), name),
-  });
+    predicate: (q: Query) => usesIndicator(String(q.queryKey[3]), name),
+  };
+  await queryClient.invalidateQueries(filter);
+  const failed = queryClient
+    .getQueryCache()
+    .findAll({ ...filter, type: "active" })
+    .find((q) => q.state.status === "error");
+  return failed?.state.error?.message ?? null;
 }
 
 /**

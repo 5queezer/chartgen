@@ -51,6 +51,9 @@ const STEP_LABEL: Record<string, string> = {
   presence: "Script shape",
   dry_run: "Dry run",
   runtime: "On the chart",
+  unknown: "On the chart",
+  params: "Parameters on the chart",
+  chart: "Chart reload",
 };
 
 const buttonClass =
@@ -314,7 +317,15 @@ export default function ScriptEditor(props: ScriptEditorProps): JSX.Element {
       }
       void list.refetch();
       void refreshIndicatorList(queryClient);
-      void refreshChartsUsing(queryClient, result.name);
+      void refreshChartsUsing(queryClient, result.name).then((failure) => {
+        if (failure === null) return;
+        if (request === openRequest) {
+          setErrors((shown) => [...shown, { step: "chart", line: null, message: failure }]);
+          setStatus("Saved, but the chart did not reload.");
+        } else {
+          showToast(`Saved ${target}, but the chart did not reload.`);
+        }
+      });
     } catch (err) {
       if (request === openRequest) {
         setErrors([{ step: "save", line: null, message: messageOf(err) }]);
