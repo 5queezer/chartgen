@@ -16,7 +16,9 @@ import type {
   GetQuotesInput,
   SearchSymbolsInput,
   SubscribeChartInput,
+  SubscribePushInput,
   UnsubscribeChartInput,
+  UnsubscribePushInput,
   UpdateServerAlertInput,
 } from "./types/generated-input";
 import {
@@ -34,7 +36,9 @@ import {
   ServerAlertChangePayloadSchema,
   ServerAlertsPayloadSchema,
   SubscribeChartPayloadSchema,
+  SubscribePushPayloadSchema,
   UnsubscribeChartPayloadSchema,
+  UnsubscribePushPayloadSchema,
   type DeleteIndicatorPayload,
   type DeleteServerAlertPayload,
   type ListIndicatorsPayload,
@@ -48,7 +52,9 @@ import {
   type ServerAlertChangePayload,
   type ServerAlertsPayload,
   type SubscribeChartPayload,
+  type SubscribePushPayload,
   type UnsubscribeChartPayload,
+  type UnsubscribePushPayload,
 } from "./types/responses";
 import { isNotFound, scriptRejection } from "./lib/scripts";
 import { clearAccessToken, getAccessToken } from "./oauth";
@@ -136,6 +142,10 @@ export interface McpSession {
   callUpdateServerAlert: (args: UpdateServerAlertInput) => Promise<ServerAlertChangePayload>;
   /** Invoke `delete_server_alert`. */
   callDeleteServerAlert: (args: DeleteServerAlertInput) => Promise<DeleteServerAlertPayload>;
+  /** Invoke `subscribe_push` (ADR-0045): this browser's push subscription. */
+  callSubscribePush: (args: SubscribePushInput) => Promise<SubscribePushPayload>;
+  /** Invoke `unsubscribe_push`. */
+  callUnsubscribePush: (args: UnsubscribePushInput) => Promise<UnsubscribePushPayload>;
   /** The names `tools/list` reports; the scripting tools are there only when enabled. */
   callListToolNames: () => Promise<string[]>;
   /** Invoke `list_my_indicators` (ADR-0025): the caller's scripts. */
@@ -407,6 +417,20 @@ export function createMcpSession(): McpSession {
         args as unknown as Record<string, unknown>,
       );
       return DeleteServerAlertPayloadSchema.parse(json);
+    },
+    async callSubscribePush(args) {
+      const json = await callToolWithAuthRetry(
+        "subscribe_push",
+        args as unknown as Record<string, unknown>,
+      );
+      return SubscribePushPayloadSchema.parse(json);
+    },
+    async callUnsubscribePush(args) {
+      const json = await callToolWithAuthRetry(
+        "unsubscribe_push",
+        args as unknown as Record<string, unknown>,
+      );
+      return UnsubscribePushPayloadSchema.parse(json);
     },
     callListToolNames() {
       return withAuthRetry(async (conn) => {

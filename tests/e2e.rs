@@ -846,6 +846,8 @@ fn test_server_serves_web_app_same_origin() {
     std::fs::create_dir_all(web.join("assets")).unwrap();
     std::fs::write(web.join("index.html"), "<!doctype html><title>app</title>").unwrap();
     std::fs::write(web.join("assets/x.js"), "console.log(1)").unwrap();
+    std::fs::write(web.join("sw.js"), "// worker").unwrap();
+    std::fs::write(web.join("manifest.webmanifest"), "{}").unwrap();
     std::fs::write(web.join(".env"), "DOTSECRET").unwrap();
     std::fs::write(root.join("secret.txt"), "TOPSECRET").unwrap();
     let srv = spawn_server(Some(&web));
@@ -874,6 +876,15 @@ fn test_server_serves_web_app_same_origin() {
         "{head}"
     );
     assert!(head.contains("x-content-type-options: nosniff"), "{head}");
+
+    // The push worker and manifest (ADR-0045): at the root, and never cached, or a
+    // browser would keep an old worker for a year.
+    for path in ["/sw.js", "/manifest.webmanifest"] {
+        let (st, head, _) = http(p, "GET", path, &[], "");
+        assert_eq!(st, 200, "{path}");
+        assert!(head.contains("cache-control: no-cache"), "{path}: {head}");
+        assert!(!head.contains("immutable"), "{path}: {head}");
+    }
 
     // Revalidation keeps `immutable` (a 304 must not downgrade to no-cache).
     let (st, head, _) = http(
@@ -1132,11 +1143,13 @@ fn store_path(test: &str) -> std::path::PathBuf {
     dir.join("chartgen.db")
 }
 
-const ALERT_TOOLS: [&str; 4] = [
+const ALERT_TOOLS: [&str; 6] = [
     "create_server_alert",
     "list_server_alerts",
     "update_server_alert",
     "delete_server_alert",
+    "subscribe_push",
+    "unsubscribe_push",
 ];
 
 /// Call a tool; `Err` is an `isError` result's text.
@@ -1190,7 +1203,18 @@ fn test_server_alerts_are_off_by_default() {
 #[cfg(feature = "scripting")]
 mod server_alerts {
     use super::*;
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    use base64::Engine;
+    use openssl::bn::BigNumContext;
+    use openssl::derive::Deriver;
+    use openssl::ec::{EcGroup, EcKey, EcPoint, PointConversionForm};
+    use openssl::hash::MessageDigest;
+    use openssl::nid::Nid;
+    use openssl::pkey::{PKey, Private};
+    use openssl::sign::Signer;
+    use openssl::symm::{decrypt_aead, Cipher};
     use std::io::{Read, Write};
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
 
     /// A webhook receiver answering 200; returns its port and what it received.
@@ -1204,9 +1228,12 @@ mod server_alerts {
                 let Ok(mut s) = stream else { continue };
                 let mut buf = vec![0u8; 16384];
                 let n = s.read(&mut buf).unwrap_or(0);
-                log.lock()
-                    .unwrap()
-                    .push(String::from_utf8_lossy(&buf[..n]).to_string());
+                // Other programs on this host probe local ports: only a POST is a delivery.
+                if buf.starts_with(b"POST ") {
+                    log.lock()
+                        .unwrap()
+                        .push(String::from_utf8_lossy(&buf[..n]).to_string());
+                }
                 let _ = s.write_all(
                     b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
                 );
@@ -1229,6 +1256,7 @@ mod server_alerts {
         let mut cmd = server_command(port, None, db, false);
         cmd.env("CHARTGEN_SERVER_ALERTS", "1")
             .env("CHARTGEN_SERVER_ALERT_CLIENTS", clients)
+            .env("CHARTGEN_VAPID_SUBJECT", "mailto:ops@example.com")
             .env(
                 "CHARTGEN_WEBHOOK_TEST_ORIGIN",
                 format!("http://127.0.0.1:{hook_port}"),
@@ -1317,6 +1345,212 @@ mod server_alerts {
         let other = sign_in(port, &register_external(port));
         let list = call_tool(port, &other, "list_server_alerts", serde_json::json!({})).unwrap();
         assert_eq!(list["alerts"], serde_json::json!([]));
+    }
+
+    type Bodies = Arc<Mutex<Vec<Vec<u8>>>>;
+
+    /// A fake push service: what it was sent, whole. It holds its answer until told,
+    /// so a delivery can be left unfinished.
+    fn push_service() -> (u16, Bodies, Arc<AtomicBool>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let answer = Arc::new(AtomicBool::new(false));
+        let (log, open) = (seen.clone(), answer.clone());
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut s) = stream else { continue };
+                let (log, open) = (log.clone(), open.clone());
+                std::thread::spawn(move || {
+                    let mut got = Vec::new();
+                    let mut buf = [0u8; 8192];
+                    let body = loop {
+                        let n = s.read(&mut buf).unwrap_or(0);
+                        if n == 0 {
+                            return;
+                        }
+                        got.extend_from_slice(&buf[..n]);
+                        let Some(end) = got.windows(4).position(|w| w == b"\r\n\r\n") else {
+                            continue;
+                        };
+                        let head = String::from_utf8_lossy(&got[..end]).to_lowercase();
+                        if !head.starts_with("post /push/") {
+                            return;
+                        }
+                        let len: usize = head
+                            .lines()
+                            .find_map(|l| l.strip_prefix("content-length: "))
+                            .and_then(|l| l.trim().parse().ok())
+                            .unwrap_or(0);
+                        if got.len() >= end + 4 + len {
+                            break got[end + 4..end + 4 + len].to_vec();
+                        }
+                    };
+                    log.lock().unwrap().push(body);
+                    while !open.load(Ordering::SeqCst) {
+                        std::thread::sleep(std::time::Duration::from_millis(20));
+                    }
+                    let _ = s.write_all(
+                        b"HTTP/1.1 201 Created\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
+                    );
+                });
+            }
+        });
+        (port, seen, answer)
+    }
+
+    /// The browser's half of RFC 8291, written here from the RFC and not with the
+    /// server's code, so that a mistake there cannot agree with itself.
+    fn open_push(message: &[u8], ua: &EcKey<Private>, auth: &[u8]) -> serde_json::Value {
+        let hkdf = |salt: &[u8], ikm: &[u8], info: &[u8], len: usize| -> Vec<u8> {
+            let hmac = |key: &[u8], data: &[u8]| {
+                let key = PKey::hmac(key).unwrap();
+                let mut signer = Signer::new(MessageDigest::sha256(), &key).unwrap();
+                signer.update(data).unwrap();
+                signer.sign_to_vec().unwrap()
+            };
+            let prk = hmac(salt, ikm);
+            hmac(&prk, &[info, &[1]].concat())[..len].to_vec()
+        };
+        let group = EcGroup::from_curve_name(Nid::X9_62_PRIME256V1).unwrap();
+        let mut ctx = BigNumContext::new().unwrap();
+        let ua_public = ua
+            .public_key()
+            .to_bytes(&group, PointConversionForm::UNCOMPRESSED, &mut ctx)
+            .unwrap();
+        let (salt, rest) = message.split_at(16);
+        let (server_public, sealed) = rest[5..].split_at(rest[4] as usize);
+        let point = EcPoint::from_bytes(&group, server_public, &mut ctx).unwrap();
+        let peer = PKey::from_ec_key(EcKey::from_public_key(&group, &point).unwrap()).unwrap();
+        let own = PKey::from_ec_key(ua.clone()).unwrap();
+        let mut deriver = Deriver::new(&own).unwrap();
+        deriver.set_peer(&peer).unwrap();
+        let secret = deriver.derive_to_vec().unwrap();
+        let info = [b"WebPush: info\0".as_slice(), &ua_public, server_public].concat();
+        let ikm = hkdf(auth, &secret, &info, 32);
+        let cek = hkdf(salt, &ikm, b"Content-Encoding: aes128gcm\0", 16);
+        let nonce = hkdf(salt, &ikm, b"Content-Encoding: nonce\0", 12);
+        let (body, tag) = sealed.split_at(sealed.len() - 16);
+        let mut plain =
+            decrypt_aead(Cipher::aes_128_gcm(), &cek, Some(&nonce), &[], body, tag).unwrap();
+        assert_eq!(plain.pop(), Some(2));
+        serde_json::from_slice(&plain).unwrap()
+    }
+
+    /// A browser's keys: the pair, and `subscribe_push`'s arguments for them.
+    fn browser(port: u16) -> (EcKey<Private>, Vec<u8>, serde_json::Value) {
+        let group = EcGroup::from_curve_name(Nid::X9_62_PRIME256V1).unwrap();
+        let key = EcKey::generate(&group).unwrap();
+        let mut ctx = BigNumContext::new().unwrap();
+        let public = key
+            .public_key()
+            .to_bytes(&group, PointConversionForm::UNCOMPRESSED, &mut ctx)
+            .unwrap();
+        let auth = b"sixteen byte key".to_vec();
+        let args = serde_json::json!({
+            "endpoint": format!("http://127.0.0.1:{port}/push/phone"),
+            "p256dh": URL_SAFE_NO_PAD.encode(public),
+            "auth": URL_SAFE_NO_PAD.encode(&auth),
+        });
+        (key, auth, args)
+    }
+
+    /// The whole path on the real binary: a fired alert reaches the fake service
+    /// encrypted for the browser, and a delivery the kill left unfinished is sent again
+    /// after the restart, as the same event, with no second fire.
+    #[test]
+    fn test_a_push_decrypts_and_survives_a_restart_as_the_same_event() {
+        let db = store_path("alerts-push");
+        let (service, seen, answer) = push_service();
+        let srv = alert_server(&db, service, true);
+        let client = register_external(srv.port);
+        let token = sign_in(srv.port, &client);
+        let (key, auth, device) = browser(service);
+        let list = call_tool(
+            srv.port,
+            &token,
+            "list_server_alerts",
+            serde_json::json!({}),
+        )
+        .unwrap();
+        assert_eq!(list["push"]["devices"], 0);
+        let public_key = list["push"]["public_key"].as_str().unwrap().to_string();
+        call_tool(srv.port, &token, "subscribe_push", device.clone()).unwrap();
+        // A level far below the sample price is simply greater, at once.
+        let alert = call_tool(
+            srv.port,
+            &token,
+            "create_server_alert",
+            serde_json::json!({
+                "symbol": "BTCUSDT", "condition": "greater", "trigger": "once",
+                "level": 0.01, "push": true, "message": "hello",
+            }),
+        )
+        .unwrap();
+        wait_for("the push", || seen.lock().unwrap().len() == 1);
+        let first = open_push(&seen.lock().unwrap()[0], &key, &auth);
+        assert_eq!(first["alert_id"], alert["id"]);
+        assert_eq!(first["symbol"], "BTCUSDT");
+        assert_eq!(first["condition"], "greater");
+        assert_eq!(first["message"], "hello");
+        assert_eq!(first["fire_count"], 1);
+        assert!(first["price"].as_f64().unwrap() > 0.01);
+        // Unanswered, so the row is still there when the server goes.
+        drop(srv);
+
+        answer.store(true, Ordering::SeqCst);
+        let srv = alert_server(&db, service, true);
+        let token = sign_in(srv.port, &client);
+        wait_for("the push again", || seen.lock().unwrap().len() == 2);
+        let again = open_push(&seen.lock().unwrap()[1], &key, &auth);
+        assert_eq!(again["id"], first["id"], "the same event");
+        {
+            let seen = seen.lock().unwrap();
+            assert_ne!(seen[0], seen[1], "a new key and salt");
+        }
+        let delivered = || {
+            let list = call_tool(
+                srv.port,
+                &token,
+                "list_server_alerts",
+                serde_json::json!({}),
+            )
+            .unwrap();
+            list["alerts"][0].clone()
+        };
+        wait_for("its record", || delivered()["last_push_status"] == 201);
+        let view = delivered();
+        assert_eq!(
+            (&view["fire_count"], &view["active"]),
+            (&1.into(), &false.into())
+        );
+        std::thread::sleep(std::time::Duration::from_secs(2));
+        assert_eq!(seen.lock().unwrap().len(), 2, "exactly once more");
+        // The key is kept, or every browser's subscription would stop working.
+        let list = call_tool(
+            srv.port,
+            &token,
+            "list_server_alerts",
+            serde_json::json!({}),
+        )
+        .unwrap();
+        assert_eq!(list["push"]["public_key"], public_key.as_str());
+        assert_eq!(list["push"]["devices"], 1);
+        let out = call_tool(srv.port, &token, "unsubscribe_push", device).unwrap();
+        assert_eq!(out["removed"], true);
+    }
+
+    /// A request cannot set the test origin, and on a live source it does not count.
+    #[test]
+    fn test_the_test_origin_does_not_open_the_push_list_on_a_live_source() {
+        let db = store_path("alerts-push-live");
+        let (service, seen, _) = push_service();
+        let srv = alert_server(&db, service, false);
+        let token = sign_in(srv.port, &register_external(srv.port));
+        let (_, _, device) = browser(service);
+        let e = call_tool(srv.port, &token, "subscribe_push", device).unwrap_err();
+        assert!(e.contains("not a known push service"), "{e}");
+        assert!(seen.lock().unwrap().is_empty());
     }
 
     /// With only the flag on, as an operator might leave it: strangers get alerts,

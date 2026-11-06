@@ -30,6 +30,7 @@ rand = "0.9"
 uuid = { version = "1", features = ["v4"] }
 async-trait = "0.1"
 hmac = "0.12"
+openssl = "0.10"
 hex = "0.4"
 chrono = { version = "0.4", features = ["serde"] }
 chrono-tz = "0.10"
@@ -46,6 +47,11 @@ default = ["scripting"]
 # CHARTGEN_SCRIPTING=1. `--no-default-features` builds without starlark
 # and rusqlite.
 scripting = ["dep:starlark", "dep:starlark_syntax", "dep:allocative", "dep:anyhow", "dep:rusqlite"]
+
+# Published macOS binaries must start without Homebrew's OpenSSL, and nothing else brings
+# OpenSSL in there: `native-tls` uses the system's TLS (ADR-0045).
+[target.'cfg(target_os = "macos")'.dependencies]
+openssl = { version = "0.10", features = ["vendored"] }
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
