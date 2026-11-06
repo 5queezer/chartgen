@@ -107,12 +107,41 @@ evicted, so a session in use cannot be revoked this way, and neither is a client
 that owns stored [scripted indicators](/chartgen/guides/scripted-indicators/).
 `/register` answers `503 temporarily_unavailable` when no other client is left, or
 when the owners cannot be read from the store. Clients already registered keep
-working. Tokens are memory-only, so a restart makes every client without scripts
-evictable again.
+working.
 
 An evicted client loses its pending codes, and its next `/authorize` gets the
 [unknown client](#unknown-client_id) answer. It recovers as after a restart without
 a volume: the web app re-registers by itself and an MCP client registers again.
+
+### When `/register` stays at `503`
+
+If every client without scripts holds a live token, nothing can be evicted. New
+browsers, browsers recovering from a stale client and new MCP clients then cannot
+sign in. The server logs this at most once a minute:
+
+```text
+[OAuth] /register refused: client table full at 1000 clients, 12 refusal(s) since the last line. ...
+```
+
+Nothing ends this by itself, and neither does a restart. A restart drops the tokens
+and they expire after 7 days, but the clients persist, and `/authorize` and `/token`
+issue new tokens with no `/register` and no rate limit. Someone who filled the table
+can keep it full, so this lasts until an operator acts:
+
+1. Stop the server. A running server keeps its clients in memory and would not
+   notice.
+2. Run this on the file at `CHARTGEN_DB`. The Docker image has no `sqlite3`, so run
+   it from the host on the file in the volume.
+
+   ```bash
+   sqlite3 chartgen.db "DELETE FROM oauth_clients WHERE client_id NOT IN (SELECT user_id FROM user_indicators);"
+   ```
+
+3. Start the server.
+
+This removes every client that owns no scripts, and clients that own scripts stay.
+The removed ones recover like evicted clients, and keeping the table full then takes
+filling it again through the rate-limited `/register`.
 
 ## MCP handler behavior
 

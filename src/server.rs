@@ -52,6 +52,8 @@ const MAX_REGISTRATIONS_PER_IP: usize = 20;
 const REGISTER_WINDOW: Duration = Duration::from_secs(600);
 /// A client that never received a token is forgotten after this long.
 const UNUSED_CLIENT_TTL: Duration = Duration::from_secs(24 * 3600);
+/// A refused registration logs at most this often: refusals are free to send.
+const REFUSAL_LOG_INTERVAL: Duration = Duration::from_secs(60);
 
 struct AuthCode {
     _code: String,
@@ -75,6 +77,9 @@ struct OAuthStore {
     tokens: HashMap<String, AccessToken>,
     /// Recent `/register` calls per client address.
     registrations: HashMap<String, Vec<Instant>>,
+    /// When a refused registration last logged, and refusals since.
+    refusal_logged_at: Option<Instant>,
+    refusals_unlogged: u64,
 }
 
 impl OAuthStore {
@@ -84,6 +89,8 @@ impl OAuthStore {
             codes: HashMap::new(),
             tokens: HashMap::new(),
             registrations: HashMap::new(),
+            refusal_logged_at: None,
+            refusals_unlogged: 0,
         }
     }
 
@@ -180,14 +187,8 @@ impl OAuthStore {
         if excess == 0 {
             return Ok(Vec::new());
         }
-        let full = || {
-            Err((
-                StatusCode::SERVICE_UNAVAILABLE,
-                json!({"error": "temporarily_unavailable", "error_description": "client registry is full"}),
-            ))
-        };
         let Some(owners) = script_owners() else {
-            return full();
+            return Err(self.refuse_full());
         };
         self.cleanup_expired();
         let live: HashSet<&str> = self.tokens.values().map(|t| t.client_id.as_str()).collect();
@@ -198,7 +199,7 @@ impl OAuthStore {
             .map(|(id, c)| (c.last_used, c.created_at, id.clone()))
             .collect();
         if candidates.len() < excess {
-            return full();
+            return Err(self.refuse_full());
         }
         candidates.sort();
         let evicted: Vec<String> = candidates
@@ -211,6 +212,34 @@ impl OAuthStore {
         }
         self.codes.retain(|_, c| !evicted.contains(&c.client_id));
         Ok(evicted)
+    }
+
+    /// The answer to a registration that found no room. Nothing ends this by
+    /// itself (ADR-0036), so it is logged, but only so often.
+    fn refuse_full(&mut self) -> (StatusCode, Value) {
+        if let Some(refused) = self.refusal_due_for_log(Instant::now()) {
+            eprintln!(
+                "[OAuth] /register refused: client table full at {} clients, {refused} refusal(s) since the last line. New clients cannot sign in until an operator acts; see the OAuth reference.",
+                self.clients.len()
+            );
+        }
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            json!({"error": "temporarily_unavailable", "error_description": "client registry is full"}),
+        )
+    }
+
+    /// Count a refusal; `Some(refusals to report)` when a log line is due.
+    fn refusal_due_for_log(&mut self, now: Instant) -> Option<u64> {
+        self.refusals_unlogged += 1;
+        if self
+            .refusal_logged_at
+            .is_some_and(|t| now.duration_since(t) < REFUSAL_LOG_INTERVAL)
+        {
+            return None;
+        }
+        self.refusal_logged_at = Some(now);
+        Some(std::mem::take(&mut self.refusals_unlogged))
     }
 
     fn cleanup_expired(&mut self) {
@@ -2174,6 +2203,19 @@ mod tests {
             .insert("new".into(), client(Duration::from_secs(1), None));
         s.collect_unused(|| panic!("no lookup when nothing is unused"));
         assert!(s.clients.contains_key("new"));
+    }
+
+    #[test]
+    fn refusals_log_at_most_once_per_interval_and_count_the_rest() {
+        let mut s = OAuthStore::new();
+        let start = Instant::now();
+        assert_eq!(s.refusal_due_for_log(start), Some(1));
+        for _ in 0..3 {
+            assert_eq!(s.refusal_due_for_log(start + Duration::from_secs(1)), None);
+        }
+        let later = start + REFUSAL_LOG_INTERVAL;
+        assert_eq!(s.refusal_due_for_log(later), Some(4));
+        assert_eq!(s.refusal_due_for_log(later), None);
     }
 
     #[test]

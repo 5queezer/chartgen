@@ -141,7 +141,9 @@ Rejected:
   working daily on a 6-day-old token was first in line, and a stranger repeating
   register, authorize and token emptied the table of everyone else's sessions: 1000
   rounds took 1.7 s on a loopback peer.
-- **Always refuse with `503`.** Then only an operator can recover the table.
+- **Always refuse with `503`.** Then every full table needs an operator, even one
+  filled by ordinary use with idle clients. With eviction, only a deliberate lockout
+  does.
 - **Expiry by age alone.** It would not stop the table filling quickly, and would
   drop idle clients even when there is room.
 
@@ -160,8 +162,17 @@ Rejected:
   proxy has no limit, and the limit is per address, so many addresses get around it.
   Those clients must sign in again, and an MCP client gets a new `client_id`. No
   scripts are lost, because their owners are spared.
-- Bad: someone holding 1000 live tokens gets `503` for all new registrations, until
-  the tokens expire or a restart clears them.
+- Bad: this does not stop a deliberate lockout. Someone holding 1000 live tokens gets
+  `503` for all new registrations, and it lasts until an operator acts. Tokens expire
+  after 7 days and a restart drops them, but the clients persist, and `/authorize` and
+  `/token` issue new tokens with no `/register` and no rate limit: re-tokening 999
+  clients after a restart took 1.6 s on a loopback peer. Clients already registered
+  keep working. New browsers, browsers recovering from a stale client and new MCP
+  clients cannot sign in. Refusals are logged at most once a minute, and the
+  [recovery](/chartgen/reference/oauth/#when-register-stays-at-503) deletes every client
+  that owns no scripts. While registration is open and auto-approved, the server
+  cannot tell a stranger's client from a user's. Requiring approval or authentication
+  at registration is the real alternative, and a separate project.
 - Bad: at the limit, a client that just registered is the first to go until it has a
   token, so a concurrent registration can evict it mid sign-in. It then recovers like
   any other evicted client. Registrations without a token can evict at most one other
