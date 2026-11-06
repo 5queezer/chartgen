@@ -84,7 +84,6 @@ impl OAuthStore {
     }
 
     /// Check a registration from `ip` against the limits, and count it.
-    /// Forgets clients that never got a token within `UNUSED_CLIENT_TTL`.
     fn admit_registration(
         &mut self,
         ip: &str,
@@ -133,10 +132,23 @@ impl OAuthStore {
             ));
         }
         hits.push(now);
-        self.clients.retain(|_, c| {
-            c.last_used.is_some() || now.duration_since(c.created_at) < UNUSED_CLIENT_TTL
-        });
         Ok(())
+    }
+
+    /// Forget clients that never got a token within `UNUSED_CLIENT_TTL`,
+    /// unless they own scripts (`None`: owners unknown, so forget nobody).
+    fn collect_unused(&mut self, script_owners: impl FnOnce() -> Option<HashSet<String>>) {
+        let now = Instant::now();
+        let unused = |c: &OAuthClient| {
+            c.last_used.is_none() && now.duration_since(c.created_at) >= UNUSED_CLIENT_TTL
+        };
+        if !self.clients.values().any(unused) {
+            return;
+        }
+        if let Some(owners) = script_owners() {
+            self.clients
+                .retain(|id, c| !unused(c) || owners.contains(id));
+        }
     }
 
     /// Keep the table below `MAX_CLIENTS` for one more client by evicting
@@ -317,8 +329,10 @@ async fn oauth_register(
     let mut oauth = state.oauth.lock().unwrap();
     let evicted = match oauth
         .admit_registration(&client_addr(&ext), &body)
-        .and_then(|()| oauth.make_room(script_owners))
-    {
+        .and_then(|()| {
+            oauth.collect_unused(script_owners);
+            oauth.make_room(script_owners)
+        }) {
         Ok(evicted) => evicted,
         Err((status, err)) => return (status, Json(err)),
     };
@@ -611,6 +625,8 @@ async fn oauth_token(
     if let Some(c) = s.clients.get_mut(&body.client_id) {
         c.last_used = Some(Instant::now());
     }
+    // Every authenticated request needs this lock: not across a disk write.
+    drop(s);
     #[cfg(feature = "scripting")]
     if let Some(store) = scripting::persistence::global() {
         if let Err(e) = store.mark_oauth_client_used(&body.client_id) {
@@ -1215,8 +1231,12 @@ pub async fn run_server(port: u16, engine: Option<Arc<RwLock<TradingEngine>>>) {
     {
         let path = scripting::persistence::db_path();
         let ttl = UNUSED_CLIENT_TTL.as_secs() as i64;
-        let restored = scripting::persistence::global()
-            .map(|s| s.gc_oauth_clients(ttl).and_then(|_| s.oauth_clients()));
+        let restored = scripting::persistence::global().map(|s| {
+            if let Err(e) = s.gc_oauth_clients(ttl) {
+                eprintln!("[OAuth] could not collect unused clients: {e}");
+            }
+            s.oauth_clients()
+        });
         match restored {
             Some(Ok(clients)) => {
                 println!(
@@ -2037,7 +2057,6 @@ mod tests {
     #[test]
     fn unused_clients_expire() {
         let mut s = OAuthStore::new();
-        let ok = reg(&["http://localhost/cb"]);
         // never-used clients older than a day are collected; used ones stay
         s.clients
             .insert("c0".into(), client(UNUSED_CLIENT_TTL * 2, None));
@@ -2045,9 +2064,31 @@ mod tests {
             "c1".into(),
             client(UNUSED_CLIENT_TTL * 2, Some(UNUSED_CLIENT_TTL * 2)),
         );
-        assert!(s.admit_registration("4.4.4.4", &ok).is_ok());
+        s.collect_unused(nobody_owns_scripts);
         assert!(!s.clients.contains_key("c0"));
         assert!(s.clients.contains_key("c1"));
+    }
+
+    #[test]
+    fn collecting_unused_clients_spares_script_owners() {
+        let mut s = OAuthStore::new();
+        for id in ["owner", "other"] {
+            s.clients
+                .insert(id.into(), client(UNUSED_CLIENT_TTL * 2, None));
+        }
+        s.collect_unused(|| None);
+        assert_eq!(s.clients.len(), 2, "owners unknown: forget nobody");
+        s.collect_unused(|| Some(["owner".to_string()].into()));
+        assert!(s.clients.contains_key("owner") && !s.clients.contains_key("other"));
+    }
+
+    #[test]
+    fn collecting_needs_no_lookup_when_nothing_expired() {
+        let mut s = OAuthStore::new();
+        s.clients
+            .insert("new".into(), client(Duration::from_secs(1), None));
+        s.collect_unused(|| panic!("no lookup when nothing is unused"));
+        assert!(s.clients.contains_key("new"));
     }
 
     #[test]

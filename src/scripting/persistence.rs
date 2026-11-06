@@ -75,8 +75,8 @@ fn row_to_script(r: &rusqlite::Row) -> rusqlite::Result<StoredScript> {
 const COLUMNS: &str = "name, source, meta_json, source_hash, created_at, updated_at";
 
 impl Store {
-    /// Open (creating the file and its directory) and migrate. The
-    /// directory is made owner-only (0700) and the file 0600: it holds
+    /// Open (creating the file and its directory) and migrate. A missing
+    /// directory is created owner-only (0700) and the file is 0600: it holds
     /// users' scripts and the OAuth client ids that own them.
     pub fn open(path: &Path) -> rusqlite::Result<Self> {
         restrict(path);
@@ -219,27 +219,33 @@ impl Store {
     }
 
     /// Delete clients registered over `max_age_secs` ago that never received
-    /// a token; returns how many.
+    /// a token and own no scripts; returns how many.
     pub fn gc_oauth_clients(&self, max_age_secs: i64) -> rusqlite::Result<usize> {
         self.conn().execute(
-            "DELETE FROM oauth_clients WHERE last_token_at IS NULL AND created_at < ?1",
+            "DELETE FROM oauth_clients WHERE last_token_at IS NULL AND created_at < ?1
+                 AND client_id NOT IN (SELECT user_id FROM user_indicators)",
             params![chrono::Utc::now().timestamp() - max_age_secs],
         )
     }
 }
 
-/// Create `path`'s directory (0700) and the file (0600) before SQLite opens
-/// it, and tighten them if they already exist.
+/// Create `path`'s directory if missing (0700) and the file (0600) before
+/// SQLite opens it, and tighten the file if it already exists. An existing
+/// directory is not ours to change: `CHARTGEN_DB` may sit directly in `/tmp`.
 fn restrict(path: &Path) {
     let dir = path.parent().filter(|d| !d.as_os_str().is_empty());
+    #[cfg(not(unix))]
     if let Some(dir) = dir {
         let _ = std::fs::create_dir_all(dir);
     }
     #[cfg(unix)]
     {
-        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
         if let Some(dir) = dir {
-            let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
+            let _ = std::fs::DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(dir);
         }
         let _ = std::fs::OpenOptions::new()
             .create(true)

@@ -1164,6 +1164,97 @@ fn test_restart_collects_unused_clients_and_keeps_tokened_ones() {
     let _ = std::fs::remove_dir_all(db.parent().unwrap());
 }
 
+/// A failed GC write at startup must not cost the clients it could still read.
+#[cfg(feature = "scripting")]
+#[test]
+fn test_failed_gc_at_startup_still_restores_clients() {
+    let db = store_path("gc-fails");
+    seed_tokened_clients(&db, 1, 0);
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    conn.execute_batch(
+        "INSERT INTO oauth_clients (client_id, redirect_uris, created_at)
+             VALUES ('unused', '[]', 0);
+         CREATE TRIGGER no_delete BEFORE DELETE ON oauth_clients
+             BEGIN SELECT RAISE(ABORT, 'read-only'); END;",
+    )
+    .unwrap();
+    drop(conn);
+
+    let port = free_port();
+    let srv = spawn_server_on(port, None, &db, false);
+    assert_eq!(authorize(port, "c0000", EXTERNAL_REDIRECT).0, 307);
+    drop(srv);
+    let _ = std::fs::remove_dir_all(db.parent().unwrap());
+}
+
+/// A client registered before `last_token_at` existed, or whose use could not
+/// be recorded, looks unused. If it owns a script it must not be collected.
+#[cfg(feature = "scripting")]
+#[test]
+fn test_startup_gc_spares_script_owners() {
+    let db = store_path("gc-owner");
+    seed_tokened_clients(&db, 2, 1);
+    rusqlite::Connection::open(&db)
+        .unwrap()
+        .execute(
+            "UPDATE oauth_clients SET last_token_at = NULL, created_at = 0",
+            [],
+        )
+        .unwrap();
+
+    let port = free_port();
+    let srv = spawn_server_on(port, None, &db, false);
+    assert_eq!(authorize(port, "c0000", EXTERNAL_REDIRECT).0, 307);
+    assert_unknown_client_json(authorize(port, "c0001", EXTERNAL_REDIRECT), "no scripts");
+    drop(srv);
+    let _ = std::fs::remove_dir_all(db.parent().unwrap());
+}
+
+/// Writing the token's use to a busy store must not stall other requests.
+#[cfg(feature = "scripting")]
+#[test]
+fn test_busy_store_does_not_stall_authenticated_calls_during_token() {
+    let db = store_path("busy");
+    let port = free_port();
+    let srv = spawn_server_on(port, None, &db, false);
+    let client = register_external(port);
+    let token = sign_in(port, &client);
+    let (_, head, _) = authorize(port, &client, EXTERNAL_REDIRECT);
+    let code = head
+        .split("code=")
+        .nth(1)
+        .and_then(|rest| rest.split(['&', '\r']).next())
+        .unwrap()
+        .to_string();
+
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    conn.execute_batch("BEGIN EXCLUSIVE").unwrap();
+    let body = serde_json::json!({
+        "grant_type": "authorization_code",
+        "code": code,
+        "redirect_uri": EXTERNAL_REDIRECT,
+        "client_id": client,
+        "code_verifier": PKCE_VERIFIER,
+    })
+    .to_string();
+    let exchange = std::thread::spawn(move || http(port, "POST", "/token", &JSON_POST, &body).0);
+    std::thread::sleep(std::time::Duration::from_millis(500));
+
+    let started = std::time::Instant::now();
+    assert_eq!(ping_status(port, &token), 200);
+    let waited = started.elapsed();
+    assert!(
+        !exchange.is_finished(),
+        "/token should still be on the store"
+    );
+    assert!(waited.as_secs() < 2, "ping waited {waited:?}");
+
+    conn.execute_batch("COMMIT").unwrap();
+    assert_eq!(exchange.join().unwrap(), 200);
+    drop(srv);
+    let _ = std::fs::remove_dir_all(db.parent().unwrap());
+}
+
 /// A store that cannot be opened costs persistence, not the server.
 #[test]
 fn test_unopenable_store_is_not_fatal() {

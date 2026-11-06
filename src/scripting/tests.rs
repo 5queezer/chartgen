@@ -510,6 +510,41 @@ fn store_files_are_owner_only() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+#[cfg(unix)]
+#[test]
+fn store_keeps_the_mode_of_an_existing_directory() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = std::env::temp_dir().join(format!("chartgen-perm-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir(&dir).unwrap();
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o1777)).unwrap();
+    let path = dir.join("x.db");
+    persistence::Store::open(&path).unwrap();
+    let mode = |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o7777;
+    assert_eq!(mode(&dir), 0o1777);
+    assert_eq!(mode(&path), 0o600);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn gc_spares_clients_that_own_scripts() {
+    let path = std::env::temp_dir().join(format!("chartgen-gc-{}.db", uuid::Uuid::new_v4()));
+    let store = persistence::Store::open(&path).unwrap();
+    store.save_oauth_client("owner", &[]).unwrap();
+    store.save_oauth_client("other", &[]).unwrap();
+    store
+        .upsert("owner", "x", "", &serde_json::json!({}), "")
+        .unwrap();
+    assert_eq!(store.gc_oauth_clients(-10).unwrap(), 1);
+    let left: Vec<String> = store
+        .oauth_clients()
+        .unwrap()
+        .into_iter()
+        .map(|c| c.client_id)
+        .collect();
+    assert_eq!(left, ["owner"]);
+    let _ = std::fs::remove_file(&path);
+}
+
 // ---- refimpl parity ----
 
 /// Fixture battery: trending up and down, low and high volatility, flat and

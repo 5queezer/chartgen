@@ -93,7 +93,7 @@ recovers as described [above](#unknown-client_id).
 `client_name` of at most 256 (`400 invalid_client_metadata` otherwise), 20
 registrations per peer address per 10 minutes (`429 slow_down`; loopback
 peers are exempt) and 1000 registered clients. A client that never receives a
-token within 24 hours is forgotten. Logs never contain client ids, codes or
+token within 24 hours is forgotten, unless it owns scripts. Logs never contain client ids, codes or
 verifiers.
 
 At 1000 clients, `/register` makes room where it can

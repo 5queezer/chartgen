@@ -133,9 +133,10 @@ CREATE TABLE oauth_clients (
 );
 ```
 
-The directory is created owner-only (0700) and the file 0600. Clients with
-no token 24 hours after registering are deleted at startup and on each
-registration.
+A directory that does not exist yet is created owner-only (0700); an existing
+one keeps its mode. The file is always 0600. Clients with no token 24 hours after
+registering are deleted at startup and on each registration, unless they own
+scripts.
 
 `oauth_clients` keeps dynamically registered OAuth clients across restarts,
 so a client keeps its `client_id`, and with it any scripts. Access tokens stay
