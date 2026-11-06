@@ -35,8 +35,13 @@ fi
 sha=$(jq -r '.sha // empty' "$body")
 [ -n "$sha" ] || { log "no sha in GitHub response; retrying next tick"; exit 0; }
 
-if [ ! -f "$STATE_FILE" ]; then
-  mkdir -p "$(dirname "$STATE_FILE")" && echo "$sha" >"$STATE_FILE"
+# write_state SHA: atomic tmp-then-mv
+write_state() {
+  mkdir -p "$(dirname "$STATE_FILE")" && echo "$1" >"$STATE_FILE.tmp" && mv "$STATE_FILE.tmp" "$STATE_FILE"
+}
+
+if [ ! -s "$STATE_FILE" ]; then
+  write_state "$sha" || { log "could not write $STATE_FILE"; exit 1; }
   log "first run: recorded $sha without deploying"
   exit 0
 fi
@@ -73,7 +78,7 @@ code=$(printf 'header = "Authorization: Bearer %s"\n' "$COOLIFY_API_TOKEN" |
 
 case $code in
   2??)
-    if ! { mkdir -p "$(dirname "$STATE_FILE")" && echo "$sha" >"$STATE_FILE.tmp" && mv "$STATE_FILE.tmp" "$STATE_FILE"; }; then
+    if ! write_state "$sha"; then
       log "deployed $sha but could not write $STATE_FILE"
       exit 1
     fi

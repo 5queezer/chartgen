@@ -59,6 +59,15 @@ export CI_JSON; CI_JSON=$(ci_json completed '"success"')
 run "no state file records head without deploying" 0 0 bbb
 [ "$(grep -c . "$CALLS")" = 1 ] || { echo "FAIL first run made extra calls"; fails=$((fails + 1)); }
 
+# An empty state file (e.g. a crash mid-write) must re-baseline, not deploy every tick.
+rm -f "$CALLS"; : >"$CALLS"; : >"$STATE_FILE"
+"$here/chartgen-autodeploy.sh" >/dev/null 2>&1; rc=$?
+if [ "$rc" = 0 ] && [ "$(cat "$STATE_FILE")" = bbb ] && [ "$(grep -c '^POST' "$CALLS")" = 0 ]; then
+  echo "ok   empty state file counts as first run"
+else
+  echo "FAIL empty state file counts as first run"; fails=$((fails + 1))
+fi
+
 run "same SHA exits after one API call" 0 0 bbb bbb
 [ "$(grep -c . "$CALLS")" = 1 ] || { echo "FAIL same-SHA run made extra calls"; fails=$((fails + 1)); }
 
