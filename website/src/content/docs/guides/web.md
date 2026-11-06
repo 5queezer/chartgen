@@ -920,8 +920,9 @@ round trip while the session lasts, up to 30 days. A GitHub and a Google account
 separate users, each with their own scripts.
 
 The header shows the signed-in user at its right end: an initial, with the name on wider
-windows. Its menu says which provider it was, and has **Sign out**. A server without
-sign-in shows none of this.
+windows. Its menu says which provider it was, and has **Sign out**. On the compact shell,
+where the symbol needs that room, the same entries are at the bottom of the **More tools**
+menu. A server without sign-in shows none of this.
 
 **Sign out** ends the session in this browser and leads to a page of its own, with
 **Sign in again**. Every other tab of the app in this browser follows. It does not sign you

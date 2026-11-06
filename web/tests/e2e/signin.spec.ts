@@ -305,20 +305,20 @@ test.describe("sign-in", () => {
         page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth);
       expect(await fits()).toBe(true);
 
-      // Not `signIn`: this narrow, the status text it waits for is hidden.
+      // Not `signIn`: this narrow, the status text it waits for is hidden, and the
+      // account is in the More tools menu instead of taking the symbol's room.
       await page.getByRole("link", { name: "Continue with GitHub" }).click();
       await page.getByRole("link", { name: "Sign in as octo" }).click();
       await page.waitForURL((url) => url.pathname === "/" && !url.searchParams.has("code"));
       await expect(page.locator(".pane-header").first()).toBeVisible();
-      await expect(userMenu(page)).toBeVisible();
-
-      const box = await userMenu(page).boundingBox();
-      expect(box).not.toBeNull();
-      expect(box!.x + box!.width).toBeLessThanOrEqual(360);
+      await expect(userMenu(page)).toBeHidden();
       expect(await fits()).toBe(true);
       await expect(page.getByRole("button", { name: /^Layout:/ })).toBeVisible();
+      const symbol = page.getByRole("button", { name: /^Symbol:/ }).getByText("BTCUSDT");
+      expect(await symbol.evaluate((e) => e.scrollWidth <= e.clientWidth)).toBe(true);
 
-      await userMenu(page).tap();
+      await page.getByTestId("toolbar-more").tap();
+      await expect(page.getByText("Signed in with GitHub")).toBeVisible();
       await expect(page.getByTestId("user-name")).toHaveText("octo");
       await page.getByRole("menuitem", { name: "Sign out" }).tap();
       await expect(page.getByRole("heading", { name: "You are signed out" })).toBeVisible();

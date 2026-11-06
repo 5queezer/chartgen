@@ -1,6 +1,8 @@
-// The signed-in user at the right end of the top bar (ADR-0044): who, through
-// which provider, and Sign out. Only shown on a server with sign-in on. The
-// name comes from the provider and is rendered as text.
+// The signed-in user (ADR-0044): who, through which provider, and Sign out. A
+// menu of its own at the right end of the top bar. The compact shell has no room
+// for it next to the symbol, so there the same items sit in the toolbar's More
+// tools menu. Only shown on a server with sign-in on. The name comes from the
+// provider and is rendered as text.
 
 import { DropdownMenu } from "@kobalte/core";
 import type { JSX } from "solid-js";
@@ -15,7 +17,8 @@ const menuClass =
 const itemClass =
   "px-3 py-1.5 text-sm cursor-pointer outline-none data-[highlighted]:bg-[color:var(--color-border)]";
 
-export function UserMenu(props: { user: SignedInUser }): JSX.Element {
+/** The menu's content, for inside any `DropdownMenu.Content`. */
+export function UserMenuItems(props: { user: SignedInUser }): JSX.Element {
   const provider = () => PROVIDERS[props.user.provider] ?? props.user.provider;
   const signOutNow = () => {
     void signOut().catch((e: unknown) =>
@@ -23,9 +26,26 @@ export function UserMenu(props: { user: SignedInUser }): JSX.Element {
     );
   };
   return (
+    <>
+      <div class="px-3 py-1.5">
+        <div class="text-xs text-[color:var(--color-fg-muted)]">Signed in with {provider()}</div>
+        <div class="text-sm break-words" data-testid="user-name">
+          {props.user.name}
+        </div>
+      </div>
+      <DropdownMenu.Separator class="my-1 h-px bg-[color:var(--color-border)]" />
+      <DropdownMenu.Item class={itemClass} onSelect={signOutNow}>
+        Sign out
+      </DropdownMenu.Item>
+    </>
+  );
+}
+
+export function UserMenu(props: { user: SignedInUser }): JSX.Element {
+  return (
     <DropdownMenu.Root>
       <DropdownMenu.Trigger
-        class="px-1.5 py-1 rounded-md text-sm cursor-pointer text-[color:var(--color-fg)] hover:bg-[color:var(--color-bg-elev)] inline-flex items-center gap-1.5 shrink-0"
+        class="px-1.5 py-1 rounded-md text-sm cursor-pointer text-[color:var(--color-fg)] hover:bg-[color:var(--color-bg-elev)] inline-flex items-center gap-1.5 shrink-0 compact:hidden"
         aria-label={`Account: ${props.user.name}`}
         title={`Signed in as ${props.user.name}`}
         data-testid="user-menu"
@@ -36,22 +56,11 @@ export function UserMenu(props: { user: SignedInUser }): JSX.Element {
         >
           {props.user.name.charAt(0)}
         </span>
-        <span class="max-w-28 truncate max-[1199px]:hidden compact:hidden">{props.user.name}</span>
+        <span class="max-w-28 truncate max-[1199px]:hidden">{props.user.name}</span>
       </DropdownMenu.Trigger>
       <DropdownMenu.Portal>
         <DropdownMenu.Content class={menuClass}>
-          <div class="px-3 py-1.5">
-            <div class="text-xs text-[color:var(--color-fg-muted)]">
-              Signed in with {provider()}
-            </div>
-            <div class="text-sm break-words" data-testid="user-name">
-              {props.user.name}
-            </div>
-          </div>
-          <DropdownMenu.Separator class="my-1 h-px bg-[color:var(--color-border)]" />
-          <DropdownMenu.Item class={itemClass} onSelect={signOutNow}>
-            Sign out
-          </DropdownMenu.Item>
+          <UserMenuItems user={props.user} />
         </DropdownMenu.Content>
       </DropdownMenu.Portal>
     </DropdownMenu.Root>

@@ -47,6 +47,8 @@ import {
   createViewportWidth,
 } from "../lib/viewport";
 import { SymbolSearch } from "./SymbolSearch";
+import { UserMenuItems } from "./UserMenu";
+import type { SignedInUser } from "../oauth";
 
 const CHART_TYPE_LABELS: Record<ChartType, string> = {
   candles: "Candles",
@@ -266,6 +268,8 @@ export interface ToolbarProps {
   onReplay: () => void;
   /** Open the chart settings dialog. */
   onSettings: () => void;
+  /** The signed-in user: the compact shell's More tools menu holds their items. */
+  user: SignedInUser | null;
 }
 
 export function Toolbar(props: ToolbarProps): JSX.Element {
@@ -621,6 +625,14 @@ export function Toolbar(props: ToolbarProps): JSX.Element {
                     Fullscreen
                   </DropdownMenu.Item>
                 </Show>
+              </Show>
+              <Show when={compact() && props.user}>
+                {(user) => (
+                  <>
+                    <DropdownMenu.Separator class="my-1 h-px bg-[color:var(--color-border)]" />
+                    <UserMenuItems user={user()} />
+                  </>
+                )}
               </Show>
             </DropdownMenu.Content>
           </DropdownMenu.Portal>

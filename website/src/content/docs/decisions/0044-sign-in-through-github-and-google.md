@@ -117,6 +117,11 @@ user. For the same reason the other tabs are told through a `localStorage` event
 leave too, and they are told before the request, because the request ends their tokens.
 If it fails they have left without cause, and have a way back.
 
+The user is shown in a menu at the right end of the header. On the compact shell
+([ADR-0039](/chartgen/decisions/0039-compact-layout/)) the same entries go in the
+existing **More tools** menu: an avatar there cost the symbol its room, down to `BTC…`
+on a 360 px phone.
+
 ### Consent
 
 A signed-in user is asked before a client that is new to them gets a code. The page

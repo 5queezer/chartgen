@@ -853,7 +853,7 @@ fn chooser_page(config: &Config, request: &str) -> Response {
     page(
         StatusCode::OK,
         "Sign in to chartgen",
-        &format!("<p>Choose how to sign in. chartgen only reads your account id and name.</p>{links}<p class=\"m\">A GitHub and a Google account are two separate chartgen users, each with their own scripts.</p>"),
+        &format!("<p>Choose how to sign in. chartgen keeps only your account id and name.</p>{links}<p class=\"m\">A GitHub and a Google account are two separate chartgen users, each with their own scripts.</p>"),
     )
 }
 
