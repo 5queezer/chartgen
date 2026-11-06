@@ -47,12 +47,12 @@ export interface OffsetChart {
   setOffsetRightDistance: (distance: number) => void;
 }
 
-// Bars the chart's shown indicators project: set by Chart.tsx per full load.
-let shownProjection = 0;
+// Bars each chart's shown indicators project: set by Chart.tsx per full load.
+const shownProjection = new WeakMap<object, number>();
 
-/** Record how many bars the shown indicators project (0: none). */
-export function setShownProjection(bars: number): void {
-  shownProjection = bars;
+/** Record how many bars a chart's shown indicators project (0: none). */
+export function setShownProjection(chart: object, bars: number): void {
+  shownProjection.set(chart, bars);
 }
 
 /**
@@ -60,10 +60,11 @@ export function setShownProjection(bars: number): void {
  * `width` px (the margin depends on the bar width); null when nothing is
  * projected.
  */
-export function projectionBarSpace(count: number, width: number): number | null {
-  if (shownProjection <= 0 || count <= 0) return null;
-  const free = width / (count + shownProjection + MARGIN_BARS);
-  const offset = rightOffset(shownProjection, free, width);
+export function projectionBarSpace(chart: object, count: number, width: number): number | null {
+  const shown = shownProjection.get(chart) ?? 0;
+  if (shown <= 0 || count <= 0) return null;
+  const free = width / (count + shown + MARGIN_BARS);
+  const offset = rightOffset(shown, free, width);
   return (width - offset) / count;
 }
 
@@ -75,7 +76,7 @@ export function projectionBarSpace(count: number, width: number): number | null 
  */
 export function fitProjection(chart: OffsetChart): void {
   const width = chart.getSize("candle_pane", "main" as never)?.width ?? 0;
-  chart.setOffsetRightDistance(rightOffset(shownProjection, chart.getBarSpace(), width));
+  chart.setOffsetRightDistance(rightOffset(shownProjection.get(chart) ?? 0, chart.getBarSpace(), width));
 }
 
 /** Future slot (0 = the bar after the last) of bar `index`, or null. */

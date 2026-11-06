@@ -84,7 +84,9 @@ impl Default for Limits {
     fn default() -> Self {
         Self {
             per_token: 4,
-            per_client: 8,
+            // Eight 4-chart grids (ADR-0043). No forwarding header is trusted, so
+            // everyone behind one proxy shares this; `total` bounds the server.
+            per_client: 32,
             total: 64,
             subscribes_per_minute: 10,
             min_push_interval: Duration::from_millis(250),
@@ -1658,6 +1660,15 @@ mod tests {
             "50 ticks in a burst must collapse into a few pushes, got {closes:?}"
         );
         assert_eq!(closes.last(), Some(&149.0), "the newest tick is never lost");
+    }
+
+    #[test]
+    fn default_cap_per_client_leaves_room_for_grids_behind_one_address() {
+        let limits = Limits::default();
+        assert_eq!(limits.per_client, 32);
+        assert_eq!(limits.total, 64);
+        // ADR-0043: a token holds a 4-chart grid, and a proxy's clients share an address.
+        assert_eq!(limits.per_client / limits.per_token, 8);
     }
 
     #[tokio::test]

@@ -38,7 +38,7 @@ import {
   activeIndicators,
   addIndicator,
   indicatorName,
-  setActiveIndicators,
+  removeIndicatorEverywhere,
 } from "../stores/indicators";
 import type { IndicatorError, ListIndicatorsPayload } from "../types/responses";
 
@@ -384,7 +384,7 @@ export default function ScriptEditor(props: ScriptEditorProps): JSX.Element {
         (i) => i.source !== "user" && (i.name === target || i.aliases?.includes(target)),
       );
       if (!builtinLeft) {
-        setActiveIndicators(activeIndicators().filter((e) => indicatorName(e) !== target));
+        removeIndicatorEverywhere(target);
       }
       void refreshChartsUsing(queryClient, target);
     } catch (err) {

@@ -5,6 +5,7 @@ import {
   MAX_IMPORT_BYTES,
   MAX_INDICATORS,
   isDirty,
+  isPaneDirty,
   normalizeIndicators,
   parseExport,
   parseLayouts,
@@ -499,5 +500,181 @@ describe("live bindings", () => {
     expect(lay.timeframe()).toBe("4h");
     expect(lay.chartType()).toBe("line");
     expect(l.layoutDirty()).toBe(false);
+  });
+});
+
+describe("grid in a layout (ADR-0043)", () => {
+  const { timeZone: _, ...pane } = base;
+  const two: LayoutState = {
+    ...base,
+    grid: "2h",
+    panes: [{ ...pane, symbol: "ETHUSDT", timeframe: "15m" }],
+  };
+
+  it("reads a layout saved before grids as one chart, with no grid fields", () => {
+    const state = parseState(base)!;
+    expect(state.grid).toBeUndefined();
+    expect(state.panes).toBeUndefined();
+    expect(isDirty(state, base)).toBe(false);
+  });
+
+  it("keeps the grid and each chart's state", () => {
+    const state = parseState(JSON.parse(JSON.stringify(two)))!;
+    expect(state.grid).toBe("2h");
+    expect(state.panes).toHaveLength(1);
+    expect(state.panes![0]!.symbol).toBe("ETHUSDT");
+    expect(state.panes![0]!.timeframe).toBe("15m");
+    // The first chart stays where it always was, so an older build opens it.
+    expect(state.symbol).toBe("BTCUSDT");
+  });
+
+  it("an unknown grid is one chart and drops the panes", () => {
+    const state = parseState({ ...two, grid: "9x9" })!;
+    expect(state.grid).toBeUndefined();
+    expect(state.panes).toBeUndefined();
+  });
+
+  it("a one-chart grid value carries no panes", () => {
+    const state = parseState({ ...two, grid: "1" })!;
+    expect(state.grid).toBeUndefined();
+    expect(state.panes).toBeUndefined();
+  });
+
+  it("has exactly as many panes as the grid: extras dropped, missing ones copy the first", () => {
+    const many = parseState({ ...two, panes: [two.panes![0], two.panes![0], two.panes![0]] })!;
+    expect(many.panes).toHaveLength(1);
+    const short = parseState({ ...two, grid: "4" })!;
+    expect(short.panes).toHaveLength(3);
+    expect(short.panes![0]!.symbol).toBe("ETHUSDT");
+    expect(short.panes![1]!.symbol).toBe("BTCUSDT");
+    expect(short.panes![2]!.symbol).toBe("BTCUSDT");
+  });
+
+  it("a malformed pane becomes a copy of the first chart, the layout survives", () => {
+    const state = parseState({ ...two, panes: [{ symbol: "bad symbol!" }] })!;
+    expect(state.panes![0]!.symbol).toBe("BTCUSDT");
+  });
+
+  it("a pane's indicators and compare list are validated like the first chart's", () => {
+    const state = parseState({
+      ...two,
+      panes: [{ ...pane, indicators: ["rsi", 42, { nope: 1 }], compare: ["ETHUSDT", "?!"] }],
+    })!;
+    expect(state.panes![0]!.indicators).toEqual(["rsi"]);
+    expect(state.panes![0]!.compare).toEqual(["ETHUSDT"]);
+  });
+
+  it("the grid and every pane count for the dirty check", () => {
+    expect(isDirty(two, two)).toBe(false);
+    expect(isDirty(two, base)).toBe(true);
+    expect(isDirty(two, { ...two, grid: "2v" })).toBe(true);
+    expect(
+      isDirty(two, { ...two, panes: [{ ...two.panes![0]!, timeframe: "4h" }] }),
+    ).toBe(true);
+  });
+
+  it("a pane's restore mode is not a change, like the first chart's", () => {
+    expect(
+      isDirty(two, { ...two, panes: [{ ...two.panes![0]!, compareRestore: "log" }] }),
+    ).toBe(false);
+    expect(isPaneDirty(pane, { ...pane, compareRestore: "log" })).toBe(false);
+  });
+
+  it("a pane differs by anything a layout holds for a chart", () => {
+    expect(isPaneDirty(pane, { ...pane })).toBe(false);
+    expect(isPaneDirty(pane, { ...pane, symbol: "ETHUSDT" })).toBe(true);
+    expect(isPaneDirty(pane, { ...pane, indicators: [] })).toBe(true);
+  });
+
+  it("export and import keep the grid", () => {
+    const layout: Layout = { id: "x", name: "Grid", updatedAt: 1, state: two };
+    const parsed = parseExport(serializeExport(layout))!;
+    expect(parsed.state.grid).toBe("2h");
+    expect(parsed.state.panes![0]!.symbol).toBe("ETHUSDT");
+  });
+});
+
+describe("per-pane stores (ADR-0043)", () => {
+  beforeEach(() => {
+    vi.resetModules();
+    const data = new Map<string, string>();
+    vi.stubGlobal("localStorage", {
+      getItem: (k: string) => data.get(k) ?? null,
+      setItem: (k: string, v: string) => void data.set(k, v),
+      removeItem: (k: string) => void data.delete(k),
+    });
+  });
+
+  it("a pane's change stays in that pane and its own keys", async () => {
+    const { chartStoreOf } = await import("./layout");
+    const { compareStoreOf } = await import("./compare");
+    const { indicatorStoreOf } = await import("./indicators");
+    chartStoreOf(1).setSymbol("ETHUSDT");
+    compareStoreOf(1).addCompare("SOLUSDT", "ETHUSDT");
+    indicatorStoreOf(1).setActiveIndicators(["volume"]);
+
+    expect(chartStoreOf(0).symbol()).toBe("BTCUSDT");
+    expect(chartStoreOf(0).scaleMode()).toBe("normal");
+    expect(compareStoreOf(0).compareSymbols()).toEqual([]);
+    expect(indicatorStoreOf(0).activeIndicators()).not.toEqual(["volume"]);
+    expect(localStorage.getItem("chartgen.layout.symbol")).toBeNull();
+    expect(localStorage.getItem("chartgen.indicators.active")).toBeNull();
+    expect(localStorage.getItem("chartgen.pane.1.symbol")).toBe('"ETHUSDT"');
+    expect(localStorage.getItem("chartgen.pane.1.indicators")).toBe('["volume"]');
+    expect(chartStoreOf(1).scaleMode()).toBe("percentage");
+  });
+
+  it("the module-level exports read and write the active pane", async () => {
+    const { setActivePane } = await import("./grid");
+    const { setSymbol, symbol, chartStoreOf } = await import("./layout");
+    setActivePane(2);
+    setSymbol("ETHUSDT");
+    expect(symbol()).toBe("ETHUSDT");
+    expect(chartStoreOf(2).symbol()).toBe("ETHUSDT");
+    expect(chartStoreOf(0).symbol()).toBe("BTCUSDT");
+    setActivePane(0);
+    expect(symbol()).toBe("BTCUSDT");
+  });
+
+  it("a stored grid and active pane are validated", async () => {
+    localStorage.setItem("chartgen.layout.grid", '"4"');
+    localStorage.setItem("chartgen.layout.activePane", "3");
+    const fresh = await import("./grid");
+    expect(fresh.grid()).toBe("4");
+    expect(fresh.activePane()).toBe(3);
+    expect(fresh.parseGrid("nope")).toBe("1");
+    expect(fresh.parseActivePane(5, "2h")).toBe(0);
+    expect(fresh.parseActivePane(1.5, "4")).toBe(0);
+    fresh.setGrid("2h");
+    expect(fresh.activePane()).toBe(0);
+  });
+
+  it("changing the grid seeds new panes; only touched ones count as lost", async () => {
+    const layouts = await import("./layouts");
+    const { chartStoreOf } = await import("./layout");
+    chartStoreOf(0).setSymbol("SOLUSDT");
+    layouts.changeGrid("4");
+    expect(chartStoreOf(3).symbol()).toBe("SOLUSDT");
+    expect(layouts.panesLostBy("1")).toEqual([]);
+    chartStoreOf(2).setTimeframe("4h");
+    expect(layouts.panesLostBy("1")).toEqual([2]);
+    expect(layouts.panesLostBy("4")).toEqual([]);
+  });
+
+  it("a chart saved in the layout is not lost, and comes back", async () => {
+    const layouts = await import("./layouts");
+    const { chartStoreOf } = await import("./layout");
+    layouts.changeGrid("2h");
+    chartStoreOf(1).setSymbol("ETHUSDT");
+    expect(layouts.panesLostBy("1")).toEqual([1]);
+    expect(layouts.saveLayout()).toBe(true);
+    expect(layouts.layoutDirty()).toBe(false);
+    expect(layouts.panesLostBy("1")).toEqual([]);
+    layouts.changeGrid("1");
+    expect(layouts.layoutDirty()).toBe(true);
+    chartStoreOf(1).setSymbol("AAPL");
+    layouts.changeGrid("2h");
+    expect(chartStoreOf(1).symbol()).toBe("ETHUSDT");
+    expect(layouts.layoutDirty()).toBe(false);
   });
 });
