@@ -473,6 +473,8 @@ mod tests {
     fn only_https_on_443_without_credentials_passes() {
         for url in [
             "http://example.com/",
+            "http://example.com:443/",
+            "ftp://example.com:443/",
             "ftp://example.com/",
             "file:///etc/passwd",
             "gopher://example.com/",

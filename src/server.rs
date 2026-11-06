@@ -272,8 +272,7 @@ impl OAuthStore {
     }
 
     /// The OAuth client a valid token was issued to: the owner of that
-    /// caller's scripted indicators (ADR-0025).
-    #[cfg(feature = "scripting")]
+    /// caller's scripted indicators (ADR-0025) and server alerts (ADR-0042).
     fn client_for_token(&mut self, token: &str) -> Option<String> {
         self.cleanup_expired();
         self.tokens.get(token).map(|t| t.client_id.clone())

@@ -349,7 +349,8 @@ impl ServerAlerts {
                         Ok(r) => {
                             st.alerts.insert(r.id.clone(), r);
                         }
-                        Err(e) => eprintln!("[alerts] skipping an unreadable alert: {e}"),
+                        // Not the error: it can quote the row, which holds a secret.
+                        Err(_) => eprintln!("[alerts] skipping an unreadable alert"),
                     }
                 }
             }

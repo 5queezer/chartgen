@@ -332,12 +332,14 @@ impl State {
     }
 }
 
+#[cfg(feature = "scripting")]
 /// Keeps a feed running for `ChartHub::watch_feed`.
 pub struct FeedLease {
     hub: Weak<ChartHub>,
     key: FeedKey,
 }
 
+#[cfg(feature = "scripting")]
 impl Drop for FeedLease {
     fn drop(&mut self) {
         let Some(hub) = self.hub.upgrade() else {
@@ -572,12 +574,14 @@ impl ChartHub {
         rx
     }
 
+    #[cfg(feature = "scripting")]
     /// The feed serving `symbol` at `timeframe`, or why there is none.
     pub fn feed_key(&self, symbol: &str, timeframe: &str) -> Result<FeedKey, String> {
         let interval = self.source.feed_interval(symbol, timeframe)?;
         Ok((feed_symbol(symbol)?, interval))
     }
 
+    #[cfg(feature = "scripting")]
     /// Does `symbol` have bars at `timeframe`? Blocking; one fetch.
     pub fn check_symbol(&self, symbol: &str, timeframe: &str) -> Result<(), String> {
         match self.source.seed(symbol, timeframe, 2) {
@@ -587,6 +591,7 @@ impl ChartHub {
         }
     }
 
+    #[cfg(feature = "scripting")]
     /// Listen to a feed without a chart (server alerts, ADR-0042): it shares the
     /// WebSocket with every chart of that symbol and interval, and closes after
     /// the linger once the lease and all charts are gone.
@@ -1070,6 +1075,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "scripting")]
     #[tokio::test]
     async fn a_watcher_shares_the_charts_feed_and_holds_it_open() {
         let fake = Arc::new(Fake::default());
