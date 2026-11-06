@@ -677,6 +677,26 @@ describe("pattern channels (ADR-0046)", () => {
     expect(s.indicators.auto_fib!.lines![0]!.values[0]).toBe(50);
   });
 
+  it("a recompute reaching back past our first bar still lands on our bars", () => {
+    // The chart holds bars 10.. only; the recompute covers bars 5..15.
+    const line = { index: 0, label: "0.5", values: Array.from({ length: 30 }, () => 50) };
+    const s = withInd(series(30, 10), "auto_fib", {
+      lines: [line],
+      levels: [{ line: 0, x: 0, t: tOf(10), y: 50 }],
+      patterns: [],
+    });
+    const rc = withInd(series(11, 5), "auto_fib", {
+      lines: [{ index: 0, label: "0.5", values: new Array(11).fill(33) }],
+      levels: [{ line: 0, x: 8, t: tOf(13), y: 33 }],
+      patterns: [pattern(6, 13, 5, "forming")],
+    });
+    const got = replayFrame(s, 5, rc).indicators.auto_fib!;
+    // Chart bar 13 is index 3 here; recompute bar 6 lies before our first bar.
+    expect(got.levels![0]!.x).toBe(3);
+    expect(got.lines![0]!.values).toEqual([null, null, null, 33, 33, 33]);
+    expect(got.patterns![0]!.strokes[0]).toMatchObject({ x1: -4, x2: 3 });
+  });
+
   it("a frame's shape counts an indicator that has only events", () => {
     const s = withInd(series(3), "chart_patterns", { events: [{ key: "bullish", name: "B", t: null }] });
     expect(frameShape(s)).toBe("chart_patterns");

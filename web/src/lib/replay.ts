@@ -342,14 +342,16 @@ export function replayFrame(
     ind.hlines = r?.hlines ? r.hlines.slice() : [];
     if (r?.y_range) ind.y_range = r.y_range;
     // Whole-window channels (ADR-0046) as the recompute saw them: its indices run
-    // from its own first bar, which is `at(0)` here. A level rewrites its plot on
-    // every bar: nothing of the live swing may stay on bars before the window.
-    const base = r && recompute!.bars.length > 0 ? at(0) : -1;
+    // from its own first bar, which can lie before ours, so the offset comes from
+    // the first bar both have. A level rewrites its plot on every bar: nothing of
+    // the live swing may stay on bars before the window.
+    const shared = r ? toSlice.findIndex((si) => si >= 0) : -1;
+    const base = shared >= 0 ? toSlice[shared]! - shared : null;
     if (ind.patterns || r?.patterns) {
-      ind.patterns = base >= 0 ? (r?.patterns ?? []).map((p) => shiftPattern(p, base)) : [];
+      ind.patterns = base !== null ? (r?.patterns ?? []).map((p) => shiftPattern(p, base)) : [];
     }
     if (ind.levels || r?.levels) {
-      ind.levels = base >= 0 ? (r?.levels ?? []).map((l) => shiftLevel(l, base)) : [];
+      ind.levels = base !== null ? (r?.levels ?? []).map((l) => shiftLevel(l, base)) : [];
       writeLevels(ind.lines, ind.levels, n);
     }
   }
