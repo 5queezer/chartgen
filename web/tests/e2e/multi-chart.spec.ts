@@ -252,6 +252,10 @@ test.describe("multi-chart grid", () => {
     await page.waitForTimeout(300);
     expect((await panes(page))[0]!.drawings).toBe(0);
     expect((await panes(page))[1]!.drawings).toBe(0);
+    // Leaving the chart cancelled it: coming back and clicking places nothing.
+    await drawClick(page, 1, 0.4, 0.3);
+    await page.waitForTimeout(300);
+    expect((await panes(page))[1]!.drawings).toBe(0);
 
     // Two charts on one symbol show its drawings, and neither overwrites the other's.
     await activate(page, 1);
@@ -380,13 +384,16 @@ test.describe("multi-chart grid", () => {
       .poll(async () => (await panes(page)).map((p) => p.poll), { timeout: 20_000 })
       .toEqual(["push", "push"]);
 
+    // Pushed, not polled: the sample source ticks about every 500 ms, far faster
+    // than the 2 s tail poll a chart without its ticks would fall back to.
     const before = await panes(page);
-    await expect
-      .poll(async () => {
-        const now = await panes(page);
-        return now.map((p, i) => p.updateKind === "tail" && p.version! > before[i]!.version!);
-      }, { timeout: 15_000 })
-      .toEqual([true, true]);
+    await page.waitForTimeout(5000);
+    const after = await panes(page);
+    expect(after.map((p) => p.poll)).toEqual(["push", "push"]);
+    for (const i of [0, 1]) {
+      expect(after[i]!.updateKind).toBe("tail");
+      expect(after[i]!.version! - before[i]!.version!).toBeGreaterThanOrEqual(5);
+    }
     expect(errors).toEqual([]);
   });
 
