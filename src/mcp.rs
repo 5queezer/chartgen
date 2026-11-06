@@ -4674,8 +4674,14 @@ mod tests {
         .data;
         raw.symbol = Some("ETHUSDT".into());
         raw.interval = Some("4h".into());
+        // The polled value went through text. Parse the pushed one the same
+        // way: without starlark's `arbitrary_precision`, serde_json's float
+        // parser can land 1 ulp off the computed f64.
         let pushed = series_tail(&raw, &indicators, "heikin_ashi", 2).unwrap();
-        assert_eq!(pushed, polled);
+        assert_eq!(
+            serde_json::from_str::<Value>(&pushed.to_string()).unwrap(),
+            polled
+        );
     }
 
     #[test]
@@ -4708,7 +4714,11 @@ mod tests {
         raw.symbol = Some("ETHUSDT".into());
         raw.interval = Some("4h".into());
         let pushed = series_tail(&raw, &indicators, "candles", 2).unwrap();
-        assert_eq!(pushed, polled);
+        // Parse the pushed tail like the polled one (see the test above).
+        assert_eq!(
+            serde_json::from_str::<Value>(&pushed.to_string()).unwrap(),
+            polled
+        );
         let ichimoku = indicators::by_name("ichimoku").unwrap();
         let want = |data: &chartgen::data::OhlcvData| {
             let p = ichimoku.projection(data).unwrap();

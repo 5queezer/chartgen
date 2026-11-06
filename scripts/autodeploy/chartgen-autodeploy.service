@@ -1,0 +1,15 @@
+[Unit]
+Description=chartgen pull-based auto-deploy (poll GitHub, trigger Coolify)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/chartgen-autodeploy.env
+ExecStart=/usr/local/bin/chartgen-autodeploy.sh
+DynamicUser=yes
+StateDirectory=chartgen-autodeploy
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
