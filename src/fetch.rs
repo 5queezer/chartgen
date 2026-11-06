@@ -2557,7 +2557,7 @@ mod tests {
 
         /// Until `n` requests have been counted, answered or not.
         fn wait_for_requests(&self, n: usize) {
-            let give_up = far();
+            let give_up = Instant::now() + Duration::from_secs(10);
             while self.requests() < n {
                 assert!(Instant::now() < give_up, "{} requests", self.requests());
                 std::thread::sleep(Duration::from_millis(1));
@@ -2574,12 +2574,17 @@ mod tests {
             let flying = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
             self.peak.fetch_max(flying, Ordering::SeqCst);
             std::thread::sleep(self.delay);
-            {
-                let mut paused = self.paused.0.lock().unwrap();
-                while *paused {
-                    paused = self.paused.1.wait(paused).unwrap();
-                }
-            }
+            // Not for ever: a test that fails while paused must end, not hang.
+            drop(
+                self.paused
+                    .1
+                    .wait_timeout_while(
+                        self.paused.0.lock().unwrap(),
+                        Duration::from_secs(15),
+                        |paused| *paused,
+                    )
+                    .unwrap(),
+            );
             self.in_flight.fetch_sub(1, Ordering::SeqCst);
 
             let now_s = self.now_s.load(Ordering::SeqCst);
@@ -2947,7 +2952,7 @@ mod tests {
 
     /// Until `n` callers besides the one reading wait on this refresh.
     fn wait_for_joiners(client: &BinanceClient, key: &KlineKey, n: usize) {
-        let give_up = far();
+        let give_up = Instant::now() + Duration::from_secs(10);
         loop {
             let waiting = client
                 .klines
@@ -3112,7 +3117,7 @@ mod tests {
         let key: PageKey = ("BTCUSDT".to_string(), "1h", end, 800);
         std::thread::scope(|s| {
             let handles: Vec<_> = (0..5).map(|_| s.spawn(read)).collect();
-            let give_up = far();
+            let give_up = Instant::now() + Duration::from_secs(10);
             loop {
                 let flying = client.pages.state.lock().unwrap().flying.get(&key).cloned();
                 if flying.is_some_and(|f| Arc::strong_count(&f) >= 7) {
@@ -3247,7 +3252,7 @@ mod tests {
         let key = ("BTCUSDT".to_string(), "1h");
         std::thread::scope(|s| {
             let handles: Vec<_> = (0..6).map(|_| s.spawn(read)).collect();
-            let give_up = far();
+            let give_up = Instant::now() + Duration::from_secs(10);
             loop {
                 let flying = client.klines.lock().walking.get(&key).cloned();
                 if flying.is_some_and(|f| Arc::strong_count(&f) >= 8) {
@@ -3291,7 +3296,7 @@ mod tests {
                     panic!("a joiner sends nothing")
                 })
             });
-            let give_up = far();
+            let give_up = Instant::now() + Duration::from_secs(10);
             loop {
                 let flying = cache.lock().walking.get(&key).cloned();
                 if flying.is_some_and(|f| Arc::strong_count(&f) >= 4) {
