@@ -15,6 +15,7 @@ interface PaneInfo {
   invert: boolean;
   reverse: boolean | null;
   candleIndicators: string[];
+  visibleFrom: number | null;
   candleHeight: number | null;
   stackHeight: number | null;
   staleCanvases: number;
@@ -269,6 +270,42 @@ test.describe("multi-chart grid", () => {
     await page.keyboard.press("Enter");
     await expect(dialog).toBeVisible();
     await expect(paneCell(page, 1)).toHaveAttribute("data-active", "");
+  });
+
+  test("go to date stays on the chart it started on", async ({ bootedApp: page }) => {
+    await chooseGrid(page, "2h");
+    await expectLoaded(page, 2);
+    await expect(paneCell(page, 0)).toHaveAttribute("data-active", "");
+    // History pages slowly enough to press the other chart meanwhile.
+    await page.evaluate(() => {
+      const realFetch = window.fetch.bind(window);
+      window.fetch = async (input, init) => {
+        const body = typeof init?.body === "string" ? init.body : "";
+        if (body.includes('"generate_chart"') && body.includes('"end_time"')) {
+          await new Promise((r) => setTimeout(r, 1000));
+        }
+        return realFetch(input, init);
+      };
+    });
+
+    const target = Date.now() - 40 * 24 * 3600 * 1000;
+    const iso = new Date(target).toISOString();
+    await page.getByRole("button", { name: "Go to date" }).click();
+    const dialog = page.getByRole("dialog");
+    await dialog.getByLabel("Date").fill(iso.slice(0, 10));
+    await dialog.getByLabel("Time (optional)").fill("12:00");
+    await dialog.getByLabel("Time (optional)").press("Enter");
+    await expect(dialog).toHaveCount(0);
+    await activate(page, 1);
+
+    // The first chart paged in and moved; the second, now active, did neither.
+    await expect
+      .poll(async () => (await panes(page))[0]!.visibleFrom!, { timeout: 20_000 })
+      .toBeLessThan(target);
+    await page.waitForTimeout(300);
+    const second = (await panes(page))[1]!;
+    expect(second.visibleFrom!).toBeGreaterThan(target);
+    expect(second.bars).toBeLessThan((await panes(page))[0]!.bars);
   });
 
   test("each chart registers its own indicators: geometry is kept by registered name", async ({
