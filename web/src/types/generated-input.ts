@@ -144,6 +144,49 @@ export interface GenerateChartInput {
 
 export interface GetBalanceInput {}
 
+export interface GetFootprintInput {
+  /**
+   * ATR length of the auto row size.
+   */
+  atr_length?: number;
+  /**
+   * Newest bars to return.
+   */
+  bars?: number;
+  /**
+   * Exclusive upper bound on bar open time, ms since epoch.
+   */
+  end_time?: number;
+  /**
+   * Imbalance, percent: buy against sell one row below, sell against buy one row above.
+   */
+  imbalance?: number;
+  /**
+   * Row height in price. Widened if a bar would have over 200 rows. Omit for row_ticks or auto.
+   */
+  row_size?: number;
+  /**
+   * Row height in ticks. Omit for auto: 0.2 x ATR on round numbers.
+   */
+  row_ticks?: number;
+  /**
+   * Imbalances in a row that make a stacked imbalance.
+   */
+  stacked?: number;
+  /**
+   * Symbol, as generate_chart's ticker.
+   */
+  ticker: string;
+  /**
+   * Chart interval, as generate_chart's timeframe.
+   */
+  timeframe?: string;
+  /**
+   * Value area, percent of the volume.
+   */
+  value_area?: number;
+}
+
 export interface GetIndicatorsInput {
   /**
    * List of indicator names to compute (e.g. ["rsi", "macd", "adx"])
@@ -177,6 +220,57 @@ export interface GetQuotesInput {
    * @maxItems 50
    */
   symbols: string[];
+}
+
+export interface GetTpoInput {
+  /**
+   * Length of a block, from 5m to 4h.
+   */
+  block?: string;
+  /**
+   * Exclusive upper bound on block open time, ms since epoch.
+   */
+  end_time?: number;
+  /**
+   * Blocks of the initial balance.
+   */
+  ib_blocks?: number;
+  /**
+   * Length of a profile: a count and D, W or M, such as 1D, 1W or 1M.
+   */
+  period?: string;
+  /**
+   * Newest periods to return. Long periods of short blocks are cut to 3000 blocks; `periods_cut` then says so.
+   */
+  periods?: number;
+  /**
+   * Row height in price. Omit for row_ticks or auto.
+   */
+  row_size?: number;
+  /**
+   * Row height in ticks. Omit for auto: a 24th of the median period range, on round numbers.
+   */
+  row_ticks?: number;
+  /**
+   * Up to 5 HH:MM-HH:MM in the exchange's time (UTC for crypto): one profile per session of each period.
+   *
+   * @maxItems 5
+   */
+  sessions?:
+    | []
+    | [string]
+    | [string, string]
+    | [string, string, string]
+    | [string, string, string, string]
+    | [string, string, string, string, string];
+  /**
+   * Symbol, as generate_chart's ticker.
+   */
+  ticker: string;
+  /**
+   * Value area, percent of the blocks.
+   */
+  value_area?: number;
 }
 
 export interface ListAlertsInput {}

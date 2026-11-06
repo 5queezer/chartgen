@@ -163,6 +163,46 @@ pub fn tools_list_result() -> Value {
                 }
             },
             {
+                "name": "get_footprint",
+                "description": "Volume footprint of chart bars: buy and sell volume per price row of each bar, built from lower-timeframe bars (not from trades). `intrabar_interval` says which; null means nothing finer exists and the bar is its own only intrabar. `side` says how volume was split: 'taker_volume' uses Binance's taker buy volume per kline, 'close_vs_open' gives each intrabar to one side (Yahoo has no aggressor data). Row placement is always an estimate: each intrabar's volume is spread over its high-low range. The forming bar repaints as data arrives. Costs up to 7 Binance requests on a cold load, and is cached.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "ticker": { "type": "string", "description": "Symbol, as generate_chart's ticker." },
+                        "timeframe": { "type": "string", "description": "Chart interval, as generate_chart's timeframe.", "default": "1h" },
+                        "bars": { "type": "integer", "minimum": 1, "maximum": 200, "default": 60, "description": "Newest bars to return." },
+                        "end_time": { "type": "integer", "description": "Exclusive upper bound on bar open time, ms since epoch." },
+                        "row_size": { "type": "number", "minimum": 0, "description": "Row height in price. Widened if a bar would have over 200 rows. Omit for row_ticks or auto." },
+                        "row_ticks": { "type": "integer", "minimum": 0, "description": "Row height in ticks. Omit for auto: 0.2 x ATR on round numbers." },
+                        "atr_length": { "type": "integer", "minimum": 1, "maximum": 500, "default": 14, "description": "ATR length of the auto row size." },
+                        "value_area": { "type": "number", "minimum": 1, "maximum": 100, "default": 70, "description": "Value area, percent of the volume." },
+                        "imbalance": { "type": "number", "minimum": 100, "maximum": 100000, "default": 300, "description": "Imbalance, percent: buy against sell one row below, sell against buy one row above." },
+                        "stacked": { "type": "integer", "minimum": 1, "maximum": 100, "default": 3, "description": "Imbalances in a row that make a stacked imbalance." }
+                    },
+                    "required": ["ticker"]
+                }
+            },
+            {
+                "name": "get_tpo",
+                "description": "Time Price Opportunity (market profile) of periods: which blocks traded at each price row, with POC, value area, poor highs and lows, single prints, initial balance and rotation factor. Built from block-length klines. Costs up to 3 Binance requests.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "ticker": { "type": "string", "description": "Symbol, as generate_chart's ticker." },
+                        "period": { "type": "string", "default": "1D", "description": "Length of a profile: a count and D, W or M, such as 1D, 1W or 1M." },
+                        "block": { "type": "string", "default": "30m", "description": "Length of a block, from 5m to 4h." },
+                        "periods": { "type": "integer", "minimum": 1, "maximum": 60, "default": 10, "description": "Newest periods to return. Long periods of short blocks are cut to 3000 blocks; `periods_cut` then says so." },
+                        "end_time": { "type": "integer", "description": "Exclusive upper bound on block open time, ms since epoch." },
+                        "row_size": { "type": "number", "minimum": 0, "description": "Row height in price. Omit for row_ticks or auto." },
+                        "row_ticks": { "type": "integer", "minimum": 0, "description": "Row height in ticks. Omit for auto: a 24th of the median period range, on round numbers." },
+                        "value_area": { "type": "number", "minimum": 1, "maximum": 100, "default": 70, "description": "Value area, percent of the blocks." },
+                        "ib_blocks": { "type": "integer", "minimum": 1, "maximum": 100, "default": 2, "description": "Blocks of the initial balance." },
+                        "sessions": { "type": "array", "items": { "type": "string" }, "maxItems": 5, "description": "Up to 5 HH:MM-HH:MM in the exchange's time (UTC for crypto): one profile per session of each period." }
+                    },
+                    "required": ["ticker"]
+                }
+            },
+            {
                 "name": "search_symbols",
                 "description": "Search symbols by ticker or name across all Binance spot pairs and Yahoo Finance instruments (stocks, ETFs, funds, indices, FX, futures), like TradingView's symbol search. Returns {results: [{symbol, name, exchange, type, source}], warnings?}, ranked: exact symbol match first, then prefix, then contains, then name match. type is one of crypto, stock, etf, fund, index, forex, future; source is binance, yahoo or sample. Crypto comes from Binance only (e.g. BTCUSDT); Yahoo's own crypto listings are dropped. If one source fails its results are omitted and a warning is added; the call fails only when every queried source fails.",
                 "inputSchema": {

@@ -184,6 +184,17 @@ pub trait Indicator {
         false
     }
 
+    /// Whether this is better computed from lower-timeframe bars (ADR-0048).
+    fn wants_intrabars(&self) -> bool {
+        false
+    }
+
+    /// The result over `chart`'s bars with its volume read from `intrabars`, which
+    /// cover them. `None` when it has no such form.
+    fn with_intrabars(&self, _chart: &OhlcvData, _intrabars: &OhlcvData) -> Option<PanelResult> {
+        None
+    }
+
     /// Bars of history the values need before they converge (an SMA-seeded
     /// EMA's seed weighs < 0.1% after them). A non-zero series `warmup` is
     /// raised to this, up to its cap (ADR-0032). 0: no extra need.

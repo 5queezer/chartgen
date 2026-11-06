@@ -923,6 +923,7 @@ impl Indicator for PivotPoints {
 
 // ---- Volume Profile (overlay) ----
 
+#[derive(Clone)]
 pub struct VolumeProfile {
     pub bins: usize,
     pub side: String,              // "left" or "right"
@@ -947,9 +948,40 @@ impl Default for VolumeProfile {
     }
 }
 
+/// `data` with only the bars opening in `[from, to)`.
+fn bars_between(data: &OhlcvData, from: Option<i64>, to: Option<i64>) -> OhlcvData {
+    let inside = |b: &&crate::data::Bar| {
+        let t = b.date.parse::<i64>().unwrap_or(0);
+        from.is_none_or(|f| t >= f) && to.is_none_or(|e| t < e)
+    };
+    OhlcvData {
+        bars: data.bars.iter().filter(inside).cloned().collect(),
+        symbol: data.symbol.clone(),
+        interval: data.interval.clone(),
+        session: data.session,
+    }
+}
+
 impl Indicator for VolumeProfile {
     fn windowed_profile(&self) -> bool {
         true
+    }
+
+    fn wants_intrabars(&self) -> bool {
+        true
+    }
+
+    fn with_intrabars(&self, chart: &OhlcvData, intrabars: &OhlcvData) -> Option<PanelResult> {
+        // `range_bars` counts chart bars: find where they start in time.
+        let from = self
+            .range_bars
+            .filter(|r| *r < chart.len())
+            .and_then(|r| chart.bars[chart.len() - r].date.parse().ok());
+        let profile = Self {
+            range_bars: None,
+            ..self.clone()
+        };
+        Some(profile.compute(&bars_between(intrabars, from, None)))
     }
 
     fn name(&self) -> &str {
@@ -1974,7 +2006,22 @@ impl Indicator for SessionVolumeProfile {
         }
     }
 
+    fn wants_intrabars(&self) -> bool {
+        true
+    }
+
+    fn with_intrabars(&self, chart: &OhlcvData, intrabars: &OhlcvData) -> Option<PanelResult> {
+        Some(self.compute_from(chart, Some(intrabars)))
+    }
+
     fn compute(&self, data: &OhlcvData) -> PanelResult {
+        self.compute_from(data, None)
+    }
+}
+
+impl SessionVolumeProfile {
+    /// Sessions from `data`; the volume of each from `intrabars` when given.
+    fn compute_from(&self, data: &OhlcvData, intrabars: Option<&OhlcvData>) -> PanelResult {
         let n = data.len();
         let mut out = PanelResult {
             is_overlay: true,
@@ -1987,12 +2034,17 @@ impl Indicator for SessionVolumeProfile {
 
         let period_secs = parse_period_secs(&self.session);
         let ranges = session_ranges(data, period_secs, self.bars_per_session);
+        let open_of = |i: usize| data.bars.get(i).and_then(|b| b.date.parse::<i64>().ok());
 
         for (s, e) in ranges {
             if e <= s {
                 continue;
             }
-            let slice = &data.bars[s..e];
+            let finer = intrabars.map(|ltf| bars_between(ltf, open_of(s), open_of(e)));
+            let slice = match &finer {
+                Some(ltf) if !ltf.bars.is_empty() => &ltf.bars[..],
+                _ => &data.bars[s..e],
+            };
             let Some(prof) = compute_profile(slice, self.bins.max(1), false) else {
                 continue;
             };
@@ -2032,6 +2084,137 @@ impl Indicator for SessionVolumeProfile {
         }
 
         out
+    }
+}
+
+// ---- Fixed range and anchored volume profiles (overlay) ----
+
+/// A time from an indicator parameter, unix seconds: a number of seconds, or
+/// `YYYY-MM-DD` or `YYYY-MM-DD HH:MM` in UTC. Empty or unreadable is no limit.
+fn parse_time_param(value: &Value) -> Option<i64> {
+    if let Some(n) = value.as_i64() {
+        return Some(n);
+    }
+    let text = value.as_str()?.trim();
+    if let Ok(n) = text.parse::<i64>() {
+        return Some(n);
+    }
+    let date_time = chrono::NaiveDateTime::parse_from_str(text, "%Y-%m-%d %H:%M")
+        .ok()
+        .or_else(|| {
+            chrono::NaiveDate::parse_from_str(text, "%Y-%m-%d")
+                .ok()
+                .and_then(|d| d.and_hms_opt(0, 0, 0))
+        })?;
+    Some(date_time.and_utc().timestamp())
+}
+
+/// The profile of a time range of the loaded bars. `anchored` leaves out the end of
+/// the range, so it runs to the newest bar: that is all that tells the two apart.
+pub struct RangeVolumeProfile {
+    pub profile: VolumeProfile,
+    pub anchored: bool,
+    pub from: Option<i64>,
+    pub to: Option<i64>,
+}
+
+impl RangeVolumeProfile {
+    pub fn fixed() -> Self {
+        Self {
+            profile: VolumeProfile::default(),
+            anchored: false,
+            from: None,
+            to: None,
+        }
+    }
+
+    pub fn anchored() -> Self {
+        Self {
+            anchored: true,
+            ..Self::fixed()
+        }
+    }
+
+    fn short_name(&self) -> &'static str {
+        if self.anchored {
+            "AVP"
+        } else {
+            "FRVP"
+        }
+    }
+
+    fn range_of(&self, data: &OhlcvData) -> PanelResult {
+        let mut out = self
+            .profile
+            .compute(&bars_between(data, self.from, self.to));
+        out.label = self.short_name().into();
+        out
+    }
+}
+
+impl Indicator for RangeVolumeProfile {
+    fn windowed_profile(&self) -> bool {
+        true
+    }
+
+    fn wants_intrabars(&self) -> bool {
+        true
+    }
+
+    fn with_intrabars(&self, _chart: &OhlcvData, intrabars: &OhlcvData) -> Option<PanelResult> {
+        Some(self.range_of(intrabars))
+    }
+
+    fn name(&self) -> &str {
+        self.short_name()
+    }
+
+    fn description(&self) -> &str {
+        if self.anchored {
+            "Anchored Volume Profile: histogram with POC/VAH/VAL from an anchor time to the newest bar"
+        } else {
+            "Fixed Range Volume Profile: histogram with POC/VAH/VAL over a time range"
+        }
+    }
+
+    fn params(&self) -> Value {
+        let time =
+            "YYYY-MM-DD, YYYY-MM-DD HH:MM in UTC, or unix seconds. Empty: the first loaded bar.";
+        let mut params = vec![
+            json!({"name": "bins", "type": "integer", "min": 1, "max": 1000, "default": 24}),
+            json!({"name": "side", "type": "string", "default": "left", "description": "left or right"}),
+            json!({"name": "opacity", "type": "number", "min": 0, "max": 1, "default": 0.35}),
+        ];
+        if self.anchored {
+            params.push(
+                json!({"name": "anchor", "type": "string", "default": "", "description": time}),
+            );
+        } else {
+            params.push(
+                json!({"name": "from", "type": "string", "default": "", "description": time}),
+            );
+            params.push(json!({"name": "to", "type": "string", "default": "", "description": "As from. Empty: the newest bar."}));
+        }
+        Value::Array(params)
+    }
+
+    fn configure(&mut self, params: &Value) {
+        self.profile.configure(params);
+        if let Some(v) = params.get("anchor").filter(|_| self.anchored) {
+            self.from = parse_time_param(v);
+        }
+        if !self.anchored {
+            if let Some(v) = params.get("from") {
+                self.from = parse_time_param(v);
+            }
+            if let Some(v) = params.get("to") {
+                self.to = parse_time_param(v);
+            }
+        }
+    }
+
+    fn compute(&self, data: &OhlcvData) -> PanelResult {
+        self.range_of(data)
     }
 }
 

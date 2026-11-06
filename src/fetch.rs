@@ -597,6 +597,47 @@ pub(crate) fn binance() -> &'static BinanceClient {
     })
 }
 
+/// Taker buy volume of each kline of a Binance response, oldest first: field 9.
+fn parse_taker_buy(body: &str) -> Result<Vec<f64>, String> {
+    let body: serde_json::Value =
+        serde_json::from_str(body).map_err(|e| format!("Failed to parse Binance response: {e}"))?;
+    let klines = body.as_array().ok_or("Binance response is not an array")?;
+    klines
+        .iter()
+        .map(|k| {
+            k.get(9)
+                .and_then(|v| v.as_str())
+                .and_then(|v| v.parse().ok())
+                .ok_or_else(|| "Binance kline has no taker buy volume".to_string())
+        })
+        .collect()
+}
+
+/// The newest `limit` (at most `BINANCE_MAX_LIMIT`) klines of `interval` with their
+/// taker buy volume, opening before `end_ms`, through the gate. One request.
+pub(crate) fn fetch_binance_taker_page(
+    symbol: &str,
+    interval: &str,
+    limit: usize,
+    end_ms: Option<i64>,
+) -> Result<Vec<(Bar, f64)>, String> {
+    let client = binance();
+    // endTime is inclusive on Binance; this one is not.
+    let url = binance_klines_url(
+        symbol,
+        interval,
+        limit.min(BINANCE_MAX_LIMIT),
+        end_ms.map(|e| e - 1),
+    );
+    let resp = client.get(&url)?;
+    if !(200..300).contains(&resp.status) {
+        return Err(format!("Binance API returned status {}", resp.status));
+    }
+    let bars = parse_binance_klines(&resp.body)?;
+    let taker = parse_taker_buy(&resp.body)?;
+    Ok(bars.into_iter().zip(taker).collect())
+}
+
 fn fetch_binance_page(client: &BinanceClient, url: &str) -> Result<Vec<Bar>, String> {
     let resp = client.get(url)?;
 
@@ -604,7 +645,11 @@ fn fetch_binance_page(client: &BinanceClient, url: &str) -> Result<Vec<Bar>, Str
         return Err(format!("Binance API returned status {}", resp.status));
     }
 
-    let body: serde_json::Value = serde_json::from_str(&resp.body)
+    parse_binance_klines(&resp.body)
+}
+
+fn parse_binance_klines(body: &str) -> Result<Vec<Bar>, String> {
+    let body: serde_json::Value = serde_json::from_str(body)
         .map_err(|e| format!("Failed to parse Binance response: {}", e))?;
 
     let klines = body.as_array().ok_or("Binance response is not an array")?;
@@ -1621,6 +1666,14 @@ fn parse_yahoo_quote(body: &serde_json::Value) -> Result<Quote, String> {
 mod tests {
     use super::*;
     use std::sync::Arc;
+
+    #[test]
+    fn taker_buy_volume_is_read_from_field_nine() {
+        let body = r#"[[0,"1","2","0.5","1.5","10",59999,"15",5,"7.25","11","0"],
+                       [60000,"1","2","0.5","1.5","10",119999,"15",5,"2","3","0"]]"#;
+        assert_eq!(parse_taker_buy(body), Ok(vec![7.25, 2.0]));
+        assert!(parse_taker_buy(r#"[[0,"1","2","0.5","1.5","10"]]"#).is_err());
+    }
 
     const HOUR_MS: i64 = 3_600_000;
 
