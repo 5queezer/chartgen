@@ -49,6 +49,22 @@ const MIGRATIONS: &[&str] = &[
     );
 ",
     "
+    ALTER TABLE server_alert_events ADD COLUMN device TEXT;
+    CREATE TABLE push_devices (
+        id          TEXT    PRIMARY KEY,
+        owner       TEXT    NOT NULL,
+        endpoint    TEXT    NOT NULL,
+        p256dh      TEXT    NOT NULL,
+        auth        TEXT    NOT NULL,
+        created_at  INTEGER NOT NULL,
+        UNIQUE (owner, endpoint)
+    );
+    CREATE TABLE server_settings (
+        name   TEXT PRIMARY KEY,
+        value  TEXT NOT NULL
+    );
+",
+    "
     ALTER TABLE oauth_clients ADD COLUMN client_name TEXT;
     CREATE TABLE users (
         id             TEXT    PRIMARY KEY,
@@ -133,13 +149,28 @@ pub struct StoredSession {
     pub expires_at: i64,
 }
 
-/// A webhook delivery not finished yet: written with the fire it reports, so a
-/// restart resumes it and never fires again to get it.
+/// A delivery not finished yet: written with the fire it reports, so a restart
+/// resumes it and never fires again to get it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct StoredEvent {
     pub id: String,
     pub alert_id: String,
     pub body: String,
+    pub created_at: i64,
+    /// The push device it goes to (`StoredDevice::id`); `None` is the alert's webhook.
+    pub device: Option<String>,
+}
+
+/// A browser's push subscription (ADR-0045). Not `Debug`: the endpoint and keys are
+/// what it takes to notify that device.
+#[derive(Clone, PartialEq)]
+pub struct StoredDevice {
+    pub id: String,
+    pub owner: String,
+    pub endpoint: String,
+    pub p256dh: String,
+    pub auth: String,
+    /// Unix milliseconds.
     pub created_at: i64,
 }
 
@@ -384,13 +415,13 @@ impl Store {
         tx.commit()
     }
 
-    /// Write a fired alert's new state and, in one transaction, its delivery.
+    /// Write a fired alert's new state and, in one transaction, its deliveries.
     pub fn record_server_alert_fire(
         &self,
         id: &str,
         owner: &str,
         record: &str,
-        event: Option<&StoredEvent>,
+        events: &[StoredEvent],
     ) -> rusqlite::Result<()> {
         let mut conn = self.conn();
         let tx = conn.transaction()?;
@@ -398,11 +429,11 @@ impl Store {
             "INSERT OR REPLACE INTO server_alerts (id, owner, record_json) VALUES (?1, ?2, ?3)",
             params![id, owner, record],
         )?;
-        if let Some(e) = event {
+        for e in events {
             tx.execute(
-                "INSERT INTO server_alert_events (id, alert_id, body, created_at)
-                 VALUES (?1, ?2, ?3, ?4)",
-                params![e.id, e.alert_id, e.body, e.created_at],
+                "INSERT INTO server_alert_events (id, alert_id, body, created_at, device)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![e.id, e.alert_id, e.body, e.created_at, e.device],
             )?;
         }
         tx.commit()
@@ -412,7 +443,8 @@ impl Store {
     pub fn server_alert_events(&self) -> rusqlite::Result<Vec<StoredEvent>> {
         let conn = self.conn();
         let mut stmt = conn.prepare(
-            "SELECT id, alert_id, body, created_at FROM server_alert_events ORDER BY created_at",
+            "SELECT id, alert_id, body, created_at, device FROM server_alert_events
+             ORDER BY created_at",
         )?;
         let rows = stmt.query_map([], |r| {
             Ok(StoredEvent {
@@ -420,6 +452,7 @@ impl Store {
                 alert_id: r.get(1)?,
                 body: r.get(2)?,
                 created_at: r.get(3)?,
+                device: r.get(4)?,
             })
         })?;
         rows.collect()
@@ -429,6 +462,60 @@ impl Store {
         self.conn()
             .execute("DELETE FROM server_alert_events WHERE id = ?1", params![id])?;
         Ok(())
+    }
+
+    /// Insert or replace a push device.
+    pub fn save_push_device(&self, d: &StoredDevice) -> rusqlite::Result<()> {
+        self.conn().execute(
+            "INSERT OR REPLACE INTO push_devices (id, owner, endpoint, p256dh, auth, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![d.id, d.owner, d.endpoint, d.p256dh, d.auth, d.created_at],
+        )?;
+        Ok(())
+    }
+
+    pub fn push_devices(&self) -> rusqlite::Result<Vec<StoredDevice>> {
+        let conn = self.conn();
+        let mut stmt =
+            conn.prepare("SELECT id, owner, endpoint, p256dh, auth, created_at FROM push_devices")?;
+        let rows = stmt.query_map([], |r| {
+            Ok(StoredDevice {
+                id: r.get(0)?,
+                owner: r.get(1)?,
+                endpoint: r.get(2)?,
+                p256dh: r.get(3)?,
+                auth: r.get(4)?,
+                created_at: r.get(5)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    /// Delete a push device and whatever it still had to receive.
+    pub fn delete_push_device(&self, id: &str) -> rusqlite::Result<()> {
+        let mut conn = self.conn();
+        let tx = conn.transaction()?;
+        tx.execute("DELETE FROM push_devices WHERE id = ?1", params![id])?;
+        tx.execute(
+            "DELETE FROM server_alert_events WHERE device = ?1",
+            params![id],
+        )?;
+        tx.commit()
+    }
+
+    /// The setting `name`, set to `value` first if it has none. One statement decides,
+    /// so two starts cannot each keep a different key.
+    pub fn setting_or_insert(&self, name: &str, value: &str) -> rusqlite::Result<String> {
+        let conn = self.conn();
+        conn.execute(
+            "INSERT OR IGNORE INTO server_settings (name, value) VALUES (?1, ?2)",
+            params![name, value],
+        )?;
+        conn.query_row(
+            "SELECT value FROM server_settings WHERE name = ?1",
+            params![name],
+            |r| r.get(0),
+        )
     }
 
     /// Insert the user, or refresh the display name and login time of a known one.

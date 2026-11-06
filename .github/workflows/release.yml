@@ -65,6 +65,11 @@ jobs:
         if: ${{ matrix.cross }}
         run: cross build --release --target ${{ matrix.target }}
 
+      # OpenSSL is vendored on macOS (ADR-0045), so a Mac without Homebrew's can start it.
+      - name: No OpenSSL to find at run time (macOS)
+        if: runner.os == 'macOS'
+        run: "! otool -L target/${{ matrix.target }}/release/${{ env.BIN }} | grep -E 'libssl|libcrypto'"
+
       - name: Package
         run: |
           cd target/${{ matrix.target }}/release

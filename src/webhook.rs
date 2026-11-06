@@ -51,6 +51,16 @@ pub const SIGNATURE_HEADER: &str = "X-Chartgen-Signature";
 pub const TIMESTAMP_HEADER: &str = "X-Chartgen-Timestamp";
 pub const EVENT_HEADER: &str = "X-Chartgen-Event";
 
+/// Longest push endpoint accepted: Windows' carry a long token.
+pub const MAX_PUSH_URL_LEN: usize = 1024;
+/// Where a browser's push subscription may point (ADR-0045).
+const PUSH_HOSTS: [&str; 2] = ["fcm.googleapis.com", "updates.push.services.mozilla.com"];
+/// The same, for services that hand out subdomains.
+const PUSH_DOMAINS: [&str; 2] = [".push.apple.com", ".notify.windows.com"];
+/// The longest a push service may ask a retry to wait: past this, its word is taken and
+/// the delivery ends, instead of holding a task for it.
+const MAX_RETRY_AFTER: Duration = Duration::from_secs(60);
+
 /// Is `ip` an address a webhook may reach? IPv6 must be global unicast, which
 /// leaves out loopback, link-local, unique-local, multicast and the IPv4-mapped,
 /// IPv4-compatible and NAT64 forms; the transition ranges inside it are refused
@@ -240,6 +250,38 @@ impl Target {
         }
     }
 
+    /// A push endpoint: the same rules, and only a known push service. A subscription
+    /// comes from the browser, so nothing but this list says it points at one.
+    pub fn parse_push(raw: &str, policy: &Policy) -> Result<Self, String> {
+        if raw.len() > MAX_PUSH_URL_LEN {
+            return Err(format!(
+                "push endpoint is longer than {MAX_PUSH_URL_LEN} bytes"
+            ));
+        }
+        let url = Url::parse(raw).map_err(|_| "push endpoint does not parse".to_string())?;
+        if policy.allows(&url) {
+            return Ok(Self { url });
+        }
+        let plain = url.scheme() == "https"
+            && url.username().is_empty()
+            && url.password().is_none()
+            && url.port_or_known_default() == Some(443);
+        match url.host() {
+            Some(url::Host::Domain(name)) if plain && is_push_host(name) => Ok(Self { url }),
+            _ => Err("push endpoint is not a known push service".into()),
+        }
+    }
+
+    /// The URL as parsed, so that one endpoint written two ways is one device.
+    pub fn as_str(&self) -> &str {
+        self.url.as_str()
+    }
+
+    /// `https://host`, what a VAPID token is issued for.
+    pub fn origin(&self) -> String {
+        self.url.origin().ascii_serialization()
+    }
+
     /// The host, which is all a list shows: the path may hold a token.
     pub fn host(&self) -> &str {
         self.url.host_str().unwrap_or("")
@@ -267,6 +309,12 @@ fn is_or_under(name: &str, domain: &str) -> bool {
 fn is_local_name(name: &str) -> bool {
     let name = normalized(name);
     !name.contains('.') || LOCAL_NAMES.iter().any(|l| is_or_under(&name, l))
+}
+
+/// `name` comes lowercased from the URL parser. A trailing dot is not allowed for: no
+/// browser hands one out.
+fn is_push_host(name: &str) -> bool {
+    PUSH_HOSTS.contains(&name) || PUSH_DOMAINS.iter().any(|d| name.ends_with(d))
 }
 
 fn is_our_host(name: &str, policy: &Policy) -> bool {
@@ -347,6 +395,36 @@ struct Failure {
     status: Option<u16>,
     error: String,
     retry: bool,
+    retry_after: Option<Duration>,
+}
+
+/// What one attempt sends.
+#[derive(Clone)]
+pub struct Request {
+    pub headers: Vec<(&'static str, String)>,
+    pub body: Vec<u8>,
+    /// Wait as long as the receiver asks before a retry. For a push service, whose
+    /// standing matters: a webhook receiver is whoever a client named, and could use it to
+    /// keep a delivery going.
+    pub honor_retry_after: bool,
+}
+
+/// A webhook's request. Its timestamp is the attempt's, so a retry signs anew.
+fn webhook_request(body: &str, event_id: &str, secret: Option<&str>) -> Request {
+    let timestamp = chrono::Utc::now().timestamp();
+    let mut headers = vec![
+        ("content-type", "application/json".to_string()),
+        (EVENT_HEADER, event_id.to_string()),
+        (TIMESTAMP_HEADER, timestamp.to_string()),
+    ];
+    if let Some(secret) = secret {
+        headers.push((SIGNATURE_HEADER, signature(secret, timestamp, body)));
+    }
+    Request {
+        headers,
+        body: body.as_bytes().to_vec(),
+        honor_retry_after: false,
+    }
 }
 
 /// One POST to `addrs`. The name in `target` only reaches the TLS handshake and
@@ -356,9 +434,7 @@ struct Failure {
 async fn post(
     target: &Target,
     addrs: &[SocketAddr],
-    body: &str,
-    event_id: &str,
-    secret: Option<&str>,
+    sending: Request,
     timing: &Timing,
     proxy: Option<&str>,
 ) -> Result<u16, Failure> {
@@ -366,7 +442,9 @@ async fn post(
         status: None,
         error: error.to_string(),
         retry,
+        retry_after: None,
     };
+    let honor_retry_after = sending.honor_retry_after;
     let builder = match proxy.map(reqwest::Proxy::all) {
         None => Client::builder().no_proxy(),
         Some(Ok(proxy)) => Client::builder().proxy(proxy),
@@ -382,15 +460,9 @@ async fn post(
         .user_agent("chartgen-webhook/1")
         .build()
         .map_err(|_| failed("could not prepare the request", false))?;
-    let timestamp = chrono::Utc::now().timestamp();
-    let mut request = client
-        .post(target.url.clone())
-        .header(reqwest::header::CONTENT_TYPE, "application/json")
-        .header(EVENT_HEADER, event_id)
-        .header(TIMESTAMP_HEADER, timestamp)
-        .body(body.to_string());
-    if let Some(secret) = secret {
-        request = request.header(SIGNATURE_HEADER, signature(secret, timestamp, body));
+    let mut request = client.post(target.url.clone()).body(sending.body);
+    for (name, value) in sending.headers {
+        request = request.header(name, value);
     }
     match request.send().await {
         Ok(resp) => {
@@ -405,10 +477,17 @@ async fn post(
             } else {
                 format!("HTTP {code}")
             };
+            let retry_after = resp
+                .headers()
+                .get(reqwest::header::RETRY_AFTER)
+                .and_then(|v| v.to_str().ok()?.trim().parse().ok())
+                .map(Duration::from_secs)
+                .filter(|_| honor_retry_after && retry);
             Err(Failure {
                 status: Some(code),
                 error,
                 retry,
+                retry_after,
             })
         }
         Err(e) if e.is_timeout() => Err(failed("timed out", true)),
@@ -417,15 +496,28 @@ async fn post(
     }
 }
 
-/// POST `body`, retrying what may pass later. Every attempt resolves and checks
-/// the name again, so an address that turned private is refused, without retry.
-/// `slots` are held for each attempt but not during the waits between them.
+/// POST a webhook's `body`, as `deliver_request` does.
 pub async fn deliver(
     target: &Target,
     policy: &Policy,
     body: &str,
     event_id: &str,
     secret: Option<&str>,
+    timing: &Timing,
+    slots: &[&Semaphore],
+) -> Outcome {
+    let make = || webhook_request(body, event_id, secret);
+    deliver_request(target, policy, &make, timing, slots).await
+}
+
+/// POST what `make` builds for each attempt, retrying what may pass later. Every
+/// attempt resolves and checks the name again, so an address that turned private is
+/// refused, without retry. `slots` are held for each attempt but not during the waits
+/// between them.
+pub async fn deliver_request(
+    target: &Target,
+    policy: &Policy,
+    make: &(dyn Fn() -> Request + Sync),
     timing: &Timing,
     slots: &[&Semaphore],
 ) -> Outcome {
@@ -440,7 +532,7 @@ pub async fn deliver(
         let failure = match resolve(target, policy).await {
             Ok(addrs) => {
                 let proxy = policy.proxy.as_deref();
-                match post(target, &addrs, body, event_id, secret, timing, proxy).await {
+                match post(target, &addrs, make(), timing, proxy).await {
                     Ok(code) => {
                         return Outcome {
                             status: Some(code),
@@ -455,11 +547,16 @@ pub async fn deliver(
                 status: None,
                 error,
                 retry: false,
+                retry_after: None,
             },
         };
         drop(permits);
-        match waits.next().filter(|_| failure.retry) {
-            Some(wait) => tokio::time::sleep(*wait).await,
+        let asked = failure.retry_after.unwrap_or_default();
+        let next = waits
+            .next()
+            .filter(|_| failure.retry && asked <= MAX_RETRY_AFTER);
+        match next {
+            Some(wait) => tokio::time::sleep((*wait).max(asked)).await,
             None => {
                 return Outcome {
                     status: failure.status,
@@ -487,6 +584,145 @@ mod tests {
 
     fn refused(url: &str) {
         assert!(Target::parse(url, &OPEN).is_err(), "{url} passed");
+    }
+
+    #[test]
+    fn a_push_endpoint_must_be_a_known_push_service() {
+        for url in [
+            "https://fcm.googleapis.com/fcm/send/abc",
+            "https://updates.push.services.mozilla.com/wpush/v2/abc",
+            "https://web.push.apple.com/QGabc",
+            "https://api.push.apple.com/abc",
+            "https://wns2-par02p.notify.windows.com/w/?token=abc",
+            "https://FCM.googleapis.com/fcm/send/abc",
+        ] {
+            assert!(Target::parse_push(url, &OPEN).is_ok(), "{url}");
+        }
+        for url in [
+            "http://fcm.googleapis.com/fcm/send/abc",
+            "https://fcm.googleapis.com:8443/fcm/send/abc",
+            "https://user:pw@fcm.googleapis.com/fcm/send/abc",
+            "https://fcm.googleapis.com./abc",
+            "https://push.apple.com/abc",
+            "https://notify.windows.com/abc",
+            "https://fcm.googleapis.com.evil.example/abc",
+            "https://evilfcm.googleapis.com/abc",
+            "https://googleapis.com/abc",
+            "https://evilpush.apple.com/abc",
+            "https://push.apple.com.evil.example/abc",
+            "https://notify.windows.com.evil.example/abc",
+            "https://example.com/hook",
+            "https://127.0.0.1/abc",
+            "https://[::1]/abc",
+            "https://169.254.169.254/latest",
+            "https://localhost/abc",
+            "not a url",
+        ] {
+            assert!(Target::parse_push(url, &OPEN).is_err(), "{url}");
+        }
+        let long = format!(
+            "https://fcm.googleapis.com/{}",
+            "a".repeat(MAX_PUSH_URL_LEN)
+        );
+        assert!(Target::parse_push(&long, &OPEN).is_err());
+    }
+
+    #[test]
+    fn one_endpoint_written_two_ways_reads_the_same() {
+        let parsed = |raw| Target::parse_push(raw, &OPEN).unwrap().as_str().to_string();
+        assert_eq!(
+            parsed("https://FCM.googleapis.com:443/fcm/send/a"),
+            parsed("https://fcm.googleapis.com/fcm/send/a"),
+        );
+    }
+
+    /// Answers `reply` and counts the requests, with when each arrived.
+    async fn asking_receiver(reply: &'static str) -> (u16, Arc<Mutex<Vec<std::time::Instant>>>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let times = Arc::new(Mutex::new(Vec::new()));
+        let log = times.clone();
+        tokio::spawn(async move {
+            while let Ok((mut s, _)) = listener.accept().await {
+                let mut buf = vec![0u8; 8192];
+                let n = s.read(&mut buf).await.unwrap_or(0);
+                if buf[..n].starts_with(b"POST ") {
+                    log.lock().unwrap().push(std::time::Instant::now());
+                }
+                let _ = s.write_all(reply.as_bytes()).await;
+                let _ = s.shutdown().await;
+            }
+        });
+        (port, times)
+    }
+
+    fn pushing() -> Request {
+        Request {
+            headers: Vec::new(),
+            body: b"x".to_vec(),
+            honor_retry_after: true,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_push_retry_waits_as_long_as_the_service_asks() {
+        const WAIT: &str =
+            "HTTP/1.1 429 Slow\r\nretry-after: 1\r\ncontent-length: 0\r\nconnection: close\r\n\r\n";
+        let (port, times) = asking_receiver(WAIT).await;
+        let (policy, target) = local(port);
+        let make = pushing;
+        let out = deliver_request(&target, &policy, &make, &quick(), &[]).await;
+        assert_eq!((out.status, out.attempts), (Some(429), 3));
+        let times = times.lock().unwrap();
+        for pair in times.windows(2) {
+            assert!(
+                pair[1] - pair[0] >= Duration::from_millis(990),
+                "{:?}",
+                pair[1] - pair[0]
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_service_that_asks_for_too_long_ends_the_delivery() {
+        const WAIT: &str =
+            "HTTP/1.1 429 Slow\r\nretry-after: 3600\r\ncontent-length: 0\r\nconnection: close\r\n\r\n";
+        let (port, times) = asking_receiver(WAIT).await;
+        let (policy, target) = local(port);
+        let make = pushing;
+        // Waiting as asked would take an hour, so a mistake here fails rather than hangs.
+        let out = tokio::time::timeout(
+            Duration::from_secs(10),
+            deliver_request(&target, &policy, &make, &quick(), &[]),
+        )
+        .await
+        .expect("it should end, not wait");
+        assert_eq!((out.status, out.attempts), (Some(429), 1));
+        assert_eq!(times.lock().unwrap().len(), 1);
+    }
+
+    /// A webhook receiver is whoever a client named, so it gets no say in this.
+    #[tokio::test]
+    async fn a_webhook_retry_does_not_wait_for_the_receiver() {
+        const WAIT: &str =
+            "HTTP/1.1 429 Slow\r\nretry-after: 3600\r\ncontent-length: 0\r\nconnection: close\r\n\r\n";
+        let (port, times) = asking_receiver(WAIT).await;
+        let (policy, target) = local(port);
+        let started = std::time::Instant::now();
+        let out = deliver(&target, &policy, "{}", "e", None, &quick(), &[]).await;
+        assert_eq!(out.attempts, 3);
+        assert!(started.elapsed() < Duration::from_secs(5));
+        assert_eq!(times.lock().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn a_test_origin_is_the_only_way_round_the_push_list_and_needs_the_sample_source() {
+        let on = Policy::for_test_origin(Some("http://127.0.0.1:9000"), true);
+        assert!(Target::parse_push("http://127.0.0.1:9000/push/a", &on).is_ok());
+        assert!(Target::parse_push("http://127.0.0.1:9001/push/a", &on).is_err());
+        assert!(Target::parse_push("https://example.com/a", &on).is_err());
+        let live = Policy::for_test_origin(Some("http://127.0.0.1:9000"), false);
+        assert!(Target::parse_push("http://127.0.0.1:9000/push/a", &live).is_err());
     }
 
     #[test]
@@ -917,13 +1153,16 @@ mod tests {
         let (seen2, hits2) = (seen.clone(), hits.clone());
         tokio::spawn(async move {
             while let Ok((mut s, _)) = listener.accept().await {
-                hits2.fetch_add(1, Ordering::SeqCst);
                 let mut buf = vec![0u8; 8192];
                 let n = s.read(&mut buf).await.unwrap_or(0);
-                seen2
-                    .lock()
-                    .unwrap()
-                    .push(String::from_utf8_lossy(&buf[..n]).to_string());
+                // Other programs on this host probe local ports: only a POST is a delivery.
+                if buf.starts_with(b"POST ") {
+                    hits2.fetch_add(1, Ordering::SeqCst);
+                    seen2
+                        .lock()
+                        .unwrap()
+                        .push(String::from_utf8_lossy(&buf[..n]).to_string());
+                }
                 let _ = s.write_all(reply.as_bytes()).await;
                 let _ = s.shutdown().await;
             }
@@ -1070,7 +1309,14 @@ mod tests {
         };
         let target = Target::parse(&format!("http://rebind.invalid:{port}/h"), &policy).unwrap();
         let addrs = [SocketAddr::new("127.0.0.1".parse().unwrap(), port)];
-        let code = post(&target, &addrs, "{}", "e", None, &quick(), None).await;
+        let code = post(
+            &target,
+            &addrs,
+            webhook_request("{}", "e", None),
+            &quick(),
+            None,
+        )
+        .await;
         assert_eq!(code.ok(), Some(200));
         let req = seen.lock().unwrap()[0].to_lowercase();
         assert!(

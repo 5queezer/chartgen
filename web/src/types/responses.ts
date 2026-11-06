@@ -594,6 +594,10 @@ export const ServerAlertSchema = z.object({
   last_delivery_at: z.number().nullable(),
   last_status: z.number().int().nullable(),
   last_error: z.string().nullable(),
+  push: z.boolean(),
+  last_push_at: z.number().nullable(),
+  last_push_status: z.number().int().nullable(),
+  last_push_error: z.string().nullable(),
   feed: z.enum(["live", "waiting"]),
   last_price: z.number().nullable(),
 });
@@ -604,6 +608,8 @@ export const ServerAlertsPayloadSchema = z.object({
   // What this client may do; absent when the server has them off.
   can_create: z.boolean().optional(),
   webhooks: z.boolean().optional(),
+  // Null where this client's alerts cannot notify a device.
+  push: z.object({ public_key: z.string(), devices: z.number().int() }).nullable().optional(),
   alerts: z.array(ServerAlertSchema),
 });
 export type ServerAlertsPayload = z.infer<typeof ServerAlertsPayloadSchema>;
@@ -615,3 +621,12 @@ export type ServerAlertChangePayload = z.infer<typeof ServerAlertChangePayloadSc
 
 export const DeleteServerAlertPayloadSchema = z.object({ deleted: z.boolean() });
 export type DeleteServerAlertPayload = z.infer<typeof DeleteServerAlertPayloadSchema>;
+
+export const SubscribePushPayloadSchema = z.object({ devices: z.number().int() });
+export type SubscribePushPayload = z.infer<typeof SubscribePushPayloadSchema>;
+
+export const UnsubscribePushPayloadSchema = z.object({
+  removed: z.boolean(),
+  devices: z.number().int(),
+});
+export type UnsubscribePushPayload = z.infer<typeof UnsubscribePushPayloadSchema>;

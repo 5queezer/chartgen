@@ -8,10 +8,12 @@
 import { createSignal } from "solid-js";
 
 import { CONDITION_LABELS } from "../lib/alerts";
+import { pushReport } from "../lib/pushDevice";
 import { formatPrice } from "../lib/quote";
 import type { McpSession } from "../mcp";
 import type {
   CreateServerAlertInput,
+  SubscribePushInput,
   UpdateServerAlertInput,
 } from "../types/generated-input";
 import {
@@ -65,6 +67,8 @@ export const serverAlertsEnabled = (): boolean => shared().enabled;
 export const serverAlertsCanCreate = (): boolean => shared().can_create === true;
 /** Does the server send webhooks for this sign-in? */
 export const serverWebhooksAllowed = (): boolean => shared().webhooks === true;
+/** What it takes to notify this sign-in's devices; null where the server will not. */
+export const serverPush = (): ServerAlertsPayload["push"] => shared().push ?? null;
 
 if (typeof window !== "undefined") {
   window.addEventListener("storage", (e) => {
@@ -103,18 +107,24 @@ function readSeen(): Record<string, number> {
 }
 
 /**
- * The fires nobody was told about yet, marked as told. Read fresh each time:
- * another tab may have led until now. Ids that are gone are forgotten.
+ * The fires this tab should tell the user about, marked as told; those a push reports
+ * are marked too, and those it may yet report stay for the next look (`pushReport`).
+ * Read fresh each time: another tab may have led until now. Ids that are gone are
+ * forgotten.
  */
-export function takeNewFires(): ServerAlert[] {
+export function takeNewFires(pushOnHere = false, now = Date.now()): ServerAlert[] {
   const list = serverAlerts();
-  const fired = newFires(list, readSeen());
-  for (const a of list) toldHere[a.id] = a.fire_count;
+  const seen = readSeen();
+  const pending = newFires(list, seen);
+  const report = new Map(pending.map((a) => [a.id, pushReport(a, pushOnHere, now)]));
+  const fired = pending.filter((a) => report.get(a.id) === "report");
+  const told = list.map((a) => [
+    a.id,
+    report.get(a.id) === "wait" ? (seen[a.id] ?? 0) : a.fire_count,
+  ]) as [string, number][];
+  for (const [id, count] of told) toldHere[id] = count;
   try {
-    localStorage.setItem(
-      SEEN_KEY,
-      JSON.stringify(Object.fromEntries(list.map((a) => [a.id, a.fire_count]))),
-    );
+    localStorage.setItem(SEEN_KEY, JSON.stringify(Object.fromEntries(told)));
   } catch {
     // Quota exceeded or private-mode storage: `toldHere` keeps this tab from repeating.
   }
@@ -178,6 +188,19 @@ export async function updateServerAlert(
   const updated = await connected().callUpdateServerAlert(args);
   merge(updated);
   return updated;
+}
+
+/** Tell the server about this browser, and keep the count it answers. */
+export async function subscribePush(args: SubscribePushInput): Promise<void> {
+  const { devices } = await connected().callSubscribePush(args);
+  const now = shared();
+  if (now.push) publish({ ...now, push: { ...now.push, devices } });
+}
+
+export async function unsubscribePush(endpoint: string): Promise<void> {
+  const { devices } = await connected().callUnsubscribePush({ endpoint });
+  const now = shared();
+  if (now.push) publish({ ...now, push: { ...now.push, devices } });
 }
 
 export async function deleteServerAlert(id: string): Promise<void> {
