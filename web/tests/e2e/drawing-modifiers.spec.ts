@@ -24,6 +24,8 @@ interface TestChart {
   getOverlayById: (id: string) => { points: Point[] };
   subscribeAction: (type: string, fn: () => void) => void;
   unsubscribeAction: (type: string, fn: () => void) => void;
+  getVisibleRange: () => { from: number };
+  getSize: (paneId: string, position: string) => { top: number; height: number };
 }
 type TestWindow = {
   __chartgenTest: { chart: () => TestChart };
@@ -296,6 +298,108 @@ test.describe("drawing modifiers", () => {
     await expect.poll(async () => (await overlays(page)).length).toBe(1);
     expect((await overlays(page))[0]!.points).toHaveLength(3);
     expect(Math.abs((await overlays(page))[0]!.pixels[2]!.y! - 260)).toBeLessThan(1);
+  });
+
+  test.describe("a press that moves while a tool is armed places no point", () => {
+    const trendLine = (page: Page) => page.getByRole("button", { name: "Trend line" });
+    const visibleFrom = (page: Page) =>
+      page.evaluate(() => (window as unknown as TestWindow).__chartgenTest.chart().getVisibleRange().from);
+
+    /** Press at `at`, go `away` px right and come back to `back` px from it, then release. */
+    const pressAwayAndBack = async (page: Page, at: At, away: number, back = 0) => {
+      const box = (await host(page).boundingBox())!;
+      await page.mouse.move(box.x + at.x, box.y + at.y);
+      await page.mouse.down();
+      await page.mouse.move(box.x + at.x + away, box.y + at.y, { steps: 6 });
+      const during = await visibleFrom(page);
+      await page.mouse.move(box.x + at.x + back, box.y + at.y, { steps: 6 });
+      await page.mouse.up();
+      await page.waitForTimeout(100);
+      return during;
+    };
+
+    /** Nothing placed: still armed, nothing drawn or stored. */
+    const expectNothingPlaced = async (page: Page) => {
+      expect(await overlays(page)).toHaveLength(0);
+      expect(await storedRecords(page)).toBeNull();
+      await expect(trendLine(page)).toHaveAttribute("aria-pressed", "true");
+    };
+
+    test("a pan and return before the first point", async ({ bootedApp: page }) => {
+      await trendLine(page).click();
+      const before = await visibleFrom(page);
+      const during = await pressAwayAndBack(page, { x: 500, y: 200 }, 120);
+      expect(during).toBeLessThan(before);
+      await expectNothingPlaced(page);
+
+      // The next clicks are the line's two points, not its second and a new line.
+      await clickAt(page, { x: 800, y: 100 });
+      await expectNothingPlaced(page);
+      await clickAt(page, { x: 900, y: 220 });
+      await expect.poll(async () => (await overlays(page)).length).toBe(1);
+      const { pixels } = (await overlays(page))[0]!;
+      expect(Math.abs(pixels[0]!.y! - 100)).toBeLessThan(1);
+      expect(Math.abs(pixels[1]!.y! - 220)).toBeLessThan(1);
+    });
+
+    test("a pan and return before the second point", async ({ bootedApp: page }) => {
+      await trendLine(page).click();
+      await clickAt(page, { x: 300, y: 130 });
+      const before = await visibleFrom(page);
+      const during = await pressAwayAndBack(page, { x: 700, y: 200 }, 120);
+      expect(during).toBeLessThan(before);
+      await expectNothingPlaced(page);
+
+      await clickAt(page, { x: 900, y: 260 });
+      await expect.poll(async () => (await overlays(page)).length).toBe(1);
+      expect(Math.abs((await overlays(page))[0]!.pixels[1]!.y! - 260)).toBeLessThan(1);
+    });
+
+    test("a jiggle of 5 px or more, ending within 5 px", async ({ bootedApp: page }) => {
+      await trendLine(page).click();
+      await clickAt(page, { x: 300, y: 130 });
+      await pressAwayAndBack(page, { x: 700, y: 200 }, 6, 1);
+      await expectNothingPlaced(page);
+    });
+
+    test("a quick click that shifts less than 5 px still places its point", async ({ bootedApp: page }) => {
+      const box = (await host(page).boundingBox())!;
+      await trendLine(page).click();
+      await page.mouse.move(box.x + 300, box.y + 130);
+      await page.mouse.down();
+      await page.mouse.up();
+      await page.mouse.move(box.x + 700, box.y + 200);
+      await page.mouse.down();
+      await page.mouse.move(box.x + 703, box.y + 200);
+      await page.mouse.up();
+      await expect.poll(async () => (await overlays(page)).length).toBe(1);
+      expect(Math.abs((await overlays(page))[0]!.pixels[1]!.y! - 200)).toBeLessThan(1);
+    });
+
+    test("a quick second click pinned from another pane still places its point", async ({
+      bootedApp: page,
+    }) => {
+      // Settled first: right after boot this click can be lost, cause not found.
+      await page.waitForTimeout(1500);
+      const box = (await host(page).boundingBox())!;
+      const hdr = await page.locator(".pane-header", { hasText: "RSI" }).first().boundingBox();
+      const paneBottom = await page.evaluate(() => {
+        const pane = (window as unknown as TestWindow).__chartgenTest.chart().getSize("candle_pane", "root");
+        return pane.top + pane.height;
+      });
+      await trendLine(page).click();
+      await page.mouse.move(box.x + 300, box.y + 130);
+      await page.mouse.down();
+      await page.mouse.up();
+      await page.waitForTimeout(80);
+      await page.mouse.move(box.x + 700, hdr!.y + 30);
+      await page.mouse.down();
+      await page.mouse.up();
+      await expect.poll(async () => (await overlays(page)).length).toBe(1);
+      const { pixels } = (await overlays(page))[0]!;
+      expect(Math.abs(pixels[1]!.x! - 700)).toBeLessThan(10);
+      expect(pixels[1]!.y!).toBeLessThan(paneBottom);
+    });
   });
 
   test("a quick Shift click snaps its point like a slow one", async ({ bootedApp: page }) => {
