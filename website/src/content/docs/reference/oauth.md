@@ -73,8 +73,8 @@ After `/authorize` has checked the client and `redirect_uri`:
   Approving remembers the answer for that user and client. Denying answers
   `error=access_denied` on `redirect_uri`.
 - **The web app's own client,** whose `redirect_uri` is exactly `/` on the base URL's
-  origin, needs no consent when the request began on our own origin or at the address bar
-  (`Sec-Fetch-Site: same-origin` or `none`). From anywhere else it is asked like any client.
+  origin, needs no consent when the request began on our own origin
+  (`Sec-Fetch-Site: same-origin`). From anywhere else it is asked like any client.
 
 A denied login, a provider that refuses or cannot be reached (10 s timeout) and any other
 failure end on a page with **Try again** and **Cancel**, which answers
@@ -103,8 +103,9 @@ Limits per user: 20 clients with live tokens and 20 tokens per client, 100 for t
 (past these the longest out of use are dropped), 20 pending codes, 20 sessions, 50 approved clients, 50
 [scripts](/chartgen/guides/scripted-indicators/), and 600 `tools/call` per minute (`429`
 with `Retry-After`). Sign-in: 120 steps that create state per minute per client address, loopback
-exempt, one provider round trip per request, 5 open requests per browser and per user with the
-oldest dropped, and 2000 on the server (`429` page). The address is the TCP peer, unless
+exempt, one provider round trip per request, 5 open requests per browser and per user and 50 per
+address with the oldest dropped, and 2000 on the server (`429` page). An IPv6 /64 is one address.
+The address is the TCP peer, unless
 [`CHARTGEN_TRUSTED_PROXY_HEADER`](/chartgen/guides/deploy/#sign-in-through-github-and-google) names
 a proxy's header, which `/register` and the chart push cap use too.
 

@@ -113,18 +113,24 @@ sign-in on nobody can reach them, and startup says how many wait. To collect the
 `https://api.github.com/users/<login>`) or `google:<sub>`, and sign in, through any client. You
 then own every client's rows, whichever client made them. **An alert's webhook and signing secret
 move with it**, so name only yourself. A script name you already have stays with its client, and
-nothing is deleted ([ADR-0044](/chartgen/decisions/0044-sign-in-through-github-and-google/#existing-rows)). Scripts wait for as long as it takes. Alerts keep
+so does the second of two clients' scripts with one name: nothing is overwritten or deleted, and
+startup counts these name collisions. To move one, rename or delete your own and sign in again
+([ADR-0044](/chartgen/decisions/0044-sign-in-through-github-and-google/#existing-rows)). Scripts wait for as long as it takes. Alerts keep
 running meanwhile, and expire 30 days after their client last got a token, so do not leave it long.
 You can unset the variable afterwards.
 
 **On a public server, also name your proxy's address header.** With
 `CHARTGEN_TRUSTED_PROXY_HEADER=CF-Connecting-IP`, or whatever single-address header your proxy
-sets, each client gets its own limits on sign-in, registration and chart push. Without it every
+sets, each client gets its own limits on sign-in, registration and chart push, with an IPv6 /64
+counted as one address. Without it every
 visitor is the proxy's address, and one person can use up everyone's: 120 sign-in steps a minute
-and 20 registrations per 10 minutes, shared by all, while a same-host proxy has neither limit. **Only set it if
+and 20 registrations per 10 minutes, shared by all, and 50 open sign-ins, while a same-host proxy
+has no budget at all and a flood through it pushes out everyone's open sign-ins. **Only set it if
 the server cannot be reached except through that proxy**, because anyone reaching it directly can
-write that header and claim any address. A list such as `X-Forwarded-For` will not do: a value
-that is not one address falls back to the peer.
+write that header and claim any address. **The proxy must replace the header, never append to
+it**: with an appending proxy the client's own value comes first and wins, so `X-Forwarded-For`
+will not do. A value that is not exactly one address shares a single budget with every other
+such value.
 
 Turning sign-in off again means removing the provider variables. Users' scripts and alerts stay in
 the file, out of reach until it is turned back on, and those alerts expire after 30 days.

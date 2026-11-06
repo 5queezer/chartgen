@@ -137,10 +137,11 @@ days when its token runs out. Redirect URIs of a client cannot change after
 registration, so the approval stays meaningful.
 
 **The web app's own client skips consent,** when the browser says the request began on our
-own origin or at the address bar (`Sec-Fetch-Site: same-origin` or `none`). That is any client
+own origin (`Sec-Fetch-Site: same-origin`), as the app's always does. That is any client
 whose `redirect_uri` is exactly `/` on `CHARTGEN_BASE_URL`'s origin, whoever registered it, so
-a stranger can register a look-alike. Asked from anywhere else, or by a browser that does not
-say, it gets the consent page. The header is read at `/authorize` and kept with the request,
+a stranger can register a look-alike. Asked from anywhere else it gets the consent page: from
+another site's page, from a link in a mail or a chat (`none`, even through a redirect), or by a
+browser that does not say. The header is read at `/authorize` and kept with the request,
 because the provider's callback always looks cross-site. A code that reached our page anyway
 is discarded there unless the page issued its `state`, and the page sends no referrer to other
 sites, so the code in its address stays there.
@@ -151,8 +152,12 @@ sites, so the code in its address stays there.
 `CHARTGEN_CLAIM_OWNER=github:<id>` or `google:<sub>` names it. When that user gets a token,
 through any client, they collect every script and server alert still owned by a client, with
 waiting deliveries, whatever their limits, because these are theirs already. An alert's webhook
-and its signing secret move with it. A script name they already have stays with its client, as
-does the second of two clients' scripts with one name, so nothing is overwritten.
+and its signing secret move with it. A client here means an owner shaped like the ids `/register`
+hands out, tested positively, so another kind of owner is never swept in.
+
+A script name they already have stays with its client, as does the second of two clients' scripts
+with one name, so nothing is overwritten. Startup counts these name collisions. To move one, the
+owner renames or deletes their own script and signs in again, one at a time per name.
 
 **Unset, nothing moves.** The rows stay with their clients, where nobody can reach them, because
 with sign-in on a token's owner is its user and never its client. Startup says how many rows
@@ -216,13 +221,19 @@ Sign-in itself is limited so that nobody can hold it shut for free:
   as for `/register`). That means an `/authorize` that stores a request, a first `/oauth/login`
   for one, and a callback with a `state` of ours. Junk costs nothing.
 - **One provider round trip per request,** so round trips cannot outnumber requests.
-- **5 open requests per browser and per signed-in user,** the oldest going first, and 2000 on
-  the whole server, then `429`.
+- **5 open requests per browser and per signed-in user, and 50 per address,** the oldest of
+  each going first. A client that sends no cookie is a new browser every time, so the cap per
+  address is what holds. An address can only push out its own requests, and a stranger's stay.
+- **2000 on the whole server, then `429`.** That takes 40 addresses to reach.
+- **An IPv6 /64 is one address,** for these limits, `/register`'s and the chart push cap, because
+  that is what one household or server has.
 - **`CHARTGEN_TRUSTED_PROXY_HEADER`** names the header holding the client's address, such as
-  `CF-Connecting-IP`, for these limits, `/register`'s and the chart push cap. Unset, no header is
-  trusted, so behind a proxy all clients are one address. Set, it is only as true as the proxy
-  makes it, so the server must not be reachable any other way. A missing, malformed or
-  loopback value falls back to the peer.
+  `CF-Connecting-IP`, for those same limits. Unset, no header is trusted, so behind a proxy all
+  clients are one address. Set, it is only as true as the proxy makes it, so the proxy must
+  replace that header rather than append to it, and the server must not be reachable any other
+  way. With the header absent, the address is the peer. Present but not exactly one usable
+  address, it counts under one fixed bucket, so it can never reach a same-host proxy's loopback
+  exemption.
 
 ### What a signed-in stranger can still do
 
@@ -261,12 +272,13 @@ Someone without an account can still:
   registers again. It loses its approvals, so its users see consent once more.
 - **Slow new sign-ins for everyone behind one address, where no proxy header is named.**
   Registering a client and asking `/authorize` 120 times a minute uses that address's budget,
-  and everybody behind the proxy shares it. **Set `CHARTGEN_TRUSTED_PROXY_HEADER` on a public
-  server.** A same-host proxy has no such limit, being loopback, and only the 2000 below stops it.
-- **Block new sign-ins for up to 10 minutes** by holding 2000 open requests. With the header
-  named that takes many addresses, at 120 a minute each. Refusing was preferred to evicting
-  pending sign-ins, which would turn this into breaking those in progress. Anyone holding a
-  session is not affected.
+  and everybody behind the proxy shares it, as they share its 50 open requests. A same-host proxy
+  has no budget, being loopback, so a flood there pushes out everyone's open requests while it
+  lasts. **Set `CHARTGEN_TRUSTED_PROXY_HEADER` on a public server.**
+- **Block new sign-ins for up to 10 minutes** by holding 2000 open requests, which takes 40
+  IPv4 addresses or IPv6 /64s, so a botnet rather than a laptop. Refusing at that point was
+  preferred to evicting strangers' requests, which would break those in progress. Anyone holding
+  a session is not affected.
 
 ### Consequences
 
@@ -283,8 +295,8 @@ Someone without an account can still:
   that browser sees them. Syncing a workspace per user is a separate project.
 - Bad: behind a proxy with no header named, all peers share one address, so 120 hits a minute
   comes to about 40 sign-ins a minute for the whole server.
-- Bad: a browser without `Sec-Fetch-Site`, such as Safari before 16.4, sees a consent page for
-  the web app once per client.
+- Bad: a browser that sends no `Sec-Fetch-Site`, such as Safari before 16.4, sees a consent page
+  for the web app once per client, as does any browser on plain http off localhost.
 - Bad: a tab restored from the back-forward cache misses the sign-out event, and with
   one provider and a live provider session can sign back in on its next 401.
 - Neutral: an SSE stream opened before a sign-out runs on until it reconnects, as one
