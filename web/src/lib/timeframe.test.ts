@@ -63,11 +63,14 @@ describe("parseTimeframe", () => {
     ["3M", "3mo"],
     ["5h", "5h"],
     ["2 h", "2h"],
+    ["7  m", "7m"],
+    ["2 D", "2d"],
+    ["3 M", "3mo"],
   ])("custom: %s -> %s", (input, expected) => {
     expect(parseTimeframe(input)).toBe(expected);
   });
 
-  it.each(["", "h", "m", "0", "61", "abc", "1x", "-5", "1.5", "61m", "53W", "13M"])(
+  it.each(["", "h", "m", "0", "61", "abc", "1x", "-5", "1.5", "61m", "53W", "13M", "1 5", "1 0h", "1 5 m", "1 2 h"])(
     "rejects %j",
     (input) => {
       expect(parseTimeframe(input)).toBeNull();

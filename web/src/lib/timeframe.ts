@@ -102,10 +102,11 @@ function canonicalTimeframe(text: string): Timeframe | null {
  * Parse what the user typed into the timeframe-entry popup: the server's
  * grammar, plus two TradingView shortcuts. A bare number means minutes
  * (`60` = 1h, `45` = 45m), and a lone `D`, `W` or `M` means one day, week
- * or month. Returns null for anything the backend cannot serve.
+ * or month. Spaces may come before a unit (`2 h`), never between digits.
+ * Returns null for anything the backend cannot serve.
  */
 export function parseTimeframe(input: string): Timeframe | null {
-  const text = input.trim().replace(/^(\d+)\s+/, "$1");
+  const text = input.trim().replace(/^(\d+)\s+(?=[a-zA-Z])/, "$1");
   if (/^\d+$/.test(text)) return canonicalTimeframe(`${text}m`);
   if (/^[dwDW]$/.test(text) || text === "M") return canonicalTimeframe(`1${text}`);
   return canonicalTimeframe(text);
