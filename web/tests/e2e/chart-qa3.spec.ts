@@ -15,7 +15,7 @@ type Hook = {
     getSize: (id: string, w: string) => { height: number; width: number; left: number } | null;
     getBarSpace: () => number;
     setBarSpace: (n: number) => void;
-    getVisibleRange: () => { from: number; to: number };
+    getVisibleRange: () => { from: number; realFrom: number; to: number };
     getDataList: () => { high: number; low: number; close: number; timestamp: number }[];
     getIndicatorByPaneId: (
       paneId: string,
@@ -32,13 +32,14 @@ const offScreen = (page: Page) =>
     const [a, b] = c.convertFromPixel([{ y: 0 }, { y: h }], { paneId: "candle_pane" });
     const lo = Math.min(a!.value, b!.value);
     const hi = Math.max(a!.value, b!.value);
-    const { from, to } = c.getVisibleRange();
+    // The axis fits realFrom..to; `from` also holds off-screen bars to the left.
+    const { realFrom, to } = c.getVisibleRange();
     const data = c.getDataList();
     const cmp = c.getIndicatorByPaneId("candle_pane", "chartgen__compare")?.result ?? [];
     let bars = 0;
     let lines = 0;
     let seen = 0;
-    for (let i = from; i < to; i++) {
+    for (let i = Math.max(0, realFrom); i < to; i++) {
       const d = data[i]!;
       if (d.low < lo - 1e-9 || d.high > hi + 1e-9) bars++;
       for (const v of Object.values(cmp[i] ?? {})) {
@@ -60,7 +61,7 @@ const fitRatio = (page: Page) =>
     const c = (window as unknown as { __chartgenTest: Hook }).__chartgenTest.chart()! as unknown as {
       convertFromPixel: (p: { y: number }[], o: { paneId: string }) => { value: number }[];
       getSize: (id: string, w: string) => { height: number };
-      getVisibleRange: () => { from: number; to: number };
+      getVisibleRange: () => { realFrom: number; to: number };
       getDataList: () => { high: number; low: number }[];
       getIndicatorByPaneId: (
         id: string,
@@ -68,9 +69,10 @@ const fitRatio = (page: Page) =>
     };
     const h = c.getSize("candle_pane", "yAxis").height;
     const [a, b] = c.convertFromPixel([{ y: 0 }, { y: h }], { paneId: "candle_pane" });
-    const { from, to } = c.getVisibleRange();
+    // The axis fits realFrom..to; `from` also holds off-screen bars to the left.
+    const { realFrom, to } = c.getVisibleRange();
     const values: number[] = [];
-    for (let i = from; i < to; i++) {
+    for (let i = Math.max(0, realFrom); i < to; i++) {
       const d = c.getDataList()[i]!;
       values.push(d.low, d.high);
       c.getIndicatorByPaneId("candle_pane").forEach((ind) => {

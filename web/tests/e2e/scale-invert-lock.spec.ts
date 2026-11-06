@@ -10,7 +10,7 @@ type Hook = {
     getSize: (id: string, w: string) => { height: number } | null;
     getBarSpace: () => number;
     setBarSpace: (n: number) => void;
-    getVisibleRange: () => { from: number; to: number };
+    getVisibleRange: () => { realFrom: number; to: number };
     getDataList: () => { high: number; low: number }[];
   } | null;
 };
@@ -23,8 +23,9 @@ const allVisibleInRange = (page: Page) =>
     const [a, b] = c.convertFromPixel([{ y: 0 }, { y: h }], { paneId: "candle_pane" });
     const lo = Math.min(a!.value, b!.value);
     const hi = Math.max(a!.value, b!.value);
-    const { from, to } = c.getVisibleRange();
-    const bars = c.getDataList().slice(from, to);
+    // The axis fits realFrom..to; `from` also holds off-screen bars to the left.
+    const { realFrom, to } = c.getVisibleRange();
+    const bars = c.getDataList().slice(Math.max(0, realFrom), to);
     return bars.length > 0 && bars.every((d) => d.low >= lo - 1e-9 && d.high <= hi + 1e-9);
   });
 
