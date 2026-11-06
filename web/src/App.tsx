@@ -745,6 +745,11 @@ export function App(): JSX.Element {
               previousSymbol={lastLoaded() === symbol() ? null : lastLoaded()}
               onRetry={() => void query.refetch()}
               onBack={setSymbol}
+              onRemoveIndicators={(names) =>
+                setActiveIndicators(
+                  activeIndicators().filter((e) => !names.includes(indicatorName(e))),
+                )
+              }
             />
           </Show>
           <Chart

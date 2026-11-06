@@ -5,6 +5,8 @@
 
 import { Show, type JSX } from "solid-js";
 
+import { loadErrorReason } from "../lib/chartLoadError";
+
 export interface ChartLoadErrorProps {
   symbol: string;
   /** Raw error message of the failed request. */
@@ -13,24 +15,16 @@ export interface ChartLoadErrorProps {
   previousSymbol: string | null;
   onRetry: () => void;
   onBack: (symbol: string) => void;
-}
-
-/** Short reason for the headline; the raw message is the tooltip. */
-function reason(message: string): string {
-  const text = message.replace(/^MCP tool error: /, "");
-  // Retry cannot help with these: say which indicator is the cause.
-  const unknown = /^Unknown indicator\(s\): (.+?)\. /.exec(text);
-  if (unknown) return `unknown indicator ${unknown[1]}: remove it from the chips above`;
-  if (/^Invalid parameter/.test(text)) return `${text}: change it in the indicator's settings`;
-  return /\b404\b|not found|no data|unknown symbol|invalid symbol/i.test(message)
-    ? "symbol not found"
-    : "request failed";
+  /** Take these indicators off the chart. */
+  onRemoveIndicators: (names: string[]) => void;
 }
 
 const buttonClass =
   "px-3 py-1.5 rounded-md text-sm cursor-pointer border border-[color:var(--color-border)] hover:bg-[color:var(--color-bg-elev)]";
 
 export function ChartLoadError(props: ChartLoadErrorProps): JSX.Element {
+  // The raw message stays as the tooltip.
+  const reason = () => loadErrorReason(props.message);
   return (
     <div
       role="alert"
@@ -38,9 +32,19 @@ export function ChartLoadError(props: ChartLoadErrorProps): JSX.Element {
       class="absolute inset-0 z-10 flex flex-col items-center justify-center gap-3 px-4 text-center bg-[color:var(--color-bg)]"
     >
       <p class="text-sm text-[color:var(--color-fg)]" title={props.message}>
-        Couldn't load {props.symbol} — {reason(props.message)}
+        Couldn't load {props.symbol} — {reason().text}
       </p>
-      <div class="flex items-center gap-2">
+      <div class="flex flex-wrap items-center justify-center gap-2">
+        <Show when={reason().indicators.length > 0}>
+          <button
+            type="button"
+            data-testid="chart-error-remove"
+            class={`${buttonClass} bg-[color:var(--color-accent)] text-black font-semibold border-transparent hover:bg-[color:var(--color-accent)]`}
+            onClick={() => props.onRemoveIndicators(reason().indicators)}
+          >
+            Remove {reason().indicators.join(", ")}
+          </button>
+        </Show>
         <Show when={props.previousSymbol}>
           {(prev) => (
             <button

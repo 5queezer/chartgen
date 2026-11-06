@@ -1,6 +1,8 @@
 // With scripting off (the default server) the script editor leaves no trace:
 // nothing on screen, no scripting tool called, nothing failing (ADR-0041).
 
+import { devices, type Page } from "@playwright/test";
+
 import { expect, gotoApp, test } from "./fixtures/app";
 
 test("no UI, no scripting calls and no failed requests", async ({ page }) => {
@@ -37,15 +39,38 @@ test("no UI, no scripting calls and no failed requests", async ({ page }) => {
   expect(await page.evaluate(() => localStorage.getItem("chartgen.scripts.drafts"))).toBeNull();
 });
 
-test("an unknown indicator fails the chart with scripting off, and says which", async ({ page }) => {
-  await page.addInitScript(() => {
-    localStorage.setItem("chartgen.indicators.active", JSON.stringify(["rsi", "gone_script"]));
+const seedUnknown = (page: Page) =>
+  page.addInitScript(() => {
+    if (localStorage.getItem("chartgen.indicators.active") === null) {
+      localStorage.setItem("chartgen.indicators.active", JSON.stringify(["rsi", "gone_script"]));
+    }
   });
+
+test("an unknown indicator fails the chart with scripting off, says which, and can be removed", async ({ page }) => {
+  await seedUnknown(page);
   await page.goto("/");
   const error = page.getByTestId("chart-load-error");
   await expect(error).toContainText("unknown indicator gone_script", { timeout: 30_000 });
-  await expect(error).toContainText("remove it from the chips");
-  await page.getByRole("button", { name: "Remove gone_script" }).click();
+  await error.getByRole("button", { name: "Remove gone_script" }).click();
   await expect(error).toHaveCount(0, { timeout: 30_000 });
   await expect(page.locator(".pane-header").first()).toBeVisible();
+  // Only that one: the others stay.
+  await expect(page.getByRole("button", { name: "Remove rsi" }).first()).toBeVisible();
+  await expect(page.getByRole("button", { name: "Remove gone_script" })).toHaveCount(0);
+});
+
+test.describe("on a phone, which has no chips", () => {
+  const { defaultBrowserType: _browser, ...iPhone } = devices["iPhone 13"]!;
+  test.use(iPhone);
+
+  test("the load error has its own way out", async ({ page }) => {
+    await seedUnknown(page);
+    await page.goto("/");
+    const error = page.getByTestId("chart-load-error");
+    await expect(error).toContainText("unknown indicator gone_script", { timeout: 30_000 });
+    await expect(error).not.toContainText("chips");
+    await error.getByRole("button", { name: "Remove gone_script" }).tap();
+    await expect(error).toHaveCount(0, { timeout: 30_000 });
+    await expect(page.locator(".pane-header").first()).toBeVisible();
+  });
 });
