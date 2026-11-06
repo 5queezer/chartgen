@@ -1361,6 +1361,40 @@ fn test_busy_store_does_not_stall_authenticated_calls_during_token() {
     let _ = std::fs::remove_dir_all(db.parent().unwrap());
 }
 
+/// Reading the script owners at a full table must not stall other requests
+/// while the store is busy.
+#[cfg(feature = "scripting")]
+#[test]
+fn test_busy_store_does_not_stall_authenticated_calls_at_a_full_table() {
+    let db = store_path("busy-full");
+    seed_tokened_clients(&db, MAX_CLIENTS - 1, 0);
+    let port = free_port();
+    let srv = spawn_server_on(port, None, &db, false);
+    let live = register_external(port);
+    let token = sign_in(port, &live);
+
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    conn.execute_batch("BEGIN EXCLUSIVE").unwrap();
+    let registering = std::thread::spawn(move || register(port, EXTERNAL_REDIRECT).0);
+    std::thread::sleep(std::time::Duration::from_millis(500));
+
+    let started = std::time::Instant::now();
+    assert_eq!(ping_status(port, &token), 200);
+    let waited = started.elapsed();
+    assert!(waited.as_secs() < 2, "ping waited {waited:?}");
+    assert!(
+        !registering.is_finished(),
+        "/register should be on the store"
+    );
+
+    conn.execute_batch("COMMIT").unwrap();
+    assert_eq!(registering.join().unwrap(), 201);
+    assert_unknown_client_json(authorize(port, "c0000", EXTERNAL_REDIRECT), "evicted");
+    assert_eq!(ping_status(port, &token), 200);
+    drop(srv);
+    let _ = std::fs::remove_dir_all(db.parent().unwrap());
+}
+
 /// A store that cannot be opened costs persistence, not the server.
 #[test]
 fn test_unopenable_store_is_not_fatal() {

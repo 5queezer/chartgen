@@ -156,19 +156,23 @@ impl OAuthStore {
         Ok(())
     }
 
+    /// Whether this registration will ask for the script owners: to collect
+    /// unused clients or to evict. They are read before taking the lock for it.
+    fn needs_script_owners(&self) -> bool {
+        let now = Instant::now();
+        self.clients.len() >= MAX_CLIENTS || self.clients.values().any(|c| is_unused(c, now))
+    }
+
     /// Forget clients that never got a token within `UNUSED_CLIENT_TTL`,
     /// unless they own scripts (`None`: owners unknown, so forget nobody).
     fn collect_unused(&mut self, script_owners: impl FnOnce() -> Option<HashSet<String>>) {
         let now = Instant::now();
-        let unused = |c: &OAuthClient| {
-            c.last_used.is_none() && now.duration_since(c.created_at) >= UNUSED_CLIENT_TTL
-        };
-        if !self.clients.values().any(unused) {
+        if !self.clients.values().any(|c| is_unused(c, now)) {
             return;
         }
         if let Some(owners) = script_owners() {
             self.clients
-                .retain(|id, c| !unused(c) || owners.contains(id));
+                .retain(|id, c| !is_unused(c, now) || owners.contains(id));
         }
     }
 
@@ -268,6 +272,11 @@ impl OAuthStore {
         self.cleanup_expired();
         self.tokens.get(token).map(|t| t.client_id.clone())
     }
+}
+
+/// Never got a token, and old enough to be forgotten for it.
+fn is_unused(c: &OAuthClient, now: Instant) -> bool {
+    c.last_used.is_none() && now.duration_since(c.created_at) >= UNUSED_CLIENT_TTL
 }
 
 struct AppState {
@@ -371,27 +380,47 @@ async fn oauth_register(
     );
     let client_id = Uuid::new_v4().to_string();
     let client_secret = Uuid::new_v4().to_string();
-    let evicted = {
-        let mut oauth = state.oauth.lock().unwrap();
-        let evicted = match oauth
-            .admit_registration(&client_addr(&ext), &body)
-            .and_then(|()| {
-                oauth.collect_unused(script_owners);
-                oauth.make_room(script_owners)
-            }) {
-            Ok(evicted) => evicted,
-            Err((status, err)) => return (status, Json(err)),
-        };
+    let admitted = state
+        .oauth
+        .lock()
+        .unwrap()
+        .admit_registration(&client_addr(&ext), &body);
+    if let Err((status, err)) = admitted {
+        return (status, Json(err));
+    }
+    // The owners come from the store, which may be busy: every authenticated
+    // request needs the lock, so read them first, off the async workers. A
+    // client's first script can land in between, but writing one takes a live
+    // token and a client with a live token is not evicted (ADR-0036). The loop
+    // covers a table that fills up between the locks.
+    let mut owners_read: Option<Option<HashSet<String>>> = None;
+    let evicted = loop {
+        {
+            let mut oauth = state.oauth.lock().unwrap();
+            if owners_read.is_some() || !oauth.needs_script_owners() {
+                let owners = owners_read.flatten();
+                oauth.collect_unused(|| owners.clone());
+                let evicted = match oauth.make_room(|| owners) {
+                    Ok(evicted) => evicted,
+                    Err((status, err)) => return (status, Json(err)),
+                };
 
-        let client = OAuthClient {
-            _client_secret: Some(client_secret.clone()),
-            redirect_uris: body.redirect_uris.clone(),
-            created_at: Instant::now(),
-            last_used: None,
-        };
+                let client = OAuthClient {
+                    _client_secret: Some(client_secret.clone()),
+                    redirect_uris: body.redirect_uris.clone(),
+                    created_at: Instant::now(),
+                    last_used: None,
+                };
 
-        oauth.clients.insert(client_id.clone(), client);
-        evicted
+                oauth.clients.insert(client_id.clone(), client);
+                break evicted;
+            }
+        }
+        owners_read = Some(
+            tokio::task::spawn_blocking(script_owners)
+                .await
+                .unwrap_or(None),
+        );
     };
     if !evicted.is_empty() {
         eprintln!(
@@ -2194,6 +2223,18 @@ mod tests {
         assert_eq!(s.clients.len(), 2, "owners unknown: forget nobody");
         s.collect_unused(|| Some(["owner".to_string()].into()));
         assert!(s.clients.contains_key("owner") && !s.clients.contains_key("other"));
+    }
+
+    #[test]
+    fn script_owners_are_needed_when_full_or_something_can_be_collected() {
+        let mut s = OAuthStore::new();
+        s.clients
+            .insert("new".into(), client(Duration::from_secs(1), None));
+        assert!(!s.needs_script_owners());
+        s.clients
+            .insert("old".into(), client(UNUSED_CLIENT_TTL * 2, None));
+        assert!(s.needs_script_owners());
+        assert!(full_table().needs_script_owners());
     }
 
     #[test]

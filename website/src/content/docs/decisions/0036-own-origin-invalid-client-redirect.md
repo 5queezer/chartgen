@@ -131,6 +131,11 @@ the store:
 4. If nothing is left, or the owners cannot be read, `/register` answers `503` and
    evicts nobody.
 
+The owners are read from the store before taking the OAuth lock, because every
+authenticated call needs that lock and the store may be busy. A client's first script
+can land after the read, but writing one takes a live token, so that client is not
+evictable anyway unless the token expires in that moment.
+
 Eviction drops the client's pending codes, so a code cannot mint a token for a
 client on no record. An evicted client recovers as after a restart without a volume:
 the web app through the redirect above, an MCP client by registering again.
