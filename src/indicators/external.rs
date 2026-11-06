@@ -1,7 +1,7 @@
 use crate::data::{Bar, OhlcvData};
 use crate::indicator::{rgba, Bars as BarsSeries, Dot, Fill, HLine, Indicator, Line, PanelResult};
 use std::collections::HashMap;
-use std::sync::{Arc, LazyLock, Mutex};
+use std::sync::{Arc, Condvar, LazyLock, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 /// How often one futures series is asked for. A push group recomputes up to 4 times
@@ -13,22 +13,57 @@ const SERIES_REFRESH: Duration = Duration::from_secs(15);
 /// the gate's default 60 s cooldown plus one `SERIES_REFRESH`.
 const SERIES_KEEP: Duration = Duration::from_secs(90);
 
+/// How long a caller with nothing to serve waits for a read already in flight: as long
+/// as that read's HTTP timeout. Chart requests and pushes run on the blocking pool;
+/// `--trade`'s engine computes on its task, which these HTTP calls already block.
+const SERIES_WAIT: Duration = Duration::from_secs(15);
+
 struct HeldSeries<T> {
+    /// When the current refresh was claimed, before its fetch.
     tried: Instant,
     good: Option<(Instant, Arc<Vec<T>>)>,
     error: String,
+    fetching: bool,
 }
 
+type SeriesKey = (String, String);
+
 /// Futures series by symbol and period.
-struct SeriesCache<T>(Mutex<HashMap<(String, String), HeldSeries<T>>>);
+struct SeriesCache<T> {
+    held: Mutex<HashMap<SeriesKey, HeldSeries<T>>>,
+    fetched: Condvar,
+}
 
 impl<T> Default for SeriesCache<T> {
     fn default() -> Self {
-        Self(Mutex::default())
+        Self {
+            held: Mutex::default(),
+            fetched: Condvar::new(),
+        }
+    }
+}
+
+/// The turn to refresh a series. Ends however the fetch does, a panic included, so
+/// nobody waits on it for longer than it runs.
+struct SeriesClaim<'a, T> {
+    cache: &'a SeriesCache<T>,
+    key: SeriesKey,
+}
+
+impl<T> Drop for SeriesClaim<'_, T> {
+    fn drop(&mut self) {
+        if let Some(h) = self.cache.lock().get_mut(&self.key) {
+            h.fetching = false;
+        }
+        self.cache.fetched.notify_all();
     }
 }
 
 impl<T> SeriesCache<T> {
+    fn lock(&self) -> MutexGuard<'_, HashMap<SeriesKey, HeldSeries<T>>> {
+        self.held.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     /// The series for `symbol` and `period`: `fetch`ed at most once per
     /// `SERIES_REFRESH`, whether that worked or not, and otherwise the last good one
     /// while it lasts.
@@ -39,6 +74,22 @@ impl<T> SeriesCache<T> {
         now: Instant,
         fetch: impl FnOnce() -> Result<Vec<T>, String>,
     ) -> Result<Arc<Vec<T>>, String> {
+        self.get_waiting(symbol, period, now, SERIES_WAIT, fetch)
+    }
+
+    /// `get`, with its wait as an argument. The refresh is claimed under the lock
+    /// before the fetch, so of the callers at an expiry only one sends a request. The
+    /// others get the last good series at once. With none held, as on a first read,
+    /// they wait up to `wait` for that request, so a chart loading at the same moment
+    /// is not left with a blank panel, and a failed read gives them its error.
+    fn get_waiting(
+        &self,
+        symbol: &str,
+        period: &str,
+        now: Instant,
+        wait: Duration,
+        fetch: impl FnOnce() -> Result<Vec<T>, String>,
+    ) -> Result<Arc<Vec<T>>, String> {
         let key = (symbol.to_uppercase(), period.to_string());
         let lasting = |held: &HeldSeries<T>| {
             held.good
@@ -46,38 +97,74 @@ impl<T> SeriesCache<T> {
                 .filter(|(at, _)| now.saturating_duration_since(*at) < SERIES_KEEP)
                 .map(|(_, series)| series.clone())
         };
-        let lock = || self.0.lock().unwrap_or_else(|e| e.into_inner());
-        {
-            let mut held = lock();
+        let claim = {
+            let mut held = self.lock();
             held.retain(|_, h| now.saturating_duration_since(h.tried) < SERIES_KEEP);
-            if let Some(h) = held
+            let give_up = Instant::now() + wait;
+            // A claim holds for one refresh, so a fetch that hangs cannot stick.
+            while let Some(h) = held
                 .get(&key)
                 .filter(|h| now.saturating_duration_since(h.tried) < SERIES_REFRESH)
             {
-                return lasting(h).ok_or_else(|| h.error.clone());
+                if let Some(series) = lasting(h) {
+                    return Ok(series);
+                }
+                if !h.fetching {
+                    return Err(h.error.clone());
+                }
+                let left = give_up.saturating_duration_since(Instant::now());
+                if left.is_zero() {
+                    return Err(SERIES_LOADING.into());
+                }
+                held = self
+                    .fetched
+                    .wait_timeout(held, left)
+                    .unwrap_or_else(|e| e.into_inner())
+                    .0;
             }
-        }
+            let entry = held.entry(key.clone()).or_insert_with(|| HeldSeries {
+                tried: now,
+                good: None,
+                error: SERIES_LOADING.into(),
+                fetching: false,
+            });
+            entry.tried = now;
+            entry.fetching = true;
+            SeriesClaim {
+                cache: self,
+                key: key.clone(),
+            }
+        };
         let result = fetch();
-        let mut held = lock();
+        let mut held = self.lock();
         let entry = held.entry(key).or_insert_with(|| HeldSeries {
             tried: now,
             good: None,
-            error: String::new(),
+            error: SERIES_LOADING.into(),
+            fetching: true,
         });
-        entry.tried = now;
-        match result {
+        let answer = match result {
             Ok(series) => {
                 let series = Arc::new(series);
-                entry.good = Some((now, series.clone()));
+                // A fetch that outlasted its refresh must not replace a newer one.
+                if entry.good.as_ref().is_none_or(|(at, _)| *at <= now) {
+                    entry.good = Some((now, series.clone()));
+                }
                 Ok(series)
             }
             Err(e) => {
                 entry.error = e.clone();
                 lasting(entry).ok_or(e)
             }
-        }
+        };
+        drop(held);
+        drop(claim);
+        answer
     }
 }
+
+/// Says a series has not been read yet, or a read is taking too long.
+const SERIES_LOADING: &str = "futures data is not loaded yet; try again shortly";
 
 static FUNDING: LazyLock<SeriesCache<(i64, f64)>> = LazyLock::new(SeriesCache::default);
 static OPEN_INTEREST: LazyLock<SeriesCache<(i64, f64)>> = LazyLock::new(SeriesCache::default);
@@ -763,7 +850,152 @@ mod interval_tests {
         cache
             .get("ETHUSDT", "1h", t0 + SERIES_KEEP, || Ok(vec![2]))
             .unwrap();
-        assert_eq!(cache.0.lock().unwrap().len(), 1);
+        assert_eq!(cache.lock().len(), 1);
+    }
+
+    type SeriesRead = Result<Arc<Vec<i64>>, String>;
+
+    /// A fetch held open on another thread: `started` says it is running, and sending
+    /// on the returned channel lets it answer.
+    fn in_flight<'s>(
+        scope: &'s std::thread::Scope<'s, '_>,
+        cache: &'s SeriesCache<i64>,
+        at: Instant,
+        answer: Result<Vec<i64>, String>,
+    ) -> (
+        std::sync::mpsc::Sender<()>,
+        std::thread::ScopedJoinHandle<'s, SeriesRead>,
+    ) {
+        let (started_tx, started) = std::sync::mpsc::channel();
+        let (release, released) = std::sync::mpsc::channel();
+        let leader = scope.spawn(move || {
+            cache.get("btcusdt", "1h", at, move || {
+                started_tx.send(()).unwrap();
+                released.recv().unwrap();
+                answer
+            })
+        });
+        started.recv().unwrap();
+        (release, leader)
+    }
+
+    fn no_fetch() -> Result<Vec<i64>, String> {
+        panic!("only the caller that claimed the refresh may fetch")
+    }
+
+    #[test]
+    fn callers_at_an_expiry_send_one_request_and_get_the_last_good_series() {
+        let (cache, t0) = (SeriesCache::default(), Instant::now());
+        let mut calls = 0;
+        read(&cache, &mut calls, t0, Ok(vec![1])).unwrap();
+        let at = t0 + SERIES_REFRESH;
+        std::thread::scope(|s| {
+            let (release, leader) = in_flight(s, &cache, at, Ok(vec![2]));
+            // Another 64 push groups recompute while it runs: none of them fetches,
+            // and none of them blocks.
+            for i in 0..64 {
+                let late = at + Duration::from_millis(i);
+                let got = cache.get("btcusdt", "1h", late, no_fetch).unwrap();
+                assert_eq!(*got, vec![1]);
+            }
+            release.send(()).unwrap();
+            assert_eq!(*leader.join().unwrap().unwrap(), vec![2]);
+        });
+        let next = cache.get("btcusdt", "1h", at, no_fetch).unwrap();
+        assert_eq!(*next, vec![2]);
+    }
+
+    #[test]
+    fn a_first_read_racing_another_waits_for_it_rather_than_blanking() {
+        let (cache, t0) = (SeriesCache::default(), Instant::now());
+        std::thread::scope(|s| {
+            let (release, leader) = in_flight(s, &cache, t0, Ok(vec![7]));
+            let (done_tx, done) = std::sync::mpsc::channel();
+            let cache = &cache;
+            let late = s.spawn(move || {
+                let got = cache.get("btcusdt", "1h", t0, no_fetch);
+                done_tx.send(()).unwrap();
+                got
+            });
+            // It waits, rather than answering with an empty panel.
+            assert!(done.recv_timeout(Duration::from_millis(50)).is_err());
+            release.send(()).unwrap();
+            assert_eq!(*late.join().unwrap().unwrap(), vec![7]);
+            assert_eq!(*leader.join().unwrap().unwrap(), vec![7]);
+        });
+    }
+
+    #[test]
+    fn a_first_read_gives_up_on_a_slow_fetch_with_a_clear_error() {
+        let (cache, t0) = (SeriesCache::default(), Instant::now());
+        std::thread::scope(|s| {
+            let (release, leader) = in_flight(s, &cache, t0, Ok(vec![7]));
+            let e = cache
+                .get_waiting("btcusdt", "1h", t0, Duration::from_millis(5), no_fetch)
+                .unwrap_err();
+            assert_eq!(e, SERIES_LOADING);
+            release.send(()).unwrap();
+            leader.join().unwrap().unwrap();
+        });
+    }
+
+    #[test]
+    fn a_failed_read_tells_those_waiting_and_retries_after_the_refresh() {
+        let (cache, t0) = (SeriesCache::default(), Instant::now());
+        std::thread::scope(|s| {
+            let (release, leader) = in_flight(s, &cache, t0, Err("HTTP 500".to_string()));
+            let cache = &cache;
+            let late = s.spawn(move || cache.get("btcusdt", "1h", t0, no_fetch));
+            std::thread::sleep(Duration::from_millis(5));
+            release.send(()).unwrap();
+            assert_eq!(leader.join().unwrap().unwrap_err(), "HTTP 500");
+            assert_eq!(late.join().unwrap().unwrap_err(), "HTTP 500");
+        });
+        assert!(!cache.lock().values().any(|h| h.fetching));
+        // Inside the refresh it stays an error, and after it the series is read again.
+        let soon = t0 + Duration::from_secs(1);
+        assert!(cache.get("btcusdt", "1h", soon, no_fetch).is_err());
+        let mut calls = 0;
+        let healed = read(&cache, &mut calls, t0 + SERIES_REFRESH, Ok(vec![3]));
+        assert_eq!((healed, calls), (Ok(vec![3]), 1));
+    }
+
+    #[test]
+    fn a_fetch_that_panics_leaves_nothing_stuck() {
+        let (cache, t0) = (SeriesCache::<i64>::default(), Instant::now());
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            cache.get("btcusdt", "1h", t0, || panic!("the fetch blew up"))
+        }));
+        assert!(panicked.is_err());
+        assert!(!cache.lock().values().any(|h| h.fetching));
+        // Nobody waits on it: a clear error at once, and a new read after the refresh.
+        let soon = t0 + Duration::from_secs(1);
+        let e = cache
+            .get_waiting("btcusdt", "1h", soon, Duration::from_secs(60), no_fetch)
+            .unwrap_err();
+        assert_eq!(e, SERIES_LOADING);
+        let mut calls = 0;
+        let healed = read(&cache, &mut calls, t0 + SERIES_REFRESH, Ok(vec![3]));
+        assert_eq!((healed, calls), (Ok(vec![3]), 1));
+    }
+
+    #[test]
+    fn a_fetch_that_hangs_holds_its_claim_for_one_refresh_only() {
+        let (cache, t0) = (SeriesCache::default(), Instant::now());
+        std::thread::scope(|s| {
+            let (release, leader) = in_flight(s, &cache, t0, Ok(vec![1]));
+            // A refresh later another caller may fetch, and what it reads stays.
+            let mut calls = 0;
+            let next = read(&cache, &mut calls, t0 + SERIES_REFRESH, Ok(vec![2]));
+            assert_eq!((next, calls), (Ok(vec![2]), 1));
+            // The slow one lands last, with older data: it must not replace it.
+            release.send(()).unwrap();
+            leader.join().unwrap().unwrap();
+        });
+        let held = cache
+            .get("btcusdt", "1h", t0 + SERIES_REFRESH, no_fetch)
+            .unwrap();
+        assert_eq!(*held, vec![2]);
     }
 
     #[test]

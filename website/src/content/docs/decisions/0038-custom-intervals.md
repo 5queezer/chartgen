@@ -164,8 +164,10 @@ quotes, the symbol list and the feed's backfill included:
 
 The futures panels (`funding`, `oi`, `long_short`) also have limits the weight header
 does not show: `fundingRate` allows 500 requests per 5 minutes per IP. So a series is
-asked for at most every 15 s, however often a push group recomputes, and when a call
-fails or is refused the last good series is served for up to 90 s. That outlasts the
+asked for at most every 15 s, however often push groups recompute, as its refresh is
+claimed before the call. Others get the last good series meanwhile, or wait for that
+call if there is none yet. When a call fails or is refused the last good series is
+served for up to 90 s. That outlasts the
 default cooldown, so the panel keeps its shape and the chart does not reload. A longer
 ban still empties the panel until it ends, and reloads the chart each way.
 
