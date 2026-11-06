@@ -449,6 +449,9 @@ export type ServerAlert = z.infer<typeof ServerAlertSchema>;
 
 export const ServerAlertsPayloadSchema = z.object({
   enabled: z.boolean(),
+  // What this client may do; absent when the server has them off.
+  can_create: z.boolean().optional(),
+  webhooks: z.boolean().optional(),
   alerts: z.array(ServerAlertSchema),
 });
 export type ServerAlertsPayload = z.infer<typeof ServerAlertsPayloadSchema>;

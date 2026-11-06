@@ -11,13 +11,16 @@ import { gotoApp } from "./fixtures/app";
 const WARMUP_TIMEOUT_MS = 180_000;
 
 export default async function globalSetup(config: FullConfig): Promise<void> {
-  const { baseURL } = config.projects[0]!.use;
   const browser = await chromium.launch();
   try {
-    const page = await browser.newPage({ baseURL });
-    page.setDefaultTimeout(WARMUP_TIMEOUT_MS);
-    page.setDefaultNavigationTimeout(WARMUP_TIMEOUT_MS);
-    await gotoApp(page);
+    // Each project has its own servers.
+    for (const baseURL of new Set(config.projects.map((p) => p.use.baseURL))) {
+      const page = await browser.newPage({ baseURL });
+      page.setDefaultTimeout(WARMUP_TIMEOUT_MS);
+      page.setDefaultNavigationTimeout(WARMUP_TIMEOUT_MS);
+      await gotoApp(page);
+      await page.close();
+    }
   } catch (err) {
     // Only a warm-up: if it fails, the specs report the real problem.
     console.warn(`[global-setup] warm-up boot failed: ${String(err)}`);

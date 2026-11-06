@@ -53,7 +53,9 @@ import {
   createServerAlert,
   serverAlertError,
   serverAlerts,
+  serverAlertsCanCreate,
   serverAlertsEnabled,
+  serverWebhooksAllowed,
   updateServerAlert,
 } from "../stores/serverAlerts";
 import {
@@ -678,14 +680,16 @@ export function AlertDialog(props: AlertDialogProps): JSX.Element {
                       }
                     >
                       <Show
-                        when={serverAlertsEnabled()}
+                        when={serverAlertsEnabled() && serverAlertsCanCreate()}
                         fallback={
                           <p
                             data-role="alert-browser-only"
                             class="text-xs text-[color:var(--color-fg-muted)]"
                           >
-                            This server does not run alerts: this one runs in this browser, only
-                            while a tab is open.
+                            {serverAlertsEnabled()
+                              ? "This server only runs alerts for sign-ins its operator allowed"
+                              : "This server does not run alerts"}
+                            : this one runs in this browser, only while a tab is open.
                           </p>
                         }
                       >
@@ -718,25 +722,44 @@ export function AlertDialog(props: AlertDialogProps): JSX.Element {
                         </select>
                       </label>
                     </Show>
-                    <label class="flex items-center justify-between gap-3 text-sm">
-                      Webhook
-                      <input
-                        class={`${inputClass} text-left`}
-                        type="url"
-                        maxlength="512"
-                        placeholder={d().webhookHost ? `Keep ${d().webhookHost}` : "https:// (optional)"}
-                        value={d().webhook}
-                        onInput={(e) => patch({ webhook: e.currentTarget.value })}
-                      />
-                    </label>
-                    <label class="flex items-center justify-between gap-3 text-sm">
-                      Sign webhook
-                      <input
-                        type="checkbox"
-                        checked={d().sign}
-                        onChange={(e) => patch({ sign: e.currentTarget.checked })}
-                      />
-                    </label>
+                    <Show
+                      when={serverWebhooksAllowed()}
+                      fallback={
+                        <p
+                          data-role="webhooks-off"
+                          class="text-xs text-[color:var(--color-fg-muted)]"
+                        >
+                          This server does not send webhooks for this sign-in. The alert fires
+                          here, in the Alerts tab.
+                        </p>
+                      }
+                    >
+                      <label class="flex items-center justify-between gap-3 text-sm">
+                        Webhook
+                        <input
+                          class={`${inputClass} text-left`}
+                          type="url"
+                          maxlength="512"
+                          autocomplete="off"
+                          placeholder={
+                            d().webhookHost ? `Keep ${d().webhookHost}` : "https:// (optional)"
+                          }
+                          value={d().webhook}
+                          onInput={(e) => patch({ webhook: e.currentTarget.value })}
+                        />
+                      </label>
+                      <label
+                        class="flex items-center justify-between gap-3 text-sm"
+                        title="A new URL does not keep the old secret: sign again to get a new one."
+                      >
+                        Sign webhook
+                        <input
+                          type="checkbox"
+                          checked={d().sign}
+                          onChange={(e) => patch({ sign: e.currentTarget.checked })}
+                        />
+                      </label>
+                    </Show>
                   </Show>
                   <Show when={error()}>
                     <p role="alert" class="text-xs text-[color:var(--color-danger)]">

@@ -16,6 +16,7 @@ import {
   createMemo,
   createSignal,
   onCleanup,
+  untrack,
   type Accessor,
 } from "solid-js";
 
@@ -27,6 +28,7 @@ import { createQuotesQuery } from "../queries";
 import {
   refreshServerAlerts,
   serverAlertText,
+  serverAlertsEnabled,
   setServerAlertSession,
   takeNewFires,
 } from "../stores/serverAlerts";
@@ -46,6 +48,9 @@ import {
 
 const TOAST_MS = 5_000;
 const SERVER_ALERT_POLL_MS = 5_000;
+/** How often a server without them is asked again, and how soon a focus may do so. */
+const SERVER_ALERT_RECHECK_MS = 300_000;
+const SERVER_ALERT_FOCUS_GAP_MS = 30_000;
 // A triggered alert is worth reading; it stays longer than a confirmation.
 const ALERT_TOAST_MS = 8_000;
 /** Toasts visible at once; a new one pushes the oldest out. */
@@ -301,23 +306,44 @@ export function chartTick(series: SeriesPayload): Tick {
 }
 
 /**
- * Keep the server's alerts (ADR-0042) up to date while the tab is visible, and
- * tell the user what fired. They never enter the browser's own list, so no tab
- * evaluates them; the server fires them, and only the leading tab reports it.
+ * Keep the server's alerts (ADR-0042) up to date and tell the user what fired. They
+ * never enter the browser's own list, so no tab evaluates them; the server fires them.
+ * Only the leading tab asks and reports, and the others read the list it shares. While
+ * the server does not run them, this asks `tools/list` once, then on focus or every few
+ * minutes, in case the operator turned them on.
  */
 export function createServerAlertPoll(session: McpSession, enabled: Accessor<boolean>): void {
   createEffect(() => {
-    if (!enabled()) return;
-    setServerAlertSession(session);
-    const tick = async () => {
-      if (document.visibilityState === "hidden") return;
-      if (!(await refreshServerAlerts())) return;
-      if (!leader()) return;
-      deliver(takeNewFires().map((a) => ({ id: a.id, text: serverAlertText(a) })));
+    if (enabled()) setServerAlertSession(session);
+  });
+  createEffect(() => {
+    if (!enabled() || !leader()) return;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let stopped = false;
+    let asking = false;
+    let lastAsked = 0;
+    const ask = async () => {
+      if (asking) return;
+      asking = true;
+      clearTimeout(timer);
+      lastAsked = Date.now();
+      const on = await refreshServerAlerts();
+      asking = false;
+      if (stopped) return;
+      if (on) deliver(takeNewFires().map((a) => ({ id: a.id, text: serverAlertText(a) })));
+      timer = setTimeout(() => void ask(), on ? SERVER_ALERT_POLL_MS : SERVER_ALERT_RECHECK_MS);
     };
-    void tick();
-    const timer = setInterval(() => void tick(), SERVER_ALERT_POLL_MS);
-    onCleanup(() => clearInterval(timer));
+    const onFocus = () => {
+      if (!serverAlertsEnabled() && Date.now() - lastAsked >= SERVER_ALERT_FOCUS_GAP_MS) void ask();
+    };
+    window.addEventListener("focus", onFocus);
+    // Untracked: what it asks changes the store it reads, which must not restart this.
+    untrack(() => void ask());
+    onCleanup(() => {
+      stopped = true;
+      clearTimeout(timer);
+      window.removeEventListener("focus", onFocus);
+    });
   });
 }
 

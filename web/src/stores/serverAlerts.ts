@@ -1,8 +1,9 @@
 // Alerts that run on the server (ADR-0042). The server is the source of truth,
 // so they are not in the browser's own list (`stores/alerts`) and no tab can
-// evaluate them or fire them a second time. This store mirrors what the server
-// says, and remembers which fires the user was already told about, in storage
-// shared by the tabs, so one fire is reported once, in whichever tab leads.
+// evaluate them or fire them a second time. The tab that leads asks the server, and
+// shares the answer with the other tabs through storage. It also remembers there which
+// fires the user was already told about, so one fire is reported once, in whichever
+// tab leads. A server that does not run them is asked nothing but `tools/list`.
 
 import { createSignal } from "solid-js";
 
@@ -13,9 +14,16 @@ import type {
   CreateServerAlertInput,
   UpdateServerAlertInput,
 } from "../types/generated-input";
-import type { ServerAlert, ServerAlertChangePayload } from "../types/responses";
+import {
+  ServerAlertsPayloadSchema,
+  type ServerAlert,
+  type ServerAlertChangePayload,
+  type ServerAlertsPayload,
+} from "../types/responses";
 
 const SEEN_KEY = "chartgen.serverAlerts.seen";
+const LIST_KEY = "chartgen.serverAlerts.list";
+const OFF: ServerAlertsPayload = { enabled: false, alerts: [] };
 
 export type ServerAlertStatus = "active" | "triggered" | "paused";
 
@@ -37,23 +45,61 @@ export function newFires(
   return list.filter((a) => a.fire_count > (seen[a.id] ?? 0));
 }
 
-const [serverAlerts, setServerAlerts] = createSignal<ServerAlert[]>([]);
-export { serverAlerts };
-const [serverAlertsEnabled, setServerAlertsEnabled] = createSignal(false);
-export { serverAlertsEnabled };
+/** What the leading tab last shared; validated, as anything read back is. */
+function loadShared(): ServerAlertsPayload {
+  if (typeof localStorage === "undefined") return OFF;
+  try {
+    const parsed = ServerAlertsPayloadSchema.safeParse(
+      JSON.parse(localStorage.getItem(LIST_KEY) ?? "null"),
+    );
+    return parsed.success ? parsed.data : OFF;
+  } catch {
+    return OFF;
+  }
+}
+
+const [shared, setShared] = createSignal<ServerAlertsPayload>(loadShared());
+export const serverAlerts = (): ServerAlert[] => shared().alerts;
+export const serverAlertsEnabled = (): boolean => shared().enabled;
+/** May this sign-in put an alert on the server? */
+export const serverAlertsCanCreate = (): boolean => shared().can_create === true;
+/** Does the server send webhooks for this sign-in? */
+export const serverWebhooksAllowed = (): boolean => shared().webhooks === true;
+
+if (typeof window !== "undefined") {
+  window.addEventListener("storage", (e) => {
+    if (e.key === LIST_KEY || e.key === null) setShared(loadShared());
+  });
+}
+
+function publish(next: ServerAlertsPayload): void {
+  setShared(next);
+  try {
+    localStorage.setItem(LIST_KEY, JSON.stringify(next));
+  } catch {
+    // Quota exceeded or private-mode storage: other tabs keep what they have.
+  }
+}
 
 let session: McpSession | null = null;
 export function setServerAlertSession(s: McpSession): void {
   session = s;
 }
 
+/** Counts told about in this tab, for when storage fails to keep them. */
+const toldHere: Record<string, number> = {};
+
 function readSeen(): Record<string, number> {
+  let stored: Record<string, number> = {};
   try {
     const raw: unknown = JSON.parse(localStorage.getItem(SEEN_KEY) ?? "{}");
-    return typeof raw === "object" && raw !== null ? (raw as Record<string, number>) : {};
+    if (typeof raw === "object" && raw !== null) stored = raw as Record<string, number>;
   } catch {
-    return {};
+    // As if nothing was stored; `toldHere` still holds this tab's.
   }
+  const seen = { ...stored };
+  for (const [id, n] of Object.entries(toldHere)) seen[id] = Math.max(n, seen[id] ?? 0);
+  return seen;
 }
 
 /**
@@ -63,27 +109,35 @@ function readSeen(): Record<string, number> {
 export function takeNewFires(): ServerAlert[] {
   const list = serverAlerts();
   const fired = newFires(list, readSeen());
+  for (const a of list) toldHere[a.id] = a.fire_count;
   try {
     localStorage.setItem(
       SEEN_KEY,
       JSON.stringify(Object.fromEntries(list.map((a) => [a.id, a.fire_count]))),
     );
   } catch {
-    // Quota exceeded or private-mode storage: best-effort only.
+    // Quota exceeded or private-mode storage: `toldHere` keeps this tab from repeating.
   }
   return fired;
 }
 
-/** Ask the server. False when it could not answer; the last list stays. */
+/**
+ * Ask the server, and share what it says. True while it runs alerts, so polling goes
+ * on. While they are off only `tools/list` is asked, which has no cost to speak of;
+ * when it could not answer, what was known stands.
+ */
 export async function refreshServerAlerts(): Promise<boolean> {
   if (!session) return false;
   try {
+    if (!serverAlertsEnabled() && !(await session.serverAlertsListed())) {
+      publish(OFF);
+      return false;
+    }
     const payload = await session.callListServerAlerts();
-    setServerAlertsEnabled(payload.enabled);
-    setServerAlerts(payload.alerts);
-    return true;
+    publish(payload);
+    return payload.enabled;
   } catch {
-    return false;
+    return serverAlertsEnabled();
   }
 }
 
@@ -101,11 +155,13 @@ export function serverAlertError(err: unknown): string {
 /** Put the alert in the list as the server now has it. The secret stays out. */
 function merge(a: ServerAlertChangePayload): void {
   const { webhook_secret: _, ...alert } = a;
-  setServerAlerts((list) =>
-    list.some((x) => x.id === alert.id)
-      ? list.map((x) => (x.id === alert.id ? alert : x))
-      : [...list, alert],
-  );
+  const now = shared();
+  publish({
+    ...now,
+    alerts: now.alerts.some((x) => x.id === alert.id)
+      ? now.alerts.map((x) => (x.id === alert.id ? alert : x))
+      : [...now.alerts, alert],
+  });
 }
 
 export async function createServerAlert(
@@ -126,5 +182,6 @@ export async function updateServerAlert(
 
 export async function deleteServerAlert(id: string): Promise<void> {
   await connected().callDeleteServerAlert({ alert_id: id });
-  setServerAlerts((list) => list.filter((a) => a.id !== id));
+  const now = shared();
+  publish({ ...now, alerts: now.alerts.filter((a) => a.id !== id) });
 }

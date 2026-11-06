@@ -106,6 +106,8 @@ export interface McpSession {
   callUnsubscribeChart: (
     args: UnsubscribeChartInput,
   ) => Promise<UnsubscribeChartPayload>;
+  /** Does `tools/list` have the server alert tools? One request, and no tool call. */
+  serverAlertsListed: () => Promise<boolean>;
   /** Invoke `list_server_alerts`; says so when the server does not run them. */
   callListServerAlerts: () => Promise<ServerAlertsPayload>;
   /** Invoke `create_server_alert`; a signing secret is only in this response. */
@@ -334,6 +336,11 @@ export function createMcpSession(): McpSession {
         args as unknown as Record<string, unknown>,
       );
       return UnsubscribeChartPayloadSchema.parse(json);
+    },
+    async serverAlertsListed() {
+      const conn = await ensureConnected();
+      const { tools } = await conn.client.listTools();
+      return tools.some((t) => t.name === "list_server_alerts");
     },
     async callListServerAlerts() {
       const json = await callToolWithAuthRetry("list_server_alerts", {});

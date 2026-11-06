@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { ServerAlertChangePayloadSchema, ServerAlertsPayloadSchema } from "../types/responses";
 import type { ServerAlert } from "../types/responses";
@@ -67,5 +67,115 @@ describe("the wire shape", () => {
         alerts: [{ ...alert, condition: "sideways" }],
       }).success,
     ).toBe(false);
+  });
+});
+
+describe("asking the server", () => {
+  const LIST = "chartgen.serverAlerts.list";
+
+  function stubStorage(initial: Record<string, string> = {}, opts = { failWrites: false }) {
+    const data = new Map(Object.entries(initial));
+    vi.stubGlobal("localStorage", {
+      getItem: (k: string) => data.get(k) ?? null,
+      setItem: (k: string, v: string) => {
+        if (opts.failWrites) throw new Error("quota");
+        data.set(k, v);
+      },
+      removeItem: (k: string) => void data.delete(k),
+    });
+    return data;
+  }
+
+  /** The store reads storage at import time. */
+  async function load() {
+    vi.resetModules();
+    return import("./serverAlerts");
+  }
+
+  function session(listed: boolean, payload: unknown = { enabled: true, alerts: [] }) {
+    return {
+      serverAlertsListed: vi.fn(async () => listed),
+      callListServerAlerts: vi.fn(async () => payload),
+    };
+  }
+
+  beforeEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("asks only tools/list while the tool is not listed", async () => {
+    stubStorage();
+    const store = await load();
+    const s = session(false);
+    store.setServerAlertSession(s as never);
+    expect(await store.refreshServerAlerts()).toBe(false);
+    expect(await store.refreshServerAlerts()).toBe(false);
+    expect(s.serverAlertsListed).toHaveBeenCalledTimes(2);
+    expect(s.callListServerAlerts).not.toHaveBeenCalled();
+    expect(store.serverAlertsEnabled()).toBe(false);
+  });
+
+  it("stops polling when the server says it is off, even if the tool is listed", async () => {
+    stubStorage();
+    const store = await load();
+    const s = session(true, { enabled: false, alerts: [] });
+    store.setServerAlertSession(s as never);
+    expect(await store.refreshServerAlerts()).toBe(false);
+    expect(store.serverAlertsEnabled()).toBe(false);
+  });
+
+  it("polls the list while on, without asking for the tool again, and shares it", async () => {
+    const data = stubStorage();
+    const store = await load();
+    const payload = { enabled: true, can_create: true, webhooks: false, alerts: [alert] };
+    const s = session(true, payload);
+    store.setServerAlertSession(s as never);
+    expect(await store.refreshServerAlerts()).toBe(true);
+    expect(await store.refreshServerAlerts()).toBe(true);
+    expect(s.serverAlertsListed).toHaveBeenCalledTimes(1);
+    expect(s.callListServerAlerts).toHaveBeenCalledTimes(2);
+    expect(store.serverAlertsCanCreate()).toBe(true);
+    expect(store.serverWebhooksAllowed()).toBe(false);
+    expect(JSON.parse(data.get(LIST)!).alerts[0].id).toBe("a");
+  });
+
+  it("a tab that does not ask reads what the leading tab shared, validated", async () => {
+    stubStorage({ [LIST]: JSON.stringify({ enabled: true, can_create: true, alerts: [alert] }) });
+    const store = await load();
+    expect(store.serverAlerts().map((a) => a.id)).toEqual(["a"]);
+    expect(store.serverAlertsEnabled()).toBe(true);
+
+    stubStorage({ [LIST]: JSON.stringify({ enabled: true, alerts: [{ id: "bad" }] }) });
+    const bad = await load();
+    expect(bad.serverAlerts()).toEqual([]);
+    expect(bad.serverAlertsEnabled()).toBe(false);
+  });
+
+  it("keeps what it knows when the server cannot answer", async () => {
+    stubStorage({ [LIST]: JSON.stringify({ enabled: true, alerts: [alert] }) });
+    const store = await load();
+    const s = session(true);
+    s.callListServerAlerts.mockRejectedValue(new Error("down"));
+    store.setServerAlertSession(s as never);
+    expect(await store.refreshServerAlerts()).toBe(true);
+    expect(store.serverAlerts()).toHaveLength(1);
+  });
+
+  it("reports a fire once even when storage refuses to keep the count", async () => {
+    const fired = { ...alert, fire_count: 1 };
+    stubStorage({ [LIST]: JSON.stringify({ enabled: true, alerts: [fired] }) }, { failWrites: true });
+    const store = await load();
+    expect(store.takeNewFires().map((a) => a.id)).toEqual(["a"]);
+    expect(store.takeNewFires()).toEqual([]);
+  });
+
+  it("reports a fire once across tabs through storage", async () => {
+    const fired = { ...alert, fire_count: 1 };
+    const data = stubStorage({ [LIST]: JSON.stringify({ enabled: true, alerts: [fired] }) });
+    const first = await load();
+    expect(first.takeNewFires()).toHaveLength(1);
+    expect(JSON.parse(data.get("chartgen.serverAlerts.seen")!)).toEqual({ a: 1 });
+    const second = await load();
+    expect(second.takeNewFires()).toEqual([]);
   });
 });

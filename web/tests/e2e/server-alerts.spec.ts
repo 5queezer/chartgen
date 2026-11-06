@@ -108,8 +108,28 @@ test("a server alert fires its webhook once, and the panel shows the result", as
   expect(received).toHaveLength(1);
 });
 
+test("the leading tab polls every few seconds, not on every answer", async ({ page }) => {
+  let asked = 0;
+  page.on("request", (r) => {
+    if (r.postData()?.includes('"list_server_alerts"')) asked++;
+  });
+  await gotoApp(page);
+  await expect.poll(() => asked).toBeGreaterThan(0);
+  await page.waitForTimeout(11_000);
+  // One at the start and one each 5 s, with some room for a slow host.
+  expect(asked).toBeLessThanOrEqual(5);
+  expect(asked).toBeGreaterThanOrEqual(2);
+});
+
 test("with two tabs open a fire reaches the webhook once and one tab reports it", async ({ bootedApp: page, context }) => {
   const other = await context.newPage();
+  const asked = { page: 0, other: 0 };
+  page.on("request", (r) => {
+    if (r.postData()?.includes('"list_server_alerts"')) asked.page++;
+  });
+  other.on("request", (r) => {
+    if (r.postData()?.includes('"list_server_alerts"')) asked.other++;
+  });
   await gotoApp(other);
   await createServerAlert(page, { webhook: HOOK });
   await expect.poll(() => received.length, { timeout: 15_000 }).toBe(1);
@@ -122,6 +142,9 @@ test("with two tabs open a fire reaches the webhook once and one tab reports it"
   await expect(toasts(page)).toHaveCount(1, { timeout: 15_000 });
   await other.waitForTimeout(6_000);
   await expect(toasts(other)).toHaveCount(0);
+  // Only the leading tab asks; the other read all of that from what it shared.
+  expect(asked.page).toBeGreaterThan(0);
+  expect(asked.other).toBe(0);
   expect(received).toHaveLength(1);
   await other.close();
 });
@@ -180,6 +203,71 @@ test("the dialog refuses an unsafe webhook and keeps the alert uncreated", async
   }
   await expect(rows(page)).toHaveCount(0);
   expect(received).toHaveLength(0);
+});
+
+/** Answer `list_server_alerts` as a server with these permissions would. */
+async function answerList(page: Page, payload: Record<string, unknown>): Promise<void> {
+  await page.addInitScript((answer) => {
+    const realFetch = window.fetch.bind(window);
+    window.fetch = (input, init) => {
+      const body = typeof init?.body === "string" ? init.body : "";
+      if (init?.method === "POST" && body.includes('"list_server_alerts"')) {
+        const { id } = JSON.parse(body) as { id: unknown };
+        const result = { content: [{ type: "text", text: JSON.stringify(answer) }] };
+        return Promise.resolve(
+          new Response(JSON.stringify({ jsonrpc: "2.0", id, result }), {
+            headers: { "content-type": "application/json" },
+          }),
+        );
+      }
+      return realFetch(input, init);
+    };
+  }, payload);
+}
+
+test("without webhooks for this sign-in the dialog offers none, and says so", async ({ page }) => {
+  await answerList(page, { enabled: true, can_create: true, webhooks: false, alerts: [] });
+  await gotoApp(page);
+  await openDialog(page);
+  await dialog(page).getByLabel("Run on server").check();
+  await expect(dialog(page).locator('[data-role="webhooks-off"]')).toContainText("does not send webhooks");
+  await expect(dialog(page).getByLabel("Webhook", { exact: true })).toHaveCount(0);
+  await expect(dialog(page).getByLabel("Sign webhook")).toHaveCount(0);
+});
+
+test("a sign-in the operator did not allow is told why it runs in the browser", async ({ page }) => {
+  await answerList(page, { enabled: true, can_create: false, webhooks: false, alerts: [] });
+  await gotoApp(page);
+  await openDialog(page);
+  await expect(dialog(page).getByLabel("Run on server")).toHaveCount(0);
+  await expect(dialog(page).locator('[data-role="alert-browser-only"]')).toContainText(
+    "operator allowed",
+  );
+});
+
+test("the webhook field stays out of the browser's form history", async ({ bootedApp: page }) => {
+  await openDialog(page);
+  await dialog(page).getByLabel("Run on server").check();
+  await expect(dialog(page).getByLabel("Webhook", { exact: true })).toHaveAttribute(
+    "autocomplete",
+    "off",
+  );
+});
+
+test("editing a fired alert's message does not fire it again", async ({ bootedApp: page }) => {
+  await createServerAlert(page, { webhook: HOOK });
+  await expect.poll(() => received.length, { timeout: 15_000 }).toBe(1);
+  const row = rows(page);
+  await expect(row).toHaveAttribute("data-status", "triggered", { timeout: 15_000 });
+  await row.hover();
+  await row.getByRole("button", { name: "Edit alert" }).click();
+  await dialog(page).getByLabel("Message").fill("a note");
+  await dialog(page).getByRole("button", { name: "Save" }).click();
+  await expect(dialog(page)).toBeHidden();
+  await expect(row).toContainText("a note");
+  await expect(row).toHaveAttribute("data-status", "triggered");
+  await page.waitForTimeout(2_000);
+  expect(received).toHaveLength(1);
 });
 
 test("drawing and indicator alerts say they stay in the browser", async ({ bootedApp: page }) => {
