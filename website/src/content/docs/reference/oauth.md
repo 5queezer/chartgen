@@ -73,12 +73,21 @@ Access tokens are valid for **7 days** (`604800` seconds). Expired tokens are
 evicted lazily on the next request; there is no refresh-token flow, so the
 client re-runs the authorization code dance when a token expires.
 
-Clients and tokens are held in memory — a process restart invalidates every
-registration and token, and Claude.ai will re-register transparently.
-With `CHARTGEN_SCRIPTING=1` registered clients are also stored in
-`CHARTGEN_DB` and restored at startup, because the `client_id` owns that
-client's [scripted indicators](/chartgen/guides/scripted-indicators/); tokens
-are still lost on restart ([ADR-0025](/chartgen/decisions/0025-user-indicator-registry/)).
+Tokens are held in memory, so a process restart invalidates every token and
+clients re-authorize. Registered clients are also stored in `CHARTGEN_DB` and
+restored at startup, with or without `CHARTGEN_SCRIPTING=1`, so a client keeps
+its `client_id` across a restart
+([ADR-0036](/chartgen/decisions/0036-own-origin-invalid-client-redirect/)). With
+scripting on, that `client_id` also owns the client's
+[scripted indicators](/chartgen/guides/scripted-indicators/)
+([ADR-0025](/chartgen/decisions/0025-user-indicator-registry/)).
+
+Registrations only survive if the file does: a production container must
+[mount a volume at `~/.chartgen`](/chartgen/guides/deploy/#docker). Without one,
+or when the store cannot be opened (logged, not fatal), or in a build without
+the default `scripting` cargo feature, clients live in memory only and a restart
+forgets them. Claude.ai then re-registers transparently, and the web app
+recovers as described [above](#unknown-client_id).
 
 `/register` is bounded: 1–5 `redirect_uris` of at most 512 characters, a
 `client_name` of at most 256 (`400 invalid_client_metadata` otherwise), 20
@@ -86,6 +95,11 @@ registrations per peer address per 10 minutes (`429 slow_down`; loopback
 peers are exempt) and 1000 registered clients (`503
 temporarily_unavailable`). A client that never receives a token within 24
 hours is forgotten. Logs never contain client ids, codes or verifiers.
+
+A client that did receive a token is kept for good, and a restart no longer
+clears the table. Once 1000 such clients are stored, `/register` answers `503`
+across restarts, while clients already registered keep working. To recover, stop
+the server, delete rows from `oauth_clients`, and start it again.
 
 ## MCP handler behavior
 

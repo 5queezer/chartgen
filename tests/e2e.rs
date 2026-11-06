@@ -709,34 +709,61 @@ fn test_nan_inf_floats_are_not_representable_or_rejected() {
 struct Server {
     child: std::process::Child,
     port: u16,
+    /// Its throwaway `CHARTGEN_DB`, deleted on drop.
+    temp_db: Option<std::path::PathBuf>,
 }
 
 impl Drop for Server {
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
+        if let Some(db) = &self.temp_db {
+            let _ = std::fs::remove_file(db);
+        }
     }
 }
 
-fn spawn_server(web_dir: Option<&std::path::Path>) -> Server {
-    let port = std::net::TcpListener::bind("127.0.0.1:0")
+fn free_port() -> u16 {
+    std::net::TcpListener::bind("127.0.0.1:0")
         .unwrap()
         .local_addr()
         .unwrap()
-        .port();
+        .port()
+}
+
+/// A server with an empty store of its own, never the user's real one.
+fn spawn_server(web_dir: Option<&std::path::Path>) -> Server {
+    let port = free_port();
+    let db = std::env::temp_dir().join(format!("chartgen-e2e-{}-{port}.db", std::process::id()));
+    let mut server = spawn_server_on(port, web_dir, &db, false);
+    server.temp_db = Some(db);
+    server
+}
+
+fn spawn_server_on(
+    port: u16,
+    web_dir: Option<&std::path::Path>,
+    db: &std::path::Path,
+    scripting: bool,
+) -> Server {
     let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_chartgen"));
     cmd.args(["--serve", "--port", &port.to_string()])
         .env_remove("CHARTGEN_WEB_DIR")
         .env_remove("CHARTGEN_BASE_URL")
         .env_remove("CHARTGEN_SCRIPTING")
+        .env("CHARTGEN_DB", db)
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
     if let Some(dir) = web_dir {
         cmd.env("CHARTGEN_WEB_DIR", dir);
     }
+    if scripting {
+        cmd.env("CHARTGEN_SCRIPTING", "1");
+    }
     let server = Server {
         child: cmd.spawn().unwrap(),
         port,
+        temp_db: None,
     };
     for _ in 0..200 {
         if std::net::TcpStream::connect(("127.0.0.1", port)).is_ok() {
@@ -894,11 +921,15 @@ fn test_server_without_web_dir_keeps_root_json() {
     assert_eq!(http(srv.port, "GET", "/index.html", &[HTML], "").0, 404);
 }
 
+/// The S256 pair from RFC 7636 appendix B.
+const PKCE_VERIFIER: &str = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
+const PKCE_CHALLENGE: &str = "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM";
+
 /// `GET /authorize` for `client_id`, returning (status, head, body).
 fn authorize(port: u16, client_id: &str, redirect_uri: &str) -> (u16, String, String) {
     let redirect_uri: String = redirect_uri.bytes().map(|b| format!("%{b:02X}")).collect();
     let path = format!(
-        "/authorize?response_type=code&client_id={client_id}&redirect_uri={redirect_uri}&code_challenge=c&state=a%20b%26c"
+        "/authorize?response_type=code&client_id={client_id}&redirect_uri={redirect_uri}&code_challenge={PKCE_CHALLENGE}&state=a%20b%26c"
     );
     http(port, "GET", &path, &[HTML], "")
 }
@@ -979,6 +1010,167 @@ fn test_authorize_unknown_client_without_web_dir_stays_json() {
     let srv = spawn_server(None);
     let own = format!("http://localhost:{}/", srv.port);
     assert_unknown_client_json(authorize(srv.port, "stale", &own), "no web dir");
+}
+
+const EXTERNAL_REDIRECT: &str = "https://client.example/cb";
+
+fn register_external(port: u16) -> String {
+    let body = format!(r#"{{"redirect_uris":["{EXTERNAL_REDIRECT}"]}}"#);
+    let (st, _, body) = http(port, "POST", "/register", &JSON_POST, &body);
+    assert_eq!(st, 201, "{body}");
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    v["client_id"].as_str().unwrap().to_string()
+}
+
+/// Run the whole code flow for `client_id`, returning the access token.
+fn sign_in(port: u16, client_id: &str) -> String {
+    let (st, head, _) = authorize(port, client_id, EXTERNAL_REDIRECT);
+    assert_eq!(st, 307, "{head}");
+    let code = head
+        .split("code=")
+        .nth(1)
+        .and_then(|rest| rest.split(['&', '\r']).next())
+        .unwrap();
+    let body = serde_json::json!({
+        "grant_type": "authorization_code",
+        "code": code,
+        "redirect_uri": EXTERNAL_REDIRECT,
+        "client_id": client_id,
+        "code_verifier": PKCE_VERIFIER,
+    });
+    let (st, _, body) = http(port, "POST", "/token", &JSON_POST, &body.to_string());
+    assert_eq!(st, 200, "{body}");
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    v["access_token"].as_str().unwrap().to_string()
+}
+
+fn tool_names(port: u16) -> Vec<String> {
+    let (st, _, body) = http(
+        port,
+        "POST",
+        "/mcp",
+        &JSON_POST,
+        r#"{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}"#,
+    );
+    assert_eq!(st, 200, "{body}");
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    v["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["name"].as_str().unwrap().to_string())
+        .collect()
+}
+
+const SCRIPT_TOOLS: [&str; 4] = [
+    "register_indicator",
+    "fork_indicator",
+    "list_my_indicators",
+    "delete_indicator",
+];
+
+/// A fresh path for a store that outlives one server.
+fn store_path(test: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("chartgen-{test}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    dir.join("chartgen.db")
+}
+
+/// External MCP clients keep their registration across a restart without
+/// `CHARTGEN_SCRIPTING`, which stays off (ADR-0036). Without the `scripting`
+/// feature there is no store, so the client is gone.
+#[test]
+fn test_registered_client_survives_restart_without_scripting() {
+    let db = store_path("restart");
+    let port = free_port();
+    let srv = spawn_server_on(port, None, &db, false);
+    let client = register_external(port);
+    let token = sign_in(port, &client);
+    let tools = tool_names(port);
+    assert!(tools.iter().any(|t| t == "generate_chart"), "{tools:?}");
+    for script_tool in SCRIPT_TOOLS {
+        assert!(!tools.iter().any(|t| t == script_tool), "{script_tool}");
+    }
+    drop(srv);
+
+    let port = free_port();
+    let srv = spawn_server_on(port, None, &db, false);
+    assert_eq!(tool_names(port), tools);
+    if cfg!(feature = "scripting") {
+        let new_token = sign_in(port, &client);
+        assert_ne!(new_token, token);
+        // Tokens stay in memory: the old one is gone, the new one works.
+        let call = r#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#;
+        let with = |t: &str| format!("Authorization: Bearer {t}");
+        let (old, new) = (with(&token), with(&new_token));
+        let headers = |auth| [JSON_POST[0], JSON_POST[1], auth];
+        let (st, _, _) = http(port, "POST", "/mcp", &headers(old.as_str()), call);
+        assert_eq!(st, 401);
+        let (st, _, _) = http(port, "POST", "/mcp", &headers(new.as_str()), call);
+        assert_eq!(st, 200);
+    } else {
+        assert_unknown_client_json(authorize(port, &client, EXTERNAL_REDIRECT), "no store");
+    }
+    drop(srv);
+
+    // The same store with scripting on: the client is back, and the tools
+    // asserted absent above do exist, so that check can fail.
+    #[cfg(feature = "scripting")]
+    {
+        let port = free_port();
+        let _srv = spawn_server_on(port, None, &db, true);
+        sign_in(port, &client);
+        let tools = tool_names(port);
+        for script_tool in SCRIPT_TOOLS {
+            assert!(tools.iter().any(|t| t == script_tool), "{script_tool}");
+        }
+    }
+    let _ = std::fs::remove_dir_all(db.parent().unwrap());
+}
+
+/// The store stays bounded without scripting: a client that never got a token
+/// is collected after a day, one that did is kept, also from the in-memory
+/// table that the next registration sweeps.
+#[cfg(feature = "scripting")]
+#[test]
+fn test_restart_collects_unused_clients_and_keeps_tokened_ones() {
+    let db = store_path("restart-gc");
+    let port = free_port();
+    let srv = spawn_server_on(port, None, &db, false);
+    let (used, unused) = (register_external(port), register_external(port));
+    sign_in(port, &used);
+    drop(srv);
+
+    let two_days = 2 * 24 * 3600;
+    rusqlite::Connection::open(&db)
+        .unwrap()
+        .execute(
+            "UPDATE oauth_clients SET created_at = created_at - ?1",
+            [two_days],
+        )
+        .unwrap();
+
+    let port = free_port();
+    let srv = spawn_server_on(port, None, &db, false);
+    register_external(port);
+    sign_in(port, &used);
+    assert_unknown_client_json(authorize(port, &unused, EXTERNAL_REDIRECT), "unused");
+    drop(srv);
+    let _ = std::fs::remove_dir_all(db.parent().unwrap());
+}
+
+/// A store that cannot be opened costs persistence, not the server.
+#[test]
+fn test_unopenable_store_is_not_fatal() {
+    let db = store_path("no-store");
+    std::fs::write(&db, "a file, not a directory").unwrap();
+    let port = free_port();
+    let srv = spawn_server_on(port, None, &db.join("chartgen.db"), false);
+    let client = register_external(port);
+    sign_in(port, &client);
+    drop(srv);
+    let _ = std::fs::remove_dir_all(db.parent().unwrap());
 }
 
 /// A connector added at `/mcp` finds its RFC 9728 metadata, and from it the

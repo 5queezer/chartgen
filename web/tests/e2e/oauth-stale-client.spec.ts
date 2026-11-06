@@ -18,7 +18,7 @@ import { test, expect, bootApp, gotoApp } from "./fixtures/app";
 const LS_CLIENT_ID = "chartgen.oauth.client_id";
 
 let server: ChildProcess;
-let distDir: string;
+let tempDir: string;
 let origin: string;
 
 function freePort(): Promise<number> {
@@ -58,7 +58,8 @@ test.describe("stale OAuth client", () => {
   test.beforeAll(async ({}, testInfo) => {
     testInfo.setTimeout(300_000);
     const webRoot = resolve(testInfo.project.testDir, "../..");
-    distDir = mkdtempSync(join(tmpdir(), "chartgen-e2e-dist-"));
+    tempDir = mkdtempSync(join(tmpdir(), "chartgen-e2e-stale-"));
+    const distDir = join(tempDir, "dist");
     await promisify(execFile)(
       "npx",
       ["vite", "build", "--outDir", distDir, "--emptyOutDir"],
@@ -73,6 +74,7 @@ test.describe("stale OAuth client", () => {
         ...process.env,
         CHARTGEN_DATA_SOURCE: "sample",
         CHARTGEN_WEB_DIR: distDir,
+        CHARTGEN_DB: join(tempDir, "chartgen.db"),
         CHARTGEN_BASE_URL: origin,
       },
       stdio: "ignore",
@@ -91,7 +93,7 @@ test.describe("stale OAuth client", () => {
 
   test.afterAll(() => {
     server?.kill();
-    if (distDir) rmSync(distDir, { recursive: true, force: true });
+    if (tempDir) rmSync(tempDir, { recursive: true, force: true });
   });
 
   test("re-registers and signs in with no user action", async ({ page }) => {

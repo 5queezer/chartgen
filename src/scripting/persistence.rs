@@ -2,7 +2,8 @@
 //!
 //! One file, `CHARTGEN_DB` (default `~/.chartgen/chartgen.db`), migrated on
 //! open. OAuth clients are stored so a client keeps its `client_id` (the
-//! script owner's identity) across server restarts.
+//! script owner's identity) across server restarts, with `CHARTGEN_SCRIPTING`
+//! or without (ADR-0036).
 
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::Value;
@@ -253,7 +254,7 @@ pub fn open_global(path: &Path) -> Option<&'static Store> {
         .get_or_init(|| match Store::open(path) {
             Ok(s) => Some(s),
             Err(e) => {
-                eprintln!("[scripting] cannot open {}: {e}", path.display());
+                eprintln!("[store] cannot open {}: {e}", path.display());
                 None
             }
         })

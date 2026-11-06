@@ -1,12 +1,13 @@
 ---
 title: "0036 — Redirect an unknown OAuth client back to the server's own web app"
-description: "GET /authorize answers an unknown client_id with a redirect only when redirect_uri is on the server's own origin and it serves the web app, so the app can re-register after a redeploy. Everyone else still gets the 400."
+description: "GET /authorize answers an unknown client_id with a redirect only when redirect_uri is on the server's own origin and it serves the web app, so the app can re-register after a redeploy. Everyone else still gets the 400. Registered clients now persist without CHARTGEN_SCRIPTING."
 sidebar:
   order: 36
 ---
 
 **Status:** Accepted
 **Date:** 2026-11-06
+**Amends:** [ADR-0025](/chartgen/decisions/0025-user-indicator-registry/) (client storage no longer needs `CHARTGEN_SCRIPTING=1`)
 
 ## Context and Problem Statement
 
@@ -29,7 +30,9 @@ an open redirector. Any recovery by redirect has to be a deliberate exception.
 
 - The app recovers with no user action, and share links survive it.
 - `/authorize` must not become an open redirector.
-- External MCP clients see no change.
+- External MCP clients get no redirect, and keep their registration across a
+  deploy.
+- Script tools stay off unless `CHARTGEN_SCRIPTING=1`.
 - Works whatever the persistence setup of the deployment is.
 
 ## Considered Options
@@ -37,10 +40,9 @@ an open redirector. Any recovery by redirect has to be a deliberate exception.
 **Redirect to the server's own origin only (chosen).** The server tells the app
 through its own callback, under the conditions below.
 
-**Persist clients only.** Run with a volume and `CHARTGEN_SCRIPTING=1`, so
-clients survive. This removes the cause on a deployment that does it, but it
-turns on an unrelated feature, does nothing for a deployment without a volume,
-and a browser can still hold an id the server has collected.
+**Persist clients only.** This removes the cause on a deployment with a volume,
+and we do it as well (below). Alone it does nothing for a deployment without a
+volume, and a browser can still hold an id the server has collected.
 
 **Client-side probe.** `fetch` `/authorize` before navigating and re-register on
 a 400. For a valid client this GET has a side effect: it issues an auth code
@@ -84,9 +86,31 @@ written to the stores before any redirect
 ([ADR-0029](/chartgen/decisions/0029-shareable-chart-links/)), so a share link
 opened with a stale client still lands on its chart.
 
+### Persisting clients without scripting
+
+External MCP clients cannot use the redirect, so they also need the cause
+removed. In a build with the `scripting` cargo feature, the default, the HTTP
+server now stores and restores registered clients in `CHARTGEN_DB` whether or not
+`CHARTGEN_SCRIPTING=1`. ADR-0025 tied this to scripting because the `client_id`
+owns scripts. A build without the feature has no store and keeps clients in
+memory.
+
+The env var still alone decides the script tools, in `tools/list` and in
+dispatch, because turning it on just to keep clients would expose them. A separate
+env var for client storage was rejected: it adds a switch with no use for off,
+since a store that cannot be opened is already logged and not fatal.
+
 ### Consequences
 
 - Good: redeploys no longer strand browsers, with or without a volume.
+- Good: with a volume, external MCP clients keep their `client_id` across a
+  deploy. They re-authorize, because tokens stay in memory.
+- Bad: clients that received a token are never collected, and a restart no longer
+  clears them. Sign-in is auto-approved, so 1000 such clients, from real use or
+  from someone scripting the flow, leave `/register` at `503` until an operator
+  deletes rows. Clients already registered keep working. Before this, a deploy
+  emptied the table.
+- Neutral: every default `--serve` now creates `~/.chartgen/chartgen.db`.
 - Good: external MCP clients with their own redirect URIs, and API-only servers,
   still get the `400`.
 - Bad: a deliberate deviation from RFC 6749 section 4.1.2.1. Anyone can make

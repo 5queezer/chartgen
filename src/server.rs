@@ -275,17 +275,16 @@ async fn oauth_register(
         .unwrap()
         .clients
         .insert(client_id.clone(), client);
-    // With scripting on, the client id owns stored indicators, so it must
-    // survive restarts: persist the registration (ADR-0025).
+    // The client id must survive restarts: external MCP clients keep their
+    // registration (ADR-0036), and with scripting on it owns stored
+    // indicators (ADR-0025). Persist the registration.
     #[cfg(feature = "scripting")]
-    if scripting::enabled() {
-        if let Some(store) = scripting::persistence::global() {
-            let saved = store
-                .gc_oauth_clients(UNUSED_CLIENT_TTL.as_secs() as i64)
-                .and_then(|_| store.save_oauth_client(&client_id, &body.redirect_uris));
-            if let Err(e) = saved {
-                eprintln!("[OAuth] could not persist a client registration: {e}");
-            }
+    if let Some(store) = scripting::persistence::global() {
+        let saved = store
+            .gc_oauth_clients(UNUSED_CLIENT_TTL.as_secs() as i64)
+            .and_then(|_| store.save_oauth_client(&client_id, &body.redirect_uris));
+        if let Err(e) = saved {
+            eprintln!("[OAuth] could not persist a client registration: {e}");
         }
     }
 
@@ -543,11 +542,9 @@ async fn oauth_token(
         c.tokened = true;
     }
     #[cfg(feature = "scripting")]
-    if scripting::enabled() {
-        if let Some(store) = scripting::persistence::global() {
-            if let Err(e) = store.mark_oauth_client_used(&body.client_id) {
-                eprintln!("[OAuth] could not record client use: {e}");
-            }
+    if let Some(store) = scripting::persistence::global() {
+        if let Err(e) = store.mark_oauth_client_used(&body.client_id) {
+            eprintln!("[OAuth] could not record client use: {e}");
         }
     }
 
@@ -1141,10 +1138,11 @@ impl Drop for CleanupStream {
 pub async fn run_server(port: u16, engine: Option<Arc<RwLock<TradingEngine>>>) {
     #[cfg_attr(not(feature = "scripting"), allow(unused_mut))]
     let mut oauth = OAuthStore::new();
-    // Scripting: open (and migrate) the store at startup and restore the
-    // registered OAuth clients, so their scripts stay theirs (ADR-0025).
+    // Open (and migrate) the store at startup and restore the registered
+    // OAuth clients, with CHARTGEN_SCRIPTING or without: they keep their
+    // registration (ADR-0036) and their scripts stay theirs (ADR-0025).
     #[cfg(feature = "scripting")]
-    if scripting::enabled() {
+    {
         let path = scripting::persistence::db_path();
         let ttl = UNUSED_CLIENT_TTL.as_secs() as i64;
         let restored = scripting::persistence::global()
@@ -1152,10 +1150,13 @@ pub async fn run_server(port: u16, engine: Option<Arc<RwLock<TradingEngine>>>) {
         match restored {
             Some(Ok(clients)) => {
                 println!(
-                    "Scripting enabled: {} ({} OAuth clients restored)",
+                    "OAuth client store: {} ({} clients restored)",
                     path.display(),
                     clients.len()
                 );
+                if scripting::enabled() {
+                    println!("Scripting enabled");
+                }
                 let now_unix = chrono::Utc::now().timestamp();
                 for c in clients {
                     let age = Duration::from_secs((now_unix - c.created_at).max(0) as u64);
@@ -1172,8 +1173,8 @@ pub async fn run_server(port: u16, engine: Option<Arc<RwLock<TradingEngine>>>) {
                     );
                 }
             }
-            Some(Err(e)) => eprintln!("[scripting] cannot read OAuth clients: {e}"),
-            None => eprintln!("[scripting] store unavailable at {}", path.display()),
+            Some(Err(e)) => eprintln!("[OAuth] cannot read stored clients: {e}"),
+            None => eprintln!("[OAuth] store unavailable at {}", path.display()),
         }
     }
     let state = Arc::new(AppState {
