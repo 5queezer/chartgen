@@ -112,7 +112,7 @@ from the coarsest native interval that divides it and are resampled:
 | Source | Native | Built from |
 |---|---|---|
 | Binance | `1m 3m 5m 15m 30m 1h 2h 4h 6h 8h 12h 1d 3d 1w 1M` | `7m` from `1m`, `45m` from `15m`, `90m` from `30m`, `10h` from `2h`, `6d` from `3d`, `2W` from `1w`, `3M` from `1M` |
-| Yahoo | `1m 2m 5m 15m 30m 1h 90m 1d 1wk 1mo 3mo` | `7m` from `1m`, `6m` from `2m`, `45m` from `15m`, `8h` from `1h`, `2D` from `1d`, `2W` from `1wk`, `2M` from `1mo` |
+| Yahoo | `1m 2m 5m 15m 30m 1h 90m 1d 1wk 1mo` | `7m` from `1m`, `6m` from `2m`, `45m` from `15m`, `8h` from `1h`, `2D` from `1d`, `2W` from `1wk`, `2M` and `3M` from `1mo` |
 
 Bars land on a stable grid, so a reload gives the same bars:
 

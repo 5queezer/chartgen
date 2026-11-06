@@ -796,7 +796,7 @@ fn yahoo_api_interval(interval: &str) -> &str {
         }
         Unit::Day => "1d",
         Unit::Week => "1wk",
-        Unit::Month if iv.n == 3 => "3mo",
+        // Not Yahoo's 3mo: its rows follow `period1`, not calendar quarters.
         Unit::Month => "1mo",
     }
 }
@@ -1766,7 +1766,7 @@ mod tests {
             ("5d", "1d"),
             ("2wk", "1wk"),
             ("2mo", "1mo"),
-            ("3mo", "3mo"),
+            ("3mo", "1mo"),
         ] {
             assert_eq!(yahoo_window(tf, 100, None, now).api_interval, api, "{tf}");
         }
@@ -1994,6 +1994,34 @@ mod tests {
         let body = yahoo_body(&[1_700_006_400], "BTC-USD", "CRYPTOCURRENCY", 0);
         let f = parse_yahoo_chart(&body, "1h", 100, None, &win("1h", 0)).unwrap();
         assert_eq!(f.data.session, None);
+    }
+
+    #[test]
+    fn yahoo_quarters_are_calendar_quarters_built_from_months() {
+        let ts = |s: &str| chrono::DateTime::parse_from_rfc3339(s).unwrap().timestamp();
+        // Yahoo's monthly stamps across a DST change, then its live print, which
+        // the snap merges into November's row.
+        let rows = [
+            "2026-07-01T04:00:00Z",
+            "2026-08-01T04:00:00Z",
+            "2026-09-01T04:00:00Z",
+            "2026-10-01T04:00:00Z",
+            "2026-11-01T04:00:00Z",
+            "2026-11-05T21:00:00Z",
+        ];
+        let stamps: Vec<i64> = rows.iter().map(|s| ts(s)).collect();
+        let body = yahoo_body(&stamps, "AAPL", "EQUITY", -18_000);
+        let window = yahoo_window("3mo", 40, None, ts("2026-11-06T00:00:00Z"));
+        assert_eq!(window.api_interval, "1mo");
+        let f = parse_yahoo_chart(&body, "3mo", 100, None, &win(window.api_interval, 0)).unwrap();
+        // Two quarters, with no bar for the month the live print falls in.
+        assert_eq!(
+            dates(&f),
+            vec![ts("2026-07-01T00:00:00Z"), ts("2026-10-01T00:00:00Z")]
+        );
+        // July to September, then October and November's row with the print.
+        assert_eq!(f.data.bars[0].volume, 0.0 + 1.0 + 2.0);
+        assert_eq!(f.data.bars[1].close, 5.0);
     }
 
     #[test]
