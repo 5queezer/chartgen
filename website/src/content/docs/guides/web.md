@@ -1082,10 +1082,14 @@ empty, not drawn as zero. When a panel has no values at all, its legend says why
 
 | Legend | Why |
 |---|---|
-| `Funding (Binance futures only)` | The symbol is a stock, index or FX pair. |
-| `Funding (no futures market)` | Binance has no futures rows for it, as for a spot-only pair such as `BTCFDUSD`, or the futures market did not exist yet for these bars. |
-| `Funding (unavailable)` | The request failed or Binance's rate limit was reached. The server log has the reason (`[futures] ...`); the panel recovers on its own. |
+| `Funding (Binance futures only)` | The symbol is not on Binance: a stock, index, FX pair, or `BTC-USD`. |
+| `Funding (no futures market)` | Binance has no futures rows for it: a spot-only pair such as `BTCFDUSD`, a spot symbol whose future has another name (`SHIBUSDT` is `1000SHIBUSDT` there), or a futures market that did not exist yet for these bars. |
+| `Funding (unavailable)` | The request failed, or the server's request budget for Binance was used up. The server log has the reason (`[futures] ...`). |
 | `OI (last 30 days only)` | Every bar is older than the 30 days Binance keeps. |
+
+A panel that loaded as `unavailable` while Binance was refusing requests is
+loaded again by the web app once values return (a bounded reload, up to three,
+which also brings the new label), so it does not stay blank.
 
 How far back the values go:
 
@@ -1101,12 +1105,24 @@ How far back the values go:
   The data periods are 5m to 1d, so a 1m chart repeats each 5 minute row over its
   bars.
 
-Cost: opening a chart reads each panel's series once, at most 6 requests for
-funding and 8 each for open interest and long/short, 22 in all. The server then
-asks for the newest rows only, one request per series every 15 seconds, however
-often the chart updates. Bars from a window that is not the newest are their own
-series, so scrolling back never replaces the newest. Binance allows 500 funding
-requests per 5 minutes per IP, shared by every chart on the server.
+Cost, in requests to Binance:
+
+- Opening a chart in the web app (500 bars and 300 bars of warmup) reads each
+  series once, and the live updates that follow reuse it. Funding, open interest
+  and long/short together: **5** on a 5m chart (1 + 2 + 2), **7** on 1D (5 + 1 + 1),
+  **8** on 1W (6 + 1 + 1). A request for thousands of bars, as an MCP client can
+  make, reads at most 6 pages of funding and 8 of each of the others, **22** in all.
+- After that nothing is asked for until a new row can exist: funding once when the
+  next payment is due (about every 8 hours per symbol), the others once per data
+  period (5 minutes and up). A window of older bars, from scrolling back, is read
+  once for its span and then kept.
+- Binance allows 500 `fundingRate` requests per 5 minutes per IP, and 1000 per 5
+  minutes for each of the two data endpoints. The server counts them itself and
+  refuses at 400 and 800, so Binance never answers 429 for them, which would stop
+  every futures request for a while. A refusal in the middle of a read keeps the
+  rows read so far, and the older bars stay empty.
+- One series is read for at most 20 seconds, and a second chart asking for it meanwhile
+  waits for that read.
 
 ## Script editor
 
