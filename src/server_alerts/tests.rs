@@ -588,6 +588,67 @@ async fn bad_input_is_refused() {
     assert!(a.lock().alerts.is_empty());
 }
 
+/// `create` on the real source, with the gate shut. The gate is one per process, so this
+/// runs in a process of its own, with a dead proxy so that a request past the gate fails
+/// here and never reaches Binance.
+#[tokio::test(flavor = "multi_thread")]
+async fn on_the_real_source_a_new_symbol_asks_the_binance_gate() {
+    const CHILD: &str = "CHARTGEN_TEST_GATE_SHUT";
+    if std::env::var_os(CHILD).is_none() {
+        let test = "server_alerts::tests::on_the_real_source_a_new_symbol_asks_the_binance_gate";
+        let out = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", test, "--nocapture"])
+            .env(CHILD, "1")
+            .env("HTTPS_PROXY", "http://127.0.0.1:9")
+            .output()
+            .unwrap();
+        let text = String::from_utf8_lossy(&out.stdout);
+        assert!(out.status.success() && text.contains("1 passed"), "{text}");
+        return;
+    }
+    let gate = chartgen::binance_gate::spot();
+    gate.observe(gate.admit().unwrap(), 429, Some("600"), None);
+    let (store, _) = store_at("gate");
+    let hub = ChartHub::new(
+        Arc::new(crate::chart_push::BinanceSource),
+        HubLimits::default(),
+    );
+    let a = ServerAlerts::new(
+        store,
+        hub,
+        Policy::default(),
+        Access::Open,
+        Limits::default(),
+        quick_timing(),
+    );
+    let refused = |interval: &str, on: &str| {
+        let mut args = spec("crossing", "once", 1.0);
+        args["interval"] = json!(interval);
+        args["evaluate_on"] = json!(on);
+        let a = a.clone();
+        async move {
+            call(&a, "create_server_alert", args, "me")
+                .await
+                .unwrap_err()
+        }
+    };
+    // A native close, and a custom interval as a live alert's label (ADR-0038).
+    for (interval, on) in [("1h", "close"), ("7m", "live"), ("2wk", "live")] {
+        let e = refused(interval, on).await;
+        assert!(
+            e.starts_with("Cannot watch BTCUSDT: Binance rate limit"),
+            "{interval} {on}: {e}"
+        );
+    }
+    // A custom interval's closes are built from a finer stream, so there are none to read.
+    for interval in ["2m", "7m", "45m", "5d", "2wk"] {
+        let e = refused(interval, "close").await;
+        assert!(e.contains("kline stream"), "{interval}: {e}");
+    }
+    assert!(refused("61m", "close").await.contains("cannot watch"));
+    assert!(a.lock().alerts.is_empty());
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_symbol_new_to_the_server_is_checked_once() {
     let (store, _) = store_at("symbol");

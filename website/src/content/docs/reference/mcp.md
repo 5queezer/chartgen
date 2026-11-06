@@ -825,7 +825,9 @@ your client may do.
   wait until the price is back on the other side.
 - `evaluate_on`: `live` (default) reads every price update, and `interval` only labels
   the alert, so it can be any interval. `close` reads only the closes of `interval`'s bars,
-  which must have a Binance kline stream.
+  which must have a Binance kline stream, so a custom interval is refused.
+- A symbol new to the server is checked with one request, so `create_server_alert` can fail
+  with `Binance rate limit:` like any fetch. Nothing is stored; retry after the wait it names.
 - `update_server_alert`: a new `condition`, `level` or `trigger` switches the alert on and
   re-arms it. A new `message` or webhook leaves its state alone, so a spent alert stays spent.
   `active: false` pauses, `active: true` resumes re-armed. `webhook_url: ""` removes the webhook,

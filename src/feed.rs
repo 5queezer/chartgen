@@ -455,6 +455,34 @@ async fn fetch_binance_async(
 mod tests {
     use super::*;
 
+    /// The gate is one per process, so this runs in a process of its own, with a dead
+    /// proxy so that a backfill past the gate fails here and never reaches Binance.
+    #[tokio::test]
+    async fn a_backfill_the_gate_refuses_sends_nothing() {
+        const CHILD: &str = "CHARTGEN_TEST_GATE_SHUT";
+        if std::env::var_os(CHILD).is_none() {
+            let test = "feed::tests::a_backfill_the_gate_refuses_sends_nothing";
+            let out = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", test, "--nocapture"])
+                .env(CHILD, "1")
+                .env("HTTPS_PROXY", "http://127.0.0.1:9")
+                .output()
+                .unwrap();
+            let text = String::from_utf8_lossy(&out.stdout);
+            assert!(out.status.success() && text.contains("1 passed"), "{text}");
+            return;
+        }
+        let gate = crate::binance_gate::spot();
+        gate.observe(gate.admit().unwrap(), 429, Some("600"), None);
+        let (tx, mut rx) = mpsc::channel(16);
+        let e = BinanceFeed::new("BTCUSDT", "1h")
+            .backfill(&tx)
+            .await
+            .unwrap_err();
+        assert!(e.starts_with("Binance rate limit"), "{e}");
+        assert!(rx.try_recv().is_err());
+    }
+
     #[test]
     fn test_new_creates_feed() {
         let feed = BinanceFeed::new("BTCUSDT", "1m");

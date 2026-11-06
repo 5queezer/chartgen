@@ -67,11 +67,15 @@ Chosen: option 3, in `src/server_alerts.rs` and `src/webhook.rs`, on only with
   only with the `scripting` feature, so a build without it has no server alerts.
 - **Prices.** `ChartHub::watch_feed` joins the hub's feed for a symbol and interval
   and holds it with a lease. Live alerts on a symbol all read its 1m feed, whatever
-  interval they are labelled with, so any interval works as a label. Alerts on bar closes
-  read that interval's feed, which needs a stream of its own. No REST polling is added.
-  The one fetch is a check of a symbol new to the server, on the path `generate_chart`
-  uses, and the feed's own backfill after a reconnect: both go through the Binance gate in
-  `src/binance_gate.rs` once that is merged. New feeds are limited to 40 a minute across
+  interval they are labelled with, so any interval works as a label, a custom one
+  ([ADR-0038](/chartgen/decisions/0038-custom-intervals/)) included. Alerts on bar closes
+  read that interval's feed, which needs a stream of its own, so a custom interval's closes
+  are refused. No REST polling is added. The one fetch is a check of a symbol new to the
+  server, on the path `generate_chart` uses, and the feed's own backfill after a reconnect:
+  both go through the Binance gate (`src/binance_gate.rs`). While it refuses, creating an
+  alert on a new symbol fails with `Binance rate limit:` and stores nothing, and a backfill
+  is skipped and logged, so closes missed during that reconnect do not fire. Alerts on a
+  feed already running do not ask it. New feeds are limited to 40 a minute across
   charts and alerts, and to 96 connected at once with the lingering ones, because Binance
   bans an IP that connects too often, and that would stop every chart. Over those a
   subscribe fails with `feeds busy`, not `push limit reached`: anyone's churn can cause it
