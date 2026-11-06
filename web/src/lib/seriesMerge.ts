@@ -88,32 +88,66 @@ function barsProblem(s: SeriesPayload): MergeFailure | null {
 }
 
 /**
- * True when `inc` has exactly the indicators of `cur` with the same number
- * of lines, histograms and fills, and every per-bar array of `inc` has one
- * value per bar of `inc`.
+ * True when `inc` has the indicators of `cur` with the same number of lines,
+ * histograms and fills, and every per-bar array of `inc` has one value per bar
+ * of `inc`. An indicator one side reports under `indicator_errors` may be
+ * missing from that side: a script can fail on a full load and not on a tail,
+ * or the reverse (ADR-0025), and a reload cannot change that.
  */
 function sameShape(cur: SeriesPayload, inc: SeriesPayload): boolean {
-  const names = Object.keys(cur.indicators);
-  if (names.length !== Object.keys(inc.indicators).length) return false;
+  for (const name of Object.keys(inc.indicators)) {
+    if (!cur.indicators[name] && !cur.indicator_errors?.[name]) return false;
+  }
   const n = inc.bars.length;
-  for (const name of names) {
-    const a = cur.indicators[name]!;
+  for (const [name, a] of Object.entries(cur.indicators)) {
     const b = inc.indicators[name];
-    if (!b) return false;
-    const al = a.lines ?? [];
-    const bl = b.lines ?? [];
-    const ah = a.histogram ?? [];
-    const bh = b.histogram ?? [];
-    const af = a.fills ?? [];
-    const bf = b.fills ?? [];
-    if (al.length !== bl.length || ah.length !== bh.length) return false;
-    if (af.length !== bf.length) return false;
-    if (bl.some((l) => l.values.length !== n)) return false;
-    if (bh.some((h) => h.values.length !== n || (h.color_idx && h.color_idx.length !== n)))
+    if (!b) {
+      if (inc.indicator_errors?.[name]) continue;
       return false;
-    if (bf.some((f) => f.y1.length !== n || f.y2.length !== n)) return false;
+    }
+    if (!fits(a, b, n)) return false;
   }
   return true;
+}
+
+/** `b` has the channels of `a`, with one value per bar of a window of `n` bars. */
+function fits(a: Indicator, b: Indicator, n: number): boolean {
+  const al = a.lines ?? [];
+  const bl = b.lines ?? [];
+  const ah = a.histogram ?? [];
+  const bh = b.histogram ?? [];
+  const af = a.fills ?? [];
+  const bf = b.fills ?? [];
+  if (al.length !== bl.length || ah.length !== bh.length) return false;
+  if (af.length !== bf.length) return false;
+  if (bl.some((l) => l.values.length !== n)) return false;
+  if (bh.some((h) => h.values.length !== n || (h.color_idx && h.color_idx.length !== n)))
+    return false;
+  return !bf.some((f) => f.y1.length !== n || f.y2.length !== n);
+}
+
+/**
+ * `tail` with only the indicators that fit `cur`; the others become errors of
+ * their own. For when reloading is no longer an option (MAX_RELOADS): the bars and
+ * the rest of the chart stay live, and only what does not fit stops updating.
+ */
+export function withoutMisfits(cur: SeriesPayload, tail: SeriesPayload): SeriesPayload {
+  const misfit = {
+    step: "shape",
+    line: null,
+    message: "Its plots keep changing between updates; reload the page to start over.",
+  };
+  const errors = { ...tail.indicator_errors };
+  const indicators: SeriesPayload["indicators"] = {};
+  for (const [name, b] of Object.entries(tail.indicators)) {
+    const a = cur.indicators[name];
+    if (a && fits(a, b, tail.bars.length)) indicators[name] = b;
+    else errors[name] = cur.indicator_errors?.[name] ?? misfit;
+  }
+  for (const name of Object.keys(cur.indicators)) {
+    if (!indicators[name]) errors[name] ??= misfit;
+  }
+  return withErrors({ ...tail, indicators }, errors);
 }
 
 /**
@@ -137,6 +171,27 @@ function headerProblem(
       : null;
   return own ?? barsProblem(inc) ?? (sameShape(cur, inc) ? null : "shape");
 }
+
+/**
+ * The errors after merging `inc`: its own, and ours for an indicator we still
+ * hold no values of. One that has values and did not fail in `inc` recovered.
+ */
+function mergedErrors(cur: SeriesPayload, inc: SeriesPayload): SeriesPayload["indicator_errors"] {
+  const kept = Object.entries(cur.indicator_errors ?? {}).filter(([k]) => !cur.indicators[k]);
+  const errors = { ...Object.fromEntries(kept), ...inc.indicator_errors };
+  return Object.keys(errors).length > 0 ? errors : undefined;
+}
+
+/** `series` with `errors` as its `indicator_errors`, or none. */
+function withErrors(
+  series: SeriesPayload,
+  errors: SeriesPayload["indicator_errors"],
+): SeriesPayload {
+  const { indicator_errors: _old, ...rest } = series;
+  return errors ? { ...rest, indicator_errors: errors } : rest;
+}
+
+const nulls = (n: number): null[] => new Array<null>(n).fill(null);
 
 const shiftSignal = (s: Signal, by: number): Signal => ({ ...s, x: s.x + by });
 
@@ -218,7 +273,11 @@ export function mergeOlder(
   const bars = [...page.bars, ...current.bars];
   const indicators: SeriesPayload["indicators"] = {};
   for (const [name, cur] of Object.entries(current.indicators)) {
-    const pg = page.indicators[name]!;
+    const pg = page.indicators[name];
+    if (!pg) {
+      indicators[name] = padOlder(cur, offset);
+      continue;
+    }
     const merged: Indicator = { ...cur };
     if (cur.lines) {
       merged.lines = cur.lines.map((l, i) => ({
@@ -265,13 +324,57 @@ export function mergeOlder(
   return {
     ok: true,
     count: offset,
-    series: {
-      ...current,
-      bars,
-      indicators,
-      has_more: offset > 0 && page.has_more,
-    },
+    series: withErrors(
+      {
+        ...current,
+        bars,
+        indicators,
+        has_more: offset > 0 && page.has_more,
+      },
+      mergedErrors(current, page),
+    ),
   };
+}
+
+/** An indicator that failed on an older page: no values for those `count` bars. */
+function padOlder(cur: Indicator, count: number): Indicator {
+  const merged: Indicator = { ...cur };
+  if (cur.lines) {
+    merged.lines = cur.lines.map((l) => ({ ...l, values: [...nulls(count), ...l.values] }));
+  }
+  if (cur.histogram) {
+    merged.histogram = cur.histogram.map((h) => ({
+      ...h,
+      values: [...nulls(count), ...h.values],
+      ...(h.color_idx ? { color_idx: [...new Array<number>(count).fill(0), ...h.color_idx] } : {}),
+    }));
+  }
+  if (cur.fills) {
+    merged.fills = cur.fills.map((f) => ({
+      ...f,
+      y1: [...nulls(count), ...f.y1],
+      y2: [...nulls(count), ...f.y2],
+    }));
+  }
+  if (cur.signals) merged.signals = cur.signals.map((s) => shiftSignal(s, count));
+  if (cur.divlines) merged.divlines = cur.divlines.map((d) => shiftDivline(d, count));
+  return merged;
+}
+
+/** An indicator that failed on a tail: it keeps its values, and new bars have none. */
+function padTail(cur: Indicator, length: number): void {
+  const pad = (values: Array<number | null>, fill: number | null = null) => {
+    while (values.length < length) values.push(fill);
+  };
+  cur.lines?.forEach((l) => pad(l.values));
+  cur.histogram?.forEach((h) => {
+    pad(h.values);
+    if (h.color_idx) pad(h.color_idx, 0);
+  });
+  cur.fills?.forEach((f) => {
+    pad(f.y1);
+    pad(f.y2);
+  });
 }
 
 /** Write `src` (from index `skip` on) over `dst` from index `from`. */
@@ -305,6 +408,9 @@ export function mergeTail(
 ): MergeResult<{ from: number }> {
   const problem = headerProblem(current, tail, false);
   if (problem) return fail(problem);
+  // Values for a key we only hold an error for: it failed on the full load and
+  // works now. Only a full load can bring it back (MAX_RELOADS bounds the attempts).
+  if (Object.keys(tail.indicators).some((k) => !current.indicators[k])) return fail("shape");
   const bars = current.bars;
   const oldest = bars[0];
   const newest = bars.at(-1);
@@ -330,7 +436,11 @@ export function mergeTail(
   const shift = from - skip;
   overwrite(bars, from, tail.bars, skip);
   for (const [name, cur] of Object.entries(current.indicators)) {
-    const tl = tail.indicators[name]!;
+    const tl = tail.indicators[name];
+    if (!tl) {
+      padTail(cur, bars.length);
+      continue;
+    }
     cur.lines?.forEach((l, i) =>
       overwrite(l.values, from, tl.lines![i]!.values, skip),
     );
@@ -376,7 +486,7 @@ export function mergeTail(
     if (tl.future) cur.future = tl.future;
     else delete cur.future;
   }
-  return { ok: true, from, series: { ...current } };
+  return { ok: true, from, series: withErrors(current, mergedErrors(current, tail)) };
 }
 
 /**

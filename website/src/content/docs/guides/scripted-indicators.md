@@ -5,7 +5,9 @@ description: Write your own indicators in Starlark (a Python dialect with Pine-l
 
 chartgen can run indicators you write yourself, the way TradingView runs
 Pine Script. Scripts are written in [Starlark](https://github.com/bazelbuild/starlark/blob/master/spec.md),
-a small, deterministic dialect of Python. You register a script over MCP,
+a small, deterministic dialect of Python. You register a script over MCP
+or write it in the web app's
+[script editor](/chartgen/guides/web/#script-editor),
 and from then on `generate_chart` accepts its name like any built-in. It
 is sandboxed: a script cannot read files, use the network or load other
 code. Design records: [ADR-0024](/chartgen/decisions/0024-starlark-script-runtime/)
@@ -254,6 +256,16 @@ example on more bars or other params. Then only that indicator fails: it
 is left out of `indicators`, the rest of the chart renders, and the
 response carries
 `indicator_errors: {"<name>": {"step": "runtime", "line": 7, "message": "..."}}`.
+
+For an authenticated client with scripting on, two more cases fail only their
+indicator, with `line: null`: a name that is neither your script nor a built-in
+(`"step": "unknown"`: it may be a script deleted since, or saved under an
+earlier client), and params your script no longer accepts (`"step": "params"`).
+Bad params of a built-in still fail the whole request, and so does an unknown
+name on the stdio server or with scripting off.
+
+A chart that uses your scripts is never pushed: `subscribe_chart` answers
+`not pushable`, and clients poll `generate_chart`, which runs your scripts.
 See the [MCP reference](/chartgen/reference/mcp/#scripted-indicators-chartgen_scripting1).
 
 ## Limits
@@ -302,6 +314,7 @@ even a trusted deployment should run chartgen under an OS memory limit
 |---|---|
 | `register_indicator(name, source)` | Validate and store, or replace a script with the same name |
 | `list_my_indicators()` | Your scripts with params and timestamps |
+| `get_my_indicator(name)` | The stored source of one of your scripts |
 | `delete_indicator(name)` | Remove one; a built-in it shadowed is visible again |
 | `fork_indicator(builtin_name)` | The source of a forkable built-in |
 

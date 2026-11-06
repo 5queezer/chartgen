@@ -138,3 +138,39 @@ describe("createMcpSession connection lifecycle", () => {
     expect(h.clients).toHaveLength(2);
   });
 });
+
+describe("tool errors and auth", () => {
+  const refused = (text: string) => () =>
+    Promise.resolve({ content: [{ type: "text", text }], isError: true });
+
+  it("a tool error mentioning 401 does not sign the user out", async () => {
+    const body = { ok: false, errors: [{ step: "dry_run", line: 401, message: "boom 401" }] };
+    h.callImpl = refused(JSON.stringify(body));
+    const r = await createMcpSession().callRegisterIndicator({ name: "a", source: "x", create_only: false });
+    expect(r).toEqual(body);
+    expect(h.clearAccessToken).not.toHaveBeenCalled();
+    expect(h.clients).toHaveLength(1);
+  });
+
+  it("a plain refusal comes back as an error without a line", async () => {
+    h.callImpl = refused("name must be 1-48 lowercase letters");
+    const r = await createMcpSession().callRegisterIndicator({ name: "A", source: "x", create_only: true });
+    expect(r).toEqual({
+      ok: false,
+      errors: [{ step: "register", line: null, message: "name must be 1-48 lowercase letters" }],
+    });
+  });
+
+  it("a 401 from the transport still re-authenticates", async () => {
+    h.callImpl = (n) =>
+      n === 0
+        ? Promise.reject(new Error("HTTP 401"))
+        : Promise.resolve({
+            content: [{ type: "text", text: JSON.stringify({ total: 0, indicators: [] }) }],
+          });
+    const r = await createMcpSession().callListMyIndicators();
+    expect(r.total).toBe(0);
+    expect(h.clearAccessToken).toHaveBeenCalledTimes(1);
+    expect(h.clients).toHaveLength(2);
+  });
+});
