@@ -256,6 +256,16 @@ example on more bars or other params. Then only that indicator fails: it
 is left out of `indicators`, the rest of the chart renders, and the
 response carries
 `indicator_errors: {"<name>": {"step": "runtime", "line": 7, "message": "..."}}`.
+
+For an authenticated client with scripting on, two more cases fail only their
+indicator, with `line: null`: a name that is neither your script nor a built-in
+(`"step": "unknown"`: it may be a script deleted since, or saved under an
+earlier client), and params your script no longer accepts (`"step": "params"`).
+Bad params of a built-in still fail the whole request, and so does an unknown
+name on the stdio server or with scripting off.
+
+A chart that uses your scripts is never pushed: `subscribe_chart` answers
+`not pushable`, and clients poll `generate_chart`, which runs your scripts.
 See the [MCP reference](/chartgen/reference/mcp/#scripted-indicators-chartgen_scripting1).
 
 ## Limits

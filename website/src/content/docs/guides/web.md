@@ -900,7 +900,8 @@ On a server started with `CHARTGEN_SCRIPTING=1`, a **Scripts** button (`{ }` on
 smaller windows) sits next to **Indicators**, and the indicator picker links to
 the same panel. Without that flag none of this appears
 ([ADR-0041](/chartgen/decisions/0041-script-editor-in-the-web-app/)). The
-panel opens under the chart, or over the whole window below 768 px. See
+panel opens under the chart, or over the whole window below 768 px of width
+or 700 px of height. See
 [Scripted indicators](/chartgen/guides/scripted-indicators/) for the language
 and for why scripting is for trusted deployments only.
 
@@ -914,13 +915,24 @@ and for why scripting is for trusted deployments only.
 - **Add to chart** adds the saved script as an indicator instance, and is off
   while there are unsaved changes because the chart runs the saved text. Saving a
   script the chart uses reloads the chart. If it fails on the real chart, which
-  has more bars than the dry run, the error appears here too and the other
-  indicators stay. A chart runs at most 3 scripts.
+  has more bars than the dry run, the error appears here too, the indicator's chip
+  turns red with the reason as its tooltip, and the other indicators stay. A chart
+  runs at most 3 scripts, and is polled rather than pushed. A chart that names a
+  script you no longer have works the same way: remove its chip, or save it again.
 - **Delete** asks first, and also removes the script from the chart, unless a
   built-in of that name takes its place again.
 - **Unsaved text** is kept per script in this browser's localStorage, so closing
-  the panel or the tab loses nothing. It comes back when you reopen the script;
-  **Revert** returns to the saved text, and Ctrl/Cmd+Z undoes that.
+  the panel or the tab loses nothing, and open tabs keep each other's drafts. Two
+  tabs editing the same script share one draft: the last one to write wins. It
+  comes back when you reopen the script; **Revert** returns to the saved text, and
+  Ctrl/Cmd+Z undoes that.
+- **A script changed elsewhere**, in another tab or by an MCP client, is not
+  replaced unasked. If the saved text differs from what your draft started from,
+  the panel says so and Save waits until you pick **Use the saved version** or
+  **Keep my draft**. A draft whose script is gone stays in the list as
+  **Draft, not saved**, and saving it creates the script again.
+- **A new script** never replaces a saved one of the same name, even from a tab
+  whose list is out of date.
 - **Tab** indents by four spaces. To leave the editor with the keyboard, press Esc
   and then Tab.
 

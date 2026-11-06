@@ -70,7 +70,9 @@ runs a second pair of servers 1000 ports above those two, with
 `CHARTGEN_SCRIPTING=1` and its own throwaway database. The `scripting` project
 runs only `script-editor-on.spec.ts` against it; every other spec is in the
 `chromium` project, with scripting off. To write the script editor's screenshots,
-set `SCRIPT_EDITOR_SHOTS` to a directory.
+set `SCRIPT_EDITOR_SHOTS` to a directory. With `PW_REUSE_SERVER=1` each of the four
+servers is reused on its own, so whatever already listens on a +1000 port is
+tested as the scripting server; sessions exactly 1000 ports apart collide.
 
 ## How CI runs it
 
