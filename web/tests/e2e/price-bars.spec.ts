@@ -2,11 +2,14 @@
 // them. Each type is picked from the menu and takes its inputs from its dialog. The
 // suite's server serves deterministic sample bars, so no market data is touched.
 
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
 import { devices, type Page, type Request } from "@playwright/test";
 
 import { test, expect, expectChartRendered, gotoApp, reloadApp } from "./fixtures/app";
 
-const SHOTS = "/tmp/claude-1000/-home-christian-Projects-chartgen-wt-mobile/1d887bf1-ac5f-425d-86ac-f0fbcc36c3c3/scratchpad/price-shots";
+const SHOTS = join(tmpdir(), "chartgen-shots", "price-bars");
 
 interface ChartArgs {
   bars?: number;
@@ -202,17 +205,13 @@ test.describe("price-based chart types", () => {
     for (const b of s.bars.slice(0, -1)) expect(Math.abs(b.o - b.c)).toBeCloseTo(fixed, 6);
     await page.screenshot({ path: `${SHOTS}/renko-fixed.png` });
 
-    // Too small for its prices: refused by the server, and the error says what to do.
+    // Too small for its prices: refused by the server. The chart falls back and says so.
     await openSettings(page, "Renko");
     await dialog.getByLabel("Size").fill("0.0000001");
     await dialog.getByRole("button", { name: "OK" }).click();
-    await expect(page.getByText(/too small; choose a larger one/)).toBeVisible();
-    // And the chart comes back with a size that fits.
-    await openSettings(page, "Renko");
-    await dialog.getByLabel("Size").fill(String(fixed));
-    await dialog.getByRole("button", { name: "OK" }).click();
-    await expect(page.getByText(/too small; choose a larger one/)).toHaveCount(0);
-    await expect(legendParams(page)).toHaveText(new RegExp(`Renko ${fixed}`));
+    await expect(page.getByTestId("toasts")).toContainText(/too small.*Using ATR/);
+    await expect(legendParams(page)).toHaveText(/Renko \d/);
+    await expect.poll(async () => (await series(page))?.chart_params?.box).toBe("atr");
   });
 
   test("each type's dialog shows its own inputs and sends them", async ({ bootedApp: page }) => {
@@ -414,8 +413,146 @@ async function saveLayoutAs(page: Page, name: string): Promise<void> {
   await expect(page.getByRole("dialog")).toHaveCount(0);
 }
 
+test.describe("a box the server refuses", () => {
+  // The review's values, on a sample price of about 246. The last is under the floor by
+  // far, 0.00001 by a little; 0.001 is allowed, and must not build its marks to refuse them.
+  for (const size of ["0.00001", "0.0000001", "0.000000001"]) {
+    test(`a link to a Point & Figure box of ${size} recovers, with a message`, async ({ page }) => {
+      const errors: string[] = [];
+      page.on("pageerror", (e) => errors.push(e.message));
+      await gotoApp(page, `/?symbol=BTCUSDT&type=point_figure&tp=box:fixed;size:${size}&ind=rsi`);
+      await expect(page.getByTestId("toasts")).toContainText(/too small.*Using ATR/);
+      const s = await expectBuilt(page, "point_figure");
+      expect(s.chart_params).toMatchObject({ box: "atr" });
+      expect(errors).toEqual([]);
+      // The fallback is what is saved, so a reload is fine too.
+      const stored = await page.evaluate(() => localStorage.getItem("chartgen.layout.chartParams"));
+      expect(JSON.parse(stored!)).toMatchObject({ box: "atr" });
+      await reloadApp(page);
+      expect((await expectBuilt(page, "point_figure")).chart_params).toMatchObject({ box: "atr" });
+      expect(errors).toEqual([]);
+    });
+  }
+
+  test("a bad box already saved recovers on the next load", async ({ page }) => {
+    await page.addInitScript(() => {
+      localStorage.setItem("chartgen.layout.chartType", JSON.stringify("kagi"));
+      localStorage.setItem(
+        "chartgen.layout.chartParams",
+        JSON.stringify({ box: "fixed", boxSize: 1e-9, atrLength: 14, percent: 1, reversal: 3, lines: 3 }),
+      );
+    });
+    await gotoApp(page, "/?ind=rsi");
+    await expect(page.getByTestId("toasts")).toContainText(/too small.*Using ATR/);
+    expect((await expectBuilt(page, "kagi")).chart_params).toMatchObject({ box: "atr" });
+  });
+
+  test("a small box the server allows draws without stalling", async ({ page }) => {
+    const errors: string[] = [];
+    page.on("pageerror", (e) => errors.push(e.message));
+    await gotoApp(page, "/?symbol=BTCUSDT&type=point_figure&tp=box:fixed;size:0.001&ind=rsi");
+    await expectBuilt(page, "point_figure");
+    await expect
+      .poll(async () => Math.min(...(await pixelsNear(page, [BULL, BEAR]))))
+      .toBeGreaterThan(40);
+    const frames = await page.evaluate(
+      () =>
+        new Promise<number>((resolve) => {
+          let n = 0;
+          const start = performance.now();
+          const tick = () => {
+            n++;
+            if (performance.now() - start < 1000) requestAnimationFrame(tick);
+            else resolve(n);
+          };
+          requestAnimationFrame(tick);
+        }),
+    );
+    expect(frames).toBeGreaterThan(10);
+    expect(errors).toEqual([]);
+  });
+});
+
+test.describe("compare on a price-based chart", () => {
+  test("leaves no percent axis or list entry, and returns on candles", async ({ page }) => {
+    const scale = () =>
+      page.evaluate(() => JSON.parse(localStorage.getItem("chartgen.layout.scaleMode") ?? "null"));
+    await gotoApp(page, "/?symbol=BTCUSDT&type=renko&compare=SOLUSDT&ind=rsi");
+    await expectBuilt(page, "renko");
+    expect(await scale()).not.toBe("percentage");
+    await page.getByRole("tab", { name: "Object Tree" }).click();
+    await expect(page.getByTestId("tree-compare-SOLUSDT")).toHaveCount(0);
+
+    await pickChartType(page, "Candles");
+    await expect(page.getByTestId("tree-compare-SOLUSDT")).toBeVisible();
+    await expect.poll(scale).toBe("percentage");
+
+    await pickChartType(page, "Kagi");
+    await expect(page.getByTestId("tree-compare-SOLUSDT")).toHaveCount(0);
+    await expect.poll(scale).not.toBe("percentage");
+  });
+});
+
 test.describe("live price-based bars", () => {
   test.use({ push: false });
+
+  test("a tail of a new build keeps the chart updating, with its bars and history", async ({
+    bootedApp: page,
+  }) => {
+    await pickChartType(page, "Renko");
+    const loaded = await expectBuilt(page, "renko");
+    expect(typeof (loaded as unknown as { anchor: unknown }).anchor).toBe("number");
+
+    // Every tail from now on comes from a build that started later and has not reached our
+    // newest bar: the shape that froze a chart until the new build caught up.
+    let n = 0;
+    let fullLoads = 0;
+    page.on("request", (req) => {
+      const a = chartArgs(req);
+      if (a && a.bars !== 64 && a.end_time === undefined) fullLoads++;
+    });
+    await page.route("**/mcp", async (route) => {
+      const a = chartArgs(route.request());
+      if (!a || a.bars !== 64) return route.continue();
+      const res = await route.fetch();
+      const body = (await res.json()) as {
+        result: { content: { text: string }[] };
+      };
+      const tail = JSON.parse(body.result.content[0]!.text) as Series & { anchor: number };
+      tail.anchor += 1_000_000;
+      const keep = tail.bars.length - 3;
+      tail.bars = tail.bars.slice(0, keep);
+      for (const ind of Object.values(tail.indicators) as Array<Record<string, unknown>>) {
+        for (const key of ["lines", "histogram"]) {
+          for (const l of (ind[key] ?? []) as Array<Record<string, unknown[]>>) {
+            l.values = l.values!.slice(0, keep);
+            if (l.color_idx) l.color_idx = l.color_idx.slice(0, keep);
+          }
+        }
+        for (const f of (ind.fills ?? []) as Array<Record<string, unknown[]>>) {
+          f.y1 = f.y1!.slice(0, keep);
+          f.y2 = f.y2!.slice(0, keep);
+        }
+      }
+      tail.bars.at(-1)!.c = 1000 + ++n;
+      body.result.content[0]!.text = JSON.stringify(tail);
+      return route.fulfill({ response: res, json: body });
+    });
+
+    const drawnClose = async () => (await drawnBars(page)).at(-1)?.close;
+    await expect.poll(drawnClose, { timeout: 15_000 }).toBeGreaterThan(1000);
+    const first = (await drawnClose())!;
+    await expect.poll(drawnClose, { timeout: 15_000 }).toBeGreaterThan(first);
+
+    const s = (await series(page))!;
+    expect(s.bars.length).toBeLessThan(loaded.bars.length);
+    expect(s.bars[0]!.t).toBe(loaded.bars[0]!.t);
+    expect(s.bars.every((b, i) => i === 0 || b.t > s.bars[i - 1]!.t)).toBe(true);
+    expect((await drawnBars(page)).length).toBe(s.bars.length);
+    expect(fullLoads).toBe(0);
+    await expect(page.getByTestId("status-text")).not.toContainText(/keeps not lining up/);
+    await page.unroute("**/mcp");
+  });
 
   test("polls keep the load's box and leave its confirmed bars alone", async ({
     bootedApp: page,

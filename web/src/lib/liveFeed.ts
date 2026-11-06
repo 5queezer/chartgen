@@ -241,8 +241,14 @@ export function createLiveFeed(opts: LiveFeedOptions): LiveFeed {
   let reloading = false;
   let pageLoading = false;
   let failures = 0;
-  // Bars for the next poll: the tail's, or more to catch up after a gap.
-  const tailBars = () => (request?.chart_params ? PRICE_TAIL_BARS : TAIL_BARS);
+  // Bars for the next poll: the tail's, or more to catch up after a gap. A bar
+  // shorter than the poll needs enough to overlap, or every poll would be a gap.
+  const tailBars = () => {
+    if (!request) return TAIL_BARS;
+    if (request.chart_params) return PRICE_TAIL_BARS;
+    const barMs = barCloseMs(0, request.timeframe) ?? Infinity;
+    return barMs < period() ? Math.ceil(period() / barMs) + TAIL_BARS : TAIL_BARS;
+  };
   let nextBars = TAIL_BARS;
   // Push: the live subscription, a subscribe in flight, failed subscribes
   // since the last push, whether this generation's chart is pushable, and
@@ -481,7 +487,7 @@ export function createLiveFeed(opts: LiveFeedOptions): LiveFeed {
     } else if (
       r.reason === "gap" &&
       !request.chart_params &&
-      bars === TAIL_BARS &&
+      bars === tailBars() &&
       newest !== null
     ) {
       // Missed bars (sleep, hidden tab): fetch enough to overlap again,

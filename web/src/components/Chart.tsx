@@ -1764,7 +1764,6 @@ export function Chart(props: ChartProps): JSX.Element {
     const { from, prevLength } = update;
     const head = series.bars[from]?.t;
     if (list.length !== prevLength || head == null) return false;
-    if (list[from]?.timestamp !== head * 1000) return false;
     // The tail merge updates fill arrays and divline lists in place, which
     // the stored geometry shares (storeGeometry); only a list the merge
     // had to create is not shared yet. Merged data is always timed.
@@ -1789,7 +1788,11 @@ export function Chart(props: ChartProps): JSX.Element {
     const klines = seriesToKLines(series, from, series.bars.length, compare);
     const kept = prevLength - from;
     const added = klines.length - kept;
-    if (added > MAX_INCREMENTAL_BARS) {
+    // A new price-based build (ADR-0047) can replace bars with other times, or
+    // fewer. Those cannot be updated in place.
+    const moved =
+      added < 0 || klines.some((k, i) => i < kept && list[from + i]!.timestamp !== k.timestamp);
+    if (added > MAX_INCREMENTAL_BARS || moved) {
       // A catch-up after missed bars: one updateData per bar would recalc
       // every indicator per bar. Apply the whole list once instead and
       // move the view back to where it was (applyNewData snaps it to the

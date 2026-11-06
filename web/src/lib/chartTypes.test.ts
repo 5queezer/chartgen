@@ -12,7 +12,7 @@ import {
   markerRadius,
   stepPoints,
 } from "./chartTypes";
-import { columnLevels, isKagiUp, isXColumn, kagiThick } from "./chartTypes";
+import { columnCount, columnLevels, kagiThick, runsUp } from "./chartTypes";
 import { CHART_TYPES } from "../stores/layout";
 
 // A y axis at BTC-like prices that rounds to whole pixels as klinecharts does:
@@ -189,11 +189,25 @@ describe("chart types", () => {
 describe("Kagi and Point & Figure geometry", () => {
   const b = (open: number, high: number, low: number, close: number) => ({ open, high, low, close });
 
-  it("reads a Kagi line's direction by its reach", () => {
-    expect(isKagiUp(b(100, 112, 100, 112))).toBe(true);
-    expect(isKagiUp(b(112, 112, 95, 95))).toBe(false);
-    // An up line whose last price fell back still reads as up.
-    expect(isKagiUp(b(100, 112, 98, 99))).toBe(true);
+  it("reads a line's direction from its close once confirmed", () => {
+    const lines = [b(100, 112, 100, 112), b(112, 112, 95, 95), b(95, 110, 95, 110)];
+    expect(runsUp(lines)).toEqual([true, false, true]);
+  });
+
+  it("does not take the direction of the newest from the last price", () => {
+    // Down, and the last price has come back over its open.
+    expect(runsUp([b(100, 112, 100, 112), b(112, 115, 95, 114)])).toEqual([true, false]);
+    // Up, and the last price has fallen under its open.
+    expect(runsUp([b(112, 112, 95, 95), b(95, 110, 90, 92)])).toEqual([false, true]);
+    expect(runsUp([b(10, 13, 9, 9)])).toEqual([false]);
+  });
+
+  it("alternates through bars with no length, without recursing", () => {
+    const up = b(10, 13, 10, 13);
+    const single = (v: number) => b(v, v, v, v);
+    expect(runsUp([up, single(12), single(13), single(12)])).toEqual([true, false, true, false]);
+    const long = [up, ...Array.from({ length: 200_000 }, () => single(12))];
+    expect(runsUp(long).at(-1)).toBe(true);
   });
 
   it("goes thick past a shoulder and thin past a waist", () => {
@@ -206,7 +220,7 @@ describe("Kagi and Point & Figure geometry", () => {
       b(106, 106, 102, 102),
       b(102, 109, 102, 109), // over 106: thick
     ];
-    expect(kagiThick(lines)).toEqual([true, false, false, false, false, false, true]);
+    expect(kagiThick(lines, runsUp(lines))).toEqual([true, false, false, false, false, false, true]);
   });
 
   it("finds the box levels inside a column", () => {
@@ -216,16 +230,13 @@ describe("Kagi and Point & Figure geometry", () => {
     expect(columnLevels(5.1, 5.9, 1)).toEqual([]);
   });
 
-  it("tells Xs from Os", () => {
-    const up = b(10, 13, 10, 13);
-    const down = b(12, 12, 8, 8);
-    expect(isXColumn([up], 0)).toBe(true);
-    expect(isXColumn([up, down], 1)).toBe(false);
-    // Up with the last price fallen under its open: still Xs.
-    expect(isXColumn([b(10, 13, 10, 9)], 0)).toBe(true);
-    // A single box goes against the column before it.
-    expect(isXColumn([up, b(12, 12, 12, 12)], 1)).toBe(false);
-    expect(isXColumn([down, b(9, 9, 9, 9)], 1)).toBe(true);
+  it("counts a column without allocating it, whatever the box", () => {
+    expect(columnCount(10, 13, 1)).toBe(4);
+    expect(columnCount(5.1, 5.9, 1)).toBe(0);
+    for (const box of [0.001, 0.00001, 0.0000001, 0.000000001]) {
+      expect(columnCount(100, 346, box)).toBeCloseTo(246 / box, -2);
+    }
+    expect(columnCount(100, 346, 0)).toBe(0);
   });
 
   it("hides the series for a chart that draws its own, spanning highs and lows", () => {

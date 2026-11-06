@@ -14,7 +14,7 @@ import { describeDrawing } from "../lib/objectTree";
 import { formatPrice } from "../lib/quote";
 import type { SeriesPayload } from "../types/responses";
 import { alerts, inactiveReason, removeAlert } from "../stores/alerts";
-import { compareEntries, removeCompare } from "../stores/compare";
+import { drawnCompareEntries, removeCompare } from "../stores/compare";
 import {
   activeIndicators,
   indicatorName,
@@ -148,9 +148,9 @@ export function ObjectTree(props: ObjectTreeProps): JSX.Element {
           }
         />
       </Group>
-      <Show when={compareEntries().length > 0}>
+      <Show when={drawnCompareEntries().length > 0}>
         <Group title="Compare">
-          <For each={compareEntries()}>
+          <For each={drawnCompareEntries()}>
             {(e) => (
               <Item
                 testId={`tree-compare-${e.symbol}`}

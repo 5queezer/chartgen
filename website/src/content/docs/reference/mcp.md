@@ -246,18 +246,22 @@ bars will not line up.
 - **Times** are when a bar opened: the first source bar after the last confirmed one. Bars
   from one source bar take the next free second, so times always increase and are not evenly
   spaced. `end_time` works as for candles.
-- **The last bar is open.** Only closed source bars confirm a bar. The open bar closes on the
-  last price and keeps its `t` when confirmed, so overwrite by `t`. On `kagi` and
-  `point_figure` it is the current line or column.
+- **The last bar is open.** Only closed source bars confirm a bar. The open bar keeps its `t`
+  when confirmed, so overwrite by `t`. On `kagi` and `point_figure` it is the current line or
+  column. The newest bar of any live build closes on the last price, so its close can read
+  past a level until the next call.
+- **`anchor`** in `format=series` is the time of the first source bar the build used. A later
+  one is a new build, whose bars need not line up with an earlier call's: replace yours from the
+  tail's first bar on. This happens every 1000 source bars on Binance, and sooner on Yahoo.
 - **Reads** take a fixed window of source bars, up to 5000, within the 20,000 native bar limit,
   from a start on a fixed grid of time. `warmup` does nothing here: every bar of the window
   warms the indicators. A window may hold fewer bars than `bars`, with `has_more: true`.
 - **Tails:** ask for more than 2 bars, as one source bar can confirm several. `subscribe_chart`
-  pushes up to 64.
-- **Refused:** a box that would make over 20,000 bars, and any of these styles without a
-  ticker on the demo series.
+  pushes up to 64 first, then the bars since its last push plus one of overlap.
+- **Refused:** a box under a millionth of the last price, one that would make over 20,000 bars,
+  and any of these styles without a ticker on the demo series.
 - Indicators that project past the last bar return no `future`. The PNG draws these bars as
-  candles, including `kagi` and `point_figure`.
+  candles, including `kagi` and `point_figure`, and its title names the type and box.
 
 ##### Several instances of one indicator
 

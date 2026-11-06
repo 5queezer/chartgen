@@ -8,6 +8,11 @@ export interface LoadErrorReason {
   indicators: string[];
 }
 
+/** The sentence that says a box cannot be used, if `message` is such a refusal. */
+export function boxRefusal(message: string): string | null {
+  return /Box size \S+ is too small[^]*$/.exec(message)?.[0] ?? null;
+}
+
 export function loadErrorReason(message: string): LoadErrorReason {
   const text = message.replace(/^MCP tool error: /, "");
   const unknown = /^Unknown indicator\(s\): (.+?)\. /.exec(text);

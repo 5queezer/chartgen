@@ -416,13 +416,19 @@ tape, with less history. [ADR-0047](/chartgen/decisions/0047-price-based-charts/
 
 An ATR or percentage box is worked out when the chart loads, rounded to two significant
 digits, and kept until the next load. The legend shows it, as `Renko 3.3`, except on a phone,
-whose legend is shorter. A box too small for the prices, over 20,000 bars, gives an error
-saying so.
+whose legend is shorter. A box too small for the prices, under a millionth of the last price or
+making over 20,000 bars, is refused: the chart goes to ATR and a message says so. That includes
+a fixed box you bring to a much dearer symbol.
 
 **The last bar is open.** Only a closed source bar confirms a bar, so a spike that fades makes
 none. The open bar runs from the last confirmed level to the last price and keeps its place
-when it is confirmed. Bars can be far apart in time, so the time axis is not linear, and there
-is no countdown.
+when it is confirmed. The newest bar always closes on the last price, even with the market
+shut. Bars can be far apart in time, so the time axis is not linear, and there is no countdown.
+
+**Every so often the build starts later**, about every 1000 source bars, and sooner on a stock.
+The chart takes the new build from its newest bars on and keeps your paged history, so a bar at
+the live end can move at that moment, and older bars can differ from a fresh load until you
+reload.
 
 **What works:** indicators, drawings, history paging, price alerts, layouts, grids, share links
 (`type=renko&tp=box:fixed;size:50`) and the compact layout. Indicator and sloped-line alerts are
@@ -431,7 +437,7 @@ Server alerts run on the interval's candles. Indicators that project past the la
 nothing there.
 
 **Refused:** bar replay and compare, whose buttons are disabled and say why. Both need bars on a
-time grid. Your compare symbols come back when you pick a time-based type.
+time grid. Your compare symbols and their percent axis come back when you pick a time-based type.
 
 ## Drawing tools
 

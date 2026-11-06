@@ -21,6 +21,7 @@ import type { Chart as KLineChart } from "klinecharts";
 import { rememberLabels } from "../lib/indicatorNames";
 import { alignAsOf, COMPARE_PALETTE } from "../lib/compare";
 import { createCompareFeed, type CompareData } from "../lib/compareFeed";
+import { boxRefusal } from "../lib/chartLoadError";
 import { barCloseMs, isContinuousMarket } from "../lib/countdown";
 import {
   createLiveFeed,
@@ -36,7 +37,7 @@ import { resolveTimeZone } from "../lib/timezone";
 import type { McpSession } from "../mcp";
 import { chartQueryKey, createChartQuery } from "../queries";
 import { copyChartLink, importPending } from "../services/shareLink";
-import { feedChartSnapshot } from "../services/alertEngine";
+import { feedChartSnapshot, showToast } from "../services/alertEngine";
 import { createReplay } from "../services/replay";
 import { forgetReadings, setChartContext } from "../stores/alerts";
 import { compareStoreOf } from "../stores/compare";
@@ -184,6 +185,18 @@ export function createChartPane(pane: number, deps: PaneDeps) {
     }),
   );
 
+  // A saved or linked box the server refuses must not leave a blank chart: the
+  // chart falls back to ATR, and says so.
+  createEffect(() => {
+    const error = query.isError && !query.isFetching ? query.error : null;
+    const refusal = error ? boxRefusal(error.message) : null;
+    const params = untrack(chartParams);
+    if (!refusal || params.box === "atr" || !untrack(priceBased)) return;
+    const { boxSize: _refused, ...rest } = params;
+    untrack(() => layout.setChartParams({ ...rest, box: "atr" }));
+    showToast(`${refusal} Using ATR on ${untrack(symbol)}.`);
+  });
+
   // Becoming the active chart makes this the chart the alerts read (ADR-0043).
   createEffect(
     on(
@@ -295,11 +308,10 @@ export function createChartPane(pane: number, deps: PaneDeps) {
     const main = symbol();
     if (untrack(compare.compareSymbols).includes(main)) compare.removeCompare(main);
   });
-  // Price-based bars have no time grid to join another symbol on (ADR-0047): the
-  // list stays for when the chart type changes back, but nothing loads or draws.
   const comparing = createMemo(() =>
-    priceBased() ? [] : compare.compareEntries().filter((e) => e.symbol !== symbol()),
+    compare.drawnEntries().filter((e) => e.symbol !== symbol()),
   );
+  createEffect(on(priceBased, () => compare.syncDrawn(), { defer: true }));
   // Sized to the main series once it matches the timeframe (a kept previous
   // chart of another timeframe must not size the loads).
   createEffect(() => {

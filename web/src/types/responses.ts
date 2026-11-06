@@ -246,6 +246,9 @@ export const SeriesPayloadSchema = z.object({
       lines: z.number().optional(),
     })
     .optional(),
+  // First source bar a price-based build started from (ADR-0047). A later one is
+  // a new build, whose bars need not line up with this one's.
+  anchor: z.number().nullable().optional(),
   bars: z.array(SeriesBarSchema),
   // Keyed by instance (ADR-0028): the entry's `id`, else its name; a
   // repeat of a name without an id is `name#2`, `name#3`...

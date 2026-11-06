@@ -62,7 +62,7 @@ export function PriceAxisControls(props: PriceAxisControlsProps): JSX.Element {
     setLockRatio,
     setScaleMode,
   } = chartStoreOf(gridPane);
-  const { compareSymbols } = compareStoreOf(gridPane);
+  const { drawnEntries } = compareStoreOf(gridPane);
   const [now, setNow] = createSignal(Date.now());
   const [pos, setPos] = createSignal<BadgePos | null>(null);
   const [axisWidth, setAxisWidth] = createSignal(FALLBACK_AXIS_WIDTH);
@@ -134,7 +134,7 @@ export function PriceAxisControls(props: PriceAxisControlsProps): JSX.Element {
   // Compare lines pause it: they are rebased to the first visible bar, so a
   // fixed price range says nothing about them and would crop them; the axis
   // fits every series until the last compare symbol goes.
-  const comparing = createMemo(() => compareSymbols().length > 0);
+  const comparing = createMemo(() => drawnEntries().length > 0);
   let ratio: number | null = null;
   let gap: Gap = DEFAULT_GAP;
   let lockKey = "";

@@ -321,6 +321,43 @@ describe("price-based charts", () => {
     s.feed.dispose();
   });
 
+  it("a 1s candle chart asks for enough to overlap a poll, so no poll is a gap", async () => {
+    const s = setup();
+    s.feed.reset(payload(900, 1000, true), { ...REQ, timeframe: "1s" });
+    await vi.advanceTimersByTimeAsync(FAST_POLL_MS + 1);
+    expect(s.fetch.mock.calls[0]![1].bars).toBe(4);
+    s.feed.dispose();
+    const five = setup();
+    five.feed.reset(payload(900, 1000, true), { ...REQ, timeframe: "5s" });
+    await vi.advanceTimersByTimeAsync(FAST_POLL_MS + 1);
+    expect(five.fetch.mock.calls[0]![1].bars).toBe(TAIL_BARS);
+    five.feed.dispose();
+  });
+
+  it("keeps updating across a new build, through the real merge, with its history", async () => {
+    // The new build's tail ends before our newest bar: it used to be stale, for good.
+    let polls = 0;
+    const s = setup(() => {
+      polls++;
+      const t = priced(980, 995 + polls);
+      t.anchor = 5000;
+      t.bars.at(-1)!.c = 1234 + polls;
+      return Promise.resolve(t);
+    });
+    const loaded = priced(900, 1000);
+    loaded.anchor = 1000;
+    s.feed.reset(loaded, PRICE_REQ);
+    const before = s.last()!.series.bars[0]!.t;
+    await vi.advanceTimersByTimeAsync(FAST_POLL_MS + 1);
+    expect(s.reload).not.toHaveBeenCalled();
+    expect(s.last()!.series.anchor).toBe(5000);
+    expect(s.last()!.series.bars.at(-1)!.c).toBe(1235);
+    await vi.advanceTimersByTimeAsync(FAST_POLL_MS + 1);
+    expect(s.last()!.series.bars.at(-1)!.c).toBe(1236);
+    expect(s.last()!.series.bars[0]!.t).toBe(before);
+    s.feed.dispose();
+  });
+
   it("a candle chart keeps its short tail", async () => {
     const s = setup();
     s.feed.reset(payload(900, 1000, true), REQ);

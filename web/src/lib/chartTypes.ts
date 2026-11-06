@@ -125,48 +125,60 @@ export interface Rect {
 
 type Hl = Pick<KLineData, "open" | "high" | "low" | "close">;
 
-/** A Kagi line runs up from its open, or down: the server's bars say which by reach. */
-export const isKagiUp = (b: Hl): boolean => b.high - b.open >= b.open - b.low;
+/**
+ * Whether each Kagi line or Point & Figure column runs up. Its close says so once
+ * it is confirmed. The newest closes on the last price, which says nothing, and
+ * neither does a bar with no length, but they alternate, so those go against the
+ * one before.
+ */
+export function runsUp(bars: readonly Hl[]): boolean[] {
+  const out: boolean[] = [];
+  for (let i = 0; i < bars.length; i++) {
+    const b = bars[i]!;
+    const known = i < bars.length - 1 && b.close !== b.open;
+    if (known) out.push(b.close > b.open);
+    else out.push(i > 0 ? !out[i - 1]! : b.close >= b.open);
+  }
+  return out;
+}
 
 /**
  * Thick or thin for each Kagi line: thick from the line that passes the last up
  * line's top until a line passes the last down line's bottom. A line takes one
  * weight along its whole length, where TradingView changes it at the crossing.
  */
-export function kagiThick(bars: readonly Hl[]): boolean[] {
+export function kagiThick(bars: readonly Hl[], up: readonly boolean[]): boolean[] {
   const out: boolean[] = [];
   let thick = true;
   for (let i = 0; i < bars.length; i++) {
     const b = bars[i]!;
     const before = bars[i - 2];
     if (before) {
-      if (isKagiUp(b) && b.high > before.high) thick = true;
-      else if (!isKagiUp(b) && b.low < before.low) thick = false;
+      if (up[i] && b.high > before.high) thick = true;
+      else if (!up[i] && b.low < before.low) thick = false;
     } else {
-      thick = isKagiUp(b);
+      thick = up[i]!;
     }
     out.push(thick);
   }
   return out;
 }
 
-/** The levels on the box's grid inside a column, lowest first. */
-export function columnLevels(low: number, high: number, box: number): number[] {
-  const from = Math.ceil(low / box - 1e-9);
-  const to = Math.floor(high / box + 1e-9);
-  const out: number[] = [];
-  for (let k = from; k <= to; k++) out.push(k * box);
-  return out;
+/** How many levels of the box's grid lie inside a column. */
+export function columnCount(low: number, high: number, box: number): number {
+  const n = Math.floor(high / box + 1e-9) - Math.ceil(low / box - 1e-9) + 1;
+  return Number.isFinite(n) && n > 0 ? n : 0;
 }
 
-/** Xs or Os: a column of Os opens at its top. A single box goes against the last column. */
-export function isXColumn(bars: readonly Hl[], i: number): boolean {
-  const b = bars[i]!;
-  if (b.high === b.low) {
-    const prev = bars[i - 1];
-    return prev ? !isXColumn(bars, i - 1) : b.close >= b.open;
-  }
-  return b.open !== b.high;
+/**
+ * The levels on the box's grid inside a column, lowest first. Only for a count
+ * that is safe to allocate: `columnCount` comes first.
+ */
+export function columnLevels(low: number, high: number, box: number): number[] {
+  const from = Math.ceil(low / box - 1e-9);
+  const out: number[] = [];
+  for (let i = 0, n = columnCount(low, high, box); i < n; i++) out.push((from + i) * box);
+  return out;
 }
 
 /** A column of marks this close together, or this long, is drawn as one bar. */
@@ -332,11 +344,12 @@ export function drawSeries({
       break;
     }
     case "kagi": {
-      const thick = kagiThick(bars);
+      const up = runsUp(bars);
+      const thick = kagiThick(bars, up);
       for (let i = start; i < end; i++) {
         const b = bars[i]!;
         const x = xAxis.convertToPixel(i);
-        const y = yAxis.convertToPixel(isKagiUp(b) ? b.high : b.low);
+        const y = yAxis.convertToPixel(up[i] ? b.high : b.low);
         ctx.strokeStyle = thick[i] ? ext.up : ext.down;
         ctx.lineWidth = thick[i] ? 3 : 1;
         ctx.beginPath();
@@ -351,13 +364,15 @@ export function drawSeries({
       const box = ext.boxSize;
       if (!box) break;
       const cell = Math.abs(yAxis.convertToPixel(box * 2) - yAxis.convertToPixel(box));
+      const up = runsUp(bars);
       for (let i = start; i < end; i++) {
         const b = bars[i]!;
         const x = xAxis.convertToPixel(i);
-        const isX = isXColumn(bars, i);
+        const isX = up[i]!;
         const color = isX ? ext.up : ext.down;
-        const levels = columnLevels(b.low, b.high, box);
-        if (cell < MIN_MARK_PX || levels.length > MAX_MARKS) {
+        // From its open towards its end: the last price can lie past the other side.
+        const [low, high] = isX ? [b.open, b.high] : [b.low, b.open];
+        if (cell < MIN_MARK_PX || columnCount(low, high, box) > MAX_MARKS) {
           const r = barRect(x, yAxis.convertToPixel(b.high), yAxis.convertToPixel(b.low), barSpace.gapBar);
           ctx.fillStyle = withAlpha(color, 0.5);
           ctx.fillRect(r.x, r.y, r.width, r.height);
@@ -367,7 +382,7 @@ export function drawSeries({
         ctx.strokeStyle = color;
         ctx.lineWidth = 1.5;
         ctx.beginPath();
-        for (const level of levels) {
+        for (const level of columnLevels(low, high, box)) {
           const y = yAxis.convertToPixel(level);
           if (y < -half || y > bounding.height + half) continue;
           if (isX) {
