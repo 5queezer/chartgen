@@ -846,6 +846,8 @@ fn test_server_serves_web_app_same_origin() {
     std::fs::create_dir_all(web.join("assets")).unwrap();
     std::fs::write(web.join("index.html"), "<!doctype html><title>app</title>").unwrap();
     std::fs::write(web.join("assets/x.js"), "console.log(1)").unwrap();
+    std::fs::write(web.join("sw.js"), "// worker").unwrap();
+    std::fs::write(web.join("manifest.webmanifest"), "{}").unwrap();
     std::fs::write(web.join(".env"), "DOTSECRET").unwrap();
     std::fs::write(root.join("secret.txt"), "TOPSECRET").unwrap();
     let srv = spawn_server(Some(&web));
@@ -874,6 +876,15 @@ fn test_server_serves_web_app_same_origin() {
         "{head}"
     );
     assert!(head.contains("x-content-type-options: nosniff"), "{head}");
+
+    // The push worker and manifest (ADR-0045): at the root, and never cached, or a
+    // browser would keep an old worker for a year.
+    for path in ["/sw.js", "/manifest.webmanifest"] {
+        let (st, head, _) = http(p, "GET", path, &[], "");
+        assert_eq!(st, 200, "{path}");
+        assert!(head.contains("cache-control: no-cache"), "{path}: {head}");
+        assert!(!head.contains("immutable"), "{path}: {head}");
+    }
 
     // Revalidation keeps `immutable` (a 304 must not downgrade to no-cache).
     let (st, head, _) = http(
