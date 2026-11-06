@@ -5,6 +5,7 @@
 
 import { batch, createSignal } from "solid-js";
 
+import { activePane } from "./grid";
 import { applyTheme, THEME_NAMES, type ThemeName } from "../lib/theme";
 import { isTimeframe, type Timeframe } from "../lib/timeframe";
 import {
@@ -67,24 +68,27 @@ const DEFAULT_TIMEFRAME: Timeframe = "1h";
 export const DEFAULT_CHART_TYPE: ChartType = "candles";
 export const DEFAULT_SCALE_MODE: ScaleMode = "normal";
 
-export function read(key: string): unknown {
+function readAt(fullKey: string): unknown {
   if (typeof localStorage === "undefined") return undefined;
   try {
-    const raw = localStorage.getItem(PREFIX + key);
+    const raw = localStorage.getItem(fullKey);
     return raw === null ? undefined : JSON.parse(raw);
   } catch {
     return undefined;
   }
 }
 
-export function persist(key: string, value: unknown): void {
+function persistAt(fullKey: string, value: unknown): void {
   if (typeof localStorage === "undefined") return;
   try {
-    localStorage.setItem(PREFIX + key, JSON.stringify(value));
+    localStorage.setItem(fullKey, JSON.stringify(value));
   } catch {
     // Quota exceeded or private-mode storage: best-effort only.
   }
 }
+
+const read = (key: string): unknown => readAt(PREFIX + key);
+const persist = (key: string, value: unknown): void => persistAt(PREFIX + key, value);
 
 const MAX_SYMBOL_LENGTH = 32;
 const SYMBOL_CHARSET = /^[A-Z0-9.^=\-_]+$/;
@@ -127,25 +131,9 @@ function loadRecents(): string[] {
   return [...new Set(normalized)].slice(0, MAX_RECENTS);
 }
 
-const storedSymbol = read("symbol");
-const storedTimeframe = read("timeframe");
-const storedChartType = read("chartType");
-const storedScaleMode = read("scaleMode");
 const storedTheme = read("theme");
 const storedTimeZone = read("timeZone");
 
-const [symbol, setSymbolSignal] = createSignal(
-  normalizeSymbol(storedSymbol) ?? DEFAULT_SYMBOL,
-);
-const [timeframe, setTimeframeSignal] = createSignal<Timeframe>(
-  isTimeframe(storedTimeframe) ? storedTimeframe : DEFAULT_TIMEFRAME,
-);
-const [chartType, setChartTypeSignal] = createSignal<ChartType>(
-  isChartType(storedChartType) ? storedChartType : DEFAULT_CHART_TYPE,
-);
-const [scaleMode, setScaleModeSignal] = createSignal<ScaleMode>(
-  isScaleMode(storedScaleMode) ? storedScaleMode : DEFAULT_SCALE_MODE,
-);
 const [theme, setThemeSignal] = createSignal<ThemeName>(
   initialTheme(storedTheme),
 );
@@ -153,67 +141,141 @@ if (typeof document !== "undefined") applyTheme(theme());
 const [timeZone, setTimeZoneSignal] = createSignal<TimeZoneChoice>(
   isTimeZoneChoice(storedTimeZone) ? storedTimeZone : DEFAULT_TIME_ZONE,
 );
-// Auto-fit keeps the price axis fitted to the visible bars; it turns off
-// when the user drags the axis. Session-only: it starts on at every load
-// because a manual scale does not survive a reload.
-// A locked price-to-bar ratio (persisted) implies auto-fit is off.
-const storedLockRatio = read("lockRatio") === true;
-const [lockRatio, setLockRatioSignal] = createSignal(storedLockRatio);
-const [invertScale, setInvertScaleSignal] = createSignal(
-  read("invertScale") === true,
-);
-const [autoScale, setAutoScaleSignal] = createSignal(!storedLockRatio);
 const [recentSymbols, setRecentSymbolsSignal] =
   createSignal<string[]>(loadRecents());
 
-export {
-  symbol,
-  timeframe,
-  chartType,
-  scaleMode,
-  theme,
-  timeZone,
-  autoScale,
-  lockRatio,
-  invertScale,
-  recentSymbols,
-};
+/** What one chart of the grid holds (ADR-0043), persisted under `prefix`. */
+function createChartStore(prefix: string) {
+  const readKey = (key: string): unknown => readAt(prefix + key);
+  const persistKey = (key: string, value: unknown): void =>
+    persistAt(prefix + key, value);
 
-/** Auto-fit on or off; turning it on releases the price-to-bar ratio lock. */
-export function setAutoScale(next: boolean): void {
-  batch(() => {
-    setAutoScaleSignal(next);
-    if (next && lockRatio()) {
-      setLockRatioSignal(false);
-      persist("lockRatio", false);
-    }
-  });
+  const storedSymbol = readKey("symbol");
+  const storedTimeframe = readKey("timeframe");
+  const storedChartType = readKey("chartType");
+  const storedScaleMode = readKey("scaleMode");
+
+  const [symbol, setSymbolSignal] = createSignal(
+    normalizeSymbol(storedSymbol) ?? DEFAULT_SYMBOL,
+  );
+  const [timeframe, setTimeframeSignal] = createSignal<Timeframe>(
+    isTimeframe(storedTimeframe) ? storedTimeframe : DEFAULT_TIMEFRAME,
+  );
+  const [chartType, setChartTypeSignal] = createSignal<ChartType>(
+    isChartType(storedChartType) ? storedChartType : DEFAULT_CHART_TYPE,
+  );
+  const [scaleMode, setScaleModeSignal] = createSignal<ScaleMode>(
+    isScaleMode(storedScaleMode) ? storedScaleMode : DEFAULT_SCALE_MODE,
+  );
+  // Auto-fit keeps the price axis fitted to the visible bars; it turns off
+  // when the user drags the axis. Session-only: it starts on at every load
+  // because a manual scale does not survive a reload.
+  // A locked price-to-bar ratio (persisted) implies auto-fit is off.
+  const storedLockRatio = readKey("lockRatio") === true;
+  const [lockRatio, setLockRatioSignal] = createSignal(storedLockRatio);
+  const [invertScale, setInvertScaleSignal] = createSignal(
+    readKey("invertScale") === true,
+  );
+  const [autoScale, setAutoScaleSignal] = createSignal(!storedLockRatio);
+
+  return {
+    read: readKey,
+    persist: persistKey,
+    symbol,
+    timeframe,
+    chartType,
+    scaleMode,
+    autoScale,
+    lockRatio,
+    invertScale,
+
+    /** Auto-fit on or off; turning it on releases the price-to-bar ratio lock. */
+    setAutoScale(next: boolean): void {
+      batch(() => {
+        setAutoScaleSignal(next);
+        if (next && lockRatio()) {
+          setLockRatioSignal(false);
+          persistKey("lockRatio", false);
+        }
+      });
+    },
+
+    /** Lock the price-to-bar ratio; locking turns auto-fit off, releasing it turns it back on. */
+    setLockRatio(next: boolean): void {
+      const was = lockRatio();
+      batch(() => {
+        setLockRatioSignal(next);
+        persistKey("lockRatio", next);
+        if (next) setAutoScaleSignal(false);
+        else if (was) setAutoScaleSignal(true);
+      });
+    },
+
+    /** Flip the price axis so higher prices are at the bottom. */
+    setInvertScale(next: boolean): void {
+      setInvertScaleSignal(next);
+      persistKey("invertScale", next);
+    },
+
+    /** Select a symbol; invalid input is ignored. Recents are added separately. */
+    setSymbol(next: string): void {
+      const value = normalizeSymbol(next);
+      if (value === null) return;
+      setSymbolSignal(value);
+      persistKey("symbol", value);
+    },
+
+    setTimeframe(next: Timeframe): void {
+      setTimeframeSignal(next);
+      persistKey("timeframe", next);
+    },
+
+    setChartType(next: ChartType): void {
+      setChartTypeSignal(next);
+      persistKey("chartType", next);
+    },
+
+    setScaleMode(next: ScaleMode): void {
+      setScaleModeSignal(next);
+      persistKey("scaleMode", next);
+    },
+  };
 }
 
-/** Lock the price-to-bar ratio; locking turns auto-fit off, releasing it turns it back on. */
-export function setLockRatio(next: boolean): void {
-  const was = lockRatio();
-  batch(() => {
-    setLockRatioSignal(next);
-    persist("lockRatio", next);
-    if (next) setAutoScaleSignal(false);
-    else if (was) setAutoScaleSignal(true);
-  });
+export type ChartStore = ReturnType<typeof createChartStore>;
+
+const charts = new Map<number, ChartStore>();
+
+/** The chart store of a pane. Pane 0 has the keys the single-chart app always had. */
+export function chartStoreOf(pane: number): ChartStore {
+  let store = charts.get(pane);
+  if (!store) {
+    store = createChartStore(pane === 0 ? PREFIX : `chartgen.pane.${pane}.`);
+    charts.set(pane, store);
+  }
+  return store;
 }
 
-/** Flip the price axis so higher prices are at the bottom. */
-export function setInvertScale(next: boolean): void {
-  setInvertScaleSignal(next);
-  persist("invertScale", next);
-}
+chartStoreOf(0);
+const active = (): ChartStore => chartStoreOf(activePane());
 
-/** Select a symbol; invalid input is ignored. Recents are added separately. */
-export function setSymbol(next: string): void {
-  const value = normalizeSymbol(next);
-  if (value === null) return;
-  setSymbolSignal(value);
-  persist("symbol", value);
-}
+// The active chart: what the toolbar, the panels and the shortcuts act on.
+export const symbol = () => active().symbol();
+export const timeframe = () => active().timeframe();
+export const chartType = () => active().chartType();
+export const scaleMode = () => active().scaleMode();
+export const autoScale = () => active().autoScale();
+export const lockRatio = () => active().lockRatio();
+export const invertScale = () => active().invertScale();
+export const setAutoScale = (next: boolean): void => active().setAutoScale(next);
+export const setLockRatio = (next: boolean): void => active().setLockRatio(next);
+export const setInvertScale = (next: boolean): void => active().setInvertScale(next);
+export const setSymbol = (next: string): void => active().setSymbol(next);
+export const setTimeframe = (next: Timeframe): void => active().setTimeframe(next);
+export const setChartType = (next: ChartType): void => active().setChartType(next);
+export const setScaleMode = (next: ScaleMode): void => active().setScaleMode(next);
+
+export { theme, timeZone, recentSymbols };
 
 /** Move a symbol that loaded successfully to the front of the recents. */
 export function addRecent(value: string): void {
@@ -223,21 +285,6 @@ export function addRecent(value: string): void {
   ].slice(0, MAX_RECENTS);
   setRecentSymbolsSignal(recents);
   persist("recents", recents);
-}
-
-export function setTimeframe(next: Timeframe): void {
-  setTimeframeSignal(next);
-  persist("timeframe", next);
-}
-
-export function setChartType(next: ChartType): void {
-  setChartTypeSignal(next);
-  persist("chartType", next);
-}
-
-export function setScaleMode(next: ScaleMode): void {
-  setScaleModeSignal(next);
-  persist("scaleMode", next);
 }
 
 export function setTheme(next: ThemeName): void {
