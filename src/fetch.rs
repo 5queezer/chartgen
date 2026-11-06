@@ -415,6 +415,22 @@ where
     paginate_backwards(want, end, Instant::now() + BINANCE_DEADLINE, page)
 }
 
+/// Replace the end of `bars` with `fresh`, from its first bar on. False, leaving
+/// `bars` alone, if `fresh` does not reach them.
+fn lay_over(bars: &mut Vec<Bar>, fresh: &[Bar]) -> bool {
+    let reaches = fresh.first().and_then(bar_ts).filter(|first| {
+        bars.last()
+            .and_then(bar_ts)
+            .is_some_and(|last| last >= *first)
+    });
+    let Some(first) = reaches else {
+        return false;
+    };
+    bars.truncate(bars.partition_point(|b| bar_ts(b).is_some_and(|t| t < first)));
+    bars.extend_from_slice(fresh);
+    true
+}
+
 /// The newest `want` klines of `key`. A resampled chart's tail still needs every
 /// one of them, since indicators run over its warmup, but a closed kline never
 /// changes: only the first read walks the history, and a repeat reads one small
@@ -438,15 +454,8 @@ where
         KlineRead::Walk(c) => claim = Some(c),
         KlineRead::Held(mut bars, complete) => {
             let fresh = page(KLINE_REFRESH, None)?;
-            let overlap = fresh.first().and_then(bar_ts).filter(|first| {
-                bars.last()
-                    .and_then(bar_ts)
-                    .is_some_and(|last| last >= *first)
-            });
             // A gap means the page does not reach what we hold: read it all again.
-            if let Some(first) = overlap {
-                bars.truncate(bars.partition_point(|b| bar_ts(b).is_some_and(|t| t < first)));
-                bars.extend(fresh);
+            if lay_over(&mut bars, &fresh) {
                 joined = Some((bars, complete));
             } else if let KlineRead::Walk(c) = cache.begin(&key, want, now, deadline, false)? {
                 claim = Some(c);
@@ -466,14 +475,27 @@ where
     }
     let out = bars[bars.len().saturating_sub(want)..].to_vec();
     let mut st = cache.lock();
-    st.held.insert(
-        key,
-        HeldKlines {
-            used: now,
-            bars,
-            complete,
-        },
-    );
+    // Another read of this key may have stored a longer window meanwhile: a shorter
+    // one lies on top of it, so the next long read need not walk again.
+    let kept_longer = st.held.get_mut(&key).is_some_and(|h| {
+        let longer = h.bars.len() > bars.len() && lay_over(&mut h.bars, &bars);
+        if longer {
+            h.used = now;
+            let over = h.bars.len().saturating_sub(MAX_BASE_BARS);
+            h.bars.drain(..over);
+        }
+        longer
+    });
+    if !kept_longer {
+        st.held.insert(
+            key,
+            HeldKlines {
+                used: now,
+                bars,
+                complete,
+            },
+        );
+    }
     while st.held.len() > KLINE_CACHE_ENTRIES {
         let oldest = st
             .held
@@ -2092,6 +2114,43 @@ mod tests {
         assert_eq!((small.len(), calls), (2_000, 1));
         let (big, calls) = cached_read(&cache, "BTCUSDT", want + 1_000, t0, later);
         assert_eq!((big.len(), calls), (want + 1_000, 19));
+    }
+
+    #[test]
+    fn a_short_read_landing_after_a_long_walk_does_not_cut_its_window() {
+        let last = 1_700_000_000_000 / HOUR_MS * HOUR_MS;
+        let cache = KlineCache::default();
+        let t0 = Instant::now();
+        cached_read(&cache, "BTCUSDT", 1_500, t0, (0, last));
+
+        // A 7m chart's refresh is out while a 59m chart's walk finishes.
+        let mut exchange = fake_exchange(0, last);
+        let got = newest_klines(
+            &cache,
+            &Walks::default(),
+            ("BTCUSDT".to_string(), "1h"),
+            1_500,
+            t0,
+            far(),
+            |limit, end| {
+                cached_read(&cache, "BTCUSDT", 5_000, t0, (0, last));
+                exchange(limit, end)
+            },
+        )
+        .unwrap();
+        assert_eq!(got.len(), 1_500);
+        assert_eq!(
+            cache.lock().held[&("BTCUSDT".to_string(), "1h")].bars.len(),
+            5_000
+        );
+
+        // So the long chart's next read costs one page, not a walk.
+        let (long, calls) = cached_read(&cache, "BTCUSDT", 5_000, t0, (0, last + HOUR_MS));
+        assert_eq!((long.len(), calls), (5_000, 1));
+        assert_eq!(bar_open_ms(long.last().unwrap()), Some(last + HOUR_MS));
+        assert!(long
+            .windows(2)
+            .all(|w| { bar_open_ms(&w[1]).unwrap() - bar_open_ms(&w[0]).unwrap() == HOUR_MS }));
     }
 
     #[test]
