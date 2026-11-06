@@ -1085,6 +1085,30 @@ test.describe("drawing modifiers", () => {
       });
     }
 
+    test("a stale press, its release never heard: the next press ends it, and the pan leaves the drawing", async ({
+      bootedApp: page,
+    }) => {
+      await drawTwoLines(page);
+      const box = (await host(page).boundingBox())!;
+      // What Firefox can leave behind on a release outside the window (klinecharts takes
+      // a mouseleave as the release, finds no pane, and no mouseup follows).
+      await page.evaluate(() => {
+        const w = window as unknown as TestWindow & { __chartgenDrawings: () => { id: string }[] };
+        const chart = w.__chartgenTest.chart() as unknown as TestChart & {
+          getChartStore: () => { getOverlayStore: () => { setPressedInstanceInfo: (i: unknown) => void } };
+        };
+        chart.getChartStore().getOverlayStore().setPressedInstanceInfo({
+          paneId: "candle_pane",
+          instance: chart.getOverlayById(w.__chartgenDrawings()[0]!.id),
+          figureType: 1,
+          figureKey: "overlay_figure_point_1",
+          figureIndex: 1,
+          attrsIndex: 0,
+        });
+      });
+      await expectPanLeavesLine(page, box);
+    });
+
     test("a real blur ends the press: it stays discarded, and later moves leave the drawing", async ({
       bootedApp: page,
     }) => {

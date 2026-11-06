@@ -1343,11 +1343,14 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
   // own press in place, and its next pan would move that drawing. No public call ends a
   // press, so this does what its mouseUpEvent does, without onPressedMoveEnd: the drag is
   // discarded, and the drawing goes back at once. Bubble, so after klinecharts has had the event.
+  // A new press also ends one, in capture, before klinecharts sees it: Firefox can take a
+  // mouseleave for the release outside the window, and no mouseup follows (not run on Firefox).
   const pressStore = () =>
     (props.chart as unknown as PressStoreOwner | null)?.getChartStore().getOverlayStore();
   const dropStuckPress = (e: Event) => {
     const store = pressStore();
     if (!isRelease(e) || !store?.getPressedInstanceInfo().instance) return;
+    pressedId = null;
     store.setPressedInstanceInfo({
       paneId: "",
       instance: null,
@@ -1372,12 +1375,14 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
     window.addEventListener(type, endPress, true);
     window.addEventListener(type, dropStuckPress);
   }
+  window.addEventListener("mousedown", dropStuckPress, true);
   window.addEventListener("blur", releaseOnBlur);
   onCleanup(() => {
     for (const type of endPressEvents) {
       window.removeEventListener(type, endPress, true);
       window.removeEventListener(type, dropStuckPress);
     }
+    window.removeEventListener("mousedown", dropStuckPress, true);
     window.removeEventListener("blur", releaseOnBlur);
   });
 
