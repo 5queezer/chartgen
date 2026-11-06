@@ -4,7 +4,7 @@
 
 import type { BrowserContext, Page, Request } from "@playwright/test";
 
-import { test, expect, expectChartRendered } from "./fixtures/app";
+import { test, expect, expectChartRendered, gotoApp, reloadApp } from "./fixtures/app";
 
 const CHARTGEN_PORT = Number(process.env.CHARTGEN_PORT ?? 9315);
 const FAKE_ORIGIN = `http://127.0.0.1:${CHARTGEN_PORT - 4_000}`;
@@ -76,9 +76,7 @@ test.describe("sign-in", () => {
       if (isProvider(req)) visits.push(req.url());
     });
 
-    await page.reload();
-    await page.waitForURL((url) => !url.searchParams.has("code"));
-    await expectChartRendered(page);
+    await reloadApp(page);
 
     await expect(userMenu(page)).toBeVisible();
     expect(visits).toEqual([]);
@@ -105,9 +103,7 @@ test.describe("sign-in", () => {
     const first = await context.newPage();
     await bootSignedIn(first);
     const second = await context.newPage();
-    await second.goto("/");
-    await second.waitForURL((url) => !url.searchParams.has("code"));
-    await expectChartRendered(second);
+    await gotoApp(second);
 
     await first.bringToFront();
     await userMenu(first).click();
@@ -222,9 +218,7 @@ test.describe("sign-in", () => {
       localStorage.setItem("chartgen.oauth.client_secret", "stale-secret");
     });
 
-    await page.reload();
-    await page.waitForURL((url) => !url.searchParams.has("code") && !url.searchParams.has("error"));
-    await expectChartRendered(page);
+    await reloadApp(page);
 
     await expect(userMenu(page)).toBeVisible();
     const stored = await page.evaluate(() => localStorage.getItem("chartgen.oauth.client_id"));
