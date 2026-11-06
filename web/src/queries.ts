@@ -154,7 +154,8 @@ export function createListIndicatorsQuery(
 
 /**
  * The tool names of `tools/list`, once per session: what the server lists does
- * not change while it runs. A failure reads as "not listed" and is not retried.
+ * not change while it runs. A network blip gets two more tries, so it does not
+ * hide the script editor until the next reload; after that it reads as "not listed".
  */
 export function createToolNamesQuery(
   session: McpSession,
@@ -166,7 +167,8 @@ export function createToolNamesQuery(
     staleTime: Infinity,
     gcTime: Infinity,
     enabled: enabled(),
-    retry: false,
+    retry: 2,
+    retryDelay: 1000,
   }));
 }
 

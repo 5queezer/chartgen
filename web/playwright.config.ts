@@ -79,7 +79,8 @@ export default defineConfig({
       command: `rm -f "${CHARTGEN_DB}" && cargo run -- --serve --port ${CHARTGEN_PORT}`,
       cwd: "..",
       port: CHARTGEN_PORT,
-      env: { CHARTGEN_DATA_SOURCE: "sample", CHARTGEN_DB },
+      // Off even if the developer's shell turns scripting on.
+      env: { CHARTGEN_DATA_SOURCE: "sample", CHARTGEN_DB, CHARTGEN_SCRIPTING: "0" },
       reuseExistingServer: REUSE_SERVER,
       // Cold build can chew several minutes on a slow CI runner.
       // Cached Swatinem builds drop this to seconds.

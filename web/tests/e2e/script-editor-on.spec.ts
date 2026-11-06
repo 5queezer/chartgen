@@ -893,6 +893,20 @@ test.describe("panel size", () => {
   }
 });
 
+test("a failed tools/list at boot does not hide the editor for the session", async ({ page }) => {
+  let failures = 0;
+  await page.route("**/mcp", async (route) => {
+    if (route.request().postData()?.includes('"tools/list"') && failures === 0) {
+      failures++;
+      return route.abort();
+    }
+    return route.fallback();
+  });
+  await gotoApp(page);
+  await expect(page.getByTestId("script-editor-open")).toBeVisible({ timeout: 10_000 });
+  expect(failures).toBe(1);
+});
+
 test.describe("at 390 px", () => {
   test("the panel fits and works from the picker", async ({ page }) => {
     await gotoApp(page);
