@@ -219,16 +219,18 @@ export function feedPrice(
 export function feedChartSnapshot(symbol: string, snapshot: LiveSnapshot): void {
   const { bars, indicators } = snapshot.series;
   const close = bars[bars.length - 1]?.c;
+  const tick = chartTick(snapshot.series);
   setChartContext({
     symbol,
     interval: snapshot.series.interval ?? "",
     keys: Object.keys(indicators),
+    axis: tick.chart?.view?.axis,
   });
   if (snapshot.update.kind === "reset") {
     forgetBaseline(symbol);
     if (close != null) observePrice(symbol, close);
   } else if (snapshot.update.kind === "tail") {
-    feedPrice(symbol, close, chartTick(snapshot.series));
+    feedPrice(symbol, close, tick);
   }
 }
 
