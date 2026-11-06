@@ -1123,6 +1123,22 @@ fn test_registered_client_survives_restart_without_scripting() {
     let port = free_port();
     let srv = spawn_server_on(port, None, &db, false);
     assert_eq!(tool_names(port), tools);
+    // Not just unlisted: a call to one is refused as well.
+    let live = register_external(port);
+    let auth = format!("Authorization: Bearer {}", sign_in(port, &live));
+    for script_tool in SCRIPT_TOOLS {
+        let call = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {"name": script_tool, "arguments": {}},
+        });
+        let headers = [JSON_POST[0], JSON_POST[1], auth.as_str()];
+        let (st, _, resp) = http(port, "POST", "/mcp", &headers, &call.to_string());
+        assert_eq!(st, 200, "{resp}");
+        let expected = format!("Unknown tool: {script_tool}");
+        assert!(resp.contains(&expected), "{script_tool}: {resp}");
+    }
     if cfg!(feature = "scripting") {
         let new_token = sign_in(port, &client);
         assert_ne!(new_token, token);

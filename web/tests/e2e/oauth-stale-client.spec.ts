@@ -240,6 +240,31 @@ test.describe("stale OAuth client", () => {
     });
   }
 
+  test("without surviving sessionStorage it stops instead of looping", async ({
+    page,
+  }) => {
+    // An embedded webview may lose sessionStorage on navigation, so the state
+    // can never match.
+    await page.addInitScript(() => {
+      const items = new Map<string, string>();
+      Object.defineProperty(window, "sessionStorage", {
+        value: {
+          getItem: (k: string) => items.get(k) ?? null,
+          setItem: (k: string, v: string) => items.set(k, v),
+          removeItem: (k: string) => items.delete(k),
+        },
+      });
+      localStorage.setItem("chartgen.oauth.client_id", "stale-client");
+      localStorage.setItem("chartgen.oauth.client_secret", "stale-secret");
+    });
+    const statuses = authorizeStatuses(page);
+
+    await page.goto(`${origin}/`);
+
+    await expect(page.getByRole("button", { name: "Sign in again" })).toBeVisible();
+    expect(statuses).toEqual([302]);
+  });
+
   test("a crafted link keeps the stored client", async ({ page }) => {
     await gotoApp(page, `${origin}/`);
     const client = await storedClient(page);

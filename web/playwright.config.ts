@@ -24,7 +24,10 @@ const CHARTGEN_PORT = Number(process.env.CHARTGEN_PORT ?? 9315);
 const WEB_PORT = Number(process.env.WEB_PORT ?? 5173);
 const REUSE_SERVER = !process.env.CI && process.env.PW_REUSE_SERVER === "1";
 // Every test registers an OAuth client and the server persists them: start
-// each run with an empty store of its own, never the user's real one.
+// each run with an empty store of its own, never the user's real one. With
+// PW_REUSE_SERVER=1 this does not apply, because neither the command nor its env
+// is used: a reused server keeps its own store, which on a dev server is the
+// real ~/.chartgen/chartgen.db, and collects the test clients there.
 const CHARTGEN_DB = join(tmpdir(), `chartgen-e2e-${CHARTGEN_PORT}.db`);
 
 export default defineConfig({
