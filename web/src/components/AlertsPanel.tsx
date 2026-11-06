@@ -107,7 +107,8 @@ export function AlertsPanel(): JSX.Element {
 function AlertRow(props: { alert: Alert }): JSX.Element {
   const a = () => props.alert;
   const status = () => alertStatus(a());
-  const reason = () => inactiveReason(a());
+  // Reads the stored drawings: once per change, however often the row shows it.
+  const reason = createMemo(() => inactiveReason(a()));
   const stop = (fn: () => void) => (e: MouseEvent) => {
     e.stopPropagation();
     fn();

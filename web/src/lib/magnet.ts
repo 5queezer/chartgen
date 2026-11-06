@@ -10,6 +10,14 @@ export function effectiveMagnet(chosen: Magnet, inverted: boolean): Magnet {
 }
 
 /**
+ * The key that inverts the magnet is held: Cmd on Mac, where Ctrl+click is the
+ * context menu gesture, and Ctrl elsewhere, where Meta is the system's key.
+ */
+export function magnetKeyHeld(e: { ctrlKey: boolean; metaKey: boolean }, mac: boolean): boolean {
+  return mac ? e.metaKey : e.ctrlKey;
+}
+
+/**
  * `value` pulled to `bar` by the magnet, for a point that klinecharts' own magnet
  * read the wrong bar for: strong takes the nearest of OHLC, weak only when that
  * is within `sensitivity` pixels (`overlay.modeSensitivity`). `toY` is the axis.

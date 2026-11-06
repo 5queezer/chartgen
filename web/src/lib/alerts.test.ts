@@ -208,6 +208,27 @@ describe("drawingLevels (ADR-0034)", () => {
     expect(pointBarIndex(flat.axis, {})).toBeUndefined();
   });
 
+  it("isVerticalLine on an axis agrees with drawingLevels", () => {
+    // Ten 1-minute bars apart: one bar of an hourly axis, and not exactly vertical.
+    const M = H / 60;
+    const steep = { name: "segment" as const, points: [p(5 * H, 100), p(5 * H + 10 * M, 200)] };
+    expect(isVerticalLine(steep)).toBe(false);
+    expect(isVerticalLine(steep, flat.axis)).toBe(true);
+    expect(drawingLevels(steep, 5 * H, flat)).toEqual([]);
+    // Apart again on the axis: both agree it has a value.
+    const wide = { ...steep, points: [p(5 * H, 100), p(6 * H, 200)] };
+    expect(isVerticalLine(wide, flat.axis)).toBe(false);
+    expect(drawingLevels(wide, 5 * H, flat)).toEqual([100]);
+    // On a future bar too.
+    const future = { ...steep, points: [p(40 * H, 100), p(40 * H + 10 * M, 200)] };
+    expect(flat.axis.lastTs).toBeLessThan(40 * H);
+    expect(isVerticalLine(future, flat.axis)).toBe(true);
+    expect(drawingLevels(future, 5 * H, flat)).toEqual([]);
+    // No axis, or one point: as before.
+    expect(isVerticalLine(steep, null)).toBe(false);
+    expect(isVerticalLine({ points: [p(5 * H, 100)] }, flat.axis)).toBe(false);
+  });
+
   it("isVerticalLine: both anchors on one bar, on a future bar too", () => {
     expect(isVerticalLine({ points: [p(5 * H, 100), p(5 * H, 200)] })).toBe(true);
     expect(isVerticalLine({ points: [p(5 * H, 100), p(6 * H, 200)] })).toBe(false);
