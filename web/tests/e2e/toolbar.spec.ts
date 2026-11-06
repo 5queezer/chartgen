@@ -65,6 +65,19 @@ test.describe("toolbar", () => {
     await expectChartRendered(page);
   });
 
+  test("timeframe buttons keep a hairline apart", async ({
+    bootedApp: page,
+  }) => {
+    const group = page.getByRole("group", { name: "Timeframe" });
+    const box = async (name: string) => {
+      const b = await group.getByRole("button", { name, exact: true }).boundingBox();
+      if (!b) throw new Error(`${name} is not on screen`);
+      return b;
+    };
+    const [left, right] = [await box("15m"), await box("1h")];
+    expect(right.x - (left.x + left.width)).toBeCloseTo(1, 1);
+  });
+
   test("symbol search: type-to-open, filter, arrow keys, Enter, Esc", async ({
     bootedApp: page,
   }) => {
