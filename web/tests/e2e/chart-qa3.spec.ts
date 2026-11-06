@@ -731,21 +731,50 @@ test.describe("x-axis labels", () => {
     });
   });
 
-  test("a tick alone on the axis keeps its label", async ({ bootedApp: page }) => {
-    // Narrow and zoomed in: one tick, with the long date label that cannot fit.
-    await page.locator(".chart-host").evaluate((el) => {
-      (el as HTMLElement).style.width = "130px";
-      (el as HTMLElement).style.flex = "none";
-    });
-    await setBarSpace(page, 50);
+  test("narrow charts always keep a label, a lone tick included", async ({ bootedApp: page }) => {
+    /** Size the host so the main area is `main` px wide. */
+    const setMainWidth = async (main: number) => {
+      for (let n = 0; n < 3; n++) {
+        const yAxis = await page.evaluate(
+          () =>
+            (window as unknown as { __chartgenTest: Hook }).__chartgenTest
+              .chart()!
+              .getSize("candle_pane", "yAxis")!.width,
+        );
+        await page.locator(".chart-host").evaluate((el, w) => {
+          (el as HTMLElement).style.width = `${w}px`;
+          (el as HTMLElement).style.flex = "none";
+        }, main + yAxis);
+        await page.waitForTimeout(100);
+      }
+      await expect
+        .poll(async () => Math.abs((await axis(page)).width - main) <= 2)
+        .toBe(true);
+    };
+
     let alone = 0;
-    for (let i = 0; i < 30; i++) {
-      await scrollBy(page, 17);
-      const { ticks } = await axis(page);
-      if (ticks.length !== 1) continue;
-      alone++;
-      expect(ticks[0]!.text).not.toBe("");
+    for (const [main, spaces] of [
+      [33, [3, 8, 50]],
+      [53, [3, 8, 50]],
+      [73, [3, 8]],
+      [103, [8]],
+    ] as const) {
+      await setMainWidth(main);
+      for (const space of spaces) {
+        await setBarSpace(page, space);
+        for (let i = 0; i < 25; i++) {
+          await scrollBy(page, 7);
+          const { ticks } = await axis(page);
+          if (ticks.length === 0) continue;
+          if (ticks.length === 1) alone++;
+          expect(
+            ticks.map((t) => t.text).filter(Boolean),
+            `main ${main}, bar space ${space}, ticks at ${ticks.map((t) => t.coord).join()}`,
+          ).not.toEqual([]);
+        }
+      }
     }
+    // The sweep did reach a tick alone on the axis.
     expect(alone).toBeGreaterThan(0);
   });
 });

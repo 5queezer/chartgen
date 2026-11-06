@@ -614,16 +614,18 @@ const X_TICK_SIZE = 11;
 
 // klinecharts centers an x-axis label on its tick and the canvas cuts off what
 // sticks out, so a label too close to either edge is blanked. The tick stays:
-// the vertical grid line is drawn from it. A tick alone on the axis keeps its
-// label, cut off or not, so the axis never ends up empty.
+// the vertical grid line is drawn from it. If that blanks every label, the
+// labels stay, cut off or not, so the axis never ends up empty.
 registerXAxis({
   name: X_AXIS_NAME,
-  createTicks: ({ bounding, defaultTicks }) =>
-    defaultTicks.map((t) => {
+  createTicks: ({ bounding, defaultTicks }) => {
+    const ticks = defaultTicks.map((t) => {
       const reach = utils.calcTextWidth(t.text, X_TICK_SIZE, "400", FONT_FAMILY) / 2 + 2;
       const fits = t.coord >= reach && t.coord <= bounding.width - reach;
-      return fits || defaultTicks.length === 1 ? t : { ...t, text: "" };
-    }),
+      return fits ? t : { ...t, text: "" };
+    });
+    return ticks.some((t) => t.text !== "") ? ticks : defaultTicks;
+  },
 });
 
 let compareRegistered = false;
