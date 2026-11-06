@@ -648,45 +648,71 @@ impl Default for ZigZag {
 impl ZigZag {
     /// Confirmed zigzag pivots as (bar index, price, is_high).
     fn pivots(&self, data: &OhlcvData) -> Vec<(usize, f64, bool)> {
-        let n = data.len();
-        let d = self.depth;
-        let mut out: Vec<(usize, f64, bool)> = vec![];
-        if n < 2 * d + 1 {
-            return out;
-        }
-        for i in d..n - d {
-            let b = &data.bars[i];
-            let left = &data.bars[i - d..i];
-            let right = &data.bars[i + 1..=i + d];
-            let is_h =
-                left.iter().all(|x| b.high >= x.high) && right.iter().all(|x| b.high > x.high);
-            let is_l = left.iter().all(|x| b.low <= x.low) && right.iter().all(|x| b.low < x.low);
-            // An outside bar can be both; take the type opposite to the last pivot.
-            let high = match (is_h, is_l) {
-                (true, true) => out.last().map(|p| !p.2).unwrap_or(true),
-                (true, false) => true,
-                (false, true) => false,
-                _ => continue,
-            };
-            let price = if high { b.high } else { b.low };
-            match out.last_mut() {
-                None => out.push((i, price, high)),
-                Some(last) if last.2 == high => {
-                    if (high && price > last.1) || (!high && price < last.1) {
-                        *last = (i, price, high);
-                    }
+        zigzag_pivots(&data.bars, self.depth, |_| self.deviation)
+    }
+}
+
+/// Confirmed zigzag pivots of `bars` as (bar index, price, is_high): swing
+/// highs and lows with `depth` bars on each side, alternating, each at least
+/// `deviation(i)` percent from the one before. `i` is the bar of the new pivot.
+/// Only the newest pivot can still move, to a more extreme one of its kind.
+pub(crate) fn zigzag_pivots(
+    bars: &[crate::data::Bar],
+    depth: usize,
+    deviation: impl Fn(usize) -> f64,
+) -> Vec<(usize, f64, bool)> {
+    zigzag_walk(bars, depth, deviation, |_, _| {})
+}
+
+/// `zigzag_pivots`, calling `on_change(pivots, moved)` each time the list changes:
+/// a new pivot, or with `moved` the newest one replaced. A pivot on bar `i` is known
+/// from bar `i + depth` on, so the calls come in the order they became known.
+pub(crate) fn zigzag_walk(
+    bars: &[crate::data::Bar],
+    depth: usize,
+    deviation: impl Fn(usize) -> f64,
+    mut on_change: impl FnMut(&[(usize, f64, bool)], bool),
+) -> Vec<(usize, f64, bool)> {
+    let n = bars.len();
+    let d = depth;
+    let mut out: Vec<(usize, f64, bool)> = vec![];
+    if n < 2 * d + 1 {
+        return out;
+    }
+    for i in d..n - d {
+        let b = &bars[i];
+        let left = &bars[i - d..i];
+        let right = &bars[i + 1..=i + d];
+        let is_h = left.iter().all(|x| b.high >= x.high) && right.iter().all(|x| b.high > x.high);
+        let is_l = left.iter().all(|x| b.low <= x.low) && right.iter().all(|x| b.low < x.low);
+        // An outside bar can be both; take the type opposite to the last pivot.
+        let high = match (is_h, is_l) {
+            (true, true) => out.last().map(|p| !p.2).unwrap_or(true),
+            (true, false) => true,
+            (false, true) => false,
+            _ => continue,
+        };
+        let price = if high { b.high } else { b.low };
+        match out.last_mut() {
+            None => {
+                out.push((i, price, high));
+                on_change(&out, false);
+            }
+            Some(last) if last.2 == high => {
+                if (high && price > last.1) || (!high && price < last.1) {
+                    *last = (i, price, high);
+                    on_change(&out, true);
                 }
-                Some(last) => {
-                    if last.1 == 0.0
-                        || (price - last.1).abs() / last.1.abs() * 100.0 >= self.deviation
-                    {
-                        out.push((i, price, high));
-                    }
+            }
+            Some(last) => {
+                if last.1 == 0.0 || (price - last.1).abs() / last.1.abs() * 100.0 >= deviation(i) {
+                    out.push((i, price, high));
+                    on_change(&out, false);
                 }
             }
         }
-        out
     }
+    out
 }
 
 impl Indicator for ZigZag {

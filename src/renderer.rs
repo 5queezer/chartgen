@@ -1,5 +1,5 @@
 use crate::data::OhlcvData;
-use crate::indicator::{Indicator, PanelResult};
+use crate::indicator::{DivLine, Indicator, PanelResult};
 use plotters::prelude::*;
 
 const BG: RGBColor = RGBColor(19, 23, 34);
@@ -242,8 +242,51 @@ pub fn render_results(
                 )))?;
             }
 
+            // Pattern outlines (ADR-0044) draw the same way as segments.
+            let strokes: Vec<DivLine> = overlay
+                .patterns
+                .iter()
+                .flat_map(|p| {
+                    p.strokes.iter().map(|s| DivLine {
+                        x1: s.x1.max(0) as usize,
+                        y1: s.y1,
+                        x2: s.x2.max(0) as usize,
+                        y2: s.y2,
+                        color: p.bias.color(),
+                        dashed: s.dashed,
+                    })
+                })
+                .collect();
+
+            // Pattern labels: past the bar's high or low, in the pattern's color.
+            let text = |s: &str, x: f64, y: f64, above: bool, c: RGBAColor| {
+                let off = if above { -16 } else { 4 };
+                EmptyElement::at((x, y))
+                    + Text::new(
+                        s.to_string(),
+                        (-4, off),
+                        ("sans-serif", 12).into_font().color(&c),
+                    )
+            };
+            for l in &overlay.labels {
+                let c = l.bias.color();
+                let c = if l.tentative { c.mix(0.5) } else { c };
+                chart.draw_series(std::iter::once(text(&l.text, l.x as f64, l.y, l.above, c)))?;
+            }
+            for p in &overlay.patterns {
+                let s = format!("{} ({})", p.name, p.status.as_str());
+                let x = p.label_x.max(0) as f64;
+                chart.draw_series(std::iter::once(text(
+                    &s,
+                    x,
+                    p.label_y,
+                    p.label_above,
+                    p.bias.color(),
+                )))?;
+            }
+
             // Segments on overlay (e.g. zigzag)
-            for d in &overlay.divlines {
+            for d in overlay.divlines.iter().chain(&strokes) {
                 let (x1, y1, x2, y2) = (d.x1 as f64, d.y1, d.x2 as f64, d.y2);
                 // Dashed: 20 steps, every other one drawn (same as the panel path)
                 let steps = if d.dashed { 20 } else { 1 };

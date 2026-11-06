@@ -86,6 +86,120 @@ pub struct DivLine {
     pub dashed: bool, // true = dashed line
 }
 
+/// Which way a detected pattern points.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Bias {
+    Bullish,
+    Bearish,
+    Neutral,
+}
+
+impl Bias {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Bias::Bullish => "bullish",
+            Bias::Bearish => "bearish",
+            Bias::Neutral => "neutral",
+        }
+    }
+
+    /// TradingView's pattern colors: blue bullish, red bearish, grey neutral.
+    pub fn color(self) -> RGBAColor {
+        match self {
+            Bias::Bullish => rgba(0x2962FF, 1.0),
+            Bias::Bearish => rgba(0xF23645, 1.0),
+            Bias::Neutral => rgba(0x787B86, 1.0),
+        }
+    }
+}
+
+/// A text label on one bar (candlestick patterns, ADR-0044).
+#[derive(Clone, Debug)]
+pub struct BarLabel {
+    pub x: usize,
+    /// The bar's high (`above`) or low (not `above`): the label sits past it.
+    pub y: f64,
+    pub above: bool,
+    /// Short text on the chart, e.g. "H".
+    pub text: String,
+    /// Stable id, e.g. "hammer".
+    pub key: String,
+    /// Display name, e.g. "Hammer".
+    pub name: String,
+    pub bias: Bias,
+    pub tooltip: String,
+    /// On the forming bar: can change or vanish until the bar closes.
+    pub tentative: bool,
+}
+
+/// Where a detected chart pattern stands. See ADR-0044.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PatternStatus {
+    Forming,
+    Confirmed,
+    Failed,
+}
+
+impl PatternStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            PatternStatus::Forming => "forming",
+            PatternStatus::Confirmed => "confirmed",
+            PatternStatus::Failed => "failed",
+        }
+    }
+}
+
+/// One straight stroke of a pattern's outline. Bar indices are signed: a
+/// response cut to its newest bars still names points before its first bar.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Stroke {
+    pub x1: i64,
+    pub y1: f64,
+    pub x2: i64,
+    pub y2: f64,
+    pub dashed: bool,
+}
+
+/// A pattern drawn over several bars, re-detected as a whole on every
+/// response: a newer response replaces all of them (ADR-0044).
+#[derive(Clone, Debug)]
+pub struct PatternShape {
+    pub key: String,
+    pub name: String,
+    pub bias: Bias,
+    pub status: PatternStatus,
+    pub strokes: Vec<Stroke>,
+    pub label_x: i64,
+    pub label_y: f64,
+    pub label_above: bool,
+    pub tooltip: String,
+    /// Measured-move target, when the pattern has one.
+    pub target: Option<f64>,
+    /// A close past this price fails the pattern.
+    pub invalidation: Option<f64>,
+    /// Bar whose close confirmed the pattern.
+    pub confirmed_x: Option<i64>,
+}
+
+/// A flat level (`lines[line]`) from bar `x` to the last bar. The whole level
+/// moves when its anchors do, so a newer response rewrites it on every bar
+/// instead of only the bars it covers (ADR-0044).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LevelLine {
+    pub line: usize,
+    pub x: i64,
+    pub y: f64,
+}
+
+/// Something an alert can wait for: `x` is the bar of its newest occurrence.
+#[derive(Clone, Debug, PartialEq)]
+pub struct IndicatorEvent {
+    pub key: String,
+    pub name: String,
+    pub x: Option<i64>,
+}
+
 /// Output of an indicator computation.
 #[derive(Clone, Default)]
 pub struct PanelResult {
@@ -96,6 +210,10 @@ pub struct PanelResult {
     pub hlines: Vec<HLine>,
     pub hbars: Vec<HBar>,
     pub divlines: Vec<DivLine>,
+    pub labels: Vec<BarLabel>,
+    pub patterns: Vec<PatternShape>,
+    pub levels: Vec<LevelLine>,
+    pub events: Vec<IndicatorEvent>,
     pub y_range: Option<(f64, f64)>,
     pub label: String,
     pub is_overlay: bool,
