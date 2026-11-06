@@ -15,11 +15,20 @@
 // Single worker because the chartgen OAuth store is process-global and
 // multiple tests racing through the PKCE dance would collide on state.
 
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
 import { defineConfig, devices } from "@playwright/test";
 
 const CHARTGEN_PORT = Number(process.env.CHARTGEN_PORT ?? 9315);
 const WEB_PORT = Number(process.env.WEB_PORT ?? 5173);
 const REUSE_SERVER = !process.env.CI && process.env.PW_REUSE_SERVER === "1";
+// Every test registers an OAuth client and the server persists them: start
+// each run with an empty store of its own, never the user's real one. With
+// PW_REUSE_SERVER=1 this does not apply, because neither the command nor its env
+// is used: a reused server keeps its own store, which on a dev server is the
+// real ~/.chartgen/chartgen.db, and collects the test clients there.
+const CHARTGEN_DB = join(tmpdir(), `chartgen-e2e-${CHARTGEN_PORT}.db`);
 
 export default defineConfig({
   testDir: "./tests/e2e",
@@ -53,10 +62,10 @@ export default defineConfig({
       // synthetic bars without network (ignored by older servers, which
       // fall back to sample data when the fetch fails). Debug build:
       // faster to compile than release and fast enough for the suite.
-      command: `cargo run -- --serve --port ${CHARTGEN_PORT}`,
+      command: `rm -f "${CHARTGEN_DB}" && cargo run -- --serve --port ${CHARTGEN_PORT}`,
       cwd: "..",
       port: CHARTGEN_PORT,
-      env: { CHARTGEN_DATA_SOURCE: "sample" },
+      env: { CHARTGEN_DATA_SOURCE: "sample", CHARTGEN_DB },
       reuseExistingServer: REUSE_SERVER,
       // Cold build can chew several minutes on a slow CI runner.
       // Cached Swatinem builds drop this to seconds.
