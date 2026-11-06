@@ -182,10 +182,11 @@ oversight.
   [ADR-0011](/chartgen/decisions/0011-watchlist-quotes/)
 - **Push is capped per client address, and behind a proxy that is one
   address.** chartgen trusts no forwarding header, so behind a reverse proxy
-  or tunnel every client shares the proxy's address and the cap of 8
-  subscriptions becomes a second server-wide cap. Fine for a personal
-  deployment. Other symbols poll.
-  [ADR-0021](/chartgen/decisions/0021-realtime-chart-push/)
+  or tunnel every client shares the proxy's address and the cap of 32
+  subscriptions (eight 4-chart grids) becomes a second server-wide cap. Fine for a
+  personal deployment. Other symbols poll.
+  [ADR-0021](/chartgen/decisions/0021-realtime-chart-push/),
+  [ADR-0043](/chartgen/decisions/0043-multi-chart-grid/)
 - **The NaN rule follows the Pine reference.** Warmup bars are `null`, not
   zero and not a partial window. Window functions skip missing values.
   EMA and RMA keep state across a missing value; that case is not yet

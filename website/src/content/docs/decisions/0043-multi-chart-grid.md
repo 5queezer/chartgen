@@ -7,7 +7,7 @@ sidebar:
 
 **Status:** Accepted
 **Date:** 2026-11-06
-**Amends:** [ADR-0015](/chartgen/decisions/0015-named-layouts/) (a layout's state gains optional `grid` and `panes`), [ADR-0029](/chartgen/decisions/0029-shareable-chart-links/) (a link carries the active chart) and [ADR-0034](/chartgen/decisions/0034-drawing-and-indicator-alerts/) (chart-bound alerts read the active chart)
+**Amends:** [ADR-0021](/chartgen/decisions/0021-realtime-chart-push/) (the push cap per client address), [ADR-0015](/chartgen/decisions/0015-named-layouts/) (a layout's state gains optional `grid` and `panes`), [ADR-0029](/chartgen/decisions/0029-shareable-chart-links/) (a link carries the active chart) and [ADR-0034](/chartgen/decisions/0034-drawing-and-indicator-alerts/) (chart-bound alerts read the active chart)
 
 ## Context and Problem Statement
 
@@ -77,6 +77,13 @@ a documented exception to "changing one chart cannot change another".
 other subscription ids. Each chart subscribes on its own. The server allows
 4 subscriptions per token and 10 subscribe calls per minute (ADR-0021); past those a
 chart polls.
+
+**Push cap per client address: 8 raised to 32, the 64 total kept.** chartgen trusts
+no forwarding header, so behind a proxy or tunnel every user shares one address. At 8,
+two 4-chart grids would have refused push to everyone else, users without a grid
+included. 32 fits eight grids. Reading `CF-Connecting-IP` behind an opt-in would give
+each user their own cap, but a wrong setting lets a client forge its address and
+escape the cap, so it is left out. The server total still bounds the load.
 
 **Alerts.** Only the active chart feeds the alert engine. Other charts' symbols go
 on the quotes poll, like any symbol not on the chart. Indicator and sloped-drawing

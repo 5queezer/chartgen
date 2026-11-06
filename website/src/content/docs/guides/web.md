@@ -550,8 +550,9 @@ indicators and bar replay, and its own live data.
   undo history for that symbol is cleared, so undo cannot overwrite the change.
   Different symbols never share drawings.
 - **Live data.** Each chart subscribes on its own. Past the server's push limits
-  (4 subscriptions per token, 10 subscribe calls per minute) a chart polls instead,
-  and the status line shows the active chart's state.
+  (4 subscriptions per token, 10 subscribe calls per minute, 32 per client address,
+  which everyone behind one proxy shares) a chart polls instead, and the status line
+  shows the active chart's state.
 - **Alerts.** Lines show on every chart of their symbol. Price alerts run as usual.
   Indicator and sloped-drawing alerts only run while the **active** chart shows
   their symbol and interval, and otherwise read *inactive: open AAPL 1h*.
