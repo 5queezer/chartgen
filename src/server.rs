@@ -410,6 +410,7 @@ struct RegisterRequest {
 
 async fn oauth_register(
     State(state): State<SharedState>,
+    headers: HeaderMap,
     ext: axum::http::Extensions,
     Json(body): Json<RegisterRequest>,
 ) -> (StatusCode, Json<Value>) {
@@ -423,7 +424,7 @@ async fn oauth_register(
         .oauth
         .lock()
         .unwrap()
-        .admit_registration(&client_addr(&ext), &body);
+        .admit_registration(&client_addr(&headers, &ext), &body);
     if let Err((status, err)) = admitted {
         return (status, Json(err));
     }
@@ -622,7 +623,7 @@ async fn oauth_authorize(
 
     // With sign-in on, a client id and a redirect URI are not enough (ADR-0044).
     if s.signin.is_some() {
-        return signin::authorize(&mut s, &params, &headers, &client_addr(&ext));
+        return signin::authorize(&mut s, &params, &headers, &client_addr(&headers, &ext));
     }
 
     // Auto-approve: generate auth code
@@ -912,13 +913,25 @@ fn stream_key(token: &str, session_id: Option<&str>) -> String {
     format!("{token}\n{}", session_id.unwrap_or(""))
 }
 
-/// The peer address of the connection, for the per-client chart push cap.
-/// chartgen trusts no forwarding header (`X-Forwarded-For` and the like),
-/// so behind a reverse proxy this is the proxy's address (ADR-0021).
-fn client_addr(ext: &axum::http::Extensions) -> String {
-    ext.get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
-        .map(|c| c.0.ip().to_string())
-        .unwrap_or_else(|| "unknown".into())
+/// The client's address, for the limits per address. The peer of the connection:
+/// chartgen trusts no forwarding header (`X-Forwarded-For` and the like), so behind
+/// a reverse proxy this is the proxy's address (ADR-0021), unless the operator names
+/// the proxy's header (ADR-0044).
+fn client_addr(headers: &HeaderMap, ext: &axum::http::Extensions) -> String {
+    let trusted = std::env::var("CHARTGEN_TRUSTED_PROXY_HEADER").ok();
+    forwarded_addr(headers, trusted.as_deref()).unwrap_or_else(|| {
+        ext.get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+            .map(|c| c.0.ip().to_string())
+            .unwrap_or_else(|| "unknown".into())
+    })
+}
+
+/// The address in the header the operator named, if it holds exactly one. Anything
+/// else falls back to the peer, and so does loopback, which the limits exempt.
+fn forwarded_addr(headers: &HeaderMap, name: Option<&str>) -> Option<String> {
+    let value = headers.get(name?.trim())?.to_str().ok()?;
+    let ip = value.trim().parse::<std::net::IpAddr>().ok()?;
+    (!ip.is_loopback()).then(|| ip.to_string())
 }
 
 /// True for a JSON-RPC message that gets no response: a notification (no
@@ -1190,7 +1203,7 @@ async fn mcp_handler(
     let push_client = token_owned
         .as_deref()
         .and_then(|t| state.oauth.lock().unwrap().user_for_token(t))
-        .unwrap_or_else(|| client_addr(&ext));
+        .unwrap_or_else(|| client_addr(&headers, &ext));
     let push = token_owned.as_deref().map(|t| PushCtx {
         hub: state.charts.clone(),
         stream: stream_key(t, session_id.as_deref()),
@@ -1693,6 +1706,37 @@ mod tests {
             );
         }
         h
+    }
+
+    // --- forwarded_addr unit tests ---
+
+    #[test]
+    fn a_forwarding_header_counts_only_when_named_and_well_formed() {
+        let h = headers_with(&[("cf-connecting-ip", "203.0.113.9")]);
+        assert_eq!(forwarded_addr(&h, None), None, "not trusted when unset");
+        assert_eq!(
+            forwarded_addr(&h, Some("X-Real-IP")),
+            None,
+            "another header"
+        );
+        assert_eq!(
+            forwarded_addr(&h, Some("CF-Connecting-IP")).as_deref(),
+            Some("203.0.113.9")
+        );
+        let v6 = headers_with(&[("cf-connecting-ip", " 2001:db8::1 ")]);
+        assert_eq!(
+            forwarded_addr(&v6, Some("cf-connecting-ip")).as_deref(),
+            Some("2001:db8::1")
+        );
+        for bad in ["junk", "203.0.113.9, 10.0.0.1", "", "127.0.0.1", "::1"] {
+            let h = headers_with(&[("cf-connecting-ip", bad)]);
+            assert_eq!(forwarded_addr(&h, Some("cf-connecting-ip")), None, "{bad}");
+        }
+        assert_eq!(
+            forwarded_addr(&HeaderMap::new(), Some("cf-connecting-ip")),
+            None
+        );
+        assert_eq!(forwarded_addr(&h, Some("not a header name")), None);
     }
 
     // --- invalid_client_redirect unit tests ---
@@ -2654,6 +2698,7 @@ mod tests {
         ))));
         let (status, _) = oauth_register(
             State(state.clone()),
+            HeaderMap::new(),
             ext,
             Json(reg(&["http://localhost/cb"])),
         )

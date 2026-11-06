@@ -3599,6 +3599,175 @@ fn test_signin_per_user_limits() {
     assert_eq!(ping_status(p, &theirs), 200);
 }
 
+/// A server that takes the client's address from `X-Test-Client`, so these tests can
+/// be many addresses and not one exempt loopback.
+fn signin_server_behind_proxy(test: &str, fake: &FakeProvider) -> Server {
+    let port = free_port();
+    let db = store_path(test);
+    let mut cmd = signin_command(port, &db, fake, &["github", "google"], None, false);
+    cmd.env("CHARTGEN_TRUSTED_PROXY_HEADER", "X-Test-Client");
+    let mut srv = start_server(cmd, port);
+    srv.temp_db = Some(db);
+    srv
+}
+
+/// Nobody can hold sign-in shut with requests that create nothing.
+#[test]
+fn test_signin_junk_costs_nothing_and_locks_nobody_out() {
+    let fake = FakeProvider::start();
+    let srv = signin_server_behind_proxy("signin-junk", &fake);
+    let p = srv.port;
+    let client = register_client(p, &web_redirect(p));
+    let from = "X-Test-Client: 198.51.100.7";
+    let mut attacker = Browser::new(p);
+    for _ in 0..150 {
+        let page = attacker.request("GET", "/oauth/login/github?request=junk", &[from], "");
+        assert_eq!(page.status, 400, "{}", page.body);
+        let page = attacker.request(
+            "GET",
+            "/oauth/callback/github?state=junk&code=x",
+            &[from],
+            "",
+        );
+        assert_eq!(page.status, 400, "{}", page.body);
+    }
+    // The same address, so everyone behind a shared one, can still start a sign-in.
+    let mut victim = Browser::new(p);
+    let path = format!(
+        "/authorize?response_type=code&client_id={client}&redirect_uri={}&code_challenge={PKCE_CHALLENGE}&state=s",
+        url_encode(&web_redirect(p))
+    );
+    let page = victim.request("GET", &path, &[from], "");
+    assert_eq!(page.status, 303, "{}", page.body);
+}
+
+/// What creates state is limited per address, and one address is not everyone's.
+#[test]
+fn test_signin_a_flood_from_one_address_leaves_the_others_alone() {
+    let fake = FakeProvider::start();
+    let srv = signin_server_behind_proxy("signin-flood", &fake);
+    let p = srv.port;
+    let client = register_client(p, &web_redirect(p));
+    let path = format!(
+        "/authorize?response_type=code&client_id={client}&redirect_uri={}&code_challenge={PKCE_CHALLENGE}&state=s",
+        url_encode(&web_redirect(p))
+    );
+    let flood = "X-Test-Client: 198.51.100.7";
+    let mut limited = false;
+    for _ in 0..125 {
+        let page = Browser::new(p).request("GET", &path, &[flood], "");
+        if page.status == 429 {
+            limited = true;
+            break;
+        }
+    }
+    assert!(limited, "a flood from one address must be refused");
+    let page = Browser::new(p).request("GET", &path, &["X-Test-Client: 203.0.113.5"], "");
+    assert_eq!(page.status, 303, "another address: {}", page.body);
+    // A malformed header is no address of its own: it falls back to the peer, here exempt.
+    let page = Browser::new(p).request("GET", &path, &["X-Test-Client: not-an-ip"], "");
+    assert_eq!(page.status, 303, "{}", page.body);
+    // /register counts per client address too.
+    let body = format!(r#"{{"redirect_uris":["{EXTERNAL_REDIRECT}"]}}"#);
+    let headers = [JSON_POST[0], JSON_POST[1], "X-Test-Client: 192.0.2.8"];
+    let statuses: Vec<u16> = (0..21)
+        .map(|_| http(p, "POST", "/register", &headers, &body).0)
+        .collect();
+    assert_eq!(statuses[19], 201, "{statuses:?}");
+    assert_eq!(statuses[20], 429, "{statuses:?}");
+}
+
+/// Not named, the header is anyone's to write, so it must do nothing: here 21
+/// registrations claiming one address would be refused if it counted.
+#[test]
+fn test_a_spoofed_address_is_ignored_unless_the_operator_names_the_header() {
+    let srv = spawn_server(None);
+    let body = format!(r#"{{"redirect_uris":["{EXTERNAL_REDIRECT}"]}}"#);
+    let headers = [
+        JSON_POST[0],
+        JSON_POST[1],
+        "CF-Connecting-IP: 192.0.2.8",
+        "X-Forwarded-For: 192.0.2.8",
+        "X-Real-IP: 192.0.2.8",
+    ];
+    for i in 0..25 {
+        let (st, _, resp) = http(srv.port, "POST", "/register", &headers, &body);
+        assert_eq!(st, 201, "registration {i}: {resp}");
+    }
+}
+
+/// One request cannot fill the table of provider round trips: it holds one at a time.
+#[test]
+fn test_signin_one_request_cannot_fill_the_round_trips() {
+    let fake = FakeProvider::start();
+    let srv = signin_server("signin-flows", &fake, &["github", "google"]);
+    let p = srv.port;
+    let client = register_client(p, &web_redirect(p));
+    let mut attacker = Browser::new(p);
+    let first = attacker.authorize(&client, &web_redirect(p), "s");
+    let request = first
+        .location()
+        .split("request=")
+        .nth(1)
+        .unwrap()
+        .to_string();
+    let login = format!("/oauth/login/github?request={request}");
+    let early = attacker.get(&login).query()["state"].clone();
+    for _ in 0..2100 {
+        assert_eq!(attacker.get(&login).status, 303);
+    }
+    let mut victim = Browser::new(p);
+    let first = victim.authorize(&client, &web_redirect(p), "s");
+    let back = provider_round_trip(
+        &mut victim,
+        &fake,
+        "github",
+        profile_of("github", 1, "a"),
+        &first,
+    );
+    assert_eq!(back.status, 303, "{}", back.body);
+    // The attempt it replaced is dead.
+    let page = attacker.get(&format!(
+        "/oauth/callback/github?code=x&state={}",
+        url_encode(&early)
+    ));
+    assert_eq!(page.status, 400, "{}", page.body);
+}
+
+/// A browser holds few requests, on both the sign-in and the consent path.
+#[test]
+fn test_signin_a_browser_holds_few_open_requests() {
+    let fake = FakeProvider::start();
+    let srv = signin_server("signin-per-browser", &fake, &["github", "google"]);
+    let p = srv.port;
+    let client = register_client(p, &web_redirect(p));
+    let mut b = Browser::new(p);
+    let requests: Vec<String> = (0..6)
+        .map(|_| b.authorize(&client, &web_redirect(p), "s").location())
+        .collect();
+    assert_eq!(b.get(&requests[0]).status, 400, "the oldest went");
+    assert_eq!(b.get(&requests[1]).status, 200, "the rest stay");
+    assert_eq!(b.get(&requests[5]).status, 200);
+
+    let mut signed_in = Browser::new(p);
+    web_sign_in(
+        &mut signed_in,
+        &fake,
+        "github",
+        profile_of("github", 1, "a"),
+    );
+    let external = register_external(p);
+    let requests: Vec<String> = (0..6)
+        .map(|_| {
+            signed_in
+                .authorize(&external, EXTERNAL_REDIRECT, "s")
+                .location()
+        })
+        .collect();
+    assert_eq!(signed_in.get(&requests[0]).status, 400);
+    assert_eq!(signed_in.get(&requests[5]).status, 200);
+}
+
 /// A free account does not buy unlimited rendering and upstream quota, and one
 /// user's flood is not another's problem.
 #[test]
@@ -3656,9 +3825,9 @@ fn test_signin_pending_logins_are_bounded() {
     web_sign_in(&mut holder, &fake, "github", profile_of("github", 1, "a"));
     let client = register_client(p, &web_redirect(p));
     let mut limited = None;
-    let mut b = Browser::new(p);
     for i in 0..2100 {
-        let page = b.authorize(&client, &web_redirect(p), "s");
+        // A browser of its own each time, or its own limit would keep this from filling up.
+        let page = Browser::new(p).authorize(&client, &web_redirect(p), "s");
         if page.status == 429 {
             limited = Some((i, page));
             break;

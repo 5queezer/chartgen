@@ -15,8 +15,11 @@ const LOGIN_TTL: Duration = Duration::from_secs(600);
 /// Open client requests, and open provider round trips, in the whole server. At the
 /// limit new sign-ins get a 429 until entries expire; sessions in use are not touched.
 const MAX_PENDING_LOGINS: usize = 2000;
-/// Hits on the login endpoints per client address per `LOGIN_WINDOW`. Loopback peers
-/// are exempt as for `/register`, so behind a same-host proxy only the cap above applies.
+/// Open client requests per browser, and per signed-in user: past it the oldest goes.
+const MAX_PENDING_PER_BROWSER: usize = 5;
+/// Login hits that create state, per client address per `LOGIN_WINDOW`. Junk creates
+/// none and costs nothing. Loopback peers are exempt as for `/register`, so behind a
+/// same-host proxy with no trusted header only the cap above applies.
 const MAX_LOGIN_HITS_PER_IP: usize = 120;
 const LOGIN_WINDOW: Duration = Duration::from_secs(60);
 const SESSION_TTL_SECS: i64 = 30 * 24 * 3600;
@@ -211,6 +214,8 @@ pub(super) struct PendingRequest {
     pub(super) code_challenge_method: String,
     pub(super) state: Option<String>,
     browser: String,
+    /// The signed-in user who asked, for the limit per user.
+    user: Option<String>,
     created_at: Instant,
     /// Set when the consent page was shown: the session it was shown to and the
     /// token its form must return.
@@ -422,13 +427,32 @@ impl SignIn {
         let now = Instant::now();
         self.pending
             .retain(|_, p| now.duration_since(p.created_at) < LOGIN_TTL);
-        self.flows
-            .retain(|_, f| now.duration_since(f.created_at) < LOGIN_TTL);
+        let pending = &self.pending;
+        self.flows.retain(|_, f| {
+            now.duration_since(f.created_at) < LOGIN_TTL && pending.contains_key(&f.request)
+        });
         let unix = now_unix();
         self.sessions.retain(|_, s| s.expires_at > unix);
     }
 
-    /// Count a hit on a login endpoint from `peer`; false when over the limit.
+    /// Keep this browser's and this user's open requests below their limit for one
+    /// more, oldest going first with their provider round trips.
+    fn make_room_for_request(&mut self, browser: &str, user: Option<&str>) {
+        let mut mine: Vec<(Instant, String)> = self
+            .pending
+            .iter()
+            .filter(|(_, p)| p.browser == browser || (user.is_some() && p.user.as_deref() == user))
+            .map(|(id, p)| (p.created_at, id.clone()))
+            .collect();
+        mine.sort();
+        let excess = (mine.len() + 1).saturating_sub(MAX_PENDING_PER_BROWSER);
+        for (_, id) in mine.into_iter().take(excess) {
+            self.pending.remove(&id);
+            self.flows.retain(|_, f| f.request != id);
+        }
+    }
+
+    /// Count a login hit that creates state from `peer`; false when over the limit.
     fn admit_login(&mut self, peer: &str, now: Instant) -> bool {
         self.login_hits.retain(|_, hits| {
             hits.retain(|t| now.duration_since(*t) < LOGIN_WINDOW);
@@ -977,7 +1001,8 @@ pub(super) fn authorize(
         code_challenge: params.code_challenge.clone(),
         code_challenge_method: params.code_challenge_method.clone(),
         state: params.state.clone(),
-        browser,
+        browser: browser.clone(),
+        user: session.as_ref().map(|(_, user)| user.clone()),
         created_at: Instant::now(),
         consent: None,
     };
@@ -990,12 +1015,11 @@ pub(super) fn authorize(
                 None => expired_page(),
             };
         }
-    } else if !signin.admit_login(peer, Instant::now()) {
+    }
+    if !signin.admit_login(peer, Instant::now()) || signin.pending.len() >= MAX_PENDING_LOGINS {
         return too_many_page();
     }
-    if signin.pending.len() >= MAX_PENDING_LOGINS {
-        return too_many_page();
-    }
+    signin.make_room_for_request(&browser, session.as_ref().map(|(_, user)| user.as_str()));
     let id = random_token();
     signin.pending.insert(id.clone(), request);
     let next = if session.is_some() {
@@ -1067,16 +1091,18 @@ pub(super) async fn login(
             &format!("<p>This server does not offer that way to sign in.</p>{BACK_LINK}"),
         );
     };
-    if !signin.admit_login(&client_addr(&ext), Instant::now())
-        || signin.flows.len() >= MAX_PENDING_LOGINS
-    {
-        return too_many_page();
-    }
     let Some(browser) =
         browser_of(&headers).filter(|b| signin.pending_for(&q.request, Some(b)).is_some())
     else {
         return expired_page();
     };
+    // One round trip per request, so these cannot outnumber the requests. Starting
+    // another for the same request replaces it and creates nothing, so it is not counted.
+    let replacing = signin.flows.values().any(|f| f.request == q.request);
+    if !replacing && !signin.admit_login(&client_addr(&headers, &ext), Instant::now()) {
+        return too_many_page();
+    }
+    signin.flows.retain(|_, f| f.request != q.request);
     let flow_state = random_token();
     let verifier = random_token();
     let challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()));
@@ -1144,7 +1170,12 @@ pub(super) async fn callback(
             return StatusCode::NOT_FOUND.into_response();
         };
         signin.cleanup();
-        if !signin.admit_login(&client_addr(&ext), Instant::now()) {
+        // Only a `state` of ours counts, and a refusal leaves it for a retry.
+        let known = q
+            .state
+            .as_deref()
+            .is_some_and(|flow_state| signin.flows.contains_key(flow_state));
+        if known && !signin.admit_login(&client_addr(&headers, &ext), Instant::now()) {
             return too_many_page();
         }
         let config = signin.config.clone();
@@ -1808,6 +1839,7 @@ mod tests {
             code_challenge_method: "S256".to_string(),
             state: Some("st".to_string()),
             browser: "b".to_string(),
+            user: None,
             created_at: Instant::now(),
             consent: None,
         }
@@ -1907,6 +1939,74 @@ mod tests {
         token_for(&mut s, 0, "github:2", 5000);
         s.trim_user_tokens("github:1");
         assert!(keeps(&s, 0));
+    }
+
+    #[test]
+    fn a_browser_and_a_user_hold_few_requests_and_the_oldest_goes() {
+        let mut s = store_with("c1", "https://client.example/cb");
+        let signin = s.signin.as_mut().unwrap();
+        let t0 = Instant::now();
+        let add = |signin: &mut SignIn, id: &str, browser: &str, user: Option<&str>, age: u64| {
+            let mut p = pending("c1", "https://client.example/cb");
+            p.browser = browser.to_string();
+            p.user = user.map(str::to_string);
+            p.created_at = t0 - Duration::from_secs(age);
+            signin.pending.insert(id.to_string(), p);
+        };
+        for i in 0..MAX_PENDING_PER_BROWSER {
+            add(signin, &format!("b{i}"), "b", None, 100 - i as u64);
+        }
+        add(signin, "other", "another-browser", None, 200);
+        signin.flows.insert(
+            "state-of-b0".to_string(),
+            ProviderFlow {
+                provider: Provider::GitHub,
+                request: "b0".to_string(),
+                browser: "b".to_string(),
+                verifier: String::new(),
+                created_at: t0,
+            },
+        );
+        signin.make_room_for_request("b", None);
+        assert!(!signin.pending.contains_key("b0"), "the oldest goes");
+        assert!(signin.flows.is_empty(), "with its round trip");
+        assert!(signin.pending.contains_key("b1"));
+        assert!(
+            signin.pending.contains_key("other"),
+            "another browser's stays"
+        );
+
+        // Leaving the browser cookie out buys a signed-in user nothing.
+        for i in 0..MAX_PENDING_PER_BROWSER {
+            add(
+                signin,
+                &format!("u{i}"),
+                &format!("fresh-{i}"),
+                Some("github:1"),
+                50 - i as u64,
+            );
+        }
+        signin.make_room_for_request("fresh-again", Some("github:1"));
+        assert!(!signin.pending.contains_key("u0"));
+        assert!(signin.pending.contains_key("u1"));
+    }
+
+    #[test]
+    fn a_round_trip_does_not_outlive_its_request() {
+        let mut s = store_with("c1", "https://client.example/cb");
+        let signin = s.signin.as_mut().unwrap();
+        signin.flows.insert(
+            "orphan".to_string(),
+            ProviderFlow {
+                provider: Provider::GitHub,
+                request: "gone".to_string(),
+                browser: "b".to_string(),
+                verifier: String::new(),
+                created_at: Instant::now(),
+            },
+        );
+        signin.cleanup();
+        assert!(signin.flows.is_empty());
     }
 
     #[cfg(feature = "scripting")]
