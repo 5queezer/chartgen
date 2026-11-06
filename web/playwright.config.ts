@@ -29,6 +29,9 @@ const REUSE_SERVER = !process.env.CI && process.env.PW_REUSE_SERVER === "1";
 // is used: a reused server keeps its own store, which on a dev server is the
 // real ~/.chartgen/chartgen.db, and collects the test clients there.
 const CHARTGEN_DB = join(tmpdir(), `chartgen-e2e-${CHARTGEN_PORT}.db`);
+// The webhook receiver of server-alerts.spec.ts. The server only accepts this
+// local origin because it runs on the sample source (ADR-0042).
+const WEBHOOK_PORT = CHARTGEN_PORT - 1_000;
 
 export default defineConfig({
   testDir: "./tests/e2e",
@@ -65,7 +68,12 @@ export default defineConfig({
       command: `rm -f "${CHARTGEN_DB}" && cargo run -- --serve --port ${CHARTGEN_PORT}`,
       cwd: "..",
       port: CHARTGEN_PORT,
-      env: { CHARTGEN_DATA_SOURCE: "sample", CHARTGEN_DB },
+      env: {
+        CHARTGEN_DATA_SOURCE: "sample",
+        CHARTGEN_DB,
+        CHARTGEN_SERVER_ALERTS: "1",
+        CHARTGEN_WEBHOOK_TEST_ORIGIN: `http://127.0.0.1:${WEBHOOK_PORT}`,
+      },
       reuseExistingServer: REUSE_SERVER,
       // Cold build can chew several minutes on a slow CI runner.
       // Cached Swatinem builds drop this to seconds.

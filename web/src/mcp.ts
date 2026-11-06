@@ -10,25 +10,34 @@ import type { Notification } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 
 import type {
+  CreateServerAlertInput,
+  DeleteServerAlertInput,
   GenerateChartInput,
   GetQuotesInput,
   SearchSymbolsInput,
   SubscribeChartInput,
   UnsubscribeChartInput,
+  UpdateServerAlertInput,
 } from "./types/generated-input";
 import {
   CHART_TICK_METHOD,
   ChartTickParamsSchema,
+  DeleteServerAlertPayloadSchema,
   ListIndicatorsPayloadSchema,
   QuotesPayloadSchema,
   SearchSymbolsPayloadSchema,
   SeriesPayloadSchema,
+  ServerAlertChangePayloadSchema,
+  ServerAlertsPayloadSchema,
   SubscribeChartPayloadSchema,
   UnsubscribeChartPayloadSchema,
+  type DeleteServerAlertPayload,
   type ListIndicatorsPayload,
   type QuotesPayload,
   type SearchSymbolsPayload,
   type SeriesPayload,
+  type ServerAlertChangePayload,
+  type ServerAlertsPayload,
   type SubscribeChartPayload,
   type UnsubscribeChartPayload,
 } from "./types/responses";
@@ -97,6 +106,14 @@ export interface McpSession {
   callUnsubscribeChart: (
     args: UnsubscribeChartInput,
   ) => Promise<UnsubscribeChartPayload>;
+  /** Invoke `list_server_alerts`; says so when the server does not run them. */
+  callListServerAlerts: () => Promise<ServerAlertsPayload>;
+  /** Invoke `create_server_alert`; a signing secret is only in this response. */
+  callCreateServerAlert: (args: CreateServerAlertInput) => Promise<ServerAlertChangePayload>;
+  /** Invoke `update_server_alert`. */
+  callUpdateServerAlert: (args: UpdateServerAlertInput) => Promise<ServerAlertChangePayload>;
+  /** Invoke `delete_server_alert`. */
+  callDeleteServerAlert: (args: DeleteServerAlertInput) => Promise<DeleteServerAlertPayload>;
   /** Install the handler for `notifications/chart_tick`. */
   onChartTick: (handler: ChartTickHandler) => void;
   /** Install a handler invoked for every other `notifications/*` frame. */
@@ -317,6 +334,31 @@ export function createMcpSession(): McpSession {
         args as unknown as Record<string, unknown>,
       );
       return UnsubscribeChartPayloadSchema.parse(json);
+    },
+    async callListServerAlerts() {
+      const json = await callToolWithAuthRetry("list_server_alerts", {});
+      return ServerAlertsPayloadSchema.parse(json);
+    },
+    async callCreateServerAlert(args) {
+      const json = await callToolWithAuthRetry(
+        "create_server_alert",
+        args as unknown as Record<string, unknown>,
+      );
+      return ServerAlertChangePayloadSchema.parse(json);
+    },
+    async callUpdateServerAlert(args) {
+      const json = await callToolWithAuthRetry(
+        "update_server_alert",
+        args as unknown as Record<string, unknown>,
+      );
+      return ServerAlertChangePayloadSchema.parse(json);
+    },
+    async callDeleteServerAlert(args) {
+      const json = await callToolWithAuthRetry(
+        "delete_server_alert",
+        args as unknown as Record<string, unknown>,
+      );
+      return DeleteServerAlertPayloadSchema.parse(json);
     },
     onChartTick(handler) {
       state.chartTickHandler = handler;

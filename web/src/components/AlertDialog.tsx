@@ -10,6 +10,10 @@
 // plot: of any indicator for the price, of the same indicator for a plot).
 // An existing alert keeps its source; its condition, value, trigger and
 // message can be edited.
+//
+// A price alert on a value can run on the server instead (ADR-0042), with no
+// browser open and an optional webhook. Drawing and indicator alerts cannot:
+// the dialog says so rather than offering it.
 
 import { Dialog } from "@kobalte/core";
 import {
@@ -46,6 +50,13 @@ import {
 } from "../stores/alerts";
 import { symbol as chartSymbol } from "../stores/layout";
 import {
+  createServerAlert,
+  serverAlertError,
+  serverAlerts,
+  serverAlertsEnabled,
+  updateServerAlert,
+} from "../stores/serverAlerts";
+import {
   requestNotificationPermission,
   showToast,
   unlockAudio,
@@ -74,7 +85,24 @@ interface Draft {
   price: string;
   trigger: AlertTrigger;
   message: string;
+  /** Run on the server (create only). */
+  onServer: boolean;
+  /** Set when editing a server alert. */
+  serverId?: string;
+  evaluateOn: "live" | "close";
+  /** New webhook URL; empty keeps the current one when editing. */
+  webhook: string;
+  /** The webhook's host when editing a server alert that has one. */
+  webhookHost?: string;
+  sign: boolean;
 }
+
+const SERVER_DEFAULTS = {
+  onServer: false,
+  evaluateOn: "live",
+  webhook: "",
+  sign: false,
+} as const;
 
 const [draft, setDraft] = createSignal<Draft | null>(null);
 
@@ -84,6 +112,8 @@ const priceText = (p: number) => String(+p.toFixed(priceDecimals(p)));
 export interface OpenAlertOptions {
   /** Edit this alert; the other fields are ignored. */
   id?: string;
+  /** Edit this server alert; the other fields are ignored. */
+  serverId?: string;
   /** Defaults to the chart symbol. */
   symbol?: string;
   /** Prefilled level value; defaults to the symbol's last live price, if known. */
@@ -98,6 +128,24 @@ export interface OpenAlertOptions {
 
 /** Open the dialog to create an alert (or edit one with `id`). */
 export function openAlertDialog(opts: OpenAlertOptions = {}): void {
+  const onServer = serverAlerts().find((a) => a.id === opts.serverId);
+  if (onServer) {
+    setDraft({
+      ...SERVER_DEFAULTS,
+      serverId: onServer.id,
+      symbol: onServer.symbol,
+      source: PRICE,
+      level: VALUE,
+      fixed: { kind: "price" },
+      condition: onServer.condition,
+      price: priceText(onServer.level),
+      trigger: onServer.trigger,
+      message: onServer.message ?? "",
+      evaluateOn: onServer.evaluate_on,
+      webhookHost: onServer.webhook?.host,
+    });
+    return;
+  }
   const existing =
     opts.id === undefined ? undefined : alerts().find((a) => a.id === opts.id);
   if (existing) {
@@ -109,6 +157,7 @@ export function openAlertDialog(opts: OpenAlertOptions = {}): void {
           ? String(src.against.value)
           : "";
     setDraft({
+      ...SERVER_DEFAULTS,
       id: existing.id,
       symbol: existing.symbol,
       source: PRICE,
@@ -124,6 +173,7 @@ export function openAlertDialog(opts: OpenAlertOptions = {}): void {
   const sym = opts.symbol ?? chartSymbol();
   const price = opts.price ?? (opts.source ? null : lastPrice(sym));
   setDraft({
+    ...SERVER_DEFAULTS,
     symbol: sym,
     source:
       opts.drawingId !== undefined ? drawingRef(opts.drawingId) : (opts.source ?? PRICE),
@@ -246,6 +296,9 @@ export interface AlertDialogProps {
 
 export function AlertDialog(props: AlertDialogProps): JSX.Element {
   const [error, setError] = createSignal<string | null>(null);
+  const [pending, setPending] = createSignal(false);
+  /** A new webhook secret, shown once before the dialog closes. */
+  const [secret, setSecret] = createSignal<string | null>(null);
 
   onMount(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -305,6 +358,7 @@ export function AlertDialog(props: AlertDialogProps): JSX.Element {
   const close = () => {
     setDraft(null);
     setError(null);
+    setSecret(null);
   };
 
   const patch = (p: Partial<Draft>) => {
@@ -323,6 +377,51 @@ export function AlertDialog(props: AlertDialogProps): JSX.Element {
       level: VALUE,
       price: value === null ? "" : plot ? String(+value.toPrecision(6)) : priceText(value),
     });
+  };
+
+  /** A plain price level: all a server alert can watch. */
+  const canRunOnServer = () => {
+    const d = draft();
+    return d !== null && d.id === undefined && d.source === PRICE && d.level === VALUE;
+  };
+  const runsOnServer = () => {
+    const d = draft();
+    return d !== null && (d.serverId !== undefined || (d.onServer && canRunOnServer()));
+  };
+
+  /** Create or change the server alert in the draft; shows a new secret once. */
+  const submitServer = async (d: Draft, level: number) => {
+    const webhook = d.webhook.trim();
+    const args = {
+      condition: d.condition,
+      level,
+      trigger: d.trigger,
+      message: d.message,
+      ...(webhook !== "" ? { webhook_url: webhook } : {}),
+      ...(d.sign ? { sign: true } : {}),
+    };
+    setPending(true);
+    try {
+      const saved =
+        d.serverId !== undefined
+          ? await updateServerAlert({ alert_id: d.serverId, ...args })
+          : await createServerAlert({
+              ...args,
+              symbol: d.symbol,
+              interval: props.series?.interval ?? "1m",
+              evaluate_on: d.evaluateOn,
+            });
+      if (d.serverId === undefined) {
+        requestNotificationPermission();
+        showToast(`Server alert created for ${d.symbol}`);
+      }
+      if (saved.webhook_secret !== undefined) setSecret(saved.webhook_secret);
+      else close();
+    } catch (err) {
+      setError(serverAlertError(err));
+    } finally {
+      setPending(false);
+    }
   };
 
   /** The new alert's source from the selects; a string is an error. */
@@ -374,6 +473,10 @@ export function AlertDialog(props: AlertDialogProps): JSX.Element {
       setError("Enter a price greater than zero.");
       return;
     }
+    if (runsOnServer()) {
+      void submitServer(d, value);
+      return;
+    }
     if (d.id !== undefined) {
       updateAlert(d.id, {
         condition: d.condition,
@@ -417,12 +520,32 @@ export function AlertDialog(props: AlertDialogProps): JSX.Element {
         <Dialog.Overlay class="fixed inset-0 z-40 bg-black/60" />
         <div class="fixed inset-0 z-50 flex items-start justify-center pt-[10vh] px-4">
           <Dialog.Content class="w-full max-w-md bg-[color:var(--color-bg)] border border-[color:var(--color-border)] rounded-lg shadow-xl">
-            <Show when={draft()}>
+            <Show when={secret()}>
+              {(s) => (
+                <div class="flex flex-col gap-3 p-4">
+                  <Dialog.Title class="text-sm font-semibold">Webhook secret</Dialog.Title>
+                  <p class="text-xs text-[color:var(--color-fg-muted)]">
+                    Copy it now. It signs each delivery and is not shown again.
+                  </p>
+                  <code data-role="webhook-secret" class="text-xs break-all select-all">
+                    {s()}
+                  </code>
+                  <div class="flex justify-end">
+                    <button type="button" class={buttonClass} onClick={close}>
+                      Done
+                    </button>
+                  </div>
+                </div>
+              )}
+            </Show>
+            <Show when={!secret() && draft()}>
               {(d) => (
                 <form class="flex flex-col gap-3 p-4" onSubmit={submit}>
                   <Dialog.Title class="text-sm font-semibold">
-                    {d().id === undefined ? "Create alert" : "Edit alert"} on{" "}
-                    {d().symbol}
+                    {d().id === undefined && d().serverId === undefined
+                      ? "Create alert"
+                      : "Edit alert"}{" "}
+                    on {d().symbol}
                   </Dialog.Title>
                   <Show
                     when={d().fixed}
@@ -541,6 +664,80 @@ export function AlertDialog(props: AlertDialogProps): JSX.Element {
                       onInput={(e) => patch({ message: e.currentTarget.value })}
                     />
                   </label>
+                  <Show when={d().id === undefined && d().serverId === undefined}>
+                    <Show
+                      when={canRunOnServer()}
+                      fallback={
+                        <p
+                          data-role="alert-browser-only"
+                          class="text-xs text-[color:var(--color-fg-muted)]"
+                        >
+                          Drawing and indicator alerts run in this browser, only while a tab is
+                          open.
+                        </p>
+                      }
+                    >
+                      <Show
+                        when={serverAlertsEnabled()}
+                        fallback={
+                          <p
+                            data-role="alert-browser-only"
+                            class="text-xs text-[color:var(--color-fg-muted)]"
+                          >
+                            This server does not run alerts: this one runs in this browser, only
+                            while a tab is open.
+                          </p>
+                        }
+                      >
+                        <label class="flex items-center justify-between gap-3 text-sm">
+                          Run on server
+                          <input
+                            type="checkbox"
+                            checked={d().onServer}
+                            onChange={(e) => patch({ onServer: e.currentTarget.checked })}
+                          />
+                        </label>
+                      </Show>
+                    </Show>
+                  </Show>
+                  <Show when={runsOnServer()}>
+                    <Show when={d().serverId === undefined}>
+                      <label class="flex items-center justify-between gap-3 text-sm">
+                        Check on
+                        <select
+                          class={selectClass}
+                          value={d().evaluateOn}
+                          onChange={(e) =>
+                            patch({ evaluateOn: e.currentTarget.value as Draft["evaluateOn"] })
+                          }
+                        >
+                          <option value="live">Every tick</option>
+                          <option value="close">
+                            Bar close ({props.series?.interval ?? "1m"})
+                          </option>
+                        </select>
+                      </label>
+                    </Show>
+                    <label class="flex items-center justify-between gap-3 text-sm">
+                      Webhook
+                      <input
+                        class={`${inputClass} text-left`}
+                        type="url"
+                        maxlength="512"
+                        placeholder={d().webhookHost ? `Keep ${d().webhookHost}` : "https:// (optional)"}
+                        value={d().webhook}
+                        onInput={(e) => patch({ webhook: e.currentTarget.value })}
+                      />
+                    </label>
+                    <label class="flex items-center justify-between gap-3 text-sm">
+                      Sign webhook
+                      <input
+                        type="checkbox"
+                        checked={d().sign}
+                        onChange={(e) => patch({ sign: e.currentTarget.checked })}
+                      />
+                    </label>
+                  </Show>
                   <Show when={error()}>
                     <p role="alert" class="text-xs text-[color:var(--color-danger)]">
                       {error()}
@@ -550,8 +747,8 @@ export function AlertDialog(props: AlertDialogProps): JSX.Element {
                     <button type="button" class={buttonClass} onClick={close}>
                       Cancel
                     </button>
-                    <button type="submit" class={buttonClass}>
-                      {d().id === undefined ? "Create" : "Save"}
+                    <button type="submit" class={buttonClass} disabled={pending()}>
+                      {d().id === undefined && d().serverId === undefined ? "Create" : "Save"}
                     </button>
                   </div>
                 </form>

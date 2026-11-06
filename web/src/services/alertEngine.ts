@@ -24,6 +24,12 @@ import type { LiveSnapshot } from "../lib/liveFeed";
 import { formatPrice } from "../lib/quote";
 import type { McpSession } from "../mcp";
 import { createQuotesQuery } from "../queries";
+import {
+  refreshServerAlerts,
+  serverAlertText,
+  setServerAlertSession,
+  takeNewFires,
+} from "../stores/serverAlerts";
 import { timeAxisOf } from "../stores/drawings";
 import { scaleMode } from "../stores/layout";
 import type { SeriesPayload } from "../types/responses";
@@ -37,6 +43,7 @@ import {
 } from "../stores/alerts";
 
 const TOAST_MS = 5_000;
+const SERVER_ALERT_POLL_MS = 5_000;
 // A triggered alert is worth reading; it stays longer than a confirmation.
 const ALERT_TOAST_MS = 8_000;
 /** Toasts visible at once; a new one pushes the oldest out. */
@@ -128,14 +135,13 @@ export function requestNotificationPermission(): void {
   }
 }
 
-function deliver(fired: Alert[]): void {
+function deliver(fired: readonly { id: string; text: string }[]): void {
   if (fired.length === 0) return;
-  for (const a of fired) {
-    const text = alertText(a);
+  for (const { id, text } of fired) {
     showToast(`Alert: ${text}`, ALERT_TOAST_MS);
     try {
       if (typeof Notification !== "undefined" && Notification.permission === "granted") {
-        new Notification("chartgen alert", { body: text, tag: a.id });
+        new Notification("chartgen alert", { body: text, tag: id });
       }
     } catch {
       // Some browsers throw (e.g. Android Chrome wants a service worker):
@@ -205,7 +211,9 @@ export function feedPrice(
     observePrice(symbol, price);
     return;
   }
-  deliver(processPrice(symbol, price, Date.now(), tick));
+  deliver(
+    processPrice(symbol, price, Date.now(), tick).map((a) => ({ id: a.id, text: alertText(a) })),
+  );
 }
 
 /**
@@ -251,6 +259,27 @@ export function chartTick(series: SeriesPayload): Tick {
       view: axis ? { axis, log: scaleMode() === "log" } : undefined,
     },
   };
+}
+
+/**
+ * Keep the server's alerts (ADR-0042) up to date while the tab is visible, and
+ * tell the user what fired. They never enter the browser's own list, so no tab
+ * evaluates them; the server fires them, and only the leading tab reports it.
+ */
+export function createServerAlertPoll(session: McpSession, enabled: Accessor<boolean>): void {
+  createEffect(() => {
+    if (!enabled()) return;
+    setServerAlertSession(session);
+    const tick = async () => {
+      if (document.visibilityState === "hidden") return;
+      if (!(await refreshServerAlerts())) return;
+      if (!leader()) return;
+      deliver(takeNewFires().map((a) => ({ id: a.id, text: serverAlertText(a) })));
+    };
+    void tick();
+    const timer = setInterval(() => void tick(), SERVER_ALERT_POLL_MS);
+    onCleanup(() => clearInterval(timer));
+  });
 }
 
 /**

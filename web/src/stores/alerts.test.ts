@@ -1,5 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+import semantics from "../../../tests/fixtures/alert_semantics.json";
+
 function stubStorage(initial: Record<string, string> = {}) {
   const data = new Map(Object.entries(initial));
   vi.stubGlobal("localStorage", {
@@ -29,6 +31,28 @@ const valid = {
 
 beforeEach(() => {
   vi.unstubAllGlobals();
+});
+
+describe("the fire rules the server shares (tests/fixtures/alert_semantics.json)", () => {
+  for (const c of semantics.cases) {
+    it(c.name, async () => {
+      stubStorage();
+      const { addAlert, alerts, forgetBaseline, processPrice } = await load();
+      addAlert({
+        symbol: "ETHUSDT",
+        condition: c.condition as "crossing",
+        trigger: c.trigger as "once",
+        price: c.level,
+      });
+      const fired: number[] = [];
+      c.prices.forEach((p, i) => {
+        if (p === null) forgetBaseline("ETHUSDT");
+        else if (processPrice("ETHUSDT", p).length > 0) fired.push(i);
+      });
+      expect(fired).toEqual(c.fires);
+      expect(alerts()[0]!.active).toBe(c.active);
+    });
+  }
 });
 
 describe("sanitizeAlerts", () => {

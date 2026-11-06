@@ -21,6 +21,52 @@ export interface CancelOrderInput {
   order_id: string;
 }
 
+export interface CreateServerAlertInput {
+  /**
+   * crossing: the price goes from one side of the level to the other, or onto it. crossing_up / crossing_down: only that way. greater / less: the price is above / below the level. A crossing needs a previous reading, so the first price the alert sees never fires one.
+   */
+  condition: "crossing" | "crossing_up" | "crossing_down" | "greater" | "less";
+  /**
+   * live: every price update, like a browser alert. close: only when a bar of the interval closes.
+   */
+  evaluate_on?: "live" | "close";
+  /**
+   * Bar interval with a Binance kline stream, e.g. 1m, 15m, 1h, 1d. With evaluate_on: close the alert reads the closes of these bars; with live it only labels the alert.
+   */
+  interval?: string;
+  /**
+   * The price level; greater than 0.
+   */
+  level: number;
+  /**
+   * Your note, sent in the webhook payload.
+   */
+  message?: string;
+  /**
+   * Sign deliveries with a per-alert secret (HMAC-SHA256). Needs webhook_url.
+   */
+  sign?: boolean;
+  /**
+   * Binance symbol, e.g. BTCUSDT.
+   */
+  symbol: string;
+  /**
+   * once: switch off after firing. every: stay active; greater and less wait until the price is back on the other side.
+   */
+  trigger: "once" | "every";
+  /**
+   * https URL to POST to when the alert fires.
+   */
+  webhook_url?: string;
+}
+
+export interface DeleteServerAlertInput {
+  /**
+   * The alert's id.
+   */
+  alert_id: string;
+}
+
 export interface GenerateChartInput {
   /**
    * Number of OHLCV candlestick bars to display (max 5000, all formats)
@@ -137,6 +183,8 @@ export interface ListAlertsInput {}
 
 export interface ListIndicatorsInput {}
 
+export interface ListServerAlertsInput {}
+
 export interface ListSubscriptionsInput {}
 
 export interface PlaceOrderInput {
@@ -240,3 +288,38 @@ export interface UnsubscribeChartInput {
 }
 
 export interface UnsubscribeNotificationsInput {}
+
+export interface UpdateServerAlertInput {
+  /**
+   * Pause (false) or resume (true).
+   */
+  active?: boolean;
+  /**
+   * The alert's id.
+   */
+  alert_id: string;
+  /**
+   * crossing: the price goes from one side of the level to the other, or onto it. crossing_up / crossing_down: only that way. greater / less: the price is above / below the level. A crossing needs a previous reading, so the first price the alert sees never fires one.
+   */
+  condition?: "crossing" | "crossing_up" | "crossing_down" | "greater" | "less";
+  /**
+   * The price level; greater than 0.
+   */
+  level?: number;
+  /**
+   * Your note; an empty string removes it.
+   */
+  message?: string;
+  /**
+   * true: sign with a new secret. false: stop signing.
+   */
+  sign?: boolean;
+  /**
+   * once: switch off after firing. every: stay active; greater and less wait until the price is back on the other side.
+   */
+  trigger?: "once" | "every";
+  /**
+   * New https URL, or an empty string to remove the webhook.
+   */
+  webhook_url?: string;
+}

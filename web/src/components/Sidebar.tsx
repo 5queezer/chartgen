@@ -8,6 +8,7 @@ import { For, Show, createSignal, type JSX } from "solid-js";
 
 import type { McpSession } from "../mcp";
 import { alerts } from "../stores/alerts";
+import { serverAlerts } from "../stores/serverAlerts";
 import { watchlistCollapsed } from "../stores/watchlist";
 import { AlertsPanel } from "./AlertsPanel";
 import { DataWindow, type DataWindowProps } from "./DataWindow";
@@ -61,7 +62,8 @@ export interface SidebarProps {
 }
 
 export function Sidebar(props: SidebarProps): JSX.Element {
-  const activeCount = () => alerts().filter((a) => a.active).length;
+  const activeCount = () =>
+    alerts().filter((a) => a.active).length + serverAlerts().filter((a) => a.active).length;
 
   return (
     <Show
