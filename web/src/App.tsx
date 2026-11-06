@@ -40,6 +40,7 @@ import { IndicatorSettings } from "./components/IndicatorSettings";
 import { LayoutMenu } from "./components/LayoutMenu";
 import {
   openScriptEditor,
+  scriptEditorOpen,
   ScriptEditorButton,
   ScriptEditorDock,
 } from "./components/ScriptEditorDock";
@@ -758,6 +759,7 @@ export function App(): JSX.Element {
             history={historyStatus()}
             onLoadOlder={feed.loadOlder}
             activeIndicators={wireIndicators()}
+            fitPanes={scriptEditorOpen()}
             styles={plotStyles()}
             chartType={chartType()}
             timeZone={resolveTimeZone(timeZone(), symbol())}

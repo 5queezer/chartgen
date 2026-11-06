@@ -11,6 +11,9 @@ const ScriptEditor = lazy(() => import("./ScriptEditor"));
 
 const [open, setOpen] = createSignal(false);
 
+/** Whether the panel is open: the chart then fits its panes to what is left. */
+export const scriptEditorOpen = open;
+
 export const openScriptEditor = (): void => {
   setOpen(true);
 };

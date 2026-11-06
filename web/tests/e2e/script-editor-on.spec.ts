@@ -948,44 +948,85 @@ test.describe("panel size", () => {
     });
   }
 
-  for (const [width, height] of [[1280, 720], [1440, 780], [1920, 950]] as const) {
-    test(`docked with room for the price pane: ${width}x${height}`, async ({ page }) => {
-      await page.setViewportSize({ width, height });
-      await gotoApp(page);
-      await openEditor(page);
-      const panel = (await page.getByTestId("script-editor").boundingBox())!;
-      expect(panel.height).toBeLessThanOrEqual(height * 0.45 + 1);
-      expect(panel.y + panel.height).toBeLessThanOrEqual(height);
-      // Nothing of the chart's side reaches into the panel.
-      const main = (await page.locator("main").boundingBox())!;
-      expect(main.y + main.height).toBeLessThanOrEqual(panel.y);
-      // A mouse keeps the compact controls and the editor's own text size.
-      expect((await page.getByTestId("script-save").boundingBox())!.height).toBeLessThan(40);
-      expect(await code(page).evaluate((el) => getComputedStyle(el).fontSize)).toBe("13px");
-      // Docked, the chart may shrink; the rule is scoped away from the compact shell.
-      expect(await page.locator(".chart-host").evaluate((el) => getComputedStyle(el).minHeight)).toBe("120px");
-      // The drawing toolbar still fits: its last button is not cut off.
-      const last = (await page.getByRole("button", { name: "Remove all drawings" }).boundingBox())!;
-      expect(last.y + last.height).toBeLessThanOrEqual(main.y + main.height);
-      for (const id of ["script-new", "script-name", "script-save", "script-close"]) {
-        expect(await reachable(page, id), id).toBe(true);
-      }
-      await expect
-        .poll(
-          () =>
-            page.evaluate(() => {
-              const t = (window as unknown as {
-                __chartgenTest: {
-                  chart: () => { getSize: (pane: string) => { height: number } | null } | null;
-                };
-              }).__chartgenTest;
-              return t.chart()?.getSize("candle_pane")?.height ?? 0;
-            }),
-          { timeout: 5_000 },
-        )
-        .toBeGreaterThanOrEqual(60);
+  const candleHeight = (page: Page) =>
+    page.evaluate(() => {
+      const t = (window as unknown as {
+        __chartgenTest: {
+          chart: () => { getSize: (pane: string) => { height: number } | null } | null;
+        };
+      }).__chartgenTest;
+      return t.chart()?.getSize("candle_pane")?.height ?? 0;
     });
+
+  const FIVE = ["ema_stack", "volume", "rsi", "macd", "stoch"];
+
+  for (const [width, height] of [[1280, 720], [1440, 780], [1920, 950]] as const) {
+    for (const [label, indicators] of [["the default indicators", null], ["five indicators", FIVE]] as const) {
+      test(`docked with room for the price pane: ${width}x${height}, ${label}`, async ({ page }) => {
+        if (indicators) await seedIndicators(page, [...indicators]);
+        await page.setViewportSize({ width, height });
+        await gotoApp(page);
+        // Opened well after load, as a user does: nothing may depend on the
+        // layout the chart was still settling into right after it.
+        await page.waitForTimeout(6000);
+        const before = await candleHeight(page);
+        await openEditor(page);
+
+        const panel = (await page.getByTestId("script-editor").boundingBox())!;
+        expect(panel.height).toBeLessThanOrEqual(height * 0.45 + 1);
+        expect(panel.y + panel.height).toBeLessThanOrEqual(height);
+        // Nothing of the chart's side reaches into the panel.
+        const main = (await page.locator("main").boundingBox())!;
+        expect(main.y + main.height).toBeLessThanOrEqual(panel.y);
+        // A mouse keeps the compact controls and the editor's own text size.
+        expect((await page.getByTestId("script-save").boundingBox())!.height).toBeLessThan(40);
+        expect(await code(page).evaluate((el) => getComputedStyle(el).fontSize)).toBe("13px");
+        // Docked, the chart may shrink; the rule is scoped away from the compact shell.
+        expect(await page.locator(".chart-host").evaluate((el) => getComputedStyle(el).minHeight)).toBe("120px");
+        // The drawing toolbar still fits: its last button is not cut off.
+        const last = (await page.getByRole("button", { name: "Remove all drawings" }).boundingBox())!;
+        expect(last.y + last.height).toBeLessThanOrEqual(main.y + main.height);
+        for (const id of ["script-new", "script-name", "script-save", "script-close"]) {
+          expect(await reachable(page, id), id).toBe(true);
+        }
+        await expect.poll(() => candleHeight(page), { timeout: 5_000 }).toBeGreaterThanOrEqual(100);
+        // And it stays there: nothing later undoes the fit.
+        await page.waitForTimeout(2500);
+        expect(await candleHeight(page)).toBeGreaterThanOrEqual(100);
+
+        // Closing gives the sub-panes their heights back.
+        await page.getByTestId("script-close").click();
+        await expect.poll(() => candleHeight(page), { timeout: 5_000 }).toBe(before);
+      });
+    }
   }
+
+  test("the fit holds when a script is added and saved while docked", async ({ page }) => {
+    await page.setViewportSize({ width: 1280, height: 720 });
+    await gotoApp(page);
+    await page.waitForTimeout(3000);
+    await openEditor(page);
+    await saveNew(page, "docked_pane", script('    chart.line(1.0, title = "Docked")'));
+    await page.getByTestId("script-add").click();
+    await expect.poll(() => plotted(page, "docked_pane"), { timeout: 30_000 }).not.toBeNull();
+    await expect.poll(() => candleHeight(page), { timeout: 5_000 }).toBeGreaterThanOrEqual(100);
+
+    await setCode(page, script('    chart.line(2.0, title = "Docked again")'));
+    await page.getByTestId("script-save").click();
+    await expect.poll(() => plotted(page, "docked_pane"), { timeout: 30_000 }).toEqual({ label: "Docked again", last: 2 });
+    await page.waitForTimeout(1000);
+    expect(await candleHeight(page)).toBeGreaterThanOrEqual(100);
+  });
+
+  test("a full-screen panel leaves the chart as it was", async ({ page }) => {
+    await page.setViewportSize({ width: 1280, height: 600 });
+    await gotoApp(page);
+    await page.waitForTimeout(3000);
+    const before = await candleHeight(page);
+    await openEditor(page);
+    await page.getByTestId("script-close").click();
+    await expect.poll(() => candleHeight(page), { timeout: 5_000 }).toBe(before);
+  });
 });
 
 test("a failed tools/list at boot does not hide the editor for the session", async ({ page }) => {
