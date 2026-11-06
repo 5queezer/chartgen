@@ -4,7 +4,7 @@
 
 import type { Page, Request } from "@playwright/test";
 
-import { test, expect, gotoApp, reloadApp } from "./fixtures/app";
+import { test, expect, gotoApp, reloadApp, openSidebarTab } from "./fixtures/app";
 
 // Every tab also asks once for the script editor (`createToolNamesQuery`, ADR-0041).
 const EDITOR = 1;
@@ -48,7 +48,7 @@ test("a second tab asks nothing while the first leads", async ({ page, context }
 });
 
 test("the dialog says an alert runs in this browser, and offers no server", async ({ bootedApp: page }) => {
-  await page.getByRole("tab", { name: /^Alerts/ }).click();
+  await openSidebarTab(page, /^Alerts/);
   await page.getByRole("button", { name: "Create alert" }).click();
   const dialog = page.getByRole("dialog");
   await expect(dialog.locator('[data-role="alert-browser-only"]')).toContainText(
@@ -90,7 +90,7 @@ test("what an earlier server shared does not outlive it being off", async ({ boo
     ),
   );
   await reloadApp(page);
-  await page.getByRole("tab", { name: /^Alerts/ }).click();
+  await openSidebarTab(page, /^Alerts/);
   await page.getByRole("button", { name: "Create alert" }).click();
   await expect(page.getByRole("dialog").getByLabel("Run on server")).toHaveCount(0);
   await expect(

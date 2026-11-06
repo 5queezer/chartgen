@@ -11,7 +11,7 @@
 
 import type { Page } from "@playwright/test";
 
-import { test, expect, reloadApp } from "./fixtures/app";
+import { test, expect, reloadApp, openSidebarTab } from "./fixtures/app";
 
 const shot = async (page: Page, name: string) => {
   const dir = process.env.ALERT_SHOTS_DIR;
@@ -140,7 +140,7 @@ test.describe("price alerts", () => {
     await expect.poll(() => lineCount(page)).toBe(1);
     await shot(page, "alert-line");
 
-    await alertsTab(page).click();
+    await openSidebarTab(page, /^Alerts/);
     await expect(rows(page)).toHaveCount(1);
     await expect(rows(page)).toHaveAttribute("data-status", "active");
     await shot(page, "alerts-tab");
@@ -196,7 +196,7 @@ test.describe("price alerts", () => {
     await mockNotifications(page);
     const L = await lowLevel(page);
     await createAlert(page, { condition: "crossing_up", price: L, trigger: "every" });
-    await alertsTab(page).click();
+    await openSidebarTab(page, /^Alerts/);
     await feed(page, [L - 1, L + 1, L + 2, L - 1, L + 1]);
     expect(await notes(page)).toHaveLength(2);
     await expect(rows(page)).toHaveAttribute("data-status", "active");
@@ -220,7 +220,7 @@ test.describe("price alerts", () => {
     bootedApp: page,
   }) => {
     const far = Math.round((await lastClose(page)) * 3);
-    await alertsTab(page).click();
+    await openSidebarTab(page, /^Alerts/);
     await page.getByRole("button", { name: "Create alert" }).click();
     await expect(dialog(page)).toBeVisible();
     await dialog(page).getByLabel("Condition").selectOption("greater");
@@ -257,7 +257,7 @@ test.describe("price alerts", () => {
   }) => {
     const far = Math.round((await lastClose(page)) * 3);
     await createAlert(page, { condition: "greater", price: far, message: "far away" });
-    await alertsTab(page).click();
+    await openSidebarTab(page, /^Alerts/);
     await expect(rows(page)).toHaveCount(1);
 
     await reloadApp(page);
@@ -317,7 +317,7 @@ test.describe("price alerts", () => {
       return Math.max(...bars.slice(-30).map((b) => b.h));
     });
     await createAlert(page, { condition: "greater", price: +level.toFixed(2) });
-    await alertsTab(page).click();
+    await openSidebarTab(page, /^Alerts/);
     await expect.poll(() => lineCount(page)).toBe(1);
 
     const [line] = await page.evaluate(
@@ -353,11 +353,11 @@ test.describe("price alerts", () => {
     expect(stored[0]!.price).toBeLessThan(line!.value);
     expect(stored[0]!.price).toBeGreaterThan(0);
 
-    await page.getByRole("tab", { name: "Watchlist" }).click();
+    await openSidebarTab(page, "Watchlist");
     await page.getByRole("button", { name: "Show ETHUSDT on the chart" }).click();
     await expect(page.getByRole("button", { name: /^Symbol:.*ETHUSDT/ })).toBeVisible();
     await expect.poll(() => lineCount(page)).toBe(0);
-    await alertsTab(page).click();
+    await openSidebarTab(page, /^Alerts/);
     await rows(page).click();
     await expect(page.getByRole("button", { name: /^Symbol:.*BTCUSDT/ })).toBeVisible();
     await expect.poll(() => lineCount(page)).toBe(1);
