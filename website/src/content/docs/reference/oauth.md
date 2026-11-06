@@ -119,31 +119,53 @@ a volume: the web app re-registers by itself and an MCP client registers again.
 
 If every client without scripts holds a live token, nothing can be evicted. New
 browsers, browsers recovering from a stale client and new MCP clients then cannot
-sign in. The server logs this at most once a minute:
+sign in, while clients already registered keep working. The server logs this at most
+once a minute:
 
 ```text
 [OAuth] /register refused: client table full at 1000 clients, 12 refusal(s) since the last line. ...
 ```
 
-Nothing ends this by itself, and neither does a restart. A restart drops the tokens
-and they expire after 7 days, but the clients persist, and `/authorize` and `/token`
-issue new tokens with no `/register` and no rate limit. Someone who filled the table
-can keep it full, so this lasts until an operator acts:
+**Usually this clears without deleting anything, so do not start by deleting
+registrations.** A token expires after 7 days, and its client can then be evicted
+unless it has a new one. To clear it sooner, restart the server. A restart drops every
+token, so the next registrations can evict clients without scripts, and clients in use
+sign in again by themselves.
+
+**Delete only if it keeps coming back.** If `/register` returns to `503` soon after a
+restart, something is keeping every client live. `/authorize` and `/token` issue new
+tokens with no `/register` and no rate limit, so someone who filled the table can keep
+it full through restarts and expiry, and it lasts until an operator acts. The server
+cannot tell this from 1000 clients really in use, and deleting real clients only makes
+them register again.
 
 1. Stop the server. A running server keeps its clients in memory and would not
    notice.
-2. Run this on the file at `CHARTGEN_DB`. The Docker image has no `sqlite3`, so run
-   it from the host on the file in the volume.
+2. Find the file `CHARTGEN_DB` names, by its path on the host. With the named volume in
+   the [deploy guide](/chartgen/guides/deploy/#docker), `docker volume inspect
+   chartgen-data` shows the directory as `Mountpoint`. The Docker image has no
+   `sqlite3`, so run this from the host, with your path in place of the placeholder:
 
    ```bash
-   sqlite3 chartgen.db "DELETE FROM oauth_clients WHERE client_id NOT IN (SELECT user_id FROM user_indicators);"
+   sqlite3 /host/path/to/chartgen.db "DELETE FROM oauth_clients WHERE client_id NOT IN (SELECT user_id FROM user_indicators);"
    ```
 
+   A wrong path changes nothing: `sqlite3` creates an empty file there and fails with
+   `no such table: oauth_clients`. Remove that file and use the right path.
 3. Start the server.
 
 This removes every client that owns no scripts, and clients that own scripts stay.
 The removed ones recover like evicted clients, and keeping the table full then takes
 filling it again through the rate-limited `/register`.
+
+**A table full of script owners is different.** Owners are never evicted, so neither
+waiting nor a restart frees anything, and the statement above deletes nothing. A slot
+only comes free by choosing whose scripts go. With the server stopped, remove that
+client from both tables:
+
+```bash
+sqlite3 /host/path/to/chartgen.db "DELETE FROM user_indicators WHERE user_id = '<client_id>'; DELETE FROM oauth_clients WHERE client_id = '<client_id>';"
+```
 
 ## MCP handler behavior
 

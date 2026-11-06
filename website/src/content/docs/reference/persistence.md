@@ -133,10 +133,16 @@ CREATE TABLE oauth_clients (
 );
 ```
 
-A directory that does not exist yet is created owner-only (0700); an existing
-one keeps its mode. The file is always 0600. Clients with no token 24 hours after
-registering are deleted at startup and on each registration, unless they own
-scripts.
+On Unix, a directory that does not exist yet is created owner-only (0700), and an
+existing one keeps its mode. The file is created 0600, and an existing file is set to
+0600 when the server opens it. These steps are best effort: a failure is not logged
+and the server carries on, for example when another user owns the file or the
+filesystem ignores modes. On Windows the server sets no permissions or ACLs, so the
+directory and file inherit theirs. The file holds client ids and scripts, so check who
+can read it, especially on Windows or a mounted volume.
+
+Clients with no token 24 hours after registering are deleted at startup and on each
+registration, unless they own scripts.
 
 `oauth_clients` keeps dynamically registered OAuth clients across restarts,
 so a client keeps its `client_id`, and with it any scripts. Access tokens stay
