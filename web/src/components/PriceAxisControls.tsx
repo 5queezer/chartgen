@@ -40,6 +40,7 @@ import {
   type ScaleMode,
 } from "../stores/layout";
 import { chartSettings } from "../stores/chartSettings";
+import { compareSymbols } from "../stores/compare";
 import type { SeriesPayload } from "../types/responses";
 
 const CANDLE_PANE_ID = "candle_pane";
@@ -132,6 +133,10 @@ export function PriceAxisControls(props: PriceAxisControlsProps): JSX.Element {
   // Lock price to bar ratio: see lib/priceRatio.ts. `ratio` is captured the
   // first time the lock applies with data, and dropped when it is released or
   // the symbol or interval changes (a new instrument has its own scale).
+  // Compare lines pause it: they are rebased to the first visible bar, so a
+  // fixed price range says nothing about them and would crop them; the axis
+  // fits every series until the last compare symbol goes.
+  const comparing = createMemo(() => compareSymbols().length > 0);
   let ratio: number | null = null;
   let gap: Gap = DEFAULT_GAP;
   let lockKey = "";
@@ -146,7 +151,7 @@ export function PriceAxisControls(props: PriceAxisControlsProps): JSX.Element {
   };
   const applyLock = () => {
     const c = props.chart;
-    if (!c || !untrack(lockRatio)) return;
+    if (!c || !untrack(lockRatio) || untrack(comparing)) return;
     const data = c.getDataList();
     // Without data klinecharts fits a 0..10 range, which must not become the ratio.
     if (data.length === 0) return;
@@ -224,6 +229,7 @@ export function PriceAxisControls(props: PriceAxisControlsProps): JSX.Element {
     if (!c) return;
     const locked = lockRatio();
     scaleMode();
+    comparing();
     resetGap(c);
     zoomed = false;
     if (locked && !wasLocked) {

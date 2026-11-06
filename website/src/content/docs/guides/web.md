@@ -136,6 +136,9 @@ Symbol, timeframe, chart type, price-scale mode, theme, time zone and recent sym
   when zoomed in the window slides to keep the last visible close in view.
   The ratio is taken when you turn the lock on, and again for a new symbol
   or timeframe; after a window resize it keeps the price range on screen.
+  While compare symbols are shown the lock is paused and the axis fits every
+  series, because a fixed price range would crop lines rebased to the first
+  visible bar; it resumes from a fresh fit when the last one is removed.
   Locking turns `auto` off; clicking `auto`, double-clicking the axis,
   dragging the axis or `Alt+R` releases the lock. While it is locked the
   price axis cannot be panned vertically (TradingView allows it). Invert
