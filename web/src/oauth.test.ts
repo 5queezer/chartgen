@@ -362,6 +362,149 @@ describe("stale client (?error=invalid_client)", () => {
   });
 });
 
+describe("registering from several tabs", () => {
+  const registrations = () =>
+    fetchMock.mock.calls.filter(([u]) => u === DISCOVERY.registration_endpoint).length;
+  const clientsAuthorized = () =>
+    assign.mock.calls.map(([u]) =>
+      new URL(String(u)).searchParams.get("client_id"),
+    );
+  /** A LockManager that runs one holder at a time, like the browser's. */
+  const serialLocks = () => {
+    let tail: Promise<unknown> = Promise.resolve();
+    return {
+      request: (_name: string, fn: () => Promise<unknown>) => {
+        const run = tail.then(fn, fn);
+        tail = run.catch(() => {});
+        return run;
+      },
+    };
+  };
+
+  beforeEach(() => {
+    vi.resetModules();
+    boot("http://app.test/");
+    localStorage.removeItem("chartgen.oauth.client_id");
+    localStorage.removeItem("chartgen.oauth.client_secret");
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it("registers once, and the waiting tab uses that client", async () => {
+    vi.stubGlobal("navigator", { locks: serialLocks() });
+    const { startSignIn } = await import("./oauth");
+
+    void startSignIn();
+    void startSignIn();
+    await vi.waitFor(() => expect(assign).toHaveBeenCalledTimes(2));
+
+    expect(registrations()).toBe(1);
+    expect(clientsAuthorized()).toEqual(["new", "new"]);
+  });
+
+  it("uses a client another tab stored while this one waited for the lock", async () => {
+    vi.stubGlobal("navigator", {
+      locks: {
+        request: (_name: string, fn: () => Promise<unknown>) => {
+          localStorage.setItem("chartgen.oauth.client_id", "from-other-tab");
+          localStorage.setItem("chartgen.oauth.client_secret", "");
+          return fn();
+        },
+      },
+    });
+    const { startSignIn } = await import("./oauth");
+
+    void startSignIn();
+    await vi.waitFor(() => expect(assign).toHaveBeenCalledOnce());
+
+    expect(registrations()).toBe(0);
+    expect(clientsAuthorized()).toEqual(["from-other-tab"]);
+  });
+
+  it("does not remove the stored client while another tab is registering", async () => {
+    let finishRegistering = () => {};
+    const registering = new Promise<void>((done) => (finishRegistering = done));
+    const locks = serialLocks();
+    vi.stubGlobal("navigator", { locks });
+    void locks.request("chartgen.oauth.client", () => registering);
+    boot("http://app.test/?error=invalid_client&state=s1");
+    vi.stubGlobal("navigator", { locks });
+    sessionStorage.setItem(
+      "chartgen.oauth.pkce",
+      JSON.stringify({ code_verifier: "v", state: "s1", client_id: "rejected" }),
+    );
+    localStorage.setItem("chartgen.oauth.client_id", "rejected");
+    const { tryHandlePendingRedirect } = await import("./oauth");
+
+    void tryHandlePendingRedirect();
+    await new Promise((r) => setTimeout(r, 0));
+    expect(localStorage.getItem("chartgen.oauth.client_id")).toBe("rejected");
+
+    // The holder stored its new client; the check runs against that one.
+    localStorage.setItem("chartgen.oauth.client_id", "from-other-tab");
+    finishRegistering();
+    await vi.waitFor(() => expect(assign).toHaveBeenCalledOnce());
+    expect(clientsAuthorized()).toEqual(["from-other-tab"]);
+    expect(registrations()).toBe(0);
+  });
+
+  it("does not take the lock when a client is stored", async () => {
+    const request = vi.fn();
+    vi.stubGlobal("navigator", { locks: { request } });
+    localStorage.setItem("chartgen.oauth.client_id", "client");
+    localStorage.setItem("chartgen.oauth.client_secret", "");
+    const { startSignIn } = await import("./oauth");
+
+    void startSignIn();
+    await vi.waitFor(() => expect(assign).toHaveBeenCalledOnce());
+
+    expect(request).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["no navigator", undefined],
+    ["no Web Locks", {}],
+  ])("with %s, still registers", async (_name, navigatorStub) => {
+    vi.stubGlobal("navigator", navigatorStub);
+    const { startSignIn } = await import("./oauth");
+
+    void startSignIn();
+    await vi.waitFor(() => expect(assign).toHaveBeenCalledOnce());
+
+    expect(registrations()).toBe(1);
+    expect(clientsAuthorized()).toEqual(["new"]);
+  });
+
+  it("still registers when the lock itself is refused", async () => {
+    vi.stubGlobal("navigator", {
+      locks: { request: () => Promise.reject(new DOMException("denied", "SecurityError")) },
+    });
+    const { startSignIn } = await import("./oauth");
+
+    void startSignIn();
+    await vi.waitFor(() => expect(assign).toHaveBeenCalledOnce());
+
+    expect(registrations()).toBe(1);
+  });
+
+  it("reports a failed registration once, without registering again", async () => {
+    vi.stubGlobal("navigator", { locks: serialLocks() });
+    fetchMock.mockImplementation(async (input: string) =>
+      input === DISCOVERY.registration_endpoint
+        ? new Response("{}", { status: 500 })
+        : new Response(JSON.stringify(DISCOVERY), { status: 200 }),
+    );
+    const { startSignIn } = await import("./oauth");
+
+    await expect(startSignIn()).rejects.toThrow("registration failed: 500");
+
+    expect(registrations()).toBe(1);
+    expect(assign).not.toHaveBeenCalled();
+  });
+});
+
 describe("registration rate limit", () => {
   beforeEach(() => {
     vi.resetModules();

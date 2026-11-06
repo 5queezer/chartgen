@@ -230,6 +230,12 @@ test.describe("stale OAuth client", () => {
     test(`${tabs} restored tabs all sign in by themselves`, async ({ context }) => {
       test.setTimeout(60_000);
       await seedStaleClientForTabs(context);
+      const signedInAs: (string | null)[] = [];
+      context.on("request", (req) => {
+        if (new URL(req.url()).pathname === "/token") {
+          signedInAs.push(new URLSearchParams(req.postData() ?? "").get("client_id"));
+        }
+      });
       const pages = await Promise.all(
         Array.from({ length: tabs }, () => context.newPage()),
       );
@@ -237,6 +243,10 @@ test.describe("stale OAuth client", () => {
       await Promise.all(pages.map((p) => p.goto(`${origin}/`, { waitUntil: "commit" })));
 
       await Promise.all(pages.map((p) => expectSignedIn(p)));
+
+      // Every tab is the client this browser will use after a reload.
+      expect(signedInAs).toHaveLength(tabs);
+      expect(new Set(signedInAs)).toEqual(new Set([await storedClient(pages[0]!)]));
     });
   }
 

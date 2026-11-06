@@ -13,6 +13,8 @@ import { z } from "zod";
 const LS_CLIENT_ID = "chartgen.oauth.client_id";
 const LS_CLIENT_SECRET = "chartgen.oauth.client_secret";
 const SS_PKCE = "chartgen.oauth.pkce";
+/** Web Lock held while registering or removing the stored client. */
+const LOCK_CLIENT = "chartgen.oauth.client";
 /**
  * Set when a failed redirect consumption started one automatic retry of
  * the flow; cleared by the next successful exchange. A second failure in
@@ -181,15 +183,50 @@ async function registerClient(registration_endpoint: string): Promise<{
 async function ensureClient(
   discovery: DiscoveryDocument,
 ): Promise<{ client_id: string; client_secret: string }> {
-  const existingId = localStorage.getItem(LS_CLIENT_ID);
-  const existingSecret = localStorage.getItem(LS_CLIENT_SECRET);
-  if (existingId !== null && existingSecret !== null) {
-    return { client_id: existingId, client_secret: existingSecret };
+  const stored = () => {
+    const client_id = localStorage.getItem(LS_CLIENT_ID);
+    const client_secret = localStorage.getItem(LS_CLIENT_SECRET);
+    return client_id !== null && client_secret !== null
+      ? { client_id, client_secret }
+      : null;
+  };
+  const existing = stored();
+  if (existing !== null) return existing;
+
+  const register = async () => {
+    const meanwhile = stored();
+    if (meanwhile !== null) return meanwhile;
+    const registered = await registerClient(discovery.registration_endpoint);
+    localStorage.setItem(LS_CLIENT_ID, registered.client_id);
+    localStorage.setItem(LS_CLIENT_SECRET, registered.client_secret);
+    return registered;
+  };
+
+  return withClientLock(register);
+}
+
+/**
+ * Run `fn` while no other tab changes the stored client: tabs share it, so one
+ * registers and the others wait and use it. Without Web Locks (an insecure
+ * origin, an old browser) `fn` just runs: tabs may then each register, the last
+ * one stored wins, and each keeps working as its own client.
+ */
+async function withClientLock<T>(fn: () => T | Promise<T>): Promise<T> {
+  const locks =
+    typeof navigator === "undefined"
+      ? undefined
+      : (navigator.locks as LockManager | undefined);
+  if (locks === undefined) return fn();
+  let started = false;
+  try {
+    return await locks.request(LOCK_CLIENT, () => {
+      started = true;
+      return fn();
+    });
+  } catch (err) {
+    if (started) throw err;
+    return fn();
   }
-  const registered = await registerClient(discovery.registration_endpoint);
-  localStorage.setItem(LS_CLIENT_ID, registered.client_id);
-  localStorage.setItem(LS_CLIENT_SECRET, registered.client_secret);
-  return registered;
 }
 
 function savePkce(pkce: PkceState): void {
@@ -318,7 +355,7 @@ async function tryConsumeRedirect(): Promise<boolean> {
  *   else, and starting over could loop where sessionStorage does not survive.
  * - `null` if the URL carries no such answer.
  */
-function handleRejectedClient(): "rejected" | "unmatched" | null {
+async function handleRejectedClient(): Promise<"rejected" | "unmatched" | null> {
   const params = new URLSearchParams(window.location.search);
   if (params.get("error") !== "invalid_client") return null;
   window.history.replaceState(
@@ -331,13 +368,15 @@ function handleRejectedClient(): "rejected" | "unmatched" | null {
   const returnedState = params.get("state");
   if (!returnedState || pending?.state !== returnedState) return "unmatched";
 
-  if (
-    pending.client_id === undefined ||
-    localStorage.getItem(LS_CLIENT_ID) === pending.client_id
-  ) {
-    localStorage.removeItem(LS_CLIENT_ID);
-    localStorage.removeItem(LS_CLIENT_SECRET);
-  }
+  await withClientLock(() => {
+    if (
+      pending.client_id === undefined ||
+      localStorage.getItem(LS_CLIENT_ID) === pending.client_id
+    ) {
+      localStorage.removeItem(LS_CLIENT_ID);
+      localStorage.removeItem(LS_CLIENT_SECRET);
+    }
+  });
   sessionStorage.removeItem(SS_PKCE);
   return "rejected";
 }
@@ -390,7 +429,7 @@ export function clearAccessToken(): void {
  */
 export async function tryHandlePendingRedirect(): Promise<Error | null> {
   try {
-    const rejection = handleRejectedClient();
+    const rejection = await handleRejectedClient();
     if (rejection === "unmatched") {
       return new Error("this address is not a sign-in in progress");
     }

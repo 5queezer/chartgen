@@ -89,6 +89,13 @@ has just registered. The code exchange uses the recorded id, because the stored 
 may have changed since. Entries saved before this have no id and use the stored
 client as before.
 
+Registering and removing the stored client both take a Web Lock, re-checking the
+stored client inside it, so tabs that find it empty end up sharing one client instead
+of each registering. Without Web Locks, on an insecure origin or an old browser, tabs
+may each register. The last one stored wins and each tab keeps working as its own
+client, though with scripting on a script saved in a losing tab is not listed after a
+reload.
+
 This counts as a failed redirect in the app's existing one-retry guard. A second
 failure in the tab stops at `sign-in failed: <reason>` with **Sign in again**,
 which registers again because the client is already gone. Share parameters are
