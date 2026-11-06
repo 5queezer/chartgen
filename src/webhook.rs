@@ -690,7 +690,13 @@ mod tests {
         let (port, times) = asking_receiver(WAIT).await;
         let (policy, target) = local(port);
         let make = pushing;
-        let out = deliver_request(&target, &policy, &make, &quick(), &[]).await;
+        // Waiting as asked would take an hour, so a mistake here fails rather than hangs.
+        let out = tokio::time::timeout(
+            Duration::from_secs(10),
+            deliver_request(&target, &policy, &make, &quick(), &[]),
+        )
+        .await
+        .expect("it should end, not wait");
         assert_eq!((out.status, out.attempts), (Some(429), 1));
         assert_eq!(times.lock().unwrap().len(), 1);
     }
