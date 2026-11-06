@@ -574,7 +574,7 @@ hidden or the panel is collapsed, and resumes within 5 s when you come back.
   current chart symbol is highlighted.
 - **+** opens the symbol search dialog. The symbol you pick is added at
   the bottom of the list, and the chart symbol stays unchanged.
-- **×** (shown on hover) removes a row.
+- **×** (shown on hover, always on a touch screen, like the row's other buttons) removes a row.
 - **»** collapses the panel to a thin strip on the right edge; the list
   icon there expands it again.
 
