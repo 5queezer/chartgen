@@ -95,7 +95,7 @@ The token lives in `/etc/chartgen-autodeploy.env` on the host:
 
 | Variable | What it is |
 |----------|------------|
-| `COOLIFY_URL` | Coolify instance root, e.g. `http://192.168.1.242:8000`. |
+| `COOLIFY_URL` | Coolify instance root, e.g. `http://coolify.lan:8000`. |
 | `COOLIFY_APP_UUID` | UUID of the chartgen application in Coolify. |
 | `COOLIFY_API_TOKEN` | Coolify API token with deploy permission. |
 | `GITHUB_REPO` | `owner/name` to poll, default `5queezer/chartgen`. |

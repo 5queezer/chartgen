@@ -12,7 +12,7 @@ sidebar:
 
 `.github/workflows/deploy.yml` called an old Coolify host with `GET` after
 `CI` succeeded; that host now answers 403. The current Coolify runs on a
-Radxa on the LAN (`http://192.168.1.242:8000`) and GitHub-hosted runners
+Radxa on the LAN (e.g. `http://coolify.lan:8000`) and GitHub-hosted runners
 cannot reach it. Coolify's deploy endpoint is `POST /api/v1/deploy` and a
 deploy takes 20–25 minutes. How does a green `master` reach Coolify?
 

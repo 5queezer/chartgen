@@ -22,7 +22,7 @@ systemctl enable --now chartgen-autodeploy.timer
 `/etc/chartgen-autodeploy.env`:
 
 ```
-COOLIFY_URL=http://192.168.1.242:8000
+COOLIFY_URL=http://coolify.lan:8000
 COOLIFY_API_TOKEN=<Coolify API token with deploy permission>
 COOLIFY_APP_UUID=<application uuid>
 GITHUB_REPO=5queezer/chartgen
