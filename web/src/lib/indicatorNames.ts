@@ -16,6 +16,28 @@ const OVERRIDES: Record<string, string> = {
   sar: "Parabolic SAR",
 };
 
+/**
+ * What can change on the chart after it was drawn, for indicators that detect
+ * patterns (ADR-0046). Shown in their settings so no repaint is a surprise.
+ */
+const REPAINT_NOTES: Record<string, string> = {
+  candlestick_patterns:
+    "A label on the forming bar is outlined and can change or vanish until the bar closes. Labels on closed bars never change, and alerts wait for the close.",
+  chart_patterns:
+    "Read from closed bars: the forming bar changes nothing. A swing is known only after Depth more bars, so a pattern appears that much later. Forming patterns can reshape or vanish as swings confirm. A pattern is confirmed only after a later bar closes past its line, and can still fail after that. In the older half of the 600 bars, confirmed patterns can appear or disappear as the window slides; the newer half holds.",
+  auto_fib:
+    "Read from closed bars: the forming bar moves nothing. The levels are redrawn when a newer swing is confirmed, Depth bars after it, or when a close breaks the start of the swing. Older bars then show the new levels too.",
+};
+const NOTE_ALIASES: Record<string, string> = {
+  candle_patterns: "candlestick_patterns",
+  auto_chart_patterns: "chart_patterns",
+  auto_fib_retracement: "auto_fib",
+};
+
+/** The repaint note of an indicator id, if it has one. */
+export const repaintNote = (id: string): string | undefined =>
+  REPAINT_NOTES[NOTE_ALIASES[id] ?? id];
+
 /** `volume_profile` -> `Volume Profile`, `ema_stack` -> `EMA Stack`. */
 export function prettifyId(id: string): string {
   return (

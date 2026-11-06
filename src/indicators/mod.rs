@@ -1,3 +1,6 @@
+pub mod auto_fib;
+pub mod candle_patterns;
+pub mod chart_patterns;
 pub mod cipher_b;
 pub mod custom;
 pub mod external;
@@ -69,6 +72,13 @@ pub fn by_name(name: &str) -> Option<Box<dyn Indicator>> {
         "vortex" => Some(Box::new(trend::Vortex::default())),
         "chande_kroll_stop" => Some(Box::new(trend::ChandeKrollStop::default())),
         "zigzag" => Some(Box::new(trend::ZigZag::default())),
+        "candlestick_patterns" | "candle_patterns" => {
+            Some(Box::new(candle_patterns::CandlestickPatterns::default()))
+        }
+        "chart_patterns" | "auto_chart_patterns" => {
+            Some(Box::new(chart_patterns::ChartPatterns::default()))
+        }
+        "auto_fib" | "auto_fib_retracement" => Some(Box::new(auto_fib::AutoFib::default())),
         n if oscillators::Kind::from_name(n).is_some() => {
             oscillators::by_name(n).map(|o| Box::new(o) as Box<dyn Indicator>)
         }
@@ -229,6 +239,9 @@ pub fn available() -> &'static [&'static str] {
         "vortex",
         "chande_kroll_stop",
         "zigzag",
+        "candlestick_patterns",
+        "chart_patterns",
+        "auto_fib",
         "stoch_rsi",
         "awesome_oscillator",
         "momentum",
@@ -399,6 +412,24 @@ pub fn registry() -> Vec<IndicatorInfo> {
         trend::ChandeKrollStop::default()
     );
     reg!("zigzag", &[], "overlay", trend::ZigZag::default());
+    reg!(
+        "candlestick_patterns",
+        &["candle_patterns"],
+        "overlay",
+        candle_patterns::CandlestickPatterns::default()
+    );
+    reg!(
+        "chart_patterns",
+        &["auto_chart_patterns"],
+        "overlay",
+        chart_patterns::ChartPatterns::default()
+    );
+    reg!(
+        "auto_fib",
+        &["auto_fib_retracement"],
+        "overlay",
+        auto_fib::AutoFib::default()
+    );
     reg!("volume", &[], "panel", trend::Volume::default());
     reg!("aroon", &[], "panel", trend::Aroon::default());
     reg!("vortex", &[], "panel", trend::Vortex::default());
