@@ -295,6 +295,8 @@ test.describe("volume footprint", () => {
     const tail = calls.find((c) => c.bars === 3)!;
     expect(tail.row_size).toBeGreaterThan(0);
     expect(tail.row_ticks).toBeUndefined();
+    // And the interval of the load: its few bars could afford a finer one on a stock.
+    expect(tail.intrabar_interval).toBe("1m");
     // The poll sends the row size back, and it is still the auto one.
     await page.waitForTimeout(500);
     await expect(status(page)).toContainText(/row [\d.]+ auto/);
@@ -376,6 +378,8 @@ test.describe("TPO", () => {
     await expect(status(page)).toContainText(/row [\d.]+ auto/);
     await expect.poll(async () => (await painterExtend(page, TPO))?.count ?? 0).toBeGreaterThan(3);
     expect(calls[0]).toMatchObject({ period: "1D", block: "30m", periods: 10, value_area: 70, ib_blocks: 2 });
+    // A poll asks for the period before too: its last block may have changed.
+    await expect.poll(() => calls.filter((c) => c.periods === 2).length, { timeout: 40_000 }).toBeGreaterThan(0);
     await expect.poll(() => paintedLike(page, POC)).toBeGreaterThan(30);
     await page.waitForTimeout(500);
     await page.screenshot({ path: testInfo.outputPath("tpo.png") });
@@ -384,6 +388,11 @@ test.describe("TPO", () => {
     await dialog.getByLabel("Block size").selectOption("1h");
     await expect.poll(() => calls.at(-1)?.block).toBe("1h");
     await expect(status(page)).toContainText("1D from 1h blocks");
+    // A month is too many 5m blocks: it says what it did instead.
+    await dialog.getByLabel("Block size").selectOption("5m");
+    await dialog.getByLabel("Period").selectOption("1M");
+    await expect(status(page)).toContainText("1M from 15m blocks (shorter ones cannot cover it)");
+    await dialog.getByLabel("Block size").selectOption("1h");
     await dialog.getByLabel("Period").selectOption("1W");
     await expect.poll(() => calls.at(-1)?.period).toBe("1W");
     await dialog.getByLabel("Sessions (HH:MM-HH:MM, commas)").fill("00:00-08:00, 08:00-16:00");

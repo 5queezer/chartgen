@@ -163,6 +163,36 @@ export function firstAtOrAfter(times: readonly { timestamp: number }[], t: numbe
   return lo;
 }
 
+/** Where a profile starts on the chart: its first block. `t` is its period's start. */
+export function profileStart(p: Pick<TpoProfile, "t" | "block_times">): number {
+  return p.block_times[0] ?? p.t;
+}
+
+/**
+ * Which of the first `count` of `opens` (ascending, unix seconds; one more may follow,
+ * for the end of the last) no profile overlaps. A bar reaches to the next one's open:
+ * a daily bar is stamped at midnight and its profile starts at the session's open.
+ */
+export function barsWithoutProfile(
+  opens: readonly number[],
+  profiles: Iterable<Pick<TpoProfile, "t" | "end" | "block_times">>,
+  count: number,
+): number[] {
+  const spans = [...profiles]
+    .map((p) => [profileStart(p), p.end] as const)
+    .sort((a, b) => a[0] - b[0]);
+  const out: number[] = [];
+  let k = 0;
+  for (let i = 0; i < count; i++) {
+    const open = opens[i]!;
+    const close = opens[i + 1] ?? Infinity;
+    while (k < spans.length && spans[k]![1] <= open) k++;
+    const span = spans[k];
+    if (!span || span[0] >= close) out.push(i);
+  }
+  return out;
+}
+
 /** What the status chip says about how a footprint was made. */
 export function footprintMethod(meta: {
   intrabar_interval: string | null;
@@ -183,12 +213,16 @@ export function footprintMethod(meta: {
   return parts.join(" · ");
 }
 
-/** A footprint poll or page over its load: only the load chose the row size. */
+/**
+ * A footprint poll or page over its load. Only the load chose the row size: a later
+ * reply's bars carry theirs, and that it had to widen them still gets said.
+ */
 export function mergeFootprintMeta(load: FootprintMeta, later: FootprintMeta): FootprintMeta {
   return {
     ...later,
+    row_size: load.row_size,
     row_auto: load.row_auto,
-    row_widened: load.row_widened,
+    row_widened: load.row_widened || later.row_widened,
     intrabar_interval: load.intrabar_interval,
     bars_without_data: Math.max(load.bars_without_data, later.bars_without_data),
     coarser_older:
@@ -196,22 +230,29 @@ export function mergeFootprintMeta(load: FootprintMeta, later: FootprintMeta): F
   };
 }
 
-/** A TPO poll or page over its load: only the load chose the row size. */
+/** A TPO poll or page over its load: as a footprint's (`mergeFootprintMeta`). */
 export function mergeTpoMeta(load: TpoMeta, later: TpoMeta): TpoMeta {
-  return { ...later, row_auto: load.row_auto, row_widened: load.row_widened, periods_cut: load.periods_cut };
+  return {
+    ...later,
+    row_size: load.row_size,
+    row_auto: load.row_auto,
+    row_widened: load.row_widened || later.row_widened,
+    periods_cut: load.periods_cut,
+  };
 }
 
 /** What the status chip says about a TPO chart. */
 export function tpoMethod(meta: {
   period: string;
   block: string;
+  block_widened?: boolean;
   row_size: number;
   row_auto: boolean;
   row_widened: boolean;
   periods_cut: boolean;
 }): string {
   const parts = [
-    `${meta.period} from ${meta.block} blocks`,
+    `${meta.period} from ${meta.block} blocks${meta.block_widened ? " (shorter ones cannot cover it)" : ""}`,
     `row ${meta.row_size}${meta.row_auto ? " auto" : ""}${meta.row_widened ? " (widened)" : ""}`,
   ];
   if (meta.periods_cut) parts.push("fewer periods: too many blocks");

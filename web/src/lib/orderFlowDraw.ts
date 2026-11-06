@@ -14,10 +14,12 @@ import {
 import { barRect, drawSpan, isUpBar } from "./chartTypes";
 import { formatColor, parseColor } from "./color";
 import {
+  barsWithoutProfile,
   cellMode,
   firstAtOrAfter,
   footprintSummary,
   gradientIndex,
+  profileStart,
   sessionCvd,
   shortNumber,
   stackedEnd,
@@ -64,7 +66,6 @@ export interface TpoExtend extends Colors {
   kind: "tpo";
   profiles: ReadonlyMap<number, TpoProfile>;
   settings: TpoSettings;
-  rowSize: number;
   decimals: number;
 }
 
@@ -111,7 +112,7 @@ function drawCells(
   ext: FootprintExtend,
 ): void {
   const s = ext.settings;
-  const row = ext.rowSize;
+  const row = fp.row;
   const width = Math.max(4, barPx - 2);
   const left = Math.round(x - width / 2);
   const mid = left + width / 2;
@@ -222,7 +223,7 @@ function drawInfoBox(
   ctx.font = `9px ${LETTER_FONT}`;
   ctx.textAlign = "center";
   ctx.textBaseline = "top";
-  const top = Math.max(y(low[0]), y(low[0] + ext.rowSize)) + 2;
+  const top = Math.max(y(low[0]), y(low[0] + fp.row)) + 2;
   lines.forEach(([text, color], k) => {
     ctx.fillStyle = color;
     fitText(ctx, text, x, top + k * 10, width);
@@ -304,7 +305,7 @@ function drawProfile(
   ext: TpoExtend,
 ): void {
   const s = ext.settings;
-  const row = ext.rowSize;
+  const row = p.row;
   const total = x1 - x0;
   const profileW = s.showProfile ? Math.round(total * 0.25) : 0;
   const blocksFrom = s.showProfile && s.profileSide === "left" ? x0 + profileW : x0;
@@ -416,19 +417,20 @@ export function drawTpo({
   if (!ext || end <= start) return true;
   const y = (v: number) => yAxis.convertToPixel(v);
   ctx.setLineDash([]);
-  // Nothing to show yet, or not in replay: the candles, rather than an empty chart.
-  if (ext.profiles.size === 0) {
-    for (let i = start; i < end; i++) {
-      drawCandle(ctx, bars, i, xAxis.convertToPixel(i), barSpace.gapBar, y, ext);
-    }
-    return true;
+  // Candles where no profile is: none yet, in replay, or older than the source's
+  // blocks go. The candles of the chart itself are hidden, and nothing else draws here.
+  const profiles = [...ext.profiles.values()];
+  const shown = bars.slice(start, Math.min(end + 1, bars.length)).map((b) => b.timestamp / 1000);
+  for (const k of barsWithoutProfile(shown, profiles, end - start)) {
+    drawCandle(ctx, bars, start + k, xAxis.convertToPixel(start + k), barSpace.gapBar, y, ext);
   }
   const edge = (t: number) => xAxis.convertToPixel(firstAtOrAfter(bars, t * 1000)) - barSpace.bar / 2;
   const first = bars[start]!.timestamp / 1000;
   const lastT = bars[end - 1]!.timestamp / 1000;
-  for (const p of ext.profiles.values()) {
-    if (p.end <= first || p.t > lastT) continue;
-    const x0 = edge(p.t);
+  for (const p of profiles) {
+    const from = profileStart(p);
+    if (p.end <= first || from > lastT) continue;
+    const x0 = edge(from);
     const x1 = Math.max(x0 + barSpace.bar, edge(p.end) - 2);
     const xOfBlock = (k: number) => {
       const t = p.block_times[k] ?? p.end;
@@ -504,7 +506,7 @@ function drawOrderFlowTable({
         columns.push({
           x: xAxis.convertToPixel(i),
           width: barSpace.bar - 2,
-          rows: footprintSummary(fp, prev, cvd.get(t), ext.rowSize, fmt),
+          rows: footprintSummary(fp, prev, cvd.get(t), fp.row, fmt),
         });
       }
     }
@@ -512,8 +514,9 @@ function drawOrderFlowTable({
     const first = bars[start]!.timestamp / 1000;
     const last = bars[end - 1]!.timestamp / 1000;
     for (const p of ext.profiles.values()) {
-      if (p.end <= first || p.t > last) continue;
-      const a = xAxis.convertToPixel(firstAtOrAfter(bars, p.t * 1000));
+      const from = profileStart(p);
+      if (p.end <= first || from > last) continue;
+      const a = xAxis.convertToPixel(firstAtOrAfter(bars, from * 1000));
       const b = xAxis.convertToPixel(firstAtOrAfter(bars, p.end * 1000));
       if (b - a < 50) continue;
       columns.push({ x: (a + b) / 2, width: b - a - 4, rows: tpoSummary(p, fmt) });

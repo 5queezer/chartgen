@@ -62,7 +62,7 @@ import {
 } from "../stores/indicators";
 import { addRecent, chartStoreOf, chartStyleOf, theme, timeZone } from "../stores/layout";
 import { chartSettings } from "../stores/chartSettings";
-import { orderFlowSettings, tpoSessions } from "../stores/orderFlow";
+import { orderFlowSettings, tpoSessions, type TpoSettings } from "../stores/orderFlow";
 import type { GetTpoInput } from "../types/generated-input";
 import type {
   FootprintBar,
@@ -84,6 +84,16 @@ const FOOTPRINT_POLL_MS = 10_000;
 const TPO_POLL_MS = 30_000;
 
 const EMPTY_FLOW = { items: new Map(), meta: null, status: "loading", message: null } as const;
+
+/** Most bars one `get_footprint` returns, and periods of a TPO load. */
+const FOOTPRINT_MAX_TAIL = 200;
+const TPO_MAX_TAIL = 10;
+const TPO_PERIOD_SECS: Record<TpoSettings["period"], number> = {
+  "1D": 86_400,
+  "2D": 2 * 86_400,
+  "1W": 7 * 86_400,
+  "1M": 31 * 86_400,
+};
 
 const decimalsOf = (tick: number | undefined) =>
   tick ? Math.min(8, Math.max(0, Math.ceil(-Math.log10(tick)))) : 2;
@@ -395,17 +405,26 @@ export function createChartPane(pane: number, deps: PaneDeps) {
     doc: replay.liveDoc,
     onChange: setFootprints,
     mergeMeta: mergeFootprintMeta,
-    fetch: async ({ tail, endTime, rowSize }, signal) => {
+    // The last closed bar and the forming one, and any it missed.
+    tailSize: (gap) => {
+      const close = barCloseMs(0, untrack(timeframe));
+      return close ? Math.ceil(gap / (close / 1000)) + 2 : 3;
+    },
+    maxTail: FOOTPRINT_MAX_TAIL,
+    fetch: async ({ tail, endTime, meta: load }, signal) => {
       const f = untrack(orderFlowSettings).footprint;
       const { footprints: items, has_more, ...meta } = await session.callGetFootprint(
         {
           ticker: untrack(symbol),
           timeframe: untrack(timeframe),
-          bars: tail ? 3 : 60,
+          bars: tail ?? 60,
           ...(endTime !== undefined && { end_time: endTime }),
-          ...(rowSize !== undefined
-            ? { row_size: rowSize }
+          ...(load !== undefined
+            ? { row_size: load.row_size }
             : f.rowTicks > 0 && { row_ticks: f.rowTicks }),
+          // A poll reads what its load read: its few bars could afford finer ones.
+          ...(tail !== undefined &&
+            load && { intrabar_interval: load.intrabar_interval ?? "none" }),
           atr_length: f.atrLength,
           value_area: f.valueArea,
           imbalance: f.imbalance,
@@ -421,7 +440,11 @@ export function createChartPane(pane: number, deps: PaneDeps) {
     doc: replay.liveDoc,
     onChange: setProfiles,
     mergeMeta: mergeTpoMeta,
-    fetch: async ({ tail, endTime, rowSize }, signal) => {
+    // The current period and the one before, whose last block may have changed since.
+    tailSize: (gap) =>
+      Math.ceil(gap / TPO_PERIOD_SECS[untrack(orderFlowSettings).tpo.period]) + 1,
+    maxTail: TPO_MAX_TAIL,
+    fetch: async ({ tail, endTime, meta: load }, signal) => {
       const t = untrack(orderFlowSettings).tpo;
       const sessions = tpoSessions(t.sessions);
       const { profiles: items, has_more, ...meta } = await session.callGetTpo(
@@ -429,10 +452,10 @@ export function createChartPane(pane: number, deps: PaneDeps) {
           ticker: untrack(symbol),
           period: t.period,
           block: t.block,
-          periods: tail ? 1 : 10,
+          periods: tail ?? 10,
           ...(endTime !== undefined && { end_time: endTime }),
-          ...(rowSize !== undefined
-            ? { row_size: rowSize }
+          ...(load !== undefined
+            ? { row_size: load.row_size }
             : t.rowTicks > 0 && { row_ticks: t.rowTicks }),
           value_area: t.valueArea,
           ib_blocks: t.ibBlocks,
@@ -498,7 +521,6 @@ export function createChartPane(pane: number, deps: PaneDeps) {
       kind,
       profiles: state.items,
       settings: orderFlowSettings().tpo,
-      rowSize: state.meta?.row_size ?? 1,
       decimals: decimalsOf(state.meta?.tick),
     };
   });

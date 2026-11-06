@@ -182,7 +182,8 @@ pub fn tools_list_result() -> Value {
                         "atr_length": { "type": "integer", "minimum": 1, "maximum": 500, "default": 14, "description": "ATR length of the auto row size." },
                         "value_area": { "type": "number", "minimum": 1, "maximum": 100, "default": 70, "description": "Value area, percent of the volume." },
                         "imbalance": { "type": "number", "minimum": 100, "maximum": 100000, "default": 300, "description": "Imbalance, percent: buy against sell one row below, sell against buy one row above." },
-                        "stacked": { "type": "integer", "minimum": 1, "maximum": 100, "default": 3, "description": "Imbalances in a row that make a stacked imbalance." }
+                        "stacked": { "type": "integer", "minimum": 1, "maximum": 100, "default": 3, "description": "Imbalances in a row that make a stacked imbalance. A level counts only where at least 2 intrabars traded, on it and on the level it is compared with: one kline has one split, so its rows would all agree." },
+                        "intrabar_interval": { "type": "string", "description": "For a poll of a chart already loaded: the intrabar_interval its load returned, or 'none' if that was null, so the few newest bars are read as the load's were. Falls back to what these bars can afford if they cannot have it. Omit to choose by the window." }
                     },
                     "required": ["ticker"]
                 }

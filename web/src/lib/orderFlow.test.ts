@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  barsWithoutProfile,
   cellMode,
   firstAtOrAfter,
   footprintMethod,
@@ -8,6 +9,7 @@ import {
   gradientIndex,
   mergeFootprintMeta,
   mergeTpoMeta,
+  profileStart,
   sessionCvd,
   shortNumber,
   stackedEnd,
@@ -21,6 +23,7 @@ import type { FootprintBar, FootprintMeta, TpoMeta, TpoProfile } from "../types/
 
 const fp = (over: Partial<FootprintBar> = {}): FootprintBar => ({
   t: 0,
+  row: 1,
   buy: 60,
   sell: 40,
   min_delta: -5,
@@ -243,6 +246,12 @@ describe("the status says how it was made", () => {
     expect(tpoMethod({ ...tpo, periods_cut: false })).toBe("1M from 5m blocks · row 2 auto");
     expect(tpoMethod({ ...tpo, periods_cut: true })).toContain("fewer periods");
   });
+
+  it("says when the block is longer than asked", () => {
+    const tpo = { period: "1M", block: "15m", row_size: 2, row_auto: true, row_widened: false, periods_cut: false };
+    expect(tpoMethod(tpo)).toBe("1M from 15m blocks · row 2 auto");
+    expect(tpoMethod({ ...tpo, block_widened: true })).toContain("1M from 15m blocks (shorter ones cannot cover it)");
+  });
 });
 
 describe("what a poll keeps of its load", () => {
@@ -267,6 +276,21 @@ describe("what a poll keeps of its load", () => {
     expect(got.coarser_older).toBe(false);
   });
 
+  it("keeps the load's row size, and says when any reply had to widen its own", () => {
+    const quiet = { ...load, row_widened: false };
+    const got = mergeFootprintMeta(quiet, { ...quiet, row_size: 10, row_auto: false, row_widened: true });
+    expect(got.row_size).toBe(5);
+    expect(got.row_widened).toBe(true);
+    expect(footprintMethod(got)).toContain("row 5 auto (widened)");
+    // A later reply that fits does not take that back.
+    expect(mergeFootprintMeta(got, { ...quiet, row_auto: false }).row_widened).toBe(true);
+  });
+
+  it("does not call a poll coarser when it read what its load read", () => {
+    const got = mergeFootprintMeta(load, { ...load, row_auto: false });
+    expect(footprintMethod(got)).not.toContain("coarser");
+  });
+
   it("says when an older page came from coarser data, and goes on saying it", () => {
     const got = mergeFootprintMeta(load, { ...load, intrabar_interval: "1h" });
     expect(got.intrabar_interval).toBe("1m");
@@ -280,5 +304,43 @@ describe("what a poll keeps of its load", () => {
     const got = mergeTpoMeta(tpo, { ...tpo, row_auto: false, periods_cut: false });
     expect(got.row_auto).toBe(true);
     expect(got.periods_cut).toBe(true);
+  });
+
+  it("keeps a TPO's row size too, and says when a reply widened its own", () => {
+    const tpo = { row_size: 5, row_auto: true, row_widened: false, periods_cut: false } as TpoMeta;
+    const got = mergeTpoMeta(tpo, { ...tpo, row_size: 10, row_auto: false, row_widened: true });
+    expect(got.row_size).toBe(5);
+    expect(got.row_widened).toBe(true);
+  });
+});
+
+describe("where a profile is", () => {
+  const profile = (first: number, end: number) => ({ t: first - 3_600, end, block_times: [first] });
+
+  it("starts at its first block; its key is the period's", () => {
+    expect(profileStart(profile(5_000, 9_000))).toBe(5_000);
+    expect(profileStart({ t: 7, block_times: [] })).toBe(7);
+  });
+
+  it("finds the bars no profile covers", () => {
+    const opens = [100, 200, 300, 400, 500, 600];
+    // The last of `opens` only ends the bar before it.
+    expect(barsWithoutProfile(opens, [profile(300, 500)], 5)).toEqual([0, 1, 4]);
+    expect(barsWithoutProfile(opens, [], 5)).toEqual([0, 1, 2, 3, 4]);
+  });
+
+  it("counts a bar a profile only starts inside as covered", () => {
+    // A daily bar stamped at midnight, its session's profile opening hours later.
+    expect(barsWithoutProfile([0, 86_400], [profile(50_000, 70_000)], 1)).toEqual([]);
+  });
+
+  it("covers the newest bar, which has no next one to end it", () => {
+    expect(barsWithoutProfile([100, 200], [profile(200, 300)], 2)).toEqual([0]);
+  });
+
+  it("takes profiles in any order, and sees a gap between two", () => {
+    const opens = [0, 100, 200, 300, 400, 500];
+    const list = [profile(400, 500), profile(0, 100)];
+    expect(barsWithoutProfile(opens, list, 5)).toEqual([1, 2, 3]);
   });
 });

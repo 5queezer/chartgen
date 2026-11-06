@@ -502,8 +502,12 @@ pub struct TpoRow {
 /// One period's profile.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TpoProfile {
+    /// The start of its period, plus its session's: what identifies it between replies.
+    /// The first block can be later, and with a window that moves it would move too.
     pub t: i64,
     pub end: i64,
+    /// Height of its rows.
+    pub row: f64,
     /// Open time of each block, for splitting the profile by blocks.
     pub block_times: Vec<i64>,
     pub rows: Vec<TpoRow>,
@@ -596,6 +600,7 @@ pub fn build_tpo(
     Some(TpoProfile {
         t,
         end,
+        row,
         block_times: blocks.iter().map(|b| b.t).collect(),
         open: first.open,
         close: last.close,
@@ -641,6 +646,7 @@ impl TpoProfile {
         json!({
             "t": self.t,
             "end": self.end,
+            "row": self.row,
             "block_times": self.block_times,
             "open": self.open,
             "close": self.close,
@@ -780,24 +786,53 @@ pub struct TpoOptions {
     pub ib_blocks: usize,
 }
 
-/// Group `blocks` (oldest first) by period, and with `sessions` also by session,
-/// in time order.
+/// Group `blocks` (oldest first) by period, and with `sessions` also by session, in
+/// time order, each under its key: the period's start, plus when its session starts.
 fn tpo_groups<Tz: TimeZone>(
     blocks: &[Intrabar],
     period: Period,
     sessions: &[DaySession],
     tz: &Tz,
-) -> Vec<Vec<Intrabar>> {
-    let mut groups: BTreeMap<(i64, usize), Vec<Intrabar>> = BTreeMap::new();
+) -> BTreeMap<i64, Vec<Intrabar>> {
+    let mut groups: BTreeMap<i64, Vec<Intrabar>> = BTreeMap::new();
     for block in blocks {
         let start = period.start_of(block.t, tz);
         if sessions.is_empty() {
-            groups.entry((start, 0)).or_default().push(block.clone());
-        } else if let Some(s) = sessions.iter().position(|s| s.contains(block.t, tz)) {
-            groups.entry((start, s)).or_default().push(block.clone());
+            groups.entry(start).or_default().push(block.clone());
+        } else if let Some(s) = sessions.iter().find(|s| s.contains(block.t, tz)) {
+            groups
+                .entry(start + i64::from(s.from) * 60)
+                .or_default()
+                .push(block.clone());
         }
     }
-    groups.into_values().collect()
+    groups
+}
+
+/// The shortest of the usual block lengths from `asked` up that can hold a whole
+/// `period` in `max_blocks`, and its seconds: `asked` itself if it can. A shorter one
+/// would leave a profile with only the end of its period, with the wrong open, letters
+/// and initial balance. `None`: even the longest cannot.
+pub fn block_for_period(
+    asked: (&str, i64),
+    period: Period,
+    max_blocks: i64,
+) -> Option<(String, i64)> {
+    const LONGER: [(&str, i64); 5] = [
+        ("15m", 900),
+        ("30m", 1_800),
+        ("1h", 3_600),
+        ("2h", 7_200),
+        ("4h", 14_400),
+    ];
+    let holds = |secs: i64| period.max_secs() / secs <= max_blocks;
+    if holds(asked.1) {
+        return Some((asked.0.to_string(), asked.1));
+    }
+    LONGER
+        .iter()
+        .find(|(_, secs)| *secs > asked.1 && holds(*secs))
+        .map(|(name, secs)| (name.to_string(), *secs))
 }
 
 /// Auto row size of a TPO chart. TradingView does not publish its rule: this is a
@@ -810,7 +845,7 @@ pub fn tpo_auto_row<Tz: TimeZone>(
     tick: f64,
 ) -> f64 {
     let mut ranges: Vec<f64> = tpo_groups(blocks, period, sessions, tz)
-        .iter()
+        .values()
         .map(|g| {
             let high = g.iter().map(|b| b.high).fold(f64::MIN, f64::max);
             let low = g.iter().map(|b| b.low).fold(f64::MAX, f64::min);
@@ -830,7 +865,7 @@ pub fn tpo_widest_range<Tz: TimeZone>(
     tz: &Tz,
 ) -> f64 {
     tpo_groups(blocks, period, sessions, tz)
-        .iter()
+        .values()
         .map(|g| {
             let high = g.iter().map(|b| b.high).fold(f64::MIN, f64::max);
             let low = g.iter().map(|b| b.low).fold(f64::MAX, f64::min);
@@ -850,10 +885,10 @@ pub fn tpo_profiles<Tz: TimeZone>(
 ) -> Vec<TpoProfile> {
     tpo_groups(blocks, period, sessions, tz)
         .iter()
-        .filter_map(|g| {
-            let (first, last) = (g.first()?, g.last()?);
+        .filter_map(|(t, g)| {
+            let last = g.last()?;
             build_tpo(
-                first.t,
+                *t,
                 last.t + o.block_secs,
                 g,
                 o.row,

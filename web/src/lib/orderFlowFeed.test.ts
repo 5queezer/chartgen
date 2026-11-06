@@ -11,10 +11,13 @@ interface Meta {
   auto?: boolean;
 }
 
+/** The last closed bar and the forming one of a 1m chart, and any it missed. */
+const BARS_OF_A_MINUTE = (gap: number) => Math.ceil(gap / 60) + 2;
+
 function setup(hidden = false) {
-  const requests: FlowRequest[] = [];
+  const requests: FlowRequest<Meta>[] = [];
   const states: FlowState<Item, Meta>[] = [];
-  let next: (r: FlowRequest) => FlowPage<Item, Meta> = () => ({
+  let next: (r: FlowRequest<Meta>) => FlowPage<Item, Meta> = () => ({
     items: [{ t: 100, v: 1 }, { t: 200, v: 2 }],
     meta: { row_size: 5 },
     hasMore: true,
@@ -25,6 +28,8 @@ function setup(hidden = false) {
     doc: doc as never,
     onChange: (s) => states.push(s),
     mergeMeta: (load, later) => ({ ...later, auto: load.auto }),
+    tailSize: BARS_OF_A_MINUTE,
+    maxTail: 200,
     fetch: async (r) => {
       requests.push(r);
       return next(r);
@@ -44,14 +49,14 @@ beforeEach(() => vi.useFakeTimers());
 afterEach(() => vi.useRealTimers());
 
 describe("order-flow feed", () => {
-  it("loads, then polls only the tail with the row size of the load", async () => {
+  it("loads, then polls only the tail with what the load said", async () => {
     const t = setup();
     t.feed.restart();
     await vi.advanceTimersByTimeAsync(0);
     expect(t.requests).toEqual([{}]);
     expect(t.last().status).toBe("live");
     await vi.advanceTimersByTimeAsync(10_000);
-    expect(t.requests[1]).toEqual({ tail: true, rowSize: 5 });
+    expect(t.requests[1]).toEqual({ tail: 3, meta: { row_size: 5 } });
     t.feed.dispose();
   });
 
@@ -105,6 +110,63 @@ describe("order-flow feed", () => {
     t.feed.dispose();
   });
 
+  it("asks for the bars it missed while hidden, so no hole stays", async () => {
+    const t = setup();
+    t.feed.restart();
+    await vi.advanceTimersByTimeAsync(0);
+    t.doc.visibilityState = "hidden";
+    await vi.advanceTimersByTimeAsync(20 * 60_000);
+    expect(t.requests).toHaveLength(1);
+    t.doc.visibilityState = "visible";
+    await vi.advanceTimersByTimeAsync(10_000);
+    // 20 minutes and the 10 s until the poll: 21 bars of 1m, and the two it always reads.
+    expect(t.requests[1]!.tail).toBe(23);
+    // It has caught up: the next poll is a plain one.
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(t.requests[2]!.tail).toBe(3);
+    t.feed.dispose();
+  });
+
+  it("asks for what failed polls missed too", async () => {
+    const t = setup();
+    t.feed.restart();
+    await vi.advanceTimersByTimeAsync(0);
+    t.setNext(() => {
+      throw new Error("gate closed");
+    });
+    await vi.advanceTimersByTimeAsync(10_000 + 20_000 + 40_000);
+    expect(t.requests.map((r) => r.tail)).toEqual([undefined, 3, 3, 4]);
+    t.feed.dispose();
+  });
+
+  it("does not ask for more on a closed market, where nothing new comes", async () => {
+    const t = setup();
+    t.feed.restart();
+    await vi.advanceTimersByTimeAsync(0);
+    // The replies never hold a newer item, for far longer than `maxTail` bars.
+    await vi.advanceTimersByTimeAsync(5 * 3_600_000);
+    expect(new Set(t.requests.slice(1).map((r) => r.tail))).toEqual(new Set([3]));
+    t.feed.dispose();
+  });
+
+  it("loads again when it missed more than a poll may ask for", async () => {
+    const t = setup();
+    t.feed.restart();
+    await vi.advanceTimersByTimeAsync(0);
+    t.doc.visibilityState = "hidden";
+    await vi.advanceTimersByTimeAsync(4 * 3_600_000);
+    t.doc.visibilityState = "visible";
+    t.setNext(() => ({ items: [{ t: 900, v: 9 }], meta: { row_size: 5 }, hasMore: true }));
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(t.requests).toHaveLength(2);
+    expect(t.requests[1]).toEqual({});
+    // Started over: what it held is gone, rather than a hole in the middle of it.
+    expect([...t.last().items.keys()]).toEqual([900]);
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(t.requests[2]!.tail).toBe(3);
+    t.feed.dispose();
+  });
+
   it("pages older items once when the chart reaches them", async () => {
     const t = setup();
     t.feed.restart();
@@ -115,7 +177,7 @@ describe("order-flow feed", () => {
     t.feed.ensure(60);
     t.feed.ensure(60);
     await vi.advanceTimersByTimeAsync(0);
-    expect(t.requests.slice(1)).toEqual([{ endTime: 100_000, rowSize: 5 }]);
+    expect(t.requests.slice(1)).toEqual([{ endTime: 100_000, meta: { row_size: 5 } }]);
     expect(t.last().items.has(50)).toBe(true);
     // Nothing older exists: it stops asking.
     t.feed.ensure(10);
@@ -168,6 +230,8 @@ describe("order-flow feed", () => {
       doc: t.doc as never,
       onChange: (s) => t.states.push(s),
       mergeMeta: (_load, later) => later,
+      tailSize: BARS_OF_A_MINUTE,
+      maxTail: 200,
       fetch: () => new Promise((r) => answers.push(r)),
     });
     feed.restart();

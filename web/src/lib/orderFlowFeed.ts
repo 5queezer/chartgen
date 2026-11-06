@@ -1,7 +1,8 @@
 // Live data of an order-flow chart (ADR-0048): a load, older pages as the chart
 // scrolls, and a poll of the newest items, merged by open time. One per chart. The
 // poll is slow on purpose: the server reads finer bars for it, and shares them
-// between charts for only a few seconds.
+// between charts for only a few seconds. After a hidden tab, sleep or errors a poll
+// asks for all it missed, or starts over if that is more than `maxTail`.
 
 import type { VisibilityDoc } from "./liveFeed";
 
@@ -9,13 +10,13 @@ import type { VisibilityDoc } from "./liveFeed";
 export const MAX_ITEMS = 600;
 const MAX_BACKOFF_MS = 120_000;
 
-export interface FlowRequest {
+export interface FlowRequest<M> {
   /** Exclusive end, ms: an older page. */
   endTime?: number;
-  /** Newest items only: the live poll. */
-  tail?: boolean;
-  /** Row size of the first load, so later pages line up with it. */
-  rowSize?: number;
+  /** This many of the newest items only: the live poll. */
+  tail?: number;
+  /** What the load said (a page or a poll), so that it lines up with it. */
+  meta?: M;
 }
 
 export interface FlowPage<T, M> {
@@ -32,11 +33,15 @@ export interface FlowState<T, M> {
 }
 
 export interface FlowFeedOptions<T extends { t: number }, M extends { row_size: number }> {
-  fetch: (request: FlowRequest, signal: AbortSignal) => Promise<FlowPage<T, M>>;
+  fetch: (request: FlowRequest<M>, signal: AbortSignal) => Promise<FlowPage<T, M>>;
   onChange: (state: FlowState<T, M>) => void;
   /** What a poll or page says over what the load said: they send its row size back. */
   mergeMeta: (load: M, later: M) => M;
   pollMs: number;
+  /** Items a poll needs after `gapSecs` without one. */
+  tailSize: (gapSecs: number) => number;
+  /** Most items a poll may ask for: past this the chart loads again. */
+  maxTail: number;
   doc?: VisibilityDoc;
 }
 
@@ -61,6 +66,9 @@ export function createFlowFeed<T extends { t: number }, M extends { row_size: nu
   let paging = false;
   let failures = 0;
   let running = false;
+  // When the newest read that worked was sent. Not the newest item's time: while a
+  // market is closed that stays put, and a poll would ask for ever more of nothing.
+  let readAt = 0;
 
   const emit = (status: FlowState<T, M>["status"], message: string | null = null) =>
     opts.onChange({ items, meta, status, message });
@@ -95,12 +103,14 @@ export function createFlowFeed<T extends { t: number }, M extends { row_size: nu
 
   async function load(): Promise<void> {
     const { signal } = abort;
+    const sent = Date.now();
     try {
       const page = await opts.fetch({}, signal);
       if (signal.aborted) return;
       merge(page);
       hasMore = page.hasMore;
       failures = 0;
+      readAt = sent;
       emit("live");
     } catch (err) {
       failed(err, signal);
@@ -120,12 +130,19 @@ export function createFlowFeed<T extends { t: number }, M extends { row_size: nu
       await load();
       return;
     }
+    const sent = Date.now();
+    const tail = opts.tailSize(Math.max(0, sent - readAt) / 1000);
+    if (tail > opts.maxTail) {
+      start();
+      return;
+    }
     const { signal } = abort;
     try {
-      const page = await opts.fetch({ tail: true, rowSize: meta.row_size }, signal);
+      const page = await opts.fetch({ tail, meta }, signal);
       if (signal.aborted) return;
       merge(page);
       failures = 0;
+      readAt = sent;
       emit("live");
     } catch (err) {
       failed(err, signal);
@@ -133,20 +150,22 @@ export function createFlowFeed<T extends { t: number }, M extends { row_size: nu
     if (!signal.aborted) schedule();
   }
 
+  function start(): void {
+    abort.abort();
+    abort = new AbortController();
+    clearTimer();
+    items = new Map();
+    meta = null;
+    hasMore = false;
+    paging = false;
+    failures = 0;
+    running = true;
+    emit("loading");
+    void load();
+  }
+
   return {
-    restart() {
-      abort.abort();
-      abort = new AbortController();
-      clearTimer();
-      items = new Map();
-      meta = null;
-      hasMore = false;
-      paging = false;
-      failures = 0;
-      running = true;
-      emit("loading");
-      void load();
-    },
+    restart: start,
 
     stop() {
       running = false;
@@ -165,7 +184,7 @@ export function createFlowFeed<T extends { t: number }, M extends { row_size: nu
       paging = true;
       const { signal } = abort;
       void opts
-        .fetch({ endTime: oldest * 1000, rowSize: meta.row_size }, signal)
+        .fetch({ endTime: oldest * 1000, meta }, signal)
         .then((page) => {
           if (signal.aborted) return;
           merge(page);

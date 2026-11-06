@@ -526,6 +526,8 @@ export type DeleteServerAlertPayload = z.infer<typeof DeleteServerAlertPayloadSc
 
 export const FootprintBarSchema = z.object({
   t: z.number(),
+  /** Height of this bar's rows: a reply that had to widen them has its own. */
+  row: z.number(),
   buy: z.number(),
   sell: z.number(),
   min_delta: z.number(),
@@ -568,8 +570,11 @@ export type FootprintMeta = Omit<FootprintPayload, "footprints" | "has_more"> & 
 };
 
 export const TpoProfileSchema = z.object({
+  /** The period's start, or the session's: what identifies it between replies. */
   t: z.number(),
   end: z.number(),
+  /** Height of this profile's rows, as a footprint bar's. */
+  row: z.number(),
   block_times: z.array(z.number()),
   open: z.number(),
   close: z.number(),
@@ -604,6 +609,8 @@ export const TpoPayloadSchema = z.object({
   symbol: z.string(),
   period: z.string(),
   block: z.string(),
+  /** The block asked for could not cover a whole period: `block` is a longer one. */
+  block_widened: z.boolean(),
   row_size: z.number(),
   row_auto: z.boolean(),
   row_widened: z.boolean(),

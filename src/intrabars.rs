@@ -50,15 +50,56 @@ const YAHOO: &[(&str, i64, Option<i64>)] = &[
 /// opening `age` seconds ago, within `MAX_INTRABARS`. `None`: nothing finer exists
 /// or can be afforded, and the bar itself is all there is.
 pub fn plan(source: &str, chart_secs: i64, bars: usize, age: i64) -> Option<(&'static str, i64)> {
-    let table = if source == "binance" { BINANCE } else { YAHOO };
-    table
+    table_of(source)
         .iter()
-        .find(|(_, secs, oldest)| {
-            let affordable =
-                (bars as i64).saturating_mul(chart_secs / secs) <= MAX_INTRABARS as i64;
-            *secs < chart_secs && affordable && oldest.is_none_or(|o| age <= o)
-        })
+        .find(|e| fits(e, chart_secs, bars, age))
         .map(|(name, secs, _)| (*name, *secs))
+}
+
+/// What a live poll reads: `load`, the interval its load read (`NO_INTERVAL` for
+/// nothing finer), so that its cells do not change with the age of its few bars. If
+/// these bars cannot have that one, as after a long gap, whatever `plan` finds instead,
+/// which is coarser.
+pub fn plan_like_load(
+    source: &str,
+    chart_secs: i64,
+    bars: usize,
+    age: i64,
+    load: &str,
+) -> Result<Option<(&'static str, i64)>, String> {
+    if load == NO_INTERVAL {
+        return Ok(None);
+    }
+    let table = table_of(source);
+    let Some(entry) = table.iter().find(|(name, _, _)| *name == load) else {
+        let known: Vec<&str> = table.iter().map(|(name, _, _)| *name).collect();
+        return Err(format!(
+            "intrabar_interval must be {NO_INTERVAL} or one of {}.",
+            known.join(", ")
+        ));
+    };
+    Ok(if fits(entry, chart_secs, bars, age) {
+        Some((entry.0, entry.1))
+    } else {
+        plan(source, chart_secs, bars, age)
+    })
+}
+
+/// `plan_like_load`'s word for a load that read nothing finer.
+pub const NO_INTERVAL: &str = "none";
+
+fn table_of(source: &str) -> &'static [(&'static str, i64, Option<i64>)] {
+    if source == "binance" {
+        BINANCE
+    } else {
+        YAHOO
+    }
+}
+
+fn fits(entry: &(&str, i64, Option<i64>), chart_secs: i64, bars: usize, age: i64) -> bool {
+    let (_, secs, oldest) = *entry;
+    let affordable = (bars as i64).saturating_mul(chart_secs / secs) <= MAX_INTRABARS as i64;
+    secs < chart_secs && affordable && oldest.is_none_or(|o| age <= o)
 }
 
 struct Held {
@@ -431,6 +472,35 @@ mod tests {
     }
 
     #[test]
+    fn a_stocks_poll_keeps_the_interval_of_its_load() {
+        // 60 hourly bars of a stock span 12 days: too old for 1m. Its poll's 3 bars are not.
+        let load = plan("yahoo", 3_600, 60, 12 * DAY).unwrap().0;
+        assert_eq!(load, "5m");
+        assert_eq!(plan("yahoo", 3_600, 60, 3 * 3_600).unwrap().0, "1m");
+        assert_eq!(
+            plan_like_load("yahoo", 3_600, 3, 3 * 3_600, load),
+            Ok(Some(("5m", 300)))
+        );
+        // A load with nothing finer stays that way, whatever a short window could read.
+        assert_eq!(
+            plan_like_load("yahoo", 3_600, 3, 3_600, NO_INTERVAL),
+            Ok(None)
+        );
+        // Too many bars for it: what they can afford, which is coarser.
+        assert_eq!(
+            plan_like_load("binance", 60, 200, 0, "1s"),
+            Ok(plan("binance", 60, 200, 0))
+        );
+        assert_eq!(
+            plan_like_load("binance", 3_600, 200, 0, "1m"),
+            Ok(Some(("3m", 180)))
+        );
+        // Yahoo has no 1s; nonsense is refused.
+        assert!(plan_like_load("yahoo", 60, 3, 0, "1s").is_err());
+        assert!(plan_like_load("binance", 60, 3, 0, "bogus").is_err());
+    }
+
+    #[test]
     fn nothing_finer_than_the_chart_is_no_plan() {
         // Yahoo's finest is 1m.
         assert_eq!(plan("yahoo", 60, 60, 0), None);
@@ -565,7 +635,8 @@ mod tests {
         let source = Source::new(500_000, 600_000);
         let now = Instant::now();
         let (got, held) = run(&source, None, 480_000, 540_000, 700_000, now);
-        assert_eq!(got.first().unwrap().t, 500_040.min(got[0].t));
+        // Nothing before the first bar on the source's grid at or after its start.
+        assert_eq!(got.first().unwrap().t, 500_040);
         let requests = source.requests.borrow().len();
         let (_, _) = run(&source, Some(held), 480_000, 540_000, 700_000, now);
         assert_eq!(source.requests.borrow().len(), requests);

@@ -1951,10 +1951,14 @@ fn footprint_payload(args: &Value, source: fetch::DataSource) -> Result<Value, S
     let last_end = iv.grid_end(last);
 
     let age = fetch::now_ms() / 1000 - first;
-    // As for a load, whatever is asked now: a live tail must read what its load read,
-    // or a daily chart's tail would fetch days of 1m bars its load could not afford.
+    // As for a load, whatever is asked now: a daily chart's few bars must not fetch days
+    // of 1m bars its load could not afford. A poll says outright what its load read.
     let plan_bars = visible.len().max(DEFAULT_FOOTPRINT_BARS);
-    let plan = intrabars::plan(fetch::detect_source(symbol), iv.secs(), plan_bars, age);
+    let exchange = fetch::detect_source(symbol);
+    let plan = match args.get("intrabar_interval").and_then(Value::as_str) {
+        Some(load) => intrabars::plan_like_load(exchange, iv.secs(), plan_bars, age, load)?,
+        None => intrabars::plan(exchange, iv.secs(), plan_bars, age),
+    };
     let list = match plan {
         Some((name, secs)) => intrabars::load(source, symbol, name, secs, visible, last_end)
             .map_err(|e| format!("Intrabar fetch failed: {e}"))?,
@@ -2040,12 +2044,14 @@ fn tpo_payload(args: &Value, source: fetch::DataSource) -> Result<Value, String>
         .and_then(|v| v.as_str())
         .ok_or("ticker is required.")?;
     let period = of::Period::parse(args.get("period").and_then(|v| v.as_str()).unwrap_or("1D"))?;
-    let block = check_interval(args.get("block").and_then(|v| v.as_str()).unwrap_or("30m"))?;
-    let block_iv = chartgen::interval::Interval::parse(&block)?;
-    let block_secs = block_iv.secs();
-    if !(300..=14_400).contains(&block_secs) {
+    let asked_block = check_interval(args.get("block").and_then(|v| v.as_str()).unwrap_or("30m"))?;
+    let asked_secs = chartgen::interval::Interval::parse(&asked_block)?.secs();
+    if !(300..=14_400).contains(&asked_secs) {
         return Err("block must be from 5m to 4h.".into());
     }
+    let (block, block_secs) =
+        of::block_for_period((&asked_block, asked_secs), period, MAX_TPO_BLOCKS as i64)
+            .ok_or("period is too long: even 4h blocks cannot cover a whole one.")?;
     let periods = number_arg(args, "periods", 10.0, 1.0, MAX_TPO_PERIODS as f64)? as usize;
     let value_area = number_arg(args, "value_area", 70.0, 1.0, 100.0)?;
     let ib_blocks = number_arg(args, "ib_blocks", 2.0, 1.0, 100.0)? as usize;
@@ -2101,6 +2107,7 @@ fn tpo_payload(args: &Value, source: fetch::DataSource) -> Result<Value, String>
     Ok(json!({
         "symbol": symbol,
         "period": args.get("period").and_then(|v| v.as_str()).unwrap_or("1D"),
+        "block_widened": block != asked_block,
         "block": block,
         "row_size": row,
         "row_auto": auto,
@@ -3450,6 +3457,28 @@ mod tests {
     }
 
     #[test]
+    fn a_stocks_poll_reads_what_its_load_read_though_its_few_bars_are_younger() {
+        // A load reaching 12 days back: too old for Yahoo's 1m.
+        let end = fetch::now_ms() - 10 * 86_400_000;
+        let load = json!({ "ticker": "AAPL", "timeframe": "1h", "bars": 60, "end_time": end });
+        let load = footprint_payload(&load, Sample).unwrap();
+        assert_eq!(load["intrabar_interval"], "5m");
+        let poll = |extra: Value| {
+            let mut args = json!({ "ticker": "AAPL", "timeframe": "1h", "bars": 3 });
+            args.as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            footprint_payload(&args, Sample)
+        };
+        assert_eq!(poll(json!({})).unwrap()["intrabar_interval"], "1m");
+        let kept = json!({ "intrabar_interval": load["intrabar_interval"] });
+        assert_eq!(poll(kept).unwrap()["intrabar_interval"], "5m");
+        let nothing = poll(json!({ "intrabar_interval": "none" })).unwrap();
+        assert_eq!(nothing["intrabar_interval"], Value::Null);
+        assert!(poll(json!({ "intrabar_interval": "nonsense" })).is_err());
+    }
+
+    #[test]
     fn a_stock_has_no_taker_volume_and_says_so() {
         let args = json!({ "ticker": "AAPL", "timeframe": "1h", "bars": 3 });
         let fp = footprint_payload(&args, Sample).unwrap();
@@ -3631,7 +3660,18 @@ mod tests {
     }
 
     #[test]
-    fn a_long_period_of_short_blocks_is_cut_and_says_so() {
+    fn a_block_too_short_for_a_whole_period_is_widened_and_says_so() {
+        let args = json!({ "ticker": "BTCUSDT", "period": "1M", "block": "5m", "periods": 1,
+            "end_time": 1_699_920_000_000i64 });
+        let tpo = tpo_payload(&args, Sample).unwrap();
+        assert_eq!(tpo["block"], "15m");
+        assert_eq!(tpo["block_widened"], true);
+        assert_eq!(tpo["periods_cut"], false);
+        // The month from its start: 13 days and 16 hours in, on 15m blocks.
+        let p = &tpo["profiles"][0];
+        assert_eq!(p["t"], 1_698_796_800, "2023-11-01");
+        assert_eq!(p["block_times"][0], 1_698_796_800);
+        // More periods than fit are cut, whole ones.
         let args = json!({ "ticker": "BTCUSDT", "period": "1M", "block": "5m", "periods": 12,
             "end_time": 1_699_920_000_000i64 });
         let tpo = tpo_payload(&args, Sample).unwrap();
@@ -3643,6 +3683,67 @@ mod tests {
             .map(|p| p["block_times"].as_array().unwrap().len())
             .sum();
         assert!(blocks <= MAX_TPO_BLOCKS, "{blocks}");
+        let as_asked = json!({ "ticker": "BTCUSDT", "period": "1D", "block": "5m", "periods": 1,
+            "end_time": 1_699_920_000_000i64 });
+        assert_eq!(
+            tpo_payload(&as_asked, Sample).unwrap()["block_widened"],
+            false
+        );
+        // Longer than 4h blocks can cover: refused rather than cut.
+        let too_long = json!({ "ticker": "BTCUSDT", "period": "30M" });
+        assert!(tpo_payload(&too_long, Sample)
+            .unwrap_err()
+            .contains("too long"));
+    }
+
+    #[test]
+    fn a_profile_keeps_its_key_as_the_window_moves() {
+        let key = |period: &str, block: &str, end: i64| {
+            let args = json!({ "ticker": "BTCUSDT", "period": period, "block": block,
+                "periods": 2, "end_time": end });
+            let tpo = tpo_payload(&args, Sample).unwrap();
+            tpo["profiles"].as_array().unwrap().last().unwrap()["t"].clone()
+        };
+        // Noon, so that these hours stay in the same day, week and month.
+        let end = 1_699_920_000_000i64 + 12 * 3_600_000;
+        for (period, block) in [("1M", "5m"), ("1W", "30m"), ("1D", "30m")] {
+            let at = key(period, block, end);
+            for hours in [1, 2, 6] {
+                assert_eq!(key(period, block, end + hours * 3_600_000), at, "{period}");
+            }
+        }
+    }
+
+    #[test]
+    fn profiles_come_in_time_order_with_a_key_each_whatever_the_order_of_sessions() {
+        let args = json!({ "ticker": "BTCUSDT", "periods": 2, "end_time": 1_699_920_000_000i64,
+            "sessions": ["16:00-20:00", "08:00-12:00"] });
+        let tpo = tpo_payload(&args, Sample).unwrap();
+        let keys: Vec<i64> = tpo["profiles"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|p| p["t"].as_i64().unwrap())
+            .collect();
+        assert_eq!(keys.len(), 4);
+        assert!(keys.windows(2).all(|w| w[0] < w[1]), "{keys:?}");
+    }
+
+    #[test]
+    fn each_bar_and_profile_says_the_row_it_was_built_with() {
+        let args = json!({ "ticker": "BTCUSDT", "timeframe": "1h", "bars": 3, "row_size": 2.5 });
+        let fp = footprint_payload(&args, Sample).unwrap();
+        assert_eq!(fp["footprints"][0]["row"], 2.5);
+        // Too fine for this reply: it is wider than asked, on the bar too.
+        let args = json!({ "ticker": "BTCUSDT", "timeframe": "1h", "bars": 3, "row_size": 0.01 });
+        let fp = footprint_payload(&args, Sample).unwrap();
+        assert_eq!(fp["row_widened"], true);
+        assert_eq!(fp["footprints"][0]["row"], fp["row_size"]);
+        let args = json!({ "ticker": "BTCUSDT", "periods": 1, "row_size": 2.5 });
+        assert_eq!(
+            tpo_payload(&args, Sample).unwrap()["profiles"][0]["row"],
+            2.5
+        );
     }
 
     #[test]
