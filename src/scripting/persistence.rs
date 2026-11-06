@@ -235,22 +235,29 @@ impl Store {
         Ok(())
     }
 
-    /// The client ids that own at least one stored script or server alert.
+    /// The client ids that own at least one stored script.
     pub fn script_owners(&self) -> rusqlite::Result<HashSet<String>> {
         let conn = self.conn();
-        let mut stmt = conn
-            .prepare("SELECT user_id FROM user_indicators UNION SELECT owner FROM server_alerts")?;
+        let mut stmt = conn.prepare("SELECT DISTINCT user_id FROM user_indicators")?;
+        let rows = stmt.query_map([], |r| r.get(0))?;
+        rows.collect()
+    }
+
+    /// The client ids that own at least one server alert.
+    pub fn server_alert_owners(&self) -> rusqlite::Result<HashSet<String>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare("SELECT DISTINCT owner FROM server_alerts")?;
         let rows = stmt.query_map([], |r| r.get(0))?;
         rows.collect()
     }
 
     /// Delete clients registered over `max_age_secs` ago that never received
-    /// a token and own no scripts or server alerts; returns how many.
+    /// a token and own no scripts; returns how many. An owner of a server alert
+    /// has received one.
     pub fn gc_oauth_clients(&self, max_age_secs: i64) -> rusqlite::Result<usize> {
         self.conn().execute(
             "DELETE FROM oauth_clients WHERE last_token_at IS NULL AND created_at < ?1
-                 AND client_id NOT IN (SELECT user_id FROM user_indicators)
-                 AND client_id NOT IN (SELECT owner FROM server_alerts)",
+                 AND client_id NOT IN (SELECT user_id FROM user_indicators)",
             params![chrono::Utc::now().timestamp() - max_age_secs],
         )
     }

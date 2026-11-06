@@ -772,6 +772,7 @@ fn server_command(
         .env_remove("CHARTGEN_SCRIPTING")
         .env_remove("CHARTGEN_SERVER_ALERTS")
         .env_remove("CHARTGEN_WEBHOOK_TEST_ORIGIN")
+        .env_remove("CHARTGEN_SERVER_ALERT_CLIENTS")
         .env("CHARTGEN_DB", db)
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
@@ -1212,12 +1213,23 @@ mod server_alerts {
     }
 
     fn alert_server(db: &std::path::Path, hook_port: u16, sample: bool) -> Server {
+        alert_server_for(db, hook_port, sample, "*")
+    }
+
+    fn alert_server_for(
+        db: &std::path::Path,
+        hook_port: u16,
+        sample: bool,
+        clients: &str,
+    ) -> Server {
         let port = free_port();
         let mut cmd = server_command(port, None, db, false);
-        cmd.env("CHARTGEN_SERVER_ALERTS", "1").env(
-            "CHARTGEN_WEBHOOK_TEST_ORIGIN",
-            format!("http://127.0.0.1:{hook_port}"),
-        );
+        cmd.env("CHARTGEN_SERVER_ALERTS", "1")
+            .env("CHARTGEN_SERVER_ALERT_CLIENTS", clients)
+            .env(
+                "CHARTGEN_WEBHOOK_TEST_ORIGIN",
+                format!("http://127.0.0.1:{hook_port}"),
+            );
         if sample {
             cmd.env("CHARTGEN_DATA_SOURCE", "sample");
         } else {
@@ -1289,6 +1301,66 @@ mod server_alerts {
         let other = sign_in(port, &register_external(port));
         let list = call_tool(port, &other, "list_server_alerts", serde_json::json!({})).unwrap();
         assert_eq!(list["alerts"], serde_json::json!([]));
+    }
+
+    /// With only the flag on, as an operator might leave it: strangers get alerts,
+    /// and the setting that allows webhooks is what is missing, not a URL check.
+    #[test]
+    fn test_without_the_client_setting_no_webhook_is_accepted() {
+        let db = store_path("alerts-allowlist");
+        let (hook, seen) = receiver();
+        let srv = alert_server_for(&db, hook, true, "");
+        let token = sign_in(srv.port, &register_external(srv.port));
+        let spec = |extra: serde_json::Value| {
+            let mut args = serde_json::json!({
+                "symbol": "BTCUSDT", "condition": "greater", "trigger": "once", "level": 0.01,
+            });
+            args.as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            args
+        };
+        let url = format!("http://127.0.0.1:{hook}/hook");
+        let e = call_tool(
+            srv.port,
+            &token,
+            "create_server_alert",
+            spec(serde_json::json!({"webhook_url": url})),
+        )
+        .unwrap_err();
+        assert!(e.contains("operator allowed"), "{e}");
+        call_tool(
+            srv.port,
+            &token,
+            "create_server_alert",
+            spec(serde_json::json!({})),
+        )
+        .unwrap();
+        let list = call_tool(
+            srv.port,
+            &token,
+            "list_server_alerts",
+            serde_json::json!({}),
+        )
+        .unwrap();
+        assert_eq!(list["webhooks"], false);
+        assert_eq!(list["can_create"], true);
+        assert!(seen.lock().unwrap().is_empty());
+    }
+
+    /// A security setting that does not parse leaves the feature off, not open.
+    #[test]
+    fn test_a_bad_webhook_setting_keeps_alerts_off() {
+        let db = store_path("alerts-bad-setting");
+        let port = free_port();
+        let mut cmd = server_command(port, None, &db, false);
+        cmd.env("CHARTGEN_SERVER_ALERTS", "1")
+            .env("CHARTGEN_DATA_SOURCE", "sample")
+            .env("CHARTGEN_WEBHOOK_BLOCKED_PREFIXES", "not-a-prefix");
+        let srv = start_server(cmd, port);
+        assert!(!tool_names(srv.port)
+            .iter()
+            .any(|t| t == "list_server_alerts"));
     }
 
     /// "Bar close" on the real binary, where the sample feed sends the next candle's

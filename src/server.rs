@@ -354,17 +354,29 @@ fn with_resource_metadata(mut resp: Response, path: &str) -> Response {
     resp
 }
 
-/// The client ids owning stored scripts; `None` if that cannot be determined.
-/// Scripts live in the store, so without one nobody owns any.
+/// The client ids owning stored scripts, and server alerts while those are on (an
+/// off feature has no one to run them for, so its rows pin nobody); `None` if that
+/// cannot be determined. Scripts live in the store, so without one nobody owns any.
 fn script_owners() -> Option<HashSet<String>> {
     #[cfg(feature = "scripting")]
     if let Some(store) = scripting::persistence::global() {
-        return store
-            .script_owners()
+        return pinned_clients(store, crate::server_alerts::enabled())
             .map_err(|e| eprintln!("[OAuth] cannot read script owners: {e}"))
             .ok();
     }
     Some(HashSet::new())
+}
+
+#[cfg(feature = "scripting")]
+fn pinned_clients(
+    store: &scripting::persistence::Store,
+    alerts_on: bool,
+) -> rusqlite::Result<HashSet<String>> {
+    let mut owners = store.script_owners()?;
+    if alerts_on {
+        owners.extend(store.server_alert_owners()?);
+    }
+    Ok(owners)
 }
 
 #[derive(Deserialize)]
@@ -2397,6 +2409,19 @@ mod tests {
         let (status, _) = s.make_room(|| None).unwrap_err();
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(s.clients.len(), MAX_CLIENTS);
+    }
+
+    #[cfg(feature = "scripting")]
+    #[test]
+    fn an_alert_owner_is_pinned_only_while_alerts_are_on() {
+        let dir = std::env::temp_dir().join(format!("chartgen-pins-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = scripting::persistence::Store::open(&dir.join("s.db")).unwrap();
+        store.save_server_alert("a1", "owner", "{}").unwrap();
+        assert!(pinned_clients(&store, true).unwrap().contains("owner"));
+        assert!(pinned_clients(&store, false).unwrap().is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

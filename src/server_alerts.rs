@@ -1,7 +1,8 @@
 //! Alerts that run on the server, with no browser open (ADR-0042).
 //!
-//! Off unless `CHARTGEN_SERVER_ALERTS=1`. An alert watches one Binance symbol's
-//! price and belongs to the OAuth client that created it. Prices come from the
+//! Off unless `CHARTGEN_SERVER_ALERTS=1`, and registration being open, webhooks need
+//! `CHARTGEN_SERVER_ALERT_CLIENTS` too (`Access`). An alert watches one Binance
+//! symbol's price and belongs to the OAuth client that created it. Prices come from the
 //! chart hub's feeds, one WebSocket per symbol and interval shared with every
 //! chart of it, so alerts add no REST polling: only the one fetch that checks a
 //! symbol new to the server, on the path `generate_chart` uses.
@@ -22,7 +23,7 @@ use chartgen::scripting::persistence::{self, Store, StoredEvent};
 use chartgen::webhook::{self, Policy, Target, Timing};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use tokio::sync::{broadcast, mpsc, Semaphore};
+use tokio::sync::{broadcast, Semaphore};
 use tokio::task::JoinHandle;
 
 use crate::chart_push::{ChartHub, FeedKey, FeedLease};
@@ -39,19 +40,85 @@ const FEED_QUIET: Duration = Duration::from_secs(120);
 /// A delivery still pending after this long, across a restart, is dropped.
 const EVENT_MAX_AGE_SECS: i64 = 3_600;
 const MINUTE: Duration = Duration::from_secs(60);
+/// How often waiting deliveries are looked at. The budget is per tick, so the total
+/// per minute is spread out instead of being spent by whoever is first.
+const DISPATCH_EVERY: Duration = Duration::from_millis(500);
+const DISPATCHES_PER_MINUTE: usize = 120;
+/// How often expired alerts are collected and feeds refused earlier are tried again.
+const UPKEEP_EVERY: Duration = Duration::from_secs(60);
+/// A fired `once` alert is deleted this long after it fired.
+const SPENT_TTL_MS: i64 = 7 * 86_400 * 1000;
+/// An alert is deleted once its owner has had no token for this long, unless the
+/// operator listed that client: alerts can outlive the people who made them.
+const IDLE_OWNER_TTL_MS: i64 = 30 * 86_400 * 1000;
 
 /// `CHARTGEN_SERVER_ALERTS=1` turns server alerts on.
 pub fn enabled() -> bool {
     std::env::var("CHARTGEN_SERVER_ALERTS").is_ok_and(|v| v == "1")
 }
 
+/// Who may do what (`CHARTGEN_SERVER_ALERT_CLIENTS`). Client ids are free, so no
+/// per-client limit can stand in for this.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Access {
+    /// Unset: anyone may create alerts, nobody gets webhooks. An alert in a panel
+    /// sends nothing anywhere; a webhook is a request made for a stranger.
+    NoWebhooks,
+    /// Only these clients may create alerts, and they get webhooks.
+    Clients(HashSet<String>),
+    /// `*`: anyone, with webhooks.
+    Open,
+}
+
+impl Access {
+    fn parse(raw: Option<&str>) -> Self {
+        let ids: HashSet<String> = raw
+            .unwrap_or("")
+            .split(',')
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+            .map(str::to_string)
+            .collect();
+        if ids.is_empty() {
+            Self::NoWebhooks
+        } else if ids.contains("*") {
+            Self::Open
+        } else {
+            Self::Clients(ids)
+        }
+    }
+
+    fn may_create(&self, owner: &str) -> bool {
+        match self {
+            Self::Clients(ids) => ids.contains(owner),
+            _ => true,
+        }
+    }
+
+    fn may_use_webhooks(&self, owner: &str) -> bool {
+        match self {
+            Self::Clients(ids) => ids.contains(owner),
+            Self::Open => true,
+            Self::NoWebhooks => false,
+        }
+    }
+
+    fn keeps_idle_alerts(&self, owner: &str) -> bool {
+        matches!(self, Self::Clients(ids) if ids.contains(owner))
+    }
+}
+
 /// Registration is open (ADR-0036), so these assume a stranger.
 #[derive(Clone, Copy, Debug)]
 pub struct Limits {
     pub alerts_per_client: usize,
+    /// Alerts not yet spent.
     pub alerts_total: usize,
+    /// Rows, spent ones included, until they expire.
+    pub rows_total: usize,
     /// Symbol and interval pairs watched: each is a WebSocket to Binance.
     pub feeds: usize,
+    pub pairs_per_client: usize,
     /// `create_server_alert` and `update_server_alert` calls per client.
     pub changes_per_minute: usize,
     /// Fires of one `every` alert; a `once` alert cannot repeat.
@@ -59,6 +126,8 @@ pub struct Limits {
     pub webhooks_per_client_per_minute: usize,
     pub webhooks_total_per_minute: usize,
     pub pending_deliveries: usize,
+    /// So that a few clients cannot fill `pending_deliveries`.
+    pub pending_deliveries_per_client: usize,
     pub deliveries_in_flight: usize,
     pub deliveries_in_flight_per_client: usize,
 }
@@ -68,12 +137,15 @@ impl Default for Limits {
         Self {
             alerts_per_client: 20,
             alerts_total: 200,
+            rows_total: 1000,
             feeds: 16,
+            pairs_per_client: 2,
             changes_per_minute: 10,
             fires_per_alert_per_minute: 6,
             webhooks_per_client_per_minute: 30,
             webhooks_total_per_minute: 120,
-            pending_deliveries: 500,
+            pending_deliveries: 2000,
+            pending_deliveries_per_client: 50,
             deliveries_in_flight: 16,
             deliveries_in_flight_per_client: 2,
         }
@@ -236,17 +308,24 @@ struct Watch {
 struct Window(HashMap<String, VecDeque<Instant>>);
 
 impl Window {
-    fn admit(&mut self, key: &str, max: usize, now: Instant) -> bool {
+    fn has_room(&mut self, key: &str, max: usize, now: Instant) -> bool {
         self.0.retain(|_, calls| {
             while calls.front().is_some_and(|t| now - *t >= MINUTE) {
                 calls.pop_front();
             }
             !calls.is_empty()
         });
-        let calls = self.0.entry(key.to_string()).or_default();
-        let admitted = calls.len() < max;
+        self.0.get(key).map_or(0, VecDeque::len) < max
+    }
+
+    fn record(&mut self, key: &str, now: Instant) {
+        self.0.entry(key.to_string()).or_default().push_back(now);
+    }
+
+    fn admit(&mut self, key: &str, max: usize, now: Instant) -> bool {
+        let admitted = self.has_room(key, max, now);
         if admitted {
-            calls.push_back(now);
+            self.record(key, now);
         }
         admitted
     }
@@ -263,6 +342,11 @@ struct State {
     webhooks: Window,
     /// Fires an `every` alert was refused in the last minute.
     held_back: HashMap<String, Instant>,
+    /// Deliveries waiting for their turn, per client.
+    queues: HashMap<String, VecDeque<StoredEvent>>,
+    /// When each client last had a turn: the longest waiting goes first, so a client
+    /// with a backlog cannot keep another's single delivery waiting.
+    served: HashMap<String, Instant>,
     pending: usize,
     client_slots: HashMap<String, Arc<Semaphore>>,
 }
@@ -275,7 +359,7 @@ pub struct ServerAlerts {
     timing: Timing,
     runtime: tokio::runtime::Handle,
     state: Mutex<State>,
-    deliveries: mpsc::UnboundedSender<StoredEvent>,
+    access: Access,
     slots: Arc<Semaphore>,
     me: Weak<ServerAlerts>,
 }
@@ -303,15 +387,33 @@ pub fn start(hub: &Arc<ChartHub>) {
             return;
         }
     };
+    let access = Access::parse(
+        std::env::var("CHARTGEN_SERVER_ALERT_CLIENTS")
+            .ok()
+            .as_deref(),
+    );
+    let mut limits = Limits::default();
+    if let Some(pairs) = std::env::var("CHARTGEN_SERVER_ALERT_PAIRS_PER_CLIENT")
+        .ok()
+        .and_then(|v| v.trim().parse().ok())
+    {
+        limits.pairs_per_client = pairs;
+    }
+    let who = match &access {
+        Access::NoWebhooks => "no webhooks: CHARTGEN_SERVER_ALERT_CLIENTS is unset".to_string(),
+        Access::Clients(ids) => format!("{} allowed clients", ids.len()),
+        Access::Open => "open to every client, with webhooks".to_string(),
+    };
     let alerts = ServerAlerts::new(
         store,
         hub.clone(),
         policy,
-        Limits::default(),
+        access,
+        limits,
         Timing::default(),
     );
     println!(
-        "Server alerts enabled ({} restored)",
+        "Server alerts enabled ({} restored; {who})",
         alerts.lock().alerts.len()
     );
     let _ = GLOBAL.set(alerts);
@@ -327,10 +429,10 @@ impl ServerAlerts {
         store: &'static Store,
         hub: Arc<ChartHub>,
         policy: Policy,
+        access: Access,
         limits: Limits,
         timing: Timing,
     ) -> Arc<Self> {
-        let (deliveries, rx) = mpsc::unbounded_channel();
         let alerts = Arc::new_cyclic(|me| Self {
             store,
             hub,
@@ -339,12 +441,12 @@ impl ServerAlerts {
             timing,
             runtime: tokio::runtime::Handle::current(),
             state: Mutex::default(),
-            deliveries,
+            access,
             slots: Arc::new(Semaphore::new(limits.deliveries_in_flight)),
             me: me.clone(),
         });
-        alerts.runtime.spawn(run_deliveries(alerts.me.clone(), rx));
         alerts.restore();
+        alerts.runtime.spawn(run_upkeep(alerts.me.clone()));
         alerts
     }
 
@@ -364,18 +466,19 @@ impl ServerAlerts {
             }
             Err(e) => eprintln!("[alerts] cannot read stored alerts: {e}"),
         }
-        self.sync_feeds(&mut st);
+        self.sweep(&mut st, now_ms());
         let events = self.store.server_alert_events().unwrap_or_else(|e| {
             eprintln!("[alerts] cannot read pending deliveries: {e}");
             Vec::new()
         });
         let oldest = chrono::Utc::now().timestamp() - EVENT_MAX_AGE_SECS;
         for event in events {
-            if event.created_at < oldest || !st.alerts.contains_key(&event.alert_id) {
-                let _ = self.store.delete_server_alert_event(&event.id);
-            } else {
-                st.pending += 1;
-                let _ = self.deliveries.send(event);
+            let owner = st.alerts.get(&event.alert_id).map(|a| a.owner.clone());
+            match owner.filter(|_| event.created_at >= oldest) {
+                Some(owner) => Self::enqueue(&mut st, owner, event),
+                None => {
+                    let _ = self.store.delete_server_alert_event(&event.id);
+                }
             }
         }
     }
@@ -384,17 +487,22 @@ impl ServerAlerts {
         self.state.lock().unwrap_or_else(|p| p.into_inner())
     }
 
-    fn wanted_feeds(st: &State) -> HashSet<FeedKey> {
+    /// A client the operator took off the list stops running at once.
+    fn runs(&self, a: &Record) -> bool {
+        a.active && self.access.may_create(&a.owner)
+    }
+
+    fn wanted_feeds(&self, st: &State) -> HashSet<FeedKey> {
         st.alerts
             .values()
-            .filter(|a| a.active)
+            .filter(|a| self.runs(a))
             .map(Record::feed)
             .collect()
     }
 
     /// Join the feeds active alerts need and leave the others.
     fn sync_feeds(&self, st: &mut State) {
-        let wanted = Self::wanted_feeds(st);
+        let wanted = self.wanted_feeds(st);
         st.watches.retain(|key, w| {
             let keep = wanted.contains(key);
             if !keep {
@@ -406,7 +514,14 @@ impl ServerAlerts {
             if st.watches.contains_key(&key) {
                 continue;
             }
-            let (rx, lease) = self.hub.watch_feed(&key);
+            // Refused now: the upkeep tries again, and the alert reads as waiting.
+            let (rx, lease) = match self.hub.watch_feed(&key) {
+                Ok(joined) => joined,
+                Err(e) => {
+                    eprintln!("[alerts] feed {} {}: {e}", key.0, key.1);
+                    continue;
+                }
+            };
             let task = self
                 .runtime
                 .spawn(run_watch(self.me.clone(), key.clone(), rx));
@@ -484,7 +599,7 @@ impl ServerAlerts {
             .alerts
             .values()
             .filter(|a| {
-                a.active
+                self.runs(a)
                     && a.feed() == *key
                     && match a.evaluate_on {
                         EvaluateOn::Live => !late,
@@ -543,7 +658,7 @@ impl ServerAlerts {
         let at = now_ms();
         updated.last_triggered_at = Some(at);
         updated.fire_count += 1;
-        let event = self.prepare_delivery(st, &mut updated, price, bar_time, at, now);
+        let event = self.prepare_delivery(st, &mut updated, price, bar_time, at);
         if let Err(e) =
             self.store
                 .record_server_alert_fire(id, &updated.owner, &updated.json(), event.as_ref())
@@ -554,16 +669,23 @@ impl ServerAlerts {
         }
         st.alerts.insert(id.to_string(), updated);
         if let Some(event) = event {
-            st.pending += 1;
-            let _ = self.deliveries.send(event);
+            let owner = st.alerts[id].owner.clone();
+            Self::enqueue(st, owner, event);
         }
         if !next.active {
             self.sync_feeds(st);
         }
     }
 
-    /// The delivery of a fire, if it has a webhook and the budget allows one.
-    /// Refused, the fire still counts and the alert says why nothing was sent.
+    fn enqueue(st: &mut State, owner: String, event: StoredEvent) {
+        st.pending += 1;
+        st.queues.entry(owner).or_default().push_back(event);
+    }
+
+    /// The delivery of a fire, if it has a webhook and is allowed to wait for one.
+    /// It waits for its turn however busy the budget is, so a `once` alert keeps its
+    /// webhook. Only with a full queue does the fire count without one, and the alert
+    /// says why.
     fn prepare_delivery(
         &self,
         st: &mut State,
@@ -571,20 +693,24 @@ impl ServerAlerts {
         price: f64,
         bar_time: i64,
         at: i64,
-        now: Instant,
     ) -> Option<StoredEvent> {
         alert.webhook.as_ref()?;
         let limits = &self.limits;
-        let allowed = st.pending < limits.pending_deliveries
-            && st
-                .webhooks
-                .admit(&alert.owner, limits.webhooks_per_client_per_minute, now)
-            && st.webhooks.admit("", limits.webhooks_total_per_minute, now);
-        if !allowed {
+        let refusal = if !self.access.may_use_webhooks(&alert.owner) {
+            Some("webhook skipped: this client may not use webhooks")
+        } else if st.pending >= limits.pending_deliveries
+            || st.queues.get(&alert.owner).map_or(0, VecDeque::len)
+                >= limits.pending_deliveries_per_client
+        {
+            Some("webhook skipped: too many deliveries waiting")
+        } else {
+            None
+        };
+        if let Some(error) = refusal {
             alert.last_delivery = Some(Delivery {
                 at,
                 status: None,
-                error: Some("webhook skipped: rate limit reached".into()),
+                error: Some(error.into()),
             });
             return None;
         }
@@ -610,6 +736,111 @@ impl ServerAlerts {
             body: body.to_string(),
             created_at: at / 1000,
         })
+    }
+
+    /// Start the deliveries whose turn it is: the client that waited longest first,
+    /// within its own budget and the total, at an even pace.
+    fn dispatch(&self, now: Instant) {
+        let mut guard = self.lock();
+        let st = &mut *guard;
+        let limits = &self.limits;
+        let oldest = chrono::Utc::now().timestamp() - EVENT_MAX_AGE_SECS;
+        let mut owners: Vec<String> = st
+            .queues
+            .iter()
+            .filter(|(_, q)| !q.is_empty())
+            .map(|(owner, _)| owner.clone())
+            .collect();
+        owners.sort_by_key(|owner| st.served.get(owner).copied());
+        let mut left = (limits.webhooks_total_per_minute / DISPATCHES_PER_MINUTE).max(1);
+        for owner in owners {
+            if left == 0
+                || !st
+                    .webhooks
+                    .has_room("", limits.webhooks_total_per_minute, now)
+            {
+                break;
+            }
+            // Waited for an hour: a price that old is no news, as after a restart.
+            let queue = st.queues.entry(owner.clone()).or_default();
+            while queue.front().is_some_and(|e| e.created_at < oldest) {
+                if let Some(stale) = queue.pop_front() {
+                    st.pending = st.pending.saturating_sub(1);
+                    let _ = self.store.delete_server_alert_event(&stale.id);
+                }
+            }
+            if !st
+                .webhooks
+                .has_room(&owner, limits.webhooks_per_client_per_minute, now)
+            {
+                continue;
+            }
+            let Some(event) = st.queues.get_mut(&owner).and_then(VecDeque::pop_front) else {
+                continue;
+            };
+            st.webhooks.record(&owner, now);
+            st.webhooks.record("", now);
+            st.served.insert(owner, now);
+            left -= 1;
+            if let Some(this) = self.me.upgrade() {
+                self.runtime.spawn(this.deliver(event));
+            }
+        }
+        st.queues.retain(|_, q| !q.is_empty());
+    }
+
+    /// Delete what expired, and try again to join feeds that were refused. A failure
+    /// to read the clients keeps their alerts: an unknown owner is not an idle one.
+    fn sweep(&self, st: &mut State, now: i64) {
+        let last_tokens: Option<HashMap<String, i64>> = match self.store.oauth_clients() {
+            Ok(clients) => Some(
+                clients
+                    .into_iter()
+                    .filter_map(|c| Some((c.client_id, c.last_token_at?)))
+                    .collect(),
+            ),
+            Err(e) => {
+                eprintln!("[alerts] cannot read clients: {e}");
+                None
+            }
+        };
+        let expired: Vec<String> = st
+            .alerts
+            .values()
+            .filter(|a| {
+                let spent =
+                    !a.active && a.last_triggered_at.is_some_and(|t| now - t > SPENT_TTL_MS);
+                let idle = last_tokens.as_ref().is_some_and(|tokens| {
+                    let last = tokens.get(&a.owner).map_or(0, |secs| secs * 1000);
+                    !self.access.keeps_idle_alerts(&a.owner)
+                        && now - last.max(a.created_at) > IDLE_OWNER_TTL_MS
+                });
+                spent || idle
+            })
+            .map(|a| a.id.clone())
+            .collect();
+        for id in expired {
+            if let Err(e) = self.remove(st, &id) {
+                eprintln!("[alerts] cannot delete an expired alert: {e}");
+            }
+        }
+        self.sync_feeds(st);
+    }
+
+    /// Delete an alert, with what it still had to deliver.
+    fn remove(&self, st: &mut State, id: &str) -> rusqlite::Result<()> {
+        self.store.delete_server_alert(id)?;
+        st.alerts.remove(id);
+        st.baselines.remove(id);
+        st.held_back.remove(id);
+        let mut dropped = 0;
+        for queue in st.queues.values_mut() {
+            let before = queue.len();
+            queue.retain(|e| e.alert_id != id);
+            dropped += before - queue.len();
+        }
+        st.pending = st.pending.saturating_sub(dropped);
+        Ok(())
     }
 
     /// Send one event, then record how it went and forget it.
@@ -711,7 +942,10 @@ impl ServerAlerts {
     }
 
     /// Check a webhook URL now, so a bad one is refused to the person typing it.
-    fn check_webhook(&self, raw: &str) -> Result<(), String> {
+    fn check_webhook(&self, raw: &str, owner: &str) -> Result<(), String> {
+        if !self.access.may_use_webhooks(owner) {
+            return Err("This server only sends webhooks for clients its operator allowed".into());
+        }
         let target = Target::parse(raw, &self.policy)?;
         self.runtime
             .block_on(webhook::resolve(&target, &self.policy))
@@ -738,27 +972,50 @@ impl ServerAlerts {
                 limits.alerts_per_client
             ));
         }
-        if st.alerts.len() >= limits.alerts_total {
+        let spent = |a: &&Record| !a.active && a.last_triggered_at.is_some();
+        let live = st.alerts.values().filter(|a| !spent(a)).count();
+        if live >= limits.alerts_total || st.alerts.len() >= limits.rows_total {
             return Err(format!(
                 "Limit reached: this server holds its maximum of {} server alerts",
                 limits.alerts_total
             ));
         }
-        self.check_feed_room(st, feed)
+        self.check_feed_room(st, owner, feed)
     }
 
-    fn check_feed_room(&self, st: &State, feed: &FeedKey) -> Result<(), String> {
-        let wanted = Self::wanted_feeds(st);
+    fn check_feed_room(&self, st: &State, owner: &str, feed: &FeedKey) -> Result<(), String> {
+        let wanted = self.wanted_feeds(st);
         if !wanted.contains(feed) && wanted.len() >= self.limits.feeds {
             return Err(format!(
                 "Limit reached: this server watches at most {} symbol and interval pairs",
                 self.limits.feeds
             ));
         }
+        let mine: HashSet<FeedKey> = st
+            .alerts
+            .values()
+            .filter(|a| a.owner == owner && a.active)
+            .map(Record::feed)
+            .collect();
+        if !mine.contains(feed) && mine.len() >= self.limits.pairs_per_client {
+            return Err(format!(
+                "Limit reached: at most {} symbol and interval pairs per client",
+                self.limits.pairs_per_client
+            ));
+        }
+        if !st.watches.contains_key(feed) {
+            self.hub.feed_room(feed).map_err(|_| {
+                "Limit reached: this server is starting too many feeds; try again in a minute"
+                    .to_string()
+            })?;
+        }
         Ok(())
     }
 
     fn create(&self, args: &Value, owner: &str) -> Result<Value, String> {
+        if !self.access.may_create(owner) {
+            return Err("This server only runs alerts for clients its operator allowed".into());
+        }
         self.admit_change(owner)?;
         let raw_symbol = args.get("symbol").and_then(Value::as_str).unwrap_or("");
         let symbol = normalize_quote_symbol(raw_symbol).ok_or("symbol is required")?;
@@ -810,7 +1067,7 @@ impl ServerAlerts {
         };
         // In this order: a refused URL costs the exchange nothing.
         if let Some(url) = &webhook_url {
-            self.check_webhook(url)?;
+            self.check_webhook(url, owner)?;
         }
         if new_feed {
             self.hub
@@ -878,7 +1135,7 @@ impl ServerAlerts {
         };
         let (webhook_url, sign) = webhook_args(args)?;
         if let Some(url) = webhook_url.as_deref().filter(|u| !u.is_empty()) {
-            self.check_webhook(url)?;
+            self.check_webhook(url, owner)?;
         }
 
         let mut st = self.lock();
@@ -888,8 +1145,11 @@ impl ServerAlerts {
             .filter(|a| a.owner == owner)
             .cloned()
             .ok_or("No such alert")?;
-        let redefined =
-            condition.is_some() || trigger.is_some() || level.is_some() || message.is_some();
+        // What decides when it fires: a note or a webhook does not bring a spent alert
+        // back, and neither does the dialog sending the same values again.
+        let redefined = condition.is_some_and(|c| c != next.condition)
+            || trigger.is_some_and(|t| t != next.trigger)
+            || level.is_some_and(|l| l != next.level);
         next.condition = condition.unwrap_or(next.condition);
         next.trigger = trigger.unwrap_or(next.trigger);
         next.level = level.unwrap_or(next.level);
@@ -916,7 +1176,12 @@ impl ServerAlerts {
         match webhook_url {
             Some(url) if url.is_empty() => next.webhook = None,
             Some(url) => {
-                let secret = next.webhook.take().and_then(|h| h.secret);
+                // A secret signs for one receiver: a new host does not inherit it.
+                let secret = next
+                    .webhook
+                    .take()
+                    .filter(|h| h.url == url)
+                    .and_then(|h| h.secret);
                 next.webhook = Some(Hook { url, secret });
             }
             None => {}
@@ -928,7 +1193,7 @@ impl ServerAlerts {
             new_secret_text = hook.secret.clone();
         }
         if next.active {
-            self.check_feed_room(&st, &next.feed())?;
+            self.check_feed_room(&st, owner, &next.feed())?;
         }
         self.store
             .save_server_alert(id, owner, &next.json())
@@ -957,13 +1222,10 @@ impl ServerAlerts {
         if !st.alerts.get(id).is_some_and(|a| a.owner == owner) {
             return Ok(json!({ "deleted": false }));
         }
-        self.store.delete_server_alert(id).map_err(|e| {
+        self.remove(&mut st, id).map_err(|e| {
             eprintln!("[alerts] cannot delete an alert: {e}");
             "The alert store is unavailable".to_string()
         })?;
-        st.alerts.remove(id);
-        st.baselines.remove(id);
-        st.held_back.remove(id);
         self.sync_feeds(&mut st);
         Ok(json!({ "deleted": true }))
     }
@@ -975,8 +1237,11 @@ impl ServerAlerts {
         let limits = &self.limits;
         json!({
             "enabled": true,
+            "can_create": self.access.may_create(owner),
+            "webhooks": self.access.may_use_webhooks(owner),
             "limits": {
                 "alerts_per_client": limits.alerts_per_client,
+                "pairs_per_client": limits.pairs_per_client,
                 "fires_per_alert_per_minute": limits.fires_per_alert_per_minute,
                 "webhooks_per_client_per_minute": limits.webhooks_per_client_per_minute,
             },
@@ -1120,16 +1385,20 @@ async fn run_watch(
     }
 }
 
-/// Send each delivery on its own task; `ServerAlerts::deliver` takes the slots.
-async fn run_deliveries(
-    alerts: Weak<ServerAlerts>,
-    mut events: mpsc::UnboundedReceiver<StoredEvent>,
-) {
-    while let Some(event) = events.recv().await {
+/// Start deliveries on a steady beat, and collect what expired less often.
+async fn run_upkeep(alerts: Weak<ServerAlerts>) {
+    let mut last_sweep = Instant::now();
+    loop {
+        tokio::time::sleep(DISPATCH_EVERY).await;
         let Some(this) = alerts.upgrade() else {
             return;
         };
-        this.runtime.clone().spawn(this.deliver(event));
+        let now = Instant::now();
+        this.dispatch(now);
+        if now - last_sweep >= UPKEEP_EVERY {
+            last_sweep = now;
+            this.sweep(&mut this.lock(), now_ms());
+        }
     }
 }
 

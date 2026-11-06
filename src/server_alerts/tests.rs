@@ -4,6 +4,7 @@ use chartgen::data::{Bar, OhlcvData};
 use futures_util::future::BoxFuture;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::sync::mpsc;
 
 const BASE: i64 = 1_700_000_040;
 
@@ -81,7 +82,7 @@ fn hub_with(fake: Arc<Fake>) -> Arc<ChartHub> {
 
 fn alerts_on(store: &'static Store, policy: Policy, limits: Limits) -> Arc<ServerAlerts> {
     let hub = hub_with(Arc::new(Fake::default()));
-    ServerAlerts::new(store, hub, policy, limits, quick_timing())
+    ServerAlerts::new(store, hub, policy, Access::Open, limits, quick_timing())
 }
 
 fn plain(store: &'static Store) -> Arc<ServerAlerts> {
@@ -290,6 +291,7 @@ async fn closes_fire_when_trades_roll_the_candle_first() {
         store,
         hub_with(fake.clone()),
         Policy::default(),
+        Access::Open,
         Limits::default(),
         quick_timing(),
     );
@@ -594,6 +596,7 @@ async fn a_symbol_new_to_the_server_is_checked_once() {
         store,
         hub_with(fake.clone()),
         Policy::default(),
+        Access::Open,
         Limits::default(),
         quick_timing(),
     );
@@ -713,6 +716,7 @@ async fn the_limits_hold() {
         alerts_per_client: 2,
         alerts_total: 3,
         feeds: 2,
+        pairs_per_client: 1,
         changes_per_minute: 1000,
         ..Limits::default()
     };
@@ -838,7 +842,7 @@ fn local(port: u16) -> Policy {
 }
 
 async fn until(what: &str, mut done: impl FnMut() -> bool) {
-    for _ in 0..200 {
+    for _ in 0..600 {
         if done() {
             return;
         }
@@ -972,8 +976,9 @@ async fn a_failed_delivery_shows_the_status_only() {
     assert!(store.server_alert_events().unwrap().is_empty(), "given up");
 }
 
+/// Over its budget a delivery waits, so a `once` alert keeps its webhook.
 #[tokio::test(flavor = "multi_thread")]
-async fn the_webhook_budget_skips_the_send_but_not_the_fire() {
+async fn a_delivery_over_budget_waits_and_is_not_dropped() {
     let (port, seen) = receiver(OK).await;
     let (store, _) = store_at("budget");
     let limits = Limits {
@@ -986,23 +991,86 @@ async fn the_webhook_budget_skips_the_send_but_not_the_fire() {
     let other = create(&a, hooked(port, "greater", "once"), "you").await;
     tick(&a, BASE, 101.0);
     until("two deliveries", || seen.lock().unwrap().len() == 2).await;
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    tokio::time::sleep(Duration::from_millis(700)).await;
     assert_eq!(seen.lock().unwrap().len(), 2, "one per client");
     for id in [&first, &second, &other] {
         assert_eq!(a.lock().alerts[id].fire_count, 1, "every alert fired");
     }
-    let skipped = [&first, &second]
-        .iter()
-        .filter(|id| {
-            a.lock().alerts[**id]
-                .last_delivery
-                .as_ref()
-                .and_then(|d| d.error.clone())
-                .as_deref()
-                == Some("webhook skipped: rate limit reached")
-        })
-        .count();
-    assert_eq!(skipped, 1);
+    assert_eq!(a.lock().pending, 1, "the third is waiting");
+    assert_eq!(store.server_alert_events().unwrap().len(), 1, "and stored");
+
+    // Its turn comes when the window moves on.
+    a.lock().webhooks = Window::default();
+    until("the third", || seen.lock().unwrap().len() == 3).await;
+    until("the row to clear", || {
+        store.server_alert_events().unwrap().is_empty()
+    })
+    .await;
+    assert_eq!(a.lock().pending, 0);
+    for id in [&first, &second] {
+        let view = get(&a, "me", id).await;
+        assert!(view["last_error"].is_null(), "{view}");
+    }
+}
+
+/// With no budget it never leaves the queue, so this shows the bound exactly.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_clients_queue_is_bounded_and_the_alert_says_so() {
+    let (port, seen) = receiver(OK).await;
+    let (store, _) = store_at("queue-bound");
+    let limits = Limits {
+        fires_per_alert_per_minute: 1000,
+        webhooks_per_client_per_minute: 0,
+        pending_deliveries_per_client: 5,
+        ..Limits::default()
+    };
+    let a = alerts_on(store, local(port), limits);
+    let id = create(&a, hooked(port, "crossing", "every"), "hog").await;
+    tick(&a, BASE, 99.0);
+    for i in 0..10 {
+        tick(&a, BASE, if i % 2 == 0 { 101.0 } else { 99.0 });
+    }
+    assert_eq!(a.lock().alerts[&id].fire_count, 10, "every fire counts");
+    assert_eq!(a.lock().queues["hog"].len(), 5);
+    assert_eq!(store.server_alert_events().unwrap().len(), 5);
+    let view = get(&a, "hog", &id).await;
+    assert_eq!(
+        view["last_error"],
+        "webhook skipped: too many deliveries waiting"
+    );
+    assert!(seen.lock().unwrap().is_empty());
+}
+
+/// The review's case: another client has a backlog, and a victim's `once` still
+/// goes out next, not behind it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_backlog_does_not_keep_another_clients_delivery_waiting() {
+    let (port, seen) = receiver(OK).await;
+    let (store, _) = store_at("share");
+    let limits = Limits {
+        changes_per_minute: 1000,
+        fires_per_alert_per_minute: 1000,
+        webhooks_per_client_per_minute: 1000,
+        webhooks_total_per_minute: 1000,
+        ..Limits::default()
+    };
+    let a = alerts_on(store, local(port), limits);
+    create(&a, hooked(port, "crossing", "every"), "hog").await;
+    tick(&a, BASE, 99.0);
+    for i in 0..40 {
+        tick(&a, BASE, if i % 2 == 0 { 101.0 } else { 99.0 });
+    }
+    let victim = create(&a, hooked(port, "greater", "once"), "victim").await;
+    tick(&a, BASE, 101.0);
+    assert_eq!(a.lock().alerts[&victim].fire_count, 1);
+    let backlog = a.lock().queues["hog"].len();
+    assert!(backlog > 30, "{backlog}");
+    until("the victim's delivery", || {
+        seen.lock().unwrap().iter().any(|r| r.contains(&victim))
+    })
+    .await;
+    let sent = seen.lock().unwrap().len();
+    assert!(sent < 8, "it waited behind the backlog: {sent} went first");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1019,8 +1087,433 @@ async fn the_total_budget_holds_across_clients() {
     }
     tick(&a, BASE, 101.0);
     until("two deliveries", || seen.lock().unwrap().len() == 2).await;
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    tokio::time::sleep(Duration::from_millis(700)).await;
     assert_eq!(seen.lock().unwrap().len(), 2);
+    until("the two to finish", || a.lock().pending == 2).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_delivery_that_waited_an_hour_is_dropped() {
+    let (port, seen) = receiver(OK).await;
+    let (store, _) = store_at("stale-queue");
+    let limits = Limits {
+        webhooks_per_client_per_minute: 1,
+        ..Limits::default()
+    };
+    let a = alerts_on(store, local(port), limits);
+    a.lock().webhooks.record("me", Instant::now());
+    create(&a, hooked(port, "greater", "once"), "me").await;
+    tick(&a, BASE, 101.0);
+    a.lock().queues.get_mut("me").unwrap()[0].created_at -= EVENT_MAX_AGE_SECS + 10;
+    a.lock().webhooks = Window::default();
+    until("it to go", || a.lock().pending == 0).await;
+    assert!(seen.lock().unwrap().is_empty());
+    assert!(store.server_alert_events().unwrap().is_empty());
+}
+
+fn with_access(store: &'static Store, access: Access, policy: Policy) -> Arc<ServerAlerts> {
+    let hub = hub_with(Arc::new(Fake::default()));
+    ServerAlerts::new(
+        store,
+        hub,
+        policy,
+        access,
+        Limits::default(),
+        quick_timing(),
+    )
+}
+
+#[test]
+fn the_access_setting_reads_as_documented() {
+    assert_eq!(Access::parse(None), Access::NoWebhooks);
+    assert_eq!(Access::parse(Some("")), Access::NoWebhooks);
+    assert_eq!(Access::parse(Some(" , ")), Access::NoWebhooks);
+    assert_eq!(Access::parse(Some("*")), Access::Open);
+    let ids = Access::parse(Some(" a, b ,"));
+    assert_eq!(
+        ids,
+        Access::Clients(HashSet::from(["a".to_string(), "b".to_string()]))
+    );
+    assert!(ids.may_create("a") && ids.may_use_webhooks("b"));
+    assert!(!ids.may_create("c") && !ids.may_use_webhooks("c"));
+    assert!(Access::NoWebhooks.may_create("c") && !Access::NoWebhooks.may_use_webhooks("c"));
+}
+
+/// Unset, as an operator who only set the flag gets: alerts for anyone, webhooks
+/// for nobody, and no lookup of the URL either.
+#[tokio::test(flavor = "multi_thread")]
+async fn without_an_allowlist_nobody_gets_webhooks() {
+    let (port, seen) = receiver(OK).await;
+    let (store, _) = store_at("no-webhooks");
+    let a = with_access(store, Access::NoWebhooks, local(port));
+    let e = call(
+        &a,
+        "create_server_alert",
+        hooked(port, "greater", "once"),
+        "me",
+    )
+    .await
+    .unwrap_err();
+    assert!(e.contains("operator allowed"), "{e}");
+    let id = create(&a, spec("greater", "once", 100.0), "me").await;
+    let args = json!({"alert_id": id, "webhook_url": format!("http://127.0.0.1:{port}/h")});
+    let e = call(&a, "update_server_alert", args, "me")
+        .await
+        .unwrap_err();
+    assert!(e.contains("operator allowed"), "{e}");
+    let list = call(&a, "list_server_alerts", json!({}), "me")
+        .await
+        .unwrap();
+    assert_eq!(
+        (&list["can_create"], &list["webhooks"]),
+        (&json!(true), &json!(false))
+    );
+    tick(&a, BASE, 101.0);
+    assert_eq!(a.lock().alerts[&id].fire_count, 1, "it still runs");
+    assert!(seen.lock().unwrap().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_allowlist_keeps_everyone_else_out() {
+    let (port, seen) = receiver(OK).await;
+    let (store, _) = store_at("allowlist");
+    let a = with_access(store, Access::parse(Some("friend")), local(port));
+    let e = call(
+        &a,
+        "create_server_alert",
+        spec("less", "once", 1.0),
+        "stranger",
+    )
+    .await
+    .unwrap_err();
+    assert!(e.contains("operator allowed"), "{e}");
+    let list = call(&a, "list_server_alerts", json!({}), "stranger")
+        .await
+        .unwrap();
+    assert_eq!(
+        (&list["can_create"], &list["webhooks"]),
+        (&json!(false), &json!(false))
+    );
+    let id = create(&a, hooked(port, "greater", "once"), "friend").await;
+    tick(&a, BASE, 101.0);
+    until("the delivery", || seen.lock().unwrap().len() == 1).await;
+    assert_eq!(a.lock().alerts[&id].fire_count, 1);
+}
+
+/// Taking a client off the list stops its alerts and its webhooks, stored or not.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_client_taken_off_the_list_stops_running() {
+    let (port, seen) = receiver(OK).await;
+    let (store, path) = store_at("revoked");
+    let a = with_access(store, Access::Open, local(port));
+    let id = create(&a, hooked(port, "greater", "once"), "gone").await;
+    drop(a);
+    let a = with_access(reopen(&path), Access::parse(Some("other")), local(port));
+    assert!(a.lock().watches.is_empty(), "holds no feed");
+    assert_eq!(a.lock().alerts.len(), 1, "the row stays until it expires");
+    assert!(a.lock().alerts[&id].active);
+    // Even a tick for that feed, had another alert kept it open, passes it by.
+    let other = create(&a, spec("less", "once", 1.0), "other").await;
+    tick(&a, BASE, 101.0);
+    assert_eq!(a.lock().alerts[&id].fire_count, 0);
+    assert!(a.lock().alerts.contains_key(&other));
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(seen.lock().unwrap().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn spent_alerts_do_not_count_toward_the_total_but_rows_stay_bounded() {
+    let (store, _) = store_at("spent-total");
+    let limits = Limits {
+        alerts_total: 2,
+        rows_total: 3,
+        changes_per_minute: 1000,
+        ..Limits::default()
+    };
+    let a = alerts_on(store, Policy::default(), limits);
+    create(&a, spec("greater", "once", 1.0), "a").await;
+    create(&a, spec("greater", "once", 1.0), "b").await;
+    let e = call(&a, "create_server_alert", spec("less", "once", 1.0), "c")
+        .await
+        .unwrap_err();
+    assert!(e.contains("maximum of 2"), "{e}");
+    tick(&a, BASE, 101.0);
+    create(&a, spec("less", "once", 1.0), "c").await;
+    let e = call(&a, "create_server_alert", spec("less", "once", 1.0), "d")
+        .await
+        .unwrap_err();
+    assert!(e.contains("maximum"), "rows: {e}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_paused_alert_counts_toward_the_total() {
+    let (store, _) = store_at("paused");
+    let limits = Limits {
+        alerts_total: 1,
+        changes_per_minute: 1000,
+        ..Limits::default()
+    };
+    let a = alerts_on(store, Policy::default(), limits);
+    let id = create(&a, spec("less", "once", 1.0), "a").await;
+    let args = json!({"alert_id": id, "active": false});
+    call(&a, "update_server_alert", args, "a").await.unwrap();
+    let e = call(&a, "create_server_alert", spec("less", "once", 1.0), "b")
+        .await
+        .unwrap_err();
+    assert!(e.contains("maximum of 1"), "{e}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn pairs_are_limited_per_client_and_resuming_checks_it() {
+    let (store, _) = store_at("pairs");
+    let limits = Limits {
+        changes_per_minute: 1000,
+        ..Limits::default()
+    };
+    let a = alerts_on(store, Policy::default(), limits);
+    let on = |symbol: &str| {
+        let mut args = spec("less", "once", 1.0);
+        args["symbol"] = json!(symbol);
+        args
+    };
+    let first = create(&a, on("BTCUSDT"), "a").await;
+    create(&a, on("ETHUSDT"), "a").await;
+    let e = call(&a, "create_server_alert", on("SOLUSDT"), "a")
+        .await
+        .unwrap_err();
+    assert!(
+        e.contains("at most 2 symbol and interval pairs per client"),
+        "{e}"
+    );
+    // More alerts on a pair it has is fine, and so is another client.
+    let second = create(&a, on("BTCUSDT"), "a").await;
+    create(&a, on("SOLUSDT"), "b").await;
+
+    // A paused alert frees its pair, and resuming needs room again.
+    for id in [&first, &second] {
+        let args = json!({"alert_id": id, "active": false});
+        call(&a, "update_server_alert", args, "a").await.unwrap();
+    }
+    create(&a, on("SOLUSDT"), "a").await;
+    let args = json!({"alert_id": first, "active": true});
+    let e = call(&a, "update_server_alert", args, "a")
+        .await
+        .unwrap_err();
+    assert!(e.contains("per client"), "{e}");
+}
+
+/// Churn: deleting frees the pair at once, while the WebSocket lingers.
+#[tokio::test(flavor = "multi_thread")]
+async fn new_feeds_are_limited_however_fast_alerts_come_and_go() {
+    let (store, _) = store_at("churn");
+    let fake = Arc::new(Fake::default());
+    let hub = ChartHub::new(
+        fake.clone(),
+        HubLimits {
+            new_feeds_per_minute: 3,
+            ..HubLimits::default()
+        },
+    );
+    let limits = Limits {
+        changes_per_minute: 1000,
+        ..Limits::default()
+    };
+    let a = ServerAlerts::new(
+        store,
+        hub,
+        Policy::default(),
+        Access::Open,
+        limits,
+        quick_timing(),
+    );
+    let on = |symbol: &str| {
+        let mut args = spec("less", "once", 1.0);
+        args["symbol"] = json!(symbol);
+        args
+    };
+    for symbol in ["AAAUSDT", "BBBUSDT", "CCCUSDT"] {
+        let id = create(&a, on(symbol), "me").await;
+        let args = json!({"alert_id": id});
+        call(&a, "delete_server_alert", args, "me").await.unwrap();
+    }
+    let seeds = fake.seeds.load(Ordering::SeqCst);
+    let e = call(&a, "create_server_alert", on("DDDUSDT"), "me")
+        .await
+        .unwrap_err();
+    assert!(e.contains("too many feeds"), "{e}");
+    assert_eq!(
+        fake.seeds.load(Ordering::SeqCst),
+        seeds,
+        "and no fetch for it"
+    );
+    // A feed still lingering is not a new connection.
+    create(&a, on("AAAUSDT"), "me").await;
+}
+
+/// A feed refused at startup or on a resume comes back with the upkeep.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_refused_feed_is_tried_again() {
+    let (store, path) = store_at("feed-retry");
+    let a = plain(store);
+    let id = create(&a, spec("less", "once", 1.0), "me").await;
+    drop(a);
+    let hub = ChartHub::new(
+        Arc::new(Fake::default()),
+        HubLimits {
+            new_feeds_per_minute: 0,
+            ..HubLimits::default()
+        },
+    );
+    let a = ServerAlerts::new(
+        reopen(&path),
+        hub,
+        Policy::default(),
+        Access::Open,
+        Limits::default(),
+        quick_timing(),
+    );
+    assert!(a.lock().watches.is_empty());
+    assert_eq!(get(&a, "me", &id).await["feed"], "waiting");
+    assert!(a.lock().alerts[&id].active, "it stays on");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_spent_alert_expires_and_a_recent_one_stays() {
+    let (store, _) = store_at("expire-spent");
+    store.save_oauth_client("me", &[]).unwrap();
+    store.mark_oauth_client_used("me").unwrap();
+    let a = plain(store);
+    let spent = create(&a, spec("greater", "once", 1.0), "me").await;
+    tick(&a, BASE, 2.0);
+    let waiting = create(&a, spec("less", "once", 1.0), "me").await;
+    let now = now_ms();
+    a.sweep(&mut a.lock(), now + SPENT_TTL_MS - 60_000);
+    assert_eq!(a.lock().alerts.len(), 2, "not yet");
+    a.sweep(&mut a.lock(), now + SPENT_TTL_MS + 60_000);
+    assert!(!a.lock().alerts.contains_key(&spent));
+    assert!(a.lock().alerts.contains_key(&waiting));
+    assert_eq!(
+        store.server_alerts().unwrap().len(),
+        1,
+        "the row is gone too"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_idle_owners_alerts_expire_unless_the_operator_listed_it() {
+    let (store, _) = store_at("expire-idle");
+    for owner in ["idle", "listed"] {
+        store.save_oauth_client(owner, &[]).unwrap();
+        store.mark_oauth_client_used(owner).unwrap();
+    }
+    let a = with_access(store, Access::Open, Policy::default());
+    let idle = create(&a, spec("less", "once", 1.0), "idle").await;
+    let unknown = create(&a, spec("less", "once", 1.0), "not-in-the-table").await;
+    drop(a);
+    let a = with_access(store, Access::parse(Some("listed")), Policy::default());
+    let listed = create(&a, spec("less", "once", 1.0), "listed").await;
+    let now = now_ms();
+    a.sweep(&mut a.lock(), now + IDLE_OWNER_TTL_MS - 60_000);
+    assert_eq!(a.lock().alerts.len(), 3, "not yet");
+    a.sweep(&mut a.lock(), now + IDLE_OWNER_TTL_MS + 60_000);
+    for gone in [&idle, &unknown] {
+        assert!(!a.lock().alerts.contains_key(gone));
+    }
+    assert!(
+        a.lock().alerts.contains_key(&listed),
+        "the operator keeps those"
+    );
+    assert_eq!(
+        store.server_alert_owners().unwrap().len(),
+        1,
+        "pins go with the rows"
+    );
+}
+
+/// It is the token that counts, not when the alert was made.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_recent_token_keeps_an_old_alert() {
+    let (store, _) = store_at("expire-renewed");
+    store.save_oauth_client("active", &[]).unwrap();
+    store.mark_oauth_client_used("active").unwrap();
+    let a = plain(store);
+    let kept = create(&a, spec("less", "once", 1.0), "active").await;
+    let gone = create(&a, spec("less", "once", 1.0), "silent").await;
+    let now = now_ms();
+    let long_ago = now - IDLE_OWNER_TTL_MS - 60_000;
+    for id in [&kept, &gone] {
+        a.lock().alerts.get_mut(id).unwrap().created_at = long_ago;
+    }
+    a.sweep(&mut a.lock(), now);
+    assert!(a.lock().alerts.contains_key(&kept));
+    assert!(!a.lock().alerts.contains_key(&gone));
+}
+
+/// Only what decides when it fires brings a spent alert back.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_note_or_webhook_edit_does_not_re_arm_a_spent_alert() {
+    let (port, seen) = receiver(OK).await;
+    let (store, _) = store_at("no-rearm");
+    let limits = Limits {
+        changes_per_minute: 1000,
+        ..Limits::default()
+    };
+    let a = alerts_on(store, local(port), limits);
+    let id = create(&a, hooked(port, "greater", "once"), "me").await;
+    tick(&a, BASE, 101.0);
+    until("the delivery", || seen.lock().unwrap().len() == 1).await;
+    for args in [
+        json!({"alert_id": id, "message": "note"}),
+        json!({"alert_id": id, "webhook_url": format!("http://127.0.0.1:{port}/other")}),
+        json!({"alert_id": id, "sign": true}),
+        // What the dialog sends for those: the same definition again.
+        json!({"alert_id": id, "condition": "greater", "trigger": "once", "level": 100.0, "message": "x"}),
+    ] {
+        let view = call(&a, "update_server_alert", args.clone(), "me")
+            .await
+            .unwrap();
+        assert_eq!(view["active"], false, "{args}");
+        assert!(view["last_triggered_at"].is_i64(), "{args}");
+        tick(&a, BASE, 102.0);
+        assert_eq!(a.lock().alerts[&id].fire_count, 1, "{args}");
+    }
+    // A new level does.
+    let args = json!({"alert_id": id, "level": 50.0});
+    let view = call(&a, "update_server_alert", args, "me").await.unwrap();
+    assert_eq!(view["active"], true);
+    tick(&a, BASE, 102.0);
+    assert_eq!(a.lock().alerts[&id].fire_count, 2);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_new_url_does_not_inherit_the_secret() {
+    let (port, _) = receiver(OK).await;
+    let (store, _) = store_at("secret-url");
+    let limits = Limits {
+        changes_per_minute: 1000,
+        ..Limits::default()
+    };
+    let a = alerts_on(store, local(port), limits);
+    let mut args = hooked(port, "less", "once");
+    args["sign"] = json!(true);
+    let created = call(&a, "create_server_alert", args, "me").await.unwrap();
+    let id = created["id"].as_str().unwrap().to_string();
+    let same = a.lock().alerts[&id].webhook.as_ref().unwrap().url.clone();
+
+    let args = json!({"alert_id": id, "webhook_url": same});
+    let view = call(&a, "update_server_alert", args, "me").await.unwrap();
+    assert_eq!(view["webhook"]["signed"], true, "the same URL keeps it");
+
+    let new = format!("http://127.0.0.1:{port}/other");
+    let args = json!({"alert_id": id, "webhook_url": new});
+    let view = call(&a, "update_server_alert", args, "me").await.unwrap();
+    assert_eq!(view["webhook"]["signed"], false, "a new one clears it");
+    assert!(view.get("webhook_secret").is_none());
+
+    let args = json!({"alert_id": id, "webhook_url": format!("{new}2"), "sign": true});
+    let view = call(&a, "update_server_alert", args, "me").await.unwrap();
+    assert_eq!(view["webhook"]["signed"], true);
+    assert!(view["webhook_secret"].is_string());
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1116,13 +1609,14 @@ async fn a_deleted_alert_sends_nothing_more() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn an_owner_of_alerts_is_not_collected_as_unused() {
+async fn an_owner_has_a_token_so_collecting_unused_clients_passes_it_by() {
     let (store, _) = store_at("owners");
     store.save_oauth_client("owner", &[]).unwrap();
+    store.mark_oauth_client_used("owner").unwrap();
     store.save_oauth_client("nobody", &[]).unwrap();
     let a = plain(store);
     create(&a, spec("less", "once", 1.0), "owner").await;
-    assert!(store.script_owners().unwrap().contains("owner"));
+    assert!(store.server_alert_owners().unwrap().contains("owner"));
     assert_eq!(store.gc_oauth_clients(-10).unwrap(), 1, "only nobody");
     let left: Vec<String> = store
         .oauth_clients()
