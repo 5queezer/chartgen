@@ -688,23 +688,63 @@ describe("drawing alerts", () => {
   });
 
   it("passing through vertical does not re-arm a fired every-time alert", async () => {
-    stubStorage({ [DRAWINGS_KEY]: JSON.stringify([hline]) });
+    stubStorage({ [DRAWINGS_KEY]: JSON.stringify([trendLine]) });
     const s = await load();
-    s.addAlert({ ...hlineAlert, condition: "greater", trigger: "every" });
-    const level = hline.points[0]!.value;
-    expect(s.processPrice("AAPL", level + 1)).toHaveLength(1);
+    const { timeAxisOf } = await import("./drawings");
+    const view = { axis: timeAxisOf(Array.from({ length: 30 }, (_, i) => i * H))!, log: false };
+    // The line reads 150 at this bar.
+    const tick = { time: 5 * H, chart: { interval: "1h", indicators: {}, view } };
+    s.addAlert({ ...drawingAlert, condition: "greater", trigger: "every" });
+    expect(s.processPrice("AAPL", 151, 0, tick)).toHaveLength(1);
     expect(s.alerts()[0]!.disarmed).toBe(true);
 
-    const upright = { ...hline, points: [hline.points[0]!, hline.points[0]!] };
+    const upright = {
+      ...trendLine,
+      points: [trendLine.points[0]!, { ...trendLine.points[1]!, timestamp: trendLine.points[0]!.timestamp }],
+    };
     s.syncDrawingAlerts("AAPL", [upright]);
     expect(s.alerts()[0]).toMatchObject({ active: false, note: s.LINE_VERTICAL, disarmed: true });
-    s.syncDrawingAlerts("AAPL", [hline]);
+    s.syncDrawingAlerts("AAPL", [trendLine]);
     expect(s.alerts()[0]).toMatchObject({ active: true, disarmed: true });
 
     // Still above the level: no second firing until the price has been back below.
-    expect(s.processPrice("AAPL", level + 2)).toEqual([]);
-    expect(s.processPrice("AAPL", level - 1)).toEqual([]);
-    expect(s.processPrice("AAPL", level + 1)).toHaveLength(1);
+    expect(s.processPrice("AAPL", 152, 0, tick)).toEqual([]);
+    expect(s.processPrice("AAPL", 149, 0, tick)).toEqual([]);
+    expect(s.processPrice("AAPL", 151, 0, tick)).toHaveLength(1);
+  });
+
+  it("a horizontal tool with two points is never called vertical", async () => {
+    // A ray stored from when the tool took two clicks: its level needs neither point's bar.
+    const ray = (apart: number) => ({
+      ...hline,
+      name: "horizontalRayLine",
+      points: [hline.points[0]!, { ...hline.points[0]!, timestamp: hline.points[0]!.timestamp + apart }],
+    });
+    const data = stubStorage({ [DRAWINGS_KEY]: JSON.stringify([ray(0)]) });
+    const s = await load();
+    const { timeAxisOf } = await import("./drawings");
+    const axis = timeAxisOf(Array.from({ length: 30 }, (_, i) => i * H))!;
+    const view = { axis, log: false };
+    const ctx = { symbol: "AAPL", interval: "1h", keys: [], axis };
+    const a = s.addAlert(hlineAlert)!;
+    const bound = s.addAlert({ ...hlineAlert, source: { ...hlineAlert.source, interval: "1h" } })!;
+    const byId = (id: string) => s.alerts().find((x) => x.id === id)!;
+
+    // Equal times: a save leaves it on, and resuming keeps it on.
+    s.syncDrawingAlerts("AAPL", [ray(0)]);
+    expect(byId(a.id)).toMatchObject({ active: true });
+    expect(byId(a.id)).not.toHaveProperty("note");
+    s.setAlertActive(a.id, false);
+    s.setAlertActive(a.id, true);
+    expect(byId(a.id)).toMatchObject({ active: true });
+    expect(byId(a.id)).not.toHaveProperty("note");
+
+    // Within one bar of the chart: no reason, and it fires at its level.
+    data.set(DRAWINGS_KEY, JSON.stringify([ray(15 * 60_000)]));
+    expect(s.inactiveReason(byId(bound.id), ctx)).toBeNull();
+    const tick = { time: 5 * H, chart: { interval: "1h", indicators: {}, view } };
+    s.processPrice("AAPL", 149, 0, tick);
+    expect(s.processPrice("AAPL", 151, 0, tick).map((f) => f.id).sort()).toEqual([a.id, bound.id].sort());
   });
 
   it("a paused alert on a deleted drawing gets the note when resumed", async () => {

@@ -17,6 +17,7 @@ import {
   drawingLevels,
   fires,
   indicatorReading,
+  isHorizontalTool,
   isVerticalLine,
   needsRearm,
   rearmedReading,
@@ -48,7 +49,7 @@ export const DRAWING_DELETED = "drawing deleted";
 export const LINE_VERTICAL = "line is vertical";
 
 /** What the alerts need of a stored drawing to tell if it can be read. */
-type DrawingRecordRef = Pick<DrawingRecord, "id" | "points">;
+type DrawingRecordRef = Pick<DrawingRecord, "id" | "points"> & { name: string };
 
 const isFinitePositive = (v: unknown): v is number =>
   typeof v === "number" && Number.isFinite(v) && v > 0;
@@ -331,7 +332,7 @@ export function inactiveReason(
   if (src.kind === "drawing") {
     void drawingsRevision();
     const rec = loadDrawings(a.symbol, false).find((d) => d.id === src.drawingId);
-    return rec && isVerticalLine(rec, ctx.axis) ? LINE_VERTICAL : null;
+    return rec && !isHorizontalTool(rec.name) && isVerticalLine(rec, ctx.axis) ? LINE_VERTICAL : null;
   }
   if (!ctx.keys.includes(src.instanceKey)) return "indicator not on the chart";
   return signatures[src.instanceKey] === src.signature ? null : "indicator changed";
@@ -403,11 +404,13 @@ export function updateAlert(
  * Why the drawing `rec` cannot be read for alert `a` in any tab, or null: it is gone, or
  * vertical by its points. The note is stored and all tabs share it, so a line falling on
  * one bar of the bars on screen does not count here (`inactiveReason` says that one).
+ * A horizontal tool's level needs no second point: a ray stored from when it took two
+ * clicks can have them on one time, and it is still readable.
  */
 function drawingNote(a: Alert, rec: DrawingRecordRef | undefined): string | null {
   if (a.source?.kind !== "drawing") return null;
   if (!rec) return DRAWING_DELETED;
-  return isVerticalLine(rec) ? LINE_VERTICAL : null;
+  return !isHorizontalTool(rec.name) && isVerticalLine(rec) ? LINE_VERTICAL : null;
 }
 
 /** Why a drawing alert's stored drawing cannot be read, or null when it can. */
@@ -574,7 +577,7 @@ export function processPrice(
           return null;
         }
         // Both points on one bar of these bars: no value, and no re-arming from having none.
-        if (view && isVerticalLine(rec, view.axis)) return null;
+        if (view && !isHorizontalTool(rec.name) && isVerticalLine(rec, view.axis)) return null;
         // The line as it is now, at the previous and the current bar time:
         // moving a drawing over the price does not fire it.
         return {

@@ -27,7 +27,7 @@ import {
   type Point,
 } from "klinecharts";
 
-import { isDrawingAlertTool, isVerticalLine, pointBarIndex } from "../lib/alerts";
+import { isDrawingAlertTool, isHorizontalTool, isVerticalLine, pointBarIndex } from "../lib/alerts";
 import { isRelease, isTypingContext, undoRedoKey } from "../lib/keys";
 import { effectiveMagnet, magnetKeyHeld, magnetValue, type Magnet } from "../lib/magnet";
 import { syncDrawingAlerts } from "../stores/alerts";
@@ -578,7 +578,7 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
                   id,
                   ...structuredClone(canon.get(id)!),
                   offRange: offRange.has(id),
-                  vertical: isVerticalLine(canon.get(id)!, ax),
+                  vertical: !isHorizontalTool(canon.get(id)!.name) && isVerticalLine(canon.get(id)!, ax),
                 },
               ]
             : [],

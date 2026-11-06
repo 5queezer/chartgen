@@ -1488,6 +1488,88 @@ test.describe("drawing modifiers", () => {
     await expect(paused).toHaveAttribute("data-status", "paused");
   });
 
+  test.describe("a stored two-point horizontal ray, from when the tool took two clicks", () => {
+    /** Stores a ray with its second point `apart` ms after the first, with alerts on it, on 1h. */
+    const seedRay = async (page: Page, apart: number) => {
+      await showInterval(page, "1h");
+      const level = await page.evaluate((ms) => {
+        const bar = (window as unknown as TestWindow).__chartgenTest.chart().getDataList().at(-5)!;
+        localStorage.setItem(
+          "chartgen.drawings.BTCUSDT",
+          JSON.stringify([
+            {
+              id: "ray",
+              name: "horizontalRayLine",
+              points: [
+                { timestamp: bar.timestamp, value: bar.close },
+                { timestamp: bar.timestamp + ms, value: bar.close },
+              ],
+              lock: false,
+              visible: true,
+            },
+          ]),
+        );
+        const alert = { symbol: "BTCUSDT", condition: "crossing_up", trigger: "every", active: true, createdAt: 1 };
+        const source = { kind: "drawing", drawingId: "ray", label: "Horizontal ray" };
+        localStorage.setItem(
+          "chartgen.alerts.list",
+          JSON.stringify([
+            { ...alert, id: "plain", source },
+            // No dialog makes this one; it holds the bar check off the horizontal path too.
+            { ...alert, id: "bound", source: { ...source, interval: "1h" } },
+          ]),
+        );
+        return bar.close;
+      }, apart);
+      await reloadApp(page);
+      await expect.poll(async () => (await overlays(page)).length).toBe(1);
+      await page.getByRole("tab", { name: /^Alerts/ }).click();
+      return level;
+    };
+
+    const statuses = (page: Page) => alertRows(page).locator("[data-role=status]");
+
+    test("on one bar: offered, not called vertical, and it fires", async ({ bootedApp: page }) => {
+      const level = await seedRay(page, 15 * 60_000);
+      expect((await overlays(page))[0]!.points).toHaveLength(2);
+      await expect(statuses(page)).toHaveText(["active", "active"]);
+
+      const { x, y } = (await overlays(page))[0]!.pixels[0]!;
+      await clickAt(page, { x: x! + 15, y: y! }, "right");
+      await expect(drawingMenu(page).getByRole("menuitem", { name: /^Add alert on Horizontal ray/ })).toBeVisible();
+      await page.keyboard.press("Escape");
+      await page.keyboard.press("Alt+KeyA");
+      await expect(dialog(page).getByLabel("Source").locator("option", { hasText: "Horizontal ray" })).toHaveCount(1);
+      await page.keyboard.press("Escape");
+      await expect(dialog(page)).toHaveCount(0);
+
+      const fired = await page.evaluate((v) => {
+        const hook = (window as unknown as { __chartgenTest: { feedPrice: (s: string, p: number) => void } }).__chartgenTest;
+        hook.feedPrice("BTCUSDT", v - 1);
+        hook.feedPrice("BTCUSDT", v + 1);
+        return (JSON.parse(localStorage.getItem("chartgen.alerts.list")!) as { lastTriggeredAt?: number }[]).map(
+          (a) => a.lastTriggeredAt !== undefined,
+        );
+      }, level);
+      expect(fired).toEqual([true, true]);
+    });
+
+    test("with equal times: a save does not switch its alerts off", async ({ bootedApp: page }) => {
+      await seedRay(page, 0);
+      await expect(statuses(page)).toHaveText(["active", "active"]);
+      await page.keyboard.press("Alt+KeyA");
+      await expect(dialog(page).getByLabel("Source").locator("option", { hasText: "Horizontal ray" })).toHaveCount(1);
+      await page.keyboard.press("Escape");
+      await expect(dialog(page)).toHaveCount(0);
+
+      await page.getByRole("button", { name: "Lock all drawings" }).click();
+      await expect
+        .poll(async () => (await storedRecords(page))?.[0] as unknown as { lock: boolean })
+        .toMatchObject({ lock: true });
+      await expect(statuses(page)).toHaveText(["active", "active"]);
+    });
+  });
+
   test("two windows on different intervals each say what holds for them, and write nothing", async ({
     bootedApp: page,
     context,
