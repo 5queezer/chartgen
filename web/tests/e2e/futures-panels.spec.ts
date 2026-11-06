@@ -76,11 +76,14 @@ test.describe("futures panels", () => {
             /Binance|futures market|unavailable|30 days/.test(l),
         ),
       ).toEqual([]);
-      // A value is read for each (not the empty marker).
-      for (const name of ["OI", "L/S"]) {
-        await expect(
-          header(page, name).locator(".pane-header-value").first(),
-        ).not.toHaveText(/^\s*$/);
+      // A value is read for each: a number in the legend, where an empty panel shows the
+      // label and a dash (`OI —`).
+      for (const name of ["Funding", "OI", "L/S"]) {
+        await expect
+          .poll(async () =>
+            (await header(page, name).locator(".pane-header-value").allTextContents()).join(" "),
+          )
+          .toMatch(/\d/);
       }
       const before = loads.length;
       await page.waitForTimeout(6_000); // three live tail polls

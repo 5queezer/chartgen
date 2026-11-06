@@ -6,29 +6,40 @@ use std::time::{Duration, Instant};
 
 /// How often one futures series is asked for. A push group recomputes up to 4 times
 /// a second, and these endpoints have limits of their own that the weight header does
-/// not show (fundingRate: 500 requests per 5 minutes per IP).
+/// not show (`binance_gate::funding_budget`, `futures_data_budget`).
 const SERIES_REFRESH: Duration = Duration::from_secs(15);
 /// How long a series is served after its last good read, when a call fails or the gate
 /// refuses it, so the panel keeps its shape and the chart does not reload. Longer than
 /// the gate's default 60 s cooldown plus one `SERIES_REFRESH`.
 const SERIES_KEEP: Duration = Duration::from_secs(90);
 
+/// How long a read holds its claim on a series: its deadline (`READ_DEADLINE`) and the
+/// timeout of the request that may be running when it passes. A claim older than that
+/// is a hung read, and the next caller reads afresh.
+const SERIES_CLAIM: Duration = Duration::from_secs(35);
+
 /// How long a caller with nothing to serve waits for a read already in flight: as long
-/// as that read's HTTP timeout. Chart requests and pushes run on the blocking pool;
+/// as the claim can hold. Chart requests and pushes run on the blocking pool;
 /// `--trade`'s engine computes on its task, which these HTTP calls already block.
-const SERIES_WAIT: Duration = Duration::from_secs(15);
+const SERIES_WAIT: Duration = SERIES_CLAIM;
+
+/// The longest one series is read for, the pages of a first read included. What was
+/// read by then is served, the older bars staying empty.
+const READ_DEADLINE: Duration = Duration::from_secs(20);
 
 struct HeldSeries<T> {
     /// When the current refresh was claimed, before its fetch.
     tried: Instant,
     good: Option<(Instant, Arc<Vec<T>>)>,
+    /// The oldest time `good` is complete from (see `Read::from`).
+    from: i64,
     error: String,
     fetching: bool,
 }
 
 type SeriesKey = (String, String);
 
-/// Futures series by symbol and period.
+/// Futures series by symbol, period and whether the window is live (`Window::key`).
 struct SeriesCache<T> {
     held: Mutex<HashMap<SeriesKey, HeldSeries<T>>>,
     fetched: Condvar,
@@ -88,11 +99,12 @@ impl<T> SeriesCache<T> {
         wait: Duration,
         fetch: impl FnOnce() -> Result<Vec<T>, String>,
     ) -> Result<Arc<Vec<T>>, String> {
-        self.get_extending(symbol, period, now, wait, |_| fetch())
+        self.get_extending(symbol, period, now, wait, |_| fetch().map(|v| (v, 0)))
     }
 
     /// `get` with its wait as an argument, and `fetch` given the series it replaces (the
-    /// last good one, however old) so it can read only what is new. The refresh is
+    /// last good one, however old, with the time it is complete from) so it can read
+    /// only what is new, and answering the series with that time. The refresh is
     /// claimed under the lock before the fetch, so of the callers at an expiry only one
     /// sends a request. The others get the last good series at once. With none held, as
     /// on a first read, they wait up to `wait` for that request, so a chart loading at
@@ -104,7 +116,7 @@ impl<T> SeriesCache<T> {
         period: &str,
         now: Instant,
         wait: Duration,
-        fetch: impl FnOnce(Option<&[T]>) -> Result<Vec<T>, String>,
+        fetch: impl FnOnce(Option<(&[T], i64)>) -> Result<(Vec<T>, i64), String>,
     ) -> Result<Arc<Vec<T>>, String> {
         let key = (symbol.to_uppercase(), period.to_string());
         let lasting = |held: &HeldSeries<T>| {
@@ -117,11 +129,13 @@ impl<T> SeriesCache<T> {
             let mut held = self.lock();
             held.retain(|_, h| now.saturating_duration_since(h.tried) < SERIES_KEEP);
             let give_up = Instant::now() + wait;
-            // A claim holds for one refresh, so a fetch that hangs cannot stick.
-            while let Some(h) = held
-                .get(&key)
-                .filter(|h| now.saturating_duration_since(h.tried) < SERIES_REFRESH)
-            {
+            // A read is not repeated within a refresh, and one in flight holds its claim
+            // for `SERIES_CLAIM`, so a slow Binance does not start a second read and a
+            // fetch that hangs cannot stick.
+            while let Some(h) = held.get(&key).filter(|h| {
+                let age = now.saturating_duration_since(h.tried);
+                age < SERIES_REFRESH || (h.fetching && age < SERIES_CLAIM)
+            }) {
                 if let Some(series) = lasting(h) {
                     return Ok(series);
                 }
@@ -141,12 +155,16 @@ impl<T> SeriesCache<T> {
             let entry = held.entry(key.clone()).or_insert_with(|| HeldSeries {
                 tried: now,
                 good: None,
+                from: 0,
                 error: SERIES_LOADING.into(),
                 fetching: false,
             });
             entry.tried = now;
             entry.fetching = true;
-            let before = entry.good.as_ref().map(|(_, series)| series.clone());
+            let before = entry
+                .good
+                .as_ref()
+                .map(|(_, series)| (series.clone(), entry.from));
             (
                 SeriesClaim {
                     cache: self,
@@ -155,20 +173,22 @@ impl<T> SeriesCache<T> {
                 before,
             )
         };
-        let result = fetch(before.as_deref().map(Vec::as_slice));
+        let result = fetch(before.as_ref().map(|(rows, from)| (rows.as_slice(), *from)));
         let mut held = self.lock();
         let entry = held.entry(key).or_insert_with(|| HeldSeries {
             tried: now,
             good: None,
+            from: 0,
             error: SERIES_LOADING.into(),
             fetching: true,
         });
         let answer = match result {
-            Ok(series) => {
+            Ok((series, from)) => {
                 let series = Arc::new(series);
                 // A fetch that outlasted its refresh must not replace a newer one.
                 if entry.good.as_ref().is_none_or(|(at, _)| *at <= now) {
                     entry.good = Some((now, series.clone()));
+                    entry.from = from;
                 }
                 Ok(series)
             }
@@ -189,13 +209,6 @@ const SERIES_LOADING: &str = "futures data is not loaded yet; try again shortly"
 static FUNDING: LazyLock<SeriesCache<(i64, f64)>> = LazyLock::new(SeriesCache::default);
 static OPEN_INTEREST: LazyLock<SeriesCache<(i64, f64)>> = LazyLock::new(SeriesCache::default);
 static LONG_SHORT: LazyLock<SeriesCache<(i64, f64, f64)>> = LazyLock::new(SeriesCache::default);
-
-fn http_client() -> reqwest::blocking::Client {
-    reqwest::blocking::Client::builder()
-        .timeout(Duration::from_secs(15))
-        .build()
-        .unwrap()
-}
 
 // ---- Helpers ----
 
@@ -334,6 +347,19 @@ const RETENTION_MARGIN_MS: i64 = 10 * 60 * 1000;
 /// Funding is paid every 8 hours (some symbols every 4 or 1); a bar is matched to the
 /// nearest payment within this.
 const FUNDING_GAP_MS: i64 = 8 * HOUR_MS;
+/// The shortest time between two funding payments of any symbol: no new row can exist
+/// sooner than this after the last one.
+const FUNDING_STEP_MS: i64 = HOUR_MS;
+
+/// The time between funding payments of a symbol, from its last two rows (8 hours for
+/// most, 4 or 1 for some): no new row can exist sooner than this after the last one, so
+/// nothing is asked for until then. One payment late if a symbol just shortened it.
+fn funding_step(rows: Option<&[(i64, f64)]>) -> i64 {
+    match rows {
+        Some([.., (a, _), (b, _)]) => (b - a).max(FUNDING_STEP_MS),
+        _ => FUNDING_STEP_MS,
+    }
+}
 
 /// A row of a futures series: something at a time.
 trait Row: Clone {
@@ -391,31 +417,27 @@ struct Window {
     from: i64,
     /// The last bar's open, plus that gap.
     to: i64,
-    /// `from` rounded down, so a chart that gains a bar keeps its series.
-    bucket: i64,
     /// The newest bar is still current, so the series has to keep up with it.
     live: bool,
 }
 
 impl Window {
-    fn of(bars: &[Bar], gap_ms: i64, bucket_ms: i64, now: i64) -> Option<Window> {
+    fn of(bars: &[Bar], gap_ms: i64, now: i64) -> Option<Window> {
         let ms = |b: &Bar| b.date.parse::<i64>().ok().map(|s| s * 1000);
         let from = ms(bars.first()?)? - gap_ms;
         let to = ms(bars.last()?)? + gap_ms;
         Some(Window {
             from,
             to,
-            bucket: from.div_euclid(bucket_ms) * bucket_ms,
             live: to >= now,
         })
     }
 
-    /// The cache key's period part. A window of older bars is its own series, so a
-    /// page read while scrolling back is never served as the newest, and never
-    /// replaces it.
+    /// The cache key's period part. Windows of older bars are series of their own, so
+    /// a page read while scrolling back is never served as the newest, and never
+    /// replaces it. Within one series the held rows say what they cover (`Read::from`).
     fn key(&self, period: &str) -> String {
-        let end = if self.live { 'L' } else { 'H' };
-        format!("{period}@{}{end}", self.bucket)
+        format!("{period}@{}", if self.live { 'L' } else { 'H' })
     }
 }
 
@@ -425,58 +447,121 @@ struct Query {
     end: Option<i64>,
 }
 
+/// What a read brought.
+struct Read<T> {
+    rows: Vec<T>,
+    /// The oldest time `rows` are complete from. The window's start when it was read
+    /// that far, or as far as the page cap allows (older bars stay empty, as meant);
+    /// `i64::MIN` when Binance has nothing older; the oldest row when the read failed
+    /// or ran out of time, so the next window that asks for more reads afresh.
+    from: i64,
+    /// Why the read stopped early, for the log.
+    partial: Option<String>,
+}
+
 /// The rows a window needs, `page` being one request to Binance.
 ///
 /// Binance returns the *latest* rows up to `end` (500 at most), so the history is
 /// read newest page first, each one ending before the oldest row of the last, until
-/// a page reaches `from` or `floor`, comes back empty (no older rows exist), or
-/// `max_pages` is spent. With `prev`, the series held from the last read, only the
-/// rows after its last one are asked for: one request, whatever the window.
+/// a page reaches `from` or `floor`, is short (nothing older exists), or `max_pages`
+/// is spent. A failure or the `deadline` after the first page keeps what is in hand.
+///
+/// With `prev`, the series held from the last read and the time it is complete from:
+/// - a window it does not reach back to is read afresh, so no hole is left inside it;
+/// - nothing is asked for before a new row can exist (`step` after the last one);
+/// - then only the rows after the last one, unless they fill a page, when some in
+///   between may be missing and the window is read afresh.
+#[allow(clippy::too_many_arguments)]
 fn collect<T: Row>(
-    prev: Option<&[T]>,
+    prev: Option<(&[T], i64)>,
     w: &Window,
     now: i64,
     floor: i64,
+    step: i64,
     max_pages: usize,
+    deadline: Instant,
     page: &mut dyn FnMut(Query) -> Result<Vec<T>, String>,
-) -> Result<Vec<T>, String> {
+) -> Result<Read<T>, String> {
     // A window of older bars is read up to its own end, not to now.
     let end = (w.to < now).then_some(w.to);
-    if let Some(prev) = prev.filter(|p| !p.is_empty()) {
-        let last = prev[prev.len() - 1].at();
-        if last >= w.to {
-            return Ok(prev.to_vec());
+    if let Some((rows, from)) = prev.filter(|(rows, from)| !rows.is_empty() && w.from >= *from) {
+        let last = rows[rows.len() - 1].at();
+        let kept = || Read {
+            rows: rows.to_vec(),
+            from,
+            partial: None,
+        };
+        if last + step > w.to.min(now) {
+            return Ok(kept());
         }
         let mut new = page(Query {
             start: Some(last + 1),
             end,
         })?;
-        new.retain(|r| r.at() > last);
-        new.sort_by_key(Row::at);
-        let mut out = prev.to_vec();
-        out.extend(new);
-        return Ok(out);
+        if new.len() < PAGE_ROWS {
+            new.retain(|r| r.at() > last);
+            new.sort_by_key(Row::at);
+            let mut read = kept();
+            read.rows.extend(new);
+            return Ok(read);
+        }
     }
-    let (mut chunks, mut end) = (Vec::new(), end);
+    let (mut chunks, mut end) = (Vec::<Vec<T>>::new(), end);
+    let (mut from, mut partial) = (w.from, None);
     for _ in 0..max_pages {
-        let mut rows = page(Query { start: None, end })?;
+        let rows = if Instant::now() >= deadline {
+            Err("ran out of time".to_string())
+        } else {
+            page(Query { start: None, end })
+        };
+        let mut rows = match rows {
+            Ok(rows) => rows,
+            Err(e) if chunks.is_empty() => return Err(e),
+            Err(e) => {
+                partial = Some(e);
+                break;
+            }
+        };
         rows.sort_by_key(Row::at);
+        let short = rows.len() < PAGE_ROWS;
         let Some(oldest) = rows.first().map(Row::at) else {
+            from = i64::MIN;
             break;
         };
         chunks.push(rows);
-        if oldest <= w.from.max(floor) {
+        if oldest <= floor || (short && oldest > w.from) {
+            from = i64::MIN;
+            break;
+        }
+        if oldest <= w.from {
             break;
         }
         end = Some(oldest - 1);
     }
-    let mut out: Vec<T> = chunks.into_iter().rev().flatten().collect();
-    out.dedup_by_key(|r| r.at());
-    Ok(out)
+    if partial.is_some() {
+        from = chunks.last().and_then(|c| c.first()).map_or(from, Row::at);
+    }
+    let mut rows: Vec<T> = chunks.into_iter().rev().flatten().collect();
+    rows.dedup_by_key(|r| r.at());
+    Ok(Read {
+        rows,
+        from,
+        partial,
+    })
 }
 
-/// One request to a Binance futures endpoint, as its rows. Goes through the gate.
-fn fetch_page(url: &str, q: &Query) -> Result<Vec<serde_json::Value>, String> {
+/// One request to a Binance futures endpoint, as its rows. Goes through the gate and
+/// the endpoint's `budget`.
+fn fetch_page(
+    url: &str,
+    q: &Query,
+    budget: &crate::binance_gate::Budget,
+) -> Result<Vec<serde_json::Value>, String> {
+    // Unit tests seed the cache or use the sample source; a stalled thread must not be
+    // the reason one of them reaches Binance.
+    if cfg!(test) {
+        return Err("unit tests do not send requests to Binance".into());
+    }
     let mut url = format!("{url}&limit={PAGE_ROWS}");
     if let Some(start) = q.start {
         url += &format!("&startTime={start}");
@@ -486,13 +571,21 @@ fn fetch_page(url: &str, q: &Query) -> Result<Vec<serde_json::Value>, String> {
     }
     let gate = crate::binance_gate::futures();
     let sent = gate.admit()?;
-    let resp = http_client()
+    budget.take()?;
+    let resp = crate::binance_gate::http()
         .get(&url)
         .send()
         .map_err(|e| format!("request failed: {e}"))?;
     gate.observe_response(sent, resp.status().as_u16(), resp.headers());
     if !resp.status().is_success() {
-        return Err(format!("Binance returned status {}", resp.status()));
+        let status = resp.status();
+        // Binance explains in the body: {"code":-1130,"msg":"..."}.
+        let code = resp
+            .json::<serde_json::Value>()
+            .ok()
+            .and_then(|b| b.get("code")?.as_i64())
+            .map_or(String::new(), |c| format!(" (code {c})"));
+        return Err(format!("Binance returned status {status}{code}"));
     }
     let body: serde_json::Value = resp
         .json()
@@ -511,7 +604,7 @@ fn number(row: &serde_json::Value, key: &str) -> Option<f64> {
 /// `CHARTGEN_DATA_SOURCE=sample`: the futures series come from `sample_times`, not
 /// from Binance, as the candles do. For E2E tests and demos.
 fn sampling() -> bool {
-    std::env::var("CHARTGEN_DATA_SOURCE").is_ok_and(|v| v == "sample")
+    crate::data::sample_source()
 }
 
 /// The times of the rows Binance would return for `q` on a grid of `step_ms`: the
@@ -559,7 +652,7 @@ fn funding_page(symbol: &str, q: &Query) -> Result<Vec<(i64, f64)>, String> {
         "https://fapi.binance.com/fapi/v1/fundingRate?symbol={}",
         symbol.to_uppercase()
     );
-    Ok(fetch_page(&url, q)?
+    Ok(fetch_page(&url, q, crate::binance_gate::funding_budget())?
         .iter()
         .filter_map(|r| Some((r.get("fundingTime")?.as_i64()?, number(r, "fundingRate")?)))
         .collect())
@@ -581,15 +674,17 @@ fn oi_page(symbol: &str, period: &str, q: &Query) -> Result<Vec<(i64, f64)>, Str
         "https://fapi.binance.com/futures/data/openInterestHist?symbol={}&period={period}",
         symbol.to_uppercase()
     );
-    Ok(fetch_page(&url, q)?
-        .iter()
-        .filter_map(|r| {
-            Some((
-                r.get("timestamp")?.as_i64()?,
-                number(r, "sumOpenInterestValue")?,
-            ))
-        })
-        .collect())
+    Ok(
+        fetch_page(&url, q, crate::binance_gate::futures_data_budget())?
+            .iter()
+            .filter_map(|r| {
+                Some((
+                    r.get("timestamp")?.as_i64()?,
+                    number(r, "sumOpenInterestValue")?,
+                ))
+            })
+            .collect(),
+    )
 }
 
 fn ls_page(symbol: &str, period: &str, q: &Query) -> Result<Vec<(i64, f64, f64)>, String> {
@@ -607,30 +702,41 @@ fn ls_page(symbol: &str, period: &str, q: &Query) -> Result<Vec<(i64, f64, f64)>
         "https://fapi.binance.com/futures/data/globalLongShortAccountRatio?symbol={}&period={period}",
         symbol.to_uppercase()
     );
-    Ok(fetch_page(&url, q)?
-        .iter()
-        .filter_map(|r| {
-            Some((
-                r.get("timestamp")?.as_i64()?,
-                number(r, "longAccount")?,
-                number(r, "shortAccount")?,
-            ))
-        })
-        .collect())
+    Ok(
+        fetch_page(&url, q, crate::binance_gate::futures_data_budget())?
+            .iter()
+            .filter_map(|r| {
+                Some((
+                    r.get("timestamp")?.as_i64()?,
+                    number(r, "longAccount")?,
+                    number(r, "shortAccount")?,
+                ))
+            })
+            .collect(),
+    )
 }
 
-/// The cached series for a window, `fetch`ed when it is due. A failure is logged here,
-/// once per refresh (the cache calls `fetch` once per refresh), so the log explains a
-/// panel that says "unavailable".
+/// The cached series for a window, `fetch`ed when it is due. A failure, or a read that
+/// stopped early, is logged here, once per refresh (the cache calls `fetch` once per
+/// refresh), so the log explains a panel that says "unavailable" or lacks old bars.
 fn read<T: Row>(
     cache: &SeriesCache<T>,
     what: &str,
     symbol: &str,
     key: &str,
-    fetch: impl FnOnce(Option<&[T]>) -> Result<Vec<T>, String>,
+    fetch: impl FnOnce(Option<(&[T], i64)>) -> Result<Read<T>, String>,
 ) -> Result<Arc<Vec<T>>, Missing> {
-    let logged = |prev: Option<&[T]>| {
-        fetch(prev).inspect_err(|e| eprintln!("[futures] {what} {symbol}: {e}"))
+    let logged = |prev: Option<(&[T], i64)>| match fetch(prev) {
+        Ok(r) => {
+            if let Some(e) = &r.partial {
+                eprintln!("[futures] {what} {symbol}: stopped early, older bars stay empty: {e}");
+            }
+            Ok((r.rows, r.from))
+        }
+        Err(e) => {
+            eprintln!("[futures] {what} {symbol}: {e}");
+            Err(e)
+        }
     };
     match cache.get_extending(symbol, key, Instant::now(), SERIES_WAIT, logged) {
         Ok(series) if series.is_empty() => Err(Missing::NoMarket),
@@ -653,10 +759,12 @@ fn history_window(data: &OhlcvData, now: i64) -> Result<(Window, &str), Missing>
     let interval = data.interval.as_deref().unwrap_or("4h");
     let period = map_interval(interval);
     let gap = interval_to_max_gap_ms(interval);
-    let Some(w) = Window::of(&data.bars, gap, 64 * period_ms(period), now) else {
+    let Some(w) = Window::of(&data.bars, gap, now) else {
         return Err(Missing::NoMarket);
     };
-    if w.to < now - RETENTION_MS {
+    // With the margin the floor of the read has: a window that ends within it may have
+    // no rows only because Binance keeps a little less than 30 days.
+    if w.to < now - RETENTION_MS + RETENTION_MARGIN_MS {
         return Err(Missing::Retention);
     }
     Ok((w, period))
@@ -667,7 +775,7 @@ fn history_window(data: &OhlcvData, now: i64) -> Result<(Window, &str), Missing>
 pub struct FundingRate;
 
 fn funding_window(data: &OhlcvData, now: i64) -> Option<Window> {
-    Window::of(&data.bars, FUNDING_GAP_MS, DAY_MS, now)
+    Window::of(&data.bars, FUNDING_GAP_MS, now)
 }
 
 fn funding_values(data: &OhlcvData) -> Result<Vec<f64>, Missing> {
@@ -678,7 +786,18 @@ fn funding_values(data: &OhlcvData) -> Result<Vec<f64>, Missing> {
     };
     let series = read(&FUNDING, "funding rate", sym, &w.key(""), |prev| {
         let mut page = |q: Query| funding_page(sym, &q);
-        collect(prev, &w, now, i64::MIN, FUNDING_MAX_PAGES, &mut page)
+        let deadline = Instant::now() + READ_DEADLINE;
+        let step = funding_step(prev.map(|(rows, _)| rows));
+        collect(
+            prev,
+            &w,
+            now,
+            i64::MIN,
+            step,
+            FUNDING_MAX_PAGES,
+            deadline,
+            &mut page,
+        )
     })?;
     Ok(align_to_bars(&series, &data.bars, FUNDING_GAP_MS))
 }
@@ -743,7 +862,18 @@ fn oi_values(data: &OhlcvData) -> Result<Vec<f64>, Missing> {
         &w.key(period),
         |prev| {
             let mut page = |q: Query| oi_page(sym, period, &q);
-            collect(prev, &w, now, floor, HISTORY_MAX_PAGES, &mut page)
+            let deadline = Instant::now() + READ_DEADLINE;
+            let step = period_ms(period);
+            collect(
+                prev,
+                &w,
+                now,
+                floor,
+                step,
+                HISTORY_MAX_PAGES,
+                deadline,
+                &mut page,
+            )
         },
     )?;
     let gap = interval_to_max_gap_ms(data.interval.as_deref().unwrap_or("4h"));
@@ -804,7 +934,18 @@ fn ls_values(data: &OhlcvData) -> Result<(Vec<f64>, Vec<f64>), Missing> {
         &w.key(period),
         |prev| {
             let mut page = |q: Query| ls_page(sym, period, &q);
-            collect(prev, &w, now, floor, HISTORY_MAX_PAGES, &mut page)
+            let deadline = Instant::now() + READ_DEADLINE;
+            let step = period_ms(period);
+            collect(
+                prev,
+                &w,
+                now,
+                floor,
+                step,
+                HISTORY_MAX_PAGES,
+                deadline,
+                &mut page,
+            )
         },
     )?;
     let long: Vec<(i64, f64)> = series.iter().map(|&(ts, l, _)| (ts, l)).collect();
@@ -875,7 +1016,7 @@ impl Indicator for LongShortRatio {
 pub struct FearGreed;
 
 fn fetch_fear_greed_data() -> Result<Vec<(i64, f64)>, String> {
-    let client = http_client();
+    let client = crate::binance_gate::http();
     let url = "https://api.alternative.me/fng/?limit=365&format=json";
     let resp = client
         .get(url)
@@ -1223,22 +1364,45 @@ mod interval_tests {
     }
 
     #[test]
-    fn a_fetch_that_hangs_holds_its_claim_for_one_refresh_only() {
+    fn a_read_in_flight_holds_its_claim_until_it_could_have_ended() {
         let (cache, t0) = (SeriesCache::default(), Instant::now());
         std::thread::scope(|s| {
             let (release, leader) = in_flight(s, &cache, t0, Ok(vec![1]));
-            // A refresh later another caller may fetch, and what it reads stays.
+            // A slow read (a deep first read on a slow Binance) is not repeated by
+            // callers a refresh or more later: they wait for it, or are told it is loading.
+            let late = t0 + SERIES_REFRESH + Duration::from_secs(5);
+            let e = cache
+                .get_waiting("btcusdt", "1h", late, Duration::from_millis(5), no_fetch)
+                .unwrap_err();
+            assert_eq!(e, SERIES_LOADING);
+            // Past the claim it is a hung read: another caller reads, and what it reads stays.
             let mut calls = 0;
-            let next = read(&cache, &mut calls, t0 + SERIES_REFRESH, Ok(vec![2]));
+            let next = read(&cache, &mut calls, t0 + SERIES_CLAIM, Ok(vec![2]));
             assert_eq!((next, calls), (Ok(vec![2]), 1));
             // The slow one lands last, with older data: it must not replace it.
             release.send(()).unwrap();
             leader.join().unwrap().unwrap();
         });
         let held = cache
-            .get("btcusdt", "1h", t0 + SERIES_REFRESH, no_fetch)
+            .get("btcusdt", "1h", t0 + SERIES_CLAIM, no_fetch)
             .unwrap();
         assert_eq!(*held, vec![2]);
+    }
+
+    #[test]
+    fn a_read_is_told_the_series_it_replaces_and_what_it_covers() {
+        let (cache, t0) = (SeriesCache::<i64>::default(), Instant::now());
+        let first = cache.get_extending("btcusdt", "1h@L", t0, SERIES_WAIT, |prev| {
+            assert!(prev.is_none());
+            Ok((vec![1, 2], 77))
+        });
+        assert_eq!(*first.unwrap(), vec![1, 2]);
+        let at = t0 + SERIES_REFRESH;
+        let next = cache.get_extending("btcusdt", "1h@L", at, SERIES_WAIT, |prev| {
+            assert_eq!(prev, Some((&[1, 2][..], 77)));
+            Ok((vec![1, 2, 3], 5))
+        });
+        assert_eq!(*next.unwrap(), vec![1, 2, 3]);
     }
 
     fn hourly(symbol: &str, first: i64, n: usize) -> OhlcvData {
@@ -1427,13 +1591,28 @@ mod interval_tests {
         Window {
             from,
             to,
-            bucket: from,
             live: to >= NOW,
         }
     }
 
     fn rows_every(step: i64, from: i64, to: i64) -> Vec<(i64, f64)> {
         (from / step..=to / step).map(|i| (i * step, 1.0)).collect()
+    }
+
+    fn later() -> Instant {
+        Instant::now() + Duration::from_secs(60)
+    }
+
+    /// `collect` against the fake, an hour a row, with room to spare in time.
+    fn collect_hourly(
+        fake: &mut Fake,
+        prev: Option<(&[(i64, f64)], i64)>,
+        w: &Window,
+        now: i64,
+        max_pages: usize,
+    ) -> Read<(i64, f64)> {
+        let page = &mut |q| fake.page(q);
+        collect(prev, w, now, i64::MIN, HOUR_MS, max_pages, later(), page).unwrap()
     }
 
     #[test]
@@ -1444,15 +1623,16 @@ mod interval_tests {
             asked: vec![],
         };
         let w = window(NOW - 1200 * HOUR_MS, NOW + HOUR_MS);
-        let got = collect(None, &w, NOW, i64::MIN, 8, &mut |q| fake.page(q)).unwrap();
+        let got = collect_hourly(&mut fake, None, &w, NOW, 8);
         assert_eq!(fake.asked.len(), 3, "{:?}", fake.asked);
         assert_eq!(fake.asked[0], (None, None));
-        assert!(got.first().unwrap().0 <= w.from);
-        assert_eq!(got.last().unwrap().0, NOW);
+        assert!(got.rows.first().unwrap().0 <= w.from);
+        assert_eq!(got.rows.last().unwrap().0, NOW);
         assert!(
-            got.windows(2).all(|p| p[0].0 < p[1].0),
+            got.rows.windows(2).all(|p| p[0].0 < p[1].0),
             "ascending, no repeats"
         );
+        assert_eq!((got.from, got.partial), (w.from, None));
     }
 
     #[test]
@@ -1462,22 +1642,35 @@ mod interval_tests {
             asked: vec![],
         };
         let w = window(0, NOW + HOUR_MS);
-        let got = collect(None, &w, NOW, i64::MIN, 6, &mut |q| fake.page(q)).unwrap();
+        let got = collect_hourly(&mut fake, None, &w, NOW, 6);
         assert_eq!(fake.asked.len(), 6);
-        assert_eq!(got.len(), 6 * PAGE_ROWS);
-        // The newest rows are the ones kept.
-        assert_eq!(got.last().unwrap().0, NOW);
+        assert_eq!(got.rows.len(), 6 * PAGE_ROWS);
+        // The newest rows are the ones kept, and the older bars are meant to stay empty.
+        assert_eq!(got.rows.last().unwrap().0, NOW);
+        assert_eq!(got.from, w.from);
     }
 
     #[test]
-    fn running_out_of_history_ends_with_an_empty_page_not_a_loop() {
+    fn a_short_page_ends_the_history_without_another_request() {
+        // 30 daily rows, as open interest keeps: one request, not two.
         let mut fake = Fake {
-            rows: rows_every(HOUR_MS, NOW - 700 * HOUR_MS, NOW),
+            rows: rows_every(DAY_MS, NOW - 29 * DAY_MS, NOW),
             asked: vec![],
         };
-        let w = window(0, NOW + HOUR_MS);
-        let got = collect(None, &w, NOW, i64::MIN, 50, &mut |q| fake.page(q)).unwrap();
-        assert_eq!((fake.asked.len(), got.len()), (3, 701));
+        let w = window(NOW - 400 * DAY_MS, NOW + DAY_MS);
+        let got = collect_hourly(&mut fake, None, &w, NOW, 8);
+        assert_eq!((fake.asked.len(), got.rows.len()), (1, 30));
+        assert_eq!(got.from, i64::MIN, "nothing older exists");
+        // An empty answer (a spot-only pair) is one request too.
+        let mut none = Fake {
+            rows: vec![],
+            asked: vec![],
+        };
+        let got = collect_hourly(&mut none, None, &w, NOW, 8);
+        assert_eq!(
+            (none.asked.len(), got.rows.len(), got.from),
+            (1, 0, i64::MIN)
+        );
     }
 
     #[test]
@@ -1487,68 +1680,231 @@ mod interval_tests {
             rows: rows_every(HOUR_MS, floor, NOW),
             asked: vec![],
         };
-        // The window reaches back a year; the first page past the floor is not asked for.
+        // The window reaches back a year; the page that reaches the floor is the last.
         let w = window(NOW - 365 * DAY_MS, NOW + HOUR_MS);
-        collect(None, &w, NOW, floor, 50, &mut |q| fake.page(q)).unwrap();
+        let page = &mut |q| fake.page(q);
+        let got = collect(None, &w, NOW, floor, HOUR_MS, 50, later(), page).unwrap();
         assert_eq!(fake.asked.len(), 2, "720 rows = 2 pages, then done");
+        assert_eq!(got.from, i64::MIN);
     }
 
     #[test]
-    fn a_window_of_older_bars_is_read_up_to_its_own_end() {
+    fn a_window_of_older_bars_is_read_up_to_its_own_end_and_then_asks_for_nothing() {
         let mut fake = Fake {
             rows: rows_every(HOUR_MS, NOW - 2000 * HOUR_MS, NOW),
             asked: vec![],
         };
         let to = NOW - 1000 * HOUR_MS;
         let w = window(to - 100 * HOUR_MS, to);
-        let got = collect(None, &w, NOW, i64::MIN, 8, &mut |q| fake.page(q)).unwrap();
+        let got = collect_hourly(&mut fake, None, &w, NOW, 8);
         assert_eq!(fake.asked, vec![(None, Some(to))]);
-        assert_eq!(got.last().unwrap().0, to);
+        assert_eq!(got.rows.last().unwrap().0, to);
+        // Asked again (another refresh, another poll): the rows are final, no request.
+        fake.asked.clear();
+        let again = collect_hourly(&mut fake, Some((&got.rows, got.from)), &w, NOW, 8);
+        assert!(fake.asked.is_empty());
+        assert_eq!(again.rows, got.rows);
     }
 
     #[test]
-    fn a_refresh_asks_only_for_what_is_new() {
+    fn nothing_is_asked_for_before_a_new_row_can_exist() {
         let mut fake = Fake {
             rows: rows_every(HOUR_MS, NOW - 300 * HOUR_MS, NOW),
             asked: vec![],
         };
         let w = window(NOW - 200 * HOUR_MS, NOW + HOUR_MS);
-        let first = collect(None, &w, NOW, i64::MIN, 8, &mut |q| fake.page(q)).unwrap();
+        let first = collect_hourly(&mut fake, None, &w, NOW, 8);
+        fake.asked.clear();
+        // Minutes later, the next hourly row is not due: every refresh costs nothing.
+        for minutes in [1, 15, 59] {
+            let at = NOW + minutes * 60_000;
+            let r = collect_hourly(&mut fake, Some((&first.rows, first.from)), &w, at, 8);
+            assert_eq!(r.rows.len(), first.rows.len());
+        }
+        assert!(fake.asked.is_empty(), "{:?}", fake.asked);
+        // An hour on it is, and only the new rows are asked for.
         fake.rows.push((NOW + HOUR_MS, 2.0));
-        fake.asked.clear();
-        let next = collect(Some(&first), &w, NOW + HOUR_MS, i64::MIN, 8, &mut |q| {
-            fake.page(q)
-        })
-        .unwrap();
+        let at = NOW + HOUR_MS;
+        let next = collect_hourly(&mut fake, Some((&first.rows, first.from)), &w, at, 8);
         assert_eq!(fake.asked, vec![(Some(NOW + 1), None)]);
-        assert_eq!(next.len(), first.len() + 1);
-        assert_eq!(next.last().unwrap(), &(NOW + HOUR_MS, 2.0));
-        // A window already covered asks for nothing.
-        fake.asked.clear();
-        let old = window(NOW - 200 * HOUR_MS, NOW - 10 * HOUR_MS);
-        let kept = collect(Some(&next), &old, NOW, i64::MIN, 8, &mut |q| fake.page(q)).unwrap();
-        assert!(fake.asked.is_empty());
-        assert_eq!(kept, next);
+        assert_eq!(next.rows.len(), first.rows.len() + 1);
+        assert_eq!(next.rows.last().unwrap(), &(NOW + HOUR_MS, 2.0));
     }
 
     #[test]
-    fn a_failing_page_fails_the_read_so_the_last_good_series_is_kept() {
+    fn a_window_older_than_the_series_held_is_read_afresh_with_no_hole() {
+        // (a) A short historic window is held, then a longer one that starts before it.
+        let mut fake = Fake {
+            rows: rows_every(HOUR_MS, NOW - 3000 * HOUR_MS, NOW),
+            asked: vec![],
+        };
+        let to = NOW - 500 * HOUR_MS;
+        let short = window(to - 100 * HOUR_MS, to);
+        let held = collect_hourly(&mut fake, None, &short, NOW, 8);
+        let long = window(to - 900 * HOUR_MS, to);
+        let got = collect_hourly(&mut fake, Some((&held.rows, held.from)), &long, NOW, 8);
+        assert!(got.rows.first().unwrap().0 <= long.from);
+        let hourly = |r: &Read<(i64, f64)>| r.rows.windows(2).all(|p| p[1].0 - p[0].0 == HOUR_MS);
+        assert!(hourly(&got), "a row is missing inside the window");
+        assert_eq!(got.from, long.from);
+        // A narrower window than the one held is covered: no request.
+        fake.asked.clear();
+        let inside = window(to - 300 * HOUR_MS, to - 200 * HOUR_MS);
+        collect_hourly(&mut fake, Some((&got.rows, got.from)), &inside, NOW, 8);
+        assert!(fake.asked.is_empty());
+    }
+
+    #[test]
+    fn a_catch_up_that_fills_a_page_is_read_afresh_not_left_with_a_hole() {
+        // (d) The series was last read 700 hours ago: the rows since are more than a page.
+        let mut fake = Fake {
+            rows: rows_every(HOUR_MS, NOW - 1500 * HOUR_MS, NOW),
+            asked: vec![],
+        };
+        let old = window(NOW - 1200 * HOUR_MS, NOW - 700 * HOUR_MS);
+        let held = collect_hourly(&mut fake, None, &old, NOW - 700 * HOUR_MS, 8);
+        let w = window(NOW - 1200 * HOUR_MS, NOW + HOUR_MS);
+        let got = collect_hourly(&mut fake, Some((&held.rows, held.from)), &w, NOW, 8);
+        assert!(
+            got.rows.windows(2).all(|p| p[1].0 - p[0].0 == HOUR_MS),
+            "hole"
+        );
+        assert_eq!(got.rows.last().unwrap().0, NOW);
+    }
+
+    #[test]
+    fn a_late_failure_keeps_the_pages_in_hand() {
         let w = window(0, NOW + HOUR_MS);
         let mut calls = 0;
-        let got = collect::<(i64, f64)>(None, &w, NOW, i64::MIN, 8, &mut |_| {
+        let mut page = |q: Query| {
             calls += 1;
-            if calls == 1 {
-                Ok(rows_every(HOUR_MS, NOW - 499 * HOUR_MS, NOW))
+            if calls <= 2 {
+                let end = q.end.unwrap_or(NOW);
+                Ok(rows_every(
+                    HOUR_MS,
+                    end - (PAGE_ROWS as i64 - 1) * HOUR_MS,
+                    end,
+                ))
             } else {
-                Err("HTTP 429".into())
+                Err("Binance funding budget: 400 requests in 5 minutes used".to_string())
             }
-        });
-        assert_eq!(got.unwrap_err(), "HTTP 429");
+        };
+        let got = collect(None, &w, NOW, i64::MIN, HOUR_MS, 8, later(), &mut page).unwrap();
+        assert_eq!(got.rows.len(), 2 * PAGE_ROWS);
+        assert!(got.partial.unwrap().contains("budget"));
+        // Complete from the oldest row it has, so a window that wants more reads again.
+        assert_eq!(got.from, got.rows[0].0);
+        // With nothing in hand it is an error, as ever.
+        let fail = &mut |_| Err::<Vec<(i64, f64)>, _>("HTTP 429".to_string());
+        let e = collect(None, &w, NOW, i64::MIN, HOUR_MS, 8, later(), fail);
+        assert_eq!(e.err().unwrap(), "HTTP 429");
     }
 
     #[test]
-    fn older_bars_are_their_own_series_and_never_the_newest_window() {
-        let now = NOW;
+    fn a_read_stops_at_its_deadline_with_the_rows_it_has() {
+        let w = window(0, NOW + HOUR_MS);
+        let deadline = Instant::now() + Duration::from_millis(30);
+        let mut page = |q: Query| {
+            std::thread::sleep(Duration::from_millis(50));
+            let end = q.end.unwrap_or(NOW);
+            Ok(rows_every(
+                HOUR_MS,
+                end - (PAGE_ROWS as i64 - 1) * HOUR_MS,
+                end,
+            ))
+        };
+        let got = collect(None, &w, NOW, i64::MIN, HOUR_MS, 8, deadline, &mut page).unwrap();
+        assert_eq!(got.rows.len(), PAGE_ROWS, "one page, then out of time");
+        assert!(got.partial.unwrap().contains("time"));
+        // Out of time before the first page is an error.
+        let one = &mut |_| Ok::<_, String>(vec![(1, 1.0)]);
+        let e = collect(None, &w, NOW, i64::MIN, HOUR_MS, 8, Instant::now(), one);
+        assert!(e.is_err());
+    }
+
+    #[test]
+    fn funding_is_asked_for_when_the_next_payment_is_due_not_every_refresh() {
+        let rows = rows_every(8 * HOUR_MS, NOW - 100 * 8 * HOUR_MS, NOW);
+        assert_eq!(funding_step(Some(&rows)), 8 * HOUR_MS);
+        assert_eq!(
+            funding_step(Some(&rows[..1])),
+            HOUR_MS,
+            "one row says nothing"
+        );
+        assert_eq!(funding_step(None), HOUR_MS);
+        let hourly = rows_every(HOUR_MS, NOW - 10 * HOUR_MS, NOW);
+        assert_eq!(funding_step(Some(&hourly)), HOUR_MS);
+        // Three hours after a payment, with 8 hour payments: nothing to ask for.
+        let w = window(NOW - 500 * HOUR_MS, NOW + 8 * HOUR_MS);
+        let mut fake = Fake {
+            rows: rows.clone(),
+            asked: vec![],
+        };
+        let at = NOW + 3 * HOUR_MS;
+        let page = &mut |q| fake.page(q);
+        let step = funding_step(Some(&rows));
+        let r = collect(
+            Some((&rows, w.from)),
+            &w,
+            at,
+            i64::MIN,
+            step,
+            6,
+            later(),
+            page,
+        )
+        .unwrap();
+        assert_eq!(r.rows, rows);
+        assert!(fake.asked.is_empty());
+    }
+
+    #[test]
+    fn opening_a_chart_reads_the_tail_window_from_what_the_full_load_read() {
+        // The web app loads 500 bars + 300 warmup, then polls a tail of 2 + 300 bars.
+        // Both are live windows of one series: the tail's first read asks for nothing.
+        let day = 24 * HOUR_MS;
+        let cache = SeriesCache::<(i64, f64)>::default();
+        let mut fake = Fake {
+            rows: rows_every(8 * HOUR_MS, NOW - 2000 * day, NOW),
+            asked: vec![],
+        };
+        let open = |fake: &mut Fake, bars: i64, at: Instant| {
+            let w = window(NOW - bars * day - FUNDING_GAP_MS, NOW + FUNDING_GAP_MS);
+            let key = w.key("");
+            cache
+                .get_extending("BTCUSDT", &key, at, SERIES_WAIT, |prev| {
+                    let step = funding_step(prev.map(|(rows, _)| rows));
+                    let page = &mut |q| fake.page(q);
+                    let r = collect(
+                        prev,
+                        &w,
+                        NOW,
+                        i64::MIN,
+                        step,
+                        FUNDING_MAX_PAGES,
+                        later(),
+                        page,
+                    )?;
+                    Ok((r.rows, r.from))
+                })
+                .unwrap()
+                .len()
+        };
+        let t0 = Instant::now();
+        assert_eq!(
+            open(&mut fake, 800, t0),
+            6 * PAGE_ROWS,
+            "the full load reads to its cap"
+        );
+        let full = fake.asked.len();
+        assert_eq!(full, 5);
+        // The tail window, past the refresh: covered, and no payment is due.
+        open(&mut fake, 302, t0 + SERIES_REFRESH);
+        assert_eq!(fake.asked.len(), full);
+    }
+
+    #[test]
+    fn live_and_older_bars_are_their_own_series() {
         let bar = |ms: i64| Bar {
             open: 1.0,
             high: 1.0,
@@ -1557,46 +1913,55 @@ mod interval_tests {
             volume: 1.0,
             date: (ms / 1000).to_string(),
         };
-        let newest = Window::of(
-            &[bar(now - 3 * HOUR_MS), bar(now)],
-            FUNDING_GAP_MS,
-            DAY_MS,
-            now,
-        );
+        let now = NOW;
+        let newest = Window::of(&[bar(now - 3 * HOUR_MS), bar(now)], FUNDING_GAP_MS, now).unwrap();
         let older = Window::of(
             &[bar(now - 90 * DAY_MS), bar(now - 89 * DAY_MS)],
             FUNDING_GAP_MS,
-            DAY_MS,
             now,
-        );
-        let (newest, older) = (newest.unwrap(), older.unwrap());
+        )
+        .unwrap();
         assert!(newest.live && !older.live);
         assert_ne!(newest.key(""), older.key(""));
         assert_ne!(newest.key("1h"), newest.key("5m"));
-        // The chart gaining a bar keeps its series; the next day starts another.
-        let later = Window::of(
-            &[bar(now - 2 * HOUR_MS), bar(now + HOUR_MS)],
-            FUNDING_GAP_MS,
-            DAY_MS,
-            now + HOUR_MS,
-        );
-        assert_eq!(later.unwrap().key(""), newest.key(""));
+        // A chart gaining a bar keeps its series.
+        let gained = [bar(now - 2 * HOUR_MS), bar(now + HOUR_MS)];
+        let later = Window::of(&gained, FUNDING_GAP_MS, now).unwrap();
+        assert_eq!(later.key(""), newest.key(""));
 
         // And in the cache they do not touch.
         let cache = SeriesCache::<(i64, f64)>::default();
         let t = Instant::now();
-        cache
-            .get("BTCUSDT", &newest.key(""), t, || Ok(vec![(now, 1.0)]))
-            .unwrap();
-        cache
-            .get("BTCUSDT", &older.key(""), t, || {
-                Ok(vec![(now - 90 * DAY_MS, 2.0)])
-            })
-            .unwrap();
+        let get =
+            |w: &Window, rows: Vec<(i64, f64)>| cache.get("BTCUSDT", &w.key(""), t, || Ok(rows));
+        get(&newest, vec![(now, 1.0)]).unwrap();
+        get(&older, vec![(now - 90 * DAY_MS, 2.0)]).unwrap();
         let held = cache
             .get("BTCUSDT", &newest.key(""), t, no_fetch_rows)
             .unwrap();
         assert_eq!(*held, vec![(now, 1.0)]);
+    }
+
+    #[test]
+    fn a_window_ending_at_the_retention_edge_is_not_called_no_market() {
+        // Binance may keep a little less than 30 days: a window that ends within the
+        // margin of it says so, rather than "no futures market".
+        let now = now_ms();
+        let gap = interval_to_max_gap_ms("1h");
+        let first = (now - RETENTION_MS + RETENTION_MARGIN_MS / 2 - gap) / 1000;
+        let edge = hourly("EDGEUSDT", first, 1);
+        // Where an answer without the margin would read from: empty, as Binance would.
+        let w = Window::of(&edge.bars, gap, now).unwrap();
+        seed(&OPEN_INTEREST, "EDGEUSDT", w.key("1h"), Ok(vec![]));
+        seed(&LONG_SHORT, "EDGEUSDT", w.key("1h"), Ok(vec![]));
+        assert_eq!(
+            OpenInterestHist.compute(&edge).label,
+            "OI (last 30 days only)"
+        );
+        assert_eq!(
+            LongShortRatio.compute(&edge).label,
+            "L/S (last 30 days only)"
+        );
     }
 
     #[test]
