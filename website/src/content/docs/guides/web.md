@@ -8,10 +8,14 @@ The `web/` directory holds a SolidJS single-page app that connects to
 chart with an RSI panel. It implements
 [ADR-0003](/chartgen/decisions/0003-web-frontend-stack/).
 
-The scope is deliberately narrow: a top toolbar (symbol, timeframe,
-chart type), the indicator picker, the chart and a watchlist. Order
-entry, multi-chart layouts, and LLM chat are explicitly out of scope
-until the core loop is solid.
+The Docker image serves the app at `/`, on the same origin as `/mcp`
+([ADR-0027](/chartgen/decisions/0027-serve-web-app-same-origin/)). It has a
+top toolbar (symbol, timeframe including custom intervals, chart type), the
+indicator picker, drawings, a watchlist, price alerts, layouts and a compact
+layout for phones. With `CHARTGEN_SCRIPTING=1` it also has a
+[script editor](#script-editor), and with `CHARTGEN_SERVER_ALERTS=1` alerts
+can run on the server. Order entry, multi-chart layouts, and LLM chat are
+out of scope.
 
 ## Toolbar
 
