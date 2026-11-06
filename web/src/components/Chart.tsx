@@ -613,13 +613,17 @@ const X_AXIS_NAME = "chartgen_x";
 const X_TICK_SIZE = 11;
 
 // klinecharts centers an x-axis label on its tick and the canvas cuts off what
-// sticks out, so a label too close to the left edge is left out.
+// sticks out, so a label too close to either edge is blanked. The tick stays:
+// the vertical grid line is drawn from it. A tick alone on the axis keeps its
+// label, cut off or not, so the axis never ends up empty.
 registerXAxis({
   name: X_AXIS_NAME,
-  createTicks: ({ defaultTicks }) =>
-    defaultTicks.filter(
-      (t) => t.coord >= utils.calcTextWidth(t.text, X_TICK_SIZE, "400", FONT_FAMILY) / 2,
-    ),
+  createTicks: ({ bounding, defaultTicks }) =>
+    defaultTicks.map((t) => {
+      const reach = utils.calcTextWidth(t.text, X_TICK_SIZE, "400", FONT_FAMILY) / 2 + 2;
+      const fits = t.coord >= reach && t.coord <= bounding.width - reach;
+      return fits || defaultTicks.length === 1 ? t : { ...t, text: "" };
+    }),
 });
 
 let compareRegistered = false;

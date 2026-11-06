@@ -395,50 +395,95 @@ test.describe("indicator settings title", () => {
 });
 
 test.describe("x-axis labels", () => {
-  /** Label pixels in the x axis canvas: in its first columns, and overall. */
-  const labelPixels = (page: Page) =>
+  interface Tick {
+    text: string;
+    coord: number;
+    /** Label width, measured in the axis font. */
+    width: number;
+  }
+  /**
+   * The ticks klinecharts draws and the width of the axis. They have no public
+   * getter; geometry holds at any time of day, unlike which pixels a label
+   * happens to cover.
+   */
+  const axis = (page: Page) =>
     page.evaluate(() => {
-      const c = (window as unknown as { __chartgenTest: Hook }).__chartgenTest.chart()! as unknown as {
-        getDom: (id: string, w: string) => HTMLElement | null;
+      const c = (window as unknown as { __chartgenTest: { chart: () => unknown } }).__chartgenTest.chart() as {
+        _xAxisPane: {
+          getAxisComponent: () => {
+            getTicks: () => { text: string; coord: number }[];
+            getSelfBounding: () => { width: number };
+          };
+        };
+        getStyles: () => { xAxis: { tickText: { size: number; weight: string; family: string } } };
       };
-      let edge = 0;
-      let all = 0;
-      for (const canvas of c.getDom("x_axis_pane", "main")!.querySelectorAll("canvas")) {
-        if (canvas.width === 0 || canvas.height === 0) continue;
-        const ctx = canvas.getContext("2d")!;
-        // Below the axis line and the tick marks.
-        const top = 6 * window.devicePixelRatio;
-        const { data, width, height } = ctx.getImageData(0, top, canvas.width, canvas.height - top);
-        for (let y = 0; y < height; y++) {
-          for (let x = 0; x < width; x++) {
-            if (data[(y * width + x) * 4 + 3]! === 0) continue;
-            all++;
-            if (x < 2) edge++;
-          }
-        }
-      }
-      return { edge, all };
+      const a = c._xAxisPane.getAxisComponent();
+      const { size, weight, family } = c.getStyles().xAxis.tickText;
+      const ctx = document.createElement("canvas").getContext("2d")!;
+      ctx.font = `${weight} ${size}px ${family}`;
+      return {
+        width: a.getSelfBounding().width,
+        ticks: a.getTicks().map((t) => ({
+          text: t.text,
+          coord: t.coord,
+          width: ctx.measureText(t.text).width,
+        })),
+      };
     });
 
-  test("no label is cut off at the left edge while scrolling", async ({ bootedApp: page }) => {
-    const scroll = () =>
-      page.evaluate(() => {
-        const c = (window as unknown as { __chartgenTest: Hook }).__chartgenTest.chart()! as unknown as {
-          scrollByDistance: (d: number) => void;
-        };
-        c.scrollByDistance(9);
-        return new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
-      });
-    let cut = 0;
-    for (let i = 0; i < 40; i++) {
-      await scroll();
-      const { edge, all } = await labelPixels(page);
-      expect(all).toBeGreaterThan(0);
-      if (edge > 0) cut++;
+  const scrollBy = (page: Page, distance: number) =>
+    page.evaluate((d) => {
+      const c = (window as unknown as { __chartgenTest: { chart: () => unknown } }).__chartgenTest.chart() as {
+        scrollByDistance: (d: number) => void;
+      };
+      c.scrollByDistance(d);
+      return new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    }, distance);
+
+  test("labels stay whole at both edges, and their grid lines stay", async ({
+    bootedApp: page,
+  }) => {
+    const cut: Tick[] = [];
+    let blankLeft = 0;
+    let blankRight = 0;
+    // Small steps, so several ticks land inside each edge's 2 px margin.
+    for (let i = 0; i < 120; i++) {
+      await scrollBy(page, 4);
+      const { width, ticks } = await axis(page);
+      expect(ticks.length).toBeGreaterThan(1);
+      for (const t of ticks) {
+        if (t.text === "") {
+          if (t.coord < width / 2) blankLeft++;
+          else blankRight++;
+        } else if (t.coord - t.width / 2 < 1.5 || t.coord + t.width / 2 > width - 1.5) {
+          cut.push(t);
+        }
+      }
     }
-    expect(cut).toBe(0);
+    expect(cut).toEqual([]);
+    // The ticks near the edges were kept with no text: GridView draws from them.
+    expect(blankLeft).toBeGreaterThan(0);
+    expect(blankRight).toBeGreaterThan(0);
     await page.locator(".chart-host").screenshot({
       path: test.info().outputPath("x-axis-left-edge.png"),
     });
+  });
+
+  test("a tick alone on the axis keeps its label", async ({ bootedApp: page }) => {
+    // Narrow and zoomed in: one tick, with the long date label that cannot fit.
+    await page.locator(".chart-host").evaluate((el) => {
+      (el as HTMLElement).style.width = "130px";
+      (el as HTMLElement).style.flex = "none";
+    });
+    await setBarSpace(page, 50);
+    let alone = 0;
+    for (let i = 0; i < 30; i++) {
+      await scrollBy(page, 17);
+      const { ticks } = await axis(page);
+      if (ticks.length !== 1) continue;
+      alone++;
+      expect(ticks[0]!.text).not.toBe("");
+    }
+    expect(alone).toBeGreaterThan(0);
   });
 });
