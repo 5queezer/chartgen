@@ -479,6 +479,44 @@ test.describe("drawing modifiers", () => {
     });
   });
 
+  test.describe("a double click while a tool is armed", () => {
+    const pressTwice = async (page: Page, at: At, then: At = at) => {
+      const box = (await host(page).boundingBox())!;
+      await page.mouse.move(box.x + at.x, box.y + at.y);
+      await page.mouse.down();
+      await page.mouse.up();
+      await page.waitForTimeout(60);
+      await page.mouse.move(box.x + then.x, box.y + then.y);
+      await page.mouse.down();
+      await page.mouse.up();
+      await page.waitForTimeout(200);
+    };
+
+    /** Off the pane klinecharts sends a double click nowhere: it must not become a second click. */
+    for (const [name, spot] of [
+      ["y-axis", (w: number, _h: number) => ({ x: w - 20, y: 200 })],
+      ["x-axis", (_w: number, h: number) => ({ x: 700, y: h - 8 })],
+    ] as const) {
+      test(`on the ${name}: not sent again, so no drawing`, async ({ bootedApp: page }) => {
+        // Settled first: right after boot a quick click can be lost, cause not found.
+        await page.waitForTimeout(1500);
+        const box = (await host(page).boundingBox())!;
+        await page.getByRole("button", { name: "Trend line" }).click();
+        await pressTwice(page, spot(box.width, box.height));
+        expect(await overlays(page)).toHaveLength(0);
+        await expect(page.getByRole("button", { name: "Trend line" })).toHaveAttribute("aria-pressed", "true");
+      });
+    }
+
+    test("is measured as klinecharts does: 4 px on both axes is two clicks", async ({ bootedApp: page }) => {
+      await page.waitForTimeout(1500);
+      await page.getByRole("button", { name: "Trend line" }).click();
+      await pressTwice(page, { x: 500, y: 200 }, { x: 504, y: 204 });
+      await expect.poll(async () => (await overlays(page)).length).toBe(1);
+      expect(Math.abs((await overlays(page))[0]!.pixels[1]!.y! - 204)).toBeLessThan(1);
+    });
+  });
+
   test("a quick Shift click snaps its point like a slow one", async ({ bootedApp: page }) => {
     const box = (await host(page).boundingBox())!;
     await page.getByRole("button", { name: "Trend line" }).click();

@@ -1231,7 +1231,17 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
   // 5 px of it, a double click (`_mouseUpHandler`), and the next point of a drawing with it.
   // That also ends its click timer, so the same click sent again counts as a first one.
   // A press that went 5 px or more is a cancelled click to klinecharts, wherever it ends.
-  let armedPress: { step: number; x: number; y: number; target: EventTarget; moved: boolean } | null = null;
+  // A real double click off the pane (an axis) reaches no drawing and leaves the step alone,
+  // so it is told apart by klinecharts' own measure: under 5 px, by x + y, within 500 ms.
+  let armedPress: {
+    step: number;
+    x: number;
+    y: number;
+    target: EventTarget;
+    moved: boolean;
+    double: boolean;
+  } | null = null;
+  let lastArmedPress: { x: number; y: number; time: number } | null = null;
   let replaying = false;
   const armedStep = () =>
     armedId === null
@@ -1242,10 +1252,17 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
   const noteArmedPress = (e: MouseEvent) => {
     if (!e.isTrusted) return;
     const step = armedStep();
-    armedPress =
-      step !== undefined && e.button === 0 && e.target instanceof Node && props.chart?.getDom()?.contains(e.target)
-        ? { step, x: e.clientX, y: e.clientY, target: e.target, moved: false }
-        : null;
+    if (step === undefined || e.button !== 0 || !(e.target instanceof Node) || !props.chart?.getDom()?.contains(e.target)) {
+      armedPress = null;
+      return;
+    }
+    const last = lastArmedPress;
+    const double =
+      last !== null &&
+      e.timeStamp - last.time < 500 &&
+      Math.abs(e.clientX - last.x) + Math.abs(e.clientY - last.y) < 5;
+    lastArmedPress = { x: e.clientX, y: e.clientY, time: e.timeStamp };
+    armedPress = { step, x: e.clientX, y: e.clientY, target: e.target, moved: false, double };
   };
   const trackArmedPress = (e: MouseEvent) => {
     if (e.isTrusted && armedPress && Math.abs(e.clientX - armedPress.x) + Math.abs(e.clientY - armedPress.y) >= 5) {
@@ -1257,8 +1274,8 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
     const press = armedPress;
     if (replaying || !press || e.button !== 0) return;
     armedPress = null;
-    // The step moved on (the click counted), or the press moved (a pan).
-    if (armedStep() !== press.step || press.moved) return;
+    // The step moved on (the click counted), the press moved (a pan), or it was a double click.
+    if (armedStep() !== press.step || press.moved || press.double) return;
     replaying = true;
     press.target.dispatchEvent(new MouseEvent("mousedown", e));
     (e.target ?? press.target).dispatchEvent(new MouseEvent("mouseup", e));
