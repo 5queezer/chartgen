@@ -1058,7 +1058,9 @@ export function Chart(props: ChartProps): JSX.Element {
     rememberNaturalHeights(c);
     const ids = untrack(paneIds);
     const names = paneStack.filter((n) => ids[n]);
-    const stack = (c.getSize()?.height ?? 0) - (c.getSize("x_axis_pane")?.height ?? 0);
+    // The host, not getSize(): after a resize too short for the panes that reports
+    // a clamped total, which made the heights depend on the path taken here.
+    const stack = host.clientHeight - (c.getSize("x_axis_pane")?.height ?? 0);
     const fit = compactPaneHeights(stack, names.map((n) => naturalHeights.get(n)!));
     names.forEach((n, i) => c.setPaneOptions({ id: ids[n]!, height: fit[i]! }));
   };

@@ -344,6 +344,21 @@ for (const name of ["iPhone 13 landscape", "iPhone SE landscape"]) {
       const size = page.viewportSize()!;
       expect(await page.evaluate(() => document.documentElement.scrollHeight)).toBeLessThanOrEqual(size.height);
     });
+
+    for (const settle of [0, 30, 200]) {
+      test(`pane heights do not depend on the resize's timing (${settle} ms)`, async ({ page }) => {
+        await bootCompact(page);
+        const sideways = (await paneHeights(page)).subs;
+        const { width, height } = page.viewportSize()!;
+        // Tall, then back to a screen too short for those heights.
+        await page.setViewportSize({ width: 800, height: 1000 });
+        await expect.poll(async () => (await paneHeights(page)).subs).toEqual([120, 120]);
+        if (settle) await page.waitForTimeout(settle);
+        await page.setViewportSize({ width, height });
+        if (settle) await page.waitForTimeout(settle);
+        await expect.poll(async () => (await paneHeights(page)).subs).toEqual(sideways);
+      });
+    }
   });
 }
 
