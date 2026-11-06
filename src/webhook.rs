@@ -6,6 +6,9 @@
 //! gives must be public, and the connection is pinned to those addresses, so a
 //! rebind between the check and the request changes nothing. Redirects are not
 //! followed. The response body is never read and the status is all that is kept.
+//! A name with no dot, a host this server fetches from and its own host are refused
+//! too, and whether a name failed to resolve or resolved to a private address reads
+//! the same, so the answer says nothing about the network inside.
 //! Error texts are fixed strings, because a request error prints its URL, which
 //! may hold a token.
 
@@ -15,19 +18,33 @@ use std::time::Duration;
 use hmac::{Hmac, Mac};
 use reqwest::{Client, Url};
 use sha2::Sha256;
+use tokio::sync::Semaphore;
 
 /// Longest webhook URL accepted.
 pub const MAX_URL_LEN: usize = 512;
 /// How long a name may take to resolve.
 const RESOLVE_TIMEOUT: Duration = Duration::from_secs(4);
 /// Names that only mean something inside a network.
-const LOCAL_NAMES: [&str; 6] = [
+const LOCAL_NAMES: [&str; 12] = [
     "localhost",
+    "localdomain",
     "local",
     "internal",
     "intranet",
     "lan",
+    "home",
     "home.arpa",
+    "corp",
+    "docker",
+    "test",
+    "invalid",
+];
+/// Where this server gets its data: a webhook at them spends its standing there.
+const UPSTREAM_DOMAINS: [&str; 4] = [
+    "binance.com",
+    "binance.vision",
+    "yahoo.com",
+    "alternative.me",
 ];
 
 pub const SIGNATURE_HEADER: &str = "X-Chartgen-Signature";
@@ -74,21 +91,70 @@ fn is_public_v6(ip: Ipv6Addr) -> bool {
         && !(s[0] == 0x3fff && s[1] < 0x1000) // documentation
 }
 
-/// What may be reached besides public addresses. `test_origin` is the origin of
-/// a local test receiver, read once from the environment at startup: no request
-/// can set it, and it only counts with the sample data source (`from_env`).
+/// An address range: `203.0.113.7/32`, `2001:db8::/48`, or one address.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Prefix {
+    net: IpAddr,
+    len: u32,
+}
+
+impl Prefix {
+    fn parse(raw: &str) -> Option<Self> {
+        let (ip, len) = match raw.split_once('/') {
+            Some((ip, len)) => (ip.parse().ok()?, Some(len.parse().ok()?)),
+            None => (raw.parse().ok()?, None),
+        };
+        let max = if matches!(ip, IpAddr::V4(_)) { 32 } else { 128 };
+        let len = len.unwrap_or(max);
+        (len <= max).then_some(Self { net: ip, len })
+    }
+
+    fn contains(&self, ip: IpAddr) -> bool {
+        match (self.net, ip) {
+            (IpAddr::V4(net), IpAddr::V4(ip)) => {
+                let mask = u32::MAX.checked_shl(32 - self.len).unwrap_or(0);
+                u32::from(net) & mask == u32::from(ip) & mask
+            }
+            (IpAddr::V6(net), IpAddr::V6(ip)) => {
+                let mask = u128::MAX.checked_shl(128 - self.len).unwrap_or(0);
+                u128::from(net) & mask == u128::from(ip) & mask
+            }
+            _ => false,
+        }
+    }
+}
+
+/// What the operator set, read once from the environment at startup: no request
+/// can change any of it.
 #[derive(Clone, Debug, Default)]
 pub struct Policy {
+    /// The origin of a local test receiver, which may be reached besides public
+    /// addresses. It only counts with the sample data source (`from_env`).
     pub test_origin: Option<String>,
+    /// This server's own host (`CHARTGEN_BASE_URL`).
+    pub own_host: Option<String>,
+    /// Public addresses that are still off limits, such as this network's own.
+    pub blocked: Vec<Prefix>,
+    /// Send webhooks through this proxy, so that a receiver never sees this
+    /// server's address. Unset means direct, ignoring any proxy in the environment.
+    pub proxy: Option<String>,
 }
 
 impl Policy {
-    /// `CHARTGEN_WEBHOOK_TEST_ORIGIN`, honored only with
-    /// `CHARTGEN_DATA_SOURCE=sample` and only for a loopback address.
-    pub fn from_env() -> Self {
+    /// `CHARTGEN_WEBHOOK_TEST_ORIGIN` (honored only with `CHARTGEN_DATA_SOURCE=sample`
+    /// and only for a loopback address), `CHARTGEN_BASE_URL`,
+    /// `CHARTGEN_WEBHOOK_BLOCKED_PREFIXES` and `CHARTGEN_WEBHOOK_PROXY`. A security
+    /// setting that does not parse is an error: nothing falls back to no protection.
+    pub fn from_env() -> Result<Self, String> {
+        let var = |name: &str| std::env::var(name).ok().filter(|v| !v.trim().is_empty());
         let sample = std::env::var("CHARTGEN_DATA_SOURCE").is_ok_and(|v| v == "sample");
-        let raw = std::env::var("CHARTGEN_WEBHOOK_TEST_ORIGIN").ok();
-        Self::for_test_origin(raw.as_deref(), sample)
+        let mut policy =
+            Self::for_test_origin(var("CHARTGEN_WEBHOOK_TEST_ORIGIN").as_deref(), sample);
+        policy.own_host = var("CHARTGEN_BASE_URL")
+            .and_then(|u| Url::parse(&u).ok()?.host_str().map(str::to_ascii_lowercase));
+        policy.blocked = parse_prefixes(var("CHARTGEN_WEBHOOK_BLOCKED_PREFIXES").as_deref())?;
+        policy.proxy = parse_proxy(var("CHARTGEN_WEBHOOK_PROXY"))?;
+        Ok(policy)
     }
 
     fn for_test_origin(raw: Option<&str>, sample: bool) -> Self {
@@ -100,11 +166,41 @@ impl Policy {
         if let Some(origin) = &test_origin {
             eprintln!("[webhook] test receiver allowed at {origin}");
         }
-        Self { test_origin }
+        Self {
+            test_origin,
+            ..Self::default()
+        }
     }
 
     fn allows(&self, url: &Url) -> bool {
         self.test_origin.as_deref() == Some(url.origin().ascii_serialization().as_str())
+    }
+
+    fn permits(&self, ip: IpAddr) -> bool {
+        is_public_ip(ip) && !self.blocked.iter().any(|p| p.contains(ip))
+    }
+}
+
+fn parse_prefixes(raw: Option<&str>) -> Result<Vec<Prefix>, String> {
+    raw.unwrap_or("")
+        .split(',')
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        .map(|p| {
+            Prefix::parse(p)
+                .ok_or_else(|| format!("CHARTGEN_WEBHOOK_BLOCKED_PREFIXES: cannot read {p}"))
+        })
+        .collect()
+}
+
+/// The error never repeats the value: a proxy URL can hold a password.
+fn parse_proxy(raw: Option<String>) -> Result<Option<String>, String> {
+    let Some(raw) = raw else { return Ok(None) };
+    let http = Url::parse(&raw).is_ok_and(|u| matches!(u.scheme(), "http" | "https"));
+    if http && reqwest::Proxy::all(&raw).is_ok() {
+        Ok(Some(raw))
+    } else {
+        Err("CHARTGEN_WEBHOOK_PROXY must be an http or https URL".into())
     }
 }
 
@@ -135,9 +231,10 @@ impl Target {
             return Err("webhook URL must use port 443".into());
         }
         match url.host() {
-            Some(url::Host::Ipv4(ip)) if !is_public_v4(ip) => Err(REFUSED_ADDRESS.into()),
-            Some(url::Host::Ipv6(ip)) if !is_public_v6(ip) => Err(REFUSED_ADDRESS.into()),
+            Some(url::Host::Ipv4(ip)) if !policy.permits(ip.into()) => Err(REFUSED_ADDRESS.into()),
+            Some(url::Host::Ipv6(ip)) if !policy.permits(ip.into()) => Err(REFUSED_ADDRESS.into()),
             Some(url::Host::Domain(name)) if is_local_name(name) => Err(REFUSED_ADDRESS.into()),
+            Some(url::Host::Domain(name)) if is_our_host(name, policy) => Err(REFUSED_HOST.into()),
             None => Err("webhook URL has no host".into()),
             _ => Ok(Self { url }),
         }
@@ -154,26 +251,45 @@ impl Target {
 }
 
 const REFUSED_ADDRESS: &str = "webhook URL points at a private or reserved address";
+const REFUSED_HOST: &str = "webhook URL points at a host this server itself uses";
+/// For a name that does not resolve and one that resolves to a private address alike.
+const REFUSED_NAME: &str = "webhook host does not resolve to a public address";
 
-fn is_local_name(name: &str) -> bool {
-    let name = name.trim_end_matches('.').to_ascii_lowercase();
-    LOCAL_NAMES
-        .iter()
-        .any(|l| name == *l || name.ends_with(&format!(".{l}")))
+fn normalized(name: &str) -> String {
+    name.trim_end_matches('.').to_ascii_lowercase()
 }
 
-/// Every address must be public: one private answer among public ones is how
+fn is_or_under(name: &str, domain: &str) -> bool {
+    name == domain || name.ends_with(&format!(".{domain}"))
+}
+
+/// A name with no dot only means something inside a network.
+fn is_local_name(name: &str) -> bool {
+    let name = normalized(name);
+    !name.contains('.') || LOCAL_NAMES.iter().any(|l| is_or_under(&name, l))
+}
+
+fn is_our_host(name: &str, policy: &Policy) -> bool {
+    let name = normalized(name);
+    UPSTREAM_DOMAINS.iter().any(|d| is_or_under(&name, d))
+        || policy
+            .own_host
+            .as_deref()
+            .is_some_and(|own| is_or_under(&name, own))
+}
+
+/// Every address must be permitted: one private answer among public ones is how
 /// a name reaches the inside.
 fn check_addresses(
     addrs: Vec<SocketAddr>,
     target: &Target,
     policy: &Policy,
 ) -> Result<Vec<SocketAddr>, String> {
-    if addrs.is_empty() {
-        return Err("webhook host does not resolve".into());
+    if policy.allows(&target.url) {
+        return Ok(addrs);
     }
-    if !policy.allows(&target.url) && addrs.iter().any(|a| !is_public_ip(a.ip())) {
-        return Err(REFUSED_ADDRESS.into());
+    if addrs.is_empty() || addrs.iter().any(|a| !policy.permits(a.ip())) {
+        return Err(REFUSED_NAME.into());
     }
     Ok(addrs)
 }
@@ -187,7 +303,7 @@ pub async fn resolve(target: &Target, policy: &Policy) -> Result<Vec<SocketAddr>
     .await;
     let addrs = match lookup {
         Ok(Ok(addrs)) => addrs.collect(),
-        _ => return Err("webhook host does not resolve".into()),
+        _ => return Err(REFUSED_NAME.into()),
     };
     check_addresses(addrs, target, policy)
 }
@@ -235,7 +351,8 @@ struct Failure {
 
 /// One POST to `addrs`. The name in `target` only reaches the TLS handshake and
 /// the Host header: `resolve_to_addrs` keeps the client from looking it up
-/// again, `no_proxy` from handing it to a proxy that would.
+/// again, `no_proxy` from handing it to a proxy that would. With a configured
+/// proxy, the proxy connects instead, and the addresses it reaches are its own.
 async fn post(
     target: &Target,
     addrs: &[SocketAddr],
@@ -243,16 +360,22 @@ async fn post(
     event_id: &str,
     secret: Option<&str>,
     timing: &Timing,
+    proxy: Option<&str>,
 ) -> Result<u16, Failure> {
     let failed = |error: &str, retry| Failure {
         status: None,
         error: error.to_string(),
         retry,
     };
-    let client = Client::builder()
+    let builder = match proxy.map(reqwest::Proxy::all) {
+        None => Client::builder().no_proxy(),
+        Some(Ok(proxy)) => Client::builder().proxy(proxy),
+        // Never direct instead: the proxy is there to hide this server's address.
+        Some(Err(_)) => return Err(failed("could not prepare the request", false)),
+    };
+    let client = builder
         .resolve_to_addrs(target.host(), addrs)
         .redirect(reqwest::redirect::Policy::none())
-        .no_proxy()
         .pool_max_idle_per_host(0)
         .connect_timeout(timing.connect)
         .timeout(timing.total)
@@ -296,6 +419,7 @@ async fn post(
 
 /// POST `body`, retrying what may pass later. Every attempt resolves and checks
 /// the name again, so an address that turned private is refused, without retry.
+/// `slots` are held for each attempt but not during the waits between them.
 pub async fn deliver(
     target: &Target,
     policy: &Policy,
@@ -303,28 +427,37 @@ pub async fn deliver(
     event_id: &str,
     secret: Option<&str>,
     timing: &Timing,
+    slots: &[&Semaphore],
 ) -> Outcome {
     let mut attempts = 0;
     let mut waits = timing.backoff.iter();
     loop {
         attempts += 1;
+        let mut permits = Vec::with_capacity(slots.len());
+        for slot in slots {
+            permits.push(slot.acquire().await);
+        }
         let failure = match resolve(target, policy).await {
-            Ok(addrs) => match post(target, &addrs, body, event_id, secret, timing).await {
-                Ok(code) => {
-                    return Outcome {
-                        status: Some(code),
-                        error: None,
-                        attempts,
+            Ok(addrs) => {
+                let proxy = policy.proxy.as_deref();
+                match post(target, &addrs, body, event_id, secret, timing, proxy).await {
+                    Ok(code) => {
+                        return Outcome {
+                            status: Some(code),
+                            error: None,
+                            attempts,
+                        }
                     }
+                    Err(f) => f,
                 }
-                Err(f) => f,
-            },
+            }
             Err(error) => Failure {
                 status: None,
                 error,
                 retry: false,
             },
         };
+        drop(permits);
         match waits.next().filter(|_| failure.retry) {
             Some(wait) => tokio::time::sleep(*wait).await,
             None => {
@@ -345,7 +478,12 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-    const OPEN: Policy = Policy { test_origin: None };
+    const OPEN: Policy = Policy {
+        test_origin: None,
+        own_host: None,
+        blocked: Vec::new(),
+        proxy: None,
+    };
 
     fn refused(url: &str) {
         assert!(Target::parse(url, &OPEN).is_err(), "{url} passed");
@@ -470,6 +608,192 @@ mod tests {
     }
 
     #[test]
+    fn a_name_with_no_dot_or_a_private_suffix_is_refused() {
+        for url in [
+            "https://redis/",
+            "https://coolify/hook",
+            "https://fedora./",
+            "https://db.localdomain/",
+            "https://git.corp/",
+            "https://app.docker/",
+            "https://x.test/",
+            "https://x.invalid/",
+            "https://nas.home/",
+        ] {
+            assert_eq!(
+                Target::parse(url, &OPEN).err().unwrap(),
+                REFUSED_ADDRESS,
+                "{url}"
+            );
+        }
+    }
+
+    #[test]
+    fn this_servers_own_host_and_data_sources_are_refused() {
+        let policy = Policy {
+            own_host: Some("chartgen.example.net".into()),
+            ..Policy::default()
+        };
+        for url in [
+            "https://api.binance.com/api/v3/klines",
+            "https://fapi.binance.com/",
+            "https://API.BINANCE.COM./",
+            "https://binance.com/",
+            "https://testnet.binance.vision/",
+            "https://query1.finance.yahoo.com/v8/",
+            "https://api.alternative.me/fng/",
+            "https://chartgen.example.net/mcp",
+        ] {
+            assert_eq!(
+                Target::parse(url, &policy).err().unwrap(),
+                REFUSED_HOST,
+                "{url}"
+            );
+        }
+        for url in [
+            "https://notbinance.com/",
+            "https://example.net/",
+            "https://binance.com.example.org/",
+        ] {
+            assert!(Target::parse(url, &policy).is_ok(), "{url}");
+        }
+        // Only because of the setting.
+        assert!(Target::parse("https://chartgen.example.net/", &OPEN).is_ok());
+    }
+
+    #[test]
+    fn a_private_answer_and_no_answer_read_the_same() {
+        let t = Target::parse("https://example.com/", &OPEN).unwrap();
+        let private = check_addresses(vec![sock("10.0.0.1")], &t, &OPEN).unwrap_err();
+        let none = check_addresses(vec![], &t, &OPEN).unwrap_err();
+        assert_eq!(private, none);
+        assert_eq!(private, REFUSED_NAME);
+    }
+
+    #[tokio::test]
+    async fn a_name_that_does_not_resolve_reads_as_a_private_one() {
+        let policy = Policy {
+            test_origin: Some("https://no-such-host.invalid".into()),
+            ..Policy::default()
+        };
+        let t = Target::parse("https://no-such-host.invalid/", &policy).unwrap();
+        assert_eq!(resolve(&t, &OPEN).await.unwrap_err(), REFUSED_NAME);
+    }
+
+    #[test]
+    fn prefixes_read_and_match() {
+        let p = |raw: &str| Prefix::parse(raw).unwrap();
+        assert!(p("203.0.113.0/24").contains("203.0.113.200".parse().unwrap()));
+        assert!(!p("203.0.113.0/24").contains("203.0.114.1".parse().unwrap()));
+        assert!(p("8.8.8.8").contains("8.8.8.8".parse().unwrap()));
+        assert!(!p("8.8.8.8").contains("8.8.8.9".parse().unwrap()));
+        assert!(p("0.0.0.0/0").contains("8.8.8.8".parse().unwrap()));
+        assert!(p("2a00:1450::/32").contains("2a00:1450:4001::1".parse().unwrap()));
+        assert!(!p("2a00:1450::/32").contains("2a00:1451::1".parse().unwrap()));
+        assert!(!p("8.8.8.8/32").contains("2a00:1450::1".parse().unwrap()));
+        for bad in ["8.8.8.8/33", "2a00::/129", "nonsense", "8.8.8.8/x", "/24"] {
+            assert_eq!(Prefix::parse(bad), None, "{bad}");
+        }
+        assert_eq!(parse_prefixes(None).unwrap(), []);
+        assert_eq!(
+            parse_prefixes(Some(" 8.8.8.8 , ,1.1.1.1/32"))
+                .unwrap()
+                .len(),
+            2
+        );
+        assert!(parse_prefixes(Some("8.8.8.8,oops")).is_err());
+    }
+
+    #[test]
+    fn an_operators_blocked_prefix_refuses_a_public_address() {
+        let policy = Policy {
+            blocked: vec![Prefix::parse("8.8.8.0/24").unwrap()],
+            ..Policy::default()
+        };
+        assert_eq!(
+            Target::parse("https://8.8.8.8/", &policy).err().unwrap(),
+            REFUSED_ADDRESS
+        );
+        assert!(Target::parse("https://1.1.1.1/", &policy).is_ok());
+        let t = Target::parse("https://example.com/", &policy).unwrap();
+        let e = check_addresses(vec![sock("1.1.1.1"), sock("8.8.8.8")], &t, &policy);
+        assert_eq!(e.unwrap_err(), REFUSED_NAME);
+        assert!(check_addresses(vec![sock("1.1.1.1")], &t, &policy).is_ok());
+    }
+
+    #[test]
+    fn a_bad_proxy_is_an_error_that_does_not_repeat_it() {
+        assert_eq!(parse_proxy(None).unwrap(), None);
+        let ok = parse_proxy(Some("http://relay.example:3128".into())).unwrap();
+        assert_eq!(ok.as_deref(), Some("http://relay.example:3128"));
+        for bad in [
+            "ftp://user:hunter2@relay/",
+            "hunter2",
+            "socks5://user:hunter2@relay/",
+        ] {
+            let e = parse_proxy(Some(bad.into())).unwrap_err();
+            assert!(!e.contains("hunter2"), "{e}");
+        }
+    }
+
+    #[tokio::test]
+    async fn with_a_proxy_the_request_goes_there_and_not_to_the_target() {
+        let (proxy_port, proxied, _) = receiver(OK).await;
+        let (target_port, _, target_hits) = receiver(OK).await;
+        let policy = Policy {
+            test_origin: Some(format!("http://127.0.0.1:{target_port}")),
+            proxy: Some(format!("http://127.0.0.1:{proxy_port}")),
+            ..Policy::default()
+        };
+        let target =
+            Target::parse(&format!("http://127.0.0.1:{target_port}/hook"), &policy).unwrap();
+        let out = deliver(&target, &policy, "{}", "e", None, &quick(), &[]).await;
+        assert_eq!(out.status, Some(200));
+        assert_eq!(target_hits.load(Ordering::SeqCst), 0);
+        let req = proxied.lock().unwrap()[0].clone();
+        assert!(
+            req.contains(&format!("127.0.0.1:{target_port}/hook")),
+            "{req}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_broken_proxy_never_falls_back_to_direct() {
+        let (port, _, hits) = receiver(OK).await;
+        let (mut policy, target) = local(port);
+        policy.proxy = Some("::not a url::".into());
+        let out = deliver(&target, &policy, "{}", "e", None, &quick(), &[]).await;
+        assert_eq!(out.error.as_deref(), Some("could not prepare the request"));
+        assert_eq!(hits.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn the_slots_are_free_during_the_wait_between_attempts() {
+        let reply = "HTTP/1.1 503 Busy\r\ncontent-length: 0\r\nconnection: close\r\n\r\n";
+        let (port, _, hits) = receiver(reply).await;
+        let (policy, target) = local(port);
+        let slots = Arc::new(Semaphore::new(1));
+        let timing = Timing {
+            backoff: [Duration::from_millis(400), Duration::from_millis(400)],
+            ..quick()
+        };
+        let held = slots.clone();
+        let run = tokio::spawn(async move {
+            deliver(&target, &policy, "{}", "e", None, &timing, &[&held]).await
+        });
+        for _ in 0..100 {
+            if hits.load(Ordering::SeqCst) == 1 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(slots.available_permits(), 1, "held through the wait");
+        assert_eq!(run.await.unwrap().attempts, 3);
+        assert_eq!(slots.available_permits(), 1);
+    }
+
+    #[test]
     fn only_https_on_443_without_credentials_passes() {
         for url in [
             "http://example.com/",
@@ -520,7 +844,7 @@ mod tests {
             "::ffff:10.0.0.1",
         ] {
             let e = check_addresses(vec![sock("1.1.1.1"), sock(bad)], &t, &OPEN).unwrap_err();
-            assert_eq!(e, REFUSED_ADDRESS, "{bad}");
+            assert_eq!(e, REFUSED_NAME, "{bad}");
         }
         let good = vec![sock("1.1.1.1"), sock("2606:4700:4700::1111")];
         assert_eq!(check_addresses(good.clone(), &t, &OPEN).unwrap(), good);
@@ -533,11 +857,12 @@ mod tests {
         // through a policy and check under an open one.
         let policy = Policy {
             test_origin: Some("https://localhost".into()),
+            ..Policy::default()
         };
         let t = Target::parse("https://localhost/", &policy).unwrap();
-        assert_eq!(resolve(&t, &OPEN).await.unwrap_err(), REFUSED_ADDRESS);
-        let out = deliver(&t, &OPEN, "{}", "e", None, &quick()).await;
-        assert_eq!(out.error.as_deref(), Some(REFUSED_ADDRESS));
+        assert_eq!(resolve(&t, &OPEN).await.unwrap_err(), REFUSED_NAME);
+        let out = deliver(&t, &OPEN, "{}", "e", None, &quick(), &[]).await;
+        assert_eq!(out.error.as_deref(), Some(REFUSED_NAME));
         assert_eq!(out.attempts, 1, "a refusal is not retried");
     }
 
@@ -611,6 +936,7 @@ mod tests {
     fn local(port: u16) -> (Policy, Target) {
         let policy = Policy {
             test_origin: Some(format!("http://127.0.0.1:{port}")),
+            ..Policy::default()
         };
         let target = Target::parse(&format!("http://127.0.0.1:{port}/hook"), &policy).unwrap();
         (policy, target)
@@ -621,7 +947,7 @@ mod tests {
         let (port, seen, _) = receiver(OK).await;
         let (policy, target) = local(port);
         let body = r#"{"id":"e1"}"#;
-        let out = deliver(&target, &policy, body, "e1", Some("s3cret"), &quick()).await;
+        let out = deliver(&target, &policy, body, "e1", Some("s3cret"), &quick(), &[]).await;
         assert_eq!((out.status, out.error, out.attempts), (Some(200), None, 1));
         let req = seen.lock().unwrap()[0].to_lowercase();
         assert!(req.starts_with("post /hook"), "{req}");
@@ -647,7 +973,7 @@ mod tests {
     async fn without_a_secret_there_is_no_signature() {
         let (port, seen, _) = receiver(OK).await;
         let (policy, target) = local(port);
-        deliver(&target, &policy, "{}", "e", None, &quick()).await;
+        deliver(&target, &policy, "{}", "e", None, &quick(), &[]).await;
         let req = seen.lock().unwrap()[0].to_lowercase();
         assert!(!req.contains("x-chartgen-signature"), "{req}");
     }
@@ -663,7 +989,7 @@ mod tests {
         );
         let (port, _, hits) = receiver(reply).await;
         let (policy, target) = local(port);
-        let out = deliver(&target, &policy, "{}", "e", None, &quick()).await;
+        let out = deliver(&target, &policy, "{}", "e", None, &quick(), &[]).await;
         assert_eq!(out.status, Some(302));
         assert_eq!(
             out.error.as_deref(),
@@ -678,7 +1004,7 @@ mod tests {
         let reply = "HTTP/1.1 503 Busy\r\ncontent-length: 0\r\nconnection: close\r\n\r\n";
         let (port, _, hits) = receiver(reply).await;
         let (policy, target) = local(port);
-        let out = deliver(&target, &policy, "{}", "e", None, &quick()).await;
+        let out = deliver(&target, &policy, "{}", "e", None, &quick(), &[]).await;
         assert_eq!(
             (out.status, out.error.as_deref(), out.attempts),
             (Some(503), Some("HTTP 503"), 3)
@@ -692,7 +1018,7 @@ mod tests {
             "HTTP/1.1 404 Nope\r\ncontent-length: 11\r\nconnection: close\r\n\r\nSECRET-BODY";
         let (port, _, hits) = receiver(reply).await;
         let (policy, target) = local(port);
-        let out = deliver(&target, &policy, "{}", "e", None, &quick()).await;
+        let out = deliver(&target, &policy, "{}", "e", None, &quick(), &[]).await;
         assert_eq!(hits.load(Ordering::SeqCst), 1);
         assert_eq!(out.error.as_deref(), Some("HTTP 404"));
         assert!(!format!("{out:?}").contains("SECRET-BODY"));
@@ -710,7 +1036,7 @@ mod tests {
         });
         let (policy, target) = local(port);
         let started = std::time::Instant::now();
-        let out = deliver(&target, &policy, "{}", "e", None, &quick()).await;
+        let out = deliver(&target, &policy, "{}", "e", None, &quick(), &[]).await;
         assert_eq!(out.error.as_deref(), Some("timed out"));
         assert_eq!((out.status, out.attempts), (None, 3));
         assert!(started.elapsed() < Duration::from_secs(5));
@@ -725,9 +1051,10 @@ mod tests {
         };
         let policy = Policy {
             test_origin: Some(format!("http://127.0.0.1:{port}")),
+            ..Policy::default()
         };
         let target = Target::parse(&format!("http://127.0.0.1:{port}/token-abc"), &policy).unwrap();
-        let out = deliver(&target, &policy, "{}", "e", None, &quick()).await;
+        let out = deliver(&target, &policy, "{}", "e", None, &quick(), &[]).await;
         assert_eq!(out.error.as_deref(), Some("could not connect"));
         assert!(!format!("{out:?}").contains("token-abc"));
     }
@@ -739,10 +1066,11 @@ mod tests {
         let (port, seen, _) = receiver(OK).await;
         let policy = Policy {
             test_origin: Some(format!("http://rebind.invalid:{port}")),
+            ..Policy::default()
         };
         let target = Target::parse(&format!("http://rebind.invalid:{port}/h"), &policy).unwrap();
         let addrs = [SocketAddr::new("127.0.0.1".parse().unwrap(), port)];
-        let code = post(&target, &addrs, "{}", "e", None, &quick()).await;
+        let code = post(&target, &addrs, "{}", "e", None, &quick(), None).await;
         assert_eq!(code.ok(), Some(200));
         let req = seen.lock().unwrap()[0].to_lowercase();
         assert!(

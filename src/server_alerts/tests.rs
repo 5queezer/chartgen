@@ -651,6 +651,62 @@ async fn each_ssrf_refusal_reaches_the_caller_and_stores_nothing() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn update_refuses_what_create_refuses_and_keeps_the_webhook() {
+    let (port, _) = receiver(OK).await;
+    let (store, _) = store_at("ssrf-update");
+    let limits = Limits {
+        changes_per_minute: 1000,
+        ..Limits::default()
+    };
+    let a = alerts_on(store, local(port), limits);
+    let id = create(&a, hooked(port, "less", "once"), "me").await;
+    for url in [
+        "http://example.com/",
+        "https://127.0.0.1/",
+        "https://169.254.169.254/latest/meta-data/",
+        "https://[::ffff:127.0.0.1]/",
+        "https://redis/",
+        "https://localhost/",
+        "https://api.binance.com/",
+        "https://example.com:8443/",
+    ] {
+        let args = json!({"alert_id": id, "webhook_url": url});
+        let e = call(&a, "update_server_alert", args, "me")
+            .await
+            .unwrap_err();
+        assert!(e.starts_with("webhook"), "{url}: {e}");
+    }
+    let stored = a.lock().alerts[&id].webhook.as_ref().unwrap().url.clone();
+    assert!(stored.contains("TOPSECRET"), "the old webhook stays");
+}
+
+/// An id you do not own gets the same answer whatever the URL is, without a lookup.
+#[tokio::test(flavor = "multi_thread")]
+async fn ownership_is_checked_before_the_url() {
+    let (store, _) = store_at("oracle");
+    let limits = Limits {
+        changes_per_minute: 1000,
+        ..Limits::default()
+    };
+    let a = alerts_on(store, Policy::default(), limits);
+    let id = create(&a, spec("less", "once", 1.0), "me").await;
+    for alert_id in ["made-up", id.as_str()] {
+        for url in [
+            "https://redis/",
+            "https://localhost/",
+            "not a url",
+            "https://1.1.1.1/",
+        ] {
+            let args = json!({"alert_id": alert_id, "webhook_url": url});
+            let e = call(&a, "update_server_alert", args, "them")
+                .await
+                .unwrap_err();
+            assert_eq!(e, "No such alert", "{alert_id} {url}");
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn the_limits_hold() {
     let (store, _) = store_at("limits");
     let limits = Limits {
@@ -777,6 +833,7 @@ const OK: &str = "HTTP/1.1 200 OK\r\ncontent-length: 0\r\nconnection: close\r\n\
 fn local(port: u16) -> Policy {
     Policy {
         test_origin: Some(format!("http://127.0.0.1:{port}")),
+        ..Policy::default()
     }
 }
 

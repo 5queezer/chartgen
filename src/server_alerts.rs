@@ -296,10 +296,17 @@ pub fn start(hub: &Arc<ChartHub>) {
         eprintln!("[alerts] the store is unavailable; server alerts stay off");
         return;
     };
+    let policy = match Policy::from_env() {
+        Ok(policy) => policy,
+        Err(e) => {
+            eprintln!("[alerts] {e}; server alerts stay off");
+            return;
+        }
+    };
     let alerts = ServerAlerts::new(
         store,
         hub.clone(),
-        Policy::from_env(),
+        policy,
         Limits::default(),
         Timing::default(),
     );
@@ -621,12 +628,8 @@ impl ServerAlerts {
             (hook, client)
         };
         let outcome = match hook {
-            Some(hook) => {
-                // One client's dead host cannot hold every slot.
-                let _mine = client.acquire().await;
-                let _slot = self.slots.acquire().await;
-                Some(self.send(&hook, &event).await)
-            }
+            // One client's dead host cannot hold every slot.
+            Some(hook) => Some(self.send(&hook, &event, &client).await),
             None => None,
         };
         let mut st = self.lock();
@@ -647,13 +650,20 @@ impl ServerAlerts {
         }
     }
 
-    async fn send(&self, hook: &Hook, event: &StoredEvent) -> Delivery {
+    async fn send(&self, hook: &Hook, event: &StoredEvent, client: &Semaphore) -> Delivery {
         let outcome = match Target::parse(&hook.url, &self.policy) {
             Ok(target) => {
-                let secret = hook.secret.as_deref();
-                let policy = &self.policy;
-                let timing = &self.timing;
-                webhook::deliver(&target, policy, &event.body, &event.id, secret, timing).await
+                let slots = [client, self.slots.as_ref()];
+                webhook::deliver(
+                    &target,
+                    &self.policy,
+                    &event.body,
+                    &event.id,
+                    hook.secret.as_deref(),
+                    &self.timing,
+                    &slots,
+                )
+                .await
             }
             Err(error) => webhook::Outcome {
                 status: None,
@@ -854,6 +864,10 @@ impl ServerAlerts {
             .get("alert_id")
             .and_then(Value::as_str)
             .ok_or("alert_id is required")?;
+        // First: a stranger's URL must not cost a lookup, or answer anything about it.
+        if !self.lock().alerts.get(id).is_some_and(|a| a.owner == owner) {
+            return Err("No such alert".into());
+        }
         let condition: Option<Condition> = enum_arg(args, "condition")?;
         let trigger: Option<Trigger> = enum_arg(args, "trigger")?;
         let level = level_arg(args)?;
