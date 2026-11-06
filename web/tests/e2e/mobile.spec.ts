@@ -86,6 +86,36 @@ async function expectRealChart(page: Page): Promise<void> {
     .toBe(true);
 }
 
+/** Heights of the price pane and of the sub-panes, top down. */
+const paneHeights = (page: Page) =>
+  page.evaluate(() => {
+    const c = (
+      window as unknown as {
+        __chartgenTest: {
+          chart: () => {
+            getSize: (id: string) => { height: number } | null;
+            getIndicatorByPaneId: () => Map<string, unknown>;
+          };
+        };
+      }
+    ).__chartgenTest.chart();
+    const subs = [...c.getIndicatorByPaneId().keys()].filter((id) => id !== "candle_pane");
+    return {
+      candle: c.getSize("candle_pane")!.height,
+      subs: subs.map((id) => c.getSize(id)!.height),
+    };
+  });
+
+/** The price pane has at least `share` of the panes' height, and no sub-pane has vanished. */
+async function expectPriceShare(page: Page, share: number): Promise<void> {
+  await expect
+    .poll(async () => {
+      const { candle, subs } = await paneHeights(page);
+      return candle / (candle + subs.reduce((a, b) => a + b, 0)) >= share && subs.every((h) => h >= 30);
+    })
+    .toBe(true);
+}
+
 /** Nothing scrolls the page sideways, measured against the device's own width. */
 async function expectNoOverflow(page: Page): Promise<void> {
   const width = page.viewportSize()!.width;
@@ -258,6 +288,39 @@ for (const d of COMPACT) {
       await expectInView(page, "OK");
       await page.getByRole("button", { name: "Cancel" }).tap();
       await expect(dialog).toHaveCount(0);
+    });
+  });
+}
+
+for (const name of ["iPhone 13 landscape", "Pixel 7 landscape", "iPhone SE landscape"]) {
+  test.describe(name, () => {
+    test.use(device(name));
+
+    test("the price pane gets most of the height, and rotating keeps it right", async ({ page }) => {
+      await bootCompact(page);
+      await expectPriceShare(page, 0.6);
+      await shot(page, `${name.replaceAll(" ", "-")}-panes`);
+      const { width, height } = page.viewportSize()!;
+      const sideways = (await paneHeights(page)).subs;
+
+      // Upright the sub-panes grow back: to their usual heights, except on a
+      // phone so small that upright is a short screen too.
+      await page.setViewportSize({ width: height, height: width });
+      if (name === "iPhone SE landscape") {
+        await expect
+          .poll(async () => (await paneHeights(page)).subs.every((h, i) => h > sideways[i]!))
+          .toBe(true);
+        await expectPriceShare(page, 0.6);
+        // On a bigger screen its panes prove what they were asked to be.
+        await page.setViewportSize({ width: 800, height: 1000 });
+        await expect.poll(async () => (await paneHeights(page)).subs).toEqual([120, 120]);
+      } else {
+        await expect.poll(async () => (await paneHeights(page)).subs).toEqual([120, 120]);
+      }
+
+      await page.setViewportSize({ width, height });
+      await expect.poll(async () => (await paneHeights(page)).subs).toEqual(sideways);
+      await expectPriceShare(page, 0.6);
     });
   });
 }
@@ -502,10 +565,12 @@ test.describe("touch on a phone", () => {
       else if (body.includes('"generate_chart"') && !/"bars":2\b|"end_time"/.test(body)) loads.push(body);
     });
 
+    const natural = (await paneHeights(page)).subs;
     const { width, height } = page.viewportSize()!;
     for (const size of [{ width: height, height: width }, { width, height }]) {
       await page.setViewportSize(size);
       await expectRealChart(page);
+      await expectPriceShare(page, size.width > size.height ? 0.6 : 0.4);
       await expectNoOverflow(page);
       await expect(symbol).toBeVisible();
       expect(await footerProblems(page)).toEqual([]);
@@ -513,6 +578,7 @@ test.describe("touch on a phone", () => {
       expect(await drawings(page)).toBe(1);
     }
     expect(loads).toEqual([]);
+    await expect.poll(async () => (await paneHeights(page)).subs).toEqual(natural);
     // Upright again, the time zone is back.
     await expect(page.getByTestId("tz-select")).toBeAttached();
     await expect(page.getByTestId("tz-select")).not.toHaveCSS("display", "none");
@@ -564,6 +630,10 @@ test.describe("a mouse window", () => {
   for (const width of [360, 400, 600]) {
     test(`resized to ${width} px keeps a real chart, and comes back unchanged`, async ({ page }) => {
       await gotoApp(page);
+      const desktop = await paneHeights(page);
+      // Short as well as narrow: the panes shrink, and come back below.
+      await page.setViewportSize({ width, height: 380 });
+      await expectPriceShare(page, 0.6);
       await page.setViewportSize({ width, height: 700 });
       await expectRealChart(page);
       await expectNoOverflow(page);
@@ -575,8 +645,18 @@ test.describe("a mouse window", () => {
       await page.setViewportSize({ width: 1280, height: 720 });
       await expect(page.getByRole("complementary", { name: "Sidebar" })).toBeVisible();
       await expect(page.getByRole("navigation", { name: "Panels" })).toHaveCount(0);
+      await expect.poll(() => paneHeights(page)).toEqual(desktop);
     });
   }
+
+  test("leaving a short compact window restores the panes straight away", async ({ page }) => {
+    await gotoApp(page);
+    const desktop = await paneHeights(page);
+    await page.setViewportSize({ width: 600, height: 380 });
+    await expectPriceShare(page, 0.6);
+    await page.setViewportSize({ width: 1280, height: 720 });
+    await expect.poll(() => paneHeights(page)).toEqual(desktop);
+  });
 
   test("keeps the desktop layout at desktop sizes", async ({ page }) => {
     await page.setViewportSize({ width: 1280, height: 720 });

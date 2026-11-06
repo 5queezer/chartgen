@@ -783,6 +783,9 @@ In the compact layout:
 - **Dialogs** fit the screen and shrink to what the on-screen keyboard leaves
   visible, with their buttons always in view. They also stay clear of notches
   and the home indicator.
+- **On a short screen** the price pane takes about two thirds of the height, and
+  the indicator panes shrink to fit. They return to their usual height when you
+  rotate back. Rotating also resets any pane height you dragged by hand.
 - **The range buttons** scroll sideways when they do not fit. On a phone held
   sideways the time zone select is hidden, so hold it upright to change the time
   zone.
