@@ -1229,6 +1229,70 @@ fn test_failed_gc_at_startup_still_restores_clients() {
     let _ = std::fs::remove_dir_all(db.parent().unwrap());
 }
 
+/// A failed GC write must not cost a new registration its row either.
+#[cfg(feature = "scripting")]
+#[test]
+fn test_failed_gc_at_registration_still_saves_the_client() {
+    let db = store_path("gc-fails-register");
+    seed_tokened_clients(&db, 1, 0);
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    conn.execute_batch(
+        "INSERT INTO oauth_clients (client_id, redirect_uris, created_at)
+             VALUES ('unused', '[]', 0);
+         CREATE TRIGGER no_delete BEFORE DELETE ON oauth_clients
+             BEGIN SELECT RAISE(ABORT, 'read-only'); END;",
+    )
+    .unwrap();
+    drop(conn);
+
+    let port = free_port();
+    let srv = spawn_server_on(port, None, &db, false);
+    let client = register_external(port);
+    drop(srv);
+
+    let port = free_port();
+    let srv = spawn_server_on(port, None, &db, false);
+    assert_eq!(authorize(port, &client, EXTERNAL_REDIRECT).0, 307);
+    drop(srv);
+    let _ = std::fs::remove_dir_all(db.parent().unwrap());
+}
+
+/// `/register` refuses script schemes, but a store can hold older rows, and
+/// `/authorize` must not emit one as a `Location` or issue a code for it.
+#[cfg(feature = "scripting")]
+#[test]
+fn test_authorize_refuses_a_stored_script_redirect_uri() {
+    let db = store_path("stored-script-uri");
+    let uris = [
+        "javascript:alert(1)",
+        "JAVASCRIPT:alert(1)",
+        "data:text/html,x",
+        "vbscript:x",
+    ];
+    chartgen::scripting::persistence::Store::open(&db).unwrap();
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    for (i, uri) in uris.iter().enumerate() {
+        conn.execute(
+            "INSERT INTO oauth_clients (client_id, redirect_uris, created_at, last_token_at)
+             VALUES (?1, ?2, 0, 0)",
+            rusqlite::params![format!("old{i}"), serde_json::json!([uri]).to_string()],
+        )
+        .unwrap();
+    }
+    drop(conn);
+
+    let port = free_port();
+    let srv = spawn_server_on(port, None, &db, false);
+    for (i, uri) in uris.iter().enumerate() {
+        let (st, head, body) = authorize(port, &format!("old{i}"), uri);
+        assert_eq!(st, 400, "{uri}: {head}");
+        assert!(!head.contains("location:"), "{uri}: {head}");
+        assert!(body.contains("invalid_request"), "{uri}: {body}");
+    }
+    drop(srv);
+    let _ = std::fs::remove_dir_all(db.parent().unwrap());
+}
+
 /// A client registered before `last_token_at` existed, or whose use could not
 /// be recorded, looks unused. If it owns a script it must not be collected.
 #[cfg(feature = "scripting")]

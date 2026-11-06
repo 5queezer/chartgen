@@ -386,10 +386,10 @@ async fn oauth_register(
                     eprintln!("[OAuth] could not delete an evicted client: {e}");
                 }
             }
-            let saved = store
-                .gc_oauth_clients(UNUSED_CLIENT_TTL.as_secs() as i64)
-                .and_then(|_| store.save_oauth_client(&id, &uris));
-            if let Err(e) = saved {
+            if let Err(e) = store.gc_oauth_clients(UNUSED_CLIENT_TTL.as_secs() as i64) {
+                eprintln!("[OAuth] could not collect unused clients: {e}");
+            }
+            if let Err(e) = store.save_oauth_client(&id, &uris) {
                 eprintln!("[OAuth] could not persist a client registration: {e}");
             }
         })
@@ -502,6 +502,14 @@ async fn oauth_authorize(
         )
             .into_response();
     };
+    // `/register` refuses these, but the store can hold rows from before it did.
+    if FORBIDDEN_REDIRECT_SCHEMES.contains(&redirect.scheme()) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "invalid_request", "error_description": "redirect_uri scheme is not allowed"})),
+        )
+            .into_response();
+    }
 
     // Auto-approve: generate auth code
     let code = Uuid::new_v4().to_string();
