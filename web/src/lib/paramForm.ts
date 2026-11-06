@@ -16,6 +16,8 @@ export interface ParamField {
   max?: number;
   /** `step` attribute for the number input. */
   step: number | "any";
+  /** A string param's allowed values: the form shows a select. */
+  options?: readonly string[];
 }
 
 /** Form state: numbers and strings as text, booleans as booleans. */
@@ -58,6 +60,7 @@ export function buildFields(
       min: spec.min ?? (kind === "integer" ? 1 : undefined),
       max: spec.max ?? (kind === "integer" ? Number.MAX_SAFE_INTEGER : undefined),
       step: kind === "integer" ? 1 : "any",
+      ...(spec.enum ? { options: spec.enum } : {}),
     };
   });
 }

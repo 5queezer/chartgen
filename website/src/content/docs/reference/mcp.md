@@ -349,6 +349,31 @@ Three additional channels round out the payload so the full set of
   (WaveTrend/RSI divergences in Cipher B, for example). Each endpoint
   carries both `x` (bar index) and `t` (unix seconds, or `null` for
   synthetic sample data), mirroring the signal shape, plus `dashed`.
+- **`labels`** — text labels on bars (`candlestick_patterns`): `x`, `t`, `y`
+  (the bar's high or low), `above`, `text`, `key`, `name`, `bias`, `color` and
+  `tooltip`. `tentative: true` marks one on the forming bar, which can change or
+  vanish until the bar closes.
+- **`patterns`** — detected shapes (`chart_patterns`, the swing of `auto_fib`):
+  `key`, `name`, `bias`, `status` (`forming`, `confirmed` or `failed`), `strokes`
+  (two-point segments as in `divlines`), `label`, `tooltip`, and optional `target`,
+  `invalidation` and `confirmed_t`.
+- **`levels`** — `lines[line]` is flat at `y` from bar `x` on (`auto_fib`).
+- **`events`** — what an alert can wait for: `key`, `name` and `t`, the bar time of
+  the newest occurrence on a closed bar, or `null`.
+
+`patterns`, `levels` and `events` are re-detected as a whole
+([ADR-0046](/chartgen/decisions/0046-pattern-detection/)), so every response holds all
+of them, tails included: an index before the response's first bar is negative, and `t`
+still names the bar. Take them from your newest response and ignore those on older
+history pages. A new swing moves a level on every bar, so rewrite that plot from `levels`
+instead of merging its values. These indicators raise `warmup` to their lookback.
+`signals` only hold detections on the newest closed bar, for `indicator_signal` alerts
+(see the [conditions](#alerts-require---trade) that needs).
+As the 600-bar window slides, `chart_patterns`' older patterns can change, and an event's `t`
+can fall back to an older bar or to `null` and return. To tell a new detection, take a `t`
+newer than any you saw and no older than the newest bar of your previous response.
+`format=summary` and `png` take no warmup, so `chart_patterns` and `auto_fib` read only the
+`bars` you ask for: ask for 600 to match the web chart.
 
 An indicator that plots past the last bar also carries a **`future`**
 block ([ADR-0033](/chartgen/decisions/0033-indicator-projection-past-last-bar/)).
@@ -1030,6 +1055,14 @@ Alert conditions:
 
 Signal labels come from a fixed registry in `src/trading/signals.rs` — see
 the [trading guide](/chartgen/guides/trading/#signal-labels) for the full list.
+`candlestick_patterns` and `chart_patterns` use their own: a pattern's key such as `hammer`, or
+`double_top_confirmed`, on the newest closed bar.
+
+`indicator_signal` is not checked when set. It only fires if the indicator is in the server's
+`--panels` under that exact name, since the engine computes nothing else; any other name is
+accepted and never fires. The engine's window starts empty and holds at most 200 bars, with no
+history loaded, so an indicator needing more bars stays silent until they have closed, and
+`chart_patterns` reads those 200 rather than the web chart's 600.
 
 ### Push notifications (require `--trade`)
 
