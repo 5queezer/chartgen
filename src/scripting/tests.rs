@@ -1151,6 +1151,12 @@ fn a_file_with_push_devices_upgrades_and_keeps_them() {
     assert_eq!(devices[0].endpoint, "https://x/1");
     assert_eq!(store.waiting_rows(None).unwrap().devices, 1);
     assert!(store.server_alert_owners().unwrap().contains("old-client"));
+    // Slot 5 came on top of them: what it adds is there too.
+    store.set_oauth_client_name("old-client", "Claude").unwrap();
+    assert_eq!(
+        store.oauth_clients().unwrap()[0].client_name.as_deref(),
+        Some("Claude")
+    );
 }
 
 /// What counts as a user's activity for their server alerts: a login or a token.
