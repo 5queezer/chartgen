@@ -962,7 +962,10 @@ test.describe("drawing modifiers", () => {
         chart.applyNewData(chart.getDataList());
       });
 
-    /** Moves drawing `n` off its committed record; only a `refresh` puts it back. */
+    /**
+     * Moves drawing `n` off its committed record; only a `refresh` puts it back. Returns its
+     * first value read in the same step, as a load landing later would rightly put it back.
+     */
     const knockOff = (page: Page, n: number) =>
       page.evaluate((i) => {
         const w = window as unknown as TestWindow & {
@@ -972,12 +975,12 @@ test.describe("drawing modifiers", () => {
         const { id } = w.__chartgenDrawings()[i]!;
         const points = chart.getOverlayById(id).points.map((p) => ({ ...p, value: 1 }));
         chart.overrideOverlay({ id, points });
+        return chart.getOverlayById(id).points[0]!.value;
       }, n);
 
     /** A tick still reaches drawing `n`, and places it from its stored record. */
     const expectFollowsTicks = async (page: Page, n: number) => {
-      await knockOff(page, n);
-      expect((await overlays(page))[n]!.points[0]!.value).toBe(1);
+      expect(await knockOff(page, n)).toBe(1);
       await tick(page);
       const live = (await overlays(page))[n]!.points;
       const stored = (await storedRecords(page))![n]!.points;
@@ -1789,13 +1792,21 @@ test.describe("drawing modifiers", () => {
     bootedApp: page,
     context,
   }) => {
-    const stored = () => page.evaluate(() => localStorage.getItem("chartgen.alerts.list"));
+    // Once widened, the line can sit within the sample price's wobble at some hours and fire.
+    // An alert that repeats stays active when it does, and when it last fired is no verdict.
+    const stored = () =>
+      page.evaluate(() =>
+        (JSON.parse(localStorage.getItem("chartgen.alerts.list")!) as { lastTriggeredAt?: number }[]).map(
+          ({ lastTriggeredAt: _, ...alert }) => alert,
+        ),
+      );
 
     await showInterval(page, "15m");
     await drawLineWithinAnHour(page);
     await page.getByRole("tab", { name: /^Alerts/ }).click();
     await page.keyboard.press("Alt+KeyA");
     await dialog(page).getByLabel("Source").selectOption({ label: "Extended line" });
+    await dialog(page).getByLabel("Trigger").selectOption("every");
     await dialog(page).getByRole("button", { name: "Create" }).click();
     await expect(dialog(page)).toHaveCount(0);
     await bindAlertsTo(page, "1h");
@@ -1806,7 +1817,7 @@ test.describe("drawing modifiers", () => {
     const statusIn = (p: Page) => alertRows(p).first().locator("[data-role=status]");
     await expect(statusIn(page)).toHaveText("inactive: line is vertical");
     const list = await stored();
-    const [alert] = JSON.parse(list!) as { active: boolean; note?: string }[];
+    const [alert] = list as { active?: boolean; note?: string }[];
     expect(alert!.active).toBe(true);
     expect(alert).not.toHaveProperty("note");
 
@@ -1818,7 +1829,7 @@ test.describe("drawing modifiers", () => {
     await expect(statusIn(other)).toHaveText("inactive: open BTCUSDT 1h");
     await page.waitForTimeout(1500);
     await expect(statusIn(page)).toHaveText("inactive: line is vertical");
-    expect(await stored()).toBe(list);
+    expect(await stored()).toEqual(list);
 
     // The other window leads from here on, so that its chart is the one evaluated.
     await reloadApp(page);
@@ -1832,13 +1843,13 @@ test.describe("drawing modifiers", () => {
     await expect(statusIn(page)).toHaveText("inactive: open BTCUSDT 1h");
     await page.waitForTimeout(1500);
     await expect(statusIn(page)).toHaveText("inactive: open BTCUSDT 1h");
-    expect(await stored()).toBe(list);
+    expect(await stored()).toEqual(list);
 
     // The line widened here: the other window's reason goes, through the storage event.
     await dragPoint(page, 0, 1, -260, 150, []);
     await expect(statusIn(other)).not.toContainText("inactive");
     await expect(statusIn(page)).toHaveText("inactive: open BTCUSDT 1h");
-    expect(await stored()).toBe(list);
+    expect(await stored()).toEqual(list);
 
     // Undone on the interval it runs on: this window's reason is back, with no alert changed.
     await showInterval(page, "1h");
@@ -1846,7 +1857,7 @@ test.describe("drawing modifiers", () => {
     await page.keyboard.press("Control+z");
     await expect(statusIn(page)).toHaveText("inactive: line is vertical");
     await expect(statusIn(other)).toHaveText("inactive: line is vertical");
-    expect(await stored()).toBe(list);
+    expect(await stored()).toEqual(list);
   });
 
   test("blur or a hidden tab while a modifier is held restores it", async ({ bootedApp: page }) => {
