@@ -316,29 +316,43 @@ export function createServerAlertPoll(session: McpSession, enabled: Accessor<boo
   createEffect(() => {
     if (enabled()) setServerAlertSession(session);
   });
+  // Outlives the leadership, so that switching tabs back and forth does not each ask.
+  let lastAsked = 0;
   createEffect(() => {
     if (!enabled() || !leader()) return;
     let timer: ReturnType<typeof setTimeout> | undefined;
     let stopped = false;
     let asking = false;
-    let lastAsked = 0;
+    const every = () => (serverAlertsEnabled() ? SERVER_ALERT_POLL_MS : SERVER_ALERT_RECHECK_MS);
     const ask = async () => {
       if (asking) return;
-      asking = true;
       clearTimeout(timer);
+      // Without Web Locks a hidden tab leads as well, and nobody is looking at it.
+      if (document.visibilityState === "hidden") {
+        timer = setTimeout(() => void ask(), every());
+        return;
+      }
+      asking = true;
       lastAsked = Date.now();
       const on = await refreshServerAlerts();
       asking = false;
       if (stopped) return;
       if (on) deliver(takeNewFires().map((a) => ({ id: a.id, text: serverAlertText(a) })));
-      timer = setTimeout(() => void ask(), on ? SERVER_ALERT_POLL_MS : SERVER_ALERT_RECHECK_MS);
+      timer = setTimeout(() => void ask(), every());
     };
+    /** Asked recently enough that a focus or a new leadership need not ask again? */
+    const askedLately = () =>
+      Date.now() - lastAsked <
+      (serverAlertsEnabled() ? SERVER_ALERT_POLL_MS : SERVER_ALERT_FOCUS_GAP_MS);
     const onFocus = () => {
-      if (!serverAlertsEnabled() && Date.now() - lastAsked >= SERVER_ALERT_FOCUS_GAP_MS) void ask();
+      if (!serverAlertsEnabled() && !askedLately()) void ask();
     };
     window.addEventListener("focus", onFocus);
     // Untracked: what it asks changes the store it reads, which must not restart this.
-    untrack(() => void ask());
+    untrack(() => {
+      if (askedLately()) timer = setTimeout(() => void ask(), every() - (Date.now() - lastAsked));
+      else void ask();
+    });
     onCleanup(() => {
       stopped = true;
       clearTimeout(timer);

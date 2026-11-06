@@ -121,6 +121,50 @@ test("the leading tab polls every few seconds, not on every answer", async ({ pa
   expect(asked).toBeGreaterThanOrEqual(2);
 });
 
+test("switching tabs back and forth does not add polls", async ({ page }) => {
+  let asked = 0;
+  page.on("request", (r) => {
+    if (r.postData()?.includes('"list_server_alerts"')) asked++;
+  });
+  await gotoApp(page);
+  await expect.poll(() => asked).toBeGreaterThan(0);
+  const before = asked;
+  for (const state of ["hidden", "visible", "hidden", "visible", "hidden", "visible"]) {
+    await page.evaluate((s) => {
+      Object.defineProperty(document, "visibilityState", { configurable: true, get: () => s });
+      document.dispatchEvent(new Event("visibilitychange"));
+    }, state);
+    await page.waitForTimeout(150);
+  }
+  // Under a second of switching: at most the one a 5 s poll could be due anyway.
+  expect(asked - before).toBeLessThanOrEqual(1);
+});
+
+test("without Web Locks a hidden tab does not poll, and a visible one does again", async ({ page }) => {
+  await page.addInitScript(() => {
+    delete (Navigator.prototype as unknown as { locks?: unknown }).locks;
+  });
+  let asked = 0;
+  page.on("request", (r) => {
+    if (r.postData()?.includes('"list_server_alerts"')) asked++;
+  });
+  await gotoApp(page);
+  await expect.poll(() => asked).toBeGreaterThan(0);
+  const setState = (s: string) =>
+    page.evaluate((state) => {
+      Object.defineProperty(document, "visibilityState", { configurable: true, get: () => state });
+      document.dispatchEvent(new Event("visibilitychange"));
+    }, s);
+  await setState("hidden");
+  // One may already be on its way when the tab goes hidden.
+  await page.waitForTimeout(500);
+  const hidden = asked;
+  await page.waitForTimeout(6_500);
+  expect(asked).toBe(hidden);
+  await setState("visible");
+  await expect.poll(() => asked, { timeout: 10_000 }).toBeGreaterThan(hidden);
+});
+
 test("with two tabs open a fire reaches the webhook once and one tab reports it", async ({ bootedApp: page, context }) => {
   const other = await context.newPage();
   const asked = { page: 0, other: 0 };

@@ -63,6 +63,21 @@ test("a focus asks again only after a pause", async ({ page }) => {
   expect(counts.tools).toBe(1);
 });
 
+test("switching tabs back and forth does not ask again each time", async ({ page }) => {
+  const counts = count(page);
+  await gotoApp(page);
+  await expect.poll(() => counts.tools).toBe(1);
+  for (const state of ["hidden", "visible", "hidden", "visible", "hidden", "visible"]) {
+    await page.evaluate((s) => {
+      Object.defineProperty(document, "visibilityState", { configurable: true, get: () => s });
+      document.dispatchEvent(new Event("visibilitychange"));
+    }, state);
+    await page.waitForTimeout(150);
+  }
+  await page.waitForTimeout(500);
+  expect(counts).toEqual({ list: 0, tools: 1 });
+});
+
 test("what an earlier server shared does not outlive it being off", async ({ bootedApp: page }) => {
   await page.evaluate(() =>
     localStorage.setItem(
