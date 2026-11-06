@@ -237,6 +237,71 @@ test.describe("drawing modifiers", () => {
     expect((await overlays(page))[1]!.mode).toBe("normal");
   });
 
+  test("two quick clicks at different places place both points", async ({ bootedApp: page }) => {
+    const box = (await host(page).boundingBox())!;
+    const quickClick = async (at: At) => {
+      await page.mouse.move(box.x + at.x, box.y + at.y);
+      await page.mouse.down();
+      await page.mouse.up();
+    };
+
+    await page.getByRole("button", { name: "Trend line" }).click();
+    await quickClick({ x: 300, y: 130 });
+    await page.waitForTimeout(100);
+    await quickClick({ x: 560, y: 260 });
+    await expect.poll(async () => (await overlays(page)).length).toBe(1);
+    const { pixels } = (await overlays(page))[0]!;
+    expect(Math.abs(pixels[1]!.x! - 560)).toBeLessThan(10);
+    expect(Math.abs(pixels[1]!.y! - 260)).toBeLessThan(1);
+    await expect(page.getByRole("button", { name: "Trend line" })).toHaveAttribute("aria-pressed", "false");
+    expect((await storedRecords(page))![0]!.points).toHaveLength(2);
+
+    // One step of undo removes it: the extra click makes no extra commit.
+    await page.keyboard.press("Control+z");
+    await expect.poll(async () => (await overlays(page)).length).toBe(0);
+    await page.keyboard.press("Control+z");
+    await expect.poll(async () => (await overlays(page)).length).toBe(0);
+
+    // A quick press that moves is a pan, not a point.
+    await page.getByRole("button", { name: "Trend line" }).click();
+    await quickClick({ x: 300, y: 130 });
+    await page.mouse.move(box.x + 700, box.y + 200);
+    await page.mouse.down();
+    await page.mouse.move(box.x + 760, box.y + 240, { steps: 4 });
+    await page.mouse.up();
+    await page.waitForTimeout(100);
+    expect(await overlays(page)).toHaveLength(0);
+    await expect(page.getByRole("button", { name: "Trend line" })).toHaveAttribute("aria-pressed", "true");
+    await page.keyboard.press("Escape");
+
+    // Three points, all quick.
+    await pickTool(page, "Parallel channel");
+    await quickClick({ x: 300, y: 130 });
+    await page.waitForTimeout(50);
+    await quickClick({ x: 560, y: 180 });
+    await page.waitForTimeout(50);
+    await quickClick({ x: 400, y: 260 });
+    await expect.poll(async () => (await overlays(page)).length).toBe(1);
+    expect((await overlays(page))[0]!.points).toHaveLength(3);
+    expect(Math.abs((await overlays(page))[0]!.pixels[2]!.y! - 260)).toBeLessThan(1);
+  });
+
+  test("a quick Shift click snaps its point like a slow one", async ({ bootedApp: page }) => {
+    const box = (await host(page).boundingBox())!;
+    await page.getByRole("button", { name: "Trend line" }).click();
+    await page.mouse.move(box.x + 300, box.y + 130);
+    await page.mouse.down();
+    await page.mouse.up();
+    await page.keyboard.down("Shift");
+    await page.mouse.move(box.x + 560, box.y + 150);
+    await page.mouse.down();
+    await page.mouse.up();
+    await page.keyboard.up("Shift");
+    await expect.poll(async () => (await overlays(page)).length).toBe(1);
+    const { points } = (await overlays(page))[0]!;
+    expect(points[1]!.value).toBe(points[0]!.value);
+  });
+
   test("Ctrl pressed mid-drawing applies to the moving point", async ({ bootedApp: page }) => {
     await page.getByRole("button", { name: "Trend line" }).click();
     await clickAt(page, { x: 300, y: 165 });

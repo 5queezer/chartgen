@@ -1222,6 +1222,42 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
     for (const type of pinEvents) document.removeEventListener(type, pinToStartPane, true);
   });
 
+  // klinecharts drops a second click within 500 ms of the first press unless it is within
+  // 5 px of it, a double click (`_mouseUpHandler`), and the next point of a drawing with it.
+  // That also ends its click timer, so the same click sent again counts as a first one.
+  let armedPress: { step: number; x: number; y: number; target: EventTarget } | null = null;
+  let replaying = false;
+  const armedStep = () =>
+    armedId === null
+      ? undefined
+      : (props.chart?.getOverlayById(armedId) as unknown as { currentStep: number } | null)?.currentStep;
+  const noteArmedPress = (e: MouseEvent) => {
+    if (replaying) return;
+    const step = armedStep();
+    armedPress =
+      step !== undefined && e.button === 0 && e.target instanceof Node && props.chart?.getDom()?.contains(e.target)
+        ? { step, x: e.clientX, y: e.clientY, target: e.target }
+        : null;
+  };
+  // Bubble, so after klinecharts has had the release.
+  const replayDroppedClick = (e: MouseEvent) => {
+    const press = armedPress;
+    if (replaying || !press || e.button !== 0) return;
+    armedPress = null;
+    // The step moved on (the click counted), or a press moved this far is a pan.
+    if (armedStep() !== press.step || Math.abs(e.clientX - press.x) + Math.abs(e.clientY - press.y) >= 5) return;
+    replaying = true;
+    press.target.dispatchEvent(new MouseEvent("mousedown", e));
+    (e.target ?? press.target).dispatchEvent(new MouseEvent("mouseup", e));
+    replaying = false;
+  };
+  window.addEventListener("mousedown", noteArmedPress, true);
+  window.addEventListener("mouseup", replayDroppedClick);
+  onCleanup(() => {
+    window.removeEventListener("mousedown", noteArmedPress, true);
+    window.removeEventListener("mouseup", replayDroppedClick);
+  });
+
   const onKey = (e: KeyboardEvent) => {
     if (e.defaultPrevented) return;
     // Our own menu has role=menu, so it is handled before the guard.
