@@ -699,7 +699,9 @@ compared with (a value, or a plot).
   you changed its parameters: create a new alert for the new ones).
 
 Only price alerts are drawn as lines on the chart. With several chartgen tabs
-open, one evaluates the alerts and the Alerts tab of the others says so.
+open, one evaluates the alerts and the Alerts tab of the others says so. An
+indicator or sloped drawing alert depends on that tab's chart: while it shows
+something else, the others read *inactive: open BTCUSDT 1h in the other tab*.
 
 ### Data Window
 

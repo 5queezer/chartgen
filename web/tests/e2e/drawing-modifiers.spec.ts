@@ -1746,6 +1746,45 @@ test.describe("drawing modifiers", () => {
     });
   });
 
+  test("a window does not read a line alert as running while the leading one cannot evaluate it", async ({
+    bootedApp: page,
+    context,
+  }) => {
+    await showInterval(page, "1h");
+    await page.getByRole("button", { name: "Trend line" }).click();
+    await clickAt(page, { x: 300, y: 165 });
+    await clickAt(page, { x: 560, y: 260 });
+    await expect.poll(async () => (await overlays(page)).length).toBe(1);
+    await page.getByRole("tab", { name: /^Alerts/ }).click();
+    await page.keyboard.press("Alt+KeyA");
+    await dialog(page).getByLabel("Source").selectOption({ label: "Trend line" });
+    await dialog(page).getByRole("button", { name: "Create" }).click();
+    await expect(dialog(page)).toHaveCount(0);
+
+    const other = await context.newPage();
+    await gotoApp(other);
+    await other.getByRole("tab", { name: /^Alerts/ }).click();
+    await showInterval(other, "1h");
+    const statusIn = (p: Page) => alertRows(p).first().locator("[data-role=status]");
+    await expect(other.locator("[data-role=alerts-elsewhere]")).toBeVisible();
+    await expect(statusIn(other)).toHaveText("active");
+
+    // The leading window goes elsewhere: nothing evaluates the line now, whatever this one shows.
+    await showInterval(page, "15m");
+    await expect(statusIn(other)).toHaveText("inactive: open BTCUSDT 1h in the other tab");
+    await expect(statusIn(page)).toHaveText("inactive: open BTCUSDT 1h");
+
+    await showInterval(page, "1h");
+    await expect(statusIn(other)).toHaveText("active");
+
+    // It stays that way when this window gets the lead: then its own chart is what counts.
+    await showInterval(page, "15m");
+    await expect(statusIn(other)).toHaveText("inactive: open BTCUSDT 1h in the other tab");
+    await page.close();
+    await expect(other.locator("[data-role=alerts-elsewhere]")).toHaveCount(0);
+    await expect(statusIn(other)).toHaveText("active");
+  });
+
   test("two windows on different intervals each say what holds for them, and write nothing", async ({
     bootedApp: page,
     context,
@@ -1781,11 +1820,16 @@ test.describe("drawing modifiers", () => {
     await expect(statusIn(page)).toHaveText("inactive: line is vertical");
     expect(await stored()).toBe(list);
 
+    // The other window leads from here on, so that its chart is the one evaluated.
+    await reloadApp(page);
+    await page.getByRole("tab", { name: /^Alerts/ }).click();
+    await expect(page.locator("[data-role=alerts-elsewhere]")).toBeVisible();
+
     // Each keeps its own through more changes on the other side.
-    await showInterval(page, "15m");
-    await expect(statusIn(page)).toHaveText("inactive: open BTCUSDT 1h");
     await showInterval(other, "1h");
     await expect(statusIn(other)).toHaveText("inactive: line is vertical");
+    await showInterval(page, "15m");
+    await expect(statusIn(page)).toHaveText("inactive: open BTCUSDT 1h");
     await page.waitForTimeout(1500);
     await expect(statusIn(page)).toHaveText("inactive: open BTCUSDT 1h");
     expect(await stored()).toBe(list);
