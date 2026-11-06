@@ -5,6 +5,8 @@
 // the chart pages bars in and out, so an index is meaningless across
 // loads, while a timestamp maps onto any timeframe.
 
+import { createSignal } from "solid-js";
+
 import { isColor } from "../lib/color";
 
 export const DRAWING_NAMES = [
@@ -412,6 +414,18 @@ export function loadDrawings(symbol: string, touchIndex = true): DrawingRecord[]
     return [];
   }
 }
+
+const [drawingsSaved, setDrawingsSaved] = createSignal<{ symbol: string; pane: number } | null>(
+  null,
+  { equals: false },
+);
+/**
+ * The last save in this page. Drawings belong to the symbol, so another chart of
+ * the grid on it reloads them (ADR-0043); a stale copy would overwrite the save.
+ */
+export { drawingsSaved };
+export const announceDrawings = (symbol: string, pane: number): void =>
+  void setDrawingsSaved({ symbol, pane });
 
 /** Persist a symbol's drawings. Returns false (after warning) if they could not be saved. */
 export function saveDrawings(

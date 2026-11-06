@@ -46,7 +46,7 @@ const SCRIPTING_CHARTGEN_PORT = CHARTGEN_PORT + 1000;
 const SCRIPTING_WEB_PORT = WEB_PORT + 1000;
 const SCRIPTING_DB = join(tmpdir(), `chartgen-e2e-${SCRIPTING_CHARTGEN_PORT}.db`);
 // Specs that need the scripting server.
-const SCRIPTING_SPECS = /script-editor-on\.spec\.ts$/;
+const SCRIPTING_SPECS = /script-editor-(on|grid)\.spec\.ts$/;
 // The whole suite runs with nothing configured. signin.spec.ts has servers of its
 // own with both providers on, against the fake of fixtures/fake-provider.mjs. Its
 // base URL is the Vite origin, as in production the app and the server share one.

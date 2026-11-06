@@ -100,7 +100,7 @@ keep running.
 
 Limits per user: 20 clients with live tokens and 20 tokens per client (past these the
 oldest are dropped), 20 pending codes, 20 sessions, 50 approved clients, 50
-[scripts](/chartgen/guides/scripted-indicators/), and 300 `tools/call` per minute (`429`
+[scripts](/chartgen/guides/scripted-indicators/), and 600 `tools/call` per minute (`429`
 with `Retry-After`). Login endpoints: 120 hits per minute per peer address, loopback
 exempt, and 2000 sign-ins in progress on the server (`429` page).
 

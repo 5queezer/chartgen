@@ -31,8 +31,10 @@ const MAX_LIVE_CLIENTS_PER_USER: usize = 20;
 const MAX_TOKENS_PER_CLIENT: usize = 20;
 const MAX_CODES_PER_USER: usize = 20;
 /// Tool calls one user can make per `LOGIN_WINDOW`: chart rendering and upstream
-/// quota are shared, and a free account is all it takes to ask for them.
-pub(super) const MAX_TOOL_CALLS_PER_USER: usize = 300;
+/// quota are shared, and a free account is all it takes to ask for them. A 4-chart
+/// grid polling everything makes about 145 a minute per visible window (ADR-0043), so
+/// this leaves room for four.
+pub(super) const MAX_TOOL_CALLS_PER_USER: usize = 600;
 const PROVIDER_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_NAME_CHARS: usize = 100;
 

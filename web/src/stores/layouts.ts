@@ -6,6 +6,10 @@
 //
 // Drawings are not part of a layout: they stay global per symbol, as in
 // TradingView with "sync drawings to all layouts".
+//
+// A multi-chart layout (ADR-0043) keeps its first chart where a layout has
+// always kept it, and the others under `panes`. A layout without a grid is a
+// single chart, and one with a grid opens as its first chart in an older build.
 
 import { batch, createSignal } from "solid-js";
 
@@ -14,14 +18,17 @@ import {
   isTimeZoneChoice,
   type TimeZoneChoice,
 } from "../lib/timezone";
+import { compareStoreOf, parseCompare } from "./compare";
 import {
-  compareRestore,
-  compareSymbols,
-  parseCompare,
-  setCompareSymbols,
-} from "./compare";
+  activePane,
+  grid,
+  paneCount,
+  parseGrid,
+  setActivePane,
+  setGrid,
+  type GridId,
+} from "./grid";
 import {
-  activeIndicators,
   DEFAULT_SET,
   indicatorName,
   indicatorParams,
@@ -31,25 +38,16 @@ import {
   isActiveIndicator,
   normalizeInstances,
   sanitizeStyle,
-  setActiveIndicators,
+  indicatorStoreOf,
   type ActiveIndicator,
 } from "./indicators";
 import {
   CHART_TYPES,
-  chartType,
+  chartStoreOf,
   DEFAULT_CHART_TYPE,
   DEFAULT_SCALE_MODE,
   normalizeSymbol,
   SCALE_MODES,
-  scaleMode,
-  invertScale,
-  lockRatio,
-  setChartType,
-  setInvertScale,
-  setLockRatio,
-  setScaleMode,
-  setSymbol,
-  setTimeframe,
   setTimeZone,
   symbol,
   timeframe,
@@ -87,7 +85,14 @@ export interface LayoutState {
    * something the user set, so it never makes a layout dirty.
    */
   compareRestore?: ScaleMode;
+  /** Only present when more than one chart shows (ADR-0043). */
+  grid?: GridId;
+  /** The charts after the first, exactly as many as `grid` has. */
+  panes?: PaneState[];
 }
+
+/** One chart of a layout. The time zone is the layout's, for all its charts. */
+export type PaneState = Omit<LayoutState, "timeZone" | "grid" | "panes">;
 
 export interface Layout {
   id: string;
@@ -153,8 +158,8 @@ function sanitizeEntry(e: ActiveIndicator): ActiveIndicator {
   ]) as ActiveIndicator;
 }
 
-/** Validate a stored/imported state; null if a required field is malformed. */
-export function parseState(x: unknown): LayoutState | null {
+/** Validate one chart of a stored/imported state; null if a required field is malformed. */
+function parsePane(x: unknown): PaneState | null {
   if (!isPlainObject(x)) return null;
   const sym = normalizeSymbol(x.symbol);
   if (
@@ -182,13 +187,34 @@ export function parseState(x: unknown): LayoutState | null {
     scaleMode: x.scaleMode as ScaleMode,
     ...(x.invertScale === true ? { invertScale: true } : {}),
     ...(x.lockRatio === true ? { lockRatio: true } : {}),
-    // Layouts saved before time zones existed keep the current zone.
-    timeZone: isTimeZoneChoice(x.timeZone) ? x.timeZone : timeZone(),
     indicators,
     compare: parseCompare(x.compare),
     ...((SCALE_MODES as readonly unknown[]).includes(x.compareRestore)
       ? { compareRestore: x.compareRestore as ScaleMode }
       : {}),
+  };
+}
+
+/** Validate a stored/imported state; null if a required field is malformed. */
+export function parseState(x: unknown): LayoutState | null {
+  const first = parsePane(x);
+  if (first === null || !isPlainObject(x)) return null;
+  const g = parseGrid(x.grid);
+  const stored = Array.isArray(x.panes) ? x.panes : [];
+  return {
+    ...first,
+    // Layouts saved before time zones existed keep the current zone.
+    timeZone: isTimeZoneChoice(x.timeZone) ? x.timeZone : timeZone(),
+    // No grid is a single chart; a damaged chart of a grid opens as a copy of the first.
+    ...(g === "1"
+      ? {}
+      : {
+          grid: g,
+          panes: Array.from(
+            { length: paneCount(g) - 1 },
+            (_, i) => parsePane(stored[i]) ?? first,
+          ),
+        }),
   };
 }
 
@@ -300,18 +326,38 @@ export function normalizeIndicators(
   });
 }
 
-function comparable(s: LayoutState, defaults: ParamDefaults): string {
-  return JSON.stringify([
+function comparablePane(s: PaneState, defaults: ParamDefaults): unknown[] {
+  return [
     s.symbol,
     s.timeframe,
     s.chartType,
     s.scaleMode,
     !!s.invertScale,
     !!s.lockRatio,
-    s.timeZone,
     normalizeIndicators(s.indicators, defaults),
     s.compare,
+  ];
+}
+
+function comparable(s: LayoutState, defaults: ParamDefaults): string {
+  return JSON.stringify([
+    comparablePane(s, defaults),
+    s.timeZone,
+    s.grid ?? "1",
+    (s.panes ?? []).map((p) => comparablePane(p, defaults)),
   ]);
+}
+
+/** True when two charts differ in anything a layout holds for a chart. */
+export function isPaneDirty(
+  saved: PaneState,
+  live: PaneState,
+  defaults: ParamDefaults = {},
+): boolean {
+  return (
+    JSON.stringify(comparablePane(saved, defaults)) !==
+    JSON.stringify(comparablePane(live, defaults))
+  );
 }
 
 /** True when `live` differs from `saved` in anything a layout holds . */
@@ -412,20 +458,36 @@ function newId(): string {
     : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
 }
 
+/** One chart as the other stores hold it right now. */
+function livePane(pane: number): PaneState {
+  const chart = chartStoreOf(pane);
+  const compare = compareStoreOf(pane);
+  const restoreTo = compare.compareRestore();
+  return {
+    symbol: chart.symbol(),
+    timeframe: chart.timeframe(),
+    chartType: chart.chartType(),
+    scaleMode: chart.scaleMode(),
+    ...(chart.invertScale() ? { invertScale: true } : {}),
+    ...(chart.lockRatio() ? { lockRatio: true } : {}),
+    indicators: indicatorStoreOf(pane).activeIndicators(),
+    compare: compare.compareSymbols(),
+    ...(restoreTo ? { compareRestore: restoreTo } : {}),
+  };
+}
+
 /** The live state as the other stores hold it right now. */
 function liveState(): LayoutState {
-  const restoreTo = compareRestore();
+  const g = grid();
   return {
-    symbol: symbol(),
-    timeframe: timeframe(),
-    chartType: chartType(),
-    scaleMode: scaleMode(),
-    ...(invertScale() ? { invertScale: true } : {}),
-    ...(lockRatio() ? { lockRatio: true } : {}),
+    ...livePane(0),
     timeZone: timeZone(),
-    indicators: activeIndicators(),
-    compare: compareSymbols(),
-    ...(restoreTo ? { compareRestore: restoreTo } : {}),
+    ...(g === "1"
+      ? {}
+      : {
+          grid: g,
+          panes: Array.from({ length: paneCount(g) - 1 }, (_, i) => livePane(i + 1)),
+        }),
   };
 }
 
@@ -535,18 +597,69 @@ function update(
   return true;
 }
 
+/** Write one chart through the existing stores' setters. */
+function applyPane(pane: number, state: PaneState): void {
+  const chart = chartStoreOf(pane);
+  chart.setSymbol(state.symbol);
+  chart.setTimeframe(state.timeframe);
+  chart.setChartType(state.chartType);
+  chart.setScaleMode(state.scaleMode);
+  chart.setInvertScale(!!state.invertScale);
+  chart.setLockRatio(!!state.lockRatio);
+  indicatorStoreOf(pane).setActiveIndicators(state.indicators);
+  compareStoreOf(pane).setCompareSymbols(state.compare, state.compareRestore);
+}
+
 /** Write a state through the existing stores' setters. */
 function applyState(state: LayoutState): void {
   batch(() => {
-    setSymbol(state.symbol);
-    setTimeframe(state.timeframe);
-    setChartType(state.chartType);
-    setScaleMode(state.scaleMode);
-    setInvertScale(!!state.invertScale);
-    setLockRatio(!!state.lockRatio);
     setTimeZone(state.timeZone);
-    setActiveIndicators(state.indicators);
-    setCompareSymbols(state.compare, state.compareRestore);
+    applyPane(0, state);
+    state.panes?.forEach((p, i) => applyPane(i + 1, p));
+    setGrid(state.grid ?? "1");
+    setActivePane(0);
+  });
+}
+
+/** What a chart holds that its grid slot started with, to tell whether it was touched. */
+const seedOf = (pane: number): PaneState | null =>
+  parsePane(chartStoreOf(pane).read("seed"));
+
+/**
+ * The charts `next` would remove that the active layout cannot bring back: ones
+ * differing from their saved chart or, with none saved, from how they started.
+ */
+export function panesLostBy(next: GridId): number[] {
+  const saved = activeLayout().state.panes ?? [];
+  const lost: number[] = [];
+  for (let n = paneCount(next); n < paneCount(grid()); n++) {
+    const base = saved[n - 1] ?? seedOf(n);
+    if (!base || isPaneDirty(base, livePane(n), paramDefaults())) lost.push(n);
+  }
+  return lost;
+}
+
+/**
+ * Change the grid. A new chart is its saved chart in the active layout, else
+ * starts from the active chart's symbol, interval, type and indicators.
+ */
+export function changeGrid(next: GridId): void {
+  batch(() => {
+    const saved = activeLayout().state.panes ?? [];
+    const from = livePane(activePane());
+    for (let n = paneCount(grid()); n < paneCount(next); n++) {
+      const start: PaneState = saved[n - 1] ?? {
+        symbol: from.symbol,
+        timeframe: from.timeframe,
+        chartType: from.chartType,
+        scaleMode: DEFAULT_SCALE_MODE,
+        indicators: from.indicators,
+        compare: [],
+      };
+      applyPane(n, start);
+      chartStoreOf(n).persist("seed", start);
+    }
+    setGrid(next);
   });
 }
 

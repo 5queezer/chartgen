@@ -3615,7 +3615,7 @@ fn test_signin_tool_calls_are_limited_per_user() {
         let headers = [JSON_POST[0], JSON_POST[1], auth.as_str()];
         http(p, "POST", "/mcp", &headers, call)
     };
-    for i in 0..300 {
+    for i in 0..600 {
         let (st, _, body) = tool_status(&token);
         assert_eq!(st, 200, "call {i}: {body}");
     }
@@ -3638,7 +3638,7 @@ fn test_tool_calls_are_not_limited_without_signin() {
     let auth = format!("Authorization: Bearer {token}");
     let headers = [JSON_POST[0], JSON_POST[1], auth.as_str()];
     let call = r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"list_indicators","arguments":{}}}"#;
-    for i in 0..310 {
+    for i in 0..610 {
         let (st, _, body) = http(p, "POST", "/mcp", &headers, call);
         assert_eq!(st, 200, "call {i}: {body}");
     }

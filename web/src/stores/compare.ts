@@ -10,14 +10,12 @@
 import { createSignal } from "solid-js";
 
 import { MAX_COMPARE } from "../lib/compare";
+import { activePane } from "./grid";
 import {
+  chartStoreOf,
   DEFAULT_SCALE_MODE,
   isScaleMode,
   normalizeSymbol,
-  persist,
-  read,
-  scaleMode,
-  setScaleMode,
   type ScaleMode,
 } from "./layout";
 
@@ -52,93 +50,125 @@ const firstFree = (used: readonly number[]): number => {
   return slot;
 };
 
-const initialSymbols = parseCompare(read("compare"));
-const initialSlots = parseSlots(read("compareSlots"), initialSymbols.length);
-const storedRestore = read("compareRestore");
+/** Compare symbols of one chart of the grid (ADR-0043). */
+function createCompareStore(pane: number) {
+  const { read, persist, scaleMode, setScaleMode } = chartStoreOf(pane);
 
-const [compareEntries, setEntries] = createSignal<CompareEntry[]>(
-  initialSymbols.map((symbol, i) => ({ symbol, slot: initialSlots[i]! })),
-);
-// Scale mode to return to when the last compare symbol goes; null while none.
-let restore: ScaleMode | null =
-  initialSymbols.length === 0
-    ? null
-    : isScaleMode(storedRestore)
-      ? storedRestore
-      : DEFAULT_SCALE_MODE;
+  const initialSymbols = parseCompare(read("compare"));
+  const initialSlots = parseSlots(read("compareSlots"), initialSymbols.length);
+  const storedRestore = read("compareRestore");
 
-export { compareEntries };
+  const [compareEntries, setEntries] = createSignal<CompareEntry[]>(
+    initialSymbols.map((symbol, i) => ({ symbol, slot: initialSlots[i]! })),
+  );
+  // Scale mode to return to when the last compare symbol goes; null while none.
+  let restore: ScaleMode | null =
+    initialSymbols.length === 0
+      ? null
+      : isScaleMode(storedRestore)
+        ? storedRestore
+        : DEFAULT_SCALE_MODE;
 
-export const compareSymbols = (): string[] =>
-  compareEntries().map((e) => e.symbol);
-
-/** Scale mode the last compare symbol will return to; null while there are none. */
-export const compareRestore = (): ScaleMode | null => restore;
-
-function commit(list: CompareEntry[]): void {
-  setEntries(list);
-  persist("compare", list.map((e) => e.symbol));
-  persist("compareSlots", list.map((e) => e.slot));
-  persist("compareRestore", restore);
-}
-
-/**
- * Add a compare symbol; false if it is invalid, already there, the same as
- * `main` or the cap is reached. The first one switches the axis to percent.
- */
-export function addCompare(next: string, main: string): boolean {
-  const symbol = normalizeSymbol(next);
-  const list = compareEntries();
-  if (
-    symbol === null ||
-    symbol === main ||
-    list.some((e) => e.symbol === symbol) ||
-    list.length >= MAX_COMPARE
-  ) {
-    return false;
+  function commit(list: CompareEntry[]): void {
+    setEntries(list);
+    persist("compare", list.map((e) => e.symbol));
+    persist("compareSlots", list.map((e) => e.slot));
+    persist("compareRestore", restore);
   }
-  if (list.length === 0) {
-    restore = scaleMode();
-    setScaleMode("percentage");
-  }
-  commit([...list, { symbol, slot: firstFree(list.map((e) => e.slot)) }]);
-  return true;
+
+  return {
+    compareEntries,
+
+    compareSymbols: (): string[] => compareEntries().map((e) => e.symbol),
+
+    /** Scale mode the last compare symbol will return to; null while there are none. */
+    compareRestore: (): ScaleMode | null => restore,
+
+    /**
+     * Add a compare symbol; false if it is invalid, already there, the same as
+     * `main` or the cap is reached. The first one switches the axis to percent.
+     */
+    addCompare(next: string, main: string): boolean {
+      const symbol = normalizeSymbol(next);
+      const list = compareEntries();
+      if (
+        symbol === null ||
+        symbol === main ||
+        list.some((e) => e.symbol === symbol) ||
+        list.length >= MAX_COMPARE
+      ) {
+        return false;
+      }
+      if (list.length === 0) {
+        restore = scaleMode();
+        setScaleMode("percentage");
+      }
+      commit([...list, { symbol, slot: firstFree(list.map((e) => e.slot)) }]);
+      return true;
+    },
+
+    /**
+     * Remove a compare symbol. The last one restores the previous scale mode,
+     * but only while the axis is still in percent: a mode the user picked since
+     * stays.
+     */
+    removeCompare(symbol: string): void {
+      const list = compareEntries();
+      if (!list.some((e) => e.symbol === symbol)) return;
+      const rest = list.filter((e) => e.symbol !== symbol);
+      if (rest.length === 0) {
+        if (restore !== null && scaleMode() === "percentage") setScaleMode(restore);
+        restore = null;
+      }
+      commit(rest);
+    },
+
+    /**
+     * Replace the list without touching the scale mode: a layout switch sets the
+     * mode itself (a layout stores it with its compare symbols). Symbols already
+     * shown keep their color slot. `restoreTo` is the layout's scale mode to return
+     * to when the last compare symbol goes (ADR-0040); layouts saved without one
+     * return to the default.
+     */
+    setCompareSymbols(next: unknown, restoreTo?: ScaleMode): void {
+      const symbols = parseCompare(next);
+      const kept = compareEntries().filter((e) => symbols.includes(e.symbol));
+      const used = kept.map((e) => e.slot);
+      const list = symbols.map((symbol) => {
+        const had = kept.find((e) => e.symbol === symbol);
+        if (had) return had;
+        const slot = firstFree(used);
+        used.push(slot);
+        return { symbol, slot };
+      });
+      restore = list.length === 0 ? null : (restoreTo ?? DEFAULT_SCALE_MODE);
+      commit(list);
+    },
+  };
 }
 
-/**
- * Remove a compare symbol. The last one restores the previous scale mode,
- * but only while the axis is still in percent: a mode the user picked since
- * stays.
- */
-export function removeCompare(symbol: string): void {
-  const list = compareEntries();
-  if (!list.some((e) => e.symbol === symbol)) return;
-  const rest = list.filter((e) => e.symbol !== symbol);
-  if (rest.length === 0) {
-    if (restore !== null && scaleMode() === "percentage") setScaleMode(restore);
-    restore = null;
+export type CompareStore = ReturnType<typeof createCompareStore>;
+
+const stores = new Map<number, CompareStore>();
+
+export function compareStoreOf(pane: number): CompareStore {
+  let store = stores.get(pane);
+  if (!store) {
+    store = createCompareStore(pane);
+    stores.set(pane, store);
   }
-  commit(rest);
+  return store;
 }
 
-/**
- * Replace the list without touching the scale mode: a layout switch sets the
- * mode itself (a layout stores it with its compare symbols). Symbols already
- * shown keep their color slot. `restoreTo` is the layout's scale mode to return
- * to when the last compare symbol goes (ADR-0040); layouts saved without one
- * return to the default.
- */
-export function setCompareSymbols(next: unknown, restoreTo?: ScaleMode): void {
-  const symbols = parseCompare(next);
-  const kept = compareEntries().filter((e) => symbols.includes(e.symbol));
-  const used = kept.map((e) => e.slot);
-  const list = symbols.map((symbol) => {
-    const had = kept.find((e) => e.symbol === symbol);
-    if (had) return had;
-    const slot = firstFree(used);
-    used.push(slot);
-    return { symbol, slot };
-  });
-  restore = list.length === 0 ? null : (restoreTo ?? DEFAULT_SCALE_MODE);
-  commit(list);
-}
+compareStoreOf(0);
+const active = (): CompareStore => compareStoreOf(activePane());
+
+// The active chart's compare symbols.
+export const compareEntries = (): CompareEntry[] => active().compareEntries();
+export const compareSymbols = (): string[] => active().compareSymbols();
+export const compareRestore = (): ScaleMode | null => active().compareRestore();
+export const addCompare = (next: string, main: string): boolean =>
+  active().addCompare(next, main);
+export const removeCompare = (symbol: string): void => active().removeCompare(symbol);
+export const setCompareSymbols = (next: unknown, restoreTo?: ScaleMode): void =>
+  active().setCompareSymbols(next, restoreTo);

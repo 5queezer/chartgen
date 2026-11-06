@@ -184,8 +184,8 @@ buy no more alerts or watched pairs.
 | Pending codes | 20 | oldest dropped |
 | Browser sessions | 20 | oldest dropped |
 | Approved clients | 50 | oldest forgotten |
-| Tool calls | 300 per minute | `429` with `Retry-After` |
-| Chart subscriptions | 8 | refused, as before; now per user instead of per address |
+| Tool calls | 600 per minute | `429` with `Retry-After` |
+| Chart subscriptions | 32 | refused, as before; now per user instead of per address |
 
 The 20 client limit is what changes ADR-0036's lockout. A client with a live token is
 still never evicted, and liveness now comes from a user's token, so holding the table
@@ -199,10 +199,12 @@ as for `/register`), and 2000 sign-ins in progress on the whole server, then `42
 Anyone with a free GitHub or Google account can:
 
 - **Read everything public to a user:** charts, indicators, quotes and search.
-- **Spend shared resources within the limits.** 300 tool calls a minute is real
+- **Spend shared resources within the limits.** 600 tool calls a minute, which leaves
+  room for four visible windows of a polling 4-chart grid
+  ([ADR-0043](/chartgen/decisions/0043-multi-chart-grid/)), is real
   rendering work and upstream quota, and enough of them can put Binance or Yahoo into
   cooldown for everyone. Many accounts multiply it. There is no global call limit.
-- **Take all 64 chart subscriptions** with 8 accounts, which leaves nobody push until
+- **Take all 64 chart subscriptions** with 2 accounts, which leaves nobody push until
   they let go. The app falls back to polling.
 - **Fill the store slowly.** A user row per account, and with scripting on, 50 scripts
   per account.
