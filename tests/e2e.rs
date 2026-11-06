@@ -2721,6 +2721,8 @@ fn test_signin_third_party_client_needs_consent() {
     let head = page.head.to_ascii_lowercase();
     assert!(head.contains("frame-ancestors 'none'"), "{head}");
     assert!(head.contains("cache-control: no-store"), "{head}");
+    // `no-referrer` would make a browser send `Origin: null` with the form below.
+    assert!(head.contains("referrer-policy: same-origin"), "{head}");
 
     let (request, csrf) = consent_fields(&page.body);
     let form = "Content-Type: application/x-www-form-urlencoded";
@@ -2733,7 +2735,7 @@ fn test_signin_third_party_client_needs_consent() {
 
     // Refused: no token, a wrong one, another browser, another site. Each leaves the
     // request as it was, so the genuine answer below still works.
-    let refusals: [(String, Browser, &[&str]); 4] = [
+    let refusals: [(String, Browser, &[&str]); 5] = [
         (
             format!("request={request}&csrf=&decision=approve"),
             b.clone(),
@@ -2758,6 +2760,7 @@ fn test_signin_third_party_client_needs_consent() {
             b.clone(),
             &["Origin: https://evil.example"],
         ),
+        (approve.clone(), b.clone(), &["Origin: null"]),
     ];
     for (fields, mut who, extra) in refusals {
         let refused = post(&mut who, fields.clone(), extra);

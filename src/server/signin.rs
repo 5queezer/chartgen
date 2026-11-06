@@ -744,8 +744,9 @@ fn escape(text: &str) -> String {
 
 const PAGE_STYLE: &str = "body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;background:#131722;color:#d1d4dc;font:15px/1.5 system-ui,sans-serif;padding:16px;box-sizing:border-box}main{width:100%;max-width:26rem;background:#1e222d;border:1px solid #2a2e39;border-radius:10px;padding:24px;box-sizing:border-box}h1{font-size:20px;margin:0 0 12px}a.b,button{display:block;width:100%;box-sizing:border-box;margin-top:10px;padding:11px;border-radius:6px;border:1px solid #2a2e39;background:#2a2e39;color:#d1d4dc;font:inherit;text-align:center;text-decoration:none;cursor:pointer}a.b.p,button.p{background:#2962ff;border-color:#2962ff;color:#fff}.host{font-size:18px;font-weight:600;word-break:break-all;color:#fff}.m{color:#9598a1;font-size:13px;word-break:break-word}";
 
-/// A page of ours: no scripts, nothing framed, nothing cached, no referrer. There is
-/// no `form-action`, which browsers also apply to the redirect to the client.
+/// A page of ours: no scripts, nothing framed, nothing cached, no referrer to other
+/// sites. There is no `form-action`, which browsers also apply to the redirect to
+/// the client.
 fn page(status: StatusCode, title: &str, body: &str) -> Response {
     let html = format!(
         "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>{title} · chartgen</title><style>{PAGE_STYLE}</style></head><body><main><h1>{title}</h1>{body}</main></body></html>",
@@ -761,7 +762,9 @@ fn page(status: StatusCode, title: &str, body: &str) -> Response {
                 "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'",
             ),
             (header::X_FRAME_OPTIONS, "DENY"),
-            (header::REFERRER_POLICY, "no-referrer"),
+            // Not `no-referrer`: that makes a browser send `Origin: null` on the consent
+            // form, which `same_origin` rightly refuses.
+            (header::REFERRER_POLICY, "same-origin"),
             (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
         ],
         html,
