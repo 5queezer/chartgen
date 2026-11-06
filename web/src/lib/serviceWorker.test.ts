@@ -14,6 +14,7 @@ function loadWorker(windows: unknown[] = []) {
     addEventListener: (name: string, fn: Handler) => {
       handlers[name] = fn;
     },
+    skipWaiting: vi.fn(async () => {}),
     registration: { showNotification: vi.fn(async () => {}) },
     clients: {
       matchAll: vi.fn(async () => windows),
@@ -44,6 +45,12 @@ async function push(handlers: Record<string, Handler>, data: unknown): Promise<v
 
 describe("the service worker", () => {
   beforeEach(() => vi.restoreAllMocks());
+
+  it("takes over as soon as it is installed", () => {
+    const { self, handlers } = loadWorker();
+    handlers.install?.({});
+    expect(self.skipWaiting).toHaveBeenCalledTimes(1);
+  });
 
   it("does not intercept requests", () => {
     expect(loadWorker().handlers.fetch).toBeUndefined();

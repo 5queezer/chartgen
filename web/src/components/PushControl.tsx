@@ -40,7 +40,7 @@ export function PushControl(props: { onEnabled?: () => void }): JSX.Element {
         </Match>
         <Match when={pushDeviceState() === "off"}>
           <div class="flex items-center justify-between gap-2">
-            <p class={textClass}>Get alerts on this device with chartgen closed.</p>
+            <p class={textClass}>Get alerts made in this browser on this device, with chartgen closed.</p>
             <button
               type="button"
               class={buttonClass}
@@ -57,7 +57,9 @@ export function PushControl(props: { onEnabled?: () => void }): JSX.Element {
         </Match>
         <Match when={pushDeviceState() === "on"}>
           <div class="flex items-center justify-between gap-2">
-            <p class={textClass}>Notifications are on for this device.</p>
+            <p class={textClass}>
+              Notifications are on here, for alerts made in this browser.
+            </p>
             <button
               type="button"
               class={buttonClass}

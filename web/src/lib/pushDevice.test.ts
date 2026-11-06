@@ -82,4 +82,9 @@ describe("pushReport", () => {
     expect(pushReport(alert({ last_push_error: "HTTP 500" }), true, FIRED + 1000)).toBe("report");
     expect(pushReport(alert({ last_push_at: null }), true, FIRED + 3_600_001)).toBe("report");
   });
+
+  it("reports a fire first seen after the message's life, though the service took it", () => {
+    expect(pushReport(alert({}), true, FIRED + 3_600_000)).toBe("quiet");
+    expect(pushReport(alert({}), true, FIRED + 3_600_001)).toBe("report");
+  });
 });

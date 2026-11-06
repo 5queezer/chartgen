@@ -26,6 +26,10 @@ function notificationOf(fire) {
   };
 }
 
+// A fixed worker takes over at once, not when the last tab closes. With no fetch handler
+// that cannot mix versions of the app.
+self.addEventListener("install", () => self.skipWaiting());
+
 // Always shows something: a browser may end the subscription of a site whose pushes
 // show nothing. A tab that is open stays quiet about these fires instead (`pushReport`).
 self.addEventListener("push", (event) => {

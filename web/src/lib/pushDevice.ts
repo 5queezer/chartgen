@@ -53,14 +53,19 @@ export function bytesToBase64Url(bytes: ArrayBuffer | ArrayBufferView): string {
     .replace(/=+$/, "");
 }
 
-/** Longest a delivery waits on the server: past this no outcome is coming. */
-const DELIVERY_MAX_AGE_MS = 3_600_000;
+/**
+ * How long a push service keeps a message for a device that is off, and how long a
+ * delivery waits on the server (`TTL_SECS`, `EVENT_MAX_AGE_SECS`).
+ */
+const PUSH_MAX_AGE_MS = 3_600_000;
 
 /**
  * Who tells the user about a fire of `a`. An alert that notifies this device has one
  * voice, the service worker, which always shows its notification. So the tab says
- * nothing about it, whether it is open then or opened later. It only speaks up when the
- * push did not get through, and until the server knows, it waits rather than risk both.
+ * nothing about it, unless the push did not get through, and until the server knows, it
+ * waits rather than risk both. A service accepting a push is not the device getting it,
+ * and one that was off for longer than the message lives never will: a fire first seen
+ * that late is reported here, because a second report beats a silent alarm.
  */
 export function pushReport(
   a: ServerAlert,
@@ -69,9 +74,7 @@ export function pushReport(
 ): "report" | "quiet" | "wait" {
   if (!pushOnHere || !a.push) return "report";
   const fired = a.last_triggered_at;
-  if (fired === null) return "report";
-  if (a.last_push_at === null || a.last_push_at < fired) {
-    return now - fired > DELIVERY_MAX_AGE_MS ? "report" : "wait";
-  }
+  if (fired === null || now - fired > PUSH_MAX_AGE_MS) return "report";
+  if (a.last_push_at === null || a.last_push_at < fired) return "wait";
   return a.last_push_error === null ? "quiet" : "report";
 }
