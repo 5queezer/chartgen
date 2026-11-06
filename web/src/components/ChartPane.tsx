@@ -93,6 +93,15 @@ export function createChartPane(pane: number, deps: PaneDeps) {
     enabled: authReady() && !importPending(),
   }));
 
+  // The cache entry is shared with every chart on the same request (ADR-0043),
+  // so a new result only replaces this chart's series if this chart asked for it.
+  // Otherwise a refetch elsewhere would drop its paged history and its scroll.
+  let refetchAsked = false;
+  const refetch = (options?: { cancelRefetch?: boolean }) => {
+    refetchAsked = true;
+    return query.refetch(options);
+  };
+
   // The live feed owns the chart's data from each full load on: it polls
   // the tail and pages in history, and the chart renders its snapshots.
   const [live, setLive] = createSignal<LiveSnapshot | null>(null);
@@ -139,7 +148,9 @@ export function createChartPane(pane: number, deps: PaneDeps) {
   const feed = createLiveFeed({
     fetch: (request, { signal, ...args }) =>
       session.callGenerateChart({ ...request, ...args }, signal),
-    reload: () => query.refetch(),
+    // Joins a fetch in flight: charts on one request reloading together, after a
+    // sleep, would otherwise cancel each other's.
+    reload: () => refetch({ cancelRefetch: false }),
     // Server push over the SSE stream (ADR-0021); polling is the fallback.
     push: {
       subscribe: async (request, warmup) =>
@@ -183,9 +194,9 @@ export function createChartPane(pane: number, deps: PaneDeps) {
   // What gets adopted is read from the query cache entry of exactly the
   // current key, not from `query.data`: that can still be the previous
   // key's result (placeholder, or published a tick after the key changed).
-  // Each successful fetch stamps the entry with a new dataUpdatedAt, so a
-  // refetch of the same key (Retry, re-pick, the feed's own reload) is
-  // adopted even when the payload is equal, and switching back to a cached
+  // Each successful fetch stamps the entry with a new dataUpdatedAt, so this
+  // chart's own refetch of the same key (Retry, re-pick, the feed's own reload)
+  // is adopted even when the payload is equal, and switching back to a cached
   // key adopts that key's own data.
   const queryClient = useQueryClient();
   let feedKey = "";
@@ -208,11 +219,15 @@ export function createChartPane(pane: number, deps: PaneDeps) {
       if (json !== feedKey) {
         feedKey = json;
         adoptedAt = null;
+        refetchAsked = false;
         feed.suspend();
       }
       const state = queryClient.getQueryState<SeriesPayload, Error>(key);
+      if (state?.status === "error") refetchAsked = false;
       if (state?.data !== undefined) {
         if (state.dataUpdatedAt === adoptedAt) return;
+        if (adoptedAt !== null && adoptedAt !== -1 && !refetchAsked) return;
+        refetchAsked = false;
         adoptedAt = state.dataUpdatedAt;
         // A copy: the feed updates its series in place, the cache stays as loaded.
         feedTicker = request.ticker;
@@ -326,6 +341,7 @@ export function createChartPane(pane: number, deps: PaneDeps) {
     wireIndicators,
     plotStyles,
     query,
+    refetch,
     live,
     shown,
     pollStatus,
@@ -415,7 +431,7 @@ export function ChartPane(props: ChartPaneProps): JSX.Element {
                   : String(s.query.error)
               }
               previousSymbol={s.lastLoaded() === symbol() ? null : s.lastLoaded()}
-              onRetry={() => void s.query.refetch()}
+              onRetry={() => void s.refetch()}
               onBack={setSymbol}
             />
           </Show>

@@ -66,6 +66,27 @@ async function reloadGrid(page: Page, count: number): Promise<void> {
   await expectLoaded(page, count);
 }
 
+/** Drag a chart to older bars until it has paged in history. */
+async function pageBack(page: Page, n: number): Promise<number> {
+  const box = await paneCell(page, n).boundingBox();
+  if (!box) throw new Error(`pane ${n} not laid out`);
+  const y = box.y + box.height * 0.3;
+  const start = (await panes(page))[n]!.bars;
+  await expect
+    .poll(
+      async () => {
+        await page.mouse.move(box.x + 40, y);
+        await page.mouse.down();
+        await page.mouse.move(box.x + box.width * 0.8, y, { steps: 6 });
+        await page.mouse.up();
+        return (await panes(page))[n]!.bars;
+      },
+      { timeout: 20_000 },
+    )
+    .toBeGreaterThan(start);
+  return (await panes(page))[n]!.bars;
+}
+
 const row = (page: Page, sym: string) =>
   page.getByRole("table", { name: "Watchlist" }).locator(`[role=row][data-symbol="${sym}"]`);
 
@@ -201,6 +222,29 @@ test.describe("multi-chart grid", () => {
     await page.getByRole("button", { name: "4h", exact: true }).click();
     await expect.poll(async () => (await panes(page))[1]!.timeframe).toBe("4h");
     expect((await panes(page))[0]!.timeframe).toBe("1h");
+  });
+
+  test("charts on one request: a refetch only reloads the chart that asked", async ({ bootedApp: page }) => {
+    await chooseGrid(page, "2h");
+    await expectLoaded(page, 2);
+    const [start] = await panes(page);
+    const initial = start!.bars;
+    const first = await pageBack(page, 0);
+    const second = await pageBack(page, 1);
+    expect(first).toBeGreaterThan(initial);
+    expect(second).toBeGreaterThan(initial);
+
+    // Pressing the current interval reloads the active chart, here the second.
+    await expect(paneCell(page, 1)).toHaveAttribute("data-active", "");
+    await page.getByRole("button", { name: "1h", exact: true }).click();
+    await expect.poll(async () => (await panes(page))[1]!.bars).toBe(initial);
+    await page.waitForTimeout(500);
+    expect((await panes(page))[0]!.bars).toBe(first);
+
+    // It keeps working for the chart that was left alone.
+    await activate(page, 0);
+    await page.getByRole("button", { name: "1h", exact: true }).click();
+    await expect.poll(async () => (await panes(page))[0]!.bars).toBe(initial);
   });
 
   test("each chart registers its own indicators: geometry is kept by registered name", async ({

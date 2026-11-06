@@ -375,7 +375,7 @@ export function App(): JSX.Element {
         </h1>
         <Toolbar
           session={session}
-          onReselect={() => void view().query.refetch()}
+          onReselect={() => void view().refetch()}
           onScreenshot={screenshot}
           onCopyLink={() => void copyChartLink()}
           onResetChart={resetView}
