@@ -74,7 +74,7 @@ everyone else ([ADR-0027](/chartgen/decisions/0027-serve-web-app-same-origin/)).
 
 21 tools. The 12 trading tools require `--trade`; attempting to call them
 without it returns an error. With `CHARTGEN_SCRIPTING=1` the server also
-lists the 4 [scripted-indicator tools](#scripted-indicators-chartgen_scripting1),
+lists the 5 [scripted-indicator tools](#scripted-indicators-chartgen_scripting1),
 and with `CHARTGEN_SERVER_ALERTS=1` the 4
 [server alert tools](#server-alerts-chartgen_server_alerts1).
 

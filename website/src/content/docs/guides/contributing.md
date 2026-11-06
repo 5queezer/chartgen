@@ -21,6 +21,36 @@ npm run build        # what GitHub Pages runs
 The pre-commit hook enforces `cargo fmt`. Clippy is gate-keeped in CI with
 `-D warnings`. Never push with `--no-verify`.
 
+## Source layout
+
+```
+src/
+├── main.rs              CLI and mode dispatch
+├── lib.rs               library root
+├── data.rs              Bar, OhlcvData
+├── interval.rs          interval parsing (1m, 7m, 2W, ...)
+├── indicator.rs         Indicator trait, PanelResult, Line/Fill/HBar
+├── indicator_state.rs   streaming indicator state for the engine
+├── indicators/          registry (mod.rs), built-ins, Pine v5 helpers (ADR-0018)
+├── scripting/           Starlark runtime for scripted indicators
+├── fetch.rs             Yahoo Finance and Binance REST
+├── feed.rs              Binance WebSocket kline feed
+├── binance_gate.rs      shared limits for Binance calls
+├── search.rs            symbol search
+├── mtf.rs               multi-timeframe aggregation
+├── engine.rs            trading engine: live bars, indicators, alerts
+├── trading/             alerts, orders, positions, subscriptions, persistence
+├── server_alerts.rs     alerts that run on the server
+├── webhook.rs           webhook delivery for server alerts
+├── chart_push.rs        live chart push (subscribe_chart)
+├── renderer.rs          plotters PNG rendering
+├── mcp.rs               MCP JSON-RPC, shared by stdio and HTTP
+├── mcp_schema.rs        tools/list schemas
+└── server.rs            axum HTTP, OAuth 2.1 PKCE, SSE
+web/                     SolidJS web app
+website/                 this site
+```
+
 ## Keeping docs in sync
 
 `website/src/content/docs/reference/indicators.md` is **generated**. Do not
