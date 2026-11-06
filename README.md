@@ -207,9 +207,7 @@ docker run -p 9315:9315 -e CHARTGEN_BASE_URL=https://your-domain.com chartgen
 
 ### CI/CD
 
-Push to `master` → GitHub Actions runs check/test/clippy/fmt → on success, Coolify auto-deploys via its `/deploy` endpoint.
-
-Required secrets: `COOLIFY_API_TOKEN`, `COOLIFY_APP_UUID`, `COOLIFY_BASE_URL`.
+Push to `master` → GitHub Actions runs check/test/clippy/fmt → a systemd timer on the Coolify host (`scripts/autodeploy/`) sees the green SHA and calls Coolify's `/deploy` endpoint. No secrets live in GitHub.
 
 ## Testing
 

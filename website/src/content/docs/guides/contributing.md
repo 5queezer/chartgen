@@ -55,7 +55,8 @@ follows; human contributors should follow the same rules.
 | `build-release` | After the gates pass, builds the Linux x86_64 release artifact. |
 
 Separate workflows handle GitHub Pages (`docs.yml`, Node 22 after PR #60),
-Coolify auto-deploy (`deploy.yml`, runs on `workflow_run` success), and
+Coolify auto-deploy (pull-based, a systemd timer on the host; see
+[deployment](/chartgen/guides/deploy/)), and
 tagged releases (`release.yml`, publishes four platform artifacts on `v*`
 tags — see [deployment](/chartgen/guides/deploy/)).
 
