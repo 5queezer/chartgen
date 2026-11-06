@@ -492,6 +492,66 @@ test.describe("drawing modifiers", () => {
       await page.waitForTimeout(200);
     };
 
+    /** On the chart a double click only places the first point: the tool waits for the second. */
+    const firstPointOnly = async (page: Page, tool: string, at: At, then: At) => {
+      await page.waitForTimeout(1500);
+      await pickTool(page, tool);
+      await pressTwice(page, at);
+      expect(await overlays(page)).toHaveLength(0);
+      expect(await storedRecords(page)).toBeNull();
+      await expect(page.getByRole("button", { name: tool })).toHaveAttribute("aria-pressed", "true");
+      await page.waitForTimeout(700);
+      await clickAt(page, then);
+      await expect.poll(async () => (await overlays(page)).length).toBe(1);
+      const { pixels } = (await overlays(page))[0]!;
+      for (const [i, want] of [at, then].entries()) {
+        expect(Math.abs(pixels[i]!.x! - want.x)).toBeLessThan(10);
+        expect(Math.abs(pixels[i]!.y! - want.y)).toBeLessThan(1);
+      }
+      expect(await storedRecords(page)).toHaveLength(1);
+    };
+
+    for (const tool of ["Trend line", "Ray", "Extended line"]) {
+      test(`${tool} on the chart: the first point only, no zero-length line`, async ({ bootedApp: page }) => {
+        await firstPointOnly(page, tool, { x: 500, y: 200 }, { x: 700, y: 120 });
+      });
+    }
+
+    test("on a future bar: the first point only too", async ({ bootedApp: page }) => {
+      await firstPointOnly(page, "Trend line", { x: 1100, y: 200 }, { x: 900, y: 120 });
+      const lastBar = await page.evaluate(() =>
+        (window as unknown as TestWindow).__chartgenTest.chart().getDataList().at(-1)!.timestamp,
+      );
+      expect((await storedRecords(page))![0]!.points[0]!.timestamp).toBeGreaterThan(lastBar);
+    });
+
+    test("a third quick click, or a slow second one, on the first point places nothing", async ({
+      bootedApp: page,
+    }) => {
+      await page.waitForTimeout(1500);
+      const line = page.getByRole("button", { name: "Trend line" });
+      await line.click();
+      await pressTwice(page, { x: 500, y: 200 });
+      await clickAt(page, { x: 500, y: 200 });
+      await clickAt(page, { x: 500, y: 200 });
+      expect(await overlays(page)).toHaveLength(0);
+      await expect(line).toHaveAttribute("aria-pressed", "true");
+      await clickAt(page, { x: 700, y: 120 });
+      await expect.poll(async () => (await overlays(page)).length).toBe(1);
+      expect(Math.abs((await overlays(page))[0]!.pixels[1]!.x! - 700)).toBeLessThan(10);
+    });
+
+    test("a second point on the first one's bar at another price still makes a line", async ({
+      bootedApp: page,
+    }) => {
+      await page.getByRole("button", { name: "Trend line" }).click();
+      await clickAt(page, { x: 500, y: 200 });
+      await clickAt(page, { x: 500, y: 150 });
+      await expect.poll(async () => (await overlays(page)).length).toBe(1);
+      const { pixels } = (await overlays(page))[0]!;
+      expect(pixels[1]!.y!).toBeLessThan(pixels[0]!.y!);
+    });
+
     /** Off the pane klinecharts sends a double click nowhere: it must not become a second click. */
     for (const [name, spot] of [
       ["y-axis", (w: number, _h: number) => ({ x: w - 20, y: 200 })],
@@ -608,23 +668,24 @@ test.describe("drawing modifiers", () => {
       await shiftDraw(page, tool, { x: 300, y: 130 }, { x: 560, y: 150 });
       await shiftDraw(page, tool, { x: 640, y: 130 }, { x: 648, y: 300 });
       await shiftDraw(page, tool, { x: 900, y: 130 }, { x: 1020, y: 245 });
-      // Mouse back on the anchor: zero length, no NaN.
+      // Mouse back on the anchor: zero length, so no line. A NaN from the snap would not
+      // count as the same point, and would finish one.
       await shiftDraw(page, tool, { x: 1100, y: 130 }, { x: 1100, y: 130 });
-      await expect.poll(async () => (await overlays(page)).length).toBe(4);
+      await page.keyboard.press("Escape");
+      await expect.poll(async () => (await overlays(page)).length).toBe(3);
 
-      const [level, upright, diagonal, zero] = await overlays(page);
+      const [level, upright, diagonal] = await overlays(page);
       expect(level!.points[1]!.value).toBe(level!.points[0]!.value);
       expect(level!.points[1]!.timestamp).toBeGreaterThan(level!.points[0]!.timestamp!);
       expect(upright!.points[1]!.timestamp).toBe(upright!.points[0]!.timestamp);
       // A vertical's value follows the mouse.
       expect(Math.abs(upright!.pixels[1]!.y! - 300)).toBeLessThan(1);
       expectDiagonal(diagonal!.pixels);
-      expect(zero!.points[1]).toEqual(zero!.points[0]);
 
       // All stored, the vertical one still vertical after a restore.
-      await expect.poll(async () => (await storedRecords(page))?.length).toBe(4);
+      await expect.poll(async () => (await storedRecords(page))?.length).toBe(3);
       await reloadApp(page);
-      await expect.poll(async () => (await overlays(page)).length).toBe(4);
+      await expect.poll(async () => (await overlays(page)).length).toBe(3);
       const restored = (await overlays(page))[1]!.points;
       expect(restored[1]!.timestamp).toBe(restored[0]!.timestamp);
       expect(errors).toEqual([]);

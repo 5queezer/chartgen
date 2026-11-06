@@ -926,6 +926,23 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
     if (typeof id === "string") {
       armedId = id;
       setArmed(name);
+      // A double click finishes a drawing in klinecharts, its only use of forceComplete, and a
+      // click after it or a slow one can land on the first point. On a two-point line either
+      // gives a zero-length line, which no alert can ever use: the tool waits for a second
+      // point somewhere else instead.
+      if (SNAP_TOOLS.has(name)) {
+        const o = chart.getOverlayById(id) as unknown as {
+          points: { dataIndex?: number; value?: number }[];
+          forceComplete: () => void;
+          nextStep: () => void;
+        };
+        const nextStep = o.nextStep.bind(o);
+        o.forceComplete = () => {};
+        o.nextStep = () => {
+          const [a, b] = o.points;
+          if (!b || a?.dataIndex !== b.dataIndex || a?.value !== b.value) nextStep();
+        };
+      }
     }
   };
 
