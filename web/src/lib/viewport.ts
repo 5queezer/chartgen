@@ -12,7 +12,7 @@ export const BP_TINY = 640; // below: replay -> ⋯, no wordmark
 // The compact shell: phones and portrait tablets, or any very narrow window.
 // `html.compact` scopes its CSS (globals.css); `compact()` is for the little
 // behaviour that has to branch. Crossing it only moves the layout: nothing is
-// reloaded and the chart stays mounted.
+// reloaded and the chart stays mounted (ADR-0039).
 const COMPACT_QUERY =
   "(max-width: 767px), (pointer: coarse) and (max-width: 1023px), (pointer: coarse) and (max-height: 500px)";
 const media =

@@ -757,7 +757,8 @@ Layouts are stored in `localStorage` under `chartgen.layouts` (at most
 
 ## Phones and tablets
 
-The app runs in a phone's browser without a separate mobile site. Rotating or
+The app runs in a phone's browser without a separate mobile site
+([ADR-0039](/chartgen/decisions/0039-compact-layout/)). Rotating or
 resizing only moves the layout: the symbol, indicators and drawings stay, the
 chart is not reloaded and no data is fetched again.
 
