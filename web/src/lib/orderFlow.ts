@@ -2,6 +2,7 @@
 // cell shows, and what the summary tables read. The numbers come from the server;
 // this only derives what depends on the bars on screen.
 
+import { barCloseMs } from "./countdown";
 import type { FootprintBar, FootprintMeta, TpoMeta, TpoProfile } from "../types/responses";
 
 /** Narrower than this a bar has no room for cells: it draws as a candle. */
@@ -211,6 +212,28 @@ export function footprintMethod(meta: {
   if (meta.bars_without_data > 0) parts.push(`${meta.bars_without_data} bars without data`);
   if (meta.coarser_older) parts.push("older bars from coarser data");
   return parts.join(" · ");
+}
+
+/** Most bars one `get_footprint` returns, and the periods of a TPO load. */
+export const FOOTPRINT_MAX_TAIL = 200;
+export const TPO_MAX_TAIL = 10;
+
+/** Bars a footprint poll asks for `gap` seconds on: the last closed, the forming, and any missed. */
+export function footprintTail(gap: number, timeframe: string): number {
+  const close = barCloseMs(0, timeframe);
+  return close ? Math.ceil(gap / (close / 1000)) + 2 : 3;
+}
+
+const TPO_PERIOD_SECS: Record<string, number> = {
+  "1D": 86_400,
+  "2D": 2 * 86_400,
+  "1W": 7 * 86_400,
+  "1M": 31 * 86_400,
+};
+
+/** Periods a TPO poll asks for: the current one and the one before, whose end it may have missed. */
+export function tpoTail(gap: number, period: string): number {
+  return Math.ceil(gap / (TPO_PERIOD_SECS[period] ?? 86_400)) + 1;
 }
 
 /**

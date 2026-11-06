@@ -23,10 +23,14 @@ import { resolveColors } from "../lib/chartStyle";
 import { rememberLabels } from "../lib/indicatorNames";
 import {
   CELL_MIN_BAR,
+  FOOTPRINT_MAX_TAIL,
   footprintMethod,
+  footprintTail,
   mergeFootprintMeta,
   mergeTpoMeta,
+  TPO_MAX_TAIL,
   tpoMethod,
+  tpoTail,
   type CellMode,
 } from "../lib/orderFlow";
 import type { FootprintExtend, TpoExtend } from "../lib/orderFlowDraw";
@@ -62,7 +66,7 @@ import {
 } from "../stores/indicators";
 import { addRecent, chartStoreOf, chartStyleOf, theme, timeZone } from "../stores/layout";
 import { chartSettings } from "../stores/chartSettings";
-import { orderFlowSettings, tpoSessions, type TpoSettings } from "../stores/orderFlow";
+import { orderFlowSettings, tpoSessions } from "../stores/orderFlow";
 import type { GetTpoInput } from "../types/generated-input";
 import type {
   FootprintBar,
@@ -84,16 +88,6 @@ const FOOTPRINT_POLL_MS = 10_000;
 const TPO_POLL_MS = 30_000;
 
 const EMPTY_FLOW = { items: new Map(), meta: null, status: "loading", message: null } as const;
-
-/** Most bars one `get_footprint` returns, and periods of a TPO load. */
-const FOOTPRINT_MAX_TAIL = 200;
-const TPO_MAX_TAIL = 10;
-const TPO_PERIOD_SECS: Record<TpoSettings["period"], number> = {
-  "1D": 86_400,
-  "2D": 2 * 86_400,
-  "1W": 7 * 86_400,
-  "1M": 31 * 86_400,
-};
 
 const decimalsOf = (tick: number | undefined) =>
   tick ? Math.min(8, Math.max(0, Math.ceil(-Math.log10(tick)))) : 2;
@@ -405,11 +399,7 @@ export function createChartPane(pane: number, deps: PaneDeps) {
     doc: replay.liveDoc,
     onChange: setFootprints,
     mergeMeta: mergeFootprintMeta,
-    // The last closed bar and the forming one, and any it missed.
-    tailSize: (gap) => {
-      const close = barCloseMs(0, untrack(timeframe));
-      return close ? Math.ceil(gap / (close / 1000)) + 2 : 3;
-    },
+    tailSize: (gap) => footprintTail(gap, untrack(timeframe)),
     maxTail: FOOTPRINT_MAX_TAIL,
     fetch: async ({ tail, endTime, meta: load }, signal) => {
       const f = untrack(orderFlowSettings).footprint;
@@ -440,9 +430,7 @@ export function createChartPane(pane: number, deps: PaneDeps) {
     doc: replay.liveDoc,
     onChange: setProfiles,
     mergeMeta: mergeTpoMeta,
-    // The current period and the one before, whose last block may have changed since.
-    tailSize: (gap) =>
-      Math.ceil(gap / TPO_PERIOD_SECS[untrack(orderFlowSettings).tpo.period]) + 1,
+    tailSize: (gap) => tpoTail(gap, untrack(orderFlowSettings).tpo.period),
     maxTail: TPO_MAX_TAIL,
     fetch: async ({ tail, endTime, meta: load }, signal) => {
       const t = untrack(orderFlowSettings).tpo;

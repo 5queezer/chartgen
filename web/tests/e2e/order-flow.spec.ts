@@ -378,8 +378,6 @@ test.describe("TPO", () => {
     await expect(status(page)).toContainText(/row [\d.]+ auto/);
     await expect.poll(async () => (await painterExtend(page, TPO))?.count ?? 0).toBeGreaterThan(3);
     expect(calls[0]).toMatchObject({ period: "1D", block: "30m", periods: 10, value_area: 70, ib_blocks: 2 });
-    // A poll asks for the period before too: its last block may have changed.
-    await expect.poll(() => calls.filter((c) => c.periods === 2).length, { timeout: 40_000 }).toBeGreaterThan(0);
     await expect.poll(() => paintedLike(page, POC)).toBeGreaterThan(30);
     await page.waitForTimeout(500);
     await page.screenshot({ path: testInfo.outputPath("tpo.png") });

@@ -6,6 +6,7 @@ import {
   firstAtOrAfter,
   footprintMethod,
   footprintSummary,
+  footprintTail,
   gradientIndex,
   mergeFootprintMeta,
   mergeTpoMeta,
@@ -17,6 +18,7 @@ import {
   tpoHue,
   tpoMethod,
   tpoSummary,
+  tpoTail,
   volumeCandleWidth,
 } from "./orderFlow";
 import type { FootprintBar, FootprintMeta, TpoMeta, TpoProfile } from "../types/responses";
@@ -311,6 +313,29 @@ describe("what a poll keeps of its load", () => {
     const got = mergeTpoMeta(tpo, { ...tpo, row_size: 10, row_auto: false, row_widened: true });
     expect(got.row_size).toBe(5);
     expect(got.row_widened).toBe(true);
+  });
+});
+
+describe("how much a poll asks for", () => {
+  it("is the last closed bar and the forming one, when it is on time", () => {
+    expect(footprintTail(10, "1m")).toBe(3);
+    expect(footprintTail(10, "1h")).toBe(3);
+  });
+
+  it("adds the bars of a gap", () => {
+    expect(footprintTail(20 * 60, "1m")).toBe(22);
+    expect(footprintTail(3 * 3_600, "1h")).toBe(5);
+  });
+
+  it("stays at 3 for an interval it cannot read", () => {
+    expect(footprintTail(99_999, "nonsense")).toBe(3);
+  });
+
+  it("is two periods for a TPO, whose last one may have ended since", () => {
+    expect(tpoTail(30, "1D")).toBe(2);
+    expect(tpoTail(30, "1M")).toBe(2);
+    expect(tpoTail(3 * 86_400, "1D")).toBe(4);
+    expect(tpoTail(3 * 86_400, "1W")).toBe(2);
   });
 });
 
