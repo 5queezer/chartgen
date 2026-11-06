@@ -845,7 +845,8 @@ mouse. Their actions are elsewhere on touch:
 
 Most targets are at least 40 px. These are smaller, because they sit on the
 chart or inside a row: the legend buttons (32 px), the `%`, `log`, `inv` and
-`auto` buttons (32 by 28 px), the indicator chip buttons (28 px) and the arrow
+`auto` buttons (32 by 28 px), the indicator chip buttons (28 px), a watchlist row's
+buttons (20 px) and the arrow
 on a drawing tool group (20 px; holding the tool's button opens the same list).
 
 This layout has been tested in Chromium's device emulation only (iPhone 13,

@@ -262,7 +262,22 @@ for (const d of COMPACT) {
         expect(box.y + box.height).toBeLessThanOrEqual(page.viewportSize()!.height);
         // A sheet lies over the chart: it never resizes it.
         expect(await page.locator(".chart-host").boundingBox()).toEqual(before);
-        if (name === "Watchlist") await shot(page, `${d.shot}-sheet`);
+        if (name === "Watchlist") {
+          await shot(page, `${d.shot}-sheet`);
+          // No button in the row's middle, and none overlapping another.
+          const hit = await page.getByRole("row", { name: /ETHUSDT/ }).evaluate((row) => {
+            const r = row.getBoundingClientRect();
+            const at = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+            const buttons = [...row.querySelectorAll("button")].map((b) => b.getBoundingClientRect());
+            return {
+              middle: at?.closest("button")?.getAttribute("aria-label") ?? null,
+              overlaps: buttons.some((a, i) =>
+                buttons.some((b, j) => i < j && a.left < b.right && b.left < a.right),
+              ),
+            };
+          });
+          expect(hit).toEqual({ middle: null, overlaps: false });
+        }
         await page.getByRole("button", { name: "Close panel" }).tap();
         await expect(sheet).toHaveCount(0);
       }
@@ -654,6 +669,7 @@ test.describe("touch on a phone", () => {
   test("picking a symbol in the watchlist returns to the chart", async ({ page }) => {
     await bootCompact(page);
     await dock(page, "Watchlist").tap();
+    // In the middle of the row, which must not be its Remove button.
     await page.getByRole("row", { name: /ETHUSDT/ }).tap();
     await expect(page.getByRole("button", { name: "Symbol: ETHUSDT. Open symbol search" })).toBeVisible();
     await expect(page.getByRole("complementary", { name: "Sidebar" })).toHaveCount(0);

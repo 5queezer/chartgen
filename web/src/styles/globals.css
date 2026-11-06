@@ -789,6 +789,13 @@ body {
   overscroll-behavior: contain;
 }
 
+/* A row's buttons sit at the symbol cell's right edge. Stretched across a full-width
+ * sheet that is the middle of the row, where Remove would take a tap meant for the row:
+ * the cell fits its symbol, and the spare width goes between the buttons and the numbers. */
+.compact .wl-table {
+  grid-template-columns: auto minmax(0, 1fr) auto auto;
+}
+
 /* The sheet has its own close button. */
 .compact .sidebar [aria-label^="Collapse"] {
   display: none;
