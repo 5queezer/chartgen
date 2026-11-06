@@ -85,6 +85,18 @@ const valueAtY = (page: Page, y: number) =>
 const nearest = (values: number[], to: number) =>
   values.reduce((best, v) => (Math.abs(v - to) < Math.abs(best - to) ? v : best));
 
+/**
+ * A trusted window blur. Bringing another page to the front fires none here: Chromium
+ * headless keeps both pages visible and focused, also with focus emulation off.
+ * Focus moving into an iframe is a real one.
+ */
+const loseFocus = (page: Page) =>
+  page.evaluate(() => {
+    const frame = document.createElement("iframe");
+    document.body.append(frame);
+    frame.contentWindow!.focus();
+  });
+
 const shiftHeld = (page: Page) =>
   page.evaluate(() => (window as unknown as TestWindow).__chartgenShiftHeld());
 
@@ -692,11 +704,7 @@ test.describe("drawing modifiers", () => {
       expect(live.map((p) => p.value)).toEqual(stored.map((p) => p.value));
     };
 
-    /**
-     * Two free lines, with the mouse pressed on the end point of the first. `beforePress`
-     * runs right before the press, once the mouse is on the point.
-     */
-    const pressOnLine = async (page: Page, beforePress?: () => Promise<void>) => {
+    const drawTwoLines = async (page: Page) => {
       await page.getByRole("button", { name: "Trend line" }).click();
       await clickAt(page, { x: 300, y: 130 });
       await clickAt(page, { x: 560, y: 260 });
@@ -704,6 +712,14 @@ test.describe("drawing modifiers", () => {
       await clickAt(page, { x: 700, y: 130 });
       await clickAt(page, { x: 900, y: 260 });
       await expect.poll(async () => (await overlays(page)).length).toBe(2);
+    };
+
+    /**
+     * Two free lines, with the mouse pressed on the end point of the first. `beforePress`
+     * runs right before the press, once the mouse is on the point.
+     */
+    const pressOnLine = async (page: Page, beforePress?: () => Promise<void>) => {
+      await drawTwoLines(page);
       const box = (await host(page).boundingBox())!;
       const [anchor, end] = (await overlays(page))[0]!.pixels;
       await page.mouse.move(box.x + end!.x!, box.y + end!.y!, { steps: 5 });
@@ -918,6 +934,133 @@ test.describe("drawing modifiers", () => {
         await page.mouse.up();
       });
     }
+
+    test("a real blur ends the press: it stays discarded, and later moves leave the drawing", async ({
+      bootedApp: page,
+    }) => {
+      const { box, end } = await pressOnLine(page);
+      const before = (await storedRecords(page))![0]!.points.map((p) => p.value);
+      await page.mouse.move(box.x + end.x! + 30, box.y + end.y! + 30, { steps: 4 });
+      expect((await overlays(page))[0]!.points.map((p) => p.value)).not.toEqual(before);
+
+      await loseFocus(page);
+      await expect.poll(async () => (await overlays(page))[0]!.points.map((p) => p.value)).toEqual(before);
+      await page.mouse.move(box.x + end.x! + 90, box.y + end.y! + 60, { steps: 4 });
+      expect((await overlays(page))[0]!.points.map((p) => p.value)).toEqual(before);
+      await expectFollowsTicks(page, 0);
+
+      await page.mouse.up();
+      await page.waitForTimeout(100);
+      expect((await storedRecords(page))![0]!.points.map((p) => p.value)).toEqual(before);
+    });
+
+    test.describe("with real touches", () => {
+      test.use({ hasTouch: true });
+
+      /** Sends real touch input to the page: `at` in chart pixels, none to lift the finger. */
+      const toucher = async (page: Page) => {
+        const cdp = await page.context().newCDPSession(page);
+        const box = (await host(page).boundingBox())!;
+        const send = (type: string, at?: At) =>
+          cdp.send("Input.dispatchTouchEvent", {
+            type: type as "touchStart",
+            touchPoints: at ? [{ x: box.x + at.x, y: box.y + at.y }] : [],
+          });
+        return {
+          box,
+          start: (at: At) => send("touchStart", at),
+          end: () => send("touchEnd"),
+          cancel: () => send("touchCancel"),
+          move: async (from: At, to: At) => {
+            for (let i = 1; i <= 8; i++) {
+              await send("touchMove", {
+                x: from.x + ((to.x - from.x) * i) / 8,
+                y: from.y + ((to.y - from.y) * i) / 8,
+              });
+            }
+          },
+        };
+      };
+
+      /** Two lines, the first selected by a tap so its points can be pressed; its end point. */
+      const selectFirstLine = async (page: Page, touch: Awaited<ReturnType<typeof toucher>>) => {
+        await drawTwoLines(page);
+        await page.mouse.move(touch.box.x + 40, touch.box.y + 40);
+        const [a, b] = (await overlays(page))[0]!.pixels;
+        await touch.start({ x: (a!.x! + b!.x!) / 2, y: (a!.y! + b!.y!) / 2 });
+        await touch.end();
+        await page.waitForTimeout(100);
+        return { x: b!.x!, y: b!.y! };
+      };
+
+      test("a touch drag survives a live tick, and the release saves it once", async ({
+        bootedApp: page,
+      }) => {
+        const touch = await toucher(page);
+        const end = await selectFirstLine(page, touch);
+        const before = (await overlays(page))[0]!.points.map((p) => p.value);
+
+        await touch.start(end);
+        await touch.move(end, { x: end.x + 60, y: end.y + 40 });
+        const moved = (await overlays(page))[0]!.points.map((p) => p.value);
+        expect(moved).not.toEqual(before);
+        await tick(page);
+        expect((await overlays(page))[0]!.points.map((p) => p.value)).toEqual(moved);
+        await touch.end();
+        await page.waitForTimeout(100);
+        expect((await storedRecords(page))![0]!.points.map((p) => p.value)).toEqual(moved);
+        await expectFollowsTicks(page, 0);
+        expect((await overlays(page))[0]!.points.map((p) => p.value)).toEqual(moved);
+
+        // One undo step goes back to before the drag.
+        await page.keyboard.press("Control+z");
+        await expect.poll(async () => (await overlays(page))[0]!.points.map((p) => p.value)).toEqual(before);
+      });
+
+      test("a touch released off the panes is discarded, and a later touch pan leaves the drawing", async ({
+        bootedApp: page,
+      }) => {
+        const touch = await toucher(page);
+        const end = await selectFirstLine(page, touch);
+        const before = (await storedRecords(page))![0]!.points;
+
+        await touch.start(end);
+        await touch.move(end, { x: end.x + 30, y: end.y - 30 });
+        // Over the drawing toolbar, left of the chart.
+        await touch.move({ x: end.x + 30, y: end.y - 30 }, { x: -20, y: end.y });
+        await touch.end();
+        await expect
+          .poll(async () => (await overlays(page))[0]!.points.map((p) => p.value))
+          .toEqual(before.map((p) => p.value));
+
+        const from = { x: 150, y: 400 };
+        await touch.start(from);
+        await touch.move(from, { x: 330, y: 340 });
+        await touch.end();
+        await page.waitForTimeout(100);
+        expect((await overlays(page))[0]!.points.map((p) => p.value)).toEqual(before.map((p) => p.value));
+        expect((await storedRecords(page))![0]!.points).toEqual(before);
+      });
+
+      test("a cancelled touch is discarded", async ({ bootedApp: page }) => {
+        const touch = await toucher(page);
+        const end = await selectFirstLine(page, touch);
+        const before = (await storedRecords(page))![0]!.points;
+
+        await touch.start(end);
+        await touch.move(end, { x: end.x + 60, y: end.y + 40 });
+        await touch.cancel();
+        await expect
+          .poll(async () => (await overlays(page))[0]!.points.map((p) => p.value))
+          .toEqual(before.map((p) => p.value));
+        await expectFollowsTicks(page, 0);
+        expect((await storedRecords(page))![0]!.points).toEqual(before);
+
+        // klinecharts' own press ended too. It ignores mouse events for 500 ms after a touch.
+        await page.waitForTimeout(600);
+        await expectPanLeavesLine(page, touch.box);
+      });
+    });
 
     test("an undo during the press, then ticks", async ({ bootedApp: page }) => {
       await pressOnLine(page);
@@ -1138,6 +1281,19 @@ test.describe("drawing modifiers", () => {
       await expect(magnetButton(page, "off")).toBeVisible();
       expect(await shiftHeld(page)).toBe(false);
     }
+  });
+
+  test("a real blur while a modifier is held restores it", async ({ bootedApp: page }) => {
+    await page.keyboard.down("Control");
+    await page.keyboard.down("Shift");
+    await expect(magnetButton(page, "strong")).toBeVisible();
+    expect(await shiftHeld(page)).toBe(true);
+    await loseFocus(page);
+    await expect(magnetButton(page, "off")).toBeVisible();
+    expect(await shiftHeld(page)).toBe(false);
+    // The keys come up elsewhere; the page never sees it.
+    await page.keyboard.up("Shift");
+    await page.keyboard.up("Control");
   });
 
   test("a mouse event resyncs the modifiers", async ({ bootedApp: page }) => {
