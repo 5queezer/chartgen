@@ -61,8 +61,8 @@ const buttonClass =
 const primaryClass =
   "px-2.5 py-1 rounded-md text-xs cursor-pointer bg-[color:var(--color-accent)] text-white font-semibold disabled:opacity-50 disabled:cursor-default";
 
-// Narrow screens: title and close, then the name on a row of its own, then these.
-const LOWER_ROW = "max-[767px]:order-3";
+// Full screen: title and close, then the name on a row of its own, then these.
+const LOWER_ROW = "script-lower";
 
 export interface ScriptEditorProps {
   session: McpSession;
@@ -399,7 +399,7 @@ export default function ScriptEditor(props: ScriptEditorProps): JSX.Element {
     <section
       aria-label="Script editor"
       data-testid="script-editor"
-      class="script-editor flex flex-col shrink-0 h-[42vh] min-h-[280px] border-t border-[color:var(--color-border)] bg-[color:var(--color-bg)] max-[767px]:fixed max-[767px]:inset-0 max-[767px]:z-40 max-[767px]:h-dvh max-[767px]:min-h-0 max-[767px]:border-t-0"
+      class="script-editor flex flex-col shrink-0 border-t border-[color:var(--color-border)] bg-[color:var(--color-bg)]"
       onKeyDown={(e) => {
         if ((e.ctrlKey || e.metaKey) && !e.altKey && e.key.toLowerCase() === "s") {
           e.preventDefault();
@@ -425,7 +425,7 @@ export default function ScriptEditor(props: ScriptEditorProps): JSX.Element {
           autocomplete="off"
           spellcheck={false}
           data-testid="script-name"
-          class="min-w-0 w-44 max-[767px]:order-2 max-[767px]:w-full bg-[color:var(--color-bg-elev)] border border-[color:var(--color-border)] rounded-md px-2 py-1 text-xs font-mono text-[color:var(--color-fg)] focus:outline-none focus:border-[color:var(--color-accent)] read-only:opacity-70"
+          class="script-name min-w-0 w-44 bg-[color:var(--color-bg-elev)] border border-[color:var(--color-border)] rounded-md px-2 py-1 text-xs font-mono text-[color:var(--color-fg)] focus:outline-none focus:border-[color:var(--color-accent)] read-only:opacity-70"
         />
         <button
           type="button"
@@ -470,7 +470,7 @@ export default function ScriptEditor(props: ScriptEditorProps): JSX.Element {
         >
           {status()}
         </span>
-        <span class="ml-auto flex items-center gap-2 max-[767px]:order-1">
+        <span class="script-end ml-auto flex items-center gap-2">
           <a
             href={SCRIPTING_DOCS_URL}
             target="_blank"
@@ -491,8 +491,8 @@ export default function ScriptEditor(props: ScriptEditorProps): JSX.Element {
           </button>
         </span>
       </div>
-      <div class="flex flex-1 min-h-0 max-[767px]:flex-col">
-        <div class="w-48 shrink-0 overflow-y-auto border-r border-[color:var(--color-border)] max-[767px]:w-full max-[767px]:max-h-24 max-[767px]:border-r-0 max-[767px]:border-b">
+      <div class="script-body flex flex-1 min-h-0">
+        <div class="script-list w-48 shrink-0 overflow-y-auto border-r border-[color:var(--color-border)]">
           <Show when={list.isError}>
             <p class="p-2 text-xs text-[color:var(--color-danger)]">
               {messageOf(list.error)}{" "}

@@ -832,6 +832,67 @@ def compute(ohlcv, params, chart):
   }
 });
 
+test.describe("panel size", () => {
+  /** Whether a click at the center of the element would reach it. */
+  const reachable = (page: Page, id: string) =>
+    page.getByTestId(id).evaluate((el) => {
+      const r = el.getBoundingClientRect();
+      const hit = document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2);
+      return hit === el || el.contains(hit);
+    });
+
+  for (const [width, height] of [[1280, 600], [1366, 650], [844, 390]] as const) {
+    test(`full screen when the window is short: ${width}x${height}`, async ({ page }) => {
+      await gotoApp(page);
+      await page.setViewportSize({ width, height });
+      await openEditor(page);
+      const panel = page.getByTestId("script-editor");
+      expect(await panel.boundingBox()).toEqual({ x: 0, y: 0, width, height });
+      for (const id of ["script-new", "script-name", "script-save", "script-add", "script-close"]) {
+        expect(await reachable(page, id), id).toBe(true);
+      }
+      expect((await page.getByTestId("script-code").boundingBox())!.height).toBeGreaterThan(100);
+      expect(await panel.evaluate((el) => el.scrollHeight <= el.clientHeight)).toBe(true);
+
+      // Closing brings the chart back at its usual height.
+      await page.getByTestId("script-close").click();
+      await expect(panel).toHaveCount(0);
+      await expect(page.locator(".chart-host")).toBeVisible();
+    });
+  }
+
+  for (const [width, height] of [[1280, 700], [1440, 780], [1920, 950]] as const) {
+    test(`docked with room for the price pane: ${width}x${height}`, async ({ page }) => {
+      await page.setViewportSize({ width, height });
+      await gotoApp(page);
+      await openEditor(page);
+      const panel = (await page.getByTestId("script-editor").boundingBox())!;
+      expect(panel.height).toBeLessThanOrEqual(height * 0.45 + 1);
+      expect(panel.y + panel.height).toBeLessThanOrEqual(height);
+      // Nothing of the chart's side reaches into the panel.
+      const main = (await page.locator("main").boundingBox())!;
+      expect(main.y + main.height).toBeLessThanOrEqual(panel.y);
+      for (const id of ["script-new", "script-name", "script-save", "script-close"]) {
+        expect(await reachable(page, id), id).toBe(true);
+      }
+      await expect
+        .poll(
+          () =>
+            page.evaluate(() => {
+              const t = (window as unknown as {
+                __chartgenTest: {
+                  chart: () => { getSize: (pane: string) => { height: number } | null } | null;
+                };
+              }).__chartgenTest;
+              return t.chart()?.getSize("candle_pane")?.height ?? 0;
+            }),
+          { timeout: 5_000 },
+        )
+        .toBeGreaterThanOrEqual(60);
+    });
+  }
+});
+
 test.describe("at 390 px", () => {
   test("the panel fits and works from the picker", async ({ page }) => {
     await gotoApp(page);

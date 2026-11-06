@@ -19,7 +19,58 @@
   --script-active-line: rgba(19, 23, 34, 0.04);
 }
 
-/* Docked under the chart: the chart's usual minimum would push it over the panel. */
-body:has(.script-editor) .chart-host {
-  min-height: 120px;
+/* Docked under the chart: a part of the window, so the price pane keeps room. */
+.script-editor {
+  height: 42vh;
+  min-height: 280px;
+  max-height: 45vh;
+}
+
+@media (min-width: 768px) and (min-height: 700px) {
+  /* The chart's usual minimum would push it over the panel. */
+  body:has(.script-editor) .chart-host {
+    min-height: 120px;
+  }
+
+  body:has(.script-editor) main {
+    overflow: hidden;
+  }
+}
+
+/* No room for both, in width or in height (a landscape phone, a small laptop
+   window): the panel takes the whole screen, and closing it brings the chart back. */
+@media (max-width: 767px), (max-height: 699px) {
+  .script-editor {
+    position: fixed;
+    inset: 0;
+    z-index: 40;
+    height: 100dvh;
+    min-height: 0;
+    max-height: none;
+    border-top: none;
+  }
+
+  .script-body {
+    flex-direction: column;
+  }
+
+  .script-list {
+    width: 100%;
+    max-height: 6rem;
+    border-right: none;
+    border-bottom: 1px solid var(--color-border);
+  }
+
+  .script-end {
+    order: 1;
+  }
+
+  .script-name {
+    order: 2;
+    width: 100%;
+  }
+
+  .script-lower {
+    order: 3;
+  }
 }
