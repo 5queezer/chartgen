@@ -50,7 +50,7 @@ import { StatusLine, type Status } from "./components/StatusLine";
 import { SymbolSearch } from "./components/SymbolSearch";
 import { Toasts } from "./components/Toasts";
 import { Toolbar } from "./components/Toolbar";
-import { Sidebar } from "./components/Sidebar";
+import { Sidebar, SidebarDock } from "./components/Sidebar";
 import {
   applyChartAction,
   chartKeyAction,
@@ -58,7 +58,8 @@ import {
   resetChart,
   screenshotFilename,
 } from "./lib/chartActions";
-import { isTypingContext, keepKeyboardFocus } from "./lib/keys";
+import { isTypingContext, keepKeyboardFocus, swallowMenuGhostClicks } from "./lib/keys";
+import { compact } from "./lib/viewport";
 import { alignAsOf, COMPARE_PALETTE } from "./lib/compare";
 import { createCompareFeed, type CompareData } from "./lib/compareFeed";
 import { barCloseMs, isContinuousMarket } from "./lib/countdown";
@@ -143,6 +144,7 @@ export function App(): JSX.Element {
   const [settingsOpen, setSettingsOpen] = createSignal(false);
 
   onMount(() => onCleanup(keepKeyboardFocus()));
+  onMount(() => onCleanup(swallowMenuGhostClicks()));
 
   // Chart keyboard navigation: never while typing or a dialog/menu is open.
   onMount(() => {
@@ -254,6 +256,8 @@ export function App(): JSX.Element {
   let resuming = false;
   // Whether a drawing tool is armed (Esc then cancels only the tool).
   const [drawingArmed, setDrawingArmed] = createSignal(false);
+  // Compact shell: the drawing toolbar behind the dock's Draw button.
+  const [drawOpen, setDrawOpen] = createSignal(false);
   const replay = createReplay({
     live,
     request: () => feedRequest,
@@ -539,6 +543,17 @@ export function App(): JSX.Element {
       : plotsOf(ind, (n) => paletteColor(key, n), key);
   });
 
+  // Undefined only while the registry cannot say. The server leaves out
+  // `configurable_params` for an indicator without params (EMA Stack), which
+  // is an empty form with its Style tab, not a failed load.
+  const settingsSpecs = createMemo(() => {
+    const n = settingsTarget()?.name;
+    const found = listIndicators.data?.indicators.find(
+      (i) => i.name === n || i.aliases?.includes(n ?? ""),
+    );
+    return found && (found.configurable_params ?? []);
+  });
+
   const settingsGeometry = createMemo(() => {
     const key = settingsTarget()?.key;
     const ind = key === undefined ? undefined : query.data?.indicators[key];
@@ -562,7 +577,7 @@ export function App(): JSX.Element {
   });
 
   return (
-    <div class="flex flex-col h-screen w-screen">
+    <div class="app-shell flex flex-col h-dvh w-screen">
       <header class="flex flex-nowrap items-center gap-2 min-[1280px]:gap-3 px-4 h-[52px] shrink-0 overflow-hidden border-b border-[color:var(--color-border)]">
         <h1 class="text-lg font-semibold mr-1 min-[1280px]:mr-2 leading-none max-[639px]:hidden">
           chartgen
@@ -602,7 +617,7 @@ export function App(): JSX.Element {
         </button>
         {/* Below 480px the header has no room: alerts stay reachable from the
          * sidebar panel, the status text drops (the sign-in recovery stays) and the layout name collapses. */}
-        <div class="max-[479px]:hidden">
+        <div class="max-[479px]:hidden compact:hidden">
           <AlertButton />
         </div>
         <div>
@@ -630,12 +645,7 @@ export function App(): JSX.Element {
         target={settingsTarget()}
         plots={settingsPlots()}
         geometry={settingsGeometry()}
-        specs={
-          listIndicators.data?.indicators.find((i) => {
-            const n = settingsTarget()?.name;
-            return i.name === n || i.aliases?.includes(n ?? "");
-          })?.configurable_params
-        }
+        specs={settingsSpecs()}
         onClose={() => setSettingsIndex(null)}
         onSubmit={(params, fields, style) => {
           const target = settingsTarget();
@@ -673,12 +683,16 @@ export function App(): JSX.Element {
         open={settingsOpen()}
         onClose={() => setSettingsOpen(false)}
       />
-      <main class="flex flex-1 min-h-0">
+      <main class="flex flex-1 min-h-0" data-draw-open={drawOpen() ? "" : undefined}>
         <DrawingToolbar
           chart={chart()}
           symbol={symbol()}
           onApi={setDrawings}
-          onArmedChange={setDrawingArmed}
+          onArmedChange={(armed) => {
+            setDrawingArmed(armed);
+            // The chart needs the room to place the tool's points.
+            if (armed) setDrawOpen(false);
+          }}
           disarm={replay.mode() === "select"}
         />
         <AlertLines chart={chart()} symbol={symbol()} />
@@ -748,7 +762,15 @@ export function App(): JSX.Element {
           }}
         />
       </main>
-      <BottomBar chart={chart()} series={shown()?.series ?? null} loadUntil={feed.loadUntil} />
+      <div class="bottom-rows flex flex-col shrink-0">
+        <BottomBar chart={chart()} series={shown()?.series ?? null} loadUntil={feed.loadUntil} />
+        <Show when={compact()}>
+          <SidebarDock
+            drawActive={drawOpen() || drawingArmed()}
+            onDraw={() => setDrawOpen(!drawOpen())}
+          />
+        </Show>
+      </div>
       <AlertDialog
         series={live()?.series ?? null}
         params={alertParams()}

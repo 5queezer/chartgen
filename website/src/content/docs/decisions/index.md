@@ -66,4 +66,5 @@ one and link both ways.
 | [0036](/chartgen/decisions/0036-own-origin-invalid-client-redirect/) | Redirect an unknown OAuth client back to the server's own web app | Accepted | 2026-11-06 |
 | [0037](/chartgen/decisions/0037-pull-based-deploy/) | Pull-based deploy from the Coolify host | Accepted | 2026-11-06 |
 | [0038](/chartgen/decisions/0038-custom-intervals/) | Custom intervals and session-aware future bars | Accepted | 2026-11-06 |
+| [0039](/chartgen/decisions/0039-compact-layout/) | Compact layout for phones and small tablets | Accepted | 2026-11-06 |
 | [0040](/chartgen/decisions/0040-layout-compare-restore/) | A layout stores the scale mode its compare symbols return to | Accepted | 2026-11-06 |

@@ -521,7 +521,8 @@ and validated on load. Settings are not part of named layouts (invert and lock, 
 
 ## Chart context menu
 
-Right-clicking the chart (outside a drawing) opens a menu:
+Right-clicking the chart (outside a drawing) opens a menu (mouse only, see
+[Phones and tablets](#phones-and-tablets) for touch):
 
 | Item | Action |
 |---|---|
@@ -790,6 +791,83 @@ Layouts are stored in `localStorage` under `chartgen.layouts` (at most
 50, validated on load, malformed ones dropped). See
 [ADR-0015](/chartgen/decisions/0015-named-layouts/) and
 [ADR-0040](/chartgen/decisions/0040-layout-compare-restore/).
+
+## Phones and tablets
+
+The app runs in a phone's browser without a separate mobile site
+([ADR-0039](/chartgen/decisions/0039-compact-layout/)). Rotating or
+resizing only moves the layout: the symbol, indicators and drawings stay, the
+chart is not reloaded and no data is fetched again.
+
+Windows narrower than 768 px get the compact layout. So do touch screens
+narrower than 1024 px or shorter than 500 px, which covers phones in both
+orientations and small tablets held upright. A tablet held sideways keeps the
+desktop layout with larger touch targets.
+
+In the compact layout:
+
+- **The chart takes the whole width.** The header keeps the symbol, the
+  interval, the chart type, the indicators and a `⋯` menu with the rest (replay,
+  compare, reset, theme, screenshot, link, settings, fullscreen), plus the
+  layout menu. The indicator chips and the clock go away.
+- **A dock at the bottom** opens the drawing tools, the watchlist, the alerts,
+  the Data Window and the Object Tree. The panels open as a bottom sheet, or as
+  a side panel when the phone is sideways, over the chart and without resizing
+  it. Tap outside the sheet or its `×` to close it. Picking a symbol in the
+  watchlist closes it too.
+- **The drawing toolbar** opens from the dock's pencil button and closes when
+  you pick a tool, so you can tap the tool's points on the chart. The button
+  stays highlighted while a tool is armed.
+- **Dialogs** fit the screen and shrink to what the on-screen keyboard leaves
+  visible, with their buttons always in view. They also stay clear of notches
+  and the home indicator.
+- **On a short screen** the price pane takes about two thirds of the height, and
+  the indicator panes shrink to fit. They return to their usual height when you
+  rotate back. In the compact layout any resize or indicator change resets pane
+  heights dragged with a mouse, and touch cannot drag pane separators at all.
+- **The range buttons** scroll sideways when they do not fit. On a phone held
+  sideways the time zone select is hidden, so hold it upright to change the time
+  zone.
+
+On any touch screen:
+
+| Gesture | What it does |
+| --- | --- |
+| One-finger drag | Pans the chart |
+| Pinch | Zooms the chart |
+| Tap, or long press | Shows the crosshair; the legend reads that bar |
+| Drag after a long press | Moves the crosshair instead of panning |
+| Tap elsewhere | Hides the crosshair |
+| Tap an indicator's legend row | Shows its alert, hide, settings and remove buttons |
+
+The page itself does not scroll or pull to refresh, so gestures on the chart
+only reach the chart. A drawing dragged past its pane stops at the pane's edge, and
+lifting your finger on the separator there keeps the drag. Dragging an axis does nothing on touch, because klinecharts
+only scales axes for the mouse. Use a pinch for the time axis, and the `auto` and
+`log` buttons for the price axis.
+
+Touch has no right-click, and a long press belongs to the crosshair, so the
+[chart context menu](#chart-context-menu) and the drawing menu open only with a
+mouse. Their actions are elsewhere on touch:
+
+- Reset view, copy link and settings are in the `⋯` menu. Invert scale and lock
+  ratio are in **Chart settings**.
+- Remove all drawings is in the drawing toolbar.
+- Remove or lock one drawing, and remove one indicator, are in the Object Tree.
+- Add an alert from the Alerts panel's `+`. Type the price, or pick a drawing or
+  indicator as the source.
+- Copy price, and adding an alert or a horizontal line at a tapped price, have
+  no touch equivalent. Use the horizontal line tool instead.
+
+Most targets are at least 40 px. These are smaller, because they sit on the
+chart or inside a row: the legend buttons (32 px), the `%`, `log`, `inv` and
+`auto` buttons (32 by 28 px), the indicator chip buttons (28 px), a watchlist row's
+buttons (20 px) and the arrow
+on a drawing tool group (20 px; holding the tool's button opens the same list).
+
+This layout has been tested in Chromium's device emulation only (iPhone 13,
+Pixel 7, iPad Mini and a 360 px phone), not on real phones or in Safari. The
+on-screen keyboard was simulated.
 
 ## Getting started
 

@@ -7,6 +7,8 @@ sidebar:
 
 **Status:** Accepted
 **Date:** 2026-11-04
+**Amended by:** [ADR-0039](/chartgen/decisions/0039-compact-layout/) (the app
+supports mobile viewports, and the suite covers them in emulation)
 
 ## Context and Problem Statement
 

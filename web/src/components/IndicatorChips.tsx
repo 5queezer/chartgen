@@ -26,12 +26,12 @@ export interface IndicatorChipsProps {
 }
 
 const chipButton =
-  "inline-flex items-center justify-center w-4 h-4 rounded-full text-[color:var(--color-fg-muted)] hover:text-[color:var(--color-fg)] hover:bg-[color:var(--color-bg)] cursor-pointer";
+  "chip-btn inline-flex items-center justify-center w-4 h-4 rounded-full text-[color:var(--color-fg-muted)] hover:text-[color:var(--color-fg)] hover:bg-[color:var(--color-bg)] cursor-pointer";
 
 export function IndicatorChips(props: IndicatorChipsProps): JSX.Element {
   const labels = createMemo(() => paramLabels(props.entries, paramDefaults(), true));
   return (
-    <div class="flex flex-wrap items-center gap-2 px-4 py-2 border-b border-[color:var(--color-border)] min-h-[2.5rem]">
+    <div class="flex flex-wrap items-center gap-2 px-4 py-2 border-b border-[color:var(--color-border)] min-h-[2.5rem] compact:hidden">
       <Show
         when={props.entries.length > 0}
         fallback={

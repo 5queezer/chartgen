@@ -43,6 +43,7 @@ import {
   BP_NARROW,
   BP_TIMEFRAMES,
   BP_TINY,
+  compact,
   createViewportWidth,
 } from "../lib/viewport";
 import { SymbolSearch } from "./SymbolSearch";
@@ -313,10 +314,10 @@ export function Toolbar(props: ToolbarProps): JSX.Element {
 
   // Lower-priority items collapse as the window narrows (see lib/viewport).
   const width = createViewportWidth();
-  const showTimeframes = () => width() >= BP_TIMEFRAMES;
-  const showMisc = () => width() >= BP_FULL;
-  const showTools = () => width() >= BP_NARROW;
-  const showReplay = () => width() >= BP_TINY;
+  const showTimeframes = () => width() >= BP_TIMEFRAMES && !compact();
+  const showMisc = () => width() >= BP_FULL && !compact();
+  const showTools = () => width() >= BP_NARROW && !compact();
+  const showReplay = () => width() >= BP_TINY && !compact();
   const hasFullscreen = document.fullscreenEnabled;
   // Timeframes in the dropdown: the favourites join it once their buttons go.
   const overflow = (): readonly Timeframe[] =>
@@ -351,7 +352,7 @@ export function Toolbar(props: ToolbarProps): JSX.Element {
           <circle cx="6" cy="6" r="4" />
           <path d="M9 9l3.5 3.5" />
         </svg>
-        {symbol()}
+        <span class="truncate">{symbol()}</span>
       </button>
 
       <span class="w-px h-5 bg-[color:var(--color-border)] mx-1" />
