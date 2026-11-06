@@ -242,13 +242,20 @@ impl BinanceFeed {
     /// Fetch recent bars via REST to cover any gap during a disconnect.
     async fn backfill(&self, tx: &mpsc::Sender<FeedEvent>) -> Result<(), String> {
         let bars = fetch_binance_async(&self.symbol, &self.interval, 10).await?;
-        for bar in bars {
+        for bar in without_forming(bars) {
             if tx.send(FeedEvent::Bar(bar)).await.is_err() {
                 return Ok(()); // receiver dropped
             }
         }
         Ok(())
     }
+}
+
+/// The newest kline of a REST answer is the candle still forming, and a `Bar` means
+/// a closed one. The stream delivers the forming candle itself.
+fn without_forming(mut bars: Vec<Bar>) -> Vec<Bar> {
+    bars.pop();
+    bars
 }
 
 fn bar_secs(bar: &Bar) -> i64 {
@@ -448,6 +455,34 @@ async fn fetch_binance_async(
 mod tests {
     use super::*;
 
+    /// The gate is one per process, so this runs in a process of its own, with a dead
+    /// proxy so that a backfill past the gate fails here and never reaches Binance.
+    #[tokio::test]
+    async fn a_backfill_the_gate_refuses_sends_nothing() {
+        const CHILD: &str = "CHARTGEN_TEST_GATE_SHUT";
+        if std::env::var_os(CHILD).is_none() {
+            let test = "feed::tests::a_backfill_the_gate_refuses_sends_nothing";
+            let out = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", test, "--nocapture"])
+                .env(CHILD, "1")
+                .env("HTTPS_PROXY", "http://127.0.0.1:9")
+                .output()
+                .unwrap();
+            let text = String::from_utf8_lossy(&out.stdout);
+            assert!(out.status.success() && text.contains("1 passed"), "{text}");
+            return;
+        }
+        let gate = crate::binance_gate::spot();
+        gate.observe(gate.admit().unwrap(), 429, Some("600"), None);
+        let (tx, mut rx) = mpsc::channel(16);
+        let e = BinanceFeed::new("BTCUSDT", "1h")
+            .backfill(&tx)
+            .await
+            .unwrap_err();
+        assert!(e.starts_with("Binance rate limit"), "{e}");
+        assert!(rx.try_recv().is_err());
+    }
+
     #[test]
     fn test_new_creates_feed() {
         let feed = BinanceFeed::new("BTCUSDT", "1m");
@@ -631,6 +666,50 @@ mod tests {
             .parse_event(trade, &mut Forming::default())
             .unwrap()
             .is_empty());
+    }
+
+    #[test]
+    fn a_backfill_holds_only_closed_bars() {
+        let bars = vec![bar_at(60, 1.0), bar_at(120, 2.0), bar_at(180, 3.0)];
+        let dates: Vec<String> = without_forming(bars).into_iter().map(|b| b.date).collect();
+        assert_eq!(dates, ["60", "120"]);
+        assert!(without_forming(Vec::new()).is_empty());
+    }
+
+    /// What server alerts must cope with: the next candle's first trade comes before
+    /// the kline that closes the last one.
+    #[test]
+    fn a_trade_past_the_boundary_comes_before_the_closing_kline() {
+        let feed = BinanceFeed::new("BTCUSDT", "1m").with_trades();
+        let mut forming = Forming::default();
+        let kline = |closed: bool, at: i64| {
+            format!(
+                r#"{{"e":"kline","E":{at},"k":{{"t":60000,"o":"1","h":"2","l":"1","c":"2","v":"1","x":{closed}}}}}"#
+            )
+        };
+        let trade = r#"{"e":"aggTrade","p":"3","q":"1","T":120500}"#;
+        let mut order = Vec::new();
+        for msg in [
+            kline(false, 100_000),
+            trade.to_string(),
+            kline(true, 121_000),
+        ] {
+            for event in feed.parse_event(&msg, &mut forming).unwrap() {
+                order.push(match event {
+                    FeedEvent::Tick(b) => ("tick", b.date),
+                    FeedEvent::Bar(b) => ("close", b.date),
+                });
+            }
+        }
+        let date = |d: &str| d.to_string();
+        assert_eq!(
+            order,
+            [
+                ("tick", date("60")),
+                ("tick", date("120")),
+                ("close", date("60"))
+            ]
+        );
     }
 
     #[test]

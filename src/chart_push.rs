@@ -48,6 +48,9 @@ pub const STREAM_BUFFER: usize = 256;
 pub const NOT_PUSHABLE: &str = "not pushable";
 /// Prefix of errors for a cap or rate limit; clients poll this chart.
 pub const PUSH_LIMIT: &str = "push limit reached";
+/// Prefix of errors for too many feeds starting. Anyone's churn can cause this and
+/// it passes within a minute, so unlike `PUSH_LIMIT` clients try again.
+pub const FEEDS_BUSY: &str = "feeds busy";
 /// Cadence of the sample source's synthetic ticks.
 const SAMPLE_TICK: Duration = Duration::from_millis(500);
 /// Feed events buffered per group before it lags (and skips some).
@@ -69,6 +72,11 @@ pub struct Limits {
     /// How long a feed without groups stays connected, so a quick
     /// unsubscribe/subscribe does not reconnect the WebSocket.
     pub feed_linger: Duration,
+    /// New WebSockets per minute, for charts and alerts together: Binance bans an
+    /// IP that connects too often, which would stop every chart.
+    pub new_feeds_per_minute: usize,
+    /// Feeds connected at once, the lingering ones included.
+    pub feeds_total: usize,
     /// Shortest gap between two reads of klines a group is missing.
     pub reread_pause: Duration,
 }
@@ -82,6 +90,8 @@ impl Default for Limits {
             subscribes_per_minute: 10,
             min_push_interval: Duration::from_millis(250),
             feed_linger: Duration::from_secs(30),
+            new_feeds_per_minute: 40,
+            feeds_total: 96,
             reread_pause: Duration::from_secs(5),
         }
     }
@@ -218,7 +228,7 @@ impl PushSource for SampleSource {
 }
 
 /// The sample source's forming bar with a sub-second wobble on its close,
-/// and the completed bar when the interval rolls over.
+/// and the completed bar just after the interval rolls over.
 async fn sample_feed(symbol: String, interval: String, tx: mpsc::Sender<FeedEvent>) {
     let mut forming: Option<String> = None;
     let mut every = tokio::time::interval(SAMPLE_TICK);
@@ -232,15 +242,16 @@ async fn sample_feed(symbol: String, interval: String, tx: mpsc::Sender<FeedEven
             return;
         };
         let rolled = forming.as_ref().is_some_and(|f| *f != bar.date);
-        if rolled && d.bars.len() == 2 && tx.send(FeedEvent::Bar(d.bars[0].clone())).await.is_err()
-        {
-            return;
-        }
         forming = Some(bar.date.clone());
         bar.close += bar.open * 0.002 * (now as f64 / 350.0).sin();
         bar.high = bar.high.max(bar.close);
         bar.low = bar.low.min(bar.close);
         if tx.send(FeedEvent::Tick(bar)).await.is_err() {
+            return;
+        }
+        // After the next candle's first tick, as a feed with trades sends it.
+        if rolled && d.bars.len() == 2 && tx.send(FeedEvent::Bar(d.bars[0].clone())).await.is_err()
+        {
             return;
         }
     }
@@ -282,7 +293,8 @@ pub struct PushCtx {
     pub client: String,
 }
 
-type FeedKey = (String, String);
+/// A feed: the symbol as it goes into the stream name, and its interval.
+pub type FeedKey = (String, String);
 
 struct StreamSlot {
     id: u64,
@@ -323,6 +335,8 @@ struct State {
     feeds: HashMap<FeedKey, Feed>,
     /// Recent `subscribe_chart` calls per token.
     attempts: HashMap<String, VecDeque<std::time::Instant>>,
+    /// When recent feeds started.
+    feed_starts: VecDeque<std::time::Instant>,
 }
 
 impl State {
@@ -356,6 +370,32 @@ impl State {
     }
 }
 
+#[cfg(feature = "scripting")]
+/// Keeps a feed running for `ChartHub::watch_feed`.
+pub struct FeedLease {
+    hub: Weak<ChartHub>,
+    key: FeedKey,
+}
+
+#[cfg(feature = "scripting")]
+impl Drop for FeedLease {
+    fn drop(&mut self) {
+        let Some(hub) = self.hub.upgrade() else {
+            return;
+        };
+        let mut st = hub.lock();
+        let Some(feed) = st.feeds.get_mut(&self.key) else {
+            return;
+        };
+        feed.groups = feed.groups.saturating_sub(1);
+        if feed.groups == 0 {
+            feed.epoch += 1;
+            let epoch = feed.epoch;
+            hub.close_later(self.key.clone(), epoch);
+        }
+    }
+}
+
 /// Registry of SSE streams and chart subscriptions, with their groups and
 /// feeds.
 pub struct ChartHub {
@@ -382,11 +422,17 @@ impl ChartHub {
 
     /// The sample source under `CHARTGEN_DATA_SOURCE=sample`, else Binance.
     pub fn from_env() -> Arc<Self> {
-        let source: Arc<dyn PushSource> = match DataSource::from_env() {
-            DataSource::Sample => Arc::new(SampleSource),
-            _ => Arc::new(BinanceSource),
-        };
-        Self::new(source, Limits::default())
+        match DataSource::from_env() {
+            // No exchange to protect, and tests start feeds quickly.
+            DataSource::Sample => Self::new(
+                Arc::new(SampleSource),
+                Limits {
+                    new_feeds_per_minute: usize::MAX,
+                    ..Limits::default()
+                },
+            ),
+            _ => Self::new(Arc::new(BinanceSource), Limits::default()),
+        }
     }
 
     fn lock(&self) -> MutexGuard<'_, State> {
@@ -508,40 +554,7 @@ impl ChartHub {
 
         if !st.groups.contains_key(&req) {
             let feed = (symbol, interval);
-            let events = match st.feeds.get_mut(&feed) {
-                Some(f) => match f.events.upgrade() {
-                    Some(events) => {
-                        if f.groups == 0 {
-                            f.epoch += 1;
-                        }
-                        f.groups += 1;
-                        Some(events.subscribe())
-                    }
-                    None => None,
-                },
-                None => None,
-            };
-            let events = match events {
-                Some(rx) => rx,
-                None => {
-                    // New, or its task ended: start it (again). Groups still
-                    // on the ended feed see `Closed` and leave.
-                    let groups = st.feeds.remove(&feed).map_or(0, |f| f.groups);
-                    let (events, rx) = broadcast::channel(FEED_BUFFER);
-                    let weak = events.downgrade();
-                    let task = self.spawn_feed(&feed, events);
-                    st.feeds.insert(
-                        feed.clone(),
-                        Feed {
-                            groups: groups + 1,
-                            events: weak,
-                            task,
-                            epoch: 0,
-                        },
-                    );
-                    rx
-                }
-            };
+            let events = self.join_feed(st, &feed)?;
             let id = self.id();
             let task = self.runtime.spawn(run_group(
                 self.me.clone(),
@@ -576,6 +589,108 @@ impl ChartHub {
             },
         );
         Ok(id)
+    }
+
+    /// Is there room to start `feed`? Yes if it runs already, however idle.
+    fn check_feed_room(&self, st: &mut State, feed: &FeedKey) -> Result<(), String> {
+        if st
+            .feeds
+            .get(feed)
+            .is_some_and(|f| f.events.upgrade().is_some())
+        {
+            return Ok(());
+        }
+        let now = std::time::Instant::now();
+        let minute = Duration::from_secs(60);
+        while st.feed_starts.front().is_some_and(|t| now - *t >= minute) {
+            st.feed_starts.pop_front();
+        }
+        if st.feed_starts.len() >= self.limits.new_feeds_per_minute {
+            return Err(format!(
+                "{FEEDS_BUSY}: at most {} new feeds per minute; try again shortly",
+                self.limits.new_feeds_per_minute
+            ));
+        }
+        if st.feeds.len() >= self.limits.feeds_total && !st.feeds.contains_key(feed) {
+            return Err(format!(
+                "{FEEDS_BUSY}: the server holds its maximum of {} feeds; try again shortly",
+                self.limits.feeds_total
+            ));
+        }
+        Ok(())
+    }
+
+    /// One more user of `feed`, started if it is new or its task ended and there
+    /// is room. Users still on an ended feed see `Closed` and leave.
+    fn join_feed(
+        &self,
+        st: &mut State,
+        feed: &FeedKey,
+    ) -> Result<broadcast::Receiver<FeedEvent>, String> {
+        self.check_feed_room(st, feed)?;
+        if let Some(f) = st.feeds.get_mut(feed) {
+            if let Some(events) = f.events.upgrade() {
+                if f.groups == 0 {
+                    f.epoch += 1;
+                }
+                f.groups += 1;
+                return Ok(events.subscribe());
+            }
+        }
+        st.feed_starts.push_back(std::time::Instant::now());
+        let groups = st.feeds.remove(feed).map_or(0, |f| f.groups);
+        let (events, rx) = broadcast::channel(FEED_BUFFER);
+        let weak = events.downgrade();
+        let task = self.spawn_feed(feed, events);
+        st.feeds.insert(
+            feed.clone(),
+            Feed {
+                groups: groups + 1,
+                events: weak,
+                task,
+                epoch: 0,
+            },
+        );
+        Ok(rx)
+    }
+
+    /// Could `watch_feed` join `key` now?
+    #[cfg(feature = "scripting")]
+    pub fn feed_room(&self, key: &FeedKey) -> Result<(), String> {
+        self.check_feed_room(&mut self.lock(), key)
+    }
+
+    #[cfg(feature = "scripting")]
+    /// The feed serving `symbol` at `timeframe`, or why there is none.
+    pub fn feed_key(&self, symbol: &str, timeframe: &str) -> Result<FeedKey, String> {
+        let interval = self.source.feed_interval(symbol, timeframe)?;
+        Ok((feed_symbol(symbol)?, interval))
+    }
+
+    #[cfg(feature = "scripting")]
+    /// Does `symbol` have bars at `timeframe`? Blocking; one fetch.
+    pub fn check_symbol(&self, symbol: &str, timeframe: &str) -> Result<(), String> {
+        match self.source.seed(symbol, timeframe, 2) {
+            Ok(d) if !d.is_empty() => Ok(()),
+            Ok(_) => Err(format!("no bars for {symbol}")),
+            Err(e) => Err(e),
+        }
+    }
+
+    #[cfg(feature = "scripting")]
+    /// Listen to a feed without a chart (server alerts, ADR-0042): it shares the
+    /// WebSocket with every chart of that symbol and interval, and closes after
+    /// the linger once the lease and all charts are gone.
+    pub fn watch_feed(
+        self: &Arc<Self>,
+        key: &FeedKey,
+    ) -> Result<(broadcast::Receiver<FeedEvent>, FeedLease), String> {
+        let rx = self.join_feed(&mut self.lock(), key)?;
+        let lease = FeedLease {
+            hub: Arc::downgrade(self),
+            key: key.clone(),
+        };
+        Ok((rx, lease))
     }
 
     /// Drop subscription `id` if `token` owns it. True if it did.
@@ -1377,6 +1492,119 @@ mod tests {
             next(&mut rx, 2_000).await.unwrap()["params"]["series"]["bars"][1]["c"],
             7.0
         );
+    }
+
+    #[tokio::test]
+    async fn new_feeds_are_limited_per_minute_and_a_running_one_is_free() {
+        let fake = Arc::new(Fake::default());
+        let hub = hub(
+            &fake,
+            Limits {
+                new_feeds_per_minute: 2,
+                feed_linger: Duration::from_millis(20),
+                ..Limits::default()
+            },
+        );
+        let (tx, _rx) = stream();
+        hub.link_stream("s1", tx);
+        let a = hub
+            .subscribe("t1", "i1", "s1", req("BTCUSDT", "[]"))
+            .unwrap();
+        hub.subscribe("t2", "i2", "s1", req("ETHUSDT", "[]"))
+            .unwrap();
+        let e = hub
+            .subscribe("t3", "i3", "s1", req("SOLUSDT", "[]"))
+            .unwrap_err();
+        assert!(e.starts_with(FEEDS_BUSY), "{e}");
+        assert!(!e.contains(PUSH_LIMIT), "a client would stop retrying: {e}");
+        assert_eq!(fake.started.load(Ordering::SeqCst), 2);
+        // A chart on a feed that runs starts nothing.
+        hub.subscribe("t3", "i3", "s1", req("ETHUSDT", r#"["rsi"]"#))
+            .unwrap();
+        // Closing a feed does not give its start back: churn is what this limits.
+        hub.unsubscribe("t1", &a);
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        assert_eq!(hub.counts().2, 1);
+        let e = hub
+            .subscribe("t1", "i1", "s1", req("BTCUSDT", "[]"))
+            .unwrap_err();
+        assert!(e.starts_with(FEEDS_BUSY), "{e}");
+    }
+
+    #[tokio::test]
+    async fn lingering_feeds_count_toward_the_total() {
+        let fake = Arc::new(Fake::default());
+        let hub = hub(
+            &fake,
+            Limits {
+                feeds_total: 1,
+                feed_linger: Duration::from_secs(30),
+                ..Limits::default()
+            },
+        );
+        let (tx, _rx) = stream();
+        hub.link_stream("s1", tx);
+        let a = hub
+            .subscribe("t1", "i1", "s1", req("BTCUSDT", "[]"))
+            .unwrap();
+        hub.unsubscribe("t1", &a);
+        assert_eq!(hub.counts(), (0, 0, 1), "lingering");
+        let e = hub
+            .subscribe("t1", "i1", "s1", req("ETHUSDT", "[]"))
+            .unwrap_err();
+        assert!(e.starts_with(FEEDS_BUSY), "{e}");
+        assert!(e.contains("maximum of 1 feeds"), "{e}");
+        // The lingering one itself can be taken again.
+        hub.subscribe("t1", "i1", "s1", req("BTCUSDT", "[]"))
+            .unwrap();
+    }
+
+    #[cfg(feature = "scripting")]
+    #[tokio::test]
+    async fn a_watcher_shares_the_charts_feed_and_holds_it_open() {
+        let fake = Arc::new(Fake::default());
+        let hub = hub(
+            &fake,
+            Limits {
+                feed_linger: Duration::from_millis(50),
+                ..Limits::default()
+            },
+        );
+        let (tx, mut rx) = stream();
+        hub.link_stream("s1", tx);
+        let sub = hub
+            .subscribe("tok", "ip", "s1", req("BTCUSDT", "[]"))
+            .unwrap();
+        let key = hub.feed_key("btcusdt", "1m").unwrap();
+        assert_eq!(key, ("BTCUSDT".to_string(), "1m".to_string()));
+        let (mut events, lease) = hub.watch_feed(&key).unwrap();
+        assert_eq!(
+            fake.started.load(Ordering::SeqCst),
+            1,
+            "no second WebSocket"
+        );
+
+        fake.send(FeedEvent::Tick(bar(1_704_067_200, 7.0))).await;
+        let event = tokio::time::timeout(Duration::from_secs(2), events.recv());
+        let Ok(Ok(FeedEvent::Tick(seen))) = event.await else {
+            panic!("the watcher got no tick");
+        };
+        assert_eq!(seen.close, 7.0);
+
+        // The chart leaving does not close a feed that is watched.
+        hub.unsubscribe("tok", &sub);
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        assert_eq!(hub.counts(), (0, 0, 1));
+        assert_eq!(fake.running.load(Ordering::SeqCst), 1);
+
+        // The lease going closes it after the linger, if nobody came back.
+        drop(lease);
+        assert_eq!(hub.counts(), (0, 0, 1));
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        assert_eq!(hub.counts(), (0, 0, 0));
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(fake.running.load(Ordering::SeqCst), 0);
+        while next(&mut rx, 20).await.is_some() {}
     }
 
     #[tokio::test]

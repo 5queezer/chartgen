@@ -10,10 +10,15 @@
 use serde_json::json;
 
 fn main() {
+    let mut result = chartgen::mcp_schema::tools_list_result();
+    result["tools"]
+        .as_array_mut()
+        .unwrap()
+        .extend(chartgen::mcp_schema::server_alert_tools());
     let envelope = json!({
         "jsonrpc": "2.0",
         "id": 1,
-        "result": chartgen::mcp_schema::tools_list_result(),
+        "result": result,
     });
     println!("{}", serde_json::to_string_pretty(&envelope).unwrap());
 }

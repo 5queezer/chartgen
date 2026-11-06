@@ -16,7 +16,11 @@ export default async function globalSetup(config: FullConfig): Promise<void> {
   await Promise.all(
     // Not the sign-in project: gotoApp waits for a token, and there a person has to
     // choose a provider first. signin.spec.ts warms its own server.
-    config.projects.filter((p) => p.name !== "chromium-signin").map(async ({ use: { baseURL } }) => {
+    [
+      ...new Set(
+        config.projects.filter((p) => p.name !== "chromium-signin").map((p) => p.use.baseURL),
+      ),
+    ].map(async (baseURL) => {
       try {
         const page = await browser.newPage({ baseURL });
         page.setDefaultTimeout(WARMUP_TIMEOUT_MS);

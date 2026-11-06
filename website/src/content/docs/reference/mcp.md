@@ -1,6 +1,6 @@
 ---
 title: MCP Integration
-description: Connect chartgen to Claude Desktop or Claude.ai — 19 tools across charting, live chart push, orders, alerts, and notifications.
+description: Connect chartgen to Claude Desktop or Claude.ai — 19 tools across charting, live chart push, orders, alerts, and notifications, plus optional scripted-indicator and server-alert tools.
 ---
 
 chartgen speaks the Model Context Protocol over both stdio (Claude Desktop)
@@ -74,7 +74,9 @@ everyone else ([ADR-0027](/chartgen/decisions/0027-serve-web-app-same-origin/)).
 
 19 tools. The 12 trading tools require `--trade`; attempting to call them
 without it returns an error. With `CHARTGEN_SCRIPTING=1` the server also
-lists the 4 [scripted-indicator tools](#scripted-indicators-chartgen_scripting1).
+lists the 4 [scripted-indicator tools](#scripted-indicators-chartgen_scripting1),
+and with `CHARTGEN_SERVER_ALERTS=1` the 4
+[server alert tools](#server-alerts-chartgen_server_alerts1).
 
 ### Charting (always available)
 
@@ -785,7 +787,10 @@ forming bar, with every indicator recomputed. Merge it like a polled tail.
   server, and 10 `subscribe_chart` calls per token per minute. Over a
   limit the call fails with an error starting with `push limit reached`;
   poll that chart instead. Without an open SSE stream for the session it
-  fails too, and can be retried once the stream is open.
+  fails too, and can be retried once the stream is open. An error starting
+  with `feeds busy` means too many feeds are starting across the server (40 new
+  ones a minute, 96 at once): it passes within a minute, so poll meanwhile and
+  try again.
 - **Lifetime.** A subscription ends with `unsubscribe_chart`, when its
   SSE stream closes, or when the stream falls 256 frames behind (the stream
   is then unlinked). A WebSocket closes 30 s after its last chart goes.
@@ -793,6 +798,154 @@ forming bar, with every indicator recomputed. Merge it like a polled tail.
 `unsubscribe_chart` takes `subscription_id` and returns
 `{ "unsubscribed": true }`, or `false` if the subscription was already gone
 (or belongs to another token).
+
+### Server alerts (`CHARTGEN_SERVER_ALERTS=1`)
+
+Price alerts that run on the server with no browser open, and can call a webhook
+([guide](/chartgen/guides/web/#alerts-on-the-server),
+[ADR-0042](/chartgen/decisions/0042-server-side-alerts/)). These tools are listed only
+when the server runs with `CHARTGEN_SERVER_ALERTS=1` and answer only on the HTTP
+transport: an alert belongs to the OAuth client of the bearer token, and another client
+cannot see or change it. They are unrelated to the `--trade` alert tools above. On a
+server without them `list_server_alerts` returns `{enabled: false, alerts: []}` and the
+others an error. The operator decides who may use them
+([`CHARTGEN_SERVER_ALERT_CLIENTS`](/chartgen/guides/deploy/#server-alerts)): by default anyone
+may create alerts and nobody gets webhooks. `can_create` and `webhooks` in the list say what
+your client may do.
+
+| Tool | Arguments | Result |
+|---|---|---|
+| `create_server_alert` | `symbol`, `condition`, `level`, `trigger`; optional `interval` (default `1m`), `evaluate_on`, `message`, `webhook_url`, `sign` | The alert; `webhook_secret` too, once, with `sign: true` |
+| `list_server_alerts` | — | `{enabled, can_create, webhooks, limits, alerts: [...]}` |
+| `update_server_alert` | `alert_id`; optional `active`, `condition`, `level`, `trigger`, `message`, `webhook_url`, `sign` | The alert; a new `webhook_secret`, once, with `sign: true` |
+| `delete_server_alert` | `alert_id` | `{deleted}`, with any delivery still pending |
+
+- `symbol`: a Binance symbol. A stock is refused. Drawing and indicator alerts cannot
+  run here.
+- `condition`: `crossing`, `crossing_up`, `crossing_down`, `greater`, `less`. A crossing
+  needs a previous reading, so the first price after creating, resuming, editing or a
+  server restart never fires one. `greater` and `less` can fire on it.
+- `trigger`: `once` switches off after firing. `every` stays on; `greater` and `less`
+  wait until the price is back on the other side.
+- `evaluate_on`: `live` (default) reads every price update, and `interval` only labels
+  the alert, so it can be any interval. `close` reads only the closes of `interval`'s bars,
+  which must have a Binance kline stream, so a custom interval is refused.
+- A symbol new to the server is checked with one request, so `create_server_alert` can fail
+  with `Binance rate limit:` like any fetch. Nothing is stored; retry after the wait it names.
+- `update_server_alert`: a new `condition`, `level` or `trigger` switches the alert on and
+  re-arms it. A new `message` or webhook leaves its state alone, so a spent alert stays spent.
+  `active: false` pauses, `active: true` resumes re-armed. `webhook_url: ""` removes the webhook,
+  and a new URL drops the signing secret unless `sign: true` is sent with it. `sign: false` stops
+  signing. Symbol, interval and `evaluate_on` cannot change.
+
+An alert in a list:
+
+```json
+{
+  "id": "61c779cc-a2f2-418c-8965-95f1241994f2",
+  "symbol": "BTCUSDT",
+  "interval": "1h",
+  "evaluate_on": "live",
+  "condition": "crossing",
+  "level": 65000.0,
+  "trigger": "every",
+  "message": "breakout",
+  "active": true,
+  "disarmed": false,
+  "created_at": 1793965350122,
+  "last_triggered_at": 1793965351000,
+  "fire_count": 1,
+  "webhook": { "host": "hooks.example.com", "signed": true },
+  "last_delivery_at": 1793965351131,
+  "last_status": 200,
+  "last_error": null,
+  "feed": "live",
+  "last_price": 65012.5
+}
+```
+
+Times are unix milliseconds. `webhook` shows the host only, never the URL or the secret.
+`feed` is `waiting` when no price arrived for two minutes. `last_status` is the webhook's
+HTTP status, and nothing else of its response is kept. `last_error` is why the last
+delivery failed or was skipped, or that fires are being limited.
+
+Limits: 20 alerts per client and 200 not yet spent in total, 16 symbol and interval pairs
+watched and 2 per client, 10 creates or updates per client per minute, 6 fires per `every` alert
+per minute, 30 webhooks per client and 120 in total per minute. A delivery over those waits its
+turn, up to 50 per client and for up to an hour, with the client that waited longest going first;
+past that the fire still counts and `last_error` says the webhook was skipped.
+
+A spent alert is deleted 7 days after it fired. An alert is deleted once its owner has had no
+token for 30 days, unless the operator listed that client.
+
+#### Webhook URL
+
+Refused when creating, and checked again before every attempt:
+
+- anything but `https` on port 443, or a URL with a user or password, or over 512 bytes;
+- an address that is loopback, private, link-local, CGNAT, multicast, reserved, documentation
+  or a cloud metadata address, on IPv4 or IPv6, in any spelling (`2130706433`,
+  `[::ffff:127.0.0.1]`), IPv6 outside global unicast or in the 6to4, Teredo and NAT64 ranges, or
+  in a prefix the operator blocked;
+- a name with no dot, or under a private suffix such as `.internal` or `.docker`;
+- a host this server fetches from (Binance, Yahoo, alternative.me) or its own host;
+- a name with any refused address among its answers. That reads the same as a name that does not
+  resolve: `webhook host does not resolve to a public address`.
+
+The connection is pinned to the addresses checked, unless the operator sends webhooks through a
+proxy, which then resolves and connects itself. Redirects are not followed: a 3xx is
+a failure. Each attempt has 5 s; a timeout, connection failure, 5xx or 429 is retried
+twice, after 2 s and 8 s; other answers are final.
+
+#### Webhook payload
+
+`POST` with `Content-Type: application/json`:
+
+```json
+{
+  "id": "d99a10e1-d742-4b79-9ccc-f75169944c6a",
+  "type": "alert.fired",
+  "alert_id": "61c779cc-a2f2-418c-8965-95f1241994f2",
+  "symbol": "BTCUSDT",
+  "interval": "1h",
+  "evaluate_on": "live",
+  "condition": "crossing",
+  "level": 65000.0,
+  "price": 65010.5,
+  "trigger": "every",
+  "message": "breakout",
+  "bar_time": 1793962800,
+  "fired_at": 1793965351000
+}
+```
+
+`bar_time` is the bar's open in unix seconds, `fired_at` unix milliseconds, `message` may
+be `null`. Delivery is at least once: a restart resumes an unfinished delivery for up to
+an hour, so deduplicate on `id`. Any 2xx counts as received; the body of the response is
+never read.
+
+| Header | Value |
+|---|---|
+| `X-Chartgen-Event` | The event `id` |
+| `X-Chartgen-Timestamp` | Unix seconds of this attempt |
+| `X-Chartgen-Signature` | `sha256=<hex>`, only with `sign: true` |
+| `User-Agent` | `chartgen-webhook/1` |
+
+The signature is HMAC-SHA256 with the alert's secret over `<timestamp>.<raw body>`. To
+verify, compute it over the bytes you received, compare in constant time, and refuse an
+old timestamp to stop replays:
+
+```python
+import hashlib, hmac
+
+def verify(secret: str, timestamp: str, body: bytes, signature: str) -> bool:
+    signed = timestamp.encode() + b"." + body
+    mac = hmac.new(secret.encode(), signed, hashlib.sha256).hexdigest()
+    return hmac.compare_digest(f"sha256={mac}", signature)
+```
+
+The secret is shown once and is never logged or returned again; `sign: true` on
+`update_server_alert` replaces it.
 
 ### Scripted indicators (`CHARTGEN_SCRIPTING=1`)
 

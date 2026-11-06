@@ -1,0 +1,20 @@
+{
+  "_comment": "Fire semantics of a price alert, run by both the browser (web/src/stores/alerts.test.ts) and the server (src/server_alerts.rs), so they cannot drift. Each case feeds `prices` to one alert; `null` is a gap, after which the next price is only a new baseline. `fires` lists the indexes into `prices` that fire; `active` is the alert's state at the end.",
+  "cases": [
+    { "name": "a crossing needs a previous reading", "condition": "crossing", "trigger": "every", "level": 100, "prices": [101], "fires": [], "active": true },
+    { "name": "crossing up from below", "condition": "crossing", "trigger": "once", "level": 100, "prices": [99, 101], "fires": [1], "active": false },
+    { "name": "crossing down from above", "condition": "crossing", "trigger": "once", "level": 100, "prices": [101, 99], "fires": [1], "active": false },
+    { "name": "landing on the level counts", "condition": "crossing", "trigger": "every", "level": 100, "prices": [99, 100], "fires": [1], "active": true },
+    { "name": "leaving the level is not a cross", "condition": "crossing", "trigger": "every", "level": 100, "prices": [100, 101, 102], "fires": [], "active": true },
+    { "name": "once stops after the first fire", "condition": "crossing", "trigger": "once", "level": 100, "prices": [99, 101, 99, 101], "fires": [1], "active": false },
+    { "name": "every fires on each new cross", "condition": "crossing", "trigger": "every", "level": 100, "prices": [99, 101, 102, 99, 101], "fires": [1, 3, 4], "active": true },
+    { "name": "crossing up ignores falls", "condition": "crossing_up", "trigger": "every", "level": 100, "prices": [101, 99, 100, 99, 101], "fires": [2, 4], "active": true },
+    { "name": "crossing down ignores rises", "condition": "crossing_down", "trigger": "every", "level": 100, "prices": [99, 101, 100, 101, 99], "fires": [2, 4], "active": true },
+    { "name": "greater fires on the first reading", "condition": "greater", "trigger": "once", "level": 100, "prices": [101, 102], "fires": [0], "active": false },
+    { "name": "greater is strict", "condition": "greater", "trigger": "every", "level": 100, "prices": [100, 99], "fires": [], "active": true },
+    { "name": "every greater waits to be re-armed", "condition": "greater", "trigger": "every", "level": 100, "prices": [101, 102, 103, 100, 101, 102], "fires": [0, 4], "active": true },
+    { "name": "every less waits to be re-armed", "condition": "less", "trigger": "every", "level": 100, "prices": [99, 98, 100, 99], "fires": [0, 3], "active": true },
+    { "name": "a gap starts the baseline over", "condition": "crossing", "trigger": "every", "level": 100, "prices": [99, null, 101, 99], "fires": [3], "active": true },
+    { "name": "a gap does not re-arm", "condition": "greater", "trigger": "every", "level": 100, "prices": [101, null, 102], "fires": [0], "active": true }
+  ]
+}
