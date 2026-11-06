@@ -978,8 +978,10 @@ On a server started with `CHARTGEN_SCRIPTING=1`, a **Scripts** button (`{ }` on
 smaller windows) sits next to **Indicators**, and the indicator picker links to
 the same panel. Without that flag none of this appears
 ([ADR-0041](/chartgen/decisions/0041-script-editor-in-the-web-app/)). The
-panel opens under the chart, or over the whole window below 768 px of width
-or 720 px of height. See
+panel opens under the chart. On the compact layout it takes the whole screen, clear
+of notches and fitted above the on-screen keyboard, and opens from the indicator
+picker, since the header has no room for its button. Any other window below 720 px
+of height gets the full screen too. See
 [Scripted indicators](/chartgen/guides/scripted-indicators/) for the language
 and for why scripting is for trusted deployments only.
 

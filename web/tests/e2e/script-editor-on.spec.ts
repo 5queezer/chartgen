@@ -6,7 +6,7 @@ import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 
 import { expect, gotoApp, reloadApp, test } from "./fixtures/app";
-import type { Page } from "@playwright/test";
+import { devices, type Page } from "@playwright/test";
 
 const code = (page: Page) => page.locator("[data-testid=script-code] .cm-content");
 const lines = (page: Page) => page.locator("[data-testid=script-code] .cm-line");
@@ -874,6 +874,11 @@ test.describe("panel size", () => {
       // Nothing of the chart's side reaches into the panel.
       const main = (await page.locator("main").boundingBox())!;
       expect(main.y + main.height).toBeLessThanOrEqual(panel.y);
+      // A mouse keeps the compact controls and the editor's own text size.
+      expect((await page.getByTestId("script-save").boundingBox())!.height).toBeLessThan(40);
+      expect(await code(page).evaluate((el) => getComputedStyle(el).fontSize)).toBe("13px");
+      // Docked, the chart may shrink; the rule is scoped away from the compact shell.
+      expect(await page.locator(".chart-host").evaluate((el) => getComputedStyle(el).minHeight)).toBe("120px");
       // The drawing toolbar still fits: its last button is not cut off.
       const last = (await page.getByRole("button", { name: "Remove all drawings" }).boundingBox())!;
       expect(last.y + last.height).toBeLessThanOrEqual(main.y + main.height);
@@ -910,6 +915,164 @@ test("a failed tools/list at boot does not hide the editor for the session", asy
   await gotoApp(page);
   await expect(page.getByTestId("script-editor-open")).toBeVisible({ timeout: 10_000 });
   expect(failures).toBe(1);
+});
+
+/** A device's context options; the suite only runs Chromium. */
+const device = (name: string) => {
+  const { defaultBrowserType: _browser, ...options } = devices[name]!;
+  return options;
+};
+
+/** Boot at a size where the status text is hidden: wait for the panes instead. */
+async function bootPhone(page: Page): Promise<void> {
+  const exchanged = page.waitForResponse(
+    (res) => res.request().method() === "POST" && new URL(res.url()).pathname === "/token",
+  );
+  await page.goto("/");
+  expect((await exchanged).ok()).toBe(true);
+  await page.waitForURL((url) => !url.searchParams.has("code"));
+  await expect(page.locator(".pane-header").first()).toBeVisible({ timeout: 20_000 });
+}
+
+/** Open the panel the only way a phone can: from the indicator picker. */
+async function openOnPhone(page: Page): Promise<void> {
+  await expect(page.getByTestId("script-editor-open")).toBeHidden();
+  await page.getByTitle("Indicators", { exact: true }).tap();
+  await page.getByTestId("picker-script-editor").tap();
+  await expect(page.getByTestId("script-editor")).toBeVisible({ timeout: 30_000 });
+  await expect(code(page)).toContainText("PARAMS");
+}
+
+const inViewport = async (page: Page, id: string) => {
+  const box = (await page.getByTestId(id).boundingBox())!;
+  const { width, height } = page.viewportSize()!;
+  return box.x >= 0 && box.y >= 0 && box.x + box.width <= width && box.y + box.height <= height;
+};
+
+test.describe("on the compact shell", () => {
+  const DEVICES = [
+    { name: "iPhone 13", use: device("iPhone 13"), minCode: 300 },
+    { name: "iPhone 13 landscape", use: device("iPhone 13 landscape"), minCode: 180 },
+    { name: "Pixel 7", use: device("Pixel 7"), minCode: 300 },
+    { name: "Pixel 7 landscape", use: device("Pixel 7 landscape"), minCode: 180 },
+    {
+      name: "360x640 phone",
+      use: { viewport: { width: 360, height: 640 }, isMobile: true, hasTouch: true },
+      minCode: 250,
+    },
+    // Wide and tall: only `compact` makes these two full screen, no size query would.
+    { name: "iPad Mini", use: device("iPad Mini"), minCode: 500 },
+    {
+      name: "1000x800 touch tablet",
+      use: { viewport: { width: 1000, height: 800 }, isMobile: true, hasTouch: true },
+      minCode: 400,
+    },
+  ];
+
+  for (const { name, use, minCode } of DEVICES) {
+    test.describe(name, () => {
+      test.use(use);
+
+      test("the panel fills the screen and works by touch", async ({ page }) => {
+        await bootPhone(page);
+        expect(await page.evaluate(() => document.documentElement.classList.contains("compact"))).toBe(true);
+        await openOnPhone(page);
+
+        const { width, height } = page.viewportSize()!;
+        const panel = page.getByTestId("script-editor");
+        expect(await panel.boundingBox()).toEqual({ x: 0, y: 0, width, height });
+        expect(await panel.evaluate((el) => el.scrollWidth <= el.clientWidth)).toBe(true);
+        expect(await panel.evaluate((el) => el.scrollHeight <= el.clientHeight)).toBe(true);
+        for (const id of ["script-new", "script-name", "script-save", "script-add", "script-close", "script-docs"]) {
+          expect(await inViewport(page, id), id).toBe(true);
+        }
+        expect((await page.getByTestId("script-code").boundingBox())!.height).toBeGreaterThan(minCode);
+        for (const id of ["script-new", "script-save", "script-add", "script-close"]) {
+          const box = (await page.getByTestId(id).boundingBox())!;
+          expect(Math.min(box.width, box.height), id).toBeGreaterThanOrEqual(40);
+        }
+        expect(await code(page).evaluate((el) => getComputedStyle(el).fontSize)).toBe("16px");
+        // The compact shell's own rule stands: nothing forces the chart taller.
+        expect(await page.locator(".chart-host").evaluate((el) => getComputedStyle(el).minHeight)).toBe("0px");
+        // Nothing of the shell is on top of the panel.
+        expect(
+          await page.getByTestId("script-close").evaluate((el) => {
+            const r = el.getBoundingClientRect();
+            return el.contains(document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2));
+          }),
+        ).toBe(true);
+
+        await page.getByTestId("script-name").fill("touch_one");
+        if (process.env.SCRIPT_EDITOR_SHOTS) {
+          await setCode(page, script("    y = 1 // 0"));
+          await page.getByTestId("script-save").tap();
+          await expect(page.getByTestId("script-errors")).toBeVisible();
+          await page.screenshot({
+            path: join(process.env.SCRIPT_EDITOR_SHOTS, `phone-${name.replace(/\W+/g, "-")}.png`),
+          });
+          await setCode(page, script('    chart.line(1.0, title = "Shot")'));
+        }
+        await page.getByTestId("script-save").tap();
+        await expect(page.getByTestId("script-status")).toHaveText("Saved.");
+        await page.getByTestId("script-add").tap();
+        await expect.poll(() => plotted(page, "touch_one"), { timeout: 30_000 }).not.toBeNull();
+
+        // Delete asks in a dialog that fits, then the chart is back.
+        await page.getByTestId("script-delete").tap();
+        expect(await inViewport(page, "script-delete-confirm")).toBe(true);
+        expect((await page.getByTestId("script-delete-confirm").boundingBox())!.height).toBeGreaterThanOrEqual(40);
+        await page.getByTestId("script-delete-confirm").tap();
+        await expect(page.getByTestId("script-status")).toHaveText("Deleted touch_one.");
+        await page.getByTestId("script-close").tap();
+        await expect(panel).toHaveCount(0);
+        await expect(page.locator(".chart-host")).toBeVisible();
+      });
+    });
+  }
+
+  test.describe("iPhone 13 with its insets and keyboard", () => {
+    test.use(device("iPhone 13"));
+
+    test("stays clear of the notch and the home indicator", async ({ page }) => {
+      await bootPhone(page);
+      const cdp = await page.context().newCDPSession(page);
+      await cdp.send("Emulation.setSafeAreaInsetsOverride", {
+        insets: { top: 47, bottom: 34, left: 0, right: 0 },
+      });
+      await openOnPhone(page);
+      const { height } = page.viewportSize()!;
+      const close = (await page.getByTestId("script-close").boundingBox())!;
+      expect(close.y).toBeGreaterThanOrEqual(47);
+      const editor = (await page.getByTestId("script-code").boundingBox())!;
+      expect(editor.y + editor.height).toBeLessThanOrEqual(height - 34);
+    });
+
+    test("fits what the on-screen keyboard leaves visible", async ({ page }) => {
+      await bootPhone(page);
+      await openOnPhone(page);
+      // What lib/viewport.ts sets from the visual viewport when a keyboard opens:
+      // the emulator has no real keyboard to open.
+      await page.evaluate(() => {
+        document.documentElement.style.setProperty("--vvh", "400px");
+        document.documentElement.style.setProperty("--vvt", "20px");
+      });
+      const panel = (await page.getByTestId("script-editor").boundingBox())!;
+      expect(panel.y).toBe(20);
+      expect(panel.height).toBe(400);
+
+      await page.getByTestId("script-name").fill("kb_one");
+      await setCode(page, script("    y = 1 // 0"));
+      await page.getByTestId("script-save").tap();
+      const errors = page.getByTestId("script-errors");
+      await expect(errors).toContainText("Line 5");
+      // The error and the code above it stay above the keyboard.
+      const list = (await errors.boundingBox())!;
+      expect(list.y + list.height).toBeLessThanOrEqual(420);
+      const editor = (await page.getByTestId("script-code").boundingBox())!;
+      expect(editor.height).toBeGreaterThan(80);
+      await expect(page.locator("[data-testid=script-code] .cm-script-error-line")).toBeVisible();
+    });
+  });
 });
 
 test.describe("at 390 px", () => {

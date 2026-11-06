@@ -132,8 +132,12 @@ reload starts a new generation, which resets the poll backoff, reloads are also
 capped per chart: 3 in 5 minutes.
 
 **Layout.** A dock below the bottom bar shrinks the chart, so the chart stays
-visible while editing, at up to 45% of the window. Below 768 px of width or 720 px
-of height there is no room for both, and plain CSS makes it a full-screen panel.
+visible while editing, at up to 45% of the window. On the compact shell
+([ADR-0039](/chartgen/decisions/0039-compact-layout/)), and in any other window below
+720 px of height, there is no room for both: plain CSS makes it a full-screen panel,
+with `--vvh` and `--vvt` for what the on-screen keyboard leaves visible and padding
+for the safe area. The docked rules are scoped with `html:not(.compact)`. Touch gets
+the app's 40 px targets and 16 px text, so iOS does not zoom into the editor.
 
 ### Consequences
 

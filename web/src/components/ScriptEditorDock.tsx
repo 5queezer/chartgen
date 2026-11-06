@@ -23,7 +23,7 @@ export function ScriptEditorButton(): JSX.Element {
       aria-pressed={open()}
       data-testid="script-editor-open"
       title="Script editor"
-      class="bg-[color:var(--color-bg-elev)] border border-[color:var(--color-border)] text-[color:var(--color-fg)] px-3 py-1.5 rounded-md text-sm hover:border-[color:var(--color-accent)] cursor-pointer inline-flex items-center gap-2 shrink-0 max-[767px]:hidden"
+      class="bg-[color:var(--color-bg-elev)] border border-[color:var(--color-border)] text-[color:var(--color-fg)] px-3 py-1.5 rounded-md text-sm hover:border-[color:var(--color-accent)] cursor-pointer inline-flex items-center gap-2 shrink-0 compact:hidden"
     >
       <span class="max-[1399px]:sr-only">Scripts</span>
       <span aria-hidden="true" class="font-mono leading-none min-[1400px]:hidden">{"{ }"}</span>
