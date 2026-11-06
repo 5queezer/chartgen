@@ -756,6 +756,15 @@ fn spawn_server_on(
     db: &std::path::Path,
     scripting: bool,
 ) -> Server {
+    start_server(server_command(port, web_dir, db, scripting), port)
+}
+
+fn server_command(
+    port: u16,
+    web_dir: Option<&std::path::Path>,
+    db: &std::path::Path,
+    scripting: bool,
+) -> std::process::Command {
     let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_chartgen"));
     cmd.args(["--serve", "--port", &port.to_string()])
         .env_remove("CHARTGEN_WEB_DIR")
@@ -770,6 +779,10 @@ fn spawn_server_on(
     if scripting {
         cmd.env("CHARTGEN_SCRIPTING", "1");
     }
+    cmd
+}
+
+fn start_server(mut cmd: std::process::Command, port: u16) -> Server {
     let server = Server {
         child: cmd.spawn().unwrap(),
         port,
@@ -1400,12 +1413,30 @@ fn test_busy_store_does_not_stall_authenticated_calls_at_a_full_table() {
 fn test_unopenable_store_is_not_fatal() {
     let db = store_path("no-store");
     std::fs::write(&db, "a file, not a directory").unwrap();
+    let unopenable = db.join("chartgen.db");
+    let dir = db.parent().unwrap();
+    let (log, home) = (dir.join("stderr.log"), dir.join("home"));
+    std::fs::create_dir(&home).unwrap();
     let port = free_port();
-    let srv = spawn_server_on(port, None, &db.join("chartgen.db"), false);
+    let mut cmd = server_command(port, None, &unopenable, false);
+    cmd.stderr(std::fs::File::create(&log).unwrap())
+        .env("HOME", &home);
+    let srv = start_server(cmd, port);
     let client = register_external(port);
     sign_in(port, &client);
     drop(srv);
-    let _ = std::fs::remove_dir_all(db.parent().unwrap());
+
+    // It tried the configured path, and did not fall back to the default one.
+    assert!(
+        !home.join(".chartgen/chartgen.db").exists(),
+        "the server ignored CHARTGEN_DB"
+    );
+    if cfg!(feature = "scripting") {
+        let log = std::fs::read_to_string(&log).unwrap();
+        let expected = format!("cannot open {}", unopenable.display());
+        assert!(log.contains(&expected), "{log}");
+    }
+    let _ = std::fs::remove_dir_all(dir);
 }
 
 /// `/register` refuses schemes a browser would run, and keeps the native ones
