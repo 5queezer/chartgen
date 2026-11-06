@@ -3726,7 +3726,7 @@ mod tests {
 
     use fetch::DataSource::Sample;
 
-    fn series_of(args: Value) -> Value {
+    fn flow_series(args: Value) -> Value {
         let resp = generate_chart(Some(json!(1)), &args, Sample, None);
         assert!(!is_error(&resp), "{resp}");
         serde_json::from_str(chart_content(&resp)[0]["text"].as_str().unwrap()).unwrap()
@@ -3747,7 +3747,7 @@ mod tests {
         assert_eq!(fp["row_auto"], true);
         let list = fp["footprints"].as_array().unwrap();
         assert_eq!(list.len(), 5);
-        let chart = series_of(json!({ "ticker": "BTCUSDT", "timeframe": "1h", "bars": 5,
+        let chart = flow_series(json!({ "ticker": "BTCUSDT", "timeframe": "1h", "bars": 5,
             "end_time": 1_699_920_000_000i64, "format": "series", "indicators": [] }));
         for (f, bar) in list.iter().zip(chart["bars"].as_array().unwrap()) {
             assert_eq!(f["t"], bar["t"]);
@@ -4080,7 +4080,7 @@ mod tests {
             if let Some(ask) = ask {
                 args["profile_intrabars"] = json!(ask);
             }
-            series_of(args)
+            flow_series(args)
         };
         let end = 1_699_920_000_000i64;
         let load = series(100, Some(true), end);
@@ -4148,7 +4148,7 @@ mod tests {
     #[test]
     fn a_session_profile_has_the_values_of_its_load_on_a_tail() {
         let lines = |bars: u64, ask: bool| {
-            let s = series_of(
+            let s = flow_series(
                 json!({ "ticker": "BTCUSDT", "timeframe": "1h", "bars": bars,
                 "warmup": 300, "format": "series", "indicators": ["session_vp"],
                 "profile_intrabars": ask, "end_time": 1_699_920_000_000i64 }),
@@ -4173,7 +4173,7 @@ mod tests {
     #[test]
     fn a_session_profile_keeps_a_value_on_every_bar_of_every_session() {
         for (timeframe, bars, per_session) in [("1h", 96, 24), ("4h", 60, 6), ("12h", 30, 2)] {
-            let s = series_of(
+            let s = flow_series(
                 json!({ "ticker": "BTCUSDT", "timeframe": timeframe, "bars": bars,
                 "format": "series", "indicators": ["session_vp"], "warmup": 300,
                 "end_time": 1_699_920_000_000i64 }),
@@ -4212,7 +4212,7 @@ mod tests {
     #[test]
     fn range_profiles_only_count_their_range() {
         let series = |ind: Value| {
-            series_of(
+            flow_series(
                 json!({ "ticker": "BTCUSDT", "timeframe": "1h", "bars": 48, "format": "series",
                 "indicators": [ind], "end_time": 1_699_920_000_000i64 }),
             )
