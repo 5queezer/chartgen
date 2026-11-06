@@ -35,8 +35,8 @@ export interface IndicatorSettingsProps {
   /** Indicator being edited, or null when the dialog is closed. */
   target: {
     name: string;
-    /** Dialog title when it differs from `name`, e.g. `RSI (21)` for a repeated indicator. */
-    title?: string;
+    /** Dialog title: the chip's name, e.g. `BB`, or `RSI (21)` for a repeated indicator. */
+    title: string;
     params: Record<string, unknown>;
     style: IndicatorStyle | undefined;
     hidden: boolean;
@@ -615,7 +615,7 @@ export function IndicatorSettings(props: IndicatorSettingsProps): JSX.Element {
                   fallback={
                     <div class="flex flex-col gap-3 p-4">
                       <Dialog.Title class="text-sm font-semibold">
-                        {t.title ?? t.name}
+                        {t.title}
                       </Dialog.Title>
                       <p class="text-sm text-[color:var(--color-fg-muted)]">
                         Settings unavailable: the indicator list is loading or
@@ -638,7 +638,7 @@ export function IndicatorSettings(props: IndicatorSettingsProps): JSX.Element {
                 >
                   {(specs) => (
                     <SettingsForm
-                      name={t.title ?? t.name}
+                      name={t.title}
                       params={t.params}
                       style={t.style}
                       hidden={t.hidden}
