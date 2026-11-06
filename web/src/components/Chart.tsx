@@ -1116,27 +1116,38 @@ export function Chart(props: ChartProps): JSX.Element {
     // crosshair is over a pane (it checks `isString(crosshair.paneId)`),
     // which means we never see an event when the mouse leaves the
     // chart. A mouseleave listener on the host clears the state.
+    // Nor does it fire when the pointer moves onto an axis or separator (it
+    // only clears its own crosshair), or when a zoom, scroll or new bar moves
+    // the bars under a resting one. So the x is kept and read back on each.
+    let crosshairX: number | null = null;
+    const followCrosshair = () => {
+      const x = crosshairX;
+      const [point] =
+        x === null
+          ? []
+          : (c!.convertFromPixel([{ x }], { paneId: CANDLE_PANE_ID }) as { dataIndex?: number }[]);
+      const real = point?.dataIndex;
+      if (typeof real !== "number") {
+        setCrosshairIndex(null);
+        return;
+      }
+      // Right of the last bar klinecharts clamps `dataIndex` to it; over
+      // a projection (ADR-0033) the real index reads the future values.
+      const series = props.series;
+      const shown = Object.keys(untrack(paneIds));
+      const last = c!.getDataList().length - 1;
+      setCrosshairIndex(
+        series && inProjection(series, shown, real)
+          ? real
+          : Math.max(0, Math.min(last, real)),
+      );
+    };
     const onCrosshair = (data?: unknown) => {
-      if (crosshairFrame !== null) return;
-      const payload = data as
-        | { dataIndex?: number; realDataIndex?: number; paneId?: string }
-        | undefined;
-      crosshairFrame = requestAnimationFrame(() => {
+      const x = (data as { x?: number } | undefined)?.x;
+      crosshairX = typeof x === "number" ? x : null;
+      crosshairFrame ??= requestAnimationFrame(() => {
         crosshairFrame = null;
-        if (!payload || typeof payload.dataIndex !== "number") {
-          setCrosshairIndex(null);
-          return;
-        }
-        // Right of the last bar klinecharts clamps `dataIndex` to it; over
-        // a projection (ADR-0033) the real index reads the future values.
-        const real = payload.realDataIndex;
-        const series = props.series;
-        const shown = Object.keys(untrack(paneIds));
-        setCrosshairIndex(
-          typeof real === "number" && series && inProjection(series, shown, real)
-            ? real
-            : payload.dataIndex,
-        );
+        followCrosshair();
       });
     };
     // Use the string form of the action type to avoid pulling in the
@@ -1155,16 +1166,29 @@ export function Chart(props: ChartProps): JSX.Element {
         batch(() => {
           setFirstVisible(from);
           setLastVisible(to);
+          followCrosshair();
         });
       });
     };
     c!.subscribeAction("onVisibleRangeChange" as never, onRange);
-    const onLeave = () => setCrosshairIndex(null);
+    const onLeave = () => {
+      crosshairX = null;
+      setCrosshairIndex(null);
+    };
+    const onMove = (e: MouseEvent) => {
+      const panes = [CANDLE_PANE_ID, ...Object.values(untrack(paneIds))];
+      const inMain = panes.some((id) =>
+        c!.getDom(id, "main" as never)?.contains(e.target as Node),
+      );
+      if (!inMain) onLeave();
+    };
     host.addEventListener("mouseleave", onLeave);
+    host.addEventListener("mousemove", onMove);
     onCleanup(() => {
       c!.unsubscribeAction("onCrosshairChange" as never, onCrosshair);
       c!.unsubscribeAction("onVisibleRangeChange" as never, onRange);
       host.removeEventListener("mouseleave", onLeave);
+      host.removeEventListener("mousemove", onMove);
       if (crosshairFrame !== null) cancelAnimationFrame(crosshairFrame);
       if (rangeFrame !== null) cancelAnimationFrame(rangeFrame);
     });

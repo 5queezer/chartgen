@@ -216,3 +216,58 @@ test.describe("loading the active layout", () => {
     expect(loads).toBe(0);
   });
 });
+
+test.describe("legend after a keyboard zoom", () => {
+  /** Close of the bar at x (host pixels) or of the last bar, as the legend prints it. */
+  const closeAt = (page: Page, x: number | null) =>
+    page.evaluate((px) => {
+      const hook = (window as unknown as { __chartgenTest: Hook }).__chartgenTest;
+      const c = hook.chart()!;
+      const data = c.getDataList();
+      const i =
+        px === null
+          ? data.length - 1
+          : Math.min(data.length - 1, c.convertFromPixel([{ x: px }], { paneId: "candle_pane" })[0]!.dataIndex);
+      return { i, close: data[i]!.close };
+    }, x);
+  const legendClose = async (page: Page) =>
+    Number((await page.getByTestId("legend-c").innerText()).replaceAll(",", ""));
+
+  test("follows the bar under a resting crosshair", async ({ bootedApp: page }) => {
+    const box = (await page.locator(".chart-host").boundingBox())!;
+    const x = 200;
+    await page.mouse.move(box.x + x, box.y + box.height / 3);
+    const before = await closeAt(page, x);
+    await expect.poll(() => legendClose(page)).toBeCloseTo(before.close, 2);
+
+    for (let n = 0; n < 4; n++) await page.keyboard.press("ArrowUp");
+    const after = await closeAt(page, x);
+    expect(after.i).toBeGreaterThan(before.i);
+    await expect.poll(() => legendClose(page)).toBeCloseTo(after.close, 2);
+  });
+
+  test("reads the last bar once the pointer is on the price axis", async ({
+    bootedApp: page,
+  }) => {
+    const box = (await page.locator(".chart-host").boundingBox())!;
+    await page.mouse.move(box.x + 200, box.y + box.height / 3);
+    const hovered = await closeAt(page, 200);
+    await expect.poll(() => legendClose(page)).toBeCloseTo(hovered.close, 2);
+
+    await page.mouse.move(box.x + box.width - 20, box.y + box.height / 3);
+    const last = await closeAt(page, null);
+    expect(last.i).not.toBe(hovered.i);
+    await expect.poll(() => legendClose(page)).toBeCloseTo(last.close, 2);
+    await page.keyboard.press("ArrowUp");
+    await expect.poll(() => legendClose(page)).toBeCloseTo(last.close, 2);
+  });
+
+  test("reads the last bar with the pointer off the chart", async ({ bootedApp: page }) => {
+    const box = (await page.locator(".chart-host").boundingBox())!;
+    await page.mouse.move(box.x + 200, box.y + box.height / 3);
+    await page.mouse.move(box.x + box.width / 2, 2);
+    await page.keyboard.press("ArrowUp");
+    const last = await closeAt(page, null);
+    await expect.poll(() => legendClose(page)).toBeCloseTo(last.close, 2);
+  });
+});
