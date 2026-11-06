@@ -5,7 +5,7 @@ use std::collections::{HashMap, HashSet};
 use std::io::{self, BufRead, Write};
 use std::sync::{Arc, RwLock};
 
-use crate::chart_push::{ChartRequest, PushCtx, MAX_INDICATORS, PUSH_LIMIT};
+use crate::chart_push::{ChartRequest, PushCtx, MAX_INDICATORS, NOT_PUSHABLE, PUSH_LIMIT};
 use crate::fetch;
 use crate::search;
 use chartgen::data;
@@ -190,7 +190,7 @@ fn call_tool(
         "subscribe_notifications" => tool_subscribe_notifications(id, &arguments, engine, token),
         "unsubscribe_notifications" => tool_unsubscribe_notifications(id, engine, token),
         "list_subscriptions" => tool_list_subscriptions(id, engine, token),
-        "subscribe_chart" => tool_subscribe_chart(id, &arguments, push, token),
+        "subscribe_chart" => tool_subscribe_chart(id, &arguments, push, token, user),
         "unsubscribe_chart" => tool_unsubscribe_chart(id, &arguments, push, token),
         #[cfg(feature = "scripting")]
         "register_indicator" if scripting => tool_register_indicator(id, &arguments, user),
@@ -198,6 +198,8 @@ fn call_tool(
         "fork_indicator" if scripting => tool_fork_indicator(id, &arguments),
         #[cfg(feature = "scripting")]
         "list_my_indicators" if scripting => tool_list_my_indicators(id, user),
+        #[cfg(feature = "scripting")]
+        "get_my_indicator" if scripting => tool_get_my_indicator(id, &arguments, user),
         #[cfg(feature = "scripting")]
         "delete_indicator" if scripting => tool_delete_indicator(id, &arguments, user),
         _ => json!({
@@ -212,13 +214,29 @@ fn call_tool(
 }
 
 /// Parse panels array: each element can be a string ("rsi") or an object ({"name": "rsi", "length": 21}).
-/// Returns (indicators, instance-keys-in-order, unknown-names, invalid-parameter messages).
+/// Returns (indicators, instance-keys-in-order, unknown-names, invalid-parameter
+/// messages, per-key errors). With a `user`, a name nobody knows may be a script
+/// that was deleted or belongs to a previous client, and a script's params may no
+/// longer fit its new schema: those fail only their key, under `indicator_errors`
+/// (ADR-0041). Without one, and for a built-in's params, they fail the request.
 type ParsedPanels = (
     Vec<Box<dyn Indicator>>,
     Vec<String>,
     Vec<String>,
     Vec<String>,
+    Vec<(String, Value)>,
 );
+
+fn key_error(step: &str, message: String) -> Value {
+    json!({ "step": step, "line": null, "message": message })
+}
+
+fn unknown_key_error(name: &str) -> Value {
+    key_error(
+        "unknown",
+        format!("Unknown indicator: {name}. It is not one of your scripts or a built-in."),
+    )
+}
 
 /// Longest accepted instance `id` (ADR-0028).
 const MAX_INSTANCE_ID: usize = 64;
@@ -299,13 +317,14 @@ fn instance_keys(arr: &[Value]) -> Result<Vec<Option<String>>, String> {
 fn parse_panels(panels_value: &Value, user: Option<&str>) -> ParsedPanels {
     let arr = match panels_value.as_array() {
         Some(a) => a,
-        None => return (vec![], vec![], vec![], vec![]),
+        None => return (vec![], vec![], vec![], vec![], vec![]),
     };
     let instance = match instance_keys(arr) {
         Ok(k) => k,
-        Err(e) => return (vec![], vec![], vec![], vec![e]),
+        Err(e) => return (vec![], vec![], vec![], vec![e], vec![]),
     };
     let mut invalid = Vec::new();
+    let mut per_key = Vec::new();
 
     let mut result: Vec<Box<dyn Indicator>> = Vec::new();
     let mut keys: Vec<String> = Vec::new();
@@ -320,6 +339,7 @@ fn parse_panels(panels_value: &Value, user: Option<&str>) -> ParsedPanels {
                     result.push(ind);
                     keys.push(key);
                 }
+                None if user.is_some() => per_key.push((key, unknown_key_error(name))),
                 None => errors.push(name.to_string()),
             }
         } else if let Some(obj) = item.as_object() {
@@ -336,13 +356,26 @@ fn parse_panels(panels_value: &Value, user: Option<&str>) -> ParsedPanels {
                     result.push(ind);
                     keys.push(key);
                 }
+                Ok(None) if user.is_some() => per_key.push((key, unknown_key_error(name))),
                 Ok(None) => errors.push(name.to_string()),
+                Err(msg) if indicators::is_user_script(name, user) => {
+                    per_key.push((key, key_error("params", msg)));
+                }
                 Err(msg) => invalid.push(msg),
             }
         }
     }
 
-    (result, keys, errors, invalid)
+    (result, keys, errors, invalid, per_key)
+}
+
+/// Whether an entry of a chart's indicators resolves to `user`'s own script.
+fn names_user_script(indicators: &Value, user: Option<&str>) -> bool {
+    indicators.as_array().into_iter().flatten().any(|item| {
+        item.as_str()
+            .or_else(|| item.get("name").and_then(|n| n.as_str()))
+            .is_some_and(|name| indicators::is_user_script(name, user))
+    })
 }
 
 /// Upper bound for `bars`: Binance pagination costs one upstream request per
@@ -494,7 +527,8 @@ fn generate_chart(
             &format!("At most {MAX_CHART_INDICATORS} indicators per chart."),
         );
     }
-    let (panel_indicators, indicator_keys, unknown, invalid) = parse_panels(&panels_value, user);
+    let (panel_indicators, indicator_keys, unknown, invalid, per_key) =
+        parse_panels(&panels_value, user);
     if let Err(e) = check_panels(&unknown, &invalid) {
         return tool_err(id, &e);
     }
@@ -548,6 +582,7 @@ fn generate_chart(
     // An indicator that fails (a user script, ADR-0025) is left out and
     // reported under `indicator_errors`; the rest of the chart still renders.
     let (computed, inds, errors_value) = compute_panels(&data, &indicator_keys, &panel_indicators);
+    let errors_value = with_key_errors(errors_value, per_key);
 
     // Build summary payload keyed by request name (or instance id, ADR-0028)
     // so the LLM can correlate output with the entries it passed in.
@@ -641,6 +676,19 @@ type Computed<'a> = (
     Vec<&'a dyn Indicator>,
     Option<Value>,
 );
+
+/// `errors` (an `indicator_errors` map) plus the errors found before computing.
+fn with_key_errors(errors: Option<Value>, per_key: Vec<(String, Value)>) -> Option<Value> {
+    if per_key.is_empty() {
+        return errors;
+    }
+    let mut map = match errors {
+        Some(Value::Object(m)) => m,
+        _ => serde_json::Map::new(),
+    };
+    map.extend(per_key);
+    Some(Value::Object(map))
+}
 
 fn compute_panels<'a>(
     data: &chartgen::data::OhlcvData,
@@ -751,7 +799,7 @@ pub(crate) fn series_tail(
     chart_style: &str,
     bars: usize,
 ) -> Result<Value, String> {
-    let (panel_indicators, keys, unknown, invalid) = parse_panels(indicators, None);
+    let (panel_indicators, keys, unknown, invalid, _) = parse_panels(indicators, None);
     check_panels(&unknown, &invalid)?;
     let ha;
     let data = if chart_style == "heikin_ashi" {
@@ -779,6 +827,7 @@ fn tool_subscribe_chart(
     args: &Value,
     push: Option<&PushCtx>,
     token: Option<&str>,
+    user: Option<&str>,
 ) -> Value {
     let (Some(push), Some(token)) = (push, token) else {
         return no_push_transport(id);
@@ -815,9 +864,17 @@ fn tool_subscribe_chart(
             &format!("{PUSH_LIMIT}: at most {MAX_INDICATORS} indicators per subscription"),
         );
     }
-    let (panels, _, unknown, invalid) = parse_panels(&indicators, None);
+    let (panels, _, unknown, invalid, per_key) = parse_panels(&indicators, user);
     if let Err(e) = check_panels(&unknown, &invalid) {
         return tool_err(id, &e);
+    }
+    // Pushed tails are computed without a user (`series_tail`): a script would
+    // be missing, or replaced by the built-in it shadows. Such a chart polls.
+    if !per_key.is_empty() || names_user_script(&indicators, user) {
+        return tool_err(
+            id,
+            &format!("{NOT_PUSHABLE}: the chart uses your scripts; poll generate_chart instead"),
+        );
     }
     let req = ChartRequest {
         ticker: ticker.to_string(),
@@ -995,8 +1052,29 @@ fn tool_register_indicator(id: Option<Value>, args: &Value, user: Option<&str>) 
     };
     let info = &compiled.info;
     let hash = scripting::source_hash(source);
-    if let Err(e) = store.upsert(user, name, source, &info.to_json(), &hash) {
-        return tool_err(id, &format!("Could not store the indicator: {e}"));
+    let create_only = args
+        .get("create_only")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let stored = if create_only {
+        store.insert_new(user, name, source, &info.to_json(), &hash)
+    } else {
+        store
+            .upsert(user, name, source, &info.to_json(), &hash)
+            .map(|()| true)
+    };
+    match stored {
+        Ok(true) => {}
+        Ok(false) => {
+            let error = json!({
+                "step": "exists",
+                "line": null,
+                "message": format!("You already have an indicator named {name}. Open it, or pick another name."),
+            });
+            let payload = json!({ "ok": false, "errors": [error] });
+            return tool_err(id, &serde_json::to_string_pretty(&payload).unwrap());
+        }
+        Err(e) => return tool_err(id, &format!("Could not store the indicator: {e}")),
     }
     tool_ok(
         id,
@@ -1058,6 +1136,31 @@ fn tool_list_my_indicators(id: Option<Value>, user: Option<&str>) -> Value {
         })
         .collect();
     tool_ok(id, json!({ "total": list.len(), "indicators": list }))
+}
+
+#[cfg(feature = "scripting")]
+fn tool_get_my_indicator(id: Option<Value>, args: &Value, user: Option<&str>) -> Value {
+    let (store, user) = match scripting_session(&id, user, "get_my_indicator") {
+        Ok(s) => s,
+        Err(resp) => return resp,
+    };
+    let name = args.get("name").and_then(|v| v.as_str()).unwrap_or("");
+    match store.get(user, name) {
+        Ok(Some(s)) => tool_ok(
+            id,
+            json!({ "name": s.name, "source": s.source, "updated_at": s.updated_at }),
+        ),
+        // Told apart from a failed read: a client may treat this one as "gone".
+        Ok(None) => {
+            let payload = json!({
+                "ok": false,
+                "error": "not_found",
+                "message": format!("You have no indicator named `{name}`."),
+            });
+            tool_err(id, &serde_json::to_string_pretty(&payload).unwrap())
+        }
+        Err(e) => tool_err(id, &format!("Could not read the indicator: {e}")),
+    }
 }
 
 #[cfg(feature = "scripting")]
@@ -4938,6 +5041,133 @@ def compute(ohlcv, params, chart):
     chart.hline(0)
 "#;
 
+    /// The error of `key` in a series response, which must not have failed.
+    fn key_error_of(resp: &Value, key: &str) -> Value {
+        payload(resp)["indicator_errors"][key].clone()
+    }
+
+    #[test]
+    fn an_unknown_name_fails_only_its_key_for_a_user() {
+        let u = user();
+        let resp = chart(
+            &u,
+            json!(["gone", "rsi", { "name": "gone", "id": "gone#2" }]),
+            "series",
+        );
+        assert_eq!(key_error_of(&resp, "gone")["step"], "unknown");
+        assert_eq!(key_error_of(&resp, "gone#2")["step"], "unknown");
+        assert!(payload(&resp)["indicators"]["rsi"].is_object());
+        assert!(payload(&resp)["indicators"].get("gone").is_none());
+
+        // png has no JSON payload: the errors come as a text item.
+        let png = chart(&u, json!(["gone", "rsi"]), "png");
+        assert_eq!(png["result"]["content"][0]["type"], "image");
+        assert!(text(&png, 1).contains("Unknown indicator: gone"));
+
+        // Without a user (stdio, scripting off) the request fails, as before.
+        let resp = generate_chart(
+            Some(json!(1)),
+            &json!({"indicators": ["gone", "rsi"], "format": "series"}),
+            fetch::DataSource::Sample,
+            None,
+        );
+        assert_eq!(resp["result"]["isError"], true);
+        assert!(text(&resp, 0).contains("Unknown indicator(s): gone"));
+    }
+
+    #[test]
+    fn params_a_saved_script_no_longer_allows_fail_only_its_key() {
+        let u = user();
+        payload(&call(
+            "register_indicator",
+            json!({"name": "narrowed", "source": MOMENTUM}),
+            Some(&u),
+        ));
+        let resp = chart(
+            &u,
+            json!([{ "name": "narrowed", "length": 9999 }, "rsi"]),
+            "series",
+        );
+        let err = key_error_of(&resp, "narrowed");
+        assert_eq!(err["step"], "params");
+        assert!(err["message"].as_str().unwrap().contains("length"), "{err}");
+        assert!(payload(&resp)["indicators"]["rsi"].is_object());
+
+        // A built-in's bad params still fail the whole request.
+        let resp = chart(&u, json!([{ "name": "rsi", "length": 0 }]), "series");
+        assert_eq!(resp["result"]["isError"], true);
+    }
+
+    #[tokio::test]
+    async fn a_chart_with_scripts_is_not_pushable() {
+        let u = user();
+        payload(&call(
+            "register_indicator",
+            json!({"name": "rsi", "source": MOMENTUM}),
+            Some(&u),
+        ));
+        let hub = crate::chart_push::ChartHub::new(
+            Arc::new(crate::chart_push::SampleSource),
+            crate::chart_push::Limits::default(),
+        );
+        let (tx, _rx) = tokio::sync::mpsc::channel(crate::chart_push::STREAM_BUFFER);
+        hub.link_stream("s", tx);
+        let push = PushCtx {
+            hub,
+            stream: "s".into(),
+            client: "127.0.0.1".into(),
+        };
+        let subscribe = |indicators: Value, user: Option<&str>| {
+            call_tool(
+                "subscribe_chart",
+                Some(json!(1)),
+                json!({"ticker": "BTCUSDT", "indicators": indicators}),
+                None,
+                Some("tok"),
+                Some(&push),
+                user,
+                true,
+            )
+        };
+        // A script shadowing a built-in, under either entry form.
+        for indicators in [json!(["rsi"]), json!([{ "name": "rsi", "length": 5 }])] {
+            let resp = subscribe(indicators, Some(&u));
+            assert!(text(&resp, 0).starts_with(NOT_PUSHABLE), "{resp}");
+        }
+        // A name the server no longer knows: polled, with its error per key.
+        let resp = subscribe(json!(["gone"]), Some(&u));
+        assert!(text(&resp, 0).starts_with(NOT_PUSHABLE), "{resp}");
+        // Built-ins only: pushed, and another user's shadow does not count.
+        let resp = subscribe(json!(["macd"]), Some(&u));
+        assert!(!text(&resp, 0).contains(NOT_PUSHABLE), "{resp}");
+        let resp = subscribe(json!(["rsi"]), Some(&user()));
+        assert!(!text(&resp, 0).contains(NOT_PUSHABLE), "{resp}");
+    }
+
+    #[test]
+    fn create_only_never_replaces_a_saved_script() {
+        let u = user();
+        let register = |source: &str, create_only: bool| {
+            call(
+                "register_indicator",
+                json!({"name": "mine", "source": source, "create_only": create_only}),
+                Some(&u),
+            )
+        };
+        let other = MOMENTUM.replace("Momentum", "Other");
+
+        assert_eq!(payload(&register(MOMENTUM, true))["replaced"], false);
+        let refused = register(&other, true);
+        assert_eq!(refused["result"]["isError"], true);
+        let body: Value = serde_json::from_str(text(&refused, 0)).unwrap();
+        assert_eq!(body["errors"][0]["step"], "exists");
+        let got = payload(&call("get_my_indicator", json!({"name": "mine"}), Some(&u)));
+        assert_eq!(got["source"], MOMENTUM, "the saved text must survive");
+
+        // Without the flag, saving replaces as before.
+        assert_eq!(payload(&register(&other, false))["replaced"], true);
+    }
+
     #[test]
     fn tools_listed_only_when_enabled() {
         let names = |on: bool| -> Vec<String> {
@@ -4952,6 +5182,7 @@ def compute(ohlcv, params, chart):
             "register_indicator",
             "fork_indicator",
             "list_my_indicators",
+            "get_my_indicator",
             "delete_indicator",
         ];
         assert!(scripting
@@ -4994,6 +5225,23 @@ def compute(ohlcv, params, chart):
         assert_eq!(mine["total"], 1);
         assert_eq!(mine["indicators"][0]["name"], "my_momentum");
         assert_eq!(mine["indicators"][0]["source"], "user");
+
+        // The stored source reads back for its owner, and only for its owner.
+        let got = payload(&call(
+            "get_my_indicator",
+            json!({"name": "my_momentum"}),
+            Some(&u),
+        ));
+        assert_eq!(got["source"], MOMENTUM);
+        let other = call(
+            "get_my_indicator",
+            json!({"name": "my_momentum"}),
+            Some("someone_else"),
+        );
+        assert_eq!(other["result"]["isError"], true);
+        assert!(!other.to_string().contains("compute"), "{other}");
+        let missing: Value = serde_json::from_str(text(&other, 0)).unwrap();
+        assert_eq!(missing["error"], "not_found");
 
         let all = payload(&tool_list_indicators(Some(json!(1)), Some(&u)));
         let entry = all["indicators"]
@@ -5044,7 +5292,7 @@ def compute(ohlcv, params, chart):
         ));
         assert_eq!(del["ok"], true);
         let resp = chart(&u, json!(["my_momentum"]), "series");
-        assert!(text(&resp, 0).contains("Unknown indicator"));
+        assert_eq!(key_error_of(&resp, "my_momentum")["step"], "unknown");
         let resp = call("delete_indicator", json!({"name": "my_momentum"}), Some(&u));
         assert!(text(&resp, 0).contains("no indicator named"));
     }
@@ -5096,7 +5344,8 @@ def compute(ohlcv, params, chart):
         let all_b = payload(&tool_list_indicators(Some(json!(1)), Some(&b)));
         assert!(!all_b.to_string().contains("secret_sauce"));
         let resp = chart(&b, json!(["secret_sauce"]), "series");
-        assert!(text(&resp, 0).contains("Unknown indicator"));
+        assert_eq!(key_error_of(&resp, "secret_sauce")["step"], "unknown");
+        assert!(payload(&resp)["indicators"].get("secret_sauce").is_none());
         let resp = call(
             "delete_indicator",
             json!({"name": "secret_sauce"}),

@@ -34,13 +34,20 @@ import {
 } from "./components/DrawingToolbar";
 import { isDrawingAlertTool, isHorizontalTool } from "./lib/alerts";
 import { forgetReadings, setIndicatorSignatures } from "./stores/alerts";
-import { IndicatorChips } from "./components/IndicatorChips";
+import { CompactIndicatorErrors, IndicatorChips } from "./components/IndicatorChips";
 import { IndicatorPicker } from "./components/IndicatorPicker";
 import { IndicatorSettings } from "./components/IndicatorSettings";
 import { LayoutMenu } from "./components/LayoutMenu";
+import {
+  openScriptEditor,
+  scriptEditorOpen,
+  ScriptEditorButton,
+  ScriptEditorDock,
+} from "./components/ScriptEditorDock";
 import { UserMenu } from "./components/UserMenu";
 import { ReplayBar } from "./components/ReplayBar";
 import { chipName, rememberLabels } from "./lib/indicatorNames";
+import { scriptingEnabled } from "./lib/scripts";
 import { mergeParams } from "./lib/paramForm";
 import { resolveColors } from "./lib/chartStyle";
 import { PALETTES } from "./lib/theme";
@@ -76,6 +83,7 @@ import {
   chartQueryKey,
   createChartQuery,
   createListIndicatorsQuery,
+  createToolNamesQuery,
 } from "./queries";
 import {
   createLiveFeed,
@@ -523,6 +531,10 @@ export function App(): JSX.Element {
   // is cached forever. It fires as soon as auth is ready.
   const listIndicators = createListIndicatorsQuery(session, authReady);
 
+  // The script editor exists only where the server lists its tools (ADR-0041).
+  const toolNames = createToolNamesQuery(session, authReady);
+  const scripting = createMemo(() => scriptingEnabled(toolNames.data));
+
   // Indicators from a share link are checked against the registry before
   // the first chart request; if the registry cannot be loaded they are kept.
   createEffect(() => {
@@ -628,6 +640,9 @@ export function App(): JSX.Element {
             {activeIndicators().length}
           </span>
         </button>
+        <Show when={scripting()}>
+          <ScriptEditorButton />
+        </Show>
         {/* Below 480px the header has no room: alerts stay reachable from the
          * sidebar panel, the status text drops (the sign-in recovery stays) and the layout name collapses. */}
         <div class="max-[479px]:hidden compact:hidden">
@@ -654,6 +669,12 @@ export function App(): JSX.Element {
         onRemove={removeIndicator}
         onToggleHidden={toggleIndicatorHidden}
         onSettings={setSettingsIndex}
+        errors={live()?.series.indicator_errors}
+      />
+      <CompactIndicatorErrors
+        entries={activeIndicators()}
+        errors={live()?.series.indicator_errors}
+        onRemove={removeIndicator}
       />
       <IndicatorSettings
         target={settingsTarget()}
@@ -692,6 +713,14 @@ export function App(): JSX.Element {
         loading={listIndicators.isFetching}
         error={listIndicators.isError ? listIndicators.error : null}
         active={activeIndicators()}
+        onOpenScripts={
+          scripting()
+            ? () => {
+                setPickerOpen(false);
+                openScriptEditor();
+              }
+            : undefined
+        }
       />
       <ChartSettings
         open={settingsOpen()}
@@ -731,6 +760,11 @@ export function App(): JSX.Element {
               previousSymbol={lastLoaded() === symbol() ? null : lastLoaded()}
               onRetry={() => void query.refetch()}
               onBack={setSymbol}
+              onRemoveIndicators={(names) =>
+                setActiveIndicators(
+                  activeIndicators().filter((e) => !names.includes(indicatorName(e))),
+                )
+              }
             />
           </Show>
           <Chart
@@ -739,6 +773,7 @@ export function App(): JSX.Element {
             history={historyStatus()}
             onLoadOlder={feed.loadOlder}
             activeIndicators={wireIndicators()}
+            fitPanes={scriptEditorOpen()}
             styles={plotStyles()}
             chartType={chartType()}
             timeZone={resolveTimeZone(timeZone(), symbol())}
@@ -791,6 +826,9 @@ export function App(): JSX.Element {
         drawings={alertDrawings()}
       />
       <Toasts />
+      <Show when={scripting()}>
+        <ScriptEditorDock session={session} chartErrors={live()?.series.indicator_errors} />
+      </Show>
     </div>
   );
 }

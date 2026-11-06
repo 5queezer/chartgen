@@ -7,6 +7,9 @@
 // Ports are configurable so parallel checkouts/sessions don't collide:
 //   CHARTGEN_PORT (default 9315) — chartgen --serve
 //   WEB_PORT      (default 5173) — Vite dev server
+// The `scripting` project (ADR-0041) has a second pair 1000 ports up, with
+// CHARTGEN_SCRIPTING=1 and a store of its own, because whether the server lists
+// the scripting tools is fixed at startup. Every other spec keeps scripting off.
 //
 // Servers already listening on those ports are reused only with
 // PW_REUSE_SERVER=1. Otherwise Playwright fails fast on a busy port, so a
@@ -29,6 +32,11 @@ const REUSE_SERVER = !process.env.CI && process.env.PW_REUSE_SERVER === "1";
 // is used: a reused server keeps its own store, which on a dev server is the
 // real ~/.chartgen/chartgen.db, and collects the test clients there.
 const CHARTGEN_DB = join(tmpdir(), `chartgen-e2e-${CHARTGEN_PORT}.db`);
+const SCRIPTING_CHARTGEN_PORT = CHARTGEN_PORT + 1000;
+const SCRIPTING_WEB_PORT = WEB_PORT + 1000;
+const SCRIPTING_DB = join(tmpdir(), `chartgen-e2e-${SCRIPTING_CHARTGEN_PORT}.db`);
+// Specs that need the scripting server.
+const SCRIPTING_SPECS = /script-editor-on\.spec\.ts$/;
 // The whole suite runs with nothing configured. signin.spec.ts has servers of its
 // own with both providers on, against the fake of fixtures/fake-provider.mjs. Its
 // base URL is the Vite origin, as in production the app and the server share one.
@@ -37,6 +45,7 @@ const SIGNIN_WEB_PORT = WEB_PORT - 3_000;
 const SIGNIN_DB = join(tmpdir(), `chartgen-e2e-${SIGNIN_CHARTGEN_PORT}.db`);
 const FAKE_PROVIDER_PORT = CHARTGEN_PORT - 4_000;
 const FAKE_PROVIDER_SECRET = "fake-provider-secret";
+const SIGNIN_SPECS = /signin\.spec\.ts$/;
 
 export default defineConfig({
   testDir: "./tests/e2e",
@@ -58,12 +67,17 @@ export default defineConfig({
   projects: [
     {
       name: "chromium",
-      testIgnore: /signin\.spec\.ts$/,
+      testIgnore: [SCRIPTING_SPECS, SIGNIN_SPECS],
       use: { ...devices["Desktop Chrome"] },
     },
     {
+      name: "scripting",
+      testMatch: SCRIPTING_SPECS,
+      use: { ...devices["Desktop Chrome"], baseURL: `http://localhost:${SCRIPTING_WEB_PORT}` },
+    },
+    {
       name: "chromium-signin",
-      testMatch: /signin\.spec\.ts$/,
+      testMatch: SIGNIN_SPECS,
       use: { ...devices["Desktop Chrome"], baseURL: `http://localhost:${SIGNIN_WEB_PORT}` },
     },
   ],
@@ -79,7 +93,8 @@ export default defineConfig({
       command: `rm -f "${CHARTGEN_DB}" && cargo run -- --serve --port ${CHARTGEN_PORT}`,
       cwd: "..",
       port: CHARTGEN_PORT,
-      env: { CHARTGEN_DATA_SOURCE: "sample", CHARTGEN_DB },
+      // Off even if the developer's shell turns scripting on.
+      env: { CHARTGEN_DATA_SOURCE: "sample", CHARTGEN_DB, CHARTGEN_SCRIPTING: "0" },
       reuseExistingServer: REUSE_SERVER,
       // Cold build can chew several minutes on a slow CI runner.
       // Cached Swatinem builds drop this to seconds.
@@ -94,6 +109,16 @@ export default defineConfig({
       env: { CHARTGEN_DEV_TARGET: `http://localhost:${CHARTGEN_PORT}` },
       reuseExistingServer: REUSE_SERVER,
       timeout: 60_000,
+      stdout: "pipe",
+      stderr: "pipe",
+    },
+    {
+      command: `rm -f "${SCRIPTING_DB}" && cargo run -- --serve --port ${SCRIPTING_CHARTGEN_PORT}`,
+      cwd: "..",
+      port: SCRIPTING_CHARTGEN_PORT,
+      env: { CHARTGEN_DATA_SOURCE: "sample", CHARTGEN_DB: SCRIPTING_DB, CHARTGEN_SCRIPTING: "1" },
+      reuseExistingServer: REUSE_SERVER,
+      timeout: 300_000,
       stdout: "pipe",
       stderr: "pipe",
     },
@@ -133,10 +158,27 @@ export default defineConfig({
       stderr: "pipe",
     },
     {
+      // Its own dep cache: two dev servers must not optimize into one directory.
+      command: `npm run dev -- --port ${SCRIPTING_WEB_PORT} --strictPort`,
+      cwd: ".",
+      port: SCRIPTING_WEB_PORT,
+      env: {
+        CHARTGEN_DEV_TARGET: `http://localhost:${SCRIPTING_CHARTGEN_PORT}`,
+        VITE_CACHE_DIR: "node_modules/.vite-scripting",
+      },
+      reuseExistingServer: REUSE_SERVER,
+      timeout: 60_000,
+      stdout: "pipe",
+      stderr: "pipe",
+    },
+    {
       command: `npm run dev -- --port ${SIGNIN_WEB_PORT} --strictPort`,
       cwd: ".",
       port: SIGNIN_WEB_PORT,
-      env: { CHARTGEN_DEV_TARGET: `http://localhost:${SIGNIN_CHARTGEN_PORT}` },
+      env: {
+        CHARTGEN_DEV_TARGET: `http://localhost:${SIGNIN_CHARTGEN_PORT}`,
+        VITE_CACHE_DIR: "node_modules/.vite-signin",
+      },
       reuseExistingServer: REUSE_SERVER,
       timeout: 60_000,
       stdout: "pipe",

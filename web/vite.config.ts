@@ -8,6 +8,8 @@ import tailwindcss from "@tailwindcss/vite";
 const CHARTGEN_DEV_TARGET = process.env.CHARTGEN_DEV_TARGET ?? "http://localhost:9315";
 
 export default defineConfig({
+  // Set by the e2e suite, which runs a second dev server (playwright.config.ts).
+  ...(process.env.VITE_CACHE_DIR ? { cacheDir: process.env.VITE_CACHE_DIR } : {}),
   plugins: [solid(), tailwindcss()],
   server: {
     port: 5173,

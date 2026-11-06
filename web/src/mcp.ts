@@ -19,19 +19,29 @@ import type {
 import {
   CHART_TICK_METHOD,
   ChartTickParamsSchema,
+  DeleteIndicatorPayloadSchema,
   ListIndicatorsPayloadSchema,
+  MyIndicatorSourcePayloadSchema,
+  MyIndicatorsPayloadSchema,
   QuotesPayloadSchema,
+  RegisteredIndicatorPayloadSchema,
   SearchSymbolsPayloadSchema,
   SeriesPayloadSchema,
   SubscribeChartPayloadSchema,
   UnsubscribeChartPayloadSchema,
+  type DeleteIndicatorPayload,
   type ListIndicatorsPayload,
+  type MyIndicatorSourcePayload,
+  type MyIndicatorsPayload,
   type QuotesPayload,
+  type RegisteredIndicatorPayload,
+  type ScriptRejection,
   type SearchSymbolsPayload,
   type SeriesPayload,
   type SubscribeChartPayload,
   type UnsubscribeChartPayload,
 } from "./types/responses";
+import { isNotFound, scriptRejection } from "./lib/scripts";
 import { clearAccessToken, getAccessToken } from "./oauth";
 
 // Validate the MCP `CallToolResult` shape at the boundary (ADR-0004)
@@ -53,6 +63,16 @@ const BASE_URL =
 function mcpUrl(): URL {
   const origin = BASE_URL || window.location.origin;
   return new URL("/mcp", origin);
+}
+
+/**
+ * The tool answered with `isError`. The call itself went through, so its text
+ * says nothing about auth, even when it contains "401" (a script's line 401).
+ */
+export class McpToolError extends Error {
+  constructor(readonly text: string) {
+    super(`MCP tool error: ${text || "(no message)"}`);
+  }
 }
 
 export type AlertNotificationHandler = (
@@ -97,6 +117,24 @@ export interface McpSession {
   callUnsubscribeChart: (
     args: UnsubscribeChartInput,
   ) => Promise<UnsubscribeChartPayload>;
+  /** The names `tools/list` reports; the scripting tools are there only when enabled. */
+  callListToolNames: () => Promise<string[]>;
+  /** Invoke `list_my_indicators` (ADR-0025): the caller's scripts. */
+  callListMyIndicators: () => Promise<MyIndicatorsPayload>;
+  /** Invoke `get_my_indicator` (ADR-0041): one script's stored source; null if you have none. */
+  callGetMyIndicator: (name: string) => Promise<MyIndicatorSourcePayload | null>;
+  /**
+   * Invoke `register_indicator`. A script the server refuses is a result,
+   * with the errors to show next to the code, not a rejection.
+   */
+  callRegisterIndicator: (args: {
+    name: string;
+    source: string;
+    /** Refuse instead of replacing a script of that name. */
+    create_only: boolean;
+  }) => Promise<RegisteredIndicatorPayload | ScriptRejection>;
+  /** Invoke `delete_indicator`. */
+  callDeleteIndicator: (name: string) => Promise<DeleteIndicatorPayload>;
   /** Install the handler for `notifications/chart_tick`. */
   onChartTick: (handler: ChartTickHandler) => void;
   /** Install a handler invoked for every other `notifications/*` frame. */
@@ -162,7 +200,7 @@ function extractJsonFromResult(result: {
       .map((c) => (c.type === "text" ? c.text : ""))
       .filter(Boolean)
       .join("\n");
-    throw new Error(`MCP tool error: ${msg || "(no message)"}`);
+    throw new McpToolError(msg);
   }
   const first = result.content[0];
   if (!first || first.type !== "text" || typeof first.text !== "string") {
@@ -172,6 +210,7 @@ function extractJsonFromResult(result: {
 }
 
 function isUnauthorized(err: unknown): boolean {
+  if (err instanceof McpToolError) return false;
   if (err instanceof Error) {
     const m = err.message || "";
     if (m.includes("401") || /unauthoriz/i.test(m)) return true;
@@ -234,32 +273,34 @@ export function createMcpSession(): McpSession {
     }
   }
 
-  async function callToolWithAuthRetry(
-    name: string,
-    args: Record<string, unknown>,
-    signal?: AbortSignal,
-  ): Promise<unknown> {
-    let conn = await ensureConnected();
+  async function withAuthRetry<T>(
+    request: (conn: ConnectedTransport) => Promise<T>,
+  ): Promise<T> {
+    const conn = await ensureConnected();
     try {
-      const result = await conn.client.callTool(
-        { name, arguments: args },
-        undefined,
-        { signal },
-      );
-      return extractJsonFromResult(CallToolResultSchema.parse(result));
+      return await request(conn);
     } catch (err) {
       if (!isUnauthorized(err)) throw err;
       // Re-auth once, then retry.
       clearAccessToken();
       await dropConnection(conn);
-      conn = await ensureConnected();
+      return request(await ensureConnected());
+    }
+  }
+
+  function callToolWithAuthRetry(
+    name: string,
+    args: Record<string, unknown>,
+    signal?: AbortSignal,
+  ): Promise<unknown> {
+    return withAuthRetry(async (conn) => {
       const result = await conn.client.callTool(
         { name, arguments: args },
         undefined,
         { signal },
       );
       return extractJsonFromResult(CallToolResultSchema.parse(result));
-    }
+    });
   }
 
   return {
@@ -317,6 +358,38 @@ export function createMcpSession(): McpSession {
         args as unknown as Record<string, unknown>,
       );
       return UnsubscribeChartPayloadSchema.parse(json);
+    },
+    callListToolNames() {
+      return withAuthRetry(async (conn) => {
+        const { tools } = await conn.client.listTools();
+        return tools.map((t) => t.name);
+      });
+    },
+    async callListMyIndicators() {
+      const json = await callToolWithAuthRetry("list_my_indicators", {});
+      return MyIndicatorsPayloadSchema.parse(json);
+    },
+    async callGetMyIndicator(name) {
+      try {
+        const json = await callToolWithAuthRetry("get_my_indicator", { name });
+        return MyIndicatorSourcePayloadSchema.parse(json);
+      } catch (err) {
+        if (err instanceof McpToolError && isNotFound(err.text)) return null;
+        throw err;
+      }
+    },
+    async callRegisterIndicator(args) {
+      try {
+        const json = await callToolWithAuthRetry("register_indicator", args);
+        return RegisteredIndicatorPayloadSchema.parse(json);
+      } catch (err) {
+        if (err instanceof McpToolError) return scriptRejection(err.text);
+        throw err;
+      }
+    },
+    async callDeleteIndicator(name) {
+      const json = await callToolWithAuthRetry("delete_indicator", { name });
+      return DeleteIndicatorPayloadSchema.parse(json);
     },
     onChartTick(handler) {
       state.chartTickHandler = handler;

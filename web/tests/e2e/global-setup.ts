@@ -11,17 +11,22 @@ import { gotoApp } from "./fixtures/app";
 const WARMUP_TIMEOUT_MS = 180_000;
 
 export default async function globalSetup(config: FullConfig): Promise<void> {
-  const { baseURL } = config.projects[0]!.use;
   const browser = await chromium.launch();
-  try {
-    const page = await browser.newPage({ baseURL });
-    page.setDefaultTimeout(WARMUP_TIMEOUT_MS);
-    page.setDefaultNavigationTimeout(WARMUP_TIMEOUT_MS);
-    await gotoApp(page);
-  } catch (err) {
-    // Only a warm-up: if it fails, the specs report the real problem.
-    console.warn(`[global-setup] warm-up boot failed: ${String(err)}`);
-  } finally {
-    await browser.close();
-  }
+  // Every project has its own dev server to warm (playwright.config.ts).
+  await Promise.all(
+    // Not the sign-in project: gotoApp waits for a token, and there a person has to
+    // choose a provider first. signin.spec.ts warms its own server.
+    config.projects.filter((p) => p.name !== "chromium-signin").map(async ({ use: { baseURL } }) => {
+      try {
+        const page = await browser.newPage({ baseURL });
+        page.setDefaultTimeout(WARMUP_TIMEOUT_MS);
+        page.setDefaultNavigationTimeout(WARMUP_TIMEOUT_MS);
+        await gotoApp(page);
+      } catch (err) {
+        // Only a warm-up: if it fails, the specs report the real problem.
+        console.warn(`[global-setup] warm-up boot failed: ${String(err)}`);
+      }
+    }),
+  );
+  await browser.close();
 }
