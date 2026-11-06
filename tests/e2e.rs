@@ -3710,14 +3710,111 @@ fn test_signin_a_flood_from_one_address_leaves_the_others_alone() {
             == 429
     });
     assert!(limited, "a flood of consent requests must be refused too");
-    // A malformed header is no address of its own: it falls back to the peer, here exempt.
-    let page = Browser::new(p).request("GET", &path, &["X-Test-Client: not-an-ip"], "");
+    // With no such header at all it is the peer, here loopback and exempt.
+    let page = Browser::new(p).request("GET", &path, &[], "");
     assert_eq!(page.status, 303, "{}", page.body);
     // /register counts per client address too.
     let body = format!(r#"{{"redirect_uris":["{EXTERNAL_REDIRECT}"]}}"#);
     let headers = [JSON_POST[0], JSON_POST[1], "X-Test-Client: 192.0.2.8"];
     let statuses: Vec<u16> = (0..21)
         .map(|_| http(p, "POST", "/register", &headers, &body).0)
+        .collect();
+    assert_eq!(statuses[19], 201, "{statuses:?}");
+    assert_eq!(statuses[20], 429, "{statuses:?}");
+}
+
+/// Present but unusable, a value shares one budget. It never reaches the peer's
+/// loopback exemption, which a same-host proxy has, however it is spelled.
+#[test]
+fn test_signin_an_unusable_address_header_cannot_reach_the_exemption() {
+    let fake = FakeProvider::start();
+    let srv = signin_server_behind_proxy("signin-bad-header", &fake);
+    let p = srv.port;
+    let client = register_client(p, &web_redirect(p));
+    let path = format!(
+        "/authorize?response_type=code&client_id={client}&redirect_uri={}&code_challenge={PKCE_CHALLENGE}&state=s",
+        url_encode(&web_redirect(p))
+    );
+    let bad = [
+        "X-Test-Client: junk",
+        "X-Test-Client: 198.51.100.7, 10.0.0.1",
+        "X-Test-Client: 127.0.0.1",
+        "X-Test-Client: ::1",
+        "X-Test-Client: 198.51.100.7:1234",
+    ];
+    let accepted = (0..125)
+        .take_while(|i| {
+            let page = Browser::new(p).request("GET", &path, &[bad[i % bad.len()]], "");
+            page.status != 429
+        })
+        .count();
+    assert_eq!(accepted, 120, "all of them share one budget");
+    // And a good address is not affected.
+    let page = Browser::new(p).request("GET", &path, &["X-Test-Client: 203.0.113.5"], "");
+    assert_eq!(page.status, 303, "{}", page.body);
+}
+
+/// A /64 is one address for every limit, not 2^64 of them, and two addresses and a
+/// /64 flooding away do not reach another's open request.
+#[test]
+fn test_signin_a_few_addresses_cannot_shut_out_a_stranger() {
+    let fake = FakeProvider::start();
+    let srv = signin_server_behind_proxy("signin-per-address", &fake);
+    let p = srv.port;
+    let client = register_client(p, &web_redirect(p));
+    let path = format!(
+        "/authorize?response_type=code&client_id={client}&redirect_uri={}&code_challenge={PKCE_CHALLENGE}&state=s",
+        url_encode(&web_redirect(p))
+    );
+    let mut stranger = Browser::new(p);
+    let open = stranger.request("GET", &path, &["X-Test-Client: 203.0.113.5"], "");
+    assert_eq!(open.status, 303, "{}", open.body);
+
+    // The address's own oldest request goes, so its first is dead after 50 more.
+    let mut first = Browser::new(p);
+    let flood = "X-Test-Client: 198.51.100.7";
+    let oldest = first.request("GET", &path, &[flood], "");
+    for address in ["198.51.100.7", "198.51.100.8"] {
+        let from = format!("X-Test-Client: {address}");
+        for _ in 0..60 {
+            let page = Browser::new(p).request("GET", &path, &[from.as_str()], "");
+            assert_eq!(page.status, 303, "{}", page.body);
+        }
+    }
+    assert_eq!(
+        first.get(&oldest.location()).status,
+        400,
+        "pushed out by its own"
+    );
+
+    // Hosts of one /64 share one budget: without that each would have its own 120.
+    let accepted = (0..125)
+        .take_while(|i| {
+            let from = format!("X-Test-Client: 2001:db8:1:1::{i:x}");
+            Browser::new(p)
+                .request("GET", &path, &[from.as_str()], "")
+                .status
+                != 429
+        })
+        .count();
+    assert_eq!(accepted, 120, "a /64 is one address");
+    let other = Browser::new(p).request("GET", &path, &["X-Test-Client: 2001:db8:1:2::1"], "");
+    assert_eq!(other.status, 303, "the next /64 is another: {}", other.body);
+
+    assert_eq!(
+        stranger.get(&open.location()).status,
+        200,
+        "the stranger's still open"
+    );
+
+    // /register counts it the same way.
+    let body = format!(r#"{{"redirect_uris":["{EXTERNAL_REDIRECT}"]}}"#);
+    let statuses: Vec<u16> = (0..21)
+        .map(|i| {
+            let from = format!("X-Test-Client: 2001:db8:9:9::{i:x}");
+            let headers = [JSON_POST[0], JSON_POST[1], from.as_str()];
+            http(p, "POST", "/register", &headers, &body).0
+        })
         .collect();
     assert_eq!(statuses[19], 201, "{statuses:?}");
     assert_eq!(statuses[20], 429, "{statuses:?}");
@@ -3966,23 +4063,29 @@ fn test_tool_calls_are_not_limited_without_signin() {
     }
 }
 
-/// Sign-ins in progress are bounded on loopback too, where the per-address limit does
-/// not apply, and hitting the bound leaves a signed-in user alone.
+/// Sign-ins in progress are bounded on the server too, which takes 40 addresses to reach,
+/// and hitting the bound leaves a signed-in user alone.
 #[test]
 fn test_signin_pending_logins_are_bounded() {
     let fake = FakeProvider::start();
-    let srv = signin_server("signin-cap", &fake, &["github", "google"]);
+    let srv = signin_server_behind_proxy("signin-cap", &fake);
     let p = srv.port;
     let mut holder = Browser::new(p);
     web_sign_in(&mut holder, &fake, "github", profile_of("github", 1, "a"));
     let client = register_client(p, &web_redirect(p));
+    let path = format!(
+        "/authorize?response_type=code&client_id={client}&redirect_uri={}&code_challenge={PKCE_CHALLENGE}&state=s",
+        url_encode(&web_redirect(p))
+    );
     let mut limited = None;
-    for i in 0..2100 {
-        // A browser of its own each time, or its own limit would keep this from filling up.
-        let page = Browser::new(p).authorize(&client, &web_redirect(p), "s");
-        if page.status == 429 {
-            limited = Some((i, page));
-            break;
+    'flood: for address in 0..45 {
+        let from = format!("X-Test-Client: 198.51.100.{address}");
+        for i in 0..50 {
+            let page = Browser::new(p).request("GET", &path, &[from.as_str()], "");
+            if page.status == 429 {
+                limited = Some((address * 50 + i, page));
+                break 'flood;
+            }
         }
     }
     let (at, page) = limited.expect("a flood of sign-ins must be refused");

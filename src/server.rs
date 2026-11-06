@@ -924,17 +924,38 @@ fn client_addr(headers: &HeaderMap, ext: &axum::http::Extensions) -> String {
     let trusted = std::env::var("CHARTGEN_TRUSTED_PROXY_HEADER").ok();
     forwarded_addr(headers, trusted.as_deref()).unwrap_or_else(|| {
         ext.get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
-            .map(|c| c.0.ip().to_string())
-            .unwrap_or_else(|| "unknown".into())
+            .map_or_else(|| "unknown".into(), |c| address_key(c.0.ip()))
     })
 }
 
-/// The address in the header the operator named, if it holds exactly one. Anything
-/// else falls back to the peer, and so does loopback, which the limits exempt.
+/// One address for every limit. A whole IPv6 /64 is what one household or one server
+/// has, so it counts once, or anyone could be thousands of addresses.
+fn address_key(ip: std::net::IpAddr) -> String {
+    match ip.to_canonical() {
+        std::net::IpAddr::V6(v6) if !v6.is_loopback() => {
+            let net = u128::from(v6) & !u128::from(u64::MAX);
+            format!("{}/64", std::net::Ipv6Addr::from(net))
+        }
+        ip => ip.to_string(),
+    }
+}
+
+/// What one sender of an unusable address counts under: one budget, shared.
+const BAD_FORWARDED_ADDRESS: &str = "bad-header";
+
+/// The address in the header the operator named. `None` if none is named or the
+/// header is absent, which means the peer. Present but not exactly one address, it
+/// counts under one fixed bucket: falling back to the peer would hand anyone who can
+/// send it a same-host proxy's loopback exemption, and so would a loopback value.
 fn forwarded_addr(headers: &HeaderMap, name: Option<&str>) -> Option<String> {
-    let value = headers.get(name?.trim())?.to_str().ok()?;
-    let ip = value.trim().parse::<std::net::IpAddr>().ok()?;
-    (!ip.is_loopback()).then(|| ip.to_string())
+    let value = headers.get(name?.trim())?;
+    let usable = value
+        .to_str()
+        .ok()
+        .and_then(|v| v.trim().parse::<std::net::IpAddr>().ok())
+        .map(|ip| ip.to_canonical())
+        .filter(|ip| !ip.is_loopback());
+    Some(usable.map_or_else(|| BAD_FORWARDED_ADDRESS.to_string(), address_key))
 }
 
 /// True for a JSON-RPC message that gets no response: a notification (no
@@ -1738,20 +1759,55 @@ mod tests {
             forwarded_addr(&h, Some("CF-Connecting-IP")).as_deref(),
             Some("203.0.113.9")
         );
-        let v6 = headers_with(&[("cf-connecting-ip", " 2001:db8::1 ")]);
+        let v6 = headers_with(&[("cf-connecting-ip", " 2001:db8:1:1:aaaa::1 ")]);
         assert_eq!(
             forwarded_addr(&v6, Some("cf-connecting-ip")).as_deref(),
-            Some("2001:db8::1")
+            Some("2001:db8:1:1::/64"),
+            "a /64 is one address"
         );
-        for bad in ["junk", "203.0.113.9, 10.0.0.1", "", "127.0.0.1", "::1"] {
+        let mapped = headers_with(&[("cf-connecting-ip", "::ffff:203.0.113.9")]);
+        assert_eq!(
+            forwarded_addr(&mapped, Some("cf-connecting-ip")).as_deref(),
+            Some("203.0.113.9")
+        );
+        // Present but unusable: one budget for all of them, and never the peer's
+        // exemption, whichever way the value is spelled.
+        for bad in [
+            "junk",
+            "203.0.113.9, 10.0.0.1",
+            "",
+            "127.0.0.1",
+            "::1",
+            "::ffff:127.0.0.1",
+            "[2001:db8::1]",
+            "203.0.113.9:1234",
+        ] {
             let h = headers_with(&[("cf-connecting-ip", bad)]);
-            assert_eq!(forwarded_addr(&h, Some("cf-connecting-ip")), None, "{bad}");
+            assert_eq!(
+                forwarded_addr(&h, Some("cf-connecting-ip")).as_deref(),
+                Some(BAD_FORWARDED_ADDRESS),
+                "{bad}"
+            );
         }
         assert_eq!(
             forwarded_addr(&HeaderMap::new(), Some("cf-connecting-ip")),
             None
         );
         assert_eq!(forwarded_addr(&h, Some("not a header name")), None);
+    }
+
+    #[test]
+    fn an_ipv6_slash_64_is_one_address_and_loopback_stays_itself() {
+        let key = |ip: &str| address_key(ip.parse().unwrap());
+        assert_eq!(key("203.0.113.9"), "203.0.113.9");
+        assert_eq!(
+            key("2001:db8:1:1::1"),
+            key("2001:db8:1:1:ffff:ffff:ffff:ffff")
+        );
+        assert_ne!(key("2001:db8:1:1::1"), key("2001:db8:1:2::1"));
+        assert_eq!(key("::1"), "::1", "the exemption is decided on this");
+        assert_eq!(key("127.0.0.1"), "127.0.0.1");
+        assert_eq!(key("::ffff:127.0.0.1"), "127.0.0.1");
     }
 
     // --- invalid_client_redirect unit tests ---

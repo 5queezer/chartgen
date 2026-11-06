@@ -17,6 +17,10 @@ const LOGIN_TTL: Duration = Duration::from_secs(600);
 const MAX_PENDING_LOGINS: usize = 2000;
 /// Open client requests per browser, and per signed-in user: past it the oldest goes.
 const MAX_PENDING_PER_BROWSER: usize = 5;
+/// Open client requests per client address, the oldest going first, because a client
+/// that sends no cookie is a new browser every time. Filling the server's table takes
+/// 40 addresses, and one address can only ever push out its own requests.
+const MAX_PENDING_PER_ADDRESS: usize = 50;
 /// Login hits that create state, per client address per `LOGIN_WINDOW`. Junk creates
 /// none and costs nothing. Loopback peers are exempt as for `/register`, so behind a
 /// same-host proxy with no trusted header only the cap above applies.
@@ -220,6 +224,8 @@ pub(super) struct PendingRequest {
     browser: String,
     /// The signed-in user who asked, for the limit per user.
     user: Option<String>,
+    /// The client address that asked, for the limit per address.
+    peer: String,
     /// The web app's own client, asked from its own pages: needs no consent. Read at
     /// `/authorize`, because the provider's callback always looks cross-site.
     own_app: bool,
@@ -445,18 +451,27 @@ impl SignIn {
         self.sessions.retain(|_, s| s.expires_at > unix);
     }
 
-    /// Keep this browser's and this user's open requests below their limit for one
-    /// more, oldest going first with their provider round trips.
-    fn make_room_for_request(&mut self, browser: &str, user: Option<&str>) {
-        let mut mine: Vec<(Instant, String)> = self
+    /// Keep this browser's, this user's and this address's open requests below their
+    /// limits for one more.
+    fn make_room_for_request(&mut self, browser: &str, user: Option<&str>, peer: &str) {
+        self.drop_oldest_requests(MAX_PENDING_PER_BROWSER, |p| {
+            p.browser == browser || (user.is_some() && p.user.as_deref() == user)
+        });
+        self.drop_oldest_requests(MAX_PENDING_PER_ADDRESS, |p| p.peer == peer);
+    }
+
+    /// Of the requests `mine` picks, leave room for one more below `cap`, oldest going
+    /// first with their provider round trips.
+    fn drop_oldest_requests(&mut self, cap: usize, mine: impl Fn(&PendingRequest) -> bool) {
+        let mut picked: Vec<(Instant, String)> = self
             .pending
             .iter()
-            .filter(|(_, p)| p.browser == browser || (user.is_some() && p.user.as_deref() == user))
+            .filter(|(_, p)| mine(p))
             .map(|(id, p)| (p.created_at, id.clone()))
             .collect();
-        mine.sort();
-        let excess = (mine.len() + 1).saturating_sub(MAX_PENDING_PER_BROWSER);
-        for (_, id) in mine.into_iter().take(excess) {
+        picked.sort();
+        let excess = (picked.len() + 1).saturating_sub(cap);
+        for (_, id) in picked.into_iter().take(excess) {
             self.pending.remove(&id);
             self.flows.retain(|_, f| f.request != id);
         }
@@ -1033,6 +1048,7 @@ pub(super) fn authorize(
         state: params.state.clone(),
         browser: browser.clone(),
         user: session.as_ref().map(|(_, user)| user.clone()),
+        peer: peer.to_string(),
         own_app: is_first_party(&base_url(), &params.redirect_uri) && from_own_origin(headers),
         created_at: Instant::now(),
         consent: None,
@@ -1049,7 +1065,11 @@ pub(super) fn authorize(
     if !signin.admit_login(peer, Instant::now()) || signin.pending.len() >= MAX_PENDING_LOGINS {
         return too_many_page();
     }
-    signin.make_room_for_request(&browser, session.as_ref().map(|(_, user)| user.as_str()));
+    signin.make_room_for_request(
+        &browser,
+        session.as_ref().map(|(_, user)| user.as_str()),
+        peer,
+    );
     let id = random_token();
     signin.pending.insert(id.clone(), request);
     let next = if session.is_some() {
@@ -1870,6 +1890,7 @@ mod tests {
             state: Some("st".to_string()),
             browser: "b".to_string(),
             user: None,
+            peer: "203.0.113.1".to_string(),
             own_app: false,
             created_at: Instant::now(),
             consent: None,
@@ -2041,7 +2062,7 @@ mod tests {
                 created_at: t0,
             },
         );
-        signin.make_room_for_request("b", None);
+        signin.make_room_for_request("b", None, "198.51.100.1");
         assert!(!signin.pending.contains_key("b0"), "the oldest goes");
         assert!(signin.flows.is_empty(), "with its round trip");
         assert!(signin.pending.contains_key("b1"));
@@ -2060,9 +2081,46 @@ mod tests {
                 50 - i as u64,
             );
         }
-        signin.make_room_for_request("fresh-again", Some("github:1"));
+        signin.make_room_for_request("fresh-again", Some("github:1"), "198.51.100.1");
         assert!(!signin.pending.contains_key("u0"));
         assert!(signin.pending.contains_key("u1"));
+    }
+
+    /// A client with no cookie is a new browser each time, so this is what stops it:
+    /// flooding from a few addresses neither fills the table nor touches anyone else.
+    #[test]
+    fn a_few_addresses_cannot_fill_the_table_or_push_out_a_stranger() {
+        let mut s = store_with("c1", "https://client.example/cb");
+        let signin = s.signin.as_mut().unwrap();
+        let t0 = Instant::now();
+        let mut stranger = pending("c1", "https://client.example/cb");
+        stranger.browser = "stranger".to_string();
+        stranger.peer = "203.0.113.200".to_string();
+        stranger.created_at = t0 - Duration::from_secs(120);
+        signin.pending.insert("stranger".to_string(), stranger);
+
+        let attackers = ["198.51.100.1", "198.51.100.2", "2001:db8:1:1::/64"];
+        for i in 0..MAX_PENDING_LOGINS * 3 {
+            let peer = attackers[i % 3];
+            let browser = format!("fresh-{i}");
+            signin.make_room_for_request(&browser, None, peer);
+            let mut p = pending("c1", "https://client.example/cb");
+            p.browser = browser;
+            p.peer = peer.to_string();
+            p.created_at = t0 + Duration::from_millis(i as u64);
+            signin.pending.insert(format!("r{i}"), p);
+        }
+        assert_eq!(signin.pending.len(), 3 * MAX_PENDING_PER_ADDRESS + 1);
+        assert!(
+            signin.pending.contains_key("stranger"),
+            "not theirs to push out"
+        );
+        assert!(signin.pending.len() < MAX_PENDING_LOGINS);
+        // The newest of an address stay, and its oldest went.
+        assert!(signin
+            .pending
+            .contains_key(&format!("r{}", MAX_PENDING_LOGINS * 3 - 1)));
+        assert!(!signin.pending.contains_key("r0"));
     }
 
     #[test]
