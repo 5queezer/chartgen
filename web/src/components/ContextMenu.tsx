@@ -77,13 +77,13 @@ const itemClass =
   "px-3 py-1.5 text-sm cursor-pointer flex items-center justify-between gap-6 outline-none data-[highlighted]:bg-[color:var(--color-border)] data-[disabled]:opacity-40 data-[disabled]:cursor-default";
 const hintClass = "text-[color:var(--color-fg-muted)] text-xs";
 
-function Entry(props: { item: MenuItem }): JSX.Element {
+function Entry(props: { item: MenuItem; onSelect: () => void }): JSX.Element {
   const shared = () => ({
     class: `${itemClass}${props.item.danger ? " text-[color:var(--color-danger)]" : ""}`,
     disabled: props.item.disabled,
-    // As Kobalte does for a plain item: the action, then the close on the next task.
-    closeOnSelect: true,
-    onSelect: props.item.onSelect,
+    // The menu is gone before the action runs (see the host below).
+    closeOnSelect: false,
+    onSelect: props.onSelect,
   });
   return (
     <Show
@@ -174,7 +174,15 @@ export function ContextMenuHost(): JSX.Element {
                   item === null ? (
                     <DropdownMenu.Separator class="my-1 border-t border-[color:var(--color-border)]" />
                   ) : (
-                    <Entry item={item} />
+                    <Entry
+                      item={item}
+                      onSelect={() => {
+                        // Closed first: the action may be a confirm or open a
+                        // dialog, which takes the focus this would hand back.
+                        close();
+                        item.onSelect();
+                      }}
+                    />
                   )
                 }
               </For>

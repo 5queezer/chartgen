@@ -29,6 +29,12 @@ const allVisibleInRange = (page: Page) =>
     return bars.length > 0 && bars.every((d) => d.low >= lo - 1e-9 && d.high <= hi + 1e-9);
   });
 
+/** The lock takes its ratio on the next frames: a zoom before that would set the ratio. */
+const lockSettled = (page: Page) =>
+  page.evaluate(
+    () => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done))),
+  );
+
 async function lockViaMenu(page: Page): Promise<void> {
   const box = await page.locator(".chart-host").boundingBox();
   if (!box) throw new Error("chart host has no bounding box");
@@ -37,6 +43,7 @@ async function lockViaMenu(page: Page): Promise<void> {
   });
   await page.getByRole("menuitemcheckbox", { name: /Lock price to bar ratio/ }).click();
   await expect(page.getByRole("menu")).toBeHidden();
+  await lockSettled(page);
 }
 
 const storage = (page: Page, key: string) =>
@@ -195,6 +202,7 @@ test.describe("price scale invert and lock ratio", () => {
     });
     await page.getByRole("menuitemcheckbox", { name: /Lock price to bar ratio/ }).click();
     await expect(scaleButton(page, "auto")).toHaveAttribute("aria-pressed", "false");
+    await lockSettled(page);
 
     const span = async () => {
       const r = await axisRange(page);
