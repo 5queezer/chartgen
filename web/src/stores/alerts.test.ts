@@ -545,7 +545,7 @@ describe("drawing alerts", () => {
     const a = s.addAlert(drawingAlert)!;
     const other = s.addAlert({ ...drawingAlert, symbol: "MSFT" })!;
     const price = s.addAlert({ symbol: "AAPL", condition: "greater", price: 5, trigger: "once" })!;
-    s.syncDrawingAlerts("AAPL", ["d1"]);
+    s.syncDrawingAlerts("AAPL", [trendLine]);
     expect(s.alerts().every((x) => x.active)).toBe(true);
 
     data.delete(DRAWINGS_KEY);
@@ -568,7 +568,7 @@ describe("drawing alerts", () => {
 
     // The drawing comes back (undo): the alert is on again.
     data.set(DRAWINGS_KEY, JSON.stringify([trendLine]));
-    s.syncDrawingAlerts("AAPL", ["d1"]);
+    s.syncDrawingAlerts("AAPL", [trendLine]);
     expect(byId(a.id).active).toBe(true);
     expect(byId(a.id)).not.toHaveProperty("note");
   });
@@ -586,7 +586,7 @@ describe("drawing alerts", () => {
     const byId = (id: string) => s.alerts().find((x) => x.id === id)!;
 
     data.set(DRAWINGS_KEY, JSON.stringify([vertical]));
-    s.syncDrawingAlerts("AAPL", ["d1"], ["d1"]);
+    s.syncDrawingAlerts("AAPL", [vertical]);
     expect(byId(a.id)).toMatchObject({ active: false, note: s.LINE_VERTICAL });
     expect(s.inactiveReason(byId(a.id))).toBe(s.LINE_VERTICAL);
     expect(byId(paused.id)).not.toHaveProperty("note");
@@ -603,14 +603,77 @@ describe("drawing alerts", () => {
     // Deleted while vertical says so, and undo brings the vertical note back.
     s.syncDrawingAlerts("AAPL", []);
     expect(byId(a.id)).toMatchObject({ active: false, note: s.DRAWING_DELETED });
-    s.syncDrawingAlerts("AAPL", ["d1"], ["d1"]);
+    s.syncDrawingAlerts("AAPL", [vertical]);
     expect(byId(a.id)).toMatchObject({ active: false, note: s.LINE_VERTICAL });
 
     // No longer vertical: on again, and the paused one stays paused.
     data.set(DRAWINGS_KEY, JSON.stringify([trendLine]));
-    s.syncDrawingAlerts("AAPL", ["d1"], []);
+    s.syncDrawingAlerts("AAPL", [trendLine]);
     expect(byId(a.id).active).toBe(true);
     expect(byId(a.id)).not.toHaveProperty("note");
+    expect(byId(paused.id).active).toBe(false);
+  });
+
+  it("a line on one bar of the alert's interval gets the note, only while the chart shows it", async () => {
+    // Ten 1-minute bars apart: not vertical by its points.
+    const steep = {
+      ...trendLine,
+      points: [trendLine.points[0]!, { ...trendLine.points[1]!, timestamp: 10 * 60_000 }],
+    };
+    const data = stubStorage({ [DRAWINGS_KEY]: JSON.stringify([steep]) });
+    const s = await load();
+    const { timeAxisOf } = await import("./drawings");
+    const hourly = timeAxisOf(Array.from({ length: 30 }, (_, i) => i * H));
+    const minutes = timeAxisOf(Array.from({ length: 30 }, (_, i) => i * 60_000));
+    const ctx = (interval: string, axis: typeof hourly) =>
+      s.setChartContext({ symbol: "AAPL", interval, keys: [], axis });
+    const a = s.addAlert(drawingAlert)!;
+    const paused = s.addAlert(drawingAlert)!;
+    s.setAlertActive(paused.id, false);
+    const byId = (id: string) => s.alerts().find((x) => x.id === id)!;
+
+    // The chart on another interval: not evaluated there, not called vertical either.
+    ctx("1m", minutes);
+    expect(byId(a.id).active).toBe(true);
+    expect(s.inactiveReason(byId(a.id))).toBe("open AAPL 1h");
+
+    // Its own interval: dead, says so, and resuming the paused one keeps it off.
+    ctx("1h", hourly);
+    expect(byId(a.id)).toMatchObject({ active: false, note: s.LINE_VERTICAL });
+    expect(byId(paused.id).active).toBe(false);
+    expect(byId(paused.id)).not.toHaveProperty("note");
+    s.setAlertActive(paused.id, true);
+    expect(byId(paused.id)).toMatchObject({ active: false, note: s.LINE_VERTICAL });
+    s.setAlertActive(paused.id, false);
+
+    // A save on these bars judges it the same way.
+    data.set(DRAWINGS_KEY, JSON.stringify([trendLine]));
+    s.syncDrawingAlerts("AAPL", [trendLine]);
+    expect(byId(a.id).active).toBe(true);
+    s.syncDrawingAlerts("AAPL", [steep]);
+    expect(byId(a.id)).toMatchObject({ active: false, note: s.LINE_VERTICAL });
+    data.set(DRAWINGS_KEY, JSON.stringify([steep]));
+
+    // An alert on another interval is not judged on these bars: one bar here, but alive.
+    const finer = s.addAlert({
+      ...drawingAlert,
+      source: { ...drawingAlert.source, interval: "1m" },
+    })!;
+    s.syncDrawingAlerts("AAPL", [steep]);
+    expect(byId(finer.id).active).toBe(true);
+    expect(s.inactiveReason(byId(finer.id))).toBe("open AAPL 1m");
+
+    // Interval changed: the note clears, the paused one stays paused.
+    ctx("1m", minutes);
+    expect(byId(a.id).active).toBe(true);
+    expect(byId(a.id)).not.toHaveProperty("note");
+    expect(byId(paused.id).active).toBe(false);
+    expect(byId(paused.id)).not.toHaveProperty("note");
+    expect(s.inactiveReason(byId(a.id))).toBe("open AAPL 1h");
+
+    // And back.
+    ctx("1h", hourly);
+    expect(byId(a.id)).toMatchObject({ active: false, note: s.LINE_VERTICAL });
     expect(byId(paused.id).active).toBe(false);
   });
 
@@ -622,9 +685,10 @@ describe("drawing alerts", () => {
     expect(s.processPrice("AAPL", level + 1)).toHaveLength(1);
     expect(s.alerts()[0]!.disarmed).toBe(true);
 
-    s.syncDrawingAlerts("AAPL", ["h1"], ["h1"]);
+    const upright = { ...hline, points: [hline.points[0]!, hline.points[0]!] };
+    s.syncDrawingAlerts("AAPL", [upright]);
     expect(s.alerts()[0]).toMatchObject({ active: false, note: s.LINE_VERTICAL, disarmed: true });
-    s.syncDrawingAlerts("AAPL", ["h1"], []);
+    s.syncDrawingAlerts("AAPL", [hline]);
     expect(s.alerts()[0]).toMatchObject({ active: true, disarmed: true });
 
     // Still above the level: no second firing until the price has been back below.

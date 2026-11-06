@@ -223,6 +223,7 @@ export function feedChartSnapshot(symbol: string, snapshot: LiveSnapshot): void 
     symbol,
     interval: snapshot.series.interval ?? "",
     keys: Object.keys(indicators),
+    axis: chartTick(snapshot.series).chart?.view?.axis,
   });
   if (snapshot.update.kind === "reset") {
     forgetBaseline(symbol);

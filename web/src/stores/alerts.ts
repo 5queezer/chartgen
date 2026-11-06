@@ -28,7 +28,7 @@ import {
   type ChartView,
   type Reading,
 } from "../lib/alerts";
-import { loadDrawings, setEvictionListener, type DrawingRecord } from "./drawings";
+import { loadDrawings, setEvictionListener, type DrawingRecord, type TimeAxis } from "./drawings";
 import { normalizeSymbol, symbol as chartSymbol } from "./layout";
 
 export const MAX_ALERTS = 200;
@@ -39,6 +39,9 @@ const KEY = "chartgen.alerts.list";
 export const DRAWING_DELETED = "drawing deleted";
 /** The note of a drawing alert whose line was dragged vertical: it has no value to read. */
 export const LINE_VERTICAL = "line is vertical";
+
+/** What the alerts need of a stored drawing to tell if it can be read. */
+type DrawingRecordRef = Pick<DrawingRecord, "id" | "points">;
 
 const isFinitePositive = (v: unknown): v is number =>
   typeof v === "number" && Number.isFinite(v) && v > 0;
@@ -269,6 +272,8 @@ export interface ChartContext {
   interval: string;
   /** Instance keys of the indicators in the series. */
   keys: readonly string[];
+  /** The series' bars; a sloped line's alert is read on them at its interval. */
+  axis?: TimeAxis | null;
 }
 
 const [chartContext, setChartContextSignal] = createSignal<ChartContext | null>(
@@ -280,12 +285,18 @@ const [chartContext, setChartContextSignal] = createSignal<ChartContext | null>(
         b !== null &&
         a.symbol === b.symbol &&
         a.interval === b.interval &&
-        a.keys.join("\n") === b.keys.join("\n")),
+        a.keys.join("\n") === b.keys.join("\n") &&
+        a.axis?.firstTs === b.axis?.firstTs &&
+        a.axis?.lastTs === b.axis?.lastTs),
   },
 );
 export { chartContext };
-export const setChartContext = (ctx: ChartContext | null): void =>
-  void setChartContextSignal(ctx);
+export const setChartContext = (ctx: ChartContext | null): void => {
+  const before = chartContext();
+  setChartContextSignal(ctx);
+  // Other bars: a line can start or stop falling on one bar of them.
+  if (ctx && chartContext() !== before) syncDrawingAlerts(ctx.symbol, loadDrawings(ctx.symbol, false));
+};
 
 /**
  * Why an alert cannot fire right now, for the Alerts tab and Object Tree:
@@ -374,12 +385,25 @@ export function updateAlert(
   );
 }
 
+/**
+ * Why the drawing `rec` cannot be read for alert `a`, or null when it can: judged on
+ * the chart's bars while they are the ones the alert runs on. On any other interval it
+ * is not evaluated at all ("open BTCUSDT 1h"), so only the points themselves count.
+ */
+function drawingNote(a: Alert, rec: DrawingRecordRef | undefined): string | null {
+  const src = a.source;
+  if (src?.kind !== "drawing") return null;
+  if (!rec) return DRAWING_DELETED;
+  const ctx = chartContext();
+  const own = ctx?.symbol === a.symbol && ctx.interval === src.interval;
+  return isVerticalLine(rec, own ? ctx.axis : undefined) ? LINE_VERTICAL : null;
+}
+
 /** Why a drawing alert's stored drawing cannot be read, or null when it can. */
 function deadDrawingNote(a: Alert): string | null {
   const src = a.source;
   if (src?.kind !== "drawing") return null;
-  const rec = loadDrawings(a.symbol, false).find((d) => d.id === src.drawingId);
-  return !rec ? DRAWING_DELETED : isVerticalLine(rec) ? LINE_VERTICAL : null;
+  return drawingNote(a, loadDrawings(a.symbol, false).find((d) => d.id === src.drawingId));
 }
 
 /**
@@ -435,29 +459,19 @@ export function removeAlert(id: string): void {
 }
 
 /**
- * The drawings of `symbol` are now `ids` (called when they are saved, and
- * with none when the symbol's drawings are evicted). Active alerts on a
- * drawing that is gone, or in `verticalIds` (a line with no value to read), are
- * switched off with a note, not deleted, so the user sees what happened; when
- * the drawing comes back (undo) or stops being vertical they are switched on again.
+ * The drawings of `symbol` are now `records` (called when they are saved, when the
+ * chart's bars change, and with none when the symbol's drawings are evicted). Active
+ * alerts on a drawing that is gone, or on a line with no value to read (`drawingNote`),
+ * are switched off with a note, not deleted, so the user sees what happened; when the
+ * drawing comes back (undo) or stops being vertical they are switched on again.
  */
-export function syncDrawingAlerts(
-  symbol: string,
-  ids: readonly (string | undefined)[],
-  verticalIds: readonly (string | undefined)[] = [],
-): void {
-  const have = new Set(ids);
-  const vertical = new Set(verticalIds);
+export function syncDrawingAlerts(symbol: string, records: readonly DrawingRecordRef[]): void {
   const list = fresh();
   let changed = false;
   const next = list.map((a) => {
     const src = a.source;
     if (a.symbol !== symbol || src?.kind !== "drawing") return a;
-    const note = !have.has(src.drawingId)
-      ? DRAWING_DELETED
-      : vertical.has(src.drawingId)
-        ? LINE_VERTICAL
-        : null;
+    const note = drawingNote(a, records.find((r) => r.id === src.drawingId));
     const ours = a.note === DRAWING_DELETED || a.note === LINE_VERTICAL;
     if (note !== null && (a.active || (ours && a.note !== note))) {
       changed = true;

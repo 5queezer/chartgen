@@ -437,6 +437,8 @@ export interface DrawingItem extends DrawingRecord {
   id: string;
   /** A point precedes the first loaded bar: the drawing is hidden and locked until bars cover it. */
   offRange: boolean;
+  /** Both points on one bar of the chart: no value for an alert to read. */
+  vertical: boolean;
 }
 
 /** What the Object Tree needs from the drawing controller. */
@@ -559,13 +561,21 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
   const syncFlags = () => {
     setLockAll(current.length > 0 && current.every((r) => r.lock));
     setHideAll(current.length > 0 && current.every((r) => !r.visible));
+    const ax = axis();
     setItems(
       reconcile(
         ids.flatMap((id) =>
           // Cloned: reconcile edits the objects it is given in place, which
           // would rewrite the snapshots held by canon and the undo history.
           canon.has(id)
-            ? [{ id, ...structuredClone(canon.get(id)!), offRange: offRange.has(id) }]
+            ? [
+                {
+                  id,
+                  ...structuredClone(canon.get(id)!),
+                  offRange: offRange.has(id),
+                  vertical: isVerticalLine(canon.get(id)!, ax),
+                },
+              ]
             : [],
         ),
         { key: "id" },
@@ -580,11 +590,7 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
     if (!p) return;
     setSaveFailed(!saveDrawings(p.symbol, p.records));
     // Alerts on a drawing that is gone or vertical are switched off (ADR-0034).
-    syncDrawingAlerts(
-      p.symbol,
-      p.records.map((r) => r.id),
-      p.records.filter(isVerticalLine).map((r) => r.id),
-    );
+    syncDrawingAlerts(p.symbol, p.records);
   };
   const persist = () => {
     pendingSave = { symbol: props.symbol, records: current };
@@ -1517,7 +1523,7 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
             </button>
             <Show when={canon.get(m().id)?.name}>
               {(name) => (
-                <Show when={isDrawingAlertTool(name()) && !isVerticalLine(canon.get(m().id) ?? { points: [] })}>
+                <Show when={isDrawingAlertTool(name()) && !items.find((i) => i.id === m().id)?.vertical}>
                   <button type="button" role="menuitem" class={menuItemClass} onClick={() => menuAction("alert")}>
                     Add alert on {DRAWING_LABELS[name()]}…
                   </button>

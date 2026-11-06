@@ -930,6 +930,114 @@ test.describe("drawing modifiers", () => {
     await expect(alertRows(page).locator("[data-role=status]")).not.toContainText("inactive");
   });
 
+  test("a line on one bar of the interval: no alert offered, its alert says so, until the interval changes", async ({
+    bootedApp: page,
+  }) => {
+    const interval = async (name: string) => {
+      await page.getByRole("button", { name, exact: true }).click();
+      await expect
+        .poll(() =>
+          page.evaluate(
+            () => (window as unknown as { __chartgenTest: { series: () => { interval?: string } | null } })
+              .__chartgenTest.series()?.interval,
+          ),
+        )
+        .toBe(name);
+      // The chart has the new bars once a drawing's pixels are refreshed from them.
+      await page.waitForTimeout(500);
+    };
+    /** Whether the drawing's menu and the dialog's Source list offer an alert on the line. */
+    const offered = async () => {
+      const { pixels } = (await overlays(page))[0]!;
+      // An extended line on one bar runs through the whole pane, wherever its points are.
+      const oneBar = pixels[0]!.x === pixels[1]!.x;
+      await clickAt(
+        page,
+        { x: (pixels[0]!.x! + pixels[1]!.x!) / 2, y: oneBar ? 165 : (pixels[0]!.y! + pixels[1]!.y!) / 2 },
+        "right",
+      );
+      await expect(drawingMenu(page).getByRole("menuitem", { name: "Remove" })).toBeVisible();
+      const menu = await drawingMenu(page).getByRole("menuitem", { name: /^Add alert/ }).count();
+      await page.keyboard.press("Escape");
+      await expect(drawingMenu(page)).toHaveCount(0);
+      await page.keyboard.press("Alt+KeyA");
+      await expect(dialog(page)).toBeVisible();
+      const source = await dialog(page).getByLabel("Source").locator("option", { hasText: "Extended line" }).count();
+      await page.keyboard.press("Escape");
+      await expect(dialog(page)).toHaveCount(0);
+      expect(source).toBe(menu);
+      return menu === 1;
+    };
+
+    // On 15m, between the :00 and :15 bars of an hour: one bar of 1h, not exactly vertical.
+    await interval("15m");
+    const [x0, x1] = await page.evaluate(() => {
+      const chart = (window as unknown as TestWindow).__chartgenTest.chart() as unknown as {
+        getDataList: () => { timestamp: number }[];
+        convertToPixel: (p: { dataIndex: number }, f: { paneId: string }) => { x: number };
+      };
+      const list = chart.getDataList();
+      const px = (dataIndex: number) => chart.convertToPixel({ dataIndex }, { paneId: "candle_pane" }).x;
+      const i = list.findLastIndex((d, n) => d.timestamp % 3_600_000 === 0 && n < list.length - 2);
+      return [px(i), px(i + 1)];
+    });
+    await pickTool(page, "Extended line");
+    await clickAt(page, { x: x0!, y: 100 });
+    await clickAt(page, { x: x1!, y: 260 });
+    await expect.poll(async () => (await overlays(page)).length).toBe(1);
+    expect(await offered()).toBe(true);
+
+    // Two alerts on it, one paused.
+    await page.getByRole("tab", { name: /^Alerts/ }).click();
+    for (const _ of [0, 1]) {
+      await page.keyboard.press("Alt+KeyA");
+      await dialog(page).getByLabel("Source").selectOption({ label: "Extended line" });
+      await dialog(page).getByRole("button", { name: "Create" }).click();
+      await expect(dialog(page)).toHaveCount(0);
+    }
+    await expect(alertRows(page)).toHaveCount(2);
+    await alertRows(page).nth(1).hover();
+    await alertRows(page).nth(1).getByRole("button", { name: "Pause alert" }).click();
+    const live = alertRows(page).nth(0);
+    const paused = alertRows(page).nth(1);
+    const status = live.locator("[data-role=status]");
+    await expect(paused).toHaveAttribute("data-status", "paused");
+    await expect(status).not.toContainText("inactive");
+
+    // On 1h no new one is offered, and these are read on 15m: not dead, not called vertical.
+    await interval("1h");
+    expect(await offered()).toBe(false);
+    await expect(status).toHaveText("inactive: open BTCUSDT 15m");
+    await interval("15m");
+    await expect(status).not.toContainText("inactive");
+    await expect(paused).toHaveAttribute("data-status", "paused");
+    expect(await offered()).toBe(true);
+
+    // An alert made on 1h before it stopped being offered there: dead on 1h, and says so.
+    await page.evaluate(() => {
+      const list = JSON.parse(localStorage.getItem("chartgen.alerts.list")!) as {
+        source: { interval: string };
+      }[];
+      for (const a of list) a.source.interval = "1h";
+      localStorage.setItem("chartgen.alerts.list", JSON.stringify(list));
+    });
+    await reloadApp(page);
+    await page.getByRole("tab", { name: /^Alerts/ }).click();
+    await expect(status).toHaveText("inactive: open BTCUSDT 1h");
+    await interval("1h");
+    await expect(live).toHaveAttribute("data-status", "inactive");
+    await expect(status).toHaveText("inactive: line is vertical");
+    await expect(paused).toHaveAttribute("data-status", "paused");
+
+    // The interval changing clears the note, and the paused alert stays paused.
+    await interval("15m");
+    await expect(status).toHaveText("inactive: open BTCUSDT 1h");
+    await expect(paused).toHaveAttribute("data-status", "paused");
+    await interval("1h");
+    await expect(status).toHaveText("inactive: line is vertical");
+    await expect(paused).toHaveAttribute("data-status", "paused");
+  });
+
   test("blur or a hidden tab while a modifier is held restores it", async ({ bootedApp: page }) => {
     for (const fire of [
       () => page.evaluate(() => window.dispatchEvent(new Event("blur"))),
