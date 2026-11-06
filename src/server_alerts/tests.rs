@@ -2364,15 +2364,170 @@ async fn devices_are_limited_per_client_and_in_total() {
     assert_eq!(store.server_alert_events().unwrap().len(), 1);
 
     subscribe(&a, port, "theirs", "you").await;
-    let e = call(&a, "subscribe_push", device(port, "more"), "third")
+    // Replacing one's own needs no room, and leaves everyone else's alone.
+    subscribe(&a, port, "four", "me").await;
+    let ends: HashSet<String> = store
+        .push_devices()
+        .unwrap()
+        .into_iter()
+        .map(|d| d.endpoint)
+        .collect();
+    assert!(ends.iter().any(|e| e.ends_with("/theirs")), "{ends:?}");
+    assert!(!ends.iter().any(|e| e.ends_with("/two")), "{ends:?}");
+}
+
+fn full_table() -> Limits {
+    Limits {
+        changes_per_minute: 1000,
+        devices_total: 3,
+        pushes_per_client_per_minute: 0,
+        ..Limits::default()
+    }
+}
+
+fn endpoints(store: &Store) -> HashSet<String> {
+    store
+        .push_devices()
+        .unwrap()
+        .into_iter()
+        .map(|d| d.endpoint.rsplit('/').next().unwrap().to_string())
+        .collect()
+}
+
+async fn subscribe_in_turn(a: &Arc<ServerAlerts>, port: u16, owners: &[&str]) {
+    for owner in owners {
+        subscribe(a, port, owner, owner).await;
+        tokio::time::sleep(Duration::from_millis(3)).await;
+    }
+}
+
+/// Full, a stranger's device replaces the one whose owner was idle longest.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_full_table_replaces_the_owner_idle_longest() {
+    let (port, _) = receiver(OK).await;
+    let (store, _) = store_at("push-full-idle");
+    let a = push_alerts(store, port, Access::Open, vapid(), full_table());
+    subscribe_in_turn(&a, port, &["old", "middle", "young"]).await;
+    subscribe(&a, port, "new", "new").await;
+    assert_eq!(
+        endpoints(store),
+        ["middle", "young", "new"].map(String::from).into()
+    );
+
+    // A token since then makes an owner the less idle one, however old the device.
+    let (store, _) = store_at("push-full-token");
+    let a = push_alerts(store, port, Access::Open, vapid(), full_table());
+    store.save_oauth_client("old", &[]).unwrap();
+    subscribe_in_turn(&a, port, &["old", "middle", "young"]).await;
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+    store.mark_oauth_client_used("old").unwrap();
+    subscribe(&a, port, "new", "new").await;
+    assert_eq!(
+        endpoints(store),
+        ["old", "young", "new"].map(String::from).into()
+    );
+}
+
+/// A flood needs no alert, and its clients hold fresh tokens: it must not push out
+/// someone whose alert would notify them.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_flood_of_new_devices_replaces_itself_before_a_real_users() {
+    let (port, _) = receiver(OK).await;
+    let (store, _) = store_at("push-full-flood");
+    let a = push_alerts(store, port, Access::Open, vapid(), full_table());
+    subscribe(&a, port, "real", "real").await;
+    create(&a, pushed("greater", "every"), "real").await;
+    tokio::time::sleep(Duration::from_millis(3)).await;
+    for i in 0..10 {
+        let owner = format!("junk{i}");
+        subscribe(&a, port, &owner, &owner).await;
+        tokio::time::sleep(Duration::from_millis(3)).await;
+    }
+    assert!(endpoints(store).contains("real"), "{:?}", endpoints(store));
+    assert_eq!(store.push_devices().unwrap().len(), 3);
+
+    // Once it no longer notifies anyone, it is one more idle device.
+    let id = call(&a, "list_server_alerts", json!({}), "real")
+        .await
+        .unwrap()["alerts"][0]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let args = json!({ "alert_id": id, "active": false });
+    call(&a, "update_server_alert", args, "real").await.unwrap();
+    subscribe(&a, port, "last", "last").await;
+    assert!(!endpoints(store).contains("real"), "{:?}", endpoints(store));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_listed_clients_device_is_never_replaced() {
+    let (port, _) = receiver(OK).await;
+    let (store, _) = store_at("push-full-listed");
+    let listed = Access::Clients(["a", "b", "c", "d"].map(String::from).into());
+    let a = push_alerts(store, port, listed, vapid(), full_table());
+    subscribe_in_turn(&a, port, &["a", "b", "c"]).await;
+    let e = call(&a, "subscribe_push", device(port, "d"), "d")
         .await
         .unwrap_err();
     assert!(e.contains("maximum of 3"), "{e}");
-    // Replacing one's own needs no room.
-    subscribe(&a, port, "four", "me").await;
+    assert_eq!(endpoints(store), ["a", "b", "c"].map(String::from).into());
 }
 
-/// A webhook's budget does not hold a push back, and each client's is its own.
+/// The caller is under its own limit here, so its own device is not what makes room.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_full_table_does_not_replace_the_callers_own_device() {
+    let (port, _) = receiver(OK).await;
+    let (store, _) = store_at("push-full-own");
+    let a = push_alerts(store, port, Access::Open, vapid(), full_table());
+    subscribe_in_turn(&a, port, &["me", "other", "another"]).await;
+    subscribe(&a, port, "second", "me").await;
+    assert_eq!(
+        endpoints(store),
+        ["me", "second", "another"].map(String::from).into()
+    );
+}
+
+/// The review's measurement: this got 25 devices of 1.9 MB each past the old check.
+#[tokio::test(flavor = "multi_thread")]
+async fn padded_keys_are_refused_and_nothing_is_stored() {
+    let (port, _) = receiver(OK).await;
+    let (store, _) = store_at("push-padding");
+    let a = push_alerts(store, port, Access::Open, vapid(), Limits::default());
+    for (key, value) in [
+        ("p256dh", format!("{UA_PUBLIC}{}", "=".repeat(1_900_000))),
+        ("auth", format!("{UA_AUTH}{}", "=".repeat(1_900_000))),
+    ] {
+        let mut args = device(port, "x");
+        args[key] = json!(value);
+        let e = call(&a, "subscribe_push", args, "me").await.unwrap_err();
+        assert!(e.contains("push keys"), "{e}");
+    }
+    assert!(store.push_devices().unwrap().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn one_endpoint_written_two_ways_is_one_device_and_removes_as_one() {
+    let (port, _) = receiver(OK).await;
+    let (store, _) = store_at("push-normal");
+    let a = push_alerts(store, port, Access::Open, vapid(), Limits::default());
+    for endpoint in [
+        "https://fcm.googleapis.com/fcm/send/a",
+        "https://FCM.googleapis.com:443/fcm/send/a",
+    ] {
+        let mut args = device(port, "x");
+        args["endpoint"] = json!(endpoint);
+        let out = call(&a, "subscribe_push", args, "me").await.unwrap();
+        assert_eq!(out["devices"], 1, "{endpoint}");
+    }
+    let args = json!({ "endpoint": "https://FCM.GOOGLEAPIS.com/fcm/send/a" });
+    let out = call(&a, "unsubscribe_push", args, "me").await.unwrap();
+    assert_eq!(
+        (&out["removed"], &out["devices"]),
+        (&json!(true), &json!(0))
+    );
+}
+
+/// Each client's budget is its own, and a webhook's does not apply to a push.
 #[tokio::test(flavor = "multi_thread")]
 async fn pushes_have_a_budget_per_client() {
     let (port, seen) = receiver(OK).await;
@@ -2387,16 +2542,50 @@ async fn pushes_have_a_budget_per_client() {
     };
     let a = push_alerts(store, port, Access::Open, vapid(), limits);
     subscribe(&a, port, "phone", "me").await;
-    let id = create(&a, pushed("crossing", "every"), "me").await;
+    subscribe(&a, port, "theirs", "you").await;
+    let mine = create(&a, pushed("crossing", "every"), "me").await;
+    create(&a, pushed("crossing", "every"), "you").await;
     tick(&a, BASE, 99.0);
     for i in 0..10 {
         tick(&a, BASE, if i % 2 == 0 { 101.0 } else { 99.0 });
     }
-    assert_eq!(a.lock().alerts[&id].fire_count, 10);
-    until("the budget's worth", || seen.lock().unwrap().len() == 2).await;
+    assert_eq!(a.lock().alerts[&mine].fire_count, 10);
+    until("both budgets' worth", || seen.lock().unwrap().len() == 4).await;
     tokio::time::sleep(DISPATCH_EVERY * 3).await;
-    assert_eq!(seen.lock().unwrap().len(), 2, "the rest wait");
+    let seen = seen.lock().unwrap();
+    assert_eq!(seen.len(), 4, "the rest wait");
+    let to = |path: &str| seen.iter().filter(|r| r.starts_with(path)).count();
+    assert_eq!((to("POST /push/phone"), to("POST /push/theirs")), (2, 2));
     assert_eq!(a.lock().queues["me"].len(), 8);
+}
+
+/// As the ADR says: a client's deliveries stay in order, so its webhook over budget holds
+/// its own pushes back, and nobody else's.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_webhook_over_budget_holds_back_only_its_own_clients_push() {
+    let (port, seen) = receiver(OK).await;
+    let (store, _) = store_at("push-order");
+    let limits = Limits {
+        webhooks_per_client_per_minute: 0,
+        ..Limits::default()
+    };
+    let a = push_alerts(store, port, Access::Open, vapid(), limits);
+    subscribe(&a, port, "phone", "me").await;
+    subscribe(&a, port, "theirs", "you").await;
+    let mut both = hooked(port, "greater", "once");
+    both["push"] = json!(true);
+    create(&a, both, "me").await;
+    create(&a, pushed("greater", "once"), "you").await;
+    tick(&a, BASE, 101.0);
+    until("the other client's push", || {
+        !seen.lock().unwrap().is_empty()
+    })
+    .await;
+    tokio::time::sleep(DISPATCH_EVERY * 3).await;
+    let seen = seen.lock().unwrap();
+    assert_eq!(seen.len(), 1, "{seen:?}");
+    assert!(seen[0].starts_with("POST /push/theirs"));
+    assert_eq!(a.lock().queues["me"].len(), 2);
 }
 
 #[tokio::test(flavor = "multi_thread")]

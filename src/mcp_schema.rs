@@ -461,13 +461,13 @@ pub fn server_alert_tools() -> Vec<Value> {
         }),
         json!({
             "name": "subscribe_push",
-            "description": "Register this browser's Web Push subscription, so that server alerts with push: true notify it. Subscribe with the public_key from list_server_alerts. The endpoint must be a known push service (FCM, Mozilla, Apple, Windows). Registering the same endpoint again updates its keys. A device over the limit replaces your oldest.",
+            "description": "Register this browser's Web Push subscription, so that server alerts with push: true notify it. Subscribe with the public_key from list_server_alerts. The endpoint must be a known push service (FCM, Mozilla, Apple, Windows). Registering the same endpoint again updates its keys. A device over the limit replaces your oldest. Devices get the alerts of this client only.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "endpoint": { "type": "string", "maxLength": 1024, "description": "PushSubscription.endpoint." },
-                    "p256dh": { "type": "string", "description": "The subscription's p256dh key, base64url." },
-                    "auth": { "type": "string", "description": "The subscription's auth secret, base64url." }
+                    "p256dh": { "type": "string", "maxLength": 88, "description": "The subscription's p256dh key, base64url." },
+                    "auth": { "type": "string", "maxLength": 24, "description": "The subscription's auth secret, base64url." }
                 },
                 "required": ["endpoint", "p256dh", "auth"]
             }

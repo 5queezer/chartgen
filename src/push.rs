@@ -32,7 +32,12 @@ const TTL_SECS: u32 = 3600;
 /// RFC 8292 allows 24 hours; a token is made for each delivery.
 const TOKEN_SECS: i64 = 12 * 3600;
 
+/// A 65-byte point and a 16-byte secret in base64url, with padding if a browser adds it.
+pub const MAX_P256DH_LEN: usize = 88;
+pub const MAX_AUTH_LEN: usize = 24;
+
 const FAILED: &str = "could not encrypt the push message";
+const BAD_KEYS: &str = "push keys must be a P-256 point and a 16-byte secret";
 
 fn failed<E>(_: E) -> String {
     FAILED.to_string()
@@ -67,16 +72,21 @@ pub struct DeviceKeys {
 }
 
 impl DeviceKeys {
+    /// The raw text is what gets stored, so its length is checked before decoding, which
+    /// would otherwise ignore any amount of padding. Only the uncompressed form: a browser
+    /// could not decrypt a message made from a hybrid one.
     pub fn parse(p256dh: &str, auth: &str) -> Result<Self, String> {
-        let public = decode(p256dh).filter(|k| k.len() == 65);
+        if p256dh.len() > MAX_P256DH_LEN || auth.len() > MAX_AUTH_LEN {
+            return Err(BAD_KEYS.into());
+        }
+        let public = decode(p256dh).filter(|k| k.len() == 65 && k[0] == 4);
         let auth = decode(auth).filter(|k| k.len() == 16);
         let (Some(public), Some(auth)) = (public, auth) else {
-            return Err("push keys must be a P-256 point and a 16-byte secret".into());
+            return Err(BAD_KEYS.into());
         };
         let group = group()?;
         let mut ctx = BigNumContext::new().map_err(failed)?;
-        EcPoint::from_bytes(&group, &public, &mut ctx)
-            .map_err(|_| "push keys must be a P-256 point and a 16-byte secret".to_string())?;
+        EcPoint::from_bytes(&group, &public, &mut ctx).map_err(|_| BAD_KEYS.to_string())?;
         Ok(Self { public, auth })
     }
 }
@@ -236,6 +246,7 @@ impl Vapid {
                 ("urgency", "high".to_string()),
             ],
             body: encrypt(plaintext, device)?,
+            honor_retry_after: true,
         })
     }
 }
@@ -356,6 +367,26 @@ mod tests {
         // As some browsers pad them.
         let padded = format!("{AUTH}==");
         assert!(DeviceKeys::parse(UA_PUBLIC, &padded).is_ok());
+        assert!(DeviceKeys::parse(&format!("{UA_PUBLIC}="), AUTH).is_ok());
+    }
+
+    /// The raw text is stored, so padding must not get a megabyte past the length check.
+    #[test]
+    fn padding_cannot_make_a_key_longer_than_its_limit() {
+        let long = |key: &str, limit: usize| format!("{key}{}", "=".repeat(limit + 1 - key.len()));
+        assert!(DeviceKeys::parse(&long(UA_PUBLIC, MAX_P256DH_LEN), AUTH).is_err());
+        assert!(DeviceKeys::parse(UA_PUBLIC, &long(AUTH, MAX_AUTH_LEN)).is_err());
+        let huge = format!("{UA_PUBLIC}{}", "=".repeat(1_900_000));
+        assert!(DeviceKeys::parse(&huge, AUTH).is_err());
+    }
+
+    /// A browser could not decrypt what a hybrid point produces.
+    #[test]
+    fn only_the_uncompressed_form_of_a_point_is_taken() {
+        let mut point = decode(UA_PUBLIC).unwrap();
+        let hybrid = if point[64] & 1 == 0 { 6 } else { 7 };
+        point[0] = hybrid;
+        assert!(DeviceKeys::parse(&URL_SAFE_NO_PAD.encode(&point), AUTH).is_err());
     }
 
     #[test]

@@ -137,6 +137,7 @@ pub struct Limits {
     pub deliveries_total_per_minute: usize,
     /// Push devices per client; a new one over this replaces its oldest.
     pub devices_per_client: usize,
+    /// When full, a new device replaces someone else's (`device_to_replace`).
     pub devices_total: usize,
     pub pending_deliveries: usize,
     /// So that a few clients cannot fill `pending_deliveries`.
@@ -1187,8 +1188,9 @@ impl ServerAlerts {
                 .and_then(Value::as_str)
                 .ok_or_else(|| format!("{name} is required"))
         };
-        let (endpoint, p256dh, auth) = (text("endpoint")?, text("p256dh")?, text("auth")?);
-        Target::parse_push(endpoint, &self.policy)?;
+        let (p256dh, auth) = (text("p256dh")?, text("auth")?);
+        let target = Target::parse_push(text("endpoint")?, &self.policy)?;
+        let endpoint = target.as_str();
         DeviceKeys::parse(p256dh, auth)?;
 
         let mut st = self.lock();
@@ -1208,10 +1210,13 @@ impl ServerAlerts {
             let over = (mine.len() + 1).saturating_sub(self.limits.devices_per_client);
             // Replacing one of its own adds nothing to the total.
             if over == 0 && st.devices.len() >= self.limits.devices_total {
-                return Err(format!(
-                    "Limit reached: this server holds its maximum of {} push devices",
-                    self.limits.devices_total
-                ));
+                let Some(id) = self.device_to_replace(&st, owner) else {
+                    return Err(format!(
+                        "Limit reached: this server holds its maximum of {} push devices",
+                        self.limits.devices_total
+                    ));
+                };
+                self.forget_device(&mut st, &id);
             }
             for (_, id) in mine.into_iter().take(over) {
                 self.forget_device(&mut st, &id);
@@ -1235,11 +1240,46 @@ impl ServerAlerts {
         Ok(json!({ "devices": st.devices.values().filter(|d| d.owner == owner).count() }))
     }
 
+    /// With the table full, whose device makes room: never a client the operator listed,
+    /// and those with no alert that would notify them go first, the owner idle longest
+    /// among them. Junk devices need no alert, and their owners hold fresh tokens, so going
+    /// by idleness alone would let a flood push out real users; this way it mostly replaces
+    /// itself. An unknown owner is not an idle one, as in `sweep`.
+    fn device_to_replace(&self, st: &State, caller: &str) -> Option<String> {
+        let tokens: HashMap<String, i64> = match self.store.oauth_clients() {
+            Ok(clients) => clients
+                .into_iter()
+                .filter_map(|c| Some((c.client_id, c.last_token_at?)))
+                .collect(),
+            Err(e) => {
+                eprintln!("[alerts] cannot read clients: {e}");
+                return None;
+            }
+        };
+        let notified: HashSet<&str> = st
+            .alerts
+            .values()
+            .filter(|a| a.push && a.active)
+            .map(|a| a.owner.as_str())
+            .collect();
+        st.devices
+            .values()
+            .filter(|d| d.owner != caller && !self.access.keeps_idle_alerts(&d.owner))
+            .min_by_key(|d| {
+                let last = tokens.get(&d.owner).map_or(0, |secs| secs * 1000);
+                (notified.contains(d.owner.as_str()), last.max(d.created_at))
+            })
+            .map(|d| d.id.clone())
+    }
+
     fn unsubscribe_push(&self, args: &Value, owner: &str) -> Result<Value, String> {
-        let endpoint = args
+        let raw = args
             .get("endpoint")
             .and_then(Value::as_str)
             .ok_or("endpoint is required")?;
+        // As it was stored. One that does not parse was never stored, and removes nothing.
+        let target = Target::parse_push(raw, &self.policy);
+        let endpoint = target.as_ref().map_or(raw, Target::as_str);
         let mut st = self.lock();
         let id = st
             .devices
