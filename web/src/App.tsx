@@ -544,6 +544,17 @@ export function App(): JSX.Element {
       : plotsOf(ind, (n) => paletteColor(key, n), key);
   });
 
+  // Undefined only while the registry cannot say. The server leaves out
+  // `configurable_params` for an indicator without params (EMA Stack), which
+  // is an empty form with its Style tab, not a failed load.
+  const settingsSpecs = createMemo(() => {
+    const n = settingsTarget()?.name;
+    const found = listIndicators.data?.indicators.find(
+      (i) => i.name === n || i.aliases?.includes(n ?? ""),
+    );
+    return found && (found.configurable_params ?? []);
+  });
+
   const settingsGeometry = createMemo(() => {
     const key = settingsTarget()?.key;
     const ind = key === undefined ? undefined : query.data?.indicators[key];
@@ -635,12 +646,7 @@ export function App(): JSX.Element {
         target={settingsTarget()}
         plots={settingsPlots()}
         geometry={settingsGeometry()}
-        specs={
-          listIndicators.data?.indicators.find((i) => {
-            const n = settingsTarget()?.name;
-            return i.name === n || i.aliases?.includes(n ?? "");
-          })?.configurable_params
-        }
+        specs={settingsSpecs()}
         onClose={() => setSettingsIndex(null)}
         onSubmit={(params, fields, style) => {
           const target = settingsTarget();
