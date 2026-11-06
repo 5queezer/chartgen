@@ -76,10 +76,18 @@ influence the origin it is compared with. The `Location` is the re-serialized
 parsed URL, so a browser cannot read it differently from the check.
 
 The web app acts on `?error=invalid_client` only if `state` equals the pending
-PKCE state in `sessionStorage`. It then clears the stored client and the PKCE
-state, removes the parameters from the URL and restarts the flow, which registers
-a new client. A crafted link does not know the state and is ignored, so it cannot
-wipe the stored client.
+PKCE state in `sessionStorage`. It then clears the PKCE state, removes the
+parameters from the URL and restarts the flow. A crafted link does not know the
+state, so it cannot wipe the stored client: the app removes the parameters and
+stops at **Sign in again**. It does not restart, because where `sessionStorage`
+does not survive a navigation the state can never match and a restart would loop.
+
+Tabs of one browser share `localStorage` but not `sessionStorage`, so the PKCE state
+records the `client_id` that asked. The stored client is cleared only if it still
+equals the rejected id, so a tab bounced late cannot remove the client another tab
+has just registered. The code exchange uses the recorded id, because the stored one
+may have changed since. Entries saved before this have no id and use the stored
+client as before.
 
 This counts as a failed redirect in the app's existing one-retry guard. A second
 failure in the tab stops at `sign-in failed: <reason>` with **Sign in again**,
@@ -165,8 +173,9 @@ Rejected:
   still get the `400`.
 - Bad: a deliberate deviation from RFC 6749 section 4.1.2.1. Anyone can make
   `/authorize` redirect to a path on the server's own origin, with these two
-  parameters added. No other origin can be reached this way, and the app ignores
-  a `state` it did not issue.
+  parameters added. No other origin can be reached this way, and the app does
+  nothing with a `state` it did not issue beyond stopping at **Sign in again**. A
+  crafted link can therefore show that screen to someone who follows it.
 - Bad: each recovery registers a client. Unused ones are collected after 24 hours
   and registration is rate-limited as before.
 - Neutral: the recovery needs `CHARTGEN_BASE_URL` to match the origin the app is

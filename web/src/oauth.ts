@@ -53,6 +53,8 @@ const TokenResponseSchema = z.object({
 interface PkceState {
   code_verifier: string;
   state: string;
+  /** The client that asked; absent in entries saved by an older version. */
+  client_id?: string;
 }
 
 /** Cached in-memory access token. Cleared on 401 or full re-auth. */
@@ -217,7 +219,7 @@ async function redirectToAuthorize(
   const codeVerifier = generateCodeVerifier();
   const codeChallenge = await deriveCodeChallenge(codeVerifier);
   const state = generateState();
-  savePkce({ code_verifier: codeVerifier, state });
+  savePkce({ code_verifier: codeVerifier, state, client_id: clientId });
 
   const params = new URLSearchParams({
     response_type: "code",
@@ -290,7 +292,10 @@ async function tryConsumeRedirect(): Promise<boolean> {
   }
 
   const discovery = await discover();
-  const { client_id } = await ensureClient(discovery);
+  // The code belongs to the client that asked for it. Another tab may have
+  // replaced the stored one since.
+  const client_id =
+    pending.client_id ?? (await ensureClient(discovery)).client_id;
   const token = await exchangeCode(
     discovery,
     client_id,
@@ -305,26 +310,36 @@ async function tryConsumeRedirect(): Promise<boolean> {
 /**
  * `/authorize` sends a client it does not know back to the app as
  * `?error=invalid_client&state=...`: a redeploy without persistent storage
- * forgets every registration (ADR-0036). Forgets the stored client so that
- * the next sign-in registers a new one, and returns `true`. Anyone can craft
- * this URL, so unless `state` is the pending one it touches nothing and
- * returns `false`.
+ * forgets every registration (ADR-0036). Scrubs that from the URL and returns:
+ * - `"rejected"` if `state` is the pending one. Forgets the stored client so
+ *   that the next sign-in registers a new one, unless another tab has already
+ *   replaced it with a good one.
+ * - `"unmatched"` otherwise. Anyone can craft this URL, so it touches nothing
+ *   else, and starting over could loop where sessionStorage does not survive.
+ * - `null` if the URL carries no such answer.
  */
-function forgetRejectedClient(): boolean {
+function handleRejectedClient(): "rejected" | "unmatched" | null {
   const params = new URLSearchParams(window.location.search);
-  const returnedState = params.get("state");
-  if (params.get("error") !== "invalid_client" || !returnedState) return false;
-  if (readPkce()?.state !== returnedState) return false;
-
-  localStorage.removeItem(LS_CLIENT_ID);
-  localStorage.removeItem(LS_CLIENT_SECRET);
-  sessionStorage.removeItem(SS_PKCE);
+  if (params.get("error") !== "invalid_client") return null;
   window.history.replaceState(
     {},
     "",
     window.location.origin + window.location.pathname + window.location.hash,
   );
-  return true;
+
+  const pending = readPkce();
+  const returnedState = params.get("state");
+  if (!returnedState || pending?.state !== returnedState) return "unmatched";
+
+  if (
+    pending.client_id === undefined ||
+    localStorage.getItem(LS_CLIENT_ID) === pending.client_id
+  ) {
+    localStorage.removeItem(LS_CLIENT_ID);
+    localStorage.removeItem(LS_CLIENT_SECRET);
+  }
+  sessionStorage.removeItem(SS_PKCE);
+  return "rejected";
 }
 
 /**
@@ -364,7 +379,8 @@ export function clearAccessToken(): void {
  * If the URL on load already carries `?code=...`, run the exchange
  * eagerly so the rest of the app sees a token immediately. An
  * `?error=invalid_client` answer to this tab's request counts as a failed
- * exchange after dropping the stored client, so the restart registers anew.
+ * exchange after dropping the stored client, so the restart registers anew;
+ * one that is not goes straight to the error, with no restart.
  *
  * Resolves `null` when there was nothing to consume or the exchange
  * worked. When it fails, the first time in this tab it restarts the flow
@@ -374,15 +390,26 @@ export function clearAccessToken(): void {
  */
 export async function tryHandlePendingRedirect(): Promise<Error | null> {
   try {
-    if (forgetRejectedClient()) {
+    const rejection = handleRejectedClient();
+    if (rejection === "unmatched") {
+      return new Error("this address is not a sign-in in progress");
+    }
+    if (rejection === "rejected") {
       throw new Error("the server no longer knows this client");
     }
     await tryConsumeRedirect();
     return null;
   } catch (err) {
     console.error("[oauth] redirect handler failed:", err);
-    if (sessionStorage.getItem(SS_RETRIED) === null) {
-      sessionStorage.setItem(SS_RETRIED, "1");
+    // Without a working guard, no retry: it could not stop a loop.
+    let mayRetry = false;
+    try {
+      mayRetry = sessionStorage.getItem(SS_RETRIED) === null;
+      if (mayRetry) sessionStorage.setItem(SS_RETRIED, "1");
+    } catch {
+      mayRetry = false;
+    }
+    if (mayRetry) {
       try {
         return await startSignIn();
       } catch (retryErr) {

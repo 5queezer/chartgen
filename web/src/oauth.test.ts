@@ -159,6 +159,59 @@ describe("tryHandlePendingRedirect", () => {
   });
 });
 
+describe("the client of a code", () => {
+  const exchangedClient = () => {
+    const call = fetchMock.mock.calls.find(([u]) => u === DISCOVERY.token_endpoint)!;
+    return new URLSearchParams(String(call[1].body)).get("client_id");
+  };
+
+  beforeEach(() => {
+    vi.resetModules();
+    tokenStatus = 200;
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it("is the one that asked, even if another tab replaced the stored one", async () => {
+    boot("http://app.test/?code=c1&state=s1");
+    sessionStorage.setItem(
+      "chartgen.oauth.pkce",
+      JSON.stringify({ code_verifier: "v", state: "s1", client_id: "asked" }),
+    );
+    localStorage.setItem("chartgen.oauth.client_id", "from-other-tab");
+    const { tryHandlePendingRedirect } = await import("./oauth");
+
+    expect(await tryHandlePendingRedirect()).toBeNull();
+
+    expect(exchangedClient()).toBe("asked");
+    expect(localStorage.getItem("chartgen.oauth.client_id")).toBe("from-other-tab");
+  });
+
+  it("is the stored one for a pending entry saved without client_id", async () => {
+    boot("http://app.test/?code=c1&state=s1");
+    const { tryHandlePendingRedirect } = await import("./oauth");
+
+    expect(await tryHandlePendingRedirect()).toBeNull();
+
+    expect(exchangedClient()).toBe("client");
+  });
+
+  it("is saved with the pending entry when a sign-in starts", async () => {
+    boot("http://app.test/");
+    sessionStorage.removeItem("chartgen.oauth.pkce");
+    const { startSignIn } = await import("./oauth");
+
+    void startSignIn();
+    await vi.waitFor(() => expect(assign).toHaveBeenCalledOnce());
+
+    expect(
+      JSON.parse(sessionStorage.getItem("chartgen.oauth.pkce")!) as { client_id: string },
+    ).toMatchObject({ client_id: "client" });
+  });
+});
+
 describe("stale client (?error=invalid_client)", () => {
   const authorizedClient = () =>
     new URL(String(assign.mock.calls[0]![0])).searchParams.get("client_id");
@@ -194,9 +247,23 @@ describe("stale client (?error=invalid_client)", () => {
   it.each([
     ["a forged state", "http://app.test/?error=invalid_client&state=forged"],
     ["no state", "http://app.test/?error=invalid_client"],
-    ["another error", "http://app.test/?error=access_denied&state=s1"],
-  ])("with %s, changes nothing", async (_name, url) => {
+  ])("with %s, stops without restarting or touching the client", async (_name, url) => {
     boot(url);
+    const { tryHandlePendingRedirect } = await import("./oauth");
+
+    const err = await tryHandlePendingRedirect();
+
+    expect(err?.message).toBe("this address is not a sign-in in progress");
+    expect(href).toBe("http://app.test/");
+    expect(localStorage.getItem("chartgen.oauth.client_id")).toBe("client");
+    expect(pendingState()).toBe("s1");
+    expect(sessionStorage.getItem(RETRIED)).toBeNull();
+    expect(assign).not.toHaveBeenCalled();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("with another error, changes nothing", async () => {
+    boot("http://app.test/?error=access_denied&state=s1");
     const { tryHandlePendingRedirect } = await import("./oauth");
 
     expect(await tryHandlePendingRedirect()).toBeNull();
@@ -209,14 +276,71 @@ describe("stale client (?error=invalid_client)", () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
-  it("without any pending sign-in, changes nothing", async () => {
+  it("without any pending sign-in, stops and keeps the client", async () => {
     boot("http://app.test/?error=invalid_client&state=s1");
     sessionStorage.removeItem("chartgen.oauth.pkce");
-    const { tryHandlePendingRedirect } = await import("./oauth");
+    const { tryHandlePendingRedirect, startSignIn } = await import("./oauth");
 
-    expect(await tryHandlePendingRedirect()).toBeNull();
+    expect((await tryHandlePendingRedirect())?.message).toBe(
+      "this address is not a sign-in in progress",
+    );
     expect(localStorage.getItem("chartgen.oauth.client_id")).toBe("client");
     expect(assign).not.toHaveBeenCalled();
+
+    void startSignIn();
+    await vi.waitFor(() => expect(assign).toHaveBeenCalledOnce());
+    expect(authorizedClient()).toBe("client");
+  });
+
+  it("with sessionStorage throwing, resolves with an error instead of hanging", async () => {
+    boot("http://app.test/?error=invalid_client&state=s1");
+    const blocked = () => {
+      throw new Error("storage blocked");
+    };
+    vi.stubGlobal("sessionStorage", {
+      getItem: blocked,
+      setItem: blocked,
+      removeItem: blocked,
+    });
+    const { tryHandlePendingRedirect } = await import("./oauth");
+
+    expect((await tryHandlePendingRedirect())?.message).toBe("storage blocked");
+    expect(assign).not.toHaveBeenCalled();
+    expect(localStorage.getItem("chartgen.oauth.client_id")).toBe("client");
+  });
+
+  it("keeps a client another tab has already put in place of the rejected one", async () => {
+    boot("http://app.test/?error=invalid_client&state=s1");
+    sessionStorage.setItem(
+      "chartgen.oauth.pkce",
+      JSON.stringify({ code_verifier: "v", state: "s1", client_id: "rejected" }),
+    );
+    localStorage.setItem("chartgen.oauth.client_id", "from-other-tab");
+    const { tryHandlePendingRedirect } = await import("./oauth");
+
+    void tryHandlePendingRedirect();
+    await vi.waitFor(() => expect(assign).toHaveBeenCalledOnce());
+
+    expect(authorizedClient()).toBe("from-other-tab");
+    expect(localStorage.getItem("chartgen.oauth.client_id")).toBe("from-other-tab");
+    expect(fetchMock).not.toHaveBeenCalledWith(
+      DISCOVERY.registration_endpoint,
+      expect.anything(),
+    );
+  });
+
+  it("forgets the client when the rejected id is the stored one", async () => {
+    boot("http://app.test/?error=invalid_client&state=s1");
+    sessionStorage.setItem(
+      "chartgen.oauth.pkce",
+      JSON.stringify({ code_verifier: "v", state: "s1", client_id: "client" }),
+    );
+    const { tryHandlePendingRedirect } = await import("./oauth");
+
+    void tryHandlePendingRedirect();
+    await vi.waitFor(() => expect(assign).toHaveBeenCalledOnce());
+
+    expect(authorizedClient()).toBe("new");
   });
 
   it("a second failure stops with the error, and Sign in again registers", async () => {
