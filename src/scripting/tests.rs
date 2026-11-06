@@ -532,6 +532,7 @@ fn fixtures() -> Vec<OhlcvData> {
             .collect(),
         symbol: None,
         interval: None,
+        session: None,
     };
     vec![
         sample_data(500),

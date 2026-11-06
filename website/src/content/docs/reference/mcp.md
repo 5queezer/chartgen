@@ -351,11 +351,17 @@ bars ahead of price.
 - `lines[k].index` and `fills[k].index` name the line or fill the values
   continue: Senkou A (line 2), Senkou B (line 3) and the cloud (fill 0).
 - `t` is those bars' open times: the last bar's time plus `j + 1`
-  intervals. Month-based bars (`1M`, `3M`, `2mo`) step by
-  calendar months. Daily and longer bars skip Saturday and Sunday when the
-  loaded bars have none on a weekend (stocks); exchange holidays and
-  intraday closed hours are not skipped. It is absent when the bars have
-  no timestamps.
+  intervals, on 24/7 symbols. Month-based bars (`1M`, `3M`, `2mo`) step by
+  calendar months. Exchange-traded symbols follow the exchange's regular session,
+  from Yahoo's metadata, in its time zone: intraday bars stay between open and
+  close and restart at the next open, and day bars stay on trading days. Weekdays
+  with no bars in three or more weeks of loaded bars count as closed (with fewer,
+  Saturday and Sunday). US-listed equities, ETFs, indices and mutual funds also skip
+  the holidays and early closes of the NYSE's published calendar, for 2026 to 2028.
+  Other exchanges' holidays, and US dates past 2028, are not skipped. Futures step
+  through their breaks. See
+  [ADR-0038](/chartgen/decisions/0038-custom-intervals/). `t` is absent when the
+  bars have no timestamps.
 - The per-bar arrays are unchanged, so clients that ignore `future` keep
   working. Every series response carries the block, tails and pushes
   included: the forming bar moves the newest projected values. Take it

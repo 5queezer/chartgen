@@ -693,6 +693,7 @@ fn series_json(
         bars: data.bars[offset..].to_vec(),
         symbol: data.symbol.clone(),
         interval: data.interval.clone(),
+        session: data.session,
     };
     let bars_arr: Vec<Value> = visible
         .bars
@@ -723,7 +724,9 @@ fn series_json(
         }
         let mut entry = panel_result_to_series_json(&trimmed, &visible);
         if let Some(p) = ind.projection(data) {
-            entry["future"] = projection_to_json(&p, &visible);
+            // Every bar, not the visible ones: the times read closed days off
+            // the loaded bars, and a two-bar tail shows too few.
+            entry["future"] = projection_to_json(&p, data);
         }
         indicators_json.insert(key.clone(), entry);
     }
@@ -2763,6 +2766,7 @@ mod tests {
             bars: vec![],
             symbol: None,
             interval: None,
+            session: None,
         };
         let j = panel_result_to_series_json(&pr, &data);
         let want = "rgba(10,20,30,0.25)";
@@ -2795,6 +2799,7 @@ mod tests {
             bars: vec![],
             symbol: None,
             interval: None,
+            session: None,
         };
         let j = panel_result_to_series_json(&pr, &data);
         assert_eq!(j["fills"][0]["color"], "rgba(76,175,80,0.2)");
@@ -2963,6 +2968,7 @@ mod tests {
                 .collect(),
             symbol: None,
             interval: None,
+            session: None,
         };
         let pr = PanelResult {
             lines: vec![Line {
@@ -3005,6 +3011,7 @@ mod tests {
                 .collect(),
             symbol: None,
             interval: None,
+            session: None,
         };
         let green = RGBAColor(38, 166, 154, 0.5);
         let red = RGBAColor(239, 83, 80, 0.5);
@@ -3269,6 +3276,7 @@ mod tests {
                 .collect(),
             symbol: None,
             interval: None,
+            session: None,
         };
         let pr = PanelResult {
             divlines: vec![DivLine {
@@ -3675,6 +3683,7 @@ mod tests {
                 .collect(),
             symbol: None,
             interval: None,
+            session: None,
         };
         let j = panel_result_to_series_json(&t, &visible);
         assert_eq!(j["signals"][0]["t"], json!(1_003));
@@ -4277,6 +4286,24 @@ mod tests {
             assert!(is_error(&resp), "timeframe {tf} must be rejected");
             assert!(response_text(&resp).contains("Unsupported timeframe"));
         }
+    }
+
+    #[test]
+    fn a_tails_future_times_match_the_full_load() {
+        // A 24/7 daily chart on a Friday: the two-bar tail shows no weekend bar,
+        // but its future times must step through weekends, as the full load's do.
+        let friday_ms = 1_793_937_600_000; // 2026-11-06T04:00:00Z
+        let mut raw = data::sample_ohlcv("BTCUSDT", "1d", 150, None, friday_ms).unwrap();
+        raw.symbol = Some("BTCUSDT".into());
+        raw.interval = Some("1d".into());
+        let t = |bars: usize| -> Vec<i64> {
+            let v = series_tail(&raw, &json!(["ichimoku"]), "candles", bars).unwrap();
+            serde_json::from_value(v["indicators"]["ichimoku"]["future"]["t"].clone()).unwrap()
+        };
+        let (full, tail) = (t(100), t(2));
+        assert_eq!(full.len(), 25);
+        assert_eq!(tail, full);
+        assert!(tail.windows(2).all(|w| w[1] - w[0] == 86_400), "{tail:?}");
     }
 
     #[test]

@@ -1,4 +1,4 @@
-use crate::data::{self, Bar, OhlcvData};
+use crate::data::{self, Bar, OhlcvData, Session};
 use chartgen::interval::{Interval, Unit};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -208,6 +208,7 @@ pub fn fetch_binance(
             bars,
             symbol: None,
             interval: None,
+            session: None,
         },
         has_more,
     })
@@ -312,6 +313,7 @@ pub fn fetch_yahoo(
                     bars: Vec::new(),
                     symbol: None,
                     interval: None,
+                    session: None,
                 },
                 has_more: false,
             }),
@@ -355,6 +357,7 @@ fn parse_yahoo_chart(
             bars: Vec::new(),
             symbol: None,
             interval: None,
+            session: None,
         },
         has_more: false,
     };
@@ -531,13 +534,56 @@ fn parse_yahoo_chart(
         bars = bars.split_off(bars.len() - limit);
     }
 
+    let session = if all_day {
+        None
+    } else {
+        meta.and_then(session_from_meta)
+    };
+
     Ok(Fetched {
         data: OhlcvData {
             bars,
             symbol: None,
             interval: None,
+            session,
         },
         has_more,
+    })
+}
+
+/// The regular session from a Yahoo `meta`: exchange time zone, today's open,
+/// and the latest close among `tradingPeriods` (intraday responses list recent
+/// days), because today may be an early close. `None` for markets open all day
+/// (futures report 23 h 59 m), which then step through time like crypto, or for
+/// anything missing. US-listed means an instrument with New York's zone.
+fn session_from_meta(meta: &serde_json::Value) -> Option<Session> {
+    use chrono::TimeZone;
+    let regular = meta.get("currentTradingPeriod")?.get("regular")?;
+    let start = regular.get("start")?.as_i64()?;
+    let end = regular.get("end")?.as_i64()?;
+    if end - start >= 23 * 3_600 {
+        return None;
+    }
+    let tz: chrono_tz::Tz = meta.get("exchangeTimezoneName")?.as_str()?.parse().ok()?;
+    let local = |t: i64| tz.timestamp_opt(t, 0).single().map(|d| d.time());
+    let recent_ends = meta
+        .get("tradingPeriods")
+        .and_then(|p| p.as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|day| day.as_array())
+        .flatten()
+        .filter_map(|p| local(p.get("end")?.as_i64()?));
+    let close = recent_ends.fold(local(end)?, |a, b| a.max(b));
+    let listed_type = matches!(
+        meta.get("instrumentType").and_then(|v| v.as_str()),
+        Some("EQUITY" | "ETF" | "INDEX" | "MUTUALFUND")
+    );
+    Some(Session {
+        tz,
+        open: local(start)?,
+        close,
+        us_calendar: listed_type && tz == chrono_tz::America::New_York,
     })
 }
 
@@ -1703,6 +1749,57 @@ mod tests {
         let body = yahoo_body(&ts, "BTC-USD", "CRYPTOCURRENCY", 0);
         let f = parse_yahoo_chart(&body, "7m", 100, None, &win("1m", 0)).unwrap();
         assert_eq!(dates(&f), vec![base, base + 420, base + 840]);
+    }
+
+    #[test]
+    fn yahoo_meta_gives_the_regular_session() {
+        use chrono::Timelike;
+        // The AAPL fixture: 09:30 to 16:00 New York, a US listing.
+        let f = parse_yahoo_chart(&fixture(), "1h", 100, None, &win("1h", 0)).unwrap();
+        let s = f.data.session.expect("an equity has a session");
+        assert_eq!(s.tz, chrono_tz::America::New_York);
+        assert_eq!((s.open.hour(), s.open.minute()), (9, 30));
+        assert_eq!((s.close.hour(), s.close.minute()), (16, 0));
+        assert!(s.us_calendar);
+
+        let meta = |instrument: &str, tz: &str, start: i64, end: i64| {
+            serde_json::json!({
+                "instrumentType": instrument,
+                "exchangeTimezoneName": tz,
+                "currentTradingPeriod": { "regular": { "start": start, "end": end } },
+            })
+        };
+        // 09:00 to 15:30 in Tokyo: hours, and no US calendar.
+        let tokyo = 1_793_923_200;
+        let s = session_from_meta(&meta("EQUITY", "Asia/Tokyo", tokyo, tokyo + 23_400)).unwrap();
+        assert_eq!(
+            (s.open.hour(), s.close.hour(), s.close.minute()),
+            (9, 15, 30)
+        );
+        assert!(!s.us_calendar);
+        // A New York future runs all day, so it has no session.
+        let future = meta("FUTURE", "America/New_York", tokyo, tokyo + 86_340);
+        assert_eq!(session_from_meta(&future), None);
+        // Unknown zone: no session rather than a wrong one.
+        assert_eq!(
+            session_from_meta(&meta("EQUITY", "Mars/Base", tokyo, tokyo + 23_400)),
+            None
+        );
+
+        // Today an early close: the recent days say what a normal close is.
+        let open = NOV4_OPEN;
+        let mut early = meta("EQUITY", "America/New_York", open, open + 12_600);
+        assert_eq!(session_from_meta(&early).unwrap().close.hour(), 13);
+        early["tradingPeriods"] = serde_json::json!([
+            [{ "start": open - DAY, "end": open - DAY + 23_400 }],
+            [{ "start": open, "end": open + 12_600 }],
+        ]);
+        assert_eq!(session_from_meta(&early).unwrap().close.hour(), 16);
+
+        // 24/7 instruments have none, whatever their metadata says.
+        let body = yahoo_body(&[1_700_006_400], "BTC-USD", "CRYPTOCURRENCY", 0);
+        let f = parse_yahoo_chart(&body, "1h", 100, None, &win("1h", 0)).unwrap();
+        assert_eq!(f.data.session, None);
     }
 
     #[test]

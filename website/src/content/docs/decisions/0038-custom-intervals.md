@@ -1,6 +1,6 @@
 ---
-title: "0038 — Custom intervals"
-description: "A timeframe is a number and a unit, parsed once on the server. Bars are resampled from the coarsest native interval, on a stable grid, with limits that bound what one request can cost."
+title: "0038 — Custom intervals and session-aware future bars"
+description: "A timeframe is a number and a unit, parsed once on the server. Bars are resampled from the coarsest native interval, on a stable grid, with limits that bound what one request can cost. Projected bars stay in the exchange's session and skip its known holidays."
 sidebar:
   order: 38
 ---
@@ -8,6 +8,7 @@ sidebar:
 **Status:** Accepted
 **Date:** 2026-11-06
 **Extends:** [ADR-0009](/chartgen/decisions/0009-live-tail-polling-and-history-paging/) (paging and tails), [ADR-0021](/chartgen/decisions/0021-realtime-chart-push/) (chart push), [ADR-0032](/chartgen/decisions/0032-indicator-aware-warmup/) (warmup)
+**Amends:** [ADR-0033](/chartgen/decisions/0033-indicator-projection-past-last-bar/) (future bar times)
 
 ## Context and Problem Statement
 
@@ -24,6 +25,10 @@ and tail polls repeat them every 2 s. Bars must also land on stable boundaries,
 or a reload would show different bars and a live tick would fold into the wrong
 one.
 
+Separately, ADR-0033 deferred sessions and holidays until bars carried their
+session. Its future bars skip weekends on daily stock charts and nothing else, so
+an intraday stock chart put cloud bars in closed hours.
+
 ## Decision Drivers
 
 - One grammar. The same interval must mean the same thing in the MCP tool, a
@@ -32,6 +37,7 @@ one.
 - A reload gives the same bars, and a live bar is the bar a reload shows.
 - Native intervals stay native. A resampled `8h` should not replace Binance's.
 - Reuse what exists: session splitting, the phantom-print merge, the grids.
+- Do not invent market data. A calendar we cannot source is one we do not have.
 
 ## Considered Options
 
@@ -61,10 +67,29 @@ one.
 2. **Keep native bars and resample on each recompute.** The window is larger,
    and the result is the fetch path's result by construction.
 
+### Exchange sessions for future bars
+
+1. **Infer hours from the loaded bars' first and last times.** No new data, but a
+   tail of a `1m` chart can hold less than one session, and the result would differ
+   between a full load and a tail.
+2. **A table of exchanges and their hours.** Data to maintain and get wrong, for
+   something the source already reports.
+3. **Yahoo's metadata.** Every chart response names the exchange's time zone and
+   its regular session.
+
+### Holidays
+
+1. **Compute them by rule** (third Monday of January, and so on). Looks complete
+   and is unbounded, but exchange rules have exceptions the rules do not capture.
+2. **A paid or external calendar service.** A new runtime dependency for labels.
+3. **A small table copied from the exchange's published calendar**, that ends
+   when the calendar ends.
+4. **No holidays.** Simple, and wrong a few days a year.
+
 ## Decision Outcome
 
-Chosen: the server's parser with a shared fixture, both limits, and resampling
-on each recompute.
+Chosen: the server's parser with a shared fixture, both limits, resampling on each
+recompute, Yahoo's metadata for sessions, and a small NYSE table for holidays.
 
 ### Grammar
 
@@ -131,6 +156,42 @@ chart seeds native bars, upserts feed events as before, and resamples on each
 recompute with `fetch::resample`. Groups on the same base share one WebSocket.
 `--trade` still needs a stream of its own, and refuses other intervals at startup.
 
+### Future bars
+
+`OhlcvData` gains `session: Option<Session>`, parsed from Yahoo's `meta`: time zone
+from `exchangeTimezoneName`, open from `currentTradingPeriod.regular`, and close
+from the latest of that and `tradingPeriods`, because today may be an early close.
+`chrono-tz` turns those into each future day's UTC time, so DST changes need no
+special case. A response with a regular session of 23 hours or more (futures), a
+24/7 instrument, or a zone it does not know has no session and steps on as before.
+That includes Binance and the sample source.
+
+`data::future_bar_times` then works per interval:
+
+- **Intraday with a session.** Step from the last bar until the next would reach
+  the close, then restart at the next open day's open. That is the grid resampled
+  bars use, and Yahoo's own: its `1h` bars open at 09:30, 10:30 and so on.
+- **Days.** Next slot of the day grid, on its first open day.
+- **Weeks and months.** As before. They do not move for a closed day.
+
+Closed weekdays come from the bars. Across three weeks of dates, the weekdays that
+never occur are closed, which finds a Sunday to Thursday market without a list.
+With fewer dates, Saturday and Sunday are closed unless a bar falls on one.
+
+The block is computed from every loaded bar, warmup included. It used the visible
+bars before, so a two-bar tail of a daily crypto chart saw no weekend bar and
+skipped weekends the full load did not.
+
+**Holidays.** `US_HOLIDAYS` and `US_EARLY_CLOSES` hold the New York Stock Exchange's
+published 2026 to 2028 calendar, read from
+[its site](https://www.nyse.com/markets/hours-calendars) on 2026-11-06. They apply to
+equities, ETFs, indices and mutual funds in New York's time zone, which covers
+NYSE and Nasdaq listings. Their end is a known limit: past 2028 only weekends are
+skipped, until someone adds the next years. No other exchange has a table: its
+future bars keep correct hours and weekdays and step through its holidays.
+
+The existing cap of 500 projected bars and the calendar months are unchanged.
+
 ## Consequences
 
 **Positive.** Any sensible interval works for both sources, live, with paging,
@@ -154,6 +215,16 @@ of their own beyond the canonical string. MCP clients get it too.
   stays stable across requests. A Friday can be a bar of its own.
 - Epoch-counted lengths do not restart daily. TradingView's bar opens may differ
   on 24/7 symbols for lengths that do not divide a day.
+- A new dependency, `chrono-tz`, with its time zone tables, for DST. Without it a
+  projection across a change would be an hour off.
+- Holidays are known for one market until 2028, and only as scheduled. An
+  unscheduled closure, another exchange's holiday, or a US date past 2028 shows a
+  future bar on a closed day. These times only label future bars, in the legend,
+  the Data Window and the `future.t` an MCP client reads, so the harm is small.
+- Yahoo's session has no lunch break. Its Tokyo `5m` bars run through the break
+  too (checked 2026-11-06), so future bars match the bars, not the market's rule.
+- A market that changes its hours is only reflected when Yahoo reports them.
+- Extended hours are not covered, and neither are futures' daily and weekend breaks.
 
 ## More Information
 

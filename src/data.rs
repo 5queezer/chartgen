@@ -1,5 +1,6 @@
 /// OHLCV bar and data container.
 use crate::interval::{Interval, Unit};
+use chrono::{Datelike, NaiveDate, NaiveTime, TimeZone};
 
 #[derive(Clone, Debug)]
 #[allow(dead_code)]
@@ -17,6 +18,8 @@ pub struct OhlcvData {
     pub bars: Vec<Bar>,
     pub symbol: Option<String>,
     pub interval: Option<String>,
+    /// The exchange's regular session; `None` for a 24/7 market or an unknown one.
+    pub session: Option<Session>,
 }
 
 impl OhlcvData {
@@ -49,6 +52,7 @@ impl OhlcvData {
             bars,
             symbol: self.symbol.clone(),
             interval: self.interval.clone(),
+            session: self.session,
         }
     }
 
@@ -115,6 +119,7 @@ pub fn sample_data(n: usize) -> OhlcvData {
         bars,
         symbol: None,
         interval: None,
+        session: None,
     }
 }
 
@@ -126,13 +131,105 @@ pub fn interval_secs(interval: &str) -> Option<i64> {
     Interval::parse(interval).ok().map(|iv| iv.secs())
 }
 
+/// New York Stock Exchange market holidays, as (year, month, day), from its
+/// published calendar (https://www.nyse.com/markets/hours-calendars, read
+/// 2026-11-06). Nasdaq closes on the same days. It ends with 2028: past that,
+/// only weekends are skipped. Unscheduled closures cannot be listed.
+const US_HOLIDAYS: [(i32, u32, u32); 29] = [
+    (2026, 1, 1),
+    (2026, 1, 19),
+    (2026, 2, 16),
+    (2026, 4, 3),
+    (2026, 5, 25),
+    (2026, 6, 19),
+    (2026, 7, 3),
+    (2026, 9, 7),
+    (2026, 11, 26),
+    (2026, 12, 25),
+    (2027, 1, 1),
+    (2027, 1, 18),
+    (2027, 2, 15),
+    (2027, 3, 26),
+    (2027, 5, 31),
+    (2027, 6, 18),
+    (2027, 7, 5),
+    (2027, 9, 6),
+    (2027, 11, 25),
+    (2027, 12, 24),
+    (2028, 1, 17),
+    (2028, 2, 21),
+    (2028, 4, 14),
+    (2028, 5, 29),
+    (2028, 6, 19),
+    (2028, 7, 4),
+    (2028, 9, 4),
+    (2028, 11, 23),
+    (2028, 12, 25),
+];
+
+/// Days the same calendar closes the market at 13:00 New York time.
+const US_EARLY_CLOSES: [(i32, u32, u32); 5] = [
+    (2026, 11, 27),
+    (2026, 12, 24),
+    (2027, 11, 26),
+    (2028, 7, 3),
+    (2028, 11, 24),
+];
+
+fn listed(table: &[(i32, u32, u32)], d: NaiveDate) -> bool {
+    table.contains(&(d.year(), d.month(), d.day()))
+}
+
+/// An exchange's regular session, read from the data source's metadata.
+/// Times are the exchange's own, so its DST changes need no special case.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Session {
+    pub tz: chrono_tz::Tz,
+    pub open: NaiveTime,
+    pub close: NaiveTime,
+    /// A US-listed instrument: `US_HOLIDAYS` and `US_EARLY_CLOSES` apply.
+    pub us_calendar: bool,
+}
+
+impl Session {
+    fn close_on(&self, d: NaiveDate) -> NaiveTime {
+        if self.us_calendar && listed(&US_EARLY_CLOSES, d) {
+            NaiveTime::from_hms_opt(13, 0, 0).unwrap_or(self.close)
+        } else {
+            self.close
+        }
+    }
+}
+
+/// Which weekdays (Monday first) a market with these bar dates is closed. With
+/// three weeks of dates, those that never occur: this finds a Sunday to Thursday
+/// market without a list of them. With fewer, Saturday and Sunday unless a bar
+/// falls on one.
+fn closed_weekdays(days: &[NaiveDate]) -> [bool; 7] {
+    let mut seen = [false; 7];
+    for d in days {
+        seen[d.weekday().num_days_from_monday() as usize] = true;
+    }
+    let span = match (days.first(), days.last()) {
+        (Some(a), Some(b)) => (*b - *a).num_days(),
+        _ => 0,
+    };
+    if span >= 21 {
+        seen.map(|s| !s)
+    } else {
+        let weekend = !seen[5] && !seen[6];
+        [false, false, false, false, false, weekend, weekend]
+    }
+}
+
 /// Open times (unix s) of the `n` bars after the last bar of `data`, for a
-/// projection past it (ADR-0033). Month-based bars step by
-/// calendar months. Day-based bars (1d and up) skip Saturday and Sunday
-/// when no loaded bar falls on a weekend (a stock); exchange sessions and
-/// holidays are not modelled. `None` without bar times or a known interval.
+/// projection past it (ADR-0033, ADR-0038). Month-based bars step by calendar
+/// months. Day-based bars stay on their grid and skip days the market is closed.
+/// Intraday bars of a market with a `session` stay inside it: they step from the
+/// last bar to the close, then restart at the next open. Without one (24/7) they
+/// step on regardless. `None` without bar times or a known interval.
 pub fn future_bar_times(data: &OhlcvData, n: usize) -> Option<Vec<i64>> {
-    use chrono::{DateTime, Datelike, Months, Weekday};
+    use chrono::{DateTime, Months};
     let last = data.bars.last()?.date.parse::<i64>().ok()?;
     let iv = Interval::parse(data.interval.as_deref()?).ok()?;
     if iv.unit == Unit::Month {
@@ -141,24 +238,95 @@ pub fn future_bar_times(data: &OhlcvData, n: usize) -> Option<Vec<i64>> {
             .map(|k| Some(start.checked_add_months(Months::new(iv.n * k))?.timestamp()))
             .collect();
     }
-    let step = iv.secs();
-    let weekend = |t: i64| {
-        DateTime::from_timestamp(t, 0)
-            .is_some_and(|d| matches!(d.weekday(), Weekday::Sat | Weekday::Sun))
+    let times: Vec<i64> = data
+        .bars
+        .iter()
+        .filter_map(|b| b.date.parse().ok())
+        .collect();
+    if iv.is_date_bar() {
+        return date_bar_times(data, &iv, &times, last, n);
+    }
+    if let Some(s) = &data.session {
+        return session_bar_times(s, iv.secs(), &times, last, n);
+    }
+    Some((1..=n as i64).map(|k| last + k * iv.secs()).collect())
+}
+
+/// Date bars are stamped with their date in UTC (see `fetch::local_date_stamp`).
+fn date_bar_times(
+    data: &OhlcvData,
+    iv: &Interval,
+    times: &[i64],
+    last: i64,
+    n: usize,
+) -> Option<Vec<i64>> {
+    const DAY: i64 = 86_400;
+    let date = |t: i64| chrono::DateTime::from_timestamp(t, 0).map(|d| d.date_naive());
+    let days: Vec<NaiveDate> = times.iter().filter_map(|t| date(*t)).collect();
+    let closed_day = closed_weekdays(&days);
+    let us = data.session.is_some_and(|s| s.us_calendar);
+    let closed = |t: i64| {
+        date(t).is_some_and(|d| {
+            closed_day[d.weekday().num_days_from_monday() as usize]
+                || (us && listed(&US_HOLIDAYS, d))
+        })
     };
-    let skip = step >= 86_400 && !data.bars.iter().any(|b| b.date.parse().is_ok_and(weekend));
+    let tod = last.rem_euclid(DAY);
+    let mut grid = iv.grid_start(last);
+    let mut out = Vec::with_capacity(n);
+    while out.len() < n {
+        grid += iv.secs();
+        if iv.unit == Unit::Week {
+            out.push(grid + tod);
+        } else if let Some(t) = (0..i64::from(iv.n))
+            .map(|k| grid + k * DAY + tod)
+            .find(|t| !closed(*t))
+        {
+            out.push(t);
+        }
+    }
+    Some(out)
+}
+
+fn session_bar_times(
+    s: &Session,
+    step: i64,
+    times: &[i64],
+    last: i64,
+    n: usize,
+) -> Option<Vec<i64>> {
+    let local = |t: i64| s.tz.timestamp_opt(t, 0).single().map(|d| d.naive_local());
+    let days: Vec<NaiveDate> = times
+        .iter()
+        .filter_map(|t| Some(local(*t)?.date()))
+        .collect();
+    let closed_day = closed_weekdays(&days);
+    let closed = |d: NaiveDate| {
+        closed_day[d.weekday().num_days_from_monday() as usize]
+            || (s.us_calendar && listed(&US_HOLIDAYS, d))
+    };
     let mut t = last;
-    Some(
-        (0..n)
-            .map(|_| {
-                t += step;
-                while skip && weekend(t) {
-                    t += 86_400;
-                }
-                t
-            })
-            .collect(),
-    )
+    let mut out = Vec::with_capacity(n);
+    while out.len() < n {
+        let (here, there) = (local(t)?, local(t + step)?);
+        let inside = there.date() == here.date()
+            && !closed(here.date())
+            && there.time() >= s.open
+            && there.time() < s.close_on(here.date());
+        t = if inside {
+            t + step
+        } else {
+            let mut d = here.date().succ_opt()?;
+            while closed(d) {
+                d = d.succ_opt()?;
+            }
+            s.tz.from_local_datetime(&d.and_time(s.open))
+                .earliest()?
+                .timestamp()
+        };
+        out.push(t);
+    }
+    Some(out)
 }
 
 /// Bar length in seconds for indicator math (HV annualization, VWAP and
@@ -313,6 +481,7 @@ pub fn sample_ohlcv(
         bars,
         symbol: None,
         interval: None,
+        session: None,
     })
 }
 
@@ -337,6 +506,7 @@ mod tests {
                 .collect(),
             symbol: None,
             interval: Some(interval.into()),
+            session: None,
         }
     }
 
@@ -399,6 +569,240 @@ mod tests {
         let mut untimed = at(&[t], "1d");
         untimed.bars[0].date = "D0".into();
         assert_eq!(future_bar_times(&untimed, 2), None);
+    }
+
+    /// `bars` in the session's own zone; dates are local.
+    fn ts_in(tz: chrono_tz::Tz, s: &str) -> i64 {
+        tz.from_local_datetime(&chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M").unwrap())
+            .single()
+            .unwrap()
+            .timestamp()
+    }
+
+    fn in_session(
+        mut d: OhlcvData,
+        tz: chrono_tz::Tz,
+        open: (u32, u32),
+        close: (u32, u32),
+    ) -> OhlcvData {
+        d.session = Some(Session {
+            tz,
+            open: NaiveTime::from_hms_opt(open.0, open.1, 0).unwrap(),
+            close: NaiveTime::from_hms_opt(close.0, close.1, 0).unwrap(),
+            us_calendar: tz == chrono_tz::America::New_York,
+        });
+        d
+    }
+
+    fn ny(times: &[i64], interval: &str) -> OhlcvData {
+        in_session(
+            at(times, interval),
+            chrono_tz::America::New_York,
+            (9, 30),
+            (16, 0),
+        )
+    }
+
+    fn local_times(d: &OhlcvData, tz: chrono_tz::Tz, n: usize) -> Vec<String> {
+        future_bar_times(d, n)
+            .unwrap()
+            .iter()
+            .map(|t| {
+                tz.timestamp_opt(*t, 0)
+                    .single()
+                    .unwrap()
+                    .format("%a %m-%d %H:%M")
+                    .to_string()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_24h_market_stays_continuous_through_nights_and_weekends() {
+        let ts = |s: &str| chrono::DateTime::parse_from_rfc3339(s).unwrap().timestamp();
+        let fri = ts("2026-11-06T22:00:00Z");
+        // Crypto: no session, so the night and the weekend are bars like any other.
+        let t = future_bar_times(&at(&[fri - 3_600, fri], "1h"), 60).unwrap();
+        assert_eq!(t, (1..=60).map(|k| fri + k * 3_600).collect::<Vec<_>>());
+        // Custom lengths too, and a holiday in the US table means nothing here.
+        let eve = ts("2026-11-25T23:55:00Z");
+        let t = future_bar_times(&at(&[eve], "7m"), 3).unwrap();
+        assert_eq!(t, vec![eve + 420, eve + 840, eve + 1_260]);
+        let wed = ts("2026-11-25T00:00:00Z");
+        let t = future_bar_times(&at(&[wed - 86_400, wed], "1d"), 1).unwrap();
+        assert_eq!(
+            t,
+            vec![wed + 86_400],
+            "Thanksgiving is a day like any other"
+        );
+    }
+
+    #[test]
+    fn intraday_stock_bars_stay_in_the_session() {
+        let tz = chrono_tz::America::New_York;
+        // 1h from a Monday: to the 15:30 bar, then the next day's open.
+        let d = ny(&[ts_in(tz, "2026-11-09 14:30")], "1h");
+        assert_eq!(
+            local_times(&d, tz, 3),
+            ["Mon 11-09 15:30", "Tue 11-10 09:30", "Tue 11-10 10:30"]
+        );
+        // Friday's close leads to Monday.
+        let d = ny(&[ts_in(tz, "2026-11-13 15:30")], "1h");
+        assert_eq!(local_times(&d, tz, 1), ["Mon 11-16 09:30"]);
+        // A custom length keeps the session's grid, and ends before the close.
+        let d = ny(&[ts_in(tz, "2026-11-09 15:30")], "45m");
+        assert_eq!(
+            local_times(&d, tz, 3),
+            ["Tue 11-10 09:30", "Tue 11-10 10:15", "Tue 11-10 11:00"]
+        );
+        let d = ny(&[ts_in(tz, "2026-11-09 14:38")], "7m");
+        assert_eq!(local_times(&d, tz, 1), ["Mon 11-09 14:45"]);
+        // A bar longer than the session is one bar per session.
+        let d = ny(&[ts_in(tz, "2026-11-09 09:30")], "8h");
+        assert_eq!(
+            local_times(&d, tz, 2),
+            ["Tue 11-10 09:30", "Wed 11-11 09:30"]
+        );
+    }
+
+    #[test]
+    fn every_future_bar_of_a_long_stock_projection_is_in_the_session() {
+        let tz = chrono_tz::America::New_York;
+        let d = ny(&[ts_in(tz, "2026-10-26 09:30")], "90m");
+        let t = future_bar_times(&d, 500).unwrap();
+        assert_eq!(t.len(), 500);
+        assert!(t.windows(2).all(|w| w[0] < w[1]));
+        for x in t {
+            let l = tz.timestamp_opt(x, 0).single().unwrap().naive_local();
+            let date = l.date();
+            assert!(date.weekday().num_days_from_monday() < 5, "{l}");
+            assert!(!listed(&US_HOLIDAYS, date), "{l}");
+            let open = NaiveTime::from_hms_opt(9, 30, 0).unwrap();
+            let close = d.session.unwrap().close_on(date);
+            assert!(l.time() >= open && l.time() < close, "{l}");
+        }
+    }
+
+    #[test]
+    fn stock_sessions_keep_their_local_hours_across_dst() {
+        let tz = chrono_tz::America::New_York;
+        // US clocks go back on 2026-11-01: the open moves from 13:30 to 14:30 UTC.
+        let fri = ts_in(tz, "2026-10-30 15:30");
+        let t = future_bar_times(&ny(&[fri], "1h"), 1).unwrap();
+        let want = chrono::DateTime::parse_from_rfc3339("2026-11-02T14:30:00Z").unwrap();
+        assert_eq!(t[0], want.timestamp());
+    }
+
+    #[test]
+    fn us_holidays_and_early_closes_are_skipped() {
+        let tz = chrono_tz::America::New_York;
+        // Thanksgiving is closed, and the Friday after closes at 13:00.
+        let d = ny(&[ts_in(tz, "2026-11-25 15:30")], "1h");
+        assert_eq!(
+            local_times(&d, tz, 6),
+            [
+                "Fri 11-27 09:30",
+                "Fri 11-27 10:30",
+                "Fri 11-27 11:30",
+                "Fri 11-27 12:30",
+                "Mon 11-30 09:30",
+                "Mon 11-30 10:30",
+            ]
+        );
+        // Date bars skip them too: Christmas 2026 is a Friday.
+        let d = ny(&[ts_in(tz, "2026-12-22 00:00") - 5 * 3_600], "1d");
+        let t = future_bar_times(&d, 4).unwrap();
+        let date = |x: i64| {
+            chrono::DateTime::from_timestamp(x, 0)
+                .unwrap()
+                .format("%m-%d")
+                .to_string()
+        };
+        assert_eq!(
+            t.iter().map(|x| date(*x)).collect::<Vec<_>>(),
+            ["12-23", "12-24", "12-28", "12-29"]
+        );
+        // Past the table's end it degrades to weekends: 2029-01-01 is not listed.
+        let d = ny(&[ts_in(tz, "2028-12-29 15:30")], "1h");
+        assert_eq!(local_times(&d, tz, 1), ["Mon 01-01 09:30"]);
+    }
+
+    #[test]
+    fn the_us_tables_hold_trading_weekdays_of_the_published_years() {
+        // Counts as NYSE publishes them: 2028 observes no New Year's Day, because
+        // it falls on a Saturday.
+        for (year, holidays) in [(2026, 10), (2027, 10), (2028, 9)] {
+            let n = US_HOLIDAYS.iter().filter(|d| d.0 == year).count();
+            assert_eq!(n, holidays, "{year}");
+        }
+        for &(y, m, d) in US_HOLIDAYS.iter().chain(&US_EARLY_CLOSES) {
+            let date = NaiveDate::from_ymd_opt(y, m, d).unwrap();
+            assert!(date.weekday().num_days_from_monday() < 5, "{date}");
+        }
+        assert!(US_HOLIDAYS.is_sorted() && US_EARLY_CLOSES.is_sorted());
+    }
+
+    #[test]
+    fn other_exchanges_get_hours_but_no_holidays() {
+        let tz = chrono_tz::Asia::Tokyo;
+        let d = in_session(
+            at(&[ts_in(tz, "2026-11-06 15:00")], "1h"),
+            tz,
+            (9, 0),
+            (15, 30),
+        );
+        assert_eq!(
+            local_times(&d, tz, 2),
+            ["Mon 11-09 09:00", "Mon 11-09 10:00"]
+        );
+        // Culture Day, 2026-11-03, is a Tokyo holiday this table does not hold.
+        let d = in_session(
+            at(&[ts_in(tz, "2026-11-02 15:00")], "1h"),
+            tz,
+            (9, 0),
+            (15, 30),
+        );
+        assert_eq!(local_times(&d, tz, 1), ["Tue 11-03 09:00"]);
+    }
+
+    #[test]
+    fn trading_days_come_from_the_bars() {
+        // Riyadh trades Sunday to Thursday, 10:00 to 15:00.
+        let tz = chrono_tz::Asia::Riyadh;
+        let thu = ts_in(tz, "2026-11-05 14:00");
+        let bars: Vec<i64> = (0..30)
+            .rev()
+            .map(|k| thu - k * 86_400)
+            .filter(|t| {
+                let d = tz.timestamp_opt(*t, 0).single().unwrap().weekday();
+                !matches!(d, chrono::Weekday::Fri | chrono::Weekday::Sat)
+            })
+            .collect();
+        let d = in_session(at(&bars, "1h"), tz, (10, 0), (15, 0));
+        assert_eq!(local_times(&d, tz, 1), ["Sun 11-08 10:00"]);
+    }
+
+    #[test]
+    fn multi_day_stock_bars_land_on_the_first_open_day_of_their_grid_slot() {
+        const DAY: i64 = 86_400;
+        let ts = |s: &str| chrono::DateTime::parse_from_rfc3339(s).unwrap().timestamp();
+        let iv = Interval::parse("3d").unwrap();
+        // A stock's 3d bars with no weekend bars: each future bar is on the grid
+        // or the first weekday of its slot, and none falls on a weekend.
+        let wed = ts("2026-11-04T00:00:00Z");
+        let t = future_bar_times(&at(&[wed - DAY, wed], "3d"), 12).unwrap();
+        let mut slots = std::collections::HashSet::new();
+        for x in &t {
+            let d = chrono::DateTime::from_timestamp(*x, 0).unwrap();
+            assert!(d.weekday().num_days_from_monday() < 5, "{d}");
+            assert!(slots.insert(iv.grid_start(*x)), "one bar per slot: {d}");
+        }
+        // Weekly bars stay on Mondays.
+        let mon = ts("2026-11-02T00:00:00Z");
+        assert_eq!(
+            future_bar_times(&at(&[mon], "1wk"), 2).unwrap(),
+            vec![mon + 7 * DAY, mon + 14 * DAY]
+        );
     }
 
     #[test]

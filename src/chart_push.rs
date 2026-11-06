@@ -684,6 +684,7 @@ async fn run_group(
                     bars: window.clone(),
                     symbol: Some(req.ticker.clone()),
                     interval: Some(req.timeframe.clone()),
+                    session: None,
                 };
                 let (indicators, style) = (indicators.clone(), req.chart_style.clone());
                 let computed = tokio::task::spawn_blocking(move || {
