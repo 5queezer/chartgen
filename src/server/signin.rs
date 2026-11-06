@@ -30,6 +30,9 @@ const MAX_LIVE_CLIENTS_PER_USER: usize = 20;
 /// Tokens per user and client: the web app gets one per page load.
 const MAX_TOKENS_PER_CLIENT: usize = 20;
 const MAX_CODES_PER_USER: usize = 20;
+/// Tool calls one user can make per `LOGIN_WINDOW`: chart rendering and upstream
+/// quota are shared, and a free account is all it takes to ask for them.
+pub(super) const MAX_TOOL_CALLS_PER_USER: usize = 300;
 const PROVIDER_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_NAME_CHARS: usize = 100;
 
@@ -240,6 +243,7 @@ pub(super) struct SignIn {
     pending: HashMap<String, PendingRequest>,
     flows: HashMap<String, ProviderFlow>,
     login_hits: HashMap<String, Vec<Instant>>,
+    tool_calls: HashMap<String, Vec<Instant>>,
 }
 
 /// What a handler must write to the store once it has let go of the OAuth lock.
@@ -327,6 +331,7 @@ impl SignIn {
             pending: HashMap::new(),
             flows: HashMap::new(),
             login_hits: HashMap::new(),
+            tool_calls: HashMap::new(),
         }
     }
 
@@ -379,6 +384,20 @@ impl SignIn {
         }
         let hits = self.login_hits.entry(peer.to_owned()).or_default();
         if hits.len() >= MAX_LOGIN_HITS_PER_IP {
+            return false;
+        }
+        hits.push(now);
+        true
+    }
+
+    /// Count a tool call by `user`; false when over the limit.
+    fn admit_tool_call(&mut self, user: &str, now: Instant) -> bool {
+        self.tool_calls.retain(|_, hits| {
+            hits.retain(|t| now.duration_since(*t) < LOGIN_WINDOW);
+            !hits.is_empty()
+        });
+        let hits = self.tool_calls.entry(user.to_owned()).or_default();
+        if hits.len() >= MAX_TOOL_CALLS_PER_USER {
             return false;
         }
         hits.push(now);
@@ -514,6 +533,16 @@ impl OAuthStore {
         for (_, code) in mine.into_iter().take(excess) {
             self.codes.remove(&code);
         }
+    }
+
+    /// Count a tool call against the token's user, if it has one.
+    pub(super) fn admit_tool_call(&mut self, token: &str) -> bool {
+        let Some(user) = self.user_for_token(token) else {
+            return true;
+        };
+        self.signin
+            .as_mut()
+            .is_none_or(|s| s.admit_tool_call(&user, Instant::now()))
     }
 
     /// `(display name, provider slug)` of a signed-in user.

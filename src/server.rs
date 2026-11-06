@@ -1104,6 +1104,26 @@ async fn mcp_handler(
     let id = body.get("id").cloned();
     let params = body.get("params");
 
+    if method == "tools/call" {
+        let admitted = extract_bearer_token(&headers)
+            .is_none_or(|t| state.oauth.lock().unwrap().admit_tool_call(t));
+        if !admitted {
+            let message = format!(
+                "Too many requests: at most {} tool calls per minute per user",
+                signin::MAX_TOOL_CALLS_PER_USER
+            );
+            let err = jsonrpc_error(id, -32000, &message);
+            let mut resp = streamable_http_json_response(
+                StatusCode::TOO_MANY_REQUESTS,
+                err,
+                session_id.as_deref(),
+            );
+            resp.headers_mut()
+                .insert(header::RETRY_AFTER, HeaderValue::from_static("60"));
+            return resp;
+        }
+    }
+
     // Notifications: no response body. Still echo the session id.
     // Per JSON-RPC 2.0 §4.1, a frame without an `id` is a notification; a
     // frame with an `id` is a request and MUST produce a matching response

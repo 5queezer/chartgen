@@ -3193,6 +3193,52 @@ fn test_signin_per_user_limits() {
     assert_eq!(ping_status(p, &theirs), 200);
 }
 
+/// A free account does not buy unlimited rendering and upstream quota, and one
+/// user's flood is not another's problem.
+#[test]
+fn test_signin_tool_calls_are_limited_per_user() {
+    let fake = FakeProvider::start();
+    let srv = signin_server("signin-calls", &fake, &["github"]);
+    let p = srv.port;
+    let mut b = Browser::new(p);
+    let token = web_sign_in(&mut b, &fake, "github", profile_of("github", 1, "a"));
+    let mut other = Browser::new(p);
+    let theirs = web_sign_in(&mut other, &fake, "github", profile_of("github", 2, "b"));
+    let call = r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"list_indicators","arguments":{}}}"#;
+    let tool_status = |token: &str| {
+        let auth = format!("Authorization: Bearer {token}");
+        let headers = [JSON_POST[0], JSON_POST[1], auth.as_str()];
+        http(p, "POST", "/mcp", &headers, call)
+    };
+    for i in 0..300 {
+        let (st, _, body) = tool_status(&token);
+        assert_eq!(st, 200, "call {i}: {body}");
+    }
+    let (st, head, body) = tool_status(&token);
+    assert_eq!(st, 429, "{body}");
+    assert!(head.contains("retry-after: 60"), "{head}");
+    assert!(body.contains("per user"), "{body}");
+    // Not a tool call, so still answered: the client can tell it is signed in.
+    assert_eq!(ping_status(p, &token), 200);
+    assert_eq!(tool_status(&theirs).0, 200, "another user is not affected");
+}
+
+/// Without sign-in, nothing counts tool calls: today's behaviour.
+#[test]
+fn test_tool_calls_are_not_limited_without_signin() {
+    let srv = spawn_server(None);
+    let p = srv.port;
+    let client = register_external(p);
+    let token = sign_in(p, &client);
+    let auth = format!("Authorization: Bearer {token}");
+    let headers = [JSON_POST[0], JSON_POST[1], auth.as_str()];
+    let call = r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"list_indicators","arguments":{}}}"#;
+    for i in 0..310 {
+        let (st, _, body) = http(p, "POST", "/mcp", &headers, call);
+        assert_eq!(st, 200, "call {i}: {body}");
+    }
+}
+
 /// Sign-ins in progress are bounded on loopback too, where the per-address limit does
 /// not apply, and hitting the bound leaves a signed-in user alone.
 #[test]
