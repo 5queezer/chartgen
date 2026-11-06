@@ -3713,14 +3713,18 @@ mod tests {
         let args = json!({ "ticker": "BTCUSDT", "periods": 2, "end_time": 1_699_920_000_000i64,
             "sessions": ["16:00-20:00", "08:00-12:00"] });
         let tpo = tpo_payload(&args, Sample).unwrap();
-        let keys: Vec<i64> = tpo["profiles"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|p| p["t"].as_i64().unwrap())
-            .collect();
-        assert_eq!(keys.len(), 4);
-        assert!(keys.windows(2).all(|w| w[0] < w[1]), "{keys:?}");
+        let list = tpo["profiles"].as_array().unwrap();
+        assert_eq!(list.len(), 4);
+        let first_block = |p: &Value| p["block_times"][0].as_i64().unwrap();
+        assert!(
+            list.windows(2)
+                .all(|w| first_block(&w[0]) < first_block(&w[1])),
+            "{list:?}"
+        );
+        // Each key is where its session starts, as the blocks here start with it.
+        for p in list {
+            assert_eq!(p["t"].as_i64().unwrap(), first_block(p));
+        }
     }
 
     #[test]

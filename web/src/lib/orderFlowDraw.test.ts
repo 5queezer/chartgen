@@ -178,7 +178,8 @@ describe("a TPO", () => {
 
   it("starts a profile at its first block, not at its period's start", () => {
     const { ctx, rects } = recorder();
-    draw(drawTpo, ext([profile(2 * 3_600, 4 * 3_600)]), 5, ctx);
+    // Its period started at bar 0, and its blocks only at bar 2.
+    draw(drawTpo, ext([{ ...profile(2 * 3_600, 4 * 3_600), t: 0 }]), 5, ctx);
     const blocks = rects.filter((r) => r.color.startsWith("hsla"));
     expect(blocks.length).toBeGreaterThan(0);
     // The edge of bar 2, half a bar before its center.

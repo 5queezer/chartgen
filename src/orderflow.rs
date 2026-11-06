@@ -1783,6 +1783,27 @@ mod tests {
         assert!(tpo_profiles(&late, Period::Days(1), &sessions, &Utc, &o).is_empty());
     }
 
+    /// A reply may start inside a period, and the next one later still: its profile must
+    /// replace the last, not add another beside it.
+    #[test]
+    fn a_profile_is_keyed_on_its_period_not_on_its_first_block() {
+        let o = TpoOptions {
+            block_secs: 3_600,
+            row: 1.0,
+            value_area: 70.0,
+            ib_blocks: 1,
+        };
+        let list = |from: i64| -> Vec<Intrabar> {
+            (from..from + 3)
+                .map(|h| ib(h * 3_600, 10.0, 11.0, 10.0, 10.5, 1.0))
+                .collect()
+        };
+        let at = |from: i64| tpo_profiles(&list(from), Period::Days(1), &[], &chrono_tz::UTC, &o);
+        assert_eq!(at(3)[0].t, 0);
+        assert_eq!(at(5)[0].t, 0);
+        assert_eq!(at(5)[0].block_times[0], 5 * 3_600);
+    }
+
     #[test]
     fn auto_row_of_a_tpo_is_a_fraction_of_the_typical_range() {
         use chrono::Utc;
