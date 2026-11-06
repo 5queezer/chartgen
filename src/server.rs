@@ -274,9 +274,12 @@ impl OAuthStore {
 
     fn validate_token(&mut self, token: &str) -> bool {
         self.cleanup_expired();
-        let Some(t) = self.tokens.get(token) else {
+        let Some(t) = self.tokens.get_mut(token) else {
             return false;
         };
+        if let Some(user) = t.user.as_mut() {
+            user.last_used = Instant::now();
+        }
         if let Some(c) = self.clients.get_mut(&t.client_id) {
             c.last_used = Some(Instant::now());
         }
@@ -1322,7 +1325,19 @@ async fn serve_web(dir: PathBuf, req: Request) -> Response {
         } else {
             "no-cache"
         };
+    let html = resp
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .is_some_and(|t| t.as_bytes().starts_with(b"text/html"));
     let h = resp.headers_mut();
+    // The sign-in callback's `?code=` is in this page's address until the app scrubs it,
+    // so no resource it loads from elsewhere may be told that address (ADR-0044).
+    if html {
+        h.insert(
+            header::REFERRER_POLICY,
+            HeaderValue::from_static("same-origin"),
+        );
+    }
     h.insert(header::CACHE_CONTROL, HeaderValue::from_static(cache));
     h.insert(
         header::X_CONTENT_TYPE_OPTIONS,

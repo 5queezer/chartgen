@@ -30,8 +30,12 @@ const MAX_GRANTS_PER_USER: usize = 50;
 /// token for longest ago are dropped, which makes that client evictable, so holding
 /// the client table full takes many accounts (ADR-0036).
 const MAX_LIVE_CLIENTS_PER_USER: usize = 20;
-/// Tokens per user and client: the web app gets one per page load.
+/// Tokens per user and client; the longest out of use go first.
 const MAX_TOKENS_PER_CLIENT: usize = 20;
+/// The web app gets a token per page load and each tab keeps using its own, because the
+/// chart push limits are per token. A cap below the tabs someone has open would have each
+/// tab's sign-in end another's, in a loop that never settles, so this one is roomy.
+const MAX_TOKENS_PER_WEB_CLIENT: usize = 100;
 const MAX_CODES_PER_USER: usize = 20;
 /// Tool calls one user can make per `LOGIN_WINDOW`: chart rendering and upstream
 /// quota are shared, and a free account is all it takes to ask for them. A 4-chart
@@ -216,6 +220,9 @@ pub(super) struct PendingRequest {
     browser: String,
     /// The signed-in user who asked, for the limit per user.
     user: Option<String>,
+    /// The web app's own client, asked from its own pages: needs no consent. Read at
+    /// `/authorize`, because the provider's callback always looks cross-site.
+    own_app: bool,
     created_at: Instant,
     /// Set when the consent page was shown: the session it was shown to and the
     /// token its form must return.
@@ -238,6 +245,8 @@ pub(super) struct TokenUser {
     /// The browser session, for the web app's own tokens only: signing out ends
     /// them, and leaves what other clients were given.
     pub(super) session: Option<String>,
+    /// When it last made a call; the limit per client drops the longest out of use.
+    pub(super) last_used: Instant,
 }
 
 pub(super) struct SignIn {
@@ -571,28 +580,39 @@ impl OAuthStore {
     /// since a session or a new approval round is all it takes.
     pub(super) fn trim_user_tokens(&mut self, user: &str) {
         let mut by_client: HashMap<String, Vec<(Instant, String)>> = HashMap::new();
+        let mut web_clients = HashSet::new();
         for (token, t) in &self.tokens {
-            if t.user.as_ref().is_some_and(|u| u.id == user) {
-                by_client
-                    .entry(t.client_id.clone())
-                    .or_default()
-                    .push((t.created_at, token.clone()));
+            let Some(u) = t.user.as_ref().filter(|u| u.id == user) else {
+                continue;
+            };
+            by_client
+                .entry(t.client_id.clone())
+                .or_default()
+                .push((u.last_used, token.clone()));
+            if u.session.is_some() {
+                web_clients.insert(t.client_id.clone());
             }
         }
-        let mut clients: Vec<(Instant, Vec<(Instant, String)>)> = by_client
-            .into_values()
-            .map(|mut tokens| {
+        let mut clients: Vec<(Instant, usize, Vec<(Instant, String)>)> = by_client
+            .into_iter()
+            .map(|(client, mut tokens)| {
                 tokens.sort();
+                let cap = if web_clients.contains(&client) {
+                    MAX_TOKENS_PER_WEB_CLIENT
+                } else {
+                    MAX_TOKENS_PER_CLIENT
+                };
                 (
                     tokens.last().map(|t| t.0).unwrap_or_else(Instant::now),
+                    cap,
                     tokens,
                 )
             })
             .collect();
         clients.sort_by_key(|c| std::cmp::Reverse(c.0));
-        for (rank, (_, tokens)) in clients.into_iter().enumerate() {
+        for (rank, (_, cap, tokens)) in clients.into_iter().enumerate() {
             let keep = if rank < MAX_LIVE_CLIENTS_PER_USER {
-                MAX_TOKENS_PER_CLIENT
+                cap
             } else {
                 0
             };
@@ -657,6 +677,7 @@ impl OAuthStore {
                 user: Some(TokenUser {
                     id: user.to_string(),
                     session: first_party.then(|| session.to_string()),
+                    last_used: Instant::now(),
                 }),
             },
         );
@@ -689,7 +710,7 @@ impl OAuthStore {
             }
             return unknown_client_answer(&request.redirect_uri, request.state.as_deref());
         }
-        let approved = is_first_party(&base_url(), &request.redirect_uri)
+        let approved = request.own_app
             || self
                 .signin
                 .as_ref()
@@ -709,9 +730,17 @@ impl OAuthStore {
 
 // --- The web app's own client ------------------------------------------------
 
-/// The web app's redirect: exactly `/` on this server's origin. Such a client may
-/// skip consent, whoever registered it, because its code lands on our own page, which
-/// discards a code whose `state` it did not issue, and so never reaches anyone else.
+/// Whether a browser says this navigation started on our own origin, or at the address
+/// bar. A stranger's link is `cross-site`, and one with no such header proves nothing.
+fn from_own_origin(headers: &HeaderMap) -> bool {
+    headers
+        .get("sec-fetch-site")
+        .is_some_and(|v| v == "same-origin" || v == "none")
+}
+
+/// The web app's redirect: exactly `/` on this server's origin. Such a client skips
+/// consent when asked from our own origin (`from_own_origin`), whoever registered it:
+/// its code lands on our own page, which discards a code whose `state` it did not issue.
 fn is_first_party(base: &str, redirect_uri: &str) -> bool {
     let (Ok(base), Ok(uri)) = (reqwest::Url::parse(base), reqwest::Url::parse(redirect_uri)) else {
         return false;
@@ -1003,12 +1032,12 @@ pub(super) fn authorize(
         state: params.state.clone(),
         browser: browser.clone(),
         user: session.as_ref().map(|(_, user)| user.clone()),
+        own_app: is_first_party(&base_url(), &params.redirect_uri) && from_own_origin(headers),
         created_at: Instant::now(),
         consent: None,
     };
     if let Some((session, user)) = &session {
-        let approved = is_first_party(&base_url(), &params.redirect_uri)
-            || signin.has_grant(user, &params.client_id);
+        let approved = request.own_app || signin.has_grant(user, &params.client_id);
         if approved {
             return match s.issue_code(&request, user, session) {
                 Some(target) => Redirect::temporary(&target).into_response(),
@@ -1840,6 +1869,7 @@ mod tests {
             state: Some("st".to_string()),
             browser: "b".to_string(),
             user: None,
+            own_app: false,
             created_at: Instant::now(),
             consent: None,
         }
@@ -1916,6 +1946,7 @@ mod tests {
                     user: Some(TokenUser {
                         id: user.to_string(),
                         session: None,
+                        last_used: t0 - Duration::from_secs(age),
                     }),
                 },
             );
@@ -1939,6 +1970,48 @@ mod tests {
         token_for(&mut s, 0, "github:2", 5000);
         s.trim_user_tokens("github:1");
         assert!(keeps(&s, 0));
+    }
+
+    /// The tokens a client keeps are the ones in use, and the cap is the client's kind.
+    #[test]
+    fn the_longest_out_of_use_tokens_go_first() {
+        let mut s = OAuthStore::new();
+        let t0 = Instant::now();
+        let add = |s: &mut OAuthStore, token: String, session: Option<&str>, age: u64| {
+            s.tokens.insert(
+                token.clone(),
+                AccessToken {
+                    _token: token,
+                    client_id: if session.is_some() { "web" } else { "mcp" }.to_string(),
+                    created_at: t0,
+                    expires_in: Duration::from_secs(3600),
+                    user: Some(TokenUser {
+                        id: "github:1".to_string(),
+                        session: session.map(str::to_string),
+                        last_used: t0 - Duration::from_secs(age),
+                    }),
+                },
+            );
+        };
+        for i in 0..MAX_TOKENS_PER_CLIENT + 1 {
+            add(&mut s, format!("mcp-{i}"), None, 100 + i as u64);
+        }
+        for i in 0..MAX_TOKENS_PER_WEB_CLIENT + 1 {
+            add(&mut s, format!("web-{i}"), Some("sess"), 1000 + i as u64);
+        }
+        s.trim_user_tokens("github:1");
+        let gone = MAX_TOKENS_PER_CLIENT;
+        assert!(
+            !s.tokens.contains_key(&format!("mcp-{gone}")),
+            "out of use longest"
+        );
+        assert!(s.tokens.contains_key("mcp-0"));
+        let gone = MAX_TOKENS_PER_WEB_CLIENT;
+        assert!(!s.tokens.contains_key(&format!("web-{gone}")));
+        assert!(
+            s.tokens.contains_key(&format!("web-{}", gone - 1)),
+            "a roomier cap"
+        );
     }
 
     #[test]

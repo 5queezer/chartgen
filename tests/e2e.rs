@@ -2418,13 +2418,29 @@ impl Browser {
         self.request("GET", path, &[], "")
     }
 
-    /// `GET /authorize` for a client, as it arrives from that client.
+    /// `GET /authorize` for a client, as a browser sends it from the app's own page.
     fn authorize(&mut self, client_id: &str, redirect_uri: &str, state: &str) -> Page {
+        self.authorize_from(
+            client_id,
+            redirect_uri,
+            state,
+            &["Sec-Fetch-Site: same-origin"],
+        )
+    }
+
+    /// `GET /authorize` with these headers, such as where the browser says it came from.
+    fn authorize_from(
+        &mut self,
+        client_id: &str,
+        redirect_uri: &str,
+        state: &str,
+        headers: &[&str],
+    ) -> Page {
         let path = format!(
             "/authorize?response_type=code&client_id={client_id}&redirect_uri={}&code_challenge={PKCE_CHALLENGE}&state={state}",
             url_encode(redirect_uri)
         );
-        self.get(&path)
+        self.request("GET", &path, headers, "")
     }
 
     fn has_session(&self) -> bool {
@@ -3392,7 +3408,15 @@ fn test_signin_keeps_the_stale_client_recovery_and_serves_the_app() {
 
     // Sign-in's paths are its own, and the app still answers everything else.
     let mut b = Browser::new(port);
-    assert!(b.get("/").body.contains("the app"));
+    let root = b.get("/");
+    assert!(root.body.contains("the app"));
+    assert!(
+        root.head
+            .to_ascii_lowercase()
+            .contains("referrer-policy: same-origin"),
+        "the callback's code is in this page's address: {}",
+        root.head
+    );
     assert!(b.get("/some/route").body.contains("the app"));
     let page = b.get("/oauth/signed-out");
     assert!(page.body.contains("You are signed out"), "{}", page.body);
@@ -3579,15 +3603,20 @@ fn test_signin_per_user_limits() {
     for token in &tokens {
         assert_eq!(ping_status(p, token), 200);
     }
-    // One client: the web app gets a token per page load, and they do not pile up.
+    // One client: the web app gets a token per page load, and they do not pile up. What
+    // goes is what nobody uses, not the oldest: a tab open for days keeps working.
     let client = register_client(p, &redirect);
     let mut last = Vec::new();
-    for _ in 0..21 {
+    for i in 0..101 {
         let answer = b.authorize(&client, &redirect, "s");
         last.push(token_from(p, &client, &redirect, &answer.query()["code"]));
+        if i == 50 {
+            assert_eq!(ping_status(p, &last[0]), 200, "a tab in use");
+        }
     }
-    assert_eq!(ping_status(p, &last[0]), 401);
-    assert_eq!(ping_status(p, &last[20]), 200);
+    assert_eq!(ping_status(p, &last[0]), 200, "in use, so it stays");
+    assert_eq!(ping_status(p, &last[1]), 401, "out of use the longest");
+    assert_eq!(ping_status(p, &last[100]), 200);
     // Someone else's are not touched by any of it.
     let mut other = Browser::new(p);
     let theirs = web_sign_in(&mut other, &fake, "github", profile_of("github", 2, "b"));
@@ -3693,6 +3722,112 @@ fn test_a_spoofed_address_is_ignored_unless_the_operator_names_the_header() {
     for i in 0..25 {
         let (st, _, resp) = http(srv.port, "POST", "/register", &headers, &body);
         assert_eq!(st, 201, "registration {i}: {resp}");
+    }
+}
+
+/// A stranger's client that looks like the web app gets no code for a victim: a link to
+/// it from elsewhere leads to consent. Only the app's own origin skips it.
+#[test]
+fn test_signin_a_look_alike_of_the_web_app_needs_consent_from_elsewhere() {
+    let fake = FakeProvider::start();
+    let srv = signin_server("signin-look-alike", &fake, &["github"]);
+    let p = srv.port;
+    let redirect = web_redirect(p);
+    let mut victim = Browser::new(p);
+    web_sign_in(&mut victim, &fake, "github", profile_of("github", 1, "ann"));
+    let body = format!(r#"{{"redirect_uris":["{redirect}"],"client_name":"chartgen-web"}}"#);
+    let (st, _, body) = http(p, "POST", "/register", &JSON_POST, &body);
+    assert_eq!(st, 201, "{body}");
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let look_alike = v["client_id"].as_str().unwrap().to_string();
+
+    for origin in [
+        vec!["Sec-Fetch-Site: cross-site"],
+        vec!["Sec-Fetch-Site: same-site"],
+        vec![],
+    ] {
+        let page = victim.authorize_from(&look_alike, &redirect, "evil", &origin);
+        assert_eq!(page.status, 303, "{origin:?}: {}", page.body);
+        assert!(
+            page.location().starts_with("/oauth/consent?"),
+            "{origin:?}: {}",
+            page.location()
+        );
+        let consent = victim.get(&page.location());
+        assert!(
+            consent.body.contains("Approve this application?"),
+            "{}",
+            consent.body
+        );
+    }
+    // From our own origin, and from the address bar, there is no consent to ask.
+    for origin in ["Sec-Fetch-Site: same-origin", "Sec-Fetch-Site: none"] {
+        let page = victim.authorize_from(&look_alike, &redirect, "s", &[origin]);
+        assert_eq!(page.status, 307, "{origin}: {}", page.body);
+        assert!(page.query().contains_key("code"), "{origin}");
+    }
+
+    // Signed out, the answer is the same after the provider, whose callback always
+    // looks cross-site: it is where the request began that counts.
+    let mut fresh = Browser::new(p);
+    let first = fresh.authorize_from(
+        &look_alike,
+        &redirect,
+        "evil",
+        &["Sec-Fetch-Site: cross-site"],
+    );
+    let back = provider_round_trip(
+        &mut fresh,
+        &fake,
+        "github",
+        profile_of("github", 2, "b"),
+        &first,
+    );
+    assert!(
+        back.location().starts_with("/oauth/consent?"),
+        "{}",
+        back.location()
+    );
+    let mut own = Browser::new(p);
+    let first = own.authorize(&look_alike, &redirect, "s");
+    let back = provider_round_trip(
+        &mut own,
+        &fake,
+        "github",
+        profile_of("github", 3, "c"),
+        &first,
+    );
+    assert!(
+        back.location().starts_with(&redirect),
+        "{}",
+        back.location()
+    );
+}
+
+/// More tabs than the old cap of 20, each with its own token: none ends another's.
+#[test]
+fn test_signin_many_tabs_do_not_revoke_each_other() {
+    let fake = FakeProvider::start();
+    let srv = signin_server("signin-tabs", &fake, &["github"]);
+    let p = srv.port;
+    let redirect = web_redirect(p);
+    let client = register_client(p, &redirect);
+    let mut b = Browser::new(p);
+    let first = b.authorize(&client, &redirect, "s");
+    let back = provider_round_trip(
+        &mut b,
+        &fake,
+        "github",
+        profile_of("github", 1, "a"),
+        &first,
+    );
+    let mut tabs = vec![token_from(p, &client, &redirect, &back.query()["code"])];
+    for _ in 0..24 {
+        let answer = b.authorize(&client, &redirect, "s");
+        tabs.push(token_from(p, &client, &redirect, &answer.query()["code"]));
+    }
+    for (i, tab) in tabs.iter().enumerate() {
+        assert_eq!(ping_status(p, tab), 200, "tab {i} of {}", tabs.len());
     }
 }
 

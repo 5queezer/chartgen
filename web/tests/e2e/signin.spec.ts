@@ -226,6 +226,39 @@ test.describe("sign-in", () => {
     expect(visits).toEqual([]);
   });
 
+  test("the app itself is not asked for consent, and a look-alike from elsewhere is", async ({
+    page,
+    context,
+  }) => {
+    await bootSignedIn(page);
+    // Reloading goes through /authorize from the app's own page, in a real browser.
+    const consent: string[] = [];
+    page.on("request", (req) => {
+      if (new URL(req.url()).pathname === "/oauth/consent") consent.push(req.url());
+    });
+    await reloadApp(page);
+    expect(consent).toEqual([]);
+
+    const origin = new URL(page.url()).origin;
+    const res = await context.request.post("/register", {
+      data: { redirect_uris: [`${origin}/`], client_name: "chartgen-web" },
+    });
+    const { client_id } = (await res.json()) as { client_id: string };
+    const params = new URLSearchParams({
+      response_type: "code",
+      client_id,
+      redirect_uri: `${origin}/`,
+      code_challenge: "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM",
+      code_challenge_method: "S256",
+      state: "attacker-state",
+    });
+    // A link on someone else's page: the browser says cross-site.
+    await page.goto(`${FAKE_ORIGIN}/client/cb`);
+    await page.evaluate((target) => window.location.assign(target), `${origin}/authorize?${params}`);
+    await expect(page.getByRole("heading", { name: "Approve this application?" })).toBeVisible();
+    expect(new URL(page.url()).searchParams.has("code")).toBe(false);
+  });
+
   test.describe("a third-party client", () => {
     const CLIENT_REDIRECT = `${FAKE_ORIGIN}/client/cb`;
 
