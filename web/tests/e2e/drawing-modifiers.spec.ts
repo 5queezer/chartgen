@@ -962,7 +962,10 @@ test.describe("drawing modifiers", () => {
         chart.applyNewData(chart.getDataList());
       });
 
-    /** Moves drawing `n` off its committed record; only a `refresh` puts it back. */
+    /**
+     * Moves drawing `n` off its committed record; only a `refresh` puts it back. Returns its
+     * first value read in the same step, as a load landing later would rightly put it back.
+     */
     const knockOff = (page: Page, n: number) =>
       page.evaluate((i) => {
         const w = window as unknown as TestWindow & {
@@ -972,12 +975,12 @@ test.describe("drawing modifiers", () => {
         const { id } = w.__chartgenDrawings()[i]!;
         const points = chart.getOverlayById(id).points.map((p) => ({ ...p, value: 1 }));
         chart.overrideOverlay({ id, points });
+        return chart.getOverlayById(id).points[0]!.value;
       }, n);
 
     /** A tick still reaches drawing `n`, and places it from its stored record. */
     const expectFollowsTicks = async (page: Page, n: number) => {
-      await knockOff(page, n);
-      expect((await overlays(page))[n]!.points[0]!.value).toBe(1);
+      expect(await knockOff(page, n)).toBe(1);
       await tick(page);
       const live = (await overlays(page))[n]!.points;
       const stored = (await storedRecords(page))![n]!.points;
