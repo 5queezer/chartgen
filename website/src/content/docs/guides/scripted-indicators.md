@@ -44,8 +44,8 @@ Scripts belong to the **OAuth client** that registered them, that is, the
 `client_id` your MCP client got from `/register`. Another client, even
 your own second client, does not see them. With
 [sign-in](/chartgen/reference/oauth/#sign-in) they belong to the **signed-in user**
-instead, from any client, at 50 per user, and scripts from before it move to the first
-user through their client
+instead, from any client, at 50 per user, and scripts from before it stay out of reach until
+the operator names who inherits them
 ([ADR-0044](/chartgen/decisions/0044-sign-in-through-github-and-google/#existing-rows)). The stdio transport (`--mcp`)
 has no user: it lists the tools but cannot store scripts, and it charts
 built-ins only.

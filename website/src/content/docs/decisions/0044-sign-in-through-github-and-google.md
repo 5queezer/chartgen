@@ -7,7 +7,7 @@ sidebar:
 
 **Status:** Accepted
 **Date:** 2026-11-06
-**Amends:** [ADR-0025](/chartgen/decisions/0025-user-indicator-registry/) (with sign-in on, scripts belong to the user, not the client), [ADR-0036](/chartgen/decisions/0036-own-origin-invalid-client-redirect/) (a client's liveness is limited per user, which makes the lockout cost accounts), [ADR-0021](/chartgen/decisions/0021-realtime-chart-push/) (with sign-in on, the per-client push cap counts per user) and [ADR-0042](/chartgen/decisions/0042-server-side-alerts/) (with sign-in on, server alerts and their allowlist belong to accounts)
+**Amends:** [ADR-0025](/chartgen/decisions/0025-user-indicator-registry/) (with sign-in on, scripts belong to the user, not the client), [ADR-0036](/chartgen/decisions/0036-own-origin-invalid-client-redirect/) (a client's liveness is limited per user, which makes the lockout cost accounts), [ADR-0021](/chartgen/decisions/0021-realtime-chart-push/) (with sign-in on, the per-client push cap counts per user, and an operator can name a proxy's address header) and [ADR-0042](/chartgen/decisions/0042-server-side-alerts/) (with sign-in on, server alerts and their allowlist belong to accounts)
 
 ## Context and Problem Statement
 
@@ -136,22 +136,36 @@ Approval is remembered per user and client, so a connector does not ask again ev
 days when its token runs out. Redirect URIs of a client cannot change after
 registration, so the approval stays meaningful.
 
-**The web app's own client skips consent.** That is any client whose `redirect_uri` is
-exactly `/` on `CHARTGEN_BASE_URL`'s origin, whoever registered it. Nobody can use
-this: the code lands on our own page, which discards a code whose `state` it did not
-issue, and a third party never sees it.
+**The web app's own client skips consent,** when the browser says the request began on our
+own origin or at the address bar (`Sec-Fetch-Site: same-origin` or `none`). That is any client
+whose `redirect_uri` is exactly `/` on `CHARTGEN_BASE_URL`'s origin, whoever registered it, so
+a stranger can register a look-alike. Asked from anywhere else, or by a browser that does not
+say, it gets the consent page. The header is read at `/authorize` and kept with the request,
+because the provider's callback always looks cross-site. A code that reached our page anyway
+is discarded there unless the page issued its `state`, and the page sends no referrer to other
+sites, so the code in its address stays there.
 
 ### Existing rows
 
-**Scripts and server alerts of a client move to the first user who gets a token through
-it.** Nothing is deleted. A script name that user already has stays with the client, and
-so does whatever exceeds their limit, 50 scripts and 20 alerts. The next user through the
-same client gets nothing, so a browser's scripts stay with the first person on that
-browser. Leftovers keep pinning their client against eviction, and stay claimable.
+**Rows from before sign-in go to one named account, and to nobody else.**
+`CHARTGEN_CLAIM_OWNER=github:<id>` or `google:<sub>` names it. When that user gets a token,
+through any client, they collect every script and server alert still owned by a client, with
+waiting deliveries, whatever their limits, because these are theirs already. An alert's webhook
+and its signing secret move with it. A script name they already have stays with its client, as
+does the second of two clients' scripts with one name, so nothing is overwritten.
 
-This relies on the `client_id` being unknown to others, which is what guarded those rows
-until now, so no one gains access they lacked. The alternative, leaving rows orphaned with
-a recovery note, would have made every existing user lose them until an operator ran SQL.
+**Unset, nothing moves.** The rows stay with their clients, where nobody can reach them, because
+with sign-in on a token's owner is its user and never its client. Startup says how many rows
+wait and what to set, as a count. Unclaimed scripts keep until claimed. Unclaimed alerts keep
+running under ADR-0042's rules, so they expire 30 days after their client last got a token.
+Those rows pin their client against eviction.
+
+Rejected: **the first user through a client takes its rows.** This was the first version. A
+`client_id` travels in `/authorize` URLs, browser history and proxy logs, and a connector's may be
+shared, so a leaked id became a one-time transfer of the owner's scripts and alerts to whoever
+moved first, with webhook secrets that sign requests to the owner's receiver. **Leaving the rows
+for SQL** works, and is what setting nothing amounts to, but the variable saves the operator doing
+it by hand.
 
 Turning sign-in off again leaves users' scripts and alerts in the file, but out of reach,
 because owners are then client ids again. Clients, sessions and users stay and work again
@@ -180,7 +194,7 @@ buy no more alerts or watched pairs.
 |---|---|---|
 | Scripts | 50 | refused, as before; more clients no longer buy more |
 | Clients holding a live token | 20 | the tokens of the client that got one longest ago are dropped |
-| Tokens per client | 20 | oldest dropped (the web app gets one per page load) |
+| Tokens per client | 20, or 100 for the web app | the longest out of use dropped |
 | Pending codes | 20 | oldest dropped |
 | Browser sessions | 20 | oldest dropped |
 | Approved clients | 50 | oldest forgotten |
@@ -191,8 +205,24 @@ The 20 client limit is what changes ADR-0036's lockout. A client with a live tok
 still never evicted, and liveness now comes from a user's token, so holding the table
 of 1000 clients full takes at least 50 accounts.
 
-Login endpoints are limited too: 120 hits per minute per peer address (loopback exempt,
-as for `/register`), and 2000 sign-ins in progress on the whole server, then `429`.
+The web app gets a token per page load, and each tab keeps its own, because the chart push
+limits are per token, so sharing one would cost a grid its push. Its cap is roomy because a cap
+below the number of open tabs would have each tab's sign-in end another's, in a loop that never
+settles.
+
+Sign-in itself is limited so that nobody can hold it shut for free:
+
+- **Only what creates state counts:** 120 hits per minute per client address (loopback exempt,
+  as for `/register`). That means an `/authorize` that stores a request, a first `/oauth/login`
+  for one, and a callback with a `state` of ours. Junk costs nothing.
+- **One provider round trip per request,** so round trips cannot outnumber requests.
+- **5 open requests per browser and per signed-in user,** the oldest going first, and 2000 on
+  the whole server, then `429`.
+- **`CHARTGEN_TRUSTED_PROXY_HEADER`** names the header holding the client's address, such as
+  `CF-Connecting-IP`, for these limits, `/register`'s and the chart push cap. Unset, no header is
+  trusted, so behind a proxy all clients are one address. Set, it is only as true as the proxy
+  makes it, so the server must not be reachable any other way. A missing, malformed or
+  loopback value falls back to the peer.
 
 ### What a signed-in stranger can still do
 
@@ -229,10 +259,14 @@ Someone without an account can still:
 - **Register clients,** rate-limited per address, and with them evict clients that hold
   no live token. Registration has to stay open for MCP clients. An evicted client
   registers again. It loses its approvals, so its users see consent once more.
-- **Block new sign-ins for up to 10 minutes** by starting 2000 and abandoning them, or
-  from behind a shared proxy address, 120 hits a minute. Refusing was preferred to
-  evicting pending sign-ins, which would turn this into breaking those in progress.
-  Anyone holding a session is not affected.
+- **Slow new sign-ins for everyone behind one address, where no proxy header is named.**
+  Registering a client and asking `/authorize` 120 times a minute uses that address's budget,
+  and everybody behind the proxy shares it. **Set `CHARTGEN_TRUSTED_PROXY_HEADER` on a public
+  server.** A same-host proxy has no such limit, being loopback, and only the 2000 below stops it.
+- **Block new sign-ins for up to 10 minutes** by holding 2000 open requests. With the header
+  named that takes many addresses, at 120 a minute each. Refusing was preferred to evicting
+  pending sign-ins, which would turn this into breaking those in progress. Anyone holding a
+  session is not affected.
 
 ### Consequences
 
@@ -247,9 +281,10 @@ Someone without an account can still:
   chart settings and browser-side alerts stay in the browser's `localStorage`, as before: not
   per account, not synced, and still there after signing out. The next person to sign in on
   that browser sees them. Syncing a workspace per user is a separate project.
-- Bad: behind a proxy all peers share one address, so 120 hits a minute comes to about
-  40 sign-ins a minute for the whole server. chartgen trusts no forwarding header
-  ([ADR-0021](/chartgen/decisions/0021-realtime-chart-push/)).
+- Bad: behind a proxy with no header named, all peers share one address, so 120 hits a minute
+  comes to about 40 sign-ins a minute for the whole server.
+- Bad: a browser without `Sec-Fetch-Site`, such as Safari before 16.4, sees a consent page for
+  the web app once per client.
 - Bad: a tab restored from the back-forward cache misses the sign-out event, and with
   one provider and a live provider session can sign back in on its next 401.
 - Neutral: an SSE stream opened before a sign-out runs on until it reconnects, as one

@@ -782,7 +782,8 @@ forming bar, with every indicator recomputed. Merge it like a polled tail.
   and one recompute. Every chart of a symbol and feed interval shares one Binance
   WebSocket, so `1m` and `7m` of a symbol use the same one.
 - **Limits.** At most 4 subscriptions per token, 32 per client address
-  (the TCP peer; behind a reverse proxy that is the proxy) or with
+  (the TCP peer; behind a reverse proxy that is the proxy, unless
+  [a header is named](/chartgen/guides/deploy/#sign-in-through-github-and-google)) or with
   [sign-in](/chartgen/reference/oauth/#sign-in) per user, and 64 per
   server, and 10 `subscribe_chart` calls per token per minute. Over a
   limit the call fails with an error starting with `push limit reached`;

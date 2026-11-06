@@ -111,8 +111,10 @@ the scripted indicators, which need it
 `CHARTGEN_DB`, default `~/.chartgen/chartgen.db`. The HTTP server opens it at
 startup, creating the file and its directory, and applies pending migrations.
 `PRAGMA user_version` counts the migrations applied. If it cannot be opened, the
-server logs that and runs with clients in memory only. A build without the
-default `scripting` cargo feature has no store at all.
+server logs that and runs with clients in memory only. A migration runs in one transaction, so
+one that fails leaves the file as it was: repair the cause and restart, and the clients and
+everything else come back. A build without the default `scripting` cargo feature has no store
+at all.
 
 ```sql
 CREATE TABLE user_indicators (

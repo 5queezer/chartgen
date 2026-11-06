@@ -62,6 +62,8 @@ a token. See [what a signed-in stranger can still do](/chartgen/decisions/0044-s
 | `CHARTGEN_WEBHOOK_TEST_ORIGIN` | `src/webhook.rs` | Tests only. One loopback origin (`http://127.0.0.1:9000`) a webhook may reach. Ignored unless `CHARTGEN_DATA_SOURCE=sample`, so it does nothing on a live server. |
 | `CHARTGEN_GITHUB_CLIENT_ID`, `CHARTGEN_GITHUB_CLIENT_SECRET` | `src/server/signin.rs` | [Sign-in through GitHub](#sign-in-through-github-and-google). Unset: not offered. One without the other stops the server at startup. |
 | `CHARTGEN_GOOGLE_CLIENT_ID`, `CHARTGEN_GOOGLE_CLIENT_SECRET` | `src/server/signin.rs` | The same for Google. |
+| `CHARTGEN_CLAIM_OWNER` | `src/server/signin.rs` | The one account (`github:<id>`, `google:<sub>`) that [inherits](#sign-in-through-github-and-google) scripts and server alerts from before sign-in, with webhook secrets. Unset: nothing moves. |
+| `CHARTGEN_TRUSTED_PROXY_HEADER` | `src/server.rs` | Header holding the client's address, such as `CF-Connecting-IP`, for the limits per address. Only if the server cannot be reached except through that proxy. Unset: no header is trusted, and the address is the TCP peer. |
 | `CHARTGEN_SIGNIN_TEST_PROVIDER_ORIGIN` | `src/server/signin.rs` | Tests only: a loopback `http` origin that replaces both providers. Honored only with `CHARTGEN_DATA_SOURCE=sample`, ignored on live data. Never set it in production. |
 | `HOME` / `USERPROFILE` | `src/main.rs` | Picks the data directory (`~/.chartgen/`). Override to relocate `alerts.json` / `trades.log` / `subscriptions.json` / `chartgen.db`. |
 | `_CHARTGEN_PORT` | `src/server.rs` | Internal — set by the process to its own bind port so `base_url()` can compose the fallback URL. Do not set by hand. |
@@ -103,13 +105,28 @@ Restart, and the log says `Sign-in required, through: GitHub, Google`. With one 
 configured the choice of provider is skipped. Tokens are in memory, so clients sign in
 once after that restart; existing clients keep their `client_id`.
 
-Keep the volume at `~/.chartgen` mounted: sessions and users are stored there. Existing
-scripts and server alerts move to the first user who signs in through their client, and
-nothing is deleted
-([ADR-0044](/chartgen/decisions/0044-sign-in-through-github-and-google/#existing-rows)). Check that the first person through a shared browser is
-the right one.
+Keep the volume at `~/.chartgen` mounted: sessions and users are stored there.
 
-Turning sign-in off again means removing the variables. Users' scripts and alerts stay in
+**Existing scripts and server alerts stay where they are until you name who inherits them.** With
+sign-in on nobody can reach them, and startup says how many wait. To collect them, set
+`CHARTGEN_CLAIM_OWNER` to your own account, `github:<numeric id>` (the `id` in
+`https://api.github.com/users/<login>`) or `google:<sub>`, and sign in, through any client. You
+then own every client's rows, whichever client made them. **An alert's webhook and signing secret
+move with it**, so name only yourself. A script name you already have stays with its client, and
+nothing is deleted ([ADR-0044](/chartgen/decisions/0044-sign-in-through-github-and-google/#existing-rows)). Scripts wait for as long as it takes. Alerts keep
+running meanwhile, and expire 30 days after their client last got a token, so do not leave it long.
+You can unset the variable afterwards.
+
+**On a public server, also name your proxy's address header.** With
+`CHARTGEN_TRUSTED_PROXY_HEADER=CF-Connecting-IP`, or whatever single-address header your proxy
+sets, each client gets its own limits on sign-in, registration and chart push. Without it every
+visitor is the proxy's address, and one person can use up everyone's: 120 sign-in steps and 20
+registrations a minute or ten for all, while a same-host proxy has neither limit. **Only set it if
+the server cannot be reached except through that proxy**, because anyone reaching it directly can
+write that header and claim any address. A list such as `X-Forwarded-For` will not do: a value
+that is not one address falls back to the peer.
+
+Turning sign-in off again means removing the provider variables. Users' scripts and alerts stay in
 the file, out of reach until it is turned back on, and those alerts expire after 30 days.
 
 ### Server alerts
