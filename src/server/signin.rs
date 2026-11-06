@@ -1301,23 +1301,23 @@ pub(super) async fn logout(State(state): State<SharedState>, headers: HeaderMap)
         return StatusCode::FORBIDDEN.into_response();
     }
     let hash = read_cookie(&headers, SESSION_COOKIE).map(|v| hash_of(&v));
-    let mut writes = Vec::new();
-    if let Some(hash) = hash {
+    {
         let mut guard = state.oauth.lock().unwrap();
         let s = &mut *guard;
         let Some(signin) = s.signin.as_mut() else {
             return StatusCode::NOT_FOUND.into_response();
         };
-        signin.sessions.remove(&hash);
-        let ours = |u: &Option<TokenUser>| {
-            u.as_ref()
-                .is_some_and(|u| u.session.as_deref() == Some(hash.as_str()))
-        };
-        s.tokens.retain(|_, t| !ours(&t.user));
-        s.codes.retain(|_, c| !ours(&c.user));
-        writes.push(Write::DeleteSession(hash));
+        if let Some(hash) = &hash {
+            signin.sessions.remove(hash);
+            let ours = |u: &Option<TokenUser>| {
+                u.as_ref()
+                    .is_some_and(|u| u.session.as_deref() == Some(hash.as_str()))
+            };
+            s.tokens.retain(|_, t| !ours(&t.user));
+            s.codes.retain(|_, c| !ours(&c.user));
+        }
     }
-    persist(writes).await;
+    persist(hash.map(Write::DeleteSession).into_iter().collect()).await;
     eprintln!("[OAuth] signed out");
     with_cookie(
         StatusCode::NO_CONTENT.into_response(),
@@ -1328,7 +1328,10 @@ pub(super) async fn logout(State(state): State<SharedState>, headers: HeaderMap)
 /// `GET /oauth/signed-out`: where the web app goes after signing out. Going straight
 /// back to the app would sign the user in again: with one provider there is no chooser
 /// in between, and the provider remembers them.
-pub(super) async fn signed_out() -> Response {
+pub(super) async fn signed_out(State(state): State<SharedState>) -> Response {
+    if state.oauth.lock().unwrap().signin.is_none() {
+        return StatusCode::NOT_FOUND.into_response();
+    }
     page(
         StatusCode::OK,
         "You are signed out",
@@ -1683,6 +1686,137 @@ mod tests {
             "anysphere.cursor"
         );
         assert_eq!(redirect_target_label("my-app:/cb"), "my-app:");
+    }
+
+    fn store_with(client: &str, redirect_uri: &str) -> OAuthStore {
+        let c = config(&[
+            ("CHARTGEN_GITHUB_CLIENT_ID", "h"),
+            ("CHARTGEN_GITHUB_CLIENT_SECRET", "hs"),
+        ])
+        .unwrap()
+        .unwrap();
+        let mut s = OAuthStore::new();
+        s.signin = Some(SignIn::new(c));
+        s.clients.insert(
+            client.to_string(),
+            OAuthClient {
+                _client_secret: None,
+                redirect_uris: vec![redirect_uri.to_string()],
+                created_at: Instant::now(),
+                last_used: None,
+                name: None,
+            },
+        );
+        s
+    }
+
+    fn pending(client: &str, redirect_uri: &str) -> PendingRequest {
+        PendingRequest {
+            client_id: client.to_string(),
+            redirect_uri: redirect_uri.to_string(),
+            code_challenge: "c".to_string(),
+            code_challenge_method: "S256".to_string(),
+            state: Some("st".to_string()),
+            browser: "b".to_string(),
+            created_at: Instant::now(),
+            consent: None,
+        }
+    }
+
+    /// The request is checked again on return: a client evicted while its user was at
+    /// the provider, or one no longer listing the redirect, gets no code.
+    #[test]
+    fn a_request_is_validated_again_after_the_provider() {
+        const URI: &str = "https://client.example/cb";
+        let mut s = store_with("c1", URI);
+        s.signin.as_mut().unwrap().add_grant("github:1", "c1");
+        let put = |s: &mut OAuthStore, client: &str, uri: &str| {
+            let signin = s.signin.as_mut().unwrap();
+            signin.pending.insert("p".to_string(), pending(client, uri));
+        };
+
+        put(&mut s, "gone", URI);
+        let resp = s.continue_request("p", "github:1", "sess");
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        assert!(s.codes.is_empty());
+        assert!(s.signin.as_ref().unwrap().pending.is_empty());
+
+        put(&mut s, "c1", "https://evil.example/cb");
+        let resp = s.continue_request("p", "github:1", "sess");
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        assert!(s.codes.is_empty());
+
+        // Control: the same request with a good client gets its code, bound to the
+        // user, with no session on it because this is not the web app.
+        put(&mut s, "c1", URI);
+        let resp = s.continue_request("p", "github:1", "sess");
+        assert!(resp.status().is_redirection());
+        let code = s.codes.values().next().unwrap();
+        let user = code.user.as_ref().unwrap();
+        assert_eq!(user.id, "github:1");
+        assert_eq!(user.session, None);
+
+        // A user without the approval goes to consent, and the request stays for it.
+        put(&mut s, "c1", URI);
+        let resp = s.continue_request("p", "github:2", "sess");
+        let location = resp.headers()[header::LOCATION].to_str().unwrap();
+        assert_eq!(location, "/oauth/consent?request=p");
+        assert!(s.signin.as_ref().unwrap().pending.contains_key("p"));
+    }
+
+    /// ADR-0036 keeps working with users: a live token pins its client, and the
+    /// per-user cap is what releases one, so one account cannot pin the table.
+    #[test]
+    fn the_client_cap_makes_a_users_oldest_client_evictable() {
+        let mut s = OAuthStore::new();
+        let t0 = Instant::now();
+        for i in 0..MAX_CLIENTS {
+            s.clients.insert(
+                format!("c{i}"),
+                OAuthClient {
+                    _client_secret: None,
+                    redirect_uris: Vec::new(),
+                    created_at: t0,
+                    last_used: Some(t0),
+                    name: None,
+                },
+            );
+        }
+        let token_for = |s: &mut OAuthStore, i: usize, user: &str, age: u64| {
+            let token = format!("t{i}");
+            s.tokens.insert(
+                token.clone(),
+                AccessToken {
+                    _token: token,
+                    client_id: format!("c{i}"),
+                    created_at: t0 - Duration::from_secs(age),
+                    expires_in: Duration::from_secs(3600),
+                    user: Some(TokenUser {
+                        id: user.to_string(),
+                        session: None,
+                    }),
+                },
+            );
+        };
+        // One account holds a token on every client: all are pinned, as without a cap.
+        for i in 0..MAX_CLIENTS {
+            token_for(&mut s, i, "github:1", (MAX_CLIENTS - i) as u64);
+        }
+        assert!(s.make_room(|| Some(HashSet::new())).is_err(), "all live");
+        s.trim_user_tokens("github:1");
+        assert_eq!(s.tokens.len(), MAX_LIVE_CLIENTS_PER_USER);
+        let keeps = |s: &OAuthStore, i: usize| s.tokens.contains_key(&format!("t{i}"));
+        assert!(keeps(&s, MAX_CLIENTS - 1), "the newest stays");
+        assert!(!keeps(&s, 0), "the oldest goes");
+        let evicted = s.make_room(|| Some(HashSet::new())).unwrap();
+        assert_eq!(evicted.len(), 1);
+        let live: HashSet<&str> = s.tokens.values().map(|t| t.client_id.as_str()).collect();
+        assert!(!live.contains(evicted[0].as_str()), "a live client stays");
+
+        // Another user's tokens do not count against this one's.
+        token_for(&mut s, 0, "github:2", 5000);
+        s.trim_user_tokens("github:1");
+        assert!(keeps(&s, 0));
     }
 
     #[test]

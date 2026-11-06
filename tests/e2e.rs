@@ -770,6 +770,10 @@ fn server_command(
         .env_remove("CHARTGEN_WEB_DIR")
         .env_remove("CHARTGEN_BASE_URL")
         .env_remove("CHARTGEN_SCRIPTING")
+        .env_remove("CHARTGEN_GITHUB_CLIENT_ID")
+        .env_remove("CHARTGEN_GITHUB_CLIENT_SECRET")
+        .env_remove("CHARTGEN_GOOGLE_CLIENT_ID")
+        .env_remove("CHARTGEN_GOOGLE_CLIENT_SECRET")
         .env("CHARTGEN_DB", db)
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
@@ -806,6 +810,18 @@ fn http(
     headers: &[&str],
     body: &str,
 ) -> (u16, String, String) {
+    let (status, head, body) = http_exact(port, method, path, headers, body);
+    (status, head.to_ascii_lowercase(), body)
+}
+
+/// `http` with the head as sent: cookies and `state` values are case-sensitive.
+fn http_exact(
+    port: u16,
+    method: &str,
+    path: &str,
+    headers: &[&str],
+    body: &str,
+) -> (u16, String, String) {
     use std::io::{Read, Write};
     let mut s = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
     let mut req = format!("{method} {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n");
@@ -818,7 +834,7 @@ fn http(
     s.read_to_string(&mut resp).unwrap();
     let (head, body) = resp.split_once("\r\n\r\n").unwrap();
     let status = head.split(' ').nth(1).unwrap().parse().unwrap();
-    (status, head.to_ascii_lowercase(), body.to_string())
+    (status, head.to_string(), body.to_string())
 }
 
 const HTML: &str = "Accept: text/html,application/xhtml+xml,*/*;q=0.8";
@@ -1780,4 +1796,1617 @@ fn test_oauth_discovery_from_mcp() {
     assert_eq!(st, 200);
     let v: serde_json::Value = serde_json::from_str(&body).unwrap();
     assert_eq!(v["issuer"], base);
+}
+
+// ===========================================================================
+// 14. Sign-in through GitHub and Google (ADR-0044)
+// ===========================================================================
+
+/// What the fake provider does with a token request.
+#[derive(Clone, Copy, PartialEq)]
+enum FakeMode {
+    Normal,
+    /// A bad code as GitHub answers it: a 200 with an `error` field.
+    RefuseToken,
+    /// Accept the connection and never answer.
+    Hang,
+}
+
+#[derive(Default)]
+struct FakeState {
+    /// By code: (profile JSON, PKCE challenge of the flow, provider).
+    codes: std::collections::HashMap<String, (serde_json::Value, String, String)>,
+    /// By provider access token.
+    tokens: std::collections::HashMap<String, serde_json::Value>,
+    next: u64,
+}
+
+/// GitHub and Google on loopback: `/<provider>/token` and `/<provider>/userinfo`
+/// as each answers them. It checks the secret and the PKCE verifier, so a wrong
+/// exchange fails here as it would for real.
+struct FakeProvider {
+    port: u16,
+    state: std::sync::Arc<std::sync::Mutex<FakeState>>,
+    mode: std::sync::Arc<std::sync::Mutex<FakeMode>>,
+}
+
+const FAKE_SECRET: &str = "fake-provider-secret";
+
+impl FakeProvider {
+    fn start() -> Self {
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let state = std::sync::Arc::new(std::sync::Mutex::new(FakeState::default()));
+        let mode = std::sync::Arc::new(std::sync::Mutex::new(FakeMode::Normal));
+        let (st, md) = (state.clone(), mode.clone());
+        std::thread::spawn(move || {
+            for conn in listener.incoming().flatten() {
+                let (st, md) = (st.clone(), md.clone());
+                std::thread::spawn(move || fake_answer(conn, &st, &md));
+            }
+        });
+        Self { port, state, mode }
+    }
+
+    fn origin(&self) -> String {
+        format!("http://127.0.0.1:{}", self.port)
+    }
+
+    fn set_mode(&self, mode: FakeMode) {
+        *self.mode.lock().unwrap() = mode;
+    }
+
+    /// The user approves at the provider: a code for `profile`.
+    fn approve(&self, provider: &str, profile: serde_json::Value, challenge: &str) -> String {
+        let mut s = self.state.lock().unwrap();
+        s.next += 1;
+        let code = format!("code-{}", s.next);
+        s.codes.insert(
+            code.clone(),
+            (profile, challenge.to_string(), provider.to_string()),
+        );
+        code
+    }
+}
+
+fn fake_answer(
+    mut conn: std::net::TcpStream,
+    state: &std::sync::Mutex<FakeState>,
+    mode: &std::sync::Mutex<FakeMode>,
+) {
+    use base64::Engine as _;
+    use sha2::Digest as _;
+    use std::io::{Read, Write};
+    let mut buf = Vec::new();
+    let mut chunk = [0u8; 4096];
+    let (head, body) = loop {
+        let n = conn.read(&mut chunk).unwrap_or(0);
+        buf.extend_from_slice(&chunk[..n]);
+        let text = String::from_utf8_lossy(&buf).to_string();
+        if let Some((head, body)) = text.split_once("\r\n\r\n") {
+            let len = head
+                .lines()
+                .find_map(|l| {
+                    l.to_ascii_lowercase()
+                        .strip_prefix("content-length: ")
+                        .map(str::to_owned)
+                })
+                .and_then(|v| v.trim().parse::<usize>().ok())
+                .unwrap_or(0);
+            if body.len() >= len {
+                break (head.to_string(), body.to_string());
+            }
+        }
+        if n == 0 {
+            return;
+        }
+    };
+    let mut parts = head.split(' ');
+    let (method, path) = (parts.next().unwrap_or(""), parts.next().unwrap_or(""));
+    let provider = path.split('/').nth(1).unwrap_or("").to_string();
+    let current = *mode.lock().unwrap();
+    if current == FakeMode::Hang {
+        std::thread::sleep(std::time::Duration::from_secs(30));
+        return;
+    }
+    let answer = |status: &str, json: serde_json::Value, conn: &mut std::net::TcpStream| {
+        let body = json.to_string();
+        let _ = write!(
+            conn,
+            "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+    };
+    if method == "POST" && path.ends_with("/token") {
+        let form: std::collections::HashMap<String, String> = url_form(&body);
+        let mut s = state.lock().unwrap();
+        let bad = serde_json::json!({"error": "bad_verification_code"});
+        let Some((profile, challenge, code_provider)) =
+            form.get("code").and_then(|c| s.codes.remove(c))
+        else {
+            return answer("200 OK", bad, &mut conn);
+        };
+        let verifier = form.get("code_verifier").cloned().unwrap_or_default();
+        let computed = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(sha2::Sha256::digest(verifier.as_bytes()));
+        if current == FakeMode::RefuseToken
+            || code_provider != provider
+            || computed != challenge
+            || form.get("client_secret").map(String::as_str) != Some(FAKE_SECRET)
+        {
+            return answer("200 OK", bad, &mut conn);
+        }
+        s.next += 1;
+        let token = format!("provider-token-{}", s.next);
+        s.tokens.insert(token.clone(), profile);
+        return answer(
+            "200 OK",
+            serde_json::json!({"access_token": token}),
+            &mut conn,
+        );
+    }
+    if method == "GET" && path.ends_with("/userinfo") {
+        let bearer = head.lines().find_map(|l| {
+            l.strip_prefix("authorization: Bearer ")
+                .or_else(|| l.strip_prefix("Authorization: Bearer "))
+        });
+        let s = state.lock().unwrap();
+        return match bearer.and_then(|t| s.tokens.get(t.trim())) {
+            Some(profile) => answer("200 OK", profile.clone(), &mut conn),
+            None => answer("401 Unauthorized", serde_json::json!({}), &mut conn),
+        };
+    }
+    answer("404 Not Found", serde_json::json!({}), &mut conn);
+}
+
+fn url_decode(v: &str) -> String {
+    let (bytes, mut out, mut i) = (v.as_bytes(), Vec::new(), 0);
+    while i < bytes.len() {
+        match bytes[i] {
+            b'%' if bytes.len() - i > 2 => {
+                let hex = std::str::from_utf8(&bytes[i + 1..i + 3]).unwrap();
+                out.push(u8::from_str_radix(hex, 16).unwrap());
+                i += 3;
+            }
+            b'+' => {
+                out.push(b' ');
+                i += 1;
+            }
+            b => {
+                out.push(b);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8(out).unwrap()
+}
+
+fn url_form(raw: &str) -> std::collections::HashMap<String, String> {
+    raw.split('&')
+        .filter_map(|p| p.split_once('='))
+        .map(|(k, v)| (url_decode(k), url_decode(v)))
+        .collect()
+}
+
+fn url_encode(v: &str) -> String {
+    v.bytes().map(|b| format!("%{b:02X}")).collect()
+}
+
+/// A browser: keeps cookies, and follows nothing by itself.
+#[derive(Clone)]
+struct Browser {
+    port: u16,
+    cookies: std::collections::HashMap<String, String>,
+}
+
+/// A response in the browser: status, exact head, body.
+struct Page {
+    status: u16,
+    head: String,
+    body: String,
+}
+
+impl Page {
+    fn location(&self) -> String {
+        self.head
+            .lines()
+            .find_map(|l| {
+                let (k, v) = l.split_once(':')?;
+                k.eq_ignore_ascii_case("location")
+                    .then(|| v.trim().to_string())
+            })
+            .unwrap_or_else(|| panic!("no Location in {}", self.head))
+    }
+
+    fn set_cookies(&self) -> Vec<String> {
+        self.head
+            .lines()
+            .filter_map(|l| {
+                let (k, v) = l.split_once(':')?;
+                k.eq_ignore_ascii_case("set-cookie")
+                    .then(|| v.trim().to_string())
+            })
+            .collect()
+    }
+
+    fn query(&self) -> std::collections::HashMap<String, String> {
+        let location = self.location();
+        url_form(location.split_once('?').map_or("", |q| q.1))
+    }
+}
+
+impl Browser {
+    fn new(port: u16) -> Self {
+        Self {
+            port,
+            cookies: std::collections::HashMap::new(),
+        }
+    }
+
+    fn request(&mut self, method: &str, path: &str, extra: &[&str], body: &str) -> Page {
+        let cookie = self
+            .cookies
+            .iter()
+            .map(|(k, v)| format!("{k}={v}"))
+            .collect::<Vec<_>>()
+            .join("; ");
+        let cookie = format!("Cookie: {cookie}");
+        let mut headers = vec![HTML];
+        if !self.cookies.is_empty() {
+            headers.push(&cookie);
+        }
+        headers.extend_from_slice(extra);
+        let (status, head, body) = http_exact(self.port, method, path, &headers, body);
+        let page = Page { status, head, body };
+        for set in page.set_cookies() {
+            let pair = set.split(';').next().unwrap();
+            let (name, value) = pair.split_once('=').unwrap();
+            if value.is_empty() {
+                self.cookies.remove(name);
+            } else {
+                self.cookies.insert(name.to_string(), value.to_string());
+            }
+        }
+        page
+    }
+
+    fn get(&mut self, path: &str) -> Page {
+        self.request("GET", path, &[], "")
+    }
+
+    /// `GET /authorize` for a client, as it arrives from that client.
+    fn authorize(&mut self, client_id: &str, redirect_uri: &str, state: &str) -> Page {
+        let path = format!(
+            "/authorize?response_type=code&client_id={client_id}&redirect_uri={}&code_challenge={PKCE_CHALLENGE}&state={state}",
+            url_encode(redirect_uri)
+        );
+        self.get(&path)
+    }
+
+    fn has_session(&self) -> bool {
+        self.cookies.keys().any(|k| k.contains("chartgen_session"))
+    }
+}
+
+/// Everything but the fake provider's own page: follow `/authorize`'s answer through
+/// the choice of provider to the provider's redirect, then come back as the provider
+/// would with an approved code. Returns the answer of the callback.
+fn provider_round_trip(
+    b: &mut Browser,
+    fake: &FakeProvider,
+    provider: &str,
+    profile: serde_json::Value,
+    authorize_answer: &Page,
+) -> Page {
+    let at_provider = go_to_provider(b, provider, authorize_answer);
+    let query = at_provider.query();
+    let code = fake.approve(provider, profile, &query["code_challenge"]);
+    b.get(&format!(
+        "/oauth/callback/{provider}?code={code}&state={}",
+        url_encode(&query["state"])
+    ))
+}
+
+/// From `/authorize`'s answer to the redirect that leaves for the provider.
+fn go_to_provider(b: &mut Browser, provider: &str, authorize_answer: &Page) -> Page {
+    let mut next = authorize_answer.location();
+    if next.starts_with("/oauth/signin") {
+        let chooser = b.get(&next);
+        assert_eq!(chooser.status, 200, "{}", chooser.body);
+        let request = next.split("request=").nth(1).unwrap();
+        next = format!("/oauth/login/{provider}?request={request}");
+        assert!(chooser.body.contains(&next), "{}", chooser.body);
+    }
+    let page = b.get(&next);
+    assert_eq!(page.status, 303, "{}", page.body);
+    page
+}
+
+fn profile_of(provider: &str, id: u64, name: &str) -> serde_json::Value {
+    match provider {
+        "github" => serde_json::json!({"id": id, "login": name, "email": "ignored@example.com"}),
+        _ => serde_json::json!({"sub": format!("sub-{id}"), "name": name}),
+    }
+}
+
+/// A server on the sample source, signing in against `fake` with `providers`.
+fn signin_command(
+    port: u16,
+    db: &std::path::Path,
+    fake: &FakeProvider,
+    providers: &[&str],
+    base: Option<&str>,
+    scripting: bool,
+) -> std::process::Command {
+    let mut cmd = server_command(port, None, db, scripting);
+    cmd.env("CHARTGEN_DATA_SOURCE", "sample")
+        .env("CHARTGEN_SIGNIN_TEST_PROVIDER_ORIGIN", fake.origin())
+        .env(
+            "CHARTGEN_BASE_URL",
+            base.map_or_else(|| format!("http://localhost:{port}"), str::to_string),
+        );
+    for provider in providers {
+        let upper = provider.to_ascii_uppercase();
+        cmd.env(
+            format!("CHARTGEN_{upper}_CLIENT_ID"),
+            format!("{provider}-id"),
+        )
+        .env(format!("CHARTGEN_{upper}_CLIENT_SECRET"), FAKE_SECRET);
+    }
+    cmd
+}
+
+fn signin_server(test: &str, fake: &FakeProvider, providers: &[&str]) -> Server {
+    let port = free_port();
+    let db = store_path(test);
+    let mut srv = start_server(
+        signin_command(port, &db, fake, providers, None, false),
+        port,
+    );
+    srv.temp_db = Some(db);
+    srv
+}
+
+fn web_redirect(port: u16) -> String {
+    format!("http://localhost:{port}/")
+}
+
+fn register_client(port: u16, redirect_uri: &str) -> String {
+    let (st, body) = register(port, redirect_uri);
+    assert_eq!(st, 201, "{body}");
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    v["client_id"].as_str().unwrap().to_string()
+}
+
+fn exchange(port: u16, client_id: &str, redirect_uri: &str, code: &str) -> (u16, String) {
+    let body = serde_json::json!({
+        "grant_type": "authorization_code",
+        "code": code,
+        "redirect_uri": redirect_uri,
+        "client_id": client_id,
+        "code_verifier": PKCE_VERIFIER,
+    });
+    let (st, _, body) = http(port, "POST", "/token", &JSON_POST, &body.to_string());
+    (st, body)
+}
+
+fn token_from(port: u16, client_id: &str, redirect_uri: &str, code: &str) -> String {
+    let (st, body) = exchange(port, client_id, redirect_uri, code);
+    assert_eq!(st, 200, "{body}");
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    v["access_token"].as_str().unwrap().to_string()
+}
+
+/// `GET /oauth/me` with a bearer token: (status, JSON).
+fn me(port: u16, token: &str) -> (u16, serde_json::Value) {
+    let auth = format!("Authorization: Bearer {token}");
+    let (st, _, body) = http(port, "GET", "/oauth/me", &[auth.as_str()], "");
+    (st, serde_json::from_str(&body).unwrap())
+}
+
+/// Sign `b` in as the web app would and return the token.
+fn web_sign_in(
+    b: &mut Browser,
+    fake: &FakeProvider,
+    provider: &str,
+    profile: serde_json::Value,
+) -> String {
+    let port = b.port;
+    let client = register_client(port, &web_redirect(port));
+    let first = b.authorize(&client, &web_redirect(port), "s1");
+    let back = provider_round_trip(b, fake, provider, profile, &first);
+    assert_eq!(back.status, 303, "{}", back.body);
+    token_from(port, &client, &web_redirect(port), &back.query()["code"])
+}
+
+#[test]
+fn test_signin_whole_flow_with_both_providers() {
+    let fake = FakeProvider::start();
+    let srv = signin_server("signin-flow", &fake, &["github", "google"]);
+    let p = srv.port;
+    let cases = [
+        ("github", profile_of("github", 7, "octo"), "octo"),
+        ("google", profile_of("google", 7, "Ann"), "Ann"),
+    ];
+    for (provider, profile, name) in cases {
+        let mut b = Browser::new(p);
+        let client = register_client(p, &web_redirect(p));
+        // Not signed in: a chooser offering both, and no code anywhere.
+        let first = b.authorize(&client, &web_redirect(p), "app%20state");
+        assert_eq!(first.status, 303, "{}", first.body);
+        assert!(first.location().starts_with("/oauth/signin?request="));
+        let chooser = b.get(&first.location());
+        assert!(
+            chooser.body.contains("Continue with GitHub"),
+            "{}",
+            chooser.body
+        );
+        assert!(
+            chooser.body.contains("Continue with Google"),
+            "{}",
+            chooser.body
+        );
+
+        // The provider gets the exact callback, our id, PKCE and a minimal scope.
+        let leaving = go_to_provider(&mut b, provider, &first);
+        let target = leaving.location();
+        assert!(
+            target.starts_with(&format!("{}/{provider}/authorize?", fake.origin())),
+            "{target}"
+        );
+        let q = leaving.query();
+        assert_eq!(q["client_id"], format!("{provider}-id"));
+        assert_eq!(
+            q["redirect_uri"],
+            format!("http://localhost:{p}/oauth/callback/{provider}")
+        );
+        assert_eq!(q["code_challenge_method"], "S256");
+        assert_eq!(q["response_type"], "code");
+        assert!(!q["state"].is_empty());
+        assert!(!target.contains(FAKE_SECRET), "{target}");
+        match provider {
+            "github" => assert!(!q.contains_key("scope"), "{target}"),
+            _ => assert_eq!(q["scope"], "openid profile email"),
+        }
+
+        // Back from the provider: a session, then the code on the client's redirect
+        // with its state, without consent because this is the web app's own origin.
+        let code = fake.approve(provider, profile, &q["code_challenge"]);
+        let back = b.get(&format!(
+            "/oauth/callback/{provider}?code={code}&state={}",
+            url_encode(&q["state"])
+        ));
+        assert_eq!(back.status, 303, "{}", back.body);
+        assert!(b.has_session());
+        assert!(
+            back.location().starts_with(&web_redirect(p)),
+            "{}",
+            back.location()
+        );
+        assert_eq!(back.query()["state"], "app state");
+
+        let token = token_from(p, &client, &web_redirect(p), &back.query()["code"]);
+        assert_eq!(ping_status(p, &token), 200);
+        let (st, who) = me(p, &token);
+        assert_eq!(st, 200);
+        assert_eq!(who["sign_in"], true);
+        assert_eq!(who["user"]["name"], name);
+        assert_eq!(who["user"]["provider"], provider);
+    }
+}
+
+#[test]
+fn test_signin_with_one_provider_skips_the_chooser() {
+    let fake = FakeProvider::start();
+    let srv = signin_server("signin-one", &fake, &["google"]);
+    let p = srv.port;
+    let mut b = Browser::new(p);
+    let client = register_client(p, &web_redirect(p));
+    let first = b.authorize(&client, &web_redirect(p), "s");
+    assert!(
+        first.location().starts_with("/oauth/login/google?request="),
+        "{}",
+        first.location()
+    );
+    // The other provider is not on offer, not even by asking for it.
+    let request = first
+        .location()
+        .split("request=")
+        .nth(1)
+        .unwrap()
+        .to_string();
+    let other = b.get(&format!("/oauth/login/github?request={request}"));
+    assert_eq!(other.status, 404, "{}", other.body);
+    let back = provider_round_trip(
+        &mut b,
+        &fake,
+        "google",
+        profile_of("google", 1, "Ann"),
+        &first,
+    );
+    assert_eq!(back.status, 303, "{}", back.body);
+    assert!(back.location().starts_with(&web_redirect(p)));
+}
+
+#[test]
+fn test_signin_a_client_id_alone_gets_no_token() {
+    let fake = FakeProvider::start();
+    let srv = signin_server("signin-noauto", &fake, &["github"]);
+    let p = srv.port;
+    let client = register_external(p);
+    // The whole of the old attack: read the code off the Location header.
+    let (st, head, _) = authorize(p, &client, EXTERNAL_REDIRECT);
+    assert_ne!(st, 307, "{head}");
+    assert!(!head.contains("code="), "{head}");
+    assert!(head.contains("location: /oauth/login/github"), "{head}");
+    // And there is nothing to guess: a made-up code is refused.
+    let (st, body) = exchange(
+        p,
+        &client,
+        EXTERNAL_REDIRECT,
+        "00000000-0000-4000-8000-000000000000",
+    );
+    assert_eq!(st, 400, "{body}");
+    // Still a bearer-protected server with the same discovery.
+    let (st, head, _) = http(p, "GET", "/mcp", &[], "");
+    assert_eq!(st, 401);
+    assert!(
+        head.contains("www-authenticate: bearer resource_metadata="),
+        "{head}"
+    );
+    let (_, _, body) = http(p, "GET", "/.well-known/oauth-authorization-server", &[], "");
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(
+        v["authorization_endpoint"],
+        format!("http://localhost:{p}/authorize")
+    );
+    assert_eq!(
+        v["registration_endpoint"],
+        format!("http://localhost:{p}/register")
+    );
+}
+
+#[test]
+fn test_signin_state_is_single_use_and_bound_to_the_browser() {
+    let fake = FakeProvider::start();
+    let srv = signin_server("signin-state", &fake, &["github", "google"]);
+    let p = srv.port;
+    let client = register_client(p, &web_redirect(p));
+    let profile = || profile_of("github", 9, "mallory");
+    let start = |b: &mut Browser| {
+        let first = b.authorize(&client, &web_redirect(p), "s");
+        go_to_provider(b, "github", &first).query()
+    };
+    let refused = |page: &Page, b: &Browser, case: &str| {
+        assert_eq!(page.status, 400, "{case}: {}", page.body);
+        assert!(!b.has_session(), "{case}: no session");
+        assert!(page.body.contains("expired"), "{case}: {}", page.body);
+    };
+
+    // Login CSRF: the attacker's own finished callback, opened by the victim. The
+    // victim's browser did not start this flow, so it must not end up logged in.
+    let mut attacker = Browser::new(p);
+    let q = start(&mut attacker);
+    let code = fake.approve("github", profile(), &q["code_challenge"]);
+    let url = format!(
+        "/oauth/callback/github?code={code}&state={}",
+        url_encode(&q["state"])
+    );
+    let mut victim = Browser::new(p);
+    let page = victim.get(&url);
+    refused(&page, &victim, "no browser cookie");
+    // Nor with a browser cookie of its own.
+    let mut victim = Browser::new(p);
+    let _ = start(&mut victim);
+    let q = start(&mut attacker);
+    let code = fake.approve("github", profile(), &q["code_challenge"]);
+    let page = victim.get(&format!(
+        "/oauth/callback/github?code={code}&state={}",
+        url_encode(&q["state"])
+    ));
+    refused(&page, &victim, "another browser's cookie");
+
+    // A made-up state, and none at all.
+    let mut b = Browser::new(p);
+    let _ = start(&mut b);
+    refused(
+        &b.get("/oauth/callback/github?code=x&state=made-up"),
+        &b,
+        "unknown state",
+    );
+    refused(&b.get("/oauth/callback/github?code=x"), &b, "no state");
+
+    // A state for GitHub on the Google callback is used up and refused.
+    let q = start(&mut b);
+    let code = fake.approve("github", profile(), &q["code_challenge"]);
+    let state = url_encode(&q["state"]);
+    refused(
+        &b.get(&format!("/oauth/callback/google?code={code}&state={state}")),
+        &b,
+        "another provider",
+    );
+    refused(
+        &b.get(&format!("/oauth/callback/github?code={code}&state={state}")),
+        &b,
+        "after the wrong provider",
+    );
+
+    // Replay: the first use works, the second does not, with the same browser.
+    let q = start(&mut b);
+    let code = fake.approve("github", profile(), &q["code_challenge"]);
+    let url = format!(
+        "/oauth/callback/github?code={code}&state={}",
+        url_encode(&q["state"])
+    );
+    assert_eq!(b.get(&url).status, 303);
+    let mut no_session = b.clone();
+    no_session.cookies.retain(|k, _| !k.contains("session"));
+    refused(&no_session.get(&url), &no_session, "replay");
+
+    // A pending request belongs to its browser: a stranger's link leads nowhere.
+    let mut owner = Browser::new(p);
+    let first = owner.authorize(&client, &web_redirect(p), "s");
+    let mut other = Browser::new(p);
+    assert_eq!(other.get(&first.location()).status, 400);
+    let request = first
+        .location()
+        .split("request=")
+        .nth(1)
+        .unwrap()
+        .to_string();
+    assert_eq!(
+        other
+            .get(&format!("/oauth/login/github?request={request}"))
+            .status,
+        400
+    );
+    assert_eq!(
+        other
+            .get(&format!("/oauth/cancel?request={request}"))
+            .status,
+        400
+    );
+}
+
+#[test]
+fn test_signin_denied_login_can_be_retried_or_cancelled() {
+    let fake = FakeProvider::start();
+    let srv = signin_server("signin-denied", &fake, &["github", "google"]);
+    let p = srv.port;
+    let mut b = Browser::new(p);
+    let client = register_client(p, &web_redirect(p));
+    let first = b.authorize(&client, &web_redirect(p), "app-state");
+    let q = go_to_provider(&mut b, "github", &first).query();
+    let denied = b.get(&format!(
+        "/oauth/callback/github?error=access_denied&error_description=%3Cscript%3Ealert(1)%3C/script%3E&state={}",
+        url_encode(&q["state"])
+    ));
+    assert_eq!(denied.status, 200, "{}", denied.body);
+    assert!(denied.body.contains("cancelled"), "{}", denied.body);
+    assert!(!denied.body.contains("<script"), "{}", denied.body);
+    assert!(
+        denied
+            .head
+            .to_ascii_lowercase()
+            .contains("content-security-policy"),
+        "{}",
+        denied.head
+    );
+    assert!(!b.has_session());
+
+    // Try again goes back to the chooser with the same request, and works.
+    let request = first
+        .location()
+        .split("request=")
+        .nth(1)
+        .unwrap()
+        .to_string();
+    let retry = format!("/oauth/signin?request={request}");
+    assert!(denied.body.contains(&retry), "{}", denied.body);
+    assert_eq!(b.get(&retry).status, 200);
+    let back = provider_round_trip(
+        &mut b,
+        &fake,
+        "github",
+        profile_of("github", 1, "a"),
+        &first,
+    );
+    assert_eq!(back.status, 303, "{}", back.body);
+    assert!(b.has_session());
+
+    // Cancel tells the client, with its state.
+    let mut b = Browser::new(p);
+    let first = b.authorize(&client, &web_redirect(p), "app-state");
+    let q = go_to_provider(&mut b, "github", &first).query();
+    let denied = b.get(&format!(
+        "/oauth/callback/github?error=access_denied&state={}",
+        url_encode(&q["state"])
+    ));
+    let request = first
+        .location()
+        .split("request=")
+        .nth(1)
+        .unwrap()
+        .to_string();
+    let cancel = format!("/oauth/cancel?request={request}");
+    assert!(denied.body.contains(&cancel), "{}", denied.body);
+    let cancelled = b.get(&cancel);
+    assert_eq!(cancelled.status, 303);
+    assert!(cancelled.location().starts_with(&web_redirect(p)));
+    assert_eq!(cancelled.query()["error"], "access_denied");
+    assert_eq!(cancelled.query()["state"], "app-state");
+    assert!(!cancelled.query().contains_key("code"));
+    // Used up: the same link does not redirect twice.
+    assert_eq!(b.get(&cancel).status, 400);
+}
+
+#[test]
+fn test_signin_provider_failures_leave_a_retry() {
+    let fake = FakeProvider::start();
+    let srv = signin_server("signin-down", &fake, &["github", "google"]);
+    let p = srv.port;
+    let client = register_client(p, &web_redirect(p));
+    let attempt = |mode: FakeMode, expect: &str| {
+        fake.set_mode(mode);
+        let mut b = Browser::new(p);
+        let first = b.authorize(&client, &web_redirect(p), "s");
+        let page = provider_round_trip(
+            &mut b,
+            &fake,
+            "github",
+            profile_of("github", 1, "a"),
+            &first,
+        );
+        assert_eq!(page.status, 502, "{}", page.body);
+        assert!(page.body.contains(expect), "{}", page.body);
+        assert!(page.body.contains("Try again"), "{}", page.body);
+        assert!(!page.body.contains(FAKE_SECRET), "{}", page.body);
+        assert!(!b.has_session());
+        fake.set_mode(FakeMode::Normal);
+        // The retry path works once the provider is back.
+        let request = first
+            .location()
+            .split("request=")
+            .nth(1)
+            .unwrap()
+            .to_string();
+        assert!(page
+            .body
+            .contains(&format!("/oauth/signin?request={request}")));
+        let again = provider_round_trip(
+            &mut b,
+            &fake,
+            "github",
+            profile_of("github", 1, "a"),
+            &first,
+        );
+        assert_eq!(again.status, 303, "{}", again.body);
+    };
+    attempt(FakeMode::RefuseToken, "refused");
+    attempt(FakeMode::Hang, "could not be reached");
+
+    // A provider error other than a denial is a failure, not a cancelled sign-in.
+    let mut b = Browser::new(p);
+    let first = b.authorize(&client, &web_redirect(p), "s");
+    let q = go_to_provider(&mut b, "google", &first).query();
+    let page = b.get(&format!(
+        "/oauth/callback/google?error=server_error&state={}",
+        url_encode(&q["state"])
+    ));
+    assert_eq!(page.status, 502, "{}", page.body);
+    assert!(page.body.contains("reported a problem"), "{}", page.body);
+
+    // Nothing listens on the provider's port at all.
+    let closed = free_port();
+    let dead = FakeProvider {
+        port: closed,
+        state: Default::default(),
+        mode: std::sync::Arc::new(std::sync::Mutex::new(FakeMode::Normal)),
+    };
+    let srv = signin_server("signin-dead", &dead, &["github"]);
+    let p = srv.port;
+    let client = register_client(p, &web_redirect(p));
+    let mut b = Browser::new(p);
+    let first = b.authorize(&client, &web_redirect(p), "s");
+    let page = provider_round_trip(
+        &mut b,
+        &dead,
+        "github",
+        profile_of("github", 1, "a"),
+        &first,
+    );
+    assert_eq!(page.status, 502, "{}", page.body);
+    assert!(page.body.contains("could not be reached"), "{}", page.body);
+}
+
+#[test]
+fn test_signin_session_is_reused_for_a_second_client() {
+    let fake = FakeProvider::start();
+    let srv = signin_server("signin-reuse", &fake, &["github", "google"]);
+    let p = srv.port;
+    let mut b = Browser::new(p);
+    let first = web_sign_in(&mut b, &fake, "github", profile_of("github", 5, "octo"));
+    assert_eq!(ping_status(p, &first), 200);
+    // Another client of the web app in this browser: straight to the code, as in the
+    // flow without sign-in, with no provider and no page.
+    let client = register_client(p, &web_redirect(p));
+    let again = b.authorize(&client, &web_redirect(p), "s2");
+    assert_eq!(again.status, 307, "{}", again.body);
+    assert!(again.location().starts_with(&web_redirect(p)));
+    let token = token_from(p, &client, &web_redirect(p), &again.query()["code"]);
+    assert_eq!(me(p, &token).1["user"]["name"], "octo");
+    // The same account again is the same user with a new session, and a renamed one
+    // too: the id decides.
+    let mut other = Browser::new(p);
+    let renamed = web_sign_in(
+        &mut other,
+        &fake,
+        "github",
+        profile_of("github", 5, "renamed"),
+    );
+    assert_eq!(me(p, &renamed).1["user"]["name"], "renamed");
+    // The same person on the other provider is another user: no linking.
+    let mut google = Browser::new(p);
+    let token = web_sign_in(
+        &mut google,
+        &fake,
+        "google",
+        profile_of("google", 5, "octo"),
+    );
+    assert_eq!(me(p, &token).1["user"]["provider"], "google");
+}
+
+/// The form fields of the consent page.
+fn consent_fields(body: &str) -> (String, String) {
+    let value = |name: &str| {
+        let marker = format!("name=\"{name}\" value=\"");
+        let rest = body
+            .split(&marker)
+            .nth(1)
+            .unwrap_or_else(|| panic!("no {name} in {body}"));
+        rest.split('"').next().unwrap().to_string()
+    };
+    (value("request"), value("csrf"))
+}
+
+#[test]
+fn test_signin_third_party_client_needs_consent() {
+    let fake = FakeProvider::start();
+    let srv = signin_server("signin-consent", &fake, &["github"]);
+    let p = srv.port;
+    let mut b = Browser::new(p);
+    web_sign_in(
+        &mut b,
+        &fake,
+        "github",
+        profile_of("github", 5, "<b>octo</b>"),
+    );
+
+    let body = format!(
+        r#"{{"redirect_uris":["{EXTERNAL_REDIRECT}"],"client_name":"<script>alert('x')</script>Claude"}}"#
+    );
+    let (st, _, body) = http(p, "POST", "/register", &JSON_POST, &body);
+    assert_eq!(st, 201, "{body}");
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let client = v["client_id"].as_str().unwrap().to_string();
+
+    let first = b.authorize(&client, EXTERNAL_REDIRECT, "st");
+    assert_eq!(first.status, 303, "{}", first.body);
+    assert!(!first.location().contains("code="), "{}", first.location());
+    assert!(first.location().starts_with("/oauth/consent?request="));
+    let page = b.get(&first.location());
+    assert_eq!(page.status, 200, "{}", page.body);
+    // The redirect host is what to trust, and what the client chose is escaped.
+    let host = reqwest::Url::parse(EXTERNAL_REDIRECT).unwrap();
+    assert!(
+        page.body
+            .contains(&format!(">{}<", host.host_str().unwrap())),
+        "{}",
+        page.body
+    );
+    assert!(!page.body.contains("<script"), "{}", page.body);
+    assert!(
+        page.body
+            .contains("&lt;script&gt;alert(&#39;x&#39;)&lt;/script&gt;Claude"),
+        "{}",
+        page.body
+    );
+    assert!(
+        page.body.contains("&lt;b&gt;octo&lt;/b&gt;"),
+        "{}",
+        page.body
+    );
+    let head = page.head.to_ascii_lowercase();
+    assert!(head.contains("frame-ancestors 'none'"), "{head}");
+    assert!(head.contains("cache-control: no-store"), "{head}");
+
+    let (request, csrf) = consent_fields(&page.body);
+    let form = "Content-Type: application/x-www-form-urlencoded";
+    let post = |b: &mut Browser, fields: String, extra: &[&str]| {
+        let mut headers = vec![form];
+        headers.extend_from_slice(extra);
+        b.request("POST", "/oauth/consent", &headers, &fields)
+    };
+    let approve = format!("request={request}&csrf={csrf}&decision=approve");
+
+    // Refused: no token, a wrong one, another browser, another site. Each leaves the
+    // request as it was, so the genuine answer below still works.
+    let refusals: [(String, Browser, &[&str]); 4] = [
+        (
+            format!("request={request}&csrf=&decision=approve"),
+            b.clone(),
+            &[],
+        ),
+        (
+            format!("request={request}&csrf=wrong&decision=approve"),
+            b.clone(),
+            &[],
+        ),
+        (
+            approve.clone(),
+            {
+                let mut other = b.clone();
+                other.cookies.retain(|k, _| k.contains("session"));
+                other
+            },
+            &[],
+        ),
+        (
+            approve.clone(),
+            b.clone(),
+            &["Origin: https://evil.example"],
+        ),
+    ];
+    for (fields, mut who, extra) in refusals {
+        let refused = post(&mut who, fields.clone(), extra);
+        assert_eq!(refused.status, 400, "{fields}: {}", refused.body);
+        assert!(!refused.head.contains("code="), "{}", refused.head);
+    }
+    // A signed-out browser cannot answer either.
+    let mut logged_out = b.clone();
+    logged_out.cookies.retain(|k, _| !k.contains("session"));
+    assert_eq!(post(&mut logged_out, approve.clone(), &[]).status, 400);
+
+    // Deny: the client hears it and gets no code.
+    let denied = post(
+        &mut b,
+        format!("request={request}&csrf={csrf}&decision=deny"),
+        &[],
+    );
+    assert_eq!(denied.status, 303, "{}", denied.body);
+    assert!(denied.location().starts_with(EXTERNAL_REDIRECT));
+    assert_eq!(denied.query()["error"], "access_denied");
+    assert_eq!(denied.query()["state"], "st");
+    assert!(!denied.query().contains_key("code"));
+    // The decision used the request up.
+    assert_eq!(post(&mut b, approve, &[]).status, 400);
+
+    // Still not approved, so asked again; approve this time.
+    let first = b.authorize(&client, EXTERNAL_REDIRECT, "st2");
+    let page = b.get(&first.location());
+    let (request, csrf) = consent_fields(&page.body);
+    let origin = format!("Origin: http://localhost:{p}");
+    let approved = post(
+        &mut b,
+        format!("request={request}&csrf={csrf}&decision=approve"),
+        &[origin.as_str()],
+    );
+    assert_eq!(approved.status, 303, "{}", approved.body);
+    assert_eq!(approved.query()["state"], "st2");
+    let token = token_from(p, &client, EXTERNAL_REDIRECT, &approved.query()["code"]);
+    assert_eq!(me(p, &token).1["user"]["name"], "<b>octo</b>");
+
+    // Once approved the client is not asked about again.
+    let again = b.authorize(&client, EXTERNAL_REDIRECT, "st3");
+    assert_eq!(again.status, 307, "{}", again.body);
+    assert_eq!(again.query()["state"], "st3");
+
+    // Approval is per user: someone else is asked.
+    let mut other = Browser::new(p);
+    web_sign_in(
+        &mut other,
+        &fake,
+        "github",
+        profile_of("github", 6, "other"),
+    );
+    let theirs = other.authorize(&client, EXTERNAL_REDIRECT, "st4");
+    assert!(
+        theirs.location().starts_with("/oauth/consent?"),
+        "{}",
+        theirs.location()
+    );
+
+    // Without a session it is the provider first, and consent after.
+    let mut fresh = Browser::new(p);
+    let first = fresh.authorize(&client, EXTERNAL_REDIRECT, "st5");
+    let back = provider_round_trip(
+        &mut fresh,
+        &fake,
+        "github",
+        profile_of("github", 7, "new"),
+        &first,
+    );
+    assert_eq!(back.status, 303, "{}", back.body);
+    assert!(fresh.has_session());
+    assert!(
+        back.location().starts_with("/oauth/consent?"),
+        "{}",
+        back.location()
+    );
+}
+
+#[test]
+fn test_signin_logout_ends_the_session_and_only_the_web_apps_tokens() {
+    let fake = FakeProvider::start();
+    let srv = signin_server("signin-logout", &fake, &["github"]);
+    let p = srv.port;
+    let mut b = Browser::new(p);
+    let web = web_sign_in(&mut b, &fake, "github", profile_of("github", 5, "octo"));
+
+    // A connector approved on purpose from the same browser.
+    let client = register_external(p);
+    let first = b.authorize(&client, EXTERNAL_REDIRECT, "s");
+    let page = b.get(&first.location());
+    let (request, csrf) = consent_fields(&page.body);
+    let approved = b.request(
+        "POST",
+        "/oauth/consent",
+        &["Content-Type: application/x-www-form-urlencoded"],
+        &format!("request={request}&csrf={csrf}&decision=approve"),
+    );
+    let connector = token_from(p, &client, EXTERNAL_REDIRECT, &approved.query()["code"]);
+    assert_eq!(ping_status(p, &web), 200);
+    assert_eq!(ping_status(p, &connector), 200);
+
+    // Not from another site, even with the cookie.
+    let cross = b.request(
+        "POST",
+        "/oauth/logout",
+        &["Origin: https://evil.example"],
+        "",
+    );
+    assert_eq!(cross.status, 403, "{}", cross.body);
+    assert!(b.has_session());
+    assert_eq!(ping_status(p, &web), 200);
+
+    let session_cookie = b.cookies.clone();
+    let out = b.request("POST", "/oauth/logout", &[], "");
+    assert_eq!(out.status, 204, "{}", out.head);
+    let cleared = out.set_cookies().join("\n");
+    assert!(cleared.contains("chartgen_session=;"), "{cleared}");
+    assert!(cleared.contains("Max-Age=0"), "{cleared}");
+    assert!(!b.has_session());
+    assert_eq!(
+        ping_status(p, &web),
+        401,
+        "the web app's token ends with its session"
+    );
+    assert_eq!(
+        ping_status(p, &connector),
+        200,
+        "a connector keeps its token"
+    );
+
+    // The old cookie value is dead on the server too, not just cleared.
+    let mut stale = Browser {
+        port: p,
+        cookies: session_cookie,
+    };
+    let client = register_client(p, &web_redirect(p));
+    let again = stale.authorize(&client, &web_redirect(p), "s");
+    assert!(
+        again.location().starts_with("/oauth/login/github"),
+        "{}",
+        again.location()
+    );
+    // Harmless without a session, and the page after it needs nothing.
+    assert_eq!(
+        Browser::new(p)
+            .request("POST", "/oauth/logout", &[], "")
+            .status,
+        204
+    );
+    assert_eq!(Browser::new(p).get("/oauth/signed-out").status, 200);
+}
+
+#[test]
+fn test_signin_codes_and_tokens_carry_the_user() {
+    let fake = FakeProvider::start();
+    let srv = signin_server("signin-bound", &fake, &["github"]);
+    let p = srv.port;
+    let client = register_client(p, &web_redirect(p));
+    let mut a = Browser::new(p);
+    let first = a.authorize(&client, &web_redirect(p), "s");
+    let back = provider_round_trip(
+        &mut a,
+        &fake,
+        "github",
+        profile_of("github", 1, "ann"),
+        &first,
+    );
+    let code = back.query()["code"].clone();
+    // A code works once, also after a failed attempt.
+    let (st, _) = exchange(p, &client, "https://other.example/", &code);
+    assert_eq!(st, 400);
+    let (st, _) = exchange(p, &client, &web_redirect(p), &code);
+    assert_eq!(st, 400, "a failed exchange used the code up");
+
+    let first = a.authorize(&client, &web_redirect(p), "s");
+    let code = first.query()["code"].clone();
+    let token = token_from(p, &client, &web_redirect(p), &code);
+    let (st, _) = exchange(p, &client, &web_redirect(p), &code);
+    assert_eq!(st, 400, "replayed code");
+
+    // Two users through one client are two users.
+    let mut b = Browser::new(p);
+    let first = b.authorize(&client, &web_redirect(p), "s");
+    let back = provider_round_trip(
+        &mut b,
+        &fake,
+        "github",
+        profile_of("github", 2, "bob"),
+        &first,
+    );
+    let bob = token_from(p, &client, &web_redirect(p), &back.query()["code"]);
+    assert_eq!(me(p, &token).1["user"]["name"], "ann");
+    assert_eq!(me(p, &bob).1["user"]["name"], "bob");
+    // A bad token is nobody.
+    assert_eq!(me(p, "nonsense").0, 401);
+}
+
+#[test]
+fn test_signin_cookies_on_https() {
+    let fake = FakeProvider::start();
+    let port = free_port();
+    let db = store_path("signin-https");
+    let cmd = signin_command(
+        port,
+        &db,
+        &fake,
+        &["github"],
+        Some("https://chartgen.example"),
+        false,
+    );
+    let mut srv = start_server(cmd, port);
+    srv.temp_db = Some(db);
+    let redirect = "https://chartgen.example/";
+    let client = register_client(port, redirect);
+    let mut b = Browser::new(port);
+    let first = b.authorize(&client, redirect, "s");
+    let browser_cookie = first.set_cookies().join("\n");
+    let attributes = |set: &str| {
+        assert!(set.contains("HttpOnly"), "{set}");
+        assert!(set.contains("; Secure"), "{set}");
+        assert!(set.contains("SameSite=Lax"), "{set}");
+        assert!(set.contains("Path=/"), "{set}");
+    };
+    assert!(
+        browser_cookie.starts_with("__Host-chartgen_browser="),
+        "{browser_cookie}"
+    );
+    attributes(&browser_cookie);
+    let back = provider_round_trip(
+        &mut b,
+        &fake,
+        "github",
+        profile_of("github", 1, "a"),
+        &first,
+    );
+    assert_eq!(back.status, 303, "{}", back.body);
+    let session = back.set_cookies().join("\n");
+    assert!(session.starts_with("__Host-chartgen_session="), "{session}");
+    attributes(&session);
+    let days: i64 = session
+        .split("Max-Age=")
+        .nth(1)
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert!(days > 0 && days <= 31 * 86400, "{session}");
+    // A plain-named cookie of the same value is not ours: a subdomain could plant it.
+    let value = b.cookies["__Host-chartgen_session"].clone();
+    let mut planted = Browser::new(port);
+    planted.cookies.insert("chartgen_session".into(), value);
+    let answer = planted.authorize(&client, redirect, "s");
+    assert!(
+        answer.location().starts_with("/oauth/login/"),
+        "{}",
+        answer.location()
+    );
+}
+
+/// With nothing configured none of the above exists: the code comes straight back
+/// with no cookie.
+#[test]
+fn test_signin_nothing_configured_is_todays_behaviour() {
+    let srv = spawn_server(None);
+    let p = srv.port;
+    let client = register_external(p);
+    let (st, head, _) = authorize(p, &client, EXTERNAL_REDIRECT);
+    assert_eq!(st, 307, "{head}");
+    assert!(head.contains("code="), "{head}");
+    assert!(!head.contains("set-cookie"), "{head}");
+    let token = sign_in(p, &client);
+    assert_eq!(ping_status(p, &token), 200);
+    let (st, who) = me(p, &token);
+    assert_eq!(st, 200);
+    assert_eq!(who["sign_in"], false);
+    assert_eq!(who["user"], serde_json::Value::Null);
+    for path in [
+        "/oauth/signin?request=x",
+        "/oauth/login/github?request=x",
+        "/oauth/callback/github?state=x",
+        "/oauth/consent?request=x",
+        "/oauth/cancel?request=x",
+    ] {
+        assert_eq!(http(p, "GET", path, &[], "").0, 404, "{path}");
+    }
+    assert_eq!(http(p, "POST", "/oauth/logout", &[], "").0, 404);
+    assert_eq!(http(p, "GET", "/oauth/signed-out", &[], "").0, 404);
+}
+
+#[test]
+fn test_signin_half_a_provider_refuses_to_start() {
+    let port = free_port();
+    let db = store_path("signin-half");
+    let mut cmd = server_command(port, None, &db, false);
+    cmd.env("CHARTGEN_GITHUB_CLIENT_ID", "only-an-id");
+    let status = cmd.status().unwrap();
+    assert_eq!(status.code(), Some(1), "it must not start open");
+}
+
+/// The test provider is the only way past the real ones, and it takes the sample
+/// source: on live data the same setting leaves the real GitHub in the Location.
+#[test]
+fn test_signin_test_provider_is_ignored_on_live_data() {
+    let fake = FakeProvider::start();
+    let port = free_port();
+    let db = store_path("signin-live");
+    let mut cmd = signin_command(port, &db, &fake, &["github"], None, false);
+    cmd.env_remove("CHARTGEN_DATA_SOURCE");
+    let mut srv = start_server(cmd, port);
+    srv.temp_db = Some(db);
+    let client = register_client(port, &web_redirect(port));
+    let mut b = Browser::new(port);
+    let first = b.authorize(&client, &web_redirect(port), "s");
+    let leaving = b.get(&first.location());
+    assert!(
+        leaving
+            .location()
+            .starts_with("https://github.com/login/oauth/authorize?"),
+        "{}",
+        leaving.location()
+    );
+}
+
+/// Secrets, codes, states and session values stay out of the log, whatever happens.
+#[test]
+fn test_signin_logs_no_secrets() {
+    let fake = FakeProvider::start();
+    let port = free_port();
+    let db = store_path("signin-logs");
+    let log_path = db.with_extension("log");
+    let log = std::fs::File::create(&log_path).unwrap();
+    let mut cmd = signin_command(port, &db, &fake, &["github"], None, false);
+    cmd.stderr(log.try_clone().unwrap()).stdout(log);
+    let mut srv = start_server(cmd, port);
+    srv.temp_db = Some(db);
+
+    let mut b = Browser::new(port);
+    let client = register_client(port, &web_redirect(port));
+    let first = b.authorize(&client, &web_redirect(port), "app-state-value");
+    let q = go_to_provider(&mut b, "github", &first).query();
+    let code = fake.approve(
+        "github",
+        profile_of("github", 77, "octo-name"),
+        &q["code_challenge"],
+    );
+    let back = b.get(&format!(
+        "/oauth/callback/github?code={code}&state={}",
+        url_encode(&q["state"])
+    ));
+    let our_code = back.query()["code"].clone();
+    let token = token_from(port, &client, &web_redirect(port), &our_code);
+    let _ = b.request("POST", "/oauth/logout", &[], "");
+    fake.set_mode(FakeMode::RefuseToken);
+    let first = b.authorize(&client, &web_redirect(port), "s");
+    let _ = provider_round_trip(
+        &mut b,
+        &fake,
+        "github",
+        profile_of("github", 77, "octo-name"),
+        &first,
+    );
+    drop(srv);
+
+    let logged = std::fs::read_to_string(&log_path).unwrap();
+    assert!(
+        logged.contains("sign-in succeeded provider=github"),
+        "{logged}"
+    );
+    for secret in [
+        FAKE_SECRET,
+        code.as_str(),
+        q["state"].as_str(),
+        q["code_challenge"].as_str(),
+        our_code.as_str(),
+        token.as_str(),
+        client.as_str(),
+        "app-state-value",
+        "octo-name",
+        "github:77",
+    ] {
+        assert!(!logged.contains(secret), "{secret} in the log:\n{logged}");
+    }
+    let _ = std::fs::remove_file(&log_path);
+}
+
+/// One user cannot hold the shared tables: live clients and tokens are capped per
+/// user, so a client dropped from the cap becomes evictable again (ADR-0036).
+#[test]
+fn test_signin_per_user_limits() {
+    let fake = FakeProvider::start();
+    let srv = signin_server("signin-limits", &fake, &["github"]);
+    let p = srv.port;
+    let mut b = Browser::new(p);
+    let first_token = web_sign_in(&mut b, &fake, "github", profile_of("github", 1, "a"));
+    let redirect = web_redirect(p);
+    let mut tokens = Vec::new();
+    for _ in 0..20 {
+        let client = register_client(p, &redirect);
+        let answer = b.authorize(&client, &redirect, "s");
+        tokens.push(token_from(p, &client, &redirect, &answer.query()["code"]));
+    }
+    assert_eq!(
+        ping_status(p, &first_token),
+        401,
+        "the client longest out of use lost its token"
+    );
+    for token in &tokens {
+        assert_eq!(ping_status(p, token), 200);
+    }
+    // One client: the web app gets a token per page load, and they do not pile up.
+    let client = register_client(p, &redirect);
+    let mut last = Vec::new();
+    for _ in 0..21 {
+        let answer = b.authorize(&client, &redirect, "s");
+        last.push(token_from(p, &client, &redirect, &answer.query()["code"]));
+    }
+    assert_eq!(ping_status(p, &last[0]), 401);
+    assert_eq!(ping_status(p, &last[20]), 200);
+    // Someone else's are not touched by any of it.
+    let mut other = Browser::new(p);
+    let theirs = web_sign_in(&mut other, &fake, "github", profile_of("github", 2, "b"));
+    for _ in 0..3 {
+        let client = register_client(p, &redirect);
+        let answer = b.authorize(&client, &redirect, "s");
+        token_from(p, &client, &redirect, &answer.query()["code"]);
+    }
+    assert_eq!(ping_status(p, &theirs), 200);
+}
+
+/// Sign-ins in progress are bounded on loopback too, where the per-address limit does
+/// not apply, and hitting the bound leaves a signed-in user alone.
+#[test]
+fn test_signin_pending_logins_are_bounded() {
+    let fake = FakeProvider::start();
+    let srv = signin_server("signin-cap", &fake, &["github", "google"]);
+    let p = srv.port;
+    let mut holder = Browser::new(p);
+    web_sign_in(&mut holder, &fake, "github", profile_of("github", 1, "a"));
+    let client = register_client(p, &web_redirect(p));
+    let mut limited = None;
+    let mut b = Browser::new(p);
+    for i in 0..2100 {
+        let page = b.authorize(&client, &web_redirect(p), "s");
+        if page.status == 429 {
+            limited = Some((i, page));
+            break;
+        }
+    }
+    let (at, page) = limited.expect("a flood of sign-ins must be refused");
+    assert!(at >= 1990, "refused too soon: {at}");
+    assert!(
+        page.head.to_ascii_lowercase().contains("retry-after: 60"),
+        "{}",
+        page.head
+    );
+    assert!(page.body.contains("Too many"), "{}", page.body);
+    let answer = holder.authorize(&client, &web_redirect(p), "s");
+    assert_eq!(answer.status, 307, "{}", answer.body);
+}
+
+#[cfg(feature = "scripting")]
+const OWN_SCRIPT: &str =
+    "PARAMS = []\nMETA = {}\ndef compute(ohlcv, params, chart):\n    chart.line(ohlcv.close)\n";
+
+/// `tools/call` with a token; the text of the answer.
+#[cfg(feature = "scripting")]
+fn tool_text(port: u16, token: &str, tool: &str, args: serde_json::Value) -> String {
+    let auth = format!("Authorization: Bearer {token}");
+    let headers = [JSON_POST[0], JSON_POST[1], auth.as_str()];
+    let call = serde_json::json!({
+        "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+        "params": {"name": tool, "arguments": args}
+    });
+    let (st, _, body) = http(port, "POST", "/mcp", &headers, &call.to_string());
+    assert_eq!(st, 200, "{body}");
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    v["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap_or("")
+        .to_string()
+}
+
+/// ADR-0044: scripts belong to the user. Two users are apart, one user sees them from
+/// any client, and they survive a restart along with the session and the user.
+#[cfg(feature = "scripting")]
+#[test]
+fn test_signin_scripts_follow_the_user_and_sessions_survive_restart() {
+    let fake = FakeProvider::start();
+    let port = free_port();
+    let db = store_path("signin-scripts");
+    let start = |fake: &FakeProvider| {
+        start_server(
+            signin_command(port, &db, fake, &["github"], None, true),
+            port,
+        )
+    };
+    let srv = start(&fake);
+    let redirect = web_redirect(port);
+    let register_script = |token: &str, name: &str| {
+        let answer = tool_text(
+            port,
+            token,
+            "register_indicator",
+            serde_json::json!({"name": name, "source": OWN_SCRIPT}),
+        );
+        assert!(answer.contains(name), "{answer}");
+    };
+    let mine = |token: &str| tool_text(port, token, "list_my_indicators", serde_json::json!({}));
+
+    let mut ann = Browser::new(port);
+    let ann_token = web_sign_in(&mut ann, &fake, "github", profile_of("github", 1, "ann"));
+    let mut bob = Browser::new(port);
+    let bob_token = web_sign_in(&mut bob, &fake, "github", profile_of("github", 2, "bob"));
+    register_script(&ann_token, "anns_line");
+    register_script(&bob_token, "bobs_line");
+    assert!(mine(&ann_token).contains("anns_line"));
+    assert!(
+        !mine(&ann_token).contains("bobs_line"),
+        "{}",
+        mine(&ann_token)
+    );
+    assert!(
+        !mine(&bob_token).contains("anns_line"),
+        "{}",
+        mine(&bob_token)
+    );
+
+    // Ann from another client of hers: the same scripts. With client ownership
+    // this would be an empty list.
+    let client = register_client(port, &redirect);
+    let answer = ann.authorize(&client, &redirect, "s");
+    let second = token_from(port, &client, &redirect, &answer.query()["code"]);
+    assert!(mine(&second).contains("anns_line"), "{}", mine(&second));
+
+    // The limit is the user's: more clients do not buy more scripts.
+    for i in 1..50 {
+        register_script(&second, &format!("more_{i}"));
+    }
+    let answer = tool_text(
+        port,
+        &ann_token,
+        "register_indicator",
+        serde_json::json!({"name": "one_too_many", "source": OWN_SCRIPT}),
+    );
+    assert!(answer.contains("50"), "{answer}");
+
+    // A restart: the session and user are back, the token is not, and signing the
+    // app in again takes no provider.
+    drop(srv);
+    let srv = start(&fake);
+    assert_eq!(
+        ping_status(port, &ann_token),
+        401,
+        "tokens stay memory-only"
+    );
+    let answer = ann.authorize(&client, &redirect, "s");
+    assert_eq!(answer.status, 307, "the session came back: {}", answer.body);
+    let token = token_from(port, &client, &redirect, &answer.query()["code"]);
+    assert_eq!(me(port, &token).1["user"]["name"], "ann");
+    assert!(mine(&token).contains("anns_line"), "{}", mine(&token));
+
+    // Approval survives too.
+    let external = register_external(port);
+    let first = ann.authorize(&external, EXTERNAL_REDIRECT, "s");
+    let page = ann.get(&first.location());
+    let (request, csrf) = consent_fields(&page.body);
+    let approved = ann.request(
+        "POST",
+        "/oauth/consent",
+        &["Content-Type: application/x-www-form-urlencoded"],
+        &format!("request={request}&csrf={csrf}&decision=approve"),
+    );
+    assert_eq!(approved.status, 303);
+    drop(srv);
+    let srv = start(&fake);
+    let again = ann.authorize(&external, EXTERNAL_REDIRECT, "s");
+    assert_eq!(again.status, 307, "the approval came back: {}", again.body);
+    // A signed-out session stays signed out across a restart.
+    assert_eq!(ann.request("POST", "/oauth/logout", &[], "").status, 204);
+    let stale = ann.cookies.clone();
+    drop(srv);
+    let _srv = start(&fake);
+    let mut ann = Browser {
+        port,
+        cookies: stale,
+    };
+    let answer = ann.authorize(&client, &redirect, "s");
+    assert_ne!(answer.status, 307, "{}", answer.head);
+}
+
+/// ADR-0044: scripts from before sign-in go to the first user through their client,
+/// the next user does not get them, and nothing is lost.
+#[cfg(feature = "scripting")]
+#[test]
+fn test_signin_existing_scripts_move_to_the_first_user_of_their_client() {
+    let fake = FakeProvider::start();
+    let port = free_port();
+    let db = store_path("signin-claim");
+    let old = spawn_server_on(port, None, &db, true);
+    let redirect = web_redirect(port);
+    let client = register_client(port, &redirect);
+    let (st, head, _) = authorize(port, &client, &redirect);
+    assert_eq!(st, 307, "{head}");
+    let code = head
+        .split("code=")
+        .nth(1)
+        .unwrap()
+        .split(['&', '\r'])
+        .next()
+        .unwrap()
+        .to_string();
+    let token = token_from(port, &client, &redirect, &code);
+    let answer = tool_text(
+        port,
+        &token,
+        "register_indicator",
+        serde_json::json!({"name": "from_before", "source": OWN_SCRIPT}),
+    );
+    assert!(answer.contains("from_before"), "{answer}");
+    drop(old);
+
+    let _srv = start_server(
+        signin_command(port, &db, &fake, &["github"], None, true),
+        port,
+    );
+    let mine = |token: &str| tool_text(port, token, "list_my_indicators", serde_json::json!({}));
+    let mut first = Browser::new(port);
+    let answer = first.authorize(&client, &redirect, "s");
+    let back = provider_round_trip(
+        &mut first,
+        &fake,
+        "github",
+        profile_of("github", 1, "ann"),
+        &answer,
+    );
+    let ann = token_from(port, &client, &redirect, &back.query()["code"]);
+    assert!(mine(&ann).contains("from_before"), "{}", mine(&ann));
+
+    let mut second = Browser::new(port);
+    let answer = second.authorize(&client, &redirect, "s");
+    let back = provider_round_trip(
+        &mut second,
+        &fake,
+        "github",
+        profile_of("github", 2, "bob"),
+        &answer,
+    );
+    let bob = token_from(port, &client, &redirect, &back.query()["code"]);
+    assert!(!mine(&bob).contains("from_before"), "{}", mine(&bob));
+    assert!(mine(&ann).contains("from_before"), "{}", mine(&ann));
 }
