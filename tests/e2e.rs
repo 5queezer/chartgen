@@ -3023,6 +3023,55 @@ fn test_signin_cookies_on_https() {
     );
 }
 
+/// ADR-0036 with sign-in on: a browser with a forgotten client still gets back to the
+/// app by itself, and anyone else still gets the 400 and no way off this origin. The
+/// app is served from one origin as in production, callbacks and all.
+#[test]
+fn test_signin_keeps_the_stale_client_recovery_and_serves_the_app() {
+    let fake = FakeProvider::start();
+    let dir = std::env::temp_dir().join(format!("chartgen-signin-app-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("index.html"), "<!doctype html>the app").unwrap();
+    let port = free_port();
+    let db = store_path("signin-web");
+    let mut cmd = signin_command(port, &db, &fake, &["github"], None, false);
+    cmd.env("CHARTGEN_WEB_DIR", &dir);
+    let mut srv = start_server(cmd, port);
+    srv.temp_db = Some(db);
+
+    let (st, head, _) = authorize(port, "stale-client", &web_redirect(port));
+    assert_eq!(st, 302, "{head}");
+    assert!(head.contains("error=invalid_client"), "{head}");
+    assert!(!head.contains("code="), "{head}");
+    assert_unknown_client_json(
+        authorize(port, "stale-client", EXTERNAL_REDIRECT),
+        "other origin",
+    );
+
+    // Sign-in's paths are its own, and the app still answers everything else.
+    let mut b = Browser::new(port);
+    assert!(b.get("/").body.contains("the app"));
+    assert!(b.get("/some/route").body.contains("the app"));
+    let page = b.get("/oauth/signed-out");
+    assert!(page.body.contains("You are signed out"), "{}", page.body);
+    // The callback with its code lands on the app, as a browser would load it.
+    let client = register_client(port, &web_redirect(port));
+    let first = b.authorize(&client, &web_redirect(port), "s");
+    let back = provider_round_trip(
+        &mut b,
+        &fake,
+        "github",
+        profile_of("github", 1, "a"),
+        &first,
+    );
+    let location = back.location();
+    let path = location
+        .strip_prefix(&format!("http://localhost:{port}"))
+        .unwrap();
+    assert!(b.get(path).body.contains("the app"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// With nothing configured none of the above exists: the code comes straight back
 /// with no cookie.
 #[test]
