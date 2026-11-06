@@ -383,6 +383,8 @@ fn names_user_script(indicators: &Value, user: Option<&str>) -> bool {
 const MAX_BARS: usize = 5000;
 /// Upper bound for `warmup` (ADR-0009).
 const MAX_WARMUP: usize = 1000;
+/// Newest pattern labels in a summary: the rest are only counted.
+const MAX_SUMMARY_LABELS: usize = 20;
 
 /// The `warmup` argument as the client sent it, capped.
 fn asked_warmup(args: &Value) -> usize {
@@ -772,6 +774,7 @@ fn series_json(
             trimmed.hlines = profile.hlines;
         }
         let mut entry = panel_result_to_series_json(&trimmed, &visible);
+        add_marks_to_series_json(&mut entry, pr, data, offset);
         if let Some(p) = ind.projection(data) {
             // Every bar, not the visible ones: the times read closed days off
             // the loaded bars, and a two-bar tail shows too few.
@@ -1495,6 +1498,118 @@ fn panel_result_to_series_json(
     out
 }
 
+// Pattern channels of a series indicator (ADR-0046), from the untrimmed result:
+// `pr`'s indices are bars of `data`, of which the response starts at `offset`.
+// `labels` belong to their bar and are cut like signals. `patterns`, `levels`
+// and `events` are re-detected as a whole, so they stay complete on a tail: an
+// index before the response's first bar is negative, and its `t` still says which
+// bar it is. Absent when empty, except `events`, which name what an alert can wait for.
+fn add_marks_to_series_json(
+    out: &mut Value,
+    pr: &chartgen::indicator::PanelResult,
+    data: &chartgen::data::OhlcvData,
+    offset: usize,
+) {
+    let t_of = |x: i64| {
+        usize::try_from(x)
+            .ok()
+            .and_then(|i| data.bars.get(i))
+            .map_or(Value::Null, bar_t)
+    };
+    let at = |x: i64| x - offset as i64;
+    let labels: Vec<Value> = pr
+        .labels
+        .iter()
+        .filter(|l| l.x >= offset)
+        .map(|l| {
+            let mut j = json!({
+                "x": l.x - offset,
+                "t": t_of(l.x as i64),
+                "y": l.y,
+                "above": l.above,
+                "text": l.text,
+                "key": l.key,
+                "name": l.name,
+                "bias": l.bias.as_str(),
+                "color": css_rgba(&l.bias.color()),
+                "tooltip": l.tooltip,
+            });
+            if l.tentative {
+                j["tentative"] = json!(true);
+            }
+            j
+        })
+        .collect();
+    if !labels.is_empty() {
+        out["labels"] = json!(labels);
+    }
+    let patterns: Vec<Value> = pr
+        .patterns
+        .iter()
+        .map(|p| {
+            let strokes: Vec<Value> = p
+                .strokes
+                .iter()
+                .map(|s| {
+                    json!({
+                        "x1": at(s.x1),
+                        "t1": t_of(s.x1),
+                        "y1": s.y1,
+                        "x2": at(s.x2),
+                        "t2": t_of(s.x2),
+                        "y2": s.y2,
+                        "dashed": s.dashed,
+                    })
+                })
+                .collect();
+            let mut j = json!({
+                "key": p.key,
+                "name": p.name,
+                "bias": p.bias.as_str(),
+                "status": p.status.as_str(),
+                "color": css_rgba(&p.bias.color()),
+                "strokes": strokes,
+                "label": {
+                    "x": at(p.label_x),
+                    "t": t_of(p.label_x),
+                    "y": p.label_y,
+                    "above": p.label_above,
+                },
+                "tooltip": p.tooltip,
+            });
+            if let Some(v) = p.target {
+                j["target"] = json!(v);
+            }
+            if let Some(v) = p.invalidation {
+                j["invalidation"] = json!(v);
+            }
+            if let Some(x) = p.confirmed_x {
+                j["confirmed_t"] = t_of(x);
+            }
+            j
+        })
+        .collect();
+    if !patterns.is_empty() {
+        out["patterns"] = json!(patterns);
+    }
+    if !pr.levels.is_empty() {
+        let levels: Vec<Value> = pr
+            .levels
+            .iter()
+            .map(|l| json!({ "line": l.line, "x": at(l.x), "t": t_of(l.x), "y": l.y }))
+            .collect();
+        out["levels"] = json!(levels);
+    }
+    if !pr.events.is_empty() {
+        let events: Vec<Value> = pr
+            .events
+            .iter()
+            .map(|e| json!({ "key": e.key, "name": e.name, "t": e.x.map_or(Value::Null, t_of) }))
+            .collect();
+        out["events"] = json!(events);
+    }
+}
+
 // `future` block of a series indicator (ADR-0033): the values plotted on the
 // `bars` bars after the last one. `t` are their open times
 // (`data::future_bar_times`); absent when the bars have no time.
@@ -1613,6 +1728,69 @@ fn panel_result_to_json(pr: &chartgen::indicator::PanelResult) -> Value {
             .collect();
         out["hbars_top"] = json!(top);
         out["hbars_count"] = json!(pr.hbars.len());
+    }
+
+    // Patterns (ADR-0046): the newest labels and every chart pattern, by bar index.
+    if !pr.labels.is_empty() {
+        let labels: Vec<Value> = pr
+            .labels
+            .iter()
+            .rev()
+            .take(MAX_SUMMARY_LABELS)
+            .rev()
+            .map(|l| {
+                let mut j =
+                    json!({ "x": l.x, "key": l.key, "name": l.name, "bias": l.bias.as_str() });
+                if l.tentative {
+                    j["tentative"] = json!(true);
+                }
+                j
+            })
+            .collect();
+        out["labels"] = json!(labels);
+        out["labels_count"] = json!(pr.labels.len());
+    }
+    if !pr.patterns.is_empty() {
+        let patterns: Vec<Value> = pr
+            .patterns
+            .iter()
+            .map(|p| {
+                let mut j = json!({
+                    "key": p.key,
+                    "name": p.name,
+                    "bias": p.bias.as_str(),
+                    "status": p.status.as_str(),
+                    "tooltip": p.tooltip,
+                });
+                if let Some(v) = p.target {
+                    j["target"] = json!(v);
+                }
+                if let Some(v) = p.invalidation {
+                    j["invalidation"] = json!(v);
+                }
+                if let Some(x) = p.confirmed_x {
+                    j["confirmed_x"] = json!(x);
+                }
+                j
+            })
+            .collect();
+        out["patterns"] = json!(patterns);
+    }
+    if !pr.levels.is_empty() {
+        let levels: Vec<Value> = pr
+            .levels
+            .iter()
+            .map(|l| json!({ "line": l.line, "x": l.x, "y": l.y }))
+            .collect();
+        out["levels"] = json!(levels);
+    }
+    if !pr.events.is_empty() {
+        let events: Vec<Value> = pr
+            .events
+            .iter()
+            .map(|e| json!({ "key": e.key, "name": e.name, "x": e.x }))
+            .collect();
+        out["events"] = json!(events);
     }
 
     // Divergence lines (momentum vs price divergence — important signals)
@@ -2895,6 +3073,7 @@ mod tests {
             y_range: None,
             label: "T".into(),
             is_overlay: false,
+            ..Default::default()
         };
         let data = chartgen::data::OhlcvData {
             bars: vec![],
@@ -2998,6 +3177,7 @@ mod tests {
             y_range: Some((0.0, 100.0)),
             label: "Test".into(),
             is_overlay: false,
+            ..Default::default()
         };
 
         let j = panel_result_to_json(&pr);
@@ -3014,6 +3194,156 @@ mod tests {
     }
 
     // --- series format ---
+
+    /// Bars of a double top on unix-second dates: 40 of them reach its breakout.
+    fn double_top_data(bars: usize) -> chartgen::data::OhlcvData {
+        let knots: [(usize, f64); 7] = [
+            (0, 100.0),
+            (10, 90.0),
+            (20, 110.0),
+            (30, 100.0),
+            (40, 110.0),
+            (70, 80.0),
+            (100, 80.0),
+        ];
+        let mut out = vec![];
+        for w in knots.windows(2) {
+            let ((x0, y0), (x1, y1)) = (w[0], w[1]);
+            for x in x0..x1 {
+                let c = y0 + (y1 - y0) * (x - x0) as f64 / (x1 - x0) as f64;
+                out.push(chartgen::data::Bar {
+                    open: c,
+                    high: c + 0.1,
+                    low: c - 0.1,
+                    close: c,
+                    volume: 1.0,
+                    date: (1_000_000 + x as i64 * 3600).to_string(),
+                });
+            }
+        }
+        out.truncate(bars);
+        chartgen::data::OhlcvData {
+            bars: out,
+            symbol: Some("X".into()),
+            interval: Some("1h".into()),
+            session: None,
+        }
+    }
+
+    fn series_of(
+        data: &chartgen::data::OhlcvData,
+        name: &str,
+        params: Value,
+        bars: usize,
+    ) -> Value {
+        let ind = indicators::by_name_configured(name, &params)
+            .unwrap()
+            .unwrap();
+        let pr = ind.compute(data);
+        let j = series_json(
+            data,
+            &[("k".into(), pr)],
+            &[ind.as_ref()],
+            bars,
+            "candles",
+            false,
+        );
+        j["indicators"]["k"].clone()
+    }
+
+    #[test]
+    fn series_keeps_whole_patterns_and_levels_on_a_tail() {
+        let data = double_top_data(90);
+        let params = json!({"depth": 3, "pattern": "double_top"});
+        let full = series_of(&data, "chart_patterns", params.clone(), 90);
+        let tail = series_of(&data, "chart_patterns", params, 2);
+        let (f, t) = (&full["patterns"][0], &tail["patterns"][0]);
+        assert_eq!(f["key"], "double_top");
+        assert_eq!(f["status"], "confirmed");
+        assert_eq!(f["bias"], "bearish");
+        // The tail's indices are from its own first bar, 88 on, so negative.
+        let (fx, tx) = (
+            f["strokes"][0]["x1"].as_i64().unwrap(),
+            t["strokes"][0]["x1"].as_i64().unwrap(),
+        );
+        assert_eq!(tx, fx - 88);
+        assert!(tx < 0);
+        // The same bar by time, whichever window it came in.
+        assert_eq!(f["strokes"][0]["t1"], t["strokes"][0]["t1"]);
+        assert_eq!(f["strokes"][0]["t1"], json!(1_000_000 + fx * 3600));
+        assert_eq!(f["confirmed_t"], t["confirmed_t"]);
+        // Events carry the bar's time, and only bearish happened.
+        let bear = &tail["events"][1];
+        assert_eq!(bear["key"], "bearish");
+        assert_eq!(bear["t"], f["confirmed_t"]);
+        assert_eq!(tail["events"][0]["t"], Value::Null);
+
+        let params = json!({"depth": 3});
+        let fib = series_of(&data, "auto_fib", params.clone(), 90);
+        let tail = series_of(&data, "auto_fib", params, 2);
+        let (a, b) = (&fib["levels"][4], &tail["levels"][4]);
+        assert_eq!(a["line"], 4);
+        assert_eq!(a["y"], b["y"]);
+        assert_eq!(a["t"], b["t"]);
+        assert_eq!(b["x"].as_i64().unwrap(), a["x"].as_i64().unwrap() - 88);
+        // The plot's own values are cut like any other's.
+        assert_eq!(tail["lines"][4]["values"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn series_cuts_candle_labels_like_signals() {
+        let data = double_top_data(90);
+        let params = json!({"pattern": "all", "trend": "none"});
+        let full = series_of(&data, "candlestick_patterns", params.clone(), 90);
+        let all = full["labels"].as_array().expect("labels").clone();
+        let last_x = all.last().unwrap()["x"].as_u64().unwrap() as usize;
+        let cut = 90 - last_x;
+        let tail = series_of(&data, "candlestick_patterns", params, cut);
+        let got = tail["labels"].as_array().expect("labels");
+        assert!(got.iter().all(|l| l["x"].as_u64().unwrap() < cut as u64));
+        assert_eq!(got.last().unwrap()["t"], all.last().unwrap()["t"]);
+        assert_eq!(
+            got.last().unwrap()["tooltip"],
+            all.last().unwrap()["tooltip"]
+        );
+    }
+
+    #[test]
+    fn summary_reports_patterns_labels_and_events() {
+        let data = double_top_data(90);
+        let ind = indicators::by_name_configured("chart_patterns", &json!({"depth": 3}))
+            .unwrap()
+            .unwrap();
+        let j = panel_result_to_json(&ind.compute(&data));
+        assert_eq!(j["patterns"][0]["status"], "confirmed");
+        assert!(j["patterns"][0]["tooltip"]
+            .as_str()
+            .unwrap()
+            .contains("Double Top"));
+        assert_eq!(j["events"][1]["key"], "bearish");
+        // More labels than a summary lists: it keeps the newest, and counts them all.
+        let ind = indicators::by_name_configured(
+            "candlestick_patterns",
+            &json!({"pattern": "long_legged_doji", "trend": "none"}),
+        )
+        .unwrap()
+        .unwrap();
+        let mut data = double_top_data(90);
+        data.interval = None;
+        for bar in &mut data.bars {
+            bar.open = bar.close - 0.01;
+            bar.high = bar.close + 1.0;
+            bar.low = bar.close - 1.0;
+        }
+        let pr = ind.compute(&data);
+        assert!(pr.labels.len() > MAX_SUMMARY_LABELS, "{}", pr.labels.len());
+        let j = panel_result_to_json(&pr);
+        assert_eq!(j["labels_count"], pr.labels.len());
+        let listed = j["labels"].as_array().unwrap();
+        assert_eq!(listed.len(), MAX_SUMMARY_LABELS);
+        assert_eq!(listed.last().unwrap()["x"], pr.labels.last().unwrap().x);
+        assert_eq!(listed[0]["key"], "long_legged_doji");
+    }
 
     #[test]
     fn bar_t_parses_unix_seconds() {
@@ -3780,6 +4110,7 @@ mod tests {
             y_range: Some((0.0, 100.0)),
             label: "T".into(),
             is_overlay: false,
+            ..Default::default()
         };
 
         let t = trim_panel_result(&pr, 3);
@@ -4238,8 +4569,8 @@ mod tests {
             .map(|i| (i.name, need(i.name)))
             .filter(|&(_, n)| n > 0)
             .collect();
-        // At their defaults only ema_stack and kalman_volume need more than
-        // the web's 300.
+        // At their defaults only ema_stack, kalman_volume and the patterns' whole
+        // window (ADR-0046) need more than the web's 300.
         assert_eq!(
             declared,
             [
@@ -4257,6 +4588,9 @@ mod tests {
                 ("hma", 11),
                 ("ma_ribbon", 200),
                 ("envelopes", 20),
+                ("candlestick_patterns", 80),
+                ("chart_patterns", 600),
+                ("auto_fib", 600),
                 ("stoch_rsi", 129),
                 ("trix", 244),
                 ("ppo", 94),
