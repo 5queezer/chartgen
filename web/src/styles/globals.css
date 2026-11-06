@@ -560,9 +560,11 @@ body {
     height: 20px;
   }
 
+  /* A larger target without a taller row: the chart keeps its height. */
   .chip-btn {
     width: 28px;
     height: 28px;
+    margin-block: -6px;
   }
 
   /* Tappable: the strip outgrows the price axis, over the end of the time axis. */
