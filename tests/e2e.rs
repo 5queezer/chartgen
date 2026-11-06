@@ -3776,6 +3776,15 @@ fn test_signin_scripts_follow_the_user_and_sessions_survive_restart() {
         assert!(!hashes.contains(&cookie), "the raw value is stored");
         let hashed = hex::encode(sha2::Sha256::digest(cookie.as_bytes()));
         assert!(hashes.contains(&hashed), "{hashes:?}");
+        // Getting a token counts as activity, which is what keeps a user's alerts alive.
+        let active: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM users WHERE id = 'github:1' AND last_token_at IS NOT NULL",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(active, 1);
     }
 
     // A restart: the session and user are back, the token is not, and signing the

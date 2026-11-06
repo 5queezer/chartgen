@@ -155,8 +155,8 @@ a recovery note, would have made every existing user lose them until an operator
 
 Turning sign-in off again leaves users' scripts and alerts in the file, but out of reach,
 because owners are then client ids again. Clients, sessions and users stay and work again
-when it is turned back on. A user's alerts then count as idle, and are deleted once 30 days
-pass with no sign-in or token of theirs.
+when it is turned back on. A user's alerts keep running meanwhile, and are deleted once 30
+days pass with no sign-in or token of theirs.
 
 ### Server alerts
 
