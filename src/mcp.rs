@@ -416,13 +416,10 @@ fn chart_style_arg(args: &Value) -> Result<&'static str, &'static str> {
     }
 }
 
-fn check_interval(interval: &str) -> Result<(), String> {
-    match data::interval_secs(interval) {
-        Some(_) => Ok(()),
-        None => Err(format!(
-            "Unsupported timeframe: {interval}. Use e.g. 1m, 3m, 5m, 15m, 30m, 1h, 2h, 4h, 6h, 12h, 1d, 3d, 1wk, 1mo."
-        )),
-    }
+/// The canonical form of a requested timeframe, or why it is rejected
+/// (ADR-0038). A chart is echoed and keyed by this form.
+fn check_interval(interval: &str) -> Result<String, String> {
+    chartgen::interval::Interval::parse(interval).map(|iv| iv.canonical())
 }
 
 /// Accept both "indicators" and "panels" parameter names
@@ -494,9 +491,11 @@ fn generate_chart(
         .or_else(|| args.get("interval"))
         .and_then(|v| v.as_str())
         .unwrap_or("4h");
-    if let Err(e) = check_interval(interval) {
-        return tool_err(id, &e);
-    }
+    let interval = match check_interval(interval) {
+        Ok(canonical) => canonical,
+        Err(e) => return tool_err(id, &e),
+    };
+    let interval = interval.as_str();
 
     let panels_value = indicators_arg(args);
 
@@ -742,6 +741,7 @@ fn series_json(
         bars: data.bars[offset..].to_vec(),
         symbol: data.symbol.clone(),
         interval: data.interval.clone(),
+        session: data.session,
     };
     let bars_arr: Vec<Value> = visible
         .bars
@@ -772,7 +772,9 @@ fn series_json(
         }
         let mut entry = panel_result_to_series_json(&trimmed, &visible);
         if let Some(p) = ind.projection(data) {
-            entry["future"] = projection_to_json(&p, &visible);
+            // Every bar, not the visible ones: the times read closed days off
+            // the loaded bars, and a two-bar tail shows too few.
+            entry["future"] = projection_to_json(&p, data);
         }
         indicators_json.insert(key.clone(), entry);
     }
@@ -842,9 +844,10 @@ fn tool_subscribe_chart(
         .or_else(|| args.get("interval"))
         .and_then(|v| v.as_str())
         .unwrap_or("4h");
-    if let Err(e) = check_interval(timeframe) {
-        return tool_err(id, &e);
-    }
+    let timeframe = match check_interval(timeframe) {
+        Ok(canonical) => canonical,
+        Err(e) => return tool_err(id, &e),
+    };
     let chart_style = match chart_style_arg(args) {
         Ok(s) => s,
         Err(e) => return tool_err(id, e),
@@ -874,7 +877,7 @@ fn tool_subscribe_chart(
     }
     let req = ChartRequest {
         ticker: ticker.to_string(),
-        timeframe: timeframe.to_string(),
+        timeframe,
         indicators: indicators.to_string(),
         chart_style: chart_style.to_string(),
         warmup: warmup_arg(args, &panels),
@@ -1696,6 +1699,11 @@ fn tool_get_indicators(
     if indicator_names.is_empty() {
         return tool_err(id, "indicators array is required and must not be empty");
     }
+    let interval = match check_interval(interval) {
+        Ok(canonical) => canonical,
+        Err(e) => return tool_err(id, &e),
+    };
+    let interval = interval.as_str();
 
     // Validate indicator names
     let mut unknown = Vec::new();
@@ -2449,6 +2457,31 @@ mod tests {
     // --- set_alert / list_alerts / cancel_alert roundtrip ---
 
     #[test]
+    fn get_indicators_takes_any_spelling_of_an_interval() {
+        // Under --trade -i 1h, 60m is the same chart and reads the engine's state.
+        let dir = temp_dir("get_ind_spelling");
+        let engine = make_engine(dir.clone());
+        {
+            let mut e = engine.write().unwrap();
+            for i in 0..20 {
+                e.on_bar(make_bar(100.0 + i as f64));
+            }
+        }
+        let args = json!({ "symbol": "BTCUSDT", "interval": "60m", "indicators": ["rsi"] });
+        let resp = tool_get_indicators(Some(json!(1)), &args, Some(&engine));
+        let parsed: Value = serde_json::from_str(&response_text(&resp)).unwrap();
+        assert_eq!(parsed["source"], "engine_cache");
+        assert_eq!(parsed["interval"], "1h");
+        std::fs::remove_dir_all(&dir).ok();
+
+        // What it cannot serve is the same tool error as for generate_chart.
+        let args = json!({ "symbol": "BTCUSDT", "interval": "61m", "indicators": ["rsi"] });
+        let resp = tool_get_indicators(Some(json!(1)), &args, None);
+        assert!(is_error(&resp));
+        assert!(response_text(&resp).contains("Unsupported timeframe"));
+    }
+
+    #[test]
     fn alert_roundtrip() {
         let dir = temp_dir("alert_rt");
         let engine = make_engine(dir.clone());
@@ -2866,6 +2899,7 @@ mod tests {
             bars: vec![],
             symbol: None,
             interval: None,
+            session: None,
         };
         let j = panel_result_to_series_json(&pr, &data);
         let want = "rgba(10,20,30,0.25)";
@@ -2898,6 +2932,7 @@ mod tests {
             bars: vec![],
             symbol: None,
             interval: None,
+            session: None,
         };
         let j = panel_result_to_series_json(&pr, &data);
         assert_eq!(j["fills"][0]["color"], "rgba(76,175,80,0.2)");
@@ -3066,6 +3101,7 @@ mod tests {
                 .collect(),
             symbol: None,
             interval: None,
+            session: None,
         };
         let pr = PanelResult {
             lines: vec![Line {
@@ -3108,6 +3144,7 @@ mod tests {
                 .collect(),
             symbol: None,
             interval: None,
+            session: None,
         };
         let green = RGBAColor(38, 166, 154, 0.5);
         let red = RGBAColor(239, 83, 80, 0.5);
@@ -3372,6 +3409,7 @@ mod tests {
                 .collect(),
             symbol: None,
             interval: None,
+            session: None,
         };
         let pr = PanelResult {
             divlines: vec![DivLine {
@@ -3778,6 +3816,7 @@ mod tests {
                 .collect(),
             symbol: None,
             interval: None,
+            session: None,
         };
         let j = panel_result_to_series_json(&t, &visible);
         assert_eq!(j["signals"][0]["t"], json!(1_003));
@@ -4370,7 +4409,7 @@ mod tests {
 
     #[test]
     fn unsupported_timeframe_is_a_tool_error() {
-        for tf in ["4611686018427387904m", "0h", "7h", "1x"] {
+        for tf in ["4611686018427387904m", "0h", "61m", "53w", "1x"] {
             let resp = generate_chart(
                 Some(json!(1)),
                 &json!({ "ticker": "BTCUSDT", "timeframe": tf, "format": "series" }),
@@ -4379,6 +4418,57 @@ mod tests {
             );
             assert!(is_error(&resp), "timeframe {tf} must be rejected");
             assert!(response_text(&resp).contains("Unsupported timeframe"));
+        }
+    }
+
+    #[test]
+    fn a_tails_future_times_match_the_full_load() {
+        // A 24/7 daily chart on a Friday: the two-bar tail shows no weekend bar,
+        // but its future times must step through weekends, as the full load's do.
+        let friday_ms = 1_793_937_600_000; // 2026-11-06T04:00:00Z
+        let mut raw = data::sample_ohlcv("BTCUSDT", "1d", 150, None, friday_ms).unwrap();
+        raw.symbol = Some("BTCUSDT".into());
+        raw.interval = Some("1d".into());
+        let t = |bars: usize| -> Vec<i64> {
+            let v = series_tail(&raw, &json!(["ichimoku"]), "candles", bars).unwrap();
+            serde_json::from_value(v["indicators"]["ichimoku"]["future"]["t"].clone()).unwrap()
+        };
+        let (full, tail) = (t(100), t(2));
+        assert_eq!(full.len(), 25);
+        assert_eq!(tail, full);
+        assert!(tail.windows(2).all(|w| w[1] - w[0] == 86_400), "{tail:?}");
+    }
+
+    #[test]
+    fn custom_timeframes_are_echoed_canonically_on_their_grid() {
+        for (asked, canonical, secs) in [
+            ("7m", "7m", 420),
+            ("45m", "45m", 2_700),
+            ("90m", "90m", 5_400),
+            ("120m", "2h", 7_200),
+            ("8h", "8h", 28_800),
+            ("2D", "2d", 172_800),
+            ("2W", "2wk", 1_209_600),
+        ] {
+            let resp = generate_chart(
+                Some(json!(1)),
+                &json!({ "ticker": "BTCUSDT", "timeframe": asked, "format": "series", "bars": 5 }),
+                fetch::DataSource::Sample,
+                None,
+            );
+            assert!(!is_error(&resp), "{asked}: {}", response_text(&resp));
+            let v: Value = serde_json::from_str(&response_text(&resp)).unwrap();
+            assert_eq!(v["interval"], canonical, "{asked}");
+            let iv = chartgen::interval::Interval::parse(asked).unwrap();
+            let t: Vec<i64> = v["bars"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|b| b["t"].as_i64().unwrap())
+                .collect();
+            assert_eq!(t.len(), 5, "{asked}");
+            assert!(t.windows(2).all(|w| w[1] - w[0] == secs), "{asked}: {t:?}");
+            assert!(t.iter().all(|x| iv.grid_start(*x) == *x), "{asked}: {t:?}");
         }
     }
 

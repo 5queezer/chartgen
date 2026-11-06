@@ -21,6 +21,7 @@ import {
   type LiveSnapshot,
   type PollStatus,
   type PushApi,
+  PUSH_LIMIT_RETRY_MS,
 } from "./liveFeed";
 
 // A 1m market whose forming bar is `now` (a bar index) and whose history
@@ -521,19 +522,37 @@ describe("push mode", () => {
     expect(t.polls.at(-1)).toEqual({ kind: "live", everyMs: SLOW_POLL_MS });
   });
 
-  it("keeps polling without retrying when a push limit refuses the chart", async () => {
+  it("polls when a push limit refuses the chart, and tries push again later", async () => {
     const t = setupPush();
     t.push.error = new Error("MCP tool error: push limit reached: at most 4 per token");
     t.feed.reset(payload(501, 1000), REQ);
     await vi.advanceTimersByTimeAsync(60_000);
     expect(t.push.subscribe).toHaveBeenCalledTimes(1);
     expect(t.polls.at(-1)).toEqual({ kind: "live", everyMs: FAST_POLL_MS });
-    // The next chart may try again.
+    // Still refused a few minutes on: it asks once and goes on polling.
+    await vi.advanceTimersByTimeAsync(PUSH_LIMIT_RETRY_MS - 60_000);
+    expect(t.push.subscribe).toHaveBeenCalledTimes(2);
+    expect(t.polls.at(-1)).toEqual({ kind: "live", everyMs: FAST_POLL_MS });
+    // The limit has passed: push takes over, with no reload of the symbol or interval.
     t.push.error = null;
+    await vi.advanceTimersByTimeAsync(PUSH_LIMIT_RETRY_MS);
+    expect(t.push.subscribe).toHaveBeenCalledTimes(3);
+    expect(t.polls.at(-1)).toEqual({ kind: "push" });
+  });
+
+  it("does not leave a push retry behind for the next chart", async () => {
+    const t = setupPush();
+    t.push.error = new Error("MCP tool error: push limit reached: at most 4 per token");
+    t.feed.reset(payload(501, 1000), REQ);
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(t.push.subscribe).toHaveBeenCalledTimes(1);
+    // The next chart may try at once, and the old retry, a minute ahead of its own,
+    // dies with its chart.
     t.feed.reset(payload(501, 1000), { ...REQ, timeframe: "5m" });
     await vi.advanceTimersByTimeAsync(0);
     expect(t.push.subscribe).toHaveBeenCalledTimes(2);
-    expect(t.polls.at(-1)).toEqual({ kind: "push" });
+    await vi.advanceTimersByTimeAsync(PUSH_LIMIT_RETRY_MS - 1);
+    expect(t.push.subscribe).toHaveBeenCalledTimes(2);
   });
 
   it("drops a routine poll that lands after push took over", async () => {

@@ -6,7 +6,7 @@
 import { batch, createSignal } from "solid-js";
 
 import { applyTheme, THEME_NAMES, type ThemeName } from "../lib/theme";
-import { isTimeframe, type Timeframe } from "../lib/timeframe";
+import { TIMEFRAME_OPTIONS, isTimeframe, type Timeframe } from "../lib/timeframe";
 import {
   DEFAULT_TIME_ZONE,
   isTimeZoneChoice,
@@ -59,6 +59,7 @@ export const SCALE_MODES: readonly ScaleMode[] = [
 ];
 
 export const MAX_RECENTS = 10;
+export const MAX_RECENT_TIMEFRAMES = 5;
 
 const PREFIX = "chartgen.layout.";
 
@@ -127,6 +128,16 @@ function loadRecents(): string[] {
   return [...new Set(normalized)].slice(0, MAX_RECENTS);
 }
 
+/** Custom intervals offered again in the timeframe menu, newest first. */
+function sanitizeRecentTimeframes(x: unknown): Timeframe[] {
+  if (!Array.isArray(x)) return [];
+  const valid = x.filter(
+    (tf): tf is Timeframe =>
+      isTimeframe(tf) && !TIMEFRAME_OPTIONS.includes(tf as (typeof TIMEFRAME_OPTIONS)[number]),
+  );
+  return [...new Set(valid)].slice(0, MAX_RECENT_TIMEFRAMES);
+}
+
 const storedSymbol = read("symbol");
 const storedTimeframe = read("timeframe");
 const storedChartType = read("chartType");
@@ -139,6 +150,9 @@ const [symbol, setSymbolSignal] = createSignal(
 );
 const [timeframe, setTimeframeSignal] = createSignal<Timeframe>(
   isTimeframe(storedTimeframe) ? storedTimeframe : DEFAULT_TIMEFRAME,
+);
+const [recentTimeframes, setRecentTimeframesSignal] = createSignal<Timeframe[]>(
+  sanitizeRecentTimeframes(read("recentTimeframes")),
 );
 const [chartType, setChartTypeSignal] = createSignal<ChartType>(
   isChartType(storedChartType) ? storedChartType : DEFAULT_CHART_TYPE,
@@ -169,6 +183,7 @@ const [recentSymbols, setRecentSymbolsSignal] =
 export {
   symbol,
   timeframe,
+  recentTimeframes,
   chartType,
   scaleMode,
   theme,
@@ -228,6 +243,14 @@ export function addRecent(value: string): void {
 export function setTimeframe(next: Timeframe): void {
   setTimeframeSignal(next);
   persist("timeframe", next);
+  if (!TIMEFRAME_OPTIONS.includes(next as (typeof TIMEFRAME_OPTIONS)[number])) {
+    const recents = [next, ...recentTimeframes().filter((tf) => tf !== next)].slice(
+      0,
+      MAX_RECENT_TIMEFRAMES,
+    );
+    setRecentTimeframesSignal(recents);
+    persist("recentTimeframes", recents);
+  }
 }
 
 export function setChartType(next: ChartType): void {

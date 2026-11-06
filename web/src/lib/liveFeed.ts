@@ -71,6 +71,8 @@ export const PUSH_CADENCE_MS = 2_000;
 export const PUSH_WATCHDOG_MS = 3 * PUSH_CADENCE_MS;
 /** First retry of a failed subscription; doubles up to MAX_BACKOFF_MS. */
 export const PUSH_RETRY_MS = 2_000;
+/** How long a chart refused for a cap or rate limit polls before trying push again. */
+export const PUSH_LIMIT_RETRY_MS = 5 * 60_000;
 /**
  * Largest catch-up tail after missed bars (sleep, hidden tab); with
  * WARMUP still one Binance call. A longer gap reloads the chart.
@@ -163,12 +165,11 @@ export interface PushApi {
   unsubscribe: (subscriptionId: string) => Promise<unknown>;
 }
 
-/**
- * True when `err` says the chart will not be pushed (not pushable, or a cap
- * or rate limit): poll it for this generation, don't retry.
- */
-export const isNotPushable = (err: unknown) =>
-  /not pushable|push limit reached/i.test(message(err));
+/** True when `err` says this chart can never be pushed: poll it for this generation. */
+export const isNotPushable = (err: unknown) => /not pushable/i.test(message(err));
+
+/** True when a cap or rate limit refused the chart for now: poll, and try again later. */
+export const isPushLimit = (err: unknown) => /push limit reached/i.test(message(err));
 
 export interface LiveFeedOptions {
   fetch: (request: LiveRequest, args: FetchArgs) => Promise<SeriesPayload>;
@@ -373,8 +374,14 @@ export function createLiveFeed(opts: LiveFeedOptions): LiveFeed {
     } catch (err) {
       if (my !== gen) return;
       subscribing = false;
-      if (isNotPushable(err)) pushable = false;
-      else retrySubscribe();
+      if (isNotPushable(err)) {
+        pushable = false;
+      } else if (isPushLimit(err)) {
+        clearPushTimer();
+        pushTimer = setTimeout(() => void subscribe(), PUSH_LIMIT_RETRY_MS);
+      } else {
+        retrySubscribe();
+      }
       return;
     }
     if (my !== gen || hidden()) {

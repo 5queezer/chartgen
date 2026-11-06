@@ -60,9 +60,10 @@ fn format_epoch(epoch: i64) -> String {
 /// Short date label depending on interval.
 fn format_bar_label(epoch: i64, interval: &str) -> String {
     let full = format_epoch(epoch);
-    match interval {
-        "1d" | "1wk" | "1mo" => full[..10].to_string(), // YYYY-MM-DD
-        _ => full,                                      // YYYY-MM-DD HH:MM
+    if crate::interval::Interval::parse(interval).is_ok_and(|iv| iv.is_date_bar()) {
+        full[..10].to_string() // YYYY-MM-DD
+    } else {
+        full // YYYY-MM-DD HH:MM
     }
 }
 
@@ -610,5 +611,21 @@ mod tests {
         assert_eq!(legend_value(&[1.0, NAN], false).as_deref(), Some("1.00"));
         assert_eq!(legend_value(&[NAN, NAN], true), None);
         assert_eq!(legend_value(&[], false), None);
+    }
+}
+
+#[cfg(test)]
+mod label_tests {
+    use super::*;
+
+    #[test]
+    fn date_bars_are_labelled_by_date_alone() {
+        let t = 1_793_802_600; // 2026-11-04 14:30 UTC
+        for tf in ["1d", "2D", "3d", "1wk", "2W", "1mo", "3M"] {
+            assert_eq!(format_bar_label(t, tf), "2026-11-04", "{tf}");
+        }
+        for tf in ["1m", "7m", "45m", "8h", "36h"] {
+            assert_eq!(format_bar_label(t, tf), "2026-11-04 14:30", "{tf}");
+        }
     }
 }

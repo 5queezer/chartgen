@@ -1,9 +1,11 @@
+pub mod binance_gate;
 pub mod data;
 pub mod engine;
 pub mod feed;
 pub mod indicator;
 pub mod indicator_state;
 pub mod indicators;
+pub mod interval;
 pub mod mcp_schema;
 pub mod mtf;
 pub mod renderer;

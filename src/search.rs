@@ -307,6 +307,16 @@ impl SrcErr {
     }
 }
 
+/// A call the budget refused says nothing about Binance's symbols, so it is not
+/// remembered: the search works again as soon as the gate reopens.
+fn binance_err(msg: String) -> SrcErr {
+    if msg.starts_with("Binance rate limit") {
+        SrcErr::transient(&msg)
+    } else {
+        SrcErr::upstream(msg)
+    }
+}
+
 struct Entry<V> {
     stored_at: i64,
     fresh_until: i64,
@@ -495,18 +505,12 @@ fn engine() -> &'static Arc<Engine> {
 // ---------------------------------------------------------------------------
 
 fn fetch_binance_pairs() -> Result<Vec<SymbolResult>, String> {
-    let resp = fetch::http()
-        .get("https://api.binance.com/api/v3/exchangeInfo?symbolStatus=TRADING")
-        .send()
-        .map_err(|e| format!("Binance request failed: {e}"))?;
-    let status = resp.status();
-    if !status.is_success() {
-        return Err(format!("Binance API returned status {status}"));
+    let resp =
+        fetch::binance().get("https://api.binance.com/api/v3/exchangeInfo?symbolStatus=TRADING")?;
+    if !(200..300).contains(&resp.status) {
+        return Err(format!("Binance API returned status {}", resp.status));
     }
-    let body = resp
-        .text()
-        .map_err(|e| format!("Failed to read Binance response: {e}"))?;
-    parse_exchange_info(&body)
+    parse_exchange_info(&resp.body)
 }
 
 fn yahoo_search_url(query: &str) -> String {
@@ -613,7 +617,7 @@ pub fn search_symbols(
                 types,
                 fetch::now_ms(),
                 SOURCE_DEADLINE,
-                || fetch_binance_pairs().map_err(SrcErr::upstream),
+                || fetch_binance_pairs().map_err(binance_err),
                 move |q| {
                     let allowed = yahoo_eng
                         .yahoo_bucket
@@ -1082,6 +1086,15 @@ mod tests {
             std::thread::sleep(Duration::from_millis(10));
         }
         panic!("background refresh never landed");
+    }
+
+    #[test]
+    fn a_refused_binance_call_is_not_remembered() {
+        let refused = binance_err("Binance rate limit: waiting 30s after HTTP 429".into());
+        assert!(!refused.cache);
+        assert!(refused.msg.contains("30s"));
+        let failed = binance_err("Binance API returned status 500".into());
+        assert!(failed.cache);
     }
 
     #[test]
