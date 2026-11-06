@@ -297,6 +297,10 @@ const KLINE_STALE: Duration = Duration::from_secs(3);
 const PAGE_CACHE_ENTRIES: usize = 128;
 const PAGE_CACHE_BARS: usize = 64_000;
 const PAGE_CACHE_TTL: Duration = Duration::from_secs(60);
+/// How long after a kline's close, by this host's clock, a page holding it may be
+/// kept. Its last trades can reach REST late or this clock can be ahead, and nothing
+/// lays newer klines over a kept page, as a refresh does over a window.
+const PAGE_SETTLE_MS: i64 = 5_000;
 
 const NO_BARS: &str = "Binance returned zero bars";
 /// What joiners of a read get if its thread panicked.
@@ -305,32 +309,32 @@ const READ_ABORTED: &str = "Binance read failed unexpectedly; try again shortly"
 /// A read under way that others may join, and how it ended once it has.
 struct Flight<T>(OnceLock<Result<T, String>>);
 
-impl<T> Flight<T> {
-    fn running(&self) -> bool {
-        self.0.get().is_none()
-    }
-}
+type Flights<K, T> = HashMap<K, Arc<Flight<T>>>;
 
 /// The turn to run a flight. Ends however the read does, panics included, so
-/// nobody who joined it hangs.
-struct Claim<'a, S, T> {
+/// nobody who joined it hangs, and leaves `flights`, so what it read lives on only
+/// where the cache keeps it and with those who joined.
+struct Claim<'a, S, K: Eq + Hash, T> {
     state: &'a Mutex<S>,
     ended: &'a Condvar,
+    flights: fn(&mut S) -> &mut Flights<K, T>,
+    key: K,
     flight: Arc<Flight<T>>,
 }
 
-impl<S, T> Claim<'_, S, T> {
+impl<S, K: Eq + Hash, T> Claim<'_, S, K, T> {
     /// How the read ended, for those who joined it. They learn when this drops.
     fn end(&self, how: Result<T, String>) {
         let _ = self.flight.0.set(how);
     }
 }
 
-impl<S, T> Drop for Claim<'_, S, T> {
+impl<S, K: Eq + Hash, T> Drop for Claim<'_, S, K, T> {
     fn drop(&mut self) {
         self.end(Err(READ_ABORTED.into()));
         // Under the lock, so a joiner between its check and its wait still hears.
-        let _state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        (self.flights)(&mut state).remove(&self.key);
         self.ended.notify_all();
     }
 }
@@ -411,10 +415,10 @@ type KlineFlight = Arc<Flight<()>>;
 struct KlineState {
     held: HashMap<KlineKey, HeldKlines>,
     /// Reads of klines older than those held, or of the first ones.
-    walking: HashMap<KlineKey, KlineFlight>,
+    walking: Flights<KlineKey, ()>,
     /// Reads of the newest klines over those held. They do not touch the older end,
     /// so a chart's refresh need not wait for another chart's long walk.
-    refreshing: HashMap<KlineKey, KlineFlight>,
+    refreshing: Flights<KlineKey, ()>,
 }
 
 #[derive(Default)]
@@ -423,7 +427,7 @@ struct KlineCache {
     ended: Condvar,
 }
 
-type KlineClaim<'a> = Claim<'a, KlineState, ()>;
+type KlineClaim<'a> = Claim<'a, KlineState, KlineKey, ()>;
 
 enum KlineRead<'a> {
     Held(Arc<Vec<Bar>>),
@@ -437,11 +441,21 @@ impl KlineCache {
         self.state.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    fn claim(&self, flight: &KlineFlight) -> KlineClaim<'_> {
+    /// Start a flight of `key` in `flights`.
+    fn claim(
+        &self,
+        st: &mut KlineState,
+        flights: fn(&mut KlineState) -> &mut Flights<KlineKey, ()>,
+        key: &KlineKey,
+    ) -> KlineClaim<'_> {
+        let flight = Arc::new(Flight(OnceLock::new()));
+        flights(st).insert(key.clone(), flight.clone());
         Claim {
             state: &self.state,
             ended: &self.ended,
-            flight: flight.clone(),
+            flights,
+            key: key.clone(),
+            flight,
         }
     }
 
@@ -471,8 +485,6 @@ impl KlineCache {
             let st = &mut *guard;
             st.held
                 .retain(|_, h| now.mono.saturating_duration_since(h.used) < KLINE_CACHE_TTL);
-            st.walking.retain(|_, f| f.running());
-            st.refreshing.retain(|_, f| f.running());
             let refresh = st.refreshing.get(key).cloned();
             let covering = st
                 .held
@@ -489,21 +501,19 @@ impl KlineCache {
                     return Ok(KlineRead::Held(h.bars.clone()));
                 }
                 let Some(flight) = refresh else {
-                    let flight = Arc::new(Flight(OnceLock::new()));
-                    st.refreshing.insert(key.clone(), flight.clone());
-                    return Ok(KlineRead::Refresh(self.claim(&flight)));
+                    let claim = self.claim(st, |s| &mut s.refreshing, key);
+                    return Ok(KlineRead::Refresh(claim));
                 };
                 (flight, true)
             } else if let Some(flight) = st.walking.get(key) {
                 (flight.clone(), false)
             } else {
-                let flight = Arc::new(Flight(OnceLock::new()));
-                st.walking.insert(key.clone(), flight.clone());
                 let from = st
                     .held
                     .get(key)
                     .and_then(|h| Some((bar_open_ms(h.bars.first()?)?, h.bars.len())));
-                return Ok(KlineRead::Walk(self.claim(&flight), from));
+                let claim = self.claim(st, |s| &mut s.walking, key);
+                return Ok(KlineRead::Walk(claim, from));
             });
             guard = wait_for_flight(&self.ended, guard, deadline)?;
         }
@@ -521,7 +531,7 @@ type PageKey = (String, &'static str, i64, usize);
 #[derive(Default)]
 struct PageState {
     held: HashMap<PageKey, HeldPage>,
-    flying: HashMap<PageKey, Arc<Flight<Arc<Vec<Bar>>>>>,
+    flying: Flights<PageKey, Arc<Vec<Bar>>>,
 }
 
 #[derive(Default)]
@@ -531,9 +541,9 @@ struct PageCache {
 }
 
 /// The klines of an `end_time` page: from a recent read of the same page, or a read
-/// under way, or `read`. A page reaching the forming kline is shared but not kept,
-/// since keeping it could not bound how old that kline gets. Anything else is closed
-/// and never changes, so history that ran out is kept as well.
+/// under way, or `read`. A page reaching the forming kline, or one closed only just
+/// now, is shared but not kept, since keeping it could not bound how old that kline
+/// gets. Anything else never changes, so history that ran out is kept as well.
 fn shared_page<F>(
     cache: &PageCache,
     key: PageKey,
@@ -549,7 +559,6 @@ where
     let st = &mut *guard;
     st.held
         .retain(|_, p| now.mono.saturating_duration_since(p.read) < PAGE_CACHE_TTL);
-    st.flying.retain(|_, f| f.running());
     if let Some(bars) = st.held.get(&key).map(|p| p.bars.clone()) {
         drop(guard);
         return Ok(bars.to_vec());
@@ -568,6 +577,8 @@ where
     let claim = Claim {
         state: &cache.state,
         ended: &cache.ended,
+        flights: |s: &mut PageState| &mut s.flying,
+        key: key.clone(),
         flight,
     };
     drop(guard);
@@ -578,7 +589,7 @@ where
     let closed = bars
         .last()
         .and_then(bar_open_ms)
-        .is_none_or(|t| kline_end_ms(key.1, t) <= now.wall_ms);
+        .is_none_or(|t| kline_end_ms(key.1, t).saturating_add(PAGE_SETTLE_MS) <= now.wall_ms);
     if closed {
         let mut st = cache.state.lock().unwrap_or_else(|e| e.into_inner());
         let page = HeldPage {
@@ -2506,6 +2517,9 @@ mod tests {
         extra_ms: Arc<std::sync::atomic::AtomicI64>,
         /// Open time of the first kline.
         listed_ms: std::sync::atomic::AtomicI64,
+        /// How far REST's view of the market is behind this clock: trades reach it
+        /// late, and a negative lag is a host clock behind Binance's.
+        rest_lag_ms: std::sync::atomic::AtomicI64,
         /// While true, a request that has been counted does not answer.
         paused: (Mutex<bool>, Condvar),
         /// Its weight per minute, and the gate's. Small, so a test stays cheap.
@@ -2526,6 +2540,7 @@ mod tests {
                 now_s: Arc::new(std::sync::atomic::AtomicI64::new(1_700_000_040)),
                 extra_ms: Arc::default(),
                 listed_ms: Default::default(),
+                rest_lag_ms: Default::default(),
                 paused: Default::default(),
                 limit,
                 minute_weight: Mutex::default(),
@@ -2588,7 +2603,8 @@ mod tests {
             self.in_flight.fetch_sub(1, Ordering::SeqCst);
 
             let now_s = self.now_s.load(Ordering::SeqCst);
-            let now_ms = now_s * 1000 + self.extra_ms.load(Ordering::SeqCst);
+            let now_ms = now_s * 1000 + self.extra_ms.load(Ordering::SeqCst)
+                - self.rest_lag_ms.load(Ordering::SeqCst);
             let listed_ms = self.listed_ms.load(Ordering::SeqCst);
             let used = {
                 let mut weights = self.minute_weight.lock().unwrap();
@@ -2679,10 +2695,7 @@ mod tests {
 
     fn no_read_under_way(client: &BinanceClient) -> bool {
         let st = client.klines.lock();
-        st.walking
-            .values()
-            .chain(st.refreshing.values())
-            .all(|f| !f.running())
+        st.walking.is_empty() && st.refreshing.is_empty()
     }
 
     #[test]
@@ -3600,6 +3613,76 @@ mod tests {
         };
         assert!(rolling(&hot).iter().all(|v| v.is_number()));
         assert_eq!(rolling(&hot), rolling(&full));
+    }
+
+    #[test]
+    fn a_finished_read_leaves_nothing_behind_but_what_the_cache_keeps() {
+        let t0 = Instant::now();
+        let clock = move || Now {
+            mono: t0,
+            wall_ms: 1_700_000_000_000,
+        };
+        let pages = PageCache::default();
+        let key = |end: i64| -> PageKey { ("A".to_string(), "1m", end, 10) };
+        let page = || Ok((0..10).map(|i| bar_at(i, 1.0)).collect::<Vec<_>>());
+
+        shared_page(&pages, key(1), &clock, far(), page).unwrap();
+        {
+            let st = pages.state.lock().unwrap();
+            assert!(st.flying.is_empty());
+            // Only the cache holds it, so evicting it frees it.
+            assert_eq!(Arc::strong_count(&st.held[&key(1)].bars), 1);
+        }
+        // Not kept: reaches the forming kline, by this clock.
+        let forming = || Ok(vec![bar_at(1_700_000_000, 1.0)]);
+        shared_page(&pages, key(2), &clock, far(), forming).unwrap();
+        let failing = || Err("no".to_string());
+        shared_page(&pages, key(3), &clock, far(), failing).unwrap_err();
+        let panicked = std::thread::scope(|s| {
+            s.spawn(|| {
+                shared_page(
+                    &pages,
+                    key(4),
+                    &clock,
+                    far(),
+                    || -> Result<Vec<Bar>, String> { panic!("the read panics") },
+                )
+            })
+            .join()
+            .is_err()
+        });
+        assert!(panicked);
+        let st = pages.state.lock().unwrap();
+        assert!(st.flying.is_empty());
+        assert_eq!(st.held.len(), 1);
+    }
+
+    #[test]
+    fn a_page_closed_only_just_now_is_not_kept() {
+        for lag in [0, 200] {
+            let fake = FakeBinance::new(600_000, 0);
+            let client = client_of(&fake);
+            fake.rest_lag_ms.store(lag, Ordering::SeqCst);
+            // 100 ms after a minute closes, a page ending at that close.
+            fake.advance(60);
+            fake.advance_ms(100);
+            let close = fake.now_s.load(Ordering::SeqCst) * 1000;
+            let read = || fetch_binance_via(&client, "BTCUSDT", "1m", 100, Some(close)).unwrap();
+            read();
+            read();
+            assert_eq!(fake.requests(), 2, "not kept yet");
+
+            fake.advance_ms(PAGE_SETTLE_MS - 100);
+            let settled = read();
+            assert_eq!(fake.requests(), 3);
+            assert_eq!(
+                seen(&settled),
+                direct(&fake, "BTCUSDT", "1m", 100, Some(close))
+            );
+            let before = fake.requests();
+            assert_eq!(seen(&read()), seen(&settled));
+            assert_eq!(fake.requests(), before, "kept from here");
+        }
     }
 
     #[test]
