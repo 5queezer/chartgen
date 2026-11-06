@@ -1893,8 +1893,8 @@ mod interval_tests {
         let t0 = Instant::now();
         assert_eq!(
             open(&mut fake, 800, t0),
-            6 * PAGE_ROWS,
-            "the full load reads to its cap"
+            5 * PAGE_ROWS,
+            "800 days of 3 payments: 5 pages"
         );
         let full = fake.asked.len();
         assert_eq!(full, 5);
