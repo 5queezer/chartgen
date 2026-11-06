@@ -492,6 +492,66 @@ test.describe("drawing modifiers", () => {
       await page.waitForTimeout(200);
     };
 
+    /** On the chart a double click only places the first point: the tool waits for the second. */
+    const firstPointOnly = async (page: Page, tool: string, at: At, then: At) => {
+      await page.waitForTimeout(1500);
+      await pickTool(page, tool);
+      await pressTwice(page, at);
+      expect(await overlays(page)).toHaveLength(0);
+      expect(await storedRecords(page)).toBeNull();
+      await expect(page.getByRole("button", { name: tool })).toHaveAttribute("aria-pressed", "true");
+      await page.waitForTimeout(700);
+      await clickAt(page, then);
+      await expect.poll(async () => (await overlays(page)).length).toBe(1);
+      const { pixels } = (await overlays(page))[0]!;
+      for (const [i, want] of [at, then].entries()) {
+        expect(Math.abs(pixels[i]!.x! - want.x)).toBeLessThan(10);
+        expect(Math.abs(pixels[i]!.y! - want.y)).toBeLessThan(1);
+      }
+      expect(await storedRecords(page)).toHaveLength(1);
+    };
+
+    for (const tool of ["Trend line", "Ray", "Extended line"]) {
+      test(`${tool} on the chart: the first point only, no zero-length line`, async ({ bootedApp: page }) => {
+        await firstPointOnly(page, tool, { x: 500, y: 200 }, { x: 700, y: 120 });
+      });
+    }
+
+    test("on a future bar: the first point only too", async ({ bootedApp: page }) => {
+      await firstPointOnly(page, "Trend line", { x: 1100, y: 200 }, { x: 900, y: 120 });
+      const lastBar = await page.evaluate(() =>
+        (window as unknown as TestWindow).__chartgenTest.chart().getDataList().at(-1)!.timestamp,
+      );
+      expect((await storedRecords(page))![0]!.points[0]!.timestamp).toBeGreaterThan(lastBar);
+    });
+
+    test("a third quick click, or a slow second one, on the first point places nothing", async ({
+      bootedApp: page,
+    }) => {
+      await page.waitForTimeout(1500);
+      const line = page.getByRole("button", { name: "Trend line" });
+      await line.click();
+      await pressTwice(page, { x: 500, y: 200 });
+      await clickAt(page, { x: 500, y: 200 });
+      await clickAt(page, { x: 500, y: 200 });
+      expect(await overlays(page)).toHaveLength(0);
+      await expect(line).toHaveAttribute("aria-pressed", "true");
+      await clickAt(page, { x: 700, y: 120 });
+      await expect.poll(async () => (await overlays(page)).length).toBe(1);
+      expect(Math.abs((await overlays(page))[0]!.pixels[1]!.x! - 700)).toBeLessThan(10);
+    });
+
+    test("a second point on the first one's bar at another price still makes a line", async ({
+      bootedApp: page,
+    }) => {
+      await page.getByRole("button", { name: "Trend line" }).click();
+      await clickAt(page, { x: 500, y: 200 });
+      await clickAt(page, { x: 500, y: 150 });
+      await expect.poll(async () => (await overlays(page)).length).toBe(1);
+      const { pixels } = (await overlays(page))[0]!;
+      expect(pixels[1]!.y!).toBeLessThan(pixels[0]!.y!);
+    });
+
     /** Off the pane klinecharts sends a double click nowhere: it must not become a second click. */
     for (const [name, spot] of [
       ["y-axis", (w: number, _h: number) => ({ x: w - 20, y: 200 })],
@@ -608,23 +668,24 @@ test.describe("drawing modifiers", () => {
       await shiftDraw(page, tool, { x: 300, y: 130 }, { x: 560, y: 150 });
       await shiftDraw(page, tool, { x: 640, y: 130 }, { x: 648, y: 300 });
       await shiftDraw(page, tool, { x: 900, y: 130 }, { x: 1020, y: 245 });
-      // Mouse back on the anchor: zero length, no NaN.
+      // Mouse back on the anchor: zero length, so no line. A NaN from the snap would not
+      // count as the same point, and would finish one.
       await shiftDraw(page, tool, { x: 1100, y: 130 }, { x: 1100, y: 130 });
-      await expect.poll(async () => (await overlays(page)).length).toBe(4);
+      await page.keyboard.press("Escape");
+      await expect.poll(async () => (await overlays(page)).length).toBe(3);
 
-      const [level, upright, diagonal, zero] = await overlays(page);
+      const [level, upright, diagonal] = await overlays(page);
       expect(level!.points[1]!.value).toBe(level!.points[0]!.value);
       expect(level!.points[1]!.timestamp).toBeGreaterThan(level!.points[0]!.timestamp!);
       expect(upright!.points[1]!.timestamp).toBe(upright!.points[0]!.timestamp);
       // A vertical's value follows the mouse.
       expect(Math.abs(upright!.pixels[1]!.y! - 300)).toBeLessThan(1);
       expectDiagonal(diagonal!.pixels);
-      expect(zero!.points[1]).toEqual(zero!.points[0]);
 
       // All stored, the vertical one still vertical after a restore.
-      await expect.poll(async () => (await storedRecords(page))?.length).toBe(4);
+      await expect.poll(async () => (await storedRecords(page))?.length).toBe(3);
       await reloadApp(page);
-      await expect.poll(async () => (await overlays(page)).length).toBe(4);
+      await expect.poll(async () => (await overlays(page)).length).toBe(3);
       const restored = (await overlays(page))[1]!.points;
       expect(restored[1]!.timestamp).toBe(restored[0]!.timestamp);
       expect(errors).toEqual([]);
@@ -1286,6 +1347,83 @@ test.describe("drawing modifiers", () => {
         return { x: b!.x!, y: b!.y! };
       };
 
+      test.describe("quick taps while a tool is armed", () => {
+        const tap = async (touch: Awaited<ReturnType<typeof toucher>>, at: At) => {
+          await touch.start(at);
+          await touch.end();
+        };
+
+        test("two taps place both points", async ({ bootedApp: page }) => {
+          const touch = await toucher(page);
+          await page.getByRole("button", { name: "Trend line" }).click();
+          await tap(touch, { x: 500, y: 200 });
+          await page.waitForTimeout(60);
+          await tap(touch, { x: 700, y: 120 });
+          await expect.poll(async () => (await overlays(page)).length).toBe(1);
+          const { pixels } = (await overlays(page))[0]!;
+          expect(Math.abs(pixels[0]!.x! - 500)).toBeLessThan(10);
+          expect(Math.abs(pixels[1]!.x! - 700)).toBeLessThan(10);
+          expect(Math.abs(pixels[1]!.y! - 120)).toBeLessThan(1);
+          expect(await storedRecords(page)).toHaveLength(1);
+        });
+
+        test("two taps 30 px apart are two points, as klinecharts measures it", async ({ bootedApp: page }) => {
+          const touch = await toucher(page);
+          await page.getByRole("button", { name: "Trend line" }).click();
+          await tap(touch, { x: 500, y: 200 });
+          await page.waitForTimeout(60);
+          await tap(touch, { x: 515, y: 215 });
+          await expect.poll(async () => (await overlays(page)).length).toBe(1);
+          expect(Math.abs((await overlays(page))[0]!.pixels[1]!.y! - 215)).toBeLessThan(1);
+        });
+
+        test("a double tap places the first point only", async ({ bootedApp: page }) => {
+          const touch = await toucher(page);
+          const line = page.getByRole("button", { name: "Trend line" });
+          await line.click();
+          await tap(touch, { x: 500, y: 200 });
+          await page.waitForTimeout(60);
+          await tap(touch, { x: 510, y: 205 });
+          await page.waitForTimeout(700);
+          expect(await overlays(page)).toHaveLength(0);
+          await expect(line).toHaveAttribute("aria-pressed", "true");
+          await tap(touch, { x: 700, y: 120 });
+          await expect.poll(async () => (await overlays(page)).length).toBe(1);
+          const { pixels } = (await overlays(page))[0]!;
+          expect(Math.abs(pixels[0]!.x! - 500)).toBeLessThan(10);
+          expect(Math.abs(pixels[1]!.x! - 700)).toBeLessThan(10);
+        });
+
+        test("three taps place all three points of a channel", async ({ bootedApp: page }) => {
+          const touch = await toucher(page);
+          await pickTool(page, "Parallel channel");
+          await tap(touch, { x: 500, y: 200 });
+          await page.waitForTimeout(60);
+          await tap(touch, { x: 700, y: 120 });
+          await page.waitForTimeout(60);
+          await tap(touch, { x: 600, y: 260 });
+          await expect.poll(async () => (await overlays(page)).length).toBe(1);
+          const { pixels } = (await overlays(page))[0]!;
+          expect(pixels).toHaveLength(3);
+          expect(Math.abs(pixels[2]!.y! - 260)).toBeLessThan(1);
+        });
+
+        test("a pan right after the first tap places nothing", async ({ bootedApp: page }) => {
+          const touch = await toucher(page);
+          const line = page.getByRole("button", { name: "Trend line" });
+          await line.click();
+          await tap(touch, { x: 500, y: 200 });
+          await page.waitForTimeout(60);
+          await touch.start({ x: 700, y: 120 });
+          await touch.move({ x: 700, y: 120 }, { x: 640, y: 120 });
+          await touch.move({ x: 640, y: 120 }, { x: 700, y: 120 });
+          await touch.end();
+          await page.waitForTimeout(300);
+          expect(await overlays(page)).toHaveLength(0);
+          await expect(line).toHaveAttribute("aria-pressed", "true");
+        });
+      });
+
       test("a touch drag survives a live tick, and the release saves it once", async ({
         bootedApp: page,
       }) => {
@@ -1608,6 +1746,45 @@ test.describe("drawing modifiers", () => {
     });
   });
 
+  test("a window does not read a line alert as running while the leading one cannot evaluate it", async ({
+    bootedApp: page,
+    context,
+  }) => {
+    await showInterval(page, "1h");
+    await page.getByRole("button", { name: "Trend line" }).click();
+    await clickAt(page, { x: 300, y: 165 });
+    await clickAt(page, { x: 560, y: 260 });
+    await expect.poll(async () => (await overlays(page)).length).toBe(1);
+    await page.getByRole("tab", { name: /^Alerts/ }).click();
+    await page.keyboard.press("Alt+KeyA");
+    await dialog(page).getByLabel("Source").selectOption({ label: "Trend line" });
+    await dialog(page).getByRole("button", { name: "Create" }).click();
+    await expect(dialog(page)).toHaveCount(0);
+
+    const other = await context.newPage();
+    await gotoApp(other);
+    await other.getByRole("tab", { name: /^Alerts/ }).click();
+    await showInterval(other, "1h");
+    const statusIn = (p: Page) => alertRows(p).first().locator("[data-role=status]");
+    await expect(other.locator("[data-role=alerts-elsewhere]")).toBeVisible();
+    await expect(statusIn(other)).toHaveText("active");
+
+    // The leading window goes elsewhere: nothing evaluates the line now, whatever this one shows.
+    await showInterval(page, "15m");
+    await expect(statusIn(other)).toHaveText("inactive: open BTCUSDT 1h in the other tab");
+    await expect(statusIn(page)).toHaveText("inactive: open BTCUSDT 1h");
+
+    await showInterval(page, "1h");
+    await expect(statusIn(other)).toHaveText("active");
+
+    // It stays that way when this window gets the lead: then its own chart is what counts.
+    await showInterval(page, "15m");
+    await expect(statusIn(other)).toHaveText("inactive: open BTCUSDT 1h in the other tab");
+    await page.close();
+    await expect(other.locator("[data-role=alerts-elsewhere]")).toHaveCount(0);
+    await expect(statusIn(other)).toHaveText("active");
+  });
+
   test("two windows on different intervals each say what holds for them, and write nothing", async ({
     bootedApp: page,
     context,
@@ -1643,11 +1820,16 @@ test.describe("drawing modifiers", () => {
     await expect(statusIn(page)).toHaveText("inactive: line is vertical");
     expect(await stored()).toBe(list);
 
+    // The other window leads from here on, so that its chart is the one evaluated.
+    await reloadApp(page);
+    await page.getByRole("tab", { name: /^Alerts/ }).click();
+    await expect(page.locator("[data-role=alerts-elsewhere]")).toBeVisible();
+
     // Each keeps its own through more changes on the other side.
-    await showInterval(page, "15m");
-    await expect(statusIn(page)).toHaveText("inactive: open BTCUSDT 1h");
     await showInterval(other, "1h");
     await expect(statusIn(other)).toHaveText("inactive: line is vertical");
+    await showInterval(page, "15m");
+    await expect(statusIn(page)).toHaveText("inactive: open BTCUSDT 1h");
     await page.waitForTimeout(1500);
     await expect(statusIn(page)).toHaveText("inactive: open BTCUSDT 1h");
     expect(await stored()).toBe(list);

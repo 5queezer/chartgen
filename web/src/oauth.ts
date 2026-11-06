@@ -428,18 +428,19 @@ export function clearAccessToken(): void {
  * own — that would redirect in a loop — but offer `startSignIn()`.
  */
 export async function tryHandlePendingRedirect(): Promise<Error | null> {
+  let staleClient = false;
   try {
     const rejection = await handleRejectedClient();
     if (rejection === "unmatched") {
       return new Error("this address is not a sign-in in progress");
     }
     if (rejection === "rejected") {
+      staleClient = true;
       throw new Error("the server no longer knows this client");
     }
     await tryConsumeRedirect();
     return null;
   } catch (err) {
-    console.error("[oauth] redirect handler failed:", err);
     // Without a working guard, no retry: it could not stop a loop.
     let mayRetry = false;
     try {
@@ -448,10 +449,14 @@ export async function tryHandlePendingRedirect(): Promise<Error | null> {
     } catch {
       mayRetry = false;
     }
+    // The one restart after a redeploy forgot the client is the expected way back (ADR-0036).
+    if (staleClient && mayRetry) console.info("[oauth] signing in again:", toError(err).message);
+    else console.error("[oauth] redirect handler failed:", err);
     if (mayRetry) {
       try {
         return await startSignIn();
       } catch (retryErr) {
+        console.error("[oauth] redirect handler failed:", retryErr);
         return toError(retryErr);
       }
     }
