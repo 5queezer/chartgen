@@ -1437,6 +1437,47 @@ fn test_register_refuses_script_redirect_uris_and_keeps_native_ones() {
     }
 }
 
+/// What `/register` accepts is what `/authorize` accepts, so a client with a bad
+/// redirect URI finds out when it registers, not when it signs in.
+#[test]
+fn test_register_and_authorize_agree_on_redirect_uris() {
+    let srv = spawn_server(None);
+    let p = srv.port;
+    for uri in [
+        "my_app://cb",
+        "com.example.my_app:/cb",
+        "1password://cb",
+        "127.0.0.1:1234/cb",
+        "/relative",
+        "http://localhost:99999/cb",
+        "http://[fe80::1%25en0]:1234/cb",
+    ] {
+        let (st, resp) = register(p, uri);
+        assert_eq!(st, 400, "{uri}: {resp}");
+        assert!(resp.contains("invalid_redirect_uri"), "{uri}: {resp}");
+    }
+    for uri in [
+        "http://localhost:6274/oauth/callback",
+        "http://127.0.0.1:33418",
+        "http://[::1]:8080/cb",
+        "https://claude.ai/api/mcp/auth_callback",
+        "https://vscode.dev/redirect",
+        "cursor://anysphere.cursor-retrieval/oauth/user-chartgen/callback",
+        "windsurf://codeium.windsurf/cb",
+        "exp://192.168.1.2:8081/--/cb",
+        "com.example.app:/cb",
+        "com.example.app:cb",
+        "myapp:///cb",
+        "myapp://cb",
+    ] {
+        let (st, resp) = register(p, uri);
+        assert_eq!(st, 201, "{uri}: {resp}");
+        let v: serde_json::Value = serde_json::from_str(&resp).unwrap();
+        let (st, head, _) = authorize(p, v["client_id"].as_str().unwrap(), uri);
+        assert_eq!(st, 307, "{uri}: {head}");
+    }
+}
+
 /// A known client's callback gets `state` encoded, so it can add no parameters
 /// and no headers, the same as the redirect for an unknown client.
 #[test]

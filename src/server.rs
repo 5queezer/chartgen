@@ -118,14 +118,19 @@ impl OAuthStore {
                 "redirect_uris are limited to {MAX_REDIRECT_URI_LEN} characters"
             ));
         }
-        // Parsed as a browser would, so case and stray whitespace don't hide it.
-        let forbidden = |u: &String| {
-            reqwest::Url::parse(u).is_ok_and(|u| FORBIDDEN_REDIRECT_SCHEMES.contains(&u.scheme()))
-        };
-        if body.redirect_uris.iter().any(forbidden) {
+        // Parsed as a browser would, so case and stray whitespace don't hide a
+        // script scheme. `/authorize` refuses what this refuses, and nothing else.
+        for uri in &body.redirect_uris {
+            let refused = match reqwest::Url::parse(uri) {
+                Ok(u) if FORBIDDEN_REDIRECT_SCHEMES.contains(&u.scheme()) => {
+                    "javascript:, data: and vbscript: redirect_uris are not allowed"
+                }
+                Ok(_) => continue,
+                Err(_) => "redirect_uris must be absolute URIs",
+            };
             return Err((
                 StatusCode::BAD_REQUEST,
-                json!({"error": "invalid_redirect_uri", "error_description": "javascript:, data: and vbscript: redirect_uris are not allowed"}),
+                json!({"error": "invalid_redirect_uri", "error_description": refused}),
             ));
         }
         if body
@@ -2178,6 +2183,31 @@ mod tests {
             assert!(
                 s.admit_registration("6.6.6.6", &reg(&[uri])).is_ok(),
                 "{uri}"
+            );
+        }
+    }
+
+    #[test]
+    fn registration_refuses_redirect_uris_that_do_not_parse() {
+        let mut s = OAuthStore::new();
+        for uri in [
+            "my_app://cb",
+            "com.example.my_app:/cb",
+            "1password://cb",
+            "127.0.0.1:1234/cb",
+            "/relative",
+            "",
+            "http://localhost:99999/cb",
+            "http://[fe80::1%25en0]:1234/cb",
+        ] {
+            let (status, err) = s
+                .admit_registration("7.7.7.7", &reg(&["https://ok.example/cb", uri]))
+                .unwrap_err();
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{uri}");
+            assert_eq!(err["error"], "invalid_redirect_uri", "{uri}");
+            assert_eq!(
+                err["error_description"],
+                "redirect_uris must be absolute URIs"
             );
         }
     }

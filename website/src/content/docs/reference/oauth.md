@@ -89,10 +89,12 @@ the default `scripting` cargo feature, clients live in memory only and a restart
 forgets them. Claude.ai then re-registers transparently, and the web app
 recovers as described [above](#unknown-client_id).
 
-`/register` refuses `javascript:`, `data:` and `vbscript:` redirect URIs (`400
-invalid_redirect_uri`), and allows native schemes such as `cursor://` and
-`vscode://`. `/authorize` answers `400 invalid_request` for such a URI on a client
-stored before this check existed. `/register` is also bounded: 1–5 `redirect_uris` of at most 512 characters, a
+`/register` refuses redirect URIs that are not absolute URIs, such as `/relative`,
+`127.0.0.1:1234/cb` or `my_app://cb` (a scheme cannot contain `_`), and `javascript:`,
+`data:` and `vbscript:` ones, all with `400 invalid_redirect_uri`. It allows native
+schemes such as `cursor://` and `vscode://`. `/authorize` answers `400 invalid_request`
+for such a URI on a client stored before these checks existed. `/register` is also
+bounded: 1–5 `redirect_uris` of at most 512 characters, a
 `client_name` of at most 256 (`400 invalid_client_metadata` otherwise), 20
 registrations per peer address per 10 minutes (`429 slow_down`; loopback
 peers are exempt) and 1000 registered clients. A client that never receives a
