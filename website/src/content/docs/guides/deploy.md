@@ -65,7 +65,18 @@ registrations of external MCP clients. See the [persistence reference](/chartgen
 with `CHARTGEN_SERVER_ALERT_CLIENTS` listing the clients you trust. **That allowlist is the
 recommended setup**: client ids are free, so no limit per client can stand in for it. A web user's
 client id is `chartgen.oauth.client_id` in that browser's local storage, and an MCP client's is
-what `/register` gave it.
+what `/register` gave it. The list is read at startup, so a change takes a restart. From then on a
+client taken off it runs no alerts and sends no webhooks, and what it had queued is dropped.
+
+Before turning it on:
+
+- Treat each listed id as a credential ([below](#a-listed-client-id-is-a-credential)).
+- Log the live event order for a few minutes. That the closing kline follows the next candle's first
+  trade is inferred from the parser and from test sources, and has not been observed on a live Binance
+  stream. Watch `wss://stream.binance.com:9443/stream?streams=btcusdt@kline_1m/btcusdt@aggTrade` across
+  a few minute boundaries and note when the kline with `"x":true` arrives against the first trade past
+  the boundary. Both orders are handled and tested; anything else, such as closes that never arrive,
+  means **Bar close** alerts can't be relied on. Then check that one fires.
 
 | `CHARTGEN_SERVER_ALERT_CLIENTS` | Who can create alerts | Who gets webhooks |
 |---|---|---|
@@ -82,8 +93,10 @@ someone's alerts yet: it takes SQL on `chartgen.db` and a restart.
 **One webhook reveals your IP.** A receiver sees where the request came from. A tunnel hides your
 home address from visitors, and a webhook gives it to anyone it is sent for, because the server
 connects directly. List only clients you trust with your address, or set `CHARTGEN_WEBHOOK_PROXY`
-to a proxy elsewhere, which hides it from everyone. The proxy resolves and connects to the receiver
-itself, so run it somewhere that cannot reach this network.
+to a proxy elsewhere, which hides it from receivers. The proxy resolves and connects to the receiver
+itself, so run it somewhere that cannot reach this network. It does not hide everything: the name is
+looked up from here first, so a receiver's DNS server sees whoever resolves for this network. That is
+your ISP or a public resolver, or your home IP if you run your own recursive resolver.
 
 Webhooks cannot reach private, loopback, link-local, CGNAT, multicast or metadata addresses, on IPv4
 or IPv6, names with no dot, the hosts this server fetches data from, or its own host, and follow no
@@ -102,6 +115,38 @@ delivers HTTP where a publicly trusted certificate matches the name.
 
 A value in `CHARTGEN_WEBHOOK_BLOCKED_PREFIXES` or `CHARTGEN_WEBHOOK_PROXY` that does not parse keeps
 server alerts off, with a line in the log, rather than running without it.
+
+#### A listed client id is a credential
+
+This server auto-approves sign-in. Anyone holding a client id and one of its redirect URIs gets a token
+for that client, with no login and no consent, and a web client's redirect URI is simply this server's
+own address. So whoever holds a listed id can do all that client can: create alerts, send webhooks, which
+reveals your IP, and read, change or delete its alerts and notes. They cannot read its existing webhook
+URLs or signing secrets, which are never returned. No other secret backs the list.
+
+An id cannot be guessed, and the server does not log it, but nothing else treats it as a secret. It is in
+`/authorize` URLs, so in browser history and proxy logs, in local storage, and in your deployment's
+environment. Keep it as you would a password, and do not paste it into tickets or chats.
+
+To replace one that leaked:
+
+1. Get a new id. In the browser, clear this site's data, or remove `chartgen.oauth.client_id` and
+   `chartgen.oauth.client_secret` from local storage, and reload. An MCP client registers again.
+2. Stop the server. A restart also ends every token, which live in memory only, including any the old
+   id was given.
+3. Put the new id in `CHARTGEN_SERVER_ALERT_CLIENTS` in place of the old one.
+4. Delete the old client and its alerts, or it can still sign in, as any stranger can, and see them:
+
+   ```sql
+   DELETE FROM server_alert_events WHERE alert_id IN (SELECT id FROM server_alerts WHERE owner = 'OLD_ID');
+   DELETE FROM server_alerts WHERE owner = 'OLD_ID';
+   DELETE FROM oauth_clients WHERE client_id = 'OLD_ID';
+   ```
+
+5. Start the server and create the alerts again under the new sign-in. They do not move across, and
+   new signing secrets come with them.
+
+Whoever held the id may already have sent a webhook, so treat your IP as known to them.
 
 ## Reverse proxy
 

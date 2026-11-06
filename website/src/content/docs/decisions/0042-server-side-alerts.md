@@ -55,7 +55,9 @@ Chosen: option 3, in `src/server_alerts.rs` and `src/webhook.rs`, on only with
   alerts but nobody gets webhooks.** That is deliberate: an alert in a panel sends nothing
   anywhere and the limits below bound what it holds, while a webhook is a request made for
   a stranger, and reveals this server's address. `*` opens both, for an operator who
-  accepts that. Taking a client off the list stops its alerts and webhooks at once.
+  accepts that. The list is read at startup, so taking a client off it takes a restart. From
+  then on that client's alerts do not run, its webhooks are not sent, and what it had queued
+  is dropped. A listed id is a credential: see Consequences.
 - **Scope.** Price levels and crossings on Binance symbols. Drawing and indicator
   alerts need the browser's drawings and series and stay there, and the dialog says
   so. A stock has no feed, so the server refuses it.
@@ -71,7 +73,9 @@ Chosen: option 3, in `src/server_alerts.rs` and `src/webhook.rs`, on only with
   uses, and the feed's own backfill after a reconnect: both go through the Binance gate in
   `src/binance_gate.rs` once that is merged. New feeds are limited to 40 a minute across
   charts and alerts, and to 96 connected at once with the lingering ones, because Binance
-  bans an IP that connects too often, and that would stop every chart.
+  bans an IP that connects too often, and that would stop every chart. Over those a
+  subscribe fails with `feeds busy`, not `push limit reached`: anyone's churn can cause it
+  and it passes within a minute, so the browser polls meanwhile and tries again.
 - **Closes.** A feed with trades rolls the candle on the first trade past the boundary, so
   the closing kline usually arrives after the next candle's first tick. An older bar is
   therefore a late close, read by close alerts only, unless it closed before or before the
@@ -91,8 +95,9 @@ Chosen: option 3, in `src/server_alerts.rs` and `src/webhook.rs`, on only with
 - **No second evaluator.** Server alerts are not in the browser's list, so no tab
   can evaluate them. The leading tab polls `list_server_alerts` every 5 s and shares the
   list through storage; it reports a fire, and a count in shared storage keeps it to one
-  report across tabs and reloads. While the tool is not listed it asks only `tools/list`,
-  on focus or every 5 minutes, so the feature costs a server that has it off nothing.
+  report across tabs and reloads. While the tool is not listed it asks only `tools/list`:
+  once, then every 5 minutes or on a focus or leader change at least 30 s after the last time.
+  A hidden tab asks nothing, also without Web Locks, where every tab leads.
 - **Webhook reach.** https, port 443, no credentials in the URL. The name is
   resolved here and **every** answer must be a public address; the connection is
   pinned to those addresses, so a rebind changes nothing, and no proxy is used. IPv6
@@ -109,12 +114,15 @@ Chosen: option 3, in `src/server_alerts.rs` and `src/webhook.rs`, on only with
   connection failure, 5xx or 429 only. Each attempt resolves and checks again. A delivery
   over budget is not dropped: it waits in the store, and at each turn the client that waited
   longest goes first, at an even pace, so a backlog cannot keep another client's `once` alert
-  waiting. In-flight slots are held per attempt, not through the wait between attempts.
+  waiting. It also waits while its client has no free slot, so a receiver that never answers
+  fills that client's queue and not the global one. In-flight slots are held per attempt, not
+  through the wait between attempts.
 - **Direct or relayed.** Direct by default, ignoring any proxy in the environment, because
   the connection is pinned. `CHARTGEN_WEBHOOK_PROXY` sends webhooks through a proxy instead,
-  so the receiver sees the proxy's address. The check before sending still runs here, but the
-  proxy resolves and connects, so it must be somewhere that cannot reach this network. If it
-  cannot be used the delivery fails; it never falls back to direct.
+  so the receiver sees the proxy's address. The check before sending still runs here, which
+  means the name is also looked up from this network; the proxy then resolves it again and
+  connects, so it must be somewhere that cannot reach this network. If it cannot be used the
+  delivery fails; it never falls back to direct.
 - **Signing.** Optional HMAC-SHA256 over `<timestamp>.<body>` with a per-alert secret
   shown once. It is stored because the server needs it to sign, and is never returned
   or logged. A new URL does not keep it, because it signs for one receiver. A list shows a
@@ -151,10 +159,23 @@ Chosen: option 3, in `src/server_alerts.rs` and `src/webhook.rs`, on only with
   pairs until they expire, which refuses other people's new alerts, because client ids are free
   and the limits cannot attribute them. There is no operator command to list and delete alerts
   yet. That is why the allowlist is the recommendation.
+- **A listed client id is a credential.** This server auto-approves sign-in
+  ([ADR-0036](/chartgen/decisions/0036-own-origin-invalid-client-redirect/)): whoever holds a client
+  id and one of its redirect URIs gets a token, with no login and no consent. So the holder of a
+  listed id can do all that client can, webhooks included, which is everything the allowlist withholds.
+  The allowlist is only as strong as the secrecy of those ids. An id cannot be guessed, but nothing
+  treats it as a secret: it is in `/authorize` URLs, browser history, proxy logs and local storage.
+  No operator secret backs it. A leaked id has to be replaced, as the deploy guide describes.
 - **One webhook reveals this server's IP.** A receiver sees where the request came from, so a
   server hidden behind a tunnel gives its home address to anyone it sends a webhook for. It is
   the first request here whose destination someone else chooses. The allowlist limits who can do
-  it; `CHARTGEN_WEBHOOK_PROXY` hides the address from everyone, those clients included.
+  it; `CHARTGEN_WEBHOOK_PROXY` hides the address from receivers, those clients included. It does not
+  hide everything: names are still looked up here first, so a receiver's DNS server sees whoever
+  resolves for this network, which is the home IP if this network runs its own recursive resolver.
+- **Live event order is inferred.** That the closing kline follows the next candle's first trade comes
+  from the feed's parser and its comments, and from sample and fake sources. It has not been observed
+  on a live Binance stream. Both orders are handled and tested, but it should be logged for a few minutes
+  before this is turned on, and close alerts watched while it runs.
 - A stranger with `*` can make this server send small POSTs to any other public HTTPS host,
   within the budgets. That is what a webhook is.
 - **Not covered: public addresses inside this network.** The checks cannot tell that a public

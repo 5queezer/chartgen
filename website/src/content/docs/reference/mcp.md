@@ -707,7 +707,10 @@ forming bar, with every indicator recomputed. Merge it like a polled tail.
   server, and 10 `subscribe_chart` calls per token per minute. Over a
   limit the call fails with an error starting with `push limit reached`;
   poll that chart instead. Without an open SSE stream for the session it
-  fails too, and can be retried once the stream is open.
+  fails too, and can be retried once the stream is open. An error starting
+  with `feeds busy` means too many feeds are starting across the server (40 new
+  ones a minute, 96 at once): it passes within a minute, so poll meanwhile and
+  try again.
 - **Lifetime.** A subscription ends with `unsubscribe_chart`, when its
   SSE stream closes, or when the stream falls 256 frames behind (the stream
   is then unlinked). A WebSocket closes 30 s after its last chart goes.
