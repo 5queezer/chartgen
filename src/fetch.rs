@@ -525,9 +525,10 @@ pub(crate) struct BinanceClient {
 impl BinanceClient {
     /// GET `url` if the gate admits it, and tell the gate how it went.
     pub(crate) fn get(&self, url: &str) -> Result<BinanceResponse, String> {
-        self.gate.admit()?;
+        let sent = self.gate.admit()?;
         let resp = (self.send)(url)?;
         self.gate.observe(
+            sent,
             resp.status,
             resp.retry_after.as_deref(),
             resp.used_weight.as_deref(),
@@ -2239,12 +2240,16 @@ mod tests {
     }
 
     fn client_of(fake: &Arc<FakeBinance>) -> BinanceClient {
-        let clock = fake.now_s.clone();
+        let (wall, mono) = (fake.now_s.clone(), fake.now_s.clone());
+        let (start, base) = (fake.now_s.load(Ordering::SeqCst), Instant::now());
         let exchange = fake.clone();
         BinanceClient {
-            gate: Box::leak(Box::new(Gate::with_clock(
+            gate: Box::leak(Box::new(Gate::with_clocks(
                 fake.limit,
-                Box::new(move || clock.load(Ordering::SeqCst)),
+                Box::new(move || wall.load(Ordering::SeqCst)),
+                Box::new(move || {
+                    base + Duration::from_secs((mono.load(Ordering::SeqCst) - start) as u64)
+                }),
             ))),
             walks: Walks::default(),
             klines: KlineCache::default(),

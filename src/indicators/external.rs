@@ -128,12 +128,12 @@ fn fetch_funding_data(symbol: &str) -> Result<Vec<(i64, f64)>, String> {
         symbol.to_uppercase()
     );
     let gate = crate::binance_gate::futures();
-    gate.admit()?;
+    let sent = gate.admit()?;
     let resp = client
         .get(&url)
         .send()
         .map_err(|e| format!("Funding rate request failed: {}", e))?;
-    gate.observe_response(resp.status().as_u16(), resp.headers());
+    gate.observe_response(sent, resp.status().as_u16(), resp.headers());
     if !resp.status().is_success() {
         return Err(format!(
             "Funding rate API returned status {}",
@@ -246,12 +246,12 @@ fn fetch_oi_data(symbol: &str, interval: &str) -> Result<Vec<(i64, f64)>, String
         period
     );
     let gate = crate::binance_gate::futures();
-    gate.admit()?;
+    let sent = gate.admit()?;
     let resp = client
         .get(&url)
         .send()
         .map_err(|e| format!("OI request failed: {}", e))?;
-    gate.observe_response(resp.status().as_u16(), resp.headers());
+    gate.observe_response(sent, resp.status().as_u16(), resp.headers());
     if !resp.status().is_success() {
         return Err(format!("OI API returned status {}", resp.status()));
     }
@@ -346,12 +346,12 @@ fn fetch_ls_data(symbol: &str, interval: &str) -> Result<Vec<(i64, f64, f64)>, S
         period
     );
     let gate = crate::binance_gate::futures();
-    gate.admit()?;
+    let sent = gate.admit()?;
     let resp = client
         .get(&url)
         .send()
         .map_err(|e| format!("L/S request failed: {}", e))?;
-    gate.observe_response(resp.status().as_u16(), resp.headers());
+    gate.observe_response(sent, resp.status().as_u16(), resp.headers());
     if !resp.status().is_success() {
         return Err(format!("L/S API returned status {}", resp.status()));
     }

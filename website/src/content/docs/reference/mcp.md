@@ -142,8 +142,8 @@ it. Calls for the newest bars share native
 klines read in the last 2 minutes, so after the first, polling a tail costs one
 request whatever its warmup.
 
-The server holds one budget for all its Binance requests. After Binance answers 429
-or 418 nothing is sent until its `Retry-After` has passed, and nothing starts once
+The server holds one budget for all its Binance requests. After Binance answers 429,
+418 or 403 nothing is sent until its `Retry-After` has passed, and nothing starts once
 80% of the weight for the minute is used. Such a call is a tool error starting
 `Binance rate limit:` that names the wait. Retry after it.
 

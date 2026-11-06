@@ -376,11 +376,11 @@ async fn fetch_binance_async(
     );
 
     let gate = crate::binance_gate::spot();
-    gate.admit()?;
+    let sent = gate.admit()?;
     let resp = reqwest::get(&url)
         .await
         .map_err(|e| format!("Binance REST request failed: {e}"))?;
-    gate.observe_response(resp.status().as_u16(), resp.headers());
+    gate.observe_response(sent, resp.status().as_u16(), resp.headers());
 
     if !resp.status().is_success() {
         return Err(format!("Binance REST returned status {}", resp.status()));

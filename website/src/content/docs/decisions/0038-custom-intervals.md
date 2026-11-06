@@ -152,10 +152,12 @@ of the IP, here a home one.
 `binance_gate::Gate` stands in front of every REST request, native intervals, seeds,
 quotes, the symbol list and the feed's backfill included:
 
-- After a 429 or 418, nothing is sent until `Retry-After` has passed (60 s if
-  it names none), and a later, shorter answer does not shorten it.
+- After a 429, 418 or 403 (Binance's WAF answers 403 to some rate violations), nothing
+  is sent until `Retry-After` has passed: 60 s if it names none, 3 days at most, the
+  longest ban Binance documents. A later, shorter answer does not shorten it, and the
+  wait is held on a monotonic clock, so a step of the wall clock cannot lengthen it.
 - Nothing starts once `x-mbx-used-weight-1m` reaches 80% of the limit, until the next
-  minute. The limits are Binance's published ones: 6000 for `api.binance.com` and,
+  minute. A reading from a request that left in an earlier minute is ignored. The limits are Binance's published ones: 6000 for `api.binance.com` and,
   on a gate of its own because its counter is separate, 2400 for `fapi.binance.com`.
 - A refused call fails with an error starting `Binance rate limit:` and stores
   nothing, so no cache holds a partial read, and a symbol is not marked unknown.
