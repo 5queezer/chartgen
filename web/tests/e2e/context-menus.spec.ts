@@ -643,6 +643,11 @@ test.describe("the menu itself", () => {
     // A field inside the chart area: the replay bar's date.
     await page.getByRole("button", { name: /replay/i }).first().click();
     const date = page.getByTestId("replay-select-date");
+    // Its buttons are in the chart area too, and are not the chart.
+    await page.evaluate(() => (window.__nativeMenu = undefined));
+    await date.click({ button: "right" });
+    expect(await nativeMenu(page)).toBe(true);
+    await expect(chartMenu(page)).toHaveCount(0);
     await date.click();
     const field = page.locator('input[type="date"]').first();
     await page.evaluate(() => (window.__nativeMenu = undefined));

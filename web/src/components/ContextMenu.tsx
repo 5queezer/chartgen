@@ -43,12 +43,11 @@ const close = () => {
 };
 
 /**
- * Handle a `contextmenu` event with this menu. Text fields keep the browser's
- * menu, for paste. An empty menu or a touch press opens nothing, and no native
- * menu either.
+ * Handle a `contextmenu` event with this menu. An empty menu or a touch press
+ * opens nothing, and no native menu either. No surface holds a text field, so
+ * those keep the browser's menu, for paste.
  */
 export function openContextMenu(e: MouseEvent, spec: MenuSpec | null): void {
-  if (e.target instanceof Element && e.target.closest("input, textarea, select, [contenteditable]")) return;
   e.preventDefault();
   e.stopPropagation();
   if (touchPress || !spec?.items.length) return;
