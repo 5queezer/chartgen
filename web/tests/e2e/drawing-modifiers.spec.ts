@@ -796,6 +796,9 @@ test.describe("drawing modifiers", () => {
       bootedApp: page,
     }) => {
       const { box, end } = await pressOnFuturePoint(page);
+      // A real tick puts the full bars back, which places the drawing once more: start
+      // right after one, so that none comes before the assertions.
+      await nextDataTick(page);
       await replaceBars(page);
       await page.mouse.move(box.x + end.x! - 60, box.y + end.y! + 30, { steps: 8 });
       const moved = (await overlays(page))[0]!.points[1]!.value;
