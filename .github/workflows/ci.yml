@@ -200,6 +200,7 @@ jobs:
         working-directory: web
         run: npx playwright install --with-deps chromium
       - name: Run Playwright tests
+        timeout-minutes: 35
         working-directory: web
         env:
           CI: "true"

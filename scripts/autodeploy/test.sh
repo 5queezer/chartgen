@@ -2,13 +2,13 @@
 # Tests chartgen-autodeploy.sh against a stub curl; no network is used.
 set -u
 here=$(cd "$(dirname "$0")" && pwd)
-work=$(mktemp -d)
+work=$(mktemp -d) && [ -n "$work" ] || exit 1
 trap 'rm -rf "$work"' EXIT
-mkdir "$work/bin"
+mkdir "$work/bin" || exit 1
 
 # Stub curl: GitHub URLs answer from $GH_HEAD_CODE/$CI_JSON, the Coolify POST from $COOLIFY_CODE.
 # Every call is appended to $work/calls (URL only, never the stdin config).
-cat >"$work/bin/curl" <<'STUB'
+cat >"$work/bin/curl" <<'STUB' || exit 1
 #!/usr/bin/env bash
 out=; url=; method=GET
 while [ $# -gt 0 ]; do
@@ -28,7 +28,7 @@ case $url in
   *) echo "unexpected url $url" >&2; exit 9 ;;
 esac
 STUB
-chmod +x "$work/bin/curl"
+chmod +x "$work/bin/curl" || exit 1
 
 export PATH="$work/bin:$PATH" CALLS="$work/calls" STATE_FILE="$work/state"
 export COOLIFY_URL=http://coolify.test COOLIFY_API_TOKEN=secret-token COOLIFY_APP_UUID=app-uuid

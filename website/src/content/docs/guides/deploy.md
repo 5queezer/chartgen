@@ -81,6 +81,12 @@ Authorization: Bearer ${COOLIFY_API_TOKEN}
 A pending CI run is retried on the next tick; a failed one is not deployed.
 A failed Coolify call keeps the old state, so the next tick retries. The
 first run only records the current SHA. A deploy takes 20–25 minutes.
+Coolify's endpoint takes no SHA and builds the branch head, so a commit that
+lands between the CI check and the build can ship before its own CI on
+`master` finishes. This is accepted: every merge passes pull-request CI
+first and the window is small. While a new head is undeployed each tick
+makes 2 GitHub calls (about 24 per hour, against the unauthenticated limit
+of 60); an idle tick makes 1.
 Nothing is exposed inbound and the repository holds no Coolify secrets; see
 [ADR-0037](/chartgen/decisions/0037-pull-based-deploy/).
 

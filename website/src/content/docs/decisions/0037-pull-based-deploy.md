@@ -55,8 +55,13 @@ installing never causes a surprise deploy. The unit is a hardened oneshot
 * Good, because the script is small and tested against a stub `curl`.
 * Bad, because deploys lag a green CI by up to about 5 minutes.
 * Bad, because the unauthenticated GitHub API allows 60 requests per hour per
-  IP; polling costs 12 per hour plus one per new commit. A rate-limit response
-  is logged and retried.
+  IP. An idle tick makes 1 call (12 per hour); while a new head is still
+  undeployed (CI pending, failed or cancelled) each tick makes 2 (24 per
+  hour). A rate-limit response is logged and retried.
+* Bad, because Coolify's deploy endpoint takes no SHA and builds the branch
+  head. A commit that lands between the CI check and the build can go out
+  before its own CI on `master` has finished. Accepted: every merge passes
+  pull-request CI first and the window is small, so no workaround is built.
 * Bad, because the install is a manual step on the host, outside the repo's CI.
 
 ## Pros and Cons of the Options
