@@ -452,12 +452,14 @@ function readStored(): Stored {
   return { kind: "unusable", text };
 }
 
-function persist(file: LayoutsFile): void {
-  if (typeof localStorage === "undefined") return;
+/** False when the browser refused the write (quota exceeded, private-mode storage). */
+function persist(file: LayoutsFile): boolean {
+  if (typeof localStorage === "undefined") return true;
   try {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(file));
+    return true;
   } catch {
-    // Quota exceeded or private-mode storage: best-effort only.
+    return false;
   }
 }
 
@@ -516,15 +518,20 @@ export const layoutDirty = (): boolean =>
  * Apply `reducer` to the layouts as they are in storage right now (another
  * tab may have changed them since this tab loaded) and persist the result.
  * Returns false when the reducer refuses (null). If the stored value is
- * unusable, this tab's in-memory file is the base; the backup is kept.
+ * unusable, this tab's in-memory file is the base; the backup is kept. Storage
+ * is best-effort unless `mustStore` is set: then a refused write leaves the
+ * in-memory file as it was and returns false too.
  */
-function update(reducer: (f: LayoutsFile) => LayoutsFile | null): boolean {
+function update(
+  reducer: (f: LayoutsFile) => LayoutsFile | null,
+  mustStore = false,
+): boolean {
   const stored = readStored();
   const base = stored.kind === "ok" ? mergeActive(stored.file) : file();
   const next = reducer(base);
   if (next === null) return false;
+  if (!persist(next) && mustStore) return false;
   setFile(next);
-  persist(next);
   return true;
 }
 
@@ -543,9 +550,9 @@ function applyState(state: LayoutState): void {
   });
 }
 
-/** Save the live state into the active layout. */
-export function saveLayout(): void {
-  update((f) => withSaved(f, f.active, liveState(), Date.now()));
+/** Save the live state into the active layout. False when the browser refused the write. */
+export function saveLayout(): boolean {
+  return update((f) => withSaved(f, f.active, liveState(), Date.now()), true);
 }
 
 /** Copy the live state into a new layout and switch to it. False when the cap is reached. */

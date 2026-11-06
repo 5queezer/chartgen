@@ -753,7 +753,9 @@ unsaved changes, a dialog offers Save, Don't save or Cancel, also when
 you pick the open layout itself to discard them. Unsaved
 changes survive a reload like any other chart state, and so does the
 active layout, so there is no "leave page?" prompt. Saving with nothing
-changed still shows "Layout saved". Hiding an indicator counts as a
+changed still shows "Layout saved". If the browser refuses the save (storage
+full or blocked), an error says so, the layout stays unsaved and the dialog stays
+open. Hiding an indicator counts as a
 change; opening an indicator's settings and pressing OK without edits
 does not.
 

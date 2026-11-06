@@ -39,7 +39,7 @@ type Dialogue =
       submit: (name: string) => void;
     }
   | { kind: "load" }
-  | { kind: "unsaved"; proceed: () => void; kept: () => void }
+  | { kind: "unsaved"; proceed: () => void; kept: () => void; failed?: boolean }
   | { kind: "delete"; id: string; name: string };
 
 const buttonClass =
@@ -60,6 +60,7 @@ const primaryClass =
 const isMac =
   typeof navigator !== "undefined" && /mac/i.test(navigator.platform);
 const SAVE_HINT = isMac ? "⌘S" : "Ctrl+S";
+const SAVE_ERROR = "Couldn't save the layout: browser storage is full or blocked";
 
 function download(filename: string, text: string): void {
   const url = URL.createObjectURL(new Blob([text], { type: "application/json" }));
@@ -86,9 +87,10 @@ export function LayoutMenu(): JSX.Element {
   };
   const full = () => say(`Layout limit reached (${MAX_LAYOUTS})`);
   // Saving with nothing changed gives the same feedback as a real save.
-  const save = () => {
-    saveLayout();
-    say("Layout saved", false);
+  const save = (): boolean => {
+    const saved = saveLayout();
+    say(saved ? "Layout saved" : SAVE_ERROR, !saved);
+    return saved;
   };
 
   // Ctrl/Cmd+S saves from anywhere, including inputs and the chart, and
@@ -361,6 +363,11 @@ export function LayoutMenu(): JSX.Element {
                         <Dialog.Description class="text-sm text-[color:var(--color-fg-muted)] mb-4">
                           Save changes to “{activeLayout().name}” first?
                         </Dialog.Description>
+                        <Show when={d.failed}>
+                          <p role="alert" class="text-sm text-[color:var(--color-danger)] mb-4">
+                            {SAVE_ERROR}
+                          </p>
+                        </Show>
                         <div class="flex justify-end gap-2">
                           <button
                             type="button"
@@ -383,7 +390,10 @@ export function LayoutMenu(): JSX.Element {
                             type="button"
                             class={primaryClass}
                             onClick={() => {
-                              save();
+                              if (!save()) {
+                                setDialogue({ ...d, failed: true });
+                                return;
+                              }
                               setDialogue(null);
                               d.kept();
                             }}

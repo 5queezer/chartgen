@@ -292,20 +292,72 @@ test.describe("loading the active layout", () => {
     expect(loads).toBe(0);
   });
 
-  test("Save with storage full keeps the chart as it is", async ({ bootedApp: page }) => {
-    await page.getByRole("button", { name: "15m", exact: true }).click();
-    await page.evaluate(() => {
+  /** Make the layouts key fail to write. Returns what is stored for it right now. */
+  const fillStorage = (page: Page) =>
+    page.evaluate(() => {
       const real = Storage.prototype.setItem;
       Storage.prototype.setItem = function (key: string, value: string) {
         if (key === "chartgen.layouts") throw new DOMException("full", "QuotaExceededError");
         real.call(this, key, value);
       };
+      return localStorage.getItem("chartgen.layouts");
     });
+  const SAVE_ERROR = /couldn't save the layout/i;
+
+  async function expectSaveFailed(page: Page): Promise<void> {
+    const prompt = page.getByRole("dialog");
+    await expect(prompt.getByRole("alert")).toHaveText(SAVE_ERROR);
+    await expect(prompt.getByRole("button", { name: "Don't save" })).toBeVisible();
+    await expect(page.getByTestId("layout-notice")).toHaveText(SAVE_ERROR);
+    await expect(page.getByTestId("layout-notice")).not.toHaveText(/Layout saved/);
+  }
+
+  test("Save with storage full on the active layout says so and loses nothing", async ({
+    bootedApp: page,
+  }) => {
+    await page.getByRole("button", { name: "15m", exact: true }).click();
+    const stored = await fillStorage(page);
     await pickActive(page);
     await page.getByRole("dialog").getByRole("button", { name: "Save", exact: true }).click();
-    await expect(page.getByRole("dialog")).toHaveCount(0);
-    await page.waitForTimeout(300);
+    await expectSaveFailed(page);
+
+    await page.getByRole("dialog").getByRole("button", { name: "Cancel" }).click();
     await expect(activeTimeframe(page)).toHaveText("15m");
+    await expect(dirtyDot(page)).toBeVisible();
+    expect(await page.evaluate(() => localStorage.getItem("chartgen.layouts"))).toBe(stored);
+  });
+
+  test("Save with storage full before leaving for another layout stays put", async ({
+    bootedApp: page,
+  }) => {
+    await layoutButton(page).click();
+    await page.getByRole("menuitem", { name: /^Create new layout/ }).click();
+    const input = page.getByRole("textbox", { name: "Layout name" });
+    await input.fill("Other");
+    await input.press("Enter");
+    await expect(page.getByTestId("layout-name")).toHaveText("Other");
+
+    await page.getByRole("button", { name: "15m", exact: true }).click();
+    await fillStorage(page);
+    await layoutButton(page).click();
+    await page.getByRole("menuitem", { name: /^Load layout/ }).click();
+    await page.getByRole("button", { name: /^Unnamed/ }).click();
+    await page.getByRole("dialog").getByRole("button", { name: "Save", exact: true }).click();
+    await expectSaveFailed(page);
+
+    // Still on the layout with the edit, not switched away from it.
+    await page.getByRole("dialog").getByRole("button", { name: "Cancel" }).click();
+    await expect(page.getByTestId("layout-name")).toHaveText("Other");
+    await expect(activeTimeframe(page)).toHaveText("15m");
+    await expect(dirtyDot(page)).toBeVisible();
+  });
+
+  test("Ctrl+S with storage full says so and keeps the dirty dot", async ({ bootedApp: page }) => {
+    await page.getByRole("button", { name: "15m", exact: true }).click();
+    await fillStorage(page);
+    await page.keyboard.press("Control+s");
+    await expect(page.getByTestId("layout-notice")).toHaveText(SAVE_ERROR);
+    await expect(dirtyDot(page)).toBeVisible();
   });
 
   test("with nothing changed it writes nothing", async ({ bootedApp: page }) => {

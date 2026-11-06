@@ -435,6 +435,33 @@ describe("live bindings", () => {
     expect(removedTo("c")).toBe("normal");
   });
 
+  it("reports a save the storage refused and keeps the layout as it was", async () => {
+    const data = stub();
+    vi.resetModules();
+    const l = await import("./layouts");
+    const lay = await import("./layout");
+    const stored = data.get(KEY);
+    lay.setChartType("line");
+    vi.stubGlobal("localStorage", {
+      getItem: (k: string) => data.get(k) ?? null,
+      setItem: () => {
+        throw new Error("full");
+      },
+      removeItem: () => {},
+    });
+    expect(l.saveLayout()).toBe(false);
+    expect(l.layoutDirty()).toBe(true);
+    expect(data.get(KEY)).toBe(stored);
+
+    vi.stubGlobal("localStorage", {
+      getItem: (k: string) => data.get(k) ?? null,
+      setItem: (k: string, v: string) => data.set(k, v),
+      removeItem: () => {},
+    });
+    expect(l.saveLayout()).toBe(true);
+    expect(l.layoutDirty()).toBe(false);
+  });
+
   it("keeps an existing backup instead of replacing it", async () => {
     const data = stub({ [KEY]: "{bad", [KEY + ".bak"]: "first" });
     vi.resetModules();
