@@ -756,6 +756,69 @@ test.describe("drawing modifiers", () => {
       expect((await storedRecords(page))![0]!.points).toEqual(before);
     });
 
+    /** Pans on empty chart and asserts drawing 0 stayed on its record while the chart scrolled. */
+    const expectPanLeavesLine = async (page: Page, box: { x: number; y: number }) => {
+      const record = (await storedRecords(page))![0]!.points;
+      const from = () =>
+        page.evaluate(() =>
+          (window as unknown as { __chartgenTest: { chart: () => { getVisibleRange: () => { from: number } } } })
+            .__chartgenTest.chart().getVisibleRange().from,
+        );
+      const before = await from();
+      // Far from both lines of `pressOnLine`.
+      await page.mouse.move(box.x + 150, box.y + 400, { steps: 4 });
+      await page.mouse.down();
+      await page.mouse.move(box.x + 330, box.y + 340, { steps: 8 });
+      await page.mouse.up();
+      await page.waitForTimeout(100);
+      expect((await overlays(page))[0]!.points.map((p) => p.value)).toEqual(record.map((p) => p.value));
+      expect((await storedRecords(page))![0]!.points).toEqual(record);
+      expect(await from()).toBeLessThan(before);
+    };
+
+    test("a release outside the pane is discarded at once, and a later pan leaves the drawing", async ({
+      bootedApp: page,
+    }) => {
+      const { box, end } = await pressOnLine(page);
+      const before = (await storedRecords(page))![0]!.points;
+      await page.mouse.move(box.x + end.x! + 30, box.y + end.y! - 30, { steps: 4 });
+      await page.mouse.move(box.x - 20, box.y + end.y!, { steps: 4 });
+      await page.mouse.up();
+      // No tick needed: right after the release it is back on its record.
+      expect((await overlays(page))[0]!.points.map((p) => p.value)).toEqual(before.map((p) => p.value));
+      await expectPanLeavesLine(page, box);
+    });
+
+    test("a release on a pane separator: a later pan leaves the drawing", async ({ bootedApp: page }) => {
+      const { box, end } = await pressOnLine(page);
+      await page.mouse.move(box.x + end.x! + 30, box.y + end.y! + 30, { steps: 4 });
+      const y = await page.evaluate(() => {
+        const chart = (window as unknown as { __chartgenTest: { chart: () => {
+          getSize: (id: string, pos: string) => { top: number; height: number };
+        } } }).__chartgenTest.chart();
+        const pane = chart.getSize("candle_pane", "root");
+        return pane.top + pane.height;
+      });
+      await page.mouse.move(box.x + end.x!, box.y + y, { steps: 4 });
+      await page.mouse.up();
+      await expectPanLeavesLine(page, box);
+    });
+
+    test("a blur during a press: later moves leave the drawing, without a button", async ({
+      bootedApp: page,
+    }) => {
+      const { box, end } = await pressOnLine(page);
+      const before = (await storedRecords(page))![0]!.points;
+      await page.mouse.move(box.x + end.x! + 30, box.y + end.y! + 30, { steps: 4 });
+      await page.evaluate(() => window.dispatchEvent(new Event("blur")));
+      expect((await overlays(page))[0]!.points.map((p) => p.value)).toEqual(before.map((p) => p.value));
+      // klinecharts no longer thinks the button is down.
+      await page.mouse.move(box.x + end.x! + 90, box.y + end.y! + 60, { steps: 4 });
+      expect((await overlays(page))[0]!.points.map((p) => p.value)).toEqual(before.map((p) => p.value));
+      await page.mouse.up();
+      await expectPanLeavesLine(page, box);
+    });
+
     test("a release outside the window, then ticks", async ({ bootedApp: page }) => {
       const { box, end } = await pressOnLine(page);
       await page.mouse.move(box.x + end.x! + 30, box.y + end.y! - 30, { steps: 4 });

@@ -15,6 +15,15 @@ export function isTypingContext(e: KeyboardEvent): boolean {
 }
 
 /**
+ * True when a mouseup, touchend or touchcancel ends a chart press: the left button
+ * (a right-button release does not), or the last finger.
+ */
+export function isRelease(e: Event): boolean {
+  if (e instanceof MouseEvent) return e.button === 0;
+  return !((e as Partial<TouchEvent>).touches?.length ?? 0);
+}
+
+/**
  * Chromium delivers no key events to a page whose focused element was removed
  * (a closed dialog's content) and fell back to `<body>`, until the next click.
  * Moves focus to the chart host whenever DOM removal leaves it on `<body>`, so

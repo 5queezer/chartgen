@@ -14,6 +14,7 @@ import {
 } from "klinecharts";
 
 import { CONDITION_LABELS, type Alert } from "../lib/alerts";
+import { isRelease } from "../lib/keys";
 import { formatPrice, priceDecimals } from "../lib/quote";
 import { PALETTES } from "../lib/theme";
 import { alerts, moveAlert } from "../stores/alerts";
@@ -163,6 +164,20 @@ export function AlertLines(props: AlertLinesProps): null {
       for (const id of lines.values()) chart.removeOverlay(id);
       lines.clear();
     });
+  });
+
+  // A release off the panes fires no onPressedMoveEnd: the drag is discarded, as for a
+  // drawing (DrawingToolbar's dropStuckPress), and the line goes back. Bubble, so after
+  // klinecharts has had the release.
+  const endDrag = (e: Event) => {
+    if (dragging === null || !isRelease(e)) return;
+    dragging = null;
+    sync();
+  };
+  const endDragEvents = ["mouseup", "touchend", "touchcancel"] as const;
+  for (const type of endDragEvents) window.addEventListener(type, endDrag);
+  onCleanup(() => {
+    for (const type of endDragEvents) window.removeEventListener(type, endDrag);
   });
 
   // Alerts, symbol or chart changed.

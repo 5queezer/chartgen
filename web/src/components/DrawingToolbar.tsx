@@ -28,7 +28,7 @@ import {
 } from "klinecharts";
 
 import { isDrawingAlertTool, isVerticalLine, pointBarIndex } from "../lib/alerts";
-import { isTypingContext, undoRedoKey } from "../lib/keys";
+import { isRelease, isTypingContext, undoRedoKey } from "../lib/keys";
 import { effectiveMagnet, magnetValue, type Magnet } from "../lib/magnet";
 import { syncDrawingAlerts } from "../stores/alerts";
 import { createHistory } from "../stores/drawingHistory";
@@ -411,6 +411,23 @@ const btnClass =
   "relative shrink-0 disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-transparent w-9 h-9 inline-flex items-center justify-center rounded-md cursor-pointer text-[color:var(--color-fg-muted)] hover:bg-[color:var(--color-border)] hover:text-[color:var(--color-fg)] aria-pressed:bg-[color:var(--color-border)] aria-pressed:text-[color:var(--color-accent)]";
 const menuItemClass =
   "w-full text-left px-3 py-1.5 text-sm cursor-pointer hover:bg-[color:var(--color-border)] outline-none focus:bg-[color:var(--color-border)]";
+
+/** The internals of klinecharts ~9.8 that hold the overlay under a press. */
+interface PressStoreOwner {
+  getChartStore(): {
+    getOverlayStore(): {
+      getPressedInstanceInfo(): { instance: unknown };
+      setPressedInstanceInfo(info: {
+        paneId: string;
+        instance: null;
+        figureType: 0;
+        figureKey: string;
+        figureIndex: number;
+        attrsIndex: number;
+      }): void;
+    };
+  };
+}
 
 const LIMIT_NOTICE = `Drawing limit reached (${MAX_DRAWINGS})`;
 const SAVE_ERROR = "Drawings not saved: storage full";
@@ -1264,14 +1281,47 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
   // window's blur is not: an element's blur passes through capture too, and pressing on
   // the chart takes the focus from whatever had it.
   const endPress = (e: Event) => {
-    if (!(e instanceof MouseEvent) || e.button === 0) pressedId = null;
+    if (isRelease(e)) pressedId = null;
+  };
+  // A release that misses a pane (off the chart, on a separator) also leaves klinecharts'
+  // own press in place, and its next pan would move that drawing. No public call ends a
+  // press, so this does what its mouseUpEvent does, without onPressedMoveEnd: the drag is
+  // discarded, and the drawing goes back at once. Bubble, so after klinecharts has had the event.
+  const pressStore = () =>
+    (props.chart as unknown as PressStoreOwner | null)?.getChartStore().getOverlayStore();
+  const dropStuckPress = (e: Event) => {
+    const store = pressStore();
+    if (!isRelease(e) || !store?.getPressedInstanceInfo().instance) return;
+    store.setPressedInstanceInfo({
+      paneId: "",
+      instance: null,
+      figureType: 0,
+      figureKey: "",
+      figureIndex: -1,
+      attrsIndex: -1,
+    });
+    refresh();
+  };
+  // A blur has no release, and klinecharts would treat later moves as still pressed: give
+  // it one, off the panes.
+  const releaseOnBlur = () => {
+    if (!pressStore()?.getPressedInstanceInfo().instance) return;
+    document.documentElement.dispatchEvent(
+      new MouseEvent("mouseup", { bubbles: true, button: 0, clientX: -1, clientY: -1 }),
+    );
   };
   const endPressEvents = ["mouseup", "touchend", "touchcancel"] as const;
-  for (const type of endPressEvents) window.addEventListener(type, endPress, true);
-  window.addEventListener("blur", endPress);
+  for (const type of endPressEvents) {
+    window.addEventListener(type, endPress, true);
+    window.addEventListener(type, dropStuckPress);
+  }
+  window.addEventListener("blur", releaseOnBlur);
   onCleanup(() => {
-    for (const type of endPressEvents) window.removeEventListener(type, endPress, true);
-    window.removeEventListener("blur", endPress);
+    for (const type of endPressEvents) {
+      window.removeEventListener(type, endPress, true);
+      window.removeEventListener(type, dropStuckPress);
+    }
+    window.removeEventListener("blur", releaseOnBlur);
   });
 
   const resetRightClick = () => {

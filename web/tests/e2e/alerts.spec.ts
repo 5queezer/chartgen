@@ -268,6 +268,47 @@ test.describe("price alerts", () => {
     await expect.poll(() => lineCount(page)).toBe(1);
   });
 
+  test("an alert line released off the chart goes back, and a later pan leaves it", async ({
+    bootedApp: page,
+  }) => {
+    const level = await page.evaluate(() => {
+      const bars = (window as unknown as TestWindow).__chartgenTest.series()!.bars;
+      return +Math.max(...bars.slice(-30).map((b) => b.h)).toFixed(2);
+    });
+    await createAlert(page, { condition: "greater", price: level });
+    await expect.poll(() => lineCount(page)).toBe(1);
+    const lineValue = async () =>
+      page.evaluate(() => (window as unknown as TestWindow).__chartgenAlertLines()[0]!.value);
+    const storedPrice = async () =>
+      (JSON.parse((await page.evaluate(() => localStorage.getItem("chartgen.alerts.list")))!) as {
+        price: number;
+      }[])[0]!.price;
+
+    const [line] = await page.evaluate(
+      () => (window as unknown as TestWindow).__chartgenAlertLines(),
+    );
+    const box = (await page.locator(".chart-container").boundingBox())!;
+    const x = box.x + box.width * 0.5;
+    const y = box.y + line!.y;
+    await page.mouse.move(x, y);
+    await page.mouse.down();
+    await page.mouse.move(x, y + 30, { steps: 8 });
+    expect(await lineValue()).not.toBe(level);
+    await page.mouse.move(box.x - 20, y + 30, { steps: 4 });
+    await page.mouse.up();
+    await expect.poll(lineValue).toBe(level);
+    expect(await storedPrice()).toBe(level);
+
+    // Somewhere else on the chart: a pan, not another move of the line.
+    await page.mouse.move(box.x + 150, box.y + 400, { steps: 4 });
+    await page.mouse.down();
+    await page.mouse.move(box.x + 330, box.y + 340, { steps: 8 });
+    await page.mouse.up();
+    await page.waitForTimeout(100);
+    expect(await lineValue()).toBe(level);
+    expect(await storedPrice()).toBe(level);
+  });
+
   test("dragging an alert line moves its level; clicking a row switches symbol", async ({
     bootedApp: page,
   }) => {
