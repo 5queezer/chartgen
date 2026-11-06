@@ -374,8 +374,9 @@ bars ahead of price.
   neither a Friday nor a Saturday means a Friday and Saturday weekend. Without a
   session, as for crypto, a day closes only if the bars could have shown otherwise:
   7 days of `1d` bars, or 5 cycles of 7 longer ones. US-listed equities, ETFs, indices and mutual funds also skip
-  the holidays of the NYSE's published calendar, for 2026 to 2028. An early-close day
-  is not skipped: its bars stop at the 13:00 New York close. Other exchanges' holidays,
+  the holidays of the NYSE's published calendar, for 2026 to 2028, on intraday and day
+  bars. Weekly and monthly bars stay on their calendar grid, so one can fall on a
+  holiday. An early-close day is not skipped: its bars stop at the 13:00 New York close. Other exchanges' holidays,
   US indices quoted from Chicago (`^VIX`, `^TNX`), and US dates past 2028 are not skipped. Futures step
   through their breaks. See
   [ADR-0038](/chartgen/decisions/0038-custom-intervals/). `t` is absent when the

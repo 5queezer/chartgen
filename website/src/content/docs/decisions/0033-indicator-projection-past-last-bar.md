@@ -5,10 +5,13 @@ sidebar:
   order: 33
 ---
 
-**Status:** Accepted
+**Status:** Accepted; superseded in part by [ADR-0038](/chartgen/decisions/0038-custom-intervals/)
 **Date:** 2026-11-05
-**Amended by:** [ADR-0038](/chartgen/decisions/0038-custom-intervals/) (future bar times follow exchange sessions and holidays)
 **Extends:** [ADR-0007](/chartgen/decisions/0007-complete-series-serialization/) (the series payload), [ADR-0009](/chartgen/decisions/0009-live-tail-polling-and-history-paging/) (tail merging)
+
+> **Superseded in part by [ADR-0038](/chartgen/decisions/0038-custom-intervals/).**
+> Future bar times now follow exchange sessions and known holidays, and closed days
+> are read differently. The `future` block and everything else here stay in force.
 
 ## Context and Problem Statement
 

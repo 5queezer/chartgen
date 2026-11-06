@@ -62,8 +62,8 @@ pub struct Limits {
     pub total: usize,
     /// `subscribe_chart` calls one token may make per minute.
     pub subscribes_per_minute: usize,
-    /// Shortest gap between two pushes of a group with warmup ≤ 300; twice
-    /// that above (see `push_interval`).
+    /// Shortest gap between two pushes of a group whose window holds at most 302
+    /// bars, native ones included; twice that above (see `push_interval`).
     pub min_push_interval: Duration,
     /// How long a feed without groups stays connected, so a quick
     /// unsubscribe/subscribe does not reconnect the WebSocket.

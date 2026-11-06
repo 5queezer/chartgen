@@ -8,7 +8,7 @@ sidebar:
 **Status:** Accepted
 **Date:** 2026-11-06
 **Extends:** [ADR-0009](/chartgen/decisions/0009-live-tail-polling-and-history-paging/) (paging and tails), [ADR-0021](/chartgen/decisions/0021-realtime-chart-push/) (chart push), [ADR-0032](/chartgen/decisions/0032-indicator-aware-warmup/) (warmup)
-**Amends:** [ADR-0033](/chartgen/decisions/0033-indicator-projection-past-last-bar/) (future bar times)
+**Supersedes in part:** [ADR-0033](/chartgen/decisions/0033-indicator-projection-past-last-bar/) (future bar times only; its `future` block stays in force)
 
 ## Context and Problem Statement
 
@@ -292,6 +292,9 @@ of their own beyond the canonical string. MCP clients get it too.
   unscheduled closure, another exchange's holiday, or a US date past 2028 shows a
   future bar on a closed day. These times only label future bars, in the legend,
   the Data Window and the `future.t` an MCP client reads, so the harm is small.
+- A short tail of a Sunday to Thursday market sees no Sunday, so it reads Saturday and
+  Sunday as its weekend: a Riyadh `1m` tail projects its next session on Friday where
+  the full load says Sunday, and the newest tail replaces the load's future block.
 - Yahoo's session has no lunch break, so future bars run through it. Its Tokyo,
   Shanghai and Hong Kong `5m` rows continue through the break with null prices
   (checked 2026-11-06), so charts have no bars there while future bars do. Because

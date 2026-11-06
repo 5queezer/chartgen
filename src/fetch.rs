@@ -359,8 +359,9 @@ impl Drop for WalkClaim<'_> {
 /// Paged walks of Binance's history allowed at once. At about 0.3 s a page, four
 /// cost about 1600 weight a minute, well under the gate's threshold.
 const MAX_WALKS: usize = 4;
-/// Says a call gave up waiting; it spent no request.
-const BUSY: &str = "Binance rate limit: too many history reads at once; try again shortly";
+/// Says a call gave up waiting; it spent no request. Not the rate limit: others'
+/// reads may just be slow, as in an outage.
+const BUSY: &str = "Binance: timed out waiting for other history reads; try again shortly";
 
 #[derive(Default)]
 struct Walks {
@@ -2354,7 +2355,8 @@ mod tests {
         );
         let refused: Vec<&String> = results.iter().filter_map(|r| r.as_ref().err()).collect();
         assert!(!refused.is_empty());
-        assert!(refused.iter().all(|e| e.contains(REFUSED)), "{refused:?}");
+        let clear = |e: &&String| e.contains(REFUSED) || e.as_str() == BUSY;
+        assert!(refused.iter().all(clear), "{refused:?}");
         // The next minute the budget is back.
         fake.advance(60);
         assert!(fetch_binance_via(&client, "BTCUSDT", "59m", 5000, Some(base_ms)).is_ok());
@@ -2519,7 +2521,8 @@ mod tests {
         })
         .err()
         .unwrap();
-        assert!(e.contains(REFUSED), "{e}");
+        // Others' reads may just be slow, so it does not blame the rate limit.
+        assert!(e.contains("timed out") && !e.contains(REFUSED), "{e}");
         // One page needs no permit, and a freed permit is free again.
         let one = walk_klines(&walks, 1, None, far(), fake_exchange(0, HOUR_MS * 3)).unwrap();
         assert_eq!(one.len(), 1);

@@ -378,6 +378,12 @@ A custom interval works like a preset everywhere: live updates, history paging,
 bar replay, alerts on it, layouts and share links. On a stock, an interval built
 from Yahoo's finest bars has as much history as they do: about 30 days for `7m`.
 
+A custom interval on a Binance symbol computes indicators over at most 20,000 native
+bars, however much warmup they ask for. A `59m` chart holds about 338 bars, while
+EMA 200 needs 891 to converge, so its live values and page seams can differ from a
+longer history until enough bars are loaded. [MCP reference](/chartgen/reference/mcp/#generate_chart)
+gives the rule.
+
 ## Drawing tools
 
 The vertical toolbar on the left of the chart holds the drawing tools in
