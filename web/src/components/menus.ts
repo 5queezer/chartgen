@@ -94,15 +94,16 @@ export function indicatorMenuOf(
   on: { onAddAlert: (key: string) => void; onSettings: (key: string) => void },
 ): MenuSpec {
   const entries = store.activeIndicators();
-  const index = entries.findIndex((e) => instanceKey(e) === key);
-  const entry = entries[index];
+  const entry = entries.find((e) => instanceKey(e) === key);
   return indicatorMenu(
     entry ? chipName(indicatorName(entry), paramLabels(entries, paramDefaults(), true).get(key)) : key,
     {
       hidden: entry !== undefined && isHidden(entry),
       onAddAlert: series?.indicators[key]?.lines?.length ? () => on.onAddAlert(key) : undefined,
       onSettings: () => on.onSettings(key),
-      onToggleHidden: () => store.toggleIndicatorHidden(index),
+      // By key, when chosen: the list may have changed since the menu opened.
+      onToggleHidden: () =>
+        store.toggleIndicatorHidden(store.activeIndicators().findIndex((e) => instanceKey(e) === key)),
       onRemove: () => store.removeIndicator(key),
     },
   );
