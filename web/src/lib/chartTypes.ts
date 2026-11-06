@@ -164,6 +164,14 @@ export function kagiThick(bars: readonly Hl[], up: readonly boolean[]): boolean[
   return out;
 }
 
+/**
+ * The part of a column to mark: from its open towards its end, as the last price
+ * can lie past the other side and fills no box there.
+ */
+export function markRange(b: Hl, isX: boolean): [number, number] {
+  return isX ? [b.open, b.high] : [b.low, b.open];
+}
+
 /** How many levels of the box's grid lie inside a column. */
 export function columnCount(low: number, high: number, box: number): number {
   const n = Math.floor(high / box + 1e-9) - Math.ceil(low / box - 1e-9) + 1;
@@ -370,8 +378,7 @@ export function drawSeries({
         const x = xAxis.convertToPixel(i);
         const isX = up[i]!;
         const color = isX ? ext.up : ext.down;
-        // From its open towards its end: the last price can lie past the other side.
-        const [low, high] = isX ? [b.open, b.high] : [b.low, b.open];
+        const [low, high] = markRange(b, isX);
         if (cell < MIN_MARK_PX || columnCount(low, high, box) > MAX_MARKS) {
           const r = barRect(x, yAxis.convertToPixel(b.high), yAxis.convertToPixel(b.low), barSpace.gapBar);
           ctx.fillStyle = withAlpha(color, 0.5);

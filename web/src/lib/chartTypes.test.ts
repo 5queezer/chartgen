@@ -12,7 +12,7 @@ import {
   markerRadius,
   stepPoints,
 } from "./chartTypes";
-import { columnCount, columnLevels, kagiThick, runsUp } from "./chartTypes";
+import { columnCount, columnLevels, kagiThick, markRange, runsUp } from "./chartTypes";
 import { CHART_TYPES } from "../stores/layout";
 
 // A y axis at BTC-like prices that rounds to whole pixels as klinecharts does:
@@ -228,6 +228,13 @@ describe("Kagi and Point & Figure geometry", () => {
     expect(columnLevels(10.5, 12.9, 1)).toEqual([11, 12]);
     expect(columnLevels(0.3, 0.3, 0.1).length).toBe(1);
     expect(columnLevels(5.1, 5.9, 1)).toEqual([]);
+  });
+
+  it("marks a column from its open, however far the last price has gone back", () => {
+    const up = b(100, 140, 75, 75);
+    expect(columnLevels(...markRange(up, true), 10)).toEqual([100, 110, 120, 130, 140]);
+    const down = b(120, 150, 80, 150);
+    expect(columnLevels(...markRange(down, false), 10)).toEqual([80, 90, 100, 110, 120]);
   });
 
   it("counts a column without allocating it, whatever the box", () => {
