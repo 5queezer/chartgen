@@ -10,16 +10,20 @@ import type { Notification } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 
 import type {
+  CreateServerAlertInput,
+  DeleteServerAlertInput,
   GenerateChartInput,
   GetQuotesInput,
   SearchSymbolsInput,
   SubscribeChartInput,
   UnsubscribeChartInput,
+  UpdateServerAlertInput,
 } from "./types/generated-input";
 import {
   CHART_TICK_METHOD,
   ChartTickParamsSchema,
   DeleteIndicatorPayloadSchema,
+  DeleteServerAlertPayloadSchema,
   ListIndicatorsPayloadSchema,
   MyIndicatorSourcePayloadSchema,
   MyIndicatorsPayloadSchema,
@@ -27,9 +31,12 @@ import {
   RegisteredIndicatorPayloadSchema,
   SearchSymbolsPayloadSchema,
   SeriesPayloadSchema,
+  ServerAlertChangePayloadSchema,
+  ServerAlertsPayloadSchema,
   SubscribeChartPayloadSchema,
   UnsubscribeChartPayloadSchema,
   type DeleteIndicatorPayload,
+  type DeleteServerAlertPayload,
   type ListIndicatorsPayload,
   type MyIndicatorSourcePayload,
   type MyIndicatorsPayload,
@@ -38,6 +45,8 @@ import {
   type ScriptRejection,
   type SearchSymbolsPayload,
   type SeriesPayload,
+  type ServerAlertChangePayload,
+  type ServerAlertsPayload,
   type SubscribeChartPayload,
   type UnsubscribeChartPayload,
 } from "./types/responses";
@@ -117,6 +126,16 @@ export interface McpSession {
   callUnsubscribeChart: (
     args: UnsubscribeChartInput,
   ) => Promise<UnsubscribeChartPayload>;
+  /** Does `tools/list` have the server alert tools? One request, and no tool call. */
+  serverAlertsListed: () => Promise<boolean>;
+  /** Invoke `list_server_alerts`; says so when the server does not run them. */
+  callListServerAlerts: () => Promise<ServerAlertsPayload>;
+  /** Invoke `create_server_alert`; a signing secret is only in this response. */
+  callCreateServerAlert: (args: CreateServerAlertInput) => Promise<ServerAlertChangePayload>;
+  /** Invoke `update_server_alert`. */
+  callUpdateServerAlert: (args: UpdateServerAlertInput) => Promise<ServerAlertChangePayload>;
+  /** Invoke `delete_server_alert`. */
+  callDeleteServerAlert: (args: DeleteServerAlertInput) => Promise<DeleteServerAlertPayload>;
   /** The names `tools/list` reports; the scripting tools are there only when enabled. */
   callListToolNames: () => Promise<string[]>;
   /** Invoke `list_my_indicators` (ADR-0025): the caller's scripts. */
@@ -358,6 +377,36 @@ export function createMcpSession(): McpSession {
         args as unknown as Record<string, unknown>,
       );
       return UnsubscribeChartPayloadSchema.parse(json);
+    },
+    async serverAlertsListed() {
+      const conn = await ensureConnected();
+      const { tools } = await conn.client.listTools();
+      return tools.some((t) => t.name === "list_server_alerts");
+    },
+    async callListServerAlerts() {
+      const json = await callToolWithAuthRetry("list_server_alerts", {});
+      return ServerAlertsPayloadSchema.parse(json);
+    },
+    async callCreateServerAlert(args) {
+      const json = await callToolWithAuthRetry(
+        "create_server_alert",
+        args as unknown as Record<string, unknown>,
+      );
+      return ServerAlertChangePayloadSchema.parse(json);
+    },
+    async callUpdateServerAlert(args) {
+      const json = await callToolWithAuthRetry(
+        "update_server_alert",
+        args as unknown as Record<string, unknown>,
+      );
+      return ServerAlertChangePayloadSchema.parse(json);
+    },
+    async callDeleteServerAlert(args) {
+      const json = await callToolWithAuthRetry(
+        "delete_server_alert",
+        args as unknown as Record<string, unknown>,
+      );
+      return DeleteServerAlertPayloadSchema.parse(json);
     },
     callListToolNames() {
       return withAuthRetry(async (conn) => {
