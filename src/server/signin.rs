@@ -310,27 +310,59 @@ async fn persist(writes: Vec<Write>) {
     }
 }
 
-/// A user got a token through a client: that keeps their server alerts alive, and
-/// scripts and alerts of the client from before sign-in go to the first user who does
-/// (ADR-0044). Blocking.
+/// `CHARTGEN_CLAIM_OWNER`: the one account that inherits what clients owned before
+/// sign-in. Unset means nobody does. A client id travels in URLs, so holding one must
+/// never be what hands anything over (ADR-0044).
+pub(super) fn claim_owner() -> Option<String> {
+    std::env::var("CHARTGEN_CLAIM_OWNER")
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+}
+
+/// A user got a token: that keeps their server alerts alive, and the named owner
+/// collects what clients still own, through any client (ADR-0044). Blocking.
 #[cfg(feature = "scripting")]
-pub(super) fn after_token(client: &str, user: &str) {
-    if let Some(store) = scripting::persistence::global() {
-        if let Err(e) = store.mark_user_used(user) {
-            eprintln!("[OAuth] could not record user activity: {e}");
-        }
-        match store.claim_scripts(client, user, scripting::MAX_SCRIPTS_PER_USER) {
-            Ok(0) => {}
-            Ok(n) => eprintln!("[OAuth] {n} script(s) moved from a client to its signed-in user"),
-            Err(e) => eprintln!("[OAuth] could not move a client's scripts: {e}"),
-        }
+pub(super) fn after_token(user: &str) {
+    let Some(store) = scripting::persistence::global() else {
+        return;
+    };
+    if let Err(e) = store.mark_user_used(user) {
+        eprintln!("[OAuth] could not record user activity: {e}");
+    }
+    if claim_owner().as_deref() != Some(user) {
+        return;
+    }
+    match store.claim_waiting_scripts(user) {
+        Ok(0) => {}
+        Ok(n) => eprintln!("[OAuth] {n} script(s) from before sign-in moved to the named owner"),
+        Err(e) => eprintln!("[OAuth] could not move scripts to the named owner: {e}"),
     }
     if let Some(alerts) = crate::server_alerts::global() {
-        match alerts.claim(client, user) {
+        match alerts.claim_waiting(user) {
             0 => {}
-            n => eprintln!("[OAuth] {n} server alert(s) moved from a client to its signed-in user"),
+            n => eprintln!(
+                "[OAuth] {n} server alert(s) from before sign-in moved to the named owner"
+            ),
         }
     }
+}
+
+/// What startup says about rows from before sign-in: counts only, an id is a credential.
+#[cfg(feature = "scripting")]
+pub(super) fn waiting_rows_notice(
+    scripts: i64,
+    alerts: i64,
+    owner: Option<&str>,
+) -> Option<String> {
+    if scripts == 0 && alerts == 0 {
+        return None;
+    }
+    let rows = format!("{scripts} script(s) and {alerts} server alert(s) from before sign-in");
+    Some(match owner {
+        Some(_) => format!("{rows} wait for the owner CHARTGEN_CLAIM_OWNER names, until their next sign-in."),
+        None => format!("{rows} stay with their clients, out of everyone's reach. To collect them, set CHARTGEN_CLAIM_OWNER=github:<id> or google:<sub> to your own account and sign in."),
+    })
 }
 
 /// How many entries of `CHARTGEN_SERVER_ALERT_CLIENTS` can match nobody with sign-in
@@ -1875,6 +1907,23 @@ mod tests {
         token_for(&mut s, 0, "github:2", 5000);
         s.trim_user_tokens("github:1");
         assert!(keeps(&s, 0));
+    }
+
+    #[cfg(feature = "scripting")]
+    #[test]
+    fn the_notice_counts_rows_and_says_how_to_collect_them() {
+        assert_eq!(waiting_rows_notice(0, 0, None), None);
+        let unset = waiting_rows_notice(2, 1, None).unwrap();
+        assert!(
+            unset.contains("2 script(s) and 1 server alert(s)"),
+            "{unset}"
+        );
+        assert!(
+            unset.contains("CHARTGEN_CLAIM_OWNER=github:<id>"),
+            "{unset}"
+        );
+        let set = waiting_rows_notice(2, 1, Some("github:7")).unwrap();
+        assert!(!set.contains("github:7"), "no ids in the log: {set}");
     }
 
     #[test]

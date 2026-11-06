@@ -841,24 +841,21 @@ impl ServerAlerts {
         self.sync_feeds(st);
     }
 
-    /// Alerts of a client from before sign-in go to the first user who gets a token
-    /// through it, oldest first and up to that user's limit, with their deliveries. The
-    /// rest stay with the client, and nothing is deleted (ADR-0044). Returns how many
-    /// moved. Blocking.
-    pub fn claim(&self, client: &str, user: &str) -> usize {
+    /// Every alert still owned by a client goes to `user`, the owner the operator named,
+    /// with its deliveries, whatever limit that passes: they are that person's already,
+    /// and nothing is deleted (ADR-0044). A webhook's secret moves with its alert.
+    /// Returns how many moved. Blocking.
+    pub fn claim_waiting(&self, user: &str) -> usize {
         let mut guard = self.lock();
         let st = &mut *guard;
-        let mine = st.alerts.values().filter(|a| a.owner == user).count();
-        let room = self.limits.alerts_per_client.saturating_sub(mine);
-        let mut ids: Vec<(i64, String)> = st
+        let ids: Vec<String> = st
             .alerts
             .values()
-            .filter(|a| a.owner == client)
-            .map(|a| (a.created_at, a.id.clone()))
+            .filter(|a| !persistence::is_account(&a.owner))
+            .map(|a| a.id.clone())
             .collect();
-        ids.sort();
         let mut moved = HashSet::new();
-        for (_, id) in ids.into_iter().take(room) {
+        for id in ids {
             let Some(alert) = st.alerts.get_mut(&id) else {
                 continue;
             };
@@ -872,16 +869,24 @@ impl ServerAlerts {
                 Err(e) => eprintln!("[alerts] cannot move an alert to its user: {e}"),
             }
         }
-        if let Some(queue) = st.queues.get_mut(client) {
-            let (theirs, stays): (VecDeque<_>, VecDeque<_>) = std::mem::take(queue)
-                .into_iter()
-                .partition(|e| moved.contains(&e.alert_id));
-            *queue = stays;
-            st.queues
-                .entry(user.to_string())
-                .or_default()
-                .extend(theirs);
+        if moved.is_empty() {
+            return 0;
         }
+        let mut theirs = VecDeque::new();
+        for (owner, queue) in st.queues.iter_mut() {
+            if !persistence::is_account(owner) {
+                let (took, stays): (VecDeque<_>, VecDeque<_>) = std::mem::take(queue)
+                    .into_iter()
+                    .partition(|e| moved.contains(&e.alert_id));
+                *queue = stays;
+                theirs.extend(took);
+            }
+        }
+        st.queues
+            .entry(user.to_string())
+            .or_default()
+            .extend(theirs);
+        self.sync_feeds(st);
         moved.len()
     }
 

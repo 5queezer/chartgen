@@ -776,6 +776,7 @@ fn server_command(
         .env_remove("CHARTGEN_GITHUB_CLIENT_SECRET")
         .env_remove("CHARTGEN_GOOGLE_CLIENT_ID")
         .env_remove("CHARTGEN_GOOGLE_CLIENT_SECRET")
+        .env_remove("CHARTGEN_CLAIM_OWNER")
         .env_remove("CHARTGEN_SERVER_ALERTS")
         .env_remove("CHARTGEN_WEBHOOK_TEST_ORIGIN")
         .env_remove("CHARTGEN_SERVER_ALERT_CLIENTS")
@@ -3831,15 +3832,10 @@ fn test_signin_scripts_follow_the_user_and_sessions_survive_restart() {
     assert_ne!(answer.status, 307, "{}", answer.head);
 }
 
-/// ADR-0044: scripts from before sign-in go to the first user through their client,
-/// the next user does not get them, and nothing is lost.
+/// A script made through `client` with sign-in off, in `db`.
 #[cfg(feature = "scripting")]
-#[test]
-fn test_signin_existing_scripts_move_to_the_first_user_of_their_client() {
-    let fake = FakeProvider::start();
-    let port = free_port();
-    let db = store_path("signin-claim");
-    let old = spawn_server_on(port, None, &db, true);
+fn seed_script_through(port: u16, db: &std::path::Path, name: &str) -> String {
+    let old = spawn_server_on(port, None, db, true);
     let redirect = web_redirect(port);
     let client = register_client(port, &redirect);
     let (st, head, _) = authorize(port, &client, &redirect);
@@ -3857,40 +3853,132 @@ fn test_signin_existing_scripts_move_to_the_first_user_of_their_client() {
         port,
         &token,
         "register_indicator",
-        serde_json::json!({"name": "from_before", "source": OWN_SCRIPT}),
+        serde_json::json!({"name": name, "source": OWN_SCRIPT}),
     );
-    assert!(answer.contains("from_before"), "{answer}");
+    assert!(answer.contains(name), "{answer}");
     drop(old);
+    client
+}
 
-    let _srv = start_server(
-        signin_command(port, &db, &fake, &["github"], None, true),
-        port,
-    );
+/// A client id travels in URLs, so one must never be what hands a script over.
+/// A stranger through the owner's own client gets nothing, whatever is set.
+#[cfg(feature = "scripting")]
+#[test]
+fn test_signin_a_stranger_through_a_known_client_gets_nothing() {
+    for named in [None, Some("github:1")] {
+        let fake = FakeProvider::start();
+        let port = free_port();
+        let db = store_path(if named.is_some() {
+            "claim-set"
+        } else {
+            "claim-unset"
+        });
+        let client = seed_script_through(port, &db, "from_before");
+        let mut cmd = signin_command(port, &db, &fake, &["github"], None, true);
+        if let Some(owner) = named {
+            cmd.env("CHARTGEN_CLAIM_OWNER", owner);
+        }
+        let _srv = start_server(cmd, port);
+        let redirect = web_redirect(port);
+        let mut stranger = Browser::new(port);
+        let first = stranger.authorize(&client, &redirect, "s");
+        let back = provider_round_trip(
+            &mut stranger,
+            &fake,
+            "github",
+            profile_of("github", 666, "stranger"),
+            &first,
+        );
+        let token = token_from(port, &client, &redirect, &back.query()["code"]);
+        let mine = tool_text(port, &token, "list_my_indicators", serde_json::json!({}));
+        assert!(!mine.contains("from_before"), "{named:?}: {mine}");
+
+        // The row is still there and still a client's, for whoever is named later.
+        let store = chartgen::scripting::persistence::Store::open(&db).unwrap();
+        assert_eq!(store.waiting_rows().unwrap().0, 1, "{named:?}");
+    }
+}
+
+/// The account named collects what every client owned, whichever client it signs in through.
+#[cfg(feature = "scripting")]
+#[test]
+fn test_signin_named_owner_collects_everything_through_any_client_once() {
+    let fake = FakeProvider::start();
+    let port = free_port();
+    let db = store_path("claim-owner");
+    let log_path = db.with_extension("log");
+    let owner_client = seed_script_through(port, &db, "from_before");
+    let _other_client = seed_script_through(port, &db, "from_elsewhere");
+    let log = std::fs::File::create(&log_path).unwrap();
+    let mut cmd = signin_command(port, &db, &fake, &["github"], None, true);
+    cmd.env("CHARTGEN_CLAIM_OWNER", "github:1")
+        .stderr(log.try_clone().unwrap())
+        .stdout(log);
+    let srv = start_server(cmd, port);
     let mine = |token: &str| tool_text(port, token, "list_my_indicators", serde_json::json!({}));
-    let mut first = Browser::new(port);
-    let answer = first.authorize(&client, &redirect, "s");
-    let back = provider_round_trip(
-        &mut first,
-        &fake,
-        "github",
-        profile_of("github", 1, "ann"),
-        &answer,
-    );
-    let ann = token_from(port, &client, &redirect, &back.query()["code"]);
-    assert!(mine(&ann).contains("from_before"), "{}", mine(&ann));
 
-    let mut second = Browser::new(port);
-    let answer = second.authorize(&client, &redirect, "s");
+    // Through a client that never owned anything: both clients' rows arrive.
+    let mut ann = Browser::new(port);
+    let token = web_sign_in(&mut ann, &fake, "github", profile_of("github", 1, "ann"));
+    assert!(mine(&token).contains("from_before"), "{}", mine(&token));
+    assert!(mine(&token).contains("from_elsewhere"), "{}", mine(&token));
+
+    // Anyone after that, through the old client, finds nothing there.
+    let redirect = web_redirect(port);
+    let mut bob = Browser::new(port);
+    let first = bob.authorize(&owner_client, &redirect, "s");
     let back = provider_round_trip(
-        &mut second,
+        &mut bob,
         &fake,
         "github",
-        profile_of("github", 2, "bob"),
-        &answer,
+        profile_of("github", 2, "b"),
+        &first,
     );
-    let bob = token_from(port, &client, &redirect, &back.query()["code"]);
-    assert!(!mine(&bob).contains("from_before"), "{}", mine(&bob));
-    assert!(mine(&ann).contains("from_before"), "{}", mine(&ann));
+    let theirs = token_from(port, &owner_client, &redirect, &back.query()["code"]);
+    assert!(!mine(&theirs).contains("from_before"), "{}", mine(&theirs));
+
+    // Once: a second collection moves nothing, and a restart has nothing left waiting.
+    drop(srv);
+    let store = chartgen::scripting::persistence::Store::open(&db).unwrap();
+    assert_eq!(store.waiting_rows().unwrap(), (0, 0));
+    let logged = std::fs::read_to_string(&log_path).unwrap();
+    assert!(
+        logged.contains("2 script(s) and 0 server alert(s)"),
+        "{logged}"
+    );
+    assert!(
+        !logged.contains(&owner_client),
+        "no ids in the log: {logged}"
+    );
+    assert!(!logged.contains("github:1"), "no ids in the log: {logged}");
+    let _ = std::fs::remove_file(&log_path);
+}
+
+/// Unset, startup says how many rows wait and what to set, as a count.
+#[cfg(feature = "scripting")]
+#[test]
+fn test_signin_unnamed_owner_is_told_how_many_rows_wait() {
+    let fake = FakeProvider::start();
+    let port = free_port();
+    let db = store_path("claim-notice");
+    let log_path = db.with_extension("log");
+    let client = seed_script_through(port, &db, "from_before");
+    let log = std::fs::File::create(&log_path).unwrap();
+    let mut cmd = signin_command(port, &db, &fake, &["github"], None, true);
+    cmd.stderr(log.try_clone().unwrap()).stdout(log);
+    let srv = start_server(cmd, port);
+    drop(srv);
+    let logged = std::fs::read_to_string(&log_path).unwrap();
+    assert!(
+        logged.contains("1 script(s) and 0 server alert(s)"),
+        "{logged}"
+    );
+    assert!(
+        logged.contains("CHARTGEN_CLAIM_OWNER=github:<id>"),
+        "{logged}"
+    );
+    assert!(!logged.contains(&client), "no ids in the log: {logged}");
+    let _ = std::fs::remove_file(&log_path);
 }
 
 /// ADR-0044 with server alerts (ADR-0042): an alert belongs to the user.
@@ -4069,10 +4157,11 @@ mod signin_server_alerts {
         assert_eq!(list[0]["fire_count"], 1, "and it is on record");
     }
 
-    /// Alerts from before sign-in go to the first user through their client, keep
-    /// running, and stay theirs across a restart.
+    /// A stranger through the owner's client gets nothing, the alert staying the client's;
+    /// the named owner then collects it through another client, and it stays theirs across
+    /// a restart. Its webhook secret goes with it, and a stranger gets neither.
     #[test]
-    fn test_existing_alerts_move_to_the_first_user_of_their_client() {
+    fn test_existing_alerts_go_to_the_named_owner_and_nobody_else() {
         let fake = FakeProvider::start();
         let port = free_port();
         let db = store_path("signin-alerts-claim");
@@ -4101,22 +4190,13 @@ mod signin_server_alerts {
 
         let with_signin = |fake: &FakeProvider| {
             let mut cmd = signin_command(port, &db, fake, &["github"], None, false);
+            cmd.env("CHARTGEN_CLAIM_OWNER", "github:1");
             alerts_on(&mut cmd);
             start_server(cmd, port)
         };
         let srv = with_signin(&fake);
-        let mut ann = Browser::new(port);
-        let first = ann.authorize(&client, &redirect, "s");
-        let back = provider_round_trip(
-            &mut ann,
-            &fake,
-            "github",
-            profile_of("github", 1, "ann"),
-            &first,
-        );
-        let token = token_from(port, &client, &redirect, &back.query()["code"]);
-        assert_eq!(listed(port, &token).len(), 1, "hers now");
 
+        // A stranger through the client that made it, first in line: nothing.
         let mut bob = Browser::new(port);
         let first = bob.authorize(&client, &redirect, "s");
         let back = provider_round_trip(
@@ -4127,12 +4207,17 @@ mod signin_server_alerts {
             &first,
         );
         let theirs = token_from(port, &client, &redirect, &back.query()["code"]);
-        assert_eq!(listed(port, &theirs).len(), 0, "the next user gets nothing");
+        assert_eq!(listed(port, &theirs).len(), 0, "the stranger gets nothing");
+
+        // The named owner through a client of their own: all of it.
+        let mut ann = Browser::new(port);
+        let token = web_sign_in(&mut ann, &fake, "github", profile_of("github", 1, "ann"));
+        assert_eq!(listed(port, &token).len(), 1, "hers now");
+        assert_eq!(listed(port, &theirs).len(), 0, "still nothing for him");
 
         drop(srv);
         let _srv = with_signin(&fake);
-        // Through another client: the old one would just claim it again, and hide a move
-        // that never reached the store.
+        // Through another client again: the move has to have reached the store.
         let token = second_client(&mut ann);
         assert_eq!(listed(port, &token).len(), 1, "and it stays hers");
     }

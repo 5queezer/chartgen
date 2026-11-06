@@ -72,6 +72,12 @@ const MIGRATIONS: &[&str] = &[
 ",
 ];
 
+/// Whether an owner is a signed-in account, not an OAuth client id (ADR-0044). The
+/// queries above and below spell the same rule in SQL.
+pub fn is_account(owner: &str) -> bool {
+    owner.starts_with("github:") || owner.starts_with("google:")
+}
+
 /// A stored script. `meta` is the `ScriptInfo` snapshot taken at register.
 #[derive(Clone, Debug, PartialEq)]
 pub struct StoredScript {
@@ -523,27 +529,34 @@ impl Store {
         rows.collect()
     }
 
-    /// Move scripts owned by `client_id` to `user_id`, newest first, up to `max`
-    /// scripts in all for that user; returns how many moved. A name the user
-    /// already has stays with the client, and so does what exceeds `max`, so
-    /// nothing is overwritten or deleted (ADR-0044).
-    pub fn claim_scripts(
-        &self,
-        client_id: &str,
-        user_id: &str,
-        max: usize,
-    ) -> rusqlite::Result<usize> {
+    /// Move every script still owned by a client to `user_id`; returns how many moved.
+    /// A name the user already has stays with its client, as does the second of two
+    /// clients' scripts with one name, so nothing is overwritten or deleted (ADR-0044).
+    pub fn claim_waiting_scripts(&self, user_id: &str) -> rusqlite::Result<usize> {
         self.conn().execute(
-            "UPDATE OR IGNORE user_indicators SET user_id = ?2
-             WHERE user_id = ?1 AND name IN (
-                 SELECT name FROM user_indicators
-                 WHERE user_id = ?1 AND name NOT IN
-                     (SELECT name FROM user_indicators WHERE user_id = ?2)
-                 ORDER BY updated_at DESC, name
-                 LIMIT max(0, ?3 - (SELECT COUNT(*) FROM user_indicators WHERE user_id = ?2))
-             )",
-            params![client_id, user_id, max as i64],
+            "UPDATE OR IGNORE user_indicators SET user_id = ?1
+             WHERE user_id NOT LIKE 'github:%' AND user_id NOT LIKE 'google:%'",
+            params![user_id],
         )
+    }
+
+    /// How many scripts and server alerts are still owned by a client: from before
+    /// sign-in, and out of everyone's reach until `CHARTGEN_CLAIM_OWNER` collects them.
+    pub fn waiting_rows(&self) -> rusqlite::Result<(i64, i64)> {
+        let conn = self.conn();
+        let scripts = conn.query_row(
+            "SELECT COUNT(*) FROM user_indicators
+             WHERE user_id NOT LIKE 'github:%' AND user_id NOT LIKE 'google:%'",
+            [],
+            |r| r.get(0),
+        )?;
+        let alerts = conn.query_row(
+            "SELECT COUNT(*) FROM server_alerts
+             WHERE owner NOT LIKE 'github:%' AND owner NOT LIKE 'google:%'",
+            [],
+            |r| r.get(0),
+        )?;
+        Ok((scripts, alerts))
     }
 }
 

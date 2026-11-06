@@ -811,7 +811,7 @@ async fn oauth_token(
                 }
             }
             if let Some(user) = token_user {
-                signin::after_token(&client_id, &user.id);
+                signin::after_token(&user.id);
             }
         })
         .await;
@@ -1557,6 +1557,21 @@ pub async fn run_server(port: u16, engine: Option<Arc<RwLock<TradingEngine>>>) {
             match scripting::persistence::global().map(|s| signin.restore(s)) {
                 Some(Ok((users, sessions))) => {
                     println!("Sign-in store: {users} users, {sessions} sessions restored");
+                    let owner = signin::claim_owner();
+                    if owner
+                        .as_deref()
+                        .is_some_and(|o| !scripting::persistence::is_account(o))
+                    {
+                        eprintln!("[OAuth] WARNING: CHARTGEN_CLAIM_OWNER is not an account (github:<id>, google:<sub>), so it matches nobody.");
+                    }
+                    let waiting = scripting::persistence::global().map(|s| s.waiting_rows());
+                    if let Some(Ok((scripts, alerts))) = waiting {
+                        if let Some(notice) =
+                            signin::waiting_rows_notice(scripts, alerts, owner.as_deref())
+                        {
+                            eprintln!("[OAuth] {notice}");
+                        }
+                    }
                 }
                 Some(Err(e)) => eprintln!("[OAuth] cannot read stored sessions: {e}"),
                 None => eprintln!("[OAuth] sessions and users stay in memory: no store"),

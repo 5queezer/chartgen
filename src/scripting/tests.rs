@@ -968,43 +968,55 @@ fn sign_in_rows_survive_reopening() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// ADR-0044: scripts move to the first user, and nothing is overwritten or lost.
+/// ADR-0044: what clients own goes to the account named, from every client, and
+/// nothing is overwritten or lost.
 #[test]
-fn claiming_scripts_moves_them_without_loss() {
+fn collecting_waiting_scripts_takes_every_client_without_loss() {
     let dir = std::env::temp_dir().join(format!("chartgen-claim-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     let store = persistence::Store::open(&dir.join("s.db")).unwrap();
     let meta = serde_json::json!({});
     for name in ["a", "b", "c"] {
         store
-            .upsert("client", name, "client's", &meta, "h")
+            .upsert("client-1", name, "client's", &meta, "h")
             .unwrap();
     }
-    store.upsert("user", "b", "user's", &meta, "h").unwrap();
+    store
+        .upsert("client-2", "d", "other client's", &meta, "h")
+        .unwrap();
+    store.upsert("github:1", "b", "user's", &meta, "h").unwrap();
+    store
+        .upsert("google:2", "own", "someone else's", &meta, "h")
+        .unwrap();
+    assert_eq!(store.waiting_rows().unwrap().0, 4);
 
-    assert_eq!(store.claim_scripts("client", "user", 50).unwrap(), 2);
-    assert_eq!(store.get("user", "a").unwrap().unwrap().source, "client's");
+    assert_eq!(store.claim_waiting_scripts("github:1").unwrap(), 3);
+
     assert_eq!(
-        store.get("user", "b").unwrap().unwrap().source,
+        store.get("github:1", "a").unwrap().unwrap().source,
+        "client's"
+    );
+    assert_eq!(
+        store.get("github:1", "d").unwrap().unwrap().source,
+        "other client's"
+    );
+    assert_eq!(
+        store.get("github:1", "b").unwrap().unwrap().source,
         "user's",
         "a name the user has is not overwritten"
     );
     assert_eq!(
-        store.get("client", "b").unwrap().unwrap().source,
+        store.get("client-1", "b").unwrap().unwrap().source,
         "client's",
         "and the client's stays where it was"
     );
-    assert_eq!(store.count("user").unwrap(), 3);
-    assert_eq!(store.claim_scripts("client", "user", 50).unwrap(), 0);
-    assert_eq!(store.claim_scripts("nobody", "user", 50).unwrap(), 0);
-
-    // At the user's limit the rest stays with the client.
-    for name in ["x", "y", "z"] {
-        store.upsert("full", name, "s", &meta, "h").unwrap();
-    }
-    assert_eq!(store.claim_scripts("full", "other", 2).unwrap(), 2);
-    assert_eq!(store.count("full").unwrap(), 1);
-    assert_eq!(store.claim_scripts("full", "other", 2).unwrap(), 0);
+    assert_eq!(
+        store.get("google:2", "own").unwrap().unwrap().source,
+        "someone else's",
+        "another account's rows are not a client's"
+    );
+    assert_eq!(store.waiting_rows().unwrap().0, 1);
+    assert_eq!(store.claim_waiting_scripts("github:1").unwrap(), 0, "once");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -1046,6 +1058,7 @@ fn schema_is_complete(store: &persistence::Store) {
     store.save_grant("github:1", "old-client").unwrap();
     assert!(store.live_sessions(0).unwrap().is_empty());
     store.save_server_alert("a2", "github:1", "{}").unwrap();
+    assert!(store.waiting_rows().is_ok());
     assert!(store.server_alert_events().unwrap().is_empty());
     assert!(store.server_alert_owners().unwrap().contains("github:1"));
 }

@@ -1993,47 +1993,45 @@ async fn a_users_alerts_live_on_that_users_activity() {
     assert!(!a.lock().alerts.contains_key(&kept));
 }
 
-/// ADR-0044: what a client owned goes to its first user, within their limit, and
-/// survives a restart there. Nothing is lost.
+/// ADR-0044: what clients owned goes to the account named, from every client, and
+/// survives a restart there. Other accounts' alerts are not touched.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_clients_alerts_move_to_its_first_user() {
+async fn the_named_owner_collects_every_clients_alerts() {
     let (store, _) = store_at("claim-alerts");
     let a = plain(store);
-    let first = create(&a, spec("less", "once", 1.0), "client").await;
-    let second = create(&a, spec("less", "once", 1.0), "client").await;
+    let first = create(&a, spec("less", "once", 1.0), "client-1").await;
+    let second = create(&a, spec("less", "once", 1.0), "client-2").await;
+    let other = create(&a, spec("less", "once", 1.0), "google:2").await;
 
-    assert_eq!(a.claim("nobody", "github:1"), 0);
-    assert_eq!(a.claim("client", "github:1"), 2);
+    assert_eq!(a.claim_waiting("github:1"), 2);
     assert_eq!(a.lock().alerts[&first].owner, "github:1");
     assert_eq!(a.lock().alerts[&second].owner, "github:1");
-    assert_eq!(
-        a.claim("client", "github:2"),
-        0,
-        "the next user gets nothing"
-    );
+    assert_eq!(a.lock().alerts[&other].owner, "google:2");
+    assert_eq!(a.claim_waiting("github:1"), 0, "once");
     let owners = store.server_alert_owners().unwrap();
-    assert!(owners.contains("github:1") && !owners.contains("client"));
+    assert!(owners.contains("github:1") && !owners.contains("client-1"));
     let stored = store.server_alerts().unwrap();
-    assert!(
-        stored.iter().all(|row| row.contains("github:1")),
+    assert_eq!(
+        stored.iter().filter(|row| row.contains("github:1")).count(),
+        2,
         "the record says so too, as a restart reads it"
     );
 }
 
+/// They are that person's already, so the limit for new alerts takes nothing away.
 #[tokio::test(flavor = "multi_thread")]
-async fn claiming_stops_at_the_users_limit_and_the_rest_stays() {
+async fn collecting_passes_the_limit_and_leaves_nothing_behind() {
     let (store, _) = store_at("claim-limit");
     let a = plain(store);
     let limit = a.limits.alerts_per_client;
     let made = create(&a, spec("less", "once", 1.0), "client").await;
     let template = a.lock().alerts[&made].clone();
-    // One slot left for the user, and three alerts of the client after the first.
-    for i in 0..limit - 1 + 2 {
+    for i in 0..limit + 2 {
         let mut record = template.clone();
         record.id = format!("copy-{i}");
-        record.owner = if i < limit - 1 { "github:1" } else { "client" }.to_string();
         a.lock().alerts.insert(record.id.clone(), record);
     }
+    assert_eq!(a.claim_waiting("github:1"), limit + 3);
     let count = |owner: &str| {
         a.lock()
             .alerts
@@ -2041,18 +2039,13 @@ async fn claiming_stops_at_the_users_limit_and_the_rest_stays() {
             .filter(|r| r.owner == owner)
             .count()
     };
-    assert_eq!((count("github:1"), count("client")), (limit - 1, 3));
-
-    assert_eq!(a.claim("client", "github:1"), 1, "one slot was left");
-
-    assert_eq!(count("github:1"), limit);
-    assert_eq!(count("client"), 2, "the rest stays, not lost");
+    assert_eq!((count("github:1"), count("client")), (limit + 3, 0));
 }
 
-/// A delivery waiting when its alert moves goes along, or its old owner's queue would
-/// hold a delivery of someone else's alert.
+/// A delivery waiting when its alert moves goes along, signed as it was. One of an
+/// alert that did not move stays where it is.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_claimed_alert_takes_its_waiting_deliveries_along() {
+async fn a_collected_alert_takes_its_waiting_deliveries_along() {
     let (store, _) = store_at("claim-queue");
     let a = plain(store);
     let moved = create(&a, spec("less", "once", 1.0), "client").await;
@@ -2066,10 +2059,9 @@ async fn a_claimed_alert_takes_its_waiting_deliveries_along() {
         let mut st = a.lock();
         let queue = st.queues.entry("client".to_string()).or_default();
         queue.push_back(event("e1", &moved));
-        queue.push_back(event("e2", "an-alert-it-keeps"));
+        queue.push_back(event("e2", "an-alert-not-in-the-table"));
     }
-    // Only one alert may move here: the second event's alert is not in the table.
-    assert_eq!(a.claim("client", "github:1"), 1);
+    assert_eq!(a.claim_waiting("github:1"), 1);
     let st = a.lock();
     assert_eq!(st.queues["github:1"].len(), 1);
     assert_eq!(st.queues["github:1"][0].id, "e1");
