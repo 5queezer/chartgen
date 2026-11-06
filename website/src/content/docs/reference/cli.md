@@ -6,7 +6,7 @@ description: Command-line flags for chartgen.
 | Short | Long | Type | Default | Description |
 |-------|------|------|---------|-------------|
 | `-s` | `--symbol` | string | sample data | Ticker (e.g. `AAPL`, `BTCUSDT`). If omitted, chartgen uses random sample data. In `--trade` mode, defaults to `BTCUSDT`. |
-| `-i` | `--interval` | string | `4h` | Candle interval: `1m`, `5m`, `15m`, `1h`, `4h`, `1d`, `1wk`. |
+| `-i` | `--interval` | string | `4h` | Candle interval: a number and a unit, such as `1m`, `7m`, `45m`, `4h`, `8h`, `1d`, `2D`, `2W`, `1M`. Above 60 minutes the length must be round. `--trade` needs an interval Binance streams natively. |
 | `-p` | `--panels` | string (repeat) | `cipher_b`, `macd` | Indicator names, bottom to top. Repeat the flag for multiple indicators. See the [indicator reference](/chartgen/reference/indicators/). |
 | `-n` | `--bars` | integer | `120` | Number of bars. |
 | `-o` | `--output` | string | `chart.png` | Output file path (one-shot render mode only). |
@@ -16,8 +16,8 @@ description: Command-line flags for chartgen.
 |  | `--mcp` | flag | off | Run as MCP stdio JSON-RPC server. Use with Claude Desktop. |
 |  | `--serve` | flag | off | Run as remote MCP HTTP server with OAuth 2.1 PKCE. See [MCP integration](/chartgen/reference/mcp/) and [OAuth](/chartgen/reference/oauth/). |
 |  | `--port` | integer | `9315` | HTTP server port, used by both `--serve` and `--trade`. |
-|  | `--trade` | flag | off | Start the trading engine: live WebSocket feed, indicator state manager, order tracker, alert engine, and the same HTTP + OAuth server as `--serve`. Exposes 12 extra MCP tools on top of the 3 charting tools. Mutually exclusive with `--serve`. See the [trading guide](/chartgen/guides/trading/). |
-|  | `--testnet` | flag | off | Intended to route `--trade` orders to Binance testnet. Currently a no-op — see the caution in the [trading guide](/chartgen/guides/trading/). |
+|  | `--trade` | flag | off | Start the trading engine: live WebSocket feed, indicator state manager, order tracker, alert engine, and the same HTTP + OAuth server as `--serve`. Exposes the 12 trading MCP tools on top of the charting tools. Mutually exclusive with `--serve`. See the [trading guide](/chartgen/guides/trading/). |
+|  | `--testnet` | flag | off | Meant to route `--trade` orders to Binance testnet. Currently a no-op — see the caution in the [trading guide](/chartgen/guides/trading/). |
 
 ## Operating modes
 
@@ -28,7 +28,7 @@ order (`src/main.rs` dispatches sequentially and returns early):
 2. **`--serve`** — HTTP MCP server with OAuth 2.1 PKCE, for Claude.ai
    (charting tools only).
 3. **`--trade`** — trading engine plus the same HTTP + OAuth server as
-   `--serve`, with all 19 tools exposed.
+   `--serve`, with the trading tools added.
 4. **One-shot render** (no mode flag) — fetch data, render `chart.png`, exit.
 
 `--serve` and `--trade` are mutually exclusive; passing both runs only

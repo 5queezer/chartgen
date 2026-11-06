@@ -8,10 +8,14 @@ The `web/` directory holds a SolidJS single-page app that connects to
 chart with an RSI panel. It implements
 [ADR-0003](/chartgen/decisions/0003-web-frontend-stack/).
 
-The scope is deliberately narrow: a top toolbar (symbol, timeframe,
-chart type), the indicator picker, the chart (or a [grid of charts](#chart-grid))
-and a watchlist. Order entry and LLM chat are explicitly out of scope until the
-core loop is solid.
+The Docker image serves the app at `/`, on the same origin as `/mcp`
+([ADR-0027](/chartgen/decisions/0027-serve-web-app-same-origin/)). It has a
+top toolbar (symbol, timeframe including custom intervals, chart type), the
+indicator picker, drawings, a watchlist, price alerts, layouts, a
+[grid of charts](#chart-grid) and a compact layout for phones. With
+`CHARTGEN_SCRIPTING=1` it also has a [script editor](#script-editor), and with
+`CHARTGEN_SERVER_ALERTS=1` alerts can run on the server. Order entry and LLM
+chat are out of scope.
 
 ## Toolbar
 
@@ -240,7 +244,7 @@ While replaying:
   Those whose values change with later bars are recomputed on the server up
   to the replay bar: volume and time profiles (`volume_profile`/VPVR,
   `session_vp`, `hvn_lvn`, `naked_poc`, `tpo`), ZigZag, the linear
-  regression channel and Ichimoku. While playing that happens at most twice a
+  regression channel, Ichimoku, chart patterns and Auto Fib. While playing that happens at most twice a
   second and again on pause, so these lag a little and their newest bars are
   briefly blank. Divergence lines and signals appear once they are
   confirmed: Cipher B's two bars after the bar they mark. A moving average
@@ -802,6 +806,8 @@ compared with (a value, or a plot).
   with the same indicator settings; otherwise the Alerts tab reads *inactive:
   open BTCUSDT 1h*, *indicator not on the chart* or *indicator changed* (after
   you changed its parameters: create a new alert for the new ones).
+- **Patterns.** See [pattern indicators](#pattern-indicators). A detection has
+  no condition or level: the alert fires when a bar closes with a new one.
 
 Only price alerts are drawn as lines on the chart. With several chartgen tabs
 open, one evaluates the alerts and the Alerts tab of the others says so. An
@@ -1072,6 +1078,77 @@ and so do the plot styles
 Every instance after the first is stored with an instance id
 (`{ "name": "rsi", "id": "rsi#2", "length": 21 }`). Sets and layouts saved
 before instances existed load unchanged.
+
+## Pattern indicators
+
+Three indicators in the picker find patterns on the server
+([ADR-0046](/chartgen/decisions/0046-pattern-detection/)). They work on any data
+source, and on Heikin Ashi bars, where they read the Heikin Ashi candles. Gap
+patterns never fire on those, and rarely on 24/7 markets, where a bar opens at the
+last close.
+
+- **Candlestick Patterns** (`candlestick_patterns`) labels 50 patterns: blue
+  bullish, red bearish, grey neutral, above or below the bar. Hover a label for its
+  name and meaning. **pattern** chooses all, one side or one pattern; search the
+  picker by a pattern's name to find the indicator. **trend** is the prior trend for
+  patterns that need one, such as a hammer against a hanging man: the close against
+  its SMA 50, also the SMA 50 against the SMA 200, or no check.
+- **Chart Patterns** (`chart_patterns`) searches the last 600 bars for head and
+  shoulders and its inverse, double and triple tops and bottoms, ascending,
+  descending and symmetrical triangles, rising and falling wedges, channels, flags,
+  pennants and rectangles. It draws the outline with a label that names the status:
+  forming, confirmed or failed. Hover it for the measured move and what fails it.
+  **depth** is the bars on each side of a swing, **deviation** the least move between
+  swings in ATR(10), **tolerance** how close counts as the same level, as a percentage of
+  the pattern's height. There are no Elliott waves: an honest count needs a degree and
+  alternatives, not one rule check.
+- **Auto Fib Retracement** (`auto_fib`) draws levels over the last significant swing,
+  from the same **depth** and **deviation**. **level1** to **level8** set the ratios
+  (0 is the end of the swing, 1 its start; **reverse** swaps them). On the Style tab each
+  level is a plot with its own color, width and visibility. Changing a level's value
+  starts its color over, because a plot's style follows its name.
+
+**What can change.** Each indicator's settings say this too.
+
+| | On the forming bar | After it closed |
+|---|---|---|
+| Candlestick label | Outlined: can change or vanish | Never |
+| Chart pattern | Nothing | A forming one can reshape or vanish as swings confirm. In the newer half of the 600 bars, a confirmed one stays, and can still fail. In the older half, confirmed ones can appear and disappear as the window slides |
+| Fib levels | Nothing | Redrawn when a newer swing confirms or a close breaks the swing's start. Older bars show the new levels too |
+
+A swing is known only **depth** bars after its high or low, so a chart pattern appears that
+much after its last turn, and is confirmed only by a later bar's close past its line. The
+window's start decides its first swings, so moving it by a bar can change what the older half
+of the 600 bars shows: on a random walk, over 11,200 closes, 271 confirmed patterns appeared
+there and 360 disappeared, against 1 and 1 in the newer half. The status of a pattern more than
+300 bars old is a reading of the window, not a record. A daily bar counts as forming for 24
+hours from its open, so a label on it stays outlined after its exchange closes.
+
+**Alerts.** The bell on a pattern indicator's legend row, or **Source** in the dialog, offers
+*Bullish*, *Bearish* and, for candlesticks, *Neutral*. To alert on one pattern, choose it in
+the settings, then add the alert to that instance. Each new detection on a closed bar fires
+once; those already on the chart do not, nor do older ones that only appear because the window
+moved. For a fib level, pick the level under **Level**:
+*Close crossing 0.618*. A level moving over the price with a new swing does not fire it.
+
+**What alerts cannot do.** They run in this browser, only while a tab shows that symbol,
+interval and settings (in a grid, on its active chart): not on the server, and not by webhook. A pattern cannot fire on the
+forming bar, and there is no alert on a pattern failing or on a forming one.
+
+**Over MCP**, `set_alert` with `indicator_signal` matches a pattern's key on the newest closed
+bar, such as `hammer` or `double_top_confirmed`. It needs a server started with `--trade`, and
+two things it does not check when you set the alert. The indicator must be in that server's
+`--panels` under the name you pass, since the engine computes nothing else; any other name is
+accepted and never fires. And the engine's window starts empty and holds 200 bars at most,
+with no history loaded: nothing fires until enough bars have closed since the start (about 50
+for the SMA 50 trend rule, 200 for SMA 50 and 200), and `chart_patterns` reads only those 200,
+so it can differ from the web chart's 600.
+
+**How much to trust them.** A label says a shape occurred, not that it predicts anything. On a
+random walk, which holds no pattern at all, the defaults still find about 238 candlestick
+labels and 10 chart patterns per 1000 bars, right after 10 bars about half of the time, as
+chance would be. `cargo run --example pattern_stats` prints the table per pattern. It was not
+run on real market data.
 
 ## Script editor
 

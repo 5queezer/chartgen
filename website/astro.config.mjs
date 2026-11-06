@@ -9,7 +9,7 @@ export default defineConfig({
     starlight({
       title: 'chartgen',
       description:
-        'Trading chart generator, MCP server, and live trading engine in Rust. 38 indicators, Yahoo Finance + Binance, Claude.ai integration.',
+        'Chart generator, web app and MCP server for Yahoo Finance and Binance data, written in Rust.',
       social: [
         {
           icon: 'github',

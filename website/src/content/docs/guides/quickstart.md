@@ -5,13 +5,13 @@ description: Build chartgen and generate your first chart.
 
 ## Prerequisites
 
-- Rust 1.76+
-- `fontconfig` and `freetype` development libraries
+- Rust 1.89 or newer
+- `pkg-config`, OpenSSL, and the `fontconfig` and `freetype` development libraries
 
 On Debian/Ubuntu:
 
 ```bash
-sudo apt-get install libfontconfig1-dev libfreetype-dev
+sudo apt-get install pkg-config libssl-dev libfontconfig1-dev libfreetype-dev
 ```
 
 ## Build
@@ -49,6 +49,13 @@ cargo run -- --serve --port 9315
 
 Add `https://<your-domain>/mcp` as the remote connector URL.
 
+## Open the web app
+
+The Docker image serves the [web app](/chartgen/guides/web/) at `/`, on the
+same origin as `/mcp`. A plain `cargo run -- --serve` serves no web app unless
+you set `CHARTGEN_WEB_DIR` to a built `web/dist`. See
+[deployment](/chartgen/guides/deploy/).
+
 ## Run in trading mode
 
 `--trade` streams a live Binance WebSocket feed, runs the alert engine, and
@@ -76,8 +83,8 @@ cargo clippy -- -D warnings
 ## Next steps
 
 - [CLI reference](/chartgen/reference/cli/) — every flag.
-- [Indicators](/chartgen/reference/indicators/) — all 38 with sample renders and parameters.
-- [MCP integration](/chartgen/reference/mcp/) — the 19 tools exposed over stdio and HTTP.
+- [Indicators](/chartgen/reference/indicators/) — all of them, with sample renders and parameters.
+- [MCP integration](/chartgen/reference/mcp/) — the tools exposed over stdio and HTTP.
 - [Trading](/chartgen/guides/trading/) — alerts, orders, and the live engine.
 - [Push notifications](/chartgen/guides/notifications/) — SSE subscriptions for triggered alerts.
 - [Deployment](/chartgen/guides/deploy/) — Docker, Coolify, release binaries, reverse proxy.

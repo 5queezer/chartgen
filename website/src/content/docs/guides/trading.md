@@ -98,7 +98,10 @@ Three condition types:
 ### Signal labels
 
 `indicator_signal` alerts match against a fixed label registry in
-`src/trading/signals.rs`. Using anything else will never match. Current labels:
+`src/trading/signals.rs`. Using anything else will never match, and neither will an
+indicator missing from `--panels`; neither is rejected when you set the alert. Pattern
+indicators have labels of their own: see
+[pattern indicators](/chartgen/guides/web/#pattern-indicators). Current labels:
 
 | Group | Labels |
 |-------|--------|

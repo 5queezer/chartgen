@@ -3,6 +3,7 @@
 // (GeometryStyle) apply over the server / theme colors at render time.
 
 import {
+  BIAS_COLORS,
   DIVLINE_COLORS,
   fillColors,
   hbarColors,
@@ -30,6 +31,8 @@ export interface GeometryInfo {
   /** `va` is null when the indicator has no value area. */
   hbars: { color: string; va: string | null; pocColor: string } | null;
   divlines: { bull: string; bear: string } | null;
+  /** Pattern labels and outlines (ADR-0046). */
+  marks: { bullish: string; bearish: string; neutral: string } | null;
 }
 
 const fmtLevel = (y: number) => String(Math.round(y * 100) / 100);
@@ -72,6 +75,12 @@ export function geometryOf(name: string, ind: SeriesIndicator): GeometryInfo {
       (ind.divlines ?? []).length > 0
         ? { bull: DIVLINE_COLORS.bull, bear: DIVLINE_COLORS.bear }
         : null,
+    marks:
+      (ind.labels?.length ?? 0) > 0 ||
+      (ind.events?.length ?? 0) > 0 ||
+      (ind.patterns?.length ?? 0) > 0
+        ? BIAS_COLORS
+        : null,
   };
 }
 
@@ -89,6 +98,16 @@ export function divColor(
   if (kind === "bull") return g?.bullColor ?? fallback;
   if (kind === "bear") return g?.bearColor ?? fallback;
   return fallback;
+}
+
+/** Color of a pattern mark of `bias`: the user's, else `fallback`. */
+export function markColor(
+  bias: "bullish" | "bearish" | "neutral",
+  fallback: string,
+  g: GeometryStyle["marks"],
+): string {
+  const own = bias === "bullish" ? g?.bullColor : bias === "bearish" ? g?.bearColor : g?.neutralColor;
+  return own ?? fallback;
 }
 
 /** Visibility of a geometry item; unset means shown. */
@@ -162,5 +181,6 @@ export function pruneGeometry(
     ...(hlines ? { hlines } : {}),
     ...(g.hbars && info.hbars ? { hbars: g.hbars } : {}),
     ...(g.divlines && info.divlines ? { divlines: g.divlines } : {}),
+    ...(g.marks && info.marks ? { marks: g.marks } : {}),
   };
 }

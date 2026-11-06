@@ -61,12 +61,12 @@ Status legend:
 
 | Feature | TradingView | chartgen | Notes / links |
 |---|---|---|---|
-| Built-in indicator library | ✅ (100+) | ◐ | 72 registered indicators: overlays, oscillators, volume and external data. [Indicator reference](/chartgen/reference/indicators/) |
+| Built-in indicator library | ✅ (100+) | ◐ | 75 registered indicators: overlays, oscillators, volume and external data. [Indicator reference](/chartgen/reference/indicators/) |
 | Pine v5 value semantics and TradingView defaults | ✅ | ◐ | Values equal TradingView's for the same parameters and first bar. Known differences: UTC calendar periods, pivots from loaded bars, intrabar profiles approximated, long warmups. [ADR-0018](/chartgen/decisions/0018-pine-semantics-for-indicators/), [differences list](/chartgen/reference/indicators/#values-match-tradingview) |
 | Session VWAP and VWAP bands | ✅ | ◐ | Resets per session by default, but sessions are UTC days, not exchange sessions. [ADR-0018](/chartgen/decisions/0018-pine-semantics-for-indicators/) |
 | Higher-timeframe pivots | ✅ | ◐ | Day, week, month, year periods. Only P, R1, S1, R2, S2 are drawn, for every period. [Pivots](/chartgen/reference/indicators/#pivot) |
 | Indicator picker | ✅ | ✅ | By name, server default parameters. [Managing indicators](/chartgen/guides/web/#managing-indicators) |
-| Settings dialog with Inputs and Style tabs | ✅ | ◐ | The Inputs form is generated from the server schema (numbers, switches, text; no enums). The Style tab sets visibility, color, opacity, width and line style. No per-timeframe visibility tab. [ADR-0017](/chartgen/decisions/0017-indicator-plot-styles/) |
+| Settings dialog with Inputs and Style tabs | ✅ | ◐ | The Inputs form is generated from the server schema (numbers, switches, text, and a select for a fixed list of values). The Style tab sets visibility, color, opacity, width and line style. No per-timeframe visibility tab. [ADR-0017](/chartgen/decisions/0017-indicator-plot-styles/) |
 | Hide and remove from the pane legend | ✅ | ✅ | [Managing indicators](/chartgen/guides/web/#managing-indicators), [ADR-0013](/chartgen/decisions/0013-indicator-visibility-and-instances/) |
 | Several instances of one indicator (RSI 14 and RSI 21) | ✅ | ✅ | Each with its own params, style, visibility and pane. [Managing indicators](/chartgen/guides/web/#managing-indicators), [ADR-0028](/chartgen/decisions/0028-multiple-indicator-instances/) |
 | Fills, hlines, volume profile, divergence lines | ✅ | ✅ | Server colors on the wire. The VPVR up/down split cannot be colored. [ADR-0007](/chartgen/decisions/0007-complete-series-serialization/), [ADR-0010](/chartgen/decisions/0010-overlay-geometry-rendering/), [ADR-0012](/chartgen/decisions/0012-geometry-colors-on-the-wire/) |
@@ -74,6 +74,9 @@ Status legend:
 | Geometry colors editable in Style | ✅ | ✅ | Fill, level, histogram-palette, profile and divergence colors, each with a visibility toggle, in `style.geometry` ([ADR-0035](/chartgen/decisions/0035-styleable-geometry/)). |
 | Indicator on indicator (apply to another indicator's output) | ✅ | ❌ | Every indicator reads the price bars. |
 | Indicators on Heikin Ashi values | ✅ | ✅ | [`chart_style`](/chartgen/reference/mcp/) |
+| Candlestick pattern recognition | ✅ | ◐ | `candlestick_patterns`: 50 patterns, all, one side or one pattern, with a trend rule. Blue, red and grey labels with a tooltip. TradingView does not publish its list, so coverage cannot be compared exactly. No separate indicator per pattern in the picker: search by the pattern's name and choose it in the settings. [Pattern indicators](/chartgen/guides/web/#pattern-indicators), [ADR-0046](/chartgen/decisions/0046-pattern-detection/) |
+| Auto chart patterns | ✅ | ◐ | `chart_patterns` on the last 600 bars: head and shoulders, double and triple tops and bottoms, triangles, wedges, channels, flags, pennants, rectangles, with a status. No Elliott waves, on purpose: see ADR-0046. Thresholds are ours; TradingView does not publish its own. [Pattern indicators](/chartgen/guides/web/#pattern-indicators) |
+| Auto Fib Retracement | ✅ | ◐ | `auto_fib`: levels from the last ZigZag swing, with depth and deviation, a value and color per level, and an alert per level. Up to 8 levels, no fill between them, no log-scale levels. [Pattern indicators](/chartgen/guides/web/#pattern-indicators) |
 | Profiles from lower-timeframe data | ✅ | ◐ | Volume and time profiles and CVD spread each bar's volume over its range. [Differences list](/chartgen/reference/indicators/#values-match-tradingview) |
 | Volume in the default set | ✅ | ✅ | A fresh install starts with the EMA stack, Volume and RSI. Stored sets are never changed. [Managing indicators](/chartgen/guides/web/#managing-indicators) |
 | Persisted indicator set | ✅ (cloud) | ◐ | Saved in `localStorage` per browser, not synced. [ADR-0005](/chartgen/decisions/0005-client-indicator-state/) |
@@ -95,7 +98,7 @@ Status legend:
 | Fib extension (trend-based) | ✅ | ◐ | TradingView's default levels, not editable; no fill between levels. |
 | Pitchfork (Andrews) | ✅ | ◐ | Original pitchfork only; no Schiff or modified Schiff variants, no inner levels. |
 | Long and short position | ✅ | ◐ | Entry, target and stop handles with risk/reward; no account size, quantity or P&L. |
-| Gann, Elliott and chart patterns, other fib tools | ✅ | ❌ | Not implemented. |
+| Gann, Elliott and chart pattern drawing tools, other fib tools | ✅ | ❌ | Not implemented. Auto chart patterns and Auto Fib are [indicators](/chartgen/guides/web/#pattern-indicators). |
 | Drawings stored per symbol | ✅ | ◐ | `localStorage`, per browser, max 500 per symbol. Shared across layouts. [Drawing tools](/chartgen/guides/web/#drawing-tools) |
 
 ## Data & live updates
@@ -155,7 +158,7 @@ Status legend:
 | Pine-like series operators and `ta.*` functions in scripts | ✅ | ✅ | Element-wise operators, `close[1]`, comparisons, `ta.sma/ema/rsi/atr/macd/crossover` and more, with the Pine v5 code the built-ins use. Pivot tie rule is unverified against TradingView. [Series](/chartgen/guides/scripted-indicators/#series), [`ta.*`](/chartgen/guides/scripted-indicators/#ta-functions) |
 | Fork a built-in as a script | ✅ (open source scripts) | ◐ | `fork_indicator` works for `wavetrend` only. [Forking](/chartgen/guides/scripted-indicators/#forking-a-built-in) |
 | Script editor in the web app | ✅ | ◐ | Create, edit, save, delete and add to the chart, with errors at their line. Only on servers with `CHARTGEN_SCRIPTING=1`. No autocomplete, no renaming and no fork button yet. [Script editor](/chartgen/guides/web/#script-editor), [ADR-0041](/chartgen/decisions/0041-script-editor-in-the-web-app/) |
-| Programmatic access (API, agents) | partial | ✅ | The MCP server exposes 19 tools, including chart generation, quotes and symbol search. [MCP reference](/chartgen/reference/mcp/) |
+| Programmatic access (API, agents) | partial | ✅ | The MCP server exposes 19 tools (plus optional scripting and server-alert tools), including chart generation, quotes and symbol search. [MCP reference](/chartgen/reference/mcp/) |
 
 ## Data sources
 

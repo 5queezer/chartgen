@@ -1546,6 +1546,7 @@ impl Indicator for KalmanVolume {
             y_range: Some((-2.5, 2.5)),
             label: "KVF".into(),
             is_overlay: false,
+            ..Default::default()
         }
     }
 }
