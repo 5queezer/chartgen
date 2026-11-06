@@ -120,6 +120,27 @@ impl Store {
         Ok(())
     }
 
+    /// Insert `(user, name)` only if it does not exist; false when it does.
+    /// The check and the write are one statement, so two creators cannot both win.
+    pub fn insert_new(
+        &self,
+        user: &str,
+        name: &str,
+        source: &str,
+        meta: &Value,
+        source_hash: &str,
+    ) -> rusqlite::Result<bool> {
+        let now = chrono::Utc::now().timestamp();
+        let inserted = self.conn().execute(
+            "INSERT INTO user_indicators
+                 (user_id, name, source, meta_json, source_hash, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)
+             ON CONFLICT (user_id, name) DO NOTHING",
+            params![user, name, source, meta.to_string(), source_hash, now],
+        )?;
+        Ok(inserted == 1)
+    }
+
     pub fn get(&self, user: &str, name: &str) -> rusqlite::Result<Option<StoredScript>> {
         self.conn()
             .query_row(

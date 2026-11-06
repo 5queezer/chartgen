@@ -31,6 +31,7 @@
 import {
   batch,
   createEffect,
+  on,
   createSignal,
   createMemo,
   Index,
@@ -986,6 +987,8 @@ export interface ChartProps {
    * client asked for.
    */
   activeIndicators: ActiveIndicator[];
+  /** Part of the window is taken (the script editor): panes fit what is left. */
+  fitPanes?: boolean;
   /** Client-side plot style overrides (ADR-0017), keyed by instance key. */
   styles?: Record<string, IndicatorStyle | undefined>;
   /** Price rendering style chosen in the toolbar. */
@@ -1061,6 +1064,9 @@ export function Chart(props: ChartProps): JSX.Element {
   let dateBars = false;
   // Oscillator pane keys, top to bottom, as klinecharts stacks them.
   let paneStack: string[] = [];
+  // Panes fit the host rather than keep their heights: on the compact shell, and
+  // while the script editor takes part of the window (ADR-0041).
+  const fitting = () => compact() || props.fitPanes === true;
   // Compact shell: the heights the sub-panes had before the screen shrank them.
   const naturalHeights = new Map<string, number>();
   // Before klinecharts' resize, which clamps panes that no longer fit.
@@ -1273,9 +1279,9 @@ export function Chart(props: ChartProps): JSX.Element {
     if (host && typeof ResizeObserver !== "undefined") {
       const ro = new ResizeObserver(() => {
         const current = chart();
-        if (current && compact()) rememberNaturalHeights(current);
+        if (current && fitting()) rememberNaturalHeights(current);
         current?.resize();
-        if (current && compact()) fitPanesToScreen(current);
+        if (current && fitting()) fitPanesToScreen(current);
         else if (current) restoreNaturalHeights(current);
         recomputeHeaders();
       });
@@ -1283,6 +1289,26 @@ export function Chart(props: ChartProps): JSX.Element {
       onCleanup(() => ro.disconnect());
     }
   });
+
+  // A full-screen panel opens and closes without resizing the host, and a closing
+  // dock must lay out at the new size before the panes get their heights back.
+  createEffect(
+    on(
+      () => props.fitPanes === true,
+      (fit) => {
+        const c = chart();
+        if (!c || compact()) return;
+        if (fit) {
+          fitPanesToScreen(c);
+        } else {
+          c.resize();
+          restoreNaturalHeights(c);
+        }
+        recomputeHeaders();
+      },
+      { defer: true },
+    ),
+  );
 
   // Legend text must stay readable on the chart background: light plot
   // colors are darkened on a light background (the swatches keep theirs).
@@ -1753,7 +1779,7 @@ export function Chart(props: ChartProps): JSX.Element {
 
     // Keep the price pane usable: shrink the sub-panes first.
     const fitPanes = () => {
-      if (untrack(compact)) {
+      if (untrack(fitting)) {
         fitPanesToScreen(c);
         return;
       }
