@@ -65,3 +65,4 @@ one and link both ways.
 | [0035](/chartgen/decisions/0035-styleable-geometry/) | Styleable indicator geometry colors | Accepted | 2026-11-05 |
 | [0036](/chartgen/decisions/0036-own-origin-invalid-client-redirect/) | Redirect an unknown OAuth client back to the server's own web app | Accepted | 2026-11-06 |
 | [0037](/chartgen/decisions/0037-pull-based-deploy/) | Pull-based deploy from the Coolify host | Accepted | 2026-11-06 |
+| [0040](/chartgen/decisions/0040-layout-compare-restore/) | A layout stores the scale mode its compare symbols return to | Accepted | 2026-11-06 |

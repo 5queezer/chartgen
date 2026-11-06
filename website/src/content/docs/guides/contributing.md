@@ -41,6 +41,25 @@ Other docs are hand-written, but must be kept in sync when you ship a
 user-facing change. See the project `CLAUDE.md` for the checklist Claude
 follows; human contributors should follow the same rules.
 
+## Testing at another time of day
+
+Sample bars are a function of the clock, so an e2e spec can pass for days and
+then fail for an hour or two when the data takes a different shape, and a retry
+won't help because it sees the same bars. `scripts/e2e-at-clock.sh` runs specs
+against a sample server with its clock moved, to reach those hours on demand:
+
+```bash
+scripts/e2e-at-clock.sh 5h tests/e2e/scale-invert-lock.spec.ts
+scripts/e2e-at-clock.sh 25d tests/e2e/smoke.spec.ts -g "cold boot"
+```
+
+The first argument is the offset (seconds, or `5h`, `25d`), and the rest go to
+`playwright test`, from `web/`. It needs Linux and `gcc`: it moves the clock by
+preloading a small shim into the server. Only the server's clock moves, not the
+browser's. It uses `CHARTGEN_PORT` and `WEB_PORT` like the suite does, and stops if
+either port is in use. Try a spread of offsets when a spec depends on the data;
+this found failures that runs on the real clock did not.
+
 ## CI jobs
 
 `.github/workflows/ci.yml`:
