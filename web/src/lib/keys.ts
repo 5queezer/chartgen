@@ -15,8 +15,9 @@ export function isTypingContext(e: KeyboardEvent): boolean {
 }
 
 /**
- * True when a mouseup, touchend or touchcancel ends a chart press: the left button
- * (a right-button release does not), or the last finger.
+ * True when a mouse event or touchend/touchcancel can end a chart press: the left
+ * button (a right-button one does not), or the last finger. DrawingToolbar also passes
+ * it a mousedown, whose left button ends a press still held.
  */
 export function isRelease(e: Event): boolean {
   if (e instanceof MouseEvent) return e.button === 0;

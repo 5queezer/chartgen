@@ -30,6 +30,7 @@ import {
 } from "../lib/alerts";
 import {
   DRAWINGS_PREFIX,
+  INDEX_KEY,
   loadDrawings,
   setEvictionListener,
   type DrawingRecord,
@@ -205,7 +206,7 @@ const drawingsChanged = () => setDrawingsRevision((n) => n + 1);
 if (typeof window !== "undefined") {
   window.addEventListener("storage", (e) => {
     if (e.key === KEY || e.key === null) setAlertsSignal(load());
-    if (e.key === null || e.key.startsWith(DRAWINGS_PREFIX)) drawingsChanged();
+    if (e.key === null || (e.key.startsWith(DRAWINGS_PREFIX) && e.key !== INDEX_KEY)) drawingsChanged();
   });
 }
 

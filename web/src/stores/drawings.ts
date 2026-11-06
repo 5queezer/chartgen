@@ -88,7 +88,7 @@ export interface DrawingRecord {
 }
 
 export const DRAWINGS_PREFIX = "chartgen.drawings.";
-const INDEX_KEY = DRAWINGS_PREFIX + "index";
+export const INDEX_KEY = DRAWINGS_PREFIX + "index";
 const MAX_POINTS = 3;
 /** Applied on load only; arming a tool refuses to go past it. */
 export const MAX_DRAWINGS = 500;

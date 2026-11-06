@@ -1479,7 +1479,7 @@ test.describe("drawing modifiers", () => {
     await expect(status).toHaveText("inactive: line is vertical");
     await expect(paused).toHaveAttribute("data-status", "paused");
 
-    // The interval changing clears the note, and the paused alert stays paused.
+    // Another interval gives its own reason, and the paused alert stays paused.
     await interval("15m");
     await expect(status).toHaveText("inactive: open BTCUSDT 1h");
     await expect(paused).toHaveAttribute("data-status", "paused");
