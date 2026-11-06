@@ -993,8 +993,29 @@ fn tool_register_indicator(id: Option<Value>, args: &Value, user: Option<&str>) 
     };
     let info = &compiled.info;
     let hash = scripting::source_hash(source);
-    if let Err(e) = store.upsert(user, name, source, &info.to_json(), &hash) {
-        return tool_err(id, &format!("Could not store the indicator: {e}"));
+    let create_only = args
+        .get("create_only")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let stored = if create_only {
+        store.insert_new(user, name, source, &info.to_json(), &hash)
+    } else {
+        store
+            .upsert(user, name, source, &info.to_json(), &hash)
+            .map(|()| true)
+    };
+    match stored {
+        Ok(true) => {}
+        Ok(false) => {
+            let error = json!({
+                "step": "exists",
+                "line": null,
+                "message": format!("You already have an indicator named {name}. Open it, or pick another name."),
+            });
+            let payload = json!({ "ok": false, "errors": [error] });
+            return tool_err(id, &serde_json::to_string_pretty(&payload).unwrap());
+        }
+        Err(e) => return tool_err(id, &format!("Could not store the indicator: {e}")),
     }
     tool_ok(
         id,
@@ -1070,7 +1091,15 @@ fn tool_get_my_indicator(id: Option<Value>, args: &Value, user: Option<&str>) ->
             id,
             json!({ "name": s.name, "source": s.source, "updated_at": s.updated_at }),
         ),
-        Ok(None) => tool_err(id, &format!("You have no indicator named `{name}`.")),
+        // Told apart from a failed read: a client may treat this one as "gone".
+        Ok(None) => {
+            let payload = json!({
+                "ok": false,
+                "error": "not_found",
+                "message": format!("You have no indicator named `{name}`."),
+            });
+            tool_err(id, &serde_json::to_string_pretty(&payload).unwrap())
+        }
         Err(e) => tool_err(id, &format!("Could not read the indicator: {e}")),
     }
 }
@@ -4867,6 +4896,30 @@ def compute(ohlcv, params, chart):
 "#;
 
     #[test]
+    fn create_only_never_replaces_a_saved_script() {
+        let u = user();
+        let register = |source: &str, create_only: bool| {
+            call(
+                "register_indicator",
+                json!({"name": "mine", "source": source, "create_only": create_only}),
+                Some(&u),
+            )
+        };
+        let other = MOMENTUM.replace("Momentum", "Other");
+
+        assert_eq!(payload(&register(MOMENTUM, true))["replaced"], false);
+        let refused = register(&other, true);
+        assert_eq!(refused["result"]["isError"], true);
+        let body: Value = serde_json::from_str(text(&refused, 0)).unwrap();
+        assert_eq!(body["errors"][0]["step"], "exists");
+        let got = payload(&call("get_my_indicator", json!({"name": "mine"}), Some(&u)));
+        assert_eq!(got["source"], MOMENTUM, "the saved text must survive");
+
+        // Without the flag, saving replaces as before.
+        assert_eq!(payload(&register(&other, false))["replaced"], true);
+    }
+
+    #[test]
     fn tools_listed_only_when_enabled() {
         let names = |on: bool| -> Vec<String> {
             handle_tools_list(Some(json!(1)), on)["result"]["tools"]
@@ -4938,6 +4991,8 @@ def compute(ohlcv, params, chart):
         );
         assert_eq!(other["result"]["isError"], true);
         assert!(!other.to_string().contains("compute"), "{other}");
+        let missing: Value = serde_json::from_str(text(&other, 0)).unwrap();
+        assert_eq!(missing["error"], "not_found");
 
         let all = payload(&tool_list_indicators(Some(json!(1)), Some(&u)));
         let entry = all["indicators"]

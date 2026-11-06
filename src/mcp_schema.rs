@@ -390,7 +390,8 @@ pub fn scripting_tools() -> Vec<Value> {
                 "type": "object",
                 "properties": {
                     "name": { "type": "string", "pattern": "^[a-z][a-z0-9_]{0,47}$", "description": "Indicator name: lowercase letters, digits and _, starting with a letter." },
-                    "source": { "type": "string", "maxLength": 65536, "description": "Starlark source defining PARAMS, META and compute(ohlcv, params, chart)." }
+                    "source": { "type": "string", "maxLength": 65536, "description": "Starlark source defining PARAMS, META and compute(ohlcv, params, chart)." },
+                    "create_only": { "type": "boolean", "default": false, "description": "Refuse instead of replacing when you already have an indicator with this name." }
                 },
                 "required": ["name", "source"]
             }
