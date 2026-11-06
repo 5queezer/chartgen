@@ -13,7 +13,7 @@ use chartgen::data::{sample_ohlcv, Bar};
 use chartgen::indicator::{Bias, PatternStatus};
 use chartgen::indicators::candle_patterns::{self, TrendRule, PATTERNS};
 use chartgen::indicators::chart_patterns::{self, Settings, KINDS};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 const SYMBOLS: &[&str] = &["BTCUSDT", "ETHUSDT", "SOLUSDT", "AAPL", "MSFT", "EURUSD"];
 const INTERVALS: &[&str] = &["15m", "1h", "4h", "1d"];
@@ -202,39 +202,71 @@ fn charts(title: &str, all: &[Vec<Bar>]) {
     );
 }
 
-/// How often a pattern, once confirmed, disappears or changes as bars arrive:
-/// the honest test of "no silent repaint". The window slides like a live chart's.
+/// What the sliding 600-bar window does to confirmed patterns, one bar at a time as
+/// on a live chart. Growing a series from a fixed start changes no past confirmation
+/// (a unit test holds that), but a window's start moves its first pivots, so older
+/// bars can gain and lose confirmed patterns. Both are counted, by how old the
+/// confirmation was: a confirmation at most one bar old is simply new.
 fn stability(all: &[Vec<Bar>]) {
     let s = Settings::default();
-    let (mut confirmed, mut vanished) = (0usize, 0usize);
+    let half = chart_patterns::LOOKBACK / 2;
+    let (mut shown, mut fresh, mut late_newer, mut late_older) = (0usize, 0usize, 0usize, 0usize);
+    let (mut gone_newer, mut gone_older) = (0usize, 0usize);
+    let mut ages = [0usize; 6];
     for bars in all.iter().step_by(3) {
         let bars = &bars[bars.len() - 2000..];
-        let mut seen: BTreeMap<(usize, &str), bool> = BTreeMap::new();
-        for end in (chart_patterns::LOOKBACK..bars.len()).step_by(5) {
+        let mut ever: BTreeSet<(usize, &str)> = BTreeSet::new();
+        let mut before: BTreeSet<(usize, &str)> = BTreeSet::new();
+        for end in chart_patterns::LOOKBACK..bars.len() {
             let from = end - chart_patterns::LOOKBACK;
-            let now = chart_patterns::detect(&bars[from..end], &s, "all");
-            let keys: Vec<(usize, &str, PatternStatus)> = now
+            let now: BTreeSet<(usize, &str)> = chart_patterns::detect(&bars[from..end], &s, "all")
                 .iter()
-                .filter_map(|f| f.confirmed_at.map(|at| (at + from, f.kind.key(), f.status)))
+                .filter_map(|f| f.confirmed_at.map(|at| (at + from, f.kind.key())))
                 .collect();
-            for (at, key, _) in &keys {
-                seen.entry((*at, key)).or_insert(true);
-            }
-            // Old ones scroll out of the window by design: only judge the newer half.
-            for ((at, key), alive) in seen.iter_mut() {
-                let inside = *at > from + chart_patterns::LOOKBACK / 2;
-                let has = keys.iter().any(|(a, k, _)| a == at && k == key);
-                if inside && !has && *alive {
-                    *alive = false;
+            let newest = end - 1;
+            if end > chart_patterns::LOOKBACK {
+                for k in now.difference(&before) {
+                    if !ever.contains(k) {
+                        shown += 1;
+                    }
+                    let age = newest - k.0;
+                    match age {
+                        0 | 1 => fresh += 1,
+                        a if a < half => late_newer += 1,
+                        _ => late_older += 1,
+                    }
+                    if age > 1 {
+                        ages[(age / 100).min(5)] += 1;
+                    }
+                }
+                for k in before.difference(&now) {
+                    // Leaving at the window's start is by design.
+                    if k.0 > from {
+                        if newest - k.0 < half {
+                            gone_newer += 1;
+                        } else {
+                            gone_older += 1;
+                        }
+                    }
                 }
             }
+            ever.extend(now.iter().copied());
+            before = now;
         }
-        confirmed += seen.len();
-        vanished += seen.values().filter(|alive| !**alive).count();
     }
     println!(
-        "Stability: {confirmed} confirmed patterns over sliding windows, {vanished} later vanished from the newer half of the window ({:.1}%)\n",
-        100.0 * vanished as f64 / confirmed.max(1) as f64
+        "Sliding the {}-bar window one bar at a time:",
+        chart_patterns::LOOKBACK
+    );
+    println!(
+        "  {shown} confirmed patterns newly shown. Appearances: {fresh} on the newest bars, {late_newer} late in the newer half of the window, {late_older} in the older half"
+    );
+    println!(
+        "  Age in bars of the late ones: <100 {}, 100s {}, 200s {}, 300s {}, 400s {}, 500s {}",
+        ages[0], ages[1], ages[2], ages[3], ages[4], ages[5]
+    );
+    println!(
+        "  Disappearances before leaving the window: {gone_newer} from the newer half, {gone_older} from the older half\n"
     );
 }
 
