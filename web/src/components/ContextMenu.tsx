@@ -4,6 +4,7 @@
 // the crosshair (ADR-0039). guides/web.md says where touch finds these actions.
 //
 // Not modal, so a right click elsewhere closes this menu and opens that spot's.
+// A left click outside only closes it: see `swallowPress`.
 
 import { DropdownMenu } from "@kobalte/core";
 import { For, Show, createSignal, onCleanup, onMount, type JSX } from "solid-js";
@@ -31,6 +32,37 @@ const [menu, setMenu] = createSignal<(MenuSpec & { x: number; y: number }) | nul
 let returnFocus: Element | null = null;
 let touchPress = false;
 let overlayMenu: (() => MenuSpec | null) | null = null;
+let endSwallow: (() => void) | null = null;
+// There a Ctrl+click is the right click.
+const isMac = typeof navigator !== "undefined" && /mac/i.test(navigator.platform);
+
+/**
+ * The rest of a press that dismissed the menu stops here, before the page sees it:
+ * no replay start, drawing point, symbol change or removed row. It ends with the
+ * release, the click being in the same task. A release that never comes (let go
+ * outside the window) ends it at the next press, key or blur, and until then only
+ * releases and clicks are stopped.
+ */
+function swallowPress(): void {
+  const types = ["mousedown", "pointerup", "mouseup", "click"];
+  const stop = (e: Event) => {
+    e.preventDefault();
+    e.stopImmediatePropagation();
+    if (e.type === "pointerup" || e.type === "mouseup") setTimeout(end);
+  };
+  const end = () => {
+    for (const type of types) window.removeEventListener(type, stop, true);
+    window.removeEventListener("keydown", end, true);
+    window.removeEventListener("pointercancel", end, true);
+    window.removeEventListener("blur", end);
+    endSwallow = null;
+  };
+  for (const type of types) window.addEventListener(type, stop, true);
+  window.addEventListener("keydown", end, true);
+  window.addEventListener("pointercancel", end, true);
+  window.addEventListener("blur", end);
+  endSwallow = end;
+}
 
 const close = () => {
   const el = returnFocus;
@@ -114,9 +146,17 @@ function Entry(props: { item: MenuItem; onSelect: () => void }): JSX.Element {
 export function ContextMenuHost(): JSX.Element {
   onMount(() => {
     const onPointerDown = (e: PointerEvent) => {
+      endSwallow?.();
       touchPress = e.pointerType !== "mouse";
       overlayMenu = null;
-      if (menu() && !(e.target instanceof Element && e.target.closest("[role=menu]"))) close();
+      if (!menu() || (e.target instanceof Element && e.target.closest("[role=menu]"))) return;
+      close();
+      // A right press goes on, to open the menu of what it landed on. A finger's mouse
+      // events come later and on their own clock, and no finger opened this menu.
+      if (e.button === 0 && !(isMac && e.ctrlKey) && e.pointerType !== "touch") {
+        e.stopImmediatePropagation();
+        swallowPress();
+      }
     };
     // A press with another button held has no pointerdown.
     const onMouseDown = () => {
@@ -138,6 +178,7 @@ export function ContextMenuHost(): JSX.Element {
     window.addEventListener("wheel", onWheel, { capture: true, passive: true });
     window.addEventListener("resize", onResize);
     onCleanup(() => {
+      endSwallow?.();
       window.removeEventListener("pointerdown", onPointerDown, true);
       window.removeEventListener("mousedown", onMouseDown, true);
       window.removeEventListener("keydown", onKeyDown, true);

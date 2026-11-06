@@ -533,8 +533,9 @@ and validated on load. Settings are not part of named layouts (invert and lock, 
 
 Right-clicking opens a menu for what is under the pointer (mouse only, see
 [Phones and tablets](#phones-and-tablets) for touch). Arrow keys and `Enter`
-drive it. `Esc` or a click outside closes it, a scroll closes it too, and a right
-click elsewhere moves it there. Anywhere not listed here, and in every text field,
+drive it. `Esc` or a scroll closes it. A click outside closes it and does nothing
+else, so it cannot start a replay, place a drawing point or press what is under
+it. A right click elsewhere moves the menu there. Anywhere not listed here, and in every text field,
 the browser's own menu stays.
 
 ### Chart context menu
