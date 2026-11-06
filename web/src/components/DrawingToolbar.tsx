@@ -926,6 +926,23 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
     if (typeof id === "string") {
       armedId = id;
       setArmed(name);
+      // A double click finishes a drawing in klinecharts, its only use of forceComplete, and a
+      // click after it or a slow one can land on the first point. On a two-point line either
+      // gives a zero-length line, which no alert can ever use: the tool waits for a second
+      // point somewhere else instead.
+      if (SNAP_TOOLS.has(name)) {
+        const o = chart.getOverlayById(id) as unknown as {
+          points: { dataIndex?: number; value?: number }[];
+          forceComplete: () => void;
+          nextStep: () => void;
+        };
+        const nextStep = o.nextStep.bind(o);
+        o.forceComplete = () => {};
+        o.nextStep = () => {
+          const [a, b] = o.points;
+          if (!b || a?.dataIndex !== b.dataIndex || a?.value !== b.value) nextStep();
+        };
+      }
     }
   };
 
@@ -1292,6 +1309,61 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
     window.removeEventListener("mouseup", replayDroppedClick);
   });
 
+  // Touch has the same drop (`_touchEndHandler`), with its own measure: a double tap is under
+  // 30 px, by x + y, within 500 ms. It is sent again with the real touch, which is all
+  // klinecharts reads. Only the replay is synthetic, and it comes after the real release.
+  let armedTap: { step: number; x: number; y: number; moved: boolean; double: boolean } | null = null;
+  let lastArmedTap: { x: number; y: number; time: number } | null = null;
+  const noteArmedTap = (e: TouchEvent) => {
+    if (!e.isTrusted) return;
+    const step = armedStep();
+    const t = e.touches[0];
+    if (step === undefined || e.touches.length !== 1 || !t || !(t.target instanceof Node) || !props.chart?.getDom()?.contains(t.target)) {
+      armedTap = null;
+      return;
+    }
+    const last = lastArmedTap;
+    const double =
+      last !== null &&
+      e.timeStamp - last.time < 500 &&
+      Math.abs(t.clientX - last.x) + Math.abs(t.clientY - last.y) < 30;
+    lastArmedTap = { x: t.clientX, y: t.clientY, time: e.timeStamp };
+    armedTap = { step, x: t.clientX, y: t.clientY, moved: false, double };
+  };
+  const trackArmedTap = (e: TouchEvent) => {
+    const t = e.changedTouches[0];
+    if (armedTap && t && Math.abs(t.clientX - armedTap.x) + Math.abs(t.clientY - armedTap.y) >= 5) {
+      armedTap.moved = true;
+    }
+  };
+  const forgetArmedTap = () => {
+    armedTap = null;
+  };
+  // Bubble, so after klinecharts has had the release.
+  const replayDroppedTap = (e: TouchEvent) => {
+    const tap = armedTap;
+    const t = e.changedTouches[0];
+    armedTap = null;
+    if (!tap || !t || armedStep() !== tap.step || tap.moved || tap.double) return;
+    const init = { bubbles: true, cancelable: true, changedTouches: [t] };
+    const start = new TouchEvent("touchstart", { ...init, touches: [t], targetTouches: [t] });
+    const end = new TouchEvent("touchend", init);
+    t.target.dispatchEvent(start);
+    t.target.dispatchEvent(end);
+  };
+  window.addEventListener("touchstart", noteArmedTap, true);
+  window.addEventListener("touchmove", trackArmedTap, true);
+  window.addEventListener("touchend", trackArmedTap, true);
+  window.addEventListener("touchcancel", forgetArmedTap, true);
+  window.addEventListener("touchend", replayDroppedTap);
+  onCleanup(() => {
+    window.removeEventListener("touchstart", noteArmedTap, true);
+    window.removeEventListener("touchmove", trackArmedTap, true);
+    window.removeEventListener("touchend", trackArmedTap, true);
+    window.removeEventListener("touchcancel", forgetArmedTap, true);
+    window.removeEventListener("touchend", replayDroppedTap);
+  });
+
   const onKey = (e: KeyboardEvent) => {
     if (e.defaultPrevented) return;
     // Our own menu has role=menu, so it is handled before the guard.
@@ -1384,6 +1456,7 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
   // or plain pan: give it one, off the panes. With nothing pressed, nothing hears it.
   const releaseOnBlur = () => {
     armedPress = null;
+    armedTap = null;
     document.documentElement.dispatchEvent(
       new MouseEvent("mouseup", { bubbles: true, button: 0, clientX: -1, clientY: -1 }),
     );
