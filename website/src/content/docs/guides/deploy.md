@@ -54,6 +54,8 @@ registrations of external MCP clients. See the [persistence reference](/chartgen
 | `CHARTGEN_SERVER_ALERT_CLIENTS` | `src/server_alerts.rs` | Comma-separated OAuth client ids that may create server alerts and use webhooks. Unset: anyone may create alerts, nobody gets webhooks. `*`: anyone, with webhooks. |
 | `CHARTGEN_SERVER_ALERT_PAIRS_PER_CLIENT` | `src/server_alerts.rs` | Symbol and interval pairs one client may watch. Default 2. |
 | `CHARTGEN_WEBHOOK_PROXY` | `src/webhook.rs` | `http` or `https` URL of a proxy that sends the webhooks, so a receiver does not see this server's address. Unset means direct, ignoring `HTTPS_PROXY` and the like. |
+| `CHARTGEN_VAPID_SUBJECT` | `src/server_alerts.rs` | `mailto:` or `https:` URL where push services can reach you. Falls back to an https `CHARTGEN_BASE_URL`; with neither, [browser push](#browser-push) stays off. |
+| `CHARTGEN_VAPID_PRIVATE_KEY` | `src/server_alerts.rs` | Application server key for push, 32 bytes of base64url. Unset, one is made once and kept in `chartgen.db`. Changing it stops every device until its browser next opens chartgen. |
 | `CHARTGEN_WEBHOOK_BLOCKED_PREFIXES` | `src/webhook.rs` | Comma-separated addresses or prefixes a webhook may not reach besides the private ranges (`203.0.113.7,2001:db8:1::/48`). For this network's own public addresses. |
 | `CHARTGEN_WEBHOOK_TEST_ORIGIN` | `src/webhook.rs` | Tests only. One loopback origin (`http://127.0.0.1:9000`) a webhook may reach. Ignored unless `CHARTGEN_DATA_SOURCE=sample`, so it does nothing on a live server. |
 | `HOME` / `USERPROFILE` | `src/main.rs` | Picks the data directory (`~/.chartgen/`). Override to relocate `alerts.json` / `trades.log` / `subscriptions.json` / `chartgen.db`. |
@@ -147,6 +149,63 @@ To replace one that leaked:
    new signing secrets come with them.
 
 Whoever held the id may already have sent a webhook, so treat your IP as known to them.
+
+### Browser push
+
+An alert can notify a browser or phone with chartgen closed
+([ADR-0045](/chartgen/decisions/0045-web-push-for-server-alerts/)). It runs where server alerts do,
+needs no setting of its own beyond `CHARTGEN_VAPID_SUBJECT` or an https `CHARTGEN_BASE_URL`, and needs
+the site on https, because browsers only allow push there and on localhost.
+
+| `CHARTGEN_SERVER_ALERT_CLIENTS` | Who gets push |
+|---|---|
+| A list of ids (recommended) | Those clients |
+| Unset | Anyone, though nobody gets webhooks |
+| `*` | Anyone |
+
+**Requests go only to** `fcm.googleapis.com`, `updates.push.services.mozilla.com`, `*.push.apple.com` and
+`*.notify.windows.com`, after the same address checks as a webhook, so a stranger cannot aim one at a
+host of their choice. Those services do see this server's IP, unless `CHARTGEN_WEBHOOK_PROXY` is set,
+which push also uses. If you filter outbound traffic, allow those hosts.
+
+With the list unset, a stranger can register up to 5 devices per client id, and client ids are free, so
+**the 2000 devices can be filled quickly**: 400 clients with made-up endpoints took 2.1 s in a review, from
+loopback, which the limit on registrations exempts. From any other address that limit (20 per 10 minutes
+per TCP peer) makes it about 3 h 20 min, and behind a tunnel all clients may share one peer, so real users
+then wait with the attacker. Check which peer yours presents. When full, a new device replaces someone
+else's: never a listed client's, and first those with no active alert that notifies, idle longest first. So a flood
+mostly replaces itself, but it can push out a real user who has push on and no such alert, until their
+browser next opens chartgen. The 120 deliveries a minute are shared in the same way, per client and not per
+person, and the real ceiling is about 360 requests, because retries do not count.
+
+**Recommended for this server until sign-in lands:** `CHARTGEN_SERVER_ALERT_CLIENTS`, and
+`CHARTGEN_VAPID_SUBJECT` with your address. **Each browser is its own client**, so list one id for each browser
+you use, and expect an alert to notify only the devices of the browser that made it: to get an alert on your
+phone, make it on your phone.
+
+**A listed client id is a password, for push as well.** Whoever has it can get a token, replace that
+client's devices with their own, and receive its fires and notes. It appears in `/authorize` URLs, so in browser
+history and in any proxy that logs query strings. Sign-in fixes this; until then, replace a leaked id as
+[above](#server-alerts).
+
+Tests only use a fake push service. Before relying on it, check real delivery by hand:
+
+1. On the server, set `CHARTGEN_SERVER_ALERTS=1`, `CHARTGEN_SERVER_ALERT_CLIENTS` and
+   `CHARTGEN_VAPID_SUBJECT`, and open the site over https.
+2. **Desktop Chrome (FCM):** in the Alerts tab press **Enable notifications** and allow. Create a
+   **Run on server** alert with **Send a notification** ticked, on a level the price will soon cross.
+   Close every chartgen tab, and wait. A notification should appear; clicking it should open the chart
+   on that symbol. The alert's row should then show no error.
+3. **Firefox (Mozilla):** the same.
+4. **Edge on Windows (Windows push):** the same.
+5. **Android Chrome:** the same, with the app closed and the screen off.
+6. **iPhone or iPad, iOS 16.4 or later (Apple):** in Safari the control should say to add it to the Home
+   Screen. Do that, open it from there, sign in, then as above. Lock the phone and wait.
+7. With a tab open and push on, check that one fire gives one notification and no toast.
+8. **Turn off**: the next fire should not notify this device, and its row should say that no device has
+   notifications on. Each browser is its own client, so two browsers cannot share an alert yet.
+
+If a row shows `HTTP 401` or `HTTP 403`, the push service refused the VAPID token: check the subject.
 
 ## Reverse proxy
 

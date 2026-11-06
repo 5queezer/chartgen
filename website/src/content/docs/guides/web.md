@@ -800,6 +800,21 @@ one fires, the tab that leads shows the toast, within 5 s, once however many tab
 a fire while no tab was open is reported when you next open one. A webhook over the server's
 budget waits its turn, so it can arrive later than the toast.
 
+**Notifications** reach this device with chartgen closed
+([ADR-0045](/chartgen/decisions/0045-web-push-for-server-alerts/)). Press **Enable notifications**
+in the Alerts tab or the dialog, which is the only thing that asks for the browser's permission,
+then tick **Send a notification** on an alert; new alerts start ticked once this device is on. It
+works in desktop browsers and on Android. On an iPhone or iPad, add chartgen to the Home Screen first
+(Share, then Add to Home Screen) and open it from there, because iOS only lets an installed app
+notify; the control says so. If notifications are blocked, or the browser cannot do it, it says that
+too. The notification shows the symbol, the condition and the price, and clicking it opens the chart
+on that symbol. With push on, the notification is the one report of that fire: the tab shows no toast
+for it, unless the push failed or you first see the fire more than an hour later, when the notification may
+never have arrived. **Turn off** stops this device. Signing out does not, so alarms keep working.
+
+Each browser is its own sign-in for now, so **an alert notifies only the browser that made it**: to get an
+alert on your phone, make it on your phone. On iOS the Home Screen app probably counts as its own browser.
+
 A server alert belongs to the sign-in of this browser, so clearing its site data loses
 access to it while it keeps running. It has no line on the chart and is not in the
 Object Tree yet. Limits: 20 alerts and 2 symbol and interval pairs per sign-in, and an *Every

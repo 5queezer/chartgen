@@ -382,11 +382,13 @@ pub fn tools_list_result() -> Value {
 
 /// Names of the server alert tools (ADR-0042). They answer on the HTTP
 /// transport, where a call has an OAuth client to own the alert.
-pub const SERVER_ALERT_TOOLS: [&str; 4] = [
+pub const SERVER_ALERT_TOOLS: [&str; 6] = [
     "create_server_alert",
     "list_server_alerts",
     "update_server_alert",
     "delete_server_alert",
+    "subscribe_push",
+    "unsubscribe_push",
 ];
 
 /// Tools for alerts that run on the server (ADR-0042). `tools/list` appends them
@@ -418,7 +420,8 @@ pub fn server_alert_tools() -> Vec<Value> {
                     "trigger": trigger.clone(),
                     "message": { "type": "string", "maxLength": 200, "description": "Your note, sent in the webhook payload." },
                     "webhook_url": { "type": "string", "maxLength": 512, "description": "https URL to POST to when the alert fires." },
-                    "sign": { "type": "boolean", "description": "Sign deliveries with a per-alert secret (HMAC-SHA256). Needs webhook_url.", "default": false }
+                    "sign": { "type": "boolean", "description": "Sign deliveries with a per-alert secret (HMAC-SHA256). Needs webhook_url.", "default": false },
+                    "push": { "type": "boolean", "description": "Notify your devices (subscribe_push) when it fires. May go with a webhook.", "default": false }
                 },
                 "required": ["symbol", "condition", "level", "trigger"]
             }
@@ -441,7 +444,8 @@ pub fn server_alert_tools() -> Vec<Value> {
                     "trigger": trigger,
                     "message": { "type": "string", "maxLength": 200, "description": "Your note; an empty string removes it." },
                     "webhook_url": { "type": "string", "maxLength": 512, "description": "New https URL, or an empty string to remove the webhook." },
-                    "sign": { "type": "boolean", "description": "true: sign with a new secret. false: stop signing." }
+                    "sign": { "type": "boolean", "description": "true: sign with a new secret. false: stop signing." },
+                    "push": { "type": "boolean", "description": "Notify your devices when it fires, or stop." }
                 },
                 "required": ["alert_id"]
             }
@@ -455,6 +459,30 @@ pub fn server_alert_tools() -> Vec<Value> {
                     "alert_id": { "type": "string", "description": "The alert's id." }
                 },
                 "required": ["alert_id"]
+            }
+        }),
+        json!({
+            "name": "subscribe_push",
+            "description": "Register this browser's Web Push subscription, so that server alerts with push: true notify it. Subscribe with the public_key from list_server_alerts. The endpoint must be a known push service (FCM, Mozilla, Apple, Windows). Registering the same endpoint again updates its keys. A device over the limit replaces your oldest. Devices get the alerts of this client only.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "endpoint": { "type": "string", "maxLength": 1024, "description": "PushSubscription.endpoint." },
+                    "p256dh": { "type": "string", "maxLength": 88, "description": "The subscription's p256dh key, base64url." },
+                    "auth": { "type": "string", "maxLength": 24, "description": "The subscription's auth secret, base64url." }
+                },
+                "required": ["endpoint", "p256dh", "auth"]
+            }
+        }),
+        json!({
+            "name": "unsubscribe_push",
+            "description": "Stop notifying this browser. Signing out does not do this, so that alarms keep working. Returns {removed: false} if you have no such device.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "endpoint": { "type": "string", "description": "PushSubscription.endpoint." }
+                },
+                "required": ["endpoint"]
             }
         }),
     ]

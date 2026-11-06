@@ -22,6 +22,10 @@ const alert: ServerAlert = {
   last_delivery_at: null,
   last_status: null,
   last_error: null,
+  push: false,
+  last_push_at: null,
+  last_push_status: null,
+  last_push_error: null,
   feed: "live",
   last_price: 99,
 };
@@ -167,6 +171,40 @@ describe("asking the server", () => {
     const store = await load();
     expect(store.takeNewFires().map((a) => a.id)).toEqual(["a"]);
     expect(store.takeNewFires()).toEqual([]);
+  });
+
+  describe("with push on this device", () => {
+    const FIRED = 1_000_000;
+    const fired = { ...alert, fire_count: 1, push: true, last_triggered_at: FIRED };
+    const open = (a: ServerAlert) => {
+      const data = stubStorage({ [LIST]: JSON.stringify({ enabled: true, alerts: [a] }) });
+      return { data, store: load() };
+    };
+
+    it("says nothing about a fire the push reported, and marks it told", async () => {
+      const { data, store } = open({ ...fired, last_push_at: FIRED + 1 });
+      const s = await store;
+      expect(s.takeNewFires(true, FIRED + 2)).toEqual([]);
+      expect(JSON.parse(data.get("chartgen.serverAlerts.seen")!)).toEqual({ a: 1 });
+      expect(s.takeNewFires(true, FIRED + 3)).toEqual([]);
+    });
+
+    it("waits for the outcome, then reports a push that failed, once", async () => {
+      const { data, store } = open(fired);
+      const s = await store;
+      expect(s.takeNewFires(true, FIRED + 1)).toEqual([]);
+      expect(JSON.parse(data.get("chartgen.serverAlerts.seen")!)).toEqual({ a: 0 });
+      const failed = { ...fired, last_push_at: FIRED + 2, last_push_error: "HTTP 500" };
+      data.set(LIST, JSON.stringify({ enabled: true, alerts: [failed] }));
+      const again = await load();
+      expect(again.takeNewFires(true, FIRED + 3).map((a) => a.id)).toEqual(["a"]);
+      expect(again.takeNewFires(true, FIRED + 4)).toEqual([]);
+    });
+
+    it("reports as before when this device has push off", async () => {
+      const { store } = open({ ...fired, last_push_at: FIRED + 1 });
+      expect((await store).takeNewFires(false).map((a) => a.id)).toEqual(["a"]);
+    });
   });
 
   it("reports a fire once across tabs through storage", async () => {

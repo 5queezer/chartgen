@@ -1,6 +1,7 @@
 /target
 *.png
 !docs/*.png
+!web/public/icons/*.png
 .claude/
 .docs/
 graphify-out/

@@ -56,9 +56,12 @@ import {
   serverAlerts,
   serverAlertsCanCreate,
   serverAlertsEnabled,
+  serverPush,
   serverWebhooksAllowed,
   updateServerAlert,
 } from "../stores/serverAlerts";
+import { pushOnHere } from "../stores/pushDevice";
+import { PushControl } from "./PushControl";
 import {
   requestNotificationPermission,
   showToast,
@@ -101,6 +104,8 @@ interface Draft {
   /** The webhook's host when editing a server alert that has one. */
   webhookHost?: string;
   sign: boolean;
+  /** Notify the sign-in's devices when it fires. */
+  push: boolean;
 }
 
 const SERVER_DEFAULTS = {
@@ -108,6 +113,7 @@ const SERVER_DEFAULTS = {
   evaluateOn: "live",
   webhook: "",
   sign: false,
+  push: false,
 } as const;
 
 const [draft, setDraft] = createSignal<Draft | null>(null);
@@ -148,6 +154,7 @@ export function openAlertDialog(opts: OpenAlertOptions = {}): void {
       trigger: onServer.trigger,
       message: onServer.message ?? "",
       evaluateOn: onServer.evaluate_on,
+      push: onServer.push,
       webhookHost: onServer.webhook?.host,
     });
     return;
@@ -180,6 +187,7 @@ export function openAlertDialog(opts: OpenAlertOptions = {}): void {
   const price = opts.price ?? (opts.source ? null : lastPrice(sym));
   setDraft({
     ...SERVER_DEFAULTS,
+    push: pushOnHere(),
     symbol: sym,
     source:
       opts.drawingId !== undefined ? drawingRef(opts.drawingId) : (opts.source ?? PRICE),
@@ -451,6 +459,7 @@ export function AlertDialog(props: AlertDialogProps): JSX.Element {
       message: d.message,
       ...(webhook !== "" ? { webhook_url: webhook } : {}),
       ...(d.sign ? { sign: true } : {}),
+      ...(serverPush() ? { push: d.push } : {}),
     };
     setPending(true);
     try {
@@ -849,6 +858,17 @@ export function AlertDialog(props: AlertDialogProps): JSX.Element {
                         />
                       </label>
                     </Show>
+                  </Show>
+                  <Show when={runsOnServer() && serverPush()}>
+                    <label class="flex items-center justify-between gap-3 text-sm">
+                      Send a notification
+                      <input
+                        type="checkbox"
+                        checked={d().push}
+                        onChange={(e) => patch({ push: e.currentTarget.checked })}
+                      />
+                    </label>
+                    <PushControl onEnabled={() => patch({ push: true })} />
                   </Show>
                   <Show when={error()}>
                     <p role="alert" class="text-xs text-[color:var(--color-danger)]">
