@@ -42,7 +42,12 @@ export type AlertAgainst =
   | { kind: "value"; value: number }
   | { kind: "plot"; line: number; name: string }
   /** The price is the left operand and the plot the level: "Close crossing EMA 200". */
-  | { kind: "price" };
+  | { kind: "price" }
+  /**
+   * A detection of the indicator (ADR-0046): fires when `events[key]` names a newer
+   * bar. There is no level to cross, so `line` and the condition play no part.
+   */
+  | { kind: "event"; key: string };
 
 /** What an alert watches. A record without one is a price alert. */
 export type AlertSource =
@@ -175,6 +180,7 @@ export function describeAlert(
       return `Close ${cond.toLowerCase()} ${src.label}`;
     case "indicator": {
       const ag = src.against;
+      if (ag.kind === "event") return src.name;
       if (ag.kind === "price") return `Close ${cond.toLowerCase()} ${src.name}`;
       const right = ag.kind === "value" ? num(ag.value) : ag.name;
       return `${src.name} ${cond.toLowerCase()} ${right}`;
@@ -235,7 +241,14 @@ export function needsRearm(condition: AlertCondition): boolean {
 export interface ChartValues {
   interval: string;
   indicators: Readonly<
-    Record<string, { lines?: readonly { values: readonly (number | null)[] }[] }>
+    Record<
+      string,
+      {
+        lines?: readonly { values: readonly (number | null)[] }[];
+        events?: readonly { key: string; t: number | null }[];
+        levels?: readonly { line: number; t: number | null; y: number }[];
+      }
+    >
   >;
 }
 
@@ -254,6 +267,7 @@ export function indicatorReading(
 ): Reading | null {
   if (!chart || chart.interval !== src.interval) return null;
   const lines = chart.indicators[src.instanceKey]?.lines;
+  if (src.against.kind === "event") return null;
   const last = (i: number) => {
     const v = lines?.[i]?.values.at(-1);
     return typeof v === "number" && Number.isFinite(v) ? v : null;
@@ -264,6 +278,27 @@ export function indicatorReading(
   if (ag.kind === "price") return [price - plot];
   const level = ag.kind === "value" ? ag.value : last(ag.line);
   return level === null ? null : [plot - level];
+}
+
+/**
+ * Bar time of the newest occurrence of an event alert's detection on `chart`: 0
+ * when it has not happened, null when the chart cannot say (another interval, the
+ * indicator or the event is gone).
+ */
+export function eventTime(src: IndicatorSource, chart: ChartValues | undefined): number | null {
+  if (src.against.kind !== "event" || !chart || chart.interval !== src.interval) return null;
+  const key = src.against.key;
+  const ev = chart.indicators[src.instanceKey]?.events?.find((e) => e.key === key);
+  return ev ? (ev.t ?? 0) : null;
+}
+
+/**
+ * What an indicator's level plots stand on: a jump of a plot to a new swing
+ * (ADR-0046) is no crossing, so a reading from another swing does not count.
+ */
+export function levelsAnchor(src: IndicatorSource, chart: ChartValues | undefined): string {
+  const levels = chart?.indicators[src.instanceKey]?.levels;
+  return levels ? levels.map((l) => `${l.line}:${l.t}:${l.y}`).join() : "";
 }
 
 /**

@@ -1,4 +1,4 @@
-//! Candlestick pattern recognition (ADR-0044).
+//! Candlestick pattern recognition (ADR-0046).
 //!
 //! `detect` is pure: bars in, hits out. Shape rules follow the conventions of
 //! TradingView's published Pine candlestick library (body against an EMA(14) of

@@ -113,7 +113,7 @@ impl Bias {
     }
 }
 
-/// A text label on one bar (candlestick patterns, ADR-0044).
+/// A text label on one bar (candlestick patterns, ADR-0046).
 #[derive(Clone, Debug)]
 pub struct BarLabel {
     pub x: usize,
@@ -132,7 +132,7 @@ pub struct BarLabel {
     pub tentative: bool,
 }
 
-/// Where a detected chart pattern stands. See ADR-0044.
+/// Where a detected chart pattern stands. See ADR-0046.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PatternStatus {
     Forming,
@@ -162,7 +162,7 @@ pub struct Stroke {
 }
 
 /// A pattern drawn over several bars, re-detected as a whole on every
-/// response: a newer response replaces all of them (ADR-0044).
+/// response: a newer response replaces all of them (ADR-0046).
 #[derive(Clone, Debug)]
 pub struct PatternShape {
     pub key: String,
@@ -184,7 +184,7 @@ pub struct PatternShape {
 
 /// A flat level (`lines[line]`) from bar `x` to the last bar. The whole level
 /// moves when its anchors do, so a newer response rewrites it on every bar
-/// instead of only the bars it covers (ADR-0044).
+/// instead of only the bars it covers (ADR-0046).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct LevelLine {
     pub line: usize,

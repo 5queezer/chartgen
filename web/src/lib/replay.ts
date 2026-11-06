@@ -20,7 +20,7 @@ import { barCloseMs } from "./countdown";
 import { keyName } from "./instances";
 import { INITIAL_BARS, type SeriesUpdate } from "./liveFeed";
 import { sliceFuture } from "./projection";
-import { colorIdxInto } from "./seriesMerge";
+import { colorIdxInto, shiftLevel, shiftPattern, writeLevels } from "./seriesMerge";
 
 type Indicator = SeriesPayload["indicators"][string];
 type DivLine = NonNullable<Indicator["divlines"]>[number];
@@ -59,6 +59,10 @@ const REPAINTING = new Set([
   "zigzag",
   "linreg_channel",
   "ichimoku",
+  "chart_patterns",
+  "auto_chart_patterns",
+  "auto_fib",
+  "auto_fib_retracement",
 ]);
 
 /**
@@ -200,6 +204,11 @@ function sliceIndicator(
   // A divergence is known once its end bar printed (and was confirmed): one
   // ending later is not drawn yet, not even in part.
   if (ind.divlines) out.divlines = ind.divlines.filter((d) => endOf(d) + markers < n);
+  if (ind.labels) out.labels = ind.labels.filter((l) => l.x + markers < n);
+  // Whole-window channels hold what the newest bars know: `replayFrame` takes
+  // them from a recompute instead, as they would show the future here.
+  if (ind.patterns) out.patterns = [];
+  if (ind.levels) out.levels = [];
   // New arrays per frame even where nothing changes: the chart re-stores an
   // indicator's geometry when these arrays change identity.
   if (ind.hlines) out.hlines = ind.hlines.slice();
@@ -332,6 +341,17 @@ export function replayFrame(
     ind.hbars = r?.hbars ? r.hbars.slice() : [];
     ind.hlines = r?.hlines ? r.hlines.slice() : [];
     if (r?.y_range) ind.y_range = r.y_range;
+    // Whole-window channels (ADR-0046) as the recompute saw them: its indices run
+    // from its own first bar, which is `at(0)` here. A level rewrites its plot on
+    // every bar: nothing of the live swing may stay on bars before the window.
+    const base = r && recompute!.bars.length > 0 ? at(0) : -1;
+    if (ind.patterns || r?.patterns) {
+      ind.patterns = base >= 0 ? (r?.patterns ?? []).map((p) => shiftPattern(p, base)) : [];
+    }
+    if (ind.levels || r?.levels) {
+      ind.levels = base >= 0 ? (r?.levels ?? []).map((l) => shiftLevel(l, base)) : [];
+      writeLevels(ind.lines, ind.levels, n);
+    }
   }
   return slice;
 }
@@ -367,7 +387,15 @@ export function frameShape(series: SeriesPayload): string {
   return Object.entries(series.indicators)
     .filter(
       ([, i]) =>
-        some(i.lines) || some(i.histogram) || some(i.fills) || some(i.hbars) || some(i.divlines) || some(i.hlines),
+        some(i.lines) ||
+        some(i.histogram) ||
+        some(i.fills) ||
+        some(i.hbars) ||
+        some(i.divlines) ||
+        some(i.hlines) ||
+        some(i.labels) ||
+        some(i.patterns) ||
+        some(i.events),
     )
     .map(([name]) => name)
     .join("\n");

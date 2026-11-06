@@ -1,4 +1,4 @@
-//! Auto Fib Retracement (ADR-0044): fib levels over the last significant swing.
+//! Auto Fib Retracement (ADR-0046): fib levels over the last significant swing.
 //!
 //! `last_swing` and `levels` are pure. Only closed bars count, so the forming bar
 //! moves nothing. The swing changes when a newer pivot is confirmed, `depth` bars
@@ -142,7 +142,7 @@ impl Indicator for AutoFib {
         ];
         for (i, d) in DEFAULTS.iter().enumerate() {
             let mut p = json!({"name": format!("level{}", i + 1), "type": "number", "min": -10, "max": 10,
-                               "description": "Ratio of the swing: 0 at its end, 1 at its start. Empty hides the level"});
+                               "description": "Ratio of the swing: 0 at its end, 1 at its start. Colors and hiding are on the Style tab"});
             if let Some(v) = d {
                 p["default"] = json!(v);
             }
@@ -176,7 +176,7 @@ impl Indicator for AutoFib {
     }
 
     fn warmup_bars(&self) -> usize {
-        // A live tail must see the same window as the full load (ADR-0044).
+        // A live tail must see the same window as the full load (ADR-0046).
         self.lookback
     }
 

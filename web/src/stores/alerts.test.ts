@@ -917,3 +917,140 @@ describe("indicator alerts", () => {
     expect(s.inactiveReason(a, { symbol: "AAPL", interval: "1h", keys: ["rsi"] })).toBeNull();
   });
 });
+
+describe("alerts on a detection (ADR-0046)", () => {
+  const key = "chart_patterns";
+  const tick = (t: number | null) => ({
+    chart: {
+      interval: "1h",
+      indicators: { [key]: { events: [{ key: "bullish", t }, { key: "bearish", t: null }] } },
+    },
+  });
+  async function withEvent(trigger: "once" | "every" = "every") {
+    stubStorage();
+    const s = await load();
+    s.setIndicatorSignatures({ [key]: "sig" });
+    const added = s.addAlert({
+      symbol: "BTCUSDT",
+      condition: "crossing_up",
+      trigger,
+      source: {
+        kind: "indicator",
+        interval: "1h",
+        instanceKey: key,
+        signature: "sig",
+        line: 0,
+        name: "Chart Patterns: Bullish pattern confirmed",
+        against: { kind: "event", key: "bullish" },
+      },
+    });
+    expect(added).not.toBeNull();
+    return s;
+  }
+
+  it("an old detection does not fire when the chart loads", async () => {
+    const s = await withEvent();
+    expect(s.processPrice("BTCUSDT", 1, 0, tick(100))).toEqual([]);
+    expect(s.processPrice("BTCUSDT", 1, 0, tick(100))).toEqual([]);
+  });
+
+  it("each newer detection fires once", async () => {
+    const s = await withEvent();
+    s.processPrice("BTCUSDT", 1, 0, tick(100));
+    expect(s.processPrice("BTCUSDT", 1, 0, tick(160))).toHaveLength(1);
+    expect(s.processPrice("BTCUSDT", 1, 0, tick(160))).toEqual([]);
+    // On the very next bar too: nothing has to fall back first.
+    expect(s.processPrice("BTCUSDT", 1, 0, tick(220))).toHaveLength(1);
+  });
+
+  it("the first detection ever fires too", async () => {
+    const s = await withEvent();
+    s.processPrice("BTCUSDT", 1, 0, tick(null));
+    expect(s.processPrice("BTCUSDT", 1, 0, tick(160))).toHaveLength(1);
+  });
+
+  it("a once alert stops after firing", async () => {
+    const s = await withEvent("once");
+    s.processPrice("BTCUSDT", 1, 0, tick(100));
+    expect(s.processPrice("BTCUSDT", 1, 0, tick(160))).toHaveLength(1);
+    expect(s.processPrice("BTCUSDT", 1, 0, tick(220))).toEqual([]);
+    expect(s.alerts()[0]!.active).toBe(false);
+  });
+
+  it("does not run with another interval or other settings on the chart", async () => {
+    const s = await withEvent();
+    s.processPrice("BTCUSDT", 1, 0, tick(100));
+    const other = { chart: { ...tick(160).chart, interval: "4h" } };
+    expect(s.processPrice("BTCUSDT", 1, 0, other)).toEqual([]);
+    // No value on that chart: the baseline starts over.
+    expect(s.processPrice("BTCUSDT", 1, 0, tick(160))).toEqual([]);
+    s.setIndicatorSignatures({ [key]: "changed" });
+    expect(s.processPrice("BTCUSDT", 1, 0, tick(220))).toEqual([]);
+  });
+
+  it("survives a reload and rejects a detection without a key", async () => {
+    await withEvent();
+    const s = await load();
+    const [a] = s.alerts();
+    expect(a!.source).toMatchObject({ against: { kind: "event", key: "bullish" } });
+    expect(
+      s.sanitizeAlerts([
+        { ...a, id: "bad", source: { ...(a!.source as object), against: { kind: "event" } } },
+      ]),
+    ).toEqual([]);
+  });
+
+  it("says what it watches", async () => {
+    const s = await withEvent();
+    const { describeAlert } = await import("../lib/alerts");
+    expect(describeAlert(s.alerts()[0]!)).toBe("Chart Patterns: Bullish pattern confirmed");
+  });
+});
+
+describe("alerts on a level plot (ADR-0046)", () => {
+  const key = "auto_fib";
+  const tick = (y: number, anchor = 1000) => ({
+    chart: {
+      interval: "1h",
+      indicators: {
+        [key]: { lines: [{ values: [y] }], levels: [{ line: 0, t: anchor, y }] },
+      },
+    },
+  });
+
+  async function onLevel() {
+    stubStorage();
+    const s = await load();
+    s.setIndicatorSignatures({ [key]: "sig" });
+    s.addAlert({
+      symbol: "BTCUSDT",
+      condition: "crossing",
+      trigger: "every",
+      source: {
+        kind: "indicator",
+        interval: "1h",
+        instanceKey: key,
+        signature: "sig",
+        line: 0,
+        name: "0.618",
+        against: { kind: "price" },
+      },
+    });
+    return s;
+  }
+
+  it("a price crossing the level fires", async () => {
+    const s = await onLevel();
+    s.processPrice("BTCUSDT", 90, 0, tick(100));
+    expect(s.processPrice("BTCUSDT", 110, 0, tick(100))).toHaveLength(1);
+  });
+
+  it("the level jumping over the price with a new swing does not", async () => {
+    const s = await onLevel();
+    s.processPrice("BTCUSDT", 90, 0, tick(100));
+    // Now under the price, because the swing moved: no crossing by the price.
+    expect(s.processPrice("BTCUSDT", 90, 0, tick(80, 2000))).toEqual([]);
+    // The new swing's level still works.
+    expect(s.processPrice("BTCUSDT", 70, 0, tick(80, 2000))).toHaveLength(1);
+  });
+});

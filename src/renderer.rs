@@ -242,7 +242,7 @@ pub fn render_results(
                 )))?;
             }
 
-            // Pattern outlines (ADR-0044) draw the same way as segments.
+            // Pattern outlines (ADR-0046) draw the same way as segments.
             let strokes: Vec<DivLine> = overlay
                 .patterns
                 .iter()

@@ -18,6 +18,7 @@ import { BottomBar } from "./components/BottomBar";
 import {
   AlertDialog,
   AlertButton,
+  eventRef,
   lastPlotValue,
   openAlertDialog,
   plotRef,
@@ -452,6 +453,11 @@ export function App(): JSX.Element {
   const addIndicatorAlert = (key: string) => {
     const series = live()?.series ?? null;
     const ind = series?.indicators[key];
+    const event = ind?.events?.[0];
+    if (event) {
+      openAlertDialog({ source: eventRef(key, event.key) });
+      return;
+    }
     if (!ind?.lines?.length) return;
     if (ind.is_overlay) {
       openAlertDialog({ level: plotRef(key, 0) });

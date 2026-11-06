@@ -1497,7 +1497,7 @@ fn panel_result_to_series_json(
     out
 }
 
-// Pattern channels of a series indicator (ADR-0044), from the untrimmed result:
+// Pattern channels of a series indicator (ADR-0046), from the untrimmed result:
 // `pr`'s indices are bars of `data`, of which the response starts at `offset`.
 // `labels` belong to their bar and are cut like signals. `patterns`, `levels`
 // and `events` are re-detected as a whole, so they stay complete on a tail: an
@@ -1729,7 +1729,7 @@ fn panel_result_to_json(pr: &chartgen::indicator::PanelResult) -> Value {
         out["hbars_count"] = json!(pr.hbars.len());
     }
 
-    // Patterns (ADR-0044): the newest labels and every chart pattern, by bar index.
+    // Patterns (ADR-0046): the newest labels and every chart pattern, by bar index.
     if !pr.labels.is_empty() {
         let labels: Vec<Value> = pr
             .labels

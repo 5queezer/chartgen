@@ -1,4 +1,4 @@
-//! Auto chart patterns (ADR-0044): classic patterns on ZigZag pivots.
+//! Auto chart patterns (ADR-0046): classic patterns on ZigZag pivots.
 //!
 //! `detect` is pure and reads closed bars only. It walks through time, deciding
 //! each pattern from what was known then: a pivot is known `depth` bars after its
@@ -1009,7 +1009,7 @@ impl Indicator for ChartPatterns {
     }
 
     fn warmup_bars(&self) -> usize {
-        // A live tail must see the same window as the full load (ADR-0044).
+        // A live tail must see the same window as the full load (ADR-0046).
         self.lookback
     }
 
@@ -1464,6 +1464,36 @@ mod tests {
             }
         }
         assert!(checked > 50, "too few to mean anything: {checked}");
+    }
+
+    #[test]
+    fn on_a_random_walk_patterns_are_rare_and_no_better_than_chance() {
+        // A hindsight leak shows up here first: confirmations "right" far too often.
+        let s = Settings::default();
+        let (mut bars_seen, mut found, mut judged, mut right) = (0usize, 0usize, 0usize, 0usize);
+        for seed in 1..=40 {
+            let bars = walk(seed * 7919, LOOKBACK);
+            bars_seen += bars.len();
+            for f in detect(&bars, &s, "all") {
+                found += 1;
+                let Some(at) = f.confirmed_at else { continue };
+                let Some(later) = bars.get(at + 10) else {
+                    continue;
+                };
+                let up = later.close > bars[at].close;
+                match f.bias {
+                    Bias::Bullish => right += usize::from(up),
+                    Bias::Bearish => right += usize::from(!up),
+                    Bias::Neutral => continue,
+                }
+                judged += 1;
+            }
+        }
+        let per_1000 = 1000.0 * found as f64 / bars_seen as f64;
+        assert!(per_1000 < 20.0, "{per_1000} per 1000 bars");
+        assert!(judged >= 50, "too few to mean anything: {judged}");
+        let rate = right as f64 / judged as f64;
+        assert!((0.38..=0.62).contains(&rate), "right {rate} of {judged}");
     }
 
     #[test]
