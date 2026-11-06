@@ -415,6 +415,17 @@ pub fn scripting_tools() -> Vec<Value> {
             }
         }),
         json!({
+            "name": "get_my_indicator",
+            "description": "Get the stored Starlark source of one of your registered indicators, to edit and register again.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "Name of your indicator." }
+                },
+                "required": ["name"]
+            }
+        }),
+        json!({
             "name": "delete_indicator",
             "description": "Delete one of your registered indicators. A built-in it shadowed becomes visible again.",
             "inputSchema": {

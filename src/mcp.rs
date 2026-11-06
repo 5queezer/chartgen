@@ -198,6 +198,8 @@ fn call_tool(
         #[cfg(feature = "scripting")]
         "list_my_indicators" if scripting => tool_list_my_indicators(id, user),
         #[cfg(feature = "scripting")]
+        "get_my_indicator" if scripting => tool_get_my_indicator(id, &arguments, user),
+        #[cfg(feature = "scripting")]
         "delete_indicator" if scripting => tool_delete_indicator(id, &arguments, user),
         _ => json!({
             "jsonrpc": "2.0",
@@ -1054,6 +1056,23 @@ fn tool_list_my_indicators(id: Option<Value>, user: Option<&str>) -> Value {
         })
         .collect();
     tool_ok(id, json!({ "total": list.len(), "indicators": list }))
+}
+
+#[cfg(feature = "scripting")]
+fn tool_get_my_indicator(id: Option<Value>, args: &Value, user: Option<&str>) -> Value {
+    let (store, user) = match scripting_session(&id, user, "get_my_indicator") {
+        Ok(s) => s,
+        Err(resp) => return resp,
+    };
+    let name = args.get("name").and_then(|v| v.as_str()).unwrap_or("");
+    match store.get(user, name) {
+        Ok(Some(s)) => tool_ok(
+            id,
+            json!({ "name": s.name, "source": s.source, "updated_at": s.updated_at }),
+        ),
+        Ok(None) => tool_err(id, &format!("You have no indicator named `{name}`.")),
+        Err(e) => tool_err(id, &format!("Could not read the indicator: {e}")),
+    }
 }
 
 #[cfg(feature = "scripting")]
@@ -4861,6 +4880,7 @@ def compute(ohlcv, params, chart):
             "register_indicator",
             "fork_indicator",
             "list_my_indicators",
+            "get_my_indicator",
             "delete_indicator",
         ];
         assert!(scripting
@@ -4903,6 +4923,21 @@ def compute(ohlcv, params, chart):
         assert_eq!(mine["total"], 1);
         assert_eq!(mine["indicators"][0]["name"], "my_momentum");
         assert_eq!(mine["indicators"][0]["source"], "user");
+
+        // The stored source reads back for its owner, and only for its owner.
+        let got = payload(&call(
+            "get_my_indicator",
+            json!({"name": "my_momentum"}),
+            Some(&u),
+        ));
+        assert_eq!(got["source"], MOMENTUM);
+        let other = call(
+            "get_my_indicator",
+            json!({"name": "my_momentum"}),
+            Some("someone_else"),
+        );
+        assert_eq!(other["result"]["isError"], true);
+        assert!(!other.to_string().contains("compute"), "{other}");
 
         let all = payload(&tool_list_indicators(Some(json!(1)), Some(&u)));
         let entry = all["indicators"]

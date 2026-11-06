@@ -733,6 +733,7 @@ types do not include these tools.
 | `register_indicator` | `name` (`^[a-z][a-z0-9_]{0,47}$`), `source` (≤ 64 KiB) | `{ok: true, name, title, overlay, configurable_params, replaced, shadows_builtin}` |
 | `fork_indicator` | `builtin_name` | `{name, source, configurable_params}` for a built-in with a reference implementation (`wavetrend`); otherwise an error listing the forkable ones |
 | `list_my_indicators` | — | `{total, indicators: [{name, title, description, type, overlay, configurable_params?, source: "user", created_at, updated_at}]}` |
+| `get_my_indicator` | `name` | `{name, source, updated_at}`: the stored Starlark source; an error if you have no such script |
 | `delete_indicator` | `name` | `{ok: true, name}`; an error if you have no such script |
 
 `register_indicator` validates in four steps: `parse`, `static`, `presence`,
