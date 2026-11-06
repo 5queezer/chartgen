@@ -714,7 +714,10 @@ async fn run_group(
                         match tokio::task::spawn_blocking(read.clone()).await {
                             Ok(Ok(d)) if !d.is_empty() => {
                                 window = d.bars;
-                                missing = false;
+                                // REST may still be behind the stream: read again
+                                // after the pause, until it has caught up.
+                                missing = feed_grid
+                                    .is_some_and(|grid| skips_a_bar(&window, &bar, &grid));
                                 dirty = true;
                             }
                             Ok(Ok(_)) => {}
@@ -910,6 +913,10 @@ mod tests {
         seeds: AtomicUsize,
         /// Seeds fail while set, as a refused read does.
         refuse_seeds: AtomicBool,
+        /// Seeds wait while set, so the feed can overflow behind a slow one.
+        hold_seeds: AtomicBool,
+        /// How far past its fixed clock REST has got, in seconds.
+        rest_ahead: std::sync::atomic::AtomicI64,
     }
 
     struct Running(Arc<AtomicUsize>);
@@ -926,11 +933,15 @@ mod tests {
         fn seed(&self, symbol: &str, timeframe: &str, count: usize) -> Result<OhlcvData, String> {
             assert!(!self.panic_on_seed.load(Ordering::SeqCst), "seed exploded");
             self.seeds.fetch_add(1, Ordering::SeqCst);
+            while self.hold_seeds.load(Ordering::SeqCst) {
+                std::thread::sleep(Duration::from_millis(1));
+            }
             if self.refuse_seeds.load(Ordering::SeqCst) {
                 return Err("Binance rate limit: refused".into());
             }
             // 2024-01-01T00:00Z, so the forming bar is fixed.
-            data::sample_ohlcv(symbol, timeframe, count, None, 1_704_067_200_000)
+            let now_ms = 1_704_067_200_000 + self.rest_ahead.load(Ordering::SeqCst) * 1000;
+            data::sample_ohlcv(symbol, timeframe, count, None, now_ms)
         }
         fn run(
             &self,
@@ -1107,7 +1118,9 @@ mod tests {
         next(&mut rx, 2_000).await.expect("tick push");
         assert_eq!(fake.seeds.load(Ordering::SeqCst), 1);
 
-        // Three minutes later: two klines were lost, so it reads them again.
+        // Three minutes later: two klines were lost, so it reads them again, and
+        // REST has them.
+        fake.rest_ahead.store(240, Ordering::SeqCst);
         fake.send(FeedEvent::Tick(bar(now + 240, 2.0))).await;
         let n = next(&mut rx, 2_000).await.expect("push after the gap");
         assert_eq!(fake.seeds.load(Ordering::SeqCst), 2);
@@ -1118,6 +1131,72 @@ mod tests {
         tokio::time::sleep(PAST_PAUSE).await;
         fake.send(FeedEvent::Tick(bar(now + 300, 3.0))).await;
         next(&mut rx, 2_000).await.expect("tick push");
+        assert_eq!(fake.seeds.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn a_read_still_behind_the_feed_is_read_again_until_it_catches_up() {
+        let fake = Arc::new(Fake {
+            base: Some("1m"),
+            ..Fake::default()
+        });
+        let (_hub, mut rx, now) = custom_chart(&fake, short_pause()).await;
+
+        // REST stays where it was, so the read leaves the hole.
+        fake.send(FeedEvent::Tick(bar(now + 240, 2.0))).await;
+        next(&mut rx, 2_000).await.expect("push after the gap");
+        assert_eq!(fake.seeds.load(Ordering::SeqCst), 2);
+
+        // The next tick past the pause reads again, though it follows the last.
+        tokio::time::sleep(PAST_PAUSE).await;
+        fake.send(FeedEvent::Tick(bar(now + 300, 3.0))).await;
+        next(&mut rx, 2_000).await.expect("tick push");
+        assert_eq!(fake.seeds.load(Ordering::SeqCst), 3);
+
+        // Caught up: one more read, and then none.
+        fake.rest_ahead.store(360, Ordering::SeqCst);
+        tokio::time::sleep(PAST_PAUSE).await;
+        fake.send(FeedEvent::Tick(bar(now + 360, 4.0))).await;
+        next(&mut rx, 2_000).await.expect("tick push");
+        assert_eq!(fake.seeds.load(Ordering::SeqCst), 4);
+        tokio::time::sleep(PAST_PAUSE).await;
+        fake.send(FeedEvent::Tick(bar(now + 420, 5.0))).await;
+        next(&mut rx, 2_000).await.expect("tick push");
+        assert_eq!(fake.seeds.load(Ordering::SeqCst), 4);
+    }
+
+    #[tokio::test]
+    async fn a_lagging_group_reads_again_and_keeps_the_newest_close() {
+        // The group cannot read the feed during a slow seed, so a burst overflows
+        // its buffer and it lags past events it will never see.
+        let fake = Arc::new(Fake::default());
+        fake.hold_seeds.store(true, Ordering::SeqCst);
+        let hub = hub(&fake, short_pause());
+        let (tx, mut rx) = stream();
+        hub.link_stream("s1", tx);
+        hub.subscribe("tok", "ip", "s1", req("BTCUSDT", "[]"))
+            .unwrap();
+        settle().await;
+        assert_eq!(fake.seeds.load(Ordering::SeqCst), 1);
+
+        let now = 1_704_067_200;
+        for i in 0..FEED_BUFFER + 50 {
+            fake.send(FeedEvent::Tick(bar(now, i as f64))).await;
+        }
+        fake.send(FeedEvent::Tick(bar(now, 9999.0))).await;
+        settle().await;
+        fake.hold_seeds.store(false, Ordering::SeqCst);
+
+        // Pushes settle on the newest close, after one more read.
+        let mut close = Value::Null;
+        for _ in 0..50 {
+            let n = next(&mut rx, 2_000).await.expect("push");
+            close = n["params"]["series"]["bars"][1]["c"].clone();
+            if close == 9999.0 {
+                break;
+            }
+        }
+        assert_eq!(close, 9999.0);
         assert_eq!(fake.seeds.load(Ordering::SeqCst), 2);
     }
 

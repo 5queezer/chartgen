@@ -210,7 +210,11 @@ recompute with `fetch::resample`. Groups on the same base share one WebSocket.
 A lost kline would otherwise leave a resampled bar wrong until the group ended. So a
 lag, or a kline that does not follow the last one, reads the window again and lays
 the event on top. Through `newest_klines` that costs one page while the klines are
-held. If the budget refuses, the group keeps pushing and tries again after 5 s.
+held. If REST is still behind the stream, or the budget refuses, the group keeps
+pushing and reads again after 5 s. One case stays open: a reconnect short enough to
+fit inside a kline, whose backfill fails, loses that kline's last updates, and the next
+kline follows on, so the bar stays wrong until it leaves the window. That takes a
+reconnect during a cooldown.
 `--trade` still needs a stream of its own, and refuses other intervals at startup. It
 keys its state by the canonical form and subscribes under Binance's name for it, so
 `-i 1W` follows `1w` and `get_indicators` finds it by any spelling.
