@@ -3,7 +3,11 @@
 
 import { z } from "zod";
 
-import { ScriptRejectionSchema, type ScriptRejection } from "../types/responses";
+import {
+  IndicatorNotFoundSchema,
+  ScriptRejectionSchema,
+  type ScriptRejection,
+} from "../types/responses";
 
 /** Everything the editor calls; it appears only when the server lists them all. */
 const EDITOR_TOOLS = [
@@ -44,6 +48,15 @@ export function scriptRejection(text: string): ScriptRejection {
   return { ok: false, errors: [{ step: "register", line: null, message: text }] };
 }
 
+/** Whether an error text is the server's own "you have no such script". */
+export function isNotFound(text: string): boolean {
+  try {
+    return IndicatorNotFoundSchema.safeParse(JSON.parse(text)).success;
+  } catch {
+    return false;
+  }
+}
+
 /** Whether a chart query's indicators key (`activeIndicatorsKey`) includes the indicator. */
 export function usesIndicator(indicatorsKey: string, name: string): boolean {
   try {
@@ -57,7 +70,12 @@ export function usesIndicator(indicatorsKey: string, name: string): boolean {
   }
 }
 
-const DraftSchema = z.object({ name: z.string(), source: z.string() });
+const DraftSchema = z.object({
+  name: z.string(),
+  source: z.string(),
+  /** The saved text this draft started from; none for a script never saved. */
+  base: z.string().optional(),
+});
 export type ScriptDraft = z.infer<typeof DraftSchema>;
 
 const DraftsSchema = z.object({
@@ -84,10 +102,26 @@ export function loadDrafts(storage: DraftStorage = localStorage): ScriptDrafts {
   return { selected: null, drafts: {} };
 }
 
-/** False when the browser refused it (quota, private mode): the draft is not kept. */
-export function saveDrafts(value: ScriptDrafts, storage: DraftStorage = localStorage): boolean {
+/** The draft stored under `key`, never something inherited (a script may be called `constructor`). */
+export function draftAt(drafts: ScriptDrafts["drafts"], key: string): ScriptDraft | undefined {
+  return Object.hasOwn(drafts, key) ? drafts[key] : undefined;
+}
+
+/**
+ * Change one key, on top of what is stored now: another tab's drafts stay.
+ * `selected` is last-writer-wins. False when the browser refused it (quota,
+ * private mode): the draft is not kept.
+ */
+export function writeDraft(
+  key: string,
+  draft: ScriptDraft | null,
+  selected: string | null,
+  storage: DraftStorage = localStorage,
+): boolean {
+  const { [key]: _old, ...others } = loadDrafts(storage).drafts;
+  const drafts = draft ? { ...others, [key]: draft } : others;
   try {
-    storage.setItem(DRAFTS_KEY, JSON.stringify(value));
+    storage.setItem(DRAFTS_KEY, JSON.stringify({ selected, drafts }));
     return true;
   } catch {
     return false;

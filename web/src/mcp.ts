@@ -41,7 +41,7 @@ import {
   type SubscribeChartPayload,
   type UnsubscribeChartPayload,
 } from "./types/responses";
-import { scriptRejection } from "./lib/scripts";
+import { isNotFound, scriptRejection } from "./lib/scripts";
 import { clearAccessToken, getAccessToken } from "./oauth";
 
 // Validate the MCP `CallToolResult` shape at the boundary (ADR-0004)
@@ -121,8 +121,8 @@ export interface McpSession {
   callListToolNames: () => Promise<string[]>;
   /** Invoke `list_my_indicators` (ADR-0025): the caller's scripts. */
   callListMyIndicators: () => Promise<MyIndicatorsPayload>;
-  /** Invoke `get_my_indicator` (ADR-0041): one script's stored source. */
-  callGetMyIndicator: (name: string) => Promise<MyIndicatorSourcePayload>;
+  /** Invoke `get_my_indicator` (ADR-0041): one script's stored source; null if you have none. */
+  callGetMyIndicator: (name: string) => Promise<MyIndicatorSourcePayload | null>;
   /**
    * Invoke `register_indicator`. A script the server refuses is a result,
    * with the errors to show next to the code, not a rejection.
@@ -130,6 +130,8 @@ export interface McpSession {
   callRegisterIndicator: (args: {
     name: string;
     source: string;
+    /** Refuse instead of replacing a script of that name. */
+    create_only: boolean;
   }) => Promise<RegisteredIndicatorPayload | ScriptRejection>;
   /** Invoke `delete_indicator`. */
   callDeleteIndicator: (name: string) => Promise<DeleteIndicatorPayload>;
@@ -368,8 +370,13 @@ export function createMcpSession(): McpSession {
       return MyIndicatorsPayloadSchema.parse(json);
     },
     async callGetMyIndicator(name) {
-      const json = await callToolWithAuthRetry("get_my_indicator", { name });
-      return MyIndicatorSourcePayloadSchema.parse(json);
+      try {
+        const json = await callToolWithAuthRetry("get_my_indicator", { name });
+        return MyIndicatorSourcePayloadSchema.parse(json);
+      } catch (err) {
+        if (err instanceof McpToolError && isNotFound(err.text)) return null;
+        throw err;
+      }
     },
     async callRegisterIndicator(args) {
       try {

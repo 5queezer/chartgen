@@ -322,6 +322,314 @@ test("a failed chunk load says so and leaves the app working", async ({ page }) 
   await expect(page.locator(".chart-host")).toBeVisible();
 });
 
+/** Answer every call of `tool` with an error, as the server does; `page.unroute` ends it. */
+async function failTool(page: Page, tool: string, text: string): Promise<void> {
+  await page.route("**/mcp", async (route) => {
+    const body = route.request().postData();
+    if (!body?.includes(`"name":"${tool}"`)) return route.fallback();
+    const { id } = JSON.parse(body) as { id: unknown };
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id,
+        result: { content: [{ type: "text", text }], isError: true },
+      }),
+    });
+  });
+}
+
+/** Hold the next calls of `tool` until `release`; `sent` resolves once one is out. */
+async function holdTool(page: Page, tool: string) {
+  let release = () => {};
+  const held = new Promise<void>((resolve) => (release = resolve));
+  let markSent = () => {};
+  const sent = new Promise<void>((resolve) => (markSent = resolve));
+  await page.route("**/mcp", async (route) => {
+    if (route.request().postData()?.includes(`"name":"${tool}"`)) {
+      markSent();
+      await held;
+    }
+    await route.fallback();
+  });
+  return { sent, release: () => release() };
+}
+
+/** Save a new script under `name`, in the panel that is open. */
+async function saveNew(page: Page, name: string, source: string): Promise<void> {
+  await page.getByTestId("script-new").click();
+  await page.getByTestId("script-name").fill(name);
+  await setCode(page, source);
+  await page.getByTestId("script-save").click();
+  await expect(page.getByTestId("script-status")).toHaveText(/^Saved/);
+}
+
+/** A second tab of the same browser: same OAuth client, same drafts. */
+async function secondTab(page: Page): Promise<Page> {
+  const tab = await page.context().newPage();
+  await gotoApp(tab);
+  await openEditor(tab);
+  return tab;
+}
+
+/** Wait until the draft debounce has written the text in `key`. */
+const storedDraft = (page: Page, key: string) =>
+  page.evaluate((k) => {
+    const raw = localStorage.getItem("chartgen.scripts.drafts");
+    const drafts = raw ? (JSON.parse(raw) as { drafts: Record<string, { source: string }> }).drafts : {};
+    return Object.hasOwn(drafts, k) ? drafts[k]!.source : null;
+  }, key);
+
+test.describe("code is never lost", () => {
+  test("a tab with a stale list cannot overwrite a script saved in another tab", async ({ page }) => {
+    await gotoApp(page);
+    await openEditor(page);
+    await expect(page.getByText("No saved indicators yet.")).toBeVisible();
+
+    const other = await secondTab(page);
+    await saveNew(other, "foo", script("    pass  # from the other tab"));
+
+    // This tab's list still says it has no `foo`.
+    await expect(page.getByTestId("script-row-foo")).toHaveCount(0);
+    await page.getByTestId("script-name").fill("foo");
+    await setCode(page, script("    pass  # from this tab"));
+    await page.getByTestId("script-save").click();
+    await expect(page.getByTestId("script-errors")).toContainText("already have an indicator named foo");
+    await expect(page.getByTestId("script-status")).toHaveText("Not saved.");
+    await expect(code(page)).toContainText("# from this tab");
+
+    await other.getByTestId("script-new").click();
+    await other.getByTestId("script-row-foo").click();
+    await expect(code(other)).toContainText("# from the other tab");
+  });
+
+  test("Save waits until the list has loaded", async ({ page }) => {
+    await gotoApp(page);
+    await failTool(page, "list_my_indicators", "The indicator store is unavailable");
+    await openEditor(page);
+    await expect(page.getByTestId("script-list-retry")).toBeVisible();
+    await page.getByTestId("script-name").fill("blocked");
+    await expect(page.getByTestId("script-save")).toBeDisabled();
+    await code(page).click();
+    await page.keyboard.press("ControlOrMeta+s");
+    await expect(page.getByTestId("script-status")).toContainText("have not loaded yet");
+
+    await page.unroute("**/mcp");
+    await page.getByTestId("script-list-retry").click();
+    await expect(page.getByTestId("script-save")).toBeEnabled();
+    await page.getByTestId("script-save").click();
+    await expect(page.getByTestId("script-status")).toHaveText("Saved.");
+  });
+
+  test("a script changed elsewhere is not replaced without asking", async ({ page }) => {
+    await gotoApp(page);
+    await openEditor(page);
+    await saveNew(page, "shared", script("    pass  # version one"));
+    await setCode(page, script("    pass  # my draft"));
+    await expect.poll(() => storedDraft(page, "shared")).toContain("# my draft");
+
+    // Another machine or MCP client saves over it.
+    const other = await secondTab(page);
+    await other.getByTestId("script-row-shared").click();
+    await expect(other.getByTestId("script-conflict")).toHaveCount(0);
+    await other.getByTestId("script-revert").click();
+    await setCode(other, script("    pass  # version two"));
+    await other.getByTestId("script-save").click();
+    await expect(other.getByTestId("script-status")).toHaveText("Saved.");
+    await other.close();
+
+    // Saving what was already open is caught...
+    await page.getByTestId("script-save").click();
+    await expect(page.getByTestId("script-conflict")).toBeVisible();
+    await expect(page.getByTestId("script-status")).toHaveText("Not saved: this script changed elsewhere.");
+    await expect(page.getByTestId("script-save")).toBeDisabled();
+
+    // ...and so is a draft reopened later, which says so instead of "restored".
+    await page.getByTestId("script-close").click();
+    await openEditor(page);
+    await expect(code(page)).toContainText("# my draft");
+    await expect(page.getByTestId("script-conflict")).toBeVisible();
+    await expect(page.getByTestId("script-status")).not.toHaveText("Unsaved draft restored.");
+    await expect(page.getByTestId("script-save")).toBeDisabled();
+
+    await page.getByTestId("script-use-saved").click();
+    await expect(code(page)).toContainText("# version two");
+    await expect(page.getByTestId("script-conflict")).toHaveCount(0);
+    await expect(page.getByTestId("script-revert")).toHaveCount(0);
+
+    // The saved version replaced the text as one undoable edit: the draft is
+    // still there, and Save now replaces knowingly.
+    await code(page).click();
+    await page.keyboard.press("ControlOrMeta+z");
+    await expect(code(page)).toContainText("# my draft");
+    await page.getByTestId("script-save").click();
+    await expect(page.getByTestId("script-status")).toHaveText("Saved.");
+    await reloadApp(page);
+    await openEditor(page);
+    await expect(code(page)).toContainText("# my draft");
+    await expect(page.getByTestId("script-conflict")).toHaveCount(0);
+  });
+
+  test("Keep my draft lets Save replace the newer version", async ({ page }) => {
+    await gotoApp(page);
+    await openEditor(page);
+    await saveNew(page, "kept", script("    pass  # one"));
+    await setCode(page, script("    pass  # mine"));
+    const other = await secondTab(page);
+    await other.getByTestId("script-row-kept").click();
+    await other.getByTestId("script-revert").click();
+    await setCode(other, script("    pass  # two"));
+    await other.getByTestId("script-save").click();
+    await expect(other.getByTestId("script-status")).toHaveText("Saved.");
+
+    await page.getByTestId("script-save").click();
+    await page.getByTestId("script-keep-draft").click();
+    await expect(page.getByTestId("script-conflict")).toHaveCount(0);
+    await expect(code(page)).toContainText("# mine");
+    await page.getByTestId("script-save").click();
+    await expect(page.getByTestId("script-status")).toHaveText("Saved.");
+    await other.getByTestId("script-new").click();
+    await other.getByTestId("script-row-kept").click();
+    await expect(code(other)).toContainText("# mine");
+  });
+
+  test("two tabs keep each other's drafts", async ({ page }) => {
+    await gotoApp(page);
+    await openEditor(page);
+    await saveNew(page, "one", script("    pass  # one"));
+    await saveNew(page, "two", script("    pass  # two"));
+    const other = await secondTab(page);
+
+    await page.getByTestId("script-row-one").click();
+    await expect(code(page)).toContainText("# one");
+    await setCode(page, script("    pass  # one drafted"));
+    await expect.poll(() => storedDraft(page, "one")).toContain("# one drafted");
+
+    await other.getByTestId("script-row-two").click();
+    await expect(code(other)).toContainText("# two");
+    await setCode(other, script("    pass  # two drafted"));
+    await expect.poll(() => storedDraft(other, "two")).toContain("# two drafted");
+
+    // Both are stored, and stay after the tabs flush on close.
+    expect(await storedDraft(page, "one")).toContain("# one drafted");
+    await other.close({ runBeforeUnload: true });
+    await page.getByTestId("script-close").click();
+    expect(await storedDraft(page, "one")).toContain("# one drafted");
+    expect(await storedDraft(page, "two")).toContain("# two drafted");
+  });
+
+  test("the draft of a vanished script keeps its name and spares the new-script draft", async ({ page }) => {
+    await gotoApp(page);
+    await openEditor(page);
+    await page.getByTestId("script-name").fill("precious_new");
+    await setCode(page, script("    pass  # precious"));
+    await expect.poll(() => storedDraft(page, "")).toContain("# precious");
+
+    const other = await secondTab(page);
+    await other.getByTestId("script-new").click();
+    await other.getByTestId("script-name").fill("doomed");
+    await setCode(other, script("    pass  # doomed saved"));
+    await other.getByTestId("script-save").click();
+    await expect(other.getByTestId("script-status")).toHaveText("Saved.");
+    await page.getByTestId("script-close").click();
+    await openEditor(page);
+    await page.getByTestId("script-row-doomed").click();
+    await expect(code(page)).toContainText("# doomed saved");
+    await setCode(page, script("    pass  # doomed edited"));
+    await expect.poll(() => storedDraft(page, "doomed")).toContain("# doomed edited");
+
+    await other.getByTestId("script-row-doomed").click();
+    await expect(other.getByTestId("script-delete")).toBeVisible();
+    await other.getByTestId("script-delete").click();
+    await other.getByTestId("script-delete-confirm").click();
+    await expect(other.getByTestId("script-status")).toHaveText("Deleted doomed.");
+    await other.close();
+
+    await reloadApp(page);
+    await openEditor(page);
+    await expect(page.getByTestId("script-status")).toContainText("doomed is no longer saved");
+    await expect(code(page)).toContainText("# doomed edited");
+    expect(await storedDraft(page, "")).toContain("# precious");
+
+    // Both reachable: the new script's draft, and the row of the vanished one.
+    await page.getByTestId("script-new").click();
+    await expect(code(page)).toContainText("# precious");
+    await expect(page.getByTestId("script-name")).toHaveValue("precious_new");
+    await expect(page.getByTestId("script-row-doomed")).toContainText("Draft, not saved");
+    await page.getByTestId("script-row-doomed").click();
+    await expect(code(page)).toContainText("# doomed edited");
+
+    // Saving creates it again, and ends only its own draft.
+    await page.getByTestId("script-save").click();
+    await expect(page.getByTestId("script-status")).toHaveText("Saved.");
+    expect(await storedDraft(page, "doomed")).toBeNull();
+    expect(await storedDraft(page, "")).toContain("# precious");
+  });
+
+  test("a failed read is not taken for a deleted script", async ({ page }) => {
+    await gotoApp(page);
+    await openEditor(page);
+    await saveNew(page, "flaky", script("    pass  # flaky saved"));
+    await setCode(page, script("    pass  # flaky edited"));
+    await expect.poll(() => storedDraft(page, "flaky")).toContain("# flaky edited");
+    await page.getByTestId("script-close").click();
+
+    await failTool(page, "get_my_indicator", "Could not read the indicator: disk I/O error");
+    await openEditor(page);
+    await expect(page.getByTestId("script-errors")).toContainText("disk I/O error");
+    await expect(page.getByTestId("script-status")).not.toContainText("no longer saved");
+    expect(await storedDraft(page, "flaky")).toContain("# flaky edited");
+
+    await page.unroute("**/mcp");
+    await page.getByTestId("script-row-flaky").click();
+    await expect(code(page)).toContainText("# flaky edited");
+    await expect(page.getByTestId("script-status")).toHaveText("Unsaved draft restored.");
+  });
+
+  test("a script called constructor has no phantom draft", async ({ page }) => {
+    await gotoApp(page);
+    await openEditor(page);
+    await saveNew(page, "constructor", script("    pass  # odd name"));
+    await page.getByTestId("script-new").click();
+    await page.getByTestId("script-row-constructor").click();
+    await expect(code(page)).toContainText("# odd name");
+    await expect(page.getByTestId("script-status")).toHaveText("");
+  });
+
+  test("the last keystrokes survive opening another script", async ({ page }) => {
+    await gotoApp(page);
+    await openEditor(page);
+    await saveNew(page, "first", script("    pass  # first"));
+    await saveNew(page, "second", script("    pass  # second"));
+    await page.getByTestId("script-row-first").click();
+    await expect(code(page)).toContainText("# first");
+
+    const held = await holdTool(page, "get_my_indicator");
+    await page.getByTestId("script-row-second").click();
+    await held.sent;
+    await setCode(page, script("    pass  # typed while it loaded"));
+    held.release();
+    await expect(code(page)).toContainText("# second");
+    await page.unroute("**/mcp");
+    await page.getByTestId("script-row-first").click();
+    await expect(code(page)).toContainText("# typed while it loaded");
+  });
+
+  test("Save during a pending save says so", async ({ page }) => {
+    await gotoApp(page);
+    await openEditor(page);
+    await page.getByTestId("script-name").fill("slow_save");
+    const held = await holdTool(page, "register_indicator");
+    await page.getByTestId("script-save").click();
+    await held.sent;
+    await code(page).click();
+    await page.keyboard.press("ControlOrMeta+s");
+    await expect(page.getByTestId("script-status")).toHaveText("Still saving the last change…");
+    held.release();
+    await expect(page.getByTestId("script-status")).toHaveText("Saved.");
+  });
+});
+
 test.describe("at 390 px", () => {
   test("the panel fits and works from the picker", async ({ page }) => {
     await gotoApp(page);

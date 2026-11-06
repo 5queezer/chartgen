@@ -146,7 +146,7 @@ describe("tool errors and auth", () => {
   it("a tool error mentioning 401 does not sign the user out", async () => {
     const body = { ok: false, errors: [{ step: "dry_run", line: 401, message: "boom 401" }] };
     h.callImpl = refused(JSON.stringify(body));
-    const r = await createMcpSession().callRegisterIndicator({ name: "a", source: "x" });
+    const r = await createMcpSession().callRegisterIndicator({ name: "a", source: "x", create_only: false });
     expect(r).toEqual(body);
     expect(h.clearAccessToken).not.toHaveBeenCalled();
     expect(h.clients).toHaveLength(1);
@@ -154,7 +154,7 @@ describe("tool errors and auth", () => {
 
   it("a plain refusal comes back as an error without a line", async () => {
     h.callImpl = refused("name must be 1-48 lowercase letters");
-    const r = await createMcpSession().callRegisterIndicator({ name: "A", source: "x" });
+    const r = await createMcpSession().callRegisterIndicator({ name: "A", source: "x", create_only: true });
     expect(r).toEqual({
       ok: false,
       errors: [{ step: "register", line: null, message: "name must be 1-48 lowercase letters" }],

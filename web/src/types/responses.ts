@@ -330,9 +330,12 @@ export type MyIndicatorsPayload = z.infer<typeof MyIndicatorsPayloadSchema>;
 export const MyIndicatorSourcePayloadSchema = z.object({
   name: z.string(),
   source: z.string(),
-  updated_at: z.number().int(),
 });
 export type MyIndicatorSourcePayload = z.infer<typeof MyIndicatorSourcePayloadSchema>;
+
+// The `isError` body of `get_my_indicator` for a script you do not have. Any
+// other error is a failed read, which says nothing about whether it exists.
+export const IndicatorNotFoundSchema = z.object({ error: z.literal("not_found") });
 
 export const RegisteredIndicatorPayloadSchema = z.object({
   ok: z.literal(true),

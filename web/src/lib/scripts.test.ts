@@ -1,11 +1,13 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  draftAt,
+  isNotFound,
   loadDrafts,
-  saveDrafts,
   scriptingEnabled,
   scriptRejection,
   usesIndicator,
+  writeDraft,
 } from "./scripts";
 import { activeIndicatorsKey } from "../stores/indicators";
 
@@ -72,11 +74,33 @@ describe("drafts", () => {
     };
   };
 
-  it("round-trips", () => {
+  it("round-trips, with the base text", () => {
     const s = memory();
-    const value = { selected: "mine", drafts: { mine: { name: "mine", source: "x = 1" } } };
-    expect(saveDrafts(value, s)).toBe(true);
-    expect(loadDrafts(s)).toEqual(value);
+    const draft = { name: "mine", source: "x = 1", base: "x = 0" };
+    expect(writeDraft("mine", draft, "mine", s)).toBe(true);
+    expect(loadDrafts(s)).toEqual({ selected: "mine", drafts: { mine: draft } });
+  });
+
+  it("changes only its key, so two tabs keep each other's drafts", () => {
+    const s = memory();
+    // Each tab writes without having read the other's key first.
+    writeDraft("one", { name: "one", source: "tab a" }, "one", s);
+    writeDraft("two", { name: "two", source: "tab b" }, "two", s);
+    writeDraft("one", { name: "one", source: "tab a, later" }, "one", s);
+    expect(loadDrafts(s).drafts).toEqual({
+      one: { name: "one", source: "tab a, later" },
+      two: { name: "two", source: "tab b" },
+    });
+    writeDraft("one", null, null, s);
+    expect(Object.keys(loadDrafts(s).drafts)).toEqual(["two"]);
+  });
+
+  it("does not take inherited properties for drafts", () => {
+    const { drafts } = loadDrafts(memory());
+    expect(draftAt(drafts, "constructor")).toBeUndefined();
+    const s = memory();
+    writeDraft("constructor", { name: "constructor", source: "x" }, null, s);
+    expect(draftAt(loadDrafts(s).drafts, "constructor")?.source).toBe("x");
   });
 
   it("starts empty when nothing or garbage is stored", () => {
@@ -95,6 +119,15 @@ describe("drafts", () => {
         throw new Error("QuotaExceededError");
       },
     };
-    expect(saveDrafts({ selected: null, drafts: {} }, s)).toBe(false);
+    expect(writeDraft("a", { name: "a", source: "x" }, null, s)).toBe(false);
+  });
+});
+
+describe("isNotFound", () => {
+  it("is only the server's own answer, not a failed read", () => {
+    expect(isNotFound(JSON.stringify({ ok: false, error: "not_found", message: "none" }))).toBe(true);
+    expect(isNotFound("Could not read the indicator: disk I/O error")).toBe(false);
+    expect(isNotFound("The indicator store is unavailable")).toBe(false);
+    expect(isNotFound('{"error":"other"}')).toBe(false);
   });
 });

@@ -23,11 +23,13 @@ import "./scriptEditor.css";
 import { createScriptView, type ScriptView } from "./scriptEditorView";
 import { keyName } from "../lib/instances";
 import {
+  draftAt,
   loadDrafts,
   NEW_DRAFT,
-  saveDrafts,
   SCRIPTING_DOCS_URL,
   STARTER_SCRIPT,
+  writeDraft,
+  type ScriptDraft,
 } from "../lib/scripts";
 import { McpToolError, type McpSession } from "../mcp";
 import { refreshChartsUsing, refreshIndicatorList } from "../queries";
@@ -71,25 +73,45 @@ export default function ScriptEditor(props: ScriptEditorProps): JSX.Element {
   const list = createQuery(() => ({
     queryKey: ["list_my_indicators"] as const,
     queryFn: () => props.session.callListMyIndicators(),
+    // Fresh each time the panel opens: another tab or client may have changed it.
+    staleTime: 0,
     retry: false,
   }));
   const scripts = () => list.data?.indicators ?? [];
 
-  // The open script: null is a new one, not saved yet.
+  // The open script: null is one not saved yet. Its unsaved text is stored under
+  // `bufferKey`: its name, NEW_DRAFT, or for a saved script that is gone, its old name.
   const [selected, setSelected] = createSignal<string | null>(null);
+  const [bufferKey, setBufferKey] = createSignal(NEW_DRAFT);
   const [name, setName] = createSignal("");
   const [source, setSource] = createSignal("");
   // The text on the server; a new script compares against the starter.
   const [saved, setSaved] = createSignal(STARTER_SCRIPT);
+  // The saved text this draft started from. When the server's text differs, the
+  // script changed elsewhere, and saving would destroy that change unasked.
+  const [draftBase, setDraftBase] = createSignal(STARTER_SCRIPT);
+  const conflict = () => selected() !== null && draftBase() !== saved();
   const [errors, setErrors] = createSignal<IndicatorError[]>([]);
   const [status, setStatus] = createSignal("");
   const [busy, setBusy] = createSignal(false);
   const [confirmingDelete, setConfirmingDelete] = createSignal(false);
 
-  const stored = loadDrafts();
-  const [draftNames, setDraftNames] = createSignal(Object.keys(stored.drafts));
   const dirty = createMemo(
     () => source() !== saved() || (selected() === null && name() !== ""),
+  );
+
+  // Drafts the browser refused to store: they live here until this panel closes.
+  const unwritten = new Map<string, ScriptDraft>();
+  const storedDrafts = () => loadDrafts().drafts;
+  const draftOf = (key: string) => unwritten.get(key) ?? draftAt(storedDrafts(), key);
+  const draftKeys = () => [...new Set([...Object.keys(storedDrafts()), ...unwritten.keys()])];
+  const [draftNames, setDraftNames] = createSignal(draftKeys());
+  // Drafts whose script is not in the list: deleted elsewhere, or saved under an
+  // earlier OAuth client. Offered, so they stay reachable.
+  const orphans = createMemo(() =>
+    list.data
+      ? draftNames().filter((k) => k !== NEW_DRAFT && !scripts().some((s) => s.name === k))
+      : [],
   );
 
   let view: ScriptView | undefined;
@@ -99,16 +121,22 @@ export default function ScriptEditor(props: ScriptEditorProps): JSX.Element {
   let draftTimer: ReturnType<typeof setTimeout> | undefined;
   let openRequest = 0;
 
+  function storeDraft(key: string, draft: ScriptDraft | null): void {
+    if (writeDraft(key, draft, selected())) {
+      unwritten.delete(key);
+    } else if (draft) {
+      unwritten.set(key, draft);
+      setStatus("This browser refused to keep a draft: save soon.");
+    }
+    setDraftNames(draftKeys());
+  }
+
   function flushDraft(): void {
     clearTimeout(draftTimer);
     draftTimer = undefined;
     if (!bufferOpen) return;
-    const key = selected() ?? NEW_DRAFT;
-    if (dirty()) stored.drafts[key] = { name: name(), source: source() };
-    else delete stored.drafts[key];
-    stored.selected = selected();
-    setDraftNames(Object.keys(stored.drafts));
-    if (!saveDrafts(stored)) setStatus("This browser refused to keep a draft: save soon.");
+    const base = selected() === null ? {} : { base: draftBase() };
+    storeDraft(bufferKey(), dirty() ? { name: name(), source: source(), ...base } : null);
   }
 
   function scheduleDraft(): void {
@@ -116,10 +144,21 @@ export default function ScriptEditor(props: ScriptEditorProps): JSX.Element {
     draftTimer = setTimeout(flushDraft, DRAFT_DEBOUNCE_MS);
   }
 
-  function showBuffer(key: string | null, bufferName: string, text: string, base: string): void {
-    setSelected(key);
+  /** Open a buffer. What the old one holds is stored first, last keystrokes included. */
+  function showBuffer(
+    key: string,
+    script: string | null,
+    bufferName: string,
+    text: string,
+    base: string,
+    startedFrom = base,
+  ): void {
+    flushDraft();
+    setBufferKey(key);
+    setSelected(script);
     setName(bufferName);
     setSaved(base);
+    setDraftBase(startedFrom);
     setErrors([]);
     view?.open(text);
     markErrors();
@@ -128,43 +167,46 @@ export default function ScriptEditor(props: ScriptEditorProps): JSX.Element {
   }
 
   function openNew(): void {
-    openRequest++;
-    const draft = stored.drafts[NEW_DRAFT];
-    setStatus(draft ? "Unsaved draft restored." : "");
-    showBuffer(null, draft?.name ?? "", draft?.source ?? STARTER_SCRIPT, STARTER_SCRIPT);
-  }
-
-  function newScript(): void {
     flushDraft();
-    openNew();
+    openRequest++;
+    const draft = draftOf(NEW_DRAFT);
+    setStatus(draft ? "Unsaved draft restored." : "");
+    showBuffer(NEW_DRAFT, null, draft?.name ?? "", draft?.source ?? STARTER_SCRIPT, STARTER_SCRIPT);
   }
 
   async function openScript(target: string): Promise<void> {
     flushDraft();
     const request = ++openRequest;
-    const draft = stored.drafts[target];
     try {
-      const { source: text } = await props.session.callGetMyIndicator(target);
+      const result = await props.session.callGetMyIndicator(target);
       if (request !== openRequest) return;
-      setStatus(draft ? "Unsaved draft restored." : "");
-      showBuffer(target, target, draft?.source ?? text, text);
+      const draft = draftOf(target);
+      if (result === null) {
+        // Really gone. The draft stays under its own name, and keeps any other
+        // draft safe: this buffer never takes over the new script's slot.
+        if (draft) {
+          setStatus(`${target} is no longer saved; your draft is kept. Save creates it again.`);
+          showBuffer(target, null, draft.name || target, draft.source, STARTER_SCRIPT);
+        } else {
+          if (!bufferOpen) openNew();
+          else setErrors([{ step: "load", line: null, message: `${target} is no longer saved.` }]);
+          void list.refetch();
+        }
+        return;
+      }
+      const text = result.source;
+      // A draft equal to the saved text is no draft; compared as text, because
+      // `updated_at` only has a resolution of one second.
+      const open = draft && draft.source !== text ? draft : undefined;
+      const changed = open !== undefined && open.base !== text;
+      setStatus(open && !changed ? "Unsaved draft restored." : "");
+      showBuffer(target, target, target, open?.source ?? text, text, changed ? (open.base ?? "") : text);
     } catch (err) {
       if (request !== openRequest) return;
-      if (err instanceof McpToolError && draft) {
-        // Gone from the server (deleted elsewhere): the draft is a new script.
-        delete stored.drafts[target];
-        setStatus(`${target} is no longer saved; your draft is kept as a new script.`);
-        showBuffer(null, target, draft.source, STARTER_SCRIPT);
-      } else {
-        // Keep the open buffer; with none yet, start a new script to type in.
-        // A script gone since the last visit needs no message; one gone from the list does.
-        const restoring = !bufferOpen;
-        if (restoring) openNew();
-        if (!restoring || !(err instanceof McpToolError)) {
-          setErrors([{ step: "load", line: null, message: messageOf(err) }]);
-        }
-        void list.refetch();
-      }
+      // A failed read says nothing about the script: keep what is open and every
+      // draft. With nothing open yet, start a new script to type in.
+      if (!bufferOpen) openNew();
+      setErrors([{ step: "load", line: null, message: messageOf(err) }]);
     }
   }
 
@@ -173,7 +215,8 @@ export default function ScriptEditor(props: ScriptEditorProps): JSX.Element {
       setSource(text);
       scheduleDraft();
     });
-    if (stored.selected !== null) void openScript(stored.selected);
+    const restore = loadDrafts().selected;
+    if (restore !== null) void openScript(restore);
     else openNew();
     const onPageHide = () => flushDraft();
     window.addEventListener("pagehide", onPageHide);
@@ -200,32 +243,53 @@ export default function ScriptEditor(props: ScriptEditorProps): JSX.Element {
   const onChart = (n: string) => activeIndicators().some((e) => indicatorName(e) === n);
 
   async function save(): Promise<void> {
-    if (busy()) return;
-    const target = name().trim();
-    if (selected() === null && scripts().some((s) => s.name === target)) {
-      setErrors([{
-        step: "register",
-        line: null,
-        message: `You already have an indicator named ${target}. Open it, or pick another name.`,
-      }]);
-      setStatus("");
+    if (busy()) {
+      setStatus("Still saving the last change…");
       return;
     }
+    // Only with the list known is the buffer's identity known.
+    if (list.data === undefined) {
+      setStatus("Not saved: your indicators have not loaded yet.");
+      return;
+    }
+    if (conflict()) {
+      setStatus("Not saved: choose which version to keep first.");
+      return;
+    }
+    const target = name().trim();
     setBusy(true);
     setStatus("Saving…");
     // Another script may be opened while this waits: the answer is not about it.
     const request = openRequest;
-    const key = selected() ?? NEW_DRAFT;
+    const key = bufferKey();
+    const script = selected();
+    const base = saved();
+    const text = source();
     try {
-      const text = source();
-      const result = await props.session.callRegisterIndicator({ name: target, source: text });
+      // The server may have moved on since this was opened. The window left
+      // between this read and the write is small; a new script needs no read.
+      const current = script === null ? null : await props.session.callGetMyIndicator(script);
+      if (current !== null && current.source !== base) {
+        if (request === openRequest) {
+          setSaved(current.source);
+          flushDraft();
+          setStatus("Not saved: this script changed elsewhere.");
+        } else {
+          showToast(`${target} was not saved: it changed elsewhere.`);
+        }
+        return;
+      }
+      const result = await props.session.callRegisterIndicator({
+        name: target,
+        source: text,
+        create_only: script === null,
+      });
       if (request !== openRequest) {
         if (!result.ok) {
           showToast(`${target} was not saved: ${result.errors[0]?.message ?? "refused"}`);
           return;
         }
-        if (stored.drafts[key]?.source === text) delete stored.drafts[key];
-        flushDraft();
+        if (draftOf(key)?.source === text) storeDraft(key, null);
         showToast(`Saved ${target}.`);
       } else if (!result.ok) {
         setErrors(result.errors);
@@ -234,10 +298,12 @@ export default function ScriptEditor(props: ScriptEditorProps): JSX.Element {
         if (first?.line != null) view?.reveal(first.line);
         return;
       } else {
-        delete stored.drafts[key];
+        storeDraft(key, null);
+        setBufferKey(result.name);
         setSelected(result.name);
         setName(result.name);
         setSaved(text);
+        setDraftBase(text);
         setErrors([]);
         flushDraft();
         setStatus(
@@ -266,15 +332,21 @@ export default function ScriptEditor(props: ScriptEditorProps): JSX.Element {
     setConfirmingDelete(false);
     if (target === null || busy()) return;
     setBusy(true);
+    const request = openRequest;
     try {
       await props.session.callDeleteIndicator(target);
-      delete stored.drafts[target];
-      clearTimeout(draftTimer);
-      openNew();
-      setStatus(`Deleted ${target}.`);
+      storeDraft(target, null);
+      if (request === openRequest) {
+        // Its text is deleted with it: nothing to store from this buffer.
+        bufferOpen = false;
+        openNew();
+        setStatus(`Deleted ${target}.`);
+      } else {
+        showToast(`Deleted ${target}.`);
+      }
       void list.refetch();
       // A built-in it shadowed is back under that name, so the chart keeps it;
-      // any other name would now fail the whole chart request.
+      // any other name would now be reported as unknown on the chart.
       await refreshIndicatorList(queryClient);
       const registry = queryClient.getQueryData<ListIndicatorsPayload>(["list_indicators"]);
       const builtinLeft = registry?.indicators.some(
@@ -300,8 +372,15 @@ export default function ScriptEditor(props: ScriptEditorProps): JSX.Element {
 
   function revert(): void {
     setStatus("");
+    setDraftBase(saved());
     view?.replace(saved());
     if (selected() === null) setName("");
+    flushDraft();
+  }
+
+  /** Keep this text: the next save replaces what changed elsewhere, knowingly. */
+  function keepDraft(): void {
+    setDraftBase(saved());
     flushDraft();
   }
 
@@ -319,7 +398,7 @@ export default function ScriptEditor(props: ScriptEditorProps): JSX.Element {
     >
       <div class="flex flex-wrap items-center gap-2 px-3 py-2 border-b border-[color:var(--color-border)]">
         <h2 class="text-sm font-semibold">Script editor</h2>
-        <button type="button" class={buttonClass} data-testid="script-new" onClick={newScript}>
+        <button type="button" class={buttonClass} data-testid="script-new" onClick={() => openNew()}>
           New
         </button>
         <input
@@ -341,7 +420,7 @@ export default function ScriptEditor(props: ScriptEditorProps): JSX.Element {
           type="button"
           class={`${primaryClass} ${LOWER_ROW}`}
           data-testid="script-save"
-          disabled={busy()}
+          disabled={busy() || list.data === undefined || conflict()}
           title="Validate and save (Ctrl/Cmd+S)"
           onClick={() => void save()}
         >
@@ -404,9 +483,19 @@ export default function ScriptEditor(props: ScriptEditorProps): JSX.Element {
       <div class="flex flex-1 min-h-0 max-[767px]:flex-col">
         <div class="w-48 shrink-0 overflow-y-auto border-r border-[color:var(--color-border)] max-[767px]:w-full max-[767px]:max-h-24 max-[767px]:border-r-0 max-[767px]:border-b">
           <Show when={list.isError}>
-            <p class="p-2 text-xs text-[color:var(--color-danger)]">{messageOf(list.error)}</p>
+            <p class="p-2 text-xs text-[color:var(--color-danger)]">
+              {messageOf(list.error)}{" "}
+              <button
+                type="button"
+                data-testid="script-list-retry"
+                class="underline cursor-pointer"
+                onClick={() => void list.refetch()}
+              >
+                Retry
+              </button>
+            </p>
           </Show>
-          <Show when={list.isSuccess && scripts().length === 0}>
+          <Show when={list.isSuccess && scripts().length === 0 && orphans().length === 0}>
             <p class="p-2 text-xs text-[color:var(--color-fg-muted)]">No saved indicators yet.</p>
           </Show>
           <ul data-testid="script-list">
@@ -416,7 +505,7 @@ export default function ScriptEditor(props: ScriptEditorProps): JSX.Element {
                   <button
                     type="button"
                     data-testid={`script-row-${s.name}`}
-                    aria-current={selected() === s.name ? "true" : undefined}
+                    aria-current={bufferKey() === s.name ? "true" : undefined}
                     title={s.description}
                     class="w-full text-left px-2 py-1 text-xs cursor-pointer hover:bg-[color:var(--color-bg-elev)] aria-[current]:bg-[color:var(--color-bg-elev)]"
                     onClick={() => void openScript(s.name)}
@@ -435,9 +524,44 @@ export default function ScriptEditor(props: ScriptEditorProps): JSX.Element {
                 </li>
               )}
             </For>
+            <For each={orphans()}>
+              {(key) => (
+                <li>
+                  <button
+                    type="button"
+                    data-testid={`script-row-${key}`}
+                    aria-current={bufferKey() === key ? "true" : undefined}
+                    class="w-full text-left px-2 py-1 text-xs cursor-pointer hover:bg-[color:var(--color-bg-elev)] aria-[current]:bg-[color:var(--color-bg-elev)]"
+                    onClick={() => void openScript(key)}
+                  >
+                    <span class="block font-mono truncate">{key}</span>
+                    <span class="block truncate text-[color:var(--color-fg-muted)]">
+                      Draft, not saved
+                    </span>
+                  </button>
+                </li>
+              )}
+            </For>
           </ul>
         </div>
         <div class="flex flex-col flex-1 min-w-0 min-h-0">
+          <Show when={conflict()}>
+            <div
+              role="alert"
+              data-testid="script-conflict"
+              class="flex flex-wrap items-center gap-2 px-3 py-1.5 border-b border-[color:var(--color-danger)] text-xs text-[color:var(--color-fg)]"
+            >
+              <span class="min-w-0">
+                This script changed elsewhere since your draft. Saving now would replace that change.
+              </span>
+              <button type="button" class={buttonClass} data-testid="script-use-saved" onClick={revert}>
+                Use the saved version
+              </button>
+              <button type="button" class={buttonClass} data-testid="script-keep-draft" onClick={keepDraft}>
+                Keep my draft
+              </button>
+            </div>
+          </Show>
           <div ref={host} data-testid="script-code" class="flex-1 min-h-0 overflow-hidden" />
           <Show when={shownErrors().length > 0}>
             <ul
