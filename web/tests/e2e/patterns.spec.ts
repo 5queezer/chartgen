@@ -265,6 +265,83 @@ test.describe("candlestick patterns", () => {
   });
 });
 
+test.describe("in a grid (ADR-0043)", () => {
+  test("a chart's marks answer the hover in that chart, not another", async ({ page }) => {
+    await openWith(page, [{ name: "candlestick_patterns", params: { trend: "none" } }]);
+    // A new chart starts as a copy of the first.
+    await page.getByTestId("grid-menu").click();
+    await page.getByTestId("grid-option-2h").click();
+    const second = page.locator('[data-testid=chart-pane][data-pane="1"]');
+    const paneLabels = () =>
+      page.evaluate(() => {
+        const w = window as unknown as {
+          __chartgenTest: {
+            paneSeries: (n: number) => { indicators: Record<string, { labels?: Mark[] }> } | null;
+          };
+        };
+        return w.__chartgenTest.paneSeries(1)?.indicators.candlestick_patterns?.labels ?? [];
+      });
+    await expect.poll(async () => (await paneLabels()).length, { timeout: 30_000 }).toBeGreaterThan(10);
+
+    // Then only the second chart has the indicator.
+    const first = page.locator('[data-testid=chart-pane][data-pane="0"]');
+    const firstBox = (await first.boundingBox())!;
+    await page.mouse.click(firstBox.x + firstBox.width * 0.4, firstBox.y + firstBox.height * 0.35);
+    await expect(first).toHaveAttribute("data-active", "");
+    await page.getByRole("button", { name: "Remove Candlestick Patterns", exact: true }).first().click();
+    await expect
+      .poll(() =>
+        page.evaluate(() => {
+          const w = window as unknown as {
+            __chartgenTest: { paneSeries: (n: number) => { indicators: Record<string, unknown> } | null };
+          };
+          return "candlestick_patterns" in (w.__chartgenTest.paneSeries(0)?.indicators ?? {});
+        }),
+      )
+      .toBe(false);
+
+    // The hook's chart is the active one.
+    const box = (await second.boundingBox())!;
+    await page.mouse.click(box.x + box.width * 0.4, box.y + box.height * 0.35);
+    await expect(second).toHaveAttribute("data-active", "");
+    await page.mouse.move(box.x + 5, box.y + 5);
+
+    const all = await paneLabels();
+    const closed = all.filter((l) => !(l as Mark & { tentative?: boolean }).tentative);
+    const lone = closed.filter(
+      (l) => closed.filter((o) => o.x === l.x && o.above === l.above).length === 1,
+    );
+    const l = lone[Math.max(0, lone.length - 4)]!;
+    const at = await page.evaluate(
+      ([bar, price]) => {
+        const w = window as unknown as {
+          __chartgenTest: {
+            chart: () => {
+              convertToPixel: (
+                p: { dataIndex: number; value: number },
+                f: { paneId: string },
+              ) => { x: number; y: number };
+            };
+          };
+        };
+        return w.__chartgenTest
+          .chart()
+          .convertToPixel({ dataIndex: bar as number, value: price as number }, { paneId: "candle_pane" });
+      },
+      [l.x, l.y] as const,
+    );
+    const container = (await second.locator(".chart-container").boundingBox())!;
+    const y = container.y + at.y + (l.above ? -12 : 12);
+    await page.mouse.move(container.x + at.x, y, { steps: 3 });
+    await expect(second.getByTestId("pattern-tooltip")).toHaveText(l.tooltip);
+    await shot(page, "grid-tooltip");
+
+    // The same spot of the first chart, which has no marks, says nothing.
+    await page.mouse.move(firstBox.x + (container.x - box.x) + at.x, y, { steps: 3 });
+    await expect(page.getByTestId("pattern-tooltip")).toHaveCount(0);
+  });
+});
+
 test.describe("chart patterns", () => {
   // Lower thresholds than the defaults: the sample source then always has some.
   const entry = { name: "chart_patterns", params: { depth: 3, deviation: 1, tolerance: 25 } };
