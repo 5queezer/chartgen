@@ -345,7 +345,7 @@ test.describe("loading the active layout", () => {
   });
 });
 
-test.describe("legend after a keyboard zoom", () => {
+test.describe("legend with a resting crosshair", () => {
   /** Index and close of the bar at x (host pixels), or of the last bar. */
   const barAt = (page: Page, x: number | null) =>
     page.evaluate((px) => {
@@ -399,6 +399,72 @@ test.describe("legend after a keyboard zoom", () => {
     await page.mouse.move(box.x + box.width / 2, 2);
     await page.keyboard.press("ArrowUp");
     await expectLegendAt(page, null);
+  });
+
+  test("follows the bar under a resting crosshair when scrolling", async ({
+    bootedApp: page,
+  }) => {
+    const box = (await page.locator(".chart-host").boundingBox())!;
+    const x = 200;
+    await page.mouse.move(box.x + x, box.y + box.height / 3);
+    const before = await barAt(page, x);
+    await expectLegendAt(page, x);
+
+    for (let n = 0; n < 5; n++) await page.keyboard.press("ArrowLeft");
+    expect((await barAt(page, x)).i).toBeLessThan(before.i);
+    await expectLegendAt(page, x);
+  });
+
+  test("keeps the crosshair's bar with the pointer on a pane header", async ({
+    bootedApp: page,
+  }) => {
+    const box = (await page.locator(".chart-host").boundingBox())!;
+    const x = 200;
+    await page.mouse.move(box.x + x, box.y + box.height / 3);
+    await expectLegendAt(page, x);
+    expect((await barAt(page, x)).i).not.toBe((await barAt(page, null)).i);
+
+    // Physically over the pane, on the way to the row's buttons.
+    await page.locator(".pane-header-interactive").first().hover();
+    await page.waitForTimeout(200);
+    await expectLegendAt(page, x);
+    // Past it, off the panes, the legend goes back to the last bar.
+    await page.mouse.move(box.x + box.width - 20, box.y + box.height / 3);
+    await expectLegendAt(page, null);
+  });
+
+  test.describe("with a new bar", () => {
+    test.use({ push: false });
+
+    test("follows the bar under a resting crosshair", async ({ bootedApp: page }) => {
+      // A new bar takes up to an interval to come by itself, so the tail polls
+      // are moved one bar on.
+      let nextBar = false;
+      await page.route("**/mcp", async (route) => {
+        const body = route.request().postData() ?? "";
+        if (!nextBar || !body.includes('"generate_chart"') || !/"bars":2\b/.test(body)) {
+          return route.continue().catch(() => {});
+        }
+        const res = await route.fetch();
+        const json = (await res.json()) as { result: { content: { text: string }[] } };
+        const content = json.result.content[0]!;
+        const series = JSON.parse(content.text) as { bars: { t: number }[] };
+        const step = series.bars[1]!.t - series.bars[0]!.t;
+        for (const bar of series.bars) bar.t += step;
+        content.text = JSON.stringify(series);
+        return route.fulfill({ response: res, json });
+      });
+
+      const box = (await page.locator(".chart-host").boundingBox())!;
+      const x = 200;
+      await page.mouse.move(box.x + x, box.y + box.height / 3);
+      const before = await barAt(page, x);
+      await expectLegendAt(page, x);
+
+      nextBar = true;
+      await expect.poll(async () => (await barAt(page, x)).i, { timeout: 15_000 }).toBe(before.i + 1);
+      await expectLegendAt(page, x);
+    });
   });
 });
 

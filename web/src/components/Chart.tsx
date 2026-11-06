@@ -1199,7 +1199,8 @@ export function Chart(props: ChartProps): JSX.Element {
       const inMain = panes.some((id) =>
         c!.getDom(id, "main" as never)?.contains(e.target as Node),
       );
-      if (!inMain) onLeave();
+      // A pane header is still over its pane: the crosshair's bar stays.
+      if (!inMain && !(e.target as Element).closest(".pane-header")) onLeave();
     };
     host.addEventListener("mouseleave", onLeave);
     host.addEventListener("mousemove", onMove);
