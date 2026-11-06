@@ -69,6 +69,14 @@ run "no CI run yet keeps state, no deploy" 0 0 aaa aaa
 CI_JSON=$(ci_json completed '"failure"')
 run "CI failed keeps state, no deploy" 0 0 aaa aaa
 
+for c in cancelled timed_out; do
+  CI_JSON=$(ci_json completed "\"$c\"")
+  run "CI $c keeps state, no deploy" 0 0 aaa aaa
+  grep -q 'gh run rerun' <<<"$("$here/chartgen-autodeploy.sh" 2>&1)" || { echo "FAIL $c log lacks re-run hint"; fails=$((fails + 1)); }
+done
+CI_JSON=$(ci_json completed '"failure"')
+[ "$(echo aaa >"$STATE_FILE"; "$here/chartgen-autodeploy.sh" 2>&1 | grep -c 'gh run rerun')" = 0 ] || { echo "FAIL test failure log has re-run hint"; fails=$((fails + 1)); }
+
 CI_JSON=$(ci_json completed '"success"')
 run "CI success posts once and writes state" 0 1 bbb aaa
 COOLIFY_CODE=502 run "Coolify 5xx keeps state" 1 1 aaa aaa

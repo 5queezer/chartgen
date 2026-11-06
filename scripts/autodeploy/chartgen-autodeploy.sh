@@ -54,10 +54,17 @@ if [ "$status" != completed ]; then
   log "CI for $sha not finished (status: $status); waiting"
   exit 0
 fi
-if [ "$conclusion" != success ]; then
-  log "CI for $sha concluded '$conclusion'; not deploying"
-  exit 0
-fi
+case $conclusion in
+  success) ;;
+  cancelled | timed_out)
+    log "CI for $sha concluded '$conclusion'; not deploying. Nothing else will deploy this SHA: re-run CI (gh run rerun, or the Actions UI)"
+    exit 0
+    ;;
+  *)
+    log "CI for $sha concluded '$conclusion'; not deploying"
+    exit 0
+    ;;
+esac
 
 # The token goes to curl via a stdin config so it never appears in argv or in a trace.
 code=$(printf 'header = "Authorization: Bearer %s"\n' "$COOLIFY_API_TOKEN" |

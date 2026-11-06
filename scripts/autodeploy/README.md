@@ -49,6 +49,14 @@ cat /var/lib/private/chartgen-autodeploy/last-sha   # last SHA a deploy was trig
 Delete `last-sha` to make the next run re-baseline (it records the head
 without deploying).
 
+## Cancelled or timed-out CI
+
+If the `CI` run for a new head is `cancelled` or `timed_out` (for example a
+stalled mirror), the script logs it and does not deploy. Nothing else will
+deploy that SHA, so re-run CI (`gh run rerun <run-id>` or the Actions UI);
+the next tick picks up the green run. A CI run that failed on tests is
+fixed by a new commit instead.
+
 ## Uninstall
 
 ```sh
