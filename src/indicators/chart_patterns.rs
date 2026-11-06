@@ -3,8 +3,11 @@
 //! `detect` is pure and reads closed bars only. It walks through time, deciding
 //! each pattern from what was known then: a pivot is known `depth` bars after its
 //! extreme, a pattern appears when its last pivot is known, and only a close from
-//! then on can confirm it. So adding bars never changes a past confirmation, and
-//! the hit rate on a random walk stays near chance (examples/pattern_stats.rs).
+//! then on can confirm it. So adding bars to a series never changes a past
+//! confirmation, and the hit rate on a random walk stays near chance
+//! (examples/pattern_stats.rs). The indicator reads a window that slides, and a
+//! window's start moves its first pivots: its older half can gain and lose
+//! confirmed patterns as bars arrive, while its newer half holds (ADR-0046).
 //! Elliott waves are left out: an honest count needs a degree and alternatives,
 //! not one rule check on pivots.
 
@@ -818,7 +821,9 @@ fn tooltip(f: &Found) -> String {
             out.push_str(&format!(" A close past {} fails it.", price_text(s)));
         }
     }
-    out.push_str(" Read from closed bars; the forming bar changes nothing.");
+    out.push_str(
+        " Read from closed bars; the forming bar changes nothing. In the older half of the window, a pattern can come and go as the window slides.",
+    );
     out
 }
 

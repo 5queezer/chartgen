@@ -367,7 +367,11 @@ of them, tails included: an index before the response's first bar is negative, a
 still names the bar. Take them from your newest response and ignore those on older
 history pages. A new swing moves a level on every bar, so rewrite that plot from `levels`
 instead of merging its values. These indicators raise `warmup` to their lookback.
-`signals` only hold detections on the newest closed bar, for `indicator_signal` alerts.
+`signals` only hold detections on the newest closed bar, for `indicator_signal` alerts
+(see the [conditions](#alerts-require---trade) that needs).
+As the 600-bar window slides, `chart_patterns`' older patterns can change, and an event's `t`
+can fall back to an older bar or to `null` and return. To tell a new detection, take a `t`
+newer than any you saw and no older than the newest bar of your previous response.
 `format=summary` and `png` take no warmup, so `chart_patterns` and `auto_fib` read only the
 `bars` you ask for: ask for 600 to match the web chart.
 
@@ -1051,6 +1055,14 @@ Alert conditions:
 
 Signal labels come from a fixed registry in `src/trading/signals.rs` — see
 the [trading guide](/chartgen/guides/trading/#signal-labels) for the full list.
+`candlestick_patterns` and `chart_patterns` use their own: a pattern's key such as `hammer`, or
+`double_top_confirmed`, on the newest closed bar.
+
+`indicator_signal` is not checked when set. It only fires if the indicator is in the server's
+`--panels` under that exact name, since the engine computes nothing else; any other name is
+accepted and never fires. The engine's window starts empty and holds at most 200 bars, with no
+history loaded, so an indicator needing more bars stays silent until they have closed, and
+`chart_patterns` reads those 200 rather than the web chart's 600.
 
 ### Push notifications (require `--trade`)
 

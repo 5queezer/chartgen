@@ -4,7 +4,8 @@
 //! pattern on it is a chance formation, so its count is a false positive rate and
 //! its directional hit rate should sit near 50%. The e2e sample source is a smooth
 //! wave, not a market: its counts show what the screenshots show, and its hit rates
-//! only show that a wave keeps going, so they are not printed as an edge.
+//! only show that a wave keeps going, so they are no edge. The last section counts
+//! what the sliding window makes confirmed patterns do on the random walk.
 //! Prints what guides/tradingview-parity.md quotes.
 //!
 //! Usage: `cargo run --example pattern_stats`

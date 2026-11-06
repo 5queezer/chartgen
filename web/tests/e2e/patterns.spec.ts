@@ -171,6 +171,14 @@ test.describe("candlestick patterns", () => {
     await page.mouse.move(px.x, px.y + (l.above ? 200 : -200), { steps: 2 });
     await expect(tooltip(page)).toHaveCount(0);
 
+    // Live ticks leave it alone; a zoom moves the bars from under it.
+    await hoverLabel(page, l);
+    await expect(tooltip(page)).toHaveText(l.tooltip);
+    await page.waitForTimeout(2_500);
+    await expect(tooltip(page)).toHaveText(l.tooltip);
+    await page.mouse.wheel(0, -300);
+    await expect(tooltip(page)).toHaveCount(0);
+
     // A label on the forming bar reads differently: outlined, not filled.
     const filled = await colorCount(page, BLUE);
     await page.evaluate(() => {

@@ -24,7 +24,7 @@ const REPAINT_NOTES: Record<string, string> = {
   candlestick_patterns:
     "A label on the forming bar is outlined and can change or vanish until the bar closes. Labels on closed bars never change, and alerts wait for the close.",
   chart_patterns:
-    "Read from closed bars: the forming bar changes nothing. A swing is known only after Depth more bars, so a pattern appears that much later. Forming patterns can reshape or vanish as swings confirm. A pattern is confirmed only after a later bar closes past its line, and can still fail after that.",
+    "Read from closed bars: the forming bar changes nothing. A swing is known only after Depth more bars, so a pattern appears that much later. Forming patterns can reshape or vanish as swings confirm. A pattern is confirmed only after a later bar closes past its line, and can still fail after that. In the older half of the 600 bars, confirmed patterns can appear or disappear as the window slides; the newer half holds.",
   auto_fib:
     "Read from closed bars: the forming bar moves nothing. The levels are redrawn when a newer swing is confirmed, Depth bars after it, or when a close breaks the start of the swing. Older bars then show the new levels too.",
 };

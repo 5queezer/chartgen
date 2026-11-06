@@ -1370,6 +1370,9 @@ export function Chart(props: ChartProps): JSX.Element {
       setAtOldest(r?.from === 0);
       if (typeof r?.from !== "number" || typeof r.to !== "number") return;
       const { from, to } = r;
+      // The bars moved under the pointer, as on a zoom or a replay step, and a tooltip
+      // would name the wrong one. This action also fires on every live tick.
+      if (from !== untrack(firstVisible) || to !== untrack(lastVisible)) setMarkTip(null);
       // One update per frame however many range events a drag fires.
       if (rangeFrame !== null) cancelAnimationFrame(rangeFrame);
       rangeFrame = requestAnimationFrame(() => {

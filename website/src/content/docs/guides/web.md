@@ -1110,25 +1110,36 @@ last close.
 | | On the forming bar | After it closed |
 |---|---|---|
 | Candlestick label | Outlined: can change or vanish | Never |
-| Chart pattern | Nothing | A forming one can reshape or vanish as swings confirm. A confirmed one stays, and can still fail |
+| Chart pattern | Nothing | A forming one can reshape or vanish as swings confirm. In the newer half of the 600 bars, a confirmed one stays, and can still fail. In the older half, confirmed ones can appear and disappear as the window slides |
 | Fib levels | Nothing | Redrawn when a newer swing confirms or a close breaks the swing's start. Older bars show the new levels too |
 
 A swing is known only **depth** bars after its high or low, so a chart pattern appears that
-much after its last turn, and is confirmed only by a later bar's close past its line. A
-pattern near the start of the 600 bars can change as the window slides. A daily bar counts
-as forming for its whole UTC day, so a label on it stays outlined after its exchange closes.
+much after its last turn, and is confirmed only by a later bar's close past its line. The
+window's start decides its first swings, so moving it by a bar can change what the older half
+of the 600 bars shows: on a random walk, over 11,200 closes, 271 confirmed patterns appeared
+there and 360 disappeared, against 1 and 1 in the newer half. The status of a pattern more than
+300 bars old is a reading of the window, not a record. A daily bar counts as forming for 24
+hours from its open, so a label on it stays outlined after its exchange closes.
 
 **Alerts.** The bell on a pattern indicator's legend row, or **Source** in the dialog, offers
 *Bullish*, *Bearish* and, for candlesticks, *Neutral*. To alert on one pattern, choose it in
 the settings, then add the alert to that instance. Each new detection on a closed bar fires
-once; those already on the chart do not. For a fib level, pick the level under **Level**:
+once; those already on the chart do not, nor do older ones that only appear because the window
+moved. For a fib level, pick the level under **Level**:
 *Close crossing 0.618*. A level moving over the price with a new swing does not fire it.
 
 **What alerts cannot do.** They run in this browser, only while a tab shows that symbol,
 interval and settings (in a grid, on its active chart): not on the server, and not by webhook. A pattern cannot fire on the
-forming bar, and there is no alert on a pattern failing or on a forming one. Over MCP,
-`set_alert` with `indicator_signal` matches a pattern's key on the newest closed bar, such as
-`hammer` or `double_top_confirmed`.
+forming bar, and there is no alert on a pattern failing or on a forming one.
+
+**Over MCP**, `set_alert` with `indicator_signal` matches a pattern's key on the newest closed
+bar, such as `hammer` or `double_top_confirmed`. It needs a server started with `--trade`, and
+two things it does not check when you set the alert. The indicator must be in that server's
+`--panels` under the name you pass, since the engine computes nothing else; any other name is
+accepted and never fires. And the engine's window starts empty and holds 200 bars at most,
+with no history loaded: nothing fires until enough bars have closed since the start (about 50
+for the SMA 50 trend rule, 200 for SMA 50 and 200), and `chart_patterns` reads only those 200,
+so it can differ from the web chart's 600.
 
 **How much to trust them.** A label says a shape occurred, not that it predicts anything. On a
 random walk, which holds no pattern at all, the defaults still find about 238 candlestick
