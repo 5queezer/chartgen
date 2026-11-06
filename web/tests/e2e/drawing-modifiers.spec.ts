@@ -135,6 +135,9 @@ const nextDataTick = (page: Page) =>
  * a reload left the point where it was. The chart is still taking its first data then;
  * the exact cause is not pinned down. It is not the tick that used to undo a drag on
  * release, which DrawingToolbar's `refresh` now prevents (tests under "a live tick").
+ * One lead: a press on the line's body moves both points, which leaves a vertical line
+ * as long as it was. Forcing that took delayed animation frames; 224 drags without
+ * this wait, under CPU throttling and long tasks too, all took the point.
  */
 async function dragTo(page: Page, from: At, to: At, keys: string[] = []): Promise<void> {
   const box = (await host(page).boundingBox())!;
