@@ -1,0 +1,25 @@
+/* Syntax colors of the script editor (ADR-0041), with the panel's lazy chunk. */
+.script-editor {
+  --script-keyword: #c792ea;
+  --script-string: #a5d6a7;
+  --script-number: #f7a072;
+  --script-comment: #8b8f9a;
+  --script-function: #82aaff;
+  --script-property: #7fdbca;
+  --script-active-line: rgba(255, 255, 255, 0.04);
+}
+
+:root[data-theme="light"] .script-editor {
+  --script-keyword: #8b1fa8;
+  --script-string: #1a7f37;
+  --script-number: #a64b00;
+  --script-comment: #6a6f7a;
+  --script-function: #0550ae;
+  --script-property: #00696b;
+  --script-active-line: rgba(19, 23, 34, 0.04);
+}
+
+/* Docked under the chart: the chart's usual minimum would push it over the panel. */
+body:has(.script-editor) .chart-host {
+  min-height: 120px;
+}
