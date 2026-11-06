@@ -93,10 +93,10 @@ closes of a random walk:
 | Appeared | 81 | 1 | 271 |
 | Disappeared before leaving the window | | 1 | 360 |
 
-The late appearances were 200 to 599 bars old, nearly all over 400. The newer half holds, and
-a test keeps it so; the older half does not, and this is not hidden from the user. Anchoring
-the window would not fix it without per-chart state (option 2), and a tail and a full load
-would then need the same anchor.
+The late appearances were 200 to 599 bars old, most of them over 400. The newer half holds, and
+a test keeps it so. The older half does not, and the settings dialog, tooltip and guide say so.
+Starting the window on a fixed grid of bar times might reduce this, at the price of more bars
+on every tail; that was not tried.
 
 ### Wire
 
