@@ -291,7 +291,7 @@ describe("price-based charts", () => {
     chart_style: "renko",
     chart_params: { box: "atr", atr_length: 14 },
   };
-  const priced = (first: number, last: number, box = 50) => ({
+  const priced = (first: number, last: number, box = 50): SeriesPayload => ({
     ...payload(first, last, first > 0),
     chart_style: "renko" as const,
     chart_params: { box: "atr" as const, atr_length: 14, box_size: box },
@@ -337,16 +337,19 @@ describe("price-based charts", () => {
   it("keeps updating across a new build, through the real merge, with its history", async () => {
     // The new build's tail ends before our newest bar: it used to be stale, for good.
     let polls = 0;
+    const percent = { box: "percent" as const, percent: 1, box_size: 50 };
     const s = setup(() => {
       polls++;
       const t = priced(980, 995 + polls);
       t.anchor = 5000;
+      t.chart_params = percent;
       t.bars.at(-1)!.c = 1234 + polls;
       return Promise.resolve(t);
     });
     const loaded = priced(900, 1000);
     loaded.anchor = 1000;
-    s.feed.reset(loaded, PRICE_REQ);
+    loaded.chart_params = percent;
+    s.feed.reset(loaded, { ...REQ, chart_style: "renko", chart_params: { box: "percent", percent: 1 } });
     const before = s.last()!.series.bars[0]!.t;
     await vi.advanceTimersByTimeAsync(FAST_POLL_MS + 1);
     expect(s.reload).not.toHaveBeenCalled();

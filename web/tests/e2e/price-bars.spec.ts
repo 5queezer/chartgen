@@ -499,8 +499,15 @@ test.describe("live price-based bars", () => {
   test("a tail of a new build keeps the chart updating, with its bars and history", async ({
     bootedApp: page,
   }) => {
+    // A percent box: where the review measured freezes, and where a build is shortest.
     await pickChartType(page, "Renko");
-    const loaded = await expectBuilt(page, "renko");
+    await expectBuilt(page, "renko");
+    await openSettings(page, "Renko");
+    const dialog = page.getByTestId("chart-type-settings");
+    await dialog.getByLabel("Box assignment").selectOption("percent");
+    await dialog.getByRole("button", { name: "OK" }).click();
+    await expect.poll(async () => (await series(page))?.chart_params?.box).toBe("percent");
+    const loaded = (await series(page))!;
     expect(typeof (loaded as unknown as { anchor: unknown }).anchor).toBe("number");
 
     // Every tail from now on comes from a build that started later and has not reached our
