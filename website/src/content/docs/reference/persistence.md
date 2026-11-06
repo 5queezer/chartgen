@@ -147,7 +147,8 @@ CREATE TABLE server_alert_events (   -- deliveries not finished yet
 
 A fire writes the alert's new state and its delivery in one transaction, before
 anything is sent, so a restart neither fires it again nor loses the delivery. A
-delivery older than an hour at startup is dropped. `record_json` holds webhook URLs,
+delivery older than an hour is dropped. Spent alerts are deleted after 7 days, and those of an
+owner with no token for 30 days too, unless the operator listed that client. `record_json` holds webhook URLs,
 which may contain tokens, and signing secrets in clear text, because the server needs
 them to send and sign. They are never returned or logged, but treat a copy of this file
 as holding them.
@@ -161,12 +162,13 @@ directory and file inherit theirs. The file holds client ids, scripts and webhoo
 can read it, especially on Windows or a mounted volume.
 
 Clients with no token 24 hours after registering are deleted at startup and on each
-registration, unless they own scripts or server alerts.
+registration, unless they own scripts.
 
 `oauth_clients` keeps dynamically registered OAuth clients across restarts,
 so a client keeps its `client_id`, and with it any scripts. Access tokens stay
 in memory: after a restart, clients re-authorize. Clients that received a token
 are only deleted when a registration at the
 [1000 client limit](/chartgen/reference/oauth/#token-lifetime) evicts them, which
-spares any client with a live token or a row in `user_indicators` or `server_alerts`. Back up the file like any
+spares any client with a live token or a row in `user_indicators`, or, with
+`CHARTGEN_SERVER_ALERTS=1`, in `server_alerts`. Back up the file like any
 SQLite database (`sqlite3 chartgen.db ".backup copy.db"`).

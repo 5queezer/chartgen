@@ -315,6 +315,34 @@ test("pause, edit and delete act on the server, and survive a reload", async ({ 
   await expect(rows(page)).toHaveCount(0);
 });
 
+test("a fire nobody saw is reported when the app next opens, once", async ({ bootedApp: page }) => {
+  // Nobody hears from the server while it fires, as with no tab open.
+  await page.route("**/mcp", async (route) => {
+    if (route.request().postData()?.includes('"list_server_alerts"')) await route.abort();
+    else await route.continue();
+  });
+  await createServerAlert(page, { webhook: HOOK });
+  await expect.poll(() => received.length, { timeout: 15_000 }).toBe(1);
+  await expect(toasts(page)).toHaveCount(0);
+  await page.unrouteAll({ behavior: "wait" });
+  await reloadApp(page);
+  await expect(toasts(page)).toHaveCount(1, { timeout: 15_000 });
+  await reloadApp(page);
+  await page.waitForTimeout(1_500);
+  await expect(toasts(page)).toHaveCount(0);
+});
+
+test("a bar-close alert is created from the dialog and says so", async ({ bootedApp: page }) => {
+  await openDialog(page);
+  await dialog(page).getByLabel("Run on server").check();
+  await dialog(page).getByLabel("Check on").selectOption("close");
+  await dialog(page).getByLabel("Condition").selectOption("crossing_up");
+  await dialog(page).getByLabel("Price").fill("9000000");
+  await dialog(page).getByRole("button", { name: "Create" }).click();
+  await expect(rows(page)).toHaveCount(1);
+  await expect(rows(page)).toContainText(/on \S+ close/);
+});
+
 test("a fire is reported once across a reload", async ({ bootedApp: page }) => {
   await createServerAlert(page);
   await expect(toasts(page)).toHaveCount(1, { timeout: 15_000 });

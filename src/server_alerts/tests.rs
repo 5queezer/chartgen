@@ -1073,6 +1073,96 @@ async fn a_backlog_does_not_keep_another_clients_delivery_waiting() {
     assert!(sent < 8, "it waited behind the backlog: {sent} went first");
 }
 
+/// No client gets a second turn before the others had one.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_client_that_waited_longest_goes_first() {
+    let (port, _) = receiver(OK).await;
+    let (store, _) = store_at("turns");
+    let a = alerts_on(store, local(port), Limits::default());
+    let owners = ["a", "b", "c", "d"];
+    for owner in owners {
+        let event = |n: u32| StoredEvent {
+            id: format!("{owner}-{n}"),
+            alert_id: "gone".into(),
+            body: "{}".into(),
+            created_at: chrono::Utc::now().timestamp(),
+        };
+        let mut st = a.lock();
+        ServerAlerts::enqueue(&mut st, owner.to_string(), event(1));
+        ServerAlerts::enqueue(&mut st, owner.to_string(), event(2));
+    }
+    let left = |a: &ServerAlerts| a.lock().queues.values().map(VecDeque::len).sum::<usize>();
+    let mut served = HashSet::new();
+    let before = left(&a);
+    let mut turns = 0;
+    while served.len() < owners.len() && turns < 16 {
+        let waiting: HashMap<String, usize> = a
+            .lock()
+            .queues
+            .iter()
+            .map(|(o, q)| (o.clone(), q.len()))
+            .collect();
+        a.dispatch(Instant::now());
+        turns += 1;
+        for owner in owners {
+            let now = a.lock().queues.get(owner).map_or(0, VecDeque::len);
+            if now < waiting.get(owner).copied().unwrap_or(0) {
+                assert!(served.insert(owner), "{owner} went twice before the others");
+            }
+        }
+    }
+    assert_eq!(served.len(), owners.len());
+    assert_eq!(left(&a), before - 4);
+}
+
+/// A dead host of one client holds that client's slots, not everyone's.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_client_is_held_to_its_share_of_the_slots() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let seen = Arc::new(Mutex::new(HashSet::new()));
+    let log = seen.clone();
+    tokio::spawn(async move {
+        while let Ok((mut s, _)) = listener.accept().await {
+            let log = log.clone();
+            tokio::spawn(async move {
+                let mut buf = vec![0u8; 16384];
+                let n = s.read(&mut buf).await.unwrap_or(0);
+                let text = String::from_utf8_lossy(&buf[..n]).to_lowercase();
+                let event = text
+                    .lines()
+                    .find_map(|l| l.strip_prefix("x-chartgen-event: "))
+                    .map(|e| e.trim().to_string());
+                if let Some(event) = event {
+                    log.lock().unwrap().insert(event);
+                }
+                // Never answers, and holds the connection until the client gives up.
+                let _ = s.read(&mut buf).await;
+            });
+        }
+    });
+    let (store, _) = store_at("slots");
+    let limits = Limits {
+        deliveries_in_flight_per_client: 1,
+        ..Limits::default()
+    };
+    // One attempt outlasts the test: the slot is free again between attempts.
+    let timing = Timing {
+        total: Duration::from_secs(5),
+        ..quick_timing()
+    };
+    let hub = hub_with(Arc::new(Fake::default()));
+    let a = ServerAlerts::new(store, hub, local(port), Access::Open, limits, timing);
+    for _ in 0..3 {
+        create(&a, hooked(port, "greater", "once"), "me").await;
+    }
+    tick(&a, BASE, 101.0);
+    until("the first delivery", || !seen.lock().unwrap().is_empty()).await;
+    // Several dispatch ticks, while the first still waits for its silent receiver.
+    tokio::time::sleep(Duration::from_millis(1300)).await;
+    assert_eq!(seen.lock().unwrap().len(), 1, "a second went at once");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn the_total_budget_holds_across_clients() {
     let (port, seen) = receiver(OK).await;
@@ -1218,6 +1308,27 @@ async fn a_client_taken_off_the_list_stops_running() {
     assert_eq!(a.lock().alerts[&id].fire_count, 0);
     assert!(a.lock().alerts.contains_key(&other));
     tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(seen.lock().unwrap().is_empty());
+}
+
+/// Going from `*` to unset: alerts run on, and what was stored sends nothing.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stored_webhook_stops_when_the_setting_no_longer_allows_it() {
+    let (port, seen) = receiver(OK).await;
+    let (store, path) = store_at("webhooks-gone");
+    let a = with_access(store, Access::Open, local(port));
+    let id = create(&a, hooked(port, "greater", "once"), "me").await;
+    drop(a);
+    let a = with_access(reopen(&path), Access::NoWebhooks, local(port));
+    tick(&a, BASE, 101.0);
+    assert_eq!(a.lock().alerts[&id].fire_count, 1);
+    assert_eq!(a.lock().pending, 0);
+    let view = get(&a, "me", &id).await;
+    assert_eq!(
+        view["last_error"],
+        "webhook skipped: this client may not use webhooks"
+    );
+    tokio::time::sleep(Duration::from_millis(700)).await;
     assert!(seen.lock().unwrap().is_empty());
 }
 

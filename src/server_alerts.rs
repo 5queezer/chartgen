@@ -583,9 +583,6 @@ impl ServerAlerts {
             return;
         }
         let late = watch.last_bar.is_some_and(|last| bar_time < last);
-        if late && !is_close {
-            return;
-        }
         if !late {
             watch.last_bar = Some(bar_time);
             watch.last_price = Some(price);

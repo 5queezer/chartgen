@@ -31,7 +31,7 @@ export interface CreateServerAlertInput {
    */
   evaluate_on?: "live" | "close";
   /**
-   * Bar interval with a Binance kline stream, e.g. 1m, 15m, 1h, 1d. With evaluate_on: close the alert reads the closes of these bars; with live it only labels the alert.
+   * Bar interval, e.g. 1m, 15m, 1h, 1d. With evaluate_on: close the alert reads the closes of these bars, which need a Binance kline stream; with live it only labels the alert.
    */
   interval?: string;
   /**

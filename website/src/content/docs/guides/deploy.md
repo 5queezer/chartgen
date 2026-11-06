@@ -50,28 +50,58 @@ registrations of external MCP clients. See the [persistence reference](/chartgen
 | `CHARTGEN_DATA_SOURCE` | `src/fetch.rs` | Set to `sample` to make `generate_chart`, `get_indicators` and `get_quotes` use a deterministic offline source and never call Binance or Yahoo. Bars follow the interval grid (weekly bars open on Monday), each bar's prices depend only on the symbol and its open time (so overlapping pages match exactly), and the forming candle moves every second. Intended for E2E tests and demos. Unset means live data. |
 | `CHARTGEN_SCRIPTING` | `src/scripting/mod.rs` | `1` enables [scripted indicators](/chartgen/guides/scripted-indicators/): the four scripting MCP tools and user scripts in `generate_chart` / `list_indicators`. Off when unset. |
 | `CHARTGEN_DB` | `src/scripting/persistence.rs` | SQLite file for registered OAuth clients, with or without `CHARTGEN_SCRIPTING=1`, and for scripted indicators. Opened at server startup; a failure is logged and leaves clients in memory only. Default `~/.chartgen/chartgen.db`, inside the persisted volume. |
-| `CHARTGEN_SERVER_ALERTS` | `src/server_alerts.rs` | `1` enables [alerts on the server](/chartgen/guides/web/#alerts-on-the-server) and their webhooks: four MCP tools, and **Run on server** in the web app. Off when unset; alerts already stored wait in `chartgen.db`. Needs a build with the `scripting` feature, which the Docker image has, and the store. Read [before turning it on](#server-alerts). |
+| `CHARTGEN_SERVER_ALERTS` | `src/server_alerts.rs` | `1` enables [alerts on the server](/chartgen/guides/web/#alerts-on-the-server): four MCP tools, and **Run on server** in the web app. Off when unset; alerts already stored wait in `chartgen.db`, and pin nobody. Needs a build with the `scripting` feature, which the Docker image has, and the store. Read [before turning it on](#server-alerts). |
+| `CHARTGEN_SERVER_ALERT_CLIENTS` | `src/server_alerts.rs` | Comma-separated OAuth client ids that may create server alerts and use webhooks. Unset: anyone may create alerts, nobody gets webhooks. `*`: anyone, with webhooks. |
+| `CHARTGEN_SERVER_ALERT_PAIRS_PER_CLIENT` | `src/server_alerts.rs` | Symbol and interval pairs one client may watch. Default 2. |
+| `CHARTGEN_WEBHOOK_PROXY` | `src/webhook.rs` | `http` or `https` URL of a proxy that sends the webhooks, so a receiver does not see this server's address. Unset means direct, ignoring `HTTPS_PROXY` and the like. |
+| `CHARTGEN_WEBHOOK_BLOCKED_PREFIXES` | `src/webhook.rs` | Comma-separated addresses or prefixes a webhook may not reach besides the private ranges (`203.0.113.7,2001:db8:1::/48`). For this network's own public addresses. |
 | `CHARTGEN_WEBHOOK_TEST_ORIGIN` | `src/webhook.rs` | Tests only. One loopback origin (`http://127.0.0.1:9000`) a webhook may reach. Ignored unless `CHARTGEN_DATA_SOURCE=sample`, so it does nothing on a live server. |
 | `HOME` / `USERPROFILE` | `src/main.rs` | Picks the data directory (`~/.chartgen/`). Override to relocate `alerts.json` / `trades.log` / `subscriptions.json` / `chartgen.db`. |
 | `_CHARTGEN_PORT` | `src/server.rs` | Internal — set by the process to its own bind port so `base_url()` can compose the fallback URL. Do not set by hand. |
 
 ### Server alerts
 
-`CHARTGEN_SERVER_ALERTS` is off by default, and that is the recommended setting for a
-server with open registration. With it on, anyone who registers an OAuth client can:
+`CHARTGEN_SERVER_ALERTS` is off by default. With open registration, leave it off, or turn it on
+with `CHARTGEN_SERVER_ALERT_CLIENTS` listing the clients you trust. **That allowlist is the
+recommended setup**: client ids are free, so no limit per client can stand in for it. A web user's
+client id is `chartgen.oauth.client_id` in that browser's local storage, and an MCP client's is
+what `/register` gave it.
 
-- make the server send small POSTs to any public HTTPS host, up to 30 a minute per
-  client and 120 in total;
-- hold WebSockets to Binance, up to 16 symbol and interval pairs in total;
-- use up the 200 alerts or the 16 pairs, after which other people's new alerts are
-  refused.
+| `CHARTGEN_SERVER_ALERT_CLIENTS` | Who can create alerts | Who gets webhooks |
+|---|---|---|
+| A list of ids (recommended) | Those clients | Those clients |
+| Unset | Anyone | Nobody |
+| `*` | Anyone | Anyone |
 
-Webhooks cannot reach private, loopback, link-local, CGNAT, multicast or metadata
-addresses, on IPv4 or IPv6, and follow no redirects
-([ADR-0042](/chartgen/decisions/0042-server-side-alerts/)). What the checks cannot
-know is your own public address: a webhook at it reaches whatever your router forwards
-on port 443, so forward nothing there if you turn this on. A server behind a tunnel
-needs no forwarded port.
+Unset, a stranger can hold alerts but cannot make the server send anything. Even then they can use
+up the 200 alerts or the 16 watched symbol and interval pairs until those expire, after which other
+people's new alerts are refused. Spent alerts are deleted after 7 days, and alerts whose owner had
+no token for 30 days are too, unless you listed that client. There is no command to list or delete
+someone's alerts yet: it takes SQL on `chartgen.db` and a restart.
+
+**One webhook reveals your IP.** A receiver sees where the request came from. A tunnel hides your
+home address from visitors, and a webhook gives it to anyone it is sent for, because the server
+connects directly. List only clients you trust with your address, or set `CHARTGEN_WEBHOOK_PROXY`
+to a proxy elsewhere, which hides it from everyone. The proxy resolves and connects to the receiver
+itself, so run it somewhere that cannot reach this network.
+
+Webhooks cannot reach private, loopback, link-local, CGNAT, multicast or metadata addresses, on IPv4
+or IPv6, names with no dot, the hosts this server fetches data from, or its own host, and follow no
+redirects ([ADR-0042](/chartgen/decisions/0042-server-side-alerts/)). What the checks cannot know is
+which public addresses are yours:
+
+- Your WAN address: a webhook at it reaches whatever your router forwards on port 443. A server
+  behind a tunnel needs no forwarded port, so forward nothing there.
+- A LAN device with a global IPv6 address, if the container has IPv6 egress: the router's firewall
+  does not apply on-link.
+- Anything that trusts your IP. Webhooks come from it, so a Cloudflare Access bypass or service rule
+  that trusts your home address also trusts them. Check those before turning this on.
+
+List such addresses in `CHARTGEN_WEBHOOK_BLOCKED_PREFIXES`. TLS limits the rest: a webhook only
+delivers HTTP where a publicly trusted certificate matches the name.
+
+A value in `CHARTGEN_WEBHOOK_BLOCKED_PREFIXES` or `CHARTGEN_WEBHOOK_PROXY` that does not parse keeps
+server alerts off, with a line in the log, rather than running without it.
 
 ## Reverse proxy
 

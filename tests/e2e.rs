@@ -1348,6 +1348,39 @@ mod server_alerts {
         assert!(seen.lock().unwrap().is_empty());
     }
 
+    /// The connection is pinned to checked addresses, so a proxy in the environment
+    /// must not get to resolve the name instead. Only the explicit setting uses one.
+    #[test]
+    fn test_webhooks_ignore_a_proxy_in_the_environment() {
+        let db = store_path("alerts-env-proxy");
+        let (hook, seen) = receiver();
+        let (proxy, proxied) = receiver();
+        let port = free_port();
+        let mut cmd = server_command(port, None, &db, false);
+        let proxy_url = format!("http://127.0.0.1:{proxy}");
+        cmd.env("CHARTGEN_SERVER_ALERTS", "1")
+            .env("CHARTGEN_SERVER_ALERT_CLIENTS", "*")
+            .env("CHARTGEN_DATA_SOURCE", "sample")
+            .env(
+                "CHARTGEN_WEBHOOK_TEST_ORIGIN",
+                format!("http://127.0.0.1:{hook}"),
+            )
+            .env_remove("NO_PROXY")
+            .env_remove("no_proxy");
+        for name in ["HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy"] {
+            cmd.env(name, &proxy_url);
+        }
+        let srv = start_server(cmd, port);
+        let token = sign_in(srv.port, &register_external(srv.port));
+        let args = serde_json::json!({
+            "symbol": "BTCUSDT", "condition": "greater", "trigger": "once", "level": 0.01,
+            "webhook_url": format!("http://127.0.0.1:{hook}/hook"),
+        });
+        call_tool(srv.port, &token, "create_server_alert", args).unwrap();
+        wait_for("the delivery", || !seen.lock().unwrap().is_empty());
+        assert!(proxied.lock().unwrap().is_empty(), "went through the proxy");
+    }
+
     /// A security setting that does not parse leaves the feature off, not open.
     #[test]
     fn test_a_bad_webhook_setting_keeps_alerts_off() {

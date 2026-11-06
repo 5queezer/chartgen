@@ -404,12 +404,12 @@ pub fn server_alert_tools() -> Vec<Value> {
     vec![
         json!({
             "name": "create_server_alert",
-            "description": "Create a price alert that runs on the server, with no browser open, and optionally calls a webhook when it fires. It belongs to your OAuth client and survives restarts. Binance symbols only. Drawing and indicator alerts cannot run here. The webhook must be https on port 443 at a public address. With sign: true the response holds webhook_secret once; it cannot be read again. Returns the alert as list_server_alerts does.",
+            "description": "Create a price alert that runs on the server, with no browser open, and optionally calls a webhook when it fires. It belongs to your OAuth client and survives restarts. Binance symbols only. Drawing and indicator alerts cannot run here. The server's operator decides which clients may create alerts and use webhooks (see can_create and webhooks in list_server_alerts). The webhook must be https on port 443 at a public address. With sign: true the response holds webhook_secret once; it cannot be read again. Returns the alert as list_server_alerts does.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "symbol": { "type": "string", "description": "Binance symbol, e.g. BTCUSDT." },
-                    "interval": { "type": "string", "description": "Bar interval with a Binance kline stream, e.g. 1m, 15m, 1h, 1d. With evaluate_on: close the alert reads the closes of these bars; with live it only labels the alert.", "default": "1m" },
+                    "interval": { "type": "string", "description": "Bar interval, e.g. 1m, 15m, 1h, 1d. With evaluate_on: close the alert reads the closes of these bars, which need a Binance kline stream; with live it only labels the alert.", "default": "1m" },
                     "evaluate_on": { "type": "string", "enum": ["live", "close"], "description": "live: every price update, like a browser alert. close: only when a bar of the interval closes.", "default": "live" },
                     "condition": condition.clone(),
                     "level": { "type": "number", "description": "The price level; greater than 0." },
@@ -423,12 +423,12 @@ pub fn server_alert_tools() -> Vec<Value> {
         }),
         json!({
             "name": "list_server_alerts",
-            "description": "List your server alerts with their state: active, disarmed, last_triggered_at, fire_count, feed (live or waiting), last_price and the last webhook delivery (status and error only). A webhook shows its host and whether it signs, never its URL or secret. On a server without server alerts this returns {enabled: false, alerts: []}.",
+            "description": "List your server alerts with what your client may do (can_create, webhooks) and each alert's state: active, disarmed, last_triggered_at, fire_count, feed (live or waiting), last_price and the last webhook delivery (status and error only). A webhook shows its host and whether it signs, never its URL or secret. On a server without server alerts this returns {enabled: false, alerts: []}.",
             "inputSchema": { "type": "object", "properties": {} }
         }),
         json!({
             "name": "update_server_alert",
-            "description": "Change one of your server alerts. Changing condition, level, trigger or message switches it on and re-arms it. active: false pauses it and active: true resumes it, re-armed. webhook_url replaces the webhook, an empty string removes it. With sign: true the response holds a new webhook_secret once. Symbol, interval and evaluate_on cannot change: delete and create instead.",
+            "description": "Change one of your server alerts. A new condition, level or trigger switches it on and re-arms it; a new message or webhook does not, so a spent alert stays spent. active: false pauses it and active: true resumes it, re-armed. webhook_url replaces the webhook, an empty string removes it; a new URL does not keep the old signing secret. With sign: true the response holds a new webhook_secret once. Symbol, interval and evaluate_on cannot change: delete and create instead.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
