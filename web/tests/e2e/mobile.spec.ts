@@ -371,9 +371,15 @@ for (const name of ["iPhone 13 landscape", "iPhone SE landscape"]) {
       const popover = page.locator('[data-popper-positioner] [role="dialog"]');
       await expect(popover).toBeVisible();
       await expect(popover).toBeInViewport({ ratio: 1 });
-      await expect(popover.getByRole("slider", { name: "Opacity" })).toBeInViewport({ ratio: 1 });
+      // By label: the modal dialog hides what is outside it from role queries.
+      await expect(popover.getByLabel("Opacity")).toBeInViewport({ ratio: 1 });
       const size = page.viewportSize()!;
       expect(await page.evaluate(() => document.documentElement.scrollHeight)).toBeLessThanOrEqual(size.height);
+
+      // Its palette answers a finger.
+      const before = await swatch.getAttribute("style");
+      await popover.locator('[aria-label^="Color "]').first().tap();
+      await expect.poll(() => swatch.getAttribute("style")).not.toBe(before);
     });
 
     for (const settle of [0, 30, 200]) {
