@@ -17,6 +17,10 @@
 //   Every other indicator's hlines and y_range do not depend on the window.
 // - `future`, the values past the last bar (ADR-0033), belongs to the newest
 //   bar: a tail's replaces ours, an older page's is ignored.
+// - `labels` (ADR-0046) belong to their bar, and merge like `signals`.
+// - `patterns`, `levels` and `events` (ADR-0046) are re-detected as a whole on
+//   the newest bars: a tail's replace ours, an older page's are ignored. Levels
+//   rewrite their plot on every bar, as a swing moves the whole level.
 // - Anything that does not line up (other symbol or interval, a bar
 //   without a timestamp, unordered or overlapping bars, a different
 //   indicator set or channel count) is rejected with a reason instead of
@@ -30,6 +34,9 @@ type Indicator = SeriesPayload["indicators"][string];
 type DivLine = NonNullable<Indicator["divlines"]>[number];
 type Signal = NonNullable<Indicator["signals"]>[number];
 type Histogram = NonNullable<Indicator["histogram"]>[number];
+type BarLabel = NonNullable<Indicator["labels"]>[number];
+type Pattern = NonNullable<Indicator["patterns"]>[number];
+type Level = NonNullable<Indicator["levels"]>[number];
 
 /**
  * The per-bar colors of `src` as indices into `palette`, which gains (in
@@ -201,6 +208,38 @@ const shiftDivline = (d: DivLine, by: number): DivLine => ({
   x2: d.x2 + by,
 });
 
+const shiftLabel = (l: BarLabel, by: number): BarLabel => ({ ...l, x: l.x + by });
+
+export const shiftPattern = (p: Pattern, by: number): Pattern => ({
+  ...p,
+  strokes: p.strokes.map((s) => ({ ...s, x1: s.x1 + by, x2: s.x2 + by })),
+  label: { ...p.label, x: p.label.x + by },
+});
+
+export const shiftLevel = (l: Level, by: number): Level => ({ ...l, x: l.x + by });
+
+/**
+ * Write `levels` over the plots of `lines` on all `length` bars: each level's plot
+ * is flat from its bar on and null before, and a plot without a level is null.
+ * Only for indicators that have levels: their plots hold nothing else.
+ */
+export function writeLevels(
+  lines: Indicator["lines"],
+  levels: readonly Level[],
+  length: number,
+): void {
+  lines?.forEach((l, line) => {
+    const lv = levels.find((v) => v.line === line);
+    l.values.length = length;
+    for (let i = 0; i < length; i++) l.values[i] = lv && i >= lv.x ? lv.y : null;
+  });
+}
+
+/** True when both lists draw the same levels on the same bars. */
+const sameLevels = (a: readonly Level[], b: readonly Level[]): boolean =>
+  a.length === b.length &&
+  a.every((v, i) => v.line === b[i]!.line && v.x === b[i]!.x && v.y === b[i]!.y);
+
 const startOf = (d: DivLine) => Math.min(d.x1, d.x2);
 const endOf = (d: DivLine) => Math.max(d.x1, d.x2);
 
@@ -214,8 +253,8 @@ function divKey(d: DivLine, bars: SeriesPayload["bars"]): string {
   return `${bars[endOf(d)]?.t ?? endOf(d)}|${d.dashed}`;
 }
 
-/** Sort order of signals: by bar. */
-const bySignal = (a: Signal, b: Signal) => a.x - b.x;
+/** Sort order of signals and labels: by bar. Sorting is stable: one bar's order stays. */
+const bySignal = (a: { x: number }, b: { x: number }) => a.x - b.x;
 
 /** Sort order of divlines: by end bar, then start bar. */
 const byDivline = (a: DivLine, b: DivLine) =>
@@ -247,6 +286,7 @@ export function dedupeDivlines(
 export function sortChannels(series: SeriesPayload): SeriesPayload {
   for (const ind of Object.values(series.indicators)) {
     ind.signals?.sort(bySignal);
+    ind.labels?.sort(bySignal);
     ind.divlines?.sort(byDivline);
   }
   return series;
@@ -319,6 +359,14 @@ export function mergeOlder(
         bars,
       );
     }
+    if (cur.labels || pg.labels) {
+      merged.labels = [
+        ...(pg.labels ?? []),
+        ...(cur.labels ?? []).map((l) => shiftLabel(l, offset)),
+      ].sort(bySignal);
+    }
+    shiftWhole(merged, cur, offset);
+    if (merged.levels) writeLevels(merged.lines, merged.levels, bars.length);
     indicators[name] = merged;
   }
   return {
@@ -334,6 +382,12 @@ export function mergeOlder(
       mergedErrors(current, page),
     ),
   };
+}
+
+/** `out`'s whole-window channels: those of `cur`, moved `by` bars. */
+function shiftWhole(out: Indicator, cur: Indicator, by: number): void {
+  if (cur.patterns) out.patterns = cur.patterns.map((p) => shiftPattern(p, by));
+  if (cur.levels) out.levels = cur.levels.map((l) => shiftLevel(l, by));
 }
 
 /** An indicator that failed on an older page: no values for those `count` bars. */
@@ -358,6 +412,8 @@ function padOlder(cur: Indicator, count: number): Indicator {
   }
   if (cur.signals) merged.signals = cur.signals.map((s) => shiftSignal(s, count));
   if (cur.divlines) merged.divlines = cur.divlines.map((d) => shiftDivline(d, count));
+  if (cur.labels) merged.labels = cur.labels.map((l) => shiftLabel(l, count));
+  shiftWhole(merged, cur, count);
   return merged;
 }
 
@@ -459,6 +515,8 @@ export function mergeTail(
   // Tail index k lands on our index k + shift.
   const shift = from - skip;
   overwrite(bars, from, tail.bars, skip);
+  // A swing that moved rewrites its levels on older bars too.
+  let rewritten = from;
   for (const [name, cur] of Object.entries(current.indicators)) {
     const tl = tail.indicators[name];
     if (!tl) {
@@ -507,10 +565,34 @@ export function mergeTail(
       const added = shifted.filter((d) => startOf(d) >= 0);
       for (const d of dedupeDivlines([...touching, ...added], bars)) div.push(d);
     }
+    if (cur.labels || tl.labels?.length) {
+      const own = (cur.labels ??= []);
+      while (own.length > 0 && own[own.length - 1]!.x >= from) own.pop();
+      for (const l of tl.labels ?? []) {
+        if (l.x >= skip) own.push(shiftLabel(l, shift));
+      }
+    }
+    if (cur.patterns || tl.patterns) {
+      cur.patterns = (tl.patterns ?? []).map((p) => shiftPattern(p, shift));
+    }
+    if (cur.events || tl.events) cur.events = tl.events ?? [];
+    if (cur.levels || tl.levels) {
+      const old = cur.levels ?? [];
+      const next = (tl.levels ?? []).map((l) => shiftLevel(l, shift));
+      if (!sameLevels(old, next)) {
+        writeLevels(cur.lines, next, bars.length);
+        for (const l of [...old, ...next]) rewritten = Math.min(rewritten, Math.max(0, l.x));
+      }
+      cur.levels = next;
+    }
     if (tl.future) cur.future = tl.future;
     else delete cur.future;
   }
-  return { ok: true, from, series: withErrors(current, mergedErrors(current, tail)) };
+  return {
+    ok: true,
+    from: rewritten,
+    series: withErrors(current, mergedErrors(current, tail)),
+  };
 }
 
 /**

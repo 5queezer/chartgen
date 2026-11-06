@@ -598,3 +598,107 @@ describe("createThrottle", () => {
     expect(fn).toHaveBeenCalledTimes(2);
   });
 });
+
+describe("pattern channels (ADR-0046)", () => {
+  const stroke = (a: number, b: number, first: number) => ({
+    x1: a - first,
+    t1: tOf(a),
+    y1: 1,
+    x2: b - first,
+    t2: tOf(b),
+    y2: 2,
+    dashed: false,
+  });
+  const pattern = (a: number, b: number, first: number, status: "forming" | "confirmed") => ({
+    key: "double_top",
+    name: "Double Top",
+    bias: "bearish" as const,
+    status,
+    strokes: [stroke(a, b, first)],
+    label: { x: a - first, t: tOf(a), y: 2, above: true },
+    tooltip: status,
+  });
+  const withInd = (s: SeriesPayload, key: string, ind: Partial<SeriesPayload["indicators"][string]>) => {
+    s.indicators = { [key]: { label: key, is_overlay: true, ...ind } };
+    return s;
+  };
+
+  it("a label after the cursor is not known yet", () => {
+    const label = (x: number) => ({
+      x,
+      t: tOf(x),
+      y: 1,
+      above: true,
+      text: "H",
+      key: "hammer",
+      name: "Hammer",
+      bias: "bullish" as const,
+      tooltip: "",
+    });
+    const s = withInd(series(30), "candlestick_patterns", { labels: [label(5), label(25)] });
+    const got = sliceSeries(s, 10).indicators.candlestick_patterns!.labels!;
+    expect(got.map((l) => l.x)).toEqual([5]);
+  });
+
+  it("a chart pattern of the live chart never shows: it knows the future", () => {
+    const s = withInd(series(30), "chart_patterns", { patterns: [pattern(2, 5, 0, "confirmed")] });
+    expect(isRepainting("chart_patterns#2")).toBe(true);
+    const frame = replayFrame(s, 10, null);
+    expect(frame.indicators.chart_patterns!.patterns).toEqual([]);
+  });
+
+  it("the recompute's pattern shows on the cursor's bars", () => {
+    const s = withInd(series(30), "chart_patterns", { patterns: [pattern(2, 28, 0, "confirmed")] });
+    const rc = withInd(series(6, 5), "chart_patterns", { patterns: [pattern(6, 8, 5, "forming")] });
+    const got = replayFrame(s, 10, rc).indicators.chart_patterns!.patterns!;
+    expect(got).toHaveLength(1);
+    expect(got[0]!.status).toBe("forming");
+    expect(got[0]!.strokes[0]).toMatchObject({ x1: 6, x2: 8 });
+  });
+
+  it("a level of the live swing does not show on older bars either", () => {
+    const line = { index: 0, label: "0.5", values: Array.from({ length: 30 }, () => 50) };
+    const s = withInd(series(30), "auto_fib", {
+      lines: [line],
+      levels: [{ line: 0, x: 0, t: tOf(0), y: 50 }],
+    });
+    const none = replayFrame(s, 10, null).indicators.auto_fib!;
+    expect(none.lines![0]!.values).toEqual(new Array(11).fill(null));
+    expect(none.levels).toEqual([]);
+
+    const rc = withInd(series(6, 5), "auto_fib", {
+      lines: [{ index: 0, label: "0.5", values: [33, 33, 33, 33, 33, 33] }],
+      levels: [{ line: 0, x: 2, t: tOf(7), y: 33 }],
+    });
+    const got = replayFrame(s, 10, rc).indicators.auto_fib!;
+    expect(got.levels![0]!.x).toBe(7);
+    expect(got.lines![0]!.values).toEqual([...new Array(7).fill(null), 33, 33, 33, 33]);
+    // The live series keeps its values.
+    expect(s.indicators.auto_fib!.lines![0]!.values[0]).toBe(50);
+  });
+
+  it("a recompute reaching back past our first bar still lands on our bars", () => {
+    // The chart holds bars 10.. only; the recompute covers bars 5..15.
+    const line = { index: 0, label: "0.5", values: Array.from({ length: 30 }, () => 50) };
+    const s = withInd(series(30, 10), "auto_fib", {
+      lines: [line],
+      levels: [{ line: 0, x: 0, t: tOf(10), y: 50 }],
+      patterns: [],
+    });
+    const rc = withInd(series(11, 5), "auto_fib", {
+      lines: [{ index: 0, label: "0.5", values: new Array(11).fill(33) }],
+      levels: [{ line: 0, x: 8, t: tOf(13), y: 33 }],
+      patterns: [pattern(6, 13, 5, "forming")],
+    });
+    const got = replayFrame(s, 5, rc).indicators.auto_fib!;
+    // Chart bar 13 is index 3 here; recompute bar 6 lies before our first bar.
+    expect(got.levels![0]!.x).toBe(3);
+    expect(got.lines![0]!.values).toEqual([null, null, null, 33, 33, 33]);
+    expect(got.patterns![0]!.strokes[0]).toMatchObject({ x1: -4, x2: 3 });
+  });
+
+  it("a frame's shape counts an indicator that has only events", () => {
+    const s = withInd(series(3), "chart_patterns", { events: [{ key: "bullish", name: "B", t: null }] });
+    expect(frameShape(s)).toBe("chart_patterns");
+  });
+});
