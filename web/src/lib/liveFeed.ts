@@ -149,7 +149,8 @@ export interface PushApi {
    * Subscribe to pushed tails of `request` computed with `warmup`; resolves
    * to the subscription id. Rejects with a message containing "not
    * pushable" for charts the server cannot push, or "push limit reached"
-   * when a cap or rate limit refuses it.
+   * when a cap or rate limit refuses it. Anything else, such as "feeds busy"
+   * when too many feeds are starting, is retried with a backoff.
    */
   subscribe: (request: LiveRequest, warmup: number) => Promise<string>;
   unsubscribe: (subscriptionId: string) => Promise<unknown>;

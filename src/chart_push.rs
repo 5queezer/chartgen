@@ -44,6 +44,9 @@ pub const STREAM_BUFFER: usize = 256;
 pub const NOT_PUSHABLE: &str = "not pushable";
 /// Prefix of errors for a cap or rate limit; clients poll this chart.
 pub const PUSH_LIMIT: &str = "push limit reached";
+/// Prefix of errors for too many feeds starting. Anyone's churn can cause this and
+/// it passes within a minute, so unlike `PUSH_LIMIT` clients try again.
+pub const FEEDS_BUSY: &str = "feeds busy";
 /// Cadence of the sample source's synthetic ticks.
 const SAMPLE_TICK: Duration = Duration::from_millis(500);
 /// Feed events buffered per group before it lags (and skips some).
@@ -578,13 +581,13 @@ impl ChartHub {
         }
         if st.feed_starts.len() >= self.limits.new_feeds_per_minute {
             return Err(format!(
-                "{PUSH_LIMIT}: at most {} new feeds per minute",
+                "{FEEDS_BUSY}: at most {} new feeds per minute; try again shortly",
                 self.limits.new_feeds_per_minute
             ));
         }
         if st.feeds.len() >= self.limits.feeds_total && !st.feeds.contains_key(feed) {
             return Err(format!(
-                "{PUSH_LIMIT}: the server holds its maximum of {} feeds",
+                "{FEEDS_BUSY}: the server holds its maximum of {} feeds; try again shortly",
                 self.limits.feeds_total
             ));
         }
@@ -1153,7 +1156,8 @@ mod tests {
         let e = hub
             .subscribe("t3", "i3", "s1", req("SOLUSDT", "[]"))
             .unwrap_err();
-        assert!(e.starts_with(PUSH_LIMIT), "{e}");
+        assert!(e.starts_with(FEEDS_BUSY), "{e}");
+        assert!(!e.contains(PUSH_LIMIT), "a client would stop retrying: {e}");
         assert_eq!(fake.started.load(Ordering::SeqCst), 2);
         // A chart on a feed that runs starts nothing.
         hub.subscribe("t3", "i3", "s1", req("ETHUSDT", r#"["rsi"]"#))
@@ -1165,7 +1169,7 @@ mod tests {
         let e = hub
             .subscribe("t1", "i1", "s1", req("BTCUSDT", "[]"))
             .unwrap_err();
-        assert!(e.starts_with(PUSH_LIMIT), "{e}");
+        assert!(e.starts_with(FEEDS_BUSY), "{e}");
     }
 
     #[tokio::test]
@@ -1189,6 +1193,7 @@ mod tests {
         let e = hub
             .subscribe("t1", "i1", "s1", req("ETHUSDT", "[]"))
             .unwrap_err();
+        assert!(e.starts_with(FEEDS_BUSY), "{e}");
         assert!(e.contains("maximum of 1 feeds"), "{e}");
         // The lingering one itself can be taken again.
         hub.subscribe("t1", "i1", "s1", req("BTCUSDT", "[]"))
