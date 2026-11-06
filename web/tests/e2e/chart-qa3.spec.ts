@@ -601,6 +601,51 @@ test.describe("legend with a resting crosshair", () => {
     await expectLegendAt(page, null);
   });
 
+  test("reads the last bar after removing an indicator from its header", async ({
+    bootedApp: page,
+  }) => {
+    const box = (await page.locator(".chart-host").boundingBox())!;
+    await page.mouse.move(box.x + 200, box.y + box.height / 3);
+    await expectLegendAt(page, 200);
+    const header = page.locator(".pane-header-interactive", { hasText: "RSI" });
+    await header.hover();
+    await expectLegendAt(page, 200);
+    // No move follows the click: the pointer is now on a canvas, with no crosshair.
+    await header.getByRole("button", { name: /^Remove RSI/ }).click();
+    await expect(header).toHaveCount(0);
+    await expectLegendAt(page, null);
+  });
+
+  test("works with the price scale on the left", async ({ bootedApp: page }) => {
+    await page.getByRole("button", { name: "Chart settings" }).click();
+    const dialog = page.getByRole("dialog", { name: "Settings" });
+    await dialog.getByRole("tab", { name: "Scales" }).click();
+    await dialog.getByLabel("Scale placement").selectOption("left");
+    await dialog.getByRole("button", { name: "OK" }).click();
+    await expect(dialog).toBeHidden();
+
+    const box = (await page.locator(".chart-host").boundingBox())!;
+    const axisWidth = await page.evaluate(
+      () =>
+        (window as unknown as { __chartgenTest: Hook }).__chartgenTest
+          .chart()!
+          .getSize("candle_pane", "yAxis")!.width,
+    );
+    expect(axisWidth).toBeGreaterThan(0);
+    // The crosshair's x counts from the main area, right of the axis.
+    const x = 200;
+    await page.mouse.move(box.x + axisWidth + x, box.y + box.height / 3);
+    const before = await barAt(page, x);
+    await expectLegendAt(page, x);
+
+    for (let n = 0; n < 4; n++) await page.keyboard.press("ArrowUp");
+    expect((await barAt(page, x)).i).toBeGreaterThan(before.i);
+    await expectLegendAt(page, x);
+
+    await page.mouse.move(box.x + axisWidth / 2, box.y + box.height / 3);
+    await expectLegendAt(page, null);
+  });
+
   test.describe("with a new bar", () => {
     test.use({ push: false });
 

@@ -1206,6 +1206,12 @@ export function Chart(props: ChartProps): JSX.Element {
     };
     host.addEventListener("mouseleave", onLeave);
     host.addEventListener("mousemove", onMove);
+    // Panes changed under a still pointer (Remove in a header): klinecharts has no
+    // crosshair, and no move will come to say so.
+    createEffect(() => {
+      visibleKey();
+      onLeave();
+    });
     onCleanup(() => {
       c!.unsubscribeAction("onCrosshairChange" as never, onCrosshair);
       c!.unsubscribeAction("onVisibleRangeChange" as never, onRange);
