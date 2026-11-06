@@ -506,37 +506,22 @@ fn test_session_vp_resets_per_day() {
     .unwrap();
     let result = ind.compute(&data);
     // One POC line, whatever the number of sessions (ADR-0048): a live tail holds
-    // fewer sessions than a load and must keep its shape. It breaks between sessions,
-    // and holds one level through each.
+    // fewer sessions than a load and must keep its shape. It holds one level through
+    // each session, with a value on all of its bars.
     let poc_lines: Vec<_> = result
         .lines
         .iter()
         .filter(|l| l.label.as_deref() == Some("POC"))
         .collect();
     assert_eq!(poc_lines.len(), 1);
-    let mut sessions: Vec<Vec<f64>> = Vec::new();
-    let mut open = false;
-    for &v in &poc_lines[0].y {
-        if v.is_nan() {
-            open = false;
-        } else if open {
-            sessions.last_mut().unwrap().push(v);
-        } else {
-            sessions.push(vec![v]);
-            open = true;
-        }
-    }
+    assert!(result.level_lines);
+    assert!(poc_lines[0].y.iter().all(|v| v.is_finite()));
+    let sessions: Vec<&[f64]> = poc_lines[0].y.chunk_by(|a, b| a == b).collect();
     assert!(
         sessions.len() >= 2,
         "expected at least 2 sessions: {}",
         sessions.len()
     );
-    for session in &sessions {
-        assert!(
-            session.iter().all(|v| *v == session[0]),
-            "a session has one POC"
-        );
-    }
 }
 
 #[test]

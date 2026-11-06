@@ -609,8 +609,9 @@ fn generate_chart(
 
     let series_value = want_series.then(|| {
         let mut series = series_json(&data, &computed, &inds, bars, chart_style, has_more);
-        // A tail keeps the profile of its full load (ADR-0009), so only a load pays.
-        if bars > TAIL_BARS_MAX {
+        // Only a chart's full load asks. Pages and tails keep the load's profile
+        // (ADR-0009), so reading finer bars for them would pay for nothing.
+        if args.get("profile_intrabars").and_then(Value::as_bool) == Some(true) {
             apply_intrabar_profiles(&mut series, &data, &computed, &inds, bars, source);
         }
         if let Some(errors) = &errors_value {
@@ -673,9 +674,6 @@ fn generate_chart(
         "result": { "content": content }
     })
 }
-
-/// A request of at most this many bars is a live tail, not a chart load.
-const TAIL_BARS_MAX: usize = 2;
 
 /// Replace the profiles that want it with their form from lower-timeframe bars
 /// (ADR-0048). Without those bars, for whatever reason, they stay as computed: the
@@ -1399,6 +1397,10 @@ fn panel_result_to_series_json(
     data: &chartgen::data::OhlcvData,
 ) -> Value {
     let mut out = json!({ "label": pr.label, "is_overlay": pr.is_overlay });
+
+    if pr.level_lines {
+        out["level_lines"] = json!(true);
+    }
 
     if let Some((lo, hi)) = pr.y_range {
         out["y_range"] = json!([finite_or_null(lo), finite_or_null(hi)]);
@@ -3240,6 +3242,7 @@ mod tests {
             y_range: None,
             label: "T".into(),
             is_overlay: false,
+            level_lines: false,
         };
         let data = chartgen::data::OhlcvData {
             bars: vec![],
@@ -3343,6 +3346,7 @@ mod tests {
             y_range: Some((0.0, 100.0)),
             label: "Test".into(),
             is_overlay: false,
+            level_lines: false,
         };
 
         let j = panel_result_to_json(&pr);
@@ -3642,14 +3646,17 @@ mod tests {
     }
 
     #[test]
-    fn a_chart_load_reads_its_profiles_from_finer_bars_and_a_tail_does_not() {
-        let series = |bars: u64| {
-            series_of(
-                json!({ "ticker": "BTCUSDT", "timeframe": "1h", "bars": bars, "format": "series",
-                "indicators": ["volume_profile", "rsi"], "end_time": 1_699_920_000_000i64 }),
-            )
+    fn only_a_load_that_asks_reads_its_profiles_from_finer_bars() {
+        let series = |bars: u64, ask: Option<bool>, end: i64| {
+            let mut args = json!({ "ticker": "BTCUSDT", "timeframe": "1h", "bars": bars,
+                "format": "series", "indicators": ["volume_profile", "rsi"], "end_time": end });
+            if let Some(ask) = ask {
+                args["profile_intrabars"] = json!(ask);
+            }
+            series_of(args)
         };
-        let load = series(100);
+        let end = 1_699_920_000_000i64;
+        let load = series(100, Some(true), end);
         assert_eq!(
             load["indicators"]["volume_profile"]["profile_interval"],
             "3m"
@@ -3659,9 +3666,23 @@ mod tests {
             .as_array()
             .unwrap()
             .is_empty());
-        let tail = series(2);
+        // `profile_interval` is only set after reading: without it nothing was read. A
+        // page and a catch-up tail are longer than a tail, and do not ask.
+        for (what, bars, end) in [
+            ("tail", 2, end),
+            ("catch-up tail", 9, end),
+            ("page", 500, end - 500 * 3_600_000),
+        ] {
+            let s = series(bars, None, end);
+            assert_eq!(
+                s["indicators"]["volume_profile"].get("profile_interval"),
+                None,
+                "{what}"
+            );
+        }
+        let no = series(100, Some(false), end);
         assert_eq!(
-            tail["indicators"]["volume_profile"].get("profile_interval"),
+            no["indicators"]["volume_profile"].get("profile_interval"),
             None
         );
     }
@@ -3698,19 +3719,67 @@ mod tests {
     }
 
     #[test]
-    fn a_session_profile_keeps_its_shape_from_a_load_to_a_tail() {
-        let lines = |bars: u64| {
+    fn a_session_profile_has_the_values_of_its_load_on_a_tail() {
+        let lines = |bars: u64, ask: bool| {
             let s = series_of(
                 json!({ "ticker": "BTCUSDT", "timeframe": "1h", "bars": bars,
-                "format": "series", "indicators": ["session_vp"], "end_time": 1_699_920_000_000i64 }),
+                "warmup": 300, "format": "series", "indicators": ["session_vp"],
+                "profile_intrabars": ask, "end_time": 1_699_920_000_000i64 }),
             );
-            s["indicators"]["session_vp"]["lines"]
+            let ind = &s["indicators"]["session_vp"];
+            assert_eq!(ind.get("profile_interval"), None);
+            assert_eq!(ind["level_lines"], true);
+            ind["lines"].as_array().unwrap().clone()
+        };
+        let (load, tail) = (lines(100, true), lines(2, false));
+        assert_eq!(load.len(), 3);
+        assert_eq!(tail.len(), 3);
+        for (l, t) in load.iter().zip(&tail) {
+            let values = l["values"].as_array().unwrap();
+            assert_eq!(
+                &values[values.len() - 2..],
+                t["values"].as_array().unwrap().as_slice()
+            );
+        }
+    }
+
+    #[test]
+    fn a_session_profile_keeps_a_value_on_every_bar_of_every_session() {
+        for (timeframe, bars, per_session) in [("1h", 96, 24), ("4h", 60, 6), ("12h", 30, 2)] {
+            let s = series_of(
+                json!({ "ticker": "BTCUSDT", "timeframe": timeframe, "bars": bars,
+                "format": "series", "indicators": ["session_vp"], "warmup": 300,
+                "end_time": 1_699_920_000_000i64 }),
+            );
+            let bar_times: Vec<i64> = s["bars"]
                 .as_array()
                 .unwrap()
-                .len()
-        };
-        assert_eq!(lines(200), 3);
-        assert_eq!(lines(2), 3);
+                .iter()
+                .map(|b| b["t"].as_i64().unwrap())
+                .collect();
+            let poc: Vec<f64> = s["indicators"]["session_vp"]["lines"][0]["values"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|v| {
+                    v.as_f64()
+                        .unwrap_or_else(|| panic!("{timeframe}: a bar has no POC"))
+                })
+                .collect();
+            // Sessions are UTC days here: one level through each, the last bar included.
+            let mut by_day: std::collections::BTreeMap<i64, Vec<f64>> = Default::default();
+            for (t, v) in bar_times.iter().zip(&poc) {
+                by_day.entry(t.div_euclid(86_400)).or_default().push(*v);
+            }
+            let whole = by_day.values().filter(|d| d.len() == per_session);
+            assert!(whole.clone().count() >= 2, "{timeframe}");
+            for day in whole {
+                assert!(day.iter().all(|v| *v == day[0]), "{timeframe}: {day:?}");
+            }
+            let levels: std::collections::BTreeSet<u64> =
+                by_day.values().map(|d| d[0].to_bits()).collect();
+            assert!(levels.len() >= 2, "{timeframe}: the sessions differ");
+        }
     }
 
     #[test]
@@ -4485,6 +4554,7 @@ mod tests {
             y_range: Some((0.0, 100.0)),
             label: "T".into(),
             is_overlay: false,
+            level_lines: false,
         };
 
         let t = trim_panel_result(&pr, 3);

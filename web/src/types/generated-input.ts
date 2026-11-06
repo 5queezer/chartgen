@@ -121,6 +121,10 @@ export interface GenerateChartInput {
       }
   )[];
   /**
+   * format=series only: compute volume_profile, fixed_range_vp and anchored_vp from lower-timeframe bars, for a chart's full load: up to 6 more Binance requests. The series then says which bars in profile_interval. Leave it off on pages and tails, which keep the load's profile. Default: false, each bar's volume spread over its range.
+   */
+  profile_intrabars?: boolean;
+  /**
    * Alias for ticker. Stock or crypto symbol.
    */
   symbol?: string;

@@ -59,6 +59,7 @@ import {
 import {
   barColor,
   figureOverrides,
+  isLevelJump,
   DASH,
   figureStyle,
   paletteBarColor,
@@ -242,6 +243,8 @@ function plotFigureStyle(
  */
 interface FigureExtend extends IndicatorStyle {
   defaults: Record<string, { color: string; width: number }>;
+  /** The lines hold levels (`level_lines`): nothing is drawn across a jump. */
+  levels?: boolean;
 }
 
 function extendFor(
@@ -257,7 +260,7 @@ function extendFor(
       { color: p.defaultColor, width: p.defaultWidth },
     ]),
   );
-  return { ...figureOverrides(plots, style), defaults };
+  return { ...figureOverrides(plots, style), defaults, levels: ind.level_lines === true };
 }
 
 /** Extend data of an indicator without overrides; klinecharts ignores an undefined override. */
@@ -524,7 +527,10 @@ function ensureRegistered(name: string, shape: IndicatorShape, gridPane: number)
     type?: "line" | "bar";
     baseValue?: number;
     styles?: (
-      data: { current: { kLineData?: KLineData } },
+      data: {
+        current: { kLineData?: KLineData; indicatorData?: Row };
+        next: { indicatorData?: Row };
+      },
       indicator: { extendData?: unknown },
     ) => Record<string, unknown>;
   }> = [
@@ -542,7 +548,14 @@ function ensureRegistered(name: string, shape: IndicatorShape, gridPane: number)
       key: `line${i}`,
       title: "",
       type: "line",
-      styles: (_d, ind) => plotFigureStyle(name, "line", i, i, ind),
+      styles: (d, ind) => {
+        const style = plotFigureStyle(name, "line", i, i, ind);
+        const levels = (ind.extendData as FigureExtend | undefined)?.levels;
+        const key = `line${i}`;
+        return levels && isLevelJump(d.current.indicatorData?.[key], d.next.indicatorData?.[key])
+          ? { ...style, color: "transparent" }
+          : style;
+      },
     });
   }
   for (let i = 0; i < shape.hist; i++) {

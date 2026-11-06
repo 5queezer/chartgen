@@ -99,6 +99,9 @@ pub struct PanelResult {
     pub y_range: Option<(f64, f64)>,
     pub label: String,
     pub is_overlay: bool,
+    /// Its lines hold levels: a change of value is a jump between two of them, not a
+    /// slope, so nothing is drawn across it.
+    pub level_lines: bool,
 }
 
 /// Values an indicator plots past the last bar (ADR-0033), e.g. the

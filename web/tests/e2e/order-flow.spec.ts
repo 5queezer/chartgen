@@ -431,6 +431,26 @@ test.describe("TPO", () => {
 });
 
 test.describe("volume profiles from finer bars", () => {
+  test("only the chart's load asks for them, not a page or a tail", async ({ page, bootedApp: _ }) => {
+    await page.evaluate(() =>
+      localStorage.setItem("chartgen.indicators.active", JSON.stringify(["volume_profile"])),
+    );
+    const calls = recordCalls(page, "generate_chart");
+    await reloadApp(page);
+    await expect(page.getByTestId("indicator-legend-volume_profile")).toContainText("from");
+    const load = calls.find((c) => c.bars === 500 && c.end_time === undefined);
+    expect(load?.profile_intrabars).toBe(true);
+    await page.evaluate(() =>
+      (window as unknown as { __chartgenTest: { chart: () => { setBarSpace: (n: number) => void } } }).__chartgenTest
+        .chart()
+        .setBarSpace(1),
+    );
+    await expect.poll(() => calls.filter((c) => c.end_time !== undefined).length, { timeout: 20_000 }).toBeGreaterThan(0);
+    for (const later of calls.filter((c) => c !== load && c.indicators !== undefined)) {
+      if (later.end_time !== undefined || later.bars !== 500) expect(later.profile_intrabars).toBeUndefined();
+    }
+  });
+
   test("say which, and the new ones reach the chart", async ({ page, bootedApp: _ }) => {
     await page.evaluate(() =>
       localStorage.setItem(
@@ -439,10 +459,12 @@ test.describe("volume profiles from finer bars", () => {
       ),
     );
     await reloadApp(page);
-    for (const key of ["volume_profile", "anchored_vp", "fixed_range_vp", "session_vp"]) {
+    for (const key of ["volume_profile", "anchored_vp", "fixed_range_vp"]) {
       await expect(page.getByTestId(`indicator-legend-${key}`)).toContainText("from");
       await expect(page.getByTestId(`indicator-legend-${key}`)).toContainText("bars");
     }
+    // Its live updates spread each bar's volume, so its load does too, and says nothing.
+    await expect(page.getByTestId("indicator-legend-session_vp")).not.toContainText("from");
     const hbars = await page.evaluate(() => {
       const s = (window as unknown as {
         __chartgenTest: { series: () => { indicators: Record<string, { hbars?: unknown[]; profile_interval?: string }> } };
@@ -454,6 +476,33 @@ test.describe("volume profiles from finer bars", () => {
     expect(hbars.anchored_vp![0]).toBeGreaterThan(0);
     expect(hbars.fixed_range_vp![0]).toBeGreaterThan(0);
     expect(hbars.volume_profile![1]).toBeTruthy();
+
+    // A session holds its levels to its last bar, and nothing joins it to the next.
+    const session = await page.evaluate(() => {
+      const t = (window as unknown as {
+        __chartgenTest: {
+          series: () => { indicators: Record<string, { lines: { values: (number | null)[] }[] }> };
+          chart: () => {
+            getIndicatorByPaneId: (p: string, n: string) => {
+              figures: { key: string; styles?: (d: unknown, ind: unknown, s: unknown) => { color?: string } }[];
+            } | null;
+          };
+        };
+      }).__chartgenTest;
+      const ind = t.chart().getIndicatorByPaneId("candle_pane", "chartgen_session_vp")!;
+      const figure = ind.figures.find((f) => f.key === "line0")!;
+      const color = (current: number, next: number) =>
+        figure.styles!(
+          { current: { indicatorData: { line0: current } }, next: { indicatorData: { line0: next } } },
+          ind,
+          {},
+        ).color;
+      const values = t.series().indicators.session_vp!.lines[0]!.values;
+      return { nulls: values.filter((v) => v === null).length, same: color(1, 1), jump: color(1, 2) };
+    });
+    expect(session.nulls).toBe(0);
+    expect(session.jump).toBe("transparent");
+    expect(session.same).not.toBe("transparent");
 
     // A session profile lasts through live updates: on master it fell out of them.
     await page.waitForTimeout(3000);

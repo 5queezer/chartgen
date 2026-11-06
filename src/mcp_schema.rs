@@ -89,6 +89,11 @@ pub fn tools_list_result() -> Value {
                             "description": "format=series only: extra older bars (max 1000) fetched and fed to indicator computation, then trimmed, so the first returned bars carry warmed-up indicator values. A non-zero warmup is raised to what the indicators need to converge (891 for ema_stack's EMA 200). Ignored by png/summary/both.",
                             "default": 0
                         },
+                        "profile_intrabars": {
+                            "type": "boolean",
+                            "description": "format=series only: compute volume_profile, fixed_range_vp and anchored_vp from lower-timeframe bars, for a chart's full load: up to 6 more Binance requests. The series then says which bars in profile_interval. Leave it off on pages and tails, which keep the load's profile. Default: false, each bar's volume spread over its range.",
+                            "default": false
+                        },
                         "chart_style": {
                             "type": "string",
                             "enum": ["candles", "heikin_ashi"],

@@ -225,7 +225,7 @@ pub fn render_results(
             // Pine's plot.style_linebr), so a gap draws no connector.
             for line in &overlay.lines {
                 let draw_width = if line.width <= 1 { 2 } else { line.width };
-                for run in line_runs(&line.y) {
+                for run in level_runs(line_runs(&line.y), overlay.level_lines) {
                     chart.draw_series(std::iter::once(PathElement::new(
                         run,
                         line.color.stroke_width(draw_width),
@@ -397,7 +397,7 @@ pub fn render_results(
         // Pine's plot.style_linebr), so a gap draws no connector.
         for line in &result.lines {
             let draw_width = if line.width <= 1 { 2 } else { line.width };
-            for run in line_runs(&line.y) {
+            for run in level_runs(line_runs(&line.y), result.level_lines) {
                 chart.draw_series(std::iter::once(PathElement::new(
                     run,
                     line.color.stroke_width(draw_width),
@@ -524,6 +524,17 @@ fn line_runs(y: &[f64]) -> Vec<Vec<(f64, f64)>> {
         .collect()
 }
 
+/// `runs`, split again wherever a value changes if the line holds levels, so a jump
+/// between two levels draws no connector (`PanelResult::level_lines`).
+fn level_runs(runs: Vec<Vec<(f64, f64)>>, levels: bool) -> Vec<Vec<(f64, f64)>> {
+    if !levels {
+        return runs;
+    }
+    runs.iter()
+        .flat_map(|run| run.chunk_by(|a, b| a.1 == b.1).map(<[_]>::to_vec))
+        .collect()
+}
+
 /// Legend text of a line: its last finite value. A line that breaks at trend
 /// flips (`breaks`) reads the last bar instead, "n/a" when it has none there
 /// (the inactive Supertrend line). None when it has no value at all.
@@ -600,6 +611,16 @@ mod tests {
             ]
         );
         assert!(line_runs(&[NAN, NAN]).is_empty());
+        let levels = line_runs(&[1.0, 1.0, 2.0, 2.0, NAN, 3.0]);
+        assert_eq!(level_runs(levels.clone(), false).len(), 2);
+        assert_eq!(
+            level_runs(levels, true),
+            vec![
+                vec![(0.0, 1.0), (1.0, 1.0)],
+                vec![(2.0, 2.0), (3.0, 2.0)],
+                vec![(5.0, 3.0)]
+            ]
+        );
         assert_eq!(line_runs(&[1.0, 2.0]), vec![vec![(0.0, 1.0), (1.0, 2.0)]]);
     }
 

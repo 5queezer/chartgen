@@ -1578,6 +1578,7 @@ impl Indicator for KalmanVolume {
             y_range: Some((-2.5, 2.5)),
             label: "KVF".into(),
             is_overlay: false,
+            level_lines: false,
         }
     }
 }
@@ -1950,7 +1951,9 @@ fn parse_period_secs(session: &str) -> i64 {
 // ---- Session Volume Profile (overlay) ----
 
 /// Periodic volume profile: resets per session (daily/weekly/N-bar) and draws
-/// per-session POC/VAH/VAL as segmented horizontal lines.
+/// per-session POC/VAH/VAL as one line each that holds a level per session. Its tails
+/// recompute it from their own bars, so unlike the profiles that keep their load it
+/// reads no finer bars: the load and the live part would disagree (ADR-0048).
 pub struct SessionVolumeProfile {
     pub bins: usize,
     pub session: String,
@@ -2006,26 +2009,14 @@ impl Indicator for SessionVolumeProfile {
         }
     }
 
-    fn wants_intrabars(&self) -> bool {
-        true
-    }
-
-    fn with_intrabars(&self, chart: &OhlcvData, intrabars: &OhlcvData) -> Option<PanelResult> {
-        Some(self.compute_from(chart, Some(intrabars)))
-    }
-
     fn compute(&self, data: &OhlcvData) -> PanelResult {
-        self.compute_from(data, None)
-    }
-}
-
-impl SessionVolumeProfile {
-    /// Sessions from `data`; the volume of each from `intrabars` when given.
-    fn compute_from(&self, data: &OhlcvData, intrabars: Option<&OhlcvData>) -> PanelResult {
         let n = data.len();
         let mut out = PanelResult {
             is_overlay: true,
             label: "SVP".into(),
+            // Each session holds its levels through its last bar; what is drawn stops
+            // there rather than sloping to the next session's levels.
+            level_lines: true,
             ..Default::default()
         };
         if n == 0 {
@@ -2034,7 +2025,6 @@ impl SessionVolumeProfile {
 
         let period_secs = parse_period_secs(&self.session);
         let ranges = session_ranges(data, period_secs, self.bars_per_session);
-        let open_of = |i: usize| data.bars.get(i).and_then(|b| b.date.parse::<i64>().ok());
         let mut poc_line = vec![f64::NAN; n];
         let mut vah_line = vec![f64::NAN; n];
         let mut val_line = vec![f64::NAN; n];
@@ -2043,19 +2033,11 @@ impl SessionVolumeProfile {
             if e <= s {
                 continue;
             }
-            let finer = intrabars.map(|ltf| bars_between(ltf, open_of(s), open_of(e)));
-            let slice = match &finer {
-                Some(ltf) if !ltf.bars.is_empty() => &ltf.bars[..],
-                _ => &data.bars[s..e],
-            };
-            let Some(prof) = compute_profile(slice, self.bins.max(1), false) else {
+            let Some(prof) = compute_profile(&data.bars[s..e], self.bins.max(1), false) else {
                 continue;
             };
 
-            // The last bar of a session is left empty, so a line breaks between
-            // sessions rather than jumping, except on the newest, which is still open.
-            let until = if e == n { e } else { e - 1 };
-            for i in s..until.max(s + 1) {
+            for i in s..e {
                 poc_line[i] = prof.poc_price;
                 vah_line[i] = prof.vah_price;
                 val_line[i] = prof.val_price;
@@ -2065,7 +2047,7 @@ impl SessionVolumeProfile {
         // One line each, whatever the number of sessions in this window: a live tail
         // holds fewer of them than a load, and must keep the load's shape.
         out.lines.push(Line {
-            breaks: true,
+            breaks: false,
             y: poc_line,
             color: rgba(0xFFD700, 0.9),
             width: 2,
@@ -2073,14 +2055,14 @@ impl SessionVolumeProfile {
         });
         if self.show_value_area {
             out.lines.push(Line {
-                breaks: true,
+                breaks: false,
                 y: vah_line,
                 color: rgba(0x787B86, 0.7),
                 width: 1,
                 label: Some("VAH".into()),
             });
             out.lines.push(Line {
-                breaks: true,
+                breaks: false,
                 y: val_line,
                 color: rgba(0x787B86, 0.7),
                 width: 1,

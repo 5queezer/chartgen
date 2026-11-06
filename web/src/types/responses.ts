@@ -128,6 +128,8 @@ export const SeriesIndicatorSchema = z.object({
   is_overlay: z.boolean(),
   /** A profile read from these lower-timeframe bars rather than the chart's (ADR-0048). */
   profile_interval: z.string().optional(),
+  /** Its lines hold levels: nothing is drawn across a change of value. */
+  level_lines: z.boolean().optional(),
   y_range: YRangeSchema.optional(),
   lines: z.array(SeriesLineSchema).optional(),
   histogram: z.array(SeriesHistogramBucketSchema).optional(),
