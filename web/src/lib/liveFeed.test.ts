@@ -5,9 +5,11 @@ import {
   FAST_POLL_MS,
   MAX_CATCHUP_BARS,
   MAX_HISTORY_BARS,
+  MAX_RELOADS,
   PAGE_BARS,
   PUSH_RETRY_MS,
   PUSH_WATCHDOG_MS,
+  RELOAD_WINDOW_MS,
   SLOW_POLL_MS,
   TAIL_BARS,
   WARMUP,
@@ -616,5 +618,43 @@ describe("push mode", () => {
     // Still pushing: no polls follow.
     await vi.advanceTimersByTimeAsync(FAST_POLL_MS * 2);
     expect(t.fetch).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("reload bound", () => {
+  // Every tail misses an indicator the full load has, so each one asks for a
+  // reload, and each reload lands in reset(): a new generation every time.
+  const misfitTail = (req: LiveRequest, args: FetchArgs) =>
+    serve(req, args).then((p) => ({ ...p, indicators: {} }));
+  const landing = (feed: LiveFeed) => {
+    feed.reset(payload(0, market.now), REQ);
+    return Promise.resolve();
+  };
+
+  it("holds across generations, then backs off and allows more after the window", async () => {
+    const t = setup(misfitTail, landing);
+    t.feed.reset(payload(0, market.now), REQ);
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(t.reload).toHaveBeenCalledTimes(MAX_RELOADS);
+    const status = t.polls.at(-1);
+    expect(status?.kind).toBe("retrying");
+    expect(status?.kind === "retrying" && status.message).toMatch(/keeps changing shape/);
+
+    await vi.advanceTimersByTimeAsync(RELOAD_WINDOW_MS);
+    const later = t.reload.mock.calls.length;
+    expect(later).toBeGreaterThan(MAX_RELOADS);
+    expect(later).toBeLessThanOrEqual(MAX_RELOADS * 2);
+    t.feed.dispose();
+  });
+
+  it("counts per chart: another request starts a new count", async () => {
+    const t = setup(misfitTail, landing);
+    t.feed.reset(payload(0, market.now), REQ);
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(t.reload).toHaveBeenCalledTimes(MAX_RELOADS);
+    t.feed.reset(payload(0, market.now), { ...REQ, timeframe: "5m" });
+    await vi.advanceTimersByTimeAsync(SLOW_POLL_MS * 2);
+    expect(t.reload.mock.calls.length).toBeGreaterThan(MAX_RELOADS);
+    t.feed.dispose();
   });
 });

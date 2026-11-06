@@ -55,6 +55,13 @@ export const SLOW_POLL_MS = 15_000;
 /** Ceiling for the error backoff. */
 export const MAX_BACKOFF_MS = 60_000;
 /**
+ * Most full reloads the feed asks for per chart in `RELOAD_WINDOW_MS`. A reload
+ * starts a new generation, so only this outlives it: a chart whose tails never
+ * fit its full loads would otherwise reload for as long as it is open.
+ */
+export const MAX_RELOADS = 3;
+export const RELOAD_WINDOW_MS = 5 * 60_000;
+/**
  * Longest expected gap between pushes: Binance sends a kline update at
  * least every 2 s, trades in between.
  */
@@ -228,6 +235,9 @@ export function createLiveFeed(opts: LiveFeedOptions): LiveFeed {
   // catch-up). Only such a poll is merged while subscribed; any other may
   // carry bars older than the pushes already applied.
   let catchUp = false;
+  // Full reloads asked for, and the chart they were for (see MAX_RELOADS).
+  let reloads: number[] = [];
+  let reloadsOf = "";
 
   const hidden = () => doc.visibilityState === "hidden";
   const period = () =>
@@ -285,6 +295,18 @@ export function createLiveFeed(opts: LiveFeedOptions): LiveFeed {
   };
 
   const reload = (my: number) => {
+    const key = JSON.stringify(request);
+    const now = Date.now();
+    if (key !== reloadsOf) {
+      reloadsOf = key;
+      reloads = [];
+    }
+    reloads = reloads.filter((at) => now - at < RELOAD_WINDOW_MS);
+    if (reloads.length >= MAX_RELOADS) {
+      backoff(new Error("the chart's data keeps changing shape; reload the page to start over"));
+      return;
+    }
+    reloads.push(now);
     clearTimer();
     reloading = true;
     opts.onPollStatus({ kind: "reloading" });
