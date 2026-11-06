@@ -772,6 +772,14 @@ body {
   border-top: 1px solid var(--color-border);
 }
 
+.sidebar-dock button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 40px;
+  min-height: 40px;
+}
+
 .compact footer {
   gap: 0;
   padding-inline: 4px;
@@ -825,6 +833,13 @@ body {
     flex-shrink: 0;
     gap: 4px;
     border-top: 0;
+  }
+}
+
+/* A phone on its side has no room for the time zone: it stays in portrait. */
+@media (orientation: landscape) and (max-height: 500px) {
+  .compact [data-testid="tz-select"] {
+    display: none;
   }
 }
 

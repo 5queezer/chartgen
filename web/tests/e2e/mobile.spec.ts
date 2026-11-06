@@ -106,6 +106,48 @@ async function expectInView(page: Page, name: string | RegExp, bottom?: number):
   expect(box!.y + box!.height, String(name)).toBeLessThanOrEqual(bottom ?? size.height);
 }
 
+/**
+ * What the footer row shows: no two controls overlap (where the footer scrolls,
+ * a control counts only for its visible part), none reaches the dock, and each
+ * dock icon sits in the middle of its button.
+ */
+async function footerProblems(page: Page): Promise<string[]> {
+  return page.evaluate(() => {
+    const footerEl = document.querySelector("footer")!;
+    const footer = footerEl.getBoundingClientRect();
+    const clips = getComputedStyle(footerEl).overflowX !== "visible";
+    const label = (e: Element) => e.getAttribute("aria-label") ?? e.textContent?.trim() ?? e.tagName;
+    const visible = (e: Element) => (e as HTMLElement).offsetParent !== null;
+    const controls = [...document.querySelectorAll("footer button, footer select")]
+      .filter(visible)
+      .map((e) => {
+        const r = e.getBoundingClientRect();
+        return { name: label(e), left: r.left, right: clips ? Math.min(r.right, footer.right) : r.right, top: r.top, bottom: r.bottom };
+      })
+      .filter((r) => r.right > r.left);
+    const dock = [...document.querySelectorAll('nav[aria-label="Panels"] button')].map((e) => {
+      const r = e.getBoundingClientRect();
+      const icon = e.querySelector("svg")!.getBoundingClientRect();
+      return { name: `dock ${label(e)}`, left: r.left, right: r.right, top: r.top, bottom: r.bottom, icon };
+    });
+    const problems: string[] = [];
+    const all = [...controls, ...dock];
+    for (let i = 0; i < all.length; i++) {
+      for (let j = i + 1; j < all.length; j++) {
+        const [a, b] = [all[i]!, all[j]!];
+        if (a.left < b.right && b.left < a.right && a.top < b.bottom && b.top < a.bottom) {
+          problems.push(`${a.name} overlaps ${b.name}`);
+        }
+      }
+    }
+    for (const d of dock) {
+      const off = d.icon.left + d.icon.width / 2 - (d.left + d.right) / 2;
+      if (Math.abs(off) > 1) problems.push(`${d.name} icon is ${off}px off center`);
+    }
+    return problems;
+  });
+}
+
 const dock = (page: Page, name: string) =>
   page.getByRole("navigation", { name: "Panels" }).getByRole("button", { name, exact: true });
 
@@ -141,6 +183,7 @@ for (const d of COMPACT) {
       await expect(page.locator("html")).toHaveClass(/compact/);
       await expectRealChart(page);
       await expectNoOverflow(page);
+      expect(await footerProblems(page)).toEqual([]);
       // Sidebar and drawing tools are out of the chart's way until asked for.
       await expect(page.getByRole("complementary", { name: "Sidebar" })).toHaveCount(0);
       await expect(page.getByRole("button", { name: "Trend line" })).toBeHidden();
@@ -215,6 +258,22 @@ for (const d of COMPACT) {
       await expectInView(page, "OK");
       await page.getByRole("button", { name: "Cancel" }).tap();
       await expect(dialog).toHaveCount(0);
+    });
+  });
+}
+
+for (const name of ["iPhone 13 landscape", "Pixel 7 landscape"]) {
+  test.describe(name, () => {
+    test.use(device(name));
+
+    test("the footer fits beside the dock, without the time zone", async ({ page }) => {
+      await bootCompact(page);
+      await expect(page.getByTestId("tz-select")).toBeHidden();
+      for (const control of await page.locator("footer button").all()) {
+        const box = (await control.boundingBox())!;
+        const footer = (await page.locator("footer").boundingBox())!;
+        expect(box.x + box.width).toBeLessThanOrEqual(footer.x + footer.width);
+      }
     });
   });
 }
@@ -449,10 +508,14 @@ test.describe("touch on a phone", () => {
       await expectRealChart(page);
       await expectNoOverflow(page);
       await expect(symbol).toBeVisible();
+      expect(await footerProblems(page)).toEqual([]);
       expect(await legend()).toEqual(labels);
       expect(await drawings(page)).toBe(1);
     }
     expect(loads).toEqual([]);
+    // Upright again, the time zone is back.
+    await expect(page.getByTestId("tz-select")).toBeAttached();
+    await expect(page.getByTestId("tz-select")).not.toHaveCSS("display", "none");
     // The same chart, not a new one.
     expect(
       await page.evaluate(

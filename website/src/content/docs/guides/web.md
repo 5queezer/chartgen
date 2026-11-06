@@ -783,7 +783,9 @@ In the compact layout:
 - **Dialogs** fit the screen and shrink to what the on-screen keyboard leaves
   visible, with their buttons always in view. They also stay clear of notches
   and the home indicator.
-- **The range buttons** scroll sideways when they do not fit.
+- **The range buttons** scroll sideways when they do not fit. On a phone held
+  sideways the time zone select is hidden, so hold it upright to change the time
+  zone.
 
 On any touch screen:
 
