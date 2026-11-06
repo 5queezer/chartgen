@@ -194,6 +194,10 @@ to the nearest local midnight, which `2W` and `2M` need to bucket correctly.
 `feed_interval` returns the base stream. A group whose feed is finer than its
 chart seeds native bars, upserts feed events as before, and resamples on each
 recompute with `fetch::resample`. Groups on the same base share one WebSocket.
+A lost kline would otherwise leave a resampled bar wrong until the group ended. So a
+lag, or a kline that does not follow the last one, reads the window again and lays
+the event on top. Through `newest_klines` that costs one page while the klines are
+held. If the budget refuses, the group keeps pushing and tries again after 5 s.
 `--trade` still needs a stream of its own, and refuses other intervals at startup. It
 keys its state by the canonical form and subscribes under Binance's name for it, so
 `-i 1W` follows `1w` and `get_indicators` finds it by any spelling.

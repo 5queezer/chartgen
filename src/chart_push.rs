@@ -68,6 +68,8 @@ pub struct Limits {
     /// How long a feed without groups stays connected, so a quick
     /// unsubscribe/subscribe does not reconnect the WebSocket.
     pub feed_linger: Duration,
+    /// Shortest gap between two reads of klines a group is missing.
+    pub reread_pause: Duration,
 }
 
 impl Default for Limits {
@@ -79,6 +81,7 @@ impl Default for Limits {
             subscribes_per_minute: 10,
             min_push_interval: Duration::from_millis(250),
             feed_linger: Duration::from_secs(30),
+            reread_pause: Duration::from_secs(5),
         }
     }
 }
@@ -540,6 +543,7 @@ impl ChartHub {
                 events,
                 feed.1.clone(),
                 req.push_interval(limits.min_push_interval, &feed.1),
+                limits.reread_pause,
             ));
             st.groups.insert(
                 req.clone(),
@@ -657,6 +661,7 @@ async fn run_group(
     mut events: broadcast::Receiver<FeedEvent>,
     feed_interval: String,
     min_interval: Duration,
+    reread_pause: Duration,
 ) {
     let fail = |why: String| {
         eprintln!("[push] {} {}: {why}", req.ticker, req.timeframe);
@@ -673,8 +678,11 @@ async fn run_group(
         None => req.timeframe.clone(),
     };
     // Subscribed to the feed before seeding, so no event in between is lost.
-    let seeded =
-        tokio::task::spawn_blocking(move || source.seed(&symbol, &seed_interval, len)).await;
+    let read = {
+        let (source, seed_interval) = (source.clone(), seed_interval.clone());
+        move || source.seed(&symbol, &seed_interval, len)
+    };
+    let seeded = tokio::task::spawn_blocking(read.clone()).await;
     let mut window = match seeded {
         Ok(Ok(d)) if !d.is_empty() => d.bars,
         Ok(Ok(_)) => return fail("seeding returned no bars".into()),
@@ -685,13 +693,33 @@ async fn run_group(
     // Push the seeded window right away.
     let mut dirty = true;
     let mut next = Instant::now();
+    let feed_grid = Interval::parse(&seed_interval).ok();
+    // Klines may be missing: a lag, or a bar that does not follow the last. A
+    // resampled bar would stay wrong, so read again, which costs one page when the
+    // klines are still held, and try again later if the budget says no.
+    let mut missing = false;
+    let mut next_read = Instant::now();
     loop {
         tokio::select! {
             event = events.recv() => match event {
                 Ok(FeedEvent::Tick(bar) | FeedEvent::Bar(bar)) => {
+                    missing |= feed_grid.is_some_and(|grid| skips_a_bar(&window, &bar, &grid));
+                    if missing && Instant::now() >= next_read {
+                        next_read = Instant::now() + reread_pause;
+                        match tokio::task::spawn_blocking(read.clone()).await {
+                            Ok(Ok(d)) if !d.is_empty() => {
+                                window = d.bars;
+                                missing = false;
+                                dirty = true;
+                            }
+                            Ok(Ok(_)) => {}
+                            Ok(Err(e)) => eprintln!("[push] {} {}: {e}", req.ticker, req.timeframe),
+                            Err(e) => eprintln!("[push] {} {}: {e}", req.ticker, req.timeframe),
+                        }
+                    }
                     dirty |= upsert_bar(&mut window, bar, len);
                 }
-                Err(broadcast::error::RecvError::Lagged(_)) => {}
+                Err(broadcast::error::RecvError::Lagged(_)) => missing = true,
                 Err(broadcast::error::RecvError::Closed) => return fail("feed ended".into()),
             },
             _ = tokio::time::sleep_until(next), if dirty => {
@@ -720,6 +748,15 @@ async fn run_group(
                 next = Instant::now() + min_interval;
             }
         }
+    }
+}
+
+/// Does `bar` open later than the bar after the window's last one?
+fn skips_a_bar(window: &[Bar], bar: &Bar, grid: &Interval) -> bool {
+    let ts = |b: &Bar| b.date.parse::<i64>().ok();
+    match (window.last().and_then(ts), ts(bar)) {
+        (Some(last), Some(t)) => t > grid.grid_end(last),
+        _ => false,
     }
 }
 
@@ -863,6 +900,9 @@ mod tests {
         panic_on_seed: AtomicBool,
         /// The feed behind every chart, when it is not the chart's interval.
         base: Option<&'static str>,
+        seeds: AtomicUsize,
+        /// Seeds fail while set, as a refused read does.
+        refuse_seeds: AtomicBool,
     }
 
     struct Running(Arc<AtomicUsize>);
@@ -878,6 +918,10 @@ mod tests {
         }
         fn seed(&self, symbol: &str, timeframe: &str, count: usize) -> Result<OhlcvData, String> {
             assert!(!self.panic_on_seed.load(Ordering::SeqCst), "seed exploded");
+            self.seeds.fetch_add(1, Ordering::SeqCst);
+            if self.refuse_seeds.load(Ordering::SeqCst) {
+                return Err("Binance rate limit: refused".into());
+            }
             // 2024-01-01T00:00Z, so the forming bar is fixed.
             data::sample_ohlcv(symbol, timeframe, count, None, 1_704_067_200_000)
         }
@@ -1012,6 +1056,150 @@ mod tests {
         let last = &n["params"]["series"]["bars"][1];
         assert_eq!(last["c"], 125.0);
         assert_eq!(last["v"].as_f64().unwrap(), 4.0);
+    }
+
+    /// A 7m chart on a 1m feed, past its seed push; Fake's clock is on the bar's
+    /// last minute. Returns the hub too, which owns the group.
+    async fn custom_chart(
+        fake: &Arc<Fake>,
+        limits: Limits,
+    ) -> (Arc<ChartHub>, mpsc::Receiver<String>, i64) {
+        let hub = hub(fake, limits);
+        let (tx, mut rx) = stream();
+        hub.link_stream("s1", tx);
+        let r = ChartRequest {
+            timeframe: "7m".into(),
+            ..req("BTCUSDT", "[]")
+        };
+        hub.subscribe("tok", "ip", "s1", r).unwrap();
+        next(&mut rx, 2_000).await.expect("seed push");
+        assert_eq!(fake.seeds.load(Ordering::SeqCst), 1);
+        (hub, rx, 1_704_067_200)
+    }
+
+    /// Past any `reread_pause` of the tests below.
+    const PAST_PAUSE: Duration = Duration::from_millis(150);
+
+    fn short_pause() -> Limits {
+        Limits {
+            reread_pause: Duration::from_millis(50),
+            ..quick()
+        }
+    }
+
+    #[tokio::test]
+    async fn a_gap_in_the_feed_reads_the_missing_klines_once() {
+        let fake = Arc::new(Fake {
+            base: Some("1m"),
+            ..Fake::default()
+        });
+        let (_hub, mut rx, now) = custom_chart(&fake, short_pause()).await;
+
+        // The next minute is contiguous: no read.
+        fake.send(FeedEvent::Tick(bar(now + 60, 1.0))).await;
+        next(&mut rx, 2_000).await.expect("tick push");
+        assert_eq!(fake.seeds.load(Ordering::SeqCst), 1);
+
+        // Three minutes later: two klines were lost, so it reads them again.
+        fake.send(FeedEvent::Tick(bar(now + 240, 2.0))).await;
+        let n = next(&mut rx, 2_000).await.expect("push after the gap");
+        assert_eq!(fake.seeds.load(Ordering::SeqCst), 2);
+        let last = &n["params"]["series"]["bars"][1];
+        assert_eq!(last["c"], 2.0, "the tick that showed the gap is kept");
+
+        // Read and done: well past the pause, a contiguous tick reads nothing.
+        tokio::time::sleep(PAST_PAUSE).await;
+        fake.send(FeedEvent::Tick(bar(now + 300, 3.0))).await;
+        next(&mut rx, 2_000).await.expect("tick push");
+        assert_eq!(fake.seeds.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn a_refused_read_after_a_gap_keeps_the_chart_alive_and_retries() {
+        let fake = Arc::new(Fake {
+            base: Some("1m"),
+            ..Fake::default()
+        });
+        let (hub, mut rx, now) = custom_chart(&fake, short_pause()).await;
+        fake.refuse_seeds.store(true, Ordering::SeqCst);
+
+        fake.send(FeedEvent::Tick(bar(now + 240, 2.0))).await;
+        let n = next(&mut rx, 2_000).await.expect("still pushing");
+        assert_eq!(n["params"]["series"]["bars"][1]["c"], 2.0);
+        assert_eq!(fake.seeds.load(Ordering::SeqCst), 2);
+        assert_eq!(hub.counts().1, 1, "the group is still there");
+
+        // Once allowed, the next tick past the pause reads again, though this tick
+        // itself is contiguous: the klines are still missing.
+        fake.refuse_seeds.store(false, Ordering::SeqCst);
+        tokio::time::sleep(PAST_PAUSE).await;
+        fake.send(FeedEvent::Tick(bar(now + 240, 3.0))).await;
+        next(&mut rx, 2_000).await.expect("tick push");
+        assert_eq!(fake.seeds.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn missing_klines_are_not_asked_for_on_every_tick() {
+        // The default pause: seconds, against ticks many times a second.
+        let fake = Arc::new(Fake {
+            base: Some("1m"),
+            refuse_seeds: AtomicBool::new(false),
+            ..Fake::default()
+        });
+        let (_hub, mut rx, now) = custom_chart(&fake, quick()).await;
+        fake.refuse_seeds.store(true, Ordering::SeqCst);
+        for i in 0..10 {
+            fake.send(FeedEvent::Tick(bar(now + 240, f64::from(i))))
+                .await;
+        }
+        next(&mut rx, 2_000).await.expect("still pushing");
+        assert_eq!(fake.seeds.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn a_bar_skips_only_if_one_is_missing_before_it() {
+        let grid = Interval::parse("1m").unwrap();
+        let window = [bar(600, 1.0)];
+        assert!(!skips_a_bar(&window, &bar(600, 2.0), &grid), "the same bar");
+        assert!(!skips_a_bar(&window, &bar(540, 2.0), &grid), "a late one");
+        assert!(!skips_a_bar(&window, &bar(660, 2.0), &grid), "the next one");
+        assert!(skips_a_bar(&window, &bar(720, 2.0), &grid));
+        assert!(!skips_a_bar(&[], &bar(720, 2.0), &grid));
+        // Months have calendar lengths.
+        let month = Interval::parse("1mo").unwrap();
+        let ts = |s: &str| chrono::DateTime::parse_from_rfc3339(s).unwrap().timestamp();
+        let jan = [bar(ts("2026-01-01T00:00:00Z"), 1.0)];
+        assert!(!skips_a_bar(
+            &jan,
+            &bar(ts("2026-02-01T00:00:00Z"), 1.0),
+            &month
+        ));
+        assert!(skips_a_bar(
+            &jan,
+            &bar(ts("2026-03-01T00:00:00Z"), 1.0),
+            &month
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_refused_read_after_a_gap_keeps_the_chart_alive() {
+        let fake = Arc::new(Fake {
+            base: Some("1m"),
+            ..Fake::default()
+        });
+        let (hub, mut rx, now) = custom_chart(&fake).await;
+        fake.refuse_seeds.store(true, Ordering::SeqCst);
+
+        fake.send(FeedEvent::Tick(bar(now + 240, 2.0))).await;
+        let n = next(&mut rx, 2_000).await.expect("still pushing");
+        assert_eq!(n["params"]["series"]["bars"][1]["c"], 2.0);
+        assert_eq!(fake.seeds.load(Ordering::SeqCst), 2);
+        assert_eq!(hub.counts().1, 1, "the group is still there");
+
+        // It does not ask again on every tick while the budget says no.
+        fake.send(FeedEvent::Tick(bar(now + 240, 3.0))).await;
+        next(&mut rx, 2_000).await.expect("still pushing");
+        assert_eq!(fake.seeds.load(Ordering::SeqCst), 2);
     }
 
     #[tokio::test]
