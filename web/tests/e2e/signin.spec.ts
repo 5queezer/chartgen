@@ -230,12 +230,14 @@ test.describe("sign-in", () => {
     page,
     context,
   }) => {
-    await bootSignedIn(page);
-    // Reloading goes through /authorize from the app's own page, in a real browser.
+    // From the first sign-in through the provider, whose callback looks cross-site, to a
+    // reload through a live session: the app's own /authorize, in a real browser.
     const consent: string[] = [];
     page.on("request", (req) => {
       if (new URL(req.url()).pathname === "/oauth/consent") consent.push(req.url());
     });
+    await bootSignedIn(page);
+    expect(consent).toEqual([]);
     await reloadApp(page);
     expect(consent).toEqual([]);
 
@@ -255,6 +257,11 @@ test.describe("sign-in", () => {
     // A link on someone else's page: the browser says cross-site.
     await page.goto(`${FAKE_ORIGIN}/client/cb`);
     await page.evaluate((target) => window.location.assign(target), `${origin}/authorize?${params}`);
+    await expect(page.getByRole("heading", { name: "Approve this application?" })).toBeVisible();
+    expect(new URL(page.url()).searchParams.has("code")).toBe(false);
+
+    // A link from outside any page, such as a mail: the browser says none.
+    await page.goto(`${origin}/authorize?${params}`);
     await expect(page.getByRole("heading", { name: "Approve this application?" })).toBeVisible();
     expect(new URL(page.url()).searchParams.has("code")).toBe(false);
   });

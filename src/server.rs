@@ -1613,10 +1613,11 @@ pub async fn run_server(port: u16, engine: Option<Arc<RwLock<TradingEngine>>>) {
                     {
                         eprintln!("[OAuth] WARNING: CHARTGEN_CLAIM_OWNER is not an account (github:<id>, google:<sub>), so it matches nobody.");
                     }
-                    let waiting = scripting::persistence::global().map(|s| s.waiting_rows());
-                    if let Some(Ok((scripts, alerts))) = waiting {
+                    let waiting =
+                        scripting::persistence::global().map(|s| s.waiting_rows(owner.as_deref()));
+                    if let Some(Ok(waiting)) = waiting {
                         if let Some(notice) =
-                            signin::waiting_rows_notice(scripts, alerts, owner.as_deref())
+                            signin::waiting_rows_notice(&waiting, owner.as_deref())
                         {
                             eprintln!("[OAuth] {notice}");
                         }

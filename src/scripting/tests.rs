@@ -969,26 +969,33 @@ fn sign_in_rows_survive_reopening() {
 }
 
 /// ADR-0044: what clients own goes to the account named, from every client, and
-/// nothing is overwritten or lost.
+/// nothing is overwritten or lost. Only a client id's shape counts as a client.
 #[test]
 fn collecting_waiting_scripts_takes_every_client_without_loss() {
+    const CLIENT_1: &str = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1";
+    const CLIENT_2: &str = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa2";
     let dir = std::env::temp_dir().join(format!("chartgen-claim-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     let store = persistence::Store::open(&dir.join("s.db")).unwrap();
     let meta = serde_json::json!({});
     for name in ["a", "b", "c"] {
         store
-            .upsert("client-1", name, "client's", &meta, "h")
+            .upsert(CLIENT_1, name, "client's", &meta, "h")
             .unwrap();
     }
     store
-        .upsert("client-2", "d", "other client's", &meta, "h")
+        .upsert(CLIENT_2, "d", "other client's", &meta, "h")
         .unwrap();
     store.upsert("github:1", "b", "user's", &meta, "h").unwrap();
     store
         .upsert("google:2", "own", "someone else's", &meta, "h")
         .unwrap();
-    assert_eq!(store.waiting_rows().unwrap().0, 4);
+    store
+        .upsert("device:9", "kept", "not a client's", &meta, "h")
+        .unwrap();
+    let waiting = store.waiting_rows(Some("github:1")).unwrap();
+    assert_eq!((waiting.scripts, waiting.name_collisions), (4, 1));
+    assert_eq!(store.waiting_rows(None).unwrap().name_collisions, 0);
 
     assert_eq!(store.claim_waiting_scripts("github:1").unwrap(), 3);
 
@@ -1006,7 +1013,7 @@ fn collecting_waiting_scripts_takes_every_client_without_loss() {
         "a name the user has is not overwritten"
     );
     assert_eq!(
-        store.get("client-1", "b").unwrap().unwrap().source,
+        store.get(CLIENT_1, "b").unwrap().unwrap().source,
         "client's",
         "and the client's stays where it was"
     );
@@ -1015,9 +1022,30 @@ fn collecting_waiting_scripts_takes_every_client_without_loss() {
         "someone else's",
         "another account's rows are not a client's"
     );
-    assert_eq!(store.waiting_rows().unwrap().0, 1);
+    assert_eq!(
+        store.get("device:9", "kept").unwrap().unwrap().source,
+        "not a client's",
+        "nor is any other kind of owner"
+    );
+    let left = store.waiting_rows(Some("github:1")).unwrap();
+    assert_eq!((left.scripts, left.name_collisions), (1, 1));
     assert_eq!(store.claim_waiting_scripts("github:1").unwrap(), 0, "once");
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_client_id_is_the_shape_register_gives() {
+    assert!(persistence::is_client_id(&uuid::Uuid::new_v4().to_string()));
+    for other in [
+        "github:1",
+        "google:abc",
+        "device:9",
+        "",
+        "aaaaaaaaaaaa4aaa8aaaaaaaaaaaaaa1",
+        "not-a-uuid-but-exactly-36-chars-long",
+    ] {
+        assert!(!persistence::is_client_id(other), "{other}");
+    }
 }
 
 /// The schema as each deployed version left it: migrations only append, so a file
@@ -1058,7 +1086,7 @@ fn schema_is_complete(store: &persistence::Store) {
     store.save_grant("github:1", "old-client").unwrap();
     assert!(store.live_sessions(0).unwrap().is_empty());
     store.save_server_alert("a2", "github:1", "{}").unwrap();
-    assert!(store.waiting_rows().is_ok());
+    assert_eq!(store.waiting_rows(None).unwrap().scripts, 0);
     assert!(store.server_alert_events().unwrap().is_empty());
     assert!(store.server_alert_owners().unwrap().contains("github:1"));
 }

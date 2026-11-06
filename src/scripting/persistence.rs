@@ -72,10 +72,25 @@ const MIGRATIONS: &[&str] = &[
 ",
 ];
 
-/// Whether an owner is a signed-in account, not an OAuth client id (ADR-0044). The
-/// queries above and below spell the same rule in SQL.
+/// Whether an owner is a signed-in account (ADR-0044).
 pub fn is_account(owner: &str) -> bool {
     owner.starts_with("github:") || owner.starts_with("google:")
+}
+
+/// Whether an owner has the shape `/register` gives a client id, a hyphenated UUID, and
+/// so is what `CHARTGEN_CLAIM_OWNER` collects. A positive test: an owner of any other
+/// kind, now or later, is not swept into someone's account (ADR-0044).
+pub fn is_client_id(owner: &str) -> bool {
+    owner.len() == 36 && uuid::Uuid::try_parse(owner).is_ok()
+}
+
+/// What `Store::waiting_rows` counts.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct WaitingRows {
+    pub scripts: usize,
+    pub alerts: usize,
+    /// Of `scripts`, those whose name the named owner already has, so they cannot move.
+    pub name_collisions: usize,
 }
 
 /// A stored script. `meta` is the `ScriptInfo` snapshot taken at register.
@@ -529,34 +544,50 @@ impl Store {
         rows.collect()
     }
 
-    /// Move every script still owned by a client to `user_id`; returns how many moved.
+    /// Move every script owned by an OAuth client to `user_id`; returns how many moved.
     /// A name the user already has stays with its client, as does the second of two
     /// clients' scripts with one name, so nothing is overwritten or deleted (ADR-0044).
     pub fn claim_waiting_scripts(&self, user_id: &str) -> rusqlite::Result<usize> {
-        self.conn().execute(
-            "UPDATE OR IGNORE user_indicators SET user_id = ?1
-             WHERE user_id NOT LIKE 'github:%' AND user_id NOT LIKE 'google:%'",
-            params![user_id],
-        )
+        let conn = self.conn();
+        let mut stmt = conn.prepare("SELECT DISTINCT user_id FROM user_indicators")?;
+        let owners: Vec<String> = stmt
+            .query_map([], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        let mut moved = 0;
+        for owner in owners.iter().filter(|o| is_client_id(o)) {
+            moved += conn.execute(
+                "UPDATE OR IGNORE user_indicators SET user_id = ?1 WHERE user_id = ?2",
+                params![user_id, owner],
+            )?;
+        }
+        Ok(moved)
     }
 
-    /// How many scripts and server alerts are still owned by a client: from before
-    /// sign-in, and out of everyone's reach until `CHARTGEN_CLAIM_OWNER` collects them.
-    pub fn waiting_rows(&self) -> rusqlite::Result<(i64, i64)> {
+    /// What OAuth clients still own: from before sign-in, and out of everyone's reach
+    /// until `CHARTGEN_CLAIM_OWNER` collects it. `owner` is that account, if one is named.
+    pub fn waiting_rows(&self, owner: Option<&str>) -> rusqlite::Result<WaitingRows> {
         let conn = self.conn();
-        let scripts = conn.query_row(
-            "SELECT COUNT(*) FROM user_indicators
-             WHERE user_id NOT LIKE 'github:%' AND user_id NOT LIKE 'google:%'",
-            [],
-            |r| r.get(0),
-        )?;
-        let alerts = conn.query_row(
-            "SELECT COUNT(*) FROM server_alerts
-             WHERE owner NOT LIKE 'github:%' AND owner NOT LIKE 'google:%'",
-            [],
-            |r| r.get(0),
-        )?;
-        Ok((scripts, alerts))
+        let mut stmt = conn.prepare("SELECT user_id, name FROM user_indicators")?;
+        let scripts: Vec<(String, String)> = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+        let taken: HashSet<&str> = scripts
+            .iter()
+            .filter(|(o, _)| Some(o.as_str()) == owner)
+            .map(|(_, name)| name.as_str())
+            .collect();
+        let waiting = || scripts.iter().filter(|(o, _)| is_client_id(o));
+        let mut stmt = conn.prepare("SELECT owner FROM server_alerts")?;
+        let alerts: Vec<String> = stmt
+            .query_map([], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(WaitingRows {
+            scripts: waiting().count(),
+            alerts: alerts.iter().filter(|o| is_client_id(o)).count(),
+            name_collisions: waiting()
+                .filter(|(_, name)| taken.contains(name.as_str()))
+                .count(),
+        })
     }
 }
 

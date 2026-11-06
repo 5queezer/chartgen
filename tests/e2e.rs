@@ -3858,6 +3858,9 @@ fn test_signin_a_look_alike_of_the_web_app_needs_consent_from_elsewhere() {
     for origin in [
         vec!["Sec-Fetch-Site: cross-site"],
         vec!["Sec-Fetch-Site: same-site"],
+        // What a link in a mail or a chat sends, also through a redirect.
+        vec!["Sec-Fetch-Site: none"],
+        vec!["Sec-Fetch-Site: SAME-ORIGIN"],
         vec![],
     ] {
         let page = victim.authorize_from(&look_alike, &redirect, "evil", &origin);
@@ -3874,12 +3877,15 @@ fn test_signin_a_look_alike_of_the_web_app_needs_consent_from_elsewhere() {
             consent.body
         );
     }
-    // From our own origin, and from the address bar, there is no consent to ask.
-    for origin in ["Sec-Fetch-Site: same-origin", "Sec-Fetch-Site: none"] {
-        let page = victim.authorize_from(&look_alike, &redirect, "s", &[origin]);
-        assert_eq!(page.status, 307, "{origin}: {}", page.body);
-        assert!(page.query().contains_key("code"), "{origin}");
-    }
+    // From our own origin, where the app asks from, there is no consent to ask.
+    let page = victim.authorize_from(
+        &look_alike,
+        &redirect,
+        "s",
+        &["Sec-Fetch-Site: same-origin"],
+    );
+    assert_eq!(page.status, 307, "{}", page.body);
+    assert!(page.query().contains_key("code"));
 
     // Signed out, the answer is the same after the provider, whose callback always
     // looks cross-site: it is where the request began that counts.
@@ -4319,7 +4325,7 @@ fn test_signin_a_stranger_through_a_known_client_gets_nothing() {
 
         // The row is still there and still a client's, for whoever is named later.
         let store = chartgen::scripting::persistence::Store::open(&db).unwrap();
-        assert_eq!(store.waiting_rows().unwrap().0, 1, "{named:?}");
+        assert_eq!(store.waiting_rows(None).unwrap().scripts, 1, "{named:?}");
     }
 }
 
@@ -4364,7 +4370,10 @@ fn test_signin_named_owner_collects_everything_through_any_client_once() {
     // Once: a second collection moves nothing, and a restart has nothing left waiting.
     drop(srv);
     let store = chartgen::scripting::persistence::Store::open(&db).unwrap();
-    assert_eq!(store.waiting_rows().unwrap(), (0, 0));
+    assert_eq!(
+        store.waiting_rows(Some("github:1")).unwrap(),
+        Default::default()
+    );
     let logged = std::fs::read_to_string(&log_path).unwrap();
     assert!(
         logged.contains("2 script(s) and 0 server alert(s)"),
@@ -4375,6 +4384,41 @@ fn test_signin_named_owner_collects_everything_through_any_client_once() {
         "no ids in the log: {logged}"
     );
     assert!(!logged.contains("github:1"), "no ids in the log: {logged}");
+    let _ = std::fs::remove_file(&log_path);
+}
+
+/// A name the owner already has cannot move, and startup says how many are stuck that way.
+#[cfg(feature = "scripting")]
+#[test]
+fn test_signin_startup_counts_name_collisions() {
+    let fake = FakeProvider::start();
+    let port = free_port();
+    let db = store_path("claim-collision");
+    let log_path = db.with_extension("log");
+    seed_script_through(port, &db, "same_name");
+    seed_script_through(port, &db, "same_name");
+    let start = |fake: &FakeProvider, log: std::fs::File| {
+        let mut cmd = signin_command(port, &db, fake, &["github"], None, true);
+        cmd.env("CHARTGEN_CLAIM_OWNER", "github:1")
+            .stderr(log.try_clone().unwrap())
+            .stdout(log);
+        start_server(cmd, port)
+    };
+    let srv = start(&fake, std::fs::File::create(&log_path).unwrap());
+    let mut ann = Browser::new(port);
+    web_sign_in(&mut ann, &fake, "github", profile_of("github", 1, "ann"));
+    drop(srv);
+    let srv = start(&fake, std::fs::File::create(&log_path).unwrap());
+    drop(srv);
+    let logged = std::fs::read_to_string(&log_path).unwrap();
+    assert!(
+        logged.contains("1 script(s) and 0 server alert(s)"),
+        "the second client's copy stays: {logged}"
+    );
+    assert!(
+        logged.contains("1 of these scripts are name collisions"),
+        "{logged}"
+    );
     let _ = std::fs::remove_file(&log_path);
 }
 

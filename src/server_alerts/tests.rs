@@ -1993,23 +1993,29 @@ async fn a_users_alerts_live_on_that_users_activity() {
     assert!(!a.lock().alerts.contains_key(&kept));
 }
 
+const CLIENT_1: &str = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1";
+const CLIENT_2: &str = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa2";
+
 /// ADR-0044: what clients owned goes to the account named, from every client, and
-/// survives a restart there. Other accounts' alerts are not touched.
+/// survives a restart there. Other accounts' alerts are not touched, nor any owner that
+/// is not shaped like a client id.
 #[tokio::test(flavor = "multi_thread")]
 async fn the_named_owner_collects_every_clients_alerts() {
     let (store, _) = store_at("claim-alerts");
     let a = plain(store);
-    let first = create(&a, spec("less", "once", 1.0), "client-1").await;
-    let second = create(&a, spec("less", "once", 1.0), "client-2").await;
+    let first = create(&a, spec("less", "once", 1.0), CLIENT_1).await;
+    let second = create(&a, spec("less", "once", 1.0), CLIENT_2).await;
     let other = create(&a, spec("less", "once", 1.0), "google:2").await;
+    let device = create(&a, spec("less", "once", 1.0), "device:9").await;
 
     assert_eq!(a.claim_waiting("github:1"), 2);
     assert_eq!(a.lock().alerts[&first].owner, "github:1");
     assert_eq!(a.lock().alerts[&second].owner, "github:1");
     assert_eq!(a.lock().alerts[&other].owner, "google:2");
+    assert_eq!(a.lock().alerts[&device].owner, "device:9");
     assert_eq!(a.claim_waiting("github:1"), 0, "once");
     let owners = store.server_alert_owners().unwrap();
-    assert!(owners.contains("github:1") && !owners.contains("client-1"));
+    assert!(owners.contains("github:1") && !owners.contains(CLIENT_1));
     let stored = store.server_alerts().unwrap();
     assert_eq!(
         stored.iter().filter(|row| row.contains("github:1")).count(),
@@ -2024,7 +2030,7 @@ async fn collecting_passes_the_limit_and_leaves_nothing_behind() {
     let (store, _) = store_at("claim-limit");
     let a = plain(store);
     let limit = a.limits.alerts_per_client;
-    let made = create(&a, spec("less", "once", 1.0), "client").await;
+    let made = create(&a, spec("less", "once", 1.0), CLIENT_1).await;
     let template = a.lock().alerts[&made].clone();
     for i in 0..limit + 2 {
         let mut record = template.clone();
@@ -2039,7 +2045,7 @@ async fn collecting_passes_the_limit_and_leaves_nothing_behind() {
             .filter(|r| r.owner == owner)
             .count()
     };
-    assert_eq!((count("github:1"), count("client")), (limit + 3, 0));
+    assert_eq!((count("github:1"), count(CLIENT_1)), (limit + 3, 0));
 }
 
 /// A delivery waiting when its alert moves goes along, signed as it was. One of an
@@ -2048,7 +2054,7 @@ async fn collecting_passes_the_limit_and_leaves_nothing_behind() {
 async fn a_collected_alert_takes_its_waiting_deliveries_along() {
     let (store, _) = store_at("claim-queue");
     let a = plain(store);
-    let moved = create(&a, spec("less", "once", 1.0), "client").await;
+    let moved = create(&a, spec("less", "once", 1.0), CLIENT_1).await;
     let event = |id: &str, alert: &str| StoredEvent {
         id: id.to_string(),
         alert_id: alert.to_string(),
@@ -2057,7 +2063,7 @@ async fn a_collected_alert_takes_its_waiting_deliveries_along() {
     };
     {
         let mut st = a.lock();
-        let queue = st.queues.entry("client".to_string()).or_default();
+        let queue = st.queues.entry(CLIENT_1.to_string()).or_default();
         queue.push_back(event("e1", &moved));
         queue.push_back(event("e2", "an-alert-not-in-the-table"));
     }
@@ -2065,6 +2071,6 @@ async fn a_collected_alert_takes_its_waiting_deliveries_along() {
     let st = a.lock();
     assert_eq!(st.queues["github:1"].len(), 1);
     assert_eq!(st.queues["github:1"][0].id, "e1");
-    assert_eq!(st.queues["client"].len(), 1);
-    assert_eq!(st.queues["client"][0].id, "e2");
+    assert_eq!(st.queues[CLIENT_1].len(), 1);
+    assert_eq!(st.queues[CLIENT_1][0].id, "e2");
 }

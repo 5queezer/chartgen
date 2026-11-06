@@ -372,14 +372,20 @@ pub(super) fn after_token(user: &str) {
 /// What startup says about rows from before sign-in: counts only, an id is a credential.
 #[cfg(feature = "scripting")]
 pub(super) fn waiting_rows_notice(
-    scripts: i64,
-    alerts: i64,
+    waiting: &scripting::persistence::WaitingRows,
     owner: Option<&str>,
 ) -> Option<String> {
+    let (scripts, alerts) = (waiting.scripts, waiting.alerts);
     if scripts == 0 && alerts == 0 {
         return None;
     }
     let rows = format!("{scripts} script(s) and {alerts} server alert(s) from before sign-in");
+    if owner.is_some() && waiting.name_collisions > 0 {
+        return Some(format!(
+            "{rows} wait for the owner CHARTGEN_CLAIM_OWNER names. {} of these scripts are name collisions: that account has a script of that name, so they stay with their clients until it renames or deletes its own and signs in again.",
+            waiting.name_collisions
+        ));
+    }
     Some(match owner {
         Some(_) => format!("{rows} wait for the owner CHARTGEN_CLAIM_OWNER names, until their next sign-in."),
         None => format!("{rows} stay with their clients, out of everyone's reach. To collect them, set CHARTGEN_CLAIM_OWNER=github:<id> or google:<sub> to your own account and sign in."),
@@ -746,12 +752,13 @@ impl OAuthStore {
 
 // --- The web app's own client ------------------------------------------------
 
-/// Whether a browser says this navigation started on our own origin, or at the address
-/// bar. A stranger's link is `cross-site`, and one with no such header proves nothing.
+/// Whether a browser says this navigation started on our own origin, as the app's
+/// always does. A stranger's link on a page is `cross-site`, one in a mail or a chat is
+/// `none`, and a request with no such header proves nothing.
 fn from_own_origin(headers: &HeaderMap) -> bool {
     headers
         .get("sec-fetch-site")
-        .is_some_and(|v| v == "same-origin" || v == "none")
+        .is_some_and(|v| v == "same-origin")
 }
 
 /// The web app's redirect: exactly `/` on this server's origin. Such a client skips
@@ -2144,8 +2151,14 @@ mod tests {
     #[cfg(feature = "scripting")]
     #[test]
     fn the_notice_counts_rows_and_says_how_to_collect_them() {
-        assert_eq!(waiting_rows_notice(0, 0, None), None);
-        let unset = waiting_rows_notice(2, 1, None).unwrap();
+        use scripting::persistence::WaitingRows;
+        let rows = |scripts, alerts, name_collisions| WaitingRows {
+            scripts,
+            alerts,
+            name_collisions,
+        };
+        assert_eq!(waiting_rows_notice(&rows(0, 0, 0), None), None);
+        let unset = waiting_rows_notice(&rows(2, 1, 0), None).unwrap();
         assert!(
             unset.contains("2 script(s) and 1 server alert(s)"),
             "{unset}"
@@ -2154,8 +2167,14 @@ mod tests {
             unset.contains("CHARTGEN_CLAIM_OWNER=github:<id>"),
             "{unset}"
         );
-        let set = waiting_rows_notice(2, 1, Some("github:7")).unwrap();
+        let set = waiting_rows_notice(&rows(2, 1, 0), Some("github:7")).unwrap();
         assert!(!set.contains("github:7"), "no ids in the log: {set}");
+        assert!(!set.contains("collision"), "{set}");
+        let stuck = waiting_rows_notice(&rows(2, 0, 2), Some("github:7")).unwrap();
+        assert!(
+            stuck.contains("2 of these scripts are name collisions"),
+            "{stuck}"
+        );
     }
 
     #[test]

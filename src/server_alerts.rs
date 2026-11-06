@@ -841,7 +841,7 @@ impl ServerAlerts {
         self.sync_feeds(st);
     }
 
-    /// Every alert still owned by a client goes to `user`, the owner the operator named,
+    /// Every alert owned by an OAuth client goes to `user`, the owner the operator named,
     /// with its deliveries, whatever limit that passes: they are that person's already,
     /// and nothing is deleted (ADR-0044). A webhook's secret moves with its alert.
     /// Returns how many moved. Blocking.
@@ -851,7 +851,7 @@ impl ServerAlerts {
         let ids: Vec<String> = st
             .alerts
             .values()
-            .filter(|a| !persistence::is_account(&a.owner))
+            .filter(|a| persistence::is_client_id(&a.owner))
             .map(|a| a.id.clone())
             .collect();
         let mut moved = HashSet::new();
@@ -874,7 +874,7 @@ impl ServerAlerts {
         }
         let mut theirs = VecDeque::new();
         for (owner, queue) in st.queues.iter_mut() {
-            if !persistence::is_account(owner) {
+            if persistence::is_client_id(owner) {
                 let (took, stays): (VecDeque<_>, VecDeque<_>) = std::mem::take(queue)
                     .into_iter()
                     .partition(|e| moved.contains(&e.alert_id));
