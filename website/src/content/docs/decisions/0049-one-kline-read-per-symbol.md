@@ -1,8 +1,8 @@
 ---
-title: "0050 — One Binance kline read per symbol and interval"
+title: "0049 — One Binance kline read per symbol and interval"
 description: "Every read of the newest klines shares one window per symbol and kline, with a one-second freshness window and one caller refreshing. Identical history pages share a read. The cache is bounded by klines, not only entries."
 sidebar:
-  order: 50
+  order: 49
 ---
 
 **Status:** Accepted

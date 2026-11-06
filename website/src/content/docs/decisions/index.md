@@ -72,4 +72,4 @@ one and link both ways.
 | [0042](/chartgen/decisions/0042-server-side-alerts/) | Alerts that run on the server, with webhooks | Accepted | 2026-11-06 |
 | [0043](/chartgen/decisions/0043-multi-chart-grid/) | Multi-chart grid: per-pane store instances behind an active-chart API | Accepted | 2026-11-06 |
 | [0046](/chartgen/decisions/0046-pattern-detection/) | Pattern detection: candlesticks, chart patterns, auto fib | Accepted | 2026-11-06 |
-| [0050](/chartgen/decisions/0050-one-kline-read-per-symbol/) | One Binance kline read per symbol and interval | Accepted | 2026-11-06 |
+| [0049](/chartgen/decisions/0049-one-kline-read-per-symbol/) | One Binance kline read per symbol and interval | Accepted | 2026-11-06 |

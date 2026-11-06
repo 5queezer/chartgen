@@ -62,7 +62,7 @@ registrations of external MCP clients. See the [persistence reference](/chartgen
 ### Upstream load and memory
 
 Binance is loaded per symbol and interval, not per user
-([ADR-0050](/chartgen/decisions/0050-one-kline-read-per-symbol/)). All readers of a chart share
+([ADR-0049](/chartgen/decisions/0049-one-kline-read-per-symbol/)). All readers of a chart share
 one window of klines: its first read costs one request per 1000 klines, and after that at most
 about one request a second, whatever the number of users. Identical history pages share a read
 as well. So a polled forming candle can be up to 3 s old. The cache holds at most about 31 MB,
