@@ -1361,11 +1361,10 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
     });
     refresh();
   };
-  // A blur has no release, and klinecharts would treat later moves as still pressed: give
-  // it one, off the panes.
+  // A blur has no release, and klinecharts would treat later moves as still pressed, drawing
+  // or plain pan: give it one, off the panes. With nothing pressed, nothing hears it.
   const releaseOnBlur = () => {
     armedPress = null;
-    if (!pressStore()?.getPressedInstanceInfo().instance) return;
     document.documentElement.dispatchEvent(
       new MouseEvent("mouseup", { bubbles: true, button: 0, clientX: -1, clientY: -1 }),
     );

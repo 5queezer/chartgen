@@ -419,6 +419,19 @@ test.describe("drawing modifiers", () => {
       expect(Math.abs((await overlays(page))[0]!.pixels[1]!.y! - 200)).toBeLessThan(1);
     });
 
+    test("a blur during the press places nothing", async ({ bootedApp: page }) => {
+      const box = (await host(page).boundingBox())!;
+      await trendLine(page).click();
+      await clickAt(page, { x: 300, y: 130 });
+      await page.mouse.move(box.x + 700, box.y + 200);
+      await page.mouse.down();
+      await loseFocus(page);
+      await page.waitForTimeout(100);
+      await page.mouse.up();
+      await page.waitForTimeout(100);
+      await expectNothingPlaced(page);
+    });
+
     test("a quick second click pinned from another pane still places its point", async ({
       bootedApp: page,
     }) => {
@@ -1084,6 +1097,53 @@ test.describe("drawing modifiers", () => {
         await page.mouse.up();
       });
     }
+
+    test("a real blur during a plain pan ends the pan", async ({ bootedApp: page }) => {
+      const box = (await host(page).boundingBox())!;
+      const from = () =>
+        page.evaluate(() => (window as unknown as TestWindow).__chartgenTest.chart().getVisibleRange().from);
+      const start = await from();
+      await page.mouse.move(box.x + 500, box.y + 300);
+      await page.mouse.down();
+      await page.mouse.move(box.x + 740, box.y + 300, { steps: 6 });
+      await loseFocus(page);
+      await page.waitForTimeout(50);
+      const stopped = await from();
+      expect(stopped).toBeLessThan(start);
+      await page.mouse.move(box.x + 1000, box.y + 300, { steps: 6 });
+      expect(await from()).toBe(stopped);
+      await page.mouse.up();
+      await page.waitForTimeout(100);
+      expect(await from()).toBe(stopped);
+    });
+
+    test("a real blur with nothing pressed changes nothing", async ({ bootedApp: page }) => {
+      await drawTwoLines(page);
+      const box = (await host(page).boundingBox())!;
+      const stateBefore = {
+        range: await page.evaluate(() => (window as unknown as TestWindow).__chartgenTest.chart().getVisibleRange().from),
+        stored: await storedRecords(page),
+        undo: await page.getByRole("button", { name: "Undo" }).isEnabled(),
+      };
+      // A tool armed, with one point placed.
+      await page.getByRole("button", { name: "Trend line" }).click();
+      await clickAt(page, { x: 200, y: 180 });
+
+      await loseFocus(page);
+      await page.mouse.move(box.x + 500, box.y + 300, { steps: 4 });
+      await page.waitForTimeout(100);
+
+      expect(await page.evaluate(() => (window as unknown as TestWindow).__chartgenTest.chart().getVisibleRange().from)).toBe(stateBefore.range);
+      expect(await storedRecords(page)).toEqual(stateBefore.stored);
+      expect(await page.getByRole("button", { name: "Undo" }).isEnabled()).toBe(stateBefore.undo);
+      await expect(page.getByRole("button", { name: "Trend line" })).toHaveAttribute("aria-pressed", "true");
+
+      // The tool still works: the next click is the line's second point.
+      await clickAt(page, { x: 400, y: 280 });
+      await expect.poll(async () => (await overlays(page)).length).toBe(3);
+      expect(Math.abs((await overlays(page))[2]!.pixels[0]!.y! - 180)).toBeLessThan(1);
+      expect(Math.abs((await overlays(page))[2]!.pixels[1]!.y! - 280)).toBeLessThan(1);
+    });
 
     test("a stale press, its release never heard: the next press ends it, and the pan leaves the drawing", async ({
       bootedApp: page,
