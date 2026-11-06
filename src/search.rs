@@ -495,18 +495,12 @@ fn engine() -> &'static Arc<Engine> {
 // ---------------------------------------------------------------------------
 
 fn fetch_binance_pairs() -> Result<Vec<SymbolResult>, String> {
-    let resp = fetch::http()
-        .get("https://api.binance.com/api/v3/exchangeInfo?symbolStatus=TRADING")
-        .send()
-        .map_err(|e| format!("Binance request failed: {e}"))?;
-    let status = resp.status();
-    if !status.is_success() {
-        return Err(format!("Binance API returned status {status}"));
+    let resp =
+        fetch::binance().get("https://api.binance.com/api/v3/exchangeInfo?symbolStatus=TRADING")?;
+    if !(200..300).contains(&resp.status) {
+        return Err(format!("Binance API returned status {}", resp.status));
     }
-    let body = resp
-        .text()
-        .map_err(|e| format!("Failed to read Binance response: {e}"))?;
-    parse_exchange_info(&body)
+    parse_exchange_info(&resp.body)
 }
 
 fn yahoo_search_url(query: &str) -> String {

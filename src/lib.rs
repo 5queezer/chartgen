@@ -1,3 +1,4 @@
+pub mod binance_gate;
 pub mod data;
 pub mod engine;
 pub mod feed;

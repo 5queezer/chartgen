@@ -137,6 +137,29 @@ request after the first. A gap reads everything again, as does a first read, or 
 read of more than is held. Only the live end is cached; `end_time` pages read
 Binance as before.
 
+### A budget in front of Binance
+
+The limits above bound one request. Nothing bounded a sequence of them: parallel
+history pages at 20 requests each, nine symbols thrashing a cache of eight (about
+8000 weight a minute), or subscribe churn. A 429 was only an error string, so the
+next call simply tried again, and Binance answers that with an escalating 418 ban
+of the IP, here a home one.
+
+`binance_gate::Gate` stands in front of every REST request, native intervals, seeds,
+quotes, the symbol list and the feed's backfill included:
+
+- After a 429 or 418, nothing is sent until `Retry-After` has passed (60 s if
+  it names none), and a later, shorter answer does not shorten it.
+- Nothing starts once `x-mbx-used-weight-1m` reaches 80% of the limit, until the next
+  minute. The limits are Binance's published ones: 6000 for `api.binance.com` and,
+  on a gate of its own because its counter is separate, 2400 for `fapi.binance.com`.
+- A refused call fails with an error starting `Binance rate limit:` and stores
+  nothing, so no cache holds a partial read, and a symbol is not marked unknown.
+
+At most 4 paged walks run at once (`Walks`). Concurrent first reads of one chart share
+a walk. Reads of the newest bars of any interval share `newest_klines`, so a push
+seed is one request after the first as well.
+
 ### Native interval and grid
 
 The base is the coarsest native interval that divides the requested one, so the
@@ -220,7 +243,10 @@ of their own beyond the canonical string. MCP clients get it too.
   about 13 MB, held only while such charts are being read. An idle entry's memory
   is freed by the next read of any custom chart, not on its own.
 - Scrolling back on a custom chart is not cached: a `59m` history page still costs
-  up to 20 requests, though only when a person pages.
+  up to 20 requests, though only when a person pages, and the budget applies.
+- One client can spend the budget for all: the gate is process-wide, not per token,
+  so past the threshold everyone's Binance charts fail for the rest of the minute.
+  A chart already loaded keeps what it has, and the error names the wait.
 - A push group at the limit holds up to 20,000 bars and clones them for each
   recompute, at most 4 times a second. At most 64 groups exist.
 - Depth of history follows the base. A stock's `7m` ends after about 30 days,

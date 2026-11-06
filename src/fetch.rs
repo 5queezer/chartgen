@@ -1,8 +1,9 @@
 use crate::data::{self, Bar, OhlcvData, Session};
+use chartgen::binance_gate::{self, Gate};
 use chartgen::interval::{Interval, Unit};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Condvar, Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
 
 /// Binance klines REST caps `limit` at 1000 per request.
@@ -162,6 +163,16 @@ pub fn fetch_binance(
     limit: usize,
     end_time_ms: Option<i64>,
 ) -> Result<Fetched, String> {
+    fetch_binance_via(binance(), symbol, interval, limit, end_time_ms)
+}
+
+fn fetch_binance_via(
+    client: &BinanceClient,
+    symbol: &str,
+    interval: &str,
+    limit: usize,
+    end_time_ms: Option<i64>,
+) -> Result<Fetched, String> {
     let iv = Interval::parse(interval)?;
     let (base, per_bar) = iv.binance_base();
     let resampled = per_bar > 1;
@@ -185,13 +196,21 @@ pub fn fetch_binance(
     let now = Instant::now();
     let deadline = now + BINANCE_DEADLINE;
     let page = |page_limit: usize, end: Option<i64>| {
-        fetch_binance_page(&binance_klines_url(symbol, base, page_limit, end))
+        fetch_binance_page(client, &binance_klines_url(symbol, base, page_limit, end))
     };
-    let fetched = if resampled && end_time_ms.is_none() && want > BINANCE_MAX_LIMIT {
+    let fetched = if end_time_ms.is_none() && want > BINANCE_MAX_LIMIT {
         let key = (symbol.to_uppercase(), base);
-        newest_klines(kline_cache(), key, want, now, deadline, page)?
+        newest_klines(
+            &client.klines,
+            &client.walks,
+            key,
+            want,
+            now,
+            deadline,
+            page,
+        )?
     } else {
-        paginate_backwards(want, end, deadline, page)?
+        walk_klines(&client.walks, want, end, deadline, page)?
     };
 
     let reached_want = fetched.len() >= want;
@@ -236,20 +255,153 @@ struct HeldKlines {
     complete: bool,
 }
 
-type KlineCache = HashMap<(String, &'static str), HeldKlines>;
+type KlineKey = (String, &'static str);
 
-fn kline_cache() -> &'static Mutex<KlineCache> {
-    static CACHE: OnceLock<Mutex<KlineCache>> = OnceLock::new();
-    CACHE.get_or_init(Mutex::default)
+#[derive(Default)]
+struct KlineState {
+    held: HashMap<KlineKey, HeldKlines>,
+    /// Keys a full read is walking now: others wait for its result.
+    walking: HashSet<KlineKey>,
+}
+
+#[derive(Default)]
+struct KlineCache {
+    state: Mutex<KlineState>,
+    walked: Condvar,
+}
+
+impl KlineCache {
+    fn lock(&self) -> MutexGuard<'_, KlineState> {
+        self.state.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Klines held for `want`, or this thread's turn to walk `key`, waiting up to
+    /// `deadline` for a read already under way and then looking again.
+    fn begin(
+        &self,
+        key: &KlineKey,
+        want: usize,
+        now: Instant,
+        deadline: Instant,
+        use_held: bool,
+    ) -> Result<KlineRead<'_>, String> {
+        let mut st = self.lock();
+        loop {
+            st.held
+                .retain(|_, h| now.duration_since(h.used) < KLINE_CACHE_TTL);
+            let usable = st
+                .held
+                .get(key)
+                .filter(|h| use_held && (h.complete || h.bars.len() >= want));
+            if let Some(h) = usable {
+                return Ok(KlineRead::Held(h.bars.clone(), h.complete));
+            }
+            if st.walking.insert(key.clone()) {
+                return Ok(KlineRead::Walk(WalkClaim {
+                    cache: self,
+                    key: key.clone(),
+                }));
+            }
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return Err(BUSY.into());
+            }
+            st = self
+                .walked
+                .wait_timeout(st, left)
+                .unwrap_or_else(|e| e.into_inner())
+                .0;
+        }
+    }
+}
+
+enum KlineRead<'a> {
+    Held(Vec<Bar>, bool),
+    Walk(WalkClaim<'a>),
+}
+
+/// The turn to walk a key. Ends however the walk does, so waiters never hang on
+/// a refused or failed read: the next one takes the turn, and is refused itself.
+struct WalkClaim<'a> {
+    cache: &'a KlineCache,
+    key: KlineKey,
+}
+
+impl Drop for WalkClaim<'_> {
+    fn drop(&mut self) {
+        self.cache.lock().walking.remove(&self.key);
+        self.cache.walked.notify_all();
+    }
+}
+
+/// Paged walks of Binance's history allowed at once. At about 0.3 s a page, four
+/// cost about 1600 weight a minute, well under the gate's threshold.
+const MAX_WALKS: usize = 4;
+/// Says a call gave up waiting; it spent no request.
+const BUSY: &str = "Binance rate limit: too many history reads at once; try again shortly";
+
+#[derive(Default)]
+struct Walks {
+    running: Mutex<usize>,
+    free: Condvar,
+}
+
+struct WalkPermit<'a>(&'a Walks);
+
+impl Drop for WalkPermit<'_> {
+    fn drop(&mut self) {
+        *self.0.running.lock().unwrap_or_else(|e| e.into_inner()) -= 1;
+        self.0.free.notify_one();
+    }
+}
+
+impl Walks {
+    fn enter(&self, deadline: Instant) -> Result<WalkPermit<'_>, String> {
+        let mut running = self.running.lock().unwrap_or_else(|e| e.into_inner());
+        while *running >= MAX_WALKS {
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return Err(BUSY.into());
+            }
+            running = self
+                .free
+                .wait_timeout(running, left)
+                .unwrap_or_else(|e| e.into_inner())
+                .0;
+        }
+        *running += 1;
+        Ok(WalkPermit(self))
+    }
+}
+
+/// `paginate_backwards`, holding a walk permit when it takes more than one page.
+/// The wait for one comes out of `deadline`, and the walk then gets its own.
+fn walk_klines<F>(
+    walks: &Walks,
+    want: usize,
+    end: Option<i64>,
+    deadline: Instant,
+    page: F,
+) -> Result<Vec<Bar>, String>
+where
+    F: FnMut(usize, Option<i64>) -> Result<Vec<Bar>, String>,
+{
+    if want <= BINANCE_MAX_LIMIT {
+        return paginate_backwards(want, end, deadline, page);
+    }
+    let _permit = walks.enter(deadline)?;
+    paginate_backwards(want, end, Instant::now() + BINANCE_DEADLINE, page)
 }
 
 /// The newest `want` klines of `key`. A resampled chart's tail still needs every
 /// one of them, since indicators run over its warmup, but a closed kline never
 /// changes: only the first read walks the history, and a repeat reads one small
-/// page and lays it over the klines held. `page` is as for `paginate_backwards`.
+/// page and lays it over the klines held. Concurrent first reads share one walk.
+/// A refused or failed read stores nothing. `page` is as for `paginate_backwards`.
 fn newest_klines<F>(
-    cache: &Mutex<KlineCache>,
-    key: (String, &'static str),
+    cache: &KlineCache,
+    walks: &Walks,
+    key: KlineKey,
     want: usize,
     now: Instant,
     deadline: Instant,
@@ -258,32 +410,31 @@ fn newest_klines<F>(
 where
     F: FnMut(usize, Option<i64>) -> Result<Vec<Bar>, String>,
 {
-    let held = {
-        let mut c = cache.lock().unwrap_or_else(|e| e.into_inner());
-        c.retain(|_, h| now.duration_since(h.used) < KLINE_CACHE_TTL);
-        c.get(&key)
-            .filter(|h| h.complete || h.bars.len() >= want)
-            .map(|h| (h.bars.clone(), h.complete))
-    };
     let mut joined = None;
-    if let Some((mut bars, complete)) = held {
-        let fresh = page(KLINE_REFRESH, None)?;
-        let overlap = fresh.first().and_then(bar_ts).filter(|first| {
-            bars.last()
-                .and_then(bar_ts)
-                .is_some_and(|last| last >= *first)
-        });
-        // A gap means the page does not reach what we hold: read it all again.
-        if let Some(first) = overlap {
-            bars.truncate(bars.partition_point(|b| bar_ts(b).is_some_and(|t| t < first)));
-            bars.extend(fresh);
-            joined = Some((bars, complete));
+    let mut claim = None;
+    match cache.begin(&key, want, now, deadline, true)? {
+        KlineRead::Walk(c) => claim = Some(c),
+        KlineRead::Held(mut bars, complete) => {
+            let fresh = page(KLINE_REFRESH, None)?;
+            let overlap = fresh.first().and_then(bar_ts).filter(|first| {
+                bars.last()
+                    .and_then(bar_ts)
+                    .is_some_and(|last| last >= *first)
+            });
+            // A gap means the page does not reach what we hold: read it all again.
+            if let Some(first) = overlap {
+                bars.truncate(bars.partition_point(|b| bar_ts(b).is_some_and(|t| t < first)));
+                bars.extend(fresh);
+                joined = Some((bars, complete));
+            } else if let KlineRead::Walk(c) = cache.begin(&key, want, now, deadline, false)? {
+                claim = Some(c);
+            }
         }
     }
     let (mut bars, complete) = match joined {
         Some(j) => j,
         None => {
-            let bars = paginate_backwards(want, None, deadline, page)?;
+            let bars = walk_klines(walks, want, None, deadline, page)?;
             let complete = bars.len() < want;
             (bars, complete)
         }
@@ -292,8 +443,8 @@ where
         bars.drain(..bars.len() - MAX_BASE_BARS);
     }
     let out = bars[bars.len().saturating_sub(want)..].to_vec();
-    let mut c = cache.lock().unwrap_or_else(|e| e.into_inner());
-    c.insert(
+    let mut st = cache.lock();
+    st.held.insert(
         key,
         HeldKlines {
             used: now,
@@ -301,11 +452,17 @@ where
             complete,
         },
     );
-    while c.len() > KLINE_CACHE_ENTRIES {
-        let oldest = c.iter().min_by_key(|(_, h)| h.used).map(|(k, _)| k.clone());
+    while st.held.len() > KLINE_CACHE_ENTRIES {
+        let oldest = st
+            .held
+            .iter()
+            .min_by_key(|(_, h)| h.used)
+            .map(|(k, _)| k.clone());
         let Some(k) = oldest else { break };
-        c.remove(&k);
+        st.held.remove(&k);
     }
+    drop(st);
+    drop(claim);
     Ok(out)
 }
 
@@ -325,18 +482,83 @@ pub(crate) fn resample(bars: &[Bar], iv: &Interval, may_be_cut: bool) -> Vec<Bar
     }
 }
 
-fn fetch_binance_page(url: &str) -> Result<Vec<Bar>, String> {
+/// One REST response, whatever its status.
+pub(crate) struct BinanceResponse {
+    pub status: u16,
+    retry_after: Option<String>,
+    used_weight: Option<String>,
+    pub body: String,
+}
+
+type BinanceSend = Box<dyn Fn(&str) -> Result<BinanceResponse, String> + Send + Sync>;
+
+/// Every spot REST request goes through here, so all of them answer to one budget.
+pub(crate) struct BinanceClient {
+    gate: &'static Gate,
+    walks: Walks,
+    klines: KlineCache,
+    send: BinanceSend,
+}
+
+impl BinanceClient {
+    /// GET `url` if the gate admits it, and tell the gate how it went.
+    pub(crate) fn get(&self, url: &str) -> Result<BinanceResponse, String> {
+        self.gate.admit()?;
+        let resp = (self.send)(url)?;
+        self.gate.observe(
+            resp.status,
+            resp.retry_after.as_deref(),
+            resp.used_weight.as_deref(),
+        );
+        Ok(resp)
+    }
+}
+
+fn http_send(url: &str) -> Result<BinanceResponse, String> {
     let resp = http()
         .get(url)
         .send()
-        .map_err(|e| format!("Binance request failed: {}", e))?;
+        .map_err(|e| format!("Binance request failed: {e}"))?;
+    let header = |name: &str| {
+        resp.headers()
+            .get(name)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_string)
+    };
+    let (status, retry_after, used_weight) = (
+        resp.status().as_u16(),
+        header("retry-after"),
+        header("x-mbx-used-weight-1m"),
+    );
+    let body = resp
+        .text()
+        .map_err(|e| format!("Failed to read Binance response: {e}"))?;
+    Ok(BinanceResponse {
+        status,
+        retry_after,
+        used_weight,
+        body,
+    })
+}
 
-    if !resp.status().is_success() {
-        return Err(format!("Binance API returned status {}", resp.status()));
+pub(crate) fn binance() -> &'static BinanceClient {
+    static CLIENT: OnceLock<BinanceClient> = OnceLock::new();
+    CLIENT.get_or_init(|| BinanceClient {
+        gate: binance_gate::spot(),
+        walks: Walks::default(),
+        klines: KlineCache::default(),
+        send: Box::new(http_send),
+    })
+}
+
+fn fetch_binance_page(client: &BinanceClient, url: &str) -> Result<Vec<Bar>, String> {
+    let resp = client.get(url)?;
+
+    if !(200..300).contains(&resp.status) {
+        return Err(format!("Binance API returned status {}", resp.status));
     }
 
-    let body: serde_json::Value = resp
-        .json()
+    let body: serde_json::Value = serde_json::from_str(&resp.body)
         .map_err(|e| format!("Failed to parse Binance response: {}", e))?;
 
     let klines = body.as_array().ok_or("Binance response is not an array")?;
@@ -1241,25 +1463,26 @@ fn binance_unknown_symbol(status: u16, body: &serde_json::Value) -> bool {
 /// GET a Binance JSON endpoint. On failure the flag is true when Binance
 /// rejected a symbol as unknown (see `binance_unknown_symbol`).
 fn binance_get(url: &str) -> Result<serde_json::Value, (bool, String)> {
-    let resp = http()
-        .get(url)
-        .send()
-        .map_err(|e| (false, format!("Binance request failed: {e}")))?;
-    let status = resp.status();
-    let body: serde_json::Value = resp.json().map_err(|e| {
+    binance_get_via(binance(), url)
+}
+
+fn binance_get_via(client: &BinanceClient, url: &str) -> Result<serde_json::Value, (bool, String)> {
+    let resp = client.get(url).map_err(|e| (false, e))?;
+    let status = resp.status;
+    let body: serde_json::Value = serde_json::from_str(&resp.body).map_err(|e| {
         (
             false,
             format!("Failed to parse Binance response ({status}): {e}"),
         )
     })?;
-    if status.is_success() {
+    if (200..300).contains(&status) {
         return Ok(body);
     }
     let msg = body.get("msg").and_then(|m| m.as_str()).map_or_else(
         || format!("Binance API returned status {status}"),
         |m| format!("Binance: {m}"),
     );
-    Err((binance_unknown_symbol(status.as_u16(), &body), msg))
+    Err((binance_unknown_symbol(status, &body), msg))
 }
 
 /// Match a `/ticker/24hr?symbols=` array to `symbols` (in order). Pure, so
@@ -1350,6 +1573,7 @@ fn parse_yahoo_quote(body: &serde_json::Value) -> Result<Quote, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
 
     const HOUR_MS: i64 = 3_600_000;
 
@@ -1774,7 +1998,7 @@ mod tests {
 
     /// Reads through `newest_klines` against a fake exchange, counting requests.
     fn cached_read(
-        cache: &Mutex<KlineCache>,
+        cache: &KlineCache,
         key: &str,
         want: usize,
         now: Instant,
@@ -1784,6 +2008,7 @@ mod tests {
         let mut exchange = fake_exchange(first_ms, last_ms);
         let bars = newest_klines(
             cache,
+            &Walks::default(),
             (key.to_string(), "1h"),
             want,
             now,
@@ -1803,7 +2028,7 @@ mod tests {
         let want = 303 * 59;
         let last = 1_700_000_000_000 / HOUR_MS * HOUR_MS;
         let history = (0, last);
-        let cache = Mutex::default();
+        let cache = KlineCache::default();
         let t0 = Instant::now();
 
         let (first, calls) = cached_read(&cache, "BTCUSDT", want, t0, history);
@@ -1833,7 +2058,7 @@ mod tests {
     fn the_kline_cache_reads_again_after_a_gap_or_its_lifetime() {
         let want = 2_500;
         let last = 1_700_000_000_000 / HOUR_MS * HOUR_MS;
-        let cache = Mutex::default();
+        let cache = KlineCache::default();
         let t0 = Instant::now();
         assert_eq!(cached_read(&cache, "A", want, t0, (0, last)).1, 3);
         // More new klines than a refresh reads: the page does not reach ours.
@@ -1852,7 +2077,7 @@ mod tests {
     #[test]
     fn the_kline_cache_knows_a_short_history_and_stays_bounded() {
         let last = 1_700_000_000_000 / HOUR_MS * HOUR_MS;
-        let cache = Mutex::default();
+        let cache = KlineCache::default();
         let t0 = Instant::now();
         // A symbol listed 1500 klines ago cannot fill the ask, yet only the first
         // read walks it.
@@ -1866,9 +2091,364 @@ mod tests {
             let at = t0 + Duration::from_secs(1 + i as u64);
             cached_read(&cache, &format!("S{i}"), 1_500, at, (0, last));
         }
-        let held = cache.lock().unwrap();
-        assert_eq!(held.len(), KLINE_CACHE_ENTRIES);
-        assert!(!held.contains_key(&("NEW".to_string(), "1h")));
+        let st = cache.lock();
+        assert_eq!(st.held.len(), KLINE_CACHE_ENTRIES);
+        assert!(!st.held.contains_key(&("NEW".to_string(), "1h")));
+    }
+
+    /// A pretend Binance behind `BinanceClient`'s HTTP boundary: real URLs in, real
+    /// JSON, statuses and weight headers out, with a clock the test moves.
+    struct FakeBinance {
+        now_s: Arc<std::sync::atomic::AtomicI64>,
+        /// Its weight per minute, and the gate's. Small, so a test stays cheap.
+        limit: u32,
+        minute_weight: Mutex<HashMap<i64, u32>>,
+        requests: AtomicUsize,
+        in_flight: AtomicUsize,
+        peak: AtomicUsize,
+        over_limit: AtomicUsize,
+        /// Answer the k-th request (counted from 1) with this status and Retry-After.
+        fail_at: Mutex<Option<(usize, u16, &'static str)>>,
+        delay: Duration,
+    }
+
+    impl FakeBinance {
+        fn new(limit: u32, delay_ms: u64) -> Arc<Self> {
+            Arc::new(Self {
+                now_s: Arc::new(std::sync::atomic::AtomicI64::new(1_700_000_040)),
+                limit,
+                minute_weight: Mutex::default(),
+                requests: AtomicUsize::new(0),
+                in_flight: AtomicUsize::new(0),
+                peak: AtomicUsize::new(0),
+                over_limit: AtomicUsize::new(0),
+                fail_at: Mutex::default(),
+                delay: Duration::from_millis(delay_ms),
+            })
+        }
+
+        fn requests(&self) -> usize {
+            self.requests.load(Ordering::SeqCst)
+        }
+
+        fn advance(&self, secs: i64) {
+            self.now_s.fetch_add(secs, Ordering::SeqCst);
+        }
+
+        fn most_in_a_minute(&self) -> u32 {
+            let weights = self.minute_weight.lock().unwrap();
+            weights.values().copied().max().unwrap_or(0)
+        }
+
+        fn answer(&self, url: &str) -> Result<BinanceResponse, String> {
+            let k = self.requests.fetch_add(1, Ordering::SeqCst) + 1;
+            let flying = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+            self.peak.fetch_max(flying, Ordering::SeqCst);
+            std::thread::sleep(self.delay);
+            self.in_flight.fetch_sub(1, Ordering::SeqCst);
+
+            let now_s = self.now_s.load(Ordering::SeqCst);
+            let used = {
+                let mut weights = self.minute_weight.lock().unwrap();
+                let w = weights.entry(now_s.div_euclid(60)).or_insert(0);
+                *w += 2;
+                *w
+            };
+            if used > self.limit {
+                self.over_limit.fetch_add(1, Ordering::SeqCst);
+            }
+            let reply = |status, retry: Option<&str>, body: String| {
+                Ok(BinanceResponse {
+                    status,
+                    retry_after: retry.map(str::to_string),
+                    used_weight: Some(used.to_string()),
+                    body,
+                })
+            };
+            let scripted = *self.fail_at.lock().unwrap();
+            if let Some((_, status, retry)) = scripted.filter(|(at, _, _)| *at == k) {
+                return reply(
+                    status,
+                    Some(retry),
+                    r#"{"code":-1003,"msg":"Too many"}"#.into(),
+                );
+            }
+            let param = |name: &str| {
+                url.split(['?', '&'])
+                    .find_map(|kv| kv.strip_prefix(name)?.strip_prefix('='))
+            };
+            let Some(interval) = param("interval") else {
+                return reply(200, None, "[]".into());
+            };
+            let step_ms = data::interval_secs(interval).unwrap() * 1000;
+            let limit: i64 = param("limit").unwrap().parse().unwrap();
+            let end: i64 = param("endTime").map_or(i64::MAX, |e| e.parse().unwrap());
+            // Binance's klines lie on the grid: weeks open on Monday, for example.
+            let grid = Interval::parse(interval).unwrap();
+            let newest = grid.grid_start(end.min(now_s * 1000).div_euclid(1000)) * 1000;
+            let rows: Vec<String> = (0..limit)
+                .rev()
+                .map(|i| newest - i * step_ms)
+                .filter(|t| *t >= 0)
+                .map(|t| {
+                    let p = 100.0 + (t / step_ms % 97) as f64;
+                    format!(r#"[{t},"{p}","{}","{}","{p}","1"]"#, p + 1.0, p - 1.0)
+                })
+                .collect();
+            reply(200, None, format!("[{}]", rows.join(",")))
+        }
+    }
+
+    fn client_of(fake: &Arc<FakeBinance>) -> BinanceClient {
+        let clock = fake.now_s.clone();
+        let exchange = fake.clone();
+        BinanceClient {
+            gate: Box::leak(Box::new(Gate::with_clock(
+                fake.limit,
+                Box::new(move || clock.load(Ordering::SeqCst)),
+            ))),
+            walks: Walks::default(),
+            klines: KlineCache::default(),
+            send: Box::new(move |url| exchange.answer(url)),
+        }
+    }
+
+    /// A `59m` tail with warmup 300, as the web app polls it.
+    fn tail_59m(client: &BinanceClient, symbol: &str) -> Result<Fetched, String> {
+        fetch_binance_via(client, symbol, "59m", 302, None)
+    }
+
+    const REFUSED: &str = "Binance rate limit";
+
+    #[test]
+    fn failure_a_parallel_history_pages_stop_at_the_budget() {
+        // Parallel 20-request history reads, each with its own end_time, so no
+        // cache helps. Weight limit 600: the gate refuses from 480, 240 requests.
+        let fake = FakeBinance::new(600, 1);
+        let client = client_of(&fake);
+        let base_ms = fake.now_s.load(Ordering::SeqCst) * 1000;
+        let results: Vec<Result<Fetched, String>> = std::thread::scope(|s| {
+            let handles: Vec<_> = (0..10i64)
+                .flat_map(|i| (0..3i64).map(move |j| (i, j)))
+                .map(|(i, j)| {
+                    let (client, end) = (&client, base_ms - (i * 7 + j) * HOUR_MS);
+                    s.spawn(move || fetch_binance_via(client, "BTCUSDT", "59m", 5000, Some(end)))
+                })
+                .collect();
+            handles.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+        // 240 requests, and at most one more from each walk already past the gate.
+        let most = 240 + MAX_WALKS;
+        assert!(fake.requests() <= most, "{} requests", fake.requests());
+        assert_eq!(
+            fake.over_limit.load(Ordering::SeqCst),
+            0,
+            "Binance never said no"
+        );
+        assert!(
+            fake.peak.load(Ordering::SeqCst) <= MAX_WALKS,
+            "walks at once"
+        );
+        let refused: Vec<&String> = results.iter().filter_map(|r| r.as_ref().err()).collect();
+        assert!(!refused.is_empty());
+        assert!(refused.iter().all(|e| e.contains(REFUSED)), "{refused:?}");
+        // The next minute the budget is back.
+        fake.advance(60);
+        assert!(fetch_binance_via(&client, "BTCUSDT", "59m", 5000, Some(base_ms)).is_ok());
+    }
+
+    #[test]
+    fn failure_b_tail_polls_thrashing_the_cache_stop_at_the_budget() {
+        // One symbol more than the cache holds: every poll evicts the next one's
+        // klines, and each costs a full 18-request walk.
+        let fake = FakeBinance::new(600, 0);
+        let client = client_of(&fake);
+        let symbols: Vec<String> = (0..=KLINE_CACHE_ENTRIES)
+            .map(|i| format!("S{i}USDT"))
+            .collect();
+        let (mut ok, mut refused) = (0, 0);
+        for _round in 0..50 {
+            for s in &symbols {
+                match tail_59m(&client, s) {
+                    Ok(_) => ok += 1,
+                    Err(e) => {
+                        assert!(e.contains(REFUSED), "{e}");
+                        refused += 1;
+                    }
+                }
+            }
+            fake.advance(2);
+        }
+        assert!(ok > 0 && refused > 0, "ok {ok}, refused {refused}");
+        assert!(
+            fake.most_in_a_minute() <= 480 + 2,
+            "{}",
+            fake.most_in_a_minute()
+        );
+        assert_eq!(fake.over_limit.load(Ordering::SeqCst), 0);
+
+        // As many symbols as it holds cost one request a poll, after the first.
+        let fake = FakeBinance::new(6_000, 0);
+        let client = client_of(&fake);
+        for s in &symbols[..KLINE_CACHE_ENTRIES] {
+            tail_59m(&client, s).unwrap();
+        }
+        let first = fake.requests();
+        assert_eq!(first, KLINE_CACHE_ENTRIES * 18);
+        for s in &symbols[..KLINE_CACHE_ENTRIES] {
+            tail_59m(&client, s).unwrap();
+        }
+        assert_eq!(fake.requests(), first + KLINE_CACHE_ENTRIES);
+    }
+
+    #[test]
+    fn failure_c_subscribe_churn_seeds_share_the_klines() {
+        // A push seed of a 59m chart asks for its native 1m klines.
+        let want = 303 * 59;
+        let fake = FakeBinance::new(6_000, 0);
+        let client = client_of(&fake);
+        let seed = |c: &BinanceClient| fetch_binance_via(c, "BTCUSDT", "1m", want, None);
+        let first = seed(&client).unwrap();
+        assert_eq!(fake.requests(), 18);
+        for _ in 0..9 {
+            fake.advance(6);
+            seed(&client).unwrap();
+        }
+        assert_eq!(fake.requests(), 18 + 9, "ten subscribes, one walk");
+        assert_eq!(first.data.len(), want);
+    }
+
+    #[test]
+    fn every_binance_path_stops_after_a_429_or_418_until_retry_after() {
+        for status in [429, 418] {
+            let fake = FakeBinance::new(6_000, 0);
+            let client = client_of(&fake);
+            // The fifth page of a walk is answered with the status.
+            *fake.fail_at.lock().unwrap() = Some((5, status, "120"));
+            let e = tail_59m(&client, "BTCUSDT").err().unwrap();
+            assert!(e.contains(&status.to_string()), "{e}");
+            assert_eq!(fake.requests(), 5, "the walk stops there");
+
+            // Nothing leaves now: this chart, another, a native seed, a single
+            // page, the quotes and the symbol list's path.
+            for call in [
+                tail_59m(&client, "BTCUSDT").map(|_| ()),
+                tail_59m(&client, "ETHUSDT").map(|_| ()),
+                fetch_binance_via(&client, "BTCUSDT", "1m", 5000, None).map(|_| ()),
+                fetch_binance_via(&client, "BTCUSDT", "4h", 10, None).map(|_| ()),
+                client
+                    .get("https://api.binance.com/api/v3/exchangeInfo")
+                    .map(|_| ()),
+            ] {
+                let e = call.err().unwrap();
+                assert!(e.contains(REFUSED) && e.contains("120s"), "{e}");
+            }
+            // A refused quote is not a symbol Binance called unknown.
+            let (unknown, e) = binance_get_via(&client, &binance_ticker_url(&["BTCUSDT"]))
+                .err()
+                .unwrap();
+            assert!(!unknown && e.contains(REFUSED), "{e}");
+            assert_eq!(fake.requests(), 5, "not one request during the cooldown");
+
+            // The refused reads left nothing behind: the next is a full, right one.
+            assert!(client.klines.lock().held.is_empty());
+            assert!(client.klines.lock().walking.is_empty());
+            fake.advance(120);
+            let after = tail_59m(&client, "BTCUSDT").unwrap();
+            assert_eq!(fake.requests(), 5 + 18);
+            let clean = tail_59m(&client_of(&fake), "BTCUSDT").unwrap();
+            let key = |f: &Fetched| {
+                f.data
+                    .bars
+                    .iter()
+                    .map(|b| (b.date.clone(), ohlcv(b)))
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(key(&after), key(&clean));
+        }
+    }
+
+    #[test]
+    fn a_refused_refresh_keeps_the_klines_it_held() {
+        let fake = FakeBinance::new(6_000, 0);
+        let client = client_of(&fake);
+        let held = tail_59m(&client, "BTCUSDT").unwrap();
+        *fake.fail_at.lock().unwrap() = Some((19, 429, "30"));
+        assert!(tail_59m(&client, "BTCUSDT").is_err());
+        assert!(tail_59m(&client, "BTCUSDT")
+            .err()
+            .unwrap()
+            .contains(REFUSED));
+        fake.advance(30);
+        let again = tail_59m(&client, "BTCUSDT").unwrap();
+        assert_eq!(fake.requests(), 18 + 1 + 1, "one refresh, no new walk");
+        assert_eq!(again.data.len(), held.data.len());
+    }
+
+    #[test]
+    fn concurrent_first_reads_of_a_chart_share_one_walk() {
+        let fake = FakeBinance::new(6_000, 1);
+        let client = client_of(&fake);
+        let results: Vec<Result<Fetched, String>> = std::thread::scope(|s| {
+            let handles: Vec<_> = (0..6)
+                .map(|_| {
+                    let client = &client;
+                    s.spawn(move || tail_59m(client, "BTCUSDT"))
+                })
+                .collect();
+            handles.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+        assert!(results.iter().all(|r| r.is_ok()));
+        // One walk, and at most one refresh for each of the other five.
+        assert!(fake.requests() <= 18 + 5, "{} requests", fake.requests());
+        assert!(client.klines.lock().walking.is_empty());
+    }
+
+    #[test]
+    fn a_walk_waits_for_a_permit_and_gives_up_cleanly() {
+        let walks = Walks::default();
+        let permits: Vec<_> = (0..MAX_WALKS)
+            .map(|_| walks.enter(far()).unwrap())
+            .collect();
+        let soon = Instant::now() + Duration::from_millis(20);
+        let e = walk_klines(&walks, BINANCE_MAX_LIMIT + 1, None, soon, |_, _| {
+            panic!("a call that gave up sends nothing")
+        })
+        .err()
+        .unwrap();
+        assert!(e.contains(REFUSED), "{e}");
+        // One page needs no permit, and a freed permit is free again.
+        let one = walk_klines(&walks, 1, None, far(), fake_exchange(0, HOUR_MS * 3)).unwrap();
+        assert_eq!(one.len(), 1);
+        drop(permits);
+        assert!(walks.enter(far()).is_ok());
+    }
+
+    #[test]
+    fn binance_paging_a_custom_interval_joins_up_to_one_read() {
+        // The glue around the walk: want, end and has_more, against real URLs.
+        let fake = FakeBinance::new(600_000, 0);
+        let client = client_of(&fake);
+        let dates = |f: &Fetched| {
+            f.data
+                .bars
+                .iter()
+                .map(|b| b.date.clone())
+                .collect::<Vec<_>>()
+        };
+        for (tf, n) in [("7m", 60), ("45m", 40), ("7h", 30), ("2d", 20), ("2wk", 12)] {
+            let whole = fetch_binance_via(&client, "BTCUSDT", tf, n, None).unwrap();
+            assert!(whole.has_more, "{tf}");
+            assert_eq!(whole.data.len(), n, "{tf}");
+            let mid_ms = bar_open_ms(&whole.data.bars[n / 2]).unwrap();
+            let newer = fetch_binance_via(&client, "BTCUSDT", tf, n / 2, None).unwrap();
+            let older = fetch_binance_via(&client, "BTCUSDT", tf, n / 2, Some(mid_ms)).unwrap();
+            let mut joined = dates(&older);
+            joined.extend(dates(&newer));
+            assert_eq!(joined, dates(&whole), "{tf}");
+            let key = |f: &Fetched| f.data.bars.iter().map(ohlcv).collect::<Vec<_>>();
+            assert_eq!(key(&older), key(&whole)[..n / 2].to_vec(), "{tf}");
+        }
     }
 
     #[test]
