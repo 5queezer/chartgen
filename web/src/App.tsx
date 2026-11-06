@@ -38,6 +38,7 @@ import { IndicatorChips } from "./components/IndicatorChips";
 import { IndicatorPicker } from "./components/IndicatorPicker";
 import { IndicatorSettings } from "./components/IndicatorSettings";
 import { LayoutMenu } from "./components/LayoutMenu";
+import { UserMenu } from "./components/UserMenu";
 import { ReplayBar } from "./components/ReplayBar";
 import { chipName, rememberLabels } from "./lib/indicatorNames";
 import { mergeParams } from "./lib/paramForm";
@@ -64,7 +65,13 @@ import { alignAsOf, COMPARE_PALETTE } from "./lib/compare";
 import { createCompareFeed, type CompareData } from "./lib/compareFeed";
 import { barCloseMs, isContinuousMarket } from "./lib/countdown";
 import { createMcpSession } from "./mcp";
-import { startSignIn, tryHandlePendingRedirect } from "./oauth";
+import {
+  fetchSignedInUser,
+  followSignOutInOtherTabs,
+  startSignIn,
+  tryHandlePendingRedirect,
+  type SignedInUser,
+} from "./oauth";
 import {
   chartQueryKey,
   createChartQuery,
@@ -137,6 +144,7 @@ export function App(): JSX.Element {
 
   const [authReady, setAuthReady] = createSignal(false);
   const [authError, setAuthError] = createSignal<string | null>(null);
+  const [signedInUser, setSignedInUser] = createSignal<SignedInUser | null>(null);
   const [pickerOpen, setPickerOpen] = createSignal(false);
   // Index (into the active set) of the indicator whose settings dialog is open.
   const [settingsIndex, setSettingsIndex] = createSignal<number | null>(null);
@@ -179,12 +187,16 @@ export function App(): JSX.Element {
   // automatic retry, queries stay off (a query would only restart the
   // flow, in a loop) and the status line offers "Sign in again".
   onMount(async () => {
+    onCleanup(followSignOutInOtherTabs());
     const err = await tryHandlePendingRedirect();
     if (err) {
       setAuthError(err.message);
       return;
     }
     setAuthReady(true);
+    void fetchSignedInUser()
+      .then(setSignedInUser)
+      .catch((e: unknown) => console.warn("[oauth] cannot tell who is signed in:", e));
 
     const logger = createAlertLogger(session);
     logger.install();
@@ -634,6 +646,7 @@ export function App(): JSX.Element {
         <div class="ml-auto min-w-0 max-[479px]:[&_[data-testid=layout-name]]:hidden">
           <LayoutMenu />
         </div>
+        <Show when={signedInUser()}>{(user) => <UserMenu user={user()} />}</Show>
       </header>
       <IndicatorChips
         entries={activeIndicators()}
