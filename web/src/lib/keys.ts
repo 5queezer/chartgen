@@ -47,7 +47,8 @@ export function keepKeyboardFocus(): () => void {
  * Kobalte selects a menu item on pointerup, so on touch the tap's mouse events
  * still follow, on whatever the selection put under the finger: a dialog's
  * Cancel or OK button, which it would press at once. Drops them when they land
- * outside the item that was pressed.
+ * outside the item that was pressed. A script's click (an item opening the file
+ * picker) and a keyboard's (detail 0) are not the tap's, so they pass.
  */
 export function swallowMenuGhostClicks(): () => void {
   let pressed: Element | null = null;
@@ -57,7 +58,11 @@ export function swallowMenuGhostClicks(): () => void {
         ? e.target.closest('[role^="menuitem"]')
         : null;
   };
+  const onCancel = () => {
+    pressed = null;
+  };
   const guard = (e: MouseEvent) => {
+    if (!e.isTrusted || e.detail === 0) return;
     if (pressed && !(e.target instanceof Node && pressed.contains(e.target))) {
       e.preventDefault();
       e.stopPropagation();
@@ -65,10 +70,12 @@ export function swallowMenuGhostClicks(): () => void {
     if (e.type === "click") pressed = null;
   };
   document.addEventListener("pointerdown", onDown, true);
+  document.addEventListener("pointercancel", onCancel, true);
   document.addEventListener("mousedown", guard, true);
   document.addEventListener("click", guard, true);
   return () => {
     document.removeEventListener("pointerdown", onDown, true);
+    document.removeEventListener("pointercancel", onCancel, true);
     document.removeEventListener("mousedown", guard, true);
     document.removeEventListener("click", guard, true);
   };

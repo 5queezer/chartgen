@@ -508,6 +508,29 @@ test.describe("touch on a phone", () => {
     expect(await stored()).toContain(String(moved));
   });
 
+  test("Import layout opens the file picker on touch, and its ghost click stays guarded", async ({ page }) => {
+    await bootCompact(page);
+    await page.getByRole("button", { name: /^Layout:/ }).tap();
+    const chooser = page.waitForEvent("filechooser", { timeout: 5000 });
+    await page.getByRole("menuitem", { name: "Import layout…" }).tap();
+    await chooser;
+  });
+
+  test("a keyboard click after a menu press that never became a click is not dropped", async ({ page }) => {
+    await bootCompact(page);
+    await page.getByTestId("toolbar-more").tap();
+    const item = page.getByRole("menuitem", { name: "Chart settings" });
+    await expect(item).toBeVisible();
+    await item.dispatchEvent("pointerdown", { pointerType: "touch", bubbles: true });
+    await page.keyboard.press("Escape");
+    await expect(item).toHaveCount(0);
+
+    const draw = dock(page, "Draw");
+    await draw.focus();
+    await page.keyboard.press("Enter");
+    await expect(draw).toHaveAttribute("aria-pressed", "true");
+  });
+
   test("picking a symbol in the watchlist returns to the chart", async ({ page }) => {
     await bootCompact(page);
     await dock(page, "Watchlist").tap();
