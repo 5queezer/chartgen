@@ -136,6 +136,10 @@ Symbol, timeframe, chart type, price-scale mode, theme, time zone and recent sym
   when zoomed in the window slides to keep the last visible close in view.
   The ratio is taken when you turn the lock on, and again for a new symbol
   or timeframe; after a window resize it keeps the price range on screen.
+  While compare symbols are shown the lock is paused and the axis fits every
+  series, because a fixed price range would crop lines rebased to the first
+  visible bar; the context menu item then reads "(paused while comparing)", and
+  the lock resumes from a fresh fit when the last one is removed.
   Locking turns `auto` off; clicking `auto`, double-clicking the axis,
   dragging the axis or `Alt+R` releases the lock. While it is locked the
   price axis cannot be panned vertically (TradingView allows it). Invert
@@ -510,8 +514,8 @@ Right-clicking the chart (outside a drawing) opens a menu:
 | Reset chart view (`Alt+R`) | Scroll to real time at the default zoom |
 | Copy link to chart | Copy a [shareable link](#sharing-a-chart) |
 | Copy price | Copy the price under the cursor, in the chart's precision |
-| Invert scale (`Alt+I`) | Flip the price axis |
-| Lock price to bar ratio | Keep the candle aspect while zooming horizontally |
+| Invert scale (`Alt+I`) | Flip the price axis; a check mark shows when it is on |
+| Lock price to bar ratio | Keep the candle aspect while zooming horizontally; a check mark shows when it is on |
 | Add horizontal line at | Add a horizontal line at that price; it is saved like any drawing |
 | Add alert at | Open the alert dialog at that price |
 | Remove all drawings | Asks for confirmation |
@@ -570,7 +574,7 @@ hidden or the panel is collapsed, and resumes within 5 s when you come back.
   current chart symbol is highlighted.
 - **+** opens the symbol search dialog. The symbol you pick is added at
   the bottom of the list, and the chart symbol stays unchanged.
-- **×** (shown on hover) removes a row.
+- **×** (shown on hover, always on a touch screen, like the row's other buttons) removes a row.
 - **»** collapses the panel to a thin strip on the right edge; the list
   icon there expands it again.
 
@@ -775,23 +779,35 @@ current chart.
 | Rename... | Rename the active layout. A name already in use gets a suffix: `Name (2)`. |
 | Make a copy / Save as... | Store the current chart as a new layout and switch to it. |
 | Create new layout... | A new layout on the current symbol and timeframe; chart type, scale mode and indicators go back to their defaults. |
-| Load layout... | A searchable list of layouts; click one to switch, or the x on its row to delete it. The open layout cannot be deleted: switch to another one first. |
+| Load layout... | A searchable list of layouts; click one to switch, or the x on its row to delete it. Clicking the open layout goes back to its saved state. The open layout cannot be deleted: switch to another one first. |
 | Export saved layout / Import layout... | Download the saved layout as a JSON file, or add one from a file. Imports are validated (files over 256 KB, other versions and unknown fields are refused or dropped); invalid files are refused. |
 
 Switching layouts applies all of the above. If the current layout has
-unsaved changes, a dialog offers Save, Don't save or Cancel. Unsaved
+unsaved changes, a dialog offers Save, Don't save or Cancel, also when
+you pick the open layout itself to discard them. Unsaved
 changes survive a reload like any other chart state, and so does the
 active layout, so there is no "leave page?" prompt. Saving with nothing
-changed still shows "Layout saved". Hiding an indicator counts as a
+changed still shows "Layout saved". If the browser refuses the save (storage
+full or blocked), an error says so, the layout stays unsaved and the dialog stays
+open. Hiding an indicator counts as a
 change; opening an indicator's settings and pressing OK without edits
 does not.
 
 If you use several tabs, each tab keeps its own open layout; saving in
 one tab does not discard layouts created in another.
 
+A layout with compare symbols also remembers the scale mode to return to when
+the last one is removed, so layouts with the same compare list each go back to
+their own mode. A layout saved before this has none, so opening it falls back to
+the normal scale, and saving it then keeps normal: saving does not bring back a
+mode it has already lost. The mode is taken when the first compare symbol is
+added, so to set it, remove the layout's compare symbols, pick the mode you want,
+add them back, then save.
+
 Layouts are stored in `localStorage` under `chartgen.layouts` (at most
 50, validated on load, malformed ones dropped). See
-[ADR-0015](/chartgen/decisions/0015-named-layouts/).
+[ADR-0015](/chartgen/decisions/0015-named-layouts/) and
+[ADR-0040](/chartgen/decisions/0040-layout-compare-restore/).
 
 ## Getting started
 
