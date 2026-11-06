@@ -825,7 +825,7 @@ function WatchlistRow(props: WatchlistRowProps): JSX.Element {
       }}
       title={error() ?? undefined}
     >
-      <span role="cell" class="min-w-0 truncate" title={props.symbol}>
+      <span role="cell" class="wl-symbol min-w-0" title={props.symbol}>
         <button
           type="button"
           class="font-semibold cursor-pointer text-left truncate max-w-full"
@@ -833,7 +833,7 @@ function WatchlistRow(props: WatchlistRowProps): JSX.Element {
         >
           {props.symbol}
         </button>
-        {/* Absolutely positioned over the row's edges (CSS). */}
+        {/* Absolutely positioned at the symbol cell's edges, clear of the numbers (CSS). */}
         <Show when={!props.readOnly}>
           <button
             type="button"

@@ -44,7 +44,7 @@ import {
   ScriptEditorDock,
 } from "./components/ScriptEditorDock";
 import { ReplayBar } from "./components/ReplayBar";
-import { rememberLabels } from "./lib/indicatorNames";
+import { chipName, rememberLabels } from "./lib/indicatorNames";
 import { scriptingEnabled } from "./lib/scripts";
 import { mergeParams } from "./lib/paramForm";
 import { resolveColors } from "./lib/chartStyle";
@@ -216,10 +216,9 @@ export function App(): JSX.Element {
     const key = instanceKey(entry);
     // A repeated indicator's title says which instance it is (ADR-0028).
     const params = paramLabels(entries, untrack(paramDefaults), true).get(key);
-    const label = untrack(() => query.data?.indicators[key]?.label) || indicatorName(entry);
     return {
       name: indicatorName(entry),
-      title: params ? `${label} ${params}` : undefined,
+      title: untrack(() => chipName(indicatorName(entry), params)),
       key,
       params: indicatorParams(entry),
       style: indicatorStyle(entry),

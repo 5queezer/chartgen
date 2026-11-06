@@ -308,9 +308,18 @@ export const setChartContext = (ctx: ChartContext | null): void =>
   void setChartContextSignal(ctx);
 
 /**
+ * What the tab that evaluates alerts shows, as "BTCUSDT 1h", when that is
+ * another tab and it said so. Only it evaluates (`leader` in alertEngine).
+ */
+const [evaluatingChart, setEvaluatingChartSignal] = createSignal<string | null>(null);
+export const setEvaluatingChart = (chart: string | null): void =>
+  void setEvaluatingChartSignal(chart);
+
+/**
  * Why an alert cannot fire right now, for the Alerts tab and Object Tree:
  * its note ("drawing deleted"), "open BTCUSDT 1h" (an indicator or sloped
- * drawing alert while the chart shows something else), "line is vertical" (both
+ * drawing alert while the chart shows something else), "open BTCUSDT 1h in the
+ * other tab" (the same for the tab that evaluates), "line is vertical" (both
  * points on one bar of these bars, which only holds in this tab, so it is never
  * stored as a note), "indicator not on the chart" or "indicator changed" (other
  * name or params under its key). Null when it is evaluated, or simply paused or
@@ -326,6 +335,10 @@ export function inactiveReason(
   if (!a.active || src === undefined || src.kind === "price") return null;
   const interval = src.interval;
   if (interval === undefined) return null;
+  const evaluating = evaluatingChart();
+  if (evaluating !== null && evaluating !== `${a.symbol} ${interval}`) {
+    return `open ${a.symbol} ${interval} in the other tab`;
+  }
   if (ctx?.symbol !== a.symbol || ctx.interval !== interval) {
     return `open ${a.symbol} ${interval}`;
   }
