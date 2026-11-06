@@ -107,11 +107,15 @@ means one of that unit.
 
 ### Limits, and why
 
-- **Longest per unit: `1439m`, `168h`, `365D`, `52W`, `12M`.** Each stops short of
-  what the next unit says better, or at a year. Lengths past these are not bars
-  anyone reads, and days, weeks and months are bounded by the source's history:
-  Binance's oldest daily klines are a few pages away.
-- **At most 60 native bars per bar (`MAX_BASE_PER_BAR`), on Binance's ladder.**
+- **Upper bounds per unit, after normalization: under 1440 minutes, then `168h`,
+  `365D`, `52W`, `12M`.** These are bounds, not lengths that all parse: `1439m` and
+  `167h` fail the next rule, `1440m` normalizes to `1d`, and `168h` to `1wk`. Each
+  stops short of what the next unit says better, or at a year. Lengths past these
+  are not bars anyone reads, and days, weeks and months are bounded by the source's
+  history: Binance's oldest daily klines are a few pages away.
+- **At most 60 native bars per bar (`MAX_BASE_PER_BAR`), for minutes and hours, on
+  Binance's ladder.** Days, weeks and months have no such rule (`365D` takes 365
+  `1d` klines), because their history is what bounds them.
   Yahoo returns one window per request whatever the interval, so its finer bars
   cost history rather than requests; Binance is what needs bounding. The rule
   is the same for both sources, so a share link cannot work for one symbol and
@@ -267,8 +271,19 @@ of their own beyond the canonical string. MCP clients get it too.
   unscheduled closure, another exchange's holiday, or a US date past 2028 shows a
   future bar on a closed day. These times only label future bars, in the legend,
   the Data Window and the `future.t` an MCP client reads, so the harm is small.
-- Yahoo's session has no lunch break. Its Tokyo `5m` bars run through the break
-  too (checked 2026-11-06), so future bars match the bars, not the market's rule.
+- Yahoo's session has no lunch break, so future bars run through it. Its Tokyo,
+  Shanghai and Hong Kong `5m` rows continue through the break with null prices
+  (checked 2026-11-06), so charts have no bars there while future bars do. Because
+  those rows mark the session as unbroken, the afternoon stays on the morning's
+  grid: a Shanghai `45m` bar can be stamped 12:30, inside lunch. Yahoo's own `1h`
+  rows are stamped the same way. Modelling lunch stays out of scope.
+- US indices quoted from Chicago get no holidays. `^VIX` and `^TNX` report their
+  own exchanges in `America/Chicago`, with their own hours, and the NYSE's table
+  does not say those follow it, so their future bars run through US holidays.
+- The 20,000-kline cap also shortens warmup, and a poll or push never pages to make
+  up for it. A `59m` chart holds about 338 bars at most, so with `warmup: 1000` a long
+  indicator (`ema` of 500) stays unconverged or null on the forming bar. The response
+  does not say so.
 - A market that changes its hours is only reflected when Yahoo reports them.
 - Extended hours are not covered, and neither are futures' daily and weekend breaks.
 

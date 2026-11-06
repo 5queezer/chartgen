@@ -711,7 +711,7 @@ function TimeframeEntry(props: TimeframeEntryProps): JSX.Element {
                 fallback={
                   value() === ""
                     ? "Examples: 7, 45, 8h, 2D, 2W, 3M"
-                    : "Examples: 7, 45, 8h, 2D, 2W, 3M. Longest 1439m, 168h, 365D, 52W, 12M; above 60m a round number such as 65m."
+                    : "Examples: 7, 45, 8h, 2D, 2W, 3M. At most 365D, 52W or 12M; above 60m a round number such as 65m."
                 }
               >
                 {(tf) => `Enter to switch to ${timeframeLabel(tf())}`}

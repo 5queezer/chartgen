@@ -60,7 +60,7 @@ test.describe("custom intervals", () => {
     const before = await bars(page);
     for (const bad of ["61m", "53W", "0", "7x"]) {
       await typeInterval(page, bad);
-      await expect(page.getByRole("dialog")).toContainText("Longest 1439m");
+      await expect(page.getByRole("dialog")).toContainText("At most 365D");
       await page.keyboard.press("Enter");
       await expect(page.getByRole("dialog")).toBeVisible();
       await page.keyboard.press("Escape");

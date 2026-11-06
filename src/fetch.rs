@@ -1148,9 +1148,10 @@ const SESSION_GAP: i64 = 3_600;
 /// buckets of `bucket_secs` start at a session's open, and a session's last
 /// bucket may be shorter. A session ends where consecutive bars are more than
 /// an hour apart: the overnight gap, a futures daily break, or a lunch break
-/// (so a Tokyo afternoon is anchored separately). `opens` holds those starts
-/// from Yahoo's rows, priced or not: a first minute with no price (Yahoo sends
-/// nulls) must not shift the session's grid. Each bucket's `t` is its slot on
+/// that leaves a gap in the rows. `opens` holds those starts from Yahoo's rows,
+/// priced or not: a first minute with no price (Yahoo sends nulls) must not shift
+/// the session's grid. Tokyo, Shanghai and Hong Kong keep null rows through lunch,
+/// so their afternoon stays on the morning's grid (ADR-0038). Each bucket's `t` is its slot on
 /// that grid. `gmtoffset` (seconds) maps UTC to exchange time; it is the
 /// current offset, but a DST shift of an hour never moves a session across a
 /// day boundary. The local day containing `min_start` may be cut off by the

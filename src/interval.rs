@@ -78,7 +78,7 @@ impl Interval {
         };
         if iv.n > max {
             return Err(format!(
-                "Unsupported timeframe: {text}. The longest are 1439m, 168h, 365D, 52W and 12M."
+                "Unsupported timeframe: {text}. The upper bounds are under 1440m, 168h, 365D, 52W and 12M."
             ));
         }
         if matches!(iv.unit, Unit::Minute | Unit::Hour) {

@@ -83,7 +83,7 @@ export interface GenerateChartInput {
    */
   ticker?: string;
   /**
-   * Candlestick timeframe / interval: a number and a unit, m minutes, h hours, D days, W weeks, M months (1m, 5m, 7m, 45m, 90m, 4h, 8h, 1d, 2D, 1W, 2W, 1M). Up to 1439m, 168h, 365D, 52W, 12M; one bar may take at most 60 native bars, so 61m is rejected and 65m is not. The response echoes the canonical form (120m becomes 2h, 2W becomes 2wk, 1M becomes 1mo).
+   * Candlestick timeframe / interval: a number and a unit, m minutes, h hours, D days, W weeks, M months (1m, 5m, 7m, 45m, 90m, 4h, 8h, 1d, 2D, 1W, 2W, 1M). Upper bounds after normalization: under 1440m, 168h, 365D, 52W, 12M. A minute or hour interval may also take at most 60 native Binance bars per bar, so 61m is rejected and 65m is not. The response echoes the canonical form (120m becomes 2h, 2W becomes 2wk, 1M becomes 1mo).
    */
   timeframe?: string;
   /**

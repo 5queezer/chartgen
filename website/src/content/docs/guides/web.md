@@ -368,9 +368,9 @@ The timeframe popup accepts a number of minutes (`5`, `7`, `45`, `120`) or a
 number with a unit `m`, `h`, `d`, `w` (`7m`, `45m`, `8h`, `4H`, `2D`, `2W`);
 an uppercase `M` means month (`3M`), lowercase `m` minutes. A lone `D`, `W`
 or `M` means one day, week or month. `1`, `2`, `0` then `Enter` selects 2h.
-This works for Binance and Yahoo symbols alike. The longest are 1439m, 168h,
-365D, 52W and 12M, and above 60 minutes the length must be a round one (`65m`
-works, `61m` does not). The field turns red for anything else, including
+This works for Binance and Yahoo symbols alike. Lengths are bounded at under 1440
+minutes, 168h, 365D, 52W and 12M, and above 60 minutes the length must be a round
+one (`65m` works, `61m` does not). The field turns red for anything else, including
 seconds, and says so. [MCP reference](/chartgen/reference/mcp/#generate_chart)
 lists how bars line up and what each source builds them from.
 

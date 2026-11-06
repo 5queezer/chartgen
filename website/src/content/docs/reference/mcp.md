@@ -97,10 +97,14 @@ Render a chart for a symbol. Accepts `ticker`/`symbol`, `timeframe`/`interval`,
 take either case. Anything else is a tool error that says what is wrong.
 [ADR-0038](/chartgen/decisions/0038-custom-intervals/) explains the limits:
 
-- The longest are `1439m`, `168h`, `365D`, `52W` and `12M`. Seconds are not offered.
-- One bar may take at most 60 native bars. Every length up to 60 minutes
-  qualifies; `61m` needs 61 `1m` klines and is rejected, while `65m` needs 13
-  `5m` klines and is fine.
+- Upper bounds, after normalization: under 1440 minutes, then `168h`, `365D`, `52W`
+  and `12M`. Not every length below a bound parses, as the next rule says. `1440m`
+  is `1d`, and seconds are not offered.
+- A minute or hour interval may take at most 60 native bars per bar, counted on
+  Binance's klines for every symbol. Every length up to 60 minutes qualifies; `61m`
+  needs 61 `1m` klines and is rejected, while `65m` needs 13 `5m` klines and is
+  fine, and `1439m` is rejected. Days, weeks and months have no such rule: `365D`
+  takes 365 `1d` klines.
 
 The response's `interval` is the canonical form, and the same bars have one
 name: `120m` is `2h`, `24h` is `1d`, `7d` is `1wk`, `2W` is `2wk`, `1M` is
@@ -128,9 +132,13 @@ Bars land on a stable grid, so a reload gives the same bars:
   `12M` a calendar year.
 
 A custom interval on Binance reads at most 20 requests' worth of native bars per
-call (20,000). Past that, the call returns the newest bars that fit, with
-`has_more: true`, and older bars come from paging. A `59m` chart gets about 339
-bars per call however many it asks for. Calls for the newest bars share native
+call (20,000). That caps the bars fetched, which also supply `warmup`; the response
+returns at most `bars` of them. A `59m` call fetches about 338 bars, so one asking
+for `bars: 2` returns 2, computed over those 338, and one asking for `bars: 500`
+returns the 338 with `has_more: true`, and older bars come from paging. Warmup past
+the cap is simply shorter: with `warmup: 1000` on `59m`, an indicator with a very long
+window stays `null` or unconverged, and polls and pushes never page to make up for
+it. Calls for the newest bars share native
 klines read in the last 2 minutes, so after the first, polling a tail costs one
 request whatever its warmup.
 
@@ -366,8 +374,9 @@ bars ahead of price.
   neither a Friday nor a Saturday means a Friday and Saturday weekend. Without a
   session, as for crypto, a day closes only if the bars could have shown otherwise:
   7 days of `1d` bars, or 5 cycles of 7 longer ones. US-listed equities, ETFs, indices and mutual funds also skip
-  the holidays and early closes of the NYSE's published calendar, for 2026 to 2028.
-  Other exchanges' holidays, and US dates past 2028, are not skipped. Futures step
+  the holidays of the NYSE's published calendar, for 2026 to 2028. An early-close day
+  is not skipped: its bars stop at the 13:00 New York close. Other exchanges' holidays,
+  US indices quoted from Chicago (`^VIX`, `^TNX`), and US dates past 2028 are not skipped. Futures step
   through their breaks. See
   [ADR-0038](/chartgen/decisions/0038-custom-intervals/). `t` is absent when the
   bars have no timestamps.
