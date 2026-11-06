@@ -147,3 +147,72 @@ test.describe("lock price to bar ratio with compare", () => {
       .toBe(true);
   });
 });
+
+test.describe("loading the active layout", () => {
+  const layoutButton = (page: Page) => page.getByRole("button", { name: /^Layout:/ });
+  const dirtyDot = (page: Page) => page.getByTestId("layout-dirty");
+  const activeTimeframe = (page: Page) =>
+    page.getByRole("group", { name: "Timeframe" }).locator("[aria-pressed=true]");
+  const chip = (page: Page, name: string) =>
+    page.getByRole("button", { name: `Remove ${name}`, exact: true });
+
+  async function pickActive(page: Page): Promise<void> {
+    await layoutButton(page).click();
+    await page.getByRole("menuitem", { name: /^Load layout/ }).click();
+    await page.getByRole("button", { name: /^Unnamed/ }).click();
+  }
+
+  test("discards unsaved changes after the prompt, keeps them on Cancel", async ({
+    bootedApp: page,
+  }) => {
+    await page.getByRole("button", { name: "15m", exact: true }).click();
+    await chip(page, "ema_stack").click();
+    await page.getByRole("button", { name: "Compare symbol" }).waitFor();
+    await addCompare(page, "ETHUSDT");
+    await expect(dirtyDot(page)).toBeVisible();
+
+    await pickActive(page);
+    const prompt = page.getByRole("dialog");
+    await expect(prompt).toContainText("Unsaved changes");
+    await prompt.getByRole("button", { name: "Cancel" }).click();
+    await expect(activeTimeframe(page)).toHaveText("15m");
+    await expect(dirtyDot(page)).toBeVisible();
+
+    await pickActive(page);
+    await page.getByRole("dialog").getByRole("button", { name: "Don't save" }).click();
+    await expect(activeTimeframe(page)).toHaveText("1h");
+    await expect(chip(page, "ema_stack")).toBeVisible();
+    await expect(compareLegend(page, "ETHUSDT")).toHaveCount(0);
+    await expect(
+      page.getByRole("group", { name: "Price scale" }).getByRole("button", { name: "%", exact: true }),
+    ).toHaveAttribute("aria-pressed", "false");
+    await expect(dirtyDot(page)).toHaveCount(0);
+  });
+
+  test("Save in the prompt keeps the changes as the saved state", async ({
+    bootedApp: page,
+  }) => {
+    await page.getByRole("button", { name: "15m", exact: true }).click();
+    await pickActive(page);
+    await page.getByRole("dialog").getByRole("button", { name: "Save", exact: true }).click();
+    await expect(activeTimeframe(page)).toHaveText("15m");
+    await expect(dirtyDot(page)).toHaveCount(0);
+  });
+
+  test("with nothing changed it does not prompt or reload the chart", async ({
+    bootedApp: page,
+  }) => {
+    let loads = 0;
+    page.on("request", (req) => {
+      if (req.url().endsWith("/mcp") && /"generate_chart"/.test(req.postData() ?? "")) {
+        const bars = (req.postDataJSON() as { params?: { arguments?: { bars?: number } } }).params
+          ?.arguments?.bars;
+        if ((bars ?? 0) > 2) loads++;
+      }
+    });
+    await pickActive(page);
+    await expect(page.getByRole("dialog")).toHaveCount(0);
+    await page.waitForTimeout(500);
+    expect(loads).toBe(0);
+  });
+});

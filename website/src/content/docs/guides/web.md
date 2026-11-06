@@ -739,11 +739,12 @@ current chart.
 | Rename... | Rename the active layout. A name already in use gets a suffix: `Name (2)`. |
 | Make a copy / Save as... | Store the current chart as a new layout and switch to it. |
 | Create new layout... | A new layout on the current symbol and timeframe; chart type, scale mode and indicators go back to their defaults. |
-| Load layout... | A searchable list of layouts; click one to switch, or the x on its row to delete it. The open layout cannot be deleted: switch to another one first. |
+| Load layout... | A searchable list of layouts; click one to switch, or the x on its row to delete it. Clicking the open layout goes back to its saved state. The open layout cannot be deleted: switch to another one first. |
 | Export saved layout / Import layout... | Download the saved layout as a JSON file, or add one from a file. Imports are validated (files over 256 KB, other versions and unknown fields are refused or dropped); invalid files are refused. |
 
 Switching layouts applies all of the above. If the current layout has
-unsaved changes, a dialog offers Save, Don't save or Cancel. Unsaved
+unsaved changes, a dialog offers Save, Don't save or Cancel, also when
+you pick the open layout itself to discard them. Unsaved
 changes survive a reload like any other chart state, and so does the
 active layout, so there is no "leave page?" prompt. Saving with nothing
 changed still shows "Layout saved". Hiding an indicator counts as a

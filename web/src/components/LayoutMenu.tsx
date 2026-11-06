@@ -309,7 +309,7 @@ export function LayoutMenu(): JSX.Element {
                                   class="flex-1 min-w-0 text-left px-2 py-1.5 text-sm rounded-md cursor-pointer hover:bg-[color:var(--color-bg-elev)] aria-[current=true]:text-[color:var(--color-accent)] flex justify-between gap-4"
                                   onClick={() => {
                                     setDialogue(null);
-                                    if (l.id === activeLayout().id) return;
+                                    // The active layout too: that reverts its unsaved changes.
                                     leaving(() => switchLayout(l.id));
                                   }}
                                 >
