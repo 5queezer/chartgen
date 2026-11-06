@@ -402,4 +402,54 @@ test.describe("bar replay", () => {
       )
       .toBe(true);
   });
+
+  test("pattern indicators show what the cursor knew, not the live chart (ADR-0046)", async ({
+    page,
+  }) => {
+    await page.addInitScript(() =>
+      localStorage.setItem(
+        "chartgen.indicators.active",
+        JSON.stringify([{ name: "auto_fib", params: { depth: 5, deviation: 1 } }, "chart_patterns"]),
+      ),
+    );
+    await gotoApp(page);
+    const calls = recordCalls(page);
+    await startInMiddle(page);
+    await expect
+      .poll(() => calls.filter((c) => c.args.end_time !== undefined).length)
+      .toBeGreaterThan(0);
+    // The fib plots come from a recompute that ends at the cursor: every level
+    // starts on a bar of the frame, and its plot holds only that level.
+    await expect
+      .poll(() =>
+        page.evaluate(() => {
+          const s = (
+            window as unknown as {
+              __chartgenTest: {
+                shownSeries: () => {
+                  bars: unknown[];
+                  indicators: Record<
+                    string,
+                    {
+                      levels?: Array<{ line: number; x: number; y: number }>;
+                      lines?: Array<{ values: Array<number | null> }>;
+                    }
+                  >;
+                } | null;
+              };
+            }
+          ).__chartgenTest.shownSeries();
+          const fib = s?.indicators.auto_fib;
+          if (!fib?.levels?.length) return "no levels";
+          for (const l of fib.levels) {
+            if (l.x >= s!.bars.length) return "a level from the future";
+            const v = fib.lines![l.line]!.values;
+            if (v.length !== s!.bars.length) return "a plot past the cursor";
+            if (v.some((y, i) => (i < l.x ? y !== null : y !== l.y))) return "another swing's values";
+          }
+          return "ok";
+        }),
+      )
+      .toBe("ok");
+  });
 });

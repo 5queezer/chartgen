@@ -16,8 +16,11 @@ import {
   TRIGGERS,
   drawingLevels,
   fires,
+  eventTime,
   indicatorReading,
   isHorizontalTool,
+  isNewDetection,
+  levelsAnchor,
   isVerticalLine,
   needsRearm,
   rearmedReading,
@@ -72,6 +75,8 @@ function sanitizeAgainst(raw: unknown): AlertAgainst | null {
       return isIndex(r.line) && isText(r.name, MAX_NAME)
         ? { kind: "plot", line: r.line, name: r.name }
         : null;
+    case "event":
+      return isText(r.key, 64) ? { kind: "event", key: r.key } : null;
     default:
       return null;
   }
@@ -229,7 +234,10 @@ function commit(next: Alert[]): void {
 // is lost (see `forgetBaseline`).
 const lastPrices = new Map<string, number>();
 const baselines = new Map<string, { price: number; time: number }>();
-const readings = new Map<string, { symbol: string; reading: Reading }>();
+const readings = new Map<
+  string,
+  { symbol: string; reading: Reading; anchor?: string; barMs?: number }
+>();
 
 /** Last live price seen for a symbol, or null. */
 export function lastPrice(symbol: string): number | null {
@@ -600,10 +608,26 @@ export function processPrice(
       }
       case "indicator": {
         const same = indicatorSignatures()[src.instanceKey] === src.signature;
+        if (src.against.kind === "event") {
+          // A new detection is a crossing of "has happened". The first reading only
+          // sets the baseline, and the stored value never falls.
+          const at = same ? eventTime(src, tick.chart) : null;
+          const was = readings.get(a.id);
+          const seen = was?.reading[0];
+          if (at === null) {
+            readings.delete(a.id);
+            return null;
+          }
+          readings.set(a.id, { symbol, reading: [Math.max(at, seen ?? at)], barMs: time });
+          if (seen === undefined) return { prev: null, cur: [-1] };
+          return { prev: [-1], cur: [isNewDetection(at, seen, was!.barMs!) ? 1 : -1] };
+        }
         const cur = same ? indicatorReading(src, price, tick.chart) : null;
-        const before = readings.get(a.id)?.reading ?? null;
+        const anchor = levelsAnchor(src, tick.chart);
+        const was = readings.get(a.id);
+        const before = was && was.anchor === anchor ? was.reading : null;
         if (cur === null) readings.delete(a.id);
-        else readings.set(a.id, { symbol, reading: cur });
+        else readings.set(a.id, { symbol, reading: cur, anchor });
         return cur && { prev: before, cur };
       }
     }

@@ -80,6 +80,7 @@ import {
   matchLevel,
   shown,
   visibleFills,
+  markColor,
 } from "../lib/geometryStyle";
 import {
   instanceKey,
@@ -115,6 +116,7 @@ import {
   type SeriesExtend,
   type SeriesType,
 } from "../lib/chartTypes";
+import { priceDecimals } from "../lib/quote";
 import { FONT_FAMILY, PALETTES, type Palette } from "../lib/theme";
 import type { SeriesPayload } from "../types/responses";
 import {
@@ -143,6 +145,10 @@ import {
   valueExtents,
   type Mapper,
   type SeriesIndicator,
+  labelBoxes,
+  markAt,
+  patternDrawings,
+  type MarkBox,
 } from "./geometry";
 import {
   FUTURE_LEGEND,
@@ -322,6 +328,11 @@ const isEmptyShape = (s: IndicatorShape): boolean =>
  */
 const geometryStore = new Map<string, SeriesIndicator>();
 
+/** Pattern marks as last painted, per registered name: what a hover can hit. */
+const markHits = new Map<string, MarkBox[]>();
+
+const MARK_FONT = `600 10px ${FONT_FAMILY}`;
+
 /**
  * Put the geometry of `names` into `geometryStore`, in data space. When
  * every bar has a timestamp (`timed`; always so for merged live data)
@@ -430,8 +441,103 @@ function drawGeometry(name: string, gridPane: number): IndicatorDrawCallback {
       ctx.stroke();
     }
     drawHLines(ctx, ind, bounding, map.y, geo?.hlines);
+    drawLevels(ctx, name, ind, length, indicator, bounding, map);
+    markHits.set(regName, drawMarks(ctx, ind, visibleRange, map, geo?.marks));
     return false;
   };
+}
+
+/** Pattern outlines and labels (ADR-0046); returns the boxes a hover can hit. */
+function drawMarks(
+  ctx: CanvasRenderingContext2D,
+  ind: SeriesIndicator,
+  range: { from: number; to: number },
+  map: Mapper,
+  style: GeometryStyle["marks"],
+): MarkBox[] {
+  if (!shown(style) || (!ind.labels?.length && !ind.patterns?.length)) return [];
+  ctx.font = MARK_FONT;
+  const measure = (s: string) => ctx.measureText(s).width;
+  const drawings = patternDrawings(ind.patterns ?? [], range, map, measure);
+  ctx.lineWidth = 1.5;
+  for (const d of drawings) {
+    ctx.globalAlpha = d.status === "confirmed" ? 1 : d.status === "forming" ? 0.8 : 0.4;
+    ctx.strokeStyle = markColor(d.bias, d.box.color, style);
+    for (const s of d.strokes) {
+      ctx.setLineDash(s.dashed ? [4, 4] : []);
+      ctx.beginPath();
+      ctx.moveTo(s.from.x, s.from.y);
+      ctx.lineTo(s.to.x, s.to.y);
+      ctx.stroke();
+    }
+  }
+  ctx.setLineDash([]);
+  const boxes = [...drawings.map((d) => d.box), ...labelBoxes(ind.labels ?? [], range, map, measure)];
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  for (const b of boxes) {
+    const color = markColor(b.bias, b.color, style);
+    // An outline has little ink as it is: only a filled box can afford to fade.
+    ctx.globalAlpha = b.faint && !b.hollow ? 0.65 : 1;
+    ctx.beginPath();
+    ctx.roundRect(b.x, b.y, b.width, b.height, 3);
+    if (b.hollow) {
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 1;
+      ctx.setLineDash([2, 2]);
+      ctx.stroke();
+      ctx.setLineDash([]);
+    } else {
+      ctx.fillStyle = color;
+      ctx.fill();
+    }
+    ctx.fillStyle = b.hollow ? color : "#ffffff";
+    ctx.fillText(b.text, b.x + b.width / 2, b.y + b.height / 2 + 0.5);
+  }
+  ctx.globalAlpha = 1;
+  return boxes;
+}
+
+/**
+ * The levels past the last bar, to the pane's edge, each named with its price
+ * there. The plots themselves stop at the last bar, as line figures do. In each
+ * plot's style; hidden plots are skipped.
+ */
+function drawLevels(
+  ctx: CanvasRenderingContext2D,
+  name: string,
+  ind: SeriesIndicator,
+  length: number,
+  indicator: { extendData?: unknown },
+  bounding: { width: number },
+  map: Mapper,
+): void {
+  if (!ind.levels?.length || length === 0) return;
+  const ext = indicator.extendData as FigureExtend | undefined;
+  const from = map.x(length - 1);
+  ctx.font = MARK_FONT;
+  ctx.textAlign = "right";
+  ctx.textBaseline = "bottom";
+  for (const l of ind.levels) {
+    if (ext?.plots[plotKey("line", l.line)]?.visible === false) continue;
+    const style = plotFigureStyle(name, "line", l.line, l.line, indicator) as {
+      color: string;
+      size: number;
+      dashedValue?: number[];
+    };
+    const y = map.y(l.y);
+    ctx.strokeStyle = style.color;
+    ctx.lineWidth = style.size;
+    ctx.setLineDash(style.dashedValue ?? []);
+    ctx.beginPath();
+    ctx.moveTo(from, y);
+    ctx.lineTo(bounding.width, y);
+    ctx.stroke();
+    ctx.fillStyle = style.color;
+    const label = ind.lines?.[l.line]?.label ?? "";
+    ctx.fillText(`${label} (${l.y.toFixed(priceDecimals(l.y))})`, bounding.width - 4, y - 1);
+  }
+  ctx.setLineDash([]);
 }
 
 /**
@@ -740,7 +846,12 @@ function shapeFromPayload(
     (ind.fills?.length ?? 0) > 0 ||
     (ind.hbars?.length ?? 0) > 0 ||
     (ind.divlines?.length ?? 0) > 0 ||
-    (ind.hlines?.length ?? 0) > 0;
+    (ind.hlines?.length ?? 0) > 0 ||
+    (ind.labels?.length ?? 0) > 0 ||
+    (ind.patterns?.length ?? 0) > 0 ||
+    // Always sent by pattern indicators: a chart with no pattern yet still
+    // registers them, so the first one that appears on a tail can draw.
+    (ind.events?.length ?? 0) > 0;
   return { lines, hist, geometry };
 }
 
@@ -1082,6 +1193,13 @@ export function Chart(props: ChartProps): JSX.Element {
   const [headers, setHeaders] = createSignal<HeaderState[]>([]);
   // Crosshair state drives the header readout. null = no crosshair
   // (resting state → show last finite values).
+  const [markTip, setMarkTip] = createSignal<{
+    x: number;
+    y: number;
+    height: number;
+    below: boolean;
+    text: string;
+  } | null>(null);
   const [crosshairIndex, setCrosshairIndex] = createSignal<number | null>(
     null,
   );
@@ -1285,6 +1403,9 @@ export function Chart(props: ChartProps): JSX.Element {
       setAtOldest(r?.from === 0);
       if (typeof r?.from !== "number" || typeof r.to !== "number") return;
       const { from, to } = r;
+      // The bars moved under the pointer, as on a zoom or a replay step, and a tooltip
+      // would name the wrong one. This action also fires on every live tick.
+      if (from !== untrack(firstVisible) || to !== untrack(lastVisible)) setMarkTip(null);
       // One update per frame however many range events a drag fires.
       if (rangeFrame !== null) cancelAnimationFrame(rangeFrame);
       rangeFrame = requestAnimationFrame(() => {
@@ -1302,8 +1423,31 @@ export function Chart(props: ChartProps): JSX.Element {
     const onLeave = () => {
       crosshairX = null;
       setCrosshairIndex(null);
+      setMarkTip(null);
+    };
+    // The pattern mark under a point, for its tooltip (ADR-0046).
+    const followMark = (clientX: number, clientY: number) => {
+      const main = c!.getDom(CANDLE_PANE_ID, "main" as never);
+      if (!main) return;
+      const pane = main.getBoundingClientRect();
+      const box = host.getBoundingClientRect();
+      let hit: MarkBox | null = null;
+      for (const name of Object.keys(untrack(() => props.series?.indicators) ?? {})) {
+        const boxes = markHits.get(indicatorRegName(name, gridPane));
+        hit = (boxes && markAt(boxes, clientX - pane.left, clientY - pane.top)) ?? hit;
+      }
+      setMarkTip(
+        hit && {
+          x: hit.x + pane.left - box.left + hit.width / 2,
+          y: hit.y + pane.top - box.top,
+          below: hit.y < pane.height / 2,
+          height: hit.height,
+          text: hit.tooltip,
+        },
+      );
     };
     const onMove = (e: MouseEvent) => {
+      followMark(e.clientX, e.clientY);
       const panes = [CANDLE_PANE_ID, ...Object.values(untrack(paneIds))];
       const inMain = panes.some((id) =>
         c!.getDom(id, "main" as never)?.contains(e.target as Node),
@@ -1314,7 +1458,10 @@ export function Chart(props: ChartProps): JSX.Element {
     host.addEventListener("mouseleave", onLeave);
     // A touch away from the crosshair hides it, without an action or a
     // mouseleave. This runs after klinecharts' own listener, on the bubble.
-    const onTouch = () => {
+    const onTouch = (e: TouchEvent) => {
+      const at = e.touches[0];
+      if (at) followMark(at.clientX, at.clientY);
+      else setMarkTip(null);
       const store = (
         c as unknown as {
           getChartStore: () => { getTooltipStore: () => { getCrosshair: () => { x?: number } } };
@@ -1440,11 +1587,16 @@ export function Chart(props: ChartProps): JSX.Element {
       const ind = series.indicators[name]!;
       if (!paneMap[name]) continue; // pane not yet created (or skipped)
 
-      // A profile has no plots, but says what it was read from (ADR-0048).
-      const plots = (ind.lines?.length ?? 0) + (ind.histogram?.length ?? 0);
-      if (plots === 0 && !ind.profile_interval) continue;
+      // A profile has no plots, but says what it was read from (ADR-0048). Pattern
+      // indicators may draw none either, and still get a row: its bell is how to alert
+      // on them (ADR-0046).
+      const rows = (ind.lines?.length ?? 0) + (ind.histogram?.length ?? 0) + (ind.events?.length ?? 0);
+      if (rows === 0 && !ind.profile_interval) continue;
       const style = props.styles?.[name];
-      const headerLines: PaneHeaderLine[] = legendPlots(name, ind, style).map((p) => {
+      // A level slot with no value set is no plot to read.
+      const unset = (p: { kind: string; index: number }) =>
+        ind.levels !== undefined && p.kind === "line" && !ind.levels.some((l) => l.line === p.index);
+      const headerLines: PaneHeaderLine[] = legendPlots(name, ind, style).filter((p) => !unset(p)).map((p) => {
         const plot =
           p.kind === "line" ? ind.lines![p.index]! : ind.histogram![p.index]!;
         const values = plot.values;
@@ -1658,7 +1810,10 @@ export function Chart(props: ChartProps): JSX.Element {
         ind !== undefined &&
         (stored?.fills !== ind.fills ||
           stored?.hlines !== ind.hlines ||
-          stored?.future !== ind.future);
+          stored?.future !== ind.future ||
+          stored?.labels !== ind.labels ||
+          stored?.patterns !== ind.patterns ||
+          stored?.levels !== ind.levels);
       if (ind && stored && (stored.divlines !== ind.divlines || replaced)) {
         storeGeometry(series, [name], gridPane, true);
       }
@@ -2080,6 +2235,22 @@ export function Chart(props: ChartProps): JSX.Element {
       }}
     >
       <div ref={container} class="chart-container" />
+      <Show when={markTip()}>
+        {(t) => (
+          <div
+            role="tooltip"
+            data-testid="pattern-tooltip"
+            class="absolute z-30 max-w-xs px-2 py-1 text-xs rounded-md pointer-events-none bg-[color:var(--color-bg-elev)] text-[color:var(--color-fg)] border border-[color:var(--color-border)] shadow"
+            style={{
+              left: `${t().x}px`,
+              top: t().below ? `${t().y + t().height + 4}px` : `${t().y - 4}px`,
+              transform: t().below ? "translateX(-50%)" : "translate(-50%, -100%)",
+            }}
+          >
+            {t().text}
+          </div>
+        )}
+      </Show>
       <Index each={headers()}>
         {(h) => (
           <PaneHeader
@@ -2113,7 +2284,8 @@ export function Chart(props: ChartProps): JSX.Element {
             onAddAlert={
               h().key !== undefined &&
               props.onAddAlert &&
-              (props.series?.indicators[h().key!]?.lines?.length ?? 0) > 0
+              ((props.series?.indicators[h().key!]?.lines?.length ?? 0) > 0 ||
+                (props.series?.indicators[h().key!]?.events?.length ?? 0) > 0)
                 ? () => props.onAddAlert!(h().key!)
                 : undefined
             }

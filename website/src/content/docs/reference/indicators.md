@@ -102,6 +102,9 @@ the community composites and user scripts keep the `warmup` you send. Known diff
 | [`linreg_channel`](#linreg_channel) |  |
 | [`chande_kroll_stop`](#chande_kroll_stop) |  |
 | [`zigzag`](#zigzag) |  |
+| [`candlestick_patterns`](#candlestick_patterns) | `candle_patterns` |
+| [`chart_patterns`](#chart_patterns) | `auto_chart_patterns` |
+| [`auto_fib`](#auto_fib) | `auto_fib_retracement` |
 
 ### `ema_stack`
 
@@ -476,6 +479,58 @@ ZigZag — connects confirmed swing pivots that differ by at least the deviation
 | `depth` | `integer` | `10` | Pivot legs: bars on each side of a swing high/low |
 
 ![zigzag sample render](../../../assets/indicators/zigzag.png)
+
+### `candlestick_patterns`
+
+Candlestick pattern recognition: doji variants, hammer, hanging man, inverted hammer, shooting star, engulfing, harami, piercing, dark cloud, morning and evening star, three white soldiers, three black crows, tweezers, marubozu, spinning top, kicking, abandoned baby, three inside and outside and more. All at once or one by one
+
+**Aliases:** `candle_patterns`
+
+**Parameters:**
+
+| Param | Type | Default | Description |
+|-------|------|---------|-------------|
+| `pattern` | `string` | `all` | Which patterns: all, one side, or a single pattern |
+| `trend` | `string` | `sma50` | Prior trend for patterns that need one: close against its SMA 50, also SMA 50 against SMA 200, or no check |
+
+### `chart_patterns`
+
+Auto chart patterns on ZigZag pivots of the last 600 bars: head and shoulders, double and triple tops and bottoms, triangles, wedges, channels, flags, pennants, rectangles. Each with a status: forming, confirmed or failed
+
+**Aliases:** `auto_chart_patterns`
+
+**Parameters:**
+
+| Param | Type | Default | Description |
+|-------|------|---------|-------------|
+| `pattern` | `string` | `all` | Which patterns: all or one |
+| `depth` | `integer` | `5` | ZigZag depth: bars on each side of a swing high or low. A swing is known this many bars after it |
+| `deviation` | `number` | `3.0` | ZigZag deviation: least move between swings, in ATR(10) |
+| `tolerance` | `number` | `15.0` | Same level, as a percentage of the pattern's height |
+| `lookback` | `integer` | `600` | Most recent bars searched |
+| `show_failed` | `boolean` | `true` | Keep failed patterns on the chart |
+
+### `auto_fib`
+
+Auto Fib Retracement: fibonacci levels over the last significant ZigZag swing, redrawn as swings change. Each level has its own value and color and can be alerted on
+
+**Aliases:** `auto_fib_retracement`
+
+**Parameters:**
+
+| Param | Type | Default | Description |
+|-------|------|---------|-------------|
+| `depth` | `integer` | `10` | ZigZag depth: bars on each side of a swing high or low. A swing is known this many bars after it |
+| `deviation` | `number` | `3.0` | ZigZag deviation: least move between swings, in ATR(10) |
+| `reverse` | `boolean` | `false` | Swap the ends: level 0 at the start of the swing |
+| `level1` | `number` | `0.0` | Ratio of the swing: 0 at its end, 1 at its start. Colors and hiding are on the Style tab |
+| `level2` | `number` | `0.236` | Ratio of the swing: 0 at its end, 1 at its start. Colors and hiding are on the Style tab |
+| `level3` | `number` | `0.382` | Ratio of the swing: 0 at its end, 1 at its start. Colors and hiding are on the Style tab |
+| `level4` | `number` | `0.5` | Ratio of the swing: 0 at its end, 1 at its start. Colors and hiding are on the Style tab |
+| `level5` | `number` | `0.618` | Ratio of the swing: 0 at its end, 1 at its start. Colors and hiding are on the Style tab |
+| `level6` | `number` | `0.786` | Ratio of the swing: 0 at its end, 1 at its start. Colors and hiding are on the Style tab |
+| `level7` | `number` | `1.0` | Ratio of the swing: 0 at its end, 1 at its start. Colors and hiding are on the Style tab |
+| `level8` | `number` | `` | Ratio of the swing: 0 at its end, 1 at its start. Colors and hiding are on the Style tab |
 
 ## Panels
 

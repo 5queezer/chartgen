@@ -103,6 +103,71 @@ export const SeriesDivLineSchema = z.object({
   color: z.string().optional(),
 });
 
+// Pattern channels (ADR-0046). A label belongs to its bar. `tentative` marks one
+// on the forming bar, which can change or vanish until the bar closes.
+export const BiasSchema = z.enum(["bullish", "bearish", "neutral"]);
+
+export const SeriesLabelSchema = z.object({
+  x: z.number().int(),
+  t: z.number().nullable(),
+  y: z.number(),
+  above: z.boolean(),
+  text: z.string(),
+  key: z.string(),
+  name: z.string(),
+  bias: BiasSchema,
+  color: z.string().optional(),
+  tooltip: z.string(),
+  tentative: z.boolean().optional(),
+});
+
+export const SeriesStrokeSchema = z.object({
+  x1: z.number().int(),
+  t1: z.number().nullable(),
+  y1: z.number(),
+  x2: z.number().int(),
+  t2: z.number().nullable(),
+  y2: z.number(),
+  dashed: z.boolean(),
+});
+
+// A chart pattern. The newest response holds all of them, whatever bars it covers:
+// an index before its first bar is negative, and `t` still names the bar.
+export const SeriesPatternSchema = z.object({
+  key: z.string(),
+  name: z.string(),
+  bias: BiasSchema,
+  status: z.enum(["forming", "confirmed", "failed"]),
+  color: z.string().optional(),
+  strokes: z.array(SeriesStrokeSchema),
+  label: z.object({
+    x: z.number().int(),
+    t: z.number().nullable(),
+    y: z.number(),
+    above: z.boolean(),
+  }),
+  tooltip: z.string(),
+  target: z.number().optional(),
+  invalidation: z.number().optional(),
+  confirmed_t: z.number().nullable().optional(),
+});
+
+// `lines[line]` is flat at `y` from bar `x` on. The newest response's levels
+// rewrite that plot on every bar: they move as a whole when the swing does.
+export const SeriesLevelSchema = z.object({
+  line: z.number().int(),
+  x: z.number().int(),
+  t: z.number().nullable(),
+  y: z.number(),
+});
+
+// What an alert can wait for: `t` is the bar of the newest occurrence on a closed bar.
+export const SeriesEventSchema = z.object({
+  key: z.string(),
+  name: z.string(),
+  t: z.number().nullable(),
+});
+
 export const YRangeSchema = z.tuple([FiniteOrNull, FiniteOrNull]);
 
 // Values plotted on the `bars` bars after the last one (ADR-0033), e.g. the
@@ -138,6 +203,10 @@ export const SeriesIndicatorSchema = z.object({
   fills: z.array(SeriesFillSchema).optional(),
   hbars: z.array(SeriesHBarSchema).optional(),
   divlines: z.array(SeriesDivLineSchema).optional(),
+  labels: z.array(SeriesLabelSchema).optional(),
+  patterns: z.array(SeriesPatternSchema).optional(),
+  levels: z.array(SeriesLevelSchema).optional(),
+  events: z.array(SeriesEventSchema).optional(),
   future: SeriesFutureSchema.optional(),
 });
 
@@ -250,12 +319,41 @@ export const DivergenceLineSchema = z.object({
   dashed: z.boolean(),
 });
 
+// The newest pattern labels (ADR-0046); `labels_count` has them all.
+export const SummaryLabelSchema = z.object({
+  x: z.number().int(),
+  key: z.string(),
+  name: z.string(),
+  bias: BiasSchema,
+  tentative: z.boolean().optional(),
+});
+
+export const SummaryPatternSchema = z.object({
+  key: z.string(),
+  name: z.string(),
+  bias: BiasSchema,
+  status: z.enum(["forming", "confirmed", "failed"]),
+  tooltip: z.string(),
+  target: z.number().optional(),
+  invalidation: z.number().optional(),
+  confirmed_x: z.number().int().optional(),
+});
+
 export const SummaryIndicatorSchema = z.object({
   label: z.string(),
   is_overlay: z.boolean(),
   y_range: YRangeSchema.optional(),
   lines: z.array(SummaryLineSchema).optional(),
   signals: z.array(SummarySignalSchema).optional(),
+  labels: z.array(SummaryLabelSchema).optional(),
+  labels_count: z.number().int().optional(),
+  patterns: z.array(SummaryPatternSchema).optional(),
+  levels: z
+    .array(z.object({ line: z.number().int(), x: z.number().int(), y: z.number() }))
+    .optional(),
+  events: z
+    .array(z.object({ key: z.string(), name: z.string(), x: z.number().int().nullable() }))
+    .optional(),
   decorative_dots: z.number().int().optional(),
   hlines: z.array(HLineSchema).optional(),
   histogram: z.array(SummaryHistogramBucketSchema).optional(),
