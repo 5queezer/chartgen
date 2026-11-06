@@ -29,6 +29,8 @@ import {
 import type { McpSession } from "../mcp";
 import { subscribeSignInNotice } from "../oauth";
 import { createQuotesQuery } from "../queries";
+import { showToast } from "../services/alertEngine";
+import { copyText } from "../services/shareLink";
 import { setSymbol, symbol } from "../stores/layout";
 import {
   FLAGGED_ID,
@@ -63,6 +65,8 @@ import {
   type WatchItem,
 } from "../stores/watchlist";
 import type { Quote, QuoteError } from "../types/responses";
+import { openAlertDialog } from "./AlertDialog";
+import { openContextMenu } from "./ContextMenu";
 import { SymbolSearch } from "./SymbolSearch";
 
 /** How long a Last cell stays highlighted after a tick. */
@@ -712,6 +716,24 @@ function SectionRow(props: SectionRowProps): JSX.Element {
         "wl-drop-after": props.dropAfter,
       }}
       onKeyDown={props.onKeyDown}
+      onContextMenu={(e) =>
+        openContextMenu(e, {
+          label: `Section ${props.section.name} actions`,
+          items: [
+            {
+              label: props.section.collapsed ? "Expand" : "Collapse",
+              onSelect: () => toggleSection(props.section.id),
+            },
+            { label: "Rename…", onSelect: props.onRename },
+            null,
+            {
+              label: "Remove section",
+              danger: true,
+              onSelect: () => removeSection(props.section.id),
+            },
+          ],
+        })
+      }
     >
       <span role="cell" aria-colspan="4" class="wl-section-cell">
       <button
@@ -820,8 +842,30 @@ function WatchlistRow(props: WatchlistRowProps): JSX.Element {
       onClick={() => setSymbol(props.symbol)}
       onKeyDown={props.onKeyDown}
       onContextMenu={(e) => {
-        e.preventDefault();
-        props.onFlagMenu(props.symbol, e.clientX, e.clientY);
+        const { clientX: x, clientY: y } = e;
+        openContextMenu(e, {
+          label: `${props.symbol} actions`,
+          items: [
+            { label: `Open ${props.symbol} in chart`, onSelect: () => setSymbol(props.symbol) },
+            { label: `Add alert on ${props.symbol}…`, onSelect: () => openAlertDialog({ symbol: props.symbol }) },
+            { label: "Flag…", onSelect: () => props.onFlagMenu(props.symbol, x, y) },
+            {
+              label: "Copy symbol",
+              onSelect: () =>
+                void copyText(props.symbol).then((ok) => showToast(ok ? "Symbol copied" : "Copy failed")),
+            },
+            ...(props.readOnly
+              ? []
+              : [
+                  null,
+                  {
+                    label: "Remove from watchlist",
+                    danger: true,
+                    onSelect: () => removeFromWatchlist(props.symbol),
+                  },
+                ]),
+          ],
+        });
       }}
       title={error() ?? undefined}
     >
