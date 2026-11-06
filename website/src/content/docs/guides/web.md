@@ -1121,7 +1121,7 @@ once; those already on the chart do not. For a fib level, pick the level under *
 *Close crossing 0.618*. A level moving over the price with a new swing does not fire it.
 
 **What alerts cannot do.** They run in this browser, only while a tab shows that symbol,
-interval and settings: not on the server, and not by webhook. A pattern cannot fire on the
+interval and settings (in a grid, on its active chart): not on the server, and not by webhook. A pattern cannot fire on the
 forming bar, and there is no alert on a pattern failing or on a forming one. Over MCP,
 `set_alert` with `indicator_signal` matches a pattern's key on the newest closed bar, such as
 `hammer` or `double_top_confirmed`.
