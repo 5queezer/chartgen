@@ -28,19 +28,10 @@ import {
   type Gap,
 } from "../lib/priceRatio";
 import { barCountdown, isContinuousMarket } from "../lib/countdown";
-import {
-  autoScale,
-  invertScale,
-  lockRatio,
-  scaleMode,
-  setAutoScale,
-  setInvertScale,
-  setLockRatio,
-  setScaleMode,
-  type ScaleMode,
-} from "../stores/layout";
+import { usePane } from "../stores/grid";
+import { chartStoreOf, type ScaleMode } from "../stores/layout";
 import { chartSettings } from "../stores/chartSettings";
-import { compareSymbols } from "../stores/compare";
+import { compareStoreOf } from "../stores/compare";
 import type { SeriesPayload } from "../types/responses";
 
 const CANDLE_PANE_ID = "candle_pane";
@@ -59,6 +50,19 @@ interface BadgePos {
 }
 
 export function PriceAxisControls(props: PriceAxisControlsProps): JSX.Element {
+  // This chart's scale, whichever chart of the grid is active (ADR-0043).
+  const gridPane = usePane();
+  const {
+    autoScale,
+    invertScale,
+    lockRatio,
+    scaleMode,
+    setAutoScale,
+    setInvertScale,
+    setLockRatio,
+    setScaleMode,
+  } = chartStoreOf(gridPane);
+  const { compareSymbols } = compareStoreOf(gridPane);
   const [now, setNow] = createSignal(Date.now());
   const [pos, setPos] = createSignal<BadgePos | null>(null);
   const [axisWidth, setAxisWidth] = createSignal(FALLBACK_AXIS_WIDTH);

@@ -46,7 +46,7 @@ const SCRIPTING_CHARTGEN_PORT = CHARTGEN_PORT + 1000;
 const SCRIPTING_WEB_PORT = WEB_PORT + 1000;
 const SCRIPTING_DB = join(tmpdir(), `chartgen-e2e-${SCRIPTING_CHARTGEN_PORT}.db`);
 // Specs that need the scripting server.
-const SCRIPTING_SPECS = /script-editor-on\.spec\.ts$/;
+const SCRIPTING_SPECS = /script-editor-(on|grid)\.spec\.ts$/;
 
 export default defineConfig({
   testDir: "./tests/e2e",

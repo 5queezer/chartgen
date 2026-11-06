@@ -53,6 +53,8 @@ export interface ReplayBarProps {
   drawingArmed: boolean;
   /** Time zone of the "Select date" form. */
   timeZone: string;
+  /** Its chart is the active one of the grid (ADR-0043): only that one takes shortcuts. */
+  active?: boolean;
 }
 
 export function ReplayBar(props: ReplayBarProps): JSX.Element {
@@ -63,7 +65,7 @@ export function ReplayBar(props: ReplayBarProps): JSX.Element {
   // then sees the key handled (isTypingContext checks defaultPrevented).
   onMount(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (r().mode() === "off" || e.altKey || e.ctrlKey || e.metaKey || isTypingContext(e)) {
+      if (props.active === false || r().mode() === "off" || e.altKey || e.ctrlKey || e.metaKey || isTypingContext(e)) {
         return;
       }
       if (e.shiftKey && e.key === "ArrowRight") {

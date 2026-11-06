@@ -24,6 +24,7 @@ import { createSignal } from "solid-js";
 
 import { isColor } from "../lib/color";
 import { keyName } from "../lib/instances";
+import { activePane } from "./grid";
 
 /**
  * Wire shape for a single indicator request. Matches the `indicators` field
@@ -100,10 +101,10 @@ export const DEFAULT_SET: ActiveIndicator[] = [
   { name: "rsi", length: 14 },
 ];
 
-function load(): ActiveIndicator[] {
+function load(storageKey: string): ActiveIndicator[] {
   if (typeof localStorage === "undefined") return [...DEFAULT_SET];
   try {
-    const raw = localStorage.getItem(STORAGE_KEY);
+    const raw = localStorage.getItem(storageKey);
     if (raw === null) return [...DEFAULT_SET];
     const parsed = JSON.parse(raw);
     if (!Array.isArray(parsed)) return [...DEFAULT_SET];
@@ -123,10 +124,10 @@ function load(): ActiveIndicator[] {
   }
 }
 
-function persist(value: ActiveIndicator[]): void {
+function persist(storageKey: string, value: ActiveIndicator[]): void {
   if (typeof localStorage === "undefined") return;
   try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(value));
+    localStorage.setItem(storageKey, JSON.stringify(value));
   } catch {
     // Quota exceeded or private-mode storage: best-effort only.
   }
@@ -505,86 +506,137 @@ export function indicatorName(entry: ActiveIndicator): string {
   return typeof entry === "string" ? entry : entry.name;
 }
 
-const [activeIndicators, setActiveIndicatorsSignal] =
-  createSignal<ActiveIndicator[]>(load());
-
-export { activeIndicators };
-
-/** Replace the entire set, persisting to localStorage. */
-export function setActiveIndicators(next: ActiveIndicator[]): void {
-  setActiveIndicatorsSignal(next);
-  persist(next);
-}
-
 /** Most indicators on a chart; the server rejects more (ADR-0028). */
 export const MAX_ACTIVE_INDICATORS = 50;
 
-/**
- * Append an indicator as a new instance (ADR-0028): an already active name
- * gets the next free instance key. Returns that key, or null at the cap.
- */
-export function addIndicator(entry: ActiveIndicator): string | null {
-  const current = activeIndicators();
-  if (current.length >= MAX_ACTIVE_INDICATORS) return null;
-  const name = indicatorName(entry);
-  const key = nextInstanceKey(current, name);
-  setActiveIndicators([
-    ...current,
-    makeEntry(
-      name,
-      indicatorParams(entry),
-      isHidden(entry),
-      indicatorStyle(entry),
-      key === name ? undefined : key,
-    ),
-  ]);
-  return key;
+/** The indicator set of one chart of the grid (ADR-0043). */
+function createIndicatorStore(storageKey: string) {
+  const [activeIndicators, setActiveIndicatorsSignal] =
+    createSignal<ActiveIndicator[]>(load(storageKey));
+
+  /** Replace the entire set, persisting to localStorage. */
+  function setActiveIndicators(next: ActiveIndicator[]): void {
+    setActiveIndicatorsSignal(next);
+    persist(storageKey, next);
+  }
+
+  return {
+    activeIndicators,
+    setActiveIndicators,
+
+    /**
+     * Append an indicator as a new instance (ADR-0028): an already active name
+     * gets the next free instance key. Returns that key, or null at the cap.
+     */
+    addIndicator(entry: ActiveIndicator): string | null {
+      const current = activeIndicators();
+      if (current.length >= MAX_ACTIVE_INDICATORS) return null;
+      const name = indicatorName(entry);
+      const key = nextInstanceKey(current, name);
+      setActiveIndicators([
+        ...current,
+        makeEntry(
+          name,
+          indicatorParams(entry),
+          isHidden(entry),
+          indicatorStyle(entry),
+          key === name ? undefined : key,
+        ),
+      ]);
+      return key;
+    },
+
+    /** Replace the parameters of the entry at `index`. */
+    updateIndicatorParams(index: number, params: Record<string, unknown>): void {
+      setActiveIndicators(withParams(activeIndicators(), index, params));
+    },
+
+    /**
+     * Apply a settings dialog result to the entry at `index` in one write:
+     * `params` (undefined keeps them) and the plot `style`. The style is only
+     * written when it differs from the stored one, and nothing is persisted
+     * when nothing changes.
+     */
+    updateIndicatorSettings(
+      index: number,
+      params: Record<string, unknown> | undefined,
+      style: IndicatorStyle | undefined,
+    ): void {
+      const entries = activeIndicators();
+      const entry = entries[index];
+      if (entry === undefined) return;
+      let next = params === undefined ? entries : withParams(entries, index, params);
+      const clean = sanitizeStyle(style);
+      if (JSON.stringify(clean) !== JSON.stringify(indicatorStyle(entry))) {
+        next = withStyle(next, index, clean);
+      }
+      if (next !== entries) setActiveIndicators(next);
+    },
+
+    /** Toggle the client-side visibility of the entry at `index`. */
+    toggleIndicatorHidden(index: number): void {
+      const entries = activeIndicators();
+      const entry = entries[index];
+      if (entry === undefined) return;
+      setActiveIndicators(withHidden(entries, index, !isHidden(entry)));
+    },
+
+    /** Remove the instance with this key (ADR-0028); other instances of the indicator stay. */
+    removeIndicator(key: string): void {
+      setActiveIndicators(
+        activeIndicators().filter((e) => instanceKey(e) !== key),
+      );
+    },
+  };
 }
 
-/** Replace the parameters of the entry at `index`. */
-export function updateIndicatorParams(
+export type IndicatorStore = ReturnType<typeof createIndicatorStore>;
+
+const stores = new Map<number, IndicatorStore>();
+
+/** The indicator store of a pane. Pane 0 has the key the single-chart app always had. */
+export function indicatorStoreOf(pane: number): IndicatorStore {
+  let store = stores.get(pane);
+  if (!store) {
+    store = createIndicatorStore(
+      pane === 0 ? STORAGE_KEY : `chartgen.pane.${pane}.indicators`,
+    );
+    stores.set(pane, store);
+  }
+  return store;
+}
+
+/** Take an indicator off every chart of the grid: it no longer exists (a deleted script). */
+export function removeIndicatorEverywhere(name: string): void {
+  for (const store of stores.values()) {
+    const entries = store.activeIndicators();
+    if (entries.some((e) => indicatorName(e) === name)) {
+      store.setActiveIndicators(entries.filter((e) => indicatorName(e) !== name));
+    }
+  }
+}
+
+indicatorStoreOf(0);
+const active = (): IndicatorStore => indicatorStoreOf(activePane());
+
+// The active chart's indicators.
+export const activeIndicators = (): ActiveIndicator[] => active().activeIndicators();
+export const setActiveIndicators = (next: ActiveIndicator[]): void =>
+  active().setActiveIndicators(next);
+export const addIndicator = (entry: ActiveIndicator): string | null =>
+  active().addIndicator(entry);
+export const updateIndicatorParams = (
   index: number,
   params: Record<string, unknown>,
-): void {
-  setActiveIndicators(withParams(activeIndicators(), index, params));
-}
-
-/**
- * Apply a settings dialog result to the entry at `index` in one write:
- * `params` (undefined keeps them) and the plot `style`. The style is only
- * written when it differs from the stored one, and nothing is persisted
- * when nothing changes.
- */
-export function updateIndicatorSettings(
+): void => active().updateIndicatorParams(index, params);
+export const updateIndicatorSettings = (
   index: number,
   params: Record<string, unknown> | undefined,
   style: IndicatorStyle | undefined,
-): void {
-  const entries = activeIndicators();
-  const entry = entries[index];
-  if (entry === undefined) return;
-  let next = params === undefined ? entries : withParams(entries, index, params);
-  const clean = sanitizeStyle(style);
-  if (JSON.stringify(clean) !== JSON.stringify(indicatorStyle(entry))) {
-    next = withStyle(next, index, clean);
-  }
-  if (next !== entries) setActiveIndicators(next);
-}
-
-/** Toggle the client-side visibility of the entry at `index`. */
-export function toggleIndicatorHidden(index: number): void {
-  const entries = activeIndicators();
-  const entry = entries[index];
-  if (entry === undefined) return;
-  setActiveIndicators(withHidden(entries, index, !isHidden(entry)));
-}
-
-/** Remove the instance with this key (ADR-0028); other instances of the indicator stay. */
-export function removeIndicator(key: string): void {
-  setActiveIndicators(
-    activeIndicators().filter((e) => instanceKey(e) !== key),
-  );
-}
+): void => active().updateIndicatorSettings(index, params, style);
+export const toggleIndicatorHidden = (index: number): void =>
+  active().toggleIndicatorHidden(index);
+export const removeIndicator = (key: string): void => active().removeIndicator(key);
 
 /**
  * Stable-stringify the active set for use in a TanStack Query key. Object

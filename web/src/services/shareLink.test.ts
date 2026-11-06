@@ -53,6 +53,17 @@ beforeEach(() => {
 });
 
 describe("applyShareLink", () => {
+  it("puts a link's indicators on the chart it opened in, not the one active later", async () => {
+    stub("http://x/?ind=rsi");
+    const { svc, ind } = await load();
+    svc.applyShareLink();
+    const grid = await import("../stores/grid");
+    grid.setActivePane(1);
+    svc.reconcileImported([{ name: "rsi" }]);
+    expect(ind.indicatorStoreOf(0).activeIndicators().map(ind.indicatorName)).toEqual(["rsi"]);
+    expect(ind.indicatorStoreOf(1).activeIndicators().map(ind.indicatorName)).not.toEqual(["rsi"]);
+  });
+
   it("applies params, cleans only share params and holds the chart query", async () => {
     const { history, local } = stub(
       "http://x/?symbol=ethusdt&interval=4h&ind=rsi,bogus&code=c1&state=s1",

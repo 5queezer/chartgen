@@ -37,7 +37,8 @@ import {
   wallClock,
   zonedToUtc,
 } from "../lib/timezone";
-import { setTimeframe, setTimeZone, symbol, timeframe, timeZone } from "../stores/layout";
+import { activePane } from "../stores/grid";
+import { chartStoreOf, setTimeZone, symbol, timeframe, timeZone } from "../stores/layout";
 import type { SeriesPayload } from "../types/responses";
 
 /** How long a new interval may take to load before a range gives up. */
@@ -147,40 +148,48 @@ export function BottomBar(props: BottomBarProps): JSX.Element {
     }
   };
 
+  // A navigation stays on the chart it started on: history pages in slowly, and
+  // another chart of the grid may have become active by then (ADR-0043).
   const selectRange = (range: RangeId) =>
     navigate(async (isCurrent) => {
+      const chart = props.chart;
+      const pane = activePane();
+      const store = chartStoreOf(pane);
       const interval = RANGE_TIMEFRAME[range];
-      if (interval !== timeframe()) {
-        setTimeframe(interval);
-        if (!(await seriesFor(interval)) || !isCurrent()) {
-          if (isCurrent() && timeframe() === interval) say("The new interval did not load");
+      if (interval !== store.timeframe()) {
+        store.setTimeframe(interval);
+        const loaded = await seriesFor(interval);
+        // This bar only sees the active chart's series, so that chart's is out of reach.
+        if (activePane() !== pane) return;
+        if (!loaded || !isCurrent()) {
+          if (isCurrent() && store.timeframe() === interval) say("The new interval did not load");
           return;
         }
       }
       const last = props.series?.bars.at(-1)?.t;
       if (last == null) return;
-      const sym = symbol();
+      const sym = store.symbol();
       let start = rangeStart(range, last * 1000, tz());
       // Daily and longer bars carry a date: keep the one that holds `start`.
       if (start !== null && isDateBar(interval)) start = barAlignedStart(start, tz());
       const result = await props.loadUntil(start === null ? -Infinity : start / 1000, isCurrent);
       await settled();
-      const chart = props.chart;
       if (!isCurrent() || result === "aborted" || !chart) return;
-      if (symbol() !== sym || timeframe() !== interval) return;
+      if (store.symbol() !== sym || store.timeframe() !== interval) return;
       fitRange(chart, start);
       if (result === "limit") say("History limit reached");
     });
 
   const goToDate = (ms: number) =>
     navigate(async (isCurrent) => {
-      const sym = symbol();
-      const tf = timeframe();
+      const chart = props.chart;
+      const store = chartStoreOf(activePane());
+      const sym = store.symbol();
+      const tf = store.timeframe();
       const result = await props.loadUntil(ms / 1000, isCurrent);
       await settled();
-      const chart = props.chart;
       if (!isCurrent() || result === "aborted" || !chart) return;
-      if (symbol() !== sym || timeframe() !== tf) return;
+      if (store.symbol() !== sym || store.timeframe() !== tf) return;
       const first = chart.getDataList()[0]?.timestamp;
       if (first === undefined) return;
       if (ms < first) {
