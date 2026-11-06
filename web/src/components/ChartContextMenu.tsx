@@ -157,7 +157,10 @@ export function ChartContextMenu(props: ChartContextMenuProps): JSX.Element {
             onChange={setInvertScale}
           >
             Invert scale
-            <span class="text-[color:var(--color-fg-muted)] text-xs">Alt+I</span>
+            <span class="flex items-center gap-2">
+              <ContextMenu.ItemIndicator>✓</ContextMenu.ItemIndicator>
+              <span class="text-[color:var(--color-fg-muted)] text-xs">Alt+I</span>
+            </span>
           </ContextMenu.CheckboxItem>
           <ContextMenu.CheckboxItem
             closeOnSelect
@@ -167,6 +170,7 @@ export function ChartContextMenu(props: ChartContextMenuProps): JSX.Element {
           >
             Lock price to bar ratio
             {lockRatio() && compareSymbols().length > 0 ? " (paused while comparing)" : ""}
+            <ContextMenu.ItemIndicator>✓</ContextMenu.ItemIndicator>
           </ContextMenu.CheckboxItem>
           <ContextMenu.Separator class="my-1 border-t border-[color:var(--color-border)]" />
           <ContextMenu.Item

@@ -514,8 +514,8 @@ Right-clicking the chart (outside a drawing) opens a menu:
 | Reset chart view (`Alt+R`) | Scroll to real time at the default zoom |
 | Copy link to chart | Copy a [shareable link](#sharing-a-chart) |
 | Copy price | Copy the price under the cursor, in the chart's precision |
-| Invert scale (`Alt+I`) | Flip the price axis |
-| Lock price to bar ratio | Keep the candle aspect while zooming horizontally |
+| Invert scale (`Alt+I`) | Flip the price axis; a check mark shows when it is on |
+| Lock price to bar ratio | Keep the candle aspect while zooming horizontally; a check mark shows when it is on |
 | Add horizontal line at | Add a horizontal line at that price; it is saved like any drawing |
 | Add alert at | Open the alert dialog at that price |
 | Remove all drawings | Asks for confirmation |

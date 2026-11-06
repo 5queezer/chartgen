@@ -152,7 +152,7 @@ test.describe("lock price to bar ratio with compare", () => {
       const box = (await page.locator(".chart-host").boundingBox())!;
       await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2, { button: "right" });
       const entry = page.getByRole("menuitemcheckbox", { name: /Lock price to bar ratio/ });
-      const text = (await entry.innerText()).trim();
+      const text = (await entry.innerText()).replace("✓", "").trim();
       await page.keyboard.press("Escape");
       await expect(page.getByRole("menu")).toBeHidden();
       return text;
@@ -694,6 +694,41 @@ async function narrowestSymbolColumn(page: Page, symbol: string): Promise<void> 
     .poll(() => cell.evaluate((el) => Math.round(el.getBoundingClientRect().width)))
     .toBe(62);
 }
+
+test.describe("chart context menu state", () => {
+  test("Invert scale and the lock show a check mark when on", async ({ bootedApp: page }) => {
+    const box = (await page.locator(".chart-host").boundingBox())!;
+    const open = () =>
+      page.mouse.click(box.x + box.width / 2, box.y + box.height / 2, { button: "right" });
+    const close = async () => {
+      await page.keyboard.press("Escape");
+      await expect(page.getByRole("menu")).toBeHidden();
+    };
+    const entry = (name: RegExp) => page.getByRole("menuitemcheckbox", { name });
+    const expectMark = async (name: RegExp, on: boolean) => {
+      await expect(entry(name)).toHaveAttribute("aria-checked", String(on));
+      await expect(entry(name).getByText("✓", { exact: true })).toHaveCount(on ? 1 : 0);
+    };
+
+    await open();
+    await expectMark(/Invert scale/, false);
+    await expectMark(/Lock price to bar ratio/, false);
+
+    await entry(/Invert scale/).click();
+    await expect(page.getByRole("menu")).toBeHidden();
+    await open();
+    await expectMark(/Invert scale/, true);
+    await expectMark(/Lock price to bar ratio/, false);
+
+    await entry(/Lock price to bar ratio/).click();
+    await expect(page.getByRole("menu")).toBeHidden();
+    await open();
+    await expectMark(/Invert scale/, true);
+    await expectMark(/Lock price to bar ratio/, true);
+    await page.screenshot({ path: test.info().outputPath("context-menu-checks.png") });
+    await close();
+  });
+});
 
 test.describe("watchlist hover buttons", () => {
   /** Hover the row and measure its buttons against the text of the numeric cells. */
