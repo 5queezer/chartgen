@@ -50,6 +50,44 @@ const offScreen = (page: Page) =>
     return { bars, lines, seen };
   });
 
+/**
+ * Axis span over the range of everything drawn on the price pane in view.
+ * klinecharts' auto-fit with the default gap makes this 1.3 whatever the data
+ * is; a locked range makes it something else.
+ */
+const fitRatio = (page: Page) =>
+  page.evaluate(() => {
+    const c = (window as unknown as { __chartgenTest: Hook }).__chartgenTest.chart()! as unknown as {
+      convertFromPixel: (p: { y: number }[], o: { paneId: string }) => { value: number }[];
+      getSize: (id: string, w: string) => { height: number };
+      getVisibleRange: () => { from: number; to: number };
+      getDataList: () => { high: number; low: number }[];
+      getIndicatorByPaneId: (
+        id: string,
+      ) => Map<string, { figures: { key: string }[]; result: (Record<string, unknown> | undefined)[] }>;
+    };
+    const h = c.getSize("candle_pane", "yAxis").height;
+    const [a, b] = c.convertFromPixel([{ y: 0 }, { y: h }], { paneId: "candle_pane" });
+    const { from, to } = c.getVisibleRange();
+    const values: number[] = [];
+    for (let i = from; i < to; i++) {
+      const d = c.getDataList()[i]!;
+      values.push(d.low, d.high);
+      c.getIndicatorByPaneId("candle_pane").forEach((ind) => {
+        for (const f of ind.figures) {
+          const v = ind.result[i]?.[f.key];
+          if (typeof v === "number") values.push(v);
+        }
+      });
+    }
+    return Math.abs(a!.value - b!.value) / (Math.max(...values) - Math.min(...values));
+  });
+
+const expectAutoFit = (page: Page) =>
+  expect
+    .poll(async () => Math.abs((await fitRatio(page)) - 1.3) < 0.05, { timeout: 8_000 })
+    .toBe(true);
+
 const setBarSpace = (page: Page, n: number) =>
   page.evaluate((v) => {
     (window as unknown as { __chartgenTest: Hook }).__chartgenTest.chart()!.setBarSpace(v);
@@ -90,17 +128,20 @@ test.describe("lock price to bar ratio with compare", () => {
     await addCompare(page, "ETHUSDT");
     await expect(compareLegend(page, "ETHUSDT")).toBeVisible();
     await expect.poll(async () => (await offScreen(page)).seen).toBeGreaterThan(0);
+    await expectAutoFit(page);
     await expect.poll(() => offScreen(page)).toMatchObject({ bars: 0, lines: 0 });
     await setBarSpace(page, 24);
-    await page.waitForTimeout(300);
-    expect(await offScreen(page)).toMatchObject({ bars: 0, lines: 0 });
+    await expectAutoFit(page);
+    await expect.poll(() => offScreen(page)).toMatchObject({ bars: 0, lines: 0 });
 
     // A second symbol, and the same after a reload with the list stored.
     await addCompare(page, "SOLUSDT");
     await expect(compareLegend(page, "SOLUSDT")).toBeVisible();
+    await expectAutoFit(page);
     await expect.poll(() => offScreen(page)).toMatchObject({ bars: 0, lines: 0 });
     await reloadApp(page);
     await expect.poll(async () => (await offScreen(page)).seen).toBeGreaterThan(0);
+    await expectAutoFit(page);
     await expect.poll(() => offScreen(page)).toMatchObject({ bars: 0, lines: 0 });
   });
 
@@ -114,10 +155,16 @@ test.describe("lock price to bar ratio with compare", () => {
       .click();
     await setBarSpace(page, 8);
     await lockViaMenu(page);
+    await expect.poll(() => span(page)).toBeGreaterThan(0);
+    const before = await span(page);
+    // The lock holds: three times the bar width, a third of the price range.
     await setBarSpace(page, 24);
-    await expect.poll(async () => (await offScreen(page)).bars).toBeGreaterThan(0);
+    await expect
+      .poll(async () => Math.abs((await span(page)) / before - 1 / 3) < 0.03)
+      .toBe(true);
     await addCompare(page, "ETHUSDT");
     await expect.poll(async () => (await offScreen(page)).seen).toBeGreaterThan(0);
+    await expectAutoFit(page);
     await expect.poll(() => offScreen(page)).toMatchObject({ bars: 0, lines: 0 });
   });
 
@@ -218,8 +265,8 @@ test.describe("loading the active layout", () => {
 });
 
 test.describe("legend after a keyboard zoom", () => {
-  /** Close of the bar at x (host pixels) or of the last bar, as the legend prints it. */
-  const closeAt = (page: Page, x: number | null) =>
+  /** Index and close of the bar at x (host pixels), or of the last bar. */
+  const barAt = (page: Page, x: number | null) =>
     page.evaluate((px) => {
       const hook = (window as unknown as { __chartgenTest: Hook }).__chartgenTest;
       const c = hook.chart()!;
@@ -230,20 +277,26 @@ test.describe("legend after a keyboard zoom", () => {
           : Math.min(data.length - 1, c.convertFromPixel([{ x: px }], { paneId: "candle_pane" })[0]!.dataIndex);
       return { i, close: data[i]!.close };
     }, x);
-  const legendClose = async (page: Page) =>
-    Number((await page.getByTestId("legend-c").innerText()).replaceAll(",", ""));
+  /** The legend reads the bar at x. Both sides are read on each try: a tick moves the last bar. */
+  const expectLegendAt = (page: Page, x: number | null) =>
+    expect
+      .poll(async () => {
+        const text = await page.getByTestId("legend-c").innerText();
+        const { close } = await barAt(page, x);
+        return Math.abs(Number(text.replaceAll(",", "")) - close) < 0.01;
+      })
+      .toBe(true);
 
   test("follows the bar under a resting crosshair", async ({ bootedApp: page }) => {
     const box = (await page.locator(".chart-host").boundingBox())!;
     const x = 200;
     await page.mouse.move(box.x + x, box.y + box.height / 3);
-    const before = await closeAt(page, x);
-    await expect.poll(() => legendClose(page)).toBeCloseTo(before.close, 2);
+    const before = await barAt(page, x);
+    await expectLegendAt(page, x);
 
     for (let n = 0; n < 4; n++) await page.keyboard.press("ArrowUp");
-    const after = await closeAt(page, x);
-    expect(after.i).toBeGreaterThan(before.i);
-    await expect.poll(() => legendClose(page)).toBeCloseTo(after.close, 2);
+    expect((await barAt(page, x)).i).toBeGreaterThan(before.i);
+    await expectLegendAt(page, x);
   });
 
   test("reads the last bar once the pointer is on the price axis", async ({
@@ -251,15 +304,12 @@ test.describe("legend after a keyboard zoom", () => {
   }) => {
     const box = (await page.locator(".chart-host").boundingBox())!;
     await page.mouse.move(box.x + 200, box.y + box.height / 3);
-    const hovered = await closeAt(page, 200);
-    await expect.poll(() => legendClose(page)).toBeCloseTo(hovered.close, 2);
+    await expectLegendAt(page, 200);
 
     await page.mouse.move(box.x + box.width - 20, box.y + box.height / 3);
-    const last = await closeAt(page, null);
-    expect(last.i).not.toBe(hovered.i);
-    await expect.poll(() => legendClose(page)).toBeCloseTo(last.close, 2);
+    await expectLegendAt(page, null);
     await page.keyboard.press("ArrowUp");
-    await expect.poll(() => legendClose(page)).toBeCloseTo(last.close, 2);
+    await expectLegendAt(page, null);
   });
 
   test("reads the last bar with the pointer off the chart", async ({ bootedApp: page }) => {
@@ -267,8 +317,7 @@ test.describe("legend after a keyboard zoom", () => {
     await page.mouse.move(box.x + 200, box.y + box.height / 3);
     await page.mouse.move(box.x + box.width / 2, 2);
     await page.keyboard.press("ArrowUp");
-    const last = await closeAt(page, null);
-    await expect.poll(() => legendClose(page)).toBeCloseTo(last.close, 2);
+    await expectLegendAt(page, null);
   });
 });
 
@@ -276,15 +325,18 @@ test.describe("watchlist hover buttons", () => {
   /** Hover the row and measure its buttons against the text of the numeric cells. */
   const overlaps = async (page: Page, symbol: string) => {
     const row = page.locator(`.wl-row[data-symbol="${symbol}"]`);
-    await page.mouse.move(0, 0);
     const lefts = () =>
       row.locator('[role="cell"]').evaluateAll((cells) =>
         cells.map((c) => c.getBoundingClientRect().left),
       );
-    const before = await lefts();
-    await row.hover();
-    // Showing the buttons does not move the columns.
-    expect(await lefts()).toEqual(before);
+    // Showing the buttons does not move the columns. Retried: a live quote can
+    // change a column's width between the two reads.
+    await expect(async () => {
+      await page.mouse.move(0, 0);
+      const before = await lefts();
+      await row.hover();
+      expect(await lefts()).toEqual(before);
+    }).toPass({ timeout: 10_000 });
     await expect(row.getByRole("button", { name: `Remove ${symbol} from watchlist` })).toHaveCSS(
       "opacity",
       "1",
