@@ -466,6 +466,48 @@ test.describe("touch on a phone", () => {
     await shot(page, "phone-drawing");
   });
 
+  test("dragging a drawing's point past its pane keeps a price, and saves it", async ({ page }) => {
+    await bootCompact(page);
+    await dock(page, "Draw").tap();
+    await page.getByRole("button", { name: "Trend line" }).tap();
+    const box = (await page.locator(".chart-container").boundingBox())!;
+    await page.touchscreen.tap(box.x + box.width * 0.2, box.y + box.height * 0.1);
+    await page.waitForTimeout(700);
+    await page.touchscreen.tap(box.x + box.width * 0.5, box.y + box.height * 0.2);
+    await expect.poll(() => drawings(page)).toBe(1);
+    await page.waitForTimeout(700);
+
+    type Drawing = { points: { value: number }[]; pixels: { x: number; y: number }[] };
+    const line = () =>
+      page.evaluate(
+        () => (window as unknown as { __chartgenDrawings: () => unknown[] }).__chartgenDrawings()[0] as Drawing,
+      );
+    const stored = () =>
+      page.evaluate(() => {
+        const key = Object.keys(localStorage).find((k) => k.startsWith("chartgen.drawings"));
+        return key ? localStorage.getItem(key) : null;
+      });
+    const end = (await line()).pixels[1]!;
+    const from = { x: box.x + end.x, y: box.y + end.y };
+    // The price pane ends here: the next pane's axis is volume, in the thousands.
+    const paneBottom = (await paneHeights(page)).candle;
+    const start = (await line()).points[1]!.value;
+    const t = await touch(page);
+    await t.start(from);
+    for (let i = 1; i <= 12; i++) {
+      await t.move({ x: from.x + i * 5, y: box.y + end.y + ((paneBottom + 60 - end.y) * i) / 12 });
+    }
+    const moved = (await line()).points[1]!.value;
+    expect(moved).not.toBe(start);
+    await t.end();
+    await page.waitForTimeout(300);
+
+    // Within a price chart's range, where it stopped, and that is what was saved.
+    expect(moved).toBeLessThan(start);
+    expect((await line()).points[1]!.value).toBe(moved);
+    expect(await stored()).toContain(String(moved));
+  });
+
   test("picking a symbol in the watchlist returns to the chart", async ({ page }) => {
     await bootCompact(page);
     await dock(page, "Watchlist").tap();

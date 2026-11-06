@@ -1221,6 +1221,20 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
       pinning = false;
     }
   };
+  // klinecharts' touch path converts a drag with the axis of the pane under the
+  // finger, so crossing into a sub-pane moved a point to a volume-scale "price".
+  // Its mouse path stops at the pane's edge: this does the same for touch.
+  const keepTouchDragInPane = (e: TouchEvent) => {
+    const chart = props.chart;
+    const touch = e.touches[0];
+    if (pressedId === null || !chart || !touch) return;
+    const o = chart.getOverlayById(pressedId) as unknown as { paneId: string } | null;
+    const r = o && chart.getDom(o.paneId, "main" as never)?.getBoundingClientRect();
+    if (r && (touch.clientY < r.top || touch.clientY > r.bottom)) e.stopImmediatePropagation();
+  };
+  window.addEventListener("touchmove", keepTouchDragInPane, true);
+  onCleanup(() => window.removeEventListener("touchmove", keepTouchDragInPane, true));
+
   const pinEvents = ["mousemove", "mousedown", "mouseup", "click"] as const;
   for (const type of pinEvents) document.addEventListener(type, pinToStartPane, true);
   onCleanup(() => {
