@@ -17,6 +17,11 @@ export interface ChartLoadErrorProps {
 
 /** Short reason for the headline; the raw message is the tooltip. */
 function reason(message: string): string {
+  const text = message.replace(/^MCP tool error: /, "");
+  // Retry cannot help with these: say which indicator is the cause.
+  const unknown = /^Unknown indicator\(s\): (.+?)\. /.exec(text);
+  if (unknown) return `unknown indicator ${unknown[1]}: remove it from the chips above`;
+  if (/^Invalid parameter/.test(text)) return `${text}: change it in the indicator's settings`;
   return /\b404\b|not found|no data|unknown symbol|invalid symbol/i.test(message)
     ? "symbol not found"
     : "request failed";

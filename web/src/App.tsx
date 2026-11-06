@@ -639,6 +639,7 @@ export function App(): JSX.Element {
         onRemove={removeIndicator}
         onToggleHidden={toggleIndicatorHidden}
         onSettings={setSettingsIndex}
+        errors={live()?.series.indicator_errors}
       />
       <IndicatorSettings
         target={settingsTarget()}

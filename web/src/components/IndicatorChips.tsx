@@ -14,6 +14,7 @@ import {
   type ActiveIndicator,
 } from "../stores/indicators";
 import { paramDefaults } from "../stores/layouts";
+import type { IndicatorError } from "../types/responses";
 
 export interface IndicatorChipsProps {
   entries: ActiveIndicator[];
@@ -23,6 +24,8 @@ export interface IndicatorChipsProps {
   onToggleHidden: (index: number) => void;
   /** Open settings for the entry at `index`. */
   onSettings: (index: number) => void;
+  /** Why an instance is missing from the chart, by instance key (`indicator_errors`). */
+  errors?: Record<string, IndicatorError> | undefined;
 }
 
 const chipButton =
@@ -46,10 +49,16 @@ export function IndicatorChips(props: IndicatorChipsProps): JSX.Element {
             const shown = () => chipName(indicatorName(entry()), params());
             const name = () =>
               [indicatorName(entry()), params()].filter(Boolean).join(" ");
+            const error = () => props.errors?.[instanceKey(entry())];
             return (
               <span
-                class="inline-flex items-center gap-1 bg-[color:var(--color-bg-elev)] border border-[color:var(--color-border)] rounded-full pl-1.5 pr-1 py-0.5 text-xs font-mono text-[color:var(--color-fg)]"
-                classList={{ "opacity-50": isHidden(entry()) }}
+                class="inline-flex items-center gap-1 bg-[color:var(--color-bg-elev)] border rounded-full pl-1.5 pr-1 py-0.5 text-xs font-mono text-[color:var(--color-fg)]"
+                classList={{
+                  "opacity-50": isHidden(entry()),
+                  "border-[color:var(--color-border)]": !error(),
+                  "border-[color:var(--color-danger)]": !!error(),
+                }}
+                data-chip-error={error() ? "" : undefined}
               >
                 <button
                   type="button"
@@ -67,7 +76,7 @@ export function IndicatorChips(props: IndicatorChipsProps): JSX.Element {
                   </svg>
                 </button>
                 <span
-                  title={name()}
+                  title={error()?.message ?? name()}
                   classList={{ "line-through": isHidden(entry()) }}
                 >
                   {shown()}

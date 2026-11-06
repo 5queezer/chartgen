@@ -36,3 +36,16 @@ test("no UI, no scripting calls and no failed requests", async ({ page }) => {
   expect(failed).toEqual([]);
   expect(await page.evaluate(() => localStorage.getItem("chartgen.scripts.drafts"))).toBeNull();
 });
+
+test("an unknown indicator fails the chart with scripting off, and says which", async ({ page }) => {
+  await page.addInitScript(() => {
+    localStorage.setItem("chartgen.indicators.active", JSON.stringify(["rsi", "gone_script"]));
+  });
+  await page.goto("/");
+  const error = page.getByTestId("chart-load-error");
+  await expect(error).toContainText("unknown indicator gone_script", { timeout: 30_000 });
+  await expect(error).toContainText("remove it from the chips");
+  await page.getByRole("button", { name: "Remove gone_script" }).click();
+  await expect(error).toHaveCount(0, { timeout: 30_000 });
+  await expect(page.locator(".pane-header").first()).toBeVisible();
+});
