@@ -658,6 +658,40 @@ every 5 s. **They only fire while chartgen is open in a visible tab** (with seve
 are saved in `localStorage` under `chartgen.alerts.list` (at most 200;
 invalid entries are dropped on load) and are not shared between browsers.
 
+### Alerts on the server
+
+On a server started with `CHARTGEN_SERVER_ALERTS=1`, a price alert can run on the
+server ([ADR-0042](/chartgen/decisions/0042-server-side-alerts/)): it fires with no
+browser open and can call a webhook. Tick **Run on server** in the dialog. On a
+server without them the dialog says the alert runs in this browser.
+
+- **Only price alerts on Binance symbols.** Drawing and indicator alerts run in the
+  browser, and the dialog says so when one is the source. A stock is refused with
+  the reason.
+- **Check on** is *Every tick*, like a browser alert, or *Bar close* of the chart's
+  interval, which reads only the closes of those bars. An interval with no Binance
+  stream of its own (7m) can only use *Every tick*.
+- **Webhook** is optional and must be `https` on port 443 at a public address: local
+  and private addresses, other ports and redirects are refused. **Sign webhook**
+  shows a secret once, when the alert is saved. Copy it then. See the
+  [payload and signature](/chartgen/reference/mcp/#webhook-payload).
+
+The conditions and triggers work as above. A crossing needs a previous reading, so a
+crossing that happens while the server is down is not reported. What already fired
+does not fire again after a restart.
+
+In the Alerts tab a server alert is marked **server**, with its status, the webhook's
+host and the last result: *webhook HTTP 200*, the error, or *waiting for prices*. Edit,
+pause / resume and delete act on the server. In the dialog a new webhook URL replaces
+the old one, and an empty field keeps it. When one fires, the tab that leads shows the
+toast, within 5 s, once however many tabs are open; a fire while no tab was open is
+reported when you next open one.
+
+A server alert belongs to the sign-in of this browser, so clearing its site data loses
+access to it while it keeps running. It has no line on the chart and is not in the
+Object Tree yet. Limits: 20 alerts per sign-in, and an *Every time* alert fires at most
+6 times a minute.
+
 ### Drawing and indicator alerts
 
 An alert can also watch a drawing or an indicator plot

@@ -12,7 +12,7 @@ before launch.
 | `alerts.json` | `set_alert`, `cancel_alert`, fired alerts | JSON array, atomic replace |
 | `trades.log` | Order lifecycle + alert triggers | Append-only text |
 | `subscriptions.json` | `subscribe_notifications`, `unsubscribe_notifications` | JSON map keyed by token |
-| `chartgen.db` | `/register` and `/token` on the HTTP server; scripted indicators, with `CHARTGEN_SCRIPTING=1` (any mode) | SQLite, path from `CHARTGEN_DB` |
+| `chartgen.db` | `/register` and `/token` on the HTTP server; scripted indicators, with `CHARTGEN_SCRIPTING=1` (any mode); server alerts, with `CHARTGEN_SERVER_ALERTS=1` | SQLite, path from `CHARTGEN_DB` |
 
 ## `alerts.json`
 
@@ -101,7 +101,7 @@ Both fields may be `null`, meaning "match any". Restarting the server
 preserves filters so clients keep their filters across chartgen restarts, but
 queued alerts are lost.
 
-## `chartgen.db` (OAuth clients and scripted indicators)
+## `chartgen.db` (OAuth clients, scripted indicators and server alerts)
 
 Holds the registered OAuth clients, with or without `CHARTGEN_SCRIPTING=1`
 ([ADR-0036](/chartgen/decisions/0036-own-origin-invalid-client-redirect/)), and
@@ -131,23 +131,42 @@ CREATE TABLE oauth_clients (
     created_at     INTEGER NOT NULL,
     last_token_at  INTEGER           -- migration 2; NULL = never got a token
 );
+-- Migration 3: server alerts (ADR-0042).
+CREATE TABLE server_alerts (
+    id           TEXT PRIMARY KEY,
+    owner        TEXT NOT NULL,      -- OAuth client_id
+    record_json  TEXT NOT NULL       -- definition and state, webhook URL and secret
+);
+CREATE TABLE server_alert_events (   -- deliveries not finished yet
+    id          TEXT    PRIMARY KEY, -- the event id a receiver sees
+    alert_id    TEXT    NOT NULL,
+    body        TEXT    NOT NULL,    -- the JSON payload
+    created_at  INTEGER NOT NULL     -- unix seconds
+);
 ```
+
+A fire writes the alert's new state and its delivery in one transaction, before
+anything is sent, so a restart neither fires it again nor loses the delivery. A
+delivery older than an hour at startup is dropped. `record_json` holds webhook URLs,
+which may contain tokens, and signing secrets in clear text, because the server needs
+them to send and sign. They are never returned or logged, but treat a copy of this file
+as holding them.
 
 On Unix, a directory that does not exist yet is created owner-only (0700), and an
 existing one keeps its mode. The file is created 0600, and an existing file is set to
 0600 when the server opens it. These steps are best effort: a failure is not logged
 and the server carries on, for example when another user owns the file or the
 filesystem ignores modes. On Windows the server sets no permissions or ACLs, so the
-directory and file inherit theirs. The file holds client ids and scripts, so check who
+directory and file inherit theirs. The file holds client ids, scripts and webhook secrets, so check who
 can read it, especially on Windows or a mounted volume.
 
 Clients with no token 24 hours after registering are deleted at startup and on each
-registration, unless they own scripts.
+registration, unless they own scripts or server alerts.
 
 `oauth_clients` keeps dynamically registered OAuth clients across restarts,
 so a client keeps its `client_id`, and with it any scripts. Access tokens stay
 in memory: after a restart, clients re-authorize. Clients that received a token
 are only deleted when a registration at the
 [1000 client limit](/chartgen/reference/oauth/#token-lifetime) evicts them, which
-spares any client with a live token or a row in `user_indicators`. Back up the file like any
+spares any client with a live token or a row in `user_indicators` or `server_alerts`. Back up the file like any
 SQLite database (`sqlite3 chartgen.db ".backup copy.db"`).

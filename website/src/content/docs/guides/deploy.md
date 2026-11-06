@@ -50,8 +50,28 @@ registrations of external MCP clients. See the [persistence reference](/chartgen
 | `CHARTGEN_DATA_SOURCE` | `src/fetch.rs` | Set to `sample` to make `generate_chart`, `get_indicators` and `get_quotes` use a deterministic offline source and never call Binance or Yahoo. Bars follow the interval grid (weekly bars open on Monday), each bar's prices depend only on the symbol and its open time (so overlapping pages match exactly), and the forming candle moves every second. Intended for E2E tests and demos. Unset means live data. |
 | `CHARTGEN_SCRIPTING` | `src/scripting/mod.rs` | `1` enables [scripted indicators](/chartgen/guides/scripted-indicators/): the four scripting MCP tools and user scripts in `generate_chart` / `list_indicators`. Off when unset. |
 | `CHARTGEN_DB` | `src/scripting/persistence.rs` | SQLite file for registered OAuth clients, with or without `CHARTGEN_SCRIPTING=1`, and for scripted indicators. Opened at server startup; a failure is logged and leaves clients in memory only. Default `~/.chartgen/chartgen.db`, inside the persisted volume. |
+| `CHARTGEN_SERVER_ALERTS` | `src/server_alerts.rs` | `1` enables [alerts on the server](/chartgen/guides/web/#alerts-on-the-server) and their webhooks: four MCP tools, and **Run on server** in the web app. Off when unset; alerts already stored wait in `chartgen.db`. Needs a build with the `scripting` feature, which the Docker image has, and the store. Read [before turning it on](#server-alerts). |
+| `CHARTGEN_WEBHOOK_TEST_ORIGIN` | `src/webhook.rs` | Tests only. One loopback origin (`http://127.0.0.1:9000`) a webhook may reach. Ignored unless `CHARTGEN_DATA_SOURCE=sample`, so it does nothing on a live server. |
 | `HOME` / `USERPROFILE` | `src/main.rs` | Picks the data directory (`~/.chartgen/`). Override to relocate `alerts.json` / `trades.log` / `subscriptions.json` / `chartgen.db`. |
 | `_CHARTGEN_PORT` | `src/server.rs` | Internal — set by the process to its own bind port so `base_url()` can compose the fallback URL. Do not set by hand. |
+
+### Server alerts
+
+`CHARTGEN_SERVER_ALERTS` is off by default, and that is the recommended setting for a
+server with open registration. With it on, anyone who registers an OAuth client can:
+
+- make the server send small POSTs to any public HTTPS host, up to 30 a minute per
+  client and 120 in total;
+- hold WebSockets to Binance, up to 16 symbol and interval pairs in total;
+- use up the 200 alerts or the 16 pairs, after which other people's new alerts are
+  refused.
+
+Webhooks cannot reach private, loopback, link-local, CGNAT, multicast or metadata
+addresses, on IPv4 or IPv6, and follow no redirects
+([ADR-0042](/chartgen/decisions/0042-server-side-alerts/)). What the checks cannot
+know is your own public address: a webhook at it reaches whatever your router forwards
+on port 443, so forward nothing there if you turn this on. A server behind a tunnel
+needs no forwarded port.
 
 ## Reverse proxy
 

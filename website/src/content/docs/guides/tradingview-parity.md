@@ -116,10 +116,10 @@ Status legend:
 |---|---|---|---|
 | Watchlist with last, change, change % | ✅ | ◐ | Polled every 5 s for the active list, max 50 symbols per list. Crypto change is rolling 24 h. [Watchlist](/chartgen/guides/web/#watchlist), [ADR-0011](/chartgen/decisions/0011-watchlist-quotes/) |
 | Multiple named watchlists, sections, flags | ✅ | ◐ | Named lists (create, rename, duplicate, delete), collapsible sections, drag and Alt+Arrow reordering, seven flag colors and one Flagged view across lists. No separate list per flag color, no nested sections, no sync across devices; at most 20 lists and 20 sections per list. [Watchlist](/chartgen/guides/web/#watchlist), [ADR-0031](/chartgen/decisions/0031-multiple-watchlists/) |
-| Price alerts (crossing, up, down, greater, less) | ✅ | ◐ | Same conditions, once or every time, toast, beep and browser notification. Evaluated in the browser. [Sidebar and price alerts](/chartgen/guides/web/#sidebar-and-price-alerts), [ADR-0020](/chartgen/decisions/0020-client-side-price-alerts/) |
-| Alerts that fire with no tab open | ✅ | ❌ | Fire only while chartgen is open in a visible tab. The server alert tools exist for `--trade` users but are not wired to the web app. [ADR-0020](/chartgen/decisions/0020-client-side-price-alerts/) |
+| Price alerts (crossing, up, down, greater, less) | ✅ | ◐ | Same conditions, once or every time, toast, beep and browser notification. Evaluated in the browser, or on the server where it is on. [Sidebar and price alerts](/chartgen/guides/web/#sidebar-and-price-alerts), [ADR-0020](/chartgen/decisions/0020-client-side-price-alerts/) |
+| Alerts that fire with no tab open | ✅ | ◐ | Price alerts on Binance symbols, on a server with `CHARTGEN_SERVER_ALERTS=1`. Drawing and indicator alerts, and stocks, still need an open tab. [Alerts on the server](/chartgen/guides/web/#alerts-on-the-server), [ADR-0042](/chartgen/decisions/0042-server-side-alerts/) |
 | Alerts synced across devices | ✅ | ❌ | Stored per browser profile. |
-| Indicator and drawing alerts, webhooks, email, SMS | ✅ | ◐ | Alerts on trend lines, rays, horizontal lines and channels, and on indicator plots against a value, another plot or the price. Indicator and sloped-line alerts only run while the chart shows their symbol and interval. No webhooks, email or SMS. [Drawing and indicator alerts](/chartgen/guides/web/#drawing-and-indicator-alerts), [ADR-0034](/chartgen/decisions/0034-drawing-and-indicator-alerts/). [Push notifications](/chartgen/guides/notifications/) covers the server side. |
+| Indicator and drawing alerts, webhooks, email, SMS | ✅ | ◐ | Alerts on trend lines, rays, horizontal lines and channels, and on indicator plots against a value, another plot or the price. Indicator and sloped-line alerts only run while the chart shows their symbol and interval. Webhooks on [server alerts](/chartgen/guides/web/#alerts-on-the-server) only. No email or SMS. [Drawing and indicator alerts](/chartgen/guides/web/#drawing-and-indicator-alerts), [ADR-0034](/chartgen/decisions/0034-drawing-and-indicator-alerts/). [Push notifications](/chartgen/guides/notifications/) covers the server side. |
 | Alert lines on the chart (drag to move) | ✅ | ✅ | [Sidebar and price alerts](/chartgen/guides/web/#sidebar-and-price-alerts) |
 
 ## Layouts & settings
@@ -172,10 +172,13 @@ Status legend:
 Deliberate deviations recorded in the ADRs. Each is a trade-off, not an
 oversight.
 
-- **Alerts run in the browser.** They fire only while chartgen is open in a
-  visible tab, are per browser profile and do not sync. A crossing that
-  happens and reverts while the tab is asleep is lost.
-  [ADR-0020](/chartgen/decisions/0020-client-side-price-alerts/)
+- **Alerts run in the browser unless put on the server.** A browser alert fires
+  only while chartgen is open in a visible tab, is per browser profile and does not
+  sync. A crossing that happens and reverts while the tab is asleep is lost.
+  [ADR-0020](/chartgen/decisions/0020-client-side-price-alerts/). A server alert
+  fires with no tab open, but only for a price level on a Binance symbol, and only
+  where the server has them on.
+  [ADR-0042](/chartgen/decisions/0042-server-side-alerts/)
 - **Crypto watchlist change is the rolling 24 hours** that Binance reports,
   not the change since the daily open. Stocks, ETFs, indices and FX change
   against the previous close, like TradingView.
