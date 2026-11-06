@@ -4555,8 +4555,8 @@ mod tests {
             .map(|i| (i.name, need(i.name)))
             .filter(|&(_, n)| n > 0)
             .collect();
-        // At their defaults only ema_stack and kalman_volume need more than
-        // the web's 300.
+        // At their defaults only ema_stack, kalman_volume and the patterns' whole
+        // window (ADR-0046) need more than the web's 300.
         assert_eq!(
             declared,
             [
@@ -4574,6 +4574,9 @@ mod tests {
                 ("hma", 11),
                 ("ma_ribbon", 200),
                 ("envelopes", 20),
+                ("candlestick_patterns", 80),
+                ("chart_patterns", 600),
+                ("auto_fib", 600),
                 ("stoch_rsi", 129),
                 ("trix", 244),
                 ("ppo", 94),
