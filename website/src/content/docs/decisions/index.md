@@ -63,5 +63,6 @@ one and link both ways.
 | [0033](/chartgen/decisions/0033-indicator-projection-past-last-bar/) | Indicator projection past the last bar | Accepted | 2026-11-05 |
 | [0034](/chartgen/decisions/0034-drawing-and-indicator-alerts/) | Drawing and indicator alerts | Accepted | 2026-11-05 |
 | [0035](/chartgen/decisions/0035-styleable-geometry/) | Styleable indicator geometry colors | Accepted | 2026-11-05 |
+| [0036](/chartgen/decisions/0036-own-origin-invalid-client-redirect/) | Redirect an unknown OAuth client back to the server's own web app | Accepted | 2026-11-06 |
 | [0037](/chartgen/decisions/0037-pull-based-deploy/) | Pull-based deploy from the Coolify host | Accepted | 2026-11-06 |
 | [0038](/chartgen/decisions/0038-custom-intervals/) | Custom intervals and session-aware future bars | Accepted | 2026-11-06 |

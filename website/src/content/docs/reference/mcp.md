@@ -813,7 +813,7 @@ with:
 Registering an existing name replaces the script (`"replaced": true`). Each
 user may store 50 scripts. Scripts are stored in SQLite at `CHARTGEN_DB`
 (default `~/.chartgen/chartgen.db`), see the
-[persistence reference](/chartgen/reference/persistence/#chartgendb-scripted-indicators).
+[persistence reference](/chartgen/reference/persistence/#chartgendb-oauth-clients-and-scripted-indicators).
 
 A `generate_chart` call computes at most 3 scripted indicators, sharing one
 1 s budget; further ones fail with an `indicator_errors` entry. At most 4

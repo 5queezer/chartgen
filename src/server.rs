@@ -8,7 +8,7 @@ use base64::Engine as Base64Engine;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
@@ -28,8 +28,10 @@ struct OAuthClient {
     _client_secret: Option<String>,
     redirect_uris: Vec<String>,
     created_at: Instant,
-    /// Received a token at least once (unused clients are collected).
-    tokened: bool,
+    /// When it last received a token or made a call with one; `None` if it
+    /// never received one (unused clients are collected, and evicted first).
+    /// In memory only: a restart starts over from `last_token_at`.
+    last_used: Option<Instant>,
 }
 
 /// Dynamic client registration limits: `/authorize` auto-approves, so
@@ -37,6 +39,10 @@ struct OAuthClient {
 const MAX_REDIRECT_URIS: usize = 5;
 const MAX_REDIRECT_URI_LEN: usize = 512;
 const MAX_CLIENT_NAME_LEN: usize = 256;
+/// Redirect URI schemes a browser would run or render instead of leaving for a
+/// client. Native schemes (`cursor://`, `vscode://`) are how MCP clients get
+/// their callback, so this is not an allow-list.
+const FORBIDDEN_REDIRECT_SCHEMES: [&str; 3] = ["javascript", "data", "vbscript"];
 const MAX_CLIENTS: usize = 1000;
 /// Registrations per client address (the TCP peer) per `REGISTER_WINDOW`.
 /// Loopback peers are exempt: local tests and dev clients register freely,
@@ -46,6 +52,8 @@ const MAX_REGISTRATIONS_PER_IP: usize = 20;
 const REGISTER_WINDOW: Duration = Duration::from_secs(600);
 /// A client that never received a token is forgotten after this long.
 const UNUSED_CLIENT_TTL: Duration = Duration::from_secs(24 * 3600);
+/// A refused registration logs at most this often: refusals are free to send.
+const REFUSAL_LOG_INTERVAL: Duration = Duration::from_secs(60);
 
 struct AuthCode {
     _code: String,
@@ -58,7 +66,6 @@ struct AuthCode {
 
 struct AccessToken {
     _token: String,
-    #[cfg_attr(not(feature = "scripting"), allow(dead_code))]
     client_id: String,
     created_at: Instant,
     expires_in: Duration,
@@ -70,6 +77,9 @@ struct OAuthStore {
     tokens: HashMap<String, AccessToken>,
     /// Recent `/register` calls per client address.
     registrations: HashMap<String, Vec<Instant>>,
+    /// When a refused registration last logged, and refusals since.
+    refusal_logged_at: Option<Instant>,
+    refusals_unlogged: u64,
 }
 
 impl OAuthStore {
@@ -79,11 +89,12 @@ impl OAuthStore {
             codes: HashMap::new(),
             tokens: HashMap::new(),
             registrations: HashMap::new(),
+            refusal_logged_at: None,
+            refusals_unlogged: 0,
         }
     }
 
     /// Check a registration from `ip` against the limits, and count it.
-    /// Forgets clients that never got a token within `UNUSED_CLIENT_TTL`.
     fn admit_registration(
         &mut self,
         ip: &str,
@@ -105,6 +116,21 @@ impl OAuthStore {
         {
             return bad(format!(
                 "redirect_uris are limited to {MAX_REDIRECT_URI_LEN} characters"
+            ));
+        }
+        // Parsed as a browser would, so case and stray whitespace don't hide a
+        // script scheme. `/authorize` refuses what this refuses, and nothing else.
+        for uri in &body.redirect_uris {
+            let refused = match reqwest::Url::parse(uri) {
+                Ok(u) if FORBIDDEN_REDIRECT_SCHEMES.contains(&u.scheme()) => {
+                    "javascript:, data: and vbscript: redirect_uris are not allowed"
+                }
+                Ok(_) => continue,
+                Err(_) => "redirect_uris must be absolute URIs",
+            };
+            return Err((
+                StatusCode::BAD_REQUEST,
+                json!({"error": "invalid_redirect_uri", "error_description": refused}),
             ));
         }
         if body
@@ -132,15 +158,97 @@ impl OAuthStore {
             ));
         }
         hits.push(now);
-        self.clients
-            .retain(|_, c| c.tokened || now.duration_since(c.created_at) < UNUSED_CLIENT_TTL);
-        if self.clients.len() >= MAX_CLIENTS {
-            return Err((
-                StatusCode::SERVICE_UNAVAILABLE,
-                json!({"error": "temporarily_unavailable", "error_description": "client registry is full"}),
-            ));
-        }
         Ok(())
+    }
+
+    /// Whether this registration will ask for the script owners: to collect
+    /// unused clients or to evict. They are read before taking the lock for it.
+    fn needs_script_owners(&self) -> bool {
+        let now = Instant::now();
+        self.clients.len() >= MAX_CLIENTS || self.clients.values().any(|c| is_unused(c, now))
+    }
+
+    /// Forget clients that never got a token within `UNUSED_CLIENT_TTL`,
+    /// unless they own scripts (`None`: owners unknown, so forget nobody).
+    fn collect_unused(&mut self, script_owners: impl FnOnce() -> Option<HashSet<String>>) {
+        let now = Instant::now();
+        if !self.clients.values().any(|c| is_unused(c, now)) {
+            return;
+        }
+        if let Some(owners) = script_owners() {
+            self.clients
+                .retain(|id, c| !is_unused(c, now) || owners.contains(id));
+        }
+    }
+
+    /// Keep the table below `MAX_CLIENTS` for one more client by evicting
+    /// never-tokened clients, oldest first, then the ones longest out of use
+    /// (ADR-0036). Their pending codes go too. A client with a live token is
+    /// never evicted, so a stranger cannot revoke a session in use, and neither
+    /// is one owning stored scripts. `script_owners` (`None`: unknown) is only
+    /// asked when full. Returns the ids evicted; without enough evictable
+    /// clients this answers 503 and evicts nothing.
+    fn make_room(
+        &mut self,
+        script_owners: impl FnOnce() -> Option<HashSet<String>>,
+    ) -> Result<Vec<String>, (StatusCode, Value)> {
+        let excess = (self.clients.len() + 1).saturating_sub(MAX_CLIENTS);
+        if excess == 0 {
+            return Ok(Vec::new());
+        }
+        let Some(owners) = script_owners() else {
+            return Err(self.refuse_full());
+        };
+        self.cleanup_expired();
+        let live: HashSet<&str> = self.tokens.values().map(|t| t.client_id.as_str()).collect();
+        let mut candidates: Vec<_> = self
+            .clients
+            .iter()
+            .filter(|(id, _)| !owners.contains(*id) && !live.contains(id.as_str()))
+            .map(|(id, c)| (c.last_used, c.created_at, id.clone()))
+            .collect();
+        if candidates.len() < excess {
+            return Err(self.refuse_full());
+        }
+        candidates.sort();
+        let evicted: Vec<String> = candidates
+            .into_iter()
+            .take(excess)
+            .map(|(_, _, id)| id)
+            .collect();
+        for id in &evicted {
+            self.clients.remove(id);
+        }
+        self.codes.retain(|_, c| !evicted.contains(&c.client_id));
+        Ok(evicted)
+    }
+
+    /// The answer to a registration that found no room. It may clear by itself
+    /// or take an operator (ADR-0036), so it is logged, but only so often.
+    fn refuse_full(&mut self) -> (StatusCode, Value) {
+        if let Some(refused) = self.refusal_due_for_log(Instant::now()) {
+            eprintln!(
+                "[OAuth] /register refused: client table full at {} clients, {refused} refusal(s) since the last line. New clients cannot register right now; see the OAuth reference.",
+                self.clients.len()
+            );
+        }
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            json!({"error": "temporarily_unavailable", "error_description": "client registry is full"}),
+        )
+    }
+
+    /// Count a refusal; `Some(refusals to report)` when a log line is due.
+    fn refusal_due_for_log(&mut self, now: Instant) -> Option<u64> {
+        self.refusals_unlogged += 1;
+        if self
+            .refusal_logged_at
+            .is_some_and(|t| now.duration_since(t) < REFUSAL_LOG_INTERVAL)
+        {
+            return None;
+        }
+        self.refusal_logged_at = Some(now);
+        Some(std::mem::take(&mut self.refusals_unlogged))
     }
 
     fn cleanup_expired(&mut self) {
@@ -153,7 +261,13 @@ impl OAuthStore {
 
     fn validate_token(&mut self, token: &str) -> bool {
         self.cleanup_expired();
-        self.tokens.contains_key(token)
+        let Some(t) = self.tokens.get(token) else {
+            return false;
+        };
+        if let Some(c) = self.clients.get_mut(&t.client_id) {
+            c.last_used = Some(Instant::now());
+        }
+        true
     }
 
     /// The OAuth client a valid token was issued to: the owner of that
@@ -163,6 +277,11 @@ impl OAuthStore {
         self.cleanup_expired();
         self.tokens.get(token).map(|t| t.client_id.clone())
     }
+}
+
+/// Never got a token, and old enough to be forgotten for it.
+fn is_unused(c: &OAuthClient, now: Instant) -> bool {
+    c.last_used.is_none() && now.duration_since(c.created_at) >= UNUSED_CLIENT_TTL
 }
 
 struct AppState {
@@ -235,6 +354,19 @@ fn with_resource_metadata(mut resp: Response, path: &str) -> Response {
     resp
 }
 
+/// The client ids owning stored scripts; `None` if that cannot be determined.
+/// Scripts live in the store, so without one nobody owns any.
+fn script_owners() -> Option<HashSet<String>> {
+    #[cfg(feature = "scripting")]
+    if let Some(store) = scripting::persistence::global() {
+        return store
+            .script_owners()
+            .map_err(|e| eprintln!("[OAuth] cannot read script owners: {e}"))
+            .ok();
+    }
+    Some(HashSet::new())
+}
+
 #[derive(Deserialize)]
 struct RegisterRequest {
     redirect_uris: Vec<String>,
@@ -251,42 +383,80 @@ async fn oauth_register(
         "[OAuth] POST /register redirect_uris={}",
         body.redirect_uris.len()
     );
-    if let Err((status, err)) = state
-        .oauth
-        .lock()
-        .unwrap()
-        .admit_registration(&client_addr(&ext), &body)
-    {
-        return (status, Json(err));
-    }
     let client_id = Uuid::new_v4().to_string();
     let client_secret = Uuid::new_v4().to_string();
-
-    let client = OAuthClient {
-        _client_secret: Some(client_secret.clone()),
-        redirect_uris: body.redirect_uris.clone(),
-        created_at: Instant::now(),
-        tokened: false,
-    };
-
-    state
+    let admitted = state
         .oauth
         .lock()
         .unwrap()
-        .clients
-        .insert(client_id.clone(), client);
-    // With scripting on, the client id owns stored indicators, so it must
-    // survive restarts: persist the registration (ADR-0025).
-    #[cfg(feature = "scripting")]
-    if scripting::enabled() {
-        if let Some(store) = scripting::persistence::global() {
-            let saved = store
-                .gc_oauth_clients(UNUSED_CLIENT_TTL.as_secs() as i64)
-                .and_then(|_| store.save_oauth_client(&client_id, &body.redirect_uris));
-            if let Err(e) = saved {
-                eprintln!("[OAuth] could not persist a client registration: {e}");
+        .admit_registration(&client_addr(&ext), &body);
+    if let Err((status, err)) = admitted {
+        return (status, Json(err));
+    }
+    // The owners come from the store, which may be busy: every authenticated
+    // request needs the lock, so read them first, off the async workers. A
+    // client's first script can land in between, but writing one takes a live
+    // token and a client with a live token is not evicted (ADR-0036). The loop
+    // covers a table that fills up between the locks.
+    let mut owners_read: Option<Option<HashSet<String>>> = None;
+    let evicted = loop {
+        {
+            let mut oauth = state.oauth.lock().unwrap();
+            if owners_read.is_some() || !oauth.needs_script_owners() {
+                let owners = owners_read.flatten();
+                oauth.collect_unused(|| owners.clone());
+                let evicted = match oauth.make_room(|| owners) {
+                    Ok(evicted) => evicted,
+                    Err((status, err)) => return (status, Json(err)),
+                };
+
+                let client = OAuthClient {
+                    _client_secret: Some(client_secret.clone()),
+                    redirect_uris: body.redirect_uris.clone(),
+                    created_at: Instant::now(),
+                    last_used: None,
+                };
+
+                oauth.clients.insert(client_id.clone(), client);
+                break evicted;
             }
         }
+        owners_read = Some(
+            tokio::task::spawn_blocking(script_owners)
+                .await
+                .unwrap_or(None),
+        );
+    };
+    if !evicted.is_empty() {
+        eprintln!(
+            "[OAuth] client table full: evicted {} client(s)",
+            evicted.len()
+        );
+    }
+    // The client id must survive restarts: external MCP clients keep their
+    // registration (ADR-0036), and with scripting on it owns stored
+    // indicators (ADR-0025). Persist the registration, off the async workers:
+    // a busy store would stall whatever else a blocked worker holds.
+    #[cfg(feature = "scripting")]
+    {
+        let (id, uris) = (client_id.clone(), body.redirect_uris.clone());
+        let _ = tokio::task::spawn_blocking(move || {
+            let Some(store) = scripting::persistence::global() else {
+                return;
+            };
+            for evicted in &evicted {
+                if let Err(e) = store.delete_oauth_client(evicted) {
+                    eprintln!("[OAuth] could not delete an evicted client: {e}");
+                }
+            }
+            if let Err(e) = store.gc_oauth_clients(UNUSED_CLIENT_TTL.as_secs() as i64) {
+                eprintln!("[OAuth] could not collect unused clients: {e}");
+            }
+            if let Err(e) = store.save_oauth_client(&id, &uris) {
+                eprintln!("[OAuth] could not persist a client registration: {e}");
+            }
+        })
+        .await;
     }
 
     (
@@ -321,6 +491,33 @@ fn default_challenge_method() -> String {
     "S256".to_string()
 }
 
+/// Where `/authorize` sends an unknown client back to, if anywhere: only to
+/// `redirect_uri` on the origin of `base`, which is this server's own web app
+/// and so not attacker-controlled (ADR-0036). Everything else, including a
+/// `redirect_uri` that cannot be parsed, gets `None`: RFC 6749 section 4.1.2.1
+/// forbids redirecting for an invalid client in general. The result is the
+/// re-serialized URL, so it cannot be read differently from the check.
+fn invalid_client_redirect(base: &str, redirect_uri: &str, state: Option<&str>) -> Option<String> {
+    let base = reqwest::Url::parse(base).ok()?;
+    let mut target = reqwest::Url::parse(redirect_uri).ok()?;
+    if target.scheme() != base.scheme()
+        || target.origin() != base.origin()
+        || !target.username().is_empty()
+        || target.password().is_some()
+        || target.fragment().is_some()
+    {
+        return None;
+    }
+    {
+        let mut query = target.query_pairs_mut();
+        query.append_pair("error", "invalid_client");
+        if let Some(state) = state {
+            query.append_pair("state", state);
+        }
+    }
+    Some(target.into())
+}
+
 async fn oauth_authorize(
     State(state): State<SharedState>,
     Query(params): Query<AuthorizeQuery>,
@@ -333,6 +530,17 @@ async fn oauth_authorize(
     let client = match s.clients.get(&params.client_id) {
         Some(c) => c,
         None => {
+            // The web app remembers its client across redeploys that forget
+            // it; a JSON page here would strand it (ADR-0036).
+            if std::env::var_os("CHARTGEN_WEB_DIR").is_some() {
+                if let Some(target) = invalid_client_redirect(
+                    &base_url(),
+                    &params.redirect_uri,
+                    params.state.as_deref(),
+                ) {
+                    return (StatusCode::FOUND, [(header::LOCATION, target)]).into_response();
+                }
+            }
             return (
                 StatusCode::BAD_REQUEST,
                 Json(json!({"error": "invalid_client", "error_description": "Unknown client_id"})),
@@ -350,6 +558,22 @@ async fn oauth_authorize(
             .into_response();
     }
 
+    let Ok(mut redirect) = reqwest::Url::parse(&params.redirect_uri) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "invalid_request", "error_description": "redirect_uri is not an absolute URI"})),
+        )
+            .into_response();
+    };
+    // `/register` refuses these, but the store can hold rows from before it did.
+    if FORBIDDEN_REDIRECT_SCHEMES.contains(&redirect.scheme()) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "invalid_request", "error_description": "redirect_uri scheme is not allowed"})),
+        )
+            .into_response();
+    }
+
     // Auto-approve: generate auth code
     let code = Uuid::new_v4().to_string();
     let auth_code = AuthCode {
@@ -363,14 +587,15 @@ async fn oauth_authorize(
     s.codes.insert(code.clone(), auth_code);
 
     // Build redirect URL
-    let mut redirect = params.redirect_uri.clone();
-    redirect.push_str(if redirect.contains('?') { "&" } else { "?" });
-    redirect.push_str(&format!("code={}", code));
-    if let Some(state) = &params.state {
-        redirect.push_str(&format!("&state={}", state));
+    {
+        let mut query = redirect.query_pairs_mut();
+        query.append_pair("code", &code);
+        if let Some(state) = &params.state {
+            query.append_pair("state", state);
+        }
     }
 
-    Redirect::temporary(&redirect).into_response()
+    Redirect::temporary(redirect.as_str()).into_response()
 }
 
 #[derive(Deserialize)]
@@ -437,81 +662,92 @@ async fn oauth_token(
             .into_response();
     }
 
-    let mut s = state.oauth.lock().unwrap();
-    s.cleanup_expired();
+    let token = {
+        let mut s = state.oauth.lock().unwrap();
+        s.cleanup_expired();
 
-    // Extract code data (clone to release borrow before mutating store)
-    let code_data = s.codes.get(&body.code).map(|c| {
-        (
-            c.client_id.clone(),
-            c.redirect_uri.clone(),
-            c.code_challenge.clone(),
-        )
-    });
+        // Extract code data (clone to release borrow before mutating store)
+        let code_data = s.codes.get(&body.code).map(|c| {
+            (
+                c.client_id.clone(),
+                c.redirect_uri.clone(),
+                c.code_challenge.clone(),
+            )
+        });
 
-    let (stored_client_id, stored_redirect_uri, stored_challenge) = match code_data {
-        Some(d) => d,
-        None => {
-            eprintln!("[OAuth] POST /token code not found (possibly already exchanged)");
-            return (
+        let (stored_client_id, stored_redirect_uri, stored_challenge) = match code_data {
+            Some(d) => d,
+            None => {
+                eprintln!("[OAuth] POST /token code not found (possibly already exchanged)");
+                return (
                 StatusCode::BAD_REQUEST,
                 Json(json!({"error": "invalid_grant", "error_description": "Invalid or expired code"})),
             )
                 .into_response();
+            }
+        };
+
+        // Validate client_id and redirect_uri
+        if stored_client_id != body.client_id {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": "invalid_grant", "error_description": "client_id mismatch"})),
+            )
+                .into_response();
         }
-    };
+        if stored_redirect_uri != body.redirect_uri {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(
+                    json!({"error": "invalid_grant", "error_description": "redirect_uri mismatch"}),
+                ),
+            )
+                .into_response();
+        }
 
-    // Validate client_id and redirect_uri
-    if stored_client_id != body.client_id {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({"error": "invalid_grant", "error_description": "client_id mismatch"})),
-        )
-            .into_response();
-    }
-    if stored_redirect_uri != body.redirect_uri {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({"error": "invalid_grant", "error_description": "redirect_uri mismatch"})),
-        )
-            .into_response();
-    }
-
-    // PKCE S256 verification
-    let pkce_ok = verify_pkce(&body.code_verifier, &stored_challenge);
-    eprintln!("[OAuth] POST /token PKCE verify: ok={}", pkce_ok);
-    if !pkce_ok {
-        return (
+        // PKCE S256 verification
+        let pkce_ok = verify_pkce(&body.code_verifier, &stored_challenge);
+        eprintln!("[OAuth] POST /token PKCE verify: ok={}", pkce_ok);
+        if !pkce_ok {
+            return (
             StatusCode::BAD_REQUEST,
             Json(
                 json!({"error": "invalid_grant", "error_description": "PKCE verification failed"}),
             ),
         )
             .into_response();
-    }
-
-    // Issue access token
-    let token = Uuid::new_v4().to_string();
-    let expires_in = Duration::from_secs(7 * 24 * 3600); // 7 days
-    s.tokens.insert(
-        token.clone(),
-        AccessToken {
-            _token: token.clone(),
-            client_id: body.client_id.clone(),
-            created_at: Instant::now(),
-            expires_in,
-        },
-    );
-    if let Some(c) = s.clients.get_mut(&body.client_id) {
-        c.tokened = true;
-    }
-    #[cfg(feature = "scripting")]
-    if scripting::enabled() {
-        if let Some(store) = scripting::persistence::global() {
-            if let Err(e) = store.mark_oauth_client_used(&body.client_id) {
-                eprintln!("[OAuth] could not record client use: {e}");
-            }
         }
+
+        // Issue access token
+        let token = Uuid::new_v4().to_string();
+        let expires_in = Duration::from_secs(7 * 24 * 3600); // 7 days
+        s.tokens.insert(
+            token.clone(),
+            AccessToken {
+                _token: token.clone(),
+                client_id: body.client_id.clone(),
+                created_at: Instant::now(),
+                expires_in,
+            },
+        );
+        if let Some(c) = s.clients.get_mut(&body.client_id) {
+            c.last_used = Some(Instant::now());
+        }
+        token
+    };
+    // Every authenticated request needs that lock, and an async worker may hold
+    // others' work: neither waits for a disk write.
+    #[cfg(feature = "scripting")]
+    {
+        let client_id = body.client_id.clone();
+        let _ = tokio::task::spawn_blocking(move || {
+            if let Some(store) = scripting::persistence::global() {
+                if let Err(e) = store.mark_oauth_client_used(&client_id) {
+                    eprintln!("[OAuth] could not record client use: {e}");
+                }
+            }
+        })
+        .await;
     }
 
     eprintln!(
@@ -1104,39 +1340,48 @@ impl Drop for CleanupStream {
 pub async fn run_server(port: u16, engine: Option<Arc<RwLock<TradingEngine>>>) {
     #[cfg_attr(not(feature = "scripting"), allow(unused_mut))]
     let mut oauth = OAuthStore::new();
-    // Scripting: open (and migrate) the store at startup and restore the
-    // registered OAuth clients, so their scripts stay theirs (ADR-0025).
+    // Open (and migrate) the store at startup and restore the registered
+    // OAuth clients, with CHARTGEN_SCRIPTING or without: they keep their
+    // registration (ADR-0036) and their scripts stay theirs (ADR-0025).
     #[cfg(feature = "scripting")]
-    if scripting::enabled() {
+    {
         let path = scripting::persistence::db_path();
         let ttl = UNUSED_CLIENT_TTL.as_secs() as i64;
-        let restored = scripting::persistence::global()
-            .map(|s| s.gc_oauth_clients(ttl).and_then(|_| s.oauth_clients()));
+        let restored = scripting::persistence::global().map(|s| {
+            if let Err(e) = s.gc_oauth_clients(ttl) {
+                eprintln!("[OAuth] could not collect unused clients: {e}");
+            }
+            s.oauth_clients()
+        });
         match restored {
             Some(Ok(clients)) => {
                 println!(
-                    "Scripting enabled: {} ({} OAuth clients restored)",
+                    "OAuth client store: {} ({} clients restored)",
                     path.display(),
                     clients.len()
                 );
+                if scripting::enabled() {
+                    println!("Scripting enabled");
+                }
                 let now_unix = chrono::Utc::now().timestamp();
+                let instant_of = |unix: i64| {
+                    let age = Duration::from_secs((now_unix - unix).max(0) as u64);
+                    Instant::now().checked_sub(age).unwrap_or_else(Instant::now)
+                };
                 for c in clients {
-                    let age = Duration::from_secs((now_unix - c.created_at).max(0) as u64);
                     oauth.clients.insert(
                         c.client_id,
                         OAuthClient {
                             _client_secret: None,
                             redirect_uris: c.redirect_uris,
-                            created_at: Instant::now()
-                                .checked_sub(age)
-                                .unwrap_or_else(Instant::now),
-                            tokened: c.last_token_at.is_some(),
+                            created_at: instant_of(c.created_at),
+                            last_used: c.last_token_at.map(instant_of),
                         },
                     );
                 }
             }
-            Some(Err(e)) => eprintln!("[scripting] cannot read OAuth clients: {e}"),
-            None => eprintln!("[scripting] store unavailable at {}", path.display()),
+            Some(Err(e)) => eprintln!("[OAuth] cannot read stored clients: {e}"),
+            None => eprintln!("[OAuth] store unavailable at {}", path.display()),
         }
     }
     let state = Arc::new(AppState {
@@ -1241,6 +1486,66 @@ mod tests {
             );
         }
         h
+    }
+
+    // --- invalid_client_redirect unit tests ---
+
+    #[test]
+    fn invalid_client_redirect_stays_on_the_own_origin() {
+        const BASE: &str = "https://chartgen.vasudev.xyz";
+        let target = |uri, state| invalid_client_redirect(BASE, uri, state);
+
+        assert_eq!(
+            target("https://chartgen.vasudev.xyz/", Some("s1")).as_deref(),
+            Some("https://chartgen.vasudev.xyz/?error=invalid_client&state=s1")
+        );
+        // Without a state there is none to return.
+        assert_eq!(
+            target("https://chartgen.vasudev.xyz/", None).as_deref(),
+            Some("https://chartgen.vasudev.xyz/?error=invalid_client")
+        );
+        // An existing query string stays, and the state is encoded.
+        assert_eq!(
+            target("https://chartgen.vasudev.xyz/cb?a=1", Some("x y&z=1#f")).as_deref(),
+            Some("https://chartgen.vasudev.xyz/cb?a=1&error=invalid_client&state=x+y%26z%3D1%23f")
+        );
+        // An explicit default port and upper case are the same origin.
+        assert_eq!(
+            target("HTTPS://CHARTGEN.vasudev.xyz:443/", None).as_deref(),
+            Some("https://chartgen.vasudev.xyz/?error=invalid_client")
+        );
+        // Parsed like a browser would: the host is still ours, and the
+        // Location is the normalized form, not the input.
+        assert_eq!(
+            target("https://chartgen.vasudev.xyz\\@evil.com", None).as_deref(),
+            Some("https://chartgen.vasudev.xyz/@evil.com?error=invalid_client")
+        );
+
+        for uri in [
+            "https://chartgen.vasudev.xyz.evil.com/",
+            "https://chartgen.vasudev.xyz@evil.com/",
+            "https://evil.com/chartgen.vasudev.xyz/",
+            "https://evil.com#https://chartgen.vasudev.xyz/",
+            "https://user@chartgen.vasudev.xyz/",
+            "https://user:pw@chartgen.vasudev.xyz/",
+            "https://chartgen.vasudev.xyz/#fragment",
+            "https://sub.chartgen.vasudev.xyz/",
+            "http://chartgen.vasudev.xyz/",
+            "https://chartgen.vasudev.xyz:8443/",
+            "javascript:alert(1)//chartgen.vasudev.xyz/",
+            "data:text/html,chartgen.vasudev.xyz",
+            "blob:https://chartgen.vasudev.xyz/abc",
+            "ftp://chartgen.vasudev.xyz/",
+            "//chartgen.vasudev.xyz/",
+            "/",
+            "",
+        ] {
+            assert_eq!(target(uri, Some("s")), None, "{uri}");
+        }
+        assert_eq!(
+            invalid_client_redirect("not a url", "https://chartgen.vasudev.xyz/", None),
+            None
+        );
     }
 
     // --- accepts_json unit tests ---
@@ -1794,13 +2099,45 @@ mod tests {
         }
     }
 
-    fn client(age: Duration, tokened: bool) -> OAuthClient {
+    fn client(age: Duration, last_used_age: Option<Duration>) -> OAuthClient {
         OAuthClient {
             _client_secret: None,
             redirect_uris: vec![],
             created_at: Instant::now() - age,
-            tokened,
+            last_used: last_used_age.map(|a| Instant::now() - a),
         }
+    }
+
+    /// `MAX_CLIENTS` clients with no live token; the lower the index, the
+    /// longer out of use.
+    fn full_table() -> OAuthStore {
+        let mut s = OAuthStore::new();
+        for i in 0..MAX_CLIENTS {
+            let unused_for = Duration::from_secs((MAX_CLIENTS - i) as u64 * 60);
+            s.clients.insert(
+                format!("c{i}"),
+                client(Duration::from_secs(1), Some(unused_for)),
+            );
+        }
+        s
+    }
+
+    fn give_token(s: &mut OAuthStore, token: &str, client_id: &str, expires_in: Duration) {
+        s.tokens.insert(
+            token.into(),
+            AccessToken {
+                _token: token.into(),
+                client_id: client_id.into(),
+                created_at: Instant::now(),
+                expires_in,
+            },
+        );
+    }
+
+    const LIVE: Duration = Duration::from_secs(600);
+
+    fn nobody_owns_scripts() -> Option<HashSet<String>> {
+        Some(HashSet::new())
     }
 
     #[test]
@@ -1820,6 +2157,62 @@ mod tests {
     }
 
     #[test]
+    fn registration_refuses_redirect_uris_a_browser_would_run() {
+        let mut s = OAuthStore::new();
+        for uri in [
+            "javascript:alert(1)",
+            "JavaScript:alert(1)",
+            " javascript:alert(1)",
+            "java\tscript:alert(1)",
+            "data:text/html,x",
+            "vbscript:msgbox(1)",
+        ] {
+            let (status, err) = s
+                .admit_registration("5.5.5.5", &reg(&["https://ok.example/cb", uri]))
+                .unwrap_err();
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{uri}");
+            assert_eq!(err["error"], "invalid_redirect_uri", "{uri}");
+        }
+        for uri in [
+            "https://ok.example/cb",
+            "http://localhost:1234/cb",
+            "cursor://anysphere.cursor-retrieval/oauth/callback",
+            "vscode://vscode.dev/redirect",
+            "com.example.app:/cb",
+        ] {
+            assert!(
+                s.admit_registration("6.6.6.6", &reg(&[uri])).is_ok(),
+                "{uri}"
+            );
+        }
+    }
+
+    #[test]
+    fn registration_refuses_redirect_uris_that_do_not_parse() {
+        let mut s = OAuthStore::new();
+        for uri in [
+            "my_app://cb",
+            "com.example.my_app:/cb",
+            "1password://cb",
+            "127.0.0.1:1234/cb",
+            "/relative",
+            "",
+            "http://localhost:99999/cb",
+            "http://[fe80::1%25en0]:1234/cb",
+        ] {
+            let (status, err) = s
+                .admit_registration("7.7.7.7", &reg(&["https://ok.example/cb", uri]))
+                .unwrap_err();
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{uri}");
+            assert_eq!(err["error"], "invalid_redirect_uri", "{uri}");
+            assert_eq!(
+                err["error_description"],
+                "redirect_uris must be absolute URIs"
+            );
+        }
+    }
+
+    #[test]
     fn registration_is_rate_limited_per_address() {
         let mut s = OAuthStore::new();
         let ok = reg(&["http://localhost/cb"]);
@@ -1835,22 +2228,211 @@ mod tests {
     }
 
     #[test]
-    fn registry_is_bounded_and_unused_clients_expire() {
+    fn unused_clients_expire() {
         let mut s = OAuthStore::new();
-        for i in 0..MAX_CLIENTS {
-            s.clients
-                .insert(format!("c{i}"), client(Duration::from_secs(60), false));
-        }
-        let ok = reg(&["http://localhost/cb"]);
-        let (status, _) = s.admit_registration("4.4.4.4", &ok).unwrap_err();
-        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
         // never-used clients older than a day are collected; used ones stay
         s.clients
-            .insert("c0".into(), client(UNUSED_CLIENT_TTL * 2, false));
-        s.clients
-            .insert("c1".into(), client(UNUSED_CLIENT_TTL * 2, true));
-        assert!(s.admit_registration("4.4.4.4", &ok).is_ok());
+            .insert("c0".into(), client(UNUSED_CLIENT_TTL * 2, None));
+        s.clients.insert(
+            "c1".into(),
+            client(UNUSED_CLIENT_TTL * 2, Some(UNUSED_CLIENT_TTL * 2)),
+        );
+        s.collect_unused(nobody_owns_scripts);
         assert!(!s.clients.contains_key("c0"));
         assert!(s.clients.contains_key("c1"));
+    }
+
+    #[test]
+    fn collecting_unused_clients_spares_script_owners() {
+        let mut s = OAuthStore::new();
+        for id in ["owner", "other"] {
+            s.clients
+                .insert(id.into(), client(UNUSED_CLIENT_TTL * 2, None));
+        }
+        s.collect_unused(|| None);
+        assert_eq!(s.clients.len(), 2, "owners unknown: forget nobody");
+        s.collect_unused(|| Some(["owner".to_string()].into()));
+        assert!(s.clients.contains_key("owner") && !s.clients.contains_key("other"));
+    }
+
+    #[test]
+    fn script_owners_are_needed_when_full_or_something_can_be_collected() {
+        let mut s = OAuthStore::new();
+        s.clients
+            .insert("new".into(), client(Duration::from_secs(1), None));
+        assert!(!s.needs_script_owners());
+        s.clients
+            .insert("old".into(), client(UNUSED_CLIENT_TTL * 2, None));
+        assert!(s.needs_script_owners());
+        assert!(full_table().needs_script_owners());
+    }
+
+    #[test]
+    fn collecting_needs_no_lookup_when_nothing_expired() {
+        let mut s = OAuthStore::new();
+        s.clients
+            .insert("new".into(), client(Duration::from_secs(1), None));
+        s.collect_unused(|| panic!("no lookup when nothing is unused"));
+        assert!(s.clients.contains_key("new"));
+    }
+
+    #[test]
+    fn refusals_log_at_most_once_per_interval_and_count_the_rest() {
+        let mut s = OAuthStore::new();
+        let start = Instant::now();
+        assert_eq!(s.refusal_due_for_log(start), Some(1));
+        for _ in 0..3 {
+            assert_eq!(s.refusal_due_for_log(start + Duration::from_secs(1)), None);
+        }
+        let later = start + REFUSAL_LOG_INTERVAL;
+        assert_eq!(s.refusal_due_for_log(later), Some(4));
+        assert_eq!(s.refusal_due_for_log(later), None);
+    }
+
+    #[test]
+    fn make_room_needs_no_lookup_below_the_limit() {
+        let mut s = OAuthStore::new();
+        let evicted = s.make_room(|| panic!("no lookup when there is room"));
+        assert_eq!(evicted.unwrap(), Vec::<String>::new());
+    }
+
+    #[test]
+    fn make_room_evicts_never_tokened_oldest_first_then_longest_out_of_use() {
+        let mut s = full_table();
+        s.clients.remove("c500");
+        s.clients.remove("c501");
+        s.clients
+            .insert("new".into(), client(Duration::from_secs(1), None));
+        s.clients
+            .insert("old".into(), client(Duration::from_secs(60), None));
+
+        for expected in ["old", "new", "c0", "c1"] {
+            assert_eq!(s.make_room(nobody_owns_scripts).unwrap(), [expected]);
+            assert_eq!(s.clients.len(), MAX_CLIENTS - 1);
+            s.clients.insert(
+                format!("after-{expected}"),
+                client(Duration::ZERO, Some(Duration::ZERO)),
+            );
+        }
+    }
+
+    #[test]
+    fn make_room_shrinks_a_table_over_the_limit() {
+        let mut s = full_table();
+        s.clients
+            .insert("extra".into(), client(Duration::ZERO, Some(Duration::ZERO)));
+        let evicted = s.make_room(nobody_owns_scripts).unwrap();
+        assert_eq!(evicted.len(), 2);
+        assert!(evicted.contains(&"c0".to_string()) && evicted.contains(&"c1".to_string()));
+        assert_eq!(s.clients.len(), MAX_CLIENTS - 1);
+    }
+
+    #[test]
+    fn make_room_never_evicts_script_owners() {
+        let mut s = full_table();
+        let owners: HashSet<String> = ["c0".to_string(), "c1".to_string()].into();
+        assert_eq!(s.make_room(|| Some(owners)).unwrap(), ["c2"]);
+        assert!(s.clients.contains_key("c0") && s.clients.contains_key("c1"));
+
+        let mut s = full_table();
+        let all: HashSet<String> = s.clients.keys().cloned().collect();
+        let (status, _) = s.make_room(|| Some(all)).unwrap_err();
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(s.clients.len(), MAX_CLIENTS);
+    }
+
+    #[test]
+    fn make_room_evicts_nobody_when_owners_are_unknown() {
+        let mut s = full_table();
+        let (status, _) = s.make_room(|| None).unwrap_err();
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(s.clients.len(), MAX_CLIENTS);
+    }
+
+    #[test]
+    fn make_room_never_touches_a_live_session() {
+        let mut s = full_table();
+        give_token(&mut s, "t0", "c0", LIVE);
+        assert_eq!(s.make_room(nobody_owns_scripts).unwrap(), ["c1"]);
+        assert!(s.clients.contains_key("c0") && s.validate_token("t0"));
+    }
+
+    #[test]
+    fn make_room_refuses_when_everything_left_is_live_or_owned() {
+        let mut s = full_table();
+        let ids: Vec<String> = s.clients.keys().cloned().collect();
+        for (i, id) in ids.iter().enumerate().skip(1) {
+            give_token(&mut s, &format!("t{i}"), id, LIVE);
+        }
+        let owners: HashSet<String> = [ids[0].clone()].into();
+        let (status, _) = s.make_room(|| Some(owners)).unwrap_err();
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(s.clients.len(), MAX_CLIENTS);
+        assert_eq!(s.tokens.len(), MAX_CLIENTS - 1);
+    }
+
+    #[test]
+    fn make_room_does_not_count_an_expired_token_as_live() {
+        let mut s = full_table();
+        give_token(&mut s, "t0", "c0", Duration::ZERO);
+        assert_eq!(s.make_room(nobody_owns_scripts).unwrap(), ["c0"]);
+    }
+
+    #[test]
+    fn a_call_with_a_token_counts_as_use() {
+        let mut s = full_table();
+        give_token(&mut s, "t0", "c0", LIVE);
+        assert!(s.validate_token("t0"));
+        s.tokens.clear();
+        assert_eq!(s.make_room(nobody_owns_scripts).unwrap(), ["c1"]);
+        assert!(!s.validate_token("t0"));
+    }
+
+    #[test]
+    fn make_room_drops_the_codes_of_evicted_clients_only() {
+        let mut s = full_table();
+        for (key, client_id) in [("gone", "c0"), ("kept", "c1")] {
+            s.codes.insert(
+                key.into(),
+                AuthCode {
+                    _code: key.into(),
+                    client_id: client_id.into(),
+                    redirect_uri: String::new(),
+                    code_challenge: String::new(),
+                    _code_challenge_method: String::new(),
+                    created_at: Instant::now(),
+                },
+            );
+        }
+        assert_eq!(s.make_room(nobody_owns_scripts).unwrap(), ["c0"]);
+        assert!(!s.codes.contains_key("gone") && s.codes.contains_key("kept"));
+    }
+
+    /// The rate limit runs first: a limited caller cannot evict anyone.
+    #[tokio::test]
+    async fn rate_limited_registration_evicts_nobody() {
+        let mut oauth = full_table();
+        oauth.registrations.insert(
+            "9.9.9.9".into(),
+            vec![Instant::now(); MAX_REGISTRATIONS_PER_IP],
+        );
+        let state = Arc::new(AppState {
+            oauth: Mutex::new(oauth),
+            engine: None,
+            charts: ChartHub::from_env(),
+        });
+        let mut ext = axum::http::Extensions::new();
+        ext.insert(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+            [9, 9, 9, 9],
+            1,
+        ))));
+        let (status, _) = oauth_register(
+            State(state.clone()),
+            ext,
+            Json(reg(&["http://localhost/cb"])),
+        )
+        .await;
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(state.oauth.lock().unwrap().clients.len(), MAX_CLIENTS);
     }
 }
