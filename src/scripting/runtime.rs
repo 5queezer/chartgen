@@ -684,6 +684,16 @@ fn apply_edits(source: &str, edits: Vec<Edit>) -> String {
 /// Parse, static-check and evaluate the module top level, then check that
 /// `PARAMS`, `META` and `compute` are present and well-formed.
 pub fn compile(name: &str, source: &str) -> Result<Compiled, ScriptError> {
+    compile_within(name, source, DRY_RUN_TIMEOUT)
+}
+
+/// `compile` with its limit on top-level code as an argument, so a test can
+/// reach a guard behind that code on a loaded machine.
+pub(super) fn compile_within(
+    name: &str,
+    source: &str,
+    timeout: Duration,
+) -> Result<Compiled, ScriptError> {
     if source.len() > MAX_SOURCE {
         return Err(ScriptError::new(
             "parse",
@@ -706,7 +716,7 @@ pub fn compile(name: &str, source: &str) -> Result<Compiled, ScriptError> {
 
     let before = super::alloc::thread_net();
     let module = Module::with_temp_heap(|module| {
-        limited(&module, DRY_RUN_TIMEOUT, 0, |eval| {
+        limited(&module, timeout, 0, |eval| {
             eval.eval_module(ast, globals()).map(|_| ())
         })
         .map_err(|e| error_from("static", e))?;

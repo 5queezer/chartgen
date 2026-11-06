@@ -22,6 +22,12 @@ describe("barCloseMs", () => {
     ["4h", 14_400],
     ["1d", 86_400],
     ["1wk", 604_800],
+    ["7m", 420],
+    ["45m", 2_700],
+    ["90m", 5_400],
+    ["8h", 28_800],
+    ["2d", 172_800],
+    ["2wk", 1_209_600],
   ])("%s adds a fixed length", (interval, secs) => {
     expect(barCloseMs(T0, interval)).toBe((T0 + secs) * 1000);
   });

@@ -60,6 +60,7 @@ impl IndicatorStateManager {
             bars: window.bars.clone(),
             symbol: Some(symbol.to_uppercase()),
             interval: Some(interval.to_string()),
+            session: None,
         };
 
         for name in &self.indicator_names {

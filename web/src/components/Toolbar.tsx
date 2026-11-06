@@ -30,6 +30,7 @@ import {
   setChartType,
   setSymbol,
   setTheme,
+  recentTimeframes,
   setTimeframe as storeSetTimeframe,
   symbol,
   theme,
@@ -319,10 +320,12 @@ export function Toolbar(props: ToolbarProps): JSX.Element {
   const showReplay = () => width() >= BP_TINY && !compact();
   const hasFullscreen = document.fullscreenEnabled;
   // Timeframes in the dropdown: the favourites join it once their buttons go.
-  const overflow = () =>
+  const overflow = (): readonly Timeframe[] =>
     showTimeframes()
       ? TIMEFRAME_OPTIONS.filter((tf) => !FAVOURITE_TIMEFRAMES.includes(tf))
       : TIMEFRAME_OPTIONS;
+  // The dropdown's button names the current timeframe unless a favourite does.
+  const inDropdown = () => !showTimeframes() || !FAVOURITE_TIMEFRAMES.includes(timeframe());
 
   return (
     <div
@@ -371,16 +374,14 @@ export function Toolbar(props: ToolbarProps): JSX.Element {
         </Show>
         <DropdownMenu.Root>
           <DropdownMenu.Trigger
-            class={`${buttonClass} ${
-              overflow().includes(timeframe()) ? activeClass : ""
-            }`}
+            class={`${buttonClass} ${inDropdown() ? activeClass : ""}`}
             aria-label={
-              overflow().includes(timeframe())
+              inDropdown()
                 ? `More timeframes (current: ${timeframeLabel(timeframe())})`
                 : "More timeframes"
             }
           >
-            <Show when={overflow().includes(timeframe())}>
+            <Show when={inDropdown()}>
               {timeframeLabel(timeframe())}
             </Show>
             <span aria-hidden="true">▾</span>
@@ -406,6 +407,20 @@ export function Toolbar(props: ToolbarProps): JSX.Element {
                   </DropdownMenu.Group>
                 )}
               </For>
+              <Show when={recentTimeframes().length > 0}>
+                <DropdownMenu.Group>
+                  <DropdownMenu.GroupLabel class="px-3 py-1 text-[10px] uppercase tracking-wide text-[color:var(--color-fg-muted)]">
+                    Recent
+                  </DropdownMenu.GroupLabel>
+                  <For each={recentTimeframes()}>
+                    {(tf: Timeframe) => (
+                      <DropdownMenu.Item class={itemClass} onSelect={() => setTimeframe(tf)}>
+                        {timeframeLabel(tf)}
+                      </DropdownMenu.Item>
+                    )}
+                  </For>
+                </DropdownMenu.Group>
+              </Show>
               <DropdownMenu.Separator class="my-1 h-px bg-[color:var(--color-border)]" />
               <DropdownMenu.Item
                 class={itemClass}
@@ -636,7 +651,7 @@ interface TimeframeEntryProps {
   onSelect: (tf: Timeframe) => void;
 }
 
-/** Small popup: type `15`, `2h`, `3D`... and press Enter to switch timeframe. */
+/** Small popup: type `15`, `2h`, `7m`, `2D`... and press Enter to switch timeframe. */
 function TimeframeEntry(props: TimeframeEntryProps): JSX.Element {
   let input!: HTMLInputElement;
   let previouslyFocused: HTMLElement | null = null;
@@ -672,7 +687,7 @@ function TimeframeEntry(props: TimeframeEntryProps): JSX.Element {
             <input
               ref={input}
               type="text"
-              aria-label="Timeframe, for example 15, 2h, 3D"
+              aria-label="Timeframe, for example 15, 7m, 8h, 2D"
               autocomplete="off"
               spellcheck={false}
               value={value()}
@@ -694,7 +709,11 @@ function TimeframeEntry(props: TimeframeEntryProps): JSX.Element {
             <p class="mt-2 text-xs text-[color:var(--color-fg-muted)]">
               <Show
                 when={parsed()}
-                fallback="Examples: 5, 15, 60, 2h, 3D, W"
+                fallback={
+                  value() === ""
+                    ? "Examples: 7, 45, 8h, 2D, 2W, 3M"
+                    : "Examples: 7, 45, 8h, 2D, 2W, 3M. At most 365D, 52W or 12M; above 60m a round number such as 65m."
+                }
               >
                 {(tf) => `Enter to switch to ${timeframeLabel(tf())}`}
               </Show>

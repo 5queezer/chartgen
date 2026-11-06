@@ -112,8 +112,8 @@ describe("zonedToUtc", () => {
 
 describe("date bars", () => {
   it("recognises daily and longer intervals", () => {
-    for (const i of ["1d", "1wk", "1mo"]) expect(isDateBar(i)).toBe(true);
-    for (const i of ["1m", "4h", null]) expect(isDateBar(i)).toBe(false);
+    for (const i of ["1d", "2d", "1wk", "2wk", "1mo", "3mo"]) expect(isDateBar(i)).toBe(true);
+    for (const i of ["1m", "7m", "4h", "36h", null]) expect(isDateBar(i)).toBe(false);
   });
   it("shows the date alone, the same in every zone", () => {
     const midnight = Date.UTC(2026, 0, 1);

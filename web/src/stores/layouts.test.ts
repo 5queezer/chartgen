@@ -71,7 +71,7 @@ describe("parseLayouts", () => {
         null,
         { ...good, id: "" },
         { ...good, name: "  " },
-        { ...good, id: "b", state: { ...good.state, timeframe: "7m" } },
+        { ...good, id: "b", state: { ...good.state, timeframe: "61m" } },
         { ...good, id: "c", state: { ...good.state, indicators: "rsi" } },
         {
           ...good,

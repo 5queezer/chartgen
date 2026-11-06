@@ -637,6 +637,7 @@ pub(crate) mod test_util {
                 .collect(),
             symbol: None,
             interval: None,
+            session: None,
         }
     }
 

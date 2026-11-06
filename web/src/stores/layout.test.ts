@@ -33,7 +33,7 @@ describe("layout store", () => {
   it("falls back to defaults on corrupt or invalid data", async () => {
     stubStorage({
       "chartgen.layout.symbol": "{not json",
-      "chartgen.layout.timeframe": '"7m"',
+      "chartgen.layout.timeframe": '"61m"',
       "chartgen.layout.chartType": "42",
       "chartgen.layout.recents": '"nope"',
     });
@@ -86,6 +86,25 @@ describe("layout store", () => {
     expect(data.get("chartgen.layout.chartType")).toBe('"area"');
     expect(data.get("chartgen.layout.symbol")).toBe('"ETH"');
     expect(s.symbol()).toBe("ETH");
+  });
+
+  it("remembers custom timeframes, not presets, newest first and capped at 5", async () => {
+    const store = stubStorage({
+      "chartgen.layout.recentTimeframes": '["7m","1h","61m",3,"7m","45m"]',
+    });
+    const s = await load();
+    expect(s.recentTimeframes()).toEqual(["7m", "45m"]);
+    s.setTimeframe("15m");
+    expect(s.recentTimeframes()).toEqual(["7m", "45m"]);
+    for (const tf of ["2d", "8h", "90m", "2wk", "45m"]) s.setTimeframe(tf);
+    expect(s.timeframe()).toBe("45m");
+    expect(s.recentTimeframes()).toEqual(["45m", "2wk", "90m", "8h", "2d"]);
+    expect(JSON.parse(store.get("chartgen.layout.recentTimeframes")!)).toEqual(s.recentTimeframes());
+  });
+
+  it("restores a custom timeframe", async () => {
+    stubStorage({ "chartgen.layout.timeframe": '"7m"' });
+    expect((await load()).timeframe()).toBe("7m");
   });
 
   it("setSymbol does not touch recents; addRecent dedupes, newest first, capped at 10", async () => {
