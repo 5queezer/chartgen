@@ -17,7 +17,7 @@ pub fn tools_list_result() -> Value {
         "tools": [
             {
                 "name": "generate_chart",
-                "description": "Generate a financial candlestick or OHLCV chart for a given stock or crypto ticker symbol. Supports multiple timeframes (1m, 3m, 5m, 15m, 30m, 1h, 2h, 4h, 6h, 12h, 1d, 3d, 1wk, 1mo) and 33 technical indicators including RSI, MACD, EMA, Bollinger Bands, Ichimoku Cloud, Stochastic, ATR, OBV, VWAP, Supertrend, and more. Returns a rendered PNG chart with price action and indicator panels by default. Set format='summary' to instead receive a compact JSON summary (OHLCV stats, last indicator values, signals, divergences, levels) — much cheaper in tokens and ideal for automated reasoning without vision. Set format='series' to receive a full per-bar time-series JSON payload (every OHLCV bar plus 1:1 aligned indicator value arrays, signals with bar timestamps, hlines, y_range) — useful for downstream numeric computation that needs raw arrays rather than last values. Use when the user asks to plot, chart, visualize, render, or analyze price action, candlesticks, or technical signals. Data sourced from Yahoo Finance (stocks like AAPL, MSFT, TSLA) and Binance (crypto like BTCUSDT, ETHUSDT). Call list_indicators first to discover all available indicator names and their configurable parameters.",
+                "description": "Generate a financial candlestick or OHLCV chart for a given stock or crypto ticker symbol. Supports any timeframe of a number and a unit (1m, 7m, 45m, 90m, 4h, 8h, 1d, 2D, 2W, 1M, ...) and 33 technical indicators including RSI, MACD, EMA, Bollinger Bands, Ichimoku Cloud, Stochastic, ATR, OBV, VWAP, Supertrend, and more. Returns a rendered PNG chart with price action and indicator panels by default. Set format='summary' to instead receive a compact JSON summary (OHLCV stats, last indicator values, signals, divergences, levels) — much cheaper in tokens and ideal for automated reasoning without vision. Set format='series' to receive a full per-bar time-series JSON payload (every OHLCV bar plus 1:1 aligned indicator value arrays, signals with bar timestamps, hlines, y_range) — useful for downstream numeric computation that needs raw arrays rather than last values. Use when the user asks to plot, chart, visualize, render, or analyze price action, candlesticks, or technical signals. Data sourced from Yahoo Finance (stocks like AAPL, MSFT, TSLA) and Binance (crypto like BTCUSDT, ETHUSDT). Call list_indicators first to discover all available indicator names and their configurable parameters.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -31,7 +31,7 @@ pub fn tools_list_result() -> Value {
                         },
                         "timeframe": {
                             "type": "string",
-                            "description": "Candlestick timeframe / interval: 1m, 3m, 5m, 15m, 30m, 1h, 2h, 4h, 6h, 12h, 1d, 3d, 1wk, 1mo",
+                            "description": "Candlestick timeframe / interval: a number and a unit, m minutes, h hours, D days, W weeks, M months (1m, 5m, 7m, 45m, 90m, 4h, 8h, 1d, 2D, 1W, 2W, 1M). Up to 1439m, 168h, 365D, 52W, 12M; one bar may take at most 60 native bars, so 61m is rejected and 65m is not. The response echoes the canonical form (120m becomes 2h, 2W becomes 2wk, 1M becomes 1mo).",
                             "default": "4h"
                         },
                         "interval": {
@@ -134,7 +134,7 @@ pub fn tools_list_result() -> Value {
                         },
                         "interval": {
                             "type": "string",
-                            "description": "Candle interval (e.g. 1m, 3m, 5m, 15m, 1h, 2h, 4h, 1d, 3d)",
+                            "description": "Candle interval, as generate_chart's timeframe (e.g. 1m, 7m, 45m, 1h, 4h, 8h, 1d, 2D, 2W)",
                             "default": "4h"
                         },
                         "indicators": {
@@ -323,7 +323,7 @@ pub fn tools_list_result() -> Value {
                         },
                         "timeframe": {
                             "type": "string",
-                            "description": "Candlestick timeframe, as for generate_chart: 1m, 3m, 5m, 15m, 30m, 1h, 2h, 4h, 6h, 12h, 1d, 3d, 1wk, 1mo.",
+                            "description": "Candlestick timeframe, as for generate_chart: a number and a unit (1m, 7m, 45m, 4h, 8h, 1d, 2D, 2W, 1M). Binance pushes intervals it has no stream for by resampling a finer one.",
                             "default": "4h"
                         },
                         "indicators": {

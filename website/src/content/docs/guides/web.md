@@ -60,8 +60,10 @@ stays visible.
   with the active one highlighted (below 1200 px they all move into the
   dropdown, which then lists every timeframe). The dropdown holds the rest, grouped as
   on TradingView: Minutes (3m, 30m), Hours (2h, 6h, 12h) and Days (3D, 1M),
-  and ends with **Custom interval...**, which opens the same popup as the
-  keyboard entry (see [Keyboard shortcuts](#keyboard-shortcuts)).
+  then **Recent** with your last five custom intervals, and ends with
+  **Custom interval...**, which opens the same popup as the keyboard entry (see
+  [Keyboard shortcuts](#keyboard-shortcuts)). While a custom interval is
+  active, the dropdown's button shows it.
 - **Chart type** — Candles, Hollow candles (only up candles hollow), Bars (OHLC), Line, Line with markers, Step line, Area, Baseline, Columns, High-low, Heikin Ashi. Heikin Ashi is computed on the server (the web app sends `chart_style: "heikin_ashi"` with every load, tail poll and history page), so the legend shows Heikin Ashi OHLC values and indicators are calculated on them, as on TradingView. Switching to or from it reloads the chart. The other types are drawn in the browser from the same bars, so switching between them needs no reload, and the legend keeps showing the bar's OHLC:
   - **Line with markers** — the close line with a dot on every bar.
   - **Step line** — the closes joined by horizontal-then-vertical steps.
@@ -362,13 +364,19 @@ while typing in a field or while a dialog or menu is open.
 | `Shift+↓` | Bar replay: play / pause |
 | `Esc` | Bar replay: jump to real time |
 
-The timeframe popup accepts a number of minutes (`5`, `15`, `60`, `120`,
-`240`) or a number with a unit `m`, `h`, `d`, `w` (`1h`, `2h`, `4H`, `3D`);
-an uppercase `M` means month (`1M`), lowercase `m` minutes. A lone `D`, `W`
+The timeframe popup accepts a number of minutes (`5`, `7`, `45`, `120`) or a
+number with a unit `m`, `h`, `d`, `w` (`7m`, `45m`, `8h`, `4H`, `2D`, `2W`);
+an uppercase `M` means month (`3M`), lowercase `m` minutes. A lone `D`, `W`
 or `M` means one day, week or month. `1`, `2`, `0` then `Enter` selects 2h.
-The supported set is 1m, 3m, 5m, 15m, 30m, 1h, 2h, 4h, 6h, 12h, 1D, 3D, 1W
-and 1M, for Binance and Yahoo symbols alike; anything else (7m, 2D, seconds)
-is rejected and the field turns red.
+This works for Binance and Yahoo symbols alike. The longest are 1439m, 168h,
+365D, 52W and 12M, and above 60 minutes the length must be a round one (`65m`
+works, `61m` does not). The field turns red for anything else, including
+seconds, and says so. [MCP reference](/chartgen/reference/mcp/#generate_chart)
+lists how bars line up and what each source builds them from.
+
+A custom interval works like a preset everywhere: live updates, history paging,
+bar replay, alerts on it, layouts and share links. On a stock, an interval built
+from Yahoo's finest bars has as much history as they do: about 30 days for `7m`.
 
 ## Drawing tools
 
@@ -536,7 +544,7 @@ https://chartgen.vasudev.xyz/?symbol=ETHUSDT&interval=4h&type=candles&ind=rsi(le
 | Parameter | Meaning |
 |---|---|
 | `symbol` | Chart symbol |
-| `interval` | Timeframe (`4h`, `240`, `1d`, ...) |
+| `interval` | Timeframe (`4h`, `240`, `1d`, `7m`, `2W`, ...) |
 | `type` | Chart type: `candles`, `hollow`, `bars`, `line`, `line_markers`, `step_line`, `area`, `baseline`, `columns`, `high_low`, `heikin_ashi` |
 | `ind` | Indicators, comma separated (at most 50, 2 KB). Non-default parameters go in parentheses, separated by `;`: `macd(fast:8;slow:20)`; characters outside letters, digits, `.`, `_` and `-` in a text value are percent-encoded. Visible indicators only; `ind=` means none. A repeated name is another instance: `rsi,rsi(length:21)` shows two RSIs |
 | `compare` | Compare symbols, comma separated; always written, `compare=` clears them |

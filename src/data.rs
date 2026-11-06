@@ -1,4 +1,5 @@
 /// OHLCV bar and data container.
+use crate::interval::{Interval, Unit};
 
 #[derive(Clone, Debug)]
 #[allow(dead_code)]
@@ -117,59 +118,30 @@ pub fn sample_data(n: usize) -> OhlcvData {
     }
 }
 
-/// Length of a supported bar interval in seconds: the union of Binance and
-/// Yahoo timeframe names ("1m", "4h", "1d", "1w"/"1wk", "1M"/"1mo", ...).
-/// Months are approximated as 30 days. `None` for anything else, so callers
-/// can reject the timeframe instead of doing arithmetic on it.
+/// Length in seconds of a bar interval in the grammar of `interval::Interval`
+/// ("1m", "45m", "4h", "2D", "1w"/"1wk", "1M"/"1mo", ...). Months are
+/// approximated as 30 days. `None` for anything else, so callers can reject
+/// the timeframe instead of doing arithmetic on it.
 pub fn interval_secs(interval: &str) -> Option<i64> {
-    const MIN: i64 = 60;
-    const HOUR: i64 = 3_600;
-    const DAY: i64 = 86_400;
-    Some(match interval {
-        "1m" => MIN,
-        "2m" => 2 * MIN,
-        "3m" => 3 * MIN,
-        "5m" => 5 * MIN,
-        "15m" => 15 * MIN,
-        "30m" => 30 * MIN,
-        "60m" | "1h" => HOUR,
-        "90m" => 90 * MIN,
-        "2h" => 2 * HOUR,
-        "4h" => 4 * HOUR,
-        "6h" => 6 * HOUR,
-        "8h" => 8 * HOUR,
-        "12h" => 12 * HOUR,
-        "1d" => DAY,
-        "3d" => 3 * DAY,
-        "5d" => 5 * DAY,
-        "1w" | "1wk" => 7 * DAY,
-        "1M" | "1mo" => 30 * DAY,
-        "3mo" => 90 * DAY,
-        _ => return None,
-    })
+    Interval::parse(interval).ok().map(|iv| iv.secs())
 }
 
 /// Open times (unix s) of the `n` bars after the last bar of `data`, for a
-/// projection past it (ADR-0033). Monthly and quarterly bars step by
+/// projection past it (ADR-0033). Month-based bars step by
 /// calendar months. Day-based bars (1d and up) skip Saturday and Sunday
 /// when no loaded bar falls on a weekend (a stock); exchange sessions and
 /// holidays are not modelled. `None` without bar times or a known interval.
 pub fn future_bar_times(data: &OhlcvData, n: usize) -> Option<Vec<i64>> {
     use chrono::{DateTime, Datelike, Months, Weekday};
     let last = data.bars.last()?.date.parse::<i64>().ok()?;
-    let interval = data.interval.as_deref()?;
-    let months = match interval {
-        "1M" | "1mo" => Some(1),
-        "3mo" => Some(3),
-        _ => None,
-    };
-    if let Some(m) = months {
+    let iv = Interval::parse(data.interval.as_deref()?).ok()?;
+    if iv.unit == Unit::Month {
         let start = DateTime::from_timestamp(last, 0)?;
         return (1..=n as u32)
-            .map(|k| Some(start.checked_add_months(Months::new(m * k))?.timestamp()))
+            .map(|k| Some(start.checked_add_months(Months::new(iv.n * k))?.timestamp()))
             .collect();
     }
-    let step = interval_secs(interval)?;
+    let step = iv.secs();
     let weekend = |t: i64| {
         DateTime::from_timestamp(t, 0)
             .is_some_and(|d| matches!(d.weekday(), Weekday::Sat | Weekday::Sun))
@@ -219,16 +191,14 @@ pub fn bar_interval_secs(interval: &str) -> Option<i64> {
     (k > 0).then(|| k.checked_mul(unit_secs)).flatten()
 }
 
-/// Offset of the bar grid from the epoch: weekly bars open on Monday
-/// (1970-01-01 was a Thursday) and Binance's 3d bars on epoch days with
-/// `day % 3 == 1`; everything else is epoch-aligned.
-fn grid_offset_ms(step: i64) -> i64 {
-    if step == 7 * 86_400 {
-        4 * 86_400_000
-    } else if step == 3 * 86_400 {
-        86_400_000
-    } else {
-        0
+/// Offset of the sample bar grid from the epoch, as on `Interval::grid_start`:
+/// weekly bars open on Monday (1970-01-01 was a Thursday), day bars on epoch
+/// day 1, like Binance's 3d. Sample months are a fixed 30 days from the epoch.
+fn grid_offset_ms(iv: &Interval) -> i64 {
+    match iv.unit {
+        Unit::Week => 4 * 86_400_000,
+        Unit::Day => 86_400_000,
+        _ => 0,
     }
 }
 
@@ -277,14 +247,15 @@ pub fn sample_ohlcv(
     end_time_ms: Option<i64>,
     now_ms: i64,
 ) -> Result<OhlcvData, String> {
-    let step = interval_secs(interval).ok_or(format!("Unsupported interval: {interval}"))?;
+    let iv = Interval::parse(interval)?;
+    let step = iv.secs();
     let step_ms = step * 1000;
     // FNV-1a: stable across Rust versions, unlike DefaultHasher.
     let seed = symbol.bytes().fold(0xCBF2_9CE4_8422_2325_u64, |h, b| {
         (h ^ b as u64).wrapping_mul(0x0100_0000_01B3)
     });
 
-    let off = grid_offset_ms(step);
+    let off = grid_offset_ms(&iv);
     let slot = |ms: i64| {
         ms.saturating_sub(off)
             .div_euclid(step_ms)
@@ -413,8 +384,18 @@ mod tests {
             future_bar_times(&at(&[fri], "4h"), 1),
             Some(vec![fri + 14_400])
         );
+        // Custom intervals step like any other.
+        assert_eq!(
+            future_bar_times(&at(&[t], "7m"), 2),
+            Some(vec![t + 420, t + 840])
+        );
+        let m = future_bar_times(&at(&[nov], "2mo"), 2).unwrap();
+        assert_eq!(
+            m,
+            vec![ts("2027-01-01T00:00:00Z"), ts("2027-03-01T00:00:00Z")]
+        );
         // No time or unknown interval: none.
-        assert_eq!(future_bar_times(&at(&[t], "7m"), 2), None);
+        assert_eq!(future_bar_times(&at(&[t], "61m"), 2), None);
         let mut untimed = at(&[t], "1d");
         untimed.bars[0].date = "D0".into();
         assert_eq!(future_bar_times(&untimed, 2), None);
@@ -455,7 +436,11 @@ mod tests {
         assert_eq!(interval_secs("1x"), None);
         // Absurd multiples are rejected rather than overflowing.
         assert_eq!(interval_secs("4611686018427387904m"), None);
-        assert_eq!(interval_secs("7h"), None);
+        assert_eq!(interval_secs("61m"), None);
+        // Custom intervals are the grammar's.
+        assert_eq!(interval_secs("7h"), Some(25_200));
+        assert_eq!(interval_secs("2D"), Some(172_800));
+        assert_eq!(interval_secs("2W"), Some(1_209_600));
     }
 
     #[test]
@@ -491,13 +476,30 @@ mod tests {
             ("12h", 43_200),
             ("3d", 259_200),
             ("1mo", 2_592_000),
+            ("7m", 420),
+            ("90m", 5_400),
+            ("8h", 28_800),
+            ("2d", 172_800),
+            ("2wk", 1_209_600),
         ] {
             let d = sample_ohlcv("BTCUSDT", tf, 20, None, now).unwrap();
             assert_eq!(d.len(), 20, "{tf}");
             let ts: Vec<i64> = d.bars.iter().map(|b| b.date.parse().unwrap()).collect();
             assert!(ts.windows(2).all(|w| w[1] - w[0] == secs), "{tf} spacing");
-            // Binance's 3d klines open on epoch days with day % 3 == 1.
-            let off = if tf == "3d" { 86_400 } else { 0 };
+            // Binance's 3d klines open on epoch days with day % 3 == 1; weeks
+            // on Monday, epoch day 4. The same as `Interval::grid_start`.
+            let off = match tf {
+                "3d" | "2d" => 86_400,
+                "2wk" => 4 * 86_400,
+                _ => 0,
+            };
+            if tf != "1mo" {
+                let iv = Interval::parse(tf).unwrap();
+                assert!(
+                    ts.iter().all(|t| iv.grid_start(*t) == *t),
+                    "{tf} grid_start"
+                );
+            }
             assert!(ts.iter().all(|t| (t - off) % secs == 0), "{tf} grid");
         }
     }

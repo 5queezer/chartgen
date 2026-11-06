@@ -5,7 +5,10 @@
 //! indicators, chart style, warmup) share a group. A group keeps a rolling
 //! window of `TAIL_BARS + warmup` raw bars: seeded through the normal fetch
 //! path, then updated from a feed. Groups on the same symbol and interval
-//! share one feed, so one Binance WebSocket serves every chart of it.
+//! share one feed, so one Binance WebSocket serves every chart of it. A chart
+//! of an interval with no stream (7m, ADR-0038) holds the bars of the stream
+//! it is built from and resamples them on each recompute, with the code a fetch
+//! uses, so a live bar is the bar a reload shows.
 //!
 //! After a feed event the group recomputes the tail exactly like
 //! `generate_chart(format=series, bars=TAIL_BARS, warmup)`, on the blocking
@@ -23,6 +26,7 @@ use std::time::Duration;
 
 use chartgen::data::{self, Bar, OhlcvData};
 use chartgen::feed::{BinanceFeed, FeedEvent};
+use chartgen::interval::Interval;
 use futures_util::future::BoxFuture;
 use serde_json::{json, Value};
 use tokio::sync::{broadcast, mpsc};
@@ -48,11 +52,6 @@ pub const PUSH_LIMIT: &str = "push limit reached";
 const SAMPLE_TICK: Duration = Duration::from_millis(500);
 /// Feed events buffered per group before it lags (and skips some).
 const FEED_BUFFER: usize = 1024;
-/// Binance kline stream intervals.
-const BINANCE_KLINES: [&str; 15] = [
-    "1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "8h", "12h", "1d", "3d", "1w", "1M",
-];
-
 #[derive(Clone, Copy, Debug)]
 pub struct Limits {
     /// Subscriptions one bearer token may hold, across its streams.
@@ -140,14 +139,7 @@ pub struct BinanceSource;
 impl PushSource for BinanceSource {
     fn feed_interval(&self, symbol: &str, timeframe: &str) -> Result<String, String> {
         binance_only(symbol)?;
-        let interval = fetch::binance_interval(timeframe);
-        if BINANCE_KLINES.contains(&interval) {
-            Ok(interval.to_string())
-        } else {
-            Err(format!(
-                "{NOT_PUSHABLE}: Binance has no {timeframe} kline stream; poll generate_chart instead"
-            ))
-        }
+        Ok(Interval::parse(timeframe)?.binance_base().0.to_string())
     }
 
     fn seed(&self, symbol: &str, timeframe: &str, count: usize) -> Result<OhlcvData, String> {
@@ -176,9 +168,7 @@ pub struct SampleSource;
 impl PushSource for SampleSource {
     fn feed_interval(&self, symbol: &str, timeframe: &str) -> Result<String, String> {
         binance_only(symbol)?;
-        data::interval_secs(timeframe)
-            .map(|_| timeframe.to_string())
-            .ok_or_else(|| format!("Unsupported timeframe: {timeframe}"))
+        Interval::parse(timeframe).map(|_| timeframe.to_string())
     }
 
     fn seed(&self, symbol: &str, timeframe: &str, count: usize) -> Result<OhlcvData, String> {
@@ -524,6 +514,7 @@ impl ChartHub {
                 req.clone(),
                 id,
                 events,
+                feed.1.clone(),
                 req.push_interval(limits.min_push_interval),
             ));
             st.groups.insert(
@@ -632,13 +623,15 @@ impl ChartHub {
 /// A group's task: seed the window, then apply feed events and push the
 /// recomputed tail, throttled to one push per `min_interval`. Seeding and
 /// recomputes run on the blocking pool; one that fails or panics ends the
-/// group.
+/// group. The window holds bars of `feed_interval`; when that is finer than
+/// the chart's, each recompute resamples it first.
 async fn run_group(
     hub: Weak<ChartHub>,
     source: Arc<dyn PushSource>,
     req: ChartRequest,
     id: u64,
     mut events: broadcast::Receiver<FeedEvent>,
+    feed_interval: String,
     min_interval: Duration,
 ) {
     let fail = |why: String| {
@@ -647,10 +640,26 @@ async fn run_group(
             hub.drop_group(&req, id);
         }
     };
-    let len = TAIL_BARS + req.warmup;
-    let (symbol, timeframe) = (req.ticker.clone(), req.timeframe.clone());
+    let resample_to = Interval::parse(&req.timeframe)
+        .ok()
+        .filter(|iv| data::interval_secs(&feed_interval).is_some_and(|secs| secs < iv.secs()));
+    let len = match resample_to {
+        // One bar more than the window: its oldest may lack klines.
+        Some(iv) => {
+            let per_bar =
+                (iv.secs() / data::interval_secs(&feed_interval).unwrap_or(iv.secs())) as usize;
+            ((TAIL_BARS + req.warmup + 1) * per_bar).min(fetch::MAX_BASE_BARS)
+        }
+        None => TAIL_BARS + req.warmup,
+    };
+    let symbol = req.ticker.clone();
+    let seed_interval = match resample_to {
+        Some(_) => feed_interval,
+        None => req.timeframe.clone(),
+    };
     // Subscribed to the feed before seeding, so no event in between is lost.
-    let seeded = tokio::task::spawn_blocking(move || source.seed(&symbol, &timeframe, len)).await;
+    let seeded =
+        tokio::task::spawn_blocking(move || source.seed(&symbol, &seed_interval, len)).await;
     let mut window = match seeded {
         Ok(Ok(d)) if !d.is_empty() => d.bars,
         Ok(Ok(_)) => return fail("seeding returned no bars".into()),
@@ -671,13 +680,16 @@ async fn run_group(
                 Err(broadcast::error::RecvError::Closed) => return fail("feed ended".into()),
             },
             _ = tokio::time::sleep_until(next), if dirty => {
-                let raw = OhlcvData {
+                let mut raw = OhlcvData {
                     bars: window.clone(),
                     symbol: Some(req.ticker.clone()),
                     interval: Some(req.timeframe.clone()),
                 };
                 let (indicators, style) = (indicators.clone(), req.chart_style.clone());
                 let computed = tokio::task::spawn_blocking(move || {
+                    if let Some(iv) = resample_to {
+                        raw.bars = fetch::resample(&raw.bars, &iv, true);
+                    }
                     crate::mcp::series_tail(&raw, &indicators, &style, TAIL_BARS)
                 })
                 .await;
@@ -742,7 +754,16 @@ mod tests {
         }
         assert_eq!(BinanceSource.feed_interval("BTCUSDT", "3d").unwrap(), "3d");
         assert_eq!(BinanceSource.feed_interval("BTCUSDT", "1mo").unwrap(), "1M");
-        assert!(BinanceSource.feed_interval("BTCUSDT", "2m").is_err());
+        // No stream of their own: built from the coarsest that divides them.
+        assert_eq!(BinanceSource.feed_interval("BTCUSDT", "2m").unwrap(), "1m");
+        assert_eq!(BinanceSource.feed_interval("BTCUSDT", "7m").unwrap(), "1m");
+        assert_eq!(
+            BinanceSource.feed_interval("BTCUSDT", "45m").unwrap(),
+            "15m"
+        );
+        assert_eq!(BinanceSource.feed_interval("BTCUSDT", "2wk").unwrap(), "1w");
+        assert_eq!(SampleSource.feed_interval("BTCUSDT", "7m").unwrap(), "7m");
+        assert!(BinanceSource.feed_interval("BTCUSDT", "61m").is_err());
     }
 
     #[test]
@@ -816,6 +837,8 @@ mod tests {
         /// Ends every running feed.
         stop: Arc<tokio::sync::Notify>,
         panic_on_seed: AtomicBool,
+        /// The feed behind every chart, when it is not the chart's interval.
+        base: Option<&'static str>,
     }
 
     struct Running(Arc<AtomicUsize>);
@@ -827,7 +850,7 @@ mod tests {
 
     impl PushSource for Fake {
         fn feed_interval(&self, symbol: &str, timeframe: &str) -> Result<String, String> {
-            binance_only(symbol).map(|_| timeframe.to_string())
+            binance_only(symbol).map(|_| self.base.unwrap_or(timeframe).to_string())
         }
         fn seed(&self, symbol: &str, timeframe: &str, count: usize) -> Result<OhlcvData, String> {
             assert!(!self.panic_on_seed.load(Ordering::SeqCst), "seed exploded");
@@ -908,6 +931,63 @@ mod tests {
 
     async fn settle() {
         tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    #[tokio::test]
+    async fn a_custom_interval_folds_its_feed_onto_the_grid_of_a_reload() {
+        let fake = Arc::new(Fake {
+            base: Some("1m"),
+            ..Fake::default()
+        });
+        let hub = hub(&fake, quick());
+        let (tx, mut rx) = stream();
+        hub.link_stream("s1", tx);
+        let r = ChartRequest {
+            timeframe: "7m".into(),
+            ..req("BTCUSDT", "[]")
+        };
+        hub.subscribe("tok", "ip", "s1", r).unwrap();
+
+        // The seed's 1m bars arrive as 7m bars on the 7m grid. Fake's clock
+        // stands at 2024-01-01T00:00Z.
+        let now: i64 = 1_704_067_200;
+        let iv = Interval::parse("7m").unwrap();
+        let open = iv.grid_start(now);
+        let n = next(&mut rx, 2_000).await.expect("seed push");
+        let series = &n["params"]["series"];
+        assert_eq!(series["interval"], "7m");
+        let bars = series["bars"].as_array().unwrap();
+        assert_eq!(bars.len(), TAIL_BARS);
+        assert_eq!(bars[0]["t"], open - 420);
+        assert_eq!(bars[1]["t"], open);
+        // Fake's clock stands on the bar's last minute (now + 60 is on the grid).
+        assert_eq!(open + 420, now + 60);
+
+        // The first minute past the bar opens the next one.
+        fake.send(FeedEvent::Tick(bar(now + 60, 123.0))).await;
+        let n = next(&mut rx, 2_000).await.expect("rollover push");
+        let bars = n["params"]["series"]["bars"].as_array().unwrap().clone();
+        assert_eq!(bars[0]["t"], open);
+        assert_eq!(bars[1]["t"], now + 60);
+        assert_eq!(bars[1]["c"], 123.0);
+
+        // The next minute folds into that bar.
+        fake.send(FeedEvent::Tick(bar(now + 120, 124.0))).await;
+        let n = next(&mut rx, 2_000).await.expect("tick push");
+        let last = &n["params"]["series"]["bars"][1];
+        assert_eq!(last["t"], now + 60);
+        assert_eq!(last["o"], 123.0);
+        assert_eq!(last["c"], 124.0);
+        assert_eq!(last["v"].as_f64().unwrap(), 2.0);
+
+        // Its update replaces that minute rather than adding to it.
+        let mut update = bar(now + 120, 125.0);
+        update.volume = 3.0;
+        fake.send(FeedEvent::Tick(update)).await;
+        let n = next(&mut rx, 2_000).await.expect("update push");
+        let last = &n["params"]["series"]["bars"][1];
+        assert_eq!(last["c"], 125.0);
+        assert_eq!(last["v"].as_f64().unwrap(), 4.0);
     }
 
     #[tokio::test]

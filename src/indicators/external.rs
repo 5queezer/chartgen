@@ -38,19 +38,27 @@ fn align_to_bars(external: &[(i64, f64)], bars: &[Bar], max_gap_ms: i64) -> Vec<
     out
 }
 
+/// The Binance futures data period for a chart interval: the longest that
+/// fits in one bar.
 fn map_interval(interval: &str) -> &str {
-    match interval {
-        "1m" | "5m" => "5m",
-        "15m" => "15m",
-        "30m" => "30m",
-        "1h" | "60m" => "1h",
-        "2h" => "2h",
-        "4h" => "4h",
-        "6h" => "6h",
-        "12h" => "12h",
-        "1d" | "1wk" | "1mo" => "1d",
-        _ => "4h",
-    }
+    const PERIODS: [(i64, &str); 9] = [
+        (86_400, "1d"),
+        (43_200, "12h"),
+        (21_600, "6h"),
+        (14_400, "4h"),
+        (7_200, "2h"),
+        (3_600, "1h"),
+        (1_800, "30m"),
+        (900, "15m"),
+        (300, "5m"),
+    ];
+    let Some(secs) = crate::data::interval_secs(interval) else {
+        return "4h";
+    };
+    PERIODS
+        .iter()
+        .find(|(p, _)| *p <= secs)
+        .map_or("5m", |(_, name)| name)
 }
 
 fn is_crypto_symbol(sym: &str) -> bool {
@@ -566,21 +574,35 @@ impl Indicator for FearGreed {
 // ---- Interval to max gap helper ----
 
 fn interval_to_max_gap_ms(interval: &str) -> i64 {
-    let base_ms: i64 = match interval {
-        "1m" => 60_000,
-        "5m" => 5 * 60_000,
-        "15m" => 15 * 60_000,
-        "30m" => 30 * 60_000,
-        "1h" | "60m" => 60 * 60_000,
-        "2h" => 2 * 60 * 60_000,
-        "4h" => 4 * 60 * 60_000,
-        "6h" => 6 * 60 * 60_000,
-        "12h" => 12 * 60 * 60_000,
-        "1d" => 24 * 60 * 60_000,
-        "1wk" => 7 * 24 * 60 * 60_000,
-        "1mo" => 31 * 24 * 60 * 60_000,
-        _ => 4 * 60 * 60_000,
-    };
+    let base_ms = crate::data::interval_secs(interval).unwrap_or(14_400) * 1000;
     // Allow 2x the interval as max gap
     base_ms * 2
+}
+
+#[cfg(test)]
+mod interval_tests {
+    use super::*;
+
+    #[test]
+    fn a_chart_interval_reads_the_longest_period_that_fits_in_a_bar() {
+        for (tf, period) in [
+            ("1m", "5m"),
+            ("3m", "5m"),
+            ("7m", "5m"),
+            ("15m", "15m"),
+            ("45m", "30m"),
+            ("90m", "1h"),
+            ("4h", "4h"),
+            ("8h", "6h"),
+            ("1d", "1d"),
+            ("2D", "1d"),
+            ("2W", "1d"),
+            ("1mo", "1d"),
+            ("banana", "4h"),
+        ] {
+            assert_eq!(map_interval(tf), period, "{tf}");
+        }
+        assert_eq!(interval_to_max_gap_ms("7m"), 840_000);
+        assert_eq!(interval_to_max_gap_ms("2D"), 345_600_000);
+    }
 }

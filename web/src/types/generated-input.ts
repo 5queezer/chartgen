@@ -83,7 +83,7 @@ export interface GenerateChartInput {
    */
   ticker?: string;
   /**
-   * Candlestick timeframe / interval: 1m, 3m, 5m, 15m, 30m, 1h, 2h, 4h, 6h, 12h, 1d, 3d, 1wk, 1mo
+   * Candlestick timeframe / interval: a number and a unit, m minutes, h hours, D days, W weeks, M months (1m, 5m, 7m, 45m, 90m, 4h, 8h, 1d, 2D, 1W, 2W, 1M). Up to 1439m, 168h, 365D, 52W, 12M; one bar may take at most 60 native bars, so 61m is rejected and 65m is not. The response echoes the canonical form (120m becomes 2h, 2W becomes 2wk, 1M becomes 1mo).
    */
   timeframe?: string;
   /**
@@ -104,7 +104,7 @@ export interface GetIndicatorsInput {
    */
   indicators: string[];
   /**
-   * Candle interval (e.g. 1m, 3m, 5m, 15m, 1h, 2h, 4h, 1d, 3d)
+   * Candle interval, as generate_chart's timeframe (e.g. 1m, 7m, 45m, 1h, 4h, 8h, 1d, 2D, 2W)
    */
   interval?: string;
   /**
@@ -212,7 +212,7 @@ export interface SubscribeChartInput {
    */
   ticker: string;
   /**
-   * Candlestick timeframe, as for generate_chart: 1m, 3m, 5m, 15m, 30m, 1h, 2h, 4h, 6h, 12h, 1d, 3d, 1wk, 1mo.
+   * Candlestick timeframe, as for generate_chart: a number and a unit (1m, 7m, 45m, 4h, 8h, 1d, 2D, 2W, 1M). Binance pushes intervals it has no stream for by resampling a finer one.
    */
   timeframe?: string;
   /**

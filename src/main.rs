@@ -40,7 +40,7 @@ struct Cli {
     #[arg(short, long)]
     symbol: Option<String>,
 
-    /// Candle interval (e.g., 1m, 3m, 5m, 15m, 1h, 2h, 4h, 1d, 3d, 1wk)
+    /// Candle interval: a number and a unit (e.g., 1m, 7m, 45m, 4h, 8h, 1d, 2D, 2W, 1M)
     #[arg(short, long, default_value = "4h")]
     interval: String,
 
@@ -86,6 +86,12 @@ fn main() {
     if cli.trade {
         let symbol = cli.symbol.clone().unwrap_or_else(|| "BTCUSDT".to_string());
         let interval = cli.interval.clone();
+        // The engine folds the kline stream as it arrives, so it needs a real one.
+        if !chartgen::interval::Interval::parse(&interval).is_ok_and(|iv| iv.binance_base().1 == 1)
+        {
+            eprintln!("--trade needs an interval Binance streams natively, not {interval}");
+            std::process::exit(2);
+        }
         let indicators: Vec<String> = cli.panels.clone();
 
         let data_dir = dirs_data_dir();

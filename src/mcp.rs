@@ -383,13 +383,10 @@ fn chart_style_arg(args: &Value) -> Result<&'static str, &'static str> {
     }
 }
 
-fn check_interval(interval: &str) -> Result<(), String> {
-    match data::interval_secs(interval) {
-        Some(_) => Ok(()),
-        None => Err(format!(
-            "Unsupported timeframe: {interval}. Use e.g. 1m, 3m, 5m, 15m, 30m, 1h, 2h, 4h, 6h, 12h, 1d, 3d, 1wk, 1mo."
-        )),
-    }
+/// The canonical form of a requested timeframe, or why it is rejected
+/// (ADR-0038). A chart is echoed and keyed by this form.
+fn check_interval(interval: &str) -> Result<String, String> {
+    chartgen::interval::Interval::parse(interval).map(|iv| iv.canonical())
 }
 
 /// Accept both "indicators" and "panels" parameter names
@@ -461,9 +458,11 @@ fn generate_chart(
         .or_else(|| args.get("interval"))
         .and_then(|v| v.as_str())
         .unwrap_or("4h");
-    if let Err(e) = check_interval(interval) {
-        return tool_err(id, &e);
-    }
+    let interval = match check_interval(interval) {
+        Ok(canonical) => canonical,
+        Err(e) => return tool_err(id, &e),
+    };
+    let interval = interval.as_str();
 
     let panels_value = indicators_arg(args);
 
@@ -793,9 +792,10 @@ fn tool_subscribe_chart(
         .or_else(|| args.get("interval"))
         .and_then(|v| v.as_str())
         .unwrap_or("4h");
-    if let Err(e) = check_interval(timeframe) {
-        return tool_err(id, &e);
-    }
+    let timeframe = match check_interval(timeframe) {
+        Ok(canonical) => canonical,
+        Err(e) => return tool_err(id, &e),
+    };
     let chart_style = match chart_style_arg(args) {
         Ok(s) => s,
         Err(e) => return tool_err(id, e),
@@ -817,7 +817,7 @@ fn tool_subscribe_chart(
     }
     let req = ChartRequest {
         ticker: ticker.to_string(),
-        timeframe: timeframe.to_string(),
+        timeframe,
         indicators: indicators.to_string(),
         chart_style: chart_style.to_string(),
         warmup: warmup_arg(args, &panels),
@@ -4267,7 +4267,7 @@ mod tests {
 
     #[test]
     fn unsupported_timeframe_is_a_tool_error() {
-        for tf in ["4611686018427387904m", "0h", "7h", "1x"] {
+        for tf in ["4611686018427387904m", "0h", "61m", "53w", "1x"] {
             let resp = generate_chart(
                 Some(json!(1)),
                 &json!({ "ticker": "BTCUSDT", "timeframe": tf, "format": "series" }),
@@ -4276,6 +4276,39 @@ mod tests {
             );
             assert!(is_error(&resp), "timeframe {tf} must be rejected");
             assert!(response_text(&resp).contains("Unsupported timeframe"));
+        }
+    }
+
+    #[test]
+    fn custom_timeframes_are_echoed_canonically_on_their_grid() {
+        for (asked, canonical, secs) in [
+            ("7m", "7m", 420),
+            ("45m", "45m", 2_700),
+            ("90m", "90m", 5_400),
+            ("120m", "2h", 7_200),
+            ("8h", "8h", 28_800),
+            ("2D", "2d", 172_800),
+            ("2W", "2wk", 1_209_600),
+        ] {
+            let resp = generate_chart(
+                Some(json!(1)),
+                &json!({ "ticker": "BTCUSDT", "timeframe": asked, "format": "series", "bars": 5 }),
+                fetch::DataSource::Sample,
+                None,
+            );
+            assert!(!is_error(&resp), "{asked}: {}", response_text(&resp));
+            let v: Value = serde_json::from_str(&response_text(&resp)).unwrap();
+            assert_eq!(v["interval"], canonical, "{asked}");
+            let iv = chartgen::interval::Interval::parse(asked).unwrap();
+            let t: Vec<i64> = v["bars"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|b| b["t"].as_i64().unwrap())
+                .collect();
+            assert_eq!(t.len(), 5, "{asked}");
+            assert!(t.windows(2).all(|w| w[1] - w[0] == secs), "{asked}: {t:?}");
+            assert!(t.iter().all(|x| iv.grid_start(*x) == *x), "{asked}: {t:?}");
         }
     }
 
