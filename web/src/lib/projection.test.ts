@@ -82,23 +82,37 @@ describe("projection (ADR-0033)", () => {
       getSize: () => ({ width: 1000 }),
       setOffsetRightDistance: (d: number) => set.push(d),
     };
-    setShownProjection(25);
+    setShownProjection(chart, 25);
     fitProjection(chart);
     space = 20; // zoomed in: 25 bars now need 560 px, capped at 500
     fitProjection(chart);
-    setShownProjection(0);
+    setShownProjection(chart, 0);
     fitProjection(chart);
     expect(set).toEqual([28 * 8, 500, DEFAULT_RIGHT_OFFSET]);
   });
 
   it("fits a date range together with the projection's margin", () => {
-    setShownProjection(25);
+    const chart = {};
+    setShownProjection(chart, 25);
     // 100 bars + 28 margin bars in 1280 px: 10 px each.
-    expect(projectionBarSpace(100, 1280)).toBe(10);
+    expect(projectionBarSpace(chart, 100, 1280)).toBe(10);
     // 10 bars would leave a 737 px margin: the cap keeps it at half the pane.
-    expect(projectionBarSpace(10, 1000)).toBe(50);
-    setShownProjection(0);
-    expect(projectionBarSpace(100, 1280)).toBeNull();
+    expect(projectionBarSpace(chart, 10, 1000)).toBe(50);
+    setShownProjection(chart, 0);
+    expect(projectionBarSpace(chart, 100, 1280)).toBeNull();
+  });
+
+  it("is per chart: one chart's projection leaves another's margin alone (ADR-0043)", () => {
+    const set: number[] = [];
+    const other = {
+      getBarSpace: () => 8,
+      getSize: () => ({ width: 1000 }),
+      setOffsetRightDistance: (d: number) => set.push(d),
+    };
+    setShownProjection({}, 25);
+    fitProjection(other);
+    expect(set).toEqual([DEFAULT_RIGHT_OFFSET]);
+    expect(projectionBarSpace(other, 100, 1280)).toBeNull();
   });
 
   it("reads projected values and times past the last bar", () => {

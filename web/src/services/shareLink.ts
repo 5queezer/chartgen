@@ -16,8 +16,10 @@ import {
   addCompare,
   removeCompare,
 } from "../stores/compare";
+import { activePane } from "../stores/grid";
 import {
   activeIndicators,
+  indicatorStoreOf,
   instanceKey,
   normalizeInstances,
   setActiveIndicators,
@@ -68,6 +70,8 @@ function savePending(entries: ActiveIndicator[]): void {
 }
 
 const [pending, setPending] = createSignal<ActiveIndicator[]>(loadPending());
+// The chart a link opens in, whichever is active once the registry has answered.
+const importPane = activePane();
 
 /** True while imported indicators wait for the registry; hold the chart query. */
 export const importPending = (): boolean => pending().length > 0;
@@ -120,7 +124,7 @@ export function reconcileImported(
     raw.map(instanceKey),
     registry,
   );
-  setActiveIndicators(entries);
+  indicatorStoreOf(importPane).setActiveIndicators(entries);
   savePending([]);
   setPending([]);
   if (unknown.length > 0) {

@@ -7,6 +7,7 @@ sidebar:
 
 **Status:** Accepted
 **Date:** 2026-11-05
+**Amended by:** [ADR-0043](/chartgen/decisions/0043-multi-chart-grid/) (the cap per client address goes from 8 to 32)
 
 Supersedes the "push is deferred" part of
 [ADR-0009](/chartgen/decisions/0009-live-tail-polling-and-history-paging/).

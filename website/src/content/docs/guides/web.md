@@ -11,11 +11,11 @@ chart with an RSI panel. It implements
 The Docker image serves the app at `/`, on the same origin as `/mcp`
 ([ADR-0027](/chartgen/decisions/0027-serve-web-app-same-origin/)). It has a
 top toolbar (symbol, timeframe including custom intervals, chart type), the
-indicator picker, drawings, a watchlist, price alerts, layouts and a compact
-layout for phones. With `CHARTGEN_SCRIPTING=1` it also has a
-[script editor](#script-editor), and with `CHARTGEN_SERVER_ALERTS=1` alerts
-can run on the server. Order entry, multi-chart layouts, and LLM chat are
-out of scope.
+indicator picker, drawings, a watchlist, price alerts, layouts, a
+[grid of charts](#chart-grid) and a compact layout for phones. With
+`CHARTGEN_SCRIPTING=1` it also has a [script editor](#script-editor), and with
+`CHARTGEN_SERVER_ALERTS=1` alerts can run on the server. Order entry and LLM
+chat are out of scope.
 
 ## Toolbar
 
@@ -550,6 +550,44 @@ pane. Right-clicking a drawing opens the drawing menu instead. TradingView's
 "Lock vertical cursor line by time" is not offered because klinecharts has no
 pinned crosshair.
 
+## Chart grid
+
+The grid button left of the layout menu shows 1 chart, 2 side by side, 2 stacked or
+4. Each chart has its own symbol, interval, chart type, scale, compare symbols,
+indicators and bar replay, and its own live data.
+
+- **Active chart.** Pressing a chart makes it active, with a colored frame. The
+  toolbar, indicator chips and picker, watchlist clicks, sidebar panels, bottom bar,
+  drawing toolbar and keyboard shortcuts act on it. Only one drawing toolbar shows,
+  the active chart's. Each chart's legend shows its symbol and interval.
+- **Global.** Theme, chart settings, the time zone, watchlists and recent symbols
+  are the same for all charts.
+- **New charts.** A chart added by a bigger grid is the chart saved for that place
+  in the active layout, else starts from the active chart's symbol, interval, chart
+  type and indicators.
+- **Fewer charts** remove the last ones. If one holds something the active layout
+  could not bring back, a prompt asks first.
+- **Drawings** belong to the symbol, as everywhere else: two charts on one symbol
+  show the same drawings, and a change in one appears in the other. That chart's
+  undo history for that symbol is cleared, so undo cannot overwrite the change.
+  Different symbols never share drawings.
+- **Live data.** Each chart subscribes on its own. Past the server's push limits
+  (4 subscriptions per token, 10 subscribe calls per minute, 32 per client address,
+  which everyone behind one proxy shares) a chart polls instead and tries push again
+  every 5 minutes. The status line shows the active chart's state.
+- **Alerts.** Lines show on every chart of their symbol. Price alerts run as usual.
+  Indicator and sloped-drawing alerts only run while the **active** chart shows
+  their symbol and interval, and otherwise read *inactive: open AAPL 1h*. Server alerts
+  run whatever the charts show. Clicking an alert puts its symbol on the active chart.
+- **Scripts.** The editor's Add to chart and the error marks read the active chart.
+  Saving a script reloads every chart using it, and deleting one takes it off all of them.
+- **Sub-panes** shrink to fit a smaller chart, and get their height back with one chart.
+- **The compact layout** ([phones and tablets](#phones-and-tablets)) shows the active
+  chart only. The grid is kept and comes back on a wider screen.
+
+There is no symbol or crosshair sync between charts yet. Storage and the design are
+in [ADR-0043](/chartgen/decisions/0043-multi-chart-grid/).
+
 ## Sharing a chart
 
 The link icon in the toolbar ("Copy link to chart", also in the chart context
@@ -580,7 +618,8 @@ checked; your other indicators are never removed. If the list cannot be loaded,
 the link's indicators are kept as they are. A link carries the chart setup only,
 not drawings, alerts, colors or indicator styles. The parameters survive the
 sign-in redirect. If the browser blocks the clipboard API (plain HTTP), the link
-is copied through a hidden text field instead.
+is copied through a hidden text field instead. In a [chart grid](#chart-grid) a link
+carries the active chart only, and opening one applies it to the active chart.
 [ADR-0029](/chartgen/decisions/0029-shareable-chart-links/)
 
 ## Watchlist
@@ -797,8 +836,9 @@ The **Object Tree** tab lists what is on the chart:
 ## Layouts
 
 A layout is a named bundle of symbol, timeframe, chart type, scale mode,
-compare symbols and the indicator set (including hidden and edited ones). Drawings are
-not part of a layout: they stay per symbol and look the same in every
+compare symbols and the indicator set (including hidden and edited ones), for each
+chart of its [grid](#chart-grid). A layout saved before grids existed opens as one
+chart. Drawings are not part of a layout: they stay per symbol and look the same in every
 layout. The layout menu sits at the right end of the top bar and shows the active
 layout's name. A dot next to the name means the chart differs from the
 saved layout. The first start creates one layout, `Unnamed`, from your
@@ -1137,6 +1177,10 @@ etc. on the current origin.
   to a timeframe we already loaded is instant (the live feed then catches
   up). The query never goes stale and does not refetch on focus or
   reconnect, because the live feed keeps the data fresh.
+- **Charts of a grid** — `web/src/components/ChartPane.tsx` holds what belongs to one
+  chart (query, live feed, replay, compare feed). The stores keep one instance per pane,
+  and their module-level exports read the active pane
+  ([ADR-0043](/chartgen/decisions/0043-multi-chart-grid/)).
 - **Live feed** — `web/src/lib/liveFeed.ts` takes over each full load,
   applies pushed tails or polls the tail, and pages in history. The merge rules live in
   `web/src/lib/seriesMerge.ts` (unit-tested): bars and every per-bar
