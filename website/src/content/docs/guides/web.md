@@ -986,6 +986,10 @@ etc. on the current origin.
   to a timeframe we already loaded is instant (the live feed then catches
   up). The query never goes stale and does not refetch on focus or
   reconnect, because the live feed keeps the data fresh.
+- **Charts of a grid** — `web/src/components/ChartPane.tsx` holds what belongs to one
+  chart (query, live feed, replay, compare feed). The stores keep one instance per pane,
+  and their module-level exports read the active pane
+  ([ADR-0043](/chartgen/decisions/0043-multi-chart-grid/)).
 - **Live feed** — `web/src/lib/liveFeed.ts` takes over each full load,
   applies pushed tails or polls the tail, and pages in history. The merge rules live in
   `web/src/lib/seriesMerge.ts` (unit-tested): bars and every per-bar
