@@ -336,6 +336,30 @@ test.describe("multi-chart grid", () => {
     await expect.poll(context).toBeNull();
   });
 
+  test("the load error's Remove acts on the chart that failed", async ({ bootedApp: page }) => {
+    await chooseGrid(page, "2h");
+    await expectLoaded(page, 2);
+    await page.evaluate(() =>
+      localStorage.setItem("chartgen.pane.1.indicators", JSON.stringify(["rsi", "gone_script"])),
+    );
+    const exchanged = page.waitForResponse(
+      (res) => res.request().method() === "POST" && new URL(res.url()).pathname === "/token",
+    );
+    await page.reload();
+    await exchanged;
+    const error = paneCell(page, 1).getByTestId("chart-load-error");
+    await expect(error).toContainText("unknown indicator gone_script", { timeout: 30_000 });
+    await expect(paneCell(page, 0).getByTestId("chart-load-error")).toHaveCount(0);
+    const before = (await panes(page))[0]!.indicators;
+
+    await error.getByRole("button", { name: "Remove gone_script" }).click();
+    await expect(error).toHaveCount(0, { timeout: 30_000 });
+    const [first, second] = await panes(page);
+    expect(first!.indicators).toEqual(before);
+    expect(JSON.stringify(second!.indicators)).not.toContain("gone_script");
+    expect(JSON.stringify(second!.indicators)).toContain("rsi");
+  });
+
   test("each chart registers its own indicators: geometry is kept by registered name", async ({
     bootedApp: page,
   }) => {

@@ -31,6 +31,7 @@
 import {
   batch,
   createEffect,
+  on,
   createSignal,
   createMemo,
   Index,
@@ -992,6 +993,8 @@ export interface ChartProps {
    * client asked for.
    */
   activeIndicators: ActiveIndicator[];
+  /** Part of the window is taken (the script editor): panes fit what is left. */
+  fitPanes?: boolean;
   /** Client-side plot style overrides (ADR-0017), keyed by instance key. */
   styles?: Record<string, IndicatorStyle | undefined>;
   /** Price rendering style chosen in the toolbar. */
@@ -1072,8 +1075,11 @@ export function Chart(props: ChartProps): JSX.Element {
   // Oscillator pane keys, top to bottom, as klinecharts stacks them.
   let paneStack: string[] = [];
   let fitFrame: number | null = null;
-  // Compact shell or a chart of a grid (ADR-0043): the heights the sub-panes had before
-  // the screen or the grid shrank them.
+  // Panes fit the host rather than keep their heights: on the compact shell, in a
+  // chart of a grid (ADR-0043), and while the script editor takes part of the window
+  // (ADR-0041).
+  const fitting = () => compact() || !!props.multi || props.fitPanes === true;
+  // The heights the sub-panes had before the screen, the grid or the editor shrank them.
   const naturalHeights = new Map<string, number>();
   // Before klinecharts' resize, which clamps panes that no longer fit.
   const rememberNaturalHeights = (c: KChart) => {
@@ -1103,9 +1109,7 @@ export function Chart(props: ChartProps): JSX.Element {
     };
     fitFrame = requestAnimationFrame(step);
   };
-  // Whether the sub-panes fit a smaller host: the compact shell, or a chart of a grid.
-  const fitsHost = () => compact() || !!props.multi;
-  const fitPanesToHost = (c: KChart) => {
+  const fitPanesToScreen = (c: KChart) => {
     rememberNaturalHeights(c);
     const ids = untrack(paneIds);
     const names = paneStack.filter((n) => ids[n]);
@@ -1309,9 +1313,9 @@ export function Chart(props: ChartProps): JSX.Element {
     if (host && typeof ResizeObserver !== "undefined") {
       const ro = new ResizeObserver(() => {
         const current = chart();
-        if (current && fitsHost()) rememberNaturalHeights(current);
+        if (current && fitting()) rememberNaturalHeights(current);
         current?.resize();
-        if (current && fitsHost()) fitPanesToHost(current);
+        if (current && fitting()) fitPanesToScreen(current);
         else if (current) restoreNaturalHeights(current);
         recomputeHeaders();
       });
@@ -1319,6 +1323,27 @@ export function Chart(props: ChartProps): JSX.Element {
       onCleanup(() => ro.disconnect());
     }
   });
+
+  // A full-screen panel opens and closes without resizing the host, and a closing
+  // dock must lay out at the new size before the panes get their heights back.
+  createEffect(
+    on(
+      () => props.fitPanes === true,
+      (fit) => {
+        const c = chart();
+        // A chart of a grid fits its cell either way, and the cell's resize says when.
+        if (!c || compact() || props.multi) return;
+        if (fit) {
+          fitPanesToScreen(c);
+        } else {
+          c.resize();
+          restoreNaturalHeights(c);
+        }
+        recomputeHeaders();
+      },
+      { defer: true },
+    ),
+  );
 
   // Legend text must stay readable on the chart background: light plot
   // colors are darkened on a light background (the swatches keep theirs).
@@ -1793,8 +1818,8 @@ export function Chart(props: ChartProps): JSX.Element {
 
     // Keep the price pane usable: shrink the sub-panes first.
     const fitPanes = () => {
-      if (untrack(fitsHost)) {
-        fitPanesToHost(c);
+      if (untrack(fitting)) {
+        fitPanesToScreen(c);
         return;
       }
       const subIds = wantedOsc.map((n) => nextPanes[n]).filter((id) => !!id);

@@ -32,6 +32,7 @@ import {
   mergeTail,
   missingBars,
   sortChannels,
+  withoutMisfits,
 } from "./seriesMerge";
 
 /** Bars of the initial full load. */
@@ -54,6 +55,13 @@ export const FAST_POLL_MS = 2_000;
 export const SLOW_POLL_MS = 15_000;
 /** Ceiling for the error backoff. */
 export const MAX_BACKOFF_MS = 60_000;
+/**
+ * Most full reloads the feed asks for per chart in `RELOAD_WINDOW_MS`. A reload
+ * starts a new generation, so only this outlives it: a chart whose tails never
+ * fit its full loads would otherwise reload for as long as it is open.
+ */
+export const MAX_RELOADS = 3;
+export const RELOAD_WINDOW_MS = 5 * 60_000;
 /**
  * Longest expected gap between pushes: Binance sends a kline update at
  * least every 2 s, trades in between.
@@ -229,6 +237,9 @@ export function createLiveFeed(opts: LiveFeedOptions): LiveFeed {
   // catch-up). Only such a poll is merged while subscribed; any other may
   // carry bars older than the pushes already applied.
   let catchUp = false;
+  // Full reloads asked for, and the chart they were for (see MAX_RELOADS).
+  let reloads: number[] = [];
+  let reloadsOf = "";
 
   const hidden = () => doc.visibilityState === "hidden";
   const period = () =>
@@ -298,7 +309,32 @@ export function createLiveFeed(opts: LiveFeedOptions): LiveFeed {
     schedule(inMs);
   };
 
+  /** Whether this chart may still ask for a full reload (MAX_RELOADS). */
+  const canReload = () => {
+    const key = JSON.stringify(request);
+    const now = Date.now();
+    if (key !== reloadsOf) {
+      reloadsOf = key;
+      reloads = [];
+    }
+    reloads = reloads.filter((at) => now - at < RELOAD_WINDOW_MS);
+    return reloads.length < MAX_RELOADS;
+  };
+
+  /** Merge a tail. Out of reloads, what does not fit fails alone: the chart stays live. */
+  const merge = (cur: SeriesPayload, tail: SeriesPayload) => {
+    const r = mergeTail(cur, tail);
+    return !r.ok && r.reason === "shape" && !canReload()
+      ? mergeTail(cur, withoutMisfits(cur, tail))
+      : r;
+  };
+
   const reload = (my: number) => {
+    if (!canReload()) {
+      backoff(new Error("the chart's data keeps not lining up; reload the page to start over"));
+      return;
+    }
+    reloads.push(Date.now());
     clearTimer();
     reloading = true;
     opts.onPollStatus({ kind: "reloading" });
@@ -417,7 +453,7 @@ export function createLiveFeed(opts: LiveFeedOptions): LiveFeed {
 
     const prevLength = series.bars.length;
     const newest = series.bars[prevLength - 1]?.t ?? null;
-    const r = mergeTail(series, tail);
+    const r = merge(series, tail);
     if (r.ok) {
       series = r.series;
       failures = 0;
@@ -578,13 +614,14 @@ export function createLiveFeed(opts: LiveFeedOptions): LiveFeed {
       pushFailures = 0;
       if (reloading) return;
       const prevLength = series.bars.length;
-      const r = mergeTail(series, tail);
+      const r = merge(series, tail);
       if (r.ok) {
         series = r.series;
         emit({ version: ++version, kind: "tail", from: r.from, prevLength });
-      } else if (r.reason !== "stale" && !polling) {
+      } else if (r.reason !== "stale" && !polling && canReload()) {
         // Missed bars or data that does not line up: a poll catches up
-        // (or reloads) exactly as when polling.
+        // (or reloads) exactly as when polling. Out of reloads it could do
+        // neither, and pushes would turn into one poll each.
         clearTimer();
         catchUp = true;
         void poll();

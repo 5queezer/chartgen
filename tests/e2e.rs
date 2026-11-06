@@ -1113,10 +1113,11 @@ fn tool_names(port: u16) -> Vec<String> {
         .collect()
 }
 
-const SCRIPT_TOOLS: [&str; 4] = [
+const SCRIPT_TOOLS: [&str; 5] = [
     "register_indicator",
     "fork_indicator",
     "list_my_indicators",
+    "get_my_indicator",
     "delete_indicator",
 ];
 

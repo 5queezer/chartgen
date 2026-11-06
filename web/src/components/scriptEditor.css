@@ -1,0 +1,152 @@
+/* Syntax colors of the script editor (ADR-0041), with the panel's lazy chunk. */
+.script-editor {
+  --script-keyword: #c792ea;
+  --script-string: #a5d6a7;
+  --script-number: #f7a072;
+  --script-comment: #8b8f9a;
+  --script-function: #82aaff;
+  --script-property: #7fdbca;
+  --script-active-line: rgba(255, 255, 255, 0.04);
+}
+
+:root[data-theme="light"] .script-editor {
+  --script-keyword: #8b1fa8;
+  --script-string: #1a7f37;
+  --script-number: #a64b00;
+  --script-comment: #6a6f7a;
+  --script-function: #0550ae;
+  --script-property: #00696b;
+  --script-active-line: rgba(19, 23, 34, 0.04);
+}
+
+/* Docked under the chart: a part of the window, so the price pane keeps room. */
+.script-editor {
+  height: 41vh;
+  min-height: 280px;
+  max-height: 45vh;
+}
+
+@media (min-height: 720px) {
+  /* The chart's usual minimum would push it over the panel. */
+  html:not(.compact) body:has(.script-editor) .chart-host {
+    min-height: 120px;
+  }
+
+  html:not(.compact) body:has(.script-editor) main {
+    overflow: hidden;
+  }
+}
+
+/* No room for both: the panel takes the whole screen, and closing it brings the
+   chart back. First the compact shell (phones and portrait tablets, ADR-0039)... */
+.compact .script-editor {
+  position: fixed;
+  top: var(--vvt, 0px);
+  left: 0;
+  right: 0;
+  bottom: auto;
+  z-index: 40;
+  /* What is visible above the on-screen keyboard (lib/viewport.ts). */
+  height: var(--vvh, 100dvh);
+  min-height: 0;
+  max-height: none;
+  border-top: none;
+  padding: env(safe-area-inset-top) env(safe-area-inset-right)
+    env(safe-area-inset-bottom) env(safe-area-inset-left);
+}
+
+.compact .script-body {
+  flex-direction: column;
+}
+
+.compact .script-list {
+  width: 100%;
+  max-height: 6rem;
+  border-right: none;
+  border-bottom: 1px solid var(--color-border);
+}
+
+.compact .script-end {
+  order: 1;
+}
+
+.compact .script-name {
+  order: 2;
+  width: 100%;
+}
+
+.compact .script-lower {
+  order: 3;
+}
+
+/* ...then any other short window: a small laptop window, a tablet in landscape.
+   The same rules: a media query and a class cannot share one selector. */
+@media (max-height: 719px) {
+  html:not(.compact) .script-editor {
+    position: fixed;
+    top: var(--vvt, 0px);
+    left: 0;
+    right: 0;
+    bottom: auto;
+    z-index: 40;
+    /* What is visible above the on-screen keyboard (lib/viewport.ts). */
+    height: var(--vvh, 100dvh);
+    min-height: 0;
+    max-height: none;
+    border-top: none;
+    padding: env(safe-area-inset-top) env(safe-area-inset-right)
+      env(safe-area-inset-bottom) env(safe-area-inset-left);
+  }
+
+  html:not(.compact) .script-body {
+    flex-direction: column;
+  }
+
+  html:not(.compact) .script-list {
+    width: 100%;
+    max-height: 6rem;
+    border-right: none;
+    border-bottom: 1px solid var(--color-border);
+  }
+
+  html:not(.compact) .script-end {
+    order: 1;
+  }
+
+  html:not(.compact) .script-name {
+    order: 2;
+    width: 100%;
+  }
+
+  html:not(.compact) .script-lower {
+    order: 3;
+  }
+}
+
+/* A landscape phone: the list beside the code, or the code has no height left. */
+@media (max-height: 500px) {
+  html .script-editor .script-body {
+    flex-direction: row;
+  }
+
+  html .script-editor .script-list {
+    width: 9rem;
+    max-height: none;
+    border-right: 1px solid var(--color-border);
+    border-bottom: none;
+  }
+}
+
+/* Touch, as the rest of the app (globals.css): larger targets, and no zoom into
+   a field below 16px, which on iOS includes the editor's text. */
+@media (pointer: coarse) {
+  .script-editor button,
+  [data-testid="script-delete-dialog"] button {
+    min-height: 40px;
+    min-width: 40px;
+  }
+
+  .script-editor .cm-editor {
+    font-size: 16px;
+  }
+}

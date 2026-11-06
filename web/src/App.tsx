@@ -28,11 +28,18 @@ import { DRAWING_LABELS } from "./components/DrawingToolbar";
 import { GridMenu } from "./components/GridMenu";
 import { isDrawingAlertTool, isHorizontalTool } from "./lib/alerts";
 import { chartContext, setIndicatorSignatures } from "./stores/alerts";
-import { IndicatorChips } from "./components/IndicatorChips";
+import { CompactIndicatorErrors, IndicatorChips } from "./components/IndicatorChips";
 import { IndicatorPicker } from "./components/IndicatorPicker";
 import { IndicatorSettings } from "./components/IndicatorSettings";
 import { LayoutMenu } from "./components/LayoutMenu";
+import {
+  openScriptEditor,
+  scriptEditorOpen,
+  ScriptEditorButton,
+  ScriptEditorDock,
+} from "./components/ScriptEditorDock";
 import { chipName } from "./lib/indicatorNames";
+import { scriptingEnabled } from "./lib/scripts";
 import { mergeParams } from "./lib/paramForm";
 import { resolveColors } from "./lib/chartStyle";
 import { PALETTES } from "./lib/theme";
@@ -54,7 +61,7 @@ import { isTypingContext, keepKeyboardFocus, swallowMenuGhostClicks } from "./li
 import { compact } from "./lib/viewport";
 import { createMcpSession } from "./mcp";
 import { startSignIn, tryHandlePendingRedirect } from "./oauth";
-import { createListIndicatorsQuery } from "./queries";
+import { createListIndicatorsQuery, createToolNamesQuery } from "./queries";
 import { createAlertLogger } from "./services/notifications";
 import { copyChartLink, reconcileImported } from "./services/shareLink";
 import {
@@ -257,6 +264,7 @@ export function App(): JSX.Element {
       series: () => live()?.series ?? null,
       // Multi-chart e2e (tests/e2e/multi-chart.spec.ts): what alerts read, and each chart of the grid.
       alertContext: chartContext,
+      paneSeries: (pane: number) => panes().find((p) => p.pane === pane)?.live()?.series ?? null,
       panes: () =>
         panes().map((p) => ({
           pane: p.pane,
@@ -302,6 +310,10 @@ export function App(): JSX.Element {
   // The indicator registry only changes between deploys, so this query
   // is cached forever. It fires as soon as auth is ready.
   const listIndicators = createListIndicatorsQuery(session, authReady);
+
+  // The script editor exists only where the server lists its tools (ADR-0041).
+  const toolNames = createToolNamesQuery(session, authReady);
+  const scripting = createMemo(() => scriptingEnabled(toolNames.data));
 
   // Indicators from a share link are checked against the registry before
   // the first chart request; if the registry cannot be loaded they are kept.
@@ -408,6 +420,9 @@ export function App(): JSX.Element {
             {activeIndicators().length}
           </span>
         </button>
+        <Show when={scripting()}>
+          <ScriptEditorButton />
+        </Show>
         {/* Below 480px the header has no room: alerts stay reachable from the
          * sidebar panel, the status text drops (the sign-in recovery stays) and the layout name collapses. */}
         <div class="max-[479px]:hidden compact:hidden">
@@ -436,6 +451,12 @@ export function App(): JSX.Element {
         onRemove={removeIndicator}
         onToggleHidden={toggleIndicatorHidden}
         onSettings={setSettingsIndex}
+        errors={live()?.series.indicator_errors}
+      />
+      <CompactIndicatorErrors
+        entries={activeIndicators()}
+        errors={live()?.series.indicator_errors}
+        onRemove={removeIndicator}
       />
       <IndicatorSettings
         target={settingsTarget()}
@@ -474,6 +495,14 @@ export function App(): JSX.Element {
         loading={listIndicators.isFetching}
         error={listIndicators.isError ? listIndicators.error : null}
         active={activeIndicators()}
+        onOpenScripts={
+          scripting()
+            ? () => {
+                setPickerOpen(false);
+                openScriptEditor();
+              }
+            : undefined
+        }
       />
       <ChartSettings
         open={settingsOpen()}
@@ -496,6 +525,7 @@ export function App(): JSX.Element {
                 state={state}
                 rail={rail()}
                 multi={paneIds().length > 1}
+                fitPanes={scriptEditorOpen()}
                 onToolArmed={() => setDrawOpen(false)}
                 onIndicatorSettings={(key) => setSettingsIndex(indexOf(key))}
                 onAddAlert={addIndicatorAlert}
@@ -540,6 +570,9 @@ export function App(): JSX.Element {
         drawings={alertDrawings()}
       />
       <Toasts />
+      <Show when={scripting()}>
+        <ScriptEditorDock session={session} chartErrors={live()?.series.indicator_errors} />
+      </Show>
     </div>
   );
 }

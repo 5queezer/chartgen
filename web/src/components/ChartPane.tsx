@@ -41,6 +41,7 @@ import { forgetReadings, setChartContext } from "../stores/alerts";
 import { compareStoreOf } from "../stores/compare";
 import { activePane, PaneProvider, setActivePane } from "../stores/grid";
 import {
+  indicatorName,
   indicatorStoreOf,
   indicatorStyle,
   instanceKey,
@@ -206,6 +207,20 @@ export function createChartPane(pane: number, deps: PaneDeps) {
   let feedKey = "";
   // dataUpdatedAt of the adopted entry; null: none yet, -1: cleared.
   let adoptedAt: number | null = null;
+  // A script changed (`refreshChartsUsing`): the entry is out of date for every chart
+  // on it, not just one, so each takes the result. In the event, not when the result
+  // lands, as the entry is no longer marked invalid by then.
+  onCleanup(
+    queryClient.getQueryCache().subscribe((event) => {
+      if (
+        event.type === "updated" &&
+        event.action.type === "invalidate" &&
+        JSON.stringify(event.query.queryKey) === feedKey
+      ) {
+        refetchAsked = true;
+      }
+    }),
+  );
   createEffect(() => {
     const request: LiveRequest = {
       ticker: symbol(),
@@ -231,7 +246,8 @@ export function createChartPane(pane: number, deps: PaneDeps) {
       if (state?.data !== undefined) {
         if (state.dataUpdatedAt === adoptedAt) return;
         if (adoptedAt !== null && adoptedAt !== -1 && !refetchAsked) return;
-        refetchAsked = false;
+        // Back on a key invalidated while away: this data is old, its refetch is ours.
+        refetchAsked = state.isInvalidated;
         adoptedAt = state.dataUpdatedAt;
         // A copy: the feed updates its series in place, the cache stays as loaded.
         feedTicker = request.ticker;
@@ -372,6 +388,8 @@ export interface ChartPaneProps {
   rail: HTMLElement | undefined;
   /** More than one chart shows: its sub-panes share a smaller height. */
   multi: boolean;
+  /** The script editor takes part of the window (ADR-0041). */
+  fitPanes: boolean;
   /** A drawing tool was armed here. */
   onToolArmed: () => void;
   /** Open the settings of an indicator of the active chart. */
@@ -437,6 +455,11 @@ export function ChartPane(props: ChartPaneProps): JSX.Element {
               previousSymbol={s.lastLoaded() === symbol() ? null : s.lastLoaded()}
               onRetry={() => void s.refetch()}
               onBack={setSymbol}
+              onRemoveIndicators={(names) =>
+                setActiveIndicators(
+                  activeIndicators().filter((e) => !names.includes(indicatorName(e))),
+                )
+              }
             />
           </Show>
           <Chart
@@ -445,6 +468,7 @@ export function ChartPane(props: ChartPaneProps): JSX.Element {
             history={s.historyStatus()}
             onLoadOlder={s.feed.loadOlder}
             activeIndicators={s.wireIndicators()}
+            fitPanes={props.fitPanes}
             styles={s.plotStyles()}
             chartType={chartType()}
             timeZone={s.timeZone()}

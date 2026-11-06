@@ -602,6 +602,16 @@ export function indicatorStoreOf(pane: number): IndicatorStore {
   return store;
 }
 
+/** Take an indicator off every chart of the grid: it no longer exists (a deleted script). */
+export function removeIndicatorEverywhere(name: string): void {
+  for (const store of stores.values()) {
+    const entries = store.activeIndicators();
+    if (entries.some((e) => indicatorName(e) === name)) {
+      store.setActiveIndicators(entries.filter((e) => indicatorName(e) !== name));
+    }
+  }
+}
+
 indicatorStoreOf(0);
 const active = (): IndicatorStore => indicatorStoreOf(activePane());
 

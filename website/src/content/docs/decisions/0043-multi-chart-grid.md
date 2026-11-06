@@ -102,7 +102,9 @@ charts' state are untouched, so nothing is dirty and they come back when there i
 
 - Good: one chart behaves as before, on the same keys. Existing e2e specs pass unmodified.
 - Good: a chart cannot reach another chart's state through its own effects. Charts on
-  one request share a cache entry, so a chart only adopts a new result it asked for.
+  one request share a cache entry, so a chart only adopts a new result it asked for, or
+  one that replaces an invalidated entry: a saved script reloads every chart using it.
+  Deleting a script takes it off every chart.
 - Bad: a module-level export read from code running for a non-active chart is a
   silent bug. Pane code must use the pane's instances; this rule is by review only.
 - Bad: after a rollback, or in a tab still on an older build, any layout action strips

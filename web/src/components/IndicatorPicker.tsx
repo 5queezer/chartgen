@@ -46,6 +46,8 @@ export interface IndicatorPickerProps {
   error: Error | null;
   /** Current active set — used to mark rows as "added". */
   active: ActiveIndicator[];
+  /** Opens the script editor; absent where the server has no scripting tools. */
+  onOpenScripts?: (() => void) | undefined;
 }
 
 // Human-readable category labels for the `type` field returned by the
@@ -334,6 +336,18 @@ export function IndicatorPicker(props: IndicatorPickerProps): JSX.Element {
                 </Show>
               </Show>
             </div>
+            <Show when={props.onOpenScripts}>
+              <div class="px-4 py-2 border-t border-[color:var(--color-border)]">
+                <button
+                  type="button"
+                  data-testid="picker-script-editor"
+                  class="text-sm text-[color:var(--color-accent)] hover:underline cursor-pointer"
+                  onClick={() => props.onOpenScripts?.()}
+                >
+                  Write your own in the script editor
+                </button>
+              </div>
+            </Show>
           </Dialog.Content>
         </div>
       </Dialog.Portal>
