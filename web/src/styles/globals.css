@@ -323,8 +323,21 @@ body {
   position: relative;
 }
 
-.wl-row:hover .wl-symbol {
+.wl-row:hover .wl-symbol,
+.wl-row:focus-within .wl-symbol {
   padding-right: 48px;
+}
+
+/* No hover on a touch screen: a hidden button would still take the tap. */
+@media (hover: none) {
+  .wl-remove,
+  .wl-row-action {
+    opacity: 1;
+  }
+
+  .wl-symbol {
+    padding-right: 48px;
+  }
 }
 
 .wl-remove:hover,

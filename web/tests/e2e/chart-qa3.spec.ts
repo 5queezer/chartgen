@@ -461,6 +461,70 @@ test.describe("watchlist hover buttons", () => {
   });
 });
 
+test.describe("watchlist row buttons without hover", () => {
+  const row = (page: Page, symbol: string) => page.locator(`.wl-row[data-symbol="${symbol}"]`);
+  const button = (page: Page, name: string) => page.getByRole("button", { name, exact: true });
+
+  test("are hidden until hover with a mouse", async ({ bootedApp: page }) => {
+    await page.mouse.move(0, 0);
+    await expect(button(page, "Remove BTCUSDT from watchlist")).toHaveCSS("opacity", "0");
+    await row(page, "BTCUSDT").hover();
+    await expect(button(page, "Remove BTCUSDT from watchlist")).toHaveCSS("opacity", "1");
+  });
+
+  test("keyboard focus reserves their room, at the narrowest column too", async ({
+    bootedApp: page,
+  }) => {
+    await page.mouse.move(0, 0);
+    // Large quotes squeeze the symbol column to its minimum.
+    await page.locator(".wl-table").evaluate((el) => {
+      (el as HTMLElement).style.width = "19rem";
+    });
+    await row(page, "BTCUSDT").locator('[role="cell"]').nth(1).evaluate((el) => {
+      el.textContent = "1,234,567.89";
+    });
+    await row(page, "BTCUSDT").focus();
+    // Past the symbol button and the grip.
+    await page.keyboard.press("Tab");
+    await page.keyboard.press("Tab");
+    await page.keyboard.press("Tab");
+    const flag = button(page, "Flag BTCUSDT");
+    await expect(flag).toBeFocused();
+    await expect(flag).toHaveCSS("opacity", "1");
+    const gap = await row(page, "BTCUSDT").evaluate((el) => {
+      const symbol = el.querySelector('button[aria-label^="Show "]')!.getBoundingClientRect();
+      const flagBox = el.querySelector(".wl-flag")!.getBoundingClientRect();
+      return flagBox.left - symbol.right;
+    });
+    expect(gap).toBeGreaterThanOrEqual(0);
+  });
+
+  test.describe("on a touch screen", () => {
+    test.use({ hasTouch: true, isMobile: true });
+
+    test("show always, so a tap never lands on a hidden button", async ({ bootedApp: page }) => {
+      expect(await page.evaluate(() => matchMedia("(hover: none)").matches)).toBe(true);
+      const remove = button(page, "Remove BTCUSDT from watchlist");
+      await expect(remove).toHaveCSS("opacity", "1");
+      await expect(button(page, "Flag BTCUSDT")).toHaveCSS("opacity", "1");
+      await expect(button(page, "Drag BTCUSDT to reorder")).toHaveCSS("opacity", "1");
+
+      // The symbol does not run under them, and a tap on it selects the row.
+      const gap = await row(page, "ETHUSDT").evaluate((el) => {
+        const symbol = el.querySelector('button[aria-label^="Show "]')!.getBoundingClientRect();
+        const flagBox = el.querySelector(".wl-flag")!.getBoundingClientRect();
+        return flagBox.left - symbol.right;
+      });
+      expect(gap).toBeGreaterThanOrEqual(0);
+      await page.getByRole("button", { name: "Show ETHUSDT on the chart" }).tap();
+      await expect(row(page, "ETHUSDT")).toHaveAttribute("aria-current", "true");
+
+      await remove.tap();
+      await expect(row(page, "BTCUSDT")).toHaveCount(0);
+    });
+  });
+});
+
 test.describe("indicator settings title", () => {
   test("shows the chip's name, not the raw id", async ({ page }) => {
     await gotoApp(page, "/?ind=bbands,ema_stack");
