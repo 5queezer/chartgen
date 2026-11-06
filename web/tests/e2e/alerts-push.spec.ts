@@ -434,7 +434,20 @@ test("the worker and manifest are at the root", async ({ page }) => {
   expect(worker.ok()).toBe(true);
   expect(worker.headers()["content-type"]).toContain("javascript");
   await expect(page.locator('link[rel="manifest"]')).toHaveCount(1);
-  await expect(page.locator('link[rel="apple-touch-icon"]')).toHaveCount(1);
+
+  // Every icon asked for exists, as a PNG of the size it claims. On a clean checkout, as
+  // in CI, this is what notices one that was never committed.
+  const touch = await page.locator('link[rel="apple-touch-icon"]').getAttribute("href");
+  const manifestIcons = (parsed as unknown as { icons: { src: string; sizes: string }[] }).icons;
+  const icons = [...manifestIcons, { src: touch!, sizes: "180x180" }];
+  expect(manifestIcons.map((i) => i.sizes)).toEqual(expect.arrayContaining(["192x192", "512x512"]));
+  for (const { src, sizes } of icons) {
+    const res = await page.request.get(src);
+    expect(res.ok(), src).toBe(true);
+    const png = await res.body();
+    expect(png.subarray(1, 4).toString(), src).toBe("PNG");
+    expect(`${png.readUInt32BE(16)}x${png.readUInt32BE(20)}`, src).toBe(sizes);
+  }
 });
 
 test.describe("on an iPhone, not installed", () => {
