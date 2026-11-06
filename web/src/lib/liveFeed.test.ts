@@ -623,6 +623,57 @@ describe("push mode", () => {
     expect(t.polls.at(-1)).toEqual({ kind: "off" });
   });
 
+  it("waits for a pending unsubscribe before subscribing the next chart", async () => {
+    const t = setupPush();
+    t.feed.reset(payload(501, 1000), REQ);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(t.push.subscribe).toHaveBeenCalledTimes(1);
+
+    let finish!: () => void;
+    t.push.unsubscribe.mockImplementationOnce(
+      () => new Promise<void>((resolve) => (finish = resolve)),
+    );
+    t.feed.reset(payload(501, 1000), { ...REQ, timeframe: "5m" });
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(t.push.unsubscribe).toHaveBeenCalledWith("s1");
+    // At a cap of one subscription, this one would be refused now.
+    expect(t.push.subscribe).toHaveBeenCalledTimes(1);
+
+    finish();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(t.push.subscribe).toHaveBeenCalledTimes(2);
+    expect(t.polls.at(-1)).toEqual({ kind: "push" });
+  });
+
+  it("subscribes the next chart even if the unsubscribe fails", async () => {
+    const t = setupPush();
+    t.feed.reset(payload(501, 1000), REQ);
+    await vi.advanceTimersByTimeAsync(0);
+    t.push.unsubscribe.mockImplementationOnce(() => Promise.reject(new Error("gone")));
+    t.feed.reset(payload(501, 1000), { ...REQ, timeframe: "5m" });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(t.push.subscribe).toHaveBeenCalledTimes(2);
+  });
+
+  it("a chart changed while waiting for an unsubscribe does not subscribe the old one", async () => {
+    const t = setupPush();
+    t.feed.reset(payload(501, 1000), REQ);
+    await vi.advanceTimersByTimeAsync(0);
+    let finish!: () => void;
+    t.push.unsubscribe.mockImplementationOnce(
+      () => new Promise<void>((resolve) => (finish = resolve)),
+    );
+    const five = { ...REQ, timeframe: "5m" } as const;
+    const fifteen = { ...REQ, timeframe: "15m" } as const;
+    t.feed.reset(payload(501, 1000), five);
+    await vi.advanceTimersByTimeAsync(0);
+    t.feed.reset(payload(501, 1000), fifteen);
+    finish();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(t.push.subscribe).toHaveBeenCalledTimes(2);
+    expect(t.push.subscribe).toHaveBeenLastCalledWith(fifteen, WARMUP);
+  });
+
   it("a hidden tab unsubscribes and resubscribes when visible", async () => {
     const t = setupPush();
     t.feed.reset(payload(501, 1000), REQ);
@@ -681,6 +732,20 @@ describe("reload bound", () => {
     expect(later).toBeGreaterThan(MAX_RELOADS);
     expect(later).toBeLessThanOrEqual(MAX_RELOADS * 2);
     t.feed.dispose();
+  });
+
+  it("the reload budget is per chart: one out of reloads leaves another's (ADR-0043)", async () => {
+    const spent = setup(misfitTail, landing);
+    spent.feed.reset(payload(0, market.now), REQ);
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(spent.reload).toHaveBeenCalledTimes(MAX_RELOADS);
+
+    const other = setup(misfitTail, landing);
+    other.feed.reset(payload(0, market.now), REQ);
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(other.reload.mock.calls.length).toBeGreaterThan(0);
+    spent.feed.dispose();
+    other.feed.dispose();
   });
 
   it("out of reloads, a misfit keeps the bars live and fails only its indicator", async () => {

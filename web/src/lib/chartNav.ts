@@ -25,7 +25,7 @@ export function fitRange(chart: KLineChart, startMs: number | null): void {
   const count = first === -1 ? 0 : list.length - first;
   const usable = paneWidth(chart) - chart.getOffsetRightDistance();
   // With a projection (ADR-0033) its margin is part of the fit.
-  const space = projectionBarSpace(count, paneWidth(chart)) ?? (count > 0 ? usable / count : 0);
+  const space = projectionBarSpace(chart, count, paneWidth(chart)) ?? (count > 0 ? usable / count : 0);
   if (count > 0 && space > 0) {
     chart.setBarSpace(Math.min(MAX_BAR_SPACE, Math.max(MIN_BAR_SPACE, space)));
   }
