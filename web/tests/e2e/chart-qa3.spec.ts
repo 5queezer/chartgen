@@ -497,6 +497,20 @@ test.describe("legend with a resting crosshair", () => {
   });
 });
 
+/**
+ * The symbol column at its minimum, as large quotes would squeeze it. Forced with
+ * CSS and checked: a number set by hand is overwritten by the next quote.
+ */
+async function narrowestSymbolColumn(page: Page, symbol: string): Promise<void> {
+  await page.addStyleTag({
+    content: ".wl-table { grid-template-columns: 4.75rem auto auto auto !important; }",
+  });
+  const cell = page.locator(`.wl-row[data-symbol="${symbol}"] [role="cell"]`).first();
+  await expect
+    .poll(() => cell.evaluate((el) => Math.round(el.getBoundingClientRect().width)))
+    .toBe(62);
+}
+
 test.describe("watchlist hover buttons", () => {
   /** Hover the row and measure its buttons against the text of the numeric cells. */
   const overlaps = async (page: Page, symbol: string) => {
@@ -544,13 +558,7 @@ test.describe("watchlist hover buttons", () => {
   });
 
   test("cover none of the numbers at the narrowest column width", async ({ bootedApp: page }) => {
-    // Large quotes squeeze the symbol column to its minimum.
-    await page.locator(".wl-table").evaluate((el) => {
-      (el as HTMLElement).style.width = "19rem";
-    });
-    await page.locator('.wl-row[data-symbol="BTCUSDT"] [role="cell"]').nth(1).evaluate((el) => {
-      el.textContent = "1,234,567.89";
-    });
+    await narrowestSymbolColumn(page, "BTCUSDT");
     const result = await overlaps(page, "BTCUSDT");
     expect(result.numbers).toEqual([]);
   });
@@ -571,13 +579,7 @@ test.describe("watchlist row buttons without hover", () => {
     bootedApp: page,
   }) => {
     await page.mouse.move(0, 0);
-    // Large quotes squeeze the symbol column to its minimum.
-    await page.locator(".wl-table").evaluate((el) => {
-      (el as HTMLElement).style.width = "19rem";
-    });
-    await row(page, "BTCUSDT").locator('[role="cell"]').nth(1).evaluate((el) => {
-      el.textContent = "1,234,567.89";
-    });
+    await narrowestSymbolColumn(page, "BTCUSDT");
     await row(page, "BTCUSDT").focus();
     // Past the symbol button and the grip.
     await page.keyboard.press("Tab");
@@ -592,6 +594,26 @@ test.describe("watchlist row buttons without hover", () => {
       return flagBox.left - symbol.right;
     });
     expect(gap).toBeGreaterThanOrEqual(0);
+  });
+
+  test("a mouse click leaves no room reserved once the pointer is away", async ({
+    bootedApp: page,
+  }) => {
+    await narrowestSymbolColumn(page, "ETHUSDT");
+    const symbolWidth = () =>
+      row(page, "ETHUSDT")
+        .locator('button[aria-label^="Show "]')
+        .evaluate((el) => el.getBoundingClientRect().width);
+    await page.mouse.move(0, 0);
+    const before = await symbolWidth();
+    // Any click in the row focuses it; the symbol itself sits under Flag at this width.
+    await row(page, "ETHUSDT").locator('[role="cell"]').nth(1).click();
+    await expect(row(page, "ETHUSDT")).toHaveAttribute("aria-current", "true");
+    await expect
+      .poll(() => row(page, "ETHUSDT").evaluate((el) => el.matches(":focus-within")))
+      .toBe(true);
+    await page.mouse.move(0, 0);
+    await expect.poll(symbolWidth).toBe(before);
   });
 
   test.describe("on a touch screen", () => {

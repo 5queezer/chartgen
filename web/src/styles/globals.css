@@ -323,13 +323,15 @@ body {
   position: relative;
 }
 
+/* Keyboard focus on a button shows them too (above); a mouse click on the row does not. */
 .wl-row:hover .wl-symbol,
-.wl-row:focus-within .wl-symbol {
+.wl-row:has(.wl-remove:focus-visible, .wl-row-action:focus-visible) .wl-symbol {
   padding-right: 48px;
 }
 
-/* No hover on a touch screen: a hidden button would still take the tap. */
-@media (hover: none) {
+/* No hover on a touch screen: a hidden button would still take the tap. That
+ * includes a touch laptop, whose primary pointer is a mouse and reports hover. */
+@media (hover: none), (any-pointer: coarse) {
   .wl-remove,
   .wl-row-action {
     opacity: 1;
