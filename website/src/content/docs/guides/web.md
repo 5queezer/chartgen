@@ -565,7 +565,7 @@ items (see below), Copy link and Settings.
 | Price axis, and its `%` `log` `inv` `auto` buttons | Reset price scale, Auto, Lock price to bar ratio, Regular, Percent, Logarithmic, Invert scale, and at the click's height Copy price, Add alert at, Add horizontal line at |
 | Time axis | Reset time scale, Go to date… (`Alt+G`) |
 | Drawing, or its Object Tree row | Add alert on … (lines and channels), Style…, Clone, Lock/Unlock, Hide/Show, Remove |
-| Alert line, Alerts panel row, or its Object Tree row | Edit…, Pause/Resume, Open *symbol* in chart (another symbol's alert), Delete |
+| Alert line, Alerts panel row (a server alert's too), or its Object Tree row | Edit…, Pause/Resume, Open *symbol* in chart (another symbol's alert), Delete |
 | Indicator legend row, chip, Object Tree row | Add alert on … (with a plot to read), Settings for …, Hide/Show, Remove |
 | Compare symbol's legend row or Object Tree row | Remove |
 | Watchlist row | Open in chart, Add alert on …, Flag…, Copy symbol, Remove from watchlist (not in the Flagged view) |

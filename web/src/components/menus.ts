@@ -3,8 +3,11 @@
 // chip, tree row, sub-pane).
 
 import type { Alert } from "../lib/alerts";
+import { showToast } from "../services/alertEngine";
 import { removeAlert, setAlertActive } from "../stores/alerts";
 import { setSymbol, symbol } from "../stores/layout";
+import { deleteServerAlert, serverAlertError, updateServerAlert } from "../stores/serverAlerts";
+import type { ServerAlert } from "../types/responses";
 import { openAlertDialog } from "./AlertDialog";
 import type { MenuItem, MenuSpec } from "./ContextMenu";
 
@@ -22,6 +25,27 @@ export function alertMenu(a: Alert): MenuSpec {
         : [{ label: `Open ${a.symbol} in chart`, onSelect: () => setSymbol(a.symbol) }]),
       null,
       { label: "Delete", danger: true, onSelect: () => removeAlert(a.id) },
+    ],
+  };
+}
+
+/** The same menu for an alert the server runs (ADR-0042). */
+export function serverAlertMenu(a: ServerAlert): MenuSpec {
+  const send = (request: Promise<unknown>) =>
+    void request.catch((err: unknown) => showToast(serverAlertError(err)));
+  return {
+    label: "Alert actions",
+    items: [
+      { label: "Edit…", onSelect: () => openAlertDialog({ serverId: a.id }) },
+      {
+        label: a.active ? "Pause" : "Resume",
+        onSelect: () => send(updateServerAlert({ alert_id: a.id, active: !a.active })),
+      },
+      ...(a.symbol === symbol()
+        ? []
+        : [{ label: `Open ${a.symbol} in chart`, onSelect: () => setSymbol(a.symbol) }]),
+      null,
+      { label: "Delete", danger: true, onSelect: () => send(deleteServerAlert(a.id)) },
     ],
   };
 }

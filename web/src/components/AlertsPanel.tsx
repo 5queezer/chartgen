@@ -35,7 +35,7 @@ import { setWatchlistCollapsed } from "../stores/watchlist";
 import { leader, showToast } from "../services/alertEngine";
 import { openAlertDialog } from "./AlertDialog";
 import { openContextMenu } from "./ContextMenu";
-import { alertMenu } from "./menus";
+import { alertMenu, serverAlertMenu } from "./menus";
 
 const iconButtonClass =
   "inline-flex items-center justify-center w-7 h-7 rounded-md cursor-pointer text-[color:var(--color-fg-muted)] hover:text-[color:var(--color-fg)] hover:bg-[color:var(--color-bg-elev)]";
@@ -216,6 +216,7 @@ function ServerAlertRow(props: { alert: ServerAlert }): JSX.Element {
       data-status={serverAlertStatus(a())}
       class="wl-row group flex items-center gap-2 px-3 py-1.5 text-sm cursor-pointer"
       onClick={() => setSymbol(a().symbol)}
+      onContextMenu={(e) => openContextMenu(e, serverAlertMenu(a()))}
     >
       <div class="flex-1 min-w-0">
         <div class="truncate" data-role="description">
