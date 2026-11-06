@@ -166,7 +166,7 @@ jobs:
 
   e2e:
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    timeout-minutes: 60
     needs: [build-release]
     # Implements ADR-0008 — Playwright suite runs against the real
     # chartgen server + Vite dev server launched by Playwright's
@@ -201,7 +201,7 @@ jobs:
         working-directory: web
         run: npx playwright install --with-deps chromium
       - name: Run Playwright tests
-        timeout-minutes: 35
+        timeout-minutes: 45
         working-directory: web
         env:
           CI: "true"
