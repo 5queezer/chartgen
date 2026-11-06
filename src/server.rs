@@ -22,6 +22,8 @@ use chartgen::engine::Engine as TradingEngine;
 #[cfg(feature = "scripting")]
 use chartgen::scripting;
 
+mod signin;
+
 // --- OAuth 2.1 PKCE in-memory store ---
 
 struct OAuthClient {
@@ -32,6 +34,8 @@ struct OAuthClient {
     /// never received one (unused clients are collected, and evicted first).
     /// In memory only: a restart starts over from `last_token_at`.
     last_used: Option<Instant>,
+    /// As it registered, for the consent page (ADR-0044). Chosen by the client.
+    name: Option<String>,
 }
 
 /// Dynamic client registration limits: `/authorize` auto-approves, so
@@ -62,6 +66,8 @@ struct AuthCode {
     code_challenge: String,
     _code_challenge_method: String,
     created_at: Instant,
+    /// The signed-in user it was issued to; `None` with sign-in off (ADR-0044).
+    user: Option<signin::TokenUser>,
 }
 
 struct AccessToken {
@@ -69,6 +75,8 @@ struct AccessToken {
     client_id: String,
     created_at: Instant,
     expires_in: Duration,
+    /// The signed-in user it was issued to; `None` with sign-in off (ADR-0044).
+    user: Option<signin::TokenUser>,
 }
 
 struct OAuthStore {
@@ -80,6 +88,9 @@ struct OAuthStore {
     /// When a refused registration last logged, and refusals since.
     refusal_logged_at: Option<Instant>,
     refusals_unlogged: u64,
+    /// Sign-in through GitHub and Google; `None` when none is configured, and
+    /// `/authorize` then auto-approves (ADR-0044).
+    signin: Option<signin::SignIn>,
 }
 
 impl OAuthStore {
@@ -91,6 +102,7 @@ impl OAuthStore {
             registrations: HashMap::new(),
             refusal_logged_at: None,
             refusals_unlogged: 0,
+            signin: None,
         }
     }
 
@@ -270,12 +282,22 @@ impl OAuthStore {
         true
     }
 
-    /// The OAuth client a valid token was issued to: the owner of that
-    /// caller's scripted indicators (ADR-0025).
+    /// The owner of what a valid token's caller stores, such as scripted indicators
+    /// (ADR-0025): its signed-in user, or with sign-in off its OAuth client
+    /// (ADR-0044).
     #[cfg(feature = "scripting")]
-    fn client_for_token(&mut self, token: &str) -> Option<String> {
+    fn owner_for_token(&mut self, token: &str) -> Option<String> {
         self.cleanup_expired();
-        self.tokens.get(token).map(|t| t.client_id.clone())
+        self.tokens.get(token).map(|t| match &t.user {
+            Some(user) => user.id.clone(),
+            None => t.client_id.clone(),
+        })
+    }
+
+    /// The signed-in user of a valid token; `None` with sign-in off.
+    fn user_for_token(&mut self, token: &str) -> Option<String> {
+        self.cleanup_expired();
+        self.tokens.get(token)?.user.as_ref().map(|u| u.id.clone())
     }
 }
 
@@ -415,6 +437,7 @@ async fn oauth_register(
                     redirect_uris: body.redirect_uris.clone(),
                     created_at: Instant::now(),
                     last_used: None,
+                    name: body.client_name.clone(),
                 };
 
                 oauth.clients.insert(client_id.clone(), client);
@@ -439,7 +462,11 @@ async fn oauth_register(
     // a busy store would stall whatever else a blocked worker holds.
     #[cfg(feature = "scripting")]
     {
-        let (id, uris) = (client_id.clone(), body.redirect_uris.clone());
+        let (id, uris, name) = (
+            client_id.clone(),
+            body.redirect_uris.clone(),
+            body.client_name.clone(),
+        );
         let _ = tokio::task::spawn_blocking(move || {
             let Some(store) = scripting::persistence::global() else {
                 return;
@@ -454,6 +481,11 @@ async fn oauth_register(
             }
             if let Err(e) = store.save_oauth_client(&id, &uris) {
                 eprintln!("[OAuth] could not persist a client registration: {e}");
+            }
+            if let Some(name) = name {
+                if let Err(e) = store.set_oauth_client_name(&id, &name) {
+                    eprintln!("[OAuth] could not persist a client name: {e}");
+                }
             }
         })
         .await;
@@ -520,6 +552,8 @@ fn invalid_client_redirect(base: &str, redirect_uri: &str, state: Option<&str>) 
 
 async fn oauth_authorize(
     State(state): State<SharedState>,
+    headers: HeaderMap,
+    ext: axum::http::Extensions,
     Query(params): Query<AuthorizeQuery>,
 ) -> Response {
     eprintln!("[OAuth] GET /authorize");
@@ -574,6 +608,11 @@ async fn oauth_authorize(
             .into_response();
     }
 
+    // With sign-in on, a client id and a redirect URI are not enough (ADR-0044).
+    if s.signin.is_some() {
+        return signin::authorize(&mut s, &params, &headers, &client_addr(&ext));
+    }
+
     // Auto-approve: generate auth code
     let code = Uuid::new_v4().to_string();
     let auth_code = AuthCode {
@@ -583,6 +622,7 @@ async fn oauth_authorize(
         code_challenge: params.code_challenge.clone(),
         _code_challenge_method: params.code_challenge_method.clone(),
         created_at: Instant::now(),
+        user: None,
     };
     s.codes.insert(code.clone(), auth_code);
 
@@ -662,7 +702,8 @@ async fn oauth_token(
             .into_response();
     }
 
-    let token = {
+    #[cfg_attr(not(feature = "scripting"), allow(unused_variables))]
+    let (token, token_user) = {
         let mut s = state.oauth.lock().unwrap();
         s.cleanup_expired();
 
@@ -672,10 +713,12 @@ async fn oauth_token(
                 c.client_id.clone(),
                 c.redirect_uri.clone(),
                 c.code_challenge.clone(),
+                c.user.clone(),
             )
         });
 
-        let (stored_client_id, stored_redirect_uri, stored_challenge) = match code_data {
+        let (stored_client_id, stored_redirect_uri, stored_challenge, token_user) = match code_data
+        {
             Some(d) => d,
             None => {
                 eprintln!("[OAuth] POST /token code not found (possibly already exchanged)");
@@ -686,6 +729,11 @@ async fn oauth_token(
                 .into_response();
             }
         };
+
+        // A code that carries a user works once, whatever the outcome (ADR-0044).
+        if token_user.is_some() {
+            s.codes.remove(&body.code);
+        }
 
         // Validate client_id and redirect_uri
         if stored_client_id != body.client_id {
@@ -728,12 +776,16 @@ async fn oauth_token(
                 client_id: body.client_id.clone(),
                 created_at: Instant::now(),
                 expires_in,
+                user: token_user.clone(),
             },
         );
         if let Some(c) = s.clients.get_mut(&body.client_id) {
             c.last_used = Some(Instant::now());
         }
-        token
+        if let Some(user) = &token_user {
+            s.trim_user_tokens(&user.id);
+        }
+        (token, token_user)
     };
     // Every authenticated request needs that lock, and an async worker may hold
     // others' work: neither waits for a disk write.
@@ -745,6 +797,9 @@ async fn oauth_token(
                 if let Err(e) = store.mark_oauth_client_used(&client_id) {
                     eprintln!("[OAuth] could not record client use: {e}");
                 }
+            }
+            if let Some(user) = token_user {
+                signin::claim_scripts(&client_id, &user.id);
             }
         })
         .await;
@@ -1065,10 +1120,11 @@ async fn mcp_handler(
 
     // Extract token for subscription tools
     let token_owned = extract_bearer_token(&headers).map(|t| t.to_string());
-    // Scripted indicators belong to the token's OAuth client (ADR-0025).
+    // Scripted indicators belong to the token's user, or with sign-in off to its
+    // OAuth client (ADR-0025, ADR-0044).
     #[cfg(feature = "scripting")]
     let user = match &token_owned {
-        Some(t) if scripting::enabled() => state.oauth.lock().unwrap().client_for_token(t),
+        Some(t) if scripting::enabled() => state.oauth.lock().unwrap().owner_for_token(t),
         _ => None,
     };
     #[cfg(not(feature = "scripting"))]
@@ -1078,10 +1134,16 @@ async fn mcp_handler(
     let method_owned = method.to_string();
     let params_owned = params.cloned();
     let engine = state.engine.clone();
+    // The per-client cap counts per user where there is one: behind a proxy every
+    // address is the proxy's, so one stranger could use up everyone's.
+    let push_client = token_owned
+        .as_deref()
+        .and_then(|t| state.oauth.lock().unwrap().user_for_token(t))
+        .unwrap_or_else(|| client_addr(&ext));
     let push = token_owned.as_deref().map(|t| PushCtx {
         hub: state.charts.clone(),
         stream: stream_key(t, session_id.as_deref()),
-        client: client_addr(&ext),
+        client: push_client,
     });
     let result = tokio::task::spawn_blocking(move || {
         handle_mcp_request(
@@ -1340,6 +1402,27 @@ impl Drop for CleanupStream {
 pub async fn run_server(port: u16, engine: Option<Arc<RwLock<TradingEngine>>>) {
     #[cfg_attr(not(feature = "scripting"), allow(unused_mut))]
     let mut oauth = OAuthStore::new();
+    match signin::Config::from_env() {
+        Ok(Some(config)) => {
+            println!("Sign-in required, through: {}", config.provider_labels());
+            if engine.is_some() {
+                eprintln!("[OAuth] WARNING: sign-in is open to anyone with an account, and this server has a trading engine: anyone who signs in can use the order tools. Do not expose it (ADR-0044).");
+            }
+            if signin::public_base_url().is_some_and(|b| !b.starts_with("https://")) {
+                eprintln!("[OAuth] WARNING: CHARTGEN_BASE_URL is not https: session cookies travel unprotected.");
+            }
+            oauth.signin = Some(signin::SignIn::new(config));
+        }
+        Ok(None) => {
+            if let Some(base) = signin::public_base_url() {
+                eprintln!("[OAuth] WARNING: serving {base} without sign-in: anyone can get a token. Set CHARTGEN_GITHUB_CLIENT_ID/SECRET or CHARTGEN_GOOGLE_CLIENT_ID/SECRET (ADR-0044).");
+            }
+        }
+        Err(e) => {
+            eprintln!("[OAuth] sign-in is misconfigured, refusing to start: {e}");
+            std::process::exit(1);
+        }
+    }
     // Open (and migrate) the store at startup and restore the registered
     // OAuth clients, with CHARTGEN_SCRIPTING or without: they keep their
     // registration (ADR-0036) and their scripts stay theirs (ADR-0025).
@@ -1376,12 +1459,22 @@ pub async fn run_server(port: u16, engine: Option<Arc<RwLock<TradingEngine>>>) {
                             redirect_uris: c.redirect_uris,
                             created_at: instant_of(c.created_at),
                             last_used: c.last_token_at.map(instant_of),
+                            name: c.client_name,
                         },
                     );
                 }
             }
             Some(Err(e)) => eprintln!("[OAuth] cannot read stored clients: {e}"),
             None => eprintln!("[OAuth] store unavailable at {}", path.display()),
+        }
+        if let Some(signin) = oauth.signin.as_mut() {
+            match scripting::persistence::global().map(|s| signin.restore(s)) {
+                Some(Ok((users, sessions))) => {
+                    println!("Sign-in store: {users} users, {sessions} sessions restored");
+                }
+                Some(Err(e)) => eprintln!("[OAuth] cannot read stored sessions: {e}"),
+                None => eprintln!("[OAuth] sessions and users stay in memory: no store"),
+            }
         }
     }
     let state = Arc::new(AppState {
@@ -1418,6 +1511,17 @@ pub async fn run_server(port: u16, engine: Option<Arc<RwLock<TradingEngine>>>) {
         .route("/register", post(oauth_register))
         .route("/authorize", get(oauth_authorize))
         .route("/token", post(oauth_token))
+        .route("/oauth/signin", get(signin::signin_page))
+        .route("/oauth/login/{provider}", get(signin::login))
+        .route("/oauth/callback/{provider}", get(signin::callback))
+        .route("/oauth/cancel", get(signin::cancel))
+        .route(
+            "/oauth/consent",
+            get(signin::consent_form).post(signin::consent_decision),
+        )
+        .route("/oauth/logout", post(signin::logout))
+        .route("/oauth/signed-out", get(signin::signed_out))
+        .route("/oauth/me", get(signin::me))
         .route("/favicon.ico", get(favicon_handler))
         .route("/favicon.svg", get(favicon_handler))
         // MCP endpoints — Claude.ai may try root, /mcp, /message, or /sse
@@ -1848,6 +1952,7 @@ mod tests {
                     client_id: "test".to_string(),
                     created_at: Instant::now(),
                     expires_in: Duration::from_secs(3600),
+                    user: None,
                 },
             );
         }
@@ -1962,6 +2067,7 @@ mod tests {
                 client_id: "test".to_string(),
                 created_at: Instant::now(),
                 expires_in: Duration::from_secs(3600),
+                user: None,
             },
         );
         let app: Router = Router::new()
@@ -2023,6 +2129,7 @@ mod tests {
                 client_id: "test".to_string(),
                 created_at: Instant::now(),
                 expires_in: Duration::from_secs(3600),
+                user: None,
             },
         );
         let app: Router = Router::new()
@@ -2105,6 +2212,7 @@ mod tests {
             redirect_uris: vec![],
             created_at: Instant::now() - age,
             last_used: last_used_age.map(|a| Instant::now() - a),
+            name: None,
         }
     }
 
@@ -2130,6 +2238,7 @@ mod tests {
                 client_id: client_id.into(),
                 created_at: Instant::now(),
                 expires_in,
+                user: None,
             },
         );
     }
@@ -2401,6 +2510,7 @@ mod tests {
                     code_challenge: String::new(),
                     _code_challenge_method: String::new(),
                     created_at: Instant::now(),
+                    user: None,
                 },
             );
         }

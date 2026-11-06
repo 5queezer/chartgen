@@ -885,3 +885,98 @@ fn concurrency_and_chart_budget() {
     );
     assert!(msgs[3].contains("at most 3"), "{msgs:?}");
 }
+
+/// ADR-0044: users, sessions and approvals survive reopening, and migrating an
+/// existing file keeps its clients.
+#[test]
+fn sign_in_rows_survive_reopening() {
+    let dir = std::env::temp_dir().join(format!("chartgen-signin-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let path = dir.join("s.db");
+    let store = persistence::Store::open(&path).unwrap();
+    store.save_oauth_client("c1", &[]).unwrap();
+    store.set_oauth_client_name("c1", "Claude").unwrap();
+    store.save_user("github:1", "octo").unwrap();
+    store.save_user("github:1", "renamed").unwrap();
+    let session = |hash: &str, expires_at| persistence::StoredSession {
+        token_hash: hash.into(),
+        user_id: "github:1".into(),
+        created_at: 1,
+        expires_at,
+    };
+    let now = chrono::Utc::now().timestamp();
+    store.save_session(&session("live", now + 100)).unwrap();
+    store.save_session(&session("gone", now - 1)).unwrap();
+    store
+        .save_session(&session("logged-out", now + 100))
+        .unwrap();
+    store.delete_session("logged-out").unwrap();
+    store.save_grant("github:1", "c1").unwrap();
+    store.save_grant("github:1", "evicted").unwrap();
+    store.save_grant("github:2", "c1").unwrap();
+    store.delete_grant("github:2", "c1").unwrap();
+    drop(store);
+
+    let store = persistence::Store::open(&path).unwrap();
+    assert_eq!(
+        store.users().unwrap(),
+        [persistence::StoredUser {
+            id: "github:1".into(),
+            name: "renamed".into()
+        }]
+    );
+    assert_eq!(
+        store.live_sessions(now).unwrap(),
+        [session("live", now + 100)]
+    );
+    assert_eq!(
+        store.grants().unwrap(),
+        [("github:1".to_string(), "c1".to_string())],
+        "a grant of a client no longer registered goes"
+    );
+    assert_eq!(
+        store.oauth_clients().unwrap()[0].client_name.as_deref(),
+        Some("Claude")
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// ADR-0044: scripts move to the first user, and nothing is overwritten or lost.
+#[test]
+fn claiming_scripts_moves_them_without_loss() {
+    let dir = std::env::temp_dir().join(format!("chartgen-claim-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let store = persistence::Store::open(&dir.join("s.db")).unwrap();
+    let meta = serde_json::json!({});
+    for name in ["a", "b", "c"] {
+        store
+            .upsert("client", name, "client's", &meta, "h")
+            .unwrap();
+    }
+    store.upsert("user", "b", "user's", &meta, "h").unwrap();
+
+    assert_eq!(store.claim_scripts("client", "user", 50).unwrap(), 2);
+    assert_eq!(store.get("user", "a").unwrap().unwrap().source, "client's");
+    assert_eq!(
+        store.get("user", "b").unwrap().unwrap().source,
+        "user's",
+        "a name the user has is not overwritten"
+    );
+    assert_eq!(
+        store.get("client", "b").unwrap().unwrap().source,
+        "client's",
+        "and the client's stays where it was"
+    );
+    assert_eq!(store.count("user").unwrap(), 3);
+    assert_eq!(store.claim_scripts("client", "user", 50).unwrap(), 0);
+    assert_eq!(store.claim_scripts("nobody", "user", 50).unwrap(), 0);
+
+    // At the user's limit the rest stays with the client.
+    for name in ["x", "y", "z"] {
+        store.upsert("full", name, "s", &meta, "h").unwrap();
+    }
+    assert_eq!(store.claim_scripts("full", "other", 2).unwrap(), 2);
+    assert_eq!(store.count("full").unwrap(), 1);
+    assert_eq!(store.claim_scripts("full", "other", 2).unwrap(), 0);
+    let _ = std::fs::remove_dir_all(&dir);
+}

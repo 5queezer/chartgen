@@ -72,7 +72,8 @@ pub fn run() {
 /// an error indicating that the trading engine is not running.
 /// `token` is the client's Bearer token (if any), used for subscription identity.
 /// `push` is set on the HTTP transport, for the chart push tools (ADR-0021).
-/// `user` owns the caller's scripted indicators (the OAuth client id, ADR-0025);
+/// `user` owns the caller's scripted indicators (the signed-in user, or with
+/// sign-in off the OAuth client id; ADR-0025, ADR-0044);
 /// `None` on stdio and whenever scripting is disabled.
 pub fn handle_mcp_request(
     method: &str,
