@@ -460,7 +460,7 @@ fn test_sample_data_sizes() {
 #[test]
 fn test_available_count() {
     let available = indicators::available();
-    assert_eq!(available.len(), 72, "Expected 72 indicators");
+    assert_eq!(available.len(), 74, "Expected 74 indicators");
 }
 
 #[test]
@@ -505,21 +505,37 @@ fn test_session_vp_resets_per_day() {
     .unwrap()
     .unwrap();
     let result = ind.compute(&data);
-    // Expect multiple POC lines — one per session — each with NaN gaps.
+    // One POC line, whatever the number of sessions (ADR-0048): a live tail holds
+    // fewer sessions than a load and must keep its shape. It breaks between sessions,
+    // and holds one level through each.
     let poc_lines: Vec<_> = result
         .lines
         .iter()
         .filter(|l| l.label.as_deref() == Some("POC"))
         .collect();
-    assert!(poc_lines.len() >= 2, "expected at least 2 session POCs");
-    for line in &poc_lines {
-        let nans = line.y.iter().filter(|v| v.is_nan()).count();
-        let finite = line.y.len() - nans;
+    assert_eq!(poc_lines.len(), 1);
+    let mut sessions: Vec<Vec<f64>> = Vec::new();
+    let mut open = false;
+    for &v in &poc_lines[0].y {
+        if v.is_nan() {
+            open = false;
+        } else if open {
+            sessions.last_mut().unwrap().push(v);
+        } else {
+            sessions.push(vec![v]);
+            open = true;
+        }
+    }
+    assert!(
+        sessions.len() >= 2,
+        "expected at least 2 sessions: {}",
+        sessions.len()
+    );
+    for session in &sessions {
         assert!(
-            nans > 0,
-            "session POC should have NaN gaps outside its range"
+            session.iter().all(|v| *v == session[0]),
+            "a session has one POC"
         );
-        assert!(finite > 0, "session POC should have some finite values");
     }
 }
 
