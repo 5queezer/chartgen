@@ -168,7 +168,10 @@ export function LayoutMenu(): JSX.Element {
           aria-label={`Layout: ${activeLayout().name}${layoutDirty() ? " (unsaved changes)" : ""}`}
           title="Layouts"
         >
-          <span class="min-w-0 max-w-40 truncate" data-testid="layout-name">
+          <svg aria-hidden="true" viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.5" class="hidden compact:inline shrink-0">
+            <path d="M2 2.5h12v11H2zM2 6.5h12M7 6.5v7" />
+          </svg>
+          <span class="min-w-0 max-w-40 truncate compact:hidden" data-testid="layout-name">
             {activeLayout().name}
           </span>
           <Show when={layoutDirty()}>

@@ -1,5 +1,8 @@
 @import "tailwindcss";
 
+/* The compact shell: lib/viewport.ts sets `html.compact`. */
+@custom-variant compact (&:where(.compact, .compact *));
+
 /*
  * TradingView visual parity per ADR-0006. These are the dark defaults
  * (#131722 family); lib/theme.ts is the source of truth and overrides them
@@ -495,4 +498,350 @@ body {
   to {
     transform: rotate(360deg);
   }
+}
+
+/* Keep the app clear of notches and the home indicator (0 on a desktop). */
+.app-shell {
+  padding: env(safe-area-inset-top) env(safe-area-inset-right)
+    env(safe-area-inset-bottom) env(safe-area-inset-left);
+}
+
+/* klinecharts handles every touch on the chart: pan, pinch, long-press. */
+.chart-host {
+  touch-action: none;
+}
+
+/* A narrow price axis cannot hold the scale buttons (PriceAxisControls). */
+.compact .price-scale-controls {
+  width: auto !important;
+  background: var(--color-bg);
+}
+
+/* --- Touch input, whatever the layout ---------------------------------- */
+@media (pointer: coarse) {
+  html,
+  body {
+    /* No pull-to-refresh or rubber-banding against the chart. */
+    overflow: hidden;
+    overscroll-behavior: none;
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  .chart-host,
+  [role="toolbar"] {
+    -webkit-user-select: none;
+    user-select: none;
+    -webkit-touch-callout: none;
+  }
+
+  /* iOS zooms the page into a focused field below 16px. */
+  input,
+  select,
+  textarea {
+    font-size: 16px;
+  }
+
+  header button,
+  footer button,
+  .sidebar-dock button,
+  [role="toolbar"] button:not([data-testid^="tool-group-more-"]),
+  [role="dialog"] form > :last-child button,
+  [role="dialog"] [aria-label="Close"],
+  [role="tab"],
+  [role="menuitem"],
+  [role="menuitemradio"],
+  [role="menuitemcheckbox"] {
+    min-height: 40px;
+    min-width: 40px;
+  }
+
+  [data-testid^="tool-group-more-"] {
+    width: 20px;
+    height: 20px;
+  }
+
+  .chip-btn {
+    width: 28px;
+    height: 28px;
+  }
+
+  /* Tappable: the strip outgrows the price axis, over the end of the time axis. */
+  .price-scale-controls {
+    width: auto !important;
+    background: var(--color-bg);
+  }
+
+  .price-scale-btn {
+    min-width: 32px;
+    min-height: 28px;
+    font-size: 11px;
+  }
+
+  .wl-row {
+    min-height: 40px;
+  }
+}
+
+/* No hover: a tap on an indicator's legend row shows its controls in place of
+ * its values, which a phone-width row would otherwise clip them behind. */
+@media (hover: none) {
+  .pane-header-controls {
+    display: none;
+  }
+
+  .pane-header-open {
+    z-index: 4;
+    background: var(--legend-bg, var(--color-bg));
+  }
+
+  .pane-header-open .pane-header-controls {
+    display: inline-flex;
+    opacity: 1;
+  }
+
+  .pane-header-open .pane-header-value {
+    display: none;
+  }
+
+  .pane-header-btn {
+    width: 32px;
+    height: 32px;
+  }
+}
+
+/* --- Compact shell ------------------------------------------------------ */
+.compact .chart-host {
+  min-height: 0;
+}
+
+.compact header h1 {
+  display: none;
+}
+
+.compact header {
+  height: 48px;
+  gap: 2px;
+  padding-inline: 6px;
+}
+
+.compact header [role="toolbar"] {
+  flex-shrink: 1;
+  min-width: 0;
+  gap: 0;
+}
+
+.compact header [role="toolbar"] > span {
+  display: none;
+}
+
+.compact header [role="toolbar"] > button:first-child {
+  flex-shrink: 1;
+  min-width: 0;
+}
+
+/* The live badge reduces to its colored dot. */
+.compact .live-status {
+  margin-left: 2px;
+  font-size: 0;
+}
+
+.compact [data-testid="layout-notice"] {
+  position: fixed;
+  z-index: 30;
+  top: calc(52px + env(safe-area-inset-top));
+  right: 8px;
+  padding: 4px 8px;
+  border-radius: 4px;
+  background: var(--color-surface);
+}
+
+/* A phone-width price legend keeps the prices, then the change: the header
+ * already names the symbol and the interval. */
+.compact .pane-header .pane-header-vol,
+.compact .pane-header:has([data-testid="price-legend"]) :is(.pane-header-label, .pane-header-params) {
+  display: none;
+}
+
+.compact .pane-header {
+  gap: 6px;
+  font-size: 11px;
+}
+
+.compact .pane-header-ohlc {
+  gap: 5px;
+}
+
+/* Drawing toolbar: a column over the chart, behind the dock's Draw button. It
+ * stays in the tree when closed, since a selected drawing's style bar and
+ * menu live inside it. */
+.compact main {
+  position: relative;
+}
+
+.compact [aria-label="Drawing tools"] {
+  position: absolute;
+  z-index: 20;
+  inset-block: 0;
+  left: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+/* It scrolls as a whole: a short screen would squeeze its tools list to nothing. */
+.compact [aria-label="Drawing tools"] > * {
+  flex: none;
+}
+
+.compact [aria-label="Drawing tools"] > .overflow-y-auto {
+  overflow: visible;
+}
+
+.compact main:not([data-draw-open]) [aria-label="Drawing tools"] {
+  width: 0;
+  padding: 0;
+  border: 0;
+  overflow: hidden;
+  visibility: hidden;
+}
+
+.compact [data-testid="drawing-style-bar"],
+.compact [data-drawing-menu] {
+  visibility: visible;
+}
+
+.compact [data-testid="drawing-style-bar"] {
+  left: 8px !important;
+  right: 8px;
+  translate: none;
+  flex-wrap: wrap;
+}
+
+.compact [data-tool-flyout] {
+  max-height: calc(var(--vvh, 100dvh) - 16px);
+  overflow-y: auto;
+}
+
+/* Sidebar: a bottom sheet, or a side panel when the phone lies on its side. */
+.sheet-backdrop {
+  position: fixed;
+  z-index: 29;
+  inset: 0;
+  background: rgb(0 0 0 / 0.4);
+  touch-action: none;
+}
+
+.compact .sidebar {
+  position: fixed;
+  z-index: 30;
+  inset: auto 0 0;
+  width: auto;
+  height: 65dvh;
+  padding-bottom: env(safe-area-inset-bottom);
+  border-top: 1px solid var(--color-border);
+  border-left: 0;
+  border-radius: 12px 12px 0 0;
+  background: var(--color-bg);
+  overscroll-behavior: contain;
+}
+
+/* The sheet has its own close button. */
+.compact .sidebar [aria-label^="Collapse"] {
+  display: none;
+}
+
+.compact .sidebar-dock {
+  border-top: 1px solid var(--color-border);
+}
+
+.compact footer {
+  gap: 0;
+  padding-inline: 4px;
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  scrollbar-width: none;
+  white-space: nowrap;
+}
+
+.compact footer > * {
+  flex-shrink: 0;
+}
+
+.compact [data-testid="clock"] {
+  display: none;
+}
+
+.compact [data-testid="tz-select"] {
+  max-width: 96px;
+  margin-left: auto;
+}
+
+@media (orientation: landscape) {
+  .compact .sidebar {
+    inset: 0 0 0 auto;
+    width: min(360px, 100vw);
+    height: auto;
+    padding-right: env(safe-area-inset-right);
+    border-top: 0;
+    border-left: 1px solid var(--color-border);
+    border-radius: 0;
+  }
+
+  /* Height is scarce: ranges and dock share one row. */
+  .compact .bottom-rows {
+    flex-direction: row;
+    border-top: 1px solid var(--color-border);
+  }
+
+  .compact .bottom-rows > footer {
+    flex: 1;
+    min-width: 0;
+    border-top: 0;
+  }
+
+  .compact [data-testid="tz-select"] {
+    max-width: 72px;
+  }
+
+  .compact .sidebar-dock {
+    flex-shrink: 0;
+    gap: 4px;
+    border-top: 0;
+  }
+}
+
+/* Dialogs and menus fit what is visible above the on-screen keyboard. */
+.compact div:has(> [role="dialog"]) {
+  top: var(--vvt, 0px);
+  bottom: auto;
+  height: var(--vvh, 100dvh);
+  padding: max(8px, env(safe-area-inset-top)) max(8px, env(safe-area-inset-right))
+    max(8px, env(safe-area-inset-bottom)) max(8px, env(safe-area-inset-left));
+}
+
+.compact [role="dialog"] {
+  max-height: 100%;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+/* The whole dialog scrolls, with its buttons always in view. */
+.compact [role="dialog"] .max-h-\[60vh\] {
+  max-height: none;
+  overflow: visible;
+}
+
+.compact [role="dialog"] form > :last-child {
+  position: sticky;
+  z-index: 1;
+  bottom: 0;
+  padding-block: 8px;
+  background: var(--color-bg);
+}
+
+.compact [role="menu"] {
+  max-height: min(
+    var(--kb-popper-content-available-height, 100dvh),
+    calc(var(--vvh, 100dvh) - 16px)
+  );
+  overflow-y: auto;
 }
