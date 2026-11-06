@@ -545,7 +545,7 @@ describe("drawing alerts", () => {
     const a = s.addAlert(drawingAlert)!;
     const other = s.addAlert({ ...drawingAlert, symbol: "MSFT" })!;
     const price = s.addAlert({ symbol: "AAPL", condition: "greater", price: 5, trigger: "once" })!;
-    s.syncDrawingAlerts("AAPL", ["d1"]);
+    s.syncDrawingAlerts("AAPL", [trendLine]);
     expect(s.alerts().every((x) => x.active)).toBe(true);
 
     data.delete(DRAWINGS_KEY);
@@ -568,7 +568,7 @@ describe("drawing alerts", () => {
 
     // The drawing comes back (undo): the alert is on again.
     data.set(DRAWINGS_KEY, JSON.stringify([trendLine]));
-    s.syncDrawingAlerts("AAPL", ["d1"]);
+    s.syncDrawingAlerts("AAPL", [trendLine]);
     expect(byId(a.id).active).toBe(true);
     expect(byId(a.id)).not.toHaveProperty("note");
   });
@@ -586,7 +586,7 @@ describe("drawing alerts", () => {
     const byId = (id: string) => s.alerts().find((x) => x.id === id)!;
 
     data.set(DRAWINGS_KEY, JSON.stringify([vertical]));
-    s.syncDrawingAlerts("AAPL", ["d1"], ["d1"]);
+    s.syncDrawingAlerts("AAPL", [vertical]);
     expect(byId(a.id)).toMatchObject({ active: false, note: s.LINE_VERTICAL });
     expect(s.inactiveReason(byId(a.id))).toBe(s.LINE_VERTICAL);
     expect(byId(paused.id)).not.toHaveProperty("note");
@@ -603,34 +603,148 @@ describe("drawing alerts", () => {
     // Deleted while vertical says so, and undo brings the vertical note back.
     s.syncDrawingAlerts("AAPL", []);
     expect(byId(a.id)).toMatchObject({ active: false, note: s.DRAWING_DELETED });
-    s.syncDrawingAlerts("AAPL", ["d1"], ["d1"]);
+    s.syncDrawingAlerts("AAPL", [vertical]);
     expect(byId(a.id)).toMatchObject({ active: false, note: s.LINE_VERTICAL });
 
     // No longer vertical: on again, and the paused one stays paused.
     data.set(DRAWINGS_KEY, JSON.stringify([trendLine]));
-    s.syncDrawingAlerts("AAPL", ["d1"], []);
+    s.syncDrawingAlerts("AAPL", [trendLine]);
     expect(byId(a.id).active).toBe(true);
     expect(byId(a.id)).not.toHaveProperty("note");
     expect(byId(paused.id).active).toBe(false);
   });
 
-  it("passing through vertical does not re-arm a fired every-time alert", async () => {
-    stubStorage({ [DRAWINGS_KEY]: JSON.stringify([hline]) });
+  it("a line on one bar of the alert's interval is a reason in this tab, never stored", async () => {
+    // Ten 1-minute bars apart: not vertical by its points.
+    const steep = {
+      ...trendLine,
+      points: [trendLine.points[0]!, { ...trendLine.points[1]!, timestamp: 10 * 60_000 }],
+    };
+    const data = stubStorage({ [DRAWINGS_KEY]: JSON.stringify([steep]) });
     const s = await load();
-    s.addAlert({ ...hlineAlert, condition: "greater", trigger: "every" });
-    const level = hline.points[0]!.value;
-    expect(s.processPrice("AAPL", level + 1)).toHaveLength(1);
+    const { timeAxisOf } = await import("./drawings");
+    const hourly = timeAxisOf(Array.from({ length: 30 }, (_, i) => i * H));
+    const minutes = timeAxisOf(Array.from({ length: 30 }, (_, i) => i * 60_000));
+    const ctx = (interval: string, axis: typeof hourly) => ({ symbol: "AAPL", interval, keys: [], axis });
+    const a = s.addAlert(drawingAlert)!;
+    const paused = s.addAlert(drawingAlert)!;
+    s.setAlertActive(paused.id, false);
+    const finer = s.addAlert({ ...drawingAlert, source: { ...drawingAlert.source, interval: "1m" } })!;
+    const byId = (id: string) => s.alerts().find((x) => x.id === id)!;
+    const stored = () => data.get("chartgen.alerts.list");
+    const before = stored();
+
+    // Each tab judges by its own chart, and showing a chart stores nothing.
+    expect(s.inactiveReason(byId(a.id), ctx("1h", hourly))).toBe(s.LINE_VERTICAL);
+    expect(s.inactiveReason(byId(a.id), ctx("1m", minutes))).toBe("open AAPL 1h");
+    s.setChartContext(ctx("1h", hourly));
+    expect(s.inactiveReason(byId(a.id))).toBe(s.LINE_VERTICAL);
+    s.setChartContext(ctx("1m", minutes));
+    expect(s.inactiveReason(byId(a.id))).toBe("open AAPL 1h");
+    s.setChartContext(ctx("1h", hourly));
+    expect(stored()).toBe(before);
+    expect(byId(a.id).active).toBe(true);
+    expect(byId(a.id)).not.toHaveProperty("note");
+
+    // Paused stays paused, and an alert on another interval is not judged on these bars.
+    expect(s.inactiveReason(byId(paused.id))).toBeNull();
+    expect(byId(paused.id).active).toBe(false);
+    expect(s.inactiveReason(byId(finer.id))).toBe("open AAPL 1m");
+    expect(byId(finer.id).active).toBe(true);
+
+    // A save does not store it either, and the reason follows the drawing.
+    s.syncDrawingAlerts("AAPL", [steep]);
+    expect(stored()).toBe(before);
+    data.set(DRAWINGS_KEY, JSON.stringify([trendLine]));
+    s.syncDrawingAlerts("AAPL", [trendLine]);
+    expect(s.inactiveReason(byId(a.id))).toBeNull();
+    expect(stored()).toBe(before);
+  });
+
+  it("a line on one bar of the chart is not evaluated: it neither fires nor re-arms", async () => {
+    const steep = {
+      ...trendLine,
+      points: [trendLine.points[0]!, { ...trendLine.points[1]!, timestamp: 10 * 60_000 }],
+    };
+    const data = stubStorage({ [DRAWINGS_KEY]: JSON.stringify([trendLine]) });
+    const s = await load();
+    const { timeAxisOf } = await import("./drawings");
+    const view = { axis: timeAxisOf(Array.from({ length: 30 }, (_, i) => i * H))!, log: false };
+    const tick = (i: number) => ({ time: i * H, chart: { interval: "1h", indicators: {}, view } });
+    s.addAlert({ ...drawingAlert, trigger: "every" });
+
+    // On the line it fires, and an "every" crossing stays armed; now disarm it by hand.
+    s.processPrice("AAPL", 100, 0, tick(5));
+    expect(s.processPrice("AAPL", 400, 0, tick(6))).toHaveLength(1);
+    const stored = JSON.parse(data.get("chartgen.alerts.list")!) as { disarmed?: boolean }[];
+    stored[0]!.disarmed = true;
+    data.set("chartgen.alerts.list", JSON.stringify(stored));
+
+    // One bar: nothing happens to it, whatever the price does.
+    data.set(DRAWINGS_KEY, JSON.stringify([steep]));
+    expect(s.processPrice("AAPL", 1, 0, tick(7))).toEqual([]);
+    expect(s.processPrice("AAPL", 900, 0, tick(8))).toEqual([]);
+    expect(s.alerts()[0]).toMatchObject({ active: true, disarmed: true });
+  });
+
+  it("passing through vertical does not re-arm a fired every-time alert", async () => {
+    stubStorage({ [DRAWINGS_KEY]: JSON.stringify([trendLine]) });
+    const s = await load();
+    const { timeAxisOf } = await import("./drawings");
+    const view = { axis: timeAxisOf(Array.from({ length: 30 }, (_, i) => i * H))!, log: false };
+    // The line reads 150 at this bar.
+    const tick = { time: 5 * H, chart: { interval: "1h", indicators: {}, view } };
+    s.addAlert({ ...drawingAlert, condition: "greater", trigger: "every" });
+    expect(s.processPrice("AAPL", 151, 0, tick)).toHaveLength(1);
     expect(s.alerts()[0]!.disarmed).toBe(true);
 
-    s.syncDrawingAlerts("AAPL", ["h1"], ["h1"]);
+    const upright = {
+      ...trendLine,
+      points: [trendLine.points[0]!, { ...trendLine.points[1]!, timestamp: trendLine.points[0]!.timestamp }],
+    };
+    s.syncDrawingAlerts("AAPL", [upright]);
     expect(s.alerts()[0]).toMatchObject({ active: false, note: s.LINE_VERTICAL, disarmed: true });
-    s.syncDrawingAlerts("AAPL", ["h1"], []);
+    s.syncDrawingAlerts("AAPL", [trendLine]);
     expect(s.alerts()[0]).toMatchObject({ active: true, disarmed: true });
 
     // Still above the level: no second firing until the price has been back below.
-    expect(s.processPrice("AAPL", level + 2)).toEqual([]);
-    expect(s.processPrice("AAPL", level - 1)).toEqual([]);
-    expect(s.processPrice("AAPL", level + 1)).toHaveLength(1);
+    expect(s.processPrice("AAPL", 152, 0, tick)).toEqual([]);
+    expect(s.processPrice("AAPL", 149, 0, tick)).toEqual([]);
+    expect(s.processPrice("AAPL", 151, 0, tick)).toHaveLength(1);
+  });
+
+  it("a horizontal tool with two points is never called vertical", async () => {
+    // A ray stored from when the tool took two clicks: its level needs neither point's bar.
+    const ray = (apart: number) => ({
+      ...hline,
+      name: "horizontalRayLine",
+      points: [hline.points[0]!, { ...hline.points[0]!, timestamp: hline.points[0]!.timestamp + apart }],
+    });
+    const data = stubStorage({ [DRAWINGS_KEY]: JSON.stringify([ray(0)]) });
+    const s = await load();
+    const { timeAxisOf } = await import("./drawings");
+    const axis = timeAxisOf(Array.from({ length: 30 }, (_, i) => i * H))!;
+    const view = { axis, log: false };
+    const ctx = { symbol: "AAPL", interval: "1h", keys: [], axis };
+    const a = s.addAlert(hlineAlert)!;
+    const bound = s.addAlert({ ...hlineAlert, source: { ...hlineAlert.source, interval: "1h" } })!;
+    const byId = (id: string) => s.alerts().find((x) => x.id === id)!;
+
+    // Equal times: a save leaves it on, and resuming keeps it on.
+    s.syncDrawingAlerts("AAPL", [ray(0)]);
+    expect(byId(a.id)).toMatchObject({ active: true });
+    expect(byId(a.id)).not.toHaveProperty("note");
+    s.setAlertActive(a.id, false);
+    s.setAlertActive(a.id, true);
+    expect(byId(a.id)).toMatchObject({ active: true });
+    expect(byId(a.id)).not.toHaveProperty("note");
+
+    // Within one bar of the chart: no reason, and it fires at its level.
+    data.set(DRAWINGS_KEY, JSON.stringify([ray(15 * 60_000)]));
+    expect(s.inactiveReason(byId(bound.id), ctx)).toBeNull();
+    const tick = { time: 5 * H, chart: { interval: "1h", indicators: {}, view } };
+    s.processPrice("AAPL", 149, 0, tick);
+    expect(s.processPrice("AAPL", 151, 0, tick).map((f) => f.id).sort()).toEqual([a.id, bound.id].sort());
   });
 
   it("a paused alert on a deleted drawing gets the note when resumed", async () => {

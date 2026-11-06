@@ -679,8 +679,13 @@ compared with (a value, or a plot).
   open AAPL 1h*); horizontal lines and rays are watched for any symbol.
   Deleting the drawing does not delete its alerts: they switch off and read
   *inactive: drawing deleted* until the drawing is back (undo). Alerts are not
-  offered on a vertical line, and those on a line dragged vertical read
-  *inactive: line is vertical* until it no longer is.
+  offered on a vertical line, nor on one whose two points fall on a single bar
+  of the interval on screen (a line drawn on 1m, viewed on 1h). An alert whose
+  line is like that on its creation interval reads *inactive: line is vertical*
+  there. Changing the interval does not bring it back to life: elsewhere it
+  reads *inactive: open AAPL 1h*, and the line must no longer be vertical on its
+  creation interval before the alert can run. Each window reports this for the
+  chart it shows.
 - **Indicators.** Hover an indicator's legend row and click the bell
   (**Add alert on RSI**). For an overlay such as EMA the dialog opens as the
   price crossing its first plot (pick another one, e.g. EMA 200, under
