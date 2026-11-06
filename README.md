@@ -50,4 +50,4 @@ See the [contributing guide](https://5queezer.github.io/chartgen/guides/contribu
 
 ## License
 
-MIT
+[MIT](LICENSE)
