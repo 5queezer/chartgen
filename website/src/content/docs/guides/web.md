@@ -300,7 +300,7 @@ like a polled tail. Polling stops while pushes arrive. The server answers
 "not pushable" for other symbols, which simply keep polling, and "push
 limit reached" when a server limit (subscriptions per token or address,
 subscribes per minute, at most 10 indicators) refuses the chart, which
-then polls until the next chart change.
+then polls and tries push again every 5 minutes.
 
 - **Fallback.** No push for 6 s (three times the 2 s Binance kline
   cadence), or a dropped SSE stream, which ends the subscription on the
@@ -551,8 +551,8 @@ indicators and bar replay, and its own live data.
   Different symbols never share drawings.
 - **Live data.** Each chart subscribes on its own. Past the server's push limits
   (4 subscriptions per token, 10 subscribe calls per minute, 32 per client address,
-  which everyone behind one proxy shares) a chart polls instead, and the status line
-  shows the active chart's state.
+  which everyone behind one proxy shares) a chart polls instead and tries push again
+  every 5 minutes. The status line shows the active chart's state.
 - **Alerts.** Lines show on every chart of their symbol. Price alerts run as usual.
   Indicator and sloped-drawing alerts only run while the **active** chart shows
   their symbol and interval, and otherwise read *inactive: open AAPL 1h*.

@@ -76,7 +76,9 @@ a documented exception to "changing one chart cannot change another".
 **Live data.** One `onChartTick` handler hands each tail to every feed, which ignores
 other subscription ids. Each chart subscribes on its own. The server allows
 4 subscriptions per token and 10 subscribe calls per minute (ADR-0021); past those a
-chart polls.
+chart polls, and tries push again every 5 minutes. A grid reaches these limits in
+ordinary use, so a refusal cannot last until the chart's next load. "Not pushable"
+stays permanent for that load.
 
 **Push cap per client address: 8 raised to 32, the 64 total kept.** chartgen trusts
 no forwarding header, so behind a proxy or tunnel every user shares one address. At 8,
