@@ -1178,11 +1178,19 @@ mod tests {
         let hammer = b(100.0, 100.5, 98.0, 100.5);
         // Same with a real upper shadow.
         let not = b(100.0, 101.5, 98.0, 100.5);
-        check("hammer", &[hammer.clone()], &[not.clone()]);
+        check(
+            "hammer",
+            std::slice::from_ref(&hammer),
+            std::slice::from_ref(&not),
+        );
         check("hanging_man", &[hammer], &[not]);
         let star = b(100.5, 102.5, 100.0, 100.0);
         let not = b(100.5, 102.5, 98.5, 100.0);
-        check("inverted_hammer", &[star.clone()], &[not.clone()]);
+        check(
+            "inverted_hammer",
+            std::slice::from_ref(&star),
+            std::slice::from_ref(&not),
+        );
         check("shooting_star", &[star], &[not]);
         check(
             "marubozu_white",

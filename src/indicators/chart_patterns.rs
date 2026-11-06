@@ -293,22 +293,20 @@ struct Watch {
     height: f64,
 }
 
+/// How a pattern stands after the closes since it was known.
+struct Outcome {
+    status: PatternStatus,
+    bias: Bias,
+    confirmed_at: Option<usize>,
+    failed_at: Option<usize>,
+    failed_why: Option<&'static str>,
+    target: Option<f64>,
+}
+
 /// Status from the closes since bar `known`: `kind`'s breakout confirms it, a
 /// breakout the other way or `Watch::stop` fails it, and so does waiting too long.
 /// After a confirmation, a close past `stop` before the target fails it still.
-fn resolve(
-    kind: Kind,
-    w: &Watch,
-    bars: &[Bar],
-    known: usize,
-) -> (
-    PatternStatus,
-    Bias,
-    Option<usize>,
-    Option<usize>,
-    Option<&'static str>,
-    Option<f64>,
-) {
+fn resolve(kind: Kind, w: &Watch, bars: &[Bar], known: usize) -> Outcome {
     let expects = kind.expects();
     let mut bias = match expects {
         Some(true) => Bias::Bullish,
@@ -321,14 +319,14 @@ fn resolve(
         let c = bar.close;
         if confirmed.is_none() {
             if i > known + w.patience {
-                return (
-                    PatternStatus::Failed,
+                return Outcome {
+                    status: PatternStatus::Failed,
                     bias,
-                    None,
-                    Some(i),
-                    Some("no breakout in time"),
-                    None,
-                );
+                    confirmed_at: None,
+                    failed_at: Some(i),
+                    failed_why: Some("no breakout in time"),
+                    target: None,
+                };
             }
             let up = c > w.upper.at(i);
             let down = c < w.lower.at(i);
@@ -338,14 +336,14 @@ fn resolve(
                 None => false,
             });
             if past_stop || (up && expects == Some(false)) || (down && expects == Some(true)) {
-                return (
-                    PatternStatus::Failed,
+                return Outcome {
+                    status: PatternStatus::Failed,
                     bias,
-                    None,
-                    Some(i),
-                    Some("closed through the far side"),
-                    None,
-                );
+                    confirmed_at: None,
+                    failed_at: Some(i),
+                    failed_why: Some("closed through the far side"),
+                    target: None,
+                };
             }
             if up || down {
                 confirmed = Some(i);
@@ -367,48 +365,48 @@ fn resolve(
             _ => false,
         };
         if back {
-            return (
-                PatternStatus::Failed,
+            return Outcome {
+                status: PatternStatus::Failed,
                 bias,
-                confirmed,
-                Some(i),
-                Some("reversed before its target"),
+                confirmed_at: confirmed,
+                failed_at: Some(i),
+                failed_why: Some("reversed before its target"),
                 target,
-            );
+            };
         }
     }
-    match confirmed {
-        Some(_) => (
-            PatternStatus::Confirmed,
-            bias,
-            confirmed,
-            None,
-            None,
-            target,
-        ),
-        None => (PatternStatus::Forming, bias, None, None, None, None),
+    Outcome {
+        status: if confirmed.is_some() {
+            PatternStatus::Confirmed
+        } else {
+            PatternStatus::Forming
+        },
+        bias,
+        confirmed_at: confirmed,
+        failed_at: None,
+        failed_why: None,
+        target,
     }
 }
 
 fn found(kind: Kind, p: &[Pivot], w: Watch, bars: &[Bar], depth: usize) -> Found {
     let (start, end) = (p[0].bar, p[p.len() - 1].bar);
     let known_at = end + depth;
-    let (status, bias, confirmed_at, failed_at, failed_why, target) =
-        resolve(kind, &w, bars, known_at);
+    let o = resolve(kind, &w, bars, known_at);
     Found {
         kind,
-        bias,
-        status,
+        bias: o.bias,
+        status: o.status,
         points: p.to_vec(),
         upper: Some(w.upper),
         lower: Some(w.lower),
         start,
         end,
         known_at,
-        confirmed_at,
-        failed_at,
-        failed_why,
-        target,
+        confirmed_at: o.confirmed_at,
+        failed_at: o.failed_at,
+        failed_why: o.failed_why,
+        target: o.target,
         invalidation: w.stop,
     }
 }
@@ -1359,8 +1357,8 @@ mod tests {
             10,
             &[100.0, 110.0, 100.0, 110.0, 100.0, 110.0, 100.0],
         ));
-        for i in 21..28 {
-            bars[i].close = 130.0;
+        for b in &mut bars[21..28] {
+            b.close = 130.0;
         }
         let all = detect(&bars, &settings(), "rectangle");
         assert!(all.is_empty(), "{:?}", kinds(&all));
