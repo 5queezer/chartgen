@@ -207,6 +207,12 @@ test.describe("price-based chart types", () => {
     await dialog.getByLabel("Size").fill("0.0000001");
     await dialog.getByRole("button", { name: "OK" }).click();
     await expect(page.getByText(/too small; choose a larger one/)).toBeVisible();
+    // And the chart comes back with a size that fits.
+    await openSettings(page, "Renko");
+    await dialog.getByLabel("Size").fill(String(fixed));
+    await dialog.getByRole("button", { name: "OK" }).click();
+    await expect(page.getByText(/too small; choose a larger one/)).toHaveCount(0);
+    await expect(legendParams(page)).toHaveText(new RegExp(`Renko ${fixed}`));
   });
 
   test("each type's dialog shows its own inputs and sends them", async ({ bootedApp: page }) => {

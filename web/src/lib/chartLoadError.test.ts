@@ -20,3 +20,21 @@ describe("loadErrorReason", () => {
     expect(loadErrorReason("HTTP 502")).toEqual({ text: "request failed", indicators: [] });
   });
 });
+
+describe("errors that say what to change", () => {
+  it("keeps the server's own words", () => {
+    expect(
+      loadErrorReason(
+        "MCP tool error: The chart would have too many bars. Box size 1e-7 is too small; choose a larger one.",
+      ).text,
+    ).toBe("Box size 1e-7 is too small; choose a larger one.");
+    expect(
+      loadErrorReason(
+        "MCP tool error: Data fetch failed: Yahoo has no seconds data: AAPL cannot be charted at 5s. Seconds intervals need a Binance symbol.",
+      ).text,
+    ).toBe("Yahoo has no seconds data: AAPL cannot be charted at 5s. Seconds intervals need a Binance symbol.");
+    expect(
+      loadErrorReason("MCP tool error: The source bars give no box size (no price movement); use a fixed box.").text,
+    ).toBe("no box size (no price movement); use a fixed box.");
+  });
+});

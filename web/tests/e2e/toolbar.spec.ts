@@ -189,7 +189,7 @@ test.describe("toolbar", () => {
     await page.keyboard.press("Enter");
 
     await page.getByRole("button", { name: /^Chart type/ }).click();
-    await page.getByRole("menuitemradio", { name: "Area" }).click();
+    await page.getByRole("menuitemradio", { name: "Area", exact: true }).click();
     await expect(
       page.getByRole("button", { name: "Chart type: Area" }),
     ).toBeVisible();
