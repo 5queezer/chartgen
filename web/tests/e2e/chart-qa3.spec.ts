@@ -271,3 +271,59 @@ test.describe("legend after a keyboard zoom", () => {
     await expect.poll(() => legendClose(page)).toBeCloseTo(last.close, 2);
   });
 });
+
+test.describe("watchlist hover buttons", () => {
+  /** Hover the row and measure its buttons against the text of the numeric cells. */
+  const overlaps = async (page: Page, symbol: string) => {
+    const row = page.locator(`.wl-row[data-symbol="${symbol}"]`);
+    await page.mouse.move(0, 0);
+    const lefts = () =>
+      row.locator('[role="cell"]').evaluateAll((cells) =>
+        cells.map((c) => c.getBoundingClientRect().left),
+      );
+    const before = await lefts();
+    await row.hover();
+    // Showing the buttons does not move the columns.
+    expect(await lefts()).toEqual(before);
+    await expect(row.getByRole("button", { name: `Remove ${symbol} from watchlist` })).toHaveCSS(
+      "opacity",
+      "1",
+    );
+    return row.evaluate((el) => {
+      const rect = (e: Element) => e.getBoundingClientRect();
+      const text = (e: Element) => {
+        const r = document.createRange();
+        r.selectNodeContents(e);
+        return r.getBoundingClientRect();
+      };
+      const cells = [...el.querySelectorAll('[role="cell"]')].slice(1);
+      const buttons = [...el.querySelectorAll(".wl-flag, .wl-remove")].map(rect);
+      const hits = cells.filter((c) => {
+        const t = text(c);
+        return buttons.some((b) => b.left < t.right && b.right > t.left);
+      });
+      return { numbers: hits.map((c) => c.textContent), buttons: buttons.length };
+    });
+  };
+
+  test("cover none of the numbers", async ({ bootedApp: page }) => {
+    const result = await overlaps(page, "BTCUSDT");
+    expect(result.buttons).toBe(2);
+    expect(result.numbers).toEqual([]);
+    await page.locator('.wl-row[data-symbol="BTCUSDT"]').screenshot({
+      path: test.info().outputPath("watchlist-row-hover.png"),
+    });
+  });
+
+  test("cover none of the numbers at the narrowest column width", async ({ bootedApp: page }) => {
+    // Large quotes squeeze the symbol column to its minimum.
+    await page.locator(".wl-table").evaluate((el) => {
+      (el as HTMLElement).style.width = "19rem";
+    });
+    await page.locator('.wl-row[data-symbol="BTCUSDT"] [role="cell"]').nth(1).evaluate((el) => {
+      el.textContent = "1,234,567.89";
+    });
+    const result = await overlaps(page, "BTCUSDT");
+    expect(result.numbers).toEqual([]);
+  });
+});
