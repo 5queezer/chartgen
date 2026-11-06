@@ -291,6 +291,32 @@ test.describe("touch on a phone", () => {
     expect((await chartState(page)).from).toBe(before.from);
   });
 
+  test("a tap shows the crosshair and a tap elsewhere hides it", async ({ page }) => {
+    await bootCompact(page);
+    const time = page.getByTestId("legend-time");
+    await expect.poll(() => time.textContent()).not.toBe("");
+    const lastBar = await time.textContent();
+    const near = await inChart(page, 0.3);
+    await page.touchscreen.tap(near.x, near.y);
+    await expect.poll(() => time.textContent()).not.toBe(lastBar);
+    await page.waitForTimeout(700);
+    const far = await inChart(page, 0.7);
+    await page.touchscreen.tap(far.x, far.y);
+    await expect.poll(() => time.textContent()).toBe(lastBar);
+  });
+
+  test("holding a drawing tool opens its list", async ({ page }) => {
+    await bootCompact(page);
+    await dock(page, "Draw").tap();
+    const tool = await page.getByRole("button", { name: "Trend line" }).boundingBox();
+    const t = await touch(page);
+    await t.start({ x: tool!.x + tool!.width / 2, y: tool!.y + tool!.height / 2 });
+    await page.waitForTimeout(600);
+    await t.end();
+    await expect(page.locator("[data-tool-flyout]")).toBeVisible();
+    await expect(page.locator("[data-tool-flyout]")).toBeInViewport({ ratio: 1 });
+  });
+
   test("tapping a legend row gives the controls a mouse gets on hover", async ({ page }) => {
     await bootCompact(page);
     const settings = page.getByRole("button", { name: /^Settings for RSI/ }).first();
