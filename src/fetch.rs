@@ -182,10 +182,17 @@ pub fn fetch_binance(
         ),
         other => other,
     };
-    let deadline = Instant::now() + BINANCE_DEADLINE;
-    let fetched = paginate_backwards(want, end, deadline, |page_limit, end| {
+    let now = Instant::now();
+    let deadline = now + BINANCE_DEADLINE;
+    let page = |page_limit: usize, end: Option<i64>| {
         fetch_binance_page(&binance_klines_url(symbol, base, page_limit, end))
-    })?;
+    };
+    let fetched = if resampled && end_time_ms.is_none() && want > BINANCE_MAX_LIMIT {
+        let key = (symbol.to_uppercase(), base);
+        newest_klines(kline_cache(), key, want, now, deadline, page)?
+    } else {
+        paginate_backwards(want, end, deadline, page)?
+    };
 
     let reached_want = fetched.len() >= want;
     let (bars, has_more) = if resampled {
@@ -212,6 +219,94 @@ pub fn fetch_binance(
         },
         has_more,
     })
+}
+
+/// How many symbol and kline pairs `newest_klines` holds, and for how long
+/// since last used. A full entry is about 1.6 MB.
+const KLINE_CACHE_ENTRIES: usize = 8;
+const KLINE_CACHE_TTL: Duration = Duration::from_secs(120);
+/// Klines a refresh reads: enough to overlap after up to `KLINE_CACHE_TTL` on
+/// the finest kline, with the forming one.
+const KLINE_REFRESH: usize = 16;
+
+struct HeldKlines {
+    used: Instant,
+    bars: Vec<Bar>,
+    /// A full read found less than it asked for: nothing older exists.
+    complete: bool,
+}
+
+type KlineCache = HashMap<(String, &'static str), HeldKlines>;
+
+fn kline_cache() -> &'static Mutex<KlineCache> {
+    static CACHE: OnceLock<Mutex<KlineCache>> = OnceLock::new();
+    CACHE.get_or_init(Mutex::default)
+}
+
+/// The newest `want` klines of `key`. A resampled chart's tail still needs every
+/// one of them, since indicators run over its warmup, but a closed kline never
+/// changes: only the first read walks the history, and a repeat reads one small
+/// page and lays it over the klines held. `page` is as for `paginate_backwards`.
+fn newest_klines<F>(
+    cache: &Mutex<KlineCache>,
+    key: (String, &'static str),
+    want: usize,
+    now: Instant,
+    deadline: Instant,
+    mut page: F,
+) -> Result<Vec<Bar>, String>
+where
+    F: FnMut(usize, Option<i64>) -> Result<Vec<Bar>, String>,
+{
+    let held = {
+        let mut c = cache.lock().unwrap_or_else(|e| e.into_inner());
+        c.retain(|_, h| now.duration_since(h.used) < KLINE_CACHE_TTL);
+        c.get(&key)
+            .filter(|h| h.complete || h.bars.len() >= want)
+            .map(|h| (h.bars.clone(), h.complete))
+    };
+    let mut joined = None;
+    if let Some((mut bars, complete)) = held {
+        let fresh = page(KLINE_REFRESH, None)?;
+        let overlap = fresh.first().and_then(bar_ts).filter(|first| {
+            bars.last()
+                .and_then(bar_ts)
+                .is_some_and(|last| last >= *first)
+        });
+        // A gap means the page does not reach what we hold: read it all again.
+        if let Some(first) = overlap {
+            bars.truncate(bars.partition_point(|b| bar_ts(b).is_some_and(|t| t < first)));
+            bars.extend(fresh);
+            joined = Some((bars, complete));
+        }
+    }
+    let (mut bars, complete) = match joined {
+        Some(j) => j,
+        None => {
+            let bars = paginate_backwards(want, None, deadline, page)?;
+            let complete = bars.len() < want;
+            (bars, complete)
+        }
+    };
+    if bars.len() > MAX_BASE_BARS {
+        bars.drain(..bars.len() - MAX_BASE_BARS);
+    }
+    let out = bars[bars.len().saturating_sub(want)..].to_vec();
+    let mut c = cache.lock().unwrap_or_else(|e| e.into_inner());
+    c.insert(
+        key,
+        HeldKlines {
+            used: now,
+            bars,
+            complete,
+        },
+    );
+    while c.len() > KLINE_CACHE_ENTRIES {
+        let oldest = c.iter().min_by_key(|(_, h)| h.used).map(|(k, _)| k.clone());
+        let Some(k) = oldest else { break };
+        c.remove(&k);
+    }
+    Ok(out)
 }
 
 /// Bars of `iv` from ascending native bars that lie on its grid (24/7 markets,
@@ -1675,6 +1770,105 @@ mod tests {
         ] {
             assert_eq!(yahoo_window(tf, 100, None, now).api_interval, api, "{tf}");
         }
+    }
+
+    /// Reads through `newest_klines` against a fake exchange, counting requests.
+    fn cached_read(
+        cache: &Mutex<KlineCache>,
+        key: &str,
+        want: usize,
+        now: Instant,
+        (first_ms, last_ms): (i64, i64),
+    ) -> (Vec<Bar>, usize) {
+        let mut calls = 0;
+        let mut exchange = fake_exchange(first_ms, last_ms);
+        let bars = newest_klines(
+            cache,
+            (key.to_string(), "1h"),
+            want,
+            now,
+            now + Duration::from_secs(60),
+            |limit, end| {
+                calls += 1;
+                exchange(limit, end)
+            },
+        )
+        .unwrap();
+        (bars, calls)
+    }
+
+    #[test]
+    fn a_repeat_read_takes_one_request_and_equals_a_full_one() {
+        // A 59m tail with warmup 300: 303 bars of 59 klines each.
+        let want = 303 * 59;
+        let last = 1_700_000_000_000 / HOUR_MS * HOUR_MS;
+        let history = (0, last);
+        let cache = Mutex::default();
+        let t0 = Instant::now();
+
+        let (first, calls) = cached_read(&cache, "BTCUSDT", want, t0, history);
+        assert_eq!(calls, 18, "the first read walks the history");
+        assert_eq!(first.len(), want);
+
+        // The forming kline moved on by two klines since then.
+        let later = (0, last + 2 * HOUR_MS);
+        let (again, calls) = cached_read(&cache, "BTCUSDT", want, t0, later);
+        assert_eq!(calls, 1, "a repeat reads one page");
+        let full = paginate_backwards(want, None, far(), fake_exchange(0, later.1)).unwrap();
+        let key = |b: &[Bar]| {
+            b.iter()
+                .map(|x| (x.date.clone(), ohlcv(x)))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(key(&again), key(&full), "the same klines, oldest to newest");
+
+        // A smaller ask is served too, and a larger one reads it all again.
+        let (small, calls) = cached_read(&cache, "BTCUSDT", 2_000, t0, later);
+        assert_eq!((small.len(), calls), (2_000, 1));
+        let (big, calls) = cached_read(&cache, "BTCUSDT", want + 1_000, t0, later);
+        assert_eq!((big.len(), calls), (want + 1_000, 19));
+    }
+
+    #[test]
+    fn the_kline_cache_reads_again_after_a_gap_or_its_lifetime() {
+        let want = 2_500;
+        let last = 1_700_000_000_000 / HOUR_MS * HOUR_MS;
+        let cache = Mutex::default();
+        let t0 = Instant::now();
+        assert_eq!(cached_read(&cache, "A", want, t0, (0, last)).1, 3);
+        // More new klines than a refresh reads: the page does not reach ours.
+        let far_on = (0, last + (KLINE_REFRESH as i64 + 5) * HOUR_MS);
+        let (bars, calls) = cached_read(&cache, "A", want, t0, far_on);
+        assert_eq!(calls, 1 + 3, "the refresh, then a full read");
+        assert_eq!(bar_open_ms(bars.last().unwrap()), Some(far_on.1));
+        assert!(bars
+            .windows(2)
+            .all(|w| { bar_open_ms(&w[1]).unwrap() - bar_open_ms(&w[0]).unwrap() == HOUR_MS }));
+        // Past its lifetime an entry is gone.
+        let later = t0 + KLINE_CACHE_TTL + Duration::from_secs(1);
+        assert_eq!(cached_read(&cache, "A", want, later, far_on).1, 3);
+    }
+
+    #[test]
+    fn the_kline_cache_knows_a_short_history_and_stays_bounded() {
+        let last = 1_700_000_000_000 / HOUR_MS * HOUR_MS;
+        let cache = Mutex::default();
+        let t0 = Instant::now();
+        // A symbol listed 1500 klines ago cannot fill the ask, yet only the first
+        // read walks it.
+        let listed = (last - 1_499 * HOUR_MS, last);
+        let (bars, calls) = cached_read(&cache, "NEW", 5_000, t0, listed);
+        assert_eq!((bars.len(), calls), (1_500, 2));
+        let (bars, calls) = cached_read(&cache, "NEW", 5_000, t0, listed);
+        assert_eq!((bars.len(), calls), (1_500, 1));
+        // The least recently used entry goes when the cache is full.
+        for i in 0..KLINE_CACHE_ENTRIES {
+            let at = t0 + Duration::from_secs(1 + i as u64);
+            cached_read(&cache, &format!("S{i}"), 1_500, at, (0, last));
+        }
+        let held = cache.lock().unwrap();
+        assert_eq!(held.len(), KLINE_CACHE_ENTRIES);
+        assert!(!held.contains_key(&("NEW".to_string(), "1h")));
     }
 
     #[test]

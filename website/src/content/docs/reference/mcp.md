@@ -130,7 +130,9 @@ Bars land on a stable grid, so a reload gives the same bars:
 A custom interval on Binance reads at most 20 requests' worth of native bars per
 call (20,000). Past that, the call returns the newest bars that fit, with
 `has_more: true`, and older bars come from paging. A `59m` chart gets about 339
-bars per call however many it asks for.
+bars per call however many it asks for. Calls for the newest bars share native
+klines read in the last 2 minutes, so after the first, polling a tail costs one
+request whatever its warmup.
 
 With a `ticker`, a failed upstream fetch (network error, unknown symbol, rate
 limit) is a tool error in every format. Only a call without a ticker renders

@@ -124,6 +124,19 @@ means one of that unit.
   native bars per bar. Above that the first page is shorter and its oldest indicator
   values are unconverged until the next page arrives.
 
+### Tail polls
+
+A tail poll cannot drop its warmup: the server computes indicators over it, and
+many indicators declare no `warmup_bars` and rely on the client's 300. A `59m` tail
+at warmup 300 therefore needs about 18,000 `1m` klines, which is 18 requests, every
+2 s for a client over its push limit. But it only needs to *read* the ones it does
+not have, because a closed kline never changes. `fetch::newest_klines` holds the
+native klines of a resampled chart for 2 minutes since last used, per symbol and
+kline. A repeat reads one page of 16 and lays it over them, so a poll costs one
+request after the first. A gap reads everything again, as does a first read, or a
+read of more than is held. Only the live end is cached; `end_time` pages read
+Binance as before.
+
 ### Native interval and grid
 
 The base is the coarsest native interval that divides the requested one, so the
@@ -203,10 +216,11 @@ of their own beyond the canonical string. MCP clients get it too.
 - Two parsers. The fixture catches a grammar that drifts, but not a new shortcut.
 - `61m` is refused, which may surprise someone used to typing any number. The
   message says why.
-- Polling is the expensive path. A `59m` tail with warmup 300 reads about 18
-  requests per poll. Binance charts normally get pushes and only seed once, but
-  a client over its push limit polls every 2 s. That is the worst case the limits
-  allow, and it only arises on the longest prime-like lengths.
+- A process-wide cache of native klines. It is at most 8 entries of 20,000 bars,
+  about 13 MB, held only while such charts are being read. An idle entry's memory
+  is freed by the next read of any custom chart, not on its own.
+- Scrolling back on a custom chart is not cached: a `59m` history page still costs
+  up to 20 requests, though only when a person pages.
 - A push group at the limit holds up to 20,000 bars and clones them for each
   recompute, at most 4 times a second. At most 64 groups exist.
 - Depth of history follows the base. A stock's `7m` ends after about 30 days,
