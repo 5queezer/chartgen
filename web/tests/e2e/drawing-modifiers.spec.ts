@@ -1,10 +1,20 @@
-// Drawing modifier keys, as in TradingView: Ctrl/Cmd held inverts the magnet and
+// Drawing modifier keys, as in TradingView: Ctrl (Cmd on Mac) held inverts the magnet and
 // Shift held snaps a line to horizontal, vertical or 45 degrees, while placing or
 // dragging a point.
 
 import type { Page } from "@playwright/test";
 
-import { test, expect, gotoApp, pickTool, reloadApp } from "./fixtures/app";
+import { test as appTest, expect, gotoApp, pickTool, reloadApp } from "./fixtures/app";
+
+/** Not Mac, whatever the host: there Cmd inverts the magnet, and these tests hold Ctrl. */
+const test = appTest.extend({
+  page: async ({ page }, use) => {
+    await page.addInitScript(() =>
+      Object.defineProperty(navigator, "platform", { get: () => "Linux x86_64", configurable: true }),
+    );
+    await use(page);
+  },
+});
 
 test.use({ viewport: { width: 1280 + 320, height: 720 } });
 
@@ -217,8 +227,21 @@ async function showInterval(page: Page, name: string): Promise<void> {
       ),
     )
     .toBe(name);
-  // The chart has the new bars once a drawing's pixels are refreshed from them.
-  await page.waitForTimeout(500);
+  // The chart holds them too, not only the feed.
+  await expect
+    .poll(() =>
+      page.evaluate(() => {
+        const w = window as unknown as TestWindow & {
+          __chartgenTest: { series: () => { bars: { t: number }[] } | null };
+        };
+        const times = (ts: number[]) => ts.slice(-2).join();
+        return (
+          times(w.__chartgenTest.chart().getDataList().map((d) => d.timestamp)) ===
+          times((w.__chartgenTest.series()?.bars ?? []).map((b) => b.t * 1000))
+        );
+      }),
+    )
+    .toBe(true);
 }
 
 /** On 15m, an extended line between the :00 and :15 bars of an hour: one bar of 1h, not exactly vertical. */
@@ -314,8 +337,6 @@ test.describe("drawing modifiers", () => {
     expect((await storedRecords(page))![0]!.points).toHaveLength(2);
 
     // One step of undo removes it: the extra click makes no extra commit.
-    await page.keyboard.press("Control+z");
-    await expect.poll(async () => (await overlays(page)).length).toBe(0);
     await page.keyboard.press("Control+z");
     await expect.poll(async () => (await overlays(page)).length).toBe(0);
 
