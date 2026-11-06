@@ -46,6 +46,8 @@ export interface ChartContextMenuProps {
   hasIndicators: boolean;
   /** The items of an indicator in a sub-pane, by instance key. */
   indicatorItems: (key: string) => (MenuItem | null)[];
+  /** Make this the active chart, for what reads the active one: a key opens this menu with no press. */
+  activate: () => void;
   onCopyLink: () => void;
   onRemoveAllIndicators: () => void;
   onSettings: () => void;
@@ -84,7 +86,10 @@ export function ChartContextMenu(props: ChartContextMenuProps): JSX.Element {
           { label: `Copy price ${at.text}`, onSelect: () => void copy(at.text, "Price copied") },
           {
             label: `Add alert at ${at.text}…`,
-            onSelect: () => openAlertDialog({ symbol: props.symbol, price: at.price }),
+            onSelect: () => {
+              props.activate();
+              openAlertDialog({ symbol: props.symbol, price: at.price });
+            },
           },
           {
             label: `Add horizontal line at ${at.text}`,
@@ -106,7 +111,13 @@ export function ChartContextMenu(props: ChartContextMenuProps): JSX.Element {
     onSelect: () => props.scale.setLockRatio(!props.scale.lockRatio()),
   });
 
-  const copyLinkItem = (): MenuItem => ({ label: "Copy link to chart", onSelect: props.onCopyLink });
+  const copyLinkItem = (): MenuItem => ({
+    label: "Copy link to chart",
+    onSelect: () => {
+      props.activate();
+      props.onCopyLink();
+    },
+  });
   const settingsItem = (): MenuItem => ({ label: "Settings…", onSelect: props.onSettings });
 
   const priceAxisMenu = (c: KLineChart, clientY: number): MenuSpec => {
@@ -148,7 +159,10 @@ export function ChartContextMenu(props: ChartContextMenuProps): JSX.Element {
         label: "Go to date…",
         hint: "Alt+G",
         disabled: c.getDataList().length === 0,
-        onSelect: openGoToDate,
+        onSelect: () => {
+          props.activate();
+          openGoToDate();
+        },
       },
     ],
   });

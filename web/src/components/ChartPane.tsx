@@ -405,6 +405,15 @@ export function ChartPane(props: ChartPaneProps): JSX.Element {
   const { activeIndicators, removeIndicator, setActiveIndicators, toggleIndicatorHidden } = s.indicators;
   const indexOf = (key: string) =>
     activeIndicators().findIndex((e) => instanceKey(e) === key);
+  // Both read the active chart. A press has activated this one, a key has not.
+  const openIndicatorSettings = (key: string) => {
+    setActivePane(s.pane);
+    props.onIndicatorSettings(key);
+  };
+  const addIndicatorAlert = (key: string) => {
+    setActivePane(s.pane);
+    props.onAddAlert(key);
+  };
 
   return (
     <PaneProvider value={s.pane}>
@@ -443,10 +452,11 @@ export function ChartPane(props: ChartPaneProps): JSX.Element {
           hasIndicators={activeIndicators().length > 0}
           indicatorItems={(key) =>
             indicatorMenuOf(s.indicators, s.live()?.series, key, {
-              onAddAlert: props.onAddAlert,
-              onSettings: props.onIndicatorSettings,
+              onAddAlert: addIndicatorAlert,
+              onSettings: openIndicatorSettings,
             }).items
           }
+          activate={() => setActivePane(s.pane)}
           onCopyLink={() => void copyChartLink()}
           onRemoveAllIndicators={() => setActiveIndicators([])}
           onSettings={props.onSettings}
@@ -480,16 +490,9 @@ export function ChartPane(props: ChartPaneProps): JSX.Element {
             chartType={chartType()}
             timeZone={s.timeZone()}
             onToggleHidden={(n) => toggleIndicatorHidden(indexOf(n))}
-            // Both read the active chart. A press has activated this one, a key has not.
-            onSettings={(key) => {
-              setActivePane(s.pane);
-              props.onIndicatorSettings(key);
-            }}
+            onSettings={openIndicatorSettings}
             onRemove={removeIndicator}
-            onAddAlert={(key) => {
-              setActivePane(s.pane);
-              props.onAddAlert(key);
-            }}
+            onAddAlert={addIndicatorAlert}
             onChartReady={s.setChart}
             multi={props.multi}
             onCrosshair={s.setCrosshair}
