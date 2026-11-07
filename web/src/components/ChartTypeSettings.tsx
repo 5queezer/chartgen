@@ -3,7 +3,7 @@
 // which reloads; anything else that closes the dialog leaves them as they were.
 
 import { Dialog } from "@kobalte/core";
-import { createEffect, createMemo, createSignal, Show, type JSX } from "solid-js";
+import { createEffect, createMemo, createSignal, on, Show, type JSX } from "solid-js";
 
 import {
   MAX_ATR_LENGTH,
@@ -56,16 +56,23 @@ export function ChartTypeSettings(props: ChartTypeSettingsProps): JSX.Element {
   const [reversal, setReversal] = createSignal("");
   const [lines, setLines] = createSignal("");
 
-  createEffect(() => {
-    if (!props.open) return;
-    const p = chartParams();
-    setBox(p.box);
-    setLength(String(p.atrLength));
-    setSize(String(p.boxSize ?? props.currentBox ?? ""));
-    setPercent(String(p.percent));
-    setReversal(String(p.reversal));
-    setLines(String(p.lines));
-  });
+  // Seeded once per opening: `currentBox` changes with every live tail, and what
+  // has been typed must survive that.
+  createEffect(
+    on(
+      () => props.open,
+      (open) => {
+        if (!open) return;
+        const p = chartParams();
+        setBox(p.box);
+        setLength(String(p.atrLength));
+        setSize(String(p.boxSize ?? props.currentBox ?? ""));
+        setPercent(String(p.percent));
+        setReversal(String(p.reversal));
+        setLines(String(p.lines));
+      },
+    ),
+  );
 
   const usesBox = () => chartType() !== "line_break";
 

@@ -49,7 +49,13 @@ import {
   instanceKey,
   toWire,
 } from "../stores/indicators";
-import { addRecent, chartStoreOf, chartStyleOf, timeZone } from "../stores/layout";
+import {
+  addRecent,
+  chartStoreOf,
+  chartStyleOf,
+  DEFAULT_CHART_TYPE,
+  timeZone,
+} from "../stores/layout";
 import type { SeriesPayload } from "../types/responses";
 import { AlertLines } from "./AlertLines";
 import { Chart } from "./Chart";
@@ -185,16 +191,23 @@ export function createChartPane(pane: number, deps: PaneDeps) {
     }),
   );
 
-  // A saved or linked box the server refuses must not leave a blank chart: the
-  // chart falls back to ATR, and says so.
+  // A box the server refuses must not leave a blank chart: a saved or linked one
+  // falls back to ATR, and where ATR cannot make one either the chart goes to
+  // candles. Each says so.
   createEffect(() => {
     const error = query.isError && !query.isFetching ? query.error : null;
     const refusal = error ? boxRefusal(error.message) : null;
-    const params = untrack(chartParams);
-    if (!refusal || params.box === "atr" || !untrack(priceBased)) return;
-    const { boxSize: _refused, ...rest } = params;
-    untrack(() => layout.setChartParams({ ...rest, box: "atr" }));
-    showToast(`${refusal} Using ATR on ${untrack(symbol)}.`);
+    if (!refusal || !untrack(priceBased)) return;
+    untrack(() => {
+      const { boxSize: _refused, ...rest } = chartParams();
+      if (rest.box === "atr") {
+        layout.setChartType(DEFAULT_CHART_TYPE);
+        showToast(`${refusal} Showing candles on ${symbol()}.`);
+      } else {
+        layout.setChartParams({ ...rest, box: "atr" });
+        showToast(`${refusal} Using ATR on ${symbol()}.`);
+      }
+    });
   });
 
   // Becoming the active chart makes this the chart the alerts read (ADR-0043).

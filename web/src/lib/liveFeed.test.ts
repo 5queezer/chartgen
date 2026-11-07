@@ -361,6 +361,21 @@ describe("price-based charts", () => {
     s.feed.dispose();
   });
 
+  it("recovers a pushed tail that left bars out, by a poll and then a reload", async () => {
+    const t = setupPush();
+    t.fetch.mockImplementation((_req, args) =>
+      Promise.resolve(priced(5000, 5000 + args.bars - 1)),
+    );
+    t.feed.reset(priced(900, 1000), PRICE_REQ);
+    await vi.advanceTimersByTimeAsync(0);
+    t.feed.applyPush("s1", priced(3000, 3063));
+    await vi.advanceTimersByTimeAsync(0);
+    // Past our newest bar: a catch-up poll, whose long tail is past it too.
+    expect(t.fetch.mock.calls[0]![1].bars).toBe(PRICE_TAIL_BARS);
+    expect(t.reload).toHaveBeenCalledTimes(1);
+    t.feed.dispose();
+  });
+
   it("a candle chart keeps its short tail", async () => {
     const s = setup();
     s.feed.reset(payload(900, 1000, true), REQ);

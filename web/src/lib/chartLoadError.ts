@@ -10,7 +10,7 @@ export interface LoadErrorReason {
 
 /** The sentence that says a box cannot be used, if `message` is such a refusal. */
 export function boxRefusal(message: string): string | null {
-  return /Box size \S+ is too small[^]*$/.exec(message)?.[0] ?? null;
+  return /(?:Box size \S+ is too small|The source bars give no box size)[^]*$/.exec(message)?.[0] ?? null;
 }
 
 export function loadErrorReason(message: string): LoadErrorReason {

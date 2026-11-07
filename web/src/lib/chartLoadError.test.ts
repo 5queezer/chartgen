@@ -26,6 +26,9 @@ describe("boxRefusal", () => {
     expect(boxRefusal("MCP tool error: Box size 1e-7 is too small; choose a larger one.")).toBe(
       "Box size 1e-7 is too small; choose a larger one.",
     );
+    expect(
+      boxRefusal("MCP tool error: The source bars give no box size (no price movement); use a fixed box."),
+    ).toBe("The source bars give no box size (no price movement); use a fixed box.");
     expect(boxRefusal("MCP tool error: chart_params.box fixed needs box_size.")).toBeNull();
   });
 });

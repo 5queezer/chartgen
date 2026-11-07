@@ -434,6 +434,32 @@ test.describe("a box the server refuses", () => {
     });
   }
 
+  test("when ATR itself cannot make a box, the chart goes to candles and says why", async ({
+    bootedApp: page,
+  }) => {
+    const reason = "The source bars give no box size (no price movement); use a fixed box.";
+    await page.route("**/mcp", async (route) => {
+      const req = route.request();
+      const a = chartArgs(req);
+      if (a?.chart_style !== "renko") return route.continue();
+      const { id } = req.postDataJSON() as { id: unknown };
+      return route.fulfill({
+        json: {
+          jsonrpc: "2.0",
+          id,
+          result: { content: [{ type: "text", text: reason }], isError: true },
+        },
+      });
+    });
+    await pickChartType(page, "Renko");
+    await expect(page.getByRole("button", { name: "Chart type: Candles" })).toBeVisible();
+    await expect(page.getByTestId("toasts")).toContainText(/no price movement.*candles on BTCUSDT/);
+    await expect(page.getByTestId("chart-load-error")).toHaveCount(0);
+    await expect.poll(async () => (await series(page))?.chart_style).toBe("candles");
+    await expect.poll(async () => (await drawnBars(page)).length).toBeGreaterThan(5);
+    await page.unroute("**/mcp");
+  });
+
   test("a bad box already saved recovers on the next load", async ({ page }) => {
     await page.addInitScript(() => {
       localStorage.setItem("chartgen.layout.chartType", JSON.stringify("kagi"));
@@ -495,6 +521,32 @@ test.describe("compare on a price-based chart", () => {
 
 test.describe("live price-based bars", () => {
   test.use({ push: false });
+
+  test("what is typed in the dialog survives a live tail", async ({ bootedApp: page }) => {
+    await pickChartType(page, "Renko");
+    await expectBuilt(page, "renko");
+    await openSettings(page, "Renko");
+    const dialog = page.getByTestId("chart-type-settings");
+    await dialog.getByLabel("Box assignment").selectOption("fixed");
+    await dialog.getByLabel("Size").fill("123");
+
+    // Two tails, each landed: the second proves the first has been taken in.
+    for (let i = 0; i < 2; i++) {
+      await page.waitForResponse(
+        (res) => {
+          const a = chartArgs(res.request());
+          return a !== null && a.chart_style === "renko" && a.bars === 64;
+        },
+        { timeout: 15_000 },
+      );
+    }
+    await expect(dialog.getByLabel("Box assignment")).toHaveValue("fixed");
+    await expect(dialog.getByLabel("Size")).toHaveValue("123");
+
+    const load = chartRequest(page, (a) => a.chart_params?.box_size === 123);
+    await dialog.getByRole("button", { name: "OK" }).click();
+    expect(chartArgs(await load)!.chart_params).toMatchObject({ box: "fixed", box_size: 123 });
+  });
 
   test("a tail of a new build keeps the chart updating, with its bars and history", async ({
     bootedApp: page,
