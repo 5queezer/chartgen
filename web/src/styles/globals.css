@@ -15,6 +15,7 @@
   --color-fg: #d1d4dc;           /* primary text */
   --color-fg-muted: #787b86;     /* axis labels, secondary */
   --color-accent: #2962ff;       /* TV blue — primary buttons */
+  --color-brand: #82b4fa;        /* the "gen" of the wordmark */
   --color-bull: #26a69a;         /* candle up */
   --color-bear: #ef5350;         /* candle down */
   --color-grid: #2a2e39;         /* chart grid */
