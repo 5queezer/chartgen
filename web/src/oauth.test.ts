@@ -716,7 +716,7 @@ describe("signed-in user and sign-out (ADR-0044)", () => {
   type Listener = (e: { key: string; newValue: string | null }) => void;
   let listeners: Set<Listener>;
   let logoutStatus: number;
-  let me: unknown;
+  let me: { sign_in: boolean; user: unknown } | null;
 
   /** Boot back from the provider with a token, and a server for these calls. */
   async function signedIn() {
@@ -730,7 +730,9 @@ describe("signed-in user and sign-out (ADR-0044)", () => {
     fetchMock.mockImplementation(async (input: string, init?: RequestInit) => {
       if (input === "/oauth/logout") return new Response(null, { status: logoutStatus });
       if (input === "/oauth/me") {
-        return new Response(JSON.stringify(me), { status: me === null ? 401 : 200 });
+        return new Response(JSON.stringify(me), {
+          status: me === null ? 500 : me.user === null && me.sign_in ? 401 : 200,
+        });
       }
       return base(input, init);
     });
@@ -742,7 +744,7 @@ describe("signed-in user and sign-out (ADR-0044)", () => {
   beforeEach(() => {
     vi.resetModules();
     logoutStatus = 204;
-    me = { sign_in: true, user: { name: "octo", provider: "github" } };
+    me = { sign_in: true, user: { id: "github:1", name: "octo", provider: "github" } };
   });
   afterEach(() => {
     vi.unstubAllGlobals();
@@ -750,25 +752,31 @@ describe("signed-in user and sign-out (ADR-0044)", () => {
   });
 
   it("asks who the token belongs to", async () => {
-    const { fetchSignedInUser } = await signedIn();
+    const { fetchSignIn } = await signedIn();
 
-    expect(await fetchSignedInUser()).toEqual({ name: "octo", provider: "github" });
+    expect((await fetchSignIn(new AbortController().signal)).user).toEqual({
+      id: "github:1",
+      name: "octo",
+      provider: "github",
+    });
     const call = fetchMock.mock.calls.find(([u]) => u === "/oauth/me")!;
     expect((call[1] as RequestInit).headers).toEqual({ Authorization: "Bearer tok" });
   });
 
-  it("no user without sign-in, on a stale token, or without a token", async () => {
-    const { fetchSignedInUser, clearAccessToken } = await signedIn();
+  it("tells a server without sign-in, and one with no user yet, from one it cannot read", async () => {
+    const { fetchSignIn, clearAccessToken } = await signedIn();
+    const ask = () => fetchSignIn(new AbortController().signal);
 
     me = { sign_in: false, user: null };
-    expect(await fetchSignedInUser()).toBeNull();
+    expect(await ask()).toEqual({ sign_in: false, user: null });
     me = null;
-    expect(await fetchSignedInUser()).toBeNull();
+    await expect(ask()).rejects.toThrow();
 
     clearAccessToken();
     fetchMock.mockClear();
-    expect(await fetchSignedInUser()).toBeNull();
-    expect(fetchMock).not.toHaveBeenCalled();
+    me = { sign_in: true, user: null };
+    expect(await ask()).toEqual({ sign_in: true, user: null });
+    expect((fetchMock.mock.calls[0]![1] as RequestInit).headers).toEqual({});
   });
 
   it("signing out leaves for the signed-out page and starts no new sign-in", async () => {

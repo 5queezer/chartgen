@@ -53,6 +53,7 @@ import { plotsOf } from "./lib/plotStyle";
 import { StatusLine, type Status } from "./components/StatusLine";
 import { SymbolSearch } from "./components/SymbolSearch";
 import { Toasts } from "./components/Toasts";
+import { WorkspaceBanner } from "./components/WorkspaceBanner";
 import { Toolbar } from "./components/Toolbar";
 import { Sidebar, SidebarDock } from "./components/Sidebar";
 import {
@@ -66,10 +67,8 @@ import { isTypingContext, keepKeyboardFocus, swallowMenuGhostClicks } from "./li
 import { compact } from "./lib/viewport";
 import { createMcpSession } from "./mcp";
 import {
-  fetchSignedInUser,
   followSignOutInOtherTabs,
   startSignIn,
-  tryHandlePendingRedirect,
   type SignedInUser,
 } from "./oauth";
 import { createListIndicatorsQuery, createToolNamesQuery } from "./queries";
@@ -113,13 +112,13 @@ import {
   timeframe,
 } from "./stores/layout";
 
-export function App(): JSX.Element {
+export function App(props: { authError: string | null; user: SignedInUser | null }): JSX.Element {
   // Long-lived session for the app's lifetime.
   const session = createMcpSession();
 
   const [authReady, setAuthReady] = createSignal(false);
   const [authError, setAuthError] = createSignal<string | null>(null);
-  const [signedInUser, setSignedInUser] = createSignal<SignedInUser | null>(null);
+  const signedInUser = () => props.user;
   const [pickerOpen, setPickerOpen] = createSignal(false);
   // Index (into the active set) of the indicator whose settings dialog is open.
   const [settingsIndex, setSettingsIndex] = createSignal<number | null>(null);
@@ -157,21 +156,17 @@ export function App(): JSX.Element {
     if (c) resetChart(c);
   };
 
-  // Consume the OAuth redirect (if any) before the first render gets
-  // far enough to trigger a query. If sign-in failed even after its one
-  // automatic retry, queries stay off (a query would only restart the
-  // flow, in a loop) and the status line offers "Sign in again".
-  onMount(async () => {
+  // Boot consumed the OAuth redirect (if any) before the first render. If
+  // sign-in failed even after its one automatic retry, queries stay off (a
+  // query would only restart the flow, in a loop) and the status line offers
+  // "Sign in again".
+  onMount(() => {
     onCleanup(followSignOutInOtherTabs());
-    const err = await tryHandlePendingRedirect();
-    if (err) {
-      setAuthError(err.message);
+    if (props.authError !== null) {
+      setAuthError(props.authError);
       return;
     }
     setAuthReady(true);
-    void fetchSignedInUser()
-      .then(setSignedInUser)
-      .catch((e: unknown) => console.warn("[oauth] cannot tell who is signed in:", e));
 
     const logger = createAlertLogger(session);
     logger.install();
@@ -477,6 +472,7 @@ export function App(): JSX.Element {
         </div>
         <Show when={signedInUser()}>{(user) => <UserMenu user={user()} />}</Show>
       </header>
+      <WorkspaceBanner />
       <IndicatorChips
         entries={activeIndicators()}
         onRemove={removeIndicator}

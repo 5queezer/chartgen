@@ -7,8 +7,9 @@
 import { DropdownMenu } from "@kobalte/core";
 import type { JSX } from "solid-js";
 
-import { signOut, type SignedInUser } from "../oauth";
+import type { SignedInUser } from "../oauth";
 import { showToast } from "../services/alertEngine";
+import { signOutOfWorkspace } from "../services/workspace";
 
 const PROVIDERS: Record<string, string> = { github: "GitHub", google: "Google" };
 
@@ -21,7 +22,7 @@ const itemClass =
 export function UserMenuItems(props: { user: SignedInUser }): JSX.Element {
   const provider = () => PROVIDERS[props.user.provider] ?? props.user.provider;
   const signOutNow = () => {
-    void signOut().catch((e: unknown) =>
+    void signOutOfWorkspace().catch((e: unknown) =>
       showToast(`Could not sign out: ${e instanceof Error ? e.message : String(e)}`),
     );
   };

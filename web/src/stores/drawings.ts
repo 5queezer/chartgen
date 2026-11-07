@@ -8,6 +8,7 @@
 import { createSignal } from "solid-js";
 
 import { isColor } from "../lib/color";
+import { forgetEvicted } from "../lib/workspaceSync";
 
 export const DRAWING_NAMES = [
   "segment",
@@ -391,6 +392,7 @@ function touch(symbol: string, keep: boolean): void {
   const index = keep ? [symbol, ...rest] : rest;
   for (const evicted of index.splice(MAX_SYMBOLS)) {
     localStorage.removeItem(storageKey(evicted));
+    forgetEvicted(localStorage, storageKey(evicted));
     onEvict?.(evicted);
   }
   localStorage.setItem(INDEX_KEY, JSON.stringify(index));
