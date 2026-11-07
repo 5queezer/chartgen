@@ -99,12 +99,45 @@ pub(crate) fn http() -> &'static reqwest::blocking::Client {
     chartgen::binance_gate::http()
 }
 
-fn bar_ts(bar: &Bar) -> Option<i64> {
-    bar.date.parse::<i64>().ok()
+/// What a read of klines needs of them: when each opened, unix seconds.
+trait Timed {
+    fn open_s(&self) -> Option<i64>;
+}
+
+impl Timed for Bar {
+    fn open_s(&self) -> Option<i64> {
+        self.date.parse::<i64>().ok()
+    }
+}
+
+/// A Binance kline as the windows hold it: its bar, and its taker buy volume, which
+/// only a footprint reads (ADR-0048). Not a field of `Bar`, which every bar of every
+/// chart would then carry through every request.
+#[derive(Clone, Debug)]
+pub(crate) struct Kline {
+    pub bar: Bar,
+    /// NaN if the response had none: an `Option` would double what this costs.
+    taker_buy: f64,
+}
+
+impl Kline {
+    pub(crate) fn taker_buy(&self) -> Option<f64> {
+        Some(self.taker_buy).filter(|v| !v.is_nan())
+    }
+}
+
+impl Timed for Kline {
+    fn open_s(&self) -> Option<i64> {
+        self.bar.open_s()
+    }
+}
+
+fn bar_ts<K: Timed>(bar: &K) -> Option<i64> {
+    bar.open_s()
 }
 
 /// Open time in ms of a bar whose `date` holds unix seconds.
-fn bar_open_ms(bar: &Bar) -> Option<i64> {
+fn bar_open_ms<K: Timed>(bar: &K) -> Option<i64> {
     bar_ts(bar).map(|s| s.saturating_mul(1000))
 }
 
@@ -125,16 +158,16 @@ fn binance_klines_url(symbol: &str, interval: &str, limit: usize, end_ms: Option
 /// in pages of at most `BINANCE_MAX_LIMIT`. `page(page_limit, end_inclusive)`
 /// performs one request; a short page means history is exhausted. Fails if
 /// `deadline` passes before the walk completes.
-fn paginate_backwards<F>(
+fn paginate_backwards<K: Timed, F>(
     limit: usize,
     end_time_ms: Option<i64>,
     deadline: Instant,
     mut page: F,
-) -> Result<Vec<Bar>, String>
+) -> Result<Vec<K>, String>
 where
-    F: FnMut(usize, Option<i64>) -> Result<Vec<Bar>, String>,
+    F: FnMut(usize, Option<i64>) -> Result<Vec<K>, String>,
 {
-    let mut out: Vec<Bar> = Vec::new();
+    let mut out: Vec<K> = Vec::new();
     // Binance's endTime is inclusive; ours is exclusive.
     let mut end = end_time_ms.map(|e| e.saturating_sub(1));
     while out.len() < limit {
@@ -210,7 +243,7 @@ fn fetch_binance_since(
         fetch_binance_page(client, &binance_klines_url(symbol, base, page_limit, end))
     };
     let symbol_key = symbol.to_uppercase();
-    let fetched = match end {
+    let fetched: Vec<Bar> = match end {
         None => newest_klines(
             &client.klines,
             &client.walks,
@@ -227,7 +260,10 @@ fn fetch_binance_since(
             deadline,
             || walk_klines(&client.walks, want, Some(end), deadline, page),
         )?,
-    };
+    }
+    .into_iter()
+    .map(|k| k.bar)
+    .collect();
 
     let (bars, has_more) = if resampled {
         resampled_bars(&fetched, &iv, limit, want)
@@ -249,6 +285,46 @@ fn fetch_binance_since(
         },
         has_more,
     })
+}
+
+/// The newest `limit` klines of `kline` opening before `end_ms`, with their taker buy
+/// volume, from the windows and pages that charts read: one read per symbol and kline,
+/// whoever asks (ADR-0049). `kline` is one of Binance's own, `1s` included.
+pub(crate) fn fetch_binance_klines(
+    client: &BinanceClient,
+    symbol: &str,
+    kline: &'static str,
+    limit: usize,
+    end_ms: Option<i64>,
+) -> Result<Vec<Kline>, String> {
+    let deadline = Instant::now() + BINANCE_DEADLINE;
+    let page = |page_limit: usize, end: Option<i64>| {
+        fetch_binance_page(client, &binance_klines_url(symbol, kline, page_limit, end))
+    };
+    let symbol_key = symbol.to_uppercase();
+    let read = match end_ms {
+        None => newest_klines(
+            &client.klines,
+            &client.walks,
+            (symbol_key, kline),
+            (limit, None),
+            &*client.now,
+            deadline,
+            page,
+        ),
+        Some(end) => shared_page(
+            &client.pages,
+            (symbol_key, kline, end, limit),
+            &*client.now,
+            deadline,
+            || walk_klines(&client.walks, limit, Some(end), deadline, page),
+        ),
+    };
+    // A symbol with no klines of this size is no failure: its bars just have no data.
+    match read {
+        Err(e) if e == NO_BARS => Ok(Vec::new()),
+        other => other,
+    }
 }
 
 /// Native bars to read for `limit` bars of `iv`, and where they end.
@@ -293,8 +369,8 @@ struct Now {
 type Clock<'a> = &'a (dyn Fn() -> Now + Send + Sync);
 
 /// How many symbol and kline pairs `newest_klines` holds, how many klines in all,
-/// and for how long since last used (ADR-0049). A kline is about 96 bytes (64 for the
-/// `Bar`, 32 for its date), so at most about 25 MB of live klines, not of resident
+/// and for how long since last used (ADR-0049). A kline is about 104 bytes (72 for the
+/// `Kline`, 32 for its date), so at most about 27 MB of live klines, not of resident
 /// memory: 12 windows at the 20,000 cap, or 256 ordinary ones, which read a page of 1000.
 const KLINE_CACHE_ENTRIES: usize = 256;
 const KLINE_CACHE_BARS: usize = 256_000;
@@ -308,7 +384,7 @@ const KLINE_FRESH: Duration = Duration::from_secs(1);
 /// While one caller refreshes, others get the klines held if they are this young,
 /// rather than a blocking thread each. Older, they wait for the refresh.
 const KLINE_STALE: Duration = Duration::from_secs(3);
-/// `end_time` pages kept once read, in entries, klines (about 6 MB) and seconds.
+/// `end_time` pages kept once read, in entries, klines (about 7 MB) and seconds.
 const PAGE_CACHE_ENTRIES: usize = 128;
 const PAGE_CACHE_BARS: usize = 64_000;
 const PAGE_CACHE_TTL: Duration = Duration::from_secs(60);
@@ -322,24 +398,24 @@ const NO_BARS: &str = "Binance returned zero bars";
 const READ_ABORTED: &str = "Binance read failed unexpectedly; try again shortly";
 
 /// A read under way that others may join, and how it ended once it has.
-struct Flight<T>(OnceLock<Result<T, String>>);
+pub(crate) struct Flight<T>(pub(crate) OnceLock<Result<T, String>>);
 
-type Flights<K, T> = HashMap<K, Arc<Flight<T>>>;
+pub(crate) type Flights<K, T> = HashMap<K, Arc<Flight<T>>>;
 
 /// The turn to run a flight. Ends however the read does, panics included, so
 /// nobody who joined it hangs, and leaves `flights`, so what it read lives on only
 /// where the cache keeps it and with those who joined.
-struct Claim<'a, S, K: Eq + Hash, T> {
-    state: &'a Mutex<S>,
-    ended: &'a Condvar,
-    flights: fn(&mut S) -> &mut Flights<K, T>,
-    key: K,
-    flight: Arc<Flight<T>>,
+pub(crate) struct Claim<'a, S, K: Eq + Hash, T> {
+    pub(crate) state: &'a Mutex<S>,
+    pub(crate) ended: &'a Condvar,
+    pub(crate) flights: fn(&mut S) -> &mut Flights<K, T>,
+    pub(crate) key: K,
+    pub(crate) flight: Arc<Flight<T>>,
 }
 
 impl<S, K: Eq + Hash, T> Claim<'_, S, K, T> {
     /// How the read ended, for those who joined it. They learn when this drops.
-    fn end(&self, how: Result<T, String>) {
+    pub(crate) fn end(&self, how: Result<T, String>) {
         let _ = self.flight.0.set(how);
     }
 }
@@ -355,7 +431,7 @@ impl<S, K: Eq + Hash, T> Drop for Claim<'_, S, K, T> {
 }
 
 /// Sleep until someone's read ends or `deadline` passes, which gives `BUSY`.
-fn wait_for_flight<'a, S>(
+pub(crate) fn wait_for_flight<'a, S>(
     ended: &Condvar,
     state: MutexGuard<'a, S>,
     deadline: Instant,
@@ -392,9 +468,16 @@ fn evict<K: Eq + Hash + Clone, V>(
     }
 }
 
+/// Binance's finest kline. No chart's interval, so `Interval` does not read it, but a
+/// footprint on a 1m chart does (ADR-0048).
+const SECOND_KLINE: &str = "1s";
+
 /// Klines a refresh of `kline` reads: enough to overlap after up to `KLINE_CACHE_TTL`,
 /// with the forming one. A page costs the same weight at any size.
 fn kline_refresh(kline: &str) -> usize {
+    if kline == SECOND_KLINE {
+        return refresh_for(1);
+    }
     Interval::parse(kline).map_or(KLINE_REFRESH, |iv| refresh_for(iv.secs()))
 }
 
@@ -405,12 +488,15 @@ fn refresh_for(kline_secs: i64) -> usize {
 
 /// Unix ms at which the `kline` holding `t_ms` closes.
 fn kline_end_ms(kline: &str, t_ms: i64) -> i64 {
+    if kline == SECOND_KLINE {
+        return t_ms.div_euclid(1000).saturating_add(1).saturating_mul(1000);
+    }
     Interval::parse(kline).map_or(i64::MAX, |iv| {
         iv.grid_end(t_ms.div_euclid(1000)).saturating_mul(1000)
     })
 }
 
-struct HeldKlines {
+struct HeldKlines<K> {
     used: Instant,
     /// When the read behind the newest klines was sent.
     read: Instant,
@@ -418,12 +504,12 @@ struct HeldKlines {
     /// is served past it, so a poll sees a new kline at once. It says nothing of when
     /// REST has the closed one's last trades: see `fetch_binance_seed`.
     read_slot_end_ms: i64,
-    bars: Arc<Vec<Bar>>,
+    bars: Arc<Vec<K>>,
     /// A full read found less than it asked for: nothing older exists.
     complete: bool,
 }
 
-impl HeldKlines {
+impl<K> HeldKlines<K> {
     fn serves(&self, now: Now, age: Duration) -> bool {
         now.wall_ms < self.read_slot_end_ms && now.mono.saturating_duration_since(self.read) < age
     }
@@ -438,9 +524,8 @@ impl HeldKlines {
 type KlineKey = (String, &'static str);
 type KlineFlight = Arc<Flight<()>>;
 
-#[derive(Default)]
-struct KlineState {
-    held: HashMap<KlineKey, HeldKlines>,
+struct KlineState<K> {
+    held: HashMap<KlineKey, HeldKlines<K>>,
     /// Reads of klines older than those held, or of the first ones.
     walking: Flights<KlineKey, ()>,
     /// Reads of the newest klines over those held. They do not touch the older end,
@@ -448,33 +533,46 @@ struct KlineState {
     refreshing: Flights<KlineKey, ()>,
 }
 
-#[derive(Default)]
-struct KlineCache {
-    state: Mutex<KlineState>,
+struct KlineCache<K> {
+    state: Mutex<KlineState<K>>,
     ended: Condvar,
 }
 
-type KlineClaim<'a> = Claim<'a, KlineState, KlineKey, ()>;
-
-enum KlineRead<'a> {
-    Held(Arc<Vec<Bar>>),
-    Refresh(KlineClaim<'a>),
-    /// Read on from the open time of the oldest held, of how many held.
-    Walk(KlineClaim<'a>, Option<(i64, usize)>),
+// By hand: a derive would ask `K: Default`, which no kline need be.
+impl<K> Default for KlineCache<K> {
+    fn default() -> Self {
+        Self {
+            state: Mutex::new(KlineState {
+                held: HashMap::new(),
+                walking: HashMap::new(),
+                refreshing: HashMap::new(),
+            }),
+            ended: Condvar::new(),
+        }
+    }
 }
 
-impl KlineCache {
-    fn lock(&self) -> MutexGuard<'_, KlineState> {
+type KlineClaim<'a, K> = Claim<'a, KlineState<K>, KlineKey, ()>;
+
+enum KlineRead<'a, K> {
+    Held(Arc<Vec<K>>),
+    Refresh(KlineClaim<'a, K>),
+    /// Read on from the open time of the oldest held, of how many held.
+    Walk(KlineClaim<'a, K>, Option<(i64, usize)>),
+}
+
+impl<K: Timed> KlineCache<K> {
+    fn lock(&self) -> MutexGuard<'_, KlineState<K>> {
         self.state.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     /// Start a flight of `key` in `flights`.
     fn claim(
         &self,
-        st: &mut KlineState,
-        flights: fn(&mut KlineState) -> &mut Flights<KlineKey, ()>,
+        st: &mut KlineState<K>,
+        flights: fn(&mut KlineState<K>) -> &mut Flights<KlineKey, ()>,
         key: &KlineKey,
-    ) -> KlineClaim<'_> {
+    ) -> KlineClaim<'_, K> {
         let flight = Arc::new(Flight(OnceLock::new()));
         flights(st).insert(key.clone(), flight.clone());
         Claim {
@@ -499,7 +597,7 @@ impl KlineCache {
         (want, not_before): (usize, Option<Instant>),
         clock: Clock<'_>,
         deadline: Instant,
-    ) -> Result<KlineRead<'_>, String> {
+    ) -> Result<KlineRead<'_, K>, String> {
         let mut guard = self.lock();
         // The flight waited for, and whether it is a refresh.
         let mut joined: Option<(KlineFlight, bool)> = None;
@@ -548,39 +646,49 @@ impl KlineCache {
     }
 }
 
-struct HeldPage {
+struct HeldPage<K> {
     read: Instant,
-    bars: Arc<Vec<Bar>>,
+    bars: Arc<Vec<K>>,
 }
 
 /// Symbol, kline, exclusive end and klines asked for.
 type PageKey = (String, &'static str, i64, usize);
 
-#[derive(Default)]
-struct PageState {
-    held: HashMap<PageKey, HeldPage>,
-    flying: Flights<PageKey, Arc<Vec<Bar>>>,
+struct PageState<K> {
+    held: HashMap<PageKey, HeldPage<K>>,
+    flying: Flights<PageKey, Arc<Vec<K>>>,
 }
 
-#[derive(Default)]
-struct PageCache {
-    state: Mutex<PageState>,
+struct PageCache<K> {
+    state: Mutex<PageState<K>>,
     ended: Condvar,
+}
+
+impl<K> Default for PageCache<K> {
+    fn default() -> Self {
+        Self {
+            state: Mutex::new(PageState {
+                held: HashMap::new(),
+                flying: HashMap::new(),
+            }),
+            ended: Condvar::new(),
+        }
+    }
 }
 
 /// The klines of an `end_time` page: from a recent read of the same page, or a read
 /// under way, or `read`. A page reaching the forming kline, or one closed only just
 /// now, is shared but not kept, since keeping it could not bound how old that kline
 /// gets. Anything else never changes, so history that ran out is kept as well.
-fn shared_page<F>(
-    cache: &PageCache,
+fn shared_page<K: Timed + Clone, F>(
+    cache: &PageCache<K>,
     key: PageKey,
     clock: Clock<'_>,
     deadline: Instant,
     read: F,
-) -> Result<Vec<Bar>, String>
+) -> Result<Vec<K>, String>
 where
-    F: FnOnce() -> Result<Vec<Bar>, String>,
+    F: FnOnce() -> Result<Vec<K>, String>,
 {
     let mut guard = cache.state.lock().unwrap_or_else(|e| e.into_inner());
     let now = clock();
@@ -605,7 +713,7 @@ where
     let claim = Claim {
         state: &cache.state,
         ended: &cache.ended,
-        flights: |s: &mut PageState| &mut s.flying,
+        flights: |s: &mut PageState<K>| &mut s.flying,
         key: key.clone(),
         flight,
     };
@@ -679,15 +787,15 @@ impl Walks {
 
 /// `paginate_backwards`, holding a walk permit when it takes more than one page.
 /// The wait for one comes out of `deadline`, and the walk then gets its own.
-fn walk_klines<F>(
+fn walk_klines<K: Timed, F>(
     walks: &Walks,
     want: usize,
     end: Option<i64>,
     deadline: Instant,
     page: F,
-) -> Result<Vec<Bar>, String>
+) -> Result<Vec<K>, String>
 where
-    F: FnMut(usize, Option<i64>) -> Result<Vec<Bar>, String>,
+    F: FnMut(usize, Option<i64>) -> Result<Vec<K>, String>,
 {
     if want <= BINANCE_MAX_LIMIT {
         return paginate_backwards(want, end, deadline, page);
@@ -698,7 +806,7 @@ where
 
 /// Replace the end of `bars` with `fresh`, from its first bar on. False, leaving
 /// `bars` alone, if `fresh` does not reach them.
-fn lay_over(bars: &mut Vec<Bar>, fresh: &[Bar]) -> bool {
+fn lay_over<K: Timed + Clone>(bars: &mut Vec<K>, fresh: &[K]) -> bool {
     let reaches = fresh.first().and_then(bar_ts).filter(|first| {
         bars.last()
             .and_then(bar_ts)
@@ -722,22 +830,22 @@ fn lay_over(bars: &mut Vec<Bar>, fresh: &[Bar]) -> bool {
 /// page and lays it over the window (see `KlineCache::begin` for the others). A
 /// refused or failed read stores nothing. `page` is as for `paginate_backwards`.
 /// `not_before` is as for `KlineCache::begin`.
-fn newest_klines<F>(
-    cache: &KlineCache,
+fn newest_klines<K: Timed + Clone, F>(
+    cache: &KlineCache<K>,
     walks: &Walks,
     key: KlineKey,
     (want, not_before): (usize, Option<Instant>),
     clock: Clock<'_>,
     deadline: Instant,
     mut page: F,
-) -> Result<Vec<Bar>, String>
+) -> Result<Vec<K>, String>
 where
-    F: FnMut(usize, Option<i64>) -> Result<Vec<Bar>, String>,
+    F: FnMut(usize, Option<i64>) -> Result<Vec<K>, String>,
 {
     let want = want.min(MAX_BASE_BARS);
-    let newest = |bars: &[Bar]| bars[bars.len().saturating_sub(want)..].to_vec();
+    let newest = |bars: &[K]| bars[bars.len().saturating_sub(want)..].to_vec();
     let bounds = (KLINE_CACHE_ENTRIES, KLINE_CACHE_BARS);
-    let info = |h: &HeldKlines| (h.used, h.bars.len());
+    let info = |h: &HeldKlines<K>| (h.used, h.bars.len());
     loop {
         match cache.begin(&key, (want, not_before), clock, deadline)? {
             KlineRead::Held(bars) => return Ok(newest(&bars)),
@@ -817,7 +925,7 @@ where
                 // Only if the window still starts where this read went on from: a
                 // refresh at the 20,000 cap may have dropped its oldest klines.
                 let same =
-                    |h: &&mut HeldKlines| h.bars.first().and_then(bar_open_ms) == Some(first);
+                    |h: &&mut HeldKlines<K>| h.bars.first().and_then(bar_open_ms) == Some(first);
                 if let Some(h) = st.held.get_mut(&key).filter(same) {
                     got.reserve_exact(h.bars.len());
                     got.extend_from_slice(&h.bars);
@@ -866,8 +974,8 @@ type BinanceSend = Box<dyn Fn(&str) -> Result<BinanceResponse, String> + Send + 
 pub(crate) struct BinanceClient {
     gate: &'static Gate,
     walks: Walks,
-    klines: KlineCache,
-    pages: PageCache,
+    klines: KlineCache<Kline>,
+    pages: PageCache<Kline>,
     now: Box<dyn Fn() -> Now + Send + Sync>,
     send: BinanceSend,
 }
@@ -941,48 +1049,7 @@ pub(crate) fn binance() -> &'static BinanceClient {
     })
 }
 
-/// Taker buy volume of each kline of a Binance response, oldest first: field 9.
-fn parse_taker_buy(body: &str) -> Result<Vec<f64>, String> {
-    let body: serde_json::Value =
-        serde_json::from_str(body).map_err(|e| format!("Failed to parse Binance response: {e}"))?;
-    let klines = body.as_array().ok_or("Binance response is not an array")?;
-    klines
-        .iter()
-        .map(|k| {
-            k.get(9)
-                .and_then(|v| v.as_str())
-                .and_then(|v| v.parse().ok())
-                .ok_or_else(|| "Binance kline has no taker buy volume".to_string())
-        })
-        .collect()
-}
-
-/// The newest `limit` (at most `BINANCE_MAX_LIMIT`) klines of `interval` with their
-/// taker buy volume, opening before `end_ms`, through the gate. One request.
-pub(crate) fn fetch_binance_taker_page(
-    symbol: &str,
-    interval: &str,
-    limit: usize,
-    end_ms: Option<i64>,
-) -> Result<Vec<(Bar, f64)>, String> {
-    let client = binance();
-    // endTime is inclusive on Binance; this one is not.
-    let url = binance_klines_url(
-        symbol,
-        interval,
-        limit.min(BINANCE_MAX_LIMIT),
-        end_ms.map(|e| e - 1),
-    );
-    let resp = client.get(&url)?;
-    if !(200..300).contains(&resp.status) {
-        return Err(format!("Binance API returned status {}", resp.status));
-    }
-    let bars = parse_binance_klines(&resp.body)?;
-    let taker = parse_taker_buy(&resp.body)?;
-    Ok(bars.into_iter().zip(taker).collect())
-}
-
-fn fetch_binance_page(client: &BinanceClient, url: &str) -> Result<Vec<Bar>, String> {
+fn fetch_binance_page(client: &BinanceClient, url: &str) -> Result<Vec<Kline>, String> {
     let resp = client.get(url)?;
 
     if !(200..300).contains(&resp.status) {
@@ -992,7 +1059,7 @@ fn fetch_binance_page(client: &BinanceClient, url: &str) -> Result<Vec<Bar>, Str
     parse_binance_klines(&resp.body)
 }
 
-fn parse_binance_klines(body: &str) -> Result<Vec<Bar>, String> {
+fn parse_binance_klines(body: &str) -> Result<Vec<Kline>, String> {
     let body: serde_json::Value = serde_json::from_str(body)
         .map_err(|e| format!("Failed to parse Binance response: {}", e))?;
 
@@ -1034,13 +1101,22 @@ fn parse_binance_klines(body: &str) -> Result<Vec<Bar>, String> {
             .parse()
             .map_err(|e| format!("Failed to parse volume: {}", e))?;
 
-        bars.push(Bar {
-            open,
-            high,
-            low,
-            close,
-            volume,
-            date: format!("{}", open_time / 1000),
+        // Field 9. Absent or unreadable, the kline is still good for a chart.
+        let taker_buy = arr
+            .get(9)
+            .and_then(|v| v.as_str())
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(f64::NAN);
+        bars.push(Kline {
+            bar: Bar {
+                open,
+                high,
+                low,
+                close,
+                volume,
+                date: format!("{}", open_time / 1000),
+            },
+            taker_buy,
         });
     }
 
@@ -2015,8 +2091,13 @@ mod tests {
     fn taker_buy_volume_is_read_from_field_nine() {
         let body = r#"[[0,"1","2","0.5","1.5","10",59999,"15",5,"7.25","11","0"],
                        [60000,"1","2","0.5","1.5","10",119999,"15",5,"2","3","0"]]"#;
-        assert_eq!(parse_taker_buy(body), Ok(vec![7.25, 2.0]));
-        assert!(parse_taker_buy(r#"[[0,"1","2","0.5","1.5","10"]]"#).is_err());
+        let klines = parse_binance_klines(body).unwrap();
+        assert_eq!(klines[0].taker_buy(), Some(7.25));
+        assert_eq!(klines[1].taker_buy(), Some(2.0));
+        assert_eq!(klines[1].bar.date, "60");
+        // Without it the kline still serves a chart, and says it has none.
+        let short = parse_binance_klines(r#"[[0,"1","2","0.5","1.5","10"]]"#).unwrap();
+        assert_eq!(short[0].taker_buy(), None);
     }
 
     const HOUR_MS: i64 = 3_600_000;
@@ -2458,7 +2539,7 @@ mod tests {
 
     /// Reads through `newest_klines` against a fake exchange, counting requests.
     fn cached_read(
-        cache: &KlineCache,
+        cache: &KlineCache<Bar>,
         key: &str,
         want: usize,
         now: Instant,
@@ -2731,12 +2812,21 @@ mod tests {
             let Some(interval) = param("interval") else {
                 return reply(200, None, "[]".into());
             };
-            let step_ms = data::interval_secs(interval).unwrap() * 1000;
+            let second = interval == SECOND_KLINE;
+            let step_ms = if second {
+                1000
+            } else {
+                data::interval_secs(interval).unwrap() * 1000
+            };
             let limit: i64 = param("limit").unwrap().parse().unwrap();
             let end: i64 = param("endTime").map_or(i64::MAX, |e| e.parse().unwrap());
             // Binance's klines lie on the grid: weeks open on Monday, for example.
-            let grid = Interval::parse(interval).unwrap();
-            let newest = grid.grid_start(end.min(now_ms).div_euclid(1000)) * 1000;
+            let at = end.min(now_ms).div_euclid(1000);
+            let newest = if second {
+                at * 1000
+            } else {
+                Interval::parse(interval).unwrap().grid_start(at) * 1000
+            };
             let rows: Vec<String> = (0..limit)
                 .rev()
                 .map(|i| newest - i * step_ms)
@@ -2745,7 +2835,12 @@ mod tests {
                     let p = 100.0 + (t / step_ms % 97) as f64;
                     // The forming kline moves with the clock, and stops as it closes.
                     let close = p + (now_ms - t).min(step_ms) as f64 / 1000.0;
-                    format!(r#"[{t},"{p}","{}","{}","{close}","1"]"#, p + 1.0, p - 1.0)
+                    format!(
+                        r#"[{t},"{p}","{}","{}","{close}","1",{},"100",5,"0.25","25","0"]"#,
+                        p + 1.0,
+                        p - 1.0,
+                        t + step_ms - 1
+                    )
                 })
                 .collect();
             reply(200, None, format!("[{}]", rows.join(",")))
@@ -2991,7 +3086,7 @@ mod tests {
             .map(|_| walks.enter(far()).unwrap())
             .collect();
         let soon = Instant::now() + Duration::from_millis(20);
-        let e = walk_klines(&walks, BINANCE_MAX_LIMIT + 1, None, soon, |_, _| {
+        let e = walk_klines::<Bar, _>(&walks, BINANCE_MAX_LIMIT + 1, None, soon, |_, _| {
             panic!("a call that gave up sends nothing")
         })
         .err()
@@ -3032,10 +3127,13 @@ mod tests {
         } else {
             (limit, end_time_ms)
         };
-        let native = paginate_backwards(want, end, far(), |n, e| {
+        let native: Vec<Bar> = paginate_backwards(want, end, far(), |n, e| {
             fetch_binance_page(&client, &binance_klines_url(symbol, base, n, e))
         })
-        .unwrap();
+        .unwrap()
+        .into_iter()
+        .map(|k: Kline| k.bar)
+        .collect();
         let (bars, has_more) = if per_bar > 1 {
             resampled_bars(&native, &iv, limit, want)
         } else {
@@ -3812,6 +3910,169 @@ mod tests {
         }
     }
 
+    /// The window a footprint reads of the newest `n` klines of 60 s, on the fake's clock.
+    fn newest_window(fake: &FakeBinance, n: i64) -> (i64, i64, i64, i64) {
+        let now = fake.now_s.load(Ordering::SeqCst);
+        let forming = now.div_euclid(60) * 60;
+        (forming - (n - 1) * 60, forming + 60, now, 60)
+    }
+
+    #[test]
+    fn a_kline_costs_what_the_docs_say() {
+        assert_eq!(std::mem::size_of::<Bar>(), 64);
+        assert_eq!(std::mem::size_of::<Kline>(), 72);
+    }
+
+    #[test]
+    fn intrabars_read_the_window_a_chart_read_with_taker_volume() {
+        let fake = FakeBinance::new(600_000, 0);
+        let client = client_of(&fake);
+        fetch_binance_via(&client, "BTCUSDT", "1m", 800, None).unwrap();
+        assert_eq!(fake.requests(), 1);
+        let window = newest_window(&fake, 100);
+        let list = crate::intrabars::read_binance(&client, "BTCUSDT", "1m", window).unwrap();
+        assert_eq!(fake.requests(), 1, "the chart's read served it");
+        assert_eq!(list.len(), 100);
+        assert_eq!(list[0].taker_buy, Some(0.25));
+        // Nor do chart bars lose anything by sharing it.
+        let chart = fetch_binance_via(&client, "BTCUSDT", "1m", 800, None).unwrap();
+        assert_eq!(chart.data.bars.len(), 800);
+    }
+
+    #[test]
+    fn footprints_at_once_read_the_window_once() {
+        let fake = FakeBinance::new(600_000, 5);
+        let client = client_of(&fake);
+        let window = newest_window(&fake, 2_500);
+        let got = together(40, |_| {
+            crate::intrabars::read_binance(&client, "BTCUSDT", "1m", window).unwrap()
+        });
+        assert_eq!(
+            fake.requests(),
+            3,
+            "2502 klines in whole pages, whoever asks"
+        );
+        assert!(got.iter().all(|list| list.len() == 2_500));
+    }
+
+    #[test]
+    fn a_failed_read_of_intrabars_keeps_the_window() {
+        let fake = FakeBinance::new(600_000, 0);
+        let client = client_of(&fake);
+        let window = newest_window(&fake, 900);
+        crate::intrabars::read_binance(&client, "BTCUSDT", "1m", window).unwrap();
+        assert_eq!(fake.requests(), 1);
+        let key = ("BTCUSDT".to_string(), "1m");
+        let held = client.klines.lock().held[&key].bars.len();
+        fake.advance(5);
+        *fake.fail_at.lock().unwrap() = Some((2, 500, "0"));
+        let window = newest_window(&fake, 900);
+        assert!(crate::intrabars::read_binance(&client, "BTCUSDT", "1m", window).is_err());
+        assert_eq!(client.klines.lock().held[&key].bars.len(), held);
+        // Back up: a refresh over it, not the whole window again.
+        crate::intrabars::read_binance(&client, "BTCUSDT", "1m", window).unwrap();
+        assert_eq!(fake.requests(), 3);
+    }
+
+    #[test]
+    fn a_window_of_one_second_klines_ends_at_each_second_and_overlaps_on_refresh() {
+        let fake = FakeBinance::new(600_000, 0);
+        let client = client_of(&fake);
+        let at = |fake: &FakeBinance| {
+            let now = fake.now_s.load(Ordering::SeqCst);
+            (now - 299, now + 1, now, 1)
+        };
+        let list = crate::intrabars::read_binance(&client, "BTCUSDT", "1s", at(&fake)).unwrap();
+        assert_eq!(list.len(), 300);
+        assert_eq!(fake.requests(), 1);
+        // A minute on, less than a refresh's 130 klines: laid over the window.
+        fake.advance(60);
+        let list = crate::intrabars::read_binance(&client, "BTCUSDT", "1s", at(&fake)).unwrap();
+        assert_eq!(list.len(), 300);
+        assert_eq!(fake.requests(), 2);
+        assert_eq!(list.last().unwrap().t, fake.now_s.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn a_read_of_intrabars_goes_on_past_a_budget_for_the_next_load() {
+        let fake = FakeBinance::new(600_000, 150);
+        let client: &'static BinanceClient = Box::leak(Box::new(client_of(&fake)));
+        let window = newest_window(&fake, 2_500);
+        // Three pages at 150 ms: the caller stops waiting long before the read ends.
+        let started = Instant::now();
+        let err = crate::intrabars::read_within(
+            Duration::from_millis(60),
+            client,
+            "BTCUSDT",
+            "1m",
+            window,
+        )
+        .unwrap_err();
+        assert!(err.contains("too long"), "{err}");
+        assert!(started.elapsed() < Duration::from_millis(140));
+        // The read went on, and the next load finds what it read.
+        let give_up = Instant::now() + Duration::from_secs(10);
+        while fake.requests() < 3 && Instant::now() < give_up {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let got =
+            crate::intrabars::read_within(Duration::from_secs(10), client, "BTCUSDT", "1m", window)
+                .unwrap();
+        assert_eq!(got.len(), 2_500);
+        assert_eq!(fake.requests(), 3, "nothing read twice");
+    }
+
+    #[test]
+    fn an_older_window_is_one_shared_page_and_comes_from_there_again() {
+        let fake = FakeBinance::new(600_000, 5);
+        let client = client_of(&fake);
+        let (_, to, now, secs) = newest_window(&fake, 1);
+        // Closed long ago: ending 100 klines back, and 2500 long.
+        let end = to - 100 * secs;
+        let window = (end - 2_500 * secs, end, now, secs);
+        let got = together(40, |_| {
+            crate::intrabars::read_binance(&client, "BTCUSDT", "1m", window).unwrap()
+        });
+        assert_eq!(
+            fake.requests(),
+            3,
+            "2502 klines in whole pages, whoever asks"
+        );
+        for list in &got {
+            assert_eq!(list.len(), 2_500);
+            assert_eq!(list.first().unwrap().t, end - 2_500 * secs);
+            assert_eq!(list.last().unwrap().t, end - secs);
+        }
+        crate::intrabars::read_binance(&client, "BTCUSDT", "1m", window).unwrap();
+        assert_eq!(fake.requests(), 3, "kept");
+    }
+
+    /// Whole chart loads asking for finer bars, on a fake with history for them.
+    fn profile_load(client: &'static BinanceClient) -> serde_json::Value {
+        let args = serde_json::json!({
+            "ticker": "BTCUSDT", "timeframe": "1h", "bars": 100, "warmup": 0,
+            "indicators": ["volume_profile"], "format": "series", "profile_intrabars": true,
+        });
+        chart_call(client, args)["indicators"]["volume_profile"].clone()
+    }
+
+    #[test]
+    fn a_load_reads_a_profile_from_finer_bars_and_spreads_its_own_if_it_cannot() {
+        let fake = FakeBinance::new(600_000, 0);
+        let client: &'static BinanceClient = Box::leak(Box::new(client_of(&fake)));
+        let read = profile_load(client);
+        assert_eq!(read["profile_interval"], "3m");
+        assert!(!read["hbars"].as_array().unwrap().is_empty());
+
+        // The chart's bars come, and the finer read is refused.
+        let fake = FakeBinance::new(600_000, 0);
+        let client: &'static BinanceClient = Box::leak(Box::new(client_of(&fake)));
+        *fake.fail_at.lock().unwrap() = Some((2, 500, "0"));
+        let spread = profile_load(client);
+        assert_eq!(spread.get("profile_interval"), None);
+        assert!(!spread["hbars"].as_array().unwrap().is_empty());
+    }
+
     /// `seed` of a live push group, with the fake behind `binance()` on this thread.
     fn seed_of(client: &'static BinanceClient, limit: usize) -> OhlcvData {
         use crate::chart_push::{BinanceSource, PushSource};
@@ -3977,6 +4238,10 @@ mod tests {
             assert!(refresh_for(secs) <= BINANCE_MAX_LIMIT);
         }
         assert_eq!(refresh_for(1), 130);
+        // Binance's 1s kline is no chart interval, and a window on it must still work.
+        assert_eq!(kline_refresh("1s"), 130);
+        assert_eq!(kline_end_ms("1s", 1_500), 2_000);
+        assert_eq!(kline_end_ms("1s", 2_000), 3_000);
         assert_eq!(kline_refresh("1m"), KLINE_REFRESH);
         assert_eq!(kline_refresh("1h"), KLINE_REFRESH);
     }

@@ -709,6 +709,10 @@ fn apply_intrabar_profiles(
     }
 }
 
+/// How long a chart's load waits for a profile's finer bars before spreading its own.
+/// Far longer than the few pages should take, and short enough not to hold up a chart.
+const PROFILE_BUDGET: std::time::Duration = std::time::Duration::from_secs(8);
+
 /// Lower-timeframe bars covering `visible`, and their interval, if one can be afforded.
 fn intrabars_for(
     visible: &chartgen::data::OhlcvData,
@@ -721,8 +725,16 @@ fn intrabars_for(
     let age = fetch::now_ms() / 1000 - first;
     let (name, secs) =
         intrabars::plan(fetch::detect_source(symbol), iv.secs(), visible.len(), age)?;
-    let list =
-        intrabars::load(source, symbol, name, secs, &visible.bars, iv.grid_end(last)).ok()?;
+    let list = intrabars::load_within(
+        PROFILE_BUDGET,
+        source,
+        symbol,
+        name,
+        secs,
+        &visible.bars,
+        iv.grid_end(last),
+    )
+    .ok()?;
     if list.is_empty() {
         return None;
     }

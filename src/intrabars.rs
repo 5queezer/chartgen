@@ -1,26 +1,32 @@
 //! Lower-timeframe bars for footprints and volume profiles (ADR-0048): which
-//! interval a chart can afford, and a bounded cache in front of the data sources.
+//! interval a chart can afford, and reading them.
 //!
-//! Binance: through the gate, with taker buy volume. Yahoo: no aggressor data, and
-//! fine intervals only for recent history. The sample source: bars subdivided from
-//! the chart's own, as its intervals are drawn independently.
+//! Binance: the windows and pages charts read (ADR-0049), so one read per symbol and
+//! kline with its deadlines and walk limit, with taker buy volume. Yahoo: no aggressor
+//! data, and fine intervals only for recent history. A kline window does not fit it: it
+//! has no gate, closes for the night, and has limits by age, so it has a bounded cache
+//! of its own here. The sample source: bars subdivided from the chart's own, as its
+//! intervals are drawn independently.
 
-use crate::fetch::{self, DataSource};
+use crate::fetch::{self, BinanceClient, Claim, DataSource, Flight, Flights};
 use chartgen::data::Bar;
 use chartgen::orderflow::{self, Intrabar};
 use std::collections::HashMap;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{mpsc, Arc, Condvar, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 /// Most intrabars one request may use. On Binance, at 1000 per request, that is at
 /// most 5 requests, or 6 when a page ends short of a boundary: the cost in ADR-0048.
 pub const MAX_INTRABARS: usize = 5_000;
-/// Intervals held in the cache, and intrabars per interval: 8 x 6000 x 64 B = 3 MB.
+/// Yahoo intervals held in the cache, and intrabars per interval: 8 x 6000 x 64 B = 3 MB.
 const MAX_ENTRIES: usize = 8;
+/// Most intrabars read for one window.
 const MAX_HELD: usize = 6_000;
-/// How long the newest intrabars count as current: charts polling share one request.
+/// How long Yahoo's newest intrabars count as current: charts polling share one request.
 const REFRESH: Duration = Duration::from_secs(5);
 const MAX_PAGES: usize = 6;
+/// How long one Yahoo read may take, waiting for another's included.
+const READ_BUDGET: Duration = Duration::from_secs(20);
 
 const DAY: i64 = 86_400;
 /// `(name, seconds, oldest age in seconds)`, finest first; `None`: no limit known.
@@ -102,6 +108,7 @@ fn fits(entry: &(&str, i64, Option<i64>), chart_secs: i64, bars: usize, age: i64
     secs < chart_secs && affordable && oldest.is_none_or(|o| age <= o)
 }
 
+#[derive(Clone)]
 struct Held {
     /// Ascending by time. The last one may still be forming.
     bars: Vec<Intrabar>,
@@ -114,9 +121,15 @@ struct Held {
 /// Newest `limit` bars opening before `end_s`, oldest first.
 type Fetch<'a> = dyn FnMut(usize, Option<i64>) -> Result<Vec<Intrabar>, String> + 'a;
 
+type CacheKey = (String, &'static str);
+
 #[derive(Default)]
 struct Cache {
-    held: HashMap<(String, String), Held>,
+    /// What was read. A read works on a copy, so a read that fails or is still out
+    /// takes nothing from anybody.
+    held: HashMap<CacheKey, Arc<Held>>,
+    /// Reads under way. Others wait for them rather than read the same again.
+    reading: Flights<CacheKey, ()>,
 }
 
 impl Cache {
@@ -135,6 +148,18 @@ impl Cache {
     }
 }
 
+#[derive(Default)]
+struct SharedCache {
+    state: Mutex<Cache>,
+    ended: Condvar,
+}
+
+impl SharedCache {
+    fn lock(&self) -> std::sync::MutexGuard<'_, Cache> {
+        self.state.lock().unwrap_or_else(|e| e.into_inner())
+    }
+}
+
 fn merge(old: Vec<Intrabar>, mut newer: Vec<Intrabar>) -> Vec<Intrabar> {
     let Some(first) = newer.first().map(|b| b.t) else {
         return old;
@@ -146,17 +171,21 @@ fn merge(old: Vec<Intrabar>, mut newer: Vec<Intrabar>) -> Vec<Intrabar> {
     out
 }
 
-/// Walk back from `end_s` until `from_s` is covered, at most `MAX_PAGES` requests.
-/// Returns the bars, and whether the source ran out before `from_s`.
+/// Walk back from `end_s` until `from_s` is covered, at most `MAX_PAGES` requests, none
+/// begun after `deadline`. Returns the bars, and whether the source ran out before `from_s`.
 fn walk(
     fetch: &mut Fetch<'_>,
     from_s: i64,
     end_s: Option<i64>,
     per_page: usize,
+    deadline: Instant,
 ) -> Result<(Vec<Intrabar>, bool), String> {
     let mut out: Vec<Intrabar> = Vec::new();
     let mut end = end_s;
     for _ in 0..MAX_PAGES {
+        if Instant::now() >= deadline {
+            return Err("reading finer bars took too long".into());
+        }
         let page = fetch(per_page, end)?;
         let short = page.len() < per_page;
         let Some(oldest) = page.first().map(|b| b.t) else {
@@ -176,18 +205,20 @@ fn walk(
 
 /// Intrabars opening in `[from_s, to_s)`, from what is held where it can be. A window
 /// reaching the present reads only what is new, at most once per `REFRESH`.
+#[allow(clippy::too_many_arguments)]
 fn read(
-    held: Option<Held>,
+    held: Option<&Held>,
     from_s: i64,
     to_s: i64,
     now_s: i64,
     secs: i64,
     now: Instant,
+    deadline: Instant,
     fetch: &mut Fetch<'_>,
 ) -> Result<(Vec<Intrabar>, Held), String> {
     let per_page = 1000usize;
     let live = to_s + secs > now_s;
-    let mut h = held.unwrap_or_else(|| Held {
+    let mut h = held.cloned().unwrap_or_else(|| Held {
         bars: Vec::new(),
         complete_from: None,
         refreshed: now - REFRESH * 2,
@@ -208,7 +239,7 @@ fn read(
     // Older than what is held: read back from its oldest bar.
     if !covered_back {
         let end = first.or((!live).then_some(to_s));
-        let (older, ran_out) = walk(fetch, from_s, end, per_page)?;
+        let (older, ran_out) = walk(fetch, from_s, end, per_page, deadline)?;
         if ran_out {
             h.complete_from = Some(from_s);
         }
@@ -223,7 +254,7 @@ fn read(
         let behind_window = !live && l + secs < to_s;
         if (live && stale) || behind_window {
             let want = ((to_s.min(now_s + secs) - l) / secs + 2).clamp(2, per_page as i64) as usize;
-            let (newer, _) = walk(fetch, l, (!live).then_some(to_s), want)?;
+            let (newer, _) = walk(fetch, l, (!live).then_some(to_s), want, deadline)?;
             h.bars = merge(std::mem::take(&mut h.bars), newer);
             h.refreshed = now;
         }
@@ -244,32 +275,121 @@ fn read(
     Ok((h.bars[a..b].to_vec(), h))
 }
 
-fn cache() -> &'static Mutex<Cache> {
-    static CACHE: OnceLock<Mutex<Cache>> = OnceLock::new();
-    CACHE.get_or_init(Mutex::default)
+/// `read` of `key`, one at a time. Whoever finds one under way waits for it, until
+/// `deadline`, and then reads what it left, or fails as it did rather than each in turn
+/// against a source that is down. A read that fails leaves what was held as it was.
+fn shared_read(
+    shared: &SharedCache,
+    key: CacheKey,
+    (from_s, to_s, now_s, secs): (i64, i64, i64, i64),
+    deadline: Instant,
+    fetch: &mut Fetch<'_>,
+) -> Result<Vec<Intrabar>, String> {
+    let mut st = shared.lock();
+    // Kept past its end: a read that failed has left `reading` by the time we wake.
+    let mut joined: Option<Arc<Flight<()>>> = None;
+    loop {
+        if let Some(Err(e)) = joined.as_ref().and_then(|f| f.0.get()) {
+            return Err(e.clone());
+        }
+        let Some(flight) = st.reading.get(&key).cloned() else {
+            break;
+        };
+        joined = Some(flight);
+        st = fetch::wait_for_flight(&shared.ended, st, deadline)
+            .map_err(|_| "timed out waiting for another read of finer bars".to_string())?;
+    }
+    let held = st.held.get(&key).cloned();
+    let flight = Arc::new(Flight(OnceLock::new()));
+    st.reading.insert(key.clone(), flight.clone());
+    let claim = Claim {
+        state: &shared.state,
+        ended: &shared.ended,
+        flights: |c: &mut Cache| &mut c.reading,
+        key: key.clone(),
+        flight,
+    };
+    drop(st);
+
+    let (out, held) = read(
+        held.as_deref(),
+        from_s,
+        to_s,
+        now_s,
+        secs,
+        Instant::now(),
+        deadline,
+        fetch,
+    )
+    .inspect_err(|e| claim.end(Err(e.clone())))?;
+    let mut st = shared.lock();
+    st.held.insert(key, Arc::new(held));
+    st.evict();
+    drop(st);
+    claim.end(Ok(()));
+    Ok(out)
 }
 
-fn fetch_live(
+fn cache() -> &'static SharedCache {
+    static CACHE: OnceLock<SharedCache> = OnceLock::new();
+    CACHE.get_or_init(SharedCache::default)
+}
+
+fn read_yahoo(
     symbol: &str,
-    interval: &str,
-    limit: usize,
-    end_s: Option<i64>,
+    interval: &'static str,
+    window: (i64, i64, i64, i64),
 ) -> Result<Vec<Intrabar>, String> {
-    let end_ms = end_s.map(|e| e * 1000);
-    if fetch::detect_source(symbol) == "binance" {
-        let page = fetch::fetch_binance_taker_page(symbol, interval, limit, end_ms)?;
-        return Ok(page
+    let mut fetcher = |limit: usize, end: Option<i64>| -> Result<Vec<Intrabar>, String> {
+        let end_ms = end.map(|e| e * 1000);
+        let fetched = fetch::fetch_yahoo(symbol, interval, limit, end_ms)?;
+        Ok(fetched
+            .data
+            .bars
             .iter()
-            .filter_map(|(bar, taker)| Intrabar::from_bar(bar, Some(*taker)))
-            .collect());
-    }
-    let fetched = fetch::fetch_yahoo(symbol, interval, limit, end_ms)?;
-    Ok(fetched
-        .data
-        .bars
+            .filter_map(|bar| Intrabar::from_bar(bar, None))
+            .collect())
+    };
+    shared_read(
+        cache(),
+        (symbol.to_uppercase(), interval),
+        window,
+        Instant::now() + READ_BUDGET,
+        &mut fetcher,
+    )
+}
+
+pub(crate) fn read_binance(
+    client: &BinanceClient,
+    symbol: &str,
+    kline: &'static str,
+    (from_s, to_s, now_s, secs): (i64, i64, i64, i64),
+) -> Result<Vec<Intrabar>, String> {
+    // A window reaching the present reads the newest. An older one is a page, ending
+    // where the window does. As many klines as it has slots always reach its start:
+    // where they skip a time with no trades, as `1s` ones may, they only reach further.
+    let end_ms = (to_s + secs <= now_s).then_some(to_s * 1000);
+    let slots = (to_s.min(now_s + secs) - from_s).max(0) / secs + 2;
+    let limit = (slots as usize).min(MAX_HELD);
+    let klines = fetch::fetch_binance_klines(client, symbol, kline, limit, end_ms)?;
+    Ok(klines
         .iter()
-        .filter_map(|bar| Intrabar::from_bar(bar, None))
+        .filter_map(|k| Intrabar::from_bar(&k.bar, k.taker_buy()))
+        .filter(|b| (from_s..to_s).contains(&b.t))
         .collect())
+}
+
+fn read_live(
+    client: &BinanceClient,
+    symbol: &str,
+    interval: &'static str,
+    window: (i64, i64, i64, i64),
+) -> Result<Vec<Intrabar>, String> {
+    if fetch::detect_source(symbol) == "binance" {
+        read_binance(client, symbol, interval, window)
+    } else {
+        read_yahoo(symbol, interval, window)
+    }
 }
 
 fn sample_seed(symbol: &str) -> u64 {
@@ -282,7 +402,7 @@ fn sample_seed(symbol: &str) -> u64 {
 pub fn load(
     source: DataSource,
     symbol: &str,
-    interval: &str,
+    interval: &'static str,
     secs: i64,
     bars: &[Bar],
     last_end: i64,
@@ -295,22 +415,53 @@ pub fn load(
         let last_len = last_end - opens.last().copied().unwrap_or(from_s);
         return Ok(sample_list(symbol, bars, &opens, last_len, secs, now_s));
     }
-    let key = (symbol.to_uppercase(), interval.to_string());
-    let held = lock().held.remove(&key);
-    let mut fetcher = |limit: usize, end: Option<i64>| fetch_live(symbol, interval, limit, end);
-    let (out, held) = read(
-        held,
-        from_s,
-        last_end,
-        now_s,
-        secs,
-        Instant::now(),
-        &mut fetcher,
-    )?;
-    let mut c = lock();
-    c.held.insert(key, held);
-    c.evict();
-    Ok(out)
+    read_live(
+        fetch::binance(),
+        symbol,
+        interval,
+        (from_s, last_end, now_s, secs),
+    )
+}
+
+/// `load`, for a caller with a fallback, as a chart's load has in spreading its own
+/// bars: gives up on waiting after `budget`, whatever the source is doing, even in the
+/// middle of a request. The read goes on by itself, bounded by its own deadlines, so
+/// what it finds is there for the next load.
+pub fn load_within(
+    budget: Duration,
+    source: DataSource,
+    symbol: &str,
+    interval: &'static str,
+    secs: i64,
+    bars: &[Bar],
+    last_end: i64,
+) -> Result<Vec<Intrabar>, String> {
+    if source != DataSource::Live {
+        return load(source, symbol, interval, secs, bars, last_end);
+    }
+    let Some(from_s) = bars.iter().find_map(|b| b.date.parse().ok()) else {
+        return Ok(Vec::new());
+    };
+    let window = (from_s, last_end, fetch::now_ms() / 1000, secs);
+    read_within(budget, fetch::binance(), symbol, interval, window)
+}
+
+pub(crate) fn read_within(
+    budget: Duration,
+    client: &'static BinanceClient,
+    symbol: &str,
+    interval: &'static str,
+    window: (i64, i64, i64, i64),
+) -> Result<Vec<Intrabar>, String> {
+    let (done, finished) = mpsc::channel();
+    let symbol = symbol.to_string();
+    std::thread::spawn(move || {
+        // Nobody may be listening any more: that is the point.
+        let _ = done.send(read_live(client, &symbol, interval, window));
+    });
+    finished
+        .recv_timeout(budget)
+        .map_err(|_| "reading finer bars took too long".to_string())?
 }
 
 /// Bars of `block_secs` for a TPO: the source's own. The sample source draws each
@@ -393,10 +544,6 @@ fn sample_list(
         ));
     }
     out
-}
-
-fn lock() -> std::sync::MutexGuard<'static, Cache> {
-    cache().lock().unwrap_or_else(|e| e.into_inner())
 }
 
 #[cfg(test)]
@@ -526,7 +673,8 @@ mod tests {
         now: Instant,
     ) -> (Vec<Intrabar>, Held) {
         let mut f = |limit: usize, end: Option<i64>| source.get(limit, end);
-        read(held, from, to, now_s, 60, now, &mut f).unwrap()
+        let far = Instant::now() + Duration::from_secs(600);
+        read(held.as_ref(), from, to, now_s, 60, now, far, &mut f).unwrap()
     }
 
     #[test]
@@ -670,18 +818,161 @@ mod tests {
         let mut c = Cache::default();
         for k in 0..=MAX_ENTRIES {
             c.held.insert(
-                (k.to_string(), "1m".into()),
-                Held {
+                (k.to_string(), "1m"),
+                Arc::new(Held {
                     bars: vec![],
                     complete_from: None,
                     refreshed: now,
                     used: now + Duration::from_secs(k as u64),
-                },
+                }),
             );
         }
         c.evict();
         assert_eq!(c.held.len(), MAX_ENTRIES);
-        assert!(!c.held.contains_key(&("0".to_string(), "1m".to_string())));
+        assert!(!c.held.contains_key(&("0".to_string(), "1m")));
+    }
+
+    /// Bars every 60 s up to 600,000, counting requests and answering slowly.
+    struct SlowSource {
+        requests: std::sync::atomic::AtomicUsize,
+        fail: std::sync::atomic::AtomicBool,
+        delay: Duration,
+    }
+
+    impl SlowSource {
+        fn new(delay_ms: u64) -> Self {
+            Self {
+                requests: Default::default(),
+                fail: Default::default(),
+                delay: Duration::from_millis(delay_ms),
+            }
+        }
+
+        fn requests(&self) -> usize {
+            self.requests.load(std::sync::atomic::Ordering::SeqCst)
+        }
+
+        fn get(&self, limit: usize, end: Option<i64>) -> Result<Vec<Intrabar>, String> {
+            use std::sync::atomic::Ordering::SeqCst;
+            self.requests.fetch_add(1, SeqCst);
+            std::thread::sleep(self.delay);
+            if self.fail.load(SeqCst) {
+                return Err("source is down".into());
+            }
+            let stop = end.unwrap_or(600_060).min(600_060);
+            let first = ((stop - 1).div_euclid(60) * 60).saturating_sub(60 * (limit as i64 - 1));
+            Ok((0..limit as i64).map(|k| ib(first + k * 60)).collect())
+        }
+    }
+
+    const WINDOW: (i64, i64, i64, i64) = (540_000, 600_060, 600_030, 60);
+
+    fn far() -> Instant {
+        Instant::now() + Duration::from_secs(600)
+    }
+
+    fn shared(cache: &SharedCache, source: &SlowSource) -> Result<Vec<Intrabar>, String> {
+        let mut f = |limit: usize, end: Option<i64>| source.get(limit, end);
+        shared_read(cache, ("X".into(), "1m"), WINDOW, far(), &mut f)
+    }
+
+    #[test]
+    fn callers_at_once_share_one_read() {
+        let (cache, source) = (SharedCache::default(), SlowSource::new(100));
+        let got: Vec<_> = std::thread::scope(|s| {
+            let handles: Vec<_> = (0..32)
+                .map(|_| s.spawn(|| shared(&cache, &source)))
+                .collect();
+            handles.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+        assert_eq!(source.requests(), 2, "one walk of two pages, whoever asks");
+        for list in &got {
+            assert_eq!(list.as_ref().unwrap().len(), 1001);
+        }
+    }
+
+    #[test]
+    fn a_read_that_fails_loses_what_was_held() {
+        use std::sync::atomic::Ordering::SeqCst;
+        let (cache, source) = (SharedCache::default(), SlowSource::new(0));
+        assert_eq!(shared(&cache, &source).unwrap().len(), 1001);
+        let before = cache.lock().held[&("X".to_string(), "1m")].bars.len();
+        // Old enough to read again, and the source has gone down.
+        {
+            let mut st = cache.lock();
+            let held = st.held.get_mut(&("X".to_string(), "1m")).unwrap();
+            Arc::get_mut(held).unwrap().refreshed = Instant::now() - REFRESH * 2;
+        }
+        source.fail.store(true, SeqCst);
+        assert_eq!(shared(&cache, &source).unwrap_err(), "source is down");
+        assert_eq!(
+            cache.lock().held[&("X".to_string(), "1m")].bars.len(),
+            before,
+            "still held"
+        );
+        // Back up: one short read of the newest, not the whole window again.
+        source.fail.store(false, SeqCst);
+        let requests = source.requests();
+        assert_eq!(shared(&cache, &source).unwrap().len(), 1001);
+        assert_eq!(source.requests(), requests + 1);
+    }
+
+    #[test]
+    fn those_waiting_on_a_read_that_fails_fail_with_it() {
+        use std::sync::atomic::Ordering::SeqCst;
+        let (cache, source) = (SharedCache::default(), SlowSource::new(150));
+        source.fail.store(true, SeqCst);
+        let got: Vec<_> = std::thread::scope(|s| {
+            let handles: Vec<_> = (0..8)
+                .map(|i| {
+                    let (cache, source) = (&cache, &source);
+                    s.spawn(move || {
+                        // After the first has begun.
+                        std::thread::sleep(Duration::from_millis(30 * (i > 0) as u64));
+                        shared(cache, source)
+                    })
+                })
+                .collect();
+            handles.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+        assert!(got.iter().all(Result::is_err));
+        assert_eq!(
+            source.requests(),
+            1,
+            "not each in turn against a source that is down"
+        );
+        assert!(cache.lock().reading.is_empty());
+    }
+
+    #[test]
+    fn waiting_on_a_read_gives_up_at_its_deadline_and_sends_nothing() {
+        let (cache, source) = (SharedCache::default(), SlowSource::new(400));
+        std::thread::scope(|s| {
+            s.spawn(|| shared(&cache, &source).unwrap());
+            std::thread::sleep(Duration::from_millis(50));
+            let mut f = |limit: usize, end: Option<i64>| source.get(limit, end);
+            let soon = Instant::now() + Duration::from_millis(30);
+            let started = Instant::now();
+            let err = shared_read(&cache, ("X".into(), "1m"), WINDOW, soon, &mut f).unwrap_err();
+            assert!(err.contains("timed out"), "{err}");
+            assert!(started.elapsed() < Duration::from_millis(300));
+        });
+        assert_eq!(
+            source.requests(),
+            2,
+            "the first's two pages, and none of the waiter's"
+        );
+    }
+
+    #[test]
+    fn a_walk_past_its_deadline_begins_no_other_request() {
+        let source = SlowSource::new(30);
+        let mut f = |limit: usize, end: Option<i64>| source.get(limit, end);
+        // 3000 bars at 1000 a page, with time for one.
+        let soon = Instant::now() + Duration::from_millis(10);
+        let err = walk(&mut f, 420_000, Some(600_060), 1000, soon).unwrap_err();
+        assert!(err.contains("too long"), "{err}");
+        assert_eq!(source.requests(), 1);
     }
 
     #[test]
