@@ -1150,10 +1150,18 @@ test.describe("drawing modifiers", () => {
             .__chartgenTest.chart().getVisibleRange().from,
         );
       const before = await from();
-      // Far from both lines of `pressOnLine`.
-      await page.mouse.move(box.x + 150, box.y + 400, { steps: 4 });
+      // Far from both lines of `pressOnLine`, at the foot of the candles by the pane's own
+      // size: a press on the legend row of the pane below would not pan.
+      const y = await page.evaluate(() => {
+        const chart = (window as unknown as { __chartgenTest: { chart: () => {
+          getSize: (id: string, pos: string) => { top: number; height: number };
+        } } }).__chartgenTest.chart();
+        const pane = chart.getSize("candle_pane", "root");
+        return pane.top + pane.height - 40;
+      });
+      await page.mouse.move(box.x + 150, box.y + y, { steps: 4 });
       await page.mouse.down();
-      await page.mouse.move(box.x + 330, box.y + 340, { steps: 8 });
+      await page.mouse.move(box.x + 330, box.y + y - 60, { steps: 8 });
       await page.mouse.up();
       await page.waitForTimeout(100);
       expect((await overlays(page))[0]!.points.map((p) => p.value)).toEqual(record.map((p) => p.value));
