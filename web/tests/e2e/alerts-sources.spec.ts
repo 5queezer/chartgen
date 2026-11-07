@@ -12,7 +12,7 @@
 
 import type { Page } from "@playwright/test";
 
-import { test, expect } from "./fixtures/app";
+import { test, expect, openSidebarTab } from "./fixtures/app";
 
 const shot = async (page: Page, name: string) => {
   const dir = process.env.ALERT_SHOTS_DIR;
@@ -91,7 +91,7 @@ test.describe("drawing alerts", () => {
     await dialog(page).getByRole("button", { name: "Create" }).click();
     await expect(dialog(page)).toHaveCount(0);
 
-    await alertsTab(page).click();
+    await openSidebarTab(page, /^Alerts/);
     await expect(rows(page)).toHaveCount(1);
     await expect(rows(page)).toContainText("Close crossing Horizontal line");
     await expect(rows(page)).toHaveAttribute("data-status", "active");
@@ -114,7 +114,7 @@ test.describe("drawing alerts", () => {
     await dialog(page).getByLabel("Condition").selectOption("crossing_up");
     await shot(page, "dialog-trend-line");
     await dialog(page).getByRole("button", { name: "Create" }).click();
-    await alertsTab(page).click();
+    await openSidebarTab(page, /^Alerts/);
     await expect(rows(page)).toContainText("Close crossing up Trend line");
 
     // Far below, then far above any value the line has at the last bar.
@@ -131,7 +131,7 @@ test.describe("drawing alerts", () => {
     await dialog(page).getByLabel("Source").selectOption({ label: "Horizontal line" });
     await dialog(page).getByLabel("Condition").selectOption("greater");
     await dialog(page).getByRole("button", { name: "Create" }).click();
-    await alertsTab(page).click();
+    await openSidebarTab(page, /^Alerts/);
     await expect(rows(page)).toHaveCount(1);
 
     await clickAt(page, A, "right");
@@ -158,7 +158,7 @@ test.describe("indicator alerts", () => {
     await dialog(page).getByLabel("Value", { exact: true }).fill("0");
     await shot(page, "dialog-indicator");
     await dialog(page).getByRole("button", { name: "Create" }).click();
-    await alertsTab(page).click();
+    await openSidebarTab(page, /^Alerts/);
     await expect(rows(page)).toContainText("RSI (14) greater than 0");
     await expect(rows(page)).toHaveAttribute("data-status", "triggered", { timeout: 15_000 });
     await expect(toasts(page).filter({ hasText: "RSI (14) greater than 0" })).toBeVisible();
@@ -184,7 +184,7 @@ test.describe("indicator alerts", () => {
     await shot(page, "dialog-ema");
     await dialog(page).getByRole("button", { name: "Create" }).click();
 
-    await alertsTab(page).click();
+    await openSidebarTab(page, /^Alerts/);
     await expect(rows(page)).toHaveCount(1);
     await expect(rows(page).locator("[data-role=description]")).toHaveText(
       "Close crossing EMA 200",
