@@ -381,7 +381,7 @@ export function Toolbar(props: ToolbarProps): JSX.Element {
 
       <span class="w-px h-5 bg-[color:var(--color-border)] mx-1" />
 
-      <div class="flex items-center" role="group" aria-label="Timeframe">
+      <div class="flex items-center gap-px" role="group" aria-label="Timeframe">
         <Show when={showTimeframes()}>
           <For each={FAVOURITE_TIMEFRAMES}>
             {(tf) => (
