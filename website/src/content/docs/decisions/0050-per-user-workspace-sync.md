@@ -103,7 +103,8 @@ a minute shows a quiet "Sync is waiting for the server".
 
 In a 256 MiB container, in a debug build, the server stayed under 97 MB with ten accounts of 2 MiB each
 sending 100 parallel reads and 100 parallel 0.95 MiB writes. Before these limits, two accounts took it
-to 486 MB.
+to 486 MB. An account leaving 479 answers unread over four minutes peaked at 54 MB, where
+without ADR-0051 it was killed at about 420.
 
 ### In the browser: accounts
 
