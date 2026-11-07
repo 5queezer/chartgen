@@ -12,6 +12,7 @@ use crate::fetch::{self, BinanceClient, Claim, DataSource, Flight, Flights};
 use chartgen::data::Bar;
 use chartgen::orderflow::{self, Intrabar};
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, Condvar, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -471,12 +472,50 @@ pub(crate) fn read_within(
     interval: &'static str,
     window: (i64, i64, i64, i64),
 ) -> Result<Vec<Intrabar>, String> {
-    let (done, finished) = mpsc::channel();
+    static RUNNING: AtomicUsize = AtomicUsize::new(0);
     let symbol = symbol.to_string();
-    std::thread::spawn(move || {
+    detached(&RUNNING, budget, start_thread, move || {
+        read_live(client, &symbol, interval, window)
+    })
+}
+
+/// Reads left running on their own at once. These threads are outside the blocking pool
+/// that bounds requests, and each outlives its caller by up to its read's deadlines, so
+/// a stalled source and a flood of loads would otherwise pile them up. Past this a load
+/// just spreads its own bars, as it does for any other failure.
+const MAX_DETACHED_READS: usize = 16;
+
+fn start_thread(work: Box<dyn FnOnce() + Send>) -> std::io::Result<()> {
+    std::thread::Builder::new()
+        .name("intrabars".into())
+        .spawn(work)
+        .map(drop)
+}
+
+/// `work` on a thread of its own, waiting for it up to `budget`. It goes on after that.
+fn detached(
+    running: &'static AtomicUsize,
+    budget: Duration,
+    start: fn(Box<dyn FnOnce() + Send>) -> std::io::Result<()>,
+    work: impl FnOnce() -> Result<Vec<Intrabar>, String> + Send + 'static,
+) -> Result<Vec<Intrabar>, String> {
+    struct Slot(&'static AtomicUsize);
+    impl Drop for Slot {
+        fn drop(&mut self) {
+            self.0.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+    let slot = Slot(running);
+    if running.fetch_add(1, Ordering::SeqCst) >= MAX_DETACHED_READS {
+        return Err("too many reads of finer bars are running".into());
+    }
+    let (done, finished) = mpsc::channel();
+    start(Box::new(move || {
+        let _slot = slot;
         // Nobody may be listening any more: that is the point.
-        let _ = done.send(read_live(client, &symbol, interval, window));
-    });
+        let _ = done.send(work());
+    }))
+    .map_err(|e| format!("could not start a read of finer bars: {e}"))?;
     finished
         .recv_timeout(budget)
         .map_err(|_| "reading finer bars took too long".to_string())?
@@ -1069,6 +1108,85 @@ mod tests {
             2,
             "the first's two pages, and none of the waiter's"
         );
+    }
+
+    /// A counter of its own, as other tests run theirs at the same time.
+    fn counter() -> &'static AtomicUsize {
+        Box::leak(Box::new(AtomicUsize::new(0)))
+    }
+
+    #[test]
+    fn past_the_limit_a_detached_read_is_refused_and_a_slot_frees_when_one_ends() {
+        let running = counter();
+        let release = Arc::new((Mutex::new(false), Condvar::new()));
+        let hold = |release: Arc<(Mutex<bool>, Condvar)>| {
+            move || {
+                let (open, freed) = &*release;
+                let guard = open.lock().unwrap();
+                drop(freed.wait_while(guard, |o| !*o).unwrap());
+                Ok(Vec::new())
+            }
+        };
+        let quick = Duration::from_millis(5);
+        for _ in 0..MAX_DETACHED_READS {
+            let err = detached(running, quick, start_thread, hold(release.clone())).unwrap_err();
+            assert!(err.contains("too long"), "{err}");
+        }
+        assert_eq!(running.load(Ordering::SeqCst), MAX_DETACHED_READS);
+        let ran = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let r = ran.clone();
+        let err = detached(running, quick, start_thread, move || {
+            r.store(true, Ordering::SeqCst);
+            Ok(Vec::new())
+        })
+        .unwrap_err();
+        assert!(err.contains("too many"), "{err}");
+        assert_eq!(
+            running.load(Ordering::SeqCst),
+            MAX_DETACHED_READS,
+            "a refusal takes no slot"
+        );
+
+        // They end, and so the limit does not stay reached.
+        *release.0.lock().unwrap() = true;
+        release.1.notify_all();
+        let give_up = Instant::now() + Duration::from_secs(10);
+        while running.load(Ordering::SeqCst) > 0 && Instant::now() < give_up {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(running.load(Ordering::SeqCst), 0);
+        let got = detached(running, Duration::from_secs(5), start_thread, || {
+            Ok(vec![ib(1)])
+        });
+        assert_eq!(got.unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_thread_the_system_refuses_is_an_error_and_takes_no_slot() {
+        fn refused(_work: Box<dyn FnOnce() + Send>) -> std::io::Result<()> {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::WouldBlock,
+                "no threads",
+            ))
+        }
+        let running = counter();
+        let err = detached(running, Duration::from_secs(1), refused, || Ok(Vec::new()));
+        assert!(err.unwrap_err().contains("could not start"));
+        assert_eq!(running.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn a_read_that_panics_gives_its_slot_back_and_its_caller_an_error() {
+        let running = counter();
+        let err = detached(running, Duration::from_secs(5), start_thread, || {
+            panic!("this panic is part of the test")
+        });
+        assert!(err.is_err());
+        let give_up = Instant::now() + Duration::from_secs(5);
+        while running.load(Ordering::SeqCst) > 0 && Instant::now() < give_up {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(running.load(Ordering::SeqCst), 0);
     }
 
     #[test]
