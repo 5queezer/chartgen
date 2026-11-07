@@ -36,7 +36,9 @@ const MAX_KEY_LEN: usize = 128;
 const BODY_TIMEOUT: Duration = Duration::from_secs(8);
 /// The longest a request keeps its share of the syncs running. One that takes this long
 /// with nothing moving has a client that does not send or does not read, which costs its
-/// account the rest of the minute: it takes many accounts to keep the others out, not eight.
+/// account the rest of the minute. One that takes a piece now and then pays nothing
+/// (`SLOT_MOVING`), so eight accounts reading that slowly can keep the others out for as
+/// long as they go on.
 const SLOT_TIMEOUT: Duration = Duration::from_secs(10);
 /// An answer still going out in this last part of that is a client that is slow, not one
 /// that has stopped: it loses its share of the syncs, and pays nothing for it.

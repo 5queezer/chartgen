@@ -400,6 +400,14 @@ describe("a round", () => {
     expect(s.length).toBe(0);
   });
 
+  it("a damaged record of dropped symbols does not stop a deletion arriving", () => {
+    s.setItem("chartgen.drawingsEvicted", "{not json");
+    expect(() =>
+      applyAnswer(s, [], answer({ cursor: 2, changes: [{ key: DOC, value: null, version: 2 }] })),
+    ).not.toThrow();
+    expect(s.getItem("chartgen.drawingsEvicted"), "and it is left for its owner").toBe("{not json");
+  });
+
   it("a conflict's answer is merged and sent again, keeping both sides", () => {
     s.setItem(DOC, drawings("a"));
     const first = collectWrites(s, none);

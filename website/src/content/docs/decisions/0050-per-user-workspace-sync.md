@@ -98,8 +98,9 @@ on a new connection. Those buffers are bounded per connection for every route, b
 A request's share of the 8 ends after 10 s even so. One with nothing moving for the last 5 s of that, a
 body that does not come or an answer that is not being taken, costs its account the rest of the minute. A
 first sync downloading 2 MiB over a slow line loses its share and pays nothing, as its answer is moving.
-Eight accounts cannot keep everyone else out at no cost: at 10 s a minute each it takes about 48 to fill
-the 8 for good. To a device all of these are a pause: what it has stays, and goes out when the `Retry-After` has passed. A device refused for over
+Eight accounts stalling cannot keep everyone else out at no cost: at 10 s a minute each it takes about 48 to
+fill the 8 for good. Eight reading a workspace of about 1 MiB slowly can, by reading: one 64 KiB piece in those
+last 5 s avoids the cost, about 13 KB/s. To a device all of these are a pause: what it has stays, and goes out when the `Retry-After` has passed. A device refused for over
 a minute shows a quiet "Sync is waiting for the server".
 
 Under `MemoryMax=256M`, ten accounts of 2 MiB each sending 100 parallel reads and 100 parallel 0.95 MiB

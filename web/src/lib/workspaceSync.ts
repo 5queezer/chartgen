@@ -434,7 +434,12 @@ export interface SyncAnswer {
 function forgetEvictionOf(s: Storage, key: string): void {
   if (!key.startsWith("chartgen.drawings.")) return;
   const symbol = key.slice("chartgen.drawings.".length);
-  const evicted = JSON.parse(s.getItem(EVICTED_KEY) ?? "[]") as unknown;
+  let evicted: unknown;
+  try {
+    evicted = JSON.parse(s.getItem(EVICTED_KEY) ?? "[]");
+  } catch {
+    return;
+  }
   if (!Array.isArray(evicted) || !evicted.includes(symbol)) return;
   s.setItem(EVICTED_KEY, JSON.stringify(evicted.filter((e) => e !== symbol)));
 }
