@@ -9,11 +9,13 @@ use axum::http::header;
 use axum::response::Response;
 use axum::serve::Listener;
 use futures_util::StreamExt;
+use std::collections::HashMap;
 use std::future::Future;
 use std::io;
 use std::net::SocketAddr;
 use std::pin::Pin;
-use std::sync::{Arc, LazyLock};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, LazyLock, Mutex, Weak};
 use std::task::{ready, Context, Poll};
 use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
@@ -47,57 +49,93 @@ const _: () =
 const _: () = assert!(MAX_STREAMS < MAX_CONNECTIONS);
 
 static STREAMS: LazyLock<Arc<Semaphore>> = LazyLock::new(|| Arc::new(Semaphore::new(MAX_STREAMS)));
+static STREAM_PLACES: LazyLock<Mutex<HashMap<String, Weak<OwnedSemaphorePermit>>>> =
+    LazyLock::new(Default::default);
 
-/// A place for one long-lived response, held for as long as it runs; `None` when all are taken.
-pub(super) fn stream_slot() -> Option<OwnedSemaphorePermit> {
-    STREAMS.clone().try_acquire_owned().ok()
+/// A place for one long-lived response, held for as long as it runs; `None` when all are
+/// taken. A session's new stream shares the place of the one it replaces, so a client whose
+/// connection died can come back with the cap full of others.
+pub(super) fn stream_slot(session: &str) -> Option<Arc<OwnedSemaphorePermit>> {
+    let mut places = STREAM_PLACES.lock().unwrap();
+    if let Some(place) = places.get(session).and_then(Weak::upgrade) {
+        return Some(place);
+    }
+    places.retain(|_, place| place.strong_count() > 0);
+    let place = Arc::new(STREAMS.clone().try_acquire_owned().ok()?);
+    places.insert(session.to_owned(), Arc::downgrade(&place));
+    Some(place)
 }
 
 /// What tool calls may hold at once, in bars times series, from the moment they run until
-/// their answer has gone out. A chart is built in memory, measured at about 1.6 KiB per
-/// such unit, and for a client that does not read, hyper keeps the answer. So this is about
-/// 100 MiB: one chart at the largest size at a time, or dozens at the size the app asks for.
-/// The rest wait, at the cost of their request.
-const CALL_BUDGET: u32 = 64_000;
+/// their answer has gone out. A chart is built in memory, measured at 0.8 to 1.5 KiB per
+/// such unit, and for a client that does not read, hyper keeps the answer. The rest wait,
+/// up to `CALL_WAIT`, and a call larger than all of it is refused. Under a flood of large
+/// charts with every other connection held, this peaks at about 130 MiB in a 256 MiB
+/// container, where 48,000 reaches 216 and 64,000 the limit. It fits the app's own use: 500
+/// bars a call, so a 4-chart grid at 10 indicators each is 22,000. And 50 indicators at
+/// 500 bars, the most it asks for, is 25,500.
+const CALL_BUDGET: u32 = 32_000;
+/// A call that has waited this long is told to come back, rather than holding its
+/// connection until something gives up on it.
+const CALL_WAIT: Duration = Duration::from_secs(20);
 
 static CALLS: LazyLock<Arc<Semaphore>> =
     LazyLock::new(|| Arc::new(Semaphore::new(CALL_BUDGET as usize)));
 
+pub(super) enum NoRoom {
+    /// More than the budget could ever hold: it will never fit, however long it waits.
+    TooLarge { cost: u32, budget: u32 },
+    /// Others hold the budget. Come back in this many seconds.
+    Busy { retry_after: u64 },
+}
+
 /// A place for one tool call of this cost; pass it to `held_until_written`.
-pub(super) async fn call_slot(cost: u32) -> OwnedSemaphorePermit {
-    CALLS
-        .clone()
-        .acquire_many_owned(cost.min(CALL_BUDGET))
-        .await
-        .expect("the semaphore is never closed")
+pub(super) async fn call_slot(cost: u32) -> Result<OwnedSemaphorePermit, NoRoom> {
+    if cost > CALL_BUDGET {
+        return Err(NoRoom::TooLarge {
+            cost,
+            budget: CALL_BUDGET,
+        });
+    }
+    match tokio::time::timeout(CALL_WAIT, CALLS.clone().acquire_many_owned(cost)).await {
+        Ok(permit) => Ok(permit.expect("the semaphore is never closed")),
+        Err(_) => Err(NoRoom::Busy { retry_after: 5 }),
+    }
 }
 
 /// What a request to `/mcp` will hold, in the units of `CALL_BUDGET`. Only charts come to
-/// much. A price-based chart is built from more bars than it shows.
+/// much, and what is no tool call costs nothing, so that it never waits. A price-based chart reads up to `fetch::MAX_BASE_BARS` to build its bricks; the
+/// indicators then run on the bricks.
 pub(super) fn call_cost(body: &[u8]) -> u32 {
-    const SMALL: u32 = 1_000;
+    const SMALL: u64 = 1_000;
     const DEFAULT_BARS: u64 = 200;
+    /// `mcp::indicators_arg`'s default.
+    const DEFAULT_INDICATORS: u64 = 3;
     const MAX_BARS: u64 = 5_000;
-    /// `fetch::MAX_BASE_BARS`: what a price-based chart may read.
     const SOURCE_BARS: u64 = 20_000;
+    const PRICE_BASED: [&str; 5] = ["renko", "kagi", "point_figure", "line_break", "range"];
     let Ok(call) = serde_json::from_slice::<serde_json::Value>(body) else {
-        return SMALL;
+        return 0;
     };
+    if call["method"] != "tools/call" {
+        return 0;
+    }
     let params = &call["params"];
     if params["name"] != "generate_chart" {
-        return SMALL;
+        return SMALL as u32;
     }
     let args = &params["arguments"];
     let bars = args["bars"].as_u64().unwrap_or(DEFAULT_BARS).min(MAX_BARS);
-    let bars = if args["chart_style"].is_null() {
-        bars
-    } else {
-        SOURCE_BARS
+    let indicators = match args.get("indicators").or_else(|| args.get("panels")) {
+        Some(list) => list.as_array().map_or(0, Vec::len) as u64,
+        None => DEFAULT_INDICATORS,
     };
-    let series = args["indicators"].as_array().map_or(0, Vec::len) as u64 + 1;
-    u32::try_from(bars.saturating_mul(series))
-        .unwrap_or(CALL_BUDGET)
-        .max(SMALL)
+    let shown = bars.saturating_mul(indicators.saturating_add(1));
+    let price_based = args["chart_style"]
+        .as_str()
+        .is_some_and(|style| PRICE_BASED.contains(&style));
+    let cost = shown + if price_based { SOURCE_BARS } else { 0 };
+    u32::try_from(cost.max(SMALL)).unwrap_or(u32::MAX)
 }
 
 /// A body comes out in pieces of this, so that hyper asks for the next only when it has
@@ -108,6 +146,7 @@ const PIECE: usize = 64 * 1024;
 /// response that a client does not read. The buffers below that are `MAX_CONNECTIONS`' to
 /// bound: up to about 730 KiB can still be on its way after the guard has gone.
 pub(super) fn held_until_written<G: Send + 'static>(response: Response, guard: G) -> Response {
+    let guard = (guard, MarksFreed);
     let (mut parts, body) = response.into_parts();
     match body.size_hint().exact() {
         Some(0) => return Response::from_parts(parts, Body::empty()),
@@ -154,6 +193,43 @@ const DEADLINES: Deadlines = Deadlines {
     linger: Duration::from_secs(30),
 };
 
+/// Something large may have been freed since the last trim.
+static FREED: AtomicBool = AtomicBool::new(false);
+
+/// Marks that, when it goes.
+struct MarksFreed;
+
+impl Drop for MarksFreed {
+    fn drop(&mut self) {
+        FREED.store(true, Ordering::Relaxed);
+    }
+}
+
+/// How often freed memory is given back, when there is any to give.
+const TRIM_EVERY: Duration = Duration::from_secs(2);
+
+/// glibc keeps what a burst of large charts has freed, per arena, and it adds up to most
+/// of the container with nothing held at all (ADR-0051). Two arenas, and a trim soon after
+/// something large has gone, keep that down. Elsewhere the allocator is left as it is.
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+pub(super) fn keep_freed_memory_down() {
+    // SAFETY: a plain setting, read when a thread first needs an arena.
+    unsafe { libc::mallopt(libc::M_ARENA_MAX, 2) };
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(TRIM_EVERY);
+        loop {
+            tick.tick().await;
+            if FREED.swap(false, Ordering::Relaxed) {
+                // SAFETY: returns free pages to the kernel, under the allocator's own locks.
+                let _ = tokio::task::spawn_blocking(|| unsafe { libc::malloc_trim(0) }).await;
+            }
+        }
+    });
+}
+
+#[cfg(not(all(target_os = "linux", target_env = "gnu")))]
+pub(super) fn keep_freed_memory_down() {}
+
 pub(super) struct BoundedListener {
     listener: TcpListener,
     slots: Arc<Semaphore>,
@@ -170,6 +246,8 @@ impl BoundedListener {
             SocketAddr::V4(_) => TcpSocket::new_v4()?,
             SocketAddr::V6(_) => TcpSocket::new_v6()?,
         };
+        // As `TcpListener::bind` does: on Windows it would let another process share the port.
+        #[cfg(not(windows))]
         socket.set_reuseaddr(true)?;
         // On the listener, so a connection has them from its first byte.
         socket.set_send_buffer_size(SEND_BUFFER)?;
@@ -205,6 +283,8 @@ impl Listener for BoundedListener {
                         idle: Box::pin(sleep(deadlines.idle)),
                         stalled: None,
                         closing: None,
+                        unsent_seen: None,
+                        _freed: MarksFreed,
                     };
                     return (stream, addr);
                 }
@@ -229,7 +309,33 @@ pub(super) struct BoundedStream {
     deadlines: Deadlines,
     idle: Pin<Box<Sleep>>,
     stalled: Option<Pin<Box<Sleep>>>,
-    closing: Option<Pin<Box<Sleep>>>,
+    closing: Option<Closing>,
+    /// `unsent` when last looked at.
+    unsent_seen: Option<usize>,
+    _freed: MarksFreed,
+}
+
+struct Closing {
+    tick: Pin<Box<Sleep>>,
+    moved_at: Instant,
+}
+
+/// What the peer has not acknowledged yet: how a connection tells a client reading slowly
+/// from one that has stopped, since what the kernel holds moves with no write from here.
+/// `None` where that cannot be told, and a connection is then judged by its writes alone.
+#[cfg(target_os = "linux")]
+fn unsent(io: &TcpStream) -> Option<usize> {
+    use std::os::fd::AsRawFd;
+    let mut queued: libc::c_int = 0;
+    // SAFETY: the descriptor is open for as long as `io` is borrowed, and SIOCOUTQ writes
+    // one int to the pointer it is given.
+    let result = unsafe { libc::ioctl(io.as_raw_fd(), libc::TIOCOUTQ as _, &mut queued) };
+    (result == 0).then_some(queued as usize)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn unsent(_: &TcpStream) -> Option<usize> {
+    None
 }
 
 impl BoundedStream {
@@ -242,8 +348,17 @@ impl BoundedStream {
 
     fn moved(&mut self) {
         self.stalled = None;
+        self.unsent_seen = unsent(&self.io);
         let at = Instant::now() + self.deadlines.idle;
         self.idle.as_mut().reset(at);
+    }
+
+    /// Whether the client has taken anything of what the kernel holds since last asked.
+    fn client_is_reading(&mut self) -> bool {
+        let now = unsent(&self.io);
+        let reading = matches!((self.unsent_seen, now), (Some(before), Some(now)) if now < before);
+        self.unsent_seen = now;
+        reading
     }
 
     /// What a write came to. A write that waits starts the clock, and one that moves stops it.
@@ -260,10 +375,16 @@ impl BoundedStream {
             Poll::Pending => {
                 let write = self.deadlines.write;
                 let stalled = self.stalled.get_or_insert_with(|| Box::pin(sleep(write)));
-                if stalled.as_mut().poll(cx).is_ready() {
+                if stalled.as_mut().poll(cx).is_pending() {
+                    return Poll::Pending;
+                }
+                if !self.client_is_reading() {
                     self.abandon();
                     return Poll::Ready(Err(io::ErrorKind::TimedOut.into()));
                 }
+                let stalled = self.stalled.as_mut().expect("set above");
+                stalled.as_mut().reset(Instant::now() + write);
+                let _ = stalled.as_mut().poll(cx);
                 Poll::Pending
             }
         }
@@ -286,10 +407,16 @@ impl AsyncRead for BoundedStream {
                 Poll::Ready(result)
             }
             Poll::Pending => {
-                if this.idle.as_mut().poll(cx).is_ready() {
+                if this.idle.as_mut().poll(cx).is_pending() {
+                    return Poll::Pending;
+                }
+                if !this.client_is_reading() {
                     this.abandon();
                     return Poll::Ready(Err(io::ErrorKind::TimedOut.into()));
                 }
+                let at = Instant::now() + this.deadlines.idle;
+                this.idle.as_mut().reset(at);
+                let _ = this.idle.as_mut().poll(cx);
                 Poll::Pending
             }
         }
@@ -325,14 +452,23 @@ impl AsyncWrite for BoundedStream {
         Pin::new(&mut self.get_mut().io).poll_flush(cx)
     }
 
-    /// Say we are done, then keep the place until the client has hung up too. Closing at
-    /// once with `Connection: close` would free the place with the answer still unread,
-    /// so a client could have any number of them by just asking again.
+    /// Say we are done, then keep the place until what we sent has reached the client.
+    /// Closing at once with `Connection: close` would free the place with the answer still
+    /// unread, so a client could have any number of them by just asking again. One still
+    /// reading gets all of it. One that has stopped is reset, which drops what it did not
+    /// take, as a plain close would leave the kernel sending it for minutes. Where what is
+    /// unread cannot be told, it gets `linger` and then a plain close, as cutting off a slow
+    /// reader is worse there than an orphan.
     fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         let this = self.get_mut();
+        let tick = this.deadlines.linger / 30;
         if this.closing.is_none() {
             ready!(Pin::new(&mut this.io).poll_shutdown(cx))?;
-            this.closing = Some(Box::pin(sleep(this.deadlines.linger)));
+            this.unsent_seen = unsent(&this.io);
+            this.closing = Some(Closing {
+                tick: Box::pin(sleep(tick)),
+                moved_at: Instant::now(),
+            });
         }
         let mut discard = [0u8; 1024];
         loop {
@@ -344,12 +480,29 @@ impl AsyncWrite for BoundedStream {
                 Poll::Pending => break,
             }
         }
-        let closing = this.closing.as_mut().expect("set above");
-        if closing.as_mut().poll(cx).is_ready() {
-            this.abandon();
-            return Poll::Ready(Ok(()));
+        loop {
+            let reading = this.client_is_reading();
+            // The FIN counts as one byte until it is acknowledged.
+            if this.unsent_seen.is_some_and(|left| left <= 1) {
+                return Poll::Ready(Ok(()));
+            }
+            let can_tell = this.unsent_seen.is_some();
+            let linger = this.deadlines.linger;
+            let closing = this.closing.as_mut().expect("set above");
+            if reading {
+                closing.moved_at = Instant::now();
+            }
+            if closing.tick.as_mut().poll(cx).is_pending() {
+                return Poll::Pending;
+            }
+            if closing.moved_at.elapsed() >= linger {
+                if can_tell {
+                    this.abandon();
+                }
+                return Poll::Ready(Ok(()));
+            }
+            closing.tick.as_mut().reset(Instant::now() + tick);
         }
-        Poll::Pending
     }
 }
 
@@ -412,6 +565,8 @@ mod tests {
         assert!(written < 512 * 1024, "{written} bytes went into the socket");
     }
 
+    /// Only Linux doubles what is asked for.
+    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn the_buffers_are_the_ones_asked_for() {
         let (stream, _peer, _l) = pair(SHORT).await;
@@ -494,32 +649,62 @@ mod tests {
         writer.await.unwrap();
     }
 
+    /// Reads a little at a time, then what it got and how that ended.
+    async fn read_slowly(
+        mut peer: TcpStream,
+        chunk: usize,
+        pause: Duration,
+    ) -> (usize, io::Result<()>) {
+        let mut buf = vec![0u8; chunk];
+        let mut total = 0;
+        loop {
+            match peer.read(&mut buf).await {
+                Ok(0) => return (total, Ok(())),
+                Ok(n) => total += n,
+                Err(e) => return (total, Err(e)),
+            }
+            sleep(pause).await;
+        }
+    }
+
     #[tokio::test]
-    async fn closing_keeps_the_place_until_the_client_hangs_up() {
+    async fn closing_with_nothing_unread_takes_no_time() {
         let (mut stream, mut peer, _l) = pair(Deadlines {
             linger: Duration::from_secs(30),
             ..SHORT
         })
         .await;
         stream.write_all(b"the answer").await.unwrap();
-        let shutdown = tokio::spawn(async move { stream.shutdown().await });
-        let mut got = Vec::new();
-        peer.read_to_end(&mut got).await.unwrap();
-        assert_eq!(got, b"the answer", "it all arrives");
-        sleep(Duration::from_millis(100)).await;
-        assert!(!shutdown.is_finished(), "still waiting for the client");
-        drop(peer);
-        tokio::time::timeout(Duration::from_secs(2), shutdown)
-            .await
-            .expect("the client hung up")
-            .unwrap()
-            .unwrap();
+        let mut got = [0u8; 10];
+        peer.read_exact(&mut got).await.unwrap();
+        // The client has it all and has not hung up: there is nothing to wait for.
+        soon(stream.shutdown()).await.unwrap();
+        assert_eq!(&got, b"the answer");
     }
 
+    /// The answer fits the kernel's buffer, so from here it is written the moment it is
+    /// handed over, and the client takes far longer to read it than `linger`.
+    #[cfg(target_os = "linux")]
     #[tokio::test]
-    async fn closing_gives_up_on_a_client_that_does_not_hang_up() {
+    async fn closing_does_not_cut_a_client_still_reading() {
+        let (mut stream, peer, _l) = pair(SHORT).await;
+        let answer = vec![1u8; 128 * 1024];
+        stream.write_all(&answer).await.unwrap();
+        let reader = tokio::spawn(read_slowly(peer, 4096, SHORT.linger / 10));
+        let started = std::time::Instant::now();
+        stream.shutdown().await.unwrap();
+        drop(stream);
+        let (total, ended) = reader.await.unwrap();
+        assert!(started.elapsed() > SHORT.linger, "{:?}", started.elapsed());
+        assert_eq!(total, answer.len());
+        ended.unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn closing_gives_up_on_a_client_that_has_stopped_reading() {
         let (mut stream, mut peer, _l) = pair(SHORT).await;
-        stream.write_all(&vec![0u8; 8 * 1024]).await.unwrap();
+        stream.write_all(&vec![0u8; 128 * 1024]).await.unwrap();
         let started = std::time::Instant::now();
         soon(stream.shutdown()).await.unwrap();
         assert!(started.elapsed() >= SHORT.linger, "{:?}", started.elapsed());
@@ -530,6 +715,38 @@ mod tests {
             soon(peer.read_to_end(&mut sink)).await.unwrap_err().kind(),
             io::ErrorKind::ConnectionReset
         );
+    }
+
+    /// Slower than the kernel asks for more: what moves is what it holds.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_write_waiting_on_a_slow_client_is_not_a_stalled_one() {
+        let (mut stream, peer, _l) = pair(SHORT).await;
+        let reader = tokio::spawn(read_slowly(peer, 2048, SHORT.write / 10));
+        let answer = vec![1u8; 400 * 1024];
+        stream.write_all(&answer).await.unwrap();
+        stream.shutdown().await.unwrap();
+        drop(stream);
+        let (total, ended) = reader.await.unwrap();
+        assert_eq!(total, answer.len());
+        ended.unwrap();
+    }
+
+    /// Nothing either way from here, while the client works through what it was sent.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_client_reading_what_it_was_sent_is_not_silent() {
+        let (mut stream, peer, _l) = pair(SHORT).await;
+        let answer = vec![1u8; 128 * 1024];
+        stream.write_all(&answer).await.unwrap();
+        let reader = tokio::spawn(read_slowly(peer, 2048, SHORT.idle / 10));
+        let mut buf = [0u8; 16];
+        let until = Instant::now() + SHORT.idle * 3;
+        tokio::select! {
+            read = stream.read(&mut buf) => panic!("the connection ended: {read:?}"),
+            _ = tokio::time::sleep_until(until) => {}
+        }
+        reader.abort();
     }
 
     #[tokio::test]
@@ -553,39 +770,76 @@ mod tests {
             .expect("and comes in when one closes");
     }
 
+    fn chart_cost(args: serde_json::Value) -> u32 {
+        call_cost(
+            serde_json::json!({
+                "method": "tools/call",
+                "params": { "name": "generate_chart", "arguments": args },
+            })
+            .to_string()
+            .as_bytes(),
+        )
+    }
+
     #[test]
     fn a_call_costs_what_it_asks_for() {
-        let chart = |args: serde_json::Value| {
-            call_cost(
-                serde_json::json!({
-                    "method": "tools/call",
-                    "params": { "name": "generate_chart", "arguments": args },
-                })
-                .to_string()
-                .as_bytes(),
-            )
-        };
-        let (small, large) = (
-            chart(serde_json::json!({ "indicators": ["rsi"] })),
-            chart(
-                serde_json::json!({ "bars": 5000, "indicators": ["a", "b", "c", "d", "e", "f"] }),
+        // What the app sends: `web/src/queries.ts`, `ChartPane.tsx` and `mcp.ts`.
+        let usual = serde_json::json!({
+            "ticker": "BTCUSDT", "timeframe": "1h", "format": "series", "bars": 500,
+            "warmup": 300, "chart_style": "candles", "indicators": ["rsi", "macd", "ema"],
+        });
+        assert_eq!(chart_cost(usual), 2_000, "the app's usual chart");
+        let tail =
+            serde_json::json!({ "bars": 60, "chart_style": "candles", "indicators": ["rsi"] });
+        assert_eq!(chart_cost(tail), 1_000, "and its tail poll");
+
+        for style in ["candles", "heikin_ashi"] {
+            let chart = serde_json::json!({ "bars": 5000, "chart_style": style, "indicators": ["a", "b", "c"] });
+            assert_eq!(chart_cost(chart), 20_000, "{style} is built bar for bar");
+        }
+        for style in ["renko", "kagi", "point_figure", "line_break", "range"] {
+            let chart =
+                serde_json::json!({ "bars": 500, "chart_style": style, "indicators": ["a"] });
+            assert_eq!(chart_cost(chart), 21_000, "{style} reads the source window");
+        }
+        assert_eq!(
+            chart_cost(serde_json::json!({})),
+            1_000,
+            "200 bars, 3 by default"
+        );
+        assert_eq!(chart_cost(serde_json::json!({ "bars": 1000 })), 4_000);
+        assert_eq!(
+            chart_cost(
+                serde_json::json!({ "bars": 5000, "indicators": ["a", "b", "c", "d", "e", "f"] })
             ),
-        );
-        assert_eq!(small, 1_000, "the app's usual chart");
-        assert_eq!(large, 35_000);
-        assert_eq!(
-            chart(serde_json::json!({ "bars": 99_999_999, "indicators": vec!["a"; 12] })),
-            65_000,
-            "more than the budget waits for all of it"
+            35_000
         );
         assert_eq!(
-            chart(serde_json::json!({ "bars": 10 , "chart_style": "renko" })),
-            20_000
+            chart_cost(
+                serde_json::json!({ "bars": 5000, "panels": ["a", "b", "c", "d", "e", "f"] })
+            ),
+            35_000,
+            "`panels` is another name for them"
         );
-        assert_eq!(call_cost(b"junk"), 1_000);
+        assert_eq!(
+            chart_cost(serde_json::json!({ "bars": 99_999_999, "indicators": vec!["a"; 50] })),
+            255_000,
+            "bars stop at the tool's own limit"
+        );
+        assert_eq!(call_cost(b"junk"), 0, "answered without running anything");
+        assert_eq!(call_cost(br#"{"method":"tools/list"}"#), 0);
         assert_eq!(
             call_cost(br#"{"method":"tools/call","params":{"name":"get_x"}}"#),
             1_000
+        );
+    }
+
+    #[tokio::test]
+    async fn a_call_larger_than_the_budget_is_told_so_at_once() {
+        let refused = soon(call_slot(CALL_BUDGET + 1)).await;
+        assert!(
+            matches!(refused, Err(NoRoom::TooLarge { .. })),
+            "it would never fit"
         );
     }
 
@@ -600,12 +854,17 @@ mod tests {
             .unwrap();
         assert!(calls.clone().try_acquire_many_owned(1_000).is_err());
         drop(large);
-        let small: Vec<_> = (0..64)
-            .map(|_| calls.clone().try_acquire_many_owned(1_000).unwrap())
+        // A grid of four, at the most indicators a usual chart has, and one more.
+        let grid = chart_cost(serde_json::json!({
+            "bars": 500, "chart_style": "candles", "indicators": vec!["a"; 10],
+        }));
+        assert_eq!(grid, 5_500);
+        let charts: Vec<_> = (0..5)
+            .map(|_| calls.clone().try_acquire_many_owned(grid).unwrap())
             .collect();
         assert_eq!(
-            small.len(),
-            64,
+            charts.len(),
+            5,
             "the app's charts do not wait on each other"
         );
     }
