@@ -56,8 +56,7 @@ Status legend:
 | Renko, Kagi, Point & Figure, Line Break, Range | ✅ | ◐ | Built on the server from the chart's timeframe, on intraday and daily data, so indicators run on them. ATR, fixed and percentage boxes, reversal and line count, kept in layouts and links. On closes only, with no separate source interval, Renko wicks or projection colors. Bar replay and compare are refused on them. [ADR-0047](/chartgen/decisions/0047-price-based-charts/) |
 | HLC area | ✅ | ✅ | Drawn in the browser. [ADR-0047](/chartgen/decisions/0047-price-based-charts/) |
 | Baseline, columns, high-low, step line, line with markers | ✅ | ◐ | Drawn in the browser from the bars. Baseline's base level is fixed at TradingView's default (50% of the visible range) and not configurable. No per-type style settings (TradingView's Baseline, Columns and High-low style tabs); the types take the line and up/down body colors, and the body/border toggles do not apply to Columns or Baseline. [Toolbar](/chartgen/guides/web/#toolbar), [ADR-0030](/chartgen/decisions/0030-custom-chart-types/) |
-| Renko, Kagi, Line break, Point & figure | ✅ | ❌ | Not offered. |
-| Range bars and other non-time bars | ✅ | ❌ | Not offered. |
+| Tick bars | ✅ | ❌ | Not offered. |
 
 ## Indicators
 

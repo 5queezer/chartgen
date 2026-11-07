@@ -125,8 +125,10 @@ price line all read this close.
 A poll asks for 64 bars (`PRICE_TAIL_BARS`), because one source bar can confirm several. A
 push sends 64 first, then the bars since the last tail plus one of overlap. A tail past our
 newest bar leaves a gap and reloads, without a time-based catch-up: time says nothing
-about how many bars a gap spans. A pushed group resolves its box once from its seed, unless
-the request brings one.
+about how many bars a gap spans. `subscribe_chart` refuses an ATR or percentage box without
+the size a load echoed: one resolved there could differ from the chart it serves, and a group
+outlives its first subscriber's load. Past 64 new bars, or on joining a running group, a tail
+can start past the client's newest bar, which then reloads.
 
 ### A new build
 
@@ -157,6 +159,7 @@ on a candle chart.
 | Paging | Works. A page reads a window of source bars before `end_time` and returns bars before it. Its build starts elsewhere, so the join can differ slightly from an unbroken build. A reload shows the same join. |
 | Share links | `type=renko`, plus `tp=box:fixed;size:50` with what differs from the defaults. A price-based link without `tp` means the defaults. An older app ignores both. |
 | Layouts | `chartParams` beside `chartType`, left out when all default, so older layouts load unchanged and stay clean. Per chart of a grid. |
+| Refused boxes | A saved or linked fixed or percentage box that is refused goes to ATR, with a message. Where ATR cannot make a box, as on a market with no movement, the chart goes to candles, with a message. So a fixed box taken to a much dearer symbol is lost, and a type picked on a flat market does not stick. |
 | Price alerts | Work: they watch the last price, which the newest bar always closes on. |
 | Indicator and sloped-line alerts | Work, but tied to the type as well as the interval (`1h renko`), since their values and bar indices mean something else on these bars. An alert made on candles waits for a candle chart, and says so. |
 | Server alerts | Run on the interval's candles (ADR-0042), never on bricks. |

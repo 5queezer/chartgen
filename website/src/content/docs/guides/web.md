@@ -68,7 +68,7 @@ stays visible.
   **Custom interval...**, which opens the same popup as the keyboard entry (see
   [Keyboard shortcuts](#keyboard-shortcuts)). While a custom interval is
   active, the dropdown's button shows it.
-- **Chart type** — Candles, Hollow candles (only up candles hollow), Bars (OHLC), Line, Line with markers, Step line, Area, Baseline, Columns, High-low, HLC area, Heikin Ashi, Renko, Line break, Kagi, Point & figure, Range. The last five are [price-based](#price-based-charts). Heikin Ashi is computed on the server (the web app sends `chart_style: "heikin_ashi"` with every load, tail poll and history page), so the legend shows Heikin Ashi OHLC values and indicators are calculated on them, as on TradingView. Switching to or from it reloads the chart. The other types are drawn in the browser from the same bars, so switching between them needs no reload, and the legend keeps showing the bar's OHLC:
+- **Chart type** — Candles, Hollow candles (only up candles hollow), Bars (OHLC), Line, Line with markers, Step line, Area, Baseline, Columns, High-low, HLC area, Heikin Ashi, Renko, Line break, Kagi, Point & figure, Range. The last five are [price-based](#price-based-charts). Heikin Ashi is computed on the server (the web app sends `chart_style: "heikin_ashi"` with every load, tail poll and history page), so the legend shows Heikin Ashi OHLC values and indicators are calculated on them, as on TradingView. Switching to or from it reloads the chart, and so does switching to or from a price-based type, which is built on the server too, with indicators calculated on its bars. The remaining types are drawn in the browser from the same bars, so switching between them needs no reload, and the legend keeps showing the bar's OHLC:
   - **Line with markers** — the close line with a dot on every bar.
   - **Step line** — the closes joined by horizontal-then-vertical steps.
   - **Baseline** — the close line and fill, in the up color above a base
@@ -417,8 +417,10 @@ tape, with less history. [ADR-0047](/chartgen/decisions/0047-price-based-charts/
 An ATR or percentage box is worked out when the chart loads, rounded to two significant
 digits, and kept until the next load. The legend shows it, as `Renko 3.3`, except on a phone,
 whose legend is shorter. A box too small for the prices, under a millionth of the last price or
-making over 20,000 bars, is refused: the chart goes to ATR and a message says so. That includes
-a fixed box you bring to a much dearer symbol.
+making over 20,000 bars, is refused: a fixed or percentage box goes to ATR, and a message says
+so. That includes a fixed box you bring to a much dearer symbol. ATR can fail too, on a market
+with no price movement: the chart then goes to candles, again with a message, and you can pick
+the type again once the market moves.
 
 **The last bar is open.** Only a closed source bar confirms a bar, so a spike that fades makes
 none. The open bar runs from the last confirmed level to the last price and keeps its place

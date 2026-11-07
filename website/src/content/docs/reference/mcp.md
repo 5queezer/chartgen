@@ -240,8 +240,9 @@ source bar the order of moves is unknown.
 
 Unknown keys are errors. `atr` and `percent` round to two significant digits.
 `format=series` and `summary` echo `chart_params` with the `box_size` used. **Send that
-`box_size` back on later polls and pages**, or each call may resolve another box and the
-bars will not line up.
+`box_size` back on later polls, pages and subscriptions**, or each call may resolve another
+box and the bars will not line up. `subscribe_chart` refuses an `atr` or `percent` box without
+one, so load first.
 
 - **Times** are when a bar opened: the first source bar after the last confirmed one. Bars
   from one source bar take the next free second, so times always increase and are not evenly
@@ -257,7 +258,10 @@ bars will not line up.
   from a start on a fixed grid of time. `warmup` does nothing here: every bar of the window
   warms the indicators. A window may hold fewer bars than `bars`, with `has_more: true`.
 - **Tails:** ask for more than 2 bars, as one source bar can confirm several. `subscribe_chart`
-  pushes up to 64 first, then the bars since its last push plus one of overlap.
+  pushes 64 bars first, then the bars since its last push plus one of overlap, never more than
+  64. More new bars than that, or joining a subscription already running, can give a tail that
+  starts past your newest bar. Bars are then missing: call `generate_chart` again rather than
+  merging it.
 - **Refused:** a box under a millionth of the last price, one that would make over 20,000 bars,
   and any of these styles without a ticker on the demo series.
 - Indicators that project past the last bar return no `future`. The PNG draws these bars as
