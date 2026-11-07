@@ -922,6 +922,54 @@ fn small_window_client(port: u16) -> std::net::TcpStream {
     stream
 }
 
+/// A server on the sample source: these tests need charts of the size they ask for, with
+/// or without a network, and never the real provider.
+fn spawn_sample_server() -> Server {
+    let port = free_port();
+    let db = std::env::temp_dir().join(format!("chartgen-e2e-{}-{port}.db", std::process::id()));
+    let mut cmd = server_command(port, None, &db, false);
+    cmd.env("CHARTGEN_DATA_SOURCE", "sample");
+    let mut server = start_server(cmd, port);
+    server.temp_db = Some(db);
+    server
+}
+
+/// The bars of a chart answer. An error answer has none, so it cannot pass for a chart.
+fn bars_in(answer: &str) -> usize {
+    let call: serde_json::Value = serde_json::from_str(answer)
+        .unwrap_or_else(|e| panic!("{e}: {}", &answer[..200.min(answer.len())]));
+    let text = call["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap_or_else(|| panic!("no chart: {}", &answer[..200.min(answer.len())]));
+    let series: serde_json::Value = serde_json::from_str(text).unwrap();
+    series["bars"].as_array().map_or(0, Vec::len)
+}
+
+/// The size of the answer an unread connection is holding, reading only its head: a real
+/// chart and not a small error, or the test would hold nothing.
+fn unread_answer_size(s: &mut std::net::TcpStream) -> usize {
+    use std::io::Read;
+    s.set_read_timeout(Some(std::time::Duration::from_secs(10)))
+        .unwrap();
+    let mut head = Vec::new();
+    let mut byte = [0u8; 1];
+    while !head.ends_with(b"\r\n\r\n") {
+        s.read_exact(&mut byte).unwrap();
+        head.push(byte[0]);
+    }
+    let head = String::from_utf8_lossy(&head).to_ascii_lowercase();
+    assert!(head.starts_with("http/1.1 200"), "{head}");
+    head.lines()
+        .find_map(|line| line.strip_prefix("content-length: "))
+        .unwrap_or_else(|| panic!("no length: {head}"))
+        .trim()
+        .parse()
+        .unwrap()
+}
+
+/// More than the socket's buffer and hyper's queue can take, so it really stays held.
+const HELD: usize = 1024 * 1024;
+
 /// A chart call as text.
 fn chart_call(bars: u64, indicators: &[&str], extra: serde_json::Value) -> String {
     let mut arguments = serde_json::json!({
@@ -960,56 +1008,94 @@ const FIVE: [&str; 5] = ["rsi", "macd", "ema", "bbands", "vwap"];
 /// One answer nobody reads holds its share, not the server: what is no tool call goes on.
 #[test]
 fn test_an_unread_answer_does_not_stop_the_others() {
-    let srv = spawn_server(None);
+    let srv = spawn_sample_server();
     let client = register_external(srv.port);
     let token = sign_in(srv.port, &client);
     let auth = format!("Authorization: Bearer {token}");
     let headers = [JSON_POST[0], JSON_POST[1], auth.as_str()];
-    let _unread = post_unread(
+    let mut unread = post_unread(
         srv.port,
         &auth,
         &chart_call(5000, &FIVE, serde_json::json!({})),
     );
-    std::thread::sleep(std::time::Duration::from_millis(1000));
+    assert!(unread_answer_size(&mut unread) > HELD);
 
     let started = std::time::Instant::now();
     let list = r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#;
-    assert_eq!(http(srv.port, "POST", "/mcp", &headers, list).0, 200);
+    let (st, _, body) = http(srv.port, "POST", "/mcp", &headers, list);
+    assert_eq!(st, 200);
+    assert!(body.contains("generate_chart"), "{body}");
     assert!(started.elapsed().as_secs() < 5, "{:?}", started.elapsed());
 }
 
 /// The app's real calls, `chart_style` and all, run side by side: a grid does not take
-/// turns. Eight at once, none of them read, each still answered.
+/// turns, with part of the budget held by an answer nobody reads. Eight at once, each a
+/// chart of the 500 bars it asked for.
 #[test]
 fn test_the_apps_charts_run_in_parallel() {
-    use std::io::Read;
-    let srv = spawn_server(None);
+    let srv = spawn_sample_server();
     let client = register_external(srv.port);
     let token = sign_in(srv.port, &client);
     let auth = format!("Authorization: Bearer {token}");
+    let mut unread = post_unread(
+        srv.port,
+        &auth,
+        &chart_call(5000, &["rsi"], serde_json::json!({})),
+    );
+    assert!(unread_answer_size(&mut unread) > HELD);
+
     let call = chart_call(
         500,
         &["rsi", "macd", "ema"],
         serde_json::json!({ "chart_style": "candles", "warmup": 300 }),
     );
-    let unread: Vec<_> = (0..8)
+    let started = std::time::Instant::now();
+    std::thread::scope(|scope| {
+        let charts: Vec<_> = (0..8)
+            .map(|_| {
+                scope.spawn(|| {
+                    let headers = [JSON_POST[0], JSON_POST[1], auth.as_str()];
+                    http(srv.port, "POST", "/mcp", &headers, &call)
+                })
+            })
+            .collect();
+        for chart in charts {
+            let (st, _, body) = chart.join().unwrap();
+            assert_eq!(st, 200, "{}", &body[..200.min(body.len())]);
+            assert_eq!(bars_in(&body), 500);
+        }
+    });
+    assert!(started.elapsed().as_secs() < 10, "{:?}", started.elapsed());
+}
+
+/// What makes that test mean something: charts answer in milliseconds here, so taking turns
+/// would look the same. These hold their share until read, and none is read. Each still gets
+/// its answer, only because a chart with `candles` is priced at what it shows: 10,500 of the
+/// 32,000 each. Priced at the source window, the second would wait for the first to be read.
+#[test]
+fn test_the_apps_charts_do_not_take_turns() {
+    let srv = spawn_sample_server();
+    let client = register_external(srv.port);
+    let token = sign_in(srv.port, &client);
+    let auth = format!("Authorization: Bearer {token}");
+    let call = chart_call(
+        500,
+        &["macd", "bbands", "cipher_b", "ema", "vwap"].repeat(4),
+        serde_json::json!({ "chart_style": "candles" }),
+    );
+    let mut unread: Vec<_> = (0..3)
         .map(|_| post_unread(srv.port, &auth, &call))
         .collect();
-    std::thread::sleep(std::time::Duration::from_millis(1500));
-    for mut s in unread {
-        s.set_read_timeout(Some(std::time::Duration::from_millis(500)))
-            .unwrap();
-        let mut head = [0u8; 15];
-        s.read_exact(&mut head)
-            .expect("answered, whoever else has read theirs");
-        assert!(head.starts_with(b"HTTP/1.1 200"));
+    for s in &mut unread {
+        let size = unread_answer_size(s);
+        assert!(size > HELD, "{size} bytes would not stay held");
     }
 }
 
 /// A call larger than the budget is told so, whichever name its indicators go by.
 #[test]
 fn test_a_call_too_large_is_refused_with_the_reason() {
-    let srv = spawn_server(None);
+    let srv = spawn_sample_server();
     let client = register_external(srv.port);
     let token = sign_in(srv.port, &client);
     let auth = format!("Authorization: Bearer {token}");
@@ -1026,10 +1112,10 @@ fn test_a_call_too_large_is_refused_with_the_reason() {
     }
     let fits = chart_call(5000, &FIVE, serde_json::json!({}));
     let (_, _, body) = http(srv.port, "POST", "/mcp", &headers, &fits);
-    assert!(
-        !body.contains("too much memory"),
-        "{}",
-        &body[..200.min(body.len())]
+    assert_eq!(
+        bars_in(&body),
+        5000,
+        "the largest that fits is a real chart"
     );
 }
 
@@ -1037,13 +1123,13 @@ fn test_a_call_too_large_is_refused_with_the_reason() {
 /// waits, and then is told to come back. No account, no budget, and no wait.
 #[test]
 fn test_a_full_budget_makes_calls_wait_and_come_back() {
-    let srv = spawn_server(None);
+    let srv = spawn_sample_server();
     let client = register_external(srv.port);
     let token = sign_in(srv.port, &client);
     let auth = format!("Authorization: Bearer {token}");
     let large = chart_call(5000, &FIVE, serde_json::json!({}));
-    let unread = post_unread(srv.port, &auth, &large);
-    std::thread::sleep(std::time::Duration::from_millis(1500));
+    let mut unread = post_unread(srv.port, &auth, &large);
+    assert!(unread_answer_size(&mut unread) > HELD);
 
     // Nothing for those without a token: at once, however full it is.
     let started = std::time::Instant::now();
