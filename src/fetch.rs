@@ -4015,6 +4015,81 @@ mod tests {
     }
 
     #[test]
+    fn seconds_klines_size_their_refresh_and_close_by_the_grammar() {
+        // Both read the kline's name through `Interval::parse`, which falls back quietly
+        // if it does not know the unit: 16 klines, and a window that never closes.
+        assert_eq!(kline_refresh("1s"), refresh_for(1));
+        assert_eq!(kline_refresh("1s"), 130);
+        assert_eq!(kline_end_ms("1s", 1_700_000_000_500), 1_700_000_001_000);
+        assert_eq!(kline_end_ms("1s", 1_700_000_000_000), 1_700_000_001_000);
+    }
+
+    /// What a price-based chart reads costs what ADR-0047 says, through the shared window
+    /// and pages of ADR-0049. Each row: the chart's interval and a cold read's requests.
+    #[test]
+    fn a_price_based_read_goes_through_the_shared_window_and_pages() {
+        use chartgen::price_bars::{build, source_bars, BuildOpts, Kind, Params};
+        let params = Params::parse(
+            Kind::Renko,
+            Some(&serde_json::json!({ "box": "fixed", "box_size": 50.0 })),
+        )
+        .unwrap();
+        for (tf, cold) in [("1h", 5), ("1d", 5), ("1s", 5), ("5s", 20), ("7m", 20)] {
+            let fake = FakeBinance::new(1_000_000, 1);
+            let client = client_of(&fake);
+            let iv = Interval::parse(tf).unwrap();
+            let limit = source_bars(&iv, MAX_BASE_BARS);
+            let read = || fetch_binance_via(&client, "BTCUSDT", tf, limit, None).unwrap();
+
+            let first = read();
+            assert_eq!(fake.requests(), cold, "{tf}: a cold read");
+            let opts = BuildOpts {
+                max_base: MAX_BASE_BARS,
+                end_time_ms: None,
+                now_ms: fake.now_s.load(Ordering::SeqCst) * 1000,
+                reach_secs: None,
+            };
+            assert!(!build(&first.data.bars, &iv, &params, &opts)
+                .unwrap()
+                .bars
+                .is_empty());
+
+            // Another poll in the same moment sends nothing, and neither does another
+            // chart on the same kline.
+            read();
+            fetch_binance_via(&client, "BTCUSDT", tf, 10, None).unwrap();
+            assert_eq!(fake.requests(), cold, "{tf}: repeats");
+
+            // A later poll costs one request, however long the gap inside the window's
+            // lifetime: the refresh must overlap it, or it would read the window again.
+            for gap in [2, 100] {
+                let before = fake.requests();
+                fake.advance(gap);
+                let polled = read();
+                assert_eq!(fake.requests(), before + 1, "{tf}: a poll after {gap} s");
+                let t: Vec<i64> = polled
+                    .data
+                    .bars
+                    .iter()
+                    .map(|b| bar_ts(b).unwrap())
+                    .collect();
+                assert!(
+                    t.windows(2).all(|w| w[1] == w[0] + iv.secs()),
+                    "{tf}: gapless"
+                );
+            }
+
+            // A history page is a walk of its own, kept once its klines have closed.
+            let end = bar_ts(&first.data.bars[0]).unwrap() * 1000;
+            let before = fake.requests();
+            fetch_binance_via(&client, "BTCUSDT", tf, limit, Some(end)).unwrap();
+            assert_eq!(fake.requests(), before + cold, "{tf}: a page");
+            fetch_binance_via(&client, "BTCUSDT", tf, limit, Some(end)).unwrap();
+            assert_eq!(fake.requests(), before + cold, "{tf}: the same page again");
+        }
+    }
+
+    #[test]
     fn a_refresh_overlaps_after_the_whole_lifetime_on_any_kline() {
         for secs in [1, 5, 60, 3_600, 86_400] {
             let reach = refresh_for(secs) as i64 * secs;

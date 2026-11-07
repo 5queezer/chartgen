@@ -169,14 +169,24 @@ on a candle chart.
 `source_bars` is what a build reads: 5 chunks of 1000 source bars, fewer when an interval
 is resampled, so a read stays within `MAX_BASE_BARS` (20,000 native bars, ADR-0038).
 
-- **Binance, first load or a history page:** 5 requests for a native interval, at worst
-  20 for a resampled one. All through the gate and `Walks`, like any read. A first load
-  shares its window with other readers of that symbol and kline, and a history page always
-  walks unless an identical one is in flight
-  ([ADR-0050](/chartgen/decisions/0050-one-kline-read-per-symbol/)).
-- **Binance, polls and push seeds:** about one request after the first while the window
-  stays held, shared by every chart on that symbol and kline (ADR-0050). A window that has
-  gone, or a gap longer than a refresh covers, reads it again at the first-load cost.
+- **Binance, first load:** at most 5 requests for a native interval, 20 for a resampled
+  one, through the gate and `Walks`. It goes through the window of that symbol and kline
+  ([ADR-0049](/chartgen/decisions/0049-one-kline-read-per-symbol/)), so only what the window
+  lacks is read, and a chart on a kline already held costs less.
+- **Binance, a history page:** 5 or 20 requests again, as a page does not read the window.
+  Identical pages share one read, and one is kept for 60 s once its newest kline closed at
+  least 5 s ago, but the page cache holds 64,000 klines: 12 pages of 5000, or 3 of 20,000.
+- **Binance, polls:** nothing within 1 s of the read behind the window, and otherwise one
+  request for all the charts on that symbol and kline, however long the gap, so at most
+  about one a second per window. A refresh overlaps the window's whole 120 s lifetime: 16
+  klines at least, 130 on `1s`. On `1s` every second is a close, so a poll waits for its
+  round trip instead of being served during a refresh.
+- **Binance, push seeds:** about one request when the window is held, since a seed takes only
+  a read sent after it asked, and the first-load cost when it is not.
+- **Evicted or idle windows:** a window unused for 120 s goes at the next read, which then costs
+  a first load. The cache holds 256,000 klines, so about 51 active windows of 5000, or 12 of
+  20,000. More than that evict each other, and each poll then walks again, 5 or 20 requests,
+  bounded only by `Walks` and the gate.
 - **Yahoo:** one request per call, not gated and not cached. It is far more than a candle
   poll asks for, every 15 s per chart, all from one server IP: 60 days against 10 at `5m`,
   730 against 75 at `1h`, about 10,000 against 600 at `1d`. This stays open: it would take
@@ -184,8 +194,10 @@ is resampled, so a read stays within `MAX_BASE_BARS` (20,000 native bars, ADR-00
 - **Memory:** at most 20,000 bars per build (`MAX_PRICE_BARS`). A box that would make
   more is refused with a message, before anything is allocated for it, and so is any box
   under a millionth of the last price. A push group holds at most 20,000 native bars, about
-  1.9 MB. That is an estimate: 64 resampled groups come to about 123 MB, tight against
-  the container's 256 MiB, where typical charts are far below it. A poll recomputes every
+  1.9 MB, on top of the cache's 31 MB of live klines. Those are estimates, not a measurement
+  of this type: 64 resampled groups come to about 123 MB, and ADR-0049 measured about 2.3
+  times its live klines above the start, so the worst case nears the container's 256 MiB
+  from an idle 40 MiB. Typical charts are far below it. A poll recomputes every
   indicator over all the built bars, where a candle chart's covers about 300, so a chart with
   thousands of bricks costs more CPU each poll. Pushes go at half the rate.
 
@@ -229,5 +241,6 @@ Everything keyed by time and bar order works without knowing about these types.
 
 - [ADR-0009 — Live tail polling and history paging](/chartgen/decisions/0009-live-tail-polling-and-history-paging/)
 - [ADR-0021 — Real-time chart push](/chartgen/decisions/0021-realtime-chart-push/)
+- [ADR-0049 — One Binance kline read per symbol and interval](/chartgen/decisions/0049-one-kline-read-per-symbol/)
 - [ADR-0023 — Bar replay](/chartgen/decisions/0023-bar-replay/)
 - [ADR-0034 — Drawing and indicator alerts](/chartgen/decisions/0034-drawing-and-indicator-alerts/)
