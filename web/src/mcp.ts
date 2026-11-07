@@ -64,6 +64,7 @@ import {
 } from "./types/responses";
 import { isNotFound, scriptRejection } from "./lib/scripts";
 import { clearAccessToken, getAccessToken } from "./oauth";
+import { fetchComingBack } from "./lib/retryAfter";
 
 // Validate the MCP `CallToolResult` shape at the boundary (ADR-0004)
 // instead of casting the SDK's `unknown`-typed return value.
@@ -199,6 +200,7 @@ async function connectWithToken(
     requestInit: {
       headers: { Authorization: `Bearer ${token}` },
     },
+    fetch: fetchComingBack((input, init) => fetch(input, init)),
   });
 
   const client = new Client(

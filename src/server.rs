@@ -26,8 +26,9 @@ use chartgen::scripting;
 mod listener;
 mod signin;
 
-/// The most any request may send, unless its route says otherwise.
-const MAX_BODY_BYTES: usize = 512 * 1024;
+/// The most any request may send, unless its route says otherwise. A script is at most
+/// 64 KiB, or twice that escaped in JSON.
+const MAX_BODY_BYTES: usize = 256 * 1024;
 
 // --- OAuth 2.1 PKCE in-memory store ---
 
@@ -1083,8 +1084,40 @@ async fn mcp_handler(
     ext: axum::http::Extensions,
     body_bytes: axum::body::Bytes,
 ) -> Response {
-    let slot = listener::call_slot(listener::call_cost(&body_bytes)).await;
-    listener::held_until_written(mcp_call(state, uri, headers, ext, body_bytes).await, slot)
+    // No account, no budget: what comes next answers those at once, and they must not be
+    // able to keep anyone waiting.
+    let token_is_good = extract_bearer_token(&headers)
+        .is_some_and(|t| state.oauth.lock().unwrap().validate_token(t));
+    let cost = listener::call_cost(&body_bytes);
+    if !token_is_good || cost == 0 {
+        return mcp_call(state, uri, headers, ext, body_bytes).await;
+    }
+    match listener::call_slot(cost).await {
+        Ok(slot) => {
+            listener::held_until_written(mcp_call(state, uri, headers, ext, body_bytes).await, slot)
+        }
+        Err(listener::NoRoom::Busy { retry_after }) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            [(header::RETRY_AFTER, retry_after.to_string())],
+            "Too many tool calls are running",
+        )
+            .into_response(),
+        Err(listener::NoRoom::TooLarge { cost, budget }) => {
+            let id = serde_json::from_slice::<Value>(&body_bytes)
+                .ok()
+                .and_then(|call| call.get("id").cloned());
+            let message = format!(
+                "This chart would take too much memory at once: bars times (indicators + 1) comes \
+                 to {cost}, and the most is {budget}. Ask for fewer bars or fewer indicators."
+            );
+            let session = headers.get("Mcp-Session-Id").and_then(|v| v.to_str().ok());
+            streamable_http_json_response(
+                StatusCode::OK,
+                jsonrpc_error(id, -32602, &message),
+                session,
+            )
+        }
+    }
 }
 
 async fn mcp_call(
@@ -1411,16 +1444,6 @@ async fn sse_handler(State(state): State<SharedState>, uri: Uri, headers: Header
         return with_resource_metadata(resp, uri.path());
     }
 
-    // So that streams alone cannot take every connection (ADR-0051).
-    let Some(stream_slot) = listener::stream_slot() else {
-        return (
-            StatusCode::SERVICE_UNAVAILABLE,
-            [(header::RETRY_AFTER, "30")],
-            "Too many streams are open",
-        )
-            .into_response();
-    };
-
     // Echo the client-supplied Mcp-Session-Id if present, else mint one so
     // clients that expect the header on the SSE response still get a value.
     let client_session = headers
@@ -1428,6 +1451,15 @@ async fn sse_handler(State(state): State<SharedState>, uri: Uri, headers: Header
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_string());
     let chart_stream = stream_key(&token, client_session.as_deref());
+    // So that streams alone cannot take every connection (ADR-0051).
+    let Some(stream_slot) = listener::stream_slot(&chart_stream) else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            [(header::RETRY_AFTER, "30")],
+            "Too many streams are open",
+        )
+            .into_response();
+    };
     let session_id = client_session.unwrap_or_else(|| Uuid::new_v4().to_string());
 
     // Create notification channel. Bounded: a peer that stops reading is
@@ -1514,7 +1546,7 @@ struct CleanupStream {
     stream_key: String,
     chart_link: u64,
     cleaned_up: bool,
-    _stream_slot: tokio::sync::OwnedSemaphorePermit,
+    _stream_slot: Arc<tokio::sync::OwnedSemaphorePermit>,
 }
 
 impl futures_util::Stream for CleanupStream {
@@ -1722,6 +1754,7 @@ pub async fn run_server(port: u16, engine: Option<Arc<RwLock<TradingEngine>>>) {
         .layer(cors)
         .with_state(state);
 
+    listener::keep_freed_memory_down();
     let addr = std::net::SocketAddr::from(([0, 0, 0, 0], port));
     println!("MCP server listening on {}", addr);
     // `tap_io` does nothing here: axum gives the peer's address to tapped listeners and
