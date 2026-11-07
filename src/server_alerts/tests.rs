@@ -3081,3 +3081,104 @@ async fn an_endpoint_with_other_keys_evicts_nobody() {
     call(&a, "subscribe_push", own, "github:2").await.unwrap();
     assert_eq!(store.push_devices().unwrap().len(), 1);
 }
+
+// --- The per-device outcome belongs to one fire ---
+
+/// An `every` alert can fire again while an earlier push is out. That push's outcome says
+/// nothing about the new fire: the entry stays pending, or the tab would read "delivered"
+/// and never report the new one failing. Only the new fire's own delivery settles it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_late_outcome_does_not_answer_for_a_newer_fire() {
+    let (port, _) = receiver(OK).await;
+    let (store, _) = store_at("push-late-outcome");
+    let limits = Limits {
+        pushes_per_client_per_minute: 0,
+        ..Limits::default()
+    };
+    let a = push_alerts(store, port, Access::Open, vapid(), limits);
+    let phone = subscribe(&a, port, "phone", "me").await["device"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let id = create(&a, pushed("crossing", "every"), "me").await;
+    tick(&a, BASE, 99.0);
+    tick(&a, BASE, 101.0);
+    tick(&a, BASE, 99.0);
+    assert_eq!(a.lock().alerts[&id].fire_count, 2);
+    let (earlier, newer) = {
+        let mut st = a.lock();
+        let queue = st.queues.get_mut("me").unwrap();
+        assert_eq!(queue.len(), 2);
+        (queue.pop_front().unwrap(), queue.pop_front().unwrap())
+    };
+
+    a.clone().deliver(earlier).await;
+    let view = get(&a, "me", &id).await;
+    assert!(
+        view["last_push_devices"][&phone].is_null(),
+        "still pending for the new fire: {view}"
+    );
+    assert_eq!(
+        view["last_push_status"], 200,
+        "the last outcome still updates"
+    );
+
+    a.clone().deliver(newer).await;
+    let view = get(&a, "me", &id).await;
+    assert_eq!(view["last_push_devices"][&phone]["status"], 200, "{view}");
+}
+
+/// The same with a restart between them: which fire the map is about is stored with it.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_fire_a_map_is_about_survives_a_restart() {
+    let (port, _) = receiver(OK).await;
+    let (store, _) = store_at("push-late-restart");
+    let limits = Limits {
+        pushes_per_client_per_minute: 0,
+        ..Limits::default()
+    };
+    let a = push_alerts(store, port, Access::Open, vapid(), limits);
+    subscribe(&a, port, "phone", "me").await;
+    let id = create(&a, pushed("greater", "once"), "me").await;
+    tick(&a, BASE, 101.0);
+    let fire = a.lock().alerts[&id].device_pushes_fire.clone().unwrap();
+    let stored = store.server_alerts().unwrap();
+    assert!(stored[0].contains(&fire), "{}", stored[0]);
+}
+
+/// A fire with nothing to deliver is still a new fire: with the push turned back on later,
+/// the map must not answer with an older fire's outcome.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_fire_with_push_off_leaves_no_older_outcome_behind() {
+    let (port, _) = receiver(OK).await;
+    let (store, _) = store_at("push-off-fire");
+    let a = push_alerts(store, port, Access::Open, vapid(), Limits::default());
+    let phone = subscribe(&a, port, "phone", "me").await["device"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let id = create(&a, pushed("crossing", "every"), "me").await;
+    tick(&a, BASE, 99.0);
+    tick(&a, BASE, 101.0);
+    until("the outcome", || {
+        a.lock().alerts[&id]
+            .device_pushes
+            .get(&phone)
+            .is_some_and(Option::is_some)
+    })
+    .await;
+
+    call(
+        &a,
+        "update_server_alert",
+        json!({"alert_id": id, "push": false}),
+        "me",
+    )
+    .await
+    .unwrap();
+    tick(&a, BASE, 99.0);
+    assert_eq!(a.lock().alerts[&id].fire_count, 2);
+    let view = get(&a, "me", &id).await;
+    let map = view["last_push_devices"].as_object().unwrap();
+    assert!(map.is_empty(), "{view}");
+}

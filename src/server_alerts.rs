@@ -308,6 +308,10 @@ struct Record {
     /// browsers can fare differently (ADR-0044).
     #[serde(default)]
     device_pushes: HashMap<String, Option<Delivery>>,
+    /// The fire `device_pushes` is about. An earlier fire's push can finish after a later
+    /// fire, and its outcome says nothing about that one.
+    #[serde(default)]
+    device_pushes_fire: Option<String>,
 }
 
 impl Record {
@@ -780,6 +784,8 @@ impl ServerAlerts {
         bar_time: i64,
         at: i64,
     ) -> Vec<StoredEvent> {
+        alert.device_pushes.clear();
+        alert.device_pushes_fire = None;
         if alert.webhook.is_none() && !alert.push {
             return Vec::new();
         }
@@ -831,8 +837,8 @@ impl ServerAlerts {
             }
         }
         let mut push_refusal = None;
-        alert.device_pushes.clear();
         if alert.push {
+            alert.device_pushes_fire = Some(id.clone());
             let mut devices: Vec<&StoredDevice> = st
                 .devices
                 .values()
@@ -1155,9 +1161,15 @@ impl ServerAlerts {
             }
             if let Some(alert) = st.alerts.get_mut(&event.alert_id) {
                 if let Some(device) = &event.device {
-                    alert
-                        .device_pushes
-                        .insert(device.clone(), Some(outcome.clone()));
+                    let this_fire = alert
+                        .device_pushes_fire
+                        .as_ref()
+                        .is_some_and(|fire| event.id == format!("{fire}:{device}"));
+                    if this_fire {
+                        alert
+                            .device_pushes
+                            .insert(device.clone(), Some(outcome.clone()));
+                    }
                     alert.last_push = Some(outcome);
                 } else {
                     alert.last_delivery = Some(outcome);
@@ -1595,6 +1607,7 @@ impl ServerAlerts {
             push,
             last_push: None,
             device_pushes: HashMap::new(),
+            device_pushes_fire: None,
         };
         let mut st = self.lock();
         // The fetch and the lookup ran unlocked: another call may have filled up.
