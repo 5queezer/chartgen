@@ -748,3 +748,192 @@ test.describe("multi-chart grid", () => {
     expect(calls).toEqual([]);
   });
 });
+
+test.describe("right-click menus in a grid", () => {
+  test.use({ viewport: { width: 1600, height: 800 } });
+
+  const chartMenu = (page: Page) => page.getByRole("menu", { name: "Chart actions" });
+
+  test("a menu acts on the chart it was opened on", async ({ bootedApp: page }) => {
+    await chooseGrid(page, "2h");
+    await expectLoaded(page, 2);
+    await activate(page, 1);
+    await page.locator('.wl-row[data-symbol="ETHUSDT"]').click();
+    await expect.poll(async () => (await panes(page))[1]!.symbol).toBe("ETHUSDT");
+    await expectLoaded(page, 2);
+    await activate(page, 0);
+
+    // A right click on the other chart: it takes the action, and becomes the active one.
+    const box = (await paneCell(page, 1).boundingBox())!;
+    const spot = { x: box.x + box.width * 0.4, y: box.y + box.height * 0.3 };
+    await page.mouse.click(spot.x, spot.y, { button: "right" });
+    await expect(paneCell(page, 1)).toHaveAttribute("data-active", "");
+    await chartMenu(page).getByRole("menuitem", { name: /^Add horizontal line at/ }).click();
+    await expect.poll(async () => (await panes(page))[1]!.drawings).toBe(1);
+    expect((await panes(page))[0]!.drawings).toBe(0);
+    const stored = (sym: string) =>
+      page.evaluate((k) => localStorage.getItem(`chartgen.drawings.${k}`), sym);
+    expect(await stored("ETHUSDT")).toContain("horizontalStraightLine");
+    expect(await stored("BTCUSDT")).toBeNull();
+
+    // Opened with no press (the keyboard's way), so the first chart stays active: still the
+    // second one's store that changes.
+    await activate(page, 0);
+    await paneCell(page, 1)
+      .locator(".chart-container canvas")
+      .first()
+      .evaluate((el, p) => {
+        el.dispatchEvent(
+          new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: p.x, clientY: p.y }),
+        );
+      }, spot);
+    await chartMenu(page).locator('[role^="menuitem"]', { hasText: "Invert scale" }).click();
+    await expect.poll(async () => (await panes(page))[1]!.invert).toBe(true);
+    expect((await panes(page))[0]!.invert).toBe(false);
+    await expect(paneCell(page, 0)).toHaveAttribute("data-active", "");
+  });
+
+  test("what reads the active chart gets the menu's chart, opened with no press", async ({ bootedApp: page, context }) => {
+    await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+    await chooseGrid(page, "2h");
+    await expectLoaded(page, 2);
+    await activate(page, 1);
+    await page.locator('.wl-row[data-symbol="ETHUSDT"]').click();
+    await expect.poll(async () => (await panes(page))[1]!.symbol).toBe("ETHUSDT");
+    await expectLoaded(page, 2);
+    const box = (await paneCell(page, 1).boundingBox())!;
+    const openOnSecond = async () => {
+      await activate(page, 0);
+      await paneCell(page, 1)
+        .locator(".chart-container canvas")
+        .first()
+        .evaluate(
+          (el, p) => {
+            el.dispatchEvent(
+              new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: p.x, clientY: p.y }),
+            );
+          },
+          { x: box.x + box.width * 0.4, y: box.y + box.height * 0.3 },
+        );
+    };
+
+    await openOnSecond();
+    await chartMenu(page).getByRole("menuitem", { name: "Copy link to chart" }).click();
+    await expect
+      .poll(() => page.evaluate(() => navigator.clipboard.readText()))
+      .toContain("symbol=ETHUSDT");
+    await expect(paneCell(page, 1)).toHaveAttribute("data-active", "");
+
+    await openOnSecond();
+    await chartMenu(page).getByRole("menuitem", { name: /^Add alert at/ }).click();
+    await expect(page.getByRole("dialog")).toContainText("ETHUSDT");
+    await expect(paneCell(page, 1)).toHaveAttribute("data-active", "");
+    await page.keyboard.press("Escape");
+    await expect(page.getByRole("dialog")).toHaveCount(0);
+
+    await activate(page, 0);
+    await paneCell(page, 1)
+      .locator(".chart-container canvas")
+      .last()
+      .evaluate((el) => {
+        const r = el.getBoundingClientRect();
+        el.dispatchEvent(
+          new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: r.x + 100, clientY: r.y + r.height / 2 }),
+        );
+      });
+    await page.getByRole("menuitem", { name: /^Go to date/ }).click();
+    await expect(page.getByRole("dialog").getByLabel("Date")).toBeVisible();
+    await expect(paneCell(page, 1)).toHaveAttribute("data-active", "");
+    await page.keyboard.press("Escape");
+    await expect(page.getByRole("dialog")).toHaveCount(0);
+
+    // An indicator of the second chart: its dialog reads that chart.
+    const rsi = paneCell(page, 1).getByTestId("indicator-legend-rsi");
+    const legend = (await rsi.boundingBox())!;
+    await activate(page, 0);
+    await paneCell(page, 1)
+      .locator("[data-indicator='rsi'] canvas")
+      .first()
+      .evaluate(
+        (el, p) => {
+          el.dispatchEvent(
+            new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: p.x, clientY: p.y }),
+          );
+        },
+        { x: legend.x + 300, y: legend.y + 40 },
+      );
+    await page.getByRole("menu", { name: "Pane actions" }).getByRole("menuitem", { name: /^Settings for RSI/ }).click();
+    await expect(page.getByRole("dialog")).toContainText("RSI");
+    await expect(paneCell(page, 1)).toHaveAttribute("data-active", "");
+  });
+
+  test("a closing click activates no chart", async ({ bootedApp: page }) => {
+    await chooseGrid(page, "2h");
+    await expectLoaded(page, 2);
+    await activate(page, 0);
+    const first = (await paneCell(page, 0).boundingBox())!;
+    const second = (await paneCell(page, 1).boundingBox())!;
+    await page.mouse.click(first.x + first.width * 0.2, first.y + first.height * 0.3, { button: "right" });
+    await expect(chartMenu(page)).toBeVisible();
+    await page.mouse.click(second.x + second.width * 0.6, second.y + second.height * 0.3);
+    await expect(chartMenu(page)).toHaveCount(0);
+    await expect(paneCell(page, 0)).toHaveAttribute("data-active", "");
+  });
+
+  test("Remove on a drawing of the inactive chart removes that one", async ({ bootedApp: page }) => {
+    await chooseGrid(page, "2h");
+    await expectLoaded(page, 2);
+    await activate(page, 1);
+    await page.locator('.wl-row[data-symbol="ETHUSDT"]').click();
+    await expect.poll(async () => (await panes(page))[1]!.symbol).toBe("ETHUSDT");
+    await expectLoaded(page, 2);
+    const first = (await paneCell(page, 0).boundingBox())!;
+    const second = (await paneCell(page, 1).boundingBox())!;
+    const spot = (b: typeof first) => ({ x: b.x + b.width * 0.4, y: b.y + b.height * 0.3 });
+    const addLine = async (b: typeof first) => {
+      await page.mouse.click(spot(b).x, spot(b).y, { button: "right" });
+      await chartMenu(page).getByRole("menuitem", { name: /^Add horizontal line at/ }).click();
+    };
+    await addLine(first);
+    await addLine(second);
+    await expect
+      .poll(async () => (await panes(page)).map((p) => p.drawings))
+      .toEqual([1, 1]);
+
+    await activate(page, 0);
+    await page.mouse.click(spot(second).x + 30, spot(second).y, { button: "right" });
+    const menu = page.getByRole("menu", { name: "Drawing actions" });
+    await menu.getByRole("menuitem", { name: "Remove" }).click();
+    await expect
+      .poll(async () => (await panes(page)).map((p) => p.drawings))
+      .toEqual([1, 0]);
+  });
+
+  test("focus that falls to the page lands on the active chart", async ({ bootedApp: page }) => {
+    await chooseGrid(page, "2h");
+    await expectLoaded(page, 2);
+    await activate(page, 1);
+    // What a closing dialog can leave: nothing focused, and a node gone (keys.ts).
+    await page.evaluate(() => {
+      (document.activeElement as HTMLElement | null)?.blur();
+      document.body.appendChild(document.createElement("div")).remove();
+    });
+    await expect(paneCell(page, 1).locator(".chart-host")).toBeFocused();
+  });
+
+  test("a sub-pane's menu removes the indicator of its own chart", async ({ bootedApp: page }) => {
+    await chooseGrid(page, "2h");
+    await expectLoaded(page, 2);
+    await activate(page, 0);
+    const before = await panes(page);
+    const legend = paneCell(page, 1).getByTestId("indicator-legend-rsi");
+    const box = (await legend.boundingBox())!;
+    await page.mouse.click(box.x + 300, box.y + 40, { button: "right" });
+    await page.getByRole("menu", { name: "Pane actions" }).getByRole("menuitem", { name: /^Remove RSI/ }).click();
+    await expect(legend).toHaveCount(0);
+    await expect(paneCell(page, 0).getByTestId("indicator-legend-rsi")).toBeVisible();
+    const after = await panes(page);
+    expect(after[1]!.indicators.length).toBe(before[1]!.indicators.length - 1);
+    expect(after[0]!.indicators.length).toBe(before[0]!.indicators.length);
+  });
+});

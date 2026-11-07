@@ -196,8 +196,8 @@ test.describe("drawing tools", () => {
     await drawTrendLine(page);
     await clickAt(page, MID, "right");
     const menu = page.getByRole("menu", { name: "Drawing actions" });
-    // Remove, Lock and (a trend line can be alerted on) Add alert.
-    await expect(menu.getByRole("menuitem")).toHaveCount(3);
+    // Add alert (a trend line can have one), Style, Clone, Lock, Hide and Remove.
+    await expect(menu.getByRole("menuitem")).toHaveCount(6);
     await menu.getByRole("menuitem", { name: "Lock" }).click();
     expect((await stored(page))?.[0]).toMatchObject({ lock: true });
 

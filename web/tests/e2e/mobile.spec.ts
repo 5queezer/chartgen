@@ -479,6 +479,26 @@ test.describe("touch on a phone", () => {
     await expect.poll(async () => (await chartState(page)).space).toBeGreaterThan(space);
   });
 
+  test("a long press on a list row opens no menu, and no browser menu either", async ({ page }) => {
+    await bootCompact(page);
+    await dock(page, "Watchlist").tap();
+    const row = page.locator(".wl-row[data-symbol]").first();
+    await expect(row).toBeVisible();
+    const box = (await row.boundingBox())!;
+    const at = { x: box.x + box.width / 2, y: box.y + box.height / 2 };
+    const t = await touch(page);
+    await t.start(at);
+    // What an Android long press sends; the emulated finger sends no contextmenu.
+    const prevented = await row.evaluate((el, p) => {
+      const e = new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: p.x, clientY: p.y });
+      el.dispatchEvent(e);
+      return e.defaultPrevented;
+    }, at);
+    await t.end();
+    expect(prevented).toBe(true);
+    await expect(page.getByRole("menu")).toHaveCount(0);
+  });
+
   test("a long press shows the crosshair and its readings, not the chart menu", async ({ page }) => {
     await bootCompact(page);
     const time = page.getByTestId("legend-time");

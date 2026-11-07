@@ -359,6 +359,36 @@ test("pause, edit and delete act on the server, and survive a reload", async ({ 
   await expect(rows(page)).toHaveCount(0);
 });
 
+test("a server row's right-click menu pauses, edits and deletes on the server", async ({ bootedApp: page }) => {
+  await createServerAlert(page, { price: "9000000" });
+  const row = rows(page);
+  await expect(row).toHaveAttribute("data-status", "active");
+
+  await row.click({ button: "right" });
+  const menu = page.getByRole("menu", { name: "Alert actions" });
+  await expect(menu).toBeVisible();
+  await menu.getByRole("menuitem", { name: "Pause" }).click();
+  await expect(row).toHaveAttribute("data-status", "paused");
+
+  await row.click({ button: "right" });
+  await menu.getByRole("menuitem", { name: "Resume" }).click();
+  await expect(row).toHaveAttribute("data-status", "active");
+
+  await row.click({ button: "right" });
+  await menu.getByRole("menuitem", { name: "Edit…" }).click();
+  await expect(dialog(page).getByLabel("Price")).toHaveValue("9000000");
+  await page.keyboard.press("Escape");
+  await expect(dialog(page)).toHaveCount(0);
+
+  await row.click({ button: "right" });
+  await menu.getByRole("menuitem", { name: "Delete" }).click();
+  await expect(row).toHaveCount(0);
+  await reloadApp(page);
+  await alertsTab(page).click();
+  await page.waitForTimeout(1_000);
+  await expect(rows(page)).toHaveCount(0);
+});
+
 test("a fire nobody saw is reported when the app next opens, once", async ({ bootedApp: page }) => {
   // Nobody hears from the server while it fires, as with no tab open.
   await page.route("**/mcp", async (route) => {

@@ -53,6 +53,7 @@ import { AlertLines } from "./AlertLines";
 import { Chart } from "./Chart";
 import { ChartContextMenu } from "./ChartContextMenu";
 import { ChartLoadError } from "./ChartLoadError";
+import { indicatorMenuOf } from "./menus";
 import { DrawingToolbar, type DrawingsApi } from "./DrawingToolbar";
 import { ReplayBar } from "./ReplayBar";
 
@@ -395,7 +396,6 @@ export interface ChartPaneProps {
   /** Open the settings of an indicator of the active chart. */
   onIndicatorSettings: (key: string) => void;
   onAddAlert: (key: string) => void;
-  onResetView: () => void;
   onSettings: () => void;
 }
 
@@ -405,6 +405,15 @@ export function ChartPane(props: ChartPaneProps): JSX.Element {
   const { activeIndicators, removeIndicator, setActiveIndicators, toggleIndicatorHidden } = s.indicators;
   const indexOf = (key: string) =>
     activeIndicators().findIndex((e) => instanceKey(e) === key);
+  // Both read the active chart. A press has activated this one, a key has not.
+  const openIndicatorSettings = (key: string) => {
+    setActivePane(s.pane);
+    props.onIndicatorSettings(key);
+  };
+  const addIndicatorAlert = (key: string) => {
+    setActivePane(s.pane);
+    props.onAddAlert(key);
+  };
 
   return (
     <PaneProvider value={s.pane}>
@@ -437,9 +446,17 @@ export function ChartPane(props: ChartPaneProps): JSX.Element {
         <ChartContextMenu
           chart={s.chart()}
           symbol={symbol()}
+          scale={s.layout}
+          comparing={s.compare.compareSymbols().length > 0}
           drawings={s.drawings()}
           hasIndicators={activeIndicators().length > 0}
-          onResetView={props.onResetView}
+          indicatorItems={(key) =>
+            indicatorMenuOf(s.indicators, s.live()?.series, key, {
+              onAddAlert: addIndicatorAlert,
+              onSettings: openIndicatorSettings,
+            }).items
+          }
+          activate={() => setActivePane(s.pane)}
           onCopyLink={() => void copyChartLink()}
           onRemoveAllIndicators={() => setActiveIndicators([])}
           onSettings={props.onSettings}
@@ -473,16 +490,9 @@ export function ChartPane(props: ChartPaneProps): JSX.Element {
             chartType={chartType()}
             timeZone={s.timeZone()}
             onToggleHidden={(n) => toggleIndicatorHidden(indexOf(n))}
-            // Both read the active chart. A press has activated this one, a key has not.
-            onSettings={(key) => {
-              setActivePane(s.pane);
-              props.onIndicatorSettings(key);
-            }}
+            onSettings={openIndicatorSettings}
             onRemove={removeIndicator}
-            onAddAlert={(key) => {
-              setActivePane(s.pane);
-              props.onAddAlert(key);
-            }}
+            onAddAlert={addIndicatorAlert}
             onChartReady={s.setChart}
             multi={props.multi}
             onCrosshair={s.setCrosshair}

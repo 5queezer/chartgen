@@ -780,8 +780,7 @@ body {
   visibility: hidden;
 }
 
-.compact [data-testid="drawing-style-bar"],
-.compact [data-drawing-menu] {
+.compact [data-testid="drawing-style-bar"] {
   visibility: visible;
 }
 
