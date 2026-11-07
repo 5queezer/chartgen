@@ -429,14 +429,28 @@ export function applyAnswer(
       writeState(s, result.key, result.version, write.live, write.value);
       if (write.conflict) applied.replaced.push(result.key);
     } else if (result.status === "conflict") {
-      // Next round merges with this. Base stays: this device has still not seen it.
-      writeState(s, result.key, result.version, readState(s, result.key).b, result.value);
+      if (result.version === 0 && result.value === null) {
+        // Never there as far as the server knows, so nobody deleted it: this copy is new to it.
+        s.removeItem(SYNC + result.key);
+      } else {
+        // Next round merges with this. Base stays: this device has still not seen it.
+        writeState(s, result.key, result.version, readState(s, result.key).b, result.value);
+      }
     } else {
       applied.refused.push({ key: result.key, live: write.live, status: result.status });
     }
   }
   // A cursor past the server's means a restored file, where its versions are the truth.
   const restored = answer.cursor < since;
+  if (restored) {
+    // Then this answer holds all it has. What it lacks goes to it as new at the next round.
+    const known = new Set([...answer.changes, ...answer.results].map((d) => d.key));
+    for (const key of docKeys(s)) {
+      if (isSynced(key) && !known.has(key) && readState(s, key).e === undefined) {
+        s.removeItem(SYNC + key);
+      }
+    }
+  }
   for (const change of answer.changes) {
     if (!isSynced(change.key)) continue;
     const st = readState(s, change.key);

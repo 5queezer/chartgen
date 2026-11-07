@@ -52,6 +52,7 @@ const live = () =>
 const answer = (a: Partial<SyncAnswer>): SyncAnswer => ({ cursor: 1, results: [], changes: [], ...a });
 const drawings = (...ids: string[]) => JSON.stringify(ids.map((id) => ({ id, name: id })));
 const DOC = "chartgen.drawings.BTCUSDT";
+const OTHER_DOC = "chartgen.drawings.ETHUSDT";
 
 beforeEach(() => s.clear());
 
@@ -452,6 +453,45 @@ describe("a round", () => {
     applyAnswer(s, 0, first.writes, answer({ cursor: 90, results: [{ key: DOC, status: "ok", version: 90 }] }));
     applyAnswer(s, 90, [], answer({ cursor: 3, changes: [{ key: DOC, value: drawings("older"), version: 3 }] }));
     expect(readState(s, DOC)).toMatchObject({ v: 3, s: drawings("older") });
+  });
+
+  it("a server that lost a document gets it again, and takes nothing for a deletion", () => {
+    s.setItem(DOC, drawings("a", "b"));
+    s.setItem(OTHER_DOC, drawings("untouched"));
+    const first = collectWrites(s, none);
+    applyAnswer(s, 0, first.writes, answer({ cursor: 90, results: [
+      { key: DOC, status: "ok", version: 89 },
+      { key: OTHER_DOC, status: "ok", version: 90 },
+    ] }));
+
+    // Rows removed by hand: a device with an edit is told, as a version 0 conflict.
+    s.setItem(DOC, drawings("a", "b", "new"));
+    const edit = collectWrites(s, none);
+    expect(edit.writes[0]).toMatchObject({ key: DOC, base_version: 89 });
+    applyAnswer(s, 90, edit.writes, answer({ cursor: 0, results: [
+      { key: DOC, status: "conflict", version: 0, value: null },
+    ] }));
+    expect(s.getItem(DOC)).toBe(drawings("a", "b", "new"));
+
+    const again = collectWrites(s, none);
+    expect(again.writes.map((w) => [w.key, w.value, w.base_version]).sort()).toEqual([
+      [DOC, drawings("a", "b", "new"), 0],
+      [OTHER_DOC, drawings("untouched"), 0],
+    ]);
+    expect(again.writes.every((w) => !w.conflict)).toBe(true);
+  });
+
+  it("a restored server's copy of a doc is kept, and only what it lacks goes back as new", () => {
+    s.setItem(DOC, drawings("a"));
+    s.setItem(OTHER_DOC, drawings("since the backup"));
+    const first = collectWrites(s, none);
+    applyAnswer(s, 0, first.writes, answer({ cursor: 90, results: [
+      { key: DOC, status: "ok", version: 80 },
+      { key: OTHER_DOC, status: "ok", version: 90 },
+    ] }));
+    applyAnswer(s, 90, [], answer({ cursor: 7, changes: [{ key: DOC, value: drawings("older"), version: 7 }] }));
+    expect(readState(s, DOC)).toMatchObject({ v: 7, s: drawings("older") });
+    expect(collectWrites(s, none).writes.map((w) => [w.key, w.base_version])).toEqual([[OTHER_DOC, 0]]);
   });
 
   it("an older change arriving late does not go back", () => {

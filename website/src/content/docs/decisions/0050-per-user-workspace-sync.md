@@ -188,6 +188,10 @@ the data comes back.
 - Bad: a stranger with many accounts can fill the 1 GiB total. Then nobody's documents grow, existing
   ones stay, and everyone keeps working locally with a notice. It is cleared by deleting rows
   ([persistence](/chartgen/reference/persistence/#chartgendb-oauth-clients-scripted-indicators-and-server-alerts)).
+- Bad: restoring `chartgen.db` from a backup rolls the account back. A device notices from its cursor
+  being past the server's: it takes the file's documents as the current ones, and sends what the file
+  does not have as new. What changed since the backup in a document the file does have is replaced at
+  the next reload, or merged if it was edited since the last round.
 - Bad: a device away for more than 90 days can bring back something deleted since, because the
   tombstone is gone. Its write looks like a new document.
 - Bad: a browser with two tabs on one document saves from each tab's memory, which is how it has
