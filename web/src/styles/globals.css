@@ -698,9 +698,21 @@ body {
     padding-block: 2px;
   }
 
-  /* The Indicators button already says 0: an empty row would only cost height. */
-  html:not(.compact) .chip-row:not(:has(.chip)) {
+  /* A legend row has the same bell, eye, gear and remove on hover, so a chip is only
+   * needed where there is no row: a hidden or failed instance. No such chip, no row.
+   * One holding keyboard focus stays until focus moves on, so its eye can toggle back. */
+  html:not(.compact) .chip:not([data-chip-keep]):not(:has(:focus-visible)),
+  html:not(.compact) .chip-row:not(:has(.chip[data-chip-keep], .chip :focus-visible)) {
     display: none;
+  }
+
+  /* Those controls are now the way in, so a long row must not clip them away. */
+  .pane-header-controls {
+    position: sticky;
+    right: 0;
+    background: var(--legend-bg, var(--color-bg));
+    /* Over the 4 px of row padding sticky stops short of, where a clipped value shows. */
+    box-shadow: 0 0 0 4px var(--legend-bg, var(--color-bg));
   }
 
   html:not(.compact) .chip {

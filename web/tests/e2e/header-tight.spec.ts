@@ -52,11 +52,23 @@ for (const width of [1440, 800]) {
       }
     });
 
-    test("the chip row is tight and leaves the chart the height", async ({ bootedApp: page }) => {
+    test("the chips leave the chart the height until one is needed", async ({ bootedApp: page }) => {
       const row = page.locator(".chip-row");
+      await expect(row).toBeHidden();
+      expect((await box(page.locator(".chart-host"))).y).toBe(BAR);
+
+      // A hidden indicator has no legend row, so its chip is how it comes back.
+      const legend = page.getByTestId("indicator-legend-rsi");
+      await legend.hover();
+      await legend.getByRole("button", { name: "Hide RSI" }).click();
+      await expect(legend).toHaveCount(0);
       expect((await box(row)).height).toBe(25);
-      const host = await box(page.locator(".chart-host"));
-      expect(host.y).toBe(BAR + 25);
+      await expect.poll(async () => (await box(page.locator(".chart-host"))).y).toBe(BAR + 25);
+
+      await page.getByRole("button", { name: "Show rsi", exact: true }).click();
+      await expect(legend).toBeVisible();
+      await expect(row).toBeHidden();
+      await expect.poll(async () => (await box(page.locator(".chart-host"))).y).toBe(BAR);
     });
 
     test("an open menu hangs below the bar", async ({ bootedApp: page }) => {
@@ -127,6 +139,21 @@ test.describe("highlights", () => {
   });
 });
 
+test("a long legend row in a narrow pane keeps its controls in reach", async ({ bootedApp: page }) => {
+  await page.setViewportSize({ width: 1000, height: 800 });
+  await page.getByTestId("grid-menu").click();
+  await page.getByTestId("grid-option-4").click();
+  const legend = page.locator(".chart-pane[data-active]").getByTestId("indicator-legend-ema_stack");
+  await legend.hover();
+  const row = await box(legend);
+  const remove = await box(legend.getByRole("button", { name: /^Remove / }));
+  expect(remove.x + remove.width).toBeLessThanOrEqual(row.x + row.width);
+  // Nothing clipped may show past them, in the padding at the row's end.
+  await expect(legend.locator(".pane-header-controls")).toHaveCSS("box-shadow", /4px/);
+  await legend.getByRole("button", { name: /^Remove / }).click();
+  await expect(legend).toHaveCount(0);
+});
+
 test.describe("touch keeps its targets", () => {
   test.use({ viewport: { width: 1180, height: 820 }, hasTouch: true, isMobile: true });
 
@@ -136,5 +163,8 @@ test.describe("touch keeps its targets", () => {
     expect((await box(page.locator("header"))).height).toBe(52);
     const symbol = await box(page.getByRole("button", { name: /^Symbol:/ }));
     expect(symbol.height).toBeGreaterThanOrEqual(40);
+    // And every chip: no hover to reach the legend's controls with.
+    await expect(page.locator(".chip")).toHaveCount(3);
+    await expect(page.locator(".chip").first()).toBeVisible();
   });
 });

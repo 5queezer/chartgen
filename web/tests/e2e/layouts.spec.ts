@@ -12,7 +12,7 @@ const dirtyDot = (page: Page) => page.getByTestId("layout-dirty");
 const activeTimeframe = (page: Page) =>
   page.getByRole("group", { name: "Timeframe" }).locator("[aria-pressed=true]");
 const chip = (page: Page, name: string) =>
-  page.getByRole("button", { name: `Remove ${name}`, exact: true });
+  page.getByTestId(`indicator-legend-${name}`).getByRole("button", { name: /^Remove / });
 
 async function menu(page: Page, item: string | RegExp) {
   await layoutButton(page).click();

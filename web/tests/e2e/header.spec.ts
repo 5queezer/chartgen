@@ -181,12 +181,12 @@ test.describe("chrome fixes", () => {
     ).toHaveAttribute("aria-pressed", "false");
   });
 
-  test("indicator chips and picker show display names, not ids", async ({
+  test("indicator legends and picker show display names, not ids", async ({
     bootedApp: page,
   }) => {
-    const chips = page.locator("header + div");
-    await expect(chips).toContainText("EMA");
-    await expect(chips).not.toContainText("ema_stack");
+    const legend = page.getByTestId("indicator-legend-ema_stack");
+    await expect(legend).toContainText("EMA");
+    await expect(legend).not.toContainText("ema_stack");
 
     await page.getByRole("button", { name: /Indicators/ }).click();
     const dialog = page.getByRole("dialog");

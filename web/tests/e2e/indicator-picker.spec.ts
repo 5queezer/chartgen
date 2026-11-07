@@ -102,11 +102,10 @@ test.describe("indicator picker", () => {
     await dialog.getByRole("button", { name: "Close" }).click();
     await expect(dialog).toBeHidden();
 
-    // The chip row renders the indicator name; its remove button is
-    // `aria-label="Remove <name>"` (see IndicatorChips.tsx).
-    const removeButton = page.getByRole("button", {
-      name: `Remove ${newIndicatorName}`,
-    });
+    // Its legend row carries the remove button.
+    const removeButton = page
+      .getByTestId(`indicator-legend-${newIndicatorName}`)
+      .getByRole("button", { name: /^Remove / });
     await expect(removeButton).toBeVisible();
 
     // Refetch fires from the active-set change.
@@ -117,20 +116,14 @@ test.describe("indicator picker", () => {
     // auto-loads after reload; once it has rendered, remove the chip and
     // expect another refetch.
     await reloadApp(page);
-    await expect(
-      page.getByRole("button", { name: `Remove ${newIndicatorName}` }),
-    ).toBeVisible();
+    await expect(removeButton).toBeVisible();
 
     const refetchAfterRemove = page.waitForResponse(
       isFullLoad(newIndicatorName, false),
     );
-    await page
-      .getByRole("button", { name: `Remove ${newIndicatorName}` })
-      .click();
+    await removeButton.click();
     await refetchAfterRemove;
 
-    await expect(
-      page.getByRole("button", { name: `Remove ${newIndicatorName}` }),
-    ).toHaveCount(0);
+    await expect(removeButton).toHaveCount(0);
   });
 });

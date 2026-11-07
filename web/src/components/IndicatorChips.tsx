@@ -1,5 +1,7 @@
 // Row of chips, one per active indicator, with hide/show, settings and
 // remove buttons. Hidden indicators are dimmed. Rendered beneath the header.
+// With a mouse only the chips the legend cannot stand in for show, hidden and failed
+// instances, which have no legend row (globals.css). Touch keeps them all.
 // The empty state is a muted hint pointing at the picker button. A repeated
 // indicator (ADR-0028) shows its params so its chips read apart.
 
@@ -106,6 +108,7 @@ export function IndicatorChips(props: IndicatorChipsProps): JSX.Element {
                   "border-[color:var(--color-danger)]": !!error(),
                 }}
                 data-chip-error={error() ? "" : undefined}
+                data-chip-keep={isHidden(entry()) || error() ? "" : undefined}
                 onContextMenu={(e) => openContextMenu(e, props.menu(instanceKey(entry())))}
               >
                 <button
