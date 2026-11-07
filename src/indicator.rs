@@ -323,6 +323,12 @@ pub trait Indicator {
         0
     }
 
+    /// `warmup_bars` on a chart of `chart_secs`, for an indicator whose need is a span
+    /// of time rather than of bars.
+    fn warmup_bars_at(&self, _chart_secs: Option<i64>) -> usize {
+        self.warmup_bars()
+    }
+
     /// What `compute` over `data` plots past the last bar (ADR-0033);
     /// `None` for indicators that plot nothing there.
     fn projection(&self, _data: &OhlcvData) -> Option<Projection> {

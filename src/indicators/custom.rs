@@ -1865,6 +1865,24 @@ fn compute_profile(
     })
 }
 
+/// Seconds per bar of `data`: its interval, or else the shortest gap between its bars.
+/// `None` if its bars have no times, or there are too few to tell.
+fn bar_step(data: &OhlcvData) -> Option<i64> {
+    let named = data
+        .interval
+        .as_deref()
+        .and_then(|i| crate::interval::Interval::parse(i).ok());
+    if let Some(iv) = named {
+        return Some(iv.secs());
+    }
+    let times: Option<Vec<i64>> = data.bars.iter().map(|b| b.date.parse().ok()).collect();
+    times?
+        .windows(2)
+        .map(|w| w[1] - w[0])
+        .filter(|gap| *gap > 0)
+        .min()
+}
+
 /// Partition bar indices into sessions. Honors `bars_per_session` if Some & > 0,
 /// otherwise buckets by epoch-seconds date using `period_secs`. Fallback on parse
 /// failure: put all bars in one session.
@@ -1877,18 +1895,24 @@ fn session_ranges(
     if n == 0 {
         return vec![];
     }
+    let mut period_secs = period_secs;
     if let Some(bps) = bars_per_session {
         if bps == 0 {
             return vec![(0, n)];
         }
-        let mut out = Vec::new();
-        let mut s = 0;
-        while s < n {
-            let e = (s + bps).min(n);
-            out.push((s, e));
-            s = e;
-        }
-        return out;
+        // On the clock, not from the first bar of this window: a tail starts elsewhere
+        // than its load, and must see the same sessions.
+        let Some(step) = bar_step(data) else {
+            let mut out = Vec::new();
+            let mut s = 0;
+            while s < n {
+                let e = (s + bps).min(n);
+                out.push((s, e));
+                s = e;
+            }
+            return out;
+        };
+        period_secs = step.saturating_mul(bps as i64);
     }
     if period_secs <= 0 {
         return vec![(0, n)];
@@ -1964,7 +1988,7 @@ impl Indicator for SessionVolumeProfile {
         json!([
             {"name": "bins", "type": "integer", "min": 1, "max": 1000, "default": 24},
             {"name": "session", "type": "string", "default": "daily", "description": "daily, weekly, or hourly"},
-            {"name": "bars_per_session", "type": "integer", "min": 1, "max": 100000, "default": null, "description": "override session by fixed bar count"},
+            {"name": "bars_per_session", "type": "integer", "min": 1, "max": 100000, "default": null, "description": "override session by a span of this many bars on the clock; closed hours count"},
             {"name": "show_value_area", "type": "boolean", "default": true, "description": "draw VAH/VAL in addition to POC"}
         ])
     }
@@ -1986,6 +2010,17 @@ impl Indicator for SessionVolumeProfile {
         if let Some(v) = params.get("show_value_area").and_then(|v| v.as_bool()) {
             self.show_value_area = v;
         }
+    }
+
+    /// A whole session, so that a tail's levels are those of its load, up to the cap
+    /// on a warmup: a day of 1m bars, or a week of 5m, does not fit (ADR-0048).
+    fn warmup_bars_at(&self, chart_secs: Option<i64>) -> usize {
+        if let Some(bars) = self.bars_per_session.filter(|b| *b > 0) {
+            return bars;
+        }
+        chart_secs
+            .filter(|s| *s > 0)
+            .map_or(0, |s| (parse_period_secs(&self.session) / s) as usize + 1)
     }
 
     fn compute(&self, data: &OhlcvData) -> PanelResult {

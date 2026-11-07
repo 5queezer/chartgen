@@ -401,7 +401,17 @@ fn warmup_arg(args: &Value, panels: &[Box<dyn Indicator>]) -> usize {
     if asked == 0 {
         return 0;
     }
-    let need = panels.iter().map(|i| i.warmup_bars()).max().unwrap_or(0);
+    let chart_secs = args
+        .get("timeframe")
+        .or_else(|| args.get("interval"))
+        .and_then(Value::as_str)
+        .and_then(|t| chartgen::interval::Interval::parse(t).ok())
+        .map(|iv| iv.secs());
+    let need = panels
+        .iter()
+        .map(|i| i.warmup_bars_at(chart_secs))
+        .max()
+        .unwrap_or(0);
     asked.max(need).min(MAX_WARMUP)
 }
 
@@ -4180,6 +4190,95 @@ mod tests {
                 t["values"].as_array().unwrap().as_slice()
             );
         }
+    }
+
+    /// `session_vp`'s last values, from a load and from a tail, ending on one bar.
+    fn session_load_and_tail(extra: Value, timeframe: &str, end: i64) -> (Value, Value) {
+        let of = |bars: u64| {
+            let mut ind = json!({ "name": "session_vp" });
+            ind.as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            let s = flow_series(json!({ "ticker": "BTCUSDT", "timeframe": timeframe,
+                "bars": bars, "warmup": 300, "format": "series", "indicators": [ind],
+                "end_time": end }));
+            s["indicators"]["session_vp"]["lines"].clone()
+        };
+        (of(100), of(2))
+    }
+
+    fn assert_load_ends_as_its_tail(load: &Value, tail: &Value, what: &str) {
+        for k in 0..3 {
+            let l = load[k]["values"].as_array().unwrap();
+            assert_eq!(
+                &l[l.len() - 2..],
+                tail[k]["values"].as_array().unwrap().as_slice(),
+                "{what}, line {k}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_session_longer_than_a_usual_tail_has_the_values_of_its_load() {
+        // 2023-11-13 00:00 UTC, and hours into that day.
+        let day = 1_699_833_600_000i64;
+        let hour = 3_600_000i64;
+        for (timeframe, end, what) in [
+            // 400 bars into the day: past the 302 bars a tail otherwise has.
+            ("3m", day + 20 * hour, "3m late in the day"),
+            ("5m", day + 23 * hour, "5m late in the day"),
+            ("15m", day + 23 * hour, "15m late in the day"),
+            // 16 hours is 960 bars: within the cap of 1000.
+            ("1m", day + 16 * hour, "1m within the cap"),
+        ] {
+            let (load, tail) = session_load_and_tail(json!({}), timeframe, end);
+            assert_load_ends_as_its_tail(&load, &tail, what);
+        }
+        // A week of 30m is 336 bars, on the last day of that week.
+        let sunday = day + 6 * 24 * hour + 20 * hour;
+        let (load, tail) = session_load_and_tail(json!({ "session": "weekly" }), "30m", sunday);
+        assert_load_ends_as_its_tail(&load, &tail, "a week of 30m");
+    }
+
+    #[test]
+    fn a_session_of_a_fixed_bar_count_starts_where_the_clock_says_not_where_a_window_does() {
+        let end = 1_699_920_000_000i64;
+        for (timeframe, bars_per_session) in [("1h", 24), ("5m", 50), ("1m", 400)] {
+            let (load, tail) = session_load_and_tail(
+                json!({ "bars_per_session": bars_per_session }),
+                timeframe,
+                end,
+            );
+            assert_load_ends_as_its_tail(&load, &tail, timeframe);
+        }
+    }
+
+    #[test]
+    fn a_session_raises_a_warmup_only_as_far_as_its_chart_needs() {
+        let need = |timeframe: &str, params: Value| {
+            let mut ind = json!({ "name": "session_vp" });
+            ind.as_object_mut()
+                .unwrap()
+                .extend(params.as_object().unwrap().clone());
+            let indicators = json!([ind]);
+            let args = json!({ "warmup": 300, "timeframe": timeframe });
+            warmup_arg(&args, &parse_panels(&indicators, None).0)
+        };
+        // Charts where a day fits as it is pay nothing: this is what a tail cost before.
+        for timeframe in ["5m", "1h", "4h", "1d"] {
+            assert_eq!(need(timeframe, json!({})), 300, "{timeframe}");
+        }
+        assert_eq!(need("3m", json!({})), 481);
+        // What does not fit is capped, and so stays unequal late in a long session.
+        assert_eq!(need("1m", json!({})), MAX_WARMUP);
+        assert_eq!(need("5m", json!({ "session": "weekly" })), MAX_WARMUP);
+        assert_eq!(need("1h", json!({ "bars_per_session": 500 })), 500);
+        // No warmup asked: none raised, as for anything else.
+        let none = json!({ "timeframe": "1m" });
+        assert_eq!(
+            warmup_arg(&none, &parse_panels(&json!(["session_vp"]), None).0),
+            0
+        );
     }
 
     #[test]
