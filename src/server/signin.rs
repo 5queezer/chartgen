@@ -49,6 +49,11 @@ pub(super) const MAX_TOOL_CALLS_PER_USER: usize = 600;
 /// Workspace syncs one user can make per `LOGIN_WINDOW`: a tab makes at most one every
 /// few seconds, and each may carry up to the request body limit (ADR-0050).
 const MAX_WORKSPACE_CALLS_PER_USER: usize = 120;
+/// What one account may send in a minute. The limits on what it keeps say nothing about
+/// what it writes, and a document that changes every time is written every time.
+const MAX_WORKSPACE_BYTES_PER_USER: usize = 8 * 1024 * 1024;
+/// Syncs running at once, in all. Each holds up to a few MiB, and accounts are free.
+const MAX_WORKSPACE_SYNCS: usize = 8;
 const PROVIDER_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_NAME_CHARS: usize = 100;
 
@@ -269,7 +274,11 @@ pub(super) struct SignIn {
     flows: HashMap<String, ProviderFlow>,
     login_hits: HashMap<String, Vec<Instant>>,
     tool_calls: HashMap<String, Vec<Instant>>,
-    workspace_calls: HashMap<String, Vec<Instant>>,
+    /// Per user: when, and how many bytes the request held.
+    workspace_calls: HashMap<String, Vec<(Instant, usize)>>,
+    /// Users with a sync running.
+    workspace_running: HashSet<String>,
+    workspace_slots: Arc<tokio::sync::Semaphore>,
 }
 
 /// What a handler must write to the store once it has let go of the OAuth lock.
@@ -422,6 +431,8 @@ impl SignIn {
             login_hits: HashMap::new(),
             tool_calls: HashMap::new(),
             workspace_calls: HashMap::new(),
+            workspace_running: HashSet::new(),
+            workspace_slots: Arc::new(tokio::sync::Semaphore::new(MAX_WORKSPACE_SYNCS)),
         }
     }
 
@@ -674,22 +685,55 @@ impl OAuthStore {
             .is_none_or(|s| s.admit_tool_call(&user, Instant::now()))
     }
 
-    /// Count a workspace sync by `user`; false when over the limit.
-    pub(super) fn admit_workspace_call(&mut self, user: &str) -> bool {
+    /// Let a workspace sync by `user` start: the slot it holds while it runs. Refused
+    /// with how many seconds to wait and why. Each of these is a pause to a device: what
+    /// it has stays and goes out later.
+    pub(super) fn admit_workspace_call(
+        &mut self,
+        user: &str,
+    ) -> Result<tokio::sync::OwnedSemaphorePermit, (u64, &'static str)> {
         let Some(signin) = self.signin.as_mut() else {
-            return false;
+            return Err((60, "no sign-in"));
         };
+        if signin.workspace_running.contains(user) {
+            return Err((1, "a sync of this account is running"));
+        }
         let now = Instant::now();
         signin.workspace_calls.retain(|_, hits| {
-            hits.retain(|t| now.duration_since(*t) < LOGIN_WINDOW);
+            hits.retain(|(t, _)| now.duration_since(*t) < LOGIN_WINDOW);
             !hits.is_empty()
         });
         let hits = signin.workspace_calls.entry(user.to_owned()).or_default();
         if hits.len() >= MAX_WORKSPACE_CALLS_PER_USER {
-            return false;
+            return Err((60, "too many sync requests"));
         }
-        hits.push(now);
-        true
+        if hits.iter().map(|(_, bytes)| bytes).sum::<usize>() >= MAX_WORKSPACE_BYTES_PER_USER {
+            return Err((60, "too many bytes sent in a minute"));
+        }
+        let Ok(slot) = signin.workspace_slots.clone().try_acquire_owned() else {
+            return Err((1, "too many syncs are running"));
+        };
+        hits.push((now, 0));
+        signin.workspace_running.insert(user.to_owned());
+        Ok(slot)
+    }
+
+    /// Count what the running request of `user` turned out to hold.
+    pub(super) fn charge_workspace_bytes(&mut self, user: &str, bytes: usize) {
+        let hit = self
+            .signin
+            .as_mut()
+            .and_then(|s| s.workspace_calls.get_mut(user))
+            .and_then(|hits| hits.last_mut());
+        if let Some(hit) = hit {
+            hit.1 = bytes;
+        }
+    }
+
+    pub(super) fn workspace_call_finished(&mut self, user: &str) {
+        if let Some(signin) = self.signin.as_mut() {
+            signin.workspace_running.remove(user);
+        }
     }
 
     /// `(display name, provider slug)` of a signed-in user.

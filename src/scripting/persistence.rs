@@ -132,6 +132,8 @@ pub struct WorkspaceLimits {
     pub doc_bytes: usize,
     pub user_bytes: i64,
     pub user_docs: i64,
+    /// Deleted documents remembered per user, the newest. They are outside `user_docs`.
+    pub user_tombstones: i64,
     pub total_bytes: i64,
 }
 
@@ -160,11 +162,22 @@ pub enum WorkspaceOutcome {
 }
 
 /// A document as it stands.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
 pub struct WorkspaceDoc {
     pub key: String,
     pub value: Option<String>,
     pub version: i64,
+}
+
+/// The answer to a sync.
+#[derive(Clone, Debug, PartialEq)]
+pub struct WorkspaceSynced {
+    pub outcomes: Vec<WorkspaceOutcome>,
+    pub changes: Vec<WorkspaceDoc>,
+    pub cursor: i64,
+    /// The caller's cursor is past this account's versions: the file was restored or the
+    /// account emptied. `changes` then holds all there is, deletions included.
+    pub restored: bool,
 }
 
 /// How long a deletion is remembered. A device away for longer can bring it back.
@@ -752,7 +765,7 @@ impl Store {
         since: i64,
         writes: &[WorkspaceWrite],
         limits: &WorkspaceLimits,
-    ) -> rusqlite::Result<(Vec<WorkspaceOutcome>, Vec<WorkspaceDoc>, i64)> {
+    ) -> rusqlite::Result<WorkspaceSynced> {
         let mut conn = self.conn();
         let tx = conn.transaction()?;
         let now = chrono::Utc::now().timestamp();
@@ -765,7 +778,10 @@ impl Store {
             .optional()?
             .unwrap_or((0, 0));
         // A cursor from before this file was restored or the account emptied.
-        let since = if since > seq { 0 } else { since };
+        let restored = since > seq;
+        // A device with no cursor has nothing to delete, so it is told of no deletions.
+        let with_tombstones = since > 0;
+        let since = if restored { 0 } else { since };
         if !writes.is_empty() {
             tx.execute(
                 "DELETE FROM workspace_docs
@@ -774,7 +790,7 @@ impl Store {
             )?;
         }
         let mut docs: i64 = tx.query_row(
-            "SELECT COUNT(*) FROM workspace_docs WHERE user_id = ?1",
+            "SELECT COUNT(*) FROM workspace_docs WHERE user_id = ?1 AND value IS NOT NULL",
             params![user],
             |r| r.get(0),
         )?;
@@ -793,7 +809,6 @@ impl Store {
                     |r| Ok((r.get(0)?, r.get(1)?)),
                 )
                 .optional()?;
-            let exists = current.is_some();
             let (value, version) = current.unwrap_or((None, 0));
             // Already so, as a retry after a lost answer or another tab's same write is.
             if value == write.value {
@@ -811,9 +826,16 @@ impl Store {
                 continue;
             }
             let delta = new_len as i64 - value.as_ref().map_or(0, String::len) as i64;
-            if (delta > 0
-                && (bytes + delta > limits.user_bytes || total + delta > limits.total_bytes))
-                || (!exists && docs >= limits.user_docs)
+            let docs_delta = i64::from(write.value.is_some()) - i64::from(value.is_some());
+            // The last tenth of the total is for accounts already here, so that a file
+            // filling up with new accounts leaves those working for a while yet.
+            let room = if docs == 0 {
+                limits.total_bytes - limits.total_bytes / 10
+            } else {
+                limits.total_bytes
+            };
+            if (delta > 0 && (bytes + delta > limits.user_bytes || total + delta > room))
+                || (docs_delta > 0 && docs >= limits.user_docs)
             {
                 outcomes.push(WorkspaceOutcome::OverQuota);
                 continue;
@@ -821,7 +843,7 @@ impl Store {
             seq += 1;
             bytes += delta;
             total += delta;
-            docs += i64::from(!exists);
+            docs += docs_delta;
             tx.execute(
                 "INSERT INTO workspace_docs (user_id, key, value, version, updated_at)
                  VALUES (?1, ?2, ?3, ?4, ?5)
@@ -838,12 +860,23 @@ impl Store {
              ON CONFLICT (user_id) DO UPDATE SET seq = excluded.seq, bytes = excluded.bytes",
             params![user, seq, bytes],
         )?;
+        if !writes.is_empty() {
+            tx.execute(
+                "DELETE FROM workspace_docs
+                 WHERE user_id = ?1 AND value IS NULL AND version NOT IN (
+                     SELECT version FROM workspace_docs
+                     WHERE user_id = ?1 AND value IS NULL
+                     ORDER BY version DESC LIMIT ?2)",
+                params![user, limits.user_tombstones],
+            )?;
+        }
         let changes = {
             let mut stmt = tx.prepare(
                 "SELECT key, value, version FROM workspace_docs
-                 WHERE user_id = ?1 AND version > ?2 ORDER BY version",
+                 WHERE user_id = ?1 AND version > ?2 AND (?3 OR value IS NOT NULL)
+                 ORDER BY version",
             )?;
-            let rows = stmt.query_map(params![user, since], |r| {
+            let rows = stmt.query_map(params![user, since, with_tombstones], |r| {
                 Ok(WorkspaceDoc {
                     key: r.get(0)?,
                     value: r.get(1)?,
@@ -857,7 +890,12 @@ impl Store {
             .collect::<rusqlite::Result<Vec<_>>>()?
         };
         tx.commit()?;
-        Ok((outcomes, changes, seq))
+        Ok(WorkspaceSynced {
+            outcomes,
+            changes,
+            cursor: seq,
+            restored,
+        })
     }
 }
 

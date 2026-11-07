@@ -845,7 +845,28 @@ fn http_exact(
     s.read_to_string(&mut resp).unwrap();
     let (head, body) = resp.split_once("\r\n\r\n").unwrap();
     let status = head.split(' ').nth(1).unwrap().parse().unwrap();
-    (status, head.to_string(), body.to_string())
+    let chunked = head
+        .to_ascii_lowercase()
+        .contains("transfer-encoding: chunked");
+    let body = if chunked {
+        unchunked(body)
+    } else {
+        body.to_string()
+    };
+    (status, head.to_string(), body)
+}
+
+fn unchunked(mut rest: &str) -> String {
+    let mut body = String::new();
+    while let Some((size, after)) = rest.split_once("\r\n") {
+        let size = usize::from_str_radix(size, 16).unwrap();
+        if size == 0 {
+            break;
+        }
+        body.push_str(&after[..size]);
+        rest = &after[size + 2..];
+    }
+    body
 }
 
 const HTML: &str = "Accept: text/html,application/xhtml+xml,*/*;q=0.8";
@@ -5411,6 +5432,212 @@ fn test_workspace_needs_a_signed_in_user() {
     assert_eq!(workspace(open.port, None, empty).0, 404);
 }
 
+/// A request whose headers are in and whose body has only begun, so it stays running.
+#[cfg(feature = "scripting")]
+fn start_workspace_upload(port: u16, token: &str) -> std::net::TcpStream {
+    use std::io::Write;
+    let mut s = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+    let body = serde_json::json!({ "since": 0 }).to_string();
+    write!(
+        s,
+        "POST /workspace/sync HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\
+         Authorization: Bearer {token}\r\nContent-Type: application/json\r\n\
+         Content-Length: {}\r\n\r\n{}",
+        body.len(),
+        &body[..1]
+    )
+    .unwrap();
+    s.flush().unwrap();
+    // The server must have let it in before the test goes on.
+    std::thread::sleep(std::time::Duration::from_millis(150));
+    s
+}
+
+#[cfg(feature = "scripting")]
+fn finish_workspace_upload(mut s: std::net::TcpStream) -> String {
+    use std::io::{Read, Write};
+    let body = serde_json::json!({ "since": 0 }).to_string();
+    s.write_all(&body.as_bytes()[1..]).unwrap();
+    let mut answer = String::new();
+    s.read_to_string(&mut answer).unwrap();
+    answer
+}
+
+/// One sync per user at a time, and a caller past either limit costs no body read.
+#[cfg(feature = "scripting")]
+#[test]
+fn test_workspace_runs_one_sync_per_user() {
+    let fake = FakeProvider::start();
+    let srv = signin_server("workspace-one", &fake, &["github"]);
+    let p = srv.port;
+    let mut a = Browser::new(p);
+    let hers = web_sign_in(&mut a, &fake, "github", profile_of("github", 1, "a"));
+    let mut b = Browser::new(p);
+    let his = web_sign_in(&mut b, &fake, "github", profile_of("github", 2, "b"));
+    let empty = serde_json::json!({ "since": 0 });
+
+    let running = start_workspace_upload(p, &hers);
+    let (st, _, _) = http(
+        p,
+        "POST",
+        "/workspace/sync",
+        &[
+            JSON_POST[0],
+            JSON_POST[1],
+            &format!("Authorization: Bearer {hers}"),
+        ],
+        &empty.to_string(),
+    );
+    assert_eq!(st, 429, "her second one");
+    assert_eq!(workspace(p, Some(&his), empty.clone()).0, 200, "not his");
+    assert!(finish_workspace_upload(running).contains("\"cursor\""));
+    assert_eq!(
+        workspace(p, Some(&hers), empty.clone()).0,
+        200,
+        "free again"
+    );
+
+    // A client that hangs up frees it too.
+    drop(start_workspace_upload(p, &hers));
+    std::thread::sleep(std::time::Duration::from_millis(150));
+    assert_eq!(workspace(p, Some(&hers), empty).0, 200);
+}
+
+/// So many at once in all, however many accounts there are.
+#[cfg(feature = "scripting")]
+#[test]
+fn test_workspace_runs_so_many_syncs_in_all() {
+    let fake = FakeProvider::start();
+    let srv = signin_server("workspace-cap", &fake, &["github"]);
+    let p = srv.port;
+    let mut tokens = Vec::new();
+    for id in 1..10 {
+        let mut b = Browser::new(p);
+        tokens.push(web_sign_in(
+            &mut b,
+            &fake,
+            "github",
+            profile_of("github", id, "u"),
+        ));
+    }
+    let running: Vec<_> = tokens[..8]
+        .iter()
+        .map(|t| start_workspace_upload(p, t))
+        .collect();
+    let empty = serde_json::json!({ "since": 0 });
+    assert_eq!(workspace(p, Some(&tokens[8]), empty.clone()).0, 429);
+    drop(running);
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    assert_eq!(workspace(p, Some(&tokens[8]), empty).0, 200);
+}
+
+/// A body past the limit is refused, and nobody without a valid token has one read at all.
+#[cfg(feature = "scripting")]
+#[test]
+fn test_workspace_body_limit_and_order_of_checks() {
+    let fake = FakeProvider::start();
+    let srv = signin_server("workspace-body", &fake, &["github"]);
+    let p = srv.port;
+    let mut b = Browser::new(p);
+    let token = web_sign_in(&mut b, &fake, "github", profile_of("github", 1, "a"));
+    let auth = format!("Authorization: Bearer {token}");
+    let post = |auth: Option<&str>, body: &str| {
+        let mut headers = vec![JSON_POST[0], JSON_POST[1]];
+        headers.extend(auth);
+        http(p, "POST", "/workspace/sync", &headers, body).0
+    };
+    let huge = "x".repeat(1024 * 1024 + 1);
+    assert_eq!(post(Some(&auth), &huge), 413, "over 1 MiB");
+    assert_eq!(
+        post(None, &huge),
+        401,
+        "junk with no token is no parse error"
+    );
+    assert_eq!(post(Some("Authorization: Bearer no"), "junk"), 401);
+    assert_eq!(post(Some(&auth), "junk"), 400);
+    assert_eq!(post(Some(&auth), r#"{"since":"x"}"#), 422);
+    // Exactly the limit is read and parsed.
+    let mut exact = format!(r#"{{"since":0,"pad":"{}"#, "x".repeat(1024 * 1024));
+    exact.truncate(1024 * 1024 - 2);
+    exact.push_str("\"}");
+    assert_eq!(post(Some(&auth), &exact), 200);
+}
+
+/// What it writes is bounded, not only what it keeps: a pause, with nothing lost.
+#[cfg(feature = "scripting")]
+#[test]
+fn test_workspace_bytes_per_minute_are_bounded() {
+    let fake = FakeProvider::start();
+    let srv = signin_server("workspace-bytes", &fake, &["github"]);
+    let p = srv.port;
+    let mut a = Browser::new(p);
+    let hers = web_sign_in(&mut a, &fake, "github", profile_of("github", 1, "a"));
+    let mut b = Browser::new(p);
+    let his = web_sign_in(&mut b, &fake, "github", profile_of("github", 2, "b"));
+    let key = "chartgen.pane.1.big";
+    let auth = format!("Authorization: Bearer {hers}");
+    let mut refused_at = None;
+    for i in 0..12 {
+        let value = format!("{i}{}", "x".repeat(900 * 1024));
+        let body = serde_json::json!({ "since": 0, "writes": [write_doc(key, Some(&value), 0)] });
+        let (st, head, resp) = http(
+            p,
+            "POST",
+            "/workspace/sync",
+            &[JSON_POST[0], JSON_POST[1], &auth],
+            &body.to_string(),
+        );
+        if st == 429 {
+            assert!(
+                head.to_ascii_lowercase().contains("retry-after: 60"),
+                "{head}"
+            );
+            assert!(resp.contains("bytes"), "{resp}");
+            refused_at = Some(i);
+            break;
+        }
+        assert_eq!(st, 200, "{resp}");
+        let answer: serde_json::Value = serde_json::from_str(&resp).unwrap();
+        let result = &answer["results"][0];
+        assert_eq!(
+            result["status"], "too_large",
+            "over the document limit, and still counted"
+        );
+    }
+    assert_eq!(
+        refused_at,
+        Some(10),
+        "ten of 900 KiB pass 8 MiB, nine do not"
+    );
+    let empty = serde_json::json!({ "since": 0 });
+    assert_eq!(
+        workspace(p, Some(&his), empty).0,
+        200,
+        "not another account"
+    );
+}
+
+/// A cursor past the account's versions is said to be, for a device to send back what the
+/// file does not have.
+#[cfg(feature = "scripting")]
+#[test]
+fn test_workspace_says_when_the_cursor_is_past_it() {
+    let fake = FakeProvider::start();
+    let srv = signin_server("workspace-restored", &fake, &["github"]);
+    let p = srv.port;
+    let mut b = Browser::new(p);
+    let token = web_sign_in(&mut b, &fake, "github", profile_of("github", 1, "a"));
+    let (_, body) = workspace(p, Some(&token), serde_json::json!({ "since": 0 }));
+    assert_eq!(body["restored"], false);
+    let (_, body) = workspace(
+        p,
+        Some(&token),
+        serde_json::json!({ "since": 1, "writes": [write_doc("chartgen.pane.1.a", Some("v"), 0)] }),
+    );
+    assert_eq!(body["restored"], true, "{body}");
+    assert_eq!(body["cursor"], 1, "the write alone would have hidden it");
+}
+
 /// An application the user approved gets the tools and not the browser's data, though
 /// the token is the same user's.
 #[cfg(feature = "scripting")]
@@ -5477,7 +5704,7 @@ fn test_workspace_limits() {
     };
 
     let too_big = "x".repeat(512 * 1024 + 1);
-    let (_, body) = send(vec![write_doc("chartgen.a", Some(&too_big), 0)]);
+    let (_, body) = send(vec![write_doc("chartgen.pane.1.a", Some(&too_big), 0)]);
     assert_eq!(
         body["results"][0]["status"], "too_large",
         "{}",
@@ -5486,7 +5713,8 @@ fn test_workspace_limits() {
 
     let (_, body) = send(vec![
         write_doc("other.key", Some("v"), 0),
-        write_doc("chartgen.good", Some("v"), 0),
+        write_doc("chartgen.sidebar.tab", Some("v"), 0),
+        write_doc("chartgen.pane.1.good", Some("v"), 0),
     ]);
     let statuses: Vec<_> = body["results"]
         .as_array()
@@ -5496,12 +5724,12 @@ fn test_workspace_limits() {
         .collect();
     assert_eq!(
         statuses,
-        ["ok", "bad_key"],
+        ["ok", "bad_key", "bad_key"],
         "the good one still goes through: {body}"
     );
 
     let many: Vec<_> = (0..51)
-        .map(|i| write_doc(&format!("chartgen.k{i}"), Some("v"), 0))
+        .map(|i| write_doc(&format!("chartgen.pane.{i}.k"), Some("v"), 0))
         .collect();
     assert_eq!(send(many).0, 400, "too many in one request");
 
@@ -5510,7 +5738,7 @@ fn test_workspace_limits() {
     let mut refused = None;
     for i in 0..5 {
         let (_, body) = send(vec![write_doc(
-            &format!("chartgen.big{i}"),
+            &format!("chartgen.pane.{i}.big"),
             Some(&large),
             0,
         )]);
