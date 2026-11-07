@@ -1,7 +1,7 @@
 // The server keeps a place for everything but its long-lived streams (ADR-0051). A tab
 // refused one goes on working: the chart loads and live data falls back to polling.
 
-import { test, expect, expectChartRendered } from "./fixtures/app";
+import { test, expect, gotoApp } from "./fixtures/app";
 
 test("a tab refused a stream still shows its chart", async ({ page }) => {
   let refused = 0;
@@ -10,8 +10,7 @@ test("a tab refused a stream still shows its chart", async ({ page }) => {
     refused += 1;
     return route.fulfill({ status: 503, headers: { "Retry-After": "30" }, body: "Too many streams" });
   });
-  await page.goto("/");
-  await expectChartRendered(page);
+  await gotoApp(page);
   expect(refused).toBeGreaterThan(0);
   await expect(page.getByTestId("chart-load-error")).toHaveCount(0);
   await expect(page.getByText("sign-in failed")).toHaveCount(0);
@@ -31,8 +30,7 @@ test("a tab refused a stream comes back to it when told to, and to pushed data",
     refusals += 1;
     return route.fulfill({ status: 503, headers: { "Retry-After": "1" }, body: "Too many streams" });
   });
-  await page.goto("/");
-  await expectChartRendered(page);
+  await gotoApp(page);
   await expect.poll(() => refusals, { timeout: 15_000 }).toBe(3);
   await expect.poll(() => subscribed.length, { timeout: 45_000 }).toBeGreaterThan(0);
 });
@@ -51,8 +49,7 @@ test("a chart refused for a moment comes by itself, with no error shown", async 
       body: "Too many tool calls are running",
     });
   });
-  await page.goto("/");
-  await expectChartRendered(page);
+  await gotoApp(page);
   expect(refusals).toBe(2);
   await expect(page.getByTestId("chart-load-error")).toHaveCount(0);
 });
