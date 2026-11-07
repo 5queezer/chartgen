@@ -402,6 +402,12 @@ fn grid_close(seed: u64, t: i64, step: i64) -> f64 {
     base * (1.0 + wave + noise)
 }
 
+/// Whether `CHARTGEN_DATA_SOURCE=sample` is set: every upstream read answers from a
+/// deterministic source, with no network. The one place that reads the variable.
+pub fn sample_source() -> bool {
+    std::env::var("CHARTGEN_DATA_SOURCE").is_ok_and(|v| v == "sample")
+}
+
 /// Deterministic, network-free OHLCV source (`CHARTGEN_DATA_SOURCE=sample`).
 ///
 /// Bars sit on the epoch-aligned `interval` grid (weeks start on Monday;

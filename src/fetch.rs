@@ -29,9 +29,10 @@ pub enum DataSource {
 
 impl DataSource {
     pub fn from_env() -> Self {
-        match std::env::var("CHARTGEN_DATA_SOURCE").as_deref() {
-            Ok("sample") => DataSource::Sample,
-            _ => DataSource::Live,
+        if data::sample_source() {
+            DataSource::Sample
+        } else {
+            DataSource::Live
         }
     }
 }
@@ -95,13 +96,7 @@ pub fn now_ms() -> i64 {
 
 /// Shared blocking HTTP client; every upstream request times out after 10 s.
 pub(crate) fn http() -> &'static reqwest::blocking::Client {
-    static CLIENT: OnceLock<reqwest::blocking::Client> = OnceLock::new();
-    CLIENT.get_or_init(|| {
-        reqwest::blocking::Client::builder()
-            .timeout(Duration::from_secs(10))
-            .build()
-            .unwrap_or_else(|_| reqwest::blocking::Client::new())
-    })
+    chartgen::binance_gate::http()
 }
 
 fn bar_ts(bar: &Bar) -> Option<i64> {
