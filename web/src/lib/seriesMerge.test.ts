@@ -806,3 +806,108 @@ describe("indicators that fail on one side (indicator_errors)", () => {
     expect(r.series.indicator_errors).toEqual({ mine: error });
   });
 });
+
+describe("a price-based series", () => {
+  const priced = (box: number): SeriesPayload => ({
+    symbol: "BTCUSDT",
+    interval: "1h",
+    chart_style: "renko",
+    chart_params: { box: "atr", box_size: box },
+    bars: [
+      { t: 100, o: 1, h: 2, l: 1, c: 2, v: 1 },
+      { t: 130, o: 2, h: 3, l: 2, c: 3, v: 1 },
+    ],
+    indicators: {},
+    has_more: false,
+  });
+
+  it("merges a tail on the same box, whose bars have no even spacing", () => {
+    const tail = priced(5);
+    tail.bars = [
+      { t: 130, o: 2, h: 3, l: 2, c: 3, v: 2 },
+      { t: 131, o: 3, h: 4, l: 3, c: 4, v: 2 },
+      { t: 400, o: 4, h: 4.5, l: 4, c: 4.5, v: 1 },
+    ];
+    const r = mergeTail(priced(5), tail);
+    expect(r.ok && r.series.bars.map((b) => b.t)).toEqual([100, 130, 131, 400]);
+  });
+
+  describe("across a new build", () => {
+    const built = (anchor: number, bars: Array<[number, number]>): SeriesPayload => ({
+      ...priced(5),
+      anchor,
+      bars: bars.map(([t, c]) => ({ t, o: c, h: c, l: c, c, v: 1 })),
+    });
+    const held: Array<[number, number]> = [
+      [100, 1],
+      [130, 2],
+      [160, 3],
+      [190, 4],
+      [220, 5],
+    ];
+
+    it("takes a tail that ends before our newest bar, instead of freezing", () => {
+      const r = mergeTail(built(1000, held), built(2000, [[130, 2], [150, 9]]));
+      expect(r.ok && r.series.bars.map((b) => [b.t, b.c])).toEqual([
+        [100, 1],
+        [130, 2],
+        [150, 9],
+      ]);
+      expect(r.ok && r.series.anchor).toBe(2000);
+      expect(r.ok && r.from).toBe(1);
+    });
+
+    it("keeps the same anchor's outdated tail stale", () => {
+      const r = mergeTail(built(1000, held), built(1000, [[130, 2], [150, 9]]));
+      expect(r).toEqual({ ok: false, reason: "stale" });
+      // And one from a build older than ours.
+      const old = mergeTail(built(2000, held), built(1000, [[190, 2], [250, 9]]));
+      expect(old).toEqual({ ok: false, reason: "stale" });
+    });
+
+    it("takes a whole build inside the tail, whose first bar is not one of ours", () => {
+      const r = mergeTail(built(1000, held), built(2000, [[145, 7], [175, 8], [230, 9]]));
+      expect(r.ok && r.series.bars.map((b) => b.t)).toEqual([100, 130, 145, 175, 230]);
+      expect(r.ok && r.from).toBe(2);
+    });
+
+    it("lets a same-anchor tail that does not line up fail as before", () => {
+      const r = mergeTail(built(1000, held), built(1000, [[145, 7], [230, 9]]));
+      expect(r).toEqual({ ok: false, reason: "mismatch" });
+    });
+
+    it("still calls a tail past our newest bar a gap", () => {
+      const r = mergeTail(built(1000, held), built(2000, [[300, 7], [330, 9]]));
+      expect(r).toEqual({ ok: false, reason: "gap" });
+    });
+
+    it("rewrites indicator values from the same bar", () => {
+      const withLine = (s: SeriesPayload): SeriesPayload => ({
+        ...s,
+        indicators: {
+          a: {
+            label: "a",
+            is_overlay: true,
+            lines: [{ label: "a", color: "#fff", values: s.bars.map((b) => b.c) }],
+          } as SeriesPayload["indicators"][string],
+        },
+      });
+      const r = mergeTail(
+        withLine(built(1000, held)),
+        withLine(built(2000, [[130, 22], [150, 99]])),
+      );
+      expect(r.ok && r.series.indicators.a!.lines![0]!.values).toEqual([1, 22, 99]);
+    });
+
+    it("does not read the anchor of a page: paging keeps the chart's own", () => {
+      const r = mergeOlder(built(2000, [[500, 1], [530, 2]]), built(900, [[100, 7], [130, 8]]));
+      expect(r.ok && r.series.anchor).toBe(2000);
+      expect(r.ok && r.series.bars.map((b) => b.t)).toEqual([100, 130, 500, 530]);
+    });
+  });
+
+  it("will not mix bars of two boxes", () => {
+    expect(mergeTail(priced(5), priced(6))).toEqual({ ok: false, reason: "style" });
+    expect(mergeOlder(priced(5), priced(6))).toEqual({ ok: false, reason: "style" });
+  });
+});

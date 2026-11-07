@@ -10,6 +10,7 @@
 import { createSignal } from "solid-js";
 
 import { MAX_COMPARE } from "../lib/compare";
+import { isPriceBarType } from "../lib/priceBars";
 import { activePane } from "./grid";
 import {
   chartStoreOf,
@@ -52,7 +53,10 @@ const firstFree = (used: readonly number[]): number => {
 
 /** Compare symbols of one chart of the grid (ADR-0043). */
 function createCompareStore(pane: number) {
-  const { read, persist, scaleMode, setScaleMode } = chartStoreOf(pane);
+  const { read, persist, scaleMode, setScaleMode, chartType } = chartStoreOf(pane);
+  // Price-based bars have no time grid to join on (ADR-0047): the list stays for
+  // when the chart type changes back, and acts as if empty until then.
+  const drawn = () => !isPriceBarType(chartType());
 
   const initialSymbols = parseCompare(read("compare"));
   const initialSlots = parseSlots(read("compareSlots"), initialSymbols.length);
@@ -81,6 +85,25 @@ function createCompareStore(pane: number) {
 
     compareSymbols: (): string[] => compareEntries().map((e) => e.symbol),
 
+    /** The entries this chart draws. */
+    drawnEntries: (): CompareEntry[] => (drawn() ? compareEntries() : []),
+
+    /**
+     * The chart type changed whether the list is drawn. Only a drawn compare holds
+     * the axis in percent. A mode already there on the way back is the layout's or
+     * the user's, and `restore` stays as it was set.
+     */
+    syncDrawn(): void {
+      if (compareEntries().length === 0) return;
+      if (!drawn()) {
+        if (scaleMode() === "percentage") setScaleMode(restore ?? DEFAULT_SCALE_MODE);
+      } else if (scaleMode() !== "percentage") {
+        restore = scaleMode();
+        setScaleMode("percentage");
+        persist("compareRestore", restore);
+      }
+    },
+
     /** Scale mode the last compare symbol will return to; null while there are none. */
     compareRestore: (): ScaleMode | null => restore,
 
@@ -101,7 +124,7 @@ function createCompareStore(pane: number) {
       }
       if (list.length === 0) {
         restore = scaleMode();
-        setScaleMode("percentage");
+        if (drawn()) setScaleMode("percentage");
       }
       commit([...list, { symbol, slot: firstFree(list.map((e) => e.slot)) }]);
       return true;
@@ -166,6 +189,7 @@ const active = (): CompareStore => compareStoreOf(activePane());
 // The active chart's compare symbols.
 export const compareEntries = (): CompareEntry[] => active().compareEntries();
 export const compareSymbols = (): string[] => active().compareSymbols();
+export const drawnCompareEntries = (): CompareEntry[] => active().drawnEntries();
 export const compareRestore = (): ScaleMode | null => active().compareRestore();
 export const addCompare = (next: string, main: string): boolean =>
   active().addCompare(next, main);

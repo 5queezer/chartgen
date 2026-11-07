@@ -38,6 +38,7 @@ import {
 } from "../lib/alerts";
 import { keyName } from "../lib/instances";
 import { isTypingContext } from "../lib/keys";
+import { alertInterval } from "../lib/priceBars";
 import { priceDecimals } from "../lib/quote";
 import type { SeriesPayload } from "../types/responses";
 import {
@@ -486,7 +487,7 @@ export function AlertDialog(props: AlertDialogProps): JSX.Element {
 
   /** The new alert's source from the selects; a string is an error. */
   const buildSource = (d: Draft, value: number): AlertSource | string => {
-    const interval = props.series?.interval ?? "";
+    const interval = props.series ? alertInterval(props.series) : "";
     if (d.source.startsWith("event:")) {
       const ev = events().find((x) => x.ref === d.source);
       const signature = ev && indicatorSignatures()[ev.key];

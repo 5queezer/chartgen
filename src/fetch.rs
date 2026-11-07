@@ -468,16 +468,9 @@ fn evict<K: Eq + Hash + Clone, V>(
     }
 }
 
-/// Binance's finest kline. No chart's interval, so `Interval` does not read it, but a
-/// footprint on a 1m chart does (ADR-0048).
-const SECOND_KLINE: &str = "1s";
-
 /// Klines a refresh of `kline` reads: enough to overlap after up to `KLINE_CACHE_TTL`,
 /// with the forming one. A page costs the same weight at any size.
 fn kline_refresh(kline: &str) -> usize {
-    if kline == SECOND_KLINE {
-        return refresh_for(1);
-    }
     Interval::parse(kline).map_or(KLINE_REFRESH, |iv| refresh_for(iv.secs()))
 }
 
@@ -488,9 +481,6 @@ fn refresh_for(kline_secs: i64) -> usize {
 
 /// Unix ms at which the `kline` holding `t_ms` closes.
 fn kline_end_ms(kline: &str, t_ms: i64) -> i64 {
-    if kline == SECOND_KLINE {
-        return t_ms.div_euclid(1000).saturating_add(1).saturating_mul(1000);
-    }
     Interval::parse(kline).map_or(i64::MAX, |iv| {
         iv.grid_end(t_ms.div_euclid(1000)).saturating_mul(1000)
     })
@@ -1137,7 +1127,13 @@ pub fn fetch_yahoo(
     limit: usize,
     end_time_ms: Option<i64>,
 ) -> Result<Fetched, String> {
-    let interval = Interval::parse(interval)?.canonical();
+    let iv = Interval::parse(interval)?;
+    if iv.unit == Unit::Second {
+        return Err(format!(
+            "Yahoo has no seconds data: {symbol} cannot be charted at {interval}. Seconds intervals need a Binance symbol."
+        ));
+    }
+    let interval = iv.canonical();
     let interval = interval.as_str();
     let window = yahoo_window(interval, limit, end_time_ms, now_ms() / 1000);
 
@@ -1528,7 +1524,8 @@ fn yahoo_api_interval(interval: &str) -> &str {
     };
     match iv.unit {
         Unit::Minute | Unit::Hour if iv.secs() == 5_400 => "90m",
-        Unit::Minute | Unit::Hour => {
+        // `fetch_yahoo` refuses seconds before any window is built.
+        Unit::Second | Unit::Minute | Unit::Hour => {
             let minutes = iv.secs() / 60;
             YAHOO_INTRADAY
                 .iter()
@@ -1593,6 +1590,26 @@ fn yahoo_window(
         period2,
         age_clamped,
     }
+}
+
+/// How far back a read of `limit` bars surely reaches, if that is bounded by more
+/// than its rows. Only Yahoo answers with a window of time: the smaller of the
+/// window it allows and the time its newest `limit` rows cover. A price-based
+/// build keeps its start inside this (ADR-0047).
+pub(crate) fn read_reach_secs(
+    source: DataSource,
+    symbol: &str,
+    iv: &Interval,
+    limit: usize,
+    session: bool,
+) -> Option<i64> {
+    if source != DataSource::Live || detect_source(symbol) == "binance" {
+        return None;
+    }
+    let canonical = iv.canonical();
+    let now = now_ms() / 1000;
+    let window = yahoo_window(&canonical, limit, None, now);
+    Some((now - window.period1).min(chartgen::price_bars::rows_reach_secs(iv, limit, session)))
 }
 
 /// `symbol` as exactly one URL path segment: everything but RFC 3986
@@ -2274,6 +2291,77 @@ mod tests {
     }
 
     #[test]
+    fn a_yahoo_build_starts_inside_what_yahoo_returns_for_every_interval() {
+        use chartgen::price_bars::{anchor, rows_reach_secs, source_bars, BuildOpts};
+        let now = 1_750_000_000;
+        for tf in [
+            "1m", "2m", "5m", "7m", "15m", "30m", "45m", "90m", "1h", "2h", "4h", "1d", "2d",
+            "1wk", "1mo", "3mo",
+        ] {
+            let iv = Interval::parse(tf).unwrap();
+            let limit = source_bars(&iv, MAX_BASE_BARS);
+            let canonical = iv.canonical();
+            let window = yahoo_window(&canonical, limit, None, now);
+            for session in [true, false] {
+                let reach = (now - window.period1).min(rows_reach_secs(&iv, limit, session));
+                let opts = BuildOpts {
+                    max_base: MAX_BASE_BARS,
+                    end_time_ms: None,
+                    now_ms: now * 1000,
+                    reach_secs: Some(reach),
+                };
+                // At every point of a chunk: on its edge and just before the next.
+                let chunk = reach / 6;
+                for last in [now, now - now % chunk, now - now % chunk - 1] {
+                    let start = anchor(last, &iv, &opts);
+                    assert!(start < last, "{tf}");
+                    let w = yahoo_window(&canonical, limit, None, last);
+                    assert!(
+                        start >= w.period1,
+                        "{tf} session={session}: before the window"
+                    );
+                    // The newest `limit` rows reach it too.
+                    let stretch = rows_reach_secs(&iv, 1, session) / iv.secs();
+                    let rows = (last - start) / iv.secs() / stretch;
+                    assert!(
+                        rows <= limit as i64,
+                        "{tf} session={session}: {rows} rows back against {limit}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn only_yahoo_has_a_reach() {
+        let iv = Interval::parse("1h").unwrap();
+        assert_eq!(
+            read_reach_secs(DataSource::Sample, "AAPL", &iv, 5000, true),
+            None
+        );
+        assert_eq!(
+            read_reach_secs(DataSource::Live, "BTCUSDT", &iv, 5000, false),
+            None
+        );
+        assert!(read_reach_secs(DataSource::Live, "AAPL", &iv, 5000, true).is_some());
+    }
+
+    #[test]
+    fn yahoo_refuses_seconds_before_any_request() {
+        let e = fetch_yahoo("AAPL", "5s", 10, None).err().unwrap();
+        assert!(e.contains("Yahoo has no seconds data"), "{e}");
+    }
+
+    #[test]
+    fn sample_seconds_resample_from_one_second_klines_on_their_grid() {
+        let f = fetch_ohlcv(DataSource::Sample, "BTCUSDT", "5s", 20, None).unwrap();
+        let ts: Vec<i64> = f.data.bars.iter().map(|b| bar_ts(b).unwrap()).collect();
+        assert!(ts.len() >= 19, "{}", ts.len());
+        assert!(ts.iter().all(|t| t % 5 == 0));
+        assert!(ts.windows(2).all(|w| w[1] - w[0] == 5));
+    }
+
+    #[test]
     fn yahoo_window_sizes_and_end_time() {
         let now = 1_750_000_000;
         let w = yahoo_window("1d", 200, None, now);
@@ -2830,21 +2918,12 @@ mod tests {
             let Some(interval) = param("interval") else {
                 return reply(200, None, "[]".into());
             };
-            let second = interval == SECOND_KLINE;
-            let step_ms = if second {
-                1000
-            } else {
-                data::interval_secs(interval).unwrap() * 1000
-            };
+            let step_ms = data::interval_secs(interval).unwrap() * 1000;
             let limit: i64 = param("limit").unwrap().parse().unwrap();
             let end: i64 = param("endTime").map_or(i64::MAX, |e| e.parse().unwrap());
             // Binance's klines lie on the grid: weeks open on Monday, for example.
             let at = end.min(now_ms).div_euclid(1000);
-            let newest = if second {
-                at * 1000
-            } else {
-                Interval::parse(interval).unwrap().grid_start(at) * 1000
-            };
+            let newest = Interval::parse(interval).unwrap().grid_start(at) * 1000;
             let rows: Vec<String> = (0..limit)
                 .rev()
                 .map(|i| newest - i * step_ms)
@@ -4249,6 +4328,81 @@ mod tests {
     }
 
     #[test]
+    fn seconds_klines_size_their_refresh_and_close_by_the_grammar() {
+        // Both read the kline's name through `Interval::parse`, which falls back quietly
+        // if it does not know the unit: 16 klines, and a window that never closes.
+        assert_eq!(kline_refresh("1s"), refresh_for(1));
+        assert_eq!(kline_refresh("1s"), 130);
+        assert_eq!(kline_end_ms("1s", 1_700_000_000_500), 1_700_000_001_000);
+        assert_eq!(kline_end_ms("1s", 1_700_000_000_000), 1_700_000_001_000);
+    }
+
+    /// What a price-based chart reads costs what ADR-0047 says, through the shared window
+    /// and pages of ADR-0049. Each row: the chart's interval and a cold read's requests.
+    #[test]
+    fn a_price_based_read_goes_through_the_shared_window_and_pages() {
+        use chartgen::price_bars::{build, source_bars, BuildOpts, Kind, Params};
+        let params = Params::parse(
+            Kind::Renko,
+            Some(&serde_json::json!({ "box": "fixed", "box_size": 50.0 })),
+        )
+        .unwrap();
+        for (tf, cold) in [("1h", 5), ("1d", 5), ("1s", 5), ("5s", 20), ("7m", 20)] {
+            let fake = FakeBinance::new(1_000_000, 1);
+            let client = client_of(&fake);
+            let iv = Interval::parse(tf).unwrap();
+            let limit = source_bars(&iv, MAX_BASE_BARS);
+            let read = || fetch_binance_via(&client, "BTCUSDT", tf, limit, None).unwrap();
+
+            let first = read();
+            assert_eq!(fake.requests(), cold, "{tf}: a cold read");
+            let opts = BuildOpts {
+                max_base: MAX_BASE_BARS,
+                end_time_ms: None,
+                now_ms: fake.now_s.load(Ordering::SeqCst) * 1000,
+                reach_secs: None,
+            };
+            assert!(!build(&first.data.bars, &iv, &params, &opts)
+                .unwrap()
+                .bars
+                .is_empty());
+
+            // Another poll in the same moment sends nothing, and neither does another
+            // chart on the same kline.
+            read();
+            fetch_binance_via(&client, "BTCUSDT", tf, 10, None).unwrap();
+            assert_eq!(fake.requests(), cold, "{tf}: repeats");
+
+            // A later poll costs one request, however long the gap inside the window's
+            // lifetime: the refresh must overlap it, or it would read the window again.
+            for gap in [2, 100] {
+                let before = fake.requests();
+                fake.advance(gap);
+                let polled = read();
+                assert_eq!(fake.requests(), before + 1, "{tf}: a poll after {gap} s");
+                let t: Vec<i64> = polled
+                    .data
+                    .bars
+                    .iter()
+                    .map(|b| bar_ts(b).unwrap())
+                    .collect();
+                assert!(
+                    t.windows(2).all(|w| w[1] == w[0] + iv.secs()),
+                    "{tf}: gapless"
+                );
+            }
+
+            // A history page is a walk of its own, kept once its klines have closed.
+            let end = bar_ts(&first.data.bars[0]).unwrap() * 1000;
+            let before = fake.requests();
+            fetch_binance_via(&client, "BTCUSDT", tf, limit, Some(end)).unwrap();
+            assert_eq!(fake.requests(), before + cold, "{tf}: a page");
+            fetch_binance_via(&client, "BTCUSDT", tf, limit, Some(end)).unwrap();
+            assert_eq!(fake.requests(), before + cold, "{tf}: the same page again");
+        }
+    }
+
+    #[test]
     fn a_refresh_overlaps_after_the_whole_lifetime_on_any_kline() {
         for secs in [1, 5, 60, 3_600, 86_400] {
             let reach = refresh_for(secs) as i64 * secs;
@@ -4256,7 +4410,7 @@ mod tests {
             assert!(refresh_for(secs) <= BINANCE_MAX_LIMIT);
         }
         assert_eq!(refresh_for(1), 130);
-        // Binance's 1s kline is no chart interval, and a window on it must still work.
+        // A footprint on a 1m chart reads Binance's 1s kline (ADR-0048).
         assert_eq!(kline_refresh("1s"), 130);
         assert_eq!(kline_end_ms("1s", 1_500), 2_000);
         assert_eq!(kline_end_ms("1s", 2_000), 3_000);

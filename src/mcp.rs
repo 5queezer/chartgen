@@ -13,6 +13,7 @@ use chartgen::data;
 use chartgen::engine::Engine;
 use chartgen::indicator::Indicator;
 use chartgen::indicators;
+use chartgen::price_bars;
 use chartgen::renderer;
 #[cfg(feature = "scripting")]
 use chartgen::scripting;
@@ -427,9 +428,36 @@ fn chart_style_arg(args: &Value) -> Result<&'static str, &'static str> {
         Some(v) => match v.as_str() {
             Some("candles") => Ok("candles"),
             Some("heikin_ashi") => Ok("heikin_ashi"),
-            _ => Err("chart_style must be one of 'candles' or 'heikin_ashi'."),
+            Some(s) => price_bars::STYLES
+                .iter()
+                .find(|n| **n == s)
+                .copied()
+                .ok_or(CHART_STYLE_ERROR),
+            None => Err(CHART_STYLE_ERROR),
         },
     }
+}
+
+const CHART_STYLE_ERROR: &str = "chart_style must be one of 'candles', 'heikin_ashi', 'renko', 'kagi', 'point_figure', 'line_break' or 'range'.";
+
+/// The inputs of a price-based `chart_style` (ADR-0047); `None` for any other
+/// style, which takes no `chart_params`.
+fn chart_params_arg(args: &Value, style: &str) -> Result<Option<price_bars::Params>, String> {
+    let given = args.get("chart_params").filter(|v| !v.is_null());
+    match price_bars::Kind::from_style(style) {
+        Some(kind) => price_bars::Params::parse(kind, given).map(Some),
+        None if given.is_some() => Err(format!(
+            "chart_params does not apply to chart_style {style}."
+        )),
+        None => Ok(None),
+    }
+}
+
+/// `params` with the box its build ended up on, as a response echoes it.
+fn chart_params_echo(params: &price_bars::Params, box_size: f64) -> Value {
+    let mut echo = params.clone();
+    echo.box_size = (box_size > 0.0).then_some(box_size);
+    echo.to_json()
 }
 
 /// The canonical form of a requested timeframe, or why it is rejected
@@ -494,6 +522,10 @@ pub(crate) fn generate_chart(
         Ok(s) => s,
         Err(e) => return tool_err(id, e),
     };
+    let price_params = match chart_params_arg(args, chart_style) {
+        Ok(p) => p,
+        Err(e) => return tool_err(id, &e),
+    };
 
     // Accept both "symbol" and "ticker" parameter names
     let symbol = args
@@ -555,12 +587,24 @@ pub(crate) fn generate_chart(
     } else {
         0
     };
-    let requested = bars + warmup;
+    let parsed_interval = chartgen::interval::Interval::parse(interval);
+    // Price-based bars read a fixed window of source bars, however many bars the
+    // call wants: how many they make is only known afterwards (ADR-0047).
+    let requested = match (&price_params, &parsed_interval) {
+        (Some(_), Ok(iv)) => price_bars::source_bars(iv, fetch::MAX_BASE_BARS),
+        _ => bars + warmup,
+    };
+    if price_params.is_some() && symbol.is_none() && source == fetch::DataSource::Live {
+        return tool_err(
+            id,
+            "This chart_style needs a ticker: the demo series has no times.",
+        );
+    }
 
     // Without a ticker the live source serves the synthetic demo series
     // (no timestamps, so nothing to page). With one, a fetch failure is an
     // error in every format: sample bars would masquerade as market data.
-    let (mut data, has_more) = match (symbol, source) {
+    let (mut data, mut has_more) = match (symbol, source) {
         (None, fetch::DataSource::Live) if end_time.is_none() => {
             (data::sample_data(requested), false)
         }
@@ -575,6 +619,7 @@ pub(crate) fn generate_chart(
                 // Warmup bars are trimmed from the payload. When history ran
                 // out they are still older bars the client has not seen, so
                 // it must page on to get them (ADR-0032).
+                Ok(f) if price_params.is_some() => (f.data, f.has_more),
                 Ok(f) => {
                     let more = f.has_more || f.data.len() > bars;
                     (f.data, more)
@@ -590,6 +635,38 @@ pub(crate) fn generate_chart(
     if chart_style == "heikin_ashi" {
         data = data.heikin_ashi();
     }
+    let mut build_anchor = None;
+    let mut style_label = None;
+    let chart_params_json = match (&price_params, &parsed_interval) {
+        (Some(params), Ok(iv)) => {
+            let opts = price_bars::BuildOpts {
+                max_base: fetch::MAX_BASE_BARS,
+                end_time_ms: end_time,
+                now_ms: fetch::now_ms(),
+                reach_secs: fetch::read_reach_secs(
+                    source,
+                    symbol.unwrap_or(""),
+                    iv,
+                    requested,
+                    data.session.is_some(),
+                ),
+            };
+            let built = match price_bars::build(&data.bars, iv, params, &opts) {
+                Ok(b) => b,
+                Err(e) => return tool_err(id, &e),
+            };
+            data.bars = built.bars;
+            build_anchor = built.anchor;
+            style_label = Some(params.label(built.box_size));
+            has_more |= data.len() > bars;
+            // png and summary show exactly `bars`, as for every other style.
+            if !want_series {
+                data.bars.drain(..data.len().saturating_sub(bars));
+            }
+            Some(chart_params_echo(params, built.box_size))
+        }
+        _ => None,
+    };
 
     // Compute indicators up-front (once) so both the summary and the series
     // payloads can reuse the same PanelResult values — no recomputation,
@@ -612,6 +689,10 @@ pub(crate) fn generate_chart(
             "price": ohlcv_summary(&data),
             "indicators": Value::Object(indicators_json),
         });
+        if let Some(chart_params) = &chart_params_json {
+            summary["chart_style"] = json!(chart_style);
+            summary["chart_params"] = chart_params.clone();
+        }
         if let Some(errors) = &errors_value {
             summary["indicator_errors"] = errors.clone();
         }
@@ -622,10 +703,23 @@ pub(crate) fn generate_chart(
 
     let series_value = want_series.then(|| {
         let mut series = series_json(&data, &computed, &inds, bars, chart_style, has_more);
+        if let Some(chart_params) = &chart_params_json {
+            series["chart_params"] = chart_params.clone();
+            series["anchor"] = json!(build_anchor);
+        }
         // Only a chart's full load asks. Pages and tails keep the load's profile
         // (ADR-0009), so reading finer bars for them would pay for nothing.
         if args.get("profile_intrabars").and_then(Value::as_bool) == Some(true) {
-            apply_intrabar_profiles(&mut series, &data, &computed, &inds, bars, source);
+            let price_based = chart_params_json.is_some();
+            apply_intrabar_profiles(
+                &mut series,
+                &data,
+                &computed,
+                &inds,
+                bars,
+                source,
+                price_based,
+            );
         }
         if let Some(errors) = &errors_value {
             series["indicator_errors"] = errors.clone();
@@ -644,7 +738,14 @@ pub(crate) fn generate_chart(
 
         let results: Vec<&chartgen::indicator::PanelResult> =
             computed.iter().map(|(_, pr)| pr).collect();
-        if let Err(e) = renderer::render_results(&data, &results, &tmp_path, width, height) {
+        if let Err(e) = renderer::render_labeled(
+            &data,
+            &results,
+            &tmp_path,
+            width,
+            height,
+            style_label.as_deref(),
+        ) {
             return tool_err(id, &format!("Render error: {}", e));
         }
 
@@ -698,6 +799,7 @@ fn apply_intrabar_profiles(
     inds: &[&dyn Indicator],
     bars: usize,
     source: fetch::DataSource,
+    price_based: bool,
 ) {
     if !inds.iter().any(|i| i.wants_intrabars()) {
         return;
@@ -708,7 +810,7 @@ fn apply_intrabar_profiles(
         interval: data.interval.clone(),
         session: data.session,
     };
-    let Some(ltf) = intrabars_for(&visible, source) else {
+    let Some(ltf) = intrabars_for(&visible, source, price_based) else {
         return;
     };
     for ((key, _), ind) in computed.iter().zip(inds) {
@@ -728,14 +830,22 @@ const PROFILE_BUDGET: std::time::Duration = std::time::Duration::from_secs(8);
 fn intrabars_for(
     visible: &chartgen::data::OhlcvData,
     source: fetch::DataSource,
+    price_based: bool,
 ) -> Option<(chartgen::data::OhlcvData, &'static str)> {
     let symbol = visible.symbol.as_deref()?;
     let iv = chartgen::interval::Interval::parse(visible.interval.as_deref()?).ok()?;
     let first: i64 = visible.bars.first()?.date.parse().ok()?;
     let last: i64 = visible.bars.last()?.date.parse().ok()?;
     let age = fetch::now_ms() / 1000 - first;
-    let (name, secs) =
-        intrabars::plan(fetch::detect_source(symbol), iv.secs(), visible.len(), age)?;
+    // A price-based bar covers however long its move took (ADR-0047), so these bars say
+    // nothing of the time to read. Planned on their count, the read would stop at its
+    // page limit and the profile would hold only the chart's newest part.
+    let plan_bars = if price_based {
+        ((iv.grid_end(last) - first) / iv.secs()).max(1) as usize
+    } else {
+        visible.len()
+    };
+    let (name, secs) = intrabars::plan(fetch::detect_source(symbol), iv.secs(), plan_bars, age)?;
     let list = intrabars::load_within(
         PROFILE_BUDGET,
         source,
@@ -876,7 +986,13 @@ fn series_json(
         }
         let mut entry = panel_result_to_series_json(&trimmed, &visible);
         add_marks_to_series_json(&mut entry, pr, data, offset);
-        if let Some(p) = ind.projection(data) {
+        // Price-based bars have no next bar's time to project to (ADR-0047).
+        let projection = if price_bars::Kind::from_style(chart_style).is_none() {
+            ind.projection(data)
+        } else {
+            None
+        };
+        if let Some(p) = projection {
             // Every bar, not the visible ones: the times read closed days off
             // the loaded bars, and a two-bar tail shows too few.
             entry["future"] = projection_to_json(&p, data);
@@ -893,35 +1009,74 @@ fn series_json(
     })
 }
 
+/// What a pushed price-based tail is built with: inputs with the box pinned, and
+/// the newest bar's time in the last tail sent, if there was one.
+pub(crate) struct PriceTail {
+    pub params: price_bars::Params,
+    pub since: Option<i64>,
+}
+
 /// The `format=series` payload for the newest `bars` of `raw` (symbol and
 /// interval set, `bars` + warmup long), computed exactly like
 /// `generate_chart`: Heikin Ashi first, then indicators over every bar, then
-/// trimmed. Chart push (ADR-0021) builds its tails with this.
+/// trimmed. `price` builds a price-based style first (ADR-0047), its box already
+/// pinned. Chart push (ADR-0021) builds its tails with this.
 pub(crate) fn series_tail(
     raw: &chartgen::data::OhlcvData,
     indicators: &Value,
     chart_style: &str,
+    price: Option<&PriceTail>,
     bars: usize,
 ) -> Result<Value, String> {
     let (panel_indicators, keys, unknown, invalid, _) = parse_panels(indicators, None);
     check_panels(&unknown, &invalid)?;
-    let ha;
+    let derived;
+    let mut echo = None;
+    let mut build_anchor = None;
+    let mut bars = bars;
     let data = if chart_style == "heikin_ashi" {
-        ha = raw.heikin_ashi();
-        &ha
+        derived = raw.heikin_ashi();
+        &derived
+    } else if let Some(PriceTail { params, since }) = price {
+        let iv = chartgen::interval::Interval::parse(raw.interval.as_deref().unwrap_or(""))?;
+        let opts = price_bars::BuildOpts {
+            max_base: fetch::MAX_BASE_BARS,
+            end_time_ms: None,
+            now_ms: fetch::now_ms(),
+            // Pushes are Binance only, whose reads are bounded by rows.
+            reach_secs: None,
+        };
+        let built = price_bars::build(&raw.bars, &iv, params, &opts)?;
+        echo = Some(chart_params_echo(params, built.box_size));
+        build_anchor = built.anchor;
+        // A client that holds the last tail needs only what came since, and an overlap.
+        if let Some(since) = since {
+            let new = built
+                .bars
+                .iter()
+                .rev()
+                .take_while(|b| b.date.parse::<i64>().is_ok_and(|t| t >= *since))
+                .count();
+            bars = bars.min(new + 1).max(2);
+        }
+        derived = chartgen::data::OhlcvData {
+            bars: built.bars,
+            symbol: raw.symbol.clone(),
+            interval: raw.interval.clone(),
+            session: raw.session,
+        };
+        &derived
     } else {
         raw
     };
     let (computed, inds, _) = compute_panels(data, &keys, &panel_indicators);
     let has_more = data.len() > bars;
-    Ok(series_json(
-        data,
-        &computed,
-        &inds,
-        bars,
-        chart_style,
-        has_more,
-    ))
+    let mut series = series_json(data, &computed, &inds, bars, chart_style, has_more);
+    if let Some(echo) = echo {
+        series["chart_params"] = echo;
+        series["anchor"] = json!(build_anchor);
+    }
+    Ok(series)
 }
 
 /// `subscribe_chart`: push `generate_chart(format=series, bars=2, warmup)`
@@ -957,6 +1112,18 @@ fn tool_subscribe_chart(
         Ok(s) => s,
         Err(e) => return tool_err(id, e),
     };
+    let price_params = match chart_params_arg(args, chart_style) {
+        Ok(p) => p,
+        Err(e) => return tool_err(id, &e),
+    };
+    // A box resolved here could differ from the one the client's chart was built on,
+    // and a group outlives its first subscriber's load (ADR-0047).
+    if price_params.as_ref().is_some_and(|p| p.resolves_box()) {
+        return tool_err(
+            id,
+            "chart_params needs box_size here: send the box_size generate_chart echoed, so pushed bars line up with the chart you loaded.",
+        );
+    }
     let indicators = indicators_arg(args);
     // Every push recomputes every indicator.
     if indicators
@@ -980,13 +1147,26 @@ fn tool_subscribe_chart(
             &format!("{NOT_PUSHABLE}: the chart uses your scripts; poll generate_chart instead"),
         );
     }
+    // A price-based chart holds its whole read of source bars, as its load does.
+    let (warmup, asked) = match (
+        &price_params,
+        chartgen::interval::Interval::parse(&timeframe),
+    ) {
+        (Some(_), Ok(iv)) => {
+            let w =
+                price_bars::source_bars(&iv, fetch::MAX_BASE_BARS) - crate::chart_push::TAIL_BARS;
+            (w, w)
+        }
+        _ => (warmup_arg(args, &panels), asked_warmup(args)),
+    };
     let req = ChartRequest {
         ticker: ticker.to_string(),
         timeframe,
         indicators: indicators.to_string(),
         chart_style: chart_style.to_string(),
-        warmup: warmup_arg(args, &panels),
-        asked_warmup: asked_warmup(args),
+        chart_params: price_params.as_ref().map(|p| p.to_json().to_string()),
+        warmup,
+        asked_warmup: asked,
     };
     match push.hub.subscribe(token, &push.client, &push.stream, req) {
         Ok(sub) => tool_ok(id, json!({ "subscription_id": sub })),
@@ -4138,6 +4318,36 @@ mod tests {
     }
 
     #[test]
+    fn a_price_based_profile_reads_finer_bars_only_for_all_the_time_it_covers() {
+        let renko = |bars: u64, box_size: f64| {
+            let args = json!({ "ticker": "BTCUSDT", "timeframe": "1h", "bars": bars,
+                "format": "series", "indicators": ["volume_profile"], "profile_intrabars": true,
+                "chart_style": "renko", "chart_params": { "box": "fixed", "box_size": box_size },
+                "end_time": 1_699_920_000_000i64 });
+            flow_series(args)
+        };
+        let hours = |s: &Value| {
+            let bars = s["bars"].as_array().unwrap();
+            let t = |b: &Value| b["t"].as_i64().unwrap();
+            (t(bars.last().unwrap()) - t(&bars[0])) / 3_600
+        };
+        let profile = |s: &Value| s["indicators"]["volume_profile"].clone();
+
+        // 100 bars afford 3m on a 1h chart, by their count. These cover far more than 100
+        // hours, and all of them at 3m would take more than a read may.
+        let long = renko(100, 6.4);
+        assert_eq!(long["bars"].as_array().unwrap().len(), 100);
+        assert!(hours(&long) * 20 > intrabars::MAX_INTRABARS as i64);
+        assert_eq!(profile(&long)["profile_interval"], "15m");
+
+        // No finer bars can cover this long: the profile stays computed from its own.
+        let longest = renko(100, 32.0);
+        assert!(hours(&longest) * 2 > intrabars::MAX_INTRABARS as i64);
+        assert_eq!(profile(&longest).get("profile_interval"), None);
+        assert!(!profile(&longest)["hbars"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
     fn a_finer_profile_differs_from_spreading_each_bar() {
         use chartgen::indicator::Indicator as _;
         // A bar sold off at its high, and traded nearly all its volume in the top row.
@@ -4992,6 +5202,7 @@ mod tests {
             &raw,
             &json!(["rsi", { "name": "rsi", "length": 21, "id": "rsi#2" }]),
             "candles",
+            None,
             2,
         )
         .unwrap();
@@ -5001,6 +5212,7 @@ mod tests {
             &raw,
             &json!([{ "name": "rsi", "length": 21 }]),
             "candles",
+            None,
             2,
         )
         .unwrap();
@@ -5329,12 +5541,213 @@ mod tests {
     fn chart_style_rejects_unknown_value() {
         let resp = generate_chart(
             Some(json!(1)),
-            &json!({ "chart_style": "renko", "format": "series" }),
+            &json!({ "chart_style": "tiles", "format": "series" }),
             fetch::DataSource::Sample,
             None,
         );
         assert!(is_error(&resp));
         assert!(response_text(&resp).contains("chart_style"));
+    }
+
+    // --- price-based bars (ADR-0047) ---
+
+    fn price_args(style: &str, extra: Value) -> Value {
+        let mut args = json!({
+            "ticker": "BTCUSDT", "timeframe": "1h", "bars": 300, "warmup": 300,
+            "end_time": END_4H_MS, "indicators": ["rsi", "ichimoku"], "format": "series",
+            "chart_style": style,
+        });
+        args.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        args
+    }
+
+    #[test]
+    fn every_price_style_builds_timed_bars_and_runs_indicators_on_them() {
+        for style in price_bars::STYLES {
+            let p = series_payload(price_args(style, json!({})), fetch::DataSource::Sample);
+            assert_eq!(p["chart_style"], style);
+            let t = bar_ts(&p);
+            assert!(t.len() > 5, "{style}: {}", t.len());
+            assert!(t.windows(2).all(|w| w[1] > w[0]), "{style}");
+            assert!(*t.last().unwrap() * 1000 < END_4H_MS, "{style}");
+            // Times are not evenly spaced, unlike the 1h bars they come from.
+            let gaps: HashSet<i64> = t.windows(2).map(|w| w[1] - w[0]).collect();
+            assert!(gaps.len() > 1, "{style}");
+            let rsi = &p["indicators"]["rsi"]["lines"][0]["values"];
+            assert_eq!(rsi.as_array().unwrap().len(), t.len(), "{style}");
+            assert!(
+                p["indicators"]["ichimoku"].get("future").is_none(),
+                "{style}: no next bar's time to project to"
+            );
+            if style == "line_break" {
+                assert_eq!(p["chart_params"], json!({ "lines": 3 }));
+            } else {
+                assert!(
+                    p["chart_params"]["box_size"].as_f64().unwrap() > 0.0,
+                    "{style}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn price_bars_differ_from_candles_and_a_later_call_keeps_a_pinned_box() {
+        let first = series_payload(price_args("renko", json!({})), fetch::DataSource::Sample);
+        let size = first["chart_params"]["box_size"].as_f64().unwrap();
+        for b in first["bars"].as_array().unwrap() {
+            let body = (b["o"].as_f64().unwrap() - b["c"].as_f64().unwrap()).abs();
+            assert!((body - size).abs() < 1e-6, "{b}");
+            assert_eq!(
+                b["h"],
+                b["o"].as_f64().unwrap().max(b["c"].as_f64().unwrap())
+            );
+        }
+        // Earlier bars, a different ATR: the box sent back still rules.
+        let page = series_payload(
+            price_args(
+                "renko",
+                json!({ "end_time": END_4H_MS - 2_000 * HOUR_MS,
+                        "chart_params": { "box_size": size } }),
+            ),
+            fetch::DataSource::Sample,
+        );
+        assert_eq!(page["chart_params"]["box_size"].as_f64().unwrap(), size);
+        let unpinned = series_payload(
+            price_args("renko", json!({ "end_time": END_4H_MS - 2_000 * HOUR_MS })),
+            fetch::DataSource::Sample,
+        );
+        assert!(unpinned["chart_params"]["box_size"].as_f64().unwrap() > 0.0);
+    }
+
+    #[test]
+    fn a_price_page_ends_before_the_oldest_bar_it_is_given() {
+        for style in price_bars::STYLES {
+            let load = series_payload(price_args(style, json!({})), fetch::DataSource::Sample);
+            let oldest = bar_ts(&load)[0];
+            let params = load["chart_params"].clone();
+            let page = series_payload(
+                price_args(
+                    style,
+                    json!({ "end_time": oldest * 1000, "chart_params": params }),
+                ),
+                fetch::DataSource::Sample,
+            );
+            assert!(bar_ts(&page).iter().all(|t| *t < oldest), "{style}");
+            assert!(!bar_ts(&page).is_empty(), "{style}");
+        }
+    }
+
+    #[test]
+    fn price_styles_reach_png_and_summary() {
+        let args = json!({
+            "ticker": "BTCUSDT", "timeframe": "1h", "bars": 40, "end_time": END_4H_MS,
+            "indicators": ["rsi"], "format": "both", "chart_style": "point_figure",
+            "chart_params": { "box": "percent", "percent": 2, "reversal": 2 },
+            "width": 800, "height": 500,
+        });
+        let resp = generate_chart(Some(json!(1)), &args, fetch::DataSource::Sample, None);
+        assert!(!is_error(&resp), "{resp}");
+        let content = resp["result"]["content"].as_array().unwrap();
+        assert_eq!(content[0]["type"], "image");
+        let summary: Value = serde_json::from_str(content[1]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(summary["chart_style"], "point_figure");
+        assert_eq!(summary["chart_params"]["reversal"], 2);
+        assert_eq!(summary["chart_params"]["percent"], 2.0);
+        assert!(summary["chart_params"]["box_size"].as_f64().unwrap() > 0.0);
+    }
+
+    #[test]
+    fn a_price_series_names_its_build() {
+        for style in price_bars::STYLES {
+            let p = series_payload(price_args(style, json!({})), fetch::DataSource::Sample);
+            assert!(p["anchor"].as_i64().is_some(), "{style}: {}", p["anchor"]);
+        }
+        let candles = series_payload(
+            json!({ "ticker": "BTCUSDT", "timeframe": "1h", "bars": 5, "end_time": END_4H_MS,
+                    "indicators": [], "format": "series" }),
+            fetch::DataSource::Sample,
+        );
+        assert!(candles.get("anchor").is_none());
+    }
+
+    #[test]
+    fn price_style_errors_say_what_is_wrong() {
+        for (args, source, want) in [
+            (
+                json!({ "ticker": "BTCUSDT", "chart_params": { "lines": 3 }, "format": "series" }),
+                fetch::DataSource::Sample,
+                "does not apply",
+            ),
+            (
+                price_args("renko", json!({ "chart_params": { "box": "fixed" } })),
+                fetch::DataSource::Sample,
+                "needs box_size",
+            ),
+            (
+                price_args(
+                    "range",
+                    json!({ "chart_params": { "box": "fixed", "box_size": 1e-9 } }),
+                ),
+                fetch::DataSource::Sample,
+                "too small",
+            ),
+            (
+                json!({ "chart_style": "renko", "format": "series" }),
+                fetch::DataSource::Live,
+                "needs a ticker",
+            ),
+        ] {
+            let resp = generate_chart(Some(json!(1)), &args, source, None);
+            assert!(is_error(&resp), "{args}");
+            assert!(
+                response_text(&resp).contains(want),
+                "{}",
+                response_text(&resp)
+            );
+        }
+    }
+
+    #[test]
+    fn a_pushed_price_tail_is_a_slice_of_the_full_series() {
+        let raw = data::sample_ohlcv("BTCUSDT", "1h", 3_000, None, END_4H_MS).unwrap();
+        let params = price_bars::Params::parse(
+            price_bars::Kind::Renko,
+            Some(&json!({ "box": "percent", "percent": 0.5 })),
+        )
+        .unwrap();
+        let params = PriceTail {
+            params,
+            since: None,
+        };
+        let mut raw = raw;
+        raw.symbol = Some("BTCUSDT".into());
+        raw.interval = Some("1h".into());
+        let indicators = json!(["rsi"]);
+        let full = series_tail(&raw, &indicators, "renko", Some(&params), 3_000).unwrap();
+        let tail = series_tail(&raw, &indicators, "renko", Some(&params), 8).unwrap();
+        assert_eq!(tail["chart_params"], full["chart_params"]);
+        let bars = full["bars"].as_array().unwrap();
+        assert!(bars.len() > 8);
+        assert_eq!(tail["bars"].as_array().unwrap()[..], bars[bars.len() - 8..]);
+        // After a tail, only what is new since it, and an overlap.
+        let newest = bars[bars.len() - 3]["t"].as_i64().unwrap();
+        let since = PriceTail {
+            params: params.params.clone(),
+            since: Some(newest),
+        };
+        let short = series_tail(&raw, &indicators, "renko", Some(&since), 64).unwrap();
+        assert_eq!(
+            short["bars"].as_array().unwrap()[..],
+            bars[bars.len() - 4..]
+        );
+        let at_end = PriceTail {
+            params: params.params.clone(),
+            since: Some(i64::MAX),
+        };
+        let least = series_tail(&raw, &indicators, "renko", Some(&at_end), 64).unwrap();
+        assert_eq!(least["bars"].as_array().unwrap().len(), 2);
     }
 
     #[test]
@@ -5757,7 +6170,7 @@ mod tests {
         raw.symbol = Some("BTCUSDT".into());
         raw.interval = Some("1d".into());
         let t = |bars: usize| -> Vec<i64> {
-            let v = series_tail(&raw, &json!(["ichimoku"]), "candles", bars).unwrap();
+            let v = series_tail(&raw, &json!(["ichimoku"]), "candles", None, bars).unwrap();
             serde_json::from_value(v["indicators"]["ichimoku"]["future"]["t"].clone()).unwrap()
         };
         let (full, tail) = (t(100), t(2));
@@ -6092,6 +6505,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn subscribe_chart_takes_a_price_based_chart_with_its_box() {
+        let hub = crate::chart_push::ChartHub::new(
+            Arc::new(crate::chart_push::SampleSource),
+            crate::chart_push::Limits::default(),
+        );
+        let (tx, _rx) = tokio::sync::mpsc::channel(crate::chart_push::STREAM_BUFFER);
+        hub.link_stream("s", tx);
+        let push = PushCtx {
+            hub: hub.clone(),
+            stream: "s".into(),
+            client: "127.0.0.1".into(),
+        };
+        // The box echoed by a load, a fixed one, or a type with none.
+        for extra in [
+            json!({ "chart_style": "renko", "chart_params": { "box": "atr", "box_size": 3.4 } }),
+            json!({ "chart_style": "kagi",
+                    "chart_params": { "box": "percent", "percent": 2, "box_size": 3.4 } }),
+            json!({ "chart_style": "range", "chart_params": { "box": "fixed", "box_size": 5 } }),
+            json!({ "chart_style": "line_break" }),
+        ] {
+            let mut args = json!({ "ticker": "ETHUSDT", "timeframe": "1m", "indicators": [] });
+            args.as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            let resp = call("subscribe_chart", args.clone(), Some(&push), Some("tok"));
+            assert!(!is_error(&resp), "{args}: {}", response_text(&resp));
+        }
+    }
+
+    #[tokio::test]
     async fn subscribe_chart_validates_and_round_trips() {
         let hub = crate::chart_push::ChartHub::new(
             Arc::new(crate::chart_push::SampleSource),
@@ -6119,8 +6562,17 @@ mod tests {
                 "Unknown indicator",
             ),
             (
-                json!({ "ticker": "BTCUSDT", "chart_style": "renko" }),
+                json!({ "ticker": "BTCUSDT", "chart_style": "tiles" }),
                 "chart_style",
+            ),
+            (
+                json!({ "ticker": "BTCUSDT", "chart_style": "renko" }),
+                "needs box_size",
+            ),
+            (
+                json!({ "ticker": "BTCUSDT", "chart_style": "kagi",
+                        "chart_params": { "box": "percent", "percent": 2 } }),
+                "needs box_size",
             ),
             (json!({ "ticker": "AAPL" }), "not pushable"),
             (
@@ -6197,7 +6649,7 @@ mod tests {
         // The polled value went through text. Parse the pushed one the same
         // way: without starlark's `arbitrary_precision`, serde_json's float
         // parser can land 1 ulp off the computed f64.
-        let pushed = series_tail(&raw, &indicators, "heikin_ashi", 2).unwrap();
+        let pushed = series_tail(&raw, &indicators, "heikin_ashi", None, 2).unwrap();
         assert_eq!(
             serde_json::from_str::<Value>(&pushed.to_string()).unwrap(),
             polled
@@ -6233,7 +6685,7 @@ mod tests {
         .data;
         raw.symbol = Some("ETHUSDT".into());
         raw.interval = Some("4h".into());
-        let pushed = series_tail(&raw, &indicators, "candles", 2).unwrap();
+        let pushed = series_tail(&raw, &indicators, "candles", None, 2).unwrap();
         // Parse the pushed tail like the polled one (see the test above).
         assert_eq!(
             serde_json::from_str::<Value>(&pushed.to_string()).unwrap(),
@@ -6254,7 +6706,7 @@ mod tests {
         assert_eq!(fut["fills"][0]["y1"], json!(a));
         assert_eq!(fut["fills"][0]["y2"], json!(b));
         // The whole window ends on the same bar: same projection.
-        let full = series_tail(&raw, &indicators, "candles", raw.len()).unwrap();
+        let full = series_tail(&raw, &indicators, "candles", None, raw.len()).unwrap();
         assert_eq!(&full["indicators"]["ichimoku"]["future"], fut);
         let last: i64 = raw.bars.last().unwrap().date.parse().unwrap();
         let t = fut["t"].as_array().unwrap();
@@ -6265,7 +6717,7 @@ mod tests {
         );
         // A forming bar that makes a new high moves the newest projected spans.
         raw.bars.last_mut().unwrap().high *= 1.5;
-        let moved = series_tail(&raw, &indicators, "candles", 2).unwrap();
+        let moved = series_tail(&raw, &indicators, "candles", None, 2).unwrap();
         let fut2 = &moved["indicators"]["ichimoku"]["future"];
         assert_ne!(
             fut2["lines"][0]["values"][24],
@@ -6305,7 +6757,7 @@ mod tests {
         .data;
         raw.symbol = Some("ETHUSDT".into());
         raw.interval = Some("4h".into());
-        let pushed = series_tail(&raw, &indicators, "candles", 2).unwrap();
+        let pushed = series_tail(&raw, &indicators, "candles", None, 2).unwrap();
         assert_eq!(pushed, polled);
         let ind = &pushed["indicators"];
         for h in [&ind["volume"]["histogram"][0], &ind["macd"]["histogram"][0]] {

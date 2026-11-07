@@ -114,7 +114,10 @@ export interface McpSession {
       ticker: string;
       timeframe: string;
       indicators: GenerateChartInput["indicators"];
-    } & Pick<GenerateChartInput, "bars" | "warmup" | "end_time" | "chart_style" | "profile_intrabars">,
+    } & Pick<
+      GenerateChartInput,
+      "bars" | "warmup" | "end_time" | "chart_style" | "chart_params" | "profile_intrabars"
+    >,
     signal?: AbortSignal,
   ) => Promise<SeriesPayload>;
   /** Invoke `get_footprint` (ADR-0048). */
@@ -344,7 +347,7 @@ export function createMcpSession(): McpSession {
 
   return {
     async callGenerateChart(
-      { ticker, timeframe, indicators, bars, warmup, end_time, chart_style, profile_intrabars },
+      { ticker, timeframe, indicators, bars, warmup, end_time, chart_style, chart_params, profile_intrabars },
       signal,
     ) {
       const args: GenerateChartInput = {
@@ -356,6 +359,7 @@ export function createMcpSession(): McpSession {
         ...(warmup !== undefined && { warmup }),
         ...(end_time !== undefined && { end_time }),
         ...(chart_style !== undefined && { chart_style }),
+        ...(chart_params !== undefined && { chart_params }),
         ...(profile_intrabars !== undefined && { profile_intrabars }),
       };
       const json = await callToolWithAuthRetry(

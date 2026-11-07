@@ -80,6 +80,23 @@ pub fn render_chart(
     render_results(data, &refs, output, width, height)
 }
 
+/// The chart's title: `SYMBOL · INTERVAL`, then how its bars are built, if they are
+/// not plain candles of that interval: `BTCUSDT · 1H · P&F 3.4 x 3`.
+pub fn chart_title(data: &OhlcvData, style: Option<&str>) -> String {
+    let sym = data.symbol.as_deref().unwrap_or("Sample");
+    let ivl = data.interval.as_deref().unwrap_or("");
+    let mut title = if ivl.is_empty() {
+        sym.to_string()
+    } else {
+        format!("{} · {}", sym, ivl.to_uppercase())
+    };
+    if let Some(style) = style {
+        title.push_str(" · ");
+        title.push_str(style);
+    }
+    title
+}
+
 /// `render_chart` for indicator results computed by the caller (so each
 /// indicator runs once, and a failed one can be left out).
 pub fn render_results(
@@ -88,6 +105,18 @@ pub fn render_results(
     output: &str,
     width: u32,
     height: u32,
+) -> Result<(), Box<dyn std::error::Error>> {
+    render_labeled(data, results, output, width, height, None)
+}
+
+/// `render_results`, naming in the title how the bars are built (ADR-0047).
+pub fn render_labeled(
+    data: &OhlcvData,
+    results: &[&PanelResult],
+    output: &str,
+    width: u32,
+    height: u32,
+    style: Option<&str>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let n = data.len();
     if n == 0 {
@@ -129,13 +158,7 @@ pub fn render_results(
 
     // Draw title: "SYMBOL · INTERVAL"
     {
-        let sym = data.symbol.as_deref().unwrap_or("Sample");
-        let ivl = data.interval.as_deref().unwrap_or("");
-        let title = if ivl.is_empty() {
-            sym.to_string()
-        } else {
-            format!("{} · {}", sym, ivl.to_uppercase())
-        };
+        let title = chart_title(data, style);
         root.draw_text(
             &title,
             &("monospace", 24).into_font().color(&TITLE_COLOR),
@@ -640,6 +663,21 @@ fn auto_range(r: &PanelResult) -> (f64, f64) {
 mod tests {
     use super::*;
     const NAN: f64 = f64::NAN;
+
+    #[test]
+    fn the_title_names_how_the_bars_are_built() {
+        let data = OhlcvData {
+            bars: Vec::new(),
+            symbol: Some("BTCUSDT".into()),
+            interval: Some("1h".into()),
+            session: None,
+        };
+        assert_eq!(chart_title(&data, None), "BTCUSDT · 1H");
+        assert_eq!(
+            chart_title(&data, Some("P&F 3.4 x 3")),
+            "BTCUSDT · 1H · P&F 3.4 x 3"
+        );
+    }
 
     #[test]
     fn lines_break_at_nan() {

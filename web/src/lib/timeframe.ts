@@ -5,6 +5,10 @@
 // run against both, so they cannot drift apart.
 
 export const TIMEFRAME_OPTIONS = [
+  "1s",
+  "5s",
+  "15s",
+  "30s",
   "1m",
   "3m",
   "5m",
@@ -20,7 +24,7 @@ export const TIMEFRAME_OPTIONS = [
   "1wk",
   "1mo",
 ] as const;
-/** A canonical interval: `7m`, `8h`, `2d`, `2wk`, `3mo`. See `isTimeframe`. */
+/** A canonical interval: `5s`, `7m`, `8h`, `2d`, `2wk`, `3mo`. See `isTimeframe`. */
 export type Timeframe = string;
 
 /** Shown as one-click buttons in the toolbar; the rest go in the overflow menu. */
@@ -41,10 +45,11 @@ export function timeframeLabel(tf: Timeframe): string {
   return tf.replace(/(d|wk|mo)$/, (unit) => UNIT_LABELS[unit] ?? unit);
 }
 
-export type TimeframeGroup = "Minutes" | "Hours" | "Days";
+export type TimeframeGroup = "Seconds" | "Minutes" | "Hours" | "Days";
 
 /** Menu section of a timeframe, as TradingView groups its interval list. */
 export function timeframeGroup(tf: Timeframe): TimeframeGroup {
+  if (tf.endsWith("s")) return "Seconds";
   if (tf.endsWith("m")) return "Minutes";
   if (tf.endsWith("h")) return "Hours";
   return "Days";
@@ -55,10 +60,10 @@ export function isTimeframe(x: unknown): x is Timeframe {
   return typeof x === "string" && canonicalTimeframe(x) === x;
 }
 
-type Unit = "m" | "h" | "d" | "wk" | "mo";
+type Unit = "s" | "m" | "h" | "d" | "wk" | "mo";
 
 /** The longest of each unit, as in `Interval::parse`. */
-const MAX_BY_UNIT: Record<Unit, number> = { m: 1439, h: 168, d: 365, wk: 52, mo: 12 };
+const MAX_BY_UNIT: Record<Unit, number> = { s: 59, m: 1439, h: 168, d: 365, wk: 52, mo: 12 };
 
 /** Binance's intraday klines in minutes, coarsest first (`binance_base`). */
 const BINANCE_MINUTES = [720, 480, 360, 240, 120, 60, 30, 15, 5, 3, 1];
@@ -71,6 +76,7 @@ function normalize(count: number, unit: Unit): Timeframe | null {
   if (!Number.isSafeInteger(count) || count < 1) return null;
   let n = count;
   let u = unit;
+  if (u === "s" && n % 60 === 0) [n, u] = [n / 60, "m"];
   if (u === "m" && n % 60 === 0) [n, u] = [n / 60, "h"];
   if (u === "h" && n % 24 === 0) [n, u] = [n / 24, "d"];
   if (u === "d" && n % 7 === 0) [n, u] = [n / 7, "wk"];
@@ -83,15 +89,16 @@ function normalize(count: number, unit: Unit): Timeframe | null {
   return `${n}${u}`;
 }
 
-/** The server's grammar: digits, then `m`, `M`, or `h`/`d`/`w`/`wk`/`mo` in any case. */
+/** The server's grammar: digits, then `m`, `M`, or `s`/`h`/`d`/`w`/`wk`/`mo` in any case. */
 function canonicalTimeframe(text: string): Timeframe | null {
-  const m = /^(\d+)(m|M|[hH]|[dD]|[wW]|[wW][kK]|[mM][oO])$/.exec(text);
+  const m = /^(\d+)(m|M|[sS]|[hH]|[dD]|[wW]|[wW][kK]|[mM][oO])$/.exec(text);
   if (!m) return null;
   const raw = m[2]!;
   const lower = raw.toLowerCase();
   const unit: Unit =
     raw === "m" ? "m"
     : raw === "M" || lower === "mo" ? "mo"
+    : lower === "s" ? "s"
     : lower === "h" ? "h"
     : lower === "d" ? "d"
     : "wk";
