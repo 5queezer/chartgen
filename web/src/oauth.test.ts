@@ -275,7 +275,7 @@ describe("stale client (?error=invalid_client)", () => {
   });
 
   it("with another error, changes nothing", async () => {
-    boot("http://app.test/?error=access_denied&state=s1");
+    boot("http://app.test/?error=server_error&state=s1");
     const { tryHandlePendingRedirect } = await import("./oauth");
 
     expect(await tryHandlePendingRedirect()).toBeNull();
@@ -673,5 +673,166 @@ describe("registration rate limit", () => {
     const result = startSignIn().catch((e: Error) => e.message);
     await vi.advanceTimersByTimeAsync(10_000);
     expect(await result).toMatch(/Too many sign-ins from this network/);
+  });
+});
+
+describe("sign-in cancelled (?error=access_denied, ADR-0044)", () => {
+  beforeEach(() => {
+    vi.resetModules();
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it("with the pending state, stops there and offers no restart by itself", async () => {
+    boot("http://app.test/?error=access_denied&state=s1#pane");
+    const { tryHandlePendingRedirect } = await import("./oauth");
+
+    expect((await tryHandlePendingRedirect())?.message).toBe("you cancelled it");
+
+    expect(href).toBe("http://app.test/#pane");
+    expect(sessionStorage.getItem("chartgen.oauth.pkce")).toBeNull();
+    expect(sessionStorage.getItem(RETRIED)).toBeNull();
+    expect(localStorage.getItem("chartgen.oauth.client_id")).toBe("client");
+    expect(assign).not.toHaveBeenCalled();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("a crafted link leaves the sign-in in progress alone", async () => {
+    boot("http://app.test/?error=access_denied&state=forged");
+    const { tryHandlePendingRedirect } = await import("./oauth");
+
+    expect((await tryHandlePendingRedirect())?.message).toBe(
+      "this address is not a sign-in in progress",
+    );
+    expect(href).toBe("http://app.test/");
+    expect(sessionStorage.getItem("chartgen.oauth.pkce")).not.toBeNull();
+    expect(assign).not.toHaveBeenCalled();
+  });
+});
+
+describe("signed-in user and sign-out (ADR-0044)", () => {
+  type Listener = (e: { key: string; newValue: string | null }) => void;
+  let listeners: Set<Listener>;
+  let logoutStatus: number;
+  let me: unknown;
+
+  /** Boot back from the provider with a token, and a server for these calls. */
+  async function signedIn() {
+    boot("http://app.test/?code=c1&state=s1");
+    tokenStatus = 200;
+    listeners = new Set();
+    const win = window as unknown as Record<string, unknown>;
+    win.addEventListener = (_: string, fn: Listener) => listeners.add(fn);
+    win.removeEventListener = (_: string, fn: Listener) => listeners.delete(fn);
+    const base = fetchMock.getMockImplementation()!;
+    fetchMock.mockImplementation(async (input: string, init?: RequestInit) => {
+      if (input === "/oauth/logout") return new Response(null, { status: logoutStatus });
+      if (input === "/oauth/me") {
+        return new Response(JSON.stringify(me), { status: me === null ? 401 : 200 });
+      }
+      return base(input, init);
+    });
+    const oauth = await import("./oauth");
+    expect(await oauth.tryHandlePendingRedirect()).toBeNull();
+    return oauth;
+  }
+
+  beforeEach(() => {
+    vi.resetModules();
+    logoutStatus = 204;
+    me = { sign_in: true, user: { name: "octo", provider: "github" } };
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it("asks who the token belongs to", async () => {
+    const { fetchSignedInUser } = await signedIn();
+
+    expect(await fetchSignedInUser()).toEqual({ name: "octo", provider: "github" });
+    const call = fetchMock.mock.calls.find(([u]) => u === "/oauth/me")!;
+    expect((call[1] as RequestInit).headers).toEqual({ Authorization: "Bearer tok" });
+  });
+
+  it("no user without sign-in, on a stale token, or without a token", async () => {
+    const { fetchSignedInUser, clearAccessToken } = await signedIn();
+
+    me = { sign_in: false, user: null };
+    expect(await fetchSignedInUser()).toBeNull();
+    me = null;
+    expect(await fetchSignedInUser()).toBeNull();
+
+    clearAccessToken();
+    fetchMock.mockClear();
+    expect(await fetchSignedInUser()).toBeNull();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("signing out leaves for the signed-out page and starts no new sign-in", async () => {
+    const { signOut, getAccessToken } = await signedIn();
+    assign.mockClear();
+
+    await signOut();
+
+    expect(assign.mock.calls).toEqual([["/oauth/signed-out"]]);
+    expect(localStorage.getItem("chartgen.oauth.signed_out")).not.toBeNull();
+    // A poll in that moment must not race the navigation with a new sign-in.
+    let settled = false;
+    void getAccessToken().finally(() => (settled = true));
+    await new Promise((r) => setTimeout(r, 20));
+    expect(settled).toBe(false);
+    expect(assign).toHaveBeenCalledOnce();
+  });
+
+  it("tells other tabs before the request ends their tokens", async () => {
+    const { signOut } = await signedIn();
+    let toldAtLogout: string | null = null;
+    const base = fetchMock.getMockImplementation()!;
+    fetchMock.mockImplementation(async (input: string, init?: RequestInit) => {
+      if (input === "/oauth/logout") {
+        toldAtLogout = localStorage.getItem("chartgen.oauth.signed_out");
+      }
+      return base(input, init);
+    });
+
+    await signOut();
+
+    expect(toldAtLogout).not.toBeNull();
+  });
+
+  it("a failed sign-out rejects and the tab keeps working", async () => {
+    const { signOut, getAccessToken } = await signedIn();
+    logoutStatus = 500;
+    assign.mockClear();
+
+    await expect(signOut()).rejects.toThrow("500");
+
+    expect(assign).not.toHaveBeenCalled();
+    expect(await getAccessToken()).toBe("tok");
+  });
+
+  it("another tab signing out sends this one along, and nothing else does", async () => {
+    const { followSignOutInOtherTabs, getAccessToken } = await signedIn();
+    assign.mockClear();
+    const stop = followSignOutInOtherTabs();
+    const fire = (key: string, newValue: string | null) =>
+      listeners.forEach((fn) => fn({ key, newValue }));
+
+    fire("chartgen.oauth.client_id", "x");
+    fire("chartgen.oauth.signed_out", null);
+    expect(assign).not.toHaveBeenCalled();
+
+    fire("chartgen.oauth.signed_out", "123");
+    expect(assign.mock.calls).toEqual([["/oauth/signed-out"]]);
+    let settled = false;
+    void getAccessToken().finally(() => (settled = true));
+    await new Promise((r) => setTimeout(r, 20));
+    expect(settled).toBe(false);
+
+    stop();
+    expect(listeners.size).toBe(0);
   });
 });

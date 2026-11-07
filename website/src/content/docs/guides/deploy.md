@@ -41,6 +41,10 @@ Production must mount this volume. The `~/.chartgen/` mount persists
 registered OAuth clients, across restarts. Without it, every deploy forgets the
 registrations of external MCP clients. See the [persistence reference](/chartgen/reference/persistence/).
 
+The image's default command is `--serve`. Add `--trade` only on a server nobody else can
+reach: its order tools and engine alerts are one shared set, not per user, for anyone with
+a token. See [what a signed-in stranger can still do](/chartgen/decisions/0044-sign-in-through-github-and-google/#what-a-signed-in-stranger-can-still-do).
+
 ### Environment variables
 
 | Name | Read by | Purpose |
@@ -49,15 +53,20 @@ registrations of external MCP clients. See the [persistence reference](/chartgen
 | `CHARTGEN_WEB_DIR` | `src/server.rs` | Directory of a built web app (`web/dist`). When set, `GET /` with `Accept: text/html` returns its `index.html`, other paths fall back to its static files (unknown browser paths get `index.html`), and `/assets/*` is cached as immutable. Non-browser `GET /` still returns the health JSON. Unset means no static files. The Docker image sets it to `/usr/share/chartgen/web`. |
 | `CHARTGEN_DATA_SOURCE` | `src/fetch.rs` | Set to `sample` to make `generate_chart`, `get_indicators` and `get_quotes` use a deterministic offline source and never call Binance or Yahoo. Bars follow the interval grid (weekly bars open on Monday), each bar's prices depend only on the symbol and its open time (so overlapping pages match exactly), and the forming candle moves every second. Intended for E2E tests and demos. Unset means live data. |
 | `CHARTGEN_SCRIPTING` | `src/scripting/mod.rs` | `1` enables [scripted indicators](/chartgen/guides/scripted-indicators/): the four scripting MCP tools and user scripts in `generate_chart` / `list_indicators`. Off when unset. |
-| `CHARTGEN_DB` | `src/scripting/persistence.rs` | SQLite file for registered OAuth clients, with or without `CHARTGEN_SCRIPTING=1`, and for scripted indicators. Opened at server startup; a failure is logged and leaves clients in memory only. Default `~/.chartgen/chartgen.db`, inside the persisted volume. |
+| `CHARTGEN_DB` | `src/scripting/persistence.rs` | SQLite file for registered OAuth clients, with or without `CHARTGEN_SCRIPTING=1`, for scripted indicators, and with sign-in on for users and sessions. Opened at server startup; a failure is logged and leaves clients in memory only. Default `~/.chartgen/chartgen.db`, inside the persisted volume. |
 | `CHARTGEN_SERVER_ALERTS` | `src/server_alerts.rs` | `1` enables [alerts on the server](/chartgen/guides/web/#alerts-on-the-server): four MCP tools, and **Run on server** in the web app. Off when unset; alerts already stored wait in `chartgen.db`, and pin nobody. Needs a build with the `scripting` feature, which the Docker image has, and the store. Read [before turning it on](#server-alerts). |
-| `CHARTGEN_SERVER_ALERT_CLIENTS` | `src/server_alerts.rs` | Comma-separated OAuth client ids that may create server alerts and use webhooks. Unset: anyone may create alerts, nobody gets webhooks. `*`: anyone, with webhooks. |
+| `CHARTGEN_SERVER_ALERT_CLIENTS` | `src/server_alerts.rs` | Comma-separated OAuth client ids, or with [sign-in](#sign-in-through-github-and-google) on, accounts (`github:<id>`, `google:<sub>`), that may create server alerts and use webhooks. Unset: anyone may create alerts, nobody gets webhooks. `*`: anyone, with webhooks. |
 | `CHARTGEN_SERVER_ALERT_PAIRS_PER_CLIENT` | `src/server_alerts.rs` | Symbol and interval pairs one client may watch. Default 2. |
 | `CHARTGEN_WEBHOOK_PROXY` | `src/webhook.rs` | `http` or `https` URL of a proxy that sends the webhooks, so a receiver does not see this server's address. Unset means direct, ignoring `HTTPS_PROXY` and the like. |
 | `CHARTGEN_VAPID_SUBJECT` | `src/server_alerts.rs` | `mailto:` or `https:` URL where push services can reach you. Falls back to an https `CHARTGEN_BASE_URL`; with neither, [browser push](#browser-push) stays off. |
 | `CHARTGEN_VAPID_PRIVATE_KEY` | `src/server_alerts.rs` | Application server key for push, 32 bytes of base64url. Unset, one is made once and kept in `chartgen.db`. Changing it stops every device until its browser next opens chartgen. |
 | `CHARTGEN_WEBHOOK_BLOCKED_PREFIXES` | `src/webhook.rs` | Comma-separated addresses or prefixes a webhook may not reach besides the private ranges (`203.0.113.7,2001:db8:1::/48`). For this network's own public addresses. |
 | `CHARTGEN_WEBHOOK_TEST_ORIGIN` | `src/webhook.rs` | Tests only. One loopback origin (`http://127.0.0.1:9000`) a webhook may reach. Ignored unless `CHARTGEN_DATA_SOURCE=sample`, so it does nothing on a live server. |
+| `CHARTGEN_GITHUB_CLIENT_ID`, `CHARTGEN_GITHUB_CLIENT_SECRET` | `src/server/signin.rs` | [Sign-in through GitHub](#sign-in-through-github-and-google). Unset: not offered. One without the other stops the server at startup. |
+| `CHARTGEN_GOOGLE_CLIENT_ID`, `CHARTGEN_GOOGLE_CLIENT_SECRET` | `src/server/signin.rs` | The same for Google. |
+| `CHARTGEN_CLAIM_OWNER` | `src/server/signin.rs` | The one account (`github:<id>`, `google:<sub>`) that [inherits](#sign-in-through-github-and-google) scripts, server alerts and push devices from before sign-in, with webhook secrets. Unset: nothing moves. |
+| `CHARTGEN_TRUSTED_PROXY_HEADER` | `src/server.rs` | Header holding the client's address, such as `CF-Connecting-IP`, for the limits per address. Only if the server cannot be reached except through that proxy. Unset: no header is trusted, and the address is the TCP peer. |
+| `CHARTGEN_SIGNIN_TEST_PROVIDER_ORIGIN` | `src/server/signin.rs` | Tests only: a loopback `http` origin that replaces both providers. Honored only with `CHARTGEN_DATA_SOURCE=sample`, ignored on live data. Never set it in production. |
 | `HOME` / `USERPROFILE` | `src/main.rs` | Picks the data directory (`~/.chartgen/`). Override to relocate `alerts.json` / `trades.log` / `subscriptions.json` / `chartgen.db`. |
 | `_CHARTGEN_PORT` | `src/server.rs` | Internal — set by the process to its own bind port so `base_url()` can compose the fallback URL. Do not set by hand. |
 
@@ -85,6 +94,73 @@ All of it answers to the rate gate of [ADR-0038](/chartgen/decisions/0038-custom
 the gate refuses, clients see an error starting `Binance rate limit:`. Yahoo is not shared this
 way: every chart load and poll of a Yahoo symbol is its own request, with no gate in front.
 
+## Sign-in through GitHub and Google
+
+Without sign-in, anyone who knows a `client_id` gets a token, and a public server logs a
+warning about that at startup. Configure one or both providers to require a login.
+**Anyone with an account can then sign in**; there is no allowlist. Read
+[what they can still do](/chartgen/decisions/0044-sign-in-through-github-and-google/#what-a-signed-in-stranger-can-still-do) first. In short, keep
+`CHARTGEN_SCRIPTING` off, do not use `--trade`, and keep `CHARTGEN_SERVER_ALERTS` off or list
+trusted accounts on a public server.
+
+Both callbacks are `<CHARTGEN_BASE_URL>/oauth/callback/<provider>`, and they must match
+exactly. `CHARTGEN_BASE_URL` must be the public https origin: session cookies are only
+marked Secure with https, and a mismatch makes the provider refuse the sign-in.
+
+**GitHub**
+
+1. Open **Settings → Developer settings → OAuth Apps → New OAuth App**.
+2. Set **Homepage URL** to `https://chartgen.example.com`.
+3. Set **Authorization callback URL** to `https://chartgen.example.com/oauth/callback/github`.
+4. Register it, then **Generate a new client secret**.
+5. Set `CHARTGEN_GITHUB_CLIENT_ID` and `CHARTGEN_GITHUB_CLIENT_SECRET`.
+
+chartgen asks for no scope: it reads the public profile's id and login.
+
+**Google**
+
+1. In the [Google Cloud console](https://console.cloud.google.com/), create or pick a
+   project and configure the **OAuth consent screen** with the scopes `openid`, `profile`
+   and `email`. Publish it, or only listed test users can sign in.
+2. Open **APIs & Services → Credentials → Create credentials → OAuth client ID**.
+3. Choose **Web application**, and add `https://chartgen.example.com/oauth/callback/google`
+   under **Authorized redirect URIs**.
+4. Set `CHARTGEN_GOOGLE_CLIENT_ID` and `CHARTGEN_GOOGLE_CLIENT_SECRET`.
+
+Restart, and the log says `Sign-in required, through: GitHub, Google`. With one provider
+configured the choice of provider is skipped. Tokens are in memory, so clients sign in
+once after that restart; existing clients keep their `client_id`.
+
+Keep the volume at `~/.chartgen` mounted: sessions and users are stored there.
+
+**Existing scripts, server alerts and push devices stay where they are until you name who inherits them.** With
+sign-in on nobody can reach them, and startup says how many wait. To collect them, set
+`CHARTGEN_CLAIM_OWNER` to your own account, `github:<numeric id>` (the `id` in
+`https://api.github.com/users/<login>`) or `google:<sub>`, and sign in, through any client. You
+then own every client's rows, whichever client made them. **An alert's webhook and signing secret
+move with it, and that account's alerts then notify those devices**, so name only yourself. A script name you already have stays with its client, and
+so does the second of two clients' scripts with one name: nothing is overwritten or deleted, and
+startup counts these name collisions. To move one, rename or delete your own and sign in again
+([ADR-0044](/chartgen/decisions/0044-sign-in-through-github-and-google/#existing-rows)). Scripts wait for as long as it takes. Alerts keep
+running meanwhile, and expire 30 days after their client last got a token, so do not leave it long.
+You can unset the variable afterwards.
+
+**On a public server, also name your proxy's address header.** With
+`CHARTGEN_TRUSTED_PROXY_HEADER=CF-Connecting-IP`, or whatever single-address header your proxy
+sets, each client gets its own limits on sign-in, registration and chart push, with an IPv6 /64
+counted as one address. Without it every
+visitor is the proxy's address, and one person can use up everyone's: 120 sign-in steps a minute
+and 20 registrations per 10 minutes, shared by all, and 50 open sign-ins, while a same-host proxy
+has no budget at all and a flood through it pushes out everyone's open sign-ins. **Only set it if
+the server cannot be reached except through that proxy**, because anyone reaching it directly can
+write that header and claim any address. **The proxy must replace the header, never append to
+it**: with an appending proxy the client's own value comes first and wins, so `X-Forwarded-For`
+will not do. A value that is not exactly one address shares a single budget with every other
+such value.
+
+Turning sign-in off again means removing the provider variables. Users' scripts and alerts stay in
+the file, out of reach until it is turned back on, and those alerts expire after 30 days.
+
 ### Server alerts
 
 `CHARTGEN_SERVER_ALERTS` is off by default. With open registration, leave it off, or turn it on
@@ -93,6 +169,13 @@ recommended setup**: client ids are free, so no limit per client can stand in fo
 client id is `chartgen.oauth.client_id` in that browser's local storage, and an MCP client's is
 what `/register` gave it. The list is read at startup, so a change takes a restart. From then on a
 client taken off it runs no alerts and sends no webhooks, and what it had queued is dropped.
+
+**With [sign-in](#sign-in-through-github-and-google) on, the list names accounts, not clients.**
+Replace each client id with `github:<numeric id>` or `google:<sub>`. A client id then matches
+nobody, and startup logs how many entries look like one. For GitHub the id is `id` in
+`https://api.github.com/users/<login>`; for either provider, once the person has signed in, it
+is in the file: `sqlite3 chartgen.db "SELECT id, name FROM users"`. An account is not a credential
+like a client id is, so the section on those below does not apply.
 
 Before turning it on:
 
@@ -113,7 +196,8 @@ Before turning it on:
 Unset, a stranger can hold alerts but cannot make the server send anything. Even then they can use
 up the 200 alerts or the 16 watched symbol and interval pairs until those expire, after which other
 people's new alerts are refused. Spent alerts are deleted after 7 days, and alerts whose owner had
-no token for 30 days are too, unless you listed that client. There is no command to list or delete
+no token for 30 days are too, unless you listed that client. For a signed-in owner a sign-in counts
+as well, and signing out does not stop their alerts. There is no command to list or delete
 someone's alerts yet: it takes SQL on `chartgen.db` and a restart.
 
 **One webhook reveals your IP.** A receiver sees where the request came from. A tunnel hides your
@@ -202,15 +286,15 @@ mostly replaces itself, but it can push out a real user who has push on and no s
 browser next opens chartgen. The 120 deliveries a minute are shared in the same way, per client and not per
 person, and the real ceiling is about 360 requests, because retries do not count.
 
-**Recommended for this server until sign-in lands:** `CHARTGEN_SERVER_ALERT_CLIENTS`, and
-`CHARTGEN_VAPID_SUBJECT` with your address. **Each browser is its own client**, so list one id for each browser
-you use, and expect an alert to notify only the devices of the browser that made it: to get an alert on your
-phone, make it on your phone.
+**Recommended for this server:** [sign-in](#sign-in-through-github-and-google),
+`CHARTGEN_SERVER_ALERT_CLIENTS` listing the accounts you trust, and `CHARTGEN_VAPID_SUBJECT` with your address.
+With sign-in, devices belong to the user, so an alert made on the desktop also reaches the phone, and the 5 devices
+and 30 pushes a minute are per user. **Without sign-in each browser is its own client**, so list one id for each
+browser you use, and expect an alert to notify only the devices of the browser that made it.
 
-**A listed client id is a password, for push as well.** Whoever has it can get a token, replace that
+**Without sign-in, a listed client id is a password, for push as well.** Whoever has it can get a token, replace that
 client's devices with their own, and receive its fires and notes. It appears in `/authorize` URLs, so in browser
-history and in any proxy that logs query strings. Sign-in fixes this; until then, replace a leaked id as
-[above](#server-alerts).
+history and in any proxy that logs query strings. Replace a leaked id as [above](#server-alerts).
 
 Tests only use a fake push service. Before relying on it, check real delivery by hand:
 

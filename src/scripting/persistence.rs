@@ -1,10 +1,10 @@
-//! SQLite store for user indicators, registered OAuth clients (ADR-0025) and
-//! server alerts (ADR-0042).
+//! SQLite store for user indicators and registered OAuth clients (ADR-0025).
 //!
 //! One file, `CHARTGEN_DB` (default `~/.chartgen/chartgen.db`), migrated on
 //! open. OAuth clients are stored so a client keeps its `client_id` (the
 //! script owner's identity) across server restarts, with `CHARTGEN_SCRIPTING`
-//! or without (ADR-0036).
+//! or without (ADR-0036). With sign-in on, users, their browser sessions and
+//! the clients they approved live here too (ADR-0044).
 
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::Value;
@@ -64,7 +64,51 @@ const MIGRATIONS: &[&str] = &[
         value  TEXT NOT NULL
     );
 ",
+    "
+    ALTER TABLE oauth_clients ADD COLUMN client_name TEXT;
+    CREATE TABLE users (
+        id             TEXT    PRIMARY KEY,
+        name           TEXT    NOT NULL,
+        created_at     INTEGER NOT NULL,
+        last_login_at  INTEGER NOT NULL,
+        last_token_at  INTEGER
+    );
+    CREATE TABLE sessions (
+        token_hash  TEXT    PRIMARY KEY,
+        user_id     TEXT    NOT NULL,
+        created_at  INTEGER NOT NULL,
+        expires_at  INTEGER NOT NULL
+    );
+    CREATE TABLE client_grants (
+        user_id     TEXT    NOT NULL,
+        client_id   TEXT    NOT NULL,
+        created_at  INTEGER NOT NULL,
+        PRIMARY KEY (user_id, client_id)
+    );
+",
 ];
+
+/// Whether an owner is a signed-in account (ADR-0044).
+pub fn is_account(owner: &str) -> bool {
+    owner.starts_with("github:") || owner.starts_with("google:")
+}
+
+/// Whether an owner has the shape `/register` gives a client id, a hyphenated UUID, and
+/// so is what `CHARTGEN_CLAIM_OWNER` collects. A positive test: an owner of any other
+/// kind, now or later, is not swept into someone's account (ADR-0044).
+pub fn is_client_id(owner: &str) -> bool {
+    owner.len() == 36 && uuid::Uuid::try_parse(owner).is_ok()
+}
+
+/// What `Store::waiting_rows` counts.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct WaitingRows {
+    pub scripts: usize,
+    pub alerts: usize,
+    pub devices: usize,
+    /// Of `scripts`, those whose name the named owner already has, so they cannot move.
+    pub name_collisions: usize,
+}
 
 /// A stored script. `meta` is the `ScriptInfo` snapshot taken at register.
 #[derive(Clone, Debug, PartialEq)]
@@ -85,6 +129,25 @@ pub struct StoredClient {
     pub created_at: i64,
     /// When it last received a token; `None` if it never did.
     pub last_token_at: Option<i64>,
+    /// As it registered: chosen by the client, so never trusted.
+    pub client_name: Option<String>,
+}
+
+/// A signed-in user (ADR-0044). `id` is `<provider>:<the provider's immutable
+/// user id>`; `name` is for display only.
+#[derive(Clone, Debug, PartialEq)]
+pub struct StoredUser {
+    pub id: String,
+    pub name: String,
+}
+
+/// A browser session; only the hash of its cookie value is stored.
+#[derive(Clone, Debug, PartialEq)]
+pub struct StoredSession {
+    pub token_hash: String,
+    pub user_id: String,
+    pub created_at: i64,
+    pub expires_at: i64,
 }
 
 /// A delivery not finished yet: written with the fire it reports, so a restart
@@ -252,11 +315,20 @@ impl Store {
         Ok(())
     }
 
+    pub fn set_oauth_client_name(&self, client_id: &str, name: &str) -> rusqlite::Result<()> {
+        self.conn().execute(
+            "UPDATE oauth_clients SET client_name = ?2 WHERE client_id = ?1",
+            params![client_id, name],
+        )?;
+        Ok(())
+    }
+
     /// Every stored OAuth client.
     pub fn oauth_clients(&self) -> rusqlite::Result<Vec<StoredClient>> {
         let conn = self.conn();
         let mut stmt = conn.prepare(
-            "SELECT client_id, redirect_uris, created_at, last_token_at FROM oauth_clients",
+            "SELECT client_id, redirect_uris, created_at, last_token_at, client_name
+             FROM oauth_clients",
         )?;
         let rows = stmt.query_map([], |r| {
             let uris: String = r.get(1)?;
@@ -265,6 +337,7 @@ impl Store {
                 redirect_uris: serde_json::from_str(&uris).unwrap_or_default(),
                 created_at: r.get(2)?,
                 last_token_at: r.get(3)?,
+                client_name: r.get(4)?,
             })
         })?;
         rows.collect()
@@ -444,6 +517,169 @@ impl Store {
             params![name],
             |r| r.get(0),
         )
+    }
+
+    /// Insert the user, or refresh the display name and login time of a known one.
+    pub fn save_user(&self, id: &str, name: &str) -> rusqlite::Result<()> {
+        self.conn().execute(
+            "INSERT INTO users (id, name, created_at, last_login_at) VALUES (?1, ?2, ?3, ?3)
+             ON CONFLICT (id) DO UPDATE SET
+                 name = excluded.name, last_login_at = excluded.last_login_at",
+            params![id, name, chrono::Utc::now().timestamp()],
+        )?;
+        Ok(())
+    }
+
+    /// Record that `id` received a token now: what keeps their server alerts alive,
+    /// as `last_token_at` does for a client's (ADR-0044).
+    pub fn mark_user_used(&self, id: &str) -> rusqlite::Result<()> {
+        self.conn().execute(
+            "UPDATE users SET last_token_at = ?2 WHERE id = ?1",
+            params![id, chrono::Utc::now().timestamp()],
+        )?;
+        Ok(())
+    }
+
+    /// When each user last signed in or received a token, in unix seconds.
+    pub fn user_activity(&self) -> rusqlite::Result<Vec<(String, i64)>> {
+        let conn = self.conn();
+        let mut stmt =
+            conn.prepare("SELECT id, max(last_login_at, COALESCE(last_token_at, 0)) FROM users")?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        rows.collect()
+    }
+
+    pub fn users(&self) -> rusqlite::Result<Vec<StoredUser>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare("SELECT id, name FROM users")?;
+        let rows = stmt.query_map([], |r| {
+            Ok(StoredUser {
+                id: r.get(0)?,
+                name: r.get(1)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    pub fn save_session(&self, session: &StoredSession) -> rusqlite::Result<()> {
+        self.conn().execute(
+            "INSERT OR REPLACE INTO sessions (token_hash, user_id, created_at, expires_at)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![
+                session.token_hash,
+                session.user_id,
+                session.created_at,
+                session.expires_at
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_session(&self, token_hash: &str) -> rusqlite::Result<()> {
+        self.conn().execute(
+            "DELETE FROM sessions WHERE token_hash = ?1",
+            params![token_hash],
+        )?;
+        Ok(())
+    }
+
+    /// The sessions still valid at `now`; expired ones are deleted.
+    pub fn live_sessions(&self, now: i64) -> rusqlite::Result<Vec<StoredSession>> {
+        let conn = self.conn();
+        conn.execute("DELETE FROM sessions WHERE expires_at <= ?1", params![now])?;
+        let mut stmt =
+            conn.prepare("SELECT token_hash, user_id, created_at, expires_at FROM sessions")?;
+        let rows = stmt.query_map([], |r| {
+            Ok(StoredSession {
+                token_hash: r.get(0)?,
+                user_id: r.get(1)?,
+                created_at: r.get(2)?,
+                expires_at: r.get(3)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    pub fn save_grant(&self, user_id: &str, client_id: &str) -> rusqlite::Result<()> {
+        self.conn().execute(
+            "INSERT OR REPLACE INTO client_grants (user_id, client_id, created_at)
+             VALUES (?1, ?2, ?3)",
+            params![user_id, client_id, chrono::Utc::now().timestamp()],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_grant(&self, user_id: &str, client_id: &str) -> rusqlite::Result<()> {
+        self.conn().execute(
+            "DELETE FROM client_grants WHERE user_id = ?1 AND client_id = ?2",
+            params![user_id, client_id],
+        )?;
+        Ok(())
+    }
+
+    /// `(user, client)` approvals, oldest first. Those of clients no longer
+    /// registered are deleted: a client id is never issued twice.
+    pub fn grants(&self) -> rusqlite::Result<Vec<(String, String)>> {
+        let conn = self.conn();
+        conn.execute(
+            "DELETE FROM client_grants WHERE client_id NOT IN (SELECT client_id FROM oauth_clients)",
+            [],
+        )?;
+        let mut stmt = conn.prepare(
+            "SELECT user_id, client_id FROM client_grants ORDER BY created_at, client_id",
+        )?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        rows.collect()
+    }
+
+    /// Move every script owned by an OAuth client to `user_id`; returns how many moved.
+    /// A name the user already has stays with its client, as does the second of two
+    /// clients' scripts with one name, so nothing is overwritten or deleted (ADR-0044).
+    pub fn claim_waiting_scripts(&self, user_id: &str) -> rusqlite::Result<usize> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare("SELECT DISTINCT user_id FROM user_indicators")?;
+        let owners: Vec<String> = stmt
+            .query_map([], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        let mut moved = 0;
+        for owner in owners.iter().filter(|o| is_client_id(o)) {
+            moved += conn.execute(
+                "UPDATE OR IGNORE user_indicators SET user_id = ?1 WHERE user_id = ?2",
+                params![user_id, owner],
+            )?;
+        }
+        Ok(moved)
+    }
+
+    /// What OAuth clients still own: from before sign-in, and out of everyone's reach
+    /// until `CHARTGEN_CLAIM_OWNER` collects it. `owner` is that account, if one is named.
+    pub fn waiting_rows(&self, owner: Option<&str>) -> rusqlite::Result<WaitingRows> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare("SELECT user_id, name FROM user_indicators")?;
+        let scripts: Vec<(String, String)> = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+        let taken: HashSet<&str> = scripts
+            .iter()
+            .filter(|(o, _)| Some(o.as_str()) == owner)
+            .map(|(_, name)| name.as_str())
+            .collect();
+        let waiting = || scripts.iter().filter(|(o, _)| is_client_id(o));
+        let clients_in = |table: &str| -> rusqlite::Result<usize> {
+            let mut stmt = conn.prepare(&format!("SELECT owner FROM {table}"))?;
+            let owners: Vec<String> = stmt
+                .query_map([], |r| r.get(0))?
+                .collect::<rusqlite::Result<_>>()?;
+            Ok(owners.iter().filter(|o| is_client_id(o)).count())
+        };
+        Ok(WaitingRows {
+            scripts: waiting().count(),
+            alerts: clients_in("server_alerts")?,
+            devices: clients_in("push_devices")?,
+            name_collisions: waiting()
+                .filter(|(_, name)| taken.contains(name.as_str()))
+                .count(),
+        })
     }
 }
 

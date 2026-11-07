@@ -11,6 +11,9 @@ a connector.
 All URLs are built from `CHARTGEN_BASE_URL` (falls back to
 `http://localhost:<port>` if unset). See the [deployment guide](/chartgen/guides/deploy/).
 
+By default `/authorize` approves every request, so a `client_id` is all it takes to get
+a token. With a provider configured it needs a [signed-in user](#sign-in) instead.
+
 ## Endpoints
 
 | Method | Path | Purpose |
@@ -21,6 +24,10 @@ All URLs are built from `CHARTGEN_BASE_URL` (falls back to
 | `POST` | `/register` | Dynamic client registration (RFC 7591). Returns a `client_id`/`client_secret`. |
 | `GET` | `/authorize` | Authorization endpoint. Requires `client_id`, `redirect_uri`, `response_type=code`, `code_challenge`, `code_challenge_method=S256`, optional `state`. |
 | `POST` | `/token` | Token endpoint. Exchanges `code` + `code_verifier` for an access token. |
+| `GET` | `/oauth/signin`, `/oauth/login/{provider}`, `/oauth/callback/{provider}`, `/oauth/cancel`, `/oauth/consent` | [Sign-in](#sign-in) pages and redirects. `404` with sign-in off. |
+| `POST` | `/oauth/consent`, `/oauth/logout` | The consent decision, and signing out (`204`, clears the cookie). `404` with sign-in off. |
+| `GET` | `/oauth/signed-out` | The page after signing out. `404` with sign-in off. |
+| `GET` | `/oauth/me` | Who a bearer token belongs to: `{"sign_in": true, "user": {"name": "…", "provider": "github"}}`, `401` with `user: null` for a bad token, and `{"sign_in": false, "user": null}` with sign-in off. |
 | `GET` | `/favicon.svg` | Connector icon surfaced by `logo_uri`. |
 
 ## Metadata document
@@ -47,6 +54,60 @@ document and from it the authorization server. A `401` from the root and
 
 Only `authorization_code` with PKCE S256 is supported — there is no
 `refresh_token` or `client_credentials` path.
+
+## Sign-in
+
+With `CHARTGEN_GITHUB_CLIENT_ID`/`_SECRET`, `CHARTGEN_GOOGLE_CLIENT_ID`/`_SECRET` or both
+set ([setup](/chartgen/guides/deploy/#sign-in-through-github-and-google)), chartgen still
+issues its own codes and tokens, so clients change nothing beyond a browser login. The
+reasoning, and what a stranger with an account can still do, are in
+[ADR-0044](/chartgen/decisions/0044-sign-in-through-github-and-google/).
+
+After `/authorize` has checked the client and `redirect_uri`:
+
+- **No session:** the request is held on the server, and the browser goes to a choice of
+  provider, or straight to the only one. The provider's approval opens a session and
+  the flow continues as below. Discovery, `WWW-Authenticate` and `/token` are unchanged.
+- **A session and an approved client:** the code comes back at once, as without sign-in.
+- **A session and a new client:** a consent page names the client and its redirect host.
+  Approving remembers the answer for that user and client. Denying answers
+  `error=access_denied` on `redirect_uri`.
+- **The web app's own client,** whose `redirect_uri` is exactly `/` on the base URL's
+  origin, needs no consent when the request began on our own origin
+  (`Sec-Fetch-Site: same-origin`). From anywhere else it is asked like any client.
+
+A denied login, a provider that refuses or cannot be reached (10 s timeout) and any other
+failure end on a page with **Try again** and **Cancel**, which answers
+`error=access_denied`. An expired, replayed or foreign `state` gets a page saying so, and
+no session. All of these depend on cookies.
+
+| Cookie | Holds | Lifetime |
+|---|---|---|
+| `chartgen_session` | The session, stored on the server only as a hash | 30 days, absolute; survives restarts |
+| `chartgen_browser` | What ties a sign-in in progress to this browser | 10 minutes |
+
+Both are HttpOnly, SameSite=Lax and Path=/. With an https base URL they are also Secure and
+named `__Host-chartgen_session` and `__Host-chartgen_browser`.
+
+A code with a user works once, also after a failed attempt. Without sign-in a code stays
+valid until it expires, as it always has.
+
+A user is the provider plus its immutable id, `github:<id>` or `google:<sub>`. One person
+with both accounts is two users with separate scripts; accounts are not linked.
+
+`POST /oauth/logout` ends the session and the web app's tokens from it. Tokens of other
+clients run until they expire, and [server alerts](/chartgen/guides/web/#alerts-on-the-server)
+keep running.
+
+Limits per user: 20 clients with live tokens and 20 tokens per client, 100 for the web app
+(past these the longest out of use are dropped), 20 pending codes, 20 sessions, 50 approved clients, 50
+[scripts](/chartgen/guides/scripted-indicators/), and 600 `tools/call` per minute (`429`
+with `Retry-After`). Sign-in: 120 steps that create state per minute per client address, loopback
+exempt, one provider round trip per request, 5 open requests per browser and per user and 50 per
+address with the oldest dropped, and 2000 on the server (`429` page). An IPv6 /64 is one address.
+The address is the TCP peer, unless
+[`CHARTGEN_TRUSTED_PROXY_HEADER`](/chartgen/guides/deploy/#sign-in-through-github-and-google) names
+a proxy's header, which `/register` and the chart push cap use too.
 
 ## Unknown `client_id`
 
@@ -80,7 +141,8 @@ its `client_id` across a restart
 ([ADR-0036](/chartgen/decisions/0036-own-origin-invalid-client-redirect/)). With
 scripting on, that `client_id` also owns the client's
 [scripted indicators](/chartgen/guides/scripted-indicators/)
-([ADR-0025](/chartgen/decisions/0025-user-indicator-registry/)).
+([ADR-0025](/chartgen/decisions/0025-user-indicator-registry/)), unless sign-in is on,
+when the user owns them ([ADR-0044](/chartgen/decisions/0044-sign-in-through-github-and-google/)).
 
 Registrations only survive if the file does: a production container must
 [mount a volume at `~/.chartgen`](/chartgen/guides/deploy/#docker). Without one,
@@ -96,7 +158,7 @@ schemes such as `cursor://` and `vscode://`. `/authorize` answers `400 invalid_r
 for such a URI on a client stored before these checks existed. `/register` is also
 bounded: 1–5 `redirect_uris` of at most 512 characters, a
 `client_name` of at most 256 (`400 invalid_client_metadata` otherwise), 20
-registrations per peer address per 10 minutes (`429 slow_down`; loopback
+registrations per client address per 10 minutes (`429 slow_down`; loopback
 peers are exempt) and 1000 registered clients. A client that never receives a
 token within 24 hours is forgotten, unless it owns scripts. Logs never contain client ids, codes or
 verifiers.
@@ -106,7 +168,9 @@ At 1000 clients, `/register` makes room where it can
 evicts a client that never received a token, oldest first, or else the one longest
 out of use, from memory and from `CHARTGEN_DB`. A client with a live token is never
 evicted, so a session in use cannot be revoked this way, and neither is a client
-that owns stored [scripted indicators](/chartgen/guides/scripted-indicators/).
+that owns stored [scripted indicators](/chartgen/guides/scripted-indicators/). With
+sign-in on, one user keeps at most 20 clients live, and scripts belong to users, so only
+scripts from before sign-in still pin a client.
 `/register` answers `503 temporarily_unavailable` when no other client is left, or
 when the owners cannot be read from the store. Clients already registered keep
 working.
@@ -188,7 +252,10 @@ Server logs every OAuth step to stderr with an `[OAuth]` prefix:
 [OAuth] GET /authorize client_id=... redirect_uri=...
 [OAuth] POST /token PKCE verify: ok=true verifier_len=64 challenge=...
 [OAuth] POST /token SUCCESS — token issued (len=...)
+[OAuth] sign-in started provider=github
+[OAuth] sign-in succeeded provider=github
 ```
 
 MCP requests are tagged `[MCP]` and note whether an `Authorization` header was
-present.
+present. Logs never contain provider secrets or codes, `state` values, session values or
+user ids.

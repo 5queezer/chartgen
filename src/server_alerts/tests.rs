@@ -1993,6 +1993,112 @@ fn a_stored_alert_reads_back_with_its_secret() {
     assert_eq!(again.webhook.unwrap().url, "https://example.com/");
 }
 
+/// ADR-0044: a user is not in `oauth_clients`, and without their own activity every
+/// signed-in owner's alerts would look idle.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_users_alerts_live_on_that_users_activity() {
+    let (store, _) = store_at("expire-user");
+    store.save_user("github:1", "active").unwrap();
+    store.mark_user_used("github:1").unwrap();
+    let a = plain(store);
+    let kept = create(&a, spec("less", "once", 1.0), "github:1").await;
+    let gone = create(&a, spec("less", "once", 1.0), "github:2").await;
+    let now = now_ms();
+    let long_ago = now - IDLE_OWNER_TTL_MS - 60_000;
+    for id in [&kept, &gone] {
+        a.lock().alerts.get_mut(id).unwrap().created_at = long_ago;
+    }
+    a.sweep(&mut a.lock(), now);
+    assert!(a.lock().alerts.contains_key(&kept), "they are active");
+    assert!(!a.lock().alerts.contains_key(&gone), "they are not");
+    // And they do expire, like anyone's, once that activity is old.
+    a.sweep(&mut a.lock(), now + IDLE_OWNER_TTL_MS + 60_000);
+    assert!(!a.lock().alerts.contains_key(&kept));
+}
+
+const CLIENT_1: &str = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1";
+const CLIENT_2: &str = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa2";
+
+/// ADR-0044: what clients owned goes to the account named, from every client, and
+/// survives a restart there. Other accounts' alerts are not touched, nor any owner that
+/// is not shaped like a client id.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_named_owner_collects_every_clients_alerts() {
+    let (store, _) = store_at("claim-alerts");
+    let a = plain(store);
+    let first = create(&a, spec("less", "once", 1.0), CLIENT_1).await;
+    let second = create(&a, spec("less", "once", 1.0), CLIENT_2).await;
+    let other = create(&a, spec("less", "once", 1.0), "google:2").await;
+    let device = create(&a, spec("less", "once", 1.0), "device:9").await;
+
+    assert_eq!(a.claim_waiting("github:1"), (2, 0));
+    assert_eq!(a.lock().alerts[&first].owner, "github:1");
+    assert_eq!(a.lock().alerts[&second].owner, "github:1");
+    assert_eq!(a.lock().alerts[&other].owner, "google:2");
+    assert_eq!(a.lock().alerts[&device].owner, "device:9");
+    assert_eq!(a.claim_waiting("github:1"), (0, 0), "once");
+    let owners = store.server_alert_owners().unwrap();
+    assert!(owners.contains("github:1") && !owners.contains(CLIENT_1));
+    let stored = store.server_alerts().unwrap();
+    assert_eq!(
+        stored.iter().filter(|row| row.contains("github:1")).count(),
+        2,
+        "the record says so too, as a restart reads it"
+    );
+}
+
+/// They are that person's already, so the limit for new alerts takes nothing away.
+#[tokio::test(flavor = "multi_thread")]
+async fn collecting_passes_the_limit_and_leaves_nothing_behind() {
+    let (store, _) = store_at("claim-limit");
+    let a = plain(store);
+    let limit = a.limits.alerts_per_client;
+    let made = create(&a, spec("less", "once", 1.0), CLIENT_1).await;
+    let template = a.lock().alerts[&made].clone();
+    for i in 0..limit + 2 {
+        let mut record = template.clone();
+        record.id = format!("copy-{i}");
+        a.lock().alerts.insert(record.id.clone(), record);
+    }
+    assert_eq!(a.claim_waiting("github:1"), (limit + 3, 0));
+    let count = |owner: &str| {
+        a.lock()
+            .alerts
+            .values()
+            .filter(|r| r.owner == owner)
+            .count()
+    };
+    assert_eq!((count("github:1"), count(CLIENT_1)), (limit + 3, 0));
+}
+
+/// A delivery waiting when its alert moves goes along, signed as it was. One of an
+/// alert that did not move stays where it is.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_collected_alert_takes_its_waiting_deliveries_along() {
+    let (store, _) = store_at("claim-queue");
+    let a = plain(store);
+    let moved = create(&a, spec("less", "once", 1.0), CLIENT_1).await;
+    let event = |id: &str, alert: &str| StoredEvent {
+        id: id.to_string(),
+        alert_id: alert.to_string(),
+        body: "{}".to_string(),
+        created_at: 0,
+        device: None,
+    };
+    {
+        let mut st = a.lock();
+        let queue = st.queues.entry(CLIENT_1.to_string()).or_default();
+        queue.push_back(event("e1", &moved));
+        queue.push_back(event("e2", "an-alert-not-in-the-table"));
+    }
+    assert_eq!(a.claim_waiting("github:1"), (1, 0));
+    let st = a.lock();
+    assert_eq!(st.queues["github:1"].len(), 1);
+    assert_eq!(st.queues["github:1"][0].id, "e1");
+    assert_eq!(st.queues[CLIENT_1].len(), 1);
+    assert_eq!(st.queues[CLIENT_1][0].id, "e2");
+}
+
 // --- Push (ADR-0045) ---
 
 const UA_PUBLIC: &str =
@@ -2296,27 +2402,28 @@ async fn a_subscription_is_checked_and_stays_its_owners() {
     refused(json!({ "endpoint": "x" }), "p256dh is required").await;
     assert!(store.push_devices().unwrap().is_empty());
 
-    // The same browser under two sign-ins is two devices: neither can take or remove
-    // the other's by knowing the endpoint.
+    // The same browser under a second sign-in: its keys match, so the device moves
+    // (ADR-0044). A stranger who only names the endpoint still removes nothing.
     subscribe(&a, port, "shared", "me").await;
     assert_eq!(
         subscribe(&a, port, "shared", "me").await["devices"],
         1,
         "same device"
     );
-    subscribe(&a, port, "shared", "you").await;
-    assert_eq!(store.push_devices().unwrap().len(), 2);
     let endpoint = json!({ "endpoint": device(port, "shared")["endpoint"] });
     let out = call(&a, "unsubscribe_push", endpoint.clone(), "stranger")
         .await
         .unwrap();
     assert_eq!(out["removed"], false);
+    assert_eq!(store.push_devices().unwrap().len(), 1, "still there");
+    subscribe(&a, port, "shared", "you").await;
     let out = call(&a, "unsubscribe_push", endpoint.clone(), "me")
         .await
         .unwrap();
     assert_eq!(
         (&out["removed"], &out["devices"]),
-        (&json!(true), &json!(0))
+        (&json!(false), &json!(0)),
+        "it is no longer mine to remove"
     );
     let owners: Vec<String> = store
         .push_devices()
@@ -2689,4 +2796,389 @@ async fn a_device_outlives_a_sign_in_but_not_the_idle_limit() {
     a.sweep(&mut a.lock(), later);
     assert!(a.lock().devices.is_empty());
     assert!(store.push_devices().unwrap().is_empty());
+}
+
+// --- Push with sign-in (ADR-0044) ---
+
+/// What clients held goes to the account named, from every client, and the rows follow.
+/// An endpoint the owner already holds stays put, and other kinds of owner are not clients.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_named_owner_collects_every_clients_devices() {
+    let (port, _) = receiver(OK).await;
+    let (store, _) = store_at("claim-devices");
+    let a = push_alerts(store, port, Access::Open, vapid(), Limits::default());
+    subscribe(&a, port, "laptop", CLIENT_1).await;
+    subscribe(&a, port, "phone", CLIENT_2).await;
+    subscribe(&a, port, "tablet", "device:9").await;
+    subscribe(&a, port, "shared", "github:1").await;
+    // Rows from before an endpoint had one owner: the same subscription under a client,
+    // and one under the same endpoint with other keys, which may not be that browser.
+    let row = |name: &str, id: &str, p256dh: &str| {
+        let device = StoredDevice {
+            id: id.to_string(),
+            owner: CLIENT_1.to_string(),
+            endpoint: format!("http://127.0.0.1:{port}/push/{name}"),
+            p256dh: p256dh.to_string(),
+            auth: UA_AUTH.to_string(),
+            created_at: 1,
+        };
+        store.save_push_device(&device).unwrap();
+        a.lock().devices.insert(id.to_string(), device);
+    };
+    row("shared", "duplicate", UA_PUBLIC);
+    subscribe(&a, port, "other-keys", "github:1").await;
+    row("other-keys", "unproven", "other");
+
+    assert_eq!(a.claim_waiting("github:1"), (0, 2));
+
+    let count = |owner: &str| {
+        a.lock()
+            .devices
+            .values()
+            .filter(|d| d.owner == owner)
+            .count()
+    };
+    assert_eq!(count("github:1"), 4, "the two, and the two it held");
+    assert!(
+        !a.lock().devices.contains_key("duplicate"),
+        "one endpoint, one owner"
+    );
+    assert!(
+        a.lock().devices.contains_key("unproven"),
+        "not provably the same"
+    );
+    assert_eq!(count(CLIENT_1), 1);
+    assert_eq!(count(CLIENT_2), 0);
+    assert_eq!(count("device:9"), 1);
+    let stored = store.push_devices().unwrap();
+    assert_eq!(
+        stored.iter().filter(|d| d.owner == "github:1").count(),
+        4,
+        "as a restart reads them"
+    );
+    assert_eq!(a.claim_waiting("github:1"), (0, 0), "once");
+}
+
+/// The bound stays for what comes next: the owner's next device trims to the limit.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_new_device_trims_what_collecting_passed_the_limit_with() {
+    let (port, _) = receiver(OK).await;
+    let (store, _) = store_at("claim-devices-limit");
+    let limits = Limits::default();
+    let cap = limits.devices_per_client;
+    let a = push_alerts(store, port, Access::Open, vapid(), limits);
+    for i in 0..cap + 2 {
+        subscribe(&a, port, &format!("d{i}"), CLIENT_1).await;
+        // Five is a client's limit too, so these come from several.
+        let id = a
+            .lock()
+            .devices
+            .values()
+            .find(|d| d.endpoint.ends_with(&format!("d{i}")))
+            .unwrap()
+            .id
+            .clone();
+        a.lock().devices.get_mut(&id).unwrap().owner = format!("aaaaaaaa-aaaa-4aaa-8aaa-{i:012}");
+    }
+    assert_eq!(a.claim_waiting("github:1"), (0, cap + 2));
+    subscribe(&a, port, "new", "github:1").await;
+    let mine = a
+        .lock()
+        .devices
+        .values()
+        .filter(|d| d.owner == "github:1")
+        .count();
+    assert_eq!(mine, cap);
+}
+
+/// A user is not in `oauth_clients`, so a device of theirs lives on their activity, or
+/// every signed-in device would look idle and be forgotten.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_users_devices_live_on_that_users_activity() {
+    let (port, _) = receiver(OK).await;
+    let (store, _) = store_at("device-user");
+    store.save_user("github:1", "active").unwrap();
+    store.mark_user_used("github:1").unwrap();
+    let a = push_alerts(store, port, Access::Open, vapid(), Limits::default());
+    subscribe(&a, port, "phone", "github:1").await;
+    subscribe(&a, port, "other", "github:2").await;
+    let long_ago = now_ms() - IDLE_OWNER_TTL_MS - 60_000;
+    for d in a.lock().devices.values_mut() {
+        d.created_at = long_ago;
+    }
+    let now = now_ms();
+    a.sweep(&mut a.lock(), now);
+    let owners: Vec<String> = a.lock().devices.values().map(|d| d.owner.clone()).collect();
+    assert_eq!(owners, ["github:1"], "active, and not");
+    a.sweep(&mut a.lock(), now + IDLE_OWNER_TTL_MS + 60_000);
+    assert!(a.lock().devices.is_empty(), "and it does expire");
+}
+
+/// Each device's outcome is its own: named pending when the fire goes out, so a tab can
+/// tell "not yet" from "not sent here", and kept across a restart.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_last_fire_is_recorded_per_device() {
+    let (port, _) = receiver(OK).await;
+    let (store, _) = store_at("push-per-device");
+    let limits = Limits {
+        pushes_per_client_per_minute: 0,
+        ..Limits::default()
+    };
+    let a = push_alerts(store, port, Access::Open, vapid(), limits);
+    let phone = subscribe(&a, port, "phone", "me").await["device"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let id = create(&a, pushed("greater", "once"), "me").await;
+    tick(&a, BASE, 101.0);
+    until("the fire", || a.lock().alerts[&id].fire_count == 1).await;
+    let late = subscribe(&a, port, "late", "me").await["device"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_ne!(phone, late);
+
+    let view = get(&a, "me", &id).await;
+    let devices = view["last_push_devices"].as_object().unwrap();
+    assert!(devices[&phone].is_null(), "pending, not missing: {view}");
+    assert!(
+        !devices.contains_key(&late),
+        "it was not sent this one: {view}"
+    );
+
+    let stored = store.server_alerts().unwrap();
+    assert!(
+        stored[0].contains(&phone),
+        "it survives a restart: {}",
+        stored[0]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn each_devices_outcome_is_kept_with_a_status() {
+    let (port, _) = receiver(OK).await;
+    let (store, _) = store_at("push-per-device-ok");
+    let a = push_alerts(store, port, Access::Open, vapid(), Limits::default());
+    let phone = subscribe(&a, port, "phone", "me").await["device"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let id = create(&a, pushed("greater", "once"), "me").await;
+    tick(&a, BASE, 101.0);
+    until("the record", || a.lock().alerts[&id].last_push.is_some()).await;
+    let view = get(&a, "me", &id).await;
+    assert_eq!(view["last_push_devices"][&phone]["status"], 200, "{view}");
+    assert!(
+        view["last_push_devices"][&phone]["error"].is_null(),
+        "{view}"
+    );
+}
+
+// --- One endpoint, one owner (ADR-0044) ---
+
+/// The browser's next owner has what only that browser has, so the device is theirs. The
+/// earlier owner loses that device, and its alerts run on and reach its other ones.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_account_subscribing_an_endpoint_takes_it_over() {
+    let (port, seen) = receiver(OK).await;
+    let (store, _) = store_at("takeover");
+    let a = push_alerts(store, port, Access::Open, vapid(), Limits::default());
+    subscribe(&a, port, "shared", "github:1").await;
+    subscribe(&a, port, "laptop", "github:1").await;
+    let id = create(&a, pushed("greater", "every"), "github:1").await;
+
+    let answer = subscribe(&a, port, "shared", "github:2").await;
+    assert_eq!(answer["devices"], 1);
+
+    let owners = |endpoint: &str| -> Vec<String> {
+        store
+            .push_devices()
+            .unwrap()
+            .into_iter()
+            .filter(|d| d.endpoint.ends_with(endpoint))
+            .map(|d| d.owner)
+            .collect()
+    };
+    assert_eq!(owners("/shared"), ["github:2"], "one row, the latest");
+    assert_eq!(owners("/laptop"), ["github:1"], "its other device stays");
+    assert_eq!(a.lock().devices.len(), 2, "and memory agrees");
+    assert_eq!(
+        call(&a, "list_server_alerts", json!({}), "github:1")
+            .await
+            .unwrap()["push"]["devices"],
+        1
+    );
+
+    // Its alert goes on, to the device it has left, and not to this one.
+    tick(&a, BASE, 101.0);
+    until("the record", || a.lock().alerts[&id].last_push.is_some()).await;
+    let view = get(&a, "github:1", &id).await;
+    assert_eq!(view["fire_count"], 1, "it keeps running");
+    let got = seen.lock().unwrap().clone();
+    assert_eq!(got.len(), 1, "{got:?}");
+    assert!(got[0].starts_with("POST /push/laptop"), "{}", got[0]);
+
+    // Whoever subscribes last has it: taking it back works the same way.
+    subscribe(&a, port, "shared", "github:1").await;
+    assert_eq!(owners("/shared"), ["github:1"]);
+}
+
+/// Knowing someone's endpoint is not enough: without its keys nothing moves, and that
+/// device goes on working. Neither half of the keys will do.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_endpoint_with_other_keys_evicts_nobody() {
+    let (port, seen) = receiver(OK).await;
+    let (store, _) = store_at("no-eviction");
+    let a = push_alerts(store, port, Access::Open, vapid(), Limits::default());
+    subscribe(&a, port, "phone", "github:1").await;
+    let rows = || -> Vec<(String, String, String, String)> {
+        store
+            .push_devices()
+            .unwrap()
+            .into_iter()
+            .map(|d| (d.id, d.owner, d.p256dh, d.auth))
+            .collect()
+    };
+    let before = rows();
+    let endpoint = format!("http://127.0.0.1:{port}/push/phone");
+
+    const OTHER_PUBLIC: &str =
+        "BNToM-qH15gF5XbSbPRmBJUPnlZkIr_9kq1unPg0TkipOEABC6FQhKZi96_K2_TnLc-JPX8fT5cqzs56rxlUWSk";
+    const OTHER_AUTH: &str = "AAECAwQFBgcICQoLDA0ODw";
+    for (p256dh, auth) in [
+        (OTHER_PUBLIC, OTHER_AUTH),
+        (UA_PUBLIC, OTHER_AUTH),
+        (OTHER_PUBLIC, UA_AUTH),
+    ] {
+        let forged = json!({"endpoint": endpoint, "p256dh": p256dh, "auth": auth});
+        let refused = call(&a, "subscribe_push", forged, "github:2")
+            .await
+            .unwrap_err();
+        assert!(refused.contains("other keys"), "{refused}");
+    }
+    assert_eq!(rows(), before, "the row is as it was");
+    assert_eq!(a.lock().devices.len(), 1);
+
+    let id = create(&a, pushed("greater", "once"), "github:1").await;
+    tick(&a, BASE, 101.0);
+    until("the record", || a.lock().alerts[&id].last_push.is_some()).await;
+    assert_eq!(
+        seen.lock().unwrap().len(),
+        1,
+        "and it still gets its alerts"
+    );
+
+    // The same keys padded are the same keys, and its owner may change its own.
+    let padded = json!({
+        "endpoint": endpoint,
+        "p256dh": format!("{UA_PUBLIC}="),
+        "auth": format!("{UA_AUTH}=="),
+    });
+    call(&a, "subscribe_push", padded, "github:2")
+        .await
+        .unwrap();
+    let own = json!({"endpoint": endpoint, "p256dh": OTHER_PUBLIC, "auth": OTHER_AUTH});
+    call(&a, "subscribe_push", own, "github:2").await.unwrap();
+    assert_eq!(store.push_devices().unwrap().len(), 1);
+}
+
+// --- The per-device outcome belongs to one fire ---
+
+/// An `every` alert can fire again while an earlier push is out. That push's outcome says
+/// nothing about the new fire: the entry stays pending, or the tab would read "delivered"
+/// and never report the new one failing. Only the new fire's own delivery settles it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_late_outcome_does_not_answer_for_a_newer_fire() {
+    let (port, _) = receiver(OK).await;
+    let (store, _) = store_at("push-late-outcome");
+    let limits = Limits {
+        pushes_per_client_per_minute: 0,
+        ..Limits::default()
+    };
+    let a = push_alerts(store, port, Access::Open, vapid(), limits);
+    let phone = subscribe(&a, port, "phone", "me").await["device"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let id = create(&a, pushed("crossing", "every"), "me").await;
+    tick(&a, BASE, 99.0);
+    tick(&a, BASE, 101.0);
+    tick(&a, BASE, 99.0);
+    assert_eq!(a.lock().alerts[&id].fire_count, 2);
+    let (earlier, newer) = {
+        let mut st = a.lock();
+        let queue = st.queues.get_mut("me").unwrap();
+        assert_eq!(queue.len(), 2);
+        (queue.pop_front().unwrap(), queue.pop_front().unwrap())
+    };
+
+    a.clone().deliver(earlier).await;
+    let view = get(&a, "me", &id).await;
+    assert!(
+        view["last_push_devices"][&phone].is_null(),
+        "still pending for the new fire: {view}"
+    );
+    assert_eq!(
+        view["last_push_status"], 200,
+        "the last outcome still updates"
+    );
+
+    a.clone().deliver(newer).await;
+    let view = get(&a, "me", &id).await;
+    assert_eq!(view["last_push_devices"][&phone]["status"], 200, "{view}");
+}
+
+/// The same with a restart between them: which fire the map is about is stored with it.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_fire_a_map_is_about_survives_a_restart() {
+    let (port, _) = receiver(OK).await;
+    let (store, _) = store_at("push-late-restart");
+    let limits = Limits {
+        pushes_per_client_per_minute: 0,
+        ..Limits::default()
+    };
+    let a = push_alerts(store, port, Access::Open, vapid(), limits);
+    subscribe(&a, port, "phone", "me").await;
+    let id = create(&a, pushed("greater", "once"), "me").await;
+    tick(&a, BASE, 101.0);
+    let fire = a.lock().alerts[&id].device_pushes_fire.clone().unwrap();
+    let stored = store.server_alerts().unwrap();
+    assert!(stored[0].contains(&fire), "{}", stored[0]);
+}
+
+/// A fire with nothing to deliver is still a new fire: with the push turned back on later,
+/// the map must not answer with an older fire's outcome.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_fire_with_push_off_leaves_no_older_outcome_behind() {
+    let (port, _) = receiver(OK).await;
+    let (store, _) = store_at("push-off-fire");
+    let a = push_alerts(store, port, Access::Open, vapid(), Limits::default());
+    let phone = subscribe(&a, port, "phone", "me").await["device"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let id = create(&a, pushed("crossing", "every"), "me").await;
+    tick(&a, BASE, 99.0);
+    tick(&a, BASE, 101.0);
+    until("the outcome", || {
+        a.lock().alerts[&id]
+            .device_pushes
+            .get(&phone)
+            .is_some_and(Option::is_some)
+    })
+    .await;
+
+    call(
+        &a,
+        "update_server_alert",
+        json!({"alert_id": id, "push": false}),
+        "me",
+    )
+    .await
+    .unwrap();
+    tick(&a, BASE, 99.0);
+    assert_eq!(a.lock().alerts[&id].fire_count, 2);
+    let view = get(&a, "me", &id).await;
+    let map = view["last_push_devices"].as_object().unwrap();
+    assert!(map.is_empty(), "{view}");
 }

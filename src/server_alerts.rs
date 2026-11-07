@@ -25,6 +25,7 @@ use chartgen::scripting::persistence::{self, Store, StoredDevice, StoredEvent};
 use chartgen::webhook::{self, Policy, Target, Timing};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use tokio::sync::{broadcast, Semaphore};
 use tokio::task::JoinHandle;
 
@@ -302,6 +303,15 @@ struct Record {
     push: bool,
     #[serde(default)]
     last_push: Option<Delivery>,
+    /// The devices the last fire went to, with each one's outcome once known. A device
+    /// not here was not sent that fire, and each tab reads its own: one user's several
+    /// browsers can fare differently (ADR-0044).
+    #[serde(default)]
+    device_pushes: HashMap<String, Option<Delivery>>,
+    /// The fire `device_pushes` is about. An earlier fire's push can finish after a later
+    /// fire, and its outcome says nothing about that one.
+    #[serde(default)]
+    device_pushes_fire: Option<String>,
 }
 
 impl Record {
@@ -429,7 +439,7 @@ pub fn start(hub: &Arc<ChartHub>) {
     }
     let who = match &access {
         Access::NoWebhooks => "no webhooks: CHARTGEN_SERVER_ALERT_CLIENTS is unset".to_string(),
-        Access::Clients(ids) => format!("{} allowed clients", ids.len()),
+        Access::Clients(ids) => format!("{} allowed clients or accounts", ids.len()),
         Access::Open => "open to every client, with webhooks".to_string(),
     };
     let vapid = load_vapid(store);
@@ -475,6 +485,13 @@ fn load_vapid(store: &Store) -> Option<Vapid> {
             None
         }
     }
+}
+
+/// Whether a device has these keys, as one subscription would, however they are padded.
+/// `auth` is a secret, so this does not compare it byte by byte.
+fn same_keys(device: &StoredDevice, p256dh: &str, auth: &str) -> bool {
+    let print = |text: &str| Sha256::digest(text.trim_end_matches('='));
+    print(&device.p256dh) == print(p256dh) && print(&device.auth) == print(auth)
 }
 
 fn now_ms() -> i64 {
@@ -767,6 +784,8 @@ impl ServerAlerts {
         bar_time: i64,
         at: i64,
     ) -> Vec<StoredEvent> {
+        alert.device_pushes.clear();
+        alert.device_pushes_fire = None;
         if alert.webhook.is_none() && !alert.push {
             return Vec::new();
         }
@@ -819,6 +838,7 @@ impl ServerAlerts {
         }
         let mut push_refusal = None;
         if alert.push {
+            alert.device_pushes_fire = Some(id.clone());
             let mut devices: Vec<&StoredDevice> = st
                 .devices
                 .values()
@@ -837,6 +857,7 @@ impl ServerAlerts {
                             format!("{id}:{}", device.id),
                             Some(device.id.clone()),
                         ));
+                        alert.device_pushes.insert(device.id.clone(), None);
                     } else {
                         push_refusal = Some(refused("push skipped: too many deliveries waiting"));
                     }
@@ -920,12 +941,19 @@ impl ServerAlerts {
 
     /// Delete what expired, and try again to join feeds that were refused. A failure
     /// to read the clients keeps their alerts: an unknown owner is not an idle one.
+    /// A signed-in owner is a user, whose activity is theirs and not a client's
+    /// (ADR-0044).
     fn sweep(&self, st: &mut State, now: i64) {
-        let last_tokens: Option<HashMap<String, i64>> = match self.store.oauth_clients() {
-            Ok(clients) => Some(
+        let activity = self
+            .store
+            .oauth_clients()
+            .and_then(|clients| Ok((clients, self.store.user_activity()?)));
+        let last_tokens: Option<HashMap<String, i64>> = match activity {
+            Ok((clients, users)) => Some(
                 clients
                     .into_iter()
                     .filter_map(|c| Some((c.client_id, c.last_token_at?)))
+                    .chain(users)
                     .collect(),
             ),
             Err(e) => {
@@ -970,6 +998,98 @@ impl ServerAlerts {
             }
         }
         self.sync_feeds(st);
+    }
+
+    /// Every alert and push device owned by an OAuth client goes to `user`, the owner the
+    /// operator named, with waiting deliveries, whatever limit that passes: they are that
+    /// person's already (ADR-0044). A webhook's secret moves with its alert. Nothing is
+    /// deleted but a device that would be a second row for one subscription. Returns how
+    /// many alerts and devices moved. Blocking.
+    pub fn claim_waiting(&self, user: &str) -> (usize, usize) {
+        let mut guard = self.lock();
+        let st = &mut *guard;
+        let ids: Vec<String> = st
+            .alerts
+            .values()
+            .filter(|a| persistence::is_client_id(&a.owner))
+            .map(|a| a.id.clone())
+            .collect();
+        let mut moved = HashSet::new();
+        for id in ids {
+            let Some(alert) = st.alerts.get_mut(&id) else {
+                continue;
+            };
+            let mut updated = alert.clone();
+            updated.owner = user.to_string();
+            match self.store.save_server_alert(&id, user, &updated.json()) {
+                Ok(()) => {
+                    *alert = updated;
+                    moved.insert(id);
+                }
+                Err(e) => eprintln!("[alerts] cannot move an alert to its user: {e}"),
+            }
+        }
+
+        let mut held: HashMap<String, StoredDevice> = st
+            .devices
+            .values()
+            .filter(|d| d.owner == user)
+            .map(|d| (d.endpoint.clone(), d.clone()))
+            .collect();
+        let mut waiting: Vec<(i64, String)> = st
+            .devices
+            .values()
+            .filter(|d| persistence::is_client_id(&d.owner))
+            .map(|d| (d.created_at, d.id.clone()))
+            .collect();
+        waiting.sort();
+        let mut devices_moved = 0;
+        let mut duplicates = Vec::new();
+        for (_, id) in waiting {
+            let Some(device) = st.devices.get_mut(&id) else {
+                continue;
+            };
+            // One endpoint, one owner. The same subscription under another client is a
+            // duplicate; other keys are not provably the same browser, so they stay.
+            if let Some(kept) = held.get(&device.endpoint) {
+                if same_keys(kept, &device.p256dh, &device.auth) {
+                    duplicates.push(id);
+                }
+                continue;
+            }
+            let mut updated = device.clone();
+            updated.owner = user.to_string();
+            match self.store.save_push_device(&updated) {
+                Ok(()) => {
+                    held.insert(updated.endpoint.clone(), updated.clone());
+                    *device = updated;
+                    devices_moved += 1;
+                }
+                Err(e) => eprintln!("[alerts] cannot move a push device to its user: {e}"),
+            }
+        }
+        for id in duplicates {
+            self.forget_device(st, &id);
+        }
+
+        if !moved.is_empty() {
+            let mut theirs = VecDeque::new();
+            for (owner, queue) in st.queues.iter_mut() {
+                if persistence::is_client_id(owner) {
+                    let (took, stays): (VecDeque<_>, VecDeque<_>) = std::mem::take(queue)
+                        .into_iter()
+                        .partition(|e| moved.contains(&e.alert_id));
+                    *queue = stays;
+                    theirs.extend(took);
+                }
+            }
+            st.queues
+                .entry(user.to_string())
+                .or_default()
+                .extend(theirs);
+            self.sync_feeds(st);
+        }
+        (moved.len(), devices_moved)
     }
 
     /// Delete an alert, with what it still had to deliver.
@@ -1040,7 +1160,16 @@ impl ServerAlerts {
                 self.forget_device(&mut st, &device.id);
             }
             if let Some(alert) = st.alerts.get_mut(&event.alert_id) {
-                if event.device.is_some() {
+                if let Some(device) = &event.device {
+                    let this_fire = alert
+                        .device_pushes_fire
+                        .as_ref()
+                        .is_some_and(|fire| event.id == format!("{fire}:{device}"));
+                    if this_fire {
+                        alert
+                            .device_pushes
+                            .insert(device.clone(), Some(outcome.clone()));
+                    }
                     alert.last_push = Some(outcome);
                 } else {
                     alert.last_delivery = Some(outcome);
@@ -1131,7 +1260,8 @@ impl ServerAlerts {
         self.sync_feeds(&mut st);
     }
 
-    /// Handle a tool call. `owner` is the caller's OAuth client. Blocking.
+    /// Handle a tool call. `owner` is the caller's user, or with sign-in off its OAuth
+    /// client (ADR-0044). Blocking.
     pub fn call_tool(
         &self,
         tool: &str,
@@ -1160,7 +1290,7 @@ impl ServerAlerts {
     /// Check a webhook URL now, so a bad one is refused to the person typing it.
     fn check_webhook(&self, raw: &str, owner: &str) -> Result<(), String> {
         if !self.access.may_use_webhooks(owner) {
-            return Err("This server only sends webhooks for clients its operator allowed".into());
+            return Err("This server only sends webhooks for sign-ins its operator allowed".into());
         }
         let target = Target::parse(raw, &self.policy)?;
         self.runtime
@@ -1180,6 +1310,10 @@ impl ServerAlerts {
     /// so they are checked here. A device over the limit replaces the client's oldest:
     /// a phone reinstalled or a site cleared leaves a dead one behind, nobody can name it,
     /// and the limit is only there to bound the fan-out.
+    ///
+    /// An endpoint has one owner, whoever subscribed it last, so a device never shows two
+    /// people's alerts. Taking it over needs the keys too, which only that browser has:
+    /// knowing an endpoint is not enough to remove someone's device (ADR-0044).
     fn subscribe_push(&self, args: &Value, owner: &str) -> Result<Value, String> {
         self.check_push(owner)?;
         self.admit_change(owner)?;
@@ -1194,6 +1328,15 @@ impl ServerAlerts {
         DeviceKeys::parse(p256dh, auth)?;
 
         let mut st = self.lock();
+        let others: Vec<&StoredDevice> = st
+            .devices
+            .values()
+            .filter(|d| d.owner != owner && d.endpoint == endpoint)
+            .collect();
+        if !others.iter().all(|d| same_keys(d, p256dh, auth)) {
+            return Err("This push subscription is registered with other keys".into());
+        }
+        let taken_over: Vec<String> = others.iter().map(|d| d.id.clone()).collect();
         let existing = st
             .devices
             .values()
@@ -1208,8 +1351,8 @@ impl ServerAlerts {
                 .collect();
             mine.sort();
             let over = (mine.len() + 1).saturating_sub(self.limits.devices_per_client);
-            // Replacing one of its own adds nothing to the total.
-            if over == 0 && st.devices.len() >= self.limits.devices_total {
+            // Replacing one of its own, or taking one over, adds nothing to the total.
+            if over == 0 && taken_over.is_empty() && st.devices.len() >= self.limits.devices_total {
                 let Some(id) = self.device_to_replace(&st, owner) else {
                     return Err(format!(
                         "Limit reached: this server holds its maximum of {} push devices",
@@ -1236,8 +1379,14 @@ impl ServerAlerts {
             eprintln!("[alerts] cannot store a push device: {e}");
             "The alert store is unavailable".to_string()
         })?;
-        st.devices.insert(id, device);
-        Ok(json!({ "devices": st.devices.values().filter(|d| d.owner == owner).count() }))
+        st.devices.insert(id.clone(), device);
+        for other in taken_over {
+            self.forget_device(&mut st, &other);
+        }
+        Ok(json!({
+            "devices": st.devices.values().filter(|d| d.owner == owner).count(),
+            "device": id,
+        }))
     }
 
     /// With the table full, whose device makes room: never a client the operator listed,
@@ -1369,7 +1518,7 @@ impl ServerAlerts {
 
     fn create(&self, args: &Value, owner: &str) -> Result<Value, String> {
         if !self.access.may_create(owner) {
-            return Err("This server only runs alerts for clients its operator allowed".into());
+            return Err("This server only runs alerts for sign-ins its operator allowed".into());
         }
         self.admit_change(owner)?;
         let raw_symbol = args.get("symbol").and_then(Value::as_str).unwrap_or("");
@@ -1457,6 +1606,8 @@ impl ServerAlerts {
             last_delivery: None,
             push,
             last_push: None,
+            device_pushes: HashMap::new(),
+            device_pushes_fire: None,
         };
         let mut st = self.lock();
         // The fetch and the lookup ran unlocked: another call may have filled up.
@@ -1670,6 +1821,7 @@ impl ServerAlerts {
             "last_push_at": a.last_push.as_ref().map(|d| d.at),
             "last_push_status": a.last_push.as_ref().and_then(|d| d.status),
             "last_push_error": a.last_push.as_ref().and_then(|d| d.error.clone()),
+            "last_push_devices": a.device_pushes,
             "feed": if live { "live" } else { "waiting" },
             "last_price": watch.and_then(|w| w.last_price),
         })

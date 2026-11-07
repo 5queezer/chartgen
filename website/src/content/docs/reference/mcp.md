@@ -814,7 +814,9 @@ forming bar, with every indicator recomputed. Merge it like a polled tail.
   and one recompute. Every chart of a symbol and feed interval shares one Binance
   WebSocket, so `1m` and `7m` of a symbol use the same one.
 - **Limits.** At most 4 subscriptions per token, 32 per client address
-  (the TCP peer; behind a reverse proxy that is the proxy) and 64 per
+  (the TCP peer; behind a reverse proxy that is the proxy, unless
+  [a header is named](/chartgen/guides/deploy/#sign-in-through-github-and-google)) or with
+  [sign-in](/chartgen/reference/oauth/#sign-in) per user, and 64 per
   server, and 10 `subscribe_chart` calls per token per minute. Over a
   limit the call fails with an error starting with `push limit reached`;
   poll that chart instead. Without an open SSE stream for the session it
@@ -909,7 +911,8 @@ Price alerts that run on the server with no browser open, and can call a webhook
 ([guide](/chartgen/guides/web/#alerts-on-the-server),
 [ADR-0042](/chartgen/decisions/0042-server-side-alerts/)). These tools are listed only
 when the server runs with `CHARTGEN_SERVER_ALERTS=1` and answer only on the HTTP
-transport: an alert belongs to the OAuth client of the bearer token, and another client
+transport: an alert belongs to the OAuth client of the bearer token, or with
+[sign-in](/chartgen/reference/oauth/#sign-in) to its user, and another client or user
 cannot see or change it. They are unrelated to the `--trade` alert tools above. On a
 server without them `list_server_alerts` returns `{enabled: false, alerts: []}` and the
 others an error. The operator decides who may use them
@@ -975,7 +978,7 @@ Times are unix milliseconds. `webhook` shows the host only, never the URL or the
 HTTP status, and nothing else of its response is kept. `last_error` is why the last
 delivery failed or was skipped, or that fires are being limited.
 
-Limits: 20 alerts per client and 200 not yet spent in total, 16 symbol and interval pairs
+Limits, per user where there is sign-in: 20 alerts per client and 200 not yet spent in total, 16 symbol and interval pairs
 watched and 2 per client, 10 creates or updates per client per minute, 6 fires per `every` alert
 per minute, 30 webhooks per client and 120 in total per minute. A delivery over those waits its
 turn, up to 50 per client and for up to an hour, with the client that waited longest going first;
@@ -1063,9 +1066,15 @@ pass the subscription to `subscribe_push`. The endpoint must be `https` at a kno
 `*.notify.windows.com`), `p256dh` at most 88 characters and `auth` at most 24. Registering the same
 endpoint again updates its keys. You may have 5 devices, and a new one over that replaces the oldest; at
 most 30 pushes per minute. On a server whose 2000 devices are full, a new one replaces another client's,
-and a client's alerts only notify that client's devices. A 404 or 410 from the push service removes the device. Delivery is at least once, so deduplicate on `id`; the app's worker uses it
+and a client's alerts only notify that client's devices: with
+[sign-in](/chartgen/reference/oauth/#sign-in) those are all of its user's, on every client. `subscribe_push` answers
+`devices`, the count, and `device`, this one's id. An endpoint has one owner, whoever subscribed it last: registering one
+that someone else holds removes their row, and fails with `registered with other keys`, changing nothing, unless both
+keys match. A 404 or 410 from the push service removes the device. Delivery is at least once, so deduplicate on `id`; the app's worker uses it
 as the notification's tag. Each alert also returns `push`, `last_push_at`, `last_push_status` and
-`last_push_error`, the last outcome across your devices.
+`last_push_error`, the last outcome across your devices, and `last_push_devices`: the devices its last fire went
+to, by id, each with `{at, status, error}`, or `null` while its outcome is not known. A device not there was not sent
+that fire.
 
 ### Scripted indicators (`CHARTGEN_SCRIPTING=1`)
 
@@ -1075,7 +1084,8 @@ User-authored Starlark indicators
 [ADR-0025](/chartgen/decisions/0025-user-indicator-registry/)). These tools
 are listed and served only when the server runs with
 `CHARTGEN_SCRIPTING=1`. Scripts belong to the OAuth client of the bearer
-token, so the tools that store or read scripts need the HTTP transport
+token, or with [sign-in](/chartgen/reference/oauth/#sign-in) to its user, so the
+tools that store or read scripts need the HTTP transport
 (stdio has no user). Once registered, a script's name works in
 `generate_chart` (resolved before built-ins, so it can shadow one for its
 owner) and shows up in `list_indicators`. The generated TypeScript input
@@ -1110,10 +1120,12 @@ script evaluations run on the server at once and one per user; a caller
 waits for a slot until its deadline, then gets "server busy".
 `subscribe_chart` pushes compute built-ins only.
 
-Scripting is meant for trusted or single-user deployments: a script's
-owner is an OAuth client registration, and `/authorize` approves
-automatically (threat model in
-[ADR-0025](/chartgen/decisions/0025-user-indicator-registry/)).
+Scripting is meant for trusted or single-user deployments: without sign-in a
+script's owner is an OAuth client registration and `/authorize` approves
+automatically, and with it anyone with an account can run scripts in the server
+process (threat model in
+[ADR-0025](/chartgen/decisions/0025-user-indicator-registry/) and
+[ADR-0044](/chartgen/decisions/0044-sign-in-through-github-and-google/)).
 
 ### Orders & positions (require `--trade`)
 

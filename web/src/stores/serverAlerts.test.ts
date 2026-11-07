@@ -26,6 +26,7 @@ const alert: ServerAlert = {
   last_push_at: null,
   last_push_status: null,
   last_push_error: null,
+  last_push_devices: {},
   feed: "live",
   last_price: 99,
 };

@@ -602,6 +602,22 @@ export const ServerAlertSchema = z.object({
   last_push_at: z.number().nullable(),
   last_push_status: z.number().int().nullable(),
   last_push_error: z.string().nullable(),
+  /**
+   * The devices the last fire went to, each with its outcome once known. Each tab reads
+   * its own entry: one user's browsers can fare differently (ADR-0044).
+   */
+  last_push_devices: z
+    .record(
+      z.string(),
+      z
+        .object({
+          at: z.number(),
+          status: z.number().int().nullable(),
+          error: z.string().nullable(),
+        })
+        .nullable(),
+    )
+    .default({}),
   feed: z.enum(["live", "waiting"]),
   last_price: z.number().nullable(),
 });
@@ -626,7 +642,10 @@ export type ServerAlertChangePayload = z.infer<typeof ServerAlertChangePayloadSc
 export const DeleteServerAlertPayloadSchema = z.object({ deleted: z.boolean() });
 export type DeleteServerAlertPayload = z.infer<typeof DeleteServerAlertPayloadSchema>;
 
-export const SubscribePushPayloadSchema = z.object({ devices: z.number().int() });
+export const SubscribePushPayloadSchema = z.object({
+  devices: z.number().int(),
+  device: z.string(),
+});
 export type SubscribePushPayload = z.infer<typeof SubscribePushPayloadSchema>;
 
 export const UnsubscribePushPayloadSchema = z.object({

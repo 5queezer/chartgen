@@ -12,7 +12,7 @@ before launch.
 | `alerts.json` | `set_alert`, `cancel_alert`, fired alerts | JSON array, atomic replace |
 | `trades.log` | Order lifecycle + alert triggers | Append-only text |
 | `subscriptions.json` | `subscribe_notifications`, `unsubscribe_notifications` | JSON map keyed by token |
-| `chartgen.db` | `/register` and `/token` on the HTTP server; scripted indicators, with `CHARTGEN_SCRIPTING=1` (any mode); server alerts, with `CHARTGEN_SERVER_ALERTS=1` | SQLite, path from `CHARTGEN_DB` |
+| `chartgen.db` | `/register` and `/token` on the HTTP server; sign-in, when configured; scripted indicators, with `CHARTGEN_SCRIPTING=1` (any mode); server alerts, with `CHARTGEN_SERVER_ALERTS=1` | SQLite, path from `CHARTGEN_DB` |
 
 ## `alerts.json`
 
@@ -111,12 +111,14 @@ the scripted indicators, which need it
 `CHARTGEN_DB`, default `~/.chartgen/chartgen.db`. The HTTP server opens it at
 startup, creating the file and its directory, and applies pending migrations.
 `PRAGMA user_version` counts the migrations applied. If it cannot be opened, the
-server logs that and runs with clients in memory only. A build without the
-default `scripting` cargo feature has no store at all.
+server logs that and runs with clients in memory only. A migration runs in one transaction, so
+one that fails leaves the file as it was: repair the cause and restart, and the clients and
+everything else come back. A build without the default `scripting` cargo feature has no store
+at all.
 
 ```sql
 CREATE TABLE user_indicators (
-    user_id      TEXT    NOT NULL,   -- OAuth client_id of the owner
+    user_id      TEXT    NOT NULL,   -- owner: OAuth client_id, or with sign-in a users.id
     name         TEXT    NOT NULL,
     source       TEXT    NOT NULL,   -- Starlark source as registered
     meta_json    TEXT    NOT NULL,   -- {title, description, overlay, params} at register
@@ -129,12 +131,33 @@ CREATE TABLE oauth_clients (
     client_id      TEXT    PRIMARY KEY,
     redirect_uris  TEXT    NOT NULL, -- JSON array
     created_at     INTEGER NOT NULL,
-    last_token_at  INTEGER           -- migration 2; NULL = never got a token
+    last_token_at  INTEGER,          -- migration 2; NULL = never got a token
+    client_name    TEXT              -- migration 5; as registered, for the consent page
+);
+-- Migration 5, used with sign-in on (ADR-0044):
+CREATE TABLE users (
+    id             TEXT    PRIMARY KEY, -- github:<id> or google:<sub>
+    name           TEXT    NOT NULL,    -- display only, refreshed at each login
+    created_at     INTEGER NOT NULL,
+    last_login_at  INTEGER NOT NULL,
+    last_token_at  INTEGER              -- with the login, what keeps their alerts alive
+);
+CREATE TABLE sessions (
+    token_hash  TEXT    PRIMARY KEY,    -- SHA-256 hex of the cookie value
+    user_id     TEXT    NOT NULL,
+    created_at  INTEGER NOT NULL,
+    expires_at  INTEGER NOT NULL
+);
+CREATE TABLE client_grants (            -- clients a user approved
+    user_id     TEXT    NOT NULL,
+    client_id   TEXT    NOT NULL,
+    created_at  INTEGER NOT NULL,
+    PRIMARY KEY (user_id, client_id)
 );
 -- Migration 3: server alerts (ADR-0042).
 CREATE TABLE server_alerts (
     id           TEXT PRIMARY KEY,
-    owner        TEXT NOT NULL,      -- OAuth client_id
+    owner        TEXT NOT NULL,      -- OAuth client_id, or with sign-in a users.id
     record_json  TEXT NOT NULL       -- definition and state, webhook URL and secret
 );
 CREATE TABLE server_alert_events (   -- deliveries not finished yet
@@ -147,7 +170,7 @@ CREATE TABLE server_alert_events (   -- deliveries not finished yet
 ALTER TABLE server_alert_events ADD COLUMN device TEXT; -- NULL: the webhook
 CREATE TABLE push_devices (
     id          TEXT    PRIMARY KEY,
-    owner       TEXT    NOT NULL,    -- OAuth client_id
+    owner       TEXT    NOT NULL,    -- OAuth client_id, or with sign-in a users.id
     endpoint    TEXT    NOT NULL,
     p256dh      TEXT    NOT NULL,
     auth        TEXT    NOT NULL,
@@ -163,7 +186,7 @@ CREATE TABLE server_settings (       -- vapid_private_key, unless set by env
 A fire writes the alert's new state and its delivery in one transaction, before
 anything is sent, so a restart neither fires it again nor loses the delivery. A
 delivery older than an hour is dropped. Spent alerts are deleted after 7 days, and those of an
-owner with no token for 30 days too, unless the operator listed that client. `record_json` holds webhook URLs,
+owner with no token for 30 days too, unless the operator listed that owner. A user's sign-in counts as well. `record_json` holds webhook URLs,
 which may contain tokens, and signing secrets in clear text, because the server needs
 them to send and sign. They are never returned or logged, but treat a copy of this file
 as holding them.
@@ -187,3 +210,10 @@ are only deleted when a registration at the
 spares any client with a live token or a row in `user_indicators`, or, with
 `CHARTGEN_SERVER_ALERTS=1`, in `server_alerts`. Back up the file like any
 SQLite database (`sqlite3 chartgen.db ".backup copy.db"`).
+
+`users`, `sessions` and `client_grants` are empty until
+[sign-in](/chartgen/reference/oauth/#sign-in) is configured. Expired sessions, and
+approvals of clients no longer registered, are deleted at startup. Provider tokens and
+secrets are never stored, and neither are emails, except that a Google account without a
+name is shown by its verified email. Deleting a user is by hand, with the server stopped:
+their rows in these tables, `user_indicators` and `server_alerts`.

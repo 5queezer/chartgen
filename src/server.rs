@@ -23,6 +23,8 @@ use chartgen::mcp_schema::SERVER_ALERT_TOOLS;
 #[cfg(feature = "scripting")]
 use chartgen::scripting;
 
+mod signin;
+
 // --- OAuth 2.1 PKCE in-memory store ---
 
 struct OAuthClient {
@@ -33,6 +35,8 @@ struct OAuthClient {
     /// never received one (unused clients are collected, and evicted first).
     /// In memory only: a restart starts over from `last_token_at`.
     last_used: Option<Instant>,
+    /// As it registered, for the consent page (ADR-0044). Chosen by the client.
+    name: Option<String>,
 }
 
 /// Dynamic client registration limits: `/authorize` auto-approves, so
@@ -63,6 +67,8 @@ struct AuthCode {
     code_challenge: String,
     _code_challenge_method: String,
     created_at: Instant,
+    /// The signed-in user it was issued to; `None` with sign-in off (ADR-0044).
+    user: Option<signin::TokenUser>,
 }
 
 struct AccessToken {
@@ -70,6 +76,8 @@ struct AccessToken {
     client_id: String,
     created_at: Instant,
     expires_in: Duration,
+    /// The signed-in user it was issued to; `None` with sign-in off (ADR-0044).
+    user: Option<signin::TokenUser>,
 }
 
 struct OAuthStore {
@@ -81,6 +89,9 @@ struct OAuthStore {
     /// When a refused registration last logged, and refusals since.
     refusal_logged_at: Option<Instant>,
     refusals_unlogged: u64,
+    /// Sign-in through GitHub and Google; `None` when none is configured, and
+    /// `/authorize` then auto-approves (ADR-0044).
+    signin: Option<signin::SignIn>,
 }
 
 impl OAuthStore {
@@ -92,6 +103,7 @@ impl OAuthStore {
             registrations: HashMap::new(),
             refusal_logged_at: None,
             refusals_unlogged: 0,
+            signin: None,
         }
     }
 
@@ -262,20 +274,33 @@ impl OAuthStore {
 
     fn validate_token(&mut self, token: &str) -> bool {
         self.cleanup_expired();
-        let Some(t) = self.tokens.get(token) else {
+        let Some(t) = self.tokens.get_mut(token) else {
             return false;
         };
+        if let Some(user) = t.user.as_mut() {
+            user.last_used = Instant::now();
+        }
         if let Some(c) = self.clients.get_mut(&t.client_id) {
             c.last_used = Some(Instant::now());
         }
         true
     }
 
-    /// The OAuth client a valid token was issued to: the owner of that
-    /// caller's scripted indicators (ADR-0025) and server alerts (ADR-0042).
-    fn client_for_token(&mut self, token: &str) -> Option<String> {
+    /// The owner of what a valid token's caller stores, such as scripted indicators
+    /// (ADR-0025) and server alerts (ADR-0042): its signed-in user, or with sign-in
+    /// off its OAuth client (ADR-0044).
+    fn owner_for_token(&mut self, token: &str) -> Option<String> {
         self.cleanup_expired();
-        self.tokens.get(token).map(|t| t.client_id.clone())
+        self.tokens.get(token).map(|t| match &t.user {
+            Some(user) => user.id.clone(),
+            None => t.client_id.clone(),
+        })
+    }
+
+    /// The signed-in user of a valid token; `None` with sign-in off.
+    fn user_for_token(&mut self, token: &str) -> Option<String> {
+        self.cleanup_expired();
+        self.tokens.get(token)?.user.as_ref().map(|u| u.id.clone())
     }
 }
 
@@ -388,6 +413,7 @@ struct RegisterRequest {
 
 async fn oauth_register(
     State(state): State<SharedState>,
+    headers: HeaderMap,
     ext: axum::http::Extensions,
     Json(body): Json<RegisterRequest>,
 ) -> (StatusCode, Json<Value>) {
@@ -401,7 +427,7 @@ async fn oauth_register(
         .oauth
         .lock()
         .unwrap()
-        .admit_registration(&client_addr(&ext), &body);
+        .admit_registration(&client_addr(&headers, &ext), &body);
     if let Err((status, err)) = admitted {
         return (status, Json(err));
     }
@@ -427,6 +453,7 @@ async fn oauth_register(
                     redirect_uris: body.redirect_uris.clone(),
                     created_at: Instant::now(),
                     last_used: None,
+                    name: body.client_name.clone(),
                 };
 
                 oauth.clients.insert(client_id.clone(), client);
@@ -451,7 +478,11 @@ async fn oauth_register(
     // a busy store would stall whatever else a blocked worker holds.
     #[cfg(feature = "scripting")]
     {
-        let (id, uris) = (client_id.clone(), body.redirect_uris.clone());
+        let (id, uris, name) = (
+            client_id.clone(),
+            body.redirect_uris.clone(),
+            body.client_name.clone(),
+        );
         let _ = tokio::task::spawn_blocking(move || {
             let Some(store) = scripting::persistence::global() else {
                 return;
@@ -466,6 +497,11 @@ async fn oauth_register(
             }
             if let Err(e) = store.save_oauth_client(&id, &uris) {
                 eprintln!("[OAuth] could not persist a client registration: {e}");
+            }
+            if let Some(name) = name {
+                if let Err(e) = store.set_oauth_client_name(&id, &name) {
+                    eprintln!("[OAuth] could not persist a client name: {e}");
+                }
             }
         })
         .await;
@@ -532,6 +568,8 @@ fn invalid_client_redirect(base: &str, redirect_uri: &str, state: Option<&str>) 
 
 async fn oauth_authorize(
     State(state): State<SharedState>,
+    headers: HeaderMap,
+    ext: axum::http::Extensions,
     Query(params): Query<AuthorizeQuery>,
 ) -> Response {
     eprintln!("[OAuth] GET /authorize");
@@ -586,6 +624,11 @@ async fn oauth_authorize(
             .into_response();
     }
 
+    // With sign-in on, a client id and a redirect URI are not enough (ADR-0044).
+    if s.signin.is_some() {
+        return signin::authorize(&mut s, &params, &headers, &client_addr(&headers, &ext));
+    }
+
     // Auto-approve: generate auth code
     let code = Uuid::new_v4().to_string();
     let auth_code = AuthCode {
@@ -595,6 +638,7 @@ async fn oauth_authorize(
         code_challenge: params.code_challenge.clone(),
         _code_challenge_method: params.code_challenge_method.clone(),
         created_at: Instant::now(),
+        user: None,
     };
     s.codes.insert(code.clone(), auth_code);
 
@@ -674,7 +718,8 @@ async fn oauth_token(
             .into_response();
     }
 
-    let token = {
+    #[cfg_attr(not(feature = "scripting"), allow(unused_variables))]
+    let (token, token_user) = {
         let mut s = state.oauth.lock().unwrap();
         s.cleanup_expired();
 
@@ -684,10 +729,12 @@ async fn oauth_token(
                 c.client_id.clone(),
                 c.redirect_uri.clone(),
                 c.code_challenge.clone(),
+                c.user.clone(),
             )
         });
 
-        let (stored_client_id, stored_redirect_uri, stored_challenge) = match code_data {
+        let (stored_client_id, stored_redirect_uri, stored_challenge, token_user) = match code_data
+        {
             Some(d) => d,
             None => {
                 eprintln!("[OAuth] POST /token code not found (possibly already exchanged)");
@@ -698,6 +745,11 @@ async fn oauth_token(
                 .into_response();
             }
         };
+
+        // A code that carries a user works once, whatever the outcome (ADR-0044).
+        if token_user.is_some() {
+            s.codes.remove(&body.code);
+        }
 
         // Validate client_id and redirect_uri
         if stored_client_id != body.client_id {
@@ -740,12 +792,16 @@ async fn oauth_token(
                 client_id: body.client_id.clone(),
                 created_at: Instant::now(),
                 expires_in,
+                user: token_user.clone(),
             },
         );
         if let Some(c) = s.clients.get_mut(&body.client_id) {
             c.last_used = Some(Instant::now());
         }
-        token
+        if let Some(user) = &token_user {
+            s.trim_user_tokens(&user.id);
+        }
+        (token, token_user)
     };
     // Every authenticated request needs that lock, and an async worker may hold
     // others' work: neither waits for a disk write.
@@ -757,6 +813,9 @@ async fn oauth_token(
                 if let Err(e) = store.mark_oauth_client_used(&client_id) {
                     eprintln!("[OAuth] could not record client use: {e}");
                 }
+            }
+            if let Some(user) = token_user {
+                signin::after_token(&user.id);
             }
         })
         .await;
@@ -857,13 +916,46 @@ fn stream_key(token: &str, session_id: Option<&str>) -> String {
     format!("{token}\n{}", session_id.unwrap_or(""))
 }
 
-/// The peer address of the connection, for the per-client chart push cap.
-/// chartgen trusts no forwarding header (`X-Forwarded-For` and the like),
-/// so behind a reverse proxy this is the proxy's address (ADR-0021).
-fn client_addr(ext: &axum::http::Extensions) -> String {
-    ext.get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
-        .map(|c| c.0.ip().to_string())
-        .unwrap_or_else(|| "unknown".into())
+/// The client's address, for the limits per address. The peer of the connection:
+/// chartgen trusts no forwarding header (`X-Forwarded-For` and the like), so behind
+/// a reverse proxy this is the proxy's address (ADR-0021), unless the operator names
+/// the proxy's header (ADR-0044).
+fn client_addr(headers: &HeaderMap, ext: &axum::http::Extensions) -> String {
+    let trusted = std::env::var("CHARTGEN_TRUSTED_PROXY_HEADER").ok();
+    forwarded_addr(headers, trusted.as_deref()).unwrap_or_else(|| {
+        ext.get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+            .map_or_else(|| "unknown".into(), |c| address_key(c.0.ip()))
+    })
+}
+
+/// One address for every limit. A whole IPv6 /64 is what one household or one server
+/// has, so it counts once, or anyone could be thousands of addresses.
+fn address_key(ip: std::net::IpAddr) -> String {
+    match ip.to_canonical() {
+        std::net::IpAddr::V6(v6) if !v6.is_loopback() => {
+            let net = u128::from(v6) & !u128::from(u64::MAX);
+            format!("{}/64", std::net::Ipv6Addr::from(net))
+        }
+        ip => ip.to_string(),
+    }
+}
+
+/// What one sender of an unusable address counts under: one budget, shared.
+const BAD_FORWARDED_ADDRESS: &str = "bad-header";
+
+/// The address in the header the operator named. `None` if none is named or the
+/// header is absent, which means the peer. Present but not exactly one address, it
+/// counts under one fixed bucket: falling back to the peer would hand anyone who can
+/// send it a same-host proxy's loopback exemption, and so would a loopback value.
+fn forwarded_addr(headers: &HeaderMap, name: Option<&str>) -> Option<String> {
+    let value = headers.get(name?.trim())?;
+    let usable = value
+        .to_str()
+        .ok()
+        .and_then(|v| v.trim().parse::<std::net::IpAddr>().ok())
+        .map(|ip| ip.to_canonical())
+        .filter(|ip| !ip.is_loopback());
+    Some(usable.map_or_else(|| BAD_FORWARDED_ADDRESS.to_string(), address_key))
 }
 
 /// True for a JSON-RPC message that gets no response: a notification (no
@@ -1061,6 +1153,26 @@ async fn mcp_handler(
     let id = body.get("id").cloned();
     let params = body.get("params");
 
+    if method == "tools/call" {
+        let admitted = extract_bearer_token(&headers)
+            .is_none_or(|t| state.oauth.lock().unwrap().admit_tool_call(t));
+        if !admitted {
+            let message = format!(
+                "Too many requests: at most {} tool calls per minute per user",
+                signin::MAX_TOOL_CALLS_PER_USER
+            );
+            let err = jsonrpc_error(id, -32000, &message);
+            let mut resp = streamable_http_json_response(
+                StatusCode::TOO_MANY_REQUESTS,
+                err,
+                session_id.as_deref(),
+            );
+            resp.headers_mut()
+                .insert(header::RETRY_AFTER, HeaderValue::from_static("60"));
+            return resp;
+        }
+    }
+
     // Notifications: no response body. Still echo the session id.
     // Per JSON-RPC 2.0 §4.1, a frame without an `id` is a notification; a
     // frame with an `id` is a request and MUST produce a matching response
@@ -1082,10 +1194,11 @@ async fn mcp_handler(
         .and_then(|n| n.as_str())
         .filter(|n| method == "tools/call" && SERVER_ALERT_TOOLS.contains(n));
     if let Some(tool) = alert_tool {
-        // An alert belongs to the token's OAuth client (ADR-0042).
+        // An alert belongs to the token's user, or with sign-in off to its OAuth client
+        // (ADR-0042, ADR-0044).
         let owner = token_owned
             .as_deref()
-            .and_then(|t| state.oauth.lock().unwrap().client_for_token(t));
+            .and_then(|t| state.oauth.lock().unwrap().owner_for_token(t));
         let (tool, id) = (tool.to_string(), id.clone());
         let args = params.and_then(|p| p.get("arguments")).cloned();
         let result = tokio::task::spawn_blocking(move || {
@@ -1095,10 +1208,11 @@ async fn mcp_handler(
         .unwrap();
         return streamable_http_json_response(StatusCode::OK, result, session_id.as_deref());
     }
-    // Scripted indicators belong to the token's OAuth client (ADR-0025).
+    // Scripted indicators belong to the token's user, or with sign-in off to its
+    // OAuth client (ADR-0025, ADR-0044).
     #[cfg(feature = "scripting")]
     let user = match &token_owned {
-        Some(t) if scripting::enabled() => state.oauth.lock().unwrap().client_for_token(t),
+        Some(t) if scripting::enabled() => state.oauth.lock().unwrap().owner_for_token(t),
         _ => None,
     };
     #[cfg(not(feature = "scripting"))]
@@ -1108,10 +1222,16 @@ async fn mcp_handler(
     let method_owned = method.to_string();
     let params_owned = params.cloned();
     let engine = state.engine.clone();
+    // The per-client cap counts per user where there is one: behind a proxy every
+    // address is the proxy's, so one stranger could use up everyone's.
+    let push_client = token_owned
+        .as_deref()
+        .and_then(|t| state.oauth.lock().unwrap().user_for_token(t))
+        .unwrap_or_else(|| client_addr(&headers, &ext));
     let push = token_owned.as_deref().map(|t| PushCtx {
         hub: state.charts.clone(),
         stream: stream_key(t, session_id.as_deref()),
-        client: client_addr(&ext),
+        client: push_client,
     });
     let result = tokio::task::spawn_blocking(move || {
         handle_mcp_request(
@@ -1226,7 +1346,19 @@ async fn serve_web(dir: PathBuf, req: Request) -> Response {
         } else {
             "no-cache"
         };
+    let html = resp
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .is_some_and(|t| t.as_bytes().starts_with(b"text/html"));
     let h = resp.headers_mut();
+    // The sign-in callback's `?code=` is in this page's address until the app scrubs it,
+    // so no resource it loads from elsewhere may be told that address (ADR-0044).
+    if html {
+        h.insert(
+            header::REFERRER_POLICY,
+            HeaderValue::from_static("same-origin"),
+        );
+    }
     h.insert(header::CACHE_CONTROL, HeaderValue::from_static(cache));
     h.insert(
         header::X_CONTENT_TYPE_OPTIONS,
@@ -1400,6 +1532,32 @@ impl Drop for CleanupStream {
 pub async fn run_server(port: u16, engine: Option<Arc<RwLock<TradingEngine>>>) {
     #[cfg_attr(not(feature = "scripting"), allow(unused_mut))]
     let mut oauth = OAuthStore::new();
+    match signin::Config::from_env() {
+        Ok(Some(config)) => {
+            println!("Sign-in required, through: {}", config.provider_labels());
+            if engine.is_some() {
+                eprintln!("[OAuth] WARNING: sign-in is open to anyone with an account, and this server has a trading engine: anyone who signs in can use the order tools. Do not expose it (ADR-0044).");
+            }
+            if signin::public_base_url().is_some_and(|b| !b.starts_with("https://")) {
+                eprintln!("[OAuth] WARNING: CHARTGEN_BASE_URL is not https: session cookies travel unprotected.");
+            }
+            let not_accounts = std::env::var("CHARTGEN_SERVER_ALERT_CLIENTS")
+                .map_or(0, |raw| signin::allowlist_entries_not_accounts(&raw));
+            if not_accounts > 0 {
+                eprintln!("[alerts] WARNING: {not_accounts} entries of CHARTGEN_SERVER_ALERT_CLIENTS are not accounts (github:<id>, google:<sub>), and with sign-in on they match nobody (ADR-0044).");
+            }
+            oauth.signin = Some(signin::SignIn::new(config));
+        }
+        Ok(None) => {
+            if let Some(base) = signin::public_base_url() {
+                eprintln!("[OAuth] WARNING: serving {base} without sign-in: anyone can get a token. Set CHARTGEN_GITHUB_CLIENT_ID/SECRET or CHARTGEN_GOOGLE_CLIENT_ID/SECRET (ADR-0044).");
+            }
+        }
+        Err(e) => {
+            eprintln!("[OAuth] sign-in is misconfigured, refusing to start: {e}");
+            std::process::exit(1);
+        }
+    }
     // Open (and migrate) the store at startup and restore the registered
     // OAuth clients, with CHARTGEN_SCRIPTING or without: they keep their
     // registration (ADR-0036) and their scripts stay theirs (ADR-0025).
@@ -1436,12 +1594,38 @@ pub async fn run_server(port: u16, engine: Option<Arc<RwLock<TradingEngine>>>) {
                             redirect_uris: c.redirect_uris,
                             created_at: instant_of(c.created_at),
                             last_used: c.last_token_at.map(instant_of),
+                            name: c.client_name,
                         },
                     );
                 }
             }
             Some(Err(e)) => eprintln!("[OAuth] cannot read stored clients: {e}"),
             None => eprintln!("[OAuth] store unavailable at {}", path.display()),
+        }
+        if let Some(signin) = oauth.signin.as_mut() {
+            match scripting::persistence::global().map(|s| signin.restore(s)) {
+                Some(Ok((users, sessions))) => {
+                    println!("Sign-in store: {users} users, {sessions} sessions restored");
+                    let owner = signin::claim_owner();
+                    if owner
+                        .as_deref()
+                        .is_some_and(|o| !scripting::persistence::is_account(o))
+                    {
+                        eprintln!("[OAuth] WARNING: CHARTGEN_CLAIM_OWNER is not an account (github:<id>, google:<sub>), so it matches nobody.");
+                    }
+                    let waiting =
+                        scripting::persistence::global().map(|s| s.waiting_rows(owner.as_deref()));
+                    if let Some(Ok(waiting)) = waiting {
+                        if let Some(notice) =
+                            signin::waiting_rows_notice(&waiting, owner.as_deref())
+                        {
+                            eprintln!("[OAuth] {notice}");
+                        }
+                    }
+                }
+                Some(Err(e)) => eprintln!("[OAuth] cannot read stored sessions: {e}"),
+                None => eprintln!("[OAuth] sessions and users stay in memory: no store"),
+            }
         }
     }
     let state = Arc::new(AppState {
@@ -1480,6 +1664,17 @@ pub async fn run_server(port: u16, engine: Option<Arc<RwLock<TradingEngine>>>) {
         .route("/register", post(oauth_register))
         .route("/authorize", get(oauth_authorize))
         .route("/token", post(oauth_token))
+        .route("/oauth/signin", get(signin::signin_page))
+        .route("/oauth/login/{provider}", get(signin::login))
+        .route("/oauth/callback/{provider}", get(signin::callback))
+        .route("/oauth/cancel", get(signin::cancel))
+        .route(
+            "/oauth/consent",
+            get(signin::consent_form).post(signin::consent_decision),
+        )
+        .route("/oauth/logout", post(signin::logout))
+        .route("/oauth/signed-out", get(signin::signed_out))
+        .route("/oauth/me", get(signin::me))
         .route("/favicon.ico", get(favicon_handler))
         .route("/favicon.svg", get(favicon_handler))
         // MCP endpoints — Claude.ai may try root, /mcp, /message, or /sse
@@ -1548,6 +1743,72 @@ mod tests {
             );
         }
         h
+    }
+
+    // --- forwarded_addr unit tests ---
+
+    #[test]
+    fn a_forwarding_header_counts_only_when_named_and_well_formed() {
+        let h = headers_with(&[("cf-connecting-ip", "203.0.113.9")]);
+        assert_eq!(forwarded_addr(&h, None), None, "not trusted when unset");
+        assert_eq!(
+            forwarded_addr(&h, Some("X-Real-IP")),
+            None,
+            "another header"
+        );
+        assert_eq!(
+            forwarded_addr(&h, Some("CF-Connecting-IP")).as_deref(),
+            Some("203.0.113.9")
+        );
+        let v6 = headers_with(&[("cf-connecting-ip", " 2001:db8:1:1:aaaa::1 ")]);
+        assert_eq!(
+            forwarded_addr(&v6, Some("cf-connecting-ip")).as_deref(),
+            Some("2001:db8:1:1::/64"),
+            "a /64 is one address"
+        );
+        let mapped = headers_with(&[("cf-connecting-ip", "::ffff:203.0.113.9")]);
+        assert_eq!(
+            forwarded_addr(&mapped, Some("cf-connecting-ip")).as_deref(),
+            Some("203.0.113.9")
+        );
+        // Present but unusable: one budget for all of them, and never the peer's
+        // exemption, whichever way the value is spelled.
+        for bad in [
+            "junk",
+            "203.0.113.9, 10.0.0.1",
+            "",
+            "127.0.0.1",
+            "::1",
+            "::ffff:127.0.0.1",
+            "[2001:db8::1]",
+            "203.0.113.9:1234",
+        ] {
+            let h = headers_with(&[("cf-connecting-ip", bad)]);
+            assert_eq!(
+                forwarded_addr(&h, Some("cf-connecting-ip")).as_deref(),
+                Some(BAD_FORWARDED_ADDRESS),
+                "{bad}"
+            );
+        }
+        assert_eq!(
+            forwarded_addr(&HeaderMap::new(), Some("cf-connecting-ip")),
+            None
+        );
+        assert_eq!(forwarded_addr(&h, Some("not a header name")), None);
+    }
+
+    #[test]
+    fn an_ipv6_slash_64_is_one_address_and_loopback_stays_itself() {
+        let key = |ip: &str| address_key(ip.parse().unwrap());
+        assert_eq!(key("203.0.113.9"), "203.0.113.9");
+        assert_eq!(
+            key("2001:db8:1:1::1"),
+            key("2001:db8:1:1:ffff:ffff:ffff:ffff")
+        );
+        assert_ne!(key("2001:db8:1:1::1"), key("2001:db8:1:2::1"));
+        assert_eq!(key("::1"), "::1", "the exemption is decided on this");
+        assert_eq!(key("127.0.0.1"), "127.0.0.1");
+        assert_eq!(key("::ffff:127.0.0.1"), "127.0.0.1");
     }
 
     // --- invalid_client_redirect unit tests ---
@@ -1910,6 +2171,7 @@ mod tests {
                     client_id: "test".to_string(),
                     created_at: Instant::now(),
                     expires_in: Duration::from_secs(3600),
+                    user: None,
                 },
             );
         }
@@ -2024,6 +2286,7 @@ mod tests {
                 client_id: "test".to_string(),
                 created_at: Instant::now(),
                 expires_in: Duration::from_secs(3600),
+                user: None,
             },
         );
         let app: Router = Router::new()
@@ -2085,6 +2348,7 @@ mod tests {
                 client_id: "test".to_string(),
                 created_at: Instant::now(),
                 expires_in: Duration::from_secs(3600),
+                user: None,
             },
         );
         let app: Router = Router::new()
@@ -2167,6 +2431,7 @@ mod tests {
             redirect_uris: vec![],
             created_at: Instant::now() - age,
             last_used: last_used_age.map(|a| Instant::now() - a),
+            name: None,
         }
     }
 
@@ -2192,6 +2457,7 @@ mod tests {
                 client_id: client_id.into(),
                 created_at: Instant::now(),
                 expires_in,
+                user: None,
             },
         );
     }
@@ -2476,6 +2742,7 @@ mod tests {
                     code_challenge: String::new(),
                     _code_challenge_method: String::new(),
                     created_at: Instant::now(),
+                    user: None,
                 },
             );
         }
@@ -2503,6 +2770,7 @@ mod tests {
         ))));
         let (status, _) = oauth_register(
             State(state.clone()),
+            HeaderMap::new(),
             ext,
             Json(reg(&["http://localhost/cb"])),
         )
