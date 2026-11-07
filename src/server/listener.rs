@@ -54,7 +54,9 @@ static STREAM_PLACES: LazyLock<Mutex<HashMap<String, Weak<OwnedSemaphorePermit>>
 
 /// A place for one long-lived response, held for as long as it runs; `None` when all are
 /// taken. A session's new stream shares the place of the one it replaces, so a client whose
-/// connection died can come back with the cap full of others.
+/// connection died can come back with the cap full of others. The replaced one ends when
+/// it loses its senders to the new one, and its connection closes with it, so that this
+/// cannot be used to hold connections past the cap.
 pub(super) fn stream_slot(session: &str) -> Option<Arc<OwnedSemaphorePermit>> {
     let mut places = STREAM_PLACES.lock().unwrap();
     if let Some(place) = places.get(session).and_then(Weak::upgrade) {
@@ -73,7 +75,8 @@ pub(super) fn stream_slot(session: &str) -> Option<Arc<OwnedSemaphorePermit>> {
 /// charts with every other connection held, this peaks at about 130 MiB in a 256 MiB
 /// container, where 48,000 reaches 216 and 64,000 the limit. It fits the app's own use: 500
 /// bars a call, so a 4-chart grid at 10 indicators each is 22,000. And 50 indicators at
-/// 500 bars, the most it asks for, is 25,500.
+/// 500 bars, the most it asks for, is 25,500, or the whole budget on a price-based chart,
+/// which then takes its turn.
 const CALL_BUDGET: u32 = 32_000;
 /// A call that has waited this long is told to come back, rather than holding its
 /// connection until something gives up on it.
@@ -105,7 +108,10 @@ pub(super) async fn call_slot(cost: u32) -> Result<OwnedSemaphorePermit, NoRoom>
 
 /// What a request to `/mcp` will hold, in the units of `CALL_BUDGET`. Only charts come to
 /// much, and what is no tool call costs nothing, so that it never waits. A price-based chart reads up to `fetch::MAX_BASE_BARS` to build its bricks; the
-/// indicators then run on the bricks.
+/// indicators then run on the bricks. That is a most, and depends on the box, so it is
+/// charged up to the whole budget: a call that fits without it runs, alone if it must.
+/// An image is a bitmap of 3 bytes a pixel, 1.5 KiB a unit at 512 pixels, whatever is
+/// drawn on it.
 pub(super) fn call_cost(body: &[u8]) -> u32 {
     const SMALL: u64 = 1_000;
     const DEFAULT_BARS: u64 = 200;
@@ -114,6 +120,7 @@ pub(super) fn call_cost(body: &[u8]) -> u32 {
     const MAX_BARS: u64 = 5_000;
     const SOURCE_BARS: u64 = 20_000;
     const PRICE_BASED: [&str; 5] = ["renko", "kagi", "point_figure", "line_break", "range"];
+    const PIXELS_PER_UNIT: u64 = 512;
     let Ok(call) = serde_json::from_slice::<serde_json::Value>(body) else {
         return 0;
     };
@@ -131,10 +138,23 @@ pub(super) fn call_cost(body: &[u8]) -> u32 {
         None => DEFAULT_INDICATORS,
     };
     let shown = bars.saturating_mul(indicators.saturating_add(1));
+    // As `mcp::generate_chart` reads them.
+    let format = args["format"].as_str().unwrap_or("png").to_lowercase();
+    let pixels = if matches!(format.as_str(), "png" | "both") {
+        let side = |name: &str, default| args[name].as_u64().unwrap_or(default);
+        side("width", 1920).saturating_mul(side("height", 1080))
+    } else {
+        0
+    };
+    let held = shown.saturating_add(pixels / PIXELS_PER_UNIT);
+    let budget = u64::from(CALL_BUDGET);
     let price_based = args["chart_style"]
         .as_str()
         .is_some_and(|style| PRICE_BASED.contains(&style));
-    let cost = shown + if price_based { SOURCE_BARS } else { 0 };
+    let cost = match held <= budget && price_based {
+        true => (held + SOURCE_BARS).min(budget),
+        false => held,
+    };
     u32::try_from(cost.max(SMALL)).unwrap_or(u32::MAX)
 }
 
@@ -175,9 +195,10 @@ pub(super) fn held_until_written<G: Send + 'static>(response: Response, guard: G
 
 #[derive(Clone, Copy)]
 struct Deadlines {
-    /// A write that has not moved a byte for this long: the client has stopped reading.
-    /// The kernel takes more once about a third of the buffer has gone, so this ends a
-    /// client slower than about 3 KB/s too.
+    /// A write that has not moved a byte for this long, with what the kernel holds not
+    /// having shrunk either: the client has stopped reading. One that goes on taking bytes
+    /// stays, however slowly. What was on its way when the clock started can count as
+    /// shrinking at the first look, so one that has stopped takes up to twice this.
     write: Duration,
     /// Nothing either way for this long. Past the 90 s after which proxies drop an idle
     /// connection themselves, so that they find out first. A healthy SSE stream writes a
@@ -318,6 +339,8 @@ pub(super) struct BoundedStream {
 struct Closing {
     tick: Pin<Box<Sleep>>,
     moved_at: Instant,
+    /// The client has said it will send no more.
+    read_ended: bool,
 }
 
 /// What the peer has not acknowledged yet: how a connection tells a client reading slowly
@@ -391,6 +414,17 @@ impl BoundedStream {
     }
 }
 
+/// hyper drops a connection without closing it on an error, as when a client hangs up its
+/// side in the middle of an answer. The answer is cut off either way, so what the kernel
+/// holds of it must not stay behind as an orphan, with the place here free.
+impl Drop for BoundedStream {
+    fn drop(&mut self) {
+        if unsent(&self.io).is_some_and(|left| left > 1) {
+            self.abandon();
+        }
+    }
+}
+
 impl AsyncRead for BoundedStream {
     fn poll_read(
         self: Pin<&mut Self>,
@@ -458,7 +492,8 @@ impl AsyncWrite for BoundedStream {
     /// reading gets all of it. One that has stopped is reset, which drops what it did not
     /// take, as a plain close would leave the kernel sending it for minutes. Where what is
     /// unread cannot be told, it gets `linger` and then a plain close, as cutting off a slow
-    /// reader is worse there than an orphan.
+    /// reader is worse there than an orphan. A client hanging up its own side says nothing
+    /// of what it has read, so where that can be told, it does not end the wait.
     fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         let this = self.get_mut();
         let tick = this.deadlines.linger / 30;
@@ -468,19 +503,29 @@ impl AsyncWrite for BoundedStream {
             this.closing = Some(Closing {
                 tick: Box::pin(sleep(tick)),
                 moved_at: Instant::now(),
+                read_ended: false,
             });
         }
         let mut discard = [0u8; 1024];
-        loop {
+        while !this.closing.as_ref().expect("set above").read_ended {
             let mut buf = ReadBuf::new(&mut discard);
             match Pin::new(&mut this.io).poll_read(cx, &mut buf) {
-                Poll::Ready(Ok(())) if buf.filled().is_empty() => return Poll::Ready(Ok(())),
+                Poll::Ready(Ok(())) if buf.filled().is_empty() => {
+                    if this.unsent_seen.is_none() {
+                        return Poll::Ready(Ok(()));
+                    }
+                    this.closing.as_mut().expect("set above").read_ended = true;
+                }
                 Poll::Ready(Ok(())) => {}
                 Poll::Ready(Err(_)) => return Poll::Ready(Ok(())),
                 Poll::Pending => break,
             }
         }
         loop {
+            // A reset, after the end of what it sent: a read would only say that end again.
+            if matches!(this.io.take_error(), Ok(Some(_))) {
+                return Poll::Ready(Ok(()));
+            }
             let reading = this.client_is_reading();
             // The FIN counts as one byte until it is acknowledged.
             if this.unsent_seen.is_some_and(|left| left <= 1) {
@@ -569,8 +614,10 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn the_buffers_are_the_ones_asked_for() {
+        use std::os::fd::AsFd;
         let (stream, _peer, _l) = pair(SHORT).await;
-        let socket = TcpSocket::from_std_stream(stream.io.into_std().unwrap());
+        let copy = stream.io.as_fd().try_clone_to_owned().unwrap();
+        let socket = TcpSocket::from_std_stream(copy.into());
         assert_eq!(socket.send_buffer_size().unwrap(), SEND_BUFFER * 2);
         assert_eq!(socket.recv_buffer_size().unwrap(), RECV_BUFFER * 2);
     }
@@ -719,6 +766,74 @@ mod tests {
         );
     }
 
+    /// The answer is unread, and a client saying it will send no more has not read it: a
+    /// close taking that as the end would leave it all to the kernel, and free the place.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_client_hanging_up_its_side_does_not_end_the_wait() {
+        let (mut stream, mut peer, _l) = pair(SHORT).await;
+        stream.write_all(&vec![0u8; 128 * 1024]).await.unwrap();
+        peer.shutdown().await.unwrap();
+        let started = std::time::Instant::now();
+        soon(stream.shutdown()).await.unwrap();
+        assert!(started.elapsed() >= SHORT.linger, "{:?}", started.elapsed());
+        drop(stream);
+        let mut sink = Vec::new();
+        assert_eq!(
+            soon(peer.read_to_end(&mut sink)).await.unwrap_err().kind(),
+            io::ErrorKind::ConnectionReset,
+            "what it did not read is gone, not left to the kernel"
+        );
+    }
+
+    /// What hyper does on an error: no close, just gone.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_connection_dropped_with_an_answer_unread_leaves_no_orphan() {
+        let (mut stream, mut peer, _l) = pair(SHORT).await;
+        stream.write_all(&vec![0u8; 128 * 1024]).await.unwrap();
+        drop(stream);
+        let mut sink = Vec::new();
+        assert_eq!(
+            soon(peer.read_to_end(&mut sink)).await.unwrap_err().kind(),
+            io::ErrorKind::ConnectionReset
+        );
+    }
+
+    /// Asking with a half-closed socket is allowed: it goes on reading, and gets it all.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_client_hanging_up_its_side_can_still_read_it_all() {
+        let (mut stream, mut peer, _l) = pair(SHORT).await;
+        let answer = vec![1u8; 128 * 1024];
+        stream.write_all(&answer).await.unwrap();
+        peer.shutdown().await.unwrap();
+        let reader = tokio::spawn(read_slowly(peer, 4096, SHORT.linger / 10));
+        stream.shutdown().await.unwrap();
+        drop(stream);
+        let (total, ended) = reader.await.unwrap();
+        assert_eq!(total, answer.len());
+        ended.unwrap();
+    }
+
+    /// Gone altogether, with what it was sent unread: nothing is left to wait for.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_client_that_is_gone_ends_the_wait_at_once() {
+        let (mut stream, mut peer, _l) = pair(Deadlines {
+            linger: Duration::from_secs(30),
+            ..SHORT
+        })
+        .await;
+        stream.write_all(&vec![0u8; 128 * 1024]).await.unwrap();
+        peer.shutdown().await.unwrap();
+        let closing = tokio::spawn(async move { stream.shutdown().await });
+        sleep(Duration::from_millis(100)).await;
+        assert!(!closing.is_finished(), "it had only hung up its own side");
+        drop(peer);
+        soon(closing).await.unwrap().unwrap();
+    }
+
     /// Slower than the kernel asks for more: what moves is what it holds.
     #[cfg(target_os = "linux")]
     #[tokio::test]
@@ -791,40 +906,48 @@ mod tests {
             "warmup": 300, "chart_style": "candles", "indicators": ["rsi", "macd", "ema"],
         });
         assert_eq!(chart_cost(usual), 2_000, "the app's usual chart");
-        let tail =
-            serde_json::json!({ "bars": 60, "chart_style": "candles", "indicators": ["rsi"] });
+        let tail = serde_json::json!({
+            "bars": 60, "format": "series", "chart_style": "candles", "indicators": ["rsi"],
+        });
         assert_eq!(chart_cost(tail), 1_000, "and its tail poll");
 
         for style in ["candles", "heikin_ashi"] {
-            let chart = serde_json::json!({ "bars": 5000, "chart_style": style, "indicators": ["a", "b", "c"] });
+            let chart = serde_json::json!({
+                "bars": 5000, "format": "series", "chart_style": style,
+                "indicators": ["a", "b", "c"],
+            });
             assert_eq!(chart_cost(chart), 20_000, "{style} is built bar for bar");
         }
         for style in ["renko", "kagi", "point_figure", "line_break", "range"] {
-            let chart =
-                serde_json::json!({ "bars": 500, "chart_style": style, "indicators": ["a"] });
+            let chart = serde_json::json!({
+                "bars": 500, "format": "series", "chart_style": style, "indicators": ["a"],
+            });
             assert_eq!(chart_cost(chart), 21_000, "{style} reads the source window");
         }
+        let series = |args: serde_json::Value| {
+            let mut args = args;
+            args["format"] = "series".into();
+            chart_cost(args)
+        };
         assert_eq!(
-            chart_cost(serde_json::json!({})),
+            series(serde_json::json!({})),
             1_000,
             "200 bars, 3 by default"
         );
-        assert_eq!(chart_cost(serde_json::json!({ "bars": 1000 })), 4_000);
+        assert_eq!(series(serde_json::json!({ "bars": 1000 })), 4_000);
         assert_eq!(
-            chart_cost(
+            series(
                 serde_json::json!({ "bars": 5000, "indicators": ["a", "b", "c", "d", "e", "f"] })
             ),
             35_000
         );
         assert_eq!(
-            chart_cost(
-                serde_json::json!({ "bars": 5000, "panels": ["a", "b", "c", "d", "e", "f"] })
-            ),
+            series(serde_json::json!({ "bars": 5000, "panels": ["a", "b", "c", "d", "e", "f"] })),
             35_000,
             "`panels` is another name for them"
         );
         assert_eq!(
-            chart_cost(serde_json::json!({ "bars": 99_999_999, "indicators": vec!["a"; 50] })),
+            series(serde_json::json!({ "bars": 99_999_999, "indicators": vec!["a"; 50] })),
             255_000,
             "bars stop at the tool's own limit"
         );
@@ -834,6 +957,69 @@ mod tests {
             call_cost(br#"{"method":"tools/call","params":{"name":"get_x"}}"#),
             1_000
         );
+    }
+
+    #[test]
+    fn an_image_costs_its_pixels() {
+        let image = |args: serde_json::Value| {
+            let mut args = args;
+            args["bars"] = 50.into();
+            args["indicators"] = serde_json::json!([]);
+            chart_cost(args)
+        };
+        // Every format that draws one, and the sizes it falls back to, as the tool reads them.
+        assert_eq!(chart_cost(serde_json::json!({})), 4_850, "1920 x 1080");
+        for format in ["png", "both", "PNG", "Both"] {
+            let args = serde_json::json!({ "format": format, "width": 4000, "height": 4000 });
+            assert_eq!(image(args), 31_300, "{format}");
+        }
+        for format in ["series", "summary", "SERIES"] {
+            let args = serde_json::json!({ "format": format, "width": 16000, "height": 16000 });
+            assert_eq!(image(args), 1_000, "{format} draws nothing");
+        }
+        assert_eq!(
+            image(serde_json::json!({ "width": "wide", "height": -1 })),
+            4_100
+        );
+        assert_eq!(image(serde_json::json!({ "format": 7 })), 4_100);
+        // Refused: the largest image with little on it fits, and one size past it does not.
+        let fits = serde_json::json!({ "width": 4000, "height": 4000 });
+        assert!(image(fits) <= CALL_BUDGET);
+        let past = serde_json::json!({ "width": 4096, "height": 4096 });
+        assert!(image(past) > CALL_BUDGET);
+        let past = serde_json::json!({ "width": 16000, "height": 16000 });
+        assert!(image(past) > CALL_BUDGET);
+        // Not wrapped round by a size that does not fit 32 bits, as `as u32` would.
+        let huge = serde_json::json!({ "width": 4_294_967_396u64, "height": u64::MAX });
+        assert_eq!(image(huge), u32::MAX);
+        // No more of the default size than the bitmaps' worth fits at once.
+        assert_eq!(CALL_BUDGET / chart_cost(serde_json::json!({})), 6);
+    }
+
+    #[test]
+    fn a_price_based_chart_that_fits_without_its_source_takes_its_turn() {
+        let chart = |bars: u32, indicators: usize, style: &str| {
+            chart_cost(serde_json::json!({
+                "bars": bars, "format": "series", "chart_style": style,
+                "indicators": vec!["a"; indicators],
+            }))
+        };
+        assert_eq!(chart(500, 23, "renko"), 32_000, "fitted already, just");
+        assert_eq!(chart(500, 24, "renko"), CALL_BUDGET, "and at 24");
+        assert_eq!(chart(500, 50, "kagi"), CALL_BUDGET, "the app's most");
+        assert_eq!(chart(700, 17, "range"), CALL_BUDGET, "a catch-up");
+        // Over the budget by itself: as large as on candles, and refused the same.
+        assert_eq!(chart(700, 50, "renko"), 35_700);
+        assert_eq!(chart(700, 50, "candles"), 35_700);
+        // An image counts as held: with it the call is too large, source or not.
+        let both = serde_json::json!({
+            "bars": 100, "chart_style": "renko", "indicators": [], "width": 4000, "height": 4000,
+        });
+        assert_eq!(chart_cost(both), CALL_BUDGET);
+        let over = serde_json::json!({
+            "bars": 1000, "chart_style": "renko", "indicators": [], "width": 4000, "height": 4000,
+        });
+        assert_eq!(chart_cost(over), 32_250);
     }
 
     #[tokio::test]
@@ -858,7 +1044,8 @@ mod tests {
         drop(large);
         // A grid of four, at the most indicators a usual chart has, and one more.
         let grid = chart_cost(serde_json::json!({
-            "bars": 500, "chart_style": "candles", "indicators": vec!["a"; 10],
+            "bars": 500, "format": "series", "chart_style": "candles",
+            "indicators": vec!["a"; 10],
         }));
         assert_eq!(grid, 5_500);
         let charts: Vec<_> = (0..5)

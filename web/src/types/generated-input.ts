@@ -118,7 +118,7 @@ export interface GenerateChartInput {
    */
   format?: "png" | "summary" | "both" | "series";
   /**
-   * Chart image height in pixels
+   * Chart image height in pixels. See width.
    */
   height?: number;
   /**
@@ -174,7 +174,7 @@ export interface GenerateChartInput {
    */
   warmup?: number;
   /**
-   * Chart image width in pixels
+   * Chart image width in pixels. width x height counts towards what one call may hold: 4000 x 4000 fits with little on it, and a call past that is refused (-32602).
    */
   width?: number;
 }

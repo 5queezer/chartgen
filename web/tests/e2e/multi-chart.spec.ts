@@ -98,8 +98,12 @@ async function pickSymbol(page: Page, sym: string): Promise<void> {
   await row(page, sym).click();
 }
 
+/** The active chart's remove button for an indicator, on its legend row. */
 const chip = (page: Page, name: string) =>
-  page.getByRole("button", { name: `Remove ${name}`, exact: true });
+  page
+    .locator(".chart-pane[data-active]")
+    .getByTestId(`indicator-legend-${name}`)
+    .getByRole("button", { name: /^Remove / });
 
 /** Click with real mouse movement first (see drawing.spec.ts). */
 async function drawClick(page: Page, n: number, fx: number, fy: number): Promise<void> {

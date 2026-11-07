@@ -47,6 +47,13 @@ test.describe("sign-in", () => {
     await page.close();
   });
 
+  test("the user menu is the header's control size", async ({ page }) => {
+    await bootSignedIn(page);
+    const menu = (await userMenu(page).boundingBox())!;
+    expect(menu.height).toBe(27);
+    expect(menu.y).toBe(5);
+  });
+
   test("the chooser leads through a provider to the app, showing who signed in", async ({ page }) => {
     await page.goto("/");
     await expect(chooser(page)).toBeVisible();

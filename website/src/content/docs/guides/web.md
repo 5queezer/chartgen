@@ -29,8 +29,10 @@ area shows "Couldn't load SYMBOL — symbol not found" with **Retry** and, when
 another chart loaded before, **Back to PREVIOUS**. The failed symbol stays
 active, as on TradingView, and is not saved to your recents.
 
-The header has a fixed height and never scrolls the page sideways. As the
-window narrows, lower-priority items collapse:
+The header has a fixed height and never scrolls the page sideways: 38 px with
+a mouse, so the chart gets the height, and taller on a touch screen, where its
+buttons stay comfortable to tap. As the window narrows, lower-priority items
+collapse:
 
 - below 1400 px the **Replay** and **Indicators** labels become icon-only;
 - below 1280 px screenshot, copy link, chart settings and fullscreen move
@@ -1234,7 +1236,8 @@ A server without sign-in has none of this: everything stays in the browser, as b
 ## Managing indicators
 
 Indicators are added from the **Indicators** picker (by name, with the
-server's default parameters) and listed as chips under the toolbar.
+server's default parameters) and listed on the chart's legend rows. On a touch
+screen they are also chips under the toolbar.
 Picking an indicator that is already on the chart (marked **added**) adds
 another instance with the default parameters, so RSI 14 and RSI 21, or EMA
 20 and EMA 50 as two `ma` instances, can sit side by side. Each instance has
@@ -1247,9 +1250,9 @@ Each indicator pane legend shows controls on hover (or keyboard focus):
 - **Bell** opens the alert dialog on the indicator's plots
   ([indicator alerts](#drawing-and-indicator-alerts)).
 - **Eye** hides the indicator. It disappears from the chart immediately and
-  is no longer requested from the server; its chip stays, dimmed, with an eye button to
-  show it again.
-- **Gear** (or double-click on the legend row, or the gear on the chip)
+  is no longer requested from the server; a dimmed chip appears under the toolbar with
+  an eye button to show it again.
+- **Gear** (or double-click on the legend row)
   opens the settings dialog. The form is generated from the indicator's
   `configurable_params` (numbers, switches, text). **Defaults** resets the
   form to the schema defaults; **OK** validates and applies, which

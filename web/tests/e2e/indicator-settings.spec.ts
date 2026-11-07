@@ -64,16 +64,20 @@ test.describe("indicator settings", () => {
     await expect(page.locator(".pane-header", { hasText: "RSI" })).toHaveCount(0);
   });
 
-  test("chip eye button keeps keyboard focus across toggles", async ({
+  test("a hidden indicator's chip eye keeps keyboard focus across toggles", async ({
     bootedApp: page,
   }) => {
+    await rsiRow(page).getByRole("button", { name: "Hide RSI" }).focus();
+    await page.keyboard.press("Enter");
+    await expect(rsiRow(page)).toHaveCount(0);
     const eye = page.getByRole("button", { name: /^(Hide|Show) rsi$/ });
     await eye.focus();
     await page.keyboard.press("Enter");
-    await expect(page.locator(".pane-header", { hasText: "RSI" })).toHaveCount(0);
+    await expect(rsiRow(page)).toBeVisible();
+    // Shown again, but its chip stays until focus moves on.
     await expect(eye).toBeFocused();
     await page.keyboard.press("Enter");
-    await expect(rsiRow(page)).toBeVisible();
+    await expect(rsiRow(page)).toHaveCount(0);
     await expect(eye).toBeFocused();
   });
 

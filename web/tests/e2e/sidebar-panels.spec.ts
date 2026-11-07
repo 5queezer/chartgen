@@ -180,9 +180,10 @@ test.describe("sidebar panels", () => {
       });
     // Drag the view back in time so the future point is off screen.
     const box = (await host(page).boundingBox())!;
-    await page.mouse.move(box.x + 300, box.y + 400);
+    // On the candles: a press on a legend row of a lower pane would not pan.
+    await page.mouse.move(box.x + 300, box.y + 300);
     await page.mouse.down();
-    await page.mouse.move(box.x + 900, box.y + 400, { steps: 10 });
+    await page.mouse.move(box.x + 900, box.y + 300, { steps: 10 });
     await page.mouse.up();
     const away = await range();
     expect(away.to).toBeLessThan(away.last - 20);
