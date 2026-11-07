@@ -58,6 +58,7 @@ async function addSection(page: Page, name: string) {
 
 async function flag(page: Page, sym: string, color: string) {
   await row(page, sym).click({ button: "right" });
+  await page.getByRole("menuitem", { name: "Flag…" }).click();
   await page.getByRole("menuitem", { name: `Flag ${color}` }).click();
 }
 
@@ -232,6 +233,7 @@ test.describe("multiple watchlists", () => {
     // Clearing a flag drops the row from the view.
     await flag(page, "AAPL", "red");
     await row(page, "AAPL").click({ button: "right" });
+    await page.getByRole("menuitem", { name: "Flag…" }).click();
     await page.getByRole("menuitem", { name: "No flag" }).click();
     await expect.poll(() => order(page)).toEqual(["BTCUSDT"]);
   });
@@ -256,6 +258,12 @@ test.describe("multiple watchlists", () => {
 
     await row(page, "ETHUSDT").focus();
     await row(page, "ETHUSDT").click({ button: "right" });
+    await expect(page.getByRole("menu", { name: "ETHUSDT actions" })).toBeFocused();
+    await page.keyboard.press("ArrowDown");
+    await page.keyboard.press("ArrowDown");
+    await page.keyboard.press("ArrowDown");
+    await expect(page.getByRole("menuitem", { name: "Flag…" })).toBeFocused();
+    await page.keyboard.press("Enter");
     await expect(page.getByRole("menuitem", { name: "Flag red" })).toBeFocused();
     await page.keyboard.press("ArrowRight");
     await expect(page.getByRole("menuitem", { name: "Flag orange" })).toBeFocused();

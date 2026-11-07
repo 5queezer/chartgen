@@ -35,8 +35,8 @@ export function keepKeyboardFocus(): () => void {
     if (!records.some((r) => r.removedNodes.length > 0)) return;
     const a = document.activeElement;
     if (a && a !== document.body) return;
-    document
-      .querySelector<HTMLElement>(".chart-host")
+    // The active chart's in a grid: the keyboard's menu then opens on the chart in use.
+    (document.querySelector<HTMLElement>("[data-active] .chart-host") ?? document.querySelector<HTMLElement>(".chart-host"))
       ?.focus({ preventScroll: true });
   });
   observer.observe(document.body, { childList: true, subtree: true });

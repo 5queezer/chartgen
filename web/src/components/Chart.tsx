@@ -2011,6 +2011,15 @@ export function Chart(props: ChartProps): JSX.Element {
       }
     }
     setPaneIds(nextPanes);
+    // Which indicator a right click on a sub-pane is about (ChartContextMenu).
+    for (const name of wantedOsc) {
+      const id = nextPanes[name];
+      const root = id ? c.getDom(id) : null;
+      if (id && root) {
+        root.dataset.paneId = id;
+        root.dataset.indicator = name;
+      }
+    }
 
     // Keep the price pane usable: shrink the sub-panes first.
     const fitPanes = () => {

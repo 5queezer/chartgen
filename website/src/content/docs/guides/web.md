@@ -452,11 +452,13 @@ cross, so alerts are not offered on it.
   part of the box that is on screen. The style bar's color is the entry line.
 - **Select** a drawing by clicking it, then press `Delete` or
   `Backspace` to remove it.
-- **Right-click** a drawing for Remove and Lock/Unlock, and on lines and
-  channels **Add alert on …** ([drawing alerts](#drawing-and-indicator-alerts)). Locked drawings
-  cannot be dragged but still answer right-click, so they can be
-  unlocked there. Right-clicking while a drawing is in progress cancels
-  it. Hide is only available for all drawings at once (toolbar eye).
+- **Right-click** a drawing for its [menu](#right-click-menus): Style, Clone,
+  Lock/Unlock, Hide and Remove, and on lines and channels **Add alert on …**
+  ([drawing alerts](#drawing-and-indicator-alerts)). Locked drawings cannot be
+  dragged but still answer right-click, so they can be unlocked there. A hidden
+  drawing no longer answers on the chart; show it again from its Object Tree
+  row or the toolbar eye. Right-clicking while a tool is armed cancels the tool,
+  with or without points placed, and opens no menu.
 - **Double-click** a text annotation to edit its text in a dialog.
 - **Style** a selected drawing with the bar at the top-right of the
   chart (below the legend when the chart is too narrow): color, width
@@ -527,28 +529,56 @@ shared. Everything is saved in `localStorage` under `chartgen.chartSettings`
 and validated on load. Settings are not part of named layouts (invert and lock, which are, are not stored there). See
 [ADR-0019](/chartgen/decisions/0019-chart-settings/).
 
-## Chart context menu
+## Right-click menus
 
-Right-clicking the chart (outside a drawing) opens a menu (mouse only, see
-[Phones and tablets](#phones-and-tablets) for touch):
+Right-clicking opens a menu for what is under the pointer (mouse only, see
+[Phones and tablets](#phones-and-tablets) for touch). Arrow keys and `Enter`
+drive it. `Esc` or a scroll closes it. A click outside closes it and does nothing
+else, so it cannot start a replay, place a drawing point or press what is under
+it. A right click elsewhere moves the menu there. Anywhere not listed here, and in every text field,
+the browser's own menu stays.
+
+### Chart context menu
+
+On the chart, and on the price legend:
 
 | Item | Action |
 |---|---|
 | Reset chart view (`Alt+R`) | Scroll to real time at the default zoom |
-| Copy link to chart | Copy a [shareable link](#sharing-a-chart) |
 | Copy price | Copy the price under the cursor, in the chart's precision |
+| Add alert at | Open the alert dialog at that price |
+| Add horizontal line at | Add a horizontal line at that price; it is saved like any drawing |
 | Invert scale (`Alt+I`) | Flip the price axis; a check mark shows when it is on |
 | Lock price to bar ratio | Keep the candle aspect while zooming horizontally; a check mark shows when it is on |
-| Add horizontal line at | Add a horizontal line at that price; it is saved like any drawing |
-| Add alert at | Open the alert dialog at that price |
+| Copy link to chart | Copy a [shareable link](#sharing-a-chart) |
 | Remove all drawings | Asks for confirmation |
 | Remove all indicators | Asks for confirmation |
 | Settings… | Open the chart settings dialog |
 
-Copy price, Add horizontal line and Add alert only appear when the click is in the price
-pane. Right-clicking a drawing opens the drawing menu instead. TradingView's
-"Lock vertical cursor line by time" is not offered because klinecharts has no
-pinned crosshair.
+The price is the one under the pointer on the regular, log, percent and inverted
+scales alike. TradingView's "Lock vertical cursor line by time" is not offered
+because klinecharts has no pinned crosshair.
+
+In a sub-pane the price items and the price scale's options make no sense, so it
+offers Reset chart view, **Copy value** (on that pane's own scale), that indicator's
+items (see below), Copy link and Settings.
+
+### Everything else
+
+| Where | Items |
+|---|---|
+| Price axis, and its `%` `log` `inv` `auto` buttons | Reset price scale, Auto, Lock price to bar ratio, Regular, Percent, Logarithmic, Invert scale, and at the click's height Copy price, Add alert at, Add horizontal line at |
+| Time axis | Reset time scale, Go to date… (`Alt+G`) |
+| Drawing, or its Object Tree row | Add alert on … (lines and channels), Style…, Clone, Lock/Unlock, Hide/Show, Remove |
+| Alert line, Alerts panel row (a server alert's too), or its Object Tree row | Edit…, Pause/Resume, Open *symbol* in chart (another symbol's alert), Delete |
+| Indicator legend row, chip, Object Tree row | Add alert on … (with a plot to read), Settings for …, Hide/Show, Remove |
+| Compare symbol's legend row or Object Tree row | Remove |
+| Watchlist row | Open in chart, Add alert on …, Flag…, Copy symbol, Remove from watchlist (not in the Flagged view) |
+| Watchlist section | Collapse/Expand, Rename…, Remove section |
+
+Clone puts the copy just below the drawing; alerts on the original stay on the
+original. In a [chart grid](#chart-grid) a right click makes that chart the active
+one, and the menu acts on it.
 
 ## Order flow
 
@@ -724,7 +754,7 @@ list only, so each list holds up to 50 symbols; you can have up to 20 lists.
 - **Reorder** by dragging a row or section by its grip (⋮⋮, shown on hover), or
   focus a row and press **Alt+ArrowUp** / **Alt+ArrowDown**. A section moves
   together with its symbols.
-- **Flags**: right-click a row, or use the flag button shown on hover, to pick
+- **Flags**: right-click a row and pick **Flag…**, or use the flag button shown on hover, to pick
   one of seven colors (red, orange, yellow, green, cyan, blue, purple) or **No
   flag**. A flagged row has a colored mark at its left edge. A flag belongs to
   the symbol, so it shows in every list that holds it.
@@ -1017,17 +1047,23 @@ only scales axes for the mouse. Use a pinch for the time axis, and the `auto` an
 `log` buttons for the price axis.
 
 Touch has no right-click, and a long press belongs to the crosshair, so the
-[chart context menu](#chart-context-menu) and the drawing menu open only with a
-mouse. Their actions are elsewhere on touch:
+[right-click menus](#right-click-menus) open only with a mouse. Their actions are
+elsewhere on touch:
 
 - Reset view, copy link and settings are in the `⋯` menu. Invert scale and lock
   ratio are in **Chart settings**.
+- `%`, `log`, `inv` and `auto` are the buttons on the price axis. Go to date is its
+  button in the bottom bar.
 - Remove all drawings is in the drawing toolbar.
-- Remove or lock one drawing, and remove one indicator, are in the Object Tree.
+- Hide, lock or remove one drawing, hide, set up or remove one indicator, and
+  delete an alert, are buttons on their Object Tree rows.
+- A watchlist row's flag and remove are the buttons on the row; tapping it opens it in the chart.
+- Edit, pause or delete an alert with the buttons on its row in the Alerts panel.
 - Add an alert from the Alerts panel's `+`. Type the price, or pick a drawing or
   indicator as the source.
-- Copy price, and adding an alert or a horizontal line at a tapped price, have
-  no touch equivalent. Use the horizontal line tool instead.
+- Copy price, copy symbol, cloning a drawing, and adding an alert or a horizontal
+  line at a tapped price, have no touch equivalent. Use the horizontal line tool
+  instead of the last one.
 
 Most targets are at least 40 px. These are smaller, because they sit on the
 chart or inside a row: the legend buttons (32 px), the `%`, `log`, `inv` and
