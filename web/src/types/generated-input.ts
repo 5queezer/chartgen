@@ -77,7 +77,7 @@ export interface GenerateChartInput {
    */
   bars?: number;
   /**
-   * Inputs of a price-based chart_style, refused for the others. Echoed in format=series and summary with the box_size the build used. Send that box_size back on later polls and pages to keep the same bars. A subscribe_chart without one resolves its box once, from its first read.
+   * Inputs of a price-based chart_style, refused for the others. Echoed in format=series and summary with the box_size the build used. Send that box_size back on later polls and pages to keep the same bars. subscribe_chart requires it for an atr or percent box, so pushed bars line up with the chart that was loaded.
    */
   chart_params?: {
     /**
@@ -271,7 +271,7 @@ export interface SetAlertInput {
 
 export interface SubscribeChartInput {
   /**
-   * Inputs of a price-based chart_style, refused for the others. Echoed in format=series and summary with the box_size the build used. Send that box_size back on later polls and pages to keep the same bars. A subscribe_chart without one resolves its box once, from its first read.
+   * Inputs of a price-based chart_style, refused for the others. Echoed in format=series and summary with the box_size the build used. Send that box_size back on later polls and pages to keep the same bars. subscribe_chart requires it for an atr or percent box, so pushed bars line up with the chart that was loaded.
    */
   chart_params?: {
     /**
