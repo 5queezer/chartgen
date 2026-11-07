@@ -47,6 +47,18 @@ const SCRIPTING_WEB_PORT = WEB_PORT + 1000;
 const SCRIPTING_DB = join(tmpdir(), `chartgen-e2e-${SCRIPTING_CHARTGEN_PORT}.db`);
 // Specs that need the scripting server.
 const SCRIPTING_SPECS = /script-editor-(on|grid)\.spec\.ts$/;
+// The whole suite runs with nothing configured. signin.spec.ts has servers of its
+// own with both providers on, against the fake of fixtures/fake-provider.mjs. Its
+// base URL is the Vite origin, as in production the app and the server share one.
+const SIGNIN_CHARTGEN_PORT = CHARTGEN_PORT - 3_000;
+const SIGNIN_WEB_PORT = WEB_PORT - 3_000;
+const SIGNIN_DB = join(tmpdir(), `chartgen-e2e-${SIGNIN_CHARTGEN_PORT}.db`);
+const FAKE_PROVIDER_PORT = CHARTGEN_PORT - 4_000;
+const FAKE_PROVIDER_SECRET = "fake-provider-secret";
+const SIGNIN_SPECS = /signin(-push)?\.spec\.ts$/;
+// The fake push service of signin-push.spec.ts. The server only accepts this local
+// origin because it runs on the sample source.
+const SIGNIN_PUSH_PORT = CHARTGEN_PORT - 5_000;
 
 export default defineConfig({
   testDir: "./tests/e2e",
@@ -68,7 +80,7 @@ export default defineConfig({
   projects: [
     {
       name: "chromium",
-      testIgnore: [/(server-alerts|alerts-push)\.spec\.ts$/, SCRIPTING_SPECS],
+      testIgnore: [/(server-alerts|alerts-push)\.spec\.ts$/, SCRIPTING_SPECS, SIGNIN_SPECS],
       use: { ...devices["Desktop Chrome"] },
     },
     {
@@ -81,6 +93,11 @@ export default defineConfig({
       name: "scripting",
       testMatch: SCRIPTING_SPECS,
       use: { ...devices["Desktop Chrome"], baseURL: `http://localhost:${SCRIPTING_WEB_PORT}` },
+    },
+    {
+      name: "chromium-signin",
+      testMatch: SIGNIN_SPECS,
+      use: { ...devices["Desktop Chrome"], baseURL: `http://localhost:${SIGNIN_WEB_PORT}` },
     },
   ],
   // Launch chartgen + vite as managed fixtures. `cwd` is resolved
@@ -158,6 +175,45 @@ export default defineConfig({
       stderr: "pipe",
     },
     {
+      command: "node tests/e2e/fixtures/fake-provider.mjs",
+      cwd: ".",
+      port: FAKE_PROVIDER_PORT,
+      env: {
+        FAKE_PROVIDER_PORT: String(FAKE_PROVIDER_PORT),
+        FAKE_PROVIDER_SECRET,
+      },
+      reuseExistingServer: REUSE_SERVER,
+      timeout: 60_000,
+      stdout: "pipe",
+      stderr: "pipe",
+    },
+    {
+      command: `rm -f "${SIGNIN_DB}" && cargo run -- --serve --port ${SIGNIN_CHARTGEN_PORT}`,
+      cwd: "..",
+      port: SIGNIN_CHARTGEN_PORT,
+      env: {
+        CHARTGEN_DATA_SOURCE: "sample",
+        CHARTGEN_DB: SIGNIN_DB,
+        CHARTGEN_BASE_URL: `http://localhost:${SIGNIN_WEB_PORT}`,
+        // Turns on the redirect for a stale client (ADR-0036). Vite serves the app,
+        // so nothing is ever read from it.
+        CHARTGEN_WEB_DIR: tmpdir(),
+        CHARTGEN_GITHUB_CLIENT_ID: "github-id",
+        CHARTGEN_GITHUB_CLIENT_SECRET: FAKE_PROVIDER_SECRET,
+        CHARTGEN_GOOGLE_CLIENT_ID: "google-id",
+        CHARTGEN_GOOGLE_CLIENT_SECRET: FAKE_PROVIDER_SECRET,
+        CHARTGEN_SIGNIN_TEST_PROVIDER_ORIGIN: `http://127.0.0.1:${FAKE_PROVIDER_PORT}`,
+        CHARTGEN_SERVER_ALERTS: "1",
+        CHARTGEN_SERVER_ALERT_CLIENTS: "*",
+        CHARTGEN_VAPID_SUBJECT: "mailto:ops@example.com",
+        CHARTGEN_WEBHOOK_TEST_ORIGIN: `http://127.0.0.1:${SIGNIN_PUSH_PORT}`,
+      },
+      reuseExistingServer: REUSE_SERVER,
+      timeout: 300_000,
+      stdout: "pipe",
+      stderr: "pipe",
+    },
+    {
       // Its own dep cache: two dev servers must not optimize into one directory.
       command: `npm run dev -- --port ${SCRIPTING_WEB_PORT} --strictPort`,
       cwd: ".",
@@ -165,6 +221,19 @@ export default defineConfig({
       env: {
         CHARTGEN_DEV_TARGET: `http://localhost:${SCRIPTING_CHARTGEN_PORT}`,
         VITE_CACHE_DIR: "node_modules/.vite-scripting",
+      },
+      reuseExistingServer: REUSE_SERVER,
+      timeout: 60_000,
+      stdout: "pipe",
+      stderr: "pipe",
+    },
+    {
+      command: `npm run dev -- --port ${SIGNIN_WEB_PORT} --strictPort`,
+      cwd: ".",
+      port: SIGNIN_WEB_PORT,
+      env: {
+        CHARTGEN_DEV_TARGET: `http://localhost:${SIGNIN_CHARTGEN_PORT}`,
+        VITE_CACHE_DIR: "node_modules/.vite-signin",
       },
       reuseExistingServer: REUSE_SERVER,
       timeout: 60_000,

@@ -42,6 +42,7 @@ import {
   ScriptEditorButton,
   ScriptEditorDock,
 } from "./components/ScriptEditorDock";
+import { UserMenu } from "./components/UserMenu";
 import { chipName } from "./lib/indicatorNames";
 import { scriptingEnabled } from "./lib/scripts";
 import { mergeParams } from "./lib/paramForm";
@@ -64,7 +65,13 @@ import {
 import { isTypingContext, keepKeyboardFocus, swallowMenuGhostClicks } from "./lib/keys";
 import { compact } from "./lib/viewport";
 import { createMcpSession } from "./mcp";
-import { startSignIn, tryHandlePendingRedirect } from "./oauth";
+import {
+  fetchSignedInUser,
+  followSignOutInOtherTabs,
+  startSignIn,
+  tryHandlePendingRedirect,
+  type SignedInUser,
+} from "./oauth";
 import { createListIndicatorsQuery, createToolNamesQuery } from "./queries";
 import { createAlertLogger } from "./services/notifications";
 import { copyChartLink, reconcileImported } from "./services/shareLink";
@@ -112,6 +119,7 @@ export function App(): JSX.Element {
 
   const [authReady, setAuthReady] = createSignal(false);
   const [authError, setAuthError] = createSignal<string | null>(null);
+  const [signedInUser, setSignedInUser] = createSignal<SignedInUser | null>(null);
   const [pickerOpen, setPickerOpen] = createSignal(false);
   // Index (into the active set) of the indicator whose settings dialog is open.
   const [settingsIndex, setSettingsIndex] = createSignal<number | null>(null);
@@ -154,12 +162,16 @@ export function App(): JSX.Element {
   // automatic retry, queries stay off (a query would only restart the
   // flow, in a loop) and the status line offers "Sign in again".
   onMount(async () => {
+    onCleanup(followSignOutInOtherTabs());
     const err = await tryHandlePendingRedirect();
     if (err) {
       setAuthError(err.message);
       return;
     }
     setAuthReady(true);
+    void fetchSignedInUser()
+      .then(setSignedInUser)
+      .catch((e: unknown) => console.warn("[oauth] cannot tell who is signed in:", e));
 
     const logger = createAlertLogger(session);
     logger.install();
@@ -406,6 +418,7 @@ export function App(): JSX.Element {
         </h1>
         <Toolbar
           session={session}
+          user={signedInUser()}
           onReselect={() => void view().refetch()}
           onScreenshot={screenshot}
           onCopyLink={() => void copyChartLink()}
@@ -462,6 +475,7 @@ export function App(): JSX.Element {
         <div class="min-w-0 compact:ml-auto max-[479px]:[&_[data-testid=layout-name]]:hidden">
           <LayoutMenu />
         </div>
+        <Show when={signedInUser()}>{(user) => <UserMenu user={user()} />}</Show>
       </header>
       <IndicatorChips
         entries={activeIndicators()}

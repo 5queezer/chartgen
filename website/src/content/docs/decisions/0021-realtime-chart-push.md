@@ -7,7 +7,7 @@ sidebar:
 
 **Status:** Accepted
 **Date:** 2026-11-05
-**Amended by:** [ADR-0043](/chartgen/decisions/0043-multi-chart-grid/) (the cap per client address goes from 8 to 32)
+**Amended by:** [ADR-0043](/chartgen/decisions/0043-multi-chart-grid/) (the cap per client address goes from 8 to 32) and [ADR-0044](/chartgen/decisions/0044-sign-in-through-github-and-google/) (with sign-in on, the per-client cap counts per user)
 
 Supersedes the "push is deferred" part of
 [ADR-0009](/chartgen/decisions/0009-live-tail-polling-and-history-paging/).

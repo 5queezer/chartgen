@@ -8,6 +8,7 @@ sidebar:
 **Status:** Accepted
 **Date:** 2026-11-06
 **Amends:** [ADR-0025](/chartgen/decisions/0025-user-indicator-registry/) (client storage no longer needs `CHARTGEN_SCRIPTING=1`)
+**Amended by:** [ADR-0044](/chartgen/decisions/0044-sign-in-through-github-and-google/) (with sign-in on, a client's liveness is limited per user, so the lockout costs accounts)
 
 ## Context and Problem Statement
 

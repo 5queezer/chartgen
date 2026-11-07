@@ -14,7 +14,13 @@ export default async function globalSetup(config: FullConfig): Promise<void> {
   const browser = await chromium.launch();
   // Every project has its own dev server to warm (playwright.config.ts).
   await Promise.all(
-    [...new Set(config.projects.map((p) => p.use.baseURL))].map(async (baseURL) => {
+    // Not the sign-in project: gotoApp waits for a token, and there a person has to
+    // choose a provider first. signin.spec.ts warms its own server.
+    [
+      ...new Set(
+        config.projects.filter((p) => p.name !== "chromium-signin").map((p) => p.use.baseURL),
+      ),
+    ].map(async (baseURL) => {
       try {
         const page = await browser.newPage({ baseURL });
         page.setDefaultTimeout(WARMUP_TIMEOUT_MS);

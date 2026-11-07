@@ -154,7 +154,7 @@ Status legend:
 |---|---|---|---|
 | Pine Script indicators | ✅ | ❌ | Built-in indicators are Rust ports of Pine v5 semantics. No Pine interpreter. [ADR-0018](/chartgen/decisions/0018-pine-semantics-for-indicators/) |
 | Pine editor UI | ✅ | ◐ | A script editor for Starlark, not Pine: there is no Pine parser. [Script editor](/chartgen/guides/web/#script-editor) |
-| Scripted indicators via Starlark over MCP | n/a | ◐ | `register_indicator` and `generate_chart` accept your scripts. Phase 1: feature-flagged off by default (`CHARTGEN_SCRIPTING=1`), for trusted or single-user deployments only, since scripts run in the server process, ownership is an auto-approved OAuth client, and the limits are not a security boundary. At most 3 scripts per chart. A chart with scripts is polled: `subscribe_chart` answers `not pushable`. [Scripted indicators](/chartgen/guides/scripted-indicators/), [ADR-0024](/chartgen/decisions/0024-starlark-script-runtime/), [ADR-0025](/chartgen/decisions/0025-user-indicator-registry/) |
+| Scripted indicators via Starlark over MCP | n/a | ◐ | `register_indicator` and `generate_chart` accept your scripts. Phase 1: feature-flagged off by default (`CHARTGEN_SCRIPTING=1`), for trusted or single-user deployments only, since scripts run in the server process, ownership is an auto-approved OAuth client unless [sign-in](/chartgen/reference/oauth/#sign-in) is on, and the limits are not a security boundary. At most 3 scripts per chart. A chart with scripts is polled: `subscribe_chart` answers `not pushable`. [Scripted indicators](/chartgen/guides/scripted-indicators/), [ADR-0024](/chartgen/decisions/0024-starlark-script-runtime/), [ADR-0025](/chartgen/decisions/0025-user-indicator-registry/) |
 | Pine-like series operators and `ta.*` functions in scripts | ✅ | ✅ | Element-wise operators, `close[1]`, comparisons, `ta.sma/ema/rsi/atr/macd/crossover` and more, with the Pine v5 code the built-ins use. Pivot tie rule is unverified against TradingView. [Series](/chartgen/guides/scripted-indicators/#series), [`ta.*`](/chartgen/guides/scripted-indicators/#ta-functions) |
 | Fork a built-in as a script | ✅ (open source scripts) | ◐ | `fork_indicator` works for `wavetrend` only. [Forking](/chartgen/guides/scripted-indicators/#forking-a-built-in) |
 | Script editor in the web app | ✅ | ◐ | Create, edit, save, delete and add to the chart, with errors at their line. Only on servers with `CHARTGEN_SCRIPTING=1`. No autocomplete, no renaming and no fork button yet. [Script editor](/chartgen/guides/web/#script-editor), [ADR-0041](/chartgen/decisions/0041-script-editor-in-the-web-app/) |
@@ -187,8 +187,8 @@ oversight.
   against the previous close, like TradingView.
   [ADR-0011](/chartgen/decisions/0011-watchlist-quotes/)
 - **Push is capped per client address, and behind a proxy that is one
-  address.** chartgen trusts no forwarding header, so behind a reverse proxy
-  or tunnel every client shares the proxy's address and the cap of 32
+  address.** chartgen trusts no forwarding header unless the operator names one, so behind
+  a reverse proxy or tunnel every client shares the proxy's address and the cap of 32
   subscriptions (eight 4-chart grids) becomes a second server-wide cap. Fine for a
   personal deployment. Other symbols poll.
   [ADR-0021](/chartgen/decisions/0021-realtime-chart-push/),

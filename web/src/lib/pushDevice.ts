@@ -66,15 +66,27 @@ const PUSH_MAX_AGE_MS = 3_600_000;
  * waits rather than risk both. A service accepting a push is not the device getting it,
  * and one that was off for longer than the message lives never will: a fire first seen
  * that late is reported here, because a second report beats a silent alarm.
+ *
+ * `device` is this browser's id with the server. One user can have several, which fare
+ * differently, so this one's outcome is what counts: a device the fire did not go to has
+ * no push coming, and one still waiting has its answer pending. Not knowing the id yet,
+ * the last outcome across devices is all there is to go by.
  */
 export function pushReport(
   a: ServerAlert,
   pushOnHere: boolean,
   now: number,
+  device: string | null = null,
 ): "report" | "quiet" | "wait" {
   if (!pushOnHere || !a.push) return "report";
   const fired = a.last_triggered_at;
   if (fired === null || now - fired > PUSH_MAX_AGE_MS) return "report";
+  if (device !== null) {
+    const mine = a.last_push_devices[device];
+    if (mine === undefined) return "report";
+    if (mine === null) return "wait";
+    return mine.error === null ? "quiet" : "report";
+  }
   if (a.last_push_at === null || a.last_push_at < fired) return "wait";
   return a.last_push_error === null ? "quiet" : "report";
 }

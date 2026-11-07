@@ -61,6 +61,7 @@ describe("pushReport", () => {
       last_triggered_at: FIRED,
       last_push_at: FIRED + 500,
       last_push_error: null,
+      last_push_devices: {},
       ...over,
     }) as ServerAlert;
 
@@ -81,6 +82,32 @@ describe("pushReport", () => {
   it("reports when the push failed, or no outcome can come any more", () => {
     expect(pushReport(alert({ last_push_error: "HTTP 500" }), true, FIRED + 1000)).toBe("report");
     expect(pushReport(alert({ last_push_at: null }), true, FIRED + 3_600_001)).toBe("report");
+  });
+
+  describe("with this browser's device known (one user, several browsers)", () => {
+    const outcome = (error: string | null) => ({ at: FIRED + 500, status: error ? 500 : 201, error });
+
+    it("goes by this device, whatever another did", () => {
+      const mine = { last_push_error: "HTTP 500", last_push_devices: { me: outcome(null), other: outcome("HTTP 500") } };
+      expect(pushReport(alert(mine), true, FIRED + 1000, "me")).toBe("quiet");
+      const failed = { last_push_error: null, last_push_devices: { me: outcome("HTTP 500"), other: outcome(null) } };
+      expect(pushReport(alert(failed), true, FIRED + 1000, "me")).toBe("report");
+    });
+
+    it("waits while this device's answer is pending, even if another has one", () => {
+      const a = alert({ last_push_devices: { me: null, other: outcome(null) } });
+      expect(pushReport(a, true, FIRED + 1000, "me")).toBe("wait");
+    });
+
+    it("reports at once when the fire did not go to this device", () => {
+      const a = alert({ last_push_devices: { other: outcome(null) } });
+      expect(pushReport(a, true, FIRED + 1000, "me")).toBe("report");
+    });
+
+    it("still reports what is too old to have reached it", () => {
+      const a = alert({ last_push_devices: { me: null } });
+      expect(pushReport(a, true, FIRED + 3_600_001, "me")).toBe("report");
+    });
   });
 
   it("reports a fire first seen after the message's life, though the service took it", () => {

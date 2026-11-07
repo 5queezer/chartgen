@@ -21,6 +21,12 @@ const LOCK_CLIENT = "chartgen.oauth.client";
  * the same tab stops there and asks the user instead of looping.
  */
 const SS_RETRIED = "chartgen.oauth.retried";
+/**
+ * Written when a tab signs out, so the others leave too (ADR-0044): a tab left
+ * behind would hit a 401 and sign in again, with one provider and no chooser
+ * straight through to the provider, which remembers the user.
+ */
+const LS_SIGNED_OUT = "chartgen.oauth.signed_out";
 
 const BASE_URL =
   (import.meta.env.VITE_CHARTGEN_BASE_URL as string | undefined) ?? "";
@@ -59,8 +65,18 @@ interface PkceState {
   client_id?: string;
 }
 
+const SignedInSchema = z.object({
+  sign_in: z.boolean(),
+  user: z.object({ name: z.string(), provider: z.string() }).nullable(),
+});
+
+/** Who this tab is signed in as (ADR-0044). */
+export type SignedInUser = NonNullable<z.infer<typeof SignedInSchema>["user"]>;
+
 /** Cached in-memory access token. Cleared on 401 or full re-auth. */
 let cachedAccessToken: string | null = null;
+/** Leaving for the signed-out page: nothing may start a new sign-in meanwhile. */
+let signingOut = false;
 
 /** Base64url-encode a Uint8Array without padding. */
 function base64urlEncode(bytes: Uint8Array): string {
@@ -397,6 +413,7 @@ export async function startSignIn(): Promise<never> {
  * never resolves.
  */
 export async function getAccessToken(): Promise<string> {
+  if (signingOut) return new Promise<string>(() => {});
   if (cachedAccessToken !== null) return cachedAccessToken;
 
   // Step 1: handle redirect response if present.
@@ -412,6 +429,80 @@ export async function getAccessToken(): Promise<string> {
 /** Drop the cached token, e.g. on a 401 from the MCP call. */
 export function clearAccessToken(): void {
   cachedAccessToken = null;
+}
+
+function goToSignedOutPage(): void {
+  signingOut = true;
+  cachedAccessToken = null;
+  window.location.assign(url("/oauth/signed-out"));
+}
+
+/**
+ * Who the current token belongs to, for the header. `null` without a token, on a
+ * server without sign-in, and when it cannot be told: the header then shows no
+ * user, and the next MCP call deals with a token that went stale.
+ */
+export async function fetchSignedInUser(): Promise<SignedInUser | null> {
+  if (cachedAccessToken === null) return null;
+  const res = await fetch(url("/oauth/me"), {
+    headers: { Authorization: `Bearer ${cachedAccessToken}` },
+  });
+  if (!res.ok) return null;
+  return SignedInSchema.parse(await res.json()).user;
+}
+
+/**
+ * End the session and leave for the signed-out page, not the app: reloading the
+ * app would sign in again at once. The other tabs are told before the request,
+ * because the request ends their tokens, and one polling in that moment would
+ * sign in again. So if it fails they have left anyway, with a way back. Rejects
+ * if it failed, and this tab stays as it was.
+ */
+export async function signOut(): Promise<void> {
+  signingOut = true;
+  try {
+    localStorage.setItem(LS_SIGNED_OUT, String(Date.now()));
+    const res = await fetch(url("/oauth/logout"), {
+      method: "POST",
+      credentials: "same-origin",
+    });
+    if (!res.ok) throw new Error(`the server answered ${res.status}`);
+  } catch (err) {
+    signingOut = false;
+    throw err;
+  }
+  goToSignedOutPage();
+}
+
+/** Leave when another tab signs out; returns the uninstaller. */
+export function followSignOutInOtherTabs(): () => void {
+  const onStorage = (e: StorageEvent) => {
+    if (e.key === LS_SIGNED_OUT && e.newValue !== null) goToSignedOutPage();
+  };
+  window.addEventListener("storage", onStorage);
+  return () => window.removeEventListener("storage", onStorage);
+}
+
+/**
+ * `/oauth/cancel` sends a sign-in given up on back as `?error=access_denied&state=...`.
+ * Scrubs that from the URL and returns what to tell the user, without restarting:
+ * the user just said no. `null` if the URL carries no such answer. Anyone can
+ * craft this URL, so only the pending `state` touches the sign-in in progress.
+ */
+function handleDeniedSignIn(): string | null {
+  const params = new URLSearchParams(window.location.search);
+  if (params.get("error") !== "access_denied") return null;
+  window.history.replaceState(
+    {},
+    "",
+    window.location.origin + window.location.pathname + window.location.hash,
+  );
+  const returnedState = params.get("state");
+  if (!returnedState || readPkce()?.state !== returnedState) {
+    return "this address is not a sign-in in progress";
+  }
+  sessionStorage.removeItem(SS_PKCE);
+  return "you cancelled it";
 }
 
 /**
@@ -430,6 +521,8 @@ export function clearAccessToken(): void {
 export async function tryHandlePendingRedirect(): Promise<Error | null> {
   let staleClient = false;
   try {
+    const denied = handleDeniedSignIn();
+    if (denied !== null) return new Error(denied);
     const rejection = await handleRejectedClient();
     if (rejection === "unmatched") {
       return new Error("this address is not a sign-in in progress");
