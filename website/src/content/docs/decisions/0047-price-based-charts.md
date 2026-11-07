@@ -155,6 +155,7 @@ on a candle chart.
 | Legend, Data Window | OHLC of the bar and when it opened, with `Renko 3.3` beside the interval. The phone's short legend shows only the OHLC. |
 | Countdown | Hidden: these bars close on price. |
 | Indicators | Run on these bars, including on tails and pages. No `future` block: there is no next bar's time to project to. |
+| Volume profiles | `profile_intrabars` ([ADR-0048](/chartgen/decisions/0048-order-flow/)) plans its finer bars on the time these bars cover, as their count says nothing of it. A read planned on the count would stop at its page limit, with the profile holding only the chart's newest part. Too long a time for finer bars leaves the profile computed from these bars, with no `profile_interval`. |
 | Drawings | Stored by time and price as on any chart, on the bars' own times. Back on candles, a point lands on the bar at that time. A new box, or a chunk rollover, can leave a point between bars, which then lands on the nearest. |
 | Paging | Works. A page reads a window of source bars before `end_time` and returns bars before it. Its build starts elsewhere, so the join can differ slightly from an unbroken build. A reload shows the same join. |
 | Share links | `type=renko`, plus `tp=box:fixed;size:50` with what differs from the defaults. A price-based link without `tp` means the defaults. An older app ignores both. |

@@ -468,16 +468,9 @@ fn evict<K: Eq + Hash + Clone, V>(
     }
 }
 
-/// Binance's finest kline. No chart's interval, so `Interval` does not read it, but a
-/// footprint on a 1m chart does (ADR-0048).
-const SECOND_KLINE: &str = "1s";
-
 /// Klines a refresh of `kline` reads: enough to overlap after up to `KLINE_CACHE_TTL`,
 /// with the forming one. A page costs the same weight at any size.
 fn kline_refresh(kline: &str) -> usize {
-    if kline == SECOND_KLINE {
-        return refresh_for(1);
-    }
     Interval::parse(kline).map_or(KLINE_REFRESH, |iv| refresh_for(iv.secs()))
 }
 
@@ -488,9 +481,6 @@ fn refresh_for(kline_secs: i64) -> usize {
 
 /// Unix ms at which the `kline` holding `t_ms` closes.
 fn kline_end_ms(kline: &str, t_ms: i64) -> i64 {
-    if kline == SECOND_KLINE {
-        return t_ms.div_euclid(1000).saturating_add(1).saturating_mul(1000);
-    }
     Interval::parse(kline).map_or(i64::MAX, |iv| {
         iv.grid_end(t_ms.div_euclid(1000)).saturating_mul(1000)
     })
@@ -2928,21 +2918,12 @@ mod tests {
             let Some(interval) = param("interval") else {
                 return reply(200, None, "[]".into());
             };
-            let second = interval == SECOND_KLINE;
-            let step_ms = if second {
-                1000
-            } else {
-                data::interval_secs(interval).unwrap() * 1000
-            };
+            let step_ms = data::interval_secs(interval).unwrap() * 1000;
             let limit: i64 = param("limit").unwrap().parse().unwrap();
             let end: i64 = param("endTime").map_or(i64::MAX, |e| e.parse().unwrap());
             // Binance's klines lie on the grid: weeks open on Monday, for example.
             let at = end.min(now_ms).div_euclid(1000);
-            let newest = if second {
-                at * 1000
-            } else {
-                Interval::parse(interval).unwrap().grid_start(at) * 1000
-            };
+            let newest = Interval::parse(interval).unwrap().grid_start(at) * 1000;
             let rows: Vec<String> = (0..limit)
                 .rev()
                 .map(|i| newest - i * step_ms)
@@ -4429,7 +4410,7 @@ mod tests {
             assert!(refresh_for(secs) <= BINANCE_MAX_LIMIT);
         }
         assert_eq!(refresh_for(1), 130);
-        // Binance's 1s kline is no chart interval, and a window on it must still work.
+        // A footprint on a 1m chart reads Binance's 1s kline (ADR-0048).
         assert_eq!(kline_refresh("1s"), 130);
         assert_eq!(kline_end_ms("1s", 1_500), 2_000);
         assert_eq!(kline_end_ms("1s", 2_000), 3_000);

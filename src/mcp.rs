@@ -710,7 +710,16 @@ pub(crate) fn generate_chart(
         // Only a chart's full load asks. Pages and tails keep the load's profile
         // (ADR-0009), so reading finer bars for them would pay for nothing.
         if args.get("profile_intrabars").and_then(Value::as_bool) == Some(true) {
-            apply_intrabar_profiles(&mut series, &data, &computed, &inds, bars, source);
+            let price_based = chart_params_json.is_some();
+            apply_intrabar_profiles(
+                &mut series,
+                &data,
+                &computed,
+                &inds,
+                bars,
+                source,
+                price_based,
+            );
         }
         if let Some(errors) = &errors_value {
             series["indicator_errors"] = errors.clone();
@@ -790,6 +799,7 @@ fn apply_intrabar_profiles(
     inds: &[&dyn Indicator],
     bars: usize,
     source: fetch::DataSource,
+    price_based: bool,
 ) {
     if !inds.iter().any(|i| i.wants_intrabars()) {
         return;
@@ -800,7 +810,7 @@ fn apply_intrabar_profiles(
         interval: data.interval.clone(),
         session: data.session,
     };
-    let Some(ltf) = intrabars_for(&visible, source) else {
+    let Some(ltf) = intrabars_for(&visible, source, price_based) else {
         return;
     };
     for ((key, _), ind) in computed.iter().zip(inds) {
@@ -820,14 +830,22 @@ const PROFILE_BUDGET: std::time::Duration = std::time::Duration::from_secs(8);
 fn intrabars_for(
     visible: &chartgen::data::OhlcvData,
     source: fetch::DataSource,
+    price_based: bool,
 ) -> Option<(chartgen::data::OhlcvData, &'static str)> {
     let symbol = visible.symbol.as_deref()?;
     let iv = chartgen::interval::Interval::parse(visible.interval.as_deref()?).ok()?;
     let first: i64 = visible.bars.first()?.date.parse().ok()?;
     let last: i64 = visible.bars.last()?.date.parse().ok()?;
     let age = fetch::now_ms() / 1000 - first;
-    let (name, secs) =
-        intrabars::plan(fetch::detect_source(symbol), iv.secs(), visible.len(), age)?;
+    // A price-based bar covers however long its move took (ADR-0047), so these bars say
+    // nothing of the time to read. Planned on their count, the read would stop at its
+    // page limit and the profile would hold only the chart's newest part.
+    let plan_bars = if price_based {
+        ((iv.grid_end(last) - first) / iv.secs()).max(1) as usize
+    } else {
+        visible.len()
+    };
+    let (name, secs) = intrabars::plan(fetch::detect_source(symbol), iv.secs(), plan_bars, age)?;
     let list = intrabars::load_within(
         PROFILE_BUDGET,
         source,
@@ -4297,6 +4315,36 @@ mod tests {
             no["indicators"]["volume_profile"].get("profile_interval"),
             None
         );
+    }
+
+    #[test]
+    fn a_price_based_profile_reads_finer_bars_only_for_all_the_time_it_covers() {
+        let renko = |bars: u64, box_size: f64| {
+            let args = json!({ "ticker": "BTCUSDT", "timeframe": "1h", "bars": bars,
+                "format": "series", "indicators": ["volume_profile"], "profile_intrabars": true,
+                "chart_style": "renko", "chart_params": { "box": "fixed", "box_size": box_size },
+                "end_time": 1_699_920_000_000i64 });
+            flow_series(args)
+        };
+        let hours = |s: &Value| {
+            let bars = s["bars"].as_array().unwrap();
+            let t = |b: &Value| b["t"].as_i64().unwrap();
+            (t(bars.last().unwrap()) - t(&bars[0])) / 3_600
+        };
+        let profile = |s: &Value| s["indicators"]["volume_profile"].clone();
+
+        // 100 bars afford 3m on a 1h chart, by their count. These cover far more than 100
+        // hours, and all of them at 3m would take more than a read may.
+        let long = renko(100, 6.4);
+        assert_eq!(long["bars"].as_array().unwrap().len(), 100);
+        assert!(hours(&long) * 20 > intrabars::MAX_INTRABARS as i64);
+        assert_eq!(profile(&long)["profile_interval"], "15m");
+
+        // No finer bars can cover this long: the profile stays computed from its own.
+        let longest = renko(100, 32.0);
+        assert!(hours(&longest) * 2 > intrabars::MAX_INTRABARS as i64);
+        assert_eq!(profile(&longest).get("profile_interval"), None);
+        assert!(!profile(&longest)["hbars"].as_array().unwrap().is_empty());
     }
 
     #[test]

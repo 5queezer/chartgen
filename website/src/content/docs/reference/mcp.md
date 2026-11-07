@@ -248,6 +248,9 @@ one, so load first.
 - **Times** are when a bar opened: the first source bar after the last confirmed one. Bars
   from one source bar take the next free second, so times always increase and are not evenly
   spaced. `end_time` works as for candles.
+- **`profile_intrabars`** plans its read on the time the bars cover, not on how many there are.
+  A profile whose bars cover too long a time for finer bars stays computed from its own bars,
+  with no `profile_interval`.
 - **The last bar is open.** Only closed source bars confirm a bar. The open bar keeps its `t`
   when confirmed, so overwrite by `t`. On `kagi` and `point_figure` it is the current line or
   column. The newest bar of any live build closes on the last price, so its close can read
