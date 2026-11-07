@@ -1,7 +1,7 @@
 // Right sidebar with TradingView-style icon tabs: Watchlist, Alerts, Data
 // Window and Object Tree. The collapsed state is the watchlist store's, so
-// the edge strip is the Watchlist's own and expanding it returns to the last
-// tab. The tab is kept in localStorage. Switching tabs unmounts the other
+// the rail of tab icons is shown instead of the panel. Clicking the selected
+// tab collapses; clicking a rail icon opens that tab. The tab is kept in localStorage. Switching tabs unmounts the other
 // panel, so the watchlist only polls quotes while its tab is showing.
 
 import { For, Show, createEffect, createSignal, on, onCleanup, onMount, type JSX } from "solid-js";
@@ -71,6 +71,12 @@ export function setSidebarTab(next: Tab): void {
   }
 }
 
+/** Open the sidebar on a tab. */
+function openTab(t: Tab): void {
+  setSidebarTab(t);
+  setWatchlistCollapsed(false);
+}
+
 export interface SidebarProps {
   session: McpSession;
   /** Gates polling — true once auth is ready. */
@@ -100,7 +106,29 @@ export function Sidebar(props: SidebarProps): JSX.Element {
       when={!watchlistCollapsed()}
       fallback={
         <Show when={!compact()}>
-          <Watchlist session={props.session} enabled={props.enabled} />
+          <nav
+            class="w-10 shrink-0 flex flex-col items-center py-2 gap-1 border-l border-[color:var(--color-border)]"
+            aria-label="Sidebar (collapsed)"
+          >
+            <For each={TABS}>
+              {(t) => (
+                <button
+                  type="button"
+                  class="relative inline-flex items-center justify-center w-7 h-7 rounded-md cursor-pointer text-[color:var(--color-fg-muted)] hover:text-[color:var(--color-fg)] hover:bg-[color:var(--color-bg-elev)]"
+                  aria-label={LABELS[t]}
+                  title={LABELS[t]}
+                  onClick={() => openTab(t)}
+                >
+                  <SidebarIcon tab={t} />
+                  <Show when={t === "alerts" && activeCount() > 0}>
+                    <span class="absolute -top-0.5 -right-0.5 text-[10px] leading-none text-[color:var(--color-fg)]">
+                      {activeCount()}
+                    </span>
+                  </Show>
+                </button>
+              )}
+            </For>
+          </nav>
         </Show>
       }
     >
@@ -124,7 +152,7 @@ export function Sidebar(props: SidebarProps): JSX.Element {
                 aria-selected={tab() === t}
                 class="flex-1 px-3 py-2 text-sm cursor-pointer inline-flex items-center justify-center border-b-2 border-transparent text-[color:var(--color-fg-muted)] aria-selected:text-[color:var(--color-fg)] aria-selected:border-[color:var(--color-accent)]"
                 title={LABELS[t]}
-                onClick={() => setSidebarTab(t)}
+                onClick={() => (tab() === t && !compact() ? setWatchlistCollapsed(true) : setSidebarTab(t))}
               >
                 <SidebarIcon tab={t} />
                 <span class="sr-only">{LABELS[t]}</span>
@@ -148,7 +176,7 @@ export function Sidebar(props: SidebarProps): JSX.Element {
           </Show>
         </div>
         <Show when={tab() === "watchlist"}>
-          <Watchlist embedded session={props.session} enabled={props.enabled} />
+          <Watchlist session={props.session} enabled={props.enabled} />
         </Show>
         <Show when={tab() === "alerts"}>
           <AlertsPanel />
@@ -184,10 +212,7 @@ export function SidebarDock(props: { drawActive: boolean; onDraw: () => void }):
           <button
             type="button"
             aria-label={LABELS[t]}
-            onClick={() => {
-              setSidebarTab(t);
-              setWatchlistCollapsed(false);
-            }}
+            onClick={() => openTab(t)}
           >
             <SidebarIcon tab={t} />
           </button>

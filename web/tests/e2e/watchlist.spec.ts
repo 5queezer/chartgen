@@ -279,9 +279,9 @@ test.describe("watchlist", () => {
       });
     const expandedWidth = await chartWidth();
 
-    await page.getByRole("button", { name: "Collapse watchlist" }).click();
+    await page.getByRole("tab", { name: "Watchlist" }).click();
     await expect(table(page)).toHaveCount(0);
-    const expand = page.getByRole("button", { name: "Expand watchlist" });
+    const expand = page.getByRole("button", { name: "Watchlist", exact: true });
     await expect(expand).toBeVisible();
     // The chart takes over the panel's width.
     await expect.poll(chartWidth).toBeGreaterThan(expandedWidth + 200);
