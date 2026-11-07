@@ -2809,8 +2809,24 @@ async fn the_named_owner_collects_every_clients_devices() {
     subscribe(&a, port, "laptop", CLIENT_1).await;
     subscribe(&a, port, "phone", CLIENT_2).await;
     subscribe(&a, port, "tablet", "device:9").await;
-    subscribe(&a, port, "shared", CLIENT_1).await;
     subscribe(&a, port, "shared", "github:1").await;
+    // Rows from before an endpoint had one owner: the same subscription under a client,
+    // and one under the same endpoint with other keys, which may not be that browser.
+    let row = |name: &str, id: &str, p256dh: &str| {
+        let device = StoredDevice {
+            id: id.to_string(),
+            owner: CLIENT_1.to_string(),
+            endpoint: format!("http://127.0.0.1:{port}/push/{name}"),
+            p256dh: p256dh.to_string(),
+            auth: UA_AUTH.to_string(),
+            created_at: 1,
+        };
+        store.save_push_device(&device).unwrap();
+        a.lock().devices.insert(id.to_string(), device);
+    };
+    row("shared", "duplicate", UA_PUBLIC);
+    subscribe(&a, port, "other-keys", "github:1").await;
+    row("other-keys", "unproven", "other");
 
     assert_eq!(a.claim_waiting("github:1"), (0, 2));
 
@@ -2821,21 +2837,24 @@ async fn the_named_owner_collects_every_clients_devices() {
             .filter(|d| d.owner == owner)
             .count()
     };
-    assert_eq!(count("github:1"), 3, "the two, and the one it held");
-    assert_eq!(
-        count(CLIENT_1),
-        1,
-        "the endpoint it already holds stays put"
+    assert_eq!(count("github:1"), 4, "the two, and the two it held");
+    assert!(
+        !a.lock().devices.contains_key("duplicate"),
+        "one endpoint, one owner"
     );
+    assert!(
+        a.lock().devices.contains_key("unproven"),
+        "not provably the same"
+    );
+    assert_eq!(count(CLIENT_1), 1);
     assert_eq!(count(CLIENT_2), 0);
     assert_eq!(count("device:9"), 1);
     let stored = store.push_devices().unwrap();
     assert_eq!(
         stored.iter().filter(|d| d.owner == "github:1").count(),
-        3,
+        4,
         "as a restart reads them"
     );
-    assert_eq!(stored.len(), 5, "nothing deleted");
     assert_eq!(a.claim_waiting("github:1"), (0, 0), "once");
 }
 
@@ -2952,4 +2971,112 @@ async fn each_devices_outcome_is_kept_with_a_status() {
         view["last_push_devices"][&phone]["error"].is_null(),
         "{view}"
     );
+}
+
+// --- One endpoint, one owner (ADR-0044) ---
+
+/// The browser's next owner has what only that browser has, so the device is theirs. The
+/// earlier owner loses that device, and its alerts run on and reach its other ones.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_account_subscribing_an_endpoint_takes_it_over() {
+    let (port, seen) = receiver(OK).await;
+    let (store, _) = store_at("takeover");
+    let a = push_alerts(store, port, Access::Open, vapid(), Limits::default());
+    subscribe(&a, port, "shared", "github:1").await;
+    subscribe(&a, port, "laptop", "github:1").await;
+    let id = create(&a, pushed("greater", "every"), "github:1").await;
+
+    let answer = subscribe(&a, port, "shared", "github:2").await;
+    assert_eq!(answer["devices"], 1);
+
+    let owners = |endpoint: &str| -> Vec<String> {
+        store
+            .push_devices()
+            .unwrap()
+            .into_iter()
+            .filter(|d| d.endpoint.ends_with(endpoint))
+            .map(|d| d.owner)
+            .collect()
+    };
+    assert_eq!(owners("/shared"), ["github:2"], "one row, the latest");
+    assert_eq!(owners("/laptop"), ["github:1"], "its other device stays");
+    assert_eq!(a.lock().devices.len(), 2, "and memory agrees");
+    assert_eq!(
+        call(&a, "list_server_alerts", json!({}), "github:1")
+            .await
+            .unwrap()["push"]["devices"],
+        1
+    );
+
+    // Its alert goes on, to the device it has left, and not to this one.
+    tick(&a, BASE, 101.0);
+    until("the record", || a.lock().alerts[&id].last_push.is_some()).await;
+    let view = get(&a, "github:1", &id).await;
+    assert_eq!(view["fire_count"], 1, "it keeps running");
+    let got = seen.lock().unwrap().clone();
+    assert_eq!(got.len(), 1, "{got:?}");
+    assert!(got[0].starts_with("POST /push/laptop"), "{}", got[0]);
+
+    // Whoever subscribes last has it: taking it back works the same way.
+    subscribe(&a, port, "shared", "github:1").await;
+    assert_eq!(owners("/shared"), ["github:1"]);
+}
+
+/// Knowing someone's endpoint is not enough: without its keys nothing moves, and that
+/// device goes on working. Neither half of the keys will do.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_endpoint_with_other_keys_evicts_nobody() {
+    let (port, seen) = receiver(OK).await;
+    let (store, _) = store_at("no-eviction");
+    let a = push_alerts(store, port, Access::Open, vapid(), Limits::default());
+    subscribe(&a, port, "phone", "github:1").await;
+    let rows = || -> Vec<(String, String, String, String)> {
+        store
+            .push_devices()
+            .unwrap()
+            .into_iter()
+            .map(|d| (d.id, d.owner, d.p256dh, d.auth))
+            .collect()
+    };
+    let before = rows();
+    let endpoint = format!("http://127.0.0.1:{port}/push/phone");
+
+    const OTHER_PUBLIC: &str =
+        "BNToM-qH15gF5XbSbPRmBJUPnlZkIr_9kq1unPg0TkipOEABC6FQhKZi96_K2_TnLc-JPX8fT5cqzs56rxlUWSk";
+    const OTHER_AUTH: &str = "AAECAwQFBgcICQoLDA0ODw";
+    for (p256dh, auth) in [
+        (OTHER_PUBLIC, OTHER_AUTH),
+        (UA_PUBLIC, OTHER_AUTH),
+        (OTHER_PUBLIC, UA_AUTH),
+    ] {
+        let forged = json!({"endpoint": endpoint, "p256dh": p256dh, "auth": auth});
+        let refused = call(&a, "subscribe_push", forged, "github:2")
+            .await
+            .unwrap_err();
+        assert!(refused.contains("other keys"), "{refused}");
+    }
+    assert_eq!(rows(), before, "the row is as it was");
+    assert_eq!(a.lock().devices.len(), 1);
+
+    let id = create(&a, pushed("greater", "once"), "github:1").await;
+    tick(&a, BASE, 101.0);
+    until("the record", || a.lock().alerts[&id].last_push.is_some()).await;
+    assert_eq!(
+        seen.lock().unwrap().len(),
+        1,
+        "and it still gets its alerts"
+    );
+
+    // The same keys padded are the same keys, and its owner may change its own.
+    let padded = json!({
+        "endpoint": endpoint,
+        "p256dh": format!("{UA_PUBLIC}="),
+        "auth": format!("{UA_AUTH}=="),
+    });
+    call(&a, "subscribe_push", padded, "github:2")
+        .await
+        .unwrap();
+    let own = json!({"endpoint": endpoint, "p256dh": OTHER_PUBLIC, "auth": OTHER_AUTH});
+    call(&a, "subscribe_push", own, "github:2").await.unwrap();
+    assert_eq!(store.push_devices().unwrap().len(), 1);
 }

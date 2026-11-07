@@ -25,6 +25,7 @@ use chartgen::scripting::persistence::{self, Store, StoredDevice, StoredEvent};
 use chartgen::webhook::{self, Policy, Target, Timing};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use tokio::sync::{broadcast, Semaphore};
 use tokio::task::JoinHandle;
 
@@ -480,6 +481,13 @@ fn load_vapid(store: &Store) -> Option<Vapid> {
             None
         }
     }
+}
+
+/// Whether a device has these keys, as one subscription would, however they are padded.
+/// `auth` is a secret, so this does not compare it byte by byte.
+fn same_keys(device: &StoredDevice, p256dh: &str, auth: &str) -> bool {
+    let print = |text: &str| Sha256::digest(text.trim_end_matches('='));
+    print(&device.p256dh) == print(p256dh) && print(&device.auth) == print(auth)
 }
 
 fn now_ms() -> i64 {
@@ -988,9 +996,9 @@ impl ServerAlerts {
 
     /// Every alert and push device owned by an OAuth client goes to `user`, the owner the
     /// operator named, with waiting deliveries, whatever limit that passes: they are that
-    /// person's already, and nothing is deleted (ADR-0044). A webhook's secret moves with its
-    /// alert. An endpoint the user already holds stays with its client. Returns how many
-    /// alerts and devices moved. Blocking.
+    /// person's already (ADR-0044). A webhook's secret moves with its alert. Nothing is
+    /// deleted but a device that would be a second row for one subscription. Returns how
+    /// many alerts and devices moved. Blocking.
     pub fn claim_waiting(&self, user: &str) -> (usize, usize) {
         let mut guard = self.lock();
         let st = &mut *guard;
@@ -1016,11 +1024,11 @@ impl ServerAlerts {
             }
         }
 
-        let mut held: HashSet<String> = st
+        let mut held: HashMap<String, StoredDevice> = st
             .devices
             .values()
             .filter(|d| d.owner == user)
-            .map(|d| d.endpoint.clone())
+            .map(|d| (d.endpoint.clone(), d.clone()))
             .collect();
         let mut waiting: Vec<(i64, String)> = st
             .devices
@@ -1030,22 +1038,32 @@ impl ServerAlerts {
             .collect();
         waiting.sort();
         let mut devices_moved = 0;
+        let mut duplicates = Vec::new();
         for (_, id) in waiting {
             let Some(device) = st.devices.get_mut(&id) else {
                 continue;
             };
-            if !held.insert(device.endpoint.clone()) {
+            // One endpoint, one owner. The same subscription under another client is a
+            // duplicate; other keys are not provably the same browser, so they stay.
+            if let Some(kept) = held.get(&device.endpoint) {
+                if same_keys(kept, &device.p256dh, &device.auth) {
+                    duplicates.push(id);
+                }
                 continue;
             }
             let mut updated = device.clone();
             updated.owner = user.to_string();
             match self.store.save_push_device(&updated) {
                 Ok(()) => {
+                    held.insert(updated.endpoint.clone(), updated.clone());
                     *device = updated;
                     devices_moved += 1;
                 }
                 Err(e) => eprintln!("[alerts] cannot move a push device to its user: {e}"),
             }
+        }
+        for id in duplicates {
+            self.forget_device(st, &id);
         }
 
         if !moved.is_empty() {
@@ -1280,6 +1298,10 @@ impl ServerAlerts {
     /// so they are checked here. A device over the limit replaces the client's oldest:
     /// a phone reinstalled or a site cleared leaves a dead one behind, nobody can name it,
     /// and the limit is only there to bound the fan-out.
+    ///
+    /// An endpoint has one owner, whoever subscribed it last, so a device never shows two
+    /// people's alerts. Taking it over needs the keys too, which only that browser has:
+    /// knowing an endpoint is not enough to remove someone's device (ADR-0044).
     fn subscribe_push(&self, args: &Value, owner: &str) -> Result<Value, String> {
         self.check_push(owner)?;
         self.admit_change(owner)?;
@@ -1294,6 +1316,15 @@ impl ServerAlerts {
         DeviceKeys::parse(p256dh, auth)?;
 
         let mut st = self.lock();
+        let others: Vec<&StoredDevice> = st
+            .devices
+            .values()
+            .filter(|d| d.owner != owner && d.endpoint == endpoint)
+            .collect();
+        if !others.iter().all(|d| same_keys(d, p256dh, auth)) {
+            return Err("This push subscription is registered with other keys".into());
+        }
+        let taken_over: Vec<String> = others.iter().map(|d| d.id.clone()).collect();
         let existing = st
             .devices
             .values()
@@ -1308,8 +1339,8 @@ impl ServerAlerts {
                 .collect();
             mine.sort();
             let over = (mine.len() + 1).saturating_sub(self.limits.devices_per_client);
-            // Replacing one of its own adds nothing to the total.
-            if over == 0 && st.devices.len() >= self.limits.devices_total {
+            // Replacing one of its own, or taking one over, adds nothing to the total.
+            if over == 0 && taken_over.is_empty() && st.devices.len() >= self.limits.devices_total {
                 let Some(id) = self.device_to_replace(&st, owner) else {
                     return Err(format!(
                         "Limit reached: this server holds its maximum of {} push devices",
@@ -1337,6 +1368,9 @@ impl ServerAlerts {
             "The alert store is unavailable".to_string()
         })?;
         st.devices.insert(id.clone(), device);
+        for other in taken_over {
+            self.forget_device(&mut st, &other);
+        }
         Ok(json!({
             "devices": st.devices.values().filter(|d| d.owner == owner).count(),
             "device": id,

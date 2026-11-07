@@ -165,7 +165,8 @@ async function browserOf(newContext: () => Promise<BrowserContext>, device: Devi
   return { context, page, token: () => bearer };
 }
 
-async function callTool(bearer: string, name: string, args: unknown): Promise<Record<string, unknown>> {
+/** The tool's answer text, whatever it says. */
+async function callToolText(bearer: string, name: string, args: unknown): Promise<string> {
   const res = await fetch(MCP, {
     method: "POST",
     headers: {
@@ -181,8 +182,17 @@ async function callTool(bearer: string, name: string, args: unknown): Promise<Re
     }),
   });
   const json = (await res.json()) as { result: { content: { text: string }[] } };
-  return JSON.parse(json.result.content[0]!.text) as Record<string, unknown>;
+  return json.result.content[0]!.text;
 }
+
+async function callTool(bearer: string, name: string, args: unknown): Promise<Record<string, unknown>> {
+  return JSON.parse(await callToolText(bearer, name, args)) as Record<string, unknown>;
+}
+
+const deviceCount = async (bearer: string) => {
+  const list = await callTool(bearer, "list_server_alerts", {});
+  return (list.push as { devices: number }).devices;
+};
 
 /** Notifications this tab itself has shown: what it does about a fire it must tell of. */
 const shown = (page: Page) =>
@@ -241,6 +251,74 @@ test("a phone gets the alert made on the desktop, and each tab goes by its own d
   await phone.page.waitForTimeout(6_000);
   expect(await shown(phone.page)).toBe(1);
 
+  // The server outlives this test, and the devices would count in the next.
+  await callTool(desktop.token(), "unsubscribe_push", { endpoint: laptop.endpoint });
+  await callTool(desktop.token(), "unsubscribe_push", { endpoint: handset.endpoint });
   await desktop.context.close();
   await phone.context.close();
+});
+
+test("a shared browser's device goes with whoever is signed in, and nobody can take it without its keys", async ({
+  browser,
+}, info) => {
+  test.setTimeout(150_000);
+  const newContext = () => browser.newContext({ baseURL: info.project.use.baseURL });
+  const laptop = newDevice();
+  const shared = newDevice();
+
+  // octo keeps a laptop too, whose token outlives signing out of the shared browser.
+  const own = await browserOf(newContext, laptop);
+  const kiosk = await browserOf(newContext, shared);
+  await expect.poll(() => deviceCount(own.token())).toBe(2);
+
+  // Signing out leaves the device subscribed, and nobody else has it yet.
+  await kiosk.page.getByTestId("user-menu").click();
+  await kiosk.page.getByRole("menuitem", { name: "Sign out" }).click();
+  await expect(kiosk.page.getByRole("heading", { name: "You are signed out" })).toBeVisible();
+  expect(await deviceCount(own.token())).toBe(2);
+
+  // Someone else signs in on that browser: its subscription comes along on load.
+  let annBearer = "";
+  kiosk.page.on("request", (r: Request) => {
+    const auth = r.headers().authorization;
+    if (auth && r.url().endsWith("/mcp")) annBearer = auth;
+  });
+  await kiosk.page.getByRole("link", { name: "Sign in again" }).click();
+  await kiosk.page.getByRole("link", { name: "Continue with Google" }).click();
+  await kiosk.page.getByRole("link", { name: "Sign in as Ann Example" }).click();
+  await kiosk.page.waitForURL((url) => url.pathname === "/" && !url.searchParams.has("code"));
+  await expectChartRendered(kiosk.page);
+  await expect.poll(() => (annBearer ? deviceCount(annBearer) : 0), { timeout: 20_000 }).toBe(1);
+  expect(await deviceCount(own.token())).toBe(1);
+
+  // octo's alert reaches the laptop, and no longer that browser.
+  const hers = await callTool(own.token(), "create_server_alert", firesNow);
+  await expect.poll(() => pushes.length, { timeout: 20_000 }).toBe(1);
+  expect(pushes[0]!.url).toBe(laptop.path);
+  expect(decrypt(pushes[0]!.body, laptop).alert_id).toBe(hers.id);
+
+  // Ann's alert reaches that browser, read with its own keys.
+  const annsAlert = await callTool(annBearer, "create_server_alert", firesNow);
+  await expect.poll(() => pushes.length, { timeout: 20_000 }).toBe(2);
+  expect(pushes[1]!.url).toBe(shared.path);
+  expect(decrypt(pushes[1]!.body, shared).alert_id).toBe(annsAlert.id);
+
+  // Ann knows the laptop's endpoint and not its keys: that moves nothing.
+  const madeUp = newDevice();
+  const refused = await callToolText(annBearer, "subscribe_push", {
+    endpoint: laptop.endpoint,
+    p256dh: madeUp.p256dh,
+    auth: madeUp.authText,
+  });
+  expect(refused).toContain("other keys");
+  expect(await deviceCount(own.token())).toBe(1);
+  const again = await callTool(own.token(), "create_server_alert", firesNow);
+  await expect.poll(() => pushes.length, { timeout: 20_000 }).toBe(3);
+  expect(pushes[2]!.url).toBe(laptop.path);
+  expect(decrypt(pushes[2]!.body, laptop).alert_id).toBe(again.id);
+
+  await callTool(own.token(), "unsubscribe_push", { endpoint: laptop.endpoint });
+  await callTool(annBearer, "unsubscribe_push", { endpoint: shared.endpoint });
+  await own.context.close();
+  await kiosk.context.close();
 });

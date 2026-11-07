@@ -4994,7 +4994,8 @@ mod signin_server_alerts {
             "github",
             profile_of("github", 2, "bob"),
         );
-        let (_, _, device) = browser(service);
+        let (_, _, mut device) = browser(service);
+        device["endpoint"] = format!("http://127.0.0.1:{service}/push/bobs").into();
         call_tool(p, &theirs, "subscribe_push", device).unwrap();
         let again = call_tool(p, &at_desk, "create_server_alert", fired_now()).unwrap();
         until_received("the second push", || bodies.lock().unwrap().len() == 2);
@@ -5095,6 +5096,61 @@ mod signin_server_alerts {
         let alert = call_tool(port, &owner, "create_server_alert", fired_now()).unwrap();
         until_received("the push", || bodies.lock().unwrap().len() == 1);
         let got = open_push(&bodies.lock().unwrap()[0], &key, &auth);
+        assert_eq!(got["alert_id"], alert["id"]);
+    }
+
+    /// On the real binary, two accounts on one browser: the device goes with the last to
+    /// subscribe, and only their alerts reach it. A stranger who knows the endpoint and not
+    /// the keys moves nothing.
+    #[test]
+    fn test_one_endpoint_has_one_owner() {
+        let fake = FakeProvider::start();
+        let (service, bodies, answer) = push_service();
+        answer.store(true, Ordering::SeqCst);
+        let srv = start("signin-push-owner", &fake, "*", service, None);
+        let p = srv.port;
+        let mut ann = Browser::new(p);
+        let hers = web_sign_in(&mut ann, &fake, "github", profile_of("github", 1, "ann"));
+        let mut bob = Browser::new(p);
+        let his = web_sign_in(&mut bob, &fake, "github", profile_of("github", 2, "bob"));
+        let devices = |token: &str| {
+            call_tool(p, token, "list_server_alerts", serde_json::json!({})).unwrap()["push"]
+                ["devices"]
+                .clone()
+        };
+
+        let (key, auth, device) = browser(service);
+        call_tool(p, &hers, "subscribe_push", device.clone()).unwrap();
+        assert_eq!(devices(&hers), 1);
+
+        // Bob knows the endpoint and makes up the keys: refused, and hers still works.
+        let (_, _, mut forged) = browser(service);
+        forged["endpoint"] = device["endpoint"].clone();
+        assert_ne!(forged["p256dh"], device["p256dh"]);
+        let refused = call_tool(p, &his, "subscribe_push", forged).unwrap_err();
+        assert!(refused.contains("other keys"), "{refused}");
+        assert_eq!(devices(&hers), 1);
+        assert_eq!(devices(&his), 0);
+        let alert = call_tool(p, &hers, "create_server_alert", fired_now()).unwrap();
+        until_received("her push", || bodies.lock().unwrap().len() == 1);
+        let got = open_push(&bodies.lock().unwrap()[0], &key, &auth);
+        assert_eq!(got["alert_id"], alert["id"]);
+
+        // The browser itself, signed in as Bob now: its subscription has both halves.
+        call_tool(p, &his, "subscribe_push", device).unwrap();
+        assert_eq!(devices(&his), 1);
+        assert_eq!(devices(&hers), 0, "she lost that device");
+
+        // Her alerts go on, reaching no device, and his reach it.
+        let made = call_tool(p, &hers, "create_server_alert", fired_now()).unwrap();
+        assert!(made["id"].is_string());
+        std::thread::sleep(std::time::Duration::from_millis(1500));
+        assert_eq!(bodies.lock().unwrap().len(), 1, "hers no longer reach it");
+        let list = call_tool(p, &hers, "list_server_alerts", serde_json::json!({})).unwrap();
+        assert_eq!(list["alerts"][1]["fire_count"], 1, "and still run: {list}");
+        let alert = call_tool(p, &his, "create_server_alert", fired_now()).unwrap();
+        until_received("his push", || bodies.lock().unwrap().len() == 2);
+        let got = open_push(&bodies.lock().unwrap()[1], &key, &auth);
         assert_eq!(got["alert_id"], alert["id"]);
     }
 }
