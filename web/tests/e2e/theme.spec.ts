@@ -42,7 +42,7 @@ test.describe("theme", () => {
   }) => {
     // The Volume pane's bars are bright in both themes and would swamp the
     // luminance probe, which is about the theme's empty chart area.
-    await page.getByRole("button", { name: "Remove volume", exact: true }).click();
+    await page.getByTestId("indicator-legend-volume").getByRole("button", { name: /^Remove / }).click();
     await expect(
       page.locator(".pane-header").filter({ hasText: "Volume" }),
     ).toHaveCount(0);

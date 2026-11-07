@@ -46,8 +46,8 @@ async function useIndicators(page: Page, set: unknown[]) {
   await gotoApp(page);
 }
 
-async function openStyleTab(page: Page, chip: string) {
-  await page.getByRole("button", { name: `Settings for ${chip}`, exact: true }).click();
+async function openStyleTab(page: Page, key: string) {
+  await page.getByTestId(`indicator-legend-${key}`).getByRole("button", { name: /^Settings for / }).click();
   const dialog = page.getByRole("dialog");
   await expect(dialog).toBeVisible();
   await dialog.getByRole("tab", { name: "Style" }).click();
