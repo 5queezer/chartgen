@@ -72,7 +72,7 @@ describe("parseLayouts", () => {
         null,
         { ...good, id: "" },
         { ...good, name: "  " },
-        { ...good, id: "b", state: { ...good.state, timeframe: "61m" } },
+        { ...good, id: "b", state: { ...good.state, timeframe: 61 } },
         { ...good, id: "c", state: { ...good.state, indicators: "rsi" } },
         {
           ...good,
@@ -553,6 +553,22 @@ describe("grid in a layout (ADR-0043)", () => {
   it("a malformed pane becomes a copy of the first chart, the layout survives", () => {
     const state = parseState({ ...two, panes: [{ symbol: "bad symbol!" }] })!;
     expect(state.panes![0]!.symbol).toBe("BTCUSDT");
+  });
+
+  it("an unknown chart type or interval falls back for that pane only", () => {
+    const state = parseState({
+      ...two,
+      chartType: "renko_x",
+      timeframe: "30s",
+      panes: [{ ...pane, symbol: "ETHUSDT", chartType: "future", timeframe: "7s" }],
+    })!;
+    expect(state.chartType).toBe("candles");
+    expect(state.timeframe).toBe("1h");
+    expect(state.symbol).toBe("BTCUSDT");
+    expect(state.indicators).toEqual(two.indicators);
+    expect(state.panes![0]!.chartType).toBe("candles");
+    expect(state.panes![0]!.timeframe).toBe("1h");
+    expect(state.panes![0]!.symbol).toBe("ETHUSDT");
   });
 
   it("a pane's indicators and compare list are validated like the first chart's", () => {

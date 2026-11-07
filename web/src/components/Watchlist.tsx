@@ -56,10 +56,8 @@ import {
   renameSection,
   setActiveList,
   setFlag,
-  setWatchlistCollapsed,
   toggleSection,
   watchlist,
-  watchlistCollapsed,
   watchlists,
   type FlagColor,
   type WatchItem,
@@ -76,8 +74,6 @@ export interface WatchlistProps {
   session: McpSession;
   /** Gates polling — true once auth is ready. */
   enabled: boolean;
-  /** Inside the sidebar: it supplies the width and left border. */
-  embedded?: boolean;
 }
 
 const iconButtonClass =
@@ -94,22 +90,6 @@ const actionClass =
   "px-3 py-1.5 rounded-md text-sm cursor-pointer border border-[color:var(--color-border)] hover:bg-[color:var(--color-bg-elev)]";
 const primaryClass =
   "px-3 py-1.5 rounded-md text-sm cursor-pointer bg-[color:var(--color-accent)] text-black font-semibold";
-
-function ListIcon(): JSX.Element {
-  return (
-    <svg
-      width="18"
-      height="18"
-      viewBox="0 0 18 18"
-      fill="none"
-      stroke="currentColor"
-      stroke-width="1.5"
-      aria-hidden="true"
-    >
-      <path d="M3 4.5h12M3 9h12M3 13.5h12" />
-    </svg>
-  );
-}
 
 function SectionIcon(): JSX.Element {
   return (
@@ -166,7 +146,7 @@ export function Watchlist(props: WatchlistProps): JSX.Element {
 
   const query = createQuotesQuery(props.session, () => ({
     symbols: watchlist(),
-    enabled: props.enabled && !watchlistCollapsed(),
+    enabled: props.enabled,
   }));
 
   const quotes = createMemo(
@@ -268,286 +248,249 @@ export function Watchlist(props: WatchlistProps): JSX.Element {
   }
 
   return (
-    <Show
-      when={!watchlistCollapsed()}
-      fallback={
-        <aside
-          class="w-10 shrink-0 flex flex-col items-center py-2 border-l border-[color:var(--color-border)]"
-          aria-label="Watchlist (collapsed)"
-        >
-          <button
-            type="button"
-            class={iconButtonClass}
-            aria-label="Expand watchlist"
-            title="Watchlist"
-            onClick={() => setWatchlistCollapsed(false)}
+    <aside class="watchlist flex flex-col min-h-0 flex-1" aria-label="Watchlist">
+      <div class="flex items-center gap-1 px-3 py-2 border-b border-[color:var(--color-border)]">
+        <DropdownMenu.Root>
+          <DropdownMenu.Trigger
+            class="flex-1 min-w-0 flex items-center gap-1.5 px-1.5 py-1 -ml-1.5 rounded-md text-sm font-semibold cursor-pointer hover:bg-[color:var(--color-bg-elev)]"
+            aria-label={`Watchlist: ${listName()}`}
+            title="Switch watchlist"
           >
-            <ListIcon />
-          </button>
-        </aside>
-      }
-    >
-      <aside
-        class="watchlist flex flex-col min-h-0"
-        classList={{
-          "flex-1": props.embedded,
-          "w-80 shrink-0 border-l border-[color:var(--color-border)]":
-            !props.embedded,
-        }}
-        aria-label="Watchlist"
-      >
-        <div class="flex items-center gap-1 px-3 py-2 border-b border-[color:var(--color-border)]">
-          <DropdownMenu.Root>
-            <DropdownMenu.Trigger
-              class="flex-1 min-w-0 flex items-center gap-1.5 px-1.5 py-1 -ml-1.5 rounded-md text-sm font-semibold cursor-pointer hover:bg-[color:var(--color-bg-elev)]"
-              aria-label={`Watchlist: ${listName()}`}
-              title="Switch watchlist"
-            >
-              <span class="truncate" data-testid="watchlist-name">
-                {listName()}
-              </span>
-              <DropdownMenu.Icon aria-hidden="true">▾</DropdownMenu.Icon>
-            </DropdownMenu.Trigger>
-            <DropdownMenu.Portal>
-              <DropdownMenu.Content class={menuClass}>
-                <For each={watchlists()}>
-                  {(l) => (
-                    <DropdownMenu.Item
-                      class={itemClass}
-                      data-list-id={l.id}
-                      onSelect={() => setActiveList(l.id)}
-                    >
-                      <span class="truncate">{l.name}</span>
-                      <Show when={l.id === activeListId()}>
-                        <span aria-label="current">✓</span>
-                      </Show>
-                    </DropdownMenu.Item>
-                  )}
-                </For>
-                <DropdownMenu.Separator class="my-1 border-t border-[color:var(--color-border)]" />
-                <DropdownMenu.Item
-                  class={itemClass}
-                  onSelect={() => setActiveList(FLAGGED_ID)}
-                >
-                  Flagged
-                  <Show when={readOnly()}>
-                    <span aria-label="current">✓</span>
-                  </Show>
-                </DropdownMenu.Item>
-                <DropdownMenu.Separator class="my-1 border-t border-[color:var(--color-border)]" />
-                <DropdownMenu.Item
-                  class={itemClass}
-                  disabled={watchlists().length >= MAX_LISTS}
-                  onSelect={() =>
-                    askName("Create new list", "List name", "", (name) => {
-                      createList(name);
-                    })
-                  }
-                >
-                  Create new list…
-                </DropdownMenu.Item>
-                <DropdownMenu.Item
-                  class={itemClass}
-                  disabled={readOnly()}
-                  onSelect={() =>
-                    askName(
-                      "Rename list",
-                      "List name",
-                      activeList().name,
-                      (name) => renameList(activeList().id, name),
-                    )
-                  }
-                >
-                  Rename…
-                </DropdownMenu.Item>
-                <DropdownMenu.Item
-                  class={itemClass}
-                  disabled={readOnly() || watchlists().length >= MAX_LISTS}
-                  onSelect={() => duplicateList(activeList().id)}
-                >
-                  Duplicate
-                </DropdownMenu.Item>
-                <DropdownMenu.Item
-                  class={itemClass}
-                  disabled={readOnly() || watchlists().length <= 1}
-                  onSelect={() =>
-                    setDialogue({
-                      kind: "delete",
-                      id: activeList().id,
-                      name: activeList().name,
-                    })
-                  }
-                >
-                  Delete…
-                </DropdownMenu.Item>
-              </DropdownMenu.Content>
-            </DropdownMenu.Portal>
-          </DropdownMenu.Root>
-          <button
-            type="button"
-            class={`${iconButtonClass} text-lg leading-none`}
-            aria-label="Add symbol"
-            title="Add symbol"
-            disabled={readOnly()}
-            onClick={() => setSearchOpen(true)}
-          >
-            +
-          </button>
-          <button
-            type="button"
-            class={iconButtonClass}
-            aria-label="Add section"
-            title="Add section"
-            disabled={
-              readOnly() ||
-              items().filter((i) => i.kind === "section").length >=
-                MAX_SECTIONS
-            }
-            onClick={() =>
-              askName("Add section", "Section name", "", (name) => {
-                addSection(name);
-              })
-            }
-          >
-            <SectionIcon />
-          </button>
-          <button
-            type="button"
-            class={iconButtonClass}
-            aria-label="Collapse watchlist"
-            title="Collapse watchlist"
-            onClick={() => setWatchlistCollapsed(true)}
-          >
-            <span aria-hidden="true">»</span>
-          </button>
-        </div>
-        <div role="table" aria-label="Watchlist" class="wl-table flex-1 min-h-0 overflow-y-auto">
-          <div
-            role="row"
-            class="wl-grid px-3 py-1 text-xs text-[color:var(--color-fg-muted)]"
-          >
-            <span role="columnheader">Symbol</span>
-            <span role="columnheader" class="text-right">Last</span>
-            <span role="columnheader" class="text-right">Chg</span>
-            <span role="columnheader" class="text-right">Chg%</span>
-          </div>
-          <For each={visible()}>
-            {(item) =>
-              item.kind === "section" ? (
-                <SectionRow
-                  section={item}
-                  index={indexOf(item)}
-                  readOnly={readOnly()}
-                  dropBefore={dropBefore() === indexOf(item)}
-                  dropAfter={isLastDrop(item)}
-                  onGrip={startDrag}
-                  onKeyDown={(e) => onRowKeyDown(e, item)}
-                  onRename={() =>
-                    askName("Rename section", "Section name", item.name, (n) =>
-                      renameSection(item.id, n),
-                    )
-                  }
-                />
-              ) : (
-                <WatchlistRow
-                  symbol={item.symbol}
-                  index={indexOf(item)}
-                  quote={quotes().get(item.symbol)}
-                  active={symbol() === item.symbol}
-                  flag={flags()[item.symbol]}
-                  readOnly={readOnly()}
-                  dropBefore={dropBefore() === indexOf(item)}
-                  dropAfter={isLastDrop(item)}
-                  onGrip={startDrag}
-                  onKeyDown={(e) => onRowKeyDown(e, item)}
-                  onFlagMenu={openFlagMenu}
-                />
-              )
-            }
-          </For>
-          <Show when={items().length === 0}>
-            <p class="col-span-full px-3 py-3 text-xs text-[color:var(--color-fg-muted)]">
-              {readOnly()
-                ? "No flagged symbols. Right-click a row to flag it."
-                : "This list is empty. Use + to add a symbol."}
-            </p>
-          </Show>
-          <Show when={signInNotice()}>
-            <p
-              class="col-span-full px-3 py-2 text-xs text-[color:var(--color-fg-muted)]"
-              data-testid="signin-notice"
-            >
-              {signInNotice()}
-            </p>
-          </Show>
-          <Show when={query.isError && !signInNotice()}>
-            <p class="col-span-full px-3 py-2 text-xs text-[color:var(--color-danger)]">
-              Quotes unavailable: {query.error?.message}
-            </p>
-          </Show>
-        </div>
-        <SymbolSearch
-          open={searchOpen()}
-          onOpenChange={setSearchOpen}
-          initialQuery=""
+            <span class="truncate" data-testid="watchlist-name">
+              {listName()}
+            </span>
+            <DropdownMenu.Icon aria-hidden="true">▾</DropdownMenu.Icon>
+          </DropdownMenu.Trigger>
+          <DropdownMenu.Portal>
+            <DropdownMenu.Content class={menuClass}>
+              <For each={watchlists()}>
+                {(l) => (
+                  <DropdownMenu.Item
+                    class={itemClass}
+                    data-list-id={l.id}
+                    onSelect={() => setActiveList(l.id)}
+                  >
+                    <span class="truncate">{l.name}</span>
+                    <Show when={l.id === activeListId()}>
+                      <span aria-label="current">✓</span>
+                    </Show>
+                  </DropdownMenu.Item>
+                )}
+              </For>
+              <DropdownMenu.Separator class="my-1 border-t border-[color:var(--color-border)]" />
+              <DropdownMenu.Item
+                class={itemClass}
+                onSelect={() => setActiveList(FLAGGED_ID)}
+              >
+                Flagged
+                <Show when={readOnly()}>
+                  <span aria-label="current">✓</span>
+                </Show>
+              </DropdownMenu.Item>
+              <DropdownMenu.Separator class="my-1 border-t border-[color:var(--color-border)]" />
+              <DropdownMenu.Item
+                class={itemClass}
+                disabled={watchlists().length >= MAX_LISTS}
+                onSelect={() =>
+                  askName("Create new list", "List name", "", (name) => {
+                    createList(name);
+                  })
+                }
+              >
+                Create new list…
+              </DropdownMenu.Item>
+              <DropdownMenu.Item
+                class={itemClass}
+                disabled={readOnly()}
+                onSelect={() =>
+                  askName(
+                    "Rename list",
+                    "List name",
+                    activeList().name,
+                    (name) => renameList(activeList().id, name),
+                  )
+                }
+              >
+                Rename…
+              </DropdownMenu.Item>
+              <DropdownMenu.Item
+                class={itemClass}
+                disabled={readOnly() || watchlists().length >= MAX_LISTS}
+                onSelect={() => duplicateList(activeList().id)}
+              >
+                Duplicate
+              </DropdownMenu.Item>
+              <DropdownMenu.Item
+                class={itemClass}
+                disabled={readOnly() || watchlists().length <= 1}
+                onSelect={() =>
+                  setDialogue({
+                    kind: "delete",
+                    id: activeList().id,
+                    name: activeList().name,
+                  })
+                }
+              >
+                Delete…
+              </DropdownMenu.Item>
+            </DropdownMenu.Content>
+          </DropdownMenu.Portal>
+        </DropdownMenu.Root>
+        <button
+          type="button"
+          class={`${iconButtonClass} text-lg leading-none`}
+          aria-label="Add symbol"
           title="Add symbol"
-          onSelect={addToWatchlist}
-          session={props.session}
-        />
-        <Show when={flagMenu()}>
-          {(m) => <FlagMenu menu={m()} close={() => setFlagMenu(null)} />}
-        </Show>
-        <Dialog.Root
-          open={dialogue() !== null}
-          onOpenChange={(open) => !open && setDialogue(null)}
-          modal
+          disabled={readOnly()}
+          onClick={() => setSearchOpen(true)}
         >
-          <Dialog.Portal>
-            <Dialog.Overlay class="fixed inset-0 z-40 bg-black/40" />
-            <div class="fixed inset-0 z-50 flex items-start justify-center pt-[20vh] px-4 pointer-events-none">
-              <Dialog.Content class={dialogClass}>
-                {(() => {
-                  const d = dialogue();
-                  if (d === null) return null;
-                  if (d.kind === "name") {
-                    return <NameForm d={d} close={() => setDialogue(null)} />;
-                  }
-                  return (
-                    <>
-                      <Dialog.Title class="text-sm font-semibold mb-1">
-                        Delete list
-                      </Dialog.Title>
-                      <Dialog.Description class="text-sm text-[color:var(--color-fg-muted)] mb-4">
-                        Delete “{d.name}”? This cannot be undone.
-                      </Dialog.Description>
-                      <div class="flex justify-end gap-2">
-                        <button
-                          type="button"
-                          class={actionClass}
-                          onClick={() => setDialogue(null)}
-                        >
-                          Cancel
-                        </button>
-                        <button
-                          type="button"
-                          class="px-3 py-1.5 rounded-md text-sm cursor-pointer bg-[color:var(--color-danger)] text-white font-semibold"
-                          onClick={() => {
-                            deleteList(d.id);
-                            setDialogue(null);
-                          }}
-                        >
-                          Delete
-                        </button>
-                      </div>
-                    </>
-                  );
-                })()}
-              </Dialog.Content>
-            </div>
-          </Dialog.Portal>
-        </Dialog.Root>
-      </aside>
-    </Show>
+          +
+        </button>
+        <button
+          type="button"
+          class={iconButtonClass}
+          aria-label="Add section"
+          title="Add section"
+          disabled={
+            readOnly() ||
+            items().filter((i) => i.kind === "section").length >=
+              MAX_SECTIONS
+          }
+          onClick={() =>
+            askName("Add section", "Section name", "", (name) => {
+              addSection(name);
+            })
+          }
+        >
+          <SectionIcon />
+        </button>
+      </div>
+      <div role="table" aria-label="Watchlist" class="wl-table flex-1 min-h-0 overflow-y-auto">
+        <div
+          role="row"
+          class="wl-grid px-3 py-1 text-xs text-[color:var(--color-fg-muted)]"
+        >
+          <span role="columnheader">Symbol</span>
+          <span role="columnheader" class="text-right">Last</span>
+          <span role="columnheader" class="text-right">Chg</span>
+          <span role="columnheader" class="text-right">Chg%</span>
+        </div>
+        <For each={visible()}>
+          {(item) =>
+            item.kind === "section" ? (
+              <SectionRow
+                section={item}
+                index={indexOf(item)}
+                readOnly={readOnly()}
+                dropBefore={dropBefore() === indexOf(item)}
+                dropAfter={isLastDrop(item)}
+                onGrip={startDrag}
+                onKeyDown={(e) => onRowKeyDown(e, item)}
+                onRename={() =>
+                  askName("Rename section", "Section name", item.name, (n) =>
+                    renameSection(item.id, n),
+                  )
+                }
+              />
+            ) : (
+              <WatchlistRow
+                symbol={item.symbol}
+                index={indexOf(item)}
+                quote={quotes().get(item.symbol)}
+                active={symbol() === item.symbol}
+                flag={flags()[item.symbol]}
+                readOnly={readOnly()}
+                dropBefore={dropBefore() === indexOf(item)}
+                dropAfter={isLastDrop(item)}
+                onGrip={startDrag}
+                onKeyDown={(e) => onRowKeyDown(e, item)}
+                onFlagMenu={openFlagMenu}
+              />
+            )
+          }
+        </For>
+        <Show when={items().length === 0}>
+          <p class="col-span-full px-3 py-3 text-xs text-[color:var(--color-fg-muted)]">
+            {readOnly()
+              ? "No flagged symbols. Right-click a row to flag it."
+              : "This list is empty. Use + to add a symbol."}
+          </p>
+        </Show>
+        <Show when={signInNotice()}>
+          <p
+            class="col-span-full px-3 py-2 text-xs text-[color:var(--color-fg-muted)]"
+            data-testid="signin-notice"
+          >
+            {signInNotice()}
+          </p>
+        </Show>
+        <Show when={query.isError && !signInNotice()}>
+          <p class="col-span-full px-3 py-2 text-xs text-[color:var(--color-danger)]">
+            Quotes unavailable: {query.error?.message}
+          </p>
+        </Show>
+      </div>
+      <SymbolSearch
+        open={searchOpen()}
+        onOpenChange={setSearchOpen}
+        initialQuery=""
+        title="Add symbol"
+        onSelect={addToWatchlist}
+        session={props.session}
+      />
+      <Show when={flagMenu()}>
+        {(m) => <FlagMenu menu={m()} close={() => setFlagMenu(null)} />}
+      </Show>
+      <Dialog.Root
+        open={dialogue() !== null}
+        onOpenChange={(open) => !open && setDialogue(null)}
+        modal
+      >
+        <Dialog.Portal>
+          <Dialog.Overlay class="fixed inset-0 z-40 bg-black/40" />
+          <div class="fixed inset-0 z-50 flex items-start justify-center pt-[20vh] px-4 pointer-events-none">
+            <Dialog.Content class={dialogClass}>
+              {(() => {
+                const d = dialogue();
+                if (d === null) return null;
+                if (d.kind === "name") {
+                  return <NameForm d={d} close={() => setDialogue(null)} />;
+                }
+                return (
+                  <>
+                    <Dialog.Title class="text-sm font-semibold mb-1">
+                      Delete list
+                    </Dialog.Title>
+                    <Dialog.Description class="text-sm text-[color:var(--color-fg-muted)] mb-4">
+                      Delete “{d.name}”? This cannot be undone.
+                    </Dialog.Description>
+                    <div class="flex justify-end gap-2">
+                      <button
+                        type="button"
+                        class={actionClass}
+                        onClick={() => setDialogue(null)}
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        type="button"
+                        class="px-3 py-1.5 rounded-md text-sm cursor-pointer bg-[color:var(--color-danger)] text-white font-semibold"
+                        onClick={() => {
+                          deleteList(d.id);
+                          setDialogue(null);
+                        }}
+                      >
+                        Delete
+                      </button>
+                    </div>
+                  </>
+                );
+              })()}
+            </Dialog.Content>
+          </div>
+        </Dialog.Portal>
+      </Dialog.Root>
+    </aside>
   );
 }
 

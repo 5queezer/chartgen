@@ -4,7 +4,7 @@
 
 import type { Page } from "@playwright/test";
 
-import { test, expect } from "./fixtures/app";
+import { test, expect, openSidebarTab } from "./fixtures/app";
 
 test.use({
   viewport: { width: 1280 + 320, height: 720 },
@@ -480,7 +480,7 @@ test.describe("indicators", () => {
     await expect(legend).toHaveCount(0);
 
     await add("ETHUSDT");
-    await page.getByRole("tab", { name: "Object Tree" }).click();
+    await openSidebarTab(page, "Object Tree");
     await page.getByTestId("tree-compare-ETHUSDT").click({ button: "right" });
     await anyItem(page, /^Remove ETHUSDT/).click();
     await expect(page.getByTestId("tree-compare-ETHUSDT")).toHaveCount(0);
@@ -509,7 +509,7 @@ test.describe("indicators", () => {
     await expect(first).toBeVisible();
 
     // Hidden, it has no legend: its tree row brings it back, by key.
-    await page.getByRole("tab", { name: "Object Tree" }).click();
+    await openSidebarTab(page, "Object Tree");
     await page.getByTestId("tree-ind-rsi#2").click({ button: "right" });
     await anyItem(page, /^Show /).click();
     await expect(second).toBeVisible();
@@ -527,7 +527,7 @@ test.describe("indicators", () => {
   });
 
   test("Hide finds its instance when chosen, whatever moved since the menu opened", async ({ bootedApp: page }) => {
-    await page.getByRole("tab", { name: "Object Tree" }).click();
+    await openSidebarTab(page, "Object Tree");
     await page.getByTestId("tree-ind-rsi").click({ button: "right" });
     await expect(menu(page, /^RSI.* actions$/)).toBeVisible();
     // No user path moves the list under an open menu: the store is moved by hand.
@@ -625,7 +625,7 @@ test.describe("sidebar lists", () => {
       await page.getByRole("dialog").getByRole("button", { name: "Create" }).click();
       await expect(page.getByRole("dialog")).toHaveCount(0);
     }
-    await page.getByRole("tab", { name: /^Alerts/ }).click();
+    await openSidebarTab(page, /^Alerts/);
     const rows = page.locator("[data-alert-id]");
     await expect(rows).toHaveCount(2);
     const first = rows.first();
@@ -659,7 +659,7 @@ test.describe("sidebar lists", () => {
     await rightClick(page, { x: 300, y: 300 });
     await anyItem(page, /^Add alert at/).click();
     await page.getByRole("dialog").getByRole("button", { name: "Create" }).click();
-    await page.getByRole("tab", { name: "Object Tree" }).click();
+    await openSidebarTab(page, "Object Tree");
 
     await page.getByTestId("tree-ind-rsi").click({ button: "right" });
     await anyItem(page, /^Hide RSI/).click();

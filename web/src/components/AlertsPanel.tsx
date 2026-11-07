@@ -27,15 +27,17 @@ import {
   deleteServerAlert,
   serverAlertError,
   serverAlerts,
+  serverAlertsEnabled,
   serverAlertStatus,
+  serverPush,
   updateServerAlert,
 } from "../stores/serverAlerts";
 import type { ServerAlert } from "../types/responses";
-import { setWatchlistCollapsed } from "../stores/watchlist";
 import { leader, showToast } from "../services/alertEngine";
 import { openAlertDialog } from "./AlertDialog";
 import { openContextMenu } from "./ContextMenu";
 import { alertMenu, serverAlertMenu } from "./menus";
+import { PushControl } from "./PushControl";
 
 const iconButtonClass =
   "inline-flex items-center justify-center w-7 h-7 rounded-md cursor-pointer text-[color:var(--color-fg-muted)] hover:text-[color:var(--color-fg)] hover:bg-[color:var(--color-bg-elev)]";
@@ -74,15 +76,6 @@ export function AlertsPanel(): JSX.Element {
         >
           +
         </button>
-        <button
-          type="button"
-          class={iconButtonClass}
-          aria-label="Collapse sidebar"
-          title="Collapse sidebar"
-          onClick={() => setWatchlistCollapsed(true)}
-        >
-          <span aria-hidden="true">»</span>
-        </button>
       </div>
       <Show when={!leader()}>
         <p
@@ -91,6 +84,11 @@ export function AlertsPanel(): JSX.Element {
         >
           Alerts are evaluated in another open chartgen tab.
         </p>
+      </Show>
+      <Show when={serverAlertsEnabled() && serverPush()}>
+        <div class="px-3 py-1.5 border-b border-[color:var(--color-border)]">
+          <PushControl />
+        </div>
       </Show>
       <div class="flex-1 min-h-0 overflow-y-auto">
         <Show
@@ -195,12 +193,16 @@ function AlertRow(props: { alert: Alert }): JSX.Element {
   );
 }
 
-/** What the server last did for the alert: its webhook's result, or why it is quiet. */
+/** What the server last did for the alert: its deliveries' results, or why it is quiet. */
 function serverDetail(a: ServerAlert): string | null {
   if (a.last_error !== null) return a.last_error;
+  if (a.push && a.last_push_error !== null) return a.last_push_error;
   if (a.active && a.feed === "waiting") return "waiting for prices";
   return a.last_status !== null ? `webhook HTTP ${a.last_status}` : null;
 }
+
+const serverFailed = (a: ServerAlert): boolean =>
+  a.last_error !== null || (a.push && a.last_push_error !== null);
 
 function ServerAlertRow(props: { alert: ServerAlert }): JSX.Element {
   const a = () => props.alert;
@@ -237,6 +239,7 @@ function ServerAlertRow(props: { alert: ServerAlert }): JSX.Element {
           {TRIGGER_LABELS[a().trigger]}
           <Show when={a().evaluate_on === "close"}> · on {a().interval} close</Show>
           <Show when={a().webhook}>{(w) => <> · {w().host}</>}</Show>
+          <Show when={a().push}> · notifies</Show>
           <Show when={a().message}>{(m) => <> · {m()}</>}</Show>
         </div>
         <Show when={serverDetail(a())}>
@@ -245,8 +248,8 @@ function ServerAlertRow(props: { alert: ServerAlert }): JSX.Element {
               data-role="server-detail"
               class="text-xs truncate"
               classList={{
-                "text-[color:var(--color-danger)]": a().last_error !== null,
-                "text-[color:var(--color-fg-muted)]": a().last_error === null,
+                "text-[color:var(--color-danger)]": serverFailed(a()),
+                "text-[color:var(--color-fg-muted)]": !serverFailed(a()),
               }}
             >
               {detail()}

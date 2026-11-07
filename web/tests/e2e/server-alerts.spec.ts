@@ -9,7 +9,7 @@ import { createServer, type Server } from "node:http";
 
 import type { Page } from "@playwright/test";
 
-import { test, expect, gotoApp, reloadApp } from "./fixtures/app";
+import { test, expect, gotoApp, reloadApp, openSidebarTab } from "./fixtures/app";
 
 const WEBHOOK_PORT = Number(process.env.CHARTGEN_PORT ?? 9315) - 1_000;
 const HOOK = `http://127.0.0.1:${WEBHOOK_PORT}/hook`;
@@ -58,7 +58,7 @@ const rows = (page: Page) => page.locator('[data-alert-id][data-server="true"]')
 const toasts = (page: Page) => page.locator("[data-toast]").filter({ hasText: "Alert:" });
 
 async function openDialog(page: Page): Promise<void> {
-  await alertsTab(page).click();
+  await openSidebarTab(page, /^Alerts/);
   await page.getByRole("button", { name: "Create alert" }).click();
   await expect(dialog(page)).toBeVisible();
 }
@@ -178,7 +178,7 @@ test("with two tabs open a fire reaches the webhook once and one tab reports it"
   await createServerAlert(page, { webhook: HOOK });
   await expect.poll(() => received.length, { timeout: 15_000 }).toBe(1);
 
-  await alertsTab(other).click();
+  await openSidebarTab(other, /^Alerts/);
   await expect(other.locator('[data-role="alerts-elsewhere"]')).toBeVisible();
   await expect(rows(other)).toHaveAttribute("data-status", "triggered", { timeout: 15_000 });
   await expect(rows(page)).toHaveAttribute("data-status", "triggered", { timeout: 15_000 });
@@ -225,7 +225,7 @@ test("a signed webhook shows its secret once and signs with it", async ({ booted
   );
 
   await reloadApp(page);
-  await alertsTab(page).click();
+  await openSidebarTab(page, /^Alerts/);
   await expect(rows(page)).toHaveCount(1);
   const html = await page.content();
   expect(html).not.toContain(secret);
@@ -346,7 +346,7 @@ test("pause, edit and delete act on the server, and survive a reload", async ({ 
   await expect(row.locator('[data-role="description"]')).toContainText("8000000");
 
   await reloadApp(page);
-  await alertsTab(page).click();
+  await openSidebarTab(page, /^Alerts/);
   await expect(rows(page)).toHaveCount(1);
   await expect(rows(page)).toHaveAttribute("data-status", "active");
 
@@ -354,7 +354,7 @@ test("pause, edit and delete act on the server, and survive a reload", async ({ 
   await rows(page).getByRole("button", { name: "Delete alert" }).click();
   await expect(rows(page)).toHaveCount(0);
   await reloadApp(page);
-  await alertsTab(page).click();
+  await openSidebarTab(page, /^Alerts/);
   await page.waitForTimeout(1_000);
   await expect(rows(page)).toHaveCount(0);
 });
@@ -421,7 +421,7 @@ test("a fire is reported once across a reload", async ({ bootedApp: page }) => {
   await createServerAlert(page);
   await expect(toasts(page)).toHaveCount(1, { timeout: 15_000 });
   await reloadApp(page);
-  await alertsTab(page).click();
+  await openSidebarTab(page, /^Alerts/);
   await expect(rows(page)).toHaveAttribute("data-status", "triggered");
   await page.waitForTimeout(1_500);
   await expect(toasts(page)).toHaveCount(0);

@@ -716,9 +716,12 @@ entries are dropped.
 ## Sidebar and price alerts
 
 The right sidebar has four icon tabs, **Watchlist**, **Alerts**, **Data
-Window** and **Object Tree**; the tab you last used is remembered, and **»**
-collapses the whole sidebar. The Alerts tab shows the number of active alerts. The watchlist polls quotes only while
-its tab is showing.
+Window** and **Object Tree**; the tab you last used is remembered. Click the
+selected tab again to collapse the sidebar into a narrow rail of the four icons
+(the Alerts icon shows the number of active alerts). Click an icon in the rail
+to open the sidebar on that tab. The collapsed state is remembered. On a narrow
+screen the sidebar is a sheet closed with **×**. The Alerts tab shows the number of
+active alerts. The watchlist polls quotes only while its tab is showing.
 
 An alert watches one symbol's price. The conditions follow TradingView:
 
@@ -786,6 +789,21 @@ the old one and drops its secret unless you sign again, and an empty field keeps
 one fires, the tab that leads shows the toast, within 5 s, once however many tabs are open;
 a fire while no tab was open is reported when you next open one. A webhook over the server's
 budget waits its turn, so it can arrive later than the toast.
+
+**Notifications** reach this device with chartgen closed
+([ADR-0045](/chartgen/decisions/0045-web-push-for-server-alerts/)). Press **Enable notifications**
+in the Alerts tab or the dialog, which is the only thing that asks for the browser's permission,
+then tick **Send a notification** on an alert; new alerts start ticked once this device is on. It
+works in desktop browsers and on Android. On an iPhone or iPad, add chartgen to the Home Screen first
+(Share, then Add to Home Screen) and open it from there, because iOS only lets an installed app
+notify; the control says so. If notifications are blocked, or the browser cannot do it, it says that
+too. The notification shows the symbol, the condition and the price, and clicking it opens the chart
+on that symbol. With push on, the notification is the one report of that fire: the tab shows no toast
+for it, unless the push failed or you first see the fire more than an hour later, when the notification may
+never have arrived. **Turn off** stops this device. Signing out does not, so alarms keep working.
+
+Each browser is its own sign-in for now, so **an alert notifies only the browser that made it**: to get an
+alert on your phone, make it on your phone. On iOS the Home Screen app probably counts as its own browser.
 
 A server alert belongs to the sign-in of this browser, so clearing its site data loses
 access to it while it keeps running. It has no line on the chart and is not in the
@@ -1111,6 +1129,56 @@ and so do the plot styles
 Every instance after the first is stored with an instance id
 (`{ "name": "rsi", "id": "rsi#2", "length": 21 }`). Sets and layouts saved
 before instances existed load unchanged.
+
+### Funding, Open Interest and Long/Short panels
+
+These three panels read Binance futures data, so they have values for crypto
+symbols that Binance trades as a perpetual future. A bar with no value is left
+empty, not drawn as zero. When a panel has no values at all, its legend says why:
+
+| Legend | Why |
+|---|---|
+| `Funding (Binance futures only)` | The symbol is not on Binance: a stock, index, FX pair, or `BTC-USD`. |
+| `Funding (no futures market)` | Binance has no futures rows for it: a spot-only pair such as `BTCFDUSD`, a spot symbol whose future has another name (`SHIBUSDT` is `1000SHIBUSDT` there), or a futures market that did not exist yet for these bars. |
+| `Funding (unavailable)` | The request failed, or the server's request budget for Binance was used up. The server log has the reason (`[futures] ...`). |
+| `OI (last 30 days only)` | Every bar is older than the 30 days Binance keeps. |
+
+A panel that loaded as `unavailable` while Binance was refusing requests is
+loaded again by the web app once values return (a bounded reload, up to three,
+which also brings the new label), so it does not stay blank.
+
+How far back the values go:
+
+- **Funding** has full history at Binance. The server reads back as far as the
+  visible bars need, newest first, up to 3000 rows (about 2.7 years at one payment
+  every 8 hours). Older bars stay empty. Scrolling back reads the older window
+  the same way.
+- **Open interest** and the **long/short ratio** are kept by Binance for the last
+  30 days only. Bars older than that are empty on any chart. Reading goes back up
+  to 4000 rows (about 14 days of 5 minute rows) in one chart, so a zoomed-out
+  5 minute chart can have empty bars before that.
+- A bar takes the nearest row within two bar lengths (funding: within 8 hours).
+  The data periods are 5m to 1d, so a 1m chart repeats each 5 minute row over its
+  bars.
+
+Cost, in requests to Binance:
+
+- Opening a chart in the web app (500 bars and 300 bars of warmup) reads each
+  series once, and the live updates that follow reuse it. Funding, open interest
+  and long/short together: **5** on a 5m chart (1 + 2 + 2), **7** on 1D (5 + 1 + 1),
+  **8** on 1W (6 + 1 + 1). A request for thousands of bars, as an MCP client can
+  make, reads at most 6 pages of funding and 8 of each of the others, **22** in all.
+- After that nothing is asked for until a new row can exist: funding once when the
+  next payment is due (about every 8 hours per symbol), the others once per data
+  period (5 minutes and up). A window of older bars, from scrolling back, is read
+  once for its span and then kept.
+- Binance allows 500 `fundingRate` requests per 5 minutes per IP, and 1000 per 5
+  minutes for each of the two data endpoints. The server counts them itself and
+  refuses at 400 and 800, so Binance never answers 429 for them, which would stop
+  every futures request for a while. A refusal in the middle of a read keeps the
+  rows read so far, and the older bars stay empty.
+- One series is read for at most 20 seconds, and a second chart asking for it meanwhile
+  waits for that read.
 
 ## Pattern indicators
 

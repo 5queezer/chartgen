@@ -6,7 +6,7 @@
 
 import type { Page } from "@playwright/test";
 
-import { test, expect, pickTool, reloadApp } from "./fixtures/app";
+import { test, expect, pickTool, reloadApp, openSidebarTab } from "./fixtures/app";
 import {
   dateRangeLabel,
   fibExtensionLevels,
@@ -162,7 +162,7 @@ test.describe("drawing tools 2", () => {
       );
 
       // Object Tree lists it under the tool's name.
-      await page.getByRole("tab", { name: "Object Tree" }).click();
+      await openSidebarTab(page, "Object Tree");
       await expect(page.locator("[data-testid^=tree-drawing-]")).toHaveCount(1);
       await expect(page.locator("[data-testid^=tree-drawing-]")).toContainText(c.tool);
 

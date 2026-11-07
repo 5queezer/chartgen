@@ -4,7 +4,7 @@
 
 import type { Page } from "@playwright/test";
 
-import { test, expect, reloadApp } from "./fixtures/app";
+import { test, expect, reloadApp, openSidebarTab } from "./fixtures/app";
 
 const shot = async (page: Page, name: string) => {
   const dir = process.env.SIDEBAR_SHOTS_DIR;
@@ -50,7 +50,7 @@ test.describe("sidebar panels", () => {
   test("Data Window follows the crosshair and shows the RSI value", async ({
     bootedApp: page,
   }) => {
-    await tab(page, "Data Window").click();
+    await openSidebarTab(page, "Data Window");
     await expect(dw(page, "symbol")).toHaveText("BTCUSDT");
     await expect(dw(page, "time")).not.toHaveText("—");
     const lastBar = await dw(page, "time").textContent();
@@ -84,7 +84,7 @@ test.describe("sidebar panels", () => {
   test("Object Tree: hiding an indicator hides its legend", async ({
     bootedApp: page,
   }) => {
-    await tab(page, "Object Tree").click();
+    await openSidebarTab(page, "Object Tree");
     const row = page.getByTestId("tree-ind-rsi");
     await expect(row).toBeVisible();
     await expect(page.getByTestId("tree-main")).toContainText("BTCUSDT");
@@ -116,7 +116,7 @@ test.describe("sidebar panels", () => {
   }) => {
     await page.setViewportSize({ width: 1280 + 320, height: 720 });
     await drawTrendLine(page);
-    await tab(page, "Object Tree").click();
+    await openSidebarTab(page, "Object Tree");
     const row = page.locator("[data-testid^=tree-drawing-]");
     await expect(row).toHaveCount(1);
     await expect(row).toContainText(/^Trend line \d{4}-\d{2}-\d{2}/);
@@ -139,7 +139,7 @@ test.describe("sidebar panels", () => {
   }) => {
     await page.setViewportSize({ width: 1280 + 320, height: 720 });
     await drawTrendLine(page);
-    await tab(page, "Object Tree").click();
+    await openSidebarTab(page, "Object Tree");
     const stored = () =>
       page.evaluate(() => localStorage.getItem("chartgen.drawings.BTCUSDT"));
     const before = await stored();
@@ -159,7 +159,7 @@ test.describe("sidebar panels", () => {
     await clickAt(page, { x: 1100, y: 200 });
     await clickAt(page, { x: 700, y: 260 });
     await expect.poll(() => overlays(page)).toHaveLength(1);
-    await tab(page, "Object Tree").click();
+    await openSidebarTab(page, "Object Tree");
 
     const range = () =>
       page.evaluate(() => {
@@ -198,7 +198,7 @@ test.describe("sidebar panels", () => {
   }) => {
     await page.setViewportSize({ width: 1280 + 320, height: 720 });
     await drawTrendLine(page);
-    await tab(page, "Object Tree").click();
+    await openSidebarTab(page, "Object Tree");
     const row = page.locator("[data-testid^=tree-drawing-]");
     await row.getByRole("button", { name: /^Lock / }).click();
     await expect(row.getByRole("button", { name: /^Unlock / })).toBeFocused();
@@ -207,7 +207,7 @@ test.describe("sidebar panels", () => {
   test("Object Tree: drawing hide, lock and remove", async ({ bootedApp: page }) => {
     await page.setViewportSize({ width: 1280 + 320, height: 720 });
     await drawTrendLine(page);
-    await tab(page, "Object Tree").click();
+    await openSidebarTab(page, "Object Tree");
     const row = page.locator("[data-testid^=tree-drawing-]");
     await expect(row).toHaveCount(1);
     await row.getByRole("button", { name: /^Hide / }).click();
@@ -223,7 +223,7 @@ test.describe("sidebar panels", () => {
   });
 
   test("Object Tree lists the symbol's alerts", async ({ bootedApp: page }) => {
-    await tab(page, "Object Tree").click();
+    await openSidebarTab(page, "Object Tree");
     await expect(page.locator("[data-testid^=tree-alert-]")).toHaveCount(0);
 
     await page.keyboard.press("Alt+KeyA");
@@ -245,7 +245,7 @@ test.describe("sidebar panels", () => {
   test("the selected tab is remembered, and an old stored value still works", async ({
     bootedApp: page,
   }) => {
-    await tab(page, "Data Window").click();
+    await openSidebarTab(page, "Data Window");
     await reloadApp(page);
     await expect(tab(page, "Data Window")).toHaveAttribute("aria-selected", "true");
     await page.evaluate(() => localStorage.setItem("chartgen.sidebar.tab", "alerts"));
