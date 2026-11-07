@@ -435,8 +435,12 @@ fn test_external_indicators_stock_symbol() {
     for name in &crypto_only {
         let ind = indicators::by_name(name).unwrap();
         let result = ind.compute(&data);
-        // AAPL is not crypto, should return empty gracefully
-        assert!(!result.label.is_empty());
+        // AAPL is not crypto: nothing is drawn, and the label says why.
+        assert!(
+            result.label.ends_with("(Binance futures only)"),
+            "{}",
+            result.label
+        );
     }
 }
 

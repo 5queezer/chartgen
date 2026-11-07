@@ -74,3 +74,4 @@ one and link both ways.
 | [0044](/chartgen/decisions/0044-sign-in-through-github-and-google/) | Sign-in through GitHub and Google | Accepted | 2026-11-06 |
 | [0045](/chartgen/decisions/0045-web-push-for-server-alerts/) | Browser push for server alerts | Accepted | 2026-11-06 |
 | [0046](/chartgen/decisions/0046-pattern-detection/) | Pattern detection: candlesticks, chart patterns, auto fib | Accepted | 2026-11-06 |
+| [0049](/chartgen/decisions/0049-one-kline-read-per-symbol/) | One Binance kline read per symbol and interval | Accepted | 2026-11-06 |
