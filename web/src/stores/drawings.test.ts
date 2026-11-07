@@ -16,7 +16,7 @@ import {
   toChartPoint,
   type DrawingRecord,
 } from "./drawings";
-import { collectWrites } from "../lib/workspaceSync";
+import { readState } from "../lib/workspaceSync";
 
 const good = {
   name: "segment",
@@ -297,7 +297,7 @@ describe("storage", () => {
     localStorage.setItem(`chartgen.sync.${key}`, JSON.stringify({ v: 3, b: value }));
     for (let i = 0; i < MAX_SYMBOLS; i++) saveDrawings(`S${i}`, recs);
     expect(localStorage.getItem(key)).toBeNull();
-    expect(collectWrites(localStorage, () => false).writes.map((w) => w.key)).not.toContain(key);
+    expect(readState(localStorage, key)).toEqual({ v: 3, b: null, s: value, e: 1 });
   });
 
   it("evicts least recently used symbols beyond the limit", () => {

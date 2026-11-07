@@ -273,11 +273,32 @@ test.describe("workspace", () => {
         for (const w of body.writes ?? []) if (w.value === null) writes.push(w.key);
       });
     }
+    await first.evaluate((key) => {
+      const seen: string[] = [];
+      (window as unknown as { removals: string[] }).removals = seen;
+      window.addEventListener("storage", (e) => {
+        if (e.key === key && e.newValue === null) seen.push(key);
+      });
+    }, DOC);
     // The reload passes through the provider-less sign-in while the first tab's engine runs.
     for (let i = 0; i < 3; i++) await reloadApp(second);
     await first.waitForTimeout(6_000);
     expect(await read(first, DOC)).toBe(drawings("kept"));
+    expect(await first.evaluate(() => (window as unknown as { removals: string[] }).removals)).toEqual([]);
     expect(writes).toEqual([]);
+
+    // Should keys ever be moving, as when a tab hides them to show an error, a key
+    // gone is no deletion.
+    await second.evaluate((key) => {
+      localStorage.setItem(`chartgen.u.github%3A1001|${key}`, localStorage.getItem(key)!);
+      localStorage.removeItem(key);
+    }, DOC);
+    await first.waitForTimeout(6_000);
+    expect(writes).toEqual([]);
+    await second.evaluate((key) => {
+      localStorage.setItem(key, localStorage.getItem(`chartgen.u.github%3A1001|${key}`)!);
+      localStorage.removeItem(`chartgen.u.github%3A1001|${key}`);
+    }, DOC);
     expect(await freshDeviceReads(browser, DOC)).toBe(drawings("kept"));
     await first.context().close();
   });
