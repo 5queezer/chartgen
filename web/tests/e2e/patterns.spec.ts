@@ -7,7 +7,7 @@
 
 import type { Page } from "@playwright/test";
 
-import { test, expect, gotoApp } from "./fixtures/app";
+import { test, expect, gotoApp, openSidebarTab } from "./fixtures/app";
 
 const shot = async (page: Page, name: string) => {
   const dir = process.env.PATTERN_SHOTS_DIR;
@@ -240,7 +240,7 @@ test.describe("candlestick patterns", () => {
     await shot(page, "alert-dialog-event");
     await dialog(page).getByRole("button", { name: "Create" }).click();
     await expect(dialog(page)).toHaveCount(0);
-    await page.getByRole("tab", { name: /^Alerts/ }).click();
+    await openSidebarTab(page, /^Alerts/);
     await expect(rows(page)).toContainText("Bullish pattern");
     await expect(rows(page)).toHaveAttribute("data-status", "active");
 
@@ -511,7 +511,7 @@ test.describe("auto fib retracement", () => {
     const value = await level.locator("option", { hasText: ": 0.5" }).getAttribute("value");
     await level.selectOption(value!);
     await dialog(page).getByRole("button", { name: "Create" }).click();
-    await page.getByRole("tab", { name: /^Alerts/ }).click();
+    await openSidebarTab(page, /^Alerts/);
     await expect(rows(page)).toContainText("Close crossing 0.5");
     await feed(page, [1, 1e9]);
     await expect(rows(page)).toHaveAttribute("data-status", "triggered");
