@@ -288,6 +288,11 @@ format), so results map back to their entries whatever the order:
 - An id equal to the name of an entry without an id is a tool error, since
   both would get that key (`Indicator id macd is also the name of an entry
   without an id; give that entry an id too`).
+- `generate_chart` asks for at most 32,000 bars × (indicators + 1), which is 5000 bars with 5 indicators
+  or 500 with 50. A price-based `chart_style` adds 20,000 to that. A larger call gets a `-32602` error saying
+  so, as it would take too much memory at once
+  ([ADR-0051](/chartgen/decisions/0051-bounded-connections/)). Calls share that amount, and one that waits
+  20 s for its turn gets `503` with `Retry-After`: nothing has run, so ask again.
 - `generate_chart` takes at most 50 entries (`At most 50 indicators per
   chart.`); `subscribe_chart` at most 10.
 
