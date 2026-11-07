@@ -55,7 +55,7 @@ const SIGNIN_WEB_PORT = WEB_PORT - 3_000;
 const SIGNIN_DB = join(tmpdir(), `chartgen-e2e-${SIGNIN_CHARTGEN_PORT}.db`);
 const FAKE_PROVIDER_PORT = CHARTGEN_PORT - 4_000;
 const FAKE_PROVIDER_SECRET = "fake-provider-secret";
-const SIGNIN_SPECS = /signin(-push)?\.spec\.ts$/;
+const SIGNIN_SPECS = /signin(-push|-workspace)?\.spec\.ts$/;
 // The fake push service of signin-push.spec.ts. The server only accepts this local
 // origin because it runs on the sample source.
 const SIGNIN_PUSH_PORT = CHARTGEN_PORT - 5_000;

@@ -16,6 +16,7 @@ import {
   toChartPoint,
   type DrawingRecord,
 } from "./drawings";
+import { readState } from "../lib/workspaceSync";
 
 const good = {
   name: "segment",
@@ -286,6 +287,171 @@ describe("storage", () => {
     expect(saveDrawings("BTCUSDT", big)).toBe(false);
     expect(store.has(storageKey("BTCUSDT"))).toBe(false);
     warn.mockRestore();
+  });
+
+  describe("another tab on the symbol", () => {
+    const rec = (id: string): DrawingRecord => parseRecord({ ...good, id })!;
+    const stored = (symbol: string) =>
+      (JSON.parse(localStorage.getItem(storageKey(symbol))!) as DrawingRecord[]).map((r) => r.id);
+    /** Another tab: writes what it holds, with nothing of this page's in between. */
+    const otherTabSaves = (symbol: string, ...ids: string[]) =>
+      localStorage.setItem(storageKey(symbol), JSON.stringify(ids.map(rec)));
+
+    it("what it added stays through this page's save", () => {
+      otherTabSaves("TWO", "mine");
+      loadDrawings("TWO");
+      otherTabSaves("TWO", "mine", "theirs");
+      saveDrawings("TWO", [rec("mine"), rec("new")]);
+      expect(stored("TWO")).toEqual(["mine", "new", "theirs"]);
+    });
+
+    it("and through saves after that, this page still not having it", () => {
+      otherTabSaves("TWO", "mine");
+      loadDrawings("TWO");
+      otherTabSaves("TWO", "mine", "theirs");
+      saveDrawings("TWO", [rec("mine"), rec("new")]);
+      saveDrawings("TWO", [rec("mine"), rec("new"), rec("newer")]);
+      expect(stored("TWO")).toEqual(["mine", "new", "newer", "theirs"]);
+    });
+
+    it("what this page removes goes, and what it removes last keeps the other's", () => {
+      otherTabSaves("TWO", "a", "b");
+      loadDrawings("TWO");
+      otherTabSaves("TWO", "a", "b", "theirs");
+      saveDrawings("TWO", [rec("a")]);
+      expect(stored("TWO")).toEqual(["a", "theirs"]);
+      saveDrawings("TWO", []);
+      expect(stored("TWO")).toEqual(["theirs"]);
+    });
+
+    it("what it removed stays removed", () => {
+      otherTabSaves("TWO", "a", "b");
+      loadDrawings("TWO");
+      otherTabSaves("TWO", "a");
+      saveDrawings("TWO", [rec("a"), rec("b"), rec("new")]);
+      expect(stored("TWO")).toEqual(["a", "new"]);
+    });
+
+    it("a page alone behaves as ever, removing the last one removes the key", () => {
+      saveDrawings("ONE", [rec("a")]);
+      saveDrawings("ONE", [rec("b")]);
+      expect(stored("ONE")).toEqual(["b"]);
+      saveDrawings("ONE", []);
+      expect(localStorage.getItem(storageKey("ONE"))).toBeNull();
+    });
+
+    it("a copy the LRU dropped does not take this page's with it", () => {
+      otherTabSaves("TWO", "a");
+      loadDrawings("TWO");
+      saveDrawings("TWO", [rec("a")]);
+      for (let i = 0; i < MAX_SYMBOLS; i++) saveDrawings(`A${i}`, [rec("x")]);
+      expect(localStorage.getItem(storageKey("TWO"))).toBeNull();
+      saveDrawings("TWO", [rec("a"), rec("new")]);
+      expect(stored("TWO")).toEqual(["a", "new"]);
+    });
+
+    it("once saved again, it is no longer taken for dropped", () => {
+      saveDrawings("TWO", [rec("a")]);
+      for (let i = 0; i < MAX_SYMBOLS; i++) saveDrawings(`B${i}`, [rec("x")]);
+      saveDrawings("TWO", [rec("a")]);
+      expect(localStorage.getItem("chartgen.drawingsEvicted")).toContain("B0");
+      expect(JSON.parse(localStorage.getItem("chartgen.drawingsEvicted")!)).not.toContain("TWO");
+    });
+  });
+
+  // Two tabs really are two copies of this module over one storage.
+  describe("two tabs as two modules", () => {
+    const rec = (id: string, value = 1): DrawingRecord =>
+      parseRecord({
+        ...good,
+        id,
+        points: [
+          { timestamp: 1, value },
+          { timestamp: 2, value },
+        ],
+      })!;
+    const tab = async () => {
+      vi.resetModules();
+      return import("./drawings");
+    };
+    const ids = (symbol: string) => {
+      const raw = localStorage.getItem(storageKey(symbol));
+      return raw === null ? null : (JSON.parse(raw) as DrawingRecord[]).map((r) => r.id);
+    };
+
+    it("a deletion of them all in the other tab stays deleted, and what this one adds stays", async () => {
+      const [a, b] = [await tab(), await tab()];
+      a.saveDrawings("X", [rec("a"), rec("b")]);
+      a.loadDrawings("X");
+      b.loadDrawings("X");
+      b.saveDrawings("X", []);
+      expect(ids("X")).toBeNull();
+      a.saveDrawings("X", [rec("a"), rec("b"), rec("c")]);
+      expect(ids("X")).toEqual(["c"]);
+    });
+
+    it("this tab saving what it had changes nothing about that", async () => {
+      const [a, b] = [await tab(), await tab()];
+      a.saveDrawings("X", [rec("a")]);
+      a.loadDrawings("X");
+      b.loadDrawings("X");
+      b.saveDrawings("X", []);
+      a.saveDrawings("X", [rec("a")]);
+      expect(ids("X")).toBeNull();
+    });
+
+    it("an edit in this tab beats the other's deletion", async () => {
+      const [a, b] = [await tab(), await tab()];
+      a.saveDrawings("X", [rec("a"), rec("b")]);
+      a.loadDrawings("X");
+      b.loadDrawings("X");
+      b.saveDrawings("X", []);
+      a.saveDrawings("X", [rec("a"), rec("b", 2)]);
+      expect(ids("X")).toEqual(["b"]);
+    });
+
+    it("what the LRU dropped, either tab brings back whole", async () => {
+      const [a, b] = [await tab(), await tab()];
+      a.saveDrawings("X", [rec("a"), rec("b")]);
+      a.loadDrawings("X");
+      for (let i = 0; i < MAX_SYMBOLS; i++) b.saveDrawings(`S${i}`, [rec("x")]);
+      expect(ids("X")).toBeNull();
+      a.saveDrawings("X", [rec("a"), rec("b"), rec("c")]);
+      expect(ids("X")).toEqual(["a", "b", "c"]);
+    });
+
+    it("a tab holding a symbol through many later evictions still has it dropped, not deleted", async () => {
+      const [a, b] = [await tab(), await tab()];
+      a.saveDrawings("X", [rec("a"), rec("b")]);
+      a.loadDrawings("X");
+      for (let i = 0; i < MAX_SYMBOLS * 3; i++) b.saveDrawings(`S${i}`, [rec("x")]);
+      expect(ids("X")).toBeNull();
+      a.saveDrawings("X", [rec("a"), rec("b"), rec("c")]);
+      expect(ids("X")).toEqual(["a", "b", "c"]);
+    });
+
+    it("a symbol back from the LRU, then deleted by the other tab, is deleted", async () => {
+      const [a, b] = [await tab(), await tab()];
+      a.saveDrawings("X", [rec("a")]);
+      for (let i = 0; i < MAX_SYMBOLS; i++) b.saveDrawings(`S${i}`, [rec("x")]);
+      a.saveDrawings("X", [rec("a")]);
+      a.loadDrawings("X");
+      b.loadDrawings("X");
+      b.saveDrawings("X", []);
+      a.saveDrawings("X", [rec("a"), rec("c")]);
+      expect(ids("X")).toEqual(["c"]);
+    });
+  });
+
+  it("dropping a synced symbol from the LRU sends no deletion (ADR-0050)", () => {
+    const recs = [good] as DrawingRecord[];
+    saveDrawings("FIRST", recs);
+    const key = storageKey("FIRST");
+    const value = localStorage.getItem(key);
+    localStorage.setItem(`chartgen.sync.${key}`, JSON.stringify({ v: 3, b: value }));
+    for (let i = 0; i < MAX_SYMBOLS; i++) saveDrawings(`C${i}`, recs);
+    expect(localStorage.getItem(key)).toBeNull();
+    expect(readState(localStorage, key)).toEqual({ v: 3, b: null, s: value, e: 1 });
   });
 
   it("evicts least recently used symbols beyond the limit", () => {

@@ -26,10 +26,13 @@ interface PaneInfo {
   drawings: number;
 }
 
-const panes = (page: Page): Promise<PaneInfo[]> =>
-  page.evaluate(() =>
+// After a reload the sign-in may be through before the app has mounted (ADR-0050).
+const panes = async (page: Page): Promise<PaneInfo[]> => {
+  await page.waitForFunction(() => "__chartgenTest" in window);
+  return page.evaluate(() =>
     (window as unknown as { __chartgenTest: { panes: () => PaneInfo[] } }).__chartgenTest.panes(),
   );
+};
 
 const paneCell = (page: Page, n: number) =>
   page.locator(`[data-testid=chart-pane][data-pane="${n}"]`);

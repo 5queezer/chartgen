@@ -27,6 +27,7 @@ import {
   type Point,
 } from "klinecharts";
 
+import { accountGuard } from "../lib/workspaceSync";
 import { isDrawingAlertTool, isHorizontalTool, isVerticalLine, pointBarIndex } from "../lib/alerts";
 import { isRelease, isTypingContext, undoRedoKey } from "../lib/keys";
 import { effectiveMagnet, magnetKeyHeld, magnetValue, type Magnet } from "../lib/magnet";
@@ -589,11 +590,13 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
     );
   };
 
+  // A tab reloading because someone else signed in holds that other account's drawings.
+  const sameAccount = accountGuard(localStorage);
   const flushSave = () => {
     window.clearTimeout(saveTimer);
     const p = pendingSave;
     pendingSave = null;
-    if (!p) return;
+    if (!p || !sameAccount()) return;
     setSaveFailed(!saveDrawings(p.symbol, p.records));
     announceDrawings(p.symbol, gridPane);
     // Alerts on a drawing that is gone or vertical are switched off (ADR-0034).
