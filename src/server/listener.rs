@@ -69,14 +69,14 @@ pub(super) fn stream_slot(session: &str) -> Option<Arc<OwnedSemaphorePermit>> {
 }
 
 /// What tool calls may hold at once, in bars times series, from the moment they run until
-/// their answer has gone out. A chart is built in memory, measured at 0.8 to 1.5 KiB per
-/// such unit, and for a client that does not read, hyper keeps the answer. The rest wait,
-/// up to `CALL_WAIT`, and a call larger than all of it is refused. Under a flood of large
-/// charts with every other connection held, this peaks at about 130 MiB in a 256 MiB
+/// their answer has gone out. A chart is built in memory, measured at 0.15 to 1.3 KiB per
+/// such unit once each indicator counts its `weight`. Once built, a call keeps only its
+/// answer, which hyper holds for a client that does not read (`keep_for_answer`). The rest
+/// wait, up to `CALL_WAIT`, and a call larger than all of it is refused. Under a flood of
+/// large charts with every other connection held, this peaks at about 130 MiB in a 256 MiB
 /// container, where 48,000 reaches 216 and 64,000 the limit. It fits the app's own use: 500
-/// bars a call, so a 4-chart grid at 10 indicators each is 22,000. And 50 indicators at
-/// 500 bars, the most it asks for, is 25,500, or the whole budget on a price-based chart,
-/// which then takes its turn.
+/// bars a call, so a 4-chart grid at 10 indicators each is 22,000, and a price-based chart
+/// of 10 is 18,700 (ADR-0052).
 const CALL_BUDGET: u32 = 32_000;
 /// A call that has waited this long is told to come back, rather than holding its
 /// connection until something gives up on it.
@@ -107,18 +107,15 @@ pub(super) async fn call_slot(cost: u32) -> Result<OwnedSemaphorePermit, NoRoom>
 }
 
 /// What a request to `/mcp` will hold, in the units of `CALL_BUDGET`. Only charts come to
-/// much, and what is no tool call costs nothing, so that it never waits. A price-based chart reads up to `fetch::MAX_BASE_BARS` to build its bricks; the
-/// indicators then run on the bricks. That is a most, and depends on the box, so it is
-/// charged up to the whole budget: a call that fits without it runs, alone if it must.
-/// An image is a bitmap of 3 bytes a pixel, 1.5 KiB a unit at 512 pixels, whatever is
-/// drawn on it.
+/// much, and what is no tool call costs nothing, so that it never waits. Each indicator
+/// counts its `weight`, and a price-based chart `BRICKS` bars more. An image is a bitmap of
+/// 3 bytes a pixel, 1.5 KiB a unit at 512 pixels, whatever is drawn on it.
 pub(super) fn call_cost(body: &[u8]) -> u32 {
     const SMALL: u64 = 1_000;
     const DEFAULT_BARS: u64 = 200;
-    /// `mcp::indicators_arg`'s default.
-    const DEFAULT_INDICATORS: u64 = 3;
+    /// `mcp::indicators_arg`'s default: ema_stack, cipher_b and macd.
+    const DEFAULT_SERIES: u64 = 1 + 4 + 1;
     const MAX_BARS: u64 = 5_000;
-    const SOURCE_BARS: u64 = 20_000;
     const PRICE_BASED: [&str; 5] = ["renko", "kagi", "point_figure", "line_break", "range"];
     const PIXELS_PER_UNIT: u64 = 512;
     let Ok(call) = serde_json::from_slice::<serde_json::Value>(body) else {
@@ -133,11 +130,15 @@ pub(super) fn call_cost(body: &[u8]) -> u32 {
     }
     let args = &params["arguments"];
     let bars = args["bars"].as_u64().unwrap_or(DEFAULT_BARS).min(MAX_BARS);
-    let indicators = match args.get("indicators").or_else(|| args.get("panels")) {
-        Some(list) => list.as_array().map_or(0, Vec::len) as u64,
-        None => DEFAULT_INDICATORS,
+    let series = match args.get("indicators").or_else(|| args.get("panels")) {
+        Some(list) => list.as_array().map_or(0, |l| l.iter().map(weight).sum()),
+        None => DEFAULT_SERIES,
     };
-    let shown = bars.saturating_mul(indicators.saturating_add(1));
+    let price_based = args["chart_style"]
+        .as_str()
+        .is_some_and(|style| PRICE_BASED.contains(&style));
+    let built = bars + if price_based { BRICKS } else { 0 };
+    let shown = built.saturating_mul(series.saturating_add(1));
     // As `mcp::generate_chart` reads them.
     let format = args["format"].as_str().unwrap_or("png").to_lowercase();
     let pixels = if matches!(format.as_str(), "png" | "both") {
@@ -146,16 +147,51 @@ pub(super) fn call_cost(body: &[u8]) -> u32 {
     } else {
         0
     };
-    let held = shown.saturating_add(pixels / PIXELS_PER_UNIT);
-    let budget = u64::from(CALL_BUDGET);
-    let price_based = args["chart_style"]
-        .as_str()
-        .is_some_and(|style| PRICE_BASED.contains(&style));
-    let cost = match held <= budget && price_based {
-        true => (held + SOURCE_BARS).min(budget),
-        false => held,
-    };
+    let cost = shown.saturating_add(pixels / PIXELS_PER_UNIT);
     u32::try_from(cost.max(SMALL)).unwrap_or(u32::MAX)
+}
+
+/// A price-based chart's indicators run on every brick it builds, up to
+/// `price_bars::MAX_PRICE_BARS`, not on the bars it shows. Beyond those they keep only
+/// their own values, at most 75 bytes a brick for each unit of `weight`, measured: 20,000
+/// of them come to what this many shown bars do.
+const BRICKS: u64 = 1_200;
+
+/// What an indicator costs, in series of a usual one: most take 0.3 to 1.3 KiB a bar,
+/// shown, and these several times that, measured at 627 bars in a release build (ADR-0052).
+/// Under every name the tool takes for them. Any other is one.
+fn weight(entry: &serde_json::Value) -> u64 {
+    const HEAVY: [(&str, u64); 13] = [
+        ("cipher_b", 4),
+        ("candlestick_patterns", 3),
+        ("candle_patterns", 3),
+        ("kalman_volume", 2),
+        ("kalman", 2),
+        ("kvf", 2),
+        ("rsi_mfi_stoch", 2),
+        ("rsi_combo", 2),
+        ("combo", 2),
+        ("ichimoku", 2),
+        ("wavetrend", 2),
+        ("fear_greed", 2),
+        ("fng", 2),
+    ];
+    let name = entry.as_str().or_else(|| entry["name"].as_str());
+    HEAVY
+        .iter()
+        .find(|(n, _)| Some(*n) == name)
+        .map_or(1, |&(_, w)| w)
+}
+
+/// Gives back all of `slot` but the answer, at a unit a KiB, once it is built: what the
+/// call built to get there has been freed, so an answer nobody reads holds what it is and
+/// not what it cost to make (ADR-0052). One of unknown length keeps it all.
+pub(super) fn keep_for_answer(slot: &mut OwnedSemaphorePermit, answer: &Response) {
+    let held = answer.body().size_hint().exact().map(|len| len / 1024 + 1);
+    let held = held.and_then(|units| usize::try_from(units).ok());
+    if let Some(rest) = held.and_then(|units| slot.num_permits().checked_sub(units)) {
+        drop(slot.split(rest));
+    }
 }
 
 /// A body comes out in pieces of this, so that hyper asks for the next only when it has
@@ -922,7 +958,11 @@ mod tests {
             let chart = serde_json::json!({
                 "bars": 500, "format": "series", "chart_style": style, "indicators": ["a"],
             });
-            assert_eq!(chart_cost(chart), 21_000, "{style} reads the source window");
+            assert_eq!(
+                chart_cost(chart),
+                3_400,
+                "{style} runs it on the bricks it builds"
+            );
         }
         let series = |args: serde_json::Value| {
             let mut args = args;
@@ -931,10 +971,10 @@ mod tests {
         };
         assert_eq!(
             series(serde_json::json!({})),
-            1_000,
-            "200 bars, 3 by default"
+            1_400,
+            "200 bars, and by default 3 indicators, one of them cipher_b"
         );
-        assert_eq!(series(serde_json::json!({ "bars": 1000 })), 4_000);
+        assert_eq!(series(serde_json::json!({ "bars": 1000 })), 7_000);
         assert_eq!(
             series(
                 serde_json::json!({ "bars": 5000, "indicators": ["a", "b", "c", "d", "e", "f"] })
@@ -968,7 +1008,7 @@ mod tests {
             chart_cost(args)
         };
         // Every format that draws one, and the sizes it falls back to, as the tool reads them.
-        assert_eq!(chart_cost(serde_json::json!({})), 4_850, "1920 x 1080");
+        assert_eq!(chart_cost(serde_json::json!({})), 5_450, "1920 x 1080");
         for format in ["png", "both", "PNG", "Both"] {
             let args = serde_json::json!({ "format": format, "width": 4000, "height": 4000 });
             assert_eq!(image(args), 31_300, "{format}");
@@ -993,33 +1033,74 @@ mod tests {
         let huge = serde_json::json!({ "width": 4_294_967_396u64, "height": u64::MAX });
         assert_eq!(image(huge), u32::MAX);
         // No more of the default size than the bitmaps' worth fits at once.
-        assert_eq!(CALL_BUDGET / chart_cost(serde_json::json!({})), 6);
+        assert_eq!(CALL_BUDGET / chart_cost(serde_json::json!({})), 5);
     }
 
     #[test]
-    fn a_price_based_chart_that_fits_without_its_source_takes_its_turn() {
-        let chart = |bars: u32, indicators: usize, style: &str| {
+    fn an_indicator_costs_what_it_draws() {
+        let chart = |bars: u32, indicators: serde_json::Value, style: &str| {
             chart_cost(serde_json::json!({
-                "bars": bars, "format": "series", "chart_style": style,
-                "indicators": vec!["a"; indicators],
+                "bars": bars, "format": "series", "chart_style": style, "indicators": indicators,
             }))
         };
-        assert_eq!(chart(500, 23, "renko"), 32_000, "fitted already, just");
-        assert_eq!(chart(500, 24, "renko"), CALL_BUDGET, "and at 24");
-        assert_eq!(chart(500, 50, "kagi"), CALL_BUDGET, "the app's most");
-        assert_eq!(chart(700, 17, "range"), CALL_BUDGET, "a catch-up");
-        // Over the budget by itself: as large as on candles, and refused the same.
-        assert_eq!(chart(700, 50, "renko"), 35_700);
-        assert_eq!(chart(700, 50, "candles"), 35_700);
-        // An image counts as held: with it the call is too large, source or not.
+        let cipher_b = serde_json::json!(vec!["cipher_b"; 50]);
+        assert_eq!(
+            chart(627, cipher_b, "candles"),
+            126_027,
+            "used to fit, at 31,977"
+        );
+        // Under every name, and as an object with its parameters.
+        for (heavy, weight) in [
+            (serde_json::json!("candle_patterns"), 3),
+            (serde_json::json!("kvf"), 2),
+            (serde_json::json!("combo"), 2),
+            (serde_json::json!("fng"), 2),
+            (serde_json::json!({ "name": "cipher_b", "id": "c2" }), 4),
+            (serde_json::json!({ "name": "wavetrend", "n1": 9 }), 2),
+            (serde_json::json!({ "name": "rsi" }), 1),
+            (serde_json::json!("my_script"), 1),
+        ] {
+            let cost = chart(1_000, serde_json::json!([heavy.clone()]), "candles");
+            assert_eq!(cost, 1_000 * (weight + 1), "{heavy}");
+        }
+    }
+
+    #[test]
+    fn a_price_based_chart_costs_the_bricks_it_builds() {
+        let chart = |bars: u32, indicators: Vec<&str>, style: &str| {
+            chart_cost(serde_json::json!({
+                "bars": bars, "format": "series", "chart_style": style, "indicators": indicators,
+            }))
+        };
+        // However small the box: 80 bars of it, built from 20,000.
+        assert_eq!(chart(80, vec!["cipher_b"; 50], "renko"), 257_280);
+        assert_eq!(chart(80, vec!["cipher_b"; 50], "candles"), 16_080);
+        // The app's, at its most indicators, and the most at 500 bars.
+        assert_eq!(chart(500, vec!["rsi"; 10], "kagi"), 18_700);
+        assert_eq!(chart(500, vec!["rsi"; 17], "range"), 30_600);
+        assert!(chart(500, vec!["rsi"; 18], "range") > CALL_BUDGET);
+        // An image counts on top.
         let both = serde_json::json!({
-            "bars": 100, "chart_style": "renko", "indicators": [], "width": 4000, "height": 4000,
+            "bars": 100, "chart_style": "renko", "indicators": [], "width": 2000, "height": 2000,
         });
-        assert_eq!(chart_cost(both), CALL_BUDGET);
-        let over = serde_json::json!({
-            "bars": 1000, "chart_style": "renko", "indicators": [], "width": 4000, "height": 4000,
-        });
-        assert_eq!(chart_cost(over), 32_250);
+        assert_eq!(chart_cost(both), 1_300 + 7_812);
+    }
+
+    #[test]
+    fn a_built_call_keeps_only_its_answer() {
+        let calls = Arc::new(Semaphore::new(CALL_BUDGET as usize));
+        let mut slot = calls.clone().try_acquire_many_owned(20_000).unwrap();
+        let answer = Response::new(Body::from(vec![b'x'; 3 * 1024 * 1024]));
+        keep_for_answer(&mut slot, &answer);
+        assert_eq!(slot.num_permits(), 3_073);
+        assert_eq!(calls.available_permits(), CALL_BUDGET as usize - 3_073);
+        // Larger than its share, or of unknown length: it keeps the share.
+        let mut slot = calls.clone().try_acquire_many_owned(1_000).unwrap();
+        keep_for_answer(&mut slot, &answer);
+        assert_eq!(slot.num_permits(), 1_000);
+        let stream = futures_util::stream::iter([Ok::<_, std::io::Error>(vec![1u8])]);
+        keep_for_answer(&mut slot, &Response::new(Body::from_stream(stream)));
+        assert_eq!(slot.num_permits(), 1_000);
     }
 
     #[tokio::test]

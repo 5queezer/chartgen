@@ -7,6 +7,7 @@ sidebar:
 
 **Status:** Accepted
 **Date:** 2026-11-07
+**Amended by:** [ADR-0052](/chartgen/decisions/0052-indicator-cost/) (a call costs what its indicators draw and the bricks they run on, and keeps only its answer once built)
 
 ## Context and Problem Statement
 

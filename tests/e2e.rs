@@ -1091,8 +1091,9 @@ fn test_the_apps_charts_run_in_parallel() {
 
 /// What makes that test mean something: charts answer in milliseconds here, so taking turns
 /// would look the same. These hold their share until read, and none is read. Each still gets
-/// its answer, only because a chart with `candles` is priced at what it shows: 10,500 of the
-/// 32,000 each. Priced at the source window, the second would wait for the first to be read.
+/// its answer, only because a chart with `candles` is priced at what it shows, 16,500 of the
+/// 32,000 with cipher_b at 4, and keeps only its answer of about 1,900 once built
+/// (ADR-0052). Priced at the source window, the second would wait for the first to be read.
 #[test]
 fn test_the_apps_charts_do_not_take_turns() {
     let srv = spawn_sample_server();
@@ -1183,8 +1184,8 @@ fn test_an_image_too_large_is_refused_with_the_reason() {
     assert_eq!(bars_in(&series.to_string()), 50);
 }
 
-/// A price-based chart of many indicators costs no more than the whole budget: it takes
-/// its turn, where it used to be refused for what it might read.
+/// A price-based chart is charged for the bricks its indicators run on, up to 20,000 of
+/// them, as 1200 bars more (ADR-0052): 17 indicators at 500 bars take their turn, 50 do not.
 #[test]
 fn test_a_price_based_chart_with_many_indicators_takes_its_turn() {
     let srv = spawn_sample_server();
@@ -1192,14 +1193,63 @@ fn test_a_price_based_chart_with_many_indicators_takes_its_turn() {
     let token = sign_in(srv.port, &client);
     let auth = format!("Authorization: Bearer {token}");
     let headers = [JSON_POST[0], JSON_POST[1], auth.as_str()];
-    let many = vec!["rsi"; 50];
-    let call = chart_call(500, &many, serde_json::json!({ "chart_style": "renko" }));
+    let call = chart_call(
+        500,
+        &["rsi"; 17],
+        serde_json::json!({ "chart_style": "renko" }),
+    );
     let (st, _, body) = http(srv.port, "POST", "/mcp", &headers, &call);
     assert_eq!(st, 200, "{body}");
     assert_eq!(bars_in(&body), 500, "a real chart");
-    let call = chart_call(700, &many, serde_json::json!({ "chart_style": "renko" }));
+    let call = chart_call(
+        500,
+        &["rsi"; 50],
+        serde_json::json!({ "chart_style": "renko" }),
+    );
     let (_, _, body) = http(srv.port, "POST", "/mcp", &headers, &call);
-    assert!(body.contains("too much memory"), "too large for any style");
+    assert!(body.contains("too much memory"), "too large on bricks");
+    let call = chart_call(
+        500,
+        &["rsi"; 50],
+        serde_json::json!({ "chart_style": "candles" }),
+    );
+    let (_, _, body) = http(srv.port, "POST", "/mcp", &headers, &call);
+    assert_eq!(bars_in(&body), 500, "and fits bar for bar");
+}
+
+/// Indicators that draw several times what a usual one does cost that much (ADR-0052). 50
+/// cipher_b at 627 bars once fitted, at 31,977 of 32,000, and peaked at 137 MiB by itself,
+/// so that two got the server killed. On a small box, 80 bars of them ran on 19,000 bricks.
+#[test]
+fn test_a_chart_of_heavy_indicators_costs_what_they_draw() {
+    let srv = spawn_sample_server();
+    let client = register_external(srv.port);
+    let token = sign_in(srv.port, &client);
+    let auth = format!("Authorization: Bearer {token}");
+    let headers = [JSON_POST[0], JSON_POST[1], auth.as_str()];
+    let small_box = serde_json::json!({
+        "chart_style": "renko", "chart_params": { "box": "percent", "percent": 0.15 },
+    });
+    for call in [
+        chart_call(
+            627,
+            &["cipher_b"; 50],
+            serde_json::json!({ "chart_style": "candles" }),
+        ),
+        chart_call(627, &["candle_patterns"; 50], serde_json::json!({})),
+        chart_call(80, &["cipher_b"; 50], small_box.clone()),
+    ] {
+        let (st, _, body) = http(srv.port, "POST", "/mcp", &headers, &call);
+        assert_eq!(st, 200, "{body}");
+        assert!(
+            body.contains("too much memory"),
+            "{}",
+            &body[..300.min(body.len())]
+        );
+    }
+    let fits = chart_call(80, &["cipher_b"; 5], small_box);
+    let (_, _, body) = http(srv.port, "POST", "/mcp", &headers, &fits);
+    assert_eq!(bars_in(&body), 80, "fewer of them is a real chart");
 }
 
 /// A client that hangs up its side with an answer unread is reset, in the middle of the

@@ -290,13 +290,17 @@ format), so results map back to their entries whatever the order:
   both would get that key (`Indicator id macd is also the name of an entry
   without an id; give that entry an id too`).
 - `generate_chart` asks for at most 32,000 bars × (indicators + 1), which is 5000 bars with 5 indicators
-  or 500 with 50. With `format` `png` or `both`, an image adds width × height / 512: 4050 at the default
-  1920 × 1080, and 31,250 at 4000 × 4000, which leaves room for 750 bars × (indicators + 1). A 5000-bar image
-  takes at most 4 indicators at the default size. A larger call gets a `-32602` error saying so, as it would
-  take too much memory at once ([ADR-0051](/chartgen/decisions/0051-bounded-connections/)). A price-based
-  `chart_style` may read 20,000 bars more, so it is charged 20,000 more, up to all 32,000: it may then wait
-  for the others, but is not refused for that. Calls share that amount, and one that waits 20 s for its turn
-  gets `503` with `Retry-After`: nothing has run, so ask again.
+  or 627 with 50. Some indicators count as more than one, for what they draw: `cipher_b` as 4,
+  `candlestick_patterns` as 3, and `kalman_volume`, `rsi_mfi_stoch`, `ichimoku`, `wavetrend` and `fear_greed`
+  as 2, under any of their names. A price-based `chart_style` counts as 1200 bars more, as its indicators run
+  on every brick it builds, up to 20,000: 500 bars of it take at most 17 indicators. With `format` `png` or
+  `both`, an image adds width × height / 512: 4050 at the default 1920 × 1080, and 31,250 at 4000 × 4000,
+  which leaves room for 750 bars × (indicators + 1). A 5000-bar image takes at most 4 indicators at the
+  default size. A larger call gets a `-32602` error saying so, as it would take too much memory at once
+  ([ADR-0051](/chartgen/decisions/0051-bounded-connections/), [ADR-0052](/chartgen/decisions/0052-indicator-cost/)).
+  Calls share that amount while they are built; then each keeps only its answer, a unit a KiB, until that
+  has gone out. One that waits 20 s for its turn gets `503` with `Retry-After`: nothing has run, so ask
+  again.
 - `generate_chart` takes at most 50 entries (`At most 50 indicators per
   chart.`); `subscribe_chart` at most 10.
 

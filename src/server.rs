@@ -1094,8 +1094,10 @@ async fn mcp_handler(
         return mcp_call(state, uri, headers, ext, body_bytes).await;
     }
     match listener::call_slot(cost).await {
-        Ok(slot) => {
-            listener::held_until_written(mcp_call(state, uri, headers, ext, body_bytes).await, slot)
+        Ok(mut slot) => {
+            let answer = mcp_call(state, uri, headers, ext, body_bytes).await;
+            listener::keep_for_answer(&mut slot, &answer);
+            listener::held_until_written(answer, slot)
         }
         Err(listener::NoRoom::Busy { retry_after }) => (
             StatusCode::SERVICE_UNAVAILABLE,
@@ -1108,9 +1110,10 @@ async fn mcp_handler(
                 .ok()
                 .and_then(|call| call.get("id").cloned());
             let message = format!(
-                "This chart would take too much memory at once: bars times (indicators + 1), plus \
-                 width times height / 512 for an image, comes to {cost}, and the most is {budget}. \
-                 Ask for fewer bars, fewer indicators or a smaller image."
+                "This chart would take too much memory at once: bars times (indicators + 1), \
+                 with some indicators counting as 2 to 4 and a price-based chart as 1200 bars \
+                 more, plus width times height / 512 for an image, comes to {cost}, and the most \
+                 is {budget}. Ask for fewer bars, fewer indicators or a smaller image."
             );
             let session = headers.get("Mcp-Session-Id").and_then(|v| v.to_str().ok());
             streamable_http_json_response(
