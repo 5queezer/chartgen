@@ -560,7 +560,7 @@ describe("grid in a layout (ADR-0043)", () => {
       ...two,
       chartType: "renko_x",
       timeframe: "1y",
-      panes: [{ ...pane, symbol: "ETHUSDT", chartType: "future", timeframe: "7s" }],
+      panes: [{ ...pane, symbol: "ETHUSDT", chartType: "future", timeframe: "7y" }],
     })!;
     expect(state.chartType).toBe("candles");
     expect(state.timeframe).toBe("1h");
