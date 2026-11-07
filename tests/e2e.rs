@@ -882,6 +882,143 @@ fn initialize(port: u16, path: &str) -> (u16, String, String) {
     )
 }
 
+/// Connections past the cap wait instead of failing, and are served when others close
+/// (ADR-0051). The socket buffers and deadlines are tested on real sockets in the module.
+#[test]
+fn test_connections_past_the_cap_wait_their_turn() {
+    use std::io::{Read, Write};
+    let srv = spawn_server(None);
+    let open: Vec<_> = (0..128)
+        .map(|_| std::net::TcpStream::connect(("127.0.0.1", srv.port)).unwrap())
+        .collect();
+    std::thread::sleep(std::time::Duration::from_millis(300));
+
+    let mut next = std::net::TcpStream::connect(("127.0.0.1", srv.port)).unwrap();
+    next.write_all(b"GET /oauth/me HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+        .unwrap();
+    next.set_read_timeout(Some(std::time::Duration::from_millis(500)))
+        .unwrap();
+    let mut answer = String::new();
+    assert!(
+        next.read_to_string(&mut answer).is_err(),
+        "served past the cap: {answer}"
+    );
+    drop(open);
+    next.set_read_timeout(Some(std::time::Duration::from_secs(5)))
+        .unwrap();
+    next.read_to_string(&mut answer).unwrap();
+    assert!(answer.starts_with("HTTP/1.1 200"), "{answer}");
+}
+
+/// Bodies are read whole, so they are limited for everyone.
+#[test]
+fn test_a_large_body_is_refused() {
+    let srv = spawn_server(None);
+    let large = "x".repeat(512 * 1024 + 1);
+    assert_eq!(http(srv.port, "POST", "/mcp", &JSON_POST, &large).0, 413);
+    assert_eq!(
+        http(srv.port, "POST", "/register", &JSON_POST, &large).0,
+        413
+    );
+    let fits = "x".repeat(512 * 1024);
+    assert_ne!(http(srv.port, "POST", "/mcp", &JSON_POST, &fits).0, 413);
+}
+
+/// Tool answers a client does not read are memory until it does: so many at once, and
+/// everyone else's calls wait instead of the server filling up (ADR-0051).
+#[test]
+fn test_unread_tool_answers_are_limited_and_others_wait() {
+    use std::io::{Read, Write};
+    let srv = spawn_server(None);
+    let client = register_external(srv.port);
+    let token = sign_in(srv.port, &client);
+    let auth = format!("Authorization: Bearer {token}");
+    let call = serde_json::json!({
+        "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {
+            "name": "generate_chart",
+            "arguments": {
+                "ticker": "BTCUSDT", "timeframe": "1h", "format": "series", "bars": 5000,
+                "indicators": ["rsi", "macd", "ema", "bbands", "cipher_b", "vwap"],
+            },
+        },
+    })
+    .to_string();
+    let unread: Vec<_> = (0..2)
+        .map(|_| {
+            let mut s = std::net::TcpStream::connect(("127.0.0.1", srv.port)).unwrap();
+            write!(
+                s,
+                "POST /mcp HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\n\
+                 Accept: application/json\r\n{auth}\r\nContent-Length: {}\r\n\r\n{call}",
+                call.len()
+            )
+            .unwrap();
+            s
+        })
+        .collect();
+    std::thread::sleep(std::time::Duration::from_millis(1500));
+
+    let list = r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#;
+    let mut next = std::net::TcpStream::connect(("127.0.0.1", srv.port)).unwrap();
+    write!(
+        next,
+        "POST /mcp HTTP/1.1\r\nHost: x\r\nConnection: close\r\nContent-Type: application/json\r\n\
+         Accept: application/json\r\n{auth}\r\nContent-Length: {}\r\n\r\n{list}",
+        list.len()
+    )
+    .unwrap();
+    next.set_read_timeout(Some(std::time::Duration::from_millis(700)))
+        .unwrap();
+    let mut answer = String::new();
+    assert!(
+        next.read_to_string(&mut answer).is_err(),
+        "not past them: {answer}"
+    );
+    drop(unread);
+    next.set_read_timeout(Some(std::time::Duration::from_secs(10)))
+        .unwrap();
+    next.read_to_string(&mut answer).unwrap();
+    assert!(
+        answer.starts_with("HTTP/1.1 200"),
+        "{}",
+        &answer[..answer.len().min(200)]
+    );
+}
+
+/// Long-lived streams cannot take every connection, and a place comes back when one ends.
+#[test]
+fn test_streams_leave_room_for_everything_else() {
+    use std::io::{Read, Write};
+    let srv = spawn_server(None);
+    let client = register_external(srv.port);
+    let token = sign_in(srv.port, &client);
+    // A session of its own each: the same one again replaces the stream it has.
+    let open_stream = |session: u32| {
+        let mut s = std::net::TcpStream::connect(("127.0.0.1", srv.port)).unwrap();
+        write!(
+            s,
+            "GET /mcp HTTP/1.1\r\nHost: x\r\nAccept: text/event-stream\r\n\
+             Mcp-Session-Id: s{session}\r\nAuthorization: Bearer {token}\r\n\r\n"
+        )
+        .unwrap();
+        let mut first = [0u8; 15];
+        s.read_exact(&mut first).unwrap();
+        (s, String::from_utf8_lossy(&first).to_string())
+    };
+    let mut streams: Vec<_> = (0..64).map(open_stream).collect();
+    assert!(streams
+        .iter()
+        .all(|(_, head)| head.starts_with("HTTP/1.1 200")));
+    let (_refused, head) = open_stream(64);
+    assert!(head.starts_with("HTTP/1.1 503"), "{head}");
+    // And the app is there for everything else.
+    assert_eq!(http(srv.port, "GET", "/oauth/me", &[], "").0, 200);
+    streams.pop();
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    let (_again, head) = open_stream(65);
+    assert!(head.starts_with("HTTP/1.1 200"), "{head}");
+}
+
 #[test]
 fn test_server_serves_web_app_same_origin() {
     let root = std::env::temp_dir().join(format!("chartgen-web-{}", std::process::id()));

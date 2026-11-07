@@ -329,6 +329,16 @@ If a row shows `HTTP 401` or `HTTP 403`, the push service refused the VAPID toke
 
 ## Reverse proxy
 
+The server limits what any client may cost it, whether or not there is a proxy
+([ADR-0051](/chartgen/decisions/0051-bounded-connections/)): 128 connections at once, with further ones
+waiting, a small socket buffer each, and an end to a connection that has stopped moving for 30 s or gone
+quiet for 120 s. Long-lived streams stop at 64, and a tab refused one polls. A request body may be 512 KiB.
+There is nothing to set. Keep your proxy's own idle timeout below 120 s, or it may reuse a connection
+just as the server closes it. Traefik's default of 90 s is fine.
+
+What a proxy buffers towards a client that does not read is the proxy's memory, not the server's. A local
+Caddy took 1.5 GB for 1500 such requests. If the proxy can be reached directly, limit it as well.
+
 Claude.ai requires HTTPS. Terminate TLS at your reverse proxy and forward to
 chartgen's HTTP port (default `9315`). The SSE stream on `/mcp` and `/sse`
 must not be buffered — for nginx:
