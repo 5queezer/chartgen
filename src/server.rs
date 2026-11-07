@@ -1107,8 +1107,9 @@ async fn mcp_handler(
                 .ok()
                 .and_then(|call| call.get("id").cloned());
             let message = format!(
-                "This chart would take too much memory at once: bars times (indicators + 1) comes \
-                 to {cost}, and the most is {budget}. Ask for fewer bars or fewer indicators."
+                "This chart would take too much memory at once: bars times (indicators + 1), plus \
+                 width times height / 512 for an image, comes to {cost}, and the most is {budget}. \
+                 Ask for fewer bars, fewer indicators or a smaller image."
             );
             let session = headers.get("Mcp-Session-Id").and_then(|v| v.to_str().ok());
             streamable_http_json_response(
@@ -1527,7 +1528,9 @@ async fn sse_handler(State(state): State<SharedState>, uri: Uri, headers: Header
         .status(StatusCode::OK)
         .header("Content-Type", "text/event-stream")
         .header("Cache-Control", "no-cache")
-        .header("Connection", "keep-alive")
+        // Ending the stream ends the connection: one replaced by its session's new stream
+        // would otherwise stay open and idle, and hold a place past `listener::MAX_STREAMS`.
+        .header("Connection", "close")
         .header("Mcp-Session-Id", &session_id)
         .body(axum::body::Body::from_stream(body_stream))
         .unwrap()
@@ -1566,8 +1569,9 @@ impl Drop for CleanupStream {
             self.cleaned_up = true;
             // Ends this stream's chart subscriptions, and their feeds when
             // nobody else watches them.
-            self.charts.unlink_stream(&self.stream_key, self.chart_link);
-            if let Some(ref engine) = self.engine {
+            let current = self.charts.unlink_stream(&self.stream_key, self.chart_link);
+            // Replaced, the key's sender is the new stream's, and stays.
+            if let Some(engine) = self.engine.as_ref().filter(|_| current) {
                 match engine.write() {
                     Ok(mut e) => {
                         e.subscription_registry
@@ -2219,6 +2223,78 @@ mod tests {
 
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    /// A live tab reconnecting: the stream it replaces ends and gives back its connection,
+    /// and that ending must not take the new stream's pushes with it.
+    #[tokio::test]
+    async fn a_replaced_stream_ends_and_leaves_the_new_one_its_pushes() {
+        use chartgen::engine::EngineConfig;
+        let dir = std::env::temp_dir().join(format!("chartgen-replaced-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut engine = TradingEngine::new(EngineConfig {
+            symbol: "BTCUSDT".into(),
+            interval: "1h".into(),
+            indicators: vec![],
+            data_dir: dir.clone(),
+            notification_ttl_secs: 60,
+            max_queue_size: 10,
+        });
+        engine
+            .subscription_registry
+            .subscribe("test-token", None, None);
+        let engine = Arc::new(RwLock::new(engine));
+        let state = Arc::new(AppState {
+            oauth: Mutex::new(OAuthStore::new()),
+            engine: Some(engine.clone()),
+            charts: sample_hub(),
+        });
+        state.oauth.lock().unwrap().tokens.insert(
+            "test-token".to_string(),
+            AccessToken {
+                _token: "test-token".to_string(),
+                client_id: "test".to_string(),
+                created_at: Instant::now(),
+                expires_in: Duration::from_secs(3600),
+                user: None,
+            },
+        );
+        let headers = headers_with(&[
+            ("authorization", "Bearer test-token"),
+            ("mcp-session-id", "same"),
+        ]);
+        let open = || {
+            sse_handler(
+                State(state.clone()),
+                Uri::from_static("/mcp"),
+                headers.clone(),
+            )
+        };
+        let old = open().await;
+        assert_eq!(old.headers()[header::CONNECTION], "close");
+        let new = open().await;
+        assert_eq!(new.status(), StatusCode::OK);
+
+        let ended = tokio::time::timeout(
+            Duration::from_secs(5),
+            axum::body::to_bytes(old.into_body(), usize::MAX),
+        )
+        .await
+        .expect("the replaced stream should have ended");
+        assert_eq!(&ended.unwrap()[..], b": connected\n\n");
+        let connected = |engine: &RwLock<TradingEngine>| {
+            let engine = engine.read().unwrap();
+            engine
+                .subscription_registry
+                .list("test-token")
+                .unwrap()
+                .connected
+        };
+        assert!(connected(&engine), "the new stream keeps its alerts");
+
+        drop(new);
+        assert!(!connected(&engine), "and takes them with it when it goes");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]

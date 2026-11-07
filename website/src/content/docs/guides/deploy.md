@@ -320,8 +320,8 @@ If a row shows `HTTP 401` or `HTTP 403`, the push service refused the VAPID toke
 The server limits what any client may cost it, whether or not there is a proxy
 ([ADR-0051](/chartgen/decisions/0051-bounded-connections/)): 128 connections at once, with further ones
 waiting, a small socket buffer each, and an end to a connection that has stopped moving for 30 s or gone
-quiet for 120 s. Long-lived streams stop at 64. Tool calls share a budget, and past it a call gets `503` with
-`Retry-After` after 20 s, from which the web app recovers by itself. A request body may be 256 KiB. There is
+quiet for 120 s. Long-lived streams stop at 64. Tool calls share a budget, with images counted by their pixels,
+and past it a call gets `503` with `Retry-After` after 20 s, from which the web app recovers by itself. A request body may be 256 KiB. There is
 nothing to set. Keep your proxy's own idle timeout below 120 s, or it may reuse a connection just as the server
 closes it. Traefik's default of 90 s is fine. The numbers assume Linux with glibc, as in the Docker image.
 
