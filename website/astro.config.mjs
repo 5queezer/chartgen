@@ -8,6 +8,11 @@ export default defineConfig({
   integrations: [
     starlight({
       title: 'chartgen',
+      logo: {
+        light: './src/assets/logo-light.svg',
+        dark: './src/assets/logo-dark.svg',
+        replacesTitle: true,
+      },
       description:
         'Chart generator, web app and MCP server for Yahoo Finance and Binance data, written in Rust.',
       social: [
