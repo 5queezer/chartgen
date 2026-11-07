@@ -2402,27 +2402,28 @@ async fn a_subscription_is_checked_and_stays_its_owners() {
     refused(json!({ "endpoint": "x" }), "p256dh is required").await;
     assert!(store.push_devices().unwrap().is_empty());
 
-    // The same browser under two sign-ins is two devices: neither can take or remove
-    // the other's by knowing the endpoint.
+    // The same browser under a second sign-in: its keys match, so the device moves
+    // (ADR-0044). A stranger who only names the endpoint still removes nothing.
     subscribe(&a, port, "shared", "me").await;
     assert_eq!(
         subscribe(&a, port, "shared", "me").await["devices"],
         1,
         "same device"
     );
-    subscribe(&a, port, "shared", "you").await;
-    assert_eq!(store.push_devices().unwrap().len(), 2);
     let endpoint = json!({ "endpoint": device(port, "shared")["endpoint"] });
     let out = call(&a, "unsubscribe_push", endpoint.clone(), "stranger")
         .await
         .unwrap();
     assert_eq!(out["removed"], false);
+    assert_eq!(store.push_devices().unwrap().len(), 1, "still there");
+    subscribe(&a, port, "shared", "you").await;
     let out = call(&a, "unsubscribe_push", endpoint.clone(), "me")
         .await
         .unwrap();
     assert_eq!(
         (&out["removed"], &out["devices"]),
-        (&json!(true), &json!(0))
+        (&json!(false), &json!(0)),
+        "it is no longer mine to remove"
     );
     let owners: Vec<String> = store
         .push_devices()
