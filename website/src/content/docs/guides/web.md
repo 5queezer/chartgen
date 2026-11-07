@@ -774,8 +774,9 @@ browser that made it**: to get an alert on your phone, make it on your phone. On
 counts as its own browser. With sign-in an alert notifies every device of your account, so one made on the desktop
 reaches the phone. Each tab goes by how its own device fared, and tells you itself if that one's push failed.
 
-Signing out does not stop notifications to that device. **On a browser you share, use Turn off first**, or the next
-person there sees your alerts' notifications along with their own.
+Signing out does not stop notifications to that device, so your alerts keep reaching it. A device belongs to one
+account at a time: when someone else signs in on that browser with notifications on, it becomes theirs and shows only
+their alerts. Your alerts keep running and reach your other devices, and signing in there again takes it back.
 
 A server alert belongs to the sign-in of this browser, so clearing its site data loses
 access to it while it keeps running. It has no line on the chart and is not in the

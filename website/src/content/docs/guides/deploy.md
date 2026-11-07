@@ -116,7 +116,7 @@ sign-in on nobody can reach them, and startup says how many wait. To collect the
 then own every client's rows, whichever client made them. **An alert's webhook and signing secret
 move with it, and that account's alerts then notify those devices**, so name only yourself. A script name you already have stays with its client, and
 so does the second of two clients' scripts with one name: nothing is overwritten or deleted, and
-startup counts these name collisions. A push endpoint you already hold stays with its client the same way. To move one, rename or delete your own and sign in again
+startup counts these name collisions. To move one, rename or delete your own and sign in again
 ([ADR-0044](/chartgen/decisions/0044-sign-in-through-github-and-google/#existing-rows)). Scripts wait for as long as it takes. Alerts keep
 running meanwhile, and expire 30 days after their client last got a token, so do not leave it long.
 You can unset the variable afterwards.

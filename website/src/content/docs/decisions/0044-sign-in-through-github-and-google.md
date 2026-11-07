@@ -7,7 +7,7 @@ sidebar:
 
 **Status:** Accepted
 **Date:** 2026-11-06
-**Amends:** [ADR-0025](/chartgen/decisions/0025-user-indicator-registry/) (with sign-in on, scripts belong to the user, not the client), [ADR-0036](/chartgen/decisions/0036-own-origin-invalid-client-redirect/) (a client's liveness is limited per user, which makes the lockout cost accounts), [ADR-0021](/chartgen/decisions/0021-realtime-chart-push/) (with sign-in on, the per-client push cap counts per user, and an operator can name a proxy's address header) [ADR-0042](/chartgen/decisions/0042-server-side-alerts/) (with sign-in on, server alerts and their allowlist belong to accounts) and [ADR-0045](/chartgen/decisions/0045-web-push-for-server-alerts/) (with sign-in on, push devices belong to the user, and the last outcome is kept per device)
+**Amends:** [ADR-0025](/chartgen/decisions/0025-user-indicator-registry/) (with sign-in on, scripts belong to the user, not the client), [ADR-0036](/chartgen/decisions/0036-own-origin-invalid-client-redirect/) (a client's liveness is limited per user, which makes the lockout cost accounts), [ADR-0021](/chartgen/decisions/0021-realtime-chart-push/) (with sign-in on, the per-client push cap counts per user, and an operator can name a proxy's address header) [ADR-0042](/chartgen/decisions/0042-server-side-alerts/) (with sign-in on, server alerts and their allowlist belong to accounts) and [ADR-0045](/chartgen/decisions/0045-web-push-for-server-alerts/) (with sign-in on, push devices belong to the user, the last outcome is kept per device, and an endpoint has one owner)
 
 ## Context and Problem Statement
 
@@ -156,8 +156,9 @@ and its signing secret move with it. A client here means an owner shaped like th
 hands out, tested positively, so another kind of owner is never swept in.
 
 A script name they already have stays with its client, as does the second of two clients' scripts
-with one name, so nothing is overwritten. A push endpoint they already hold stays with its client
-likewise. Startup counts name collisions among the scripts. To move one, the
+with one name, so nothing is overwritten. Startup counts name collisions among the scripts. A
+device that would be a second row for a subscription they already hold is removed, being the same
+browser; under the same endpoint with other keys it stays, since that is not provably so. To move one, the
 owner renames or deletes their own script and signs in again, one at a time per name.
 
 **Unset, nothing moves.** The rows stay with their clients, where nobody can reach them, because
@@ -197,6 +198,17 @@ buy no more alerts or watched pairs.
   ([ADR-0045](/chartgen/decisions/0045-web-push-for-server-alerts/)), so a phone gets the alert
   made on the desktop, and the limits of 5 devices and 30 pushes a minute are per user. They live
   on the same activity as alerts.
+- **An endpoint has one owner, whoever subscribed it last,** so a device never shows two people's
+  alerts. An account subscribing an endpoint another holds removes that row. The earlier owner just
+  loses that device: their alerts keep running and reach their other devices, and signing back in
+  there takes it back. The app re-subscribes on load, so on a shared browser the device goes with
+  whoever signs in and has notifications on. Signing out alone still leaves it, so alerts keep
+  working.
+
+  Taking one over needs the endpoint **and its keys**, which only that browser has. With either key
+  different the request is refused and the existing row stays, so nobody can evict a device by
+  knowing its endpoint. The same applies with sign-in off, between clients. This replaces ADR-0045's
+  "two owners is two devices".
 - **The last outcome is kept per device.** With several devices one shared outcome is wrong: a
   live device's 201 followed by a dead one's 410 made the tab report twice, and this device's 500
   followed by another's 201 left it silent. Each fire now records the devices it goes to, pending
@@ -299,10 +311,11 @@ Someone without an account can still:
 - Bad: first-time users of an MCP client see two new pages, the provider's and consent.
 - Bad: chartgen now holds provider client secrets, and user ids and names in its store.
 - Bad: another way to fail at startup, by design: half a provider stops the server.
-- Bad: signing out does not remove a push device, so that alerts keep reaching it. On a shared
-  browser the next person to sign in and turn notifications on holds the same endpoint under
-  their account, and the device then shows both people's alerts, notes included, until someone
-  presses **Turn off** first. The web guide says so.
+- Bad: someone who already knows a browser's push endpoint, which is long and random and known
+  only to that browser, its push service and this server, could register it first with made-up
+  keys, and that browser's own subscribing would then be refused until their row expires. Their
+  pushes would not decrypt there. A browser that gets new keys for the same endpoint under a
+  different account is refused the same way; browsers change the endpoint along with the keys.
 - Bad: **only what the server stores belongs to the user.** Watchlists, layouts, drawings,
   chart settings and browser-side alerts stay in the browser's `localStorage`, as before: not
   per account, not synced, and still there after signing out. The next person to sign in on

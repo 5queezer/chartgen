@@ -988,7 +988,9 @@ endpoint again updates its keys. You may have 5 devices, and a new one over that
 most 30 pushes per minute. On a server whose 2000 devices are full, a new one replaces another client's,
 and a client's alerts only notify that client's devices: with
 [sign-in](/chartgen/reference/oauth/#sign-in) those are all of its user's, on every client. `subscribe_push` answers
-`devices`, the count, and `device`, this one's id. A 404 or 410 from the push service removes the device. Delivery is at least once, so deduplicate on `id`; the app's worker uses it
+`devices`, the count, and `device`, this one's id. An endpoint has one owner, whoever subscribed it last: registering one
+that someone else holds removes their row, and fails with `registered with other keys`, changing nothing, unless both
+keys match. A 404 or 410 from the push service removes the device. Delivery is at least once, so deduplicate on `id`; the app's worker uses it
 as the notification's tag. Each alert also returns `push`, `last_push_at`, `last_push_status` and
 `last_push_error`, the last outcome across your devices, and `last_push_devices`: the devices its last fire went
 to, by id, each with `{at, status, error}`, or `null` while its outcome is not known. A device not there was not sent
