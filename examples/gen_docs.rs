@@ -89,10 +89,13 @@ fn main() {
          \x20 `displacement - 1` bars past the last bar, from the series `future` block\n\
          \x20 ([ADR-0033](/chartgen/decisions/0033-indicator-projection-past-last-bar/));\n\
          \x20 the PNG chart ends at the last bar.\n\
-         - **Intrabar data.** The volume profiles (`volume_profile`, `session_vp`,\n\
-         \x20 `hvn_lvn`, `naked_poc`, `tpo`) and `cvd` spread each bar's volume over its\n\
-         \x20 range. TradingView builds them from lower-timeframe data, so they are\n\
-         \x20 approximations.\n\
+         - **Intrabar data.** `volume_profile`, `fixed_range_vp` and `anchored_vp` read\n\
+         \x20 lower-timeframe bars on a web chart load, as TradingView does; the series says\n\
+         \x20 which in `profile_interval`\n\
+         \x20 ([ADR-0048](/chartgen/decisions/0048-order-flow/)). Each of those bars still\n\
+         \x20 spreads over its range, and a chart too long or too fine for it falls back\n\
+         \x20 to its own bars. `session_vp`, `hvn_lvn`, `naked_poc`, `tpo` and `cvd` spread\n\
+         \x20 each chart bar's volume over its range, and PNG and summary output always does.\n\
          - **Long warmups.** `kalman_volume` normalises by a 200-bar standard deviation\n\
          \x20 and needs about 280 bars before its first value.\n\
          - **Unknown timeframe.** `histvol` needs the timeframe to annualize. When it\n\

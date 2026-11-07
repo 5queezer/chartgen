@@ -1,6 +1,6 @@
 ---
 title: MCP Integration
-description: Connect chartgen to Claude Desktop or Claude.ai — 19 tools across charting, live chart push, orders, alerts, and notifications, plus optional scripted-indicator and server-alert tools.
+description: Connect chartgen to Claude Desktop or Claude.ai — 21 tools across charting, live chart push, orders, alerts, and notifications, plus optional scripted-indicator and server-alert tools.
 ---
 
 chartgen speaks the Model Context Protocol over both stdio (Claude Desktop)
@@ -72,7 +72,7 @@ everyone else ([ADR-0027](/chartgen/decisions/0027-serve-web-app-same-origin/)).
 
 ## Tool catalog
 
-19 tools. The 12 trading tools require `--trade`; attempting to call them
+21 tools. The 12 trading tools require `--trade`; attempting to call them
 without it returns an error. With `CHARTGEN_SCRIPTING=1` the server also
 lists the 5 [scripted-indicator tools](#scripted-indicators-chartgen_scripting1),
 and with `CHARTGEN_SERVER_ALERTS=1` the 4
@@ -84,13 +84,14 @@ and with `CHARTGEN_SERVER_ALERTS=1` the 4
 
 Render a chart for a symbol. Accepts `ticker`/`symbol`, `timeframe`/`interval`,
 `indicators` (string names or objects with overrides), `bars` (default 200),
-`width`, `height`, `format`, `end_time`, `warmup`, `chart_style` and `chart_params`.
+`width`, `height`, `format`, `end_time`, `warmup`, `profile_intrabars`, `chart_style` and `chart_params`.
 
 | Parameter | Meaning |
 |-----------|---------|
 | `bars` | Integer, default 200. Capped at 5000 in every format (`png`, `summary`, `both`, `series`); larger values are silently clamped. On Binance each 1000 bars is one upstream request. |
 | `end_time` | Integer, ms since epoch, between `-2208988800000` (1900-01-01; index histories predate 1970) and one year from now. Only bars whose open time is strictly before `end_time` are returned. To load the page before the oldest bar you have, pass that bar's `t × 1000`. Omit it (or send `null`) to get the newest bars, including the candle that is still forming. Applies to every format. A string, a float or an out-of-range value is a tool error. |
 | `warmup` | Integer, default 0, max 1000. `format=series` only. Fetches this many extra older bars and feeds them to the indicators, then trims them from the response, so the first returned bars have warmed-up values instead of `null`. `png`, `summary`, and `both` ignore it and render exactly `bars`. |
+| `profile_intrabars` | Boolean, default false. `format=series` only. Computes `volume_profile`, `fixed_range_vp` and `anchored_vp` from lower-timeframe bars, for up to 6 more Binance requests ([ADR-0048](/chartgen/decisions/0048-order-flow/)). Meant for a chart's full load: pages and tails keep the load's profile, so leave it off on those. |
 | `chart_style` | `candles` (default) or `heikin_ashi`. `heikin_ashi` replaces the price bars with Heikin Ashi bars in every format: `haClose = (o+h+l+c)/4`, `haOpen = (prev haOpen + prev haClose)/2` (the first bar is seeded with `(o+c)/2`), `haHigh = max(h, haOpen, haClose)`, `haLow = min(l, haOpen, haClose)`; volume and timestamps are unchanged. Like TradingView, indicators are computed on the Heikin Ashi values, not the raw bars. The transform runs over `bars + warmup` before trimming, and because each `haOpen` is an exponentially decaying average, pages and tail polls with the same warmup agree after a few bars. `format=series` echoes the applied style as `chart_style`. `renko`, `kagi`, `point_figure`, `line_break` and `range` are [price-based](#price-based-styles). Any other value is an error. |
 | `chart_params` | Inputs of a [price-based style](#price-based-styles), and an error with any other style. |
 
@@ -389,6 +390,12 @@ Three additional channels round out the payload so the full set of
 - **`fills`** — shaded regions between two y-series (Bollinger Bands,
   Keltner Channels, Ichimoku cloud, VWAP bands). `y1` and `y2` are arrays
   aligned 1:1 with `bars[]`; pre-warmup values are `null`.
+- **`profile_interval`** — on a profile that read lower-timeframe bars because
+  `profile_intrabars` asked (`volume_profile`, `fixed_range_vp`, `anchored_vp`), which ones. Absent
+  means it spread the chart's own bars ([ADR-0048](/chartgen/decisions/0048-order-flow/)).
+- **`level_lines`** — true when the lines hold levels (`session_vp`): a change of value is a jump
+  from one to the next, not a slope, and is not drawn. So a session of one bar draws nothing:
+  with the default daily session, that is 1d and above.
 - **`hbars`** — horizontal bars at price levels, used by volume-profile
   indicators (VPVR, Session VP, HVN/LVN, Naked POC, TPO). Each bar has a
   price-space `y` and `height`, axis-relative `width` and `offset`
@@ -520,7 +527,7 @@ pushes the same tail instead of you polling for it.
   2000 1m bars when one 7-day window only holds about 1950) still reports
   `true`. It is `false` when history ran out (the page can be shorter or
   empty) and for the no-ticker demo series, which has no timestamps.
-- **Volume profiles on partial responses.** `vpvr`, `hvn_lvn`, and `tpo`
+- **Volume profiles on partial responses.** `vpvr`, `fixed_range_vp`, `anchored_vp`, `hvn_lvn`, and `tpo`
   are computed over the bars of the response they arrive in. Keep their
   `hbars` and profile-derived `hlines` (POC/VAH/VAL, HVN/LVN nodes) from
   the initial full load, and ignore them on tail-poll and history-page
@@ -531,7 +538,7 @@ its `color_idx`), and `fills` keep only their last `bars` entries. Signal `x` va
 to the trimmed window, and signals inside the warmup are dropped. Divlines
 that end at or before the first returned bar are dropped. Divlines that
 cross into the window are clipped to start at bar 0, with `y1`
-interpolated. For windowed profiles (`vpvr`, `hvn_lvn`, `tpo`), `hbars`
+interpolated. For windowed profiles (`vpvr`, `fixed_range_vp`, `anchored_vp`, `hvn_lvn`, `tpo`), `hbars`
 and `hlines` are recomputed over the returned bars only. `y_range` and the
 `hlines` of every other indicator don't change.
 
@@ -873,6 +880,79 @@ forming bar, with every indicator recomputed. Merge it like a polled tail.
 `unsubscribe_chart` takes `subscription_id` and returns
 `{ "unsubscribed": true }`, or `false` if the subscription was already gone
 (or belongs to another token).
+
+### Order flow
+
+Both are built from klines, not trades ([ADR-0048](/chartgen/decisions/0048-order-flow/)):
+**a row's volume is always an estimate**, each kline's volume spread over its high-low range.
+Compact JSON. Their forming bar or period repaints as data arrives.
+
+#### `get_footprint`
+
+Buy and sell volume per price row of each chart bar.
+
+| Argument | Default | Meaning |
+|---|---|---|
+| `ticker` | required | As `generate_chart`. |
+| `timeframe` | `1h` | Chart interval. |
+| `bars` | 60 | Newest bars, up to 200. |
+| `end_time` | | Exclusive bound on bar open time, ms. |
+| `row_size` | | Row height in price. Raised to a tick, lowered to the highest price, and widened if a bar would have over 200 rows; `row_widened` says so. |
+| `row_ticks` | | Row height in ticks. Without either: auto, 0.2 x ATR on round numbers. |
+| `atr_length` | 14 | ATR length of the auto row size. |
+| `value_area` | 70 | Percent of the volume. |
+| `imbalance` | 300 | Percent. Buy against the sell one row below, sell against the buy one row above. A row with nothing to compare with is none. |
+| `stacked` | 3 | Imbalances in a row that make a stack. A level counts only where at least 2 klines with volume traded, on it and on the level it is compared with: one kline has one split, so its rows would all agree. |
+| `intrabar_interval` | | For a poll of a chart already loaded: the `intrabar_interval` its load returned, or `none` if that was null, so the newest bars read as the load's did. Bars that cannot afford it read what they can. |
+
+```json
+{
+  "symbol": "BTCUSDT", "interval": "1h",
+  "intrabar_interval": "1m", "side": "taker_volume",
+  "row_size": 5, "row_auto": true, "row_widened": false, "tick": 0.01,
+  "bars_without_data": 0, "has_more": true,
+  "footprints": [{
+    "t": 1762466400, "row": 5, "buy": 512.3, "sell": 488.1,
+    "min_delta": -40.2, "max_delta": 61.5,
+    "poc": 100000, "vah": 100015, "val": 99990,
+    "rows": [[99990, 12.5, 9.1], [99995, 31.0, 40.2]],
+    "buy_imbalances": [], "sell_imbalances": [99990],
+    "stacked": [{ "side": "buy", "low": 100000, "high": 100015, "count": 3 }]
+  }]
+}
+```
+
+`intrabar_interval` is what the bars were read from; null means nothing finer exists, and the
+bar is its own only intrabar. `side` is `taker_volume` (Binance's measured taker buy volume per
+kline) or `close_vs_open` (no aggressor data: each kline goes to one side, a doji by the previous
+close). A row is `[bottom price, buy, sell]`, as high as the bar's `row`. `vah` is a row's top, `val`
+and `poc` a row's bottom.
+`bars_without_data` counts bars with nothing in them, whose `rows` are empty.
+
+#### `get_tpo`
+
+Time Price Opportunity (market profile): which blocks traded at each price row. Up to 3 Binance
+requests for a block Binance has (5m, 15m, 30m, 1h, 2h, 4h). Any other is built from finer klines,
+as a chart of that interval is, and can cost up to 20.
+
+| Argument | Default | Meaning |
+|---|---|---|
+| `ticker` | required | As `generate_chart`. |
+| `period` | `1D` | A count and D, W or M: `1D`, `2D`, `1W`, `1M`. |
+| `block` | `30m` | Block length, from 5m to 4h. If 3000 of them cannot hold a whole period, the next that can: the reply's `block` is that one, and `block_widened` says so. A period that 4h blocks cannot cover is refused. |
+| `periods` | 10 | Newest periods, up to 60. Whole periods within 3000 blocks; `periods_cut` says if that left some out. |
+| `end_time` | | Exclusive bound on block open time, ms. |
+| `row_size`, `row_ticks` | | As `get_footprint`. Auto: a 24th of the median period range. |
+| `value_area` | 70 | Percent of the blocks. |
+| `ib_blocks` | 2 | Blocks of the initial balance. |
+| `sessions` | | Up to 5 `HH:MM-HH:MM` in the exchange's time (UTC for crypto): one profile per session of each period. |
+
+Each profile has `t` (its period's start, plus its session's: what identifies it between replies), `end`,
+`row`, `block_times` (the first is where it starts), `open`, `close`, `high`, `low`, `mid`, `poc`, `vah`, `val`,
+`poor_high`, `poor_low` (more than one block at the extreme), `single_prints` (`[low, high]` runs of one
+block inside the profile, tails excluded), `ib_high`, `ib_low`, `total_blocks`, `blocks_above_poc`,
+`blocks_below_poc`, `rotation_factor`, `volume`, and `rows` of `{ p, letters, blocks, v }`: bottom price,
+letters (`A`-`Z`, `a`-`z`, then around again), block indices, and volume, spread over each block's range.
 
 ### Server alerts (`CHARTGEN_SERVER_ALERTS=1`)
 

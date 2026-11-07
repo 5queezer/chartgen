@@ -191,6 +191,10 @@ export const SeriesFutureSchema = z.object({
 export const SeriesIndicatorSchema = z.object({
   label: z.string(),
   is_overlay: z.boolean(),
+  /** A profile read from these lower-timeframe bars rather than the chart's (ADR-0048). */
+  profile_interval: z.string().optional(),
+  /** Its lines hold levels: nothing is drawn across a change of value. */
+  level_lines: z.boolean().optional(),
   y_range: YRangeSchema.optional(),
   lines: z.array(SeriesLineSchema).optional(),
   histogram: z.array(SeriesHistogramBucketSchema).optional(),
@@ -665,3 +669,104 @@ export const UnsubscribePushPayloadSchema = z.object({
   devices: z.number().int(),
 });
 export type UnsubscribePushPayload = z.infer<typeof UnsubscribePushPayloadSchema>;
+
+// --- Order flow (ADR-0048) ---------------------------------------------------
+
+export const FootprintBarSchema = z.object({
+  t: z.number(),
+  /** Height of this bar's rows: a reply that had to widen them has its own. */
+  row: z.number(),
+  buy: z.number(),
+  sell: z.number(),
+  min_delta: z.number(),
+  max_delta: z.number(),
+  poc: z.number().nullable(),
+  vah: z.number().nullable(),
+  val: z.number().nullable(),
+  /** `[price, buy, sell]`, ascending, the price being the row's bottom. */
+  rows: z.array(z.tuple([z.number(), z.number(), z.number()])),
+  buy_imbalances: z.array(z.number()),
+  sell_imbalances: z.array(z.number()),
+  stacked: z.array(
+    z.object({
+      side: z.enum(["buy", "sell"]),
+      low: z.number(),
+      high: z.number(),
+      count: z.number(),
+    }),
+  ),
+});
+export type FootprintBar = z.infer<typeof FootprintBarSchema>;
+
+export const FootprintPayloadSchema = z.object({
+  symbol: z.string(),
+  interval: z.string(),
+  intrabar_interval: z.string().nullable().default(null),
+  side: z.string().default("close_vs_open"),
+  row_size: z.number().default(1),
+  row_auto: z.boolean().default(true),
+  row_widened: z.boolean().default(false),
+  tick: z.number().default(0.01),
+  bars_without_data: z.number().default(0),
+  footprints: z.array(FootprintBarSchema),
+  has_more: z.boolean(),
+});
+export type FootprintPayload = z.infer<typeof FootprintPayloadSchema>;
+export type FootprintMeta = Omit<FootprintPayload, "footprints" | "has_more"> & {
+  /** A page of older bars was read from coarser data than the load. */
+  coarser_older?: boolean;
+};
+
+export const TpoProfileSchema = z.object({
+  /** The period's start, or the session's: what identifies it between replies. */
+  t: z.number(),
+  end: z.number(),
+  /** Height of this profile's rows, as a footprint bar's. */
+  row: z.number(),
+  block_times: z.array(z.number()),
+  open: z.number(),
+  close: z.number(),
+  high: z.number(),
+  low: z.number(),
+  mid: z.number(),
+  poc: z.number(),
+  vah: z.number(),
+  val: z.number(),
+  poor_high: z.boolean(),
+  poor_low: z.boolean(),
+  single_prints: z.array(z.tuple([z.number(), z.number()])),
+  ib_high: z.number(),
+  ib_low: z.number(),
+  total_blocks: z.number(),
+  blocks_above_poc: z.number(),
+  blocks_below_poc: z.number(),
+  rotation_factor: z.number(),
+  volume: z.number(),
+  rows: z.array(
+    z.object({
+      p: z.number(),
+      letters: z.string(),
+      blocks: z.array(z.number()),
+      v: z.number(),
+    }),
+  ),
+});
+export type TpoProfile = z.infer<typeof TpoProfileSchema>;
+
+export const TpoPayloadSchema = z.object({
+  symbol: z.string(),
+  period: z.string(),
+  block: z.string(),
+  /** The block asked for could not cover a whole period: `block` is a longer one. */
+  block_widened: z.boolean(),
+  row_size: z.number(),
+  row_auto: z.boolean(),
+  row_widened: z.boolean(),
+  tick: z.number(),
+  timezone: z.string(),
+  periods_cut: z.boolean(),
+  profiles: z.array(TpoProfileSchema),
+  has_more: z.boolean(),
+});
+export type TpoPayload = z.infer<typeof TpoPayloadSchema>;
+export type TpoMeta = Omit<TpoPayload, "profiles" | "has_more">;

@@ -7,12 +7,14 @@ import {
   drawSeries,
   drawSpan,
   hiddenCandleStyle,
+  isOrderFlowType,
   isSeriesType,
   isUpBar,
   markerRadius,
   stepPoints,
 } from "./chartTypes";
 import { columnCount, columnLevels, kagiThick, markRange, runsUp } from "./chartTypes";
+import { isPriceBarType } from "./priceBars";
 import { CHART_TYPES } from "../stores/layout";
 
 // A y axis at BTC-like prices that rounds to whole pixels as klinecharts does:
@@ -115,6 +117,7 @@ describe("chart types", () => {
       "columns",
       "high_low",
       "hlc_area",
+      "volume_candles",
       "kagi",
       "point_figure",
     ]);
@@ -252,5 +255,42 @@ describe("Kagi and Point & Figure geometry", () => {
       expect(hiddenCandleStyle(t)).toMatchObject({ type: "candle_solid" });
     }
     expect(isSeriesType("renko")).toBe(false);
+  });
+
+  it("autoscales on highs and lows for each type that shows them, in both families", () => {
+    const spanning = [
+      "high_low",
+      "hlc_area",
+      "volume_candles",
+      "kagi",
+      "point_figure",
+      "footprint",
+      "tpo",
+    ] as const;
+    const closes = ["baseline", "columns", "step_line", "line_markers"] as const;
+    for (const t of spanning) {
+      expect(hiddenCandleStyle(t), t).toMatchObject({ type: "candle_solid" });
+    }
+    for (const t of closes) {
+      expect(hiddenCandleStyle(t), t).toMatchObject({ type: "area" });
+    }
+    // A new type that hides klinecharts' series has to say which it is.
+    expect([...spanning, ...closes].sort()).toEqual(
+      CHART_TYPES.filter((t) => isSeriesType(t) || isOrderFlowType(t)).sort(),
+    );
+  });
+
+  it("lists order flow after the time-based types, and price-based types last", () => {
+    expect(CHART_TYPES.slice(-8)).toEqual([
+      "volume_candles",
+      "footprint",
+      "tpo",
+      "renko",
+      "line_break",
+      "kagi",
+      "point_figure",
+      "range",
+    ]);
+    expect(CHART_TYPES.filter(isPriceBarType)).toEqual(CHART_TYPES.slice(-5));
   });
 });

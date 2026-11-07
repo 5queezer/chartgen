@@ -65,6 +65,9 @@ const CHART_TYPE_LABELS: Record<ChartType, string> = {
   high_low: "High-low",
   hlc_area: "HLC area",
   heikin_ashi: "Heikin Ashi",
+  volume_candles: "Volume candles",
+  footprint: "Volume footprint",
+  tpo: "TPO",
   renko: "Renko",
   line_break: "Line break",
   kagi: "Kagi",
@@ -86,6 +89,27 @@ function ChartTypeIcon(props: { type: ChartType }): JSX.Element {
     "aria-hidden": true,
   } as const;
   switch (props.type) {
+    case "volume_candles":
+      return (
+        <svg {...common}>
+          <rect x="2" y="6" width="2" height="7" />
+          <rect x="6" y="4" width="4" height="9" />
+          <rect x="12" y="6" width="4" height="7" />
+        </svg>
+      );
+    case "footprint":
+      return (
+        <svg {...common}>
+          <rect x="3" y="3" width="12" height="12" />
+          <path d="M9 3v12M3 7h12M3 11h12" />
+        </svg>
+      );
+    case "tpo":
+      return (
+        <svg {...common}>
+          <path d="M3 4h4M3 7h9M3 10h12M3 13h6" />
+        </svg>
+      );
     case "candles":
       return (
         <svg {...common}>

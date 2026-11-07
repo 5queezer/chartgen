@@ -15,6 +15,7 @@ import {
 } from "klinecharts";
 
 import { formatColor, parseColor } from "./color";
+import { volumeCandleWidth } from "./orderFlow";
 import type { ChartType } from "../stores/layout";
 
 export type SeriesType =
@@ -24,6 +25,7 @@ export type SeriesType =
   | "hlc_area"
   | "step_line"
   | "line_markers"
+  | "volume_candles"
   | "kagi"
   | "point_figure";
 
@@ -34,6 +36,7 @@ const SERIES_TYPES: readonly ChartType[] = [
   "hlc_area",
   "step_line",
   "line_markers",
+  "volume_candles",
   "kagi",
   "point_figure",
 ];
@@ -41,6 +44,13 @@ const SERIES_TYPES: readonly ChartType[] = [
 /** True for the chart types drawn by the series indicator, not by klinecharts. */
 export function isSeriesType(t: ChartType): t is SeriesType {
   return SERIES_TYPES.includes(t);
+}
+
+export type OrderFlowType = "footprint" | "tpo";
+
+/** True for the chart types drawn from intrabar data (ADR-0048). */
+export function isOrderFlowType(t: ChartType): t is OrderFlowType {
+  return t === "footprint" || t === "tpo";
 }
 
 // Double underscore: server indicators register as `chartgen_<name>` and
@@ -81,8 +91,15 @@ export function ensureSeriesRegistered(): void {
  * autoscale spans them; the others keep an area line, which autoscales on the
  * closes as TradingView does for close-based types.
  */
-export function hiddenCandleStyle(t: SeriesType): object {
-  if (t === "high_low" || t === "hlc_area" || t === "kagi" || t === "point_figure") {
+export function hiddenCandleStyle(t: SeriesType | OrderFlowType): object {
+  if (
+    t === "high_low" ||
+    t === "hlc_area" ||
+    t === "volume_candles" ||
+    t === "kagi" ||
+    t === "point_figure" ||
+    isOrderFlowType(t)
+  ) {
     const bar: Record<string, string> = {};
     for (const part of ["", "Border", "Wick"]) {
       for (const dir of ["up", "down", "noChange"]) {
@@ -287,6 +304,23 @@ export function drawSeries({
   ctx.lineCap = "round";
 
   switch (ext.type) {
+    case "volume_candles": {
+      let most = 0;
+      for (let i = visibleRange.from; i < visibleRange.to; i++) {
+        most = Math.max(most, bars[i]!.volume ?? 0);
+      }
+      for (let i = start; i < end; i++) {
+        const b = bars[i]!;
+        const x = xAxis.convertToPixel(i);
+        ctx.fillStyle = isUpBar(bars, i) ? ext.up : ext.down;
+        const width = volumeCandleWidth(b.volume ?? 0, most, barSpace.gapBar);
+        const body = barRect(x, yAxis.convertToPixel(b.open), yAxis.convertToPixel(b.close), width);
+        ctx.fillRect(body.x, body.y, body.width, body.height);
+        const wick = barRect(x, yAxis.convertToPixel(b.high), yAxis.convertToPixel(b.low), 1);
+        ctx.fillRect(wick.x, wick.y, wick.width, wick.height);
+      }
+      break;
+    }
     case "columns":
     case "high_low": {
       const up = ext.type === "high_low" ? ext.line : withAlpha(ext.up, 0.5);

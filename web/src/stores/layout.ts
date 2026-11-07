@@ -34,6 +34,9 @@ export type ChartType =
   | "high_low"
   | "hlc_area"
   | "heikin_ashi"
+  | "volume_candles"
+  | "footprint"
+  | "tpo"
   | "renko"
   | "kagi"
   | "point_figure"
@@ -54,6 +57,9 @@ export const CHART_TYPES: readonly ChartType[] = [
   "high_low",
   "hlc_area",
   "heikin_ashi",
+  "volume_candles",
+  "footprint",
+  "tpo",
   "renko",
   "line_break",
   "kagi",
