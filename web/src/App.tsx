@@ -23,6 +23,7 @@ import {
   plotRef,
 } from "./components/AlertDialog";
 import { paletteColor } from "./components/Chart";
+import { Wordmark } from "./components/Wordmark";
 import { ChartPane, createChartPane } from "./components/ChartPane";
 import { ChartSettings } from "./components/ChartSettings";
 import { DRAWING_LABELS } from "./components/DrawingToolbar";
@@ -392,8 +393,8 @@ export function App(): JSX.Element {
   return (
     <div class="app-shell flex flex-col h-dvh w-screen">
       <header class="flex flex-nowrap items-center gap-2 min-[1280px]:gap-3 px-4 h-[52px] shrink-0 overflow-hidden border-b border-[color:var(--color-border)]">
-        <h1 class="text-lg font-semibold mr-1 min-[1280px]:mr-2 leading-none max-[639px]:hidden">
-          chartgen
+        <h1 class="mr-1 min-[1280px]:mr-2 max-[639px]:hidden">
+          <Wordmark />
         </h1>
         <Toolbar
           session={session}

@@ -18,6 +18,8 @@ export interface Palette {
   fg: string;
   fgMuted: string;
   accent: string;
+  /** The "gen" of the wordmark: at least 4.5:1 on `bg`, see theme.test.ts. */
+  brand: string;
   bull: string;
   bear: string;
   grid: string;
@@ -36,6 +38,7 @@ export const dark: Palette = {
   fg: "#d1d4dc",
   fgMuted: "#787b86",
   accent: "#2962ff",
+  brand: "#82b4fa",
   bull: "#26a69a",
   bear: "#ef5350",
   grid: "#2a2e39",
@@ -54,6 +57,7 @@ export const light: Palette = {
   fg: "#131722",
   fgMuted: "#6a6d78",
   accent: "#2962ff",
+  brand: "#143eb3",
   bull: "#089981",
   bear: "#f23645",
   grid: "#f0f3fa",
