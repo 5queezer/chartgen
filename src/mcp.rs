@@ -478,7 +478,7 @@ fn tool_generate_chart(id: Option<Value>, args: &Value, user: Option<&str>) -> V
     generate_chart(id, args, fetch::DataSource::from_env(), user)
 }
 
-fn generate_chart(
+pub(crate) fn generate_chart(
     id: Option<Value>,
     args: &Value,
     source: fetch::DataSource,

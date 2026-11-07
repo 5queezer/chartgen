@@ -74,3 +74,4 @@ one and link both ways.
 | [0045](/chartgen/decisions/0045-web-push-for-server-alerts/) | Browser push for server alerts | Accepted | 2026-11-06 |
 | [0046](/chartgen/decisions/0046-pattern-detection/) | Pattern detection: candlesticks, chart patterns, auto fib | Accepted | 2026-11-06 |
 | [0047](/chartgen/decisions/0047-price-based-charts/) | Price-based charts: Renko, Kagi, Point & Figure, Line Break, Range | Accepted | 2026-11-06 |
+| [0049](/chartgen/decisions/0049-one-kline-read-per-symbol/) | One Binance kline read per symbol and interval | Accepted | 2026-11-06 |

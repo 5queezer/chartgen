@@ -437,6 +437,57 @@ describe("mergeTail", () => {
   });
 });
 
+describe("a futures panel with and without data (Funding, OI, L/S)", () => {
+  /** The panel keeps its channels when it has no values, so a tail merges either way. */
+  const funding = (s: SeriesPayload, label: string, value: number | null): SeriesPayload => {
+    const n = s.bars.length;
+    return {
+      ...s,
+      indicators: {
+        funding: {
+          label,
+          is_overlay: false,
+          hlines: [{ y: 0 }],
+          histogram: [
+            {
+              index: 0,
+              label,
+              values: Array<number | null>(n).fill(value),
+              palette: value === null ? [] : ["rgba(38, 166, 154, 0.7)"],
+              color_idx: Array<number | null>(n).fill(value === null ? null : 0),
+            },
+          ],
+        },
+      },
+    };
+  };
+
+  it("asks for a reload when an empty panel gets values, and merges once reloads run out", () => {
+    const cur = funding(serve({ bars: 30, now: 100 }), "Funding (unavailable)", null);
+    const tail = funding(serve({ bars: 2, now: 101 }), "Funding", 0.01);
+    // The tail would fill 2 of 30 bars and keep the label: start over instead.
+    expect(mergeTail(cur, tail)).toEqual({ ok: false, reason: "shape" });
+    // A tail that is empty too, or a panel with values, merges as before.
+    const empty = funding(serve({ bars: 2, now: 101 }), "Funding (unavailable)", null);
+    expect(mergeTail(cur, empty).ok).toBe(true);
+    expect(mergeTail(funding(serve({ bars: 30, now: 100 }), "Funding", 0.01), tail).ok).toBe(true);
+    // With no reloads left the live feed merges what fits, the label staying.
+    const last = mergeTail(cur, tail, false);
+    expect(last.ok).toBe(true);
+    if (!last.ok) return;
+    const h = last.series.indicators.funding!;
+    expect(h.label).toBe("Funding (unavailable)");
+    expect(h.histogram![0]!.values.slice(-2)).toEqual([0.01, 0.01]);
+    expect(h.histogram![0]!.values[0]).toBeNull();
+  });
+
+  it("takes an empty tail into a panel with values", () => {
+    const cur = funding(serve({ bars: 30, now: 100 }), "Funding", 0.01);
+    const r = mergeTail(cur, funding(serve({ bars: 2, now: 101 }), "Funding (unavailable)", null));
+    expect(r.ok).toBe(true);
+  });
+});
+
 describe("divlines", () => {
   it("keeps the unclipped line when a tail repeats it clipped", () => {
     // Line 93→98 ends on the last closed bar; the tail [98, 99] sees it

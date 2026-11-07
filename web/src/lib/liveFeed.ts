@@ -350,7 +350,7 @@ export function createLiveFeed(opts: LiveFeedOptions): LiveFeed {
   const merge = (cur: SeriesPayload, tail: SeriesPayload) => {
     const r = mergeTail(cur, tail);
     return !r.ok && r.reason === "shape" && !canReload()
-      ? mergeTail(cur, withoutMisfits(cur, tail))
+      ? mergeTail(cur, withoutMisfits(cur, tail), false)
       : r;
   };
 

@@ -459,15 +459,39 @@ function overwrite<T>(
  * arrays. `from` is the first bar index that changed; bars from there to
  * the end are new or updated.
  */
+/** True when a line or histogram of `ind` has a finite value, looking from the newest bar back. */
+function hasValue(ind: Indicator): boolean {
+  const plots = [...(ind.lines ?? []), ...(ind.histogram ?? [])];
+  return plots.some((p) => {
+    for (let i = p.values.length - 1; i >= 0; i--) if (Number.isFinite(p.values[i])) return true;
+    return false;
+  });
+}
+
+/**
+ * `recoverEmpty`: a panel we hold with no value at all, that the tail has one for,
+ * is a full load that came back empty (a futures series during a Binance cooldown).
+ * The tail would fill only its newest bars, so it fails as "shape" and the caller
+ * reloads, which also brings the label of the full load. Off once reloads run out.
+ */
 export function mergeTail(
   current: SeriesPayload,
   tail: SeriesPayload,
+  recoverEmpty = true,
 ): MergeResult<{ from: number }> {
   const problem = headerProblem(current, tail, false);
   if (problem) return fail(problem);
   // Values for a key we only hold an error for: it failed on the full load and
   // works now. Only a full load can bring it back (MAX_RELOADS bounds the attempts).
   if (Object.keys(tail.indicators).some((k) => !current.indicators[k])) return fail("shape");
+  if (
+    recoverEmpty &&
+    Object.entries(current.indicators).some(([k, cur]) => {
+      const tl = tail.indicators[k];
+      return tl && hasValue(tl) && !hasValue(cur);
+    })
+  )
+    return fail("shape");
   const bars = current.bars;
   const oldest = bars[0];
   const newest = bars.at(-1);
