@@ -65,7 +65,7 @@ export const MAX_RECENT_TIMEFRAMES = 5;
 const PREFIX = "chartgen.layout.";
 
 const DEFAULT_SYMBOL = "BTCUSDT";
-const DEFAULT_TIMEFRAME: Timeframe = "1h";
+export const DEFAULT_TIMEFRAME: Timeframe = "1h";
 export const DEFAULT_CHART_TYPE: ChartType = "candles";
 export const DEFAULT_SCALE_MODE: ScaleMode = "normal";
 

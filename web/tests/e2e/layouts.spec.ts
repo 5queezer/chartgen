@@ -3,7 +3,7 @@
 
 import type { Page } from "@playwright/test";
 
-import { test, expect, reloadApp } from "./fixtures/app";
+import { test, expect, gotoApp, reloadApp } from "./fixtures/app";
 
 const layoutButton = (page: Page) =>
   page.getByRole("button", { name: /^Layout:/ });
@@ -157,5 +157,64 @@ test.describe("layouts", () => {
     ).toBeVisible();
     await page.getByRole("textbox", { name: "Search layouts" }).fill("zzz");
     await expect(page.getByRole("dialog")).toContainText("No layouts match");
+  });
+
+  // A layout saved by a newer build (chart type and interval this one does
+  // not know) must open with its symbol and indicators, and keep them on save.
+  test("a stored layout with an unknown type and interval opens and survives a save", async ({
+    page,
+  }) => {
+    await page.addInitScript(() => {
+      if (localStorage.getItem("chartgen.layouts")) return;
+      const base = {
+        symbol: "BTCUSDT",
+        timeframe: "1h",
+        chartType: "candles",
+        scaleMode: "normal",
+        timeZone: "local",
+        compare: [],
+        indicators: ["ema_stack"],
+      };
+      const newer = {
+        ...base,
+        symbol: "ETHUSDT",
+        timeframe: "30s",
+        chartType: "future_type",
+        indicators: ["rsi"],
+      };
+      localStorage.setItem(
+        "chartgen.layouts",
+        JSON.stringify({
+          version: 1,
+          active: "a",
+          items: [
+            { id: "a", name: "Older", updatedAt: 1, state: base },
+            { id: "n", name: "Newer", updatedAt: 2, state: newer },
+          ],
+        }),
+      );
+    });
+    await gotoApp(page);
+    await load(page, "Newer");
+    // The booted chart differs from "Older", so leaving it asks first.
+    await page.getByRole("dialog").getByRole("button", { name: "Don't save" }).click();
+    await expect(layoutName(page)).toHaveText("Newer");
+    await expect(page.getByRole("button", { name: /^Symbol:/ })).toContainText("ETHUSDT");
+    await expect(activeTimeframe(page)).toHaveText("1h");
+    await expect(chip(page, "rsi")).toBeVisible();
+    await expect(chip(page, "ema_stack")).toHaveCount(0);
+
+    await page.keyboard.press("Control+s");
+    await expect(dirtyDot(page)).toHaveCount(0);
+    const saved = await page.evaluate(() => {
+      const f = JSON.parse(localStorage.getItem("chartgen.layouts")!);
+      return f.items.find((l: { id: string }) => l.id === "n").state;
+    });
+    expect(saved).toMatchObject({
+      symbol: "ETHUSDT",
+      timeframe: "1h",
+      chartType: "candles",
+      indicators: ["rsi"],
+    });
   });
 });

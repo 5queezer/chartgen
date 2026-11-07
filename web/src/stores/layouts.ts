@@ -46,6 +46,7 @@ import {
   chartStoreOf,
   DEFAULT_CHART_TYPE,
   DEFAULT_SCALE_MODE,
+  DEFAULT_TIMEFRAME,
   normalizeSymbol,
   SCALE_MODES,
   setTimeZone,
@@ -164,13 +165,16 @@ function parsePane(x: unknown): PaneState | null {
   const sym = normalizeSymbol(x.symbol);
   if (
     sym === null ||
-    !isTimeframe(x.timeframe) ||
-    !(CHART_TYPES as readonly unknown[]).includes(x.chartType) ||
+    typeof x.timeframe !== "string" ||
+    typeof x.chartType !== "string" ||
     !(SCALE_MODES as readonly unknown[]).includes(x.scaleMode) ||
     !Array.isArray(x.indicators)
   ) {
     return null;
   }
+  // A type or interval this build does not know (saved by a newer one) opens
+  // as candles / the default interval for this chart only; the rest stays.
+  // The unknown value itself is not kept: the next save writes the fallback.
   // Same rule as the indicator store: valid entries, each with a unique
   // instance key (ADR-0028; older layouts have none and load unchanged).
   const indicators = normalizeInstances(
@@ -182,8 +186,10 @@ function parsePane(x: unknown): PaneState | null {
   // Any leftover `drawingsBySymbol` key is ignored.
   return {
     symbol: sym,
-    timeframe: x.timeframe,
-    chartType: x.chartType as ChartType,
+    timeframe: isTimeframe(x.timeframe) ? x.timeframe : DEFAULT_TIMEFRAME,
+    chartType: (CHART_TYPES as readonly unknown[]).includes(x.chartType)
+      ? (x.chartType as ChartType)
+      : DEFAULT_CHART_TYPE,
     scaleMode: x.scaleMode as ScaleMode,
     ...(x.invertScale === true ? { invertScale: true } : {}),
     ...(x.lockRatio === true ? { lockRatio: true } : {}),
