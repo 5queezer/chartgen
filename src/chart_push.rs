@@ -180,7 +180,8 @@ impl PushSource for BinanceSource {
     }
 
     fn seed(&self, symbol: &str, timeframe: &str, count: usize) -> Result<OhlcvData, String> {
-        fetch::fetch_ohlcv(DataSource::Live, symbol, timeframe, count, None).map(|f| f.data)
+        // `feed_interval` has turned away anything but a Binance symbol.
+        fetch::fetch_binance_seed(symbol, timeframe, count).map(|f| f.data)
     }
 
     fn run(
@@ -817,8 +818,8 @@ async fn run_group(
     let mut next = Instant::now();
     let feed_grid = Interval::parse(&seed_interval).ok();
     // Klines may be missing: a lag, or a bar that does not follow the last. A
-    // resampled bar would stay wrong, so read again, which costs one page when the
-    // klines are still held, and try again later if the budget says no.
+    // resampled bar would stay wrong, so read again, which costs at most one page when
+    // the klines are still held, and try again later if the budget says no.
     let mut missing = false;
     let mut next_read = Instant::now();
     loop {
