@@ -4,7 +4,7 @@
 
 import type { Page } from "@playwright/test";
 
-import { test, expect } from "./fixtures/app";
+import { test, expect, openSidebarTab } from "./fixtures/app";
 
 interface PaneInfo {
   pane: number;
@@ -39,7 +39,7 @@ async function activate(page: Page, n: number): Promise<void> {
 }
 
 async function pickSymbol(page: Page, sym: string): Promise<void> {
-  await page.getByRole("tab", { name: "Watchlist" }).click();
+  await openSidebarTab(page, "Watchlist");
   await page
     .getByRole("table", { name: "Watchlist" })
     .locator(`[role=row][data-symbol="${sym}"]`)
@@ -52,7 +52,7 @@ const toasts = (page: Page) => page.locator("[data-toast]").filter({ hasText: "A
 
 /** On the active chart's symbol, which is what the dialog takes. */
 async function createServerAlert(page: Page, condition: string): Promise<void> {
-  await page.getByRole("tab", { name: /^Alerts/ }).click();
+  await openSidebarTab(page, /^Alerts/);
   await page.getByRole("button", { name: "Create alert" }).click();
   await expect(dialog(page)).toBeVisible();
   await dialog(page).getByLabel("Run on server").check();
@@ -122,7 +122,7 @@ test("clicking a server alert puts its symbol on the active chart alone", async 
   await pickSymbol(page, "ETHUSDT");
   await expect.poll(async () => (await panes(page))[1]!.symbol).toBe("ETHUSDT");
 
-  await page.getByRole("tab", { name: /^Alerts/ }).click();
+  await openSidebarTab(page, /^Alerts/);
   await rows(page).click();
   await expect.poll(async () => (await panes(page))[1]!.symbol).toBe("SOLUSDT");
   expect((await panes(page))[0]!.symbol).toBe("BTCUSDT");

@@ -6,7 +6,7 @@
 
 import type { Page, Request } from "@playwright/test";
 
-import { test, expect, gotoApp } from "./fixtures/app";
+import { test, expect, gotoApp, openSidebarTab } from "./fixtures/app";
 
 interface ToolCall {
   name: string;
@@ -235,7 +235,7 @@ test.describe("bar replay", () => {
   });
 
   test("the Data Window shows the replay bar, never a later one", async ({ bootedApp: page }) => {
-    await page.getByRole("tab", { name: "Data Window" }).click();
+    await openSidebarTab(page, "Data Window");
     const dwClose = async () => Number(await page.getByTestId("dw-c").textContent());
     const liveTime = await page.getByTestId("dw-time").textContent();
     await startInMiddle(page);

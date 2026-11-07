@@ -4,7 +4,7 @@
 
 import type { Page } from "@playwright/test";
 
-import { test as appTest, expect, gotoApp, pickTool, reloadApp } from "./fixtures/app";
+import { test as appTest, expect, gotoApp, pickTool, reloadApp, openSidebarTab } from "./fixtures/app";
 
 /** Not Mac, whatever the host: there Cmd inverts the magnet, and these tests hold Ctrl. */
 const test = appTest.extend({
@@ -1564,7 +1564,7 @@ test.describe("drawing modifiers", () => {
     await clickAt(page, { x: 430, y: 195 }, "right");
     await drawingMenu(page).getByRole("menuitem", { name: "Add alert on Trend line…" }).click();
     await dialog(page).getByRole("button", { name: "Create" }).click();
-    await page.getByRole("tab", { name: /^Alerts/ }).click();
+    await openSidebarTab(page, /^Alerts/);
     await expect(alertRows(page)).toHaveCount(1);
     await expect(alertRows(page).locator("[data-role=status]")).not.toContainText("inactive");
 
@@ -1623,7 +1623,7 @@ test.describe("drawing modifiers", () => {
     expect(await offered()).toBe(true);
 
     // Two alerts on it, one paused.
-    await page.getByRole("tab", { name: /^Alerts/ }).click();
+    await openSidebarTab(page, /^Alerts/);
     for (const _ of [0, 1]) {
       await page.keyboard.press("Alt+KeyA");
       await dialog(page).getByLabel("Source").selectOption({ label: "Extended line" });
@@ -1651,7 +1651,7 @@ test.describe("drawing modifiers", () => {
     // An alert made on 1h before it stopped being offered there: dead on 1h, and says so.
     await bindAlertsTo(page, "1h");
     await reloadApp(page);
-    await page.getByRole("tab", { name: /^Alerts/ }).click();
+    await openSidebarTab(page, /^Alerts/);
     await expect(status).toHaveText("inactive: open BTCUSDT 1h");
     await interval("1h");
     await expect(live).toHaveAttribute("data-status", "inactive");
@@ -1702,7 +1702,7 @@ test.describe("drawing modifiers", () => {
       }, apart);
       await reloadApp(page);
       await expect.poll(async () => (await overlays(page)).length).toBe(1);
-      await page.getByRole("tab", { name: /^Alerts/ }).click();
+      await openSidebarTab(page, /^Alerts/);
       return level;
     };
 
@@ -1758,7 +1758,7 @@ test.describe("drawing modifiers", () => {
     await clickAt(page, { x: 300, y: 165 });
     await clickAt(page, { x: 560, y: 260 });
     await expect.poll(async () => (await overlays(page)).length).toBe(1);
-    await page.getByRole("tab", { name: /^Alerts/ }).click();
+    await openSidebarTab(page, /^Alerts/);
     await page.keyboard.press("Alt+KeyA");
     await dialog(page).getByLabel("Source").selectOption({ label: "Trend line" });
     await dialog(page).getByRole("button", { name: "Create" }).click();
@@ -1766,7 +1766,7 @@ test.describe("drawing modifiers", () => {
 
     const other = await context.newPage();
     await gotoApp(other);
-    await other.getByRole("tab", { name: /^Alerts/ }).click();
+    await openSidebarTab(other, /^Alerts/);
     await showInterval(other, "1h");
     const statusIn = (p: Page) => alertRows(p).first().locator("[data-role=status]");
     await expect(other.locator("[data-role=alerts-elsewhere]")).toBeVisible();
@@ -1803,7 +1803,7 @@ test.describe("drawing modifiers", () => {
 
     await showInterval(page, "15m");
     await drawLineWithinAnHour(page);
-    await page.getByRole("tab", { name: /^Alerts/ }).click();
+    await openSidebarTab(page, /^Alerts/);
     await page.keyboard.press("Alt+KeyA");
     await dialog(page).getByLabel("Source").selectOption({ label: "Extended line" });
     await dialog(page).getByLabel("Trigger").selectOption("every");
@@ -1811,7 +1811,7 @@ test.describe("drawing modifiers", () => {
     await expect(dialog(page)).toHaveCount(0);
     await bindAlertsTo(page, "1h");
     await reloadApp(page);
-    await page.getByRole("tab", { name: /^Alerts/ }).click();
+    await openSidebarTab(page, /^Alerts/);
     await showInterval(page, "1h");
 
     const statusIn = (p: Page) => alertRows(p).first().locator("[data-role=status]");
@@ -1824,7 +1824,7 @@ test.describe("drawing modifiers", () => {
     // The second window, on another interval, shares the storage and not the verdict.
     const other = await context.newPage();
     await gotoApp(other);
-    await other.getByRole("tab", { name: /^Alerts/ }).click();
+    await openSidebarTab(other, /^Alerts/);
     await showInterval(other, "15m");
     await expect(statusIn(other)).toHaveText("inactive: open BTCUSDT 1h");
     await page.waitForTimeout(1500);
@@ -1833,7 +1833,7 @@ test.describe("drawing modifiers", () => {
 
     // The other window leads from here on, so that its chart is the one evaluated.
     await reloadApp(page);
-    await page.getByRole("tab", { name: /^Alerts/ }).click();
+    await openSidebarTab(page, /^Alerts/);
     await expect(page.locator("[data-role=alerts-elsewhere]")).toBeVisible();
 
     // Each keeps its own through more changes on the other side.

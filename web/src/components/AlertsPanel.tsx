@@ -33,7 +33,6 @@ import {
   updateServerAlert,
 } from "../stores/serverAlerts";
 import type { ServerAlert } from "../types/responses";
-import { setWatchlistCollapsed } from "../stores/watchlist";
 import { leader, showToast } from "../services/alertEngine";
 import { openAlertDialog } from "./AlertDialog";
 import { PushControl } from "./PushControl";
@@ -74,15 +73,6 @@ export function AlertsPanel(): JSX.Element {
           onClick={() => openAlertDialog()}
         >
           +
-        </button>
-        <button
-          type="button"
-          class={iconButtonClass}
-          aria-label="Collapse sidebar"
-          title="Collapse sidebar"
-          onClick={() => setWatchlistCollapsed(true)}
-        >
-          <span aria-hidden="true">»</span>
         </button>
       </div>
       <Show when={!leader()}>
