@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { loadErrorReason } from "./chartLoadError";
+import { boxRefusal, loadErrorReason } from "./chartLoadError";
 
 describe("loadErrorReason", () => {
   it("names unknown indicators, one or several", () => {
@@ -18,5 +18,35 @@ describe("loadErrorReason", () => {
   it("offers nothing to remove for other failures", () => {
     expect(loadErrorReason("MCP tool error: no data for ZZZ")).toEqual({ text: "symbol not found", indicators: [] });
     expect(loadErrorReason("HTTP 502")).toEqual({ text: "request failed", indicators: [] });
+  });
+});
+
+describe("boxRefusal", () => {
+  it("finds the sentence, and nothing in other errors", () => {
+    expect(boxRefusal("MCP tool error: Box size 1e-7 is too small; choose a larger one.")).toBe(
+      "Box size 1e-7 is too small; choose a larger one.",
+    );
+    expect(
+      boxRefusal("MCP tool error: The source bars give no box size (no price movement); use a fixed box."),
+    ).toBe("The source bars give no box size (no price movement); use a fixed box.");
+    expect(boxRefusal("MCP tool error: chart_params.box fixed needs box_size.")).toBeNull();
+  });
+});
+
+describe("errors that say what to change", () => {
+  it("keeps the server's own words", () => {
+    expect(
+      loadErrorReason(
+        "MCP tool error: The chart would have too many bars. Box size 1e-7 is too small; choose a larger one.",
+      ).text,
+    ).toBe("Box size 1e-7 is too small; choose a larger one.");
+    expect(
+      loadErrorReason(
+        "MCP tool error: Data fetch failed: Yahoo has no seconds data: AAPL cannot be charted at 5s. Seconds intervals need a Binance symbol.",
+      ).text,
+    ).toBe("Yahoo has no seconds data: AAPL cannot be charted at 5s. Seconds intervals need a Binance symbol.");
+    expect(
+      loadErrorReason("MCP tool error: The source bars give no box size (no price movement); use a fixed box.").text,
+    ).toBe("no box size (no price movement); use a fixed box.");
   });
 });

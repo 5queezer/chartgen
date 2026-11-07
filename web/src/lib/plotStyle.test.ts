@@ -4,6 +4,7 @@ import {
   barColor,
   figureOverrides,
   figureStyle,
+  isLevelJump,
   plotColorAt,
   plotsOf,
   rekeyPlots,
@@ -11,6 +12,15 @@ import {
 } from "./plotStyle";
 
 const colorAt = (n: number) => `#00000${n}`;
+
+describe("isLevelJump", () => {
+  it("is a change between two values, not a gap or a level held", () => {
+    expect(isLevelJump(1, 2)).toBe(true);
+    expect(isLevelJump(1, 1)).toBe(false);
+    expect(isLevelJump(1, null)).toBe(false);
+    expect(isLevelJump(undefined, 2)).toBe(false);
+  });
+});
 
 describe("plotsOf", () => {
   it("keys unique line labels by label and the rest by index", () => {

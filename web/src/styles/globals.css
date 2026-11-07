@@ -521,6 +521,33 @@ body {
 }
 
 /* History paging state at the chart's left edge (Chart). */
+/* How an order-flow chart was made, and its settings (ADR-0048). */
+.orderflow-status {
+  position: absolute;
+  /* Over klinecharts' pane separators (20), under the active chart's frame (30). */
+  z-index: 25;
+  bottom: 28px;
+  left: 8px;
+  max-width: calc(100% - 90px);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 6px;
+  border: 1px solid var(--color-border);
+  border-radius: 4px;
+  font-size: 11px;
+  color: var(--color-fg-muted);
+  background-color: var(--color-bg-elev);
+}
+
+.orderflow-status.above-table {
+  bottom: 198px;
+}
+
+.orderflow-status button {
+  cursor: pointer;
+}
+
 .history-status {
   position: absolute;
   z-index: 3;

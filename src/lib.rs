@@ -1,3 +1,4 @@
+#![recursion_limit = "512"]
 pub mod binance_gate;
 pub mod data;
 pub mod engine;
@@ -8,6 +9,8 @@ pub mod indicators;
 pub mod interval;
 pub mod mcp_schema;
 pub mod mtf;
+pub mod orderflow;
+pub mod price_bars;
 pub mod push;
 pub mod renderer;
 #[cfg(feature = "scripting")]

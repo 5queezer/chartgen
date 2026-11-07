@@ -7,11 +7,13 @@ use std::sync::{Arc, RwLock};
 
 use crate::chart_push::{ChartRequest, PushCtx, MAX_INDICATORS, NOT_PUSHABLE, PUSH_LIMIT};
 use crate::fetch;
+use crate::intrabars;
 use crate::search;
 use chartgen::data;
 use chartgen::engine::Engine;
 use chartgen::indicator::Indicator;
 use chartgen::indicators;
+use chartgen::price_bars;
 use chartgen::renderer;
 #[cfg(feature = "scripting")]
 use chartgen::scripting;
@@ -177,6 +179,8 @@ fn call_tool(
         "list_indicators" => tool_list_indicators(id, user),
         "get_indicators" => tool_get_indicators(id, &arguments, engine),
         "get_quotes" => tool_get_quotes(id, &arguments),
+        "get_footprint" => tool_get_footprint(id, &arguments),
+        "get_tpo" => tool_get_tpo(id, &arguments),
         "search_symbols" => tool_search_symbols(id, &arguments),
         "place_order" => tool_place_order(id, &arguments, engine),
         "cancel_order" => tool_cancel_order(id, &arguments, engine),
@@ -399,7 +403,17 @@ fn warmup_arg(args: &Value, panels: &[Box<dyn Indicator>]) -> usize {
     if asked == 0 {
         return 0;
     }
-    let need = panels.iter().map(|i| i.warmup_bars()).max().unwrap_or(0);
+    let chart_secs = args
+        .get("timeframe")
+        .or_else(|| args.get("interval"))
+        .and_then(Value::as_str)
+        .and_then(|t| chartgen::interval::Interval::parse(t).ok())
+        .map(|iv| iv.secs());
+    let need = panels
+        .iter()
+        .map(|i| i.warmup_bars_at(chart_secs))
+        .max()
+        .unwrap_or(0);
     asked.max(need).min(MAX_WARMUP)
 }
 
@@ -414,9 +428,36 @@ fn chart_style_arg(args: &Value) -> Result<&'static str, &'static str> {
         Some(v) => match v.as_str() {
             Some("candles") => Ok("candles"),
             Some("heikin_ashi") => Ok("heikin_ashi"),
-            _ => Err("chart_style must be one of 'candles' or 'heikin_ashi'."),
+            Some(s) => price_bars::STYLES
+                .iter()
+                .find(|n| **n == s)
+                .copied()
+                .ok_or(CHART_STYLE_ERROR),
+            None => Err(CHART_STYLE_ERROR),
         },
     }
+}
+
+const CHART_STYLE_ERROR: &str = "chart_style must be one of 'candles', 'heikin_ashi', 'renko', 'kagi', 'point_figure', 'line_break' or 'range'.";
+
+/// The inputs of a price-based `chart_style` (ADR-0047); `None` for any other
+/// style, which takes no `chart_params`.
+fn chart_params_arg(args: &Value, style: &str) -> Result<Option<price_bars::Params>, String> {
+    let given = args.get("chart_params").filter(|v| !v.is_null());
+    match price_bars::Kind::from_style(style) {
+        Some(kind) => price_bars::Params::parse(kind, given).map(Some),
+        None if given.is_some() => Err(format!(
+            "chart_params does not apply to chart_style {style}."
+        )),
+        None => Ok(None),
+    }
+}
+
+/// `params` with the box its build ended up on, as a response echoes it.
+fn chart_params_echo(params: &price_bars::Params, box_size: f64) -> Value {
+    let mut echo = params.clone();
+    echo.box_size = (box_size > 0.0).then_some(box_size);
+    echo.to_json()
 }
 
 /// The canonical form of a requested timeframe, or why it is rejected
@@ -481,6 +522,10 @@ pub(crate) fn generate_chart(
         Ok(s) => s,
         Err(e) => return tool_err(id, e),
     };
+    let price_params = match chart_params_arg(args, chart_style) {
+        Ok(p) => p,
+        Err(e) => return tool_err(id, &e),
+    };
 
     // Accept both "symbol" and "ticker" parameter names
     let symbol = args
@@ -542,12 +587,24 @@ pub(crate) fn generate_chart(
     } else {
         0
     };
-    let requested = bars + warmup;
+    let parsed_interval = chartgen::interval::Interval::parse(interval);
+    // Price-based bars read a fixed window of source bars, however many bars the
+    // call wants: how many they make is only known afterwards (ADR-0047).
+    let requested = match (&price_params, &parsed_interval) {
+        (Some(_), Ok(iv)) => price_bars::source_bars(iv, fetch::MAX_BASE_BARS),
+        _ => bars + warmup,
+    };
+    if price_params.is_some() && symbol.is_none() && source == fetch::DataSource::Live {
+        return tool_err(
+            id,
+            "This chart_style needs a ticker: the demo series has no times.",
+        );
+    }
 
     // Without a ticker the live source serves the synthetic demo series
     // (no timestamps, so nothing to page). With one, a fetch failure is an
     // error in every format: sample bars would masquerade as market data.
-    let (mut data, has_more) = match (symbol, source) {
+    let (mut data, mut has_more) = match (symbol, source) {
         (None, fetch::DataSource::Live) if end_time.is_none() => {
             (data::sample_data(requested), false)
         }
@@ -562,6 +619,7 @@ pub(crate) fn generate_chart(
                 // Warmup bars are trimmed from the payload. When history ran
                 // out they are still older bars the client has not seen, so
                 // it must page on to get them (ADR-0032).
+                Ok(f) if price_params.is_some() => (f.data, f.has_more),
                 Ok(f) => {
                     let more = f.has_more || f.data.len() > bars;
                     (f.data, more)
@@ -577,6 +635,38 @@ pub(crate) fn generate_chart(
     if chart_style == "heikin_ashi" {
         data = data.heikin_ashi();
     }
+    let mut build_anchor = None;
+    let mut style_label = None;
+    let chart_params_json = match (&price_params, &parsed_interval) {
+        (Some(params), Ok(iv)) => {
+            let opts = price_bars::BuildOpts {
+                max_base: fetch::MAX_BASE_BARS,
+                end_time_ms: end_time,
+                now_ms: fetch::now_ms(),
+                reach_secs: fetch::read_reach_secs(
+                    source,
+                    symbol.unwrap_or(""),
+                    iv,
+                    requested,
+                    data.session.is_some(),
+                ),
+            };
+            let built = match price_bars::build(&data.bars, iv, params, &opts) {
+                Ok(b) => b,
+                Err(e) => return tool_err(id, &e),
+            };
+            data.bars = built.bars;
+            build_anchor = built.anchor;
+            style_label = Some(params.label(built.box_size));
+            has_more |= data.len() > bars;
+            // png and summary show exactly `bars`, as for every other style.
+            if !want_series {
+                data.bars.drain(..data.len().saturating_sub(bars));
+            }
+            Some(chart_params_echo(params, built.box_size))
+        }
+        _ => None,
+    };
 
     // Compute indicators up-front (once) so both the summary and the series
     // payloads can reuse the same PanelResult values — no recomputation,
@@ -599,6 +689,10 @@ pub(crate) fn generate_chart(
             "price": ohlcv_summary(&data),
             "indicators": Value::Object(indicators_json),
         });
+        if let Some(chart_params) = &chart_params_json {
+            summary["chart_style"] = json!(chart_style);
+            summary["chart_params"] = chart_params.clone();
+        }
         if let Some(errors) = &errors_value {
             summary["indicator_errors"] = errors.clone();
         }
@@ -609,6 +703,24 @@ pub(crate) fn generate_chart(
 
     let series_value = want_series.then(|| {
         let mut series = series_json(&data, &computed, &inds, bars, chart_style, has_more);
+        if let Some(chart_params) = &chart_params_json {
+            series["chart_params"] = chart_params.clone();
+            series["anchor"] = json!(build_anchor);
+        }
+        // Only a chart's full load asks. Pages and tails keep the load's profile
+        // (ADR-0009), so reading finer bars for them would pay for nothing.
+        if args.get("profile_intrabars").and_then(Value::as_bool) == Some(true) {
+            let price_based = chart_params_json.is_some();
+            apply_intrabar_profiles(
+                &mut series,
+                &data,
+                &computed,
+                &inds,
+                bars,
+                source,
+                price_based,
+            );
+        }
         if let Some(errors) = &errors_value {
             series["indicator_errors"] = errors.clone();
         }
@@ -626,7 +738,14 @@ pub(crate) fn generate_chart(
 
         let results: Vec<&chartgen::indicator::PanelResult> =
             computed.iter().map(|(_, pr)| pr).collect();
-        if let Err(e) = renderer::render_results(&data, &results, &tmp_path, width, height) {
+        if let Err(e) = renderer::render_labeled(
+            &data,
+            &results,
+            &tmp_path,
+            width,
+            height,
+            style_label.as_deref(),
+        ) {
             return tool_err(id, &format!("Render error: {}", e));
         }
 
@@ -668,6 +787,98 @@ pub(crate) fn generate_chart(
         "id": id,
         "result": { "content": content }
     })
+}
+
+/// Replace the profiles that want it with their form from lower-timeframe bars
+/// (ADR-0048). Without those bars, for whatever reason, they stay as computed: the
+/// entry then has no `profile_interval`, which is how a client can tell.
+fn apply_intrabar_profiles(
+    series: &mut Value,
+    data: &chartgen::data::OhlcvData,
+    computed: &[(String, chartgen::indicator::PanelResult)],
+    inds: &[&dyn Indicator],
+    bars: usize,
+    source: fetch::DataSource,
+    price_based: bool,
+) {
+    if !inds.iter().any(|i| i.wants_intrabars()) {
+        return;
+    }
+    let visible = chartgen::data::OhlcvData {
+        bars: data.bars[data.len().saturating_sub(bars)..].to_vec(),
+        symbol: data.symbol.clone(),
+        interval: data.interval.clone(),
+        session: data.session,
+    };
+    let Some(ltf) = intrabars_for(&visible, source, price_based) else {
+        return;
+    };
+    for ((key, _), ind) in computed.iter().zip(inds) {
+        if let Some(pr) = ind.with_intrabars(&visible, &ltf.0) {
+            let mut entry = panel_result_to_series_json(&pr, &visible);
+            entry["profile_interval"] = json!(ltf.1);
+            series["indicators"][key] = entry;
+        }
+    }
+}
+
+/// How long a chart's load waits for a profile's finer bars before spreading its own.
+/// Far longer than the few pages should take, and short enough not to hold up a chart.
+const PROFILE_BUDGET: std::time::Duration = std::time::Duration::from_secs(8);
+
+/// Lower-timeframe bars covering `visible`, and their interval, if one can be afforded.
+fn intrabars_for(
+    visible: &chartgen::data::OhlcvData,
+    source: fetch::DataSource,
+    price_based: bool,
+) -> Option<(chartgen::data::OhlcvData, &'static str)> {
+    let symbol = visible.symbol.as_deref()?;
+    let iv = chartgen::interval::Interval::parse(visible.interval.as_deref()?).ok()?;
+    let first: i64 = visible.bars.first()?.date.parse().ok()?;
+    let last: i64 = visible.bars.last()?.date.parse().ok()?;
+    let age = fetch::now_ms() / 1000 - first;
+    // A price-based bar covers however long its move took (ADR-0047), so these bars say
+    // nothing of the time to read. Planned on their count, the read would stop at its
+    // page limit and the profile would hold only the chart's newest part.
+    let plan_bars = if price_based {
+        ((iv.grid_end(last) - first) / iv.secs()).max(1) as usize
+    } else {
+        visible.len()
+    };
+    let (name, secs) = intrabars::plan(fetch::detect_source(symbol), iv.secs(), plan_bars, age)?;
+    let list = intrabars::load_within(
+        PROFILE_BUDGET,
+        source,
+        symbol,
+        name,
+        secs,
+        &visible.bars,
+        iv.grid_end(last),
+    )
+    .ok()?;
+    if list.is_empty() {
+        return None;
+    }
+    let bars = list
+        .iter()
+        .map(|b| chartgen::data::Bar {
+            open: b.open,
+            high: b.high,
+            low: b.low,
+            close: b.close,
+            volume: b.volume,
+            date: b.t.to_string(),
+        })
+        .collect();
+    Some((
+        chartgen::data::OhlcvData {
+            bars,
+            symbol: visible.symbol.clone(),
+            interval: Some(name.to_string()),
+            session: None,
+        },
+        name,
+    ))
 }
 
 /// Computed panels for a chart: `(key, result)` and the indicator of each
@@ -775,7 +986,13 @@ fn series_json(
         }
         let mut entry = panel_result_to_series_json(&trimmed, &visible);
         add_marks_to_series_json(&mut entry, pr, data, offset);
-        if let Some(p) = ind.projection(data) {
+        // Price-based bars have no next bar's time to project to (ADR-0047).
+        let projection = if price_bars::Kind::from_style(chart_style).is_none() {
+            ind.projection(data)
+        } else {
+            None
+        };
+        if let Some(p) = projection {
             // Every bar, not the visible ones: the times read closed days off
             // the loaded bars, and a two-bar tail shows too few.
             entry["future"] = projection_to_json(&p, data);
@@ -792,35 +1009,74 @@ fn series_json(
     })
 }
 
+/// What a pushed price-based tail is built with: inputs with the box pinned, and
+/// the newest bar's time in the last tail sent, if there was one.
+pub(crate) struct PriceTail {
+    pub params: price_bars::Params,
+    pub since: Option<i64>,
+}
+
 /// The `format=series` payload for the newest `bars` of `raw` (symbol and
 /// interval set, `bars` + warmup long), computed exactly like
 /// `generate_chart`: Heikin Ashi first, then indicators over every bar, then
-/// trimmed. Chart push (ADR-0021) builds its tails with this.
+/// trimmed. `price` builds a price-based style first (ADR-0047), its box already
+/// pinned. Chart push (ADR-0021) builds its tails with this.
 pub(crate) fn series_tail(
     raw: &chartgen::data::OhlcvData,
     indicators: &Value,
     chart_style: &str,
+    price: Option<&PriceTail>,
     bars: usize,
 ) -> Result<Value, String> {
     let (panel_indicators, keys, unknown, invalid, _) = parse_panels(indicators, None);
     check_panels(&unknown, &invalid)?;
-    let ha;
+    let derived;
+    let mut echo = None;
+    let mut build_anchor = None;
+    let mut bars = bars;
     let data = if chart_style == "heikin_ashi" {
-        ha = raw.heikin_ashi();
-        &ha
+        derived = raw.heikin_ashi();
+        &derived
+    } else if let Some(PriceTail { params, since }) = price {
+        let iv = chartgen::interval::Interval::parse(raw.interval.as_deref().unwrap_or(""))?;
+        let opts = price_bars::BuildOpts {
+            max_base: fetch::MAX_BASE_BARS,
+            end_time_ms: None,
+            now_ms: fetch::now_ms(),
+            // Pushes are Binance only, whose reads are bounded by rows.
+            reach_secs: None,
+        };
+        let built = price_bars::build(&raw.bars, &iv, params, &opts)?;
+        echo = Some(chart_params_echo(params, built.box_size));
+        build_anchor = built.anchor;
+        // A client that holds the last tail needs only what came since, and an overlap.
+        if let Some(since) = since {
+            let new = built
+                .bars
+                .iter()
+                .rev()
+                .take_while(|b| b.date.parse::<i64>().is_ok_and(|t| t >= *since))
+                .count();
+            bars = bars.min(new + 1).max(2);
+        }
+        derived = chartgen::data::OhlcvData {
+            bars: built.bars,
+            symbol: raw.symbol.clone(),
+            interval: raw.interval.clone(),
+            session: raw.session,
+        };
+        &derived
     } else {
         raw
     };
     let (computed, inds, _) = compute_panels(data, &keys, &panel_indicators);
     let has_more = data.len() > bars;
-    Ok(series_json(
-        data,
-        &computed,
-        &inds,
-        bars,
-        chart_style,
-        has_more,
-    ))
+    let mut series = series_json(data, &computed, &inds, bars, chart_style, has_more);
+    if let Some(echo) = echo {
+        series["chart_params"] = echo;
+        series["anchor"] = json!(build_anchor);
+    }
+    Ok(series)
 }
 
 /// `subscribe_chart`: push `generate_chart(format=series, bars=2, warmup)`
@@ -856,6 +1112,18 @@ fn tool_subscribe_chart(
         Ok(s) => s,
         Err(e) => return tool_err(id, e),
     };
+    let price_params = match chart_params_arg(args, chart_style) {
+        Ok(p) => p,
+        Err(e) => return tool_err(id, &e),
+    };
+    // A box resolved here could differ from the one the client's chart was built on,
+    // and a group outlives its first subscriber's load (ADR-0047).
+    if price_params.as_ref().is_some_and(|p| p.resolves_box()) {
+        return tool_err(
+            id,
+            "chart_params needs box_size here: send the box_size generate_chart echoed, so pushed bars line up with the chart you loaded.",
+        );
+    }
     let indicators = indicators_arg(args);
     // Every push recomputes every indicator.
     if indicators
@@ -879,13 +1147,26 @@ fn tool_subscribe_chart(
             &format!("{NOT_PUSHABLE}: the chart uses your scripts; poll generate_chart instead"),
         );
     }
+    // A price-based chart holds its whole read of source bars, as its load does.
+    let (warmup, asked) = match (
+        &price_params,
+        chartgen::interval::Interval::parse(&timeframe),
+    ) {
+        (Some(_), Ok(iv)) => {
+            let w =
+                price_bars::source_bars(&iv, fetch::MAX_BASE_BARS) - crate::chart_push::TAIL_BARS;
+            (w, w)
+        }
+        _ => (warmup_arg(args, &panels), asked_warmup(args)),
+    };
     let req = ChartRequest {
         ticker: ticker.to_string(),
         timeframe,
         indicators: indicators.to_string(),
         chart_style: chart_style.to_string(),
-        warmup: warmup_arg(args, &panels),
-        asked_warmup: asked_warmup(args),
+        chart_params: price_params.as_ref().map(|p| p.to_json().to_string()),
+        warmup,
+        asked_warmup: asked,
     };
     match push.hub.subscribe(token, &push.client, &push.stream, req) {
         Ok(sub) => tool_ok(id, json!({ "subscription_id": sub })),
@@ -1322,6 +1603,10 @@ fn panel_result_to_series_json(
     data: &chartgen::data::OhlcvData,
 ) -> Value {
     let mut out = json!({ "label": pr.label, "is_overlay": pr.is_overlay });
+
+    if pr.level_lines {
+        out["level_lines"] = json!(true);
+    }
 
     if let Some((lo, hi)) = pr.y_range {
         out["y_range"] = json!([finite_or_null(lo), finite_or_null(hi)]);
@@ -1942,6 +2227,271 @@ fn tool_get_indicators(
     }
     output["indicators"] = ind_results;
     tool_ok(id, output)
+}
+
+// get_footprint and get_tpo (ADR-0048)
+// ---------------------------------------------------------------------------
+
+/// Most bars of one `get_footprint`: a screen of the widest cells, and the padding.
+const MAX_FOOTPRINT_BARS: usize = 200;
+const DEFAULT_FOOTPRINT_BARS: usize = 60;
+/// Blocks of one `get_tpo`: 3 Binance requests at most.
+const MAX_TPO_BLOCKS: usize = 3_000;
+const MAX_TPO_PERIODS: usize = 60;
+
+/// An optional number between `min` and `max`, else `default`. Anything else fails.
+fn number_arg(args: &Value, name: &str, default: f64, min: f64, max: f64) -> Result<f64, String> {
+    match args.get(name) {
+        None | Some(Value::Null) => Ok(default),
+        Some(v) => v
+            .as_f64()
+            .filter(|n| (min..=max).contains(n))
+            .ok_or_else(|| format!("{name} must be a number from {min} to {max}.")),
+    }
+}
+
+/// `end_time` as `generate_chart` takes it.
+fn end_time_arg(args: &Value) -> Result<Option<i64>, String> {
+    match args.get("end_time") {
+        None | Some(Value::Null) => Ok(None),
+        Some(v) => {
+            let max = fetch::now_ms().saturating_add(MAX_END_TIME_AHEAD_MS);
+            v.as_i64()
+                .filter(|t| (MIN_END_TIME_MS..=max).contains(t))
+                .map(Some)
+                .ok_or_else(|| "end_time must be an integer, ms since epoch.".to_string())
+        }
+    }
+}
+
+/// A payload as compact JSON: these run to thousands of numbers.
+fn tool_ok_compact(id: Option<Value>, payload: &Value) -> Value {
+    json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "result": { "content": [{ "type": "text", "text": payload.to_string() }] }
+    })
+}
+
+/// Row size from `row_size` or `row_ticks`, or `auto`. Whether it was automatic.
+fn row_arg(args: &Value, tick: f64, auto: impl FnOnce() -> f64) -> Result<(f64, bool), String> {
+    let size = number_arg(args, "row_size", 0.0, 0.0, f64::MAX)?;
+    if size > 0.0 {
+        return Ok((size, false));
+    }
+    let ticks = number_arg(args, "row_ticks", 0.0, 0.0, 1_000_000.0)?;
+    if ticks > 0.0 {
+        return Ok((ticks.round().max(1.0) * tick, false));
+    }
+    Ok((auto(), true))
+}
+
+fn tool_get_footprint(id: Option<Value>, args: &Value) -> Value {
+    match footprint_payload(args, fetch::DataSource::from_env()) {
+        Ok(payload) => tool_ok_compact(id, &payload),
+        Err(e) => tool_err(id, &e),
+    }
+}
+
+fn footprint_payload(args: &Value, source: fetch::DataSource) -> Result<Value, String> {
+    use chartgen::orderflow as of;
+    let symbol = args
+        .get("ticker")
+        .and_then(|v| v.as_str())
+        .ok_or("ticker is required.")?;
+    let interval = check_interval(
+        args.get("timeframe")
+            .and_then(|v| v.as_str())
+            .unwrap_or("1h"),
+    )?;
+    let iv = chartgen::interval::Interval::parse(&interval)?;
+    let bars = number_arg(
+        args,
+        "bars",
+        DEFAULT_FOOTPRINT_BARS as f64,
+        1.0,
+        MAX_FOOTPRINT_BARS as f64,
+    )? as usize;
+    let atr_length = number_arg(args, "atr_length", 14.0, 1.0, 500.0)? as usize;
+    let end_time = end_time_arg(args)?;
+    let value_area = number_arg(args, "value_area", 70.0, 1.0, 100.0)?;
+    let imbalance = number_arg(args, "imbalance", 300.0, 100.0, 100_000.0)?;
+    let stacked = number_arg(args, "stacked", 3.0, 1.0, 100.0)? as usize;
+
+    let fetched = fetch::fetch_ohlcv(source, symbol, &interval, bars + atr_length + 1, end_time)
+        .map_err(|e| format!("Data fetch failed: {e}"))?;
+    let all = &fetched.data.bars;
+    let offset = all.len().saturating_sub(bars);
+    let visible = &all[offset..];
+    let opens: Vec<i64> = visible.iter().filter_map(|b| b.date.parse().ok()).collect();
+    let (Some(&first), Some(&last)) = (opens.first(), opens.last()) else {
+        return Ok(
+            json!({ "symbol": symbol, "interval": interval, "footprints": [], "has_more": false }),
+        );
+    };
+    let last_end = iv.grid_end(last);
+
+    let age = fetch::now_ms() / 1000 - first;
+    // As for a load, whatever is asked now: a daily chart's few bars must not fetch days
+    // of 1m bars its load could not afford. A poll says outright what its load read.
+    let plan_bars = visible.len().max(DEFAULT_FOOTPRINT_BARS);
+    let exchange = fetch::detect_source(symbol);
+    let plan = match args.get("intrabar_interval").and_then(Value::as_str) {
+        Some(load) => intrabars::plan_like_load(exchange, iv.secs(), plan_bars, age, load)?,
+        None => intrabars::plan(exchange, iv.secs(), plan_bars, age),
+    };
+    let list = match plan {
+        Some((name, secs)) => intrabars::load(source, symbol, name, secs, visible, last_end)
+            .map_err(|e| format!("Intrabar fetch failed: {e}"))?,
+        // Nothing finer: the bar is its own only intrabar.
+        None => visible
+            .iter()
+            .filter_map(|b| of::Intrabar::from_bar(b, None))
+            .collect(),
+    };
+
+    let prices: Vec<f64> = visible
+        .iter()
+        .flat_map(|b| [b.high, b.low])
+        .chain(list.iter().flat_map(|b| [b.high, b.low]))
+        .collect();
+    let tick = of::infer_tick(&prices);
+    let (asked, auto) = row_arg(args, tick, || {
+        of::atr(all, atr_length).map_or_else(
+            || {
+                let range = visible.iter().map(|b| b.high - b.low).fold(0.0, f64::max);
+                of::nice_row_size(range / 20.0, tick)
+            },
+            |atr| of::auto_row_size(atr, tick),
+        )
+    })?;
+    let ranges = of::group_by_bar(&opens, last_end, &list);
+    let row = of::footprint_row(asked, visible, &list, &ranges, tick);
+
+    let options = of::FootprintOptions {
+        row,
+        value_area,
+        imbalance,
+        stacked,
+    };
+    let without_data = ranges.iter().filter(|r| r.is_empty()).count();
+    let footprints: Vec<Value> = ranges
+        .into_iter()
+        .zip(&opens)
+        .enumerate()
+        .map(|(k, (range, &t))| {
+            let prev = all.get((offset + k).wrapping_sub(1)).map(|b| b.close);
+            of::build_footprint(t, &list[range], prev, &options).to_json()
+        })
+        .collect();
+    let side = if list.iter().any(|b| b.taker_buy.is_some()) {
+        of::Side::TakerVolume
+    } else {
+        of::Side::CloseVersusOpen
+    };
+    Ok(json!({
+        "symbol": symbol,
+        "interval": interval,
+        "intrabar_interval": plan.map(|p| p.0),
+        "side": side.name(),
+        "row_size": row,
+        "row_auto": auto,
+        "row_widened": row != asked,
+        "tick": tick,
+        "bars_without_data": without_data,
+        "footprints": footprints,
+        "has_more": fetched.has_more || offset > 0,
+    }))
+}
+
+fn tool_get_tpo(id: Option<Value>, args: &Value) -> Value {
+    match tpo_payload(args, fetch::DataSource::from_env()) {
+        Ok(payload) => tool_ok_compact(id, &payload),
+        Err(e) => tool_err(id, &e),
+    }
+}
+
+fn tpo_payload(args: &Value, source: fetch::DataSource) -> Result<Value, String> {
+    use chartgen::orderflow as of;
+    let symbol = args
+        .get("ticker")
+        .and_then(|v| v.as_str())
+        .ok_or("ticker is required.")?;
+    let period = of::Period::parse(args.get("period").and_then(|v| v.as_str()).unwrap_or("1D"))?;
+    let asked_block = check_interval(args.get("block").and_then(|v| v.as_str()).unwrap_or("30m"))?;
+    let asked_secs = chartgen::interval::Interval::parse(&asked_block)?.secs();
+    if !(300..=14_400).contains(&asked_secs) {
+        return Err("block must be from 5m to 4h.".into());
+    }
+    let (block, block_secs) =
+        of::block_for_period((&asked_block, asked_secs), period, MAX_TPO_BLOCKS as i64)
+            .ok_or("period is too long: even 4h blocks cannot cover a whole one.")?;
+    let periods = number_arg(args, "periods", 10.0, 1.0, MAX_TPO_PERIODS as f64)? as usize;
+    let value_area = number_arg(args, "value_area", 70.0, 1.0, 100.0)?;
+    let ib_blocks = number_arg(args, "ib_blocks", 2.0, 1.0, 100.0)? as usize;
+    let end_time = end_time_arg(args)?;
+    let sessions: Vec<of::DaySession> = match args.get("sessions") {
+        None | Some(Value::Null) => Vec::new(),
+        Some(Value::Array(list)) if list.len() <= 5 => list
+            .iter()
+            .map(|v| of::DaySession::parse(v.as_str().unwrap_or("")))
+            .collect::<Result<_, _>>()?,
+        Some(_) => return Err("sessions must be a list of at most 5 HH:MM-HH:MM.".into()),
+    };
+
+    let per_period = (period.max_secs() / block_secs).max(1) as usize;
+    let wanted = periods.saturating_mul(per_period);
+    let limit = wanted.min(MAX_TPO_BLOCKS);
+    let fetched = intrabars::tpo_blocks(source, symbol, &block, block_secs, limit, end_time)
+        .map_err(|e| format!("Data fetch failed: {e}"))?;
+    let blocks: Vec<of::Intrabar> = fetched
+        .data
+        .bars
+        .iter()
+        .filter_map(|b| of::Intrabar::from_bar(b, None))
+        .collect();
+    let tz = fetched.data.session.map_or(chrono_tz::UTC, |s| s.tz);
+    let prices: Vec<f64> = blocks.iter().flat_map(|b| [b.high, b.low]).collect();
+    let tick = if prices.is_empty() {
+        0.01
+    } else {
+        of::infer_tick(&prices)
+    };
+    let (asked, auto) = row_arg(args, tick, || {
+        of::tpo_auto_row(&blocks, period, &sessions, &tz, tick)
+    })?;
+    let widest = of::tpo_widest_range(&blocks, period, &sessions, &tz);
+    let top = prices.iter().copied().fold(0.0, f64::max);
+    let row = of::usable_row(asked, widest, top, tick);
+    let options = of::TpoOptions {
+        block_secs,
+        row,
+        value_area,
+        ib_blocks,
+    };
+    let mut profiles = of::tpo_profiles(&blocks, period, &sessions, &tz, &options);
+    // The oldest period may be cut off by the block budget: only a full read keeps it.
+    let cut = wanted > limit;
+    if cut && profiles.len() > 1 {
+        profiles.remove(0);
+    }
+    let keep = periods.saturating_mul(sessions.len().max(1));
+    let excess = profiles.len().saturating_sub(keep);
+    profiles.drain(..excess);
+    Ok(json!({
+        "symbol": symbol,
+        "period": args.get("period").and_then(|v| v.as_str()).unwrap_or("1D"),
+        "block_widened": block != asked_block,
+        "block": block,
+        "row_size": row,
+        "row_auto": auto,
+        "row_widened": row != asked,
+        "tick": tick,
+        "timezone": tz.to_string(),
+        "periods_cut": cut,
+        "profiles": profiles.iter().map(of::TpoProfile::to_json).collect::<Vec<_>>(),
+        "has_more": fetched.has_more,
+    }))
 }
 
 // ---------------------------------------------------------------------------
@@ -3375,6 +3925,649 @@ mod tests {
         assert_eq!(bar_t(&pre_epoch), json!(-631_152_000_i64));
     }
 
+    // ---- order flow (ADR-0048) ----
+
+    use fetch::DataSource::Sample;
+
+    fn flow_series(args: Value) -> Value {
+        let resp = generate_chart(Some(json!(1)), &args, Sample, None);
+        assert!(!is_error(&resp), "{resp}");
+        serde_json::from_str(chart_content(&resp)[0]["text"].as_str().unwrap()).unwrap()
+    }
+
+    fn close(a: f64, b: f64) -> bool {
+        (a - b).abs() <= 1e-3 * a.abs().max(1.0)
+    }
+
+    #[test]
+    fn a_footprint_is_one_item_per_bar_with_its_rows_adding_up_to_its_totals() {
+        // Not to the chart bar's volume: sample intrabars are cut from it, so that would
+        // hold by construction here, and a real source's minutes need not sum to its hour.
+        let args = json!({ "ticker": "BTCUSDT", "timeframe": "1h", "bars": 5, "end_time": 1_699_920_000_000i64 });
+        let fp = footprint_payload(&args, Sample).unwrap();
+        assert_eq!(fp["intrabar_interval"], "1m");
+        assert_eq!(fp["side"], "taker_volume");
+        assert_eq!(fp["row_auto"], true);
+        let list = fp["footprints"].as_array().unwrap();
+        assert_eq!(list.len(), 5);
+        let chart = flow_series(json!({ "ticker": "BTCUSDT", "timeframe": "1h", "bars": 5,
+            "end_time": 1_699_920_000_000i64, "format": "series", "indicators": [] }));
+        for (f, bar) in list.iter().zip(chart["bars"].as_array().unwrap()) {
+            assert_eq!(f["t"], bar["t"]);
+            let total = f["buy"].as_f64().unwrap() + f["sell"].as_f64().unwrap();
+            let rows = f["rows"].as_array().unwrap();
+            let in_rows: f64 = rows
+                .iter()
+                .map(|r| r[1].as_f64().unwrap() + r[2].as_f64().unwrap())
+                .sum();
+            assert!(close(in_rows, total), "{in_rows} {total}");
+            // POC and value area are row prices, and the POC is inside it.
+            let (val, poc, vah) = (
+                f["val"].as_f64().unwrap(),
+                f["poc"].as_f64().unwrap(),
+                f["vah"].as_f64().unwrap(),
+            );
+            assert!(val <= poc && poc < vah, "{val} {poc} {vah}");
+        }
+    }
+
+    #[test]
+    fn a_tail_reads_the_same_interval_as_its_load() {
+        let interval = |bars: u64| {
+            let args = json!({ "ticker": "BTCUSDT", "timeframe": "1d", "bars": bars });
+            footprint_payload(&args, Sample).unwrap()["intrabar_interval"].clone()
+        };
+        assert_eq!(interval(60), "30m");
+        assert_eq!(interval(3), "30m");
+    }
+
+    #[test]
+    fn a_stocks_poll_reads_what_its_load_read_though_its_few_bars_are_younger() {
+        // A load reaching 12 days back: too old for Yahoo's 1m.
+        let end = fetch::now_ms() - 10 * 86_400_000;
+        let load = json!({ "ticker": "AAPL", "timeframe": "1h", "bars": 60, "end_time": end });
+        let load = footprint_payload(&load, Sample).unwrap();
+        assert_eq!(load["intrabar_interval"], "5m");
+        let poll = |extra: Value| {
+            let mut args = json!({ "ticker": "AAPL", "timeframe": "1h", "bars": 3 });
+            args.as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            footprint_payload(&args, Sample)
+        };
+        assert_eq!(poll(json!({})).unwrap()["intrabar_interval"], "1m");
+        let kept = json!({ "intrabar_interval": load["intrabar_interval"] });
+        assert_eq!(poll(kept).unwrap()["intrabar_interval"], "5m");
+        let nothing = poll(json!({ "intrabar_interval": "none" })).unwrap();
+        assert_eq!(nothing["intrabar_interval"], Value::Null);
+        assert!(poll(json!({ "intrabar_interval": "nonsense" })).is_err());
+    }
+
+    #[test]
+    fn a_stock_has_no_taker_volume_and_says_so() {
+        let args = json!({ "ticker": "AAPL", "timeframe": "1h", "bars": 3 });
+        let fp = footprint_payload(&args, Sample).unwrap();
+        assert_eq!(fp["side"], "close_vs_open");
+        assert_eq!(fp["intrabar_interval"], "1m");
+    }
+
+    #[test]
+    fn a_chart_with_nothing_finer_reads_its_own_bars_and_says_so() {
+        // Yahoo's finest is 1m, and 1m is the chart.
+        let args = json!({ "ticker": "AAPL", "timeframe": "1m", "bars": 3 });
+        let fp = footprint_payload(&args, Sample).unwrap();
+        assert_eq!(fp["intrabar_interval"], Value::Null);
+        assert_eq!(fp["footprints"].as_array().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn row_size_settings_apply_and_the_row_size_is_reported() {
+        let base = json!({ "ticker": "BTCUSDT", "timeframe": "1h", "bars": 2, "row_size": 2.5 });
+        let fp = footprint_payload(&base, Sample).unwrap();
+        assert_eq!(fp["row_size"], 2.5);
+        assert_eq!(fp["row_auto"], false);
+        for r in fp["footprints"][0]["rows"].as_array().unwrap() {
+            let steps = r[0].as_f64().unwrap() / 2.5;
+            assert!((steps - steps.round()).abs() < 1e-6, "{r}");
+        }
+        let ticks = json!({ "ticker": "BTCUSDT", "timeframe": "1h", "bars": 2, "row_ticks": 4 });
+        let fp = footprint_payload(&ticks, Sample).unwrap();
+        let (row, tick) = (
+            fp["row_size"].as_f64().unwrap(),
+            fp["tick"].as_f64().unwrap(),
+        );
+        assert!(close(row, 4.0 * tick), "{row} {tick}");
+        // Too fine to fit: widened, and it says so.
+        let fine = json!({ "ticker": "BTCUSDT", "timeframe": "1h", "bars": 2, "row_size": 1e-6 });
+        let fp = footprint_payload(&fine, Sample).unwrap();
+        assert_eq!(fp["row_widened"], true);
+        for f in fp["footprints"].as_array().unwrap() {
+            assert!(f["rows"].as_array().unwrap().len() <= 210);
+        }
+        // Larger than any price: no row of a whole chart at a POC of 0.
+        let huge = json!({ "ticker": "BTCUSDT", "timeframe": "1h", "bars": 2, "row_size": 1e308 });
+        let fp = footprint_payload(&huge, Sample).unwrap();
+        assert_eq!(fp["row_widened"], true);
+        assert!(fp["row_size"].as_f64().unwrap() < 1e9, "{}", fp["row_size"]);
+        let tpo = tpo_payload(
+            &json!({ "ticker": "BTCUSDT", "periods": 1, "row_size": 1e308 }),
+            Sample,
+        );
+        assert!(tpo.unwrap()["row_size"].as_f64().unwrap() < 1e9);
+    }
+
+    #[test]
+    fn the_imbalance_setting_changes_what_is_marked() {
+        let count = |pct: f64| {
+            let args = json!({ "ticker": "BTCUSDT", "timeframe": "1h", "bars": 40, "imbalance": pct,
+                "end_time": 1_699_920_000_000i64 });
+            let fp = footprint_payload(&args, Sample).unwrap();
+            fp["footprints"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|f| f["buy_imbalances"].as_array().unwrap().len())
+                .sum::<usize>()
+        };
+        assert!(
+            count(100.0) > count(300.0),
+            "{} {}",
+            count(100.0),
+            count(300.0)
+        );
+    }
+
+    #[test]
+    fn footprint_arguments_are_checked() {
+        for (args, wanted) in [
+            (json!({}), "ticker"),
+            (json!({ "ticker": "BTCUSDT", "bars": 201 }), "bars"),
+            (json!({ "ticker": "BTCUSDT", "imbalance": 50 }), "imbalance"),
+            (json!({ "ticker": "BTCUSDT", "timeframe": "nope" }), ""),
+        ] {
+            let err = footprint_payload(&args, Sample).unwrap_err();
+            assert!(err.contains(wanted), "{err}");
+        }
+    }
+
+    #[test]
+    fn a_tpo_profile_covers_its_period_and_its_blocks() {
+        let args = json!({ "ticker": "BTCUSDT", "periods": 3, "end_time": 1_699_920_000_000i64 });
+        let tpo = tpo_payload(&args, Sample).unwrap();
+        let list = tpo["profiles"].as_array().unwrap();
+        assert_eq!(list.len(), 3);
+        assert_eq!(tpo["block"], "30m");
+        for p in list {
+            let blocks = p["block_times"].as_array().unwrap().len();
+            assert_eq!(blocks, 48);
+            let high = p["high"].as_f64().unwrap();
+            let low = p["low"].as_f64().unwrap();
+            let (val, poc, vah) = (
+                p["val"].as_f64().unwrap(),
+                p["poc"].as_f64().unwrap(),
+                p["vah"].as_f64().unwrap(),
+            );
+            assert!(val <= poc && poc < vah);
+            assert!(low <= poc && poc <= high);
+            let letters = p["rows"].as_array().unwrap();
+            let prints: usize = letters
+                .iter()
+                .map(|r| r["blocks"].as_array().unwrap().len())
+                .sum();
+            assert_eq!(prints, p["total_blocks"].as_u64().unwrap() as usize);
+            assert_eq!(
+                letters
+                    .iter()
+                    .map(|r| r["letters"].as_str().unwrap().len())
+                    .sum::<usize>(),
+                prints
+            );
+        }
+    }
+
+    #[test]
+    fn tpo_settings_apply() {
+        let base = |extra: Value| {
+            let mut a =
+                json!({ "ticker": "BTCUSDT", "periods": 2, "end_time": 1_699_920_000_000i64 });
+            a.as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            tpo_payload(&a, Sample).unwrap()
+        };
+        let hourly = base(json!({ "block": "1h" }));
+        assert_eq!(
+            hourly["profiles"][0]["block_times"]
+                .as_array()
+                .unwrap()
+                .len(),
+            24
+        );
+        let weekly = base(json!({ "period": "1W", "block": "4h" }));
+        assert_eq!(
+            weekly["profiles"][0]["block_times"]
+                .as_array()
+                .unwrap()
+                .len(),
+            42
+        );
+        let split = base(json!({ "sessions": ["00:00-08:00", "08:00-16:00"] }));
+        assert_eq!(split["profiles"].as_array().unwrap().len(), 4);
+        assert_eq!(
+            split["profiles"][0]["block_times"]
+                .as_array()
+                .unwrap()
+                .len(),
+            16
+        );
+        let rows = base(json!({ "row_size": 5.0 }));
+        assert_eq!(rows["row_size"], 5.0);
+        let narrow = base(json!({ "value_area": 20 }));
+        let wide = base(json!({ "value_area": 95 }));
+        let span = |p: &Value| p["vah"].as_f64().unwrap() - p["val"].as_f64().unwrap();
+        assert!(span(&narrow["profiles"][0]) < span(&wide["profiles"][0]));
+        for bad in [
+            json!({ "ticker": "BTCUSDT", "block": "1m" }),
+            json!({ "ticker": "BTCUSDT", "block": "1d" }),
+            json!({ "ticker": "BTCUSDT", "period": "1h" }),
+            json!({ "ticker": "BTCUSDT", "sessions": ["bad"] }),
+        ] {
+            assert!(tpo_payload(&bad, Sample).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn an_auto_tpo_row_is_not_widened_by_the_range_of_all_periods_together() {
+        // Long enough for the price to wander far more than a day's range.
+        let args = json!({ "ticker": "BTCUSDT", "periods": 30, "end_time": 1_699_920_000_000i64 });
+        let tpo = tpo_payload(&args, Sample).unwrap();
+        assert_eq!(tpo["row_widened"], false, "{}", tpo["row_size"]);
+    }
+
+    #[test]
+    fn a_block_too_short_for_a_whole_period_is_widened_and_says_so() {
+        let args = json!({ "ticker": "BTCUSDT", "period": "1M", "block": "5m", "periods": 1,
+            "end_time": 1_699_920_000_000i64 });
+        let tpo = tpo_payload(&args, Sample).unwrap();
+        assert_eq!(tpo["block"], "15m");
+        assert_eq!(tpo["block_widened"], true);
+        assert_eq!(tpo["periods_cut"], false);
+        // The month from its start: 13 days and 16 hours in, on 15m blocks.
+        let p = &tpo["profiles"][0];
+        assert_eq!(p["t"], 1_698_796_800, "2023-11-01");
+        assert_eq!(p["block_times"][0], 1_698_796_800);
+        // More periods than fit are cut, whole ones.
+        let args = json!({ "ticker": "BTCUSDT", "period": "1M", "block": "5m", "periods": 12,
+            "end_time": 1_699_920_000_000i64 });
+        let tpo = tpo_payload(&args, Sample).unwrap();
+        assert_eq!(tpo["periods_cut"], true);
+        let blocks: usize = tpo["profiles"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|p| p["block_times"].as_array().unwrap().len())
+            .sum();
+        assert!(blocks <= MAX_TPO_BLOCKS, "{blocks}");
+        let as_asked = json!({ "ticker": "BTCUSDT", "period": "1D", "block": "5m", "periods": 1,
+            "end_time": 1_699_920_000_000i64 });
+        assert_eq!(
+            tpo_payload(&as_asked, Sample).unwrap()["block_widened"],
+            false
+        );
+        // Longer than 4h blocks can cover: refused rather than cut.
+        let too_long = json!({ "ticker": "BTCUSDT", "period": "30M" });
+        assert!(tpo_payload(&too_long, Sample)
+            .unwrap_err()
+            .contains("too long"));
+    }
+
+    #[test]
+    fn a_profile_keeps_its_key_as_the_window_moves() {
+        let key = |period: &str, block: &str, end: i64| {
+            let args = json!({ "ticker": "BTCUSDT", "period": period, "block": block,
+                "periods": 2, "end_time": end });
+            let tpo = tpo_payload(&args, Sample).unwrap();
+            tpo["profiles"].as_array().unwrap().last().unwrap()["t"].clone()
+        };
+        // Noon, so that these hours stay in the same day, week and month.
+        let end = 1_699_920_000_000i64 + 12 * 3_600_000;
+        for (period, block) in [("1M", "5m"), ("1W", "30m"), ("1D", "30m")] {
+            let at = key(period, block, end);
+            for hours in [1, 2, 6] {
+                assert_eq!(key(period, block, end + hours * 3_600_000), at, "{period}");
+            }
+        }
+    }
+
+    #[test]
+    fn profiles_come_in_time_order_with_a_key_each_whatever_the_order_of_sessions() {
+        let args = json!({ "ticker": "BTCUSDT", "periods": 2, "end_time": 1_699_920_000_000i64,
+            "sessions": ["16:00-20:00", "08:00-12:00"] });
+        let tpo = tpo_payload(&args, Sample).unwrap();
+        let list = tpo["profiles"].as_array().unwrap();
+        assert_eq!(list.len(), 4);
+        let first_block = |p: &Value| p["block_times"][0].as_i64().unwrap();
+        assert!(
+            list.windows(2)
+                .all(|w| first_block(&w[0]) < first_block(&w[1])),
+            "{list:?}"
+        );
+        // Each key is where its session starts, as the blocks here start with it.
+        for p in list {
+            assert_eq!(p["t"].as_i64().unwrap(), first_block(p));
+        }
+    }
+
+    #[test]
+    fn each_bar_and_profile_says_the_row_it_was_built_with() {
+        let args = json!({ "ticker": "BTCUSDT", "timeframe": "1h", "bars": 3, "row_size": 2.5 });
+        let fp = footprint_payload(&args, Sample).unwrap();
+        assert_eq!(fp["footprints"][0]["row"], 2.5);
+        // Too fine for this reply: it is wider than asked, on the bar too.
+        let args = json!({ "ticker": "BTCUSDT", "timeframe": "1h", "bars": 3, "row_size": 0.01 });
+        let fp = footprint_payload(&args, Sample).unwrap();
+        assert_eq!(fp["row_widened"], true);
+        assert_eq!(fp["footprints"][0]["row"], fp["row_size"]);
+        let args = json!({ "ticker": "BTCUSDT", "periods": 1, "row_size": 2.5 });
+        assert_eq!(
+            tpo_payload(&args, Sample).unwrap()["profiles"][0]["row"],
+            2.5
+        );
+    }
+
+    #[test]
+    fn only_a_load_that_asks_reads_its_profiles_from_finer_bars() {
+        let series = |bars: u64, ask: Option<bool>, end: i64| {
+            let mut args = json!({ "ticker": "BTCUSDT", "timeframe": "1h", "bars": bars,
+                "format": "series", "indicators": ["volume_profile", "rsi"], "end_time": end });
+            if let Some(ask) = ask {
+                args["profile_intrabars"] = json!(ask);
+            }
+            flow_series(args)
+        };
+        let end = 1_699_920_000_000i64;
+        let load = series(100, Some(true), end);
+        assert_eq!(
+            load["indicators"]["volume_profile"]["profile_interval"],
+            "3m"
+        );
+        assert_eq!(load["indicators"]["rsi"].get("profile_interval"), None);
+        assert!(!load["indicators"]["volume_profile"]["hbars"]
+            .as_array()
+            .unwrap()
+            .is_empty());
+        // `profile_interval` is only set after reading: without it nothing was read. A
+        // page and a catch-up tail are longer than a tail, and do not ask.
+        for (what, bars, end) in [
+            ("tail", 2, end),
+            ("catch-up tail", 9, end),
+            ("page", 500, end - 500 * 3_600_000),
+        ] {
+            let s = series(bars, None, end);
+            assert_eq!(
+                s["indicators"]["volume_profile"].get("profile_interval"),
+                None,
+                "{what}"
+            );
+        }
+        let no = series(100, Some(false), end);
+        assert_eq!(
+            no["indicators"]["volume_profile"].get("profile_interval"),
+            None
+        );
+    }
+
+    #[test]
+    fn a_price_based_profile_reads_finer_bars_only_for_all_the_time_it_covers() {
+        let renko = |bars: u64, box_size: f64| {
+            let args = json!({ "ticker": "BTCUSDT", "timeframe": "1h", "bars": bars,
+                "format": "series", "indicators": ["volume_profile"], "profile_intrabars": true,
+                "chart_style": "renko", "chart_params": { "box": "fixed", "box_size": box_size },
+                "end_time": 1_699_920_000_000i64 });
+            flow_series(args)
+        };
+        let hours = |s: &Value| {
+            let bars = s["bars"].as_array().unwrap();
+            let t = |b: &Value| b["t"].as_i64().unwrap();
+            (t(bars.last().unwrap()) - t(&bars[0])) / 3_600
+        };
+        let profile = |s: &Value| s["indicators"]["volume_profile"].clone();
+
+        // 100 bars afford 3m on a 1h chart, by their count. These cover far more than 100
+        // hours, and all of them at 3m would take more than a read may.
+        let long = renko(100, 6.4);
+        assert_eq!(long["bars"].as_array().unwrap().len(), 100);
+        assert!(hours(&long) * 20 > intrabars::MAX_INTRABARS as i64);
+        assert_eq!(profile(&long)["profile_interval"], "15m");
+
+        // No finer bars can cover this long: the profile stays computed from its own.
+        let longest = renko(100, 32.0);
+        assert!(hours(&longest) * 2 > intrabars::MAX_INTRABARS as i64);
+        assert_eq!(profile(&longest).get("profile_interval"), None);
+        assert!(!profile(&longest)["hbars"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_finer_profile_differs_from_spreading_each_bar() {
+        use chartgen::indicator::Indicator as _;
+        // A bar sold off at its high, and traded nearly all its volume in the top row.
+        let bar = |o: f64, h: f64, l: f64, c: f64, v: f64, t: i64| data::Bar {
+            open: o,
+            high: h,
+            low: l,
+            close: c,
+            volume: v,
+            date: t.to_string(),
+        };
+        let data = |bars| data::OhlcvData {
+            bars,
+            symbol: None,
+            interval: None,
+            session: None,
+        };
+        let chart = data(vec![bar(100.0, 110.0, 100.0, 105.0, 100.0, 0)]);
+        let finer = data(vec![
+            bar(100.0, 100.5, 100.0, 100.5, 1.0, 0),
+            bar(109.0, 110.0, 109.0, 109.5, 99.0, 60),
+        ]);
+        let vp = chartgen::indicators::custom::VolumeProfile::default();
+        let poc = |pr: &chartgen::indicator::PanelResult| pr.hlines[0].y;
+        let spread = vp.compute(&chart);
+        let real = vp.with_intrabars(&chart, &finer).unwrap();
+        assert!(poc(&real) > 109.0, "{}", poc(&real));
+        assert!(poc(&spread) != poc(&real));
+    }
+
+    #[test]
+    fn a_session_profile_has_the_values_of_its_load_on_a_tail() {
+        let lines = |bars: u64, ask: bool| {
+            let s = flow_series(
+                json!({ "ticker": "BTCUSDT", "timeframe": "1h", "bars": bars,
+                "warmup": 300, "format": "series", "indicators": ["session_vp"],
+                "profile_intrabars": ask, "end_time": 1_699_920_000_000i64 }),
+            );
+            let ind = &s["indicators"]["session_vp"];
+            assert_eq!(ind.get("profile_interval"), None);
+            assert_eq!(ind["level_lines"], true);
+            ind["lines"].as_array().unwrap().clone()
+        };
+        let (load, tail) = (lines(100, true), lines(2, false));
+        assert_eq!(load.len(), 3);
+        assert_eq!(tail.len(), 3);
+        for (l, t) in load.iter().zip(&tail) {
+            let values = l["values"].as_array().unwrap();
+            assert_eq!(
+                &values[values.len() - 2..],
+                t["values"].as_array().unwrap().as_slice()
+            );
+        }
+    }
+
+    /// `session_vp`'s last values, from a load and from a tail, ending on one bar.
+    fn session_load_and_tail(extra: Value, timeframe: &str, end: i64) -> (Value, Value) {
+        let of = |bars: u64| {
+            let mut ind = json!({ "name": "session_vp" });
+            ind.as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            let s = flow_series(json!({ "ticker": "BTCUSDT", "timeframe": timeframe,
+                "bars": bars, "warmup": 300, "format": "series", "indicators": [ind],
+                "end_time": end }));
+            s["indicators"]["session_vp"]["lines"].clone()
+        };
+        (of(100), of(2))
+    }
+
+    fn assert_load_ends_as_its_tail(load: &Value, tail: &Value, what: &str) {
+        for k in 0..3 {
+            let l = load[k]["values"].as_array().unwrap();
+            assert_eq!(
+                &l[l.len() - 2..],
+                tail[k]["values"].as_array().unwrap().as_slice(),
+                "{what}, line {k}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_session_longer_than_a_usual_tail_has_the_values_of_its_load() {
+        // 2023-11-13 00:00 UTC, and hours into that day.
+        let day = 1_699_833_600_000i64;
+        let hour = 3_600_000i64;
+        for (timeframe, end, what) in [
+            // 400 bars into the day: past the 302 bars a tail otherwise has.
+            ("3m", day + 20 * hour, "3m late in the day"),
+            ("5m", day + 23 * hour, "5m late in the day"),
+            ("15m", day + 23 * hour, "15m late in the day"),
+            // 16 hours is 960 bars: within the cap of 1000.
+            ("1m", day + 16 * hour, "1m within the cap"),
+        ] {
+            let (load, tail) = session_load_and_tail(json!({}), timeframe, end);
+            assert_load_ends_as_its_tail(&load, &tail, what);
+        }
+        // A week of 30m is 336 bars, on the last day of that week.
+        let sunday = day + 6 * 24 * hour + 20 * hour;
+        let (load, tail) = session_load_and_tail(json!({ "session": "weekly" }), "30m", sunday);
+        assert_load_ends_as_its_tail(&load, &tail, "a week of 30m");
+    }
+
+    #[test]
+    fn a_session_of_a_fixed_bar_count_starts_where_the_clock_says_not_where_a_window_does() {
+        let end = 1_699_920_000_000i64;
+        for (timeframe, bars_per_session) in [("1h", 24), ("5m", 50), ("1m", 400)] {
+            let (load, tail) = session_load_and_tail(
+                json!({ "bars_per_session": bars_per_session }),
+                timeframe,
+                end,
+            );
+            assert_load_ends_as_its_tail(&load, &tail, timeframe);
+        }
+    }
+
+    #[test]
+    fn a_session_raises_a_warmup_only_as_far_as_its_chart_needs() {
+        let need = |timeframe: &str, params: Value| {
+            let mut ind = json!({ "name": "session_vp" });
+            ind.as_object_mut()
+                .unwrap()
+                .extend(params.as_object().unwrap().clone());
+            let indicators = json!([ind]);
+            let args = json!({ "warmup": 300, "timeframe": timeframe });
+            warmup_arg(&args, &parse_panels(&indicators, None).0)
+        };
+        // Charts where a day fits as it is pay nothing: this is what a tail cost before.
+        for timeframe in ["5m", "1h", "4h", "1d"] {
+            assert_eq!(need(timeframe, json!({})), 300, "{timeframe}");
+        }
+        assert_eq!(need("3m", json!({})), 481);
+        // What does not fit is capped, and so stays unequal late in a long session.
+        assert_eq!(need("1m", json!({})), MAX_WARMUP);
+        assert_eq!(need("5m", json!({ "session": "weekly" })), MAX_WARMUP);
+        assert_eq!(need("1h", json!({ "bars_per_session": 500 })), 500);
+        // No warmup asked: none raised, as for anything else.
+        let none = json!({ "timeframe": "1m" });
+        assert_eq!(
+            warmup_arg(&none, &parse_panels(&json!(["session_vp"]), None).0),
+            0
+        );
+    }
+
+    #[test]
+    fn a_session_profile_keeps_a_value_on_every_bar_of_every_session() {
+        for (timeframe, bars, per_session) in [("1h", 96, 24), ("4h", 60, 6), ("12h", 30, 2)] {
+            let s = flow_series(
+                json!({ "ticker": "BTCUSDT", "timeframe": timeframe, "bars": bars,
+                "format": "series", "indicators": ["session_vp"], "warmup": 300,
+                "end_time": 1_699_920_000_000i64 }),
+            );
+            let bar_times: Vec<i64> = s["bars"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|b| b["t"].as_i64().unwrap())
+                .collect();
+            let poc: Vec<f64> = s["indicators"]["session_vp"]["lines"][0]["values"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|v| {
+                    v.as_f64()
+                        .unwrap_or_else(|| panic!("{timeframe}: a bar has no POC"))
+                })
+                .collect();
+            // Sessions are UTC days here: one level through each, the last bar included.
+            let mut by_day: std::collections::BTreeMap<i64, Vec<f64>> = Default::default();
+            for (t, v) in bar_times.iter().zip(&poc) {
+                by_day.entry(t.div_euclid(86_400)).or_default().push(*v);
+            }
+            let whole = by_day.values().filter(|d| d.len() == per_session);
+            assert!(whole.clone().count() >= 2, "{timeframe}");
+            for day in whole {
+                assert!(day.iter().all(|v| *v == day[0]), "{timeframe}: {day:?}");
+            }
+            let levels: std::collections::BTreeSet<u64> =
+                by_day.values().map(|d| d[0].to_bits()).collect();
+            assert!(levels.len() >= 2, "{timeframe}: the sessions differ");
+        }
+    }
+
+    #[test]
+    fn range_profiles_only_count_their_range() {
+        let series = |ind: Value| {
+            flow_series(
+                json!({ "ticker": "BTCUSDT", "timeframe": "1h", "bars": 48, "format": "series",
+                "indicators": [ind], "end_time": 1_699_920_000_000i64 }),
+            )
+        };
+        let bars = series(json!("rsi"))["bars"].as_array().unwrap().clone();
+        let t = |i: usize| bars[i]["t"].as_i64().unwrap();
+        let all = series(json!("fixed_range_vp"));
+        let some = series(
+            json!({ "name": "fixed_range_vp", "from": t(10).to_string(), "to": t(20).to_string() }),
+        );
+        let hbars =
+            |s: &Value, key: &str| s["indicators"][key]["hbars"].as_array().unwrap().clone();
+        assert_ne!(
+            hbars(&all, "fixed_range_vp"),
+            hbars(&some, "fixed_range_vp")
+        );
+        assert_eq!(some["indicators"]["fixed_range_vp"]["label"], "FRVP");
+        // Only prices of that range.
+        let top = bars[10..20]
+            .iter()
+            .map(|b| b["h"].as_f64().unwrap())
+            .fold(f64::MIN, f64::max);
+        for h in hbars(&some, "fixed_range_vp") {
+            assert!(h["y"].as_f64().unwrap() <= top + 1.0, "{h} {top}");
+        }
+        let anchored = series(json!({ "name": "anchored_vp", "anchor": t(40).to_string() }));
+        assert_eq!(anchored["indicators"]["anchored_vp"]["label"], "AVP");
+        assert_ne!(
+            hbars(&anchored, "anchored_vp"),
+            hbars(&all, "fixed_range_vp")
+        );
+    }
+
     #[test]
     fn generate_chart_series_returns_series_json() {
         let args = json!({
@@ -4009,6 +5202,7 @@ mod tests {
             &raw,
             &json!(["rsi", { "name": "rsi", "length": 21, "id": "rsi#2" }]),
             "candles",
+            None,
             2,
         )
         .unwrap();
@@ -4018,6 +5212,7 @@ mod tests {
             &raw,
             &json!([{ "name": "rsi", "length": 21 }]),
             "candles",
+            None,
             2,
         )
         .unwrap();
@@ -4346,12 +5541,213 @@ mod tests {
     fn chart_style_rejects_unknown_value() {
         let resp = generate_chart(
             Some(json!(1)),
-            &json!({ "chart_style": "renko", "format": "series" }),
+            &json!({ "chart_style": "tiles", "format": "series" }),
             fetch::DataSource::Sample,
             None,
         );
         assert!(is_error(&resp));
         assert!(response_text(&resp).contains("chart_style"));
+    }
+
+    // --- price-based bars (ADR-0047) ---
+
+    fn price_args(style: &str, extra: Value) -> Value {
+        let mut args = json!({
+            "ticker": "BTCUSDT", "timeframe": "1h", "bars": 300, "warmup": 300,
+            "end_time": END_4H_MS, "indicators": ["rsi", "ichimoku"], "format": "series",
+            "chart_style": style,
+        });
+        args.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        args
+    }
+
+    #[test]
+    fn every_price_style_builds_timed_bars_and_runs_indicators_on_them() {
+        for style in price_bars::STYLES {
+            let p = series_payload(price_args(style, json!({})), fetch::DataSource::Sample);
+            assert_eq!(p["chart_style"], style);
+            let t = bar_ts(&p);
+            assert!(t.len() > 5, "{style}: {}", t.len());
+            assert!(t.windows(2).all(|w| w[1] > w[0]), "{style}");
+            assert!(*t.last().unwrap() * 1000 < END_4H_MS, "{style}");
+            // Times are not evenly spaced, unlike the 1h bars they come from.
+            let gaps: HashSet<i64> = t.windows(2).map(|w| w[1] - w[0]).collect();
+            assert!(gaps.len() > 1, "{style}");
+            let rsi = &p["indicators"]["rsi"]["lines"][0]["values"];
+            assert_eq!(rsi.as_array().unwrap().len(), t.len(), "{style}");
+            assert!(
+                p["indicators"]["ichimoku"].get("future").is_none(),
+                "{style}: no next bar's time to project to"
+            );
+            if style == "line_break" {
+                assert_eq!(p["chart_params"], json!({ "lines": 3 }));
+            } else {
+                assert!(
+                    p["chart_params"]["box_size"].as_f64().unwrap() > 0.0,
+                    "{style}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn price_bars_differ_from_candles_and_a_later_call_keeps_a_pinned_box() {
+        let first = series_payload(price_args("renko", json!({})), fetch::DataSource::Sample);
+        let size = first["chart_params"]["box_size"].as_f64().unwrap();
+        for b in first["bars"].as_array().unwrap() {
+            let body = (b["o"].as_f64().unwrap() - b["c"].as_f64().unwrap()).abs();
+            assert!((body - size).abs() < 1e-6, "{b}");
+            assert_eq!(
+                b["h"],
+                b["o"].as_f64().unwrap().max(b["c"].as_f64().unwrap())
+            );
+        }
+        // Earlier bars, a different ATR: the box sent back still rules.
+        let page = series_payload(
+            price_args(
+                "renko",
+                json!({ "end_time": END_4H_MS - 2_000 * HOUR_MS,
+                        "chart_params": { "box_size": size } }),
+            ),
+            fetch::DataSource::Sample,
+        );
+        assert_eq!(page["chart_params"]["box_size"].as_f64().unwrap(), size);
+        let unpinned = series_payload(
+            price_args("renko", json!({ "end_time": END_4H_MS - 2_000 * HOUR_MS })),
+            fetch::DataSource::Sample,
+        );
+        assert!(unpinned["chart_params"]["box_size"].as_f64().unwrap() > 0.0);
+    }
+
+    #[test]
+    fn a_price_page_ends_before_the_oldest_bar_it_is_given() {
+        for style in price_bars::STYLES {
+            let load = series_payload(price_args(style, json!({})), fetch::DataSource::Sample);
+            let oldest = bar_ts(&load)[0];
+            let params = load["chart_params"].clone();
+            let page = series_payload(
+                price_args(
+                    style,
+                    json!({ "end_time": oldest * 1000, "chart_params": params }),
+                ),
+                fetch::DataSource::Sample,
+            );
+            assert!(bar_ts(&page).iter().all(|t| *t < oldest), "{style}");
+            assert!(!bar_ts(&page).is_empty(), "{style}");
+        }
+    }
+
+    #[test]
+    fn price_styles_reach_png_and_summary() {
+        let args = json!({
+            "ticker": "BTCUSDT", "timeframe": "1h", "bars": 40, "end_time": END_4H_MS,
+            "indicators": ["rsi"], "format": "both", "chart_style": "point_figure",
+            "chart_params": { "box": "percent", "percent": 2, "reversal": 2 },
+            "width": 800, "height": 500,
+        });
+        let resp = generate_chart(Some(json!(1)), &args, fetch::DataSource::Sample, None);
+        assert!(!is_error(&resp), "{resp}");
+        let content = resp["result"]["content"].as_array().unwrap();
+        assert_eq!(content[0]["type"], "image");
+        let summary: Value = serde_json::from_str(content[1]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(summary["chart_style"], "point_figure");
+        assert_eq!(summary["chart_params"]["reversal"], 2);
+        assert_eq!(summary["chart_params"]["percent"], 2.0);
+        assert!(summary["chart_params"]["box_size"].as_f64().unwrap() > 0.0);
+    }
+
+    #[test]
+    fn a_price_series_names_its_build() {
+        for style in price_bars::STYLES {
+            let p = series_payload(price_args(style, json!({})), fetch::DataSource::Sample);
+            assert!(p["anchor"].as_i64().is_some(), "{style}: {}", p["anchor"]);
+        }
+        let candles = series_payload(
+            json!({ "ticker": "BTCUSDT", "timeframe": "1h", "bars": 5, "end_time": END_4H_MS,
+                    "indicators": [], "format": "series" }),
+            fetch::DataSource::Sample,
+        );
+        assert!(candles.get("anchor").is_none());
+    }
+
+    #[test]
+    fn price_style_errors_say_what_is_wrong() {
+        for (args, source, want) in [
+            (
+                json!({ "ticker": "BTCUSDT", "chart_params": { "lines": 3 }, "format": "series" }),
+                fetch::DataSource::Sample,
+                "does not apply",
+            ),
+            (
+                price_args("renko", json!({ "chart_params": { "box": "fixed" } })),
+                fetch::DataSource::Sample,
+                "needs box_size",
+            ),
+            (
+                price_args(
+                    "range",
+                    json!({ "chart_params": { "box": "fixed", "box_size": 1e-9 } }),
+                ),
+                fetch::DataSource::Sample,
+                "too small",
+            ),
+            (
+                json!({ "chart_style": "renko", "format": "series" }),
+                fetch::DataSource::Live,
+                "needs a ticker",
+            ),
+        ] {
+            let resp = generate_chart(Some(json!(1)), &args, source, None);
+            assert!(is_error(&resp), "{args}");
+            assert!(
+                response_text(&resp).contains(want),
+                "{}",
+                response_text(&resp)
+            );
+        }
+    }
+
+    #[test]
+    fn a_pushed_price_tail_is_a_slice_of_the_full_series() {
+        let raw = data::sample_ohlcv("BTCUSDT", "1h", 3_000, None, END_4H_MS).unwrap();
+        let params = price_bars::Params::parse(
+            price_bars::Kind::Renko,
+            Some(&json!({ "box": "percent", "percent": 0.5 })),
+        )
+        .unwrap();
+        let params = PriceTail {
+            params,
+            since: None,
+        };
+        let mut raw = raw;
+        raw.symbol = Some("BTCUSDT".into());
+        raw.interval = Some("1h".into());
+        let indicators = json!(["rsi"]);
+        let full = series_tail(&raw, &indicators, "renko", Some(&params), 3_000).unwrap();
+        let tail = series_tail(&raw, &indicators, "renko", Some(&params), 8).unwrap();
+        assert_eq!(tail["chart_params"], full["chart_params"]);
+        let bars = full["bars"].as_array().unwrap();
+        assert!(bars.len() > 8);
+        assert_eq!(tail["bars"].as_array().unwrap()[..], bars[bars.len() - 8..]);
+        // After a tail, only what is new since it, and an overlap.
+        let newest = bars[bars.len() - 3]["t"].as_i64().unwrap();
+        let since = PriceTail {
+            params: params.params.clone(),
+            since: Some(newest),
+        };
+        let short = series_tail(&raw, &indicators, "renko", Some(&since), 64).unwrap();
+        assert_eq!(
+            short["bars"].as_array().unwrap()[..],
+            bars[bars.len() - 4..]
+        );
+        let at_end = PriceTail {
+            params: params.params.clone(),
+            since: Some(i64::MAX),
+        };
+        let least = series_tail(&raw, &indicators, "renko", Some(&at_end), 64).unwrap();
+        assert_eq!(least["bars"].as_array().unwrap().len(), 2);
     }
 
     #[test]
@@ -4711,7 +6107,16 @@ mod tests {
             .filter(|i| indicators::by_name(i.name).is_some_and(|ind| ind.windowed_profile()))
             .map(|i| i.name)
             .collect();
-        assert_eq!(windowed, vec!["volume_profile", "hvn_lvn", "tpo"]);
+        assert_eq!(
+            windowed,
+            vec![
+                "volume_profile",
+                "fixed_range_vp",
+                "anchored_vp",
+                "hvn_lvn",
+                "tpo"
+            ]
+        );
     }
 
     #[test]
@@ -4765,7 +6170,7 @@ mod tests {
         raw.symbol = Some("BTCUSDT".into());
         raw.interval = Some("1d".into());
         let t = |bars: usize| -> Vec<i64> {
-            let v = series_tail(&raw, &json!(["ichimoku"]), "candles", bars).unwrap();
+            let v = series_tail(&raw, &json!(["ichimoku"]), "candles", None, bars).unwrap();
             serde_json::from_value(v["indicators"]["ichimoku"]["future"]["t"].clone()).unwrap()
         };
         let (full, tail) = (t(100), t(2));
@@ -5100,6 +6505,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn subscribe_chart_takes_a_price_based_chart_with_its_box() {
+        let hub = crate::chart_push::ChartHub::new(
+            Arc::new(crate::chart_push::SampleSource),
+            crate::chart_push::Limits::default(),
+        );
+        let (tx, _rx) = tokio::sync::mpsc::channel(crate::chart_push::STREAM_BUFFER);
+        hub.link_stream("s", tx);
+        let push = PushCtx {
+            hub: hub.clone(),
+            stream: "s".into(),
+            client: "127.0.0.1".into(),
+        };
+        // The box echoed by a load, a fixed one, or a type with none.
+        for extra in [
+            json!({ "chart_style": "renko", "chart_params": { "box": "atr", "box_size": 3.4 } }),
+            json!({ "chart_style": "kagi",
+                    "chart_params": { "box": "percent", "percent": 2, "box_size": 3.4 } }),
+            json!({ "chart_style": "range", "chart_params": { "box": "fixed", "box_size": 5 } }),
+            json!({ "chart_style": "line_break" }),
+        ] {
+            let mut args = json!({ "ticker": "ETHUSDT", "timeframe": "1m", "indicators": [] });
+            args.as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            let resp = call("subscribe_chart", args.clone(), Some(&push), Some("tok"));
+            assert!(!is_error(&resp), "{args}: {}", response_text(&resp));
+        }
+    }
+
+    #[tokio::test]
     async fn subscribe_chart_validates_and_round_trips() {
         let hub = crate::chart_push::ChartHub::new(
             Arc::new(crate::chart_push::SampleSource),
@@ -5127,8 +6562,17 @@ mod tests {
                 "Unknown indicator",
             ),
             (
-                json!({ "ticker": "BTCUSDT", "chart_style": "renko" }),
+                json!({ "ticker": "BTCUSDT", "chart_style": "tiles" }),
                 "chart_style",
+            ),
+            (
+                json!({ "ticker": "BTCUSDT", "chart_style": "renko" }),
+                "needs box_size",
+            ),
+            (
+                json!({ "ticker": "BTCUSDT", "chart_style": "kagi",
+                        "chart_params": { "box": "percent", "percent": 2 } }),
+                "needs box_size",
             ),
             (json!({ "ticker": "AAPL" }), "not pushable"),
             (
@@ -5205,7 +6649,7 @@ mod tests {
         // The polled value went through text. Parse the pushed one the same
         // way: without starlark's `arbitrary_precision`, serde_json's float
         // parser can land 1 ulp off the computed f64.
-        let pushed = series_tail(&raw, &indicators, "heikin_ashi", 2).unwrap();
+        let pushed = series_tail(&raw, &indicators, "heikin_ashi", None, 2).unwrap();
         assert_eq!(
             serde_json::from_str::<Value>(&pushed.to_string()).unwrap(),
             polled
@@ -5241,7 +6685,7 @@ mod tests {
         .data;
         raw.symbol = Some("ETHUSDT".into());
         raw.interval = Some("4h".into());
-        let pushed = series_tail(&raw, &indicators, "candles", 2).unwrap();
+        let pushed = series_tail(&raw, &indicators, "candles", None, 2).unwrap();
         // Parse the pushed tail like the polled one (see the test above).
         assert_eq!(
             serde_json::from_str::<Value>(&pushed.to_string()).unwrap(),
@@ -5262,7 +6706,7 @@ mod tests {
         assert_eq!(fut["fills"][0]["y1"], json!(a));
         assert_eq!(fut["fills"][0]["y2"], json!(b));
         // The whole window ends on the same bar: same projection.
-        let full = series_tail(&raw, &indicators, "candles", raw.len()).unwrap();
+        let full = series_tail(&raw, &indicators, "candles", None, raw.len()).unwrap();
         assert_eq!(&full["indicators"]["ichimoku"]["future"], fut);
         let last: i64 = raw.bars.last().unwrap().date.parse().unwrap();
         let t = fut["t"].as_array().unwrap();
@@ -5273,7 +6717,7 @@ mod tests {
         );
         // A forming bar that makes a new high moves the newest projected spans.
         raw.bars.last_mut().unwrap().high *= 1.5;
-        let moved = series_tail(&raw, &indicators, "candles", 2).unwrap();
+        let moved = series_tail(&raw, &indicators, "candles", None, 2).unwrap();
         let fut2 = &moved["indicators"]["ichimoku"]["future"];
         assert_ne!(
             fut2["lines"][0]["values"][24],
@@ -5313,7 +6757,7 @@ mod tests {
         .data;
         raw.symbol = Some("ETHUSDT".into());
         raw.interval = Some("4h".into());
-        let pushed = series_tail(&raw, &indicators, "candles", 2).unwrap();
+        let pushed = series_tail(&raw, &indicators, "candles", None, 2).unwrap();
         assert_eq!(pushed, polled);
         let ind = &pushed["indicators"];
         for h in [&ind["volume"]["histogram"][0], &ind["macd"]["histogram"][0]] {

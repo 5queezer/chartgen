@@ -6,6 +6,13 @@
 import { batch, createSignal } from "solid-js";
 
 import { activePane } from "./grid";
+import {
+  DEFAULT_CHART_PARAMS,
+  isPriceBarType,
+  sanitizeChartParams,
+  type ChartParams,
+  type PriceBarType,
+} from "../lib/priceBars";
 import { applyTheme, THEME_NAMES, type ThemeName } from "../lib/theme";
 import { TIMEFRAME_OPTIONS, isTimeframe, type Timeframe } from "../lib/timeframe";
 import {
@@ -25,7 +32,16 @@ export type ChartType =
   | "baseline"
   | "columns"
   | "high_low"
-  | "heikin_ashi";
+  | "hlc_area"
+  | "heikin_ashi"
+  | "volume_candles"
+  | "footprint"
+  | "tpo"
+  | "renko"
+  | "kagi"
+  | "point_figure"
+  | "line_break"
+  | "range";
 
 /** Menu order, as in TradingView. */
 export const CHART_TYPES: readonly ChartType[] = [
@@ -39,15 +55,27 @@ export const CHART_TYPES: readonly ChartType[] = [
   "baseline",
   "columns",
   "high_low",
+  "hlc_area",
   "heikin_ashi",
+  "volume_candles",
+  "footprint",
+  "tpo",
+  "renko",
+  "line_break",
+  "kagi",
+  "point_figure",
+  "range",
 ];
 
 /** Server price series style (`generate_chart.chart_style`) a chart type needs. */
-export type ChartStyle = "candles" | "heikin_ashi";
+export type ChartStyle = "candles" | "heikin_ashi" | PriceBarType;
 
-/** Heikin Ashi is computed server-side (ADR-0003); every other type draws raw bars. */
+/**
+ * Heikin Ashi (ADR-0003) and the price-based types (ADR-0047) are computed
+ * server-side; every other type draws raw bars.
+ */
 export function chartStyleOf(type: ChartType): ChartStyle {
-  return type === "heikin_ashi" ? "heikin_ashi" : "candles";
+  return type === "heikin_ashi" || isPriceBarType(type) ? type : "candles";
 }
 
 /** Price-axis scale: plain, percent change from the first visible bar, or logarithmic. */
@@ -178,6 +206,10 @@ function createChartStore(prefix: string) {
   const [chartType, setChartTypeSignal] = createSignal<ChartType>(
     isChartType(storedChartType) ? storedChartType : DEFAULT_CHART_TYPE,
   );
+  const storedChartParams = readKey("chartParams");
+  const [chartParams, setChartParamsSignal] = createSignal<ChartParams>(
+    storedChartParams === undefined ? DEFAULT_CHART_PARAMS : sanitizeChartParams(storedChartParams),
+  );
   const [scaleMode, setScaleModeSignal] = createSignal<ScaleMode>(
     isScaleMode(storedScaleMode) ? storedScaleMode : DEFAULT_SCALE_MODE,
   );
@@ -198,6 +230,7 @@ function createChartStore(prefix: string) {
     symbol,
     timeframe,
     chartType,
+    chartParams,
     scaleMode,
     autoScale,
     lockRatio,
@@ -257,6 +290,11 @@ function createChartStore(prefix: string) {
       persistKey("chartType", next);
     },
 
+    setChartParams(next: ChartParams): void {
+      setChartParamsSignal(next);
+      persistKey("chartParams", next);
+    },
+
     setScaleMode(next: ScaleMode): void {
       setScaleModeSignal(next);
       persistKey("scaleMode", next);
@@ -295,6 +333,8 @@ export const setInvertScale = (next: boolean): void => active().setInvertScale(n
 export const setSymbol = (next: string): void => active().setSymbol(next);
 export const setTimeframe = (next: Timeframe): void => active().setTimeframe(next);
 export const setChartType = (next: ChartType): void => active().setChartType(next);
+export const chartParams = () => active().chartParams();
+export const setChartParams = (next: ChartParams): void => active().setChartParams(next);
 export const setScaleMode = (next: ScaleMode): void => active().setScaleMode(next);
 
 export { theme, timeZone, recentSymbols, recentTimeframes };

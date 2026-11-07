@@ -72,7 +72,7 @@ export type MergeFailure =
   | "stale"
   /** A tail's timestamps do not line up with ours. */
   | "mismatch"
-  /** Different `chart_style`: real and Heikin Ashi bars must not mix. */
+  /** Different `chart_style` or box: bars of different builds must not mix. */
   | "style"
   /** Different indicators or channel counts, or misaligned arrays. */
   | "shape";
@@ -171,6 +171,7 @@ function headerProblem(
   if (cur.interval !== inc.interval) return "interval";
   if ((cur.chart_style ?? "candles") !== (inc.chart_style ?? "candles"))
     return "style";
+  if (cur.chart_params?.box_size !== inc.chart_params?.box_size) return "style";
   const own = checkCurrent
     ? barsProblem(cur)
     : cur.bars.at(-1)?.t === null
@@ -495,8 +496,13 @@ export function mergeTail(
   const oldest = bars[0];
   const newest = bars.at(-1);
   if (!oldest || !newest || tail.bars.length === 0) return fail("mismatch");
-  if (tail.bars.at(-1)!.t! < newest.t!) return fail("stale");
+  const rebuilt = (current.anchor ?? null) !== (tail.anchor ?? null);
+  // A new build (ADR-0047): its bars need not line up with ours, and it may end
+  // before our newest bar. An older one than ours is an outdated response.
+  if (rebuilt && (tail.anchor ?? Infinity) < (current.anchor ?? -Infinity)) return fail("stale");
+  if (!rebuilt && tail.bars.at(-1)!.t! < newest.t!) return fail("stale");
   if (tail.bars[0]!.t! > newest.t!) return fail("gap");
+  if (tail.bars.at(-1)!.t! < oldest.t!) return fail("mismatch");
 
   // A long catch-up tail can reach back past our oldest bar; those `skip`
   // bars are ignored, the rest must line up with ours.
@@ -507,14 +513,21 @@ export function mergeTail(
   // of ours it covers. Searched from the end: the tail overlaps the newest.
   let from = bars.length - 1;
   while (from >= 0 && bars[from]!.t! > head.t!) from--;
-  if (from < 0 || bars[from]!.t !== head.t) return fail("mismatch");
-  for (let i = from; i < bars.length; i++) {
-    if (tail.bars[i - from + skip]!.t !== bars[i]!.t) return fail("mismatch");
+  if (rebuilt) {
+    // From its first bar on the new build replaces ours, whatever their times;
+    // what is older stays, so paged history survives.
+    if (from < 0 || bars[from]!.t !== head.t) from++;
+  } else {
+    if (from < 0 || bars[from]!.t !== head.t) return fail("mismatch");
+    for (let i = from; i < bars.length; i++) {
+      if (tail.bars[i - from + skip]!.t !== bars[i]!.t) return fail("mismatch");
+    }
   }
 
   // Tail index k lands on our index k + shift.
   const shift = from - skip;
   overwrite(bars, from, tail.bars, skip);
+  if (rebuilt) current.anchor = tail.anchor;
   // A swing that moved rewrites its levels on older bars too.
   let rewritten = from;
   for (const [name, cur] of Object.entries(current.indicators)) {

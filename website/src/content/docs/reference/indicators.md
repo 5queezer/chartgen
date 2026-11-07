@@ -58,10 +58,13 @@ the community composites and user scripts keep the `warmup` you send. Known diff
   `displacement - 1` bars past the last bar, from the series `future` block
   ([ADR-0033](/chartgen/decisions/0033-indicator-projection-past-last-bar/));
   the PNG chart ends at the last bar.
-- **Intrabar data.** The volume profiles (`volume_profile`, `session_vp`,
-  `hvn_lvn`, `naked_poc`, `tpo`) and `cvd` spread each bar's volume over its
-  range. TradingView builds them from lower-timeframe data, so they are
-  approximations.
+- **Intrabar data.** `volume_profile`, `fixed_range_vp` and `anchored_vp` read
+  lower-timeframe bars on a web chart load, as TradingView does; the series says
+  which in `profile_interval`
+  ([ADR-0048](/chartgen/decisions/0048-order-flow/)). Each of those bars still
+  spreads over its range, and a chart too long or too fine for it falls back
+  to its own bars. `session_vp`, `hvn_lvn`, `naked_poc`, `tpo` and `cvd` spread
+  each chart bar's volume over its range, and PNG and summary output always does.
 - **Long warmups.** `kalman_volume` normalises by a 200-bar standard deviation
   and needs about 280 bars before its first value.
 - **Unknown timeframe.** `histvol` needs the timeframe to annualize. When it
@@ -85,6 +88,8 @@ the community composites and user scripts keep the `warmup` you send. Known diff
 | [`heikin_ashi`](#heikin_ashi) | `ha` |
 | [`pivot`](#pivot) | `pivot_points` |
 | [`volume_profile`](#volume_profile) | `vp`, `vpvr` |
+| [`fixed_range_vp`](#fixed_range_vp) | `frvp` |
+| [`anchored_vp`](#anchored_vp) | `avp` |
 | [`session_vp`](#session_vp) | `svp`, `session_volume_profile` |
 | [`hvn_lvn`](#hvn_lvn) | `vp_nodes`, `volume_nodes` |
 | [`naked_poc`](#naked_poc) | `npoc` |
@@ -255,6 +260,37 @@ Volume Profile Visible Range — horizontal volume histogram with POC/VAH/VAL
 
 ![volume_profile sample render](../../../assets/indicators/volume_profile.png)
 
+### `fixed_range_vp`
+
+Fixed Range Volume Profile: histogram with POC/VAH/VAL over a time range
+
+**Aliases:** `frvp`
+
+**Parameters:**
+
+| Param | Type | Default | Description |
+|-------|------|---------|-------------|
+| `bins` | `integer` | `24` |  |
+| `side` | `string` | `left` | left or right |
+| `opacity` | `number` | `0.35` |  |
+| `from` | `string` | `` | YYYY-MM-DD, YYYY-MM-DD HH:MM in UTC, or unix seconds. Empty: the first loaded bar. |
+| `to` | `string` | `` | As from. Empty: the newest bar. |
+
+### `anchored_vp`
+
+Anchored Volume Profile: histogram with POC/VAH/VAL from an anchor time to the newest bar
+
+**Aliases:** `avp`
+
+**Parameters:**
+
+| Param | Type | Default | Description |
+|-------|------|---------|-------------|
+| `bins` | `integer` | `24` |  |
+| `side` | `string` | `left` | left or right |
+| `opacity` | `number` | `0.35` |  |
+| `anchor` | `string` | `` | YYYY-MM-DD, YYYY-MM-DD HH:MM in UTC, or unix seconds. Empty: the first loaded bar. |
+
 ### `session_vp`
 
 Session Volume Profile — per-session POC/VAH/VAL that reset each day/week
@@ -267,7 +303,7 @@ Session Volume Profile — per-session POC/VAH/VAL that reset each day/week
 |-------|------|---------|-------------|
 | `bins` | `integer` | `24` |  |
 | `session` | `string` | `daily` | daily, weekly, or hourly |
-| `bars_per_session` | `integer` | `null` | override session by fixed bar count |
+| `bars_per_session` | `integer` | `null` | override session by a span of this many bars on the clock; closed hours count |
 | `show_value_area` | `boolean` | `true` | draw VAH/VAL in addition to POC |
 
 ![session_vp sample render](../../../assets/indicators/session_vp.png)

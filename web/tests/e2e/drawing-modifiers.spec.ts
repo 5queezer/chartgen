@@ -81,8 +81,18 @@ const barAt = (page: Page, x: number) =>
       ohlc: [d.open, d.high, d.low, d.close],
       highY: chart.convertToPixel({ value: d.high }, { paneId }).y,
       lowY: chart.convertToPixel({ value: d.low }, { paneId }).y,
+      paneHeight: chart.getSize(paneId, "main")!.height,
     };
   }, x);
+
+/**
+ * A y inside the price pane, well clear of the bar's range, on the side with more room.
+ * Sample bars follow the clock, so a fixed offset can land past the pane's edge.
+ */
+const clearOf = (bar: { lowY: number; paneHeight: number }) =>
+  bar.lowY > bar.paneHeight - bar.lowY
+    ? bar.lowY - Math.min(150, bar.lowY - 40)
+    : bar.lowY + Math.min(150, bar.paneHeight - bar.lowY - 40);
 
 /** The price at a y pixel of the price pane. */
 const valueAtY = (page: Page, y: number) =>
@@ -200,7 +210,7 @@ async function dragPoint(
 /** A free trend line starting far enough from the range of the bar at `x` for a vertical to it. */
 async function freeLineFrom(page: Page, x: number) {
   const bar = await barAt(page, x);
-  const y = bar.lowY > 200 ? bar.lowY - 150 : bar.lowY + 150;
+  const y = clearOf(bar);
   await page.getByRole("button", { name: "Trend line" }).click();
   await clickAt(page, { x, y });
   await clickAt(page, { x: x + 260, y: y + 20 });
@@ -718,7 +728,7 @@ test.describe("drawing modifiers", () => {
     const x = 600;
     const bar = await barAt(page, x);
     expect((await barAt(page, x + 30)).timestamp).not.toBe(bar.timestamp);
-    const y = bar.lowY > 200 ? bar.lowY - 150 : bar.lowY + 150;
+    const y = clearOf(bar);
     const toY = bar.lowY + 10;
     await ctrlShiftDraw({ x, y }, { x: x + 30, y: toY });
     await expect.poll(async () => (await overlays(page)).length).toBe(3);

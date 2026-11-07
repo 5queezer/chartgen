@@ -23,7 +23,7 @@ Status legend:
 | Feature | TradingView | chartgen | Notes / links |
 |---|---|---|---|
 | Symbol search | ✅ | ✅ | Binance spot pairs and Yahoo instruments, type tabs, recent symbols. [Toolbar](/chartgen/guides/web/#toolbar), [`search_symbols`](/chartgen/reference/mcp/#search_symbols) |
-| Timeframe buttons and keyboard entry | ✅ | ◐ | Presets plus custom intervals: typing a digit or **Custom interval...** opens a popup that takes a number and a unit (`7m`, `45m`, `8h`, `2D`, `2W`, `3M`), and the last five stay in the menu. Above 60 minutes the length must be round (`61m` is rejected). No seconds, ranges or user-chosen favourite buttons. [Keyboard shortcuts](/chartgen/guides/web/#keyboard-shortcuts), [ADR-0038](/chartgen/decisions/0038-custom-intervals/) |
+| Timeframe buttons and keyboard entry | ✅ | ◐ | Presets plus custom intervals: typing a digit or **Custom interval...** opens a popup that takes a number and a unit (`7m`, `45m`, `8h`, `2D`, `2W`, `3M`), and the last five stay in the menu. Above 60 minutes the length must be round (`61m` is rejected). Seconds (`1s`, `5s`, `15s`, `30s`) on Binance only, as Yahoo has none. No tick intervals or user-chosen favourite buttons. [Keyboard shortcuts](/chartgen/guides/web/#keyboard-shortcuts), [ADR-0038](/chartgen/decisions/0038-custom-intervals/) |
 | Price legend (OHLC, change, volume) | ✅ | ✅ | Follows the crosshair. [Chart conveniences](/chartgen/guides/web/#chart-conveniences) |
 | Bar-close countdown | ✅ | ◐ | Only for 24/7 symbols (the Binance rule). Hidden for stocks, FX and futures, because the session close cannot be derived from the interval. [Chart conveniences](/chartgen/guides/web/#chart-conveniences) |
 | %, log and auto price scale | ✅ | ✅ | [Chart conveniences](/chartgen/guides/web/#chart-conveniences) |
@@ -41,6 +41,9 @@ Status legend:
 | Add alert at the clicked price (context menu) | ✅ | ✅ | "Add alert at price" opens the alert dialog at that price. [Chart context menu](/chartgen/guides/web/#chart-context-menu), [Alerts](/chartgen/guides/web/#sidebar-and-price-alerts) |
 | Titled dialogs (symbol search, compare, add symbol) | ✅ | ✅ | The compare and watchlist dialogs say "Compare symbol" and "Add symbol". [Compare symbols](/chartgen/guides/web/#compare-symbols), [Watchlist](/chartgen/guides/web/#watchlist) |
 | Mobile and touch layout | ✅ | ◐ | Compact layout with a dock and bottom sheets, pan, pinch and long-press crosshair. No native app, no long-press menu with price actions, tested in device emulation only. [Phones and tablets](/chartgen/guides/web/#phones-and-tablets) |
+| Volume candles | ✅ | ◐ | No help page exists to compare with, so this is unverified: width by volume on an even time axis. [Order flow](/chartgen/guides/web/#order-flow) |
+| Volume footprint chart type | ✅ | ◐ | Row size, Cluster and Profile, Buy and Sell, Delta, Total, Ladder, gradient, value area, POC, info box, table pane, imbalances, stacked imbalances. From klines only: no tick-based mode, so rows are estimates. Departures: an empty level is no imbalance, a stack needs 2 klines per level. Bars at most 50 px wide. No open interest or footprint alerts. [Order flow](/chartgen/guides/web/#order-flow), [ADR-0048](/chartgen/decisions/0048-order-flow/) |
+| TPO chart type | ✅ | ◐ | Period, block size, row size, value area, split by blocks, letters and blocks, POC, poor high and low, single prints, VAH, VAL, midpoint, open and close, initial balance, volume profile, summary pane, custom sessions. Departures: auto row size, tails left out of single prints, a block too short for its period is widened. No pre and post market, no right click to split or merge. [Order flow](/chartgen/guides/web/#order-flow), [ADR-0048](/chartgen/decisions/0048-order-flow/) |
 | Multi-chart layouts (several charts in one view) | ✅ | ◐ | 1, 2 or 4 charts with their own symbol, interval and indicators, saved in layouts. No symbol or crosshair sync, no larger grids, no resizable splits. [Chart grid](/chartgen/guides/web/#chart-grid), [ADR-0043](/chartgen/decisions/0043-multi-chart-grid/) |
 
 ## Chart types
@@ -53,9 +56,10 @@ Status legend:
 | Line | ✅ | ✅ | |
 | Area | ✅ | ✅ | |
 | Heikin Ashi | ✅ | ✅ | Computed on the server, so indicators run on the HA values as on TradingView. [`chart_style`](/chartgen/reference/mcp/) |
+| Renko, Kagi, Point & Figure, Line Break, Range | ✅ | ◐ | Built on the server from the chart's timeframe, on intraday and daily data, so indicators run on them. ATR, fixed and percentage boxes, reversal and line count, kept in layouts and links. On closes only, with no separate source interval, Renko wicks or projection colors. Bar replay and compare are refused on them. [ADR-0047](/chartgen/decisions/0047-price-based-charts/) |
+| HLC area | ✅ | ✅ | Drawn in the browser. [ADR-0047](/chartgen/decisions/0047-price-based-charts/) |
 | Baseline, columns, high-low, step line, line with markers | ✅ | ◐ | Drawn in the browser from the bars. Baseline's base level is fixed at TradingView's default (50% of the visible range) and not configurable. No per-type style settings (TradingView's Baseline, Columns and High-low style tabs); the types take the line and up/down body colors, and the body/border toggles do not apply to Columns or Baseline. [Toolbar](/chartgen/guides/web/#toolbar), [ADR-0030](/chartgen/decisions/0030-custom-chart-types/) |
-| Renko, Kagi, Line break, Point & figure | ✅ | ❌ | Not offered. |
-| Range bars and other non-time bars | ✅ | ❌ | Not offered. |
+| Tick bars | ✅ | ❌ | Not offered. |
 
 ## Indicators
 
@@ -77,7 +81,8 @@ Status legend:
 | Candlestick pattern recognition | ✅ | ◐ | `candlestick_patterns`: 50 patterns, all, one side or one pattern, with a trend rule. Blue, red and grey labels with a tooltip. TradingView does not publish its list, so coverage cannot be compared exactly. No separate indicator per pattern in the picker: search by the pattern's name and choose it in the settings. [Pattern indicators](/chartgen/guides/web/#pattern-indicators), [ADR-0046](/chartgen/decisions/0046-pattern-detection/) |
 | Auto chart patterns | ✅ | ◐ | `chart_patterns` on the last 600 bars: head and shoulders, double and triple tops and bottoms, triangles, wedges, channels, flags, pennants, rectangles, with a status. No Elliott waves, on purpose: see ADR-0046. Thresholds are ours; TradingView does not publish its own. [Pattern indicators](/chartgen/guides/web/#pattern-indicators) |
 | Auto Fib Retracement | ✅ | ◐ | `auto_fib`: levels from the last ZigZag swing, with depth and deviation, a value and color per level, and an alert per level. Up to 8 levels, no fill between them, no log-scale levels. [Pattern indicators](/chartgen/guides/web/#pattern-indicators) |
-| Profiles from lower-timeframe data | ✅ | ◐ | Volume and time profiles and CVD spread each bar's volume over its range. [Differences list](/chartgen/reference/indicators/#values-match-tradingview) |
+| Profiles from lower-timeframe data | ✅ | ◐ | `volume_profile`, `fixed_range_vp` and `anchored_vp` read finer klines on a chart load and say which. `session_vp`, `hvn_lvn`, `naked_poc`, `tpo` and `cvd` still spread each bar's volume over its range. [ADR-0048](/chartgen/decisions/0048-order-flow/) |
+| Fixed range, anchored and session volume profile | ✅ | ◐ | Fixed and anchored take typed times and draw at the chart's edge, not over their range. Session draws POC, VAH and VAL lines, no histogram per session. [Order flow](/chartgen/guides/web/#order-flow) |
 | Volume in the default set | ✅ | ✅ | A fresh install starts with the EMA stack, Volume and RSI. Stored sets are never changed. [Managing indicators](/chartgen/guides/web/#managing-indicators) |
 | Persisted indicator set | ✅ (cloud) | ◐ | Saved in `localStorage` per browser, not synced. [ADR-0005](/chartgen/decisions/0005-client-indicator-state/) |
 
@@ -158,7 +163,7 @@ Status legend:
 | Pine-like series operators and `ta.*` functions in scripts | ✅ | ✅ | Element-wise operators, `close[1]`, comparisons, `ta.sma/ema/rsi/atr/macd/crossover` and more, with the Pine v5 code the built-ins use. Pivot tie rule is unverified against TradingView. [Series](/chartgen/guides/scripted-indicators/#series), [`ta.*`](/chartgen/guides/scripted-indicators/#ta-functions) |
 | Fork a built-in as a script | ✅ (open source scripts) | ◐ | `fork_indicator` works for `wavetrend` only. [Forking](/chartgen/guides/scripted-indicators/#forking-a-built-in) |
 | Script editor in the web app | ✅ | ◐ | Create, edit, save, delete and add to the chart, with errors at their line. Only on servers with `CHARTGEN_SCRIPTING=1`. No autocomplete, no renaming and no fork button yet. [Script editor](/chartgen/guides/web/#script-editor), [ADR-0041](/chartgen/decisions/0041-script-editor-in-the-web-app/) |
-| Programmatic access (API, agents) | partial | ✅ | The MCP server exposes 19 tools (plus optional scripting and server-alert tools), including chart generation, quotes and symbol search. [MCP reference](/chartgen/reference/mcp/) |
+| Programmatic access (API, agents) | partial | ✅ | The MCP server exposes 21 tools (plus optional scripting and server-alert tools), including chart generation, quotes and symbol search. [MCP reference](/chartgen/reference/mcp/) |
 
 ## Data sources
 

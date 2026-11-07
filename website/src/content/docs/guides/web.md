@@ -70,7 +70,7 @@ stays visible.
   **Custom interval...**, which opens the same popup as the keyboard entry (see
   [Keyboard shortcuts](#keyboard-shortcuts)). While a custom interval is
   active, the dropdown's button shows it.
-- **Chart type** — Candles, Hollow candles (only up candles hollow), Bars (OHLC), Line, Line with markers, Step line, Area, Baseline, Columns, High-low, Heikin Ashi. Heikin Ashi is computed on the server (the web app sends `chart_style: "heikin_ashi"` with every load, tail poll and history page), so the legend shows Heikin Ashi OHLC values and indicators are calculated on them, as on TradingView. Switching to or from it reloads the chart. The other types are drawn in the browser from the same bars, so switching between them needs no reload, and the legend keeps showing the bar's OHLC:
+- **Chart type** — Candles, Hollow candles (only up candles hollow), Bars (OHLC), Line, Line with markers, Step line, Area, Baseline, Columns, High-low, HLC area, Heikin Ashi, the [order-flow types](#order-flow) (Volume candles, Volume footprint and TPO), and Renko, Line break, Kagi, Point & figure and Range, the five [price-based](#price-based-charts) types. Heikin Ashi is computed on the server (the web app sends `chart_style: "heikin_ashi"` with every load, tail poll and history page), so the legend shows Heikin Ashi OHLC values and indicators are calculated on them, as on TradingView. Switching to or from it reloads the chart, and so does switching to or from a price-based type, which is built on the server too, with indicators calculated on its bars. The remaining types are drawn in the browser from the same bars, so switching between them needs no reload, and the legend keeps showing the bar's OHLC:
   - **Line with markers** — the close line with a dot on every bar.
   - **Step line** — the closes joined by horizontal-then-vertical steps.
   - **Baseline** — the close line and fill, in the up color above a base
@@ -378,13 +378,14 @@ while typing in a field or while a dialog or menu is open.
 | `Esc` | Bar replay: jump to real time |
 
 The timeframe popup accepts a number of minutes (`5`, `7`, `45`, `120`) or a
-number with a unit `m`, `h`, `d`, `w` (`7m`, `45m`, `8h`, `4H`, `2D`, `2W`);
+number with a unit `s`, `m`, `h`, `d`, `w` (`5s`, `7m`, `45m`, `8h`, `4H`, `2D`, `2W`);
 an uppercase `M` means month (`3M`), lowercase `m` minutes. A lone `D`, `W`
 or `M` means one day, week or month. `1`, `2`, `0` then `Enter` selects 2h.
-This works for Binance and Yahoo symbols alike. Lengths are bounded at under 1440
-minutes, 168h, 365D, 52W and 12M, and above 60 minutes the length must be a round
-one (`65m` works, `61m` does not). The field turns red for anything else, including
-seconds, and says so. [MCP reference](/chartgen/reference/mcp/#generate_chart)
+This works for Binance and Yahoo symbols alike, except seconds: Yahoo has no seconds
+data, so a stock's menu does not offer them and typing one gives an error. Lengths are
+bounded at under 60 seconds, 1440 minutes, 168h, 365D, 52W and 12M, and above 60 minutes
+the length must be a round one (`65m` works, `61m` does not). The field turns red for
+anything else, and says so. [MCP reference](/chartgen/reference/mcp/#generate_chart)
 lists how bars line up and what each source builds them from.
 
 A custom interval works like a preset everywhere: live updates, history paging,
@@ -397,6 +398,50 @@ EMA 200 needs 891 to converge, so its live values and page seams can differ from
 longer history. Scrolling back to load more does not change that: each page, poll and
 push computes over its own capped read. [MCP reference](/chartgen/reference/mcp/#generate_chart)
 gives the rule.
+
+
+## Price-based charts
+
+Renko, Line break, Kagi, Point & figure and Range bars form when price moves, not when time
+passes. The server builds them from the chart's timeframe, so `1h` Renko is made of `1h`
+closes, and indicators run on them. They only approximate what the same types show on tick
+data: within one source bar the order of moves is unknown. A finer timeframe is closer to the
+tape, with less history. [ADR-0047](/chartgen/decisions/0047-price-based-charts/)
+
+**Settings for ...**, at the bottom of the chart-type menu, sets each chart's inputs:
+
+| Input | Type | Meaning |
+|---|---|---|
+| Box size, Reversal amount or Range size | All but Line break | **ATR** of a length (default 14), **Traditional** (a size you set), or **Percentage LTP** (default 1% of the last price). |
+| Reversal, in boxes | Point & figure | Boxes the close must come back to start a new column (default 3). |
+| Line count | Line break | Lines the close must pass to reverse (default 3). |
+
+An ATR or percentage box is worked out when the chart loads, rounded to two significant
+digits, and kept until the next load. The legend shows it, as `Renko 3.3`, except on a phone,
+whose legend is shorter. A box too small for the prices, under a millionth of the last price or
+making over 20,000 bars, is refused: a fixed or percentage box goes to ATR, and a message says
+so. That includes a fixed box you bring to a much dearer symbol. ATR can fail too, on a market
+with no price movement: the chart then goes to candles, again with a message, and you can pick
+the type again once the market moves.
+
+**The last bar is open.** Only a closed source bar confirms a bar, so a spike that fades makes
+none. The open bar runs from the last confirmed level to the last price and keeps its place
+when it is confirmed. The newest bar always closes on the last price, even with the market
+shut. Bars can be far apart in time, so the time axis is not linear, and there is no countdown.
+
+**Every so often the build starts later**, about every 1000 source bars, and sooner on a stock.
+The chart takes the new build from its newest bars on and keeps your paged history, so a bar at
+the live end can move at that moment, and older bars can differ from a fresh load until you
+reload.
+
+**What works:** indicators, drawings, history paging, price alerts, layouts, grids, share links
+(`type=renko&tp=box:fixed;size:50`) and the compact layout. Indicator and sloped-line alerts are
+tied to the chart type as well as the interval, because their values differ on these bars.
+Server alerts run on the interval's candles. Indicators that project past the last bar show
+nothing there.
+
+**Refused:** bar replay and compare, whose buttons are disabled and say why. Both need bars on a
+time grid. Your compare symbols and their percent axis come back when you pick a time-based type.
 
 ## Drawing tools
 
@@ -582,6 +627,68 @@ Clone puts the copy just below the drawing; alerts on the original stay on the
 original. In a [chart grid](#chart-grid) a right click makes that chart the active
 one, and the menu acts on it.
 
+## Order flow
+
+Three chart types in the chart-type menu, plus volume profiles read from finer bars
+([ADR-0048](/chartgen/decisions/0048-order-flow/)). The status at the bottom left of the chart
+says how it was made, and its ⚙ opens the settings, which apply to every chart and are not part
+of a layout.
+
+**What this data is.** Footprints are built from finer klines, not trades. On Binance the buy and
+sell of a bar are measured, from each kline's taker buy volume. On Yahoo there is no aggressor data,
+so each kline goes wholly to one side by close versus open, and the status says *close vs open*. On
+both, **a row's volume is an estimate**: a kline's volume spread over its high-low range. The finer
+the klines the better, and the status names them: *from 1m bars*, or coarser for long or daily charts.
+Older stock history gets coarser data, then none. The forming bar repaints as data arrives, and cells
+update every 10 seconds, while the price moves at once. After a hidden tab or sleep a chart reads what it
+missed, or loads again past 200 bars.
+
+**Volume candles.** Candle width follows volume, relative to the most on screen.
+
+**Volume footprint.** Choosing it zooms to the widest bars, and leaving gives the zoom back. When
+bars or rows are too small for cells, a bar draws as a candle and the status says to zoom in.
+
+- *Row size:* auto (0.2 x ATR on round numbers) or ticks per row, with the ATR length.
+- *Type:* Buy and Sell (sell left, buy right), Delta, Total, or Ladder, where the buy column sits half
+  a row up, so that a buy reads against the sell it is compared with. *Display:* Cluster (equal width)
+  or Profile (width by volume).
+- *Gradient:* 4 colours by the row's share of the bar's largest, changing at 0.25, 0.5 and 0.75.
+- *Value area* (70%) with its VAH and VAL, and the *POC*, outlined.
+- *Summary:* an info box under each footprint (total, buy, sell, delta), or a table pane: volume and its
+  change, buy, sell and delta with percentages, min and max delta, session CVD, POC and HL range. Session
+  CVD restarts each UTC day and counts from the first loaded bar of it.
+- *Imbalance* (300%): a buy against the sell one row below, a sell against the buy one row above, marked
+  at the cell's edge. A row with nothing to compare with is none. *Stacked* imbalances (3 rows) are bands
+  projected until price comes back, with their count. A level counts towards a stack only where at least
+  2 klines traded: one kline has one split, so all its rows would pass together.
+
+**TPO.** One profile per period over the chart's bars, so pick an interval below the period.
+
+- *Period* (1D, 2D, 1W, 1M), *block size* (5m to 4h), *row size* (auto or ticks), *value area* (70%). A
+  month is too many 5m blocks to read: the chart uses 15m and the status says so. Bars no profile covers
+  draw as candles.
+- *Draw as* letters, when they fit, or blocks; *split by blocks* places each block at its own time.
+  Letters run A-Z then a-z, in two colour ranges. Outside the value area they fade by the opacity you set.
+- *Lines:* POC, VAH and VAL, midpoint, open and close, initial balance with its block count, poor high and
+  low (more than one block at the extreme), single prints inside the profile.
+- *Volume profile* beside it, on the left or right, from block volume. *Summary pane:* HL and VA range, VAH,
+  VAL, POC, volume, blocks in all and above and below the POC, rotation factor, and the initial balance.
+- *Sessions:* up to five `HH:MM-HH:MM`, comma separated, in the exchange's time (UTC for crypto), one profile
+  each. A TPO is off in bar replay, as a profile holds its whole period: the chart shows candles and says so.
+
+**Volume profiles.** `volume_profile`, `fixed_range_vp` (from, to) and `anchored_vp` (anchor) read finer bars
+when a chart loads, and the legend says which: *from 15m bars*. With none to be had they spread the chart's own
+bars, and the legend says nothing. Times are `YYYY-MM-DD`, `YYYY-MM-DD HH:MM` in UTC, or unix
+seconds, and a range covers only the loaded bars. Fixed range and anchored profiles draw at the chart's edge,
+not over their range, and are typed rather than picked on the chart.
+
+**Session volume profile.** `session_vp` spreads each bar's volume, as its live updates do, and holds
+POC, VAH and VAL through each session. A live update matches the load only while it can see the whole
+session: on a 1m chart past about 16 h 40 into the UTC day, or a weekly session on 10m or finer late in the
+week, the level steps at the first update and slides with each new bar. With the default daily session it
+draws nothing at 1d and above, where a session is one bar, though the legend shows its values. An alert on
+these lines can fire at a session's end, when the level jumps past the price.
+
 ## Chart grid
 
 The grid button left of the layout menu shows 1 chart, 2 side by side, 2 stacked or
@@ -634,7 +741,7 @@ https://chartgen.vasudev.xyz/?symbol=ETHUSDT&interval=4h&type=candles&ind=rsi(le
 |---|---|
 | `symbol` | Chart symbol |
 | `interval` | Timeframe (`4h`, `240`, `1d`, `7m`, `2W`, ...) |
-| `type` | Chart type: `candles`, `hollow`, `bars`, `line`, `line_markers`, `step_line`, `area`, `baseline`, `columns`, `high_low`, `heikin_ashi` |
+| `type` | Chart type: `candles`, `hollow`, `bars`, `line`, `line_markers`, `step_line`, `area`, `baseline`, `columns`, `high_low`, `heikin_ashi`, `volume_candles`, `footprint`, `tpo` |
 | `ind` | Indicators, comma separated (at most 50, 2 KB). Non-default parameters go in parentheses, separated by `;`: `macd(fast:8;slow:20)`; characters outside letters, digits, `.`, `_` and `-` in a text value are percent-encoded. Visible indicators only; `ind=` means none. A repeated name is another instance: `rsi,rsi(length:21)` shows two RSIs |
 | `compare` | Compare symbols, comma separated; always written, `compare=` clears them |
 | `tz` | One of the time zones in the time-zone menu: `utc`, `exchange`, `local` or a listed IANA name such as `Europe/Berlin` |

@@ -80,6 +80,23 @@ pub fn render_chart(
     render_results(data, &refs, output, width, height)
 }
 
+/// The chart's title: `SYMBOL · INTERVAL`, then how its bars are built, if they are
+/// not plain candles of that interval: `BTCUSDT · 1H · P&F 3.4 x 3`.
+pub fn chart_title(data: &OhlcvData, style: Option<&str>) -> String {
+    let sym = data.symbol.as_deref().unwrap_or("Sample");
+    let ivl = data.interval.as_deref().unwrap_or("");
+    let mut title = if ivl.is_empty() {
+        sym.to_string()
+    } else {
+        format!("{} · {}", sym, ivl.to_uppercase())
+    };
+    if let Some(style) = style {
+        title.push_str(" · ");
+        title.push_str(style);
+    }
+    title
+}
+
 /// `render_chart` for indicator results computed by the caller (so each
 /// indicator runs once, and a failed one can be left out).
 pub fn render_results(
@@ -88,6 +105,18 @@ pub fn render_results(
     output: &str,
     width: u32,
     height: u32,
+) -> Result<(), Box<dyn std::error::Error>> {
+    render_labeled(data, results, output, width, height, None)
+}
+
+/// `render_results`, naming in the title how the bars are built (ADR-0047).
+pub fn render_labeled(
+    data: &OhlcvData,
+    results: &[&PanelResult],
+    output: &str,
+    width: u32,
+    height: u32,
+    style: Option<&str>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let n = data.len();
     if n == 0 {
@@ -129,13 +158,7 @@ pub fn render_results(
 
     // Draw title: "SYMBOL · INTERVAL"
     {
-        let sym = data.symbol.as_deref().unwrap_or("Sample");
-        let ivl = data.interval.as_deref().unwrap_or("");
-        let title = if ivl.is_empty() {
-            sym.to_string()
-        } else {
-            format!("{} · {}", sym, ivl.to_uppercase())
-        };
+        let title = chart_title(data, style);
         root.draw_text(
             &title,
             &("monospace", 24).into_font().color(&TITLE_COLOR),
@@ -225,7 +248,7 @@ pub fn render_results(
             // Pine's plot.style_linebr), so a gap draws no connector.
             for line in &overlay.lines {
                 let draw_width = if line.width <= 1 { 2 } else { line.width };
-                for run in line_runs(&line.y) {
+                for run in level_runs(line_runs(&line.y), overlay.level_lines) {
                     chart.draw_series(std::iter::once(PathElement::new(
                         run,
                         line.color.stroke_width(draw_width),
@@ -440,7 +463,7 @@ pub fn render_results(
         // Pine's plot.style_linebr), so a gap draws no connector.
         for line in &result.lines {
             let draw_width = if line.width <= 1 { 2 } else { line.width };
-            for run in line_runs(&line.y) {
+            for run in level_runs(line_runs(&line.y), result.level_lines) {
                 chart.draw_series(std::iter::once(PathElement::new(
                     run,
                     line.color.stroke_width(draw_width),
@@ -567,6 +590,17 @@ fn line_runs(y: &[f64]) -> Vec<Vec<(f64, f64)>> {
         .collect()
 }
 
+/// `runs`, split again wherever a value changes if the line holds levels, so a jump
+/// between two levels draws no connector (`PanelResult::level_lines`).
+fn level_runs(runs: Vec<Vec<(f64, f64)>>, levels: bool) -> Vec<Vec<(f64, f64)>> {
+    if !levels {
+        return runs;
+    }
+    runs.iter()
+        .flat_map(|run| run.chunk_by(|a, b| a.1 == b.1).map(<[_]>::to_vec))
+        .collect()
+}
+
 /// Legend text of a line: its last finite value. A line that breaks at trend
 /// flips (`breaks`) reads the last bar instead, "n/a" when it has none there
 /// (the inactive Supertrend line). None when it has no value at all.
@@ -631,6 +665,21 @@ mod tests {
     const NAN: f64 = f64::NAN;
 
     #[test]
+    fn the_title_names_how_the_bars_are_built() {
+        let data = OhlcvData {
+            bars: Vec::new(),
+            symbol: Some("BTCUSDT".into()),
+            interval: Some("1h".into()),
+            session: None,
+        };
+        assert_eq!(chart_title(&data, None), "BTCUSDT · 1H");
+        assert_eq!(
+            chart_title(&data, Some("P&F 3.4 x 3")),
+            "BTCUSDT · 1H · P&F 3.4 x 3"
+        );
+    }
+
+    #[test]
     fn lines_break_at_nan() {
         // A flip of linebr lines: no point joins the runs across the gap.
         let runs = line_runs(&[NAN, 1.0, 2.0, NAN, NAN, 3.0, NAN, 4.0, 5.0]);
@@ -643,6 +692,16 @@ mod tests {
             ]
         );
         assert!(line_runs(&[NAN, NAN]).is_empty());
+        let levels = line_runs(&[1.0, 1.0, 2.0, 2.0, NAN, 3.0]);
+        assert_eq!(level_runs(levels.clone(), false).len(), 2);
+        assert_eq!(
+            level_runs(levels, true),
+            vec![
+                vec![(0.0, 1.0), (1.0, 1.0)],
+                vec![(2.0, 2.0), (3.0, 2.0)],
+                vec![(5.0, 3.0)]
+            ]
+        );
         assert_eq!(line_runs(&[1.0, 2.0]), vec![vec![(0.0, 1.0), (1.0, 2.0)]]);
     }
 

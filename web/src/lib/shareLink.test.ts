@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { ParamSpec } from "../types/responses";
+import { DEFAULT_CHART_PARAMS } from "./priceBars";
 import {
   coerceParam,
   decodeIndicators,
@@ -241,5 +242,41 @@ describe("share links", () => {
       expect(r.entries).toEqual([{ name: "zzz", n: 3, on: true }]);
       expect(r.unknown).toEqual([]);
     });
+  });
+});
+
+describe("price-based chart types in a link", () => {
+  const state: ShareState = {
+    symbol: "BTCUSDT",
+    timeframe: "1h",
+    chartType: "renko",
+    chartParams: { ...DEFAULT_CHART_PARAMS, box: "fixed", boxSize: 50 },
+    indicators: [],
+    compare: [],
+    timeZone: "local",
+  };
+
+  it("round-trips the type and its inputs", () => {
+    const q = encodeShare(state);
+    expect(q).toContain("type=renko");
+    expect(q).toContain("tp=box:fixed;size:50");
+    expect(decodeShare(q).chartParams).toEqual(state.chartParams);
+  });
+
+  it("says nothing more than before for the other types", () => {
+    const q = encodeShare({ ...state, chartType: "candles" });
+    expect(q).not.toContain("tp=");
+    expect(decodeShare(q).chartParams).toBeUndefined();
+    expect(decodeShare("?type=candles&tp=box:fixed;size:5").chartParams).toBeUndefined();
+  });
+
+  it("means the defaults when a price-based link has none", () => {
+    expect(encodeShare({ ...state, chartParams: DEFAULT_CHART_PARAMS })).not.toContain("tp=");
+    expect(decodeShare("?type=kagi").chartParams).toEqual(DEFAULT_CHART_PARAMS);
+  });
+
+  it("a link's params are its own to strip", () => {
+    expect(hasShareParams("?tp=box:atr")).toBe(true);
+    expect(stripShareParams("?type=kagi&tp=rev:2&code=x")).toBe("?code=x");
   });
 });

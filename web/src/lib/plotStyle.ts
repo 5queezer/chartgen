@@ -59,6 +59,15 @@ interface PayloadHistogram {
 }
 
 /**
+ * Whether the segment between two values of a line that holds levels is a jump from
+ * one level to the next, which draws nothing (`level_lines`). klinecharts takes a
+ * segment's style from the bar it starts at.
+ */
+export function isLevelJump(current: unknown, next: unknown): boolean {
+  return typeof current === "number" && typeof next === "number" && current !== next;
+}
+
+/**
  * Plots of a payload indicator in drawing order (lines, then histograms).
  * `colorAt` gives the fallback color for the n-th plot of the indicator,
  * used where the server sends none. For an instance after the first (`key`),

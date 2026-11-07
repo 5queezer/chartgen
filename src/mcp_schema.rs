@@ -31,7 +31,7 @@ pub fn tools_list_result() -> Value {
                         },
                         "timeframe": {
                             "type": "string",
-                            "description": "Candlestick timeframe / interval: a number and a unit, m minutes, h hours, D days, W weeks, M months (1m, 5m, 7m, 45m, 90m, 4h, 8h, 1d, 2D, 1W, 2W, 1M). Upper bounds after normalization: under 1440m, 168h, 365D, 52W, 12M. A minute or hour interval may also take at most 60 native Binance bars per bar, so 61m is rejected and 65m is not. The response echoes the canonical form (120m becomes 2h, 2W becomes 2wk, 1M becomes 1mo).",
+                            "description": "Candlestick timeframe / interval: a number and a unit, s seconds, m minutes, h hours, D days, W weeks, M months (1s, 5s, 1m, 5m, 7m, 45m, 90m, 4h, 8h, 1d, 2D, 1W, 2W, 1M). Seconds need a Binance spot symbol: Yahoo has none. Upper bounds after normalization: under 60s, 1440m, 168h, 365D, 52W, 12M. A minute or hour interval may also take at most 60 native Binance bars per bar, so 61m is rejected and 65m is not. The response echoes the canonical form (120m becomes 2h, 2W becomes 2wk, 1M becomes 1mo).",
                             "default": "4h"
                         },
                         "interval": {
@@ -89,12 +89,18 @@ pub fn tools_list_result() -> Value {
                             "description": "format=series only: extra older bars (max 1000) fetched and fed to indicator computation, then trimmed, so the first returned bars carry warmed-up indicator values. A non-zero warmup is raised to what the indicators need to converge (891 for ema_stack's EMA 200). Ignored by png/summary/both.",
                             "default": 0
                         },
+                        "profile_intrabars": {
+                            "type": "boolean",
+                            "description": "format=series only: compute volume_profile, fixed_range_vp and anchored_vp from lower-timeframe bars, for a chart's full load: up to 6 more Binance requests. The series then says which bars in profile_interval. Leave it off on pages and tails, which keep the load's profile. Default: false, each bar's volume spread over its range.",
+                            "default": false
+                        },
                         "chart_style": {
                             "type": "string",
-                            "enum": ["candles", "heikin_ashi"],
-                            "description": "Price series style. 'candles' (default) uses the raw OHLC bars. 'heikin_ashi' replaces them with Heikin Ashi bars (haClose = ohlc4, haOpen = (prev haOpen + prev haClose) / 2, seeded with (open+close)/2) in every format. Like TradingView, indicators are then computed on the Heikin Ashi values. The transform runs over bars+warmup before trimming, so pages and tail polls converge after warmup. format=series echoes the applied style as chart_style.",
+                            "enum": ["candles", "heikin_ashi", "renko", "kagi", "point_figure", "line_break", "range"],
+                            "description": "Price series style. 'candles' (default) uses the raw OHLC bars. 'heikin_ashi' replaces them with Heikin Ashi bars (haClose = ohlc4, haOpen = (prev haOpen + prev haClose) / 2, seeded with (open+close)/2) in every format. Like TradingView, indicators are then computed on the Heikin Ashi values. The transform runs over bars+warmup before trimming, so pages and tail polls converge after warmup. 'renko', 'kagi', 'point_figure', 'line_break' and 'range' are price-based: built from the bars of `timeframe`, so they only approximate tick data, with times that are not evenly spaced. The last bar is the open one; only closed source bars confirm a bar. Each reads a fixed window of source bars (up to 5000, within the 20,000 native bar limit), `warmup` does nothing for them, and a window may hold fewer bars than `bars`. Indicators run on these bars; ones that project past the last bar return no `future`. format=series echoes the applied style as chart_style. See ADR-0047.",
                             "default": "candles"
                         },
+                        "chart_params": chart_params_schema(),
                         "width": {
                             "type": "integer",
                             "description": "Chart image width in pixels",
@@ -160,6 +166,47 @@ pub fn tools_list_result() -> Value {
                         }
                     },
                     "required": ["symbols"]
+                }
+            },
+            {
+                "name": "get_footprint",
+                "description": "Volume footprint of chart bars: buy and sell volume per price row of each bar, built from lower-timeframe bars (not from trades). `intrabar_interval` says which; null means nothing finer exists and the bar is its own only intrabar. `side` says how volume was split: 'taker_volume' uses Binance's taker buy volume per kline, 'close_vs_open' gives each intrabar to one side (Yahoo has no aggressor data). Row placement is always an estimate: each intrabar's volume is spread over its high-low range. The forming bar repaints as data arrives. Costs up to 7 Binance requests on a cold load, and is cached.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "ticker": { "type": "string", "description": "Symbol, as generate_chart's ticker." },
+                        "timeframe": { "type": "string", "description": "Chart interval, as generate_chart's timeframe.", "default": "1h" },
+                        "bars": { "type": "integer", "minimum": 1, "maximum": 200, "default": 60, "description": "Newest bars to return." },
+                        "end_time": { "type": "integer", "description": "Exclusive upper bound on bar open time, ms since epoch." },
+                        "row_size": { "type": "number", "minimum": 0, "description": "Row height in price. Raised to a tick, lowered to the highest price, and widened if a bar would have over 200 rows; row_widened says so. Omit for row_ticks or auto." },
+                        "row_ticks": { "type": "integer", "minimum": 0, "description": "Row height in ticks. Omit for auto: 0.2 x ATR on round numbers." },
+                        "atr_length": { "type": "integer", "minimum": 1, "maximum": 500, "default": 14, "description": "ATR length of the auto row size." },
+                        "value_area": { "type": "number", "minimum": 1, "maximum": 100, "default": 70, "description": "Value area, percent of the volume." },
+                        "imbalance": { "type": "number", "minimum": 100, "maximum": 100000, "default": 300, "description": "Imbalance, percent: buy against sell one row below, sell against buy one row above." },
+                        "stacked": { "type": "integer", "minimum": 1, "maximum": 100, "default": 3, "description": "Imbalances in a row that make a stacked imbalance. A level counts only where at least 2 intrabars traded, on it and on the level it is compared with: one kline has one split, so its rows would all agree." },
+                        "intrabar_interval": { "type": "string", "description": "For a poll of a chart already loaded: the intrabar_interval its load returned, or 'none' if that was null, so the few newest bars are read as the load's were. Falls back to what these bars can afford if they cannot have it. Omit to choose by the window." }
+                    },
+                    "required": ["ticker"]
+                }
+            },
+            {
+                "name": "get_tpo",
+                "description": "Time Price Opportunity (market profile) of periods: which blocks traded at each price row, with POC, value area, poor highs and lows, single prints, initial balance and rotation factor. Built from block-length klines. Costs up to 3 Binance requests for a block Binance has (5m, 15m, 30m, 1h, 2h, 4h); any other is built from finer klines and can cost up to 20.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "ticker": { "type": "string", "description": "Symbol, as generate_chart's ticker." },
+                        "period": { "type": "string", "default": "1D", "description": "Length of a profile: a count and D, W or M, such as 1D, 1W or 1M." },
+                        "block": { "type": "string", "default": "30m", "description": "Length of a block, from 5m to 4h. If 3000 cannot hold a whole period, the next that can: the reply's block is that one, and block_widened says so. A period 4h blocks cannot cover is refused." },
+                        "periods": { "type": "integer", "minimum": 1, "maximum": 60, "default": 10, "description": "Newest periods to return, whole ones within 3000 blocks; `periods_cut` says if that left some out." },
+                        "end_time": { "type": "integer", "description": "Exclusive upper bound on block open time, ms since epoch." },
+                        "row_size": { "type": "number", "minimum": 0, "description": "Row height in price. Omit for row_ticks or auto." },
+                        "row_ticks": { "type": "integer", "minimum": 0, "description": "Row height in ticks. Omit for auto: a 24th of the median period range, on round numbers." },
+                        "value_area": { "type": "number", "minimum": 1, "maximum": 100, "default": 70, "description": "Value area, percent of the blocks." },
+                        "ib_blocks": { "type": "integer", "minimum": 1, "maximum": 100, "default": 2, "description": "Blocks of the initial balance." },
+                        "sessions": { "type": "array", "items": { "type": "string" }, "maxItems": 5, "description": "Up to 5 HH:MM-HH:MM in the exchange's time (UTC for crypto): one profile per session of each period." }
+                    },
+                    "required": ["ticker"]
                 }
             },
             {
@@ -323,7 +370,7 @@ pub fn tools_list_result() -> Value {
                         },
                         "timeframe": {
                             "type": "string",
-                            "description": "Candlestick timeframe, as for generate_chart: a number and a unit (1m, 7m, 45m, 4h, 8h, 1d, 2D, 2W, 1M). Binance pushes intervals it has no stream for by resampling a finer one.",
+                            "description": "Candlestick timeframe, as for generate_chart: a number and a unit (1s, 1m, 7m, 45m, 4h, 8h, 1d, 2D, 2W, 1M). Binance pushes intervals it has no stream for by resampling a finer one.",
                             "default": "4h"
                         },
                         "indicators": {
@@ -347,10 +394,11 @@ pub fn tools_list_result() -> Value {
                         },
                         "chart_style": {
                             "type": "string",
-                            "enum": ["candles", "heikin_ashi"],
-                            "description": "Price series style, as for generate_chart.",
+                            "enum": ["candles", "heikin_ashi", "renko", "kagi", "point_figure", "line_break", "range"],
+                            "description": "Price series style, as for generate_chart. Price-based tails carry up to 64 bars, as one closed source bar can confirm several.",
                             "default": "candles"
                         },
+                        "chart_params": chart_params_schema(),
                         "warmup": {
                             "type": "integer",
                             "description": "Extra older bars (max 1000) the server keeps and feeds to indicator computation, as for generate_chart(format=series), and raised the same way.",
@@ -546,4 +594,46 @@ pub fn scripting_tools() -> Vec<Value> {
             }
         }),
     ]
+}
+
+/// `generate_chart`'s `chart_params`: apart, as `json!` runs out of recursion on
+/// one literal this deep.
+fn chart_params_schema() -> Value {
+    json!({
+        "type": "object",
+        "description": "Inputs of a price-based chart_style, refused for the others. Echoed in format=series and summary with the box_size the build used. Send that box_size back on later polls and pages to keep the same bars. subscribe_chart requires it for an atr or percent box, so pushed bars line up with the chart that was loaded.",
+        "properties": {
+            "box": {
+                "type": "string",
+                "enum": ["atr", "fixed", "percent"],
+                "description": "How the box is set, for renko, kagi (the reversal amount), point_figure and range (the range size). 'atr' (default): ATR of the closed source bars. 'fixed': box_size. 'percent': a percentage of the last price. ATR and percent are rounded to two significant digits.",
+                "default": "atr"
+            },
+            "atr_length": {
+                "type": "integer",
+                "description": "ATR length, 1 to 500.",
+                "default": 14
+            },
+            "percent": {
+                "type": "number",
+                "description": "Percentage of the last price, above 0 and at most 100.",
+                "default": 1
+            },
+            "box_size": {
+                "type": "number",
+                "description": "The size of a fixed box, or the resolved size of an atr or percent box to keep. A size that would make over 20,000 bars is refused."
+            },
+            "reversal": {
+                "type": "integer",
+                "description": "point_figure: boxes the close must come back to start a new column, 1 to 20.",
+                "default": 3
+            },
+            "lines": {
+                "type": "integer",
+                "description": "line_break: how many lines a close must pass to reverse, 1 to 20.",
+                "default": 3
+            }
+        },
+        "additionalProperties": false
+    })
 }

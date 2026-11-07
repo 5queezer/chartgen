@@ -178,7 +178,7 @@ test.describe("layouts", () => {
       const newer = {
         ...base,
         symbol: "ETHUSDT",
-        timeframe: "30s",
+        timeframe: "1y",
         chartType: "future_type",
         indicators: ["rsi"],
       };

@@ -9,6 +9,7 @@ sidebar:
 **Date:** 2026-11-06
 **Extends:** [ADR-0009](/chartgen/decisions/0009-live-tail-polling-and-history-paging/) (paging and tails), [ADR-0021](/chartgen/decisions/0021-realtime-chart-push/) (chart push), [ADR-0032](/chartgen/decisions/0032-indicator-aware-warmup/) (warmup)
 **Supersedes in part:** [ADR-0033](/chartgen/decisions/0033-indicator-projection-past-last-bar/) (future bar times only; its `future` block stays in force)
+**Amended by:** [ADR-0047](/chartgen/decisions/0047-price-based-charts/) (the grammar has seconds, on Binance)
 
 ## Context and Problem Statement
 

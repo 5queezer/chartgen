@@ -8,6 +8,11 @@ export interface LoadErrorReason {
   indicators: string[];
 }
 
+/** The sentence that says a box cannot be used, if `message` is such a refusal. */
+export function boxRefusal(message: string): string | null {
+  return /(?:Box size \S+ is too small|The source bars give no box size)[^]*$/.exec(message)?.[0] ?? null;
+}
+
 export function loadErrorReason(message: string): LoadErrorReason {
   const text = message.replace(/^MCP tool error: /, "");
   const unknown = /^Unknown indicator\(s\): (.+?)\. /.exec(text);
@@ -17,6 +22,9 @@ export function loadErrorReason(message: string): LoadErrorReason {
   }
   const invalid = /^Invalid parameter for ([^:]+): /.exec(text);
   if (invalid) return { text, indicators: [invalid[1]!] };
+  // These say what to change, and Retry would only get them again.
+  const advice = /(?:Yahoo has no seconds data|Box size \S+ is too small|no box size)[^]*$/.exec(text);
+  if (advice) return { text: advice[0], indicators: [] };
   return {
     text: /\b404\b|not found|no data|unknown symbol|invalid symbol/i.test(message)
       ? "symbol not found"

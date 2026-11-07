@@ -12,6 +12,7 @@ import type { Accessor } from "solid-js";
 
 import { INITIAL_BARS, WARMUP } from "./lib/liveFeed";
 import { usesIndicator } from "./lib/scripts";
+import type { ChartParamsWire } from "./lib/priceBars";
 import type { ChartStyle } from "./stores/layout";
 import { McpToolError, type McpSession } from "./mcp";
 import { clearAccessToken } from "./oauth";
@@ -38,13 +39,18 @@ export interface ChartQueryInput {
   timeframe: string;
   indicators: ActiveIndicator[];
   chart_style: ChartStyle;
+  /** Inputs of a price-based style (ADR-0047). */
+  chart_params?: ChartParamsWire;
   /** Gates the query — true once auth is ready. */
   enabled: boolean;
 }
 
 /** Query key of the chart query for a request. */
 export function chartQueryKey(
-  input: Pick<ChartQueryInput, "ticker" | "timeframe" | "indicators" | "chart_style">,
+  input: Pick<
+    ChartQueryInput,
+    "ticker" | "timeframe" | "indicators" | "chart_style" | "chart_params"
+  >,
 ) {
   return [
     "generate_chart",
@@ -52,6 +58,7 @@ export function chartQueryKey(
     input.timeframe,
     activeIndicatorsKey(input.indicators),
     input.chart_style,
+    input.chart_params ?? null,
   ] as const;
 }
 
@@ -71,12 +78,13 @@ export function createChartQuery(
   input: Accessor<ChartQueryInput>,
 ) {
   return createQuery<SeriesPayload, Error>(() => {
-    const { ticker, timeframe, indicators, chart_style, enabled } = input();
+    const { ticker, timeframe, indicators, chart_style, chart_params, enabled } = input();
     const queryKey = chartQueryKey({
       ticker,
       timeframe,
       indicators,
       chart_style,
+      chart_params,
     });
     return {
       queryKey,
@@ -88,8 +96,11 @@ export function createChartQuery(
           timeframe,
           indicators,
           chart_style,
+          chart_params,
           bars: INITIAL_BARS,
           warmup: WARMUP,
+          // Only this full load: pages and tails keep its profiles (ADR-0048).
+          profile_intrabars: true,
         }),
       // Every fetch result is stored as it came in, never merged into the
       // previous one (replaceEqualDeep). App adopts a load by the cache

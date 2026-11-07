@@ -1,5 +1,6 @@
 // Chart types klinecharts v9 has no candle type for (ADR-0030): Baseline,
-// Columns, High-low, Step line and Line with markers. klinecharts keeps a
+// Columns, High-low, HLC area, Step line, Line with markers, and the Kagi and
+// Point & Figure bars the server builds (ADR-0047). klinecharts keeps a
 // hidden (transparent) price series, so its autoscale, crosshair, last price
 // line and data handling stay as they are; one indicator on the candle pane
 // paints the visible series from the bars in its `draw` callback.
@@ -14,26 +15,42 @@ import {
 } from "klinecharts";
 
 import { formatColor, parseColor } from "./color";
+import { volumeCandleWidth } from "./orderFlow";
 import type { ChartType } from "../stores/layout";
 
 export type SeriesType =
   | "baseline"
   | "columns"
   | "high_low"
+  | "hlc_area"
   | "step_line"
-  | "line_markers";
+  | "line_markers"
+  | "volume_candles"
+  | "kagi"
+  | "point_figure";
 
 const SERIES_TYPES: readonly ChartType[] = [
   "baseline",
   "columns",
   "high_low",
+  "hlc_area",
   "step_line",
   "line_markers",
+  "volume_candles",
+  "kagi",
+  "point_figure",
 ];
 
 /** True for the chart types drawn by the series indicator, not by klinecharts. */
 export function isSeriesType(t: ChartType): t is SeriesType {
   return SERIES_TYPES.includes(t);
+}
+
+export type OrderFlowType = "footprint" | "tpo";
+
+/** True for the chart types drawn from intrabar data (ADR-0048). */
+export function isOrderFlowType(t: ChartType): t is OrderFlowType {
+  return t === "footprint" || t === "tpo";
 }
 
 // Double underscore: server indicators register as `chartgen_<name>` and
@@ -70,12 +87,19 @@ export function ensureSeriesRegistered(): void {
 
 /**
  * klinecharts `candle` style that hides its own series, applied after the
- * settings styles. High-low keeps a candle so the autoscale spans high to
- * low; the others keep an area line, which autoscales on the closes as
- * TradingView does for close-based types.
+ * settings styles. The types that show highs and lows keep a candle so the
+ * autoscale spans them; the others keep an area line, which autoscales on the
+ * closes as TradingView does for close-based types.
  */
-export function hiddenCandleStyle(t: SeriesType): object {
-  if (t === "high_low") {
+export function hiddenCandleStyle(t: SeriesType | OrderFlowType): object {
+  if (
+    t === "high_low" ||
+    t === "hlc_area" ||
+    t === "volume_candles" ||
+    t === "kagi" ||
+    t === "point_figure" ||
+    isOrderFlowType(t)
+  ) {
     const bar: Record<string, string> = {};
     for (const part of ["", "Border", "Wick"]) {
       for (const dir of ["up", "down", "noChange"]) {
@@ -100,6 +124,8 @@ export interface SeriesExtend {
   up: string;
   down: string;
   line: string;
+  /** Point & Figure: the box its columns are built on (ADR-0047). */
+  boxSize?: number;
 }
 
 export interface Point {
@@ -113,6 +139,76 @@ export interface Rect {
   width: number;
   height: number;
 }
+
+type Hl = Pick<KLineData, "open" | "high" | "low" | "close">;
+
+/**
+ * Whether each Kagi line or Point & Figure column runs up. Its close says so once
+ * it is confirmed. The newest closes on the last price, which says nothing, and
+ * neither does a bar with no length, but they alternate, so those go against the
+ * one before.
+ */
+export function runsUp(bars: readonly Hl[]): boolean[] {
+  const out: boolean[] = [];
+  for (let i = 0; i < bars.length; i++) {
+    const b = bars[i]!;
+    const known = i < bars.length - 1 && b.close !== b.open;
+    if (known) out.push(b.close > b.open);
+    else out.push(i > 0 ? !out[i - 1]! : b.close >= b.open);
+  }
+  return out;
+}
+
+/**
+ * Thick or thin for each Kagi line: thick from the line that passes the last up
+ * line's top until a line passes the last down line's bottom. A line takes one
+ * weight along its whole length, where TradingView changes it at the crossing.
+ */
+export function kagiThick(bars: readonly Hl[], up: readonly boolean[]): boolean[] {
+  const out: boolean[] = [];
+  let thick = true;
+  for (let i = 0; i < bars.length; i++) {
+    const b = bars[i]!;
+    const before = bars[i - 2];
+    if (before) {
+      if (up[i] && b.high > before.high) thick = true;
+      else if (!up[i] && b.low < before.low) thick = false;
+    } else {
+      thick = up[i]!;
+    }
+    out.push(thick);
+  }
+  return out;
+}
+
+/**
+ * The part of a column to mark: from its open towards its end, as the last price
+ * can lie past the other side and fills no box there.
+ */
+export function markRange(b: Hl, isX: boolean): [number, number] {
+  return isX ? [b.open, b.high] : [b.low, b.open];
+}
+
+/** How many levels of the box's grid lie inside a column. */
+export function columnCount(low: number, high: number, box: number): number {
+  const n = Math.floor(high / box + 1e-9) - Math.ceil(low / box - 1e-9) + 1;
+  return Number.isFinite(n) && n > 0 ? n : 0;
+}
+
+/**
+ * The levels on the box's grid inside a column, lowest first. Only for a count
+ * that is safe to allocate: `columnCount` comes first.
+ */
+export function columnLevels(low: number, high: number, box: number): number[] {
+  const from = Math.ceil(low / box - 1e-9);
+  const out: number[] = [];
+  for (let i = 0, n = columnCount(low, high, box); i < n; i++) out.push((from + i) * box);
+  return out;
+}
+
+/** A column of marks this close together, or this long, is drawn as one bar. */
+const MIN_MARK_PX = 4;
+const MAX_MARKS = 200;
 
 /**
  * Data indices to draw, `[start, end)`: the visible range (`to` exclusive)
@@ -208,6 +304,23 @@ export function drawSeries({
   ctx.lineCap = "round";
 
   switch (ext.type) {
+    case "volume_candles": {
+      let most = 0;
+      for (let i = visibleRange.from; i < visibleRange.to; i++) {
+        most = Math.max(most, bars[i]!.volume ?? 0);
+      }
+      for (let i = start; i < end; i++) {
+        const b = bars[i]!;
+        const x = xAxis.convertToPixel(i);
+        ctx.fillStyle = isUpBar(bars, i) ? ext.up : ext.down;
+        const width = volumeCandleWidth(b.volume ?? 0, most, barSpace.gapBar);
+        const body = barRect(x, yAxis.convertToPixel(b.open), yAxis.convertToPixel(b.close), width);
+        ctx.fillRect(body.x, body.y, body.width, body.height);
+        const wick = barRect(x, yAxis.convertToPixel(b.high), yAxis.convertToPixel(b.low), 1);
+        ctx.fillRect(wick.x, wick.y, wick.width, wick.height);
+      }
+      break;
+    }
     case "columns":
     case "high_low": {
       const up = ext.type === "high_low" ? ext.line : withAlpha(ext.up, 0.5);
@@ -242,6 +355,89 @@ export function drawSeries({
       ctx.lineWidth = 2;
       tracePath(ctx, ext.type === "step_line" ? stepPoints(closes) : closes);
       ctx.stroke();
+      break;
+    }
+    case "hlc_area": {
+      const line = (key: "high" | "low") => {
+        const out: Point[] = [];
+        for (let i = start; i < end; i++) out.push(point(i, bars[i]![key]));
+        return out;
+      };
+      const highs = line("high");
+      const lows = line("low");
+      // Topmost first (see above): the close, the edges, then the fills beneath.
+      ctx.strokeStyle = ext.line;
+      ctx.lineWidth = 2;
+      tracePath(ctx, closes);
+      ctx.stroke();
+      for (const [edge, color] of [
+        [highs, ext.up],
+        [lows, ext.down],
+      ] as const) {
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 1;
+        tracePath(ctx, edge);
+        ctx.stroke();
+        ctx.fillStyle = withAlpha(color, 0.2);
+        tracePath(ctx, [...edge, ...[...closes].reverse()]);
+        ctx.closePath();
+        ctx.fill();
+      }
+      break;
+    }
+    case "kagi": {
+      const up = runsUp(bars);
+      const thick = kagiThick(bars, up);
+      for (let i = start; i < end; i++) {
+        const b = bars[i]!;
+        const x = xAxis.convertToPixel(i);
+        const y = yAxis.convertToPixel(up[i] ? b.high : b.low);
+        ctx.strokeStyle = thick[i] ? ext.up : ext.down;
+        ctx.lineWidth = thick[i] ? 3 : 1;
+        ctx.beginPath();
+        ctx.moveTo(x, yAxis.convertToPixel(b.open));
+        ctx.lineTo(x, y);
+        if (i + 1 < bars.length) ctx.lineTo(xAxis.convertToPixel(i + 1), y);
+        ctx.stroke();
+      }
+      break;
+    }
+    case "point_figure": {
+      const box = ext.boxSize;
+      if (!box) break;
+      const cell = Math.abs(yAxis.convertToPixel(box * 2) - yAxis.convertToPixel(box));
+      const up = runsUp(bars);
+      for (let i = start; i < end; i++) {
+        const b = bars[i]!;
+        const x = xAxis.convertToPixel(i);
+        const isX = up[i]!;
+        const color = isX ? ext.up : ext.down;
+        const [low, high] = markRange(b, isX);
+        if (cell < MIN_MARK_PX || columnCount(low, high, box) > MAX_MARKS) {
+          const r = barRect(x, yAxis.convertToPixel(b.high), yAxis.convertToPixel(b.low), barSpace.gapBar);
+          ctx.fillStyle = withAlpha(color, 0.5);
+          ctx.fillRect(r.x, r.y, r.width, r.height);
+          continue;
+        }
+        const half = Math.max(1.5, Math.min(barSpace.bar * 0.4, cell * 0.45));
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        for (const level of columnLevels(low, high, box)) {
+          const y = yAxis.convertToPixel(level);
+          if (y < -half || y > bounding.height + half) continue;
+          if (isX) {
+            ctx.moveTo(x - half, y - half);
+            ctx.lineTo(x + half, y + half);
+            ctx.moveTo(x + half, y - half);
+            ctx.lineTo(x - half, y + half);
+          } else {
+            ctx.moveTo(x + half, y);
+            ctx.arc(x, y, half, 0, Math.PI * 2);
+          }
+        }
+        ctx.stroke();
+      }
       break;
     }
     case "baseline": {

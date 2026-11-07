@@ -28,6 +28,7 @@ import { ChartPane, createChartPane } from "./components/ChartPane";
 import { ContextMenuHost } from "./components/ContextMenu";
 import { indicatorMenuOf } from "./components/menus";
 import { ChartSettings } from "./components/ChartSettings";
+import { ChartTypeSettings } from "./components/ChartTypeSettings";
 import { DRAWING_LABELS } from "./components/DrawingToolbar";
 import { GridMenu } from "./components/GridMenu";
 import { isDrawingAlertTool, isHorizontalTool } from "./lib/alerts";
@@ -124,6 +125,7 @@ export function App(): JSX.Element {
   // Index (into the active set) of the indicator whose settings dialog is open.
   const [settingsIndex, setSettingsIndex] = createSignal<number | null>(null);
   const [settingsOpen, setSettingsOpen] = createSignal(false);
+  const [chartTypeSettingsOpen, setChartTypeSettingsOpen] = createSignal(false);
   const [compareOpen, setCompareOpen] = createSignal(false);
 
   onMount(() => onCleanup(keepKeyboardFocus()));
@@ -317,6 +319,9 @@ export function App(): JSX.Element {
           updateKind: p.live()?.update.kind ?? null,
           poll: p.pollStatus().kind,
           drawings: p.drawings()?.list().length ?? 0,
+          flowStatus: p.flowStatus(),
+          flowMode: p.flowMode(),
+          barSpace: p.chart()?.getBarSpace() ?? null,
         })),
       // Alert e2e (tests/e2e/alerts.spec.ts): inject a live price. For the
       // chart symbol it comes with the chart's bars and indicators, as a
@@ -425,6 +430,7 @@ export function App(): JSX.Element {
           onResetChart={resetView}
           onSettings={() => setSettingsOpen(true)}
           onCompare={() => setCompareOpen(true)}
+          onChartTypeSettings={() => setChartTypeSettingsOpen(true)}
           replay={view().replay.mode() !== "off"}
           onReplay={() => (view().replay.mode() === "off" ? view().replay.enter() : view().replay.exit())}
         />
@@ -535,6 +541,11 @@ export function App(): JSX.Element {
               }
             : undefined
         }
+      />
+      <ChartTypeSettings
+        open={chartTypeSettingsOpen()}
+        currentBox={view().live()?.series.chart_params?.box_size}
+        onClose={() => setChartTypeSettingsOpen(false)}
       />
       <ChartSettings
         open={settingsOpen()}
