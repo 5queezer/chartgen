@@ -667,6 +667,8 @@ mod tests {
         }
     }
 
+    /// Where what is unread cannot be told, a close takes its `linger`.
+    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn closing_with_nothing_unread_takes_no_time() {
         let (mut stream, mut peer, _l) = pair(Deadlines {
