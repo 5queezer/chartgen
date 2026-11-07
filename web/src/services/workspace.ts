@@ -16,10 +16,11 @@ import {
   hasLegacyOffer,
   hasRemoteChanges,
   hideLive,
-  importLegacy,
   isHidden,
   MARKER,
   readCursor,
+  requestImport,
+  runRequestedImport,
   settle,
   type SentWrite,
 } from "../lib/workspaceSync";
@@ -139,6 +140,7 @@ async function runRound(force: boolean): Promise<void> {
   if (isHidden(s, me)) return;
   report(round.gaveWay, []);
   for (const key of round.tooLarge) {
+    refused.set(key, s.getItem(key));
     addNotice(`Your ${docLabel(key)} did not sync: ${REFUSED_BECAUSE.too_large}. It stays in this browser.`);
   }
   if (round.writes.length > 0 || force) {
@@ -233,9 +235,13 @@ function startEngine(): void {
   document.addEventListener("visibilitychange", () => {
     if (document.visibilityState === "hidden") void syncRound();
   });
+}
+
+/** For any signed-in tab, syncing or not: these keys stay one account's even with no store on the server. */
+function guardAccount(me: string): void {
   window.addEventListener("storage", (e) => {
     // Someone else signed in on this browser, so these stores hold the wrong data.
-    if (e.key === MARKER && e.newValue !== account && !signingOut) location.reload();
+    if (e.key === MARKER && e.newValue !== me && !signingOut) location.reload();
     else if (e.key === RELOAD && e.newValue !== null) location.reload();
   });
   const locks = navigator.locks as LockManager | undefined;
@@ -300,6 +306,7 @@ export async function bootWorkspace(): Promise<Boot> {
     if (!(await otherTabsRunning())) {
       try {
         settle(s);
+        runRequestedImport(s, who.user.id);
       } catch (err) {
         // Full: this browser stays as it was, and the banner keeps saying there is more.
         console.warn("[workspace] cannot apply what arrived:", err);
@@ -307,6 +314,7 @@ export async function bootWorkspace(): Promise<Boot> {
     }
     setRemoteChanged(hasRemoteChanges(s));
     setLegacyOffer(hasLegacyOffer(s, who.user.id));
+    guardAccount(who.user.id);
     if (account !== null) startEngine();
     return { authError: null, user: who.user };
   }
@@ -332,8 +340,8 @@ export function reloadEverywhere(): void {
   location.reload();
 }
 
-export function acceptLegacy(): void {
-  importLegacy(localStorage);
+export function acceptLegacy(user: SignedInUser): void {
+  requestImport(localStorage, user.id);
   setLegacyOffer(false);
   reloadEverywhere();
 }

@@ -4,6 +4,7 @@
 
 import { createSignal, For, Show, type JSX } from "solid-js";
 
+import type { SignedInUser } from "../oauth";
 import {
   acceptLegacy,
   dismissNotice,
@@ -19,7 +20,7 @@ const rowClass =
 const buttonClass =
   "px-2 py-0.5 rounded-md cursor-pointer border border-[color:var(--color-border)] hover:bg-[color:var(--color-border)]";
 
-export function WorkspaceBanner(): JSX.Element {
+export function WorkspaceBanner(props: { user: SignedInUser | null }): JSX.Element {
   const [offerHidden, setOfferHidden] = createSignal(false);
   const discard = () => {
     if (window.confirm("Delete the data this browser kept from before you signed in?")) {
@@ -34,7 +35,7 @@ export function WorkspaceBanner(): JSX.Element {
             This browser has charts, layouts and drawings from before you signed in. Add them to your
             account?
           </span>
-          <button type="button" class={buttonClass} data-testid="workspace-import" onClick={acceptLegacy}>
+          <button type="button" class={buttonClass} data-testid="workspace-import" onClick={() => props.user && acceptLegacy(props.user)}>
             Add to my account
           </button>
           <button type="button" class={buttonClass} data-testid="workspace-discard" onClick={discard}>

@@ -10,7 +10,8 @@ import {
   hasLegacyOffer,
   hasRemoteChanges,
   hideLive,
-  importLegacy,
+  requestImport,
+  runRequestedImport,
   isHidden,
   isScoped,
   isSynced,
@@ -67,7 +68,7 @@ describe("which keys", () => {
   });
 
   it("syncs the workspace and not what is this device's or private", () => {
-    for (const key of ["chartgen.layouts", "chartgen.layout.grid", "chartgen.pane.1.indicators", "chartgen.watchlist.v2", DOC, "chartgen.alerts.list", "chartgen.chartSettings", "chartgen.indicators.active"]) {
+    for (const key of ["chartgen.layouts", "chartgen.layout.grid", "chartgen.pane.1.indicators", "chartgen.watchlist.v2", DOC, "chartgen.alerts.list", "chartgen.chartSettings", "chartgen.orderflow", "chartgen.indicators.active"]) {
       expect(isSynced(key), key).toBe(true);
     }
     for (const key of ["chartgen.layouts.bak", "chartgen.drawings.index", "chartgen.sidebar.tab", "chartgen.scripts.drafts", "chartgen.serverAlerts.list", "chartgen.sync.chartgen.layouts"]) {
@@ -185,7 +186,10 @@ describe("data from before any sign-in", () => {
     enterAccount(s, "github:1");
     s.setItem("chartgen.layouts", "account's");
     s.setItem(DOC, drawings("new"));
-    importLegacy(s);
+    requestImport(s, "github:1");
+    expect(hasLegacyOffer(s, "github:1"), "asked, so no longer offered").toBe(false);
+    expect(s.getItem(DOC), "not under running stores").toBe(drawings("new"));
+    runRequestedImport(s, "github:1");
     expect(s.getItem("chartgen.layouts")).toBe("account's");
     expect(s.getItem(DOC)).toBe(drawings("new", "old"));
     expect(s.getItem("chartgen.sidebar.tab")).toBe("alerts");
@@ -199,11 +203,23 @@ describe("data from before any sign-in", () => {
     s.setItem(DOC, old);
     enterAccount(s, "github:1");
     s.setItem(DOC, drawings("new"));
-    importLegacy(s);
+    requestImport(s, "github:1");
+    runRequestedImport(s, "github:1");
     expect(JSON.parse(s.getItem(DOC)!)).toEqual([
       { id: "new", name: "new" },
       { name: "no id", points: [] },
     ]);
+  });
+
+  it("an import asked for by one account does not run for another", () => {
+    enterAccount(s, "github:1");
+    requestImport(s, "github:1");
+    enterAccount(s, "google:2");
+    runRequestedImport(s, "google:2");
+    expect(live()).toEqual({});
+    enterAccount(s, "github:1");
+    runRequestedImport(s, "github:1");
+    expect(s.getItem(DOC)).toBe(drawings("old"));
   });
 
   it("discarding touches only the old data", () => {

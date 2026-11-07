@@ -7,7 +7,7 @@ sidebar:
 
 **Status:** Accepted
 **Date:** 2026-11-07
-**Amends:** [ADR-0044](/chartgen/decisions/0044-sign-in-through-github-and-google/) (browser data now follows the account, and is no longer left for the next person on a browser)
+**Supersedes in part:** [ADR-0044](/chartgen/decisions/0044-sign-in-through-github-and-google/) (browser data now follows the account, and is no longer left for the next person on a browser)
 
 ## Context and Problem Statement
 
@@ -108,7 +108,8 @@ flashes on screen. Boot consumes the OAuth redirect, asks `/oauth/me`, and then:
 Signing out sends what is pending, ends the session, and hides the live keys. The marker stays, so a
 stray write from a tab on its way out is still known to be that account's. A scoped copy always
 beats a stray live value of the same key: without this, a store's defaults could replace an
-account's data. A running tab reloads when the marker changes under it.
+account's data. A running tab reloads when the marker changes under it, including where the server has no store and
+nothing syncs: the keys are still one account's.
 
 Scoped copies remain in the browser's storage. Another person using the devtools on a shared browser
 can read them, as they could read any site's `localStorage`. They are out of sight for the app, not
@@ -118,7 +119,7 @@ encrypted. Clearing site data removes them, and what has synced is still on the 
 
 Synced: `chartgen.layouts`, `chartgen.layout.*` (including the grid), `chartgen.pane.*`,
 `chartgen.indicators.active`, `chartgen.watchlist.*`, `chartgen.drawings.<SYMBOL>`,
-`chartgen.alerts.list`, `chartgen.chartSettings`. Not synced: the backup of an unreadable layouts
+`chartgen.alerts.list`, `chartgen.chartSettings`, `chartgen.orderflow`. Not synced: the backup of an unreadable layouts
 file, the drawings LRU index, the sidebar tab, the last drawing tool, script drafts (private, and
 per device), the cached server alerts, which come from the server anyway.
 
@@ -176,7 +177,8 @@ The first sign-in on a browser moves existing data aside (`chartgen.legacy|<key>
 directions: nothing goes to the account and nothing replaces it without a yes. The first account to
 sign in on that browser is offered it, with **Add to my account**, **Delete them** and **Not now**,
 and the offer returns until decided. Adding only adds: a value the account has stays, and collections
-are united. Any later account is not offered it and does not see it. If sign-in is later turned off,
+are united. The yes is recorded and carried out by the next boot, after sync and before any store
+loads, so a store saving from memory cannot cost the old data; every tab reloads for it. Any later account is not offered it and does not see it. If sign-in is later turned off,
 the data comes back.
 
 ### Consequences

@@ -5,6 +5,8 @@
 
 export const MARKER = "chartgen.workspace.account";
 const OFFER = "chartgen.workspace.legacyOffer";
+/** The account that said yes to the offer, until a boot has done it with no store running. */
+const IMPORT = "chartgen.workspace.import";
 const LEGACY = "chartgen.legacy|";
 const SYNC = "chartgen.sync.";
 const CURSOR = SYNC + "cursor";
@@ -36,6 +38,7 @@ export function isSynced(key: string): boolean {
     key === "chartgen.indicators.active" ||
     key === "chartgen.alerts.list" ||
     key === "chartgen.chartSettings" ||
+    key === "chartgen.orderflow" ||
     ["chartgen.layout.", "chartgen.pane.", "chartgen.watchlist.", "chartgen.drawings."].some((p) =>
       key.startsWith(p),
     )
@@ -123,6 +126,7 @@ export function enterAnonymous(s: Storage): void {
   reveal(s, LEGACY);
   s.removeItem(MARKER);
   s.removeItem(OFFER);
+  s.removeItem(IMPORT);
 }
 
 /** A round must not run: these keys are out of sight or another account's. */
@@ -133,13 +137,21 @@ export function isHidden(s: Storage, account: string): boolean {
 }
 
 export const hasLegacyOffer = (s: Storage, account: string): boolean =>
-  s.getItem(OFFER) === account && keysOf(s).some((k) => k.startsWith(LEGACY));
+  s.getItem(OFFER) === account &&
+  s.getItem(IMPORT) === null &&
+  keysOf(s).some((k) => k.startsWith(LEGACY));
+
+/** The yes. Only a boot acts on it, as running stores could save over the result. */
+export const requestImport = (s: Storage, account: string): void => {
+  s.setItem(IMPORT, account);
+};
 
 /**
- * Bring the data from before sign-in into this account. It only adds: a value the
- * account already has stays, and collections are united item by item.
+ * Bring the data from before sign-in into this account, if it asked. It only adds:
+ * a value the account already has stays, and collections are united item by item.
  */
-export function importLegacy(s: Storage): void {
+export function runRequestedImport(s: Storage, account: string): void {
+  if (s.getItem(IMPORT) !== account) return;
   for (const stashed of keysOf(s)) {
     if (!stashed.startsWith(LEGACY)) continue;
     const key = stashed.slice(LEGACY.length);
@@ -154,6 +166,7 @@ export function importLegacy(s: Storage): void {
     s.removeItem(stashed);
   }
   s.removeItem(OFFER);
+  s.removeItem(IMPORT);
 }
 
 export function discardLegacy(s: Storage): void {

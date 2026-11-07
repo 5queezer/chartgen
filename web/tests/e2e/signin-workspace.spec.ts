@@ -451,6 +451,37 @@ test.describe("workspace", () => {
     await context.close();
   });
 
+  test("with no store on the server a tab still reloads when its account changes", async ({
+    browser,
+  }) => {
+    const context = await browser.newContext({ baseURL: test.info().project.use.baseURL });
+    await context.route("**/workspace/sync", (route) => route.fulfill({ status: 404 }));
+    const first = await context.newPage();
+    await first.goto("/");
+    await signIn(first);
+    const second = await context.newPage();
+    await second.goto("/");
+    await expectChartRendered(second);
+    await first.bringToFront();
+    const loaded = first.waitForEvent("load");
+    await second.evaluate(() => localStorage.setItem("chartgen.workspace.account", "google:someone"));
+    await loaded;
+    await context.close();
+  });
+
+  test("a notice dismissed stays dismissed until the document changes", async ({ browser }) => {
+    const page = await device(browser);
+    await write(page, OTHER, "x".repeat(600_000));
+    const notice = page.getByTestId("workspace-notice");
+    await expect(notice).toBeVisible({ timeout: 30_000 });
+    await notice.getByRole("button", { name: "Dismiss" }).click();
+    await page.waitForTimeout(6_000);
+    await expect(notice).toHaveCount(0);
+    await write(page, OTHER, "y".repeat(600_000));
+    await expect(notice).toBeVisible({ timeout: 30_000 });
+    await page.context().close();
+  });
+
   test("an open tab of another account's reloads into the account now signed in", async ({
     browser,
   }) => {
@@ -509,6 +540,13 @@ test.describe("workspace", () => {
     await page.getByTestId("workspace-later").click();
     await expect(page.getByTestId("workspace-offer")).toBeHidden();
     await reloadApp(page);
+    // A store saving from memory on the way out must not cost the old data.
+    await page.evaluate(
+      ([key, value]) => {
+        window.addEventListener("pagehide", () => localStorage.setItem(key!, value!));
+      },
+      [DOC, drawings("accounts")],
+    );
     await Promise.all([page.waitForEvent("load"), page.getByTestId("workspace-import").click()]);
     await expectChartRendered(page);
     await expect(page.getByTestId("workspace-offer")).toBeHidden();

@@ -475,7 +475,7 @@ export function App(props: { authError: string | null; user: SignedInUser | null
         </div>
         <Show when={signedInUser()}>{(user) => <UserMenu user={user()} />}</Show>
       </header>
-      <WorkspaceBanner />
+      <WorkspaceBanner user={signedInUser()} />
       <IndicatorChips
         entries={activeIndicators()}
         onRemove={removeIndicator}
