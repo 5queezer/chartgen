@@ -42,6 +42,11 @@ const RELOAD = "chartgen.workspace.reload";
 const TAB_LOCK = "chartgen.workspace.tab";
 
 const ME_TIMEOUT_MS = 5_000;
+/** After a good exchange the answer is worth waiting for: a hiccup must not stop a real user. */
+const ME_RETRIES = [
+  { waitMs: 500, timeoutMs: 8_000 },
+  { waitMs: 1_500, timeoutMs: 12_000 },
+];
 const FIRST_SYNC_TIMEOUT_MS = 2_500;
 /** A browser new to the account has nothing to show meanwhile, and stores that start empty write defaults. */
 const FIRST_EVER_SYNC_TIMEOUT_MS = 10_000;
@@ -52,6 +57,8 @@ const SIGN_OUT_FLUSH_MS = 2_000;
 const BACKOFF_FIRST_MS = 30_000;
 const BACKOFF_MAX_MS = 5 * 60_000;
 const KEEPALIVE_MAX_BYTES = 60_000;
+/** Refused for this long, the server is not just busy for a moment, and it can be said. */
+const WAITING_SAYS_SO_MS = 60_000;
 const BUSY_RETRIES = 3;
 const BUSY_RETRY_MS = 400;
 /** For a tab told to reload to get through the sign-in. */
@@ -83,7 +90,8 @@ const SyncAnswerSchema = z.object({
 const [notices, setNotices] = createSignal<readonly string[]>([]);
 const [remoteChanged, setRemoteChanged] = createSignal(false);
 const [legacyOffer, setLegacyOffer] = createSignal(false);
-export { legacyOffer, notices, remoteChanged };
+const [syncWaiting, setSyncWaiting] = createSignal(false);
+export { legacyOffer, notices, remoteChanged, syncWaiting };
 
 const addNotice = (text: string): void => {
   setNotices((all) => (all.includes(text) ? all : [...all, text]));
@@ -101,6 +109,7 @@ let backoff = 0;
 let signingOut = false;
 /** The last round found another sync of this account running, which will be over at once. */
 let busy = false;
+let refusedSince: number | null = null;
 /** What the server turned down, so it is not sent again until it changes. */
 const refused = new Map<string, string | null>();
 const isRefused = (key: string, live: string | null): boolean =>
@@ -175,6 +184,8 @@ async function runRound(force: boolean): Promise<void> {
       const wait = Number(res.headers.get("Retry-After")) || 60;
       busy = wait <= 1;
       notBefore = Date.now() + wait * 1000;
+      refusedSince ??= Date.now();
+      setSyncWaiting(Date.now() - refusedSince >= WAITING_SAYS_SO_MS);
       return;
     }
     if (!res.ok) {
@@ -188,6 +199,8 @@ async function runRound(force: boolean): Promise<void> {
     }
     const answer = parsed.data;
     backoff = 0;
+    refusedSince = null;
+    setSyncWaiting(false);
     // The account may have changed under a request; its answer is no one else's.
     if (account !== me || isHidden(s, me)) return;
     const applied = applyAnswer(s, round.writes, answer);
@@ -278,6 +291,25 @@ async function mayApply(firstEver: boolean): Promise<boolean> {
   return !(held?.some((lock) => lock.name === TAB_LOCK) ?? false);
 }
 
+/**
+ * Who this is, or `null` if it cannot be told. Only a token just exchanged, on a browser
+ * with an account's data, has anything riding on the answer: there, no answer means an
+ * error page, so it is asked again first. Without those, the app goes on as it would.
+ */
+async function whoSignedIn(): Promise<Awaited<ReturnType<typeof fetchSignIn>> | null> {
+  const ask = (timeoutMs: number) => fetchSignIn(AbortSignal.timeout(timeoutMs)).catch(() => null);
+  let who = await ask(ME_TIMEOUT_MS);
+  if (who !== null || currentAccessToken() === null || localStorage.getItem(MARKER) === null) {
+    return who;
+  }
+  for (const { waitMs, timeoutMs } of ME_RETRIES) {
+    await sleep(waitMs);
+    who = await ask(timeoutMs);
+    if (who !== null) return who;
+  }
+  return null;
+}
+
 /** The first round, with another tab's or the last page's round perhaps still running. */
 async function firstRound(): Promise<void> {
   await syncRound(true);
@@ -309,7 +341,7 @@ export async function bootWorkspace(): Promise<Boot> {
   const authError = failed?.message ?? null;
   const s = localStorage;
 
-  const who = await fetchSignIn(AbortSignal.timeout(ME_TIMEOUT_MS)).catch(() => null);
+  const who = await whoSignedIn();
   if (who === null) {
     // A new sign-in we cannot put a name to must not see the last account's data.
     if (authError === null && currentAccessToken() !== null && s.getItem(MARKER) !== null) {

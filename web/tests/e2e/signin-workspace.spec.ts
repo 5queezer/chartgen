@@ -3,7 +3,7 @@
 // Each browser context is a device. Documents the running stores do not hold in
 // memory are written directly, to pin down the order of events across devices.
 
-import type { Browser, Page } from "@playwright/test";
+import type { Browser, Page, Route } from "@playwright/test";
 
 import { test, expect, expectChartRendered, pickTool, reloadApp } from "./fixtures/app";
 
@@ -472,6 +472,62 @@ test.describe("workspace", () => {
     expect(await read(page, NOTE), "every tab was told").toBe("after");
     await expect(page.getByTestId("workspace-remote")).toBeHidden();
     await Promise.all([laptop.context().close(), context.close()]);
+  });
+
+  for (const [name, hiccup] of [
+    ["one failure", (route: Route) => route.fulfill({ status: 500, body: "hiccup" })],
+    [
+      "one answer of 7 s",
+      async (route: Route) => {
+        await new Promise((done) => setTimeout(done, 7_000));
+        await route.continue();
+      },
+    ],
+  ] as const) {
+    test(`${name} of /oauth/me after a good exchange leaves a working chart with the user's data`, async ({
+      browser,
+    }) => {
+      const page = await device(browser);
+      await write(page, NOTE, "octo's");
+      await pushed(page, NOTE, "octo's");
+      let hit = 0;
+      await page.route("**/oauth/me", async (route) => {
+        // The one that counts: with the token the sign-in just got.
+        if (!route.request().headers().authorization || hit++ > 0) return route.continue();
+        return hiccup(route);
+      });
+      await page.reload();
+      await expectChartRendered(page);
+      await expect(userMenu(page)).toBeVisible({ timeout: 30_000 });
+      expect(hit).toBeGreaterThan(1);
+      expect(await read(page, NOTE)).toBe("octo's");
+      await expect(page.getByText("could not tell which account")).toHaveCount(0);
+      await page.context().close();
+    });
+  }
+
+  test("a sync refused for over a minute says it is waiting, and stops saying so", async ({
+    browser,
+  }) => {
+    test.setTimeout(240_000);
+    const page = await device(browser);
+    await pushedOnce(page);
+    await page.route("**/workspace/sync", (route) =>
+      route.fulfill({
+        status: 429,
+        headers: { "Retry-After": "1" },
+        json: { error: "too many syncs are running" },
+      }),
+    );
+    await write(page, NOTE, "waits");
+    await page.waitForTimeout(30_000);
+    await expect(page.getByTestId("workspace-waiting"), "not for a moment's wait").toBeHidden();
+    await expect(page.getByTestId("workspace-waiting")).toBeVisible({ timeout: 60_000 });
+    await expect(page.getByTestId("workspace-notice")).toHaveCount(0);
+    await page.unroute("**/workspace/sync");
+    await pushed(page, NOTE, "waits");
+    await expect(page.getByTestId("workspace-waiting")).toBeHidden();
+    await page.context().close();
   });
 
   test("a server that takes the token but names nobody does not loop through the provider", async ({

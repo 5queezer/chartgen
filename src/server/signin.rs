@@ -730,6 +730,11 @@ impl OAuthStore {
         }
     }
 
+    /// A running sync of `user` is taking a place for a client that neither sends nor reads.
+    pub(super) fn workspace_call_stalled(&mut self, user: &str) {
+        self.charge_workspace_bytes(user, MAX_WORKSPACE_BYTES_PER_USER);
+    }
+
     pub(super) fn workspace_call_finished(&mut self, user: &str) {
         if let Some(signin) = self.signin.as_mut() {
             signin.workspace_running.remove(user);

@@ -13,6 +13,7 @@ import {
   rejectLegacy,
   reloadEverywhere,
   remoteChanged,
+  syncWaiting,
 } from "../services/workspace";
 
 const rowClass =
@@ -57,6 +58,13 @@ export function WorkspaceBanner(props: { user: SignedInUser | null }): JSX.Eleme
           <button type="button" class={buttonClass} data-testid="workspace-reload" onClick={reloadEverywhere}>
             Reload
           </button>
+        </div>
+      </Show>
+      <Show when={syncWaiting()}>
+        <div class={rowClass} data-testid="workspace-waiting">
+          <span class="min-w-0 text-[color:var(--color-fg-muted)]">
+            Sync is waiting for the server. Your changes are safe in this browser.
+          </span>
         </div>
       </Show>
       <For each={notices()}>

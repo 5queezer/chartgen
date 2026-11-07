@@ -92,6 +92,8 @@ export interface DrawingRecord {
 
 export const DRAWINGS_PREFIX = "chartgen.drawings.";
 export const INDEX_KEY = DRAWINGS_PREFIX + "index";
+/** Symbols the LRU dropped. No key of a symbol means this, or that someone deleted them all. */
+const EVICTED_KEY = "chartgen.drawingsEvicted";
 const MAX_POINTS = 3;
 /** Applied on load only; arming a tool refuses to go past it. */
 export const MAX_DRAWINGS = 500;
@@ -387,12 +389,33 @@ export function setEvictionListener(fn: (symbol: string) => void): void {
 }
 
 /** Move `symbol` to the front of the LRU index (or drop it); evict beyond MAX_SYMBOLS. */
+function readEvicted(): string[] {
+  try {
+    const raw = JSON.parse(localStorage.getItem(EVICTED_KEY) ?? "[]") as unknown;
+    return Array.isArray(raw) ? raw.filter((x): x is string => typeof x === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
+function noLongerEvicted(symbol: string): void {
+  const evicted = readEvicted();
+  if (!evicted.includes(symbol)) return;
+  const rest = evicted.filter((s) => s !== symbol);
+  if (rest.length === 0) localStorage.removeItem(EVICTED_KEY);
+  else localStorage.setItem(EVICTED_KEY, JSON.stringify(rest));
+}
+
 function touch(symbol: string, keep: boolean): void {
   const rest = readIndex().filter((s) => s !== symbol);
   const index = keep ? [symbol, ...rest] : rest;
   for (const evicted of index.splice(MAX_SYMBOLS)) {
     localStorage.removeItem(storageKey(evicted));
     forgetEvicted(localStorage, storageKey(evicted));
+    localStorage.setItem(
+      EVICTED_KEY,
+      JSON.stringify([...readEvicted().filter((s) => s !== evicted), evicted].slice(-MAX_SYMBOLS)),
+    );
     onEvict?.(evicted);
   }
   localStorage.setItem(INDEX_KEY, JSON.stringify(index));
@@ -418,6 +441,7 @@ export function loadDrawings(symbol: string, touchIndex = true): DrawingRecord[]
     const records = parseRecords(JSON.parse(raw));
     if (!touchIndex) return records;
     inThisPage.set(symbol, raw);
+    noLongerEvicted(symbol);
     try {
       touch(symbol, true);
     } catch {
@@ -452,8 +476,11 @@ export function saveDrawings(
     const mine = records.length === 0 ? null : JSON.stringify(records);
     const stored = localStorage.getItem(key);
     const seen = inThisPage.has(symbol) ? (inThisPage.get(symbol) ?? null) : stored;
-    // Nothing stored: dropped by the LRU or removed elsewhere, and this page's copy stands.
-    const json = stored === null ? mine : merge(key, seen, mine, stored).value;
+    // Nothing stored because the LRU dropped it: this page's copy stands. Otherwise someone
+    // deleted them all, and this takes that into account like any other deletion.
+    const dropped = stored === null && readEvicted().includes(symbol);
+    const json = dropped ? mine : merge(key, seen, mine, stored).value;
+    noLongerEvicted(symbol);
     if (json === null) {
       localStorage.removeItem(key);
       touch(symbol, false);

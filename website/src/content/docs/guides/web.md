@@ -1210,7 +1210,8 @@ seconds, and on the way out when you close the tab or sign out.
   deleted, the edit stays. The replaced version is not kept.
 - **Limits:** 512 KiB per document and 2 MiB per account. What does not fit stays in this browser, and
   a notice says so.
-- **A busy server** makes a device wait a moment and try again. Nothing is lost, and nothing is said.
+- **A busy server** makes a device wait a moment and try again, with nothing lost. If that goes on for
+  over a minute, a quiet line says that sync is waiting.
 - **Two tabs** on one symbol keep each other's drawings, though each shows the other's only after a
   reload.
 - **Not synced:** the sidebar's tab, the last drawing tool, and unsaved script text. These stay on

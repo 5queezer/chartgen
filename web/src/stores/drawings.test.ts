@@ -340,12 +340,96 @@ describe("storage", () => {
       expect(localStorage.getItem(storageKey("ONE"))).toBeNull();
     });
 
-    it("a copy dropped from storage does not take this page's with it", () => {
+    it("a copy the LRU dropped does not take this page's with it", () => {
       otherTabSaves("TWO", "a");
       loadDrawings("TWO");
-      localStorage.removeItem(storageKey("TWO"));
+      saveDrawings("TWO", [rec("a")]);
+      for (let i = 0; i < MAX_SYMBOLS; i++) saveDrawings(`A${i}`, [rec("x")]);
+      expect(localStorage.getItem(storageKey("TWO"))).toBeNull();
       saveDrawings("TWO", [rec("a"), rec("new")]);
       expect(stored("TWO")).toEqual(["a", "new"]);
+    });
+
+    it("once saved again, it is no longer taken for dropped", () => {
+      saveDrawings("TWO", [rec("a")]);
+      for (let i = 0; i < MAX_SYMBOLS; i++) saveDrawings(`B${i}`, [rec("x")]);
+      saveDrawings("TWO", [rec("a")]);
+      expect(localStorage.getItem("chartgen.drawingsEvicted")).toContain("B0");
+      expect(JSON.parse(localStorage.getItem("chartgen.drawingsEvicted")!)).not.toContain("TWO");
+    });
+  });
+
+  // Two tabs really are two copies of this module over one storage.
+  describe("two tabs as two modules", () => {
+    const rec = (id: string, value = 1): DrawingRecord =>
+      parseRecord({
+        ...good,
+        id,
+        points: [
+          { timestamp: 1, value },
+          { timestamp: 2, value },
+        ],
+      })!;
+    const tab = async () => {
+      vi.resetModules();
+      return import("./drawings");
+    };
+    const ids = (symbol: string) => {
+      const raw = localStorage.getItem(storageKey(symbol));
+      return raw === null ? null : (JSON.parse(raw) as DrawingRecord[]).map((r) => r.id);
+    };
+
+    it("a deletion of them all in the other tab stays deleted, and what this one adds stays", async () => {
+      const [a, b] = [await tab(), await tab()];
+      a.saveDrawings("X", [rec("a"), rec("b")]);
+      a.loadDrawings("X");
+      b.loadDrawings("X");
+      b.saveDrawings("X", []);
+      expect(ids("X")).toBeNull();
+      a.saveDrawings("X", [rec("a"), rec("b"), rec("c")]);
+      expect(ids("X")).toEqual(["c"]);
+    });
+
+    it("this tab saving what it had changes nothing about that", async () => {
+      const [a, b] = [await tab(), await tab()];
+      a.saveDrawings("X", [rec("a")]);
+      a.loadDrawings("X");
+      b.loadDrawings("X");
+      b.saveDrawings("X", []);
+      a.saveDrawings("X", [rec("a")]);
+      expect(ids("X")).toBeNull();
+    });
+
+    it("an edit in this tab beats the other's deletion", async () => {
+      const [a, b] = [await tab(), await tab()];
+      a.saveDrawings("X", [rec("a"), rec("b")]);
+      a.loadDrawings("X");
+      b.loadDrawings("X");
+      b.saveDrawings("X", []);
+      a.saveDrawings("X", [rec("a"), rec("b", 2)]);
+      expect(ids("X")).toEqual(["b"]);
+    });
+
+    it("what the LRU dropped, either tab brings back whole", async () => {
+      const [a, b] = [await tab(), await tab()];
+      a.saveDrawings("X", [rec("a"), rec("b")]);
+      a.loadDrawings("X");
+      for (let i = 0; i < MAX_SYMBOLS; i++) b.saveDrawings(`S${i}`, [rec("x")]);
+      expect(ids("X")).toBeNull();
+      a.saveDrawings("X", [rec("a"), rec("b"), rec("c")]);
+      expect(ids("X")).toEqual(["a", "b", "c"]);
+    });
+
+    it("a symbol back from the LRU, then deleted by the other tab, is deleted", async () => {
+      const [a, b] = [await tab(), await tab()];
+      a.saveDrawings("X", [rec("a")]);
+      for (let i = 0; i < MAX_SYMBOLS; i++) b.saveDrawings(`S${i}`, [rec("x")]);
+      a.saveDrawings("X", [rec("a")]);
+      a.loadDrawings("X");
+      b.loadDrawings("X");
+      b.saveDrawings("X", []);
+      a.saveDrawings("X", [rec("a"), rec("c")]);
+      expect(ids("X")).toEqual(["c"]);
     });
   });
 
@@ -355,7 +439,7 @@ describe("storage", () => {
     const key = storageKey("FIRST");
     const value = localStorage.getItem(key);
     localStorage.setItem(`chartgen.sync.${key}`, JSON.stringify({ v: 3, b: value }));
-    for (let i = 0; i < MAX_SYMBOLS; i++) saveDrawings(`S${i}`, recs);
+    for (let i = 0; i < MAX_SYMBOLS; i++) saveDrawings(`C${i}`, recs);
     expect(localStorage.getItem(key)).toBeNull();
     expect(readState(localStorage, key)).toEqual({ v: 3, b: null, s: value, e: 1 });
   });

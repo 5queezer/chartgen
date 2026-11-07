@@ -33,10 +33,11 @@ const MAX_WRITES_PER_REQUEST: usize = 50;
 pub(super) const MAX_BODY_BYTES: usize = 1024 * 1024;
 const MAX_KEY_LEN: usize = 128;
 /// To send a request's body. A client that takes longer is holding a slot from others.
-const BODY_TIMEOUT: Duration = Duration::from_secs(10);
-/// The longest a request keeps its share of the syncs running. A client that does not
-/// read its answer keeps the one sync of its account running, but not others waiting.
-const SLOT_TIMEOUT: Duration = Duration::from_secs(30);
+const BODY_TIMEOUT: Duration = Duration::from_secs(8);
+/// The longest a request keeps its share of the syncs running. One that takes this long
+/// has a client that does not send or does not read, which costs its account the rest of
+/// the minute: it takes many accounts to keep the others out, not eight.
+const SLOT_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// The keys the app syncs (`isSynced` in `lib/workspaceSync.ts`), and what those are made of.
 #[cfg_attr(not(feature = "scripting"), allow(dead_code))]
@@ -62,8 +63,11 @@ fn is_doc_key(key: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || "._^=-:".contains(c))
 }
 
-/// A running sync: one per user and `MAX_WORKSPACE_SYNCS` in all, until its answer is
-/// out. Both are refused rather than queued, as the body is not read before this.
+/// A running sync: one per user and `MAX_WORKSPACE_SYNCS` in all, until hyper has taken
+/// the last piece of its answer. Both are refused rather than queued, as the body is not
+/// read before this. This bounds what is built and queued here, not what is on its way
+/// below that: the buffers of a connection are bounded per connection (ADR-0051), whatever
+/// the route, and an account can have as many of those as anyone.
 struct Running {
     state: SharedState,
     user: String,
@@ -74,9 +78,16 @@ impl Running {
     fn new(state: SharedState, user: String, slot: tokio::sync::OwnedSemaphorePermit) -> Self {
         let slot = Arc::new(Mutex::new(Some(slot)));
         let held = slot.clone();
+        let (later_state, later_user) = (state.clone(), user.clone());
         tokio::spawn(async move {
             tokio::time::sleep(SLOT_TIMEOUT).await;
-            held.lock().unwrap().take();
+            if held.lock().unwrap().take().is_some() {
+                later_state
+                    .oauth
+                    .lock()
+                    .unwrap()
+                    .workspace_call_stalled(&later_user);
+            }
         });
         Self { state, user, slot }
     }
@@ -156,7 +167,10 @@ pub(super) async fn sync(State(state): State<SharedState>, request: Request) -> 
     let body = match tokio::time::timeout(BODY_TIMEOUT, Bytes::from_request(request, &())).await {
         Ok(Ok(body)) => body,
         Ok(Err(rejection)) => return rejection.into_response(),
-        Err(_) => return StatusCode::REQUEST_TIMEOUT.into_response(),
+        Err(_) => {
+            state.oauth.lock().unwrap().workspace_call_stalled(&user);
+            return StatusCode::REQUEST_TIMEOUT.into_response();
+        }
     };
     state
         .oauth
@@ -203,19 +217,19 @@ async fn answer(running: Running, user: String, request: SyncRequest) -> Respons
     }
 }
 
-/// The answer, keeping its place until it is written out: answers a client does not read
-/// are memory too, and it is free to ask for 120 of them a minute.
+/// The answer, keeping its place until hyper has taken all of it. Chunked rather than with
+/// a length, so that a client has seen the end only once the place is free.
 #[cfg(feature = "scripting")]
 fn answer_held_by(running: Running, body: Vec<u8>) -> Response {
-    let stream = async_stream::stream! {
-        yield Ok::<_, std::convert::Infallible>(Bytes::from(body));
-        drop(running);
-    };
-    (
+    let chunks = futures_util::stream::once(std::future::ready(Ok::<_, std::convert::Infallible>(
+        Bytes::from(body),
+    )));
+    let response = (
         [(header::CONTENT_TYPE, "application/json")],
-        axum::body::Body::from_stream(stream),
+        axum::body::Body::from_stream(chunks),
     )
-        .into_response()
+        .into_response();
+    super::listener::held_until_written(response, running)
 }
 
 #[cfg(feature = "scripting")]

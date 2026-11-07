@@ -89,15 +89,21 @@ device that lost the answer to a request can retry.
 
 Anyone can sign in, so what a request may cost matters as much as what an account may keep. The token
 and the limits are checked before the body is read, so a caller who may not send one costs nothing,
-and a body must arrive within 10 s. A running sync keeps its place until its answer is written out,
-because an answer a client does not read is memory too, up to the size of what that account holds.
-Its share of the 8 ends after 30 s even so, so that clients that stop reading cannot keep everyone
-else out for long; the one per user stays until the connection goes. To a device all of these are a
-pause: what it has stays, and goes out when the `Retry-After` has passed.
+and a body must arrive within 8 s. A running sync keeps its place until hyper has taken the last piece
+of its answer, because an answer being built or queued is memory. What has reached the socket's buffer
+by then is another matter: a client that reads nothing frees the place at that point, and can ask again
+on a new connection. Those buffers are bounded per connection for every route, by
+[ADR-0051](/chartgen/decisions/0051-bounded-connections/), and not here.
+
+A request's share of the 8 ends after 10 s even so, and one that held its place like that, by neither
+sending nor reading, costs its account the rest of the minute. Eight accounts cannot keep everyone else
+out at no cost: at 10 s a minute each it takes about 48 to fill the 8 for good. To a device all of these
+are a pause: what it has stays, and goes out when the `Retry-After` has passed. A device refused for over
+a minute shows a quiet "Sync is waiting for the server".
 
 In a 256 MiB container, in a debug build, the server stayed under 97 MB with ten accounts of 2 MiB each
-sending 100 parallel reads, 100 parallel 0.95 MiB writes, and 200 requests whose answers they did not
-read. Before these limits, two accounts took it to 486 MB.
+sending 100 parallel reads and 100 parallel 0.95 MiB writes. Before these limits, two accounts took it
+to 486 MB.
 
 ### In the browser: accounts
 
@@ -118,8 +124,8 @@ flashes on screen. Boot consumes the OAuth redirect, asks `/oauth/me`, and then:
 | Sign-in on, no user | Off to the sign-in, with the address kept in `sessionStorage`. Nothing is hidden, since nothing renders and another tab may be running on this data |
 | Sign-in on, no user, an error to show | Live keys hidden, then the app with the error |
 | A new token, answered with no user | Live keys hidden and an error with **Sign in again**. Going through the sign-in again would come back here, without end |
-| No answer, no new token | The data as it was left: the app works with the server away |
-| No answer, a new token, data from a sign-in here | Live keys hidden and an error: this may be someone else |
+| No answer, no new token | The data as it was left: the app works with the server away, and its first call to the server brings a token |
+| No answer, a new token, data from a sign-in here | Asked twice more, over about 25 s. Then live keys hidden and an error: this may be someone else |
 | No answer, a new token, nothing from a sign-in here | As before: no account's data is here to show, and a server without sign-in keeps working |
 
 Signing out sends what is pending, ends the session, and hides the live keys. The marker stays, so a
@@ -182,7 +188,9 @@ a collection whose shape this build cannot read: nothing is garbled by trying.
 
 A save of a symbol's drawings is itself merged against what is stored, with what that page last loaded
 or saved as the base. Another tab on the symbol, which holds its own copy in memory, so takes away only
-what it saw and removed. It shows the other tab's drawings only after a reload.
+what it saw and removed. It shows the other tab's drawings only after a reload. The LRU dropping a symbol is recorded, as
+`chartgen.drawingsEvicted`, so that no stored drawings can be told apart from another tab having deleted
+them all: the first leaves this page's copy standing, and the second is merged as any deletion.
 
 A notice names the document ("your drawings on BTCUSDT"), not the item. The replaced version is not
 kept. Two devices adding symbols to one watchlist are both editing that list, so one list wins, with
@@ -212,10 +220,8 @@ the data comes back.
 - Good: `/workspace/sync` adds no setting and no schema to `tools/list`.
 - Good: one account's flood stops at its own limits, or at the total, and a row of a deleted document is
   a key and a version: about 200 KB per account at most.
-- Bad: the 8 syncs at once can all be taken, by 8 accounts at a time. Then others get `429` and wait, and
-  their work stays in their browsers.
-- Bad: an answer a client does not read holds memory until it hangs up, one per account: accounts with
-  2 MiB each that do so can in principle add up, at about 2.5 MiB per account.
+- Bad: the 8 syncs at once can all be taken, for a time, by 8 accounts, or for good by about 48. Then others
+  get `429` and wait, with a quiet status after a minute, and their work stays in their browsers.
 - Bad: a stranger with many accounts can fill the 1 GiB total, 512 accounts of 2 MiB. New accounts stop
   at nine tenths, so accounts already here go on for a while; past the total nobody's documents grow,
   existing ones stay, and everyone keeps working locally with a notice. It is cleared by deleting rows
