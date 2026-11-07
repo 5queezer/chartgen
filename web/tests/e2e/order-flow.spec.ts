@@ -149,9 +149,12 @@ test.describe("volume candles", () => {
     await page.evaluate(() => {
       (window as unknown as { __chartgenTest: { chart: () => { setBarSpace: (n: number) => void } } }).__chartgenTest
         .chart()
-        .setBarSpace(40);
+        .setBarSpace(24);
     });
     await page.waitForTimeout(300);
+    // Sample bars follow the clock, so any of them can be a doji, whose body is too thin to
+    // find at a row: only those a few pixels tall are measured. And an overlay line can cross
+    // a row and widen it: each is the narrowest of three rows inside its body.
     const widths = await page.evaluate(() => {
       const c = (window as unknown as {
         __chartgenTest: {
@@ -171,22 +174,37 @@ test.describe("volume candles", () => {
       const out: { volume: number; width: number }[] = [];
       for (let i = from; i < Math.min(to, list.length - 1); i++) {
         const b = list[i]!;
-        const p = c.convertToPixel({ dataIndex: i, value: (b.open + b.close) / 2 }, { paneId: "candle_pane" });
-        const row = ctx.getImageData(0, Math.round(p.y * ratio), canvas.width, 1).data;
-        const center = Math.round(p.x * ratio);
-        const on = (x: number) => row[x * 4 + 3]! > 200;
-        if (!on(center)) continue;
-        let a = center;
-        let z = center;
-        while (a > 0 && on(a - 1)) a--;
-        while (z < canvas.width - 1 && on(z + 1)) z++;
-        out.push({ volume: b.volume, width: (z - a + 1) / ratio });
+        const at = (value: number) => c.convertToPixel({ dataIndex: i, value }, { paneId: "candle_pane" });
+        const { x, y: open } = at(b.open);
+        const close = at(b.close).y;
+        const center = Math.round(x * ratio);
+        // Half off the canvas it looks narrower than it is.
+        const whole = x >= 12 && x <= canvas.clientWidth - 12;
+        if (!whole || Math.abs(close - open) < 4) continue;
+        const widthAt = (share: number) => {
+          const row = ctx.getImageData(0, Math.round((open + (close - open) * share) * ratio), canvas.width, 1).data;
+          const on = (k: number) => row[k * 4 + 3]! > 200;
+          if (!on(center)) return 0;
+          let a = center;
+          let z = center;
+          while (a > 0 && on(a - 1)) a--;
+          while (z < canvas.width - 1 && on(z + 1)) z++;
+          return (z - a + 1) / ratio;
+        };
+        out.push({ volume: b.volume, width: Math.min(widthAt(0.35), widthAt(0.5), widthAt(0.65)) });
       }
       return out;
     });
-    expect(widths.length).toBeGreaterThan(5);
-    const sorted = [...widths].sort((a, b) => a.volume - b.volume);
-    expect(sorted.at(-1)!.width).toBeGreaterThan(sorted[0]!.width + 4);
+    // Enough of them, across enough of a range of volume, for this to say anything.
+    expect(widths.length).toBeGreaterThanOrEqual(8);
+    const volumes = widths.map((w) => w.volume);
+    expect(Math.max(...volumes) / Math.min(...volumes)).toBeGreaterThan(1.5);
+    const drawn = widths.map((w) => w.width);
+    expect(Math.max(...drawn)).toBeGreaterThan(Math.min(...drawn) + 4);
+    // In proportion, and not just wider: the best line through zero fits every one of them.
+    const perVolume =
+      widths.reduce((sum, w) => sum + w.width * w.volume, 0) / widths.reduce((sum, w) => sum + w.volume ** 2, 0);
+    for (const w of widths) expect(Math.abs(w.width - w.volume * perVolume), JSON.stringify(w)).toBeLessThan(2.5);
 
     await pick(page, "Candles");
     await expect.poll(() => page.evaluate(() => {
