@@ -93,6 +93,22 @@ export async function expectChartRendered(page: Page): Promise<void> {
   // `.pane-header` strip. With default indicators there should be at
   // least one.
   await expect(page.locator(".pane-header").first()).toBeVisible();
+
+  // The panes take their final heights a moment after the first paint, and with
+  // the token in hand before the app mounts (ADR-0050) nothing else fills that
+  // moment. Specs read pane heights and pixel positions, so wait for it.
+  let height = -1;
+  await expect
+    .poll(
+      async () => {
+        const now = await canvas.evaluate((el) => el.getBoundingClientRect().height);
+        const settled = now === height;
+        height = now;
+        return settled;
+      },
+      { intervals: [300], timeout: 15_000 },
+    )
+    .toBe(true);
 }
 
 /**
