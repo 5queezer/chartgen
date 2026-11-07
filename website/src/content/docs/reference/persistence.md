@@ -185,7 +185,8 @@ CREATE TABLE server_settings (       -- vapid_private_key, unless set by env
 CREATE TABLE workspace_docs (
     user_id     TEXT    NOT NULL,   -- users.id
     key         TEXT    NOT NULL,   -- the web app's localStorage key
-    value       TEXT,               -- NULL: deleted, kept 90 days so other devices learn of it
+    value       TEXT,               -- NULL: deleted, kept 90 days, the newest 1000 per user,
+                                    -- so other devices learn of it
     version     INTEGER NOT NULL,   -- that user's sequence at this write
     updated_at  INTEGER NOT NULL,   -- unix seconds
     PRIMARY KEY (user_id, key)

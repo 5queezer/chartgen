@@ -5515,6 +5515,9 @@ fn test_workspace_gives_up_on_a_body_that_does_not_come() {
     let token = web_sign_in(&mut b, &fake, "github", profile_of("github", 1, "a"));
     let mut stuck = start_workspace_upload(p, &token);
     std::thread::sleep(std::time::Duration::from_secs(11));
+    stuck
+        .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+        .unwrap();
     let mut answer = String::new();
     stuck.read_to_string(&mut answer).unwrap();
     assert!(answer.starts_with("HTTP/1.1 408"), "{answer}");
