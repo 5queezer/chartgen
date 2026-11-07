@@ -1,4 +1,4 @@
-use axum::extract::{Query, Request, State};
+use axum::extract::{DefaultBodyLimit, Query, Request, State};
 use axum::http::{header, HeaderMap, HeaderValue, Method, StatusCode, Uri};
 use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
@@ -23,7 +23,11 @@ use chartgen::mcp_schema::SERVER_ALERT_TOOLS;
 #[cfg(feature = "scripting")]
 use chartgen::scripting;
 
+mod listener;
 mod signin;
+
+/// The most any request may send, unless its route says otherwise.
+const MAX_BODY_BYTES: usize = 512 * 1024;
 
 // --- OAuth 2.1 PKCE in-memory store ---
 
@@ -1073,6 +1077,17 @@ fn streamable_http_json_response(
 ///   202 for `notifications/initialized`).
 /// - Successful responses set `Content-Type: application/json`.
 async fn mcp_handler(
+    state: State<SharedState>,
+    uri: Uri,
+    headers: HeaderMap,
+    ext: axum::http::Extensions,
+    body_bytes: axum::body::Bytes,
+) -> Response {
+    let slot = listener::call_slot(listener::call_cost(&body_bytes)).await;
+    listener::held_until_written(mcp_call(state, uri, headers, ext, body_bytes).await, slot)
+}
+
+async fn mcp_call(
     State(state): State<SharedState>,
     uri: Uri,
     headers: HeaderMap,
@@ -1396,6 +1411,16 @@ async fn sse_handler(State(state): State<SharedState>, uri: Uri, headers: Header
         return with_resource_metadata(resp, uri.path());
     }
 
+    // So that streams alone cannot take every connection (ADR-0051).
+    let Some(stream_slot) = listener::stream_slot() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            [(header::RETRY_AFTER, "30")],
+            "Too many streams are open",
+        )
+            .into_response();
+    };
+
     // Echo the client-supplied Mcp-Session-Id if present, else mint one so
     // clients that expect the header on the SSE response still get a value.
     let client_session = headers
@@ -1463,6 +1488,7 @@ async fn sse_handler(State(state): State<SharedState>, uri: Uri, headers: Header
         stream_key: chart_stream,
         chart_link,
         cleaned_up: false,
+        _stream_slot: stream_slot,
     };
 
     Response::builder()
@@ -1488,6 +1514,7 @@ struct CleanupStream {
     stream_key: String,
     chart_link: u64,
     cleaned_up: bool,
+    _stream_slot: tokio::sync::OwnedSemaphorePermit,
 }
 
 impl futures_util::Stream for CleanupStream {
@@ -1688,11 +1715,19 @@ pub async fn run_server(port: u16, engine: Option<Arc<RwLock<TradingEngine>>>) {
         println!("Serving web app from {}", dir.display());
         app = app.fallback(move |req: Request| serve_web(dir.clone(), req));
     }
-    let app = app.layer(cors).with_state(state);
+    // Bodies are read whole, and a client can stop halfway on as many connections as
+    // there are (ADR-0051). A script or a tool call is far smaller than this.
+    let app = app
+        .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
+        .layer(cors)
+        .with_state(state);
 
-    let addr = format!("0.0.0.0:{}", port);
+    let addr = std::net::SocketAddr::from(([0, 0, 0, 0], port));
     println!("MCP server listening on {}", addr);
-    let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
+    // `tap_io` does nothing here: axum gives the peer's address to tapped listeners and
+    // to its own `TcpListener` only.
+    let listener =
+        axum::serve::ListenerExt::tap_io(listener::BoundedListener::bind(addr).unwrap(), |_| {});
     axum::serve(
         listener,
         app.into_make_service_with_connect_info::<std::net::SocketAddr>(),

@@ -77,3 +77,4 @@ one and link both ways.
 | [0047](/chartgen/decisions/0047-price-based-charts/) | Price-based charts: Renko, Kagi, Point & Figure, Line Break, Range | Accepted | 2026-11-06 |
 | [0048](/chartgen/decisions/0048-order-flow/) | Order flow from lower-timeframe bars: footprints, TPO, volume profiles | Accepted | 2026-11-06 |
 | [0049](/chartgen/decisions/0049-one-kline-read-per-symbol/) | One Binance kline read per symbol and interval | Accepted | 2026-11-06 |
+| [0051](/chartgen/decisions/0051-bounded-connections/) | What one connection may cost | Accepted | 2026-11-07 |
