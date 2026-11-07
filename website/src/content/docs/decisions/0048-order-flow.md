@@ -7,6 +7,7 @@ sidebar:
 
 **Status:** Accepted
 **Date:** 2026-11-06
+**Amends:** [ADR-0049](/chartgen/decisions/0049-one-kline-read-per-symbol/) (its windows hold taker buy volume, and read `1s` klines)
 
 ## Context and Problem Statement
 
@@ -79,7 +80,7 @@ the 6000 per minute. A refusal is an error for that one call.
 | `get_footprint`, cold: the chart's bars, and up to 6 pages of intrabars | 7 | 14 |
 | `get_footprint`, the same window again | 1 | 2 |
 | A footprint page of older bars, each as the chart scrolls to it | up to 7 | up to 14 |
-| Live poll per chart, every 10 s; intrabars at most once per 5 s per symbol and interval | 2 | 4 |
+| Live poll per chart, every 10 s: the chart's bars and its intrabars, each at most one request a second per symbol and kline, however many charts share them | 2 | 4 |
 | A poll after a gap: up to 200 bars, then a load instead | up to 7 | up to 14 |
 | `get_tpo`, cold: up to 3000 blocks | 3 | 6 |
 | Live TPO poll per chart, every 30 s: two periods | 1 | 2 |
@@ -87,7 +88,9 @@ the 6000 per minute. A refusal is an error for that one call.
 | A history page or a tail of such a chart: extra | 0 | 0 |
 
 So a grid of 4 footprints costs at most 56 weight to load and 96 per minute while live, of
-the 4800 the gate allows.
+the 4800 the gate allows. Those are worst cases: reads go through the windows of
+[ADR-0049](/chartgen/decisions/0049-one-kline-read-per-symbol/), so what any chart on that symbol
+and kline already read costs nothing more, and 100 charts on one pair cost what about 10 do.
 
 An interval Binance does not have is built from bars it does, and that counts as for any
 chart ([ADR-0038](/chartgen/decisions/0038-custom-intervals/)): a cold 59m footprint from the
@@ -105,8 +108,14 @@ intrabars, up to 7 cold; closed, a poll's intrabars are cached and it takes 1. `
 
 ### Memory
 
-The server holds 8 symbol and interval pairs of at most 6000 intrabars, about 3 MB, evicted
-by least recent use. A footprint has at most 200 bars and about 200 rows per bar, and a row size
+Binance intrabars live in the windows and pages of
+[ADR-0049](/chartgen/decisions/0049-one-kline-read-per-symbol/), inside their bound in klines, and
+are shared with charts. A kline there is now 104 bytes rather than 96, for its taker buy volume: 72
+for a `Kline`, 32 for its date. That is about 2.6 MB more at the bound of 320,000, about 33 MB of live
+klines in all, not resident memory. Taker volume is not a field of `Bar`, as every bar of every chart
+would then carry it through every request, and about 70 places build one. The reads no longer need a
+cache of their own there. Yahoo's has 8 symbol and interval pairs of at most 6000 intrabars, about
+3 MB, evicted by least recent use. A footprint has at most 200 bars and about 200 rows per bar, and a row size
 that would give more is widened and reported as such. The bound takes the width of the intrabars
 as well as of the bars, as rows are built from them and they are read later: a bar that read
 flat would otherwise leave any row size standing. `build_footprint` caps its rows whatever it is
@@ -128,6 +137,27 @@ profile carries the row it was built with and is drawn with that: one reply may 
 widen its own, which the status then says, and the others stay as they were.
 
 A TPO's auto row is a 24th of the median period range. This is a departure: see below.
+
+### Reading them
+
+Binance goes through the windows and pages of
+[ADR-0049](/chartgen/decisions/0049-one-kline-read-per-symbol/): one read per symbol and kline
+whoever asks, a failed read loses nothing held, and walks of more than a page take a permit and a
+deadline. Its `1s` handling did not run until this decision, as `Interval` does not read that
+kline, which is no chart interval: a refresh read 16 klines rather than the 130 it states, and a
+close did not end the window. A footprint on a 1m chart reads `1s`, so both now hold.
+
+A window does not fit Yahoo, which has no gate, closes for the night and limits fine intervals by
+age, and reads through the closed hours would each cost a request. Its reads keep a cache here:
+one read at a time per symbol and interval, on a copy, so that a failure leaves what was held. A
+caller waiting on a read that fails fails with it, rather than each trying in turn against a
+source that is down. No page begins past 20 s.
+
+A chart's load gives up on a profile's finer bars after 8 s, even in the middle of a request,
+and spreads its own bars, and the legend then names no finer ones. The read goes on by
+itself, bounded by its own deadlines, so what it finds serves the next load. `get_footprint` has
+no such fallback, as a footprint without rows is not one: it fails, the status says so, and
+the feed retries.
 
 ### Imbalance and value area
 
@@ -200,6 +230,8 @@ and summary output also spread each chart bar's volume.
 - Bad: rows are estimates. A footprint must not be read as exact per price.
 - Bad: settings the server computes with cost a reload, though from cached intrabars.
 - Bad: `session_vp` keeps spreading each bar's volume, as what could improve it cannot reach its tails.
+- Bad: a slow Binance leaves a thread per profile load finishing its read after the load gave up, bounded by that read's deadlines.
+- Bad: a footprint's forming intrabar is refreshed up to once a second per symbol and kline, not once per 5 s, as ADR-0049's freshness applies. That only costs more on a pair polled by over 2 charts.
 - Bad: live cells lag the candle by up to 10 s, while a pushed tail moves the bar at once.
 - Bad: a TPO is off in bar replay, as a profile holds its whole period.
 
