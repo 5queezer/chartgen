@@ -43,6 +43,10 @@ export interface CreateServerAlertInput {
    */
   message?: string;
   /**
+   * Notify your devices (subscribe_push) when it fires. May go with a webhook.
+   */
+  push?: boolean;
+  /**
    * Sign deliveries with a per-alert secret (HMAC-SHA256). Needs webhook_url.
    */
   sign?: boolean;
@@ -382,6 +386,21 @@ export interface SubscribeNotificationsInput {
   symbols?: string[];
 }
 
+export interface SubscribePushInput {
+  /**
+   * The subscription's auth secret, base64url.
+   */
+  auth: string;
+  /**
+   * PushSubscription.endpoint.
+   */
+  endpoint: string;
+  /**
+   * The subscription's p256dh key, base64url.
+   */
+  p256dh: string;
+}
+
 export interface UnsubscribeChartInput {
   /**
    * The subscription_id returned by subscribe_chart.
@@ -390,6 +409,13 @@ export interface UnsubscribeChartInput {
 }
 
 export interface UnsubscribeNotificationsInput {}
+
+export interface UnsubscribePushInput {
+  /**
+   * PushSubscription.endpoint.
+   */
+  endpoint: string;
+}
 
 export interface UpdateServerAlertInput {
   /**
@@ -412,6 +438,10 @@ export interface UpdateServerAlertInput {
    * Your note; an empty string removes it.
    */
   message?: string;
+  /**
+   * Notify your devices when it fires, or stop.
+   */
+  push?: boolean;
   /**
    * true: sign with a new secret. false: stop signing.
    */

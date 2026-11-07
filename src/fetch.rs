@@ -1,9 +1,10 @@
 use crate::data::{self, Bar, OhlcvData, Session};
 use chartgen::binance_gate::{self, Gate};
 use chartgen::interval::{Interval, Unit};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
+use std::hash::Hash;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Condvar, Mutex, MutexGuard, OnceLock};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
 
 /// Binance klines REST caps `limit` at 1000 per request.
@@ -28,9 +29,10 @@ pub enum DataSource {
 
 impl DataSource {
     pub fn from_env() -> Self {
-        match std::env::var("CHARTGEN_DATA_SOURCE").as_deref() {
-            Ok("sample") => DataSource::Sample,
-            _ => DataSource::Live,
+        if data::sample_source() {
+            DataSource::Sample
+        } else {
+            DataSource::Live
         }
     }
 }
@@ -94,13 +96,7 @@ pub fn now_ms() -> i64 {
 
 /// Shared blocking HTTP client; every upstream request times out after 10 s.
 pub(crate) fn http() -> &'static reqwest::blocking::Client {
-    static CLIENT: OnceLock<reqwest::blocking::Client> = OnceLock::new();
-    CLIENT.get_or_init(|| {
-        reqwest::blocking::Client::builder()
-            .timeout(Duration::from_secs(10))
-            .build()
-            .unwrap_or_else(|_| reqwest::blocking::Client::new())
-    })
+    chartgen::binance_gate::http()
 }
 
 fn bar_ts(bar: &Bar) -> Option<i64> {
@@ -173,12 +169,33 @@ pub fn fetch_binance(
     fetch_binance_via(binance(), symbol, interval, limit, end_time_ms)
 }
 
+/// The newest bars for a push seed, from a read sent after this call began. A seed
+/// has subscribed by now, so it hears every later event, but nothing repairs a kline
+/// whose closing event it missed. So it may not take a read from before it subscribed,
+/// which is the one thing a poll may do, since its next poll lays over that kline.
+pub fn fetch_binance_seed(symbol: &str, interval: &str, limit: usize) -> Result<Fetched, String> {
+    let client = binance();
+    let now = (client.now)().mono;
+    fetch_binance_since(client, symbol, interval, limit, None, Some(now))
+}
+
 fn fetch_binance_via(
     client: &BinanceClient,
     symbol: &str,
     interval: &str,
     limit: usize,
     end_time_ms: Option<i64>,
+) -> Result<Fetched, String> {
+    fetch_binance_since(client, symbol, interval, limit, end_time_ms, None)
+}
+
+fn fetch_binance_since(
+    client: &BinanceClient,
+    symbol: &str,
+    interval: &str,
+    limit: usize,
+    end_time_ms: Option<i64>,
+    not_before: Option<Instant>,
 ) -> Result<Fetched, String> {
     let iv = Interval::parse(interval)?;
     let (base, per_bar) = iv.binance_base();
@@ -188,24 +205,28 @@ fn fetch_binance_via(
     } else {
         (limit, end_time_ms)
     };
-    let now = Instant::now();
-    let deadline = now + BINANCE_DEADLINE;
+    let deadline = Instant::now() + BINANCE_DEADLINE;
     let page = |page_limit: usize, end: Option<i64>| {
         fetch_binance_page(client, &binance_klines_url(symbol, base, page_limit, end))
     };
-    let fetched = if end_time_ms.is_none() && want > BINANCE_MAX_LIMIT {
-        let key = (symbol.to_uppercase(), base);
-        newest_klines(
+    let symbol_key = symbol.to_uppercase();
+    let fetched = match end {
+        None => newest_klines(
             &client.klines,
             &client.walks,
-            key,
-            want,
-            now,
+            (symbol_key, base),
+            (want, not_before),
+            &*client.now,
             deadline,
             page,
-        )?
-    } else {
-        walk_klines(&client.walks, want, end, deadline, page)?
+        )?,
+        Some(end) => shared_page(
+            &client.pages,
+            (symbol_key, base, end, want),
+            &*client.now,
+            deadline,
+            || walk_klines(&client.walks, want, Some(end), deadline, page),
+        )?,
     };
 
     let (bars, has_more) = if resampled {
@@ -216,7 +237,7 @@ fn fetch_binance_via(
     };
 
     if bars.is_empty() && end_time_ms.is_none() {
-        return Err("Binance returned zero bars".into());
+        return Err(NO_BARS.into());
     }
 
     Ok(Fetched {
@@ -262,34 +283,184 @@ fn resampled_bars(native: &[Bar], iv: &Interval, limit: usize, want: usize) -> (
     (bars, reached_want || older)
 }
 
-/// How many symbol and kline pairs `newest_klines` holds, and for how long
-/// since last used. A full entry is about 1.6 MB.
-const KLINE_CACHE_ENTRIES: usize = 8;
+/// Both clocks a cache reads: monotonic for ages, unix ms for kline boundaries.
+#[derive(Clone, Copy)]
+struct Now {
+    mono: Instant,
+    wall_ms: i64,
+}
+
+type Clock<'a> = &'a (dyn Fn() -> Now + Send + Sync);
+
+/// How many symbol and kline pairs `newest_klines` holds, how many klines in all,
+/// and for how long since last used (ADR-0049). A kline is about 96 bytes (64 for the
+/// `Bar`, 32 for its date), so at most about 25 MB of live klines, not of resident
+/// memory: 12 windows at the 20,000 cap, or 256 ordinary ones, which read a page of 1000.
+const KLINE_CACHE_ENTRIES: usize = 256;
+const KLINE_CACHE_BARS: usize = 256_000;
 const KLINE_CACHE_TTL: Duration = Duration::from_secs(120);
-/// Klines a refresh reads: enough to overlap after up to `KLINE_CACHE_TTL` on
-/// the finest kline, with the forming one.
+/// Fewest klines a refresh reads. See `kline_refresh`.
 const KLINE_REFRESH: usize = 16;
+/// A repeat this soon after the read it would repeat sends nothing. Half the web
+/// app's 2 s poll, so any number of pollers of a chart cost one request a second
+/// and each still sees the candle move on every poll.
+const KLINE_FRESH: Duration = Duration::from_secs(1);
+/// While one caller refreshes, others get the klines held if they are this young,
+/// rather than a blocking thread each. Older, they wait for the refresh.
+const KLINE_STALE: Duration = Duration::from_secs(3);
+/// `end_time` pages kept once read, in entries, klines (about 6 MB) and seconds.
+const PAGE_CACHE_ENTRIES: usize = 128;
+const PAGE_CACHE_BARS: usize = 64_000;
+const PAGE_CACHE_TTL: Duration = Duration::from_secs(60);
+/// How long after a kline's close, by this host's clock, a page holding it may be
+/// kept. Its last trades can reach REST late or this clock can be ahead, and nothing
+/// lays newer klines over a kept page, as a refresh does over a window.
+const PAGE_SETTLE_MS: i64 = 5_000;
+
+const NO_BARS: &str = "Binance returned zero bars";
+/// What joiners of a read get if its thread panicked.
+const READ_ABORTED: &str = "Binance read failed unexpectedly; try again shortly";
+
+/// A read under way that others may join, and how it ended once it has.
+struct Flight<T>(OnceLock<Result<T, String>>);
+
+type Flights<K, T> = HashMap<K, Arc<Flight<T>>>;
+
+/// The turn to run a flight. Ends however the read does, panics included, so
+/// nobody who joined it hangs, and leaves `flights`, so what it read lives on only
+/// where the cache keeps it and with those who joined.
+struct Claim<'a, S, K: Eq + Hash, T> {
+    state: &'a Mutex<S>,
+    ended: &'a Condvar,
+    flights: fn(&mut S) -> &mut Flights<K, T>,
+    key: K,
+    flight: Arc<Flight<T>>,
+}
+
+impl<S, K: Eq + Hash, T> Claim<'_, S, K, T> {
+    /// How the read ended, for those who joined it. They learn when this drops.
+    fn end(&self, how: Result<T, String>) {
+        let _ = self.flight.0.set(how);
+    }
+}
+
+impl<S, K: Eq + Hash, T> Drop for Claim<'_, S, K, T> {
+    fn drop(&mut self) {
+        self.end(Err(READ_ABORTED.into()));
+        // Under the lock, so a joiner between its check and its wait still hears.
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        (self.flights)(&mut state).remove(&self.key);
+        self.ended.notify_all();
+    }
+}
+
+/// Sleep until someone's read ends or `deadline` passes, which gives `BUSY`.
+fn wait_for_flight<'a, S>(
+    ended: &Condvar,
+    state: MutexGuard<'a, S>,
+    deadline: Instant,
+) -> Result<MutexGuard<'a, S>, String> {
+    let left = deadline.saturating_duration_since(Instant::now());
+    if left.is_zero() {
+        return Err(BUSY.into());
+    }
+    Ok(ended
+        .wait_timeout(state, left)
+        .unwrap_or_else(|e| e.into_inner())
+        .0)
+}
+
+/// Drop the least recently used entries, other than `keep`, down to the bounds.
+/// `info` gives an entry's last use and its klines.
+fn evict<K: Eq + Hash + Clone, V>(
+    held: &mut HashMap<K, V>,
+    keep: &K,
+    (entries, bars): (usize, usize),
+    info: impl Fn(&V) -> (Instant, usize),
+) {
+    let mut total: usize = held.values().map(|v| info(v).1).sum();
+    while held.len() > entries || total > bars {
+        let oldest = held
+            .iter()
+            .filter(|(k, _)| *k != keep)
+            .min_by_key(|(_, v)| info(v).0)
+            .map(|(k, _)| k.clone());
+        let Some(gone) = oldest.and_then(|k| held.remove(&k)) else {
+            break;
+        };
+        total -= info(&gone).1;
+    }
+}
+
+/// Klines a refresh of `kline` reads: enough to overlap after up to `KLINE_CACHE_TTL`,
+/// with the forming one. A page costs the same weight at any size.
+fn kline_refresh(kline: &str) -> usize {
+    Interval::parse(kline).map_or(KLINE_REFRESH, |iv| refresh_for(iv.secs()))
+}
+
+fn refresh_for(kline_secs: i64) -> usize {
+    let klines_in_a_lifetime = KLINE_CACHE_TTL.as_secs() as usize / kline_secs.max(1) as usize;
+    KLINE_REFRESH.max(klines_in_a_lifetime + 10)
+}
+
+/// Unix ms at which the `kline` holding `t_ms` closes.
+fn kline_end_ms(kline: &str, t_ms: i64) -> i64 {
+    Interval::parse(kline).map_or(i64::MAX, |iv| {
+        iv.grid_end(t_ms.div_euclid(1000)).saturating_mul(1000)
+    })
+}
 
 struct HeldKlines {
     used: Instant,
-    bars: Vec<Bar>,
+    /// When the read behind the newest klines was sent.
+    read: Instant,
+    /// When the kline forming at that moment closes, by this host's clock. Nothing
+    /// is served past it, so a poll sees a new kline at once. It says nothing of when
+    /// REST has the closed one's last trades: see `fetch_binance_seed`.
+    read_slot_end_ms: i64,
+    bars: Arc<Vec<Bar>>,
     /// A full read found less than it asked for: nothing older exists.
     complete: bool,
 }
 
+impl HeldKlines {
+    fn serves(&self, now: Now, age: Duration) -> bool {
+        now.wall_ms < self.read_slot_end_ms && now.mono.saturating_duration_since(self.read) < age
+    }
+
+    fn stamp(&mut self, sent: Now, kline: &str) {
+        self.used = sent.mono;
+        self.read = sent.mono;
+        self.read_slot_end_ms = kline_end_ms(kline, sent.wall_ms);
+    }
+}
+
 type KlineKey = (String, &'static str);
+type KlineFlight = Arc<Flight<()>>;
 
 #[derive(Default)]
 struct KlineState {
     held: HashMap<KlineKey, HeldKlines>,
-    /// Keys a full read is walking now: others wait for its result.
-    walking: HashSet<KlineKey>,
+    /// Reads of klines older than those held, or of the first ones.
+    walking: Flights<KlineKey, ()>,
+    /// Reads of the newest klines over those held. They do not touch the older end,
+    /// so a chart's refresh need not wait for another chart's long walk.
+    refreshing: Flights<KlineKey, ()>,
 }
 
 #[derive(Default)]
 struct KlineCache {
     state: Mutex<KlineState>,
-    walked: Condvar,
+    ended: Condvar,
+}
+
+type KlineClaim<'a> = Claim<'a, KlineState, KlineKey, ()>;
+
+enum KlineRead<'a> {
+    Held(Arc<Vec<Bar>>),
+    Refresh(KlineClaim<'a>),
+    /// Read on from the open time of the oldest held, of how many held.
+    Walk(KlineClaim<'a>, Option<(i64, usize)>),
 }
 
 impl KlineCache {
@@ -297,63 +468,172 @@ impl KlineCache {
         self.state.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// Klines held for `want`, or this thread's turn to walk `key`, waiting up to
-    /// `deadline` for a read already under way and then looking again.
+    /// Start a flight of `key` in `flights`.
+    fn claim(
+        &self,
+        st: &mut KlineState,
+        flights: fn(&mut KlineState) -> &mut Flights<KlineKey, ()>,
+        key: &KlineKey,
+    ) -> KlineClaim<'_> {
+        let flight = Arc::new(Flight(OnceLock::new()));
+        flights(st).insert(key.clone(), flight.clone());
+        Claim {
+            state: &self.state,
+            ended: &self.ended,
+            flights,
+            key: key.clone(),
+            flight,
+        }
+    }
+
+    /// Klines to serve `want` from, or this thread's turn to read, waiting up to
+    /// `deadline` for a read already under way. Whoever waits for a refresh takes
+    /// its result however long it took, or a slow Binance would have each caller
+    /// find it too old and refresh again until all time out. A walk says nothing
+    /// about the newest klines, which were read when it began, so those who wait
+    /// for one look again. A failed read fails those who joined it, not each in turn.
+    /// With `not_before`, only a read sent at or after it serves, refreshes included.
     fn begin(
         &self,
         key: &KlineKey,
-        want: usize,
-        now: Instant,
+        (want, not_before): (usize, Option<Instant>),
+        clock: Clock<'_>,
         deadline: Instant,
-        use_held: bool,
     ) -> Result<KlineRead<'_>, String> {
-        let mut st = self.lock();
+        let mut guard = self.lock();
+        // The flight waited for, and whether it is a refresh.
+        let mut joined: Option<(KlineFlight, bool)> = None;
+        let mut refreshed = false;
         loop {
+            if let Some(end) = joined.as_ref().and_then(|(f, _)| f.0.get().cloned()) {
+                end?;
+                refreshed = joined.take().is_some_and(|(_, refresh)| refresh);
+            }
+            let now = clock();
+            let st = &mut *guard;
             st.held
-                .retain(|_, h| now.duration_since(h.used) < KLINE_CACHE_TTL);
-            let usable = st
+                .retain(|_, h| now.mono.saturating_duration_since(h.used) < KLINE_CACHE_TTL);
+            let refresh = st.refreshing.get(key).cloned();
+            let covering = st
                 .held
-                .get(key)
-                .filter(|h| use_held && (h.complete || h.bars.len() >= want));
-            if let Some(h) = usable {
-                return Ok(KlineRead::Held(h.bars.clone(), h.complete));
-            }
-            if st.walking.insert(key.clone()) {
-                return Ok(KlineRead::Walk(WalkClaim {
-                    cache: self,
-                    key: key.clone(),
-                }));
-            }
-            let left = deadline.saturating_duration_since(Instant::now());
-            if left.is_zero() {
-                return Err(BUSY.into());
-            }
-            st = self
-                .walked
-                .wait_timeout(st, left)
-                .unwrap_or_else(|e| e.into_inner())
-                .0;
+                .get_mut(key)
+                .filter(|h| h.complete || h.bars.len() >= want);
+            joined = Some(if let Some(h) = covering {
+                let age = match (refreshed, &refresh) {
+                    (true, _) => Duration::MAX,
+                    (false, Some(_)) => KLINE_STALE,
+                    (false, None) => KLINE_FRESH,
+                };
+                if h.serves(now, age) && not_before.is_none_or(|t| h.read >= t) {
+                    h.used = now.mono;
+                    return Ok(KlineRead::Held(h.bars.clone()));
+                }
+                let Some(flight) = refresh else {
+                    let claim = self.claim(st, |s| &mut s.refreshing, key);
+                    return Ok(KlineRead::Refresh(claim));
+                };
+                (flight, true)
+            } else if let Some(flight) = st.walking.get(key) {
+                (flight.clone(), false)
+            } else {
+                let from = st
+                    .held
+                    .get(key)
+                    .and_then(|h| Some((bar_open_ms(h.bars.first()?)?, h.bars.len())));
+                let claim = self.claim(st, |s| &mut s.walking, key);
+                return Ok(KlineRead::Walk(claim, from));
+            });
+            guard = wait_for_flight(&self.ended, guard, deadline)?;
         }
     }
 }
 
-enum KlineRead<'a> {
-    Held(Vec<Bar>, bool),
-    Walk(WalkClaim<'a>),
+struct HeldPage {
+    read: Instant,
+    bars: Arc<Vec<Bar>>,
 }
 
-/// The turn to walk a key. Ends however the walk does, so waiters never hang on
-/// a refused or failed read: the next one takes the turn, and is refused itself.
-struct WalkClaim<'a> {
-    cache: &'a KlineCache,
-    key: KlineKey,
+/// Symbol, kline, exclusive end and klines asked for.
+type PageKey = (String, &'static str, i64, usize);
+
+#[derive(Default)]
+struct PageState {
+    held: HashMap<PageKey, HeldPage>,
+    flying: Flights<PageKey, Arc<Vec<Bar>>>,
 }
 
-impl Drop for WalkClaim<'_> {
-    fn drop(&mut self) {
-        self.cache.lock().walking.remove(&self.key);
-        self.cache.walked.notify_all();
+#[derive(Default)]
+struct PageCache {
+    state: Mutex<PageState>,
+    ended: Condvar,
+}
+
+/// The klines of an `end_time` page: from a recent read of the same page, or a read
+/// under way, or `read`. A page reaching the forming kline, or one closed only just
+/// now, is shared but not kept, since keeping it could not bound how old that kline
+/// gets. Anything else never changes, so history that ran out is kept as well.
+fn shared_page<F>(
+    cache: &PageCache,
+    key: PageKey,
+    clock: Clock<'_>,
+    deadline: Instant,
+    read: F,
+) -> Result<Vec<Bar>, String>
+where
+    F: FnOnce() -> Result<Vec<Bar>, String>,
+{
+    let mut guard = cache.state.lock().unwrap_or_else(|e| e.into_inner());
+    let now = clock();
+    let st = &mut *guard;
+    st.held
+        .retain(|_, p| now.mono.saturating_duration_since(p.read) < PAGE_CACHE_TTL);
+    if let Some(bars) = st.held.get(&key).map(|p| p.bars.clone()) {
+        drop(guard);
+        return Ok(bars.to_vec());
     }
+    if let Some(flight) = st.flying.get(&key).cloned() {
+        loop {
+            if let Some(end) = flight.0.get() {
+                drop(guard);
+                return end.clone().map(|bars| bars.to_vec());
+            }
+            guard = wait_for_flight(&cache.ended, guard, deadline)?;
+        }
+    }
+    let flight = Arc::new(Flight(OnceLock::new()));
+    st.flying.insert(key.clone(), flight.clone());
+    let claim = Claim {
+        state: &cache.state,
+        ended: &cache.ended,
+        flights: |s: &mut PageState| &mut s.flying,
+        key: key.clone(),
+        flight,
+    };
+    drop(guard);
+
+    let mut bars = read().inspect_err(|e| claim.end(Err(e.clone())))?;
+    bars.shrink_to_fit();
+    let bars = Arc::new(bars);
+    let closed = bars
+        .last()
+        .and_then(bar_open_ms)
+        .is_none_or(|t| kline_end_ms(key.1, t).saturating_add(PAGE_SETTLE_MS) <= now.wall_ms);
+    if closed {
+        let mut st = cache.state.lock().unwrap_or_else(|e| e.into_inner());
+        let page = HeldPage {
+            read: now.mono,
+            bars: bars.clone(),
+        };
+        st.held.insert(key.clone(), page);
+        evict(
+            &mut st.held,
+            &key,
+            (PAGE_CACHE_ENTRIES, PAGE_CACHE_BARS),
+            |p| (p.read, p.bars.len()),
+        );
+    }
+    claim.end(Ok(bars.clone()));
+    Ok(bars.to_vec())
 }
 
 /// Paged walks of Binance's history allowed at once. At about 0.3 s a page, four
@@ -428,87 +708,132 @@ fn lay_over(bars: &mut Vec<Bar>, fresh: &[Bar]) -> bool {
         return false;
     };
     bars.truncate(bars.partition_point(|b| bar_ts(b).is_some_and(|t| t < first)));
+    // Exact, so a held window does not double its memory for one new kline.
+    bars.reserve_exact(fresh.len());
     bars.extend_from_slice(fresh);
     true
 }
 
-/// The newest `want` klines of `key`. A resampled chart's tail still needs every
-/// one of them, since indicators run over its warmup, but a closed kline never
-/// changes: only the first read walks the history, and a repeat reads one small
-/// page and lays it over the klines held. Concurrent first reads share one walk.
-/// A refused or failed read stores nothing. `page` is as for `paginate_backwards`.
+/// The newest `want` klines of `key`, for every read without an `end_time`. A closed
+/// kline never changes, so one window per symbol and kline serves every chart on it,
+/// whatever its size: only klines it lacks are read, in whole pages since a page
+/// costs the same weight at any size, so reads of mixed sizes add up to one walk. A
+/// repeat within `KLINE_FRESH` sends nothing, and after that one caller reads a small
+/// page and lays it over the window (see `KlineCache::begin` for the others). A
+/// refused or failed read stores nothing. `page` is as for `paginate_backwards`.
+/// `not_before` is as for `KlineCache::begin`.
 fn newest_klines<F>(
     cache: &KlineCache,
     walks: &Walks,
     key: KlineKey,
-    want: usize,
-    now: Instant,
+    (want, not_before): (usize, Option<Instant>),
+    clock: Clock<'_>,
     deadline: Instant,
     mut page: F,
 ) -> Result<Vec<Bar>, String>
 where
     F: FnMut(usize, Option<i64>) -> Result<Vec<Bar>, String>,
 {
-    let mut joined = None;
-    let mut claim = None;
-    match cache.begin(&key, want, now, deadline, true)? {
-        KlineRead::Walk(c) => claim = Some(c),
-        KlineRead::Held(mut bars, complete) => {
-            let fresh = page(KLINE_REFRESH, None)?;
-            // A gap means the page does not reach what we hold: read it all again.
-            if lay_over(&mut bars, &fresh) {
-                joined = Some((bars, complete));
-            } else if let KlineRead::Walk(c) = cache.begin(&key, want, now, deadline, false)? {
-                claim = Some(c);
+    let want = want.min(MAX_BASE_BARS);
+    let newest = |bars: &[Bar]| bars[bars.len().saturating_sub(want)..].to_vec();
+    let bounds = (KLINE_CACHE_ENTRIES, KLINE_CACHE_BARS);
+    let info = |h: &HeldKlines| (h.used, h.bars.len());
+    loop {
+        match cache.begin(&key, (want, not_before), clock, deadline)? {
+            KlineRead::Held(bars) => return Ok(newest(&bars)),
+            KlineRead::Refresh(claim) => {
+                let sent = clock();
+                let fresh =
+                    page(kline_refresh(key.1), None).inspect_err(|e| claim.end(Err(e.clone())))?;
+                let mut st = cache.lock();
+                let laid = st.held.get_mut(&key).and_then(|h| {
+                    // The window was read anew while this was out, so it is the newer.
+                    if h.read > sent.mono {
+                        return Some(h.bars.clone());
+                    }
+                    let bars = Arc::make_mut(&mut h.bars);
+                    if !lay_over(bars, &fresh) {
+                        return None;
+                    }
+                    if bars.len() > MAX_BASE_BARS {
+                        bars.drain(..bars.len() - MAX_BASE_BARS);
+                    }
+                    h.stamp(sent, key.1);
+                    Some(h.bars.clone())
+                });
+                let Some(bars) = laid else {
+                    // A gap means the page does not reach what we hold: read it all
+                    // again. Or it was evicted meanwhile, which comes to the same.
+                    st.held.remove(&key);
+                    drop(st);
+                    claim.end(Ok(()));
+                    continue;
+                };
+                evict(&mut st.held, &key, bounds, info);
+                drop(st);
+                claim.end(Ok(()));
+                return Ok(newest(&bars));
+            }
+            KlineRead::Walk(claim, from) => {
+                let sent = clock();
+                let (end, have) = from.map_or((None, 0), |(first, len)| (Some(first), len));
+                let whole = want.next_multiple_of(BINANCE_MAX_LIMIT).min(MAX_BASE_BARS);
+                // A first read stops at its first page, which any small read on this
+                // kline can take at once and a failed walk does not lose. The rest
+                // comes as for any window too short.
+                let read = match end {
+                    None => whole.min(BINANCE_MAX_LIMIT),
+                    Some(_) => whole.saturating_sub(have),
+                };
+                let mut got = walk_klines(walks, read, end, deadline, &mut page)
+                    .inspect_err(|e| claim.end(Err(e.clone())))?;
+                let complete = got.len() < read;
+                let mut st = cache.lock();
+                let Some(first) = end else {
+                    if got.is_empty() {
+                        drop(st);
+                        claim.end(Err(NO_BARS.into()));
+                        return Err(NO_BARS.into());
+                    }
+                    got.shrink_to_fit();
+                    let bars = Arc::new(got);
+                    let mut held = HeldKlines {
+                        used: sent.mono,
+                        read: sent.mono,
+                        read_slot_end_ms: 0,
+                        bars: bars.clone(),
+                        complete,
+                    };
+                    held.stamp(sent, key.1);
+                    st.held.insert(key.clone(), held);
+                    evict(&mut st.held, &key, bounds, info);
+                    drop(st);
+                    claim.end(Ok(()));
+                    if complete || bars.len() >= want {
+                        return Ok(newest(&bars));
+                    }
+                    continue;
+                };
+                // Only if the window still starts where this read went on from: a
+                // refresh at the 20,000 cap may have dropped its oldest klines.
+                let same =
+                    |h: &&mut HeldKlines| h.bars.first().and_then(bar_open_ms) == Some(first);
+                if let Some(h) = st.held.get_mut(&key).filter(same) {
+                    got.reserve_exact(h.bars.len());
+                    got.extend_from_slice(&h.bars);
+                    got.shrink_to_fit();
+                    h.bars = Arc::new(got);
+                    h.complete = complete;
+                    h.used = sent.mono;
+                    evict(&mut st.held, &key, bounds, info);
+                }
+                drop(st);
+                claim.end(Ok(()));
+                // Serve it as any other reader would: its newest klines are the
+                // window's, which may need a refresh by now.
             }
         }
     }
-    let (mut bars, complete) = match joined {
-        Some(j) => j,
-        None => {
-            let bars = walk_klines(walks, want, None, deadline, page)?;
-            let complete = bars.len() < want;
-            (bars, complete)
-        }
-    };
-    if bars.len() > MAX_BASE_BARS {
-        bars.drain(..bars.len() - MAX_BASE_BARS);
-    }
-    let out = bars[bars.len().saturating_sub(want)..].to_vec();
-    let mut st = cache.lock();
-    // Another read of this key may have stored a longer window meanwhile: a shorter
-    // one lies on top of it, so the next long read need not walk again.
-    let kept_longer = st.held.get_mut(&key).is_some_and(|h| {
-        let longer = h.bars.len() > bars.len() && lay_over(&mut h.bars, &bars);
-        if longer {
-            h.used = now;
-            let over = h.bars.len().saturating_sub(MAX_BASE_BARS);
-            h.bars.drain(..over);
-        }
-        longer
-    });
-    if !kept_longer {
-        st.held.insert(
-            key,
-            HeldKlines {
-                used: now,
-                bars,
-                complete,
-            },
-        );
-    }
-    while st.held.len() > KLINE_CACHE_ENTRIES {
-        let oldest = st
-            .held
-            .iter()
-            .min_by_key(|(_, h)| h.used)
-            .map(|(k, _)| k.clone());
-        let Some(k) = oldest else { break };
-        st.held.remove(&k);
-    }
-    drop(st);
-    drop(claim);
-    Ok(out)
 }
 
 /// Bars of `iv` from ascending native bars that lie on its grid (24/7 markets,
@@ -542,6 +867,8 @@ pub(crate) struct BinanceClient {
     gate: &'static Gate,
     walks: Walks,
     klines: KlineCache,
+    pages: PageCache,
+    now: Box<dyn Fn() -> Now + Send + Sync>,
     send: BinanceSend,
 }
 
@@ -587,12 +914,29 @@ fn http_send(url: &str) -> Result<BinanceResponse, String> {
     })
 }
 
+#[cfg(test)]
+thread_local! {
+    /// What `binance()` answers on this thread, so a test of a whole tool call can
+    /// reach a pretend exchange.
+    static TEST_CLIENT: std::cell::Cell<Option<&'static BinanceClient>> =
+        const { std::cell::Cell::new(None) };
+}
+
 pub(crate) fn binance() -> &'static BinanceClient {
+    #[cfg(test)]
+    if let Some(client) = TEST_CLIENT.get() {
+        return client;
+    }
     static CLIENT: OnceLock<BinanceClient> = OnceLock::new();
     CLIENT.get_or_init(|| BinanceClient {
         gate: binance_gate::spot(),
         walks: Walks::default(),
         klines: KlineCache::default(),
+        pages: PageCache::default(),
+        now: Box::new(|| Now {
+            mono: Instant::now(),
+            wall_ms: now_ms(),
+        }),
         send: Box::new(http_send),
     })
 }
@@ -2126,8 +2470,11 @@ mod tests {
             cache,
             &Walks::default(),
             (key.to_string(), "1h"),
-            want,
-            now,
+            (want, None),
+            &move || Now {
+                mono: now,
+                wall_ms: last_ms,
+            },
             now + Duration::from_secs(60),
             |limit, end| {
                 calls += 1;
@@ -2163,11 +2510,13 @@ mod tests {
         };
         assert_eq!(key(&again), key(&full), "the same klines, oldest to newest");
 
-        // A smaller ask is served too, and a larger one reads it all again.
+        // A smaller ask is served as it is, and a larger one reads only what it lacks.
         let (small, calls) = cached_read(&cache, "BTCUSDT", 2_000, t0, later);
-        assert_eq!((small.len(), calls), (2_000, 1));
+        assert_eq!((small.len(), calls), (2_000, 0));
         let (big, calls) = cached_read(&cache, "BTCUSDT", want + 1_000, t0, later);
-        assert_eq!((big.len(), calls), (want + 1_000, 19));
+        assert_eq!((big.len(), calls), (want + 1_000, 1));
+        let full = paginate_backwards(want + 1_000, None, far(), fake_exchange(0, later.1));
+        assert_eq!(key(&big), key(&full.unwrap()));
     }
 
     #[test]
@@ -2178,16 +2527,20 @@ mod tests {
         cached_read(&cache, "BTCUSDT", 1_500, t0, (0, last));
 
         // A 7m chart's refresh is out while a 59m chart's walk finishes.
+        let later = t0 + KLINE_FRESH;
         let mut exchange = fake_exchange(0, last);
         let got = newest_klines(
             &cache,
             &Walks::default(),
             ("BTCUSDT".to_string(), "1h"),
-            1_500,
-            t0,
+            (1_500, None),
+            &move || Now {
+                mono: later,
+                wall_ms: last,
+            },
             far(),
             |limit, end| {
-                cached_read(&cache, "BTCUSDT", 5_000, t0, (0, last));
+                cached_read(&cache, "BTCUSDT", 5_000, later, (0, last));
                 exchange(limit, end)
             },
         )
@@ -2199,7 +2552,7 @@ mod tests {
         );
 
         // So the long chart's next read costs one page, not a walk.
-        let (long, calls) = cached_read(&cache, "BTCUSDT", 5_000, t0, (0, last + HOUR_MS));
+        let (long, calls) = cached_read(&cache, "BTCUSDT", 5_000, later, (0, last + HOUR_MS));
         assert_eq!((long.len(), calls), (5_000, 1));
         assert_eq!(bar_open_ms(long.last().unwrap()), Some(last + HOUR_MS));
         assert!(long
@@ -2237,12 +2590,12 @@ mod tests {
         let listed = (last - 1_499 * HOUR_MS, last);
         let (bars, calls) = cached_read(&cache, "NEW", 5_000, t0, listed);
         assert_eq!((bars.len(), calls), (1_500, 2));
-        let (bars, calls) = cached_read(&cache, "NEW", 5_000, t0, listed);
+        let (bars, calls) = cached_read(&cache, "NEW", 5_000, t0 + KLINE_FRESH, listed);
         assert_eq!((bars.len(), calls), (1_500, 1));
         // The least recently used entry goes when the cache is full.
         for i in 0..KLINE_CACHE_ENTRIES {
-            let at = t0 + Duration::from_secs(1 + i as u64);
-            cached_read(&cache, &format!("S{i}"), 1_500, at, (0, last));
+            let at = t0 + Duration::from_secs(2 + i as u64 / 10);
+            cached_read(&cache, &format!("S{i}"), 900, at, (0, last));
         }
         let st = cache.lock();
         assert_eq!(st.held.len(), KLINE_CACHE_ENTRIES);
@@ -2253,6 +2606,15 @@ mod tests {
     /// JSON, statuses and weight headers out, with a clock the test moves.
     struct FakeBinance {
         now_s: Arc<std::sync::atomic::AtomicI64>,
+        /// What the clock shows past `now_s`, for moves shorter than a second.
+        extra_ms: Arc<std::sync::atomic::AtomicI64>,
+        /// Open time of the first kline.
+        listed_ms: std::sync::atomic::AtomicI64,
+        /// How far REST's view of the market is behind this clock: trades reach it
+        /// late, and a negative lag is a host clock behind Binance's.
+        rest_lag_ms: std::sync::atomic::AtomicI64,
+        /// While true, a request that has been counted does not answer.
+        paused: (Mutex<bool>, Condvar),
         /// Its weight per minute, and the gate's. Small, so a test stays cheap.
         limit: u32,
         minute_weight: Mutex<HashMap<i64, u32>>,
@@ -2269,6 +2631,10 @@ mod tests {
         fn new(limit: u32, delay_ms: u64) -> Arc<Self> {
             Arc::new(Self {
                 now_s: Arc::new(std::sync::atomic::AtomicI64::new(1_700_000_040)),
+                extra_ms: Arc::default(),
+                listed_ms: Default::default(),
+                rest_lag_ms: Default::default(),
+                paused: Default::default(),
                 limit,
                 minute_weight: Mutex::default(),
                 requests: AtomicUsize::new(0),
@@ -2288,6 +2654,24 @@ mod tests {
             self.now_s.fetch_add(secs, Ordering::SeqCst);
         }
 
+        fn advance_ms(&self, ms: i64) {
+            self.extra_ms.fetch_add(ms, Ordering::SeqCst);
+        }
+
+        fn pause(&self, paused: bool) {
+            *self.paused.0.lock().unwrap() = paused;
+            self.paused.1.notify_all();
+        }
+
+        /// Until `n` requests have been counted, answered or not.
+        fn wait_for_requests(&self, n: usize) {
+            let give_up = Instant::now() + Duration::from_secs(10);
+            while self.requests() < n {
+                assert!(Instant::now() < give_up, "{} requests", self.requests());
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        }
+
         fn most_in_a_minute(&self) -> u32 {
             let weights = self.minute_weight.lock().unwrap();
             weights.values().copied().max().unwrap_or(0)
@@ -2298,9 +2682,23 @@ mod tests {
             let flying = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
             self.peak.fetch_max(flying, Ordering::SeqCst);
             std::thread::sleep(self.delay);
+            // Not for ever: a test that fails while paused must end, not hang.
+            drop(
+                self.paused
+                    .1
+                    .wait_timeout_while(
+                        self.paused.0.lock().unwrap(),
+                        Duration::from_secs(15),
+                        |paused| *paused,
+                    )
+                    .unwrap(),
+            );
             self.in_flight.fetch_sub(1, Ordering::SeqCst);
 
             let now_s = self.now_s.load(Ordering::SeqCst);
+            let now_ms = now_s * 1000 + self.extra_ms.load(Ordering::SeqCst)
+                - self.rest_lag_ms.load(Ordering::SeqCst);
+            let listed_ms = self.listed_ms.load(Ordering::SeqCst);
             let used = {
                 let mut weights = self.minute_weight.lock().unwrap();
                 let w = weights.entry(now_s.div_euclid(60)).or_insert(0);
@@ -2338,14 +2736,16 @@ mod tests {
             let end: i64 = param("endTime").map_or(i64::MAX, |e| e.parse().unwrap());
             // Binance's klines lie on the grid: weeks open on Monday, for example.
             let grid = Interval::parse(interval).unwrap();
-            let newest = grid.grid_start(end.min(now_s * 1000).div_euclid(1000)) * 1000;
+            let newest = grid.grid_start(end.min(now_ms).div_euclid(1000)) * 1000;
             let rows: Vec<String> = (0..limit)
                 .rev()
                 .map(|i| newest - i * step_ms)
-                .filter(|t| *t >= 0)
+                .filter(|t| *t >= listed_ms)
                 .map(|t| {
                     let p = 100.0 + (t / step_ms % 97) as f64;
-                    format!(r#"[{t},"{p}","{}","{}","{p}","1"]"#, p + 1.0, p - 1.0)
+                    // The forming kline moves with the clock, and stops as it closes.
+                    let close = p + (now_ms - t).min(step_ms) as f64 / 1000.0;
+                    format!(r#"[{t},"{p}","{}","{}","{close}","1"]"#, p + 1.0, p - 1.0)
                 })
                 .collect();
             reply(200, None, format!("[{}]", rows.join(",")))
@@ -2355,6 +2755,7 @@ mod tests {
     fn client_of(fake: &Arc<FakeBinance>) -> BinanceClient {
         let (wall, mono) = (fake.now_s.clone(), fake.now_s.clone());
         let (start, base) = (fake.now_s.load(Ordering::SeqCst), Instant::now());
+        let (seconds, extra) = (fake.now_s.clone(), fake.extra_ms.clone());
         let exchange = fake.clone();
         BinanceClient {
             gate: Box::leak(Box::new(Gate::with_clocks(
@@ -2366,6 +2767,14 @@ mod tests {
             ))),
             walks: Walks::default(),
             klines: KlineCache::default(),
+            pages: PageCache::default(),
+            now: Box::new(move || {
+                let ms = seconds.load(Ordering::SeqCst) * 1000 + extra.load(Ordering::SeqCst);
+                Now {
+                    mono: base + Duration::from_millis((ms - start * 1000).max(0) as u64),
+                    wall_ms: ms,
+                }
+            }),
             send: Box::new(move |url| exchange.answer(url)),
         }
     }
@@ -2376,6 +2785,11 @@ mod tests {
     }
 
     const REFUSED: &str = "Binance rate limit";
+
+    fn no_read_under_way(client: &BinanceClient) -> bool {
+        let st = client.klines.lock();
+        st.walking.is_empty() && st.refreshing.is_empty()
+    }
 
     #[test]
     fn failure_a_parallel_history_pages_stop_at_the_budget() {
@@ -2421,9 +2835,8 @@ mod tests {
         // klines, and each costs a full 18-request walk.
         let fake = FakeBinance::new(600, 0);
         let client = client_of(&fake);
-        let symbols: Vec<String> = (0..=KLINE_CACHE_ENTRIES)
-            .map(|i| format!("S{i}USDT"))
-            .collect();
+        let holds = KLINE_CACHE_BARS / 18_000;
+        let symbols: Vec<String> = (0..=holds).map(|i| format!("S{i}USDT")).collect();
         let (mut ok, mut refused) = (0, 0);
         for _round in 0..50 {
             for s in &symbols {
@@ -2448,15 +2861,16 @@ mod tests {
         // As many symbols as it holds cost one request a poll, after the first.
         let fake = FakeBinance::new(6_000, 0);
         let client = client_of(&fake);
-        for s in &symbols[..KLINE_CACHE_ENTRIES] {
+        for s in &symbols[..holds] {
             tail_59m(&client, s).unwrap();
         }
         let first = fake.requests();
-        assert_eq!(first, KLINE_CACHE_ENTRIES * 18);
-        for s in &symbols[..KLINE_CACHE_ENTRIES] {
+        assert_eq!(first, holds * 18);
+        fake.advance(2);
+        for s in &symbols[..holds] {
             tail_59m(&client, s).unwrap();
         }
-        assert_eq!(fake.requests(), first + KLINE_CACHE_ENTRIES);
+        assert_eq!(fake.requests(), first + holds);
     }
 
     #[test]
@@ -2465,7 +2879,10 @@ mod tests {
         let want = 303 * 59;
         let fake = FakeBinance::new(6_000, 0);
         let client = client_of(&fake);
-        let seed = |c: &BinanceClient| fetch_binance_via(c, "BTCUSDT", "1m", want, None);
+        let seed = |c: &BinanceClient| {
+            let now = (c.now)().mono;
+            fetch_binance_since(c, "BTCUSDT", "1m", want, None, Some(now))
+        };
         let first = seed(&client).unwrap();
         assert_eq!(fake.requests(), 18);
         for _ in 0..9 {
@@ -2508,9 +2925,14 @@ mod tests {
             assert!(!unknown && e.contains(REFUSED), "{e}");
             assert_eq!(fake.requests(), 5, "not one request during the cooldown");
 
-            // The refused reads left nothing behind: the next is a full, right one.
-            assert!(client.klines.lock().held.is_empty());
-            assert!(client.klines.lock().walking.is_empty());
+            // The refused reads left only the first page: the next is a full, right one.
+            let held = client.klines.lock();
+            assert_eq!(
+                held.held.values().map(|h| h.bars.len()).sum::<usize>(),
+                1_000
+            );
+            drop(held);
+            assert!(no_read_under_way(&client));
             fake.advance(120);
             let after = tail_59m(&client, "BTCUSDT").unwrap();
             assert_eq!(fake.requests(), 5 + 18);
@@ -2531,6 +2953,7 @@ mod tests {
         let fake = FakeBinance::new(6_000, 0);
         let client = client_of(&fake);
         let held = tail_59m(&client, "BTCUSDT").unwrap();
+        fake.advance(1);
         *fake.fail_at.lock().unwrap() = Some((19, 429, "30"));
         assert!(tail_59m(&client, "BTCUSDT").is_err());
         assert!(tail_59m(&client, "BTCUSDT")
@@ -2557,9 +2980,8 @@ mod tests {
             handles.into_iter().map(|h| h.join().unwrap()).collect()
         });
         assert!(results.iter().all(|r| r.is_ok()));
-        // One walk, and at most one refresh for each of the other five.
-        assert!(fake.requests() <= 18 + 5, "{} requests", fake.requests());
-        assert!(client.klines.lock().walking.is_empty());
+        assert_eq!(fake.requests(), 18, "one walk, and the clock has not moved");
+        assert!(no_read_under_way(&client));
     }
 
     #[test]
@@ -2581,6 +3003,1133 @@ mod tests {
         assert_eq!(one.len(), 1);
         drop(permits);
         assert!(walks.enter(far()).is_ok());
+    }
+
+    type Seen = (Vec<(String, (f64, f64, f64, f64, f64))>, bool);
+
+    fn seen(f: &Fetched) -> Seen {
+        let bars = f.data.bars.iter();
+        (
+            bars.map(|b| (b.date.clone(), ohlcv(b))).collect(),
+            f.has_more,
+        )
+    }
+
+    /// `fetch_binance_via` with no cache: every read straight to Binance, on a client
+    /// of its own, so what is compared against has shared nothing.
+    fn direct(
+        fake: &Arc<FakeBinance>,
+        symbol: &str,
+        interval: &str,
+        limit: usize,
+        end_time_ms: Option<i64>,
+    ) -> Seen {
+        let client = client_of(fake);
+        let iv = Interval::parse(interval).unwrap();
+        let (base, per_bar) = iv.binance_base();
+        let (want, end) = if per_bar > 1 {
+            resample_window(&iv, per_bar, limit, end_time_ms)
+        } else {
+            (limit, end_time_ms)
+        };
+        let native = paginate_backwards(want, end, far(), |n, e| {
+            fetch_binance_page(&client, &binance_klines_url(symbol, base, n, e))
+        })
+        .unwrap();
+        let (bars, has_more) = if per_bar > 1 {
+            resampled_bars(&native, &iv, limit, want)
+        } else {
+            let more = native.len() >= want;
+            (native, more)
+        };
+        let data = OhlcvData {
+            bars,
+            symbol: None,
+            interval: None,
+            session: None,
+        };
+        seen(&Fetched { data, has_more })
+    }
+
+    /// `n` concurrent reads of `f`, in order of `i`.
+    fn together<T: Send>(n: usize, f: impl Fn(usize) -> T + Sync) -> Vec<T> {
+        std::thread::scope(|s| {
+            let handles: Vec<_> = (0..n)
+                .map(|i| {
+                    let f = &f;
+                    s.spawn(move || f(i))
+                })
+                .collect();
+            handles.into_iter().map(|h| h.join().unwrap()).collect()
+        })
+    }
+
+    /// Until `n` callers besides the one reading wait on this refresh.
+    fn wait_for_joiners(client: &BinanceClient, key: &KlineKey, n: usize) {
+        let give_up = Instant::now() + Duration::from_secs(10);
+        loop {
+            let waiting = client
+                .klines
+                .lock()
+                .refreshing
+                .get(key)
+                .map_or(0, |f| Arc::strong_count(f).saturating_sub(2));
+            if waiting >= n {
+                return;
+            }
+            assert!(Instant::now() < give_up, "{waiting} joined");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    #[test]
+    fn a_hundred_reads_of_mixed_sizes_share_one_walk() {
+        let sizes = [50, 300, 800, 1_000, 1_500, 5_000, 17_877];
+        let fake = FakeBinance::new(600_000, 1);
+        let client = client_of(&fake);
+        let got = together(100, |i| {
+            fetch_binance_via(&client, "BTCUSDT", "1h", sizes[i % sizes.len()], None).unwrap()
+        });
+        assert_eq!(fake.requests(), 18, "as many pages as the largest needs");
+        assert!(no_read_under_way(&client));
+        for (i, f) in got.iter().enumerate() {
+            let size = sizes[i % sizes.len()];
+            assert_eq!(
+                seen(f),
+                direct(&fake, "BTCUSDT", "1h", size, None),
+                "{size}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_repeat_sends_nothing_until_the_window_ends_then_one_caller_does() {
+        let fake = FakeBinance::new(600_000, 1);
+        let client = client_of(&fake);
+        let read = |limit| fetch_binance_via(&client, "BTCUSDT", "1h", limit, None);
+        let first = read(800).unwrap();
+        assert_eq!(fake.requests(), 1);
+        for _ in 0..50 {
+            assert_eq!(seen(&read(800).unwrap()), seen(&first));
+        }
+        fake.advance_ms(999);
+        assert_eq!(seen(&read(300).unwrap()).0.len(), 300);
+        assert_eq!(fake.requests(), 1, "still inside the window");
+
+        fake.advance_ms(1);
+        let after = together(100, |_| read(800).unwrap());
+        assert_eq!(fake.requests(), 2, "one of a hundred refreshes");
+        assert_eq!(after.len(), 100);
+        // Whoever was served during the refresh has the old read, the rest the new.
+        let (old, new) = (seen(&first), direct(&fake, "BTCUSDT", "1h", 800, None));
+        assert!(after.iter().all(|f| seen(f) == old || seen(f) == new));
+        assert_eq!(seen(&read(800).unwrap()), new);
+
+        // One poller costs a request per window, however often it polls.
+        let before = fake.requests();
+        for _ in 0..20 {
+            fake.advance_ms(250);
+            read(800).unwrap();
+        }
+        assert_eq!(fake.requests() - before, 5);
+    }
+
+    #[test]
+    fn during_a_refresh_others_are_served_until_the_klines_are_too_old() {
+        let fake = FakeBinance::new(600_000, 0);
+        let client = client_of(&fake);
+        let read = || fetch_binance_via(&client, "BTCUSDT", "1h", 800, None).unwrap();
+        let held = seen(&read());
+        fake.advance(1);
+        fake.pause(true);
+        std::thread::scope(|s| {
+            let refreshing = s.spawn(read);
+            fake.wait_for_requests(2);
+            // Upstream has not answered, and these do not wait for it.
+            for _ in 0..20 {
+                assert_eq!(seen(&read()), held);
+            }
+            assert_eq!(fake.requests(), 2);
+
+            // Past the limit they wait. A refresh this slow still serves them: were it
+            // too old to take, each would refresh in turn until all timed out.
+            fake.advance(9);
+            let waiting = s.spawn(read);
+            wait_for_joiners(&client, &("BTCUSDT".to_string(), "1h"), 1);
+            assert!(!waiting.is_finished());
+            fake.pause(false);
+            let (a, b) = (refreshing.join().unwrap(), waiting.join().unwrap());
+            assert_eq!(seen(&a), seen(&b));
+            assert_ne!(seen(&a), held, "the forming kline moved");
+            assert_eq!(seen(&a), direct(&fake, "BTCUSDT", "1h", 800, None));
+        });
+        assert_eq!(
+            fake.requests(),
+            2 + 1,
+            "the refresh, and the direct read above"
+        );
+    }
+
+    #[test]
+    fn identical_scroll_back_pages_share_a_read_and_others_do_not() {
+        let fake = FakeBinance::new(600_000, 5);
+        let client = client_of(&fake);
+        let end = fake.now_s.load(Ordering::SeqCst) * 1000 - 500 * HOUR_MS;
+        let got = together(20, |_| {
+            fetch_binance_via(&client, "BTCUSDT", "1h", 800, Some(end)).unwrap()
+        });
+        assert_eq!(fake.requests(), 1, "twenty identical pages, one read");
+        for f in &got {
+            assert_eq!(seen(f), direct(&fake, "BTCUSDT", "1h", 800, Some(end)));
+        }
+        let fake = FakeBinance::new(600_000, 5);
+        let client = client_of(&fake);
+        let different: [(&str, &str, usize, i64); 4] = [
+            ("BTCUSDT", "1h", 800, end),
+            ("BTCUSDT", "1h", 800, end - HOUR_MS),
+            ("BTCUSDT", "1h", 700, end),
+            ("ETHUSDT", "1h", 800, end),
+        ];
+        together(4, |i| {
+            let (symbol, kline, limit, end) = different[i];
+            fetch_binance_via(&client, symbol, kline, limit, Some(end)).unwrap()
+        });
+        assert_eq!(fake.requests(), 4, "different pages read separately");
+        fetch_binance_via(&client, "BTCUSDT", "4h", 800, Some(end)).unwrap();
+        assert_eq!(fake.requests(), 5, "a different kline too");
+
+        // Case does not matter, and a kept page sends nothing until it expires.
+        fetch_binance_via(&client, "btcusdt", "1h", 800, Some(end)).unwrap();
+        assert_eq!(fake.requests(), 5);
+        fake.advance(PAGE_CACHE_TTL.as_secs() as i64);
+        fetch_binance_via(&client, "BTCUSDT", "1h", 800, Some(end)).unwrap();
+        assert_eq!(fake.requests(), 6);
+    }
+
+    #[test]
+    fn a_page_reaching_the_forming_kline_is_shared_but_not_kept() {
+        let fake = FakeBinance::new(600_000, 0);
+        let client = client_of(&fake);
+        let end = fake.now_s.load(Ordering::SeqCst) * 1000 + 2 * HOUR_MS;
+        let read = || fetch_binance_via(&client, "BTCUSDT", "1h", 100, Some(end)).unwrap();
+        read();
+        fake.advance(30);
+        let later = read();
+        assert_eq!(fake.requests(), 2);
+        assert_eq!(seen(&later), direct(&fake, "BTCUSDT", "1h", 100, Some(end)));
+        assert!(client.pages.state.lock().unwrap().held.is_empty());
+    }
+
+    #[test]
+    fn a_failed_page_fails_who_joined_it_and_stores_nothing() {
+        let fake = FakeBinance::new(600_000, 5);
+        let client = client_of(&fake);
+        let end = fake.now_s.load(Ordering::SeqCst) * 1000 - 500 * HOUR_MS;
+        *fake.fail_at.lock().unwrap() = Some((1, 500, "0"));
+        fake.pause(true);
+        let read = || fetch_binance_via(&client, "BTCUSDT", "1h", 800, Some(end));
+        let key: PageKey = ("BTCUSDT".to_string(), "1h", end, 800);
+        std::thread::scope(|s| {
+            let handles: Vec<_> = (0..5).map(|_| s.spawn(read)).collect();
+            let give_up = Instant::now() + Duration::from_secs(10);
+            loop {
+                let flying = client.pages.state.lock().unwrap().flying.get(&key).cloned();
+                if flying.is_some_and(|f| Arc::strong_count(&f) >= 7) {
+                    break;
+                }
+                assert!(Instant::now() < give_up);
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            fake.pause(false);
+            for h in handles {
+                let e = h.join().unwrap().err().unwrap();
+                assert!(e.contains("500"), "{e}");
+            }
+        });
+        assert_eq!(fake.requests(), 1);
+        assert!(client.pages.state.lock().unwrap().held.is_empty());
+        assert!(read().is_ok());
+        assert_eq!(fake.requests(), 2);
+    }
+
+    #[test]
+    fn a_kline_closing_in_the_window_gives_what_a_direct_read_gives() {
+        for (tf, limit) in [("1m", 800), ("7m", 60), ("59m", 302), ("1m", 3_000)] {
+            let fake = FakeBinance::new(600_000, 0);
+            let client = client_of(&fake);
+            let read = || fetch_binance_via(&client, "BTCUSDT", tf, limit, None).unwrap();
+            // Half a second before the minute ends.
+            fake.advance(59);
+            fake.advance_ms(500);
+            let before = read();
+            let requests = fake.requests();
+            fake.advance_ms(200);
+            assert_eq!(seen(&read()), seen(&before), "{tf}: inside the window");
+            assert_eq!(fake.requests(), requests);
+
+            // Past the boundary, 0.7 s after that read: not served from it.
+            fake.advance_ms(500);
+            let closed = read();
+            assert_eq!(fake.requests(), requests + 1, "{tf}");
+            assert_eq!(
+                seen(&closed),
+                direct(&fake, "BTCUSDT", tf, limit, None),
+                "{tf}"
+            );
+            let times: Vec<i64> = closed
+                .data
+                .bars
+                .iter()
+                .map(|b| bar_ts(b).unwrap())
+                .collect();
+            assert!(times.windows(2).all(|w| w[0] < w[1]), "{tf}: no duplicates");
+        }
+    }
+
+    #[test]
+    fn a_kline_closing_during_a_refresh_is_not_served_from_it() {
+        let fake = FakeBinance::new(600_000, 0);
+        let client = client_of(&fake);
+        let read = || fetch_binance_via(&client, "BTCUSDT", "1m", 800, None).unwrap();
+        fake.advance(58);
+        fake.advance_ms(500);
+        read();
+        fake.advance(1);
+        fake.pause(true);
+        std::thread::scope(|s| {
+            // Sent at 59.5 s, so its kline is the one about to close.
+            let refreshing = s.spawn(read);
+            fake.wait_for_requests(2);
+            fake.advance_ms(700);
+            let waiting = s.spawn(read);
+            wait_for_joiners(&client, &("BTCUSDT".to_string(), "1m"), 1);
+            fake.pause(false);
+            refreshing.join().unwrap();
+            let served = waiting.join().unwrap();
+            assert_eq!(seen(&served), direct(&fake, "BTCUSDT", "1m", 800, None));
+        });
+        assert_eq!(
+            fake.requests(),
+            3 + 1,
+            "its own refresh, and the direct read"
+        );
+    }
+
+    #[test]
+    fn a_failing_refresh_keeps_the_window_and_a_later_read_recovers() {
+        let fake = FakeBinance::new(600_000, 0);
+        let client = client_of(&fake);
+        let read = || fetch_binance_via(&client, "BTCUSDT", "1h", 800, None);
+        let held = seen(&read().unwrap());
+        fake.advance(1);
+        *fake.fail_at.lock().unwrap() = Some((2, 500, "0"));
+        let e = read().err().unwrap();
+        assert!(e.contains("500"), "{e}");
+        assert_eq!(client.klines.lock().held.len(), 1);
+        let key = ("BTCUSDT".to_string(), "1h");
+        assert_eq!(client.klines.lock().held[&key].bars.len(), 1_000);
+
+        // The next read is not told the klines are fresh: it refreshes, and is right.
+        let after = read().unwrap();
+        assert_eq!(fake.requests(), 3);
+        assert_ne!(seen(&after), held);
+        assert_eq!(seen(&after), direct(&fake, "BTCUSDT", "1h", 800, None));
+
+        // Those waiting on a refresh that fails share its error, and send nothing.
+        let fake = FakeBinance::new(600_000, 0);
+        let client = client_of(&fake);
+        let read = || fetch_binance_via(&client, "BTCUSDT", "1h", 800, None);
+        read().unwrap();
+        fake.advance(5);
+        *fake.fail_at.lock().unwrap() = Some((2, 500, "0"));
+        fake.pause(true);
+        std::thread::scope(|s| {
+            let handles: Vec<_> = (0..8).map(|_| s.spawn(read)).collect();
+            wait_for_joiners(&client, &key, 7);
+            fake.pause(false);
+            for h in handles {
+                let e = h.join().unwrap().err().unwrap();
+                assert!(e.contains("500"), "{e}");
+            }
+        });
+        assert_eq!(fake.requests(), 2, "eight callers, one failure");
+        assert!(read().is_ok());
+    }
+
+    #[test]
+    fn a_failing_first_read_stores_nothing_and_shares_its_error() {
+        let fake = FakeBinance::new(600_000, 0);
+        let client = client_of(&fake);
+        let read = || fetch_binance_via(&client, "BTCUSDT", "1h", 800, None);
+        *fake.fail_at.lock().unwrap() = Some((1, 500, "0"));
+        fake.pause(true);
+        let key = ("BTCUSDT".to_string(), "1h");
+        std::thread::scope(|s| {
+            let handles: Vec<_> = (0..6).map(|_| s.spawn(read)).collect();
+            let give_up = Instant::now() + Duration::from_secs(10);
+            loop {
+                let flying = client.klines.lock().walking.get(&key).cloned();
+                if flying.is_some_and(|f| Arc::strong_count(&f) >= 8) {
+                    break;
+                }
+                assert!(Instant::now() < give_up);
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            fake.pause(false);
+            for h in handles {
+                assert!(h.join().unwrap().err().unwrap().contains("500"));
+            }
+        });
+        assert_eq!(fake.requests(), 1);
+        assert!(client.klines.lock().held.is_empty());
+        assert_eq!(seen(&read().unwrap()).0.len(), 800);
+    }
+
+    #[test]
+    fn a_panic_in_the_read_frees_who_waits_for_it() {
+        let cache = KlineCache::default();
+        let walks = Walks::default();
+        let key: KlineKey = ("BTCUSDT".to_string(), "1h");
+        let t0 = Instant::now();
+        let clock = move || Now {
+            mono: t0,
+            wall_ms: 1_700_000_000_000,
+        };
+        let (started, panic_now) = (std::sync::Barrier::new(2), std::sync::Barrier::new(2));
+        std::thread::scope(|s| {
+            let reader = s.spawn(|| {
+                newest_klines(
+                    &cache,
+                    &walks,
+                    key.clone(),
+                    (10, None),
+                    &clock,
+                    far(),
+                    |_, _| {
+                        started.wait();
+                        panic_now.wait();
+                        panic!("the read panics");
+                    },
+                )
+            });
+            started.wait();
+            let waiter = s.spawn(|| {
+                newest_klines(
+                    &cache,
+                    &walks,
+                    key.clone(),
+                    (10, None),
+                    &clock,
+                    far(),
+                    |_, _| panic!("a joiner sends nothing"),
+                )
+            });
+            let give_up = Instant::now() + Duration::from_secs(10);
+            loop {
+                let flying = cache.lock().walking.get(&key).cloned();
+                if flying.is_some_and(|f| Arc::strong_count(&f) >= 4) {
+                    break;
+                }
+                assert!(Instant::now() < give_up);
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            panic_now.wait();
+            assert!(reader.join().is_err());
+            assert_eq!(waiter.join().unwrap().err().unwrap(), READ_ABORTED);
+        });
+        // Nothing is stuck: the next read takes the turn.
+        let bars = newest_klines(
+            &cache,
+            &walks,
+            key,
+            (5, None),
+            &clock,
+            far(),
+            |limit, end| fake_exchange(0, 1_700_000_000_000)(limit, end),
+        );
+        assert_eq!(bars.unwrap().len(), 5);
+    }
+
+    #[test]
+    fn nobody_waits_past_the_deadline_for_a_read_that_hangs() {
+        let cache = KlineCache::default();
+        let walks = Walks::default();
+        let key: KlineKey = ("BTCUSDT".to_string(), "1h");
+        let t0 = Instant::now();
+        let clock = move || Now {
+            mono: t0,
+            wall_ms: 1_700_000_000_000,
+        };
+        let (started, finish) = (std::sync::Barrier::new(2), std::sync::Barrier::new(2));
+        std::thread::scope(|s| {
+            let reader = s.spawn(|| {
+                newest_klines(
+                    &cache,
+                    &walks,
+                    key.clone(),
+                    (10, None),
+                    &clock,
+                    far(),
+                    |limit, end| {
+                        started.wait();
+                        finish.wait();
+                        fake_exchange(0, 1_700_000_000_000)(limit, end)
+                    },
+                )
+            });
+            started.wait();
+            let soon = Instant::now() + Duration::from_millis(30);
+            let e = newest_klines(
+                &cache,
+                &walks,
+                key.clone(),
+                (10, None),
+                &clock,
+                soon,
+                |_, _| panic!("a joiner sends nothing"),
+            );
+            assert_eq!(e.err().unwrap(), BUSY);
+            finish.wait();
+            assert_eq!(reader.join().unwrap().unwrap().len(), 10);
+        });
+
+        // The same for a page.
+        let pages = PageCache::default();
+        let key: PageKey = ("BTCUSDT".to_string(), "1h", 1_000_000, 10);
+        let (started, finish) = (std::sync::Barrier::new(2), std::sync::Barrier::new(2));
+        std::thread::scope(|s| {
+            let reader = s.spawn(|| {
+                shared_page(&pages, key.clone(), &clock, far(), || {
+                    started.wait();
+                    finish.wait();
+                    Ok(vec![bar_at(0, 1.0)])
+                })
+            });
+            started.wait();
+            let soon = Instant::now() + Duration::from_millis(30);
+            let e = shared_page(&pages, key.clone(), &clock, soon, || {
+                panic!("a joiner sends nothing")
+            });
+            assert_eq!(e.err().unwrap(), BUSY);
+            finish.wait();
+            assert_eq!(reader.join().unwrap().unwrap().len(), 1);
+        });
+    }
+
+    #[test]
+    fn eviction_holds_the_memory_bound() {
+        // What the stated bound in bytes rests on, with 32 for the date's allocation.
+        assert_eq!(std::mem::size_of::<Bar>(), 64);
+        let last = 1_700_000_000_000 / HOUR_MS * HOUR_MS;
+        let cache = KlineCache::default();
+        let t0 = Instant::now();
+        let at = |i: usize| t0 + Duration::from_millis(i as u64);
+        // By klines: 20,000 each would hold 12.
+        for i in 0..40 {
+            cached_read(&cache, &format!("L{i}"), 20_000, at(i), (0, last));
+            let st = cache.lock();
+            let total: usize = st.held.values().map(|h| h.bars.len()).sum();
+            assert!(total <= KLINE_CACHE_BARS, "{total}");
+            assert!(
+                st.held.contains_key(&(format!("L{i}"), "1h")),
+                "kept the new"
+            );
+        }
+        {
+            let st = cache.lock();
+            assert_eq!(st.held.len(), KLINE_CACHE_BARS / 20_000);
+            assert!(
+                !st.held.contains_key(&("L0".to_string(), "1h")),
+                "oldest gone"
+            );
+            assert!(st.held.contains_key(&("L39".to_string(), "1h")));
+        }
+        // A read of a held window counts as use.
+        cached_read(&cache, "L28", 10, at(100), (0, last));
+        cached_read(&cache, "X", 20_000, at(101), (0, last));
+        assert!(cache.lock().held.contains_key(&("L28".to_string(), "1h")));
+        assert!(!cache.lock().held.contains_key(&("L29".to_string(), "1h")));
+
+        // A refresh adds no slack, or the bound in bars would not bound the bytes,
+        // and a window stays at its cap.
+        let t1 = at(200) + KLINE_FRESH;
+        cached_read(&cache, "X", 20_000, t1, (0, last + HOUR_MS));
+        let st = cache.lock();
+        let held = &st.held[&("X".to_string(), "1h")];
+        assert_eq!(held.bars.len(), MAX_BASE_BARS);
+        assert!(held.bars.capacity() <= MAX_BASE_BARS + KLINE_REFRESH);
+        drop(st);
+
+        // Pages, by entries and by klines.
+        let pages = PageCache::default();
+        let clock = move || Now {
+            mono: t0,
+            wall_ms: last,
+        };
+        let page = |n: usize| (0..n).map(|i| bar_at(i as i64, 1.0)).collect::<Vec<_>>();
+        for i in 0..200 {
+            let key = ("A".to_string(), "1h", i, 10);
+            shared_page(&pages, key, &clock, far(), || Ok(page(10))).unwrap();
+        }
+        assert_eq!(pages.state.lock().unwrap().held.len(), PAGE_CACHE_ENTRIES);
+        for i in 0..10 {
+            let key = ("B".to_string(), "1h", i, 20_000);
+            shared_page(&pages, key, &clock, far(), || Ok(page(20_000))).unwrap();
+            let st = pages.state.lock().unwrap();
+            let total: usize = st.held.values().map(|p| p.bars.len()).sum();
+            assert!(total <= PAGE_CACHE_BARS, "{total}");
+        }
+    }
+
+    #[test]
+    fn a_burst_does_not_starve_a_small_blocking_pool() {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .max_blocking_threads(4)
+            .enable_time()
+            .build()
+            .unwrap();
+        let fake = FakeBinance::new(600_000, 1);
+        let client: &'static BinanceClient = Box::leak(Box::new(client_of(&fake)));
+        let burst = || async {
+            let reads: Vec<_> = (0..200)
+                .map(|_| {
+                    rt.spawn_blocking(move || fetch_binance_via(client, "BTCUSDT", "1h", 800, None))
+                })
+                .collect();
+            for read in reads {
+                read.await.unwrap().unwrap();
+            }
+        };
+        // A cold burst, more callers than threads: the one reading already has a thread.
+        rt.block_on(burst());
+        assert_eq!(fake.requests(), 1);
+
+        // While a refresh hangs, on a thread of its own, the rest of the pool still
+        // serves a hot chart.
+        fake.advance(1);
+        fake.pause(true);
+        let refresh =
+            rt.spawn_blocking(move || fetch_binance_via(client, "BTCUSDT", "1h", 800, None));
+        fake.wait_for_requests(2);
+        let served =
+            rt.block_on(async { tokio::time::timeout(Duration::from_secs(5), burst()).await });
+        assert!(served.is_ok(), "they waited for the refresh");
+        assert_eq!(fake.requests(), 2);
+        fake.pause(false);
+        rt.block_on(refresh).unwrap().unwrap();
+    }
+
+    #[test]
+    fn has_more_and_bars_equal_a_direct_read_in_any_order() {
+        let sizes = [1, 5, 500, 999, 1_000, 1_001, 1_500, 2_000, 6_000];
+        let histories = [1, 5, 999, 1_000, 1_001, 1_500, 2_000, 2_500, 5_000];
+        for klines in histories {
+            for tf in ["1h", "7h", "2d"] {
+                for reversed in [false, true] {
+                    let fake = FakeBinance::new(6_000_000, 0);
+                    let client = client_of(&fake);
+                    let step = Interval::parse(tf).unwrap().binance_base();
+                    let step_ms = data::interval_secs(step.0).unwrap() * 1000;
+                    let now = fake.now_s.load(Ordering::SeqCst) * 1000;
+                    let newest = now.div_euclid(step_ms) * step_ms;
+                    let listed = newest - (klines - 1) * step_ms;
+                    fake.listed_ms.store(listed, Ordering::SeqCst);
+                    let mut order = sizes.to_vec();
+                    if reversed {
+                        order.reverse();
+                    }
+                    for limit in order {
+                        let what = format!("{tf}, {klines} klines, {limit}, reversed {reversed}");
+                        let got = fetch_binance_via(&client, "NEWUSDT", tf, limit, None);
+                        let want = direct(&fake, "NEWUSDT", tf, limit, None);
+                        match got {
+                            Ok(f) => assert_eq!(seen(&f), want, "{what}"),
+                            // Too few klines for one whole bar, as for a direct read.
+                            Err(e) => {
+                                assert_eq!(e, NO_BARS, "{what}");
+                                assert!(want.0.is_empty(), "{what}");
+                            }
+                        }
+                    }
+                    // A new kline opens: the window of a short history grows by it.
+                    fake.advance(step_ms / 1000);
+                    let got = fetch_binance_via(&client, "NEWUSDT", tf, 1_000, None);
+                    let want = direct(&fake, "NEWUSDT", tf, 1_000, None);
+                    assert_eq!(got.map(|f| seen(&f)).ok(), Some(want), "{tf} {klines}");
+                    // And pages that run out of history stop as a direct read does.
+                    let end = listed + 100 * step_ms;
+                    for limit in [50, 100, 101, 2_000] {
+                        let got = fetch_binance_via(&client, "NEWUSDT", tf, limit, Some(end));
+                        let want = direct(&fake, "NEWUSDT", tf, limit, Some(end));
+                        assert_eq!(seen(&got.unwrap()), want, "{tf} {klines} page {limit}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn symbols_and_klines_never_mix_and_case_does_not_matter() {
+        let fake = FakeBinance::new(600_000, 0);
+        let client = client_of(&fake);
+        let read = |symbol: &str, tf: &str| fetch_binance_via(&client, symbol, tf, 100, None);
+        let btc = seen(&read("BTCUSDT", "1h").unwrap());
+        assert_eq!(seen(&read("btcusdt", "1h").unwrap()), btc);
+        assert_eq!(seen(&read("BtcUsdt", "1h").unwrap()), btc);
+        assert_eq!(fake.requests(), 1, "one entry, whatever the case");
+        read("ETHUSDT", "1h").unwrap();
+        read("BTCUSDT", "4h").unwrap();
+        read("BTCUSDT", "1M").unwrap();
+        read("BTCUSDT", "1m").unwrap();
+        assert_eq!(fake.requests(), 5, "each its own entry");
+        assert_ne!(seen(&read("BTCUSDT", "4h").unwrap()), btc);
+        // A custom interval shares its base's window with the native chart.
+        read("BTCUSDT", "7h").unwrap();
+        assert_eq!(fake.requests(), 5);
+    }
+
+    /// One whole tool call, with the fake behind `binance()` on this thread.
+    fn chart_call(client: &'static BinanceClient, args: serde_json::Value) -> serde_json::Value {
+        TEST_CLIENT.set(Some(client));
+        let resp =
+            crate::mcp::generate_chart(Some(serde_json::json!(1)), &args, DataSource::Live, None);
+        let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+        serde_json::from_str(text).unwrap_or_else(|e| panic!("{e}: {text}"))
+    }
+
+    #[test]
+    fn whole_chart_loads_share_one_request_and_a_tail_equals_a_cold_read() {
+        let fake = FakeBinance::new(600_000, 1);
+        let client: &'static BinanceClient = Box::leak(Box::new(client_of(&fake)));
+        let args = |bars: u64, warmup: u64, ticker: &str| {
+            serde_json::json!({
+                "ticker": ticker, "timeframe": "1h", "bars": bars, "warmup": warmup,
+                "indicators": ["rsi", "donchian", "macd"], "format": "series"
+            })
+        };
+        let loads = together(100, |_| chart_call(client, args(500, 300, "BTCUSDT")));
+        let measured = fake.requests();
+        eprintln!("100 concurrent chart loads through generate_chart: {measured} request(s)");
+        assert_eq!(measured, 1);
+        assert!(loads.iter().all(|p| p == &loads[0]));
+        assert_eq!(loads[0]["bars"].as_array().unwrap().len(), 500);
+
+        // A 600-bar warmup, as `chart_patterns` asks: a tail off the shared window
+        // equals the same read on a server that has read nothing yet.
+        let hot = chart_call(client, args(2, 600, "BTCUSDT"));
+        assert_eq!(fake.requests(), measured, "the window serves the tail");
+        let cold_client: &'static BinanceClient = Box::leak(Box::new(client_of(&fake)));
+        let cold = chart_call(cold_client, args(2, 600, "BTCUSDT"));
+        assert_eq!(hot, cold);
+        // And its bars and rolling values are those of a full load of the same moment.
+        let full = chart_call(client, args(500, 600, "BTCUSDT"));
+        let tail_of = |p: &serde_json::Value, path: &[&str]| {
+            let mut v = p;
+            for key in path {
+                v = &v[*key];
+            }
+            let all = v.as_array().unwrap();
+            all[all.len() - 2..].to_vec()
+        };
+        assert_eq!(tail_of(&hot, &["bars"]), tail_of(&full, &["bars"]));
+        let rolling = |p: &serde_json::Value| {
+            let lines = &p["indicators"]["donchian"]["lines"][0];
+            let values = lines["values"].as_array().unwrap();
+            values[values.len() - 2..].to_vec()
+        };
+        assert!(rolling(&hot).iter().all(|v| v.is_number()));
+        assert_eq!(rolling(&hot), rolling(&full));
+    }
+
+    #[test]
+    fn a_finished_read_leaves_nothing_behind_but_what_the_cache_keeps() {
+        let t0 = Instant::now();
+        let clock = move || Now {
+            mono: t0,
+            wall_ms: 1_700_000_000_000,
+        };
+        let pages = PageCache::default();
+        let key = |end: i64| -> PageKey { ("A".to_string(), "1m", end, 10) };
+        let page = || Ok((0..10).map(|i| bar_at(i, 1.0)).collect::<Vec<_>>());
+
+        shared_page(&pages, key(1), &clock, far(), page).unwrap();
+        {
+            let st = pages.state.lock().unwrap();
+            assert!(st.flying.is_empty());
+            // Only the cache holds it, so evicting it frees it.
+            assert_eq!(Arc::strong_count(&st.held[&key(1)].bars), 1);
+        }
+        // Not kept: reaches the forming kline, by this clock.
+        let forming = || Ok(vec![bar_at(1_700_000_000, 1.0)]);
+        shared_page(&pages, key(2), &clock, far(), forming).unwrap();
+        let failing = || Err("no".to_string());
+        shared_page(&pages, key(3), &clock, far(), failing).unwrap_err();
+        let panicked = std::thread::scope(|s| {
+            s.spawn(|| {
+                shared_page(
+                    &pages,
+                    key(4),
+                    &clock,
+                    far(),
+                    || -> Result<Vec<Bar>, String> { panic!("the read panics") },
+                )
+            })
+            .join()
+            .is_err()
+        });
+        assert!(panicked);
+        let st = pages.state.lock().unwrap();
+        assert!(st.flying.is_empty());
+        assert_eq!(st.held.len(), 1);
+    }
+
+    #[test]
+    fn a_page_closed_only_just_now_is_not_kept() {
+        for lag in [0, 200] {
+            let fake = FakeBinance::new(600_000, 0);
+            let client = client_of(&fake);
+            fake.rest_lag_ms.store(lag, Ordering::SeqCst);
+            // 100 ms after a minute closes, a page ending at that close.
+            fake.advance(60);
+            fake.advance_ms(100);
+            let close = fake.now_s.load(Ordering::SeqCst) * 1000;
+            let read = || fetch_binance_via(&client, "BTCUSDT", "1m", 100, Some(close)).unwrap();
+            read();
+            read();
+            assert_eq!(fake.requests(), 2, "not kept yet");
+
+            fake.advance_ms(PAGE_SETTLE_MS - 100);
+            let settled = read();
+            assert_eq!(fake.requests(), 3);
+            assert_eq!(
+                seen(&settled),
+                direct(&fake, "BTCUSDT", "1m", 100, Some(close))
+            );
+            let before = fake.requests();
+            assert_eq!(seen(&read()), seen(&settled));
+            assert_eq!(fake.requests(), before, "kept from here");
+        }
+    }
+
+    /// `seed` of a live push group, with the fake behind `binance()` on this thread.
+    fn seed_of(client: &'static BinanceClient, limit: usize) -> OhlcvData {
+        use crate::chart_push::{BinanceSource, PushSource};
+        TEST_CLIENT.set(Some(client));
+        BinanceSource.seed("BTCUSDT", "1m", limit).unwrap()
+    }
+
+    #[test]
+    fn a_seed_gets_what_a_direct_read_gets_for_any_lag_and_clock() {
+        // Ms past the true close of a read by a poll, then by a seed, and how far
+        // REST is behind this host's clock: 200 ms, or the host 100 ms behind Binance.
+        for (poll, seed, lag) in [(20, 500, 200), (-150, -60, -100)] {
+            let fake = FakeBinance::new(600_000, 0);
+            let client: &'static BinanceClient = Box::leak(Box::new(client_of(&fake)));
+            fake.rest_lag_ms.store(lag, Ordering::SeqCst);
+            fake.advance(60);
+            fake.advance_ms(poll);
+            let polled = fetch_binance_via(client, "BTCUSDT", "1m", 800, None).unwrap();
+            assert_eq!(fake.requests(), 1);
+            fake.advance_ms(seed - poll);
+
+            // A poll may stay on that read, short of the closed kline's last trades.
+            let polled_again = fetch_binance_via(client, "BTCUSDT", "1m", 800, None).unwrap();
+            assert_eq!(fake.requests(), 1, "{lag}: a poll keeps the cache");
+            assert_eq!(seen(&polled_again), seen(&polled));
+
+            let data = seed_of(client, 800);
+            assert_eq!(fake.requests(), 2, "{lag}: a seed reads");
+            let bars: Vec<_> = data
+                .bars
+                .iter()
+                .map(|b| (b.date.clone(), ohlcv(b)))
+                .collect();
+            let want = direct(&fake, "BTCUSDT", "1m", 800, None).0;
+            assert_eq!(bars, want, "{lag}");
+            assert_ne!(bars, seen(&polled).0, "{lag}: the poll's read was short");
+        }
+    }
+
+    #[test]
+    fn a_seed_does_not_take_a_refresh_sent_before_it_asked() {
+        let fake = FakeBinance::new(600_000, 0);
+        let client: &'static BinanceClient = Box::leak(Box::new(client_of(&fake)));
+        let read = || fetch_binance_via(client, "BTCUSDT", "1m", 800, None).unwrap();
+        read();
+        fake.advance_ms(5_000);
+        fake.pause(true);
+        std::thread::scope(|s| {
+            let refreshing = s.spawn(read);
+            fake.wait_for_requests(2);
+            fake.advance_ms(10);
+            let seeding = s.spawn(|| seed_of(client, 800));
+            wait_for_joiners(client, &("BTCUSDT".to_string(), "1m"), 1);
+            fake.pause(false);
+            refreshing.join().unwrap();
+            seeding.join().unwrap();
+        });
+        assert_eq!(fake.requests(), 3, "the refresh, and one of its own");
+    }
+
+    #[test]
+    fn seeds_asking_together_share_a_read() {
+        let fake = FakeBinance::new(600_000, 1);
+        let client: &'static BinanceClient = Box::leak(Box::new(client_of(&fake)));
+        fetch_binance_via(client, "BTCUSDT", "1m", 800, None).unwrap();
+        fake.advance(5);
+        together(20, |_| seed_of(client, 800));
+        assert_eq!(
+            fake.requests(),
+            2,
+            "the clock has not moved since they asked"
+        );
+    }
+
+    #[test]
+    fn a_small_read_does_not_wait_for_a_long_first_read() {
+        let cache = KlineCache::default();
+        let walks = Walks::default();
+        let key: KlineKey = ("BTCUSDT".to_string(), "1h");
+        let last = 1_700_000_000_000 / HOUR_MS * HOUR_MS;
+        let t0 = Instant::now();
+        let clock = move || Now {
+            mono: t0,
+            wall_ms: last,
+        };
+        let no_request = |_: usize, _: Option<i64>| -> Result<Vec<Bar>, String> {
+            panic!("served from the first page")
+        };
+        let (first_page_in, finish) = (std::sync::Barrier::new(2), std::sync::Barrier::new(2));
+        std::thread::scope(|s| {
+            let long = s.spawn(|| {
+                let mut pages = 0;
+                let mut exchange = fake_exchange(0, last);
+                newest_klines(
+                    &cache,
+                    &walks,
+                    key.clone(),
+                    (5_000, None),
+                    &clock,
+                    far(),
+                    |limit, end| {
+                        pages += 1;
+                        if pages == 2 {
+                            first_page_in.wait();
+                            finish.wait();
+                            return Err("the walk fails".to_string());
+                        }
+                        exchange(limit, end)
+                    },
+                )
+            });
+            first_page_in.wait();
+            let small = newest_klines(
+                &cache,
+                &walks,
+                key.clone(),
+                (800, None),
+                &clock,
+                Instant::now() + Duration::from_secs(5),
+                no_request,
+            );
+            finish.wait();
+            assert_eq!(small.unwrap().len(), 800);
+            assert_eq!(long.join().unwrap().err().unwrap(), "the walk fails");
+        });
+        // A failed walk kept its first page, and the next reads on from there.
+        let small = newest_klines(
+            &cache,
+            &walks,
+            key.clone(),
+            (800, None),
+            &clock,
+            far(),
+            no_request,
+        );
+        assert_eq!(small.unwrap().len(), 800);
+        let mut calls = 0;
+        let mut exchange = fake_exchange(0, last);
+        let long = newest_klines(
+            &cache,
+            &walks,
+            key,
+            (5_000, None),
+            &clock,
+            far(),
+            |limit, end| {
+                calls += 1;
+                exchange(limit, end)
+            },
+        )
+        .unwrap();
+        assert_eq!((long.len(), calls), (5_000, 4));
+        let full = paginate_backwards(5_000, None, far(), fake_exchange(0, last)).unwrap();
+        let times = |b: &[Bar]| b.iter().map(bar_ts).collect::<Vec<_>>();
+        assert_eq!(times(&long), times(&full));
+    }
+
+    #[test]
+    fn a_refresh_overlaps_after_the_whole_lifetime_on_any_kline() {
+        for secs in [1, 5, 60, 3_600, 86_400] {
+            let reach = refresh_for(secs) as i64 * secs;
+            assert!(reach > KLINE_CACHE_TTL.as_secs() as i64, "{secs}");
+            assert!(refresh_for(secs) <= BINANCE_MAX_LIMIT);
+        }
+        assert_eq!(refresh_for(1), 130);
+        assert_eq!(kline_refresh("1m"), KLINE_REFRESH);
+        assert_eq!(kline_refresh("1h"), KLINE_REFRESH);
+    }
+
+    #[test]
+    fn a_refresh_that_only_touches_the_window_reads_it_all_again() {
+        // The window's newest kline was forming when read. A refresh starting on the
+        // kline after it does not overlap it, so that kline's last trades are missing.
+        let last = 1_700_000_000_000 / HOUR_MS * HOUR_MS;
+        let cache = KlineCache::default();
+        let walks = Walks::default();
+        let key: KlineKey = ("BTCUSDT".to_string(), "1h");
+        let t0 = Instant::now();
+        let at = move |mono, wall_ms| move || Now { mono, wall_ms };
+        let mut exchange = fake_exchange(0, last);
+        newest_klines(
+            &cache,
+            &walks,
+            key.clone(),
+            (800, None),
+            &at(t0, last),
+            far(),
+            |limit, end| {
+                let mut bars = exchange(limit, end)?;
+                if end.is_none() {
+                    bars.last_mut().unwrap().close = -1.0;
+                }
+                Ok(bars)
+            },
+        )
+        .unwrap();
+
+        let later = last + KLINE_REFRESH as i64 * HOUR_MS;
+        let clock = at(t0 + KLINE_FRESH, later);
+        let mut calls = 0;
+        let mut exchange = fake_exchange(0, later);
+        let got = newest_klines(
+            &cache,
+            &walks,
+            key,
+            (800, None),
+            &clock,
+            far(),
+            |limit, end| {
+                calls += 1;
+                let bars = exchange(limit, end)?;
+                if calls == 1 {
+                    assert_eq!(bar_open_ms(&bars[0]), Some(last + HOUR_MS), "only touches");
+                }
+                Ok(bars)
+            },
+        )
+        .unwrap();
+        assert_eq!(calls, 2, "the refresh, then a page of the first read");
+        let full = paginate_backwards(800, None, far(), fake_exchange(0, later)).unwrap();
+        let key = |b: &[Bar]| {
+            b.iter()
+                .map(|x| (x.date.clone(), ohlcv(x)))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(key(&got), key(&full));
+    }
+
+    #[test]
+    fn an_extension_is_not_laid_on_a_window_that_changed() {
+        let last = 1_700_000_000_000 / HOUR_MS * HOUR_MS;
+        let cache = KlineCache::default();
+        let walks = Walks::default();
+        let key: KlineKey = ("BTCUSDT".to_string(), "1h");
+        let t0 = Instant::now();
+        let clock = move || Now {
+            mono: t0,
+            wall_ms: last,
+        };
+        cached_read(&cache, "BTCUSDT", 1_000, t0, (0, last));
+
+        // While the extension is out, the window loses its oldest klines, as a refresh
+        // at the 20,000 cap does.
+        let mut exchange = fake_exchange(0, last);
+        let mut calls = 0;
+        let got = newest_klines(
+            &cache,
+            &walks,
+            key,
+            (1_500, None),
+            &clock,
+            far(),
+            |limit, end| {
+                calls += 1;
+                if calls == 1 {
+                    let mut st = cache.lock();
+                    let h = st.held.values_mut().next().unwrap();
+                    Arc::make_mut(&mut h.bars).drain(..5);
+                }
+                exchange(limit, end)
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            calls, 3,
+            "that read is dropped, and the next, 1005 klines, goes on from the new end"
+        );
+        let full = paginate_backwards(1_500, None, far(), fake_exchange(0, last)).unwrap();
+        let times = |b: &[Bar]| b.iter().map(bar_ts).collect::<Vec<_>>();
+        assert_eq!(times(&got), times(&full), "no gap");
+    }
+
+    #[test]
+    fn a_refresh_landing_on_a_newer_window_leaves_it() {
+        let last = 1_700_000_000_000 / HOUR_MS * HOUR_MS;
+        let cache = KlineCache::default();
+        let walks = Walks::default();
+        let key: KlineKey = ("BTCUSDT".to_string(), "1h");
+        let t0 = Instant::now();
+        let offset = std::sync::atomic::AtomicU64::new(1);
+        let clock = || Now {
+            mono: t0 + Duration::from_secs(offset.load(Ordering::SeqCst)),
+            wall_ms: last,
+        };
+        cached_read(&cache, "BTCUSDT", 800, t0, (0, last));
+
+        // While this refresh is out, the window goes and is read anew, a kline on.
+        let got = newest_klines(
+            &cache,
+            &walks,
+            key.clone(),
+            (800, None),
+            &clock,
+            far(),
+            |limit, end| {
+                cache.lock().held.clear();
+                offset.store(5, Ordering::SeqCst);
+                cached_read(
+                    &cache,
+                    "BTCUSDT",
+                    800,
+                    t0 + Duration::from_secs(5),
+                    (0, last + HOUR_MS),
+                );
+                fake_exchange(0, last)(limit, end)
+            },
+        )
+        .unwrap();
+        let newest = bar_open_ms(got.last().unwrap());
+        assert_eq!(
+            newest,
+            Some(last + HOUR_MS),
+            "it answers from the newer window"
+        );
+        let st = cache.lock();
+        let held = &st.held[&key];
+        assert_eq!(bar_open_ms(held.bars.last().unwrap()), Some(last + HOUR_MS));
+        assert_eq!(held.read, t0 + Duration::from_secs(5));
     }
 
     #[test]

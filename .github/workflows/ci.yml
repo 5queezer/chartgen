@@ -148,6 +148,28 @@ jobs:
           name: chartgen-linux-x86_64
           path: target/release/chartgen
 
+  # The macOS release binaries are only built on a tag: this finds out before then. Their
+  # OpenSSL is vendored (ADR-0045), so a Mac without Homebrew's can start them.
+  macos-build:
+    runs-on: macos-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [aarch64-apple-darwin, x86_64-apple-darwin]
+    steps:
+      - uses: actions/checkout@v4
+      - run: brew install fontconfig freetype pkg-config
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - run: cargo build --bin chartgen --target ${{ matrix.target }}
+      - name: No OpenSSL to find at run time
+        run: "! otool -L target/${{ matrix.target }}/debug/chartgen | grep -E 'libssl|libcrypto'"
+
   web-unit:
     runs-on: ubuntu-latest
     timeout-minutes: 5
