@@ -143,6 +143,21 @@ CREATE TABLE server_alert_events (   -- deliveries not finished yet
     body        TEXT    NOT NULL,    -- the JSON payload
     created_at  INTEGER NOT NULL     -- unix seconds
 );
+-- Migration 4: browser push (ADR-0045).
+ALTER TABLE server_alert_events ADD COLUMN device TEXT; -- NULL: the webhook
+CREATE TABLE push_devices (
+    id          TEXT    PRIMARY KEY,
+    owner       TEXT    NOT NULL,    -- OAuth client_id
+    endpoint    TEXT    NOT NULL,
+    p256dh      TEXT    NOT NULL,
+    auth        TEXT    NOT NULL,
+    created_at  INTEGER NOT NULL,    -- unix milliseconds
+    UNIQUE (owner, endpoint)
+);
+CREATE TABLE server_settings (       -- vapid_private_key, unless set by env
+    name   TEXT PRIMARY KEY,
+    value  TEXT NOT NULL
+);
 ```
 
 A fire writes the alert's new state and its delivery in one transaction, before

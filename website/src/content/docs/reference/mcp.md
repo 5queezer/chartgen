@@ -834,15 +834,17 @@ cannot see or change it. They are unrelated to the `--trade` alert tools above. 
 server without them `list_server_alerts` returns `{enabled: false, alerts: []}` and the
 others an error. The operator decides who may use them
 ([`CHARTGEN_SERVER_ALERT_CLIENTS`](/chartgen/guides/deploy/#server-alerts)): by default anyone
-may create alerts and nobody gets webhooks. `can_create` and `webhooks` in the list say what
-your client may do.
+may create alerts and nobody gets webhooks. `can_create`, `webhooks` and `push` in the list say
+what your client may do.
 
 | Tool | Arguments | Result |
 |---|---|---|
-| `create_server_alert` | `symbol`, `condition`, `level`, `trigger`; optional `interval` (default `1m`), `evaluate_on`, `message`, `webhook_url`, `sign` | The alert; `webhook_secret` too, once, with `sign: true` |
-| `list_server_alerts` | — | `{enabled, can_create, webhooks, limits, alerts: [...]}` |
-| `update_server_alert` | `alert_id`; optional `active`, `condition`, `level`, `trigger`, `message`, `webhook_url`, `sign` | The alert; a new `webhook_secret`, once, with `sign: true` |
+| `create_server_alert` | `symbol`, `condition`, `level`, `trigger`; optional `interval` (default `1m`), `evaluate_on`, `message`, `webhook_url`, `sign`, `push` | The alert; `webhook_secret` too, once, with `sign: true` |
+| `list_server_alerts` | — | `{enabled, can_create, webhooks, push, limits, alerts: [...]}` |
+| `update_server_alert` | `alert_id`; optional `active`, `condition`, `level`, `trigger`, `message`, `webhook_url`, `sign`, `push` | The alert; a new `webhook_secret`, once, with `sign: true` |
 | `delete_server_alert` | `alert_id` | `{deleted}`, with any delivery still pending |
+| `subscribe_push` | `endpoint`, `p256dh`, `auth` | `{devices}`: registers this browser's push subscription |
+| `unsubscribe_push` | `endpoint` | `{removed, devices}` |
 
 - `symbol`: a Binance symbol. A stock is refused. Drawing and indicator alerts cannot
   run here.
@@ -939,7 +941,8 @@ twice, after 2 s and 8 s; other answers are final.
   "trigger": "every",
   "message": "breakout",
   "bar_time": 1793962800,
-  "fired_at": 1793965351000
+  "fired_at": 1793965351000,
+  "fire_count": 3
 }
 ```
 
@@ -970,6 +973,19 @@ def verify(secret: str, timestamp: str, body: bytes, signature: str) -> bool:
 
 The secret is shown once and is never logged or returned again; `sign: true` on
 `update_server_alert` replaces it.
+
+**Push** ([ADR-0045](/chartgen/decisions/0045-web-push-for-server-alerts/)). `push: true` on an alert,
+with or without a webhook, sends the same JSON to each of your devices through Web Push, encrypted under
+RFC 8291. `push` in `list_server_alerts` is `null` where the server will not notify for your client,
+else `{public_key, devices}`: subscribe in the browser with that key as `applicationServerKey`, then
+pass the subscription to `subscribe_push`. The endpoint must be `https` at a known push service
+(`fcm.googleapis.com`, `updates.push.services.mozilla.com`, `*.push.apple.com`,
+`*.notify.windows.com`), `p256dh` at most 88 characters and `auth` at most 24. Registering the same
+endpoint again updates its keys. You may have 5 devices, and a new one over that replaces the oldest; at
+most 30 pushes per minute. On a server whose 2000 devices are full, a new one replaces another client's,
+and a client's alerts only notify that client's devices. A 404 or 410 from the push service removes the device. Delivery is at least once, so deduplicate on `id`; the app's worker uses it
+as the notification's tag. Each alert also returns `push`, `last_push_at`, `last_push_status` and
+`last_push_error`, the last outcome across your devices.
 
 ### Scripted indicators (`CHARTGEN_SCRIPTING=1`)
 

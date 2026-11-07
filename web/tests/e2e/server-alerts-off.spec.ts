@@ -49,6 +49,12 @@ test("a second tab asks nothing while the first leads", async ({ page, context }
 
 test("the dialog says an alert runs in this browser, and offers no server", async ({ bootedApp: page }) => {
   await openSidebarTab(page, /^Alerts/);
+  await expect(page.locator('[data-role="push-control"]')).toHaveCount(0);
+  // Nothing of push runs either: no worker is registered until a click asks for one.
+  const workers = await page.evaluate(
+    async () => (await navigator.serviceWorker.getRegistrations()).length,
+  );
+  expect(workers).toBe(0);
   await page.getByRole("button", { name: "Create alert" }).click();
   const dialog = page.getByRole("dialog");
   await expect(dialog.locator('[data-role="alert-browser-only"]')).toContainText(

@@ -142,6 +142,82 @@ impl Gate {
     }
 }
 
+/// A sliding-window count of requests, for limits the weight header does not show
+/// (each endpoint documents its own per IP and 5 minutes). Unlike a cooldown it
+/// affects only the endpoints that share the budget, and it refuses before Binance
+/// would answer 429, which would cool down every futures request.
+pub struct Budget {
+    what: &'static str,
+    limit: usize,
+    window: Duration,
+    sent: Mutex<std::collections::VecDeque<Instant>>,
+}
+
+impl Budget {
+    fn new(what: &'static str, limit: usize, window: Duration) -> Self {
+        Self {
+            what,
+            limit,
+            window,
+            sent: Mutex::default(),
+        }
+    }
+
+    /// Count one request, or say when there is room again.
+    pub fn take(&self) -> Result<(), String> {
+        self.take_at(Instant::now())
+    }
+
+    fn take_at(&self, now: Instant) -> Result<(), String> {
+        let mut sent = self.sent.lock().unwrap_or_else(|p| p.into_inner());
+        while sent
+            .front()
+            .is_some_and(|at| now.saturating_duration_since(*at) >= self.window)
+        {
+            sent.pop_front();
+        }
+        if sent.len() >= self.limit {
+            let wait = sent.front().map_or(Duration::ZERO, |at| {
+                self.window - now.saturating_duration_since(*at)
+            });
+            return Err(format!(
+                "Binance {} budget: {} requests in {} minutes used; try again in {}s",
+                self.what,
+                self.limit,
+                self.window.as_secs() / 60,
+                wait.as_millis().div_ceil(1000)
+            ));
+        }
+        sent.push_back(now);
+        Ok(())
+    }
+}
+
+/// `fundingRate`: Binance allows 500 requests per 5 minutes per IP, shared with
+/// `fundingInfo`; this refuses at 400.
+pub fn funding_budget() -> &'static Budget {
+    static BUDGET: OnceLock<Budget> = OnceLock::new();
+    BUDGET.get_or_init(|| Budget::new("funding rate", 400, Duration::from_secs(300)))
+}
+
+/// `/futures/data/*` (open interest and the long/short ratio): Binance documents 1000
+/// requests per 5 minutes per IP for each; this refuses at 800 for both together.
+pub fn futures_data_budget() -> &'static Budget {
+    static BUDGET: OnceLock<Budget> = OnceLock::new();
+    BUDGET.get_or_init(|| Budget::new("futures data", 800, Duration::from_secs(300)))
+}
+
+/// Shared blocking HTTP client; every upstream request times out after 10 s.
+pub fn http() -> &'static reqwest::blocking::Client {
+    static CLIENT: OnceLock<reqwest::blocking::Client> = OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::blocking::Client::builder()
+            .timeout(Duration::from_secs(10))
+            .build()
+            .unwrap_or_else(|_| reqwest::blocking::Client::new())
+    })
+}
+
 /// `api.binance.com`: 6000 weight a minute (`rateLimits` of its exchangeInfo).
 pub fn spot() -> &'static Gate {
     static GATE: OnceLock<Gate> = OnceLock::new();
@@ -157,6 +233,26 @@ pub fn futures() -> &'static Gate {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_budget_refuses_past_its_limit_and_frees_up_as_the_window_slides() {
+        let b = Budget::new("funding rate", 3, Duration::from_secs(300));
+        let t0 = Instant::now();
+        for i in 0..3 {
+            b.take_at(t0 + Duration::from_secs(i * 10)).unwrap();
+        }
+        let e = b.take_at(t0 + Duration::from_secs(60)).unwrap_err();
+        assert!(
+            e.contains("funding rate budget") && e.contains("240s"),
+            "{e}"
+        );
+        // The first request leaves the window: room for one more, not two.
+        b.take_at(t0 + Duration::from_secs(301)).unwrap();
+        assert!(b.take_at(t0 + Duration::from_secs(302)).is_err());
+        // A refusal says nothing about the cooldown of the gate it sits beside.
+        assert!(futures().admit().is_ok());
+    }
+
     use std::sync::atomic::{AtomicI64, Ordering};
     use std::sync::Arc;
 

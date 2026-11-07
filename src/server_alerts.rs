@@ -11,7 +11,8 @@
 //! `tests/fixtures/alert_semantics.json`. A fire is written before anything is
 //! sent, together with its delivery. So a restart neither fires it again (`once`
 //! is off, `every` greater/less is disarmed, a crossing has no previous reading)
-//! nor loses the delivery, which resumes under the same event id.
+//! nor loses the delivery, which resumes under the same event id. A delivery is a
+//! webhook or a push to one device (ADR-0045): the same row, queue and budgets.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, Weak};
@@ -19,7 +20,8 @@ use std::time::{Duration, Instant};
 
 use chartgen::data;
 use chartgen::feed::FeedEvent;
-use chartgen::scripting::persistence::{self, Store, StoredEvent};
+use chartgen::push::{DeviceKeys, Vapid};
+use chartgen::scripting::persistence::{self, Store, StoredDevice, StoredEvent};
 use chartgen::webhook::{self, Policy, Target, Timing};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -103,6 +105,12 @@ impl Access {
         }
     }
 
+    /// Push has no URL of the user's own: it only reaches known push services, so it
+    /// goes with being allowed alerts, where a webhook needs more.
+    fn may_use_push(&self, owner: &str) -> bool {
+        self.may_create(owner)
+    }
+
     fn keeps_idle_alerts(&self, owner: &str) -> bool {
         matches!(self, Self::Clients(ids) if ids.contains(owner))
     }
@@ -124,7 +132,13 @@ pub struct Limits {
     /// Fires of one `every` alert; a `once` alert cannot repeat.
     pub fires_per_alert_per_minute: usize,
     pub webhooks_per_client_per_minute: usize,
-    pub webhooks_total_per_minute: usize,
+    pub pushes_per_client_per_minute: usize,
+    /// Webhooks and pushes together.
+    pub deliveries_total_per_minute: usize,
+    /// Push devices per client; a new one over this replaces its oldest.
+    pub devices_per_client: usize,
+    /// When full, a new device replaces someone else's (`device_to_replace`).
+    pub devices_total: usize,
     pub pending_deliveries: usize,
     /// So that a few clients cannot fill `pending_deliveries`.
     pub pending_deliveries_per_client: usize,
@@ -143,7 +157,10 @@ impl Default for Limits {
             changes_per_minute: 10,
             fires_per_alert_per_minute: 6,
             webhooks_per_client_per_minute: 30,
-            webhooks_total_per_minute: 120,
+            pushes_per_client_per_minute: 30,
+            deliveries_total_per_minute: 120,
+            devices_per_client: 5,
+            devices_total: 2000,
             pending_deliveries: 2000,
             pending_deliveries_per_client: 50,
             deliveries_in_flight: 16,
@@ -280,6 +297,11 @@ struct Record {
     webhook: Option<Hook>,
     #[serde(default)]
     last_delivery: Option<Delivery>,
+    /// Notify the owner's devices when it fires.
+    #[serde(default)]
+    push: bool,
+    #[serde(default)]
+    last_push: Option<Delivery>,
 }
 
 impl Record {
@@ -339,7 +361,11 @@ struct State {
     baselines: HashMap<String, f64>,
     changes: Window,
     fires: Window,
+    /// Per client, and under "" every delivery of either kind.
     webhooks: Window,
+    pushes: Window,
+    /// The push devices, by id.
+    devices: HashMap<String, StoredDevice>,
     /// Fires an `every` alert was refused in the last minute.
     held_back: HashMap<String, Instant>,
     /// Deliveries waiting for their turn, per client.
@@ -360,6 +386,8 @@ pub struct ServerAlerts {
     runtime: tokio::runtime::Handle,
     state: Mutex<State>,
     access: Access,
+    /// `None` leaves push off; everything else still runs.
+    vapid: Option<Vapid>,
     slots: Arc<Semaphore>,
     me: Weak<ServerAlerts>,
 }
@@ -404,11 +432,13 @@ pub fn start(hub: &Arc<ChartHub>) {
         Access::Clients(ids) => format!("{} allowed clients", ids.len()),
         Access::Open => "open to every client, with webhooks".to_string(),
     };
+    let vapid = load_vapid(store);
     let alerts = ServerAlerts::new(
         store,
         hub.clone(),
         policy,
         access,
+        vapid,
         limits,
         Timing::default(),
     );
@@ -417,6 +447,34 @@ pub fn start(hub: &Arc<ChartHub>) {
         alerts.lock().alerts.len()
     );
     let _ = GLOBAL.set(alerts);
+}
+
+/// The application server key, from `CHARTGEN_VAPID_PRIVATE_KEY` or made once and kept
+/// in the store: a browser's subscription is tied to it, so it must outlive restarts.
+/// Push services want a way to reach the operator, so without one push stays off.
+fn load_vapid(store: &Store) -> Option<Vapid> {
+    let var = |name: &str| std::env::var(name).ok().filter(|v| !v.trim().is_empty());
+    let subject = var("CHARTGEN_VAPID_SUBJECT")
+        .or_else(|| var("CHARTGEN_BASE_URL").filter(|u| u.starts_with("https://")));
+    let Some(subject) = subject else {
+        eprintln!("[alerts] push is off: set CHARTGEN_VAPID_SUBJECT or an https CHARTGEN_BASE_URL");
+        return None;
+    };
+    let secret = match var("CHARTGEN_VAPID_PRIVATE_KEY") {
+        Some(secret) => Ok(secret),
+        None => Vapid::new_secret().and_then(|new| {
+            store
+                .setting_or_insert("vapid_private_key", &new)
+                .map_err(|e| format!("cannot store the key: {e}"))
+        }),
+    };
+    match secret.and_then(|secret| Vapid::from_secret(&secret, &subject)) {
+        Ok(vapid) => Some(vapid),
+        Err(e) => {
+            eprintln!("[alerts] push is off: {e}");
+            None
+        }
+    }
 }
 
 fn now_ms() -> i64 {
@@ -430,6 +488,7 @@ impl ServerAlerts {
         hub: Arc<ChartHub>,
         policy: Policy,
         access: Access,
+        vapid: Option<Vapid>,
         limits: Limits,
         timing: Timing,
     ) -> Arc<Self> {
@@ -442,6 +501,7 @@ impl ServerAlerts {
             runtime: tokio::runtime::Handle::current(),
             state: Mutex::default(),
             access,
+            vapid,
             slots: Arc::new(Semaphore::new(limits.deliveries_in_flight)),
             me: me.clone(),
         });
@@ -466,6 +526,10 @@ impl ServerAlerts {
             }
             Err(e) => eprintln!("[alerts] cannot read stored alerts: {e}"),
         }
+        match self.store.push_devices() {
+            Ok(devices) => st.devices = devices.into_iter().map(|d| (d.id.clone(), d)).collect(),
+            Err(e) => eprintln!("[alerts] cannot read push devices: {e}"),
+        }
         self.sweep(&mut st, now_ms());
         let events = self.store.server_alert_events().unwrap_or_else(|e| {
             eprintln!("[alerts] cannot read pending deliveries: {e}");
@@ -476,8 +540,15 @@ impl ServerAlerts {
             let owner = st.alerts.get(&event.alert_id).map(|a| a.owner.clone());
             // The list is read at startup, so this is where a removed client's
             // deliveries stop, and what it queued goes with them.
-            let may_send =
-                |owner: &String| event.created_at >= oldest && self.access.may_use_webhooks(owner);
+            let may_send = |owner: &String| {
+                event.created_at >= oldest
+                    && match &event.device {
+                        None => self.access.may_use_webhooks(owner),
+                        Some(device) => {
+                            self.access.may_use_push(owner) && st.devices.contains_key(device)
+                        }
+                    }
+            };
             match owner.filter(may_send) {
                 Some(owner) => Self::enqueue(&mut st, owner, event),
                 None => {
@@ -660,17 +731,17 @@ impl ServerAlerts {
         let at = now_ms();
         updated.last_triggered_at = Some(at);
         updated.fire_count += 1;
-        let event = self.prepare_delivery(st, &mut updated, price, bar_time, at);
+        let events = self.prepare_deliveries(st, &mut updated, price, bar_time, at);
         if let Err(e) =
             self.store
-                .record_server_alert_fire(id, &updated.owner, &updated.json(), event.as_ref())
+                .record_server_alert_fire(id, &updated.owner, &updated.json(), &events)
         {
             // Memory stays as the store has it, so a restart cannot disagree.
             eprintln!("[alerts] cannot store a fire: {e}");
             return;
         }
         st.alerts.insert(id.to_string(), updated);
-        if let Some(event) = event {
+        for event in events {
             let owner = st.alerts[id].owner.clone();
             Self::enqueue(st, owner, event);
         }
@@ -684,37 +755,20 @@ impl ServerAlerts {
         st.queues.entry(owner).or_default().push_back(event);
     }
 
-    /// The delivery of a fire, if it has a webhook and is allowed to wait for one.
-    /// It waits for its turn however busy the budget is, so a `once` alert keeps its
-    /// webhook. Only with a full queue does the fire count without one, and the alert
-    /// says why.
-    fn prepare_delivery(
+    /// The deliveries of a fire: its webhook and one push per device, those allowed to
+    /// wait. They wait for their turn however busy the budget is, so a `once` alert keeps
+    /// them. Only with a full queue does the fire count without one, and the alert says
+    /// why. All of them carry one body, and so one `id`, however many rows that takes.
+    fn prepare_deliveries(
         &self,
-        st: &mut State,
+        st: &State,
         alert: &mut Record,
         price: f64,
         bar_time: i64,
         at: i64,
-    ) -> Option<StoredEvent> {
-        alert.webhook.as_ref()?;
-        let limits = &self.limits;
-        let refusal = if !self.access.may_use_webhooks(&alert.owner) {
-            Some("webhook skipped: this client may not use webhooks")
-        } else if st.pending >= limits.pending_deliveries
-            || st.queues.get(&alert.owner).map_or(0, VecDeque::len)
-                >= limits.pending_deliveries_per_client
-        {
-            Some("webhook skipped: too many deliveries waiting")
-        } else {
-            None
-        };
-        if let Some(error) = refusal {
-            alert.last_delivery = Some(Delivery {
-                at,
-                status: None,
-                error: Some(error.into()),
-            });
-            return None;
+    ) -> Vec<StoredEvent> {
+        if alert.webhook.is_none() && !alert.push {
+            return Vec::new();
         }
         let id = uuid::Uuid::new_v4().to_string();
         let body = json!({
@@ -731,13 +785,71 @@ impl ServerAlerts {
             "message": alert.message,
             "bar_time": bar_time,
             "fired_at": at,
-        });
-        Some(StoredEvent {
+            "fire_count": alert.fire_count,
+        })
+        .to_string();
+        let limits = &self.limits;
+        let waiting = st.queues.get(&alert.owner).map_or(0, VecDeque::len);
+        let mut events: Vec<StoredEvent> = Vec::new();
+        let has_room = |events: &[StoredEvent]| {
+            st.pending + events.len() < limits.pending_deliveries
+                && waiting + events.len() < limits.pending_deliveries_per_client
+        };
+        let refused = |error: &str| Delivery {
+            at,
+            status: None,
+            error: Some(error.to_string()),
+        };
+        let event = |id: String, device: Option<String>| StoredEvent {
             id,
             alert_id: alert.id.clone(),
-            body: body.to_string(),
+            body: body.clone(),
             created_at: at / 1000,
-        })
+            device,
+        };
+        let mut hook_refusal = None;
+        if alert.webhook.is_some() {
+            if !self.access.may_use_webhooks(&alert.owner) {
+                hook_refusal = Some(refused("webhook skipped: this client may not use webhooks"));
+            } else if has_room(&events) {
+                events.push(event(id.clone(), None));
+            } else {
+                hook_refusal = Some(refused("webhook skipped: too many deliveries waiting"));
+            }
+        }
+        let mut push_refusal = None;
+        if alert.push {
+            let mut devices: Vec<&StoredDevice> = st
+                .devices
+                .values()
+                .filter(|d| d.owner == alert.owner)
+                .collect();
+            devices.sort_by_key(|d| d.created_at);
+            if self.vapid.is_none() || !self.access.may_use_push(&alert.owner) {
+                push_refusal = Some(refused("push skipped: not available on this server"));
+            } else if devices.is_empty() {
+                push_refusal = Some(refused("push skipped: no device has notifications on"));
+            }
+            if push_refusal.is_none() {
+                for device in devices {
+                    if has_room(&events) {
+                        events.push(event(
+                            format!("{id}:{}", device.id),
+                            Some(device.id.clone()),
+                        ));
+                    } else {
+                        push_refusal = Some(refused("push skipped: too many deliveries waiting"));
+                    }
+                }
+            }
+        }
+        if hook_refusal.is_some() {
+            alert.last_delivery = hook_refusal;
+        }
+        if push_refusal.is_some() {
+            alert.last_push = push_refusal;
+        }
+        events
     }
 
     /// Start the deliveries whose turn it is: the client that waited longest first,
@@ -754,12 +866,12 @@ impl ServerAlerts {
             .map(|(owner, _)| owner.clone())
             .collect();
         owners.sort_by_key(|owner| st.served.get(owner).copied());
-        let mut left = (limits.webhooks_total_per_minute / DISPATCHES_PER_MINUTE).max(1);
+        let mut left = (limits.deliveries_total_per_minute / DISPATCHES_PER_MINUTE).max(1);
         for owner in owners {
             if left == 0
                 || !st
                     .webhooks
-                    .has_room("", limits.webhooks_total_per_minute, now)
+                    .has_room("", limits.deliveries_total_per_minute, now)
             {
                 break;
             }
@@ -771,10 +883,16 @@ impl ServerAlerts {
                     let _ = self.store.delete_server_alert_event(&stale.id);
                 }
             }
-            if !st
-                .webhooks
-                .has_room(&owner, limits.webhooks_per_client_per_minute, now)
-            {
+            // Each kind has its budget; a client's own deliveries stay in order.
+            let is_push = queue.front().is_some_and(|e| e.device.is_some());
+            let has_room = if is_push {
+                st.pushes
+                    .has_room(&owner, limits.pushes_per_client_per_minute, now)
+            } else {
+                st.webhooks
+                    .has_room(&owner, limits.webhooks_per_client_per_minute, now)
+            };
+            if !has_room {
                 continue;
             }
             // Busy: it stays queued, where its cap and its age limit apply. A started
@@ -785,7 +903,11 @@ impl ServerAlerts {
             let Some(event) = st.queues.get_mut(&owner).and_then(VecDeque::pop_front) else {
                 continue;
             };
-            st.webhooks.record(&owner, now);
+            if is_push {
+                st.pushes.record(&owner, now);
+            } else {
+                st.webhooks.record(&owner, now);
+            }
             st.webhooks.record("", now);
             st.served.insert(owner, now);
             left -= 1;
@@ -831,6 +953,22 @@ impl ServerAlerts {
                 eprintln!("[alerts] cannot delete an expired alert: {e}");
             }
         }
+        // As for alerts: a device outlives a sign-in, not 30 days without one.
+        if let Some(tokens) = &last_tokens {
+            let idle: Vec<String> = st
+                .devices
+                .values()
+                .filter(|d| {
+                    let last = tokens.get(&d.owner).map_or(0, |secs| secs * 1000);
+                    !self.access.keeps_idle_alerts(&d.owner)
+                        && now - last.max(d.created_at) > IDLE_OWNER_TTL_MS
+                })
+                .map(|d| d.id.clone())
+                .collect();
+            for id in idle {
+                self.forget_device(st, &id);
+            }
+        }
         self.sync_feeds(st);
     }
 
@@ -850,6 +988,22 @@ impl ServerAlerts {
         Ok(())
     }
 
+    /// Drop a device, with what it still had to receive.
+    fn forget_device(&self, st: &mut State, id: &str) {
+        if let Err(e) = self.store.delete_push_device(id) {
+            eprintln!("[alerts] cannot delete a push device: {e}");
+            return;
+        }
+        st.devices.remove(id);
+        let mut dropped = 0;
+        for queue in st.queues.values_mut() {
+            let before = queue.len();
+            queue.retain(|e| e.device.as_deref() != Some(id));
+            dropped += before - queue.len();
+        }
+        st.pending = st.pending.saturating_sub(dropped);
+    }
+
     fn client_slot(&self, st: &mut State, owner: &str) -> Arc<Semaphore> {
         let per_client = self.limits.deliveries_in_flight_per_client;
         st.client_slots
@@ -860,23 +1014,37 @@ impl ServerAlerts {
 
     /// Send one event, then record how it went and forget it.
     async fn deliver(self: Arc<Self>, event: StoredEvent) {
-        let (hook, client) = {
+        let (hook, device, client) = {
             let mut st = self.lock();
             let alert = st.alerts.get(&event.alert_id);
             let hook = alert.and_then(|a| a.webhook.clone());
             let owner = alert.map(|a| a.owner.clone()).unwrap_or_default();
-            (hook, self.client_slot(&mut st, &owner))
+            let device = event
+                .device
+                .as_ref()
+                .and_then(|d| st.devices.get(d))
+                .cloned();
+            (hook, device, self.client_slot(&mut st, &owner))
         };
-        let outcome = match hook {
-            // One client's dead host cannot hold every slot.
-            Some(hook) => Some(self.send(&hook, &event, &client).await),
-            None => None,
+        // One client's dead host cannot hold every slot.
+        let outcome = match (&event.device, hook, &device) {
+            (None, Some(hook), _) => Some(self.send(&hook, &event, &client).await),
+            (Some(_), _, Some(device)) => Some(self.send_push(device, &event, &client).await),
+            _ => None,
         };
         let mut st = self.lock();
         st.pending = st.pending.saturating_sub(1);
         if let Some(outcome) = outcome {
+            // The push service says this subscription is gone for good.
+            if let (Some(device), Some(404 | 410)) = (&device, outcome.status) {
+                self.forget_device(&mut st, &device.id);
+            }
             if let Some(alert) = st.alerts.get_mut(&event.alert_id) {
-                alert.last_delivery = Some(outcome);
+                if event.device.is_some() {
+                    alert.last_push = Some(outcome);
+                } else {
+                    alert.last_delivery = Some(outcome);
+                }
                 if let Err(e) = self
                     .store
                     .save_server_alert(&alert.id, &alert.owner, &alert.json())
@@ -887,6 +1055,43 @@ impl ServerAlerts {
         }
         if let Err(e) = self.store.delete_server_alert_event(&event.id) {
             eprintln!("[alerts] cannot clear a delivery: {e}");
+        }
+    }
+
+    /// One push, through the webhook path's pinning, retries and slots.
+    async fn send_push(
+        &self,
+        device: &StoredDevice,
+        event: &StoredEvent,
+        client: &Semaphore,
+    ) -> Delivery {
+        let prepared = (|| {
+            let vapid = self
+                .vapid
+                .as_ref()
+                .ok_or("push is not available on this server")?;
+            let target = Target::parse_push(&device.endpoint, &self.policy)?;
+            let keys = DeviceKeys::parse(&device.p256dh, &device.auth)?;
+            let now = chrono::Utc::now().timestamp();
+            let request = vapid.request(&target.origin(), &keys, event.body.as_bytes(), now)?;
+            Ok::<_, String>((target, request))
+        })();
+        let outcome = match prepared {
+            Ok((target, request)) => {
+                let slots = [client, self.slots.as_ref()];
+                let make = || request.clone();
+                webhook::deliver_request(&target, &self.policy, &make, &self.timing, &slots).await
+            }
+            Err(error) => webhook::Outcome {
+                status: None,
+                error: Some(error),
+                attempts: 0,
+            },
+        };
+        Delivery {
+            at: now_ms(),
+            status: outcome.status,
+            error: outcome.error,
         }
     }
 
@@ -942,6 +1147,8 @@ impl ServerAlerts {
             "list_server_alerts" => Ok(self.list(owner)),
             "update_server_alert" => self.update(args, owner),
             "delete_server_alert" => self.delete(args, owner),
+            "subscribe_push" => self.subscribe_push(args, owner),
+            "unsubscribe_push" => self.unsubscribe_push(args, owner),
             _ => Err(format!("Unknown tool: {tool}")),
         };
         match result {
@@ -959,6 +1166,133 @@ impl ServerAlerts {
         self.runtime
             .block_on(webhook::resolve(&target, &self.policy))
             .map(|_| ())
+    }
+
+    /// Can this client's alerts notify devices at all?
+    fn check_push(&self, owner: &str) -> Result<(), String> {
+        if self.vapid.is_none() || !self.access.may_use_push(owner) {
+            return Err("This server does not send push notifications for this client".into());
+        }
+        Ok(())
+    }
+
+    /// Remember this browser's subscription. The endpoint and keys come from the browser,
+    /// so they are checked here. A device over the limit replaces the client's oldest:
+    /// a phone reinstalled or a site cleared leaves a dead one behind, nobody can name it,
+    /// and the limit is only there to bound the fan-out.
+    fn subscribe_push(&self, args: &Value, owner: &str) -> Result<Value, String> {
+        self.check_push(owner)?;
+        self.admit_change(owner)?;
+        let text = |name: &str| {
+            args.get(name)
+                .and_then(Value::as_str)
+                .ok_or_else(|| format!("{name} is required"))
+        };
+        let (p256dh, auth) = (text("p256dh")?, text("auth")?);
+        let target = Target::parse_push(text("endpoint")?, &self.policy)?;
+        let endpoint = target.as_str();
+        DeviceKeys::parse(p256dh, auth)?;
+
+        let mut st = self.lock();
+        let existing = st
+            .devices
+            .values()
+            .find(|d| d.owner == owner && d.endpoint == endpoint)
+            .map(|d| (d.id.clone(), d.created_at));
+        if existing.is_none() {
+            let mut mine: Vec<(i64, String)> = st
+                .devices
+                .values()
+                .filter(|d| d.owner == owner)
+                .map(|d| (d.created_at, d.id.clone()))
+                .collect();
+            mine.sort();
+            let over = (mine.len() + 1).saturating_sub(self.limits.devices_per_client);
+            // Replacing one of its own adds nothing to the total.
+            if over == 0 && st.devices.len() >= self.limits.devices_total {
+                let Some(id) = self.device_to_replace(&st, owner) else {
+                    return Err(format!(
+                        "Limit reached: this server holds its maximum of {} push devices",
+                        self.limits.devices_total
+                    ));
+                };
+                self.forget_device(&mut st, &id);
+            }
+            for (_, id) in mine.into_iter().take(over) {
+                self.forget_device(&mut st, &id);
+            }
+        }
+        let (id, created_at) =
+            existing.unwrap_or_else(|| (uuid::Uuid::new_v4().to_string(), now_ms()));
+        let device = StoredDevice {
+            id: id.clone(),
+            owner: owner.to_string(),
+            endpoint: endpoint.to_string(),
+            p256dh: p256dh.to_string(),
+            auth: auth.to_string(),
+            created_at,
+        };
+        self.store.save_push_device(&device).map_err(|e| {
+            eprintln!("[alerts] cannot store a push device: {e}");
+            "The alert store is unavailable".to_string()
+        })?;
+        st.devices.insert(id, device);
+        Ok(json!({ "devices": st.devices.values().filter(|d| d.owner == owner).count() }))
+    }
+
+    /// With the table full, whose device makes room: never a client the operator listed,
+    /// and those with no alert that would notify them go first, the owner idle longest
+    /// among them. Junk devices need no alert, and their owners hold fresh tokens, so going
+    /// by idleness alone would let a flood push out real users; this way it mostly replaces
+    /// itself. An unknown owner is not an idle one, as in `sweep`.
+    fn device_to_replace(&self, st: &State, caller: &str) -> Option<String> {
+        let tokens: HashMap<String, i64> = match self.store.oauth_clients() {
+            Ok(clients) => clients
+                .into_iter()
+                .filter_map(|c| Some((c.client_id, c.last_token_at?)))
+                .collect(),
+            Err(e) => {
+                eprintln!("[alerts] cannot read clients: {e}");
+                return None;
+            }
+        };
+        let notified: HashSet<&str> = st
+            .alerts
+            .values()
+            .filter(|a| a.push && a.active)
+            .map(|a| a.owner.as_str())
+            .collect();
+        st.devices
+            .values()
+            .filter(|d| d.owner != caller && !self.access.keeps_idle_alerts(&d.owner))
+            .min_by_key(|d| {
+                let last = tokens.get(&d.owner).map_or(0, |secs| secs * 1000);
+                (notified.contains(d.owner.as_str()), last.max(d.created_at))
+            })
+            .map(|d| d.id.clone())
+    }
+
+    fn unsubscribe_push(&self, args: &Value, owner: &str) -> Result<Value, String> {
+        let raw = args
+            .get("endpoint")
+            .and_then(Value::as_str)
+            .ok_or("endpoint is required")?;
+        // As it was stored. One that does not parse was never stored, and removes nothing.
+        let target = Target::parse_push(raw, &self.policy);
+        let endpoint = target.as_ref().map_or(raw, Target::as_str);
+        let mut st = self.lock();
+        let id = st
+            .devices
+            .values()
+            .find(|d| d.owner == owner && d.endpoint == endpoint)
+            .map(|d| d.id.clone());
+        if let Some(id) = &id {
+            self.forget_device(&mut st, id);
+        }
+        Ok(json!({
+            "removed": id.is_some(),
+            "devices": st.devices.values().filter(|d| d.owner == owner).count(),
+        }))
     }
 
     fn admit_change(&self, owner: &str) -> Result<(), String> {
@@ -1059,6 +1393,10 @@ impl ServerAlerts {
         if sign == Some(true) && webhook_url.is_none() {
             return Err("sign needs webhook_url".into());
         }
+        let push = push_arg(args)?.unwrap_or(false);
+        if push {
+            self.check_push(owner)?;
+        }
 
         let refuse = |_| format!("Server alerts cannot watch {symbol} at {interval}");
         let feed = match evaluate_on {
@@ -1117,6 +1455,8 @@ impl ServerAlerts {
                 secret: secret.clone(),
             }),
             last_delivery: None,
+            push,
+            last_push: None,
         };
         let mut st = self.lock();
         // The fetch and the lookup ran unlocked: another call may have filled up.
@@ -1157,6 +1497,10 @@ impl ServerAlerts {
         let (webhook_url, sign) = webhook_args(args)?;
         if let Some(url) = webhook_url.as_deref().filter(|u| !u.is_empty()) {
             self.check_webhook(url, owner)?;
+        }
+        let push = push_arg(args)?;
+        if push == Some(true) {
+            self.check_push(owner)?;
         }
 
         let mut st = self.lock();
@@ -1208,6 +1552,7 @@ impl ServerAlerts {
             }
             None => {}
         }
+        next.push = push.unwrap_or(next.push);
         let mut new_secret_text = None;
         if let Some(sign) = sign {
             let hook = next.webhook.as_mut().ok_or("sign needs a webhook")?;
@@ -1264,11 +1609,18 @@ impl ServerAlerts {
             "enabled": true,
             "can_create": self.access.may_create(owner),
             "webhooks": self.access.may_use_webhooks(owner),
+            // Null where this client's alerts cannot notify a device.
+            "push": self.vapid.as_ref().filter(|_| self.access.may_use_push(owner)).map(|v| json!({
+                "public_key": v.public_key(),
+                "devices": st.devices.values().filter(|d| d.owner == owner).count(),
+            })),
             "limits": {
                 "alerts_per_client": limits.alerts_per_client,
                 "pairs_per_client": limits.pairs_per_client,
                 "fires_per_alert_per_minute": limits.fires_per_alert_per_minute,
                 "webhooks_per_client_per_minute": limits.webhooks_per_client_per_minute,
+                "pushes_per_client_per_minute": limits.pushes_per_client_per_minute,
+                "devices_per_client": limits.devices_per_client,
             },
             "alerts": alerts.into_iter().map(|a| self.view(&st, a)).collect::<Vec<_>>(),
         })
@@ -1314,6 +1666,10 @@ impl ServerAlerts {
             "last_delivery_at": a.last_delivery.as_ref().map(|d| d.at),
             "last_status": a.last_delivery.as_ref().and_then(|d| d.status),
             "last_error": last_error,
+            "push": a.push,
+            "last_push_at": a.last_push.as_ref().map(|d| d.at),
+            "last_push_status": a.last_push.as_ref().and_then(|d| d.status),
+            "last_push_error": a.last_push.as_ref().and_then(|d| d.error.clone()),
             "feed": if live { "live" } else { "waiting" },
             "last_price": watch.and_then(|w| w.last_price),
         })
@@ -1378,6 +1734,13 @@ fn webhook_args(args: &Value) -> Result<(Option<String>, Option<bool>), String> 
         Some(v) => Some(v.as_bool().ok_or("sign must be true or false")?),
     };
     Ok((url, sign))
+}
+
+fn push_arg(args: &Value) -> Result<Option<bool>, String> {
+    match args.get("push") {
+        None | Some(Value::Null) => Ok(None),
+        Some(v) => Ok(Some(v.as_bool().ok_or("push must be true or false")?)),
+    }
 }
 
 fn new_secret() -> String {
