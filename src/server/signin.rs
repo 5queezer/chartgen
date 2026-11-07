@@ -700,6 +700,14 @@ impl OAuthStore {
         Some((name, provider))
     }
 
+    /// The user of a token only the web app can hold: its code went to our own root
+    /// (`is_first_party`), whoever registered the client.
+    pub(super) fn app_user_for_token(&self, token: &str) -> Option<String> {
+        let user = self.tokens.get(token)?.user.as_ref()?;
+        user.session.as_ref()?;
+        Some(user.id.clone())
+    }
+
     /// Issue a code for `request` to `user`; the answer is the redirect to the client.
     fn issue_code(
         &mut self,

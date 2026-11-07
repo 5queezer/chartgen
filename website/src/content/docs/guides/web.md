@@ -1085,10 +1085,40 @@ is gone as well, the app lands on the sign-in page.
 Other applications are not trusted the way the app is: the first time one asks, a page shows
 its name and where it will send you, and only the address is reliable.
 
-Only what is stored on the server follows the account: scripted indicators and
-[alerts on the server](#alerts-on-the-server), which keep running after signing out. Watchlists,
-layouts, drawings, chart settings and alerts in the browser stay in this browser, whoever signs
-in on it, and remain there after signing out.
+Scripted indicators and [alerts on the server](#alerts-on-the-server) belong to the account and
+keep running after signing out. So does your workspace, next.
+
+### Your workspace on any device
+
+Signed in, you find the same chart settings, layouts and grids, watchlists, indicators and styles,
+drawings and browser alerts on any browser or device. They still live in this browser while you
+work, so the app stays fast and goes on working with the server away. What you change is sent within
+seconds, and on the way out when you close the tab or sign out.
+
+- **Changes from another device wait for a reload.** A bar under the header says so, with **Reload**.
+  Nothing is replaced under what you are doing. Reload reloads every tab of the app in this browser.
+- **Both devices can work at once.** Drawings, layouts, watchlists and browser alerts are merged item
+  by item, so what each device added stays. If both changed the same item or setting, the device that
+  sends last wins and says so in a notice that names the document. If one edited what the other
+  deleted, the edit stays. The replaced version is not kept.
+- **Limits:** 512 KiB per document and 2 MiB per account. What does not fit stays in this browser, and
+  a notice says so.
+- **Not synced:** the sidebar's tab, the last drawing tool, and unsaved script text. These stay on
+  the device, per account.
+- **Browser alerts** run in each browser that has the app open, so two open devices both notify. For
+  one that runs without a browser, use [alerts on the server](#alerts-on-the-server).
+
+**On a shared browser** each account has its own data. Signing out leaves nothing on screen for the
+next person, and they see none of it. The copies stay in this browser's storage for when you sign in
+again, unencrypted: someone with the devtools open could read them. Clearing the site's data
+removes them, and what has synced is still on the server.
+
+**What was here before you signed in** stays aside, and nothing is moved either way without asking.
+The first account to sign in on a browser is offered **Add to my account**, which only adds (what your
+account already has stays), **Delete them**, or **Not now**, which asks again next time. Other
+accounts are not offered it, and do not see it.
+
+A server without sign-in has none of this: everything stays in the browser, as before.
 
 ## Managing indicators
 

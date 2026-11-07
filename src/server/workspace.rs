@@ -63,13 +63,18 @@ pub(super) async fn sync(
         if s.signin.is_none() {
             return StatusCode::NOT_FOUND.into_response();
         }
-        let user = extract_bearer_token(&headers)
-            .filter(|t| s.validate_token(t))
-            .and_then(|t| s.user_for_token(t));
-        let Some(user) = user else {
+        let Some(token) = extract_bearer_token(&headers).filter(|t| s.validate_token(t)) else {
             return (
                 StatusCode::UNAUTHORIZED,
                 Json(json!({ "error": "invalid_token" })),
+            )
+                .into_response();
+        };
+        // An application the user approved has the tools, not their browser's data.
+        let Some(user) = s.app_user_for_token(token) else {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(json!({ "error": "insufficient_scope" })),
             )
                 .into_response();
         };

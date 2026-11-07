@@ -5,7 +5,7 @@ sidebar:
   order: 44
 ---
 
-**Status:** Accepted
+**Status:** Accepted; amended by [ADR-0050](/chartgen/decisions/0050-per-user-workspace-sync/) (browser data now follows the account)
 **Date:** 2026-11-06
 **Amends:** [ADR-0025](/chartgen/decisions/0025-user-indicator-registry/) (with sign-in on, scripts belong to the user, not the client), [ADR-0036](/chartgen/decisions/0036-own-origin-invalid-client-redirect/) (a client's liveness is limited per user, which makes the lockout cost accounts), [ADR-0021](/chartgen/decisions/0021-realtime-chart-push/) (with sign-in on, the per-client push cap counts per user, and an operator can name a proxy's address header) [ADR-0042](/chartgen/decisions/0042-server-side-alerts/) (with sign-in on, server alerts and their allowlist belong to accounts) and [ADR-0045](/chartgen/decisions/0045-web-push-for-server-alerts/) (with sign-in on, push devices belong to the user, the last outcome is kept per device, and an endpoint has one owner)
 

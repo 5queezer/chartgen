@@ -5353,6 +5353,52 @@ fn test_workspace_needs_a_signed_in_user() {
     assert_eq!(workspace(open.port, None, empty).0, 404);
 }
 
+/// An application the user approved gets the tools and not the browser's data, though
+/// the token is the same user's.
+#[test]
+fn test_workspace_is_the_web_apps_alone() {
+    let fake = FakeProvider::start();
+    let srv = signin_server("workspace-third-party", &fake, &["github"]);
+    let p = srv.port;
+    let mut b = Browser::new(p);
+    let own = web_sign_in(&mut b, &fake, "github", profile_of("github", 5, "octo"));
+    let key = "chartgen.alerts.list";
+    let (st, _) = workspace(
+        p,
+        Some(&own),
+        serde_json::json!({ "since": 0, "writes": [write_doc(key, Some("private"), 0)] }),
+    );
+    assert_eq!(st, 200);
+
+    let client = register_client(p, EXTERNAL_REDIRECT);
+    let first = b.authorize(&client, EXTERNAL_REDIRECT, "st");
+    assert!(first.location().starts_with("/oauth/consent?request="));
+    let page = b.get(&first.location());
+    let (request, csrf) = consent_fields(&page.body);
+    let approved = b.request(
+        "POST",
+        "/oauth/consent",
+        &["Content-Type: application/x-www-form-urlencoded"],
+        &format!("request={request}&csrf={csrf}&decision=approve"),
+    );
+    let theirs = token_from(p, &client, EXTERNAL_REDIRECT, &approved.query()["code"]);
+    assert_eq!(me(p, &theirs).1["user"]["id"], "github:5", "the same user");
+
+    let (st, body) = workspace(p, Some(&theirs), serde_json::json!({ "since": 0 }));
+    assert_eq!(
+        (st, &body["changes"]),
+        (403, &serde_json::Value::Null),
+        "{body}"
+    );
+    let (st, _) = workspace(
+        p,
+        Some(&theirs),
+        serde_json::json!({ "since": 0, "writes": [write_doc(key, Some("evil"), 1)] }),
+    );
+    assert_eq!(st, 403);
+    assert_eq!(docs_of(p, &own)[key], "private");
+}
+
 /// Anyone can sign in, so these are what a stranger meets. One document, the user's
 /// total, requests, batches, and keys that are not the app's.
 #[test]
