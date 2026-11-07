@@ -819,23 +819,14 @@ async fn run_group(
         Err(e) => return fail(format!("seeding failed: {e}")),
     };
     let indicators: Value = serde_json::from_str(&req.indicators).unwrap_or(Value::Null);
-    // A price-based chart keeps the box it resolves now for as long as it lives.
+    // A price-based chart's request carries its box (`tool_subscribe_chart`).
     let price = match Kind::from_style(&req.chart_style) {
         Some(kind) => {
             let args: Option<Value> = req
                 .chart_params
                 .as_deref()
                 .and_then(|p| serde_json::from_str(p).ok());
-            let Ok(chart_iv) = Interval::parse(&req.timeframe) else {
-                return fail(format!("{} is not an interval", req.timeframe));
-            };
-            let source = match &resample_to {
-                Some(iv) => fetch::resample(&window, iv, true),
-                None => window.clone(),
-            };
-            match Params::parse(kind, args.as_ref())
-                .and_then(|p| p.pinned(&source, &chart_iv, fetch::now_ms()))
-            {
+            match Params::parse(kind, args.as_ref()) {
                 Ok(p) => Some(p),
                 Err(e) => return fail(e),
             }

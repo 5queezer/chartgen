@@ -996,6 +996,14 @@ fn tool_subscribe_chart(
         Ok(p) => p,
         Err(e) => return tool_err(id, &e),
     };
+    // A box resolved here could differ from the one the client's chart was built on,
+    // and a group outlives its first subscriber's load (ADR-0047).
+    if price_params.as_ref().is_some_and(|p| p.resolves_box()) {
+        return tool_err(
+            id,
+            "chart_params needs box_size here: send the box_size generate_chart echoed, so pushed bars line up with the chart you loaded.",
+        );
+    }
     let indicators = indicators_arg(args);
     // Every push recomputes every indicator.
     if indicators
@@ -5456,6 +5464,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn subscribe_chart_takes_a_price_based_chart_with_its_box() {
+        let hub = crate::chart_push::ChartHub::new(
+            Arc::new(crate::chart_push::SampleSource),
+            crate::chart_push::Limits::default(),
+        );
+        let (tx, _rx) = tokio::sync::mpsc::channel(crate::chart_push::STREAM_BUFFER);
+        hub.link_stream("s", tx);
+        let push = PushCtx {
+            hub: hub.clone(),
+            stream: "s".into(),
+            client: "127.0.0.1".into(),
+        };
+        // The box echoed by a load, a fixed one, or a type with none.
+        for extra in [
+            json!({ "chart_style": "renko", "chart_params": { "box": "atr", "box_size": 3.4 } }),
+            json!({ "chart_style": "kagi",
+                    "chart_params": { "box": "percent", "percent": 2, "box_size": 3.4 } }),
+            json!({ "chart_style": "range", "chart_params": { "box": "fixed", "box_size": 5 } }),
+            json!({ "chart_style": "line_break" }),
+        ] {
+            let mut args = json!({ "ticker": "ETHUSDT", "timeframe": "1m", "indicators": [] });
+            args.as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            let resp = call("subscribe_chart", args.clone(), Some(&push), Some("tok"));
+            assert!(!is_error(&resp), "{args}: {}", response_text(&resp));
+        }
+    }
+
+    #[tokio::test]
     async fn subscribe_chart_validates_and_round_trips() {
         let hub = crate::chart_push::ChartHub::new(
             Arc::new(crate::chart_push::SampleSource),
@@ -5485,6 +5523,15 @@ mod tests {
             (
                 json!({ "ticker": "BTCUSDT", "chart_style": "tiles" }),
                 "chart_style",
+            ),
+            (
+                json!({ "ticker": "BTCUSDT", "chart_style": "renko" }),
+                "needs box_size",
+            ),
+            (
+                json!({ "ticker": "BTCUSDT", "chart_style": "kagi",
+                        "chart_params": { "box": "percent", "percent": 2 } }),
+                "needs box_size",
             ),
             (json!({ "ticker": "AAPL" }), "not pushable"),
             (

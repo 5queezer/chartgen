@@ -193,13 +193,9 @@ impl Params {
         Value::Object(out)
     }
 
-    /// These params with the box that `source` resolves to, for every later build.
-    pub fn pinned(&self, source: &[Bar], iv: &Interval, now_ms: i64) -> Result<Self, String> {
-        let rows = rows(source)?;
-        let closed = closed_len(&rows, iv, None, now_ms);
-        let mut out = self.clone();
-        out.box_size = Some(self.resolve_box(&rows, closed)?);
-        Ok(out)
+    /// Whether the box has to be resolved from bars, so two builds can differ.
+    pub fn resolves_box(&self) -> bool {
+        self.kind.uses_box() && self.box_size.is_none()
     }
 
     /// The box: the size given, or ATR or percent of the source, rounded. Line

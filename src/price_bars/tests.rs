@@ -393,10 +393,12 @@ fn a_pinned_box_outlives_the_price_it_came_from() {
     let mut p = params(Kind::Renko, 1.0);
     p.mode = BoxMode::Percent;
     p.box_size = None;
-    let pinned = p
-        .pinned(&closes(&[50_000.0, 50_000.0]), &iv(), FAR_FUTURE_MS)
-        .unwrap();
-    assert_eq!(pinned.box_size, Some(500.0));
+    assert!(p.resolves_box());
+    let resolved = build(&closes(&[50_000.0, 50_000.0]), &iv(), &p, &opts()).unwrap();
+    assert_eq!(resolved.box_size, 500.0);
+    let mut pinned = p.clone();
+    pinned.box_size = Some(resolved.box_size);
+    assert!(!pinned.resolves_box());
     let later = build(&closes(&[90_000.0, 90_000.0]), &iv(), &pinned, &opts()).unwrap();
     assert_eq!(later.box_size, 500.0);
 }
