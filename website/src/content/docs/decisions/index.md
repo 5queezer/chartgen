@@ -79,3 +79,4 @@ one and link both ways.
 | [0049](/chartgen/decisions/0049-one-kline-read-per-symbol/) | One Binance kline read per symbol and interval | Accepted | 2026-11-06 |
 | [0050](/chartgen/decisions/0050-per-user-workspace-sync/) | A signed-in user's workspace, on any device | Accepted | 2026-11-07 |
 | [0051](/chartgen/decisions/0051-bounded-connections/) | What one connection may cost | Accepted | 2026-11-07 |
+| [0052](/chartgen/decisions/0052-indicator-cost/) | What an indicator costs | Accepted | 2026-11-07 |
