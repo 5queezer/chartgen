@@ -21,6 +21,7 @@ import {
 
 import "./scriptEditor.css";
 import { createScriptView, type ScriptView } from "./scriptEditorView";
+import { accountGuard } from "../lib/workspaceSync";
 import { keyName } from "../lib/instances";
 import {
   draftAt,
@@ -136,10 +137,12 @@ export default function ScriptEditor(props: ScriptEditorProps): JSX.Element {
     setDraftNames(draftKeys());
   }
 
+  // A tab reloading because someone else signed in holds that other account's draft.
+  const sameAccount = accountGuard(localStorage);
   function flushDraft(): void {
     clearTimeout(draftTimer);
     draftTimer = undefined;
-    if (!bufferOpen) return;
+    if (!bufferOpen || !sameAccount()) return;
     const key = bufferKey();
     if (dirty()) {
       const base = selected() === null ? {} : { base: draftBase() };

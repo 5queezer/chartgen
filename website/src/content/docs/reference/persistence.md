@@ -12,7 +12,7 @@ before launch.
 | `alerts.json` | `set_alert`, `cancel_alert`, fired alerts | JSON array, atomic replace |
 | `trades.log` | Order lifecycle + alert triggers | Append-only text |
 | `subscriptions.json` | `subscribe_notifications`, `unsubscribe_notifications` | JSON map keyed by token |
-| `chartgen.db` | `/register` and `/token` on the HTTP server; sign-in, when configured; scripted indicators, with `CHARTGEN_SCRIPTING=1` (any mode); server alerts, with `CHARTGEN_SERVER_ALERTS=1` | SQLite, path from `CHARTGEN_DB` |
+| `chartgen.db` | `/register` and `/token` on the HTTP server; sign-in, when configured; scripted indicators, with `CHARTGEN_SCRIPTING=1` (any mode); server alerts, with `CHARTGEN_SERVER_ALERTS=1`; each user's workspace, with sign-in | SQLite, path from `CHARTGEN_DB` |
 
 ## `alerts.json`
 
@@ -181,6 +181,21 @@ CREATE TABLE server_settings (       -- vapid_private_key, unless set by env
     name   TEXT PRIMARY KEY,
     value  TEXT NOT NULL
 );
+-- Migration 6: a signed-in user's workspace (ADR-0050).
+CREATE TABLE workspace_docs (
+    user_id     TEXT    NOT NULL,   -- users.id
+    key         TEXT    NOT NULL,   -- the web app's localStorage key
+    value       TEXT,               -- NULL: deleted, kept 90 days, the newest 1000 per user,
+                                    -- so other devices learn of it
+    version     INTEGER NOT NULL,   -- that user's sequence at this write
+    updated_at  INTEGER NOT NULL,   -- unix seconds
+    PRIMARY KEY (user_id, key)
+);
+CREATE TABLE workspace_users (
+    user_id  TEXT    PRIMARY KEY,
+    seq      INTEGER NOT NULL,      -- that user's last version
+    bytes    INTEGER NOT NULL       -- their documents' total, for the limit
+);
 ```
 
 A fire writes the alert's new state and its delivery in one transaction, before
@@ -217,3 +232,12 @@ approvals of clients no longer registered, are deleted at startup. Provider toke
 secrets are never stored, and neither are emails, except that a Google account without a
 name is shown by its verified email. Deleting a user is by hand, with the server stopped:
 their rows in these tables, `user_indicators` and `server_alerts`.
+
+To remove a user's workspace by hand, with the server stopped, delete their rows from both
+tables. Their devices then send what they still have as new, so sign them out first if it
+should stay gone:
+
+```sql
+DELETE FROM workspace_docs WHERE user_id = 'github:123';
+DELETE FROM workspace_users WHERE user_id = 'github:123';
+```

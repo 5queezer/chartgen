@@ -25,6 +25,7 @@ use chartgen::scripting;
 
 mod listener;
 mod signin;
+mod workspace;
 
 /// The most any request may send, unless its route says otherwise. A script is at most
 /// 64 KiB, or twice that escaped in JSON.
@@ -1738,6 +1739,10 @@ pub async fn run_server(port: u16, engine: Option<Arc<RwLock<TradingEngine>>>) {
         .route("/oauth/logout", post(signin::logout))
         .route("/oauth/signed-out", get(signin::signed_out))
         .route("/oauth/me", get(signin::me))
+        .route(
+            "/workspace/sync",
+            post(workspace::sync).layer(DefaultBodyLimit::max(workspace::MAX_BODY_BYTES)),
+        )
         .route("/favicon.ico", get(favicon_handler))
         .route("/favicon.svg", get(favicon_handler))
         // MCP endpoints — Claude.ai may try root, /mcp, /message, or /sse

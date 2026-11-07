@@ -8,6 +8,7 @@
 import { createSignal } from "solid-js";
 
 import { isColor } from "../lib/color";
+import { EVICTED_KEY, forgetEvicted, merge } from "../lib/workspaceSync";
 
 export const DRAWING_NAMES = [
   "segment",
@@ -386,24 +387,59 @@ export function setEvictionListener(fn: (symbol: string) => void): void {
 }
 
 /** Move `symbol` to the front of the LRU index (or drop it); evict beyond MAX_SYMBOLS. */
+function readEvicted(): string[] {
+  try {
+    const raw = JSON.parse(localStorage.getItem(EVICTED_KEY) ?? "[]") as unknown;
+    return Array.isArray(raw) ? raw.filter((x): x is string => typeof x === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
+function noLongerEvicted(symbol: string): void {
+  const evicted = readEvicted();
+  if (!evicted.includes(symbol)) return;
+  const rest = evicted.filter((s) => s !== symbol);
+  if (rest.length === 0) localStorage.removeItem(EVICTED_KEY);
+  else localStorage.setItem(EVICTED_KEY, JSON.stringify(rest));
+}
+
 function touch(symbol: string, keep: boolean): void {
   const rest = readIndex().filter((s) => s !== symbol);
   const index = keep ? [symbol, ...rest] : rest;
   for (const evicted of index.splice(MAX_SYMBOLS)) {
     localStorage.removeItem(storageKey(evicted));
+    forgetEvicted(localStorage, storageKey(evicted));
+    localStorage.setItem(
+      EVICTED_KEY,
+      JSON.stringify([...readEvicted().filter((s) => s !== evicted), evicted]),
+    );
     onEvict?.(evicted);
   }
   localStorage.setItem(INDEX_KEY, JSON.stringify(index));
 }
+
+/**
+ * What this page's charts hold per symbol, as last loaded or saved. Another tab on the
+ * symbol has its own, so what is stored can have moved on from this: a save takes away
+ * only what this page saw and removed, or one tab would remove the other's drawings, and
+ * with a signed-in user on every device (ADR-0050).
+ */
+const inThisPage = new Map<string, string | null>();
 
 /** A symbol's stored drawings. `touch: false` reads without marking the symbol as used (alert evaluation). */
 export function loadDrawings(symbol: string, touchIndex = true): DrawingRecord[] {
   if (typeof localStorage === "undefined") return [];
   try {
     const raw = localStorage.getItem(storageKey(symbol));
-    if (raw === null) return [];
+    if (raw === null) {
+      if (touchIndex) inThisPage.set(symbol, null);
+      return [];
+    }
     const records = parseRecords(JSON.parse(raw));
     if (!touchIndex) return records;
+    inThisPage.set(symbol, raw);
+    noLongerEvicted(symbol);
     try {
       touch(symbol, true);
     } catch {
@@ -434,18 +470,28 @@ export function saveDrawings(
 ): boolean {
   if (typeof localStorage === "undefined") return true;
   try {
-    if (records.length === 0) {
-      localStorage.removeItem(storageKey(symbol));
+    const key = storageKey(symbol);
+    const mine = records.length === 0 ? null : JSON.stringify(records);
+    const stored = localStorage.getItem(key);
+    const seen = inThisPage.has(symbol) ? (inThisPage.get(symbol) ?? null) : stored;
+    // Nothing stored because the LRU dropped it: this page's copy stands. Otherwise someone
+    // deleted them all, and this takes that into account like any other deletion.
+    const dropped = stored === null && readEvicted().includes(symbol);
+    const json = dropped ? mine : merge(key, seen, mine, stored).value;
+    noLongerEvicted(symbol);
+    if (json === null) {
+      localStorage.removeItem(key);
       touch(symbol, false);
+      inThisPage.set(symbol, mine);
       return true;
     }
-    const json = JSON.stringify(records);
     if (json.length > MAX_BYTES) {
       console.warn(`drawings for ${symbol} exceed ${MAX_BYTES} bytes`);
       return false;
     }
-    localStorage.setItem(storageKey(symbol), json);
+    localStorage.setItem(key, json);
     touch(symbol, true);
+    inThisPage.set(symbol, mine);
     return true;
   } catch (err) {
     console.warn("failed to save drawings", err);

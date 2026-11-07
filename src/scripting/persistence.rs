@@ -86,6 +86,22 @@ const MIGRATIONS: &[&str] = &[
         PRIMARY KEY (user_id, client_id)
     );
 ",
+    "
+    CREATE TABLE workspace_docs (
+        user_id     TEXT    NOT NULL,
+        key         TEXT    NOT NULL,
+        value       TEXT,
+        version     INTEGER NOT NULL,
+        updated_at  INTEGER NOT NULL,
+        PRIMARY KEY (user_id, key)
+    );
+    CREATE INDEX workspace_docs_version ON workspace_docs (user_id, version);
+    CREATE TABLE workspace_users (
+        user_id  TEXT    PRIMARY KEY,
+        seq      INTEGER NOT NULL,
+        bytes    INTEGER NOT NULL
+    );
+",
 ];
 
 /// Whether an owner is a signed-in account (ADR-0044).
@@ -109,6 +125,63 @@ pub struct WaitingRows {
     /// Of `scripts`, those whose name the named owner already has, so they cannot move.
     pub name_collisions: usize,
 }
+
+/// What one account may keep in its workspace (ADR-0050).
+#[derive(Clone, Copy, Debug)]
+pub struct WorkspaceLimits {
+    pub doc_bytes: usize,
+    pub user_bytes: i64,
+    pub user_docs: i64,
+    /// Deleted documents remembered per user, the newest. They are outside `user_docs`.
+    pub user_tombstones: i64,
+    pub total_bytes: i64,
+}
+
+/// A write to one document: `value` `None` deletes it, leaving a tombstone so that
+/// other devices learn of it. `base_version` is the version it was made against.
+#[derive(Clone, Debug, PartialEq)]
+pub struct WorkspaceWrite {
+    pub key: String,
+    pub value: Option<String>,
+    pub base_version: i64,
+}
+
+/// What became of one write.
+#[derive(Clone, Debug, PartialEq)]
+pub enum WorkspaceOutcome {
+    Stored {
+        version: i64,
+    },
+    /// The document moved on: here is what it holds now, to merge with.
+    Conflict {
+        version: i64,
+        value: Option<String>,
+    },
+    TooLarge,
+    OverQuota,
+}
+
+/// A document as it stands.
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
+pub struct WorkspaceDoc {
+    pub key: String,
+    pub value: Option<String>,
+    pub version: i64,
+}
+
+/// The answer to a sync.
+#[derive(Clone, Debug, PartialEq)]
+pub struct WorkspaceSynced {
+    pub outcomes: Vec<WorkspaceOutcome>,
+    pub changes: Vec<WorkspaceDoc>,
+    pub cursor: i64,
+    /// The caller's cursor is past this account's versions: the file was restored or the
+    /// account emptied. `changes` then holds all there is, deletions included.
+    pub restored: bool,
+}
+
+/// How long a deletion is remembered. A device away for longer can bring it back.
+const WORKSPACE_TOMBSTONE_SECS: i64 = 90 * 86_400;
 
 /// A stored script. `meta` is the `ScriptInfo` snapshot taken at register.
 #[derive(Clone, Debug, PartialEq)]
@@ -679,6 +752,149 @@ impl Store {
             name_collisions: waiting()
                 .filter(|(_, name)| taken.contains(name.as_str()))
                 .count(),
+        })
+    }
+
+    /// Apply `writes` for `user` and answer with what became of each, the documents
+    /// changed since `since` other than those just stored, and the new cursor. Every
+    /// statement names the user: this is the isolation between accounts (ADR-0050). One
+    /// transaction, so a failure leaves nothing half done.
+    pub fn workspace_sync(
+        &self,
+        user: &str,
+        since: i64,
+        writes: &[WorkspaceWrite],
+        limits: &WorkspaceLimits,
+    ) -> rusqlite::Result<WorkspaceSynced> {
+        let mut conn = self.conn();
+        let tx = conn.transaction()?;
+        let now = chrono::Utc::now().timestamp();
+        let (mut seq, mut bytes): (i64, i64) = tx
+            .query_row(
+                "SELECT seq, bytes FROM workspace_users WHERE user_id = ?1",
+                params![user],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?
+            .unwrap_or((0, 0));
+        // A cursor from before this file was restored or the account emptied.
+        let restored = since > seq;
+        // A device with no cursor has nothing to delete, so it is told of no deletions.
+        let with_tombstones = since > 0;
+        let since = if restored { 0 } else { since };
+        if !writes.is_empty() {
+            tx.execute(
+                "DELETE FROM workspace_docs
+                 WHERE user_id = ?1 AND value IS NULL AND updated_at < ?2",
+                params![user, now - WORKSPACE_TOMBSTONE_SECS],
+            )?;
+        }
+        let mut docs: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM workspace_docs WHERE user_id = ?1 AND value IS NOT NULL",
+            params![user],
+            |r| r.get(0),
+        )?;
+        let mut total: i64 = tx.query_row(
+            "SELECT COALESCE(SUM(bytes), 0) FROM workspace_users",
+            [],
+            |r| r.get(0),
+        )?;
+        let mut outcomes = Vec::with_capacity(writes.len());
+        let mut stored = HashSet::new();
+        for write in writes {
+            let current: Option<(Option<String>, i64)> = tx
+                .query_row(
+                    "SELECT value, version FROM workspace_docs WHERE user_id = ?1 AND key = ?2",
+                    params![user, write.key],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .optional()?;
+            let (value, version) = current.unwrap_or((None, 0));
+            // Already so, as a retry after a lost answer or another tab's same write is.
+            if value == write.value {
+                stored.insert(write.key.as_str());
+                outcomes.push(WorkspaceOutcome::Stored { version });
+                continue;
+            }
+            if write.base_version != version {
+                outcomes.push(WorkspaceOutcome::Conflict { version, value });
+                continue;
+            }
+            let new_len = write.value.as_ref().map_or(0, String::len);
+            if new_len > limits.doc_bytes {
+                outcomes.push(WorkspaceOutcome::TooLarge);
+                continue;
+            }
+            let delta = new_len as i64 - value.as_ref().map_or(0, String::len) as i64;
+            let docs_delta = i64::from(write.value.is_some()) - i64::from(value.is_some());
+            // The last tenth of the total is for accounts already here, so that a file
+            // filling up with new accounts leaves those working for a while yet.
+            let room = if docs == 0 {
+                limits.total_bytes - limits.total_bytes / 10
+            } else {
+                limits.total_bytes
+            };
+            if (delta > 0 && (bytes + delta > limits.user_bytes || total + delta > room))
+                || (docs_delta > 0 && docs >= limits.user_docs)
+            {
+                outcomes.push(WorkspaceOutcome::OverQuota);
+                continue;
+            }
+            seq += 1;
+            bytes += delta;
+            total += delta;
+            docs += docs_delta;
+            tx.execute(
+                "INSERT INTO workspace_docs (user_id, key, value, version, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5)
+                 ON CONFLICT (user_id, key) DO UPDATE SET
+                     value = excluded.value, version = excluded.version,
+                     updated_at = excluded.updated_at",
+                params![user, write.key, write.value, seq, now],
+            )?;
+            stored.insert(write.key.as_str());
+            outcomes.push(WorkspaceOutcome::Stored { version: seq });
+        }
+        tx.execute(
+            "INSERT INTO workspace_users (user_id, seq, bytes) VALUES (?1, ?2, ?3)
+             ON CONFLICT (user_id) DO UPDATE SET seq = excluded.seq, bytes = excluded.bytes",
+            params![user, seq, bytes],
+        )?;
+        if !writes.is_empty() {
+            tx.execute(
+                "DELETE FROM workspace_docs
+                 WHERE user_id = ?1 AND value IS NULL AND version NOT IN (
+                     SELECT version FROM workspace_docs
+                     WHERE user_id = ?1 AND value IS NULL
+                     ORDER BY version DESC LIMIT ?2)",
+                params![user, limits.user_tombstones],
+            )?;
+        }
+        let changes = {
+            let mut stmt = tx.prepare(
+                "SELECT key, value, version FROM workspace_docs
+                 WHERE user_id = ?1 AND version > ?2 AND (?3 OR value IS NOT NULL)
+                 ORDER BY version",
+            )?;
+            let rows = stmt.query_map(params![user, since, with_tombstones], |r| {
+                Ok(WorkspaceDoc {
+                    key: r.get(0)?,
+                    value: r.get(1)?,
+                    version: r.get(2)?,
+                })
+            })?;
+            rows.filter(|d| {
+                d.as_ref()
+                    .map_or(true, |d| !stored.contains(d.key.as_str()))
+            })
+            .collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        tx.commit()?;
+        Ok(WorkspaceSynced {
+            outcomes,
+            changes,
+            cursor: seq,
+            restored,
         })
     }
 }

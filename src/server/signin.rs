@@ -46,6 +46,14 @@ const MAX_CODES_PER_USER: usize = 20;
 /// grid polling everything makes about 145 a minute per visible window (ADR-0043), so
 /// this leaves room for four.
 pub(super) const MAX_TOOL_CALLS_PER_USER: usize = 600;
+/// Workspace syncs one user can make per `LOGIN_WINDOW`: a tab makes at most one every
+/// few seconds, and each may carry up to the request body limit (ADR-0050).
+const MAX_WORKSPACE_CALLS_PER_USER: usize = 120;
+/// What one account may send in a minute. The limits on what it keeps say nothing about
+/// what it writes, and a document that changes every time is written every time.
+const MAX_WORKSPACE_BYTES_PER_USER: usize = 8 * 1024 * 1024;
+/// Syncs running at once, in all. Each holds up to a few MiB, and accounts are free.
+const MAX_WORKSPACE_SYNCS: usize = 8;
 const PROVIDER_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_NAME_CHARS: usize = 100;
 
@@ -266,6 +274,11 @@ pub(super) struct SignIn {
     flows: HashMap<String, ProviderFlow>,
     login_hits: HashMap<String, Vec<Instant>>,
     tool_calls: HashMap<String, Vec<Instant>>,
+    /// Per user: when, and how many bytes the request held.
+    workspace_calls: HashMap<String, Vec<(Instant, usize)>>,
+    /// Users with a sync running.
+    workspace_running: HashSet<String>,
+    workspace_slots: Arc<tokio::sync::Semaphore>,
 }
 
 /// What a handler must write to the store once it has let go of the OAuth lock.
@@ -417,6 +430,9 @@ impl SignIn {
             flows: HashMap::new(),
             login_hits: HashMap::new(),
             tool_calls: HashMap::new(),
+            workspace_calls: HashMap::new(),
+            workspace_running: HashSet::new(),
+            workspace_slots: Arc::new(tokio::sync::Semaphore::new(MAX_WORKSPACE_SYNCS)),
         }
     }
 
@@ -669,12 +685,76 @@ impl OAuthStore {
             .is_none_or(|s| s.admit_tool_call(&user, Instant::now()))
     }
 
+    /// Let a workspace sync by `user` start: the slot it holds while it runs. Refused
+    /// with how many seconds to wait and why. Each of these is a pause to a device: what
+    /// it has stays and goes out later.
+    pub(super) fn admit_workspace_call(
+        &mut self,
+        user: &str,
+    ) -> Result<tokio::sync::OwnedSemaphorePermit, (u64, &'static str)> {
+        let Some(signin) = self.signin.as_mut() else {
+            return Err((60, "no sign-in"));
+        };
+        if signin.workspace_running.contains(user) {
+            return Err((1, "a sync of this account is running"));
+        }
+        let now = Instant::now();
+        signin.workspace_calls.retain(|_, hits| {
+            hits.retain(|(t, _)| now.duration_since(*t) < LOGIN_WINDOW);
+            !hits.is_empty()
+        });
+        let hits = signin.workspace_calls.entry(user.to_owned()).or_default();
+        if hits.len() >= MAX_WORKSPACE_CALLS_PER_USER {
+            return Err((60, "too many sync requests"));
+        }
+        if hits.iter().map(|(_, bytes)| bytes).sum::<usize>() >= MAX_WORKSPACE_BYTES_PER_USER {
+            return Err((60, "too many bytes sent in a minute"));
+        }
+        let Ok(slot) = signin.workspace_slots.clone().try_acquire_owned() else {
+            return Err((1, "too many syncs are running"));
+        };
+        hits.push((now, 0));
+        signin.workspace_running.insert(user.to_owned());
+        Ok(slot)
+    }
+
+    /// Count what the running request of `user` turned out to hold.
+    pub(super) fn charge_workspace_bytes(&mut self, user: &str, bytes: usize) {
+        let hit = self
+            .signin
+            .as_mut()
+            .and_then(|s| s.workspace_calls.get_mut(user))
+            .and_then(|hits| hits.last_mut());
+        if let Some(hit) = hit {
+            hit.1 = bytes;
+        }
+    }
+
+    /// A running sync of `user` is taking a place for a client that neither sends nor reads.
+    pub(super) fn workspace_call_stalled(&mut self, user: &str) {
+        self.charge_workspace_bytes(user, MAX_WORKSPACE_BYTES_PER_USER);
+    }
+
+    pub(super) fn workspace_call_finished(&mut self, user: &str) {
+        if let Some(signin) = self.signin.as_mut() {
+            signin.workspace_running.remove(user);
+        }
+    }
+
     /// `(display name, provider slug)` of a signed-in user.
     pub(super) fn user_profile(&self, user: &str) -> Option<(String, String)> {
         let signin = self.signin.as_ref()?;
         let name = signin.users.get(user)?.clone();
         let provider = user.split(':').next().unwrap_or_default().to_string();
         Some((name, provider))
+    }
+
+    /// The user of a token only the web app can hold: its code went to our own root
+    /// (`is_first_party`), whoever registered the client.
+    pub(super) fn app_user_for_token(&self, token: &str) -> Option<String> {
+        let user = self.tokens.get(token)?.user.as_ref()?;
+        user.session.as_ref()?;
+        Some(user.id.clone())
     }
 
     /// Issue a code for `request` to `user`; the answer is the redirect to the client.
@@ -1524,10 +1604,11 @@ pub(super) async fn me(State(state): State<SharedState>, headers: HeaderMap) -> 
         return Json(json!({ "sign_in": false, "user": null })).into_response();
     }
     let user = extract_bearer_token(&headers).and_then(|t| s.user_for_token(t));
-    match user.and_then(|u| s.user_profile(&u)) {
-        Some((name, provider)) => {
-            Json(json!({ "sign_in": true, "user": { "name": name, "provider": provider } }))
-                .into_response()
+    let profile = user.and_then(|id| s.user_profile(&id).map(|p| (id, p)));
+    match profile {
+        Some((id, (name, provider))) => {
+            let user = json!({ "id": id, "name": name, "provider": provider });
+            Json(json!({ "sign_in": true, "user": user })).into_response()
         }
         None => (
             StatusCode::UNAUTHORIZED,

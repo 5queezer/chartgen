@@ -161,6 +161,18 @@ such value.
 Turning sign-in off again means removing the provider variables. Users' scripts and alerts stay in
 the file, out of reach until it is turned back on, and those alerts expire after 30 days.
 
+### Each user's workspace
+
+With sign-in on, a user's settings, layouts, watchlists, drawings and browser alerts are stored in
+`chartgen.db`, so keep the `~/.chartgen` volume. There is nothing to set. Each document may be
+512 KiB, each user 2 MiB and 1000 documents, and all users together 1 GiB, past which nobody's
+documents grow and existing ones stay; new accounts stop at nine tenths of it. Each user may send
+8 MiB and 120 requests a minute, one at a time, with 8 running at once in all. Under that load from
+ten accounts, a debug build stayed under 97 MB in a 256 MiB container. A build without the `scripting` feature has no store: the app
+then keeps each account's data apart in the browser and syncs nothing
+([ADR-0050](/chartgen/decisions/0050-per-user-workspace-sync/)). Back up the file as you would any
+user data.
+
 ### Server alerts
 
 `CHARTGEN_SERVER_ALERTS` is off by default. With open registration, leave it off, or turn it on

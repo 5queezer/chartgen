@@ -71,10 +71,11 @@ one and link both ways.
 | [0041](/chartgen/decisions/0041-script-editor-in-the-web-app/) | Script editor in the web app | Accepted | 2026-11-06 |
 | [0042](/chartgen/decisions/0042-server-side-alerts/) | Alerts that run on the server, with webhooks | Accepted | 2026-11-06 |
 | [0043](/chartgen/decisions/0043-multi-chart-grid/) | Multi-chart grid: per-pane store instances behind an active-chart API | Accepted | 2026-11-06 |
-| [0044](/chartgen/decisions/0044-sign-in-through-github-and-google/) | Sign-in through GitHub and Google | Accepted | 2026-11-06 |
+| [0044](/chartgen/decisions/0044-sign-in-through-github-and-google/) | Sign-in through GitHub and Google | Accepted; superseded in part by [0050](/chartgen/decisions/0050-per-user-workspace-sync/) | 2026-11-06 |
 | [0045](/chartgen/decisions/0045-web-push-for-server-alerts/) | Browser push for server alerts | Accepted | 2026-11-06 |
 | [0046](/chartgen/decisions/0046-pattern-detection/) | Pattern detection: candlesticks, chart patterns, auto fib | Accepted | 2026-11-06 |
 | [0047](/chartgen/decisions/0047-price-based-charts/) | Price-based charts: Renko, Kagi, Point & Figure, Line Break, Range | Accepted | 2026-11-06 |
 | [0048](/chartgen/decisions/0048-order-flow/) | Order flow from lower-timeframe bars: footprints, TPO, volume profiles | Accepted | 2026-11-06 |
 | [0049](/chartgen/decisions/0049-one-kline-read-per-symbol/) | One Binance kline read per symbol and interval | Accepted | 2026-11-06 |
+| [0050](/chartgen/decisions/0050-per-user-workspace-sync/) | A signed-in user's workspace, on any device | Accepted | 2026-11-07 |
 | [0051](/chartgen/decisions/0051-bounded-connections/) | What one connection may cost | Accepted | 2026-11-07 |

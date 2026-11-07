@@ -32,7 +32,7 @@ const BASE_URL =
   (import.meta.env.VITE_CHARTGEN_BASE_URL as string | undefined) ?? "";
 
 /** Absolute URL relative to the chartgen origin (or same-origin if unset). */
-function url(path: string): string {
+export function url(path: string): string {
   if (BASE_URL) {
     return `${BASE_URL.replace(/\/$/, "")}${path}`;
   }
@@ -67,7 +67,7 @@ interface PkceState {
 
 const SignedInSchema = z.object({
   sign_in: z.boolean(),
-  user: z.object({ name: z.string(), provider: z.string() }).nullable(),
+  user: z.object({ id: z.string(), name: z.string(), provider: z.string() }).nullable(),
 });
 
 /** Who this tab is signed in as (ADR-0044). */
@@ -437,18 +437,25 @@ function goToSignedOutPage(): void {
   window.location.assign(url("/oauth/signed-out"));
 }
 
+/** The token in hand, without starting a sign-in for lack of one. */
+export const currentAccessToken = (): string | null => cachedAccessToken;
+
 /**
- * Who the current token belongs to, for the header. `null` without a token, on a
- * server without sign-in, and when it cannot be told: the header then shows no
- * user, and the next MCP call deals with a token that went stale.
+ * Whether this server has sign-in, and who the token in hand belongs to, if any
+ * (ADR-0050 decides on this before any store loads). Rejects when it cannot be
+ * told, which says nothing about either.
  */
-export async function fetchSignedInUser(): Promise<SignedInUser | null> {
-  if (cachedAccessToken === null) return null;
+export async function fetchSignIn(
+  signal: AbortSignal,
+): Promise<z.infer<typeof SignedInSchema>> {
   const res = await fetch(url("/oauth/me"), {
-    headers: { Authorization: `Bearer ${cachedAccessToken}` },
+    signal,
+    headers:
+      cachedAccessToken === null ? {} : { Authorization: `Bearer ${cachedAccessToken}` },
   });
-  if (!res.ok) return null;
-  return SignedInSchema.parse(await res.json()).user;
+  // With sign-in on and no valid token this is a 401 that still says so.
+  if (!res.ok && res.status !== 401) throw new Error(`/oauth/me answered ${res.status}`);
+  return SignedInSchema.parse(await res.json());
 }
 
 /**
@@ -456,9 +463,9 @@ export async function fetchSignedInUser(): Promise<SignedInUser | null> {
  * app would sign in again at once. The other tabs are told before the request,
  * because the request ends their tokens, and one polling in that moment would
  * sign in again. So if it fails they have left anyway, with a way back. Rejects
- * if it failed, and this tab stays as it was.
+ * if it failed, and this tab stays as it was. `beforeLeaving` runs once it worked.
  */
-export async function signOut(): Promise<void> {
+export async function signOut(beforeLeaving?: () => void): Promise<void> {
   signingOut = true;
   try {
     localStorage.setItem(LS_SIGNED_OUT, String(Date.now()));
@@ -471,6 +478,7 @@ export async function signOut(): Promise<void> {
     signingOut = false;
     throw err;
   }
+  beforeLeaving?.();
   goToSignedOutPage();
 }
 

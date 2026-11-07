@@ -845,7 +845,28 @@ fn http_exact(
     s.read_to_string(&mut resp).unwrap();
     let (head, body) = resp.split_once("\r\n\r\n").unwrap();
     let status = head.split(' ').nth(1).unwrap().parse().unwrap();
-    (status, head.to_string(), body.to_string())
+    let chunked = head
+        .to_ascii_lowercase()
+        .contains("transfer-encoding: chunked");
+    let body = if chunked {
+        unchunked(body)
+    } else {
+        body.to_string()
+    };
+    (status, head.to_string(), body)
+}
+
+fn unchunked(mut rest: &str) -> String {
+    let mut body = String::new();
+    while let Some((size, after)) = rest.split_once("\r\n") {
+        let size = usize::from_str_radix(size, 16).unwrap();
+        if size == 0 {
+            break;
+        }
+        body.push_str(&after[..size]);
+        rest = &after[size + 2..];
+    }
+    body
 }
 
 const HTML: &str = "Accept: text/html,application/xhtml+xml,*/*;q=0.8";
@@ -5670,4 +5691,692 @@ mod signin_server_alerts {
         let got = open_push(&bodies.lock().unwrap()[1], &key, &auth);
         assert_eq!(got["alert_id"], alert["id"]);
     }
+}
+
+// ===========================================================================
+// 15. Per-user workspace documents (ADR-0050)
+// ===========================================================================
+
+/// `POST /workspace/sync` with this token: (status, JSON or null).
+fn workspace(port: u16, token: Option<&str>, body: serde_json::Value) -> (u16, serde_json::Value) {
+    let auth = token.map(|t| format!("Authorization: Bearer {t}"));
+    let mut headers = vec![JSON_POST[0], JSON_POST[1]];
+    if let Some(auth) = &auth {
+        headers.push(auth);
+    }
+    let (st, _, resp) = http(port, "POST", "/workspace/sync", &headers, &body.to_string());
+    (st, serde_json::from_str(&resp).unwrap_or_default())
+}
+
+#[cfg(feature = "scripting")]
+fn write_doc(key: &str, value: Option<&str>, base: i64) -> serde_json::Value {
+    serde_json::json!({ "key": key, "value": value, "base_version": base })
+}
+
+/// What an account holds, as a device with nothing yet would be told.
+#[cfg(feature = "scripting")]
+fn docs_of(port: u16, token: &str) -> std::collections::HashMap<String, serde_json::Value> {
+    let (st, body) = workspace(port, Some(token), serde_json::json!({ "since": 0 }));
+    assert_eq!(st, 200, "{body}");
+    body["changes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|d| (d["key"].as_str().unwrap().to_string(), d["value"].clone()))
+        .collect()
+}
+
+/// Several clients of one user share one workspace. Two users never see or touch each
+/// other's, under the same key, and there is nothing in the request to name another by.
+#[cfg(feature = "scripting")]
+#[test]
+fn test_workspace_is_per_user_across_clients() {
+    let fake = FakeProvider::start();
+    let srv = signin_server("workspace-users", &fake, &["github"]);
+    let p = srv.port;
+    let mut ann = Browser::new(p);
+    let phone = web_sign_in(&mut ann, &fake, "github", profile_of("github", 1, "ann"));
+    let mut laptop_browser = Browser::new(p);
+    let laptop = web_sign_in(
+        &mut laptop_browser,
+        &fake,
+        "github",
+        profile_of("github", 1, "ann"),
+    );
+    let mut bob = Browser::new(p);
+    let his = web_sign_in(&mut bob, &fake, "github", profile_of("github", 2, "bob"));
+    assert_ne!(phone, laptop, "two clients, two tokens");
+
+    let key = "chartgen.chartSettings";
+    let (st, body) = workspace(
+        p,
+        Some(&phone),
+        serde_json::json!({ "since": 0, "writes": [write_doc(key, Some("anns"), 0)] }),
+    );
+    assert_eq!(st, 200, "{body}");
+    assert_eq!(body["results"][0]["status"], "ok");
+
+    assert_eq!(docs_of(p, &laptop)[key], "anns", "her other client");
+    assert!(docs_of(p, &his).is_empty(), "nothing of hers for him");
+
+    // Bob writes the same key: his own document, at his own version.
+    let (_, body) = workspace(
+        p,
+        Some(&his),
+        serde_json::json!({ "since": 0, "writes": [write_doc(key, Some("bobs"), 0)] }),
+    );
+    assert_eq!(body["results"][0]["status"], "ok", "{body}");
+    assert_eq!(docs_of(p, &his)[key], "bobs");
+    assert_eq!(docs_of(p, &phone)[key], "anns");
+    // Fields naming someone else are not a thing the server reads.
+    let (_, body) = workspace(
+        p,
+        Some(&his),
+        serde_json::json!({ "user": "github:1", "user_id": "github:1", "since": 0 }),
+    );
+    assert_eq!(body["changes"][0]["value"], "bobs", "{body}");
+    assert_eq!(body["changes"].as_array().unwrap().len(), 1);
+}
+
+/// Two devices on one version: the second is told what the first wrote, and nothing of
+/// the first's is replaced until it has seen it.
+#[cfg(feature = "scripting")]
+#[test]
+fn test_workspace_conflict_answers_with_the_current_document() {
+    let fake = FakeProvider::start();
+    let srv = signin_server("workspace-conflict", &fake, &["github"]);
+    let p = srv.port;
+    let mut a = Browser::new(p);
+    let first = web_sign_in(&mut a, &fake, "github", profile_of("github", 1, "ann"));
+    let mut b = Browser::new(p);
+    let second = web_sign_in(&mut b, &fake, "github", profile_of("github", 1, "ann"));
+    let key = "chartgen.drawings.BTCUSDT";
+    let (_, body) = workspace(
+        p,
+        Some(&first),
+        serde_json::json!({ "since": 0, "writes": [write_doc(key, Some("v1"), 0)] }),
+    );
+    let v1 = body["results"][0]["version"].as_i64().unwrap();
+    let (_, body) = workspace(
+        p,
+        Some(&first),
+        serde_json::json!({ "since": v1, "writes": [write_doc(key, Some("v2"), v1)] }),
+    );
+    let v2 = body["results"][0]["version"].as_i64().unwrap();
+
+    let (st, body) = workspace(
+        p,
+        Some(&second),
+        serde_json::json!({ "since": v1, "writes": [write_doc(key, Some("stale"), v1)] }),
+    );
+    assert_eq!(st, 200);
+    assert_eq!(body["results"][0]["status"], "conflict", "{body}");
+    assert_eq!(body["results"][0]["value"], "v2");
+    assert_eq!(body["results"][0]["version"], v2);
+    assert_eq!(docs_of(p, &first)[key], "v2", "nothing replaced");
+}
+
+/// With the server restarted and no browser connected, everything is there for the next
+/// device, and for a new client of that account. Tokens do not survive; the data does.
+#[cfg(feature = "scripting")]
+#[test]
+fn test_workspace_survives_a_restart_with_no_browser_connected() {
+    let fake = FakeProvider::start();
+    let port = free_port();
+    let db = store_path("workspace-restart");
+    let start = |fake: &FakeProvider| {
+        start_server(
+            signin_command(port, &db, fake, &["github"], None, false),
+            port,
+        )
+    };
+    let srv = start(&fake);
+    let mut ann = Browser::new(port);
+    let token = web_sign_in(&mut ann, &fake, "github", profile_of("github", 1, "ann"));
+    let (_, body) = workspace(
+        port,
+        Some(&token),
+        serde_json::json!({ "since": 0, "writes": [
+            write_doc("chartgen.layouts", Some("{\"items\":[]}"), 0),
+            write_doc("chartgen.alerts.list", Some("[]"), 0),
+        ]}),
+    );
+    let cursor = body["cursor"].as_i64().unwrap();
+    assert_eq!(cursor, 2, "{body}");
+    drop(srv);
+    let _srv = start(&fake);
+    assert_eq!(
+        workspace(port, Some(&token), serde_json::json!({ "since": 0 })).0,
+        401
+    );
+
+    let mut phone = Browser::new(port);
+    let on_phone = web_sign_in(&mut phone, &fake, "github", profile_of("github", 1, "ann"));
+    let docs = docs_of(port, &on_phone);
+    assert_eq!(docs["chartgen.alerts.list"], "[]");
+    assert_eq!(docs["chartgen.layouts"], "{\"items\":[]}");
+    // Versions carry on from where they were, so a device's cursor still means something.
+    let (_, body) = workspace(
+        port,
+        Some(&on_phone),
+        serde_json::json!({ "since": cursor, "writes": [write_doc("chartgen.alerts.list", Some("[1]"), 2)] }),
+    );
+    assert_eq!(body["results"][0]["version"], 3, "{body}");
+}
+
+/// No account, no workspace: no token, a bad one, a signed-out one, and a server with
+/// nothing configured, where it does not exist at all.
+#[test]
+fn test_workspace_needs_a_signed_in_user() {
+    let fake = FakeProvider::start();
+    let srv = signin_server("workspace-auth", &fake, &["github"]);
+    let p = srv.port;
+    let mut b = Browser::new(p);
+    let token = web_sign_in(&mut b, &fake, "github", profile_of("github", 1, "a"));
+    let empty = serde_json::json!({ "since": 0 });
+    assert_eq!(workspace(p, None, empty.clone()).0, 401);
+    assert_eq!(workspace(p, Some("nonsense"), empty.clone()).0, 401);
+    // A build with no store has nowhere to keep it: the app stays local, and says nothing.
+    let signed_in = if cfg!(feature = "scripting") {
+        200
+    } else {
+        404
+    };
+    assert_eq!(workspace(p, Some(&token), empty.clone()).0, signed_in);
+    assert_eq!(b.request("POST", "/oauth/logout", &[], "").status, 204);
+    assert_eq!(
+        workspace(p, Some(&token), empty.clone()).0,
+        401,
+        "signed out"
+    );
+
+    let open = spawn_server(None);
+    let client = register_external(open.port);
+    let token = sign_in(open.port, &client);
+    assert_eq!(workspace(open.port, Some(&token), empty.clone()).0, 404);
+    assert_eq!(workspace(open.port, None, empty).0, 404);
+}
+
+/// A request whose headers are in and whose body has only begun, so it stays running.
+#[cfg(feature = "scripting")]
+fn start_workspace_upload(port: u16, token: &str) -> std::net::TcpStream {
+    use std::io::Write;
+    let mut s = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+    let body = serde_json::json!({ "since": 0 }).to_string();
+    write!(
+        s,
+        "POST /workspace/sync HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\
+         Authorization: Bearer {token}\r\nContent-Type: application/json\r\n\
+         Content-Length: {}\r\n\r\n{}",
+        body.len(),
+        &body[..1]
+    )
+    .unwrap();
+    s.flush().unwrap();
+    // The server must have let it in before the test goes on.
+    std::thread::sleep(std::time::Duration::from_millis(150));
+    s
+}
+
+#[cfg(feature = "scripting")]
+fn finish_workspace_upload(mut s: std::net::TcpStream) -> String {
+    use std::io::{Read, Write};
+    let body = serde_json::json!({ "since": 0 }).to_string();
+    s.write_all(&body.as_bytes()[1..]).unwrap();
+    let mut answer = String::new();
+    s.read_to_string(&mut answer).unwrap();
+    answer
+}
+
+/// One sync per user at a time, and a caller past either limit costs no body read.
+#[cfg(feature = "scripting")]
+#[test]
+fn test_workspace_runs_one_sync_per_user() {
+    let fake = FakeProvider::start();
+    let srv = signin_server("workspace-one", &fake, &["github"]);
+    let p = srv.port;
+    let mut a = Browser::new(p);
+    let hers = web_sign_in(&mut a, &fake, "github", profile_of("github", 1, "a"));
+    let mut b = Browser::new(p);
+    let his = web_sign_in(&mut b, &fake, "github", profile_of("github", 2, "b"));
+    let empty = serde_json::json!({ "since": 0 });
+
+    let running = start_workspace_upload(p, &hers);
+    let (st, _, _) = http(
+        p,
+        "POST",
+        "/workspace/sync",
+        &[
+            JSON_POST[0],
+            JSON_POST[1],
+            &format!("Authorization: Bearer {hers}"),
+        ],
+        &empty.to_string(),
+    );
+    assert_eq!(st, 429, "her second one");
+    assert_eq!(workspace(p, Some(&his), empty.clone()).0, 200, "not his");
+    assert!(finish_workspace_upload(running).contains("\"cursor\""));
+    assert_eq!(
+        workspace(p, Some(&hers), empty.clone()).0,
+        200,
+        "free again"
+    );
+
+    // A client that hangs up frees it too.
+    drop(start_workspace_upload(p, &hers));
+    std::thread::sleep(std::time::Duration::from_millis(150));
+    assert_eq!(workspace(p, Some(&hers), empty).0, 200);
+}
+
+/// A client that starts a body and stops does not keep its place.
+#[cfg(feature = "scripting")]
+#[test]
+fn test_workspace_gives_up_on_a_body_that_does_not_come() {
+    use std::io::Read;
+    let fake = FakeProvider::start();
+    let srv = signin_server("workspace-slow", &fake, &["github"]);
+    let p = srv.port;
+    let mut b = Browser::new(p);
+    let token = web_sign_in(&mut b, &fake, "github", profile_of("github", 1, "a"));
+    let mut stuck = start_workspace_upload(p, &token);
+    std::thread::sleep(std::time::Duration::from_secs(11));
+    stuck
+        .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+        .unwrap();
+    let mut answer = String::new();
+    stuck.read_to_string(&mut answer).unwrap();
+    assert!(answer.starts_with("HTTP/1.1 408"), "{answer}");
+    let empty = serde_json::json!({ "since": 0 });
+    assert_eq!(
+        workspace(p, Some(&token), empty).0,
+        429,
+        "holding a place like that costs the rest of the minute"
+    );
+}
+
+/// A client that does not read keeps its account's sync running while its answer is on its
+/// way, and all eight of those do not keep anyone else out for long.
+#[cfg(feature = "scripting")]
+#[test]
+fn test_workspace_unread_answers_hold_their_place_for_a_time() {
+    use std::io::Write;
+    let fake = FakeProvider::start();
+    let srv = signin_server("workspace-unread", &fake, &["github"]);
+    let p = srv.port;
+    let doc = "x".repeat(500 * 1024);
+    let mut tokens = Vec::new();
+    for id in 1..10 {
+        let mut b = Browser::new(p);
+        tokens.push(web_sign_in(
+            &mut b,
+            &fake,
+            "github",
+            profile_of("github", id, "u"),
+        ));
+    }
+    let empty = serde_json::json!({ "since": 0 });
+    for token in &tokens[..8] {
+        for i in 0..4 {
+            let key = format!("chartgen.pane.{i}.big");
+            let body =
+                serde_json::json!({ "since": 0, "writes": [write_doc(&key, Some(&doc), 0)] });
+            assert_eq!(
+                workspace(p, Some(token), body).1["results"][0]["status"],
+                "ok"
+            );
+        }
+    }
+    let unread: Vec<_> = tokens[..8]
+        .iter()
+        .map(|token| {
+            let mut s = small_window_client(p);
+            write!(
+                s,
+                "POST /workspace/sync HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\n\
+                 Authorization: Bearer {token}\r\nContent-Length: 11\r\n\r\n{{\"since\":0}}"
+            )
+            .unwrap();
+            s
+        })
+        .collect();
+    std::thread::sleep(std::time::Duration::from_millis(500));
+
+    assert_eq!(
+        workspace(p, Some(&tokens[0]), empty.clone()).0,
+        429,
+        "its own next one"
+    );
+    assert_eq!(
+        workspace(p, Some(&tokens[8]), empty.clone()).0,
+        429,
+        "all eight taken"
+    );
+    std::thread::sleep(std::time::Duration::from_secs(11));
+    assert_eq!(
+        workspace(p, Some(&tokens[8]), empty.clone()).0,
+        200,
+        "not for long"
+    );
+    drop(unread);
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    assert_eq!(
+        workspace(p, Some(&tokens[0]), empty).0,
+        429,
+        "and it cost those accounts the rest of the minute"
+    );
+}
+
+/// A first sync on a slow line takes longer than a request's share of the syncs. It loses
+/// that, and pays nothing for it, as its answer is moving.
+#[cfg(feature = "scripting")]
+#[test]
+fn test_workspace_a_slow_download_that_keeps_moving_costs_nothing() {
+    use std::io::{Read, Write};
+    let fake = FakeProvider::start();
+    let srv = signin_server("workspace-slow-read", &fake, &["github"]);
+    let p = srv.port;
+    let mut b = Browser::new(p);
+    let token = web_sign_in(&mut b, &fake, "github", profile_of("github", 1, "a"));
+    let doc = "x".repeat(500 * 1024);
+    for i in 0..4 {
+        let key = format!("chartgen.pane.{i}.big");
+        let body = serde_json::json!({ "since": 0, "writes": [write_doc(&key, Some(&doc), 0)] });
+        assert_eq!(
+            workspace(p, Some(&token), body).1["results"][0]["status"],
+            "ok"
+        );
+    }
+    let mut s = small_window_client(p);
+    write!(
+        s,
+        "POST /workspace/sync HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\
+         Content-Type: application/json\r\nAuthorization: Bearer {token}\r\n\
+         Content-Length: 11\r\n\r\n{{\"since\":0}}"
+    )
+    .unwrap();
+    // About 2 MiB in about 14 s.
+    let started = std::time::Instant::now();
+    let mut total = 0;
+    let mut buf = [0u8; 16 * 1024];
+    loop {
+        match s.read(&mut buf).unwrap() {
+            0 => break,
+            n => total += n,
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    assert!(started.elapsed().as_secs() > 11, "{:?}", started.elapsed());
+    assert!(total > 2_000_000, "{total}");
+    let empty = serde_json::json!({ "since": 0 });
+    assert_eq!(workspace(p, Some(&token), empty).0, 200);
+}
+
+/// So many at once in all, however many accounts there are.
+#[cfg(feature = "scripting")]
+#[test]
+fn test_workspace_runs_so_many_syncs_in_all() {
+    let fake = FakeProvider::start();
+    let srv = signin_server("workspace-cap", &fake, &["github"]);
+    let p = srv.port;
+    let mut tokens = Vec::new();
+    for id in 1..10 {
+        let mut b = Browser::new(p);
+        tokens.push(web_sign_in(
+            &mut b,
+            &fake,
+            "github",
+            profile_of("github", id, "u"),
+        ));
+    }
+    let running: Vec<_> = tokens[..8]
+        .iter()
+        .map(|t| start_workspace_upload(p, t))
+        .collect();
+    let empty = serde_json::json!({ "since": 0 });
+    assert_eq!(workspace(p, Some(&tokens[8]), empty.clone()).0, 429);
+    drop(running);
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    assert_eq!(workspace(p, Some(&tokens[8]), empty).0, 200);
+}
+
+/// A body past the limit is refused, and nobody without a valid token has one read at all.
+#[cfg(feature = "scripting")]
+#[test]
+fn test_workspace_body_limit_and_order_of_checks() {
+    let fake = FakeProvider::start();
+    let srv = signin_server("workspace-body", &fake, &["github"]);
+    let p = srv.port;
+    let mut b = Browser::new(p);
+    let token = web_sign_in(&mut b, &fake, "github", profile_of("github", 1, "a"));
+    let auth = format!("Authorization: Bearer {token}");
+    let post = |auth: Option<&str>, body: &str| {
+        let mut headers = vec![JSON_POST[0], JSON_POST[1]];
+        headers.extend(auth);
+        http(p, "POST", "/workspace/sync", &headers, body).0
+    };
+    let huge = "x".repeat(1024 * 1024 + 1);
+    assert_eq!(post(Some(&auth), &huge), 413, "over 1 MiB");
+    assert_eq!(
+        post(None, &huge),
+        401,
+        "junk with no token is no parse error"
+    );
+    assert_eq!(post(Some("Authorization: Bearer no"), "junk"), 401);
+    assert_eq!(post(Some(&auth), "junk"), 400);
+    assert_eq!(post(Some(&auth), r#"{"since":"x"}"#), 422);
+    // Exactly the limit is read and parsed.
+    let mut exact = format!(r#"{{"since":0,"pad":"{}"#, "x".repeat(1024 * 1024));
+    exact.truncate(1024 * 1024 - 2);
+    exact.push_str("\"}");
+    assert_eq!(post(Some(&auth), &exact), 200);
+}
+
+/// What it writes is bounded, not only what it keeps: a pause, with nothing lost.
+#[cfg(feature = "scripting")]
+#[test]
+fn test_workspace_bytes_per_minute_are_bounded() {
+    let fake = FakeProvider::start();
+    let srv = signin_server("workspace-bytes", &fake, &["github"]);
+    let p = srv.port;
+    let mut a = Browser::new(p);
+    let hers = web_sign_in(&mut a, &fake, "github", profile_of("github", 1, "a"));
+    let mut b = Browser::new(p);
+    let his = web_sign_in(&mut b, &fake, "github", profile_of("github", 2, "b"));
+    let key = "chartgen.pane.1.big";
+    let auth = format!("Authorization: Bearer {hers}");
+    let mut refused_at = None;
+    for i in 0..12 {
+        let value = format!("{i}{}", "x".repeat(900 * 1024));
+        let body = serde_json::json!({ "since": 0, "writes": [write_doc(key, Some(&value), 0)] });
+        let (st, head, resp) = http(
+            p,
+            "POST",
+            "/workspace/sync",
+            &[JSON_POST[0], JSON_POST[1], &auth],
+            &body.to_string(),
+        );
+        if st == 429 {
+            assert!(
+                head.to_ascii_lowercase().contains("retry-after: 60"),
+                "{head}"
+            );
+            assert!(resp.contains("bytes"), "{resp}");
+            refused_at = Some(i);
+            break;
+        }
+        assert_eq!(st, 200, "{resp}");
+        let answer: serde_json::Value = serde_json::from_str(&resp).unwrap();
+        let result = &answer["results"][0];
+        assert_eq!(
+            result["status"], "too_large",
+            "over the document limit, and still counted"
+        );
+    }
+    assert_eq!(
+        refused_at,
+        Some(10),
+        "ten of 900 KiB pass 8 MiB, nine do not"
+    );
+    let empty = serde_json::json!({ "since": 0 });
+    assert_eq!(
+        workspace(p, Some(&his), empty).0,
+        200,
+        "not another account"
+    );
+}
+
+/// A cursor past the account's versions is said to be, for a device to send back what the
+/// file does not have.
+#[cfg(feature = "scripting")]
+#[test]
+fn test_workspace_says_when_the_cursor_is_past_it() {
+    let fake = FakeProvider::start();
+    let srv = signin_server("workspace-restored", &fake, &["github"]);
+    let p = srv.port;
+    let mut b = Browser::new(p);
+    let token = web_sign_in(&mut b, &fake, "github", profile_of("github", 1, "a"));
+    let (_, body) = workspace(p, Some(&token), serde_json::json!({ "since": 0 }));
+    assert_eq!(body["restored"], false);
+    let (_, body) = workspace(
+        p,
+        Some(&token),
+        serde_json::json!({ "since": 1, "writes": [write_doc("chartgen.pane.1.a", Some("v"), 0)] }),
+    );
+    assert_eq!(body["restored"], true, "{body}");
+    assert_eq!(body["cursor"], 1, "the write alone would have hidden it");
+}
+
+/// An application the user approved gets the tools and not the browser's data, though
+/// the token is the same user's.
+#[cfg(feature = "scripting")]
+#[test]
+fn test_workspace_is_the_web_apps_alone() {
+    let fake = FakeProvider::start();
+    let srv = signin_server("workspace-third-party", &fake, &["github"]);
+    let p = srv.port;
+    let mut b = Browser::new(p);
+    let own = web_sign_in(&mut b, &fake, "github", profile_of("github", 5, "octo"));
+    let key = "chartgen.alerts.list";
+    let (st, _) = workspace(
+        p,
+        Some(&own),
+        serde_json::json!({ "since": 0, "writes": [write_doc(key, Some("private"), 0)] }),
+    );
+    assert_eq!(st, 200);
+
+    let client = register_client(p, EXTERNAL_REDIRECT);
+    let first = b.authorize(&client, EXTERNAL_REDIRECT, "st");
+    assert!(first.location().starts_with("/oauth/consent?request="));
+    let page = b.get(&first.location());
+    let (request, csrf) = consent_fields(&page.body);
+    let approved = b.request(
+        "POST",
+        "/oauth/consent",
+        &["Content-Type: application/x-www-form-urlencoded"],
+        &format!("request={request}&csrf={csrf}&decision=approve"),
+    );
+    let theirs = token_from(p, &client, EXTERNAL_REDIRECT, &approved.query()["code"]);
+    assert_eq!(me(p, &theirs).1["user"]["id"], "github:5", "the same user");
+
+    let (st, body) = workspace(p, Some(&theirs), serde_json::json!({ "since": 0 }));
+    assert_eq!(
+        (st, &body["changes"]),
+        (403, &serde_json::Value::Null),
+        "{body}"
+    );
+    let (st, _) = workspace(
+        p,
+        Some(&theirs),
+        serde_json::json!({ "since": 0, "writes": [write_doc(key, Some("evil"), 1)] }),
+    );
+    assert_eq!(st, 403);
+    assert_eq!(docs_of(p, &own)[key], "private");
+}
+
+/// Anyone can sign in, so these are what a stranger meets. One document, the user's
+/// total, requests, batches, and keys that are not the app's.
+#[cfg(feature = "scripting")]
+#[test]
+fn test_workspace_limits() {
+    let fake = FakeProvider::start();
+    let srv = signin_server("workspace-limits", &fake, &["github"]);
+    let p = srv.port;
+    let mut b = Browser::new(p);
+    let token = web_sign_in(&mut b, &fake, "github", profile_of("github", 1, "a"));
+    let send = |writes: Vec<serde_json::Value>| {
+        workspace(
+            p,
+            Some(&token),
+            serde_json::json!({ "since": 0, "writes": writes }),
+        )
+    };
+
+    let too_big = "x".repeat(512 * 1024 + 1);
+    let (_, body) = send(vec![write_doc("chartgen.pane.1.a", Some(&too_big), 0)]);
+    assert_eq!(
+        body["results"][0]["status"], "too_large",
+        "{}",
+        body["results"]
+    );
+
+    let (_, body) = send(vec![
+        write_doc("other.key", Some("v"), 0),
+        write_doc("chartgen.sidebar.tab", Some("v"), 0),
+        write_doc("chartgen.pane.1.good", Some("v"), 0),
+    ]);
+    let statuses: Vec<_> = body["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["status"].clone())
+        .collect();
+    assert_eq!(
+        statuses,
+        ["ok", "bad_key", "bad_key"],
+        "the good one still goes through: {body}"
+    );
+
+    let many: Vec<_> = (0..51)
+        .map(|i| write_doc(&format!("chartgen.pane.{i}.k"), Some("v"), 0))
+        .collect();
+    assert_eq!(send(many).0, 400, "too many in one request");
+
+    // 2 MiB per user: four of the largest fit, and the fifth does not.
+    let large = "x".repeat(512 * 1024);
+    let mut refused = None;
+    for i in 0..5 {
+        let (_, body) = send(vec![write_doc(
+            &format!("chartgen.pane.{i}.big"),
+            Some(&large),
+            0,
+        )]);
+        if body["results"][0]["status"] == "quota" {
+            refused = Some(i);
+            break;
+        }
+    }
+    assert_eq!(
+        refused,
+        Some(3),
+        "with the little ones above, the fourth is too many"
+    );
+
+    // Requests per user: the next is refused, and another account is not.
+    let mut other = Browser::new(p);
+    let theirs = web_sign_in(&mut other, &fake, "github", profile_of("github", 2, "b"));
+    let empty = serde_json::json!({ "since": 0 });
+    let mut limited = None;
+    for i in 0..130 {
+        let (st, _) = workspace(p, Some(&token), empty.clone());
+        if st == 429 {
+            limited = Some(i);
+            break;
+        }
+    }
+    assert!(limited.is_some(), "a flood of syncs must be refused");
+    assert_eq!(
+        workspace(p, Some(&theirs), empty).0,
+        200,
+        "not another account"
+    );
 }

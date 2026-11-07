@@ -160,7 +160,7 @@ pub(super) fn call_cost(body: &[u8]) -> u32 {
 
 /// A body comes out in pieces of this, so that hyper asks for the next only when it has
 /// room: what is queued for a slow client stays small, and the last piece says it is out.
-const PIECE: usize = 64 * 1024;
+pub(super) const PIECE: usize = 64 * 1024;
 
 /// `response`, keeping `guard` until hyper has taken its last piece for writing, for a
 /// response that a client does not read. The buffers below that are `MAX_CONNECTIONS`' to
