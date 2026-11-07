@@ -451,7 +451,13 @@ test.describe("a box the server refuses", () => {
         },
       });
     });
-    await pickChartType(page, "Renko");
+    // The menu only: the type is Renko for just as long as the refusal takes to land,
+    // so waiting to see that label is a race the fallback can win. The request says it
+    // was picked.
+    const asked = chartRequest(page, (a) => a.chart_style === "renko");
+    await page.getByRole("button", { name: /^Chart type/ }).click();
+    await page.getByRole("menuitemradio", { name: "Renko", exact: true }).click();
+    await asked;
     await expect(page.getByRole("button", { name: "Chart type: Candles" })).toBeVisible();
     await expect(page.getByTestId("toasts")).toContainText(/no price movement.*candles on BTCUSDT/);
     await expect(page.getByTestId("chart-load-error")).toHaveCount(0);
@@ -516,6 +522,22 @@ test.describe("compare on a price-based chart", () => {
     await pickChartType(page, "Kagi");
     await expect(page.getByTestId("tree-compare-SOLUSDT")).toHaveCount(0);
     await expect.poll(scale).not.toBe("percentage");
+  });
+
+  test("does not call the ratio lock paused", async ({ page }) => {
+    await page.addInitScript(() => {
+      if (!sessionStorage.getItem("seeded")) {
+        sessionStorage.setItem("seeded", "1");
+        localStorage.setItem("chartgen.layout.lockRatio", "true");
+      }
+    });
+    await gotoApp(page, "/?symbol=BTCUSDT&type=renko&compare=SOLUSDT&ind=rsi");
+    await expectBuilt(page, "renko");
+    const box = (await page.locator(".chart-container").first().boundingBox())!;
+    await page.mouse.click(box.x + box.width / 2, box.y + box.height / 3, { button: "right" });
+    await expect(page.getByRole("menuitemcheckbox", { name: /^Lock price to bar ratio/ })).toHaveText(
+      /^Lock price to bar ratio(?!.*paused)/,
+    );
   });
 });
 
