@@ -289,6 +289,66 @@ describe("storage", () => {
     warn.mockRestore();
   });
 
+  describe("another tab on the symbol", () => {
+    const rec = (id: string): DrawingRecord => parseRecord({ ...good, id })!;
+    const stored = (symbol: string) =>
+      (JSON.parse(localStorage.getItem(storageKey(symbol))!) as DrawingRecord[]).map((r) => r.id);
+    /** Another tab: writes what it holds, with nothing of this page's in between. */
+    const otherTabSaves = (symbol: string, ...ids: string[]) =>
+      localStorage.setItem(storageKey(symbol), JSON.stringify(ids.map(rec)));
+
+    it("what it added stays through this page's save", () => {
+      otherTabSaves("TWO", "mine");
+      loadDrawings("TWO");
+      otherTabSaves("TWO", "mine", "theirs");
+      saveDrawings("TWO", [rec("mine"), rec("new")]);
+      expect(stored("TWO")).toEqual(["mine", "new", "theirs"]);
+    });
+
+    it("and through saves after that, this page still not having it", () => {
+      otherTabSaves("TWO", "mine");
+      loadDrawings("TWO");
+      otherTabSaves("TWO", "mine", "theirs");
+      saveDrawings("TWO", [rec("mine"), rec("new")]);
+      saveDrawings("TWO", [rec("mine"), rec("new"), rec("newer")]);
+      expect(stored("TWO")).toEqual(["mine", "new", "newer", "theirs"]);
+    });
+
+    it("what this page removes goes, and what it removes last keeps the other's", () => {
+      otherTabSaves("TWO", "a", "b");
+      loadDrawings("TWO");
+      otherTabSaves("TWO", "a", "b", "theirs");
+      saveDrawings("TWO", [rec("a")]);
+      expect(stored("TWO")).toEqual(["a", "theirs"]);
+      saveDrawings("TWO", []);
+      expect(stored("TWO")).toEqual(["theirs"]);
+    });
+
+    it("what it removed stays removed", () => {
+      otherTabSaves("TWO", "a", "b");
+      loadDrawings("TWO");
+      otherTabSaves("TWO", "a");
+      saveDrawings("TWO", [rec("a"), rec("b"), rec("new")]);
+      expect(stored("TWO")).toEqual(["a", "new"]);
+    });
+
+    it("a page alone behaves as ever, removing the last one removes the key", () => {
+      saveDrawings("ONE", [rec("a")]);
+      saveDrawings("ONE", [rec("b")]);
+      expect(stored("ONE")).toEqual(["b"]);
+      saveDrawings("ONE", []);
+      expect(localStorage.getItem(storageKey("ONE"))).toBeNull();
+    });
+
+    it("a copy dropped from storage does not take this page's with it", () => {
+      otherTabSaves("TWO", "a");
+      loadDrawings("TWO");
+      localStorage.removeItem(storageKey("TWO"));
+      saveDrawings("TWO", [rec("a"), rec("new")]);
+      expect(stored("TWO")).toEqual(["a", "new"]);
+    });
+  });
+
   it("dropping a synced symbol from the LRU sends no deletion (ADR-0050)", () => {
     const recs = [good] as DrawingRecord[];
     saveDrawings("FIRST", recs);

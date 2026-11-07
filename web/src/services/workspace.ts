@@ -52,9 +52,14 @@ const SIGN_OUT_FLUSH_MS = 2_000;
 const BACKOFF_FIRST_MS = 30_000;
 const BACKOFF_MAX_MS = 5 * 60_000;
 const KEEPALIVE_MAX_BYTES = 60_000;
+const BUSY_RETRIES = 3;
+const BUSY_RETRY_MS = 400;
+/** For a tab told to reload to get through the sign-in. */
+const RELOAD_WINDOW_MS = 30_000;
 
 const SyncAnswerSchema = z.object({
   cursor: z.number(),
+  restored: z.boolean(),
   results: z.array(
     z.discriminatedUnion("status", [
       z.object({ key: z.string(), status: z.literal("ok"), version: z.number() }),
@@ -94,6 +99,8 @@ let lastPost = 0;
 let notBefore = 0;
 let backoff = 0;
 let signingOut = false;
+/** The last round found another sync of this account running, which will be over at once. */
+let busy = false;
 /** What the server turned down, so it is not sent again until it changes. */
 const refused = new Map<string, string | null>();
 const isRefused = (key: string, live: string | null): boolean =>
@@ -131,6 +138,7 @@ const REFUSED_BECAUSE = {
 };
 
 async function runRound(force: boolean): Promise<void> {
+  busy = false;
   const s = localStorage;
   const me = account;
   const token = currentAccessToken();
@@ -144,7 +152,6 @@ async function runRound(force: boolean): Promise<void> {
     addNotice(`Your ${docLabel(key)} did not sync: ${REFUSED_BECAUSE.too_large}. It stays in this browser.`);
   }
   if (round.writes.length > 0 || force) {
-    const since = readCursor(s);
     lastPost = Date.now();
     let res: Response;
     try {
@@ -163,6 +170,13 @@ async function runRound(force: boolean): Promise<void> {
       stop();
       return;
     }
+    // A pause, not a problem with the data: it all goes out once the server says so.
+    if (res.status === 429) {
+      const wait = Number(res.headers.get("Retry-After")) || 60;
+      busy = wait <= 1;
+      notBefore = Date.now() + wait * 1000;
+      return;
+    }
     if (!res.ok) {
       backOff();
       return;
@@ -176,7 +190,7 @@ async function runRound(force: boolean): Promise<void> {
     backoff = 0;
     // The account may have changed under a request; its answer is no one else's.
     if (account !== me || isHidden(s, me)) return;
-    const applied = applyAnswer(s, since, round.writes, answer);
+    const applied = applyAnswer(s, round.writes, answer);
     report([], applied.replaced);
     for (const { key, live, status } of applied.refused) {
       refused.set(key, live);
@@ -248,11 +262,29 @@ function guardAccount(me: string): void {
   void locks?.request(TAB_LOCK, { mode: "shared" }, () => new Promise<void>(() => {}));
 }
 
-async function otherTabsRunning(): Promise<boolean> {
+/**
+ * Whether what arrived may go under the stores about to load: not while another tab's
+ * are up, as they would save over it from memory and take that for a deletion. With no
+ * Web Locks, on plain http, there is no telling, so only where no tab can be running on
+ * this account's data: on its first load here, or when every tab was just told to reload.
+ */
+async function mayApply(firstEver: boolean): Promise<boolean> {
   const locks = navigator.locks as LockManager | undefined;
-  if (locks === undefined) return false;
+  if (locks === undefined) {
+    const told = Number(localStorage.getItem(RELOAD) ?? 0);
+    return firstEver || Date.now() - told < RELOAD_WINDOW_MS;
+  }
   const { held } = await locks.query();
-  return held?.some((lock) => lock.name === TAB_LOCK) ?? false;
+  return !(held?.some((lock) => lock.name === TAB_LOCK) ?? false);
+}
+
+/** The first round, with another tab's or the last page's round perhaps still running. */
+async function firstRound(): Promise<void> {
+  await syncRound(true);
+  for (let tries = 0; busy && tries < BUSY_RETRIES; tries++) {
+    await sleep(BUSY_RETRY_MS);
+    await syncRound(true);
+  }
 }
 
 function restoreReturnUrl(): void {
@@ -301,9 +333,10 @@ export async function bootWorkspace(): Promise<Boot> {
     enterAccount(s, who.user.id);
     restoreReturnUrl();
     account = who.user.id;
-    const waiting = readCursor(s) === 0 ? FIRST_EVER_SYNC_TIMEOUT_MS : FIRST_SYNC_TIMEOUT_MS;
-    await Promise.race([syncRound(true), sleep(waiting)]);
-    if (!(await otherTabsRunning())) {
+    const firstEver = readCursor(s) === 0;
+    const waiting = firstEver ? FIRST_EVER_SYNC_TIMEOUT_MS : FIRST_SYNC_TIMEOUT_MS;
+    await Promise.race([firstRound(), sleep(waiting)]);
+    if (await mayApply(firstEver)) {
       try {
         settle(s);
         runRequestedImport(s, who.user.id);
@@ -317,6 +350,13 @@ export async function bootWorkspace(): Promise<Boot> {
     guardAccount(who.user.id);
     if (account !== null) startEngine();
     return { authError: null, user: who.user };
+  }
+
+  // A token just exchanged that the server does not put a name to. Signing in again
+  // would come back to this, through the provider, for as long as it lasts.
+  if (authError === null && currentAccessToken() !== null) {
+    hideLive(s);
+    return { authError: "signed in, but the server does not know this account", user: null };
   }
 
   // Signed in nowhere yet. Going to the provider shows nothing, so another tab

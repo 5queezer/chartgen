@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it } from "vitest";
 
 import {
+  accountGuard,
   applyAnswer,
   collectWrites,
   discardLegacy,
@@ -50,7 +51,13 @@ const live = () =>
       .filter(isScoped)
       .map((k) => [k, s.getItem(k)]),
   );
-const answer = (a: Partial<SyncAnswer>): SyncAnswer => ({ cursor: 1, results: [], changes: [], ...a });
+const answer = (a: Partial<SyncAnswer>): SyncAnswer => ({
+  cursor: 1,
+  restored: false,
+  results: [],
+  changes: [],
+  ...a,
+});
 const drawings = (...ids: string[]) => JSON.stringify(ids.map((id) => ({ id, name: id })));
 const DOC = "chartgen.drawings.BTCUSDT";
 const OTHER_DOC = "chartgen.drawings.ETHUSDT";
@@ -233,6 +240,22 @@ describe("data from before any sign-in", () => {
   });
 });
 
+describe("a tab of another account", () => {
+  it("knows when the keys stopped being the account's it started with", () => {
+    enterAccount(s, "github:1");
+    const same = accountGuard(s);
+    expect(same()).toBe(true);
+    hideLive(s);
+    expect(same(), "signing out keeps the marker, and a scoped copy wins").toBe(true);
+    enterAccount(s, "google:2");
+    expect(same()).toBe(false);
+  });
+
+  it("with no sign-in at all it goes on saving", () => {
+    expect(accountGuard(s)()).toBe(true);
+  });
+});
+
 describe("merge", () => {
   it("one side changed takes that side, a deletion included", () => {
     expect(merge("chartgen.chartSettings", "b", "l", "b")).toEqual({ value: "l", conflict: false });
@@ -345,7 +368,7 @@ describe("a round", () => {
     s.setItem("chartgen.sidebar.tab", "device only");
     const first = collectWrites(s, none);
     expect(first.writes.map((w) => [w.key, w.value, w.base_version])).toEqual([["chartgen.chartSettings", "a", 0]]);
-    applyAnswer(s, 0, first.writes, answer({ cursor: 1, results: [{ key: "chartgen.chartSettings", status: "ok", version: 1 }] }));
+    applyAnswer(s, first.writes, answer({ cursor: 1, results: [{ key: "chartgen.chartSettings", status: "ok", version: 1 }] }));
     expect(collectWrites(s, none).writes).toEqual([]);
     s.setItem("chartgen.chartSettings", "b");
     expect(collectWrites(s, none).writes[0]).toMatchObject({ value: "b", base_version: 1 });
@@ -354,7 +377,7 @@ describe("a round", () => {
   it("a user's deletion goes out as one", () => {
     s.setItem(DOC, drawings("a"));
     const first = collectWrites(s, none);
-    applyAnswer(s, 0, first.writes, answer({ results: [{ key: DOC, status: "ok", version: 1 }] }));
+    applyAnswer(s, first.writes, answer({ results: [{ key: DOC, status: "ok", version: 1 }] }));
     s.removeItem(DOC);
     expect(collectWrites(s, none).writes[0]).toMatchObject({ key: DOC, value: null, base_version: 1 });
   });
@@ -362,7 +385,7 @@ describe("a round", () => {
   it("the LRU dropping a copy sends no deletion, and it returns", () => {
     s.setItem(DOC, drawings("a"));
     const first = collectWrites(s, none);
-    applyAnswer(s, 0, first.writes, answer({ results: [{ key: DOC, status: "ok", version: 1 }] }));
+    applyAnswer(s, first.writes, answer({ results: [{ key: DOC, status: "ok", version: 1 }] }));
     s.removeItem(DOC);
     forgetEvicted(s, DOC);
     expect(collectWrites(s, none).writes).toEqual([]);
@@ -379,14 +402,14 @@ describe("a round", () => {
   it("a conflict's answer is merged and sent again, keeping both sides", () => {
     s.setItem(DOC, drawings("a"));
     const first = collectWrites(s, none);
-    applyAnswer(s, 0, first.writes, answer({ results: [{ key: DOC, status: "ok", version: 1 }] }));
+    applyAnswer(s, first.writes, answer({ results: [{ key: DOC, status: "ok", version: 1 }] }));
     s.setItem(DOC, drawings("a", "here"));
     const stale = collectWrites(s, none);
-    applyAnswer(s, 1, stale.writes, answer({ cursor: 2, results: [{ key: DOC, status: "conflict", version: 2, value: drawings("a", "there") }] }));
+    applyAnswer(s, stale.writes, answer({ cursor: 2, results: [{ key: DOC, status: "conflict", version: 2, value: drawings("a", "there") }] }));
     const retry = collectWrites(s, none);
     expect(retry.writes[0]).toMatchObject({ value: drawings("a", "here", "there"), base_version: 2, conflict: false });
     expect(s.getItem(DOC), "the stores' value stays until a reload").toBe(drawings("a", "here"));
-    applyAnswer(s, 2, retry.writes, answer({ cursor: 3, results: [{ key: DOC, status: "ok", version: 3 }] }));
+    applyAnswer(s, retry.writes, answer({ cursor: 3, results: [{ key: DOC, status: "ok", version: 3 }] }));
     expect(collectWrites(s, none).writes).toEqual([]);
     expect(hasRemoteChanges(s)).toBe(true);
     settle(s);
@@ -399,8 +422,8 @@ describe("a round", () => {
     s.setItem("chartgen.chartSettings", "here");
     s.setItem("chartgen.layout.grid", "here");
     const first = collectWrites(s, none);
-    applyAnswer(s, 0, first.writes, answer({ results: first.writes.map((w, i) => ({ key: w.key, status: "ok" as const, version: i + 1 })) }));
-    applyAnswer(s, 2, [], answer({ cursor: 4, changes: [
+    applyAnswer(s, first.writes, answer({ results: first.writes.map((w, i) => ({ key: w.key, status: "ok" as const, version: i + 1 })) }));
+    applyAnswer(s, [], answer({ cursor: 4, changes: [
       { key: "chartgen.chartSettings", value: "there", version: 3 },
       { key: "chartgen.layout.grid", value: "there", version: 4 },
     ]}));
@@ -415,15 +438,15 @@ describe("a round", () => {
   it("a remote deletion removes the key when settled and sends nothing back", () => {
     s.setItem(DOC, drawings("a"));
     const first = collectWrites(s, none);
-    applyAnswer(s, 0, first.writes, answer({ results: [{ key: DOC, status: "ok", version: 1 }] }));
-    applyAnswer(s, 1, [], answer({ cursor: 2, changes: [{ key: DOC, value: null, version: 2 }] }));
+    applyAnswer(s, first.writes, answer({ results: [{ key: DOC, status: "ok", version: 1 }] }));
+    applyAnswer(s, [], answer({ cursor: 2, changes: [{ key: DOC, value: null, version: 2 }] }));
     settle(s);
     expect(s.getItem(DOC)).toBeNull();
     expect(collectWrites(s, none).writes).toEqual([]);
   });
 
   it("a new device's default gives way, and the settled value is not sent back", () => {
-    applyAnswer(s, 0, [], answer({ cursor: 5, changes: [{ key: "chartgen.chartSettings", value: "account", version: 5 }] }));
+    applyAnswer(s, [], answer({ cursor: 5, changes: [{ key: "chartgen.chartSettings", value: "account", version: 5 }] }));
     s.setItem("chartgen.chartSettings", "default");
     const round = collectWrites(s, none);
     expect(round.writes).toEqual([]);
@@ -436,7 +459,7 @@ describe("a round", () => {
   it("a refused value is reported and not sent again until it changes", () => {
     s.setItem("chartgen.chartSettings", "big");
     const round = collectWrites(s, none);
-    const applied = applyAnswer(s, 0, round.writes, answer({ results: [{ key: "chartgen.chartSettings", status: "quota" }] }));
+    const applied = applyAnswer(s, round.writes, answer({ results: [{ key: "chartgen.chartSettings", status: "quota" }] }));
     expect(applied.refused).toEqual([{ key: "chartgen.chartSettings", live: "big", status: "quota" }]);
     const refused = (k: string, v: string | null) => k === "chartgen.chartSettings" && v === "big";
     expect(collectWrites(s, refused).writes).toEqual([]);
@@ -458,7 +481,7 @@ describe("a round", () => {
   });
 
   it("keys the app does not sync are ignored when the server sends them", () => {
-    applyAnswer(s, 0, [], answer({ changes: [{ key: "chartgen.oauth.client_id", value: "evil", version: 1 }] }));
+    applyAnswer(s, [], answer({ changes: [{ key: "chartgen.oauth.client_id", value: "evil", version: 1 }] }));
     expect(s.getItem("chartgen.oauth.client_id")).toBeNull();
     expect(s.getItem("chartgen.sync.chartgen.oauth.client_id")).toBeNull();
   });
@@ -466,8 +489,8 @@ describe("a round", () => {
   it("a restored server's lower versions are believed", () => {
     s.setItem(DOC, drawings("a"));
     const first = collectWrites(s, none);
-    applyAnswer(s, 0, first.writes, answer({ cursor: 90, results: [{ key: DOC, status: "ok", version: 90 }] }));
-    applyAnswer(s, 90, [], answer({ cursor: 3, changes: [{ key: DOC, value: drawings("older"), version: 3 }] }));
+    applyAnswer(s, first.writes, answer({ cursor: 90, results: [{ key: DOC, status: "ok", version: 90 }] }));
+    applyAnswer(s, [], answer({ cursor: 3, restored: true, changes: [{ key: DOC, value: drawings("older"), version: 3 }] }));
     expect(readState(s, DOC)).toMatchObject({ v: 3, s: drawings("older") });
   });
 
@@ -475,7 +498,7 @@ describe("a round", () => {
     s.setItem(DOC, drawings("a", "b"));
     s.setItem(OTHER_DOC, drawings("untouched"));
     const first = collectWrites(s, none);
-    applyAnswer(s, 0, first.writes, answer({ cursor: 90, results: [
+    applyAnswer(s, first.writes, answer({ cursor: 90, results: [
       { key: DOC, status: "ok", version: 89 },
       { key: OTHER_DOC, status: "ok", version: 90 },
     ] }));
@@ -484,7 +507,7 @@ describe("a round", () => {
     s.setItem(DOC, drawings("a", "b", "new"));
     const edit = collectWrites(s, none);
     expect(edit.writes[0]).toMatchObject({ key: DOC, base_version: 89 });
-    applyAnswer(s, 90, edit.writes, answer({ cursor: 0, results: [
+    applyAnswer(s, edit.writes, answer({ cursor: 0, restored: true, results: [
       { key: DOC, status: "conflict", version: 0, value: null },
     ] }));
     expect(s.getItem(DOC)).toBe(drawings("a", "b", "new"));
@@ -501,20 +524,62 @@ describe("a round", () => {
     s.setItem(DOC, drawings("a"));
     s.setItem(OTHER_DOC, drawings("since the backup"));
     const first = collectWrites(s, none);
-    applyAnswer(s, 0, first.writes, answer({ cursor: 90, results: [
+    applyAnswer(s, first.writes, answer({ cursor: 90, results: [
       { key: DOC, status: "ok", version: 80 },
       { key: OTHER_DOC, status: "ok", version: 90 },
     ] }));
-    applyAnswer(s, 90, [], answer({ cursor: 7, changes: [{ key: DOC, value: drawings("older"), version: 7 }] }));
+    applyAnswer(s, [], answer({ cursor: 7, restored: true, changes: [{ key: DOC, value: drawings("older"), version: 7 }] }));
     expect(readState(s, DOC)).toMatchObject({ v: 7, s: drawings("older") });
     expect(collectWrites(s, none).writes.map((w) => [w.key, w.base_version])).toEqual([[OTHER_DOC, 0]]);
+  });
+
+  it("the server's word decides a restore, even when this round's writes pass the old cursor", () => {
+    s.setItem(DOC, drawings("a"));
+    s.setItem(OTHER_DOC, drawings("untouched"));
+    const first = collectWrites(s, none);
+    applyAnswer(s, first.writes, answer({ cursor: 5, results: [
+      { key: DOC, status: "ok", version: 4 },
+      { key: OTHER_DOC, status: "ok", version: 5 },
+    ] }));
+    s.setItem(DOC, drawings("a", "b"));
+    const edit = collectWrites(s, none);
+    // The file had 4 versions and this write makes it 5: the cursor looks as ever.
+    applyAnswer(s, edit.writes, answer({ cursor: 5, restored: true, results: [
+      { key: DOC, status: "ok", version: 5 },
+    ] }));
+    expect(collectWrites(s, none).writes.map((w) => [w.key, w.base_version])).toEqual([[OTHER_DOC, 0]]);
+  });
+
+  it("a document mostly quotes is measured as it is sent", () => {
+    const quotes = '"'.repeat(400 * 1024);
+    s.setItem("chartgen.pane.1.a", quotes);
+    s.setItem("chartgen.pane.2.a", quotes);
+    const first = collectWrites(s, none);
+    expect(first.writes, "800 KiB as text, 1.6 MiB as sent").toHaveLength(1);
+    expect(first.tooLarge).toEqual([]);
+    s.clear();
+    s.setItem("chartgen.pane.1.a", '"'.repeat(511 * 1024));
+    expect(collectWrites(s, none)).toEqual({
+      writes: [],
+      gaveWay: [],
+      tooLarge: ["chartgen.pane.1.a"],
+    });
+  });
+
+  it("no write leaves the app that the server's limit would refuse", () => {
+    for (let i = 0; i < 50; i++) s.setItem(`chartgen.pane.${i}.${"k".repeat(100)}`, "v".repeat(30_000));
+    const body = JSON.stringify({
+      since: 123456789,
+      writes: collectWrites(s, none).writes.map(({ key, value, base_version }) => ({ key, value, base_version })),
+    });
+    expect(new TextEncoder().encode(body).length).toBeLessThanOrEqual(1024 * 1024);
   });
 
   it("an older change arriving late does not go back", () => {
     s.setItem(DOC, drawings("a"));
     const first = collectWrites(s, none);
-    applyAnswer(s, 0, first.writes, answer({ cursor: 5, results: [{ key: DOC, status: "ok", version: 5 }] }));
-    applyAnswer(s, 2, [], answer({ cursor: 5, changes: [{ key: DOC, value: drawings("older"), version: 3 }] }));
+    applyAnswer(s, first.writes, answer({ cursor: 5, results: [{ key: DOC, status: "ok", version: 5 }] }));
+    applyAnswer(s, [], answer({ cursor: 5, changes: [{ key: DOC, value: drawings("older"), version: 3 }] }));
     expect(readState(s, DOC)).toEqual({ v: 5, b: drawings("a") });
   });
 });

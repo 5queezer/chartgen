@@ -22,6 +22,8 @@ if (!root) {
 // The stores read localStorage as they are imported, so nothing that imports
 // them may load before the right account's data is in place (ADR-0050).
 async function start(root: HTMLElement): Promise<void> {
+  // Sign-in can take a while, retries included, and the status line is not up yet.
+  root.textContent = "Signing in...";
   const boot = await bootWorkspace();
   const [{ App }, { applyShareLink }] = await Promise.all([
     import("./App"),
@@ -33,6 +35,7 @@ async function start(root: HTMLElement): Promise<void> {
   // persist like a manual change.
   applyShareLink();
 
+  root.textContent = "";
   render(
     () => (
       <QueryClientProvider client={queryClient}>
@@ -45,6 +48,5 @@ async function start(root: HTMLElement): Promise<void> {
 
 start(root).catch((err: unknown) => {
   console.error("[boot] cannot start:", err);
-  root.textContent =
-    "Cannot start: this browser's storage is full or blocked, so accounts could not be kept apart.";
+  root.textContent = `Cannot start: ${err instanceof Error ? err.message : String(err)}. If this browser's storage is full or blocked, accounts could not be kept apart.`;
 });

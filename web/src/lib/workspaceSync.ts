@@ -15,7 +15,10 @@ const INDEX = "chartgen.drawings.index";
 /** Up to here a document goes to the server; past it the answer is known. */
 const MAX_DOC_BYTES = 512 * 1024;
 const MAX_WRITES = 50;
+/** The server's limit (`MAX_BODY_BYTES` in `src/server/workspace.rs`). */
 const MAX_BODY_BYTES = 1024 * 1024;
+/** What a request holds besides its values: 50 keys, versions and the JSON around them. */
+const BODY_OVERHEAD_BYTES = 16 * 1024;
 
 const NOT_SCOPED = [
   "chartgen.oauth.",
@@ -127,6 +130,12 @@ export function enterAnonymous(s: Storage): void {
   s.removeItem(MARKER);
   s.removeItem(OFFER);
   s.removeItem(IMPORT);
+}
+
+/** Whether these keys are still the account's they were when this was called. */
+export function accountGuard(s: Storage): () => boolean {
+  const account = s.getItem(MARKER);
+  return () => s.getItem(MARKER) === account;
 }
 
 /** A round must not run: these keys are out of sight or another account's. */
@@ -361,8 +370,7 @@ export interface Round {
   tooLarge: string[];
 }
 
-const sizeOf = (text: string | null): number =>
-  text === null ? 0 : new TextEncoder().encode(text).length;
+const sizeOf = (text: string): number => new TextEncoder().encode(text).length;
 
 /**
  * What this round sends. `refused` says a value was already turned down, so it is
@@ -372,7 +380,7 @@ const sizeOf = (text: string | null): number =>
 export function collectWrites(
   s: Storage,
   refused: (key: string, live: string | null) => boolean,
-  maxBody = MAX_BODY_BYTES,
+  maxBody = MAX_BODY_BYTES - BODY_OVERHEAD_BYTES,
 ): Round {
   const round: Round = { writes: [], gaveWay: [], tooLarge: [] };
   let body = 0;
@@ -388,8 +396,9 @@ export function collectWrites(
       if (merged.conflict) round.gaveWay.push(key);
       continue;
     }
-    const size = sizeOf(merged.value);
-    if (size > MAX_DOC_BYTES) {
+    // A document is mostly quotes, which take twice the room inside a request's JSON.
+    const size = merged.value === null ? 0 : sizeOf(JSON.stringify(merged.value));
+    if (size > maxBody || (merged.value !== null && sizeOf(merged.value) > MAX_DOC_BYTES)) {
       round.tooLarge.push(key);
       continue;
     }
@@ -413,6 +422,8 @@ export type WriteResult =
 
 export interface SyncAnswer {
   cursor: number;
+  /** This device's cursor was past the server's versions: a restored file, or removed rows. */
+  restored: boolean;
   results: WriteResult[];
   changes: { key: string; value: string | null; version: number }[];
 }
@@ -430,7 +441,6 @@ export interface Applied {
  */
 export function applyAnswer(
   s: Storage,
-  since: number,
   sent: readonly SentWrite[],
   answer: SyncAnswer,
 ): Applied {
@@ -453,8 +463,8 @@ export function applyAnswer(
       applied.refused.push({ key: result.key, live: write.live, status: result.status });
     }
   }
-  // A cursor past the server's means a restored file, where its versions are the truth.
-  const restored = answer.cursor < since;
+  // In a restored file its versions are the truth.
+  const { restored } = answer;
   if (restored) {
     // Then this answer holds all it has. What it lacks goes to it as new at the next round.
     const known = new Set([...answer.changes, ...answer.results].map((d) => d.key));

@@ -27,3 +27,26 @@ test("no sign-in configured: this browser's data stays where it is, and nothing 
   await expect(page.getByTestId("user-menu")).toHaveCount(0);
   expect(sync).toEqual([]);
 });
+
+test("with no sign-in, /oauth/me failing does not stop a working chart", async ({ page }) => {
+  await page.route("**/oauth/me", (route) => route.fulfill({ status: 500, body: "broken" }));
+  await gotoApp(page);
+  await expectChartRendered(page);
+  await reloadApp(page);
+  await expect(page.getByTestId("user-menu")).toHaveCount(0);
+  await expect(page.getByText("sign-in failed")).toHaveCount(0);
+});
+
+test("the page says something while it boots, and that goes when the app comes", async ({ page }) => {
+  let release = () => {};
+  const held = new Promise<void>((done) => (release = done));
+  await page.route("**/oauth/me", async (route) => {
+    await held;
+    await route.continue();
+  });
+  const opening = gotoApp(page);
+  await expect(page.locator("#root")).toHaveText("Signing in...");
+  release();
+  await opening;
+  await expect(page.getByText("Signing in...")).toHaveCount(0);
+});

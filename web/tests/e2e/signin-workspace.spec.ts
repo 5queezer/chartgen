@@ -374,6 +374,206 @@ test.describe("workspace", () => {
     await page.context().close();
   });
 
+  test("two tabs drawing on one symbol keep each other's, on every device", async ({ browser }) => {
+    const first = await device(browser);
+    await first.waitForTimeout(500);
+    const second = await first.context().newPage();
+    await second.goto("/");
+    await expectChartRendered(second);
+    const symbol = /[A-Z0-9]{3,}/.exec(
+      await first.getByRole("button", { name: /^Symbol:/ }).innerText(),
+    )![0];
+    const key = `chartgen.drawings.${symbol}`;
+    const had = ids(await read(first, key)).length;
+    const draw = async (page: Page, x: number) => {
+      await page.bringToFront();
+      await pickTool(page, "Horizontal line");
+      const box = (await page.locator(".chart-container").first().boundingBox())!;
+      await page.mouse.move(box.x + x, box.y + 120, { steps: 5 });
+      await page.mouse.down();
+      await page.mouse.up();
+    };
+    await draw(first, 300);
+    await expect.poll(async () => ids(await read(first, key)).length).toBe(had + 1);
+    await draw(second, 500);
+    await expect.poll(async () => ids(await read(second, key)).length).toBe(had + 2);
+    const both = await read(second, key);
+    await pushed(second, key, both);
+    expect(ids(await freshDeviceReads(browser, key))).toEqual(ids(both));
+    await first.context().close();
+  });
+
+  test("a sync refused for a moment does not leave a new device empty", async ({ browser }) => {
+    const laptop = await device(browser);
+    await write(laptop, NOTE, "there");
+    await pushed(laptop, NOTE, "there");
+
+    const context = await browser.newContext({ baseURL: test.info().project.use.baseURL });
+    let refusals = 0;
+    await context.route("**/workspace/sync", (route) => {
+      if (refusals++ > 0) return route.continue();
+      return route.fulfill({
+        status: 429,
+        headers: { "Retry-After": "1" },
+        json: { error: "a sync of this account is running" },
+      });
+    });
+    const page = await context.newPage();
+    await page.goto("/");
+    await signIn(page);
+    expect(await read(page, NOTE)).toBe("there");
+    await Promise.all([laptop.context().close(), context.close()]);
+  });
+
+  test("a minute's budget used up is a pause: nothing lost, and no notice", async ({ browser }) => {
+    const page = await device(browser);
+    await pushedOnce(page);
+    let refusals = 0;
+    await page.route("**/workspace/sync", (route) => {
+      if (refusals++ > 0) return route.continue();
+      return route.fulfill({
+        status: 429,
+        headers: { "Retry-After": "2" },
+        json: { error: "too many bytes sent in a minute" },
+      });
+    });
+    await write(page, NOTE, "waits");
+    await pushed(page, NOTE, "waits");
+    expect(refusals).toBeGreaterThan(1);
+    await expect(page.getByTestId("workspace-notice")).toHaveCount(0);
+    await page.context().close();
+  });
+
+  test("with no Web Locks, what arrives waits for Reload, and a new device still gets it", async ({
+    browser,
+  }) => {
+    const laptop = await device(browser);
+    await write(laptop, NOTE, "before");
+    await pushed(laptop, NOTE, "before");
+
+    const context = await browser.newContext({ baseURL: test.info().project.use.baseURL });
+    // As on plain http, where the browser has no such attribute.
+    await context.addInitScript(() => {
+      delete (Navigator.prototype as unknown as { locks?: unknown }).locks;
+    });
+    const page = await context.newPage();
+    await page.goto("/");
+    await signIn(page);
+    expect(await read(page, NOTE), "first load here: no tab can be running").toBe("before");
+
+    await write(laptop, NOTE, "after");
+    await pushed(laptop, NOTE, "after");
+    await reloadApp(page);
+    expect(await read(page, NOTE), "another tab might be").toBe("before");
+    await expect(page.getByTestId("workspace-remote")).toBeVisible();
+
+    await Promise.all([page.waitForEvent("load"), page.getByTestId("workspace-reload").click()]);
+    await expectChartRendered(page);
+    expect(await read(page, NOTE), "every tab was told").toBe("after");
+    await expect(page.getByTestId("workspace-remote")).toBeHidden();
+    await Promise.all([laptop.context().close(), context.close()]);
+  });
+
+  test("a server that takes the token but names nobody does not loop through the provider", async ({
+    browser,
+  }) => {
+    const context = await browser.newContext({ baseURL: test.info().project.use.baseURL });
+    const page = await context.newPage();
+    await page.goto("/");
+    await signIn(page);
+    await write(page, NOTE, "octo's");
+    await pushed(page, NOTE, "octo's");
+
+    let authorize = 0;
+    page.on("request", (req) => {
+      if (new URL(req.url()).pathname === "/authorize") authorize++;
+    });
+    await page.route("**/oauth/me", (route) =>
+      route.fulfill({ status: 401, json: { sign_in: true, user: null } }),
+    );
+    await page.goto("/");
+    await expect(page.getByText("the server does not know this account")).toBeVisible({
+      timeout: 30_000,
+    });
+    await page.waitForTimeout(3_000);
+    expect(authorize, "one round, not a loop").toBeLessThanOrEqual(2);
+    expect(await read(page, NOTE)).toBeNull();
+    await expect(page.getByRole("button", { name: "Sign in again" })).toBeVisible();
+
+    await page.unroute("**/oauth/me");
+    await page.getByRole("button", { name: "Sign in again" }).click();
+    await page.waitForURL((url) => url.pathname === "/" && !url.searchParams.has("code"));
+    await expectChartRendered(page);
+    expect(await read(page, NOTE), "and it is all still there").toBe("octo's");
+    await context.close();
+  });
+
+  test("a stray code in the address is thrown away, not exchanged", async ({ browser }) => {
+    const context = await browser.newContext({ baseURL: test.info().project.use.baseURL });
+    const page = await context.newPage();
+    const exchanged: string[] = [];
+    page.on("request", (req) => {
+      if (new URL(req.url()).pathname === "/token") exchanged.push(req.postData() ?? "");
+    });
+    await page.goto("/");
+    await signIn(page);
+    await page.goto("/?code=stolen&state=whatever");
+    await page.waitForURL((url) => !url.search.includes("stolen"));
+    await expectChartRendered(page);
+    expect(exchanged.filter((body) => body.includes("stolen"))).toEqual([]);
+    await context.close();
+  });
+
+  test("a tab leaving for another account does not save into that account's keys", async ({
+    browser,
+  }) => {
+    const first = await device(browser);
+    const second = await first.context().newPage();
+    await second.goto("/");
+    await expectChartRendered(second);
+    const symbol = /[A-Z0-9]{3,}/.exec(
+      await first.getByRole("button", { name: /^Symbol:/ }).innerText(),
+    )![0];
+    const key = `chartgen.drawings.${symbol}`;
+    const box = (await first.locator(".chart-container").first().boundingBox())!;
+    await first.bringToFront();
+    await pickTool(first, "Horizontal line");
+    await first.mouse.move(box.x + 400, box.y + 150, { steps: 5 });
+    await first.mouse.down();
+    await first.mouse.up();
+    await expect.poll(async () => ids(await read(first, key)).length).toBeGreaterThan(0);
+    const before = await read(first, key);
+
+    // A pending save, held by a clock that stops: a style change starts its debounce.
+    await first.waitForTimeout(700);
+    await first.mouse.down();
+    await first.mouse.up();
+    const bar = first.getByRole("toolbar", { name: "Drawing style" });
+    await expect(bar).toBeVisible();
+    await first.clock.install();
+    await bar.getByRole("button", { name: "Width 3" }).click();
+    expect(await read(first, key), "nothing saved yet").toBe(before);
+
+    const loaded = first.waitForEvent("load");
+    await second.evaluate((k) => {
+      localStorage.removeItem(k);
+      localStorage.setItem("chartgen.workspace.account", "google:someone");
+    }, key);
+    await loaded;
+    await expect
+      .poll(() =>
+        second.evaluate(
+          (k) => [
+            localStorage.getItem(k),
+            localStorage.getItem(`chartgen.u.google%3Asomeone|${k}`),
+          ],
+          key,
+        ),
+      )
+      .toEqual([null, null]);
+    await first.context().close();
+  });
+
   test("two accounts on one browser: signing out leaves nothing, and neither sees the other's", async ({
     browser,
   }) => {

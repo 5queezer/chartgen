@@ -5503,6 +5503,25 @@ fn test_workspace_runs_one_sync_per_user() {
     assert_eq!(workspace(p, Some(&hers), empty).0, 200);
 }
 
+/// A client that starts a body and stops does not keep its place.
+#[cfg(feature = "scripting")]
+#[test]
+fn test_workspace_gives_up_on_a_body_that_does_not_come() {
+    use std::io::Read;
+    let fake = FakeProvider::start();
+    let srv = signin_server("workspace-slow", &fake, &["github"]);
+    let p = srv.port;
+    let mut b = Browser::new(p);
+    let token = web_sign_in(&mut b, &fake, "github", profile_of("github", 1, "a"));
+    let mut stuck = start_workspace_upload(p, &token);
+    std::thread::sleep(std::time::Duration::from_secs(11));
+    let mut answer = String::new();
+    stuck.read_to_string(&mut answer).unwrap();
+    assert!(answer.starts_with("HTTP/1.1 408"), "{answer}");
+    let empty = serde_json::json!({ "since": 0 });
+    assert_eq!(workspace(p, Some(&token), empty).0, 200);
+}
+
 /// So many at once in all, however many accounts there are.
 #[cfg(feature = "scripting")]
 #[test]
