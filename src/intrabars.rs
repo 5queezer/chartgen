@@ -24,6 +24,11 @@ const MAX_ENTRIES: usize = 8;
 const MAX_HELD: usize = 6_000;
 /// How long Yahoo's newest intrabars count as current: charts polling share one request.
 const REFRESH: Duration = Duration::from_secs(5);
+/// A newest intrabar this far behind the clock, past its own end, means a market that
+/// is closed or quiet, whatever the bar's grid says: a daily bar stays open all night.
+const QUIET_AFTER: i64 = 120;
+/// How often a quiet market is asked again: soon enough to see it open.
+const QUIET_REFRESH: Duration = Duration::from_secs(60);
 const MAX_PAGES: usize = 6;
 /// How long one Yahoo read may take, waiting for another's included.
 const READ_BUDGET: Duration = Duration::from_secs(20);
@@ -115,6 +120,9 @@ struct Held {
     /// Nothing exists before this: asking for older found no more.
     complete_from: Option<i64>,
     refreshed: Instant,
+    /// How far the source has been asked, unix s: nothing newer than the bars exists
+    /// up to here, so a window ending by then has no reason to ask again.
+    asked_to: i64,
     used: Instant,
 }
 
@@ -204,7 +212,9 @@ fn walk(
 }
 
 /// Intrabars opening in `[from_s, to_s)`, from what is held where it can be. A window
-/// reaching the present reads only what is new, at most once per `REFRESH`.
+/// reaching the present reads only what is new, at most once per `REFRESH`, or per
+/// `QUIET_REFRESH` while the market looks closed. An older one reads only what the
+/// source has not been asked for yet.
 #[allow(clippy::too_many_arguments)]
 fn read(
     held: Option<&Held>,
@@ -221,7 +231,8 @@ fn read(
     let mut h = held.cloned().unwrap_or_else(|| Held {
         bars: Vec::new(),
         complete_from: None,
-        refreshed: now - REFRESH * 2,
+        refreshed: now - QUIET_REFRESH * 2,
+        asked_to: i64::MIN,
         used: now,
     });
     let first = h.bars.first().map(|b| b.t);
@@ -231,6 +242,7 @@ fn read(
     if !overlaps {
         h.bars.clear();
         h.complete_from = None;
+        h.asked_to = i64::MIN;
     }
     let first = h.bars.first().map(|b| b.t);
     let last = h.bars.last().map(|b| b.t);
@@ -244,19 +256,25 @@ fn read(
             h.complete_from = Some(from_s);
         }
         h.bars = merge(older, std::mem::take(&mut h.bars));
+        if first.is_none() {
+            h.asked_to = if live { now_s } else { to_s };
+        }
         if end.is_none() {
             h.refreshed = now;
         }
     }
     // Newer than what is held. The newest held may have been forming: read it again.
-    let stale = now.saturating_duration_since(h.refreshed) >= REFRESH;
     if let Some(l) = last {
-        let behind_window = !live && l + secs < to_s;
+        let quiet = now_s - (l + secs) >= QUIET_AFTER;
+        let wait = if quiet { QUIET_REFRESH } else { REFRESH };
+        let stale = now.saturating_duration_since(h.refreshed) >= wait;
+        let behind_window = !live && l + secs < to_s && h.asked_to < to_s;
         if (live && stale) || behind_window {
             let want = ((to_s.min(now_s + secs) - l) / secs + 2).clamp(2, per_page as i64) as usize;
             let (newer, _) = walk(fetch, l, (!live).then_some(to_s), want, deadline)?;
             h.bars = merge(std::mem::take(&mut h.bars), newer);
             h.refreshed = now;
+            h.asked_to = if live { now_s } else { to_s };
         }
     }
     // Bound it, keeping the end of the window being read.
@@ -735,6 +753,94 @@ mod tests {
         assert_eq!(got.last().unwrap().t, 600_000);
     }
 
+    /// Polls of a market whose last bar opened at `CLOSE`, every 10 s, from `now_s`:
+    /// how many of `polls` reached the source, after the load.
+    fn reads_of_polls(to_s: i64, now_s: i64, polls: i64) -> usize {
+        let source = Source::new(0, CLOSE);
+        let start = Instant::now();
+        let from = CLOSE - 600;
+        let (_, mut held) = run(&source, None, from, to_s, now_s, start);
+        source.requests.borrow_mut().clear();
+        for k in 1..=polls {
+            let at = start + Duration::from_secs(10 * k as u64);
+            let (got, h) = run(&source, Some(held), from, to_s, now_s + 10 * k, at);
+            assert_eq!(got.last().unwrap().t, CLOSE, "nothing lost by not asking");
+            held = h;
+        }
+        let requests = source.requests.borrow().len();
+        requests
+    }
+
+    /// Its last bar's open, on the 60 s grid.
+    const CLOSE: i64 = 600_000;
+    const HOUR: i64 = 3_600;
+
+    #[test]
+    fn a_closed_market_is_not_asked_on_every_poll() {
+        let after = CLOSE + 6 * HOUR;
+        // A bar ending with its last intrabar: over, and all of it read.
+        assert_eq!(reads_of_polls(CLOSE + 60, after, 6), 0);
+        // A bar whose grid ends 30 min after the close, and that time has passed.
+        assert_eq!(reads_of_polls(CLOSE + 1_800, after, 6), 0);
+        // The same bar in those 30 min, some way past the close: open by its grid.
+        assert_eq!(reads_of_polls(CLOSE + 1_800, CLOSE + 900, 5), 0);
+        // A daily bar, its session over and the bar not: no read in the first minute.
+        assert_eq!(reads_of_polls(CLOSE + 8 * HOUR, after, 5), 0);
+    }
+
+    #[test]
+    fn a_closed_market_is_asked_about_once_a_minute() {
+        // A daily bar not over, for 6 minutes of polls: to see it open.
+        let reads = reads_of_polls(CLOSE + 8 * HOUR, CLOSE + 2 * HOUR, 36);
+        assert_eq!(reads, 6);
+    }
+
+    #[test]
+    fn a_market_that_is_open_is_read_on_every_poll() {
+        // The bar forming, and the last intrabar still within its own end.
+        assert_eq!(reads_of_polls(CLOSE + HOUR, CLOSE + 30, 6), 6);
+        // Just past the threshold for a quiet one is still not a closed market yet.
+        assert_eq!(
+            reads_of_polls(CLOSE + HOUR, CLOSE + 60 + QUIET_AFTER - 70, 6),
+            6
+        );
+    }
+
+    #[test]
+    fn a_market_that_opens_is_read_as_often_again() {
+        let source = Source::new(0, CLOSE);
+        let start = Instant::now();
+        let (from, to) = (CLOSE - 600, CLOSE + 8 * HOUR);
+        let (_, held) = run(&source, None, from, to, CLOSE + 2 * HOUR, start);
+        // It opened: a new bar, seen at the next minute's read.
+        let opened = CLOSE + 2 * HOUR;
+        let source = Source::new(0, opened);
+        let at = start + QUIET_REFRESH;
+        let (got, held) = run(&source, Some(held), from, to, opened + 5, at);
+        assert_eq!(got.last().unwrap().t, opened);
+        source.requests.borrow_mut().clear();
+        // From there, as any open market.
+        run(&source, Some(held), from, to, opened + 15, at + REFRESH);
+        assert_eq!(source.requests.borrow().len(), 1);
+    }
+
+    #[test]
+    fn an_older_window_past_what_was_asked_reads_at_once_though_the_market_looks_closed() {
+        // Held up to 600,000, from a read that ended there. A window reaching further,
+        // an hour later, must not wait for a minute's refresh with bars missing.
+        let source = Source::new(0, 700_000);
+        let now = Instant::now();
+        let far = 10_000_000;
+        let (_, held) = run(&source, None, 590_000, 600_000, far, now);
+        assert_eq!(held.bars.last().unwrap().t, 599_940);
+        let (got, held) = run(&source, Some(held), 590_000, 603_600, far, now);
+        assert_eq!(got.last().unwrap().t, 603_540);
+        source.requests.borrow_mut().clear();
+        // Having asked, it does not again.
+        run(&source, Some(held), 590_000, 603_600, far, now);
+        assert_eq!(source.requests.borrow().len(), 0);
+    }
+
     #[test]
     fn the_forming_bar_is_replaced_not_duplicated() {
         let source = Source::new(0, 600_000);
@@ -823,6 +929,7 @@ mod tests {
                     bars: vec![],
                     complete_from: None,
                     refreshed: now,
+                    asked_to: 0,
                     used: now + Duration::from_secs(k as u64),
                 }),
             );
@@ -892,7 +999,7 @@ mod tests {
     }
 
     #[test]
-    fn a_read_that_fails_loses_what_was_held() {
+    fn a_read_that_fails_keeps_what_was_held() {
         use std::sync::atomic::Ordering::SeqCst;
         let (cache, source) = (SharedCache::default(), SlowSource::new(0));
         assert_eq!(shared(&cache, &source).unwrap().len(), 1001);
@@ -901,7 +1008,7 @@ mod tests {
         {
             let mut st = cache.lock();
             let held = st.held.get_mut(&("X".to_string(), "1m")).unwrap();
-            Arc::get_mut(held).unwrap().refreshed = Instant::now() - REFRESH * 2;
+            Arc::get_mut(held).unwrap().refreshed = Instant::now() - QUIET_REFRESH * 2;
         }
         source.fail.store(true, SeqCst);
         assert_eq!(shared(&cache, &source).unwrap_err(), "source is down");
