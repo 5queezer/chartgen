@@ -125,6 +125,24 @@ export async function bootApp(
 }
 
 /** Open `path` and wait for the booted app (OAuth done, chart rendered). */
+/**
+ * Open a sidebar tab only if it is not already selected: clicking the selected
+ * tab collapses the sidebar, and the selection persists across reloads. From
+ * the collapsed rail, the tab's icon button opens it.
+ */
+export async function openSidebarTab(page: Page, name: string | RegExp): Promise<void> {
+  const tab = page.getByRole("tab", { name });
+  if ((await tab.count()) === 0) {
+    await page
+      .getByRole("navigation", { name: "Sidebar (collapsed)" })
+      .getByRole("button", { name })
+      .click();
+  } else if ((await tab.getAttribute("aria-selected")) !== "true") {
+    await tab.click();
+  }
+  await expect(tab).toHaveAttribute("aria-selected", "true");
+}
+
 export function gotoApp(page: Page, path = "/"): Promise<void> {
   return bootApp(page, () => page.goto(path));
 }

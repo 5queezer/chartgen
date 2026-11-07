@@ -9,7 +9,7 @@ import { createServer, type Server } from "node:http";
 
 import type { BrowserContext, Page, Request } from "@playwright/test";
 
-import { test, expect, gotoApp } from "./fixtures/app";
+import { test, expect, gotoApp, openSidebarTab } from "./fixtures/app";
 
 const CHARTGEN_PORT = Number(process.env.CHARTGEN_PORT ?? 9315);
 const SERVICE_PORT = CHARTGEN_PORT - 1_000;
@@ -184,7 +184,7 @@ async function callTool(bearer: string, name: string, args: unknown): Promise<Re
 }
 
 async function enable(page: Page): Promise<void> {
-  await page.getByRole("tab", { name: /^Alerts/ }).click();
+  await openSidebarTab(page, /^Alerts/);
   await expect(control(page)).toHaveAttribute("data-state", "off", { timeout: 15_000 });
   await control(page).getByRole("button", { name: "Enable notifications" }).click();
   await expect(control(page)).toHaveAttribute("data-state", "on");
@@ -214,7 +214,7 @@ async function fire(bearer: string, index = 0): Promise<void> {
 test("the permission is asked on the click, not before", async ({ page, context }) => {
   await fakeBrowserPush(context, newDevice());
   await gotoApp(page);
-  await page.getByRole("tab", { name: /^Alerts/ }).click();
+  await openSidebarTab(page, /^Alerts/);
   await expect(control(page)).toHaveAttribute("data-state", "off", { timeout: 15_000 });
   await page.waitForTimeout(1_000);
   expect((await seenInPage(page)).asked).toBe(0);
@@ -397,7 +397,7 @@ test("a reload keeps it on and tells the server again, with no prompt", async ({
   await gotoApp(page);
   await enable(page);
   await gotoApp(page);
-  await page.getByRole("tab", { name: /^Alerts/ }).click();
+  await openSidebarTab(page, /^Alerts/);
   await expect(control(page)).toHaveAttribute("data-state", "on", { timeout: 15_000 });
   expect((await seenInPage(page)).asked).toBe(0);
 });
@@ -407,7 +407,7 @@ test("a blocked permission says so, and offers no button", async ({ page, contex
     Object.defineProperty(Notification, "permission", { get: () => "denied" });
   });
   await gotoApp(page);
-  await page.getByRole("tab", { name: /^Alerts/ }).click();
+  await openSidebarTab(page, /^Alerts/);
   await expect(control(page)).toHaveAttribute("data-state", "denied", { timeout: 15_000 });
   await expect(control(page)).toContainText("blocked");
   await expect(control(page).getByRole("button")).toHaveCount(0);
@@ -418,7 +418,7 @@ test("a browser with no push says so", async ({ page, context }) => {
     delete (window as unknown as { PushManager?: unknown }).PushManager;
   });
   await gotoApp(page);
-  await page.getByRole("tab", { name: /^Alerts/ }).click();
+  await openSidebarTab(page, /^Alerts/);
   await expect(control(page)).toHaveAttribute("data-state", "unsupported", { timeout: 15_000 });
   await expect(control(page).getByRole("button")).toHaveCount(0);
 });
