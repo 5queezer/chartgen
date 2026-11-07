@@ -88,6 +88,7 @@ Render a chart for a symbol. Accepts `ticker`/`symbol`, `timeframe`/`interval`,
 
 | Parameter | Meaning |
 |-----------|---------|
+| `width`, `height` | Integers, default 1920 and 1080. For `png` and `both`. Not clamped: bars × (indicators + 1) + width × height / 512 must fit the 32,000 one call may hold, or the call is refused with `-32602`. |
 | `bars` | Integer, default 200. Capped at 5000 in every format (`png`, `summary`, `both`, `series`); larger values are silently clamped. On Binance each 1000 bars is one upstream request. |
 | `end_time` | Integer, ms since epoch, between `-2208988800000` (1900-01-01; index histories predate 1970) and one year from now. Only bars whose open time is strictly before `end_time` are returned. To load the page before the oldest bar you have, pass that bar's `t × 1000`. Omit it (or send `null`) to get the newest bars, including the candle that is still forming. Applies to every format. A string, a float or an out-of-range value is a tool error. |
 | `warmup` | Integer, default 0, max 1000. `format=series` only. Fetches this many extra older bars and feeds them to the indicators, then trims them from the response, so the first returned bars have warmed-up values instead of `null`. `png`, `summary`, and `both` ignore it and render exactly `bars`. |
@@ -288,6 +289,14 @@ format), so results map back to their entries whatever the order:
 - An id equal to the name of an entry without an id is a tool error, since
   both would get that key (`Indicator id macd is also the name of an entry
   without an id; give that entry an id too`).
+- `generate_chart` asks for at most 32,000 bars × (indicators + 1), which is 5000 bars with 5 indicators
+  or 500 with 50. With `format` `png` or `both`, an image adds width × height / 512: 4050 at the default
+  1920 × 1080, and 31,250 at 4000 × 4000, which leaves room for 750 bars × (indicators + 1). A 5000-bar image
+  takes at most 4 indicators at the default size. A larger call gets a `-32602` error saying so, as it would
+  take too much memory at once ([ADR-0051](/chartgen/decisions/0051-bounded-connections/)). A price-based
+  `chart_style` may read 20,000 bars more, so it is charged 20,000 more, up to all 32,000: it may then wait
+  for the others, but is not refused for that. Calls share that amount, and one that waits 20 s for its turn
+  gets `503` with `Retry-After`: nothing has run, so ask again.
 - `generate_chart` takes at most 50 entries (`At most 50 indicators per
   chart.`); `subscribe_chart` at most 10.
 

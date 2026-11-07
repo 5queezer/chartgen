@@ -1,4 +1,4 @@
-use axum::extract::{Query, Request, State};
+use axum::extract::{DefaultBodyLimit, Query, Request, State};
 use axum::http::{header, HeaderMap, HeaderValue, Method, StatusCode, Uri};
 use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
@@ -23,7 +23,12 @@ use chartgen::mcp_schema::SERVER_ALERT_TOOLS;
 #[cfg(feature = "scripting")]
 use chartgen::scripting;
 
+mod listener;
 mod signin;
+
+/// The most any request may send, unless its route says otherwise. A script is at most
+/// 64 KiB, or twice that escaped in JSON.
+const MAX_BODY_BYTES: usize = 256 * 1024;
 
 // --- OAuth 2.1 PKCE in-memory store ---
 
@@ -1073,6 +1078,50 @@ fn streamable_http_json_response(
 ///   202 for `notifications/initialized`).
 /// - Successful responses set `Content-Type: application/json`.
 async fn mcp_handler(
+    state: State<SharedState>,
+    uri: Uri,
+    headers: HeaderMap,
+    ext: axum::http::Extensions,
+    body_bytes: axum::body::Bytes,
+) -> Response {
+    // No account, no budget: what comes next answers those at once, and they must not be
+    // able to keep anyone waiting.
+    let token_is_good = extract_bearer_token(&headers)
+        .is_some_and(|t| state.oauth.lock().unwrap().validate_token(t));
+    let cost = listener::call_cost(&body_bytes);
+    if !token_is_good || cost == 0 {
+        return mcp_call(state, uri, headers, ext, body_bytes).await;
+    }
+    match listener::call_slot(cost).await {
+        Ok(slot) => {
+            listener::held_until_written(mcp_call(state, uri, headers, ext, body_bytes).await, slot)
+        }
+        Err(listener::NoRoom::Busy { retry_after }) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            [(header::RETRY_AFTER, retry_after.to_string())],
+            "Too many tool calls are running",
+        )
+            .into_response(),
+        Err(listener::NoRoom::TooLarge { cost, budget }) => {
+            let id = serde_json::from_slice::<Value>(&body_bytes)
+                .ok()
+                .and_then(|call| call.get("id").cloned());
+            let message = format!(
+                "This chart would take too much memory at once: bars times (indicators + 1), plus \
+                 width times height / 512 for an image, comes to {cost}, and the most is {budget}. \
+                 Ask for fewer bars, fewer indicators or a smaller image."
+            );
+            let session = headers.get("Mcp-Session-Id").and_then(|v| v.to_str().ok());
+            streamable_http_json_response(
+                StatusCode::OK,
+                jsonrpc_error(id, -32602, &message),
+                session,
+            )
+        }
+    }
+}
+
+async fn mcp_call(
     State(state): State<SharedState>,
     uri: Uri,
     headers: HeaderMap,
@@ -1403,6 +1452,15 @@ async fn sse_handler(State(state): State<SharedState>, uri: Uri, headers: Header
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_string());
     let chart_stream = stream_key(&token, client_session.as_deref());
+    // So that streams alone cannot take every connection (ADR-0051).
+    let Some(stream_slot) = listener::stream_slot(&chart_stream) else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            [(header::RETRY_AFTER, "30")],
+            "Too many streams are open",
+        )
+            .into_response();
+    };
     let session_id = client_session.unwrap_or_else(|| Uuid::new_v4().to_string());
 
     // Create notification channel. Bounded: a peer that stops reading is
@@ -1463,13 +1521,16 @@ async fn sse_handler(State(state): State<SharedState>, uri: Uri, headers: Header
         stream_key: chart_stream,
         chart_link,
         cleaned_up: false,
+        _stream_slot: stream_slot,
     };
 
     Response::builder()
         .status(StatusCode::OK)
         .header("Content-Type", "text/event-stream")
         .header("Cache-Control", "no-cache")
-        .header("Connection", "keep-alive")
+        // Ending the stream ends the connection: one replaced by its session's new stream
+        // would otherwise stay open and idle, and hold a place past `listener::MAX_STREAMS`.
+        .header("Connection", "close")
         .header("Mcp-Session-Id", &session_id)
         .body(axum::body::Body::from_stream(body_stream))
         .unwrap()
@@ -1488,6 +1549,7 @@ struct CleanupStream {
     stream_key: String,
     chart_link: u64,
     cleaned_up: bool,
+    _stream_slot: Arc<tokio::sync::OwnedSemaphorePermit>,
 }
 
 impl futures_util::Stream for CleanupStream {
@@ -1507,8 +1569,9 @@ impl Drop for CleanupStream {
             self.cleaned_up = true;
             // Ends this stream's chart subscriptions, and their feeds when
             // nobody else watches them.
-            self.charts.unlink_stream(&self.stream_key, self.chart_link);
-            if let Some(ref engine) = self.engine {
+            let current = self.charts.unlink_stream(&self.stream_key, self.chart_link);
+            // Replaced, the key's sender is the new stream's, and stays.
+            if let Some(engine) = self.engine.as_ref().filter(|_| current) {
                 match engine.write() {
                     Ok(mut e) => {
                         e.subscription_registry
@@ -1688,11 +1751,20 @@ pub async fn run_server(port: u16, engine: Option<Arc<RwLock<TradingEngine>>>) {
         println!("Serving web app from {}", dir.display());
         app = app.fallback(move |req: Request| serve_web(dir.clone(), req));
     }
-    let app = app.layer(cors).with_state(state);
+    // Bodies are read whole, and a client can stop halfway on as many connections as
+    // there are (ADR-0051). A script or a tool call is far smaller than this.
+    let app = app
+        .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
+        .layer(cors)
+        .with_state(state);
 
-    let addr = format!("0.0.0.0:{}", port);
+    listener::keep_freed_memory_down();
+    let addr = std::net::SocketAddr::from(([0, 0, 0, 0], port));
     println!("MCP server listening on {}", addr);
-    let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
+    // `tap_io` does nothing here: axum gives the peer's address to tapped listeners and
+    // to its own `TcpListener` only.
+    let listener =
+        axum::serve::ListenerExt::tap_io(listener::BoundedListener::bind(addr).unwrap(), |_| {});
     axum::serve(
         listener,
         app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
@@ -2151,6 +2223,78 @@ mod tests {
 
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    /// A live tab reconnecting: the stream it replaces ends and gives back its connection,
+    /// and that ending must not take the new stream's pushes with it.
+    #[tokio::test]
+    async fn a_replaced_stream_ends_and_leaves_the_new_one_its_pushes() {
+        use chartgen::engine::EngineConfig;
+        let dir = std::env::temp_dir().join(format!("chartgen-replaced-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut engine = TradingEngine::new(EngineConfig {
+            symbol: "BTCUSDT".into(),
+            interval: "1h".into(),
+            indicators: vec![],
+            data_dir: dir.clone(),
+            notification_ttl_secs: 60,
+            max_queue_size: 10,
+        });
+        engine
+            .subscription_registry
+            .subscribe("test-token", None, None);
+        let engine = Arc::new(RwLock::new(engine));
+        let state = Arc::new(AppState {
+            oauth: Mutex::new(OAuthStore::new()),
+            engine: Some(engine.clone()),
+            charts: sample_hub(),
+        });
+        state.oauth.lock().unwrap().tokens.insert(
+            "test-token".to_string(),
+            AccessToken {
+                _token: "test-token".to_string(),
+                client_id: "test".to_string(),
+                created_at: Instant::now(),
+                expires_in: Duration::from_secs(3600),
+                user: None,
+            },
+        );
+        let headers = headers_with(&[
+            ("authorization", "Bearer test-token"),
+            ("mcp-session-id", "same"),
+        ]);
+        let open = || {
+            sse_handler(
+                State(state.clone()),
+                Uri::from_static("/mcp"),
+                headers.clone(),
+            )
+        };
+        let old = open().await;
+        assert_eq!(old.headers()[header::CONNECTION], "close");
+        let new = open().await;
+        assert_eq!(new.status(), StatusCode::OK);
+
+        let ended = tokio::time::timeout(
+            Duration::from_secs(5),
+            axum::body::to_bytes(old.into_body(), usize::MAX),
+        )
+        .await
+        .expect("the replaced stream should have ended");
+        assert_eq!(&ended.unwrap()[..], b": connected\n\n");
+        let connected = |engine: &RwLock<TradingEngine>| {
+            let engine = engine.read().unwrap();
+            engine
+                .subscription_registry
+                .list("test-token")
+                .unwrap()
+                .connected
+        };
+        assert!(connected(&engine), "the new stream keeps its alerts");
+
+        drop(new);
+        assert!(!connected(&engine), "and takes them with it when it goes");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]

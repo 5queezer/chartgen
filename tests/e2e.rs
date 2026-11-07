@@ -861,6 +861,471 @@ fn initialize(port: u16, path: &str) -> (u16, String, String) {
     )
 }
 
+/// Connections past the cap wait instead of failing, and are served when others close
+/// (ADR-0051). The socket buffers and deadlines are tested on real sockets in the module.
+#[test]
+fn test_connections_past_the_cap_wait_their_turn() {
+    use std::io::{Read, Write};
+    let srv = spawn_server(None);
+    let open: Vec<_> = (0..128)
+        .map(|_| std::net::TcpStream::connect(("127.0.0.1", srv.port)).unwrap())
+        .collect();
+    std::thread::sleep(std::time::Duration::from_millis(300));
+
+    let mut next = std::net::TcpStream::connect(("127.0.0.1", srv.port)).unwrap();
+    next.write_all(b"GET /oauth/me HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+        .unwrap();
+    next.set_read_timeout(Some(std::time::Duration::from_millis(500)))
+        .unwrap();
+    let mut answer = String::new();
+    assert!(
+        next.read_to_string(&mut answer).is_err(),
+        "served past the cap: {answer}"
+    );
+    drop(open);
+    next.set_read_timeout(Some(std::time::Duration::from_secs(5)))
+        .unwrap();
+    next.read_to_string(&mut answer).unwrap();
+    assert!(answer.starts_with("HTTP/1.1 200"), "{answer}");
+}
+
+/// Bodies are read whole, so they are limited for everyone.
+#[test]
+fn test_a_large_body_is_refused() {
+    let srv = spawn_server(None);
+    let large = "x".repeat(256 * 1024 + 1);
+    assert_eq!(http(srv.port, "POST", "/mcp", &JSON_POST, &large).0, 413);
+    assert_eq!(
+        http(srv.port, "POST", "/register", &JSON_POST, &large).0,
+        413
+    );
+    let fits = "x".repeat(256 * 1024);
+    assert_ne!(http(srv.port, "POST", "/mcp", &JSON_POST, &fits).0, 413);
+}
+
+/// A client that reads little: its receive window stays small from the start.
+fn small_window_client(port: u16) -> std::net::TcpStream {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let stream = runtime.block_on(async {
+        let socket = tokio::net::TcpSocket::new_v4().unwrap();
+        socket.set_recv_buffer_size(4096).unwrap();
+        let stream = socket
+            .connect(std::net::SocketAddr::from(([127, 0, 0, 1], port)))
+            .await
+            .unwrap();
+        stream.into_std().unwrap()
+    });
+    stream.set_nonblocking(false).unwrap();
+    stream
+}
+
+/// A server on the sample source: these tests need charts of the size they ask for, with
+/// or without a network, and never the real provider.
+fn spawn_sample_server() -> Server {
+    let port = free_port();
+    let db = std::env::temp_dir().join(format!("chartgen-e2e-{}-{port}.db", std::process::id()));
+    let mut cmd = server_command(port, None, &db, false);
+    cmd.env("CHARTGEN_DATA_SOURCE", "sample");
+    let mut server = start_server(cmd, port);
+    server.temp_db = Some(db);
+    server
+}
+
+/// The bars of a chart answer. An error answer has none, so it cannot pass for a chart.
+fn bars_in(answer: &str) -> usize {
+    let call: serde_json::Value = serde_json::from_str(answer)
+        .unwrap_or_else(|e| panic!("{e}: {}", &answer[..200.min(answer.len())]));
+    let text = call["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap_or_else(|| panic!("no chart: {}", &answer[..200.min(answer.len())]));
+    let series: serde_json::Value = serde_json::from_str(text).unwrap();
+    series["bars"].as_array().map_or(0, Vec::len)
+}
+
+/// The size of the answer an unread connection is holding, reading only its head: a real
+/// chart and not a small error, or the test would hold nothing.
+fn unread_answer_size(s: &mut std::net::TcpStream) -> usize {
+    use std::io::Read;
+    s.set_read_timeout(Some(std::time::Duration::from_secs(10)))
+        .unwrap();
+    let mut head = Vec::new();
+    let mut byte = [0u8; 1];
+    while !head.ends_with(b"\r\n\r\n") {
+        s.read_exact(&mut byte).unwrap();
+        head.push(byte[0]);
+    }
+    let head = String::from_utf8_lossy(&head).to_ascii_lowercase();
+    assert!(head.starts_with("http/1.1 200"), "{head}");
+    head.lines()
+        .find_map(|line| line.strip_prefix("content-length: "))
+        .unwrap_or_else(|| panic!("no length: {head}"))
+        .trim()
+        .parse()
+        .unwrap()
+}
+
+/// More than the socket's buffer and hyper's queue can take, so it really stays held.
+const HELD: usize = 1024 * 1024;
+
+/// A chart call as text.
+fn chart_call(bars: u64, indicators: &[&str], extra: serde_json::Value) -> String {
+    let mut arguments = serde_json::json!({
+        "ticker": "BTCUSDT", "timeframe": "1h", "format": "series", "bars": bars,
+        "indicators": indicators,
+    });
+    if let Some(extra) = extra.as_object() {
+        for (k, v) in extra {
+            arguments[k] = v.clone();
+        }
+    }
+    serde_json::json!({
+        "jsonrpc": "2.0", "id": 7, "method": "tools/call",
+        "params": { "name": "generate_chart", "arguments": arguments },
+    })
+    .to_string()
+}
+
+/// Sends a POST to `/mcp` from a client that reads little, and does not read the answer.
+fn post_unread(port: u16, auth: &str, body: &str) -> std::net::TcpStream {
+    use std::io::Write;
+    let mut s = small_window_client(port);
+    write!(
+        s,
+        "POST /mcp HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\n\
+         Accept: application/json\r\n{auth}\r\nContent-Length: {}\r\n\r\n{body}",
+        body.len()
+    )
+    .unwrap();
+    s
+}
+
+/// Five indicators: the largest chart at 5000 bars the budget can hold, 30,000 of 32,000.
+const FIVE: [&str; 5] = ["rsi", "macd", "ema", "bbands", "vwap"];
+
+/// One answer nobody reads holds its share, not the server: what is no tool call goes on.
+#[test]
+fn test_an_unread_answer_does_not_stop_the_others() {
+    let srv = spawn_sample_server();
+    let client = register_external(srv.port);
+    let token = sign_in(srv.port, &client);
+    let auth = format!("Authorization: Bearer {token}");
+    let headers = [JSON_POST[0], JSON_POST[1], auth.as_str()];
+    let mut unread = post_unread(
+        srv.port,
+        &auth,
+        &chart_call(5000, &FIVE, serde_json::json!({})),
+    );
+    assert!(unread_answer_size(&mut unread) > HELD);
+
+    let started = std::time::Instant::now();
+    let list = r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#;
+    let (st, _, body) = http(srv.port, "POST", "/mcp", &headers, list);
+    assert_eq!(st, 200);
+    assert!(body.contains("generate_chart"), "{body}");
+    assert!(started.elapsed().as_secs() < 5, "{:?}", started.elapsed());
+}
+
+/// The app's real calls, `chart_style` and all, run side by side: a grid does not take
+/// turns, with part of the budget held by an answer nobody reads. Eight at once, each a
+/// chart of the 500 bars it asked for.
+#[test]
+fn test_the_apps_charts_run_in_parallel() {
+    let srv = spawn_sample_server();
+    let client = register_external(srv.port);
+    let token = sign_in(srv.port, &client);
+    let auth = format!("Authorization: Bearer {token}");
+    let mut unread = post_unread(
+        srv.port,
+        &auth,
+        &chart_call(5000, &["rsi"], serde_json::json!({})),
+    );
+    assert!(unread_answer_size(&mut unread) > HELD);
+
+    let call = chart_call(
+        500,
+        &["rsi", "macd", "ema"],
+        serde_json::json!({ "chart_style": "candles", "warmup": 300 }),
+    );
+    let started = std::time::Instant::now();
+    std::thread::scope(|scope| {
+        let charts: Vec<_> = (0..8)
+            .map(|_| {
+                scope.spawn(|| {
+                    let headers = [JSON_POST[0], JSON_POST[1], auth.as_str()];
+                    http(srv.port, "POST", "/mcp", &headers, &call)
+                })
+            })
+            .collect();
+        for chart in charts {
+            let (st, _, body) = chart.join().unwrap();
+            assert_eq!(st, 200, "{}", &body[..200.min(body.len())]);
+            assert_eq!(bars_in(&body), 500);
+        }
+    });
+    assert!(started.elapsed().as_secs() < 10, "{:?}", started.elapsed());
+}
+
+/// What makes that test mean something: charts answer in milliseconds here, so taking turns
+/// would look the same. These hold their share until read, and none is read. Each still gets
+/// its answer, only because a chart with `candles` is priced at what it shows: 10,500 of the
+/// 32,000 each. Priced at the source window, the second would wait for the first to be read.
+#[test]
+fn test_the_apps_charts_do_not_take_turns() {
+    let srv = spawn_sample_server();
+    let client = register_external(srv.port);
+    let token = sign_in(srv.port, &client);
+    let auth = format!("Authorization: Bearer {token}");
+    let call = chart_call(
+        500,
+        &["macd", "bbands", "cipher_b", "ema", "vwap"].repeat(4),
+        serde_json::json!({ "chart_style": "candles" }),
+    );
+    let mut unread: Vec<_> = (0..3)
+        .map(|_| post_unread(srv.port, &auth, &call))
+        .collect();
+    for s in &mut unread {
+        let size = unread_answer_size(s);
+        assert!(size > HELD, "{size} bytes would not stay held");
+    }
+}
+
+/// A call larger than the budget is told so, whichever name its indicators go by.
+#[test]
+fn test_a_call_too_large_is_refused_with_the_reason() {
+    let srv = spawn_sample_server();
+    let client = register_external(srv.port);
+    let token = sign_in(srv.port, &client);
+    let auth = format!("Authorization: Bearer {token}");
+    let headers = [JSON_POST[0], JSON_POST[1], auth.as_str()];
+    let many = vec!["rsi"; 50];
+    let as_indicators = chart_call(5000, &many, serde_json::json!({}));
+    let as_panels = as_indicators.replace("\"indicators\"", "\"panels\"");
+    assert_ne!(as_indicators, as_panels);
+    for call in [as_indicators, as_panels] {
+        let (st, _, body) = http(srv.port, "POST", "/mcp", &headers, &call);
+        assert_eq!(st, 200, "{body}");
+        assert!(body.contains("too much memory"), "{body}");
+        assert!(body.contains("\"id\":7"), "{body}");
+    }
+    let fits = chart_call(5000, &FIVE, serde_json::json!({}));
+    let (_, _, body) = http(srv.port, "POST", "/mcp", &headers, &fits);
+    assert_eq!(
+        bars_in(&body),
+        5000,
+        "the largest that fits is a real chart"
+    );
+}
+
+/// An image is a bitmap of its pixels, whatever is drawn on it. Too large is refused like
+/// a chart too large, and what fits is a real image.
+#[test]
+fn test_an_image_too_large_is_refused_with_the_reason() {
+    let srv = spawn_sample_server();
+    let client = register_external(srv.port);
+    let token = sign_in(srv.port, &client);
+    let auth = format!("Authorization: Bearer {token}");
+    let headers = [JSON_POST[0], JSON_POST[1], auth.as_str()];
+    let image = |format: &str, width: u64, height: u64| {
+        let extra = serde_json::json!({ "format": format, "width": width, "height": height });
+        let call = chart_call(50, &[], extra);
+        let (st, _, body) = http(srv.port, "POST", "/mcp", &headers, &call);
+        assert_eq!(st, 200, "{body}");
+        serde_json::from_str::<serde_json::Value>(&body).unwrap()
+    };
+    for (format, width, height) in [
+        ("png", 16000, 16000),
+        ("both", 4096, 4096),
+        ("PNG", 4_294_967_396, 4_294_967_396),
+    ] {
+        let refused = image(format, width, height);
+        assert_eq!(refused["error"]["code"], -32602, "{refused}");
+        let message = refused["error"]["message"].as_str().unwrap();
+        assert!(message.contains("a smaller image"), "{message}");
+        assert_eq!(refused["id"], 7);
+    }
+    use base64::Engine as _;
+    let fits = image("png", 4000, 4000);
+    let drawn = fits["result"]["content"][0]["data"].as_str().unwrap();
+    let drawn = base64::engine::general_purpose::STANDARD
+        .decode(drawn)
+        .unwrap();
+    assert_eq!(
+        &drawn[..4],
+        b"\x89PNG",
+        "the largest that fits is a real image"
+    );
+    // Nothing is drawn for these, so the size asks for nothing.
+    let series = image("series", 16000, 16000);
+    assert_eq!(bars_in(&series.to_string()), 50);
+}
+
+/// A price-based chart of many indicators costs no more than the whole budget: it takes
+/// its turn, where it used to be refused for what it might read.
+#[test]
+fn test_a_price_based_chart_with_many_indicators_takes_its_turn() {
+    let srv = spawn_sample_server();
+    let client = register_external(srv.port);
+    let token = sign_in(srv.port, &client);
+    let auth = format!("Authorization: Bearer {token}");
+    let headers = [JSON_POST[0], JSON_POST[1], auth.as_str()];
+    let many = vec!["rsi"; 50];
+    let call = chart_call(500, &many, serde_json::json!({ "chart_style": "renko" }));
+    let (st, _, body) = http(srv.port, "POST", "/mcp", &headers, &call);
+    assert_eq!(st, 200, "{body}");
+    assert_eq!(bars_in(&body), 500, "a real chart");
+    let call = chart_call(700, &many, serde_json::json!({ "chart_style": "renko" }));
+    let (_, _, body) = http(srv.port, "POST", "/mcp", &headers, &call);
+    assert!(body.contains("too much memory"), "too large for any style");
+}
+
+/// A client that hangs up its side with an answer unread is reset, in the middle of the
+/// answer or at the end of one: a plain close would leave the rest in the kernel's hands,
+/// charged to the server, with the place free for the next.
+#[cfg(target_os = "linux")]
+#[test]
+fn test_a_client_hanging_up_its_side_leaves_no_orphan() {
+    use std::io::Read;
+    let srv = spawn_sample_server();
+    let client = register_external(srv.port);
+    let token = sign_in(srv.port, &client);
+    let auth = format!("Authorization: Bearer {token}");
+    let large = chart_call(5000, &FIVE, serde_json::json!({}));
+    let mut unread = post_unread(srv.port, &auth, &large);
+    assert!(unread_answer_size(&mut unread) > HELD);
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    unread.shutdown(std::net::Shutdown::Write).unwrap();
+    unread
+        .set_read_timeout(Some(std::time::Duration::from_secs(10)))
+        .unwrap();
+    let mut rest = Vec::new();
+    let ended = unread.read_to_end(&mut rest);
+    assert_eq!(
+        ended.map_err(|e| e.kind()),
+        Err(std::io::ErrorKind::ConnectionReset),
+        "it read {} bytes more and saw a plain end",
+        rest.len()
+    );
+    // And what it held is free again: the same call fits, and it is a real chart.
+    let headers = [JSON_POST[0], JSON_POST[1], auth.as_str()];
+    let (_, _, body) = http(srv.port, "POST", "/mcp", &headers, &large);
+    assert_eq!(bars_in(&body), 5000);
+}
+
+/// A session's new stream ends the one it replaces, and the connection goes with it. Else
+/// one session id, again and again, takes every connection there is, past the stream cap.
+#[test]
+fn test_a_replaced_stream_gives_back_its_connection() {
+    use std::io::{Read, Write};
+    let srv = spawn_sample_server();
+    let client = register_external(srv.port);
+    let token = sign_in(srv.port, &client);
+    let open_stream = || {
+        let mut s = std::net::TcpStream::connect(("127.0.0.1", srv.port)).unwrap();
+        s.set_read_timeout(Some(std::time::Duration::from_secs(5)))
+            .unwrap();
+        write!(
+            s,
+            "GET /mcp HTTP/1.1\r\nHost: x\r\nAccept: text/event-stream\r\n\
+             Mcp-Session-Id: same\r\nAuthorization: Bearer {token}\r\n\r\n"
+        )
+        .unwrap();
+        let mut first = [0u8; 15];
+        s.read_exact(&mut first).unwrap();
+        assert!(first.starts_with(b"HTTP/1.1 200"));
+        s
+    };
+    let mut old = open_stream();
+    let new = open_stream();
+    let mut rest = Vec::new();
+    old.read_to_end(&mut rest)
+        .expect("the server should have closed the replaced stream's connection");
+    // More times than there are connections, all kept open on this side.
+    let mut held: Vec<_> = (0..140).map(|_| open_stream()).collect();
+    held.push(new);
+    let started = std::time::Instant::now();
+    assert_eq!(http(srv.port, "GET", "/oauth/me", &[], "").0, 200);
+    assert!(started.elapsed() < std::time::Duration::from_secs(3));
+    // The newest is live: no end, as it waits for its next keepalive.
+    let mut newest = held.swap_remove(139);
+    newest
+        .set_read_timeout(Some(std::time::Duration::from_millis(300)))
+        .unwrap();
+    let mut sink = [0u8; 4096];
+    while let Ok(n) = newest.read(&mut sink) {
+        assert!(n > 0, "the newest stream should have stayed open");
+    }
+}
+
+/// Answers a client does not read are memory until it does. Past the budget a tool call
+/// waits, and then is told to come back. No account, no budget, and no wait.
+#[test]
+fn test_a_full_budget_makes_calls_wait_and_come_back() {
+    let srv = spawn_sample_server();
+    let client = register_external(srv.port);
+    let token = sign_in(srv.port, &client);
+    let auth = format!("Authorization: Bearer {token}");
+    let large = chart_call(5000, &FIVE, serde_json::json!({}));
+    let mut unread = post_unread(srv.port, &auth, &large);
+    assert!(unread_answer_size(&mut unread) > HELD);
+
+    // Nothing for those without a token: at once, however full it is.
+    let started = std::time::Instant::now();
+    let (st, _, _) = http(srv.port, "POST", "/mcp", &JSON_POST, &large);
+    assert_eq!(st, 401);
+    assert!(started.elapsed().as_secs() < 2, "{:?}", started.elapsed());
+
+    let started = std::time::Instant::now();
+    let headers = [JSON_POST[0], JSON_POST[1], auth.as_str()];
+    let (st, head, _) = http(srv.port, "POST", "/mcp", &headers, &large);
+    assert_eq!(st, 503);
+    assert!(head.contains("retry-after: 5"), "{head}");
+    let waited = started.elapsed().as_secs();
+    assert!((18..25).contains(&waited), "waited {waited} s");
+    drop(unread);
+}
+
+/// Long-lived streams cannot take every connection, and a place comes back when one ends.
+#[test]
+fn test_streams_leave_room_for_everything_else() {
+    use std::io::{Read, Write};
+    let srv = spawn_server(None);
+    let client = register_external(srv.port);
+    let token = sign_in(srv.port, &client);
+    // A session of its own each: the same one again replaces the stream it has.
+    let open_stream = |session: u32| {
+        let mut s = std::net::TcpStream::connect(("127.0.0.1", srv.port)).unwrap();
+        write!(
+            s,
+            "GET /mcp HTTP/1.1\r\nHost: x\r\nAccept: text/event-stream\r\n\
+             Mcp-Session-Id: s{session}\r\nAuthorization: Bearer {token}\r\n\r\n"
+        )
+        .unwrap();
+        let mut first = [0u8; 15];
+        s.read_exact(&mut first).unwrap();
+        (s, String::from_utf8_lossy(&first).to_string())
+    };
+    let mut streams: Vec<_> = (0..64).map(open_stream).collect();
+    assert!(streams
+        .iter()
+        .all(|(_, head)| head.starts_with("HTTP/1.1 200")));
+    let (_refused, head) = open_stream(64);
+    assert!(head.starts_with("HTTP/1.1 503"), "{head}");
+    // And the app is there for everything else.
+    assert_eq!(http(srv.port, "GET", "/oauth/me", &[], "").0, 200);
+    streams.pop();
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    let (_again, head) = open_stream(65);
+    assert!(head.starts_with("HTTP/1.1 200"), "{head}");
+    // Full again, and a session already holding a place comes back to it.
+    let (_full, head) = open_stream(66);
+    assert!(head.starts_with("HTTP/1.1 503"), "{head}");
+    let (_back, head) = open_stream(0);
+    assert!(head.starts_with("HTTP/1.1 200"), "{head}");
+}
+
 #[test]
 fn test_server_serves_web_app_same_origin() {
     let root = std::env::temp_dir().join(format!("chartgen-web-{}", std::process::id()));

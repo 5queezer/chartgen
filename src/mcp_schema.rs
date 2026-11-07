@@ -103,12 +103,12 @@ pub fn tools_list_result() -> Value {
                         "chart_params": chart_params_schema(),
                         "width": {
                             "type": "integer",
-                            "description": "Chart image width in pixels",
+                            "description": "Chart image width in pixels. width x height counts towards what one call may hold: 4000 x 4000 fits with little on it, and a call past that is refused (-32602).",
                             "default": 1920
                         },
                         "height": {
                             "type": "integer",
-                            "description": "Chart image height in pixels",
+                            "description": "Chart image height in pixels. See width.",
                             "default": 1080
                         },
                         "format": {

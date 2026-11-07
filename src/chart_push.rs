@@ -464,12 +464,14 @@ impl ChartHub {
     }
 
     /// Detach stream `id` and drop its subscriptions, unless a newer stream
-    /// has replaced it.
-    pub fn unlink_stream(&self, key: &str, id: u64) {
+    /// has replaced it. Says which: whether `id` was still the key's stream.
+    pub fn unlink_stream(&self, key: &str, id: u64) -> bool {
         let mut st = self.lock();
-        if st.streams.get(key).is_some_and(|s| s.id == id) {
+        let current = st.streams.get(key).is_some_and(|s| s.id == id);
+        if current {
             self.drop_stream(&mut st, key);
         }
+        current
     }
 
     fn drop_stream(&self, st: &mut State, key: &str) {
@@ -1834,10 +1836,10 @@ mod tests {
 
         // A reconnect replaces the stream; the old one's cleanup is a no-op.
         let new = hub.link_stream("s1", tx);
-        hub.unlink_stream("s1", old);
+        assert!(!hub.unlink_stream("s1", old));
         assert_eq!(hub.counts(), (1, 1, 1));
 
-        hub.unlink_stream("s1", new);
+        assert!(hub.unlink_stream("s1", new));
         settle().await;
         assert_eq!(hub.counts(), (0, 0, 0));
         assert_eq!(fake.running.load(Ordering::SeqCst), 0);
