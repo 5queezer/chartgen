@@ -35,9 +35,12 @@ const MAX_KEY_LEN: usize = 128;
 /// To send a request's body. A client that takes longer is holding a slot from others.
 const BODY_TIMEOUT: Duration = Duration::from_secs(8);
 /// The longest a request keeps its share of the syncs running. One that takes this long
-/// has a client that does not send or does not read, which costs its account the rest of
-/// the minute: it takes many accounts to keep the others out, not eight.
+/// with nothing moving has a client that does not send or does not read, which costs its
+/// account the rest of the minute: it takes many accounts to keep the others out, not eight.
 const SLOT_TIMEOUT: Duration = Duration::from_secs(10);
+/// An answer still going out in this last part of that is a client that is slow, not one
+/// that has stopped: it loses its share of the syncs, and pays nothing for it.
+const SLOT_MOVING: Duration = Duration::from_secs(5);
 
 /// The keys the app syncs (`isSynced` in `lib/workspaceSync.ts`), and what those are made of.
 #[cfg_attr(not(feature = "scripting"), allow(dead_code))]
@@ -72,6 +75,9 @@ struct Running {
     state: SharedState,
     user: String,
     slot: Arc<Mutex<Option<tokio::sync::OwnedSemaphorePermit>>>,
+    /// Pieces of the answer hyper has taken.
+    #[cfg_attr(not(feature = "scripting"), allow(dead_code))]
+    pieces: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl Running {
@@ -79,9 +85,14 @@ impl Running {
         let slot = Arc::new(Mutex::new(Some(slot)));
         let held = slot.clone();
         let (later_state, later_user) = (state.clone(), user.clone());
+        let pieces = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let taken = pieces.clone();
         tokio::spawn(async move {
-            tokio::time::sleep(SLOT_TIMEOUT).await;
-            if held.lock().unwrap().take().is_some() {
+            use std::sync::atomic::Ordering::Relaxed;
+            tokio::time::sleep(SLOT_TIMEOUT - SLOT_MOVING).await;
+            let before = taken.load(Relaxed);
+            tokio::time::sleep(SLOT_MOVING).await;
+            if held.lock().unwrap().take().is_some() && taken.load(Relaxed) == before {
                 later_state
                     .oauth
                     .lock()
@@ -89,7 +100,12 @@ impl Running {
                     .workspace_call_stalled(&later_user);
             }
         });
-        Self { state, user, slot }
+        Self {
+            state,
+            user,
+            slot,
+            pieces,
+        }
     }
 }
 
@@ -221,9 +237,15 @@ async fn answer(running: Running, user: String, request: SyncRequest) -> Respons
 /// a length, so that a client has seen the end only once the place is free.
 #[cfg(feature = "scripting")]
 fn answer_held_by(running: Running, body: Vec<u8>) -> Response {
-    let chunks = futures_util::stream::once(std::future::ready(Ok::<_, std::convert::Infallible>(
-        Bytes::from(body),
-    )));
+    let pieces = running.pieces.clone();
+    let chunks = async_stream::stream! {
+        let mut body = Bytes::from(body);
+        while body.len() > super::listener::PIECE {
+            yield Ok::<_, std::convert::Infallible>(body.split_to(super::listener::PIECE));
+            pieces.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        yield Ok(body);
+    };
     let response = (
         [(header::CONTENT_TYPE, "application/json")],
         axum::body::Body::from_stream(chunks),

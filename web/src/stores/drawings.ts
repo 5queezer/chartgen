@@ -8,7 +8,7 @@
 import { createSignal } from "solid-js";
 
 import { isColor } from "../lib/color";
-import { forgetEvicted, merge } from "../lib/workspaceSync";
+import { EVICTED_KEY, forgetEvicted, merge } from "../lib/workspaceSync";
 
 export const DRAWING_NAMES = [
   "segment",
@@ -92,8 +92,6 @@ export interface DrawingRecord {
 
 export const DRAWINGS_PREFIX = "chartgen.drawings.";
 export const INDEX_KEY = DRAWINGS_PREFIX + "index";
-/** Symbols the LRU dropped. No key of a symbol means this, or that someone deleted them all. */
-const EVICTED_KEY = "chartgen.drawingsEvicted";
 const MAX_POINTS = 3;
 /** Applied on load only; arming a tool refuses to go past it. */
 export const MAX_DRAWINGS = 500;
@@ -414,7 +412,7 @@ function touch(symbol: string, keep: boolean): void {
     forgetEvicted(localStorage, storageKey(evicted));
     localStorage.setItem(
       EVICTED_KEY,
-      JSON.stringify([...readEvicted().filter((s) => s !== evicted), evicted].slice(-MAX_SYMBOLS)),
+      JSON.stringify([...readEvicted().filter((s) => s !== evicted), evicted]),
     );
     onEvict?.(evicted);
   }

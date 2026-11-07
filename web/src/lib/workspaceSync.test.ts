@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import {
   accountGuard,
   applyAnswer,
+  EVICTED_KEY,
   collectWrites,
   discardLegacy,
   enterAccount,
@@ -573,6 +574,14 @@ describe("a round", () => {
       writes: collectWrites(s, none).writes.map(({ key, value, base_version }) => ({ key, value, base_version })),
     });
     expect(new TextEncoder().encode(body).length).toBeLessThanOrEqual(1024 * 1024);
+  });
+
+  it("a deletion from another device means a symbol's copy here is no longer just dropped", () => {
+    s.setItem(EVICTED_KEY, JSON.stringify(["BTCUSDT", "ETHUSDT"]));
+    applyAnswer(s, [], answer({ cursor: 2, changes: [{ key: DOC, value: null, version: 2 }] }));
+    expect(JSON.parse(s.getItem(EVICTED_KEY)!)).toEqual(["ETHUSDT"]);
+    applyAnswer(s, [], answer({ cursor: 3, changes: [{ key: OTHER_DOC, value: drawings("a"), version: 3 }] }));
+    expect(JSON.parse(s.getItem(EVICTED_KEY)!)).toEqual(["ETHUSDT"]);
   });
 
   it("an older change arriving late does not go back", () => {

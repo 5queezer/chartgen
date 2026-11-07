@@ -341,6 +341,40 @@ test.describe("workspace", () => {
     await page.context().close();
   });
 
+  test("a drawing's last change, still waiting to be saved, goes out as the page goes", async ({
+    browser,
+  }) => {
+    const page = await device(browser);
+    await pushedOnce(page);
+    const symbol = /[A-Z0-9]{3,}/.exec(
+      await page.getByRole("button", { name: /^Symbol:/ }).innerText(),
+    )![0];
+    const key = `chartgen.drawings.${symbol}`;
+    const box = (await page.locator(".chart-container").first().boundingBox())!;
+    await pickTool(page, "Horizontal line");
+    await page.mouse.move(box.x + 420, box.y + 170, { steps: 5 });
+    await page.mouse.down();
+    await page.mouse.up();
+    await expect.poll(async () => ids(await read(page, key)).length).toBeGreaterThan(0);
+    await pushed(page, key, await read(page, key));
+
+    // The change waits on a clock that stops, and the network round on hiding goes first.
+    await page.waitForTimeout(700);
+    await page.mouse.down();
+    await page.mouse.up();
+    const bar = page.getByRole("toolbar", { name: "Drawing style" });
+    await expect(bar).toBeVisible();
+    await page.clock.install();
+    await bar.getByRole("button", { name: "Width 4" }).click();
+    const before = await read(page, key);
+    await page.goto("/oauth/signed-out");
+    const stored = await read(page, key);
+    expect(stored, "the store saved it as the page went").not.toBe(before);
+    await page.waitForTimeout(500);
+    expect(await freshDeviceReads(browser, key)).toBe(stored);
+    await page.context().close();
+  });
+
   test("a new token nobody can put a name to sees nothing of the last account's", async ({
     browser,
   }) => {

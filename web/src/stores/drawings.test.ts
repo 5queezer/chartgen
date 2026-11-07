@@ -420,6 +420,16 @@ describe("storage", () => {
       expect(ids("X")).toEqual(["a", "b", "c"]);
     });
 
+    it("a tab holding a symbol through many later evictions still has it dropped, not deleted", async () => {
+      const [a, b] = [await tab(), await tab()];
+      a.saveDrawings("X", [rec("a"), rec("b")]);
+      a.loadDrawings("X");
+      for (let i = 0; i < MAX_SYMBOLS * 3; i++) b.saveDrawings(`S${i}`, [rec("x")]);
+      expect(ids("X")).toBeNull();
+      a.saveDrawings("X", [rec("a"), rec("b"), rec("c")]);
+      expect(ids("X")).toEqual(["a", "b", "c"]);
+    });
+
     it("a symbol back from the LRU, then deleted by the other tab, is deleted", async () => {
       const [a, b] = [await tab(), await tab()];
       a.saveDrawings("X", [rec("a")]);

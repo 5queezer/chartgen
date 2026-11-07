@@ -5671,26 +5671,6 @@ fn test_workspace_needs_a_signed_in_user() {
     assert_eq!(workspace(open.port, None, empty).0, 404);
 }
 
-/// A client that reads little: its receive window stays small from the start.
-#[cfg(feature = "scripting")]
-fn small_window_client(port: u16) -> std::net::TcpStream {
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap();
-    let stream = runtime.block_on(async {
-        let socket = tokio::net::TcpSocket::new_v4().unwrap();
-        socket.set_recv_buffer_size(4096).unwrap();
-        let stream = socket
-            .connect(std::net::SocketAddr::from(([127, 0, 0, 1], port)))
-            .await
-            .unwrap();
-        stream.into_std().unwrap()
-    });
-    stream.set_nonblocking(false).unwrap();
-    stream
-}
-
 /// A request whose headers are in and whose body has only begun, so it stays running.
 #[cfg(feature = "scripting")]
 fn start_workspace_upload(port: u16, token: &str) -> std::net::TcpStream {
@@ -5846,8 +5826,63 @@ fn test_workspace_unread_answers_hold_their_place_for_a_time() {
         "all eight taken"
     );
     std::thread::sleep(std::time::Duration::from_secs(11));
-    assert_eq!(workspace(p, Some(&tokens[8]), empty).0, 200, "not for long");
+    assert_eq!(
+        workspace(p, Some(&tokens[8]), empty.clone()).0,
+        200,
+        "not for long"
+    );
     drop(unread);
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    assert_eq!(
+        workspace(p, Some(&tokens[0]), empty).0,
+        429,
+        "and it cost those accounts the rest of the minute"
+    );
+}
+
+/// A first sync on a slow line takes longer than a request's share of the syncs. It loses
+/// that, and pays nothing for it, as its answer is moving.
+#[cfg(feature = "scripting")]
+#[test]
+fn test_workspace_a_slow_download_that_keeps_moving_costs_nothing() {
+    use std::io::{Read, Write};
+    let fake = FakeProvider::start();
+    let srv = signin_server("workspace-slow-read", &fake, &["github"]);
+    let p = srv.port;
+    let mut b = Browser::new(p);
+    let token = web_sign_in(&mut b, &fake, "github", profile_of("github", 1, "a"));
+    let doc = "x".repeat(500 * 1024);
+    for i in 0..4 {
+        let key = format!("chartgen.pane.{i}.big");
+        let body = serde_json::json!({ "since": 0, "writes": [write_doc(&key, Some(&doc), 0)] });
+        assert_eq!(
+            workspace(p, Some(&token), body).1["results"][0]["status"],
+            "ok"
+        );
+    }
+    let mut s = small_window_client(p);
+    write!(
+        s,
+        "POST /workspace/sync HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\
+         Content-Type: application/json\r\nAuthorization: Bearer {token}\r\n\
+         Content-Length: 11\r\n\r\n{{\"since\":0}}"
+    )
+    .unwrap();
+    // About 2 MiB in about 14 s.
+    let started = std::time::Instant::now();
+    let mut total = 0;
+    let mut buf = [0u8; 16 * 1024];
+    loop {
+        match s.read(&mut buf).unwrap() {
+            0 => break,
+            n => total += n,
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    assert!(started.elapsed().as_secs() > 11, "{:?}", started.elapsed());
+    assert!(total > 2_000_000, "{total}");
+    let empty = serde_json::json!({ "since": 0 });
+    assert_eq!(workspace(p, Some(&token), empty).0, 200);
 }
 
 /// So many at once in all, however many accounts there are.

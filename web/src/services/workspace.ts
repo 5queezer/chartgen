@@ -110,6 +110,7 @@ let signingOut = false;
 /** The last round found another sync of this account running, which will be over at once. */
 let busy = false;
 let refusedSince: number | null = null;
+let leaving = false;
 /** What the server turned down, so it is not sent again until it changes. */
 const refused = new Map<string, string | null>();
 const isRefused = (key: string, live: string | null): boolean =>
@@ -243,7 +244,13 @@ function tick(): void {
 /** Best effort as the page goes: a later load sends again whatever this does not get through. */
 function flushOnLeaving(): void {
   const token = currentAccessToken();
-  if (signingOut || account === null || token === null || isHidden(localStorage, account)) return;
+  if (leaving || signingOut || account === null || token === null) return;
+  // This listener comes first, as it is added before the app mounts: what the stores hold
+  // back for the page going (drawings, script drafts) has to reach `localStorage` before this.
+  leaving = true;
+  window.dispatchEvent(new Event("pagehide"));
+  leaving = false;
+  if (isHidden(localStorage, account)) return;
   const { writes } = collectWrites(localStorage, isRefused);
   const body = bodyOf(writes);
   if (writes.length === 0 || body.length > KEEPALIVE_MAX_BYTES) return;

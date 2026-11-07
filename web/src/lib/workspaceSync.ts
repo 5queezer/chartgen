@@ -11,6 +11,8 @@ const LEGACY = "chartgen.legacy|";
 const SYNC = "chartgen.sync.";
 const CURSOR = SYNC + "cursor";
 const INDEX = "chartgen.drawings.index";
+/** Symbols the LRU dropped: no key of a symbol means this, or that someone deleted them all. */
+export const EVICTED_KEY = "chartgen.drawingsEvicted";
 
 /** Up to here a document goes to the server; past it the answer is known. */
 const MAX_DOC_BYTES = 512 * 1024;
@@ -428,6 +430,15 @@ export interface SyncAnswer {
   changes: { key: string; value: string | null; version: number }[];
 }
 
+/** A deletion arrived for this key, so its being gone here is no more the LRU's doing. */
+function forgetEvictionOf(s: Storage, key: string): void {
+  if (!key.startsWith("chartgen.drawings.")) return;
+  const symbol = key.slice("chartgen.drawings.".length);
+  const evicted = JSON.parse(s.getItem(EVICTED_KEY) ?? "[]") as unknown;
+  if (!Array.isArray(evicted) || !evicted.includes(symbol)) return;
+  s.setItem(EVICTED_KEY, JSON.stringify(evicted.filter((e) => e !== symbol)));
+}
+
 export interface Applied {
   /** A local change replaced someone else's, now it is stored. */
   replaced: string[];
@@ -479,6 +490,7 @@ export function applyAnswer(
     const st = readState(s, change.key);
     if (!restored && change.version <= st.v) continue;
     writeState(s, change.key, change.version, st.b, change.value);
+    if (change.value === null) forgetEvictionOf(s, change.key);
   }
   s.setItem(CURSOR, String(answer.cursor));
   return applied;
