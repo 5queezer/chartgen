@@ -95,16 +95,17 @@ by then is another matter: a client that reads nothing frees the place at that p
 on a new connection. Those buffers are bounded per connection for every route, by
 [ADR-0051](/chartgen/decisions/0051-bounded-connections/), and not here.
 
-A request's share of the 8 ends after 10 s even so, and one that held its place like that, by neither
-sending nor reading, costs its account the rest of the minute. Eight accounts cannot keep everyone else
-out at no cost: at 10 s a minute each it takes about 48 to fill the 8 for good. To a device all of these
-are a pause: what it has stays, and goes out when the `Retry-After` has passed. A device refused for over
+A request's share of the 8 ends after 10 s even so. One with nothing moving for the last 5 s of that, a
+body that does not come or an answer that is not being taken, costs its account the rest of the minute. A
+first sync downloading 2 MiB over a slow line loses its share and pays nothing, as its answer is moving.
+Eight accounts cannot keep everyone else out at no cost: at 10 s a minute each it takes about 48 to fill
+the 8 for good. To a device all of these are a pause: what it has stays, and goes out when the `Retry-After` has passed. A device refused for over
 a minute shows a quiet "Sync is waiting for the server".
 
-In a 256 MiB container, in a debug build, the server stayed under 97 MB with ten accounts of 2 MiB each
-sending 100 parallel reads and 100 parallel 0.95 MiB writes. Before these limits, two accounts took it
-to 486 MB. An account leaving 479 answers unread over four minutes peaked at 54 MB, where
-without ADR-0051 it was killed at about 420.
+Under `MemoryMax=256M`, ten accounts of 2 MiB each sending 100 parallel reads and 100 parallel 0.95 MiB
+writes peaked at 91 MiB on a release build and 142 MiB on a debug one, and an account leaving hundreds of
+answers unread over two and a half minutes at 92 MiB. Before these limits, two accounts took it to 486 MB, and
+one account's unread answers killed it at about 420.
 
 ### In the browser: accounts
 
@@ -188,7 +189,7 @@ a collection whose shape this build cannot read: nothing is garbled by trying.
 | Both changed which entry is active | This device | Nothing worth saying: it is a selection |
 
 A save of a symbol's drawings is itself merged against what is stored, with what that page last loaded
-or saved as the base. Another tab on the symbol, which holds its own copy in memory, so takes away only
+or saved as the base. So another tab on the symbol, which holds its own copy in memory, takes away only
 what it saw and removed. It shows the other tab's drawings only after a reload. The LRU dropping a symbol is recorded, as
 `chartgen.drawingsEvicted`, so that no stored drawings can be told apart from another tab having deleted
 them all: the first leaves this page's copy standing, and the second is merged as any deletion.
