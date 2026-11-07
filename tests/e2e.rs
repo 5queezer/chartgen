@@ -5158,3 +5158,283 @@ mod signin_server_alerts {
         assert_eq!(got["alert_id"], alert["id"]);
     }
 }
+
+// ===========================================================================
+// 15. Per-user workspace documents (ADR-0050)
+// ===========================================================================
+
+/// `POST /workspace/sync` with this token: (status, JSON or null).
+fn workspace(port: u16, token: Option<&str>, body: serde_json::Value) -> (u16, serde_json::Value) {
+    let auth = token.map(|t| format!("Authorization: Bearer {t}"));
+    let mut headers = vec![JSON_POST[0], JSON_POST[1]];
+    if let Some(auth) = &auth {
+        headers.push(auth);
+    }
+    let (st, _, resp) = http(port, "POST", "/workspace/sync", &headers, &body.to_string());
+    (st, serde_json::from_str(&resp).unwrap_or_default())
+}
+
+fn write_doc(key: &str, value: Option<&str>, base: i64) -> serde_json::Value {
+    serde_json::json!({ "key": key, "value": value, "base_version": base })
+}
+
+/// What an account holds, as a device with nothing yet would be told.
+fn docs_of(port: u16, token: &str) -> std::collections::HashMap<String, serde_json::Value> {
+    let (st, body) = workspace(port, Some(token), serde_json::json!({ "since": 0 }));
+    assert_eq!(st, 200, "{body}");
+    body["changes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|d| (d["key"].as_str().unwrap().to_string(), d["value"].clone()))
+        .collect()
+}
+
+/// Several clients of one user share one workspace. Two users never see or touch each
+/// other's, under the same key, and there is nothing in the request to name another by.
+#[test]
+fn test_workspace_is_per_user_across_clients() {
+    let fake = FakeProvider::start();
+    let srv = signin_server("workspace-users", &fake, &["github"]);
+    let p = srv.port;
+    let mut ann = Browser::new(p);
+    let phone = web_sign_in(&mut ann, &fake, "github", profile_of("github", 1, "ann"));
+    let mut laptop_browser = Browser::new(p);
+    let laptop = web_sign_in(
+        &mut laptop_browser,
+        &fake,
+        "github",
+        profile_of("github", 1, "ann"),
+    );
+    let mut bob = Browser::new(p);
+    let his = web_sign_in(&mut bob, &fake, "github", profile_of("github", 2, "bob"));
+    assert_ne!(phone, laptop, "two clients, two tokens");
+
+    let key = "chartgen.chartSettings";
+    let (st, body) = workspace(
+        p,
+        Some(&phone),
+        serde_json::json!({ "since": 0, "writes": [write_doc(key, Some("anns"), 0)] }),
+    );
+    assert_eq!(st, 200, "{body}");
+    assert_eq!(body["results"][0]["status"], "ok");
+
+    assert_eq!(docs_of(p, &laptop)[key], "anns", "her other client");
+    assert!(docs_of(p, &his).is_empty(), "nothing of hers for him");
+
+    // Bob writes the same key: his own document, at his own version.
+    let (_, body) = workspace(
+        p,
+        Some(&his),
+        serde_json::json!({ "since": 0, "writes": [write_doc(key, Some("bobs"), 0)] }),
+    );
+    assert_eq!(body["results"][0]["status"], "ok", "{body}");
+    assert_eq!(docs_of(p, &his)[key], "bobs");
+    assert_eq!(docs_of(p, &phone)[key], "anns");
+    // Fields naming someone else are not a thing the server reads.
+    let (_, body) = workspace(
+        p,
+        Some(&his),
+        serde_json::json!({ "user": "github:1", "user_id": "github:1", "since": 0 }),
+    );
+    assert_eq!(body["changes"][0]["value"], "bobs", "{body}");
+    assert_eq!(body["changes"].as_array().unwrap().len(), 1);
+}
+
+/// Two devices on one version: the second is told what the first wrote, and nothing of
+/// the first's is replaced until it has seen it.
+#[test]
+fn test_workspace_conflict_answers_with_the_current_document() {
+    let fake = FakeProvider::start();
+    let srv = signin_server("workspace-conflict", &fake, &["github"]);
+    let p = srv.port;
+    let mut a = Browser::new(p);
+    let first = web_sign_in(&mut a, &fake, "github", profile_of("github", 1, "ann"));
+    let mut b = Browser::new(p);
+    let second = web_sign_in(&mut b, &fake, "github", profile_of("github", 1, "ann"));
+    let key = "chartgen.drawings.BTCUSDT";
+    let (_, body) = workspace(
+        p,
+        Some(&first),
+        serde_json::json!({ "since": 0, "writes": [write_doc(key, Some("v1"), 0)] }),
+    );
+    let v1 = body["results"][0]["version"].as_i64().unwrap();
+    let (_, body) = workspace(
+        p,
+        Some(&first),
+        serde_json::json!({ "since": v1, "writes": [write_doc(key, Some("v2"), v1)] }),
+    );
+    let v2 = body["results"][0]["version"].as_i64().unwrap();
+
+    let (st, body) = workspace(
+        p,
+        Some(&second),
+        serde_json::json!({ "since": v1, "writes": [write_doc(key, Some("stale"), v1)] }),
+    );
+    assert_eq!(st, 200);
+    assert_eq!(body["results"][0]["status"], "conflict", "{body}");
+    assert_eq!(body["results"][0]["value"], "v2");
+    assert_eq!(body["results"][0]["version"], v2);
+    assert_eq!(docs_of(p, &first)[key], "v2", "nothing replaced");
+}
+
+/// With the server restarted and no browser connected, everything is there for the next
+/// device, and for a new client of that account. Tokens do not survive; the data does.
+#[cfg(feature = "scripting")]
+#[test]
+fn test_workspace_survives_a_restart_with_no_browser_connected() {
+    let fake = FakeProvider::start();
+    let port = free_port();
+    let db = store_path("workspace-restart");
+    let start = |fake: &FakeProvider| {
+        start_server(
+            signin_command(port, &db, fake, &["github"], None, false),
+            port,
+        )
+    };
+    let srv = start(&fake);
+    let mut ann = Browser::new(port);
+    let token = web_sign_in(&mut ann, &fake, "github", profile_of("github", 1, "ann"));
+    let (_, body) = workspace(
+        port,
+        Some(&token),
+        serde_json::json!({ "since": 0, "writes": [
+            write_doc("chartgen.layouts", Some("{\"items\":[]}"), 0),
+            write_doc("chartgen.alerts.list", Some("[]"), 0),
+        ]}),
+    );
+    let cursor = body["cursor"].as_i64().unwrap();
+    assert_eq!(cursor, 2, "{body}");
+    drop(srv);
+    let _srv = start(&fake);
+    assert_eq!(
+        workspace(port, Some(&token), serde_json::json!({ "since": 0 })).0,
+        401
+    );
+
+    let mut phone = Browser::new(port);
+    let on_phone = web_sign_in(&mut phone, &fake, "github", profile_of("github", 1, "ann"));
+    let docs = docs_of(port, &on_phone);
+    assert_eq!(docs["chartgen.alerts.list"], "[]");
+    assert_eq!(docs["chartgen.layouts"], "{\"items\":[]}");
+    // Versions carry on from where they were, so a device's cursor still means something.
+    let (_, body) = workspace(
+        port,
+        Some(&on_phone),
+        serde_json::json!({ "since": cursor, "writes": [write_doc("chartgen.alerts.list", Some("[1]"), 2)] }),
+    );
+    assert_eq!(body["results"][0]["version"], 3, "{body}");
+}
+
+/// No account, no workspace: no token, a bad one, a signed-out one, and a server with
+/// nothing configured, where it does not exist at all.
+#[test]
+fn test_workspace_needs_a_signed_in_user() {
+    let fake = FakeProvider::start();
+    let srv = signin_server("workspace-auth", &fake, &["github"]);
+    let p = srv.port;
+    let mut b = Browser::new(p);
+    let token = web_sign_in(&mut b, &fake, "github", profile_of("github", 1, "a"));
+    let empty = serde_json::json!({ "since": 0 });
+    assert_eq!(workspace(p, None, empty.clone()).0, 401);
+    assert_eq!(workspace(p, Some("nonsense"), empty.clone()).0, 401);
+    assert_eq!(workspace(p, Some(&token), empty.clone()).0, 200);
+    assert_eq!(b.request("POST", "/oauth/logout", &[], "").status, 204);
+    assert_eq!(
+        workspace(p, Some(&token), empty.clone()).0,
+        401,
+        "signed out"
+    );
+
+    let open = spawn_server(None);
+    let client = register_external(open.port);
+    let token = sign_in(open.port, &client);
+    assert_eq!(workspace(open.port, Some(&token), empty.clone()).0, 404);
+    assert_eq!(workspace(open.port, None, empty).0, 404);
+}
+
+/// Anyone can sign in, so these are what a stranger meets. One document, the user's
+/// total, requests, batches, and keys that are not the app's.
+#[test]
+fn test_workspace_limits() {
+    let fake = FakeProvider::start();
+    let srv = signin_server("workspace-limits", &fake, &["github"]);
+    let p = srv.port;
+    let mut b = Browser::new(p);
+    let token = web_sign_in(&mut b, &fake, "github", profile_of("github", 1, "a"));
+    let send = |writes: Vec<serde_json::Value>| {
+        workspace(
+            p,
+            Some(&token),
+            serde_json::json!({ "since": 0, "writes": writes }),
+        )
+    };
+
+    let too_big = "x".repeat(512 * 1024 + 1);
+    let (_, body) = send(vec![write_doc("chartgen.a", Some(&too_big), 0)]);
+    assert_eq!(
+        body["results"][0]["status"], "too_large",
+        "{}",
+        body["results"]
+    );
+
+    let (_, body) = send(vec![
+        write_doc("other.key", Some("v"), 0),
+        write_doc("chartgen.good", Some("v"), 0),
+    ]);
+    let statuses: Vec<_> = body["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["status"].clone())
+        .collect();
+    assert_eq!(
+        statuses,
+        ["ok", "bad_key"],
+        "the good one still goes through: {body}"
+    );
+
+    let many: Vec<_> = (0..51)
+        .map(|i| write_doc(&format!("chartgen.k{i}"), Some("v"), 0))
+        .collect();
+    assert_eq!(send(many).0, 400, "too many in one request");
+
+    // 2 MiB per user: four of the largest fit, and the fifth does not.
+    let large = "x".repeat(512 * 1024);
+    let mut refused = None;
+    for i in 0..5 {
+        let (_, body) = send(vec![write_doc(
+            &format!("chartgen.big{i}"),
+            Some(&large),
+            0,
+        )]);
+        if body["results"][0]["status"] == "quota" {
+            refused = Some(i);
+            break;
+        }
+    }
+    assert_eq!(
+        refused,
+        Some(3),
+        "with the little ones above, the fourth is too many"
+    );
+
+    // Requests per user: the next is refused, and another account is not.
+    let mut other = Browser::new(p);
+    let theirs = web_sign_in(&mut other, &fake, "github", profile_of("github", 2, "b"));
+    let empty = serde_json::json!({ "since": 0 });
+    let mut limited = None;
+    for i in 0..130 {
+        let (st, _) = workspace(p, Some(&token), empty.clone());
+        if st == 429 {
+            limited = Some(i);
+            break;
+        }
+    }
+    assert!(limited.is_some(), "a flood of syncs must be refused");
+    assert_eq!(
+        workspace(p, Some(&theirs), empty).0,
+        200,
+        "not another account"
+    );
+}

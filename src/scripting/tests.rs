@@ -1098,6 +1098,14 @@ fn schema_is_complete(store: &persistence::Store) {
     store.save_grant("github:1", "old-client").unwrap();
     assert!(store.live_sessions(0).unwrap().is_empty());
     store.save_server_alert("a2", "github:1", "{}").unwrap();
+    store
+        .workspace_sync(
+            "github:1",
+            0,
+            &[ws_write("chartgen.layouts", Some("{}"), 0)],
+            &WS_LIMITS,
+        )
+        .unwrap();
     assert_eq!(store.waiting_rows(None).unwrap().scripts, 0);
     assert!(store.server_alert_events().unwrap().is_empty());
     assert!(store.server_alert_owners().unwrap().contains("github:1"));
@@ -1168,4 +1176,201 @@ fn user_activity_is_the_later_of_login_and_token() {
     assert!(login > 0);
     store.mark_user_used("github:1").unwrap();
     assert!(store.user_activity().unwrap()[0].1 >= login);
+}
+
+// --- Workspace documents (ADR-0050) ---
+
+const WS_LIMITS: persistence::WorkspaceLimits = persistence::WorkspaceLimits {
+    doc_bytes: 100,
+    user_bytes: 250,
+    user_docs: 4,
+    total_bytes: 400,
+};
+
+fn ws_write(key: &str, value: Option<&str>, base_version: i64) -> persistence::WorkspaceWrite {
+    persistence::WorkspaceWrite {
+        key: key.to_string(),
+        value: value.map(str::to_string),
+        base_version,
+    }
+}
+
+fn ws_store(name: &str) -> persistence::Store {
+    let dir = std::env::temp_dir().join(format!("chartgen-ws-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    persistence::Store::open(&dir.join("s.db")).unwrap()
+}
+
+#[test]
+fn a_stale_write_gets_the_current_document_instead_of_replacing_it() {
+    use persistence::WorkspaceOutcome::{Conflict, Stored};
+    let store = ws_store("conflict");
+    let (o, _, cursor) = store
+        .workspace_sync("u", 0, &[ws_write("k", Some("one"), 0)], &WS_LIMITS)
+        .unwrap();
+    assert_eq!(o, [Stored { version: 1 }]);
+    assert_eq!(cursor, 1);
+    let (o, _, _) = store
+        .workspace_sync("u", 1, &[ws_write("k", Some("two"), 1)], &WS_LIMITS)
+        .unwrap();
+    assert_eq!(o, [Stored { version: 2 }]);
+
+    let (o, _, _) = store
+        .workspace_sync("u", 2, &[ws_write("k", Some("stale"), 1)], &WS_LIMITS)
+        .unwrap();
+    assert_eq!(
+        o,
+        [Conflict {
+            version: 2,
+            value: Some("two".to_string())
+        }]
+    );
+    // What a lost answer's retry looks like: already so, whatever version it names.
+    let (o, _, cursor) = store
+        .workspace_sync("u", 2, &[ws_write("k", Some("two"), 1)], &WS_LIMITS)
+        .unwrap();
+    assert_eq!(o, [Stored { version: 2 }]);
+    assert_eq!(cursor, 2, "it wrote nothing");
+    // A new document has to say so: another device may have made it first.
+    let (o, _, _) = store
+        .workspace_sync("u", 2, &[ws_write("k", Some("new"), 0)], &WS_LIMITS)
+        .unwrap();
+    assert!(matches!(o[0], Conflict { version: 2, .. }), "{o:?}");
+}
+
+#[test]
+fn changes_are_what_moved_since_and_never_anothers() {
+    let store = ws_store("changes");
+    store
+        .workspace_sync("ann", 0, &[ws_write("a", Some("1"), 0)], &WS_LIMITS)
+        .unwrap();
+    store
+        .workspace_sync("ann", 1, &[ws_write("b", Some("2"), 0)], &WS_LIMITS)
+        .unwrap();
+    store
+        .workspace_sync("bob", 0, &[ws_write("a", Some("bobs"), 0)], &WS_LIMITS)
+        .unwrap();
+
+    let (_, changes, cursor) = store.workspace_sync("ann", 0, &[], &WS_LIMITS).unwrap();
+    let got: Vec<_> = changes
+        .iter()
+        .map(|d| (d.key.as_str(), d.value.as_deref()))
+        .collect();
+    assert_eq!(got, [("a", Some("1")), ("b", Some("2"))]);
+    assert_eq!(cursor, 2);
+    let (_, changes, _) = store.workspace_sync("ann", 1, &[], &WS_LIMITS).unwrap();
+    assert_eq!(changes.len(), 1, "only what moved since");
+    assert_eq!(changes[0].key, "b");
+
+    // A write through one account cannot name another's, and its version is its own.
+    let (_, changes, _) = store.workspace_sync("bob", 0, &[], &WS_LIMITS).unwrap();
+    assert_eq!(changes[0].value.as_deref(), Some("bobs"));
+    assert_eq!(changes.len(), 1);
+
+    // What this call just stored is not news to it; what another device did is.
+    let (_, changes, _) = store
+        .workspace_sync("ann", 0, &[ws_write("c", Some("3"), 0)], &WS_LIMITS)
+        .unwrap();
+    let keys: Vec<_> = changes.iter().map(|d| d.key.as_str()).collect();
+    assert_eq!(keys, ["a", "b"]);
+}
+
+#[test]
+fn a_deletion_reaches_other_devices_and_frees_its_bytes() {
+    let store = ws_store("tombstone");
+    store
+        .workspace_sync(
+            "u",
+            0,
+            &[ws_write("k", Some(&"x".repeat(100)), 0)],
+            &WS_LIMITS,
+        )
+        .unwrap();
+    let (o, _, _) = store
+        .workspace_sync("u", 1, &[ws_write("k", None, 1)], &WS_LIMITS)
+        .unwrap();
+    assert_eq!(o, [persistence::WorkspaceOutcome::Stored { version: 2 }]);
+    let (_, changes, _) = store.workspace_sync("u", 1, &[], &WS_LIMITS).unwrap();
+    assert_eq!(changes[0].value, None, "other devices learn of it");
+    // Its bytes are back: two more of the largest fit only if they are.
+    for (i, base) in [("a", 0), ("b", 0)] {
+        let (o, _, _) = store
+            .workspace_sync(
+                "u",
+                0,
+                &[ws_write(i, Some(&"x".repeat(100)), base)],
+                &WS_LIMITS,
+            )
+            .unwrap();
+        assert!(
+            matches!(o[0], persistence::WorkspaceOutcome::Stored { .. }),
+            "{o:?}"
+        );
+    }
+}
+
+#[test]
+fn limits_hold_per_document_per_user_and_in_total() {
+    use persistence::WorkspaceOutcome::{OverQuota, TooLarge};
+    let store = ws_store("limits");
+    let big = "x".repeat(100);
+    let (o, _, _) = store
+        .workspace_sync(
+            "u",
+            0,
+            &[ws_write("k", Some(&"x".repeat(101)), 0)],
+            &WS_LIMITS,
+        )
+        .unwrap();
+    assert_eq!(o, [TooLarge]);
+
+    // Per user, in bytes: 250 fit two of these and a part.
+    for key in ["a", "b"] {
+        store
+            .workspace_sync("u", 0, &[ws_write(key, Some(&big), 0)], &WS_LIMITS)
+            .unwrap();
+    }
+    let (o, _, _) = store
+        .workspace_sync("u", 0, &[ws_write("c", Some(&big), 0)], &WS_LIMITS)
+        .unwrap();
+    assert_eq!(o, [OverQuota], "over the user's bytes");
+    // Shrinking is always allowed, and what was there stays.
+    let (o, _, _) = store
+        .workspace_sync("u", 2, &[ws_write("a", Some("s"), 1)], &WS_LIMITS)
+        .unwrap();
+    assert!(matches!(o[0], persistence::WorkspaceOutcome::Stored { .. }));
+
+    // Per user, in documents, tombstones included.
+    let store = ws_store("limits-docs");
+    for key in ["a", "b", "c", "d"] {
+        store
+            .workspace_sync("u", 0, &[ws_write(key, Some("v"), 0)], &WS_LIMITS)
+            .unwrap();
+    }
+    let (o, _, _) = store
+        .workspace_sync("u", 0, &[ws_write("e", Some("v"), 0)], &WS_LIMITS)
+        .unwrap();
+    assert_eq!(o, [OverQuota], "over the user's documents");
+
+    // In total: another account is refused once the file is full, and keeps nothing out.
+    let store = ws_store("limits-total");
+    for (user, key) in [("a", "1"), ("a", "2"), ("b", "1"), ("b", "2")] {
+        store
+            .workspace_sync(user, 0, &[ws_write(key, Some(&big), 0)], &WS_LIMITS)
+            .unwrap();
+    }
+    let (o, _, _) = store
+        .workspace_sync("c", 0, &[ws_write("1", Some("v"), 0)], &WS_LIMITS)
+        .unwrap();
+    assert_eq!(o, [OverQuota], "over the total");
+}
+
+#[test]
+fn a_cursor_from_a_restored_file_starts_over() {
+    let store = ws_store("cursor");
+    store
+        .workspace_sync("u", 0, &[ws_write("k", Some("v"), 0)], &WS_LIMITS)
+        .unwrap();
+    let (_, changes, _) = store.workspace_sync("u", 99, &[], &WS_LIMITS).unwrap();
+    assert_eq!(changes.len(), 1);
 }

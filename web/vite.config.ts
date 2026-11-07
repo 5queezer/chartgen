@@ -21,6 +21,7 @@ export default defineConfig({
       "/token": { target: CHARTGEN_DEV_TARGET, changeOrigin: true },
       "/.well-known": { target: CHARTGEN_DEV_TARGET, changeOrigin: true },
       "/oauth": { target: CHARTGEN_DEV_TARGET, changeOrigin: true },
+      "/workspace": { target: CHARTGEN_DEV_TARGET, changeOrigin: true },
     },
   },
   build: {

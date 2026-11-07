@@ -46,6 +46,9 @@ const MAX_CODES_PER_USER: usize = 20;
 /// grid polling everything makes about 145 a minute per visible window (ADR-0043), so
 /// this leaves room for four.
 pub(super) const MAX_TOOL_CALLS_PER_USER: usize = 600;
+/// Workspace syncs one user can make per `LOGIN_WINDOW`: a tab makes at most one every
+/// few seconds, and each may carry up to the request body limit (ADR-0050).
+const MAX_WORKSPACE_CALLS_PER_USER: usize = 120;
 const PROVIDER_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_NAME_CHARS: usize = 100;
 
@@ -266,6 +269,7 @@ pub(super) struct SignIn {
     flows: HashMap<String, ProviderFlow>,
     login_hits: HashMap<String, Vec<Instant>>,
     tool_calls: HashMap<String, Vec<Instant>>,
+    workspace_calls: HashMap<String, Vec<Instant>>,
 }
 
 /// What a handler must write to the store once it has let go of the OAuth lock.
@@ -417,6 +421,7 @@ impl SignIn {
             flows: HashMap::new(),
             login_hits: HashMap::new(),
             tool_calls: HashMap::new(),
+            workspace_calls: HashMap::new(),
         }
     }
 
@@ -667,6 +672,24 @@ impl OAuthStore {
         self.signin
             .as_mut()
             .is_none_or(|s| s.admit_tool_call(&user, Instant::now()))
+    }
+
+    /// Count a workspace sync by `user`; false when over the limit.
+    pub(super) fn admit_workspace_call(&mut self, user: &str) -> bool {
+        let Some(signin) = self.signin.as_mut() else {
+            return false;
+        };
+        let now = Instant::now();
+        signin.workspace_calls.retain(|_, hits| {
+            hits.retain(|t| now.duration_since(*t) < LOGIN_WINDOW);
+            !hits.is_empty()
+        });
+        let hits = signin.workspace_calls.entry(user.to_owned()).or_default();
+        if hits.len() >= MAX_WORKSPACE_CALLS_PER_USER {
+            return false;
+        }
+        hits.push(now);
+        true
     }
 
     /// `(display name, provider slug)` of a signed-in user.
@@ -1524,10 +1547,11 @@ pub(super) async fn me(State(state): State<SharedState>, headers: HeaderMap) -> 
         return Json(json!({ "sign_in": false, "user": null })).into_response();
     }
     let user = extract_bearer_token(&headers).and_then(|t| s.user_for_token(t));
-    match user.and_then(|u| s.user_profile(&u)) {
-        Some((name, provider)) => {
-            Json(json!({ "sign_in": true, "user": { "name": name, "provider": provider } }))
-                .into_response()
+    let profile = user.and_then(|id| s.user_profile(&id).map(|p| (id, p)));
+    match profile {
+        Some((id, (name, provider))) => {
+            let user = json!({ "id": id, "name": name, "provider": provider });
+            Json(json!({ "sign_in": true, "user": user })).into_response()
         }
         None => (
             StatusCode::UNAUTHORIZED,
