@@ -125,6 +125,10 @@ export interface GenerateChartInput {
       }
   )[];
   /**
+   * format=series only: compute volume_profile, fixed_range_vp and anchored_vp from lower-timeframe bars, for a chart's full load: up to 6 more Binance requests. The series then says which bars in profile_interval. Leave it off on pages and tails, which keep the load's profile. Default: false, each bar's volume spread over its range.
+   */
+  profile_intrabars?: boolean;
+  /**
    * Alias for ticker. Stock or crypto symbol.
    */
   symbol?: string;
@@ -147,6 +151,53 @@ export interface GenerateChartInput {
 }
 
 export interface GetBalanceInput {}
+
+export interface GetFootprintInput {
+  /**
+   * ATR length of the auto row size.
+   */
+  atr_length?: number;
+  /**
+   * Newest bars to return.
+   */
+  bars?: number;
+  /**
+   * Exclusive upper bound on bar open time, ms since epoch.
+   */
+  end_time?: number;
+  /**
+   * Imbalance, percent: buy against sell one row below, sell against buy one row above.
+   */
+  imbalance?: number;
+  /**
+   * For a poll of a chart already loaded: the intrabar_interval its load returned, or 'none' if that was null, so the few newest bars are read as the load's were. Falls back to what these bars can afford if they cannot have it. Omit to choose by the window.
+   */
+  intrabar_interval?: string;
+  /**
+   * Row height in price. Raised to a tick, lowered to the highest price, and widened if a bar would have over 200 rows; row_widened says so. Omit for row_ticks or auto.
+   */
+  row_size?: number;
+  /**
+   * Row height in ticks. Omit for auto: 0.2 x ATR on round numbers.
+   */
+  row_ticks?: number;
+  /**
+   * Imbalances in a row that make a stacked imbalance. A level counts only where at least 2 intrabars traded, on it and on the level it is compared with: one kline has one split, so its rows would all agree.
+   */
+  stacked?: number;
+  /**
+   * Symbol, as generate_chart's ticker.
+   */
+  ticker: string;
+  /**
+   * Chart interval, as generate_chart's timeframe.
+   */
+  timeframe?: string;
+  /**
+   * Value area, percent of the volume.
+   */
+  value_area?: number;
+}
 
 export interface GetIndicatorsInput {
   /**
@@ -181,6 +232,57 @@ export interface GetQuotesInput {
    * @maxItems 50
    */
   symbols: string[];
+}
+
+export interface GetTpoInput {
+  /**
+   * Length of a block, from 5m to 4h. If 3000 cannot hold a whole period, the next that can: the reply's block is that one, and block_widened says so. A period 4h blocks cannot cover is refused.
+   */
+  block?: string;
+  /**
+   * Exclusive upper bound on block open time, ms since epoch.
+   */
+  end_time?: number;
+  /**
+   * Blocks of the initial balance.
+   */
+  ib_blocks?: number;
+  /**
+   * Length of a profile: a count and D, W or M, such as 1D, 1W or 1M.
+   */
+  period?: string;
+  /**
+   * Newest periods to return, whole ones within 3000 blocks; `periods_cut` says if that left some out.
+   */
+  periods?: number;
+  /**
+   * Row height in price. Omit for row_ticks or auto.
+   */
+  row_size?: number;
+  /**
+   * Row height in ticks. Omit for auto: a 24th of the median period range, on round numbers.
+   */
+  row_ticks?: number;
+  /**
+   * Up to 5 HH:MM-HH:MM in the exchange's time (UTC for crypto): one profile per session of each period.
+   *
+   * @maxItems 5
+   */
+  sessions?:
+    | []
+    | [string]
+    | [string, string]
+    | [string, string, string]
+    | [string, string, string, string]
+    | [string, string, string, string, string];
+  /**
+   * Symbol, as generate_chart's ticker.
+   */
+  ticker: string;
+  /**
+   * Value area, percent of the blocks.
+   */
+  value_area?: number;
 }
 
 export interface ListAlertsInput {}

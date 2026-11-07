@@ -113,6 +113,7 @@ describe("chart types", () => {
       "baseline",
       "columns",
       "high_low",
+      "volume_candles",
     ]);
   });
 

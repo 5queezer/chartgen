@@ -1,5 +1,6 @@
 mod chart_push;
 mod fetch;
+mod intrabars;
 mod mcp;
 mod search;
 mod server;

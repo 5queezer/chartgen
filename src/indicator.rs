@@ -217,6 +217,9 @@ pub struct PanelResult {
     pub y_range: Option<(f64, f64)>,
     pub label: String,
     pub is_overlay: bool,
+    /// Its lines hold levels: a change of value is a jump between two of them, not a
+    /// slope, so nothing is drawn across it.
+    pub level_lines: bool,
 }
 
 /// Values an indicator plots past the last bar (ADR-0033), e.g. the
@@ -302,11 +305,28 @@ pub trait Indicator {
         false
     }
 
+    /// Whether this is better computed from lower-timeframe bars (ADR-0048).
+    fn wants_intrabars(&self) -> bool {
+        false
+    }
+
+    /// The result over `chart`'s bars with its volume read from `intrabars`, which
+    /// cover them. `None` when it has no such form.
+    fn with_intrabars(&self, _chart: &OhlcvData, _intrabars: &OhlcvData) -> Option<PanelResult> {
+        None
+    }
+
     /// Bars of history the values need before they converge (an SMA-seeded
     /// EMA's seed weighs < 0.1% after them). A non-zero series `warmup` is
     /// raised to this, up to its cap (ADR-0032). 0: no extra need.
     fn warmup_bars(&self) -> usize {
         0
+    }
+
+    /// `warmup_bars` on a chart of `chart_secs`, for an indicator whose need is a span
+    /// of time rather than of bars.
+    fn warmup_bars_at(&self, _chart_secs: Option<i64>) -> usize {
+        self.warmup_bars()
     }
 
     /// What `compute` over `data` plots past the last bar (ADR-0033);

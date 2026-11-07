@@ -18,7 +18,24 @@ import { Portal } from "solid-js/web";
 import { useQueryClient } from "@tanstack/solid-query";
 import type { Chart as KLineChart } from "klinecharts";
 
+import { isOrderFlowType } from "../lib/chartTypes";
+import { resolveColors } from "../lib/chartStyle";
 import { rememberLabels } from "../lib/indicatorNames";
+import {
+  CELL_MIN_BAR,
+  FOOTPRINT_MAX_TAIL,
+  footprintMethod,
+  footprintTail,
+  mergeFootprintMeta,
+  mergeTpoMeta,
+  TPO_MAX_TAIL,
+  tpoMethod,
+  tpoTail,
+  type CellMode,
+} from "../lib/orderFlow";
+import type { FootprintExtend, TpoExtend } from "../lib/orderFlowDraw";
+import { createFlowFeed, type FlowState } from "../lib/orderFlowFeed";
+import { PALETTES } from "../lib/theme";
 import { alignAsOf, COMPARE_PALETTE } from "../lib/compare";
 import { createCompareFeed, type CompareData } from "../lib/compareFeed";
 import { barCloseMs, isContinuousMarket } from "../lib/countdown";
@@ -31,7 +48,7 @@ import {
   type LiveSnapshot,
   type PollStatus,
 } from "../lib/liveFeed";
-import { resolveTimeZone } from "../lib/timezone";
+import { isDateBar, resolveTimeZone } from "../lib/timezone";
 import type { McpSession } from "../mcp";
 import { chartQueryKey, createChartQuery } from "../queries";
 import { copyChartLink, importPending } from "../services/shareLink";
@@ -47,15 +64,34 @@ import {
   instanceKey,
   toWire,
 } from "../stores/indicators";
-import { addRecent, chartStoreOf, chartStyleOf, timeZone } from "../stores/layout";
-import type { SeriesPayload } from "../types/responses";
+import { addRecent, chartStoreOf, chartStyleOf, theme, timeZone } from "../stores/layout";
+import { chartSettings } from "../stores/chartSettings";
+import { orderFlowSettings, tpoSessions } from "../stores/orderFlow";
+import type { GetTpoInput } from "../types/generated-input";
+import type {
+  FootprintBar,
+  FootprintMeta,
+  SeriesPayload,
+  TpoMeta,
+  TpoProfile,
+} from "../types/responses";
 import { AlertLines } from "./AlertLines";
 import { Chart } from "./Chart";
 import { ChartContextMenu } from "./ChartContextMenu";
 import { ChartLoadError } from "./ChartLoadError";
 import { indicatorMenuOf } from "./menus";
 import { DrawingToolbar, type DrawingsApi } from "./DrawingToolbar";
+import { OrderFlowSettingsDialog } from "./OrderFlowSettings";
 import { ReplayBar } from "./ReplayBar";
+
+/** Slow on purpose: each poll reads finer bars on the server (ADR-0048). */
+const FOOTPRINT_POLL_MS = 10_000;
+const TPO_POLL_MS = 30_000;
+
+const EMPTY_FLOW = { items: new Map(), meta: null, status: "loading", message: null } as const;
+
+const decimalsOf = (tick: number | undefined) =>
+  tick ? Math.min(8, Math.max(0, Math.ceil(-Math.log10(tick)))) : 2;
 
 export interface PaneDeps {
   session: McpSession;
@@ -351,6 +387,155 @@ export function createChartPane(pane: number, deps: PaneDeps) {
   // Chips and picker show the legend's names (EMA, BB), not registry ids.
   createEffect(() => rememberLabels(live()?.series.indicators));
 
+  // --- Order-flow chart types (ADR-0048) --------------------------------
+  const flowKind = createMemo(() => {
+    const t = chartType();
+    return isOrderFlowType(t) ? t : null;
+  });
+  const [flowMode, setFlowMode] = createSignal<CellMode>("cells");
+  const [footprints, setFootprints] = createSignal<FlowState<FootprintBar, FootprintMeta>>(EMPTY_FLOW);
+  const [profiles, setProfiles] = createSignal<FlowState<TpoProfile, TpoMeta>>(EMPTY_FLOW);
+  const footprintFeed = createFlowFeed<FootprintBar, FootprintMeta>({
+    pollMs: FOOTPRINT_POLL_MS,
+    doc: replay.liveDoc,
+    onChange: setFootprints,
+    mergeMeta: mergeFootprintMeta,
+    tailSize: (gap) => footprintTail(gap, untrack(timeframe)),
+    maxTail: FOOTPRINT_MAX_TAIL,
+    fetch: async ({ tail, endTime, meta: load }, signal) => {
+      const f = untrack(orderFlowSettings).footprint;
+      const { footprints: items, has_more, ...meta } = await session.callGetFootprint(
+        {
+          ticker: untrack(symbol),
+          timeframe: untrack(timeframe),
+          bars: tail ?? 60,
+          ...(endTime !== undefined && { end_time: endTime }),
+          ...(load !== undefined
+            ? { row_size: load.row_size }
+            : f.rowTicks > 0 && { row_ticks: f.rowTicks }),
+          // A poll reads what its load read: its few bars could afford finer ones.
+          ...(tail !== undefined &&
+            load && { intrabar_interval: load.intrabar_interval ?? "none" }),
+          atr_length: f.atrLength,
+          value_area: f.valueArea,
+          imbalance: f.imbalance,
+          stacked: f.stacked,
+        },
+        signal,
+      );
+      return { items, meta, hasMore: has_more };
+    },
+  });
+  const tpoFeed = createFlowFeed<TpoProfile, TpoMeta>({
+    pollMs: TPO_POLL_MS,
+    doc: replay.liveDoc,
+    onChange: setProfiles,
+    mergeMeta: mergeTpoMeta,
+    tailSize: (gap) => tpoTail(gap, untrack(orderFlowSettings).tpo.period),
+    maxTail: TPO_MAX_TAIL,
+    fetch: async ({ tail, endTime, meta: load }, signal) => {
+      const t = untrack(orderFlowSettings).tpo;
+      const sessions = tpoSessions(t.sessions);
+      const { profiles: items, has_more, ...meta } = await session.callGetTpo(
+        {
+          ticker: untrack(symbol),
+          period: t.period,
+          block: t.block,
+          periods: tail ?? 10,
+          ...(endTime !== undefined && { end_time: endTime }),
+          ...(load !== undefined
+            ? { row_size: load.row_size }
+            : t.rowTicks > 0 && { row_ticks: t.rowTicks }),
+          value_area: t.valueArea,
+          ib_blocks: t.ibBlocks,
+          ...(sessions.length > 0 && { sessions: sessions as GetTpoInput["sessions"] }),
+        },
+        signal,
+      );
+      return { items, meta, hasMore: has_more };
+    },
+  });
+  onCleanup(footprintFeed.dispose);
+  onCleanup(tpoFeed.dispose);
+  // What the server computes restarts a feed; what only changes the drawing does not.
+  const footprintKey = createMemo(() => {
+    const f = orderFlowSettings().footprint;
+    return [symbol(), timeframe(), f.rowTicks, f.atrLength, f.valueArea, f.imbalance, f.stacked].join();
+  });
+  const tpoKey = createMemo(() => {
+    const t = orderFlowSettings().tpo;
+    return [symbol(), t.period, t.block, t.rowTicks, t.valueArea, t.ibBlocks, t.sessions].join();
+  });
+  createEffect(() => {
+    footprintKey();
+    const on = authReady() && flowKind() === "footprint";
+    if (on) footprintFeed.restart();
+    else footprintFeed.stop();
+  });
+  // A profile holds the whole period, so in replay it would show the future.
+  createEffect(() => {
+    tpoKey();
+    const on = authReady() && flowKind() === "tpo" && replay.mode() === "off";
+    if (on) tpoFeed.restart();
+    else tpoFeed.stop();
+  });
+  const flowView = createMemo<FootprintExtend | TpoExtend | null>(() => {
+    const kind = flowKind();
+    if (!kind) return null;
+    const palette = PALETTES[theme()];
+    const colors = resolveColors(palette, chartSettings().themes[theme()]);
+    const base = {
+      up: colors.bodyUp,
+      down: colors.bodyDown,
+      text: palette.fg,
+      muted: palette.fgMuted,
+      surface: colors.background ?? palette.bg,
+    };
+    if (kind === "footprint") {
+      const state = footprints();
+      return {
+        ...base,
+        kind,
+        bars: state.items,
+        settings: orderFlowSettings().footprint,
+        rowSize: state.meta?.row_size ?? 1,
+        decimals: decimalsOf(state.meta?.tick),
+        intraday: !isDateBar(timeframe()),
+        report: setFlowMode,
+      };
+    }
+    const state = profiles();
+    return {
+      ...base,
+      kind,
+      profiles: state.items,
+      settings: orderFlowSettings().tpo,
+      decimals: decimalsOf(state.meta?.tick),
+    };
+  });
+  const flowStatus = createMemo(() => {
+    const kind = flowKind();
+    if (!kind) return null;
+    if (kind === "tpo" && replay.mode() !== "off") return "TPO is off in replay: showing candles";
+    const state = kind === "footprint" ? footprints() : profiles();
+    if (state.status === "error") return `Order flow failed: ${state.message}`;
+    if (!state.meta) return "Loading order flow…";
+    if (kind === "footprint") {
+      const method = footprintMethod(footprints().meta!);
+      return flowMode() === "candles" ? `Zoom in for footprint cells · ${method}` : method;
+    }
+    return tpoMethod(profiles().meta!);
+  });
+  // No paging for bars drawn as candles: those need no cells, so no data. Read from
+  // the chart, as the mode only changes on the next paint, after this.
+  const onVisibleFrom = (t: number) => {
+    if (flowKind() === "tpo") tpoFeed.ensure(t);
+    else if (flowKind() === "footprint" && (chart()?.getBarSpace() ?? 0) >= CELL_MIN_BAR) {
+      footprintFeed.ensure(t);
+    }
+  };
+  // ---------------------------------------------------------------------
+
   return {
     pane,
     layout,
@@ -380,6 +565,15 @@ export function createChartPane(pane: number, deps: PaneDeps) {
     setDrawings,
     lastLoaded,
     timeZone: () => resolveTimeZone(timeZone(), symbol()),
+    flowKind,
+    flowView,
+    flowStatus,
+    flowMode,
+    flowTable: () => {
+      const view = flowView();
+      return view?.kind === "footprint" ? view.settings.summary === "table" : !!view?.settings.summary;
+    },
+    onVisibleFrom,
   };
 }
 
@@ -405,6 +599,7 @@ export function ChartPane(props: ChartPaneProps): JSX.Element {
   const { activeIndicators, removeIndicator, setActiveIndicators, toggleIndicatorHidden } = s.indicators;
   const indexOf = (key: string) =>
     activeIndicators().findIndex((e) => instanceKey(e) === key);
+  const [flowSettingsOpen, setFlowSettingsOpen] = createSignal(false);
   // Both read the active chart. A press has activated this one, a key has not.
   const openIndicatorSettings = (key: string) => {
     setActivePane(s.pane);
@@ -486,6 +681,8 @@ export function ChartPane(props: ChartPaneProps): JSX.Element {
             onLoadOlder={s.feed.loadOlder}
             activeIndicators={s.wireIndicators()}
             fitPanes={props.fitPanes}
+            orderFlow={s.flowView()}
+            onVisibleFrom={s.onVisibleFrom}
             styles={s.plotStyles()}
             chartType={chartType()}
             timeZone={s.timeZone()}
@@ -509,6 +706,31 @@ export function ChartPane(props: ChartPaneProps): JSX.Element {
             active={s.isActive()}
           />
         </ChartContextMenu>
+        <Show when={s.flowStatus()}>
+          {(text) => (
+            <div
+              class="orderflow-status"
+              classList={{ "above-table": s.flowTable() }}
+              data-testid="orderflow-status"
+              data-mode={s.flowMode()}
+            >
+              <span class="truncate" title={text()}>{text()}</span>
+              <button
+                type="button"
+                aria-label="Order flow settings"
+                data-testid="orderflow-settings-open"
+                onClick={() => setFlowSettingsOpen(true)}
+              >
+                ⚙
+              </button>
+            </div>
+          )}
+        </Show>
+        <OrderFlowSettingsDialog
+          kind={s.flowKind()}
+          open={flowSettingsOpen()}
+          onClose={() => setFlowSettingsOpen(false)}
+        />
       </div>
     </PaneProvider>
   );

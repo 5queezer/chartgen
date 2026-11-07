@@ -464,7 +464,7 @@ fn test_sample_data_sizes() {
 #[test]
 fn test_available_count() {
     let available = indicators::available();
-    assert_eq!(available.len(), 75, "Expected 75 indicators");
+    assert_eq!(available.len(), 77, "Expected 77 indicators");
 }
 
 #[test]
@@ -509,22 +509,23 @@ fn test_session_vp_resets_per_day() {
     .unwrap()
     .unwrap();
     let result = ind.compute(&data);
-    // Expect multiple POC lines — one per session — each with NaN gaps.
+    // One POC line, whatever the number of sessions (ADR-0048): a live tail holds
+    // fewer sessions than a load and must keep its shape. It holds one level through
+    // each session, with a value on all of its bars.
     let poc_lines: Vec<_> = result
         .lines
         .iter()
         .filter(|l| l.label.as_deref() == Some("POC"))
         .collect();
-    assert!(poc_lines.len() >= 2, "expected at least 2 session POCs");
-    for line in &poc_lines {
-        let nans = line.y.iter().filter(|v| v.is_nan()).count();
-        let finite = line.y.len() - nans;
-        assert!(
-            nans > 0,
-            "session POC should have NaN gaps outside its range"
-        );
-        assert!(finite > 0, "session POC should have some finite values");
-    }
+    assert_eq!(poc_lines.len(), 1);
+    assert!(result.level_lines);
+    assert!(poc_lines[0].y.iter().all(|v| v.is_finite()));
+    let sessions: Vec<&[f64]> = poc_lines[0].y.chunk_by(|a, b| a == b).collect();
+    assert!(
+        sessions.len() >= 2,
+        "expected at least 2 sessions: {}",
+        sessions.len()
+    );
 }
 
 #[test]
@@ -2376,6 +2377,53 @@ fn test_oauth_discovery_from_mcp() {
     assert_eq!(st, 200);
     let v: serde_json::Value = serde_json::from_str(&body).unwrap();
     assert_eq!(v["issuer"], base);
+}
+
+/// TradingView's volume profile page: on equal volumes the row closer to the POC, and
+/// then the one above. Volumes `[0, 6, 10, 6, 0]`: the POC and the 6 above hold 16 of 22,
+/// past 70%, so the value area is bins 2 and 3 of 0..5.
+#[test]
+fn test_volume_profile_value_area_ties_go_up() {
+    let flat = |price: f64, volume: f64, t: i64| chartgen::data::Bar {
+        open: price,
+        high: price,
+        low: price,
+        close: price,
+        volume,
+        date: t.to_string(),
+    };
+    let bars = chartgen::data::OhlcvData {
+        bars: vec![
+            chartgen::data::Bar {
+                open: 0.0,
+                high: 5.0,
+                low: 0.0,
+                close: 5.0,
+                volume: 0.0,
+                date: "0".into(),
+            },
+            flat(1.5, 6.0, 1),
+            flat(2.5, 10.0, 2),
+            flat(3.5, 6.0, 3),
+        ],
+        symbol: None,
+        interval: None,
+        session: None,
+    };
+    let vp = indicators::by_name_configured("volume_profile", &serde_json::json!({"bins": 5}))
+        .unwrap()
+        .unwrap()
+        .compute(&bars);
+    assert_eq!((vp.hlines[1].y, vp.hlines[2].y), (4.0, 2.0), "VAH, VAL");
+    // `session_vp`, `hvn_lvn`, `naked_poc` and `tpo` share another implementation.
+    let session = indicators::by_name_configured(
+        "session_vp",
+        &serde_json::json!({"bins": 5, "bars_per_session": 4}),
+    )
+    .unwrap()
+    .unwrap()
+    .compute(&bars);
+    assert_eq!((session.lines[1].y[3], session.lines[2].y[3]), (4.0, 2.0));
 }
 
 // ===========================================================================

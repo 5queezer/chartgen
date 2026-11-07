@@ -79,7 +79,7 @@ about one request a second, whatever the number of users. Identical history page
 as well. So a polled forming candle can be up to 3 s old. A push seed always reads for itself,
 about one request per subscribe.
 
-The cache holds at most about 31 MB of live klines. Expect more in resident memory: a review
+The cache holds at most about 33 MB of live klines. Expect more in resident memory: a review
 probe on a debug build measured about 2.3 times that, from transient JSON and malloc arenas. So
 watch RSS under load, and if it climbs, try `MALLOC_ARENA_MAX=2`. A window unused for 2 minutes
 goes at the next read of any Binance chart; with no traffic it stays, within the bound. Each
