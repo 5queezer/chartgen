@@ -559,7 +559,7 @@ describe("grid in a layout (ADR-0043)", () => {
     const state = parseState({
       ...two,
       chartType: "renko_x",
-      timeframe: "30s",
+      timeframe: "1y",
       panes: [{ ...pane, symbol: "ETHUSDT", chartType: "future", timeframe: "7s" }],
     })!;
     expect(state.chartType).toBe("candles");
