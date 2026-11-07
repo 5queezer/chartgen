@@ -5174,11 +5174,13 @@ fn workspace(port: u16, token: Option<&str>, body: serde_json::Value) -> (u16, s
     (st, serde_json::from_str(&resp).unwrap_or_default())
 }
 
+#[cfg(feature = "scripting")]
 fn write_doc(key: &str, value: Option<&str>, base: i64) -> serde_json::Value {
     serde_json::json!({ "key": key, "value": value, "base_version": base })
 }
 
 /// What an account holds, as a device with nothing yet would be told.
+#[cfg(feature = "scripting")]
 fn docs_of(port: u16, token: &str) -> std::collections::HashMap<String, serde_json::Value> {
     let (st, body) = workspace(port, Some(token), serde_json::json!({ "since": 0 }));
     assert_eq!(st, 200, "{body}");
@@ -5192,6 +5194,7 @@ fn docs_of(port: u16, token: &str) -> std::collections::HashMap<String, serde_js
 
 /// Several clients of one user share one workspace. Two users never see or touch each
 /// other's, under the same key, and there is nothing in the request to name another by.
+#[cfg(feature = "scripting")]
 #[test]
 fn test_workspace_is_per_user_across_clients() {
     let fake = FakeProvider::start();
@@ -5243,6 +5246,7 @@ fn test_workspace_is_per_user_across_clients() {
 
 /// Two devices on one version: the second is told what the first wrote, and nothing of
 /// the first's is replaced until it has seen it.
+#[cfg(feature = "scripting")]
 #[test]
 fn test_workspace_conflict_answers_with_the_current_document() {
     let fake = FakeProvider::start();
@@ -5338,7 +5342,13 @@ fn test_workspace_needs_a_signed_in_user() {
     let empty = serde_json::json!({ "since": 0 });
     assert_eq!(workspace(p, None, empty.clone()).0, 401);
     assert_eq!(workspace(p, Some("nonsense"), empty.clone()).0, 401);
-    assert_eq!(workspace(p, Some(&token), empty.clone()).0, 200);
+    // A build with no store has nowhere to keep it: the app stays local, and says nothing.
+    let signed_in = if cfg!(feature = "scripting") {
+        200
+    } else {
+        404
+    };
+    assert_eq!(workspace(p, Some(&token), empty.clone()).0, signed_in);
     assert_eq!(b.request("POST", "/oauth/logout", &[], "").status, 204);
     assert_eq!(
         workspace(p, Some(&token), empty.clone()).0,
@@ -5355,6 +5365,7 @@ fn test_workspace_needs_a_signed_in_user() {
 
 /// An application the user approved gets the tools and not the browser's data, though
 /// the token is the same user's.
+#[cfg(feature = "scripting")]
 #[test]
 fn test_workspace_is_the_web_apps_alone() {
     let fake = FakeProvider::start();
@@ -5401,6 +5412,7 @@ fn test_workspace_is_the_web_apps_alone() {
 
 /// Anyone can sign in, so these are what a stranger meets. One document, the user's
 /// total, requests, batches, and keys that are not the app's.
+#[cfg(feature = "scripting")]
 #[test]
 fn test_workspace_limits() {
     let fake = FakeProvider::start();
