@@ -104,7 +104,7 @@ has been handed over piece by piece, so hyper asks for the next piece only when 
 The cost does not see what a price-based chart builds. In `series`, indicators run on every bar built, up to
 20,000 with a small box, though only `bars` are returned. On the sample source the default box makes about 150 to
 3000 of them, depending on the style, and a renko box of 0.14% is refused for making over 20,000. One call at 0.15%,
-50 of the heaviest indicators and 627 bars, the most it is charged for, peaked at 165 MiB and survived.
+50 of the heaviest indicators and 627 bars, the most it is charged for, peaked at 165 to 168 MiB and survived.
 
 The web app comes back from a `503` by itself: a call after `Retry-After`, up to 6 tries, and a refused
 stream for as long as the tab wants it, so that it returns to pushed data. Its charts show no error for it.
@@ -155,13 +155,13 @@ reclaimable file pages.
 | Charts of the largest size, then 25 and 50 indicators (refused), twice | Killed | 45 | 42 |
 | Large charts in a loop, 8 threads, half-sent bodies held | Not run | 112 | 113 |
 | The app's charts in a loop, 16 threads, half-sent bodies held | Not run | 87 | 90 |
-| The bundle, `Connection: close`, half-closed at once, 2400 requests | Not run | Not run | 115, no orphans |
+| The bundle, `Connection: close`, half-closed after 0.4 s or at once, 2400 requests, 5 runs | Not run | Not run | 115 to 156, no orphans |
 | A map of 2.7 MB, `Connection: close`, half-closed after 0.4 s, 2400 requests | Not run | Not run | 146, no orphans |
 | An asset that fits the send buffer, the same, 1440 requests | Not run | Not run | 57, no orphans |
-| One image, 16000 × 16000 | Not run | Not run | 7, refused |
+| One image, 16000 × 16000 | Not run | Not run | Under 10, refused |
 | Images of 4000 × 4000, 8 at once, three times | Not run | Not run | 61 |
 | Images of 1920 × 1080, 64 at once, three times | Not run | Not run | 77 |
-| One price-based chart, box 0.15%, 627 bars, 50 of the heaviest indicators | Not run | Not run | 165 |
+| One price-based chart, box 0.15%, 627 bars, 50 of the heaviest indicators | Not run | Not run | 165 to 168 |
 
 The last seven are on the fixes here. Without them, on this listener, half-closing got the server killed by about
 600 requests, and so did one image of 16000 × 16000, eight of 4000 × 4000 at once, or 32 of 1920 × 1080 at once.
