@@ -109,8 +109,12 @@ test.describe("workspace", () => {
     browser,
   }) => {
     const laptop = await device(browser);
+    // Two devices new to an account within seconds would each add a default layout.
+    await pushed(laptop, "chartgen.layouts", await read(laptop, "chartgen.layouts"));
     const phone = await device(browser);
     const timeframes = (page: Page) => page.getByRole("group", { name: "Timeframe" });
+    await phone.waitForTimeout(6_000);
+    await expect(phone.getByTestId("workspace-remote"), "nothing new yet").toBeHidden();
 
     const next = timeframes(laptop).locator("[aria-pressed=false]").last();
     const chosen = (await next.innerText()).trim();
@@ -405,6 +409,25 @@ test.describe("workspace", () => {
     await second.evaluate(() => localStorage.setItem("chartgen.workspace.account", "google:someone"));
     await loaded;
     await first.context().close();
+  });
+
+  test("a session that ended without signing out: the next account still sees nothing", async ({
+    browser,
+  }) => {
+    const context = await browser.newContext({ baseURL: test.info().project.use.baseURL });
+    const page = await context.newPage();
+    await page.goto("/");
+    await signIn(page);
+    await write(page, NOTE, "octo's");
+    await pushed(page, NOTE, "octo's");
+
+    await context.clearCookies();
+    await page.goto("/");
+    await signIn(page, "Google", "Ann Example");
+    expect(await read(page, NOTE)).toBeNull();
+    await expect(page.getByTestId("workspace-offer")).toBeHidden();
+    expect(await freshDeviceReads(browser, NOTE, "Google", "Ann Example")).toBeNull();
+    await context.close();
   });
 
   test("an open tab of another account's reloads into the account now signed in", async ({

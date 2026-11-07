@@ -199,6 +199,8 @@ the data comes back.
 - Bad: each document costs up to three copies in `localStorage` (live, base, server's), so an account
   near its 2 MiB limit takes most of a browser's quota. If the browser's storage fills up, sync stops
   with a notice, and local work goes on as far as the stores can save.
+- Bad: two devices new to an account within a few seconds, before either has sent anything, each
+  create a default layout, and the account keeps both. Deleting one is an ordinary edit.
 - Bad: browser alerts are evaluated by each browser on its own, as before. Two devices with the app
   open both notify, and both updating an alert's state can show a conflict notice.
 - Neutral: the symbol and timeframe sync like any setting, so a reload shows what the last device
