@@ -24,6 +24,8 @@ import {
 } from "./components/AlertDialog";
 import { paletteColor } from "./components/Chart";
 import { ChartPane, createChartPane } from "./components/ChartPane";
+import { ContextMenuHost } from "./components/ContextMenu";
+import { indicatorMenuOf } from "./components/menus";
 import { ChartSettings } from "./components/ChartSettings";
 import { ChartTypeSettings } from "./components/ChartTypeSettings";
 import { DRAWING_LABELS } from "./components/DrawingToolbar";
@@ -259,6 +261,12 @@ export function App(): JSX.Element {
     }
     openAlertDialog({ source: plotRef(key, 0), price: lastPlotValue(series, key, 0) ?? undefined });
   };
+  // Chips and tree rows follow the active chart; a sub-pane asks its own (ChartPane).
+  const indicatorMenu = (key: string) =>
+    indicatorMenuOf(view().indicators, live()?.series, key, {
+      onAddAlert: addIndicatorAlert,
+      onSettings: (k) => setSettingsIndex(indexOf(k)),
+    });
   // ---------------------------------------------------------------------
 
   // Other symbols with active alerts are evaluated from their own quotes poll.
@@ -462,6 +470,7 @@ export function App(): JSX.Element {
         onRemove={removeIndicator}
         onToggleHidden={toggleIndicatorHidden}
         onSettings={setSettingsIndex}
+        menu={indicatorMenu}
         errors={live()?.series.indicator_errors}
       />
       <CompactIndicatorErrors
@@ -545,7 +554,6 @@ export function App(): JSX.Element {
                 onToolArmed={() => setDrawOpen(false)}
                 onIndicatorSettings={(key) => setSettingsIndex(indexOf(key))}
                 onAddAlert={addIndicatorAlert}
-                onResetView={resetView}
                 onSettings={() => setSettingsOpen(true)}
               />
             )}
@@ -564,6 +572,7 @@ export function App(): JSX.Element {
             timeZone: view().timeZone(),
             drawings: drawings(),
             onSettings: (n) => setSettingsIndex(indexOf(n)),
+            indicatorMenu,
           }}
         />
       </main>
@@ -586,6 +595,7 @@ export function App(): JSX.Element {
         drawings={alertDrawings()}
       />
       <Toasts />
+      <ContextMenuHost />
       <Show when={scripting()}>
         <ScriptEditorDock session={session} chartErrors={live()?.series.indicator_errors} />
       </Show>

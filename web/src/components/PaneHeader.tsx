@@ -20,6 +20,8 @@
 import { For, Show, createEffect, createSignal, onCleanup, type JSX } from "solid-js";
 
 import { formatValue, type BarLegend } from "../lib/format";
+import { openContextMenu } from "./ContextMenu";
+import { indicatorMenu } from "./menus";
 
 export interface PaneHeaderLine {
   /** Series label, e.g. "Money Flow" or "RSI". */
@@ -125,6 +127,12 @@ export function PaneHeader(props: PaneHeaderProps): JSX.Element {
       style={{ top: `${props.top}px` }}
       onClick={() => setOpen(!open())}
       onDblClick={() => props.onSettings?.()}
+      onContextMenu={(e) => {
+        // The price row has no actions of its own: the chart's menu opens there.
+        if (props.onToggleHidden || props.onSettings || props.onRemove || props.onAddAlert) {
+          openContextMenu(e, indicatorMenu(props.name, props));
+        }
+      }}
     >
       <span class="pane-header-label">{props.name}</span>
       {props.params ? (

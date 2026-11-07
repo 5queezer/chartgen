@@ -299,7 +299,8 @@ export function PriceAxisControls(props: PriceAxisControlsProps): JSX.Element {
     const axisDom = props.chart?.getDom(CANDLE_PANE_ID, "yAxis" as never);
     if (!axisDom) return;
     let pressed = false;
-    const onDown = () => (pressed = true);
+    // The left button: a right press opens the axis menu and scales nothing.
+    const onDown = (e: PointerEvent) => (pressed = e.button === 0);
     const onMove = (e: PointerEvent) => {
       if (!pressed) return;
       // No button down: the release happened away from the window, unseen.

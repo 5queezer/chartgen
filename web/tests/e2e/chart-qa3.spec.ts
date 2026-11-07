@@ -95,12 +95,19 @@ const setBarSpace = (page: Page, n: number) =>
     (window as unknown as { __chartgenTest: Hook }).__chartgenTest.chart()!.setBarSpace(v);
   }, n);
 
+/** The lock takes its ratio on the next frames: a zoom before that would set the ratio. */
+const lockSettled = (page: Page) =>
+  page.evaluate(
+    () => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done))),
+  );
+
 async function lockViaMenu(page: Page): Promise<void> {
   const box = await page.locator(".chart-host").boundingBox();
   if (!box) throw new Error("chart host has no bounding box");
   await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2, { button: "right" });
   await page.getByRole("menuitemcheckbox", { name: /Lock price to bar ratio/ }).click();
   await expect(page.getByRole("menu")).toBeHidden();
+  await lockSettled(page);
 }
 
 async function addCompare(page: Page, ticker: string): Promise<void> {

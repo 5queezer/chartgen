@@ -84,12 +84,17 @@ export function applyChartAction(chart: KLineChart, action: ChartAction): void {
   }
 }
 
-/** Time axis back to real time at default zoom, and the price axis back to auto-fit. */
-export function resetChart(chart: KLineChart): void {
-  setAutoScale(true);
+/** Time axis back to real time at default zoom. */
+export function resetTimeScale(chart: KLineChart): void {
   chart.setBarSpace(DEFAULT_BAR_SPACE);
   fitProjection(chart);
   chart.scrollToRealTime();
+}
+
+/** Time axis back to real time at default zoom, and the price axis back to auto-fit. */
+export function resetChart(chart: KLineChart, setAuto: (next: boolean) => void = setAutoScale): void {
+  setAuto(true);
+  resetTimeScale(chart);
 }
 
 const pad = (n: number) => String(n).padStart(2, "0");

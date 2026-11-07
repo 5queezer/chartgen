@@ -15,6 +15,7 @@ import {
 } from "../stores/indicators";
 import { paramDefaults } from "../stores/layouts";
 import type { IndicatorError } from "../types/responses";
+import { openContextMenu, type MenuSpec } from "./ContextMenu";
 
 export interface IndicatorChipsProps {
   entries: ActiveIndicator[];
@@ -24,6 +25,8 @@ export interface IndicatorChipsProps {
   onToggleHidden: (index: number) => void;
   /** Open settings for the entry at `index`. */
   onSettings: (index: number) => void;
+  /** Right-click menu of the instance with this key. */
+  menu: (key: string) => MenuSpec;
   /** Why an instance is missing from the chart, by instance key (`indicator_errors`). */
   errors?: Record<string, IndicatorError> | undefined;
 }
@@ -103,6 +106,7 @@ export function IndicatorChips(props: IndicatorChipsProps): JSX.Element {
                   "border-[color:var(--color-danger)]": !!error(),
                 }}
                 data-chip-error={error() ? "" : undefined}
+                onContextMenu={(e) => openContextMenu(e, props.menu(instanceKey(entry())))}
               >
                 <button
                   type="button"

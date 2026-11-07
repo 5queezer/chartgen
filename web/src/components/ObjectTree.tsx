@@ -27,7 +27,9 @@ import {
 import { symbol } from "../stores/layout";
 import { paramDefaults } from "../stores/layouts";
 import { openAlertDialog } from "./AlertDialog";
+import { openContextMenu, type MenuSpec } from "./ContextMenu";
 import { DRAWING_LABELS, type DrawingsApi } from "./DrawingToolbar";
+import { alertMenu } from "./menus";
 
 export interface ObjectTreeProps {
   series: SeriesPayload | null;
@@ -36,6 +38,8 @@ export interface ObjectTreeProps {
   drawings: DrawingsApi | null;
   /** Open the settings dialog of the indicator named `name`. */
   onSettings: (name: string) => void;
+  /** Right-click menu of the indicator with this key. */
+  indicatorMenu: (key: string) => MenuSpec;
 }
 
 const EYE =
@@ -106,6 +110,8 @@ function Item(props: {
   swatch?: string;
   label: JSX.Element;
   onClick?: () => void;
+  /** Right-click menu; a row without one keeps the browser's. */
+  menu?: () => MenuSpec | null;
   children?: JSX.Element;
 }): JSX.Element {
   return (
@@ -115,6 +121,7 @@ function Item(props: {
       class="wl-row flex items-center gap-2 px-3 py-1 text-sm"
       classList={{ "cursor-pointer": !!props.onClick, "opacity-50": props.dim }}
       onClick={() => props.onClick?.()}
+      onContextMenu={(e) => props.menu && openContextMenu(e, props.menu())}
     >
       <Show when={props.swatch}>
         {(c) => (
@@ -156,6 +163,10 @@ export function ObjectTree(props: ObjectTreeProps): JSX.Element {
                 testId={`tree-compare-${e.symbol}`}
                 swatch={COMPARE_PALETTE[e.slot]}
                 label={e.symbol}
+                menu={() => ({
+                  label: `${e.symbol} actions`,
+                  items: [{ label: `Remove ${e.symbol}`, danger: true, onSelect: () => removeCompare(e.symbol) }],
+                })}
               >
                 <Action label={`Remove ${e.symbol}`} path={CLOSE} onClick={() => removeCompare(e.symbol)} />
               </Item>
@@ -181,7 +192,12 @@ export function ObjectTree(props: ObjectTreeProps): JSX.Element {
                   .filter(Boolean)
                   .join(" ");
               return (
-                <Item testId={`tree-ind-${key()}`} dim={isHidden(entry)} label={label()}>
+                <Item
+                  testId={`tree-ind-${key()}`}
+                  dim={isHidden(entry)}
+                  label={label()}
+                  menu={() => props.indicatorMenu(key())}
+                >
                   <Action
                     label={`${isHidden(entry) ? "Show" : "Hide"} ${label()}`}
                     path={isHidden(entry) ? EYE_OFF : EYE}
@@ -219,6 +235,7 @@ export function ObjectTree(props: ObjectTreeProps): JSX.Element {
                   title={d.offRange ? "Not in loaded range" : undefined}
                   label={text()}
                   onClick={() => props.drawings?.select(d.id)}
+                  menu={() => props.drawings?.menu(d.id) ?? null}
                 >
                   <Action
                     label={`${d.visible ? "Hide" : "Show"} ${text()}`}
@@ -269,6 +286,7 @@ export function ObjectTree(props: ObjectTreeProps): JSX.Element {
                   </>
                 }
                 onClick={() => openAlertDialog({ id: a.id })}
+                menu={() => alertMenu(a, symbol())}
               >
                 <Action label="Delete alert" path={CLOSE} onClick={() => removeAlert(a.id)} />
               </Item>

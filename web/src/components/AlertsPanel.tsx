@@ -35,6 +35,8 @@ import {
 import type { ServerAlert } from "../types/responses";
 import { leader, showToast } from "../services/alertEngine";
 import { openAlertDialog } from "./AlertDialog";
+import { openContextMenu } from "./ContextMenu";
+import { alertMenu, serverAlertMenu } from "./menus";
 import { PushControl } from "./PushControl";
 
 const iconButtonClass =
@@ -130,6 +132,7 @@ function AlertRow(props: { alert: Alert }): JSX.Element {
       data-status={reason() === null ? status() : "inactive"}
       class="wl-row group flex items-center gap-2 px-3 py-1.5 text-sm cursor-pointer"
       onClick={() => setSymbol(a().symbol)}
+      onContextMenu={(e) => openContextMenu(e, alertMenu(a(), symbol()))}
     >
       <div class="flex-1 min-w-0">
         <div class="truncate" data-role="description">
@@ -215,6 +218,7 @@ function ServerAlertRow(props: { alert: ServerAlert }): JSX.Element {
       data-status={serverAlertStatus(a())}
       class="wl-row group flex items-center gap-2 px-3 py-1.5 text-sm cursor-pointer"
       onClick={() => setSymbol(a().symbol)}
+      onContextMenu={(e) => openContextMenu(e, serverAlertMenu(a(), symbol()))}
     >
       <div class="flex-1 min-w-0">
         <div class="truncate" data-role="description">
