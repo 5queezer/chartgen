@@ -497,8 +497,9 @@ test.describe("workspace", () => {
         return hiccup(route);
       });
       await page.reload();
+      await expect(page.locator(".chart-host")).toBeVisible({ timeout: 30_000 });
       await expectChartRendered(page);
-      await expect(userMenu(page)).toBeVisible({ timeout: 30_000 });
+      await expect(userMenu(page)).toBeVisible();
       expect(hit).toBeGreaterThan(1);
       expect(await read(page, NOTE)).toBe("octo's");
       await expect(page.getByText("could not tell which account")).toHaveCount(0);
