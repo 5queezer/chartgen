@@ -303,7 +303,7 @@ Session Volume Profile — per-session POC/VAH/VAL that reset each day/week
 |-------|------|---------|-------------|
 | `bins` | `integer` | `24` |  |
 | `session` | `string` | `daily` | daily, weekly, or hourly |
-| `bars_per_session` | `integer` | `null` | override session by fixed bar count |
+| `bars_per_session` | `integer` | `null` | override session by a span of this many bars on the clock; closed hours count |
 | `show_value_area` | `boolean` | `true` | draw VAH/VAL in addition to POC |
 
 ![session_vp sample render](../../../assets/indicators/session_vp.png)

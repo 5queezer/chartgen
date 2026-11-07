@@ -601,9 +601,16 @@ bars or rows are too small for cells, a bar draws as a candle and the status say
 
 **Volume profiles.** `volume_profile`, `fixed_range_vp` (from, to) and `anchored_vp` (anchor) read finer bars
 when a chart loads, and the legend says which: *from 15m bars*. With none to be had they spread the chart's own
-bars, and the legend says nothing. `session_vp` spreads them too, as its live updates do. Times are `YYYY-MM-DD`, `YYYY-MM-DD HH:MM` in UTC, or unix
+bars, and the legend says nothing. Times are `YYYY-MM-DD`, `YYYY-MM-DD HH:MM` in UTC, or unix
 seconds, and a range covers only the loaded bars. Fixed range and anchored profiles draw at the chart's edge,
 not over their range, and are typed rather than picked on the chart.
+
+**Session volume profile.** `session_vp` spreads each bar's volume, as its live updates do, and holds
+POC, VAH and VAL through each session. A live update matches the load only while it can see the whole
+session: on a 1m chart past about 16 h 40 into the UTC day, or a weekly session on 10m or finer late in the
+week, the level steps at the first update and slides with each new bar. With the default daily session it
+draws nothing at 1d and above, where a session is one bar, though the legend shows its values. An alert on
+these lines can fire at a session's end, when the level jumps past the price.
 
 ## Chart grid
 

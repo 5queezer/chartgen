@@ -190,7 +190,7 @@ pub fn tools_list_result() -> Value {
             },
             {
                 "name": "get_tpo",
-                "description": "Time Price Opportunity (market profile) of periods: which blocks traded at each price row, with POC, value area, poor highs and lows, single prints, initial balance and rotation factor. Built from block-length klines. Costs up to 3 Binance requests.",
+                "description": "Time Price Opportunity (market profile) of periods: which blocks traded at each price row, with POC, value area, poor highs and lows, single prints, initial balance and rotation factor. Built from block-length klines. Costs up to 3 Binance requests for a block Binance has (5m, 15m, 30m, 1h, 2h, 4h); any other is built from finer klines and can cost up to 20.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {

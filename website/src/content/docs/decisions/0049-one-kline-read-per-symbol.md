@@ -8,6 +8,7 @@ sidebar:
 **Status:** Accepted
 **Date:** 2026-11-06
 **Amends:** [ADR-0038](/chartgen/decisions/0038-custom-intervals/) (the kline cache now holds every newest read, repeats may send nothing, and `end_time` pages are shared)
+**Amended by:** [ADR-0048](/chartgen/decisions/0048-order-flow/) (its windows hold taker buy volume, 104 bytes a kline rather than 96, and read `1s` klines, which this decision's handling of them did not reach)
 
 ## Context and Problem Statement
 

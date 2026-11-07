@@ -345,7 +345,8 @@ Three additional channels round out the payload so the full set of
   `profile_intrabars` asked (`volume_profile`, `fixed_range_vp`, `anchored_vp`), which ones. Absent
   means it spread the chart's own bars ([ADR-0048](/chartgen/decisions/0048-order-flow/)).
 - **`level_lines`** — true when the lines hold levels (`session_vp`): a change of value is a jump
-  from one to the next, not a slope, and is not drawn.
+  from one to the next, not a slope, and is not drawn. So a session of one bar draws nothing:
+  with the default daily session, that is 1d and above.
 - **`hbars`** — horizontal bars at price levels, used by volume-profile
   indicators (VPVR, Session VP, HVN/LVN, Naked POC, TPO). Each bar has a
   price-space `y` and `height`, axis-relative `width` and `offset`
@@ -879,7 +880,9 @@ and `poc` a row's bottom.
 
 #### `get_tpo`
 
-Time Price Opportunity (market profile): which blocks traded at each price row.
+Time Price Opportunity (market profile): which blocks traded at each price row. Up to 3 Binance
+requests for a block Binance has (5m, 15m, 30m, 1h, 2h, 4h). Any other is built from finer klines,
+as a chart of that interval is, and can cost up to 20.
 
 | Argument | Default | Meaning |
 |---|---|---|

@@ -82,7 +82,7 @@ the 6000 per minute. A refusal is an error for that one call.
 | A footprint page of older bars, each as the chart scrolls to it | up to 7 | up to 14 |
 | Live poll per chart, every 10 s: the chart's bars and its intrabars, each at most one request a second per symbol and kline, however many charts share them | 2 | 4 |
 | A poll after a gap: up to 200 bars, then a load instead | up to 7 | up to 14 |
-| `get_tpo`, cold: up to 3000 blocks | 3 | 6 |
+| `get_tpo`, cold: up to 3000 blocks of an interval Binance has | 3 | 6 |
 | Live TPO poll per chart, every 30 s: two periods | 1 | 2 |
 | A chart load with `volume_profile`, `fixed_range_vp` or `anchored_vp`: extra | up to 6 | up to 12 |
 | A history page or a tail of such a chart: extra | 0 | 0 |
@@ -95,7 +95,10 @@ and kline already read costs nothing more, and 100 charts on one pair cost what 
 An interval Binance does not have is built from bars it does, and that counts as for any
 chart ([ADR-0038](/chartgen/decisions/0038-custom-intervals/)): a cold 59m footprint from the
 web chart reads 5 pages of 1m bars for its chart bars, on top of its intrabars, and an MCP caller
-asking for 200 bars and an ATR of 500 reads up to the 20 pages of that cap. Later reads without
+asking for 200 bars and an ATR of 500 reads up to the 20 pages of that cap. A `get_tpo` block
+Binance does not have reads the same way: 2D of 6m costs 7 requests, and 1W of 7m or 59m, or 1M of
+59m, costs 20. The web settings only offer blocks it has, and these are not refused for MCP callers, as
+they cost what a chart of that interval costs, under the same cap and gate. Later reads without
 `end_time` refresh those from the kline cache.
 
 Only a request with `profile_intrabars` reads finer bars for a profile, and only the web
@@ -104,7 +107,10 @@ would pay for what is thrown away. A bar count cannot tell them apart: a catch-u
 700 bars, a load 500.
 
 Yahoo has no gate. It takes 2 requests per footprint load or poll, the chart's bars and the
-intrabars, up to 7 cold; closed, a poll's intrabars are cached and it takes 1. `get_tpo` takes 1.
+intrabars, up to 7 cold: 12 a minute per chart while the market is open. Once the newest intrabar
+is 2 minutes behind the clock the market counts as closed, whatever the bar's grid says, and its
+intrabars are read about once a minute, to see it open. The chart's bars are still read on each
+poll, so a closed stock costs about 7 requests a minute per chart. `get_tpo` takes 1.
 
 ### Memory
 
@@ -151,11 +157,14 @@ A window does not fit Yahoo, which has no gate, closes for the night and limits 
 age, and reads through the closed hours would each cost a request. Its reads keep a cache here:
 one read at a time per symbol and interval, on a copy, so that a failure leaves what was held. A
 caller waiting on a read that fails fails with it, rather than each trying in turn against a
-source that is down. No page begins past 20 s.
+source that is down. No page begins past 20 s. A window in the past reads only what the source has
+not been asked for yet, and a closed market's newest as the cost section says.
 
 A chart's load gives up on a profile's finer bars after 8 s, even in the middle of a request,
 and spreads its own bars, and the legend then names no finer ones. The read goes on by
-itself, bounded by its own deadlines, so what it finds serves the next load. `get_footprint` has
+itself, bounded by its own deadlines, so what it finds serves the next load. At most 16 such reads
+run at once, as their threads are outside the blocking pool that bounds requests; past that, or if
+the system refuses a thread, a load spreads its bars at once. `get_footprint` has
 no such fallback, as a footprint without rows is not one: it fails, the status says so, and
 the feed retries.
 
@@ -220,7 +229,20 @@ overwrites from the chart's bars, so a load from finer bars would step to anothe
 first tick under a legend still naming them. It now has one line each for POC, VAH and VAL: with
 a line per session, a tail had fewer lines than its load and failed to fit on every update. It
 holds a value on every bar of a session, and `level_lines` tells both painters to draw nothing
-across a change of value, so sessions do not join. `hvn_lvn`, `naked_poc`, `tpo`, `cvd` and PNG
+across a change of value, so sessions do not join.
+
+A tail agrees with its load only while it holds the whole session. A non-zero warmup is raised to one
+session on the chart's interval, up to the cap of 1000, which costs nothing where a session already
+fits. It does not fit for a day of 1m bars past bar 1000, about 16 h 40 into the UTC day, for a week of
+10m bars or finer once past bar 1000, or for `bars_per_session` above 1000. There a tail's level comes
+from its last 1002 bars, so it still steps at the first tick and slides with each new bar: the same step
+that finer bars would have caused, by another route. A warmup above 300 also pushes half as often, and
+a 1m chart's cold load then takes 2 requests rather than 1. `bars_per_session` is a span on the clock,
+not a count from the window's first bar, so that a load and a tail split sessions alike; closed hours
+count towards it. A session of one bar draws nothing, as nothing joins it to a neighbour: with the
+default daily session that is 1d and above, where the legend shows values and the chart no line, as
+on master. A jump at a session's end, or that step, can read as a cross to an alert on these lines.
+`hvn_lvn`, `naked_poc`, `tpo`, `cvd` and PNG
 and summary output also spread each chart bar's volume.
 
 ### Consequences
@@ -228,9 +250,11 @@ and summary output also spread each chart bar's volume.
 - Good: real delta on Binance at a cost that is bounded and small.
 - Good: every chart says how it was made.
 - Bad: rows are estimates. A footprint must not be read as exact per price.
+- Bad: nothing here has run against real Binance or Yahoo responses, `1s` klines and Yahoo's walk
+  included. All of it was tested on sample data and a fake exchange.
 - Bad: settings the server computes with cost a reload, though from cached intrabars.
 - Bad: `session_vp` keeps spreading each bar's volume, as what could improve it cannot reach its tails.
-- Bad: a slow Binance leaves a thread per profile load finishing its read after the load gave up, bounded by that read's deadlines.
+- Bad: a slow Binance leaves up to 16 threads finishing their reads after their loads gave up, each bounded by that read's deadlines.
 - Bad: a footprint's forming intrabar is refreshed up to once a second per symbol and kline, not once per 5 s, as ADR-0049's freshness applies. That only costs more on a pair polled by over 2 charts.
 - Bad: live cells lag the candle by up to 10 s, while a pushed tail moves the bar at once.
 - Bad: a TPO is off in bar replay, as a profile holds its whole period.
