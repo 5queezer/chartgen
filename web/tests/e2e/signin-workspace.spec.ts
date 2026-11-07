@@ -61,6 +61,11 @@ async function pushed(page: Page, key: string, value: string | null): Promise<vo
     .toBe(value);
 }
 
+/** The first round of a new device is through, so only what comes next is pending. */
+async function pushedOnce(page: Page): Promise<void> {
+  await expect.poll(() => read(page, "chartgen.sync.cursor"), { timeout: 30_000 }).not.toBeNull();
+}
+
 /** What the account holds, as a device new to it finds. */
 async function freshDeviceReads(browser: Browser, key: string, provider = "GitHub", user = "octo") {
   const page = await device(browser, provider, user);
@@ -271,6 +276,77 @@ test.describe("workspace", () => {
     expect(writes).toEqual([]);
     expect(await freshDeviceReads(browser, DOC)).toBe(drawings("kept"));
     await first.context().close();
+  });
+
+  test("with another tab open, what arrives waits, and Reload brings it to every tab", async ({
+    browser,
+  }) => {
+    const laptop = await device(browser);
+    await write(laptop, NOTE, "before");
+    await pushed(laptop, NOTE, "before");
+    const phone = await device(browser);
+    const second = await phone.context().newPage();
+    await second.goto("/");
+    await expectChartRendered(second);
+
+    await write(laptop, NOTE, "after");
+    await pushed(laptop, NOTE, "after");
+    // A store in the other tab would save from memory over what is applied now.
+    await reloadApp(second);
+    expect(await read(second, NOTE)).toBe("before");
+    await expect(second.getByTestId("workspace-remote")).toBeVisible();
+
+    const other = phone.waitForEvent("load");
+    await second.getByTestId("workspace-reload").click();
+    await other;
+    await expectChartRendered(second);
+    await expect.poll(() => read(second, NOTE)).toBe("after");
+    await expectChartRendered(phone);
+    await expect(second.getByTestId("workspace-remote")).toBeHidden();
+    await expect(phone.getByTestId("workspace-remote")).toBeHidden();
+    await Promise.all([laptop, phone].map((p) => p.context().close()));
+  });
+
+  test("a change made just before leaving the page still goes out", async ({ browser }) => {
+    const page = await device(browser);
+    await pushedOnce(page);
+    await write(page, NOTE, "last words");
+    await page.goto("/oauth/signed-out");
+    expect(await freshDeviceReads(browser, NOTE)).toBe("last words");
+    await page.context().close();
+  });
+
+  test("a new token nobody can put a name to sees nothing of the last account's", async ({
+    browser,
+  }) => {
+    const page = await device(browser);
+    await write(page, NOTE, "octo's");
+    await pushed(page, NOTE, "octo's");
+    await page.route("**/oauth/me", (route) => route.abort());
+    await page.goto("/");
+    await expect(page.getByText("could not tell which account signed in")).toBeVisible({
+      timeout: 60_000,
+    });
+    expect(await liveKeys(page)).not.toContain(NOTE);
+    expect(await read(page, NOTE)).toBeNull();
+
+    await page.unroute("**/oauth/me");
+    await reloadApp(page);
+    expect(await read(page, NOTE)).toBe("octo's");
+    await page.context().close();
+  });
+
+  test("with the server not answering, the data is as it was left", async ({ browser }) => {
+    const page = await device(browser);
+    await write(page, NOTE, "octo's");
+    await pushed(page, NOTE, "octo's");
+    // No token and no answer: nothing moves. The app then asks to sign in as ever.
+    await page.route("**/oauth/me", (route) => route.abort());
+    await page.route("**/authorize**", () => {});
+    await page.goto("/");
+    await expect.poll(() => page.evaluate(() => document.readyState)).toBe("complete");
+    await expect.poll(() => read(page, NOTE)).toBe("octo's");
+    await page.context().close();
   });
 
   test("two accounts on one browser: signing out leaves nothing, and neither sees the other's", async ({

@@ -16,6 +16,7 @@ import {
   toChartPoint,
   type DrawingRecord,
 } from "./drawings";
+import { collectWrites } from "../lib/workspaceSync";
 
 const good = {
   name: "segment",
@@ -286,6 +287,17 @@ describe("storage", () => {
     expect(saveDrawings("BTCUSDT", big)).toBe(false);
     expect(store.has(storageKey("BTCUSDT"))).toBe(false);
     warn.mockRestore();
+  });
+
+  it("dropping a synced symbol from the LRU sends no deletion (ADR-0050)", () => {
+    const recs = [good] as DrawingRecord[];
+    saveDrawings("FIRST", recs);
+    const key = storageKey("FIRST");
+    const value = localStorage.getItem(key);
+    localStorage.setItem(`chartgen.sync.${key}`, JSON.stringify({ v: 3, b: value }));
+    for (let i = 0; i < MAX_SYMBOLS; i++) saveDrawings(`S${i}`, recs);
+    expect(localStorage.getItem(key)).toBeNull();
+    expect(collectWrites(localStorage, () => false).writes.map((w) => w.key)).not.toContain(key);
   });
 
   it("evicts least recently used symbols beyond the limit", () => {

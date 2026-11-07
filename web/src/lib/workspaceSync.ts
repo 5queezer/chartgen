@@ -207,9 +207,11 @@ function parseCollection(text: string | null, field: string): Parsed | null {
   if (!Array.isArray(list)) return null;
   for (const item of list as unknown[]) {
     const id = (item as { id?: unknown } | null)?.id;
-    if (typeof id !== "string" && typeof id !== "number") return null;
-    if (parsed.items.has(String(id))) return null;
-    parsed.items.set(String(id), JSON.stringify(item));
+    const text = JSON.stringify(item);
+    // Drawings saved before they had ids (ADR-0034) are told apart by what they are.
+    const name = typeof id === "string" || typeof id === "number" ? `#${id}` : text;
+    if (parsed.items.has(name)) return null;
+    parsed.items.set(name, text);
   }
   return parsed;
 }

@@ -193,6 +193,18 @@ describe("data from before any sign-in", () => {
     expect(live(), "none left to come back").toEqual({});
   });
 
+  it("importing keeps old drawings that have no ids", () => {
+    const old = JSON.stringify([{ name: "no id", points: [] }]);
+    s.setItem(DOC, old);
+    enterAccount(s, "github:1");
+    s.setItem(DOC, drawings("new"));
+    importLegacy(s);
+    expect(JSON.parse(s.getItem(DOC)!)).toEqual([
+      { id: "new", name: "new" },
+      { name: "no id", points: [] },
+    ]);
+  });
+
   it("discarding touches only the old data", () => {
     enterAccount(s, "github:1");
     s.setItem("chartgen.layouts", "account's");
@@ -241,6 +253,15 @@ describe("merge", () => {
       conflict: false,
     });
     expect(merge(DOC, drawings("a"), null, "[]")).toEqual({ value: null, conflict: false });
+  });
+
+  it("drawings from before they had ids are kept and removed by what they are", () => {
+    const old = (...names: string[]) => JSON.stringify(names.map((name) => ({ name, points: [] })));
+    expect(merge(DOC, old("a"), old("a", "here"), old("a", "there"))).toEqual({
+      value: old("a", "here", "there"),
+      conflict: false,
+    });
+    expect(merge(DOC, old("a", "b"), old("a"), old("a", "b", "there")).value).toBe(old("a", "there"));
   });
 
   it("one item edited on both: this one, and said; deleted against edited: the edit", () => {
@@ -296,8 +317,8 @@ describe("merge", () => {
     const m = merge("chartgen.layouts", '{"version":1,"items":[]}', '{"version":1,"items":[]} ', '{"version":9,"items":{"x":1}}');
     expect(m).toEqual({ value: '{"version":1,"items":[]} ', conflict: true });
     expect(merge(DOC, "[]", "not json", drawings("a"))).toEqual({ value: "not json", conflict: true });
-    const noIds = JSON.stringify([{ name: "no id" }]);
-    expect(merge(DOC, "[]", noIds, drawings("a"))).toEqual({ value: noIds, conflict: true });
+    const twice = JSON.stringify([{ id: "a" }, { id: "a" }]);
+    expect(merge(DOC, "[]", twice, drawings("b"))).toEqual({ value: twice, conflict: true });
   });
 });
 
