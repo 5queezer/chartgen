@@ -11,6 +11,7 @@ import {
   PUSH_WATCHDOG_MS,
   RELOAD_WINDOW_MS,
   SLOW_POLL_MS,
+  PRICE_TAIL_BARS,
   TAIL_BARS,
   WARMUP,
   createLiveFeed,
@@ -281,6 +282,106 @@ describe("live tail polling", () => {
     t.feed.loadOlder();
     t.feed.suspend();
     expect(t.history.at(-1)).toEqual({ kind: "idle" });
+  });
+});
+
+describe("price-based charts", () => {
+  const PRICE_REQ: LiveRequest = {
+    ...REQ,
+    chart_style: "renko",
+    chart_params: { box: "atr", atr_length: 14 },
+  };
+  const priced = (first: number, last: number, box = 50): SeriesPayload => ({
+    ...payload(first, last, first > 0),
+    chart_style: "renko" as const,
+    chart_params: { box: "atr" as const, atr_length: 14, box_size: box },
+  });
+
+  it("polls a longer tail and sends back the box its load resolved", async () => {
+    const s = setup((_req, args) =>
+      Promise.resolve(priced(market.now - args.bars + 1, market.now)),
+    );
+    s.feed.reset(priced(900, 1000), PRICE_REQ);
+    await vi.advanceTimersByTimeAsync(FAST_POLL_MS + 1);
+    const [req, args] = s.fetch.mock.calls[0]!;
+    expect(args.bars).toBe(PRICE_TAIL_BARS);
+    expect(req.chart_params).toEqual({ box: "atr", atr_length: 14, box_size: 50 });
+    expect(PRICE_REQ.chart_params?.box_size).toBeUndefined();
+    s.feed.dispose();
+  });
+
+  it("reloads on a gap, as time says nothing about how many bars it spans", async () => {
+    const s = setup((_req, args) =>
+      Promise.resolve(priced(market.now + 50, market.now + 50 + args.bars)),
+    );
+    s.feed.reset(priced(900, 1000), PRICE_REQ);
+    await vi.advanceTimersByTimeAsync(FAST_POLL_MS + 1);
+    expect(s.fetch).toHaveBeenCalledTimes(1);
+    expect(s.reload).toHaveBeenCalledTimes(1);
+    s.feed.dispose();
+  });
+
+  it("a 1s candle chart asks for enough to overlap a poll, so no poll is a gap", async () => {
+    const s = setup();
+    s.feed.reset(payload(900, 1000, true), { ...REQ, timeframe: "1s" });
+    await vi.advanceTimersByTimeAsync(FAST_POLL_MS + 1);
+    expect(s.fetch.mock.calls[0]![1].bars).toBe(4);
+    s.feed.dispose();
+    const five = setup();
+    five.feed.reset(payload(900, 1000, true), { ...REQ, timeframe: "5s" });
+    await vi.advanceTimersByTimeAsync(FAST_POLL_MS + 1);
+    expect(five.fetch.mock.calls[0]![1].bars).toBe(TAIL_BARS);
+    five.feed.dispose();
+  });
+
+  it("keeps updating across a new build, through the real merge, with its history", async () => {
+    // The new build's tail ends before our newest bar: it used to be stale, for good.
+    let polls = 0;
+    const percent = { box: "percent" as const, percent: 1, box_size: 50 };
+    const s = setup(() => {
+      polls++;
+      const t = priced(980, 995 + polls);
+      t.anchor = 5000;
+      t.chart_params = percent;
+      t.bars.at(-1)!.c = 1234 + polls;
+      return Promise.resolve(t);
+    });
+    const loaded = priced(900, 1000);
+    loaded.anchor = 1000;
+    loaded.chart_params = percent;
+    s.feed.reset(loaded, { ...REQ, chart_style: "renko", chart_params: { box: "percent", percent: 1 } });
+    const before = s.last()!.series.bars[0]!.t;
+    await vi.advanceTimersByTimeAsync(FAST_POLL_MS + 1);
+    expect(s.reload).not.toHaveBeenCalled();
+    expect(s.last()!.series.anchor).toBe(5000);
+    expect(s.last()!.series.bars.at(-1)!.c).toBe(1235);
+    await vi.advanceTimersByTimeAsync(FAST_POLL_MS + 1);
+    expect(s.last()!.series.bars.at(-1)!.c).toBe(1236);
+    expect(s.last()!.series.bars[0]!.t).toBe(before);
+    s.feed.dispose();
+  });
+
+  it("recovers a pushed tail that left bars out, by a poll and then a reload", async () => {
+    const t = setupPush();
+    t.fetch.mockImplementation((_req, args) =>
+      Promise.resolve(priced(5000, 5000 + args.bars - 1)),
+    );
+    t.feed.reset(priced(900, 1000), PRICE_REQ);
+    await vi.advanceTimersByTimeAsync(0);
+    t.feed.applyPush("s1", priced(3000, 3063));
+    await vi.advanceTimersByTimeAsync(0);
+    // Past our newest bar: a catch-up poll, whose long tail is past it too.
+    expect(t.fetch.mock.calls[0]![1].bars).toBe(PRICE_TAIL_BARS);
+    expect(t.reload).toHaveBeenCalledTimes(1);
+    t.feed.dispose();
+  });
+
+  it("a candle chart keeps its short tail", async () => {
+    const s = setup();
+    s.feed.reset(payload(900, 1000, true), REQ);
+    await vi.advanceTimersByTimeAsync(FAST_POLL_MS + 1);
+    expect(s.fetch.mock.calls[0]![1].bars).toBe(TAIL_BARS);
+    s.feed.dispose();
   });
 });
 

@@ -38,6 +38,7 @@ import { createFlowFeed, type FlowState } from "../lib/orderFlowFeed";
 import { PALETTES } from "../lib/theme";
 import { alignAsOf, COMPARE_PALETTE } from "../lib/compare";
 import { createCompareFeed, type CompareData } from "../lib/compareFeed";
+import { boxRefusal } from "../lib/chartLoadError";
 import { barCloseMs, isContinuousMarket } from "../lib/countdown";
 import {
   createLiveFeed,
@@ -48,11 +49,12 @@ import {
   type LiveSnapshot,
   type PollStatus,
 } from "../lib/liveFeed";
+import { chartParamsWire, isPriceBarType } from "../lib/priceBars";
 import { isDateBar, resolveTimeZone } from "../lib/timezone";
 import type { McpSession } from "../mcp";
 import { chartQueryKey, createChartQuery } from "../queries";
 import { copyChartLink, importPending } from "../services/shareLink";
-import { feedChartSnapshot } from "../services/alertEngine";
+import { feedChartSnapshot, showToast } from "../services/alertEngine";
 import { createReplay } from "../services/replay";
 import { forgetReadings, setChartContext } from "../stores/alerts";
 import { compareStoreOf } from "../stores/compare";
@@ -64,7 +66,14 @@ import {
   instanceKey,
   toWire,
 } from "../stores/indicators";
-import { addRecent, chartStoreOf, chartStyleOf, theme, timeZone } from "../stores/layout";
+import {
+  addRecent,
+  chartStoreOf,
+  chartStyleOf,
+  DEFAULT_CHART_TYPE,
+  theme,
+  timeZone,
+} from "../stores/layout";
 import { chartSettings } from "../stores/chartSettings";
 import { orderFlowSettings, tpoSessions } from "../stores/orderFlow";
 import type { GetTpoInput } from "../types/generated-input";
@@ -105,7 +114,7 @@ export function createChartPane(pane: number, deps: PaneDeps) {
   const layout = chartStoreOf(pane);
   const indicators = indicatorStoreOf(pane);
   const compare = compareStoreOf(pane);
-  const { symbol, timeframe, chartType } = layout;
+  const { symbol, timeframe, chartType, chartParams } = layout;
   const { activeIndicators } = indicators;
   const isActive = () => activePane() === pane;
 
@@ -122,11 +131,15 @@ export function createChartPane(pane: number, deps: PaneDeps) {
     ),
   );
 
+  const wireParams = createMemo(() => chartParamsWire(chartType(), chartParams()));
+  const priceBased = () => isPriceBarType(chartType());
+
   const query = createChartQuery(session, () => ({
     ticker: symbol(),
     timeframe: timeframe(),
     indicators: wireIndicators(),
     chart_style: chartStyleOf(chartType()),
+    chart_params: wireParams(),
     // Indicators from a share link wait for the registry check below.
     enabled: authReady() && !importPending(),
   }));
@@ -209,6 +222,32 @@ export function createChartPane(pane: number, deps: PaneDeps) {
   });
   onCleanup(feed.dispose);
 
+  // Picking a price-based type during a replay ends the replay.
+  createEffect(
+    on(priceBased, (refused) => {
+      if (refused && untrack(replay.mode) !== "off") replay.exit();
+    }),
+  );
+
+  // A box the server refuses must not leave a blank chart: a saved or linked one
+  // falls back to ATR, and where ATR cannot make one either the chart goes to
+  // candles. Each says so.
+  createEffect(() => {
+    const error = query.isError && !query.isFetching ? query.error : null;
+    const refusal = error ? boxRefusal(error.message) : null;
+    if (!refusal || !untrack(priceBased)) return;
+    untrack(() => {
+      const { boxSize: _refused, ...rest } = chartParams();
+      if (rest.box === "atr") {
+        layout.setChartType(DEFAULT_CHART_TYPE);
+        showToast(`${refusal} Showing candles on ${symbol()}.`);
+      } else {
+        layout.setChartParams({ ...rest, box: "atr" });
+        showToast(`${refusal} Using ATR on ${symbol()}.`);
+      }
+    });
+  });
+
   // Becoming the active chart makes this the chart the alerts read (ADR-0043).
   createEffect(
     on(
@@ -264,6 +303,7 @@ export function createChartPane(pane: number, deps: PaneDeps) {
       timeframe: timeframe(),
       indicators: wireIndicators(),
       chart_style: chartStyleOf(chartType()),
+      chart_params: wireParams(),
     };
     // Re-run whenever the query publishes a result.
     void query.data;
@@ -320,8 +360,9 @@ export function createChartPane(pane: number, deps: PaneDeps) {
     if (untrack(compare.compareSymbols).includes(main)) compare.removeCompare(main);
   });
   const comparing = createMemo(() =>
-    compare.compareEntries().filter((e) => e.symbol !== symbol()),
+    compare.drawnEntries().filter((e) => e.symbol !== symbol()),
   );
+  createEffect(on(priceBased, () => compare.syncDrawn(), { defer: true }));
   // Sized to the main series once it matches the timeframe (a kept previous
   // chart of another timeframe must not size the loads).
   createEffect(() => {
@@ -564,6 +605,7 @@ export function createChartPane(pane: number, deps: PaneDeps) {
     drawings,
     setDrawings,
     lastLoaded,
+    priceBased,
     timeZone: () => resolveTimeZone(timeZone(), symbol()),
     flowKind,
     flowView,
@@ -642,7 +684,7 @@ export function ChartPane(props: ChartPaneProps): JSX.Element {
           chart={s.chart()}
           symbol={symbol()}
           scale={s.layout}
-          comparing={s.compare.compareSymbols().length > 0}
+          comparing={s.compare.drawnEntries().length > 0}
           drawings={s.drawings()}
           hasIndicators={activeIndicators().length > 0}
           indicatorItems={(key) =>

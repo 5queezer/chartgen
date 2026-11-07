@@ -37,6 +37,8 @@ import {
   timeframe,
   type ChartType,
 } from "../stores/layout";
+import { isContinuousMarket } from "../lib/countdown";
+import { isPriceBarType } from "../lib/priceBars";
 import type { McpSession } from "../mcp";
 import {
   BP_FULL,
@@ -61,11 +63,20 @@ const CHART_TYPE_LABELS: Record<ChartType, string> = {
   baseline: "Baseline",
   columns: "Columns",
   high_low: "High-low",
+  hlc_area: "HLC area",
   heikin_ashi: "Heikin Ashi",
   volume_candles: "Volume candles",
   footprint: "Volume footprint",
   tpo: "TPO",
+  renko: "Renko",
+  line_break: "Line break",
+  kagi: "Kagi",
+  point_figure: "Point & figure",
+  range: "Range",
 };
+
+const REPLAY_REFUSED = "Bar replay needs bars that open on a time grid, which this chart type does not have";
+const COMPARE_REFUSED = "Compare needs bars that open on a time grid, which this chart type does not have";
 
 function ChartTypeIcon(props: { type: ChartType }): JSX.Element {
   const common = {
@@ -105,6 +116,50 @@ function ChartTypeIcon(props: { type: ChartType }): JSX.Element {
           <path d="M5 2v14M13 4v11" />
           <rect x="3" y="5" width="4" height="7" fill="currentColor" />
           <rect x="11" y="7" width="4" height="5" fill="currentColor" />
+        </svg>
+      );
+    case "renko":
+      return (
+        <svg {...common}>
+          <rect x="1.5" y="10" width="4" height="4" />
+          <rect x="6.5" y="6" width="4" height="4" fill="currentColor" />
+          <rect x="11.5" y="2" width="4" height="4" fill="currentColor" />
+        </svg>
+      );
+    case "line_break":
+      return (
+        <svg {...common}>
+          <rect x="2" y="9" width="3.5" height="6" />
+          <rect x="7" y="5" width="3.5" height="4" fill="currentColor" />
+          <rect x="12" y="2" width="3.5" height="3" fill="currentColor" />
+        </svg>
+      );
+    case "kagi":
+      return (
+        <svg {...common}>
+          <path d="M2 15V9h5V3h4v8h5V6" stroke-linejoin="round" />
+        </svg>
+      );
+    case "point_figure":
+      return (
+        <svg {...common} stroke-width="1.2">
+          <path d="M2 3l3 3M5 3L2 6M2 8l3 3M5 8l-3 3M2 13l3 3M5 13l-3 3" />
+          <circle cx="11" cy="5" r="2" />
+          <circle cx="11" cy="10.5" r="2" />
+        </svg>
+      );
+    case "range":
+      return (
+        <svg {...common}>
+          <path d="M4 3v6M9 6v6M14 9v6" />
+          <path d="M2 5h2M4 8h2M7 8h2M9 11h2M12 11h2M14 14h2" />
+        </svg>
+      );
+    case "hlc_area":
+      return (
+        <svg {...common}>
+          <path d="M2 8l5-4 3 2 6-4v7l-6 4-3-2-5 3z" fill="currentColor" fill-opacity="0.25" stroke-linejoin="round" />
+          <path d="M2 11l5-3 3 2 6-4" stroke-linejoin="round" />
         </svg>
       );
     case "heikin_ashi":
@@ -262,14 +317,14 @@ const toggleTheme = () => setTheme(theme() === "dark" ? "light" : "dark");
 const themeLabel = () => `Switch to ${theme() === "dark" ? "light" : "dark"} theme`;
 
 const buttonClass =
-  "px-2 py-1.5 rounded-md text-sm cursor-pointer text-[color:var(--color-fg)] hover:bg-[color:var(--color-bg-elev)] inline-flex items-center gap-1.5 shrink-0";
+  "px-2 py-1.5 rounded-md text-sm cursor-pointer text-[color:var(--color-fg)] hover:bg-[color:var(--color-bg-elev)] inline-flex items-center gap-1.5 shrink-0 disabled:opacity-40 disabled:cursor-not-allowed";
 const activeClass =
   "bg-[color:var(--color-bg-elev)] text-[color:var(--color-accent)]";
-const TIMEFRAME_GROUPS = ["Minutes", "Hours", "Days"] as const;
+const TIMEFRAME_GROUPS = ["Seconds", "Minutes", "Hours", "Days"] as const;
 const menuClass =
   "bg-[color:var(--color-bg-elev)] border border-[color:var(--color-border)] rounded-md shadow-lg z-50 py-1 min-w-36";
 const itemClass =
-  "px-3 py-1.5 text-sm cursor-pointer flex items-center gap-2 outline-none data-[highlighted]:bg-[color:var(--color-border)]";
+  "px-3 py-1.5 text-sm cursor-pointer flex items-center gap-2 outline-none data-[highlighted]:bg-[color:var(--color-border)] data-[disabled]:opacity-40 data-[disabled]:cursor-not-allowed";
 
 /** True when a keystroke should be left alone (typing in a field, dialog/menu open). */
 function shouldIgnoreKey(e: KeyboardEvent): boolean {
@@ -287,6 +342,8 @@ export interface ToolbarProps {
   onResetChart: () => void;
   /** Open the symbol search in "add compare symbol" mode. */
   onCompare: () => void;
+  /** Inputs of the price-based chart type in use (ADR-0047). */
+  onChartTypeSettings: () => void;
   /** Bar replay (ADR-0023): whether it is on, and the button's toggle. */
   replay: boolean;
   onReplay: () => void;
@@ -347,11 +404,15 @@ export function Toolbar(props: ToolbarProps): JSX.Element {
   const showTools = () => width() >= BP_NARROW && !compact();
   const showReplay = () => width() >= BP_TINY && !compact();
   const hasFullscreen = document.fullscreenEnabled;
+  const priceBased = () => isPriceBarType(chartType());
   // Timeframes in the dropdown: the favourites join it once their buttons go.
+  // Yahoo has no seconds data, so a stock's menu does not offer them.
   const overflow = (): readonly Timeframe[] =>
-    showTimeframes()
-      ? TIMEFRAME_OPTIONS.filter((tf) => !FAVOURITE_TIMEFRAMES.includes(tf))
-      : TIMEFRAME_OPTIONS;
+    TIMEFRAME_OPTIONS.filter(
+      (tf) =>
+        !(showTimeframes() && FAVOURITE_TIMEFRAMES.includes(tf)) &&
+        (isContinuousMarket(symbol()) || timeframeGroup(tf) !== "Seconds"),
+    );
   // The dropdown's button names the current timeframe unless a favourite does.
   const inDropdown = () => !showTimeframes() || !FAVOURITE_TIMEFRAMES.includes(timeframe());
 
@@ -494,6 +555,12 @@ export function Toolbar(props: ToolbarProps): JSX.Element {
                 )}
               </For>
             </DropdownMenu.RadioGroup>
+            <Show when={priceBased()}>
+              <DropdownMenu.Separator class="my-1 border-t border-[color:var(--color-border)]" />
+              <DropdownMenu.Item class={itemClass} onSelect={props.onChartTypeSettings}>
+                Settings for {CHART_TYPE_LABELS[chartType()]}…
+              </DropdownMenu.Item>
+            </Show>
           </DropdownMenu.Content>
         </DropdownMenu.Portal>
       </DropdownMenu.Root>
@@ -505,8 +572,9 @@ export function Toolbar(props: ToolbarProps): JSX.Element {
           type="button"
           class={buttonClass}
           onClick={props.onCompare}
+          disabled={priceBased()}
           aria-label="Compare symbol"
-          title="Compare symbol"
+          title={priceBased() ? COMPARE_REFUSED : "Compare symbol"}
         >
           <CompareIcon />
         </button>
@@ -516,9 +584,10 @@ export function Toolbar(props: ToolbarProps): JSX.Element {
           type="button"
           class={`${buttonClass} ${props.replay ? activeClass : ""}`}
           onClick={props.onReplay}
+          disabled={priceBased()}
           aria-pressed={props.replay}
           aria-label="Bar replay"
-          title="Bar replay"
+          title={priceBased() ? REPLAY_REFUSED : "Bar replay"}
           data-testid="toolbar-replay"
         >
           <ReplayIcon />
@@ -611,13 +680,13 @@ export function Toolbar(props: ToolbarProps): JSX.Element {
           <DropdownMenu.Portal>
             <DropdownMenu.Content class={menuClass}>
               <Show when={!showReplay()}>
-                <DropdownMenu.Item class={itemClass} onSelect={props.onReplay}>
+                <DropdownMenu.Item class={itemClass} onSelect={props.onReplay} disabled={priceBased()}>
                   <ReplayIcon />
                   Bar replay
                 </DropdownMenu.Item>
               </Show>
               <Show when={!showTools()}>
-                <DropdownMenu.Item class={itemClass} onSelect={props.onCompare}>
+                <DropdownMenu.Item class={itemClass} onSelect={props.onCompare} disabled={priceBased()}>
                   <CompareIcon />
                   Compare symbol
                 </DropdownMenu.Item>

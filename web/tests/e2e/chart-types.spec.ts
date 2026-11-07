@@ -41,6 +41,7 @@ const CASES: Case[] = [
   { label: "Baseline", probes: [FILL_UP, FILL_DOWN], min: 1500 },
   { label: "Columns", probes: [COLUMN_UP, COLUMN_DOWN], min: 3000 },
   { label: "High-low", probes: [LINE], min: 3000 },
+  { label: "HLC area", probes: [LINE], min: 1000 },
 ];
 
 /** Pixels per probe on the price pane's canvases (below the first legend row). */

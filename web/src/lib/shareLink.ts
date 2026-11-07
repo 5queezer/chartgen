@@ -6,6 +6,9 @@
 //   ?symbol=ETHUSDT&interval=4h&type=candles&ind=rsi(length:21),ema_stack
 //    &compare=BTCUSDT,SOLUSDT&tz=Europe/Berlin
 //
+// A price-based `type` (ADR-0047) may add `tp=box:fixed;size:50`: its inputs that
+// are not the defaults. An older app ignores `tp` and an unknown `type`.
+//
 // `ind` is a comma list of names (a repeated name is another instance of the
 // indicator, ADR-0028) with optional `(key:value;key:value)`
 // params (only non-default ones are written). Values are written as plain
@@ -14,6 +17,13 @@
 // string: the type comes from the indicator registry (`reconcileIndicators`),
 // which also drops params the registry rejects.
 
+import {
+  decodeChartParams,
+  DEFAULT_CHART_PARAMS,
+  encodeChartParams,
+  isPriceBarType,
+  type ChartParams,
+} from "./priceBars";
 import { parseCompare } from "../stores/compare";
 import {
   CHART_TYPES,
@@ -38,6 +48,7 @@ export const SHARE_PARAMS = [
   "symbol",
   "interval",
   "type",
+  "tp",
   "ind",
   "compare",
   "tz",
@@ -47,6 +58,8 @@ export interface ShareState {
   symbol: string;
   timeframe: Timeframe;
   chartType: ChartType;
+  /** Absent means the defaults. */
+  chartParams?: ChartParams;
   indicators: ActiveIndicator[];
   compare: string[];
   timeZone: TimeZoneChoice;
@@ -193,6 +206,9 @@ export function encodeShare(
   p.set("symbol", s.symbol);
   p.set("interval", s.timeframe);
   p.set("type", s.chartType);
+  const tp =
+    s.chartParams && isPriceBarType(s.chartType) ? encodeChartParams(s.chartParams) : "";
+  if (tp !== "") p.set("tp", tp);
   // `ind=` (empty) means "no indicators", which differs from absent.
   p.set("ind", encodeIndicators(s.indicators, defaults));
   // `compare=` (empty) clears the receiver's compare symbols.
@@ -226,6 +242,11 @@ export function decodeShare(search: string): SharePatch {
   const type = p.get("type")?.trim().toLowerCase();
   const chartType = CHART_TYPES.find((t) => t === type);
   if (chartType !== undefined) patch.chartType = chartType;
+  // A link says all of a price-based chart, so what it leaves out is the default.
+  if (chartType !== undefined && isPriceBarType(chartType)) {
+    const tp = p.get("tp");
+    patch.chartParams = tp === null ? DEFAULT_CHART_PARAMS : decodeChartParams(tp);
+  }
 
   const ind = p.get("ind");
   if (ind !== null) {

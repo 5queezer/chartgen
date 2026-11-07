@@ -77,9 +77,38 @@ export interface GenerateChartInput {
    */
   bars?: number;
   /**
-   * Price series style. 'candles' (default) uses the raw OHLC bars. 'heikin_ashi' replaces them with Heikin Ashi bars (haClose = ohlc4, haOpen = (prev haOpen + prev haClose) / 2, seeded with (open+close)/2) in every format. Like TradingView, indicators are then computed on the Heikin Ashi values. The transform runs over bars+warmup before trimming, so pages and tail polls converge after warmup. format=series echoes the applied style as chart_style.
+   * Inputs of a price-based chart_style, refused for the others. Echoed in format=series and summary with the box_size the build used. Send that box_size back on later polls and pages to keep the same bars. subscribe_chart requires it for an atr or percent box, so pushed bars line up with the chart that was loaded.
    */
-  chart_style?: "candles" | "heikin_ashi";
+  chart_params?: {
+    /**
+     * ATR length, 1 to 500.
+     */
+    atr_length?: number;
+    /**
+     * How the box is set, for renko, kagi (the reversal amount), point_figure and range (the range size). 'atr' (default): ATR of the closed source bars. 'fixed': box_size. 'percent': a percentage of the last price. ATR and percent are rounded to two significant digits.
+     */
+    box?: "atr" | "fixed" | "percent";
+    /**
+     * The size of a fixed box, or the resolved size of an atr or percent box to keep. A size that would make over 20,000 bars is refused.
+     */
+    box_size?: number;
+    /**
+     * line_break: how many lines a close must pass to reverse, 1 to 20.
+     */
+    lines?: number;
+    /**
+     * Percentage of the last price, above 0 and at most 100.
+     */
+    percent?: number;
+    /**
+     * point_figure: boxes the close must come back to start a new column, 1 to 20.
+     */
+    reversal?: number;
+  };
+  /**
+   * Price series style. 'candles' (default) uses the raw OHLC bars. 'heikin_ashi' replaces them with Heikin Ashi bars (haClose = ohlc4, haOpen = (prev haOpen + prev haClose) / 2, seeded with (open+close)/2) in every format. Like TradingView, indicators are then computed on the Heikin Ashi values. The transform runs over bars+warmup before trimming, so pages and tail polls converge after warmup. 'renko', 'kagi', 'point_figure', 'line_break' and 'range' are price-based: built from the bars of `timeframe`, so they only approximate tick data, with times that are not evenly spaced. The last bar is the open one; only closed source bars confirm a bar. Each reads a fixed window of source bars (up to 5000, within the 20,000 native bar limit), `warmup` does nothing for them, and a window may hold fewer bars than `bars`. Indicators run on these bars; ones that project past the last bar return no `future`. format=series echoes the applied style as chart_style. See ADR-0047.
+   */
+  chart_style?: "candles" | "heikin_ashi" | "renko" | "kagi" | "point_figure" | "line_break" | "range";
   /**
    * History paging: return only bars whose open time (ms since epoch) is strictly before end_time — pass the oldest loaded bar's t × 1000 to fetch the page before it. Omit (or null) for the newest bars, including the still-forming one. Must be an integer between -2208988800000 (1900-01-01) and one year from now.
    */
@@ -137,7 +166,7 @@ export interface GenerateChartInput {
    */
   ticker?: string;
   /**
-   * Candlestick timeframe / interval: a number and a unit, m minutes, h hours, D days, W weeks, M months (1m, 5m, 7m, 45m, 90m, 4h, 8h, 1d, 2D, 1W, 2W, 1M). Upper bounds after normalization: under 1440m, 168h, 365D, 52W, 12M. A minute or hour interval may also take at most 60 native Binance bars per bar, so 61m is rejected and 65m is not. The response echoes the canonical form (120m becomes 2h, 2W becomes 2wk, 1M becomes 1mo).
+   * Candlestick timeframe / interval: a number and a unit, s seconds, m minutes, h hours, D days, W weeks, M months (1s, 5s, 1m, 5m, 7m, 45m, 90m, 4h, 8h, 1d, 2D, 1W, 2W, 1M). Seconds need a Binance spot symbol: Yahoo has none. Upper bounds after normalization: under 60s, 1440m, 168h, 365D, 52W, 12M. A minute or hour interval may also take at most 60 native Binance bars per bar, so 61m is rejected and 65m is not. The response echoes the canonical form (120m becomes 2h, 2W becomes 2wk, 1M becomes 1mo).
    */
   timeframe?: string;
   /**
@@ -344,9 +373,38 @@ export interface SetAlertInput {
 
 export interface SubscribeChartInput {
   /**
-   * Price series style, as for generate_chart.
+   * Inputs of a price-based chart_style, refused for the others. Echoed in format=series and summary with the box_size the build used. Send that box_size back on later polls and pages to keep the same bars. subscribe_chart requires it for an atr or percent box, so pushed bars line up with the chart that was loaded.
    */
-  chart_style?: "candles" | "heikin_ashi";
+  chart_params?: {
+    /**
+     * ATR length, 1 to 500.
+     */
+    atr_length?: number;
+    /**
+     * How the box is set, for renko, kagi (the reversal amount), point_figure and range (the range size). 'atr' (default): ATR of the closed source bars. 'fixed': box_size. 'percent': a percentage of the last price. ATR and percent are rounded to two significant digits.
+     */
+    box?: "atr" | "fixed" | "percent";
+    /**
+     * The size of a fixed box, or the resolved size of an atr or percent box to keep. A size that would make over 20,000 bars is refused.
+     */
+    box_size?: number;
+    /**
+     * line_break: how many lines a close must pass to reverse, 1 to 20.
+     */
+    lines?: number;
+    /**
+     * Percentage of the last price, above 0 and at most 100.
+     */
+    percent?: number;
+    /**
+     * point_figure: boxes the close must come back to start a new column, 1 to 20.
+     */
+    reversal?: number;
+  };
+  /**
+   * Price series style, as for generate_chart. Price-based tails carry up to 64 bars, as one closed source bar can confirm several.
+   */
+  chart_style?: "candles" | "heikin_ashi" | "renko" | "kagi" | "point_figure" | "line_break" | "range";
   /**
    * Indicators, as for generate_chart; at most 10.
    */
@@ -366,7 +424,7 @@ export interface SubscribeChartInput {
    */
   ticker: string;
   /**
-   * Candlestick timeframe, as for generate_chart: a number and a unit (1m, 7m, 45m, 4h, 8h, 1d, 2D, 2W, 1M). Binance pushes intervals it has no stream for by resampling a finer one.
+   * Candlestick timeframe, as for generate_chart: a number and a unit (1s, 1m, 7m, 45m, 4h, 8h, 1d, 2D, 2W, 1M). Binance pushes intervals it has no stream for by resampling a finer one.
    */
   timeframe?: string;
   /**

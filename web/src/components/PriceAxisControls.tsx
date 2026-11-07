@@ -27,7 +27,7 @@ import {
   toPaneGap,
   type Gap,
 } from "../lib/priceRatio";
-import { barCountdown, isContinuousMarket } from "../lib/countdown";
+import { seriesCountdown } from "../lib/countdown";
 import { usePane } from "../stores/grid";
 import { chartStoreOf, type ScaleMode } from "../stores/layout";
 import { chartSettings } from "../stores/chartSettings";
@@ -62,20 +62,14 @@ export function PriceAxisControls(props: PriceAxisControlsProps): JSX.Element {
     setLockRatio,
     setScaleMode,
   } = chartStoreOf(gridPane);
-  const { compareSymbols } = compareStoreOf(gridPane);
+  const { drawnEntries } = compareStoreOf(gridPane);
   const [now, setNow] = createSignal(Date.now());
   const [pos, setPos] = createSignal<BadgePos | null>(null);
   const [axisWidth, setAxisWidth] = createSignal(FALLBACK_AXIS_WIDTH);
 
   const lastBar = createMemo(() => props.series?.bars.at(-1) ?? null);
   const text = createMemo(() => {
-    const bar = lastBar();
-    const interval = props.series?.interval;
-    // Only 24/7 symbols: session-based markets (Yahoo) close bars at
-    // times the interval alone cannot give.
-    if (!bar || bar.t === null || !interval) return null;
-    if (!isContinuousMarket(props.series?.symbol)) return null;
-    return barCountdown(bar.t, interval, now());
+    return seriesCountdown(props.series, now());
   });
 
   const reposition = () => {
@@ -140,7 +134,7 @@ export function PriceAxisControls(props: PriceAxisControlsProps): JSX.Element {
   // Compare lines pause it: they are rebased to the first visible bar, so a
   // fixed price range says nothing about them and would crop them; the axis
   // fits every series until the last compare symbol goes.
-  const comparing = createMemo(() => compareSymbols().length > 0);
+  const comparing = createMemo(() => drawnEntries().length > 0);
   let ratio: number | null = null;
   let gap: Gap = DEFAULT_GAP;
   let lockKey = "";

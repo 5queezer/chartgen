@@ -34,6 +34,20 @@ beforeEach(() => {
   vi.unstubAllGlobals();
 });
 
+describe("price-based charts", () => {
+  // src/price_bars/tests.rs holds the other half: what the chart's last bar closes on.
+  it("an alert at 108 does not fire with last 106 under an extreme of 110", async () => {
+    stubStorage();
+    const { addAlert, alerts, processPrice } = await load();
+    addAlert({ symbol: "ETHUSDT", condition: "crossing", trigger: "once", price: 108 });
+    processPrice("ETHUSDT", 106, 1);
+    expect(processPrice("ETHUSDT", 106, 2)).toEqual([]);
+    expect(alerts()[0]!.active).toBe(true);
+    // What the bar's close used to be, once no source bar was forming.
+    expect(processPrice("ETHUSDT", 110, 3)).toHaveLength(1);
+  });
+});
+
 describe("the fire rules the server shares (tests/fixtures/alert_semantics.json)", () => {
   for (const c of semantics.cases) {
     it(c.name, async () => {

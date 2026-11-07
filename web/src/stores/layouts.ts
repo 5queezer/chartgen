@@ -13,6 +13,12 @@
 
 import { batch, createSignal } from "solid-js";
 
+import {
+  DEFAULT_CHART_PARAMS,
+  isDefaultChartParams,
+  sanitizeChartParams,
+  type ChartParams,
+} from "../lib/priceBars";
 import { isTimeframe, type Timeframe } from "../lib/timeframe";
 import {
   isTimeZoneChoice,
@@ -73,6 +79,8 @@ export interface LayoutState {
   symbol: string;
   timeframe: Timeframe;
   chartType: ChartType;
+  /** Inputs of the price-based types (ADR-0047); absent when all are default. */
+  chartParams?: ChartParams;
   scaleMode: ScaleMode;
   /** Only present when on; layouts saved before they existed are off. */
   invertScale?: boolean;
@@ -190,6 +198,9 @@ function parsePane(x: unknown): PaneState | null {
     chartType: (CHART_TYPES as readonly unknown[]).includes(x.chartType)
       ? (x.chartType as ChartType)
       : DEFAULT_CHART_TYPE,
+    ...(x.chartParams !== undefined && !isDefaultChartParams(sanitizeChartParams(x.chartParams))
+      ? { chartParams: sanitizeChartParams(x.chartParams) }
+      : {}),
     scaleMode: x.scaleMode as ScaleMode,
     ...(x.invertScale === true ? { invertScale: true } : {}),
     ...(x.lockRatio === true ? { lockRatio: true } : {}),
@@ -337,6 +348,7 @@ function comparablePane(s: PaneState, defaults: ParamDefaults): unknown[] {
     s.symbol,
     s.timeframe,
     s.chartType,
+    s.chartParams ?? null,
     s.scaleMode,
     !!s.invertScale,
     !!s.lockRatio,
@@ -473,6 +485,7 @@ function livePane(pane: number): PaneState {
     symbol: chart.symbol(),
     timeframe: chart.timeframe(),
     chartType: chart.chartType(),
+    ...(isDefaultChartParams(chart.chartParams()) ? {} : { chartParams: chart.chartParams() }),
     scaleMode: chart.scaleMode(),
     ...(chart.invertScale() ? { invertScale: true } : {}),
     ...(chart.lockRatio() ? { lockRatio: true } : {}),
@@ -609,6 +622,7 @@ function applyPane(pane: number, state: PaneState): void {
   chart.setSymbol(state.symbol);
   chart.setTimeframe(state.timeframe);
   chart.setChartType(state.chartType);
+  chart.setChartParams(state.chartParams ?? DEFAULT_CHART_PARAMS);
   chart.setScaleMode(state.scaleMode);
   chart.setInvertScale(!!state.invertScale);
   chart.setLockRatio(!!state.lockRatio);
@@ -658,6 +672,7 @@ export function changeGrid(next: GridId): void {
         symbol: from.symbol,
         timeframe: from.timeframe,
         chartType: from.chartType,
+        ...(from.chartParams ? { chartParams: from.chartParams } : {}),
         scaleMode: DEFAULT_SCALE_MODE,
         indicators: from.indicators,
         compare: [],
