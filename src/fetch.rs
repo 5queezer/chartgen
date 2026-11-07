@@ -1101,6 +1101,14 @@ fn parse_binance_klines(body: &str) -> Result<Vec<Kline>, String> {
             .parse()
             .map_err(|e| format!("Failed to parse volume: {}", e))?;
 
+        // Rust reads "NaN" and "inf" as numbers, and nothing downstream expects them.
+        if ![open, high, low, close, volume]
+            .iter()
+            .all(|v| v.is_finite())
+        {
+            return Err("Binance kline has a price or volume that is not a number".into());
+        }
+
         // Field 9. Absent or unreadable, the kline is still good for a chart.
         let taker_buy = arr
             .get(9)
@@ -2095,6 +2103,16 @@ mod tests {
         assert_eq!(klines[0].taker_buy(), Some(7.25));
         assert_eq!(klines[1].taker_buy(), Some(2.0));
         assert_eq!(klines[1].bar.date, "60");
+        // A price that is no number fails the read, as any other unreadable kline does.
+        for (bad, field) in [
+            (r#"[[0,"1","NaN","0.5","1.5","10"]]"#, "high"),
+            (r#"[[0,"1","2","NaN","1.5","10"]]"#, "low"),
+            (r#"[[0,"inf","2","0.5","1.5","10"]]"#, "open"),
+            (r#"[[0,"1","2","0.5","-inf","10"]]"#, "close"),
+            (r#"[[0,"1","2","0.5","1.5","NaN"]]"#, "volume"),
+        ] {
+            assert!(parse_binance_klines(bad).is_err(), "{field}");
+        }
         // Without it the kline still serves a chart, and says it has none.
         let short = parse_binance_klines(r#"[[0,"1","2","0.5","1.5","10"]]"#).unwrap();
         assert_eq!(short[0].taker_buy(), None);

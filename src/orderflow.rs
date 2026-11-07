@@ -849,7 +849,8 @@ fn tpo_groups<Tz: TimeZone>(
     tz: &Tz,
 ) -> BTreeMap<i64, Vec<Intrabar>> {
     let mut groups: BTreeMap<i64, Vec<Intrabar>> = BTreeMap::new();
-    for block in blocks {
+    // Row sizes are bounded by what is grouped here, so what could not be bounded stays out.
+    for block in blocks.iter().filter(|b| has_range(b)) {
         let start = period.start_of(block.t, tz);
         if sessions.is_empty() {
             groups.entry(start).or_default().push(block.clone());
@@ -1781,6 +1782,27 @@ mod tests {
         // Outside every session: left out.
         let late = [block(7200)];
         assert!(tpo_profiles(&late, Period::Days(1), &sessions, &Utc, &o).is_empty());
+    }
+
+    #[test]
+    fn a_block_whose_price_is_no_number_makes_no_rows() {
+        let o = TpoOptions {
+            block_secs: 3_600,
+            row: 0.001,
+            value_area: 70.0,
+            ib_blocks: 1,
+        };
+        let list = [
+            ib(0, 1.0, 65_000.0, f64::NAN, 1.0, 1.0),
+            ib(3_600, 1.0, f64::INFINITY, 1.0, 1.0, 1.0),
+            ib(7_200, 100.0, 100.5, 100.0, 100.2, 1.0),
+        ];
+        let got = tpo_profiles(&list, Period::Days(1), &[], &chrono_tz::UTC, &o);
+        assert_eq!(got.len(), 1);
+        assert!(got[0].rows.len() <= 502, "{}", got[0].rows.len());
+        assert_eq!(got[0].block_times, vec![7_200]);
+        let widest = tpo_widest_range(&list, Period::Days(1), &[], &chrono_tz::UTC);
+        assert_eq!(widest, 0.5);
     }
 
     /// A reply may start inside a period, and the next one later still: its profile must
