@@ -547,11 +547,15 @@ test.describe("workspace", () => {
       },
       [DOC, drawings("accounts")],
     );
+    // No connection either, so the flush on the way out cannot save it.
+    await page.route("**/workspace/sync", (route) => route.abort());
     await Promise.all([page.waitForEvent("load"), page.getByTestId("workspace-import").click()]);
     await expectChartRendered(page);
     await expect(page.getByTestId("workspace-offer")).toBeHidden();
     expect(ids(await read(page, DOC))).toEqual(["accounts", "old"]);
     expect(await read(page, NOTE)).toBe("from before");
+    await page.unroute("**/workspace/sync");
+    await reloadApp(page);
 
     await expect
       .poll(async () => ids(await freshDeviceReads(browser, DOC)), { timeout: 30_000 })
