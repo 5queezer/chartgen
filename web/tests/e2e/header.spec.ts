@@ -42,7 +42,7 @@ test.describe("header at narrow widths", () => {
         )
         .toBeLessThanOrEqual(0);
 
-      expect(await headerHeight(page)).toBe(52);
+      expect(await headerHeight(page)).toBe(38);
 
       // Status text and live badge stay on one line.
       for (const id of ["status-text", "live-status"]) {

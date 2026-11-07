@@ -675,6 +675,40 @@ body {
   }
 }
 
+/* --- The tight top, for a mouse ----------------------------------------- */
+/* The chart gets the height. Touch and the compact shell keep their larger
+ * targets, so this asks for a real pointer. One control height for the whole bar,
+ * including controls added later: 27 px leaves 5 px above and below on the 37 px
+ * inside the border, where the wordmark's 21 px also lands on a whole pixel. */
+@media (hover: hover) and (pointer: fine) {
+  html:not(.compact) header {
+    height: 38px;
+  }
+
+  html:not(.compact) header button {
+    height: 27px;
+    padding-block: 0;
+    /* One in a block wrapper would otherwise sit on its line box, off the centre. */
+    vertical-align: top;
+  }
+
+  html:not(.compact) .chip-row {
+    min-height: 0;
+    gap: 4px;
+    padding-block: 2px;
+  }
+
+  /* The Indicators button already says 0: an empty row would only cost height. */
+  html:not(.compact) .chip-row:not(:has(.chip)) {
+    display: none;
+  }
+
+  html:not(.compact) .chip {
+    min-height: 20px;
+    padding-block: 0;
+  }
+}
+
 /* --- Compact shell ------------------------------------------------------ */
 .compact .chart-host {
   min-height: 0;

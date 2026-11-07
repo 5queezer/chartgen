@@ -81,7 +81,7 @@ export function CompactIndicatorErrors(
 export function IndicatorChips(props: IndicatorChipsProps): JSX.Element {
   const labels = createMemo(() => paramLabels(props.entries, paramDefaults(), true));
   return (
-    <div class="flex flex-wrap items-center gap-2 px-4 py-2 border-b border-[color:var(--color-border)] min-h-[2.5rem] compact:hidden">
+    <div class="chip-row flex flex-wrap items-center gap-2 px-4 py-2 border-b border-[color:var(--color-border)] min-h-[2.5rem] compact:hidden">
       <Show
         when={props.entries.length > 0}
         fallback={
@@ -99,7 +99,7 @@ export function IndicatorChips(props: IndicatorChipsProps): JSX.Element {
             const error = () => props.errors?.[instanceKey(entry())];
             return (
               <span
-                class="inline-flex items-center gap-1 bg-[color:var(--color-bg-elev)] border rounded-full pl-1.5 pr-1 py-0.5 text-xs font-mono text-[color:var(--color-fg)]"
+                class="chip inline-flex items-center gap-1 bg-[color:var(--color-bg-elev)] border rounded-full pl-1.5 pr-1 py-0.5 text-xs font-mono text-[color:var(--color-fg)]"
                 classList={{
                   "opacity-50": isHidden(entry()),
                   "border-[color:var(--color-border)]": !error(),

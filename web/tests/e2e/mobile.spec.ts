@@ -922,7 +922,7 @@ test.describe("a mouse window", () => {
     expect(await rect('[aria-label="Drawing tools"]')).toEqual({ x: 0, width: 48 });
     expect(await rect(".chart-host")).toEqual({ x: 48, width: 912 });
     expect(await rect('aside[aria-label="Sidebar"]')).toEqual({ x: 960, width: 320 });
-    expect((await page.locator("header").boundingBox())!.height).toBe(52);
+    expect((await page.locator("header").boundingBox())!.height).toBe(38);
     await expect(page.getByRole("navigation", { name: "Panels" })).toHaveCount(0);
     await expect(page.getByRole("button", { name: /^Hide EMA/ }).first()).toBeVisible();
     await expect(page.locator(".chart-host")).toHaveCSS("min-height", "400px");

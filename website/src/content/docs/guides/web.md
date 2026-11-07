@@ -29,8 +29,10 @@ area shows "Couldn't load SYMBOL — symbol not found" with **Retry** and, when
 another chart loaded before, **Back to PREVIOUS**. The failed symbol stays
 active, as on TradingView, and is not saved to your recents.
 
-The header has a fixed height and never scrolls the page sideways. As the
-window narrows, lower-priority items collapse:
+The header has a fixed height and never scrolls the page sideways: 38 px with
+a mouse, so the chart gets the height, and taller on a touch screen, where its
+buttons stay comfortable to tap. As the window narrows, lower-priority items
+collapse:
 
 - below 1400 px the **Replay** and **Indicators** labels become icon-only;
 - below 1280 px screenshot, copy link, chart settings and fullscreen move
