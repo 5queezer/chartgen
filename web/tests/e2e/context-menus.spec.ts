@@ -544,19 +544,24 @@ test.describe("indicators", () => {
     await expect(page.getByTestId("indicator-legend-volume")).toBeVisible();
   });
 
-  test("a chip's menu acts on that chip", async ({ bootedApp: page }) => {
-    // Not the legend row, which has a Remove button of the same name.
-    const chip = page.locator("span.rounded-full", { has: page.getByRole("button", { name: /^Remove volume/i }) });
+  test("a hidden indicator's chip has a menu that acts on it", async ({ bootedApp: page }) => {
+    // With a mouse only a hidden or failed instance has a chip.
+    const legend = page.getByTestId("indicator-legend-volume");
+    const hide = async () => {
+      await legend.hover();
+      await legend.getByRole("button", { name: /^Hide /i }).click();
+      await expect(legend).toHaveCount(0);
+    };
+    await hide();
+    const chip = page.locator(".chip", { has: page.getByRole("button", { name: /^Remove volume/i }) });
     const openChip = () => chip.getByText(/^volume/i).click({ button: "right" });
     await openChip();
     await expect(menu(page, /^volume.* actions$/i)).toBeVisible();
-    await anyItem(page, /^Hide volume/i).click();
-    await expect(chip.getByRole("button", { name: /^Show volume/i })).toBeVisible();
-    await expect(page.getByTestId("indicator-legend-rsi")).toBeVisible();
-
-    await openChip();
     await anyItem(page, /^Show volume/i).click();
-    await expect(chip.getByRole("button", { name: /^Hide volume/i })).toBeVisible();
+    await expect(legend).toBeVisible();
+    await expect(chip).toBeHidden();
+
+    await hide();
     await openChip();
     await anyItem(page, /^Remove volume/i).click();
     await expect(chip).toHaveCount(0);

@@ -237,7 +237,7 @@ test.describe("loading the active layout", () => {
   const activeTimeframe = (page: Page) =>
     page.getByRole("group", { name: "Timeframe" }).locator("[aria-pressed=true]");
   const chip = (page: Page, name: string) =>
-    page.getByRole("button", { name: `Remove ${name}`, exact: true });
+    page.getByTestId(`indicator-legend-${name}`).getByRole("button", { name: /^Remove / });
 
   async function pickActive(page: Page): Promise<void> {
     await layoutButton(page).click();
@@ -869,11 +869,12 @@ test.describe("watchlist row buttons without hover", () => {
 });
 
 test.describe("indicator settings title", () => {
-  test("shows the chip's name, not the raw id", async ({ page }) => {
+  test("shows the legend's name, not the raw id", async ({ page }) => {
     await gotoApp(page, "/?ind=bbands,ema_stack");
     for (const id of ["bbands", "ema_stack"]) {
-      const shown = await page.locator(`[title="${id}"]`).first().innerText();
-      await page.getByRole("button", { name: `Settings for ${id}`, exact: true }).click();
+      const legend = page.getByTestId(`indicator-legend-${id}`);
+      const shown = await legend.locator(".pane-header-label").innerText();
+      await legend.getByRole("button", { name: /^Settings for / }).click();
       const heading = page.getByRole("dialog").getByRole("heading");
       await expect(heading).toHaveText(shown);
       await expect(heading).not.toHaveText(id);

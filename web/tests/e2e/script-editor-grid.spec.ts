@@ -189,7 +189,9 @@ test("a failing script marks the chips and the editor of the chart it fails on",
 
   const failedChips = page.locator("[data-chip-error]");
   const errors = page.getByTestId("script-errors");
-  await expect(page.getByRole("button", { name: "Remove fails_late" }).first()).toBeVisible();
+  // Healthy on this chart: a legend row with its controls, and no chip.
+  const row = page.locator(".chart-pane[data-active]").getByTestId("indicator-legend-fails_late");
+  await expect(row.getByRole("button", { name: /^Remove / })).toBeVisible();
   await expect(failedChips).toHaveCount(0);
   await expect(errors).toHaveCount(0);
 

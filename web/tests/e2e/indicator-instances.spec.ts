@@ -63,9 +63,6 @@ test.describe("indicator instances", () => {
     await reloadApp(page);
     await expect(legend(page, "rsi")).toContainText("(14)");
     await expect(legend(page, "rsi#2")).toContainText("(21)");
-    // The chips tell the two apart.
-    await expect(page.getByRole("button", { name: "Remove rsi (14)", exact: true })).toBeVisible();
-    await expect(page.getByRole("button", { name: "Remove rsi (21)", exact: true })).toBeVisible();
   });
 
   test("hiding or removing one instance leaves the other", async ({ bootedApp: page }) => {

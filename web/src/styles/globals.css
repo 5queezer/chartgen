@@ -702,6 +702,52 @@ body {
   }
 }
 
+/* --- The tight top, for a mouse ----------------------------------------- */
+/* The chart gets the height. Touch and the compact shell keep their larger
+ * targets, so this asks for a real pointer. One control height for the whole bar,
+ * including controls added later: 27 px leaves 5 px above and below on the 37 px
+ * inside the border, where the wordmark's 21 px also lands on a whole pixel. */
+@media (hover: hover) and (pointer: fine) {
+  html:not(.compact) header {
+    height: 38px;
+  }
+
+  html:not(.compact) header button {
+    height: 27px;
+    padding-block: 0;
+    /* One in a block wrapper would otherwise sit on its line box, off the centre. */
+    vertical-align: top;
+  }
+
+  html:not(.compact) .chip-row {
+    min-height: 0;
+    gap: 4px;
+    padding-block: 2px;
+  }
+
+  /* A legend row has the same bell, eye, gear and remove on hover, so a chip is only
+   * needed where there is no row: a hidden or failed instance. No such chip, no row.
+   * One holding keyboard focus stays until focus moves on, so its eye can toggle back. */
+  html:not(.compact) .chip:not([data-chip-keep]):not(:has(:focus-visible)),
+  html:not(.compact) .chip-row:not(:has(.chip[data-chip-keep], .chip :focus-visible)) {
+    display: none;
+  }
+
+  /* Those controls are now the way in, so a long row must not clip them away. */
+  .pane-header-controls {
+    position: sticky;
+    right: 0;
+    background: var(--legend-bg, var(--color-bg));
+    /* Over the 4 px of row padding sticky stops short of, where a clipped value shows. */
+    box-shadow: 0 0 0 4px var(--legend-bg, var(--color-bg));
+  }
+
+  html:not(.compact) .chip {
+    min-height: 20px;
+    padding-block: 0;
+  }
+}
+
 /* --- Compact shell ------------------------------------------------------ */
 .compact .chart-host {
   min-height: 0;
