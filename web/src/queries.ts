@@ -90,6 +90,8 @@ export function createChartQuery(
           chart_style,
           bars: INITIAL_BARS,
           warmup: WARMUP,
+          // Only this full load: pages and tails keep its profiles (ADR-0048).
+          profile_intrabars: true,
         }),
       // Every fetch result is stored as it came in, never merged into the
       // previous one (replaceEqualDeep). App adopts a load by the cache

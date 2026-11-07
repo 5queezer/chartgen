@@ -46,6 +46,8 @@ pub fn by_name(name: &str) -> Option<Box<dyn Indicator>> {
         "heikin_ashi" | "ha" => Some(Box::new(custom::HeikinAshi)),
         "pivot" | "pivot_points" => Some(Box::new(custom::PivotPoints)),
         "volume_profile" | "vp" | "vpvr" => Some(Box::new(custom::VolumeProfile::default())),
+        "fixed_range_vp" | "frvp" => Some(Box::new(custom::RangeVolumeProfile::fixed())),
+        "anchored_vp" | "avp" => Some(Box::new(custom::RangeVolumeProfile::anchored())),
         "session_vp" | "svp" | "session_volume_profile" => {
             Some(Box::new(custom::SessionVolumeProfile::default()))
         }
@@ -217,6 +219,8 @@ pub fn available() -> &'static [&'static str] {
         "heikin_ashi",
         "pivot",
         "volume_profile",
+        "fixed_range_vp",
+        "anchored_vp",
         "session_vp",
         "hvn_lvn",
         "naked_poc",
@@ -328,6 +332,18 @@ pub fn registry() -> Vec<IndicatorInfo> {
         &["vp", "vpvr"],
         "overlay",
         custom::VolumeProfile::default()
+    );
+    reg!(
+        "fixed_range_vp",
+        &["frvp"],
+        "overlay",
+        custom::RangeVolumeProfile::fixed()
+    );
+    reg!(
+        "anchored_vp",
+        &["avp"],
+        "overlay",
+        custom::RangeVolumeProfile::anchored()
     );
     reg!(
         "session_vp",

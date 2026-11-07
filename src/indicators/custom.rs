@@ -1,5 +1,6 @@
 use crate::data::OhlcvData;
 use crate::indicator::*;
+use crate::orderflow::value_area_grows_down;
 use crate::trading::signals;
 use serde_json::{json, Value};
 
@@ -923,6 +924,7 @@ impl Indicator for PivotPoints {
 
 // ---- Volume Profile (overlay) ----
 
+#[derive(Clone)]
 pub struct VolumeProfile {
     pub bins: usize,
     pub side: String,              // "left" or "right"
@@ -947,9 +949,40 @@ impl Default for VolumeProfile {
     }
 }
 
+/// `data` with only the bars opening in `[from, to)`.
+fn bars_between(data: &OhlcvData, from: Option<i64>, to: Option<i64>) -> OhlcvData {
+    let inside = |b: &&crate::data::Bar| {
+        let t = b.date.parse::<i64>().unwrap_or(0);
+        from.is_none_or(|f| t >= f) && to.is_none_or(|e| t < e)
+    };
+    OhlcvData {
+        bars: data.bars.iter().filter(inside).cloned().collect(),
+        symbol: data.symbol.clone(),
+        interval: data.interval.clone(),
+        session: data.session,
+    }
+}
+
 impl Indicator for VolumeProfile {
     fn windowed_profile(&self) -> bool {
         true
+    }
+
+    fn wants_intrabars(&self) -> bool {
+        true
+    }
+
+    fn with_intrabars(&self, chart: &OhlcvData, intrabars: &OhlcvData) -> Option<PanelResult> {
+        // `range_bars` counts chart bars: find where they start in time.
+        let from = self
+            .range_bars
+            .filter(|r| *r < chart.len())
+            .and_then(|r| chart.bars[chart.len() - r].date.parse().ok());
+        let profile = Self {
+            range_bars: None,
+            ..self.clone()
+        };
+        Some(profile.compute(&bars_between(intrabars, from, None)))
     }
 
     fn name(&self) -> &str {
@@ -1142,27 +1175,14 @@ impl Indicator for VolumeProfile {
         let mut va_high_idx = poc_idx;
 
         while va_vol < target_vol && (va_low_idx > 0 || va_high_idx < bins - 1) {
-            let try_low = if va_low_idx > 0 {
-                volume_bins[va_low_idx - 1]
-            } else {
-                0.0
-            };
-            let try_high = if va_high_idx < bins - 1 {
-                volume_bins[va_high_idx + 1]
-            } else {
-                0.0
-            };
-            if try_low >= try_high && va_low_idx > 0 {
+            let below = va_low_idx.checked_sub(1).map(|i| volume_bins[i]);
+            let above = volume_bins.get(va_high_idx + 1).copied();
+            if value_area_grows_down(below, above, poc_idx - va_low_idx, va_high_idx - poc_idx) {
                 va_low_idx -= 1;
                 va_vol += volume_bins[va_low_idx];
-            } else if va_high_idx < bins - 1 {
+            } else {
                 va_high_idx += 1;
                 va_vol += volume_bins[va_high_idx];
-            } else if va_low_idx > 0 {
-                va_low_idx -= 1;
-                va_vol += volume_bins[va_low_idx];
-            } else {
-                break;
             }
         }
 
@@ -1820,23 +1840,14 @@ fn compute_profile(
     let mut lo = poc_idx;
     let mut hi = poc_idx;
     while va_vol < target && (lo > 0 || hi < bins - 1) {
-        let try_lo = if lo > 0 { volume_bins[lo - 1] } else { 0.0 };
-        let try_hi = if hi < bins - 1 {
-            volume_bins[hi + 1]
-        } else {
-            0.0
-        };
-        if try_lo >= try_hi && lo > 0 {
+        let below = lo.checked_sub(1).map(|i| volume_bins[i]);
+        let above = volume_bins.get(hi + 1).copied();
+        if value_area_grows_down(below, above, poc_idx - lo, hi - poc_idx) {
             lo -= 1;
             va_vol += volume_bins[lo];
-        } else if hi < bins - 1 {
+        } else {
             hi += 1;
             va_vol += volume_bins[hi];
-        } else if lo > 0 {
-            lo -= 1;
-            va_vol += volume_bins[lo];
-        } else {
-            break;
         }
     }
 
@@ -1854,6 +1865,24 @@ fn compute_profile(
     })
 }
 
+/// Seconds per bar of `data`: its interval, or else the shortest gap between its bars.
+/// `None` if its bars have no times, or there are too few to tell.
+fn bar_step(data: &OhlcvData) -> Option<i64> {
+    let named = data
+        .interval
+        .as_deref()
+        .and_then(|i| crate::interval::Interval::parse(i).ok());
+    if let Some(iv) = named {
+        return Some(iv.secs());
+    }
+    let times: Option<Vec<i64>> = data.bars.iter().map(|b| b.date.parse().ok()).collect();
+    times?
+        .windows(2)
+        .map(|w| w[1] - w[0])
+        .filter(|gap| *gap > 0)
+        .min()
+}
+
 /// Partition bar indices into sessions. Honors `bars_per_session` if Some & > 0,
 /// otherwise buckets by epoch-seconds date using `period_secs`. Fallback on parse
 /// failure: put all bars in one session.
@@ -1866,18 +1895,24 @@ fn session_ranges(
     if n == 0 {
         return vec![];
     }
+    let mut period_secs = period_secs;
     if let Some(bps) = bars_per_session {
         if bps == 0 {
             return vec![(0, n)];
         }
-        let mut out = Vec::new();
-        let mut s = 0;
-        while s < n {
-            let e = (s + bps).min(n);
-            out.push((s, e));
-            s = e;
-        }
-        return out;
+        // On the clock, not from the first bar of this window: a tail starts elsewhere
+        // than its load, and must see the same sessions.
+        let Some(step) = bar_step(data) else {
+            let mut out = Vec::new();
+            let mut s = 0;
+            while s < n {
+                let e = (s + bps).min(n);
+                out.push((s, e));
+                s = e;
+            }
+            return out;
+        };
+        period_secs = step.saturating_mul(bps as i64);
     }
     if period_secs <= 0 {
         return vec![(0, n)];
@@ -1919,7 +1954,9 @@ fn parse_period_secs(session: &str) -> i64 {
 // ---- Session Volume Profile (overlay) ----
 
 /// Periodic volume profile: resets per session (daily/weekly/N-bar) and draws
-/// per-session POC/VAH/VAL as segmented horizontal lines.
+/// per-session POC/VAH/VAL as one line each that holds a level per session. Its tails
+/// recompute it from their own bars, so unlike the profiles that keep their load it
+/// reads no finer bars: the load and the live part would disagree (ADR-0048).
 pub struct SessionVolumeProfile {
     pub bins: usize,
     pub session: String,
@@ -1951,7 +1988,7 @@ impl Indicator for SessionVolumeProfile {
         json!([
             {"name": "bins", "type": "integer", "min": 1, "max": 1000, "default": 24},
             {"name": "session", "type": "string", "default": "daily", "description": "daily, weekly, or hourly"},
-            {"name": "bars_per_session", "type": "integer", "min": 1, "max": 100000, "default": null, "description": "override session by fixed bar count"},
+            {"name": "bars_per_session", "type": "integer", "min": 1, "max": 100000, "default": null, "description": "override session by a span of this many bars on the clock; closed hours count"},
             {"name": "show_value_area", "type": "boolean", "default": true, "description": "draw VAH/VAL in addition to POC"}
         ])
     }
@@ -1975,11 +2012,25 @@ impl Indicator for SessionVolumeProfile {
         }
     }
 
+    /// A whole session, so that a tail's levels are those of its load, up to the cap
+    /// on a warmup: a day of 1m bars, or a week of 5m, does not fit (ADR-0048).
+    fn warmup_bars_at(&self, chart_secs: Option<i64>) -> usize {
+        if let Some(bars) = self.bars_per_session.filter(|b| *b > 0) {
+            return bars;
+        }
+        chart_secs
+            .filter(|s| *s > 0)
+            .map_or(0, |s| (parse_period_secs(&self.session) / s) as usize + 1)
+    }
+
     fn compute(&self, data: &OhlcvData) -> PanelResult {
         let n = data.len();
         let mut out = PanelResult {
             is_overlay: true,
             label: "SVP".into(),
+            // Each session holds its levels through its last bar; what is drawn stops
+            // there rather than sloping to the next session's levels.
+            level_lines: true,
             ..Default::default()
         };
         if n == 0 {
@@ -1988,51 +2039,183 @@ impl Indicator for SessionVolumeProfile {
 
         let period_secs = parse_period_secs(&self.session);
         let ranges = session_ranges(data, period_secs, self.bars_per_session);
+        let mut poc_line = vec![f64::NAN; n];
+        let mut vah_line = vec![f64::NAN; n];
+        let mut val_line = vec![f64::NAN; n];
 
         for (s, e) in ranges {
             if e <= s {
                 continue;
             }
-            let slice = &data.bars[s..e];
-            let Some(prof) = compute_profile(slice, self.bins.max(1), false) else {
+            let Some(prof) = compute_profile(&data.bars[s..e], self.bins.max(1), false) else {
                 continue;
             };
 
-            let mut poc_line = vec![f64::NAN; n];
-            let mut vah_line = vec![f64::NAN; n];
-            let mut val_line = vec![f64::NAN; n];
             for i in s..e {
                 poc_line[i] = prof.poc_price;
                 vah_line[i] = prof.vah_price;
                 val_line[i] = prof.val_price;
             }
+        }
 
+        // One line each, whatever the number of sessions in this window: a live tail
+        // holds fewer of them than a load, and must keep the load's shape.
+        out.lines.push(Line {
+            breaks: false,
+            y: poc_line,
+            color: rgba(0xFFD700, 0.9),
+            width: 2,
+            label: Some("POC".into()),
+        });
+        if self.show_value_area {
             out.lines.push(Line {
                 breaks: false,
-                y: poc_line,
-                color: rgba(0xFFD700, 0.9),
-                width: 2,
-                label: Some("POC".into()),
+                y: vah_line,
+                color: rgba(0x787B86, 0.7),
+                width: 1,
+                label: Some("VAH".into()),
             });
-            if self.show_value_area {
-                out.lines.push(Line {
-                    breaks: false,
-                    y: vah_line,
-                    color: rgba(0x787B86, 0.7),
-                    width: 1,
-                    label: Some("VAH".into()),
-                });
-                out.lines.push(Line {
-                    breaks: false,
-                    y: val_line,
-                    color: rgba(0x787B86, 0.7),
-                    width: 1,
-                    label: Some("VAL".into()),
-                });
-            }
+            out.lines.push(Line {
+                breaks: false,
+                y: val_line,
+                color: rgba(0x787B86, 0.7),
+                width: 1,
+                label: Some("VAL".into()),
+            });
         }
 
         out
+    }
+}
+
+// ---- Fixed range and anchored volume profiles (overlay) ----
+
+/// A time from an indicator parameter, unix seconds: a number of seconds, or
+/// `YYYY-MM-DD` or `YYYY-MM-DD HH:MM` in UTC. Empty or unreadable is no limit.
+fn parse_time_param(value: &Value) -> Option<i64> {
+    if let Some(n) = value.as_i64() {
+        return Some(n);
+    }
+    let text = value.as_str()?.trim();
+    if let Ok(n) = text.parse::<i64>() {
+        return Some(n);
+    }
+    let date_time = chrono::NaiveDateTime::parse_from_str(text, "%Y-%m-%d %H:%M")
+        .ok()
+        .or_else(|| {
+            chrono::NaiveDate::parse_from_str(text, "%Y-%m-%d")
+                .ok()
+                .and_then(|d| d.and_hms_opt(0, 0, 0))
+        })?;
+    Some(date_time.and_utc().timestamp())
+}
+
+/// The profile of a time range of the loaded bars. `anchored` leaves out the end of
+/// the range, so it runs to the newest bar: that is all that tells the two apart.
+pub struct RangeVolumeProfile {
+    pub profile: VolumeProfile,
+    pub anchored: bool,
+    pub from: Option<i64>,
+    pub to: Option<i64>,
+}
+
+impl RangeVolumeProfile {
+    pub fn fixed() -> Self {
+        Self {
+            profile: VolumeProfile::default(),
+            anchored: false,
+            from: None,
+            to: None,
+        }
+    }
+
+    pub fn anchored() -> Self {
+        Self {
+            anchored: true,
+            ..Self::fixed()
+        }
+    }
+
+    fn short_name(&self) -> &'static str {
+        if self.anchored {
+            "AVP"
+        } else {
+            "FRVP"
+        }
+    }
+
+    fn range_of(&self, data: &OhlcvData) -> PanelResult {
+        let mut out = self
+            .profile
+            .compute(&bars_between(data, self.from, self.to));
+        out.label = self.short_name().into();
+        out
+    }
+}
+
+impl Indicator for RangeVolumeProfile {
+    fn windowed_profile(&self) -> bool {
+        true
+    }
+
+    fn wants_intrabars(&self) -> bool {
+        true
+    }
+
+    fn with_intrabars(&self, _chart: &OhlcvData, intrabars: &OhlcvData) -> Option<PanelResult> {
+        Some(self.range_of(intrabars))
+    }
+
+    fn name(&self) -> &str {
+        self.short_name()
+    }
+
+    fn description(&self) -> &str {
+        if self.anchored {
+            "Anchored Volume Profile: histogram with POC/VAH/VAL from an anchor time to the newest bar"
+        } else {
+            "Fixed Range Volume Profile: histogram with POC/VAH/VAL over a time range"
+        }
+    }
+
+    fn params(&self) -> Value {
+        let time =
+            "YYYY-MM-DD, YYYY-MM-DD HH:MM in UTC, or unix seconds. Empty: the first loaded bar.";
+        let mut params = vec![
+            json!({"name": "bins", "type": "integer", "min": 1, "max": 1000, "default": 24}),
+            json!({"name": "side", "type": "string", "default": "left", "description": "left or right"}),
+            json!({"name": "opacity", "type": "number", "min": 0, "max": 1, "default": 0.35}),
+        ];
+        if self.anchored {
+            params.push(
+                json!({"name": "anchor", "type": "string", "default": "", "description": time}),
+            );
+        } else {
+            params.push(
+                json!({"name": "from", "type": "string", "default": "", "description": time}),
+            );
+            params.push(json!({"name": "to", "type": "string", "default": "", "description": "As from. Empty: the newest bar."}));
+        }
+        Value::Array(params)
+    }
+
+    fn configure(&mut self, params: &Value) {
+        self.profile.configure(params);
+        if let Some(v) = params.get("anchor").filter(|_| self.anchored) {
+            self.from = parse_time_param(v);
+        }
+        if !self.anchored {
+            if let Some(v) = params.get("from") {
+                self.from = parse_time_param(v);
+            }
+            if let Some(v) = params.get("to") {
+                self.to = parse_time_param(v);
+            }
+        }
+    }
+
+    fn compute(&self, data: &OhlcvData) -> PanelResult {
+        self.range_of(data)
     }
 }
 

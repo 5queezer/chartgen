@@ -317,6 +317,9 @@ export function App(): JSX.Element {
           updateKind: p.live()?.update.kind ?? null,
           poll: p.pollStatus().kind,
           drawings: p.drawings()?.list().length ?? 0,
+          flowStatus: p.flowStatus(),
+          flowMode: p.flowMode(),
+          barSpace: p.chart()?.getBarSpace() ?? null,
         })),
       // Alert e2e (tests/e2e/alerts.spec.ts): inject a live price. For the
       // chart symbol it comes with the chart's bars and indicators, as a
