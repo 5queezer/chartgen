@@ -63,7 +63,8 @@ const FEED_BUFFER: usize = 1024;
 pub struct Limits {
     /// Subscriptions one bearer token may hold, across its streams.
     pub per_token: usize,
-    /// Subscriptions one client address may hold, across its tokens.
+    /// Subscriptions one signed-in user, or without sign-in one client address,
+    /// may hold, across its tokens.
     pub per_client: usize,
     /// Subscriptions the server holds in total.
     pub total: usize,
@@ -296,7 +297,8 @@ pub struct PushCtx {
     pub hub: Arc<ChartHub>,
     /// Identifies the caller's SSE stream; see `server::stream_key`.
     pub stream: String,
-    /// The caller's network address, for the per-client cap.
+    /// The caller's user, or without sign-in its network address, for the
+    /// per-client cap (ADR-0044).
     pub client: String,
 }
 
@@ -548,7 +550,7 @@ impl ChartHub {
         }
         if count(&|s| s.client == client) >= limits.per_client {
             return Err(format!(
-                "{PUSH_LIMIT}: at most {} chart subscriptions per client address",
+                "{PUSH_LIMIT}: at most {} chart subscriptions per client address or user",
                 limits.per_client
             ));
         }

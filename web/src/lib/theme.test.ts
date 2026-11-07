@@ -72,6 +72,11 @@ describe("theme tokens", () => {
     expect(contrast(light.labelFg, light.labelBg)).toBeGreaterThanOrEqual(4.5);
   });
 
+  it("the wordmark's blue meets WCAG AA (4.5:1) on the header in both themes", () => {
+    expect(contrast(dark.brand, dark.bg)).toBeGreaterThanOrEqual(4.5);
+    expect(contrast(light.brand, light.bg)).toBeGreaterThanOrEqual(4.5);
+  });
+
   it("applyTheme sets CSS variables and the scheme", () => {
     const set = new Map<string, string>();
     const root = {

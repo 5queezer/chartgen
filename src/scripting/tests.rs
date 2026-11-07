@@ -912,3 +912,260 @@ fn concurrency_and_chart_budget() {
     );
     assert!(msgs[3].contains("at most 3"), "{msgs:?}");
 }
+
+/// ADR-0044: users, sessions and approvals survive reopening, and migrating an
+/// existing file keeps its clients.
+#[test]
+fn sign_in_rows_survive_reopening() {
+    let dir = std::env::temp_dir().join(format!("chartgen-signin-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let path = dir.join("s.db");
+    let store = persistence::Store::open(&path).unwrap();
+    store.save_oauth_client("c1", &[]).unwrap();
+    store.set_oauth_client_name("c1", "Claude").unwrap();
+    store.save_user("github:1", "octo").unwrap();
+    store.save_user("github:1", "renamed").unwrap();
+    let session = |hash: &str, expires_at| persistence::StoredSession {
+        token_hash: hash.into(),
+        user_id: "github:1".into(),
+        created_at: 1,
+        expires_at,
+    };
+    let now = chrono::Utc::now().timestamp();
+    store.save_session(&session("live", now + 100)).unwrap();
+    store.save_session(&session("gone", now - 1)).unwrap();
+    store
+        .save_session(&session("logged-out", now + 100))
+        .unwrap();
+    store.delete_session("logged-out").unwrap();
+    store.save_grant("github:1", "c1").unwrap();
+    store.save_grant("github:1", "evicted").unwrap();
+    store.save_grant("github:2", "c1").unwrap();
+    store.delete_grant("github:2", "c1").unwrap();
+    drop(store);
+
+    let store = persistence::Store::open(&path).unwrap();
+    assert_eq!(
+        store.users().unwrap(),
+        [persistence::StoredUser {
+            id: "github:1".into(),
+            name: "renamed".into()
+        }]
+    );
+    assert_eq!(
+        store.live_sessions(now).unwrap(),
+        [session("live", now + 100)]
+    );
+    assert_eq!(
+        store.grants().unwrap(),
+        [("github:1".to_string(), "c1".to_string())],
+        "a grant of a client no longer registered goes"
+    );
+    assert_eq!(
+        store.oauth_clients().unwrap()[0].client_name.as_deref(),
+        Some("Claude")
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// ADR-0044: what clients own goes to the account named, from every client, and
+/// nothing is overwritten or lost. Only a client id's shape counts as a client.
+#[test]
+fn collecting_waiting_scripts_takes_every_client_without_loss() {
+    const CLIENT_1: &str = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1";
+    const CLIENT_2: &str = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa2";
+    let dir = std::env::temp_dir().join(format!("chartgen-claim-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let store = persistence::Store::open(&dir.join("s.db")).unwrap();
+    let meta = serde_json::json!({});
+    for name in ["a", "b", "c"] {
+        store
+            .upsert(CLIENT_1, name, "client's", &meta, "h")
+            .unwrap();
+    }
+    store
+        .upsert(CLIENT_2, "d", "other client's", &meta, "h")
+        .unwrap();
+    store.upsert("github:1", "b", "user's", &meta, "h").unwrap();
+    store
+        .upsert("google:2", "own", "someone else's", &meta, "h")
+        .unwrap();
+    store
+        .upsert("device:9", "kept", "not a client's", &meta, "h")
+        .unwrap();
+    let waiting = store.waiting_rows(Some("github:1")).unwrap();
+    assert_eq!((waiting.scripts, waiting.name_collisions), (4, 1));
+    assert_eq!(store.waiting_rows(None).unwrap().name_collisions, 0);
+
+    assert_eq!(store.claim_waiting_scripts("github:1").unwrap(), 3);
+
+    assert_eq!(
+        store.get("github:1", "a").unwrap().unwrap().source,
+        "client's"
+    );
+    assert_eq!(
+        store.get("github:1", "d").unwrap().unwrap().source,
+        "other client's"
+    );
+    assert_eq!(
+        store.get("github:1", "b").unwrap().unwrap().source,
+        "user's",
+        "a name the user has is not overwritten"
+    );
+    assert_eq!(
+        store.get(CLIENT_1, "b").unwrap().unwrap().source,
+        "client's",
+        "and the client's stays where it was"
+    );
+    assert_eq!(
+        store.get("google:2", "own").unwrap().unwrap().source,
+        "someone else's",
+        "another account's rows are not a client's"
+    );
+    assert_eq!(
+        store.get("device:9", "kept").unwrap().unwrap().source,
+        "not a client's",
+        "nor is any other kind of owner"
+    );
+    let left = store.waiting_rows(Some("github:1")).unwrap();
+    assert_eq!((left.scripts, left.name_collisions), (1, 1));
+    assert_eq!(store.claim_waiting_scripts("github:1").unwrap(), 0, "once");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_client_id_is_the_shape_register_gives() {
+    assert!(persistence::is_client_id(&uuid::Uuid::new_v4().to_string()));
+    for other in [
+        "github:1",
+        "google:abc",
+        "device:9",
+        "",
+        "aaaaaaaaaaaa4aaa8aaaaaaaaaaaaaa1",
+        "not-a-uuid-but-exactly-36-chars-long",
+    ] {
+        assert!(!persistence::is_client_id(other), "{other}");
+    }
+}
+
+/// The schema as each deployed version left it: migrations only append, so a file
+/// from any of these must arrive with every table and keep its rows. No version with
+/// sign-in in slot 3 ever shipped, so that order is not supported (ADR-0044).
+const SCHEMA_V2: &str = "
+    CREATE TABLE user_indicators (
+        user_id TEXT NOT NULL, name TEXT NOT NULL, source TEXT NOT NULL,
+        meta_json TEXT NOT NULL, source_hash TEXT NOT NULL,
+        created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+        PRIMARY KEY (user_id, name)
+    );
+    CREATE TABLE oauth_clients (
+        client_id TEXT PRIMARY KEY, redirect_uris TEXT NOT NULL,
+        created_at INTEGER NOT NULL, last_token_at INTEGER
+    );
+    INSERT INTO oauth_clients VALUES ('old-client', '[\"https://x/cb\"]', 1, 2);
+    INSERT INTO user_indicators VALUES ('old-client', 's', 'src', '{}', 'h', 1, 1);
+    PRAGMA user_version = 2;
+";
+const SCHEMA_V4_PUSH: &str = "
+    ALTER TABLE server_alert_events ADD COLUMN device TEXT;
+    CREATE TABLE push_devices (
+        id TEXT PRIMARY KEY, owner TEXT NOT NULL, endpoint TEXT NOT NULL,
+        p256dh TEXT NOT NULL, auth TEXT NOT NULL, created_at INTEGER NOT NULL,
+        UNIQUE (owner, endpoint)
+    );
+    CREATE TABLE server_settings (name TEXT PRIMARY KEY, value TEXT NOT NULL);
+    INSERT INTO push_devices VALUES
+        ('d1', 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1', 'https://x/1', 'k', 'a', 1);
+    PRAGMA user_version = 4;
+";
+const SCHEMA_V3_ALERTS: &str = "
+    CREATE TABLE server_alerts (
+        id TEXT PRIMARY KEY, owner TEXT NOT NULL, record_json TEXT NOT NULL
+    );
+    CREATE INDEX server_alerts_owner ON server_alerts (owner);
+    CREATE TABLE server_alert_events (
+        id TEXT PRIMARY KEY, alert_id TEXT NOT NULL, body TEXT NOT NULL,
+        created_at INTEGER NOT NULL
+    );
+    INSERT INTO server_alerts VALUES ('a1', 'old-client', '{}');
+    PRAGMA user_version = 3;
+";
+
+fn schema_is_complete(store: &persistence::Store) {
+    store.save_user("github:1", "octo").unwrap();
+    store.mark_user_used("github:1").unwrap();
+    assert_eq!(store.user_activity().unwrap().len(), 1);
+    store.save_grant("github:1", "old-client").unwrap();
+    assert!(store.live_sessions(0).unwrap().is_empty());
+    store.save_server_alert("a2", "github:1", "{}").unwrap();
+    assert_eq!(store.waiting_rows(None).unwrap().scripts, 0);
+    assert!(store.server_alert_events().unwrap().is_empty());
+    assert!(store.server_alert_owners().unwrap().contains("github:1"));
+}
+
+fn upgraded(name: &str, setup: &[&str]) -> persistence::Store {
+    let dir = std::env::temp_dir().join(format!("chartgen-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("s.db");
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    for sql in setup {
+        conn.execute_batch(sql).unwrap();
+    }
+    drop(conn);
+    let store = persistence::Store::open(&path).unwrap();
+    // Reopening migrates nothing twice.
+    drop(store);
+    persistence::Store::open(&path).unwrap()
+}
+
+#[test]
+fn an_empty_file_gets_every_table() {
+    schema_is_complete(&upgraded("upgrade-empty", &[]));
+}
+
+#[test]
+fn a_file_from_before_alerts_upgrades_and_keeps_its_rows() {
+    let store = upgraded("upgrade-v2", &[SCHEMA_V2]);
+    schema_is_complete(&store);
+    let client = &store.oauth_clients().unwrap()[0];
+    assert_eq!(client.client_id, "old-client");
+    assert_eq!(client.client_name, None);
+    assert_eq!(store.get("old-client", "s").unwrap().unwrap().source, "src");
+}
+
+#[test]
+fn a_file_with_alerts_upgrades_and_keeps_them() {
+    let store = upgraded("upgrade-v3", &[SCHEMA_V2, SCHEMA_V3_ALERTS]);
+    schema_is_complete(&store);
+    assert!(store.server_alert_owners().unwrap().contains("old-client"));
+    assert_eq!(store.oauth_clients().unwrap().len(), 1);
+}
+
+#[test]
+fn a_file_with_push_devices_upgrades_and_keeps_them() {
+    let store = upgraded("upgrade-v4", &[SCHEMA_V2, SCHEMA_V3_ALERTS, SCHEMA_V4_PUSH]);
+    schema_is_complete(&store);
+    let devices = store.push_devices().unwrap();
+    assert_eq!(devices.len(), 1);
+    assert_eq!(devices[0].endpoint, "https://x/1");
+    assert_eq!(store.waiting_rows(None).unwrap().devices, 1);
+    assert!(store.server_alert_owners().unwrap().contains("old-client"));
+    // Slot 5 came on top of them: what it adds is there too.
+    store.set_oauth_client_name("old-client", "Claude").unwrap();
+    assert_eq!(
+        store.oauth_clients().unwrap()[0].client_name.as_deref(),
+        Some("Claude")
+    );
+}
+
+/// What counts as a user's activity for their server alerts: a login or a token.
+#[test]
+fn user_activity_is_the_later_of_login_and_token() {
+    let store = upgraded("activity", &[]);
+    store.save_user("github:1", "a").unwrap();
+    let login = store.user_activity().unwrap()[0].1;
+    assert!(login > 0);
+    store.mark_user_used("github:1").unwrap();
+    assert!(store.user_activity().unwrap()[0].1 >= login);
+}

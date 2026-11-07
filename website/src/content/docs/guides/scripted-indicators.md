@@ -17,13 +17,15 @@ code. Design records: [ADR-0024](/chartgen/decisions/0024-starlark-script-runtim
 ## Enabling it
 
 :::caution[Trusted or single-user deployments only]
-Scripts run inside the server process, and their owner is an OAuth client
+Scripts run inside the server process. Without
+[sign-in](/chartgen/reference/oauth/#sign-in) their owner is an OAuth client
 registration, not an authenticated person: anyone who learns a client's
 `client_id` can act as it, because `/authorize` approves automatically.
 Enable scripting only where you trust everyone who can reach the server
-(your own machine, a private or single-user deployment). A public,
-multi-user host needs real user login and the worker-subprocess sandbox
-recorded in [ADR-0024](/chartgen/decisions/0024-starlark-script-runtime/#required-before-public-hosting-a-worker-subprocess)
+(your own machine, a private or single-user deployment). Sign-in does not change
+that, because anyone with a GitHub or Google account can sign in. A public,
+multi-user host still needs the worker-subprocess sandbox recorded in
+[ADR-0024](/chartgen/decisions/0024-starlark-script-runtime/#required-before-public-hosting-a-worker-subprocess)
 first.
 :::
 
@@ -40,7 +42,11 @@ CHARTGEN_SCRIPTING=1 chartgen --serve
 
 Scripts belong to the **OAuth client** that registered them, that is, the
 `client_id` your MCP client got from `/register`. Another client, even
-your own second client, does not see them. The stdio transport (`--mcp`)
+your own second client, does not see them. With
+[sign-in](/chartgen/reference/oauth/#sign-in) they belong to the **signed-in user**
+instead, from any client, at 50 per user, and scripts from before it stay out of reach until
+the operator names who inherits them
+([ADR-0044](/chartgen/decisions/0044-sign-in-through-github-and-google/#existing-rows)). The stdio transport (`--mcp`)
 has no user: it lists the tools but cannot store scripts, and it charts
 built-ins only.
 

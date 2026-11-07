@@ -25,6 +25,7 @@ import {
 
 const SEEN_KEY = "chartgen.serverAlerts.seen";
 const LIST_KEY = "chartgen.serverAlerts.list";
+const DEVICE_KEY = "chartgen.push.device";
 const OFF: ServerAlertsPayload = { enabled: false, alerts: [] };
 
 export type ServerAlertStatus = "active" | "triggered" | "paused";
@@ -116,7 +117,8 @@ export function takeNewFires(pushOnHere = false, now = Date.now()): ServerAlert[
   const list = serverAlerts();
   const seen = readSeen();
   const pending = newFires(list, seen);
-  const report = new Map(pending.map((a) => [a.id, pushReport(a, pushOnHere, now)]));
+  const device = thisPushDevice();
+  const report = new Map(pending.map((a) => [a.id, pushReport(a, pushOnHere, now, device)]));
   const fired = pending.filter((a) => report.get(a.id) === "report");
   const told = list.map((a) => [
     a.id,
@@ -190,15 +192,35 @@ export async function updateServerAlert(
   return updated;
 }
 
-/** Tell the server about this browser, and keep the count it answers. */
+/** This browser's id with the server, as `subscribe_push` last answered. */
+function thisPushDevice(): string | null {
+  try {
+    return localStorage.getItem(DEVICE_KEY);
+  } catch {
+    return null;
+  }
+}
+
+function rememberPushDevice(device: string | null): void {
+  try {
+    if (device === null) localStorage.removeItem(DEVICE_KEY);
+    else localStorage.setItem(DEVICE_KEY, device);
+  } catch {
+    // Private-mode storage: the last outcome across devices stands in.
+  }
+}
+
+/** Tell the server about this browser, and keep the count and id it answers. */
 export async function subscribePush(args: SubscribePushInput): Promise<void> {
-  const { devices } = await connected().callSubscribePush(args);
+  const { devices, device } = await connected().callSubscribePush(args);
+  rememberPushDevice(device);
   const now = shared();
   if (now.push) publish({ ...now, push: { ...now.push, devices } });
 }
 
 export async function unsubscribePush(endpoint: string): Promise<void> {
   const { devices } = await connected().callUnsubscribePush({ endpoint });
+  rememberPushDevice(null);
   const now = shared();
   if (now.push) publish({ ...now, push: { ...now.push, devices } });
 }

@@ -338,20 +338,22 @@ test.describe("price alerts", () => {
     const y = box.y + line!.y;
     await page.mouse.move(x, y);
     await page.mouse.down();
-    await page.mouse.move(x, y + 20, { steps: 8 });
+    // Up, away from the price: the alert is "greater" than the recent high, so a
+    // level dragged down could end below the price and fire, which on sample data
+    // (it follows the clock) happens at some hours and removes the line.
+    await page.mouse.move(x, y - 20, { steps: 8 });
     await page.mouse.up();
 
     await expect
       .poll(async () => (await page.evaluate(
         () => (window as unknown as TestWindow).__chartgenAlertLines()[0]?.value,
       ))!)
-      .toBeLessThan(line!.value);
+      .toBeGreaterThan(line!.value);
     // The store followed the overlay.
     const stored = JSON.parse(
       (await page.evaluate(() => localStorage.getItem("chartgen.alerts.list")))!,
     ) as { price: number }[];
-    expect(stored[0]!.price).toBeLessThan(line!.value);
-    expect(stored[0]!.price).toBeGreaterThan(0);
+    expect(stored[0]!.price).toBeGreaterThan(line!.value);
 
     await openSidebarTab(page, "Watchlist");
     await page.getByRole("button", { name: "Show ETHUSDT on the chart" }).click();

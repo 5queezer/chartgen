@@ -847,8 +847,14 @@ on that symbol. With push on, the notification is the one report of that fire: t
 for it, unless the push failed or you first see the fire more than an hour later, when the notification may
 never have arrived. **Turn off** stops this device. Signing out does not, so alarms keep working.
 
-Each browser is its own sign-in for now, so **an alert notifies only the browser that made it**: to get an
-alert on your phone, make it on your phone. On iOS the Home Screen app probably counts as its own browser.
+Without [sign-in](/chartgen/reference/oauth/#sign-in) each browser is its own, so **an alert notifies only the
+browser that made it**: to get an alert on your phone, make it on your phone. On iOS the Home Screen app probably
+counts as its own browser. With sign-in an alert notifies every device of your account, so one made on the desktop
+reaches the phone. Each tab goes by how its own device fared, and tells you itself if that one's push failed.
+
+Signing out does not stop notifications to that device, so your alerts keep reaching it. A device belongs to one
+account at a time: when someone else signs in on that browser with notifications on, it becomes theirs and shows only
+their alerts. Your alerts keep running and reach your other devices, and signing in there again takes it back.
 
 A server alert belongs to the sign-in of this browser, so clearing its site data loses
 access to it while it keeps running. It has no line on the chart and is not in the
@@ -1097,6 +1103,38 @@ at that moment still lands on its chart
 This needs the app served by chartgen itself with `CHARTGEN_BASE_URL` set to
 its public URL; with the Vite dev server, clear `localStorage` by hand.
 
+### Signing in with GitHub or Google
+
+On a server with [sign-in](/chartgen/reference/oauth/#sign-in) configured, the first load
+without a session leads to a page offering each provider, or straight to the only one.
+After the provider, the app loads where it would have, and a
+[share link](#sharing-a-chart) still lands on its chart. Reloads and new tabs take no provider
+round trip while the session lasts, up to 30 days. A GitHub and a Google account are two
+separate users, each with their own scripts.
+
+The header shows the signed-in user at its right end: an initial, with the name on wider
+windows. Its menu says which provider it was, and has **Sign out**. On the compact shell,
+where the symbol needs that room, the same entries are at the bottom of the **More tools**
+menu. A server without sign-in shows none of this.
+
+**Sign out** ends the session in this browser and leads to a page of its own, with
+**Sign in again**. Every other tab of the app in this browser follows. It does not sign you
+out at the provider, and tokens given to other applications, such as Claude, keep working
+until they expire.
+
+If a provider denies, fails or cannot be reached, the page says so and offers **Try again**
+and **Cancel**. Cancel returns to the app, which stops at `sign-in failed: you cancelled it`
+with **Sign in again**. A token that went stale signs in again by itself, and if the session
+is gone as well, the app lands on the sign-in page.
+
+Other applications are not trusted the way the app is: the first time one asks, a page shows
+its name and where it will send you, and only the address is reliable.
+
+Only what is stored on the server follows the account: scripted indicators and
+[alerts on the server](#alerts-on-the-server), which keep running after signing out. Watchlists,
+layouts, drawings, chart settings and alerts in the browser stay in this browser, whoever signs
+in on it, and remain there after signing out.
+
 ## Managing indicators
 
 Indicators are added from the **Indicators** picker (by name, with the
@@ -1342,6 +1380,8 @@ and for why scripting is for trusted deployments only.
 
 Scripts belong to the OAuth client of this browser. Another browser, or this one
 after clearing its site data, signs in as a new client and does not see them.
+With [sign-in](/chartgen/reference/oauth/#sign-in) they belong to the signed-in user
+instead, and follow you to any browser.
 
 ## Build and deploy
 
