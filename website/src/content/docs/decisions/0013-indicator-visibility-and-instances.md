@@ -5,7 +5,7 @@ sidebar:
   order: 13
 ---
 
-**Status:** Accepted; superseded in part by [ADR-0028](/chartgen/decisions/0028-multiple-indicator-instances/)
+**Status:** Accepted; superseded in part by [ADR-0028](/chartgen/decisions/0028-multiple-indicator-instances/) and [ADR-0053](/chartgen/decisions/0053-hidden-indicators-stay-in-the-status-line/)
 **Date:** 2026-11-04
 **Amends:** [ADR-0005](./0005-client-indicator-state/) (stored shape only; 0005 stays in force and is not superseded)
 
@@ -13,6 +13,10 @@ sidebar:
 > The one-instance-per-name rule and the deduplication by name on load no
 > longer apply: entries carry an instance id, and the series payload is
 > keyed by it. The hidden flag and parameter editing stay in force.
+>
+> **Superseded in part by [ADR-0053](/chartgen/decisions/0053-hidden-indicators-stay-in-the-status-line/).**
+> Hidden entries are requested too, so they keep their pane and legend row;
+> the client draws nothing for them. The flag itself stays client-only.
 
 ## Context and Problem Statement
 

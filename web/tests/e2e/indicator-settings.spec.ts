@@ -1,9 +1,30 @@
-// Indicator settings / visibility / removal via the pane legend and chips.
+// Indicator settings / visibility / removal via the pane legend.
+
+import type { Page } from "@playwright/test";
 
 import { test, expect, gotoApp, reloadApp } from "./fixtures/app";
 
-const rsiRow = (page: import("@playwright/test").Page) =>
+const rsiRow = (page: Page) =>
   page.locator(".pane-header", { hasText: "RSI" }).first();
+
+/** Bars RSI draws a value on; null when the chart has no RSI at all. */
+const rsiDrawn = (page: Page) =>
+  page.evaluate(() => {
+    const c = (
+      window as unknown as {
+        __chartgenTest: {
+          chart: () => {
+            getIndicatorByPaneId: () => Map<string, Map<string, { result: Record<string, unknown>[] }>>;
+          };
+        };
+      }
+    ).__chartgenTest.chart();
+    for (const inds of c.getIndicatorByPaneId().values()) {
+      const rsi = inds.get("chartgen_rsi");
+      if (rsi) return rsi.result.filter((r) => Object.values(r).some((v) => typeof v === "number")).length;
+    }
+    return null;
+  });
 
 test.describe("indicator settings", () => {
   test("gear dialog changes RSI length and the legend follows", async ({
@@ -34,20 +55,42 @@ test.describe("indicator settings", () => {
     expect(JSON.parse(stored!)).toContainEqual({ name: "rsi", length: 21 });
   });
 
-  test("hide and unhide persist across reload", async ({ bootedApp: page }) => {
-    await rsiRow(page).hover();
-    await rsiRow(page).getByRole("button", { name: "Hide RSI" }).click();
-    await expect(page.locator(".pane-header", { hasText: "RSI" })).toHaveCount(0);
+  test("the legend eye hides an indicator in place, and shows it again", async ({
+    bootedApp: page,
+  }) => {
+    const row = page.getByTestId("indicator-legend-rsi");
+    await expect(row.locator(".pane-header-value").first()).toBeVisible();
+    await expect.poll(() => rsiDrawn(page)).toBeGreaterThan(0);
 
-    const show = page.getByRole("button", { name: "Show rsi", exact: true });
+    await row.hover();
+    await row.getByRole("button", { name: "Hide RSI" }).click();
+    // The row stays, dimmed and without values, and its pane stays empty.
+    const show = row.getByRole("button", { name: "Show RSI" });
+    await expect(show).toHaveAttribute("aria-pressed", "true");
+    await expect(row.locator(".pane-header-value")).toHaveCount(0);
+    await expect(row.locator(".pane-header-label")).toHaveCSS("opacity", "0.5");
+    await expect.poll(() => rsiDrawn(page)).toBe(0);
+    // Still requested: the pane and the row need its payload.
+    expect(
+      await page.evaluate(() =>
+        (
+          window as unknown as { __chartgenTest: { panes: () => Array<{ indicators: unknown[] }> } }
+        ).__chartgenTest.panes()[0]!.indicators,
+      ),
+    ).toContainEqual({ name: "rsi", length: 14 });
+    // Without hover only the crossed-out eye shows.
+    await page.mouse.move(0, 0);
     await expect(show).toBeVisible();
+    await expect(row.getByRole("button", { name: "Remove RSI" })).toBeHidden();
 
     await reloadApp(page);
     await expect(show).toBeVisible();
-    await expect(page.locator(".pane-header", { hasText: "RSI" })).toHaveCount(0);
+    await expect(row.locator(".pane-header-value")).toHaveCount(0);
 
     await show.click();
-    await expect(rsiRow(page)).toBeVisible();
+    await expect(row.getByRole("button", { name: "Hide RSI" })).toHaveAttribute("aria-pressed", "false");
+    await expect(row.locator(".pane-header-value").first()).toBeVisible();
+    await expect.poll(() => rsiDrawn(page)).toBeGreaterThan(0);
   });
 
   test("remove via the legend drops the indicator and persists", async ({
@@ -57,27 +100,21 @@ test.describe("indicator settings", () => {
     await rsiRow(page).getByRole("button", { name: "Remove RSI" }).click();
     await expect(page.locator(".pane-header", { hasText: "RSI" })).toHaveCount(0);
 
-    const chipRemove = page.getByRole("button", { name: "Remove rsi", exact: true });
-    await expect(chipRemove).toHaveCount(0);
     await reloadApp(page);
-    await expect(chipRemove).toHaveCount(0);
     await expect(page.locator(".pane-header", { hasText: "RSI" })).toHaveCount(0);
+    expect(await rsiDrawn(page)).toBeNull();
   });
 
-  test("a hidden indicator's chip eye keeps keyboard focus across toggles", async ({
+  test("the legend eye keeps keyboard focus across toggles", async ({
     bootedApp: page,
   }) => {
-    await rsiRow(page).getByRole("button", { name: "Hide RSI" }).focus();
-    await page.keyboard.press("Enter");
-    await expect(rsiRow(page)).toHaveCount(0);
-    const eye = page.getByRole("button", { name: /^(Hide|Show) rsi$/ });
+    const eye = rsiRow(page).getByRole("button", { name: /^(Hide|Show) RSI$/ });
     await eye.focus();
     await page.keyboard.press("Enter");
-    await expect(rsiRow(page)).toBeVisible();
-    // Shown again, but its chip stays until focus moves on.
+    await expect(eye).toHaveAccessibleName("Show RSI");
     await expect(eye).toBeFocused();
     await page.keyboard.press("Enter");
-    await expect(rsiRow(page)).toHaveCount(0);
+    await expect(eye).toHaveAccessibleName("Hide RSI");
     await expect(eye).toBeFocused();
   });
 

@@ -2,7 +2,7 @@
 // per-category Accordion listing every indicator returned by
 // `list_indicators`. Clicking a row adds the indicator by name (default
 // parameters; edit them via the settings dialog) and leaves the modal open for
-// multi-add; removal happens via the chip row, not here.
+// multi-add; removal happens from the legend row, not here.
 //
 // The accordion is normally all-collapsed. When the search field is
 // non-empty we force every category that contains a match open, so the

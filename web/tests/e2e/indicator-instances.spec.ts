@@ -71,12 +71,15 @@ test.describe("indicator instances", () => {
 
     await legend(page, "rsi#2").hover();
     await legend(page, "rsi#2").getByRole("button", { name: "Hide RSI" }).click();
-    await expect(legend(page, "rsi#2")).toHaveCount(0);
-    await expect(legend(page, "rsi")).toContainText("(14)");
+    await expect(legend(page, "rsi#2")).toHaveClass(/pane-header-hidden/);
+    await expect(legend(page, "rsi#2").locator(".pane-header-value")).toHaveCount(0);
+    await expect(legend(page, "rsi")).not.toHaveClass(/pane-header-hidden/);
+    await expect(legend(page, "rsi").locator(".pane-header-value").first()).toBeVisible();
 
-    const show = page.getByRole("button", { name: "Show rsi (21)", exact: true });
+    const show = legend(page, "rsi#2").getByRole("button", { name: "Show RSI" });
     await expect(show).toBeVisible();
     await show.click();
+    await expect(legend(page, "rsi#2")).not.toHaveClass(/pane-header-hidden/);
     await expect(legend(page, "rsi#2")).toContainText("(21)");
 
     await legend(page, "rsi").hover();

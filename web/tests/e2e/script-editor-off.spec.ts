@@ -55,11 +55,11 @@ test("an unknown indicator fails the chart with scripting off, says which, and c
   await expect(error).toHaveCount(0, { timeout: 30_000 });
   await expect(page.locator(".pane-header").first()).toBeVisible();
   // Only that one: the others stay.
-  await expect(page.getByRole("button", { name: "Remove rsi" }).first()).toBeVisible();
+  await expect(page.getByTestId("indicator-legend-rsi")).toBeVisible();
   await expect(page.getByRole("button", { name: "Remove gone_script" })).toHaveCount(0);
 });
 
-test.describe("on a phone, which has no chips", () => {
+test.describe("on a phone", () => {
   const { defaultBrowserType: _browser, ...iPhone } = devices["iPhone 13"]!;
   test.use(iPhone);
 
@@ -68,7 +68,6 @@ test.describe("on a phone, which has no chips", () => {
     await page.goto("/");
     const error = page.getByTestId("chart-load-error");
     await expect(error).toContainText("unknown indicator gone_script", { timeout: 30_000 });
-    await expect(error).not.toContainText("chips");
     await error.getByRole("button", { name: "Remove gone_script" }).tap();
     await expect(error).toHaveCount(0, { timeout: 30_000 });
     await expect(page.locator(".pane-header").first()).toBeVisible();

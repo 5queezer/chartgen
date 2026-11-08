@@ -169,7 +169,7 @@ test("deleting a script takes it off every chart", async ({ page }) => {
   await expect(page.getByTestId("chart-load-error")).toHaveCount(0);
 });
 
-test("a failing script marks the chips and the editor of the chart it fails on", async ({ page }) => {
+test("a failing script is listed, and marks the editor, on the chart it fails on", async ({ page }) => {
   await gotoApp(page);
   await chooseGrid(page, "2h", 2);
   await openEditor(page);
@@ -187,21 +187,21 @@ test("a failing script marks the chips and the editor of the chart it fails on",
   await page.getByTestId("script-add").click();
   await expect.poll(() => loadedValue(page, 1, "fails_late"), { timeout: 30_000 }).not.toBeNull();
 
-  const failedChips = page.locator("[data-chip-error]");
+  const failed = page.getByTestId("indicator-errors").locator("li");
   const errors = page.getByTestId("script-errors");
-  // Healthy on this chart: a legend row with its controls, and no chip.
+  // Healthy on this chart: a legend row with its controls, and no error row.
   const row = page.locator(".chart-pane[data-active]").getByTestId("indicator-legend-fails_late");
   await expect(row.getByRole("button", { name: /^Remove / })).toBeVisible();
-  await expect(failedChips).toHaveCount(0);
+  await expect(failed).toHaveCount(0);
   await expect(errors).toHaveCount(0);
 
   await activate(page, 0);
-  await expect(failedChips).toHaveCount(1, { timeout: 30_000 });
+  await expect(failed).toHaveCount(1, { timeout: 30_000 });
   await expect(errors).toContainText("On the chart");
   expect(await loadedValue(page, 0, "fails_late")).toBeNull();
 
   await activate(page, 1);
-  await expect(failedChips).toHaveCount(0);
+  await expect(failed).toHaveCount(0);
   await expect(errors).toHaveCount(0);
 });
 

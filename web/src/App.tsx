@@ -33,7 +33,7 @@ import { DRAWING_LABELS } from "./components/DrawingToolbar";
 import { GridMenu } from "./components/GridMenu";
 import { isDrawingAlertTool, isHorizontalTool } from "./lib/alerts";
 import { chartContext, setIndicatorSignatures } from "./stores/alerts";
-import { CompactIndicatorErrors, IndicatorChips } from "./components/IndicatorChips";
+import { IndicatorErrors } from "./components/IndicatorErrors";
 import { IndicatorPicker } from "./components/IndicatorPicker";
 import { IndicatorSettings } from "./components/IndicatorSettings";
 import { LayoutMenu } from "./components/LayoutMenu";
@@ -62,6 +62,7 @@ import {
   chartKeyAction,
   downloadChartImage,
   resetChart,
+  screenshotCaption,
   screenshotFilename,
 } from "./lib/chartActions";
 import { isTypingContext, keepKeyboardFocus, swallowMenuGhostClicks } from "./lib/keys";
@@ -80,6 +81,7 @@ import {
   createServerAlertPoll,
   chartTick,
   feedPrice,
+  showToast,
 } from "./services/alertEngine";
 import {
   activeIndicators,
@@ -91,7 +93,6 @@ import {
   isHidden,
   paramLabels,
   removeIndicator,
-  toggleIndicatorHidden,
   updateIndicatorSettings,
 } from "./stores/indicators";
 import { addCompare } from "./stores/compare";
@@ -146,11 +147,17 @@ export function App(props: { authError: string | null; user: SignedInUser | null
   const screenshot = () => {
     const c = chart();
     if (!c) return;
+    const palette = PALETTES[theme()];
     downloadChartImage(
       c,
       screenshotFilename(symbol(), timeframe(), new Date()),
-      resolveColors(PALETTES[theme()], chartSettings().themes[theme()]).background,
-    );
+      screenshotCaption(symbol(), timeframe(), activeIndicators(), paramDefaults()),
+      {
+        background: resolveColors(palette, chartSettings().themes[theme()]).background,
+        fg: palette.fg,
+        fgMuted: palette.fgMuted,
+      },
+    ).catch(() => showToast("Screenshot failed: the chart image could not be read."));
   };
 
   const resetView = () => {
@@ -269,7 +276,7 @@ export function App(props: { authError: string | null; user: SignedInUser | null
     }
     openAlertDialog({ source: plotRef(key, 0), price: lastPlotValue(series, key, 0) ?? undefined });
   };
-  // Chips and tree rows follow the active chart; a sub-pane asks its own (ChartPane).
+  // Tree rows follow the active chart; a sub-pane asks its own (ChartPane).
   const indicatorMenu = (key: string) =>
     indicatorMenuOf(view().indicators, live()?.series, key, {
       onAddAlert: addIndicatorAlert,
@@ -479,15 +486,7 @@ export function App(props: { authError: string | null; user: SignedInUser | null
         <Show when={signedInUser()}>{(user) => <UserMenu user={user()} />}</Show>
       </header>
       <WorkspaceBanner user={signedInUser()} />
-      <IndicatorChips
-        entries={activeIndicators()}
-        onRemove={removeIndicator}
-        onToggleHidden={toggleIndicatorHidden}
-        onSettings={setSettingsIndex}
-        menu={indicatorMenu}
-        errors={live()?.series.indicator_errors}
-      />
-      <CompactIndicatorErrors
+      <IndicatorErrors
         entries={activeIndicators()}
         errors={live()?.series.indicator_errors}
         onRemove={removeIndicator}

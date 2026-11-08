@@ -1,11 +1,22 @@
 // Chart-level conveniences: keyboard navigation, reset view, screenshot
-// and fullscreen. The key mapping and file naming are pure; the rest
-// drive a klinecharts instance.
+// and fullscreen. The key mapping, file naming and screenshot caption are
+// pure; the rest drive a klinecharts instance.
 
-import type { Chart as KLineChart } from "klinecharts";
+import { DomPosition, type Chart as KLineChart } from "klinecharts";
 
+import {
+  indicatorName,
+  instanceKey,
+  isHidden,
+  paramLabels,
+  type ActiveIndicator,
+} from "../stores/indicators";
 import { invertScale, setAutoScale, setInvertScale } from "../stores/layout";
+import type { ParamDefaults } from "../stores/layouts";
+import { chipName } from "./indicatorNames";
 import { fitProjection } from "./projection";
+import { FONT_FAMILY } from "./theme";
+import { timeframeLabel, type Timeframe } from "./timeframe";
 
 export type ChartAction =
   | "scrollLeft"
@@ -111,14 +122,120 @@ export function screenshotFilename(
   return `${safe(symbol)}_${safe(timeframe)}_${date}_${time}.png`;
 }
 
-/** Download the chart (overlays included) as a PNG filled with `background`. */
-export function downloadChartImage(
+const SEPARATOR = " · ";
+
+export interface ScreenshotCaption {
+  /** `BTCUSDT · 1h`, the timeframe as the toolbar writes it. */
+  title: string;
+  /** Short names of the visible indicators, in legend order. */
+  indicators: string[];
+}
+
+/** The header of a screenshot: symbol, timeframe and the short names of the visible indicators. */
+export function screenshotCaption(
+  symbol: string,
+  timeframe: Timeframe,
+  entries: readonly ActiveIndicator[],
+  defaults: ParamDefaults,
+): ScreenshotCaption {
+  // Labelled over all entries, hidden ones too, so repeated instances read apart as in the picker and dialogs.
+  const labels = paramLabels(entries, defaults, true);
+  return {
+    title: `${symbol}${SEPARATOR}${timeframeLabel(timeframe)}`,
+    indicators: entries
+      .filter((e) => !isHidden(e))
+      .map((e) => chipName(indicatorName(e), labels.get(instanceKey(e)))),
+  };
+}
+
+/** `items` joined by " · " into lines no wider than `maxWidth`; an item is never split. */
+export function wrapJoined(
+  items: readonly string[],
+  maxWidth: number,
+  measure: (text: string) => number,
+): string[] {
+  const lines: string[] = [];
+  for (const item of items) {
+    const last = lines.at(-1);
+    const joined = `${last}${SEPARATOR}${item}`;
+    if (last === undefined || measure(joined) > maxWidth) lines.push(item);
+    else lines[lines.length - 1] = joined;
+  }
+  return lines;
+}
+
+/** Fill and text colors of a screenshot. */
+export interface ScreenshotColors {
+  background: string;
+  fg: string;
+  fgMuted: string;
+}
+
+// Header layout, in CSS px.
+const PAD = 12;
+const TITLE_LINE = 22;
+const INDICATOR_LINE = 17;
+
+/**
+ * Download the chart (overlays included) as a PNG filled with
+ * `colors.background`, under a header with the caption, and with the site's
+ * host in the bottom-right corner of the plot area.
+ */
+export async function downloadChartImage(
   chart: KLineChart,
   filename: string,
-  background: string,
-): void {
+  caption: ScreenshotCaption,
+  colors: ScreenshotColors,
+): Promise<void> {
+  // klinecharts renders the picture at devicePixelRatio; the text is drawn at it too.
+  const img = new Image();
+  img.src = chart.getConvertPictureUrl(true, "png", colors.background);
+  await img.decode();
+  const dpr = window.devicePixelRatio || 1;
+  const width = img.naturalWidth / dpr;
+  const height = img.naturalHeight / dpr;
+
+  const canvas = document.createElement("canvas");
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return;
+  const titleFont = `600 15px ${FONT_FAMILY}`;
+  const indicatorFont = `12px ${FONT_FAMILY}`;
+  ctx.font = indicatorFont;
+  const lines = wrapJoined(caption.indicators, width - 2 * PAD, (t) => ctx.measureText(t).width);
+  const header = PAD + TITLE_LINE + lines.length * INDICATOR_LINE + PAD / 2;
+
+  // Resizing resets the context, so the scale and fonts are set after it.
+  canvas.width = img.naturalWidth;
+  canvas.height = img.naturalHeight + Math.round(header * dpr);
+  ctx.scale(dpr, dpr);
+  ctx.fillStyle = colors.background;
+  ctx.fillRect(0, 0, width, header + height);
+  ctx.drawImage(img, 0, header, width, height);
+
+  ctx.textBaseline = "middle";
+  ctx.fillStyle = colors.fg;
+  ctx.font = titleFont;
+  ctx.fillText(caption.title, PAD, PAD + TITLE_LINE / 2);
+  ctx.fillStyle = colors.fgMuted;
+  ctx.font = indicatorFont;
+  lines.forEach((line, i) =>
+    ctx.fillText(line, PAD, PAD + TITLE_LINE + (i + 0.5) * INDICATOR_LINE),
+  );
+
+  // Above the time axis, left of the price axis.
+  const plot = chart.getSize("candle_pane", DomPosition.Main);
+  const xAxis = chart.getSize("x_axis_pane");
+  ctx.font = `11px ${FONT_FAMILY}`;
+  ctx.textAlign = "right";
+  ctx.textBaseline = "bottom";
+  ctx.fillText(
+    location.host,
+    (plot ? plot.left + plot.width : width) - PAD / 2,
+    header + (xAxis?.top ?? height) - PAD / 2,
+  );
+
   const a = document.createElement("a");
-  a.href = chart.getConvertPictureUrl(true, "png", background);
+  a.href = canvas.toDataURL("image/png");
   a.download = filename;
   a.click();
 }

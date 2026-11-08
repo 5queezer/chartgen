@@ -1,6 +1,6 @@
 // Display names for indicator ids. The registry has no display name; the
 // chart legend uses the `label` of each series payload entry, so those
-// labels are remembered here and used by the chips and the picker. Until
+// labels are remembered here and used by the picker, menus and dialogs. Until
 // an indicator has been seen in a payload, a prettified id stands in.
 
 import { createSignal } from "solid-js";
@@ -78,7 +78,7 @@ export function withoutParamNumber(label: string, params?: string): string {
   return params ? label.replace(/\s+\d+(?:\.\d+)?$/, "") : label;
 }
 
-/** Chip text: the display name of the registry id, then the param label. */
+/** Short name of an instance: the display name of the registry id, then the param label. */
 export function chipName(id: string, params?: string): string {
   return [withoutParamNumber(displayName(id), params), params]
     .filter(Boolean)

@@ -93,10 +93,14 @@ stays visible.
   ([ADR-0030](/chartgen/decisions/0030-custom-chart-types/)).
 
 - **Replay** (rewind) — starts and ends [bar replay](#bar-replay).
-- **Screenshot** (camera) — downloads the chart canvas, overlays included,
+- **Screenshot** (camera) — downloads the active chart, overlays included,
   as a PNG on the chart background, named
-  `<SYMBOL>_<TF>_<yyyy-mm-dd_HHMM>.png` (local time). The DOM legend
-  rows above the panes are not part of the image.
+  `<SYMBOL>_<TF>_<yyyy-mm-dd_HHMM>.png` (local time). A header above the
+  chart gives the symbol and timeframe (`BTCUSDT · 1h`) and, below them, the
+  visible indicators by name, with params where an indicator repeats; hidden indicators are left
+  out, and a long list wraps. The site's host (`chartgen.vasudev.xyz`, or
+  your own on a self-hosted server) is marked in the bottom-right corner of
+  the chart. The legend rows above the panes are not part of the image.
 - **Reset chart** (circular arrow) — scrolls to the latest bar and restores
   the default bar spacing. Same as `Alt+R`.
 - **Theme** (sun/moon) — switches between the dark and light themes
@@ -623,7 +627,7 @@ items (see below), Copy link and Settings.
 | Time axis | Reset time scale, Go to date… (`Alt+G`) |
 | Drawing, or its Object Tree row | Add alert on … (lines and channels), Style…, Clone, Lock/Unlock, Hide/Show, Remove |
 | Alert line, Alerts panel row (a server alert's too), or its Object Tree row | Edit…, Pause/Resume, Open *symbol* in chart (another symbol's alert), Delete |
-| Indicator legend row, chip, Object Tree row | Add alert on … (with a plot to read), Settings for …, Hide/Show, Remove |
+| Indicator legend row, Object Tree row | Add alert on … (with a plot to read), Settings for …, Hide/Show, Remove |
 | Compare symbol's legend row or Object Tree row | Remove |
 | Watchlist row | Open in chart, Add alert on …, Flag…, Copy symbol, Remove from watchlist (not in the Flagged view) |
 | Watchlist section | Collapse/Expand, Rename…, Remove section |
@@ -701,7 +705,7 @@ The grid button left of the layout menu shows 1 chart, 2 side by side, 2 stacked
 indicators and bar replay, and its own live data.
 
 - **Active chart.** Pressing a chart makes it active, with a colored frame. The
-  toolbar, indicator chips and picker, watchlist clicks, sidebar panels, bottom bar,
+  toolbar, indicator picker, watchlist clicks, sidebar panels, bottom bar,
   drawing toolbar and keyboard shortcuts act on it. Only one drawing toolbar shows,
   the active chart's. Each chart's legend shows its symbol and interval.
 - **Global.** Theme, chart settings, the time zone, watchlists and recent symbols
@@ -1067,7 +1071,7 @@ In the compact layout:
 - **The chart takes the whole width.** The header keeps the symbol, the
   interval, the chart type, the indicators and a `⋯` menu with the rest (replay,
   compare, reset, theme, screenshot, link, settings, fullscreen), plus the
-  layout menu. The indicator chips and the clock go away.
+  layout menu. The clock goes away.
 - **A dock at the bottom** opens the drawing tools, the watchlist, the alerts,
   the Data Window and the Object Tree. The panels open as a bottom sheet, or as
   a side panel when the phone is sideways, over the chart and without resizing
@@ -1125,7 +1129,7 @@ elsewhere on touch:
 
 Most targets are at least 40 px. These are smaller, because they sit on the
 chart or inside a row: the legend buttons (32 px), the `%`, `log`, `inv` and
-`auto` buttons (32 by 28 px), the indicator chip buttons (28 px), a watchlist row's
+`auto` buttons (32 by 28 px), a watchlist row's
 buttons (20 px) and the arrow
 on a drawing tool group (20 px; holding the tool's button opens the same list).
 
@@ -1241,22 +1245,29 @@ A server without sign-in has none of this: everything stays in the browser, as b
 ## Managing indicators
 
 Indicators are added from the **Indicators** picker (by name, with the
-server's default parameters) and listed on the chart's legend rows. On a touch
-screen they are also chips under the toolbar.
+server's default parameters) and managed from their rows in the chart's
+status line (the pane legends), as on TradingView. There is no separate row of
+indicators under the toolbar.
 Picking an indicator that is already on the chart (marked **added**) adds
 another instance with the default parameters, so RSI 14 and RSI 21, or EMA
 20 and EMA 50 as two `ma` instances, can sit side by side. Each instance has
 its own parameters, style, visibility and pane. When an indicator is on the
-chart more than once, its legends, chips, Object Tree rows and Data Window
+chart more than once, its legends, Object Tree rows and Data Window
 sections show the parameters of each instance (`RSI (14)`, `RSI (21)`)
 ([ADR-0028](/chartgen/decisions/0028-multiple-indicator-instances/)).
-Each indicator pane legend shows controls on hover (or keyboard focus):
+Each indicator's legend row shows controls on hover (or keyboard focus). On a
+touch screen, tap the row to show them in place of its values; a tap elsewhere
+brings the values back.
 
 - **Bell** opens the alert dialog on the indicator's plots
   ([indicator alerts](#drawing-and-indicator-alerts)).
-- **Eye** hides the indicator. It disappears from the chart immediately and
-  is no longer requested from the server; a dimmed chip appears under the toolbar with
-  an eye button to show it again.
+- **Eye** hides the indicator. Its plots, fills and levels disappear at once
+  and no longer scale the price axis, but it keeps its legend row, dimmed and
+  without values, and an oscillator keeps its (empty) pane. The eye is then
+  crossed out and stays in view without hover: click it to show the indicator
+  again. Hiding and showing do not reload the chart: a hidden indicator is
+  still requested from the server, so its alerts keep running
+  ([ADR-0053](/chartgen/decisions/0053-hidden-indicators-stay-in-the-status-line/)).
 - **Gear** (or double-click on the legend row)
   opens the settings dialog. The form is generated from the indicator's
   `configurable_params` (numbers, switches, text). **Defaults** resets the
@@ -1289,6 +1300,10 @@ Each indicator pane legend shows controls on hover (or keyboard focus):
   fills do not scale the price axis.
 - **×** removes the indicator. Other instances of the same indicator stay.
   The price pane legend cannot be removed.
+
+An indicator the server cannot run (an unknown name, a script that fails) has
+no legend row. It is listed under the toolbar in red, with the reason and a
+**×** to remove it, and the other indicators stay.
 
 Lines and histograms are drawn in the colors of the PNG renderer, which
 the server sends with the series. Line widths come from the server too
@@ -1461,10 +1476,10 @@ and for why scripting is for trusted deployments only.
 - **Add to chart** adds the saved script as an indicator instance, and is off
   while there are unsaved changes because the chart runs the saved text. Saving a
   script the chart uses reloads the chart. If it fails on the real chart, which
-  has more bars than the dry run, the error appears here too, the indicator's chip
-  turns red with the reason as its tooltip, and the other indicators stay. A chart
+  has more bars than the dry run, the error appears here too, the indicator is
+  listed in red under the toolbar with the reason, and the other indicators stay. A chart
   runs at most 3 scripts, and is polled rather than pushed. A chart that names a
-  script you no longer have works the same way: remove its chip, or save it again.
+  script you no longer have works the same way: remove it there, or save it again.
 - **Delete** asks first, and also removes the script from the chart, unless a
   built-in of that name takes its place again.
 - **Unsaved text** is kept per script in this browser's localStorage, so closing

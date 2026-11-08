@@ -12,7 +12,9 @@
 //
 // Indicator rows can also carry hover controls (add alert, hide, settings, remove) and
 // open settings on double-click, like TradingView. Rows without callbacks
-// (the price pane) stay non-interactive.
+// (the price pane) stay non-interactive. They are the only place an indicator
+// is managed from on the chart: a hidden one keeps its row, dimmed and without
+// values, and its crossed-out eye stays in view to show it again.
 //
 // Inputs are plain data derived from SeriesPayload — no klinecharts
 // imports here, which keeps this component cheap to re-render.
@@ -52,8 +54,10 @@ export interface PaneHeaderProps {
   top: number;
   /** `data-testid` of the row. */
   testId?: string;
-  /** Hide the indicator (client-side only). Omit for rows that cannot be hidden. */
+  /** Hide or show the indicator (client-side only). Omit for rows that cannot be hidden. */
   onToggleHidden?: () => void;
+  /** The indicator is hidden: the row is dimmed and its eye offers Show. */
+  hidden?: boolean;
   /** Open the indicator's settings dialog. */
   onSettings?: () => void;
   /** Remove the indicator. Omit for the price pane. */
@@ -83,6 +87,8 @@ function Icon(props: { children: JSX.Element }): JSX.Element {
 function ControlButton(props: {
   label: string;
   onClick: () => void;
+  /** A toggle's state (the eye); omit for plain buttons. */
+  pressed?: boolean;
   children: JSX.Element;
 }): JSX.Element {
   return (
@@ -90,6 +96,7 @@ function ControlButton(props: {
       type="button"
       class="pane-header-btn"
       aria-label={props.label}
+      aria-pressed={props.pressed}
       title={props.label}
       onClick={(e) => {
         e.stopPropagation();
@@ -122,6 +129,7 @@ export function PaneHeader(props: PaneHeaderProps): JSX.Element {
       classList={{
         "pane-header-interactive": !!props.onSettings || !!props.onRemove,
         "pane-header-open": open(),
+        "pane-header-hidden": !!props.hidden,
       }}
       data-testid={props.testId}
       style={{ top: `${props.top}px` }}
@@ -193,9 +201,16 @@ export function PaneHeader(props: PaneHeaderProps): JSX.Element {
           </Show>
           <Show when={props.onToggleHidden}>
             {(cb) => (
-              <ControlButton label={`Hide ${props.name}`} onClick={cb()}>
+              <ControlButton
+                label={`${props.hidden ? "Show" : "Hide"} ${props.name}`}
+                onClick={cb()}
+                pressed={!!props.hidden}
+              >
                 <path d="M1 8 C3 4.5 5.5 3 8 3 S13 4.5 15 8 C13 11.5 10.5 13 8 13 S3 11.5 1 8 Z" />
                 <circle cx="8" cy="8" r="2" />
+                <Show when={props.hidden}>
+                  <path d="M2 14 L14 2" />
+                </Show>
               </ControlButton>
             )}
           </Show>

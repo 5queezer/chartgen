@@ -52,23 +52,19 @@ for (const width of [1440, 800]) {
       }
     });
 
-    test("the chips leave the chart the height until one is needed", async ({ bootedApp: page }) => {
-      const row = page.locator(".chip-row");
-      await expect(row).toBeHidden();
+    test("the chart starts under the bar, a hidden indicator too", async ({ bootedApp: page }) => {
       expect((await box(page.locator(".chart-host"))).y).toBe(BAR);
 
-      // A hidden indicator has no legend row, so its chip is how it comes back.
+      // A hidden indicator keeps its legend row, which is how it comes back.
       const legend = page.getByTestId("indicator-legend-rsi");
       await legend.hover();
       await legend.getByRole("button", { name: "Hide RSI" }).click();
-      await expect(legend).toHaveCount(0);
-      expect((await box(row)).height).toBe(25);
-      await expect.poll(async () => (await box(page.locator(".chart-host"))).y).toBe(BAR + 25);
+      await expect(legend.getByRole("button", { name: "Show RSI" })).toBeVisible();
+      expect((await box(page.locator(".chart-host"))).y).toBe(BAR);
 
-      await page.getByRole("button", { name: "Show rsi", exact: true }).click();
-      await expect(legend).toBeVisible();
-      await expect(row).toBeHidden();
-      await expect.poll(async () => (await box(page.locator(".chart-host"))).y).toBe(BAR);
+      await legend.getByRole("button", { name: "Show RSI" }).click();
+      await expect(legend.getByRole("button", { name: "Hide RSI" })).toBeVisible();
+      expect((await box(page.locator(".chart-host"))).y).toBe(BAR);
     });
 
     test("an open menu hangs below the bar", async ({ bootedApp: page }) => {
@@ -163,8 +159,12 @@ test.describe("touch keeps its targets", () => {
     expect((await box(page.locator("header"))).height).toBe(52);
     const symbol = await box(page.getByRole("button", { name: /^Symbol:/ }));
     expect(symbol.height).toBeGreaterThanOrEqual(40);
-    // And every chip: no hover to reach the legend's controls with.
-    await expect(page.locator(".chip")).toHaveCount(3);
-    await expect(page.locator(".chip").first()).toBeVisible();
+    // No hover: a tap on a legend row brings its controls, at a size a finger hits.
+    const legend = page.getByTestId("indicator-legend-rsi");
+    const remove = legend.getByRole("button", { name: "Remove RSI" });
+    await expect(remove).toBeHidden();
+    await legend.tap();
+    await expect(remove).toBeVisible();
+    expect((await box(remove)).height).toBe(32);
   });
 });
