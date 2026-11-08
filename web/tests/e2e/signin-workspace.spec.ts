@@ -7,7 +7,10 @@ import type { Browser, Page, Route } from "@playwright/test";
 
 import { test, expect, expectChartRendered, pickTool, reloadApp } from "./fixtures/app";
 
-// The accounts outlive a test on this server, so each test has keys of its own.
+// The accounts outlive a test on this server, so each test has keys of its own. A worker
+// that fails is replaced and counts its rounds from 1 again, so the keys also carry the
+// time this file was loaded: else a test after a failure reads what an earlier one left.
+const LOADED = Date.now();
 let round = 0;
 let NOTE = "";
 let DOC = "";
@@ -88,9 +91,9 @@ test.describe("workspace", () => {
 
   test.beforeEach(() => {
     round += 1;
-    NOTE = `chartgen.pane.9.note${round}`;
-    DOC = `chartgen.drawings.TEST${round}`;
-    OTHER = `chartgen.drawings.OTHER${round}`;
+    NOTE = `chartgen.pane.9.note${LOADED}_${round}`;
+    DOC = `chartgen.drawings.TEST${LOADED}_${round}`;
+    OTHER = `chartgen.drawings.OTHER${LOADED}_${round}`;
   });
 
   test.beforeAll(async ({ browser }, info) => {
@@ -592,7 +595,12 @@ test.describe("workspace", () => {
     await expect(page.getByRole("button", { name: "Sign in again" })).toBeVisible();
 
     await page.unroute("**/oauth/me");
-    await page.getByRole("button", { name: "Sign in again" }).click();
+    // The page is at / already, which the URL below matches at once: wait for it to leave
+    // and load again first, or the chart checked is the one going away.
+    await Promise.all([
+      page.waitForEvent("load"),
+      page.getByRole("button", { name: "Sign in again" }).click(),
+    ]);
     await page.waitForURL((url) => url.pathname === "/" && !url.searchParams.has("code"));
     await expectChartRendered(page);
     expect(await read(page, NOTE), "and it is all still there").toBe("octo's");
