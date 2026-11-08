@@ -32,7 +32,7 @@ Status legend:
 | Time zone selector and clock | ✅ | ◐ | UTC, Exchange, Local and common IANA zones. "Exchange" is a heuristic on the ticker suffix. [Bottom bar](/chartgen/guides/web/#bottom-bar) |
 | Go to date | ✅ | ✅ | `Alt+G`. [Bottom bar](/chartgen/guides/web/#bottom-bar) |
 | Scroll, zoom, keyboard navigation | ✅ | ✅ | Arrow keys, `Home`/`End`, `Alt+R` reset. [Keyboard shortcuts](/chartgen/guides/web/#keyboard-shortcuts) |
-| Screenshot | ✅ | ◐ | Downloads the chart canvas as PNG. The DOM legends are not in the image. [Toolbar](/chartgen/guides/web/#toolbar) |
+| Screenshot | ✅ | ◐ | Downloads a PNG with a header of symbol, timeframe and visible indicators, and the site's host in the corner. No OHLC or indicator values in it, no copy to clipboard or image link. [Toolbar](/chartgen/guides/web/#toolbar) |
 | Fullscreen | ✅ | ✅ | Hidden when the browser lacks the Fullscreen API. [Toolbar](/chartgen/guides/web/#toolbar) |
 | Light and dark theme | ✅ | ✅ | Follows the OS on first visit. Server-sent colors stay as sent. [ADR-0016](/chartgen/decisions/0016-light-theme/) |
 | Custom theme editor | ✅ | ❌ | Out of scope of [ADR-0006](/chartgen/decisions/0006-tradingview-visual-parity/). |

@@ -62,6 +62,7 @@ import {
   chartKeyAction,
   downloadChartImage,
   resetChart,
+  screenshotCaption,
   screenshotFilename,
 } from "./lib/chartActions";
 import { isTypingContext, keepKeyboardFocus, swallowMenuGhostClicks } from "./lib/keys";
@@ -146,10 +147,16 @@ export function App(props: { authError: string | null; user: SignedInUser | null
   const screenshot = () => {
     const c = chart();
     if (!c) return;
-    downloadChartImage(
+    const palette = PALETTES[theme()];
+    void downloadChartImage(
       c,
       screenshotFilename(symbol(), timeframe(), new Date()),
-      resolveColors(PALETTES[theme()], chartSettings().themes[theme()]).background,
+      screenshotCaption(symbol(), timeframe(), activeIndicators(), paramDefaults()),
+      {
+        background: resolveColors(palette, chartSettings().themes[theme()]).background,
+        fg: palette.fg,
+        fgMuted: palette.fgMuted,
+      },
     );
   };
 

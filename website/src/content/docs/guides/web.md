@@ -93,10 +93,14 @@ stays visible.
   ([ADR-0030](/chartgen/decisions/0030-custom-chart-types/)).
 
 - **Replay** (rewind) — starts and ends [bar replay](#bar-replay).
-- **Screenshot** (camera) — downloads the chart canvas, overlays included,
+- **Screenshot** (camera) — downloads the active chart, overlays included,
   as a PNG on the chart background, named
-  `<SYMBOL>_<TF>_<yyyy-mm-dd_HHMM>.png` (local time). The DOM legend
-  rows above the panes are not part of the image.
+  `<SYMBOL>_<TF>_<yyyy-mm-dd_HHMM>.png` (local time). A header above the
+  chart gives the symbol and timeframe (`BTCUSDT · 1h`) and, below them, the
+  visible indicators as their chips name them; hidden indicators are left
+  out, and a long list wraps. The site's host (`chartgen.vasudev.xyz`, or
+  your own on a self-hosted server) is marked in the bottom-right corner of
+  the chart. The legend rows above the panes are not part of the image.
 - **Reset chart** (circular arrow) — scrolls to the latest bar and restores
   the default bar spacing. Same as `Alt+R`.
 - **Theme** (sun/moon) — switches between the dark and light themes
