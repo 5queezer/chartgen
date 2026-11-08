@@ -57,6 +57,7 @@ test.describe("sign-in", () => {
   test("the chooser leads through a provider to the app, showing who signed in", async ({ page }) => {
     await page.goto("/");
     await expect(chooser(page)).toBeVisible();
+    await expect(page.getByRole("img", { name: "chartgen", exact: true })).toBeVisible();
     await expect(page.getByRole("link", { name: "Continue with GitHub" })).toBeVisible();
     await expect(page.getByRole("link", { name: "Continue with Google" })).toBeVisible();
 
