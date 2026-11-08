@@ -962,7 +962,8 @@ fn bars_in(answer: &str) -> usize {
     let text = call["result"]["content"][0]["text"]
         .as_str()
         .unwrap_or_else(|| panic!("no chart: {}", &answer[..200.min(answer.len())]));
-    let series: serde_json::Value = serde_json::from_str(text).unwrap();
+    let series: serde_json::Value =
+        serde_json::from_str(text).unwrap_or_else(|e| panic!("{e}: {text}"));
     series["bars"].as_array().map_or(0, Vec::len)
 }
 
@@ -1237,7 +1238,7 @@ fn test_a_chart_of_heavy_indicators_costs_what_they_draw() {
             serde_json::json!({ "chart_style": "candles" }),
         ),
         chart_call(627, &["candle_patterns"; 50], serde_json::json!({})),
-        chart_call(80, &["cipher_b"; 50], small_box.clone()),
+        chart_call(80, &["cipher_b"; 50], small_box),
     ] {
         let (st, _, body) = http(srv.port, "POST", "/mcp", &headers, &call);
         assert_eq!(st, 200, "{body}");
@@ -1247,7 +1248,15 @@ fn test_a_chart_of_heavy_indicators_costs_what_they_draw() {
             &body[..300.min(body.len())]
         );
     }
-    let fits = chart_call(80, &["cipher_b"; 5], small_box);
+    // On the default box, measured from how far the bars move: about a brick a source bar,
+    // at any hour. A percent box is a share of the price, and the sample's price swings by
+    // 40% while its bars move as far at any price, so at most hours 0.15% builds more
+    // bricks than a chart may have. Every price-based chart costs the same.
+    let fits = chart_call(
+        80,
+        &["cipher_b"; 5],
+        serde_json::json!({ "chart_style": "renko" }),
+    );
     let (_, _, body) = http(srv.port, "POST", "/mcp", &headers, &fits);
     assert_eq!(bars_in(&body), 80, "fewer of them is a real chart");
 }
