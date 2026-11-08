@@ -13,6 +13,10 @@ export default defineConfig({
         dark: './src/assets/logo-dark.svg',
         replacesTitle: true,
       },
+      // The g of the wordmark, the same files as the web app's. Starlight prefixes
+      // `favicon` with the base; `head` entries are written as they are.
+      favicon: '/favicon.svg',
+      head: [{ tag: 'link', attrs: { rel: 'icon', href: '/chartgen/favicon.ico', sizes: '32x32' } }],
       description:
         'Chart generator, web app and MCP server for Yahoo Finance and Binance data, written in Rust.',
       social: [

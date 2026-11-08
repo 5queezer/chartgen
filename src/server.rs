@@ -889,20 +889,19 @@ fn verify_pkce(code_verifier: &str, code_challenge: &str) -> bool {
 
 // --- Favicon ---
 
-const FAVICON_SVG: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
-  <rect width="64" height="64" rx="8" fill="#1a1a2e"/>
-  <line x1="14" y1="12" x2="14" y2="52" stroke="#22c55e" stroke-width="2"/>
-  <rect x="10" y="20" width="8" height="18" rx="1" fill="#22c55e"/>
-  <line x1="28" y1="8" x2="28" y2="48" stroke="#ef4444" stroke-width="2"/>
-  <rect x="24" y="16" width="8" height="22" rx="1" fill="#ef4444"/>
-  <line x1="42" y1="18" x2="42" y2="56" stroke="#22c55e" stroke-width="2"/>
-  <rect x="38" y="26" width="8" height="16" rx="1" fill="#22c55e"/>
-  <line x1="56" y1="10" x2="56" y2="50" stroke="#ef4444" stroke-width="2"/>
-  <rect x="52" y="18" width="8" height="20" rx="1" fill="#ef4444"/>
-</svg>"##;
+/// The g of the wordmark, the same files as the web app's and the docs site's
+/// (`web/public/favicon.*`; Wordmark.test.ts keeps the copies equal). The SVG is also
+/// the connector icon of `logo_uri`.
+const FAVICON_SVG: &str = include_str!("server/favicon.svg");
+/// 16, 32 and 48 px, for browsers without SVG icons (Safari).
+const FAVICON_ICO: &[u8] = include_bytes!("server/favicon.ico");
 
-async fn favicon_handler() -> impl IntoResponse {
+async fn favicon_svg() -> impl IntoResponse {
     ([(header::CONTENT_TYPE, "image/svg+xml")], FAVICON_SVG)
+}
+
+async fn favicon_ico() -> impl IntoResponse {
+    ([(header::CONTENT_TYPE, "image/x-icon")], FAVICON_ICO)
 }
 
 // --- MCP Streamable HTTP transport ---
@@ -1746,8 +1745,8 @@ pub async fn run_server(port: u16, engine: Option<Arc<RwLock<TradingEngine>>>) {
             "/workspace/sync",
             post(workspace::sync).layer(DefaultBodyLimit::max(workspace::MAX_BODY_BYTES)),
         )
-        .route("/favicon.ico", get(favicon_handler))
-        .route("/favicon.svg", get(favicon_handler))
+        .route("/favicon.ico", get(favicon_ico))
+        .route("/favicon.svg", get(favicon_svg))
         // MCP endpoints — Claude.ai may try root, /mcp, /message, or /sse
         // /mcp is canonical; POST /, /message and /sse are deprecated
         // aliases for older connectors (ADR-0027).
@@ -2000,6 +1999,20 @@ mod tests {
         // RFC 7231 §5.3.1: q=0 means "not acceptable".
         let h = headers_with(&[("accept", "application/json;q=0")]);
         assert!(!accepts_json(&h));
+    }
+
+    #[tokio::test]
+    async fn the_favicons_are_an_svg_and_a_real_ico() {
+        let svg = favicon_svg().await.into_response();
+        assert_eq!(svg.headers()[header::CONTENT_TYPE], "image/svg+xml");
+        let body = svg.into_body().collect().await.unwrap().to_bytes();
+        assert!(body.starts_with(b"<svg"));
+
+        let ico = favicon_ico().await.into_response();
+        assert_eq!(ico.headers()[header::CONTENT_TYPE], "image/x-icon");
+        let body = ico.into_body().collect().await.unwrap().to_bytes();
+        // ICONDIR: reserved 0, type 1 (icon), then the image count (16, 32 and 48 px).
+        assert_eq!(&body[..6], &[0, 0, 1, 0, 3, 0]);
     }
 
     #[tokio::test]

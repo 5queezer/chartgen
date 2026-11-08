@@ -57,7 +57,8 @@ test.describe("wordmark", () => {
       const seen: string[] = [];
       (window as unknown as { __wordmarkFills: string[] }).__wordmarkFills = seen;
       new MutationObserver((_, observer) => {
-        const gen = document.querySelector("header h1 path:last-child");
+        // "gen" by position among the paths: the load sweep's overlay follows it.
+        const gen = document.querySelector("header h1 path:nth-of-type(2)");
         if (!gen) return;
         seen.push(getComputedStyle(gen).fill);
         observer.disconnect();

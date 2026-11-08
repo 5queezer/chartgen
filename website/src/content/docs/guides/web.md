@@ -41,6 +41,11 @@ collapse:
 - below 900 px compare, reset chart and the theme toggle join the **⋯** menu;
 - below 640 px the wordmark is dropped and **Bar replay** joins the menu too.
 
+When the app loads, a band of light crosses the "gen" of the wordmark once, in
+about a second, and the name stays readable throughout. With reduced motion
+turned on in the system settings it doesn't run. The tab icon, the Home Screen
+icon and the installed app's icon are the wordmark's g.
+
 The status text stays on one line (the live badge reads `live`, `polling`,
 `paused`...); the layout name truncates, and its unsaved-changes dot always
 stays visible.
