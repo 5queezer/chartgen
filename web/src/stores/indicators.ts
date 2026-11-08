@@ -6,8 +6,9 @@
 // the same before the user touches the picker.
 //
 // Client-only state: an entry may also carry `hidden: true` (ADR-0013). It is
-// persisted with the entry but never sent to the server — `toWire` drops
-// hidden entries and strips the field from the rest.
+// persisted with the entry but never sent to the server — `toWire` strips the
+// field. A hidden entry is still requested, so it keeps its pane and its legend
+// row, and the chart draws nothing for it (ADR-0053).
 //
 // Instances (ADR-0028): the same indicator may be active several times. Each
 // entry has an instance key, unique in the set: the first instance of a name
@@ -443,15 +444,14 @@ export function withStyle(
 }
 
 /**
- * Request payload for `generate_chart`: visible entries, client-only fields
- * stripped. The instance `id` stays: the server keys the response by it.
+ * Request payload for `generate_chart`: every entry, hidden ones too
+ * (ADR-0053), client-only fields stripped, so hiding never changes the
+ * request. The instance `id` stays: the server keys the response by it.
  */
 export function toWire(entries: ActiveIndicator[]): ActiveIndicator[] {
-  return entries
-    .filter((e) => !isHidden(e))
-    .map((e) =>
-      makeEntry(indicatorName(e), indicatorParams(e), false, undefined, instanceId(e)),
-    );
+  return entries.map((e) =>
+    makeEntry(indicatorName(e), indicatorParams(e), false, undefined, instanceId(e)),
+  );
 }
 
 /** Most params a repeated instance's label shows when its instances share them all. */

@@ -185,6 +185,22 @@ body {
   background: var(--color-bg-elev);
 }
 
+/* A hidden indicator's row (ADR-0053): dimmed, and its crossed-out eye (the one
+ * toggle, `aria-pressed`) always in view to show it again. The other controls
+ * still come with hover or keyboard focus, not with the focus a click on the eye
+ * leaves behind. */
+.pane-header-hidden :is(.pane-header-label, .pane-header-params) {
+  opacity: 0.5;
+}
+
+.pane-header-hidden .pane-header-controls {
+  opacity: 1;
+}
+
+.pane-header-hidden:not(:hover, :has(:focus-visible)) .pane-header-btn:not([aria-pressed]) {
+  display: none;
+}
+
 /* Price-legend change/volume colors (PaneHeader). */
 .pane-header-up {
   color: var(--color-bull);
@@ -652,13 +668,6 @@ body {
     height: 20px;
   }
 
-  /* A larger target without a taller row: the chart keeps its height. */
-  .chip-btn {
-    width: 28px;
-    height: 28px;
-    margin-block: -6px;
-  }
-
   /* Tappable: the strip outgrows the price axis, over the end of the time axis. */
   .price-scale-controls {
     width: auto !important;
@@ -697,6 +706,15 @@ body {
     display: none;
   }
 
+  /* A hidden one keeps its eye in view; a tap brings the rest. */
+  .pane-header-hidden .pane-header-controls {
+    display: inline-flex;
+  }
+
+  .pane-header-hidden:not(.pane-header-open) .pane-header-btn:not([aria-pressed]) {
+    display: none;
+  }
+
   .pane-header-btn {
     width: 32px;
     height: 32px;
@@ -720,32 +738,13 @@ body {
     vertical-align: top;
   }
 
-  html:not(.compact) .chip-row {
-    min-height: 0;
-    gap: 4px;
-    padding-block: 2px;
-  }
-
-  /* A legend row has the same bell, eye, gear and remove on hover, so a chip is only
-   * needed where there is no row: a hidden or failed instance. No such chip, no row.
-   * One holding keyboard focus stays until focus moves on, so its eye can toggle back. */
-  html:not(.compact) .chip:not([data-chip-keep]):not(:has(:focus-visible)),
-  html:not(.compact) .chip-row:not(:has(.chip[data-chip-keep], .chip :focus-visible)) {
-    display: none;
-  }
-
-  /* Those controls are now the way in, so a long row must not clip them away. */
+  /* The legend's controls are the way in, so a long row must not clip them away. */
   .pane-header-controls {
     position: sticky;
     right: 0;
     background: var(--legend-bg, var(--color-bg));
     /* Over the 4 px of row padding sticky stops short of, where a clipped value shows. */
     box-shadow: 0 0 0 4px var(--legend-bg, var(--color-bg));
-  }
-
-  html:not(.compact) .chip {
-    min-height: 20px;
-    padding-block: 0;
   }
 }
 

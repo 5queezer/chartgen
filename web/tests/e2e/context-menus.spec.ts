@@ -235,8 +235,8 @@ test.describe("chart canvas", () => {
     expect(Math.abs(shown - 50)).toBeLessThan(fifty.perPixel * 2 + 0.01);
 
     await anyItem(page, /^Hide RSI/).click();
-    await expect(page.getByTestId("indicator-legend-rsi")).toHaveCount(0);
-    await expect(page.getByTestId("indicator-legend-volume")).toBeVisible();
+    await expect(page.getByTestId("indicator-legend-rsi")).toHaveClass(/pane-header-hidden/);
+    await expect(page.getByTestId("indicator-legend-volume")).not.toHaveClass(/pane-header-hidden/);
   });
 
   test("a right press does not pan or scale", async ({ bootedApp: page }) => {
@@ -505,14 +505,14 @@ test.describe("indicators", () => {
     await page.mouse.click(box.x + 400, box.y + 30, { button: "right" });
     await expect(menu(page, "Pane actions")).toBeVisible();
     await anyItem(page, /^Hide /).click();
-    await expect(second).toHaveCount(0);
-    await expect(first).toBeVisible();
+    await expect(second).toHaveClass(/pane-header-hidden/);
+    await expect(first).not.toHaveClass(/pane-header-hidden/);
 
-    // Hidden, it has no legend: its tree row brings it back, by key.
+    // Its tree row brings it back too, by key.
     await openSidebarTab(page, "Object Tree");
     await page.getByTestId("tree-ind-rsi#2").click({ button: "right" });
     await anyItem(page, /^Show /).click();
-    await expect(second).toBeVisible();
+    await expect(second).not.toHaveClass(/pane-header-hidden/);
 
     await page.getByTestId("tree-ind-rsi").click({ button: "right" });
     await anyItem(page, /^Remove /).click();
@@ -540,31 +540,28 @@ test.describe("indicators", () => {
       setActiveIndicators([...activeIndicators()].reverse());
     });
     await anyItem(page, /^Hide RSI/).click();
-    await expect(page.getByTestId("indicator-legend-rsi")).toHaveCount(0);
-    await expect(page.getByTestId("indicator-legend-volume")).toBeVisible();
+    await expect(page.getByTestId("indicator-legend-rsi")).toHaveClass(/pane-header-hidden/);
+    await expect(page.getByTestId("indicator-legend-volume")).not.toHaveClass(/pane-header-hidden/);
   });
 
-  test("a hidden indicator's chip has a menu that acts on it", async ({ bootedApp: page }) => {
-    // With a mouse only a hidden or failed instance has a chip.
+  test("a hidden indicator's legend row has a menu that acts on it", async ({ bootedApp: page }) => {
     const legend = page.getByTestId("indicator-legend-volume");
     const hide = async () => {
       await legend.hover();
       await legend.getByRole("button", { name: /^Hide /i }).click();
-      await expect(legend).toHaveCount(0);
+      await expect(legend).toHaveClass(/pane-header-hidden/);
     };
     await hide();
-    const chip = page.locator(".chip", { has: page.getByRole("button", { name: /^Remove volume/i }) });
-    const openChip = () => chip.getByText(/^volume/i).click({ button: "right" });
-    await openChip();
+    const openMenu = () => legend.click({ button: "right", position: { x: 10, y: 8 } });
+    await openMenu();
     await expect(menu(page, /^volume.* actions$/i)).toBeVisible();
     await anyItem(page, /^Show volume/i).click();
-    await expect(legend).toBeVisible();
-    await expect(chip).toBeHidden();
+    await expect(legend).not.toHaveClass(/pane-header-hidden/);
 
     await hide();
-    await openChip();
+    await openMenu();
     await anyItem(page, /^Remove volume/i).click();
-    await expect(chip).toHaveCount(0);
+    await expect(legend).toHaveCount(0);
     await expect(page.getByTestId("indicator-legend-rsi")).toBeVisible();
   });
 });
@@ -668,7 +665,7 @@ test.describe("sidebar lists", () => {
 
     await page.getByTestId("tree-ind-rsi").click({ button: "right" });
     await anyItem(page, /^Hide RSI/).click();
-    await expect(page.getByTestId("indicator-legend-rsi")).toHaveCount(0);
+    await expect(page.getByTestId("indicator-legend-rsi")).toHaveClass(/pane-header-hidden/);
 
     const drawingRow = page.locator("[data-testid^=tree-drawing-]");
     await drawingRow.click({ button: "right" });

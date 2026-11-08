@@ -120,7 +120,8 @@ export function createChartPane(pane: number, deps: PaneDeps) {
 
   const [chart, setChart] = createSignal<KLineChart | null>(null);
 
-  // Hidden indicators are client-only and never requested from the server.
+  // The hidden flag is client-only: a hidden indicator is still requested, and
+  // the chart draws nothing for it (ADR-0053).
   const wireIndicators = createMemo(() => toWire(activeIndicators()));
 
   // Plot styles are client-only (ADR-0017): they reach the chart separately
@@ -267,7 +268,7 @@ export function createChartPane(pane: number, deps: PaneDeps) {
   );
 
   // Hand each full load to the feed. A request change (symbol, timeframe,
-  // visible indicators, params) suspends the feed at once, which drops
+  // indicators, params) suspends the feed at once, which drops
   // every in-flight poll and page of the old chart; the old chart stays on
   // screen until the new load lands (keepPreviousData), and is cleared if
   // that load fails.
@@ -425,7 +426,7 @@ export function createChartPane(pane: number, deps: PaneDeps) {
     }
   });
 
-  // Chips and picker show the legend's names (EMA, BB), not registry ids.
+  // Picker and tree show the legend's names (EMA, BB), not registry ids.
   createEffect(() => rememberLabels(live()?.series.indicators));
 
   // --- Order-flow chart types (ADR-0048) --------------------------------
@@ -721,7 +722,7 @@ export function ChartPane(props: ChartPaneProps): JSX.Element {
             update={s.shown()?.update ?? null}
             history={s.historyStatus()}
             onLoadOlder={s.feed.loadOlder}
-            activeIndicators={s.wireIndicators()}
+            activeIndicators={activeIndicators()}
             fitPanes={props.fitPanes}
             orderFlow={s.flowView()}
             onVisibleFrom={s.onVisibleFrom}

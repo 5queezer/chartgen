@@ -723,22 +723,20 @@ const seedIndicators = (page: Page, entries: unknown[]) =>
     }
   }, entries);
 
-const errorChip = (page: Page) => page.locator("[data-chip-error]");
+const failedRow = (page: Page) => page.getByTestId("indicator-errors").locator("li");
 
 test.describe("names and params the server cannot run", () => {
-  test("a name nobody knows fails only its chip, and removing it clears the error", async ({ page }) => {
+  test("a name nobody knows fails only its own row, and removing it clears the error", async ({ page }) => {
     // A script of a deleted OAuth client, or deleted from another browser.
     await seedIndicators(page, ["rsi", "gone_one"]);
     await gotoApp(page);
     await expect(page.getByTestId("chart-load-error")).toHaveCount(0);
     await expect.poll(() => plotted(page, "rsi")).not.toBeNull();
-    await expect(errorChip(page)).toHaveCount(1);
-    await expect(errorChip(page).getByTitle(/Unknown indicator: gone_one/)).toBeVisible();
-    // The desktop has the chips: the compact row stays out of the way.
-    await expect(page.getByTestId("indicator-errors")).toBeHidden();
+    await expect(failedRow(page)).toHaveCount(1);
+    await expect(failedRow(page)).toContainText("Unknown indicator: gone_one");
 
     await page.getByRole("button", { name: "Remove gone_one" }).click();
-    await expect(errorChip(page)).toHaveCount(0, { timeout: 15_000 });
+    await expect(failedRow(page)).toHaveCount(0, { timeout: 15_000 });
   });
 
   test("a script deleted elsewhere leaves the running chart working", async ({ page }) => {
@@ -755,7 +753,7 @@ test.describe("names and params the server cannot run", () => {
     await expect(other.getByTestId("script-status")).toHaveText("Deleted doomed_two.");
 
     // The next tail reports it; the chart keeps polling, nothing blanks.
-    await expect(errorChip(page)).toHaveCount(1, { timeout: 15_000 });
+    await expect(failedRow(page)).toHaveCount(1, { timeout: 15_000 });
     await expect(page.getByTestId("chart-load-error")).toHaveCount(0);
     await reloadApp(page);
     await expect(page.getByTestId("chart-load-error")).toHaveCount(0);
@@ -793,7 +791,7 @@ test.describe("names and params the server cannot run", () => {
     await layoutMenu(/^Load layout/);
     await page.getByRole("dialog").getByRole("button", { name: /^Scripted/ }).click();
     await expect(page.getByTestId("layout-name")).toHaveText("Scripted");
-    await expect(errorChip(page)).toHaveCount(1, { timeout: 15_000 });
+    await expect(failedRow(page)).toHaveCount(1, { timeout: 15_000 });
     await expect(page.getByTestId("chart-load-error")).toHaveCount(0);
   });
 
@@ -805,7 +803,7 @@ test.describe("names and params the server cannot run", () => {
     await gotoApp(page, "/?ind=linked,gone_link");
     await expect(page.getByText("Unknown indicator(s) left out: gone_link")).toBeVisible();
     await expect.poll(() => plotted(page, "linked"), { timeout: 30_000 }).toEqual({ label: "Linked", last: 3 });
-    await expect(errorChip(page)).toHaveCount(0);
+    await expect(failedRow(page)).toHaveCount(0);
   });
 
   test("params a saved script no longer allows show in the panel, not over the chart", async ({ page }) => {
@@ -828,7 +826,7 @@ def compute(ohlcv, params, chart):
     await expect(errors).toContainText("Parameters on the chart", { timeout: 30_000 });
     await expect(errors).toContainText("length must be <= 200");
     await expect(page.getByTestId("chart-load-error")).toHaveCount(0);
-    await expect(errorChip(page)).toHaveCount(1);
+    await expect(failedRow(page)).toHaveCount(1);
     await expect.poll(() => plotted(page, "rsi")).not.toBeNull();
   });
 
@@ -936,7 +934,7 @@ def compute(ohlcv, params, chart):
     );
     const loads = countFullLoads(page);
     await page.getByTestId("script-add").click();
-    await expect(errorChip(page)).toHaveCount(1, { timeout: 30_000 });
+    await expect(failedRow(page)).toHaveCount(1, { timeout: 30_000 });
     await expect(page.getByTestId("script-errors")).toContainText("Its plots keep changing");
     const settled = loads.count;
     expect(settled).toBeLessThanOrEqual(4);
@@ -956,17 +954,17 @@ def compute(ohlcv, params, chart):
     await expect(page.getByText("retry in")).toHaveCount(0);
   });
 
-  test("a chip recovers when its script appears, without a page reload", async ({ page }) => {
+  test("a failed indicator recovers when its script appears, without a page reload", async ({ page }) => {
     await seedIndicators(page, ["rsi", "late_one"]);
     await gotoApp(page);
-    await expect(errorChip(page)).toHaveCount(1, { timeout: 15_000 });
+    await expect(failedRow(page)).toHaveCount(1, { timeout: 15_000 });
 
     const other = await secondTab(page);
     await saveNew(other, "late_one", script('    chart.line(4.0, title = "Late")'));
     await other.close();
 
     await expect.poll(() => plotted(page, "late_one"), { timeout: 15_000 }).toEqual({ label: "Late", last: 4 });
-    await expect(errorChip(page)).toHaveCount(0);
+    await expect(failedRow(page)).toHaveCount(0);
   });
 });
 
@@ -1217,7 +1215,7 @@ test.describe("on the compact shell", () => {
         await bootPhone(page);
         await expect(row(page)).toBeVisible({ timeout: 15_000 });
         await expect(row(page)).toContainText("Unknown indicator: gone_x");
-        // Only what failed: this is not the chip row.
+        // Only what failed: the rest have their legend rows.
         await expect(row(page).locator("li")).toHaveCount(1);
         await expect(row(page)).not.toContainText("RSI");
         const box = (await row(page).boundingBox())!;

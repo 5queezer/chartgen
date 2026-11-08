@@ -1,6 +1,6 @@
 // Right-click menus of things that show up in more than one place: an alert (its
 // panel row, its tree row, its line on the chart) and an indicator (legend row,
-// chip, tree row, sub-pane).
+// tree row, sub-pane).
 
 import type { Alert } from "../lib/alerts";
 import { chipName } from "../lib/indicatorNames";

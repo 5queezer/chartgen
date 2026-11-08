@@ -84,6 +84,7 @@ import {
 } from "../lib/geometryStyle";
 import {
   instanceKey,
+  isHidden,
   paramLabels,
   plotKey,
   type ActiveIndicator,
@@ -252,12 +253,15 @@ interface FigureExtend extends IndicatorStyle {
   defaults: Record<string, { color: string; width: number }>;
   /** The lines hold levels (`level_lines`): nothing is drawn across a jump. */
   levels?: boolean;
+  /** The whole indicator is hidden (ADR-0053): it draws nothing and does not scale the axis. */
+  hidden?: boolean;
 }
 
 function extendFor(
   name: string,
   ind: NonNullable<SeriesPayload["indicators"][string]> | undefined,
   style: IndicatorStyle | undefined,
+  hidden: boolean,
 ): FigureExtend {
   if (!ind) return NO_STYLE;
   const plots = plotsOf(ind, (n) => paletteColor(name, n), name);
@@ -267,7 +271,7 @@ function extendFor(
       { color: p.defaultColor, width: p.defaultWidth },
     ]),
   );
-  return { ...figureOverrides(plots, style), defaults, levels: ind.level_lines === true };
+  return { ...figureOverrides(plots, style), defaults, levels: ind.level_lines === true, hidden };
 }
 
 /** Extend data of an indicator without overrides; klinecharts ignores an undefined override. */
@@ -366,6 +370,11 @@ function drawGeometry(name: string, gridPane: number): IndicatorDrawCallback {
   const regName = indicatorRegName(name, gridPane);
   return ({ ctx, kLineDataList, indicator, visibleRange, bounding, xAxis, yAxis }) => {
     const ind = geometryStore.get(regName);
+    // A hidden indicator paints nothing, so a hover hits none of its marks.
+    if ((indicator.extendData as FigureExtend | undefined)?.hidden) {
+      markHits.delete(regName);
+      return true;
+    }
     if (!ind) return false;
     const map: Mapper = {
       x: (i) => xAxis.convertToPixel(i),
@@ -697,13 +706,15 @@ function ensureRegistered(name: string, shape: IndicatorShape, gridPane: number)
     draw: drawGeometry(name, gridPane),
     calc: (dataList: KLineData[], indicator) => {
       const geo = geometryStore.get(regName);
-      // A hidden plot's value is null, so nothing is drawn for it.
-      const ext = indicator.extendData as IndicatorStyle | undefined;
+      // A hidden plot's value is null, so nothing is drawn for it; so is every
+      // value of a hidden indicator.
+      const ext = indicator.extendData as FigureExtend | undefined;
       // Hidden fills do not scale the axis.
-      const extents = geo
-        ? valueExtents(visibleFills(geo, ext?.geometry?.fills), dataList.length)
-        : [];
-      const shown = (key: string) => ext?.plots[key]?.visible !== false;
+      const extents =
+        geo && !ext?.hidden
+          ? valueExtents(visibleFills(geo, ext?.geometry?.fills), dataList.length)
+          : [];
+      const shown = (key: string) => !ext?.hidden && ext?.plots[key]?.visible !== false;
       const lineShown = Array.from({ length: shape.lines }, (_, i) => shown(`line${i}`));
       const histShown = Array.from({ length: shape.hist }, (_, i) => shown(`hist${i}`));
       return dataList.map((bar, di) => {
@@ -1094,6 +1105,8 @@ interface HeaderState {
   top: number;
   /** Compare symbol this legend row belongs to. */
   compare?: string;
+  /** The indicator is hidden: its row stays, without values. */
+  hidden?: boolean;
 }
 
 /** klinecharts `candle` style overrides per toolbar chart type it draws itself. */
@@ -1134,7 +1147,7 @@ export interface ChartProps {
    * The active indicator registry from the store. Used to source
    * per-indicator parameter tuples for the header; the server's
    * payload only carries the indicator's `label`, not the params the
-   * client asked for.
+   * client asked for. Also says which instances are hidden.
    */
   activeIndicators: ActiveIndicator[];
   /** Part of the window is taken (the script editor): panes fit what is left. */
@@ -1314,11 +1327,17 @@ export function Chart(props: ChartProps): JSX.Element {
   let compareCreated = false;
   // True once the series indicator of a client-drawn chart type is on it.
   let seriesCreated = false;
-  // Instance keys of the indicators currently requested (visible). Panes and
-  // legends of anything else are dropped right away, before a refetch lands.
+  // Instance keys of the indicators currently requested, hidden ones too. Panes
+  // and legends of anything else are dropped right away, before a refetch lands.
   // A string so param-only changes do not re-run the pane effect.
   const visibleKey = createMemo(() =>
     props.activeIndicators.map(instanceKey).join("\n"),
+  );
+  // Hidden instances (ADR-0053) keep their pane and legend row and draw nothing.
+  const hiddenKeys = createMemo(
+    () => props.activeIndicators.filter(isHidden).map(instanceKey),
+    [],
+    { equals: (a, b) => a.join("\n") === b.join("\n") },
   );
 
   onMount(() => {
@@ -1647,16 +1666,19 @@ export function Chart(props: ChartProps): JSX.Element {
         params,
       );
 
+      // A hidden indicator's row keeps its name and params, without values.
+      const hidden = hiddenKeys().includes(name);
+      const lines = hidden ? [] : headerLines;
       if (ind.is_overlay) {
         overlayRow += 1;
         // 20px per row below the 4px price-header row — keeps overlays
         // readable without a DOM-measured layout pass.
         const top = 4 + 20 * overlayRow;
-        next.push({ key: name, name: displayName, params, lines: headerLines, top });
+        next.push({ key: name, name: displayName, params, lines, top, hidden });
       } else {
         const size = c.getSize(paneMap[name]!);
         const top = size ? size.top + 4 : 0;
-        next.push({ key: name, name: displayName, params, lines: headerLines, top });
+        next.push({ key: name, name: displayName, params, lines, top, hidden });
       }
     }
 
@@ -1755,6 +1777,7 @@ export function Chart(props: ChartProps): JSX.Element {
   createEffect(() => {
     const c = chart();
     const styles = props.styles;
+    const hidden = hiddenKeys();
     labelSignature();
     if (!c) return;
     const panes = untrack(paneIds);
@@ -1763,7 +1786,7 @@ export function Chart(props: ChartProps): JSX.Element {
       c.overrideIndicator(
         {
           name: indicatorRegName(name, gridPane),
-          extendData: extendFor(name, indicators?.[name], styles?.[name]),
+          extendData: extendFor(name, indicators?.[name], styles?.[name], hidden.includes(name)),
         },
         panes[name],
       );
@@ -2007,6 +2030,7 @@ export function Chart(props: ChartProps): JSX.Element {
             name,
             ind,
             untrack(() => props.styles?.[name]),
+            untrack(hiddenKeys).includes(name),
           ),
         },
         true,
@@ -2286,6 +2310,7 @@ export function Chart(props: ChartProps): JSX.Element {
               volume: chartSettings().options.legendVolume,
             }}
             top={h().top}
+            hidden={h().hidden}
             testId={
               h().compare !== undefined
                 ? `compare-legend-${h().compare}`

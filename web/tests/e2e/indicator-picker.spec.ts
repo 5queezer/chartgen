@@ -1,7 +1,7 @@
 // Indicator picker flow — covers ADR-0005 behavior:
 //   - modal open/close via Kobalte Dialog
 //   - search filter expanding the accordion
-//   - add / remove toggles the chip row and triggers a chart refetch
+//   - add / remove toggles the legend row and triggers a chart refetch
 //   - localStorage persistence survives a full reload
 
 import type { Response } from "@playwright/test";
@@ -67,7 +67,7 @@ test.describe("indicator picker", () => {
 
     // Search for "rsi" — several matching items appear (RSI, Stoch RSI,
     // Cipher B divergences, etc.). We intentionally pick an item that
-    // isn't already in the default active set so the chip row changes.
+    // isn't already in the default active set so a legend row appears.
     const search = dialog.getByPlaceholder("Search indicators...");
     await search.fill("rsi");
 
@@ -80,7 +80,7 @@ test.describe("indicator picker", () => {
     await expect(available.first()).toBeVisible();
 
     // Capture the indicator's name before clicking so we can assert the
-    // chip and persistence later. The button's first monospaced span is
+    // legend row and persistence later. The button's first monospaced span is
     // the canonical name.
     const newIndicatorName = (
       await available.first().locator(".font-mono").first().innerText()
@@ -112,8 +112,8 @@ test.describe("indicator picker", () => {
     await refetchAfterAdd;
     await expectChartRendered(page);
 
-    // Reload and confirm localStorage persisted the chip. The chart
-    // auto-loads after reload; once it has rendered, remove the chip and
+    // Reload and confirm localStorage persisted the indicator. The chart
+    // auto-loads after reload; once it has rendered, remove it and
     // expect another refetch.
     await reloadApp(page);
     await expect(removeButton).toBeVisible();

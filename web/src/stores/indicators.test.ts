@@ -172,7 +172,7 @@ describe("indicator store visibility and params", () => {
     expect(s.activeIndicators()[1]).toEqual({ name: "rsi", id: "rsi#2" });
   });
 
-  it("toWire keeps the instance id of every visible instance", async () => {
+  it("toWire keeps the instance id of every instance", async () => {
     stubStorage();
     const s = await loadStore();
     expect(
@@ -184,6 +184,7 @@ describe("indicator store visibility and params", () => {
     ).toEqual([
       { name: "rsi", length: 14 },
       { name: "rsi", id: "rsi#2", length: 21 },
+      { name: "rsi", id: "rsi#3" },
     ]);
   });
 
@@ -280,7 +281,7 @@ describe("indicator store visibility and params", () => {
     expect(s.activeIndicators()).toEqual(before);
   });
 
-  it("toWire excludes hidden entries and strips client-only fields", async () => {
+  it("toWire keeps hidden entries and strips client-only fields", async () => {
     stubStorage();
     const s = await loadStore();
     const wire = s.toWire([
@@ -289,7 +290,15 @@ describe("indicator store visibility and params", () => {
       { name: "c", length: 3, hidden: false },
       { name: "d", length: 4 },
     ]);
-    expect(wire).toEqual(["a", { name: "c", length: 3 }, { name: "d", length: 4 }]);
+    expect(wire).toEqual(["a", "b", { name: "c", length: 3 }, { name: "d", length: 4 }]);
     expect(JSON.stringify(wire)).not.toContain("hidden");
+  });
+
+  it("hiding an indicator does not change the request", async () => {
+    stubStorage();
+    const s = await loadStore();
+    const before = s.toWire(s.activeIndicators());
+    s.toggleIndicatorHidden(2);
+    expect(s.toWire(s.activeIndicators())).toEqual(before);
   });
 });
