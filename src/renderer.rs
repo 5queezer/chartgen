@@ -184,6 +184,9 @@ pub fn render_labeled(
         y_start += panel_h as i32;
     }
 
+    // The price pane's plot, left and right pixel: the date labels follow its x range.
+    let price_x: (f64, f64);
+
     // ---- Draw candles + overlays ----
     {
         let mut chart = ChartBuilder::on(&candle_area)
@@ -191,6 +194,8 @@ pub fn render_labeled(
             .x_label_area_size(0)
             .y_label_area_size(80)
             .build_cartesian_2d(0_f64..x_max, (p_min - p_margin)..(p_max + p_margin))?;
+        let (xs, ys) = chart.plotting_area().get_pixel_range();
+        price_x = (xs.start as f64, xs.end as f64);
 
         chart
             .configure_mesh()
@@ -396,10 +401,9 @@ pub fn render_labeled(
         )))?;
 
         if !drawings.is_empty() {
-            let (xs, ys) = chart.plotting_area().get_pixel_range();
             let canvas = Canvas {
                 area: &root,
-                x: (xs.start as f64, xs.end as f64, x_max),
+                x: (price_x.0, price_x.1, x_max),
                 y: (
                     ys.start as f64,
                     ys.end as f64,
@@ -424,9 +428,12 @@ pub fn render_labeled(
             .y_label_area_size(80)
             .build_cartesian_2d(0_f64..x_max, y_lo..y_hi)?;
 
+        // The label area stays for the spacing, empty: the dates under the last pane are
+        // the image's only x labels.
         chart
             .configure_mesh()
             .disable_x_mesh()
+            .x_labels(0)
             .light_line_style(GRID)
             .bold_line_style(GRID)
             .axis_style(GRID)
@@ -575,8 +582,7 @@ pub fn render_labeled(
     {
         let interval = data.interval.as_deref().unwrap_or("4h");
         let y_pos = height as i32 - 4; // just above the bottom edge
-        let x_margin = 80; // match Y-axis label width
-        let chart_width = (width as i32 - x_margin - 10) as f64; // usable chart width
+        let font = ("monospace", 13).into_font().color(&TEXT);
         let label_count = (width / 180).max(3) as usize; // ~1 label per 180px
         let step = (n / label_count).max(1);
 
@@ -586,18 +592,22 @@ pub fn render_labeled(
                 continue;
             }
             let label = format_bar_label(epoch, interval);
-            let x_frac = idx as f64 / x_max;
-            let x_px = x_margin + (x_frac * chart_width) as i32;
-            root.draw_text(
-                &label,
-                &("monospace", 13).into_font().color(&TEXT),
-                (x_px, y_pos - 10),
-            )?;
+            // Centred under its bar, kept inside the image.
+            let w = root.estimate_text_size(&label, &font)?.0 as f64;
+            let x = bar_x(idx as f64, x_max, price_x) - w / 2.0;
+            let x = x.min(width as f64 - w).max(0.0);
+            root.draw_text(&label, &font, (x as i32, y_pos - 10))?;
         }
     }
 
     root.present()?;
     Ok(())
+}
+
+/// Pixel of bar `x` (from 0) on a plot from `left` to `right` that spans `span` bars, the
+/// extension past the last bar for drawings included.
+fn bar_x(x: f64, span: f64, (left, right): (f64, f64)) -> f64 {
+    left + x / span * (right - left)
 }
 
 /// Height of the title bar.
@@ -688,7 +698,7 @@ impl Canvas<'_, '_> {
         let (l, r, span) = self.x;
         let (t, b, lo, hi) = self.y;
         (
-            l + x / span * (r - l),
+            bar_x(x, span, (l, r)),
             b - (price - lo) / (hi - lo) * (b - t),
         )
     }
@@ -1285,6 +1295,19 @@ fn auto_range(r: &PanelResult) -> (f64, f64) {
 mod tests {
     use super::*;
     const NAN: f64 = f64::NAN;
+
+    #[test]
+    fn bars_sit_on_the_price_panes_x_range() {
+        // 100 bars and 50 more for drawings past the last one, on a plot from 90 to 1390.
+        let plot = (90.0, 1390.0);
+        assert_eq!(bar_x(0.0, 150.0, plot), 90.0);
+        assert_eq!(bar_x(150.0, 150.0, plot), 1390.0);
+        assert_eq!(
+            bar_x(99.0, 150.0, plot),
+            948.0,
+            "the last bar, 99 of 150 in"
+        );
+    }
 
     #[test]
     fn without_panels_the_price_pane_takes_the_height() {
