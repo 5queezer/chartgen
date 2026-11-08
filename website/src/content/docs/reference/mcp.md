@@ -720,7 +720,8 @@ image cuts off: a price outside the visible price range, or a point more bars
 past the last bar than the image shows (half the bars shown). `open_url` is a
 [share link](/chartgen/guides/web/#sharing-a-chart) with `symbol`,
 `interval`, `type` (candles or Heikin Ashi only), `ind` when the call named
-indicators, and `draw`. It is there only when the server has
+at least one indicator, and `draw`. Without `ind` the receiver keeps their own
+indicators: a link never clears them. It is there only when the server has
 `CHARTGEN_BASE_URL`, and is left out with a warning when the drawings take
 more than the 8192 characters a link carries. The PNG draws every tool in the
 web app's dark-theme colors: fib levels with their prices, zones and ranges

@@ -77,8 +77,9 @@ Chosen: option 1.
   `text`, written as `ind` writes values. At most 50 items and 8192 characters. Decoding never throws:
   an item with an unknown tool, the wrong point count or a malformed point is dropped, and style fields
   pass the stored drawings' checks. The server builds `open_url` from `CHARTGEN_BASE_URL` with `symbol`,
-  `interval`, `type` (candles or Heikin Ashi only), `ind` when the call named indicators, and `draw`;
-  without a base URL it leaves `open_url` out.
+  `interval`, `type` (candles or Heikin Ashi only), `ind` when the call named at least one indicator,
+  and `draw`; without a base URL it leaves `open_url` out. A call with no indicators writes no `ind`
+  rather than an empty one, so opening the link never clears the receiver's indicators.
 - **Merge, not replace.** A link's drawings join the symbol's stored ones as the user's own. One with
   the same tool, points and text as a stored drawing is that drawing and is skipped, so a link opened
   twice adds nothing, and none go past the 500 a symbol keeps. The chart then loads them as usual:

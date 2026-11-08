@@ -885,8 +885,11 @@ fn open_url(base: &str, args: &Value, symbol: &str, interval: &str, draw: &str) 
         .or_else(|| args.get("panels"))
         .and_then(Value::as_array)
     {
+        // `ind=` would clear the receiver's indicators: only a list with some sets them.
         let ind: Vec<String> = list.iter().filter_map(share_indicator).collect();
-        q.append_pair("ind", &ind.join(","));
+        if !ind.is_empty() {
+            q.append_pair("ind", &ind.join(","));
+        }
     }
     q.append_pair("draw", draw);
     // As the web app writes its links: these stay readable.
@@ -7166,6 +7169,13 @@ mod drawing_tests {
             open_url("https://chart.example/", &args, "BTCUSDT", "4h", "segment(1:2;3:4;color:%23ff0000)"),
             "https://chart.example/?symbol=BTCUSDT&interval=4h&type=heikin_ashi&ind=rsi,ema(length:21)&draw=segment(1:2;3:4;color:%2523ff0000)"
         );
+        // No indicators writes no `ind`: an empty one would clear the receiver's.
+        for args in [json!({ "indicators": [] }), json!({})] {
+            assert_eq!(
+                open_url("https://chart.example", &args, "BTCUSDT", "1h", "x(1:2)"),
+                "https://chart.example/?symbol=BTCUSDT&interval=1h&draw=x(1:2)"
+            );
+        }
     }
 
     #[test]

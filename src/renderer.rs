@@ -154,16 +154,8 @@ pub fn render_labeled(
         .clamp(0, View::of(&data.bars).future);
     let x_max = (n as i64 + future) as f64;
 
-    // Title bar height
-    let title_h: u32 = 40;
-
-    // Layout: title + candle 55% + panels
-    let candle_h = ((height - title_h) as f64 * 0.55) as u32;
-    let panel_h = if n_panels > 0 {
-        (height - title_h - candle_h) / n_panels as u32
-    } else {
-        0
-    };
+    let title_h = TITLE_H;
+    let (candle_h, panel_h) = layout(height, n_panels);
 
     let root = BitMapBackend::new(output, (width, height)).into_drawing_area();
     root.fill(&BG)?;
@@ -606,6 +598,22 @@ pub fn render_labeled(
 
     root.present()?;
     Ok(())
+}
+
+/// Height of the title bar.
+const TITLE_H: u32 = 40;
+/// Strip under the last pane for the date labels, as a panel's x label area.
+const DATE_LABELS_H: u32 = 20;
+
+/// Heights of the price pane and of each panel below it: the price pane takes 55% under
+/// the title and the panels share the rest, or with no panels all of it but the date labels.
+fn layout(height: u32, n_panels: usize) -> (u32, u32) {
+    let below_title = height.saturating_sub(TITLE_H);
+    if n_panels == 0 {
+        return (below_title.saturating_sub(DATE_LABELS_H), 0);
+    }
+    let candle_h = (below_title as f64 * 0.55) as u32;
+    (candle_h, (below_title - candle_h) / n_panels as u32)
 }
 
 // ---- Drawings (ADR-0054) ----
@@ -1277,6 +1285,17 @@ fn auto_range(r: &PanelResult) -> (f64, f64) {
 mod tests {
     use super::*;
     const NAN: f64 = f64::NAN;
+
+    #[test]
+    fn without_panels_the_price_pane_takes_the_height() {
+        // Title, then the price pane down to the date labels.
+        assert_eq!(layout(1080, 0), (1020, 0));
+        assert_eq!(layout(400, 0), (340, 0));
+        // With panels, as before: 55% for the price pane, the rest shared.
+        assert_eq!(layout(1080, 1), (572, 468));
+        assert_eq!(layout(1080, 2), (572, 234));
+        assert_eq!(layout(800, 3), (418, 114));
+    }
 
     #[test]
     fn the_title_names_how_the_bars_are_built() {
