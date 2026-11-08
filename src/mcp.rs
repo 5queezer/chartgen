@@ -587,7 +587,11 @@ pub(crate) fn generate_chart(
     }
 
     // Their shape is checked before any bars are read; their times once the bars are in.
-    let requests = match args.get("drawings").filter(|v| !v.is_null()) {
+    // An empty list is no drawings, as absent.
+    let given = args
+        .get("drawings")
+        .filter(|v| !v.is_null() && v.as_array().is_none_or(|a| !a.is_empty()));
+    let requests = match given {
         None => None,
         Some(v) => match drawings::parse(v, fetch::now_ms()) {
             Ok(r) => Some(r),
@@ -817,7 +821,7 @@ pub(crate) fn generate_chart(
     if let Some(drawn) = &drawn {
         content.push(json!({
             "type": "text",
-            "text": serde_json::to_string_pretty(&drawn_json(args, symbol, drawn)).unwrap(),
+            "text": serde_json::to_string_pretty(&drawn_json(args, symbol, interval, drawn)).unwrap(),
         }));
     }
 
@@ -838,7 +842,12 @@ pub(crate) fn generate_chart(
 
 /// What a call's drawings came out as (ADR-0054): each with its points on their bars, what
 /// an agent should check, and a link that opens them in the web app.
-fn drawn_json(args: &Value, symbol: Option<&str>, drawn: &drawings::Resolved) -> Value {
+fn drawn_json(
+    args: &Value,
+    symbol: Option<&str>,
+    interval: &str,
+    drawn: &drawings::Resolved,
+) -> Value {
     let mut warnings = drawn.warnings.clone();
     let base = std::env::var("CHARTGEN_BASE_URL")
         .ok()
@@ -855,23 +864,17 @@ fn drawn_json(args: &Value, symbol: Option<&str>, drawn: &drawings::Resolved) ->
         "warnings": warnings,
     });
     if let (Some(base), Some(symbol), Some(draw)) = (base, symbol, draw) {
-        out["open_url"] = json!(open_url(&base, args, symbol, &draw));
+        out["open_url"] = json!(open_url(&base, args, symbol, interval, &draw));
     }
     out
 }
 
-/// A share link (ADR-0029) to the chart of `args` with `draw`: symbol, interval, the
-/// indicators if the call named them, and its style if the web app has it.
-fn open_url(base: &str, args: &Value, symbol: &str, draw: &str) -> String {
+/// A share link (ADR-0029) to the chart of `args` with `draw`: symbol, canonical interval,
+/// the indicators if the call named them, and its style if the web app has it.
+fn open_url(base: &str, args: &Value, symbol: &str, interval: &str, draw: &str) -> String {
     let mut q = url::form_urlencoded::Serializer::new(String::new());
     q.append_pair("symbol", symbol);
-    if let Some(iv) = args
-        .get("timeframe")
-        .or_else(|| args.get("interval"))
-        .and_then(Value::as_str)
-    {
-        q.append_pair("interval", iv);
-    }
+    q.append_pair("interval", interval);
     if let Some(style @ ("candles" | "heikin_ashi")) =
         args.get("chart_style").and_then(Value::as_str)
     {
@@ -949,10 +952,13 @@ fn inspect_chart(id: Option<Value>, args: &Value, source: fetch::DataSource) -> 
     };
     let bars = (args.get("bars").and_then(Value::as_u64).unwrap_or(200) as usize)
         .clamp(1, MAX_INSPECT_BARS);
-    let depth = args.get("swing_depth").and_then(Value::as_u64).unwrap_or(5);
-    if !(1..=50).contains(&depth) {
-        return tool_err(id, "swing_depth must be an integer from 1 to 50.");
-    }
+    let depth = match args.get("swing_depth").filter(|v| !v.is_null()) {
+        None => 5,
+        Some(v) => match v.as_u64().filter(|d| (1..=50).contains(d)) {
+            Some(d) => d,
+            None => return tool_err(id, "swing_depth must be an integer from 1 to 50."),
+        },
+    };
     let end_time = match end_time_arg(args) {
         Ok(t) => t,
         Err(e) => return tool_err(id, &e),
@@ -7048,6 +7054,9 @@ mod drawing_tests {
         }
         let resp = inspect_chart(Some(json!(1)), &json!({}), fetch::DataSource::Sample);
         assert_eq!(resp["result"]["isError"], true);
+        let bad = json!({ "ticker": "BTCUSDT", "swing_depth": "7" });
+        let resp = inspect_chart(Some(json!(1)), &bad, fetch::DataSource::Sample);
+        assert_eq!(resp["result"]["isError"], true);
     }
 
     #[test]
@@ -7082,6 +7091,9 @@ mod drawing_tests {
             })
             .collect();
         let plain = chart(json!({}));
+        // No drawings is the plain chart, with no drawings item.
+        let empty = chart(json!({ "drawings": [] }));
+        assert_eq!(empty["result"]["content"].as_array().unwrap().len(), 1);
         let drawn = chart(json!({ "drawings": all }));
         let content = drawn["result"]["content"].as_array().unwrap();
         assert_eq!(content.len(), 2, "{drawn}");
@@ -7151,7 +7163,7 @@ mod drawing_tests {
         let args = json!({ "ticker": "BTCUSDT", "timeframe": "4h", "chart_style": "heikin_ashi",
                            "indicators": ["rsi", { "name": "ema", "length": 21, "id": "e" }] });
         assert_eq!(
-            open_url("https://chart.example/", &args, "BTCUSDT", "segment(1:2;3:4;color:%23ff0000)"),
+            open_url("https://chart.example/", &args, "BTCUSDT", "4h", "segment(1:2;3:4;color:%23ff0000)"),
             "https://chart.example/?symbol=BTCUSDT&interval=4h&type=heikin_ashi&ind=rsi,ema(length:21)&draw=segment(1:2;3:4;color:%2523ff0000)"
         );
     }
