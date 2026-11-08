@@ -71,7 +71,7 @@ describe("screenshotCaption", () => {
     });
     expect(screenshotCaption("AAPL", "1wk", [], {}).title).toBe("AAPL · 1W");
   });
-  it("names the visible indicators as their chips do", () => {
+  it("names the visible indicators by their short names", () => {
     const entries = [
       "rsi",
       { name: "rsi", id: "rsi#2", length: 21 },

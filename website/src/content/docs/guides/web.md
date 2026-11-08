@@ -97,7 +97,7 @@ stays visible.
   as a PNG on the chart background, named
   `<SYMBOL>_<TF>_<yyyy-mm-dd_HHMM>.png` (local time). A header above the
   chart gives the symbol and timeframe (`BTCUSDT · 1h`) and, below them, the
-  visible indicators as their chips name them; hidden indicators are left
+  visible indicators by name, with params where an indicator repeats; hidden indicators are left
   out, and a long list wraps. The site's host (`chartgen.vasudev.xyz`, or
   your own on a self-hosted server) is marked in the bottom-right corner of
   the chart. The legend rows above the panes are not part of the image.

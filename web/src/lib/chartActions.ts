@@ -127,18 +127,18 @@ const SEPARATOR = " · ";
 export interface ScreenshotCaption {
   /** `BTCUSDT · 1h`, the timeframe as the toolbar writes it. */
   title: string;
-  /** The chip names of the visible indicators, in chip order. */
+  /** Short names of the visible indicators, in legend order. */
   indicators: string[];
 }
 
-/** The header of a screenshot: symbol, timeframe and the chips of the visible indicators. */
+/** The header of a screenshot: symbol, timeframe and the short names of the visible indicators. */
 export function screenshotCaption(
   symbol: string,
   timeframe: Timeframe,
   entries: readonly ActiveIndicator[],
   defaults: ParamDefaults,
 ): ScreenshotCaption {
-  // Labelled over all entries, hidden ones too, so the names match the chips.
+  // Labelled over all entries, hidden ones too, so repeated instances read apart as in the picker and dialogs.
   const labels = paramLabels(entries, defaults, true);
   return {
     title: `${symbol}${SEPARATOR}${timeframeLabel(timeframe)}`,
