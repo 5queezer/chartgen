@@ -16,6 +16,13 @@
 // [A-Za-z0-9._-] percent-encoded. Decoding keeps every value as the raw
 // string: the type comes from the indicator registry (`reconcileIndicators`),
 // which also drops params the registry rejects.
+//
+// `draw` (ADR-0054) carries drawings of the link's symbol, as a comma list of
+// `tool(t:p;t:p;key:value)`: each point is unix seconds and a price, then the
+// style keys color, fill, width, dash and fontSize, and cgText's text, values
+// written as in `ind`. Tools, point counts and styles are checked as stored
+// drawings are; an invalid item is dropped. The MCP server writes the same
+// form for generate_chart's `open_url` (src/drawings.rs, `share_param`).
 
 import {
   decodeChartParams,
@@ -25,6 +32,8 @@ import {
   type ChartParams,
 } from "./priceBars";
 import { parseCompare } from "../stores/compare";
+import { parseRecord, type DrawingRecord } from "../stores/drawings";
+import drawingTools from "../generated/drawing-tools.json";
 import {
   CHART_TYPES,
   normalizeSymbol,
@@ -52,6 +61,7 @@ export const SHARE_PARAMS = [
   "ind",
   "compare",
   "tz",
+  "draw",
 ] as const;
 
 export interface ShareState {
@@ -63,6 +73,8 @@ export interface ShareState {
   indicators: ActiveIndicator[];
   compare: string[];
   timeZone: TimeZoneChoice;
+  /** Drawings of `symbol` (ADR-0054); absent or empty writes no `draw`. */
+  drawings?: readonly DrawingRecord[];
 }
 
 /** What a link carried; absent fields keep the stored state. */
@@ -77,6 +89,16 @@ const NAME = /^[A-Za-z0-9_]{1,40}$/;
 const KEY = /^[A-Za-z_][A-Za-z0-9_]{0,40}$/;
 /** Client-only fields and the name never come from a link. */
 const RESERVED_KEYS = new Set(["name", "id", "hidden", "style"]);
+
+/** Longest `draw` value and most drawings a link may carry (as the MCP server writes). */
+export const MAX_DRAW_LENGTH = 8192;
+export const MAX_LINK_DRAWINGS = drawingTools.max_drawings;
+/** Point count of each tool, from the server's table. */
+const POINTS: ReadonlyMap<string, number> = new Map(
+  drawingTools.tools.map((t) => [t.name, t.points.length]),
+);
+const STYLE_KEYS = ["color", "fill", "width", "dash", "fontSize"] as const;
+const DECIMAL = /^-?\d+(\.\d+)?$/;
 
 /** Split on commas outside parentheses. */
 function splitTop(s: string): string[] {
@@ -149,6 +171,75 @@ export function decodeIndicators(raw: string): ActiveIndicator[] {
   return normalizeInstances(out);
 }
 
+function decodeDrawing(part: string): DrawingRecord | null {
+  const open = part.indexOf("(");
+  if (open < 0 || !part.endsWith(")")) return null;
+  const name = part.slice(0, open);
+  const points: { timestamp: number; value: number }[] = [];
+  const style: Record<string, unknown> = {};
+  let text: string | undefined;
+  for (const kv of part.slice(open + 1, -1).split(";")) {
+    const i = kv.indexOf(":");
+    if (i < 0) return null;
+    const key = kv.slice(0, i);
+    const raw = kv.slice(i + 1);
+    if (DECIMAL.test(key)) {
+      if (!DECIMAL.test(raw)) return null;
+      points.push({ timestamp: Math.round(Number(key) * 1000), value: Number(raw) });
+      continue;
+    }
+    const value = decodeValue(raw);
+    if (value === undefined) continue;
+    if (key === "text") text = value;
+    else if (key === "width" || key === "fontSize") style[key] = Number(value);
+    else if ((STYLE_KEYS as readonly string[]).includes(key)) style[key] = value;
+  }
+  if (points.length !== POINTS.get(name)) return null;
+  if (name === "cgText" && text === undefined) return null;
+  return parseRecord({
+    name,
+    points,
+    style,
+    extendData: name === "cgText" ? text : undefined,
+    lock: false,
+    visible: true,
+  });
+}
+
+/**
+ * Drawings of a `draw` value. Malformed items are skipped; a value over
+ * MAX_DRAW_LENGTH is ignored whole and at most MAX_LINK_DRAWINGS are kept.
+ */
+export function decodeDrawings(raw: string): DrawingRecord[] {
+  if (raw.length > MAX_DRAW_LENGTH) return [];
+  const out: DrawingRecord[] = [];
+  for (const part of splitTop(raw)) {
+    if (out.length >= MAX_LINK_DRAWINGS) break;
+    const rec = decodeDrawing(part);
+    if (rec !== null) out.push(rec);
+  }
+  return out;
+}
+
+/** `draw` value of `records`; null when they do not fit in a link. */
+export function encodeDrawings(records: readonly DrawingRecord[]): string | null {
+  if (records.length > MAX_LINK_DRAWINGS) return null;
+  const value = records
+    .map((r) => {
+      const parts = r.points.map(
+        (p) => `${numberText(p.timestamp / 1000)}:${numberText(p.value)}`,
+      );
+      for (const k of STYLE_KEYS) {
+        const v = encodeValue(r.style?.[k]);
+        if (v !== null) parts.push(`${k}:${v}`);
+      }
+      if (r.name === "cgText" && r.extendData) parts.push(`text:${textValue(r.extendData)}`);
+      return `${r.name}(${parts.join(";")})`;
+    })
+    .join(",");
+  return value.length <= MAX_DRAW_LENGTH ? value : null;
+}
+
 /** Decimal text of a finite number, never in exponent notation. */
 function numberText(n: number): string {
   const t = String(n);
@@ -214,6 +305,8 @@ export function encodeShare(
   // `compare=` (empty) clears the receiver's compare symbols.
   p.set("compare", s.compare.join(","));
   p.set("tz", s.timeZone);
+  const draw = s.drawings?.length ? encodeDrawings(s.drawings) : null;
+  if (draw !== null) p.set("draw", draw);
   return p
     .toString()
     .replace(/%(2C|3A|28|29|3B|2F)/g, (_, h: string) =>
@@ -265,6 +358,12 @@ export function decodeShare(search: string): SharePatch {
       ? keyword
       : tz;
   if (isTimeZoneChoice(tzChoice)) patch.timeZone = tzChoice;
+
+  const draw = p.get("draw");
+  if (draw !== null) {
+    const drawings = decodeDrawings(draw);
+    if (drawings.length > 0) patch.drawings = drawings;
+  }
 
   return patch;
 }

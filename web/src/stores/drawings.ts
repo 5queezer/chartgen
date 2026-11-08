@@ -498,3 +498,21 @@ export function saveDrawings(
     return false;
   }
 }
+
+/** What makes two drawings the same one, for a link opened twice: tool, points and text. */
+const sameness = (r: DrawingRecord) => JSON.stringify([r.name, r.points, r.extendData ?? null]);
+
+/**
+ * Add a share link's drawings (ADR-0054) to a symbol's stored ones, as
+ * drawings of the user's own: any already there are skipped, and none go past
+ * MAX_DRAWINGS. How many were added, or null when they could not be saved.
+ */
+export function importDrawings(symbol: string, records: readonly DrawingRecord[]): number | null {
+  const stored = loadDrawings(symbol);
+  const seen = new Set(stored.map(sameness));
+  const fresh = records
+    .filter((r) => !seen.has(sameness(r)) && seen.add(sameness(r)))
+    .slice(0, Math.max(0, MAX_DRAWINGS - stored.length));
+  if (fresh.length === 0) return 0;
+  return saveDrawings(symbol, [...stored, ...fresh]) ? fresh.length : null;
+}

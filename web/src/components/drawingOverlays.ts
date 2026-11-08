@@ -1,5 +1,6 @@
-// klinecharts overlays for the measure tools, trend-based fib extension,
-// Andrews' pitchfork and long/short position tools (registered on import).
+// klinecharts overlays for the rectangle, horizontal ray, text, the measure
+// tools, trend-based fib extension, Andrews' pitchfork and long/short position
+// tools (registered on import).
 // The math lives in lib/drawingMath.ts; this file only turns it into figures.
 //
 // Pixels come from the overlay's `coordinates`, prices from `overlay.points`
@@ -394,3 +395,81 @@ for (const [name, kind] of Object.entries(POSITION_KINDS)) {
     },
   });
 }
+
+// klinecharts has no rectangle; two corner points, drawn as a polygon
+// whose colors come from the overlay's `styles.polygon`.
+registerOverlay({
+  name: "cgRect",
+  totalStep: 3,
+  needDefaultPointFigure: true,
+  needDefaultXAxisFigure: true,
+  needDefaultYAxisFigure: true,
+  createPointFigures: ({ coordinates }) => {
+    const [a, b] = coordinates;
+    if (!a || !b) return [];
+    return {
+      type: "polygon",
+      attrs: {
+        coordinates: [
+          { x: a.x, y: a.y },
+          { x: b.x, y: a.y },
+          { x: b.x, y: b.y },
+          { x: a.x, y: b.y },
+        ],
+      },
+    };
+  },
+});
+
+// klinecharts' horizontalRayLine takes two clicks and points toward the
+// second one. TradingView places it with one click, extending right.
+registerOverlay({
+  name: "horizontalRayLine",
+  totalStep: 2,
+  needDefaultPointFigure: true,
+  needDefaultXAxisFigure: true,
+  needDefaultYAxisFigure: true,
+  createPointFigures: ({ coordinates, bounding }) => {
+    const a = coordinates[0];
+    if (!a) return [];
+    return {
+      type: "line",
+      attrs: { coordinates: [a, { x: bounding.width, y: a.y }] },
+    };
+  },
+});
+
+// klinecharts' simpleAnnotation ignores all mouse events, so it could be
+// neither selected nor edited. This label can; its text is `extendData`.
+registerOverlay({
+  name: "cgText",
+  totalStep: 2,
+  needDefaultPointFigure: true,
+  needDefaultXAxisFigure: false,
+  needDefaultYAxisFigure: false,
+  createPointFigures: ({ overlay, coordinates }) => {
+    const c = coordinates[0];
+    if (!c) return [];
+    const own = (overlay.styles as { text?: { color?: string; size?: number } } | null)?.text;
+    return {
+      type: "text",
+      attrs: {
+        x: c.x,
+        y: c.y,
+        text: typeof overlay.extendData === "string" ? overlay.extendData : "",
+        baseline: "middle",
+      },
+      styles: {
+        style: "stroke_fill",
+        color: own?.color ?? PALETTES[theme()].fg,
+        backgroundColor: PALETTES[theme()].surface,
+        borderColor: "#2962ff",
+        size: own?.size ?? 12,
+        paddingLeft: 6,
+        paddingRight: 6,
+        paddingTop: 3,
+        paddingBottom: 3,
+      },
+    };
+  },
+});
