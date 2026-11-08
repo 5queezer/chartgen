@@ -1791,6 +1791,9 @@ export function Chart(props: ChartProps): JSX.Element {
         panes[name],
       );
     }
+    // A hidden row drops its values (ADR-0053) even when the toggle came
+    // from the keyboard, a menu or the Object Tree, with no crosshair move.
+    untrack(recomputeHeaders);
   });
 
   /**

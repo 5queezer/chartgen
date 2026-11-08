@@ -81,6 +81,7 @@ import {
   createServerAlertPoll,
   chartTick,
   feedPrice,
+  showToast,
 } from "./services/alertEngine";
 import {
   activeIndicators,
@@ -147,7 +148,7 @@ export function App(props: { authError: string | null; user: SignedInUser | null
     const c = chart();
     if (!c) return;
     const palette = PALETTES[theme()];
-    void downloadChartImage(
+    downloadChartImage(
       c,
       screenshotFilename(symbol(), timeframe(), new Date()),
       screenshotCaption(symbol(), timeframe(), activeIndicators(), paramDefaults()),
@@ -156,7 +157,7 @@ export function App(props: { authError: string | null; user: SignedInUser | null
         fg: palette.fg,
         fgMuted: palette.fgMuted,
       },
-    );
+    ).catch(() => showToast("Screenshot failed: the chart image could not be read."));
   };
 
   const resetView = () => {
