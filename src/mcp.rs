@@ -10,6 +10,7 @@ use crate::fetch;
 use crate::intrabars;
 use crate::search;
 use chartgen::data;
+use chartgen::drawings;
 use chartgen::engine::Engine;
 use chartgen::indicator::Indicator;
 use chartgen::indicators;
@@ -90,6 +91,10 @@ pub fn handle_mcp_request(
         "initialize" => handle_initialize(id),
         "tools/list" => handle_tools_list(id, scripting_enabled()),
         "tools/call" => handle_tools_call(id, params, engine, token, push, user),
+        "prompts/list" => {
+            json!({ "jsonrpc": "2.0", "id": id, "result": chartgen::mcp_schema::prompts_list() })
+        }
+        "prompts/get" => handle_prompts_get(id, params),
         "ping" => json!({ "jsonrpc": "2.0", "id": id, "result": {} }),
         _ => json!({
             "jsonrpc": "2.0",
@@ -106,7 +111,8 @@ fn handle_initialize(id: Option<Value>) -> Value {
         "result": {
             "protocolVersion": "2025-03-26",
             "capabilities": {
-                "tools": {}
+                "tools": {},
+                "prompts": {}
             },
             "serverInfo": {
                 "name": "chartgen",
@@ -114,6 +120,19 @@ fn handle_initialize(id: Option<Value>) -> Value {
             }
         }
     })
+}
+
+/// One of `prompts/list`'s prompts, by `params.name` (ADR-0054).
+fn handle_prompts_get(id: Option<Value>, params: Option<&Value>) -> Value {
+    let name = params.and_then(|p| p["name"].as_str()).unwrap_or("");
+    match chartgen::mcp_schema::prompt_get(name) {
+        Some(result) => json!({ "jsonrpc": "2.0", "id": id, "result": result }),
+        None => json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "error": { "code": -32602, "message": format!("Unknown prompt: {name}") }
+        }),
+    }
 }
 
 /// The scripting tools are listed only when `scripting` (CHARTGEN_SCRIPTING=1).
@@ -177,6 +196,8 @@ fn call_tool(
     match tool_name {
         "generate_chart" => tool_generate_chart(id, &arguments, user),
         "list_indicators" => tool_list_indicators(id, user),
+        "list_drawing_tools" => tool_ok(id, drawings::tools_json()),
+        "inspect_chart" => inspect_chart(id, &arguments, fetch::DataSource::from_env()),
         "get_indicators" => tool_get_indicators(id, &arguments, engine),
         "get_quotes" => tool_get_quotes(id, &arguments),
         "get_footprint" => tool_get_footprint(id, &arguments),
@@ -565,6 +586,15 @@ pub(crate) fn generate_chart(
         );
     }
 
+    // Their shape is checked before any bars are read; their times once the bars are in.
+    let requests = match args.get("drawings").filter(|v| !v.is_null()) {
+        None => None,
+        Some(v) => match drawings::parse(v, fetch::now_ms()) {
+            Ok(r) => Some(r),
+            Err(problems) => return tool_err(id, &drawings::problems_text(&problems)),
+        },
+    };
+
     if panels_value
         .as_array()
         .is_some_and(|a| a.len() > MAX_CHART_INDICATORS)
@@ -668,6 +698,15 @@ pub(crate) fn generate_chart(
         _ => None,
     };
 
+    // On the bars the chart shows: a series' warmup bars are not among them.
+    let drawn = match requests
+        .map(|r| drawings::resolve(r, &data.bars[data.len().saturating_sub(bars)..]))
+    {
+        None => None,
+        Some(Ok(d)) => Some(d),
+        Some(Err(problems)) => return tool_err(id, &drawings::problems_text(&problems)),
+    };
+
     // Compute indicators up-front (once) so both the summary and the series
     // payloads can reuse the same PanelResult values — no recomputation,
     // values already aligned 1:1 with bars. The PNG renders from them too.
@@ -745,6 +784,7 @@ pub(crate) fn generate_chart(
             width,
             height,
             style_label.as_deref(),
+            drawn.as_ref().map_or(&[], |d| &d.drawings),
         ) {
             return tool_err(id, &format!("Render error: {}", e));
         }
@@ -774,6 +814,13 @@ pub(crate) fn generate_chart(
         }));
     }
 
+    if let Some(drawn) = &drawn {
+        content.push(json!({
+            "type": "text",
+            "text": serde_json::to_string_pretty(&drawn_json(args, symbol, drawn)).unwrap(),
+        }));
+    }
+
     // format=png has no JSON payload to carry the errors: add a text item.
     if let (Some(errors), "png") = (&errors_value, format.as_str()) {
         content.push(json!({
@@ -787,6 +834,190 @@ pub(crate) fn generate_chart(
         "id": id,
         "result": { "content": content }
     })
+}
+
+/// What a call's drawings came out as (ADR-0054): each with its points on their bars, what
+/// an agent should check, and a link that opens them in the web app.
+fn drawn_json(args: &Value, symbol: Option<&str>, drawn: &drawings::Resolved) -> Value {
+    let mut warnings = drawn.warnings.clone();
+    let base = std::env::var("CHARTGEN_BASE_URL")
+        .ok()
+        .filter(|b| !b.is_empty());
+    let draw = drawings::share_param(&drawn.drawings);
+    if base.is_some() && draw.is_none() {
+        warnings.push(format!(
+            "open_url is left out: the drawings take more than the {} characters a link carries",
+            drawings::MAX_SHARE_LENGTH
+        ));
+    }
+    let mut out = json!({
+        "drawings": drawn.drawings.iter().map(drawings::Drawing::to_json).collect::<Vec<_>>(),
+        "warnings": warnings,
+    });
+    if let (Some(base), Some(symbol), Some(draw)) = (base, symbol, draw) {
+        out["open_url"] = json!(open_url(&base, args, symbol, &draw));
+    }
+    out
+}
+
+/// A share link (ADR-0029) to the chart of `args` with `draw`: symbol, interval, the
+/// indicators if the call named them, and its style if the web app has it.
+fn open_url(base: &str, args: &Value, symbol: &str, draw: &str) -> String {
+    let mut q = url::form_urlencoded::Serializer::new(String::new());
+    q.append_pair("symbol", symbol);
+    if let Some(iv) = args
+        .get("timeframe")
+        .or_else(|| args.get("interval"))
+        .and_then(Value::as_str)
+    {
+        q.append_pair("interval", iv);
+    }
+    if let Some(style @ ("candles" | "heikin_ashi")) =
+        args.get("chart_style").and_then(Value::as_str)
+    {
+        q.append_pair("type", style);
+    }
+    if let Some(list) = args
+        .get("indicators")
+        .or_else(|| args.get("panels"))
+        .and_then(Value::as_array)
+    {
+        let ind: Vec<String> = list.iter().filter_map(share_indicator).collect();
+        q.append_pair("ind", &ind.join(","));
+    }
+    q.append_pair("draw", draw);
+    // As the web app writes its links: these stay readable.
+    let query = q
+        .finish()
+        .replace("%2C", ",")
+        .replace("%3A", ":")
+        .replace("%28", "(")
+        .replace("%29", ")")
+        .replace("%3B", ";")
+        .replace("%2F", "/");
+    format!("{}/?{query}", base.trim_end_matches('/'))
+}
+
+/// One `ind` entry of a share link: `name(key:value;...)`, scalar params only.
+fn share_indicator(entry: &Value) -> Option<String> {
+    let name = entry.as_str().or_else(|| entry["name"].as_str())?;
+    let params: Vec<String> = entry
+        .as_object()
+        .into_iter()
+        .flatten()
+        .filter(|(k, _)| !["name", "id"].contains(&k.as_str()))
+        .filter_map(|(k, v)| {
+            let v = match v {
+                Value::Number(n) => n.to_string(),
+                Value::Bool(b) => b.to_string(),
+                Value::String(s) if !s.is_empty() => drawings::escape(s),
+                _ => return None,
+            };
+            Some(format!("{k}:{v}"))
+        })
+        .collect();
+    Some(if params.is_empty() {
+        name.to_string()
+    } else {
+        format!("{name}({})", params.join(";"))
+    })
+}
+
+/// Most bars `inspect_chart` reads.
+const MAX_INSPECT_BARS: usize = 1000;
+/// Swing points `inspect_chart` returns, newest last.
+const MAX_SWINGS: usize = 12;
+
+/// Read-only facts of a chart for placing drawings (ADR-0054): its first and last bar, its
+/// price range, and its recent swing highs and lows, each with its time and price.
+fn inspect_chart(id: Option<Value>, args: &Value, source: fetch::DataSource) -> Value {
+    let Some(symbol) = args
+        .get("ticker")
+        .or_else(|| args.get("symbol"))
+        .and_then(Value::as_str)
+    else {
+        return tool_err(id, "inspect_chart needs a ticker.");
+    };
+    let interval = args
+        .get("timeframe")
+        .or_else(|| args.get("interval"))
+        .and_then(Value::as_str)
+        .unwrap_or("4h");
+    let interval = match check_interval(interval) {
+        Ok(canonical) => canonical,
+        Err(e) => return tool_err(id, &e),
+    };
+    let bars = (args.get("bars").and_then(Value::as_u64).unwrap_or(200) as usize)
+        .clamp(1, MAX_INSPECT_BARS);
+    let depth = args.get("swing_depth").and_then(Value::as_u64).unwrap_or(5);
+    if !(1..=50).contains(&depth) {
+        return tool_err(id, "swing_depth must be an integer from 1 to 50.");
+    }
+    let end_time = match end_time_arg(args) {
+        Ok(t) => t,
+        Err(e) => return tool_err(id, &e),
+    };
+    let data = match fetch::fetch_ohlcv(source, symbol, &interval, bars, end_time) {
+        Ok(f) => f.data,
+        Err(e) => return tool_err(id, &format!("Data fetch failed: {e}")),
+    };
+    let shown = &data.bars[data.len().saturating_sub(bars)..];
+    let Some(times) = drawings::bar_times(shown).filter(|t| !t.is_empty()) else {
+        return tool_err(id, "No bars with times for this symbol and interval.");
+    };
+    let at = |i: usize| json!({ "time": drawings::iso(times[i]), "timestamp": times[i], "bar": i });
+    let (lo_i, hi_i) = (0..shown.len()).fold((0, 0), |(lo, hi), i| {
+        (
+            if shown[i].low < shown[lo].low { i } else { lo },
+            if shown[i].high > shown[hi].high {
+                i
+            } else {
+                hi
+            },
+        )
+    });
+    let view = drawings::View::of(shown);
+    let last = shown.len() - 1;
+    let swings: Vec<Value> = drawings::swings(shown, depth as usize, MAX_SWINGS)
+        .into_iter()
+        .map(|(i, price, high)| {
+            let mut v = at(i);
+            v["price"] = json!(price);
+            v["kind"] = json!(if high { "high" } else { "low" });
+            v["snap"] = json!(if high { "high" } else { "low" });
+            v
+        })
+        .collect();
+    let bar = |i: usize| {
+        let b = &shown[i];
+        let mut v = at(i);
+        for (k, x) in [
+            ("open", b.open),
+            ("high", b.high),
+            ("low", b.low),
+            ("close", b.close),
+        ] {
+            v[k] = json!(x);
+        }
+        v
+    };
+    tool_ok(
+        id,
+        json!({
+            "symbol": symbol,
+            "interval": interval,
+            "bars": shown.len(),
+            "first_bar": bar(0),
+            "last_bar": bar(last),
+            "last_close": shown[last].close,
+            "high": { "price": shown[hi_i].high, "time": drawings::iso(times[hi_i]), "timestamp": times[hi_i], "bar": hi_i },
+            "low": { "price": shown[lo_i].low, "time": drawings::iso(times[lo_i]), "timestamp": times[lo_i], "bar": lo_i },
+            "visible_price_range": { "low": view.price_lo, "high": view.price_hi },
+            "max_bars_past_last": view.future,
+            "swing_depth": depth,
+            "swings": swings,
+        }),
+    )
 }
 
 /// Replace the profiles that want it with their form from lower-timeframe bars
@@ -6774,6 +7005,207 @@ mod tests {
 
 /// Scripted indicators over MCP (ADR-0025): register → list → chart →
 /// delete, per-user isolation, shadowing and per-indicator errors.
+#[cfg(test)]
+mod drawing_tests {
+    use super::*;
+
+    /// 2026-11-01T00:00:00Z: the sample bars are deterministic before it.
+    const END: i64 = 1_793_491_200_000;
+
+    fn chart(extra: Value) -> Value {
+        let mut args = json!({
+            "ticker": "BTCUSDT", "timeframe": "1h", "bars": 100, "end_time": END,
+            "indicators": [], "width": 600, "height": 400
+        });
+        args.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        generate_chart(Some(json!(1)), &args, fetch::DataSource::Sample, None)
+    }
+
+    fn inspect() -> Value {
+        let args = json!({ "ticker": "BTCUSDT", "timeframe": "1h", "bars": 100, "end_time": END });
+        let resp = inspect_chart(Some(json!(1)), &args, fetch::DataSource::Sample);
+        serde_json::from_str(resp["result"]["content"][0]["text"].as_str().unwrap()).unwrap()
+    }
+
+    #[test]
+    fn inspect_chart_names_the_bars_and_swings() {
+        let i = inspect();
+        assert_eq!(i["bars"], 100);
+        assert!(
+            i["first_bar"]["timestamp"].as_i64().unwrap()
+                < i["last_bar"]["timestamp"].as_i64().unwrap()
+        );
+        assert!(i["last_bar"]["timestamp"].as_i64().unwrap() < END);
+        assert_eq!(i["last_close"], i["last_bar"]["close"]);
+        assert!(i["low"]["price"].as_f64().unwrap() <= i["high"]["price"].as_f64().unwrap());
+        let swings = i["swings"].as_array().unwrap();
+        assert!(!swings.is_empty() && swings.len() <= MAX_SWINGS);
+        for w in swings.windows(2) {
+            assert_ne!(w[0]["kind"], w[1]["kind"]);
+            assert!(w[0]["bar"].as_u64() < w[1]["bar"].as_u64());
+        }
+        let resp = inspect_chart(Some(json!(1)), &json!({}), fetch::DataSource::Sample);
+        assert_eq!(resp["result"]["isError"], true);
+    }
+
+    #[test]
+    fn drawings_are_anchored_drawn_and_reported() {
+        let i = inspect();
+        let swings = i["swings"].as_array().unwrap();
+        let low = swings.iter().find(|s| s["kind"] == "low").unwrap();
+        let high = swings.iter().find(|s| s["kind"] == "high").unwrap();
+        let first = &i["first_bar"];
+        let last = &i["last_bar"];
+        let all: Vec<Value> = drawings::TOOLS
+            .iter()
+            .map(|t| {
+                let pts: Vec<Value> = match t.name {
+                    "cgLong" => vec![
+                        json!({ "time": first["time"], "snap": "close" }),
+                        json!({ "time": last["time"], "price": first["close"].as_f64().unwrap() * 1.05 }),
+                        json!({ "time": last["time"], "price": first["close"].as_f64().unwrap() * 0.97 }),
+                    ],
+                    "cgShort" => vec![
+                        json!({ "time": first["time"], "snap": "close" }),
+                        json!({ "time": last["time"], "price": first["close"].as_f64().unwrap() * 0.95 }),
+                        json!({ "time": last["time"], "price": first["close"].as_f64().unwrap() * 1.03 }),
+                    ],
+                    _ => [&low, &high, &last]
+                        .iter()
+                        .take(t.points.len())
+                        .map(|s| json!({ "time": s["time"], "snap": if s["kind"] == "high" { "high" } else { "low" } }))
+                        .collect(),
+                };
+                json!({ "tool": t.name, "points": pts, "text": t.takes_text().then_some("Note") })
+            })
+            .collect();
+        let plain = chart(json!({}));
+        let drawn = chart(json!({ "drawings": all }));
+        let content = drawn["result"]["content"].as_array().unwrap();
+        assert_eq!(content.len(), 2, "{drawn}");
+        assert_ne!(
+            content[0]["data"], plain["result"]["content"][0]["data"],
+            "the image shows the drawings"
+        );
+        let out: Value = serde_json::from_str(content[1]["text"].as_str().unwrap()).unwrap();
+        let ds = out["drawings"].as_array().unwrap();
+        assert_eq!(ds.len(), 18);
+        let seg = &ds[0];
+        assert_eq!(seg["tool"], "segment");
+        assert_eq!(seg["points"][0]["time"], low["time"]);
+        assert_eq!(seg["points"][0]["price"], low["price"]);
+        assert_eq!(seg["points"][0]["snap"], "low");
+        assert!(out["warnings"].is_array());
+        // Each tool alone draws something.
+        for d in &all {
+            let one = chart(json!({ "drawings": [d] }));
+            assert_ne!(
+                one["result"]["content"][0]["data"], plain["result"]["content"][0]["data"],
+                "{}",
+                d["tool"]
+            );
+        }
+    }
+
+    #[test]
+    fn one_bad_drawing_draws_nothing() {
+        let i = inspect();
+        let ok = json!({ "tool": "horizontalStraightLine", "points": [{ "time": i["last_bar"]["time"], "snap": "close" }] });
+        let early = json!({ "tool": "segment", "points": [
+            { "time": "2020-01-01", "price": 1 }, { "time": i["last_bar"]["time"], "price": 2 }
+        ]});
+        let resp = chart(json!({ "drawings": [ok, early] }));
+        assert_eq!(resp["result"]["isError"], true);
+        assert_eq!(
+            resp["result"]["content"].as_array().unwrap().len(),
+            1,
+            "no image"
+        );
+        let err: Value =
+            serde_json::from_str(resp["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(err["drawing_errors"][0]["index"], 1);
+        assert!(err["drawing_errors"][0]["hint"]
+            .as_str()
+            .unwrap()
+            .contains("load more history"));
+        // Shape errors come before any bars are read.
+        let resp = chart(json!({ "drawings": [{ "tool": "cgRect", "points": [] }] }));
+        assert_eq!(resp["result"]["isError"], true);
+        // The demo series has no times to draw on.
+        let resp = generate_chart(
+            Some(json!(1)),
+            &json!({ "drawings": [ok] }),
+            fetch::DataSource::Live,
+            None,
+        );
+        assert!(resp["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("pass a ticker"));
+    }
+
+    #[test]
+    fn open_url_is_a_share_link() {
+        let args = json!({ "ticker": "BTCUSDT", "timeframe": "4h", "chart_style": "heikin_ashi",
+                           "indicators": ["rsi", { "name": "ema", "length": 21, "id": "e" }] });
+        assert_eq!(
+            open_url("https://chart.example/", &args, "BTCUSDT", "segment(1:2;3:4;color:%23ff0000)"),
+            "https://chart.example/?symbol=BTCUSDT&interval=4h&type=heikin_ashi&ind=rsi,ema(length:21)&draw=segment(1:2;3:4;color:%2523ff0000)"
+        );
+    }
+
+    #[test]
+    fn the_prompt_is_listed_and_served() {
+        let list = handle_mcp_request("prompts/list", Some(json!(1)), None, None, None, None, None);
+        assert_eq!(list["result"]["prompts"][0]["name"], "draw-on-chart");
+        let got = handle_mcp_request(
+            "prompts/get",
+            Some(json!(2)),
+            Some(&json!({ "name": "draw-on-chart" })),
+            None,
+            None,
+            None,
+            None,
+        );
+        let text = got["result"]["messages"][0]["content"]["text"]
+            .as_str()
+            .unwrap();
+        assert!(text.contains("inspect_chart") && text.contains("open_url"));
+        let none = handle_mcp_request(
+            "prompts/get",
+            Some(json!(3)),
+            Some(&json!({ "name": "x" })),
+            None,
+            None,
+            None,
+            None,
+        );
+        assert_eq!(none["error"]["code"], -32602);
+        let init = handle_mcp_request("initialize", Some(json!(4)), None, None, None, None, None);
+        assert!(init["result"]["capabilities"]["prompts"].is_object());
+    }
+
+    #[test]
+    fn list_drawing_tools_is_the_table() {
+        let resp = call_tool(
+            "list_drawing_tools",
+            Some(json!(1)),
+            json!({}),
+            None,
+            None,
+            None,
+            None,
+            false,
+        );
+        let v: Value =
+            serde_json::from_str(resp["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(v, drawings::tools_json());
+        assert_eq!(v["tools"].as_array().unwrap().len(), 18);
+    }
+}
+
 #[cfg(all(test, feature = "scripting"))]
 mod scripting_tests {
     use super::*;

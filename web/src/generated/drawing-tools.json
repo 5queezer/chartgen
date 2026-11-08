@@ -1,0 +1,297 @@
+{
+  "max_drawings": 50,
+  "max_text": 200,
+  "point": "{\"time\": T, \"price\": P} or {\"time\": T, \"snap\": \"open\"|\"high\"|\"low\"|\"close\"}. T is unix seconds, unix milliseconds or an ISO 8601 date or date-time (UTC unless it has an offset); it resolves to the bar containing it. snap takes that bar's value.",
+  "style": {
+    "color": "#rgb, #rrggbb, #rrggbbaa or rgba(r, g, b, a)",
+    "dash": [
+      "solid",
+      "dashed",
+      "dotted"
+    ],
+    "fill": "fill color, as color; may carry alpha",
+    "fontSize": [
+      10,
+      12,
+      14,
+      18,
+      24
+    ],
+    "width": "line width in px, 1 to 4"
+  },
+  "tools": [
+    {
+      "label": "Trend line",
+      "name": "segment",
+      "points": [
+        "start",
+        "end"
+      ],
+      "style": [
+        "color",
+        "width",
+        "dash"
+      ],
+      "summary": "A line between two points.",
+      "text": false
+    },
+    {
+      "label": "Ray",
+      "name": "rayLine",
+      "points": [
+        "origin",
+        "a point it passes through, after which it runs on to the edge"
+      ],
+      "style": [
+        "color",
+        "width",
+        "dash"
+      ],
+      "summary": "A line from the first point through the second, extended past it.",
+      "text": false
+    },
+    {
+      "label": "Extended line",
+      "name": "straightLine",
+      "points": [
+        "a point on the line",
+        "another point on the line"
+      ],
+      "style": [
+        "color",
+        "width",
+        "dash"
+      ],
+      "summary": "A line through two points, extended both ways.",
+      "text": false
+    },
+    {
+      "label": "Horizontal line",
+      "name": "horizontalStraightLine",
+      "points": [
+        "the price level (its time only places the handle)"
+      ],
+      "style": [
+        "color",
+        "width",
+        "dash"
+      ],
+      "summary": "A horizontal line across the whole chart.",
+      "text": false
+    },
+    {
+      "label": "Horizontal ray",
+      "name": "horizontalRayLine",
+      "points": [
+        "origin; the ray runs right from it at its price"
+      ],
+      "style": [
+        "color",
+        "width",
+        "dash"
+      ],
+      "summary": "A horizontal line from a point to the right edge.",
+      "text": false
+    },
+    {
+      "label": "Vertical line",
+      "name": "verticalStraightLine",
+      "points": [
+        "the bar (its price only places the handle)"
+      ],
+      "style": [
+        "color",
+        "width",
+        "dash"
+      ],
+      "summary": "A vertical line at a bar.",
+      "text": false
+    },
+    {
+      "label": "Parallel channel",
+      "name": "parallelStraightLine",
+      "points": [
+        "first point of the base line",
+        "second point of the base line",
+        "a point the parallel line passes through"
+      ],
+      "style": [
+        "color",
+        "width",
+        "dash"
+      ],
+      "summary": "Two parallel lines across the whole chart.",
+      "text": false
+    },
+    {
+      "label": "Fib retracement",
+      "name": "fibonacciLine",
+      "points": [
+        "the 100% level",
+        "the 0% level"
+      ],
+      "style": [
+        "color",
+        "width",
+        "dash"
+      ],
+      "summary": "Levels at 0, 23.6, 38.2, 50, 61.8, 78.6 and 100% between two prices, across the whole chart, each labelled with its price.",
+      "text": false
+    },
+    {
+      "label": "Rectangle",
+      "name": "cgRect",
+      "points": [
+        "a corner",
+        "the opposite corner"
+      ],
+      "style": [
+        "color",
+        "width",
+        "dash",
+        "fill"
+      ],
+      "summary": "A filled rectangle, e.g. a support or resistance zone.",
+      "text": false
+    },
+    {
+      "label": "Text annotation",
+      "name": "cgText",
+      "points": [
+        "where the text starts (its left edge, vertically centred)"
+      ],
+      "style": [
+        "color",
+        "fontSize"
+      ],
+      "summary": "A text label; `text` is required.",
+      "text": true
+    },
+    {
+      "label": "Price label",
+      "name": "simpleTag",
+      "points": [
+        "the price (its time only places the handle)"
+      ],
+      "style": [
+        "color",
+        "width",
+        "dash"
+      ],
+      "summary": "A dashed line across the chart with its price on the right.",
+      "text": false
+    },
+    {
+      "label": "Fib extension (trend-based)",
+      "name": "cgFibExt",
+      "points": [
+        "A, where the move starts",
+        "B, where it ends",
+        "C, where the projection starts"
+      ],
+      "style": [
+        "color",
+        "width",
+        "dash"
+      ],
+      "summary": "Levels C + (B - A) x 0, 0.236, 0.382, 0.5, 0.618, 0.786, 1, 1.618, 2.618, 3.618 and 4.236, from C to the right edge.",
+      "text": false
+    },
+    {
+      "label": "Pitchfork",
+      "name": "cgPitchfork",
+      "points": [
+        "P1, the handle",
+        "P2",
+        "P3"
+      ],
+      "style": [
+        "color",
+        "width",
+        "dash"
+      ],
+      "summary": "Andrews' pitchfork: a median line from P1 through the middle of P2-P3, and parallels through P2 and P3, to the edge.",
+      "text": false
+    },
+    {
+      "label": "Price range",
+      "name": "cgPriceRange",
+      "points": [
+        "from",
+        "to"
+      ],
+      "style": [
+        "color",
+        "width",
+        "dash",
+        "fill"
+      ],
+      "summary": "A band between two prices, labelled with the change and its percentage.",
+      "text": false
+    },
+    {
+      "label": "Date range",
+      "name": "cgDateRange",
+      "points": [
+        "from",
+        "to"
+      ],
+      "style": [
+        "color",
+        "width",
+        "dash",
+        "fill"
+      ],
+      "summary": "A band between two times, labelled with the bars and the time between them.",
+      "text": false
+    },
+    {
+      "label": "Date and price range",
+      "name": "cgDatePriceRange",
+      "points": [
+        "from",
+        "to"
+      ],
+      "style": [
+        "color",
+        "width",
+        "dash",
+        "fill"
+      ],
+      "summary": "A box between two points, labelled with the price change and the time between them.",
+      "text": false
+    },
+    {
+      "label": "Long position",
+      "name": "cgLong",
+      "points": [
+        "entry; its time is the box's left edge",
+        "target, above the entry; its time is the box's right edge",
+        "stop, below the entry; the same time as the target"
+      ],
+      "style": [
+        "color",
+        "width",
+        "dash"
+      ],
+      "summary": "A long position: a green target zone above the entry, a red stop zone below it, and the risk/reward ratio.",
+      "text": false
+    },
+    {
+      "label": "Short position",
+      "name": "cgShort",
+      "points": [
+        "entry; its time is the box's left edge",
+        "target, below the entry; its time is the box's right edge",
+        "stop, above the entry; the same time as the target"
+      ],
+      "style": [
+        "color",
+        "width",
+        "dash"
+      ],
+      "summary": "A short position: a green target zone below the entry, a red stop zone above it, and the risk/reward ratio.",
+      "text": false
+    }
+  ]
+}

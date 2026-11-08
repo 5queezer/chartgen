@@ -125,10 +125,18 @@ pub(super) fn call_cost(body: &[u8]) -> u32 {
         return 0;
     }
     let params = &call["params"];
+    let args = &params["arguments"];
+    // Bars and their swing points, no indicators and no image (ADR-0054).
+    if params["name"] == "inspect_chart" {
+        let bars = args["bars"]
+            .as_u64()
+            .unwrap_or(DEFAULT_BARS)
+            .clamp(1, 1_000);
+        return (bars * 2).max(SMALL) as u32;
+    }
     if params["name"] != "generate_chart" {
         return SMALL as u32;
     }
-    let args = &params["arguments"];
     let bars = args["bars"].as_u64().unwrap_or(DEFAULT_BARS).min(MAX_BARS);
     let series = match args.get("indicators").or_else(|| args.get("panels")) {
         Some(list) => list.as_array().map_or(0, |l| l.iter().map(weight).sum()),
@@ -997,6 +1005,17 @@ mod tests {
             call_cost(br#"{"method":"tools/call","params":{"name":"get_x"}}"#),
             1_000
         );
+        let inspect = |bars: u64| {
+            call_cost(
+                serde_json::json!({ "method": "tools/call",
+                    "params": { "name": "inspect_chart", "arguments": { "bars": bars } } })
+                .to_string()
+                .as_bytes(),
+            )
+        };
+        assert_eq!(inspect(200), 1_000, "inspect_chart is small");
+        assert_eq!(inspect(1000), 2_000);
+        assert_eq!(inspect(99_999), 2_000, "at most 1000 bars");
     }
 
     #[test]

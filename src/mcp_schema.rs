@@ -5,6 +5,7 @@
 //! handlers in `src/mcp.rs` wrap `tools_list_result()` with the JSON-RPC
 //! envelope; this module owns the single source of truth for the schemas.
 
+use crate::drawings::{DASHES, FONT_SIZES, MAX_DRAWINGS, MAX_TEXT, TOOLS};
 use serde_json::{json, Value};
 
 /// Return the raw `result` object for a `tools/list` JSON-RPC response.
@@ -116,7 +117,29 @@ pub fn tools_list_result() -> Value {
                             "enum": ["png", "summary", "both", "series"],
                             "description": "Output format. 'png' (default) returns a rendered chart image. 'summary' returns a compact JSON summary (OHLCV stats, last indicator values, signals, divergences, levels) — typically 10-50x fewer tokens than a PNG and ideal for automated analysis without vision. 'both' returns the PNG plus the JSON summary. 'series' returns a full per-bar time-series JSON payload (every OHLCV bar plus 1:1 aligned indicator value arrays with NaN→null for pre-warmup, signals with bar timestamps, hlines, and y_range, a per-indicator future block with the values plotted past the last bar (Ichimoku cloud), plus has_more=true when older history may exist) — ideal for downstream numeric computation.",
                             "default": "png"
-                        }
+                        },
+                        "drawings": drawings_schema()
+                    }
+                }
+            },
+            {
+                "name": "list_drawing_tools",
+                "description": "List the 18 drawing tools generate_chart's `drawings` takes: the web app's own tools (trend line, ray, extended, horizontal and vertical lines, parallel channel, fib retracement and trend-based extension, rectangle, text, price label, pitchfork, price/date ranges, long and short positions). For each: name, label, what each of its points is, which style fields apply and whether it takes text. Read-only and free. The `draw-on-chart` prompt walks through drawing.",
+                "inputSchema": { "type": "object", "properties": {} }
+            },
+            {
+                "name": "inspect_chart",
+                "description": "Read-only facts of a chart, to place drawings on real bars instead of guessing prices: the first and last bar (time, open, high, low, close), the bar count, the highest high and lowest low with their times, the last close, the price range the PNG shows, and the most recent swing highs and lows (zigzag pivots with swing_depth bars on each side), each with its time and price and the `snap` that anchors a drawing point to it. Take the same ticker, timeframe, bars and end_time as the generate_chart call that will draw, so the bars match. Cheap: no indicators, no image.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "ticker": { "type": "string", "description": "Stock or crypto symbol, as generate_chart takes it. Required." },
+                        "symbol": { "type": "string", "description": "Alias for ticker." },
+                        "timeframe": { "type": "string", "description": "As generate_chart's timeframe.", "default": "4h" },
+                        "interval": { "type": "string", "description": "Alias for timeframe." },
+                        "bars": { "type": "integer", "description": "Bars to read, newest last, 1 to 1000.", "default": 200 },
+                        "end_time": { "type": "integer", "description": "As generate_chart's end_time: only bars that open before it (ms since epoch)." },
+                        "swing_depth": { "type": "integer", "description": "Bars on each side a swing high or low must top (or undercut), 1 to 50. Larger finds fewer, bigger swings.", "default": 5 }
                     }
                 }
             },
@@ -637,3 +660,108 @@ fn chart_params_schema() -> Value {
         "additionalProperties": false
     })
 }
+
+/// `generate_chart`'s `drawings` (ADR-0054), its tool list from `drawings::TOOLS`.
+fn drawings_schema() -> Value {
+    let names: Vec<&str> = TOOLS.iter().map(|t| t.name).collect();
+    let tools: Vec<String> = TOOLS
+        .iter()
+        .map(|t| format!("{} ({})", t.name, t.points.join("; ")))
+        .collect();
+    json!({
+        "type": "array",
+        "maxItems": MAX_DRAWINGS,
+        "description": format!(
+            "Drawings to put on the price chart, as a person draws them in the web app (ADR-0054). Each is {{tool, points, style?, text?}} with exactly the tool's points: {}. A point is {{time, price}} or an anchor {{time, snap}} that takes that bar's open, high, low or close; time is unix seconds, unix ms or an ISO 8601 date or date-time (UTC unless it has an offset) and resolves to the bar containing it, or past the last bar to that bar's grid. All drawings are checked together: if any is invalid the call fails, names each bad drawing by index with a reason and a hint, and draws nothing. On success the answer adds a JSON text item: each drawing with its resolved points (time, timestamp in ms, price, bar), warnings (a point cut off past the right edge or outside the visible price range), and open_url, a link that opens the chart in the web app with these drawings as normal, editable drawings (when the server has CHARTGEN_BASE_URL). Call inspect_chart first to anchor points to real swing highs and lows; list_drawing_tools describes every tool. At most {} drawings.",
+            tools.join(", "),
+            MAX_DRAWINGS
+        ),
+        "items": {
+            "type": "object",
+            "properties": {
+                "tool": { "type": "string", "enum": names },
+                "points": {
+                    "type": "array",
+                    "description": "Exactly the tool's points, in its order (1 to 3).",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "time": {
+                                "oneOf": [{ "type": "number" }, { "type": "string" }],
+                                "description": "Unix seconds, unix ms, or ISO 8601 (2026-10-12 or 2026-10-12T14:00:00Z)."
+                            },
+                            "price": { "type": "number", "description": "The point's price. Give price or snap." },
+                            "snap": {
+                                "type": "string",
+                                "enum": ["open", "high", "low", "close"],
+                                "description": "Anchor to this value of the bar at time, instead of a price. Only on loaded bars."
+                            }
+                        },
+                        "required": ["time"],
+                        "additionalProperties": false
+                    }
+                },
+                "style": {
+                    "type": "object",
+                    "description": "The look, as the web app's style bar sets it; absent fields take the tool's own. cgText takes color and fontSize; the others color, width and dash, and the filled ones (cgRect and the three ranges) fill.",
+                    "properties": {
+                        "color": { "type": "string", "description": "#rgb, #rrggbb, #rrggbbaa or rgba(r, g, b, a)." },
+                        "width": { "type": "integer", "minimum": 1, "maximum": 4, "description": "Line width in px." },
+                        "dash": { "type": "string", "enum": DASHES },
+                        "fill": { "type": "string", "description": "Fill color, as color; may carry alpha." },
+                        "fontSize": { "type": "integer", "enum": FONT_SIZES }
+                    },
+                    "additionalProperties": false
+                },
+                "text": { "type": "string", "maxLength": MAX_TEXT, "description": "cgText's text (required there); no other tool takes text." }
+            },
+            "required": ["tool", "points"],
+            "additionalProperties": false
+        }
+    })
+}
+
+/// `prompts/list`'s result (ADR-0054).
+pub fn prompts_list() -> Value {
+    json!({
+        "prompts": [{
+            "name": "draw-on-chart",
+            "description": "How to draw trendlines, zones, fib levels, text and positions on a chart and check the result: inspect_chart, anchors, generate_chart with drawings, warnings, open_url.",
+            "arguments": [
+                { "name": "ticker", "description": "Symbol to draw on, e.g. BTCUSDT.", "required": false },
+                { "name": "timeframe", "description": "Timeframe, e.g. 4h.", "required": false }
+            ]
+        }]
+    })
+}
+
+/// `prompts/get`'s result for `name`, or None for a prompt there is not.
+pub fn prompt_get(name: &str) -> Option<Value> {
+    (name == "draw-on-chart").then(|| {
+        json!({
+            "description": "Drawing on a chart with chartgen",
+            "messages": [{ "role": "user", "content": { "type": "text", "text": DRAW_ON_CHART } }]
+        })
+    })
+}
+
+const DRAW_ON_CHART: &str = r##"You can draw on chartgen charts with the same tools a person uses in the web app. Work like this:
+
+1. Inspect, don't guess. Call inspect_chart with the ticker, timeframe and bars you will chart. It returns the first and last bar, the price range, and recent swing highs and lows with their times and prices. Never compute coordinates from memory or from the image.
+2. Anchor points to bars. A point is {"time": T, "price": P} or {"time": T, "snap": "high"} (open, high, low or close). Prefer snap on swing points: the price then is the bar's own value. Times may be unix seconds, unix ms or ISO 8601; each resolves to the bar containing it.
+3. Draw. Call generate_chart with the same ticker, timeframe and bars, and drawings: [{tool, points, style?, text?}]. list_drawing_tools says what each tool's points are. All drawings are checked together: if one is invalid, the call fails, lists every bad drawing by index with a hint, and draws nothing. Fix them and call again.
+4. Verify. Look at the image, and read the JSON item: the resolved points (time, price, bar) and warnings, e.g. a point cut off past the right edge or a price outside the visible range. Fix what is off and draw again.
+5. Share. When the answer has open_url, give it to the user: it opens the chart in the web app with your drawings as normal drawings they can move, restyle, lock or delete.
+
+Example 1, a trendline between two swing lows. inspect_chart returned swings including {"kind": "low", "time": "2026-10-14T08:00:00Z"} and {"kind": "low", "time": "2026-10-20T16:00:00Z"}:
+{"tool": "rayLine", "points": [{"time": "2026-10-14T08:00:00Z", "snap": "low"}, {"time": "2026-10-20T16:00:00Z", "snap": "low"}], "style": {"color": "#089981", "width": 2}}
+(segment ends at the second point; rayLine runs on to the right edge.)
+
+Example 2, a support zone with cgRect, from the first swing low to the last bar, between two prices:
+{"tool": "cgRect", "points": [{"time": "2026-10-14T08:00:00Z", "price": 61850}, {"time": "2026-10-28T20:00:00Z", "price": 62400}], "style": {"fill": "rgba(8, 153, 129, 0.2)", "color": "#089981"}}
+Add a label: {"tool": "cgText", "points": [{"time": "2026-10-14T08:00:00Z", "price": 62600}], "text": "Support 61.9k-62.4k"}
+
+Example 3, a fib retracement from a swing high down to a swing low. fibonacciLine's first point is the 100% level and its second the 0% level, so this puts 0% at the low:
+{"tool": "fibonacciLine", "points": [{"time": "2026-10-09T12:00:00Z", "snap": "high"}, {"time": "2026-10-14T08:00:00Z", "snap": "low"}]}
+
+Positions: cgLong and cgShort take entry, target and stop; the target and stop share one time, the box's right edge, and must be on the profit and loss side of the entry."##;

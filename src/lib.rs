@@ -1,6 +1,7 @@
 #![recursion_limit = "512"]
 pub mod binance_gate;
 pub mod data;
+pub mod drawings;
 pub mod engine;
 pub mod feed;
 pub mod indicator;
