@@ -726,11 +726,7 @@ pub fn prompts_list() -> Value {
     json!({
         "prompts": [{
             "name": "draw-on-chart",
-            "description": "How to draw trendlines, zones, fib levels, text and positions on a chart and check the result: inspect_chart, anchors, generate_chart with drawings, warnings, open_url.",
-            "arguments": [
-                { "name": "ticker", "description": "Symbol to draw on, e.g. BTCUSDT.", "required": false },
-                { "name": "timeframe", "description": "Timeframe, e.g. 4h.", "required": false }
-            ]
+            "description": "How to draw trendlines, zones, fib levels, text and positions on a chart and check the result: inspect_chart, anchors, generate_chart with drawings, warnings, open_url."
         }]
     })
 }

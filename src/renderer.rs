@@ -341,7 +341,7 @@ pub fn render_labeled(
             // HLines on overlay
             for h in &overlay.hlines {
                 chart.draw_series(std::iter::once(PathElement::new(
-                    vec![(0.0, h.y), (n as f64, h.y)],
+                    vec![(0.0, h.y), (x_max, h.y)],
                     h.color.stroke_width(1),
                 )))?;
             }
@@ -353,7 +353,7 @@ pub fn render_labeled(
                 let (x_left, x_right) = if hbar.left {
                     (bar_offset, bar_offset + bar_width)
                 } else {
-                    (n as f64 - bar_offset - bar_width, n as f64 - bar_offset)
+                    (x_max - bar_offset - bar_width, x_max - bar_offset)
                 };
                 let y_top = hbar.y + hbar.height / 2.0;
                 let y_bot = hbar.y - hbar.height / 2.0;
@@ -594,7 +594,7 @@ pub fn render_labeled(
                 continue;
             }
             let label = format_bar_label(epoch, interval);
-            let x_frac = idx as f64 / n as f64;
+            let x_frac = idx as f64 / x_max;
             let x_px = x_margin + (x_frac * chart_width) as i32;
             root.draw_text(
                 &label,

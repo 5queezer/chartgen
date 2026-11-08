@@ -643,7 +643,8 @@ fn parse_one(d: &Value, now_ms: i64) -> Result<Request, Problem> {
                 .as_str()
                 .ok_or_else(|| fail("text must be a string".into()))?;
             if t.trim().is_empty()
-                || t.chars().count() > MAX_TEXT
+                // In UTF-16 units, as the web app's stores count it.
+                || t.encode_utf16().count() > MAX_TEXT
                 || t.chars().any(char::is_control)
             {
                 return Err(fail(format!(
@@ -1108,6 +1109,19 @@ mod tests {
             }
             assert!(parse(&mk(t.points.len()), NOW).is_ok(), "{}", t.name);
         }
+    }
+
+    #[test]
+    fn text_is_counted_as_the_web_app_counts_it() {
+        let text = |t: String| {
+            let v = json!([{ "tool": "cgText", "points": [{ "time": 1_760_227_200, "price": 1 }], "text": t }]);
+            parse(&v, NOW).is_ok()
+        };
+        assert!(text("x".repeat(200)));
+        assert!(!text("x".repeat(201)));
+        // Outside the BMP a character is two UTF-16 units.
+        assert!(text("📈".repeat(100)));
+        assert!(!text("📈".repeat(101)));
     }
 
     #[test]

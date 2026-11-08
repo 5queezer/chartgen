@@ -171,6 +171,21 @@ export function decodeIndicators(raw: string): ActiveIndicator[] {
   return normalizeInstances(out);
 }
 
+/**
+ * cgText's text: up to `max_text` UTF-16 units (as stored drawings count it), each
+ * at most 9 characters encoded (3 UTF-8 bytes of `%XX`), so not `decodeValue`'s cap.
+ */
+function decodeText(v: string): string | undefined {
+  if (v === "" || v.length > 9 * drawingTools.max_text) return undefined;
+  try {
+    const text = decodeURIComponent(v);
+    if (/[\u0000-\u001f]/.test(text) || text.trim() === "") return undefined;
+    return text.length <= drawingTools.max_text ? text : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 function decodeDrawing(part: string): DrawingRecord | null {
   const open = part.indexOf("(");
   if (open < 0 || !part.endsWith(")")) return null;
@@ -188,10 +203,13 @@ function decodeDrawing(part: string): DrawingRecord | null {
       points.push({ timestamp: Math.round(Number(key) * 1000), value: Number(raw) });
       continue;
     }
+    if (key === "text") {
+      text = decodeText(raw);
+      continue;
+    }
     const value = decodeValue(raw);
     if (value === undefined) continue;
-    if (key === "text") text = value;
-    else if (key === "width" || key === "fontSize") style[key] = Number(value);
+    if (key === "width" || key === "fontSize") style[key] = Number(value);
     else if ((STYLE_KEYS as readonly string[]).includes(key)) style[key] = value;
   }
   if (points.length !== POINTS.get(name)) return null;

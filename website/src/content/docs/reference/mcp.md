@@ -666,7 +666,7 @@ result opens in the web app as normal drawings
 | `tool` | One of the names [`list_drawing_tools`](#list_drawing_tools) lists: `segment`, `rayLine`, `straightLine`, `horizontalStraightLine`, `horizontalRayLine`, `verticalStraightLine`, `parallelStraightLine`, `fibonacciLine`, `cgRect`, `cgText`, `simpleTag`, `cgFibExt`, `cgPitchfork`, `cgPriceRange`, `cgDateRange`, `cgDatePriceRange`, `cgLong`, `cgShort`. |
 | `points` | Exactly the tool's points, in its order (1 to 3). A point is `{"time": T, "price": P}`, or an anchor `{"time": T, "snap": "open" \| "high" \| "low" \| "close"}` that takes that bar's value. `T` is unix seconds (below 1e11), unix ms, or ISO 8601 (`2026-10-12`, `2026-10-12T14:00:00Z`; UTC unless it has an offset). It resolves to the bar containing it; past the last bar, to that bar's grid, rounded to a bar. A snap needs a loaded bar. |
 | `style` | The web app's style bar fields for the tool: `color`, `width` (1-4) and `dash` (`solid`, `dashed`, `dotted`) on lines and shapes, `fill` on `cgRect` and the three ranges, `color` and `fontSize` (10, 12, 14, 18, 24) on `cgText`. Colors are `#rgb`, `#rrggbb`, `#rrggbbaa` or `rgba(r, g, b, a)`. Absent fields take the tool's own look. A field that does not apply is an error. |
-| `text` | `cgText`'s text, required there, 1 to 200 characters on one line. No other tool takes text. |
+| `text` | `cgText`'s text, required there, on one line: 1 to 200 characters, counted in UTF-16 units as the web app counts them (an emoji counts 2). No other tool takes text. |
 
 What the points of each tool mean: `fibonacciLine` is the 100% level then the
 0% level; `cgFibExt` is A, B and C, with levels `C + (B − A) × level`;

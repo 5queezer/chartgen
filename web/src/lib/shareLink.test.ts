@@ -334,6 +334,15 @@ describe("drawings in a link (ADR-0054)", () => {
     expect(decodeDrawings(encodeDrawings([rec])!)).toEqual([rec]);
   });
 
+  it("carries a text of the full 200 characters, prose or not", () => {
+    for (const text of ["a few words, ".repeat(20).slice(0, 200), "€".repeat(200), "📈".repeat(100)]) {
+      const rec = { name: "cgText" as const, points: [{ timestamp: 1000, value: 1 }], extendData: text, lock: false, visible: true };
+      expect(decodeDrawings(encodeDrawings([rec])!)).toEqual([rec]);
+    }
+    const tooLong = { name: "cgText" as const, points: [{ timestamp: 1000, value: 1 }], extendData: "x".repeat(201), lock: false, visible: true };
+    expect(decodeDrawings(encodeDrawings([tooLong])!)).toEqual([]);
+  });
+
   it("drops what a stored drawing would not be", () => {
     const bad = [
       "nope(1:1;2:2)",
