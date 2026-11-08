@@ -5,9 +5,9 @@
 
 Chart generator, web app and MCP server for Yahoo Finance and Binance data, written in Rust.
 
-![AAPL 1D with EMA Stack, VPVR, RSI, MACD](docs/screenshot.png)
+![MSFT 1h in the web app with moving averages, chart patterns, a Fibonacci swing, volume profiles and two oscillator panes](docs/screenshot.png)
 
-- Web app at [chartgen.vasudev.xyz](https://chartgen.vasudev.xyz/), served from the same origin as the MCP endpoint.
+- Web app at [chartgen.vasudev.xyz](https://chartgen.vasudev.xyz/), served from the same origin as the MCP endpoint: a TradingView-style chart with drawing tools, alerts, watchlists, multi-chart layouts, bar replay and a workspace that follows a signed-in user across devices.
 - MCP server over stdio or HTTP (`/mcp`, OAuth 2.1 PKCE) for Claude Desktop and Claude.ai.
 - PNG candlestick charts with 70+ indicators, from Yahoo Finance and Binance.
 - Live engine (`--trade`) with a Binance WebSocket feed, alerts and order tools. Orders are only recorded locally; nothing is sent to an exchange.
