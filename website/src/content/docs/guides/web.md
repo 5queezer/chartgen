@@ -754,6 +754,7 @@ https://chartgen.vasudev.xyz/?symbol=ETHUSDT&interval=4h&type=candles&ind=rsi(le
 | `ind` | Indicators, comma separated (at most 50, 2 KB). Non-default parameters go in parentheses, separated by `;`: `macd(fast:8;slow:20)`; characters outside letters, digits, `.`, `_` and `-` in a text value are percent-encoded. Visible indicators only; `ind=` means none. A repeated name is another instance: `rsi,rsi(length:21)` shows two RSIs |
 | `compare` | Compare symbols, comma separated; always written, `compare=` clears them |
 | `tz` | One of the time zones in the time-zone menu: `utc`, `exchange`, `local` or a listed IANA name such as `Europe/Berlin` |
+| `draw` | Drawings of the link's symbol, comma separated (at most 50, 8 KB): `tool(time:price;time:price;key:value)`, each point unix seconds and a price, then `color`, `fill`, `width`, `dash`, `fontSize` and a text annotation's `text`, values written as in `ind`. Example: `draw=segment(1793174400:236.3;1793304000:223.06;color:%2523089981;width:2)`. An item with an unknown tool, the wrong number of points or a malformed point is left out |
 
 Every parameter is optional. The app reads them once on load, saves them like a
 manual change and removes them from the address bar. An invalid value (unknown
@@ -763,8 +764,19 @@ the first chart request: names it does not know and parameters it rejects
 (wrong type, outside min/max, not a parameter of that indicator) are left out
 with a toast, so the indicator uses its default. Only what came from the link is
 checked; your other indicators are never removed. If the list cannot be loaded,
-the link's indicators are kept as they are. A link carries the chart setup only,
-not drawings, alerts, colors or indicator styles. The parameters survive the
+the link's indicators are kept as they are.
+
+Drawings from `draw` join the symbol's own drawings: one with the same tool,
+points and text as a drawing you have is that drawing and is skipped, so a link
+opened twice adds nothing, and a toast says how many were added. They are then
+ordinary drawings you can move, restyle, lock, hide and delete, with undo for
+every change after the load (the import itself is not an undo step). Copy link
+adds the symbol's visible drawings when they fit (at most 50, 8 KB); otherwise
+the link carries none and the toast says so. An MCP client's
+[`generate_chart`](/chartgen/reference/mcp/#drawings) returns such a link as
+`open_url` for the drawings it drew
+([ADR-0054](/chartgen/decisions/0054-agent-drawings/)). A link carries no
+alerts, colors or indicator styles. The parameters survive the
 sign-in redirect. If the browser blocks the clipboard API (plain HTTP), the link
 is copied through a hidden text field instead. In a [chart grid](#chart-grid) a link
 carries the active chart only, and opening one applies it to the active chart.
