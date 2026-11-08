@@ -4,12 +4,16 @@ import type { ParamSpec } from "../types/responses";
 import { DEFAULT_CHART_PARAMS } from "./priceBars";
 import {
   coerceParam,
+  decodeDrawings,
   decodeIndicators,
   decodeShare,
+  encodeDrawings,
   encodeIndicators,
   encodeShare,
   hasShareParams,
+  MAX_DRAW_LENGTH,
   MAX_INDICATORS,
+  MAX_LINK_DRAWINGS,
   reconcileIndicators,
   stripShareParams,
   type ShareState,
@@ -278,5 +282,95 @@ describe("price-based chart types in a link", () => {
   it("a link's params are its own to strip", () => {
     expect(hasShareParams("?tp=box:atr")).toBe(true);
     expect(stripShareParams("?type=kagi&tp=rev:2&code=x")).toBe("?code=x");
+  });
+});
+
+describe("drawings in a link (ADR-0054)", () => {
+  // What the MCP server writes (src/drawings.rs, the_share_param_is_compact).
+  const SERVER =
+    "segment(1760227200:100.5;1760230800:103;color:%232962ff;width:2),cgText(1760227200:110;text:Break%2C%20out%3B%20100%25)";
+
+  it("reads what the server writes", () => {
+    expect(decodeDrawings(SERVER)).toEqual([
+      {
+        name: "segment",
+        points: [
+          { timestamp: 1760227200000, value: 100.5 },
+          { timestamp: 1760230800000, value: 103 },
+        ],
+        style: { color: "#2962ff", width: 2 },
+        lock: false,
+        visible: true,
+      },
+      {
+        name: "cgText",
+        points: [{ timestamp: 1760227200000, value: 110 }],
+        extendData: "Break, out; 100%",
+        lock: false,
+        visible: true,
+      },
+    ]);
+  });
+
+  it("writes what the server writes, and reads it back", () => {
+    const records = decodeDrawings(SERVER);
+    expect(encodeDrawings(records)).toBe(SERVER);
+    const q = encodeShare({ ...state, drawings: records });
+    expect(decodeShare(q).drawings).toEqual(records);
+    expect(encodeShare({ ...state, drawings: [] })).not.toContain("draw=");
+  });
+
+  it("round-trips every style field, fractional seconds and a rgba fill", () => {
+    const rec = {
+      name: "cgRect" as const,
+      points: [
+        { timestamp: 1760227200500, value: 0.00001234 },
+        { timestamp: -86400000, value: -2 },
+      ],
+      style: { color: "#ff0000", fill: "rgba(8, 153, 129, 0.2)", width: 4, dash: "dotted" as const },
+      lock: false,
+      visible: true,
+    };
+    expect(decodeDrawings(encodeDrawings([rec])!)).toEqual([rec]);
+  });
+
+  it("carries a text of the full 200 characters, prose or not", () => {
+    for (const text of ["a few words, ".repeat(20).slice(0, 200), "€".repeat(200), "📈".repeat(100)]) {
+      const rec = { name: "cgText" as const, points: [{ timestamp: 1000, value: 1 }], extendData: text, lock: false, visible: true };
+      expect(decodeDrawings(encodeDrawings([rec])!)).toEqual([rec]);
+    }
+    const tooLong = { name: "cgText" as const, points: [{ timestamp: 1000, value: 1 }], extendData: "x".repeat(201), lock: false, visible: true };
+    expect(decodeDrawings(encodeDrawings([tooLong])!)).toEqual([]);
+  });
+
+  it("drops what a stored drawing would not be", () => {
+    const bad = [
+      "nope(1:1;2:2)",
+      "segment(1:1)",
+      "cgLong(1:1;2:2)",
+      "cgText(1:1)",
+      "segment(1:1;2:x)",
+      "segment(1:1;2:2",
+      "horizontalStraightLine(1:1;2:2)",
+    ];
+    expect(decodeDrawings(bad.join(","))).toEqual([]);
+    // Unknown or invalid style fields only lose themselves.
+    expect(decodeDrawings("segment(1:1;2:2;color:red;width:9;bogus:1)")[0]?.style).toBeUndefined();
+    // Text only on cgText.
+    expect(decodeDrawings("simpleTag(1:1;text:x)")[0]?.extendData).toBeUndefined();
+  });
+
+  it("caps its size and count", () => {
+    const one = "horizontalStraightLine(1:1)";
+    expect(decodeDrawings(Array(MAX_LINK_DRAWINGS + 5).fill(one).join(","))).toHaveLength(MAX_LINK_DRAWINGS);
+    expect(decodeDrawings(one + ",".repeat(MAX_DRAW_LENGTH))).toEqual([]);
+    const many = decodeDrawings(one);
+    expect(encodeDrawings(Array(MAX_LINK_DRAWINGS + 1).fill(many[0]))).toBeNull();
+  });
+
+  it("is a share param, and garbage in it leaves nothing", () => {
+    expect(hasShareParams("?draw=x")).toBe(true);
+    expect(stripShareParams("?draw=x&code=y")).toBe("?code=y");
+    expect(decodeShare("?draw=%%%(((").drawings).toBeUndefined();
   });
 });

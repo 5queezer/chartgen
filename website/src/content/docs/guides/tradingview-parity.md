@@ -138,7 +138,7 @@ Status legend:
 | Named layouts (save, copy, rename, load, delete) | ✅ | ◐ | Symbol, timeframe, chart type, scale, compare symbols and indicators, per chart of the grid. Drawings are not part of a layout. Stored in `localStorage`, max 50. [Layouts](/chartgen/guides/web/#layouts), [ADR-0015](/chartgen/decisions/0015-named-layouts/) |
 | Layout export and import | ✅ | ✅ | JSON file, validated on import. [Layouts](/chartgen/guides/web/#layouts) |
 | Cloud sync of layouts and settings | ✅ | ❌ | [ADR-0005](/chartgen/decisions/0005-client-indicator-state/) |
-| Shareable chart links | ✅ | ◐ | Query-param links for symbol, timeframe, chart type, indicators, compare symbols and time zone; no drawings, no short links. [Sharing a chart](/chartgen/guides/web/#sharing-a-chart), [ADR-0029](/chartgen/decisions/0029-shareable-chart-links/) |
+| Shareable chart links | ✅ | ◐ | Query-param links for symbol, timeframe, chart type, indicators, compare symbols, time zone and the symbol's drawings (`draw`); no short links. [Sharing a chart](/chartgen/guides/web/#sharing-a-chart), [ADR-0029](/chartgen/decisions/0029-shareable-chart-links/), [ADR-0054](/chartgen/decisions/0054-agent-drawings/) |
 | Chart settings (colors, grid, scales) | ✅ | ◐ | Saved in `localStorage` under `chartgen.chartSettings`, not synced and not in named layouts. [Chart settings](/chartgen/guides/web/#chart-settings), [ADR-0019](/chartgen/decisions/0019-chart-settings/) |
 | Keyboard shortcuts | ✅ | ◐ | A documented subset with `Alt` modifiers for tools. [Keyboard shortcuts](/chartgen/guides/web/#keyboard-shortcuts) |
 

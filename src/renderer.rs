@@ -1,4 +1,5 @@
 use crate::data::OhlcvData;
+use crate::drawings::{parse_color, Drawing, View};
 use crate::indicator::{DivLine, Indicator, PanelResult};
 use plotters::prelude::*;
 
@@ -106,10 +107,11 @@ pub fn render_results(
     width: u32,
     height: u32,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    render_labeled(data, results, output, width, height, None)
+    render_labeled(data, results, output, width, height, None, &[])
 }
 
-/// `render_results`, naming in the title how the bars are built (ADR-0047).
+/// `render_results`, naming in the title how the bars are built (ADR-0047), with
+/// `drawings` on the price chart (ADR-0054).
 pub fn render_labeled(
     data: &OhlcvData,
     results: &[&PanelResult],
@@ -117,6 +119,7 @@ pub fn render_labeled(
     width: u32,
     height: u32,
     style: Option<&str>,
+    drawings: &[Drawing],
 ) -> Result<(), Box<dyn std::error::Error>> {
     let n = data.len();
     if n == 0 {
@@ -141,17 +144,18 @@ pub fn render_labeled(
         .cloned()
         .fold(f64::NEG_INFINITY, f64::max);
     let p_margin = (p_max - p_min) * 0.05;
+    // Room on the right for drawings past the last bar, as far as `View` allows.
+    let future = drawings
+        .iter()
+        .flat_map(|d| &d.points)
+        .map(|p| p.x - (n as i64 - 1))
+        .max()
+        .unwrap_or(0)
+        .clamp(0, View::of(&data.bars).future);
+    let x_max = (n as i64 + future) as f64;
 
-    // Title bar height
-    let title_h: u32 = 40;
-
-    // Layout: title + candle 55% + panels
-    let candle_h = ((height - title_h) as f64 * 0.55) as u32;
-    let panel_h = if n_panels > 0 {
-        (height - title_h - candle_h) / n_panels as u32
-    } else {
-        0
-    };
+    let title_h = TITLE_H;
+    let (candle_h, panel_h) = layout(height, n_panels);
 
     let root = BitMapBackend::new(output, (width, height)).into_drawing_area();
     root.fill(&BG)?;
@@ -180,13 +184,18 @@ pub fn render_labeled(
         y_start += panel_h as i32;
     }
 
+    // The price pane's plot, left and right pixel: the date labels follow its x range.
+    let price_x: (f64, f64);
+
     // ---- Draw candles + overlays ----
     {
         let mut chart = ChartBuilder::on(&candle_area)
             .margin(10)
             .x_label_area_size(0)
             .y_label_area_size(80)
-            .build_cartesian_2d(0_f64..(n as f64), (p_min - p_margin)..(p_max + p_margin))?;
+            .build_cartesian_2d(0_f64..x_max, (p_min - p_margin)..(p_max + p_margin))?;
+        let (xs, ys) = chart.plotting_area().get_pixel_range();
+        price_x = (xs.start as f64, xs.end as f64);
 
         chart
             .configure_mesh()
@@ -329,7 +338,7 @@ pub fn render_labeled(
             // HLines on overlay
             for h in &overlay.hlines {
                 chart.draw_series(std::iter::once(PathElement::new(
-                    vec![(0.0, h.y), (n as f64, h.y)],
+                    vec![(0.0, h.y), (x_max, h.y)],
                     h.color.stroke_width(1),
                 )))?;
             }
@@ -341,7 +350,7 @@ pub fn render_labeled(
                 let (x_left, x_right) = if hbar.left {
                     (bar_offset, bar_offset + bar_width)
                 } else {
-                    (n as f64 - bar_offset - bar_width, n as f64 - bar_offset)
+                    (x_max - bar_offset - bar_width, x_max - bar_offset)
                 };
                 let y_top = hbar.y + hbar.height / 2.0;
                 let y_bot = hbar.y - hbar.height / 2.0;
@@ -390,6 +399,23 @@ pub fn render_labeled(
             ((n - 1) as f64, lp),
             ("monospace", 14).into_font().color(&WHITE),
         )))?;
+
+        if !drawings.is_empty() {
+            let canvas = Canvas {
+                area: &root,
+                x: (price_x.0, price_x.1, x_max),
+                y: (
+                    ys.start as f64,
+                    ys.end as f64,
+                    p_min - p_margin,
+                    p_max + p_margin,
+                ),
+            };
+            let prec = decimals(lp);
+            for d in drawings {
+                canvas.drawing(d, prec)?;
+            }
+        }
     }
 
     // ---- Draw indicator panels ----
@@ -400,11 +426,14 @@ pub fn render_labeled(
             .margin(5)
             .x_label_area_size(20)
             .y_label_area_size(80)
-            .build_cartesian_2d(0_f64..(n as f64), y_lo..y_hi)?;
+            .build_cartesian_2d(0_f64..x_max, y_lo..y_hi)?;
 
+        // The label area stays for the spacing, empty: the dates under the last pane are
+        // the image's only x labels.
         chart
             .configure_mesh()
             .disable_x_mesh()
+            .x_labels(0)
             .light_line_style(GRID)
             .bold_line_style(GRID)
             .axis_style(GRID)
@@ -553,8 +582,7 @@ pub fn render_labeled(
     {
         let interval = data.interval.as_deref().unwrap_or("4h");
         let y_pos = height as i32 - 4; // just above the bottom edge
-        let x_margin = 80; // match Y-axis label width
-        let chart_width = (width as i32 - x_margin - 10) as f64; // usable chart width
+        let font = ("monospace", 13).into_font().color(&TEXT);
         let label_count = (width / 180).max(3) as usize; // ~1 label per 180px
         let step = (n / label_count).max(1);
 
@@ -564,18 +592,622 @@ pub fn render_labeled(
                 continue;
             }
             let label = format_bar_label(epoch, interval);
-            let x_frac = idx as f64 / n as f64;
-            let x_px = x_margin + (x_frac * chart_width) as i32;
-            root.draw_text(
-                &label,
-                &("monospace", 13).into_font().color(&TEXT),
-                (x_px, y_pos - 10),
-            )?;
+            // Centred under its bar, kept inside the image.
+            let w = root.estimate_text_size(&label, &font)?.0 as f64;
+            let x = bar_x(idx as f64, x_max, price_x) - w / 2.0;
+            let x = x.min(width as f64 - w).max(0.0);
+            root.draw_text(&label, &font, (x as i32, y_pos - 10))?;
         }
     }
 
     root.present()?;
     Ok(())
+}
+
+/// Pixel of bar `x` (from 0) on a plot from `left` to `right` that spans `span` bars, the
+/// extension past the last bar for drawings included.
+fn bar_x(x: f64, span: f64, (left, right): (f64, f64)) -> f64 {
+    left + x / span * (right - left)
+}
+
+/// Height of the title bar.
+const TITLE_H: u32 = 40;
+/// Strip under the last pane for the date labels, as a panel's x label area.
+const DATE_LABELS_H: u32 = 20;
+
+/// Heights of the price pane and of each panel below it: the price pane takes 55% under
+/// the title and the panels share the rest, or with no panels all of it but the date labels.
+fn layout(height: u32, n_panels: usize) -> (u32, u32) {
+    let below_title = height.saturating_sub(TITLE_H);
+    if n_panels == 0 {
+        return (below_title.saturating_sub(DATE_LABELS_H), 0);
+    }
+    let candle_h = (below_title as f64 * 0.55) as u32;
+    (candle_h, (below_title - candle_h) / n_panels as u32)
+}
+
+// ---- Drawings (ADR-0054) ----
+// In pixels of the whole image, clipped to the price chart's plotting area, with the
+// web app's colors and labels on its dark theme.
+
+const BLUE: &str = "#1677ff";
+const RECT: (&str, &str) = ("rgba(41, 98, 255, 0.15)", "#2962ff");
+const UP: (&str, &str) = ("rgba(41, 98, 255, 0.15)", "#2962ff");
+const DOWN: (&str, &str) = ("rgba(242, 54, 69, 0.15)", "#f23645");
+const GREEN: (&str, &str) = ("rgba(8, 153, 129, 0.22)", "#089981");
+const RED: (&str, &str) = ("rgba(242, 54, 69, 0.22)", "#f23645");
+const POSITION_LINE: &str = "#787b86";
+const TEXT_FG: &str = "#d1d4dc";
+const SURFACE: &str = "#1e222d";
+const FIB_LEVELS: [f64; 7] = [1.0, 0.786, 0.618, 0.5, 0.382, 0.236, 0.0];
+const FIB_EXT_LEVELS: [f64; 11] = [
+    0.0, 0.236, 0.382, 0.5, 0.618, 0.786, 1.0, 1.618, 2.618, 3.618, 4.236,
+];
+const FIB_EXT_COLORS: [&str; 11] = [
+    "#787b86", "#f23645", "#ff9800", "#4caf50", "#089981", "#00bcd4", "#5b8cff", "#ba68c8",
+    "#e91e63", "#f23645", "#ff5252",
+];
+/// Height of a stacked measure label.
+const LABEL_H: f64 = 22.0;
+
+fn rgba(c: &str) -> RGBAColor {
+    let (r, g, b, a) = parse_color(c).unwrap_or((22, 119, 255, 1.0));
+    RGBAColor(r, g, b, a)
+}
+
+type Px = (f64, f64);
+type Drawn = Result<(), Box<dyn std::error::Error>>;
+
+#[derive(Clone, Copy)]
+struct Pen {
+    color: RGBAColor,
+    width: u32,
+    /// Pixels on and off.
+    dash: Option<(f64, f64)>,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum Baseline {
+    Top,
+    Middle,
+    Bottom,
+}
+
+struct Label<'t> {
+    text: &'t str,
+    size: u32,
+    fg: RGBAColor,
+    bg: RGBAColor,
+    border: Option<RGBAColor>,
+    /// 0 left, 0.5 centred, 1 right of the anchor.
+    align: f64,
+    baseline: Baseline,
+    pad: (f64, f64),
+}
+
+struct Canvas<'a, 'b> {
+    area: &'a DrawingArea<BitMapBackend<'b>, plotters::coord::Shift>,
+    /// Left and right pixel of the plot, and the bars they span from 0.
+    x: (f64, f64, f64),
+    /// Top and bottom pixel of the plot, and the prices at its bottom and top.
+    y: (f64, f64, f64, f64),
+}
+
+impl Canvas<'_, '_> {
+    fn px(&self, x: f64, price: f64) -> Px {
+        let (l, r, span) = self.x;
+        let (t, b, lo, hi) = self.y;
+        (
+            bar_x(x, span, (l, r)),
+            b - (price - lo) / (hi - lo) * (b - t),
+        )
+    }
+
+    fn inside(&self, (x, y): Px) -> bool {
+        (self.x.0..=self.x.1).contains(&x) && (self.y.0..=self.y.1).contains(&y)
+    }
+
+    /// `a`-`b` cut to the plot (Liang-Barsky).
+    fn clip(&self, a: Px, b: Px) -> Option<(Px, Px)> {
+        let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+        let (mut t0, mut t1) = (0.0_f64, 1.0_f64);
+        for (p, q) in [
+            (-dx, a.0 - self.x.0),
+            (dx, self.x.1 - a.0),
+            (-dy, a.1 - self.y.0),
+            (dy, self.y.1 - a.1),
+        ] {
+            if p == 0.0 {
+                if q < 0.0 {
+                    return None;
+                }
+            } else if p < 0.0 {
+                t0 = t0.max(q / p);
+            } else {
+                t1 = t1.min(q / p);
+            }
+        }
+        (t0 <= t1).then_some((
+            (a.0 + t0 * dx, a.1 + t0 * dy),
+            (a.0 + t1 * dx, a.1 + t1 * dy),
+        ))
+    }
+
+    fn line(&self, a: Px, b: Px, pen: Pen) -> Drawn {
+        let Some((a, b)) = self.clip(a, b) else {
+            return Ok(());
+        };
+        let style = pen.color.stroke_width(pen.width);
+        let ip = |p: Px| (p.0.round() as i32, p.1.round() as i32);
+        let Some((on, off)) = pen.dash else {
+            self.area
+                .draw(&PathElement::new(vec![ip(a), ip(b)], style))?;
+            return Ok(());
+        };
+        let len = (b.0 - a.0).hypot(b.1 - a.1);
+        let at = |d: f64| (a.0 + (b.0 - a.0) * d / len, a.1 + (b.1 - a.1) * d / len);
+        let mut d = 0.0;
+        while d < len {
+            let end = (d + on).min(len);
+            self.area
+                .draw(&PathElement::new(vec![ip(at(d)), ip(at(end))], style))?;
+            d += on + off;
+        }
+        Ok(())
+    }
+
+    /// A line from `from` through `through` and on past the plot.
+    fn ray(&self, from: Px, through: Px, pen: Pen) -> Drawn {
+        let (dx, dy) = (through.0 - from.0, through.1 - from.1);
+        let len = dx.hypot(dy);
+        if len == 0.0 {
+            return Ok(());
+        }
+        let far = 1e5 / len;
+        self.line(from, (from.0 + dx * far, from.1 + dy * far), pen)
+    }
+
+    fn rect(&self, a: Px, b: Px, fill: RGBAColor, pen: Pen) -> Drawn {
+        let x0 = a.0.min(b.0).max(self.x.0);
+        let x1 = a.0.max(b.0).min(self.x.1);
+        let y0 = a.1.min(b.1).max(self.y.0);
+        let y1 = a.1.max(b.1).min(self.y.1);
+        if x0 < x1 && y0 < y1 {
+            self.area.draw(&Rectangle::new(
+                [(x0 as i32, y0 as i32), (x1 as i32, y1 as i32)],
+                fill.filled(),
+            ))?;
+        }
+        let c = [a, (b.0, a.1), b, (a.0, b.1), a];
+        for w in c.windows(2) {
+            self.line(w[0], w[1], pen)?;
+        }
+        Ok(())
+    }
+
+    fn text_width(&self, text: &str, size: u32) -> f64 {
+        self.area
+            .estimate_text_size(text, &("sans-serif", size).into_text_style(self.area))
+            .map_or(0.0, |(w, _)| w as f64)
+    }
+
+    /// The centre of a label on the part of [left, right] inside the plot, kept inside it.
+    fn label_x(&self, left: f64, right: f64, text: &str, size: u32) -> f64 {
+        let (lo, hi) = (left.max(self.x.0), right.min(self.x.1));
+        let mid = if lo <= hi {
+            (lo + hi) / 2.0
+        } else {
+            (left + right) / 2.0
+        };
+        let half = (self.text_width(text, size) + 12.0) / 2.0;
+        mid.max(self.x.0 + half)
+            .min((self.x.1 - half).max(self.x.0 + half))
+    }
+
+    fn label(&self, (x, y): Px, l: Label) -> Drawn {
+        if !self.inside((x, y)) {
+            return Ok(());
+        }
+        let font = ("sans-serif", l.size).into_font();
+        let (w, h) = self
+            .area
+            .estimate_text_size(l.text, &font.clone().into_text_style(self.area))?;
+        let (bw, bh) = (w as f64 + 2.0 * l.pad.0, h as f64 + 2.0 * l.pad.1);
+        let x0 = x - l.align * bw;
+        let y0 = match l.baseline {
+            Baseline::Top => y,
+            Baseline::Middle => y - bh / 2.0,
+            Baseline::Bottom => y - bh,
+        };
+        let corner = |dx: f64, dy: f64| ((x0 + dx) as i32, (y0 + dy) as i32);
+        self.area.draw(&Rectangle::new(
+            [corner(0.0, 0.0), corner(bw, bh)],
+            l.bg.filled(),
+        ))?;
+        if let Some(c) = l.border {
+            self.area.draw(&Rectangle::new(
+                [corner(0.0, 0.0), corner(bw, bh)],
+                c.stroke_width(1),
+            ))?;
+        }
+        self.area
+            .draw_text(l.text, &font.color(&l.fg), corner(l.pad.0, l.pad.1))?;
+        Ok(())
+    }
+
+    /// A white label on `bg`, as the measure and position tools have.
+    fn tag(&self, at: Px, text: &str, bg: RGBAColor, baseline: Baseline) -> Drawn {
+        self.label(
+            at,
+            Label {
+                text,
+                size: 12,
+                fg: rgba("#ffffff"),
+                bg,
+                border: None,
+                align: 0.5,
+                baseline,
+                pad: (6.0, 3.0),
+            },
+        )
+    }
+
+    fn arrow(&self, from: Px, to: Px, pen: Pen) -> Drawn {
+        self.line(from, to, pen)?;
+        let a = (to.1 - from.1).atan2(to.0 - from.0);
+        for s in [std::f64::consts::FRAC_PI_6, -std::f64::consts::FRAC_PI_6] {
+            let wing = (to.0 - 7.0 * (a + s).cos(), to.1 - 7.0 * (a + s).sin());
+            self.line(wing, to, Pen { dash: None, ..pen })?;
+        }
+        Ok(())
+    }
+
+    fn drawing(&self, d: &Drawing, prec: usize) -> Drawn {
+        let p: Vec<Px> = d
+            .points
+            .iter()
+            .map(|q| self.px(q.x as f64, q.price))
+            .collect();
+        let v: Vec<f64> = d.points.iter().map(|q| q.price).collect();
+        let s = &d.style;
+        let color = |dflt: &str| rgba(s.color.as_deref().unwrap_or(dflt));
+        let dash = match s.dash {
+            Some("dashed") => Some((6.0, 4.0)),
+            Some("dotted") => Some((1.0, 3.0)),
+            _ => None,
+        };
+        let pen = |c: RGBAColor| Pen {
+            color: c,
+            width: s.width.unwrap_or(1),
+            dash,
+        };
+        let (l, r, t, b) = (self.x.0, self.x.1, self.y.0, self.y.1);
+        let y_of = |price: f64| self.px(0.0, price).1;
+        match d.tool.name {
+            "segment" => self.line(p[0], p[1], pen(color(BLUE))),
+            "rayLine" => self.ray(p[0], p[1], pen(color(BLUE))),
+            "straightLine" => {
+                self.ray(p[0], p[1], pen(color(BLUE)))?;
+                self.ray(p[1], p[0], pen(color(BLUE)))
+            }
+            "horizontalStraightLine" => self.line((l, p[0].1), (r, p[0].1), pen(color(BLUE))),
+            "horizontalRayLine" => self.line(p[0], (r, p[0].1), pen(color(BLUE))),
+            "verticalStraightLine" => self.line((p[0].0, t), (p[0].0, b), pen(color(BLUE))),
+            "parallelStraightLine" => {
+                let shift = if p[0].0 == p[1].0 {
+                    (p[2].0 - p[0].0, 0.0)
+                } else {
+                    let k = (p[1].1 - p[0].1) / (p[1].0 - p[0].0);
+                    (0.0, p[2].1 - (p[0].1 + k * (p[2].0 - p[0].0)))
+                };
+                for (a, c) in [
+                    (p[0], p[1]),
+                    (
+                        (p[0].0 + shift.0, p[0].1 + shift.1),
+                        (p[1].0 + shift.0, p[1].1 + shift.1),
+                    ),
+                ] {
+                    self.ray(a, c, pen(color(BLUE)))?;
+                    self.ray(c, a, pen(color(BLUE)))?;
+                }
+                Ok(())
+            }
+            "fibonacciLine" => {
+                for pct in FIB_LEVELS {
+                    let price = v[1] + (v[0] - v[1]) * pct;
+                    let y = y_of(price);
+                    self.line((l, y), (r, y), pen(color(BLUE)))?;
+                    let text = format!("{} ({:.1}%)", amount(price, prec), pct * 100.0);
+                    self.label(
+                        (l, y),
+                        Label {
+                            text: &text,
+                            size: 12,
+                            fg: color("#ffffff"),
+                            bg: rgba(BLUE),
+                            border: None,
+                            align: 0.0,
+                            baseline: Baseline::Bottom,
+                            pad: (4.0, 2.0),
+                        },
+                    )?;
+                }
+                Ok(())
+            }
+            "cgRect" => self.rect(
+                p[0],
+                p[1],
+                rgba(s.fill.as_deref().unwrap_or(RECT.0)),
+                pen(color(RECT.1)),
+            ),
+            "cgText" => self.label(
+                p[0],
+                Label {
+                    text: d.text.as_deref().unwrap_or(""),
+                    size: s.font_size.unwrap_or(12),
+                    fg: color(TEXT_FG),
+                    bg: rgba(SURFACE),
+                    border: Some(rgba(RECT.1)),
+                    align: 0.0,
+                    baseline: Baseline::Middle,
+                    pad: (6.0, 3.0),
+                },
+            ),
+            "simpleTag" => {
+                let y = p[0].1;
+                let c = color(BLUE);
+                self.line(
+                    (l, y),
+                    (r, y),
+                    Pen {
+                        dash: dash.or(Some((2.0, 2.0))),
+                        ..pen(c)
+                    },
+                )?;
+                let text = format!("{:.*}", prec, v[0]);
+                self.label(
+                    (r, y),
+                    Label {
+                        text: &text,
+                        size: 12,
+                        fg: rgba("#ffffff"),
+                        bg: c,
+                        border: None,
+                        align: 1.0,
+                        baseline: Baseline::Middle,
+                        pad: (4.0, 2.0),
+                    },
+                )
+            }
+            "cgFibExt" => {
+                let guide = Pen {
+                    dash: Some((4.0, 4.0)),
+                    ..pen(color(BLUE))
+                };
+                self.line(p[0], p[1], guide)?;
+                self.line(p[1], p[2], guide)?;
+                for (level, dflt) in FIB_EXT_LEVELS.iter().zip(FIB_EXT_COLORS) {
+                    let price = v[2] + (v[1] - v[0]) * level;
+                    let y = y_of(price);
+                    let c = color(dflt);
+                    self.line((p[2].0, y), (r.max(p[2].0), y), pen(c))?;
+                    let text = format!("{level} ({})", amount(price, prec));
+                    self.label(
+                        (p[2].0 + 4.0, y),
+                        Label {
+                            text: &text,
+                            size: 12,
+                            fg: c,
+                            bg: BG.mix(0.85),
+                            border: None,
+                            align: 0.0,
+                            baseline: Baseline::Bottom,
+                            pad: (2.0, 2.0),
+                        },
+                    )?;
+                }
+                Ok(())
+            }
+            "cgPitchfork" => {
+                let mid = ((p[1].0 + p[2].0) / 2.0, (p[1].1 + p[2].1) / 2.0);
+                let dir = (mid.0 - p[0].0, mid.1 - p[0].1);
+                for o in [p[0], p[1], p[2]] {
+                    self.ray(o, (o.0 + dir.0, o.1 + dir.1), pen(color(BLUE)))?;
+                }
+                self.line(
+                    p[1],
+                    p[2],
+                    Pen {
+                        dash: Some((4.0, 4.0)),
+                        ..pen(color(BLUE))
+                    },
+                )
+            }
+            "cgPriceRange" => self.measure(d, &p, true, false, prec, pen),
+            "cgDateRange" => self.measure(d, &p, false, true, prec, pen),
+            "cgDatePriceRange" => self.measure(d, &p, true, true, prec, pen),
+            _ => self.position(d, &p, prec, pen),
+        }
+    }
+
+    fn measure(
+        &self,
+        d: &Drawing,
+        p: &[Px],
+        price: bool,
+        date: bool,
+        prec: usize,
+        pen: impl Fn(RGBAColor) -> Pen,
+    ) -> Drawn {
+        let (a, b) = (p[0], p[1]);
+        let (pa, pb) = (&d.points[0], &d.points[1]);
+        let up = if date && !price {
+            b.0 >= a.0
+        } else {
+            pb.price >= pa.price
+        };
+        let look = if up { UP } else { DOWN };
+        let line = rgba(d.style.color.as_deref().unwrap_or(look.1));
+        self.rect(
+            a,
+            b,
+            rgba(d.style.fill.as_deref().unwrap_or(look.0)),
+            pen(line),
+        )?;
+        let (xm, ym) = ((a.0 + b.0) / 2.0, (a.1 + b.1) / 2.0);
+        if price {
+            self.arrow((xm, a.1), (xm, b.1), pen(line))?;
+        }
+        if date {
+            self.arrow((a.0, ym), (b.0, ym), pen(line))?;
+        }
+        let mut texts = vec![];
+        if price {
+            texts.push(price_range_label(pa.price, pb.price, prec));
+        }
+        if date {
+            let bars = (pb.x - pa.x).abs();
+            let ms = (pb.time_ms - pa.time_ms).abs();
+            texts.push(format!(
+                "{bars} bar{}, {}",
+                if bars == 1 { "" } else { "s" },
+                duration(ms)
+            ));
+        }
+        let (top, bottom) = (a.1.min(b.1), a.1.max(b.1));
+        // Stacked above the band, the last nearest; below it when there is no room above.
+        let below = top - 4.0 - texts.len() as f64 * LABEL_H < self.y.0;
+        for (i, text) in texts.iter().enumerate() {
+            let x = self.label_x(a.0.min(b.0), a.0.max(b.0), text, 12);
+            let y = if below {
+                bottom + 4.0 + i as f64 * LABEL_H
+            } else {
+                top - 4.0 - (texts.len() - 1 - i) as f64 * LABEL_H
+            };
+            let baseline = if below {
+                Baseline::Top
+            } else {
+                Baseline::Bottom
+            };
+            self.tag((x, y), text, line, baseline)?;
+        }
+        Ok(())
+    }
+
+    fn position(
+        &self,
+        d: &Drawing,
+        p: &[Px],
+        prec: usize,
+        pen: impl Fn(RGBAColor) -> Pen,
+    ) -> Drawn {
+        let (e, t, s) = (p[0], p[1], p[2]);
+        let (left, right) = (e.0.min(t.0), e.0.max(t.0));
+        let thin = |c: &str| Pen {
+            color: rgba(c),
+            width: 1,
+            dash: None,
+        };
+        self.rect((left, e.1), (right, t.1), rgba(GREEN.0), thin(GREEN.1))?;
+        self.rect((left, e.1), (right, s.1), rgba(RED.0), thin(RED.1))?;
+        let line = rgba(d.style.color.as_deref().unwrap_or(POSITION_LINE));
+        self.line((left, e.1), (right, e.1), pen(line))?;
+        let long = d.tool.name == "cgLong";
+        let [pe, pt, ps] = [0, 1, 2].map(|i| d.points[i].price);
+        let dir = if long { 1.0 } else { -1.0 };
+        let (reward, risk) = ((pt - pe) * dir, (pe - ps) * dir);
+        let pct = |v: f64| if pe == 0.0 { 0.0 } else { v / pe.abs() * 100.0 };
+        let target = format!("Target: {} ({}%)", amount(pt, prec), amount(pct(reward), 2));
+        let stop = format!("Stop: {} ({}%)", amount(ps, prec), amount(pct(risk), 2));
+        let ratio = format!(
+            "Risk/Reward Ratio: {}",
+            if risk > 0.0 {
+                format!("{:.2}", reward / risk)
+            } else {
+                "—".into()
+            }
+        );
+        let side = |up: bool| if up { Baseline::Bottom } else { Baseline::Top };
+        self.tag(
+            (self.label_x(left, right, &target, 12), t.1),
+            &target,
+            rgba(GREEN.1),
+            side(t.1 <= e.1),
+        )?;
+        self.tag(
+            (self.label_x(left, right, &stop, 12), s.1),
+            &stop,
+            rgba(RED.1),
+            side(s.1 < e.1),
+        )?;
+        self.tag(
+            (self.label_x(left, right, &ratio, 12), e.1),
+            &ratio,
+            line,
+            Baseline::Middle,
+        )
+    }
+}
+
+/// Decimals for prices near `p`: 2 from 1 up, more below so they keep 4 digits.
+fn decimals(p: f64) -> usize {
+    let a = p.abs();
+    if a >= 1.0 || a == 0.0 || !a.is_finite() {
+        2
+    } else {
+        ((-a.log10()).ceil() as usize + 3).min(8)
+    }
+}
+
+/// `1,234.50`: fixed decimals with thousands separators, as the web app's `formatAmount`.
+fn amount(v: f64, prec: usize) -> String {
+    let text = format!("{:.*}", prec, v.abs());
+    let (int, frac) = text
+        .split_once('.')
+        .map_or((text.as_str(), ""), |(i, f)| (i, f));
+    let mut grouped = String::new();
+    for (i, c) in int.chars().enumerate() {
+        if i > 0 && (int.len() - i) % 3 == 0 {
+            grouped.push(',');
+        }
+        grouped.push(c);
+    }
+    let sign = if v < 0.0 && text.bytes().any(|b| b.is_ascii_digit() && b != b'0') {
+        "-"
+    } else {
+        ""
+    };
+    if frac.is_empty() {
+        format!("{sign}{grouped}")
+    } else {
+        format!("{sign}{grouped}.{frac}")
+    }
+}
+
+/// `+1,234.50 (+2.31%)`, as the web app's `priceRangeLabel`.
+fn price_range_label(from: f64, to: f64, prec: usize) -> String {
+    let delta = to - from;
+    let pct = if from == 0.0 {
+        0.0
+    } else {
+        delta / from.abs() * 100.0
+    };
+    let signed =
+        |v: f64, p: usize| format!("{}{}", if v < 0.0 { "-" } else { "+" }, amount(v.abs(), p));
+    format!("{} ({}%)", signed(delta, prec), signed(pct, 2))
+}
+
+/// `3d 4h`, `5h 30m`, `45m`: the two largest units, as the web app's `formatDuration`.
+fn duration(ms: i64) -> String {
+    let total = ms.abs() / 60_000;
+    let (d, h, m) = (total / 1440, (total % 1440) / 60, total % 60);
+    match (d, h, m) {
+        (d, 0, _) if d > 0 => format!("{d}d"),
+        (d, h, _) if d > 0 => format!("{d}d {h}h"),
+        (_, h, 0) if h > 0 => format!("{h}h"),
+        (_, h, m) if h > 0 => format!("{h}h {m}m"),
+        _ => format!("{m}m"),
+    }
 }
 
 /// The points of a line as runs between NaN values, each drawn as its own
@@ -663,6 +1295,30 @@ fn auto_range(r: &PanelResult) -> (f64, f64) {
 mod tests {
     use super::*;
     const NAN: f64 = f64::NAN;
+
+    #[test]
+    fn bars_sit_on_the_price_panes_x_range() {
+        // 100 bars and 50 more for drawings past the last one, on a plot from 90 to 1390.
+        let plot = (90.0, 1390.0);
+        assert_eq!(bar_x(0.0, 150.0, plot), 90.0);
+        assert_eq!(bar_x(150.0, 150.0, plot), 1390.0);
+        assert_eq!(
+            bar_x(99.0, 150.0, plot),
+            948.0,
+            "the last bar, 99 of 150 in"
+        );
+    }
+
+    #[test]
+    fn without_panels_the_price_pane_takes_the_height() {
+        // Title, then the price pane down to the date labels.
+        assert_eq!(layout(1080, 0), (1020, 0));
+        assert_eq!(layout(400, 0), (340, 0));
+        // With panels, as before: 55% for the price pane, the rest shared.
+        assert_eq!(layout(1080, 1), (572, 468));
+        assert_eq!(layout(1080, 2), (572, 234));
+        assert_eq!(layout(800, 3), (418, 114));
+    }
 
     #[test]
     fn the_title_names_how_the_bars_are_built() {

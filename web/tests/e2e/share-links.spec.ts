@@ -158,4 +158,64 @@ test.describe("share links", () => {
     );
     expect(copied).toContain("symbol=BTCUSDT");
   });
+
+  test("draw= adds the link's drawings, editable and only once (ADR-0054)", async ({ page }) => {
+    const drawings = () =>
+      page.evaluate(() =>
+        (
+          window as unknown as {
+            __chartgenDrawings: () => {
+              name: string;
+              lock: boolean;
+              visible: boolean;
+              pixels: { x?: number; y?: number }[];
+            }[];
+          }
+        ).__chartgenDrawings(),
+      );
+    // A bar of the loaded 1h chart, well inside the visible bars.
+    const hour = Math.floor(Date.now() / 3_600_000) * 3600 - 10 * 3600;
+    const link = `/?symbol=BTCUSDT&interval=1h&draw=verticalStraightLine(${hour}:1;color:%2523f23645;width:2),cgText(${hour - 7200}:1;text:From%2520an%2520agent)`;
+    await gotoApp(page, link);
+    await expect.poll(async () => (await drawings()).map((d) => d.name)).toEqual([
+      "verticalStraightLine",
+      "cgText",
+    ]);
+    const [line] = await drawings();
+    expect(line).toMatchObject({ lock: false, visible: true });
+    const stored = await page.evaluate(() => localStorage.getItem("chartgen.drawings.BTCUSDT"));
+    expect(JSON.parse(stored ?? "[]")[0]).toMatchObject({
+      name: "verticalStraightLine",
+      points: [{ timestamp: hour * 1000, value: 1 }],
+      style: { color: "#f23645", width: 2 },
+    });
+
+    // A normal drawing: select it, delete it, undo that.
+    const box = await page.locator(".chart-container").boundingBox();
+    if (!box || line?.pixels[0]?.x === undefined) throw new Error("no line on the chart");
+    await page.mouse.move(box.x + line.pixels[0].x, box.y + 120, { steps: 5 });
+    await page.mouse.down();
+    await page.mouse.up();
+    await page.keyboard.press("Delete");
+    await expect.poll(async () => (await drawings()).map((d) => d.name)).toEqual(["cgText"]);
+    await page.keyboard.press("Control+z");
+    await expect.poll(async () => (await drawings()).length).toBe(2);
+
+    // The same link again adds nothing; another one adds to them.
+    await gotoApp(page, link);
+    await expect.poll(async () => (await drawings()).length).toBe(2);
+    await gotoApp(page, `/?symbol=BTCUSDT&draw=horizontalStraightLine(${hour}:2)`);
+    await expect.poll(async () => (await drawings()).length).toBe(3);
+  });
+
+  test("Copy link carries the symbol's drawings", async ({ context, baseURL }) => {
+    await context.grantPermissions(["clipboard-read", "clipboard-write"], { origin: baseURL });
+    const page = await context.newPage();
+    const hour = Math.floor(Date.now() / 3_600_000) * 3600 - 10 * 3600;
+    await gotoApp(page, `/?symbol=BTCUSDT&interval=1h&draw=horizontalStraightLine(${hour}:2.5)`);
+    await page.getByRole("button", { name: "Copy link to chart" }).click();
+    await expect(page.getByText("Link copied", { exact: true })).toBeVisible();
+    const link = await page.evaluate(() => navigator.clipboard.readText());
+    expect(link).toContain(`draw=horizontalStraightLine(${hour}:2.5)`);
+  });
 });

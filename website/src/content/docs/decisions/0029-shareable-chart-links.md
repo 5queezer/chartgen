@@ -7,7 +7,7 @@ sidebar:
 
 **Status:** Accepted
 **Date:** 2026-11-05
-**Amended by:** [ADR-0043](/chartgen/decisions/0043-multi-chart-grid/) (in a grid, a link carries and opens in the active chart)
+**Amended by:** [ADR-0043](/chartgen/decisions/0043-multi-chart-grid/) (in a grid, a link carries and opens in the active chart) and [ADR-0054](/chartgen/decisions/0054-agent-drawings/) (a link may carry drawings of its symbol, `draw`)
 
 ## Context and Problem Statement
 

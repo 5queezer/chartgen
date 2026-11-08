@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
+  importDrawings,
   loadDrawings,
   MAX_BYTES,
   MAX_DRAWINGS,
@@ -266,6 +267,20 @@ describe("storage", () => {
     saveDrawings("BTCUSDT", [good] as DrawingRecord[]);
     saveDrawings("BTCUSDT", []);
     expect(store.has(storageKey("BTCUSDT"))).toBe(false);
+  });
+
+  it("adds a link's drawings to the stored ones, once (ADR-0054)", () => {
+    const own = { ...good, id: "mine", lock: true } as DrawingRecord;
+    const line = { name: "horizontalStraightLine", points: [{ timestamp: 1000, value: 5 }], lock: false, visible: true } as DrawingRecord;
+    saveDrawings("BTCUSDT", [own]);
+    // The same tool, points and text as a stored one is that one, whatever its look.
+    expect(importDrawings("BTCUSDT", [{ ...good, style: { width: 2 } } as DrawingRecord, line, line])).toBe(1);
+    expect(loadDrawings("BTCUSDT")).toEqual([own, line]);
+    expect(importDrawings("BTCUSDT", [line])).toBe(0);
+    // Never past MAX_DRAWINGS.
+    const full = Array.from({ length: MAX_DRAWINGS }, (_, i) => ({ ...line, points: [{ timestamp: i, value: i }] }));
+    saveDrawings("ETHUSDT", full);
+    expect(importDrawings("ETHUSDT", [{ ...line, points: [{ timestamp: -1, value: 1 }] }])).toBe(0);
   });
 
   it("survives corrupt JSON", () => {

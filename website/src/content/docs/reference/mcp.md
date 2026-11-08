@@ -70,9 +70,20 @@ were added with the root URL. `GET /` is not MCP: it serves the
 [web app](/chartgen/guides/web/) to browsers and the health JSON to
 everyone else ([ADR-0027](/chartgen/decisions/0027-serve-web-app-same-origin/)).
 
+## Prompts
+
+`prompts/list` and `prompts/get` serve one prompt, `draw-on-chart`
+([ADR-0054](/chartgen/decisions/0054-agent-drawings/)): the workflow for
+drawing on a chart — `inspect_chart`, anchor points to its swing highs and
+lows with `snap`, `generate_chart` with [`drawings`](#drawings), check the image
+and `warnings`, then give the user `open_url` — with three worked examples: a
+trend line between two swing lows, a support zone with `cgRect`, and a fib
+retracement from a swing high to a swing low. `initialize` announces the
+`prompts` capability. An unknown prompt name is a `-32602` error.
+
 ## Tool catalog
 
-21 tools. The 12 trading tools require `--trade`; attempting to call them
+23 tools. The 12 trading tools require `--trade`; attempting to call them
 without it returns an error. With `CHARTGEN_SCRIPTING=1` the server also
 lists the 5 [scripted-indicator tools](#scripted-indicators-chartgen_scripting1),
 and with `CHARTGEN_SERVER_ALERTS=1` the 4
@@ -84,7 +95,7 @@ and with `CHARTGEN_SERVER_ALERTS=1` the 4
 
 Render a chart for a symbol. Accepts `ticker`/`symbol`, `timeframe`/`interval`,
 `indicators` (string names or objects with overrides), `bars` (default 200),
-`width`, `height`, `format`, `end_time`, `warmup`, `profile_intrabars`, `chart_style` and `chart_params`.
+`width`, `height`, `format`, `end_time`, `warmup`, `profile_intrabars`, `chart_style`, `chart_params` and [`drawings`](#drawings).
 
 | Parameter | Meaning |
 |-----------|---------|
@@ -95,6 +106,7 @@ Render a chart for a symbol. Accepts `ticker`/`symbol`, `timeframe`/`interval`,
 | `profile_intrabars` | Boolean, default false. `format=series` only. Computes `volume_profile`, `fixed_range_vp` and `anchored_vp` from lower-timeframe bars, for up to 6 more Binance requests ([ADR-0048](/chartgen/decisions/0048-order-flow/)). Meant for a chart's full load: pages and tails keep the load's profile, so leave it off on those. |
 | `chart_style` | `candles` (default) or `heikin_ashi`. `heikin_ashi` replaces the price bars with Heikin Ashi bars in every format: `haClose = (o+h+l+c)/4`, `haOpen = (prev haOpen + prev haClose)/2` (the first bar is seeded with `(o+c)/2`), `haHigh = max(h, haOpen, haClose)`, `haLow = min(l, haOpen, haClose)`; volume and timestamps are unchanged. Like TradingView, indicators are computed on the Heikin Ashi values, not the raw bars. The transform runs over `bars + warmup` before trimming, and because each `haOpen` is an exponentially decaying average, pages and tail polls with the same warmup agree after a few bars. `format=series` echoes the applied style as `chart_style`. `renko`, `kagi`, `point_figure`, `line_break` and `range` are [price-based](#price-based-styles). Any other value is an error. |
 | `chart_params` | Inputs of a [price-based style](#price-based-styles), and an error with any other style. |
+| `drawings` | Up to 50 drawings on the price chart, in the web app's drawing tools. See [Drawings](#drawings). |
 
 `timeframe` is a number and a unit: `s` seconds, `m` minutes, `h` hours, `d` or `D`
 days, `w`, `W` or `wk` weeks, and `M` or `mo` months (`5s`, `7m`, `45m`, `90m`, `8h`,
@@ -641,6 +653,125 @@ can, for example by hitting its time limit. A failing indicator is left out of
 as a second text content item, `{"indicator_errors": {...}}`. The field is
 absent when every indicator computed
 ([ADR-0025](/chartgen/decisions/0025-user-indicator-registry/)).
+
+##### Drawings
+
+An agent draws on the chart with the web app's own 18 drawing tools, and the
+result opens in the web app as normal drawings
+([ADR-0054](/chartgen/decisions/0054-agent-drawings/)). Each drawing is
+`{tool, points, style?, text?}`:
+
+| Field | Meaning |
+|---|---|
+| `tool` | One of the names [`list_drawing_tools`](#list_drawing_tools) lists: `segment`, `rayLine`, `straightLine`, `horizontalStraightLine`, `horizontalRayLine`, `verticalStraightLine`, `parallelStraightLine`, `fibonacciLine`, `cgRect`, `cgText`, `simpleTag`, `cgFibExt`, `cgPitchfork`, `cgPriceRange`, `cgDateRange`, `cgDatePriceRange`, `cgLong`, `cgShort`. |
+| `points` | Exactly the tool's points, in its order (1 to 3). A point is `{"time": T, "price": P}`, or an anchor `{"time": T, "snap": "open" \| "high" \| "low" \| "close"}` that takes that bar's value. `T` is unix seconds (below 1e11), unix ms, or ISO 8601 (`2026-10-12`, `2026-10-12T14:00:00Z`; UTC unless it has an offset). It resolves to the bar containing it; past the last bar, to that bar's grid, rounded to a bar. A snap needs a loaded bar. |
+| `style` | The web app's style bar fields for the tool: `color`, `width` (1-4) and `dash` (`solid`, `dashed`, `dotted`) on lines and shapes, `fill` on `cgRect` and the three ranges, `color` and `fontSize` (10, 12, 14, 18, 24) on `cgText`. Colors are `#rgb`, `#rrggbb`, `#rrggbbaa` or `rgba(r, g, b, a)`. Absent fields take the tool's own look. A field that does not apply is an error. |
+| `text` | `cgText`'s text, required there, on one line: 1 to 200 characters, counted in UTF-16 units as the web app counts them (an emoji counts 2). No other tool takes text. |
+
+What the points of each tool mean: `fibonacciLine` is the 100% level then the
+0% level; `cgFibExt` is A, B and C, with levels `C + (B − A) × level`;
+`parallelStraightLine` is two points of the base line and one the parallel
+passes through; `cgPitchfork` is P1, P2 and P3; `cgLong` and `cgShort` are
+entry, target and stop, where the target and the stop share one time, the
+box's right edge, and must be on the profit and the loss side of the entry.
+The horizontal tools use only the price, `verticalStraightLine` only the time.
+
+All drawings are checked together, and the call draws all of them or none. The
+shapes are checked before any bars are read, the times once they are in. A
+problem fails the call with a tool error whose text is JSON:
+
+```json
+{
+  "error": "1 problem(s) with drawings; nothing was drawn. Fix them and send the call again.",
+  "drawing_errors": [
+    {
+      "index": 1,
+      "tool": "segment",
+      "message": "points[0]: time 2026-10-01T00:00:00Z is before the first bar of the chart, 2026-10-12T00:00:00Z",
+      "hint": "load more history (a larger bars, up to 5000) or pick a time at or after 2026-10-12T00:00:00Z"
+    }
+  ]
+}
+```
+
+Drawings need bar times, so a call without a ticker (the demo series) cannot
+take them. On success the answer adds a JSON text item after the image (and
+after the summary or series):
+
+```json
+{
+  "drawings": [
+    {
+      "tool": "rayLine",
+      "points": [
+        { "time": "2026-10-28T08:00:00Z", "timestamp": 1793174400000, "price": 236.30, "bar": 32, "snap": "low" },
+        { "time": "2026-10-29T20:00:00Z", "timestamp": 1793304000000, "price": 223.06, "bar": 68, "snap": "low" }
+      ],
+      "style": { "color": "#089981", "width": 2 }
+    }
+  ],
+  "warnings": [],
+  "open_url": "https://chartgen.vasudev.xyz/?symbol=BTCUSDT&interval=1h&draw=rayLine(1793174400:236.3;1793304000:223.06;color:%2523089981;width:2)"
+}
+```
+
+`bar` counts from the first bar the chart shows. `warnings` says what the
+image cuts off: a price outside the visible price range, or a point more bars
+past the last bar than the image shows (half the bars shown). `open_url` is a
+[share link](/chartgen/guides/web/#sharing-a-chart) with `symbol`,
+`interval`, `type` (candles or Heikin Ashi only), `ind` when the call named
+at least one indicator, and `draw`. Without `ind` the receiver keeps their own
+indicators: a link never clears them. It is there only when the server has
+`CHARTGEN_BASE_URL`, and is left out with a warning when the drawings take
+more than the 8192 characters a link carries. The PNG draws every tool in the
+web app's dark-theme colors: fib levels with their prices, zones and ranges
+with translucent fills and labels, long and short positions with their target,
+stop and risk/reward ratio. Drawings add nothing to a call's cost.
+
+#### `list_drawing_tools`
+
+The drawing tools [`drawings`](#drawings) takes, from the one table in
+`src/drawings.rs`: for each its `name`, `label` (as in the web app's
+toolbar), `summary`, `points` (what each point is), `style` (the fields that
+apply) and `text` (whether it takes text), plus `max_drawings`, `max_text`
+and the style and point forms. No arguments; read-only. The web app's copy of
+the table is `web/src/generated/drawing-tools.json`.
+
+#### `inspect_chart`
+
+Read-only facts of a chart, to anchor drawings on real bars instead of
+guessing prices. Takes `ticker`/`symbol` (required), `timeframe`/`interval`
+(default `4h`), `bars` (default 200, 1 to 1000), `end_time` and
+`swing_depth` (default 5, 1 to 50). Use the same ticker, timeframe, bars and
+end time as the `generate_chart` call that will draw, so the bars match.
+
+```json
+{
+  "symbol": "BTCUSDT",
+  "interval": "1h",
+  "bars": 120,
+  "first_bar": { "time": "2026-10-27T00:00:00Z", "timestamp": 1793059200000, "bar": 0, "open": 216.12, "high": 219.07, "low": 216.06, "close": 218.22 },
+  "last_bar": { "time": "2026-10-31T23:00:00Z", "timestamp": 1793487600000, "bar": 119, "open": 257.74, "high": 263.11, "low": 257.15, "close": 262.61 },
+  "last_close": 262.61,
+  "high": { "price": 263.11, "time": "2026-10-31T23:00:00Z", "timestamp": 1793487600000, "bar": 119 },
+  "low": { "price": 216.06, "time": "2026-10-27T00:00:00Z", "timestamp": 1793059200000, "bar": 0 },
+  "visible_price_range": { "low": 213.70, "high": 265.46 },
+  "max_bars_past_last": 60,
+  "swing_depth": 5,
+  "swings": [
+    { "kind": "high", "snap": "high", "price": 256.72, "time": "2026-10-27T19:00:00Z", "timestamp": 1793127600000, "bar": 19 },
+    { "kind": "low", "snap": "low", "price": 236.30, "time": "2026-10-28T08:00:00Z", "timestamp": 1793174400000, "bar": 32 }
+  ]
+}
+```
+
+`swings` are the newest 12 swing highs and lows, oldest first, alternating:
+zigzag pivots with `swing_depth` bars on each side. A larger depth finds fewer,
+bigger swings; the newest `swing_depth` bars cannot hold one yet.
+`visible_price_range` is the price range the PNG shows (the bars' range plus
+5% each side); `max_bars_past_last` is how far past the last bar the image
+reaches for drawings. It costs `bars × 2` of the call budget, at least 1000
+([ADR-0052](/chartgen/decisions/0052-indicator-cost/)).
 
 #### `list_indicators`
 

@@ -110,6 +110,72 @@ export interface GenerateChartInput {
    */
   chart_style?: "candles" | "heikin_ashi" | "renko" | "kagi" | "point_figure" | "line_break" | "range";
   /**
+   * Drawings to put on the price chart, as a person draws them in the web app (ADR-0054). Each is {tool, points, style?, text?} with exactly the tool's points: segment (start; end), rayLine (origin; a point it passes through, after which it runs on to the edge), straightLine (a point on the line; another point on the line), horizontalStraightLine (the price level (its time only places the handle)), horizontalRayLine (origin; the ray runs right from it at its price), verticalStraightLine (the bar (its price only places the handle)), parallelStraightLine (first point of the base line; second point of the base line; a point the parallel line passes through), fibonacciLine (the 100% level; the 0% level), cgRect (a corner; the opposite corner), cgText (where the text starts (its left edge, vertically centred)), simpleTag (the price (its time only places the handle)), cgFibExt (A, where the move starts; B, where it ends; C, where the projection starts), cgPitchfork (P1, the handle; P2; P3), cgPriceRange (from; to), cgDateRange (from; to), cgDatePriceRange (from; to), cgLong (entry; its time is the box's left edge; target, above the entry; its time is the box's right edge; stop, below the entry; the same time as the target), cgShort (entry; its time is the box's left edge; target, below the entry; its time is the box's right edge; stop, above the entry; the same time as the target). A point is {time, price} or an anchor {time, snap} that takes that bar's open, high, low or close; time is unix seconds, unix ms or an ISO 8601 date or date-time (UTC unless it has an offset) and resolves to the bar containing it, or past the last bar to that bar's grid. All drawings are checked together: if any is invalid the call fails, names each bad drawing by index with a reason and a hint, and draws nothing. On success the answer adds a JSON text item: each drawing with its resolved points (time, timestamp in ms, price, bar), warnings (a point cut off past the right edge or outside the visible price range), and open_url, a link that opens the chart in the web app with these drawings as normal, editable drawings (when the server has CHARTGEN_BASE_URL). Call inspect_chart first to anchor points to real swing highs and lows; list_drawing_tools describes every tool. At most 50 drawings.
+   *
+   * @maxItems 50
+   */
+  drawings?: {
+    /**
+     * Exactly the tool's points, in its order (1 to 3).
+     */
+    points: {
+      /**
+       * The point's price. Give price or snap.
+       */
+      price?: number;
+      /**
+       * Anchor to this value of the bar at time, instead of a price. Only on loaded bars.
+       */
+      snap?: "open" | "high" | "low" | "close";
+      /**
+       * Unix seconds, unix ms, or ISO 8601 (2026-10-12 or 2026-10-12T14:00:00Z).
+       */
+      time: number | string;
+    }[];
+    /**
+     * The look, as the web app's style bar sets it; absent fields take the tool's own. cgText takes color and fontSize; the others color, width and dash, and the filled ones (cgRect and the three ranges) fill.
+     */
+    style?: {
+      /**
+       * #rgb, #rrggbb, #rrggbbaa or rgba(r, g, b, a).
+       */
+      color?: string;
+      dash?: "solid" | "dashed" | "dotted";
+      /**
+       * Fill color, as color; may carry alpha.
+       */
+      fill?: string;
+      fontSize?: 10 | 12 | 14 | 18 | 24;
+      /**
+       * Line width in px.
+       */
+      width?: number;
+    };
+    /**
+     * cgText's text (required there); no other tool takes text.
+     */
+    text?: string;
+    tool:
+      | "segment"
+      | "rayLine"
+      | "straightLine"
+      | "horizontalStraightLine"
+      | "horizontalRayLine"
+      | "verticalStraightLine"
+      | "parallelStraightLine"
+      | "fibonacciLine"
+      | "cgRect"
+      | "cgText"
+      | "simpleTag"
+      | "cgFibExt"
+      | "cgPitchfork"
+      | "cgPriceRange"
+      | "cgDateRange"
+      | "cgDatePriceRange"
+      | "cgLong"
+      | "cgShort";
+  }[];
+  /**
    * History paging: return only bars whose open time (ms since epoch) is strictly before end_time — pass the oldest loaded bar's t × 1000 to fetch the page before it. Omit (or null) for the newest bars, including the still-forming one. Must be an integer between -2208988800000 (1900-01-01) and one year from now.
    */
   end_time?: number;
@@ -314,7 +380,40 @@ export interface GetTpoInput {
   value_area?: number;
 }
 
+export interface InspectChartInput {
+  /**
+   * Bars to read, newest last, 1 to 1000.
+   */
+  bars?: number;
+  /**
+   * As generate_chart's end_time: only bars that open before it (ms since epoch).
+   */
+  end_time?: number;
+  /**
+   * Alias for timeframe.
+   */
+  interval?: string;
+  /**
+   * Bars on each side a swing high or low must top (or undercut), 1 to 50. Larger finds fewer, bigger swings.
+   */
+  swing_depth?: number;
+  /**
+   * Alias for ticker.
+   */
+  symbol?: string;
+  /**
+   * Stock or crypto symbol, as generate_chart takes it. Required.
+   */
+  ticker?: string;
+  /**
+   * As generate_chart's timeframe.
+   */
+  timeframe?: string;
+}
+
 export interface ListAlertsInput {}
+
+export interface ListDrawingToolsInput {}
 
 export interface ListIndicatorsInput {}
 

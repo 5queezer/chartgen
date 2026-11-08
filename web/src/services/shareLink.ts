@@ -38,6 +38,7 @@ import {
   timeZone,
 } from "../stores/layout";
 import { paramDefaults } from "../stores/layouts";
+import { importDrawings, loadDrawings } from "../stores/drawings";
 import { showToast } from "./alertEngine";
 
 // Raw indicator entries a link brought in, untyped and unchecked. Kept only in
@@ -108,6 +109,12 @@ export function applyShareLink(): void {
     for (const s of compareSymbols()) removeCompare(s);
     for (const s of patch.compare) addCompare(s, symbol());
   }
+  // The link's drawings join the symbol's own (ADR-0054); the chart loads them as usual.
+  if (patch.drawings !== undefined) {
+    const added = importDrawings(symbol(), patch.drawings);
+    if (added === null) showToast("Drawings from the link could not be saved");
+    else if (added > 0) showToast(`Added ${added} drawing${added === 1 ? "" : "s"} from the link`);
+  }
   window.history.replaceState({}, "", pathname + stripShareParams(search) + hash);
 }
 
@@ -138,7 +145,7 @@ export function reconcileImported(
   }
 }
 
-/** URL of the current chart. */
+/** URL of the current chart, with its symbol's visible drawings when they fit in a link. */
 export function chartLink(): string {
   const query = encodeShare(
     {
@@ -149,6 +156,7 @@ export function chartLink(): string {
       indicators: activeIndicators(),
       compare: compareSymbols(),
       timeZone: timeZone(),
+      drawings: loadDrawings(symbol(), false).filter((d) => d.visible),
     },
     paramDefaults(),
   );
@@ -187,5 +195,8 @@ export async function copyText(text: string): Promise<boolean> {
 
 /** Put the chart's link on the clipboard and confirm with a toast. */
 export async function copyChartLink(): Promise<void> {
-  showToast((await copyText(chartLink())) ? "Link copied" : "Copy failed");
+  const link = chartLink();
+  const left = loadDrawings(symbol(), false).some((d) => d.visible) && !link.includes("draw=");
+  const copied = await copyText(link);
+  showToast(!copied ? "Copy failed" : left ? "Link copied (without drawings: too many for a link)" : "Link copied");
 }
