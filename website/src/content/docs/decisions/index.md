@@ -82,3 +82,4 @@ one and link both ways.
 | [0052](/chartgen/decisions/0052-indicator-cost/) | What an indicator costs | Accepted | 2026-11-07 |
 | [0053](/chartgen/decisions/0053-hidden-indicators-stay-in-the-status-line/) | A hidden indicator stays in the status line | Accepted | 2026-11-08 |
 | [0054](/chartgen/decisions/0054-agent-drawings/) | An agent draws with the web app's tools | Accepted | 2026-11-08 |
+| [0056](/chartgen/decisions/0056-png-and-summary-warm-up/) | A png or summary reads its indicators' warmup | Accepted | 2026-11-09 |

@@ -408,6 +408,10 @@ fn names_user_script(indicators: &Value, user: Option<&str>) -> bool {
 const MAX_BARS: usize = 5000;
 /// Upper bound for `warmup` (ADR-0009).
 const MAX_WARMUP: usize = 1000;
+/// The warmup a png or summary reads before its bars, raised to its indicators' need: the
+/// web chart's (`WARMUP` in `web/src/lib/liveFeed.ts`), so all show the same values
+/// (ADR-0056).
+const PNG_WARMUP: usize = 300;
 /// Newest pattern labels in a summary: the rest are only counted.
 const MAX_SUMMARY_LABELS: usize = 20;
 
@@ -424,6 +428,23 @@ fn warmup_arg(args: &Value, panels: &[Box<dyn Indicator>]) -> usize {
     if asked == 0 {
         return 0;
     }
+    asked.max(warmup_need(args, panels))
+}
+
+/// Bars read before the ones a call shows. Warmup bars feed indicator computation but
+/// are trimmed from the payload. A series reads the `warmup` asked for, raised to its
+/// indicators' need (ADR-0032); a png or summary always reads that need, at least the web
+/// chart's warmup, and still shows exactly `bars` (ADR-0056).
+fn read_warmup(format: &str, args: &Value, panels: &[Box<dyn Indicator>]) -> usize {
+    match format {
+        "series" => warmup_arg(args, panels),
+        _ if panels.is_empty() => 0,
+        _ => PNG_WARMUP.max(warmup_need(args, panels)),
+    }
+}
+
+/// Bars of history `panels` need before their values converge, capped.
+fn warmup_need(args: &Value, panels: &[Box<dyn Indicator>]) -> usize {
     let chart_secs = args
         .get("timeframe")
         .or_else(|| args.get("interval"))
@@ -435,7 +456,7 @@ fn warmup_arg(args: &Value, panels: &[Box<dyn Indicator>]) -> usize {
         .map(|i| i.warmup_bars_at(chart_secs))
         .max()
         .unwrap_or(0);
-    asked.max(need).min(MAX_WARMUP)
+    need.min(MAX_WARMUP)
 }
 
 /// Oldest accepted `end_time`: 1900-01-01 (index histories predate 1970).
@@ -614,13 +635,7 @@ pub(crate) fn generate_chart(
         return tool_err(id, &e);
     }
 
-    // Warmup bars feed indicator computation but are trimmed from the series
-    // payload. png/summary ignore it and render exactly `bars` (ADR-0009).
-    let warmup = if want_series {
-        warmup_arg(args, &panel_indicators)
-    } else {
-        0
-    };
+    let warmup = read_warmup(&format, args, &panel_indicators);
     let parsed_interval = chartgen::interval::Interval::parse(interval);
     // Price-based bars read a fixed window of source bars, however many bars the
     // call wants: how many they make is only known afterwards (ADR-0047).
@@ -702,6 +717,14 @@ pub(crate) fn generate_chart(
         _ => None,
     };
 
+    // A png's or summary's warmup bars (ADR-0056) are read by its indicators alone:
+    // everything else is about the bars it shows.
+    let warm = (!want_series && data.len() > bars).then(|| {
+        let all = data.clone();
+        data.bars.drain(..data.len() - bars);
+        all
+    });
+
     // On the bars the chart shows: a series' warmup bars are not among them.
     let drawn = match requests
         .map(|r| drawings::resolve(r, &data.bars[data.len().saturating_sub(bars)..]))
@@ -716,8 +739,21 @@ pub(crate) fn generate_chart(
     // values already aligned 1:1 with bars. The PNG renders from them too.
     // An indicator that fails (a user script, ADR-0025) is left out and
     // reported under `indicator_errors`; the rest of the chart still renders.
-    let (computed, inds, errors_value) = compute_panels(&data, &indicator_keys, &panel_indicators);
+    let read = warm.as_ref().unwrap_or(&data);
+    let (mut computed, inds, errors_value) =
+        compute_panels(read, &indicator_keys, &panel_indicators);
     let errors_value = with_key_errors(errors_value, per_key);
+    // Trimmed to the bars shown; a profile read over them alone, as a series' (ADR-0009).
+    let offset = read.len() - data.len();
+    if offset > 0 {
+        for ((_, pr), ind) in computed.iter_mut().zip(&inds) {
+            *pr = if ind.windowed_profile() {
+                ind.compute(&data)
+            } else {
+                trim_panel_result(pr, offset)
+            };
+        }
+    }
 
     // Build summary payload keyed by request name (or instance id, ADR-0028)
     // so the LLM can correlate output with the entries it passed in.
@@ -785,7 +821,7 @@ pub(crate) fn generate_chart(
             .map(|ind| {
                 price_bars::Kind::from_style(chart_style)
                     .is_none()
-                    .then(|| ind.projection(&data))
+                    .then(|| ind.projection(read))
                     .flatten()
             })
             .collect();
@@ -1776,11 +1812,13 @@ fn bar_t(bar: &chartgen::data::Bar) -> Value {
 }
 
 // Drop the first `offset` (warmup) bars from every index-based channel and
-// re-base indices onto the remaining bars. Dots inside the warmup are
-// dropped; divlines wholly inside it are dropped, and ones straddling the
+// re-base indices onto the remaining bars. Dots and pattern labels inside the
+// warmup are dropped; divlines wholly inside it are dropped, and ones straddling the
 // boundary are clipped to start at bar 0 with y interpolated (lines that
-// only touch bar 0 would collapse to a point and are dropped too). hlines, hbars
-// and y_range are price-based and pass through unchanged.
+// only touch bar 0 would collapse to a point and are dropped too). Patterns, levels
+// and events are re-based and may start before bar 0, as a series' are (the image cuts
+// them off there); a range profile's span is cut to the bars left. hlines, hbars and
+// y_range are price-based and pass through unchanged.
 fn trim_panel_result(
     pr: &chartgen::indicator::PanelResult,
     offset: usize,
@@ -1817,6 +1855,29 @@ fn trim_panel_result(
         d.x1 -= offset;
         d.x2 -= offset;
     }
+    out.labels.retain(|l| l.x >= offset);
+    for l in &mut out.labels {
+        l.x -= offset;
+    }
+    let shift = offset as i64;
+    for p in &mut out.patterns {
+        for s in &mut p.strokes {
+            s.x1 -= shift;
+            s.x2 -= shift;
+        }
+        p.label_x -= shift;
+        p.confirmed_x = p.confirmed_x.map(|x| x - shift);
+    }
+    for l in &mut out.levels {
+        l.x -= shift;
+    }
+    for e in &mut out.events {
+        e.x = e.x.map(|x| x - shift);
+    }
+    out.span = pr
+        .span
+        .filter(|(_, last)| *last >= offset)
+        .map(|(first, last)| (first.saturating_sub(offset), last - offset));
     out
 }
 
@@ -6261,6 +6322,115 @@ mod tests {
         assert_eq!(w(300, long_ema.clone()), MAX_WARMUP);
         assert_eq!(w(0, long_ema), 0);
         assert_eq!(w(5000, json!([])), MAX_WARMUP);
+    }
+
+    #[test]
+    fn png_and_summary_read_their_indicators_warmup() {
+        // ADR-0056: as much as the indicators need, at least the web chart's 300, capped,
+        // whatever `warmup` says; a series still reads only the warmup it asks for.
+        let panels = |names: Value| parse_panels(&names, None).0;
+        let args = json!({ "timeframe": "4h" });
+        for format in ["png", "summary", "both"] {
+            assert_eq!(
+                read_warmup(format, &args, &panels(json!(["rsi"]))),
+                PNG_WARMUP
+            );
+            assert_eq!(
+                read_warmup(format, &args, &panels(json!(["ema_stack"]))),
+                891
+            );
+            let long = json!([{ "name": "ma", "type": "ema", "length": 1000 }]);
+            assert_eq!(read_warmup(format, &args, &panels(long)), MAX_WARMUP);
+            // No indicators: nothing to warm up.
+            assert_eq!(read_warmup(format, &args, &panels(json!([]))), 0);
+        }
+        assert_eq!(
+            read_warmup("series", &args, &panels(json!(["ema_stack"]))),
+            0
+        );
+    }
+
+    #[test]
+    fn kalman_volume_has_values_on_200_bars() {
+        // #125: its first value needs about 285 bars; a png or summary of 200 reads them.
+        let resp = generate_chart(
+            Some(json!(1)),
+            &json!({ "bars": 200, "indicators": ["kalman_volume"], "format": "both" }),
+            fetch::DataSource::Live,
+            None,
+        );
+        let content = chart_content(&resp);
+        assert_eq!(content[0]["type"], "image");
+        let summary: Value = serde_json::from_str(content[1]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(
+            summary["price"]["bars"], 200,
+            "the bars shown, not the warmup"
+        );
+        let lines = summary["indicators"]["kalman_volume"]["lines"]
+            .as_array()
+            .unwrap();
+        assert!(!lines.is_empty());
+        for line in lines {
+            assert!(line["last_value"].is_f64(), "{line}");
+        }
+        // The signals sit on the bars shown.
+        let signals = summary["indicators"]["kalman_volume"]["signals"]
+            .as_array()
+            .unwrap();
+        assert!(signals
+            .iter()
+            .all(|s| (0..200).contains(&s["x"].as_i64().unwrap())));
+    }
+
+    #[test]
+    fn trimming_re_bases_every_mark() {
+        use chartgen::indicator::{
+            Bias, IndicatorEvent, LevelLine, PanelResult, PatternShape, PatternStatus, Stroke,
+        };
+        let pattern = PatternShape {
+            key: "k".into(),
+            name: "n".into(),
+            bias: Bias::Bullish,
+            status: PatternStatus::Confirmed,
+            strokes: vec![Stroke {
+                x1: 5,
+                y1: 1.0,
+                x2: 30,
+                y2: 2.0,
+                dashed: false,
+            }],
+            label_x: 30,
+            label_y: 2.0,
+            label_above: true,
+            tooltip: String::new(),
+            target: None,
+            invalidation: None,
+            confirmed_x: Some(28),
+        };
+        let pr = PanelResult {
+            patterns: vec![pattern],
+            levels: vec![LevelLine {
+                line: 0,
+                x: 12,
+                y: 1.0,
+            }],
+            events: vec![IndicatorEvent {
+                key: "e".into(),
+                name: "e".into(),
+                x: Some(25),
+            }],
+            span: Some((4, 15)),
+            ..Default::default()
+        };
+        let t = trim_panel_result(&pr, 10);
+        let p = &t.patterns[0];
+        assert_eq!((p.strokes[0].x1, p.strokes[0].x2, p.label_x), (-5, 20, 20));
+        assert_eq!(p.confirmed_x, Some(18));
+        assert_eq!(t.levels[0].x, 2);
+        assert_eq!(t.events[0].x, Some(15));
+        assert_eq!(t.span, Some((0, 5)));
+        // A range wholly inside the warmup is gone.
+        assert_eq!(trim_panel_result(&pr, 16).span, None);
     }
 
     #[test]

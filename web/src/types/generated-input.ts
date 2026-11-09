@@ -236,7 +236,7 @@ export interface GenerateChartInput {
    */
   timeframe?: string;
   /**
-   * format=series only: extra older bars (max 1000) fetched and fed to indicator computation, then trimmed, so the first returned bars carry warmed-up indicator values. A non-zero warmup is raised to what the indicators need to converge (891 for ema_stack's EMA 200). Ignored by png/summary/both.
+   * format=series only: extra older bars (max 1000) fetched and fed to indicator computation, then trimmed, so the first returned bars carry warmed-up indicator values. A non-zero warmup is raised to what the indicators need to converge (891 for ema_stack's EMA 200). png/summary/both ignore it: with indicators they always read what those need, at least 300 bars, and still show exactly bars (ADR-0056).
    */
   warmup?: number;
   /**
