@@ -50,8 +50,9 @@ profiles that aggregate over their window (`windowed_profile`) are recomputed ov
 shown, so warmup bars do not leak into them. A call without indicators reads nothing more, and neither does the demo series (a call
 without a ticker): it is generated from its first bar on, so a warmup would only move the bars
 it shows.
-Price-based styles read their fixed source window, as before (ADR-0047). The `warmup` argument
-still applies to series alone.
+Price-based styles read their fixed source window, as before (ADR-0047); their indicators run on
+every brick built from it and are trimmed to the `bars` shown in every format, as a series'
+are. The `warmup` argument still applies to series alone.
 
 Option 2 leaves indicators that declare no need (CCI, Williams %R, Bollinger Bands) starting
 mid-image and slightly different from the web chart. Option 3 hides the problem instead of

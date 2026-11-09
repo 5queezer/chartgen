@@ -715,17 +715,14 @@ pub(crate) fn generate_chart(
             build_anchor = built.anchor;
             style_label = Some(params.label(built.box_size));
             has_more |= data.len() > bars;
-            // png and summary show exactly `bars`, as for every other style.
-            if !want_series {
-                data.bars.drain(..data.len().saturating_sub(bars));
-            }
             Some(chart_params_echo(params, built.box_size))
         }
         _ => None,
     };
 
-    // A png's or summary's warmup bars (ADR-0056) are read by its indicators alone:
-    // everything else is about the bars it shows.
+    // A png's or summary's warmup bars (ADR-0056), or a price-based chart's bricks
+    // before the `bars` it shows, are read by its indicators alone: everything else is
+    // about the bars it shows, which every format trims to alike.
     let warm = (!want_series && data.len() > bars).then(|| {
         let all = data.clone();
         data.bars.drain(..data.len() - bars);
@@ -6457,6 +6454,46 @@ mod tests {
                 summary["indicators"]["rsi"]["lines"][0]["last_value"],
                 rsi[rsi.len() - 1]
             );
+        }
+    }
+
+    #[test]
+    fn a_price_based_chart_reads_the_same_in_every_format() {
+        // ADR-0056: a renko png/summary runs its indicators on every brick built, as its
+        // series does, then shows the last `bars`. Closed sample bars only.
+        let args = |format: &str| {
+            json!({ "ticker": "BTCUSDT", "timeframe": "1h", "bars": 40, "format": format,
+                    "chart_style": "renko", "chart_params": { "box": "fixed", "box_size": 2.0 },
+                    "end_time": 1_699_920_000_000_i64, "indicators": ["rsi", "ema_stack"] })
+        };
+        let call = |format: &str| -> Value {
+            let resp = generate_chart(
+                Some(json!(1)),
+                &args(format),
+                fetch::DataSource::Sample,
+                None,
+            );
+            let content = chart_content(&resp);
+            let text = content.iter().find_map(|c| c["text"].as_str()).unwrap();
+            serde_json::from_str(text).unwrap()
+        };
+        let series = call("series");
+        assert!(series["bars"].as_array().unwrap().len() == 40);
+        for format in ["summary", "both"] {
+            let summary = call(format);
+            assert_eq!(summary["price"]["bars"], 40, "{format}");
+            for name in ["rsi", "ema_stack"] {
+                let lines = series["indicators"][name]["lines"].as_array().unwrap();
+                for (i, line) in lines.iter().enumerate() {
+                    let values = line["values"].as_array().unwrap();
+                    let last = values.iter().rev().find(|v| !v.is_null()).cloned();
+                    assert_eq!(
+                        Some(summary["indicators"][name]["lines"][i]["last_value"].clone()),
+                        Some(last.unwrap_or(Value::Null)),
+                        "{format} {name} line {i}"
+                    );
+                }
+            }
         }
     }
 
