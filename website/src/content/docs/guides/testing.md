@@ -76,19 +76,31 @@ tested as the scripting server; sessions exactly 1000 ports apart collide.
 
 ## How CI runs it
 
-The `web-unit` job runs `npm ci && npm test` in `web/`. The `e2e` job
-in `.github/workflows/ci.yml` gates on `build-release`
-so the Rust build cache is warm by the time the suite starts.
-The job:
+The `web-unit` job runs `npm ci && npm test` in `web/`. The e2e suite runs in
+shards ([ADR-0057](/chartgen/decisions/0057-e2e-shards/)), after `build-release`:
 
-1. Restores the Rust and Playwright browser caches.
-2. Builds chartgen.
-3. `npm ci` in `web/`.
-4. `npx playwright install --with-deps chromium`.
-5. `npm run test:e2e`.
+1. `e2e-build` builds the debug chartgen binary once, from the Rust cache, and
+   uploads it.
+2. Six `e2e (i/6)` jobs each download it, run `npm ci` and
+   `npx playwright install --with-deps chromium`, and run the spec files
+   `scripts/e2e-shard.mjs i 6` assigns them. `CHARTGEN_BIN` points the config's
+   chartgen servers at the downloaded binary instead of `cargo run`.
+3. The `e2e` job passes only if every shard passed.
 
-On failure the job uploads `playwright-report/` and `test-results/`
-as artifacts. Open the HTML report locally with
+`scripts/e2e-shard.mjs` keeps whole spec files on one shard and balances the
+shards by each file's measured seconds in `scripts/e2e-shard-durations.json`. A
+new spec counts as 20 s until the table is refreshed from a full run's log:
+
+```sh
+gh run view <run-id> --log > e2e.log
+node scripts/e2e-shard.mjs --refresh e2e.log
+```
+
+To see which files a shard runs: `node scripts/e2e-shard.mjs 3 6`.
+
+On failure each failing shard uploads its `test-results/` as
+`playwright-test-results-<i>`, and the `e2e` job merges every shard's blob report
+into one HTML report, the `playwright-report` artifact. Open it locally with
 `npx playwright show-report playwright-report`.
 
 ## Add a new spec
