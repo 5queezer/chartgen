@@ -750,15 +750,11 @@ pub(crate) fn generate_chart(
     let (mut computed, inds, errors_value) =
         compute_panels(read, &indicator_keys, &panel_indicators);
     let errors_value = with_key_errors(errors_value, per_key);
-    // Trimmed to the bars shown; a profile read over them alone, as a series' (ADR-0009).
+    // Trimmed to the bars shown, exactly as a series is (ADR-0056).
     let offset = read.len() - data.len();
     if offset > 0 {
         for ((_, pr), ind) in computed.iter_mut().zip(&inds) {
-            *pr = if ind.windowed_profile() {
-                ind.compute(&data)
-            } else {
-                trim_panel_result(pr, offset)
-            };
+            *pr = trim_to_shown(pr, *ind, offset, &data);
         }
     }
 
@@ -1270,16 +1266,7 @@ fn series_json(
     let bars_arr_empty = bars_arr.is_empty();
     let mut indicators_json = serde_json::Map::new();
     for ((key, pr), ind) in computed.iter().zip(panel_indicators.iter()) {
-        let mut trimmed = trim_panel_result(pr, offset);
-        // Volume/time profiles aggregate over the whole input window,
-        // not per bar: recompute their profile-derived channels (hbars
-        // and POC/VA/node hlines) over the visible window so warmup bars
-        // don't leak into the profile.
-        if offset > 0 && ind.windowed_profile() {
-            let profile = ind.compute(&visible);
-            trimmed.hbars = profile.hbars;
-            trimmed.hlines = profile.hlines;
-        }
+        let trimmed = trim_to_shown(pr, *ind, offset, &visible);
         let mut entry = panel_result_to_series_json(&trimmed, &visible);
         add_marks_to_series_json(&mut entry, pr, data, offset);
         // Price-based bars have no next bar's time to project to (ADR-0047).
@@ -1816,6 +1803,28 @@ fn bar_t(bar: &chartgen::data::Bar) -> Value {
         .ok()
         .map(|n| json!(n))
         .unwrap_or(Value::Null)
+}
+
+// `pr`, computed over warmup and `visible` bars, trimmed to `visible`. Volume/time
+// profiles aggregate over the whole input window, not per bar: recompute their
+// profile-derived channels (hbars, POC/VA/node hlines and the range's span) over
+// the visible window so warmup bars don't leak into the profile; their per-bar
+// channels stay the warmed ones. Every format trims this way (ADR-0009, ADR-0056).
+// Windowed profiles are built-ins, which never fail, so `compute` needs no script budget.
+fn trim_to_shown(
+    pr: &chartgen::indicator::PanelResult,
+    ind: &dyn Indicator,
+    offset: usize,
+    visible: &chartgen::data::OhlcvData,
+) -> chartgen::indicator::PanelResult {
+    let mut trimmed = trim_panel_result(pr, offset);
+    if offset > 0 && ind.windowed_profile() {
+        let profile = ind.compute(visible);
+        trimmed.hbars = profile.hbars;
+        trimmed.hlines = profile.hlines;
+        trimmed.span = profile.span;
+    }
+    trimmed
 }
 
 // Drop the first `offset` (warmup) bars from every index-based channel and
@@ -6388,6 +6397,123 @@ mod tests {
         assert!(signals
             .iter()
             .all(|s| (0..200).contains(&s["x"].as_i64().unwrap())));
+    }
+
+    #[test]
+    fn a_windowed_profile_reads_the_same_in_every_format() {
+        // ADR-0056: summary (and the png, from the same results) and series trim alike:
+        // profile levels over the bars shown, per-bar values warmed. Closed sample bars
+        // only (`end_time` in the past): the forming one follows the clock.
+        for name in [
+            "volume_profile",
+            "fixed_range_vp",
+            "anchored_vp",
+            "hvn_lvn",
+            "tpo",
+        ] {
+            let args = |format: &str| {
+                json!({ "ticker": "BTCUSDT", "timeframe": "4h", "bars": 120, "warmup": 300,
+                        "end_time": 1_790_000_000_000_i64,
+                        "indicators": [name, "rsi"], "format": format })
+            };
+            let call = |format: &str| -> Value {
+                let resp = generate_chart(
+                    Some(json!(1)),
+                    &args(format),
+                    fetch::DataSource::Sample,
+                    None,
+                );
+                let text = chart_content(&resp)
+                    .iter()
+                    .find_map(|c| c["text"].as_str())
+                    .unwrap();
+                serde_json::from_str(text).unwrap()
+            };
+            let (summary, series) = (call("summary"), call("series"));
+            let (s, t) = (&summary["indicators"][name], &series["indicators"][name]);
+            let levels = |v: &Value| -> Vec<f64> {
+                v["hlines"].as_array().map_or(vec![], |h| {
+                    h.iter().map(|l| l["y"].as_f64().unwrap()).collect()
+                })
+            };
+            assert_eq!(levels(s), levels(t), "{name} hlines");
+            let summary_hbars = s["hbars_count"].as_u64().unwrap_or(0) as usize;
+            let series_hbars = t["hbars"].as_array().map_or(0, Vec::len);
+            assert_eq!(summary_hbars, series_hbars, "{name} hbars");
+            for (i, line) in s["lines"].as_array().into_iter().flatten().enumerate() {
+                let values = t["lines"][i]["values"].as_array().unwrap();
+                let last = values.iter().rev().find(|v| !v.is_null()).cloned();
+                assert_eq!(
+                    Some(line["last_value"].clone()),
+                    last.or(Some(Value::Null)),
+                    "{name} line {i}"
+                );
+            }
+            // The other indicator, warmed the same way.
+            let rsi = series["indicators"]["rsi"]["lines"][0]["values"]
+                .as_array()
+                .unwrap();
+            assert_eq!(
+                summary["indicators"]["rsi"]["lines"][0]["last_value"],
+                rsi[rsi.len() - 1]
+            );
+        }
+    }
+
+    #[test]
+    fn a_windowed_profile_keeps_its_warmed_per_bar_values() {
+        // No built-in profile has per-bar channels yet; one that had would keep them
+        // warmed and take only its profile channels from the bars shown.
+        use chartgen::indicator::{HBar, Line, PanelResult};
+        struct Running;
+        impl Indicator for Running {
+            fn name(&self) -> &str {
+                "running"
+            }
+            fn windowed_profile(&self) -> bool {
+                true
+            }
+            fn compute(&self, data: &chartgen::data::OhlcvData) -> PanelResult {
+                let sums = data
+                    .bars
+                    .iter()
+                    .scan(0.0, |s, b| {
+                        *s += b.close;
+                        Some(*s)
+                    })
+                    .collect();
+                let hbar = |y: f64| HBar {
+                    y,
+                    height: 1.0,
+                    width: 1.0,
+                    offset: 0.0,
+                    color: plotters::style::RGBAColor(0, 0, 0, 1.0),
+                    left: true,
+                };
+                PanelResult {
+                    lines: vec![Line {
+                        y: sums,
+                        color: plotters::style::RGBAColor(0, 0, 0, 1.0),
+                        width: 1,
+                        label: None,
+                        breaks: false,
+                    }],
+                    hbars: data.bars.iter().map(|b| hbar(b.close)).collect(),
+                    span: Some((0, data.len() - 1)),
+                    ..Default::default()
+                }
+            }
+        }
+        let all = chartgen::data::sample_data(50);
+        let visible = chartgen::data::OhlcvData {
+            bars: all.bars[20..].to_vec(),
+            ..all.clone()
+        };
+        let full = Running.compute(&all);
+        let shown = trim_to_shown(&full, &Running, 20, &visible);
+        assert_eq!(shown.lines[0].y, full.lines[0].y[20..].to_vec(), "warmed");
+        assert_eq!(shown.hbars.len(), 30, "profile over the bars shown");
+        assert_eq!(shown.span, Some((0, 29)));
     }
 
     #[test]
