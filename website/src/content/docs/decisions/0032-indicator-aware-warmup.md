@@ -8,6 +8,7 @@ sidebar:
 **Status:** Accepted
 **Date:** 2026-11-05
 **Amends:** [ADR-0009](/chartgen/decisions/0009-live-tail-polling-and-history-paging/) (the meaning of `warmup` and its "cumulative-indicator seam" consequence; paging and tail polling stay as decided there)
+**Amended by:** [ADR-0056](/chartgen/decisions/0056-png-and-summary-warm-up/) (the need applies to png, summary and both, without a `warmup` argument)
 
 ## Context and Problem Statement
 

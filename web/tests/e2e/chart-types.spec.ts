@@ -101,6 +101,78 @@ async function expectLegend(page: Page): Promise<void> {
   }
 }
 
+interface Bar {
+  timestamp: number;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+}
+
+interface TestWindow {
+  __chartgenTest: {
+    chart: () => {
+      getDataList: () => Bar[];
+      getVisibleRange: () => { realFrom: number; realTo: number };
+      convertToPixel: (
+        points: Array<{ dataIndex: number }>,
+        finder: { paneId: string },
+      ) => Array<{ x?: number }>;
+      getDom: () => HTMLElement | null;
+      scrollToDataIndex: (index: number) => void;
+    };
+  };
+}
+
+/**
+ * Columns of the other color than the last price line that close well above
+ * it, in a window of bars that ends with the line's bar and holds its close
+ * well inside the window's price range (so the line is not pinned to an edge).
+ * `pick`: of the bars loaded, the one to end the chart at (a replay start)
+ * with the most such columns; scroll it into view and return its x in the
+ * page. Otherwise: how many such columns the bars on screen hold.
+ */
+const columnsAboveLine = (page: Page, pick: boolean) =>
+  page.evaluate((pick) => {
+    const chart = (window as unknown as TestWindow).__chartgenTest.chart();
+    const bars = chart.getDataList();
+    const { realFrom, realTo } = chart.getVisibleRange();
+    const from = Math.max(0, realFrom);
+    const to = Math.min(bars.length, realTo);
+    // klinecharts colors the line by its bar's close against its open; a
+    // column takes the up color when its close is at or above the previous one.
+    const up = (i: number) => bars[i]!.close >= (i > 0 ? bars[i - 1]!.close : bars[i]!.open);
+    const count = (start: number, last: number) => {
+      const line = bars[last]!;
+      if (line.close === line.open) return 0;
+      let lo = Infinity;
+      let hi = -Infinity;
+      for (let i = start; i <= last; i++) {
+        lo = Math.min(lo, bars[i]!.low);
+        hi = Math.max(hi, bars[i]!.high);
+      }
+      const margin = (hi - lo) * 0.1;
+      if (line.close < lo + margin || line.close > hi - margin) return 0;
+      let n = 0;
+      for (let i = start; i < last; i++) {
+        if (up(i) !== line.close > line.open && bars[i]!.close > line.close + margin / 2) n++;
+      }
+      return n;
+    };
+    if (!pick) return { n: to > from ? count(from, to - 1) : 0, index: to - 1, x: 0 };
+    const width = to - from;
+    let best = { n: 0, index: bars.length - 1 };
+    for (let last = width - 1; last < bars.length - 1; last++) {
+      const n = count(last - width + 1, last);
+      if (n > best.n) best = { n, index: last };
+    }
+    if (best.n === 0) throw new Error("no replay start has other-colored columns above its last price line");
+    // Into the right half of the view, clear of the edges.
+    chart.scrollToDataIndex(Math.min(bars.length - 1, best.index + Math.floor(width / 4)));
+    const [p] = chart.convertToPixel([{ dataIndex: best.index }], { paneId: "candle_pane" });
+    return { ...best, x: chart.getDom()!.getBoundingClientRect().left + (p?.x ?? 0) };
+  }, pick);
+
 test.use({ viewport: { width: 1440, height: 900 } });
 
 test.describe("chart types", () => {
@@ -113,6 +185,23 @@ test.describe("chart types", () => {
 
   test("the series sits beneath the last price line", async ({ bootedApp: page }) => {
     await pickChartType(page, "Columns");
+    // Whether any column reaches the line depends on where the data puts the
+    // last close, and the sample data ends at the wall clock. A replay ends the
+    // chart, and the line, at a bar of our choosing: start one whose close has
+    // columns of the other color closing above it.
+    const start = await columnsAboveLine(page, true);
+    await page.getByTestId("toolbar-replay").click();
+    await expect(page.getByTestId("replay-bar")).toHaveAttribute("data-mode", "select");
+    const box = (await page.locator(".chart-container").boundingBox())!;
+    await page.mouse.move(start.x, box.y + box.height * 0.3);
+    await expect(page.getByTestId("replay-cutline").locator("div").first()).toBeVisible();
+    await page.mouse.click(start.x, box.y + box.height * 0.3);
+    await expect(page.getByTestId("replay-bar")).toHaveAttribute("data-mode", "active");
+    await expect
+      .poll(async () => (await columnsAboveLine(page, false)).n, {
+        message: "columns of the other color above the last price line",
+      })
+      .toBeGreaterThanOrEqual(10);
     // In the price line's row (the row with the most opaque up/down pixels:
     // columns are half transparent), count line pixels over a column of the
     // other color. Painted beneath the line, the column leaves them opaque

@@ -102,7 +102,7 @@ Render a chart for a symbol. Accepts `ticker`/`symbol`, `timeframe`/`interval`,
 | `width`, `height` | Integers, default 1920 and 1080. For `png` and `both`. Not clamped: bars × (indicators + 1) + width × height / 512 must fit the 32,000 one call may hold, or the call is refused with `-32602`. |
 | `bars` | Integer, default 200. Capped at 5000 in every format (`png`, `summary`, `both`, `series`); larger values are silently clamped. On Binance each 1000 bars is one upstream request. |
 | `end_time` | Integer, ms since epoch, between `-2208988800000` (1900-01-01; index histories predate 1970) and one year from now. Only bars whose open time is strictly before `end_time` are returned. To load the page before the oldest bar you have, pass that bar's `t × 1000`. Omit it (or send `null`) to get the newest bars, including the candle that is still forming. Applies to every format. A string, a float or an out-of-range value is a tool error. |
-| `warmup` | Integer, default 0, max 1000. `format=series` only. Fetches this many extra older bars and feeds them to the indicators, then trims them from the response, so the first returned bars have warmed-up values instead of `null`. `png`, `summary`, and `both` ignore it and render exactly `bars`. |
+| `warmup` | Integer, default 0, max 1000. `format=series` only. Fetches this many extra older bars and feeds them to the indicators, then trims them from the response, so the first returned bars have warmed-up values instead of `null`. `png`, `summary`, and `both` ignore it: with indicators and a `ticker` they always read what those need to converge, at least 300 bars (the web chart's warmup) and at most 1000, and still show exactly `bars`; the demo series without a ticker reads none ([ADR-0056](/chartgen/decisions/0056-png-and-summary-warm-up/)). |
 | `profile_intrabars` | Boolean, default false. `format=series` only. Computes `volume_profile`, `fixed_range_vp` and `anchored_vp` from lower-timeframe bars, for up to 6 more Binance requests ([ADR-0048](/chartgen/decisions/0048-order-flow/)). Meant for a chart's full load: pages and tails keep the load's profile, so leave it off on those. |
 | `chart_style` | `candles` (default) or `heikin_ashi`. `heikin_ashi` replaces the price bars with Heikin Ashi bars in every format: `haClose = (o+h+l+c)/4`, `haOpen = (prev haOpen + prev haClose)/2` (the first bar is seeded with `(o+c)/2`), `haHigh = max(h, haOpen, haClose)`, `haLow = min(l, haOpen, haClose)`; volume and timestamps are unchanged. Like TradingView, indicators are computed on the Heikin Ashi values, not the raw bars. The transform runs over `bars + warmup` before trimming, and because each `haOpen` is an exponentially decaying average, pages and tail polls with the same warmup agree after a few bars. `format=series` echoes the applied style as `chart_style`. `renko`, `kagi`, `point_figure`, `line_break` and `range` are [price-based](#price-based-styles). Any other value is an error. |
 | `chart_params` | Inputs of a [price-based style](#price-based-styles), and an error with any other style. |
@@ -179,6 +179,22 @@ the synthetic demo series.
 | `summary` | Compact JSON: OHLCV stats, last indicator values, signal dots, divergences, and horizontal reference levels. Typically 10–50× fewer tokens than a PNG — ideal for automated analysis without vision. |
 | `both` | PNG plus the JSON summary. |
 | `series` | Full per-bar time-series JSON: every OHLCV bar plus indicator value arrays aligned 1:1 with bars (NaN → JSON `null` for pre-warmup), signals with bar timestamps, hlines, and y_range. Useful for downstream numeric computation that needs raw arrays rather than last values. |
+
+In the image:
+
+- The price pane's range fits the candles, as the web chart's does. An overlay value past it
+  (a far pivot level, an envelope band) is cut off where it leaves the pane, never drawn on
+  its edge.
+- A panel's range is its indicator's own (CCI ±250, RSI 0–100, which keeps its reference
+  lines in place), grown when the values go past it, or with none, its values'.
+- The last price is tagged right of the plot, and there is a bar of room before the first
+  candle and after the last.
+- Values plotted past the last bar (the Ichimoku cloud, the series' `future`) are drawn there.
+- A fixed range or anchored volume profile sits over the bars it was read from, with its
+  POC, VAH and VAL across them alone and its edges dashed.
+- A legend shows `—` for a line with a single value: nothing of it is drawn, and it is not
+  warmed up. A panel with a histogram and no line shows the histogram's last value
+  (`Funding: 0.0100`).
 
 Example request:
 
