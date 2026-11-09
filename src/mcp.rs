@@ -635,7 +635,14 @@ pub(crate) fn generate_chart(
         return tool_err(id, &e);
     }
 
-    let warmup = read_warmup(&format, args, &panel_indicators);
+    // The demo series (no ticker) is generated from its first bar on: a png's or
+    // summary's warmup would only move the bars it shows, so it reads none (ADR-0056).
+    let demo = symbol.is_none() && source == fetch::DataSource::Live;
+    let warmup = if demo && !want_series {
+        0
+    } else {
+        read_warmup(&format, args, &panel_indicators)
+    };
     let parsed_interval = chartgen::interval::Interval::parse(interval);
     // Price-based bars read a fixed window of source bars, however many bars the
     // call wants: how many they make is only known afterwards (ADR-0047).
@@ -6355,8 +6362,9 @@ mod tests {
         // #125: its first value needs about 285 bars; a png or summary of 200 reads them.
         let resp = generate_chart(
             Some(json!(1)),
-            &json!({ "bars": 200, "indicators": ["kalman_volume"], "format": "both" }),
-            fetch::DataSource::Live,
+            &json!({ "ticker": "BTCUSDT", "timeframe": "4h", "bars": 200,
+                     "indicators": ["kalman_volume"], "format": "both" }),
+            fetch::DataSource::Sample,
             None,
         );
         let content = chart_content(&resp);
@@ -6380,6 +6388,27 @@ mod tests {
         assert!(signals
             .iter()
             .all(|s| (0..200).contains(&s["x"].as_i64().unwrap())));
+    }
+
+    #[test]
+    fn the_demo_series_reads_only_the_bars_asked_for() {
+        // Without a ticker the demo series starts at D0 whatever the indicators need:
+        // no warmup moves it (ADR-0056).
+        for format in ["summary", "both"] {
+            let resp = generate_chart(
+                Some(json!(1)),
+                &json!({ "bars": 30, "indicators": ["ema_stack"], "format": format }),
+                fetch::DataSource::Live,
+                None,
+            );
+            let text = chart_content(&resp)
+                .iter()
+                .find_map(|c| c["text"].as_str())
+                .unwrap();
+            let summary: Value = serde_json::from_str(text).unwrap();
+            assert_eq!(summary["price"]["first"]["date"], "D0", "{format}");
+            assert_eq!(summary["price"]["last"]["date"], "D29", "{format}");
+        }
     }
 
     #[test]

@@ -47,7 +47,9 @@ Chosen option: **1**. A png, summary or both call with indicators reads
 series is trimmed (`trim_panel_result`). Patterns, levels and events are re-based onto the
 bars shown, and an index before the first of them is negative, as in a series. Volume and time
 profiles that aggregate over their window (`windowed_profile`) are recomputed over the bars
-shown, so warmup bars do not leak into them. A call without indicators reads nothing more.
+shown, so warmup bars do not leak into them. A call without indicators reads nothing more, and neither does the demo series (a call
+without a ticker): it is generated from its first bar on, so a warmup would only move the bars
+it shows.
 Price-based styles read their fixed source window, as before (ADR-0047). The `warmup` argument
 still applies to series alone.
 
@@ -66,7 +68,6 @@ the defaults stay wrong.
   requests instead of one), and `chart_patterns` or `auto_fib` read 600 more. Series calls
   could already ask for this much, and `call_cost` (ADR-0052) counts the bars shown, not those
   read, for every format alike. The extra compute is transient: only the trimmed results stay.
-- Bad: summary values on the demo series (no ticker) change. It is generated from bar 0, so a
-  summary of 30 bars now shows bars 300 to 329 of it. The summary golden was regenerated.
+- Neutral: the demo series (no ticker) shows the same bars and values as before, unconverged.
 - Neutral: cumulative indicators (OBV, A/D, CVD) start from a different bar, as in the web
   chart. Their level was never meaningful, only its changes.
