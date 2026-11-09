@@ -1,11 +1,11 @@
 #!/usr/bin/env node
 // Splits the Playwright e2e specs into CI shards by measured duration (ADR-0057).
 //
-//   node scripts/e2e-shard.mjs <shard> <total>   prints shard <shard>'s spec files,
-//                                                 relative to web/, one per line
-//   node scripts/e2e-shard.mjs --refresh <log>   rewrites e2e-shard-durations.json
-//                                                 from the list-reporter output of a
-//                                                 full run, e.g. `gh run view <id> --log`
+//   node scripts/e2e-shard.mjs <shard> <total>     prints shard <shard>'s spec files,
+//                                                  relative to web/, one per line
+//   node scripts/e2e-shard.mjs --refresh <log>...  rewrites e2e-shard-durations.json
+//                                                  from the list-reporter output of a
+//                                                  green run, e.g. every shard's job log
 //
 // Playwright's own --shard keeps whole files together (fullyParallel is off) but
 // balances them by test count, and our files differ tenfold in seconds per test.
@@ -24,11 +24,24 @@ const DEFAULT_SECONDS = 20;
 if (process.argv[2] === "--refresh") {
   const seconds = {};
   const line = /\] › tests\/e2e\/(\S+?\.spec\.ts):\d+:\d+ .*\((\d+(?:\.\d+)?)(ms|s|m)\)\s*$/;
-  for (const l of readFileSync(process.argv[3], "utf8").split("\n")) {
-    const m = line.exec(l);
-    if (!m) continue;
-    const s = Number(m[2]) * { ms: 0.001, s: 1, m: 60 }[m[3]];
-    seconds[m[1]] = (seconds[m[1]] ?? 0) + s;
+  // A GitHub log stamps every line: the time since the previous result also counts
+  // a file's hooks (a beforeAll that builds the app), which a test's own duration
+  // leaves out. Without stamps, the reported durations are all there is.
+  const stamp = /^(?:.*\t)?(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?Z) /;
+  for (const log of process.argv.slice(3)) {
+    let previous;
+    for (const l of readFileSync(log, "utf8").split("\n")) {
+      const at = stamp.exec(l)?.[1];
+      if (at && / Running \d+ tests? using /.test(l)) previous = Date.parse(at);
+      const m = line.exec(l);
+      if (!m) continue;
+      const s =
+        at && previous !== undefined
+          ? (Date.parse(at) - previous) / 1000
+          : Number(m[2]) * { ms: 0.001, s: 1, m: 60 }[m[3]];
+      if (at) previous = Date.parse(at);
+      seconds[m[1]] = (seconds[m[1]] ?? 0) + s;
+    }
   }
   const sorted = Object.keys(seconds).sort().map((f) => [f, Math.round(seconds[f])]);
   writeFileSync(DURATIONS, `${JSON.stringify(Object.fromEntries(sorted), null, 2)}\n`);
