@@ -89,11 +89,14 @@ shards ([ADR-0057](/chartgen/decisions/0057-e2e-shards/)), after `build-release`
 
 `scripts/e2e-shard.mjs` keeps whole spec files on one shard and balances the
 shards by each file's measured seconds in `scripts/e2e-shard-durations.json`. A
-new spec counts as 20 s until the table is refreshed from a full run's log:
+new spec counts as 20 s until the table is refreshed from the job logs of every
+shard of one run, ideally a green one:
 
 ```sh
-gh run view <run-id> --log > e2e.log
-node scripts/e2e-shard.mjs --refresh e2e.log
+for id in $(gh run view <run-id> --json jobs --jq '.jobs[] | select(.name | startswith("e2e (")) | .databaseId'); do
+  gh api "repos/{owner}/{repo}/actions/jobs/$id/logs" > "e2e-$id.log"
+done
+node scripts/e2e-shard.mjs --refresh e2e-*.log
 ```
 
 To see which files a shard runs: `node scripts/e2e-shard.mjs 3 6`.

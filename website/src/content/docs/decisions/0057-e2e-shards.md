@@ -63,31 +63,40 @@ Chosen: **option 3, six shards**.
 - `e2e-shard` is a matrix of six, `fail-fast: false`. Each downloads the binary
   and runs `npx playwright test` on the files `scripts/e2e-shard.mjs <i> <n>`
   prints. `CHARTGEN_BIN` makes `playwright.config.ts` start that binary instead
-  of `cargo run --`; without it nothing changes locally. Each shard starts all of
-  the config's servers, so every project works as before.
+  of `cargo run --`, and `oauth-stale-client.spec.ts`, which starts a chartgen of
+  its own, does the same; without it nothing changes locally. Each shard starts
+  all of the config's servers, so every project works as before.
 - `scripts/e2e-shard.mjs` lists every `*.spec.ts` under `web/tests/e2e`, takes
   each file's seconds from `scripts/e2e-shard-durations.json` (a file not in the
   table counts as 20 s, so a new spec runs before it is measured), and assigns
   files longest first to the least-loaded shard. The order is deterministic, so
-  every shard computes the same split. With the master durations the six shards
-  get 451–452 s each; the longest file alone is 435 s, so a seventh shard would
-  save 17 s.
+  every shard computes the same split. A file's seconds are its wall time in a
+  shard's log, from the previous result to its last, so they include its hooks
+  (a `beforeAll` that builds the app); a test's own duration leaves those out.
+  With the durations of the first green sharded run the six shards get 470–473 s
+  each; the longest file alone is 448 s, so a seventh shard would barely help.
 - Shards write blob reports. The `e2e` job needs all shards, fails unless all
   passed, and on failure merges the blobs into one HTML report (artifact
   `playwright-report`, as before). Test results are uploaded per shard
   (`playwright-test-results-<i>`).
 
-Refresh the table when the split drifts:
-`gh run view <run> --log > e2e.log && node scripts/e2e-shard.mjs --refresh e2e.log`.
+Refresh the table when the split drifts, from every shard's job log of one run
+(see the [Testing guide](/chartgen/guides/testing/#how-ci-runs-it)). Retries are
+left out, so a flake does not count against its file.
 
 ### Consequences
 
 - Good: a PR's e2e wall time drops from about 46 minutes to the longest shard plus
-  per-runner setup. The measured numbers are in the PR that implements this.
+  per-runner setup. On the implementing PR (run 42630402422) the e2e jobs took
+  10.1 minutes from the first shard's start to the end of `e2e` (shards 7.7–9.6
+  minutes), and the whole CI run 12.4 minutes instead of 49.4 on master
+  (run 42508737009).
 - Good: a failing shard does not stop the others, and the merged report still
   shows every failure in one place.
 - Bad: total runner minutes rise, since each of six runners pays checkout,
-  `npm ci`, the Chromium install and server start-up.
+  `npm ci`, the Chromium install and server start-up: 54 minutes on that run
+  against 46.5 for the single job. The Chromium install's `--with-deps` apt step
+  also runs six times, and one slow mirror once cost a shard 3 minutes.
 - Bad: the duration table can go stale. A stale table only costs balance, never
   coverage: every spec file is assigned to exactly one shard regardless.
 - Neutral: the floor is the longest spec file (signin-workspace, about 7 minutes).

@@ -282,6 +282,8 @@ jobs:
         run: |
           specs=$(node ../scripts/e2e-shard.mjs ${{ matrix.shard }} ${{ strategy.job-total }})
           echo "$specs"
+          # Without file arguments Playwright would run the whole suite here.
+          if [ -z "$specs" ]; then echo "No spec files for this shard."; exit 0; fi
           # shellcheck disable=SC2086 # one spec path per word
           npx playwright test --reporter=blob,list $specs
       - name: Upload blob report

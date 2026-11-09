@@ -40,8 +40,13 @@ if (process.argv[2] === "--refresh") {
           ? (Date.parse(at) - previous) / 1000
           : Number(m[2]) * { ms: 0.001, s: 1, m: 60 }[m[3]];
       if (at) previous = Date.parse(at);
-      seconds[m[1]] = (seconds[m[1]] ?? 0) + s;
+      // A retry is the cost of a flake, not of the file.
+      if (!/\(retry #\d+\)/.test(l)) seconds[m[1]] = (seconds[m[1]] ?? 0) + s;
     }
+  }
+  if (Object.keys(seconds).length === 0) {
+    console.error("no test results in those logs; the table is unchanged");
+    process.exit(1);
   }
   const sorted = Object.keys(seconds).sort().map((f) => [f, Math.round(seconds[f])]);
   writeFileSync(DURATIONS, `${JSON.stringify(Object.fromEntries(sorted), null, 2)}\n`);
@@ -50,7 +55,7 @@ if (process.argv[2] === "--refresh") {
 
 const [shard, total] = process.argv.slice(2).map(Number);
 if (!(total >= 1 && shard >= 1 && shard <= total)) {
-  console.error("usage: e2e-shard.mjs <shard> <total> | --refresh <log>");
+  console.error("usage: e2e-shard.mjs <shard> <total> | --refresh <log>...");
   process.exit(2);
 }
 const seconds = JSON.parse(readFileSync(DURATIONS, "utf8"));
