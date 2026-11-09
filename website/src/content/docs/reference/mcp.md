@@ -180,6 +180,22 @@ the synthetic demo series.
 | `both` | PNG plus the JSON summary. |
 | `series` | Full per-bar time-series JSON: every OHLCV bar plus indicator value arrays aligned 1:1 with bars (NaN → JSON `null` for pre-warmup), signals with bar timestamps, hlines, and y_range. Useful for downstream numeric computation that needs raw arrays rather than last values. |
 
+In the image:
+
+- The price pane's range fits the candles, as the web chart's does. An overlay value past it
+  (a far pivot level, an envelope band) is cut off where it leaves the pane, never drawn on
+  its edge.
+- A panel's range is its indicator's own (CCI ±250, RSI 0–100, which keeps its reference
+  lines in place), grown when the values go past it, or with none, its values'.
+- The last price is tagged right of the plot, and there is a bar of room before the first
+  candle and after the last.
+- Values plotted past the last bar (the Ichimoku cloud, the series' `future`) are drawn there.
+- A fixed range or anchored volume profile sits over the bars it was read from, with its
+  POC, VAH and VAL across them alone and its edges dashed.
+- A legend shows `—` for a line with a single value: nothing of it is drawn, and it is not
+  warmed up. A panel with a histogram and no line shows the histogram's last value
+  (`Funding: 0.0100`).
+
 Example request:
 
 ```json

@@ -779,8 +779,21 @@ pub(crate) fn generate_chart(
             uuid::Uuid::new_v4()
         );
 
-        let results: Vec<&chartgen::indicator::PanelResult> =
-            computed.iter().map(|(_, pr)| pr).collect();
+        // Price-based bars have no next bar's time to project to (ADR-0047).
+        let futures: Vec<_> = inds
+            .iter()
+            .map(|ind| {
+                price_bars::Kind::from_style(chart_style)
+                    .is_none()
+                    .then(|| ind.projection(&data))
+                    .flatten()
+            })
+            .collect();
+        let results: Vec<_> = computed
+            .iter()
+            .zip(&futures)
+            .map(|((_, pr), f)| (pr, f.as_ref()))
+            .collect();
         if let Err(e) = renderer::render_labeled(
             &data,
             &results,
