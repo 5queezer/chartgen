@@ -849,36 +849,59 @@ def compute(ohlcv, params, chart):
 });
 
 test.describe("live updates of a chart with a script", () => {
-  test("a script shadowing a built-in keeps its values, and the chart polls", async ({ page }) => {
-    const subscribes: string[] = [];
-    page.on("request", (r) => {
-      if (r.postData()?.includes('"name":"subscribe_chart"')) subscribes.push(r.url());
-    });
-    await gotoApp(page);
-    await openEditor(page);
-    await saveNew(
-      page,
-      "rsi",
-      `PARAMS = [{"name": "length", "type": "int", "default": 14}]
+  // The script's chart subscribes once, and only after the previous chart's
+  // subscription has ended (liveFeed waits for its unsubscribe): that can be after
+  // the chart shows the script. A slow unsubscribe pins that order down.
+  for (const unsubscribeDelay of [0, 1_000]) {
+    const slow = unsubscribeDelay ? ", after a slow unsubscribe" : "";
+    test(`a script shadowing a built-in keeps its values, and the chart polls${slow}`, async ({ page }) => {
+      const subscribes: string[] = [];
+      let notPushable = 0;
+      page.on("request", (r) => {
+        if (r.postData()?.includes('"name":"subscribe_chart"')) subscribes.push(r.url());
+      });
+      page.on("response", async (res) => {
+        if (!res.request().postData()?.includes('"name":"subscribe_chart"')) return;
+        // The body may be gone after a navigation or close: no match then.
+        const body = await res.text().catch(() => "");
+        if (body.includes("not pushable")) notPushable++;
+      });
+      if (unsubscribeDelay) {
+        await page.route("**/mcp", async (route) => {
+          if (route.request().postData()?.includes('"name":"unsubscribe_chart"')) {
+            await new Promise((done) => setTimeout(done, unsubscribeDelay));
+          }
+          await route.fallback();
+        });
+      }
+      await gotoApp(page);
+      await openEditor(page);
+      await saveNew(
+        page,
+        "rsi",
+        `PARAMS = [{"name": "length", "type": "int", "default": 14}]
 META = {"title": "Mine", "overlay": False}
 
 def compute(ohlcv, params, chart):
     chart.line(12345.0, title = "Mine")
 `,
-    );
-    await expect(page.getByTestId("script-status")).toContainText("replaces the built-in rsi");
-    await expect.poll(() => plotted(page, "rsi"), { timeout: 30_000 }).toEqual({ label: "Mine", last: 12345 });
+      );
+      await expect(page.getByTestId("script-status")).toContainText("replaces the built-in rsi");
+      await expect.poll(() => plotted(page, "rsi"), { timeout: 30_000 }).toEqual({ label: "Mine", last: 12345 });
+      await expect.poll(() => notPushable, { timeout: 15_000 }).toBe(1);
 
-    // Pushed tails came about once a second and carried the built-in's values.
-    const atStart = subscribes.length;
-    for (let i = 0; i < 16; i++) {
-      await page.waitForTimeout(500);
-      expect(await plotted(page, "rsi")).toEqual({ label: "Mine", last: 12345 });
-    }
-    // "not pushable" ends the attempts: no retry for this chart (first retry after 2 s).
-    expect(subscribes.length).toBe(atStart);
-    await expect(page.getByText("polling").first()).toBeVisible();
-  });
+      // Pushed tails came about once a second and carried the built-in's values.
+      const atStart = subscribes.length;
+      for (let i = 0; i < 16; i++) {
+        await page.waitForTimeout(500);
+        expect(await plotted(page, "rsi")).toEqual({ label: "Mine", last: 12345 });
+      }
+      // "not pushable" ends the attempts: no retry for this chart (first retry after 2 s).
+      expect(subscribes.length).toBe(atStart);
+      expect(notPushable).toBe(1);
+      await expect(page.getByText("polling").first()).toBeVisible();
+    });
+  }
 
   /** Big requests of generate_chart: full loads, not tail polls. */
   const countFullLoads = (page: Page) => {

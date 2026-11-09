@@ -36,7 +36,7 @@ one and link both ways.
 | [0005](/chartgen/decisions/0005-client-indicator-state/) | Client-side indicator state with localStorage persistence | Accepted | 2026-04-20 |
 | [0006](/chartgen/decisions/0006-tradingview-visual-parity/) | TradingView visual parity for the web frontend | Accepted | 2026-04-19 |
 | [0007](/chartgen/decisions/0007-complete-series-serialization/) | Complete series serialization: fills, hbars, divlines | Accepted | 2026-04-19 |
-| [0008](/chartgen/decisions/0008-e2e-playwright/) | End-to-end tests with Playwright + CI integration | Accepted | 2026-11-04 |
+| [0008](/chartgen/decisions/0008-e2e-playwright/) | End-to-end tests with Playwright + CI integration | Accepted; amended by [0039](/chartgen/decisions/0039-compact-layout/) and [0057](/chartgen/decisions/0057-e2e-shards/) | 2026-11-04 |
 | [0009](/chartgen/decisions/0009-live-tail-polling-and-history-paging/) | Live tail polling and history paging | Accepted | 2026-11-04 |
 | [0010](/chartgen/decisions/0010-overlay-geometry-rendering/) | Overlay geometry rendering via klinecharts indicator draw callbacks | Accepted | 2026-11-04 |
 | [0011](/chartgen/decisions/0011-watchlist-quotes/) | Watchlist quotes: batched get_quotes, rolling 24 h change for Binance | Accepted | 2026-11-04 |
@@ -83,3 +83,4 @@ one and link both ways.
 | [0053](/chartgen/decisions/0053-hidden-indicators-stay-in-the-status-line/) | A hidden indicator stays in the status line | Accepted | 2026-11-08 |
 | [0054](/chartgen/decisions/0054-agent-drawings/) | An agent draws with the web app's tools | Accepted | 2026-11-08 |
 | [0056](/chartgen/decisions/0056-png-and-summary-warm-up/) | A png or summary reads its indicators' warmup | Accepted | 2026-11-09 |
+| [0057](/chartgen/decisions/0057-e2e-shards/) | The e2e suite runs in duration-balanced CI shards | Accepted | 2026-11-09 |

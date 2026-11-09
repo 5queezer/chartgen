@@ -309,7 +309,8 @@ export function App(props: { authError: string | null; user: SignedInUser | null
           candleIndicators: [
             ...((p.chart()?.getIndicatorByPaneId("candle_pane") as Map<string, unknown> | null)?.keys() ?? []),
           ],
-          visibleFrom: p.chart()?.getDataList()[p.chart()!.getVisibleRange().from]?.timestamp ?? null,
+          visibleFrom:
+            p.chart()?.getDataList()[Math.max(0, p.chart()!.getVisibleRange().realFrom)]?.timestamp ?? null,
           candleHeight: p.chart()?.getSize("candle_pane")?.height ?? null,
           stackHeight: p.chart()?.getSize()?.height ?? null,
           // Canvases whose backing store does not match their size draw blank or stretched.
