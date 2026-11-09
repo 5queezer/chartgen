@@ -11,6 +11,7 @@ import {
   isSeriesType,
   isUpBar,
   markerRadius,
+  onScreenSpan,
   stepPoints,
 } from "./chartTypes";
 import { columnCount, columnLevels, kagiThick, markRange, runsUp } from "./chartTypes";
@@ -35,19 +36,27 @@ const mockYAxis = (inverted: boolean) =>
   }) as unknown as IndicatorDrawParams["yAxis"];
 
 /** Run drawSeries on a recording canvas; returns what it filled and stroked. */
-function paint(type: "columns" | "baseline", inverted: boolean) {
+function paint(
+  type: "columns" | "baseline",
+  inverted: boolean,
+  closes = [100_000, 100_400, 99_800, 100_200],
+  visibleRange = { from: 0, to: 4, realFrom: 0, realTo: 4 },
+) {
   const fills: { y: number; h: number }[] = [];
   const strokes: { color: string; clip: [number, number] }[] = [];
+  /** y of each horizontal dashed stroke (Baseline's base level). */
+  const dashed: number[] = [];
+  let dash: number[] = [];
   let rect: [number, number] = [0, 0];
   let clip: [number, number] = [0, 0];
   const ctx = {
     fillStyle: "",
     strokeStyle: "",
-    setLineDash() {},
+    setLineDash: (d: number[]) => (dash = d),
     save() {},
     restore() {},
     beginPath() {},
-    moveTo() {},
+    moveTo: (_x: number, y: number) => dash.length > 0 && dashed.push(y),
     lineTo() {},
     closePath() {},
     arc() {},
@@ -60,18 +69,18 @@ function paint(type: "columns" | "baseline", inverted: boolean) {
     },
     fillRect: (_x: number, y: number, _w: number, h: number) => fills.push({ y, h }),
   };
-  const bars = [100_000, 100_400, 99_800, 100_200].map((c) => bar(c - 50, c));
+  const bars = closes.map((c) => bar(c - 50, c));
   drawSeries({
     ctx: ctx as unknown as CanvasRenderingContext2D,
     kLineDataList: bars,
     indicator: { extendData: { type, up: "#26a69a", down: "#ef5350", line: "#2196f3" } },
-    visibleRange: { from: 0, to: 4, realFrom: 0, realTo: 4 },
+    visibleRange,
     bounding: { width: 600, height: HEIGHT, left: 0, top: 0, right: 600, bottom: HEIGHT },
     barSpace: { bar: 8, halfBar: 4, gapBar: 6, halfGapBar: 3 },
     xAxis: { convertToPixel: (i: number) => 20 + i * 10, convertFromPixel: () => 0 },
     yAxis: mockYAxis(inverted),
   } as unknown as IndicatorDrawParams);
-  return { fills, strokes };
+  return { fills, strokes, dashed };
 }
 
 describe("series types on a rounding axis at high prices", () => {
@@ -90,6 +99,16 @@ describe("series types on a rounding axis at high prices", () => {
     const { strokes } = paint("baseline", false);
     const up = strokes.find((s) => s.color === "#26a69a")!;
     expect(up.clip[0]).toBe(0);
+  });
+
+  it("Baseline's base level is the middle of the on-screen closes", () => {
+    // Space right of the last bar: klinecharts' `from` starts two bars
+    // off-screen, where the closes reach 100_900 and 99_100.
+    const closes = [100_900, 99_100, 100_000, 100_400, 99_800, 100_200];
+    const range = { from: 0, to: 6, realFrom: 2, realTo: 8 };
+    const { dashed } = paint("baseline", false, closes, range);
+    const middle = mockYAxis(false).convertToPixel((99_800 + 100_400) / 2);
+    expect(dashed).toEqual([middle + 0.5]);
   });
 
   it("Baseline paints the up color below the base line when inverted", () => {
@@ -158,6 +177,16 @@ describe("chart types", () => {
       { x: 10, y: 15 },
     ]);
     expect(stepPoints([])).toEqual([]);
+  });
+
+  it("takes the on-screen bars, not klinecharts' `from`, with space right of the last bar", () => {
+    // 500 bars, 128 bars wide, 10 bars of right offset: klinecharts reports
+    // from 372 (10 bars off-screen), realFrom 382 and realTo 511.
+    expect(onScreenSpan({ realFrom: 382, realTo: 511 }, 500)).toEqual([382, 500]);
+    // Scrolled back: no right offset, realFrom/realTo are the view.
+    expect(onScreenSpan({ realFrom: 100, realTo: 228 }, 500)).toEqual([100, 228]);
+    // Fewer bars than fit: clamped to the data.
+    expect(onScreenSpan({ realFrom: -20, realTo: 40 }, 30)).toEqual([0, 30]);
   });
 
   it("puts the base level in the middle of the visible closes", () => {

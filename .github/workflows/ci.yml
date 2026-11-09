@@ -197,14 +197,12 @@ jobs:
       - name: Build the web stage of the Docker image
         run: docker build --target web .
 
-  e2e:
+  # Implements ADR-0057 (sharding the suite of ADR-0008). The debug binary the
+  # Playwright webServers start is built once here, and every shard downloads it.
+  e2e-build:
     runs-on: ubuntu-latest
-    timeout-minutes: 75
-    needs: [build-release]
-    # Implements ADR-0008 — Playwright suite runs against the real
-    # chartgen server + Vite dev server launched by Playwright's
-    # webServer config. Browser install is cached; the Rust build is
-    # cached by Swatinem/rust-cache across the CI run.
+    timeout-minutes: 30
+    needs: [check, clippy, fmt]
     steps:
       - uses: actions/checkout@v4
       - name: Install system libraries
@@ -214,6 +212,44 @@ jobs:
           sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install -y libfontconfig1-dev libfreetype-dev
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          # The key the single e2e job cached its debug build under.
+          shared-key: e2e
+      - name: Build chartgen (debug)
+        run: cargo build --bin chartgen
+      - uses: actions/upload-artifact@v4
+        with:
+          name: chartgen-e2e-debug
+          path: target/debug/chartgen
+          retention-days: 1
+
+  # Each shard is its own runner with its own servers, so the single worker of
+  # playwright.config.ts still holds inside it. scripts/e2e-shard.mjs assigns whole
+  # spec files by measured duration; the shard count is the length of the matrix.
+  e2e-shard:
+    name: e2e (${{ matrix.shard }}/${{ strategy.job-total }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: [build-release, e2e-build]
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5, 6]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: chartgen-e2e-debug
+          path: target/debug
+      - name: Prepare chartgen binary
+        run: |
+          # Artifacts do not keep the executable bit.
+          chmod +x target/debug/chartgen
+          # The runner image ships fontconfig and freetype; install them only if not.
+          if ldd target/debug/chartgen | grep 'not found'; then
+            sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update
+            sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install -y libfontconfig1 libfreetype6
+          fi
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -237,22 +273,73 @@ jobs:
         working-directory: web
         run: npx playwright install --with-deps chromium
       - name: Run Playwright tests
-        timeout-minutes: 60
+        timeout-minutes: 25
         working-directory: web
         env:
           CI: "true"
-        run: npm run test:e2e
-      - name: Upload Playwright report
-        if: failure()
+          CHARTGEN_BIN: ${{ github.workspace }}/target/debug/chartgen
+          PLAYWRIGHT_BLOB_OUTPUT_NAME: report-${{ matrix.shard }}.zip
+        run: |
+          specs=$(node ../scripts/e2e-shard.mjs ${{ matrix.shard }} ${{ strategy.job-total }})
+          echo "$specs"
+          # Without file arguments Playwright would run the whole suite here.
+          if [ -z "$specs" ]; then echo "No spec files for this shard."; exit 0; fi
+          # shellcheck disable=SC2086 # one spec path per word
+          npx playwright test --reporter=blob,list $specs
+      - name: Upload blob report
+        if: ${{ !cancelled() }}
         uses: actions/upload-artifact@v4
         with:
-          name: playwright-report
-          path: web/playwright-report/
+          name: blob-report-${{ matrix.shard }}
+          path: web/blob-report/
           retention-days: 7
       - name: Upload test results
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: playwright-test-results
+          name: playwright-test-results-${{ matrix.shard }}
           path: web/test-results/
           retention-days: 7
+
+  # The check that reports the suite as one result under the name it always had.
+  e2e:
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: [e2e-shard]
+    env:
+      SHARDS: ${{ needs.e2e-shard.result }}
+    steps:
+      - uses: actions/checkout@v4
+        if: env.SHARDS == 'failure'
+      - uses: actions/setup-node@v4
+        if: env.SHARDS == 'failure'
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Install web deps
+        if: env.SHARDS == 'failure'
+        working-directory: web
+        run: npm ci
+      - uses: actions/download-artifact@v4
+        if: env.SHARDS == 'failure'
+        with:
+          path: all-blob-reports
+          pattern: blob-report-*
+          merge-multiple: true
+      - name: Merge shard reports into one HTML report
+        if: env.SHARDS == 'failure'
+        working-directory: web
+        run: npx playwright merge-reports --reporter html ../all-blob-reports
+      - name: Upload Playwright report
+        if: env.SHARDS == 'failure'
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: web/playwright-report/
+          retention-days: 7
+      - name: Fail unless every shard passed
+        run: |
+          echo "e2e shards: $SHARDS"
+          test "$SHARDS" = success

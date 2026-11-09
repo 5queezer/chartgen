@@ -25,6 +25,9 @@ import { defineConfig, devices } from "@playwright/test";
 
 const CHARTGEN_PORT = Number(process.env.CHARTGEN_PORT ?? 9315);
 const WEB_PORT = Number(process.env.WEB_PORT ?? 5173);
+// CI builds the debug binary once and hands its path to every shard (ADR-0057);
+// locally each server is `cargo run`.
+const CHARTGEN = process.env.CHARTGEN_BIN ?? "cargo run --";
 const REUSE_SERVER = !process.env.CI && process.env.PW_REUSE_SERVER === "1";
 // Every test registers an OAuth client and the server persists them: start
 // each run with an empty store of its own, never the user's real one. With
@@ -109,7 +112,7 @@ export default defineConfig({
       // synthetic bars without network (ignored by older servers, which
       // fall back to sample data when the fetch fails). Debug build:
       // faster to compile than release and fast enough for the suite.
-      command: `rm -f "${CHARTGEN_DB}" && cargo run -- --serve --port ${CHARTGEN_PORT}`,
+      command: `rm -f "${CHARTGEN_DB}" && ${CHARTGEN} --serve --port ${CHARTGEN_PORT}`,
       cwd: "..",
       port: CHARTGEN_PORT,
       // Off even if the developer's shell turns scripting on.
@@ -122,7 +125,7 @@ export default defineConfig({
       stderr: "pipe",
     },
     {
-      command: `rm -f "${ALERTS_DB}" && cargo run -- --serve --port ${ALERTS_CHARTGEN_PORT}`,
+      command: `rm -f "${ALERTS_DB}" && ${CHARTGEN} --serve --port ${ALERTS_CHARTGEN_PORT}`,
       cwd: "..",
       port: ALERTS_CHARTGEN_PORT,
       env: {
@@ -165,7 +168,7 @@ export default defineConfig({
       stderr: "pipe",
     },
     {
-      command: `rm -f "${SCRIPTING_DB}" && cargo run -- --serve --port ${SCRIPTING_CHARTGEN_PORT}`,
+      command: `rm -f "${SCRIPTING_DB}" && ${CHARTGEN} --serve --port ${SCRIPTING_CHARTGEN_PORT}`,
       cwd: "..",
       port: SCRIPTING_CHARTGEN_PORT,
       env: { CHARTGEN_DATA_SOURCE: "sample", CHARTGEN_DB: SCRIPTING_DB, CHARTGEN_SCRIPTING: "1" },
@@ -188,7 +191,7 @@ export default defineConfig({
       stderr: "pipe",
     },
     {
-      command: `rm -f "${SIGNIN_DB}" && cargo run -- --serve --port ${SIGNIN_CHARTGEN_PORT}`,
+      command: `rm -f "${SIGNIN_DB}" && ${CHARTGEN} --serve --port ${SIGNIN_CHARTGEN_PORT}`,
       cwd: "..",
       port: SIGNIN_CHARTGEN_PORT,
       env: {
