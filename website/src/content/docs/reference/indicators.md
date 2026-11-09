@@ -469,7 +469,7 @@ Chande Kroll Stop — ATR-based long and short trailing stops
 
 ### `zigzag`
 
-ZigZag — connects confirmed swing pivots that differ by at least the deviation %
+ZigZag — connects swing pivots that differ by at least the deviation %. Solid legs join confirmed pivots; dashed legs are provisional: they end at a swing in the last depth bars, which can still move or vanish
 
 **Parameters:**
 
@@ -512,7 +512,7 @@ Auto chart patterns on ZigZag pivots of the last 600 bars: head and shoulders, d
 
 ### `auto_fib`
 
-Auto Fib Retracement: fibonacci levels over the last significant ZigZag swing, redrawn as swings change. Each level has its own value and color and can be alerted on
+Auto Fib Retracement: fibonacci levels over the last significant ZigZag swing, redrawn as swings change. When price goes past the swing's end, the end (level 0) follows the new extreme and the swing is forming until a pivot confirms it. Each level has its own value and color and can be alerted on
 
 **Aliases:** `auto_fib_retracement`
 
@@ -770,7 +770,7 @@ Historical Volatility — annualized log-return std dev
 
 ### `kalman_volume`
 
-Kalman Volume Filter — smoothed volume zone oscillator
+Kalman Volume Filter — smoothed volume zone oscillator. Its z-score reads a 200-bar stdev of a 70-bar HMA, so at the defaults the first value comes 285 bars in: a png or summary of fewer bars has none; in format=series a non-zero warmup fetches the history
 
 **Aliases:** `kalman`, `kvf`
 
@@ -946,7 +946,7 @@ Chande Momentum Oscillator (-100 to 100)
 
 ### `dpo`
 
-Detrended Price Oscillator: close - SMA shifted back length/2+1 bars
+Detrended Price Oscillator, TradingView's default (not centered): close - SMA(close, length) of length/2+1 bars ago. It reads no later bar, so it runs to the last bar
 
 **Parameters:**
 

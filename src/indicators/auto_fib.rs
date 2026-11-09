@@ -2,15 +2,18 @@
 //!
 //! `last_swing` and `levels` are pure. Only closed bars count, so the forming bar
 //! moves nothing. The swing changes when a newer pivot is confirmed, `depth` bars
-//! after its extreme, or when a close breaks the swing's start. Each level is a
-//! plot, so it has a color, a width and alerts like any other plot.
+//! after its extreme, when price goes past the swing's end (its end follows the
+//! new extreme, as TradingView's ZigZag moves its newest pivot), or when a close
+//! breaks the swing's start. Each level is a plot, so it has a color, a width and
+//! alerts like any other plot.
 
 use super::chart_patterns::{closed_window, pivots, price_text, Pivot, LOOKBACK};
 use crate::data::{Bar, OhlcvData};
 use crate::indicator::*;
 use serde_json::{json, Value};
 
-/// Slots for levels: a plot count that never changes with the settings.
+/// Slots for levels: plot indices that never change with the settings. Unset
+/// slots after the last set one have no plot.
 const SLOTS: usize = 8;
 /// TradingView's usual set; its built-in tool's defaults are not published.
 const DEFAULTS: [Option<f64>; SLOTS] = [
@@ -32,7 +35,8 @@ const COLORS: [u32; SLOTS] = [
 pub struct Swing {
     pub from: Pivot,
     pub to: Pivot,
-    /// `to` is the extreme since a broken start, with no pivot confirmed yet.
+    /// `to` is an extreme no pivot confirms yet: price went past the swing's
+    /// end, or a close broke its start and `to` is the extreme since.
     pub provisional: bool,
 }
 
@@ -42,47 +46,55 @@ impl Swing {
     }
 }
 
-/// The last significant swing of closed `bars`: the two newest pivots. When a
-/// later close broke the start of that swing, it no longer stands: the swing
-/// then runs from the newest pivot to the extreme reached since.
+/// The last significant swing of closed `bars`: the two newest pivots, then
+/// bar by bar after them: price past the swing's end moves the end to that
+/// extreme, and a close past its start breaks it, so the swing then runs from
+/// its end to the extreme reached since. Either makes it provisional.
 pub fn last_swing(bars: &[Bar], depth: usize, deviation: f64) -> Option<Swing> {
     let p = pivots(bars, depth, deviation);
-    let (from, to) = match p.as_slice() {
-        [.., a, b] => (*a, *b),
-        _ => return None,
+    let [.., from, to] = p.as_slice() else {
+        return None;
     };
-    let after = &bars[to.bar + 1..];
-    let broke = after.iter().any(|b| {
-        if to.high {
-            b.close < from.price
+    let mut s = Swing {
+        from: *from,
+        to: *to,
+        provisional: false,
+    };
+    for (i, b) in bars.iter().enumerate().skip(to.bar + 1) {
+        let high = s.to.high;
+        let (past_end, past_start) = if high {
+            (b.high > s.to.price, b.close < s.from.price)
         } else {
-            b.close > from.price
+            (b.low < s.to.price, b.close > s.from.price)
+        };
+        if past_end {
+            s.to = Pivot {
+                bar: i,
+                price: if high { b.high } else { b.low },
+                high,
+            };
+            s.provisional = true;
+        } else if past_start {
+            // The extreme since the end, the first bar on a tie.
+            let (mut bar, mut price) = (s.to.bar + 1, f64::NAN);
+            for (k, b) in bars.iter().enumerate().take(i + 1).skip(s.to.bar + 1) {
+                let v = if high { b.low } else { b.high };
+                if price.is_nan() || (high && v < price) || (!high && v > price) {
+                    (bar, price) = (k, v);
+                }
+            }
+            s = Swing {
+                from: s.to,
+                to: Pivot {
+                    bar,
+                    price,
+                    high: !high,
+                },
+                provisional: true,
+            };
         }
-    });
-    if !broke {
-        return Some(Swing {
-            from,
-            to,
-            provisional: false,
-        });
     }
-    let (mut bar, mut price) = (to.bar + 1, f64::NAN);
-    for (k, b) in after.iter().enumerate() {
-        let v = if to.high { b.low } else { b.high };
-        let better = if to.high { v < price } else { v > price };
-        if price.is_nan() || better {
-            (bar, price) = (to.bar + 1 + k, v);
-        }
-    }
-    Some(Swing {
-        from: to,
-        to: Pivot {
-            bar,
-            price,
-            high: !to.high,
-        },
-        provisional: true,
-    })
+    Some(s)
 }
 
 /// Price of level `ratio`: 0 at the end of the swing, 1 at its start, so the
@@ -126,7 +138,7 @@ impl Indicator for AutoFib {
     }
 
     fn description(&self) -> &str {
-        "Auto Fib Retracement: fibonacci levels over the last significant ZigZag swing, redrawn as swings change. Each level has its own value and color and can be alerted on"
+        "Auto Fib Retracement: fibonacci levels over the last significant ZigZag swing, redrawn as swings change. When price goes past the swing's end, the end (level 0) follows the new extreme and the swing is forming until a pivot confirms it. Each level has its own value and color and can be alerted on"
     }
 
     fn params(&self) -> Value {
@@ -184,7 +196,14 @@ impl Indicator for AutoFib {
         let n = data.len();
         let mut lines = Vec::with_capacity(SLOTS);
         let mut levels = vec![];
-        for (i, ratio) in self.levels.iter().enumerate() {
+        // Unset slots after the last set one have no plot. Set slots keep
+        // their index, which alerts and plot styles refer to.
+        let used = self
+            .levels
+            .iter()
+            .rposition(Option::is_some)
+            .map_or(0, |i| i + 1);
+        for (i, ratio) in self.levels.iter().enumerate().take(used) {
             let mut y = vec![f64::NAN; n];
             let label = ratio.map_or_else(|| format!("Level {}", i + 1), ratio_text);
             if let (Some(s), Some(r)) = (&swing, ratio) {
@@ -225,7 +244,7 @@ fn swing_shape(s: &Swing, base: usize) -> PatternShape {
     let (status, how) = if s.provisional {
         (
             PatternStatus::Forming,
-            "A close broke the start of the last swing, so this runs to the extreme since, until a new swing is confirmed.",
+            "Its end is an extreme no swing confirms yet: price went past the last swing's end, or a close broke its start. The end follows new extremes until a new swing is confirmed.",
         )
     } else {
         (
@@ -363,6 +382,68 @@ mod tests {
     }
 
     #[test]
+    fn price_past_the_end_moves_the_end() {
+        // #134: a down swing 140 -> 100, a bounce too small to be a swing, then
+        // a lower low in the last `depth` bars, not a confirmed pivot yet.
+        let bars = path(&[
+            (0, 120.0),
+            (20, 140.0),
+            (60, 100.0),
+            (64, 101.5),
+            (74, 96.0),
+        ]);
+        let s = last_swing(&bars, 5, 3.0).unwrap();
+        assert_eq!((s.from.bar, s.from.price), (20, 140.1));
+        assert_eq!((s.to.bar, s.to.price), (73, bars[73].low));
+        assert!(s.provisional && !s.up());
+        let r = AutoFib {
+            depth: 5,
+            ..Default::default()
+        }
+        .compute(&data(bars.clone()));
+        assert_eq!(r.patterns[0].status, PatternStatus::Forming);
+        assert_eq!(r.levels[0].y, bars[73].low, "level 0 at the new low");
+        // Without the lower low the swing still ends at its confirmed pivot.
+        let s = last_swing(&bars[..66], 5, 3.0).unwrap();
+        assert_eq!((s.to.bar, s.to.price, s.provisional), (60, 99.9, false));
+    }
+
+    #[test]
+    fn the_swing_reads_no_later_bar() {
+        // Each prefix's swing ends on a bar it has; a confirmed one had `depth`
+        // bars after its end, and one bar more changes the swing only through
+        // that bar: its extreme, its close past the start, or a pivot it confirms.
+        let bars = crate::data::sample_data(500).bars;
+        let depth = 5;
+        let mut prev: Option<Swing> = None;
+        let mut changes = 0;
+        for m in 1..=bars.len() {
+            let s = last_swing(&bars[..m], depth, 3.0);
+            if let Some(s) = s {
+                assert!(s.from.bar < s.to.bar && s.to.bar < m, "m {m}: {s:?}");
+                assert!(s.provisional || s.to.bar + depth < m, "m {m}: {s:?}");
+                if let Some(p) = prev.filter(|p| *p != s) {
+                    changes += 1;
+                    let b = &bars[m - 1];
+                    let broke = if p.up() {
+                        b.close < p.from.price
+                    } else {
+                        b.close > p.from.price
+                    };
+                    let confirmed =
+                        pivots(&bars[..m], depth, 3.0) != pivots(&bars[..m - 1], depth, 3.0);
+                    assert!(
+                        s.to.bar == m - 1 || broke || confirmed,
+                        "m {m}: {p:?} -> {s:?}"
+                    );
+                }
+            }
+            prev = s;
+        }
+        assert!(changes > 10, "{changes}");
+    }
+
+    #[test]
     fn deviation_and_depth_decide_what_is_significant() {
         // Small swings inside the big one.
         let mut k = vec![
@@ -391,10 +472,9 @@ mod tests {
             ..Default::default()
         }
         .compute(&data(up_swing()));
-        assert_eq!(r.lines.len(), SLOTS);
+        // The unset 8th slot has no plot (#134).
+        assert_eq!(r.lines.len(), SLOTS - 1);
         assert_eq!(r.lines[4].label.as_deref(), Some("0.618"));
-        assert_eq!(r.lines[7].label.as_deref(), Some("Level 8"));
-        assert!(r.lines[7].y.iter().all(|v| v.is_nan()));
         // NaN before the swing starts, the price from there on.
         assert!(r.lines[0].y[19].is_nan());
         assert_eq!(r.lines[0].y[20], 140.1);
@@ -415,6 +495,8 @@ mod tests {
         };
         ind.configure(&json!({"level2": null, "level8": 1.618, "reverse": true}));
         let r = ind.compute(&data(up_swing()));
+        // A hidden slot before a set one keeps its plot, so indices stay.
+        assert_eq!(r.lines.len(), SLOTS);
         assert!(r.lines[1].y.iter().all(|v| v.is_nan()));
         assert_eq!(r.lines[1].label.as_deref(), Some("Level 2"));
         assert_eq!(r.lines[7].label.as_deref(), Some("1.618"));
@@ -454,7 +536,7 @@ mod tests {
     #[test]
     fn too_few_bars_draw_nothing_but_keep_the_plots() {
         let r = AutoFib::default().compute(&data(path(&[(0, 100.0), (3, 101.0)])));
-        assert_eq!(r.lines.len(), SLOTS);
+        assert_eq!(r.lines.len(), SLOTS - 1);
         assert!(r.levels.is_empty());
         assert!(r.patterns.is_empty());
     }

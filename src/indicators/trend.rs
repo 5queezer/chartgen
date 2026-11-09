@@ -671,18 +671,32 @@ pub(crate) fn zigzag_walk(
     bars: &[crate::data::Bar],
     depth: usize,
     deviation: impl Fn(usize) -> f64,
+    on_change: impl FnMut(&[(usize, f64, bool)], bool),
+) -> Vec<(usize, f64, bool)> {
+    walk(bars, depth, deviation, false, on_change)
+}
+
+/// The zigzag walk. With `provisional`, the last `depth` bars are read too, each
+/// against the bars after it so far: the pivots confirmed so far, then where the
+/// newest of them has moved to and the swings not yet confirmed.
+fn walk(
+    bars: &[crate::data::Bar],
+    depth: usize,
+    deviation: impl Fn(usize) -> f64,
+    provisional: bool,
     mut on_change: impl FnMut(&[(usize, f64, bool)], bool),
 ) -> Vec<(usize, f64, bool)> {
     let n = bars.len();
     let d = depth;
     let mut out: Vec<(usize, f64, bool)> = vec![];
-    if n < 2 * d + 1 {
+    let end = if provisional { n } else { n.saturating_sub(d) };
+    if n < d + 1 || (!provisional && n < 2 * d + 1) {
         return out;
     }
-    for i in d..n - d {
+    for i in d..end {
         let b = &bars[i];
         let left = &bars[i - d..i];
-        let right = &bars[i + 1..=i + d];
+        let right = &bars[i + 1..(i + d + 1).min(n)];
         let is_h = left.iter().all(|x| b.high >= x.high) && right.iter().all(|x| b.high > x.high);
         let is_l = left.iter().all(|x| b.low <= x.low) && right.iter().all(|x| b.low < x.low);
         // An outside bar can be both; take the type opposite to the last pivot.
@@ -720,7 +734,7 @@ impl Indicator for ZigZag {
         "ZigZag"
     }
     fn description(&self) -> &str {
-        "ZigZag — connects confirmed swing pivots that differ by at least the deviation %"
+        "ZigZag — connects swing pivots that differ by at least the deviation %. Solid legs join confirmed pivots; dashed legs are provisional: they end at a swing in the last depth bars, which can still move or vanish"
     }
     fn params(&self) -> Value {
         json!([{"name": "deviation", "type": "number", "default": 5.0, "min": 0, "max": 100,
@@ -737,32 +751,21 @@ impl Indicator for ZigZag {
         }
     }
     fn compute(&self, data: &OhlcvData) -> PanelResult {
-        let pv = self.pivots(data);
-        let seg = |(x1, y1): (usize, f64), (x2, y2): (usize, f64)| DivLine {
-            x1,
-            y1,
-            x2,
-            y2,
-            color: rgba(0x2962FF, 0.9),
-            dashed: false,
-        };
-        let mut divlines: Vec<DivLine> = pv
+        let confirmed = self.pivots(data);
+        let pv = walk(&data.bars, self.depth, |_| self.deviation, true, |_, _| {});
+        // A leg is provisional (dashed) when it ends at a pivot not confirmed yet:
+        // a swing in the last `depth` bars, or the newest pivot moved to one.
+        let divlines = pv
             .windows(2)
-            .map(|w| seg((w[0].0, w[0].1), (w[1].0, w[1].1)))
+            .map(|w| DivLine {
+                x1: w[0].0,
+                y1: w[0].1,
+                x2: w[1].0,
+                y2: w[1].1,
+                color: rgba(0x2962FF, 0.9),
+                dashed: !confirmed.contains(&w[1]),
+            })
             .collect();
-        // Live last leg: last pivot to the most extreme bar since it (newest on ties).
-        if let Some(&(pi, py, was_high)) = pv.last() {
-            let mut best: Option<(usize, f64)> = None;
-            for (i, b) in data.bars.iter().enumerate().skip(pi + 1) {
-                let v = if was_high { b.low } else { b.high };
-                if best.is_none_or(|(_, bv)| if was_high { v <= bv } else { v >= bv }) {
-                    best = Some((i, v));
-                }
-            }
-            if let Some(end) = best {
-                divlines.push(seg((pi, py), end));
-            }
-        }
         PanelResult {
             divlines,
             label: format!("ZigZag {}% {}", self.deviation, self.depth),
@@ -1048,18 +1051,108 @@ mod tests {
                 .compute(&d)
         };
         let r = mk(5.0);
-        // Pivots at 1 (H), 2 (L), 3 (H) plus the live leg 3 -> 4.
+        // Pivots at 1 (H), 2 (L), 3 (H) plus the provisional leg 3 -> 4.
         assert_eq!(r.divlines.len(), 3);
         assert_eq!((r.divlines[0].x1, r.divlines[0].x2), (1, 2));
         assert_eq!((r.divlines[0].y1, r.divlines[0].y2), (20., 10.));
         let live = &r.divlines[2];
         assert_eq!((live.x1, live.y1, live.x2, live.y2), (3, 20., 4, 10.));
-        // 50% swing is below the 60% threshold: one pivot survives, so only
-        // its live leg to the newest lowest bar remains.
-        let r = mk(60.0);
-        assert_eq!(r.divlines.len(), 1);
-        let l = &r.divlines[0];
-        assert_eq!((l.x1, l.y1, l.x2, l.y2), (1, 20., 4, 10.));
+        let dashed: Vec<bool> = r.divlines.iter().map(|l| l.dashed).collect();
+        assert_eq!(dashed, [false, false, true]);
+        // The 50% swings are below the 60% threshold: one pivot survives and
+        // no leg is drawn from it, not even a provisional one (#130).
+        assert!(mk(60.0).divlines.is_empty());
+    }
+
+    /// (high, low) bars, open and close at the low.
+    fn hl(v: &[(f64, f64)]) -> OhlcvData {
+        bars(
+            &v.iter()
+                .map(|&(h, l)| (l, h, l, l, 1.0))
+                .collect::<Vec<_>>(),
+        )
+    }
+
+    #[test]
+    fn zigzag_trailing_leg_follows_a_newer_extreme() {
+        // #130: high 110 (bar 2), low 90 (bar 5), a bounce to 93 (+3.3%, below
+        // the 5% deviation), then a lower low 88 in the last `depth` bars.
+        let mut v = vec![
+            (100., 99.),
+            (101., 100.),
+            (110., 105.),
+            (104., 100.),
+            (100., 95.),
+            (98., 90.),
+            (92., 91.),
+            (93., 91.5),
+            (92., 91.),
+            (91., 88.),
+            (90., 89.),
+        ];
+        let zz = |v: &[(f64, f64)]| {
+            by_name_configured("zigzag", &json!({"deviation": 5.0, "depth": 2}))
+                .unwrap()
+                .unwrap()
+                .compute(&hl(v))
+                .divlines
+                .iter()
+                .map(|l| (l.x1, l.y1, l.x2, l.y2, l.dashed))
+                .collect::<Vec<_>>()
+        };
+        // The low pivot has moved to 88, not confirmed yet: one dashed leg
+        // from the high to it, no sub-threshold leg to the 93 bounce.
+        assert_eq!(zz(&v), [(2, 110., 9, 88., true)]);
+        // Two more bars confirm it: the same leg, now solid.
+        v.push((91., 89.5));
+        assert_eq!(zz(&v), [(2, 110., 9, 88., false)]);
+        // Swings for inspect_chart stay confirmed only: 90 until 88 is.
+        let swings = |v: &[(f64, f64)]| crate::drawings::swings(&hl(v).bars, 2, 10);
+        assert_eq!(swings(&v), [(2, 110., true), (9, 88., false)]);
+        assert_eq!(swings(&v[..11]), [(2, 110., true), (5, 90., false)]);
+    }
+
+    #[test]
+    fn zigzag_confirmed_pivots_do_not_look_ahead() {
+        // Appending bars never changes a confirmed pivot but the newest, which
+        // may only move on to a later, more extreme one of its kind.
+        let d = sample_data(400);
+        for depth in [2, 5, 10] {
+            let full = zigzag_pivots(&d.bars, depth, |_| 2.0);
+            assert!(full.len() > 10, "depth {depth}: {}", full.len());
+            for m in (depth * 2 + 1..400).step_by(7) {
+                let part = zigzag_pivots(&d.bars[..m], depth, |_| 2.0);
+                let Some((last, settled)) = part.split_last() else {
+                    continue;
+                };
+                assert_eq!(&full[..settled.len()], settled, "depth {depth} m {m}");
+                let next = full[settled.len()];
+                assert_eq!(next.2, last.2, "depth {depth} m {m}");
+                assert!(next.0 >= last.0, "depth {depth} m {m}");
+                // Solid legs of the prefix, but the one into its newest pivot,
+                // are solid legs of the full chart.
+                let zz = |data: &OhlcvData| {
+                    ZigZag {
+                        deviation: 2.0,
+                        depth,
+                    }
+                    .compute(data)
+                    .divlines
+                    .iter()
+                    .filter(|l| !l.dashed)
+                    .map(|l| (l.x1, l.y1.to_bits(), l.x2, l.y2.to_bits()))
+                    .collect::<Vec<_>>()
+                };
+                let solid = zz(&OhlcvData {
+                    bars: d.bars[..m].to_vec(),
+                    ..d.clone()
+                });
+                let all = zz(&d);
+                for l in solid.iter().filter(|l| l.2 < last.0) {
+                    assert!(all.contains(l), "depth {depth} m {m}: {l:?}");
+                }
+            }
+        }
     }
 
     #[test]

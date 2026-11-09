@@ -224,7 +224,7 @@ impl Kind {
                 "Price Oscillator (TradingView): (short MA - long MA) / long MA * 100, MA type ema or sma"
             }
             Kind::Cmo => "Chande Momentum Oscillator (-100 to 100)",
-            Kind::Dpo => "Detrended Price Oscillator: close - SMA shifted back length/2+1 bars",
+            Kind::Dpo => "Detrended Price Oscillator, TradingView's default (not centered): close - SMA(close, length) of length/2+1 bars ago. It reads no later bar, so it runs to the last bar",
             Kind::ElderForceIndex => "Elder Force Index: EMA of change(close) * volume",
             Kind::Tsi => "True Strength Index: double-smoothed momentum ratio (x100) with signal",
             Kind::Kst => {
@@ -939,6 +939,20 @@ mod tests {
         );
         // barsback = 2; sma2 = [_,1.5,3,6,12]; dpo = close - sma[i-2]
         eq(&r.lines[0].y, &[NAN, NAN, NAN, 6.5, 13.0]);
+    }
+
+    #[test]
+    fn dpo_reads_no_later_bar() {
+        // #135: not the centered DPO (close[n/2+1] - sma), which needs n/2+1
+        // later bars. A value never changes when bars are appended.
+        let d = sample_data(300);
+        let full = run(Kind::Dpo, json!({}), &d).lines[0].y.clone();
+        assert!(full[299].is_finite());
+        for m in [31, 32, 100, 299] {
+            let mut part = d.clone();
+            part.bars.truncate(m);
+            eq(&run(Kind::Dpo, json!({}), &part).lines[0].y, &full[..m]);
+        }
     }
 
     #[test]
