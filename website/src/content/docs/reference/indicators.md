@@ -946,7 +946,7 @@ Chande Momentum Oscillator (-100 to 100)
 
 ### `dpo`
 
-Detrended Price Oscillator: close - SMA shifted back length/2+1 bars
+Detrended Price Oscillator, TradingView's default (not centered): close - SMA(close, length) of length/2+1 bars ago. It reads no later bar, so it runs to the last bar
 
 **Parameters:**
 
