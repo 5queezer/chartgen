@@ -221,6 +221,19 @@ export function drawSpan(
   return [Math.max(0, range.from - 1), Math.min(n, range.to + 1)];
 }
 
+/**
+ * Data indices on screen, `[start, end)`. klinecharts' `from` is `to` minus the
+ * pane's width in bars after `to` is clamped to the last bar, so with space
+ * right of the last bar it starts that many bars off-screen to the left;
+ * `realFrom`/`realTo` are what the pane shows.
+ */
+export function onScreenSpan(
+  range: { realFrom: number; realTo: number },
+  n: number,
+): [number, number] {
+  return [Math.max(0, range.realFrom), Math.min(n, range.realTo)];
+}
+
 /** Step line through `points`: horizontal to the next bar, then vertical. */
 export function stepPoints(points: Point[]): Point[] {
   const out: Point[] = [];
@@ -306,9 +319,8 @@ export function drawSeries({
   switch (ext.type) {
     case "volume_candles": {
       let most = 0;
-      for (let i = visibleRange.from; i < visibleRange.to; i++) {
-        most = Math.max(most, bars[i]!.volume ?? 0);
-      }
+      const [first, last] = onScreenSpan(visibleRange, bars.length);
+      for (let i = first; i < last; i++) most = Math.max(most, bars[i]!.volume ?? 0);
       for (let i = start; i < end; i++) {
         const b = bars[i]!;
         const x = xAxis.convertToPixel(i);
@@ -442,7 +454,8 @@ export function drawSeries({
     }
     case "baseline": {
       const visible = [];
-      for (let i = visibleRange.from; i < visibleRange.to; i++) visible.push(bars[i]!.close);
+      const [first, last] = onScreenSpan(visibleRange, bars.length);
+      for (let i = first; i < last; i++) visible.push(bars[i]!.close);
       const base = baselineValue(visible);
       if (base === null) break;
       const baseY = yAxis.convertToPixel(base);
