@@ -159,13 +159,14 @@ const columnsAboveLine = (page: Page, pick: boolean) =>
       }
       return n;
     };
-    if (!pick) return { n: count(from, to - 1), index: to - 1, x: 0 };
+    if (!pick) return { n: to > from ? count(from, to - 1) : 0, index: to - 1, x: 0 };
     const width = to - from;
     let best = { n: 0, index: bars.length - 1 };
-    for (let last = width; last < bars.length - 1; last++) {
+    for (let last = width - 1; last < bars.length - 1; last++) {
       const n = count(last - width + 1, last);
       if (n > best.n) best = { n, index: last };
     }
+    if (best.n === 0) throw new Error("no replay start has other-colored columns above its last price line");
     // Into the right half of the view, clear of the edges.
     chart.scrollToDataIndex(Math.min(bars.length - 1, best.index + Math.floor(width / 4)));
     const [p] = chart.convertToPixel([{ dataIndex: best.index }], { paneId: "candle_pane" });
