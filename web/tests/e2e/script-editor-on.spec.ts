@@ -862,7 +862,9 @@ test.describe("live updates of a chart with a script", () => {
       });
       page.on("response", async (res) => {
         if (!res.request().postData()?.includes('"name":"subscribe_chart"')) return;
-        if ((await res.text()).includes("not pushable")) notPushable++;
+        // The body may be gone after a navigation or close: no match then.
+        const body = await res.text().catch(() => "");
+        if (body.includes("not pushable")) notPushable++;
       });
       if (unsubscribeDelay) {
         await page.route("**/mcp", async (route) => {
