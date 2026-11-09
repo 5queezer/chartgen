@@ -9,6 +9,8 @@ sidebar:
 **Date:** 2026-11-04
 **Amended by:** [ADR-0039](/chartgen/decisions/0039-compact-layout/) (the app
 supports mobile viewports, and the suite covers them in emulation)
+and [ADR-0057](/chartgen/decisions/0057-e2e-shards/) (CI runs the suite in
+duration-balanced shards)
 
 ## Context and Problem Statement
 
