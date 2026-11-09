@@ -1,6 +1,6 @@
 use crate::data::OhlcvData;
 use crate::drawings::{parse_color, Drawing, View};
-use crate::indicator::{DivLine, Indicator, PanelResult};
+use crate::indicator::{Indicator, PanelResult, Projection};
 use plotters::prelude::*;
 
 const BG: RGBColor = RGBColor(19, 23, 34);
@@ -107,58 +107,97 @@ pub fn render_results(
     width: u32,
     height: u32,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    render_labeled(data, results, output, width, height, None, &[])
+    let plain: Vec<_> = results.iter().map(|r| (*r, None)).collect();
+    render_labeled(data, &plain, output, width, height, None, &[])
 }
 
 /// `render_results`, naming in the title how the bars are built (ADR-0047), with
-/// `drawings` on the price chart (ADR-0054).
+/// `drawings` on the price chart (ADR-0054). A result may come with what it plots past
+/// the last bar (ADR-0033): the image then reaches that far.
 pub fn render_labeled(
     data: &OhlcvData,
-    results: &[&PanelResult],
+    results: &[(&PanelResult, Option<&Projection>)],
     output: &str,
     width: u32,
     height: u32,
     style: Option<&str>,
     drawings: &[Drawing],
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let root = BitMapBackend::new(output, (width, height)).into_drawing_area();
+    draw_chart(&root, data, results, style, drawings)?;
+    root.present()?;
+    Ok(())
+}
+
+type Root<'b> = DrawingArea<BitMapBackend<'b>, plotters::coord::Shift>;
+type Chart<'a, 'b> = ChartContext<
+    'a,
+    BitMapBackend<'b>,
+    Cartesian2d<plotters::coord::types::RangedCoordf64, plotters::coord::types::RangedCoordf64>,
+>;
+
+const BULL: RGBColor = RGBColor(38, 166, 154);
+const BEAR: RGBColor = RGBColor(239, 83, 80);
+/// Padding around the last price in its tag.
+const TAG_PAD: u32 = 4;
+
+fn draw_chart(
+    root: &Root,
+    data: &OhlcvData,
+    results: &[(&PanelResult, Option<&Projection>)],
+    style: Option<&str>,
+    drawings: &[Drawing],
+) -> Drawn {
+    let (width, height) = root.dim_in_pixel();
+    root.fill(&BG)?;
     let n = data.len();
     if n == 0 {
-        // Nothing to render -- write a blank image
-        let root = BitMapBackend::new(output, (width, height)).into_drawing_area();
-        root.fill(&BG)?;
-        root.present()?;
+        // Nothing to render -- a blank image
         return Ok(());
     }
 
     // Separate overlays from panels
-    let overlays: Vec<&PanelResult> = results.iter().copied().filter(|r| r.is_overlay).collect();
-    let panel_results: Vec<&PanelResult> =
-        results.iter().copied().filter(|r| !r.is_overlay).collect();
+    let overlays: Vec<_> = results
+        .iter()
+        .copied()
+        .filter(|(r, _)| r.is_overlay)
+        .collect();
+    let panel_results: Vec<_> = results
+        .iter()
+        .copied()
+        .filter(|(r, _)| !r.is_overlay)
+        .collect();
     let n_panels = panel_results.len();
 
-    // Price range
-    let p_min = data.lows().iter().cloned().fold(f64::INFINITY, f64::min);
-    let p_max = data
-        .highs()
-        .iter()
-        .cloned()
-        .fold(f64::NEG_INFINITY, f64::max);
-    let p_margin = (p_max - p_min) * 0.05;
-    // Room on the right for drawings past the last bar, as far as `View` allows.
-    let future = drawings
+    // Price range: the candles', as the drawings' `View`. Overlays past it are cut off,
+    // as on the web chart, instead of squeezing the candles.
+    let view = View::of(&data.bars);
+    let price = (view.price_lo, view.price_hi);
+    // Room on the right for drawings and projections past the last bar, as far as `View`
+    // allows.
+    let drawn = drawings
         .iter()
         .flat_map(|d| &d.points)
         .map(|p| p.x - (n as i64 - 1))
         .max()
-        .unwrap_or(0)
-        .clamp(0, View::of(&data.bars).future);
-    let x_max = (n as i64 + future) as f64;
+        .unwrap_or(0);
+    let projected = results
+        .iter()
+        .filter_map(|(_, f)| *f)
+        .map(|f| f.bars as i64)
+        .max()
+        .unwrap_or(0);
+    let x = x_span(n, drawn.max(projected).clamp(0, view.future));
+
+    // The last price, tagged in a gutter right of every pane, so their bars line up.
+    let last = &data.bars[n - 1];
+    let tag = format!("{:.*}", decimals(last.close), last.close);
+    let tag_font = ("monospace", 14).into_font().color(&WHITE);
+    let (tag_w, tag_h) = root.estimate_text_size(&tag, &tag_font)?;
+    let gutter = tag_w + 2 * TAG_PAD + 6;
 
     let title_h = TITLE_H;
     let (candle_h, panel_h) = layout(height, n_panels);
-
-    let root = BitMapBackend::new(output, (width, height)).into_drawing_area();
-    root.fill(&BG)?;
 
     // Draw title: "SYMBOL · INTERVAL"
     {
@@ -191,9 +230,10 @@ pub fn render_labeled(
     {
         let mut chart = ChartBuilder::on(&candle_area)
             .margin(10)
+            .margin_right(gutter)
             .x_label_area_size(0)
             .y_label_area_size(80)
-            .build_cartesian_2d(0_f64..x_max, (p_min - p_margin)..(p_max + p_margin))?;
+            .build_cartesian_2d(x.0..x.1, price.0..price.1)?;
         let (xs, ys) = chart.plotting_area().get_pixel_range();
         price_x = (xs.start as f64, xs.end as f64);
 
@@ -208,11 +248,7 @@ pub fn render_labeled(
 
         for (i, bar) in data.bars.iter().enumerate() {
             let x = i as f64;
-            let color = if bar.close >= bar.open {
-                RGBColor(38, 166, 154)
-            } else {
-                RGBColor(239, 83, 80)
-            };
+            let color = if bar.close >= bar.open { BULL } else { BEAR };
 
             // Wick
             chart.draw_series(std::iter::once(PathElement::new(
@@ -233,138 +269,14 @@ pub fn render_labeled(
         }
 
         // Draw overlays on the candle chart
-        for overlay in &overlays {
-            // Fills
-            for fill in &overlay.fills {
-                let pairs: Vec<_> = fill
-                    .y1
-                    .iter()
-                    .zip(&fill.y2)
-                    .enumerate()
-                    .filter(|(_, (a, b))| !a.is_nan() && !b.is_nan())
-                    .map(|(i, (a, b))| {
-                        let (lo, hi) = if a < b { (*a, *b) } else { (*b, *a) };
-                        Rectangle::new(
-                            [(i as f64 - 0.4, lo), (i as f64 + 0.4, hi)],
-                            fill.color_for(*a, *b).filled(),
-                        )
-                    })
-                    .collect();
-                chart.draw_series(pairs)?;
-            }
-
-            // Lines, broken where a value is NaN (as on the web chart and with
-            // Pine's plot.style_linebr), so a gap draws no connector.
-            for line in &overlay.lines {
-                let draw_width = if line.width <= 1 { 2 } else { line.width };
-                for run in level_runs(line_runs(&line.y), overlay.level_lines) {
-                    chart.draw_series(std::iter::once(PathElement::new(
-                        run,
-                        line.color.stroke_width(draw_width),
-                    )))?;
-                }
-            }
-
-            // Dots
-            for dot in &overlay.dots {
-                chart.draw_series(std::iter::once(Circle::new(
-                    (dot.x as f64, dot.y),
-                    dot.size,
-                    dot.color.filled(),
-                )))?;
-            }
-
-            // Pattern outlines (ADR-0046) draw the same way as segments.
-            let strokes: Vec<DivLine> = overlay
-                .patterns
-                .iter()
-                .flat_map(|p| {
-                    p.strokes.iter().map(|s| DivLine {
-                        x1: s.x1.max(0) as usize,
-                        y1: s.y1,
-                        x2: s.x2.max(0) as usize,
-                        y2: s.y2,
-                        color: p.bias.color(),
-                        dashed: s.dashed,
-                    })
-                })
-                .collect();
-
-            // Pattern labels: past the bar's high or low, in the pattern's color.
-            let text = |s: &str, x: f64, y: f64, above: bool, c: RGBAColor| {
-                let off = if above { -16 } else { 4 };
-                EmptyElement::at((x, y))
-                    + Text::new(
-                        s.to_string(),
-                        (-4, off),
-                        ("sans-serif", 12).into_font().color(&c),
-                    )
-            };
-            for l in &overlay.labels {
-                let c = l.bias.color();
-                let c = if l.tentative { c.mix(0.5) } else { c };
-                chart.draw_series(std::iter::once(text(&l.text, l.x as f64, l.y, l.above, c)))?;
-            }
-            for p in &overlay.patterns {
-                let s = format!("{} ({})", p.name, p.status.as_str());
-                let x = p.label_x.max(0) as f64;
-                chart.draw_series(std::iter::once(text(
-                    &s,
-                    x,
-                    p.label_y,
-                    p.label_above,
-                    p.bias.color(),
-                )))?;
-            }
-
-            // Segments on overlay (e.g. zigzag)
-            for d in overlay.divlines.iter().chain(&strokes) {
-                let (x1, y1, x2, y2) = (d.x1 as f64, d.y1, d.x2 as f64, d.y2);
-                // Dashed: 20 steps, every other one drawn (same as the panel path)
-                let steps = if d.dashed { 20 } else { 1 };
-                let (dx, dy) = ((x2 - x1) / steps as f64, (y2 - y1) / steps as f64);
-                let stride = if d.dashed { 2 } else { 1 };
-                for s in (0..steps).step_by(stride) {
-                    chart.draw_series(LineSeries::new(
-                        [
-                            (x1 + dx * s as f64, y1 + dy * s as f64),
-                            (x1 + dx * (s + 1) as f64, y1 + dy * (s + 1) as f64),
-                        ],
-                        d.color.stroke_width(2),
-                    ))?;
-                }
-            }
-
-            // HLines on overlay
-            for h in &overlay.hlines {
-                chart.draw_series(std::iter::once(PathElement::new(
-                    vec![(0.0, h.y), (x_max, h.y)],
-                    h.color.stroke_width(1),
-                )))?;
-            }
-
-            // HBars (VPVR horizontal histogram)
-            for hbar in &overlay.hbars {
-                let bar_width = n as f64 * hbar.width;
-                let bar_offset = n as f64 * hbar.offset;
-                let (x_left, x_right) = if hbar.left {
-                    (bar_offset, bar_offset + bar_width)
-                } else {
-                    (x_max - bar_offset - bar_width, x_max - bar_offset)
-                };
-                let y_top = hbar.y + hbar.height / 2.0;
-                let y_bot = hbar.y - hbar.height / 2.0;
-                chart.draw_series(std::iter::once(Rectangle::new(
-                    [(x_left, y_bot), (x_right, y_top)],
-                    hbar.color.filled(),
-                )))?;
-            }
+        for (overlay, future) in &overlays {
+            draw_result(&mut chart, overlay, *future, n, x, price)?;
         }
 
         // Overlay labels and current value annotations on candle chart
         {
             let mut label_y = 5;
-            for overlay in &overlays {
+            for (overlay, _) in &overlays {
                 if !overlay.label.is_empty() {
                     candle_area.draw_text(
                         &overlay.label,
@@ -375,43 +287,35 @@ pub fn render_labeled(
                     )?;
                     label_y += 18;
                 }
-                for line in &overlay.lines {
-                    if let Some(ref lbl) = line.label {
-                        if let Some(val) = legend_value(&line.y, line.breaks) {
-                            let text = format!("{}: {}", lbl, val);
-                            let RGBAColor(r, g, b, _) = line.color;
-                            candle_area.draw_text(
-                                &text,
-                                &("monospace", 12).into_font().color(&RGBColor(r, g, b)),
-                                (85, label_y),
-                            )?;
-                            label_y += 15;
-                        }
-                    }
+                for (text, color) in legend(overlay) {
+                    candle_area.draw_text(
+                        &text,
+                        &("monospace", 12).into_font().color(&color),
+                        (85, label_y),
+                    )?;
+                    label_y += 15;
                 }
             }
         }
 
-        // Price label
-        let lp = data.bars.last().unwrap().close;
-        chart.draw_series(std::iter::once(Text::new(
-            format!("{:.2}", lp),
-            ((n - 1) as f64, lp),
-            ("monospace", 14).into_font().color(&WHITE),
-        )))?;
+        // Price label: in the gutter at the last close, in its candle's color.
+        {
+            let (gx, gy) = chart.backend_coord(&(x.1, last.close));
+            let (l, t) = (gx + 2, gy - (tag_h / 2 + TAG_PAD) as i32);
+            let (w, h) = ((tag_w + 2 * TAG_PAD) as i32, (tag_h + 2 * TAG_PAD) as i32);
+            let color = if last.close >= last.open { BULL } else { BEAR };
+            root.draw(&Rectangle::new([(l, t), (l + w, t + h)], color.filled()))?;
+            root.draw_text(&tag, &tag_font, (l + TAG_PAD as i32, t + TAG_PAD as i32))?;
+        }
 
         if !drawings.is_empty() {
             let canvas = Canvas {
-                area: &root,
-                x: (price_x.0, price_x.1, x_max),
-                y: (
-                    ys.start as f64,
-                    ys.end as f64,
-                    p_min - p_margin,
-                    p_max + p_margin,
-                ),
+                area: root,
+                x: price_x,
+                bars: x,
+                y: (ys.start as f64, ys.end as f64, price.0, price.1),
             };
-            let prec = decimals(lp);
+            let prec = decimals(last.close);
             for d in drawings {
                 canvas.drawing(d, prec)?;
             }
@@ -419,14 +323,17 @@ pub fn render_labeled(
     }
 
     // ---- Draw indicator panels ----
-    for (area, result) in areas.iter().zip(&panel_results) {
-        let (y_lo, y_hi) = result.y_range.unwrap_or_else(|| auto_range(result));
+    for (area, (result, future)) in areas.iter().zip(&panel_results) {
+        let y = panel_range(result, *future);
 
+        // The price pane's margins left and right, so a bar sits under its candle.
         let mut chart = ChartBuilder::on(area)
             .margin(5)
+            .margin_left(10)
+            .margin_right(gutter)
             .x_label_area_size(20)
             .y_label_area_size(80)
-            .build_cartesian_2d(0_f64..x_max, y_lo..y_hi)?;
+            .build_cartesian_2d(x.0..x.1, y.0..y.1)?;
 
         // The label area stays for the spacing, empty: the dates under the last pane are
         // the image's only x labels.
@@ -440,111 +347,7 @@ pub fn render_labeled(
             .label_style(("monospace", 13, &TEXT))
             .draw()?;
 
-        // HLines
-        for h in &result.hlines {
-            chart.draw_series(std::iter::once(PathElement::new(
-                vec![(0.0, h.y), (n as f64, h.y)],
-                h.color.stroke_width(1),
-            )))?;
-        }
-
-        // Fills (approximate with vertical bars for simplicity in plotters)
-        for fill in &result.fills {
-            let pairs: Vec<_> = fill
-                .y1
-                .iter()
-                .zip(&fill.y2)
-                .enumerate()
-                .filter(|(_, (a, b))| !a.is_nan() && !b.is_nan())
-                .map(|(i, (a, b))| {
-                    let (lo, hi) = if a < b { (*a, *b) } else { (*b, *a) };
-                    Rectangle::new(
-                        [(i as f64 - 0.4, lo), (i as f64 + 0.4, hi)],
-                        fill.color_for(*a, *b).filled(),
-                    )
-                })
-                .collect();
-            chart.draw_series(pairs)?;
-        }
-
-        // Bars (histogram)
-        for bars in &result.bars {
-            let rects: Vec<_> = bars
-                .y
-                .iter()
-                .zip(&bars.colors)
-                .enumerate()
-                .filter(|(_, (y, _))| !y.is_nan())
-                .map(|(i, (y, c))| {
-                    Rectangle::new(
-                        [
-                            (i as f64 - 0.35, bars.bottom),
-                            (i as f64 + 0.35, bars.bottom + y),
-                        ],
-                        c.filled(),
-                    )
-                })
-                .collect();
-            chart.draw_series(rects)?;
-        }
-
-        // Lines, broken where a value is NaN (as on the web chart and with
-        // Pine's plot.style_linebr), so a gap draws no connector.
-        for line in &result.lines {
-            let draw_width = if line.width <= 1 { 2 } else { line.width };
-            for run in level_runs(line_runs(&line.y), result.level_lines) {
-                chart.draw_series(std::iter::once(PathElement::new(
-                    run,
-                    line.color.stroke_width(draw_width),
-                )))?;
-            }
-        }
-
-        // Dots
-        for dot in &result.dots {
-            chart.draw_series(std::iter::once(Circle::new(
-                (dot.x as f64, dot.y),
-                dot.size,
-                dot.color.filled(),
-            )))?;
-        }
-
-        // Divergence lines
-        for divline in &result.divlines {
-            let x1 = divline.x1 as f64;
-            let y1 = divline.y1;
-            let x2 = divline.x2 as f64;
-            let y2 = divline.y2;
-
-            if divline.dashed {
-                let steps = 20;
-                let dx = (x2 - x1) / steps as f64;
-                let dy = (y2 - y1) / steps as f64;
-                for s in (0..steps).step_by(2) {
-                    let sx1 = x1 + dx * s as f64;
-                    let sy1 = y1 + dy * s as f64;
-                    let sx2 = x1 + dx * (s + 1) as f64;
-                    let sy2 = y1 + dy * (s + 1) as f64;
-                    chart.draw_series(LineSeries::new(
-                        [(sx1, sy1), (sx2, sy2)],
-                        ShapeStyle {
-                            color: divline.color.to_rgba(),
-                            filled: false,
-                            stroke_width: 2,
-                        },
-                    ))?;
-                }
-            } else {
-                chart.draw_series(LineSeries::new(
-                    [(x1, y1), (x2, y2)],
-                    ShapeStyle {
-                        color: divline.color.to_rgba(),
-                        filled: false,
-                        stroke_width: 2,
-                    },
-                ))?;
-            }
-        }
+        draw_result(&mut chart, result, *future, n, x, y)?;
 
         // Label
         if !result.label.is_empty() {
@@ -558,23 +361,14 @@ pub fn render_labeled(
         }
 
         // Current value annotations
-        {
-            let mut ann_y = 22; // below the panel label
-            for line in &result.lines {
-                if let Some(ref lbl) = line.label {
-                    // Value at the last bar
-                    if let Some(val) = legend_value(&line.y, line.breaks) {
-                        let text = format!("{}: {}", lbl, val);
-                        let RGBAColor(r, g, b, _) = line.color;
-                        area.draw_text(
-                            &text,
-                            &("monospace", 12).into_font().color(&RGBColor(r, g, b)),
-                            (85, ann_y),
-                        )?;
-                        ann_y += 15;
-                    }
-                }
-            }
+        let mut ann_y = 22; // below the panel label
+        for (text, color) in legend(result) {
+            area.draw_text(
+                &text,
+                &("monospace", 12).into_font().color(&color),
+                (85, ann_y),
+            )?;
+            ann_y += 15;
         }
     }
 
@@ -594,20 +388,204 @@ pub fn render_labeled(
             let label = format_bar_label(epoch, interval);
             // Centred under its bar, kept inside the image.
             let w = root.estimate_text_size(&label, &font)?.0 as f64;
-            let x = bar_x(idx as f64, x_max, price_x) - w / 2.0;
+            let x = bar_x(idx as f64, x, price_x) - w / 2.0;
             let x = x.min(width as f64 - w).max(0.0);
             root.draw_text(&label, &font, (x as i32, y_pos - 10))?;
         }
     }
 
-    root.present()?;
     Ok(())
 }
 
-/// Pixel of bar `x` (from 0) on a plot from `left` to `right` that spans `span` bars, the
-/// extension past the last bar for drawings included.
-fn bar_x(x: f64, span: f64, (left, right): (f64, f64)) -> f64 {
-    left + x / span * (right - left)
+/// Draws `r` on `chart`, cut to the bars `x` and the values `y` the pane shows. A value
+/// past them is not drawn: plotters would pin it to the edge, where it reads as a level.
+/// `future` goes on past the last of the `n` bars (ADR-0033).
+fn draw_result(
+    chart: &mut Chart,
+    r: &PanelResult,
+    future: Option<&Projection>,
+    n: usize,
+    x: (f64, f64),
+    y: (f64, f64),
+) -> Drawn {
+    let path = |chart: &mut Chart, run: &[Pt], style: ShapeStyle| -> Drawn {
+        for piece in clip_run(run, x, y) {
+            chart.draw_series(std::iter::once(PathElement::new(piece, style)))?;
+        }
+        Ok(())
+    };
+    let rect = |chart: &mut Chart, (x0, x1): (f64, f64), a: f64, b: f64, c: RGBAColor| -> Drawn {
+        let (lo, hi) = (a.min(b).max(y.0), a.max(b).min(y.1));
+        let (x0, x1) = (x0.max(x.0), x1.min(x.1));
+        if lo <= hi && x0 < x1 {
+            chart.draw_series(std::iter::once(Rectangle::new(
+                [(x0, lo), (x1, hi)],
+                c.filled(),
+            )))?;
+        }
+        Ok(())
+    };
+    let inside = |(px, py): Pt| (x.0..=x.1).contains(&px) && (y.0..=y.1).contains(&py);
+
+    // Fills (approximate with vertical bars for simplicity in plotters), and on past the
+    // last bar.
+    let projected = future
+        .into_iter()
+        .flat_map(|p| &p.fills)
+        .filter_map(|(i, y1, y2)| Some((r.fills.get(*i)?, n, y1, y2)));
+    for (fill, from, y1, y2) in r
+        .fills
+        .iter()
+        .map(|f| (f, 0, &f.y1, &f.y2))
+        .chain(projected)
+    {
+        for (i, (a, b)) in y1.iter().zip(y2).enumerate() {
+            if a.is_nan() || b.is_nan() {
+                continue;
+            }
+            let at = (from + i) as f64;
+            rect(chart, (at - 0.4, at + 0.4), *a, *b, fill.color_for(*a, *b))?;
+        }
+    }
+
+    // HBars (VPVR horizontal histogram) and the levels with them: over a range profile's
+    // bars (`span`), its edges marked, or over the whole pane.
+    let (s0, s1) = r.span.map_or(x, |(a, b)| (a as f64 - 0.5, b as f64 + 0.5));
+    for hbar in &r.hbars {
+        let (w, off) = ((s1 - s0) * hbar.width, (s1 - s0) * hbar.offset);
+        let edges = if hbar.left {
+            (s0 + off, s0 + off + w)
+        } else {
+            (s1 - off - w, s1 - off)
+        };
+        let half = hbar.height / 2.0;
+        rect(chart, edges, hbar.y - half, hbar.y + half, hbar.color)?;
+    }
+    if let Some((_, last)) = r.span {
+        let edge = TEXT.mix(0.6).stroke_width(1);
+        for at in [s0].into_iter().chain((last + 1 < n).then_some(s1)) {
+            for (a, b) in dashes((at, y.0), (at, y.1)) {
+                path(chart, &[a, b], edge)?;
+            }
+        }
+    }
+    for h in &r.hlines {
+        path(chart, &[(s0, h.y), (s1, h.y)], h.color.stroke_width(1))?;
+    }
+
+    // Bars (histogram)
+    for bars in &r.bars {
+        for (i, (v, c)) in bars.y.iter().zip(&bars.colors).enumerate() {
+            if !v.is_nan() {
+                let at = i as f64;
+                rect(
+                    chart,
+                    (at - 0.35, at + 0.35),
+                    bars.bottom,
+                    bars.bottom + v,
+                    *c,
+                )?;
+            }
+        }
+    }
+
+    // Lines, broken where a value is NaN (as on the web chart and with
+    // Pine's plot.style_linebr), so a gap draws no connector.
+    for line in &r.lines {
+        let draw_width = if line.width <= 1 { 2 } else { line.width };
+        for run in level_runs(line_runs(&line.y), r.level_lines) {
+            path(chart, &run, line.color.stroke_width(draw_width))?;
+        }
+    }
+    // On past the last bar, from its value there.
+    for (i, values) in future.iter().flat_map(|p| &p.lines) {
+        let Some(line) = r.lines.get(*i) else {
+            continue;
+        };
+        let joined: Vec<f64> = line.y.last().into_iter().chain(values).copied().collect();
+        for run in line_runs(&joined) {
+            let run: Vec<Pt> = run.iter().map(|(k, v)| (k + (n - 1) as f64, *v)).collect();
+            let draw_width = if line.width <= 1 { 2 } else { line.width };
+            path(chart, &run, line.color.stroke_width(draw_width))?;
+        }
+    }
+
+    // Dots
+    for dot in r.dots.iter().filter(|d| inside((d.x as f64, d.y))) {
+        chart.draw_series(std::iter::once(Circle::new(
+            (dot.x as f64, dot.y),
+            dot.size,
+            dot.color.filled(),
+        )))?;
+    }
+
+    // Segments (divergences, zigzag) and pattern outlines (ADR-0046), which draw the same
+    // way, dashed or not.
+    let strokes = r.patterns.iter().flat_map(|p| {
+        p.strokes.iter().map(|s| {
+            let ends = ((s.x1 as f64, s.y1), (s.x2 as f64, s.y2));
+            (ends, p.bias.color(), s.dashed)
+        })
+    });
+    let segments = r
+        .divlines
+        .iter()
+        .map(|d| {
+            (
+                ((d.x1 as f64, d.y1), (d.x2 as f64, d.y2)),
+                d.color,
+                d.dashed,
+            )
+        })
+        .chain(strokes);
+    for ((a, b), color, dashed) in segments {
+        let Some((a, b)) = clip(a, b, x, y) else {
+            continue;
+        };
+        let pieces = if dashed { dashes(a, b) } else { vec![(a, b)] };
+        for (a, b) in pieces {
+            chart.draw_series(LineSeries::new([a, b], color.stroke_width(2)))?;
+        }
+    }
+
+    // Pattern labels: past the bar's high or low, in the pattern's color, moved left to
+    // end at the plot's right edge rather than run past it.
+    let right = chart.plotting_area().get_pixel_range().0.end;
+    let text = |chart: &mut Chart, s: &str, (x, y): Pt, above: bool, c: RGBAColor| -> Drawn {
+        let font = ("sans-serif", 12).into_font().color(&c);
+        let w = chart.plotting_area().estimate_text_size(s, &font)?.0 as i32;
+        let dx = (-4).min(right - chart.backend_coord(&(x, y)).0 - w);
+        let dy = if above { -16 } else { 4 };
+        chart.draw_series(std::iter::once(
+            EmptyElement::at((x, y)) + Text::new(s.to_string(), (dx, dy), font),
+        ))?;
+        Ok(())
+    };
+    for l in r.labels.iter().filter(|l| inside((l.x as f64, l.y))) {
+        let c = l.bias.color();
+        let c = if l.tentative { c.mix(0.5) } else { c };
+        text(chart, &l.text, (l.x as f64, l.y), l.above, c)?;
+    }
+    for p in &r.patterns {
+        let at = (p.label_x as f64, p.label_y);
+        if inside(at) {
+            let s = format!("{} ({})", p.name, p.status.as_str());
+            text(chart, &s, at, p.label_above, p.bias.color())?;
+        }
+    }
+    Ok(())
+}
+
+/// Bars a pane spans for `n` bars: one more each side, so the first and last candles
+/// show whole, and `future` more past the last for what is drawn there.
+fn x_span(n: usize, future: i64) -> (f64, f64) {
+    (-1.0, n as f64 + future as f64)
+}
+
+/// Pixel of bar `x` (from 0) on a plot from `left` to `right` that spans the bars `span`,
+/// the extension past the last bar included.
+fn bar_x(x: f64, (first, last): (f64, f64), (left, right): (f64, f64)) -> f64 {
+    left + (x - first) / (last - first) * (right - left)
 }
 
 /// Height of the title bar.
@@ -656,6 +634,8 @@ fn rgba(c: &str) -> RGBAColor {
 }
 
 type Px = (f64, f64);
+/// A point in a chart's own units: bar and value.
+type Pt = (f64, f64);
 type Drawn = Result<(), Box<dyn std::error::Error>>;
 
 #[derive(Clone, Copy)]
@@ -686,19 +666,20 @@ struct Label<'t> {
 }
 
 struct Canvas<'a, 'b> {
-    area: &'a DrawingArea<BitMapBackend<'b>, plotters::coord::Shift>,
-    /// Left and right pixel of the plot, and the bars they span from 0.
-    x: (f64, f64, f64),
+    area: &'a Root<'b>,
+    /// Left and right pixel of the plot.
+    x: (f64, f64),
+    /// The bars at its left and right edge.
+    bars: (f64, f64),
     /// Top and bottom pixel of the plot, and the prices at its bottom and top.
     y: (f64, f64, f64, f64),
 }
 
 impl Canvas<'_, '_> {
     fn px(&self, x: f64, price: f64) -> Px {
-        let (l, r, span) = self.x;
         let (t, b, lo, hi) = self.y;
         (
-            bar_x(x, span, (l, r)),
+            bar_x(x, self.bars, self.x),
             b - (price - lo) / (hi - lo) * (b - t),
         )
     }
@@ -707,30 +688,9 @@ impl Canvas<'_, '_> {
         (self.x.0..=self.x.1).contains(&x) && (self.y.0..=self.y.1).contains(&y)
     }
 
-    /// `a`-`b` cut to the plot (Liang-Barsky).
+    /// `a`-`b` cut to the plot.
     fn clip(&self, a: Px, b: Px) -> Option<(Px, Px)> {
-        let (dx, dy) = (b.0 - a.0, b.1 - a.1);
-        let (mut t0, mut t1) = (0.0_f64, 1.0_f64);
-        for (p, q) in [
-            (-dx, a.0 - self.x.0),
-            (dx, self.x.1 - a.0),
-            (-dy, a.1 - self.y.0),
-            (dy, self.y.1 - a.1),
-        ] {
-            if p == 0.0 {
-                if q < 0.0 {
-                    return None;
-                }
-            } else if p < 0.0 {
-                t0 = t0.max(q / p);
-            } else {
-                t1 = t1.min(q / p);
-            }
-        }
-        (t0 <= t1).then_some((
-            (a.0 + t0 * dx, a.1 + t0 * dy),
-            (a.0 + t1 * dx, a.1 + t1 * dy),
-        ))
+        clip(a, b, self.x, (self.y.0, self.y.1))
     }
 
     fn line(&self, a: Px, b: Px, pen: Pen) -> Drawn {
@@ -1233,62 +1193,200 @@ fn level_runs(runs: Vec<Vec<(f64, f64)>>, levels: bool) -> Vec<Vec<(f64, f64)>> 
         .collect()
 }
 
+/// `a`-`b` cut to the box from `x.0` to `x.1` by `y.0` to `y.1` (Liang-Barsky); None
+/// when none of it is inside. An end inside comes back as it was.
+fn clip(a: Pt, b: Pt, x: (f64, f64), y: (f64, f64)) -> Option<(Pt, Pt)> {
+    let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+    let (mut t0, mut t1) = (0.0_f64, 1.0_f64);
+    for (p, q) in [
+        (-dx, a.0 - x.0),
+        (dx, x.1 - a.0),
+        (-dy, a.1 - y.0),
+        (dy, y.1 - a.1),
+    ] {
+        if p == 0.0 {
+            if q < 0.0 {
+                return None;
+            }
+        } else if p < 0.0 {
+            t0 = t0.max(q / p);
+        } else {
+            t1 = t1.min(q / p);
+        }
+    }
+    let at = |t: f64| match t {
+        0.0 => a,
+        1.0 => b,
+        t => (a.0 + t * dx, a.1 + t * dy),
+    };
+    (t0 <= t1).then(|| (at(t0), at(t1)))
+}
+
+/// The pieces of the line through `run` inside the box `x` by `y`, each ending where the
+/// line leaves it.
+fn clip_run(run: &[Pt], x: (f64, f64), y: (f64, f64)) -> Vec<Vec<Pt>> {
+    if let [p] = run {
+        let inside = (x.0..=x.1).contains(&p.0) && (y.0..=y.1).contains(&p.1);
+        return if inside { vec![vec![*p]] } else { vec![] };
+    }
+    let mut pieces = Vec::new();
+    let mut piece: Vec<Pt> = Vec::new();
+    for w in run.windows(2) {
+        let Some((a, b)) = clip(w[0], w[1], x, y) else {
+            continue;
+        };
+        if piece.last() != Some(&a) {
+            if !piece.is_empty() {
+                pieces.push(std::mem::take(&mut piece));
+            }
+            piece.push(a);
+        }
+        piece.push(b);
+        if b != w[1] {
+            pieces.push(std::mem::take(&mut piece));
+        }
+    }
+    if !piece.is_empty() {
+        pieces.push(piece);
+    }
+    pieces
+}
+
+/// `a`-`b` dashed: 19 steps, every other one drawn, so a dash ends at each end.
+fn dashes(a: Pt, b: Pt) -> Vec<(Pt, Pt)> {
+    const STEPS: usize = 19;
+    let (dx, dy) = ((b.0 - a.0) / STEPS as f64, (b.1 - a.1) / STEPS as f64);
+    let at = |s: usize| match s {
+        0 => a,
+        STEPS => b,
+        s => (a.0 + dx * s as f64, a.1 + dy * s as f64),
+    };
+    (0..STEPS).step_by(2).map(|s| (at(s), at(s + 1))).collect()
+}
+
+/// Legend rows of a result: each labelled line with its value, or with none, its
+/// histogram's under the result's name (Funding, AO).
+fn legend(r: &PanelResult) -> Vec<(String, RGBColor)> {
+    let solid = |c: &RGBAColor| RGBColor(c.0, c.1, c.2);
+    let mut rows: Vec<_> = r
+        .lines
+        .iter()
+        .filter_map(|l| {
+            let text = format!("{}: {}", l.label.as_ref()?, legend_value(&l.y, l.breaks)?);
+            Some((text, solid(&l.color)))
+        })
+        .collect();
+    if let (true, Some(bars)) = (rows.is_empty(), r.bars.first()) {
+        if let Some(v) = legend_value(&bars.y, false) {
+            let name = if r.label.is_empty() {
+                "Histogram"
+            } else {
+                &r.label
+            };
+            let color = bars
+                .y
+                .iter()
+                .rposition(|v| !v.is_nan())
+                .and_then(|i| bars.colors.get(i))
+                .map_or(TEXT, solid);
+            rows.push((format!("{name}: {v}"), color));
+        }
+    }
+    rows
+}
+
 /// Legend text of a line: its last finite value. A line that breaks at trend
 /// flips (`breaks`) reads the last bar instead, "n/a" when it has none there
-/// (the inactive Supertrend line). None when it has no value at all.
+/// (the inactive Supertrend line). None when it has no value at all, and "—" when it
+/// has one alone: nothing of it is drawn, and its value is not warmed up.
 fn legend_value(y: &[f64], breaks: bool) -> Option<String> {
-    if y.iter().all(|v| v.is_nan()) {
+    let values = y.iter().filter(|v| !v.is_nan()).count();
+    if values == 0 {
         return None;
+    }
+    if values == 1 && !breaks {
+        return Some("—".into());
     }
     let v = if breaks {
         y.last().copied().filter(|v| !v.is_nan())
     } else {
         y.iter().rev().find(|v| !v.is_nan()).copied()
     };
-    Some(v.map_or_else(|| "n/a".into(), |v| format!("{v:.2}")))
+    Some(v.map_or_else(|| "n/a".into(), legend_number))
 }
 
-fn auto_range(r: &PanelResult) -> (f64, f64) {
-    let mut lo = f64::INFINITY;
-    let mut hi = f64::NEG_INFINITY;
-    for line in &r.lines {
-        for v in &line.y {
-            if v.is_nan() {
-                continue;
-            }
-            lo = lo.min(*v);
-            hi = hi.max(*v);
+/// Two decimals, more below 0.1 so a small value keeps three digits (funding at 0.0100).
+fn legend_number(v: f64) -> String {
+    let a = v.abs();
+    let prec = if a == 0.0 || a >= 0.1 || !a.is_finite() {
+        2
+    } else {
+        ((-a.log10()).ceil() as usize + 2).min(10)
+    };
+    format!("{v:.prec$}")
+}
+
+/// Lowest and highest value `r` draws, its projection's included; None when it draws none.
+fn extent(r: &PanelResult, future: Option<&Projection>) -> Option<(f64, f64)> {
+    let lines = r.lines.iter().flat_map(|l| &l.y).copied();
+    let fills = r
+        .fills
+        .iter()
+        .flat_map(|f| f.y1.iter().chain(&f.y2))
+        .copied();
+    let bars = r.bars.iter().flat_map(|b| {
+        let drawn = b.y.iter().filter(|v| !v.is_nan());
+        drawn.flat_map(move |v| [b.bottom, b.bottom + v])
+    });
+    let hbars = r
+        .hbars
+        .iter()
+        .flat_map(|h| [h.y - h.height / 2.0, h.y + h.height / 2.0]);
+    let segments = r.divlines.iter().flat_map(|d| [d.y1, d.y2]);
+    let dots = r.dots.iter().map(|d| d.y);
+    let projected = future.into_iter().flat_map(|p| {
+        let lines = p.lines.iter().flat_map(|(_, v)| v);
+        lines
+            .chain(p.fills.iter().flat_map(|(_, a, b)| a.iter().chain(b)))
+            .copied()
+    });
+    lines
+        .chain(fills)
+        .chain(bars)
+        .chain(hbars)
+        .chain(segments)
+        .chain(dots)
+        .chain(projected)
+        .filter(|v| v.is_finite())
+        .fold(None, |acc, v| {
+            Some(acc.map_or((v, v), |(lo, hi): (f64, f64)| (lo.min(v), hi.max(v))))
+        })
+}
+
+/// A panel's value range: its own (`y_range`, which places its reference lines), grown
+/// past a side its values reach beyond, or with none, its values with a tenth more each
+/// side. Nothing it draws is cut off.
+fn panel_range(r: &PanelResult, future: Option<&Projection>) -> (f64, f64) {
+    let Some((lo, hi)) = extent(r, future) else {
+        return r.y_range.unwrap_or((-1.0, 1.0));
+    };
+    match r.y_range {
+        Some((a, b)) => {
+            let pad = (hi.max(b) - lo.min(a)) * 0.05;
+            (
+                if lo < a { lo - pad } else { a },
+                if hi > b { hi + pad } else { b },
+            )
+        }
+        None if hi > lo => {
+            let pad = (hi - lo) * 0.1;
+            (lo - pad, hi + pad)
+        }
+        None => {
+            let pad = if lo == 0.0 { 1.0 } else { lo.abs() * 0.1 };
+            (lo - pad, hi + pad)
         }
     }
-    for bars in &r.bars {
-        for v in &bars.y {
-            if v.is_nan() {
-                continue;
-            }
-            lo = lo.min(bars.bottom.min(bars.bottom + *v));
-            hi = hi.max(bars.bottom.max(bars.bottom + *v));
-        }
-    }
-    for hbar in &r.hbars {
-        lo = lo.min(hbar.y - hbar.height / 2.0);
-        hi = hi.max(hbar.y + hbar.height / 2.0);
-    }
-    for divline in &r.divlines {
-        if !divline.y1.is_nan() {
-            lo = lo.min(divline.y1);
-            hi = hi.max(divline.y1);
-        }
-        if !divline.y2.is_nan() {
-            lo = lo.min(divline.y2);
-            hi = hi.max(divline.y2);
-        }
-    }
-    // Fallback for empty panels
-    if lo.is_infinite() || hi.is_infinite() || (hi - lo).abs() < 1e-10 {
-        return (-1.0, 1.0);
-    }
-    let margin = (hi - lo).max(1.0) * 0.1;
-    (lo - margin, hi + margin)
 }
 
 #[cfg(test)]
@@ -1298,15 +1396,20 @@ mod tests {
 
     #[test]
     fn bars_sit_on_the_price_panes_x_range() {
-        // 100 bars and 50 more for drawings past the last one, on a plot from 90 to 1390.
+        // 100 bars and 49 more for drawings past the last one, on a plot from 90 to 1390.
         let plot = (90.0, 1390.0);
-        assert_eq!(bar_x(0.0, 150.0, plot), 90.0);
-        assert_eq!(bar_x(150.0, 150.0, plot), 1390.0);
+        let span = x_span(100, 49);
+        assert_eq!(span, (-1.0, 149.0));
+        assert_eq!(bar_x(-1.0, span, plot), 90.0);
+        assert_eq!(bar_x(149.0, span, plot), 1390.0);
         assert_eq!(
-            bar_x(99.0, 150.0, plot),
-            948.0,
-            "the last bar, 99 of 150 in"
+            bar_x(99.0, span, plot),
+            90.0 + 1300.0 * 100.0 / 150.0,
+            "the last bar, 100 of 150 in"
         );
+        // The first and last bars are a bar in from the edges.
+        assert_eq!(bar_x(0.0, x_span(10, 0), plot), 90.0 + 1300.0 / 11.0);
+        assert_eq!(bar_x(9.0, x_span(10, 0), plot), 1390.0 - 1300.0 / 11.0);
     }
 
     #[test]
@@ -1366,7 +1469,10 @@ mod tests {
         assert_eq!(legend_value(&[1.0, 2.5], false).as_deref(), Some("2.50"));
         // The inactive trend line: no stale value from an earlier bar.
         assert_eq!(legend_value(&[1.0, NAN], true).as_deref(), Some("n/a"));
-        assert_eq!(legend_value(&[1.0, NAN], false).as_deref(), Some("1.00"));
+        assert_eq!(
+            legend_value(&[1.0, 2.0, NAN], false).as_deref(),
+            Some("2.00")
+        );
         assert_eq!(legend_value(&[NAN, NAN], true), None);
         assert_eq!(legend_value(&[], false), None);
     }
@@ -1385,5 +1491,297 @@ mod label_tests {
         for tf in ["1m", "7m", "45m", "8h", "36h"] {
             assert_eq!(format_bar_label(t, tf), "2026-11-04 14:30", "{tf}");
         }
+    }
+}
+
+#[cfg(test)]
+mod clip_tests {
+    use super::*;
+    use crate::indicator::{Bars, Fill, HBar, HLine, Line};
+    const NAN: f64 = f64::NAN;
+
+    fn line(y: Vec<f64>) -> Line {
+        Line {
+            y,
+            color: RGBAColor(255, 0, 255, 1.0),
+            width: 1,
+            label: Some("L".into()),
+            breaks: false,
+        }
+    }
+
+    #[test]
+    fn a_line_is_cut_where_it_leaves_the_pane_not_pinned_to_its_edge() {
+        // #128: up out of the pane and back: two pieces, each ending on the edge.
+        let run = [(0.0, 1.0), (1.0, 5.0), (2.0, 1.0)];
+        assert_eq!(
+            clip_run(&run, (-1.0, 3.0), (0.0, 3.0)),
+            vec![vec![(0.0, 1.0), (0.5, 3.0)], vec![(1.5, 3.0), (2.0, 1.0)]]
+        );
+        // Wholly past it: nothing, where plotters drew a flat line on the edge.
+        assert!(clip_run(&[(0.0, 9.0), (1.0, 9.0)], (-1.0, 3.0), (0.0, 3.0)).is_empty());
+        // Inside: as it was, every point the same.
+        let inside = [(0.0, 0.1), (1.0, 0.7), (2.0, 0.3)];
+        assert_eq!(
+            clip_run(&inside, (-1.0, 3.0), (0.0, 1.0)),
+            vec![inside.to_vec()]
+        );
+        // Before the first bar (a re-based pattern stroke): cut at the pane's left edge.
+        assert_eq!(
+            clip((-5.0, 0.0), (5.0, 10.0), (-1.0, 10.0), (0.0, 100.0)),
+            Some(((-1.0, 4.0), (5.0, 10.0)))
+        );
+    }
+
+    #[test]
+    fn dashes_reach_both_ends() {
+        let d = dashes((0.0, 0.0), (19.0, 38.0));
+        assert_eq!(d.first().unwrap().0, (0.0, 0.0));
+        assert_eq!(d.last().unwrap().1, (19.0, 38.0));
+        assert_eq!(d.len(), 10);
+    }
+
+    #[test]
+    fn a_panels_own_range_grows_to_what_it_draws() {
+        // #126: CCI at -420 on its ±250 axis: the low side grows, the ±100 lines stay.
+        let cci = PanelResult {
+            lines: vec![line(vec![-419.9, 0.0, 120.0])],
+            y_range: Some((-250.0, 250.0)),
+            ..Default::default()
+        };
+        let (lo, hi) = panel_range(&cci, None);
+        assert!(lo < -419.9 && lo > -460.0, "{lo}");
+        assert_eq!(hi, 250.0);
+        // Inside it: the range as it was.
+        let calm = PanelResult {
+            lines: vec![line(vec![-80.0, 90.0])],
+            ..cci
+        };
+        assert_eq!(panel_range(&calm, None), (-250.0, 250.0));
+    }
+
+    #[test]
+    fn small_values_fill_their_panel() {
+        // #132: funding near 0.01 %: the range is its values' and the zero line, not ±0.1.
+        let funding = PanelResult {
+            bars: vec![Bars {
+                y: vec![0.003, NAN, 0.01],
+                colors: vec![RGBAColor(0, 0, 0, 1.0); 3],
+                bottom: 0.0,
+            }],
+            ..Default::default()
+        };
+        let (lo, hi) = panel_range(&funding, None);
+        assert!(
+            (lo - -0.001).abs() < 1e-12 && (hi - 0.011).abs() < 1e-12,
+            "{lo} {hi}"
+        );
+        // A flat line keeps a range around it.
+        let flat = PanelResult {
+            lines: vec![line(vec![5000.0, 5000.0])],
+            ..Default::default()
+        };
+        let (lo, hi) = panel_range(&flat, None);
+        assert!(lo < 5000.0 && hi > 5000.0 && hi - lo < 2000.0);
+        // What is drawn past the last bar counts too.
+        let future = Projection {
+            bars: 1,
+            lines: vec![(0, vec![9000.0])],
+            fills: vec![],
+        };
+        assert!(panel_range(&flat, Some(&future)).1 > 9000.0);
+    }
+
+    #[test]
+    fn a_histogram_alone_has_a_legend_value() {
+        // #132: Funding shows its last value, small ones with three digits.
+        let funding = PanelResult {
+            label: "Funding".into(),
+            bars: vec![Bars {
+                y: vec![0.0057, 0.01, NAN],
+                colors: vec![RGBAColor(38, 166, 154, 0.7); 3],
+                bottom: 0.0,
+            }],
+            ..Default::default()
+        };
+        assert_eq!(
+            legend(&funding),
+            vec![("Funding: 0.0100".to_string(), RGBColor(38, 166, 154))]
+        );
+        // With a labelled line, the line's value alone, as before.
+        let macd = PanelResult {
+            lines: vec![line(vec![1.0, 2.0])],
+            ..funding
+        };
+        assert_eq!(legend(&macd)[0].0, "L: 2.00");
+        assert_eq!(legend_number(0.0057), "0.00570");
+        assert_eq!(legend_number(-0.5), "-0.50");
+        assert_eq!(legend_number(80395.55), "80395.55");
+    }
+
+    #[test]
+    fn a_line_not_warmed_up_has_no_legend_number() {
+        // #131: EMA 200 over 200 bars has one value, which draws nothing.
+        let mut y = vec![NAN; 199];
+        y.push(80395.55);
+        assert_eq!(legend_value(&y, false).as_deref(), Some("—"));
+    }
+
+    /// The pixels painted pure magenta when `r` is drawn on a 520 x 200 plot of bars -1 to 51
+    /// (10 pixels a bar) by values 0 to 100.
+    fn painted(r: &PanelResult, future: Option<&Projection>) -> Vec<(u32, u32)> {
+        painted_where(r, future, |p| p == [255, 0, 255])
+    }
+
+    fn painted_where(
+        r: &PanelResult,
+        future: Option<&Projection>,
+        hit: impl Fn(&[u8]) -> bool,
+    ) -> Vec<(u32, u32)> {
+        const W: u32 = 520;
+        let mut buf = vec![0u8; (W * 200 * 3) as usize];
+        {
+            let root = BitMapBackend::with_buffer(&mut buf, (W, 200)).into_drawing_area();
+            let mut chart = ChartBuilder::on(&root)
+                .build_cartesian_2d(-1.0..51.0, 0.0..100.0)
+                .unwrap();
+            draw_result(&mut chart, r, future, 50, (-1.0, 51.0), (0.0, 100.0)).unwrap();
+            root.present().unwrap();
+        }
+        (0..W * 200)
+            .filter(|i| hit(&buf[(*i * 3) as usize..][..3]))
+            .map(|i| (i % W, i / W))
+            .collect()
+    }
+
+    #[test]
+    fn values_past_the_pane_draw_nothing() {
+        // #128: a pivot level above the price range draws nothing, not a line on the edge.
+        let above = PanelResult {
+            lines: vec![line(vec![500.0; 50])],
+            hlines: vec![HLine {
+                y: -20.0,
+                color: RGBAColor(255, 0, 255, 1.0),
+            }],
+            ..Default::default()
+        };
+        assert!(painted(&above, None).is_empty());
+        // A line that leaves the pane at bar 25 stops there.
+        let mut y = vec![50.0; 25];
+        y.extend([500.0; 25]);
+        let leaving = painted(
+            &PanelResult {
+                lines: vec![line(y)],
+                ..Default::default()
+            },
+            None,
+        );
+        assert!(!leaving.is_empty());
+        assert!(leaving.iter().all(|(x, _)| *x <= 262), "{leaving:?}");
+    }
+
+    #[test]
+    fn a_label_at_the_last_bar_moves_left_to_stay_inside() {
+        // auto_fib's "Fib swing (forming)" on the last bar (pixel 510) ran off the image.
+        let label = crate::indicator::BarLabel {
+            x: 49,
+            y: 50.0,
+            above: false,
+            text: "Fib swing (forming)".into(),
+            key: String::new(),
+            name: String::new(),
+            bias: crate::indicator::Bias::Bullish,
+            tooltip: String::new(),
+            tentative: false,
+        };
+        let r = PanelResult {
+            labels: vec![label],
+            ..Default::default()
+        };
+        // The label's blue, smoothed at its edges.
+        let px = painted_where(&r, None, |p| p[2] > 120 && p[2] > p[0] + 60);
+        let first = px.iter().map(|p| p.0).min();
+        assert!(
+            first < Some(470),
+            "the text starts well left of its bar: {first:?}"
+        );
+    }
+
+    #[test]
+    fn a_range_profile_sits_over_its_bars() {
+        // #129: bars 10 to 20 of 50: the histogram and its levels span them alone.
+        let magenta = RGBAColor(255, 0, 255, 1.0);
+        let frvp = PanelResult {
+            hbars: vec![HBar {
+                y: 50.0,
+                height: 10.0,
+                width: 1.0,
+                offset: 0.0,
+                color: magenta,
+                left: true,
+            }],
+            hlines: vec![HLine {
+                y: 80.0,
+                color: magenta,
+            }],
+            span: Some((10, 20)),
+            ..Default::default()
+        };
+        let px = painted(&frvp, None);
+        assert!(!px.is_empty());
+        // Bars 9.5 and 20.5 lie at pixels 105 and 215.
+        assert!(px.iter().all(|(x, _)| (104..=216).contains(x)), "{px:?}");
+    }
+
+    #[test]
+    fn a_projection_is_drawn_past_the_last_bar() {
+        // #127: the cloud past bar 49, nothing before it.
+        let cloud = PanelResult {
+            fills: vec![Fill {
+                y1: vec![NAN; 50],
+                y2: vec![NAN; 50],
+                color: RGBAColor(255, 0, 255, 1.0),
+                color_below: None,
+            }],
+            ..Default::default()
+        };
+        let future = Projection {
+            bars: 5,
+            lines: vec![],
+            fills: vec![(0, vec![40.0; 5], vec![60.0; 5])],
+        };
+        assert!(painted(&cloud, None).is_empty());
+        let px = painted(&cloud, Some(&future));
+        assert!(!px.is_empty());
+        // Bar 49.6, the first projected rect's left edge, lies at pixel 506.
+        assert!(px.iter().all(|(x, _)| *x >= 505), "{px:?}");
+    }
+
+    #[test]
+    fn the_last_price_and_the_first_candle_show_whole() {
+        // #133: on an 800 x 400 image, the tag ends inside the image and no candle reaches
+        // the plot's left edge (pixel 90).
+        let (w, h) = (800, 400);
+        let data = crate::data::sample_data(40);
+        let mut buf = vec![0u8; (w * h * 3) as usize];
+        {
+            let root = BitMapBackend::with_buffer(&mut buf, (w, h)).into_drawing_area();
+            draw_chart(&root, &data, &[], None, &[]).unwrap();
+            root.present().unwrap();
+        }
+        let candle = |i: usize| {
+            let p = &buf[i * 3..][..3];
+            p == [BULL.0, BULL.1, BULL.2] || p == [BEAR.0, BEAR.1, BEAR.2]
+        };
+        let cols: Vec<u32> = (0..(w * h) as usize)
+            .filter(|i| candle(*i))
+            .map(|i| i as u32 % w)
+            .collect();
+        assert!(
+            cols.iter().all(|x| *x > 90 && *x < w - 2),
+            "{:?}",
+            (cols.iter().min(), cols.iter().max())
+        );
+        assert!(cols.iter().any(|x| *x > w - 40), "the tag is in the gutter");
     }
 }

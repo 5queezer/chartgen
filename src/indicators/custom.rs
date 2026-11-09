@@ -2149,7 +2149,19 @@ impl RangeVolumeProfile {
             .profile
             .compute(&bars_between(data, self.from, self.to));
         out.label = self.short_name().into();
+        out.span = self.span_of(data);
         out
+    }
+
+    /// The first and last of `chart`'s bars inside the range.
+    fn span_of(&self, chart: &OhlcvData) -> Option<(usize, usize)> {
+        let inside = |b: &crate::data::Bar| {
+            let t = b.date.parse::<i64>().unwrap_or(0);
+            self.from.is_none_or(|f| t >= f) && self.to.is_none_or(|e| t < e)
+        };
+        let first = chart.bars.iter().position(inside)?;
+        let last = chart.bars.iter().rposition(inside)?;
+        Some((first, last))
     }
 }
 
@@ -2162,8 +2174,10 @@ impl Indicator for RangeVolumeProfile {
         true
     }
 
-    fn with_intrabars(&self, _chart: &OhlcvData, intrabars: &OhlcvData) -> Option<PanelResult> {
-        Some(self.range_of(intrabars))
+    fn with_intrabars(&self, chart: &OhlcvData, intrabars: &OhlcvData) -> Option<PanelResult> {
+        let mut out = self.range_of(intrabars);
+        out.span = self.span_of(chart);
+        Some(out)
     }
 
     fn name(&self) -> &str {
