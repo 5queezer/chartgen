@@ -1630,6 +1630,14 @@ mod clip_tests {
     /// The pixels painted pure magenta when `r` is drawn on a 520 x 200 plot of bars -1 to 51
     /// (10 pixels a bar) by values 0 to 100.
     fn painted(r: &PanelResult, future: Option<&Projection>) -> Vec<(u32, u32)> {
+        painted_where(r, future, |p| p == [255, 0, 255])
+    }
+
+    fn painted_where(
+        r: &PanelResult,
+        future: Option<&Projection>,
+        hit: impl Fn(&[u8]) -> bool,
+    ) -> Vec<(u32, u32)> {
         const W: u32 = 520;
         let mut buf = vec![0u8; (W * 200 * 3) as usize];
         {
@@ -1641,7 +1649,7 @@ mod clip_tests {
             root.present().unwrap();
         }
         (0..W * 200)
-            .filter(|i| buf[(*i * 3) as usize..][..3] == [255, 0, 255])
+            .filter(|i| hit(&buf[(*i * 3) as usize..][..3]))
             .map(|i| (i % W, i / W))
             .collect()
     }
@@ -1670,6 +1678,33 @@ mod clip_tests {
         );
         assert!(!leaving.is_empty());
         assert!(leaving.iter().all(|(x, _)| *x <= 262), "{leaving:?}");
+    }
+
+    #[test]
+    fn a_label_at_the_last_bar_moves_left_to_stay_inside() {
+        // auto_fib's "Fib swing (forming)" on the last bar (pixel 510) ran off the image.
+        let label = crate::indicator::BarLabel {
+            x: 49,
+            y: 50.0,
+            above: false,
+            text: "Fib swing (forming)".into(),
+            key: String::new(),
+            name: String::new(),
+            bias: crate::indicator::Bias::Bullish,
+            tooltip: String::new(),
+            tentative: false,
+        };
+        let r = PanelResult {
+            labels: vec![label],
+            ..Default::default()
+        };
+        // The label's blue, smoothed at its edges.
+        let px = painted_where(&r, None, |p| p[2] > 120 && p[2] > p[0] + 60);
+        let first = px.iter().map(|p| p.0).min();
+        assert!(
+            first < Some(470),
+            "the text starts well left of its bar: {first:?}"
+        );
     }
 
     #[test]
