@@ -14,11 +14,13 @@ use serde_json::{json, Value};
 /// `inputSchema` (JSON Schema). TypeScript input types are generated from
 /// these via `scripts/gen-mcp-types/`.
 pub fn tools_list_result() -> Value {
+    // The count comes from the registry so the descriptions never go stale.
+    let n = crate::indicators::registry().len();
     json!({
         "tools": [
             {
                 "name": "generate_chart",
-                "description": "Generate a financial candlestick or OHLCV chart for a given stock or crypto ticker symbol. Supports any timeframe of a number and a unit (1m, 7m, 45m, 90m, 4h, 8h, 1d, 2D, 2W, 1M, ...) and 33 technical indicators including RSI, MACD, EMA, Bollinger Bands, Ichimoku Cloud, Stochastic, ATR, OBV, VWAP, Supertrend, and more. Returns a rendered PNG chart with price action and indicator panels by default. Set format='summary' to instead receive a compact JSON summary (OHLCV stats, last indicator values, signals, divergences, levels) — much cheaper in tokens and ideal for automated reasoning without vision. Set format='series' to receive a full per-bar time-series JSON payload (every OHLCV bar plus 1:1 aligned indicator value arrays, signals with bar timestamps, hlines, y_range) — useful for downstream numeric computation that needs raw arrays rather than last values. Use when the user asks to plot, chart, visualize, render, or analyze price action, candlesticks, or technical signals. Data sourced from Yahoo Finance (stocks like AAPL, MSFT, TSLA) and Binance (crypto like BTCUSDT, ETHUSDT). Call list_indicators first to discover all available indicator names and their configurable parameters. To annotate the chart (trend lines, zones, fib levels, text, long/short positions), pass `drawings`: call inspect_chart first to anchor points to real bars, and see the draw-on-chart prompt.",
+                "description": format!("Generate a financial candlestick or OHLCV chart for a given stock or crypto ticker symbol. Supports any timeframe of a number and a unit (1m, 7m, 45m, 90m, 4h, 8h, 1d, 2D, 2W, 1M, ...) and {n} technical indicators including RSI, MACD, EMA, Bollinger Bands, Ichimoku Cloud, Stochastic, ATR, OBV, VWAP, Supertrend, and more. Returns a rendered PNG chart with price action and indicator panels by default. Set format='summary' to instead receive a compact JSON summary (OHLCV stats, last indicator values, signals, divergences, levels) — much cheaper in tokens and ideal for automated reasoning without vision. Set format='series' to receive a full per-bar time-series JSON payload (every OHLCV bar plus 1:1 aligned indicator value arrays, signals with bar timestamps, hlines, y_range) — useful for downstream numeric computation that needs raw arrays rather than last values. Use when the user asks to plot, chart, visualize, render, or analyze price action, candlesticks, or technical signals. Data sourced from Yahoo Finance (stocks like AAPL, MSFT, TSLA) and Binance (crypto like BTCUSDT, ETHUSDT). Call list_indicators first to discover all available indicator names and their configurable parameters. To annotate the chart (trend lines, zones, fib levels, text, long/short positions), pass `drawings`: call inspect_chart first to anchor points to real bars, and see the draw-on-chart prompt."),
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -55,7 +57,7 @@ pub fn tools_list_result() -> Value {
                                     }
                                 ]
                             },
-                            "description": "Technical indicators to render on the chart. Each element is a name string (e.g. 'rsi') or an object with 'name' and optional parameters (e.g. {\"name\": \"rsi\", \"length\": 21}). Results are keyed by name; give an object an 'id' to key it by that instead. The same indicator may appear several times (e.g. RSI 14 and RSI 21): a repeat without an id is keyed name#2, name#3, and so on; an id must not equal the name of an entry without one. At most 50 entries. Overlays draw on the price chart, panels draw below. Call list_indicators for the full list of 33 available indicators.",
+                            "description": format!("Technical indicators to render on the chart. Each element is a name string (e.g. 'rsi') or an object with 'name' and optional parameters (e.g. {{\"name\": \"rsi\", \"length\": 21}}). Results are keyed by name; give an object an 'id' to key it by that instead. The same indicator may appear several times (e.g. RSI 14 and RSI 21): a repeat without an id is keyed name#2, name#3, and so on; an id must not equal the name of an entry without one. At most 50 entries. Overlays draw on the price chart, panels draw below. Call list_indicators for the full list of {n} available indicators."),
                             "default": ["ema_stack", "cipher_b", "macd"]
                         },
                         "panels": {
@@ -145,7 +147,7 @@ pub fn tools_list_result() -> Value {
             },
             {
                 "name": "list_indicators",
-                "description": "List all available technical analysis indicators supported by the chart generation tool. Returns 33 indicators organized by category: momentum indicators (RSI, MACD, Stochastic, CCI, Williams %R, ROC), trend indicators (EMA stack, Supertrend, ADX, Ichimoku Cloud, Parabolic SAR), volatility indicators (Bollinger Bands, ATR, Keltner Channels, Donchian Channels, Historical Volatility), volume indicators (OBV, MFI, CMF, VWAP, CVD, A/D Line), and crypto-specific indicators (Funding Rate, Open Interest, Long/Short Ratio, Fear & Greed Index). Each indicator includes a description, configurable parameters with defaults, and whether it renders as an overlay on the price chart or as a separate panel. Call this before generate_chart to discover valid indicator names and their configuration options.",
+                "description": format!("List all available technical analysis indicators supported by the chart generation tool. Returns {n} indicators organized by category: momentum indicators (RSI, MACD, Stochastic, CCI, Williams %R, ROC), trend indicators (EMA stack, Supertrend, ADX, Ichimoku Cloud, Parabolic SAR), volatility indicators (Bollinger Bands, ATR, Keltner Channels, Donchian Channels, Historical Volatility), volume indicators (OBV, MFI, CMF, VWAP, CVD, A/D Line), and crypto-specific indicators (Funding Rate, Open Interest, Long/Short Ratio, Fear & Greed Index). Each indicator includes a description, configurable parameters with defaults, and whether it renders as an overlay on the price chart or as a separate panel. Call this before generate_chart to discover valid indicator names and their configuration options."),
                 "inputSchema": {
                     "type": "object",
                     "properties": {}
@@ -761,3 +763,32 @@ Example 3, a fib retracement from a swing high down to a swing low. fibonacciLin
 {"tool": "fibonacciLine", "points": [{"time": "2026-10-09T12:00:00Z", "snap": "high"}, {"time": "2026-10-14T08:00:00Z", "snap": "low"}]}
 
 Positions: cgLong and cgShort take entry, target and stop; the target and stop share one time, the box's right edge, and must be on the profit and loss side of the entry."##;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn descriptions_name_the_registry_count() {
+        let n = crate::indicators::registry().len();
+        let tools = tools_list_result();
+        let desc = |name: &str| {
+            tools["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|t| t["name"] == name)
+                .unwrap()["description"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        };
+        assert!(desc("generate_chart").contains(&format!("{n} technical indicators")));
+        assert!(desc("list_indicators").contains(&format!("Returns {n} indicators")));
+        let param = tools["tools"][0]["inputSchema"]["properties"]["indicators"]["description"]
+            .as_str()
+            .unwrap();
+        assert!(param.contains(&format!("{n} available indicators")));
+        assert!(param.contains("{\"name\": \"rsi\", \"length\": 21}"));
+    }
+}
