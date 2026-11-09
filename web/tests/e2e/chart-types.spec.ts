@@ -21,12 +21,17 @@ interface Probe {
 // Dark theme defaults: palette bull/bear and the line color.
 const rgb = (hex: number) => ({ r: hex >> 16, g: (hex >> 8) & 255, b: hex & 255 });
 const LINE: Probe = { ...rgb(0x2196f3), a: [250, 255] };
+// The whole 2px line, its anti-aliased edges too: the opaque core alone shrinks
+// as the line gets steeper, which moves with the sample data's clock.
+const LINE_EDGES: Probe = { ...rgb(0x2196f3), a: [100, 255] };
 const BULL: Probe = { ...rgb(0x26a69a), a: [250, 255] };
 const COLUMN_UP: Probe = { ...rgb(0x26a69a), a: [120, 135] };
 const COLUMN_DOWN: Probe = { ...rgb(0xef5350), a: [120, 135] };
-// Baseline fills: a 0.28 -> 0.05 gradient towards the base level.
-const FILL_UP: Probe = { ...rgb(0x26a69a), a: [25, 75] };
-const FILL_DOWN: Probe = { ...rgb(0xef5350), a: [25, 75] };
+// Baseline fills: a 0.28 -> 0.05 gradient towards the base level (alpha 13-71).
+// The probes take the whole gradient: a narrower band sees only the part far
+// from the base, whose size moves with the sample data's clock.
+const FILL_UP: Probe = { ...rgb(0x26a69a), a: [5, 80] };
+const FILL_DOWN: Probe = { ...rgb(0xef5350), a: [5, 80] };
 
 interface Case {
   label: string;
@@ -38,10 +43,13 @@ interface Case {
 const CASES: Case[] = [
   { label: "Line with markers", probes: [LINE], min: 1500 },
   { label: "Step line", probes: [LINE], min: 1500 },
-  { label: "Baseline", probes: [FILL_UP, FILL_DOWN], min: 1500 },
+  // Over 168 sample clocks a drawn side gains at least ~8500 px; a side whose
+  // fill is missing gains at most ~600 (the edges of its line).
+  { label: "Baseline", probes: [FILL_UP, FILL_DOWN], min: 3000 },
   { label: "Columns", probes: [COLUMN_UP, COLUMN_DOWN], min: 3000 },
   { label: "High-low", probes: [LINE], min: 3000 },
-  { label: "HLC area", probes: [LINE], min: 1000 },
+  // Over 168 sample clocks the close line gains at least ~1800 px; without it, ~20.
+  { label: "HLC area", probes: [LINE_EDGES], min: 1000 },
 ];
 
 /** Pixels per probe on the price pane's canvases (below the first legend row). */

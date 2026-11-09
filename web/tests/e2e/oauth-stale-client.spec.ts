@@ -106,7 +106,10 @@ test.describe("stale OAuth client", () => {
 
     const port = await freePort();
     origin = `http://localhost:${port}`;
-    server = spawn("cargo", ["run", "--", "--serve", "--port", String(port)], {
+    // CI hands every shard a prebuilt binary and no Rust toolchain (ADR-0057).
+    const bin = process.env.CHARTGEN_BIN;
+    const command = bin ? [bin] : ["cargo", "run", "--"];
+    server = spawn(command[0]!, [...command.slice(1), "--serve", "--port", String(port)], {
       cwd: resolve(webRoot, ".."),
       env: {
         ...process.env,
