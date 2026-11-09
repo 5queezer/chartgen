@@ -220,6 +220,9 @@ pub struct PanelResult {
     /// Its lines hold levels: a change of value is a jump between two of them, not a
     /// slope, so nothing is drawn across it.
     pub level_lines: bool,
+    /// The bars a range profile was read from, first and last: the image draws its
+    /// `hbars` and `hlines` over them alone. None: the whole chart.
+    pub span: Option<(usize, usize)>,
 }
 
 /// Values an indicator plots past the last bar (ADR-0033), e.g. the

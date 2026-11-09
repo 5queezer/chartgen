@@ -7,6 +7,7 @@ sidebar:
 
 **Status:** Accepted
 **Date:** 2026-11-04
+**Amended by:** [ADR-0056](/chartgen/decisions/0056-png-and-summary-warm-up/) (png, summary and both read their indicators' warmup)
 
 ## Context and Problem Statement
 

@@ -83,4 +83,5 @@ one and link both ways.
 | [0053](/chartgen/decisions/0053-hidden-indicators-stay-in-the-status-line/) | A hidden indicator stays in the status line | Accepted | 2026-11-08 |
 | [0054](/chartgen/decisions/0054-agent-drawings/) | An agent draws with the web app's tools | Accepted | 2026-11-08 |
 | [0055](/chartgen/decisions/0055-provisional-swing-ends/) | Provisional swing ends in zigzag and auto fib | Accepted | 2026-11-09 |
+| [0056](/chartgen/decisions/0056-png-and-summary-warm-up/) | A png or summary reads its indicators' warmup | Accepted | 2026-11-09 |
 | [0057](/chartgen/decisions/0057-e2e-shards/) | The e2e suite runs in duration-balanced CI shards | Accepted | 2026-11-09 |
