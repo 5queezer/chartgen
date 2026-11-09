@@ -1308,7 +1308,7 @@ impl Indicator for KalmanVolume {
     }
 
     fn description(&self) -> &str {
-        "Kalman Volume Filter — smoothed volume zone oscillator"
+        "Kalman Volume Filter — smoothed volume zone oscillator. Its z-score reads a 200-bar stdev of a 70-bar HMA, so at the defaults the first value comes 285 bars in: a png or summary of fewer bars has none; in format=series a non-zero warmup fetches the history"
     }
 
     fn params(&self) -> Value {
@@ -2959,6 +2959,24 @@ mod tests {
         }
         eq(&ind.compute(&d).lines[0].y, &[NAN, NAN, 0.0, weekly]);
         assert_eq!(HistVol::default().period, 10);
+    }
+
+    #[test]
+    fn kalman_volume_declares_the_history_its_first_value_needs() {
+        // #125: at its defaults the first value is on bar 284 (HMA 70, then a
+        // 200-bar stdev of it, then the 10-bar signal), so 200 bars alone have
+        // none. warmup_bars, which a non-zero series warmup is raised to,
+        // covers it.
+        let kv = KalmanVolume::default();
+        let r = kv.compute(&sample_data(600));
+        for line in &r.lines {
+            let first = line.y.iter().position(|y| y.is_finite());
+            assert_eq!(first, Some(284));
+            assert!(line.y[284..].iter().all(|y| y.is_finite()));
+        }
+        assert!(kv.warmup_bars() >= 284);
+        let short = kv.compute(&sample_data(200));
+        assert!(short.lines.iter().all(|l| l.y.iter().all(|y| y.is_nan())));
     }
 
     #[test]

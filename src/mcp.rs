@@ -4180,6 +4180,33 @@ mod tests {
     }
 
     #[test]
+    fn kalman_volume_has_values_on_every_bar_with_a_warmup() {
+        // #125: 200 bars alone are too few for its first value; any non-zero
+        // warmup is raised to what it declares, so all 200 bars have one.
+        let set = |warmup: u64| -> Vec<usize> {
+            let s = flow_series(json!({ "ticker": "BTCUSDT", "timeframe": "4h", "bars": 200,
+                "warmup": warmup, "format": "series", "indicators": ["kalman_volume"] }));
+            let lines = s["indicators"]["kalman_volume"]["lines"]
+                .as_array()
+                .unwrap()
+                .clone();
+            lines
+                .iter()
+                .map(|l| {
+                    l["values"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .filter(|v| v.is_number())
+                        .count()
+                })
+                .collect()
+        };
+        assert_eq!(set(0), [0, 0]);
+        assert_eq!(set(1), [200, 200]);
+    }
+
+    #[test]
     fn a_footprint_is_one_item_per_bar_with_its_rows_adding_up_to_its_totals() {
         // Not to the chart bar's volume: sample intrabars are cut from it, so that would
         // hold by construction here, and a real source's minutes need not sum to its hour.

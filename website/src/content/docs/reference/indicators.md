@@ -770,7 +770,7 @@ Historical Volatility — annualized log-return std dev
 
 ### `kalman_volume`
 
-Kalman Volume Filter — smoothed volume zone oscillator
+Kalman Volume Filter — smoothed volume zone oscillator. Its z-score reads a 200-bar stdev of a 70-bar HMA, so at the defaults the first value comes 285 bars in: a png or summary of fewer bars has none; in format=series a non-zero warmup fetches the history
 
 **Aliases:** `kalman`, `kvf`
 
