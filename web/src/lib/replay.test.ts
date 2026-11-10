@@ -702,3 +702,11 @@ describe("pattern channels (ADR-0046)", () => {
     expect(frameShape(s)).toBe("chart_patterns");
   });
 });
+
+it("replay cuts future session boundaries without mutating the live metadata", () => {
+  const s = series(8);
+  s.indicators.rsi!.line_breaks = [0, 3, 6];
+  const frame = sliceSeries(s, 4);
+  expect(frame.indicators.rsi!.line_breaks).toEqual([0, 3]);
+  expect(s.indicators.rsi!.line_breaks).toEqual([0, 3, 6]);
+});

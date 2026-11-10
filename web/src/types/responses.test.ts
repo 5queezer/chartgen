@@ -95,3 +95,13 @@ describe("list_indicators source tag", () => {
     expect(p.indicators.map((i) => i.source)).toEqual([undefined, "user"]);
   });
 });
+
+it("accepts additive drawing metadata while preserving older series payloads", () => {
+  const ind = {label: "SAR", is_overlay: true, point_lines: true, steps: true,
+    line_breaks: [0, 2], hlines: [{ y: 12, label: "POC" }],
+    lines: [{ index: 0, label: "SAR Up", values: [1, null, 3] }],
+  };
+  const p = SeriesPayloadSchema.parse({...series, indicators: { sar: ind }});
+  expect(p.indicators.sar).toEqual(ind);
+  expect(SeriesPayloadSchema.parse(series).indicators.rsi?.steps).toBeUndefined();
+});
