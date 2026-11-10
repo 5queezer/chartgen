@@ -1819,6 +1819,7 @@ fn trim_to_shown(
         let profile = ind.compute(visible);
         trimmed.hbars = profile.hbars;
         trimmed.hlines = profile.hlines;
+        trimmed.hline_labels = profile.hline_labels;
         trimmed.span = profile.span;
     }
     trimmed
@@ -1840,6 +1841,11 @@ fn trim_panel_result(
         v.get(offset..).unwrap_or(&[]).to_vec()
     }
     let mut out = pr.clone();
+    out.line_breaks = pr
+        .line_breaks
+        .iter()
+        .filter_map(|x| x.checked_sub(offset))
+        .collect();
     for line in &mut out.lines {
         line.y = tail(&line.y, offset);
     }
@@ -1934,6 +1940,14 @@ fn panel_result_to_series_json(
     if pr.level_lines {
         out["level_lines"] = json!(true);
     }
+    if pr.steps {
+        out["steps"] = json!(true);
+    }
+    if pr.point_lines {
+        out["point_lines"] = json!(true);
+    }
+    // Include an empty list too: tail updates can remove a prior boundary.
+    out["line_breaks"] = json!(pr.line_breaks);
 
     if let Some((lo, hi)) = pr.y_range {
         out["y_range"] = json!([finite_or_null(lo), finite_or_null(hi)]);
@@ -2029,7 +2043,14 @@ fn panel_result_to_series_json(
         let hlines: Vec<Value> = pr
             .hlines
             .iter()
-            .map(|h| json!({ "y": h.y, "color": css_rgba(&h.color) }))
+            .enumerate()
+            .map(|(i, h)| {
+                let mut j = json!({ "y": h.y, "color": css_rgba(&h.color) });
+                if let Some(Some(label)) = pr.hline_labels.get(i) {
+                    j["label"] = json!(label);
+                }
+                j
+            })
             .collect();
         out["hlines"] = json!(hlines);
     }
@@ -2297,7 +2318,18 @@ fn panel_result_to_json(pr: &chartgen::indicator::PanelResult) -> Value {
 
     // Hlines: horizontal reference levels
     if !pr.hlines.is_empty() {
-        let hlines: Vec<Value> = pr.hlines.iter().map(|h| json!({ "y": h.y })).collect();
+        let hlines: Vec<Value> = pr
+            .hlines
+            .iter()
+            .enumerate()
+            .map(|(i, h)| {
+                let mut j = json!({ "y": h.y });
+                if let Some(Some(label)) = pr.hline_labels.get(i) {
+                    j["label"] = json!(label);
+                }
+                j
+            })
+            .collect();
         out["hlines"] = json!(hlines);
     }
 
@@ -5609,6 +5641,51 @@ mod tests {
     }
 
     #[test]
+    fn presentation_metadata_preserves_wire_values_and_trims_boundaries() {
+        use chartgen::indicator::{rgba, HLine, Line, PanelResult};
+        let data = chartgen::data::sample_data(4);
+        let pr = PanelResult {
+            lines: vec![Line {
+                breaks: false,
+                y: vec![10.0, 11.0, 30.0, 31.0],
+                color: rgba(0xFFFFFF, 1.0),
+                width: 2,
+                label: Some("VWAP".into()),
+            }],
+            line_breaks: vec![0, 2, 3],
+            steps: true,
+            point_lines: true,
+            hlines: vec![HLine {
+                y: 12.0,
+                color: rgba(0xFFFFFF, 1.0),
+            }],
+            hline_labels: vec![Some("POC".into())],
+            ..Default::default()
+        };
+        let j = panel_result_to_series_json(&pr, &data);
+        assert_eq!(j["steps"], true);
+        assert_eq!(j["point_lines"], true);
+        assert_eq!(j["line_breaks"], json!([0, 2, 3]));
+        assert_eq!(j["lines"][0]["values"], json!([10.0, 11.0, 30.0, 31.0]));
+        assert_eq!(j["hlines"][0]["label"], "POC");
+        let trimmed = trim_panel_result(&pr, 2);
+        assert_eq!(trimmed.line_breaks, [0, 1]);
+        assert_eq!(trimmed.lines[0].y, [30.0, 31.0]);
+        assert_eq!(trimmed.hline_labels, pr.hline_labels);
+        assert!(trim_panel_result(&pr, 10).line_breaks.is_empty());
+        assert_eq!(
+            panel_result_to_series_json(&PanelResult::default(), &data)["line_breaks"],
+            json!([])
+        );
+        let ao = indicators::by_name("awesome_oscillator")
+            .unwrap()
+            .compute(&chartgen::data::sample_data(100));
+        let wire = panel_result_to_series_json(&ao, &data);
+        assert_eq!(wire["histogram"][0]["label"], "AO");
+        assert!(wire["histogram"][0]["values"][99].is_number());
+    }
+
+    #[test]
     fn trim_panel_result_rebases_every_channel() {
         use chartgen::data::{Bar, OhlcvData};
         use chartgen::indicator::{Bars, DivLine, Dot, Fill, HBar, HLine, Line, PanelResult};
@@ -6235,7 +6312,7 @@ mod tests {
         for (name, labels) in [
             ("sar", vec!["SAR Up", "SAR Down"]),
             ("kalman_volume", vec!["KVF", "Signal"]),
-            ("heikin_ashi", vec!["HA Close"]),
+            ("heikin_ashi", vec!["HA Close", "HA Open"]),
             ("supertrend", vec!["Up Trend", "Down Trend"]),
         ] {
             let lines = p["indicators"][name]["lines"].as_array().unwrap();
