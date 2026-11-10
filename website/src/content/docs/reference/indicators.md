@@ -226,7 +226,7 @@ Ichimoku Cloud — trend, support/resistance, momentum
 
 ### `heikin_ashi`
 
-Heikin Ashi — smoothed trend candles
+Heikin Ashi overlay — HA close/open trend ribbon on raw candles; chart_style=heikin_ashi replaces the price candles
 
 **Aliases:** `ha`
 
