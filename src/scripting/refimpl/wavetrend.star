@@ -27,7 +27,7 @@ def compute(ohlcv, params, chart):
     wt2 = ta.sma(wt1, MA_LEN)
 
     chart.line(wt1, title = "WT1", color = "#4994ec", alpha = 0.8, width = 2)
-    chart.line(wt2, title = "WT2", color = "#1f1559", alpha = 0.8, width = 2)
+    chart.line(wt2, title = "WT2", color = "#b39ddb", alpha = 1.0, width = 2)
     chart.fill(wt1, wt2, color = "#4994ec", alpha = 0.25)
     chart.fill(wt1 - wt2, 0, color = "#ffffff", alpha = 0.15)
 
