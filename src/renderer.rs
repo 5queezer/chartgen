@@ -1470,16 +1470,7 @@ fn readable_number(v: f64, precision: usize, compact: bool) -> String {
     if !v.is_finite() {
         return "n/a".into();
     }
-    let (scale, suffix) = if compact && v.abs() >= 1e9 {
-        (1e9, "B")
-    } else if compact && v.abs() >= 1e6 {
-        (1e6, "M")
-    } else if compact && v.abs() >= 1e3 {
-        (1e3, "K")
-    } else {
-        (1.0, "")
-    };
-    let precision = if suffix.is_empty() { precision } else { 2 };
+    let (scale, suffix) = number_scale(v, compact);
     let mut text = format!("{:.*}", precision, v / scale);
     if text.contains('.') {
         text = text.trim_end_matches('0').trim_end_matches('.').into();
@@ -1490,18 +1481,33 @@ fn readable_number(v: f64, precision: usize, compact: bool) -> String {
     format!("{text}{suffix}")
 }
 
+fn number_scale(v: f64, compact: bool) -> (f64, &'static str) {
+    if compact && v.abs() >= 1e9 {
+        (1e9, "B")
+    } else if compact && v.abs() >= 1e6 {
+        (1e6, "M")
+    } else if compact && v.abs() >= 1e3 {
+        (1e3, "K")
+    } else {
+        (1.0, "")
+    }
+}
+
 fn tick_count(plot_height: u32) -> usize {
     (plot_height / 36).clamp(3, 8) as usize
 }
 
 fn axis_number(v: f64, range: (f64, f64), ticks: usize) -> String {
-    let step = (range.1 - range.0).abs() / ticks.max(1) as f64;
+    // Precision is measured AFTER scaling: neighboring ticks must not collapse
+    // to the same K/M/B string when the absolute values are close together.
+    let scale = number_scale(v, true).0;
+    let step = (range.1 - range.0).abs() / ticks.max(1) as f64 / scale;
     let prec = if step > 0.0 && step < 1.0 {
         (-step.log10()).ceil() as usize + 1
     } else {
         1
     };
-    readable_number(v, prec.min(10), true)
+    readable_number(v, prec.min(16), true)
 }
 
 /// One indicator per wrapped row, on an opaque surface.
@@ -1621,6 +1627,21 @@ mod tests {
         assert_eq!(legend_number(-1_250_000.0), "-1.25M");
         assert_eq!(legend_number(1200.0), "1.2K");
         assert_eq!(legend_number(20.0), "20");
+    }
+
+    #[test]
+    fn compact_axis_ticks_keep_narrow_range_differences() {
+        for (a, b, range) in [
+            (80_000.0, 80_002.0, (80_000.0, 80_010.0)),
+            (
+                8_400_000_000.0,
+                8_400_004_000.0,
+                (8_400_000_000.0, 8_400_020_000.0),
+            ),
+        ] {
+            assert_ne!(axis_number(a, range, 5), axis_number(b, range, 5));
+        }
+        assert_eq!(axis_number(-1e-16, (-0.05, 0.05), 3), "0");
     }
 
     #[test]

@@ -61,5 +61,33 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             1000,
         )?;
     }
+    // A large absolute value with a very narrow range must keep distinct ticks.
+    let mut narrow = data.clone();
+    narrow.symbol = Some("Narrow-range readability probe".into());
+    for bar in &mut narrow.bars {
+        for price in [&mut bar.open, &mut bar.high, &mut bar.low, &mut bar.close] {
+            *price = 80_000.0 + (*price - 80_000.0) * 0.001;
+        }
+    }
+    let oi = chartgen::indicator::PanelResult {
+        label: "OI probe".into(),
+        lines: vec![chartgen::indicator::Line {
+            y: (0..200)
+                .map(|i| 8_400_000_000.0 + i as f64 * 100.0)
+                .collect(),
+            color: plotters::style::RGBAColor(33, 150, 243, 1.0),
+            width: 2,
+            label: Some("OI".into()),
+            breaks: false,
+        }],
+        ..Default::default()
+    };
+    renderer::render_results(
+        &narrow,
+        &[&oi],
+        &format!("{directory}/narrow-axis.png"),
+        1000,
+        600,
+    )?;
     Ok(())
 }
