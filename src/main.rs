@@ -102,14 +102,22 @@ fn main() {
         let indicators: Vec<String> = cli.panels.clone();
 
         let data_dir = dirs_data_dir();
+        let notifications =
+            match chartgen::config::NotificationConfig::load(&data_dir.join("config.toml")) {
+                Ok(config) => config,
+                Err(error) => {
+                    eprintln!("Invalid notification config: {error}");
+                    std::process::exit(2);
+                }
+            };
 
         let config = EngineConfig {
             symbol: symbol.clone(),
             interval: interval.clone(),
             indicators,
             data_dir,
-            notification_ttl_secs: 3600,
-            max_queue_size: 1000,
+            notification_ttl_secs: notifications.notification_ttl_secs,
+            max_queue_size: notifications.max_queue_size,
         };
 
         let engine = Arc::new(RwLock::new(Engine::new(config)));

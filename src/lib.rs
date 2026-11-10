@@ -1,5 +1,6 @@
 #![recursion_limit = "512"]
 pub mod binance_gate;
+pub mod config;
 pub mod data;
 pub mod drawings;
 pub mod engine;
