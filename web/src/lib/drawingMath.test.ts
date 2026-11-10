@@ -11,6 +11,7 @@ import {
   formatDuration,
   pitchforkLines,
   snapToAngle,
+  sameLinePoint,
   positionBars,
   positionLabels,
   positionReward,
@@ -309,5 +310,59 @@ describe("snapToAngle", () => {
     );
     expect(toPx(out).y).toBeCloseTo(a.y - 50);
     expect(out.value).toBeCloseTo(100 * Math.E ** 0.5);
+  });
+});
+
+
+describe("sameLinePoint", () => {
+  it("rejects price drift at the same pixel after the axis transform changes", () => {
+    const a = { dataIndex: 10, value: 258.68 };
+    let top = 260;
+    const toPx = (p: { dataIndex?: number; value?: number }) => ({
+      x: p.dataIndex! * 10,
+      y: Math.round((top - p.value!) * 100),
+    });
+    const firstPixel = toPx(a);
+    // A live tick moves the axis by less than a pixel; an identical mouse
+    // coordinate now converts back into a different numeric price.
+    top += 0.0002;
+    const b = { dataIndex: 10, value: top - firstPixel.y / 100 };
+    expect(a.value).not.toBe(b.value);
+    expect(toPx(b)).toEqual(toPx(a));
+    expect(sameLinePoint(a, b, toPx)).toBe(true);
+  });
+
+  it("rejects the exact initial and retry coordinate drift reported by CI", () => {
+    for (const values of [
+      [258.68518317231593, 258.67720371003367],
+      [258.68432110991677, 258.68424927138346],
+    ]) {
+      expect(sameLinePoint({ dataIndex: 10, value: values[0] },
+        { dataIndex: 10, value: values[1] }, () => ({ x: 499, y: 200 }))).toBe(true);
+    }
+  });
+
+  it("accepts visible points one pixel apart on either axis", () => {
+    const a = { dataIndex: 10, value: 100 };
+    const toPx = (p: { dataIndex?: number; value?: number }) => ({ x: p.dataIndex!, y: p.value! });
+    expect(sameLinePoint(a, { ...a, value: 101 }, toPx)).toBe(false);
+    expect(sameLinePoint(a, { ...a, dataIndex: 11 }, toPx)).toBe(false);
+  });
+
+  it("keeps exact-coordinate rejection without usable pixels and accepts distinct values", () => {
+    const a = { dataIndex: 10, value: 100 };
+    for (const pixels of [{}, { x: NaN, y: 200 }, { x: Infinity, y: Infinity }]) {
+      expect(sameLinePoint(a, {...a}, () => pixels)).toBe(true);
+      expect(sameLinePoint(a, {...a, value: 101}, () => pixels)).toBe(false);
+    }
+  });
+
+  it("reads a live nonlinear or inverted projection rather than a price epsilon", () => {
+    const a = { dataIndex: 10, value: 1e9 };
+    const b = { dataIndex: 10, value: 1e9 + 1 };
+    for (const direction of [-1, 1]) {
+      const toPx = (p: {dataIndex?: number; value?: number}) => ({x: p.dataIndex!, y: direction * Math.round(Math.log(p.value!) * 100)});
+      expect(sameLinePoint(a, b, toPx)).toBe(true);
+    }
   });
 });
