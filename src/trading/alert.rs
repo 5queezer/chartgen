@@ -27,6 +27,9 @@ pub enum AlertCondition {
 #[derive(Clone, Debug)]
 pub struct TriggeredAlert {
     pub alert: Alert,
+    /// Canonical engine interval captured at evaluation time, not persisted
+    /// on the active alert (which may have been loaded from an older version).
+    pub interval: String,
     pub triggered_at: DateTime<Utc>,
     pub value: f64,
 }
@@ -71,6 +74,7 @@ impl AlertEngine {
     pub fn evaluate(
         &mut self,
         symbol: &str,
+        interval: &str,
         bar: &Bar,
         indicators: &HashMap<String, PanelResult>,
     ) -> Vec<TriggeredAlert> {
@@ -107,6 +111,7 @@ impl AlertEngine {
                 triggered_ids.push(alert.id.clone());
                 triggered.push(TriggeredAlert {
                     alert: alert.clone(),
+                    interval: interval.to_string(),
                     triggered_at: now,
                     value,
                 });
@@ -185,7 +190,7 @@ mod tests {
         let mut engine = AlertEngine::new();
         engine.add("BTCUSD".into(), AlertCondition::PriceAbove(100.0));
         let bar = make_bar(105.0);
-        let triggered = engine.evaluate("BTCUSD", &bar, &HashMap::new());
+        let triggered = engine.evaluate("BTCUSD", "1h", &bar, &HashMap::new());
         assert_eq!(triggered.len(), 1);
         assert!((triggered[0].value - 105.0).abs() < f64::EPSILON);
     }
@@ -195,7 +200,7 @@ mod tests {
         let mut engine = AlertEngine::new();
         engine.add("BTCUSD".into(), AlertCondition::PriceAbove(100.0));
         let bar = make_bar(95.0);
-        let triggered = engine.evaluate("BTCUSD", &bar, &HashMap::new());
+        let triggered = engine.evaluate("BTCUSD", "1h", &bar, &HashMap::new());
         assert!(triggered.is_empty());
         // Alert should still be active
         assert_eq!(engine.list().len(), 1);
@@ -206,7 +211,7 @@ mod tests {
         let mut engine = AlertEngine::new();
         engine.add("BTCUSD".into(), AlertCondition::PriceBelow(100.0));
         let bar = make_bar(95.0);
-        let triggered = engine.evaluate("BTCUSD", &bar, &HashMap::new());
+        let triggered = engine.evaluate("BTCUSD", "1h", &bar, &HashMap::new());
         assert_eq!(triggered.len(), 1);
         assert!((triggered[0].value - 95.0).abs() < f64::EPSILON);
     }
@@ -216,7 +221,7 @@ mod tests {
         let mut engine = AlertEngine::new();
         engine.add("BTCUSD".into(), AlertCondition::PriceAbove(100.0));
         let bar = make_bar(105.0);
-        let triggered = engine.evaluate("BTCUSD", &bar, &HashMap::new());
+        let triggered = engine.evaluate("BTCUSD", "1h", &bar, &HashMap::new());
         assert_eq!(triggered.len(), 1);
         // Should be removed now
         assert!(engine.list().is_empty());
@@ -227,7 +232,7 @@ mod tests {
         let mut engine = AlertEngine::new();
         engine.add("ETHUSD".into(), AlertCondition::PriceAbove(100.0));
         let bar = make_bar(105.0);
-        let triggered = engine.evaluate("BTCUSD", &bar, &HashMap::new());
+        let triggered = engine.evaluate("BTCUSD", "1h", &bar, &HashMap::new());
         assert!(triggered.is_empty());
         // ETHUSD alert should still be active
         assert_eq!(engine.list().len(), 1);
@@ -264,7 +269,7 @@ mod tests {
         indicators.insert("rsi".into(), panel);
 
         let bar = make_bar(100.0);
-        let triggered = engine.evaluate("BTCUSD", &bar, &indicators);
+        let triggered = engine.evaluate("BTCUSD", "1h", &bar, &indicators);
         assert_eq!(triggered.len(), 1);
         assert!((triggered[0].value - 42.0).abs() < f64::EPSILON);
     }
@@ -284,7 +289,7 @@ mod tests {
         indicators.insert("rsi".into(), PanelResult::default());
 
         let bar = make_bar(100.0);
-        let triggered = engine.evaluate("BTCUSD", &bar, &indicators);
+        let triggered = engine.evaluate("BTCUSD", "1h", &bar, &indicators);
         assert!(triggered.is_empty());
     }
 
@@ -311,7 +316,7 @@ mod tests {
         indicators.insert("rsi".into(), panel);
 
         let bar = make_bar(100.0);
-        let triggered = engine.evaluate("BTCUSD", &bar, &indicators);
+        let triggered = engine.evaluate("BTCUSD", "1h", &bar, &indicators);
         assert!(triggered.is_empty());
         // Alert should still be active (not consumed)
         assert_eq!(engine.list().len(), 1);

@@ -83,9 +83,12 @@ impl Engine {
             .update_price(&self.config.symbol, bar.close);
 
         // 3. Evaluate alerts
-        let triggered = self
-            .alert_engine
-            .evaluate(&self.config.symbol, &bar, &indicators);
+        let triggered = self.alert_engine.evaluate(
+            &self.config.symbol,
+            &self.config.interval,
+            &bar,
+            &indicators,
+        );
 
         // 4. Log triggered alerts and queue notifications
         for t in &triggered {
@@ -343,6 +346,77 @@ mod tests {
         assert_eq!(engine.alert_engine.list()[0].symbol, "ETHUSDT");
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn notification_interval_survives_legacy_load_live_delivery_and_reconnect() {
+        let dir = temp_dir("notification_interval");
+        // The old persisted schema deliberately has no interval field.
+        fs::write(dir.join("alerts.json"), r#"[{"id":"legacy","symbol":"BTCUSDT","condition":{"PriceAbove":100.0},"created_at":"2026-01-01T00:00:00Z"}]"#).unwrap();
+        let mut engine = make_engine(dir.clone());
+        engine.config.interval = "1mo".into();
+        let reg = &mut engine.subscription_registry;
+        reg.subscribe("token", None, None);
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        reg.link_sender("token", "live", tx);
+
+        let triggered = engine.on_bar(make_bar(105.0));
+        assert_eq!(triggered[0].alert.id, "legacy");
+        let live: serde_json::Value = serde_json::from_str(&rx.try_recv().unwrap()).unwrap();
+        assert_eq!(live["params"]["interval"], "1mo");
+        assert_eq!(engine.drain_notifications().len(), 1);
+
+        engine.subscription_registry.unlink_sender("token", "live");
+        let ids: Vec<_> = (0..3)
+            .map(|_| engine.add_alert("BTCUSDT".into(), AlertCondition::PriceAbove(100.0)))
+            .collect();
+        engine.on_bar(make_bar(106.0));
+        assert_eq!(
+            engine
+                .subscription_registry
+                .list("token")
+                .unwrap()
+                .offline_queue_size,
+            3
+        );
+        // A later engine setting must not rewrite the interval of queued events.
+        engine.config.interval = "1h".into();
+        let (tx, mut first_rx) = tokio::sync::mpsc::channel(1);
+        engine
+            .subscription_registry
+            .link_sender("token", "first", tx);
+        let first: serde_json::Value = serde_json::from_str(&first_rx.try_recv().unwrap()).unwrap();
+        assert_eq!(first["params"]["interval"], "1mo");
+        assert_eq!(first["params"]["alert_id"], ids[0]);
+        assert_eq!(
+            engine
+                .subscription_registry
+                .list("token")
+                .unwrap()
+                .offline_queue_size,
+            2
+        );
+        drop(first_rx);
+        let (tx, mut retry_rx) = tokio::sync::mpsc::channel(4);
+        engine
+            .subscription_registry
+            .link_sender("token", "retry", tx);
+        for id in &ids[1..] {
+            let message: serde_json::Value =
+                serde_json::from_str(&retry_rx.try_recv().unwrap()).unwrap();
+            assert_eq!(message["params"]["alert_id"], *id);
+            assert_eq!(message["params"]["interval"], "1mo");
+        }
+        assert_eq!(
+            engine
+                .subscription_registry
+                .list("token")
+                .unwrap()
+                .offline_queue_size,
+            0
+        );
+        assert!(retry_rx.try_recv().is_err());
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
