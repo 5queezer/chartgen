@@ -270,7 +270,7 @@ fn format_notification(alert: &TriggeredAlert) -> String {
         "params": {
             "alert_id": alert.alert.id,
             "symbol": alert.alert.symbol,
-            "interval": "",
+            "interval": alert.interval,
             "condition": condition,
             "value": alert.value,
             "triggered_at": alert.triggered_at.to_rfc3339(),
@@ -288,6 +288,7 @@ mod tests {
 
     fn make_alert(id: &str, symbol: &str, condition: AlertCondition, value: f64) -> TriggeredAlert {
         TriggeredAlert {
+            interval: "4h".to_string(),
             alert: Alert {
                 id: id.to_string(),
                 symbol: symbol.to_string(),
@@ -802,6 +803,7 @@ mod tests {
         assert_eq!(parsed["method"], "notifications/alert_triggered");
         assert_eq!(parsed["params"]["alert_id"], "abc123");
         assert_eq!(parsed["params"]["symbol"], "XRPUSDT");
+        assert_eq!(parsed["params"]["interval"], "4h");
         assert_eq!(parsed["params"]["condition"]["type"], "indicator_signal");
         assert_eq!(parsed["params"]["condition"]["indicator"], "cipher_b");
         assert_eq!(parsed["params"]["condition"]["signal"], "green_dot");

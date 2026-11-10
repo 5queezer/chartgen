@@ -220,6 +220,14 @@ pub struct PanelResult {
     /// Its lines hold levels: a change of value is a jump between two of them, not a
     /// slope, so nothing is drawn across it.
     pub level_lines: bool,
+    /// Lines and fill edges hold the previous bar until the next bar, then jump.
+    pub steps: bool,
+    /// Keep numeric lines for legends/alerts, but draw a dot at each finite value.
+    pub point_lines: bool,
+    /// Start a new line/fill run BEFORE each bar index, without dropping values.
+    pub line_breaks: Vec<usize>,
+    /// Semantic names parallel to `hlines` (profile POC/VAH/VAL and HVN/LVN).
+    pub hline_labels: Vec<Option<String>>,
     /// The bars a range profile was read from, first and last: the image draws its
     /// `hbars` and `hlines` over them alone. None: the whole chart.
     pub span: Option<(usize, usize)>,

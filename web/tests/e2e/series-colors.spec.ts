@@ -166,7 +166,7 @@ test.describe("series colors", () => {
     await page.screenshot({ path: `${SHOTS}/volume-macd-ema.png` });
   });
 
-  test("per-bar plots draw as lines: Supertrend, SAR, HA, KVF", async ({ page }) => {
+  test("per-bar plots retain values: Supertrend lines, SAR dots, HA ribbon, KVF", async ({ page }) => {
     // Their per-bar points used to be unlabeled dots, which the series
     // wire drops: the chart showed no plot at all.
     await openWith(page, ["supertrend", "sar", "heikin_ashi", "kalman_volume"]);
@@ -174,7 +174,7 @@ test.describe("series colors", () => {
     const plots: Array<[string, string[], number]> = [
       ["Supertrend", ["Up Trend", "Down Trend"], 1],
       ["SAR", ["SAR Up", "SAR Down"], 1],
-      ["HA", ["HA Close"], 1],
+      ["HA", ["HA Close", "HA Open"], 2],
       ["KVF", ["KVF", "Signal"], 2],
     ];
     for (const [name, labels, valued] of plots) {

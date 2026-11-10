@@ -72,6 +72,7 @@ export const SeriesSignalSchema = z.object({
 // (ADR-0012); optional so payloads from older servers still parse.
 export const HLineSchema = z.object({
   y: z.number(),
+  label: z.string().optional(),
   color: z.string().optional(),
 });
 
@@ -195,6 +196,9 @@ export const SeriesIndicatorSchema = z.object({
   profile_interval: z.string().optional(),
   /** Its lines hold levels: nothing is drawn across a change of value. */
   level_lines: z.boolean().optional(),
+  steps: z.boolean().optional(),
+  point_lines: z.boolean().optional(),
+  line_breaks: z.array(z.number().int().nonnegative()).optional(),
   y_range: YRangeSchema.optional(),
   lines: z.array(SeriesLineSchema).optional(),
   histogram: z.array(SeriesHistogramBucketSchema).optional(),

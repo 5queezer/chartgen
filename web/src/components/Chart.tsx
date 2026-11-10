@@ -143,6 +143,7 @@ import {
   hbarTiers,
   hlineStrokes,
   payloadToDataIndex,
+  presentationRuns,
   toDataSpace,
   valueExtents,
   type Mapper,
@@ -405,7 +406,7 @@ function drawGeometry(name: string, gridPane: number): IndicatorDrawCallback {
       }
     };
     for (let fi = fills.length - 1; fi >= 0; fi--) {
-      paint(fillPolygons(fills[fi]!.y1, fills[fi]!.y2, visibleRange, map), fi);
+      paint(fillPolygons(fills[fi]!.y1, fills[fi]!.y2, visibleRange, map, ind.steps, ind.line_breaks), fi);
     }
     // The cloud past the last bar (ADR-0033), joined to it at the last bar.
     const length = kLineDataList.length;
@@ -417,6 +418,38 @@ function drawGeometry(name: string, gridPane: number): IndicatorDrawCallback {
     }
     ctx.globalCompositeOperation = "source-over";
     drawFutureLines(ctx, name, ind, length, indicator, map);
+    // Klinecharts line figures have no per-plot step/reset/point mode. Draw
+    // these paths here while keeping the figure values for scaling and legends.
+    if (ind.steps || ind.point_lines || ind.line_breaks?.length) {
+      const ext = indicator.extendData as FigureExtend | undefined;
+      for (let i = 0; i < (ind.lines?.length ?? 0); i++) {
+        if (ext?.plots[plotKey("line", i)]?.visible === false) continue;
+        const style = plotFigureStyle(name, "line", i, i, indicator) as {
+          color: string;
+          size: number;
+          dashedValue?: number[];
+        };
+        const values = ind.lines![i]!.values;
+        ctx.strokeStyle = style.color;
+        ctx.fillStyle = style.color;
+        ctx.lineWidth = style.size;
+        ctx.setLineDash(style.dashedValue ?? []);
+        for (const run of presentationRuns(values, visibleRange, map, ind.steps, ind.line_breaks)) {
+          if (ind.point_lines) {
+            for (const p of run) {
+              ctx.beginPath();
+              ctx.arc(p.x, p.y, Math.max(2, style.size), 0, 2 * Math.PI);
+              ctx.fill();
+            }
+          } else {
+            ctx.beginPath();
+            run.forEach((p, k) => k === 0 ? ctx.moveTo(p.x, p.y) : ctx.lineTo(p.x, p.y));
+            ctx.stroke();
+          }
+        }
+      }
+      ctx.setLineDash([]);
+    }
 
     if (ind.hbars && ind.hbars.length > 0 && shown(geo?.hbars)) {
       const tiers = hbarTiers(ind.hbars, ind.hlines ?? []);
@@ -666,7 +699,10 @@ function ensureRegistered(name: string, shape: IndicatorShape, gridPane: number)
       type: "line",
       styles: (d, ind) => {
         const style = plotFigureStyle(name, "line", i, i, ind);
-        const levels = (ind.extendData as FigureExtend | undefined)?.levels;
+        const ext = ind.extendData as FigureExtend | undefined;
+        const geo = geometryStore.get(regName);
+        if (geo?.steps || geo?.point_lines || geo?.line_breaks?.length) return { ...style, color: "transparent" };
+        const levels = ext?.levels;
         const key = `line${i}`;
         return levels && isLevelJump(d.current.indicatorData?.[key], d.next.indicatorData?.[key])
           ? { ...style, color: "transparent" }
@@ -1843,6 +1879,7 @@ export function Chart(props: ChartProps): JSX.Element {
         ind !== undefined &&
         (stored?.fills !== ind.fills ||
           stored?.hlines !== ind.hlines ||
+          stored?.line_breaks !== ind.line_breaks ||
           stored?.future !== ind.future ||
           stored?.labels !== ind.labels ||
           stored?.patterns !== ind.patterns ||

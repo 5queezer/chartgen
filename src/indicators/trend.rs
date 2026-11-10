@@ -6,7 +6,7 @@ use super::pine::{
     windowed,
 };
 use crate::data::OhlcvData;
-use crate::indicator::{rgba, Bars, DivLine, Fill, Indicator, PanelResult};
+use crate::indicator::{rgba, Bars, DivLine, Fill, HLine, Indicator, PanelResult};
 use serde_json::{json, Value};
 
 pub const MA_TYPES: &[&str] = &[
@@ -191,7 +191,16 @@ impl Indicator for Ma {
         );
         let label = format!("{} {}", self.kind.to_uppercase(), self.length);
         PanelResult {
-            lines: vec![line(y, 0x2962FF, 2, &label)],
+            lines: vec![line(
+                y,
+                match self.kind.as_str() {
+                    "vwma" => 0xE6C84F,
+                    "hma" => 0xEF6C9A,
+                    _ => 0x2962FF,
+                },
+                2,
+                &label,
+            )],
             label,
             is_overlay: true,
             ..Default::default()
@@ -334,7 +343,7 @@ impl Indicator for Envelopes {
         PanelResult {
             lines: vec![
                 line(upper.clone(), 0x2962FF, 1, "Env Upper"),
-                line(basis, 0xFF6D00, 1, "Env Basis"),
+                line(basis, 0xCE93D8, 2, "Env Basis"),
                 line(lower.clone(), 0x2962FF, 1, "Env Lower"),
             ],
             fills: vec![Fill {
@@ -430,7 +439,7 @@ impl Indicator for LinRegChannel {
         PanelResult {
             lines: vec![
                 line(up.clone(), 0x2962FF, 1, "LR Upper"),
-                line(base, 0xFF6D00, 1, "LR Base"),
+                line(base, 0x80CBC4, 2, "LR Base"),
                 line(lo.clone(), 0x2962FF, 1, "LR Lower"),
             ],
             fills: vec![Fill {
@@ -499,6 +508,16 @@ impl Indicator for Aroon {
                 line(down, 0x2962FF, 2, "Aroon Down"),
             ],
             y_range: Some((0.0, 100.0)),
+            hlines: vec![
+                HLine {
+                    y: 30.0,
+                    color: rgba(0x787B86, 0.6),
+                },
+                HLine {
+                    y: 70.0,
+                    color: rgba(0x787B86, 0.6),
+                },
+            ],
             label: format!("Aroon {}", l),
             ..Default::default()
         }

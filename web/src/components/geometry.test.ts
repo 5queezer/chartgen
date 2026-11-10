@@ -17,6 +17,7 @@ import {
   patternDrawings,
   patternText,
   payloadToDataIndex,
+  presentationRuns,
   toDataSpace,
   valueExtents,
   wireColor,
@@ -654,4 +655,42 @@ describe("pattern marks (ADR-0046)", () => {
     expect(out.patterns![0]!.strokes).toHaveLength(1);
     expect(out.patterns![0]!.strokes[0]).toMatchObject({ x1: 0, x2: 2 });
   });
+});
+
+describe("presentation paths", () => {
+  it("draws true steps and splits before reset bars without losing points", () => {
+    expect(presentationRuns([1, 2, 3, 4], all, map, true, [2])).toEqual([
+      [{ x: 0, y: 99 }, { x: 10, y: 99 }, { x: 10, y: 98 }],
+      [{ x: 20, y: 97 }, { x: 30, y: 97 }, { x: 30, y: 96 }],
+    ]);
+  });
+  it("preserves isolated SAR values and NaN gaps", () => {
+    expect(presentationRuns([null, 1, null, 2], all, map)).toEqual([
+      [{ x: 10, y: 99 }], [{ x: 30, y: 98 }],
+    ]);
+  });
+  it("breaks fill polygons at session resets", () => {
+    const p = fillPolygons([3, 3, 8, 8], [1, 1, 6, 6], all, map, false, [2]);
+    expect(p).toHaveLength(2);
+    expect(p[0]!.points.map(p => p.x)).toEqual([0, 10, 10, 0]);
+    expect(p[1]!.points.map(p => p.x)).toEqual([20, 30, 30, 20]);
+  });
+  it("uses orthogonal edges for stepped fills", () => {
+    const p = fillPolygons([3, 5], [1, 2], all, map, true);
+    expect(p[0]!.points).toEqual([
+      { x: 0, y: 97 }, { x: 10, y: 97 }, { x: 10, y: 95 },
+      { x: 10, y: 98 }, { x: 10, y: 99 }, { x: 0, y: 99 },
+    ]);
+  });
+  it("moves reset boundaries to the next surviving timestamp when bars are dropped", () => {
+    const ind = { label: "VWAP", is_overlay: true, line_breaks: [1, 3] };
+    expect(toDataSpace(ind, [0, -1, 1, 2]).line_breaks).toEqual([1, 2]);
+  });
+});
+
+it("compacts numeric lines for custom paths while sharing them on the live path", () => {
+  const ind = {label: "SAR", is_overlay: true, point_lines: true,
+    lines: [{index: 0, label: "SAR", values: [1, 2, 3]}]};
+  expect(toDataSpace(ind, [0, -1, 1]).lines?.[0]?.values).toEqual([1, 3]);
+  expect(toDataSpace(ind, null).lines).toBe(ind.lines);
 });

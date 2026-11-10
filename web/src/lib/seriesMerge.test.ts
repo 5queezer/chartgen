@@ -911,3 +911,41 @@ describe("a price-based series", () => {
     expect(mergeOlder(priced(5), priced(6))).toEqual({ ok: false, reason: "style" });
   });
 });
+
+describe("session drawing boundaries", () => {
+  const boundaries = (s: SeriesPayload, xs: number[]) => {
+    s.indicators.sma!.line_breaks = xs;
+    return s;
+  };
+  it("rebases boundaries when older history is prepended", () => {
+    const cur = boundaries(serve({bars: 4, now: 7}), [0, 2]);
+    const pg = boundaries(serve({bars: 4, now: 7, end: 4}), [2]);
+    const r = mergeOlder(cur, pg);
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.series.indicators.sma!.line_breaks).toEqual([2, 4, 6]);
+  });
+  it("replaces only boundaries in the tail window and clears vanished resets", () => {
+    const cur = boundaries(serve({bars: 8, now: 7}), [2, 6]);
+    const tail = boundaries(serve({bars: 3, now: 8}), [1]);
+    expect(mergeTail(cur, tail).ok).toBe(true);
+    expect(cur.indicators.sma!.line_breaks).toEqual([2, 7]);
+    const next = boundaries(serve({bars: 3, now: 8}), []);
+    expect(mergeTail(cur, next).ok).toBe(true);
+    expect(cur.indicators.sma!.line_breaks).toEqual([2]);
+  });
+  it("keeps the boundary at the first retained catch-up bar", () => {
+    const cur = boundaries(serve({bars: 4, now: 7}), [1]);
+    const tail = boundaries(serve({bars: 10, now: 8}), [4, 7]);
+    expect(mergeTail(cur, tail).ok).toBe(true);
+    expect(cur.indicators.sma!.line_breaks).toEqual([0, 3]);
+  });
+  it("shifts boundaries when the older indicator failed", () => {
+    const cur = boundaries(serve({bars: 4, now: 7}), [0, 2]);
+    const pg = serve({bars: 4, now: 7, end: 4});
+    delete pg.indicators.sma;
+    pg.indicator_errors = { sma: {step: "runtime", line: null, message: "failed"} };
+    const r = mergeOlder(cur, pg);
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.series.indicators.sma!.line_breaks).toEqual([4, 6]);
+  });
+});

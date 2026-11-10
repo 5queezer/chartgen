@@ -135,7 +135,7 @@ impl Indicator for WaveTrend {
                 Line {
                     breaks: false,
                     y: wt2.clone(),
-                    color: rgba(0x1f1559, 0.8),
+                    color: rgba(0xB39DDB, 1.0),
                     width: 2,
                     label: Some("WT2".into()),
                 },

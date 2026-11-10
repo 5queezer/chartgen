@@ -127,6 +127,7 @@ export function toDataSpace(
   remap.forEach((d, p) => {
     if (d >= 0) kept.push(p);
   });
+  const lines = ind.lines?.map((l) => ({ ...l, values: kept.map(p => l.values[p] ?? null) }));
   const fills = ind.fills?.map((f) => ({
     y1: kept.map((p) => f.y1[p] ?? null),
     y2: kept.map((p) => f.y2[p] ?? null),
@@ -151,7 +152,16 @@ export function toDataSpace(
     }),
     label: { ...p.label, x: remap[p.label.x] ?? p.label.x },
   }));
-  return { ...ind, fills, divlines, labels, patterns, hbars };
+  // A boundary on a dropped bar belongs before the next retained bar.
+  const line_breaks = ind.line_breaks?.flatMap((at) => {
+    for (let i = at; i < remap.length; i++) {
+      if (remap[i]! >= 0) return [remap[i]!];
+    }
+    return [];
+  });
+  return { ...ind, lines, fills, divlines, labels, patterns, hbars,
+    ...(line_breaks && { line_breaks: [...new Set(line_breaks)] }),
+  };
 }
 
 export interface ValueExtent {
@@ -227,6 +237,8 @@ export function fillPolygons(
   y2: Array<number | null>,
   range: IndexRange,
   map: Mapper,
+  steps = false,
+  breaks: number[] = [],
 ): FillPolygon[] {
   const n = Math.min(y1.length, y2.length);
   const start = Math.max(0, Math.floor(range.from) - 1);
@@ -235,6 +247,7 @@ export function fillPolygons(
   let edgeA: Point[] = [];
   let edgeB: Point[] = [];
   let orient: -1 | 0 | 1 = 0;
+  const boundaries = new Set(breaks);
 
   const flush = () => {
     if (edgeA.length >= 2) {
@@ -245,6 +258,10 @@ export function fillPolygons(
   };
 
   for (let i = start; i <= end; i++) {
+    if (boundaries.has(i)) {
+      flush();
+      orient = 0;
+    }
     const a = y1[i];
     const b = y2[i];
     if (!isNum(a) || !isNum(b)) {
@@ -253,7 +270,12 @@ export function fillPolygons(
       continue;
     }
     const s = sign(a - b);
-    if (s !== 0 && orient !== 0 && s !== orient) {
+    if (steps && edgeA.length > 0) {
+      edgeA.push({ x: map.x(i), y: map.y(y1[i - 1]!) });
+      edgeB.push({ x: map.x(i), y: map.y(y2[i - 1]!) });
+      if (s !== 0 && orient !== 0 && s !== orient) flush();
+    }
+    if (!steps && s !== 0 && orient !== 0 && s !== orient) {
       // Crossing between i-1 and i. edgeA is non-empty and the previous
       // bar is finite, because a null bar always flushes the run.
       const pa = y1[i - 1]!;
@@ -609,3 +631,32 @@ export const DIVLINE_COLORS: Record<DivergenceKind, string> = {
   bear: "rgba(255, 0, 0, 0.80)",
   flat: "rgba(120, 123, 134, 0.80)",
 };
+
+/** Numeric plots rendered with steps, dots, or reset boundaries; values are never altered. */
+export function presentationRuns(
+  values: Array<number | null>,
+  range: IndexRange,
+  map: Mapper,
+  steps = false,
+  breaks: number[] = [],
+): Point[][] {
+  const runs: Point[][] = [];
+  const boundaries = new Set(breaks);
+  let run: Point[] = [];
+  const flush = () => {
+    if (run.length) runs.push(run);
+    run = [];
+  };
+  const start = Math.max(0, Math.floor(range.from) - 1);
+  const end = Math.min(values.length - 1, Math.ceil(range.to));
+  for (let i = start; i <= end; i++) {
+    const value = values[i];
+    if (boundaries.has(i) || !isNum(value)) flush();
+    if (!isNum(value)) continue;
+    const point = { x: map.x(i), y: map.y(value) };
+    if (steps && run.length) run.push({ x: point.x, y: run[run.length - 1]!.y });
+    run.push(point);
+  }
+  flush();
+  return runs;
+}

@@ -1026,7 +1026,11 @@ impl CandlestickPatterns {
                 x: h.bar,
                 y,
                 above,
-                text: d.text.to_string(),
+                text: match d.bias {
+                    Bias::Bullish => format!("{}+", d.text),
+                    Bias::Bearish => format!("{}-", d.text),
+                    Bias::Neutral => d.text.to_string(),
+                },
                 key: d.key.to_string(),
                 name: d.name.to_string(),
                 bias: d.bias,

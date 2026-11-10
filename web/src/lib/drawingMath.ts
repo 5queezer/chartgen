@@ -77,6 +77,23 @@ export interface AnglePoint {
 }
 
 /**
+ * Exact points, or distinct prices that the current axis rounds to one pixel.
+ * Read both through the same live transform: autoscaling can change the value
+ * under an unchanged mouse pixel between clicks. No distance/price tolerance is
+ * used, so a visibly distinct point even one pixel away remains valid.
+ */
+export function sameLinePoint(
+  a: AnglePoint,
+  b: AnglePoint,
+  toPx: (p: AnglePoint) => Partial<Px>,
+): boolean {
+  if (a.dataIndex === b.dataIndex && a.value === b.value) return true;
+  const pa = toPx(a);
+  const pb = toPx(b);
+  return [pa.x, pa.y, pb.x, pb.y].every(Number.isFinite) && pa.x === pb.x && pa.y === pb.y;
+}
+
+/**
  * The moving point of a line, snapped to the nearest of horizontal, vertical
  * and 45° as seen on screen from `anchor` (`mouse` in the same pixels).
  * `moving` is the point as the chart placed it: on a bar, magnet applied.

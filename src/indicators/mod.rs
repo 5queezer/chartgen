@@ -478,3 +478,6 @@ pub fn registry() -> Vec<IndicatorInfo> {
 
     entries
 }
+
+#[cfg(test)]
+mod presentation_tests;

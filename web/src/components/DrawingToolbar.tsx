@@ -53,7 +53,7 @@ import { setOverlayMenu, type MenuSpec } from "./ContextMenu";
 import { DrawingStyleBar } from "./DrawingStyleBar";
 import { overlayLabels, setOverlayAxis, setPositionSize } from "./drawingOverlays";
 import { ToolGroup } from "./ToolGroup";
-import { positionReward, snapToAngle, type Px } from "../lib/drawingMath";
+import { positionReward, sameLinePoint, snapToAngle, type Px } from "../lib/drawingMath";
 import { usePane } from "../stores/grid";
 
 interface ToolDef {
@@ -858,7 +858,8 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
       // point somewhere else instead.
       if (SNAP_TOOLS.has(name)) {
         const o = chart.getOverlayById(id) as unknown as {
-          points: { dataIndex?: number; value?: number }[];
+          paneId: string;
+          points: { timestamp?: number; dataIndex?: number; value?: number }[];
           forceComplete: () => void;
           nextStep: () => void;
         };
@@ -866,7 +867,8 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
         o.forceComplete = () => {};
         o.nextStep = () => {
           const [a, b] = o.points;
-          if (!b || a?.dataIndex !== b.dataIndex || a?.value !== b.value) nextStep();
+          const toPx = (p: Partial<Point>) => chart.convertToPixel(p, { paneId: o.paneId }) as Partial<Px>;
+          if (!a || !b || !sameLinePoint(a, b, toPx)) nextStep();
         };
       }
     }

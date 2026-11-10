@@ -132,7 +132,7 @@ impl Indicator for BollingerBandsInd {
                 Line {
                     breaks: false,
                     y: middle,
-                    color: rgba(0x2196F3, 0.8),
+                    color: rgba(0xCE93D8, 1.0),
                     width: 1,
                     label: Some("BB Mid".into()),
                 },
@@ -224,21 +224,21 @@ impl Indicator for KeltnerChannels {
                 Line {
                     breaks: false,
                     y: upper.clone(),
-                    color: rgba(0x787B86, 0.7),
+                    color: rgba(0xFFB74D, 0.9),
                     width: 1,
                     label: Some("KC Upper".into()),
                 },
                 Line {
                     breaks: false,
                     y: middle,
-                    color: rgba(0x2196F3, 0.8),
+                    color: rgba(0xFFB74D, 1.0),
                     width: 1,
                     label: Some("KC Mid".into()),
                 },
                 Line {
                     breaks: false,
                     y: lower.clone(),
-                    color: rgba(0x787B86, 0.7),
+                    color: rgba(0xFFB74D, 0.9),
                     width: 1,
                     label: Some("KC Lower".into()),
                 },
@@ -246,7 +246,7 @@ impl Indicator for KeltnerChannels {
             fills: vec![Fill {
                 y1: upper,
                 y2: lower,
-                color: rgba(0x2196F3, 0.1),
+                color: rgba(0xFFB74D, 0.08),
                 color_below: None,
             }],
             is_overlay: true,
@@ -752,21 +752,21 @@ impl Indicator for Donchian {
                 Line {
                     breaks: false,
                     y: upper.clone(),
-                    color: rgba(0x787B86, 0.7),
+                    color: rgba(0x26C6DA, 0.9),
                     width: 1,
                     label: Some("DC Upper".into()),
                 },
                 Line {
                     breaks: false,
                     y: middle,
-                    color: rgba(0x2196F3, 0.8),
+                    color: rgba(0x26C6DA, 1.0),
                     width: 1,
                     label: Some("DC Mid".into()),
                 },
                 Line {
                     breaks: false,
                     y: lower.clone(),
-                    color: rgba(0x787B86, 0.7),
+                    color: rgba(0x26C6DA, 0.9),
                     width: 1,
                     label: Some("DC Lower".into()),
                 },
@@ -774,9 +774,10 @@ impl Indicator for Donchian {
             fills: vec![Fill {
                 y1: upper,
                 y2: lower,
-                color: rgba(0x2196F3, 0.1),
+                color: rgba(0x26C6DA, 0.08),
                 color_below: None,
             }],
+            steps: true,
             is_overlay: true,
             label: "DC".into(),
             ..Default::default()
@@ -853,7 +854,7 @@ impl Indicator for Cmf {
                 y: 0.0,
                 color: rgba(0x787B86, 0.5),
             }],
-            y_range: Some((-1.0, 1.0)),
+            y_range: None,
             label: "CMF".into(),
             ..Default::default()
         }

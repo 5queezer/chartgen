@@ -562,6 +562,19 @@ test.describe("drawing modifiers", () => {
       expect(pixels[1]!.y!).toBeLessThan(pixels[0]!.y!);
     });
 
+    test("a second point one pixel above the first on the same bar still makes a line", async ({
+      bootedApp: page,
+    }) => {
+      await page.waitForTimeout(1500);
+      await page.getByRole("button", { name: "Trend line" }).click();
+      await clickAt(page, { x: 500, y: 200 });
+      await clickAt(page, { x: 500, y: 199 });
+      await expect.poll(async () => (await overlays(page)).length).toBe(1);
+      const { pixels } = (await overlays(page))[0]!;
+      expect(pixels[0]!.x).toBe(pixels[1]!.x);
+      expect(pixels[0]!.y! - pixels[1]!.y!).toBe(1);
+    });
+
     /** Off the pane klinecharts sends a double click nowhere: it must not become a second click. */
     for (const [name, spot] of [
       ["y-axis", (w: number, _h: number) => ({ x: w - 20, y: 200 })],

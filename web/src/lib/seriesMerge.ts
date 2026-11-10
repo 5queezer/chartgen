@@ -367,6 +367,9 @@ export function mergeOlder(
       ].sort(bySignal);
     }
     shiftWhole(merged, cur, offset);
+    if (cur.line_breaks || pg.line_breaks) {
+      merged.line_breaks = [...(pg.line_breaks ?? []), ...(cur.line_breaks ?? []).map(x => x + offset)];
+    }
     if (merged.levels) writeLevels(merged.lines, merged.levels, bars.length);
     indicators[name] = merged;
   }
@@ -414,6 +417,7 @@ function padOlder(cur: Indicator, count: number): Indicator {
   if (cur.signals) merged.signals = cur.signals.map((s) => shiftSignal(s, count));
   if (cur.divlines) merged.divlines = cur.divlines.map((d) => shiftDivline(d, count));
   if (cur.labels) merged.labels = cur.labels.map((l) => shiftLabel(l, count));
+  if (cur.line_breaks) merged.line_breaks = cur.line_breaks.map(x => x + count);
   shiftWhole(merged, cur, count);
   return merged;
 }
@@ -584,6 +588,11 @@ export function mergeTail(
       for (const l of tl.labels ?? []) {
         if (l.x >= skip) own.push(shiftLabel(l, shift));
       }
+    }
+    if (cur.line_breaks || tl.line_breaks) {
+      const own = (cur.line_breaks ??= []);
+      while (own.length > 0 && own[own.length - 1]! >= from) own.pop();
+      for (const x of tl.line_breaks ?? []) if (x >= skip) own.push(x + shift);
     }
     if (cur.patterns || tl.patterns) {
       cur.patterns = (tl.patterns ?? []).map((p) => shiftPattern(p, shift));

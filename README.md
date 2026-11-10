@@ -35,6 +35,48 @@ chartgen --trade --testnet          # same server plus the live engine
 
 `--trade` includes the HTTP server, so do not combine it with `--serve`. All flags are in the [CLI reference](https://5queezer.github.io/chartgen/reference/cli/).
 
+### Notification retention
+
+`--trade` reads optional `~/.chartgen/config.toml` before starting its feed. With no
+file, notifications expire after 3600 seconds and each subscription queues at most
+1000 offline notifications. Either setting may be overridden:
+
+```toml
+notification_ttl_secs = 7_200 # two hours
+max_queue_size = 1_500       # entries per subscription
+```
+
+The supported TOML subset is these two bare root keys with positive decimal
+integers, optional `+`, digit separators, whitespace and `#` comments. Omitted keys
+keep their defaults. Values must fit a signed 64-bit integer; queue size must also
+fit the platform's `usize`. Zero, malformed values, duplicate or unknown keys,
+tables and other unsupported syntax fail startup with the file path and line
+number (exit status 2). Read errors also fail startup; a missing file uses defaults.
+Rendering, stdio MCP and `--serve` without a trading engine do not read this file.
+
+Triggered notifications include the engine's canonical interval, including when
+delivered from an offline queue after reconnecting. Existing saved alerts continue
+to load without an interval field.
+
+### PNG presentation
+
+Legends have opaque backgrounds; axes use fewer ticks on short panels and compact
+K/M/B numbers. Profile levels show their names and prices, and profile histograms
+sit behind candles. SAR uses per-bar dots, Donchian/pivot levels use stairs, and
+VWAP connectors stop at session resets while numeric series retain every value.
+Candlestick labels include direction (`+` bullish, `-` bearish) and a visible name
+key; `BH` means Belt Hold.
+
+The `heikin_ashi` indicator overlays a directional HA close/open ribbon on the
+original candles. To replace the price candles themselves, use the MCP
+`chart_style=heikin_ashi` option instead. The existing HA close remains numeric
+plot zero. Optional presentation metadata preserves existing numeric channels and
+is consumed by the browser adapters.
+
+Offline readability fixtures can be regenerated with
+`cargo run --example readability -- path/to/pngs`. They use fixed synthetic bars
+and timestamps, without market-data requests.
+
 ## Documentation
 
 - [Quick start](https://5queezer.github.io/chartgen/guides/quickstart/) and [CLI reference](https://5queezer.github.io/chartgen/reference/cli/)

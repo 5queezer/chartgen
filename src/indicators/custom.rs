@@ -65,6 +65,27 @@ fn anchored_vwap(data: &OhlcvData, anchor: &str) -> (Vec<f64>, Vec<f64>) {
     (vwap, sd)
 }
 
+/// Drawing boundaries use exactly the same calendar keys as the calculation.
+fn vwap_breaks(data: &OhlcvData, anchor: &str) -> Vec<usize> {
+    use super::pine::{bar_times, period_key, Period};
+    let period = match anchor {
+        "session" => Period::Day,
+        "week" => Period::Week,
+        "month" => Period::Month,
+        _ => return vec![],
+    };
+    let Some(times) = bar_times(data) else {
+        return vec![];
+    };
+    times
+        .windows(2)
+        .enumerate()
+        .filter_map(|(i, t)| {
+            (period_key(t[0], period) != period_key(t[1], period)).then_some(i + 1)
+        })
+        .collect()
+}
+
 pub struct Vwap {
     pub anchor: String,
 }
@@ -107,6 +128,7 @@ impl Indicator for Vwap {
             }],
             is_overlay: true,
             label: "VWAP".into(),
+            line_breaks: vwap_breaks(data, &self.anchor),
             ..Default::default()
         }
     }
@@ -525,7 +547,13 @@ impl Indicator for ParabolicSar {
         PanelResult {
             // TradingView draws a cross per bar; two lines that break at a
             // flip draw the same points on the series wire and the web chart.
-            lines: trend_lines(up, down, ["SAR Up", "SAR Down"]),
+            lines: {
+                let mut lines = trend_lines(up, down, ["SAR Up", "SAR Down"]);
+                lines[0].color = rgba(0xE6C84F, 1.0);
+                lines[1].color = rgba(0xB39DDB, 1.0);
+                lines
+            },
+            point_lines: true,
             dots,
             is_overlay: true,
             label: "SAR".into(),
@@ -708,7 +736,7 @@ impl Indicator for VwapBands {
                     y: vwap_vals,
                     color: rgba(0xFF9800, 0.9),
                     width: 2,
-                    label: Some("VWAP".into()),
+                    label: Some("VWAP Basis".into()),
                 },
                 Line {
                     breaks: false,
@@ -726,6 +754,7 @@ impl Indicator for VwapBands {
             }],
             is_overlay: true,
             label: "VWAP Bands".into(),
+            line_breaks: vwap_breaks(data, &self.anchor),
             ..Default::default()
         }
     }
@@ -741,7 +770,7 @@ impl Indicator for HeikinAshi {
     }
 
     fn description(&self) -> &str {
-        "Heikin Ashi — smoothed trend candles"
+        "Heikin Ashi overlay — HA close/open trend ribbon on raw candles; chart_style=heikin_ashi replaces the price candles"
     }
 
     fn compute(&self, data: &OhlcvData) -> PanelResult {
@@ -786,14 +815,28 @@ impl Indicator for HeikinAshi {
         }
 
         PanelResult {
-            // The HA close as a line, so the series wire and the web chart
-            // carry it; dots mark only the color flips.
-            lines: vec![Line {
-                breaks: false,
-                y: ha_close,
-                color: rgba(0x787B86, 0.9),
-                width: 1,
-                label: Some("HA Close".into()),
+            // The close stays at plot index 0 for existing series consumers.
+            lines: vec![
+                Line {
+                    breaks: false,
+                    y: ha_close.clone(),
+                    color: rgba(0x80CBC4, 1.0),
+                    width: 2,
+                    label: Some("HA Close".into()),
+                },
+                Line {
+                    breaks: false,
+                    y: ha_open.clone(),
+                    color: rgba(0xFFB74D, 1.0),
+                    width: 2,
+                    label: Some("HA Open".into()),
+                },
+            ],
+            fills: vec![Fill {
+                y1: ha_close,
+                y2: ha_open,
+                color: rgba(0x26A69A, 0.3),
+                color_below: Some(rgba(0xEF5350, 0.3)),
             }],
             dots,
             is_overlay: true,
@@ -917,6 +960,7 @@ impl Indicator for PivotPoints {
             ],
             is_overlay: true,
             label: "Pivot".into(),
+            steps: true,
             ..Default::default()
         }
     }
@@ -1275,6 +1319,7 @@ impl Indicator for VolumeProfile {
         PanelResult {
             hbars,
             hlines: vec![poc_hline, vah_hline, val_hline],
+            hline_labels: ["POC", "VAH", "VAL"].map(|s| Some(s.into())).to_vec(),
             is_overlay: true,
             label: "VPVR".into(),
             ..Default::default()
@@ -2149,6 +2194,19 @@ impl RangeVolumeProfile {
             .profile
             .compute(&bars_between(data, self.from, self.to));
         out.label = self.short_name().into();
+        for label in out.hline_labels.iter_mut().flatten() {
+            *label = format!("{} {}", self.short_name(), label);
+        }
+        if self.anchored {
+            // AVP uses violet/lime; fixed-range keeps the blue/gold palette.
+            for bar in &mut out.hbars {
+                let gold = bar.color.0 == 255 && bar.color.1 == 215;
+                bar.color = rgba(if gold { 0xCDDC39 } else { 0xAB80D9 }, bar.color.3);
+            }
+            for (i, line) in out.hlines.iter_mut().enumerate() {
+                line.color = rgba(if i == 0 { 0xCDDC39 } else { 0xAB80D9 }, 0.85);
+            }
+        }
         out.span = self.span_of(data);
         out
     }
@@ -2396,6 +2454,7 @@ impl Indicator for HvnLvn {
 
         if self.show_hvn {
             for (price, _) in &hvns {
+                out.hline_labels.push(Some("HVN".into()));
                 out.hlines.push(HLine {
                     y: *price,
                     color: rgba(0x26a69a, 0.75),
@@ -2404,6 +2463,7 @@ impl Indicator for HvnLvn {
         }
         if self.show_lvn {
             for (price, _) in &lvns {
+                out.hline_labels.push(Some("LVN".into()));
                 out.hlines.push(HLine {
                     y: *price,
                     color: rgba(0xef5350, 0.55),
@@ -2674,6 +2734,9 @@ impl Indicator for Tpo {
             });
         }
 
+        out.hline_labels = ["TPO POC", "TPO VAH", "TPO VAL"]
+            .map(|s| Some(s.into()))
+            .to_vec();
         out.hlines.push(HLine {
             y: prof.poc_price,
             color: rgba(0xFFD700, 0.8),
@@ -2848,7 +2911,7 @@ mod tests {
         for bars in 0..3 {
             let r = KalmanVolume::default().compute(&closes(&vec![1.0; bars]));
             assert_eq!(r.lines.len(), 2);
-            assert_eq!(HeikinAshi.compute(&closes(&vec![1.0; bars])).lines.len(), 1);
+            assert_eq!(HeikinAshi.compute(&closes(&vec![1.0; bars])).lines.len(), 2);
         }
     }
 

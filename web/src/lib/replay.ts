@@ -200,6 +200,7 @@ function sliceIndicator(
     out.fills = ind.fills.map((f) => ({ ...f, y1: cut(f.y1), y2: cut(f.y2) }));
   }
   const markers = lag.markers ?? 0;
+  if (ind.line_breaks) out.line_breaks = ind.line_breaks.filter(x => x < n);
   if (ind.signals) out.signals = ind.signals.filter((s) => s.x + markers < n);
   // A divergence is known once its end bar printed (and was confirmed): one
   // ending later is not drawn yet, not even in part.
