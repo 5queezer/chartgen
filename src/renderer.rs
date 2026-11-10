@@ -240,11 +240,19 @@ fn draw_chart(
         chart
             .configure_mesh()
             .disable_x_mesh()
+            .x_labels(0)
+            .y_labels(tick_count(candle_h.saturating_sub(20)))
+            .y_label_formatter(&|v| axis_number(*v, price, tick_count(candle_h.saturating_sub(20))))
+            .max_light_lines(0)
             .light_line_style(GRID)
             .bold_line_style(GRID)
             .axis_style(GRID)
             .label_style(("monospace", 14, &TEXT))
             .draw()?;
+
+        for (overlay, future) in &overlays {
+            draw_background(&mut chart, overlay, *future, n, x, price)?;
+        }
 
         for (i, bar) in data.bars.iter().enumerate() {
             let x = i as f64;
@@ -270,32 +278,15 @@ fn draw_chart(
 
         // Draw overlays on the candle chart
         for (overlay, future) in &overlays {
-            draw_result(&mut chart, overlay, *future, n, x, price)?;
+            draw_foreground(&mut chart, overlay, *future, n, x, price)?;
         }
 
-        // Overlay labels and current value annotations on candle chart
-        {
-            let mut label_y = 5;
-            for (overlay, _) in &overlays {
-                if !overlay.label.is_empty() {
-                    candle_area.draw_text(
-                        &overlay.label,
-                        &("monospace", 14)
-                            .into_font()
-                            .color(&RGBColor(200, 200, 210)),
-                        (85, label_y),
-                    )?;
-                    label_y += 18;
-                }
-                for (text, color) in legend(overlay) {
-                    candle_area.draw_text(
-                        &text,
-                        &("monospace", 12).into_font().color(&color),
-                        (85, label_y),
-                    )?;
-                    label_y += 15;
-                }
-            }
+        draw_profile_labels(&mut chart, &overlays, x, price)?;
+
+        // Opaque, wrapped legend rows keep candles from crossing the text.
+        let mut label_y = 5;
+        for (overlay, _) in &overlays {
+            label_y = draw_legend(&candle_area, overlay, label_y, gutter)?;
         }
 
         // Price label: in the gutter at the last close, in its candle's color.
@@ -341,6 +332,9 @@ fn draw_chart(
             .configure_mesh()
             .disable_x_mesh()
             .x_labels(0)
+            .y_labels(tick_count(panel_h.saturating_sub(30)))
+            .y_label_formatter(&|v| axis_number(*v, y, tick_count(panel_h.saturating_sub(30))))
+            .max_light_lines(0)
             .light_line_style(GRID)
             .bold_line_style(GRID)
             .axis_style(GRID)
@@ -349,27 +343,7 @@ fn draw_chart(
 
         draw_result(&mut chart, result, *future, n, x, y)?;
 
-        // Label
-        if !result.label.is_empty() {
-            area.draw_text(
-                &result.label,
-                &("monospace", 15)
-                    .into_font()
-                    .color(&RGBColor(200, 200, 210)),
-                (85, 5),
-            )?;
-        }
-
-        // Current value annotations
-        let mut ann_y = 22; // below the panel label
-        for (text, color) in legend(result) {
-            area.draw_text(
-                &text,
-                &("monospace", 12).into_font().color(&color),
-                (85, ann_y),
-            )?;
-            ann_y += 15;
-        }
+        draw_legend(area, result, 5, gutter)?;
     }
 
     // ---- Draw X-axis datetime labels along the bottom ----
@@ -408,12 +382,18 @@ fn draw_result(
     x: (f64, f64),
     y: (f64, f64),
 ) -> Drawn {
-    let path = |chart: &mut Chart, run: &[Pt], style: ShapeStyle| -> Drawn {
-        for piece in clip_run(run, x, y) {
-            chart.draw_series(std::iter::once(PathElement::new(piece, style)))?;
-        }
-        Ok(())
-    };
+    draw_background(chart, r, future, n, x, y)?;
+    draw_foreground(chart, r, future, n, x, y)
+}
+
+fn draw_background(
+    chart: &mut Chart,
+    r: &PanelResult,
+    future: Option<&Projection>,
+    n: usize,
+    x: (f64, f64),
+    y: (f64, f64),
+) -> Drawn {
     let rect = |chart: &mut Chart, (x0, x1): (f64, f64), a: f64, b: f64, c: RGBAColor| -> Drawn {
         let (lo, hi) = (a.min(b).max(y.0), a.max(b).min(y.1));
         let (x0, x1) = (x0.max(x.0), x1.min(x.1));
@@ -425,8 +405,6 @@ fn draw_result(
         }
         Ok(())
     };
-    let inside = |(px, py): Pt| (x.0..=x.1).contains(&px) && (y.0..=y.1).contains(&py);
-
     // Fills (approximate with vertical bars for simplicity in plotters), and on past the
     // last bar.
     let projected = future
@@ -461,6 +439,37 @@ fn draw_result(
         let half = hbar.height / 2.0;
         rect(chart, edges, hbar.y - half, hbar.y + half, hbar.color)?;
     }
+    Ok(())
+}
+
+fn draw_foreground(
+    chart: &mut Chart,
+    r: &PanelResult,
+    future: Option<&Projection>,
+    n: usize,
+    x: (f64, f64),
+    y: (f64, f64),
+) -> Drawn {
+    let path = |chart: &mut Chart, run: &[Pt], style: ShapeStyle| -> Drawn {
+        for piece in clip_run(run, x, y) {
+            chart.draw_series(std::iter::once(PathElement::new(piece, style)))?;
+        }
+        Ok(())
+    };
+    let rect = |chart: &mut Chart, (x0, x1): (f64, f64), a: f64, b: f64, c: RGBAColor| -> Drawn {
+        let (lo, hi) = (a.min(b).max(y.0), a.max(b).min(y.1));
+        let (x0, x1) = (x0.max(x.0), x1.min(x.1));
+        if lo <= hi && x0 < x1 {
+            chart.draw_series(std::iter::once(Rectangle::new(
+                [(x0, lo), (x1, hi)],
+                c.filled(),
+            )))?;
+        }
+        Ok(())
+    };
+    let inside = |(px, py): Pt| (x.0..=x.1).contains(&px) && (y.0..=y.1).contains(&py);
+
+    let (s0, s1) = r.span.map_or(x, |(a, b)| (a as f64 - 0.5, b as f64 + 0.5));
     if let Some((_, last)) = r.span {
         let edge = TEXT.mix(0.6).stroke_width(1);
         for at in [s0].into_iter().chain((last + 1 < n).then_some(s1)) {
@@ -493,8 +502,21 @@ fn draw_result(
     // Pine's plot.style_linebr), so a gap draws no connector.
     for line in &r.lines {
         let draw_width = if line.width <= 1 { 2 } else { line.width };
-        for run in level_runs(line_runs(&line.y), r.level_lines) {
-            path(chart, &run, line.color.stroke_width(draw_width))?;
+        for run in level_runs(
+            drawing_runs(&line.y, &r.line_breaks, r.steps),
+            r.level_lines,
+        ) {
+            if r.point_lines || (run.len() == 1 && !r.line_breaks.is_empty()) {
+                for &point in run.iter().filter(|p| inside(**p)) {
+                    chart.draw_series(std::iter::once(Circle::new(
+                        point,
+                        2,
+                        line.color.filled(),
+                    )))?;
+                }
+            } else {
+                path(chart, &run, line.color.stroke_width(draw_width))?;
+            }
         }
     }
     // On past the last bar, from its value there.
@@ -503,7 +525,7 @@ fn draw_result(
             continue;
         };
         let joined: Vec<f64> = line.y.last().into_iter().chain(values).copied().collect();
-        for run in line_runs(&joined) {
+        for run in drawing_runs(&joined, &[], r.steps) {
             let run: Vec<Pt> = run.iter().map(|(k, v)| (k + (n - 1) as f64, *v)).collect();
             let draw_width = if line.width <= 1 { 2 } else { line.width };
             path(chart, &run, line.color.stroke_width(draw_width))?;
@@ -1182,6 +1204,107 @@ fn line_runs(y: &[f64]) -> Vec<Vec<(f64, f64)>> {
         .collect()
 }
 
+/// Preserve every sample, splitting BEFORE session boundaries. Steps hold the old
+/// value until the new bar, then jump vertically at that bar.
+fn drawing_runs(values: &[f64], breaks: &[usize], steps: bool) -> Vec<Vec<Pt>> {
+    if breaks.is_empty() && !steps {
+        return line_runs(values);
+    }
+    let mut runs = Vec::new();
+    let mut run = Vec::new();
+    for (i, &value) in values.iter().enumerate() {
+        if (!value.is_finite() || breaks.contains(&i)) && !run.is_empty() {
+            runs.push(std::mem::take(&mut run));
+        }
+        if !value.is_finite() {
+            continue;
+        }
+        if steps {
+            if let Some(&(_, previous)) = run.last() {
+                run.push((i as f64, previous));
+            }
+        }
+        run.push((i as f64, value));
+    }
+    if !run.is_empty() {
+        runs.push(run);
+    }
+    runs
+}
+
+/// Price tags for profile levels, placed together so adjacent profiles cannot
+/// overwrite each other's names. Numeric prices retain price precision.
+fn draw_profile_labels(
+    chart: &mut Chart,
+    overlays: &[(&PanelResult, Option<&Projection>)],
+    x: (f64, f64),
+    y: (f64, f64),
+) -> Drawn {
+    let mut labels = Vec::new();
+    for (r, _) in overlays {
+        let end = r.span.map_or(x.1, |(_, last)| last as f64 + 0.5).min(x.1);
+        for (i, h) in r.hlines.iter().enumerate() {
+            if let Some(Some(name)) = r.hline_labels.get(i) {
+                if h.y.is_finite() && (y.0..=y.1).contains(&h.y) {
+                    labels.push((
+                        end,
+                        h.y,
+                        format!("{name}: {}", readable_number(h.y, decimals(h.y), false)),
+                        h.color,
+                    ));
+                }
+            }
+        }
+        for line in &r.lines {
+            let Some(name) = line.label.as_deref() else {
+                continue;
+            };
+            if !["POC", "VAH", "VAL", "HVN", "LVN"]
+                .iter()
+                .any(|level| name.contains(level))
+            {
+                continue;
+            }
+            let Some(&value) = line.y.iter().rev().find(|v| v.is_finite()) else {
+                continue;
+            };
+            if (y.0..=y.1).contains(&value) {
+                labels.push((
+                    end,
+                    value,
+                    format!("{name}: {}", readable_number(value, decimals(value), false)),
+                    line.color,
+                ));
+            }
+        }
+    }
+    labels.sort_by(|a, b| b.1.total_cmp(&a.1));
+    let (px, py) = chart.plotting_area().get_pixel_range();
+    let height = py.end - py.start;
+    let spacing = 18.min(height / labels.len().max(1) as i32);
+    let mut previous = py.start - spacing;
+    let count = labels.len();
+    for (i, (end, value, text, color)) in labels.into_iter().enumerate() {
+        let (gx, gy) = chart.backend_coord(&(end, value));
+        let color = legend_color(RGBColor(color.0, color.1, color.2));
+        let font = ("monospace", 12).into_font().color(&color);
+        let width = chart.plotting_area().estimate_text_size(&text, &font)?.0 as i32;
+        let top = (gy - 7)
+            .max(previous + spacing)
+            .min(py.end - 16 - (count - i - 1) as i32 * spacing)
+            .max(py.start);
+        previous = top;
+        let dx = (-width - 5).max(px.start - gx);
+        let dy = top - gy;
+        chart.draw_series(std::iter::once(
+            EmptyElement::at((end, value))
+                + Rectangle::new([(dx - 3, dy - 2), (dx + width + 3, dy + 14)], BG.filled())
+                + Text::new(text, (dx, dy), font),
+        ))?;
+    }
+    Ok(())
+}
+
 /// `runs`, split again wherever a value changes if the line holds levels, so a jump
 /// between two levels draws no connector (`PanelResult::level_lines`).
 fn level_runs(runs: Vec<Vec<(f64, f64)>>, levels: bool) -> Vec<Vec<(f64, f64)>> {
@@ -1264,10 +1387,18 @@ fn dashes(a: Pt, b: Pt) -> Vec<(Pt, Pt)> {
     (0..STEPS).step_by(2).map(|s| (at(s), at(s + 1))).collect()
 }
 
+/// Lift dim plot colors for small text on the dark, opaque legend surface.
+fn legend_color(c: RGBColor) -> RGBColor {
+    let light = (f64::from(c.0) * 299.0 + f64::from(c.1) * 587.0 + f64::from(c.2) * 114.0) / 1000.0;
+    let mix = ((145.0 - light) / (255.0 - light)).clamp(0.0, 1.0);
+    let lift = |v| (f64::from(v) + (255.0 - f64::from(v)) * mix).round() as u8;
+    RGBColor(lift(c.0), lift(c.1), lift(c.2))
+}
+
 /// Legend rows of a result: each labelled line with its value, or with none, its
 /// histogram's under the result's name (Funding, AO).
 fn legend(r: &PanelResult) -> Vec<(String, RGBColor)> {
-    let solid = |c: &RGBAColor| RGBColor(c.0, c.1, c.2);
+    let solid = |c: &RGBAColor| legend_color(RGBColor(c.0, c.1, c.2));
     let mut rows: Vec<_> = r
         .lines
         .iter()
@@ -1290,6 +1421,15 @@ fn legend(r: &PanelResult) -> Vec<(String, RGBColor)> {
                 .and_then(|i| bars.colors.get(i))
                 .map_or(TEXT, solid);
             rows.push((format!("{name}: {v}"), color));
+        }
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    for label in &r.labels {
+        if !label.name.is_empty() && seen.insert((label.text.clone(), label.key.clone())) {
+            rows.push((
+                format!("{} = {} ({})", label.text, label.name, label.bias.as_str()),
+                solid(&label.bias.color()),
+            ));
         }
     }
     rows
@@ -1323,7 +1463,86 @@ fn legend_number(v: f64) -> String {
     } else {
         ((-a.log10()).ceil() as usize + 2).min(10)
     };
-    format!("{v:.prec$}")
+    readable_number(v, prec, true)
+}
+
+fn readable_number(v: f64, precision: usize, compact: bool) -> String {
+    if !v.is_finite() {
+        return "n/a".into();
+    }
+    let (scale, suffix) = if compact && v.abs() >= 1e9 {
+        (1e9, "B")
+    } else if compact && v.abs() >= 1e6 {
+        (1e6, "M")
+    } else if compact && v.abs() >= 1e3 {
+        (1e3, "K")
+    } else {
+        (1.0, "")
+    };
+    let precision = if suffix.is_empty() { precision } else { 2 };
+    let mut text = format!("{:.*}", precision, v / scale);
+    if text.contains('.') {
+        text = text.trim_end_matches('0').trim_end_matches('.').into();
+    }
+    if text == "-0" {
+        text = "0".into();
+    }
+    format!("{text}{suffix}")
+}
+
+fn tick_count(plot_height: u32) -> usize {
+    (plot_height / 36).clamp(3, 8) as usize
+}
+
+fn axis_number(v: f64, range: (f64, f64), ticks: usize) -> String {
+    let step = (range.1 - range.0).abs() / ticks.max(1) as f64;
+    let prec = if step > 0.0 && step < 1.0 {
+        (-step.log10()).ceil() as usize + 1
+    } else {
+        1
+    };
+    readable_number(v, prec.min(10), true)
+}
+
+/// One indicator per wrapped row, on an opaque surface.
+fn draw_legend(
+    area: &Root,
+    r: &PanelResult,
+    top: i32,
+    gutter: u32,
+) -> Result<i32, Box<dyn std::error::Error>> {
+    let mut entries = Vec::new();
+    if !r.label.is_empty() {
+        entries.push((r.label.clone(), TITLE_COLOR));
+    }
+    entries.extend(legend(r));
+    let right = area.dim_in_pixel().0.saturating_sub(gutter + 12) as i32;
+    let mut x = 90;
+    let mut y = top + 4;
+    let mut positioned = Vec::new();
+    let mut max_x = x;
+    for (text, color) in entries {
+        let font = ("monospace", 12).into_font().color(&color);
+        let w = area.estimate_text_size(&text, &font)?.0 as i32;
+        if x > 90 && x + w > right {
+            x = 90;
+            y += 18;
+        }
+        max_x = max_x.max(x + w);
+        positioned.push((text, color, x, y));
+        x += w + 18;
+    }
+    if positioned.is_empty() {
+        return Ok(top);
+    }
+    area.draw(&Rectangle::new(
+        [(85, top), (max_x + 5, y + 16)],
+        BG.filled(),
+    ))?;
+    for (text, color, x, y) in positioned {
+        area.draw_text(&text, &("monospace", 12).into_font().color(&color), (x, y))?;
+    }
+    Ok(y + 18)
 }
 
 /// Lowest and highest value `r` draws, its projection's included; None when it draws none.
@@ -1357,6 +1576,7 @@ fn extent(r: &PanelResult, future: Option<&Projection>) -> Option<(f64, f64)> {
         .chain(segments)
         .chain(dots)
         .chain(projected)
+        .chain(r.hlines.iter().map(|h| h.y))
         .filter(|v| v.is_finite())
         .fold(None, |acc, v| {
             Some(acc.map_or((v, v), |(lo, hi): (f64, f64)| (lo.min(v), hi.max(v))))
@@ -1393,6 +1613,56 @@ fn panel_range(r: &PanelResult, future: Option<&Projection>) -> (f64, f64) {
 mod tests {
     use super::*;
     const NAN: f64 = f64::NAN;
+
+    #[test]
+    fn readable_values_drop_negative_zero_and_compact_large_numbers() {
+        assert_eq!(legend_number(-0.0), "0");
+        assert_eq!(legend_number(8_400_000_000.0), "8.4B");
+        assert_eq!(legend_number(-1_250_000.0), "-1.25M");
+        assert_eq!(legend_number(1200.0), "1.2K");
+        assert_eq!(legend_number(20.0), "20");
+    }
+
+    #[test]
+    fn profile_histograms_preserve_candle_body_colors() {
+        let (w, h) = (800, 400);
+        let data = crate::data::sample_data(40);
+        let paint = |results: &[(&PanelResult, Option<&Projection>)]| {
+            let mut buf = vec![0; (w * h * 3) as usize];
+            {
+                let root = BitMapBackend::with_buffer(&mut buf, (w, h)).into_drawing_area();
+                draw_chart(&root, &data, results, None, &[]).unwrap();
+            }
+            buf
+        };
+        let base = paint(&[]);
+        let profile = PanelResult {
+            is_overlay: true,
+            hbars: vec![crate::indicator::HBar {
+                y: (data.bars[0].low + data.bars[0].high) / 2.0,
+                height: 1000.0,
+                width: 1.0,
+                offset: 0.0,
+                color: RGBAColor(0, 0, 255, 0.5),
+                left: true,
+            }],
+            ..Default::default()
+        };
+        let actual = paint(&[(&profile, None)]);
+        let mut candles = 0;
+        for (before, after) in base
+            .as_chunks::<3>()
+            .0
+            .iter()
+            .zip(actual.as_chunks::<3>().0)
+        {
+            if *before == [BULL.0, BULL.1, BULL.2] || *before == [BEAR.0, BEAR.1, BEAR.2] {
+                candles += 1;
+                assert_eq!(before, after, "histogram must stay behind the candle");
+            }
+        }
+        assert!(candles > 100);
+    }
 
     #[test]
     fn bars_sit_on_the_price_panes_x_range() {
@@ -1466,13 +1736,10 @@ mod tests {
 
     #[test]
     fn legend_shows_the_last_bar() {
-        assert_eq!(legend_value(&[1.0, 2.5], false).as_deref(), Some("2.50"));
+        assert_eq!(legend_value(&[1.0, 2.5], false).as_deref(), Some("2.5"));
         // The inactive trend line: no stale value from an earlier bar.
         assert_eq!(legend_value(&[1.0, NAN], true).as_deref(), Some("n/a"));
-        assert_eq!(
-            legend_value(&[1.0, 2.0, NAN], false).as_deref(),
-            Some("2.00")
-        );
+        assert_eq!(legend_value(&[1.0, 2.0, NAN], false).as_deref(), Some("2"));
         assert_eq!(legend_value(&[NAN, NAN], true), None);
         assert_eq!(legend_value(&[], false), None);
     }
@@ -1606,17 +1873,20 @@ mod clip_tests {
         };
         assert_eq!(
             legend(&funding),
-            vec![("Funding: 0.0100".to_string(), RGBColor(38, 166, 154))]
+            vec![(
+                "Funding: 0.01".to_string(),
+                legend_color(RGBColor(38, 166, 154))
+            )]
         );
         // With a labelled line, the line's value alone, as before.
         let macd = PanelResult {
             lines: vec![line(vec![1.0, 2.0])],
             ..funding
         };
-        assert_eq!(legend(&macd)[0].0, "L: 2.00");
-        assert_eq!(legend_number(0.0057), "0.00570");
-        assert_eq!(legend_number(-0.5), "-0.50");
-        assert_eq!(legend_number(80395.55), "80395.55");
+        assert_eq!(legend(&macd)[0].0, "L: 2");
+        assert_eq!(legend_number(0.0057), "0.0057");
+        assert_eq!(legend_number(-0.5), "-0.5");
+        assert_eq!(legend_number(80395.55), "80.4K");
     }
 
     #[test]
@@ -1678,6 +1948,39 @@ mod clip_tests {
         );
         assert!(!leaving.is_empty());
         assert!(leaving.iter().all(|(x, _)| *x <= 262), "{leaving:?}");
+    }
+
+    #[test]
+    fn stairs_points_and_session_breaks_do_not_draw_diagonal_connectors() {
+        let base = PanelResult {
+            lines: vec![line(vec![20.0, 80.0])],
+            ..Default::default()
+        };
+        let stairs = painted(
+            &PanelResult {
+                steps: true,
+                ..base.clone()
+            },
+            None,
+        );
+        assert!(stairs.iter().any(|(x, y)| *x == 15 && *y > 155));
+        assert!(!stairs
+            .iter()
+            .any(|(x, y)| *x == 15 && (90..110).contains(y)));
+        for r in [
+            PanelResult {
+                point_lines: true,
+                ..base.clone()
+            },
+            PanelResult {
+                line_breaks: vec![1],
+                ..base
+            },
+        ] {
+            let dots = painted(&r, None);
+            assert!(!dots.is_empty(), "singleton session values remain visible");
+            assert!(!dots.iter().any(|(x, _)| *x == 15));
+        }
     }
 
     #[test]
