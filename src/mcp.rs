@@ -3331,9 +3331,9 @@ fn tool_subscribe_notifications(
     let token = match token {
         Some(t) => t,
         None => {
-            return tool_ok(
+            return tool_err(
                 id,
-                json!({"error": "No authentication token — subscribe via authenticated HTTP endpoint"}),
+                "No authentication token — subscribe via authenticated HTTP endpoint",
             )
         }
     };
@@ -3387,9 +3387,9 @@ fn tool_unsubscribe_notifications(
     let token = match token {
         Some(t) => t,
         None => {
-            return tool_ok(
+            return tool_err(
                 id,
-                json!({"error": "No authentication token — unsubscribe via authenticated HTTP endpoint"}),
+                "No authentication token — unsubscribe via authenticated HTTP endpoint",
             )
         }
     };
@@ -3417,7 +3417,7 @@ fn tool_list_subscriptions(
     };
     let token = match token {
         Some(t) => t,
-        None => return tool_ok(id, json!({"error": "No authentication token"})),
+        None => return tool_err(id, "No authentication token"),
     };
 
     let e = engine.read().unwrap();
@@ -3722,19 +3722,30 @@ mod tests {
     }
 
     #[test]
-    fn subscribe_notifications_no_token() {
+    fn notification_tools_require_authentication() {
         let dir = temp_dir("sub_no_tok");
         let engine = make_engine(dir.clone());
 
-        let args = json!({});
-        let resp = tool_subscribe_notifications(Some(json!(1)), &args, Some(&engine), None);
-        assert!(!is_error(&resp));
-        let text = response_text(&resp);
-        let parsed: Value = serde_json::from_str(&text).unwrap();
-        assert!(parsed["error"]
-            .as_str()
+        // Leave an existing subscription in place: unauthenticated operations
+        // must neither expose nor modify it.
+        engine
+            .write()
             .unwrap()
-            .contains("No authentication token"));
+            .subscription_registry
+            .subscribe("tok1", None, None);
+        let responses = [
+            tool_subscribe_notifications(Some(json!(1)), &json!({}), Some(&engine), None),
+            tool_unsubscribe_notifications(Some(json!(2)), Some(&engine), None),
+            tool_list_subscriptions(Some(json!(3)), Some(&engine), None),
+        ];
+        for (index, resp) in responses.iter().enumerate() {
+            assert!(is_error(resp), "tool {} must signal isError", index);
+            assert_eq!(resp["id"], json!(index + 1));
+            assert!(response_text(resp).contains("No authentication token"));
+        }
+        let state = engine.read().unwrap();
+        assert!(state.subscription_registry.list("tok1").is_some());
+        assert!(!dir.join("subscriptions.json").exists());
 
         let _ = std::fs::remove_dir_all(&dir);
     }
