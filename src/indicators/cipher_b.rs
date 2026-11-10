@@ -502,7 +502,7 @@ impl Indicator for CipherB {
             lines.push(Line {
                 breaks: false,
                 y: wt2.clone(),
-                color: rgba(0x1f1559, 0.8),
+                color: rgba(0xB39DDB, 1.0),
                 width: 2,
                 label: Some("WT2".into()),
             });
@@ -667,7 +667,7 @@ impl Indicator for CipherB {
                 lines.push(Line {
                     breaks: false,
                     y: stoch_d.clone(),
-                    color: rgba(0x673ab7, 0.1),
+                    color: rgba(0xFFB74D, 1.0),
                     width: 1,
                     label: Some("Stoch D".into()),
                 });

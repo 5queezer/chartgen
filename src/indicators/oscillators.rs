@@ -201,7 +201,7 @@ impl Kind {
             Kind::EaseOfMovement => "EOM",
             Kind::VolumeOscillator => "Vol Osc",
             Kind::BalanceOfPower => "BOP",
-            Kind::Rvi => "RVGI",
+            Kind::Rvi => "RVI (Relative Vigor)",
             Kind::SmiErgodic => "SMI Ergodic",
             Kind::ConnorsRsi => "CRSI",
         }
@@ -517,6 +517,7 @@ impl Indicator for Osc {
                     .map(|i| 100.0 * (4.0 * a[i] + 2.0 * b[i] + s[i]) / 7.0)
                     .collect();
                 r.lines = vec![line(y, PURPLE, 2, "UO")];
+                r.hlines = vec![hl(30.0, 0.5), hl(70.0, 0.5)];
                 r.y_range = Some((0.0, 100.0));
             }
             Kind::Ppo => {
@@ -541,7 +542,7 @@ impl Indicator for Osc {
                     &zip(&s1, &s2, |a, b| a + b),
                 );
                 r.lines = vec![line(y, PURPLE, 2, "CMO")];
-                r.hlines = vec![hl(0.0, 0.5)];
+                r.hlines = vec![hl(-50.0, 0.5), hl(0.0, 0.3), hl(50.0, 0.5)];
                 r.y_range = Some((-100.0, 100.0));
             }
             Kind::Dpo => {
@@ -698,7 +699,7 @@ impl Indicator for Osc {
                 let rvi = div(&num, &den);
                 let sig = swma(&rvi);
                 r.lines = vec![
-                    line(rvi, 0x089981, 2, "RVGI"),
+                    line(rvi, 0x089981, 2, "RVI"),
                     line(sig, 0xf23645, 2, "Signal"),
                 ];
                 r.hlines = vec![hl(0.0, 0.5)];
