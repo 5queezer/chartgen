@@ -660,6 +660,47 @@ test.describe("drawing modifiers", () => {
       await expect(line).toHaveAttribute("aria-pressed", "true");
     });
 
+    test("a second click where the mouse was for the first, after a tick moved the axis by pixels, places nothing", async ({
+      bootedApp: page,
+    }) => {
+      const line = page.getByRole("button", { name: "Trend line" });
+      const formingBar = () =>
+        page.evaluate(() => (window as unknown as TestWindow).__chartgenTest.chart().getDataList().at(-1)!.timestamp);
+      /** The y pixel of a price in the price pane. */
+      const yOf = (value: number) =>
+        page.evaluate(
+          (v) =>
+            (window as unknown as TestWindow).__chartgenTest
+              .chart()
+              .convertToPixel({ value: v }, { paneId: "candle_pane" }).y!,
+          value,
+        );
+      for (;;) {
+        await page.waitForTimeout(1500);
+        const bar = await lowerBar(page);
+        await line.click();
+        await clickAt(page, { x: 500, y: 200 });
+        const price = await valueAtY(page, 200);
+        // A tick that takes the axis far enough to move the first point off its pixel.
+        await lowerBar(page, 40, bar);
+        const moved = Math.abs((await yOf(price)) - 200);
+        await clickAt(page, { x: 500, y: 200 });
+        if ((await formingBar()) === bar) {
+          // By pixels the two clicks are apart now: only the mouse says they are one place.
+          expect(moved).toBeGreaterThanOrEqual(1);
+          break;
+        }
+        // The hour's bar closed during the clicks: the same pixel is another bar. Once more.
+        await page.evaluate(() => localStorage.removeItem("chartgen.drawings.BTCUSDT"));
+        await reloadApp(page);
+      }
+      expect(await overlays(page)).toHaveLength(0);
+      await expect(line).toHaveAttribute("aria-pressed", "true");
+      // The tool is still waiting: a second point somewhere else makes the line.
+      await clickAt(page, { x: 700, y: 120 });
+      await expect.poll(async () => (await overlays(page)).length).toBe(1);
+    });
+
     /** Off the pane klinecharts sends a double click nowhere: it must not become a second click. */
     for (const [name, spot] of [
       ["y-axis", (w: number, _h: number) => ({ x: w - 20, y: 200 })],
