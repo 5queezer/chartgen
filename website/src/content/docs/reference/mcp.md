@@ -1532,11 +1532,12 @@ setups; `can_create` in the list says so.
 
 | Tool | Arguments | Result |
 |---|---|---|
-| `create_setup` | `symbol`, `interval`, `direction`, `thesis`; for a setup `entry`, `invalidation`, `targets`, `expires_at`; optional `drawings`, `decision`, `tags` | The setup with its log |
+| `create_setup` | `symbol`, `interval`, `direction`, `thesis`; for a setup `entry`, `invalidation`, `targets`, `expires_at`; optional `drawings`, `decision`, `tags`, `features`, `probability`, `playbook_version` | The setup with its log |
 | `revise_setup` | `id`, `reason`; any of `thesis`, `drawings`, `tags`, `entry`, `invalidation`, `targets`, `expires_at` | The setup with its log |
 | `get_setup` | `id` | The setup with its log |
 | `list_setups` | optional `status`, `symbol`, `tags` (only setups that have all of them), `limit` (default 50, at most 500) | `{enabled, can_create, replay, total, limits, setups: [...]}`, newest first, without logs |
 | `cancel_setup` | `id`, `reason` | The setup with its log |
+| `get_track_record` | optional `symbol`, `direction`, `decision`, `playbook_version`, `from`, `to`, `group_by`, `feature` | `{replay, closed, open, truncated, group_by, feature, total, groups: [...]}` |
 
 - `symbol`: a Binance symbol. Anything else is refused.
 - `direction`: `long` or `short`. `decision`: `take` (default), or `skip` for a decision not to
@@ -1555,6 +1556,14 @@ setups; `can_create` in the list says so.
   setup, or one being cancelled, takes a revision with `tags` alone.
 - `status`, `result_r`, the excursion and duration fields, `closest_approach_r`,
   `shadow_results`, `fill`, `exit` and `costs` are set by the server. Sending one is an error.
+- `features`, `probability`, `playbook_version` ([ADR-0064](/chartgen/decisions/0064-a-setups-record/)):
+  what you state when you make the setup, all optional. `features` is a flat object of at
+  most 16 entries, names of `a-z`, `0-9` and `_` up to 32 characters, values a number,
+  `true` or `false`, or a string of at most 32 characters. `probability` is your own
+  estimate from 0 to 1 that the setup reaches its first target. `playbook_version` is a
+  label of at most 32 characters. The server gives them no meaning. **They are fixed once the
+  setup is made:** `revise_setup` and `cancel_setup` refuse them. A setup made without them
+  answers without them.
 - `as_of`: [replay servers](/chartgen/guides/setups/#replay) only, where every call needs it.
   `generate_chart`, `inspect_chart`, `get_indicators` and `get_quotes` take it there too.
 
@@ -1576,6 +1585,50 @@ entry: `seq`, `at`, `by` (`agent` or `server`), `kind` (`created`, `revised`, `c
 
 A call that fails a check answers with an error whose text is JSON:
 `{error, setup_errors: [{field, message, hint}]}`, one entry per problem, and stores nothing.
+
+#### Your track record
+
+`get_track_record` counts your **closed** setups. Open ones are not counted; `open` says how
+many match the filters.
+
+- Filters: `symbol`, `direction`, `decision`, `playbook_version`, and `from` and `to` (unix
+  seconds, unix ms or ISO 8601) on the time the setup was **made**.
+- `group_by`: `playbook_version`, `feature` (with `feature`, the name of one), `probability`
+  (in tenths: `0.0`, `0.1` ... `0.9`, with 1 in the last), `symbol` or `direction`. A setup
+  that stated none is in the group whose `key` is `null`. Groups come in the order of their
+  keys. More than 50 groups are refused: group by something that takes fewer values.
+
+```json
+{
+  "replay": false, "closed": 3, "open": 1, "truncated": false,
+  "group_by": "playbook_version", "feature": null,
+  "total": {
+    "count": 3, "won": 2, "invalidated": 1, "expired": 0, "cancelled": 0,
+    "with_result": 3, "total_r": 2.1, "mean_r": 0.7, "gaps": 0,
+    "probability": { "stated": 2, "mean": 0.425, "won": 1, "observed": 0.5 }
+  },
+  "groups": [
+    { "key": null, "count": 1, "won": 1, "invalidated": 0, "expired": 0, "cancelled": 0,
+      "with_result": 1, "total_r": 1.6, "mean_r": 1.6, "gaps": 0,
+      "probability": { "stated": 0, "mean": null, "won": 0, "observed": null } },
+    { "key": "v1", "count": 2, "won": 1, "invalidated": 1, "expired": 0, "cancelled": 0,
+      "with_result": 2, "total_r": 0.5, "mean_r": 0.25, "gaps": 0,
+      "probability": { "stated": 2, "mean": 0.425, "won": 1, "observed": 0.5 } }
+  ]
+}
+```
+
+- `with_result` is how many have a result in R; `mean_r` is over those and `null` when there
+  are none. A setup that expired filled while nobody scored it has no result and is not
+  given one. `gaps` counts results that do not cover bars the server missed.
+- `probability`: of the setups that stated one, how many (`stated`), its `mean`, how many of
+  them `won`, and that share (`observed`).
+- **It counts and judges nothing.** There is no significance and no ranking. A group of a few
+  setups says little, and setups that overlap in time or share a cause are not independent
+  trials.
+- The newest 500 closed setups are read; `truncated` is true if older ones were left out.
+- On a [replay server](/chartgen/guides/setups/#replay) it needs `as_of` and is the same on
+  every run.
 
 ### Scripted indicators (`CHARTGEN_SCRIPTING=1`)
 
