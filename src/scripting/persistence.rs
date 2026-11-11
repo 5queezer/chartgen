@@ -580,8 +580,8 @@ impl Store {
         tx.commit()
     }
 
-    /// Every stored refresh token; families whose newest token is older than
-    /// `cutoff` are deleted first.
+    /// Every stored refresh token, in the order they were stored; families whose
+    /// newest token is older than `cutoff` are deleted first.
     pub fn refresh_tokens(&self, cutoff: i64) -> rusqlite::Result<Vec<StoredRefreshToken>> {
         let conn = self.conn();
         conn.execute(
@@ -591,7 +591,7 @@ impl Store {
         )?;
         let mut stmt = conn.prepare(
             "SELECT token_hash, family, seq, client_id, user_id, created_at, spent_at, access_hash
-             FROM refresh_tokens",
+             FROM refresh_tokens ORDER BY rowid",
         )?;
         let rows = stmt.query_map([], |r| {
             Ok(StoredRefreshToken {

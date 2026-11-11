@@ -109,8 +109,8 @@ struct OAuthStore {
     clients: HashMap<String, OAuthClient>,
     codes: HashMap<String, AuthCode>,
     tokens: HashMap<String, AccessToken>,
-    /// Refresh tokens by the hash of their value, spent ones included (ADR-0058).
-    refresh: HashMap<String, refresh::RefreshToken>,
+    /// The refresh token families, spent tokens included (ADR-0058).
+    refresh: refresh::Families,
     /// Access tokens from before the restart, by the hash of their value, which is all
     /// the store has of them. The first request with one moves it to `tokens`.
     restored: HashMap<String, AccessToken>,
@@ -130,7 +130,7 @@ impl OAuthStore {
             clients: HashMap::new(),
             codes: HashMap::new(),
             tokens: HashMap::new(),
-            refresh: HashMap::new(),
+            refresh: refresh::Families::default(),
             restored: HashMap::new(),
             registrations: HashMap::new(),
             refusal_logged_at: None,
@@ -252,7 +252,7 @@ impl OAuthStore {
             .tokens
             .values()
             .map(|t| t.client_id.as_str())
-            .chain(self.refresh.values().map(|t| t.client_id.as_str()))
+            .chain(self.refresh.clients())
             .collect();
         let mut candidates: Vec<_> = self
             .clients
@@ -318,10 +318,20 @@ impl OAuthStore {
         if self.restored.is_empty() || self.tokens.contains_key(token) {
             return;
         }
-        if let Some(mut t) = self.restored.remove(&signin::hash_of(token)) {
-            t._token = token.to_string();
-            self.tokens.insert(token.to_string(), t);
+        let hash = signin::hash_of(token);
+        let Some(mut t) = self.restored.remove(&hash) else {
+            return;
+        };
+        // It lives through its family: one nobody used for 30 days has ended, whether
+        // or not the sweep has come by, and its access token with it.
+        if let Some(family) = &t.family {
+            if !self.live_family(family, chrono::Utc::now().timestamp()) {
+                return;
+            }
+            self.refresh.rekey(family, &hash, token);
         }
+        t._token = token.to_string();
+        self.tokens.insert(token.to_string(), t);
     }
 
     fn validate_token(&mut self, token: &str) -> bool {
@@ -2030,6 +2040,7 @@ pub async fn run_server(port: u16, engine: Option<Arc<RwLock<TradingEngine>>>) {
     crate::server_alerts::start(&state.charts);
     #[cfg(feature = "scripting")]
     crate::setup_service::start(&state.charts);
+    refresh::sweep_now_and_then(state.clone());
 
     // Store port for metadata endpoint
     std::env::set_var("_CHARTGEN_PORT", port.to_string());
