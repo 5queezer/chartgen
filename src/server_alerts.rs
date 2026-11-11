@@ -404,6 +404,15 @@ pub struct ServerAlerts {
     me: Weak<ServerAlerts>,
 }
 
+/// Alerts and setups share the server's limit on watched pairs (ADR-0059). Each checks
+/// it and then stores; this is held across both steps, by both, so two creates at the
+/// same moment cannot each see room for the last pair. Taken before either service's
+/// own lock, never after.
+pub(crate) fn pair_gate() -> MutexGuard<'static, ()> {
+    static GATE: Mutex<()> = Mutex::new(());
+    GATE.lock().unwrap_or_else(|p| p.into_inner())
+}
+
 static GLOBAL: OnceLock<Arc<ServerAlerts>> = OnceLock::new();
 
 /// The running server alerts, when on.
@@ -1627,6 +1636,8 @@ impl ServerAlerts {
             device_pushes: HashMap::new(),
             device_pushes_fire: None,
         };
+        // With setups: nobody else may take a pair between this check and the write.
+        let _pairs = pair_gate();
         let mut st = self.lock();
         // The fetch and the lookup ran unlocked: another call may have filled up.
         self.check_capacity(&st, owner, &feed)?;
@@ -1672,6 +1683,8 @@ impl ServerAlerts {
             self.check_push(owner)?;
         }
 
+        // With setups: nobody else may take a pair between this check and the write.
+        let _pairs = pair_gate();
         let mut st = self.lock();
         let mut next = st
             .alerts

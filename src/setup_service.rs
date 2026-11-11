@@ -679,6 +679,10 @@ impl Setups {
             }
         };
 
+        // The read of bars ran unlocked: another call may have taken the last pair. From
+        // here to the write nobody may, alerts included, whose pairs are read afresh.
+        let _pairs = crate::server_alerts::pair_gate();
+        let alert_pairs = self.alert_pairs();
         let mut st = self.lock();
         self.check_capacity(&st, owner, &symbol, &alert_pairs)?;
         let id = self.new_id(&mut st, owner);

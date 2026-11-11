@@ -595,6 +595,52 @@ async fn alerts_and_setups_share_the_servers_watched_pairs() {
     .unwrap();
 }
 
+/// Alerts and setups each check the shared limit and then store. Many creates at the
+/// same moment, on symbols nobody watches yet, must still stop at the limit.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn creates_at_the_same_moment_cannot_pass_the_shared_pair_limit() {
+    const PAIRS: usize = 3;
+    for round in 0..12 {
+        let (store, hub) = (store_at(&format!("race-{round}")).0, hub());
+        let alerts = alerts_on(store, hub.clone(), PAIRS);
+        let limits = Limits {
+            pairs_total: PAIRS,
+            ..Limits::default()
+        };
+        let s = live_on(
+            store,
+            hub,
+            Access::parse(None),
+            limits,
+            Some(alerts.clone()),
+        );
+        let start = Arc::new(std::sync::Barrier::new(12));
+        let calls: Vec<_> = (0..12)
+            .map(|i| {
+                let (s, alerts, start) = (s.clone(), alerts.clone(), start.clone());
+                tokio::task::spawn_blocking(move || {
+                    let symbol = format!("SYM{i}USDT");
+                    let owner = format!("owner-{i}");
+                    start.wait();
+                    if i % 2 == 0 {
+                        let _ = call(&s, "create_setup", long_on(&symbol), &owner);
+                    } else {
+                        let args = json!({ "symbol": symbol, "condition": "greater",
+                            "trigger": "once", "level": 1e12 });
+                        alerts.call_tool("create_server_alert", None, &args, Some(&owner));
+                    }
+                })
+            })
+            .collect();
+        for call in calls {
+            call.await.unwrap();
+        }
+        let mut pairs = s.pairs();
+        pairs.extend(alerts.pairs());
+        assert_eq!(pairs.len(), PAIRS, "round {round}: {pairs:?}");
+    }
+}
+
 #[tokio::test]
 async fn bars_move_a_setup_and_its_log_is_kept() {
     let (store, path) = store_at("bars");
