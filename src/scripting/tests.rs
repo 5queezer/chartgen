@@ -1137,28 +1137,57 @@ fn upgraded(name: &str, setup: &[&str]) -> persistence::Store {
     persistence::Store::open(&path).unwrap()
 }
 
-/// A file from just before the setups tables gets them, and keeps what it had.
+const SCHEMA_V5_SIGNIN: &str = "
+    ALTER TABLE oauth_clients ADD COLUMN client_name TEXT;
+    CREATE TABLE users (
+        id TEXT PRIMARY KEY, name TEXT NOT NULL, created_at INTEGER NOT NULL,
+        last_login_at INTEGER NOT NULL, last_token_at INTEGER
+    );
+    CREATE TABLE sessions (
+        token_hash TEXT PRIMARY KEY, user_id TEXT NOT NULL,
+        created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL
+    );
+    CREATE TABLE client_grants (
+        user_id TEXT NOT NULL, client_id TEXT NOT NULL, created_at INTEGER NOT NULL,
+        PRIMARY KEY (user_id, client_id)
+    );
+    PRAGMA user_version = 5;
+";
+const SCHEMA_V6_WORKSPACE: &str = "
+    CREATE TABLE workspace_docs (
+        user_id TEXT NOT NULL, key TEXT NOT NULL, value TEXT,
+        version INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+        PRIMARY KEY (user_id, key)
+    );
+    CREATE INDEX workspace_docs_version ON workspace_docs (user_id, version);
+    CREATE TABLE workspace_users (
+        user_id TEXT PRIMARY KEY, seq INTEGER NOT NULL, bytes INTEGER NOT NULL
+    );
+    INSERT INTO workspace_docs VALUES ('github:9', 'chartgen.layouts', '{}', 1, 1);
+    INSERT INTO workspace_users VALUES ('github:9', 1, 2);
+    PRAGMA user_version = 6;
+";
+
+/// A file from before the setups tables gets them, and keeps what it had. The file is
+/// pinned by its content, the schema as it was, so a migration added later, before or
+/// after the setups one, does not change what this test starts from.
 #[test]
 fn a_file_from_before_setups_upgrades_and_keeps_its_rows() {
-    let dir = std::env::temp_dir().join(format!("chartgen-upgrade-setups-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    let path = dir.join("s.db");
-    let store = persistence::Store::open(&path).unwrap();
-    store.save_server_alert("a1", "github:1", "{}").unwrap();
-    drop(store);
-    let conn = rusqlite::Connection::open(&path).unwrap();
-    let version: i64 = conn
-        .query_row("PRAGMA user_version", [], |r| r.get(0))
-        .unwrap();
-    conn.execute_batch("DROP TABLE setups; DROP TABLE setup_revisions;")
-        .unwrap();
-    conn.pragma_update(None, "user_version", version - 1)
-        .unwrap();
-    drop(conn);
-    let store = persistence::Store::open(&path).unwrap();
-    assert_eq!(store.server_alerts().unwrap().len(), 1);
+    let store = upgraded(
+        "upgrade-v6",
+        &[
+            SCHEMA_V2,
+            SCHEMA_V3_ALERTS,
+            SCHEMA_V4_PUSH,
+            SCHEMA_V5_SIGNIN,
+            SCHEMA_V6_WORKSPACE,
+        ],
+    );
+    assert!(store.setups().unwrap().is_empty());
+    assert!(store.setup_owners().unwrap().is_empty());
     schema_is_complete(&store);
+    assert!(store.server_alert_owners().unwrap().contains("old-client"));
+    assert_eq!(store.push_devices().unwrap().len(), 1);
 }
 
 /// A log entry is never written over.
