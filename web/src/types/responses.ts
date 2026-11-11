@@ -774,3 +774,125 @@ export const TpoPayloadSchema = z.object({
 });
 export type TpoPayload = z.infer<typeof TpoPayloadSchema>;
 export type TpoMeta = Omit<TpoPayload, "profiles" | "has_more">;
+
+// ---------------------------------------------------------------------------
+// Setups (ADR-0059)
+//   Produced by `Record::view` in `src/setups.rs` and by `Setups::view` and
+//   `Setups::list` in `src/setup_service.rs`. The server sets status, fill, exit
+//   and result_r; an agent never does. `tests/fixtures/setup_responses.json` holds
+//   real answers, pinned by a Rust test and parsed here in `responses.test.ts`.
+// ---------------------------------------------------------------------------
+
+export const SetupStatusSchema = z.enum([
+  "watching",
+  "triggered",
+  "won",
+  "invalidated",
+  "expired",
+  "cancelled",
+]);
+export type SetupStatus = z.infer<typeof SetupStatusSchema>;
+
+const SetupZoneSchema = z.object({ low: z.number(), high: z.number() });
+
+/** A price and the 1m bar it happened in (its open time, ms). */
+const SetupMarkSchema = z.object({ price: z.number(), bar_time: z.number() });
+
+const SetupLevelsSchema = z.object({
+  entry: SetupZoneSchema,
+  invalidation: z.number(),
+  // Nearest first; the first decides a win.
+  targets: z.array(z.number()).min(1),
+  expires_at: z.number(),
+});
+
+/** A change the agent sent that no bar has reached yet. */
+export const SetupPendingSchema = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("levels"), at: z.number(), levels: SetupLevelsSchema }),
+  z.object({ kind: z.literal("cancel"), at: z.number() }),
+]);
+export type SetupPending = z.infer<typeof SetupPendingSchema>;
+
+/** A drawing with its points on the bars, as generate_chart reports it (ADR-0054). */
+export const SetupDrawingSchema = z.object({
+  tool: z.string(),
+  points: z.array(
+    z.object({
+      time: z.string(),
+      timestamp: z.number(),
+      price: z.number(),
+      bar: z.number().int(),
+      snap: z.enum(["open", "high", "low", "close"]).optional(),
+    }),
+  ),
+  style: z.record(z.string(), z.unknown()),
+  text: z.string().optional(),
+});
+export type SetupDrawing = z.infer<typeof SetupDrawingSchema>;
+
+export const SetupSchema = SetupLevelsSchema.extend({
+  id: z.string(),
+  symbol: z.string(),
+  interval: z.string(),
+  direction: z.enum(["long", "short"]),
+  decision: z.enum(["take", "skip"]),
+  thesis: z.string(),
+  drawings: z.array(SetupDrawingSchema),
+  // Which rule set the levels: the agent, or for a skip the server's bracket from the
+  // ATR, or at the least risk a setup may have where the ATR was less.
+  bracket: z.enum(["agent", "atr", "floor"]),
+  status: SetupStatusSchema,
+  created_at: z.number(),
+  // The assumption the result is scored with, in basis points per side.
+  costs: z.object({ fee_bps_per_side: z.number(), slippage_bps_per_side: z.number() }),
+  fill: SetupMarkSchema.nullable(),
+  exit: SetupMarkSchema.nullable(),
+  // In R. Null while the setup is open, and for one that expired filled while nobody
+  // scored it (`gap` is then true): no price was read, so none is invented.
+  result_r: z.number().nullable(),
+  // Open time of the newest 1m bar applied, ms.
+  scored_through: z.number().nullable(),
+  // True when the server missed bars it could not read afterwards: the result does not
+  // cover them. The log's `gap` entries say which stretch.
+  gap: z.boolean(),
+  pending: z.array(SetupPendingSchema),
+  revisions: z.number().int(),
+  agent_revisions: z.number().int(),
+});
+export type Setup = z.infer<typeof SetupSchema>;
+
+/** One entry of a setup's log. Entries are only ever added. */
+export const SetupRevisionSchema = z.object({
+  seq: z.number().int(),
+  at: z.number(),
+  by: z.enum(["agent", "server"]),
+  kind: z.enum(["created", "revised", "cancelled", "status", "voided", "gap"]),
+  reason: z.string().nullable(),
+  changes: z.record(z.string(), z.object({ from: z.unknown(), to: z.unknown() })),
+});
+export type SetupRevision = z.infer<typeof SetupRevisionSchema>;
+
+// create_setup, revise_setup, get_setup and cancel_setup: the setup with its whole log.
+export const SetupPayloadSchema = SetupSchema.extend({ log: z.array(SetupRevisionSchema) });
+export type SetupPayload = z.infer<typeof SetupPayloadSchema>;
+
+export const SetupsPayloadSchema = z.object({
+  enabled: z.boolean(),
+  // The rest is absent when the server has setups off.
+  can_create: z.boolean().optional(),
+  replay: z.boolean().optional(),
+  // How many matched; `setups` holds at most the call's limit, newest first.
+  total: z.number().int().optional(),
+  limits: z
+    .object({
+      open_setups: z.number().int(),
+      setups: z.number().int(),
+      symbols: z.number().int(),
+      revisions_per_setup: z.number().int(),
+      changes_per_minute: z.number().int(),
+      bytes: z.number().int(),
+    })
+    .optional(),
+  setups: z.array(SetupSchema),
+});
+export type SetupsPayload = z.infer<typeof SetupsPayloadSchema>;

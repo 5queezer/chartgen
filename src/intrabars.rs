@@ -430,6 +430,9 @@ pub fn load(
     let (Some(&from_s), now_s) = (opens.first(), fetch::now_ms() / 1000) else {
         return Ok(Vec::new());
     };
+    if matches!(source, DataSource::Replay { .. }) {
+        return Err("a replay holds no lower-timeframe bars".into());
+    }
     if source != DataSource::Live {
         let last_len = last_end - opens.last().copied().unwrap_or(from_s);
         return Ok(sample_list(symbol, bars, &opens, last_len, secs, now_s));
