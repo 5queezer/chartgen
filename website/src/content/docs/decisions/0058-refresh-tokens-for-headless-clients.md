@@ -208,6 +208,14 @@ token that the next start does not know, which is the failure this decision remo
 first refresh token of a family is treated the same way: if it cannot be stored, the answer
 carries the access token alone.
 
+**A request is finished even if its client hangs up.** A request that is dropped while it
+waits would otherwise stop between the store write and the change in memory that follows:
+the token spent in the store and still usable in memory, so that the same token again is
+refused with `503` until a restart, or a family revoked in the store and still working. So
+a refresh, a revocation and the storing of a new family run in a task of their own, which
+the request only waits for. The client that hung up never got the answer, and the same
+token within 60 seconds is the retry above.
+
 ### Lifetime
 
 A family ends when its usable token is 30 days old. Every exchange starts the 30 days

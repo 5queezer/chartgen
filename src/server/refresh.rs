@@ -124,6 +124,31 @@ pub(super) async fn forget_families(write: &WriteFn, families: Vec<String>) {
 /// store and then changes the families, and the store is written off the OAuth lock.
 static GATE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
+/// Run `work` to its end, whether or not the request that asked for it is still
+/// there. A handler is dropped at whatever it is waiting for when its client hangs
+/// up, while a store write it started goes on without it. Dropped between that write
+/// and the change in memory that follows, a request would leave the two apart: a
+/// token spent in the store and usable in memory, a family revoked in the store and
+/// working in memory. So what reads the families, writes the store and then changes
+/// the families is a task of its own, and the request only waits for it. `None` if
+/// the work panicked.
+pub(super) async fn to_the_end<T: Send + 'static>(
+    work: impl std::future::Future<Output = T> + Send + 'static,
+) -> Option<T> {
+    tokio::spawn(work)
+        .await
+        .map_err(|e| eprintln!("[OAuth] a token request did not finish: {e}"))
+        .ok()
+}
+
+fn did_not_finish() -> Response {
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(json!({"error": "server_error"})),
+    )
+        .into_response()
+}
+
 /// A refresh token's value is `<family part>.<secret>`, both random. The family part is
 /// the same in every token of one family, and the family's id is its hash. So a token
 /// the server no longer has a row for still says which family it was of, to someone
@@ -453,6 +478,18 @@ pub(super) async fn start_family(
     first: Rotation,
     write: &WriteFn,
 ) -> Result<Option<String>, String> {
+    let (state, access_token, write) = (state.clone(), access_token.to_string(), write.clone());
+    to_the_end(async move { store_family(&state, &access_token, first, &write).await })
+        .await
+        .unwrap_or_else(|| Err("the work did not finish".to_string()))
+}
+
+async fn store_family(
+    state: &SharedState,
+    access_token: &str,
+    first: Rotation,
+    write: &WriteFn,
+) -> Result<Option<String>, String> {
     let family = &first.token.family;
     let leave_family = |s: &mut OAuthStore| {
         if let Some(t) = s.tokens.get_mut(access_token) {
@@ -502,6 +539,19 @@ fn store_failed() -> Response {
 /// does not know. When the write fails nothing is issued and the presented token
 /// stays valid.
 pub(super) async fn grant(
+    state: &SharedState,
+    presented: &str,
+    client_id: &str,
+    write: &WriteFn,
+) -> Response {
+    let (state, write) = (state.clone(), write.clone());
+    let (presented, client_id) = (presented.to_string(), client_id.to_string());
+    to_the_end(async move { rotate(&state, &presented, &client_id, &write).await })
+        .await
+        .unwrap_or_else(did_not_finish)
+}
+
+async fn rotate(
     state: &SharedState,
     presented: &str,
     client_id: &str,
@@ -604,6 +654,19 @@ pub(super) async fn revoke_endpoint(
 /// alone, so the endpoint tells nobody which tokens exist. `503` when the store could
 /// not be written: the family then still works, here and after a restart.
 pub(super) async fn revoke(
+    state: &SharedState,
+    token: &str,
+    client_id: &str,
+    write: &WriteFn,
+) -> Response {
+    let (state, write) = (state.clone(), write.clone());
+    let (token, client_id) = (token.to_string(), client_id.to_string());
+    to_the_end(async move { end_what_it_stands_for(&state, &token, &client_id, &write).await })
+        .await
+        .unwrap_or_else(did_not_finish)
+}
+
+async fn end_what_it_stands_for(
     state: &SharedState,
     token: &str,
     client_id: &str,
@@ -1692,5 +1755,216 @@ mod tests {
         assert!(state.oauth.lock().unwrap().refresh.is_empty());
         assert!(!valid(&state, &access), "nor is its access token");
         assert!(exchange(&state, &refresh, CLIENT, &write).await.is_err());
+    }
+
+    /// Where a client hangs up, which drops its request at whatever it was waiting for.
+    #[derive(Clone, Copy, Debug)]
+    enum HangUp {
+        /// Still waiting for its turn: nothing read, nothing written.
+        BeforeTheWrite,
+        /// The store is being written.
+        DuringTheWrite,
+        /// The store is written and the request has not gone on yet.
+        AfterTheWrite,
+        /// Everything is done and only the answer is left to send.
+        BeforeTheAnswer,
+    }
+    const HANG_UPS: [HangUp; 4] = [
+        HangUp::BeforeTheWrite,
+        HangUp::DuringTheWrite,
+        HangUp::AfterTheWrite,
+        HangUp::BeforeTheAnswer,
+    ];
+
+    /// A store write the test holds open: it says when it begins and when it is done,
+    /// and waits in between until let go.
+    struct HeldWrite {
+        write: WriteFn,
+        begun: std::sync::mpsc::Receiver<()>,
+        go: std::sync::mpsc::Sender<()>,
+        done: std::sync::mpsc::Receiver<()>,
+    }
+
+    fn held_write(store: &Arc<Store>) -> HeldWrite {
+        let (begun_tx, begun) = std::sync::mpsc::channel();
+        let (go, go_rx) = std::sync::mpsc::channel();
+        let (done_tx, done) = std::sync::mpsc::channel();
+        let (store, go_rx) = (store.clone(), Mutex::new(go_rx));
+        let write: WriteFn = Arc::new(move |change| {
+            let _ = begun_tx.send(());
+            let _ = go_rx.lock().unwrap().recv();
+            let result = write_to(&store, change);
+            let _ = done_tx.send(());
+            result
+        });
+        HeldWrite {
+            write,
+            begun,
+            go,
+            done,
+        }
+    }
+
+    /// Send `request` and hang up at `at`. Returns once whatever the server still does
+    /// for it is done.
+    async fn hang_up<F>(at: HangUp, held: &HeldWrite, request: F)
+    where
+        F: std::future::Future + Send + 'static,
+        F::Output: Send + 'static,
+    {
+        let begun = || async {
+            while held.begun.try_recv().is_err() {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        };
+        match at {
+            HangUp::BeforeTheWrite => {
+                let turn = GATE.lock().await;
+                let sent = tokio::spawn(request);
+                tokio::time::sleep(Duration::from_millis(20)).await;
+                sent.abort();
+                let _ = sent.await;
+                drop(turn);
+                held.go.send(()).unwrap();
+            }
+            HangUp::DuringTheWrite => {
+                let sent = tokio::spawn(request);
+                begun().await;
+                sent.abort();
+                let _ = sent.await;
+                held.go.send(()).unwrap();
+            }
+            HangUp::AfterTheWrite => {
+                let sent = tokio::spawn(request);
+                begun().await;
+                held.go.send(()).unwrap();
+                // No await from here to the abort: the request is not polled again.
+                held.done.recv().unwrap();
+                std::thread::sleep(Duration::from_millis(50));
+                sent.abort();
+                let _ = sent.await;
+            }
+            HangUp::BeforeTheAnswer => {
+                held.go.send(()).unwrap();
+                request.await;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        drop(GATE.lock().await);
+    }
+
+    fn usable_rows(store: &Store) -> usize {
+        let rows = store.refresh_tokens(0).unwrap();
+        rows.iter().filter(|r| r.spent_at.is_none()).count()
+    }
+
+    /// A client that hangs up during a refresh never got the answer. The same token
+    /// again is then a retry, wherever the request was dropped: the server and its
+    /// store must not come apart over a request that went away.
+    #[tokio::test]
+    async fn a_refresh_whose_client_hangs_up_is_done_or_not_done_and_can_be_retried() {
+        for at in HANG_UPS {
+            let (store, _) = temp_store(&format!("hang-up-refresh-{at:?}"));
+            let state = started(&store, false, &[CLIENT]);
+            let write = to(&store);
+            let (_, first) = authorize(&state, CLIENT, None, &write).await;
+            let first = first.unwrap();
+            let held = held_write(&store);
+            let (s, token, w) = (state.clone(), first.clone(), held.write.clone());
+            hang_up(at, &held, async move {
+                grant(&s, &token, CLIENT, &w).await;
+            })
+            .await;
+
+            let again = exchange(&state, &first, CLIENT, &write).await;
+            let (access, next) = again.unwrap_or_else(|status| panic!("{at:?}: {status}"));
+            assert!(valid(&state, &access), "{at:?}");
+            assert_eq!(usable_rows(&store), 1, "{at:?}");
+            assert!(
+                exchange(&state, &next, CLIENT, &write).await.is_ok(),
+                "{at:?}"
+            );
+            // And what is in the store is what a restart would bring back.
+            let restarted = started(&store, false, &[CLIENT]);
+            assert_eq!(restarted.oauth.lock().unwrap().refresh.len(), {
+                state.oauth.lock().unwrap().refresh.len()
+            });
+        }
+    }
+
+    /// A revocation whose client hangs up still happens, in memory as in the store.
+    #[tokio::test]
+    async fn a_revocation_whose_client_hangs_up_still_ends_the_family() {
+        for at in HANG_UPS {
+            let (store, _) = temp_store(&format!("hang-up-revoke-{at:?}"));
+            let state = started(&store, false, &[CLIENT]);
+            let write = to(&store);
+            let (access, token) = authorize(&state, CLIENT, None, &write).await;
+            let token = token.unwrap();
+            let held = held_write(&store);
+            let (s, t, w) = (state.clone(), token.clone(), held.write.clone());
+            hang_up(at, &held, async move {
+                revoke(&s, &t, CLIENT, &w).await;
+            })
+            .await;
+
+            assert!(!valid(&state, &access), "{at:?}");
+            assert!(store.refresh_tokens(0).unwrap().is_empty(), "{at:?}");
+            assert_eq!(
+                exchange(&state, &token, CLIENT, &write).await,
+                Err(StatusCode::BAD_REQUEST),
+                "{at:?}"
+            );
+        }
+    }
+
+    /// The same for a family that ends because a spent token came back.
+    #[tokio::test]
+    async fn a_reuse_whose_client_hangs_up_still_ends_the_family() {
+        let (store, _) = temp_store("hang-up-reuse");
+        let state = started(&store, false, &[CLIENT]);
+        let write = to(&store);
+        let (_, first) = authorize(&state, CLIENT, None, &write).await;
+        let first = first.unwrap();
+        let (access, second) = exchange(&state, &first, CLIENT, &write).await.unwrap();
+        for t in state.oauth.lock().unwrap().refresh.values_mut() {
+            t.spent_at = t.spent_at.map(|at| at - RETRY_WINDOW_SECS - 1);
+        }
+        let held = held_write(&store);
+        let (s, w) = (state.clone(), held.write.clone());
+        hang_up(HangUp::DuringTheWrite, &held, async move {
+            grant(&s, &first, CLIENT, &w).await;
+        })
+        .await;
+
+        assert!(!valid(&state, &access));
+        assert!(store.refresh_tokens(0).unwrap().is_empty());
+        assert!(exchange(&state, &second, CLIENT, &write).await.is_err());
+    }
+
+    /// A code exchange whose client hangs up while its family is stored: the family is
+    /// then in memory as it is in the store, not in the store alone until a restart.
+    #[tokio::test]
+    async fn a_new_family_whose_client_hangs_up_is_in_memory_as_in_the_store() {
+        let (store, _) = temp_store("hang-up-start");
+        let state = started(&store, false, &[CLIENT]);
+        let (access, first) = {
+            let mut s = state.oauth.lock().unwrap();
+            let access = s.issue_access(Uuid::new_v4().to_string(), CLIENT, None, None);
+            let first = s.plan_family(CLIENT, REDIRECT, None, &access).unwrap();
+            (access, first)
+        };
+        let held = held_write(&store);
+        let (s, a, w) = (state.clone(), access.clone(), held.write.clone());
+        hang_up(HangUp::DuringTheWrite, &held, async move {
+            let _ = start_family(&s, &a, first, &w).await;
+        })
+        .await;
+
+        assert_eq!(store.refresh_tokens(0).unwrap().len(), 1);
+        let s = state.oauth.lock().unwrap();
+        assert_eq!(s.refresh.len(), 1);
+        let family = s.refresh.values().next().unwrap().family.clone();
+        assert_eq!(s.tokens[&access].family, Some(family));
     }
 }
