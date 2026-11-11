@@ -54,7 +54,7 @@ one and link both ways.
 | [0024](/chartgen/decisions/0024-starlark-script-runtime/) | Starlark as the script runtime for user indicators | Accepted | 2026-11-05 |
 | [0025](/chartgen/decisions/0025-user-indicator-registry/) | Per-user indicator registry and MCP surface | Accepted | 2026-11-05 |
 | [0026](/chartgen/decisions/0026-line-and-histogram-colors/) | Line and histogram colors on the wire | Accepted | 2026-11-05 |
-| [0027](/chartgen/decisions/0027-serve-web-app-same-origin/) | Serve the web app from the MCP server's origin | Accepted | 2026-11-05 |
+| [0027](/chartgen/decisions/0027-serve-web-app-same-origin/) | Serve the web app from the MCP server's origin | Accepted; amended by [0062](/chartgen/decisions/0062-cors-per-route-and-no-framing/) | 2026-11-05 |
 | [0028](/chartgen/decisions/0028-multiple-indicator-instances/) | Several instances of one indicator | Accepted | 2026-11-05 |
 | [0029](/chartgen/decisions/0029-shareable-chart-links/) | Shareable chart links as query parameters | Accepted | 2026-11-05 |
 | [0030](/chartgen/decisions/0030-custom-chart-types/) | Chart types klinecharts does not draw | Accepted | 2026-11-05 |
@@ -71,7 +71,7 @@ one and link both ways.
 | [0041](/chartgen/decisions/0041-script-editor-in-the-web-app/) | Script editor in the web app | Accepted | 2026-11-06 |
 | [0042](/chartgen/decisions/0042-server-side-alerts/) | Alerts that run on the server, with webhooks | Accepted | 2026-11-06 |
 | [0043](/chartgen/decisions/0043-multi-chart-grid/) | Multi-chart grid: per-pane store instances behind an active-chart API | Accepted | 2026-11-06 |
-| [0044](/chartgen/decisions/0044-sign-in-through-github-and-google/) | Sign-in through GitHub and Google | Accepted; superseded in part by [0050](/chartgen/decisions/0050-per-user-workspace-sync/); amended by [0058](/chartgen/decisions/0058-refresh-tokens-for-headless-clients/) | 2026-11-06 |
+| [0044](/chartgen/decisions/0044-sign-in-through-github-and-google/) | Sign-in through GitHub and Google | Accepted; superseded in part by [0050](/chartgen/decisions/0050-per-user-workspace-sync/); amended by [0058](/chartgen/decisions/0058-refresh-tokens-for-headless-clients/) and [0062](/chartgen/decisions/0062-cors-per-route-and-no-framing/) | 2026-11-06 |
 | [0045](/chartgen/decisions/0045-web-push-for-server-alerts/) | Browser push for server alerts | Accepted | 2026-11-06 |
 | [0046](/chartgen/decisions/0046-pattern-detection/) | Pattern detection: candlesticks, chart patterns, auto fib | Accepted; amended by [0055](/chartgen/decisions/0055-provisional-swing-ends/) | 2026-11-06 |
 | [0047](/chartgen/decisions/0047-price-based-charts/) | Price-based charts: Renko, Kagi, Point & Figure, Line Break, Range | Accepted | 2026-11-06 |
@@ -88,3 +88,4 @@ one and link both ways.
 | [0058](/chartgen/decisions/0058-refresh-tokens-for-headless-clients/) | Refresh tokens, so a client authorized once keeps working | Accepted | 2026-11-11 |
 | [0059](/chartgen/decisions/0059-setups-paper-scored/) | A setup is a stored record, scored on paper by the server | Accepted | 2026-11-11 |
 | [0060](/chartgen/decisions/0060-image-built-in-ci/) | The production image is built in CI and pulled by the host | Accepted | 2026-11-11 |
+| [0062](/chartgen/decisions/0062-cors-per-route-and-no-framing/) | Other origins get an answer on the MCP and OAuth client routes only, and the app is not framed | Accepted | 2026-11-11 |

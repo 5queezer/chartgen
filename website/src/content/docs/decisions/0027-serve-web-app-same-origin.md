@@ -5,7 +5,7 @@ sidebar:
   order: 27
 ---
 
-**Status:** Accepted
+**Status:** Accepted; amended by [ADR-0062](/chartgen/decisions/0062-cors-per-route-and-no-framing/) (the app's pages forbid framing, and its files answer no other origin)
 **Date:** 2026-11-05
 
 ## Context and Problem Statement
