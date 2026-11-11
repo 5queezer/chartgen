@@ -268,4 +268,7 @@ real hub. For the replay it runs one scenario twice and compares every answer by
 compares answers from two fixtures that differ only after `as_of`, over every registered indicator
 and chart style, with a control that a difference before `as_of` does change them. The same tests
 check that no call reached for the upstream HTTP client. They count uses of that client on the
-calling thread; they do not watch sockets.
+calling thread; they do not watch sockets. `tests/replay_process.rs` starts a replay server as a
+process with a home of its own and fails if any file appears there. No test of setups depends on
+the time of day: bars come from the test or are placed against the setup's own levels, and
+`CHARTGEN_TEST_CLOCK_SHIFT_MS` runs the suite at another time to show it.
