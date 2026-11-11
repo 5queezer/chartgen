@@ -11,7 +11,7 @@
 set -u
 set +x # tracing would print COOLIFY_API_TOKEN; keep it off for the whole run
 
-for bin in curl jq; do
+for bin in curl jq flock; do
   command -v "$bin" >/dev/null 2>&1 || { echo "chartgen-autodeploy: $bin is required but not installed" >&2; exit 2; }
 done
 
@@ -24,6 +24,8 @@ STATE_FILE=${STATE_FILE:-${STATE_DIRECTORY:-/var/lib/chartgen-autodeploy}/last-s
 # What this script last put out, by the timer or by hand, and what ran before that.
 DEPLOYED_FILE=$(dirname "$STATE_FILE")/deployed-sha
 PREVIOUS_FILE=$(dirname "$STATE_FILE")/previous-sha
+LOCK_FILE=$(dirname "$STATE_FILE")/lock
+LOCK_WAIT_SECS=${LOCK_WAIT_SECS:-120}
 API=https://api.github.com/repos/$GITHUB_REPO
 REGISTRY=${CHARTGEN_IMAGE%%/*}
 IMAGE_PATH=${CHARTGEN_IMAGE#*/}
@@ -39,9 +41,26 @@ gh_get() {
     -H 'User-Agent: chartgen-autodeploy' -H 'Accept: application/vnd.github+json' "$1" 2>/dev/null || true
 }
 
-# write_file FILE VALUE: atomic tmp-then-mv
+# write_file FILE VALUE: atomic, through a temporary file of its own beside it
 write_file() {
-  mkdir -p "$(dirname "$1")" && echo "$2" >"$1.tmp" && mv "$1.tmp" "$1"
+  local tmp
+  mkdir -p "$(dirname "$1")" && tmp=$(mktemp "$1.XXXXXX") && echo "$2" >"$tmp" && mv "$tmp" "$1"
+}
+
+# One run at a time, from reading the state to writing it. The timer's service and a
+# command by hand are separate processes: unlocked, one could set its tag between the
+# other's tag and deploy, and Coolify would deploy one image while the other is
+# recorded. The lock is held until the script exits.
+#   take_turn tick: another run under way means this tick has nothing to do.
+#   take_turn hand: wait for it, and fail loudly rather than do nothing quietly.
+take_turn() {
+  mkdir -p "$(dirname "$LOCK_FILE")" || { log "could not make the state directory"; exit 1; }
+  exec 9>"$LOCK_FILE" || { log "could not open $LOCK_FILE"; exit 1; }
+  if [ "$1" = tick ]; then
+    flock -n 9 || { log "another run is under way; this tick does nothing"; exit 0; }
+  else
+    flock -w "$LOCK_WAIT_SECS" 9 || { log "another run still held the lock after $LOCK_WAIT_SECS s; nothing was deployed. Try again"; exit 1; }
+  fi
 }
 
 # image_status SHA: prints the HTTP status of the image's manifest in the registry,
@@ -156,10 +175,12 @@ case ${1-} in
       echo "usage: $0 deploy SHA (the full commit SHA, 40 hex characters)" >&2
       exit 2
     fi
+    take_turn hand
     manual "$2"
     exit 0
     ;;
   rollback)
+    take_turn hand
     [ -s "$PREVIOUS_FILE" ] || { log "no previous deploy is recorded in $PREVIOUS_FILE; use: deploy SHA"; exit 1; }
     manual "$(cat "$PREVIOUS_FILE")"
     exit 0
@@ -170,6 +191,7 @@ case ${1-} in
     ;;
 esac
 
+take_turn tick
 code=$(gh_get "$API/commits/master")
 if [ "$code" != 200 ]; then
   log "GitHub head lookup returned HTTP $code (rate limit or network); retrying next tick"

@@ -40,6 +40,11 @@ case $url in
     if [ "$method" = GET ]; then
       echo "$APP_JSON" >"$out"; printf %s "$APP_CODE"
     else
+      # A test can hold a run here, between its reading and its writing of state.
+      if [ -n "${HOLD_AT_PATCH-}" ]; then
+        : >"$HOLD_AT_PATCH.reached"
+        while [ ! -e "$HOLD_AT_PATCH.go" ]; do sleep 0.05; done
+      fi
       echo '{}' >"$out"; printf %s "$PATCH_CODE"
     fi ;;
   */api/v1/deploy*) echo '{}' >"$out"; printf %s "$COOLIFY_CODE" ;;
@@ -209,6 +214,46 @@ run "deploy of a name instead of a SHA is a usage error" 2 0 bbb bbb deploy mast
 run "deploy of a short SHA is a usage error" 2 0 bbb bbb deploy 0123abc
 [ "$(grep -c . "$CALLS")" = 0 ] || fail "a usage error made a call"
 run "an unknown command is a usage error" 2 0 bbb bbb sideways
+
+# Two runs at once: the timer's service and a command by hand are separate processes.
+# One run holds the whole sequence, from reading the state to writing it.
+hold="$work/hold"
+held_tick() { # start a tick that stops inside its PATCH until "$hold.go" exists
+  rm -f "$hold.reached" "$hold.go" "$STATE_FILE" "$previous" "$deployed" "$CALLS"; touch "$CALLS"
+  echo bbb >"$HEAD_FILE"; echo aaa >"$STATE_FILE"
+  HOLD_AT_PATCH="$hold" "$here/chartgen-autodeploy.sh" >"$work/held.out" 2>&1 &
+  held_pid=$!
+  while [ ! -e "$hold.reached" ]; do sleep 0.05; done
+}
+held_tick
+before=$(grep -c . "$CALLS")
+out=$("$here/chartgen-autodeploy.sh" 2>&1); rc=$?
+if [ "$rc" = 0 ] && [ "$(grep -c . "$CALLS")" = "$before" ] && grep -q 'another run' <<<"$out"; then
+  echo "ok   a tick during another run does nothing and says so"
+else
+  fail "a tick during another run: exit=$rc, $(($(grep -c . "$CALLS") - before)) call(s): $out"
+fi
+out=$(LOCK_WAIT_SECS=1 "$here/chartgen-autodeploy.sh" deploy "$sha_c" 2>&1); rc=$?
+if [ "$rc" = 1 ] && [ "$(grep -c . "$CALLS")" = "$before" ] && grep -q 'nothing was deployed' <<<"$out"; then
+  echo "ok   a deploy by hand that cannot get its turn fails and says nothing was deployed"
+else
+  fail "a deploy by hand during another run: exit=$rc, $(($(grep -c . "$CALLS") - before)) call(s): $out"
+fi
+: >"$hold.go"; wait "$held_pid"
+[ "$(cat "$STATE_FILE")" = bbb ] || fail "the held run did not finish: $(cat "$work/held.out")"
+
+held_tick
+"$here/chartgen-autodeploy.sh" deploy "$sha_c" >"$work/hand.out" 2>&1 &
+hand_pid=$!
+sleep 0.3; : >"$hold.go"; wait "$held_pid"; wait "$hand_pid"; rc=$?
+# The command by hand waited for its turn: its calls all come after the tick's deploy.
+order=$(grep -n -e '^PATCH' -e '^POST' "$CALLS" | sed 's/:\([A-Z]*\) .*image_tag":"\(.\).*/:\1-\2/; s/:POST .*/:POST/' | cut -d: -f2 | tr '\n' ' ')
+if [ "$rc" = 0 ] && [ "$order" = "PATCH-b POST PATCH-c POST " ] && [ "$(cat "$deployed")" = "$sha_c" ] && [ "$(cat "$previous")" = bbb ]; then
+  echo "ok   a deploy by hand waits for a run under way, then goes"
+else
+  fail "a deploy by hand after a run under way: exit=$rc order='$order' deployed=$(cat "$deployed") previous=$(cat "$previous" 2>/dev/null)"
+fi
+[ -z "$(find "$work" -maxdepth 1 -name '*.tmp' -o -maxdepth 1 -name 'state.*' -o -maxdepth 1 -name '*-sha.*')" ] || fail "a temporary state file was left behind"
 
 # Neither secret was ever an argument of curl: both go in on stdin.
 if grep -q -e secret-token -e anonymous-pull-token "$ARGS"; then

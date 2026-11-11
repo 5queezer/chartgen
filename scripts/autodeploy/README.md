@@ -9,7 +9,7 @@ holds no Coolify secrets. Rationale:
 [ADR-0037](../../website/src/content/docs/decisions/0037-pull-based-deploy.md) and
 [ADR-0060](../../website/src/content/docs/decisions/0060-image-built-in-ci.md).
 
-Needs `curl` and `jq`. Run everything below as root on the Coolify host. All
+Needs `curl`, `jq` and `flock` (util-linux). Run everything below as root on the Coolify host. All
 paths are outside `/home`, so the timer works after an unattended reboot.
 
 ## Install
