@@ -155,8 +155,8 @@ the store.
 
 - **The 7 days are absolute.** They count from the time in the row, when the token was
   issued. A restart adds nothing, however many there are.
-- **Only the newest access token of a family comes back.** One from before the last refresh
-  ends at the restart, as all did before.
+- **Only the newest access token of a family comes back.** The one before it, which has
+  60 seconds after a refresh, ends at the restart.
 - **It is never the web app's.** The web app's client has no family, so none of its tokens
   is stored, and a token that comes back has no browser session: `/workspace/sync` answers
   it `403`, as before the restart.
@@ -268,6 +268,21 @@ A family counts as a token of its client, in every limit that counts tokens.
   family of the agent that uses it.
   [ADR-0036](/chartgen/decisions/0036-own-origin-invalid-client-redirect/): "A stranger must
   not be able to end a session in use."
+- **A family has at most two access tokens:** the newest, and for 60 seconds after a
+  refresh the one before it. Anything older ends at the refresh. Each refresh used to add
+  a 7-day token to the ones before, without limit where no user's limits apply. The one
+  before is not ended at once, because a request sent with it just before the refresh can
+  arrive just after, and a `401` for a token the client believes valid is what sends it
+  back to a browser. Revoking, a token that comes back and every other way a family ends
+  take both at once, with no 60 seconds. A restart brings back only the newest.
+- **Access tokens with sign-in off** had no limit either: a loop of `/authorize` and
+  `/token` for one client minted 7-day tokens without end, and every request walks all of
+  them. A client now keeps 100 that belong to no family, the web app's number with sign-in
+  on, and one more drops the oldest by issue, since without a user a token has no time of
+  last use. A family's tokens are never dropped for this, so nobody who knows a client id
+  can push out the token of the agent that uses it; what they can push out are other
+  family-less tokens, whose holders authorize again with no person, sign-in being off.
+  With the two per family above, a client holds at most 40 plus 100.
 - **Pending codes with sign-in off** had no limit: every `/authorize` for a registered
   client stored a code for 5 minutes, with a `code_challenge` of any length. Now a client
   keeps 20, its own oldest dropped first, the server keeps 2000 and then answers `429` with

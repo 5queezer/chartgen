@@ -62,6 +62,12 @@ const MAX_CLIENTS: usize = 1000;
 /// somebody else is about to exchange. With sign-in on they are limited per user.
 const MAX_CODES_PER_CLIENT: usize = 20;
 const MAX_CODES: usize = 2000;
+/// Access tokens one client keeps with sign-in off that belong to no refresh token
+/// family: the web app's, and those of a client past its families. One more drops the
+/// oldest of them. A family's token is never dropped for this, so nobody who knows a
+/// client id can push out the token of an agent that uses it. With sign-in on the
+/// limits are per user (ADR-0044).
+const MAX_LOOSE_TOKENS_PER_CLIENT: usize = 100;
 /// Registrations per client address (the TCP peer) per `REGISTER_WINDOW`.
 /// Loopback peers are exempt: local tests and dev clients register freely,
 /// and behind a reverse proxy on the same host the peer is always loopback,
@@ -356,6 +362,23 @@ impl OAuthStore {
             c.last_used = Some(Instant::now());
         }
         token
+    }
+
+    /// With sign-in off: hold `client_id`'s access tokens that belong to no refresh
+    /// token family to their limit, the oldest by issue going first. Without a user a
+    /// token has no time of last use to go by.
+    fn trim_loose_tokens(&mut self, client_id: &str) {
+        let mut loose: Vec<(Instant, String)> = self
+            .tokens
+            .iter()
+            .filter(|(_, t)| t.client_id == client_id && t.family.is_none() && t.user.is_none())
+            .map(|(token, t)| (t.created_at, token.clone()))
+            .collect();
+        loose.sort();
+        let excess = loose.len().saturating_sub(MAX_LOOSE_TOKENS_PER_CLIENT);
+        for (_, token) in loose.into_iter().take(excess) {
+            self.tokens.remove(&token);
+        }
     }
 
     /// The owner of what a valid token's caller stores, such as scripted indicators
@@ -948,6 +971,11 @@ async fn oauth_token(
             Ok(value) => refresh_token = value,
             Err(e) => eprintln!("[OAuth] could not store a refresh token: {e}"),
         }
+    }
+    // After the family step: a token that got a family does not count here.
+    if token_user.is_none() {
+        let mut s = state.oauth.lock().unwrap();
+        s.trim_loose_tokens(&body.client_id);
     }
     token_issued(body.client_id.clone(), token_user).await;
 
@@ -3148,6 +3176,7 @@ mod tests {
         });
         let app = Router::new()
             .route("/authorize", get(oauth_authorize))
+            .route("/token", post(oauth_token))
             .with_state(state.clone());
         (state, app)
     }
@@ -3242,6 +3271,147 @@ mod tests {
             assert!(state.oauth.lock().unwrap().codes.is_empty());
             let ok = authorize_as(&app, "a", CHALLENGE).await;
             assert!(ok.status().is_redirection(), "{sign_in}: {}", ok.status());
+        }
+    }
+
+    const VERIFIER: &str = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
+
+    /// The whole code flow for `client`, as a client with sign-in off runs it.
+    async fn token_for(app: &Router, client: &str) -> Value {
+        let redirect = authorize_as(app, client, CHALLENGE).await;
+        let to = redirect.headers()[header::LOCATION].to_str().unwrap();
+        let code = to.split("code=").nth(1).unwrap().split('&').next().unwrap();
+        post_token(
+            app,
+            json!({"grant_type": "authorization_code", "code": code, "client_id": client,
+                "redirect_uri": "https://x.example/cb", "code_verifier": VERIFIER}),
+        )
+        .await
+    }
+
+    async fn post_token(app: &Router, body: Value) -> Value {
+        let request = Request::builder()
+            .method("POST")
+            .uri("/token")
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap();
+        let response = app.clone().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    /// With sign-in off nothing limited a client's access tokens: a loop of
+    /// `/authorize` and `/token` minted 7-day tokens without end, and every
+    /// authenticated request walks all of them.
+    #[tokio::test]
+    async fn without_sign_in_a_clients_access_tokens_are_limited() {
+        let (state, app) = authorize_app(false);
+        let mut first_with_refresh = None;
+        let mut answers = Vec::new();
+        let rounds = refresh::MAX_FAMILIES_PER_CLIENT + MAX_LOOSE_TOKENS_PER_CLIENT + 10;
+        for _ in 0..rounds {
+            let answer = token_for(&app, "a").await;
+            if answer.get("refresh_token").is_some() && first_with_refresh.is_none() {
+                first_with_refresh = Some(answer.clone());
+            }
+            answers.push(answer);
+        }
+        let other = token_for(&app, "b").await;
+        let valid = |answer: &Value| {
+            let token = answer["access_token"].as_str().unwrap();
+            state.oauth.lock().unwrap().validate_token(token)
+        };
+        let of_a = |state: &SharedState| {
+            let s = state.oauth.lock().unwrap();
+            s.tokens.values().filter(|t| t.client_id == "a").count()
+        };
+        assert_eq!(
+            of_a(&state),
+            refresh::MAX_FAMILIES_PER_CLIENT + MAX_LOOSE_TOKENS_PER_CLIENT
+        );
+        let held = of_a(&state);
+        assert_eq!(state.oauth.lock().unwrap().tokens.len(), held + 1);
+        // The ones with a refresh token are never what makes room: an agent must not
+        // lose its token to whoever knows the client id. Nor is another client's.
+        assert!(valid(first_with_refresh.as_ref().unwrap()));
+        assert!(valid(&other));
+        // Of the rest the oldest went, and the newest is there.
+        let loose: Vec<&Value> = answers
+            .iter()
+            .filter(|a| a.get("refresh_token").is_none())
+            .collect();
+        assert!(!valid(loose[0]) && valid(loose[loose.len() - 1]));
+    }
+
+    /// Each refresh used to add an access token to the ones the family already had,
+    /// all valid for 7 days. A family keeps the newest, and the one before it for 60
+    /// more seconds: a request sent with it just before the refresh may arrive after.
+    #[tokio::test]
+    async fn a_refresh_leaves_the_access_token_before_it_60_seconds() {
+        for sign_in in [false, true] {
+            let (state, app) = authorize_app(sign_in);
+            let mut answer = if sign_in {
+                // What `/token` does for a code with a user.
+                let mut s = state.oauth.lock().unwrap();
+                let user = signin::TokenUser {
+                    id: "github:1".into(),
+                    session: None,
+                    last_used: Instant::now(),
+                };
+                let access = s.issue_access("first".into(), "a", Some(user), None);
+                let family = s.plan_family("a", "https://x.example/cb", Some("github:1"), &access);
+                drop(s);
+                let write = refresh::store_write();
+                let refresh = refresh::start_family(&state, &access, family.unwrap(), &write)
+                    .await
+                    .unwrap();
+                json!({"access_token": access, "refresh_token": refresh})
+            } else {
+                token_for(&app, "a").await
+            };
+            let access_of = |answer: &Value| answer["access_token"].as_str().unwrap().to_string();
+            let refreshed = |answer: &Value| {
+                json!({"grant_type": "refresh_token", "client_id": "a",
+                    "refresh_token": answer["refresh_token"]})
+            };
+            let mut earlier = Vec::new();
+            for _ in 0..5 {
+                earlier.push(access_of(&answer));
+                answer = post_token(&app, refreshed(&answer)).await;
+                let mut s = state.oauth.lock().unwrap();
+                assert!(s.validate_token(&access_of(&answer)));
+                assert!(
+                    s.validate_token(earlier.last().unwrap()),
+                    "{sign_in}: the one before"
+                );
+                assert_eq!(s.tokens.len(), 2, "never more than two");
+                for old in &earlier[..earlier.len() - 1] {
+                    assert!(!s.validate_token(old));
+                }
+            }
+            // The one before has 60 seconds left, not its 7 days: seen 61 seconds on.
+            let before = earlier.last().unwrap().clone();
+            {
+                let mut s = state.oauth.lock().unwrap();
+                let t = s.tokens.get_mut(&before).unwrap();
+                assert!(t.expires_in <= t.created_at.elapsed() + Duration::from_secs(60));
+                t.expires_in = t.expires_in.saturating_sub(Duration::from_secs(61));
+                assert!(!s.validate_token(&before));
+                assert!(s.validate_token(&access_of(&answer)));
+            }
+
+            // Revoking ends both at once, with no grace.
+            let again = post_token(&app, refreshed(&answer)).await;
+            let write = refresh::store_write();
+            let token = again["refresh_token"].as_str().unwrap();
+            refresh::revoke(&state, token, "a", &write).await;
+            let mut s = state.oauth.lock().unwrap();
+            assert!(
+                !s.validate_token(&access_of(&answer)) && !s.validate_token(&access_of(&again))
+            );
+            assert!(s.tokens.is_empty());
         }
     }
 

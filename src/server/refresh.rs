@@ -4,6 +4,9 @@
 //! own client never gets one, so nothing durable is first-party (ADR-0050).
 
 use super::signin::{hash_of, now_unix, random_token, TokenUser, MAX_TOKENS_PER_CLIENT};
+
+/// Families one client keeps with sign-in off, and one user per client with it on.
+pub(super) const MAX_FAMILIES_PER_CLIENT: usize = MAX_TOKENS_PER_CLIENT;
 use super::*;
 
 /// A family ends when its newest token is this old. Each exchange starts it again.
@@ -16,6 +19,10 @@ const RETRY_WINDOW_SECS: i64 = 60;
 /// It is spent "long ago": no retry window covers it, so its next use ends the family.
 /// A token spent by its own exchange carries the time of that exchange.
 pub(super) const REPLACED: i64 = 0;
+/// How long the access token before a refresh stays valid after it. A request sent
+/// with it just before the refresh may arrive just after, and a client answers a `401`
+/// for a token it believes valid with a whole new authorization.
+const PREVIOUS_ACCESS_SECS: u64 = 60;
 /// Spent tokens kept per family, so that using one again is recognised. An older one
 /// is merely unknown, and refused all the same.
 const MAX_SPENT_PER_FAMILY: i64 = 100;
@@ -181,6 +188,31 @@ impl OAuthStore {
         self.refresh.retain(|_, t| !families.contains(&t.family));
         self.tokens.retain(|_, t| !ended(t));
         self.restored.retain(|_, t| !ended(t));
+    }
+
+    /// After a refresh: a family keeps `newest` and, for `PREVIOUS_ACCESS_SECS` more,
+    /// the access token before it. Any older one ends now, so a family never has more
+    /// than two.
+    fn retire_access(&mut self, family: &str, newest: &str) {
+        let of_family = |t: &AccessToken| t.family.as_deref() == Some(family);
+        let previous = self
+            .tokens
+            .iter()
+            .chain(self.restored.iter())
+            .filter(|(key, t)| of_family(t) && key.as_str() != newest)
+            .max_by_key(|(_, t)| t.created_at)
+            .map(|(key, _)| key.clone());
+        let keeps = |key: &String| key == newest || Some(key) == previous.as_ref();
+        self.tokens.retain(|key, t| !of_family(t) || keeps(key));
+        self.restored.retain(|key, t| !of_family(t) || keeps(key));
+        let previous = previous.and_then(|key| match self.tokens.get_mut(&key) {
+            Some(t) => Some(t),
+            None => self.restored.get_mut(&key),
+        });
+        if let Some(t) = previous {
+            let until = t.created_at.elapsed() + Duration::from_secs(PREVIOUS_ACCESS_SECS);
+            t.expires_in = t.expires_in.min(until);
+        }
     }
 
     /// The families `user` holds through `client`.
@@ -476,6 +508,7 @@ pub(super) async fn grant(
             });
             let family = Some(rotation.token.family.clone());
             let token = s.issue_access(rotation.access.clone(), client_id, user, family);
+            s.retire_access(&rotation.token.family, &token);
             // The user's limits count what a refresh adds, as they do a code exchange.
             let kept = Some(rotation.token.family.as_str());
             let ended = rotation
@@ -790,7 +823,7 @@ mod tests {
         for _ in 0..MAX_TOKENS_PER_CLIENT + 5 {
             refresh = exchange(&state, &refresh, CLIENT, &write).await.unwrap().1;
         }
-        assert_eq!(held(&state), MAX_TOKENS_PER_CLIENT);
+        assert_eq!(held(&state), 2, "the newest and the one before it");
 
         for _ in 1..MAX_TOKENS_PER_CLIENT {
             authorize(&state, CLIENT, Some("github:1"), &write).await;

@@ -301,6 +301,9 @@ characters, `A-Z a-z 0-9 - _` and one `.`; do not parse it.
   restart adds nothing. Clients commonly refresh only when they know their token has run
   out, and answer a `401` with a whole new authorization, so this is what keeps a person
   out of it.
+- **A refresh leaves the access token before it 60 seconds,** and ends any older one of the
+  same authorization at once. A request sent just before the refresh may arrive just
+  after it, and should not fail. An authorization so never has more than two access tokens.
 - **30 days out of use ends it.** Every exchange starts the 30 days again, so a client
   that keeps working is never sent back to a browser.
 - It belongs to the client it was issued to, and with sign-in on to the user who
@@ -319,9 +322,16 @@ characters, `A-Z a-z 0-9 - _` and one `.`; do not parse it.
 | `503 server_error` | The store could not be written. Nothing was issued, and the refresh token sent is still valid: try again. |
 
 **Limits.** With sign-in on, a user keeps 20 authorizations per client, the one longest
-out of use ended first, within the 20 clients they keep live. With sign-in off, a client
+out of use ended first, within the 20 clients they keep live. The one just issued or just
+refreshed is never the one ended. With sign-in off, a client
 keeps 20, and past that a code exchange answers with an access token and no refresh
 token: nobody's is ended to make room.
+
+With sign-in off a client also keeps at most 100 access tokens that came with no refresh
+token, which are the web app's and those of a client past its 20 authorizations. One more
+ends the oldest of them by time of issue. Access tokens that came with a refresh token are
+never ended for this. Together with the two per authorization, a client holds at most 140
+access tokens.
 
 **What is stored.** The server keeps the SHA-256 of a refresh token, of the part of it that
 names its authorization, and of the access token issued with it, never a value, in
