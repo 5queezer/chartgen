@@ -8,7 +8,7 @@ sidebar:
 **Status:** Accepted
 **Date:** 2026-11-06
 **Amends:** [ADR-0025](/chartgen/decisions/0025-user-indicator-registry/) (client storage no longer needs `CHARTGEN_SCRIPTING=1`)
-**Amended by:** [ADR-0044](/chartgen/decisions/0044-sign-in-through-github-and-google/) (with sign-in on, a client's liveness is limited per user, so the lockout costs accounts)
+**Amended by:** [ADR-0044](/chartgen/decisions/0044-sign-in-through-github-and-google/) (with sign-in on, a client's liveness is limited per user, so the lockout costs accounts), [ADR-0058](/chartgen/decisions/0058-refresh-tokens-for-headless-clients/) (an external client's access token survives a restart, and a refresh token keeps its client from being evicted, for up to 30 days out of use)
 
 ## Context and Problem Statement
 

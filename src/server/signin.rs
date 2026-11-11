@@ -33,9 +33,9 @@ const MAX_GRANTS_PER_USER: usize = 50;
 /// Clients one user can keep live. Past it the tokens of the client they got a
 /// token for longest ago are dropped, which makes that client evictable, so holding
 /// the client table full takes many accounts (ADR-0036).
-const MAX_LIVE_CLIENTS_PER_USER: usize = 20;
+pub(super) const MAX_LIVE_CLIENTS_PER_USER: usize = 20;
 /// Tokens per user and client; the longest out of use go first.
-const MAX_TOKENS_PER_CLIENT: usize = 20;
+pub(super) const MAX_TOKENS_PER_CLIENT: usize = 20;
 /// The web app gets a token per page load and each tab keeps using its own, because the
 /// chart push limits are per token. A cap below the tabs someone has open would have each
 /// tab's sign-in end another's, in a loop that never settles, so this one is roomy.
@@ -114,7 +114,7 @@ impl Config {
         Self::from_vars(|name| std::env::var(name).ok().filter(|v| !v.trim().is_empty()))
     }
 
-    fn from_vars(var: impl Fn(&str) -> Option<String>) -> Result<Option<Self>, String> {
+    pub(super) fn from_vars(var: impl Fn(&str) -> Option<String>) -> Result<Option<Self>, String> {
         let sample = var("CHARTGEN_DATA_SOURCE").as_deref() == Some("sample");
         let test_origin = test_provider_origin(
             var("CHARTGEN_SIGNIN_TEST_PROVIDER_ORIGIN").as_deref(),
@@ -615,9 +615,19 @@ impl SignIn {
 impl OAuthStore {
     /// Hold a user's codes and tokens to their limits, after issuing one. Oldest go
     /// first; the holder of a dropped token signs in again without noticing much,
-    /// since a session or a new approval round is all it takes.
-    pub(super) fn trim_user_tokens(&mut self, user: &str) {
-        let mut by_client: HashMap<String, Vec<(Instant, String)>> = HashMap::new();
+    /// since a session or a new approval round is all it takes. A refresh token family
+    /// counts as a token of its client (ADR-0058): it keeps the client among the
+    /// user's live ones, and goes with the client's tokens. `keep` is the family just
+    /// issued or exchanged, which is never the one to go: family times are whole
+    /// seconds, so within a second it would tie with the others. Among those, a tie
+    /// goes by family id, which is arbitrary but the same for the same data. Returns
+    /// the families ended, for the store.
+    pub(super) fn trim_user_tokens(&mut self, user: &str, keep: Option<&str>) -> Vec<String> {
+        let now = Instant::now();
+        let unix = now_unix();
+        // Per client: the access tokens by last use, and the families by last exchange.
+        type Held = (Vec<(Instant, String)>, Vec<(Instant, String)>);
+        let mut by_client: HashMap<String, Held> = HashMap::new();
         let mut web_clients = HashSet::new();
         for (token, t) in &self.tokens {
             let Some(u) = t.user.as_ref().filter(|u| u.id == user) else {
@@ -626,39 +636,86 @@ impl OAuthStore {
             by_client
                 .entry(t.client_id.clone())
                 .or_default()
+                .0
                 .push((u.last_used, token.clone()));
             if u.session.is_some() {
                 web_clients.insert(t.client_id.clone());
             }
         }
+        // The user's families, found through the user and not by a walk over all.
+        for held in self.families_held_by(user) {
+            let of_client = by_client.entry(held.client_id).or_default();
+            // An access token from before the restart counts as well, under the hash
+            // it is known by. It is always of a family.
+            for hash in held.restored {
+                let held_by = self.restored.get(&hash).and_then(|t| t.user.as_ref());
+                if let Some(u) = held_by.filter(|u| u.id == user) {
+                    of_client.0.push((u.last_used, hash));
+                }
+            }
+            let age = Duration::from_secs((unix - held.used_at).max(0) as u64);
+            let used = now.checked_sub(age).unwrap_or(now);
+            of_client.1.push((used, held.family));
+        }
         let mut clients: Vec<_> = by_client
             .into_iter()
-            .map(|(client, mut tokens)| {
+            .map(|(client, (mut tokens, mut families))| {
                 tokens.sort();
+                families.sort();
                 let cap = if web_clients.contains(&client) {
                     MAX_TOKENS_PER_WEB_CLIENT
                 } else {
                     MAX_TOKENS_PER_CLIENT
                 };
+                let newest = tokens.last().into_iter().chain(families.last());
                 (
-                    tokens.last().map(|t| t.0).unwrap_or_else(Instant::now),
+                    newest.map(|t| t.0).max().unwrap_or(now),
                     cap,
                     tokens,
+                    families,
                 )
             })
             .collect();
         clients.sort_by_key(|c| std::cmp::Reverse(c.0));
-        for (rank, (_, cap, tokens)) in clients.into_iter().enumerate() {
-            let keep = if rank < MAX_LIVE_CLIENTS_PER_USER {
-                cap
-            } else {
-                0
-            };
-            let excess = tokens.len().saturating_sub(keep);
-            for (_, token) in tokens.into_iter().take(excess) {
+        let mut ended = Vec::new();
+        for (rank, (_, cap, tokens, families)) in clients.into_iter().enumerate() {
+            let live = rank < MAX_LIVE_CLIENTS_PER_USER;
+            // Families first: one that ends takes its access tokens along, and what is
+            // left is then counted, so no family in use loses its token to one that went.
+            let room = if live { MAX_TOKENS_PER_CLIENT } else { 0 };
+            let excess = families.len().saturating_sub(room);
+            let others = families.into_iter().map(|f| f.1);
+            let gone: Vec<String> = others
+                .filter(|f| Some(f.as_str()) != keep)
+                .take(excess)
+                .collect();
+            self.end_families(&gone);
+            ended.extend(gone);
+            let held = |t: &String| self.tokens.contains_key(t) || self.restored.contains_key(t);
+            let tokens: Vec<String> = tokens.into_iter().map(|t| t.1).filter(held).collect();
+            let excess = tokens.len().saturating_sub(if live { cap } else { 0 });
+            for token in tokens.into_iter().take(excess) {
                 self.tokens.remove(&token);
+                self.restored.remove(&token);
             }
         }
+        ended
+    }
+
+    /// An approval pushed out by the limit takes the user's refresh tokens for that
+    /// client along, so that forgetting a client has one meaning (ADR-0058). Returns
+    /// the families ended, for the store.
+    fn end_dropped_grants(&mut self, writes: &[Write]) -> Vec<String> {
+        let dropped: Vec<String> = writes
+            .iter()
+            .filter_map(|w| match w {
+                Write::DeleteGrant { user, client } => Some(self.families_of(user, client)),
+                _ => None,
+            })
+            .flatten()
+            .collect();
+        self.end_families(&dropped);
+        dropped
     }
 
     fn trim_user_codes(&mut self, user: &str) {
@@ -844,7 +901,7 @@ fn from_own_origin(headers: &HeaderMap) -> bool {
 /// The web app's redirect: exactly `/` on this server's origin. Such a client skips
 /// consent when asked from our own origin (`from_own_origin`), whoever registered it:
 /// its code lands on our own page, which discards a code whose `state` it did not issue.
-fn is_first_party(base: &str, redirect_uri: &str) -> bool {
+pub(super) fn is_first_party(base: &str, redirect_uri: &str) -> bool {
     let (Ok(base), Ok(uri)) = (reqwest::Url::parse(base), reqwest::Url::parse(redirect_uri)) else {
         return false;
     };
@@ -929,17 +986,17 @@ fn with_cookie(mut resp: Response, cookie: HeaderValue) -> Response {
     resp
 }
 
-fn random_token() -> String {
+pub(super) fn random_token() -> String {
     let mut bytes = [0u8; 32];
     rand::RngCore::fill_bytes(&mut rand::rng(), &mut bytes);
     URL_SAFE_NO_PAD.encode(bytes)
 }
 
-fn hash_of(value: &str) -> String {
+pub(super) fn hash_of(value: &str) -> String {
     hex::encode(Sha256::digest(value.as_bytes()))
 }
 
-fn now_unix() -> i64 {
+pub(super) fn now_unix() -> i64 {
     chrono::Utc::now().timestamp()
 }
 
@@ -1509,7 +1566,7 @@ pub(super) async fn consent_decision(
     headers: HeaderMap,
     Form(form): Form<ConsentForm>,
 ) -> Response {
-    let (response, writes) = {
+    let (response, writes, dropped) = {
         let mut guard = state.oauth.lock().unwrap();
         let s = &mut *guard;
         let Some(signin) = s.signin.as_mut() else {
@@ -1549,10 +1606,27 @@ pub(super) async fn consent_decision(
                 None => expired_page(),
             }
         };
-        (response, writes)
+        let dropped = s.end_dropped_grants(&writes);
+        (response, writes, dropped)
     };
-    persist(writes).await;
+    store_approval(super::refresh::store_write(), dropped, persist(writes)).await;
     response
+}
+
+/// What an approval leaves for the store: the refresh tokens of an approval that the
+/// limit dropped are deleted, then the approvals are written. A browser that hangs
+/// up during the first must not keep the second from starting: after a restart the
+/// dropped approval would be back and the new one gone (`refresh::to_the_end`).
+async fn store_approval(
+    forget: super::refresh::WriteFn,
+    dropped: Vec<String>,
+    persist: impl std::future::Future<Output = ()> + Send + 'static,
+) {
+    super::refresh::to_the_end(async move {
+        super::refresh::forget_families(&forget, dropped).await;
+        persist.await;
+    })
+    .await;
 }
 
 /// `POST /oauth/logout`: end this browser's session and the web app's tokens from it.
@@ -2054,6 +2128,7 @@ mod tests {
                 token.clone(),
                 AccessToken {
                     _token: token,
+                    family: None,
                     client_id: format!("c{i}"),
                     created_at: t0 - Duration::from_secs(age),
                     expires_in: Duration::from_secs(3600),
@@ -2070,7 +2145,7 @@ mod tests {
             token_for(&mut s, i, "github:1", (MAX_CLIENTS - i) as u64);
         }
         assert!(s.make_room(|| Some(HashSet::new())).is_err(), "all live");
-        s.trim_user_tokens("github:1");
+        s.trim_user_tokens("github:1", None);
         assert_eq!(s.tokens.len(), MAX_LIVE_CLIENTS_PER_USER);
         let keeps = |s: &OAuthStore, i: usize| s.tokens.contains_key(&format!("t{i}"));
         assert!(keeps(&s, MAX_CLIENTS - 1), "the newest stays");
@@ -2082,8 +2157,75 @@ mod tests {
 
         // Another user's tokens do not count against this one's.
         token_for(&mut s, 0, "github:2", 5000);
-        s.trim_user_tokens("github:1");
+        s.trim_user_tokens("github:1", None);
         assert!(keeps(&s, 0));
+    }
+
+    /// Forgetting a client has one meaning: the approval pushed out by the limit takes
+    /// that user's refresh tokens for the client along, and nobody else's (ADR-0058).
+    #[test]
+    fn an_approval_dropped_at_the_limit_ends_that_users_families_for_the_client() {
+        let mut s = store_with("c0", "https://client.example/cb");
+        let family = |name: &str, client: &str, user: &str| {
+            (
+                format!("hash-{name}"),
+                super::super::refresh::RefreshToken {
+                    family: name.to_string(),
+                    seq: 0,
+                    client_id: client.to_string(),
+                    user: Some(user.to_string()),
+                    created_at: now_unix(),
+                    spent_at: None,
+                    access_hash: None,
+                },
+            )
+        };
+        s.refresh.extend([
+            family("mine", "c0", "github:1"),
+            family("theirs", "c0", "github:2"),
+            family("other-client", "c1", "github:1"),
+        ]);
+        s.tokens.insert(
+            "from-mine".to_string(),
+            AccessToken {
+                _token: "from-mine".to_string(),
+                family: Some("mine".to_string()),
+                client_id: "c0".to_string(),
+                created_at: Instant::now(),
+                expires_in: Duration::from_secs(3600),
+                user: None,
+            },
+        );
+        // And one from before a restart, known by its hash only.
+        s.restored.insert(
+            "hash-of-restored".to_string(),
+            AccessToken {
+                _token: String::new(),
+                family: Some("mine".to_string()),
+                client_id: "c0".to_string(),
+                created_at: Instant::now(),
+                expires_in: Duration::from_secs(3600),
+                user: None,
+            },
+        );
+        s.refresh.attach("mine", "from-mine");
+        s.refresh.attach("mine", "hash-of-restored");
+        let approve = |s: &mut OAuthStore, user: &str, client: &str| {
+            let writes = s.signin.as_mut().unwrap().add_grant(user, client);
+            s.end_dropped_grants(&writes)
+        };
+        assert!(approve(&mut s, "github:2", "c0").is_empty());
+        for i in 0..MAX_GRANTS_PER_USER {
+            assert!(approve(&mut s, "github:1", &format!("c{i}")).is_empty());
+        }
+        // One more than the limit: the oldest approval, of c0, is forgotten.
+        assert_eq!(approve(&mut s, "github:1", "new"), ["mine"]);
+        assert!(!s.signin.as_ref().unwrap().has_grant("github:1", "c0"));
+        assert!(s.families_of("github:1", "c0").is_empty());
+        assert!(!s.tokens.contains_key("from-mine"), "its access tokens too");
+        assert!(s.restored.is_empty());
+        assert_eq!(s.families_of("github:2", "c0"), ["theirs"]);
+        assert_eq!(s.families_of("github:1", "c1"), ["other-client"]);
     }
 
     /// The tokens a client keeps are the ones in use, and the cap is the client's kind.
@@ -2096,6 +2238,7 @@ mod tests {
                 token.clone(),
                 AccessToken {
                     _token: token,
+                    family: None,
                     client_id: if session.is_some() { "web" } else { "mcp" }.to_string(),
                     created_at: t0,
                     expires_in: Duration::from_secs(3600),
@@ -2113,7 +2256,7 @@ mod tests {
         for i in 0..MAX_TOKENS_PER_WEB_CLIENT + 1 {
             add(&mut s, format!("web-{i}"), Some("sess"), 1000 + i as u64);
         }
-        s.trim_user_tokens("github:1");
+        s.trim_user_tokens("github:1", None);
         let gone = MAX_TOKENS_PER_CLIENT;
         assert!(
             !s.tokens.contains_key(&format!("mcp-{gone}")),
@@ -2347,5 +2490,34 @@ mod tests {
             s.admit_login("203.0.113.9", t0 + LOGIN_WINDOW),
             "the window passes"
         );
+    }
+
+    /// The browser hangs up while the dropped approval's refresh tokens are deleted:
+    /// the approvals are written all the same.
+    #[tokio::test]
+    async fn an_approval_is_stored_even_if_the_browser_hangs_up_during_the_delete() {
+        let (begun_tx, begun) = std::sync::mpsc::channel();
+        let (go, go_rx) = std::sync::mpsc::channel::<()>();
+        let go_rx = std::sync::Mutex::new(go_rx);
+        let forget: super::super::refresh::WriteFn = Arc::new(move |_| {
+            let _ = begun_tx.send(());
+            let _ = go_rx.lock().unwrap().recv();
+            Ok(())
+        });
+        let persisted = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = persisted.clone();
+        let persist = async move { flag.store(true, std::sync::atomic::Ordering::SeqCst) };
+        let request = tokio::spawn(store_approval(forget, vec!["family".to_string()], persist));
+        while begun.try_recv().is_err() {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        request.abort();
+        let _ = request.await;
+        go.send(()).unwrap();
+        // The work goes on without its request, in a task this test cannot reach.
+        // Each look comes when some work has ended, not after a time: however long
+        // the delete takes, the approvals are found written once it is done.
+        let written = || persisted.load(std::sync::atomic::Ordering::SeqCst);
+        super::super::refresh::until_work_ended(written).await;
     }
 }
