@@ -894,7 +894,7 @@ async fn oauth_token(
             .into_response();
     }
 
-    let (token, token_user, family) = {
+    let (token, token_user, family, ended) = {
         let mut s = state.oauth.lock().unwrap();
         s.cleanup_expired();
 
@@ -959,9 +959,12 @@ async fn oauth_token(
         // Issue access token
         let token = Uuid::new_v4().to_string();
         let token = s.issue_access(token, &body.client_id, token_user.clone(), None);
-        if let Some(user) = &token_user {
-            s.trim_user_tokens(&user.id, None);
-        }
+        // A family this ends is ended in the store too, below: a row left behind would
+        // bring it back at the next start (ADR-0058).
+        let ended = match &token_user {
+            Some(user) => s.trim_user_tokens(&user.id, None),
+            None => Vec::new(),
+        };
         let user_id = token_user.as_ref().map(|u| u.id.clone());
         let family = s.plan_family(
             &body.client_id,
@@ -969,8 +972,9 @@ async fn oauth_token(
             user_id.as_deref(),
             &token,
         );
-        (token, user_id, family)
+        (token, user_id, family, ended)
     };
+    refresh::forget_families(&refresh::store_write(), ended).await;
     // A refresh token is handed out only once the store has it (ADR-0058). When the
     // write fails the client gets the access token alone, as before refresh tokens.
     let mut refresh_token = None;

@@ -5353,6 +5353,62 @@ fn test_refresh_tokens_deleted_from_the_store_are_gone_after_a_restart() {
     let _ = std::fs::remove_dir_all(db.parent().unwrap());
 }
 
+/// A user keeps 20 clients live. When the web app's code exchange makes a connector
+/// the 21st, the connector's refresh tokens end, and they stay ended after a restart.
+#[cfg(feature = "scripting")]
+#[test]
+fn test_signin_a_family_ended_by_the_live_client_limit_stays_ended_after_a_restart() {
+    let fake = FakeProvider::start();
+    let db = store_path("refresh-live-clients");
+    let profile = || profile_of("github", 5, "octo");
+    let p = free_port();
+    let srv = start_server(signin_command(p, &db, &fake, &["github"], None, false), p);
+    let mut b = Browser::new(p);
+    web_sign_in(&mut b, &fake, "github", profile());
+    let client = register_external(p);
+    let first = b.authorize(&client, EXTERNAL_REDIRECT, "s");
+    let page = b.get(&first.location());
+    let (request, csrf) = consent_fields(&page.body);
+    let approved = b.request(
+        "POST",
+        "/oauth/consent",
+        &["Content-Type: application/x-www-form-urlencoded"],
+        &format!("request={request}&csrf={csrf}&decision=approve"),
+    );
+    let (st, body) = exchange(p, &client, EXTERNAL_REDIRECT, &approved.query()["code"]);
+    assert_eq!(st, 200, "{body}");
+    let connector: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let (access, token) = (
+        text(&connector, "access_token"),
+        text(&connector, "refresh_token"),
+    );
+    drop(srv);
+
+    // A new process, because one address registers 20 clients in 10 minutes. The
+    // connector is the user's only live client now, and 20 browsers follow.
+    let p = free_port();
+    let srv = start_server(signin_command(p, &db, &fake, &["github"], None, false), p);
+    assert_eq!(ping_status(p, &access), 200);
+    // A family's time is in whole seconds: let its second pass, so it is the oldest.
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    let mut b = Browser::new(p);
+    web_sign_in(&mut b, &fake, "github", profile());
+    for _ in 1..20 {
+        let web = register_client(p, &web_redirect(p));
+        let code = b.authorize(&web, &web_redirect(p), "s").query()["code"].clone();
+        token_from(p, &web, &web_redirect(p), &code);
+    }
+    assert_eq!(ping_status(p, &access), 401);
+    assert_eq!(refresh(p, &client, &token).0, 400);
+    drop(srv);
+
+    let p = free_port();
+    let _srv = start_server(signin_command(p, &db, &fake, &["github"], None, false), p);
+    assert_eq!(ping_status(p, &access), 401, "back after a restart");
+    assert_eq!(refresh(p, &client, &token).0, 400, "back after a restart");
+    let _ = std::fs::remove_dir_all(db.parent().unwrap());
+}
+
 /// With sign-in on: a connector's refresh token is its user's, survives the user
 /// signing out of the web app and a restart, and never reaches what only the web
 /// app's own token may (ADR-0050). The web app itself gets none.
