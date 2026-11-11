@@ -85,3 +85,4 @@ one and link both ways.
 | [0055](/chartgen/decisions/0055-provisional-swing-ends/) | Provisional swing ends in zigzag and auto fib | Accepted | 2026-11-09 |
 | [0056](/chartgen/decisions/0056-png-and-summary-warm-up/) | A png or summary reads its indicators' warmup | Accepted | 2026-11-09 |
 | [0057](/chartgen/decisions/0057-e2e-shards/) | The e2e suite runs in duration-balanced CI shards | Accepted | 2026-11-09 |
+| [0059](/chartgen/decisions/0059-setups-paper-scored/) | A setup is a stored record, scored on paper by the server | Accepted | 2026-11-11 |

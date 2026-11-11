@@ -101,7 +101,7 @@ Both fields may be `null`, meaning "match any". Restarting the server
 preserves filters so clients keep their filters across chartgen restarts, but
 queued alerts are lost.
 
-## `chartgen.db` (OAuth clients, scripted indicators and server alerts)
+## `chartgen.db` (OAuth clients, scripted indicators, server alerts and setups)
 
 Holds the registered OAuth clients, with or without `CHARTGEN_SCRIPTING=1`
 ([ADR-0036](/chartgen/decisions/0036-own-origin-invalid-client-redirect/)), and
@@ -196,7 +196,34 @@ CREATE TABLE workspace_users (
     seq      INTEGER NOT NULL,      -- that user's last version
     bytes    INTEGER NOT NULL       -- their documents' total, for the limit
 );
+CREATE TABLE setups (               -- ADR-0059
+    id      TEXT PRIMARY KEY,
+    owner   TEXT NOT NULL,          -- OAuth client_id, or with sign-in a users.id
+    record  TEXT NOT NULL           -- the setup as JSON, its current state
+);
+CREATE INDEX setups_owner ON setups (owner);
+CREATE TABLE setup_revisions (
+    setup_id  TEXT    NOT NULL,
+    seq       INTEGER NOT NULL,     -- 1, 2, 3, ... per setup
+    body      TEXT    NOT NULL,     -- one log entry as JSON
+    PRIMARY KEY (setup_id, seq)
+);
 ```
+
+### Setups
+
+A [setup](/chartgen/guides/setups/) is one row in `setups`, rewritten as its status moves, and
+its log is rows in `setup_revisions`. **The log is only ever inserted into**: the server has no
+statement that updates or deletes an entry, and a write that would replace one fails. A setup
+and the entries it gained are written in one transaction. Closed setups stay; nothing deletes
+them for inactivity. A row that cannot be read at startup is left where it is, counted in the
+log line `[setups] skipped N stored setups that cannot be read`, and never scored.
+
+`record` holds a thesis in clear text. Prices are stored as JSON numbers and read back as
+exactly the numbers written.
+
+A [replay server](/chartgen/guides/setups/#replay) keeps its setups in memory and writes none
+of them here.
 
 A fire writes the alert's new state and its delivery in one transaction, before
 anything is sent, so a restart neither fires it again nor loses the delivery. A
