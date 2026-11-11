@@ -1,6 +1,6 @@
 ---
 title: Deployment
-description: Docker, prebuilt release binaries, reverse proxy, Coolify auto-deploy, ARM cross-compilation.
+description: Docker, the prebuilt arm64 image, release binaries, reverse proxy, Coolify auto-deploy, ARM cross-compilation.
 ---
 
 chartgen ships as a single binary. Below are the supported paths to get it running remotely.
@@ -35,6 +35,18 @@ docker run -p 9315:9315 \
   -v chartgen-data:/root/.chartgen \
   chartgen --serve
 ```
+
+On an arm64 host there is nothing to build. CI pushes the image of every commit of
+`master` that passed it ([ADR-0060](/chartgen/decisions/0060-image-built-in-ci/)):
+
+```bash
+docker pull ghcr.io/5queezer/chartgen:master          # master's head
+docker pull ghcr.io/5queezer/chartgen:<full commit sha>
+```
+
+The image is `linux/arm64` only; on x86 build it as above or use a release binary.
+The release build is one large compile: on a machine with 4 GB of memory it can
+exhaust the machine, which is why production pulls.
 
 Production must mount this volume. The `~/.chartgen/` mount persists
 `alerts.json`, `trades.log`, `subscriptions.json`, and in `chartgen.db` the
@@ -357,35 +369,61 @@ location / {
 ## Coolify auto-deploy
 
 A systemd timer on the Coolify host (`scripts/autodeploy/`) polls the GitHub
-API every 5 minutes. When `master` has a new head SHA and the `CI` workflow
-succeeded for it, the script calls Coolify's deploy endpoint locally:
+API every 5 minutes. When `master` has a new head SHA, the `CI` workflow
+succeeded for it and the image CI built for it is in the registry, the script
+points the Coolify application at that image and calls Coolify's deploy
+endpoint, both locally:
 
 ```
-POST ${COOLIFY_URL}/api/v1/deploy?uuid=${COOLIFY_APP_UUID}&force=false
+PATCH ${COOLIFY_URL}/api/v1/applications/${COOLIFY_APP_UUID}
+      {"docker_registry_image_name": "${CHARTGEN_IMAGE}", "docker_registry_image_tag": "<sha>"}
+POST  ${COOLIFY_URL}/api/v1/deploy?uuid=${COOLIFY_APP_UUID}&force=false
 Authorization: Bearer ${COOLIFY_API_TOKEN}
 ```
 
-A pending CI run is retried on the next tick; a failed one is not deployed.
-A failed Coolify call keeps the old state, so the next tick retries. The
-first run only records the current SHA. A deploy takes 20–25 minutes.
-Coolify's endpoint takes no SHA and builds the branch head, so a commit that
-lands between the CI check and the build can ship before its own CI on
-`master` finishes. This is accepted: every merge passes pull-request CI
-first and the window is small. While a new head is undeployed each tick
-makes 2 GitHub calls (about 24 per hour, against the unauthenticated limit
-of 60); an idle tick makes 1.
-Nothing is exposed inbound and the repository holds no Coolify secrets; see
-[ADR-0037](/chartgen/decisions/0037-pull-based-deploy/).
+The host pulls the image and builds nothing, and what goes out is exactly the
+commit that passed CI. The application in Coolify is of the kind **Docker
+Image**. A pending CI run, an image that is not published yet and a registry
+that refuses or rate-limits are all retried on the next tick; a failed CI run
+is not deployed. A failed Coolify call keeps the old state, so the next tick
+sets the tag and deploys again. The first run only records the current SHA.
 
-Install, pause and uninstall steps are in `scripts/autodeploy/README.md`.
-The token lives in `/etc/chartgen-autodeploy.env` on the host:
+The script logs that a deploy was triggered. It does not wait for it or check
+the application: look at the deployment in Coolify. `chartgen-autodeploy.sh
+rollback` deploys the image that ran before the last deploy, and `deploy
+<sha>` any published one.
+
+While a new head is undeployed each tick makes 2 GitHub calls (about 24 per
+hour, against the unauthenticated limit of 60); an idle tick makes 1. The
+registry is asked on its own host and does not count against that.
+Nothing is exposed inbound and the repository holds no Coolify secrets; see
+[ADR-0037](/chartgen/decisions/0037-pull-based-deploy/) and
+[ADR-0060](/chartgen/decisions/0060-image-built-in-ci/).
+
+Install, pause, rollback and uninstall steps are in
+`scripts/autodeploy/README.md`, and so is **moving an existing application from
+a Dockerfile build to the image, which begins with a copy of the data volume:**
+an application that starts on an empty volume has lost its clients, users,
+scripts, alerts and refresh tokens. The configuration lives in
+`/etc/chartgen-autodeploy.env` on the host:
 
 | Variable | What it is |
 |----------|------------|
 | `COOLIFY_URL` | Coolify instance root, e.g. `http://coolify.lan:8000`. |
-| `COOLIFY_APP_UUID` | UUID of the chartgen application in Coolify. |
-| `COOLIFY_API_TOKEN` | Coolify API token with deploy permission. |
+| `COOLIFY_APP_UUID` | UUID of the chartgen application in Coolify, a Docker Image application. |
+| `COOLIFY_API_TOKEN` | Coolify API token that may change and deploy the application. |
 | `GITHUB_REPO` | `owner/name` to poll, default `5queezer/chartgen`. |
+| `CHARTGEN_IMAGE` | The image without a tag, default `ghcr.io/5queezer/chartgen`. Its package must be public. |
+
+### The image
+
+The `image` job of `.github/workflows/ci.yml` builds the `Dockerfile` on a
+GitHub-hosted arm64 runner after every other CI job passed for the commit, on
+each push to `master`. To build the image of another ref, for a staging
+server, run the workflow on it: **Actions, CI, Run workflow**, and choose the
+ref. The whole of CI runs on that ref first, and the image is pushed under
+its commit SHA. The run uses the workflow file of the chosen ref, so the ref
+must contain the `image` job. `:master` is moved only from `master`.
 
 ### The old GitHub workflow
 
