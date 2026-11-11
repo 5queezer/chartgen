@@ -1899,6 +1899,42 @@ pub async fn run_server(port: u16, engine: Option<Arc<RwLock<TradingEngine>>>) {
 mod tests {
     use super::*;
 
+    /// Setups and alerts take their owner from this (ADR-0044, ADR-0059): the token's
+    /// user, or with sign-in off its OAuth client, and nobody once it has expired.
+    #[test]
+    fn a_tokens_owner_is_its_user_or_else_its_client() {
+        let mut store = OAuthStore::new();
+        let mut put = |token: &str, user: Option<&str>, expires_in: u64| {
+            store.tokens.insert(
+                token.to_string(),
+                AccessToken {
+                    _token: token.to_string(),
+                    client_id: "the-client".to_string(),
+                    created_at: Instant::now(),
+                    expires_in: Duration::from_secs(expires_in),
+                    user: user.map(|id| signin::TokenUser {
+                        id: id.to_string(),
+                        session: None,
+                        last_used: Instant::now(),
+                    }),
+                },
+            );
+        };
+        put("plain", None, 3600);
+        put("signed-in", Some("github:7"), 3600);
+        put("expired", Some("github:7"), 0);
+        assert_eq!(
+            store.owner_for_token("plain").as_deref(),
+            Some("the-client")
+        );
+        assert_eq!(
+            store.owner_for_token("signed-in").as_deref(),
+            Some("github:7")
+        );
+        assert_eq!(store.owner_for_token("expired"), None);
+        assert_eq!(store.owner_for_token("unknown"), None);
+    }
+
     /// A replay server is nothing else at the same time (ADR-0059).
     #[test]
     fn a_replay_refuses_to_start_as_anything_else_too() {

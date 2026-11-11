@@ -31,6 +31,51 @@ impl PushSource for Quiet {
     }
 }
 
+/// A hub source that sends what a test tells it to, as the real feed would.
+#[derive(Default)]
+struct Told {
+    feeds: std::sync::Mutex<Vec<mpsc::Sender<FeedEvent>>>,
+}
+
+impl Told {
+    async fn send(&self, event: FeedEvent) {
+        let feeds = self.feeds.lock().unwrap().clone();
+        for tx in feeds {
+            tx.send(event.clone()).await.unwrap();
+        }
+    }
+}
+
+impl PushSource for Told {
+    fn feed_interval(&self, _symbol: &str, timeframe: &str) -> Result<String, String> {
+        Ok(timeframe.to_string())
+    }
+    fn seed(&self, symbol: &str, timeframe: &str, count: usize) -> Result<OhlcvData, String> {
+        data::sample_ohlcv(symbol, timeframe, count, None, fetch::now_ms())
+    }
+    fn run(
+        &self,
+        _symbol: String,
+        _interval: String,
+        tx: mpsc::Sender<FeedEvent>,
+    ) -> BoxFuture<'static, ()> {
+        self.feeds.lock().unwrap().push(tx.clone());
+        Box::pin(async move {
+            tx.closed().await;
+        })
+    }
+}
+
+async fn until(what: &str, mut done: impl FnMut() -> bool) {
+    for _ in 0..600 {
+        if done() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("timed out waiting: {what}");
+}
+
 fn store_at(name: &str) -> (&'static Store, std::path::PathBuf) {
     let dir = std::env::temp_dir().join(format!("chartgen-setups-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
@@ -538,6 +583,76 @@ async fn bars_move_a_setup_and_its_log_is_kept() {
     assert_eq!(won["log"][2]["by"], "server");
     // Closed: its feed is let go.
     assert!(s.pairs().is_empty());
+}
+
+/// What setups rely on in the hub's feed (ADR-0042), pinned through the real hub: a
+/// closed bar arrives as `Bar`, usually after the next candle's first tick; ticks and
+/// the bars a reconnect sends again move nothing.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_setup_moves_on_the_hubs_closed_bars_only() {
+    let told = Arc::new(Told::default());
+    let hub = ChartHub::new(told.clone(), HubLimits::default());
+    let s = live_on(
+        store_at("hub").0,
+        hub,
+        Access::parse(None),
+        Limits::default(),
+        None,
+    );
+    let setup = {
+        let s = s.clone();
+        tokio::task::spawn_blocking(move || created(&s, "owner"))
+            .await
+            .unwrap()
+    };
+    let (id, t, p) = (id_of(&setup), first_bar(&setup) / 1000, price("BTCUSDT"));
+    let status = |s: &Setups| {
+        let st = s.lock();
+        let record = &st.setups[&("owner".to_string(), id.clone())].record;
+        (record.status, record.scored_through)
+    };
+    let feed_bar = |minute: i64, low: f64, high: f64| Bar {
+        open: p,
+        high,
+        low,
+        close: p,
+        volume: 1.0,
+        date: (t + minute * 60).to_string(),
+    };
+    until("the feed to be joined", || {
+        !told.feeds.lock().unwrap().is_empty()
+    })
+    .await;
+
+    // A tick through the entry zone and the invalidation is not a bar.
+    told.send(FeedEvent::Tick(feed_bar(0, p * 0.5, p))).await;
+    // The next candle's first tick comes before the close of the one before it.
+    told.send(FeedEvent::Tick(feed_bar(1, p, p))).await;
+    told.send(FeedEvent::Bar(feed_bar(0, p * 0.999, p * 1.001)))
+        .await;
+    until("the first close to be read", || {
+        status(&s).1 == Some(t * 1000)
+    })
+    .await;
+    assert_eq!(status(&s).0, Status::Watching);
+
+    told.send(FeedEvent::Bar(feed_bar(1, p * 0.975, p))).await;
+    until("the fill", || status(&s).0 == Status::Triggered).await;
+    // After a reconnect the feed sends closed bars again, here with other prices.
+    told.send(FeedEvent::Bar(feed_bar(0, p * 0.5, p * 2.0)))
+        .await;
+    told.send(FeedEvent::Bar(feed_bar(1, p * 0.5, p * 2.0)))
+        .await;
+    told.send(FeedEvent::Bar(feed_bar(2, p * 0.99, p * 1.06)))
+        .await;
+    until("the target", || status(&s).0 == Status::Won).await;
+    let st = s.lock();
+    let record = &st.setups[&("owner".to_string(), id.clone())].record;
+    assert_eq!(record.exit.unwrap().bar_time, (t + 120) * 1000);
+    assert_eq!(
+        record.revisions, 3,
+        "created, filled, won: the replayed bars added nothing"
+    );
 }
 
 #[tokio::test]
