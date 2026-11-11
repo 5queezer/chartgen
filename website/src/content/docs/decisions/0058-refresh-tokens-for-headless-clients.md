@@ -129,8 +129,11 @@ cannot be exchanged twice. With sign-in on that was already so. With sign-in off
 could be exchanged again and again for its 5 minutes, each time now for another refresh
 token. It is used up by its first exchange in both modes, successful or not.
 
-A refresh token is 256 random bits. The server keeps its SHA-256 and nothing else, in
-memory and in the new table `refresh_tokens`. The value is in the answer to the client and
+A refresh token is `<family part>.<secret>`, each 256 random bits. The family part is the
+same in every token of one authorization, and is what lets a token the server has no row
+for any more still end its family (below). The server keeps the SHA-256 of the whole token
+and the SHA-256 of the family part, as the family's id, and nothing else, in memory and in
+the new table `refresh_tokens`. A client treats the value as opaque. The value is in the answer to the client and
 nowhere after that, including the log. "Only hashes are stored" is about what is on disk:
 in memory, access tokens are still held by their value, as before.
 
@@ -185,8 +188,18 @@ is kept, so that a token that comes back is recognised, also after a restart:
   noticed. Rejected as well, after a first version did it: telling a retry by position and
   time alone. A replaced successor has the same position as the one that replaced it, so
   within a minute it passed for a retry and two holders could go on replacing each other.
-- The 100 most recent spent tokens of a family are kept. One older than that is unknown to
-  the server and refused like any unknown token, without ending the family.
+- The 100 most recent spent tokens of a family are kept, which bounds the table. **An older
+  one ends the family all the same.** The server has no row for it, but its family part
+  names the family, and a token that names a family in use, comes from that family's
+  client and is not its usable token has come back. Without this, the limit switched
+  detection off: whoever held a copy could exchange it 101 times, after which the owner's
+  token was merely unknown, the owner authorized anew and the copy lived on.
+
+**Who can end a family this way:** anyone who holds or ever held one of its tokens, and
+presents it with the family's client id. That is the point of it. Nobody else: a value
+that names no family in use ends nothing, a token of another client's family ends nothing,
+and the database does not help, because it holds the hash of the family part and of each
+token, and neither can be turned back into a value to present.
 
 **The successor is in the store before the answer leaves.** The spent mark and the new row
 are one transaction. If it fails, `/token` answers `503`, issues nothing, and the presented
@@ -216,7 +229,8 @@ and one that stopped lets them expire. A tool call still writes nothing.
   holds after a restart, and `503` means nothing was revoked. The answer is `200` for a
   token the server does not know or one of another client, which is left alone, so the
   endpoint tells nobody which tokens exist.
-- **By the server:** a spent token that comes back, as above.
+- **By the server:** a token of the family that is no longer its usable one comes back, as
+  above.
 - **By an operator, for a token nobody holds any more:** delete the rows and restart. The
   families are loaded at startup, so a deleted row is a family that no longer exists. The
   [OAuth reference](/chartgen/reference/oauth/#revoking-a-refresh-token) has the statement.
@@ -292,7 +306,9 @@ registered clients already do.
   access token still works, and it refreshes when the 7 days are over.
 - Good: connectors stop sending their users through sign-in every 7 days.
 - Good: nothing durable is first-party, and no new path leads to rows owned by a client.
-- Good: a copied refresh token is noticed the first time both copies are used.
+- Good: a copied refresh token is noticed. Of two holders, the one who exchanges second
+  presents a token that is no longer the usable one, and the family ends, however many
+  exchanges the other has made in between.
 - Bad: **one authorization can last for good.** While an agent keeps refreshing, its
   account's access and server alerts never need another sign-in, unlike a browser session,
   which ends after 30 days whatever happens. The ways out are the ones under Revocation.

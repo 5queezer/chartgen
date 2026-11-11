@@ -286,10 +286,11 @@ curl -s https://chartgen.example.com/token \
 ```
 
 The answer has the same shape, with a **new** refresh token. Store it in place of the old
-one before using the access token.
+one before using the access token. A refresh token is an opaque string of about 90
+characters, `A-Z a-z 0-9 - _` and one `.`; do not parse it.
 
-- **Each refresh token works once.** Presenting one that was already exchanged ends the
-  authorization: every refresh token and access token that came from it. That is how a
+- **Each refresh token works once.** Presenting one that was already exchanged, however
+  long ago, ends the authorization: every refresh token and access token that came from it. That is how a
   copied token is noticed. Two processes must therefore not share one refresh token; give
   each its own authorization.
 - **A lost answer can be retried for 60 seconds** with the same refresh token. The retry
@@ -322,8 +323,8 @@ out of use ended first, within the 20 clients they keep live. With sign-in off, 
 keeps 20, and past that a code exchange answers with an access token and no refresh
 token: nobody's is ended to make room.
 
-**What is stored.** The server keeps the SHA-256 of a refresh token and of the access token
-issued with it, never a value, in
+**What is stored.** The server keeps the SHA-256 of a refresh token, of the part of it that
+names its authorization, and of the access token issued with it, never a value, in
 the [`refresh_tokens`](/chartgen/reference/persistence/) table of `CHARTGEN_DB`. The file
 has to outlive the process: a container needs
 [a volume at `~/.chartgen`](/chartgen/guides/deploy/#docker). Without one, when the store

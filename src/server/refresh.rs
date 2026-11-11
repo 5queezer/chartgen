@@ -120,6 +120,16 @@ pub(super) async fn forget_families(write: &WriteFn, families: Vec<String>) {
 /// store and then changes the families, and the store is written off the OAuth lock.
 static GATE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
+/// A refresh token's value is `<family part>.<secret>`, both random. The family part is
+/// the same in every token of one family, and the family's id is its hash. So a token
+/// the server no longer has a row for still says which family it was of, to someone
+/// who held it, while nothing in the store leads back to a family part: the id cannot
+/// be turned into one.
+fn family_of(value: &str) -> Option<(&str, String)> {
+    let (part, _) = value.split_once('.')?;
+    (!part.is_empty()).then(|| (part, hash_of(part)))
+}
+
 /// A token to hand out once the store has it.
 pub(super) struct Rotation {
     /// The value for the client. Never stored or logged.
@@ -270,7 +280,8 @@ impl OAuthStore {
         if user.is_none() && held >= MAX_TOKENS_PER_CLIENT {
             return None;
         }
-        let value = random_token();
+        let family_part = random_token();
+        let value = format!("{family_part}.{}", random_token());
         Some(Rotation {
             hash: hash_of(&value),
             value,
@@ -278,7 +289,7 @@ impl OAuthStore {
             spent: Vec::new(),
             spent_at: now,
             token: RefreshToken {
-                family: Uuid::new_v4().to_string(),
+                family: hash_of(&family_part),
                 seq: 0,
                 client_id: client_id.to_string(),
                 user: user.map(str::to_string),
@@ -298,15 +309,30 @@ impl OAuthStore {
     ) -> Result<Rotation, Refused> {
         self.expire_refresh(now);
         let sign_in = self.signin.is_some();
-        let t = self
-            .refresh
-            .get(&hash_of(presented))
-            .filter(|t| t.client_id == client_id && self.clients.contains_key(client_id))
-            // Issued under the other sign-in mode: with sign-in on a token's owner is
-            // its user and never its client (ADR-0044).
-            .filter(|t| t.user.is_some() == sign_in)
-            .ok_or(Refused::Invalid)?
-            .clone();
+        let (family_part, family) = family_of(presented).ok_or(Refused::Invalid)?;
+        // This client's, and issued under this sign-in mode: with sign-in on a token's
+        // owner is its user and never its client (ADR-0044).
+        let ours = |t: &RefreshToken| {
+            t.family == family && t.client_id == client_id && t.user.is_some() == sign_in
+        };
+        if !self.clients.contains_key(client_id) {
+            return Err(Refused::Invalid);
+        }
+        let Some(t) = self.refresh.get(&hash_of(presented)).filter(|t| ours(t)) else {
+            // No row for it. If it names a family of this client that is in use, it is
+            // a token of that family from before the spent ones that are kept, and it
+            // came back: the family ends, as for a spent token that is still known.
+            let in_use = self
+                .refresh
+                .values()
+                .any(|t| ours(t) && t.spent_at.is_none());
+            return Err(if in_use {
+                Refused::Reused(family)
+            } else {
+                Refused::Invalid
+            });
+        };
+        let t = t.clone();
         let live = self
             .refresh
             .iter()
@@ -323,7 +349,7 @@ impl OAuthStore {
             }
             _ => return Err(Refused::Reused(t.family)),
         };
-        let value = random_token();
+        let value = format!("{family_part}.{}", random_token());
         let access = Uuid::new_v4().to_string();
         Ok(Rotation {
             hash: hash_of(&value),
@@ -515,11 +541,14 @@ pub(super) async fn revoke(
         let of_client = |c: &str| c == client_id;
         match s.refresh.get(&hash_of(token)) {
             Some(t) => of_client(&t.client_id).then(|| t.family.clone()),
-            None => s
-                .tokens
-                .get(token)
-                .filter(|t| of_client(&t.client_id))
-                .and_then(|t| t.family.clone()),
+            None => match s.tokens.get(token) {
+                Some(t) => of_client(&t.client_id).then(|| t.family.clone()).flatten(),
+                // A refresh token too old to have a row still names its family.
+                None => family_of(token).map(|f| f.1).filter(|family| {
+                    let mut tokens = s.refresh.values();
+                    tokens.any(|t| &t.family == family && of_client(&t.client_id))
+                }),
+            },
         }
     };
     let families: Vec<String> = family.into_iter().collect();
@@ -857,6 +886,111 @@ mod tests {
         assert!(exchange(&state, &lost, CLIENT, &write).await.is_err());
         assert!(exchange(&state, &second, CLIENT, &write).await.is_err());
         assert_eq!(live(&state), 0);
+    }
+
+    /// Only the newest spent tokens of a family are kept. One older than that used to
+    /// be merely unknown: whoever held a copy of the usable token could exchange it
+    /// 101 times, and the owner's token then ended nothing, while the copy lived on.
+    #[tokio::test]
+    async fn a_token_too_old_to_be_remembered_still_ends_its_family() {
+        for restart in [false, true] {
+            let (store, _) = temp_store(&format!("forgotten-{restart}"));
+            let mut state = started(&store, false, &[CLIENT]);
+            let write = to(&store);
+            let (_, owners) = authorize(&state, CLIENT, None, &write).await;
+            let owners = owners.unwrap();
+            // The holder of a copy runs ahead.
+            let (mut access, mut copy) = (String::new(), owners.clone());
+            for _ in 0..MAX_SPENT_PER_FAMILY + 2 {
+                (access, copy) = exchange(&state, &copy, CLIENT, &write).await.unwrap();
+            }
+            if restart {
+                state = started(&store, false, &[CLIENT]);
+            }
+            let known = |state: &SharedState, token: &str| {
+                let s = state.oauth.lock().unwrap();
+                s.refresh.contains_key(&hash_of(token))
+            };
+            assert!(!known(&state, &owners), "its row is gone");
+
+            assert_eq!(
+                exchange(&state, &owners, CLIENT, &write).await,
+                Err(StatusCode::BAD_REQUEST)
+            );
+            assert!(
+                !valid(&state, &access),
+                "restart {restart}: the copy's access token"
+            );
+            assert!(exchange(&state, &copy, CLIENT, &write).await.is_err());
+            assert!(store.refresh_tokens(0).unwrap().is_empty());
+        }
+    }
+
+    /// Ending a family by a token the server no longer knows takes a token of that
+    /// family, presented by its client. Nothing else does it: not a made-up value, not
+    /// another client, and not what somebody could read out of the database.
+    #[tokio::test]
+    async fn only_a_token_of_the_family_and_its_client_ends_it() {
+        let (store, _) = temp_store("family-key");
+        let state = started(&store, false, &[CLIENT, "c2"]);
+        let write = to(&store);
+        let (_, mine) = authorize(&state, CLIENT, None, &write).await;
+        let (_, theirs) = authorize(&state, "c2", None, &write).await;
+        let (mine, theirs) = (mine.unwrap(), theirs.unwrap());
+        let family_part = |token: &str| token.split_once('.').unwrap().0.to_string();
+
+        let mut attempts = vec![
+            // Names no family at all, or none that exists.
+            ("made-up".to_string(), CLIENT),
+            ("no-such-family.secret".to_string(), CLIENT),
+            (".".to_string(), CLIENT),
+            // Names a live family, of another client.
+            (format!("{}.made-up", family_part(&theirs)), CLIENT),
+            (format!("{}.made-up", family_part(&mine)), "c2"),
+        ];
+        // Everything the database holds, alone and combined, with the right client.
+        for row in store.refresh_tokens(0).unwrap() {
+            let client = if row.client_id == CLIENT {
+                CLIENT
+            } else {
+                "c2"
+            };
+            let access = row.access_hash.clone().unwrap();
+            for value in [
+                row.family.clone(),
+                row.token_hash.clone(),
+                format!("{}.{}", row.family, row.token_hash),
+                format!("{}.{}", row.family, access),
+                format!("{}.x", row.token_hash),
+            ] {
+                attempts.push((value, client));
+            }
+        }
+        for (value, client) in &attempts {
+            assert_eq!(
+                exchange(&state, value, client, &write).await,
+                Err(StatusCode::BAD_REQUEST),
+                "{value}"
+            );
+            let answer = revoke(&state, value, client, &write).await;
+            assert_eq!(answer.status(), StatusCode::OK);
+        }
+        assert_eq!(store.refresh_tokens(0).unwrap().len(), 2, "nothing ended");
+        assert!(exchange(&state, &mine, CLIENT, &write).await.is_ok());
+
+        // A former holder can: the family part of any token of it, with its client,
+        // by presenting it or by revoking it.
+        let stale = format!("{}.forgotten", family_part(&theirs));
+        assert!(exchange(&state, &stale, "c2", &write).await.is_err());
+        assert!(exchange(&state, &theirs, "c2", &write).await.is_err());
+        let (_, again) = authorize(&state, "c2", None, &write).await;
+        let again = again.unwrap();
+        let stale = format!("{}.forgotten", family_part(&again));
+        assert_eq!(
+            revoke(&state, &stale, "c2", &write).await.status(),
+            StatusCode::OK
+        );
+        assert!(exchange(&state, &again, "c2", &write).await.is_err());
     }
 
     /// A successor that a retry replaced was never exchanged. It must not pass for a

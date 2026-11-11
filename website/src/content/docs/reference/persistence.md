@@ -157,7 +157,7 @@ CREATE TABLE client_grants (            -- clients a user approved
 -- Migration 7: refresh tokens (ADR-0058).
 CREATE TABLE refresh_tokens (
     token_hash  TEXT    PRIMARY KEY,    -- SHA-256 hex of the token; the value is never stored
-    family      TEXT    NOT NULL,       -- one authorization; at most one row of it is unspent
+    family      TEXT    NOT NULL,       -- one authorization: SHA-256 hex of the part its tokens share; at most one row unspent
     seq         INTEGER NOT NULL,       -- position in the family
     client_id   TEXT    NOT NULL,
     user_id     TEXT,                   -- users.id, or NULL when issued with sign-in off
