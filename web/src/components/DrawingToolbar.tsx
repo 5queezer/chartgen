@@ -870,11 +870,15 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
         // click on the same spot would make a short line nobody drew. To the person the two
         // clicks are one place, and only the mouse can say so.
         let firstPress: typeof lastArmedPress = null;
+        // What was noted last when this tool was armed: a press from before this drawing.
+        // A first point placed with no press of its own (a touch notes none) would
+        // otherwise be remembered as that one, and a later click there be refused.
+        const before = lastArmedPress;
         o.nextStep = () => {
           const [a, b] = o.points;
           const press = lastArmedPress;
           if (!a || !b) {
-            firstPress = press;
+            firstPress = press !== before ? press : null;
             nextStep();
             return;
           }

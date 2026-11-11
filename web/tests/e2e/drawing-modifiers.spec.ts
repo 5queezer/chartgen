@@ -742,6 +742,32 @@ test.describe("drawing modifiers", () => {
       }
     });
 
+    test.describe("with a touch screen", () => {
+      test.use({ hasTouch: true });
+
+      test("a first point placed by touch is not held against a mouse press from before", async ({
+        bootedApp: page,
+      }) => {
+        await page.waitForTimeout(1500);
+        const line = page.getByRole("button", { name: "Trend line" });
+        // A line by mouse. Its last press, at (500, 200), is what was noted last.
+        await line.click();
+        await clickAt(page, { x: 300, y: 130 });
+        await clickAt(page, { x: 500, y: 200 });
+        await expect.poll(async () => (await overlays(page)).length).toBe(1);
+
+        // The next line: its first point by touch, on the same bar at another price.
+        await line.click();
+        const box = (await host(page).boundingBox())!;
+        await page.touchscreen.tap(box.x + 500, box.y + 260);
+        await page.waitForTimeout(700);
+        // Its second by mouse, where the earlier line's last press was. That press has
+        // nothing to do with this line, so this is a second point like any other.
+        await clickAt(page, { x: 500, y: 200 });
+        await expect.poll(async () => (await overlays(page)).length).toBe(2);
+      });
+    });
+
     /** Off the pane klinecharts sends a double click nowhere: it must not become a second click. */
     for (const [name, spot] of [
       ["y-axis", (w: number, _h: number) => ({ x: w - 20, y: 200 })],
