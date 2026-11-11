@@ -598,7 +598,9 @@ pub fn check_levels(
 }
 
 /// The bracket a skip is scored with: in at the next bar's open, out one ATR against
-/// or two ATR with it, on `bars`, the closed bars of the setup's interval.
+/// or two ATR with it, on `bars`, the closed bars of the setup's interval. It runs out
+/// after 24 of those bars, or after the longest expiry any setup may have if that is
+/// sooner: a skip cannot be cancelled, so it must not stay open for years.
 pub fn skip_bracket(
     direction: Direction,
     bars: &[Bar],
@@ -631,7 +633,7 @@ pub fn skip_bracket(
         },
         invalidation,
         targets: vec![last.close + sign * SKIP_TARGET_ATR * atr],
-        expires_at: now_ms + SKIP_EXPIRY_BARS * interval_secs * 1000,
+        expires_at: now_ms + (SKIP_EXPIRY_BARS * interval_secs * 1000).min(MAX_EXPIRY_MS),
     })
 }
 
