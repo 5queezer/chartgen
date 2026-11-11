@@ -285,6 +285,11 @@ A family counts as a token of its client, in every limit that counts tokens.
   can push out the token of the agent that uses it; what they can push out are other
   family-less tokens, whose holders authorize again with no person, sign-in being off.
   With the two per family above, a client holds at most 40 plus 100.
+  **What is left:** a client that could get no refresh token, because others hold its 20
+  families, has only tokens under this limit, so anyone with its client id can push its
+  token out by minting 100. Dropping was still chosen over refusing at the limit, because
+  refusing would let the same stranger lock the web app out of its own client for good,
+  where a dropped token costs one more authorization, with no person while sign-in is off.
 - **Pending codes with sign-in off** had no limit: every `/authorize` for a registered
   client stored a code for 5 minutes, with a `code_challenge` of any length. Now a client
   keeps 20, its own oldest dropped first, the server keeps 2000 and then answers `429` with
@@ -353,6 +358,10 @@ registered clients already do.
   `401` and authorizes again, with a person. A process that runs through refreshes in time,
   and so does a client that stores the time, as Hermes does. A client that answers a `401`
   with a refresh needs none of this.
+- Bad, and not new: **`/token` and `/revoke` have no rate limit.** A request with a refresh
+  token the server does not know walks that client's refresh rows while holding the lock
+  every authenticated request needs. The rows are bounded, so this costs CPU and nothing
+  else. Left as it is here.
 - Neutral: an event stream still ends with the process and reconnects, as it already had
   to.
 - Neutral: the answers of `/token` and `/register` and the metadata document name the new

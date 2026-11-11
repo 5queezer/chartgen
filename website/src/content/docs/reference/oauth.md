@@ -331,7 +331,12 @@ With sign-in off a client also keeps at most 100 access tokens that came with no
 token, which are the web app's and those of a client past its 20 authorizations. One more
 ends the oldest of them by time of issue. Access tokens that came with a refresh token are
 never ended for this. Together with the two per authorization, a client holds at most 140
-access tokens.
+access tokens. A client that got no refresh token, because others hold its 20
+authorizations, has only tokens under this limit, so anyone who knows its client id can
+push its token out by getting 100 of their own. Refusing at the limit instead would let
+them lock the web app out. With sign-in on none of this applies.
+
+`/token` and `/revoke` are not rate-limited.
 
 **What is stored.** The server keeps the SHA-256 of a refresh token, of the part of it that
 names its authorization, and of the access token issued with it, never a value, in
