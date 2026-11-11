@@ -858,6 +858,40 @@ async fn revise_and_cancel_go_to_the_log_and_wait_for_the_next_bar() {
     assert_eq!(seqs, [1, 2, 3, 4]);
 }
 
+/// A missing field does not hide what is wrong with the fields that are there, in
+/// create_setup or in revise_setup, and nothing is stored either way.
+#[tokio::test]
+async fn every_check_the_present_fields_allow_is_made_in_one_answer() {
+    let s = live();
+    let p = price("BTCUSDT");
+    // A long with its stop 1 % above the entry and no expiry.
+    let mut args = long();
+    args.as_object_mut().unwrap().remove("expires_at");
+    args["invalidation"] = json!(p * 0.99);
+    let text = call(&s, "create_setup", args, "owner").unwrap_err();
+    assert_eq!(errors(&text), ["expires_at", "invalidation"]);
+    // A long with no stop and no expiry, and its target 2 % below the entry.
+    let mut args = long();
+    args.as_object_mut().unwrap().remove("expires_at");
+    args.as_object_mut().unwrap().remove("invalidation");
+    args["targets"] = json!([p * 0.95]);
+    let text = call(&s, "create_setup", args, "owner").unwrap_err();
+    assert_eq!(errors(&text), ["invalidation", "expires_at", "targets[0]"]);
+    assert_eq!(
+        call(&s, "list_setups", json!({}), "owner").unwrap()["total"],
+        0
+    );
+
+    // A revision without a reason whose new stop is above the entry it keeps.
+    let setup = created(&s, "owner");
+    let stop = setup["entry"]["high"].as_f64().unwrap() * 1.01;
+    let args = json!({ "id": setup["id"], "invalidation": stop, "expires_at": "yesterday" });
+    let text = call(&s, "revise_setup", args, "owner").unwrap_err();
+    assert_eq!(errors(&text), ["reason", "expires_at", "invalidation"]);
+    let after = call(&s, "get_setup", json!({ "id": setup["id"] }), "owner").unwrap();
+    assert_eq!(after, setup);
+}
+
 #[tokio::test]
 async fn skip_is_stored_and_scored_with_the_default_bracket() {
     let s = live();

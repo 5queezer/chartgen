@@ -777,7 +777,14 @@ impl Setups {
             false => None,
         };
         let levels = match LEVEL_FIELDS.iter().any(|f| given(f)) {
-            true => setups::parse_levels(args, Some(current.latest_levels()), now, &mut problems),
+            true => setups::parse_levels(
+                args,
+                Some(current.latest_levels()),
+                Some(current.direction),
+                &current.costs,
+                now,
+                &mut problems,
+            ),
             false => None,
         };
         let requests = self.drawing_requests(args, now, &mut problems);

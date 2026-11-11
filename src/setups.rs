@@ -418,11 +418,14 @@ pub fn check_fields(args: &Value, allowed: &[&str], problems: &mut Vec<Problem>)
     }
 }
 
-/// The levels in `args`, each read on its own so that every problem is found. With
+/// The levels in `args`, each read on its own and then judged together as far as they
+/// could be read, so that every problem is found in one pass (`check_parts`). With
 /// `base`, a field left out keeps its value (a revision).
 pub fn parse_levels(
     args: &Value,
     base: Option<&Levels>,
+    direction: Option<Direction>,
+    costs: &Costs,
     now_ms: i64,
     problems: &mut Vec<Problem>,
 ) -> Option<Levels> {
@@ -507,15 +510,32 @@ pub fn parse_levels(
     } else {
         base.map(|b| b.expires_at)
     };
+    // What could be read is judged, whatever else is missing or unreadable.
+    let parts = Parts {
+        entry,
+        invalidation,
+        targets,
+        expires_at,
+    };
+    check_parts(direction, &parts, costs, now_ms, problems);
     if problems.len() > before {
         return None;
     }
     Some(Levels {
-        entry: entry?,
-        invalidation: invalidation?,
-        targets: targets?,
-        expires_at: expires_at?,
+        entry: parts.entry?,
+        invalidation: parts.invalidation?,
+        targets: parts.targets?,
+        expires_at: parts.expires_at?,
     })
+}
+
+/// The levels of a call that could be read. One that is missing or unreadable is
+/// `None`, and has its own problem already.
+struct Parts {
+    entry: Option<Zone>,
+    invalidation: Option<f64>,
+    targets: Option<Vec<f64>>,
+    expires_at: Option<i64>,
 }
 
 /// Whether `levels` can be proven wrong: the invalidation on the far side of the entry,
@@ -527,97 +547,124 @@ pub fn check_levels(
     now_ms: i64,
     problems: &mut Vec<Problem>,
 ) {
-    let Levels {
-        entry,
-        invalidation,
-        targets,
-        expires_at,
-    } = levels;
-    if entry.low > entry.high {
-        problems.push(Problem::new("entry", "entry.low is above entry.high"));
-        return;
-    }
-    // The entry edge nearest the invalidation, and the one nearest the targets.
-    let (near_stop, near_target, side) = match direction {
-        Direction::Long => (entry.low, entry.high, "below"),
-        Direction::Short => (entry.high, entry.low, "above"),
+    let parts = Parts {
+        entry: Some(levels.entry),
+        invalidation: Some(levels.invalidation),
+        targets: Some(levels.targets.clone()),
+        expires_at: Some(levels.expires_at),
     };
-    let sign = direction.sign();
-    let risk = sign * (near_stop - invalidation);
-    if risk <= 0.0 {
-        problems.push(
-            Problem::new(
-                "invalidation",
-                format!(
-                    "the invalidation of a {} must be {side} its entry zone",
-                    match direction {
-                        Direction::Long => "long",
-                        Direction::Short => "short",
-                    }
-                ),
-            )
-            .hint(format!(
-                "entry is {} to {}, invalidation is {invalidation}",
-                entry.low, entry.high
-            )),
-        );
-    } else {
-        let floor = costs.least_risk(near_stop);
-        if risk < floor {
+    check_parts(Some(direction), &parts, costs, now_ms, problems);
+}
+
+/// Every check the levels that could be read allow. A relation between two of them is
+/// judged when both are there and each is valid by itself, and never against one that
+/// is missing or unreadable: that one has its own problem, and a second about it would
+/// only be noise.
+fn check_parts(
+    direction: Option<Direction>,
+    parts: &Parts,
+    costs: &Costs,
+    now_ms: i64,
+    problems: &mut Vec<Problem>,
+) {
+    let entry = match parts.entry {
+        Some(entry) if entry.low > entry.high => {
+            problems.push(Problem::new("entry", "entry.low is above entry.high"));
+            None
+        }
+        entry => entry,
+    };
+    let word = |long: &'static str, short: &'static str| match direction {
+        Some(Direction::Short) => short,
+        _ => long,
+    };
+    // The entry edge nearest the invalidation, and the one nearest the targets.
+    let edges = direction
+        .zip(entry)
+        .map(|(direction, entry)| match direction {
+            Direction::Long => (entry.low, entry.high),
+            Direction::Short => (entry.high, entry.low),
+        });
+    let sign = direction.map(Direction::sign);
+    if let (Some((near_stop, _)), Some(sign), Some(invalidation), Some(entry)) =
+        (edges, sign, parts.invalidation, entry)
+    {
+        let risk = sign * (near_stop - invalidation);
+        if risk <= 0.0 {
             problems.push(
                 Problem::new(
                     "invalidation",
                     format!(
-                        "the invalidation is {risk} from the entry, closer than the least risk scored here, {floor}"
+                        "the invalidation of a {} must be {} its entry zone",
+                        word("long", "short"),
+                        word("below", "above")
                     ),
                 )
                 .hint(format!(
-                    "the least risk is {MIN_RISK_IN_ROUND_TRIP_COSTS} times the assumed cost of getting in and out, {} bps of the price",
-                    costs.round_trip() * 10_000.0
+                    "entry is {} to {}, invalidation is {invalidation}",
+                    entry.low, entry.high
                 )),
             );
+        } else {
+            let floor = costs.least_risk(near_stop);
+            if risk < floor {
+                problems.push(
+                    Problem::new(
+                        "invalidation",
+                        format!(
+                            "the invalidation is {risk} from the entry, closer than the least risk scored here, {floor}"
+                        ),
+                    )
+                    .hint(format!(
+                        "the least risk is {MIN_RISK_IN_ROUND_TRIP_COSTS} times the assumed cost of getting in and out, {} bps of the price",
+                        costs.round_trip() * 10_000.0
+                    )),
+                );
+            }
         }
     }
-    let mut last = near_target;
-    for (i, t) in targets.iter().enumerate() {
-        if sign * (t - near_target) <= 0.0 {
-            problems.push(
-                Problem::new(
-                    &format!("targets[{i}]"),
-                    format!("target {t} is not beyond the entry zone"),
-                )
-                .hint(format!(
-                    "a target of this setup is {} {near_target}",
-                    match direction {
-                        Direction::Long => "above",
-                        Direction::Short => "below",
-                    }
-                )),
-            );
-        } else if i > 0 && sign * (t - last) <= 0.0 {
-            problems.push(
-                Problem::new(
-                    &format!("targets[{i}]"),
-                    format!("target {t} is not beyond the one before it"),
-                )
-                .hint("list targets nearest first"),
-            );
+    if let (Some(targets), Some(sign)) = (&parts.targets, sign) {
+        let near_target = edges.map(|(_, near_target)| near_target);
+        let mut last = None;
+        for (i, t) in targets.iter().enumerate() {
+            let field = format!("targets[{i}]");
+            if near_target.is_some_and(|near| sign * (t - near) <= 0.0) {
+                problems.push(
+                    Problem::new(&field, format!("target {t} is not beyond the entry zone")).hint(
+                        format!(
+                            "a target of this setup is {} {}",
+                            word("above", "below"),
+                            near_target.unwrap_or_default()
+                        ),
+                    ),
+                );
+            } else if last.is_some_and(|last: f64| sign * (t - last) <= 0.0) {
+                problems.push(
+                    Problem::new(
+                        &field,
+                        format!("target {t} is not beyond the one before it"),
+                    )
+                    .hint("list targets nearest first"),
+                );
+            }
+            last = Some(*t);
         }
-        last = *t;
     }
-    if *expires_at <= now_ms {
-        problems.push(
-            Problem::new("expires_at", "expires_at is not in the future")
-                .hint(format!("it is {} now", drawings::iso(now_ms))),
-        );
-    } else if *expires_at - now_ms > MAX_EXPIRY_MS {
-        problems.push(Problem::new(
-            "expires_at",
-            format!(
-                "expires_at is more than {} days ahead",
-                MAX_EXPIRY_MS / 86_400_000
-            ),
-        ));
+    if let Some(expires_at) = parts.expires_at {
+        if expires_at <= now_ms {
+            problems.push(
+                Problem::new("expires_at", "expires_at is not in the future")
+                    .hint(format!("it is {} now", drawings::iso(now_ms))),
+            );
+        } else if expires_at - now_ms > MAX_EXPIRY_MS {
+            problems.push(Problem::new(
+                "expires_at",
+                format!(
+                    "expires_at is more than {} days ahead",
+                    MAX_EXPIRY_MS / 86_400_000
+                ),
+            ));
+        }
     }
 }
 
@@ -727,13 +774,7 @@ impl Draft {
                 }
                 None
             }
-            _ => {
-                let levels = parse_levels(args, None, now_ms, problems);
-                if let (Some(levels), Some(direction)) = (&levels, direction) {
-                    check_levels(direction, levels, &Costs::default(), now_ms, problems);
-                }
-                levels
-            }
+            _ => parse_levels(args, None, direction, &Costs::default(), now_ms, problems),
         };
         if problems.len() > before {
             return None;
