@@ -1072,7 +1072,23 @@ pub fn open_global(path: &Path) -> Option<&'static Store> {
         .as_ref()
 }
 
-/// The process-wide store at `db_path()`.
+/// Whether asking for the store may open it. Only `main` says so, and no test runs
+/// `main`: a test that reaches code asking for the store must not open, and migrate,
+/// the developer's own `~/.chartgen/chartgen.db`.
+static OPENS_ON_DEMAND: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Let `global()` open the store at `db_path()` when it is first asked for. For the
+/// start of a real process.
+pub fn open_on_demand() {
+    OPENS_ON_DEMAND.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The process-wide store: the one at `db_path()`, opened on first use, in a process
+/// that called `open_on_demand()`. Anywhere else, only a store that `open_global`
+/// already opened, and never a file of its own choosing.
 pub fn global() -> Option<&'static Store> {
-    open_global(&db_path())
+    if OPENS_ON_DEMAND.load(std::sync::atomic::Ordering::Relaxed) {
+        return open_global(&db_path());
+    }
+    STORE.get().and_then(Option::as_ref)
 }

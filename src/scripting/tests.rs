@@ -1169,6 +1169,18 @@ fn a_file_with_push_devices_upgrades_and_keeps_them() {
     );
 }
 
+/// Asking for the store must not open one. It used to open and migrate the default
+/// file, `~/.chartgen/chartgen.db`, on first use, so a test that reached any code
+/// asking for the store wrote the developer's own database. Nothing in this test
+/// process opens a store, so there is none.
+#[test]
+fn asking_for_the_store_opens_no_file() {
+    let path = persistence::db_path();
+    let existed = path.exists();
+    assert!(persistence::global().is_none());
+    assert_eq!(path.exists(), existed, "{}", path.display());
+}
+
 // --- Refresh tokens (ADR-0058) ---
 
 fn refresh_row(hash: &str, family: &str, seq: i64) -> persistence::StoredRefreshToken {
