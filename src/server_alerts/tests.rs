@@ -3123,7 +3123,7 @@ async fn a_late_outcome_does_not_answer_for_a_newer_fire() {
         (queue.pop_front().unwrap(), queue.pop_front().unwrap())
     };
 
-    a.clone().deliver(earlier, false).await;
+    a.clone().deliver(earlier).await;
     let view = get(&a, "me", &id).await;
     assert!(
         view["last_push_devices"][&phone].is_null(),
@@ -3134,7 +3134,7 @@ async fn a_late_outcome_does_not_answer_for_a_newer_fire() {
         "the last outcome still updates"
     );
 
-    a.clone().deliver(newer, false).await;
+    a.clone().deliver(newer).await;
     let view = get(&a, "me", &id).await;
     assert_eq!(view["last_push_devices"][&phone]["status"], 200, "{view}");
 }
@@ -3625,11 +3625,7 @@ async fn a_hung_agent_receiver_holds_nobody_elses_delivery() {
     })
     .await;
     let st = a.lock();
-    assert_eq!(
-        st.agent_queue.len(),
-        2,
-        "and the rest wait in its own queue"
-    );
+    assert_eq!(st.agent_in_flight.len(), 2, "two are being sent");
     assert_eq!(
         st.pending, 0,
         "none of it counts as anyone's pending delivery"
@@ -3639,17 +3635,277 @@ async fn a_hung_agent_receiver_holds_nobody_elses_delivery() {
         Limits::default().deliveries_in_flight
     );
     drop(st);
-    // What waits in the store is the fire, without the setup: the thesis is not copied.
-    let waiting = store.server_alert_events().unwrap();
-    assert_eq!(waiting.len(), 4);
-    assert!(waiting
+    // The rest wait in the owner's event log, which is the queue. What waits there is
+    // the fire, without the setup: the thesis is not copied, and neither is the note.
+    let (log, _) = store.events_after("me", 0, 10).unwrap();
+    assert_eq!(log.len(), 4);
+    assert!(log
         .iter()
-        .all(|e| !e.body.contains("thesis") && !e.body.contains(&"x".repeat(50))));
+        .all(|e| e.delivery == "waiting" && e.kind == "alert.fired"));
+    assert!(log.iter().all(|e| !e.body.contains("thesis")
+        && !e.body.contains(PRIVATE)
+        && !e.body.contains(&"x".repeat(50))));
+    assert!(store.server_alert_events().unwrap().is_empty());
+}
+
+// ---- ADR-0061: the event log is the queue of wake-ups ----
+
+const BUSY: &str =
+    "HTTP/1.1 503 Service Unavailable\r\ncontent-length: 0\r\nconnection: close\r\n\r\n";
+const SLOW_DOWN: &str =
+    "HTTP/1.1 429 Too Many Requests\r\ncontent-length: 0\r\nconnection: close\r\n\r\n";
+const REFUSED: &str = "HTTP/1.1 401 Unauthorized\r\ncontent-length: 0\r\nconnection: close\r\n\r\n";
+
+fn log_of(store: &Store, owner: &str) -> Vec<LoggedEvent> {
+    store.events_after(owner, 0, 100).unwrap().0
+}
+
+/// Bring the next round of every waiting wake-up forward to now: the minutes of the
+/// schedule are not waited for here, only read.
+fn make_due(store: &Store, owner: &str) {
+    let now = chrono::Utc::now().timestamp();
+    for e in log_of(store, owner) {
+        if e.delivery == "waiting" {
+            store
+                .set_event_delivery(owner, e.seq, "waiting", e.attempts, Some(now))
+                .unwrap();
+        }
+    }
+}
+
+/// Fire one alert of `owner` that wakes the agent, and return its id.
+async fn fire_a_wake_up(a: &Arc<ServerAlerts>, owner: &str, t: i64) -> String {
+    let id = create(a, waking_spec(None), owner).await;
+    tick(a, BASE + t, 99.0);
+    tick(a, BASE + t + 60, 101.0);
+    id
+}
+
+/// A wake-up that does not get through is tried again at 1, 5, 15 and 30 minutes
+/// after its three quick attempts, each of those once, and then given up. It stays in
+/// the log through all of it, and every attempt carries the event's one id.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_wake_up_that_fails_follows_the_schedule_and_is_given_up_last() {
+    let (port, seen) = receiver(BUSY).await;
+    let (store, _) = store_at("wake-up-schedule");
+    let (a, _setups) = waking(store, port, "me", Limits::default());
+    let alert = fire_a_wake_up(&a, "me", 0).await;
+    let hits = || seen.lock().unwrap().len();
+    let mut tried = 0;
+    for (round, wait) in [60, 300, 900, 1800].into_iter().enumerate() {
+        let round = round as i64 + 1;
+        until("the round to be recorded", || {
+            log_of(store, "me")[0].attempts == round
+        })
+        .await;
+        let event = log_of(store, "me")[0].clone();
+        tried += if round == 1 { 3 } else { 1 };
+        assert_eq!(
+            hits(),
+            tried,
+            "round {round}: three quick attempts first, then one each"
+        );
+        assert_eq!(event.delivery, "waiting", "round {round}");
+        let due_in = event.next_attempt_at.unwrap() - chrono::Utc::now().timestamp();
+        assert!(
+            (wait - 5..=wait).contains(&due_in),
+            "round {round}: due in {due_in} s, not {wait}"
+        );
+        // Not before its time.
+        tokio::time::sleep(Duration::from_millis(1200)).await;
+        assert_eq!(
+            hits(),
+            tried,
+            "round {round}: tried again before it was due"
+        );
+        make_due(store, "me");
+    }
+    until("the last round", || log_of(store, "me")[0].attempts == 5).await;
+    let event = log_of(store, "me")[0].clone();
+    assert_eq!(
+        (event.delivery.as_str(), event.next_attempt_at, hits()),
+        ("failed", None, 7)
+    );
+    let ids: HashSet<String> = seen
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|r| {
+            r.to_lowercase()
+                .split("webhook-id: ")
+                .nth(1)
+                .unwrap()
+                .lines()
+                .next()
+                .unwrap()
+                .to_string()
+        })
+        .collect();
+    assert_eq!(
+        ids,
+        HashSet::from([event.id.clone()]),
+        "one id on all seven attempts"
+    );
+    assert_eq!(get(&a, "me", &alert).await["last_status"], 503);
+    assert!(a.lock().agent_in_flight.is_empty());
+}
+
+/// The schedule is in the store, not in memory: a restart continues it. The wake-up
+/// is not sent again before its time, and then once, under the id it always had.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_restart_continues_a_wake_ups_schedule_and_does_not_start_it_again() {
+    let (down, _) = receiver(BUSY).await;
+    let (store, _) = store_at("wake-up-restart");
+    let (a, setups) = waking(store, down, "me", Limits::default());
+    fire_a_wake_up(&a, "me", 0).await;
+    until("the first round", || log_of(store, "me")[0].attempts == 1).await;
+    let before = log_of(store, "me")[0].clone();
+    drop(setups);
+    drop(a);
+
+    let (up, seen) = receiver(OK).await;
+    let (a, _setups) = waking(store, up, "me", Limits::default());
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    assert!(
+        seen.lock().unwrap().is_empty(),
+        "sent again at the restart, a minute early"
+    );
+    assert_eq!(
+        log_of(store, "me")[0],
+        before,
+        "the restart changed the schedule"
+    );
+    make_due(store, "me");
+    until("the delivery", || {
+        log_of(store, "me")[0].delivery == "delivered"
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(1200)).await;
+    let got = seen.lock().unwrap().clone();
+    assert_eq!(got.len(), 1, "once");
+    assert!(got[0]
+        .to_lowercase()
+        .contains(&format!("webhook-id: {}", before.id)));
+    assert!(the_agents_receiver_accepts(&got[0]));
+    assert_eq!(log_of(store, "me")[0].attempts, 2);
+    drop(a);
+}
+
+/// "Slow down" and a server's error may pass later, so the wake-up waits for its next
+/// round. A refusal will not, so it is given up at once. Either way it is in the log.
+#[tokio::test(flavor = "multi_thread")]
+async fn only_what_may_pass_later_is_tried_again() {
+    for (name, reply, state, hits) in [
+        ("429", SLOW_DOWN, "waiting", 3),
+        ("401", REFUSED, "failed", 1),
+    ] {
+        let (port, seen) = receiver(reply).await;
+        let (store, _) = store_at(&format!("wake-up-{name}"));
+        let (a, _setups) = waking(store, port, "me", Limits::default());
+        fire_a_wake_up(&a, "me", 0).await;
+        until("the first round", || log_of(store, "me")[0].attempts == 1).await;
+        let event = log_of(store, "me")[0].clone();
+        assert_eq!(
+            (event.delivery.as_str(), seen.lock().unwrap().len()),
+            (state, hits),
+            "{name}"
+        );
+        assert_eq!(
+            event.next_attempt_at.is_some(),
+            state == "waiting",
+            "{name}"
+        );
+    }
+}
+
+/// An hour after it was made an event is no longer news, and its receiver has
+/// forgotten its id: it is given up, not sent, and stays in the log. The hour counts
+/// from when the event was made, whatever happened since.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_wake_up_older_than_an_hour_is_given_up_and_stays_in_the_log() {
+    let (port, seen) = receiver(OK).await;
+    let (store, path) = store_at("wake-up-old");
+    let a = plain(store);
+    let logged = |n: usize, owner: &str| NewEvent {
+        id: format!("event-{owner}-{n}"),
+        owner: owner.to_string(),
+        kind: "setup.status".to_string(),
+        at: 1,
+        alert_id: None,
+        setup_id: None,
+        body: r#"{"from":"watching","to":"triggered"}"#.to_string(),
+        deliver: true,
+    };
+    store
+        .save_setups_logging(
+            &[],
+            &[logged(1, "me"), logged(2, "me"), logged(1, "someone-else")],
+        )
+        .unwrap();
+    rusqlite::Connection::open(&path)
+        .unwrap()
+        .execute(
+            "UPDATE events SET created_at = created_at - 3700 WHERE id = 'event-me-1'",
+            [],
+        )
+        .unwrap();
+    a.set_agent(agent_at(port, "me"));
+    until("the one in time", || {
+        log_of(store, "me")[1].delivery == "delivered"
+    })
+    .await;
+    until("the old one to be given up", || {
+        log_of(store, "me")[0].delivery == "failed"
+    })
+    .await;
+    assert_eq!(
+        seen.lock().unwrap().len(),
+        1,
+        "only the one in time was sent"
+    );
+    // And one that waited for an owner the receiver is not for has nobody to go to.
+    assert_eq!(log_of(store, "someone-else")[0].delivery, "failed");
+    assert_eq!(log_of(store, "me").len(), 2, "both are still in the log");
+}
+
+/// Beyond the owner's 50 waiting, a fire is still logged. Its entry says its delivery
+/// was dropped, and so does the alert.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_fire_over_the_cap_is_logged_and_says_its_wake_up_was_dropped() {
+    let port = silent_receiver().await;
+    let (store, _) = store_at("wake-up-cap");
+    let (a, _setups) = waking(store, port, "me", Limits::default());
+    let waiting: Vec<NewEvent> = (0..persistence::EVENTS_WAITING_PER_OWNER)
+        .map(|n| NewEvent {
+            id: format!("waiting-{n}"),
+            owner: "me".to_string(),
+            kind: "setup.status".to_string(),
+            at: 1,
+            alert_id: None,
+            setup_id: None,
+            body: "{}".to_string(),
+            deliver: true,
+        })
+        .collect();
+    store.save_setups_logging(&[], &waiting).unwrap();
+    let alert = fire_a_wake_up(&a, "me", 0).await;
+    let last = log_of(store, "me").pop().unwrap();
+    assert_eq!(
+        (last.kind.as_str(), last.delivery.as_str()),
+        ("alert.fired", "dropped")
+    );
+    let view = get(&a, "me", &alert).await;
+    assert_eq!(view["last_error"], "wake-up skipped: too many waiting");
+    assert_eq!(view["fire_count"], 1, "the fire counts all the same");
+    // Nothing of this is anyone's pending delivery, the owner's own included.
+    assert_eq!(a.lock().pending, 0);
 }
 
 /// Where a delivery goes, and whether it counts in every owner's shared total, is
 /// decided once, when it is queued. An alert changed between its fire and the dispatch
 /// does not move the delivery to the other path, and leaves the count where it was.
+/// With the event log the two cannot be mixed up at all: a wake-up waits as a row of
+/// the log and a webhook in its owner's queue, and neither is asked what it is.
 /// On one thread, so that no dispatch runs between the fire and the change.
 #[tokio::test]
 async fn an_alert_switched_between_fire_and_dispatch_keeps_its_delivery_and_the_count() {
@@ -3658,9 +3914,10 @@ async fn an_alert_switched_between_fire_and_dispatch_keeps_its_delivery_and_the_
     let (store, _) = store_at("wake-up-switched");
     let a = alerts_on(store, local(hook_port), Limits::default());
     a.set_agent(agent_at(agent_port, "me"));
-    let settled = |a: &Arc<ServerAlerts>| {
-        let st = a.lock();
-        st.queues.is_empty() && st.agent_queue.is_empty()
+    let settled = |a: &Arc<ServerAlerts>| a.lock().queues.is_empty();
+    let waiting = || {
+        let log = log_of(store, "me");
+        log.iter().filter(|e| e.delivery == "waiting").count()
     };
 
     // Queued as a webhook, then the alert is made one that wakes the agent.
@@ -3669,7 +3926,7 @@ async fn an_alert_switched_between_fire_and_dispatch_keeps_its_delivery_and_the_
     tick(&a, BASE + 60, 101.0);
     {
         let mut st = a.lock();
-        assert_eq!((st.pending, st.agent_queue.len()), (1, 0));
+        assert_eq!((st.pending, waiting()), (1, 0));
         let alert = st.alerts.get_mut(&id).unwrap();
         alert.webhook = None;
         alert.notify_agent = true;
@@ -3693,7 +3950,7 @@ async fn an_alert_switched_between_fire_and_dispatch_keeps_its_delivery_and_the_
     tick(&a, BASE + 180, 101.0);
     {
         let mut st = a.lock();
-        assert_eq!((st.pending, st.agent_queue.len()), (0, 1));
+        assert_eq!((st.pending, waiting()), (0, 1));
         // Someone's delivery that waits meanwhile: the count must not lose it.
         st.pending = 1;
         let alert = st.alerts.get_mut(&id).unwrap();
@@ -3703,11 +3960,13 @@ async fn an_alert_switched_between_fire_and_dispatch_keeps_its_delivery_and_the_
             secret: None,
         });
     }
-    until("the wake-up's turn", || settled(&a)).await;
-    until("its end", || {
-        store.server_alert_events().unwrap().is_empty()
+    until("the wake-up's end", || {
+        log_of(store, "me")
+            .iter()
+            .all(|e| e.delivery == "delivered")
     })
     .await;
+    assert!(settled(&a) && store.server_alert_events().unwrap().is_empty());
     assert_eq!(a.lock().pending, 1, "never counted, so nothing is taken");
     assert_eq!(
         woken.lock().unwrap().len(),
@@ -3727,7 +3986,20 @@ async fn a_thesis_is_cut_to_what_fits_on_a_whole_character() {
     let alert_id = create(&a, waking_spec(Some(&id)), "me").await;
     let alert = a.lock().alerts[&alert_id].clone();
     let mut setup = a.setup_of("me", &id).unwrap();
-    let fired = r#"{"id":"e1","fired_at":1,"price":1.5,"bar_time":1,"fire_count":1}"#;
+    let fired = LoggedEvent {
+        owner: "me".to_string(),
+        seq: 1,
+        id: "e1".to_string(),
+        kind: "alert.fired".to_string(),
+        at: 1,
+        created_at: 1,
+        alert_id: Some(alert_id.clone()),
+        setup_id: Some(id.clone()),
+        body: r#"{"price":1.5,"bar_time":1,"fire_count":1}"#.to_string(),
+        delivery: "waiting".to_string(),
+        attempts: 0,
+        next_attempt_at: None,
+    };
     // Mostly four bytes wide, with a three-byte one between: too long, and the cut
     // falls among characters of two widths.
     let mixed: String = (0..chartgen::setups::MAX_THESIS)
@@ -3735,7 +4007,7 @@ async fn a_thesis_is_cut_to_what_fits_on_a_whole_character() {
         .collect();
     for thesis in ["𝄞".repeat(chartgen::setups::MAX_THESIS), mixed] {
         setup.thesis = thesis.clone();
-        let body = agent_body(fired, &alert, Some(&setup));
+        let body = wake_up_body(&fired, Some(&alert), Some(&setup));
         assert!(body.len() <= MAX_AGENT_BODY, "{} bytes", body.len());
         let sent: Value = serde_json::from_str(&body).unwrap();
         assert_eq!(sent["setup"]["thesis_cut"], true, "{} bytes", body.len());
@@ -3752,7 +4024,7 @@ async fn a_thesis_is_cut_to_what_fits_on_a_whole_character() {
     }
     // One that fits is whole and not marked.
     setup.thesis = "é".repeat(chartgen::setups::MAX_THESIS);
-    let body = agent_body(fired, &alert, Some(&setup));
+    let body = wake_up_body(&fired, Some(&alert), Some(&setup));
     let sent: Value = serde_json::from_str(&body).unwrap();
     assert_eq!(sent["setup"]["thesis"], setup.thesis.as_str());
     assert!(sent["setup"].get("thesis_cut").is_none(), "{body}");

@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 use chartgen::data::Bar;
 use chartgen::drawings;
 use chartgen::feed::FeedEvent;
-use chartgen::scripting::persistence::{self, Store, StoredSetup};
+use chartgen::scripting::persistence::{self, NewEvent, Store, StoredSetup};
 use chartgen::setups::{
     self, Decision, Draft, MinuteBar, Problem, Record, Revision, Status, LEVEL_FIELDS, MAX_THESIS,
 };
@@ -408,10 +408,13 @@ impl Setups {
             })
             .collect();
         let (rows, added): (Vec<StoredSetup>, Vec<usize>) = rows.into_iter().unzip();
-        self.store.save_setups(&rows).map_err(|e| {
-            eprintln!("[setups] cannot store a setup: {e}");
-            "The setup store is unavailable".to_string()
-        })?;
+        let events = self.status_events(&changed);
+        self.store
+            .save_setups_logging(&rows, &events)
+            .map_err(|e| {
+                eprintln!("[setups] cannot store a setup: {e}");
+                "The setup store is unavailable".to_string()
+            })?;
         for (((record, _), row), added) in changed.into_iter().zip(rows).zip(added) {
             let key = (record.owner.clone(), record.id.clone());
             let log_bytes = st.setups.get(&key).map_or(0, |h| h.log_bytes) + added;
@@ -429,6 +432,49 @@ impl Setups {
 
     /// The store's key of a setup. A replay's ids count per owner, so that two callers
     /// cannot change each other's.
+    /// What this write says happened to a setup's status, as events of its owner's log
+    /// (ADR-0061), stored with the entries that say it. None on a replay, which has no
+    /// log and must answer the same on every run.
+    ///
+    /// A change the server made to a setup the agent took is also a wake-up, if the
+    /// operator configured a receiver for that owner. A cancellation is the agent's own
+    /// act, and nobody waits on a skip: those are logged and wake nobody.
+    fn status_events(&self, changed: &[(Record, Vec<Revision>)]) -> Vec<NewEvent> {
+        if self.replay.is_some() {
+            return Vec::new();
+        }
+        let mut events = Vec::new();
+        for (record, log) in changed {
+            let wakes = self.alerts.as_ref().is_some_and(|a| a.wakes(&record.owner));
+            for entry in log {
+                let Some(status) = entry.changes.get("status") else {
+                    continue;
+                };
+                let by_server =
+                    entry.by == setups::By::Server && entry.kind == setups::Kind::Status;
+                let cancelled = status["to"] == json!(Status::Cancelled);
+                let mut body =
+                    json!({ "from": status["from"], "to": status["to"], "gap": record.gap });
+                if let Some(result) = entry.changes.get("result_r") {
+                    body["result_r"] = result["to"].clone();
+                }
+                events.push(NewEvent {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    owner: record.owner.clone(),
+                    kind: "setup.status".to_string(),
+                    // When it happened: the bar's time, not the time of this write. After
+                    // the server was away, several are written at once.
+                    at: entry.at,
+                    alert_id: None,
+                    setup_id: Some(record.id.clone()),
+                    body: body.to_string(),
+                    deliver: wakes && by_server && !cancelled && record.decision == Decision::Take,
+                });
+            }
+        }
+        events
+    }
+
     fn row_id(&self, record: &Record) -> String {
         match self.replay {
             Some(_) => format!("{}/{}", record.owner, record.id),

@@ -713,8 +713,34 @@ pub async fn deliver_request(
     timing: &Timing,
     slots: &[&Semaphore],
 ) -> Outcome {
+    attempt(target, policy, make, timing, slots, timing.backoff.len()).await
+}
+
+/// POST a webhook's `body` once, with no retry here: a later round of a wake-up whose
+/// schedule is kept with its event (ADR-0061).
+pub async fn deliver_once(
+    target: &Target,
+    policy: &Policy,
+    body: &str,
+    event_id: &str,
+    secret: Option<&str>,
+    timing: &Timing,
+    slots: &[&Semaphore],
+) -> Outcome {
+    let make = || webhook_request(body, event_id, secret);
+    attempt(target, policy, &make, timing, slots, 0).await
+}
+
+async fn attempt(
+    target: &Target,
+    policy: &Policy,
+    make: &(dyn Fn() -> Request + Sync),
+    timing: &Timing,
+    slots: &[&Semaphore],
+    retries: usize,
+) -> Outcome {
     let mut attempts = 0;
-    let mut waits = timing.backoff.iter();
+    let mut waits = timing.backoff.iter().take(retries);
     loop {
         attempts += 1;
         let mut permits = Vec::with_capacity(slots.len());
