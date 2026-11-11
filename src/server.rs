@@ -19,7 +19,7 @@ use uuid::Uuid;
 use crate::chart_push::{ChartHub, PushCtx, STREAM_BUFFER};
 use crate::mcp::handle_mcp_request;
 use chartgen::engine::Engine as TradingEngine;
-use chartgen::mcp_schema::SERVER_ALERT_TOOLS;
+use chartgen::mcp_schema::{SERVER_ALERT_TOOLS, SETUP_TOOLS};
 #[cfg(feature = "scripting")]
 use chartgen::scripting;
 
@@ -478,13 +478,17 @@ fn with_resource_metadata(mut resp: Response, path: &str) -> Response {
     resp
 }
 
-/// The client ids owning stored scripts, and server alerts while those are on (an
-/// off feature has no one to run them for, so its rows pin nobody); `None` if that
-/// cannot be determined. Scripts live in the store, so without one nobody owns any.
+/// The client ids owning stored scripts, and server alerts or setups while those are
+/// on (an off feature has no one to run them for, so its rows pin nobody); `None` if
+/// that cannot be determined. Scripts live in the store, so without one nobody owns any.
 fn script_owners() -> Option<HashSet<String>> {
     #[cfg(feature = "scripting")]
     if let Some(store) = scripting::persistence::global() {
-        return pinned_clients(store, crate::server_alerts::enabled())
+        let (alerts, setups) = (
+            crate::server_alerts::enabled(),
+            crate::setup_service::enabled(),
+        );
+        return pinned_clients(store, alerts, setups)
             .map_err(|e| eprintln!("[OAuth] cannot read script owners: {e}"))
             .ok();
     }
@@ -495,10 +499,14 @@ fn script_owners() -> Option<HashSet<String>> {
 fn pinned_clients(
     store: &scripting::persistence::Store,
     alerts_on: bool,
+    setups_on: bool,
 ) -> rusqlite::Result<HashSet<String>> {
     let mut owners = store.script_owners()?;
     if alerts_on {
         owners.extend(store.server_alert_owners()?);
+    }
+    if setups_on {
+        owners.extend(store.setup_owners()?);
     }
     Ok(owners)
 }
@@ -1422,6 +1430,46 @@ async fn mcp_call(
         .and_then(|p| p.get("name"))
         .and_then(|n| n.as_str())
         .filter(|n| method == "tools/call" && SERVER_ALERT_TOOLS.contains(n));
+    let call_owner = |state: &Arc<AppState>| {
+        token_owned
+            .as_deref()
+            .and_then(|t| state.oauth.lock().unwrap().owner_for_token(t))
+    };
+    let tool = params
+        .and_then(|p| p.get("name"))
+        .and_then(|n| n.as_str())
+        .filter(|_| method == "tools/call");
+    // A setup belongs to the token's user, or with sign-in off to its OAuth client, as
+    // an alert does (ADR-0059).
+    if let Some(tool) = tool.filter(|n| SETUP_TOOLS.contains(n)) {
+        let owner = call_owner(&state);
+        let (tool, id) = (tool.to_string(), id.clone());
+        let args = params.and_then(|p| p.get("arguments")).cloned();
+        let result = tokio::task::spawn_blocking(move || {
+            setup_call(&tool, id, args.unwrap_or(json!({})), owner.as_deref())
+        })
+        .await
+        .unwrap();
+        return streamable_http_json_response(StatusCode::OK, result, session_id.as_deref());
+    }
+    // On a replay server a call is answered as of the time it names, or not at all.
+    let replay_at = match (crate::replay::global(), tool) {
+        (Some(replay), Some(tool)) => {
+            let args = params.and_then(|p| p.get("arguments"));
+            match replay.admit(tool, args.unwrap_or(&Value::Null)) {
+                Ok(at) => at,
+                Err(e) => {
+                    let refused = crate::mcp::tool_err(id.clone(), &e);
+                    return streamable_http_json_response(
+                        StatusCode::OK,
+                        refused,
+                        session_id.as_deref(),
+                    );
+                }
+            }
+        }
+        _ => None,
+    };
     if let Some(tool) = alert_tool {
         // An alert belongs to the token's user, or with sign-in off to its OAuth client
         // (ADR-0042, ADR-0044).
@@ -1463,21 +1511,23 @@ async fn mcp_call(
         client: push_client,
     });
     let result = tokio::task::spawn_blocking(move || {
-        handle_mcp_request(
-            &method_owned,
-            id,
-            params_owned.as_ref(),
-            engine.as_ref(),
-            token_owned.as_deref(),
-            push.as_ref(),
-            user.as_deref(),
-        )
+        crate::replay::at(replay_at, || {
+            handle_mcp_request(
+                &method_owned,
+                id,
+                params_owned.as_ref(),
+                engine.as_ref(),
+                token_owned.as_deref(),
+                push.as_ref(),
+                user.as_deref(),
+            )
+        })
     })
     .await
     .unwrap();
 
     let result = if method == "tools/list" {
-        with_server_alert_tools(result)
+        with_setup_tools(with_server_alert_tools(result))
     } else {
         result
     };
@@ -1495,6 +1545,74 @@ fn server_alert_call(tool: &str, id: Option<Value>, args: Value, owner: Option<&
         return crate::mcp::tool_ok(id, json!({ "enabled": false, "alerts": [] }));
     }
     crate::mcp::tool_err(id, "Server alerts are off on this server")
+}
+
+/// A setup tool call; on a server without setups only the list answers.
+#[cfg_attr(not(feature = "scripting"), allow(unused_variables))]
+fn setup_call(tool: &str, id: Option<Value>, args: Value, owner: Option<&str>) -> Value {
+    #[cfg(feature = "scripting")]
+    if let Some(setups) = crate::setup_service::global() {
+        return setups.call_tool(tool, id, &args, owner);
+    }
+    if tool == "list_setups" {
+        return crate::mcp::tool_ok(id, json!({ "enabled": false, "setups": [] }));
+    }
+    crate::mcp::tool_err(id, "Setups are off on this server")
+}
+
+/// The setup tools are listed only where they run (`CHARTGEN_SETUPS=1`, or a replay).
+#[cfg_attr(not(feature = "scripting"), allow(unused_mut))]
+fn with_setup_tools(mut result: Value) -> Value {
+    #[cfg(feature = "scripting")]
+    if crate::setup_service::global().is_some() {
+        if let Some(tools) = result["result"]["tools"].as_array_mut() {
+            tools.extend(chartgen::mcp_schema::setup_tools());
+        }
+    }
+    result
+}
+
+/// What a replay server cannot also be, if any of it is on.
+fn replay_conflict(engine: bool, alerts: bool, setups: bool, signin: bool) -> Option<&'static str> {
+    [
+        (engine, "--trade"),
+        (alerts, "CHARTGEN_SERVER_ALERTS=1"),
+        (setups, "CHARTGEN_SETUPS=1 (a replay has setups of its own)"),
+        (signin, "a sign-in provider"),
+    ]
+    .into_iter()
+    .find_map(|(on, what)| on.then_some(what))
+}
+
+/// Make this a replay server if `CHARTGEN_REPLAY_FIXTURES` says so (ADR-0059). A replay
+/// answers from fixtures only, so it refuses to be anything else as well: no engine, no
+/// sign-in, no server alerts.
+fn start_replay(has_engine: bool) -> Result<(), String> {
+    let Some(dir) = crate::replay::fixtures_dir() else {
+        return Ok(());
+    };
+    let alerts = std::env::var("CHARTGEN_SERVER_ALERTS").is_ok_and(|v| v == "1");
+    let setups = std::env::var("CHARTGEN_SETUPS").is_ok_and(|v| v == "1");
+    let signin = !matches!(signin::Config::from_env(), Ok(None));
+    if let Some(what) = replay_conflict(has_engine, alerts, setups, signin) {
+        return Err(format!(
+            "CHARTGEN_REPLAY_FIXTURES cannot be combined with {what}: a replay server answers from fixtures only"
+        ));
+    }
+    // Clients and everything else a server stores stay in memory too: a replay never
+    // opens `chartgen.db`.
+    #[cfg(feature = "scripting")]
+    if !scripting::persistence::open_global_in_memory() {
+        return Err("a replay server could not open its in-memory store".into());
+    }
+    #[cfg_attr(not(feature = "scripting"), allow(unused_variables))]
+    let replay = crate::replay::start(&dir)?;
+    #[cfg(feature = "scripting")]
+    crate::setup_service::start_replay(replay)?;
+    println!(
+        "Replay server: answers come from the fixtures in {dir}, as of the time each call names"
+    );
+    Ok(())
 }
 
 /// The alert tools are listed only where they run (`CHARTGEN_SERVER_ALERTS=1`).
@@ -1773,6 +1891,10 @@ impl Drop for CleanupStream {
 // --- Server startup ---
 
 pub async fn run_server(port: u16, engine: Option<Arc<RwLock<TradingEngine>>>) {
+    if let Err(e) = start_replay(engine.is_some()) {
+        eprintln!("{e}");
+        std::process::exit(2);
+    }
     #[cfg_attr(not(feature = "scripting"), allow(unused_mut))]
     let mut oauth = OAuthStore::new();
     match signin::Config::from_env() {
@@ -1806,7 +1928,10 @@ pub async fn run_server(port: u16, engine: Option<Arc<RwLock<TradingEngine>>>) {
     // registration (ADR-0036) and their scripts stay theirs (ADR-0025).
     #[cfg(feature = "scripting")]
     {
-        let path = scripting::persistence::db_path();
+        let path = match crate::replay::global() {
+            Some(_) => "in memory, for this replay".to_string(),
+            None => scripting::persistence::db_path().display().to_string(),
+        };
         let ttl = UNUSED_CLIENT_TTL.as_secs() as i64;
         let restored = scripting::persistence::global().map(|s| {
             if let Err(e) = s.gc_oauth_clients(ttl) {
@@ -1817,8 +1942,7 @@ pub async fn run_server(port: u16, engine: Option<Arc<RwLock<TradingEngine>>>) {
         match restored {
             Some(Ok(clients)) => {
                 println!(
-                    "OAuth client store: {} ({} clients restored)",
-                    path.display(),
+                    "OAuth client store: {path} ({} clients restored)",
                     clients.len()
                 );
                 if scripting::enabled() {
@@ -1843,7 +1967,7 @@ pub async fn run_server(port: u16, engine: Option<Arc<RwLock<TradingEngine>>>) {
                 }
             }
             Some(Err(e)) => eprintln!("[OAuth] cannot read stored clients: {e}"),
-            None => eprintln!("[OAuth] store unavailable at {}", path.display()),
+            None => eprintln!("[OAuth] store unavailable at {path}"),
         }
         // After the clients, which a refresh token needs (ADR-0058).
         let cutoff = chrono::Utc::now().timestamp() - refresh::REFRESH_TTL_SECS;
@@ -1890,6 +2014,8 @@ pub async fn run_server(port: u16, engine: Option<Arc<RwLock<TradingEngine>>>) {
     });
     #[cfg(feature = "scripting")]
     crate::server_alerts::start(&state.charts);
+    #[cfg(feature = "scripting")]
+    crate::setup_service::start(&state.charts);
 
     // Store port for metadata endpoint
     std::env::set_var("_CHARTGEN_PORT", port.to_string());
@@ -1977,6 +2103,59 @@ pub async fn run_server(port: u16, engine: Option<Arc<RwLock<TradingEngine>>>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Setups and alerts take their owner from this (ADR-0044, ADR-0059): the token's
+    /// user, or with sign-in off its OAuth client, and nobody once it has expired.
+    #[test]
+    fn a_tokens_owner_is_its_user_or_else_its_client() {
+        let mut store = OAuthStore::new();
+        let mut put = |token: &str, user: Option<&str>, expires_in: u64| {
+            store.tokens.insert(
+                token.to_string(),
+                AccessToken {
+                    _token: token.to_string(),
+                    family: None,
+                    client_id: "the-client".to_string(),
+                    created_at: Instant::now(),
+                    expires_in: Duration::from_secs(expires_in),
+                    user: user.map(|id| signin::TokenUser {
+                        id: id.to_string(),
+                        session: None,
+                        last_used: Instant::now(),
+                    }),
+                },
+            );
+        };
+        put("plain", None, 3600);
+        put("signed-in", Some("github:7"), 3600);
+        put("expired", Some("github:7"), 0);
+        assert_eq!(
+            store.owner_for_token("plain").as_deref(),
+            Some("the-client")
+        );
+        assert_eq!(
+            store.owner_for_token("signed-in").as_deref(),
+            Some("github:7")
+        );
+        assert_eq!(store.owner_for_token("expired"), None);
+        assert_eq!(store.owner_for_token("unknown"), None);
+    }
+
+    /// A replay server is nothing else at the same time (ADR-0059).
+    #[test]
+    fn a_replay_refuses_to_start_as_anything_else_too() {
+        assert_eq!(replay_conflict(false, false, false, false), None);
+        assert_eq!(replay_conflict(true, false, false, false), Some("--trade"));
+        assert!(replay_conflict(false, true, false, false)
+            .unwrap()
+            .contains("SERVER_ALERTS"));
+        assert!(replay_conflict(false, false, true, false)
+            .unwrap()
+            .contains("SETUPS"));
+        assert!(replay_conflict(false, false, false, true)
+            .unwrap()
+            .contains("sign-in"));
+    }
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
     use http_body_util::BodyExt;
@@ -3135,9 +3314,39 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let store = scripting::persistence::Store::open(&dir.join("s.db")).unwrap();
         store.save_server_alert("a1", "owner", "{}").unwrap();
-        assert!(pinned_clients(&store, true).unwrap().contains("owner"));
-        assert!(pinned_clients(&store, false).unwrap().is_empty());
+        assert!(pinned_clients(&store, true, false)
+            .unwrap()
+            .contains("owner"));
+        assert!(pinned_clients(&store, false, false).unwrap().is_empty());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// With sign-in off a setup belongs to an OAuth client. Evicting that client would
+    /// leave its setups scored and counted with nobody able to read them (ADR-0059).
+    #[cfg(feature = "scripting")]
+    #[test]
+    fn a_setup_owner_is_pinned_only_while_setups_are_on() {
+        let store = scripting::persistence::Store::in_memory().unwrap();
+        store
+            .save_setups(&[scripting::persistence::StoredSetup {
+                id: "s1".into(),
+                owner: "owner".into(),
+                record: "{}".into(),
+                revisions: vec![],
+            }])
+            .unwrap();
+        assert!(pinned_clients(&store, false, true)
+            .unwrap()
+            .contains("owner"));
+        assert!(pinned_clients(&store, false, false).unwrap().is_empty());
+
+        // And it is not evicted to make room, as a script owner is not.
+        let mut s = full_table();
+        let owner = s.clients.keys().next().unwrap().clone();
+        let pinned = HashSet::from([owner.clone()]);
+        s.make_room(|| Some(pinned)).unwrap();
+        assert!(s.clients.contains_key(&owner));
+        assert_eq!(s.clients.len(), MAX_CLIENTS - 1);
     }
 
     #[test]

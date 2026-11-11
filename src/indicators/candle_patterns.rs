@@ -930,12 +930,10 @@ pub fn newest_bar_forming(data: &OhlcvData, now_ms: i64) -> bool {
     end.is_some_and(|end| now_ms < end * 1000)
 }
 
-/// Wall clock in unix ms, for `newest_bar_forming`.
+/// Now in unix ms, for `newest_bar_forming`: the wall clock, or in a call answered as
+/// of a time, that time.
 pub fn now_ms() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(0)
+    crate::data::now_ms()
 }
 
 pub const FORMING_NOTE: &str =
@@ -1106,6 +1104,54 @@ impl Indicator for CandlestickPatterns {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A replay answers as of a time (ADR-0059), and its fixtures can be dated after
+    /// today. Whether the newest bar is still forming is then a question about that
+    /// time, not about the wall clock, or the newest closed bar would be left out.
+    #[test]
+    fn inside_a_call_answered_as_of_a_time_that_time_decides_what_is_forming() {
+        // Hourly bars from 2100-01-01, long after any wall clock this test runs under.
+        let open = 4_102_444_800_i64;
+        let bars: Vec<Bar> = (0..10)
+            .map(|i| Bar {
+                open: 1.0,
+                high: 2.0,
+                low: 0.5,
+                close: 1.5,
+                volume: 1.0,
+                date: (open + i * 3600).to_string(),
+            })
+            .collect();
+        let data = OhlcvData {
+            bars,
+            symbol: None,
+            interval: Some("1h".into()),
+            session: None,
+        };
+        let last_close_ms = (open + 10 * 3600) * 1000;
+        let window = |d: &OhlcvData| {
+            crate::indicators::chart_patterns::closed_window(d, 100)
+                .0
+                .len()
+        };
+
+        // With no such call the wall clock decides: every one of these bars is ahead.
+        assert!(newest_bar_forming(&data, now_ms()));
+        assert_eq!(window(&data), 9);
+        // The newest bar closed exactly at the time asked about: it is a closed bar.
+        crate::data::at(Some(last_close_ms), || {
+            assert_eq!(now_ms(), last_close_ms);
+            assert!(!newest_bar_forming(&data, now_ms()));
+            assert_eq!(window(&data), 10);
+        });
+        // A second earlier it was still forming.
+        crate::data::at(Some(last_close_ms - 1000), || {
+            assert!(newest_bar_forming(&data, now_ms()));
+            assert_eq!(window(&data), 9);
+        });
+        // The time is gone with the call.
+        assert!(newest_bar_forming(&data, now_ms()));
+    }
 
     fn b(o: f64, h: f64, l: f64, c: f64) -> Bar {
         Bar {

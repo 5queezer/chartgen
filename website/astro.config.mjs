@@ -34,6 +34,7 @@ export default defineConfig({
             { label: 'Trading', slug: 'guides/trading' },
             { label: 'Push notifications', slug: 'guides/notifications' },
             { label: 'Scripted indicators', slug: 'guides/scripted-indicators' },
+            { label: 'Setups', slug: 'guides/setups' },
             { label: 'Web frontend', slug: 'guides/web' },
             { label: 'TradingView parity', slug: 'guides/tradingview-parity' },
             { label: 'Testing', slug: 'guides/testing' },
