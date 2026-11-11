@@ -70,19 +70,10 @@ fn answer(store: &Store, owner: &str, args: &Value) -> Result<Value, String> {
     let after = number("after", 0, i64::MAX)?;
     let limit = number("limit", DEFAULT_LIMIT, MAX_LIMIT)?.max(1);
     // One more than asked, to say whether more wait.
-    let (mut events, kept, last) = store
-        .events_after(owner, after, limit + 1)
-        .and_then(|(events, _)| {
-            Ok((
-                events,
-                store.events_kept_after(owner, after)?,
-                store.last_event_seq(owner)?,
-            ))
-        })
-        .map_err(|e| {
-            eprintln!("[events] cannot read the log: {e}");
-            "The event log is unavailable".to_string()
-        })?;
+    let (mut events, kept, last) = store.events_page(owner, after, limit + 1).map_err(|e| {
+        eprintln!("[events] cannot read the log: {e}");
+        "The event log is unavailable".to_string()
+    })?;
     let more = events.len() as i64 > limit;
     events.truncate(limit as usize);
     // Fewer kept after the cursor than were numbered after it: the reader missed some

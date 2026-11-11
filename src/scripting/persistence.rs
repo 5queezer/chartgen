@@ -944,14 +944,40 @@ impl Store {
         Ok((rows.collect::<rusqlite::Result<_>>()?, oldest))
     }
 
-    /// How many of `owner`'s events after `after` are kept. Fewer than were numbered
-    /// after it means that some are gone.
-    pub fn events_kept_after(&self, owner: &str, after: i64) -> rusqlite::Result<i64> {
-        self.conn().query_row(
+    /// One page of `owner`'s log for a reader at `after`: the events, how many are kept
+    /// after its place, and the highest number given. Fewer kept than were numbered
+    /// after it means that some are gone. Read as one, in one transaction:
+    /// an event written between three separate reads would make the count and the
+    /// number disagree, and the reader would be told that events are gone when none is.
+    pub fn events_page(
+        &self,
+        owner: &str,
+        after: i64,
+        limit: i64,
+    ) -> rusqlite::Result<(Vec<LoggedEvent>, i64, i64)> {
+        let mut conn = self.conn();
+        let tx = conn.transaction()?;
+        let last: Option<i64> = tx
+            .query_row(
+                "SELECT last_seq FROM event_counters WHERE owner = ?1",
+                params![owner],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let kept: i64 = tx.query_row(
             "SELECT COUNT(*) FROM events WHERE owner = ?1 AND seq > ?2",
             params![owner, after],
             |r| r.get(0),
-        )
+        )?;
+        let events = {
+            let mut stmt = tx.prepare(&format!(
+                "SELECT {EVENT_COLUMNS} FROM events WHERE owner = ?1 AND seq > ?2 ORDER BY seq LIMIT ?3"
+            ))?;
+            let rows = stmt.query_map(params![owner, after, limit], logged_event)?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        tx.commit()?;
+        Ok((events, kept, last.unwrap_or(0)))
     }
 
     /// The highest number `owner` was ever given, kept or not.

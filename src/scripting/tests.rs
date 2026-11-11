@@ -2312,9 +2312,15 @@ fn a_waiting_wake_up_is_not_pruned_from_the_log() {
     assert_eq!(store.events_after("me", 0, 1).unwrap().0[0].seq, 8);
     // What a reader has to know: how many are kept after its place.
     let last = store.last_event_seq("me").unwrap();
-    assert_eq!(store.events_kept_after("me", last - 10).unwrap(), 10);
+    let (page, kept, numbered) = store.events_page("me", last - 10, 3).unwrap();
+    assert_eq!((page.len(), kept, numbered), (3, 10, last));
     assert_eq!(
-        store.events_kept_after("me", 0).unwrap(),
+        store.events_page("me", 0, 1).unwrap().1,
         persistence::EVENTS_PER_OWNER
+    );
+    // An owner with no log.
+    assert_eq!(
+        store.events_page("nobody", 0, 10).unwrap(),
+        (Vec::new(), 0, 0)
     );
 }
