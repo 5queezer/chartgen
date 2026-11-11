@@ -316,6 +316,13 @@ pub trait Indicator {
         false
     }
 
+    /// Whether it reads anything but the bars it is given, such as a series fetched
+    /// from an exchange. A replay refuses these: what they read is not cut at the
+    /// replay's time (ADR-0059).
+    fn reads_beyond_bars(&self) -> bool {
+        false
+    }
+
     /// Whether this is better computed from lower-timeframe bars (ADR-0048).
     fn wants_intrabars(&self) -> bool {
         false

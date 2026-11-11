@@ -8,6 +8,7 @@ sidebar:
 **Status:** Accepted
 **Date:** 2026-11-08
 **Amends:** [ADR-0029](/chartgen/decisions/0029-shareable-chart-links/) (a link may carry drawings of its symbol, `draw`)
+**Amended by:** [ADR-0059](/chartgen/decisions/0059-setups-paper-scored/) (a setup stores drawings on the server)
 
 ## Context and Problem Statement
 
