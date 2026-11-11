@@ -721,6 +721,9 @@ async fn skip_is_stored_and_scored_with_the_default_bracket() {
         "decision": "skip", "thesis": "example reason" });
     let skip = call(&s, "create_setup", args.clone(), "owner").unwrap();
     assert_eq!(skip["decision"], "skip");
+    // The server's bracket, by one of its two rules; a setup with levels is the agent's.
+    assert!(["atr", "floor"].contains(&skip["bracket"].as_str().unwrap()));
+    assert_eq!(created(&s, "other")["bracket"], "agent");
     let (entry, stop, target) = (
         skip["entry"]["low"].as_f64().unwrap(),
         skip["invalidation"].as_f64().unwrap(),

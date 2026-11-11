@@ -71,6 +71,19 @@ impl Status {
     }
 }
 
+/// Which rule set a setup's levels, so that a track record can tell them apart.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Bracket {
+    /// The agent's own levels.
+    #[default]
+    Agent,
+    /// A skip's bracket from the ATR of its interval.
+    Atr,
+    /// A skip's bracket at the least risk a setup may have, where the ATR was less.
+    Floor,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Zone {
     pub low: f64,
@@ -107,6 +120,11 @@ impl Costs {
     /// Both sides, as a fraction of the price.
     fn round_trip(&self) -> f64 {
         2.0 * (self.fee_bps_per_side + self.slippage_bps_per_side) / 10_000.0
+    }
+
+    /// The least distance from an entry at `price` to its invalidation.
+    fn least_risk(&self, price: f64) -> f64 {
+        MIN_RISK_IN_ROUND_TRIP_COSTS * self.round_trip() * price
     }
 }
 
@@ -148,6 +166,8 @@ pub struct Record {
     #[serde(default)]
     pub drawings: Vec<Value>,
     pub levels: Levels,
+    #[serde(default)]
+    pub bracket: Bracket,
     pub status: Status,
     pub created_at: i64,
     pub costs: Costs,
@@ -538,7 +558,7 @@ pub fn check_levels(
             )),
         );
     } else {
-        let floor = MIN_RISK_IN_ROUND_TRIP_COSTS * costs.round_trip() * near_stop;
+        let floor = costs.least_risk(near_stop);
         if risk < floor {
             problems.push(
                 Problem::new(
@@ -600,13 +620,15 @@ pub fn check_levels(
 /// The bracket a skip is scored with: in at the next bar's open, out one ATR against
 /// or two ATR with it, on `bars`, the closed bars of the setup's interval. It runs out
 /// after 24 of those bars, or after the longest expiry any setup may have if that is
-/// sooner: a skip cannot be cancelled, so it must not stay open for years.
+/// sooner: a skip cannot be cancelled, so it must not stay open for years. Where one
+/// ATR is less than the least risk a setup may have, the stop is that far and the target
+/// twice that; the rule that applied comes back with the levels.
 pub fn skip_bracket(
     direction: Direction,
     bars: &[Bar],
     interval_secs: i64,
     now_ms: i64,
-) -> Result<Levels, Problem> {
+) -> Result<(Levels, Bracket), Problem> {
     let atr = crate::orderflow::atr(bars, SKIP_ATR_LENGTH).filter(|a| a.is_finite() && *a > 0.0);
     let (Some(atr), Some(last)) = (atr, bars.last()) else {
         return Err(Problem::new(
@@ -619,22 +641,29 @@ pub fn skip_bracket(
         .hint("pick an interval with more history"));
     };
     let sign = direction.sign();
-    let invalidation = last.close - sign * SKIP_STOP_ATR * atr;
+    // Closer than the least risk, a skip would be scored on costs alone.
+    let floor = Costs::default().least_risk(last.close);
+    let (risk, rule) = match SKIP_STOP_ATR * atr {
+        by_atr if by_atr >= floor => (by_atr, Bracket::Atr),
+        _ => (floor, Bracket::Floor),
+    };
+    let invalidation = last.close - sign * risk;
     if invalidation <= 0.0 {
         return Err(Problem::new(
             "decision",
             "the default bracket of this skip would have a price at or below 0",
         ));
     }
-    Ok(Levels {
+    let levels = Levels {
         entry: Zone {
             low: last.close,
             high: last.close,
         },
         invalidation,
-        targets: vec![last.close + sign * SKIP_TARGET_ATR * atr],
+        targets: vec![last.close + sign * risk * SKIP_TARGET_ATR / SKIP_STOP_ATR],
         expires_at: now_ms + (SKIP_EXPIRY_BARS * interval_secs * 1000).min(MAX_EXPIRY_MS),
-    })
+    };
+    Ok((levels, rule))
 }
 
 /// What `create_setup` asked for, before the symbol and the drawings are checked.
@@ -760,6 +789,7 @@ impl Record {
             thesis: draft.thesis,
             drawings,
             levels,
+            bracket: Bracket::Agent,
             status: Status::Watching,
             created_at: now_ms,
             costs: Costs::default(),

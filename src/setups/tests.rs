@@ -353,7 +353,8 @@ fn skip(direction: &str) -> Record {
         "decision": "skip", "thesis": "example reason" });
     let mut problems = Vec::new();
     let draft = Draft::parse(&args, T0, &mut problems).unwrap();
-    let levels = skip_bracket(draft.direction, &hourly(40), 3600, T0).unwrap();
+    let (levels, rule) = skip_bracket(draft.direction, &hourly(40), 3600, T0).unwrap();
+    assert_eq!(rule, Bracket::Atr);
     Record::new(
         "setup-1".into(),
         "owner",
@@ -698,11 +699,82 @@ fn a_skip_expires_within_the_longest_expiry_whatever_its_interval() {
         (30 * day, MAX_EXPIRY_MS),
         (90 * day, MAX_EXPIRY_MS),
     ] {
-        let levels = skip_bracket(Direction::Long, &hourly(40), interval_secs, T0).unwrap();
+        let levels = skip_bracket(Direction::Long, &hourly(40), interval_secs, T0)
+            .unwrap()
+            .0;
         assert_eq!(
             levels.expires_at - T0,
             expected_ms,
             "{interval_secs} s bars"
         );
     }
+}
+
+/// On a quiet interval one ATR is less than the costs of the trade, and a skip scored
+/// on it would lose whatever the market did. The stop is then as far as the least risk
+/// any setup may have, and the target twice that.
+#[test]
+fn a_skip_on_a_quiet_interval_is_scored_at_the_risk_floor() {
+    let quiet: Vec<Bar> = (0..40)
+        .map(|i| Bar {
+            open: 100.0,
+            high: 100.05,
+            low: 99.95,
+            close: 100.0,
+            volume: 1.0,
+            date: (i * 60).to_string(),
+        })
+        .collect();
+    // ATR is 0.1, 10 bps. The floor is 3 round trips of 14 bps: 0.42.
+    let (long, rule) = skip_bracket(Direction::Long, &quiet, 60, T0).unwrap();
+    assert_eq!(rule, Bracket::Floor);
+    assert!(
+        (long.invalidation - 99.58).abs() < 1e-9,
+        "{}",
+        long.invalidation
+    );
+    assert!(
+        (long.targets[0] - 100.84).abs() < 1e-9,
+        "{}",
+        long.targets[0]
+    );
+    let (short, rule) = skip_bracket(Direction::Short, &quiet, 60, T0).unwrap();
+    assert_eq!(rule, Bracket::Floor);
+    assert!((short.invalidation - 100.42).abs() < 1e-9);
+    assert!((short.targets[0] - 99.16).abs() < 1e-9);
+
+    // Its target is worth having: about 2 R less a third of an R in costs.
+    let args = json!({ "symbol": "BTCUSDT", "interval": "1m", "direction": "long",
+        "decision": "skip", "thesis": "example reason" });
+    let draft = Draft::parse(&args, T0, &mut Vec::new()).unwrap();
+    let mut r = Record::new("s".into(), "o", "BTCUSDT".into(), draft, long, vec![], T0).0;
+    walk(
+        &mut r,
+        &[
+            bar(0, 100.0, 100.05, 99.95, 100.0),
+            bar(1, 100.0, 100.9, 99.95, 100.85),
+        ],
+    );
+    assert_eq!(r.status, Status::Won);
+    assert!(
+        (r.result_r.unwrap() - 1.6653).abs() < 1e-9,
+        "{:?}",
+        r.result_r
+    );
+}
+
+#[test]
+fn a_record_says_which_rule_set_its_bracket() {
+    let mut r = create(long_args());
+    assert_eq!(r.view()["bracket"], "agent");
+    r.bracket = Bracket::Floor;
+    assert_eq!(r.view()["bracket"], "floor");
+    // A row stored before the field existed is the agent's own levels or an ATR skip;
+    // it reads as the agent's, the default.
+    let mut old = serde_json::to_value(&r).unwrap();
+    old.as_object_mut().unwrap().remove("bracket");
+    assert_eq!(
+        serde_json::from_value::<Record>(old).unwrap().bracket,
+        Bracket::Agent
+    );
 }

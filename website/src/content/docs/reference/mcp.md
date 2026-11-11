@@ -1325,7 +1325,8 @@ setups; `can_create` in the list says so.
 - `as_of`: [replay servers](/chartgen/guides/setups/#replay) only, where every call needs it.
   `generate_chart`, `inspect_chart`, `get_indicators` and `get_quotes` take it there too.
 
-A setup answers with `id`, the fields above, `status` (`watching`, `triggered`, `won`,
+A setup answers with `id`, the fields above, `bracket` (`agent`, or for a skip `atr` or `floor`:
+which rule set its levels), `status` (`watching`, `triggered`, `won`,
 `invalidated`, `expired`, `cancelled`), `created_at`, `costs`, `fill` and `exit` (each
 `{price, bar_time}` or null), `result_r` (in R, null while open), `scored_through`, `pending`
 (changes that count from the next 1m bar), `revisions` and `agent_revisions`. `log` holds every

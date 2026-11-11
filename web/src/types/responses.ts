@@ -838,6 +838,9 @@ export const SetupSchema = SetupLevelsSchema.extend({
   decision: z.enum(["take", "skip"]),
   thesis: z.string(),
   drawings: z.array(SetupDrawingSchema),
+  // Which rule set the levels: the agent, or for a skip the server's bracket from the
+  // ATR, or at the least risk a setup may have where the ATR was less.
+  bracket: z.enum(["agent", "atr", "floor"]),
   status: SetupStatusSchema,
   created_at: z.number(),
   // The assumption the result is scored with, in basis points per side.
