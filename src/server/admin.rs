@@ -103,7 +103,10 @@ async fn overview(state: SharedState) -> Option<Arc<String>> {
 fn server_block(state: &SharedState) -> Value {
     let (push_subscriptions, _, push_feeds) = state.charts.in_use();
     let alerts = crate::server_alerts::global();
-    let (pairs, pair_limit) = alerts.map_or((0, 0), |a| a.watched_pairs());
+    let (pairs, pair_limit) = pairs_shown(
+        alerts.map(|a| a.watched_pairs()),
+        crate::setup_service::global().map(|s| s.watched_pairs()),
+    );
     json!({
         "version": env!("CARGO_PKG_VERSION"),
         "started_at": STARTED.get().copied(),
@@ -123,6 +126,12 @@ fn server_block(state: &SharedState) -> Value {
             "push_feeds": push_feeds,
         },
     })
+}
+
+/// The watched pairs to show. Alerts count the setups' pairs with their own; on a
+/// server that has setups and no alerts, the setups' count is all there is.
+fn pairs_shown(alerts: Option<(usize, usize)>, setups: Option<(usize, usize)>) -> (usize, usize) {
+    alerts.or(setups).unwrap_or((0, 0))
 }
 
 fn build(mut server: Value) -> Option<String> {
@@ -284,6 +293,13 @@ mod tests {
         }
         let off = operators(Some("github:1000001"), false).unwrap_err();
         assert!(off.contains("sign-in is off"), "{off}");
+    }
+
+    #[test]
+    fn watched_pairs_come_from_setups_where_there_are_no_alerts() {
+        assert_eq!(pairs_shown(Some((3, 16)), Some((1, 16))), (3, 16));
+        assert_eq!(pairs_shown(None, Some((1, 16))), (1, 16));
+        assert_eq!(pairs_shown(None, None), (0, 0));
     }
 
     #[test]

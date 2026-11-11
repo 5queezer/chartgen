@@ -335,6 +335,12 @@ impl Setups {
         self.wanted_feeds(&self.lock())
     }
 
+    /// How many pairs open setups watch, and the limit on watched pairs: what the
+    /// operator page shows on a server without alerts, where setups are all that watch.
+    pub(crate) fn watched_pairs(&self) -> (usize, usize) {
+        (self.pairs().len(), self.limits.pairs_total)
+    }
+
     /// Join the feeds open setups need and leave the others.
     fn sync_feeds(&self, st: &mut State) {
         let Some(hub) = &self.hub else {

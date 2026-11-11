@@ -224,6 +224,16 @@ fn kinds(setup: &Value) -> Vec<&str> {
         .collect()
 }
 
+/// On a server without alerts the setups' own count is what the operator page shows
+/// (ADR-0063).
+#[tokio::test]
+async fn the_pairs_open_setups_watch_are_counted_against_the_limit() {
+    let s = live();
+    assert_eq!(s.watched_pairs(), (0, Limits::default().pairs_total));
+    created(&s, "owner");
+    assert_eq!(s.watched_pairs(), (1, Limits::default().pairs_total));
+}
+
 #[tokio::test]
 async fn a_setup_is_created_read_and_listed() {
     let s = live();
