@@ -144,13 +144,16 @@ From here until the application runs again, production is down.
 
    ```sh
    systemctl disable --now chartgen-autodeploy.timer
-   while systemctl is-active --quiet chartgen-autodeploy.service; do sleep 2; done
-   systemctl is-active chartgen-autodeploy.service     # says: inactive
+   until systemctl show -p ActiveState --value chartgen-autodeploy.service | grep -qxE 'inactive|failed'; do sleep 2; done
+   systemctl show -p ActiveState --value chartgen-autodeploy.service     # says: inactive, or failed
    ```
 
    Disabling the timer does not stop a run of the service that is already
    under way, and that run can still ask Coolify for a deploy. So wait for it
-   to end. Then look at the application's **Deployments** in Coolify: nothing
+   to end. The service is a oneshot: while it runs its state is `activating`,
+   which `systemctl is-active` answers with "no", so a loop on `is-active`
+   would not wait at all. `failed` is a last tick that exited 1; it has ended
+   too. Then look at the application's **Deployments** in Coolify: nothing
    may be queued or in progress. A deployment that Coolify already holds can
    start the application again after you stopped it.
 2. Stop the application in Coolify. The copy below runs only if no running
@@ -416,6 +419,20 @@ cat /var/lib/private/chartgen-autodeploy/previous-sha   # what it had triggered 
 
 Delete `last-sha` to make the next run re-baseline (it records the head
 without deploying).
+
+A run that was killed between writing a temporary file and renaming it can
+leave a file like `last-sha.Ab3xYz` there. Nothing reads these; delete them
+when no run is under way. The `lock` file stays and means nothing by itself.
+
+**Rehearse on staging first, before anything else:** the timer's service and
+a command by hand at the same moment. They are two systemd units with
+`DynamicUser` and the same `StateDirectory`, and that they share the lock
+and the state files there is **not verified by this repository**; the tests
+run two plain processes. Start a tick (`systemctl start
+chartgen-autodeploy.service`) and at once the `run running <sha>` line from
+[By hand](#by-hand): one of them must wait or step aside, both must end
+without a permission error, and the files in the state directory must be
+readable by the next tick.
 
 What the log says when nothing is deployed:
 
