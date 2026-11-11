@@ -652,50 +652,51 @@ async fn alerts_and_setups_share_the_servers_watched_pairs() {
     .unwrap();
 }
 
-/// Alerts and setups each check the shared limit and then store. Many creates at the
-/// same moment, on symbols nobody watches yet, must still stop at the limit.
-#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
-async fn creates_at_the_same_moment_cannot_pass_the_shared_pair_limit() {
-    const PAIRS: usize = 3;
-    for round in 0..12 {
-        let (store, hub) = (mem(), hub());
-        let alerts = alerts_on(store, hub.clone(), PAIRS);
-        let limits = Limits {
-            pairs_total: PAIRS,
-            ..Limits::default()
-        };
-        let s = live_on(
-            store,
-            hub,
-            Access::parse(None),
-            limits,
-            Some(alerts.clone()),
-        );
-        let start = Arc::new(std::sync::Barrier::new(12));
-        let calls: Vec<_> = (0..12)
-            .map(|i| {
-                let (s, alerts, start) = (s.clone(), alerts.clone(), start.clone());
-                tokio::task::spawn_blocking(move || {
-                    let symbol = format!("SYM{i}USDT");
-                    let owner = format!("owner-{i}");
-                    start.wait();
-                    if i % 2 == 0 {
-                        let _ = call(&s, "create_setup", long_on(&symbol), &owner);
-                    } else {
-                        let args = json!({ "symbol": symbol, "condition": "greater",
-                            "trigger": "once", "level": 1e12 });
-                        alerts.call_tool("create_server_alert", None, &args, Some(&owner));
-                    }
-                })
-            })
-            .collect();
-        for call in calls {
-            call.await.unwrap();
+/// Alerts and setups each check the shared limit and then store. An alert created
+/// exactly between a setup's check and its write must not get the last pair too.
+/// The alert's create is started at that point and given time to finish: with the gate
+/// it cannot, because the setup holds the gate; without the gate it does, and the
+/// server ends up over its limit. So the outcome does not depend on luck.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_create_between_anothers_check_and_write_cannot_take_the_last_pair() {
+    let (store, hub) = (mem(), hub());
+    let alerts = alerts_on(store, hub.clone(), 1);
+    let limits = Limits {
+        pairs_total: 1,
+        ..Limits::default()
+    };
+    let s = live_on(
+        store,
+        hub,
+        Access::parse(None),
+        limits,
+        Some(alerts.clone()),
+    );
+    let racing = Arc::new(std::sync::Mutex::new(None));
+    let (hooked_alerts, started) = (alerts.clone(), racing.clone());
+    *s.before_final_check.lock().unwrap() = Some(Box::new(move || {
+        let alerts = hooked_alerts.clone();
+        let racer = std::thread::spawn(move || alert(&alerts, "ETHUSDT"));
+        // Long enough for an unblocked create to finish many times over.
+        let waited = std::time::Instant::now();
+        while !racer.is_finished() && waited.elapsed() < Duration::from_millis(500) {
+            std::thread::sleep(Duration::from_millis(5));
         }
-        let mut pairs = s.pairs();
-        pairs.extend(alerts.pairs());
-        assert_eq!(pairs.len(), PAIRS, "round {round}: {pairs:?}");
-    }
+        *started.lock().unwrap() = Some(racer);
+    }));
+    let (setup, s) =
+        tokio::task::spawn_blocking(move || (call(&s, "create_setup", long(), "owner"), s))
+            .await
+            .unwrap();
+    let racer = racing.lock().unwrap().take().expect("the hook ran");
+    let alert_answer = racer.join().unwrap();
+
+    // The setup was first to the check and got the pair; the alert was refused.
+    assert_eq!(setup.unwrap()["symbol"], "BTCUSDT");
+    assert_eq!(alert_answer["result"]["isError"], true);
+    let mut pairs = s.pairs();
+    pairs.extend(alerts.pairs());
+    assert_eq!(pairs, HashSet::from([key()]));
 }
 
 #[tokio::test]
