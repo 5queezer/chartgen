@@ -1348,14 +1348,63 @@ async fn the_same_scenario_gives_the_same_bytes_twice() {
     ] {
         assert!(all.contains(expected), "no {expected} in the run");
     }
-    assert!(
-        !all.contains("\"error\"")
-            && !all.contains("\"refused\"")
-            && !all.contains("isError\":true"),
-        "{all}"
+    // One failure is wanted: the run asks for a quote of a symbol the fixtures do not
+    // hold, and a replay refuses that symbol by name without failing the others.
+    let failures: Vec<String> = first
+        .iter()
+        .flat_map(|answer| failures_in(answer))
+        .collect();
+    assert_eq!(failures, ["error: \"this replay has no bars for SOLUSDT\""]);
+    let quotes: Value = serde_json::from_str(&first[5]).unwrap();
+    let quotes: Value =
+        serde_json::from_str(quotes["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(quotes["quotes"][0]["symbol"], "BTCUSDT");
+    assert!(quotes["quotes"][0]["last"].is_number() && quotes["quotes"][1]["last"].is_number());
+    assert_eq!(
+        quotes["quotes"][2],
+        json!({ "symbol": "SOLUSDT", "error": "this replay has no bars for SOLUSDT" })
     );
     // And it never reached for the network.
     assert_eq!(chartgen::binance_gate::http_uses(), uses);
+}
+
+/// Every failure an answer holds, however deep. A tool's payload travels as text inside
+/// the JSON-RPC envelope, so it is decoded first: searching the envelope's own text for
+/// `"error"` finds nothing, because there the quotes are escaped.
+fn failures_in(answer: &str) -> Vec<String> {
+    fn walk(v: &Value, found: &mut Vec<String>) {
+        match v {
+            Value::Object(map) => {
+                for (key, value) in map {
+                    let failed = match key.as_str() {
+                        "error" | "refused" => !value.is_null(),
+                        "isError" => value == &json!(true),
+                        "indicator_errors" | "setup_errors" | "drawing_errors" => {
+                            value.as_object().is_some_and(|m| !m.is_empty())
+                                || value.as_array().is_some_and(|a| !a.is_empty())
+                        }
+                        _ => false,
+                    };
+                    if failed {
+                        found.push(format!("{key}: {value}"));
+                    }
+                    // A text item is a payload: look inside it too.
+                    match (
+                        key.as_str(),
+                        value.as_str().map(serde_json::from_str::<Value>),
+                    ) {
+                        ("text", Some(Ok(payload))) => walk(&payload, found),
+                        _ => walk(value, found),
+                    }
+                }
+            }
+            Value::Array(items) => items.iter().for_each(|item| walk(item, found)),
+            _ => {}
+        }
+    }
+    let mut found = Vec::new();
+    walk(&serde_json::from_str(answer).unwrap(), &mut found);
+    found
 }
 
 /// What the replay tests compare against does count.
@@ -1385,7 +1434,7 @@ async fn one_clock_for_every_tool_and_caller_and_it_cannot_go_backwards() {
         let later = json!({ "ticker": "BTCUSDT", "timeframe": "15m", "format": "summary",
             "indicators": [], "as_of": at_minute(1600) });
         let read = chart_tool(replay, "generate_chart", later);
-        assert!(read.get("refused").is_none(), "{read}");
+        assert_eq!(failures_in(&read.to_string()), Vec::<String>::new());
         let p = replay.quote("BTCUSDT", at_minute(1500)).unwrap().0;
         let mut args = json!({
             "symbol": "BTCUSDT", "interval": "15m", "direction": "long", "thesis": "example",
@@ -1529,6 +1578,15 @@ async fn no_bar_after_as_of_leaks_into_any_indicator_or_chart_type() {
         .filter(|a| a.contains("Not available in a replay"))
         .count();
     assert_eq!(moved + refused, calls.len(), "every answer reads the bars");
+    // An answer that is not refused holds no failure of its own: an indicator that could
+    // not be computed would still "move" with the bars around it and pass the count.
+    for (call, answer) in calls.iter().zip(&truth) {
+        let failures = failures_in(answer);
+        match answer.contains("Not available in a replay") {
+            true => assert_eq!(failures.len(), 1, "{call}: {failures:?}"),
+            false => assert_eq!(failures, Vec::<String>::new(), "{call}"),
+        }
+    }
     assert!(refused > 0 && refused < calls.len() / 4);
     assert_eq!(chartgen::binance_gate::http_uses(), uses);
 }
