@@ -640,6 +640,10 @@ export const ServerAlertSchema = z.object({
     .default({}),
   feed: z.enum(["live", "waiting"]),
   last_price: z.number().nullable(),
+  /** Present, and true, only on an alert that wakes the owner's agent (ADR-0061). */
+  notify_agent: z.boolean().optional(),
+  /** Present only on an alert that is about one of the owner's setups. */
+  setup_id: z.string().optional(),
 });
 export type ServerAlert = z.infer<typeof ServerAlertSchema>;
 

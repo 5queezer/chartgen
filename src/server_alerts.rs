@@ -22,7 +22,7 @@ use chartgen::data;
 use chartgen::feed::FeedEvent;
 use chartgen::push::{DeviceKeys, Vapid};
 use chartgen::scripting::persistence::{self, Store, StoredDevice, StoredEvent};
-use chartgen::webhook::{self, Policy, Target, Timing};
+use chartgen::webhook::{self, AgentReceiver, Policy, Target, Timing};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -145,6 +145,12 @@ pub struct Limits {
     pub pending_deliveries_per_client: usize,
     pub deliveries_in_flight: usize,
     pub deliveries_in_flight_per_client: usize,
+    /// Wake-ups of the agent's receiver (ADR-0061) have a queue, a pace and slots of
+    /// their own. They take nothing from the budgets above, so a receiver that hangs
+    /// holds nobody else's slot, and nobody else's deliveries can crowd a wake-up out.
+    pub agent_pending: usize,
+    pub agent_deliveries_per_minute: usize,
+    pub agent_deliveries_in_flight: usize,
 }
 
 impl Default for Limits {
@@ -166,6 +172,9 @@ impl Default for Limits {
             pending_deliveries_per_client: 50,
             deliveries_in_flight: 16,
             deliveries_in_flight_per_client: 2,
+            agent_pending: 50,
+            agent_deliveries_per_minute: 30,
+            agent_deliveries_in_flight: 2,
         }
     }
 }
@@ -312,6 +321,15 @@ struct Record {
     /// fire, and its outcome says nothing about that one.
     #[serde(default)]
     device_pushes_fire: Option<String>,
+    /// Wake the owner's agent at the receiver the operator configured (ADR-0061).
+    /// Never together with `webhook`. Written only when set, so a record without it is
+    /// stored as it always was, and a build from before it reads one with it as an
+    /// alert that has no webhook.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    notify_agent: bool,
+    /// The owner's setup this alert is about: a reference, and what the wake-up shows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    setup_id: Option<String>,
 }
 
 impl Record {
@@ -385,6 +403,9 @@ struct State {
     served: HashMap<String, Instant>,
     pending: usize,
     client_slots: HashMap<String, Arc<Semaphore>>,
+    /// Wake-ups waiting for the agent's receiver, apart from everything above.
+    agent_queue: VecDeque<StoredEvent>,
+    agent_sent: Window,
 }
 
 pub struct ServerAlerts {
@@ -401,6 +422,9 @@ pub struct ServerAlerts {
     slots: Arc<Semaphore>,
     /// Setups watch feeds too, and theirs count against `limits.feeds` (ADR-0059).
     setups: OnceLock<Weak<crate::setup_service::Setups>>,
+    /// The receiver that wakes the operator's agent, if one is configured (ADR-0061).
+    agent: OnceLock<AgentReceiver>,
+    agent_slots: Arc<Semaphore>,
     me: Weak<ServerAlerts>,
 }
 
@@ -448,6 +472,24 @@ pub fn start(hub: &Arc<ChartHub>) {
     {
         limits.pairs_per_client = pairs;
     }
+    // The agent's receiver (ADR-0061). A setting that is wrong leaves alerts off, as a
+    // wrong webhook setting does: nothing runs half configured.
+    let own_port = std::env::var("_CHARTGEN_PORT")
+        .ok()
+        .and_then(|p| p.parse().ok());
+    let agent = match AgentReceiver::from_env(own_port) {
+        Ok(agent) => agent,
+        Err(e) => {
+            eprintln!("ERROR [alerts] {e}. Server alerts stay OFF until this is corrected");
+            return;
+        }
+    };
+    if let Some(agent) = &agent {
+        if let Err(e) = agent_owner_allowed(&access, &agent.owner) {
+            eprintln!("ERROR [alerts] {e}. Server alerts stay OFF until this is corrected");
+            return;
+        }
+    }
     let who = match &access {
         Access::NoWebhooks => "no webhooks: CHARTGEN_SERVER_ALERT_CLIENTS is unset".to_string(),
         Access::Clients(ids) => format!("{} allowed clients or accounts", ids.len()),
@@ -467,7 +509,47 @@ pub fn start(hub: &Arc<ChartHub>) {
         "Server alerts enabled ({} restored; {who})",
         alerts.lock().alerts.len()
     );
+    if let Some(agent) = agent {
+        // The origin only: the path can hold a token. The owner's id is no secret, and
+        // it is what the operator compares with the id the agent's sign-in shows.
+        println!(
+            "Agent receiver at {} wakes the agent of owner {}",
+            agent.target.origin(),
+            agent.owner
+        );
+        if !store_knows_owner(store, &agent.owner) {
+            println!(
+                "Agent receiver: owner {} has no account or registered client on this server yet",
+                agent.owner
+            );
+        }
+        alerts.set_agent(agent);
+    }
     let _ = GLOBAL.set(alerts);
+}
+
+/// The agent's owner must be one the operator allowed webhooks by name: `*` allows
+/// everyone and names nobody.
+fn agent_owner_allowed(access: &Access, owner: &str) -> Result<(), String> {
+    match access {
+        Access::Clients(ids) if ids.contains(owner) => Ok(()),
+        _ => Err(
+            "CHARTGEN_AGENT_WEBHOOK_OWNER is not one of the ids in CHARTGEN_SERVER_ALERT_CLIENTS"
+                .into(),
+        ),
+    }
+}
+
+/// Is `owner` a signed-in user or a registered client here? Only for a line at
+/// startup: an id typed wrong is the usual reason nothing ever wakes the agent.
+fn store_knows_owner(store: &Store, owner: &str) -> bool {
+    let user = store
+        .users()
+        .is_ok_and(|users| users.iter().any(|u| u.id == owner));
+    let client = store
+        .oauth_clients()
+        .is_ok_and(|clients| clients.iter().any(|c| c.client_id == owner));
+    user || client
 }
 
 /// The application server key, from `CHARTGEN_VAPID_PRIVATE_KEY` or made once and kept
@@ -532,6 +614,8 @@ impl ServerAlerts {
             vapid,
             slots: Arc::new(Semaphore::new(limits.deliveries_in_flight)),
             setups: OnceLock::new(),
+            agent: OnceLock::new(),
+            agent_slots: Arc::new(Semaphore::new(limits.agent_deliveries_in_flight)),
             me: me.clone(),
         });
         alerts.restore();
@@ -613,6 +697,20 @@ impl ServerAlerts {
     /// Count the feeds `setups` hold against the server's limit on watched pairs.
     pub fn count_pairs_of(&self, setups: &Arc<crate::setup_service::Setups>) {
         let _ = self.setups.set(Arc::downgrade(setups));
+    }
+
+    /// Use `agent` for the alerts of its owner that ask for it. Once, at startup.
+    pub(crate) fn set_agent(&self, agent: AgentReceiver) {
+        let _ = self.agent.set(agent);
+    }
+
+    /// The agent's receiver, if `owner` is the one it is configured for.
+    fn agent_of(&self, owner: &str) -> Option<&AgentReceiver> {
+        self.agent.get().filter(|a| a.owner == owner)
+    }
+
+    fn setup_of(&self, owner: &str, id: &str) -> Option<chartgen::setups::Record> {
+        self.setups.get()?.upgrade()?.owned(owner, id)
     }
 
     /// Join the feeds active alerts need and leave the others.
@@ -789,9 +887,27 @@ impl ServerAlerts {
         }
     }
 
+    /// Which queue an event waits in is decided here, once, from the alert as it is
+    /// now. That is also what says whether it counts in the shared total and which
+    /// way it is sent: an alert that is changed while its delivery waits moves
+    /// neither.
     fn enqueue(st: &mut State, owner: String, event: StoredEvent) {
+        if Self::is_wake_up(st, &event) {
+            st.agent_queue.push_back(event);
+            return;
+        }
         st.pending += 1;
         st.queues.entry(owner).or_default().push_back(event);
+    }
+
+    /// Is `event` a wake-up of the agent's receiver, and not a webhook of the alert's
+    /// own or a push?
+    fn is_wake_up(st: &State, event: &StoredEvent) -> bool {
+        event.device.is_none()
+            && st
+                .alerts
+                .get(&event.alert_id)
+                .is_some_and(|a| a.notify_agent)
     }
 
     /// The deliveries of a fire: its webhook and one push per device, those allowed to
@@ -808,7 +924,7 @@ impl ServerAlerts {
     ) -> Vec<StoredEvent> {
         alert.device_pushes.clear();
         alert.device_pushes_fire = None;
-        if alert.webhook.is_none() && !alert.push {
+        if alert.webhook.is_none() && !alert.push && !alert.notify_agent {
             return Vec::new();
         }
         let id = uuid::Uuid::new_v4().to_string();
@@ -886,6 +1002,19 @@ impl ServerAlerts {
                 }
             }
         }
+        // The wake-up of the agent's receiver, with a queue of its own: it is not
+        // counted above and what is above is not counted here. What is stored for it
+        // is this same body; what the receiver gets is made when it is sent
+        // (`agent_body`), so the setup's thesis is never copied into the event table.
+        if alert.notify_agent {
+            if self.agent_of(&alert.owner).is_none() {
+                hook_refusal = Some(refused("wake-up skipped: no receiver for this owner"));
+            } else if st.agent_queue.len() < limits.agent_pending {
+                events.push(event(id.clone(), None));
+            } else {
+                hook_refusal = Some(refused("wake-up skipped: too many waiting"));
+            }
+        }
         if hook_refusal.is_some() {
             alert.last_delivery = hook_refusal;
         }
@@ -955,10 +1084,30 @@ impl ServerAlerts {
             st.served.insert(owner, now);
             left -= 1;
             if let Some(this) = self.me.upgrade() {
-                self.runtime.spawn(this.deliver(event));
+                self.runtime.spawn(this.deliver(event, false));
             }
         }
         st.queues.retain(|_, q| !q.is_empty());
+        // The agent's wake-ups, at their own pace and in their own slots.
+        while st
+            .agent_queue
+            .front()
+            .is_some_and(|e| e.created_at < oldest)
+        {
+            if let Some(stale) = st.agent_queue.pop_front() {
+                let _ = self.store.delete_server_alert_event(&stale.id);
+            }
+        }
+        if !st.agent_queue.is_empty()
+            && self.agent_slots.available_permits() > 0
+            && st
+                .agent_sent
+                .admit("", limits.agent_deliveries_per_minute, now)
+        {
+            if let (Some(event), Some(this)) = (st.agent_queue.pop_front(), self.me.upgrade()) {
+                self.runtime.spawn(this.deliver(event, true));
+            }
+        }
     }
 
     /// Delete what expired, and try again to join feeds that were refused. A failure
@@ -1120,6 +1269,7 @@ impl ServerAlerts {
         st.alerts.remove(id);
         st.baselines.remove(id);
         st.held_back.remove(id);
+        st.agent_queue.retain(|e| e.alert_id != id);
         let mut dropped = 0;
         for queue in st.queues.values_mut() {
             let before = queue.len();
@@ -1154,28 +1304,34 @@ impl ServerAlerts {
             .clone()
     }
 
-    /// Send one event, then record how it went and forget it.
-    async fn deliver(self: Arc<Self>, event: StoredEvent) {
-        let (hook, device, client) = {
+    /// Send one event, then record how it went and forget it. `wake_up` is the queue
+    /// it waited in: decided when it was queued, and not asked of the alert again.
+    async fn deliver(self: Arc<Self>, event: StoredEvent, wake_up: bool) {
+        let (hook, device, client, woken) = {
             let mut st = self.lock();
             let alert = st.alerts.get(&event.alert_id);
-            let hook = alert.and_then(|a| a.webhook.clone());
+            let woken = alert.filter(|_| wake_up).cloned();
+            // A webhook that was removed while its delivery waited is not sent.
+            let hook = alert.filter(|_| !wake_up).and_then(|a| a.webhook.clone());
             let owner = alert.map(|a| a.owner.clone()).unwrap_or_default();
             let device = event
                 .device
                 .as_ref()
                 .and_then(|d| st.devices.get(d))
                 .cloned();
-            (hook, device, self.client_slot(&mut st, &owner))
+            (hook, device, self.client_slot(&mut st, &owner), woken)
         };
         // One client's dead host cannot hold every slot.
-        let outcome = match (&event.device, hook, &device) {
-            (None, Some(hook), _) => Some(self.send(&hook, &event, &client).await),
-            (Some(_), _, Some(device)) => Some(self.send_push(device, &event, &client).await),
+        let outcome = match (&event.device, hook, &device, woken) {
+            (None, _, _, Some(alert)) => Some(self.send_wake_up(&alert, &event).await),
+            (None, Some(hook), _, None) => Some(self.send(&hook, &event, &client).await),
+            (Some(_), _, Some(device), _) => Some(self.send_push(device, &event, &client).await),
             _ => None,
         };
         let mut st = self.lock();
-        st.pending = st.pending.saturating_sub(1);
+        if !wake_up {
+            st.pending = st.pending.saturating_sub(1);
+        }
         if let Some(outcome) = outcome {
             // The push service says this subscription is gone for good.
             if let (Some(device), Some(404 | 410)) = (&device, outcome.status) {
@@ -1271,6 +1427,67 @@ impl ServerAlerts {
             at: now_ms(),
             status: outcome.status,
             error: outcome.error,
+        }
+    }
+
+    /// Wake the agent: one delivery to the receiver the operator configured, through
+    /// the webhook path's pinning and retries, in the agent's own slots. The body is
+    /// made here, from the stored fire and the setup as it is now, and is never logged.
+    async fn send_wake_up(&self, alert: &Record, event: &StoredEvent) -> Delivery {
+        let outcome = match self.agent_of(&alert.owner) {
+            Some(agent) => {
+                let setup = alert
+                    .setup_id
+                    .as_deref()
+                    .and_then(|id| self.setup_of(&alert.owner, id));
+                let body = agent_body(&event.body, alert, setup.as_ref());
+                webhook::deliver(
+                    &agent.target,
+                    &self.policy,
+                    &body,
+                    &event.id,
+                    Some(agent.secret()),
+                    &self.timing,
+                    &[self.agent_slots.as_ref()],
+                )
+                .await
+            }
+            None => webhook::Outcome {
+                status: None,
+                error: Some("wake-up skipped: no receiver for this owner".into()),
+                attempts: 0,
+            },
+        };
+        Delivery {
+            at: now_ms(),
+            status: outcome.status,
+            error: outcome.error,
+        }
+    }
+
+    /// May `owner` ask for the agent's receiver? The answer to anyone else is the one
+    /// every webhook refusal gives, so it does not tell that a receiver exists. The
+    /// operator's log gets the owner's id, which is how a client that registered
+    /// again under a new id is found; nothing of the request goes there.
+    fn check_agent(&self, owner: &str) -> Result<(), String> {
+        if self.agent_of(owner).is_some() {
+            return Ok(());
+        }
+        if self.agent.get().is_some() {
+            eprintln!("[alerts] notify_agent refused for owner {owner}: CHARTGEN_AGENT_WEBHOOK_OWNER names another");
+        }
+        Err("This server only sends webhooks for sign-ins its operator allowed".into())
+    }
+
+    /// A setup an alert may be about: the caller's own, and still open.
+    fn check_setup(&self, owner: &str, id: &str) -> Result<(), String> {
+        if self.setups.get().and_then(Weak::upgrade).is_none() {
+            return Err("Setups are not enabled on this server".into());
+        }
+        match self.setup_of(owner, id) {
+            Some(setup) if setup.status.is_open() => Ok(()),
+            Some(_) => Err("That setup is closed".into()),
+            None => Err("No such setup".into()),
         }
     }
 
@@ -1573,6 +1790,15 @@ impl ServerAlerts {
         if push {
             self.check_push(owner)?;
         }
+        let notify_agent = bool_arg(args, "notify_agent")?.unwrap_or(false);
+        let setup_id = setup_arg(args)?.filter(|id| !id.is_empty());
+        check_wake_up(notify_agent, webhook_url.is_some(), setup_id.is_some())?;
+        if notify_agent {
+            self.check_agent(owner)?;
+        }
+        if let Some(id) = &setup_id {
+            self.check_setup(owner, id)?;
+        }
 
         let refuse = |_| format!("Server alerts cannot watch {symbol} at {interval}");
         let feed = match evaluate_on {
@@ -1635,6 +1861,8 @@ impl ServerAlerts {
             last_push: None,
             device_pushes: HashMap::new(),
             device_pushes_fire: None,
+            notify_agent,
+            setup_id,
         };
         // With setups: nobody else may take a pair between this check and the write.
         let _pairs = pair_gate();
@@ -1681,6 +1909,14 @@ impl ServerAlerts {
         let push = push_arg(args)?;
         if push == Some(true) {
             self.check_push(owner)?;
+        }
+        let notify_agent = bool_arg(args, "notify_agent")?;
+        if notify_agent == Some(true) {
+            self.check_agent(owner)?;
+        }
+        let setup_id = setup_arg(args)?;
+        if let Some(setup) = setup_id.as_deref().filter(|id| !id.is_empty()) {
+            self.check_setup(owner, setup)?;
         }
 
         // With setups: nobody else may take a pair between this check and the write.
@@ -1735,6 +1971,15 @@ impl ServerAlerts {
             None => {}
         }
         next.push = push.unwrap_or(next.push);
+        next.notify_agent = notify_agent.unwrap_or(next.notify_agent);
+        if let Some(setup) = setup_id {
+            next.setup_id = Some(setup).filter(|id| !id.is_empty());
+        }
+        check_wake_up(
+            next.notify_agent,
+            next.webhook.is_some(),
+            next.setup_id.is_some(),
+        )?;
         let mut new_secret_text = None;
         if let Some(sign) = sign {
             let hook = next.webhook.as_mut().ok_or("sign needs a webhook")?;
@@ -1827,7 +2072,7 @@ impl ServerAlerts {
         } else {
             delivery_error
         };
-        json!({
+        let mut view = json!({
             "id": a.id,
             "symbol": a.symbol,
             "interval": a.interval,
@@ -1855,8 +2100,140 @@ impl ServerAlerts {
             "last_push_devices": a.device_pushes,
             "feed": if live { "live" } else { "waiting" },
             "last_price": watch.and_then(|w| w.last_price),
-        })
+        });
+        // Only when set: an alert without them answers as it always did.
+        if a.notify_agent {
+            view["notify_agent"] = json!(true);
+        }
+        if let Some(setup) = &a.setup_id {
+            view["setup_id"] = json!(setup);
+        }
+        view
     }
+}
+
+/// An alert has one webhook, its own URL or the agent's receiver, since it has one
+/// outcome to show for it. And in this version a setup is named only for the agent:
+/// the setup is what the wake-up carries.
+fn check_wake_up(notify_agent: bool, has_webhook: bool, has_setup: bool) -> Result<(), String> {
+    if notify_agent && has_webhook {
+        return Err("An alert takes webhook_url or notify_agent, not both".into());
+    }
+    if has_setup && !notify_agent {
+        return Err("setup_id needs notify_agent".into());
+    }
+    Ok(())
+}
+
+/// Most bytes of a wake-up's body. A thesis is 2000 characters at most, which can be
+/// more bytes than that, and the receiver renders only the first part of a body.
+const MAX_AGENT_BODY: usize = 8 * 1024;
+
+#[derive(Serialize)]
+struct WakeUp<'a> {
+    id: &'a Value,
+    r#type: &'static str,
+    at: &'a Value,
+    alert: FiredAlert<'a>,
+    /// The alert's `message`: the agent's word to itself.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    note: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    setup: Option<SetupNow<'a>>,
+}
+
+#[derive(Serialize)]
+struct FiredAlert<'a> {
+    id: &'a str,
+    symbol: &'a str,
+    interval: &'a str,
+    evaluate_on: EvaluateOn,
+    condition: Condition,
+    level: f64,
+    price: &'a Value,
+    trigger: Trigger,
+    bar_time: &'a Value,
+    fire_count: &'a Value,
+}
+
+/// The setup as it is when the wake-up is sent. Not its drawings or its log: the
+/// agent reads those with `get_setup`.
+#[derive(Serialize)]
+struct SetupNow<'a> {
+    id: &'a str,
+    status: chartgen::setups::Status,
+    symbol: &'a str,
+    interval: &'a str,
+    direction: chartgen::setups::Direction,
+    decision: chartgen::setups::Decision,
+    levels: &'a chartgen::setups::Levels,
+    fill: Option<chartgen::setups::Mark>,
+    exit: Option<chartgen::setups::Mark>,
+    result_r: Option<f64>,
+    gap: bool,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    thesis_cut: bool,
+    thesis: &'a str,
+}
+
+/// The body of a wake-up, from the stored fire. The order of its fields is this
+/// order, by construction: what tells the agent which event this is and where its
+/// setup stands comes first, the alert's note after it, and the thesis, the longest
+/// part, last. A receiver that shows only the beginning of a body still shows those.
+fn agent_body(fired: &str, alert: &Record, setup: Option<&chartgen::setups::Record>) -> String {
+    let fired: Value = serde_json::from_str(fired).unwrap_or_default();
+    let make = |thesis_chars: usize| {
+        let setup = setup.map(|s| {
+            let cut = s.thesis.char_indices().nth(thesis_chars).map(|(at, _)| at);
+            SetupNow {
+                id: &s.id,
+                status: s.status,
+                symbol: &s.symbol,
+                interval: &s.interval,
+                direction: s.direction,
+                decision: s.decision,
+                levels: s.latest_levels(),
+                fill: s.fill,
+                exit: s.exit,
+                result_r: s.result_r,
+                gap: s.gap,
+                thesis_cut: cut.is_some(),
+                thesis: &s.thesis[..cut.unwrap_or(s.thesis.len())],
+            }
+        });
+        let body = WakeUp {
+            id: &fired["id"],
+            r#type: "alert.fired",
+            at: &fired["fired_at"],
+            alert: FiredAlert {
+                id: &alert.id,
+                symbol: &alert.symbol,
+                interval: &alert.interval,
+                evaluate_on: alert.evaluate_on,
+                condition: alert.condition,
+                level: alert.level,
+                price: &fired["price"],
+                trigger: alert.trigger,
+                bar_time: &fired["bar_time"],
+                fire_count: &fired["fire_count"],
+            },
+            note: alert.message.as_deref(),
+            setup,
+        };
+        serde_json::to_string(&body).unwrap_or_default()
+    };
+    // As much of the thesis as fits, in whole characters: the most that keeps the
+    // body within its size, found by halving the range.
+    let (mut fits, mut too_long) = (0, setup.map_or(0, |s| s.thesis.chars().count()) + 1);
+    while too_long - fits > 1 {
+        let chars = fits + (too_long - fits) / 2;
+        if make(chars).len() <= MAX_AGENT_BODY {
+            fits = chars;
+        } else {
+            too_long = chars;
+        }
+    }
+    make(fits)
 }
 
 /// A `once` alert that fired: it holds no place among the live ones until re-armed.
@@ -1920,9 +2297,29 @@ fn webhook_args(args: &Value) -> Result<(Option<String>, Option<bool>), String> 
 }
 
 fn push_arg(args: &Value) -> Result<Option<bool>, String> {
-    match args.get("push") {
+    bool_arg(args, "push")
+}
+
+fn bool_arg(args: &Value, name: &str) -> Result<Option<bool>, String> {
+    match args.get(name) {
         None | Some(Value::Null) => Ok(None),
-        Some(v) => Ok(Some(v.as_bool().ok_or("push must be true or false")?)),
+        Some(v) => Ok(Some(
+            v.as_bool()
+                .ok_or_else(|| format!("{name} must be true or false"))?,
+        )),
+    }
+}
+
+/// `setup_id`: a string, and on an update an empty one takes the setup off.
+fn setup_arg(args: &Value) -> Result<Option<String>, String> {
+    match args.get("setup_id") {
+        None | Some(Value::Null) => Ok(None),
+        Some(v) => Ok(Some(
+            v.as_str()
+                .ok_or("setup_id must be a string")?
+                .trim()
+                .to_string(),
+        )),
     }
 }
 

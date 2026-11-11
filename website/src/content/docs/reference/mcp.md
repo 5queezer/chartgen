@@ -1135,9 +1135,9 @@ what your client may do.
 
 | Tool | Arguments | Result |
 |---|---|---|
-| `create_server_alert` | `symbol`, `condition`, `level`, `trigger`; optional `interval` (default `1m`), `evaluate_on`, `message`, `webhook_url`, `sign`, `push` | The alert; `webhook_secret` too, once, with `sign: true` |
+| `create_server_alert` | `symbol`, `condition`, `level`, `trigger`; optional `interval` (default `1m`), `evaluate_on`, `message`, `webhook_url`, `sign`, `push`, `notify_agent`, `setup_id` | The alert; `webhook_secret` too, once, with `sign: true` |
 | `list_server_alerts` | — | `{enabled, can_create, webhooks, push, limits, alerts: [...]}` |
-| `update_server_alert` | `alert_id`; optional `active`, `condition`, `level`, `trigger`, `message`, `webhook_url`, `sign`, `push` | The alert; a new `webhook_secret`, once, with `sign: true` |
+| `update_server_alert` | `alert_id`; optional `active`, `condition`, `level`, `trigger`, `message`, `webhook_url`, `sign`, `push`, `notify_agent`, `setup_id` | The alert; a new `webhook_secret`, once, with `sign: true` |
 | `delete_server_alert` | `alert_id` | `{deleted}`, with any delivery still pending |
 | `subscribe_push` | `endpoint`, `p256dh`, `auth` | `{devices}`: registers this browser's push subscription |
 | `unsubscribe_push` | `endpoint` | `{removed, devices}` |
@@ -1187,6 +1187,8 @@ An alert in a list:
 ```
 
 Times are unix milliseconds. `webhook` shows the host only, never the URL or the secret.
+An alert that [wakes your agent](#waking-your-agent) also has `"notify_agent": true`, and
+`"setup_id"` if it is about a setup; other alerts have neither field.
 `feed` is `waiting` when no price arrived for two minutes. `last_status` is the webhook's
 HTTP status, and nothing else of its response is kept. `last_error` is why the last
 delivery failed or was skipped, or that fires are being limited.
@@ -1252,7 +1254,16 @@ never read.
 | `X-Chartgen-Event` | The event `id` |
 | `X-Chartgen-Timestamp` | Unix seconds of this attempt |
 | `X-Chartgen-Signature` | `sha256=<hex>`, only with `sign: true` |
+| `webhook-id` | The event `id`, the same on every attempt |
+| `webhook-timestamp` | Unix seconds of this attempt |
+| `webhook-signature` | `v1,<base64>`, only with `sign: true` |
 | `User-Agent` | `chartgen-webhook/1` |
+
+The last three are the [Standard Webhooks](https://www.standardwebhooks.com/) headers
+([ADR-0061](/chartgen/decisions/0061-alerts-that-wake-the-agent/)). A receiver built for that
+convention verifies a delivery with no code for this server: the signature is the base64
+HMAC-SHA256 over `<webhook-id>.<webhook-timestamp>.<raw body>`, keyed with the bytes of the
+alert's secret. Either pair of headers proves the same thing; verify one.
 
 The signature is HMAC-SHA256 with the alert's secret over `<timestamp>.<raw body>`. To
 verify, compute it over the bytes you received, compare in constant time, and refuse an
@@ -1269,6 +1280,57 @@ def verify(secret: str, timestamp: str, body: bytes, signature: str) -> bool:
 
 The secret is shown once and is never logged or returned again; `sign: true` on
 `update_server_alert` replaces it.
+
+#### Waking your agent
+
+`notify_agent: true` delivers the alert to **your own agent**, at a receiver this server's
+operator configured for your account ([ADR-0061](/chartgen/decisions/0061-alerts-that-wake-the-agent/)).
+There is no URL and no secret in the call: both are the operator's. Where no receiver is
+configured for you the call is refused, with the same words as any webhook the server
+does not send for you.
+
+- It takes the place of `webhook_url`: an alert has one or the other. `push` may go with it.
+- `setup_id` names one of your open [setups](/chartgen/guides/setups/). It needs
+  `notify_agent`. The wake-up then carries that setup as it stands when it is sent.
+- The alert changes nothing on the setup, and deleting it leaves the setup alone.
+
+The delivery is signed with the operator's secret and has the headers above. Its body is
+its own, in this order:
+
+```json
+{
+  "id": "d99a10e1-d742-4b79-9ccc-f75169944c6a",
+  "type": "alert.fired",
+  "at": 1793965351000,
+  "alert": {
+    "id": "61c779cc-a2f2-418c-8965-95f1241994f2",
+    "symbol": "BTCUSDT", "interval": "1m", "evaluate_on": "live",
+    "condition": "crossing", "level": 65000.0, "price": 65010.5,
+    "trigger": "once", "bar_time": 1793965320, "fire_count": 1
+  },
+  "note": "the alert's message",
+  "setup": {
+    "id": "0b6f6f0e-6f0e-4a3e-9d43-0d6c1f6a2a11",
+    "status": "watching",
+    "symbol": "BTCUSDT", "interval": "1h", "direction": "long", "decision": "take",
+    "levels": { "entry": { "low": 64000.0, "high": 64200.0 }, "invalidation": 63000.0,
+                "targets": [66000.0], "expires_at": 1794051751000 },
+    "fill": null, "exit": null, "result_r": null, "gap": false,
+    "thesis": "the setup's thesis, as you wrote it"
+  }
+}
+```
+
+`note` is absent without a `message`, and `setup` without a `setup_id` or once the setup is
+gone. **The order is fixed:** what says which event this is and where the setup stands comes
+first, the thesis last, so a receiver that shows only the beginning of a body still shows
+the levels. The setup has no drawings and no log here; `get_setup` answers those. A body is
+at most 8 KiB: a thesis that would exceed it is cut, and `"thesis_cut": true` says so.
+
+Wake-ups have limits of their own, apart from the ones above: 50 waiting, 30 a minute, 2
+at once. Delivery is tried three times within about fifteen seconds and the outcome is on
+the alert (`last_status`, `last_error`). **If your receiver is away for longer than that,
+the wake-up is lost:** an agent that depends on one should also look by itself now and then.
 
 **Push** ([ADR-0045](/chartgen/decisions/0045-web-push-for-server-alerts/)). `push: true` on an alert,
 with or without a webhook, sends the same JSON to each of your devices through Web Push, encrypted under
