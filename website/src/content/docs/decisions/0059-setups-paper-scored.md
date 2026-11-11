@@ -180,7 +180,10 @@ rather than presented as complete.
 - **Setups do not need `CHARTGEN_SERVER_ALERTS=1`.** They hold their own leases on the hub, and
   requiring alerts would open alert creation on a server that only wants setups. They follow the
   same allowlist, `CHARTGEN_SERVER_ALERT_CLIENTS`: where it names accounts, only those may create
-  setups. Unset or `*`, anyone who can get a token may.
+  setups. Unset or `*`, anyone who can get a token may. The list is read at startup. From the
+  restart that reads a list without an owner, that owner's setups hold no feed and are not scored,
+  as ADR-0042 stops its alerts; they stay readable. Back on the list they are behind like any
+  setup the server was away from: the missed bars are read if in reach, else named as a gap.
 
 ### Tools
 

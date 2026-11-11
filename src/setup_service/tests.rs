@@ -480,6 +480,52 @@ async fn an_owner_the_operator_did_not_list_cannot_create() {
     created(&s, "github:1");
 }
 
+/// The operator's list is read at startup. An owner taken off it keeps its setups, but
+/// they hold no feed and are not scored, as ADR-0042 stops such an owner's alerts.
+#[tokio::test]
+async fn setups_of_an_owner_taken_off_the_list_hold_no_feed_and_are_not_scored() {
+    let (store, path) = store_at("unlisted");
+    let both = Access::parse(Some("github:1,github:2"));
+    let s = live_on(store, hub(), both, Limits::default(), None);
+    let kept = created(&s, "github:1");
+    let dropped = call(&s, "create_setup", long_on("ETHUSDT"), "github:2").unwrap();
+    assert_eq!(s.pairs().len(), 2);
+    drop(s);
+
+    let only_one = Access::parse(Some("github:1"));
+    let s = live_on(reopen(&path), hub(), only_one, Limits::default(), None);
+    assert_eq!(s.pairs(), HashSet::from([key()]));
+    // A bar through its entry and its invalidation leaves it as it was.
+    let (t, p) = (first_bar(&dropped), mid(&dropped));
+    let eth = ("ETHUSDT".to_string(), "1m".to_string());
+    s.on_bar(&eth, bar(t, p, p * 1.2, p * 0.5, p));
+    let still = call(
+        &s,
+        "get_setup",
+        json!({ "id": id_of(&dropped) }),
+        "github:2",
+    )
+    .unwrap();
+    assert_eq!(still, dropped, "readable by its owner, and untouched");
+    // The listed owner's setup runs as before.
+    let (t, p) = (first_bar(&kept), mid(&kept));
+    s.on_bar(&key(), bar(t, p, p * 1.001, p * 0.999, p));
+    let moved = call(&s, "get_setup", json!({ "id": id_of(&kept) }), "github:1").unwrap();
+    assert_eq!(moved["scored_through"], json!(t));
+    drop(s);
+
+    // Back on the list, it is watched again and is behind like any setup the server was
+    // away from: the bars it missed are read if they are in reach, else named as a gap.
+    let s = live_on(
+        reopen(&path),
+        hub(),
+        Access::parse(Some("github:1,github:2")),
+        Limits::default(),
+        None,
+    );
+    assert_eq!(s.pairs().len(), 2);
+}
+
 fn alerts_on(store: &'static Store, hub: Arc<ChartHub>, feeds: usize) -> Arc<ServerAlerts> {
     let limits = crate::server_alerts::Limits {
         feeds,

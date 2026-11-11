@@ -186,6 +186,8 @@ open setup holds one of the server's **16 watched pairs**, which setups share wi
 
 - **Who may create setups** follows `CHARTGEN_SERVER_ALERT_CLIENTS`, whether or not alerts are
   on. Where it lists accounts, only those may. Unset or `*`, anyone who can get a token may.
+  The list is read at startup. Take an account off it and restart: its setups hold no feed and
+  are not scored from then on, and it can still read them.
 - **On a public server, list the accounts you trust.** Otherwise strangers can hold all 16
   pairs: four accounts with open setups on 5 symbols each are enough, and with sign-in off
   client ids are free. Your own agent is then refused a new symbol, and new alerts on new
