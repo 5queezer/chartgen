@@ -48,7 +48,7 @@ const FEED_QUIET: Duration = Duration::from_secs(120);
 /// a feed that keeps dropping closes cannot turn into a REST read per close.
 const REREAD_PAUSE: Duration = Duration::from_secs(60);
 /// A delivery still pending after this long, across a restart, is dropped.
-const EVENT_MAX_AGE_SECS: i64 = 3_600;
+const EVENT_MAX_AGE_SECS: i64 = chartgen::scripting::persistence::EVENT_NEWS_SECS;
 const MINUTE: Duration = Duration::from_secs(60);
 /// How often waiting deliveries are looked at. The budget is per tick, so the total
 /// per minute is spread out instead of being spent by whoever is first.
@@ -767,11 +767,7 @@ impl ServerAlerts {
     /// Give up wake-ups too old to be news, and drop events past their keep. The
     /// events given up stay in the log, marked failed.
     fn sweep_events(&self) {
-        let unix = chrono::Utc::now().timestamp();
-        let given_up = self
-            .store
-            .fail_waiting_events_before(unix - EVENT_MAX_AGE_SECS);
-        if let Err(e) = given_up.and_then(|_| self.store.sweep_events(unix)) {
+        if let Err(e) = self.store.tidy_events(chrono::Utc::now().timestamp()) {
             eprintln!("[alerts] cannot sweep the event log: {e}");
         }
     }

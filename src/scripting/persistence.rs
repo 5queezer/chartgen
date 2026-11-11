@@ -198,8 +198,9 @@ pub const EVENT_TTL_SECS: i64 = 7 * 86_400;
 /// Wake-ups of one owner that may wait for delivery. One more is still logged, and
 /// its entry says that its delivery was dropped.
 pub const EVENTS_WAITING_PER_OWNER: i64 = 50;
-/// Most bytes of an event's `body`: what happened, never a setup's text.
-pub const MAX_EVENT_BODY: usize = 1024;
+/// How long an event is news: a wake-up that did not get through in this time is given
+/// up. It is the time a Standard Webhooks receiver remembers an id for.
+pub const EVENT_NEWS_SECS: i64 = 3_600;
 
 /// How an event's wake-up stands. `None`: nobody was to be woken for it.
 pub const DELIVERY_NONE: &str = "none";
@@ -272,9 +273,17 @@ fn insert_event(tx: &rusqlite::Transaction, e: &NewEvent, now: i64) -> rusqlite:
             e.owner, seq, e.id, e.kind, e.at, now, e.alert_id, e.setup_id, e.body, delivery, due
         ],
     )?;
+    // Not one whose wake-up still waits: it is given up or delivered within the hour,
+    // and goes at a later write.
     tx.execute(
-        "DELETE FROM events WHERE owner = ?1 AND (seq <= ?2 OR created_at < ?3)",
-        params![e.owner, seq - EVENTS_PER_OWNER, now - EVENT_TTL_SECS],
+        "DELETE FROM events WHERE owner = ?1 AND (seq <= ?2 OR created_at < ?3)
+         AND delivery <> ?4",
+        params![
+            e.owner,
+            seq - EVENTS_PER_OWNER,
+            now - EVENT_TTL_SECS,
+            DELIVERY_WAITING
+        ],
     )?;
     Ok(delivery.to_string())
 }
@@ -935,6 +944,16 @@ impl Store {
         Ok((rows.collect::<rusqlite::Result<_>>()?, oldest))
     }
 
+    /// How many of `owner`'s events after `after` are kept. Fewer than were numbered
+    /// after it means that some are gone.
+    pub fn events_kept_after(&self, owner: &str, after: i64) -> rusqlite::Result<i64> {
+        self.conn().query_row(
+            "SELECT COUNT(*) FROM events WHERE owner = ?1 AND seq > ?2",
+            params![owner, after],
+            |r| r.get(0),
+        )
+    }
+
     /// The highest number `owner` was ever given, kept or not.
     pub fn last_event_seq(&self, owner: &str) -> rusqlite::Result<i64> {
         let last: Option<i64> = self
@@ -997,24 +1016,21 @@ impl Store {
         )
     }
 
-    /// Drop events past `EVENT_TTL_SECS`, for owners who log nothing new.
-    pub fn sweep_events(&self, now: i64) -> rusqlite::Result<usize> {
-        self.conn().execute(
-            "DELETE FROM events WHERE created_at < ?1",
-            params![now - EVENT_TTL_SECS],
-        )
+    /// What the log needs done now and then, whoever writes to it: give up the wake-ups
+    /// that are no longer news, and drop the events past their keep.
+    pub fn tidy_events(&self, now: i64) -> rusqlite::Result<()> {
+        self.fail_waiting_events_before(now - EVENT_NEWS_SECS)?;
+        self.sweep_events(now)?;
+        Ok(())
     }
 
-    /// An owner's events and their counter, when the owner goes.
-    pub fn delete_events_of(&self, owner: &str) -> rusqlite::Result<()> {
-        let mut conn = self.conn();
-        let tx = conn.transaction()?;
-        tx.execute("DELETE FROM events WHERE owner = ?1", params![owner])?;
-        tx.execute(
-            "DELETE FROM event_counters WHERE owner = ?1",
-            params![owner],
-        )?;
-        tx.commit()
+    /// Drop events past `EVENT_TTL_SECS`, for owners who log nothing new. Not one whose
+    /// wake-up still waits; `tidy_events` gives those up first.
+    pub fn sweep_events(&self, now: i64) -> rusqlite::Result<usize> {
+        self.conn().execute(
+            "DELETE FROM events WHERE created_at < ?1 AND delivery <> ?2",
+            params![now - EVENT_TTL_SECS, DELIVERY_WAITING],
+        )
     }
 
     /// Write setups and the entries their logs gained, in one transaction (ADR-0059).

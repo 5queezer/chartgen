@@ -262,7 +262,20 @@ impl Setups {
         }
         drop(st);
         self.expire_unscored(fetch::now_ms());
+        self.tidy_events(chrono::Utc::now().timestamp());
         self.sync_feeds(&mut self.lock());
+    }
+
+    /// Keep the event log to what it promises (ADR-0061): a wake-up waits an hour, an
+    /// event is kept 7 days. Here as well as in the alert service, since setups write
+    /// events where no alert service runs.
+    fn tidy_events(&self, unix: i64) {
+        if self.replay.is_some() {
+            return;
+        }
+        if let Err(e) = self.store.tidy_events(unix) {
+            eprintln!("[setups] cannot sweep the event log: {e}");
+        }
     }
 
     /// End the open setups that ran out while their owner was off the operator's list.
@@ -430,8 +443,6 @@ impl Setups {
         Ok(())
     }
 
-    /// The store's key of a setup. A replay's ids count per owner, so that two callers
-    /// cannot change each other's.
     /// What this write says happened to a setup's status, as events of its owner's log
     /// (ADR-0061), stored with the entries that say it. None on a replay, which has no
     /// log and must answer the same on every run.
@@ -475,6 +486,8 @@ impl Setups {
         events
     }
 
+    /// The store's key of a setup. A replay's ids count per owner, so that two callers
+    /// cannot change each other's.
     fn row_id(&self, record: &Record) -> String {
         match self.replay {
             Some(_) => format!("{}/{}", record.owner, record.id),
@@ -1169,7 +1182,11 @@ async fn run_upkeep(setups: Weak<Setups>) {
             return;
         };
         let this2 = this.clone();
-        let _ = tokio::task::spawn_blocking(move || this2.expire_unscored(fetch::now_ms())).await;
+        let _ = tokio::task::spawn_blocking(move || {
+            this2.expire_unscored(fetch::now_ms());
+            this2.tidy_events(chrono::Utc::now().timestamp());
+        })
+        .await;
         this.sync_feeds(&mut this.lock());
     }
 }

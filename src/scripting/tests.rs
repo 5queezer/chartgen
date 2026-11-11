@@ -2288,3 +2288,33 @@ fn an_event_and_what_it_reports_are_stored_together_or_not_at_all() {
     assert_eq!(store.events_after("me", 0, 10).unwrap().0.len(), 1);
     assert_eq!(store.last_event_seq("me").unwrap(), 1);
 }
+
+/// A wake-up that still waits is not dropped to make room: its row stays until it was
+/// delivered or given up, however many events the owner logs meanwhile.
+#[test]
+fn a_waiting_wake_up_is_not_pruned_from_the_log() {
+    let store = persistence::Store::in_memory().unwrap();
+    log(&store, &[an_event("me", 0, true)]);
+    let more: Vec<_> = (1..=persistence::EVENTS_PER_OWNER as usize + 5)
+        .map(|n| an_event("me", n, false))
+        .collect();
+    log(&store, &more);
+    let (kept, oldest) = store.events_after("me", 0, 2).unwrap();
+    assert_eq!(oldest, Some(1));
+    assert_eq!((kept[0].seq, kept[0].delivery.as_str()), (1, "waiting"));
+    assert_eq!(kept[1].seq, 7, "the others before it are gone as before");
+    assert_eq!(store.due_events(i64::MAX, 10).unwrap().len(), 1);
+    // Once it is settled it goes the way of every old event, at the next write.
+    store
+        .set_event_delivery("me", 1, persistence::DELIVERY_FAILED, 1, None)
+        .unwrap();
+    log(&store, &[an_event("me", 5000, false)]);
+    assert_eq!(store.events_after("me", 0, 1).unwrap().0[0].seq, 8);
+    // What a reader has to know: how many are kept after its place.
+    let last = store.last_event_seq("me").unwrap();
+    assert_eq!(store.events_kept_after("me", last - 10).unwrap(), 10);
+    assert_eq!(
+        store.events_kept_after("me", 0).unwrap(),
+        persistence::EVENTS_PER_OWNER
+    );
+}

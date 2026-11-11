@@ -2111,7 +2111,7 @@ async fn a_status_the_server_gives_a_setup_is_logged_at_the_bars_time_and_wakes_
     // What happened, and nothing of the setup's text.
     assert!(log
         .iter()
-        .all(|e| !e.body.contains("thesis") && e.body.len() < persistence::MAX_EVENT_BODY));
+        .all(|e| !e.body.contains("thesis") && e.body.len() < 200));
 
     for _ in 0..600 {
         if seen.lock().unwrap().len() == 2 {
@@ -2221,4 +2221,47 @@ async fn a_replay_logs_no_events() {
         assert!(s.store.events_after("agent", 0, 10).unwrap().0.is_empty());
         assert_eq!(s.store.last_event_seq("agent").unwrap(), 0);
     });
+}
+
+/// The log is kept for 7 days, and a wake-up waits for an hour, wherever events are
+/// written: with setups on and server alerts off there is nobody else to see to it.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_event_log_is_tidied_where_only_setups_run() {
+    let store = mem();
+    let s = live_on(store, hub(), Access::parse(None), Limits::default(), None);
+    let made = created(&s, "owner");
+    let (t, p) = (first_bar(&made), mid(&made));
+    s.on_bar(&key(), bar(t, p, p, p * 0.975, p * 0.976));
+    // A wake-up left waiting from a time when a receiver was configured.
+    let waiting = NewEvent {
+        id: "left-waiting".to_string(),
+        owner: "owner".to_string(),
+        kind: "setup.status".to_string(),
+        at: t,
+        alert_id: None,
+        setup_id: Some(id_of(&made)),
+        body: "{}".to_string(),
+        deliver: true,
+    };
+    store.save_setups_logging(&[], &[waiting]).unwrap();
+    let delivery = || {
+        let log = events_of(store, "owner");
+        log.iter().map(|e| e.delivery.clone()).collect::<Vec<_>>()
+    };
+    let now = chrono::Utc::now().timestamp();
+    s.tidy_events(now);
+    assert_eq!(delivery(), ["none", "waiting"], "nothing is old yet");
+    s.tidy_events(now + persistence::EVENT_NEWS_SECS + 1);
+    assert_eq!(
+        delivery(),
+        ["none", "failed"],
+        "given up after the hour, and kept"
+    );
+    s.tidy_events(now + persistence::EVENT_TTL_SECS + 1);
+    assert!(events_of(store, "owner").is_empty(), "gone after 7 days");
+    assert_eq!(
+        store.last_event_seq("owner").unwrap(),
+        2,
+        "the numbers go on"
+    );
 }

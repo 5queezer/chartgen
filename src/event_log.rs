@@ -70,18 +70,24 @@ fn answer(store: &Store, owner: &str, args: &Value) -> Result<Value, String> {
     let after = number("after", 0, i64::MAX)?;
     let limit = number("limit", DEFAULT_LIMIT, MAX_LIMIT)?.max(1);
     // One more than asked, to say whether more wait.
-    let (mut events, oldest, last) = store
+    let (mut events, kept, last) = store
         .events_after(owner, after, limit + 1)
-        .and_then(|(events, oldest)| Ok((events, oldest, store.last_event_seq(owner)?)))
+        .and_then(|(events, _)| {
+            Ok((
+                events,
+                store.events_kept_after(owner, after)?,
+                store.last_event_seq(owner)?,
+            ))
+        })
         .map_err(|e| {
             eprintln!("[events] cannot read the log: {e}");
             "The event log is unavailable".to_string()
         })?;
     let more = events.len() as i64 > limit;
     events.truncate(limit as usize);
-    // Events after the cursor that are no longer kept: the reader missed them for good.
-    let first_kept = oldest.unwrap_or(last + 1);
-    let truncated = after < last && first_kept > after + 1;
+    // Fewer kept after the cursor than were numbered after it: the reader missed some
+    // for good. Counted, since a wake-up that still waits is kept past its neighbours.
+    let truncated = after < last && kept < last - after;
     // A cursor ahead of the log, from another server or a typo, comes back as the log's
     // end: the next event is then not skipped.
     let cursor = events.last().map_or(after.min(last), |e| e.seq);
@@ -198,6 +204,39 @@ mod tests {
             answer(&store, "me", &json!({ "after": last + 500 })).unwrap()["cursor"],
             last
         );
+    }
+
+    /// A wake-up that still waits is kept past the others of its age. A reader behind
+    /// it and one just after it are both told that events between are gone.
+    #[test]
+    fn a_kept_waiting_row_does_not_hide_what_was_dropped_after_it() {
+        let store = Store::in_memory().unwrap();
+        let waiting = NewEvent {
+            id: "me-waiting".to_string(),
+            owner: "me".to_string(),
+            kind: "setup.status".to_string(),
+            at: 1_000,
+            alert_id: None,
+            setup_id: None,
+            body: "{}".to_string(),
+            deliver: true,
+        };
+        store.save_setups_logging(&[], &[waiting]).unwrap();
+        log(
+            &store,
+            "me",
+            2..=persistence::EVENTS_PER_OWNER as usize + 10,
+        );
+        let from_start = answer(&store, "me", &json!({ "limit": 2 })).unwrap();
+        assert_eq!(seqs(&from_start), [1, 11]);
+        assert_eq!(from_start["truncated"], true);
+        let after_it = answer(&store, "me", &json!({ "after": 1, "limit": 2 })).unwrap();
+        assert_eq!(
+            (seqs(&after_it), after_it["truncated"].clone()),
+            (vec![11, 12], json!(true))
+        );
+        let in_time = answer(&store, "me", &json!({ "after": 10, "limit": 2 })).unwrap();
+        assert_eq!(in_time["truncated"], false);
     }
 
     #[test]

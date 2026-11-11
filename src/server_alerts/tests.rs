@@ -4506,3 +4506,30 @@ async fn an_alert_on_the_close_against_a_line_takes_no_level_in_an_update() {
     .unwrap();
     assert_eq!(ok["condition"], "crossing_down");
 }
+
+/// At most two wake-ups are being sent at a time, by the dispatch's own count: also
+/// when one in flight is no longer among the rows that are due, as right after its
+/// outcome was stored and before its task has ended.
+#[tokio::test]
+async fn the_dispatch_itself_starts_no_more_than_the_slots_that_are_free() {
+    let agent_port = silent_receiver().await;
+    let (store, _) = store_at("wake-up-two-at-once");
+    let (a, _setups) = waking(store, agent_port, "me", Limits::default());
+    for t in [0, 120, 240] {
+        fire_a_wake_up(&a, "me", t).await;
+    }
+    // No dispatch has run in between on this one thread, or it took the first two.
+    let mut st = a.lock();
+    let started: Vec<(String, i64)> = st.agent_in_flight.iter().cloned().collect();
+    for key in &started {
+        st.agent_in_flight.remove(key);
+    }
+    // One is in flight whose row is not due any more.
+    st.agent_in_flight.insert(("me".to_string(), 999));
+    a.dispatch_wake_ups(&mut st, Instant::now());
+    assert_eq!(
+        st.agent_in_flight.len(),
+        2,
+        "one more, not every row that is due"
+    );
+}
