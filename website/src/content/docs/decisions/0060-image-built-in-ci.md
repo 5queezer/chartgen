@@ -71,12 +71,20 @@ image is made. A run by hand uses the workflow file of the ref it runs on, so a 
 without this job gets no image. It never runs on a pull request.
 
 `:master` is moved only by a run on `master`, and only if its commit is still
-`master`'s head when its build is done. Builds of one ref run one at a time. So of
-two pushes close together the older run cannot take the tag back from the newer.
+`master`'s head when its build is done. So of two pushes close together the older
+run cannot take the tag back from the newer, in whatever order they finish. The job
+has no concurrency group, on purpose: a group keeps one job waiting and cancels it
+when another queues, and image jobs queue as their runs' tests finish, not in commit
+order, so a group could cancel the build of `master`'s head.
 
-Only this job may write, and only packages (`contents: read`, `packages: write`).
-It uses no action besides `actions/checkout`: logging in and building are the
-runner's own `docker`. The layer cache is a tag in the same package.
+The workflow's token is read-only (`permissions: contents: read` at the top), and
+this job alone adds `packages: write`. It uses no action besides `actions/checkout`:
+logging in and building are the runner's own `docker`. The layer cache is a tag in
+the same package.
+
+All of this is what the workflow file does. **The boundary is write access to the
+repository:** whoever can push a branch can push one with an edited workflow that
+writes any tag of the package.
 
 ### The package is public
 
@@ -92,23 +100,29 @@ on the board, in Coolify and in the timer's environment, to protect nothing.
 Still the timer of ADR-0037, still pull-based. One run:
 
 1. Read `master`'s head. Unchanged since the last deploy: done.
-2. Look up the `CI` run for it: pending waits, failed or cancelled is not deployed.
-   Since the image exists only after a green run this decides nothing by itself; it
-   is kept for what it tells the log.
+2. Look up the `CI` run of the push for it: pending waits, failed or cancelled is
+   not deployed. On `master` that is the run that builds the image, so the next step
+   usually agrees. It does not always, and that is wanted: CI run by hand on
+   `master`'s head builds an image too, and it is not deployed while the push run is
+   red.
 3. Ask the registry for `ghcr.io/5queezer/chartgen:<sha>`. Not there yet, refused,
    rate-limited or unreachable: nothing is deployed, and the next tick asks again.
-4. Set the Coolify application's image name and tag to that commit, then call the
-   deploy API. Either failing leaves the state as it was; the next tick does both
-   again.
-5. Record the commit, and the one deployed before it.
+4. Read the Coolify application and refuse unless it is of the kind Docker Image.
+   On one that builds from a Dockerfile the tag would be ignored and the deploy
+   would build on the host, which is what this decision removes; a wrong uuid in
+   the configuration is enough to get there.
+5. Set the application's image name and tag to that commit, then call the deploy
+   API. Either failing leaves the state as it was; the next tick does both again.
+6. Record the commit as `master`'s head acted on, as what runs now, and what ran
+   before it.
 
-The Coolify application is of the kind Docker Image. It pulls and starts; it does
-not build.
+The Coolify application pulls and starts; it does not build.
 
-**Rollback** is the previous commit's tag: `chartgen-autodeploy.sh rollback`
-deploys the image recorded in step 5, and `deploy <sha>` any published one. Neither
-changes the timer's state, so the timer does not put the bad commit back, and the
-next commit on `master` deploys as usual.
+**Rollback** is the tag of what ran before: `chartgen-autodeploy.sh rollback`
+deploys it, and `deploy <sha>` any published commit, by its full SHA only. Both
+record what they put out, so the next rollback is right whoever deployed last.
+Neither changes which head of `master` the timer has acted on, so the timer does not
+put the bad commit back, and the next commit on `master` deploys as usual.
 
 ### Consequences
 
@@ -128,9 +142,11 @@ next commit on `master` deploys as usual.
   Nothing would have been deployed either way, and re-running the failed job
   repeats only the build.
 - Bad: **anyone with write access to the repository can publish an image of any ref**
-  by running the workflow on it, under that ref's commit SHA. They cannot move
-  `:master` from another ref, and the timer deploys only `master`'s head. Write
-  access already allows pushing to `master`.
+  by running the workflow on it, under that ref's commit SHA. This workflow file
+  moves `:master` only from `master`, but write access is not bound by the file: a
+  pushed branch with an edited workflow can write any tag. The timer deploys only
+  `master`'s head, and only when the push run of CI for it is green. Write access
+  already allows pushing to `master`.
 - Bad: the image is `linux/arm64` only. An x86 host builds the `Dockerfile` itself or
   uses the release binaries, as before.
 - Bad: images accumulate in the registry, one per commit of `master`. Nothing
@@ -139,7 +155,8 @@ next commit on `master` deploys as usual.
   way to lose the data: Coolify does not offer to convert an application that
   builds from a Dockerfile, and a new application starts on a new, empty volume.
   The [steps](https://github.com/5queezer/chartgen/blob/master/scripts/autodeploy/README.md)
-  begin with a copy of the volume.
+  prove the image pulls before anything is stopped, copy the volume into a place
+  proven empty, and check each copy by what is in the database.
 - Bad: the timer still reports that a deploy was triggered, not that it is healthy.
 - Neutral: the CI run of a push to `master` takes longer by the image build. Pull
   requests are not affected.
@@ -182,8 +199,9 @@ public repository a fork's pull request could run code on the host.
 
 `scripts/autodeploy/test.sh` runs the timer script against a stub that plays GitHub,
 the registry and Coolify: an image not yet published, the registry's refusals and
-rate limits, a refused tag change, a failed deploy and its retry, `master` moving
-during a run, and both commands by hand. `actionlint` checks the workflow.
+rate limits, an application that is not a Docker Image one, a refused tag change, a
+failed deploy and its retry, `master` moving during a run, both commands by hand, and
+that no token is ever an argument of `curl`. `actionlint` checks the workflow.
 
 Not validated when this was written: the workflow itself, which runs only on GitHub;
 the time and memory of the arm64 build; the pull on the board.

@@ -27,7 +27,7 @@ systemctl enable --now chartgen-autodeploy.timer
 
 ```
 COOLIFY_URL=http://coolify.lan:8000
-COOLIFY_API_TOKEN=<Coolify API token that may change and deploy the application>
+COOLIFY_API_TOKEN=<Coolify API token that may read, change and deploy the application>
 COOLIFY_APP_UUID=<uuid of the Docker Image application>
 GITHUB_REPO=5queezer/chartgen
 CHARTGEN_IMAGE=ghcr.io/5queezer/chartgen
@@ -36,7 +36,8 @@ CHARTGEN_IMAGE=ghcr.io/5queezer/chartgen
 `GITHUB_REPO` and `CHARTGEN_IMAGE` may be left out; these are their defaults.
 The Coolify application must be of the kind **Docker Image**: the script sets
 its image name and tag. On an application that builds from a Dockerfile the
-tag would be ignored and a deploy would build on the host again.
+tag would be ignored and a deploy would build on the host again, so the
+script reads the application first and refuses any other kind.
 
 The first run records the current `master` SHA and does not deploy. To
 deploy the current head right away, see [By hand](#by-hand).
@@ -69,68 +70,157 @@ for an image in a private package: it asks the registry as anyone would.
 
 > **This is where the data can be lost.** `chartgen.db` holds the clients,
 > users, sessions, approvals, stored scripts, alerts and the refresh tokens of
-> headless clients. If the application comes up on an empty volume, every
-> client and every headless agent has to be authorized again, and scripts and
-> alerts are gone. **Copy the data first, with the application stopped,** and
-> check the copy before anything else.
+> headless clients. If the application comes up on an empty or a wrong
+> database, every client and every headless agent has to be authorized
+> again, and scripts and alerts are gone. The steps below are in this order
+> on purpose: **nothing is stopped before the image is proven to pull, every
+> copy goes into a place proven empty, and every copy is checked by what is
+> in the database, not by the list of files.**
 
-1. **Find how the data is mounted.** In Coolify: the application, **Persistent
-   Storage**. A chartgen application has one named volume there, mounted at
-   `/root/.chartgen`. Coolify names it `<application uuid>-<name>`; the examples
-   below write `<old volume>` for that full name. `docker volume ls` on the
-   host shows it. If the page shows a host path instead of a volume, copy that
-   directory instead.
-2. **Stop the application** in Coolify, and pause the timer:
+Run the commands as root on the host. `<old volume>`, `<new volume>` and
+`<sha>` stand for your values. The checks need `sqlite3` on the host.
+
+**The check, used three times below.** It opens the file read-only, so it
+cannot create or change anything:
+
+```sh
+check() { test -s "$1" && sqlite3 -readonly "$1" "PRAGMA integrity_check; SELECT count(*) FROM oauth_clients;"; }
+```
+
+A good database answers with exactly two lines: `ok`, and the number of
+clients, which is above 0 for a production store. **Anything else means
+stop:** no output (the file is missing or empty), an `Error:` line, or `0`.
+Do not use plain `sqlite3 <file>` for this: on a missing file it creates an
+empty one, prints `ok`, and leaves a file of the right name behind.
+
+### 1. The image first, with production still running
+
+1. Merge the change. The `CI` run of that commit on `master` builds and pushes
+   the image; wait for its `image (linux/arm64)` job to be green. If it fails,
+   production is untouched: fix that first.
+2. On GitHub: the repository's **Packages**, `chartgen`, **Package settings**,
+   **Change visibility**, **Public**.
+3. On the host, prove the pull: `docker pull ghcr.io/5queezer/chartgen:<sha>`
+   with the full SHA of that commit. Do not go on until this works.
+
+### 2. Know the volume
+
+In Coolify: the application, **Persistent Storage**. A chartgen application
+has one named volume there, mounted at `/root/.chartgen`; Coolify names it
+`<application uuid>-<name>`. That full name is `<old volume>`. Prove it exists:
+
+```sh
+docker volume inspect <old volume>      # an error here means the name is wrong: stop
+```
+
+This matters because `docker run -v <name>:...` does not fail on a wrong
+name: it creates an empty volume of that name and copies nothing.
+
+### 3. Stop, copy, check
+
+From here until the application runs again, production is down.
+
+1. Stop the application in Coolify, and pause the timer:
    `systemctl disable --now chartgen-autodeploy.timer`.
-3. **Copy the volume and check the copy:**
+2. Copy the volume into a **new** directory that only root can read:
 
    ```sh
-   mkdir -p /var/backups/chartgen
-   docker run --rm -v <old volume>:/from:ro -v /var/backups/chartgen:/to debian:bookworm-slim \
-     cp -a /from/. /to/
-   ls -la /var/backups/chartgen                      # chartgen.db is there, with its size
-   sqlite3 /var/backups/chartgen/chartgen.db "PRAGMA integrity_check; SELECT count(*) FROM oauth_clients;"
+   b=/var/backups/chartgen/$(date +%Y%m%d-%H%M%S)
+   install -d -m 700 /var/backups/chartgen "$b"
+   ls -A "$b"                 # prints nothing: the directory is new and empty
+   docker run --rm -v <old volume>:/from:ro -v "$b":/to debian:bookworm-slim cp -a /from/. /to/
+   check "$b/chartgen.db"     # two lines: ok, and the number of clients. Write the number down.
    ```
 
-   `integrity_check` must answer `ok`, and the count must be the number of
-   clients you expect, not 0. Without `sqlite3` on the host, compare
-   `sha256sum` of the file in the volume and in the copy.
-4. **Make the image available:** the first green `CI` run on `master` after
-   this change pushes it. Then, on GitHub: the repository's **Packages**,
-   `chartgen`, **Package settings**, **Change visibility**, **Public**. Check
-   from the host: `docker pull ghcr.io/5queezer/chartgen:<sha>`.
-5. **Switch the application.** Two ways:
+   The source is mounted read-only and nothing in it is touched. `cp -a /from/.`
+   takes `chartgen.db` and, if the application was not stopped cleanly, its
+   `-wal` and `-shm` files, which belong to it.
 
-   **A. In place** (keeps the uuid, the volume, the environment, the domain and
-   the port). Coolify's API and UI do not offer to change an application that
-   builds from a Dockerfile into a Docker Image application. Changing the
-   application's build pack inside Coolify itself is **not verified by this
-   repository**; do it only after it worked on an application that does not
-   matter. _Rehearsal: not yet recorded._ If it is done, set the image name to
-   `ghcr.io/5queezer/chartgen` and the tag to the SHA from step 4 as well, and
-   look at **Persistent Storage** again before starting: it must still show
-   `<old volume>`.
+**A copy is only good if the application has not run since it was taken.**
+If you start the old application again for any reason, this copy is stale:
+take a new one, into a new directory, before going on.
 
-   **B. A new application** (always possible). **New resource, Docker Image**,
-   image `ghcr.io/5queezer/chartgen`, tag the SHA from step 4. Copy from the old
-   application: every environment variable, the domain, the port (9315). Add
-   a persistent storage with destination `/root/.chartgen`. **Do not start it
-   yet:** it has a new, empty volume, `<new volume>`. Fill it from the copy:
+### 4. Switch the application
 
-   ```sh
-   docker volume create <new volume>     # only if Coolify has not created it yet; use the name it shows
-   docker run --rm -v /var/backups/chartgen:/from:ro -v <new volume>:/to debian:bookworm-slim \
-     cp -a /from/. /to/
-   docker run --rm -v <new volume>:/to:ro debian:bookworm-slim ls -la /to
-   ```
+Two ways.
 
-   Leave the old application stopped, not deleted, until the new one is proven.
-6. **Start it and check** (see [Is it healthy?](#is-it-healthy)): the page
-   loads, and a client that was authorized before still is, with no new
-   authorization. If it asks again, stop: the application is not on the data.
-7. **Point the timer at it:** put the application's uuid into
-   `/etc/chartgen-autodeploy.env` (a new one for B), install the new script
-   (see [Install](#install)), and enable the timer.
+**A. In place** (keeps the uuid, the volume, the environment, the domain and
+the port). Coolify's API and UI do not offer to change an application that
+builds from a Dockerfile into a Docker Image application. Changing the
+application's build pack inside Coolify itself is **not verified by this
+repository**; do it only after it worked on an application that does not
+matter. _Rehearsal: not yet recorded._ If it is done, set the image name to
+`ghcr.io/5queezer/chartgen` and the tag to `<sha>` as well, and look at
+**Persistent Storage** again before starting: it must still show
+`<old volume>`. Then check the data where it is:
+
+```sh
+check "$(docker volume inspect -f '{{.Mountpoint}}' <old volume>)/chartgen.db"   # ok, and the same number
+```
+
+**B. A new application** (always possible). **New resource, Docker Image**,
+image `ghcr.io/5queezer/chartgen`, tag `<sha>`. Copy from the old application:
+every environment variable, the domain, the port (9315). Add a persistent
+storage with destination `/root/.chartgen`. **Do not start it.** Its volume,
+`<new volume>`, is the name Coolify shows under **Persistent Storage**.
+
+Fill the volume, and only if it is empty:
+
+```sh
+docker volume inspect <new volume> || docker volume create <new volume>   # create only if Coolify has not yet
+v=$(docker volume inspect -f '{{.Mountpoint}}' <new volume>)
+ls -A "$v"                 # must print nothing
+cp -a "$b"/. "$v"/
+check "$v/chartgen.db"     # ok, and the same number as in step 3
+```
+
+If `ls -A "$v"` prints anything, the new application has already run once,
+and the volume holds the database of an empty server, with its `-wal` and
+`-shm` files beside it. **Do not copy over that.** Copying puts the good
+`chartgen.db` next to the stranger's `-wal`, SQLite applies that log to the
+good file at the next start, and the server comes up with no clients while
+`integrity_check` still says `ok` and the file list looks right. (Tried: 3
+clients copied in, 0 seen by the server.) Stop the new application and
+remove exactly these three files, then start again at `ls -A "$v"`:
+
+```sh
+rm -f "$v/chartgen.db" "$v/chartgen.db-wal" "$v/chartgen.db-shm"
+```
+
+Whether Coolify takes a volume that was created by hand under the name it
+shows is **not verified by this repository**; rehearse it on staging. If it
+does not, start the application once, stop it, and empty and fill the
+volume as above.
+
+Leave the old application stopped, not deleted, and the backup directory in
+place, until the new one is proven.
+
+### 5. Start and check
+
+Start the application, then (see [Is it healthy?](#is-it-healthy)):
+
+- Coolify's deployment log shows a pull of `ghcr.io/5queezer/chartgen:<sha>` and
+  no build.
+- The container's log has the line `OAuth client store: ... (N clients
+  restored)`, and `N` is the number from step 3.
+- A client that was authorized before still is, with no new authorization.
+
+If the number is 0 or a client is asked to authorize again: **stop the
+application.** It is not on the data. The backup in `"$b"` and the old
+volume still have it.
+
+### 6. Point the timer at it
+
+Install the new script (see [Install](#install)), put the application's
+uuid into `/etc/chartgen-autodeploy.env` (a new one for B), and enable the
+timer. The script reads the application before every deploy and refuses
+one that is not a Docker Image application, so the old uuid left in that
+file by mistake deploys nothing and says so in the log.
+
+### If it goes wrong before the new application is proven
+
+Stop the new application and start the old one: it is still on
+`<old volume>`, untouched. The backup is then stale; see step 3.
 
 ### What the timer does the first time
 
@@ -145,25 +235,33 @@ script deployed. The new script reads it as it always did:
   change.
 
 So to get the merged code out the first time, either let the timer do it
-after step 7, or do it at once with `deploy <sha>` below. Deleting
+after step 6, or do it at once with `deploy <sha>` below. Deleting
 `last-sha` makes the next run record the head **without** deploying it.
 
 ## By hand
 
-The script deploys any published image, or the one from before the last
-deploy. Both leave the timer's state alone: a rollback is not undone at the
-next tick, and the next commit on `master` deploys as usual.
+The script deploys any published image, or goes back to the one before.
+Both leave the timer's state alone: a rollback is not undone at the next
+tick, and the next commit on `master` deploys as usual.
 
 ```sh
 run() { systemd-run --wait --pipe --quiet -p EnvironmentFile=/etc/chartgen-autodeploy.env \
   -p DynamicUser=yes -p StateDirectory=chartgen-autodeploy /usr/local/bin/chartgen-autodeploy.sh "$@"; }
 run deploy <full commit sha>     # that image, now
-run rollback                     # the image that ran before the last deploy
+run rollback                     # the image that ran before the one put out last
 ```
 
-Every image stays in the registry under its SHA, so any earlier commit of
-`master` that has one can be named. `rollback` needs a deploy by the new
-script to have happened; before that, use `deploy <sha>`.
+`deploy` takes a full commit SHA, 40 hex characters, and nothing else: a
+name like `master` is a tag that moves. Every image stays in the registry
+under its SHA, so any earlier commit of `master` that has one can be named.
+
+The script records what it put out last, by the timer or by hand, and what
+ran before that; `rollback` deploys the latter. So after "the timer deployed
+A, then B, and B is bad", `rollback` runs A, and when the timer later deploys
+C, the next `rollback` goes to A again, which is what ran before C. A second
+`rollback` in a row goes back to what the first one replaced. It knows only
+what this script deployed: before its first deploy, or after a deploy made
+in Coolify's UI, name the SHA with `deploy`.
 
 ## Is it healthy?
 
@@ -188,8 +286,9 @@ systemctl enable --now chartgen-autodeploy.timer    # resume (deploys the newest
 ```sh
 journalctl -u chartgen-autodeploy.service -n 50
 systemctl list-timers chartgen-autodeploy.timer
-cat /var/lib/private/chartgen-autodeploy/last-sha       # master's head the timer last deployed
-cat /var/lib/private/chartgen-autodeploy/previous-sha   # the one before it: what rollback deploys
+cat /var/lib/private/chartgen-autodeploy/last-sha       # master's head the timer last acted on
+cat /var/lib/private/chartgen-autodeploy/deployed-sha   # what this script put out last, by the timer or by hand
+cat /var/lib/private/chartgen-autodeploy/previous-sha   # what ran before that: what rollback deploys
 ```
 
 Delete `last-sha` to make the next run re-baseline (it records the head
@@ -205,7 +304,9 @@ What the log says when nothing is deployed:
 | `not in the registry yet` | CI is green and the image is not there. Seconds after a run this is normal; if it stays, the commit is from before the image job, or the job did not run. |
 | `is the package public?` | The registry refused. Set the package to public. |
 | `registry lookup ... answered 429` | Rate limit or network; the next tick tries again. |
-| `Coolify did not take the image tag` | The API token may not change the application, or the uuid is wrong. |
+| `not a Docker Image application` | `COOLIFY_APP_UUID` names an application that builds on the host, usually the old one. Nothing was changed or deployed. |
+| `could not read the Coolify application` | The uuid is wrong, the token may not read applications, or Coolify is down. |
+| `Coolify did not take the image tag` | The API token may not change the application. |
 
 ## Cancelled or timed-out CI
 

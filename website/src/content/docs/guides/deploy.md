@@ -375,6 +375,7 @@ points the Coolify application at that image and calls Coolify's deploy
 endpoint, both locally:
 
 ```
+GET   ${COOLIFY_URL}/api/v1/applications/${COOLIFY_APP_UUID}      (must say "build_pack": "dockerimage")
 PATCH ${COOLIFY_URL}/api/v1/applications/${COOLIFY_APP_UUID}
       {"docker_registry_image_name": "${CHARTGEN_IMAGE}", "docker_registry_image_tag": "<sha>"}
 POST  ${COOLIFY_URL}/api/v1/deploy?uuid=${COOLIFY_APP_UUID}&force=false
@@ -383,15 +384,16 @@ Authorization: Bearer ${COOLIFY_API_TOKEN}
 
 The host pulls the image and builds nothing, and what goes out is exactly the
 commit that passed CI. The application in Coolify is of the kind **Docker
-Image**. A pending CI run, an image that is not published yet and a registry
+Image**; the script refuses any other, because a deploy of one that builds
+from a Dockerfile would build on the host. A pending CI run, an image that is not published yet and a registry
 that refuses or rate-limits are all retried on the next tick; a failed CI run
 is not deployed. A failed Coolify call keeps the old state, so the next tick
 sets the tag and deploys again. The first run only records the current SHA.
 
 The script logs that a deploy was triggered. It does not wait for it or check
 the application: look at the deployment in Coolify. `chartgen-autodeploy.sh
-rollback` deploys the image that ran before the last deploy, and `deploy
-<sha>` any published one.
+rollback` deploys the image that ran before the one it put out last, and
+`deploy <sha>` any published one, by its full commit SHA.
 
 While a new head is undeployed each tick makes 2 GitHub calls (about 24 per
 hour, against the unauthenticated limit of 60); an idle tick makes 1. The
@@ -402,16 +404,18 @@ Nothing is exposed inbound and the repository holds no Coolify secrets; see
 
 Install, pause, rollback and uninstall steps are in
 `scripts/autodeploy/README.md`, and so is **moving an existing application from
-a Dockerfile build to the image, which begins with a copy of the data volume:**
-an application that starts on an empty volume has lost its clients, users,
-scripts, alerts and refresh tokens. The configuration lives in
+a Dockerfile build to the image. Follow those steps in their order:** the image
+is proven to pull before anything is stopped, the data volume is copied into a
+place proven empty, and each copy is checked by what is in the database. An
+application that starts on an empty or wrong database has lost its clients,
+users, scripts, alerts and refresh tokens. The configuration lives in
 `/etc/chartgen-autodeploy.env` on the host:
 
 | Variable | What it is |
 |----------|------------|
 | `COOLIFY_URL` | Coolify instance root, e.g. `http://coolify.lan:8000`. |
 | `COOLIFY_APP_UUID` | UUID of the chartgen application in Coolify, a Docker Image application. |
-| `COOLIFY_API_TOKEN` | Coolify API token that may change and deploy the application. |
+| `COOLIFY_API_TOKEN` | Coolify API token that may read, change and deploy the application. |
 | `GITHUB_REPO` | `owner/name` to poll, default `5queezer/chartgen`. |
 | `CHARTGEN_IMAGE` | The image without a tag, default `ghcr.io/5queezer/chartgen`. Its package must be public. |
 
