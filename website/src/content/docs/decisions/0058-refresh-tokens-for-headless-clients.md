@@ -234,6 +234,9 @@ and one that stopped lets them expire. A tool call still writes nothing.
 - **By an operator, for a token nobody holds any more:** delete the rows and restart. The
   families are loaded at startup, so a deleted row is a family that no longer exists. The
   [OAuth reference](/chartgen/reference/oauth/#revoking-a-refresh-token) has the statement.
+  It says to stop the server first. If the rows are deleted while it runs, a refresh in
+  that family is answered `503` and stores nothing, so it cannot write the family back
+  before the restart.
 - **With the client:** an evicted or deleted client takes its refresh tokens along. When a
   user's approval of a client is dropped, which today only the limit of 50 approvals does,
   that user's families for that client end too.
