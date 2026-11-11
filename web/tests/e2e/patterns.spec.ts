@@ -65,6 +65,34 @@ async function pixelOf(page: Page, x: number, y: number) {
   return { x: box!.x + at.x, y: box!.y + at.y };
 }
 
+/**
+ * Scroll the active chart so that bar `x` is well inside it, if it is not. Which labels
+ * there are follows the clock, so the one a test picks can sit at the pane's edge or
+ * past it, where no hover reaches it: in a half-width chart of a grid first.
+ */
+const bringIntoView = (page: Page, x: number) =>
+  page.evaluate(
+    ([bar, pane]) => {
+      const chart = (
+        window as unknown as {
+          __chartgenTest: {
+            chart: () => {
+              convertToPixel: (p: { dataIndex: number; value: number }, f: { paneId: string }) => { x: number };
+              getSize: (paneId: string, position: string) => { width: number };
+              getDataList: () => unknown[];
+              scrollToDataIndex: (i: number) => void;
+            };
+          };
+        }
+      ).__chartgenTest.chart();
+      const px = chart.convertToPixel({ dataIndex: bar as number, value: 0 }, { paneId: pane as string }).x;
+      if (px < 40 || px > chart.getSize(pane as string, "main").width - 40) {
+        chart.scrollToDataIndex(Math.min(chart.getDataList().length - 1, (bar as number) + 30));
+      }
+    },
+    [x, CANDLE_PANE] as const,
+  );
+
 /** The indicator as the chart holds it. */
 const held = <T>(page: Page, key: string, read: string) =>
   page.evaluate(
@@ -93,6 +121,7 @@ async function loneLabel(page: Page, key: string): Promise<Mark> {
 
 /** Hover the middle of a label's box. */
 async function hoverLabel(page: Page, l: Mark): Promise<void> {
+  await bringIntoView(page, l.x);
   const px = await pixelOf(page, l.x, l.y);
   await page.mouse.move(px.x, px.y + (l.above ? -12 : 12), { steps: 3 });
 }
@@ -325,6 +354,7 @@ test.describe("in a grid (ADR-0043)", () => {
       (l) => closed.filter((o) => o.x === l.x && o.above === l.above).length === 1,
     );
     const l = lone[Math.max(0, lone.length - 4)]!;
+    await bringIntoView(page, l.x);
     const at = await page.evaluate(
       ([bar, price]) => {
         const w = window as unknown as {
