@@ -1303,6 +1303,36 @@ fn a_refresh_tokens_table_from_before_the_access_hash_gains_the_column() {
     assert_eq!(refresh_columns(&fresh_dir.join("s.db")), columns);
 }
 
+/// The server only spends a token it holds as usable, and its rows are written by
+/// nobody else. A rotation that finds its token's row gone or already spent means
+/// the file was changed from outside, such as rows deleted for a revocation while the
+/// server ran: storing the successor would bring that family back.
+#[test]
+fn a_rotation_whose_token_is_not_usable_in_the_store_is_not_stored() {
+    let store = upgraded("refresh-rotation-stale", &[]);
+    store
+        .save_refresh_token(&refresh_row("h0", "f", 0), &[], 0, 0)
+        .unwrap();
+    store.delete_refresh_families(&["f".to_string()]).unwrap();
+    assert!(store
+        .save_refresh_token(&refresh_row("h1", "f", 1), &["h0".to_string()], 5000, 0)
+        .is_err());
+    assert!(store.refresh_tokens(0).unwrap().is_empty());
+
+    // Spent already: a second successor beside the first is refused as well.
+    store
+        .save_refresh_token(&refresh_row("g0", "g", 0), &[], 0, 0)
+        .unwrap();
+    store
+        .save_refresh_token(&refresh_row("g1", "g", 1), &["g0".to_string()], 5000, 0)
+        .unwrap();
+    assert!(store
+        .save_refresh_token(&refresh_row("g2", "g", 1), &["g0".to_string()], 5000, 0)
+        .is_err());
+    let rows = store.refresh_tokens(0).unwrap();
+    assert_eq!(rows.iter().filter(|r| r.spent_at.is_none()).count(), 1);
+}
+
 #[test]
 fn a_rotation_is_stored_whole_or_not_at_all() {
     let store = upgraded("refresh-rotation", &[]);
