@@ -163,7 +163,9 @@ setup. It never holds a thesis or a note.
 
 Events are numbered per owner, from 1, and a number is never used again, also after the
 events before it are gone. The server keeps **the newest 1000 events of an owner, for 7
-days**. `list_events` reads them back after a cursor, and says `truncated` when events
+days**, wherever events are written: the alert service and the setup service each see to
+it, so it holds with only one of them on. An event whose wake-up still waits is not dropped
+to make room; it goes once it was delivered or given up, which is within the hour. `list_events` reads them back after a cursor, and says `truncated` when events
 after the caller's cursor are no longer kept.
 
 A replay server writes no events and refuses `list_events`: its answers must not depend on
@@ -216,6 +218,12 @@ was away reads it with `list_events`.
   answer was lost on the way. The receiver has to drop a repeated `webhook-id`.
 - Bad: there is no switch on a setup for its status wake-ups. Every `take` setup of the
   agent's owner wakes it.
+- Bad: **while the store cannot be written, a wake-up that was sent is sent again.** Its
+  outcome is stored after the attempt. If that write fails, the row still says it is due,
+  and the next round sends it once more with its three quick attempts, for as long as the
+  store fails. It is accepted: every repeat carries the same `webhook-id`, which the
+  receiver drops, the repeats are held to the wake-ups' own 30 a minute and 2 at once, and
+  a store that cannot be written stops alerts and setups from firing anything new anyway.
 - Bad: **a build from before the log does not write to it.** On a store this build has
   migrated it runs as before, since it ignores tables it does not know: alerts fire and
   setups are scored, and none of that is in the log. After a roll forward the log has a
