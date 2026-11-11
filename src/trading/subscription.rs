@@ -301,7 +301,7 @@ mod tests {
     }
 
     fn temp_dir(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("chartgen_subscription_test_{name}"));
+        let dir = crate::test_dir::new(format!("chartgen_subscription_test_{name}"));
         let _ = fs::remove_dir_all(&dir);
         let _ = fs::create_dir_all(&dir);
         dir

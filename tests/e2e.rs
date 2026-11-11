@@ -1,3 +1,6 @@
+#[path = "../src/test_dir.rs"]
+mod test_dir;
+
 use chartgen::data::{sample_data, OhlcvData};
 use chartgen::indicator::{ema, highest, lowest, sma, stoch, Indicator, PanelResult};
 use chartgen::indicators;
@@ -751,7 +754,7 @@ fn free_port() -> u16 {
 /// A server with an empty store of its own, never the user's real one.
 fn spawn_server(web_dir: Option<&std::path::Path>) -> Server {
     let port = free_port();
-    let db = std::env::temp_dir().join(format!("chartgen-e2e-{}-{port}.db", std::process::id()));
+    let db = crate::test_dir::new("chartgen-e2e").join("chartgen.db");
     let mut server = spawn_server_on(port, web_dir, &db, false);
     server.temp_db = Some(db);
     server
@@ -947,7 +950,7 @@ fn small_window_client(port: u16) -> std::net::TcpStream {
 /// or without a network, and never the real provider.
 fn spawn_sample_server() -> Server {
     let port = free_port();
-    let db = std::env::temp_dir().join(format!("chartgen-e2e-{}-{port}.db", std::process::id()));
+    let db = crate::test_dir::new("chartgen-e2e").join("chartgen.db");
     let mut cmd = server_command(port, None, &db, false);
     cmd.env("CHARTGEN_DATA_SOURCE", "sample");
     let mut server = start_server(cmd, port);
@@ -1494,7 +1497,7 @@ fn test_routes_for_browser_clients_answer_another_origin_as_before() {
 /// With and without the web app, where an unknown path is answered by other code.
 #[test]
 fn test_routes_for_this_origin_say_nothing_to_another() {
-    let root = std::env::temp_dir().join(format!("chartgen-web-cors-{}", std::process::id()));
+    let root = crate::test_dir::new(format!("chartgen-web-cors-{}", std::process::id()));
     let web = root.join("dist");
     std::fs::create_dir_all(web.join("assets")).unwrap();
     std::fs::write(web.join("index.html"), "<!doctype html><title>app</title>").unwrap();
@@ -1568,7 +1571,7 @@ fn test_every_answer_forbids_content_sniffing() {
 
 #[test]
 fn test_server_serves_web_app_same_origin() {
-    let root = std::env::temp_dir().join(format!("chartgen-web-{}", std::process::id()));
+    let root = crate::test_dir::new(format!("chartgen-web-{}", std::process::id()));
     let web = root.join("dist");
     std::fs::create_dir_all(web.join("assets")).unwrap();
     std::fs::write(web.join("index.html"), "<!doctype html><title>app</title>").unwrap();
@@ -1738,7 +1741,7 @@ fn assert_unknown_client_json(resp: (u16, String, String), case: &str) {
 /// page, and nothing but the server's own app may be redirected to (ADR-0036).
 #[test]
 fn test_authorize_unknown_client_returns_to_the_own_web_app_only() {
-    let web = std::env::temp_dir().join(format!("chartgen-web-authz-{}", std::process::id()));
+    let web = crate::test_dir::new(format!("chartgen-web-authz-{}", std::process::id()));
     std::fs::create_dir_all(&web).unwrap();
     std::fs::write(web.join("index.html"), "<!doctype html>").unwrap();
     let srv = spawn_server(Some(&web));
@@ -1879,7 +1882,7 @@ const SCRIPT_TOOLS: [&str; 5] = [
 
 /// A fresh path for a store that outlives one server.
 fn store_path(test: &str) -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join(format!("chartgen-{test}-{}", std::process::id()));
+    let dir = crate::test_dir::new(format!("chartgen-{test}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     dir.join("chartgen.db")
@@ -4404,7 +4407,7 @@ fn test_signin_cookies_on_https() {
 #[test]
 fn test_signin_keeps_the_stale_client_recovery_and_serves_the_app() {
     let fake = FakeProvider::start();
-    let dir = std::env::temp_dir().join(format!("chartgen-signin-app-{}", std::process::id()));
+    let dir = crate::test_dir::new(format!("chartgen-signin-app-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join("index.html"), "<!doctype html>the app").unwrap();
     let port = free_port();

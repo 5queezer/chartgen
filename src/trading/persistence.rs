@@ -141,7 +141,7 @@ mod tests {
 
     #[test]
     fn roundtrip_save_load() {
-        let dir = std::env::temp_dir().join("chartgen_test_roundtrip");
+        let dir = crate::test_dir::new("chartgen_test_roundtrip");
         let _ = fs::remove_dir_all(&dir);
         let path = dir.join("alerts.json");
 
@@ -169,26 +169,23 @@ mod tests {
 
     #[test]
     fn load_nonexistent_returns_empty() {
-        let path = std::env::temp_dir().join("chartgen_test_nofile/does_not_exist.json");
+        let path = crate::test_dir::new("chartgen_test_nofile").join("does_not_exist.json");
         let loaded = load_alerts(&path).unwrap();
         assert!(loaded.is_empty());
     }
 
     #[test]
     fn save_creates_parent_dirs() {
-        let dir = std::env::temp_dir().join("chartgen_test_mkdirs/deep/nested");
-        let _ = fs::remove_dir_all(std::env::temp_dir().join("chartgen_test_mkdirs"));
+        let dir = crate::test_dir::new("chartgen_test_mkdirs").join("deep/nested");
         let path = dir.join("alerts.json");
 
         save_alerts(&path, &[]).unwrap();
         assert!(path.exists());
-
-        let _ = fs::remove_dir_all(std::env::temp_dir().join("chartgen_test_mkdirs"));
     }
 
     #[test]
     fn audit_log_writes_correct_format() {
-        let dir = std::env::temp_dir().join("chartgen_test_audit_format");
+        let dir = crate::test_dir::new("chartgen_test_audit_format");
         let _ = fs::remove_dir_all(&dir);
         let path = dir.join("trades.log");
 
@@ -211,7 +208,7 @@ mod tests {
 
     #[test]
     fn audit_log_appends_multiple_writes() {
-        let dir = std::env::temp_dir().join("chartgen_test_audit_append");
+        let dir = crate::test_dir::new("chartgen_test_audit_append");
         let _ = fs::remove_dir_all(&dir);
         let path = dir.join("trades.log");
 
