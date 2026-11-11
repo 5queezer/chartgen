@@ -123,7 +123,27 @@ pub fn now_ms() -> i64 {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as i64)
             .unwrap_or(0)
+            + clock_shift_ms()
     })
+}
+
+/// Tests can be run at another time of day: `CHARTGEN_TEST_CLOCK_SHIFT_MS` moves this
+/// clock, and with it the sample series, which follows it. A test that passes only at
+/// some hours then fails under a shift.
+#[cfg(test)]
+fn clock_shift_ms() -> i64 {
+    static SHIFT: OnceLock<i64> = OnceLock::new();
+    *SHIFT.get_or_init(|| {
+        std::env::var("CHARTGEN_TEST_CLOCK_SHIFT_MS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0)
+    })
+}
+
+#[cfg(not(test))]
+fn clock_shift_ms() -> i64 {
+    0
 }
 
 /// Shared blocking HTTP client; every upstream request times out after 10 s.
