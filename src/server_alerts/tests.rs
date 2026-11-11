@@ -3112,7 +3112,7 @@ async fn a_late_outcome_does_not_answer_for_a_newer_fire() {
         (queue.pop_front().unwrap(), queue.pop_front().unwrap())
     };
 
-    a.clone().deliver(earlier).await;
+    a.clone().deliver(earlier, false).await;
     let view = get(&a, "me", &id).await;
     assert!(
         view["last_push_devices"][&phone].is_null(),
@@ -3123,7 +3123,7 @@ async fn a_late_outcome_does_not_answer_for_a_newer_fire() {
         "the last outcome still updates"
     );
 
-    a.clone().deliver(newer).await;
+    a.clone().deliver(newer, false).await;
     let view = get(&a, "me", &id).await;
     assert_eq!(view["last_push_devices"][&phone]["status"], 200, "{view}");
 }
@@ -3181,4 +3181,615 @@ async fn a_fire_with_push_off_leaves_no_older_outcome_behind() {
     let view = get(&a, "me", &id).await;
     let map = view["last_push_devices"].as_object().unwrap();
     assert!(map.is_empty(), "{view}");
+}
+
+// ---- ADR-0061: alerts that wake the owner's agent ----
+
+const AGENT_SECRET: &str = "a-secret-of-thirty-two-characters";
+/// Stands for what an owner would never want in a log or a table.
+const PRIVATE: &str = "PRIVATE-REASONING-MARKER";
+
+fn agent_at(port: u16, owner: &str) -> AgentReceiver {
+    let url = format!("http://127.0.0.1:{port}/webhooks/route?token=TOPSECRET");
+    AgentReceiver::from_vars(
+        |name| match name {
+            "CHARTGEN_AGENT_WEBHOOK_URL" => Some(url.clone()),
+            "CHARTGEN_AGENT_WEBHOOK_OWNER" => Some(owner.to_string()),
+            "CHARTGEN_AGENT_WEBHOOK_SECRET" => Some(AGENT_SECRET.to_string()),
+            _ => None,
+        },
+        None,
+    )
+    .unwrap()
+    .unwrap()
+}
+
+/// Alerts with the agent's receiver at `port` for `owner`, and setups beside them.
+fn waking(
+    store: &'static Store,
+    port: u16,
+    owner: &str,
+    limits: Limits,
+) -> (Arc<ServerAlerts>, Arc<crate::setup_service::Setups>) {
+    let a = alerts_on(store, Policy::default(), limits);
+    a.set_agent(agent_at(port, owner));
+    let setups = crate::setup_service::Setups::new(
+        store,
+        Some(hub_with(Arc::new(Fake::default()))),
+        None,
+        crate::fetch::DataSource::Sample,
+        Access::parse(None),
+        crate::setup_service::Limits::default(),
+        Some(a.clone()),
+    );
+    (a, setups)
+}
+
+/// A long far below the market, so nothing scores it during a test. Its thesis is as
+/// long as a thesis may be.
+fn a_setup(setups: &crate::setup_service::Setups, owner: &str) -> String {
+    let thesis = format!(
+        "{PRIVATE} {}",
+        "x".repeat(chartgen::setups::MAX_THESIS - PRIVATE.len() - 1)
+    );
+    let p = chartgen::data::sample_ohlcv("BTCUSDT", "1m", 1, None, crate::fetch::now_ms())
+        .unwrap()
+        .bars[0]
+        .close;
+    let args = json!({
+        "symbol": "BTCUSDT", "interval": "1h", "direction": "long", "thesis": thesis,
+        "entry": { "low": p * 0.5, "high": p * 0.51 },
+        "invalidation": p * 0.4, "targets": [p * 0.9],
+        "expires_at": crate::fetch::now_ms() + 86_400_000,
+    });
+    let resp = setups.call_tool("create_setup", None, &args, Some(owner));
+    let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+    assert_ne!(resp["result"]["isError"], json!(true), "{text}");
+    serde_json::from_str::<Value>(text).unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string()
+}
+
+fn waking_spec(setup: Option<&str>) -> Value {
+    let mut args = spec("crossing", "once", 100.0);
+    args["notify_agent"] = json!(true);
+    args["message"] = json!(format!("{PRIVATE} note"));
+    if let Some(setup) = setup {
+        args["setup_id"] = json!(setup);
+    }
+    args
+}
+
+/// What the agent's receiver does with a delivery (see the same check in
+/// `webhook.rs`): Standard Webhooks, with the secret taken as bytes.
+fn the_agents_receiver_accepts(request: &str) -> bool {
+    use base64::Engine;
+    use hmac::Mac;
+    let (head, body) = request.split_once("\r\n\r\n").unwrap();
+    let header = |name: &str| {
+        head.lines()
+            .find_map(|l| {
+                l.to_lowercase()
+                    .starts_with(&format!("{name}:"))
+                    .then(|| l[name.len() + 1..].trim().to_string())
+            })
+            .unwrap_or_default()
+    };
+    let (id, at) = (header("webhook-id"), header("webhook-timestamp"));
+    let mut mac = <hmac::Hmac<Sha256> as Mac>::new_from_slice(AGENT_SECRET.as_bytes()).unwrap();
+    mac.update(format!("{id}.{at}.{body}").as_bytes());
+    let expected = base64::engine::general_purpose::STANDARD.encode(mac.finalize().into_bytes());
+    !id.is_empty() && header("webhook-signature") == format!("v1,{expected}")
+}
+
+/// A body as the agent's receiver puts it into a prompt: the parsed payload written
+/// out with an indent of two, keys in the order they came, and only the first 4000
+/// characters of that.
+fn as_the_receiver_renders(body: &str) -> String {
+    let (mut out, mut depth, mut in_string, mut escaped) = (String::new(), 0usize, false, false);
+    let mut chars = body.chars().peekable();
+    while let Some(c) = chars.next() {
+        if in_string {
+            out.push(c);
+            in_string = escaped || c != '"';
+            escaped = !escaped && c == '\\';
+            continue;
+        }
+        match c {
+            '"' => {
+                in_string = true;
+                out.push(c);
+            }
+            '{' | '[' if matches!(chars.peek(), Some('}' | ']')) => {
+                out.push(c);
+                out.push(chars.next().unwrap());
+            }
+            '{' | '[' => {
+                depth += 1;
+                out.push(c);
+                out.push('\n');
+                out.push_str(&"  ".repeat(depth));
+            }
+            '}' | ']' => {
+                depth -= 1;
+                out.push('\n');
+                out.push_str(&"  ".repeat(depth));
+                out.push(c);
+            }
+            ',' => {
+                out.push_str(",\n");
+                out.push_str(&"  ".repeat(depth));
+            }
+            ':' => out.push_str(": "),
+            _ => out.push(c),
+        }
+    }
+    out.chars().take(4000).collect()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_wake_up_reaches_the_agents_receiver_signed_with_the_setup_before_the_thesis() {
+    let (port, seen) = receiver(OK).await;
+    let (store, _) = store_at("wake-up");
+    let (a, setups) = waking(store, port, "me", Limits::default());
+    let setup = a_setup(&setups, "me");
+    let id = create(&a, waking_spec(Some(&setup)), "me").await;
+    tick(&a, BASE, 99.0);
+    tick(&a, BASE + 60, 101.0);
+    until("the wake-up", || !seen.lock().unwrap().is_empty()).await;
+    until("its record", || {
+        a.lock().alerts[&id].last_delivery.is_some()
+    })
+    .await;
+
+    let raw = seen.lock().unwrap()[0].clone();
+    assert!(
+        raw.starts_with("POST /webhooks/route?token=TOPSECRET"),
+        "{}",
+        &raw[..60]
+    );
+    assert!(the_agents_receiver_accepts(&raw), "the signature");
+    let body = raw.split_once("\r\n\r\n").unwrap().1;
+    let parsed: Value = serde_json::from_str(body).unwrap();
+    assert_eq!(parsed["type"], "alert.fired");
+    assert_eq!(parsed["alert"]["id"], id.as_str());
+    assert_eq!(parsed["alert"]["price"], 101.0);
+    assert_eq!(parsed["note"], format!("{PRIVATE} note"));
+    assert_eq!(parsed["setup"]["id"], setup.as_str());
+    assert_eq!(parsed["setup"]["status"], "watching");
+    assert!(parsed["setup"]["levels"]["invalidation"].is_f64());
+    assert!(parsed["setup"].get("drawings").is_none() && parsed["setup"].get("owner").is_none());
+    assert_eq!(
+        raw.to_lowercase()
+            .split("webhook-id: ")
+            .nth(1)
+            .unwrap()
+            .lines()
+            .next()
+            .unwrap(),
+        parsed["id"].as_str().unwrap()
+    );
+
+    // The order is fixed by how the body is built, not by the alphabet: what says
+    // which event this is and where the setup stands first, the thesis last.
+    let at = |key: &str| body.find(key).unwrap_or_else(|| panic!("{key} missing"));
+    let order = [
+        "\"id\":",
+        "\"type\":",
+        "\"at\":",
+        "\"alert\":",
+        "\"note\":",
+        "\"setup\":",
+        "\"status\":",
+        "\"levels\":",
+        "\"fill\":",
+        "\"result_r\":",
+        "\"thesis\":",
+    ];
+    for pair in order.windows(2) {
+        assert!(at(pair[0]) < at(pair[1]), "{} before {}", pair[0], pair[1]);
+    }
+    assert!(body.ends_with("x\"}}"), "the thesis ends the body");
+    // And with a thesis as long as one may be, the receiver's cut keeps all of that.
+    let shown = as_the_receiver_renders(body);
+    for needed in [
+        "\"status\": \"watching\"",
+        "\"invalidation\": ",
+        "\"targets\": [",
+        "\"note\": ",
+        "\"fill\": null",
+        "\"result_r\": null",
+    ] {
+        assert!(
+            shown.contains(needed),
+            "{needed} is past the cut:\n{}",
+            &shown[..600]
+        );
+    }
+    assert!(
+        !shown.ends_with("x\"}}"),
+        "the test's thesis must be long enough to be cut"
+    );
+
+    let view = get(&a, "me", &id).await;
+    assert_eq!(
+        (view["last_status"].clone(), view["notify_agent"].clone()),
+        (json!(200), json!(true))
+    );
+    assert_eq!(view["setup_id"], setup.as_str());
+    assert!(
+        view["webhook"].is_null(),
+        "no URL of the receiver in any answer"
+    );
+    assert!(!view.to_string().contains("TOPSECRET") && !view.to_string().contains("127.0.0.1"));
+    assert!(store.server_alert_events().unwrap().is_empty());
+}
+
+/// Nobody but the configured owner gets the receiver, and the answer is the one any
+/// webhook refusal gives: it does not say that a receiver exists.
+#[tokio::test(flavor = "multi_thread")]
+async fn only_its_owner_may_ask_for_the_agents_receiver() {
+    let (port, seen) = receiver(OK).await;
+    let (store, _) = store_at("wake-up-owner");
+    let (a, setups) = waking(store, port, "me", Limits::default());
+    let ordinary = "This server only sends webhooks for sign-ins its operator allowed";
+    let refused = call(&a, "create_server_alert", waking_spec(None), "someone-else").await;
+    assert_eq!(refused.unwrap_err(), ordinary);
+    // The same words where no receiver is configured at all.
+    let (bare_store, _) = store_at("wake-up-none");
+    let bare = plain(bare_store);
+    let refused = call(&bare, "create_server_alert", waking_spec(None), "me").await;
+    assert_eq!(refused.unwrap_err(), ordinary);
+
+    // An alert has one webhook: its own URL or the agent's.
+    let mut both = waking_spec(None);
+    both["webhook_url"] = json!("https://example.com/hook");
+    let refused = call(&a, "create_server_alert", both, "me")
+        .await
+        .unwrap_err();
+    assert!(refused.contains("not both"), "{refused}");
+    // A setup is named only for the agent, and only one's own open one.
+    let mine = a_setup(&setups, "me");
+    let theirs = a_setup(&setups, "someone-else");
+    let mut unlinked = spec("crossing", "once", 100.0);
+    unlinked["setup_id"] = json!(mine);
+    assert!(call(&a, "create_server_alert", unlinked, "me")
+        .await
+        .unwrap_err()
+        .contains("needs notify_agent"));
+    let refused = call(&a, "create_server_alert", waking_spec(Some(&theirs)), "me").await;
+    assert_eq!(refused.unwrap_err(), "No such setup");
+    let refused = call(
+        &a,
+        "create_server_alert",
+        waking_spec(Some("no-such-id")),
+        "me",
+    )
+    .await;
+    assert_eq!(refused.unwrap_err(), "No such setup");
+    // update holds to the same rules.
+    let id = create(&a, waking_spec(None), "me").await;
+    let add_url = json!({"alert_id": id, "webhook_url": "https://example.com/hook"});
+    assert!(call(&a, "update_server_alert", add_url, "me")
+        .await
+        .unwrap_err()
+        .contains("not both"));
+    let off = call(
+        &a,
+        "update_server_alert",
+        json!({"alert_id": id, "notify_agent": false}),
+        "me",
+    )
+    .await
+    .unwrap();
+    assert!(off.get("notify_agent").is_none());
+    assert!(
+        a.lock().alerts.is_empty() || seen.lock().unwrap().is_empty(),
+        "nothing was sent for any of this"
+    );
+}
+
+/// An alert that does not ask for the agent is stored and answered as it always was.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_alert_without_the_new_fields_is_stored_and_shown_as_before() {
+    let (store, _) = store_at("wake-up-plain");
+    let a = plain(store);
+    let id = create(&a, spec("crossing", "once", 100.0), "me").await;
+    let stored = a.lock().alerts[&id].json();
+    assert!(
+        !stored.contains("notify_agent") && !stored.contains("setup_id"),
+        "{stored}"
+    );
+    let view = get(&a, "me", &id).await;
+    assert!(
+        view.get("notify_agent").is_none() && view.get("setup_id").is_none(),
+        "{view}"
+    );
+    // And one that does carries exactly the two, which an older build ignores.
+    let (port, _) = receiver(OK).await;
+    let (store, _) = store_at("wake-up-stored");
+    let (a, setups) = waking(store, port, "me", Limits::default());
+    let setup = a_setup(&setups, "me");
+    let id = create(&a, waking_spec(Some(&setup)), "me").await;
+    let stored: Value = serde_json::from_str(&a.lock().alerts[&id].json()).unwrap();
+    assert_eq!(stored["notify_agent"], json!(true));
+    assert_eq!(stored["setup_id"], setup.as_str());
+    assert!(stored["webhook"].is_null());
+}
+
+#[test]
+fn the_agents_owner_must_be_named_among_the_allowed_clients() {
+    assert!(agent_owner_allowed(&Access::parse(Some("github:1, github:2")), "github:2").is_ok());
+    for (list, why) in [
+        (Some("github:1"), "another id"),
+        (Some("*"), "everyone is no name"),
+        (None, "unset"),
+    ] {
+        let refused = agent_owner_allowed(&Access::parse(list), "github:2");
+        assert!(refused.is_err(), "{why}");
+        assert!(!refused.unwrap_err().contains("github:2"));
+    }
+}
+
+/// A receiver that takes a connection and never answers.
+async fn silent_receiver() -> u16 {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        let mut held = Vec::new();
+        while let Ok((s, _)) = listener.accept().await {
+            held.push(s);
+        }
+    });
+    port
+}
+
+/// The agent's wake-ups have slots and a queue of their own. A receiver that hangs
+/// holds those and nobody else's, and what waits for it holds no thesis.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_hung_agent_receiver_holds_nobody_elses_delivery() {
+    let agent_port = silent_receiver().await;
+    let (hook_port, seen) = receiver(OK).await;
+    let (store, _) = store_at("wake-up-hung");
+    let policy = local(hook_port);
+    let a = ServerAlerts::new(
+        store,
+        hub_with(Arc::new(Fake::default())),
+        policy,
+        Access::Open,
+        None,
+        Limits::default(),
+        Timing {
+            connect: Duration::from_millis(300),
+            total: Duration::from_secs(20),
+            backoff: [Duration::from_millis(10), Duration::from_millis(10)],
+        },
+    );
+    a.set_agent(agent_at(agent_port, "me"));
+    let setups = crate::setup_service::Setups::new(
+        store,
+        Some(hub_with(Arc::new(Fake::default()))),
+        None,
+        crate::fetch::DataSource::Sample,
+        Access::parse(None),
+        crate::setup_service::Limits::default(),
+        Some(a.clone()),
+    );
+    let setup = a_setup(&setups, "me");
+    // More wake-ups than the agent has slots, all hanging.
+    for _ in 0..4 {
+        create(&a, waking_spec(Some(&setup)), "me").await;
+    }
+    let other = create(&a, hooked(hook_port, "crossing", "once"), "someone-else").await;
+    tick(&a, BASE, 99.0);
+    tick(&a, BASE + 60, 101.0);
+    until("the other owner's delivery", || {
+        !seen.lock().unwrap().is_empty()
+    })
+    .await;
+    until("its record", || {
+        a.lock().alerts[&other].last_delivery.is_some()
+    })
+    .await;
+    assert_eq!(get(&a, "someone-else", &other).await["last_status"], 200);
+
+    until("both of the agent's slots to be taken", || {
+        a.agent_slots.available_permits() == 0
+    })
+    .await;
+    let st = a.lock();
+    assert_eq!(
+        st.agent_queue.len(),
+        2,
+        "and the rest wait in its own queue"
+    );
+    assert_eq!(
+        st.pending, 0,
+        "none of it counts as anyone's pending delivery"
+    );
+    assert_eq!(
+        a.slots.available_permits(),
+        Limits::default().deliveries_in_flight
+    );
+    drop(st);
+    // What waits in the store is the fire, without the setup: the thesis is not copied.
+    let waiting = store.server_alert_events().unwrap();
+    assert_eq!(waiting.len(), 4);
+    assert!(waiting
+        .iter()
+        .all(|e| !e.body.contains("thesis") && !e.body.contains(&"x".repeat(50))));
+}
+
+/// Where a delivery goes, and whether it counts in every owner's shared total, is
+/// decided once, when it is queued. An alert changed between its fire and the dispatch
+/// does not move the delivery to the other path, and leaves the count where it was.
+/// On one thread, so that no dispatch runs between the fire and the change.
+#[tokio::test]
+async fn an_alert_switched_between_fire_and_dispatch_keeps_its_delivery_and_the_count() {
+    let (agent_port, woken) = receiver(OK).await;
+    let (hook_port, hooked_seen) = receiver(OK).await;
+    let (store, _) = store_at("wake-up-switched");
+    let a = alerts_on(store, local(hook_port), Limits::default());
+    a.set_agent(agent_at(agent_port, "me"));
+    let settled = |a: &Arc<ServerAlerts>| {
+        let st = a.lock();
+        st.queues.is_empty() && st.agent_queue.is_empty()
+    };
+
+    // Queued as a webhook, then the alert is made one that wakes the agent.
+    let id = create(&a, hooked(hook_port, "crossing", "once"), "me").await;
+    tick(&a, BASE, 99.0);
+    tick(&a, BASE + 60, 101.0);
+    {
+        let mut st = a.lock();
+        assert_eq!((st.pending, st.agent_queue.len()), (1, 0));
+        let alert = st.alerts.get_mut(&id).unwrap();
+        alert.webhook = None;
+        alert.notify_agent = true;
+    }
+    until("the webhook's turn", || settled(&a)).await;
+    until("its end", || {
+        store.server_alert_events().unwrap().is_empty()
+    })
+    .await;
+    assert_eq!(a.lock().pending, 0, "counted when queued, so taken back");
+    assert!(
+        woken.lock().unwrap().is_empty(),
+        "not sent down the other path"
+    );
+    // Its own target is gone with the change, as for any webhook that is removed.
+    assert!(hooked_seen.lock().unwrap().is_empty());
+
+    // Queued as a wake-up, then the alert is given a webhook.
+    let id = create(&a, waking_spec(None), "me").await;
+    tick(&a, BASE + 120, 99.0);
+    tick(&a, BASE + 180, 101.0);
+    {
+        let mut st = a.lock();
+        assert_eq!((st.pending, st.agent_queue.len()), (0, 1));
+        // Someone's delivery that waits meanwhile: the count must not lose it.
+        st.pending = 1;
+        let alert = st.alerts.get_mut(&id).unwrap();
+        alert.notify_agent = false;
+        alert.webhook = Some(Hook {
+            url: format!("http://127.0.0.1:{hook_port}/hook"),
+            secret: None,
+        });
+    }
+    until("the wake-up's turn", || settled(&a)).await;
+    until("its end", || {
+        store.server_alert_events().unwrap().is_empty()
+    })
+    .await;
+    assert_eq!(a.lock().pending, 1, "never counted, so nothing is taken");
+    assert_eq!(
+        woken.lock().unwrap().len(),
+        1,
+        "sent where it was queued for"
+    );
+    assert!(hooked_seen.lock().unwrap().is_empty());
+}
+
+/// A thesis too long for the body is cut to the most that fits, on a whole character,
+/// whatever the width of its characters, and the body says that it was cut.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_thesis_is_cut_to_what_fits_on_a_whole_character() {
+    let (store, _) = store_at("wake-up-cut");
+    let (a, setups) = waking(store, 9, "me", Limits::default());
+    let id = a_setup(&setups, "me");
+    let alert_id = create(&a, waking_spec(Some(&id)), "me").await;
+    let alert = a.lock().alerts[&alert_id].clone();
+    let mut setup = a.setup_of("me", &id).unwrap();
+    let fired = r#"{"id":"e1","fired_at":1,"price":1.5,"bar_time":1,"fire_count":1}"#;
+    // Mostly four bytes wide, with a three-byte one between: too long, and the cut
+    // falls among characters of two widths.
+    let mixed: String = (0..chartgen::setups::MAX_THESIS)
+        .map(|i| if i % 7 == 6 { "€" } else { "𝄞" })
+        .collect();
+    for thesis in ["𝄞".repeat(chartgen::setups::MAX_THESIS), mixed] {
+        setup.thesis = thesis.clone();
+        let body = agent_body(fired, &alert, Some(&setup));
+        assert!(body.len() <= MAX_AGENT_BODY, "{} bytes", body.len());
+        let sent: Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(sent["setup"]["thesis_cut"], true, "{} bytes", body.len());
+        let kept = sent["setup"]["thesis"].as_str().unwrap();
+        assert!(thesis.starts_with(kept), "whole characters of the thesis");
+        // The character after the cut would not have fitted.
+        let next = thesis[kept.len()..].chars().next().unwrap();
+        assert!(
+            body.len() + next.len_utf8() > MAX_AGENT_BODY,
+            "{} bytes used, {} more would fit",
+            body.len(),
+            next.len_utf8()
+        );
+    }
+    // One that fits is whole and not marked.
+    setup.thesis = "é".repeat(chartgen::setups::MAX_THESIS);
+    let body = agent_body(fired, &alert, Some(&setup));
+    let sent: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(sent["setup"]["thesis"], setup.thesis.as_str());
+    assert!(sent["setup"].get("thesis_cut").is_none(), "{body}");
+}
+
+/// With sign-in on the owner is an account, whose id looks like `github:<digits>`.
+/// The receiver's owner is compared as that whole string: an id that only begins or
+/// ends like it, another provider's, or another spelling is somebody else.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_receivers_owner_is_an_account_id_compared_whole() {
+    let (port, woken) = receiver(OK).await;
+    let (store, _) = store_at("wake-up-account");
+    let (a, _setups) = waking(store, port, "github:12345678", Limits::default());
+    for other in [
+        "github:1234567",
+        "github:123456789",
+        "github:12345678 ",
+        "GitHub:12345678",
+        "google:12345678",
+        "12345678",
+    ] {
+        let refused = call(&a, "create_server_alert", waking_spec(None), other).await;
+        assert!(
+            refused.unwrap_err().contains("only sends webhooks"),
+            "{other}"
+        );
+    }
+    let id = create(&a, waking_spec(None), "github:12345678").await;
+    tick(&a, BASE, 99.0);
+    tick(&a, BASE + 60, 101.0);
+    until("the account's wake-up", || {
+        !woken.lock().unwrap().is_empty()
+    })
+    .await;
+    until("its record", || {
+        a.lock().alerts[&id].last_delivery.is_some()
+    })
+    .await;
+    assert_eq!(get(&a, "github:12345678", &id).await["last_status"], 200);
+}
+
+/// The body of an ordinary alert's webhook, byte for byte: receivers that sign or
+/// compare it must see what they saw before wake-ups existed (ADR-0061). This same
+/// test passes on the commit before them.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_ordinary_alerts_body_is_byte_for_byte_what_it_was() {
+    let (port, seen) = receiver(OK).await;
+    let (store, _) = store_at("payload-bytes");
+    let a = alerts_on(store, local(port), Limits::default());
+    let id = create(&a, hooked(port, "crossing", "once"), "me").await;
+    tick(&a, BASE, 99.0);
+    tick(&a, BASE + 60, 101.0);
+    until("the delivery", || !seen.lock().unwrap().is_empty()).await;
+    let raw = seen.lock().unwrap()[0].clone();
+    let body = raw.split_once("\r\n\r\n").unwrap().1;
+    let sent: Value = serde_json::from_str(body).unwrap();
+    let (event, at) = (
+        sent["id"].as_str().unwrap(),
+        sent["fired_at"].as_i64().unwrap(),
+    );
+    let bar_time = BASE + 60;
+    let expected = format!(
+        r#"{{"alert_id":"{id}","bar_time":{bar_time},"condition":"crossing","evaluate_on":"live","fire_count":1,"fired_at":{at},"id":"{event}","interval":"1m","level":100.0,"message":"hello","price":101.0,"symbol":"BTCUSDT","trigger":"once","type":"alert.fired"}}"#
+    );
+    assert_eq!(body, expected);
 }

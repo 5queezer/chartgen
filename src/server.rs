@@ -2048,14 +2048,14 @@ pub async fn run_server(port: u16, engine: Option<Arc<RwLock<TradingEngine>>>) {
         engine,
         charts: ChartHub::from_env(),
     });
+    // Store port for metadata endpoint. Before the alerts start: the agent's receiver
+    // may not be at this server's own port (ADR-0061).
+    std::env::set_var("_CHARTGEN_PORT", port.to_string());
     #[cfg(feature = "scripting")]
     crate::server_alerts::start(&state.charts);
     #[cfg(feature = "scripting")]
     crate::setup_service::start(&state.charts);
     refresh::sweep_now_and_then(state.clone());
-
-    // Store port for metadata endpoint
-    std::env::set_var("_CHARTGEN_PORT", port.to_string());
 
     // Built web app (ADR-0027); unset keeps the server API-only.
     let web_dir = std::env::var_os("CHARTGEN_WEB_DIR").map(PathBuf::from);

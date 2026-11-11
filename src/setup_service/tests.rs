@@ -1688,3 +1688,70 @@ async fn setup_answers_match_the_file_the_web_types_are_tested_against() {
     }
     assert_eq!(std::fs::read_to_string(&path).unwrap_or_default(), text);
 }
+
+/// An alert can name an open setup only. One the owner cancelled, once the next bar
+/// has closed it, is refused by create and by update (ADR-0061).
+#[tokio::test(flavor = "multi_thread")]
+async fn an_alert_cannot_name_a_setup_that_is_closed() {
+    let store = mem();
+    let alerts = ServerAlerts::new(
+        store,
+        hub(),
+        Policy::default(),
+        Access::Open,
+        None,
+        crate::server_alerts::Limits::default(),
+        Timing::default(),
+    );
+    let agent = chartgen::webhook::AgentReceiver::from_vars(
+        |name| match name {
+            "CHARTGEN_AGENT_WEBHOOK_URL" => Some("http://127.0.0.1:9/webhooks/route".to_string()),
+            "CHARTGEN_AGENT_WEBHOOK_OWNER" => Some("owner".to_string()),
+            "CHARTGEN_AGENT_WEBHOOK_SECRET" => {
+                Some("a-secret-of-thirty-two-characters".to_string())
+            }
+            _ => None,
+        },
+        None,
+    );
+    alerts.set_agent(agent.unwrap().unwrap());
+    let s = live_on(
+        store,
+        hub(),
+        Access::parse(None),
+        Limits::default(),
+        Some(alerts.clone()),
+    );
+    let alert = |tool: &str, args: Value| {
+        let resp = alerts.call_tool(tool, None, &args, Some("owner"));
+        let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+        (resp["result"]["isError"] == json!(true), text.to_string())
+    };
+    let waking = |setup: &Value| {
+        json!({ "symbol": "BTCUSDT", "condition": "greater", "trigger": "once",
+            "level": 1.0e9, "notify_agent": true, "setup_id": setup["id"] })
+    };
+
+    let open = created(&s, "owner");
+    let closed = created(&s, "owner");
+    let (refused, made) = alert("create_server_alert", waking(&open));
+    assert!(!refused, "{made}");
+    let made: Value = serde_json::from_str(&made).unwrap();
+
+    let (t, p) = (first_bar(&closed), mid(&closed));
+    let cancel = json!({ "id": closed["id"], "reason": "example reason" });
+    call(&s, "cancel_setup", cancel, "owner").unwrap();
+    s.on_bar(&key(), bar(t, p, p, p, p));
+    let now = call(&s, "get_setup", json!({ "id": closed["id"] }), "owner").unwrap();
+    assert_eq!(now["status"], "cancelled");
+
+    assert_eq!(
+        alert("create_server_alert", waking(&closed)),
+        (true, "That setup is closed".to_string())
+    );
+    let moved = json!({ "alert_id": made["id"], "setup_id": closed["id"] });
+    assert_eq!(
+        alert("update_server_alert", moved),
+        (true, "That setup is closed".to_string())
+    );
+}

@@ -9,6 +9,7 @@ sidebar:
 **Date:** 2026-11-06
 **Amended by:** [ADR-0044](/chartgen/decisions/0044-sign-in-through-github-and-google/) (with sign-in on, alerts and the allowlist belong to accounts)
 **Amended by:** [ADR-0059](/chartgen/decisions/0059-setups-paper-scored/) (the 16 watched pairs count the feeds of setups too)
+**Amended by:** [ADR-0061](/chartgen/decisions/0061-alerts-that-wake-the-agent/) (deliveries also carry the Standard Webhooks headers; an alert can wake the owner's agent at one receiver the operator configures, with limits of its own)
 **Amends:** [ADR-0020](/chartgen/decisions/0020-client-side-price-alerts/) (an alert may now run without a tab), [ADR-0034](/chartgen/decisions/0034-drawing-and-indicator-alerts/) (its sources stay browser-only)
 
 ## Context and Problem Statement

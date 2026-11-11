@@ -284,6 +284,13 @@ impl Setups {
         let _ = self.write(&mut st, changed);
     }
 
+    /// `owner`'s setup `id`, as it is now. For an alert that is about it (ADR-0061):
+    /// called without the alerts' lock held.
+    pub fn owned(&self, owner: &str, id: &str) -> Option<Record> {
+        let key = (owner.to_string(), id.to_string());
+        self.lock().setups.get(&key).map(|h| h.record.clone())
+    }
+
     fn lock(&self) -> MutexGuard<'_, State> {
         self.state.lock().unwrap_or_else(|p| p.into_inner())
     }

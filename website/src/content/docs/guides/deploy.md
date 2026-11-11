@@ -69,6 +69,9 @@ a token. See [what a signed-in stranger can still do](/chartgen/decisions/0044-s
 | `CHARTGEN_DB` | `src/scripting/persistence.rs` | SQLite file for registered OAuth clients, with or without `CHARTGEN_SCRIPTING=1`, for their refresh tokens, for scripted indicators, and with sign-in on for users and sessions. Opened at server startup; a failure is logged and leaves clients in memory only. Default `~/.chartgen/chartgen.db`, inside the persisted volume. |
 | `CHARTGEN_SERVER_ALERTS` | `src/server_alerts.rs` | `1` enables [alerts on the server](/chartgen/guides/web/#alerts-on-the-server): four MCP tools, and **Run on server** in the web app. Off when unset; alerts already stored wait in `chartgen.db`, and pin nobody. Needs a build with the `scripting` feature, which the Docker image has, and the store. Read [before turning it on](#server-alerts). |
 | `CHARTGEN_SERVER_ALERT_CLIENTS` | `src/server_alerts.rs` | Comma-separated OAuth client ids, or with [sign-in](#sign-in-through-github-and-google) on, accounts (`github:<id>`, `google:<sub>`), that may create server alerts and use webhooks. Unset: anyone may create alerts, nobody gets webhooks. `*`: anyone, with webhooks. |
+| `CHARTGEN_AGENT_WEBHOOK_URL` | `src/webhook.rs` | The receiver that [wakes your own agent](#the-agents-receiver): its whole URL, `http` or `https`, on this host or its private network. Set all three of these or none. |
+| `CHARTGEN_AGENT_WEBHOOK_OWNER` | `src/webhook.rs` | The one owner whose alerts may ask for that receiver: an account (`github:<id>`, `google:<sub>`) with sign-in on, a client id with it off. It must also be named in `CHARTGEN_SERVER_ALERT_CLIENTS`. |
+| `CHARTGEN_AGENT_WEBHOOK_SECRET` | `src/webhook.rs` | The signing key, the same string the receiver has: `whsec_<base64>` or any string of at least 24 characters. Never logged. |
 | `CHARTGEN_SERVER_ALERT_PAIRS_PER_CLIENT` | `src/server_alerts.rs` | Symbol and interval pairs one client may watch. Default 2. |
 | `CHARTGEN_SETUPS` | `src/setup_service.rs` | `1` enables [setups](/chartgen/guides/setups/): five MCP tools for trading setups the server scores on paper. Off when unset; setups already stored wait in `chartgen.db`. Needs a build with the `scripting` feature and the store. It does not need `CHARTGEN_SERVER_ALERTS`. Read [before turning it on](#setups). |
 | `CHARTGEN_SETUP_SYMBOLS_PER_OWNER` | `src/setup_service.rs` | Symbols one owner may have open setups on. Default 5. |
@@ -227,6 +230,62 @@ nobody, and startup logs how many entries look like one. For GitHub the id is `i
 `https://api.github.com/users/<login>`; for either provider, once the person has signed in, it
 is in the file: `sqlite3 chartgen.db "SELECT id, name FROM users"`. An account is not a credential
 like a client id is, so the section on those below does not apply.
+
+#### The agent's receiver
+
+An alert can wake **your own agent** when it fires
+([ADR-0061](/chartgen/decisions/0061-alerts-that-wake-the-agent/)): a signed `POST` to one
+receiver that you name here, in the environment. No request can name it, so the rule that
+a client's webhook only reaches public addresses is untouched. The agent then creates its
+alerts with `notify_agent: true`.
+
+```bash
+CHARTGEN_AGENT_WEBHOOK_URL=http://<receiver>:<port>/<its route>
+CHARTGEN_AGENT_WEBHOOK_OWNER=github:<your numeric id>
+CHARTGEN_AGENT_WEBHOOK_SECRET=<the route's secret, at least 24 characters>
+CHARTGEN_SERVER_ALERT_CLIENTS=github:<your numeric id>
+```
+
+- **The receiver must be inside:** loopback, a private IPv4 address or a unique-local IPv6
+  one, or a name that resolves only to those, such as a container's. A public address is
+  refused, and so are link-local ones. On this host (`127.x`, `::1`, `localhost`) any port
+  but this server's own; on another host the same number is fine. A name that resolves to
+  this host is not checked for that at start: such a wake-up gets this server's 404 and is
+  shown as refused on the alert.
+- **Plain `http` is allowed for this URL only.** The signature keeps a delivery from being
+  forged or altered, not from being read. Put this server and the receiver on a network
+  that nothing else shares: the body carries the thesis of your setup.
+- **The secret** is the one string both sides have. Make it with `openssl rand -base64 32`,
+  give it to the receiver's route, and put it here. It is not in any answer or log.
+- **The owner is one id, and it must be in `CHARTGEN_SERVER_ALERT_CLIENTS` by name;** `*` names
+  nobody. With sign-in on it is your account, which you can read three ways: `id` in
+  `https://api.github.com/users/<login>` with `github:` in front; `user.id` in the answer of
+  `GET /oauth/me` with a token of your signed-in browser or agent; or `SELECT id, name FROM
+  users` in the store. **With sign-in off the owner is the agent's client id, and an agent
+  that registers again is a new owner:** its `notify_agent` is then refused and the log line
+  below names the new id. Sign-in on is the better fit.
+
+How you see that it is set up:
+
+| At startup | Meaning |
+|---|---|
+| `Agent receiver at http://<host>:<port> wakes the agent of owner <id>` | It is on. The line shows the origin only, never the path. |
+| `Agent receiver: owner <id> has no account or registered client on this server yet` | The id is not known here. A typing mistake, or the person has not signed in yet. |
+| `ERROR [alerts] CHARTGEN_AGENT_WEBHOOK_... . Server alerts stay OFF until this is corrected` | A setting is wrong, or the owner is not in `CHARTGEN_SERVER_ALERT_CLIENTS`. **All server alerts are off,** and `create_server_alert` answers that they are off on this server. Setups are still scored. The line names the setting and never its value. |
+
+While it runs, `[alerts] notify_agent refused for owner <id>: CHARTGEN_AGENT_WEBHOOK_OWNER names
+another` is someone other than the configured owner asking. They were told only that this
+server does not send webhooks for them.
+
+A wake-up is tried three times within about fifteen seconds. **While the receiver is away
+for longer, a deploy of the agent for example, wake-ups are lost;** the alert shows the
+outcome in `last_status` and `last_error`. Changing any of the three settings takes a
+restart.
+
+**After a rollback:** a build from before this feature runs an alert with `notify_agent` as
+one with no webhook, and when it stores that alert again, after it fires or is edited,
+`notify_agent` and `setup_id` are gone from it. Once the newer build runs again, set them
+on those alerts again.
 
 Before turning it on:
 
