@@ -291,6 +291,18 @@ impl Setups {
         self.lock().setups.get(&key).map(|h| h.record.clone())
     }
 
+    /// How many open setups each owner has, for the operator page (ADR-0063): counted
+    /// from what is held in memory, not read from the store.
+    pub(crate) fn open_by_owner(&self) -> HashMap<String, usize> {
+        let mut open = HashMap::new();
+        for ((owner, _), held) in &self.lock().setups {
+            if held.record.status.is_open() {
+                *open.entry(owner.clone()).or_default() += 1;
+            }
+        }
+        open
+    }
+
     fn lock(&self) -> MutexGuard<'_, State> {
         self.state.lock().unwrap_or_else(|p| p.into_inner())
     }

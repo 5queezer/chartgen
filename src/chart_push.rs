@@ -714,8 +714,9 @@ impl ChartHub {
         true
     }
 
-    #[cfg(test)]
-    pub fn counts(&self) -> (usize, usize, usize) {
+    /// Subscriptions, groups and feeds in use now.
+    #[cfg(any(test, feature = "scripting"))]
+    pub fn in_use(&self) -> (usize, usize, usize) {
         let st = self.lock();
         (st.subs.len(), st.groups.len(), st.feeds.len())
     }
@@ -1412,7 +1413,7 @@ mod tests {
         let n = next(&mut rx, 2_000).await.expect("still pushing");
         assert_eq!(n["params"]["series"]["bars"][1]["c"], 2.0);
         assert_eq!(fake.seeds.load(Ordering::SeqCst), 2);
-        assert_eq!(hub.counts().1, 1, "the group is still there");
+        assert_eq!(hub.in_use().1, 1, "the group is still there");
 
         // Once allowed, the next tick past the pause reads again, though this tick
         // itself is contiguous: the klines are still missing.
@@ -1479,7 +1480,7 @@ mod tests {
         let b = hub
             .subscribe("tok", "ip", "s1", req("BTCUSDT", r#"["macd"]"#))
             .unwrap();
-        assert_eq!(hub.counts(), (2, 2, 1));
+        assert_eq!(hub.in_use(), (2, 2, 1));
         assert_eq!(
             fake.started.load(Ordering::SeqCst),
             1,
@@ -1516,11 +1517,11 @@ mod tests {
             "only the owner may unsubscribe"
         );
         assert!(hub.unsubscribe("tok", &a));
-        assert_eq!(hub.counts(), (1, 1, 1));
+        assert_eq!(hub.in_use(), (1, 1, 1));
         assert!(hub.unsubscribe("tok", &b));
-        assert_eq!(hub.counts(), (0, 0, 1), "the feed lingers");
+        assert_eq!(hub.in_use(), (0, 0, 1), "the feed lingers");
         settle().await;
-        assert_eq!(hub.counts(), (0, 0, 0));
+        assert_eq!(hub.in_use(), (0, 0, 0));
         assert_eq!(fake.running.load(Ordering::SeqCst), 0, "feed task stopped");
     }
 
@@ -1567,7 +1568,7 @@ mod tests {
             .unwrap();
         tokio::time::sleep(Duration::from_millis(300)).await;
         assert_eq!(fake.started.load(Ordering::SeqCst), 1);
-        assert_eq!(hub.counts(), (1, 1, 1));
+        assert_eq!(hub.in_use(), (1, 1, 1));
         while next(&mut rx, 50).await.is_some() {}
         fake.send(FeedEvent::Tick(bar(1_704_067_200, 7.0))).await;
         assert_eq!(
@@ -1606,7 +1607,7 @@ mod tests {
         // Closing a feed does not give its start back: churn is what this limits.
         hub.unsubscribe("t1", &a);
         tokio::time::sleep(Duration::from_millis(80)).await;
-        assert_eq!(hub.counts().2, 1);
+        assert_eq!(hub.in_use().2, 1);
         let e = hub
             .subscribe("t1", "i1", "s1", req("BTCUSDT", "[]"))
             .unwrap_err();
@@ -1630,7 +1631,7 @@ mod tests {
             .subscribe("t1", "i1", "s1", req("BTCUSDT", "[]"))
             .unwrap();
         hub.unsubscribe("t1", &a);
-        assert_eq!(hub.counts(), (0, 0, 1), "lingering");
+        assert_eq!(hub.in_use(), (0, 0, 1), "lingering");
         let e = hub
             .subscribe("t1", "i1", "s1", req("ETHUSDT", "[]"))
             .unwrap_err();
@@ -1676,14 +1677,14 @@ mod tests {
         // The chart leaving does not close a feed that is watched.
         hub.unsubscribe("tok", &sub);
         tokio::time::sleep(Duration::from_millis(150)).await;
-        assert_eq!(hub.counts(), (0, 0, 1));
+        assert_eq!(hub.in_use(), (0, 0, 1));
         assert_eq!(fake.running.load(Ordering::SeqCst), 1);
 
         // The lease going closes it after the linger, if nobody came back.
         drop(lease);
-        assert_eq!(hub.counts(), (0, 0, 1));
+        assert_eq!(hub.in_use(), (0, 0, 1));
         tokio::time::sleep(Duration::from_millis(150)).await;
-        assert_eq!(hub.counts(), (0, 0, 0));
+        assert_eq!(hub.in_use(), (0, 0, 0));
         tokio::time::sleep(Duration::from_millis(50)).await;
         assert_eq!(fake.running.load(Ordering::SeqCst), 0);
         while next(&mut rx, 20).await.is_some() {}
@@ -1703,7 +1704,7 @@ mod tests {
         assert!(next(&mut r1, 2_000).await.is_some());
         hub.subscribe("u2", "ip2", "s2", req("BTCUSDT", "[]"))
             .unwrap();
-        assert_eq!(hub.counts(), (2, 1, 1));
+        assert_eq!(hub.in_use(), (2, 1, 1));
         fake.send(FeedEvent::Tick(bar(1_704_067_200, 5.0))).await;
         assert_eq!(
             next(&mut r1, 2_000).await.unwrap()["params"]["series"]["bars"][1]["c"],
@@ -1806,7 +1807,7 @@ mod tests {
             .subscribe("e", "ip3", "s4", req("BTCUSDT", "[]"))
             .unwrap_err();
         assert!(err.contains("maximum of 4"), "{err}");
-        assert_eq!(hub.counts(), (4, 2, 2));
+        assert_eq!(hub.in_use(), (4, 2, 2));
 
         // Calls that get past the pushability check count, failed or not:
         // "tok" made one above, three more fill its minute.
@@ -1837,11 +1838,11 @@ mod tests {
         // A reconnect replaces the stream; the old one's cleanup is a no-op.
         let new = hub.link_stream("s1", tx);
         assert!(!hub.unlink_stream("s1", old));
-        assert_eq!(hub.counts(), (1, 1, 1));
+        assert_eq!(hub.in_use(), (1, 1, 1));
 
         assert!(hub.unlink_stream("s1", new));
         settle().await;
-        assert_eq!(hub.counts(), (0, 0, 0));
+        assert_eq!(hub.in_use(), (0, 0, 0));
         assert_eq!(fake.running.load(Ordering::SeqCst), 0);
     }
 
@@ -1869,7 +1870,7 @@ mod tests {
                 .await;
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
-        assert_eq!(hub.counts().0, 1, "only the reading stream is left");
+        assert_eq!(hub.in_use().0, 1, "only the reading stream is left");
         assert!(next(&mut rx, 500).await.is_some());
     }
 
@@ -1885,7 +1886,7 @@ mod tests {
         hub.subscribe("tok", "ip", "s1", req("BTCUSDT", "[]"))
             .unwrap();
         settle().await;
-        assert_eq!(hub.counts(), (0, 0, 0));
+        assert_eq!(hub.in_use(), (0, 0, 0));
         fake.panic_on_seed.store(false, Ordering::SeqCst);
 
         // The feed ending reaches its groups, which leave.
@@ -1894,11 +1895,11 @@ mod tests {
         settle().await;
         fake.stop.notify_waiters();
         settle().await;
-        assert_eq!(hub.counts(), (0, 0, 0));
+        assert_eq!(hub.in_use(), (0, 0, 0));
         // The next subscription starts the feed again.
         hub.subscribe("tok", "ip", "s1", req("ETHUSDT", "[]"))
             .unwrap();
-        assert_eq!(hub.counts(), (1, 1, 1));
+        assert_eq!(hub.in_use(), (1, 1, 1));
         assert_eq!(fake.started.load(Ordering::SeqCst), 3);
     }
 

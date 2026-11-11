@@ -782,6 +782,7 @@ fn server_command(
         .env_remove("CHARTGEN_GOOGLE_CLIENT_ID")
         .env_remove("CHARTGEN_GOOGLE_CLIENT_SECRET")
         .env_remove("CHARTGEN_CLAIM_OWNER")
+        .env_remove("CHARTGEN_ADMIN_USERS")
         .env_remove("CHARTGEN_SERVER_ALERTS")
         .env_remove("CHARTGEN_WEBHOOK_TEST_ORIGIN")
         .env_remove("CHARTGEN_SERVER_ALERT_CLIENTS")
@@ -7332,4 +7333,383 @@ fn test_workspace_limits() {
         200,
         "not another account"
     );
+}
+
+/// The operator page's read, `GET /admin/overview` (ADR-0063).
+#[cfg(feature = "scripting")]
+mod operator_page {
+    use super::*;
+
+    const OVERVIEW: &str = "/admin/overview";
+    const OWN_PAGE: &str = "Sec-Fetch-Site: same-origin";
+
+    fn command(
+        port: u16,
+        db: &std::path::Path,
+        fake: &FakeProvider,
+        operators: &str,
+        web: Option<&std::path::Path>,
+    ) -> std::process::Command {
+        let mut cmd = signin_command(port, db, fake, &["github"], None, false);
+        cmd.env("CHARTGEN_ADMIN_USERS", operators);
+        if let Some(web) = web {
+            cmd.env("CHARTGEN_WEB_DIR", web);
+        }
+        cmd
+    }
+
+    fn server(
+        test: &str,
+        fake: &FakeProvider,
+        operators: &str,
+        web: Option<&std::path::Path>,
+    ) -> Server {
+        let port = free_port();
+        let db = store_path(test);
+        let mut srv = start_server(command(port, &db, fake, operators, web), port);
+        srv.temp_db = Some(db);
+        srv
+    }
+
+    fn web_dir(test: &str) -> std::path::PathBuf {
+        let web = std::env::temp_dir().join(format!("chartgen-{test}-{}", std::process::id()));
+        std::fs::create_dir_all(&web).unwrap();
+        std::fs::write(web.join("index.html"), "<!doctype html><title>app</title>").unwrap();
+        web
+    }
+
+    /// An answer without what differs between any two: the date.
+    fn answer(port: u16, method: &str, path: &str, headers: &[&str]) -> (u16, Vec<String>, String) {
+        let (status, head, body) = http(port, method, path, headers, "");
+        let mut lines: Vec<String> = head
+            .lines()
+            .skip(1)
+            .filter(|l| !l.starts_with("date:"))
+            .map(str::to_string)
+            .collect();
+        lines.sort();
+        (status, lines, body)
+    }
+
+    fn as_operator(token: &str) -> Vec<String> {
+        vec![
+            format!("Authorization: Bearer {token}"),
+            OWN_PAGE.to_string(),
+        ]
+    }
+
+    fn overview(port: u16, token: &str) -> (u16, String, String) {
+        let headers = as_operator(token);
+        let headers: Vec<&str> = headers.iter().map(String::as_str).collect();
+        http(port, "GET", OVERVIEW, &headers, "")
+    }
+
+    /// A token of `b`'s user for an application: its code goes to another site, after
+    /// consent. With a refresh token.
+    fn application_tokens(b: &mut Browser) -> (String, String, String) {
+        let port = b.port;
+        let client = register_external(port);
+        let first = b.authorize(&client, EXTERNAL_REDIRECT, "s");
+        let page = b.get(&first.location());
+        let (request, csrf) = consent_fields(&page.body);
+        let approved = b.request(
+            "POST",
+            "/oauth/consent",
+            &["Content-Type: application/x-www-form-urlencoded"],
+            &format!("request={request}&csrf={csrf}&decision=approve"),
+        );
+        assert_eq!(approved.status, 303, "{}", approved.body);
+        let (st, body) = exchange(port, &client, EXTERNAL_REDIRECT, &approved.query()["code"]);
+        assert_eq!(st, 200, "{body}");
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        (
+            client,
+            v["access_token"].as_str().unwrap().to_string(),
+            v["refresh_token"].as_str().unwrap().to_string(),
+        )
+    }
+
+    #[test]
+    fn test_the_operator_sees_accounts_clients_and_the_server_and_no_secret() {
+        let fake = FakeProvider::start();
+        let srv = server("admin-sees", &fake, "github:1", None);
+        let p = srv.port;
+        let mut ann = Browser::new(p);
+        let token = web_sign_in(&mut ann, &fake, "github", profile_of("github", 1, "ann"));
+        let mut bob = Browser::new(p);
+        let bobs = web_sign_in(
+            &mut bob,
+            &fake,
+            "github",
+            profile_of("github", 2, "b\u{202e}ob"),
+        );
+        let (client, application, refresh) = application_tokens(&mut ann);
+
+        let (st, head, body) = overview(p, &token);
+        assert_eq!(st, 200, "{body}");
+        for line in [
+            "content-type: application/json",
+            "cache-control: no-store",
+            "vary: authorization",
+            "x-frame-options: deny",
+        ] {
+            assert!(head.contains(line), "{line}: {head}");
+        }
+        assert_eq!(
+            head.matches("x-content-type-options: nosniff").count(),
+            1,
+            "{head}"
+        );
+        assert!(!head.contains("access-control-"), "{head}");
+
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["users"]["total"], 2);
+        let users = v["users"]["shown"].as_array().unwrap();
+        let of = |id: &str| users.iter().find(|u| u["id"] == id).unwrap().clone();
+        let (a, b) = (of("github:1"), of("github:2"));
+        assert_eq!(a["name"], "ann");
+        assert_eq!(a["provider"], "github");
+        assert_eq!(a["authorisations"], 1);
+        assert!(a["last_login_at"].as_i64().unwrap() > 0);
+        assert!(a["last_token_at"].as_i64().unwrap() > 0);
+        // The character that turns text around is not passed on.
+        assert_eq!(b["name"], "bob");
+        assert_eq!(b["authorisations"], 0);
+        assert_eq!(v["clients"]["limit"], 1000);
+        assert!(v["clients"]["total"].as_i64().unwrap() >= 3);
+        let short = &client[..8];
+        let row = v["clients"]["shown"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["id"] == short)
+            .unwrap();
+        assert_eq!(row["has_authorisation"], true);
+        assert_eq!(v["server"]["features"]["sign_in"], true);
+        assert_eq!(v["server"]["features"]["replay"], false);
+        assert!(v["server"]["schema_version"].as_i64().unwrap() >= 9);
+        assert!(v["server"]["started_at"].as_i64().unwrap() > 0);
+        assert!(v["server"]["store_bytes"].as_i64().unwrap() > 0);
+        // Nothing that opens anything: no token, no whole client id, no cookie.
+        for secret in [
+            token.as_str(),
+            bobs.as_str(),
+            application.as_str(),
+            refresh.as_str(),
+            client.as_str(),
+        ] {
+            assert!(!body.contains(secret), "{secret} in {body}");
+        }
+        for value in ann.cookies.values().chain(bob.cookies.values()) {
+            assert!(!body.contains(value.as_str()), "a cookie in {body}");
+        }
+        // The path alone decides: a query is still the endpoint.
+        let headers = as_operator(&token);
+        let headers: Vec<&str> = headers.iter().map(String::as_str).collect();
+        assert_eq!(http(p, "GET", "/admin/overview?x=1", &headers, "").0, 200);
+    }
+
+    /// Everyone but an operator in the web app gets, to the byte, what an unknown path
+    /// gets: for every kind of caller, and for everything the answer to an unknown path
+    /// itself depends on. With the web app and without it.
+    #[test]
+    fn test_anyone_else_gets_what_an_unknown_path_gets() {
+        let fake = FakeProvider::start();
+        let web = web_dir("admin-else");
+        for web in [Some(web.as_path()), None] {
+            let srv = server("admin-else", &fake, "github:1", web);
+            let p = srv.port;
+            let mut ann = Browser::new(p);
+            let anns = web_sign_in(&mut ann, &fake, "github", profile_of("github", 1, "ann"));
+            let mut bob = Browser::new(p);
+            let bobs = web_sign_in(&mut bob, &fake, "github", profile_of("github", 2, "bob"));
+            let (client, application, refresh) = application_tokens(&mut ann);
+            let (st, body) = refreshed(p, &client, &refresh);
+            assert_eq!(st, 200, "{body}");
+            let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+            let refreshed = v["access_token"].as_str().unwrap().to_string();
+            assert_eq!(overview(p, &anns).0, 200, "the operator, to compare with");
+
+            let bearer = |t: &str| format!("Authorization: Bearer {t}");
+            let callers: Vec<(&str, Vec<String>)> = vec![
+                ("nobody", vec![]),
+                ("nobody, from our page", vec![OWN_PAGE.into()]),
+                (
+                    "a token that is none",
+                    vec![bearer("nope"), OWN_PAGE.into()],
+                ),
+                (
+                    "another user in the web app",
+                    vec![bearer(&bobs), OWN_PAGE.into()],
+                ),
+                (
+                    "the operator's application",
+                    vec![bearer(&application), OWN_PAGE.into()],
+                ),
+                (
+                    "the operator's refreshed token",
+                    vec![bearer(&refreshed), OWN_PAGE.into()],
+                ),
+                ("the operator, not from our page", vec![bearer(&anns)]),
+                (
+                    "the operator, from another site",
+                    vec![bearer(&anns), "Sec-Fetch-Site: cross-site".into()],
+                ),
+            ];
+            for (who, headers) in &callers {
+                for accept in [Some(HTML), Some("Accept: application/json"), None] {
+                    for method in ["GET", "HEAD", "POST"] {
+                        let mut headers: Vec<&str> = headers.iter().map(String::as_str).collect();
+                        headers.extend(accept);
+                        assert_eq!(
+                            answer(p, method, OVERVIEW, &headers),
+                            answer(p, method, "/admin/zzzzzzzz", &headers),
+                            "{who}, {method}, {accept:?}, web app: {}",
+                            web.is_some()
+                        );
+                    }
+                }
+            }
+            // And for the operator, any path but the one, and any method but GET.
+            let operator = as_operator(&anns);
+            let operator: Vec<&str> = operator.iter().map(String::as_str).collect();
+            for (method, path, unknown) in [
+                ("GET", "/admin/overview/", "/admin/zzzzzzzz/"),
+                ("GET", "/Admin/Overview", "/Admin/Zzzzzzzz"),
+                ("GET", "/admin/%6fverview", "/admin/%7azzzzzzz"),
+                ("GET", "/admin", "/zzzzz"),
+                ("HEAD", OVERVIEW, "/admin/zzzzzzzz"),
+                ("POST", OVERVIEW, "/admin/zzzzzzzz"),
+            ] {
+                assert_eq!(
+                    answer(p, method, path, &operator),
+                    answer(p, method, unknown, &operator),
+                    "{method} {path}, web app: {}",
+                    web.is_some()
+                );
+            }
+        }
+        let _ = std::fs::remove_dir_all(&web);
+    }
+
+    fn refreshed(port: u16, client: &str, refresh: &str) -> (u16, String) {
+        let body = format!("grant_type=refresh_token&client_id={client}&refresh_token={refresh}");
+        let (st, _, body) = http(
+            port,
+            "POST",
+            "/token",
+            &["Content-Type: application/x-www-form-urlencoded"],
+            &body,
+        );
+        (st, body)
+    }
+
+    /// Signing out ends it at once; a restart ends it too, as the web app's token is not
+    /// kept; and who was taken off the list is refused after the restart.
+    #[test]
+    fn test_the_page_ends_with_the_session_a_restart_and_the_list() {
+        let fake = FakeProvider::start();
+        let port = free_port();
+        let db = store_path("admin-ends");
+        let unknown = |token: &str| {
+            let headers = as_operator(token);
+            let headers: Vec<&str> = headers.iter().map(String::as_str).collect();
+            assert_eq!(
+                answer(port, "GET", OVERVIEW, &headers),
+                answer(port, "GET", "/admin/zzzzzzzz", &headers)
+            );
+        };
+        let sign_in = || {
+            let mut ann = Browser::new(port);
+            let token = web_sign_in(&mut ann, &fake, "github", profile_of("github", 1, "ann"));
+            (ann, token)
+        };
+        let srv = start_server(command(port, &db, &fake, "github:1", None), port);
+        let (mut ann, token) = sign_in();
+        assert_eq!(overview(port, &token).0, 200);
+        assert_eq!(ann.request("POST", "/oauth/logout", &[], "").status, 204);
+        unknown(&token);
+
+        let (_ann, token) = sign_in();
+        assert_eq!(overview(port, &token).0, 200);
+        drop(srv);
+        let srv = start_server(command(port, &db, &fake, "github:1", None), port);
+        unknown(&token);
+        // Signed in again, the page is back; and gone when the list names another.
+        let (_ann, token) = sign_in();
+        assert_eq!(overview(port, &token).0, 200);
+        drop(srv);
+        let mut srv = start_server(command(port, &db, &fake, "github:11", None), port);
+        let (_ann, token) = sign_in();
+        unknown(&token);
+        srv.temp_db = Some(db);
+    }
+
+    /// A list the server cannot read as written, or one that can never take effect,
+    /// stops the start: it is not read as "nobody".
+    #[test]
+    fn test_a_bad_operator_list_stops_the_start() {
+        let fake = FakeProvider::start();
+        for (test, operators, sign_in) in [
+            ("admin-bad-star", "*", true),
+            ("admin-bad-name", "github:1,someone", true),
+            ("admin-bad-off", "github:1", false),
+        ] {
+            let port = free_port();
+            let db = store_path(test);
+            let mut cmd = if sign_in {
+                command(port, &db, &fake, operators, None)
+            } else {
+                let mut cmd = server_command(port, None, &db, false);
+                cmd.env("CHARTGEN_ADMIN_USERS", operators);
+                cmd
+            };
+            let mut child = cmd
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .unwrap();
+            let give_up = std::time::Instant::now() + std::time::Duration::from_secs(20);
+            let status = loop {
+                if let Some(status) = child.try_wait().unwrap() {
+                    break status;
+                }
+                if std::time::Instant::now() > give_up {
+                    child.kill().unwrap();
+                    panic!("{test}: the server started");
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            };
+            assert!(!status.success(), "{test}");
+            let mut said = String::new();
+            use std::io::Read;
+            child
+                .stderr
+                .take()
+                .unwrap()
+                .read_to_string(&mut said)
+                .unwrap();
+            assert!(said.contains("CHARTGEN_ADMIN_USERS"), "{test}: {said}");
+            assert!(!said.contains("someone"), "{test}: {said}");
+            let _ = std::fs::remove_file(&db);
+        }
+    }
+
+    /// Without the setting, and with sign-in off, there is no such page.
+    #[test]
+    fn test_without_operators_or_sign_in_there_is_no_page() {
+        let fake = FakeProvider::start();
+        let srv = signin_server("admin-none", &fake, &["github"]);
+        let mut ann = Browser::new(srv.port);
+        let token = web_sign_in(&mut ann, &fake, "github", profile_of("github", 1, "ann"));
+        let off = spawn_server(None);
+        for (port, token) in [(srv.port, token.as_str()), (off.port, "anything")] {
+            let headers = as_operator(token);
+            let headers: Vec<&str> = headers.iter().map(String::as_str).collect();
+            assert_eq!(
+                answer(port, "GET", OVERVIEW, &headers),
+                answer(port, "GET", "/admin/zzzzzzzz", &headers)
+            );
+        }
+    }
 }

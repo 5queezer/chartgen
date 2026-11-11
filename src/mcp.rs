@@ -7381,7 +7381,7 @@ mod tests {
             serde_json::from_str::<Value>(&response_text(&resp)).unwrap()["unsubscribed"],
             true
         );
-        assert_eq!(hub.counts().0, 0);
+        assert_eq!(hub.in_use().0, 0);
     }
 
     #[test]
