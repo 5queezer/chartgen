@@ -5134,6 +5134,58 @@ fn refresh(port: u16, client_id: &str, refresh_token: &str) -> (u16, serde_json:
     (st, serde_json::from_str(&body).unwrap_or_default())
 }
 
+/// An authorization code works once, with sign-in off as with it on. A second exchange
+/// used to succeed for the 5 minutes a code lives, and would now mint a second
+/// refresh token as well.
+#[test]
+fn test_an_authorization_code_is_exchanged_once() {
+    let db = store_path("code-once");
+    let port = free_port();
+    let _srv = spawn_server_on(port, None, &db, false);
+    let client = register_external(port);
+    let (st, head, _) = authorize(port, &client, EXTERNAL_REDIRECT);
+    assert_eq!(st, 307, "{head}");
+    let code = head
+        .split("code=")
+        .nth(1)
+        .and_then(|rest| rest.split(['&', '\r']).next())
+        .unwrap();
+    let (st, first) = exchange(port, &client, EXTERNAL_REDIRECT, code);
+    assert_eq!(st, 200, "{first}");
+    let (st, second) = exchange(port, &client, EXTERNAL_REDIRECT, code);
+    assert_eq!(st, 400, "{second}");
+    assert!(second.contains("invalid_grant"), "{second}");
+    assert!(!second.contains("access_token") && !second.contains("refresh_token"));
+    #[cfg(feature = "scripting")]
+    {
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        let rows: i64 = conn
+            .query_row("SELECT COUNT(*) FROM refresh_tokens", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(rows, 1, "one authorization, one refresh token");
+    }
+
+    // A failed attempt uses the code up too: it cannot be tried against.
+    let (_, head, _) = authorize(port, &client, EXTERNAL_REDIRECT);
+    let code = head
+        .split("code=")
+        .nth(1)
+        .and_then(|rest| rest.split(['&', '\r']).next())
+        .unwrap();
+    let wrong = serde_json::json!({
+        "grant_type": "authorization_code",
+        "code": code,
+        "redirect_uri": EXTERNAL_REDIRECT,
+        "client_id": client,
+        "code_verifier": "not-the-verifier",
+    });
+    let (st, _, body) = http(port, "POST", "/token", &JSON_POST, &wrong.to_string());
+    assert_eq!(st, 400, "{body}");
+    let (st, body) = exchange(port, &client, EXTERNAL_REDIRECT, code);
+    assert_eq!(st, 400, "{body}");
+    let _ = std::fs::remove_dir_all(db.parent().unwrap());
+}
+
 /// `POST /revoke`, as the form RFC 7009 names.
 #[cfg(feature = "scripting")]
 fn revoke(port: u16, client_id: &str, token: &str) -> u16 {

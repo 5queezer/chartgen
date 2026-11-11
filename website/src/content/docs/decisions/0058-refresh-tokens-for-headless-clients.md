@@ -120,6 +120,11 @@ session, and it recovers through `/authorize` by itself, so for it nothing chang
 `POST /token` with `grant_type=refresh_token`, `refresh_token` and `client_id` answers with
 a new access token, 7 days as before, and the next refresh token.
 
+**A code is exchanged once.** One authorization is one family, which relies on a code that
+cannot be exchanged twice. With sign-in on that was already so. With sign-in off a code
+could be exchanged again and again for its 5 minutes, each time now for another refresh
+token. It is used up by its first exchange in both modes, successful or not.
+
 A refresh token is 256 random bits. The server keeps its SHA-256 and nothing else, in
 memory and in the new table `refresh_tokens`. The value is in the answer to the client and
 nowhere after that, including the log. "Only hashes are stored" is about what is on disk:

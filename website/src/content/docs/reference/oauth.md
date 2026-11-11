@@ -93,8 +93,10 @@ no session. All of these depend on cookies.
 Both are HttpOnly, SameSite=Lax and Path=/. With an https base URL they are also Secure and
 named `__Host-chartgen_session` and `__Host-chartgen_browser`.
 
-A code with a user works once, also after a failed attempt. Without sign-in a code stays
-valid until it expires, as it always has.
+A code works once, also after a failed attempt, with sign-in on and off. A second exchange
+answers `400 invalid_grant`, and the client authorizes again. Without sign-in a code used to
+stay valid for its 5 minutes
+([ADR-0058](/chartgen/decisions/0058-refresh-tokens-for-headless-clients/)).
 
 A user is the provider plus its immutable id, `github:<id>` or `google:<sub>`. One person
 with both accounts is two users with separate scripts; accounts are not linked.

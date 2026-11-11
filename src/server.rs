@@ -838,10 +838,9 @@ async fn oauth_token(
             }
         };
 
-        // A code that carries a user works once, whatever the outcome (ADR-0044).
-        if token_user.is_some() {
-            s.codes.remove(&body.code);
-        }
+        // A code works once, whatever the outcome, with sign-in on (ADR-0044) and off:
+        // a second exchange would be a second authorization (ADR-0058).
+        s.codes.remove(&body.code);
 
         // Validate client_id and redirect_uri
         if stored_client_id != body.client_id {
