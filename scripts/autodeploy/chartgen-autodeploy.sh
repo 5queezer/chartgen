@@ -1,7 +1,13 @@
 #!/usr/bin/env bash
 # Pull-based deploy: poll GitHub for master's head, and when CI passed for a
-# new SHA, trigger the Coolify deploy API. One run per systemd timer tick.
-# See README.md and ADR-0037.
+# new SHA and its image is in the registry, point the Coolify application at
+# that image and trigger the deploy API. One run per systemd timer tick.
+#
+#   chartgen-autodeploy.sh               one tick
+#   chartgen-autodeploy.sh deploy SHA    deploy the image of SHA now
+#   chartgen-autodeploy.sh rollback      deploy the image that ran before the last deploy
+#
+# See README.md, ADR-0037 and ADR-0060.
 set -u
 set +x # tracing would print COOLIFY_API_TOKEN; keep it off for the whole run
 
@@ -13,8 +19,12 @@ done
 : "${COOLIFY_API_TOKEN:?COOLIFY_API_TOKEN is not set}"
 : "${COOLIFY_APP_UUID:?COOLIFY_APP_UUID is not set}"
 GITHUB_REPO=${GITHUB_REPO:-5queezer/chartgen}
+CHARTGEN_IMAGE=${CHARTGEN_IMAGE:-ghcr.io/5queezer/chartgen}
 STATE_FILE=${STATE_FILE:-${STATE_DIRECTORY:-/var/lib/chartgen-autodeploy}/last-sha}
+PREVIOUS_FILE=$(dirname "$STATE_FILE")/previous-sha
 API=https://api.github.com/repos/$GITHUB_REPO
+REGISTRY=${CHARTGEN_IMAGE%%/*}
+IMAGE_PATH=${CHARTGEN_IMAGE#*/}
 
 log() { echo "chartgen-autodeploy: $*"; }
 
@@ -27,6 +37,98 @@ gh_get() {
     -H 'User-Agent: chartgen-autodeploy' -H 'Accept: application/vnd.github+json' "$1" 2>/dev/null || true
 }
 
+# write_file FILE VALUE: atomic tmp-then-mv
+write_file() {
+  mkdir -p "$(dirname "$1")" && echo "$2" >"$1.tmp" && mv "$1.tmp" "$1"
+}
+
+# image_status SHA: prints the HTTP status of the image's manifest in the registry,
+# read as anyone can read a public package. 200: it is there. 404: not yet.
+image_status() {
+  local code token
+  code=$(curl -sS --max-time 30 -o "$body" -w '%{http_code}' \
+    "https://$REGISTRY/token?service=$REGISTRY&scope=repository:$IMAGE_PATH:pull" 2>/dev/null || true)
+  if [ "$code" != 200 ]; then
+    echo "token-$code"
+    return
+  fi
+  token=$(jq -r '.token // empty' "$body" 2>/dev/null)
+  [ -n "$token" ] || { echo token-empty; return; }
+  printf 'header = "Authorization: Bearer %s"\n' "$token" |
+    curl -sS --max-time 30 -o /dev/null -w '%{http_code}' -I -K - \
+      -H 'Accept: application/vnd.oci.image.index.v1+json' \
+      -H 'Accept: application/vnd.oci.image.manifest.v1+json' \
+      -H 'Accept: application/vnd.docker.distribution.manifest.list.v2+json' \
+      -H 'Accept: application/vnd.docker.distribution.manifest.v2+json' \
+      "https://$REGISTRY/v2/$IMAGE_PATH/manifests/$1" 2>/dev/null || true
+}
+
+# coolify METHOD PATH [JSON]: prints the HTTP status. The token goes to curl via a
+# stdin config so it never appears in argv or in a trace.
+coolify() {
+  local data=()
+  [ $# -ge 3 ] && data=(-H 'Content-Type: application/json' --data "$3")
+  printf 'header = "Authorization: Bearer %s"\n' "$COOLIFY_API_TOKEN" |
+    curl -sS --max-time 60 -o "$body" -w '%{http_code}' -X "$1" -K - "${data[@]}" \
+      "${COOLIFY_URL%/}/api/v1$2" 2>/dev/null || true
+}
+
+# deploy_image SHA: point the application at the image of SHA and deploy it.
+# Returns 0 when Coolify accepted both calls, which is "triggered", not "healthy".
+deploy_image() {
+  local code json
+  json=$(jq -cn --arg name "$CHARTGEN_IMAGE" --arg tag "$1" \
+    '{docker_registry_image_name: $name, docker_registry_image_tag: $tag}')
+  code=$(coolify PATCH "/applications/$COOLIFY_APP_UUID" "$json")
+  case $code in
+    2??) ;;
+    *)
+      log "Coolify did not take the image tag $1 (HTTP $code)"
+      return 1
+      ;;
+  esac
+  code=$(coolify POST "/deploy?uuid=$COOLIFY_APP_UUID&force=false")
+  case $code in
+    2??) ;;
+    *)
+      log "Coolify deploy for $1 failed (HTTP $code)"
+      return 1
+      ;;
+  esac
+}
+
+# By hand: deploy a published image, whatever master is at. The state of the timer
+# is left alone, so a rollback is not undone at the next tick and the next commit
+# on master deploys as usual.
+manual() {
+  local sha=$1 status
+  status=$(image_status "$sha")
+  if [ "$status" != 200 ]; then
+    log "no image $CHARTGEN_IMAGE:$sha to deploy (registry answered $status)"
+    exit 1
+  fi
+  deploy_image "$sha" || exit 1
+  log "triggered Coolify deploy of $CHARTGEN_IMAGE:$sha by hand; the timer's state is unchanged"
+}
+
+case ${1-} in
+  '') ;;
+  deploy)
+    [ -n "${2-}" ] || { echo "usage: $0 deploy SHA" >&2; exit 2; }
+    manual "$2"
+    exit 0
+    ;;
+  rollback)
+    [ -s "$PREVIOUS_FILE" ] || { log "no previous deploy is recorded in $PREVIOUS_FILE; use: deploy SHA"; exit 1; }
+    manual "$(cat "$PREVIOUS_FILE")"
+    exit 0
+    ;;
+  *)
+    echo "usage: $0 [deploy SHA | rollback]" >&2
+    exit 2
+    ;;
+esac
+
 code=$(gh_get "$API/commits/master")
 if [ "$code" != 200 ]; then
   log "GitHub head lookup returned HTTP $code (rate limit or network); retrying next tick"
@@ -35,19 +137,17 @@ fi
 sha=$(jq -r '.sha // empty' "$body")
 [ -n "$sha" ] || { log "no sha in GitHub response; retrying next tick"; exit 0; }
 
-# write_state SHA: atomic tmp-then-mv
-write_state() {
-  mkdir -p "$(dirname "$STATE_FILE")" && echo "$1" >"$STATE_FILE.tmp" && mv "$STATE_FILE.tmp" "$STATE_FILE"
-}
-
 if [ ! -s "$STATE_FILE" ]; then
-  write_state "$sha" || { log "could not write $STATE_FILE"; exit 1; }
+  write_file "$STATE_FILE" "$sha" || { log "could not write $STATE_FILE"; exit 1; }
   log "first run: recorded $sha without deploying"
   exit 0
 fi
-[ "$sha" = "$(cat "$STATE_FILE")" ] && exit 0
+last=$(cat "$STATE_FILE")
+[ "$sha" = "$last" ] && exit 0
 
-# Gate on the same thing the old deploy.yml did: the CI workflow's push run for this SHA.
+# The image is only built by the CI run that passed for this SHA (ADR-0060), so this
+# lookup decides nothing the image check below would not. It is here for the log: it
+# tells a failed or cancelled CI, which nothing will deploy, from an image on its way.
 code=$(gh_get "$API/actions/workflows/ci.yml/runs?head_sha=$sha&event=push&per_page=1")
 if [ "$code" != 200 ]; then
   log "CI lookup for $sha returned HTTP $code; retrying next tick"
@@ -71,21 +171,29 @@ case $conclusion in
     ;;
 esac
 
-# The token goes to curl via a stdin config so it never appears in argv or in a trace.
-code=$(printf 'header = "Authorization: Bearer %s"\n' "$COOLIFY_API_TOKEN" |
-  curl -sS --max-time 60 -o "$body" -w '%{http_code}' -X POST -K - \
-    "${COOLIFY_URL%/}/api/v1/deploy?uuid=$COOLIFY_APP_UUID&force=false" 2>/dev/null || true)
-
-case $code in
-  2??)
-    if ! write_state "$sha"; then
-      log "deployed $sha but could not write $STATE_FILE"
-      exit 1
-    fi
-    log "triggered Coolify deploy for $sha (HTTP $code)"
+status=$(image_status "$sha")
+case $status in
+  200) ;;
+  404)
+    log "CI passed for $sha but $CHARTGEN_IMAGE:$sha is not in the registry yet; waiting"
+    exit 0
+    ;;
+  401 | 403 | token-401 | token-403)
+    log "the registry refused to show $CHARTGEN_IMAGE:$sha (answer $status): is the package public? Retrying next tick"
+    exit 0
     ;;
   *)
-    log "Coolify deploy for $sha failed (HTTP $code); retrying next tick"
-    exit 1
+    log "registry lookup for $CHARTGEN_IMAGE:$sha answered $status (rate limit or network); retrying next tick"
+    exit 0
     ;;
 esac
+
+if ! deploy_image "$sha"; then
+  log "retrying next tick"
+  exit 1
+fi
+if ! write_file "$PREVIOUS_FILE" "$last" || ! write_file "$STATE_FILE" "$sha"; then
+  log "deployed $sha but could not write $STATE_FILE"
+  exit 1
+fi
+log "triggered Coolify deploy of $CHARTGEN_IMAGE:$sha"
