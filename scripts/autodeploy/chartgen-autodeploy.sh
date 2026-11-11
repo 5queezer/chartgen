@@ -5,7 +5,7 @@
 #
 #   chartgen-autodeploy.sh               one tick
 #   chartgen-autodeploy.sh deploy SHA    deploy the image of SHA now
-#   chartgen-autodeploy.sh rollback      deploy the image that ran before the last deploy
+#   chartgen-autodeploy.sh rollback      deploy the image that ran before the one this script put out last
 #
 # See README.md, ADR-0037 and ADR-0060.
 set -u
@@ -21,6 +21,8 @@ done
 GITHUB_REPO=${GITHUB_REPO:-5queezer/chartgen}
 CHARTGEN_IMAGE=${CHARTGEN_IMAGE:-ghcr.io/5queezer/chartgen}
 STATE_FILE=${STATE_FILE:-${STATE_DIRECTORY:-/var/lib/chartgen-autodeploy}/last-sha}
+# What this script last put out, by the timer or by hand, and what ran before that.
+DEPLOYED_FILE=$(dirname "$STATE_FILE")/deployed-sha
 PREVIOUS_FILE=$(dirname "$STATE_FILE")/previous-sha
 API=https://api.github.com/repos/$GITHUB_REPO
 REGISTRY=${CHARTGEN_IMAGE%%/*}
@@ -76,7 +78,23 @@ coolify() {
 # deploy_image SHA: point the application at the image of SHA and deploy it.
 # Returns 0 when Coolify accepted both calls, which is "triggered", not "healthy".
 deploy_image() {
-  local code json
+  local code json kind
+  # Only an application that runs a prebuilt image. On one that builds from a
+  # Dockerfile the tag would be ignored and the deploy would build on this host:
+  # the build ADR-0060 took off it. Anything but a clear answer refuses.
+  code=$(coolify GET "/applications/$COOLIFY_APP_UUID")
+  case $code in
+    2??) ;;
+    *)
+      log "could not read the Coolify application (HTTP $code); not deploying"
+      return 1
+      ;;
+  esac
+  kind=$(jq -r '.build_pack // "unknown"' "$body" 2>/dev/null)
+  if [ "$kind" != dockerimage ]; then
+    log "the Coolify application $COOLIFY_APP_UUID is not a Docker Image application (build_pack: ${kind:-unknown}); not deploying. A deploy would build on this host. Check COOLIFY_APP_UUID, see README.md"
+    return 1
+  fi
   json=$(jq -cn --arg name "$CHARTGEN_IMAGE" --arg tag "$1" \
     '{docker_registry_image_name: $name, docker_registry_image_tag: $tag}')
   code=$(coolify PATCH "/applications/$COOLIFY_APP_UUID" "$json")
@@ -97,9 +115,24 @@ deploy_image() {
   esac
 }
 
-# By hand: deploy a published image, whatever master is at. The state of the timer
-# is left alone, so a rollback is not undone at the next tick and the next commit
-# on master deploys as usual.
+# record_deploy SHA: SHA is what runs now, and what ran until now is what a rollback
+# goes back to. Until this script has put something out, that is the timer's last SHA.
+record_deploy() {
+  local before=
+  if [ -s "$DEPLOYED_FILE" ]; then
+    before=$(cat "$DEPLOYED_FILE")
+  elif [ -s "$STATE_FILE" ]; then
+    before=$(cat "$STATE_FILE")
+  fi
+  if [ -n "$before" ] && [ "$before" != "$1" ]; then
+    write_file "$PREVIOUS_FILE" "$before" || return 1
+  fi
+  write_file "$DEPLOYED_FILE" "$1"
+}
+
+# By hand: deploy a published image, whatever master is at. The timer's own state,
+# master's head it last acted on, is left alone, so a rollback is not undone at the
+# next tick and the next commit on master deploys as usual.
 manual() {
   local sha=$1 status
   status=$(image_status "$sha")
@@ -108,13 +141,21 @@ manual() {
     exit 1
   fi
   deploy_image "$sha" || exit 1
+  if ! record_deploy "$sha"; then
+    log "deployed $sha by hand but could not record it in $DEPLOYED_FILE"
+    exit 1
+  fi
   log "triggered Coolify deploy of $CHARTGEN_IMAGE:$sha by hand; the timer's state is unchanged"
 }
 
 case ${1-} in
   '') ;;
   deploy)
-    [ -n "${2-}" ] || { echo "usage: $0 deploy SHA" >&2; exit 2; }
+    # A full commit SHA and nothing else: a name like "master" is a tag that moves.
+    if ! [[ ${2-} =~ ^[0-9a-f]{40}$ ]]; then
+      echo "usage: $0 deploy SHA (the full commit SHA, 40 hex characters)" >&2
+      exit 2
+    fi
     manual "$2"
     exit 0
     ;;
@@ -145,9 +186,10 @@ fi
 last=$(cat "$STATE_FILE")
 [ "$sha" = "$last" ] && exit 0
 
-# The image is only built by the CI run that passed for this SHA (ADR-0060), so this
-# lookup decides nothing the image check below would not. It is here for the log: it
-# tells a failed or cancelled CI, which nothing will deploy, from an image on its way.
+# The push run of CI for this SHA must be green. On master that is the run that builds
+# the image, so the image check below usually agrees. It does not always: CI run by
+# hand on master's head builds an image too, and that one is not deployed while the
+# push run is red or cancelled. The lookup also tells the log which it is.
 code=$(gh_get "$API/actions/workflows/ci.yml/runs?head_sha=$sha&event=push&per_page=1")
 if [ "$code" != 200 ]; then
   log "CI lookup for $sha returned HTTP $code; retrying next tick"
@@ -192,7 +234,7 @@ if ! deploy_image "$sha"; then
   log "retrying next tick"
   exit 1
 fi
-if ! write_file "$PREVIOUS_FILE" "$last" || ! write_file "$STATE_FILE" "$sha"; then
+if ! record_deploy "$sha" || ! write_file "$STATE_FILE" "$sha"; then
   log "deployed $sha but could not write $STATE_FILE"
   exit 1
 fi
