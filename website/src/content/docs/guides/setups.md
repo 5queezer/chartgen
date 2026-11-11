@@ -120,8 +120,9 @@ Each bar is `[open time in unix seconds, open, high, low, close, volume]`. The f
   other interval is built from those bars. The bar still forming at `as_of` is not there.
 - **Time only moves forward.** Each caller has one clock for all tools. A call with an `as_of`
   before the latest one that caller has sent is refused.
-- **Setups live in memory**, apart from `chartgen.db`, and are gone when the process ends. To
-  run a scenario again, restart the server. Ids count per caller: `setup-000001`, and so on.
+- **Everything it stores lives in memory**: setups, and the OAuth clients that register with
+  it. A replay server opens no database file, not `chartgen.db` either, and all of it is gone
+  when the process ends. To run a scenario again, restart the server. Ids count per caller: `setup-000001`, and so on.
 - **What is refused:** `get_footprint`, `get_tpo`, `search_symbols`, chart subscriptions, the
   alert tools, and the indicators that fetch a series of their own (funding rate, open interest,
   long/short ratio, fear and greed).
@@ -130,6 +131,3 @@ Each bar is `[open time in unix seconds, open, high, low, close, volume]`. The f
 - A replay server is nothing else: it refuses to start with `--trade`, `--mcp`,
   `CHARTGEN_SERVER_ALERTS=1`, `CHARTGEN_SETUPS=1` or a sign-in provider. On any other server
   `as_of` is refused.
-
-The server still keeps registered OAuth clients in `chartgen.db`. Point `CHARTGEN_DB` at a
-scratch file to keep a replay away from a real one.
