@@ -865,10 +865,10 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
         };
         const nextStep = o.nextStep.bind(o);
         o.forceComplete = () => {};
-        // The press that placed the first point. A tick can move the price axis, or a new bar
-        // the time axis, between two clicks: the first point is then pixels away from where it
-        // was clicked, and a second click on the same spot would make a short line nobody drew.
-        // To the person the two clicks are one place, and only the mouse can say so.
+        // The press that placed the first point. A tick can move the price axis between two
+        // clicks: the first point is then pixels away from where it was clicked, and a second
+        // click on the same spot would make a short line nobody drew. To the person the two
+        // clicks are one place, and only the mouse can say so.
         let firstPress: typeof lastArmedPress = null;
         o.nextStep = () => {
           const [a, b] = o.points;
@@ -886,8 +886,15 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
             press !== firstPress &&
             press.x === firstPress.x &&
             press.y === firstPress.y;
+          // Only on the first point's bar. Where the chart moved sideways under the mouse, by
+          // the wheel or by a new bar, the same spot is another bar: that is a second point,
+          // and a way to draw a line without moving the mouse.
+          const sameBar =
+            a.timestamp !== undefined && b.timestamp !== undefined
+              ? a.timestamp === b.timestamp
+              : a.dataIndex === b.dataIndex;
           const toPx = (p: Partial<Point>) => chart.convertToPixel(p, { paneId: o.paneId }) as Partial<Px>;
-          if (!samePlace && !sameLinePoint(a, b, toPx)) nextStep();
+          if (!(samePlace && sameBar) && !sameLinePoint(a, b, toPx)) nextStep();
         };
       }
     }
