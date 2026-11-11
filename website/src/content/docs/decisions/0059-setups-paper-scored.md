@@ -106,6 +106,10 @@ the least risk above, the invalidation is that far and the target twice that.** 
 ATR can be 5 bps against 14 bps of costs: such a skip would lose whatever the market did, and every
 skip would read as right. The record says which rule set its levels, in `bracket`: `agent` for a
 setup with the agent's levels, `atr` or `floor` for a skip, so a track record can tell them apart.
+The bracket is measured from the last close when the skip is stored, and the fill is the next
+bar's open, so the risk at the fill can be a little under or over the bracket's: 35 bps against a
+42 bps floor in one review run. The levels are not moved to the fill: they are fixed when the
+skip is made, as every setup's are, and R is measured on the risk at the fill.
 A skip has an expiry after 24 of
 those bars, or after the 90 days every setup is bound by if that is sooner (on a weekly chart 24
 bars would be 168 days). A skip cannot be cancelled and its bracket cannot be revised, so its
