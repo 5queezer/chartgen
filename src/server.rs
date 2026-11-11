@@ -3310,7 +3310,7 @@ mod tests {
         let (state, app) = authorize_app(false);
         let mut first_with_refresh = None;
         let mut answers = Vec::new();
-        let rounds = refresh::MAX_FAMILIES_PER_CLIENT + MAX_LOOSE_TOKENS_PER_CLIENT + 10;
+        let rounds = signin::MAX_TOKENS_PER_CLIENT + MAX_LOOSE_TOKENS_PER_CLIENT + 10;
         for _ in 0..rounds {
             let answer = token_for(&app, "a").await;
             if answer.get("refresh_token").is_some() && first_with_refresh.is_none() {
@@ -3329,7 +3329,7 @@ mod tests {
         };
         assert_eq!(
             of_a(&state),
-            refresh::MAX_FAMILIES_PER_CLIENT + MAX_LOOSE_TOKENS_PER_CLIENT
+            signin::MAX_TOKENS_PER_CLIENT + MAX_LOOSE_TOKENS_PER_CLIENT
         );
         let held = of_a(&state);
         assert_eq!(state.oauth.lock().unwrap().tokens.len(), held + 1);
@@ -3354,15 +3354,18 @@ mod tests {
             let (state, app) = authorize_app(sign_in);
             let mut answer = if sign_in {
                 // What `/token` does for a code with a user.
-                let mut s = state.oauth.lock().unwrap();
-                let user = signin::TokenUser {
-                    id: "github:1".into(),
-                    session: None,
-                    last_used: Instant::now(),
+                let (access, family) = {
+                    let mut s = state.oauth.lock().unwrap();
+                    let user = signin::TokenUser {
+                        id: "github:1".into(),
+                        session: None,
+                        last_used: Instant::now(),
+                    };
+                    let access = s.issue_access("first".into(), "a", Some(user), None);
+                    let family =
+                        s.plan_family("a", "https://x.example/cb", Some("github:1"), &access);
+                    (access, family)
                 };
-                let access = s.issue_access("first".into(), "a", Some(user), None);
-                let family = s.plan_family("a", "https://x.example/cb", Some("github:1"), &access);
-                drop(s);
                 let write = refresh::store_write();
                 let refresh = refresh::start_family(&state, &access, family.unwrap(), &write)
                     .await

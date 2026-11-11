@@ -4,9 +4,6 @@
 //! own client never gets one, so nothing durable is first-party (ADR-0050).
 
 use super::signin::{hash_of, now_unix, random_token, TokenUser, MAX_TOKENS_PER_CLIENT};
-
-/// Families one client keeps with sign-in off, and one user per client with it on.
-pub(super) const MAX_FAMILIES_PER_CLIENT: usize = MAX_TOKENS_PER_CLIENT;
 use super::*;
 
 /// A family ends when its newest token is this old. Each exchange starts it again.
