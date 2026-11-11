@@ -114,7 +114,7 @@ describe("what the server said about the overview", () => {
   });
 
   it("is not a refusal when the server fails or does not answer", async () => {
-    for (const status of [500, 502, 503]) {
+    for (const status of [408, 429, 500, 502, 503]) {
       answering(() => new Response(null, { status }));
       expect(await fetchOverview()).toEqual({ kind: "unavailable" });
     }

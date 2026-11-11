@@ -194,6 +194,7 @@ It only reads.
   under your name, with a copy button: `github:` and a number, or `google:` and what Google
   calls your `sub` (digits, today).
   Set it and restart. A list the server cannot read stops the start and says which entry.
+  The list is split at commas, so an id with a comma in it cannot be named; none is known.
 - **Only you, and only in the web app.** An agent or connector you approved never sees it,
   with your account or without. What counts as the web app is where the sign-in's code
   is sent: exactly `/` on this server's address, where only the app's own page receives

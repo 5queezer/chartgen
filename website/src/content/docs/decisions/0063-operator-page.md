@@ -99,7 +99,10 @@ A list that the server cannot read as written stops the start: an entry that is 
 an id sign-in could have stored, `github:` and a number above 0 or `google:` and a
 `sub`, such as `*`, a login name, an e-mail address or an empty entry. The check
 allows exactly what sign-in stores, so every real account can be named: GitHub's id is
-a number, and Google's `sub` is taken as the text Google sends. So does a list on a server without sign-in, where it could
+a number, and Google's `sub` is taken as the text Google sends. With one exception that
+the list's form brings: it is split at commas, so an id that contained a comma could
+not be named. Google's are digits today; if one ever had a comma, that account could
+sign in and not be made operator. So does a list on a server without sign-in, where it could
 never take effect. The message names the entry by its position and does not repeat
 it. An id nobody has signed in with is not an error: it matches nobody yet.
 
@@ -140,7 +143,8 @@ the tab (never an address: nothing stored is used as a place to go), signs in as
 usual, which returns to `/`, and asks for the overview with `Accept:
 application/json`. If the server answers it, the tab shows the page. If the server
 says no, which is its answer for a path that does not exist, the tab is the app at
-`/`, with no message. A failure of the server or the network is not a no: it says
+`/`, with no message. A failure of the server or the network, or a "wait" or "too
+many requests" from something in front of it, is not a no: it says
 nothing about who asks, so the tab then offers to try again, and a page already
 shown keeps what it shows, marked as old. A no on a later refresh takes the page
 away. The flag is dropped once the page shows, so it cannot follow the tab to

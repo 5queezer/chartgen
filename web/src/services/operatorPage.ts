@@ -82,7 +82,11 @@ export async function fetchOverview(): Promise<OverviewAnswer> {
   } catch {
     return { kind: "unavailable" };
   }
-  if (res.status >= 500) return { kind: "unavailable" };
+  // "Wait" and "too many" come from something in front of the server, or from the
+  // server about its load: they say nothing about who asks, as little as its errors do.
+  if (res.status >= 500 || res.status === 408 || res.status === 429) {
+    return { kind: "unavailable" };
+  }
   if (!res.ok) return { kind: "refused" };
   const parsed = OperatorOverviewSchema.safeParse(await res.json().catch(() => null));
   return parsed.success ? { kind: "overview", overview: parsed.data } : { kind: "refused" };
