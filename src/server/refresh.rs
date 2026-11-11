@@ -27,6 +27,12 @@ pub(super) struct RefreshToken {
     pub(super) user: Option<String>,
     pub(super) created_at: i64,
     pub(super) spent_at: Option<i64>,
+    /// The hash of the access token issued with it. Stored while this token is
+    /// unspent, so that the access token is known again after a restart: a client
+    /// holding a token it believes valid would otherwise get a `401`, and the common
+    /// MCP client answers that with a new authorization, not with a refresh.
+    #[cfg_attr(not(feature = "scripting"), allow(dead_code))]
+    pub(super) access_hash: Option<String>,
 }
 
 /// What a change to the families writes to the store.
@@ -70,6 +76,7 @@ fn write_to(store: &scripting::persistence::Store, change: Change) -> Result<(),
                 user_id: token.user,
                 created_at: token.created_at,
                 spent_at: token.spent_at,
+                access_hash: token.access_hash,
             },
             &spent,
             token.seq - MAX_SPENT_PER_FAMILY,
@@ -105,6 +112,8 @@ static GATE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 pub(super) struct Rotation {
     /// The value for the client. Never stored or logged.
     pub(super) value: String,
+    /// The access token that goes out with it.
+    access: String,
     hash: String,
     token: RefreshToken,
     spent: Vec<String>,
@@ -137,13 +146,16 @@ impl OAuthStore {
             .map(|t| t.family.clone())
             .collect();
         self.refresh.retain(|_, t| live.contains(&t.family));
+        self.restored
+            .retain(|_, t| t.family.as_ref().is_some_and(|f| live.contains(f)));
     }
 
     /// End families, with the access tokens that came from them.
     pub(super) fn end_families(&mut self, families: &[String]) {
+        let ended = |t: &AccessToken| t.family.as_ref().is_some_and(|f| families.contains(f));
         self.refresh.retain(|_, t| !families.contains(&t.family));
-        self.tokens
-            .retain(|_, t| !t.family.as_ref().is_some_and(|f| families.contains(f)));
+        self.tokens.retain(|_, t| !ended(t));
+        self.restored.retain(|_, t| !ended(t));
     }
 
     /// The families `user` holds through `client`.
@@ -165,9 +177,37 @@ impl OAuthStore {
         &mut self,
         rows: Vec<scripting::persistence::StoredRefreshToken>,
     ) -> usize {
+        let now = now_unix();
+        let sign_in = self.signin.is_some();
         for r in rows {
             if !self.clients.contains_key(&r.client_id) {
                 continue;
+            }
+            // The 7 days count from when it was issued: a restart adds nothing. What is
+            // left is counted from now, since `Instant` cannot name a time before boot.
+            let left = ACCESS_TOKEN_SECS.saturating_sub((now - r.created_at).max(0) as u64);
+            let access = r
+                .access_hash
+                .clone()
+                .filter(|_| r.spent_at.is_none() && r.user_id.is_some() == sign_in)
+                .filter(|_| left > 0);
+            if let Some(access) = access {
+                self.restored.insert(
+                    access,
+                    AccessToken {
+                        _token: String::new(),
+                        family: Some(r.family.clone()),
+                        client_id: r.client_id.clone(),
+                        created_at: Instant::now(),
+                        expires_in: Duration::from_secs(left),
+                        // Never a browser session, so never the web app's (ADR-0050).
+                        user: r.user_id.as_ref().map(|id| TokenUser {
+                            id: id.clone(),
+                            session: None,
+                            last_used: Instant::now(),
+                        }),
+                    },
+                );
             }
             self.refresh.insert(
                 r.token_hash,
@@ -178,11 +218,11 @@ impl OAuthStore {
                     user: r.user_id,
                     created_at: r.created_at,
                     spent_at: r.spent_at,
+                    access_hash: r.access_hash,
                 },
             );
         }
-        self.expire_refresh(now_unix());
-        let sign_in = self.signin.is_some();
+        self.expire_refresh(now);
         self.refresh
             .values()
             .filter(|t| t.spent_at.is_none() && t.user.is_some() == sign_in)
@@ -199,6 +239,7 @@ impl OAuthStore {
         client_id: &str,
         redirect_uri: &str,
         user: Option<&str>,
+        access: &str,
     ) -> Option<Rotation> {
         if signin::is_first_party(&base_url(), redirect_uri) {
             return None;
@@ -217,6 +258,7 @@ impl OAuthStore {
         Some(Rotation {
             hash: hash_of(&value),
             value,
+            access: access.to_string(),
             spent: Vec::new(),
             token: RefreshToken {
                 family: Uuid::new_v4().to_string(),
@@ -225,6 +267,7 @@ impl OAuthStore {
                 user: user.map(str::to_string),
                 created_at: now,
                 spent_at: None,
+                access_hash: Some(hash_of(access)),
             },
         })
     }
@@ -262,6 +305,7 @@ impl OAuthStore {
             _ => return Err(Refused::Reused(t.family)),
         };
         let value = random_token();
+        let access = Uuid::new_v4().to_string();
         Ok(Rotation {
             hash: hash_of(&value),
             value,
@@ -270,8 +314,10 @@ impl OAuthStore {
                 seq: t.seq + 1,
                 created_at: now,
                 spent_at: None,
+                access_hash: Some(hash_of(&access)),
                 ..t
             },
+            access,
         })
     }
 
@@ -382,13 +428,18 @@ pub(super) async fn grant(
                 session: None,
                 last_used: Instant::now(),
             });
-            s.issue_access(client_id, user, Some(rotation.token.family.clone()))
+            let family = Some(rotation.token.family.clone());
+            let token = s.issue_access(rotation.access.clone(), client_id, user, family);
+            // The user's limits count what a refresh adds, as they do a code exchange.
+            let ended = rotation.token.user.as_ref().map(|u| s.trim_user_tokens(u));
+            (token, ended.unwrap_or_default())
         })
     };
-    let Some(token) = token else {
+    let Some((token, ended)) = token else {
         forget_families(write, vec![rotation.token.family]).await;
         return invalid_grant();
     };
+    forget_families(write, ended).await;
     token_issued(client_id.to_string(), rotation.token.user).await;
     eprintln!("[OAuth] POST /token SUCCESS — token refreshed");
     Json(json!({
@@ -439,7 +490,8 @@ pub(super) async fn revoke(
 ) -> Response {
     let _gate = GATE.lock().await;
     let family = {
-        let s = state.oauth.lock().unwrap();
+        let mut s = state.oauth.lock().unwrap();
+        s.adopt(token);
         let of_client = |c: &str| c == client_id;
         match s.refresh.get(&hash_of(token)) {
             Some(t) => of_client(&t.client_id).then(|| t.family.clone()),
@@ -550,8 +602,9 @@ mod tests {
                 session: None,
                 last_used: Instant::now(),
             });
-            let access = s.issue_access(client, token_user, None);
-            (access, s.plan_family(client, REDIRECT, user))
+            let access = s.issue_access(Uuid::new_v4().to_string(), client, token_user, None);
+            let family = s.plan_family(client, REDIRECT, user, &access);
+            (access, family)
         };
         let refresh = match family {
             Some(family) => start_family(state, &access, family, write)
@@ -596,30 +649,103 @@ mod tests {
         state.oauth.lock().unwrap().owner_for_token(access)
     }
 
-    /// The brief's case: authorized once, then the process is replaced.
+    /// The brief's case: authorized once, then the process is replaced. The client's
+    /// access token is known again, so it sees no `401` and needs no exchange, and the
+    /// refresh token works when the 7 days are over.
     #[tokio::test]
-    async fn a_refresh_token_works_after_a_restart_and_the_access_token_does_not() {
+    async fn an_authorization_works_after_a_restart_with_no_exchange() {
         for (with_sign_in, user) in [(true, Some("github:1")), (false, None)] {
             let (store, _) = temp_store(&format!("restart-{with_sign_in}"));
             let before = started(&store, with_sign_in, &[CLIENT]);
-            let (access, refresh) = authorize(&before, CLIENT, user, &to(&store)).await;
+            let (first_access, refresh) = authorize(&before, CLIENT, user, &to(&store)).await;
             let refresh = refresh.unwrap();
-            assert!(valid(&before, &access));
-            let was = owner(&before, &access);
+            assert!(valid(&before, &first_access));
+            let was = owner(&before, &first_access);
 
             let after = started(&store, with_sign_in, &[CLIENT]);
-            assert!(!valid(&after, &access), "access tokens stay in memory");
+            assert!(after.oauth.lock().unwrap().tokens.is_empty());
+            assert!(valid(&after, &first_access), "the same access token");
+            assert_eq!(owner(&after, &first_access), was, "the same owner");
+            assert_eq!(
+                after
+                    .oauth
+                    .lock()
+                    .unwrap()
+                    .app_user_for_token(&first_access),
+                None,
+                "and never the web app's (ADR-0050)"
+            );
             let (access, next) = exchange(&after, &refresh, CLIENT, &to(&store))
                 .await
                 .unwrap();
-            assert!(valid(&after, &access));
-            assert_eq!(owner(&after, &access), was, "the same owner as before");
+            assert_eq!(owner(&after, &access), was);
             assert_ne!(next, refresh);
 
-            // And again after the next one, with the rotated token.
+            // After the next one: the newest pair, and not the access token before it.
             let later = started(&store, with_sign_in, &[CLIENT]);
+            assert!(valid(&later, &access));
+            assert!(!valid(&later, &first_access));
             assert!(exchange(&later, &next, CLIENT, &to(&store)).await.is_ok());
         }
+    }
+
+    /// The 7 days of an access token count from when it was issued.
+    #[tokio::test]
+    async fn a_restart_adds_nothing_to_an_access_tokens_lifetime() {
+        let (store, path) = temp_store("lifetime");
+        let state = started(&store, false, &[CLIENT]);
+        let (access, refresh) = authorize(&state, CLIENT, None, &to(&store)).await;
+        let issued_ago = |secs: u64| {
+            rusqlite::Connection::open(&path)
+                .unwrap()
+                .execute(
+                    "UPDATE refresh_tokens SET created_at = ?1",
+                    [now_unix() - secs as i64],
+                )
+                .unwrap();
+        };
+        let day = 24 * 3600;
+        issued_ago(6 * day);
+        let state = started(&store, false, &[CLIENT]);
+        assert!(valid(&state, &access));
+        let left = state.oauth.lock().unwrap().tokens[&access].expires_in;
+        assert!(left <= Duration::from_secs(day), "{left:?}");
+
+        issued_ago(ACCESS_TOKEN_SECS + 1);
+        let state = started(&store, false, &[CLIENT]);
+        assert!(!valid(&state, &access));
+        // Which is when the client refreshes.
+        assert!(exchange(&state, &refresh.unwrap(), CLIENT, &to(&store))
+            .await
+            .is_ok());
+    }
+
+    /// A refresh counts in the user's limits like a code exchange, and so does an
+    /// access token from before a restart.
+    #[tokio::test]
+    async fn refreshing_and_restarting_add_nothing_to_a_users_token_count() {
+        let (store, _) = temp_store("count");
+        let state = started(&store, true, &[CLIENT]);
+        let write = to(&store);
+        let held = |state: &SharedState| {
+            let s = state.oauth.lock().unwrap();
+            s.tokens.len() + s.restored.len()
+        };
+        let (_, refresh) = authorize(&state, CLIENT, Some("github:1"), &write).await;
+        let mut refresh = refresh.unwrap();
+        for _ in 0..MAX_TOKENS_PER_CLIENT + 5 {
+            refresh = exchange(&state, &refresh, CLIENT, &write).await.unwrap().1;
+        }
+        assert_eq!(held(&state), MAX_TOKENS_PER_CLIENT);
+
+        for _ in 1..MAX_TOKENS_PER_CLIENT {
+            authorize(&state, CLIENT, Some("github:1"), &write).await;
+        }
+        let state = started(&store, true, &[CLIENT]);
+        assert_eq!(held(&state), MAX_TOKENS_PER_CLIENT, "one per family");
+        let (access, _) = authorize(&state, CLIENT, Some("github:1"), &write).await;
+        assert_eq!(held(&state), MAX_TOKENS_PER_CLIENT);
+        assert!(valid(&state, &access), "the new one is not the one dropped");
     }
 
     #[tokio::test]
@@ -631,6 +757,12 @@ mod tests {
         let (access, second) = exchange(&state, &first, CLIENT, &to(&store)).await.unwrap();
         let rows = store.refresh_tokens(0).unwrap();
         assert_eq!(rows.len(), 2, "the spent token and its successor");
+        let of_access: Vec<_> = rows.iter().filter_map(|r| r.access_hash.clone()).collect();
+        assert_eq!(
+            of_access,
+            [hash_of(&access)],
+            "the current access token, hashed"
+        );
         let hashes: Vec<&str> = rows.iter().map(|r| r.token_hash.as_str()).collect();
         assert!(hashes.contains(&hash_of(&first).as_str()));
         assert!(hashes.contains(&hash_of(&second).as_str()));
@@ -649,31 +781,37 @@ mod tests {
 
     #[tokio::test]
     async fn a_spent_refresh_token_ends_its_family_even_after_a_restart() {
-        let (store, _) = temp_store("reuse");
-        let state = started(&store, false, &[CLIENT]);
-        let write = to(&store);
-        let (_, first) = authorize(&state, CLIENT, None, &write).await;
-        let first = first.unwrap();
-        let (_, second) = exchange(&state, &first, CLIENT, &write).await.unwrap();
-        let (access, third) = exchange(&state, &second, CLIENT, &write).await.unwrap();
+        // Whether or not the access token from before the restart was used since.
+        for used_since in [true, false] {
+            let (store, _) = temp_store(&format!("reuse-{used_since}"));
+            let write = to(&store);
+            let state = started(&store, false, &[CLIENT]);
+            let (_, first) = authorize(&state, CLIENT, None, &write).await;
+            let first = first.unwrap();
+            let (_, second) = exchange(&state, &first, CLIENT, &write).await.unwrap();
+            let (access, third) = exchange(&state, &second, CLIENT, &write).await.unwrap();
 
-        // Two exchanges back, so no retry: whoever sends it copied it.
-        let state = started(&store, false, &[CLIENT]);
-        let (access_after, third) = exchange(&state, &third, CLIENT, &write).await.unwrap();
-        let _ = access;
-        assert_eq!(
-            exchange(&state, &first, CLIENT, &write).await,
-            Err(StatusCode::BAD_REQUEST)
-        );
-        assert!(!valid(&state, &access_after), "its access tokens end too");
-        assert_eq!(
-            exchange(&state, &third, CLIENT, &write).await,
-            Err(StatusCode::BAD_REQUEST),
-            "the newest token of the family is dead"
-        );
-        assert!(store.refresh_tokens(0).unwrap().is_empty());
-        let state = started(&store, false, &[CLIENT]);
-        assert!(exchange(&state, &third, CLIENT, &write).await.is_err());
+            // Two exchanges back, so no retry: whoever sends it copied it.
+            let state = started(&store, false, &[CLIENT]);
+            if used_since {
+                assert!(valid(&state, &access));
+            }
+            assert_eq!(
+                exchange(&state, &first, CLIENT, &write).await,
+                Err(StatusCode::BAD_REQUEST)
+            );
+            assert!(!valid(&state, &access), "its access token ends too");
+            assert!(state.oauth.lock().unwrap().restored.is_empty());
+            assert_eq!(
+                exchange(&state, &third, CLIENT, &write).await,
+                Err(StatusCode::BAD_REQUEST),
+                "the newest token of the family is dead"
+            );
+            assert!(store.refresh_tokens(0).unwrap().is_empty());
+            let state = started(&store, false, &[CLIENT]);
+            assert!(exchange(&state, &third, CLIENT, &write).await.is_err());
+            assert!(!valid(&state, &access));
+        }
     }
 
     /// A lost answer must not cost the client its authorization, and the retry must
@@ -768,6 +906,7 @@ mod tests {
         assert!(!valid(&state, &access), "its access tokens end with it");
         assert!(exchange(&state, &refresh, CLIENT, &write).await.is_err());
         let state = started(&store, false, &[CLIENT, "c2"]);
+        assert!(!valid(&state, &access), "and stay ended after a restart");
         assert!(exchange(&state, &refresh, CLIENT, &write).await.is_err());
 
         // By the access token: the family behind it goes too.
@@ -777,6 +916,23 @@ mod tests {
         assert!(exchange(&state, &refresh.unwrap(), CLIENT, &write)
             .await
             .is_err());
+
+        // A restart no longer ends an access token, so revoking must: by the refresh
+        // token, with the access token never used since.
+        let (access, refresh) = authorize(&state, CLIENT, None, &write).await;
+        let state = started(&store, false, &[CLIENT, "c2"]);
+        ok(revoke(&state, &refresh.unwrap(), CLIENT, &write).await);
+        assert!(!valid(&state, &access));
+        // And by the access token itself, which the server knows by its hash only.
+        let (access, refresh) = authorize(&state, CLIENT, None, &write).await;
+        let state = started(&store, false, &[CLIENT, "c2"]);
+        ok(revoke(&state, &access, "c2", &write).await);
+        ok(revoke(&state, &access, CLIENT, &write).await);
+        assert!(!valid(&state, &access));
+        assert!(exchange(&state, &refresh.unwrap(), CLIENT, &write)
+            .await
+            .is_err());
+        assert!(store.refresh_tokens(0).unwrap().is_empty());
     }
 
     /// The operator's way, for a token nobody holds any more: delete the rows, restart.
@@ -785,8 +941,8 @@ mod tests {
         let (store, path) = temp_store("operator");
         let state = started(&store, true, &[CLIENT]);
         let write = to(&store);
-        let (_, mine) = authorize(&state, CLIENT, Some("github:1"), &write).await;
-        let (_, theirs) = authorize(&state, CLIENT, Some("github:2"), &write).await;
+        let (my_access, mine) = authorize(&state, CLIENT, Some("github:1"), &write).await;
+        let (their_access, theirs) = authorize(&state, CLIENT, Some("github:2"), &write).await;
         rusqlite::Connection::open(&path)
             .unwrap()
             .execute(
@@ -795,6 +951,11 @@ mod tests {
             )
             .unwrap();
         let state = started(&store, true, &[CLIENT]);
+        assert!(
+            !valid(&state, &my_access),
+            "the access token goes with the rows"
+        );
+        assert!(valid(&state, &their_access));
         assert!(exchange(&state, &mine.unwrap(), CLIENT, &write)
             .await
             .is_err());
@@ -810,8 +971,8 @@ mod tests {
         for (with_sign_in, user) in [(true, Some("github:1")), (false, None)] {
             let state = started(&store, with_sign_in, &[CLIENT]);
             let mut s = state.oauth.lock().unwrap();
-            assert!(s.plan_family(CLIENT, &own_root, user).is_none());
-            assert!(s.plan_family(CLIENT, REDIRECT, user).is_some());
+            assert!(s.plan_family(CLIENT, &own_root, user, "a").is_none());
+            assert!(s.plan_family(CLIENT, REDIRECT, user, "a").is_some());
         }
     }
 
@@ -845,15 +1006,17 @@ mod tests {
         let (_, clientless) = authorize(&off, CLIENT, None, &write).await;
         let clientless = clientless.unwrap();
         let on = started(&store, true, &[CLIENT]);
-        let (_, users) = authorize(&on, CLIENT, Some("github:1"), &write).await;
+        let (users_access, users) = authorize(&on, CLIENT, Some("github:1"), &write).await;
         let users = users.unwrap();
 
         assert!(exchange(&on, &clientless, CLIENT, &write).await.is_err());
         assert!(on.oauth.lock().unwrap().tokens.len() == 1, "nothing issued");
         let off = started(&store, false, &[CLIENT]);
+        assert!(!valid(&off, &users_access), "nor is its access token known");
         assert!(exchange(&off, &users, CLIENT, &write).await.is_err());
         assert!(exchange(&off, &clientless, CLIENT, &write).await.is_ok());
         let on = started(&store, true, &[CLIENT]);
+        assert_eq!(owner(&on, &users_access).as_deref(), Some("github:1"));
         assert!(exchange(&on, &users, CLIENT, &write).await.is_ok());
     }
 
@@ -929,7 +1092,7 @@ mod tests {
         let (store, path) = temp_store("expiry");
         let state = started(&store, false, &[CLIENT]);
         let write = to(&store);
-        let (_, stale) = authorize(&state, CLIENT, None, &write).await;
+        let (stale_access, stale) = authorize(&state, CLIENT, None, &write).await;
         let (_, fresh) = authorize(&state, CLIENT, None, &write).await;
         let stale_hash = hash_of(stale.as_ref().unwrap());
         let then = now_unix() - REFRESH_TTL_SECS - 1;
@@ -955,6 +1118,8 @@ mod tests {
             .unwrap();
         let state = started(&store, false, &[CLIENT]);
         assert_eq!(store.refresh_tokens(0).unwrap().len(), 1);
+        assert_eq!(state.oauth.lock().unwrap().restored.len(), 1);
+        assert!(!valid(&state, &stale_access));
         assert!(exchange(&state, &stale.unwrap(), CLIENT, &write)
             .await
             .is_err());
@@ -968,12 +1133,13 @@ mod tests {
         let (store, _) = temp_store("evicted");
         let state = started(&store, false, &[CLIENT]);
         let write = to(&store);
-        let (_, refresh) = authorize(&state, CLIENT, None, &write).await;
+        let (access, refresh) = authorize(&state, CLIENT, None, &write).await;
         let refresh = refresh.unwrap();
         state.oauth.lock().unwrap().clients.remove(CLIENT);
         assert!(exchange(&state, &refresh, CLIENT, &write).await.is_err());
         let state = started(&store, false, &[]);
         assert!(state.oauth.lock().unwrap().refresh.is_empty());
+        assert!(!valid(&state, &access), "nor is its access token");
         assert!(exchange(&state, &refresh, CLIENT, &write).await.is_err());
     }
 }

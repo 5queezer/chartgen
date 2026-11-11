@@ -110,7 +110,8 @@ pub(super) const MIGRATIONS: &[&str] = &[
         client_id   TEXT    NOT NULL,
         user_id     TEXT,
         created_at  INTEGER NOT NULL,
-        spent_at    INTEGER
+        spent_at    INTEGER,
+        access_hash TEXT
     );
     CREATE INDEX refresh_tokens_family ON refresh_tokens (family);
 ",
@@ -248,6 +249,9 @@ pub struct StoredRefreshToken {
     pub created_at: i64,
     /// When it was exchanged or replaced; kept so that using it again is recognised.
     pub spent_at: Option<i64>,
+    /// The hash of the access token issued with it, while it is unspent: what lets
+    /// that access token outlive a restart.
+    pub access_hash: Option<String>,
 }
 
 /// A delivery not finished yet: written with the fire it reports, so a restart
@@ -480,7 +484,8 @@ impl Store {
         let tx = conn.transaction()?;
         for hash in spent {
             tx.execute(
-                "UPDATE refresh_tokens SET spent_at = ?2 WHERE token_hash = ?1 AND spent_at IS NULL",
+                "UPDATE refresh_tokens SET spent_at = ?2, access_hash = NULL
+                 WHERE token_hash = ?1 AND spent_at IS NULL",
                 params![hash, new.created_at],
             )?;
         }
@@ -490,8 +495,8 @@ impl Store {
         )?;
         tx.execute(
             "INSERT INTO refresh_tokens
-                 (token_hash, family, seq, client_id, user_id, created_at, spent_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                 (token_hash, family, seq, client_id, user_id, created_at, spent_at, access_hash)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
                 new.token_hash,
                 new.family,
@@ -499,7 +504,8 @@ impl Store {
                 new.client_id,
                 new.user_id,
                 new.created_at,
-                new.spent_at
+                new.spent_at,
+                new.access_hash
             ],
         )?;
         tx.commit()
@@ -527,7 +533,7 @@ impl Store {
             params![cutoff],
         )?;
         let mut stmt = conn.prepare(
-            "SELECT token_hash, family, seq, client_id, user_id, created_at, spent_at
+            "SELECT token_hash, family, seq, client_id, user_id, created_at, spent_at, access_hash
              FROM refresh_tokens",
         )?;
         let rows = stmt.query_map([], |r| {
@@ -539,6 +545,7 @@ impl Store {
                 user_id: r.get(4)?,
                 created_at: r.get(5)?,
                 spent_at: r.get(6)?,
+                access_hash: r.get(7)?,
             })
         })?;
         rows.collect()

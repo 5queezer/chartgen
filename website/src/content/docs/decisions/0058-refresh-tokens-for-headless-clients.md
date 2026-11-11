@@ -1,13 +1,13 @@
 ---
 title: "0058 — Refresh tokens, so a client authorized once keeps working"
-description: "/token answers a refresh-token grant. Refresh tokens are rotated, stored only as hashes and survive restarts, so a headless MCP client needs a person once. The web app's own client gets none, and POST /revoke ends one."
+description: "/token answers a refresh-token grant, and the access token of a client that holds a refresh token is known again after a restart. Both are stored only as hashes, so a headless MCP client needs a person once. The web app's own client gets neither, and POST /revoke ends them."
 sidebar:
   order: 58
 ---
 
 **Status:** Accepted
 **Date:** 2026-11-11
-**Amends:** [ADR-0044](/chartgen/decisions/0044-sign-in-through-github-and-google/) (a client other than the web app no longer re-authorizes after a restart or after 7 days; a refresh token counts as a token in the per-user limits), [ADR-0036](/chartgen/decisions/0036-own-origin-invalid-client-redirect/) (a refresh token keeps its client from being evicted, for up to 30 days out of use, and through restarts)
+**Amends:** [ADR-0044](/chartgen/decisions/0044-sign-in-through-github-and-google/) (a client other than the web app no longer re-authorizes after a restart or after 7 days, and its access token no longer ends at a restart; a refresh token counts as a token in the per-user limits), [ADR-0036](/chartgen/decisions/0036-own-origin-invalid-client-redirect/) (a refresh token keeps its client from being evicted, for up to 30 days out of use, and through restarts)
 
 ## Context and Problem Statement
 
@@ -52,8 +52,7 @@ every client.
 token and exchanges it for the next pair
 ([RFC 6749 section 6](https://www.rfc-editor.org/rfc/rfc6749#section-6)).
 
-- Good: it is what MCP clients already implement. After a restart the client's call gets
-  `401`, it refreshes and carries on.
+- Good: it is what MCP clients already implement for a token that has run out.
 - Good: the long-lived secret goes to `/token` only, never on a tool call, and the store is
   written when a token is issued or exchanged, never per request.
 - Good: the first-party rule is kept by construction, because a refresh token is never
@@ -61,6 +60,9 @@ token and exchanges it for the next pair
 - Bad: the client must store its refresh token, and the first authorization still takes a
   browser, once.
 - Bad: a rotating token can be lost between the server's answer and the client's disk.
+- Bad: **by itself it does not survive a restart with the clients that exist.** A restart
+  ends the access token while the client still believes it valid, the call gets `401`, and
+  the common client answers a `401` with a new authorization, not with a refresh. See below.
 
 **3. Personal access tokens.** A signed-in user creates a named, long-lived token in the web
 app and pastes it into the agent's configuration.
@@ -74,10 +76,37 @@ app and pastes it into the agent's configuration.
 
 ## Decision Outcome
 
-Chosen: **a refresh-token grant**. It is the only option that removes both the restart and
-the 7 days without putting a long-lived secret on every request, and it needs neither a
-page in the web app nor a new kind of credential. Personal access tokens stay possible
-later, and nothing here is in their way.
+Chosen: **a mix of options 2 and 1. A refresh-token grant, and for the clients that get a
+refresh token, the hash of their current access token is stored too,** so that a restart
+does not end it. The refresh token removes the 7 days. The stored access-token hash removes
+the restart. Neither puts a long-lived secret on every request, and neither needs a page in
+the web app or a new kind of credential. Personal access tokens stay possible later, and
+nothing here is in their way.
+
+**Why the grant alone was not enough.** The first version kept access tokens in memory only,
+as before, and relied on the client to refresh after the `401` that follows a restart. It
+passed its own tests and failed with a real client. The official Python MCP SDK, `mcp`
+1.26.0, refreshes only when its own clock says the access token has run out
+(`mcp/client/auth/oauth2.py`, lines 491 to 498: `if not self.context.is_token_valid() and
+self.context.can_refresh_token()`). On a `401` for a token it believes valid it runs the
+whole authorization again (the same file, from line 505: `if response.status_code == 401`,
+"Perform full OAuth flow"), which opens a browser. Run by hand against a local server, with
+sign-in off: authorized once, a second client process needed nobody, and after a restart of
+chartgen the client asked for a person again, with `/authorize` and a code exchange in the
+server log and no refresh. With the access-token hash stored, the same three runs need a
+person once, and after the restart the server log shows no `/authorize`, `/register` or
+`/token` request at all.
+
+Hermes, the first agent this is for, behaves the same way according to its code, which was
+read on the target and not run: it stores the absolute time at which a token runs out and
+refreshes first when that has passed (`mcp_oauth.py`, lines 468 to 495;
+`mcp_oauth_manager.py`, lines 80 to 89), and has no path of its own that refreshes after a
+`401` (`mcp_oauth_manager.py`, line 5).
+
+Rejected: **storing every access token**, option 1 as it stands. The web app's are tied to a
+browser session and come one per page load. Rejected: **telling clients apart by a
+`WWW-Authenticate` hint** such as `error="invalid_token"`: it is the standard signal, and
+the client above does not act on it.
 
 ### What is issued, and to whom
 
@@ -93,13 +122,38 @@ a new access token, 7 days as before, and the next refresh token.
 
 A refresh token is 256 random bits. The server keeps its SHA-256 and nothing else, in
 memory and in the new table `refresh_tokens`. The value is in the answer to the client and
-nowhere after that, including the log. Access tokens are unchanged: in memory, by their
-value, gone at a restart. "Only hashes are stored" is about what is on disk.
+nowhere after that, including the log. "Only hashes are stored" is about what is on disk:
+in memory, access tokens are still held by their value, as before.
 
 A refresh token belongs to the client it was issued to and to the user who authorized, or
 to no user with sign-in off. Another `client_id` is refused. The access token it yields has
 the same owner as the first one had, and never a browser session, so it cannot pass for the
 web app's and gets `403` from `/workspace/sync`.
+
+### An access token after a restart
+
+The row of a family's usable refresh token also holds the SHA-256 of the access token that
+was issued with it. It is written in the same transaction, at the code exchange and at each
+refresh, and never by a request that uses the token. A spent row loses it.
+
+At startup these hashes are loaded. The first request that carries a matching token makes
+it a token like any other again, under the value the client sent. Event streams and chart
+subscriptions are keyed by that value, taken from the request, so they need nothing from
+the store.
+
+- **The 7 days are absolute.** They count from the time in the row, when the token was
+  issued. A restart adds nothing, however many there are.
+- **Only the newest access token of a family comes back.** One from before the last refresh
+  ends at the restart, as all did before.
+- **It is never the web app's.** The web app's client has no family, so none of its tokens
+  is stored, and a token that comes back has no browser session: `/workspace/sync` answers
+  it `403`, as before the restart.
+- It comes back only under the sign-in mode it was issued in, and only while its client is
+  registered.
+- It counts in the limits as before the restart: one access token of its client.
+
+The web app's own tokens, and those of a client that got no refresh token, still end at a
+restart.
 
 ### Rotation, and a token that comes back
 
@@ -156,6 +210,13 @@ and one that stopped lets them expire. A tool call still writes nothing.
   user's approval of a client is dropped, which today only the limit of 50 approvals does,
   that user's families for that client end too.
 
+**What this gives up:** a restart used to end every access token, and operators could rely
+on that, for instance after a client id leaked. For a client with a refresh token it no
+longer does. The ways above are the only ones that end such an access token before its 7
+days are over, so each of them ends it together with the family: `/revoke`, a spent token
+that comes back, the rows deleted by an operator, the client evicted or deleted, the
+approval dropped, and the family running out.
+
 Signing out of the web app does not end a family, as it does not end a connector's access
 token today ([ADR-0044](/chartgen/decisions/0044-sign-in-through-github-and-google/)): an
 agent is there to work with no browser open.
@@ -204,8 +265,8 @@ registered clients already do.
 
 ### Consequences
 
-- Good: a headless client is authorized once. A restart or a deploy costs it one refused
-  call and one refresh.
+- Good: a headless client is authorized once. A restart or a deploy costs it nothing: its
+  access token still works, and it refreshes when the 7 days are over.
 - Good: connectors stop sending their users through sign-in every 7 days.
 - Good: nothing durable is first-party, and no new path leads to rows owned by a client.
 - Good: a copied refresh token is noticed the first time both copies are used.
@@ -225,8 +286,16 @@ registered clients already do.
 - Bad: a client that crashes after an exchange and before saving the answer has 60 seconds
   to retry. After that the token it still has is a spent one, presenting it ends the
   family, and a person authorizes again.
-- Neutral: every client sees one `401` after a restart, and its event stream reconnects, as
-  it already had to.
+- Bad: **a restart no longer ends the access token of a client with a refresh token.**
+  Ending one early takes one of the ways under Revocation.
+- Bad: **what the server cannot fix.** A client must know when its access token runs out,
+  to refresh in time. The Python SDK above keeps that time in memory only, so a client
+  process that is restarted and then holds the same access token past its 7 days gets a
+  `401` and authorizes again, with a person. A process that runs through refreshes in time,
+  and so does a client that stores the time, as Hermes does. A client that answers a `401`
+  with a refresh needs none of this.
+- Neutral: an event stream still ends with the process and reconnects, as it already had
+  to.
 - Neutral: the answers of `/token` and `/register` and the metadata document name the new
   grant also on a server with nothing configured. A client that ignores a
   `refresh_token` behaves as before.
@@ -234,11 +303,16 @@ registered clients already do.
 ### Testing
 
 **The restart** is proved with the real binary, in `tests/e2e.rs`. With sign-in off, a
-client is authorized, the process is killed and started again on the same `CHARTGEN_DB`, the
-old access token gets `401`, and the refresh token yields one that works, twice in a row;
-the same test revokes and restarts once more. With sign-in on, the second test starts the
-binary on a file that already holds a registered client, a user, a session and an approval,
-and the connector's refresh token works there as its user.
+client is authorized, the process is killed and started again on the same `CHARTGEN_DB`, and
+the same access token calls a tool, with no `/token` request in between. Then the refresh
+token yields the next pair, twice in a row with a restart between, and an access token from
+before a refresh gets `401`. The same test revokes and restarts once more, and neither token
+works. With sign-in on, the second test starts the binary on a file that already holds a
+registered client, a user, a session and an approval: the connector's access token is known
+again as its user, the web app's is not, and the refresh token works.
+
+**A real client** was run by hand, as described under the decision: the Python SDK against a
+local server, three runs with a restart before the third. It is not part of the test suite.
 
 **A deploy** is a new build started on the file the last one left, which is those restarts
 plus a schema change. The schema part is a store test: a file from before this migration,
@@ -250,4 +324,6 @@ break the day a later migration is appended.
 Further tests cover a failed store write, a spent token after a restart, the retry, rows
 deleted by an operator, the web app's client, the workspace endpoint, signing out, both
 sign-in modes and the switch between them, the limits, a dropped approval, and that
-refreshing claims nothing.
+refreshing claims nothing. Where one of these ends a family, the test also restarts and
+checks that the access token is gone. Others cover the 7 days across a restart, and an event
+stream and a chart subscription opened with an access token from before one.

@@ -99,6 +99,9 @@ struct OAuthStore {
     tokens: HashMap<String, AccessToken>,
     /// Refresh tokens by the hash of their value, spent ones included (ADR-0058).
     refresh: HashMap<String, refresh::RefreshToken>,
+    /// Access tokens from before the restart, by the hash of their value, which is all
+    /// the store has of them. The first request with one moves it to `tokens`.
+    restored: HashMap<String, AccessToken>,
     /// Recent `/register` calls per client address.
     registrations: HashMap<String, Vec<Instant>>,
     /// When a refused registration last logged, and refusals since.
@@ -116,6 +119,7 @@ impl OAuthStore {
             codes: HashMap::new(),
             tokens: HashMap::new(),
             refresh: HashMap::new(),
+            restored: HashMap::new(),
             registrations: HashMap::new(),
             refusal_logged_at: None,
             refusals_unlogged: 0,
@@ -296,7 +300,20 @@ impl OAuthStore {
             .retain(|_, t| now.duration_since(t.created_at) < t.expires_in);
     }
 
+    /// Know an access token from before the restart again (ADR-0058). From here on it
+    /// is a token like any other, under the value the client sent.
+    fn adopt(&mut self, token: &str) {
+        if self.restored.is_empty() || self.tokens.contains_key(token) {
+            return;
+        }
+        if let Some(mut t) = self.restored.remove(&signin::hash_of(token)) {
+            t._token = token.to_string();
+            self.tokens.insert(token.to_string(), t);
+        }
+    }
+
     fn validate_token(&mut self, token: &str) -> bool {
+        self.adopt(token);
         self.cleanup_expired();
         let Some(t) = self.tokens.get_mut(token) else {
             return false;
@@ -310,14 +327,14 @@ impl OAuthStore {
         true
     }
 
-    /// Issue an access token to `client_id`.
+    /// Issue `token` as an access token to `client_id`.
     fn issue_access(
         &mut self,
+        token: String,
         client_id: &str,
         user: Option<signin::TokenUser>,
         family: Option<String>,
     ) -> String {
-        let token = Uuid::new_v4().to_string();
         self.tokens.insert(
             token.clone(),
             AccessToken {
@@ -339,6 +356,7 @@ impl OAuthStore {
     /// (ADR-0025) and server alerts (ADR-0042): its signed-in user, or with sign-in
     /// off its OAuth client (ADR-0044).
     fn owner_for_token(&mut self, token: &str) -> Option<String> {
+        self.adopt(token);
         self.cleanup_expired();
         self.tokens.get(token).map(|t| match &t.user {
             Some(user) => user.id.clone(),
@@ -348,6 +366,7 @@ impl OAuthStore {
 
     /// The signed-in user of a valid token; `None` with sign-in off.
     fn user_for_token(&mut self, token: &str) -> Option<String> {
+        self.adopt(token);
         self.cleanup_expired();
         self.tokens.get(token)?.user.as_ref().map(|u| u.id.clone())
     }
@@ -856,12 +875,18 @@ async fn oauth_token(
         }
 
         // Issue access token
-        let token = s.issue_access(&body.client_id, token_user.clone(), None);
+        let token = Uuid::new_v4().to_string();
+        let token = s.issue_access(token, &body.client_id, token_user.clone(), None);
         if let Some(user) = &token_user {
             s.trim_user_tokens(&user.id);
         }
         let user_id = token_user.as_ref().map(|u| u.id.clone());
-        let family = s.plan_family(&body.client_id, &stored_redirect_uri, user_id.as_deref());
+        let family = s.plan_family(
+            &body.client_id,
+            &stored_redirect_uri,
+            user_id.as_deref(),
+            &token,
+        );
         (token, user_id, family)
     };
     // A refresh token is handed out only once the store has it (ADR-0058). When the
@@ -2588,6 +2613,96 @@ mod tests {
         (v["result"]["isError"] == true, text)
     }
 
+    /// After a restart the server knows an access token by its hash only (ADR-0058).
+    /// Streams and chart subscriptions are keyed by the value the client sends, so
+    /// they work for it as for any token, from its first request on.
+    #[tokio::test]
+    async fn an_access_token_from_before_a_restart_opens_a_stream_and_subscribes() {
+        let state = Arc::new(AppState {
+            oauth: Mutex::new(OAuthStore::new()),
+            engine: None,
+            charts: sample_hub(),
+        });
+        {
+            let mut s = state.oauth.lock().unwrap();
+            s.refresh.insert(
+                "refresh-hash".to_string(),
+                refresh::RefreshToken {
+                    family: "f".into(),
+                    seq: 0,
+                    client_id: "test".into(),
+                    user: None,
+                    created_at: chrono::Utc::now().timestamp(),
+                    spent_at: None,
+                    access_hash: Some(signin::hash_of("push-token")),
+                },
+            );
+            s.restored.insert(
+                signin::hash_of("push-token"),
+                AccessToken {
+                    _token: String::new(),
+                    family: Some("f".into()),
+                    client_id: "test".to_string(),
+                    created_at: Instant::now(),
+                    expires_in: Duration::from_secs(3600),
+                    user: None,
+                },
+            );
+        }
+        let app: Router = Router::new()
+            .route("/mcp", get(sse_handler).post(mcp_handler))
+            .with_state(state.clone());
+        let init = json!({"jsonrpc": "2.0", "id": 0, "method": "initialize", "params": {}});
+        let resp = app.clone().oneshot(rpc(init, None)).await.unwrap();
+        let sid = resp.headers()["Mcp-Session-Id"]
+            .to_str()
+            .unwrap()
+            .to_string();
+        let sse = Request::builder()
+            .method("GET")
+            .uri("/mcp")
+            .header("authorization", "Bearer push-token")
+            .header("Mcp-Session-Id", &sid)
+            .body(Body::empty())
+            .unwrap();
+        let stream = app.clone().oneshot(sse).await.unwrap();
+        assert_eq!(stream.status(), StatusCode::OK);
+        let mut body = stream.into_body();
+        {
+            let s = state.oauth.lock().unwrap();
+            assert!(s.restored.is_empty() && s.tokens.contains_key("push-token"));
+        }
+
+        let args =
+            json!({"ticker": "BTCUSDT", "timeframe": "1m", "indicators": ["rsi"], "warmup": 20});
+        let (err, text) = tool_text(&app, "subscribe_chart", args, Some(&sid)).await;
+        assert!(!err, "{text}");
+        let sub: Value = serde_json::from_str(&text).unwrap();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let frame = tokio::time::timeout_at(deadline, body.frame())
+                .await
+                .expect("a tick within 5 s")
+                .unwrap()
+                .unwrap();
+            let chunk = String::from_utf8_lossy(frame.data_ref().unwrap()).to_string();
+            if let Some(data) = chunk.strip_prefix("event: message\ndata: ") {
+                let n: Value = serde_json::from_str(data.trim()).unwrap();
+                assert_eq!(n["params"]["subscription_id"], sub["subscription_id"]);
+                break;
+            }
+        }
+        // Another token's hash opens nothing.
+        let other = Request::builder()
+            .method("GET")
+            .uri("/mcp")
+            .header("authorization", "Bearer refresh-hash")
+            .body(Body::empty())
+            .unwrap();
+        let refused = app.clone().oneshot(other).await.unwrap();
+        assert_eq!(refused.status(), StatusCode::UNAUTHORIZED);
+    }
+
     #[tokio::test]
     async fn chart_ticks_flow_over_the_sse_stream_until_it_closes() {
         let state = Arc::new(AppState {
@@ -2966,6 +3081,7 @@ mod tests {
             user: None,
             created_at,
             spent_at,
+            access_hash: None,
         };
         s.refresh.insert("h".into(), family(now, None));
         assert_eq!(s.make_room(nobody_owns_scripts).unwrap(), ["c1"]);

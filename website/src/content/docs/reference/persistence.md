@@ -162,7 +162,8 @@ CREATE TABLE refresh_tokens (
     client_id   TEXT    NOT NULL,
     user_id     TEXT,                   -- users.id, or NULL when issued with sign-in off
     created_at  INTEGER NOT NULL,
-    spent_at    INTEGER                 -- when it was exchanged; kept to recognise reuse
+    spent_at    INTEGER,                -- when it was exchanged; kept to recognise reuse
+    access_hash TEXT                    -- SHA-256 hex of the access token issued with it, while unspent
 );
 CREATE INDEX refresh_tokens_family ON refresh_tokens (family);
 -- Migration 3: server alerts (ADR-0042).
@@ -229,9 +230,10 @@ Clients with no token 24 hours after registering are deleted at startup and on e
 registration, unless they own scripts.
 
 `oauth_clients` keeps dynamically registered OAuth clients across restarts,
-so a client keeps its `client_id`, and with it any scripts. Access tokens stay
-in memory: after a restart the web app re-authorizes, and other clients exchange their
-[refresh token](/chartgen/reference/oauth/#refresh-tokens). Clients that received a token
+so a client keeps its `client_id`, and with it any scripts. Access token values stay
+in memory: after a restart the web app re-authorizes, and a client with a
+[refresh token](/chartgen/reference/oauth/#refresh-tokens) is known again by the hash of
+its access token. Clients that received a token
 are only deleted when a registration at the
 [1000 client limit](/chartgen/reference/oauth/#token-lifetime) evicts them, which
 spares any client with a live token, a refresh token or a row in `user_indicators`, or, with

@@ -138,9 +138,10 @@ Access tokens are valid for **7 days** (`604800` seconds). Expired tokens are
 evicted lazily on the next request. A client with a [refresh token](#refresh-tokens)
 exchanges it for a new one, and the web app runs the authorization code flow again.
 
-Access tokens are held in memory, so a process restart invalidates every one of
-them. A client with a refresh token gets a `401`, refreshes and carries on; the web
-app re-authorizes. Registered clients are also stored in `CHARTGEN_DB` and
+A restart ends the web app's access tokens, which are held in memory only, and the
+web app re-authorizes by itself. The access token of a client with a
+[refresh token](#refresh-tokens) is known again after a restart, for what is left of
+its 7 days. Registered clients are also stored in `CHARTGEN_DB` and
 restored at startup, with or without `CHARTGEN_SCRIPTING=1`, so a client keeps
 its `client_id` across a restart
 ([ADR-0036](/chartgen/decisions/0036-own-origin-invalid-client-redirect/)). With
@@ -198,9 +199,9 @@ once a minute:
 
 **Usually this clears without deleting anything, so do not start by deleting
 registrations.** A token expires after 7 days and a refresh token 30 days after its last
-use, and the client can then be evicted unless it has a new one. A restart drops every
-access token, so the next registrations can evict clients that have no refresh token and
-no scripts, and browsers in use sign in again by themselves. Clients with a refresh token
+use, and the client can then be evicted unless it has a new one. A restart drops the
+access tokens of clients without a refresh token, so the next registrations can evict
+those that own no scripts, and browsers in use sign in again by themselves. Clients with a refresh token
 stay through a restart ([ADR-0058](/chartgen/decisions/0058-refresh-tokens-for-headless-clients/)).
 
 **Delete only if it keeps coming back.** If `/register` returns to `503` soon after a
@@ -271,6 +272,12 @@ one before using the access token.
   each its own authorization.
 - **A lost answer can be retried for 60 seconds** with the same refresh token. The retry
   gets a new one, and the one from the lost answer stops working.
+- **The access token outlives a restart of the server.** The server stores the SHA-256 of
+  the newest access token issued with a refresh token and knows it again at startup, so a
+  restart or a deploy causes no `401`. Its 7 days count from when it was issued, and a
+  restart adds nothing. Clients commonly refresh only when they know their token has run
+  out, and answer a `401` with a whole new authorization, so this is what keeps a person
+  out of it.
 - **30 days out of use ends it.** Every exchange starts the 30 days again, so a client
   that keeps working is never sent back to a browser.
 - It belongs to the client it was issued to, and with sign-in on to the user who
@@ -293,12 +300,13 @@ out of use ended first, within the 20 clients they keep live. With sign-in off, 
 keeps 20, and past that a code exchange answers with an access token and no refresh
 token: nobody's is ended to make room.
 
-**What is stored.** The server keeps the SHA-256 of a refresh token, never its value, in
+**What is stored.** The server keeps the SHA-256 of a refresh token and of the access token
+issued with it, never a value, in
 the [`refresh_tokens`](/chartgen/reference/persistence/) table of `CHARTGEN_DB`. The file
 has to outlive the process: a container needs
 [a volume at `~/.chartgen`](/chartgen/guides/deploy/#docker). Without one, when the store
 cannot be opened, or in a build without the default `scripting` cargo feature, refresh
-tokens work until the next restart and no longer. For a store that cannot be opened the
+tokens and these access tokens work until the next restart and no longer. For a store that cannot be opened the
 log says so at startup:
 
 ```text
@@ -312,8 +320,8 @@ authorization. After that it refreshes by itself.
 
 1. **Use `https://<domain>/mcp` as the server URL with OAuth as the auth method.** The
    client must discover the server from the `401`, register itself, run the authorization
-   code flow with PKCE, **keep its refresh token on disk**, and refresh after a `401` or
-   when the access token has expired. Clients built on the official MCP SDKs do this.
+   code flow with PKCE, **keep its tokens on disk, with the time the access token runs
+   out** (`expires_in` is 604800 seconds), and refresh once that time has passed.
    With Hermes:
 
    ```bash
@@ -327,8 +335,17 @@ authorization. After that it refreshes by itself.
    to the client's `redirect_uri`, usually a loopback address. If the client does not run
    on the machine with the browser, the page fails to load: copy the address from the
    address bar back into the client, which is what it asks for.
-3. **Check it once.** Restart chartgen and let the agent make a call. The server log shows
-   `POST /token SUCCESS — token refreshed` and the call succeeds, with no browser.
+3. **Check it once.** Restart chartgen and let the agent make a call. The log says
+   `Refresh tokens: 1 authorizations restored` at startup, the call succeeds with no
+   browser, and no `/authorize` or `/token` line follows. Seven days after the
+   authorization, or earlier if the client refreshes ahead of time, the log shows
+   `POST /token SUCCESS — token refreshed`.
+
+A client that does not remember when its access token runs out, for example because it
+keeps that time in memory and was restarted, sends the old token after the 7 days, gets a
+`401`, and most clients then ask for a new authorization. If an agent comes back to a
+browser about a week after it was connected, this is why: the fix is in the client, which
+must store the expiry or refresh after a `401`.
 
 With sign-in on, what the agent stores (scripts, server alerts) belongs to the account that
 approved it, and is visible to that account in the web app. With sign-in off it belongs to
@@ -366,8 +383,8 @@ operator, because no page lists an account's authorizations yet.
    sqlite3 /host/path/to/chartgen.db "DELETE FROM refresh_tokens WHERE client_id = '<client_id>';"
    ```
 
-3. Start the server. The restart ends the access tokens too, so nothing the agent held
-   still works.
+3. Start the server. An access token is only known again through its row, so nothing the
+   agent held still works.
 
 The first statement ends every application the account approved. With sign-in off there is
 no account, so use the second.

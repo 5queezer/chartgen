@@ -2307,8 +2307,9 @@ fn test_registered_client_survives_restart_without_scripting() {
     if cfg!(feature = "scripting") {
         let new_token = sign_in(port, &client);
         assert_ne!(new_token, token);
-        // Tokens stay in memory: the old one is gone, the new one works.
-        assert_eq!(ping_status(port, &token), 401);
+        // The access token of a client that holds a refresh token is known again
+        // after a restart (ADR-0058), and a new one works beside it.
+        assert_eq!(ping_status(port, &token), 200);
         assert_eq!(ping_status(port, &new_token), 200);
     } else {
         assert_unknown_client_json(authorize(port, &client, EXTERNAL_REDIRECT), "no store");
@@ -5197,8 +5198,13 @@ fn test_a_headless_client_keeps_working_across_restarts() {
     for _ in 0..2 {
         let port = free_port();
         let _srv = spawn_server_on(port, None, &db, false);
-        let stale = access_tokens.last().unwrap();
-        assert_eq!(ping_status(port, stale), 401, "access tokens are memory");
+        // The same access token calls a tool: no 401, and no `/token` in between.
+        let (current, earlier) = access_tokens.split_last().unwrap();
+        let listed = tool_text(port, current, "list_indicators", serde_json::json!({}));
+        assert!(listed.contains("rsi"), "{listed}");
+        for old in earlier {
+            assert_eq!(ping_status(port, old), 401, "one from before an exchange");
+        }
         let (st, next) = refresh(port, &client, &token);
         assert_eq!(st, 200, "{next}");
         assert_eq!(next["token_type"], "Bearer");
@@ -5224,6 +5230,7 @@ fn test_a_headless_client_keeps_working_across_restarts() {
     drop(srv);
     let port = free_port();
     let _srv = spawn_server_on(port, None, &db, false);
+    assert_eq!(ping_status(port, &access), 401, "revoked for good");
     assert_eq!(refresh(port, &client, &token).0, 400);
 
     // The store holds hashes, never a value that was handed out.
@@ -5244,8 +5251,12 @@ fn test_refresh_tokens_deleted_from_the_store_are_gone_after_a_restart() {
     let port = free_port();
     let srv = spawn_server_on(port, None, &db, false);
     let (lost, kept) = (register_external(port), register_external(port));
-    let lost_token = text(&authorize_headless(port, &lost), "refresh_token");
-    let kept_token = text(&authorize_headless(port, &kept), "refresh_token");
+    let (lost_answer, kept_answer) = (
+        authorize_headless(port, &lost),
+        authorize_headless(port, &kept),
+    );
+    let lost_token = text(&lost_answer, "refresh_token");
+    let kept_token = text(&kept_answer, "refresh_token");
     drop(srv);
 
     let conn = rusqlite::Connection::open(&db).unwrap();
@@ -5258,6 +5269,14 @@ fn test_refresh_tokens_deleted_from_the_store_are_gone_after_a_restart() {
         .unwrap();
     assert_eq!(stored.len(), 2);
     assert!(!stored.contains(&lost_token) && !stored.contains(&kept_token));
+    let on_disk = std::fs::read(&db).unwrap();
+    for answer in [&lost_answer, &kept_answer] {
+        for field in ["access_token", "refresh_token"] {
+            let value = text(answer, field);
+            let found = on_disk.windows(value.len()).any(|w| w == value.as_bytes());
+            assert!(!found, "a {field} value is in the file");
+        }
+    }
     let deleted = conn
         .execute(
             "DELETE FROM refresh_tokens WHERE client_id = ?1",
@@ -5269,6 +5288,9 @@ fn test_refresh_tokens_deleted_from_the_store_are_gone_after_a_restart() {
 
     let port = free_port();
     let _srv = spawn_server_on(port, None, &db, false);
+    // The access token goes with the rows: a restart alone would not have ended it.
+    assert_eq!(ping_status(port, &text(&lost_answer, "access_token")), 401);
+    assert_eq!(ping_status(port, &text(&kept_answer, "access_token")), 200);
     assert_eq!(refresh(port, &lost, &lost_token).0, 400);
     assert_eq!(refresh(port, &kept, &kept_token).0, 200);
     let _ = std::fs::remove_dir_all(db.parent().unwrap());
@@ -5339,9 +5361,21 @@ fn test_signin_a_connector_refreshes_as_its_user_and_is_never_the_web_app() {
     assert_eq!(sync.0, 403, "not the web app's token: {}", sync.1);
     drop(srv);
 
-    // The same after a restart, with nobody at a browser.
+    // The same after a restart, with nobody at a browser: the connector's access
+    // token is known again, as its user and not as the web app, whose token is gone.
     let p = free_port();
     let _srv = start_server(signin_command(p, &db, &fake, &["github"], None, false), p);
+    assert_eq!(me(p, &access).1["user"]["id"], "github:5");
+    assert_eq!(
+        workspace(
+            p,
+            Some(&access),
+            serde_json::json!({"since": 0, "writes": []})
+        )
+        .0,
+        403
+    );
+    assert_eq!(ping_status(p, &web), 401);
     let (st, again) = refresh(p, &client, &text(&next, "refresh_token"));
     assert_eq!(st, 200, "{again}");
     let access = text(&again, "access_token");
@@ -5360,6 +5394,7 @@ fn test_signin_a_connector_refreshes_as_its_user_and_is_never_the_web_app() {
     drop(_srv);
     let p = free_port();
     let _srv = spawn_server_on(p, None, &db, false);
+    assert_eq!(ping_status(p, &access), 401);
     assert_eq!(refresh(p, &client, &text(&again, "refresh_token")).0, 400);
     let _ = std::fs::remove_dir_all(db.parent().unwrap());
 }

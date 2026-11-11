@@ -129,8 +129,8 @@ chartgen asks for no scope: it reads the public profile's id and login.
 4. Set `CHARTGEN_GOOGLE_CLIENT_ID` and `CHARTGEN_GOOGLE_CLIENT_SECRET`.
 
 Restart, and the log says `Sign-in required, through: GitHub, Google`. With one provider
-configured the choice of provider is skipped. Access tokens are in memory, and a refresh
-token from before sign-in is not valid with it on, so every client signs in
+configured the choice of provider is skipped. A token from before sign-in, access or refresh,
+is not valid with it on, so every client signs in
 once after that restart; existing clients keep their `client_id`.
 
 Keep the volume at `~/.chartgen` mounted: sessions and users are stored there.
@@ -256,8 +256,8 @@ To replace one that leaked:
 
 1. Get a new id. In the browser, clear this site's data, or remove `chartgen.oauth.client_id` and
    `chartgen.oauth.client_secret` from local storage, and reload. An MCP client registers again.
-2. Stop the server. A restart also ends every access token, which live in memory only, including any the old
-   id was given. Its refresh tokens go in step 4.
+2. Stop the server. A restart ends the web app's access tokens. What the old id was given beyond
+   that, refresh tokens and the access tokens that come back with them, goes in step 4.
 3. Put the new id in `CHARTGEN_SERVER_ALERT_CLIENTS` in place of the old one.
 4. Delete the old client and its alerts, or it can still sign in, as any stranger can, and see them:
 

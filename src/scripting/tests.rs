@@ -1180,6 +1180,7 @@ fn refresh_row(hash: &str, family: &str, seq: i64) -> persistence::StoredRefresh
         user_id: (family == "users").then(|| "github:1".to_string()),
         created_at: 1000 + seq,
         spent_at: None,
+        access_hash: Some(format!("access-of-{hash}")),
     }
 }
 
@@ -1230,6 +1231,7 @@ fn a_rotation_is_stored_whole_or_not_at_all() {
         Some(next.created_at),
         "kept, to recognise reuse"
     );
+    assert_eq!(spent.access_hash, None, "its access token is not restored");
     assert_eq!(rows.iter().filter(|r| r.spent_at.is_none()).count(), 1);
 
     // The successor cannot be stored: the token it would replace stays unspent.

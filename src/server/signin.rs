@@ -639,6 +639,16 @@ impl OAuthStore {
                 web_clients.insert(t.client_id.clone());
             }
         }
+        // One from before the restart counts as well, under the hash it is known by.
+        for (hash, t) in &self.restored {
+            if let Some(u) = t.user.as_ref().filter(|u| u.id == user) {
+                by_client
+                    .entry(t.client_id.clone())
+                    .or_default()
+                    .0
+                    .push((u.last_used, hash.clone()));
+            }
+        }
         for t in self.refresh.values() {
             if t.spent_at.is_none() && t.user.as_deref() == Some(user) {
                 let age = Duration::from_secs((unix - t.created_at).max(0) as u64);
@@ -672,15 +682,21 @@ impl OAuthStore {
         let mut ended = Vec::new();
         for (rank, (_, cap, tokens, families)) in clients.into_iter().enumerate() {
             let live = rank < MAX_LIVE_CLIENTS_PER_USER;
-            let excess = tokens.len().saturating_sub(if live { cap } else { 0 });
-            for (_, token) in tokens.into_iter().take(excess) {
-                self.tokens.remove(&token);
-            }
+            // Families first: one that ends takes its access tokens along, and what is
+            // left is then counted, so no family in use loses its token to one that went.
             let keep = if live { MAX_TOKENS_PER_CLIENT } else { 0 };
             let excess = families.len().saturating_sub(keep);
-            ended.extend(families.into_iter().take(excess).map(|f| f.1));
+            let gone: Vec<String> = families.into_iter().take(excess).map(|f| f.1).collect();
+            self.end_families(&gone);
+            ended.extend(gone);
+            let held = |t: &String| self.tokens.contains_key(t) || self.restored.contains_key(t);
+            let tokens: Vec<String> = tokens.into_iter().map(|t| t.1).filter(held).collect();
+            let excess = tokens.len().saturating_sub(if live { cap } else { 0 });
+            for token in tokens.into_iter().take(excess) {
+                self.tokens.remove(&token);
+                self.restored.remove(&token);
+            }
         }
-        self.end_families(&ended);
         ended
     }
 
@@ -2143,6 +2159,7 @@ mod tests {
                     user: Some(user.to_string()),
                     created_at: now_unix(),
                     spent_at: None,
+                    access_hash: None,
                 },
             )
         };
@@ -2155,6 +2172,18 @@ mod tests {
             "from-mine".to_string(),
             AccessToken {
                 _token: "from-mine".to_string(),
+                family: Some("mine".to_string()),
+                client_id: "c0".to_string(),
+                created_at: Instant::now(),
+                expires_in: Duration::from_secs(3600),
+                user: None,
+            },
+        );
+        // And one from before a restart, known by its hash only.
+        s.restored.insert(
+            "hash-of-restored".to_string(),
+            AccessToken {
+                _token: String::new(),
                 family: Some("mine".to_string()),
                 client_id: "c0".to_string(),
                 created_at: Instant::now(),
@@ -2175,6 +2204,7 @@ mod tests {
         assert!(!s.signin.as_ref().unwrap().has_grant("github:1", "c0"));
         assert!(s.families_of("github:1", "c0").is_empty());
         assert!(!s.tokens.contains_key("from-mine"), "its access tokens too");
+        assert!(s.restored.is_empty());
         assert_eq!(s.families_of("github:2", "c0"), ["theirs"]);
         assert_eq!(s.families_of("github:1", "c1"), ["other-client"]);
     }
