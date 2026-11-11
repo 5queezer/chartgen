@@ -1267,7 +1267,6 @@ fn test_a_chart_of_heavy_indicators_costs_what_they_draw() {
 #[cfg(target_os = "linux")]
 #[test]
 fn test_a_client_hanging_up_its_side_leaves_no_orphan() {
-    use std::io::Read;
     let srv = spawn_sample_server();
     let client = register_external(srv.port);
     let token = sign_in(srv.port, &client);
@@ -1277,16 +1276,22 @@ fn test_a_client_hanging_up_its_side_leaves_no_orphan() {
     assert!(unread_answer_size(&mut unread) > HELD);
     std::thread::sleep(std::time::Duration::from_millis(300));
     unread.shutdown(std::net::Shutdown::Write).unwrap();
-    unread
-        .set_read_timeout(Some(std::time::Duration::from_secs(10)))
-        .unwrap();
-    let mut rest = Vec::new();
-    let ended = unread.read_to_end(&mut rest);
+    // The answer stays unread while waiting for the reset. A client that reads on empties
+    // what the kernel holds, and a server that gets to the hang-up late, on a busy machine,
+    // then has nothing unsent to drop: it closes plainly, rightly, and leaves no orphan
+    // either. Unread, there is always something to drop, however late the server is.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let reset = loop {
+        match unread.take_error().unwrap() {
+            Some(e) => break Some(e.kind()),
+            None if std::time::Instant::now() >= deadline => break None,
+            None => std::thread::sleep(std::time::Duration::from_millis(10)),
+        }
+    };
     assert_eq!(
-        ended.map_err(|e| e.kind()),
-        Err(std::io::ErrorKind::ConnectionReset),
-        "it read {} bytes more and saw a plain end",
-        rest.len()
+        reset,
+        Some(std::io::ErrorKind::ConnectionReset),
+        "no reset within 10 s of hanging up with the answer unread"
     );
     // And what it held is free again: the same call fits, and it is a real chart.
     let headers = [JSON_POST[0], JSON_POST[1], auth.as_str()];
