@@ -1604,15 +1604,18 @@ many match the filters.
   "group_by": "playbook_version", "feature": null,
   "total": {
     "count": 3, "won": 2, "invalidated": 1, "expired": 0, "cancelled": 0,
-    "with_result": 3, "total_r": 2.1, "mean_r": 0.7, "gaps": 0,
+    "with_result": 3, "total_r": 2.1, "mean_r": 0.7,
+    "entered": 3, "mean_r_entered": 0.7, "gaps": 0,
     "probability": { "stated": 2, "mean": 0.425, "won": 1, "observed": 0.5 }
   },
   "groups": [
     { "key": null, "count": 1, "won": 1, "invalidated": 0, "expired": 0, "cancelled": 0,
-      "with_result": 1, "total_r": 1.6, "mean_r": 1.6, "gaps": 0,
+      "with_result": 1, "total_r": 1.6, "mean_r": 1.6,
+      "entered": 1, "mean_r_entered": 1.6, "gaps": 0,
       "probability": { "stated": 0, "mean": null, "won": 0, "observed": null } },
     { "key": "v1", "count": 2, "won": 1, "invalidated": 1, "expired": 0, "cancelled": 0,
-      "with_result": 2, "total_r": 0.5, "mean_r": 0.25, "gaps": 0,
+      "with_result": 2, "total_r": 0.5, "mean_r": 0.25,
+      "entered": 2, "mean_r_entered": 0.25, "gaps": 0,
       "probability": { "stated": 2, "mean": 0.425, "won": 1, "observed": 0.5 } }
   ]
 }
@@ -1621,8 +1624,17 @@ many match the filters.
 - `with_result` is how many have a result in R; `mean_r` is over those and `null` when there
   are none. A setup that expired filled while nobody scored it has no result and is not
   given one. `gaps` counts results that do not cover bars the server missed.
+- **A setup that was cancelled or expired before its entry was reached has a result of 0 R,
+  and is in `mean_r` and in the observed share.** It never traded, and it pulls the mean
+  towards 0. `entered` is how many setups had their entry reached, and `mean_r_entered` is
+  the mean over those of them that have a result: it leaves the ones that never traded out.
+  Read both: `mean_r` is what following every setup gave, `mean_r_entered` what the trades
+  gave.
 - `probability`: of the setups that stated one, how many (`stated`), its `mean`, how many of
-  them `won`, and that share (`observed`).
+  them `won`, and that share (`observed`). The share is over all of them, the ones that
+  never traded included.
+- A feature's number is one value however it was written: `1` and `1.0` are one group, and
+  a number key is written as a decimal (`1.0`). The string `"1"` is another group.
 - **It counts and judges nothing.** There is no significance and no ranking. A group of a few
   setups says little, and setups that overlap in time or share a cause are not independent
   trials.

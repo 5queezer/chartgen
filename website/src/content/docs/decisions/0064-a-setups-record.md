@@ -91,8 +91,16 @@ There is no migration.
   `probability` in tenths, `symbol` or `direction`. A setup that stated none is in the group
   whose key is null.
 - Per group and in all: `count`, `won`, `invalidated`, `expired`, `cancelled`, `with_result`,
-  `total_r`, `mean_r`, `gaps`, and under `probability` how many stated one, its mean, how
-  many of those won, and that share.
+  `total_r`, `mean_r`, `entered`, `mean_r_entered`, `gaps`, and under `probability` how many
+  stated one, its mean, how many of those won, and that share.
+- **Two means, because there are two honest readings.** A setup that was cancelled or expired
+  before its entry was reached has a result of 0 R
+  ([ADR-0059](/chartgen/decisions/0059-setups-paper-scored/)). `mean_r` is over every result
+  and so holds those zeros: what following every setup gave. `entered` counts the setups
+  whose entry was reached and `mean_r_entered` is the mean over those: what the trades
+  gave. The observed share under `probability` is over all that stated one.
+- A number a feature holds is grouped by its value: `1` and `1.0` are one group, written as
+  `1.0`.
 
 **It reports counts and sums and judges nothing.** No significance, no ranking, no score. A
 mean is over the results there are: a setup without a result is counted and is not given one.
@@ -143,6 +151,12 @@ in the event log either way.
   small group says little and that setups are not independent trials.
 - Bad: a wake-up "at the close" can be missed for good while the server is down. The agent
   needs its own schedule besides.
+- Bad: **if the first log entries cannot be read at start, the three fields are taken
+  from the record rows,** with the line `[setups] cannot read the setups' first log
+  entries` in the log. The rows are the copy an older build may have rewritten, so in that
+  one case a setup can show no fields, or a row's. It was chosen over showing none: a
+  store that answers the read of the rows and not this one is a store in trouble, and
+  hiding the fields would silently move every setup into the group that stated nothing.
 - Bad: **a build from before this, on a store that has these things:**
   - It starts. It skips each `bar_close` alert with the line
     `[alerts] skipping an unreadable alert`, runs the others, and leaves the skipped

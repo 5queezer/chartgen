@@ -228,6 +228,9 @@ one of `playbook_version`, one feature, the probability in tenths, symbol or dir
   observation more than they are several.
 - A result with `gap: true` does not cover what the server missed, and a setup with no
   result is counted but not in the mean.
+- **A setup that was cancelled or ran out before its entry was reached has a result of 0 R.
+  It is in `mean_r` and in the observed share,** and pulls both towards 0. `entered` and
+  `mean_r_entered` count only the setups whose entry was reached.
 - Skips are in it as well, scored with the server's bracket. Filter with `decision`.
 
 ## When the server was away
