@@ -118,13 +118,10 @@ fn replay_at(as_of: Option<i64>) -> Result<(&'static crate::replay::Replay, i64)
 
 /// Now, in ms. Inside a replay's call it is the time that call asks about.
 pub fn now_ms() -> i64 {
-    crate::replay::clock().unwrap_or_else(|| {
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as i64)
-            .unwrap_or(0)
-            + clock_shift_ms()
-    })
+    match crate::replay::clock() {
+        Some(as_of) => as_of,
+        None => data::now_ms() + clock_shift_ms(),
+    }
 }
 
 /// Tests can be run at another time of day: `CHARTGEN_TEST_CLOCK_SHIFT_MS` moves this
