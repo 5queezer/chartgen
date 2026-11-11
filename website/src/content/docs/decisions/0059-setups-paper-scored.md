@@ -184,6 +184,11 @@ rather than presented as complete.
   restart that reads a list without an owner, that owner's setups hold no feed and are not scored,
   as ADR-0042 stops its alerts; they stay readable. Back on the list they are behind like any
   setup the server was away from: the missed bars are read if in reach, else named as a gap.
+  **An unlisted owner's setup still expires.** An expiry is a time, and without bars nothing else
+  would end it, so it would count against the server's 200 open setups for ever. Past its
+  `expires_at` the server marks it `expired` with `gap` set. Never filled, it scores 0. Filled, it
+  closes with **no result and no exit**: no bar was read, and a price is not invented. This is
+  the one case of a closed setup whose `result_r` is null.
 
 ### Tools
 

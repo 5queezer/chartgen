@@ -254,7 +254,28 @@ impl Setups {
         if skipped > 0 {
             eprintln!("[setups] skipped {skipped} stored setups that cannot be read");
         }
-        self.sync_feeds(&mut st);
+        drop(st);
+        self.expire_unscored(fetch::now_ms());
+        self.sync_feeds(&mut self.lock());
+    }
+
+    /// End the open setups that ran out while their owner was off the operator's list.
+    /// They get no bars, and a setup only expires on a bar, so they would stay open, and
+    /// count as open, for ever.
+    fn expire_unscored(&self, now: i64) {
+        let mut st = self.lock();
+        let changed: Vec<(Record, Vec<Revision>)> = st
+            .setups
+            .values()
+            .map(|h| &h.record)
+            .filter(|r| r.status.is_open() && !self.runs(r))
+            .filter_map(|r| {
+                let mut record = r.clone();
+                let log = record.expire_unscored(now);
+                (!log.is_empty()).then_some((record, log))
+            })
+            .collect();
+        let _ = self.write(&mut st, changed);
     }
 
     fn lock(&self) -> MutexGuard<'_, State> {
@@ -972,7 +993,12 @@ fn sound(record: &Record) -> bool {
         && levels.entry.low <= levels.entry.high
         && !levels.targets.is_empty()
         && (record.fill.is_some() || record.exit.is_none())
-        && (record.status.is_open() == record.result_r.is_none())
+        // A closed setup has a result, but for one that expired filled and unscored.
+        && match (record.status.is_open(), record.result_r) {
+            (true, result) => result.is_none(),
+            (false, Some(_)) => true,
+            (false, None) => record.gap && record.fill.is_some(),
+        }
         && (record.status != Status::Triggered || record.fill.is_some())
 }
 
@@ -1016,6 +1042,8 @@ async fn run_upkeep(setups: Weak<Setups>) {
         let Some(this) = setups.upgrade() else {
             return;
         };
+        let this2 = this.clone();
+        let _ = tokio::task::spawn_blocking(move || this2.expire_unscored(fetch::now_ms())).await;
         this.sync_feeds(&mut this.lock());
     }
 }

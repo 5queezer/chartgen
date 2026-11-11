@@ -96,6 +96,10 @@ them, and scores them in order. If it cannot, the log gets a `gap` entry that na
 that was not scored, and the setup's `gap` field is true from then on. Treat a result with
 `gap: true` as incomplete.
 
+If the operator takes your account off the server's list, your setups are no longer scored. You
+can still read them. One that runs out meanwhile is marked `expired` with `gap: true`: at 0 R if
+it was never filled, and with no result (`result_r: null`) if it was, since no price was read.
+
 ## Replay
 
 A replay server answers the same tools from **fixture bars**, as of a time each call names. It

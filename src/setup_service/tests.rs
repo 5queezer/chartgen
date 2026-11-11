@@ -516,6 +516,73 @@ async fn setups_of_an_owner_taken_off_the_list_hold_no_feed_and_are_not_scored()
     assert_eq!(s.pairs().len(), 2);
 }
 
+/// An expiry is a time, not a bar. A setup whose owner is off the list gets no bars, so
+/// without this it would stay open for ever and keep one of the server's open setups.
+#[tokio::test]
+async fn an_unlisted_owners_setup_still_expires() {
+    let (store, dir) = store_at("unlisted-expiry");
+    let both = Access::parse(Some("github:1,github:2"));
+    let s = live_on(store, hub(), both, Limits::default(), None);
+    let watching = call(&s, "create_setup", long_on("ETHUSDT"), "github:2").unwrap();
+    let filled = created(&s, "github:2");
+    let listed = created(&s, "github:1");
+    let (t, p) = (first_bar(&filled), mid(&filled));
+    s.on_bar(&key(), bar(t, p, p, p * 0.975, p * 0.976));
+    drop(s);
+
+    let s = live_on(
+        reopen(&dir.db()),
+        hub(),
+        Access::parse(Some("github:1")),
+        Limits::default(),
+        None,
+    );
+    let get = |id: &Value, owner: &str| call(&s, "get_setup", json!({ "id": id }), owner).unwrap();
+    // Before their expiry nothing happens to them.
+    s.expire_unscored(fetch::now_ms());
+    assert_eq!(get(&watching["id"], "github:2")["status"], "watching");
+    assert_eq!(get(&filled["id"], "github:2")["status"], "triggered");
+
+    let after = fetch::now_ms() + 2 * 86_400_000;
+    s.expire_unscored(after);
+    // Never filled: expired at 0 R, marked as not scored for the time it was unlisted.
+    let expired = get(&watching["id"], "github:2");
+    assert_eq!(expired["status"], "expired");
+    assert_eq!(expired["result_r"], 0.0);
+    assert_eq!(expired["gap"], true);
+    assert_eq!(kinds(&expired), ["created", "gap", "status"]);
+    assert!(expired["log"][2]["reason"]
+        .as_str()
+        .unwrap()
+        .contains("not on the operator's list"));
+    // Filled: no bar was read, so there is no exit price and no result. None is invented.
+    let unknown = get(&filled["id"], "github:2");
+    assert_eq!(unknown["status"], "expired");
+    assert_eq!(unknown["fill"]["price"], filled["entry"]["high"]);
+    assert_eq!(unknown["exit"], json!(null));
+    assert_eq!(unknown["result_r"], json!(null));
+    assert_eq!(unknown["gap"], true);
+    // A listed owner's setup, filled by the same bar, is left to its bars: only a bar
+    // expires it.
+    assert_eq!(get(&listed["id"], "github:1")["status"], "triggered");
+    // They no longer count as open, and a second pass changes nothing.
+    let open = call(&s, "list_setups", json!({ "status": "open" }), "github:2").unwrap();
+    assert_eq!(open["total"], 0);
+    s.expire_unscored(after);
+    assert_eq!(get(&watching["id"], "github:2"), expired);
+    // The closed-without-a-result row is read back as it is after a restart.
+    drop(s);
+    let s = live_on(
+        reopen(&dir.db()),
+        hub(),
+        Access::parse(Some("github:1")),
+        Limits::default(),
+        None,
+    );
+    let again = call(&s, "get_setup", json!({ "id": filled["id"] }), "github:2").unwrap();
+    assert_eq!(again, unknown);
+}
+
 fn alerts_on(store: &'static Store, hub: Arc<ChartHub>, feeds: usize) -> Arc<ServerAlerts> {
     let limits = crate::server_alerts::Limits {
         feeds,
