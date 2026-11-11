@@ -5,6 +5,8 @@ on:
     branches: [main, master]
   pull_request:
     branches: [main, master]
+  # By hand, on any ref: the whole of CI, and then that ref's image (ADR-0060).
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
@@ -343,3 +345,70 @@ jobs:
         run: |
           echo "e2e shards: $SHARDS"
           test "$SHARDS" = success
+
+  # Implements ADR-0060: the image production runs is built here, not on the host
+  # that runs it. It needs every other job, so an image for a commit exists only if
+  # this run was green for that commit, and the host deploys only commits that have
+  # one (scripts/autodeploy/). Never on a pull request.
+  image:
+    name: image (linux/arm64)
+    if: ${{ github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/master') }}
+    needs:
+      - check
+      - test
+      - clippy
+      - no-default-features
+      - fmt
+      - docs-drift
+      - mcp-types-drift
+      - build-release
+      - macos-build
+      - web-unit
+      - docker-web
+      - e2e
+    # A GitHub-hosted arm64 machine: the host is arm64, and nothing is emulated.
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 90
+    # The only job of this workflow that may write anything, and only packages.
+    permissions:
+      contents: read
+      packages: write
+    # One build per ref at a time, in the order they were queued.
+    concurrency:
+      group: image-${{ github.ref }}
+      cancel-in-progress: false
+    env:
+      IMAGE: ghcr.io/${{ github.repository }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Log in to the registry
+        env:
+          REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REGISTRY_USER: ${{ github.actor }}
+        run: printf '%s' "$REGISTRY_TOKEN" | docker login ghcr.io --username "$REGISTRY_USER" --password-stdin
+      - name: Build and push the image of this commit
+        env:
+          SOURCE: ${{ github.server_url }}/${{ github.repository }}
+        run: |
+          docker buildx create --name image --use
+          docker buildx build \
+            --platform linux/arm64 \
+            --label "org.opencontainers.image.source=$SOURCE" \
+            --label "org.opencontainers.image.revision=$GITHUB_SHA" \
+            --cache-from "type=registry,ref=$IMAGE:buildcache" \
+            --cache-to "type=registry,ref=$IMAGE:buildcache,mode=max" \
+            --tag "$IMAGE:$GITHUB_SHA" \
+            --push .
+      # Two pushes close together finish in any order. `master` names the image of
+      # master's head, so a run whose commit is no longer the head leaves it alone.
+      - name: Move the master tag
+        if: ${{ github.ref == 'refs/heads/master' }}
+        run: |
+          head=$(git ls-remote origin refs/heads/master | cut -f1)
+          if [ "$head" = "$GITHUB_SHA" ]; then
+            docker buildx imagetools create --tag "$IMAGE:master" "$IMAGE:$GITHUB_SHA"
+          else
+            echo "master is at $head by now; the master tag stays with the newer run"
+          fi
