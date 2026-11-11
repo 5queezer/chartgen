@@ -8,7 +8,7 @@
 
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::Value;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
@@ -263,6 +263,46 @@ pub struct StoredClient {
 pub struct StoredUser {
     pub id: String,
     pub name: String,
+}
+
+/// An account as the operator page shows it (ADR-0063).
+#[derive(Clone, Debug, PartialEq)]
+pub struct UserSummary {
+    pub id: String,
+    pub name: String,
+    pub created_at: i64,
+    pub last_login_at: i64,
+    pub last_token_at: Option<i64>,
+    pub workspace_docs: i64,
+    pub workspace_bytes: i64,
+    pub setups: i64,
+    pub server_alerts: i64,
+    /// Refresh token families: applications that keep working without the browser.
+    pub authorisations: i64,
+    pub push_devices: i64,
+}
+
+/// A registered client as the operator page shows it (ADR-0063).
+#[derive(Clone, Debug, PartialEq)]
+pub struct ClientSummary {
+    pub id: String,
+    pub name: Option<String>,
+    pub created_at: i64,
+    pub last_token_at: Option<i64>,
+    pub has_family: bool,
+    pub owns_setups: bool,
+}
+
+/// The store as the operator page shows it (ADR-0063).
+#[derive(Clone, Debug, PartialEq)]
+pub struct StoreSummary {
+    pub users_total: i64,
+    pub users: Vec<UserSummary>,
+    pub clients_total: i64,
+    pub clients: Vec<ClientSummary>,
+    pub setups_total: i64,
+    pub pending_deliveries: i64,
+    pub schema_version: i64,
 }
 
 /// A browser session; only the hash of its cookie value is stored.
@@ -867,6 +907,93 @@ impl Store {
         rows.collect()
     }
 
+    /// What the operator page shows of the store (ADR-0063): the `users` accounts that
+    /// signed in last and the `clients` registered last, with counts of what each has,
+    /// and totals. A fixed number of statements whatever the store holds, none per row
+    /// of another table that is not found by an index. **Counts and times only:** no
+    /// token, hash, record, document, endpoint or redirect is read.
+    pub fn operator_summary(&self, users: usize, clients: usize) -> rusqlite::Result<StoreSummary> {
+        let conn = self.conn();
+        let count = |sql: &str| conn.query_row(sql, [], |r| r.get::<_, i64>(0));
+        let mut families: HashMap<String, i64> = HashMap::new();
+        let mut with_family: HashSet<String> = HashSet::new();
+        {
+            let mut stmt = conn.prepare(
+                "SELECT user_id, client_id, COUNT(DISTINCT family) FROM refresh_tokens
+                 GROUP BY user_id, client_id",
+            )?;
+            let rows = stmt.query_map([], |r| {
+                Ok((
+                    r.get::<_, Option<String>>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, i64>(2)?,
+                ))
+            })?;
+            for row in rows {
+                let (user, client, n) = row?;
+                if let Some(user) = user {
+                    *families.entry(user).or_default() += n;
+                }
+                with_family.insert(client);
+            }
+        }
+        let mut stmt = conn.prepare(
+            "SELECT u.id, u.name, u.created_at, u.last_login_at, u.last_token_at,
+                (SELECT COUNT(*) FROM workspace_docs d
+                  WHERE d.user_id = u.id AND d.value IS NOT NULL),
+                COALESCE((SELECT bytes FROM workspace_users w WHERE w.user_id = u.id), 0),
+                (SELECT COUNT(*) FROM setups s WHERE s.owner = u.id),
+                (SELECT COUNT(*) FROM server_alerts a WHERE a.owner = u.id),
+                (SELECT COUNT(*) FROM push_devices p WHERE p.owner = u.id)
+             FROM users u ORDER BY u.last_login_at DESC, u.id LIMIT ?1",
+        )?;
+        let shown_users = stmt
+            .query_map([users as i64], |r| {
+                let id: String = r.get(0)?;
+                Ok(UserSummary {
+                    authorisations: families.get(&id).copied().unwrap_or(0),
+                    id,
+                    name: r.get(1)?,
+                    created_at: r.get(2)?,
+                    last_login_at: r.get(3)?,
+                    last_token_at: r.get(4)?,
+                    workspace_docs: r.get(5)?,
+                    workspace_bytes: r.get(6)?,
+                    setups: r.get(7)?,
+                    server_alerts: r.get(8)?,
+                    push_devices: r.get(9)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let mut stmt = conn.prepare(
+            "SELECT c.client_id, c.client_name, c.created_at, c.last_token_at,
+                EXISTS (SELECT 1 FROM setups s WHERE s.owner = c.client_id)
+             FROM oauth_clients c ORDER BY c.created_at DESC, c.client_id LIMIT ?1",
+        )?;
+        let shown_clients = stmt
+            .query_map([clients as i64], |r| {
+                let id: String = r.get(0)?;
+                Ok(ClientSummary {
+                    has_family: with_family.contains(&id),
+                    id,
+                    name: r.get(1)?,
+                    created_at: r.get(2)?,
+                    last_token_at: r.get(3)?,
+                    owns_setups: r.get(4)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(StoreSummary {
+            users_total: count("SELECT COUNT(*) FROM users")?,
+            users: shown_users,
+            clients_total: count("SELECT COUNT(*) FROM oauth_clients")?,
+            clients: shown_clients,
+            setups_total: count("SELECT COUNT(*) FROM setups")?,
+            pending_deliveries: count("SELECT COUNT(*) FROM server_alert_events")?,
+            schema_version: count("PRAGMA user_version")?,
+        })
+    }
+
     pub fn users(&self) -> rusqlite::Result<Vec<StoredUser>> {
         let conn = self.conn();
         let mut stmt = conn.prepare("SELECT id, name FROM users")?;
@@ -1230,4 +1357,119 @@ pub fn global() -> Option<&'static Store> {
         return open_global(&db_path());
     }
     STORE.get().and_then(Option::as_ref)
+}
+
+#[cfg(test)]
+mod operator_summary_tests {
+    use super::*;
+
+    /// A store with two accounts, three clients and something of every kind the page
+    /// counts, each row carrying a value that must never be read.
+    fn planted() -> Store {
+        let store = Store::in_memory().unwrap();
+        store
+            .conn()
+            .execute_batch(
+                "INSERT INTO users VALUES ('github:1000001', 'Ann', 10, 50, 60);
+                 INSERT INTO users VALUES ('google:2000002', 'Bob', 20, 40, NULL);
+                 INSERT INTO oauth_clients (client_id, redirect_uris, created_at, last_token_at, client_name)
+                   VALUES ('client-old', '[\"https://secret-redirect.example/cb\"]', 1, NULL, NULL),
+                          ('client-mid', '[]', 2, 30, 'An agent'),
+                          ('client-new', '[]', 3, NULL, 'Newest');
+                 INSERT INTO workspace_docs VALUES ('github:1000001', 'k1', 'SECRET-BODY', 1, 1),
+                                                   ('github:1000001', 'k2', NULL, 2, 2);
+                 INSERT INTO workspace_users VALUES ('github:1000001', 2, 11);
+                 INSERT INTO setups VALUES ('s1', 'github:1000001', '{\"thesis\":\"SECRET-THESIS\"}'),
+                                           ('s2', 'github:1000001', '{}'),
+                                           ('s3', 'client-mid', '{}');
+                 INSERT INTO server_alerts VALUES ('a1', 'google:2000002', '{\"webhook_url\":\"https://secret-hook.example\"}');
+                 INSERT INTO server_alert_events (id, alert_id, body, created_at) VALUES ('e1', 'a1', 'SECRET-EVENT', 1);
+                 INSERT INTO push_devices VALUES ('d1', 'github:1000001', 'https://secret-push.example', 'k', 'a', 1);
+                 INSERT INTO refresh_tokens (token_hash, family, seq, client_id, user_id, created_at)
+                   VALUES ('SECRET-HASH-1', 'f1', 1, 'client-mid', 'github:1000001', 1),
+                          ('SECRET-HASH-2', 'f1', 2, 'client-mid', 'github:1000001', 2),
+                          ('SECRET-HASH-3', 'f2', 1, 'client-new', 'github:1000001', 3);",
+            )
+            .unwrap();
+        store
+    }
+
+    #[test]
+    fn the_operator_summary_counts_what_each_account_and_client_has() {
+        let summary = planted().operator_summary(200, 50).unwrap();
+        assert_eq!(summary.users_total, 2);
+        assert_eq!(
+            summary.users,
+            [
+                UserSummary {
+                    id: "github:1000001".into(),
+                    name: "Ann".into(),
+                    created_at: 10,
+                    last_login_at: 50,
+                    last_token_at: Some(60),
+                    workspace_docs: 1,
+                    workspace_bytes: 11,
+                    setups: 2,
+                    server_alerts: 0,
+                    authorisations: 2,
+                    push_devices: 1,
+                },
+                UserSummary {
+                    id: "google:2000002".into(),
+                    name: "Bob".into(),
+                    created_at: 20,
+                    last_login_at: 40,
+                    last_token_at: None,
+                    workspace_docs: 0,
+                    workspace_bytes: 0,
+                    setups: 0,
+                    server_alerts: 1,
+                    authorisations: 0,
+                    push_devices: 0,
+                },
+            ]
+        );
+        assert_eq!(summary.clients_total, 3);
+        let clients: Vec<_> = summary
+            .clients
+            .iter()
+            .map(|c| {
+                (
+                    c.id.as_str(),
+                    c.name.as_deref(),
+                    c.has_family,
+                    c.owns_setups,
+                )
+            })
+            .collect();
+        assert_eq!(
+            clients,
+            [
+                ("client-new", Some("Newest"), true, false),
+                ("client-mid", Some("An agent"), true, true),
+                ("client-old", None, false, false),
+            ]
+        );
+        assert_eq!(summary.setups_total, 3);
+        assert_eq!(summary.pending_deliveries, 1);
+        assert_eq!(summary.schema_version, MIGRATIONS.len() as i64);
+    }
+
+    #[test]
+    fn the_operator_summary_shows_the_newest_only_and_still_counts_all() {
+        let summary = planted().operator_summary(1, 2).unwrap();
+        assert_eq!(summary.users_total, 2);
+        assert_eq!(summary.users.len(), 1);
+        assert_eq!(summary.users[0].id, "github:1000001");
+        assert_eq!(summary.clients_total, 3);
+        assert_eq!(summary.clients.len(), 2);
+    }
+
+    #[test]
+    fn the_operator_summary_carries_nothing_that_is_secret_or_content() {
+        let text = format!("{:?}", planted().operator_summary(200, 50).unwrap());
+        for planted in ["SECRET", "secret-", "thesis", "webhook"] {
+            assert!(!text.contains(planted), "{planted} in {text}");
+        }
+    }
 }
