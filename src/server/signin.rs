@@ -33,9 +33,9 @@ const MAX_GRANTS_PER_USER: usize = 50;
 /// Clients one user can keep live. Past it the tokens of the client they got a
 /// token for longest ago are dropped, which makes that client evictable, so holding
 /// the client table full takes many accounts (ADR-0036).
-const MAX_LIVE_CLIENTS_PER_USER: usize = 20;
+pub(super) const MAX_LIVE_CLIENTS_PER_USER: usize = 20;
 /// Tokens per user and client; the longest out of use go first.
-const MAX_TOKENS_PER_CLIENT: usize = 20;
+pub(super) const MAX_TOKENS_PER_CLIENT: usize = 20;
 /// The web app gets a token per page load and each tab keeps using its own, because the
 /// chart push limits are per token. A cap below the tabs someone has open would have each
 /// tab's sign-in end another's, in a loop that never settles, so this one is roomy.
@@ -114,7 +114,7 @@ impl Config {
         Self::from_vars(|name| std::env::var(name).ok().filter(|v| !v.trim().is_empty()))
     }
 
-    fn from_vars(var: impl Fn(&str) -> Option<String>) -> Result<Option<Self>, String> {
+    pub(super) fn from_vars(var: impl Fn(&str) -> Option<String>) -> Result<Option<Self>, String> {
         let sample = var("CHARTGEN_DATA_SOURCE").as_deref() == Some("sample");
         let test_origin = test_provider_origin(
             var("CHARTGEN_SIGNIN_TEST_PROVIDER_ORIGIN").as_deref(),
@@ -615,9 +615,16 @@ impl SignIn {
 impl OAuthStore {
     /// Hold a user's codes and tokens to their limits, after issuing one. Oldest go
     /// first; the holder of a dropped token signs in again without noticing much,
-    /// since a session or a new approval round is all it takes.
-    pub(super) fn trim_user_tokens(&mut self, user: &str) {
-        let mut by_client: HashMap<String, Vec<(Instant, String)>> = HashMap::new();
+    /// since a session or a new approval round is all it takes. A refresh token family
+    /// counts as a token of its client (ADR-0058): it keeps the client among the
+    /// user's live ones, and goes with the client's tokens. Returns the families ended,
+    /// for the store.
+    pub(super) fn trim_user_tokens(&mut self, user: &str) -> Vec<String> {
+        let now = Instant::now();
+        let unix = now_unix();
+        // Per client: the access tokens by last use, and the families by last exchange.
+        type Held = (Vec<(Instant, String)>, Vec<(Instant, String)>);
+        let mut by_client: HashMap<String, Held> = HashMap::new();
         let mut web_clients = HashSet::new();
         for (token, t) in &self.tokens {
             let Some(u) = t.user.as_ref().filter(|u| u.id == user) else {
@@ -626,39 +633,55 @@ impl OAuthStore {
             by_client
                 .entry(t.client_id.clone())
                 .or_default()
+                .0
                 .push((u.last_used, token.clone()));
             if u.session.is_some() {
                 web_clients.insert(t.client_id.clone());
             }
         }
+        for t in self.refresh.values() {
+            if t.spent_at.is_none() && t.user.as_deref() == Some(user) {
+                let age = Duration::from_secs((unix - t.created_at).max(0) as u64);
+                by_client
+                    .entry(t.client_id.clone())
+                    .or_default()
+                    .1
+                    .push((now.checked_sub(age).unwrap_or(now), t.family.clone()));
+            }
+        }
         let mut clients: Vec<_> = by_client
             .into_iter()
-            .map(|(client, mut tokens)| {
+            .map(|(client, (mut tokens, mut families))| {
                 tokens.sort();
+                families.sort();
                 let cap = if web_clients.contains(&client) {
                     MAX_TOKENS_PER_WEB_CLIENT
                 } else {
                     MAX_TOKENS_PER_CLIENT
                 };
+                let newest = tokens.last().into_iter().chain(families.last());
                 (
-                    tokens.last().map(|t| t.0).unwrap_or_else(Instant::now),
+                    newest.map(|t| t.0).max().unwrap_or(now),
                     cap,
                     tokens,
+                    families,
                 )
             })
             .collect();
         clients.sort_by_key(|c| std::cmp::Reverse(c.0));
-        for (rank, (_, cap, tokens)) in clients.into_iter().enumerate() {
-            let keep = if rank < MAX_LIVE_CLIENTS_PER_USER {
-                cap
-            } else {
-                0
-            };
-            let excess = tokens.len().saturating_sub(keep);
+        let mut ended = Vec::new();
+        for (rank, (_, cap, tokens, families)) in clients.into_iter().enumerate() {
+            let live = rank < MAX_LIVE_CLIENTS_PER_USER;
+            let excess = tokens.len().saturating_sub(if live { cap } else { 0 });
             for (_, token) in tokens.into_iter().take(excess) {
                 self.tokens.remove(&token);
             }
+            let keep = if live { MAX_TOKENS_PER_CLIENT } else { 0 };
+            let excess = families.len().saturating_sub(keep);
+            ended.extend(families.into_iter().take(excess).map(|f| f.1));
         }
+        self.end_families(&ended);
+        ended
     }
 
     fn trim_user_codes(&mut self, user: &str) {
@@ -844,7 +867,7 @@ fn from_own_origin(headers: &HeaderMap) -> bool {
 /// The web app's redirect: exactly `/` on this server's origin. Such a client skips
 /// consent when asked from our own origin (`from_own_origin`), whoever registered it:
 /// its code lands on our own page, which discards a code whose `state` it did not issue.
-fn is_first_party(base: &str, redirect_uri: &str) -> bool {
+pub(super) fn is_first_party(base: &str, redirect_uri: &str) -> bool {
     let (Ok(base), Ok(uri)) = (reqwest::Url::parse(base), reqwest::Url::parse(redirect_uri)) else {
         return false;
     };
@@ -929,17 +952,17 @@ fn with_cookie(mut resp: Response, cookie: HeaderValue) -> Response {
     resp
 }
 
-fn random_token() -> String {
+pub(super) fn random_token() -> String {
     let mut bytes = [0u8; 32];
     rand::RngCore::fill_bytes(&mut rand::rng(), &mut bytes);
     URL_SAFE_NO_PAD.encode(bytes)
 }
 
-fn hash_of(value: &str) -> String {
+pub(super) fn hash_of(value: &str) -> String {
     hex::encode(Sha256::digest(value.as_bytes()))
 }
 
-fn now_unix() -> i64 {
+pub(super) fn now_unix() -> i64 {
     chrono::Utc::now().timestamp()
 }
 
@@ -1509,7 +1532,7 @@ pub(super) async fn consent_decision(
     headers: HeaderMap,
     Form(form): Form<ConsentForm>,
 ) -> Response {
-    let (response, writes) = {
+    let (response, writes, dropped) = {
         let mut guard = state.oauth.lock().unwrap();
         let s = &mut *guard;
         let Some(signin) = s.signin.as_mut() else {
@@ -1549,8 +1572,20 @@ pub(super) async fn consent_decision(
                 None => expired_page(),
             }
         };
-        (response, writes)
+        // An approval pushed out by the limit takes the user's refresh tokens for that
+        // client along, so that forgetting a client has one meaning (ADR-0058).
+        let dropped: Vec<String> = writes
+            .iter()
+            .filter_map(|w| match w {
+                Write::DeleteGrant { user, client } => Some(s.families_of(user, client)),
+                _ => None,
+            })
+            .flatten()
+            .collect();
+        s.end_families(&dropped);
+        (response, writes, dropped)
     };
+    super::refresh::forget_families(&super::refresh::store_write(), dropped).await;
     persist(writes).await;
     response
 }
@@ -2054,6 +2089,7 @@ mod tests {
                 token.clone(),
                 AccessToken {
                     _token: token,
+                    family: None,
                     client_id: format!("c{i}"),
                     created_at: t0 - Duration::from_secs(age),
                     expires_in: Duration::from_secs(3600),
@@ -2096,6 +2132,7 @@ mod tests {
                 token.clone(),
                 AccessToken {
                     _token: token,
+                    family: None,
                     client_id: if session.is_some() { "web" } else { "mcp" }.to_string(),
                     created_at: t0,
                     expires_in: Duration::from_secs(3600),

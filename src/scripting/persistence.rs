@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
 /// Schema migrations; `PRAGMA user_version` is the number applied.
-const MIGRATIONS: &[&str] = &[
+pub(super) const MIGRATIONS: &[&str] = &[
     "
     CREATE TABLE user_indicators (
         user_id      TEXT    NOT NULL,
@@ -101,6 +101,18 @@ const MIGRATIONS: &[&str] = &[
         seq      INTEGER NOT NULL,
         bytes    INTEGER NOT NULL
     );
+",
+    "
+    CREATE TABLE refresh_tokens (
+        token_hash  TEXT    PRIMARY KEY,
+        family      TEXT    NOT NULL,
+        seq         INTEGER NOT NULL,
+        client_id   TEXT    NOT NULL,
+        user_id     TEXT,
+        created_at  INTEGER NOT NULL,
+        spent_at    INTEGER
+    );
+    CREATE INDEX refresh_tokens_family ON refresh_tokens (family);
 ",
 ];
 
@@ -221,6 +233,21 @@ pub struct StoredSession {
     pub user_id: String,
     pub created_at: i64,
     pub expires_at: i64,
+}
+
+/// A refresh token (ADR-0058); only the hash of its value is stored. A family is one
+/// authorization: its tokens follow each other by `seq`, and at most one is unspent.
+#[derive(Clone, Debug, PartialEq)]
+pub struct StoredRefreshToken {
+    pub token_hash: String,
+    pub family: String,
+    pub seq: i64,
+    pub client_id: String,
+    /// `None` when issued with sign-in off.
+    pub user_id: Option<String>,
+    pub created_at: i64,
+    /// When it was exchanged or replaced; kept so that using it again is recognised.
+    pub spent_at: Option<i64>,
 }
 
 /// A delivery not finished yet: written with the fire it reports, so a restart
@@ -425,12 +452,96 @@ impl Store {
         Ok(())
     }
 
+    /// Delete a client, and its refresh tokens with it (ADR-0058).
     pub fn delete_oauth_client(&self, client_id: &str) -> rusqlite::Result<()> {
-        self.conn().execute(
+        let mut conn = self.conn();
+        let tx = conn.transaction()?;
+        tx.execute(
+            "DELETE FROM refresh_tokens WHERE client_id = ?1",
+            params![client_id],
+        )?;
+        tx.execute(
             "DELETE FROM oauth_clients WHERE client_id = ?1",
             params![client_id],
         )?;
-        Ok(())
+        tx.commit()
+    }
+
+    /// Store `new` and mark `spent` as used at `new.created_at`, in one transaction: a
+    /// rotation is on disk whole or not at all. Spent tokens of the family below
+    /// `forget_below_seq` are dropped.
+    pub fn save_refresh_token(
+        &self,
+        new: &StoredRefreshToken,
+        spent: &[String],
+        forget_below_seq: i64,
+    ) -> rusqlite::Result<()> {
+        let mut conn = self.conn();
+        let tx = conn.transaction()?;
+        for hash in spent {
+            tx.execute(
+                "UPDATE refresh_tokens SET spent_at = ?2 WHERE token_hash = ?1 AND spent_at IS NULL",
+                params![hash, new.created_at],
+            )?;
+        }
+        tx.execute(
+            "DELETE FROM refresh_tokens WHERE family = ?1 AND spent_at IS NOT NULL AND seq < ?2",
+            params![new.family, forget_below_seq],
+        )?;
+        tx.execute(
+            "INSERT INTO refresh_tokens
+                 (token_hash, family, seq, client_id, user_id, created_at, spent_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                new.token_hash,
+                new.family,
+                new.seq,
+                new.client_id,
+                new.user_id,
+                new.created_at,
+                new.spent_at
+            ],
+        )?;
+        tx.commit()
+    }
+
+    pub fn delete_refresh_families(&self, families: &[String]) -> rusqlite::Result<()> {
+        let mut conn = self.conn();
+        let tx = conn.transaction()?;
+        for family in families {
+            tx.execute(
+                "DELETE FROM refresh_tokens WHERE family = ?1",
+                params![family],
+            )?;
+        }
+        tx.commit()
+    }
+
+    /// Every stored refresh token; families whose newest token is older than
+    /// `cutoff` are deleted first.
+    pub fn refresh_tokens(&self, cutoff: i64) -> rusqlite::Result<Vec<StoredRefreshToken>> {
+        let conn = self.conn();
+        conn.execute(
+            "DELETE FROM refresh_tokens WHERE family IN
+                 (SELECT family FROM refresh_tokens GROUP BY family HAVING MAX(created_at) < ?1)",
+            params![cutoff],
+        )?;
+        let mut stmt = conn.prepare(
+            "SELECT token_hash, family, seq, client_id, user_id, created_at, spent_at
+             FROM refresh_tokens",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(StoredRefreshToken {
+                token_hash: r.get(0)?,
+                family: r.get(1)?,
+                seq: r.get(2)?,
+                client_id: r.get(3)?,
+                user_id: r.get(4)?,
+                created_at: r.get(5)?,
+                spent_at: r.get(6)?,
+            })
+        })?;
+        rows.collect()
     }
 
     /// The client ids that own at least one stored script.

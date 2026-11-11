@@ -24,6 +24,7 @@ use chartgen::mcp_schema::SERVER_ALERT_TOOLS;
 use chartgen::scripting;
 
 mod listener;
+mod refresh;
 mod signin;
 mod workspace;
 
@@ -79,6 +80,9 @@ struct AuthCode {
 
 struct AccessToken {
     _token: String,
+    /// The refresh token family it came from, which takes it along when it ends
+    /// (ADR-0058); `None` for the web app's own client.
+    family: Option<String>,
     client_id: String,
     created_at: Instant,
     expires_in: Duration,
@@ -86,10 +90,15 @@ struct AccessToken {
     user: Option<signin::TokenUser>,
 }
 
+/// How long an access token is valid: 7 days.
+const ACCESS_TOKEN_SECS: u64 = 7 * 24 * 3600;
+
 struct OAuthStore {
     clients: HashMap<String, OAuthClient>,
     codes: HashMap<String, AuthCode>,
     tokens: HashMap<String, AccessToken>,
+    /// Refresh tokens by the hash of their value, spent ones included (ADR-0058).
+    refresh: HashMap<String, refresh::RefreshToken>,
     /// Recent `/register` calls per client address.
     registrations: HashMap<String, Vec<Instant>>,
     /// When a refused registration last logged, and refusals since.
@@ -106,6 +115,7 @@ impl OAuthStore {
             clients: HashMap::new(),
             codes: HashMap::new(),
             tokens: HashMap::new(),
+            refresh: HashMap::new(),
             registrations: HashMap::new(),
             refusal_logged_at: None,
             refusals_unlogged: 0,
@@ -219,7 +229,15 @@ impl OAuthStore {
             return Err(self.refuse_full());
         };
         self.cleanup_expired();
-        let live: HashSet<&str> = self.tokens.values().map(|t| t.client_id.as_str()).collect();
+        // A refresh token pins its client as an access token does (ADR-0058): after a
+        // restart it is all a headless client has left.
+        self.expire_refresh(chrono::Utc::now().timestamp());
+        let live: HashSet<&str> = self
+            .tokens
+            .values()
+            .map(|t| t.client_id.as_str())
+            .chain(self.refresh.values().map(|t| t.client_id.as_str()))
+            .collect();
         let mut candidates: Vec<_> = self
             .clients
             .iter()
@@ -292,6 +310,31 @@ impl OAuthStore {
         true
     }
 
+    /// Issue an access token to `client_id`.
+    fn issue_access(
+        &mut self,
+        client_id: &str,
+        user: Option<signin::TokenUser>,
+        family: Option<String>,
+    ) -> String {
+        let token = Uuid::new_v4().to_string();
+        self.tokens.insert(
+            token.clone(),
+            AccessToken {
+                _token: token.clone(),
+                family,
+                client_id: client_id.to_string(),
+                created_at: Instant::now(),
+                expires_in: Duration::from_secs(ACCESS_TOKEN_SECS),
+                user,
+            },
+        );
+        if let Some(c) = self.clients.get_mut(client_id) {
+            c.last_used = Some(Instant::now());
+        }
+        token
+    }
+
     /// The owner of what a valid token's caller stores, such as scripted indicators
     /// (ADR-0025) and server alerts (ADR-0042): its signed-in user, or with sign-in
     /// off its OAuth client (ADR-0044).
@@ -349,7 +392,9 @@ async fn oauth_metadata(State(state): State<SharedState>) -> Json<Value> {
         "token_endpoint": format!("{}/token", base),
         "registration_endpoint": format!("{}/register", base),
         "response_types_supported": ["code"],
-        "grant_types_supported": ["authorization_code"],
+        "revocation_endpoint": format!("{}/revoke", base),
+        "revocation_endpoint_auth_methods_supported": ["none"],
+        "grant_types_supported": ["authorization_code", "refresh_token"],
         "code_challenge_methods_supported": ["S256"],
         "token_endpoint_auth_methods_supported": ["none", "client_secret_post"],
         "logo_uri": format!("{}/favicon.svg", base)
@@ -520,7 +565,7 @@ async fn oauth_register(
             "client_secret": client_secret,
             "client_name": body.client_name,
             "redirect_uris": body.redirect_uris,
-            "grant_types": ["authorization_code"],
+            "grant_types": ["authorization_code", "refresh_token"],
             "response_types": ["code"],
             "token_endpoint_auth_method": "none",
             "logo_uri": format!("{}/favicon.svg", base_url()),
@@ -663,10 +708,17 @@ async fn oauth_authorize(
 #[derive(Deserialize)]
 struct TokenRequest {
     grant_type: String,
-    code: String,
-    redirect_uri: String,
     client_id: String,
+    // For `authorization_code`.
+    #[serde(default)]
+    code: String,
+    #[serde(default)]
+    redirect_uri: String,
+    #[serde(default)]
     code_verifier: String,
+    // For `refresh_token` (ADR-0058).
+    #[serde(default)]
+    refresh_token: String,
 }
 
 /// Accept token request as either form-encoded or JSON (Claude.ai may send either).
@@ -716,6 +768,15 @@ async fn oauth_token(
             }
         }
     };
+    if body.grant_type == "refresh_token" {
+        return refresh::grant(
+            &state,
+            &body.refresh_token,
+            &body.client_id,
+            &refresh::store_write(),
+        )
+        .await;
+    }
     if body.grant_type != "authorization_code" {
         return (
             StatusCode::BAD_REQUEST,
@@ -723,9 +784,15 @@ async fn oauth_token(
         )
             .into_response();
     }
+    if body.code.is_empty() || body.redirect_uri.is_empty() || body.code_verifier.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "invalid_request", "error_description": "code, redirect_uri and code_verifier are required"})),
+        )
+            .into_response();
+    }
 
-    #[cfg_attr(not(feature = "scripting"), allow(unused_variables))]
-    let (token, token_user) = {
+    let (token, token_user, family) = {
         let mut s = state.oauth.lock().unwrap();
         s.cleanup_expired();
 
@@ -789,55 +856,61 @@ async fn oauth_token(
         }
 
         // Issue access token
-        let token = Uuid::new_v4().to_string();
-        let expires_in = Duration::from_secs(7 * 24 * 3600); // 7 days
-        s.tokens.insert(
-            token.clone(),
-            AccessToken {
-                _token: token.clone(),
-                client_id: body.client_id.clone(),
-                created_at: Instant::now(),
-                expires_in,
-                user: token_user.clone(),
-            },
-        );
-        if let Some(c) = s.clients.get_mut(&body.client_id) {
-            c.last_used = Some(Instant::now());
-        }
+        let token = s.issue_access(&body.client_id, token_user.clone(), None);
         if let Some(user) = &token_user {
             s.trim_user_tokens(&user.id);
         }
-        (token, token_user)
+        let user_id = token_user.as_ref().map(|u| u.id.clone());
+        let family = s.plan_family(&body.client_id, &stored_redirect_uri, user_id.as_deref());
+        (token, user_id, family)
     };
-    // Every authenticated request needs that lock, and an async worker may hold
-    // others' work: neither waits for a disk write.
-    #[cfg(feature = "scripting")]
-    {
-        let client_id = body.client_id.clone();
-        let _ = tokio::task::spawn_blocking(move || {
-            if let Some(store) = scripting::persistence::global() {
-                if let Err(e) = store.mark_oauth_client_used(&client_id) {
-                    eprintln!("[OAuth] could not record client use: {e}");
-                }
-            }
-            if let Some(user) = token_user {
-                signin::after_token(&user.id);
-            }
-        })
-        .await;
+    // A refresh token is handed out only once the store has it (ADR-0058). When the
+    // write fails the client gets the access token alone, as before refresh tokens.
+    let mut refresh_token = None;
+    if let Some(family) = family {
+        match refresh::start_family(&state, &token, family, &refresh::store_write()).await {
+            Ok(value) => refresh_token = value,
+            Err(e) => eprintln!("[OAuth] could not store a refresh token: {e}"),
+        }
     }
+    token_issued(body.client_id.clone(), token_user).await;
 
     eprintln!(
         "[OAuth] POST /token SUCCESS — token issued (len={})",
         token.len()
     );
 
-    Json(json!({
+    let mut answer = json!({
         "access_token": token,
         "token_type": "Bearer",
-        "expires_in": 7 * 24 * 3600
-    }))
-    .into_response()
+        "expires_in": ACCESS_TOKEN_SECS
+    });
+    if let Some(refresh_token) = refresh_token {
+        answer["refresh_token"] = json!(refresh_token);
+    }
+    Json(answer).into_response()
+}
+
+/// Record that `client_id`, and `user` with sign-in on, got a token: the activity that
+/// keeps a client registered and an owner's server alerts alive (ADR-0042, ADR-0044).
+/// Every authenticated request needs the OAuth lock, and an async worker may hold
+/// others' work: neither waits for a disk write.
+#[cfg_attr(not(feature = "scripting"), allow(unused_variables))]
+async fn token_issued(client_id: String, user: Option<String>) {
+    #[cfg(feature = "scripting")]
+    {
+        let _ = tokio::task::spawn_blocking(move || {
+            if let Some(store) = scripting::persistence::global() {
+                if let Err(e) = store.mark_oauth_client_used(&client_id) {
+                    eprintln!("[OAuth] could not record client use: {e}");
+                }
+            }
+            if let Some(user) = user {
+                signin::after_token(&user);
+            }
+        })
+        .await;
+    }
 }
 
 /// Parse application/x-www-form-urlencoded into a JSON object.
@@ -1668,6 +1741,18 @@ pub async fn run_server(port: u16, engine: Option<Arc<RwLock<TradingEngine>>>) {
             Some(Err(e)) => eprintln!("[OAuth] cannot read stored clients: {e}"),
             None => eprintln!("[OAuth] store unavailable at {}", path.display()),
         }
+        // After the clients, which a refresh token needs (ADR-0058).
+        let cutoff = chrono::Utc::now().timestamp() - refresh::REFRESH_TTL_SECS;
+        match scripting::persistence::global().map(|s| s.refresh_tokens(cutoff)) {
+            Some(Ok(rows)) => {
+                let families = oauth.restore_refresh(rows);
+                println!("Refresh tokens: {families} authorizations restored");
+            }
+            Some(Err(e)) => eprintln!("[OAuth] cannot read stored refresh tokens: {e}"),
+            None => eprintln!(
+                "[OAuth] refresh tokens stay in memory and end with this process: no store"
+            ),
+        }
         if let Some(signin) = oauth.signin.as_mut() {
             match scripting::persistence::global().map(|s| signin.restore(s)) {
                 Some(Ok((users, sessions))) => {
@@ -1730,6 +1815,7 @@ pub async fn run_server(port: u16, engine: Option<Arc<RwLock<TradingEngine>>>) {
         .route("/register", post(oauth_register))
         .route("/authorize", get(oauth_authorize))
         .route("/token", post(oauth_token))
+        .route("/revoke", post(refresh::revoke_endpoint))
         .route("/oauth/signin", get(signin::signin_page))
         .route("/oauth/login/{provider}", get(signin::login))
         .route("/oauth/callback/{provider}", get(signin::callback))
@@ -2274,6 +2360,7 @@ mod tests {
             "test-token".to_string(),
             AccessToken {
                 _token: "test-token".to_string(),
+                family: None,
                 client_id: "test".to_string(),
                 created_at: Instant::now(),
                 expires_in: Duration::from_secs(3600),
@@ -2333,6 +2420,7 @@ mod tests {
                 "test-token".to_string(),
                 AccessToken {
                     _token: "test-token".to_string(),
+                    family: None,
                     client_id: "test".to_string(),
                     created_at: Instant::now(),
                     expires_in: Duration::from_secs(3600),
@@ -2448,6 +2536,7 @@ mod tests {
             "push-token".to_string(),
             AccessToken {
                 _token: "push-token".to_string(),
+                family: None,
                 client_id: "test".to_string(),
                 created_at: Instant::now(),
                 expires_in: Duration::from_secs(3600),
@@ -2510,6 +2599,7 @@ mod tests {
             "push-token".to_string(),
             AccessToken {
                 _token: "push-token".to_string(),
+                family: None,
                 client_id: "test".to_string(),
                 created_at: Instant::now(),
                 expires_in: Duration::from_secs(3600),
@@ -2619,6 +2709,7 @@ mod tests {
             token.into(),
             AccessToken {
                 _token: token.into(),
+                family: None,
                 client_id: client_id.into(),
                 created_at: Instant::now(),
                 expires_in,
@@ -2861,6 +2952,35 @@ mod tests {
         give_token(&mut s, "t0", "c0", LIVE);
         assert_eq!(s.make_room(nobody_owns_scripts).unwrap(), ["c1"]);
         assert!(s.clients.contains_key("c0") && s.validate_token("t0"));
+    }
+
+    /// After a restart a refresh token is all a headless client has left (ADR-0058).
+    #[test]
+    fn make_room_never_evicts_a_client_with_a_refresh_token() {
+        let mut s = full_table();
+        let now = chrono::Utc::now().timestamp();
+        let family = |created_at: i64, spent_at: Option<i64>| refresh::RefreshToken {
+            family: "f".into(),
+            seq: 0,
+            client_id: "c0".into(),
+            user: None,
+            created_at,
+            spent_at,
+        };
+        s.refresh.insert("h".into(), family(now, None));
+        assert_eq!(s.make_room(nobody_owns_scripts).unwrap(), ["c1"]);
+        assert!(s.clients.contains_key("c0"));
+
+        // One nobody used for 30 days pins nothing, and neither does a spent one alone.
+        for stale in [
+            family(now - refresh::REFRESH_TTL_SECS - 1, None),
+            family(now, Some(now)),
+        ] {
+            let mut s = full_table();
+            s.refresh.insert("h".into(), stale);
+            assert_eq!(s.make_room(nobody_owns_scripts).unwrap(), ["c0"]);
+            assert!(s.refresh.is_empty());
+        }
     }
 
     #[test]

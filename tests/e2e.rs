@@ -5119,6 +5119,297 @@ fn seed_script_through(port: u16, db: &std::path::Path, name: &str) -> String {
     client
 }
 
+// --- Refresh tokens (ADR-0058) ---
+
+/// `POST /token` with a refresh token: (status, JSON).
+#[cfg(feature = "scripting")]
+fn refresh(port: u16, client_id: &str, refresh_token: &str) -> (u16, serde_json::Value) {
+    let body = serde_json::json!({
+        "grant_type": "refresh_token",
+        "client_id": client_id,
+        "refresh_token": refresh_token,
+    });
+    let (st, _, body) = http(port, "POST", "/token", &JSON_POST, &body.to_string());
+    (st, serde_json::from_str(&body).unwrap_or_default())
+}
+
+/// `POST /revoke`, as the form RFC 7009 names.
+#[cfg(feature = "scripting")]
+fn revoke(port: u16, client_id: &str, token: &str) -> u16 {
+    let body = format!("token={token}&client_id={client_id}");
+    let form = ["Content-Type: application/x-www-form-urlencoded"];
+    http(port, "POST", "/revoke", &form, &body).0
+}
+
+/// The code flow for an external client with sign-in off: the whole `/token` answer.
+#[cfg(feature = "scripting")]
+fn authorize_headless(port: u16, client_id: &str) -> serde_json::Value {
+    let (st, head, _) = authorize(port, client_id, EXTERNAL_REDIRECT);
+    assert_eq!(st, 307, "{head}");
+    let code = head
+        .split("code=")
+        .nth(1)
+        .and_then(|rest| rest.split(['&', '\r']).next())
+        .unwrap();
+    let (st, body) = exchange(port, client_id, EXTERNAL_REDIRECT, code);
+    assert_eq!(st, 200, "{body}");
+    serde_json::from_str(&body).unwrap()
+}
+
+#[cfg(feature = "scripting")]
+fn text(v: &serde_json::Value, field: &str) -> String {
+    v[field].as_str().unwrap_or_default().to_string()
+}
+
+/// A headless client is authorized once and then left alone: restarts, which are
+/// what a deploy is, cost it one refused call and one refresh, and no person.
+/// Without the `scripting` feature there is no store and nothing survives.
+#[cfg(feature = "scripting")]
+#[test]
+fn test_a_headless_client_keeps_working_across_restarts() {
+    let db = store_path("refresh-restart");
+    let port = free_port();
+    let srv = spawn_server_on(port, None, &db, false);
+    let (_, _, meta) = http(
+        port,
+        "GET",
+        "/.well-known/oauth-authorization-server",
+        &[],
+        "",
+    );
+    let meta: serde_json::Value = serde_json::from_str(&meta).unwrap();
+    assert_eq!(
+        meta["grant_types_supported"],
+        serde_json::json!(["authorization_code", "refresh_token"])
+    );
+    assert_eq!(
+        meta["revocation_endpoint"],
+        format!("http://localhost:{port}/revoke")
+    );
+    let client = register_external(port);
+    let first = authorize_headless(port, &client);
+    let (access, mut token) = (text(&first, "access_token"), text(&first, "refresh_token"));
+    assert!(!token.is_empty(), "{first}");
+    assert_eq!(ping_status(port, &access), 200);
+    drop(srv);
+
+    let mut access_tokens = vec![access];
+    for _ in 0..2 {
+        let port = free_port();
+        let _srv = spawn_server_on(port, None, &db, false);
+        let stale = access_tokens.last().unwrap();
+        assert_eq!(ping_status(port, stale), 401, "access tokens are memory");
+        let (st, next) = refresh(port, &client, &token);
+        assert_eq!(st, 200, "{next}");
+        assert_eq!(next["token_type"], "Bearer");
+        assert_eq!(next["expires_in"], 604800);
+        assert_eq!(ping_status(port, &text(&next, "access_token")), 200);
+        assert_ne!(text(&next, "refresh_token"), token, "rotated");
+        access_tokens.push(text(&next, "access_token"));
+        token = text(&next, "refresh_token");
+    }
+
+    // Revoked, it stays revoked through the next start.
+    let port = free_port();
+    let srv = spawn_server_on(port, None, &db, false);
+    let (st, last) = refresh(port, &client, &token);
+    assert_eq!(st, 200, "{last}");
+    let (access, token) = (text(&last, "access_token"), text(&last, "refresh_token"));
+    assert_eq!(revoke(port, &client, "not-a-token"), 200);
+    assert_eq!(ping_status(port, &access), 200);
+    assert_eq!(revoke(port, &client, &token), 200);
+    assert_eq!(ping_status(port, &access), 401, "its access token goes too");
+    let (st, body) = refresh(port, &client, &token);
+    assert_eq!((st, text(&body, "error").as_str()), (400, "invalid_grant"));
+    drop(srv);
+    let port = free_port();
+    let _srv = spawn_server_on(port, None, &db, false);
+    assert_eq!(refresh(port, &client, &token).0, 400);
+
+    // The store holds hashes, never a value that was handed out.
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    let rows: i64 = conn
+        .query_row("SELECT COUNT(*) FROM refresh_tokens", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(rows, 0, "a revoked family leaves nothing");
+    let _ = std::fs::remove_dir_all(db.parent().unwrap());
+}
+
+/// The operator's revocation in the OAuth reference, for a token nobody holds any
+/// more: stop, delete the rows, start.
+#[cfg(feature = "scripting")]
+#[test]
+fn test_refresh_tokens_deleted_from_the_store_are_gone_after_a_restart() {
+    let db = store_path("refresh-operator");
+    let port = free_port();
+    let srv = spawn_server_on(port, None, &db, false);
+    let (lost, kept) = (register_external(port), register_external(port));
+    let lost_token = text(&authorize_headless(port, &lost), "refresh_token");
+    let kept_token = text(&authorize_headless(port, &kept), "refresh_token");
+    drop(srv);
+
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    let stored: Vec<String> = conn
+        .prepare("SELECT token_hash FROM refresh_tokens")
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(stored.len(), 2);
+    assert!(!stored.contains(&lost_token) && !stored.contains(&kept_token));
+    let deleted = conn
+        .execute(
+            "DELETE FROM refresh_tokens WHERE client_id = ?1",
+            rusqlite::params![lost],
+        )
+        .unwrap();
+    assert_eq!(deleted, 1);
+    drop(conn);
+
+    let port = free_port();
+    let _srv = spawn_server_on(port, None, &db, false);
+    assert_eq!(refresh(port, &lost, &lost_token).0, 400);
+    assert_eq!(refresh(port, &kept, &kept_token).0, 200);
+    let _ = std::fs::remove_dir_all(db.parent().unwrap());
+}
+
+/// With sign-in on: a connector's refresh token is its user's, survives the user
+/// signing out of the web app and a restart, and never reaches what only the web
+/// app's own token may (ADR-0050). The web app itself gets none.
+#[cfg(feature = "scripting")]
+#[test]
+fn test_signin_a_connector_refreshes_as_its_user_and_is_never_the_web_app() {
+    let fake = FakeProvider::start();
+    let db = store_path("refresh-signin");
+    let p = free_port();
+    let srv = start_server(signin_command(p, &db, &fake, &["github"], None, false), p);
+    let mut b = Browser::new(p);
+
+    let web_client = register_client(p, &web_redirect(p));
+    let first = b.authorize(&web_client, &web_redirect(p), "s1");
+    let back = provider_round_trip(
+        &mut b,
+        &fake,
+        "github",
+        profile_of("github", 5, "octo"),
+        &first,
+    );
+    let (st, body) = exchange(p, &web_client, &web_redirect(p), &back.query()["code"]);
+    assert_eq!(st, 200, "{body}");
+    let web: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert!(web.get("refresh_token").is_none(), "{web}");
+    let web = text(&web, "access_token");
+    assert_eq!(
+        workspace(p, Some(&web), serde_json::json!({"since": 0, "writes": []})).0,
+        200
+    );
+
+    let client = register_external(p);
+    let first = b.authorize(&client, EXTERNAL_REDIRECT, "s");
+    let page = b.get(&first.location());
+    let (request, csrf) = consent_fields(&page.body);
+    let approved = b.request(
+        "POST",
+        "/oauth/consent",
+        &["Content-Type: application/x-www-form-urlencoded"],
+        &format!("request={request}&csrf={csrf}&decision=approve"),
+    );
+    let (st, body) = exchange(p, &client, EXTERNAL_REDIRECT, &approved.query()["code"]);
+    assert_eq!(st, 200, "{body}");
+    let connector: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let token = text(&connector, "refresh_token");
+    assert!(!token.is_empty(), "{connector}");
+
+    // Another client cannot spend it.
+    assert_eq!(refresh(p, &web_client, &token).0, 400);
+
+    // Signing out of the web app leaves the connector what it was given.
+    assert_eq!(b.request("POST", "/oauth/logout", &[], "").status, 204);
+    assert_eq!(ping_status(p, &web), 401);
+    let (st, next) = refresh(p, &client, &token);
+    assert_eq!(st, 200, "{next}");
+    let access = text(&next, "access_token");
+    assert_eq!(me(p, &access).1["user"]["id"], "github:5");
+    let sync = workspace(
+        p,
+        Some(&access),
+        serde_json::json!({"since": 0, "writes": []}),
+    );
+    assert_eq!(sync.0, 403, "not the web app's token: {}", sync.1);
+    drop(srv);
+
+    // The same after a restart, with nobody at a browser.
+    let p = free_port();
+    let _srv = start_server(signin_command(p, &db, &fake, &["github"], None, false), p);
+    let (st, again) = refresh(p, &client, &text(&next, "refresh_token"));
+    assert_eq!(st, 200, "{again}");
+    let access = text(&again, "access_token");
+    assert_eq!(me(p, &access).1["user"]["id"], "github:5");
+    assert_eq!(
+        workspace(
+            p,
+            Some(&access),
+            serde_json::json!({"since": 0, "writes": []})
+        )
+        .0,
+        403
+    );
+
+    // Sign-in turned off: a user's token yields nothing, so no token without a user.
+    drop(_srv);
+    let p = free_port();
+    let _srv = spawn_server_on(p, None, &db, false);
+    assert_eq!(refresh(p, &client, &text(&again, "refresh_token")).0, 400);
+    let _ = std::fs::remove_dir_all(db.parent().unwrap());
+}
+
+/// Refreshing counts as getting a token, and that hands nothing over: rows from
+/// before sign-in go to the named owner only (ADR-0044), also through a refresh.
+#[cfg(feature = "scripting")]
+#[test]
+fn test_signin_refreshing_claims_nothing_for_anyone_but_the_named_owner() {
+    let fake = FakeProvider::start();
+    let port = free_port();
+    let db = store_path("refresh-claim");
+    let _seeded = seed_script_through(port, &db, "from_before");
+    let mut cmd = signin_command(port, &db, &fake, &["github"], None, true);
+    cmd.env("CHARTGEN_CLAIM_OWNER", "github:1");
+    let _srv = start_server(cmd, port);
+    let client = register_external(port);
+    let mut stranger = Browser::new(port);
+    let first = stranger.authorize_from(&client, EXTERNAL_REDIRECT, "s", &[]);
+    let back = provider_round_trip(
+        &mut stranger,
+        &fake,
+        "github",
+        profile_of("github", 666, "stranger"),
+        &first,
+    );
+    let page = stranger.get(&back.location());
+    let (request, csrf) = consent_fields(&page.body);
+    let approved = stranger.request(
+        "POST",
+        "/oauth/consent",
+        &["Content-Type: application/x-www-form-urlencoded"],
+        &format!("request={request}&csrf={csrf}&decision=approve"),
+    );
+    let (st, body) = exchange(port, &client, EXTERNAL_REDIRECT, &approved.query()["code"]);
+    assert_eq!(st, 200, "{body}");
+    let answer: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let (st, next) = refresh(port, &client, &text(&answer, "refresh_token"));
+    assert_eq!(st, 200, "{next}");
+    let mine = tool_text(
+        port,
+        &text(&next, "access_token"),
+        "list_my_indicators",
+        serde_json::json!({}),
+    );
+    assert!(!mine.contains("from_before"), "{mine}");
+    let store = chartgen::scripting::persistence::Store::open(&db).unwrap();
+    assert_eq!(store.waiting_rows(None).unwrap().scripts, 1);
+}
+
 /// A client id travels in URLs, so one must never be what hands a script over.
 /// A stranger through the owner's own client gets nothing, whatever is set.
 #[cfg(feature = "scripting")]
