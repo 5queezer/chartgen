@@ -1,6 +1,6 @@
 ---
 title: OAuth 2.1 PKCE
-description: OAuth endpoints, client registration, and token lifetime for the Claude.ai connector flow.
+description: OAuth endpoints, client registration, token lifetime and refresh tokens, for connectors and headless agents.
 ---
 
 `chartgen --serve` exposes an OAuth 2.1 authorization server with PKCE (S256).
@@ -23,7 +23,8 @@ a token. With a provider configured it needs a [signed-in user](#sign-in) instea
 | `GET` | `/.well-known/oauth-authorization-server` | RFC 8414 metadata document. |
 | `POST` | `/register` | Dynamic client registration (RFC 7591). Returns a `client_id`/`client_secret`. |
 | `GET` | `/authorize` | Authorization endpoint. Requires `client_id`, `redirect_uri`, `response_type=code`, `code_challenge`, `code_challenge_method=S256`, optional `state`. |
-| `POST` | `/token` | Token endpoint. Exchanges `code` + `code_verifier` for an access token. |
+| `POST` | `/token` | Token endpoint. Exchanges `code` + `code_verifier` for an access token and, for every client but the web app's own, a [refresh token](#refresh-tokens). Exchanges a refresh token for the next pair. |
+| `POST` | `/revoke` | [Revocation](#revoking-a-refresh-token) (RFC 7009): `token` and `client_id`, as a form or JSON. |
 | `GET` | `/oauth/signin`, `/oauth/login/{provider}`, `/oauth/callback/{provider}`, `/oauth/cancel`, `/oauth/consent` | [Sign-in](#sign-in) pages and redirects. `404` with sign-in off. |
 | `POST` | `/oauth/consent`, `/oauth/logout` | The consent decision, and signing out (`204`, clears the cookie). `404` with sign-in off. |
 | `GET` | `/oauth/signed-out` | The page after signing out. `404` with sign-in off. |
@@ -39,8 +40,10 @@ a token. With a provider configured it needs a [signed-in user](#sign-in) instea
   "authorization_endpoint": "https://chartgen.example.com/authorize",
   "token_endpoint": "https://chartgen.example.com/token",
   "registration_endpoint": "https://chartgen.example.com/register",
+  "revocation_endpoint": "https://chartgen.example.com/revoke",
+  "revocation_endpoint_auth_methods_supported": ["none"],
   "response_types_supported": ["code"],
-  "grant_types_supported": ["authorization_code"],
+  "grant_types_supported": ["authorization_code", "refresh_token"],
   "code_challenge_methods_supported": ["S256"],
   "token_endpoint_auth_methods_supported": ["none", "client_secret_post"],
   "logo_uri": "https://chartgen.example.com/favicon.svg"
@@ -53,8 +56,8 @@ so a client given `https://<domain>/mcp` finds the protected-resource
 document and from it the authorization server. A `401` from the root and
 `/message`/`/sse` aliases points at the root document instead.
 
-Only `authorization_code` with PKCE S256 is supported — there is no
-`refresh_token` or `client_credentials` path.
+The grants are `authorization_code` with PKCE S256 and
+[`refresh_token`](#refresh-tokens). There is no `client_credentials` path.
 
 ## Sign-in
 
@@ -132,11 +135,12 @@ original `state` added to its query string when all of these hold:
 ## Token lifetime
 
 Access tokens are valid for **7 days** (`604800` seconds). Expired tokens are
-evicted lazily on the next request; there is no refresh-token flow, so the
-client re-runs the authorization code dance when a token expires.
+evicted lazily on the next request. A client with a [refresh token](#refresh-tokens)
+exchanges it for a new one, and the web app runs the authorization code flow again.
 
-Tokens are held in memory, so a process restart invalidates every token and
-clients re-authorize. Registered clients are also stored in `CHARTGEN_DB` and
+Access tokens are held in memory, so a process restart invalidates every one of
+them. A client with a refresh token gets a `401`, refreshes and carries on; the web
+app re-authorizes. Registered clients are also stored in `CHARTGEN_DB` and
 restored at startup, with or without `CHARTGEN_SCRIPTING=1`, so a client keeps
 its `client_id` across a restart
 ([ADR-0036](/chartgen/decisions/0036-own-origin-invalid-client-redirect/)). With
@@ -169,6 +173,7 @@ At 1000 clients, `/register` makes room where it can
 evicts a client that never received a token, oldest first, or else the one longest
 out of use, from memory and from `CHARTGEN_DB`. A client with a live token is never
 evicted, so a session in use cannot be revoked this way, and neither is a client
+with a [refresh token](#refresh-tokens) used in the last 30 days, or one
 that owns stored [scripted indicators](/chartgen/guides/scripted-indicators/). With
 sign-in on, one user keeps at most 20 clients live, and scripts belong to users, so only
 scripts from before sign-in still pin a client.
@@ -182,7 +187,7 @@ a volume: the web app re-registers by itself and an MCP client registers again.
 
 ### When `/register` stays at `503`
 
-If every client without scripts holds a live token, nothing can be evicted. New
+If every client without scripts holds a live token or a refresh token, nothing can be evicted. New
 browsers, browsers recovering from a stale client and new MCP clients then cannot
 sign in, while clients already registered keep working. The server logs this at most
 once a minute:
@@ -192,13 +197,15 @@ once a minute:
 ```
 
 **Usually this clears without deleting anything, so do not start by deleting
-registrations.** A token expires after 7 days, and its client can then be evicted
-unless it has a new one. To clear it sooner, restart the server. A restart drops every
-token, so the next registrations can evict clients without scripts, and clients in use
-sign in again by themselves.
+registrations.** A token expires after 7 days and a refresh token 30 days after its last
+use, and the client can then be evicted unless it has a new one. A restart drops every
+access token, so the next registrations can evict clients that have no refresh token and
+no scripts, and browsers in use sign in again by themselves. Clients with a refresh token
+stay through a restart ([ADR-0058](/chartgen/decisions/0058-refresh-tokens-for-headless-clients/)).
 
 **Delete only if it keeps coming back.** If `/register` returns to `503` soon after a
-restart, something is keeping every client live. `/authorize` and `/token` issue new
+restart, something is keeping every client live: refresh tokens, which survive a restart,
+or new tokens. `/authorize` and `/token` issue new
 tokens with no `/register` and no rate limit, so someone who filled the table can keep
 it full through restarts and expiry, and it lasts until an operator acts. The server
 cannot tell this from 1000 clients really in use, and deleting real clients only makes
@@ -212,15 +219,16 @@ them register again.
    `sqlite3`, so run this from the host, with your path in place of the placeholder:
 
    ```bash
-   sqlite3 /host/path/to/chartgen.db "DELETE FROM oauth_clients WHERE client_id NOT IN (SELECT user_id FROM user_indicators);"
+   sqlite3 /host/path/to/chartgen.db "DELETE FROM refresh_tokens WHERE client_id NOT IN (SELECT user_id FROM user_indicators); DELETE FROM oauth_clients WHERE client_id NOT IN (SELECT user_id FROM user_indicators);"
    ```
 
    A wrong path changes nothing: `sqlite3` creates an empty file there and fails with
    `no such table: oauth_clients`. Remove that file and use the right path.
 3. Start the server.
 
-This removes every client that owns no scripts, and clients that own scripts stay.
-The removed ones recover like evicted clients, and keeping the table full then takes
+This removes every client that owns no scripts, with its refresh tokens, and clients that
+own scripts stay. A headless client among the removed ones must be
+[connected again](#connecting-a-headless-agent) by a person. The others recover like evicted clients, and keeping the table full then takes
 filling it again through the rate-limited `/register`.
 
 **A table full of script owners is different.** Owners are never evicted, so neither
@@ -229,8 +237,140 @@ only comes free by choosing whose scripts go. With the server stopped, remove th
 client from both tables:
 
 ```bash
-sqlite3 /host/path/to/chartgen.db "DELETE FROM user_indicators WHERE user_id = '<client_id>'; DELETE FROM oauth_clients WHERE client_id = '<client_id>';"
+sqlite3 /host/path/to/chartgen.db "DELETE FROM user_indicators WHERE user_id = '<client_id>'; DELETE FROM refresh_tokens WHERE client_id = '<client_id>'; DELETE FROM oauth_clients WHERE client_id = '<client_id>';"
 ```
+
+## Refresh tokens
+
+A client that is authorized once keeps working with nobody at a browser: across a
+restart, a deploy and the 7 days of an access token
+([ADR-0058](/chartgen/decisions/0058-refresh-tokens-for-headless-clients/)).
+
+The code exchange answers with a `refresh_token` next to the access token:
+
+```json
+{"access_token": "…", "token_type": "Bearer", "expires_in": 604800, "refresh_token": "…"}
+```
+
+The web app's own client gets none: any client whose `redirect_uri` is exactly `/` on
+`CHARTGEN_BASE_URL`'s origin. This is the same with [sign-in](#sign-in) on and off.
+
+To get the next access token, `POST /token` as a form or JSON:
+
+```bash
+curl -s https://chartgen.example.com/token \
+  -d grant_type=refresh_token -d client_id="$CLIENT_ID" -d refresh_token="$REFRESH_TOKEN"
+```
+
+The answer has the same shape, with a **new** refresh token. Store it in place of the old
+one before using the access token.
+
+- **Each refresh token works once.** Presenting one that was already exchanged ends the
+  authorization: every refresh token and access token that came from it. That is how a
+  copied token is noticed. Two processes must therefore not share one refresh token; give
+  each its own authorization.
+- **A lost answer can be retried for 60 seconds** with the same refresh token. The retry
+  gets a new one, and the one from the lost answer stops working.
+- **30 days out of use ends it.** Every exchange starts the 30 days again, so a client
+  that keeps working is never sent back to a browser.
+- It belongs to the client it was issued to, and with sign-in on to the user who
+  authorized. Its access tokens have the same owner as the first one, and are never the
+  web app's: `/workspace/sync` answers them `403`.
+- It is not valid after sign-in is turned on or off, and works again when the setting is
+  switched back.
+- Signing out of the web app leaves it, as it leaves a connector's access token.
+- Refreshing counts as activity for [server alerts](/chartgen/guides/web/#alerts-on-the-server),
+  like signing in.
+
+| `/token` answer | Meaning |
+|---|---|
+| `200` | The new pair. |
+| `400 invalid_grant` | Unknown, expired, revoked, used before, another client's, or from the other sign-in setting. Authorize again. |
+| `503 server_error` | The store could not be written. Nothing was issued, and the refresh token sent is still valid: try again. |
+
+**Limits.** With sign-in on, a user keeps 20 authorizations per client, the one longest
+out of use ended first, within the 20 clients they keep live. With sign-in off, a client
+keeps 20, and past that a code exchange answers with an access token and no refresh
+token: nobody's is ended to make room.
+
+**What is stored.** The server keeps the SHA-256 of a refresh token, never its value, in
+the [`refresh_tokens`](/chartgen/reference/persistence/) table of `CHARTGEN_DB`. The file
+has to outlive the process: a container needs
+[a volume at `~/.chartgen`](/chartgen/guides/deploy/#docker). Without one, when the store
+cannot be opened, or in a build without the default `scripting` cargo feature, refresh
+tokens work until the next restart and no longer. For a store that cannot be opened the
+log says so at startup:
+
+```text
+[OAuth] refresh tokens stay in memory and end with this process: no store
+```
+
+### Connecting a headless agent
+
+An agent that runs on a server, with no browser, needs a person once, for the
+authorization. After that it refreshes by itself.
+
+1. **Use `https://<domain>/mcp` as the server URL with OAuth as the auth method.** The
+   client must discover the server from the `401`, register itself, run the authorization
+   code flow with PKCE, **keep its refresh token on disk**, and refresh after a `401` or
+   when the access token has expired. Clients built on the official MCP SDKs do this.
+   With Hermes:
+
+   ```bash
+   hermes mcp add chartgen --url https://chartgen.example.com/mcp --auth oauth
+   ```
+
+   Run it as the user the agent runs as, so that the token files it writes are readable by
+   the agent.
+2. **Open the URL the client prints, in any browser,** also on another machine. With
+   sign-in on, sign in and approve the client on the consent page. The browser is then sent
+   to the client's `redirect_uri`, usually a loopback address. If the client does not run
+   on the machine with the browser, the page fails to load: copy the address from the
+   address bar back into the client, which is what it asks for.
+3. **Check it once.** Restart chartgen and let the agent make a call. The server log shows
+   `POST /token SUCCESS — token refreshed` and the call succeeds, with no browser.
+
+With sign-in on, what the agent stores (scripts, server alerts) belongs to the account that
+approved it, and is visible to that account in the web app. With sign-in off it belongs to
+the agent's `client_id`, and anyone who learns that id can authorize as the same client, so
+do not rely on a refresh token for protection there.
+
+An agent that was idle for more than 30 days, or whose token files were lost, restored from
+an old backup or copied to a second machine that also runs, has to be authorized again from
+step 1. Keep the token files out of backups that might be restored next to a running
+agent: the copy that is used second ends both.
+
+### Revoking a refresh token
+
+**Holding the token:** `POST /revoke` with `token` and `client_id`, as a form or JSON.
+
+```bash
+curl -s -o /dev/null -w '%{http_code}\n' https://chartgen.example.com/revoke \
+  -d client_id="$CLIENT_ID" -d token="$REFRESH_TOKEN"
+```
+
+A refresh token, or an access token that came from one, ends the whole authorization at
+once. Another access token ends alone. `200` also for a token the server does not know or
+one that belongs to another client, which is left alone. `400 invalid_request` without
+`token` or `client_id`. `503` means the store could not be written and nothing was revoked.
+
+**Not holding it,** for example after losing the machine the agent ran on: this takes the
+operator, because no page lists an account's authorizations yet.
+
+1. Stop the server. A running server keeps refresh tokens in memory and would not notice.
+2. Delete the rows, by account or by client, with the path as
+   [above](#when-register-stays-at-503):
+
+   ```bash
+   sqlite3 /host/path/to/chartgen.db "DELETE FROM refresh_tokens WHERE user_id = 'github:<id>';"
+   sqlite3 /host/path/to/chartgen.db "DELETE FROM refresh_tokens WHERE client_id = '<client_id>';"
+   ```
+
+3. Start the server. The restart ends the access tokens too, so nothing the agent held
+   still works.
+
+The first statement ends every application the account approved. With sign-in off there is
+no account, so use the second.
 
 ## MCP handler behavior
 
@@ -253,10 +393,11 @@ Server logs every OAuth step to stderr with an `[OAuth]` prefix:
 [OAuth] GET /authorize client_id=... redirect_uri=...
 [OAuth] POST /token PKCE verify: ok=true verifier_len=64 challenge=...
 [OAuth] POST /token SUCCESS — token issued (len=...)
+[OAuth] POST /token SUCCESS — token refreshed
 [OAuth] sign-in started provider=github
 [OAuth] sign-in succeeded provider=github
 ```
 
 MCP requests are tagged `[MCP]` and note whether an `Authorization` header was
-present. Logs never contain provider secrets or codes, `state` values, session values or
-user ids.
+present. Logs never contain provider secrets or codes, `state` values, session values,
+refresh tokens or user ids.

@@ -154,6 +154,17 @@ CREATE TABLE client_grants (            -- clients a user approved
     created_at  INTEGER NOT NULL,
     PRIMARY KEY (user_id, client_id)
 );
+-- Migration 7: refresh tokens (ADR-0058).
+CREATE TABLE refresh_tokens (
+    token_hash  TEXT    PRIMARY KEY,    -- SHA-256 hex of the token; the value is never stored
+    family      TEXT    NOT NULL,       -- one authorization; at most one row of it is unspent
+    seq         INTEGER NOT NULL,       -- position in the family
+    client_id   TEXT    NOT NULL,
+    user_id     TEXT,                   -- users.id, or NULL when issued with sign-in off
+    created_at  INTEGER NOT NULL,
+    spent_at    INTEGER                 -- when it was exchanged; kept to recognise reuse
+);
+CREATE INDEX refresh_tokens_family ON refresh_tokens (family);
 -- Migration 3: server alerts (ADR-0042).
 CREATE TABLE server_alerts (
     id           TEXT PRIMARY KEY,
@@ -219,12 +230,21 @@ registration, unless they own scripts.
 
 `oauth_clients` keeps dynamically registered OAuth clients across restarts,
 so a client keeps its `client_id`, and with it any scripts. Access tokens stay
-in memory: after a restart, clients re-authorize. Clients that received a token
+in memory: after a restart the web app re-authorizes, and other clients exchange their
+[refresh token](/chartgen/reference/oauth/#refresh-tokens). Clients that received a token
 are only deleted when a registration at the
 [1000 client limit](/chartgen/reference/oauth/#token-lifetime) evicts them, which
-spares any client with a live token or a row in `user_indicators`, or, with
+spares any client with a live token, a refresh token or a row in `user_indicators`, or, with
 `CHARTGEN_SERVER_ALERTS=1`, in `server_alerts`. Back up the file like any
 SQLite database (`sqlite3 chartgen.db ".backup copy.db"`).
+
+`refresh_tokens` holds one row per refresh token handed out and not yet forgotten
+([ADR-0058](/chartgen/decisions/0058-refresh-tokens-for-headless-clients/)). An
+authorization unused for 30 days is deleted at startup, as are all but the 100 newest spent
+rows of one at each exchange. Rows go with their client, and when a token is
+[revoked](/chartgen/reference/oauth/#revoking-a-refresh-token). The table is written with
+sign-in on and off. Deleting a client by hand should delete its rows here too; rows left
+behind are ignored.
 
 `users`, `sessions` and `client_grants` are empty until
 [sign-in](/chartgen/reference/oauth/#sign-in) is configured. Expired sessions, and

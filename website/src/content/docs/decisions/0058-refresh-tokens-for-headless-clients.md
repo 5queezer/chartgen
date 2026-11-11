@@ -1,0 +1,253 @@
+---
+title: "0058 — Refresh tokens, so a client authorized once keeps working"
+description: "/token answers a refresh-token grant. Refresh tokens are rotated, stored only as hashes and survive restarts, so a headless MCP client needs a person once. The web app's own client gets none, and POST /revoke ends one."
+sidebar:
+  order: 58
+---
+
+**Status:** Accepted
+**Date:** 2026-11-11
+**Amends:** [ADR-0044](/chartgen/decisions/0044-sign-in-through-github-and-google/) (a client other than the web app no longer re-authorizes after a restart or after 7 days; a refresh token counts as a token in the per-user limits), [ADR-0036](/chartgen/decisions/0036-own-origin-invalid-client-redirect/) (a refresh token keeps its client from being evicted, for up to 30 days out of use, and through restarts)
+
+## Context and Problem Statement
+
+Access tokens live in the server's memory and last 7 days, and `/token` had one grant,
+`authorization_code`. Every restart ended every token, and a deploy is a restart
+([ADR-0037](/chartgen/decisions/0037-pull-based-deploy/)). A browser recovers by itself: it
+is sent through `/authorize` again and, with sign-in on, still has its session. A headless
+MCP client, such as an agent that runs on a server and wakes on an event, has no browser and
+nobody watching, so each restart and each seventh day needed a person. Such clients used the
+stdio binary instead, which has no server alerts.
+
+Registered clients, users, sessions and approvals already survive a restart in
+`CHARTGEN_DB`. What a client holds to prove its authorization did not.
+
+## Decision Drivers
+
+- Authorized once, then no person: across a restart, a deploy and the 7 days of an access
+  token.
+- Only hashes of tokens on disk, and a revocation that still holds after a restart.
+- The first-party rule of [ADR-0050](/chartgen/decisions/0050-per-user-workspace-sync/)
+  stays: only the web app's own token reaches `/workspace/sync`, and nothing durable may
+  become such a token.
+- [ADR-0044](/chartgen/decisions/0044-sign-in-through-github-and-google/) stays: with
+  sign-in on a token's owner is its user and never its client, and rows from before sign-in
+  go to `CHARTGEN_CLAIM_OWNER` and to nobody else.
+- The limits per user keep holding, and no request writes to the store.
+- A standard client needs no code written for chartgen.
+
+## Considered Options
+
+**1. Store access tokens.** Keep them as hashes in the file, so a restart is invisible to
+every client.
+
+- Good: the smallest change, and no client has to do anything.
+- Bad: the 7 days remain, so a person is still needed every week. Making the lifetime long
+  or sliding turns a bearer token that travels on every request into a long-lived secret,
+  and a sliding one needs a write per request.
+- Bad: the web app takes a token per page load, so every page load would write, and its
+  tokens end with a browser session, so signing out would have to delete rows.
+
+**2. A refresh-token grant (chosen).** `/token` hands out a refresh token with the access
+token and exchanges it for the next pair
+([RFC 6749 section 6](https://www.rfc-editor.org/rfc/rfc6749#section-6)).
+
+- Good: it is what MCP clients already implement. After a restart the client's call gets
+  `401`, it refreshes and carries on.
+- Good: the long-lived secret goes to `/token` only, never on a tool call, and the store is
+  written when a token is issued or exchanged, never per request.
+- Good: the first-party rule is kept by construction, because a refresh token is never
+  given to the web app's client and carries no browser session.
+- Bad: the client must store its refresh token, and the first authorization still takes a
+  browser, once.
+- Bad: a rotating token can be lost between the server's answer and the client's disk.
+
+**3. Personal access tokens.** A signed-in user creates a named, long-lived token in the web
+app and pastes it into the agent's configuration.
+
+- Good: no OAuth flow on the headless side at all, and a list in the web app is a natural
+  place to revoke one.
+- Bad: it needs a page in the web app and endpoints for it, and a second kind of credential
+  outside clients, consent and the limits per client.
+- Bad: a static secret that never rotates, in a configuration file and on every request.
+- Bad: it does not exist with sign-in off, where there is no signed-in user.
+
+## Decision Outcome
+
+Chosen: **a refresh-token grant**. It is the only option that removes both the restart and
+the 7 days without putting a long-lived secret on every request, and it needs neither a
+page in the web app nor a new kind of credential. Personal access tokens stay possible
+later, and nothing here is in their way.
+
+### What is issued, and to whom
+
+The code exchange at `/token` answers with a `refresh_token` next to the access token,
+unless the code went to the web app's own client: a `redirect_uri` that is exactly `/` on
+the server's own origin (`is_first_party`, as in
+[ADR-0050](/chartgen/decisions/0050-per-user-workspace-sync/)). That holds with sign-in on
+and off. The web app takes a token per page load, its tokens must end with its browser
+session, and it recovers through `/authorize` by itself, so for it nothing changes.
+
+`POST /token` with `grant_type=refresh_token`, `refresh_token` and `client_id` answers with
+a new access token, 7 days as before, and the next refresh token.
+
+A refresh token is 256 random bits. The server keeps its SHA-256 and nothing else, in
+memory and in the new table `refresh_tokens`. The value is in the answer to the client and
+nowhere after that, including the log. Access tokens are unchanged: in memory, by their
+value, gone at a restart. "Only hashes are stored" is about what is on disk.
+
+A refresh token belongs to the client it was issued to and to the user who authorized, or
+to no user with sign-in off. Another `client_id` is refused. The access token it yields has
+the same owner as the first one had, and never a browser session, so it cannot pass for the
+web app's and gets `403` from `/workspace/sync`.
+
+### Rotation, and a token that comes back
+
+One authorization is a **family**: its refresh tokens follow each other, and exactly one is
+usable. Each exchange spends the presented token and stores its successor. The spent hash
+is kept, so that a token that comes back is recognised, also after a restart:
+
+- A spent token presented again **ends the family**, with the access tokens that came from
+  it. Either the client or somebody with a copy holds the usable one, and the server cannot
+  tell which, so neither keeps it.
+- Except within 60 seconds, for the token spent last: a client that lost the answer may send
+  the same token again. It gets a new successor and **the first successor is spent**. The
+  family still has one usable token, never two. If the first successor was in fact received
+  by somebody, their next exchange presents a spent token and the family ends as above.
+  Rejected: answering the retry with a second successor while the first stays valid. That
+  leaves two lines of tokens that never meet, and a copy made in that window is never
+  noticed.
+- The 100 most recent spent tokens of a family are kept. One older than that is unknown to
+  the server and refused like any unknown token, without ending the family.
+
+**The successor is in the store before the answer leaves.** The spent mark and the new row
+are one transaction. If it fails, `/token` answers `503`, issues nothing, and the presented
+token is still the usable one. Answered first, a failed write would leave the client with a
+token that the next start does not know, which is the failure this decision removes. The
+first refresh token of a family is treated the same way: if it cannot be stored, the answer
+carries the access token alone.
+
+### Lifetime
+
+A family ends when its usable token is 30 days old. Every exchange starts the 30 days
+again, and a working client exchanges at least every 7 days, when its access token runs
+out. There is no absolute lifetime, on purpose: an agent that keeps working is never asked
+for a person again. A family nobody uses is gone after 30 days, the same time after which
+an account's server alerts go ([ADR-0042](/chartgen/decisions/0042-server-side-alerts/)).
+
+An exchange counts as getting a token: it is recorded as the client's and the user's
+activity, as a code exchange is. So a working agent keeps its owner's server alerts alive,
+and one that stopped lets them expire. A tool call still writes nothing.
+
+### Revocation
+
+- **By whoever holds a token:** `POST /revoke`
+  ([RFC 7009](https://www.rfc-editor.org/rfc/rfc7009)) with `token` and `client_id`. A
+  refresh token, or an access token that came from one, ends the whole family and its access
+  tokens. Any other access token ends alone. The rows are deleted before the answer, so it
+  holds after a restart, and `503` means nothing was revoked. The answer is `200` for a
+  token the server does not know or one of another client, which is left alone, so the
+  endpoint tells nobody which tokens exist.
+- **By the server:** a spent token that comes back, as above.
+- **By an operator, for a token nobody holds any more:** delete the rows and restart. The
+  families are loaded at startup, so a deleted row is a family that no longer exists. The
+  [OAuth reference](/chartgen/reference/oauth/#revoking-a-refresh-token) has the statement.
+- **With the client:** an evicted or deleted client takes its refresh tokens along. When a
+  user's approval of a client is dropped, which today only the limit of 50 approvals does,
+  that user's families for that client end too.
+
+Signing out of the web app does not end a family, as it does not end a connector's access
+token today ([ADR-0044](/chartgen/decisions/0044-sign-in-through-github-and-google/)): an
+agent is there to work with no browser open.
+
+There is no page in the web app that lists an account's connected applications and ends
+one. Until there is, a user who lost the machine an agent ran on needs the operator.
+
+### Limits
+
+A family counts as a token of its client, in every limit that counts tokens.
+
+- **With sign-in on,** per user: 20 families per client, the one longest out of use ended
+  first, and a client held only through a family is one of the user's 20 live clients. The
+  client that drops out of those 20 loses that user's families.
+- **With sign-in off,** 20 families per client, and at the limit the code exchange answers
+  **without a refresh token** instead of ending the oldest. A client id is all it takes to
+  authorize there, so ending the oldest would let anyone who has read a client id end the
+  family of the agent that uses it.
+  [ADR-0036](/chartgen/decisions/0036-own-origin-invalid-client-redirect/): "A stranger must
+  not be able to end a session in use."
+- **A family keeps its client from being evicted,** as a live access token does. After a
+  restart no access token is left in memory, and a refresh token is all a headless client
+  has. Evicting its client then would cost it its authorization, and a person.
+
+### Sign-in on, off, and switched
+
+Refresh tokens are issued in both modes. With sign-in off, a client id already yields a
+token to anyone who has it, so a refresh token protects nothing there that the client id
+does not already expose. It only saves the client the code flow after a restart.
+
+A refresh token is refused when the server's sign-in mode is not the one it was issued
+under. One from before sign-in would otherwise yield a token without a user on a server
+where every token has one, owned by its client: the path by which rows from before sign-in
+could be reached through a client id. The rows are kept and ignored, so switching back
+finds them again.
+
+Refreshing claims nothing. The rows from before sign-in go to `CHARTGEN_CLAIM_OWNER` when
+that user gets a token, and a refresh token is that user's or it is not.
+
+### No store
+
+In a build without the `scripting` feature, or when `CHARTGEN_DB` cannot be opened, the
+grant works and the families live in memory, as sessions do. They end with the process, and
+for a store that cannot be opened startup says so. Durability needs the file on a volume that outlives the container, as
+registered clients already do.
+
+### Consequences
+
+- Good: a headless client is authorized once. A restart or a deploy costs it one refused
+  call and one refresh.
+- Good: connectors stop sending their users through sign-in every 7 days.
+- Good: nothing durable is first-party, and no new path leads to rows owned by a client.
+- Good: a copied refresh token is noticed the first time both copies are used.
+- Bad: **one authorization can last for good.** While an agent keeps refreshing, its
+  account's access and server alerts never need another sign-in, unlike a browser session,
+  which ends after 30 days whatever happens. The ways out are the ones under Revocation.
+- Bad: a copied refresh token that is used while its owner is idle works until the owner
+  refreshes, or for 30 days after the copy stops.
+- Bad: **a full client table no longer clears by restarting.** A family pins its client
+  through restarts, and for 30 days out of use where an access token pinned it for 7. With
+  sign-in on the price is unchanged, 20 clients per account. With sign-in off someone
+  holding the table full no longer has to come back every week. The
+  [recovery](/chartgen/reference/oauth/#when-register-stays-at-503) now deletes refresh
+  tokens too.
+- Bad: with sign-in off, a client whose 20 families are held by others gets no refresh
+  token until one of them is 30 days out of use.
+- Bad: a client that crashes after an exchange and before saving the answer has 60 seconds
+  to retry. After that the token it still has is a spent one, presenting it ends the
+  family, and a person authorizes again.
+- Neutral: every client sees one `401` after a restart, and its event stream reconnects, as
+  it already had to.
+- Neutral: the answers of `/token` and `/register` and the metadata document name the new
+  grant also on a server with nothing configured. A client that ignores a
+  `refresh_token` behaves as before.
+
+### Testing
+
+**The restart** is proved with the real binary, in `tests/e2e.rs`. With sign-in off, a
+client is authorized, the process is killed and started again on the same `CHARTGEN_DB`, the
+old access token gets `401`, and the refresh token yields one that works, twice in a row;
+the same test revokes and restarts once more. With sign-in on, the second test starts the
+binary on a file that already holds a registered client, a user, a session and an approval,
+and the connector's refresh token works there as its user.
+
+**A deploy** is a new build started on the file the last one left, which is those restarts
+plus a schema change. The schema part is a store test: a file from before this migration,
+with clients, users and approvals in it, is opened by the current code and takes a refresh
+token. It is built from the migrations before this one, found by content and not by number.
+A real-binary test would have to set `PRAGMA user_version` to a fixed number, and would
+break the day a later migration is appended.
+
+Further tests cover a failed store write, a spent token after a restart, the retry, rows
+deleted by an operator, the web app's client, the workspace endpoint, signing out, both
+sign-in modes and the switch between them, the limits, a dropped approval, and that
+refreshing claims nothing.
