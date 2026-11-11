@@ -62,6 +62,8 @@ pub fn by_name(name: &str) -> Option<Box<dyn Indicator>> {
         "funding" | "funding_rate" => Some(Box::new(external::FundingRate)),
         "oi" | "open_interest" => Some(Box::new(external::OpenInterestHist)),
         "long_short" | "ls_ratio" => Some(Box::new(external::LongShortRatio)),
+        "top_long_short" | "top_ls" => Some(Box::new(external::TopLongShortRatio)),
+        "taker_ratio" | "taker_buy_sell" => Some(Box::new(external::TakerRatio)),
         "fear_greed" | "fng" => Some(Box::new(external::FearGreed)),
         "volume" => Some(Box::new(trend::Volume::default())),
         "ma" => Some(Box::new(trend::Ma::default())),
@@ -231,6 +233,8 @@ pub fn available() -> &'static [&'static str] {
         "funding",
         "oi",
         "long_short",
+        "top_long_short",
+        "taker_ratio",
         "fear_greed",
         "volume",
         "ma",
@@ -474,6 +478,18 @@ pub fn registry() -> Vec<IndicatorInfo> {
         "external",
         external::LongShortRatio
     );
+    reg!(
+        "top_long_short",
+        &["top_ls"],
+        "external",
+        external::TopLongShortRatio
+    );
+    reg!(
+        "taker_ratio",
+        &["taker_buy_sell"],
+        "external",
+        external::TakerRatio
+    );
     reg!("fear_greed", &["fng"], "external", external::FearGreed);
 
     entries
@@ -481,3 +497,22 @@ pub fn registry() -> Vec<IndicatorInfo> {
 
 #[cfg(test)]
 mod presentation_tests;
+
+#[cfg(test)]
+mod reads_beyond_bars_tests {
+    use super::*;
+
+    /// A replay refuses an indicator that reads a series of its own, by what the
+    /// indicator says of itself (ADR-0059). One that fetches and does not say so would
+    /// read live data in a replay. So every indicator listed as external says it, and
+    /// no other does: a new one that forgets fails here.
+    #[test]
+    fn every_indicator_that_fetches_a_series_of_its_own_says_so() {
+        for info in registry() {
+            // Listed with them, and computed from the bars it is given alone.
+            let fetches = info.category == "external" && info.name != "cvd";
+            let indicator = by_name(info.name).unwrap_or_else(|| panic!("{}", info.name));
+            assert_eq!(indicator.reads_beyond_bars(), fetches, "{}", info.name);
+        }
+    }
+}

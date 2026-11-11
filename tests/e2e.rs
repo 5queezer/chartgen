@@ -378,8 +378,15 @@ fn test_render_mixed_overlays_and_panels() {
 #[test]
 fn test_render_all_indicators() {
     let data = sample_data(200);
-    // Skip external API indicators (funding, oi, long_short, fear_greed) as they need network
-    let skip = ["funding", "oi", "long_short", "fear_greed"];
+    // Skip external API indicators as they need network
+    let skip = [
+        "funding",
+        "oi",
+        "long_short",
+        "top_long_short",
+        "taker_ratio",
+        "fear_greed",
+    ];
     let panels: Vec<Box<dyn Indicator>> = indicators::available()
         .iter()
         .filter(|name| !skip.contains(name))
@@ -420,7 +427,14 @@ fn test_render_minimal_data() {
 #[test]
 fn test_external_indicators_no_symbol() {
     let data = sample_data(100); // symbol = None
-    let externals = ["funding", "oi", "long_short", "fear_greed"];
+    let externals = [
+        "funding",
+        "oi",
+        "long_short",
+        "top_long_short",
+        "taker_ratio",
+        "fear_greed",
+    ];
     for name in &externals {
         let ind = indicators::by_name(name).unwrap();
         let result = ind.compute(&data);
@@ -434,7 +448,13 @@ fn test_external_indicators_stock_symbol() {
     let mut data = sample_data(100);
     data.symbol = Some("AAPL".to_string());
     data.interval = Some("1d".to_string());
-    let crypto_only = ["funding", "oi", "long_short"];
+    let crypto_only = [
+        "funding",
+        "oi",
+        "long_short",
+        "top_long_short",
+        "taker_ratio",
+    ];
     for name in &crypto_only {
         let ind = indicators::by_name(name).unwrap();
         let result = ind.compute(&data);
@@ -467,7 +487,7 @@ fn test_sample_data_sizes() {
 #[test]
 fn test_available_count() {
     let available = indicators::available();
-    assert_eq!(available.len(), 77, "Expected 77 indicators");
+    assert_eq!(available.len(), 79, "Expected 79 indicators");
 }
 
 #[test]

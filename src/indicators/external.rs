@@ -209,6 +209,8 @@ const SERIES_LOADING: &str = "futures data is not loaded yet; try again shortly"
 static FUNDING: LazyLock<SeriesCache<(i64, f64)>> = LazyLock::new(SeriesCache::default);
 static OPEN_INTEREST: LazyLock<SeriesCache<(i64, f64)>> = LazyLock::new(SeriesCache::default);
 static LONG_SHORT: LazyLock<SeriesCache<(i64, f64, f64)>> = LazyLock::new(SeriesCache::default);
+static TOP_LONG_SHORT: LazyLock<SeriesCache<(i64, f64, f64)>> = LazyLock::new(SeriesCache::default);
+static TAKER_RATIO: LazyLock<SeriesCache<(i64, f64)>> = LazyLock::new(SeriesCache::default);
 
 // ---- Helpers ----
 
@@ -662,32 +664,63 @@ fn period_ms(period: &str) -> i64 {
     crate::data::interval_secs(period).unwrap_or(300) * 1000
 }
 
-fn oi_page(symbol: &str, period: &str, q: &Query) -> Result<Vec<(i64, f64)>, String> {
+/// One value per row of a `/futures/data/*` series.
+struct Hist {
+    /// Logged when a read fails.
+    what: &'static str,
+    endpoint: &'static str,
+    field: &'static str,
+    /// Offline samples (screenshots, tests) are `base + wave * amplitude`.
+    base: f64,
+    amplitude: f64,
+}
+
+const OI: Hist = Hist {
+    what: "open interest",
+    endpoint: "openInterestHist",
+    field: "sumOpenInterestValue",
+    base: 2.0e9,
+    amplitude: 5.0e8,
+};
+
+/// Taker buy volume over taker sell volume: above 1 market buyers are the aggressors.
+const TAKER: Hist = Hist {
+    what: "taker buy/sell ratio",
+    endpoint: "takerlongshortRatio",
+    field: "buySellRatio",
+    base: 1.0,
+    amplitude: 0.3,
+};
+
+fn hist_page(h: &Hist, symbol: &str, period: &str, q: &Query) -> Result<Vec<(i64, f64)>, String> {
     if sampling() {
         let step = period_ms(period);
         return Ok(sample_times(symbol, step, Some(RETENTION_MS), q)?
             .into_iter()
-            .map(|t| (t, 2.0e9 + sample_wave(t, step) * 5.0e8))
+            .map(|t| (t, h.base + sample_wave(t, step) * h.amplitude))
             .collect());
     }
     let url = format!(
-        "https://fapi.binance.com/futures/data/openInterestHist?symbol={}&period={period}",
+        "https://fapi.binance.com/futures/data/{}?symbol={}&period={period}",
+        h.endpoint,
         symbol.to_uppercase()
     );
     Ok(
         fetch_page(&url, q, crate::binance_gate::futures_data_budget())?
             .iter()
-            .filter_map(|r| {
-                Some((
-                    r.get("timestamp")?.as_i64()?,
-                    number(r, "sumOpenInterestValue")?,
-                ))
-            })
+            .filter_map(|r| Some((r.get("timestamp")?.as_i64()?, number(r, h.field)?)))
             .collect(),
     )
 }
 
-fn ls_page(symbol: &str, period: &str, q: &Query) -> Result<Vec<(i64, f64, f64)>, String> {
+/// `endpoint` is `globalLongShortAccountRatio` (all accounts) or
+/// `topLongShortPositionRatio` (the top 20% of accounts by margin, weighted by position).
+fn ls_page(
+    endpoint: &str,
+    symbol: &str,
+    period: &str,
+    q: &Query,
+) -> Result<Vec<(i64, f64, f64)>, String> {
     if sampling() {
         let step = period_ms(period);
         return Ok(sample_times(symbol, step, Some(RETENTION_MS), q)?
@@ -699,7 +732,7 @@ fn ls_page(symbol: &str, period: &str, q: &Query) -> Result<Vec<(i64, f64, f64)>
             .collect());
     }
     let url = format!(
-        "https://fapi.binance.com/futures/data/globalLongShortAccountRatio?symbol={}&period={period}",
+        "https://fapi.binance.com/futures/data/{endpoint}?symbol={}&period={period}",
         symbol.to_uppercase()
     );
     Ok(
@@ -854,32 +887,30 @@ impl Indicator for FundingRate {
 
 pub struct OpenInterestHist;
 
-fn oi_values(data: &OhlcvData) -> Result<Vec<f64>, Missing> {
+fn hist_values(
+    cache: &SeriesCache<(i64, f64)>,
+    h: &Hist,
+    data: &OhlcvData,
+) -> Result<Vec<f64>, Missing> {
     let sym = futures_symbol(data)?;
     let now = now_ms();
     let (w, period) = history_window(data, now)?;
     let floor = now - RETENTION_MS + RETENTION_MARGIN_MS;
-    let series = read(
-        &OPEN_INTEREST,
-        "open interest",
-        sym,
-        &w.key(period),
-        |prev| {
-            let mut page = |q: Query| oi_page(sym, period, &q);
-            let deadline = Instant::now() + READ_DEADLINE;
-            let step = period_ms(period);
-            collect(
-                prev,
-                &w,
-                now,
-                floor,
-                step,
-                HISTORY_MAX_PAGES,
-                deadline,
-                &mut page,
-            )
-        },
-    )?;
+    let series = read(cache, h.what, sym, &w.key(period), |prev| {
+        let mut page = |q: Query| hist_page(h, sym, period, &q);
+        let deadline = Instant::now() + READ_DEADLINE;
+        let step = period_ms(period);
+        collect(
+            prev,
+            &w,
+            now,
+            floor,
+            step,
+            HISTORY_MAX_PAGES,
+            deadline,
+            &mut page,
+        )
+    })?;
     let gap = interval_to_max_gap_ms(data.interval.as_deref().unwrap_or("4h"));
     Ok(align_to_bars(&series, &data.bars, gap))
 }
@@ -898,7 +929,7 @@ impl Indicator for OpenInterestHist {
     }
 
     fn compute(&self, data: &OhlcvData) -> PanelResult {
-        let (aligned, why) = match oi_values(data) {
+        let (aligned, why) = match hist_values(&OPEN_INTEREST, &OI, data) {
             Ok(v) => (v, None),
             Err(m) => (vec![f64::NAN; data.len()], Some(m)),
         };
@@ -930,32 +961,31 @@ impl Indicator for OpenInterestHist {
 pub struct LongShortRatio;
 
 /// The long and the short share per bar.
-fn ls_values(data: &OhlcvData) -> Result<(Vec<f64>, Vec<f64>), Missing> {
+fn ls_values(
+    cache: &SeriesCache<(i64, f64, f64)>,
+    what: &str,
+    endpoint: &str,
+    data: &OhlcvData,
+) -> Result<(Vec<f64>, Vec<f64>), Missing> {
     let sym = futures_symbol(data)?;
     let now = now_ms();
     let (w, period) = history_window(data, now)?;
     let floor = now - RETENTION_MS + RETENTION_MARGIN_MS;
-    let series = read(
-        &LONG_SHORT,
-        "long/short ratio",
-        sym,
-        &w.key(period),
-        |prev| {
-            let mut page = |q: Query| ls_page(sym, period, &q);
-            let deadline = Instant::now() + READ_DEADLINE;
-            let step = period_ms(period);
-            collect(
-                prev,
-                &w,
-                now,
-                floor,
-                step,
-                HISTORY_MAX_PAGES,
-                deadline,
-                &mut page,
-            )
-        },
-    )?;
+    let series = read(cache, what, sym, &w.key(period), |prev| {
+        let mut page = |q: Query| ls_page(endpoint, sym, period, &q);
+        let deadline = Instant::now() + READ_DEADLINE;
+        let step = period_ms(period);
+        collect(
+            prev,
+            &w,
+            now,
+            floor,
+            step,
+            HISTORY_MAX_PAGES,
+            deadline,
+            &mut page,
+        )
+    })?;
     let long: Vec<(i64, f64)> = series.iter().map(|&(ts, l, _)| (ts, l)).collect();
     let short: Vec<(i64, f64)> = series.iter().map(|&(ts, _, s)| (ts, s)).collect();
     let gap = interval_to_max_gap_ms(data.interval.as_deref().unwrap_or("4h"));
@@ -979,44 +1009,134 @@ impl Indicator for LongShortRatio {
     }
 
     fn compute(&self, data: &OhlcvData) -> PanelResult {
-        let (long_aligned, short_aligned, why) = match ls_values(data) {
-            Ok((l, s)) => (l, s, None),
-            Err(m) => (
-                vec![f64::NAN; data.len()],
-                vec![f64::NAN; data.len()],
-                Some(m),
+        ls_panel(
+            ls_values(
+                &LONG_SHORT,
+                "long/short ratio",
+                "globalLongShortAccountRatio",
+                data,
             ),
+            data.len(),
+            "L/S",
+        )
+    }
+}
+
+// ---- Top Trader Long/Short Ratio ----
+
+pub struct TopLongShortRatio;
+
+impl Indicator for TopLongShortRatio {
+    fn name(&self) -> &str {
+        "top_long_short"
+    }
+
+    fn reads_beyond_bars(&self) -> bool {
+        true
+    }
+
+    fn description(&self) -> &str {
+        "Top Trader Long/Short Ratio — position share of the largest accounts (Binance futures, last 30 days only)"
+    }
+
+    fn compute(&self, data: &OhlcvData) -> PanelResult {
+        ls_panel(
+            ls_values(
+                &TOP_LONG_SHORT,
+                "top trader long/short ratio",
+                "topLongShortPositionRatio",
+                data,
+            ),
+            data.len(),
+            "Top L/S",
+        )
+    }
+}
+
+/// The long and the short share as two lines, the gap between them filled.
+fn ls_panel(values: Result<(Vec<f64>, Vec<f64>), Missing>, len: usize, name: &str) -> PanelResult {
+    let (long_aligned, short_aligned, why) = match values {
+        Ok((l, s)) => (l, s, None),
+        Err(m) => (vec![f64::NAN; len], vec![f64::NAN; len], Some(m)),
+    };
+
+    PanelResult {
+        lines: vec![
+            Line {
+                breaks: false,
+                y: long_aligned.clone(),
+                color: rgba(0x26A69A, 1.0),
+                width: 1,
+                label: Some("Long".into()),
+            },
+            Line {
+                breaks: false,
+                y: short_aligned.clone(),
+                color: rgba(0xEF5350, 1.0),
+                width: 1,
+                label: Some("Short".into()),
+            },
+        ],
+        fills: vec![Fill {
+            y1: long_aligned,
+            y2: short_aligned,
+            color: rgba(0x26A69A, 0.1),
+            color_below: None,
+        }],
+        hlines: vec![HLine {
+            y: 0.5,
+            color: rgba(0x888888, 0.5),
+        }],
+        y_range: Some((0.0, 1.0)),
+        label: label_for(name, why),
+        is_overlay: false,
+        ..Default::default()
+    }
+}
+
+// ---- Taker Buy/Sell Ratio ----
+
+pub struct TakerRatio;
+
+impl Indicator for TakerRatio {
+    fn name(&self) -> &str {
+        "taker_ratio"
+    }
+
+    fn reads_beyond_bars(&self) -> bool {
+        true
+    }
+
+    fn description(&self) -> &str {
+        "Taker Buy/Sell Ratio — aggressive buy over sell volume, above 1 buyers lead (Binance futures, last 30 days only)"
+    }
+
+    fn compute(&self, data: &OhlcvData) -> PanelResult {
+        let (aligned, why) = match hist_values(&TAKER_RATIO, &TAKER, data) {
+            Ok(v) => (v, None),
+            Err(m) => (vec![f64::NAN; data.len()], Some(m)),
         };
+        let ones = vec![1.0; aligned.len()];
 
         PanelResult {
-            lines: vec![
-                Line {
-                    breaks: false,
-                    y: long_aligned.clone(),
-                    color: rgba(0x26A69A, 1.0),
-                    width: 1,
-                    label: Some("Long".into()),
-                },
-                Line {
-                    breaks: false,
-                    y: short_aligned.clone(),
-                    color: rgba(0xEF5350, 1.0),
-                    width: 1,
-                    label: Some("Short".into()),
-                },
-            ],
+            lines: vec![Line {
+                breaks: false,
+                y: aligned.clone(),
+                color: rgba(0x2196F3, 1.0),
+                width: 1,
+                label: Some("Buy/Sell".into()),
+            }],
             fills: vec![Fill {
-                y1: long_aligned,
-                y2: short_aligned,
-                color: rgba(0x26A69A, 0.1),
-                color_below: None,
+                y1: aligned,
+                y2: ones,
+                color: rgba(0x26A69A, 0.15),
+                color_below: Some(rgba(0xEF5350, 0.15)),
             }],
             hlines: vec![HLine {
-                y: 0.5,
+                y: 1.0,
                 color: rgba(0x888888, 0.5),
             }],
-            y_range: Some((0.0, 1.0)),
-            label: label_for("L/S", why),
+            label: label_for("Taker", why),
             is_overlay: false,
             ..Default::default()
         }

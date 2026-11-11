@@ -174,7 +174,7 @@ Status legend:
 | Stocks, ETFs, indices, FX, futures | ✅ | ◐ | Yahoo Finance, delayed. Exchange is guessed from the ticker suffix. |
 | Other exchanges and data vendors | ✅ | ❌ | Only Binance and Yahoo. |
 | Broker connections and trading from the chart | ✅ | ❌ | Not in the web app. See [Trading](/chartgen/guides/trading/) for the server engine. |
-| Derivatives and sentiment series | partial | ◐ | `funding`, `oi`, `long_short`, `fear_greed`, `cvd` indicators. Binance futures only, and open interest and long/short cover the last 30 days, the most Binance keeps. [Futures panels](/chartgen/guides/web/#funding-open-interest-and-longshort-panels), [Indicator reference](/chartgen/reference/indicators/) |
+| Derivatives and sentiment series | partial | ◐ | `funding`, `oi`, `long_short`, `top_long_short`, `taker_ratio`, `fear_greed`, `cvd` indicators. Binance futures only, and open interest and long/short cover the last 30 days, the most Binance keeps. [Futures panels](/chartgen/guides/web/#funding-open-interest-and-longshort-panels), [Indicator reference](/chartgen/reference/indicators/) |
 
 ## Known differences
 

@@ -1529,6 +1529,20 @@ async fn a_replay_refuses_what_the_fixtures_do_not_hold() {
             "indicators": ["rsi", "funding", "fear_greed"], "as_of": t });
         let text = chart_tool(replay, "generate_chart", args).to_string();
         assert!(text.contains("Not available in a replay"), "{text}");
+        // Each of them, by itself: one that was let through would ask the exchange.
+        for name in [
+            "funding",
+            "open_interest",
+            "long_short",
+            "top_long_short",
+            "taker_ratio",
+            "fear_greed",
+        ] {
+            let args = json!({ "ticker": "BTCUSDT", "timeframe": "15m", "format": "summary",
+                "indicators": [name], "as_of": t });
+            let text = chart_tool(replay, "generate_chart", args).to_string();
+            assert!(text.contains("Not available in a replay"), "{name}: {text}");
+        }
         let plain = chart_tool(replay, "list_drawing_tools", json!({}));
         assert!(plain["result"]["content"][0]["text"].is_string());
     });
