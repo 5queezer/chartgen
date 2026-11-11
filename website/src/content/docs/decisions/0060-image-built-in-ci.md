@@ -156,7 +156,9 @@ put the bad commit back, and the next commit on `master` deploys as usual.
   builds from a Dockerfile, and a new application starts on a new, empty volume.
   The [steps](https://github.com/5queezer/chartgen/blob/master/scripts/autodeploy/README.md)
   prove the image pulls before anything is stopped, copy the volume into a place
-  proven empty, and check each copy by what is in the database.
+  proven empty, and check each copy by what is in the database. The way back is
+  the old application, which builds from the repository: unless it was pinned to
+  the commit it ran, starting it again may build on the host.
 - Bad: the timer still reports that a deploy was triggered, not that it is healthy.
 - Neutral: the CI run of a push to `master` takes longer by the image build. Pull
   requests are not affected.

@@ -77,8 +77,15 @@ for an image in a private package: it asks the registry as anyone would.
 > copy goes into a place proven empty, and every copy is checked by what is
 > in the database, not by the list of files.**
 
-Run the commands as root on the host. `<old volume>`, `<new volume>` and
-`<sha>` stand for your values. The checks need `sqlite3` on the host.
+Run the commands as root on the host, **all in one shell:** they use the
+variables `b` (the backup directory) and `v` (the new volume's directory) and
+the function `check`, which a new shell does not have. Every command that
+copies or moves is written with `"${b:?}"` and `"${v:?}"`, which stop with a
+message when the variable is empty; an empty one would otherwise make `cp`
+copy from or into `/`. If the shell is lost, define `check` again and set
+`b=/var/backups/chartgen/<the directory made in step 3>` before going on.
+`<old volume>`, `<new volume>` and `<sha>` stand for your values. The checks
+need `sqlite3` on the host.
 
 **The check, used three times below.** It opens the file read-only, so it
 cannot create or change anything:
@@ -89,7 +96,8 @@ check() { test -s "$1" && sqlite3 -readonly "$1" "PRAGMA integrity_check; SELECT
 
 A good database answers with exactly two lines: `ok`, and the number of
 clients, which is above 0 for a production store. **Anything else means
-stop:** no output (the file is missing or empty), an `Error:` line, or `0`.
+stop:** no output (the file is missing or empty), an `Error:` line, even if
+`ok` follows it, or `0`.
 Do not use plain `sqlite3 <file>` for this: on a missing file it creates an
 empty one, prints `ok`, and leaves a file of the right name behind.
 
@@ -116,6 +124,18 @@ docker volume inspect <old volume>      # an error here means the name is wrong:
 This matters because `docker run -v <name>:...` does not fail on a wrong
 name: it creates an empty volume of that name and copies nothing.
 
+**Pin the old application to what it runs, now, while it runs.** It builds
+from the repository and follows `master`, and `master` has moved since it was
+last built (step 1 merged). If it is ever started again, as the way back
+below, Coolify may build the new head on the host: the build this change
+exists to avoid. So before stopping it, set the commit SHA field in the
+application's source settings (it normally says `HEAD`) to the commit it is
+running, which the newest finished deployment in **Deployments** names, and
+save without deploying. _Not verified by this repository:_ the field's name
+in your Coolify version, and whether a start then reuses the image built
+before. Without the pin, treat a start of the old application as a build
+on the host.
+
 ### 3. Stop, copy, check
 
 From here until the application runs again, production is down.
@@ -126,10 +146,11 @@ From here until the application runs again, production is down.
 
    ```sh
    b=/var/backups/chartgen/$(date +%Y%m%d-%H%M%S)
-   install -d -m 700 /var/backups/chartgen "$b"
-   ls -A "$b"                 # prints nothing: the directory is new and empty
-   docker run --rm -v <old volume>:/from:ro -v "$b":/to debian:bookworm-slim cp -a /from/. /to/
+   install -d -m 700 /var/backups/chartgen "${b:?}"
+   ls -A "${b:?}"             # prints nothing: the directory is new and empty
+   docker run --rm -v <old volume>:/from:ro -v "${b:?}":/to debian:bookworm-slim cp -a /from/. /to/
    check "$b/chartgen.db"     # two lines: ok, and the number of clients. Write the number down.
+   echo "$b"                  # write this down too: it is how to set b again in a new shell
    ```
 
    The source is mounted read-only and nothing in it is touched. `cp -a /from/.`
@@ -169,22 +190,48 @@ Fill the volume, and only if it is empty:
 ```sh
 docker volume inspect <new volume> || docker volume create <new volume>   # create only if Coolify has not yet
 v=$(docker volume inspect -f '{{.Mountpoint}}' <new volume>)
-ls -A "$v"                 # must print nothing
-cp -a "$b"/. "$v"/
+echo "new: ${v:?}"; echo "old: $(docker volume inspect -f '{{.Mountpoint}}' <old volume>)"
+```
+
+**Read the two lines. They must be two different directories.** If they are
+the same, `<new volume>` was typed as the old volume's name: stop, nothing
+below may be run on it.
+
+```sh
+ls -A "${v:?}"             # must print nothing
+cp -a "${b:?}"/. "${v:?}"/
 check "$v/chartgen.db"     # ok, and the same number as in step 3
 ```
 
-If `ls -A "$v"` prints anything, the new application has already run once,
-and the volume holds the database of an empty server, with its `-wal` and
-`-shm` files beside it. **Do not copy over that.** Copying puts the good
-`chartgen.db` next to the stranger's `-wal`, SQLite applies that log to the
-good file at the next start, and the server comes up with no clients while
-`integrity_check` still says `ok` and the file list looks right. (Tried: 3
-clients copied in, 0 seen by the server.) Stop the new application and
-remove exactly these three files, then start again at `ls -A "$v"`:
+If `ls -A "$v"` prints anything, **do not copy, and look before touching
+it:**
 
 ```sh
-rm -f "$v/chartgen.db" "$v/chartgen.db-wal" "$v/chartgen.db-shm"
+check "$v/chartgen.db"
+```
+
+- `ok` and `0`: the new application has already run once, and this is the
+  database of a server that started empty, with its `-wal` and `-shm` files
+  beside it. Go on below.
+- `ok` and the number from step 3, or any number above 0: **stop. This is
+  not an empty server's volume; most likely it is the old one.** Move
+  nothing.
+- Anything else: stop.
+
+Copying over an empty server's files would put the good `chartgen.db` next
+to that server's `-wal`. SQLite applies that log to the good file at the
+next start, and the server comes up with no clients while `integrity_check`
+still says `ok` and the file list looks right. (Tried: 3 clients copied in, 0
+seen by the server.) So stop the new application and move its three files
+out of the volume, into a new directory beside the backup. Nothing is
+deleted:
+
+```sh
+aside="${b:?}-moved-out-of-new-volume"; install -d -m 700 "$aside"
+for f in chartgen.db chartgen.db-wal chartgen.db-shm; do
+  [ ! -e "${v:?}/$f" ] || mv "${v:?}/$f" "$aside/"
+done
+ls -A "${v:?}"             # prints nothing now; then the cp and the check above
 ```
 
 Whether Coolify takes a volume that was created by hand under the name it
@@ -219,8 +266,19 @@ file by mistake deploys nothing and says so in the log.
 
 ### If it goes wrong before the new application is proven
 
-Stop the new application and start the old one: it is still on
-`<old volume>`, untouched. The backup is then stale; see step 3.
+The data is in two places whatever happened: the backup directory, and
+`<old volume>`, which no step writes to on route B.
+
+- **Route B:** stop the new application and start the old one; it is still
+  on `<old volume>`. **Only if it was pinned in step 2:** unpinned, a start
+  may build `master`'s head on the host. If it was not pinned, pin it first,
+  to the commit of its newest finished deployment. Once the old application
+  has run again, the backup is stale; see step 3.
+- **Route A:** there is no old application to start; the application itself
+  was changed. Either undo the change in Coolify and start it, with the same
+  caution about a build on the host, or leave it stopped and go on with
+  route B, filling a new application's volume from the backup. Check
+  `<old volume>` with `check` first to see what it holds.
 
 ### What the timer does the first time
 
@@ -258,10 +316,14 @@ under its SHA, so any earlier commit of `master` that has one can be named.
 The script records what it put out last, by the timer or by hand, and what
 ran before that; `rollback` deploys the latter. So after "the timer deployed
 A, then B, and B is bad", `rollback` runs A, and when the timer later deploys
-C, the next `rollback` goes to A again, which is what ran before C. A second
-`rollback` in a row goes back to what the first one replaced. It knows only
-what this script deployed: before its first deploy, or after a deploy made
-in Coolify's UI, name the SHA with `deploy`.
+C, the next `rollback` goes to A again, which is what ran before C.
+
+**A second `rollback` in a row goes forward again:** it deploys what the first
+one replaced, the image you just rolled back from. To go further back, name
+the commit with `deploy <sha>`.
+
+The script knows only what it deployed itself: before its first deploy, or
+after a deploy made in Coolify's UI, name the SHA with `deploy`.
 
 ## Is it healthy?
 
