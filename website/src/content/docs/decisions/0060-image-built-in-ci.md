@@ -77,7 +77,10 @@ run does not take the tag back from the newer, in whatever order they finish. Th
 look at the head and the write of the tag are two steps, so the job looks again
 after writing and, if `master` has moved meanwhile, gives the tag to the head's
 image. That narrows the window to a second stall and does not close it; what
-deploys goes by the commit SHA and never by this tag. The job
+deploys goes by the commit SHA and never by this tag. For the same reason nothing
+in that step can turn the run red: the commit's image is published by then, and a
+red run would keep the host from deploying it, so a registry error while the tag
+is written is a warning on the run. The job
 has no concurrency group, on purpose: a group keeps one job waiting and cancels it
 when another queues, and image jobs queue as their runs' tests finish, not in commit
 order, so a group could cancel the build of `master`'s head.

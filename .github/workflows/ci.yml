@@ -412,7 +412,9 @@ jobs:
       # can come between them: so after writing, look again, and if master has moved
       # on meanwhile, give the tag to the head's image if it is there. If it is not
       # there yet, the head's own run moves the tag when it gets here. What deploys
-      # goes by the commit SHA, never by this tag; nothing here fails the run.
+      # goes by the commit SHA, never by this tag. So nothing here may fail the run:
+      # the image of this commit is published by now, and a red run would keep the
+      # host from deploying it. A registry error while writing the tag is a warning.
       - name: Move the master tag
         if: ${{ github.ref == 'refs/heads/master' }}
         run: |
@@ -421,7 +423,10 @@ jobs:
             echo "master is at $head by now; the master tag stays with the newer run"
             exit 0
           fi
-          docker buildx imagetools create --tag "$IMAGE:master" "$IMAGE:$GITHUB_SHA"
+          if ! docker buildx imagetools create --tag "$IMAGE:master" "$IMAGE:$GITHUB_SHA"; then
+            echo "::warning::could not move the master tag to $GITHUB_SHA; the image of this commit is published under its SHA"
+            exit 0
+          fi
           head=$(git ls-remote origin refs/heads/master | cut -f1)
           if [ -n "$head" ] && [ "$head" != "$GITHUB_SHA" ]; then
             echo "master moved to $head while the tag was written"
