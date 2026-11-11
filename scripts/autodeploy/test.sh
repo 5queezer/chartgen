@@ -181,14 +181,14 @@ HEAD_MOVES_TO=ccc run "head moves mid-run: the SHA read first is deployed" 0 1 b
 [ "$(cat "$HEAD_FILE")" = ccc ] || fail "the stub did not move master"
 IMAGE_CODE=404 HEAD=ccc run "the next tick waits for the newer head's image" 0 0 bbb bbb
 
-# By hand. Neither touches the timer's state (master's head it last acted on), so the
-# timer does not undo a rollback. Both record what they put out, so that `rollback`
-# always goes to what ran before, whoever put it there.
+# By hand. Both record what they put out, so that `rollback` goes to what this script
+# triggered before, whoever triggered it.
 rm -f "$previous" "$deployed"
 HEAD=$sha_b run "the timer deploys B after A" 0 1 "$sha_b" "$sha_a"
 HEAD=$sha_b run "rollback deploys what ran before, A" 0 1 "$sha_b" "$sha_b" rollback
 [ "$(calls "\"docker_registry_image_tag\":\"$sha_a\"")" = 1 ] || fail "rollback set another tag"
-[ "$(calls api.github.com)" = 0 ] || fail "rollback asked GitHub"
+# It asks GitHub one thing, where master is, to leave that head alone; not for CI.
+[ "$(calls api.github.com)" = 1 ] && [ "$(calls /actions/)" = 0 ] || fail "rollback asked GitHub for more than master's head"
 [ "$(cat "$deployed")" = "$sha_a" ] && [ "$(cat "$previous")" = "$sha_b" ] || fail "rollback did not record what runs now"
 HEAD=$sha_b run "the tick after a rollback deploys nothing" 0 0 "$sha_b" "$sha_b"
 HEAD=$sha_c run "the timer deploys C over the rolled-back A" 0 1 "$sha_c" "$sha_b"
@@ -214,6 +214,51 @@ run "deploy of a name instead of a SHA is a usage error" 2 0 bbb bbb deploy mast
 run "deploy of a short SHA is a usage error" 2 0 bbb bbb deploy 0123abc
 [ "$(grep -c . "$CALLS")" = 0 ] || fail "a usage error made a call"
 run "an unknown command is a usage error" 2 0 bbb bbb sideways
+
+# A command by hand is the operator's word on what runs. The timer must not put
+# master's head of that moment out over it, and must deploy the next commit as usual.
+# seq: run without resetting the state; `step NAME EXIT DEPLOYS STATE [arguments]`.
+step() {
+  local name=$1 want_exit=$2 want_posts=$3 want_state=$4 rc posts
+  shift 4
+  : >"$CALLS"
+  out=$("$here/chartgen-autodeploy.sh" "$@" 2>&1); rc=$?
+  posts=$(calls '^POST .*/api/v1/deploy')
+  if [ "$rc" = "$want_exit" ] && [ "$posts" = "$want_posts" ] && [ "$(cat "$STATE_FILE")" = "$want_state" ]; then
+    echo "ok   $name"
+  else
+    fail "$name: exit=$rc (want $want_exit) deploys=$posts (want $want_posts) state='$(cat "$STATE_FILE")' (want '$want_state'): $out"
+  fi
+}
+tag() { grep -o 'image_tag":"[a-f0-9]*' "$CALLS" | cut -d'"' -f3 | tr '\n' ' '; }
+rm -f "$work"/*-sha "$work/hand"; echo x >"$STATE_FILE"
+echo "$sha_a" >"$HEAD_FILE"; step "the timer deploys A" 0 1 "$sha_a"
+echo "$sha_b" >"$HEAD_FILE"
+step "B, master's head, is deployed by hand before the timer got to it" 0 1 "$sha_b" deploy "$sha_b"
+step "and rolled back to A" 0 1 "$sha_b" rollback
+[ "$(tag)" = "$sha_a " ] || fail "the rollback went to '$(tag)'"
+step "the next tick does not put B out again" 0 0 "$sha_b"
+step "nor the one after" 0 0 "$sha_b"
+echo "$sha_c" >"$HEAD_FILE"; step "a later commit, C, deploys as usual" 0 1 "$sha_c"
+[ "$(tag)" = "$sha_c " ] || fail "the later commit deployed '$(tag)'"
+
+# The same when GitHub cannot be asked at the moment of the command: the next tick
+# that can ask leaves that head alone.
+rm -f "$work"/*-sha "$work/hand"; echo x >"$STATE_FILE"
+echo "$sha_a" >"$HEAD_FILE"; step "the timer deploys A" 0 1 "$sha_a"
+echo "$sha_b" >"$HEAD_FILE"
+GH_HEAD_CODE=500 step "B deployed by hand while GitHub is down" 0 1 "$sha_a" deploy "$sha_b"
+GH_HEAD_CODE=500 step "rolled back to A, GitHub still down" 0 1 "$sha_a" rollback
+GH_HEAD_CODE=500 step "a tick that cannot ask changes nothing" 0 0 "$sha_a"
+step "the first tick that can ask leaves B alone and says so" 0 0 "$sha_b"
+grep -q 'by hand' <<<"$out" || fail "the held-back head is not explained: $out"
+step "and stays quiet after that" 0 0 "$sha_b"
+[ -z "$out" ] || fail "a tick with nothing to do logged: $out"
+echo "$sha_c" >"$HEAD_FILE"; step "a later commit, C, deploys as usual" 0 1 "$sha_c"
+
+# A rollback of what the timer itself put out: the same head stays out.
+echo "$sha_c" >"$HEAD_FILE"; step "C, deployed by the timer, is rolled back" 0 1 "$sha_c" rollback
+step "the next tick leaves it rolled back" 0 0 "$sha_c"
 
 # Two runs at once: the timer's service and a command by hand are separate processes.
 # One run holds the whole sequence, from reading the state to writing it.

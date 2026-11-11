@@ -24,6 +24,9 @@ STATE_FILE=${STATE_FILE:-${STATE_DIRECTORY:-/var/lib/chartgen-autodeploy}/last-s
 # What this script last put out, by the timer or by hand, and what ran before that.
 DEPLOYED_FILE=$(dirname "$STATE_FILE")/deployed-sha
 PREVIOUS_FILE=$(dirname "$STATE_FILE")/previous-sha
+# Left by a command by hand that could not ask GitHub for master's head: the next
+# tick that can ask leaves that head alone.
+HAND_FILE=$(dirname "$STATE_FILE")/by-hand
 LOCK_FILE=$(dirname "$STATE_FILE")/lock
 LOCK_WAIT_SECS=${LOCK_WAIT_SECS:-120}
 API=https://api.github.com/repos/$GITHUB_REPO
@@ -149,9 +152,25 @@ record_deploy() {
   write_file "$DEPLOYED_FILE" "$1"
 }
 
-# By hand: deploy a published image, whatever master is at. The timer's own state,
-# master's head it last acted on, is left alone, so a rollback is not undone at the
-# next tick and the next commit on master deploys as usual.
+# A command by hand is the operator's word on what runs, so the timer must not put
+# master's present head out over it: that head may be the very commit that was just
+# rolled back. The timer's mark is moved to master's head as it is now, without
+# deploying it. The next commit on master deploys as usual. If GitHub cannot be asked
+# now, the next tick that can ask does the same.
+leave_head_alone() {
+  local code head
+  code=$(gh_get "$API/commits/master")
+  head=
+  [ "$code" = 200 ] && head=$(jq -r '.sha // empty' "$body" 2>/dev/null)
+  if [ -n "$head" ]; then
+    rm -f "$HAND_FILE"
+    write_file "$STATE_FILE" "$head"
+  else
+    write_file "$HAND_FILE" 1
+  fi
+}
+
+# By hand: deploy a published image, whatever master is at.
 manual() {
   local sha=$1 status
   status=$(image_status "$sha")
@@ -160,11 +179,11 @@ manual() {
     exit 1
   fi
   deploy_image "$sha" || exit 1
-  if ! record_deploy "$sha"; then
-    log "deployed $sha by hand but could not record it in $DEPLOYED_FILE"
+  if ! record_deploy "$sha" || ! leave_head_alone; then
+    log "deployed $sha by hand but could not record it in $(dirname "$STATE_FILE"); the timer may deploy master's head over it"
     exit 1
   fi
-  log "triggered Coolify deploy of $CHARTGEN_IMAGE:$sha by hand; the timer's state is unchanged"
+  log "triggered Coolify deploy of $CHARTGEN_IMAGE:$sha by hand; the timer leaves master's present head alone and deploys the next commit"
 }
 
 case ${1-} in
@@ -206,6 +225,15 @@ if [ ! -s "$STATE_FILE" ]; then
   exit 0
 fi
 last=$(cat "$STATE_FILE")
+if [ -e "$HAND_FILE" ]; then
+  # A command by hand came since the last tick and could not ask GitHub then.
+  if [ "$sha" != "$last" ]; then
+    write_file "$STATE_FILE" "$sha" || { log "could not write $STATE_FILE"; exit 1; }
+    log "not deploying $sha: an image was deployed by hand, and master's head of that time is left alone. The next commit deploys as usual. To put this one out: deploy $sha"
+  fi
+  rm -f "$HAND_FILE"
+  exit 0
+fi
 [ "$sha" = "$last" ] && exit 0
 
 # The push run of CI for this SHA must be green. On master that is the run that builds
