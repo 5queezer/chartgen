@@ -405,7 +405,7 @@ pub(super) async fn start_family(
             }
         }
         let ended = match (&first.token.user, kept) {
-            (Some(user), true) => s.trim_user_tokens(user),
+            (Some(user), true) => s.trim_user_tokens(user, Some(&first.token.family)),
             (_, true) => Vec::new(),
             (_, false) => vec![first.token.family.clone()],
         };
@@ -477,7 +477,12 @@ pub(super) async fn grant(
             let family = Some(rotation.token.family.clone());
             let token = s.issue_access(rotation.access.clone(), client_id, user, family);
             // The user's limits count what a refresh adds, as they do a code exchange.
-            let ended = rotation.token.user.as_ref().map(|u| s.trim_user_tokens(u));
+            let kept = Some(rotation.token.family.as_str());
+            let ended = rotation
+                .token
+                .user
+                .as_ref()
+                .map(|u| s.trim_user_tokens(u, kept));
             (token, ended.unwrap_or_default())
         })
     };
@@ -1304,6 +1309,61 @@ mod tests {
         assert!(s.families_of("github:1", "c0").is_empty());
         assert_eq!(s.families_of("github:2", "c0").len(), 1);
         assert_eq!(s.families_of("github:1", "c1").len(), 1);
+    }
+
+    /// A family for `github:1` and `CLIENT` put there directly, with an id of the
+    /// test's choosing and issued this second.
+    fn put_family(state: &SharedState, id: &str) {
+        state.oauth.lock().unwrap().refresh.insert(
+            format!("hash-of-{id}"),
+            RefreshToken {
+                family: id.to_string(),
+                seq: 0,
+                client_id: CLIENT.to_string(),
+                user: Some("github:1".to_string()),
+                created_at: now_unix(),
+                spent_at: None,
+                access_hash: None,
+            },
+        );
+    }
+
+    /// The limit ends a family longest out of use, never the one just issued or just
+    /// exchanged. Times are whole seconds, so within a second the newest ties with the
+    /// others. Here every family is of the same second and the others have ids that
+    /// sort after any real one, so the newest is first in line on every run.
+    #[tokio::test]
+    async fn the_limit_never_ends_the_family_just_issued_or_exchanged() {
+        let (store, _) = temp_store("keep-newest");
+        let state = started(&store, true, &[CLIENT]);
+        let write = to(&store);
+        let families = |state: &SharedState| {
+            let mut f = state.oauth.lock().unwrap().families_of("github:1", CLIENT);
+            f.sort();
+            f
+        };
+        for i in 0..MAX_TOKENS_PER_CLIENT {
+            put_family(&state, &format!("zz{i:02}"));
+        }
+
+        // Issued: one more than the limit.
+        let (access, issued) = authorize(&state, CLIENT, Some("github:1"), &write).await;
+        let issued = issued.expect("the one just issued is kept");
+        assert!(valid(&state, &access));
+        let left = families(&state);
+        assert_eq!(left.len(), MAX_TOKENS_PER_CLIENT);
+        // Of the others, tied to the second, the smallest id went: arbitrary, but the
+        // same for the same data.
+        assert!(!left.contains(&"zz00".to_string()) && left.contains(&"zz01".to_string()));
+
+        // Exchanged while one over the limit: the answer's tokens must work.
+        put_family(&state, "zz99");
+        let (access, next) = exchange(&state, &issued, CLIENT, &write).await.unwrap();
+        assert!(valid(&state, &access), "a 200 with a dead access token");
+        let left = families(&state);
+        assert_eq!(left.len(), MAX_TOKENS_PER_CLIENT);
+        assert!(!left.contains(&"zz01".to_string()) && left.contains(&"zz02".to_string()));
+        assert!(exchange(&state, &next, CLIENT, &write).await.is_ok());
     }
 
     #[tokio::test]

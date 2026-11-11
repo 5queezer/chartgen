@@ -617,9 +617,12 @@ impl OAuthStore {
     /// first; the holder of a dropped token signs in again without noticing much,
     /// since a session or a new approval round is all it takes. A refresh token family
     /// counts as a token of its client (ADR-0058): it keeps the client among the
-    /// user's live ones, and goes with the client's tokens. Returns the families ended,
-    /// for the store.
-    pub(super) fn trim_user_tokens(&mut self, user: &str) -> Vec<String> {
+    /// user's live ones, and goes with the client's tokens. `keep` is the family just
+    /// issued or exchanged, which is never the one to go: family times are whole
+    /// seconds, so within a second it would tie with the others. Among those, a tie
+    /// goes by family id, which is arbitrary but the same for the same data. Returns
+    /// the families ended, for the store.
+    pub(super) fn trim_user_tokens(&mut self, user: &str, keep: Option<&str>) -> Vec<String> {
         let now = Instant::now();
         let unix = now_unix();
         // Per client: the access tokens by last use, and the families by last exchange.
@@ -684,9 +687,13 @@ impl OAuthStore {
             let live = rank < MAX_LIVE_CLIENTS_PER_USER;
             // Families first: one that ends takes its access tokens along, and what is
             // left is then counted, so no family in use loses its token to one that went.
-            let keep = if live { MAX_TOKENS_PER_CLIENT } else { 0 };
-            let excess = families.len().saturating_sub(keep);
-            let gone: Vec<String> = families.into_iter().take(excess).map(|f| f.1).collect();
+            let room = if live { MAX_TOKENS_PER_CLIENT } else { 0 };
+            let excess = families.len().saturating_sub(room);
+            let others = families.into_iter().map(|f| f.1);
+            let gone: Vec<String> = others
+                .filter(|f| Some(f.as_str()) != keep)
+                .take(excess)
+                .collect();
             self.end_families(&gone);
             ended.extend(gone);
             let held = |t: &String| self.tokens.contains_key(t) || self.restored.contains_key(t);
@@ -2128,7 +2135,7 @@ mod tests {
             token_for(&mut s, i, "github:1", (MAX_CLIENTS - i) as u64);
         }
         assert!(s.make_room(|| Some(HashSet::new())).is_err(), "all live");
-        s.trim_user_tokens("github:1");
+        s.trim_user_tokens("github:1", None);
         assert_eq!(s.tokens.len(), MAX_LIVE_CLIENTS_PER_USER);
         let keeps = |s: &OAuthStore, i: usize| s.tokens.contains_key(&format!("t{i}"));
         assert!(keeps(&s, MAX_CLIENTS - 1), "the newest stays");
@@ -2140,7 +2147,7 @@ mod tests {
 
         // Another user's tokens do not count against this one's.
         token_for(&mut s, 0, "github:2", 5000);
-        s.trim_user_tokens("github:1");
+        s.trim_user_tokens("github:1", None);
         assert!(keeps(&s, 0));
     }
 
@@ -2237,7 +2244,7 @@ mod tests {
         for i in 0..MAX_TOKENS_PER_WEB_CLIENT + 1 {
             add(&mut s, format!("web-{i}"), Some("sess"), 1000 + i as u64);
         }
-        s.trim_user_tokens("github:1");
+        s.trim_user_tokens("github:1", None);
         let gone = MAX_TOKENS_PER_CLIENT;
         assert!(
             !s.tokens.contains_key(&format!("mcp-{gone}")),

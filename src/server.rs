@@ -929,7 +929,7 @@ async fn oauth_token(
         let token = Uuid::new_v4().to_string();
         let token = s.issue_access(token, &body.client_id, token_user.clone(), None);
         if let Some(user) = &token_user {
-            s.trim_user_tokens(&user.id);
+            s.trim_user_tokens(&user.id, None);
         }
         let user_id = token_user.as_ref().map(|u| u.id.clone());
         let family = s.plan_family(

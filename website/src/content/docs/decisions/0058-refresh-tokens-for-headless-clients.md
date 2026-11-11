@@ -258,7 +258,10 @@ A family counts as a token of its client, in every limit that counts tokens.
 
 - **With sign-in on,** per user: 20 families per client, the one longest out of use ended
   first, and a client held only through a family is one of the user's 20 live clients. The
-  client that drops out of those 20 loses that user's families.
+  client that drops out of those 20 loses that user's families. The family just issued or
+  just exchanged is never the one ended. Family times are whole seconds; among families
+  equal to the second, the one with the smaller id goes first, which is arbitrary but the
+  same every time for the same data.
 - **With sign-in off,** 20 families per client, and at the limit the code exchange answers
   **without a refresh token** instead of ending the oldest. A client id is all it takes to
   authorize there, so ending the oldest would let anyone who has read a client id end the
