@@ -1624,7 +1624,7 @@ many match the filters.
 - `with_result` is how many have a result in R; `mean_r` is over those and `null` when there
   are none. A setup that expired filled while nobody scored it has no result and is not
   given one. `gaps` counts results that do not cover bars the server missed.
-- **A setup that was cancelled or expired before its entry was reached has a result of 0 R,
+- **A setup that was cancelled, expired or invalidated before its entry was reached has a result of 0 R,
   and is in `mean_r` and in the observed share.** It never traded, and it pulls the mean
   towards 0. `entered` is how many setups had their entry reached, and `mean_r_entered` is
   the mean over those of them that have a result: it leaves the ones that never traded out.

@@ -93,8 +93,8 @@ There is no migration.
 - Per group and in all: `count`, `won`, `invalidated`, `expired`, `cancelled`, `with_result`,
   `total_r`, `mean_r`, `entered`, `mean_r_entered`, `gaps`, and under `probability` how many
   stated one, its mean, how many of those won, and that share.
-- **Two means, because there are two honest readings.** A setup that was cancelled or expired
-  before its entry was reached has a result of 0 R
+- **Two means, because there are two honest readings.** A setup that was cancelled, expired
+  or invalidated before its entry was reached has a result of 0 R
   ([ADR-0059](/chartgen/decisions/0059-setups-paper-scored/)). `mean_r` is over every result
   and so holds those zeros: what following every setup gave. `entered` counts the setups
   whose entry was reached and `mean_r_entered` is the mean over those: what the trades

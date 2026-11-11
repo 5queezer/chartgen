@@ -1963,8 +1963,9 @@ impl Tally {
             Status::Cancelled => self.cancelled += 1,
             Status::Watching | Status::Triggered => {}
         }
-        // Entered: the setup was filled at some time. One that was cancelled or ran out
-        // before that never traded; its result is 0 R all the same (ADR-0059).
+        // Entered: the setup was filled at some time. One that was cancelled, ran out or
+        // was invalidated before that never traded; its result is 0 R all the same
+        // (ADR-0059).
         let entered = r.fill.is_some();
         self.entered += u32::from(entered);
         if let Some(result) = r.result_r {
