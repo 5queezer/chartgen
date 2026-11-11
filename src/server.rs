@@ -1415,6 +1415,12 @@ fn start_replay(has_engine: bool) -> Result<(), String> {
             "CHARTGEN_REPLAY_FIXTURES cannot be combined with {what}: a replay server answers from fixtures only"
         ));
     }
+    // Clients and everything else a server stores stay in memory too: a replay never
+    // opens `chartgen.db`.
+    #[cfg(feature = "scripting")]
+    if !scripting::persistence::open_global_in_memory() {
+        return Err("a replay server could not open its in-memory store".into());
+    }
     #[cfg_attr(not(feature = "scripting"), allow(unused_variables))]
     let replay = crate::replay::start(&dir)?;
     #[cfg(feature = "scripting")]
@@ -1738,7 +1744,10 @@ pub async fn run_server(port: u16, engine: Option<Arc<RwLock<TradingEngine>>>) {
     // registration (ADR-0036) and their scripts stay theirs (ADR-0025).
     #[cfg(feature = "scripting")]
     {
-        let path = scripting::persistence::db_path();
+        let path = match crate::replay::global() {
+            Some(_) => "in memory, for this replay".to_string(),
+            None => scripting::persistence::db_path().display().to_string(),
+        };
         let ttl = UNUSED_CLIENT_TTL.as_secs() as i64;
         let restored = scripting::persistence::global().map(|s| {
             if let Err(e) = s.gc_oauth_clients(ttl) {
@@ -1749,8 +1758,7 @@ pub async fn run_server(port: u16, engine: Option<Arc<RwLock<TradingEngine>>>) {
         match restored {
             Some(Ok(clients)) => {
                 println!(
-                    "OAuth client store: {} ({} clients restored)",
-                    path.display(),
+                    "OAuth client store: {path} ({} clients restored)",
                     clients.len()
                 );
                 if scripting::enabled() {
@@ -1775,7 +1783,7 @@ pub async fn run_server(port: u16, engine: Option<Arc<RwLock<TradingEngine>>>) {
                 }
             }
             Some(Err(e)) => eprintln!("[OAuth] cannot read stored clients: {e}"),
-            None => eprintln!("[OAuth] store unavailable at {}", path.display()),
+            None => eprintln!("[OAuth] store unavailable at {path}"),
         }
         if let Some(signin) = oauth.signin.as_mut() {
             match scripting::persistence::global().map(|s| signin.restore(s)) {

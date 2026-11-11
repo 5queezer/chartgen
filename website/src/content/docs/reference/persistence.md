@@ -222,8 +222,8 @@ log line `[setups] skipped N stored setups that cannot be read`, and never score
 `record` holds a thesis in clear text. Prices are stored as JSON numbers and read back as
 exactly the numbers written.
 
-A [replay server](/chartgen/guides/setups/#replay) keeps its setups in memory and writes none
-of them here.
+A [replay server](/chartgen/guides/setups/#replay) keeps everything in memory, its OAuth clients
+included, and never opens this file.
 
 A fire writes the alert's new state and its delivery in one transaction, before
 anything is sent, so a restart neither fires it again nor loses the delivery. A

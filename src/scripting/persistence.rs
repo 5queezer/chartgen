@@ -1027,6 +1027,18 @@ pub fn open_global(path: &Path) -> Option<&'static Store> {
         .as_ref()
 }
 
+/// Make the process-wide store one that lives in memory and touches no file, for a
+/// replay server (ADR-0059). At startup, before anything asks for the store; false if
+/// a store was opened already, or this one could not be.
+pub fn open_global_in_memory() -> bool {
+    let mut ours = false;
+    STORE.get_or_init(|| {
+        ours = true;
+        Store::in_memory().ok()
+    });
+    ours && STORE.get().is_some_and(Option::is_some)
+}
+
 /// The process-wide store at `db_path()`.
 pub fn global() -> Option<&'static Store> {
     open_global(&db_path())

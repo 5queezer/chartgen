@@ -207,7 +207,8 @@ directory, as of the time each call names. It is for an evaluation that can be r
 - **Quotes.** `last` is the close of the newest 1m bar closed by `as_of`. The 24-hour fields come
   from the 1m bars of the 24 hours before it: `prev_close` is the open of the first, `high`, `low`
   and `volume` are over them all. With less than 24 hours of fixture they cover what there is.
-- **Isolation.** Setups live in memory for that process, never in `chartgen.db`.
+- **Isolation.** A replay server opens no database file. Its setups, and the OAuth clients that
+  register with it, live in memory for that process, so it cannot touch or migrate `chartgen.db`.
 - **Same answers every run.** The clock is `as_of`, never the wall clock. Ids count per owner
   (`setup-000001`). Each call first moves the caller's open setups through the bars closed by
   `as_of`, oldest setup first, with the function the live feed uses. Lists are sorted. The
