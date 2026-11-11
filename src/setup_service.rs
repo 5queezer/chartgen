@@ -966,10 +966,16 @@ impl Setups {
             .map(Record::next_bar_time)
             .min();
         let missed = match behind {
-            Some(from) => self.missed(&key.0, from, bar.time).unwrap_or_else(|e| {
-                eprintln!("[setups] cannot read missed bars of {}: {e}", key.0);
-                Vec::new()
-            }),
+            Some(from) => match self.missed(&key.0, from, bar.time) {
+                Ok(bars) => {
+                    println!("{}", missed_note(bars.len(), &key.0));
+                    bars
+                }
+                Err(e) => {
+                    eprintln!("[setups] cannot read missed bars of {}: {e}", key.0);
+                    Vec::new()
+                }
+            },
             None => Vec::new(),
         };
         let now = fetch::now_ms();
@@ -1003,6 +1009,12 @@ impl Setups {
             self.sync_feeds(&mut st);
         }
     }
+}
+
+/// The log line of a catch-up read that worked, so an operator can see after a restart
+/// that the bars a setup missed were read, and how many.
+fn missed_note(bars: usize, symbol: &str) -> String {
+    format!("[setups] read {bars} missed 1m bars of {symbol}")
 }
 
 /// Could this row have been written here? A row that could not is never scored.

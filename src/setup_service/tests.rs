@@ -1085,6 +1085,14 @@ async fn bars_the_server_missed_are_read_and_scored_in_order() {
     });
 }
 
+#[test]
+fn a_catch_up_read_is_logged_with_its_count_and_symbol() {
+    assert_eq!(
+        missed_note(89, "BTCUSDT"),
+        "[setups] read 89 missed 1m bars of BTCUSDT"
+    );
+}
+
 #[tokio::test]
 async fn bars_out_of_reach_are_named_as_a_gap() {
     crate::replay::on(flat_bars(3000, 0..0), |_| {
