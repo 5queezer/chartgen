@@ -536,7 +536,7 @@ pub fn setup_tools() -> Vec<Value> {
         }),
         json!({
             "name": "get_setup",
-            "description": "One of your setups with its whole log: symbol, interval, direction, decision, thesis, drawings, entry, invalidation, targets, expires_at, bracket (which rule set the levels: agent, or for a skip atr or floor), status, costs, fill and exit (price and the 1m bar), result_r once closed, pending changes, and log, every entry with seq, at, by (agent or server), kind, reason and changes ({field: {from, to}}). A setup of another owner reads as one that does not exist.",
+            "description": "One of your setups with its whole log: symbol, interval, direction, decision, thesis, drawings, entry, invalidation, targets, expires_at, bracket (which rule set the levels: agent, or for a skip atr or floor), status, costs, fill and exit (price and the 1m bar), result_r once closed, gap (true when bars were missed and not scored), pending changes, and log, every entry with seq, at, by (agent or server), kind, reason and changes ({field: {from, to}}). A setup of another owner reads as one that does not exist.",
             "inputSchema": {
                 "type": "object",
                 "properties": { "id": id.clone(), "as_of": as_of.clone() },

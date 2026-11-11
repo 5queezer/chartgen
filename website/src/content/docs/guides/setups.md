@@ -93,7 +93,8 @@ one is refused and nothing old is dropped. `list_setups` returns the limits.
 
 After a restart or a dropped feed the server reads the 1m bars a setup missed, up to 1000 of
 them, and scores them in order. If it cannot, the log gets a `gap` entry that names the stretch
-that was not scored. Treat a result with a gap as incomplete.
+that was not scored, and the setup's `gap` field is true from then on. Treat a result with
+`gap: true` as incomplete.
 
 ## Replay
 

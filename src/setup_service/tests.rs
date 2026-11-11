@@ -815,6 +815,7 @@ async fn bars_the_server_missed_are_read_and_scored_in_order() {
         // Nothing came near this one: no gap, nothing moved, and it is up to date.
         let quiet = call(&s, "get_setup", json!({ "id": id_of(&quiet) }), "quiet").unwrap();
         assert_eq!(kinds(&quiet), ["created"]);
+        assert_eq!(quiet["gap"], false);
         assert_eq!(quiet["status"], "watching");
         assert_eq!(quiet["scored_through"], json!(at_minute(100)));
 
@@ -845,6 +846,10 @@ async fn bars_out_of_reach_are_named_as_a_gap() {
             json!({ "from": at_minute(11), "to": at_minute(2500 - CATCH_UP_BARS) })
         );
         assert_eq!(gapped["scored_through"], json!(at_minute(2500)));
+        // The result itself says it is incomplete, in the list too, where no log is.
+        assert_eq!(gapped["gap"], true);
+        let list = call(&s, "list_setups", json!({}), "owner").unwrap();
+        assert_eq!(list["setups"][0]["gap"], true);
     });
 }
 

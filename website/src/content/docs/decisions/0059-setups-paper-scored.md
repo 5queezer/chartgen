@@ -148,7 +148,8 @@ WebSocket every chart and alert of that symbol shares. No polling is added.
 A setup that is behind, after a restart, a deploy or a dropped feed, first gets the bars it missed:
 one read of at most 1000 1m bars per symbol, through the Binance gate, when the next closed bar
 arrives. Where that read fails or does not reach far enough, the log gets a `gap` entry naming the
-stretch that was not scored, and scoring goes on after it. A result with a gap is marked as such
+stretch that was not scored, and scoring goes on after it. The setup's `gap` field is then true,
+in `get_setup` and in `list_setups`, so a result with a gap is marked as such where it is read
 rather than presented as complete.
 
 ### Limits
