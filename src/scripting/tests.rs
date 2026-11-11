@@ -2260,3 +2260,31 @@ fn an_evicted_clients_events_go_with_it() {
     assert_eq!(store.last_event_seq("c1").unwrap(), 0);
     assert_eq!(store.events_after("other", 0, 10).unwrap().0.len(), 1);
 }
+
+/// An event is stored with what it reports or not at all: a log that says "fired"
+/// about a fire the store does not have, or the other way round, could not be trusted.
+#[test]
+fn an_event_and_what_it_reports_are_stored_together_or_not_at_all() {
+    let store = persistence::Store::in_memory().unwrap();
+    log(&store, &[an_event("me", 1, false)]);
+    // The same id again: the event's insert fails, after the other rows were written.
+    let again = an_event("me", 1, false);
+
+    store.save_server_alert("a1", "me", "before").unwrap();
+    let fire = store.record_logged_fire("a1", "me", "after", &[], Some(&again));
+    assert!(fire.is_err());
+    assert_eq!(store.server_alerts().unwrap(), ["before"]);
+
+    let setup = persistence::StoredSetup {
+        id: "s1".to_string(),
+        owner: "me".to_string(),
+        record: "{}".to_string(),
+        revisions: vec![(1, "{}".to_string())],
+    };
+    assert!(store.save_setups_logging(&[setup], &[again]).is_err());
+    assert!(store.setups().unwrap().is_empty());
+
+    // Nothing was numbered for what was not stored.
+    assert_eq!(store.events_after("me", 0, 10).unwrap().0.len(), 1);
+    assert_eq!(store.last_event_seq("me").unwrap(), 1);
+}
