@@ -226,11 +226,11 @@ jobs:
           name: chartgen-e2e-debug
           path: target/debug
       # The steps below run apt themselves, the second through Playwright's --with-deps.
-      - name: Check the apt mirror
+      - name: Choose an apt mirror
         timeout-minutes: 2
         uses: ./.github/actions/install-system-libraries
         with:
-          packages: ""
+          mirror-only: "true"
       - name: Prepare chartgen binary
         run: |
           # Artifacts do not keep the executable bit.
