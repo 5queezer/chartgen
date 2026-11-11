@@ -15,6 +15,10 @@ fn main() {
         .as_array_mut()
         .unwrap()
         .extend(chartgen::mcp_schema::server_alert_tools());
+    result["tools"]
+        .as_array_mut()
+        .unwrap()
+        .extend(chartgen::mcp_schema::setup_tools());
     let envelope = json!({
         "jsonrpc": "2.0",
         "id": 1,

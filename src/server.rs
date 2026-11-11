@@ -1388,6 +1388,18 @@ fn with_setup_tools(mut result: Value) -> Value {
     result
 }
 
+/// What a replay server cannot also be, if any of it is on.
+fn replay_conflict(engine: bool, alerts: bool, setups: bool, signin: bool) -> Option<&'static str> {
+    [
+        (engine, "--trade"),
+        (alerts, "CHARTGEN_SERVER_ALERTS=1"),
+        (setups, "CHARTGEN_SETUPS=1 (a replay has setups of its own)"),
+        (signin, "a sign-in provider"),
+    ]
+    .into_iter()
+    .find_map(|(on, what)| on.then_some(what))
+}
+
 /// Make this a replay server if `CHARTGEN_REPLAY_FIXTURES` says so (ADR-0059). A replay
 /// answers from fixtures only, so it refuses to be anything else as well: no engine, no
 /// sign-in, no server alerts.
@@ -1395,22 +1407,10 @@ fn start_replay(has_engine: bool) -> Result<(), String> {
     let Some(dir) = crate::replay::fixtures_dir() else {
         return Ok(());
     };
-    let live = [
-        (has_engine, "--trade"),
-        (
-            std::env::var("CHARTGEN_SERVER_ALERTS").is_ok_and(|v| v == "1"),
-            "CHARTGEN_SERVER_ALERTS=1",
-        ),
-        (
-            std::env::var("CHARTGEN_SETUPS").is_ok_and(|v| v == "1"),
-            "CHARTGEN_SETUPS=1 (a replay has setups of its own)",
-        ),
-        (
-            !matches!(signin::Config::from_env(), Ok(None)),
-            "a sign-in provider",
-        ),
-    ];
-    if let Some((_, what)) = live.iter().find(|(on, _)| *on) {
+    let alerts = std::env::var("CHARTGEN_SERVER_ALERTS").is_ok_and(|v| v == "1");
+    let setups = std::env::var("CHARTGEN_SETUPS").is_ok_and(|v| v == "1");
+    let signin = !matches!(signin::Config::from_env(), Ok(None));
+    if let Some(what) = replay_conflict(has_engine, alerts, setups, signin) {
         return Err(format!(
             "CHARTGEN_REPLAY_FIXTURES cannot be combined with {what}: a replay server answers from fixtures only"
         ));
@@ -1898,6 +1898,22 @@ pub async fn run_server(port: u16, engine: Option<Arc<RwLock<TradingEngine>>>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A replay server is nothing else at the same time (ADR-0059).
+    #[test]
+    fn a_replay_refuses_to_start_as_anything_else_too() {
+        assert_eq!(replay_conflict(false, false, false, false), None);
+        assert_eq!(replay_conflict(true, false, false, false), Some("--trade"));
+        assert!(replay_conflict(false, true, false, false)
+            .unwrap()
+            .contains("SERVER_ALERTS"));
+        assert!(replay_conflict(false, false, true, false)
+            .unwrap()
+            .contains("SETUPS"));
+        assert!(replay_conflict(false, false, false, true)
+            .unwrap()
+            .contains("sign-in"));
+    }
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
     use http_body_util::BodyExt;
