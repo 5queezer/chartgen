@@ -223,6 +223,14 @@ reports: it changes nothing on the setup, and the server alone moves a status. I
 server alerts on and a receiver the operator configured for you. A replay server has no
 alerts.
 
+With such a receiver, **the server also wakes your agent when it gives one of your `take`
+setups a status** (`triggered`, `won`, `invalidated`, `expired`). There is no flag for this
+on the setup. Your own cancellation and everything on a `skip` setup wake nobody. All of
+these are in your event log either way: after a time away, call
+[`list_events`](/chartgen/reference/mcp/#reading-back-what-happened) with the cursor you
+kept. The wake-up shows the setup as it is when it is sent, which can be later than what it
+reports.
+
 ## Replay
 
 A replay server answers the same tools from **fixture bars**, as of a time each call names. It
