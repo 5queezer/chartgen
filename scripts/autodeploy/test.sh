@@ -131,8 +131,14 @@ run "CI success and image there: tag set, deployed once, state written" 0 1 bbb 
   fail "the image tag was not set to the SHA: $(grep PATCH "$CALLS")"
 [ "$(calls '^HEAD https://ghcr.io/v2/5queezer/chartgen/manifests/bbb')" = 1 ] || fail "the registry was not asked for the SHA's image"
 [ "$(grep -n -e '^PATCH' -e '^POST' "$CALLS" | cut -d' ' -f1 | tr '\n' ' ')" = "6:PATCH 7:POST " ] || fail "tag and deploy out of order: $(cat "$CALLS")"
-[ "$(cat "$previous" 2>/dev/null)" = aaa ] || fail "the SHA deployed before was not recorded"
 [ "$(cat "$deployed" 2>/dev/null)" = bbb ] || fail "the SHA deployed was not recorded"
+# The timer's mark, aaa, is master's head it last acted on. On a first run that is
+# recorded without deploying, so it is no evidence that aaa ever ran: with nothing
+# deployed by this script before, there is no previous image to name.
+[ ! -e "$previous" ] || fail "the timer's mark was taken for a deployment: previous-sha is $(cat "$previous")"
+run "rollback after the script's first deploy knows no previous image" 1 0 bbb bbb rollback
+grep -q 'deploy SHA' <<<"$out" || fail "rollback with no history gives no way out: $out"
+[ "$(calls /api/v1/)" = 0 ] || fail "rollback with no history reached Coolify"
 
 # The application must be one that runs a prebuilt image. On one that builds from a
 # Dockerfile the tag is ignored and the deploy builds on the host (ADR-0060).
@@ -183,9 +189,17 @@ IMAGE_CODE=404 HEAD=ccc run "the next tick waits for the newer head's image" 0 0
 
 # By hand. Both record what they put out, so that `rollback` goes to what this script
 # triggered before, whoever triggered it.
+# What runs when the script takes over is not something it can know: it is told.
 rm -f "$previous" "$deployed"
+run "running SHA records what runs without deploying" 0 0 bbb bbb running "$sha_a"
+[ "$(cat "$deployed")" = "$sha_a" ] && [ ! -e "$previous" ] && [ "$(grep -c . "$CALLS")" = 0 ] || fail "running did more than record"
+run "running without a full SHA is a usage error" 2 0 bbb bbb running master
 HEAD=$sha_b run "the timer deploys B after A" 0 1 "$sha_b" "$sha_a"
-HEAD=$sha_b run "rollback deploys what ran before, A" 0 1 "$sha_b" "$sha_b" rollback
+HEAD=$sha_b run "rollback deploys what was triggered before, A" 0 1 "$sha_b" "$sha_b" rollback
+# It names the image before it deploys it, and what it does not know about it.
+if ! grep -q "rolling back to $sha_a" <<<"$out" || ! grep -q 'does not know whether' <<<"$out"; then
+  fail "rollback does not say what it is about to deploy: $out"
+fi
 [ "$(calls "\"docker_registry_image_tag\":\"$sha_a\"")" = 1 ] || fail "rollback set another tag"
 # It asks GitHub one thing, where master is, to leave that head alone; not for CI.
 [ "$(calls api.github.com)" = 1 ] && [ "$(calls /actions/)" = 0 ] || fail "rollback asked GitHub for more than master's head"

@@ -5,7 +5,11 @@
 #
 #   chartgen-autodeploy.sh               one tick
 #   chartgen-autodeploy.sh deploy SHA    deploy the image of SHA now
-#   chartgen-autodeploy.sh rollback      deploy the image that ran before the one this script put out last
+#   chartgen-autodeploy.sh rollback      deploy the image this script triggered before its last one
+#   chartgen-autodeploy.sh running SHA   record that SHA is what runs now; deploys nothing
+#
+# "Triggered" is all the script knows of a deploy: Coolify accepted it. It does not
+# know whether the image ever ran.
 #
 # See README.md, ADR-0037 and ADR-0060.
 set -u
@@ -137,15 +141,14 @@ deploy_image() {
   esac
 }
 
-# record_deploy SHA: SHA is what runs now, and what ran until now is what a rollback
-# goes back to. Until this script has put something out, that is the timer's last SHA.
+# record_deploy SHA: SHA is what this script triggered last, and what it had triggered
+# until now is what a rollback goes back to. The timer's mark is not used for that: it
+# is a head of master the timer acted on, and on a first run acting on it means
+# recording it without deploying. With nothing triggered or told before, there is no
+# previous image, and a rollback says so.
 record_deploy() {
   local before=
-  if [ -s "$DEPLOYED_FILE" ]; then
-    before=$(cat "$DEPLOYED_FILE")
-  elif [ -s "$STATE_FILE" ]; then
-    before=$(cat "$STATE_FILE")
-  fi
+  [ -s "$DEPLOYED_FILE" ] && before=$(cat "$DEPLOYED_FILE")
   if [ -n "$before" ] && [ "$before" != "$1" ]; then
     write_file "$PREVIOUS_FILE" "$before" || return 1
   fi
@@ -200,12 +203,26 @@ case ${1-} in
     ;;
   rollback)
     take_turn hand
-    [ -s "$PREVIOUS_FILE" ] || { log "no previous deploy is recorded in $PREVIOUS_FILE; use: deploy SHA"; exit 1; }
+    if [ ! -s "$PREVIOUS_FILE" ]; then
+      log "this script knows no image from before its last deploy, so there is nothing to roll back to. Read the SHA that should run from Coolify or the commit log and use: deploy SHA"
+      exit 1
+    fi
+    log "rolling back to $(cat "$PREVIOUS_FILE"), the image this script triggered before $(cat "$DEPLOYED_FILE" 2>/dev/null || echo its last one). It does not know whether that image ever ran: if in doubt, use deploy SHA"
     manual "$(cat "$PREVIOUS_FILE")"
     exit 0
     ;;
+  running)
+    if ! [[ ${2-} =~ ^[0-9a-f]{40}$ ]]; then
+      echo "usage: $0 running SHA (the full commit SHA, 40 hex characters)" >&2
+      exit 2
+    fi
+    take_turn hand
+    write_file "$DEPLOYED_FILE" "$2" || { log "could not write $DEPLOYED_FILE"; exit 1; }
+    log "recorded $2 as what runs now; nothing was deployed"
+    exit 0
+    ;;
   *)
-    echo "usage: $0 [deploy SHA | rollback]" >&2
+    echo "usage: $0 [deploy SHA | rollback | running SHA]" >&2
     exit 2
     ;;
 esac
