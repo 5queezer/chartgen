@@ -18,5 +18,7 @@ pub mod renderer;
 #[cfg(feature = "scripting")]
 pub mod scripting;
 pub mod setups;
+#[cfg(test)]
+mod test_dir;
 pub mod trading;
 pub mod webhook;

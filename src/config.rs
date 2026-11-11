@@ -157,7 +157,7 @@ mod tests {
 
     #[test]
     fn missing_file_uses_defaults_and_present_file_is_loaded() {
-        let dir = std::env::temp_dir().join(format!("chartgen_config_{}", uuid::Uuid::new_v4()));
+        let dir = crate::test_dir::new(format!("chartgen_config_{}", uuid::Uuid::new_v4()));
         let path = dir.join("config.toml");
         assert_eq!(
             NotificationConfig::load(&path).unwrap(),
@@ -181,7 +181,7 @@ mod tests {
 
     #[test]
     fn unreadable_path_is_an_error() {
-        let dir = std::env::temp_dir().join(format!("chartgen_config_{}", uuid::Uuid::new_v4()));
+        let dir = crate::test_dir::new(format!("chartgen_config_{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&dir).unwrap();
         let error = NotificationConfig::load(&dir).unwrap_err();
         assert!(error.contains(dir.to_str().unwrap()));
