@@ -243,6 +243,9 @@ memory and loses it on a restart on purpose, and it fires where a setup has to r
 - Bad: an ambiguous bar is scored as the worse outcome, which understates a setup that in fact
   reached its target first.
 - Bad: the server now stores drawings, which ADR-0054 avoided.
+- Bad: each open setup's record is written once a minute, to keep the bar it is scored through
+  across a restart: up to 200 rows a minute at the server's limit, each at most 32 KiB. Fine at
+  these sizes; a column of its own would avoid rewriting the record.
 - Bad: a setup scored across a gap is incomplete. The log says so; nothing fills it in later.
 - Bad: **with setups on and the allowlist unset, strangers can hold the server's 16 watched
   pairs.** Four accounts with 5 symbols each are enough, and with sign-in off client ids are free,
