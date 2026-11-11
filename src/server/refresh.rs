@@ -124,6 +124,12 @@ pub(super) async fn forget_families(write: &WriteFn, families: Vec<String>) {
 /// store and then changes the families, and the store is written off the OAuth lock.
 static GATE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
+/// A request's turn at the gate. It is waited for by the request itself, so a client
+/// that hangs up while waiting gives up its place and no work is done for it: what
+/// waits is never more than the connections that are open. Once taken, the turn goes
+/// to the task that does the work, and is given back when that task ends.
+type Turn = tokio::sync::MutexGuard<'static, ()>;
+
 /// Run `work` to its end, whether or not the request that asked for it is still
 /// there. A handler is dropped at whatever it is waiting for when its client hangs
 /// up, while a store write it started goes on without it. Dropped between that write
@@ -544,20 +550,21 @@ pub(super) async fn grant(
     client_id: &str,
     write: &WriteFn,
 ) -> Response {
+    let turn = GATE.lock().await;
     let (state, write) = (state.clone(), write.clone());
     let (presented, client_id) = (presented.to_string(), client_id.to_string());
-    to_the_end(async move { rotate(&state, &presented, &client_id, &write).await })
+    to_the_end(async move { rotate(turn, &state, &presented, &client_id, &write).await })
         .await
         .unwrap_or_else(did_not_finish)
 }
 
 async fn rotate(
+    _turn: Turn,
     state: &SharedState,
     presented: &str,
     client_id: &str,
     write: &WriteFn,
 ) -> Response {
-    let _gate = GATE.lock().await;
     let planned = state
         .oauth
         .lock()
@@ -659,20 +666,23 @@ pub(super) async fn revoke(
     client_id: &str,
     write: &WriteFn,
 ) -> Response {
+    let turn = GATE.lock().await;
     let (state, write) = (state.clone(), write.clone());
     let (token, client_id) = (token.to_string(), client_id.to_string());
-    to_the_end(async move { end_what_it_stands_for(&state, &token, &client_id, &write).await })
-        .await
-        .unwrap_or_else(did_not_finish)
+    to_the_end(
+        async move { end_what_it_stands_for(turn, &state, &token, &client_id, &write).await },
+    )
+    .await
+    .unwrap_or_else(did_not_finish)
 }
 
 async fn end_what_it_stands_for(
+    _turn: Turn,
     state: &SharedState,
     token: &str,
     client_id: &str,
     write: &WriteFn,
 ) -> Response {
-    let _gate = GATE.lock().await;
     let family = {
         let mut s = state.oauth.lock().unwrap();
         s.adopt(token);
@@ -1908,14 +1918,60 @@ mod tests {
             })
             .await;
 
-            assert!(!valid(&state, &access), "{at:?}");
-            assert!(store.refresh_tokens(0).unwrap().is_empty(), "{at:?}");
-            assert_eq!(
-                exchange(&state, &token, CLIENT, &write).await,
-                Err(StatusCode::BAD_REQUEST),
-                "{at:?}"
-            );
+            // Done or not done, and never apart. A request dropped while it waited for
+            // its turn did nothing; from its turn on it is done.
+            let done = !matches!(at, HangUp::BeforeTheWrite);
+            assert_eq!(valid(&state, &access), !done, "{at:?}");
+            assert_eq!(store.refresh_tokens(0).unwrap().is_empty(), done, "{at:?}");
+            let again = exchange(&state, &token, CLIENT, &write).await;
+            assert_eq!(again.is_err(), done, "{at:?}");
         }
+    }
+
+    /// A request waits for its turn as the request it is: a client that hangs up
+    /// while waiting does no work, so what waits is never more than the connections
+    /// that are open. Only a request whose turn has come is finished without its
+    /// client. Counted in store writes, not timed.
+    #[tokio::test]
+    async fn requests_dropped_while_waiting_for_their_turn_do_no_work() {
+        let (store, _) = temp_store("hang-up-queue");
+        let state = started(&store, false, &[CLIENT]);
+        let write = to(&store);
+        let (_, token) = authorize(&state, CLIENT, None, &write).await;
+        let token = token.unwrap();
+        let writes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counting: WriteFn = {
+            let (store, writes) = (store.clone(), writes.clone());
+            Arc::new(move |change| {
+                writes.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                write_to(&store, change)
+            })
+        };
+
+        let turn = GATE.lock().await;
+        let mut sent = Vec::new();
+        for i in 0..200 {
+            let (s, t, w) = (state.clone(), token.clone(), counting.clone());
+            sent.push(tokio::spawn(async move {
+                if i % 2 == 0 {
+                    grant(&s, &t, CLIENT, &w).await;
+                } else {
+                    revoke(&s, &t, CLIENT, &w).await;
+                }
+            }));
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        for request in sent {
+            request.abort();
+            let _ = request.await;
+        }
+        drop(turn);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        drop(GATE.lock().await);
+
+        assert_eq!(writes.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(store.refresh_tokens(0).unwrap().len(), 1);
+        assert!(exchange(&state, &token, CLIENT, &write).await.is_ok());
     }
 
     /// The same for a family that ends because a spent token came back.

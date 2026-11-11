@@ -214,7 +214,11 @@ the token spent in the store and still usable in memory, so that the same token 
 refused with `503` until a restart, or a family revoked in the store and still working. So
 a refresh, a revocation and the storing of a new family run in a task of their own, which
 the request only waits for. The client that hung up never got the answer, and the same
-token within 60 seconds is the retry above.
+token within 60 seconds is the retry above. Refreshes and revocations run one at a time,
+and a request waits for its turn as the request it is: a client that hangs up while
+waiting gives up its place and nothing is done for it, so the work that waits is never
+more than the connections that are open. Only from its turn on is a request finished
+without its client.
 
 ### Lifetime
 
