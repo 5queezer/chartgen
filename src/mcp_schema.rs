@@ -87,6 +87,7 @@ pub fn tools_list_result() -> Value {
                             "type": "integer",
                             "description": "History paging: return only bars whose open time (ms since epoch) is strictly before end_time — pass the oldest loaded bar's t × 1000 to fetch the page before it. Omit (or null) for the newest bars, including the still-forming one. Must be an integer between -2208988800000 (1900-01-01) and one year from now."
                         },
+                        "as_of": { "type": ["integer", "string"], "description": "Replay servers only (ADR-0059), and required there: the time this call is answered for, as unix seconds, unix ms or an ISO 8601 time. Only bars that closed at or before it are used, and it cannot be earlier than the latest as_of you have sent. On any other server leave it out." },
                         "warmup": {
                             "type": "integer",
                             "description": "format=series only: extra older bars (max 1000) fetched and fed to indicator computation, then trimmed, so the first returned bars carry warmed-up indicator values. A non-zero warmup is raised to what the indicators need to converge (891 for ema_stack's EMA 200). png/summary/both ignore it: with indicators and a ticker they always read what those need, at least 300 bars, and still show exactly bars (ADR-0056).",
@@ -141,6 +142,7 @@ pub fn tools_list_result() -> Value {
                         "interval": { "type": "string", "description": "Alias for timeframe." },
                         "bars": { "type": "integer", "description": "Bars to read, newest last, 1 to 1000.", "default": 200 },
                         "end_time": { "type": "integer", "description": "As generate_chart's end_time: only bars that open before it (ms since epoch)." },
+                        "as_of": { "type": ["integer", "string"], "description": "Replay servers only (ADR-0059), and required there: the time this call is answered for, as unix seconds, unix ms or an ISO 8601 time. Only bars that closed at or before it are used, and it cannot be earlier than the latest as_of you have sent. On any other server leave it out." },
                         "swing_depth": { "type": "integer", "description": "Bars on each side a swing high or low must top (or undercut), 1 to 50. Larger finds fewer, bigger swings.", "default": 5 }
                     }
                 }
@@ -168,6 +170,7 @@ pub fn tools_list_result() -> Value {
                             "description": "Candle interval, as generate_chart's timeframe (e.g. 1m, 7m, 45m, 1h, 4h, 8h, 1d, 2D, 2W)",
                             "default": "4h"
                         },
+                        "as_of": { "type": ["integer", "string"], "description": "Replay servers only (ADR-0059), and required there: the time this call is answered for, as unix seconds, unix ms or an ISO 8601 time. Only bars that closed at or before it are used, and it cannot be earlier than the latest as_of you have sent. On any other server leave it out." },
                         "indicators": {
                             "type": "array",
                             "items": { "type": "string" },
@@ -188,7 +191,8 @@ pub fn tools_list_result() -> Value {
                             "items": { "type": "string" },
                             "maxItems": 50,
                             "description": "Ticker symbols (e.g. [\"BTCUSDT\", \"AAPL\", \"^GSPC\"]). At most 50 entries; trimmed, uppercased and deduplicated."
-                        }
+                        },
+                        "as_of": { "type": ["integer", "string"], "description": "Replay servers only (ADR-0059), and required there: the time this call is answered for, as unix seconds, unix ms or an ISO 8601 time. Only bars that closed at or before it are used, and it cannot be earlier than the latest as_of you have sent. On any other server leave it out." }
                     },
                     "required": ["symbols"]
                 }
@@ -449,6 +453,119 @@ pub fn tools_list_result() -> Value {
             }
         ]
     })
+}
+
+/// Names of the setup tools (ADR-0059). They answer on the HTTP transport, where a
+/// call has an owner.
+pub const SETUP_TOOLS: [&str; 5] = [
+    "create_setup",
+    "revise_setup",
+    "get_setup",
+    "list_setups",
+    "cancel_setup",
+];
+
+/// Tools for setups the server scores on paper (ADR-0059). `tools/list` appends them
+/// only with `CHARTGEN_SETUPS=1` or on a replay server; the generated TypeScript types
+/// always include them.
+pub fn setup_tools() -> Vec<Value> {
+    use crate::setups::{
+        FEE_BPS_PER_SIDE, MAX_REASON, MAX_TARGETS, MAX_THESIS, MIN_RISK_IN_ROUND_TRIP_COSTS,
+        SKIP_ATR_LENGTH, SKIP_EXPIRY_BARS, SKIP_STOP_ATR, SKIP_TARGET_ATR, SLIPPAGE_BPS_PER_SIDE,
+    };
+    let as_of = json!({ "type": ["integer", "string"], "description": "Replay servers only (ADR-0059), and required there: the time this call is answered for, as unix seconds, unix ms or an ISO 8601 time. Only bars that closed at or before it are used, and it cannot be earlier than the latest as_of you have sent. On any other server leave it out." });
+    let time = "unix seconds, unix ms or an ISO 8601 time";
+    let entry = json!({
+        "type": "object",
+        "description": "The price zone the setup is entered in. The same price twice is a level.",
+        "properties": {
+            "low": { "type": "number", "description": "Lower edge; greater than 0." },
+            "high": { "type": "number", "description": "Upper edge; at least low." }
+        },
+        "required": ["low", "high"]
+    });
+    let invalidation = json!({ "type": "number", "description": format!("The price at which the setup is wrong: below the entry zone of a long, above that of a short, and at least {MIN_RISK_IN_ROUND_TRIP_COSTS} times the assumed round-trip cost away from it.") });
+    let targets = json!({ "type": "array", "items": { "type": "number" }, "minItems": 1, "maxItems": MAX_TARGETS, "description": "Target prices beyond the entry zone, nearest first. The first one decides a win; the others are kept for the chart." });
+    let expires_at = json!({ "type": ["integer", "string"], "description": format!("When the setup runs out, as {time}; in the future and at most 90 days ahead.") });
+    let drawings = json!({ "type": "array", "maxItems": crate::drawings::MAX_DRAWINGS, "items": { "type": "object" }, "description": "Drawings that show the setup, exactly as generate_chart's `drawings` takes them (ADR-0054) and checked by the same rules against the bars of the setup's symbol and interval. Stored with their resolved points." });
+    let thesis =
+        json!({ "type": "string", "maxLength": MAX_THESIS, "description": "Why, in plain text." });
+    let reason = json!({ "type": "string", "maxLength": MAX_REASON, "description": "Why this change, in plain text. Kept in the setup's log." });
+    let id = json!({ "type": "string", "description": "The setup's id." });
+    let costs = FEE_BPS_PER_SIDE + SLIPPAGE_BPS_PER_SIDE;
+    vec![
+        json!({
+            "name": "create_setup",
+            "description": format!("Store a trading setup that the server scores on paper: a thesis with an entry zone, an invalidation level, targets and an expiry, on a Binance symbol. No order is ever sent. The server moves its status from closed 1m bars, watching -> triggered -> won | invalidated | expired, and you cannot set a status or a result. A setup without an invalidation and an expiry is refused, as is one whose invalidation is on the wrong side of the entry or too close to it. The call is checked as a whole: if anything is wrong nothing is stored, and the error names each field with a hint. The result is in R, the move in units of the risk at the fill, less an assumed {FEE_BPS_PER_SIDE} bps fee and {SLIPPAGE_BPS_PER_SIDE} bps slippage per side ({costs} bps in, {costs} bps out). When one 1m bar reaches two levels, the worse one for you counts. decision: skip records a decision not to trade: it takes no levels and is scored as if taken at the next bar's open with the server's bracket ({SKIP_STOP_ATR} x ATR({SKIP_ATR_LENGTH}) against, {SKIP_TARGET_ATR} x ATR with, {SKIP_EXPIRY_BARS} bars of the interval). Returns the setup as get_setup does."),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "symbol": { "type": "string", "description": "Binance symbol, e.g. BTCUSDT." },
+                    "interval": { "type": "string", "description": "The chart interval the setup was read on, e.g. 15m, 1h, 4h. Its drawings are placed on these bars." },
+                    "direction": { "type": "string", "enum": ["long", "short"] },
+                    "decision": { "type": "string", "enum": ["take", "skip"], "default": "take", "description": "take: a setup with your levels. skip: a decision not to trade, scored with the server's default bracket; send no entry, invalidation, targets or expires_at with it." },
+                    "thesis": thesis.clone(),
+                    "drawings": drawings.clone(),
+                    "entry": entry.clone(),
+                    "invalidation": invalidation.clone(),
+                    "targets": targets.clone(),
+                    "expires_at": expires_at.clone(),
+                    "as_of": as_of.clone()
+                },
+                "required": ["symbol", "interval", "direction", "thesis"]
+            }
+        }),
+        json!({
+            "name": "revise_setup",
+            "description": "Revise one of your open setups, with a reason. Nothing is edited in place: the change is added to the setup's log with what it was and what it became. The thesis and drawings change at once. New levels (entry, invalidation, targets, expires_at) count from the first 1m bar that opens after this call, so the bar forming now still meets the setup as it was; a field left out keeps its value, and the levels are checked together as create_setup checks them. Once a setup is filled its levels are fixed, and a skip keeps its bracket: only thesis and drawings can change then. Returns the setup as get_setup does; levels not yet in effect are under pending.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "id": id.clone(),
+                    "reason": reason.clone(),
+                    "thesis": thesis,
+                    "drawings": drawings,
+                    "entry": entry,
+                    "invalidation": invalidation,
+                    "targets": targets,
+                    "expires_at": expires_at,
+                    "as_of": as_of.clone()
+                },
+                "required": ["id", "reason"]
+            }
+        }),
+        json!({
+            "name": "get_setup",
+            "description": "One of your setups with its whole log: symbol, interval, direction, decision, thesis, drawings, entry, invalidation, targets, expires_at, status, costs, fill and exit (price and the 1m bar), result_r once closed, pending changes, and log, every entry with seq, at, by (agent or server), kind, reason and changes ({field: {from, to}}). A setup of another owner reads as one that does not exist.",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "id": id.clone(), "as_of": as_of.clone() },
+                "required": ["id"]
+            }
+        }),
+        json!({
+            "name": "list_setups",
+            "description": "List your setups, newest first, without their logs, with what you may do (can_create) and the limits. On a server without setups this returns {enabled: false, setups: []}.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "status": { "type": "string", "enum": ["open", "closed", "watching", "triggered", "won", "invalidated", "expired", "cancelled"], "description": "open: watching or triggered. closed: any other. Omit for all." },
+                    "symbol": { "type": "string", "description": "Only this symbol's." },
+                    "limit": { "type": "integer", "minimum": 1, "maximum": 500, "default": 50, "description": "Most setups to return; total says how many matched." },
+                    "as_of": as_of.clone()
+                }
+            }
+        }),
+        json!({
+            "name": "cancel_setup",
+            "description": "Cancel one of your open setups, with a reason. It counts from the first 1m bar that opens after this call: a setup still watching then ends as cancelled with a result of 0, and a filled one is closed at that bar's open and scored, so a cancel cannot remove a loss. If the bar forming now closes the setup first, that outcome stands. A skip cannot be cancelled. Returns the setup as get_setup does.",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "id": id, "reason": reason, "as_of": as_of },
+                "required": ["id", "reason"]
+            }
+        }),
+    ]
 }
 
 /// Names of the server alert tools (ADR-0042). They answer on the HTTP

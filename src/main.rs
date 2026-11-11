@@ -2,10 +2,13 @@ mod chart_push;
 mod fetch;
 mod intrabars;
 mod mcp;
+mod replay;
 mod search;
 mod server;
 #[cfg(feature = "scripting")]
 mod server_alerts;
+#[cfg(feature = "scripting")]
+mod setup_service;
 
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
@@ -74,6 +77,13 @@ struct Cli {
 
 fn main() {
     let cli = Cli::parse();
+
+    // A replay answers over HTTP, where a call has an owner and a clock. Any other mode
+    // would read live prices while the caller believes it is replaying.
+    if replay::fixtures_dir().is_some() && (cli.mcp || cli.trade || !cli.serve) {
+        eprintln!("CHARTGEN_REPLAY_FIXTURES needs --serve, without --mcp or --trade");
+        std::process::exit(2);
+    }
 
     if cli.mcp {
         mcp::run();

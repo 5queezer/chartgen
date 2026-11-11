@@ -607,6 +607,7 @@ pub fn search_symbols(
             results: merge(sample_catalogue(), &[], &query.to_uppercase(), types, limit),
             warnings: Vec::new(),
         }),
+        DataSource::Replay { .. } => Err("symbol search is not available in a replay".into()),
         DataSource::Live => {
             let eng = Arc::clone(engine());
             let yahoo_eng = Arc::clone(&eng);
