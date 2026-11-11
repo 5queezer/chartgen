@@ -239,16 +239,25 @@ impl Setups {
                 return;
             }
         };
+        // What each setup was made with, from its log (ADR-0064).
+        let made = self.store.first_setup_revisions().unwrap_or_else(|e| {
+            eprintln!("[setups] cannot read the setups' first log entries: {e}");
+            HashMap::new()
+        });
         let mut skipped = 0;
         for (row, log_bytes) in rows {
             match serde_json::from_str::<Record>(&row).ok().filter(sound) {
-                Some(record) => {
+                Some(mut record) => {
+                    let first = made.get(&self.row_id(&record));
+                    if let Some(first) = first.and_then(|b| serde_json::from_str(b).ok()) {
+                        record.restate(&first);
+                    }
                     let key = (record.owner.clone(), record.id.clone());
                     st.setups.insert(
                         key,
                         Held {
+                            record_bytes: json_len(&record),
                             record,
-                            record_bytes: row.len(),
                             log_bytes,
                         },
                     );

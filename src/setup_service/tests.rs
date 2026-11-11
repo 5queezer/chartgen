@@ -2459,3 +2459,58 @@ async fn the_three_fields_are_checked_and_bounded() {
         call(&s, "create_setup", args, "owner").unwrap();
     }
 }
+
+/// The log's first entry is what says what a setup was made with. A record row that
+/// lost the three fields, as a build from before them writes it, or that holds other
+/// values, is read with the log's values at the next start.
+#[tokio::test(flavor = "multi_thread")]
+async fn what_a_setup_was_made_with_is_read_from_its_log_at_start() {
+    let (store, dir) = store_at("restated");
+    let s = live_on(store, hub(), Access::parse(None), Limits::default(), None);
+    let made = call(&s, "create_setup", stated(), "owner").unwrap();
+    let plain = created(&s, "owner");
+    drop(s);
+
+    let rewrite = |change: &dyn Fn(&mut Value)| {
+        let row = store.setups().unwrap().into_iter().map(|(row, _)| row);
+        let mut record: Value = row
+            .map(|row| serde_json::from_str::<Value>(&row).unwrap())
+            .find(|r| r["id"] == made["id"])
+            .unwrap();
+        change(&mut record);
+        let row = persistence::StoredSetup {
+            id: id_of(&made),
+            owner: "owner".to_string(),
+            record: record.to_string(),
+            revisions: Vec::new(),
+        };
+        store.save_setups(&[row]).unwrap();
+    };
+    let read = |id: &Value| {
+        let s = live_on(
+            reopen(&dir.db()),
+            hub(),
+            Access::parse(None),
+            Limits::default(),
+            None,
+        );
+        call(&s, "get_setup", json!({ "id": id }), "owner").unwrap()
+    };
+
+    // As an older build stores the setup when it writes it: without the fields.
+    rewrite(&|record| {
+        for field in setups::STATED_FIELDS {
+            record.as_object_mut().unwrap().remove(field);
+        }
+    });
+    assert_eq!(read(&made["id"]), made, "all three are back, from the log");
+    // And a row that says something else does not count.
+    rewrite(&|record| {
+        record["probability"] = json!(0.99);
+        record["playbook_version"] = json!("another");
+        record["features"] = json!({ "example_number": 9 });
+    });
+    assert_eq!(read(&made["id"]), made);
+    // A setup made without them still has none.
+    assert_eq!(read(&plain["id"]), plain);
+}

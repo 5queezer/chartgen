@@ -1104,6 +1104,14 @@ impl Store {
         rows.collect()
     }
 
+    /// The first entry of every setup's log, by the setup's id: what it was made with.
+    pub fn first_setup_revisions(&self) -> rusqlite::Result<HashMap<String, String>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare("SELECT setup_id, body FROM setup_revisions WHERE seq = 1")?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        rows.collect()
+    }
+
     /// The log of one setup, oldest first.
     pub fn setup_revisions(&self, id: &str) -> rusqlite::Result<Vec<String>> {
         let conn = self.conn();

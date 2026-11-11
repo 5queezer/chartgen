@@ -1211,6 +1211,22 @@ impl Record {
         }
     }
 
+    /// Take what the setup was made with from the first entry of its log. The log is
+    /// append-only in the store and the record row is not, so the log is what counts:
+    /// a row written by a build from before these fields has lost them, and gets them
+    /// back here.
+    pub fn restate(&mut self, created: &Revision) {
+        if created.kind != Kind::Created {
+            return;
+        }
+        let stated = |field: &str| created.changes.get(field).and_then(|c| c.get("to"));
+        self.features = stated("features").and_then(Value::as_object).cloned();
+        self.probability = stated("probability").and_then(Value::as_f64);
+        self.playbook_version = stated("playbook_version")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+    }
+
     /// The levels as they will be once every pending change has taken effect.
     pub fn latest_levels(&self) -> &Levels {
         self.pending
