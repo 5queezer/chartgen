@@ -102,7 +102,9 @@ when it is created, and the agent cannot set it. A setup that was never filled s
 skipped events are not lost. It takes no levels from the agent. The server's bracket is the same
 for every skip: in at the next bar's open, invalidation 1 × ATR(14) from the last close, one
 target 2 × ATR(14) from it, on the closed bars of the setup's interval, and an expiry after 24 of
-those bars. A skip cannot be cancelled and its bracket cannot be revised.
+those bars, or after the 90 days every setup is bound by if that is sooner (on a weekly chart 24
+bars would be 168 days). A skip cannot be cancelled and its bracket cannot be revised, so its
+expiry is what frees its place.
 
 ### Changes and the log
 

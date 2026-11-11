@@ -78,7 +78,8 @@ the server's own status moves included.
 A decision **not** to trade is worth recording too. `decision: "skip"` stores it with a
 direction and a thesis and no levels. The server scores it as if it had been taken, with the
 same bracket for every skip: in at the next bar's open, out one ATR(14) against it or two with
-it, and an expiry after 24 bars of the setup's interval. A skip cannot be cancelled.
+it, and an expiry after 24 bars of the setup's interval, at most 90 days. A skip cannot be
+cancelled.
 
 ## Limits
 

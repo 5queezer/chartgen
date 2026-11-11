@@ -685,3 +685,24 @@ fn a_stored_price_reads_back_as_the_same_number() {
         assert_eq!(serde_json::to_string(&price).unwrap(), text);
     }
 }
+
+/// A skip cannot be cancelled, so its expiry is bounded like any other setup's: the
+/// earlier of 24 bars and the 90 days.
+#[test]
+fn a_skip_expires_within_the_longest_expiry_whatever_its_interval() {
+    let day = 86_400;
+    for (interval_secs, expected_ms) in [
+        (3600, 24 * 3_600_000),
+        (day, 24 * 86_400_000),
+        (7 * day, MAX_EXPIRY_MS),
+        (30 * day, MAX_EXPIRY_MS),
+        (90 * day, MAX_EXPIRY_MS),
+    ] {
+        let levels = skip_bracket(Direction::Long, &hourly(40), interval_secs, T0).unwrap();
+        assert_eq!(
+            levels.expires_at - T0,
+            expected_ms,
+            "{interval_secs} s bars"
+        );
+    }
+}
