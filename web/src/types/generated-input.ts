@@ -21,6 +21,21 @@ export interface CancelOrderInput {
   order_id: string;
 }
 
+export interface CancelSetupInput {
+  /**
+   * Replay servers only (ADR-0059), and required there: the time this call is answered for, as unix seconds, unix ms or an ISO 8601 time. Only bars that closed at or before it are used, and it cannot be earlier than the latest as_of the server has been sent, by any caller. On any other server leave it out.
+   */
+  as_of?: number | string;
+  /**
+   * The setup's id.
+   */
+  id: string;
+  /**
+   * Why this change, in plain text. Kept in the setup's log.
+   */
+  reason: string;
+}
+
 export interface CreateServerAlertInput {
   /**
    * crossing: the price goes from one side of the level to the other, or onto it. crossing_up / crossing_down: only that way. greater / less: the price is above / below the level. A crossing needs a previous reading, so the first price the alert sees never fires one.
@@ -64,6 +79,64 @@ export interface CreateServerAlertInput {
   webhook_url?: string;
 }
 
+export interface CreateSetupInput {
+  /**
+   * Replay servers only (ADR-0059), and required there: the time this call is answered for, as unix seconds, unix ms or an ISO 8601 time. Only bars that closed at or before it are used, and it cannot be earlier than the latest as_of the server has been sent, by any caller. On any other server leave it out.
+   */
+  as_of?: number | string;
+  /**
+   * take: a setup with your levels. skip: a decision not to trade, scored with the server's default bracket; send no entry, invalidation, targets or expires_at with it.
+   */
+  decision?: "take" | "skip";
+  direction: "long" | "short";
+  /**
+   * Drawings that show the setup, exactly as generate_chart's `drawings` takes them (ADR-0054) and checked by the same rules against the bars of the setup's symbol and interval. Stored with their resolved points.
+   *
+   * @maxItems 50
+   */
+  drawings?: {}[];
+  /**
+   * The price zone the setup is entered in. The same price twice is a level.
+   */
+  entry?: {
+    /**
+     * Upper edge; at least low.
+     */
+    high: number;
+    /**
+     * Lower edge; greater than 0.
+     */
+    low: number;
+  };
+  /**
+   * When the setup runs out, as unix seconds, unix ms or an ISO 8601 time; in the future and at most 90 days ahead.
+   */
+  expires_at?: number | string;
+  /**
+   * The chart interval the setup was read on, e.g. 15m, 1h, 4h. Its drawings are placed on these bars.
+   */
+  interval: string;
+  /**
+   * The price at which the setup is wrong: below the entry zone of a long, above that of a short, and at least 3 times the assumed round-trip cost away from it.
+   */
+  invalidation?: number;
+  /**
+   * Binance symbol, e.g. BTCUSDT.
+   */
+  symbol: string;
+  /**
+   * Target prices beyond the entry zone, nearest first. The first one decides a win; the others are kept for the chart.
+   *
+   * @minItems 1
+   * @maxItems 4
+   */
+  targets?: [number] | [number, number] | [number, number, number] | [number, number, number, number];
+  /**
+   * Why, in plain text.
+   */
+  thesis: string;
+}
+
 export interface DeleteServerAlertInput {
   /**
    * The alert's id.
@@ -72,6 +145,10 @@ export interface DeleteServerAlertInput {
 }
 
 export interface GenerateChartInput {
+  /**
+   * Replay servers only (ADR-0059), and required there: the time this call is answered for, as unix seconds, unix ms or an ISO 8601 time. Only bars that closed at or before it are used, and it cannot be earlier than the latest as_of the server has been sent, by any caller. On any other server leave it out.
+   */
+  as_of?: number | string;
   /**
    * Number of OHLCV candlestick bars to display (max 5000, all formats)
    */
@@ -296,6 +373,10 @@ export interface GetFootprintInput {
 
 export interface GetIndicatorsInput {
   /**
+   * Replay servers only (ADR-0059), and required there: the time this call is answered for, as unix seconds, unix ms or an ISO 8601 time. Only bars that closed at or before it are used, and it cannot be earlier than the latest as_of the server has been sent, by any caller. On any other server leave it out.
+   */
+  as_of?: number | string;
+  /**
    * List of indicator names to compute (e.g. ["rsi", "macd", "adx"])
    */
   indicators: string[];
@@ -322,11 +403,26 @@ export interface GetPositionsInput {}
 
 export interface GetQuotesInput {
   /**
+   * Replay servers only (ADR-0059), and required there: the time this call is answered for, as unix seconds, unix ms or an ISO 8601 time. Only bars that closed at or before it are used, and it cannot be earlier than the latest as_of the server has been sent, by any caller. On any other server leave it out.
+   */
+  as_of?: number | string;
+  /**
    * Ticker symbols (e.g. ["BTCUSDT", "AAPL", "^GSPC"]). At most 50 entries; trimmed, uppercased and deduplicated.
    *
    * @maxItems 50
    */
   symbols: string[];
+}
+
+export interface GetSetupInput {
+  /**
+   * Replay servers only (ADR-0059), and required there: the time this call is answered for, as unix seconds, unix ms or an ISO 8601 time. Only bars that closed at or before it are used, and it cannot be earlier than the latest as_of the server has been sent, by any caller. On any other server leave it out.
+   */
+  as_of?: number | string;
+  /**
+   * The setup's id.
+   */
+  id: string;
 }
 
 export interface GetTpoInput {
@@ -382,6 +478,10 @@ export interface GetTpoInput {
 
 export interface InspectChartInput {
   /**
+   * Replay servers only (ADR-0059), and required there: the time this call is answered for, as unix seconds, unix ms or an ISO 8601 time. Only bars that closed at or before it are used, and it cannot be earlier than the latest as_of the server has been sent, by any caller. On any other server leave it out.
+   */
+  as_of?: number | string;
+  /**
    * Bars to read, newest last, 1 to 1000.
    */
   bars?: number;
@@ -419,6 +519,25 @@ export interface ListIndicatorsInput {}
 
 export interface ListServerAlertsInput {}
 
+export interface ListSetupsInput {
+  /**
+   * Replay servers only (ADR-0059), and required there: the time this call is answered for, as unix seconds, unix ms or an ISO 8601 time. Only bars that closed at or before it are used, and it cannot be earlier than the latest as_of the server has been sent, by any caller. On any other server leave it out.
+   */
+  as_of?: number | string;
+  /**
+   * Most setups to return; total says how many matched.
+   */
+  limit?: number;
+  /**
+   * open: watching or triggered. closed: any other. Omit for all.
+   */
+  status?: "open" | "closed" | "watching" | "triggered" | "won" | "invalidated" | "expired" | "cancelled";
+  /**
+   * Only this symbol's.
+   */
+  symbol?: string;
+}
+
 export interface ListSubscriptionsInput {}
 
 export interface PlaceOrderInput {
@@ -442,6 +561,59 @@ export interface PlaceOrderInput {
    * Order type
    */
   type: "market" | "limit";
+}
+
+export interface ReviseSetupInput {
+  /**
+   * Replay servers only (ADR-0059), and required there: the time this call is answered for, as unix seconds, unix ms or an ISO 8601 time. Only bars that closed at or before it are used, and it cannot be earlier than the latest as_of the server has been sent, by any caller. On any other server leave it out.
+   */
+  as_of?: number | string;
+  /**
+   * Drawings that show the setup, exactly as generate_chart's `drawings` takes them (ADR-0054) and checked by the same rules against the bars of the setup's symbol and interval. Stored with their resolved points.
+   *
+   * @maxItems 50
+   */
+  drawings?: {}[];
+  /**
+   * The price zone the setup is entered in. The same price twice is a level.
+   */
+  entry?: {
+    /**
+     * Upper edge; at least low.
+     */
+    high: number;
+    /**
+     * Lower edge; greater than 0.
+     */
+    low: number;
+  };
+  /**
+   * When the setup runs out, as unix seconds, unix ms or an ISO 8601 time; in the future and at most 90 days ahead.
+   */
+  expires_at?: number | string;
+  /**
+   * The setup's id.
+   */
+  id: string;
+  /**
+   * The price at which the setup is wrong: below the entry zone of a long, above that of a short, and at least 3 times the assumed round-trip cost away from it.
+   */
+  invalidation?: number;
+  /**
+   * Why this change, in plain text. Kept in the setup's log.
+   */
+  reason: string;
+  /**
+   * Target prices beyond the entry zone, nearest first. The first one decides a win; the others are kept for the chart.
+   *
+   * @minItems 1
+   * @maxItems 4
+   */
+  targets?: [number] | [number, number] | [number, number, number] | [number, number, number, number];
+  /**
+   * Why, in plain text.
+   */
+  thesis?: string;
 }
 
 export interface SearchSymbolsInput {

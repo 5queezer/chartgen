@@ -32,6 +32,26 @@ a token. With a provider configured it needs a [signed-in user](#sign-in) instea
 | `POST` | `/workspace/sync` | The web app's sync of a user's workspace ([ADR-0050](/chartgen/decisions/0050-per-user-workspace-sync/)). `{"since": 0, "writes": [{"key", "value" or null, "base_version"}]}` answers `{"cursor", "restored", "results": [{"key", "status": "ok", "version"}, or "conflict" with "version" and "value", or "too_large", "quota", "bad_key"], "changes": [{"key", "value", "version"}]}`. `"restored": true` says the cursor was past this account's versions. `400` for more than 50 writes in one request, `401` for a bad token, `403` for another application's, `408` for a body not sent within 8 s, `413` past 1 MiB, `429` with `Retry-After` past 120 requests or 8 MiB a minute per user, for a minute after a request held its place by neither sending nor reading for 8 to 10 s, and while another sync of the user or too many in all are running, `503` when the store fails, `404` with sign-in off or no store. The token and these limits come before the body is read. Only the keys the app syncs are stored, others answer `bad_key`. |
 | `GET` | `/favicon.svg`, `/favicon.ico` | The g of the wordmark, as SVG and as a 16, 32 and 48 px icon. The SVG is the connector icon surfaced by `logo_uri`. |
 
+### Other origins, framing and sniffing
+
+A page on another origin, such as an MCP client that runs in a browser, is answered on
+these routes only ([ADR-0062](/chartgen/decisions/0062-cors-per-route-and-no-framing/)):
+`/mcp` and its aliases `/`, `/message` and `/sse`, `/register`, `/token`, `/revoke` and
+the three `/.well-known/` documents. There every answer carries
+`Access-Control-Allow-Origin: *`, a preflight allows any method and header, and
+credentials are never allowed: these routes take a bearer token or nothing.
+
+Every other route, the web app's files and an unknown path send no `Access-Control-`
+header, and a preflight to them is not `200`. That covers `/authorize`, everything
+under `/oauth/`, and `/workspace/sync`. Until this change they carried the same headers
+as the routes above; a page on another origin that asked `/oauth/me` no longer gets an
+answer it may read. Pages on the server's own origin are not affected.
+
+The web app's pages carry `X-Frame-Options: DENY` and `Content-Security-Policy:
+frame-ancestors 'none'`, and the sign-in and consent pages a stricter policy with the
+same two, so no other site can show them in a frame. Every response carries
+`X-Content-Type-Options: nosniff`.
+
 ## Metadata document
 
 ```json

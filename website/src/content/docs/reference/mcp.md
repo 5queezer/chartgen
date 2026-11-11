@@ -87,7 +87,8 @@ retracement from a swing high to a swing low. `initialize` announces the
 without it returns an error. With `CHARTGEN_SCRIPTING=1` the server also
 lists the 5 [scripted-indicator tools](#scripted-indicators-chartgen_scripting1),
 and with `CHARTGEN_SERVER_ALERTS=1` the 4
-[server alert tools](#server-alerts-chartgen_server_alerts1).
+[server alert tools](#server-alerts-chartgen_server_alerts1). With `CHARTGEN_SETUPS=1`, or on
+a replay server, it lists the 5 [setup tools](#setups-chartgen_setups1).
 
 ### Charting (always available)
 
@@ -1287,6 +1288,55 @@ as the notification's tag. Each alert also returns `push`, `last_push_at`, `last
 `last_push_error`, the last outcome across your devices, and `last_push_devices`: the devices its last fire went
 to, by id, each with `{at, status, error}`, or `null` while its outcome is not known. A device not there was not sent
 that fire.
+
+### Setups (`CHARTGEN_SETUPS=1`)
+
+Trading setups an agent stores and the server scores on paper
+([guide](/chartgen/guides/setups/), [ADR-0059](/chartgen/decisions/0059-setups-paper-scored/)).
+No order is sent. These tools are listed only when the server runs with `CHARTGEN_SETUPS=1`, or
+as a [replay server](/chartgen/guides/setups/#replay), and answer only on the HTTP transport: a
+setup belongs to the OAuth client of the bearer token, or with
+[sign-in](/chartgen/reference/oauth/#sign-in) to its user, and a setup of another owner reads as
+one that does not exist. On a server without them `list_setups` returns
+`{enabled: false, setups: []}` and the others an error. Where the operator listed accounts in
+[`CHARTGEN_SERVER_ALERT_CLIENTS`](/chartgen/guides/deploy/#setups), only those may create
+setups; `can_create` in the list says so.
+
+| Tool | Arguments | Result |
+|---|---|---|
+| `create_setup` | `symbol`, `interval`, `direction`, `thesis`; for a setup `entry`, `invalidation`, `targets`, `expires_at`; optional `drawings`, `decision` | The setup with its log |
+| `revise_setup` | `id`, `reason`; any of `thesis`, `drawings`, `entry`, `invalidation`, `targets`, `expires_at` | The setup with its log |
+| `get_setup` | `id` | The setup with its log |
+| `list_setups` | optional `status`, `symbol`, `limit` (default 50, at most 500) | `{enabled, can_create, replay, total, limits, setups: [...]}`, newest first, without logs |
+| `cancel_setup` | `id`, `reason` | The setup with its log |
+
+- `symbol`: a Binance symbol. Anything else is refused.
+- `direction`: `long` or `short`. `decision`: `take` (default), or `skip` for a decision not to
+  trade, which takes no levels and is scored with the server's bracket.
+- `entry`: `{low, high}`. `invalidation`: below the entry zone of a long, above that of a
+  short, and at least 42 bps of the price from it. `targets`: 1 to 4 prices beyond the zone,
+  nearest first; the first decides a win. `expires_at`: unix seconds, unix ms or ISO 8601,
+  ahead and at most 90 days.
+- `thesis`: at most 2000 characters. `reason`: at most 500.
+- `drawings`: as [`generate_chart`'s](#drawings), at most 50, on the bars of the setup's
+  symbol and interval.
+- `status`, `result_r`, `fill`, `exit` and `costs` are set by the server. Sending one is an
+  error.
+- `as_of`: [replay servers](/chartgen/guides/setups/#replay) only, where every call needs it.
+  `generate_chart`, `inspect_chart`, `get_indicators` and `get_quotes` take it there too.
+
+A setup answers with `id`, the fields above, `bracket` (`agent`, or for a skip `atr` or `floor`:
+which rule set its levels), `status` (`watching`, `triggered`, `won`,
+`invalidated`, `expired`, `cancelled`), `created_at`, `costs`, `fill` and `exit` (each
+`{price, bar_time}` or null), `result_r` (in R; null while open, and for a setup that expired filled while its owner was off
+the operator's list), `scored_through`, `gap` (true if bars were missed and could
+not be read afterwards, so the result is incomplete), `pending`
+(changes that count from the next 1m bar), `revisions` and `agent_revisions`. `log` holds every
+entry: `seq`, `at`, `by` (`agent` or `server`), `kind` (`created`, `revised`, `cancelled`,
+`status`, `voided`, `gap`), `reason` and `changes` (`{field: {from, to}}`). Times are in ms.
+
+A call that fails a check answers with an error whose text is JSON:
+`{error, setup_errors: [{field, message, hint}]}`, one entry per problem, and stores nothing.
 
 ### Scripted indicators (`CHARTGEN_SCRIPTING=1`)
 

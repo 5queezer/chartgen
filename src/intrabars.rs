@@ -430,6 +430,9 @@ pub fn load(
     let (Some(&from_s), now_s) = (opens.first(), fetch::now_ms() / 1000) else {
         return Ok(Vec::new());
     };
+    if matches!(source, DataSource::Replay { .. }) {
+        return Err("a replay holds no lower-timeframe bars".into());
+    }
     if source != DataSource::Live {
         let last_len = last_end - opens.last().copied().unwrap_or(from_s);
         return Ok(sample_list(symbol, bars, &opens, last_len, secs, now_s));
@@ -983,6 +986,10 @@ mod tests {
         requests: std::sync::atomic::AtomicUsize,
         fail: std::sync::atomic::AtomicBool,
         delay: Duration,
+        /// While true a request does not answer: a test lets it go when it has seen
+        /// what it waits for, rather than hope that a delay was long enough.
+        held: Mutex<bool>,
+        released: Condvar,
     }
 
     impl SlowSource {
@@ -991,7 +998,21 @@ mod tests {
                 requests: Default::default(),
                 fail: Default::default(),
                 delay: Duration::from_millis(delay_ms),
+                held: Mutex::new(false),
+                released: Condvar::new(),
             }
+        }
+
+        /// A source whose requests answer only after `release`.
+        fn held() -> Self {
+            let source = Self::new(0);
+            *source.held.lock().unwrap() = true;
+            source
+        }
+
+        fn release(&self) {
+            *self.held.lock().unwrap() = false;
+            self.released.notify_all();
         }
 
         fn requests(&self) -> usize {
@@ -1002,6 +1023,16 @@ mod tests {
             use std::sync::atomic::Ordering::SeqCst;
             self.requests.fetch_add(1, SeqCst);
             std::thread::sleep(self.delay);
+            // The minute only ends a test that would hang.
+            drop(
+                self.released
+                    .wait_timeout_while(
+                        self.held.lock().unwrap(),
+                        Duration::from_secs(60),
+                        |held| *held,
+                    )
+                    .unwrap(),
+            );
             if self.fail.load(SeqCst) {
                 return Err("source is down".into());
             }
@@ -1015,6 +1046,25 @@ mod tests {
 
     fn far() -> Instant {
         Instant::now() + Duration::from_secs(600)
+    }
+
+    /// Wait for `what`, which another thread brings about. The bound only ends a test
+    /// that would hang; nothing is timed by it.
+    fn until(what: impl Fn() -> bool) {
+        let give_up = Instant::now() + Duration::from_secs(60);
+        while !what() {
+            assert!(Instant::now() < give_up, "waited a minute");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    /// How many callers wait on the read of `X` that is under way. Each holds the
+    /// flight, as do the map and the reader.
+    fn waiting(cache: &SharedCache) -> usize {
+        let st = cache.lock();
+        st.reading
+            .get(&("X".to_string(), "1m"))
+            .map_or(0, |flight| Arc::strong_count(flight) - 2)
     }
 
     fn shared(cache: &SharedCache, source: &SlowSource) -> Result<Vec<Intrabar>, String> {
@@ -1066,19 +1116,16 @@ mod tests {
     #[test]
     fn those_waiting_on_a_read_that_fails_fail_with_it() {
         use std::sync::atomic::Ordering::SeqCst;
-        let (cache, source) = (SharedCache::default(), SlowSource::new(150));
+        let (cache, source) = (SharedCache::default(), SlowSource::held());
         source.fail.store(true, SeqCst);
         let got: Vec<_> = std::thread::scope(|s| {
             let handles: Vec<_> = (0..8)
-                .map(|i| {
-                    let (cache, source) = (&cache, &source);
-                    s.spawn(move || {
-                        // After the first has begun.
-                        std::thread::sleep(Duration::from_millis(30 * (i > 0) as u64));
-                        shared(cache, source)
-                    })
-                })
+                .map(|_| s.spawn(|| shared(&cache, &source)))
                 .collect();
+            // One reads and seven wait on it, and only then does the source answer: a
+            // caller that came after the read had failed would rightly read again.
+            until(|| source.requests() == 1 && waiting(&cache) == 7);
+            source.release();
             handles.into_iter().map(|h| h.join().unwrap()).collect()
         });
         assert!(got.iter().all(Result::is_err));
@@ -1092,16 +1139,18 @@ mod tests {
 
     #[test]
     fn waiting_on_a_read_gives_up_at_its_deadline_and_sends_nothing() {
-        let (cache, source) = (SharedCache::default(), SlowSource::new(400));
+        let (cache, source) = (SharedCache::default(), SlowSource::held());
         std::thread::scope(|s| {
             s.spawn(|| shared(&cache, &source).unwrap());
-            std::thread::sleep(Duration::from_millis(50));
+            // The read is under way, and stays so until the waiter has given up.
+            until(|| source.requests() == 1);
             let mut f = |limit: usize, end: Option<i64>| source.get(limit, end);
             let soon = Instant::now() + Duration::from_millis(30);
-            let started = Instant::now();
             let err = shared_read(&cache, ("X".into(), "1m"), WINDOW, soon, &mut f).unwrap_err();
             assert!(err.contains("timed out"), "{err}");
-            assert!(started.elapsed() < Duration::from_millis(300));
+            assert_eq!(source.requests(), 1, "it gave up before the read ended");
+            assert!(!cache.lock().reading.is_empty());
+            source.release();
         });
         assert_eq!(
             source.requests(),

@@ -1111,6 +1111,15 @@ fn schema_is_complete(store: &persistence::Store) {
     assert_eq!(store.waiting_rows(None).unwrap().scripts, 0);
     assert!(store.server_alert_events().unwrap().is_empty());
     assert!(store.server_alert_owners().unwrap().contains("github:1"));
+    store
+        .save_setups(&[persistence::StoredSetup {
+            id: "s1".into(),
+            owner: "github:1".into(),
+            record: "{}".into(),
+            revisions: vec![(1, "{}".into())],
+        }])
+        .unwrap();
+    assert_eq!(store.setups().unwrap(), [("{}".to_string(), 2)]);
 }
 
 fn upgraded(name: &str, setup: &[&str]) -> persistence::Store {
@@ -1127,6 +1136,118 @@ fn upgraded(name: &str, setup: &[&str]) -> persistence::Store {
     // Reopening migrates nothing twice.
     drop(store);
     persistence::Store::open(&path).unwrap()
+}
+
+const SCHEMA_V5_SIGNIN: &str = "
+    ALTER TABLE oauth_clients ADD COLUMN client_name TEXT;
+    CREATE TABLE users (
+        id TEXT PRIMARY KEY, name TEXT NOT NULL, created_at INTEGER NOT NULL,
+        last_login_at INTEGER NOT NULL, last_token_at INTEGER
+    );
+    CREATE TABLE sessions (
+        token_hash TEXT PRIMARY KEY, user_id TEXT NOT NULL,
+        created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL
+    );
+    CREATE TABLE client_grants (
+        user_id TEXT NOT NULL, client_id TEXT NOT NULL, created_at INTEGER NOT NULL,
+        PRIMARY KEY (user_id, client_id)
+    );
+    PRAGMA user_version = 5;
+";
+const SCHEMA_V6_WORKSPACE: &str = "
+    CREATE TABLE workspace_docs (
+        user_id TEXT NOT NULL, key TEXT NOT NULL, value TEXT,
+        version INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+        PRIMARY KEY (user_id, key)
+    );
+    CREATE INDEX workspace_docs_version ON workspace_docs (user_id, version);
+    CREATE TABLE workspace_users (
+        user_id TEXT PRIMARY KEY, seq INTEGER NOT NULL, bytes INTEGER NOT NULL
+    );
+    INSERT INTO workspace_docs VALUES ('github:9', 'chartgen.layouts', '{}', 1, 1);
+    INSERT INTO workspace_users VALUES ('github:9', 1, 2);
+    PRAGMA user_version = 6;
+";
+
+/// A file from before the setups tables gets them, and keeps what it had. The file is
+/// pinned by its content, the schema as it was, so a migration added later, before or
+/// after the setups one, does not change what this test starts from.
+#[test]
+fn a_file_from_before_setups_upgrades_and_keeps_its_rows() {
+    let store = upgraded(
+        "upgrade-v6",
+        &[
+            SCHEMA_V2,
+            SCHEMA_V3_ALERTS,
+            SCHEMA_V4_PUSH,
+            SCHEMA_V5_SIGNIN,
+            SCHEMA_V6_WORKSPACE,
+        ],
+    );
+    assert!(store.setups().unwrap().is_empty());
+    assert!(store.setup_owners().unwrap().is_empty());
+    schema_is_complete(&store);
+    assert!(store.server_alert_owners().unwrap().contains("old-client"));
+    assert_eq!(store.push_devices().unwrap().len(), 1);
+}
+
+/// A log entry is never written over.
+#[test]
+fn a_setup_log_entry_cannot_be_replaced() {
+    let store = upgraded("setup-log", &[]);
+    let entry = |body: &str| persistence::StoredSetup {
+        id: "s1".into(),
+        owner: "github:1".into(),
+        record: "{}".into(),
+        revisions: vec![(1, body.into())],
+    };
+    store.save_setups(&[entry("first")]).unwrap();
+    assert!(store.save_setups(&[entry("second")]).is_err());
+    assert_eq!(store.setup_revisions("s1").unwrap(), ["first"]);
+}
+
+/// The log is append-only in the database itself, not only in this server's code:
+/// whoever opens the file cannot change or remove an entry by an ordinary statement.
+#[test]
+fn a_setup_log_entry_cannot_be_updated_or_deleted_in_sql() {
+    let dir = std::env::temp_dir().join(format!("chartgen-setup-log-sql-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("s.db");
+    let store = persistence::Store::open(&path).unwrap();
+    store
+        .save_setups(&[persistence::StoredSetup {
+            id: "s1".into(),
+            owner: "github:1".into(),
+            record: "{}".into(),
+            revisions: vec![(1, "first".into())],
+        }])
+        .unwrap();
+    drop(store);
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    for statement in [
+        "UPDATE setup_revisions SET body = 'changed'",
+        "UPDATE setup_revisions SET seq = 2",
+        "DELETE FROM setup_revisions",
+        "INSERT OR REPLACE INTO setup_revisions VALUES ('s1', 1, 'replaced')",
+    ] {
+        let refused = conn.execute(statement, []).unwrap_err().to_string();
+        assert!(refused.contains("append-only"), "{statement}: {refused}");
+    }
+    drop(conn);
+    let store = persistence::Store::open(&path).unwrap();
+    assert_eq!(store.setup_revisions("s1").unwrap(), ["first"]);
+    // The setup itself is still rewritten as its status moves, with new entries added.
+    store
+        .save_setups(&[persistence::StoredSetup {
+            id: "s1".into(),
+            owner: "github:1".into(),
+            record: "{\"moved\":true}".into(),
+            revisions: vec![(2, "second".into())],
+        }])
+        .unwrap();
+    assert_eq!(store.setup_revisions("s1").unwrap(), ["first", "second"]);
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
@@ -1857,4 +1978,87 @@ fn a_cursor_from_a_restored_file_starts_over() {
         .unwrap()
         .parts();
     assert_eq!(changes.len(), 1);
+}
+
+fn migration_with(text: &str) -> usize {
+    persistence::MIGRATIONS
+        .iter()
+        .position(|sql| sql.contains(text))
+        .unwrap()
+}
+
+/// The order the two features' migrations must keep: the refresh token table, its
+/// column for the access token's hash, then the setups tables. A new file gets every
+/// migration, and its version is their count.
+#[test]
+fn a_fresh_file_gets_every_migration_with_setups_after_refresh_tokens() {
+    let (table, column, setups) = (
+        migration_with("CREATE TABLE refresh_tokens"),
+        migration_with("ADD COLUMN access_hash"),
+        migration_with("CREATE TABLE setups"),
+    );
+    assert!(
+        table < column && column < setups,
+        "{table} {column} {setups}"
+    );
+    assert_eq!(column, table + 1);
+    assert_eq!(setups, column + 1);
+
+    let dir = std::env::temp_dir().join(format!("chartgen-fresh-order-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("s.db");
+    schema_is_complete(&persistence::Store::open(&path).unwrap());
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    let version: i64 = conn
+        .query_row("PRAGMA user_version", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(version as usize, persistence::MIGRATIONS.len());
+    assert!(refresh_columns(&path).contains(&"access_hash".to_string()));
+    drop(conn);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A database last opened by the build with durable tokens and without setups: it has
+/// refresh tokens in it. The build with both gives it the setups tables and keeps
+/// every token, so a headless agent authorized before the deploy still is after it.
+#[test]
+fn a_file_with_refresh_tokens_and_no_setups_upgrades_and_keeps_them() {
+    let setups = migration_with("CREATE TABLE setups");
+    let mut setup: Vec<String> = persistence::MIGRATIONS[..setups]
+        .iter()
+        .map(|sql| sql.to_string())
+        .collect();
+    setup.push(format!(
+        "INSERT INTO oauth_clients (client_id, redirect_uris, created_at, last_token_at)
+             VALUES ('agent', '[\"http://127.0.0.1:9/cb\"]', 1, 2);
+         INSERT INTO refresh_tokens VALUES ('h-old', 'fam', 0, 'agent', NULL, 900, 950, NULL);
+         INSERT INTO refresh_tokens VALUES ('h-new', 'fam', 1, 'agent', NULL, 1000, NULL, 'a-hash');
+         PRAGMA user_version = {setups};"
+    ));
+    let setup: Vec<&str> = setup.iter().map(String::as_str).collect();
+    let store = upgraded("upgrade-tokens-then-setups", &setup);
+
+    let mut tokens = store.refresh_tokens(0).unwrap();
+    tokens.sort_by_key(|t| t.seq);
+    assert_eq!(tokens.len(), 2);
+    assert_eq!(
+        (tokens[0].token_hash.as_str(), tokens[0].spent_at),
+        ("h-old", Some(950))
+    );
+    assert_eq!(tokens[1].access_hash.as_deref(), Some("a-hash"));
+    assert_eq!(tokens[1].client_id, "agent");
+    // And the setups tables are there, with their append-only log.
+    assert!(store.setups().unwrap().is_empty());
+    store
+        .save_setups(&[persistence::StoredSetup {
+            id: "s1".into(),
+            owner: "agent".into(),
+            record: "{}".into(),
+            revisions: vec![(1, "{}".into())],
+        }])
+        .unwrap();
+    assert!(store.setup_owners().unwrap().contains("agent"));
+    assert_eq!(store.refresh_tokens(0).unwrap().len(), 2);
+    assert_eq!(store.oauth_clients().unwrap()[0].client_id, "agent");
 }

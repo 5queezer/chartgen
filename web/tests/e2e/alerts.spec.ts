@@ -53,6 +53,27 @@ const feed = (page: Page, prices: number[]) =>
     for (const p of ps) w.__chartgenTest.feedPrice("BTCUSDT", p);
   }, prices);
 
+/**
+ * From now on BTCUSDT's quote is its chart's last close, as on a real feed. On the sample
+ * source the two are separate series (the quote is the daily bar's), and an alert of a
+ * symbol that is not on the chart is read against its quote: at some hours that quote is
+ * above a level that is above everything on the chart.
+ */
+async function quoteFollowsChart(page: Page): Promise<void> {
+  const last = await lastClose(page);
+  await page.route("**/mcp", async (route) => {
+    if (!(route.request().postData() ?? "").includes('"get_quotes"')) return route.fallback();
+    const response = await route.fetch();
+    const rpc = (await response.json()) as { result: { content: { text: string }[] } };
+    const payload = JSON.parse(rpc.result.content[0]!.text) as {
+      quotes: { symbol: string; last?: number }[];
+    };
+    for (const quote of payload.quotes) if (quote.symbol === "BTCUSDT") quote.last = last;
+    rpc.result.content[0]!.text = JSON.stringify(payload);
+    await route.fulfill({ response, json: rpc });
+  });
+}
+
 /** Level well below the sample price, for crossing-up alerts. */
 const lowLevel = async (page: Page) =>
   +((await lastClose(page)) / 10).toFixed(2);
@@ -312,6 +333,8 @@ test.describe("price alerts", () => {
   test("dragging an alert line moves its level; clicking a row switches symbol", async ({
     bootedApp: page,
   }) => {
+    // The alert is read against the quote while the chart shows the other symbol.
+    await quoteFollowsChart(page);
     const level = await page.evaluate(() => {
       const bars = (window as unknown as TestWindow).__chartgenTest.series()!.bars;
       return Math.max(...bars.slice(-30).map((b) => b.h));
