@@ -1188,6 +1188,8 @@ Connors RSI: average of RSI, streak RSI and percent rank of ROC(1) (0-100)
 | [`funding`](#funding) | `funding_rate` |
 | [`oi`](#oi) | `open_interest` |
 | [`long_short`](#long_short) | `ls_ratio` |
+| [`top_long_short`](#top_long_short) | `top_ls` |
+| [`taker_ratio`](#taker_ratio) | `taker_buy_sell` |
 | [`fear_greed`](#fear_greed) | `fng` |
 
 ### `cvd`
@@ -1219,6 +1221,18 @@ Long/Short Ratio — account positioning (Binance futures, last 30 days only)
 **Aliases:** `ls_ratio`
 
 ![long_short sample render](../../../assets/indicators/long_short.png)
+
+### `top_long_short`
+
+Top Trader Long/Short Ratio — position share of the largest accounts (Binance futures, last 30 days only)
+
+**Aliases:** `top_ls`
+
+### `taker_ratio`
+
+Taker Buy/Sell Ratio — aggressive buy over sell volume, above 1 buyers lead (Binance futures, last 30 days only)
+
+**Aliases:** `taker_buy_sell`
 
 ### `fear_greed`
 

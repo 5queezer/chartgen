@@ -1346,7 +1346,7 @@ before instances existed load unchanged.
 
 ### Funding, Open Interest and Long/Short panels
 
-These three panels read Binance futures data, so they have values for crypto
+These panels (`funding`, `oi`, `long_short`, `top_long_short`, `taker_ratio`) read Binance futures data, so they have values for crypto
 symbols that Binance trades as a perpetual future. A bar with no value is left
 empty, not drawn as zero. When a panel has no values at all, its legend says why:
 
@@ -1367,8 +1367,8 @@ How far back the values go:
   visible bars need, newest first, up to 3000 rows (about 2.7 years at one payment
   every 8 hours). Older bars stay empty. Scrolling back reads the older window
   the same way.
-- **Open interest** and the **long/short ratio** are kept by Binance for the last
-  30 days only. Bars older than that are empty on any chart. Reading goes back up
+- **Open interest**, the **long/short ratios** and the **taker buy/sell ratio** are
+  kept by Binance for the last 30 days only. Bars older than that are empty on any chart. Reading goes back up
   to 4000 rows (about 14 days of 5 minute rows) in one chart, so a zoomed-out
   5 minute chart can have empty bars before that.
 - A bar takes the nearest row within two bar lengths (funding: within 8 hours).

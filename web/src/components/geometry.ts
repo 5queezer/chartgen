@@ -547,6 +547,8 @@ export function fillTheme(name: string, index: number): FillTheme {
       return KALMAN_FILLS[index] ?? single(BAND_FILL);
     case "long_short":
     case "ls_ratio":
+    case "top_long_short":
+    case "top_ls":
       return single("rgba(38, 166, 154, 0.10)");
     default:
       return single(BAND_FILL);

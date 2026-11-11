@@ -62,6 +62,8 @@ pub fn by_name(name: &str) -> Option<Box<dyn Indicator>> {
         "funding" | "funding_rate" => Some(Box::new(external::FundingRate)),
         "oi" | "open_interest" => Some(Box::new(external::OpenInterestHist)),
         "long_short" | "ls_ratio" => Some(Box::new(external::LongShortRatio)),
+        "top_long_short" | "top_ls" => Some(Box::new(external::TopLongShortRatio)),
+        "taker_ratio" | "taker_buy_sell" => Some(Box::new(external::TakerRatio)),
         "fear_greed" | "fng" => Some(Box::new(external::FearGreed)),
         "volume" => Some(Box::new(trend::Volume::default())),
         "ma" => Some(Box::new(trend::Ma::default())),
@@ -231,6 +233,8 @@ pub fn available() -> &'static [&'static str] {
         "funding",
         "oi",
         "long_short",
+        "top_long_short",
+        "taker_ratio",
         "fear_greed",
         "volume",
         "ma",
@@ -473,6 +477,18 @@ pub fn registry() -> Vec<IndicatorInfo> {
         &["ls_ratio"],
         "external",
         external::LongShortRatio
+    );
+    reg!(
+        "top_long_short",
+        &["top_ls"],
+        "external",
+        external::TopLongShortRatio
+    );
+    reg!(
+        "taker_ratio",
+        &["taker_buy_sell"],
+        "external",
+        external::TakerRatio
     );
     reg!("fear_greed", &["fng"], "external", external::FearGreed);
 

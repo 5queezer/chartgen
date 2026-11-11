@@ -35,7 +35,7 @@ PANEL=(
     balance_of_power rvi smi_ergodic connors_rsi
 )
 
-EXTERNAL=(cvd funding oi long_short fear_greed)
+EXTERNAL=(cvd funding oi long_short top_long_short taker_ratio fear_greed)
 
 echo "Building chartgen (release)..."
 cargo build --release

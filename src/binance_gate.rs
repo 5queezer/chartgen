@@ -200,8 +200,9 @@ pub fn funding_budget() -> &'static Budget {
     BUDGET.get_or_init(|| Budget::new("funding rate", 400, Duration::from_secs(300)))
 }
 
-/// `/futures/data/*` (open interest and the long/short ratio): Binance documents 1000
-/// requests per 5 minutes per IP for each; this refuses at 800 for both together.
+/// `/futures/data/*` (open interest, the long/short ratios and the taker buy/sell
+/// ratio): Binance documents 1000 requests per 5 minutes per IP for each; this refuses
+/// at 800 for all of them together.
 pub fn futures_data_budget() -> &'static Budget {
     static BUDGET: OnceLock<Budget> = OnceLock::new();
     BUDGET.get_or_init(|| Budget::new("futures data", 800, Duration::from_secs(300)))
