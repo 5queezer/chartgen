@@ -96,8 +96,10 @@ a deploy ends the page until the operator's tab signs in again, as signing out d
 at once.
 
 A list that the server cannot read as written stops the start: an entry that is not
-`github:` or `google:` followed by digits, such as `*`, a login name, an e-mail
-address or an empty entry. So does a list on a server without sign-in, where it could
+an id sign-in could have stored, `github:` and a number above 0 or `google:` and a
+`sub`, such as `*`, a login name, an e-mail address or an empty entry. The check
+allows exactly what sign-in stores, so every real account can be named: GitHub's id is
+a number, and Google's `sub` is taken as the text Google sends. So does a list on a server without sign-in, where it could
 never take effect. The message names the entry by its position and does not repeat
 it. An id nobody has signed in with is not an error: it matches nobody yet.
 

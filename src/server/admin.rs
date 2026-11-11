@@ -216,20 +216,33 @@ pub(super) fn operators(
     let mut ids = std::collections::HashSet::new();
     for (i, entry) in raw.split(',').enumerate() {
         let entry = entry.trim();
-        let digits = entry
-            .strip_prefix("github:")
-            .or_else(|| entry.strip_prefix("google:"));
-        if !digits.is_some_and(|d| {
-            !d.is_empty() && d.len() <= 32 && d.bytes().all(|b| b.is_ascii_digit())
-        }) {
+        if !could_be_a_user_id(entry) {
             return Err(format!(
-                "entry {} of CHARTGEN_ADMIN_USERS is not a user id (github:<id> or google:<sub>, digits only)",
+                "entry {} of CHARTGEN_ADMIN_USERS is not a user id (github:<number> or google:<sub>)",
                 i + 1
             ));
         }
         ids.insert(entry.to_string());
     }
     Ok(ids)
+}
+
+/// Whether `entry` is an id sign-in could have stored (`identity_from_profile`): no
+/// less, or a real account could not be named, and no more. GitHub's is its numeric
+/// id, above 0 and written as a number is. Google's is the `sub` it sends, which the
+/// server takes as any text; it is digits in practice, but that is Google's to say.
+fn could_be_a_user_id(entry: &str) -> bool {
+    if let Some(id) = entry.strip_prefix("github:") {
+        return id
+            .parse::<u64>()
+            .is_ok_and(|n| n > 0 && n.to_string() == id);
+    }
+    entry.strip_prefix("google:").is_some_and(|sub| {
+        !sub.is_empty()
+            && sub.len() <= 255
+            && sub.trim() == sub
+            && !sub.chars().any(char::is_control)
+    })
 }
 
 #[cfg(test)]
@@ -243,12 +256,21 @@ mod tests {
         let two = operators(Some("github:1000001, google:2000002"), true).unwrap();
         assert_eq!(two.len(), 2);
         assert!(two.contains("github:1000001") && two.contains("google:2000002"));
+        // Whatever sign-in stores can be named: Google's `sub` is taken as any text.
+        let text = operators(Some("google:a-sub_of.Any-text"), true).unwrap();
+        assert!(text.contains("google:a-sub_of.Any-text"));
         for bad in [
             "*",
             "someone",
             "someone@mail.example",
             "github:",
             "github:12ab",
+            // Not what sign-in stores for GitHub: its id is a number above 0.
+            "github:0",
+            "github:007",
+            "github:99999999999999999999999",
+            "google:",
+            "google: 2000002",
             "GitHub:1000001",
             "github:1000001,",
             "github:1000001,,google:2000002",

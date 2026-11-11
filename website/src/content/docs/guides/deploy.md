@@ -191,7 +191,8 @@ setups, alerts, authorisations, push devices, as counts); the 50 clients registe
 It only reads.
 
 - **Name yourself in `CHARTGEN_ADMIN_USERS`.** Your id is in the web app's account menu,
-  under your name, with a copy button: `github:` and a number, or `google:` and a number.
+  under your name, with a copy button: `github:` and a number, or `google:` and what Google
+  calls your `sub` (digits, today).
   Set it and restart. A list the server cannot read stops the start and says which entry.
 - **Only you, and only in the web app.** An agent or connector you approved never sees it,
   with your account or without. What counts as the web app is where the sign-in's code

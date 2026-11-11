@@ -1198,8 +1198,8 @@ round trip while the session lasts, up to 30 days. A GitHub and a Google account
 separate users, each with their own scripts.
 
 The header shows the signed-in user at its right end: an initial, with the name on wider
-windows. Its menu says which provider it was, shows your user id (`github:` or `google:` and
-a number) with a button to copy it, and has **Sign out**. The id is what the operator of a
+windows. Its menu says which provider it was, shows your user id (`github:` and a number, or
+`google:` and Google's id for you) with a button to copy it, and has **Sign out**. The id is what the operator of a
 server puts into settings that name an account, such as
 [`CHARTGEN_ADMIN_USERS`](/chartgen/guides/deploy/#the-operator-page). On the compact shell,
 where the symbol needs that room, the same entries are at the bottom of the **More tools**
