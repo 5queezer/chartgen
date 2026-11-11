@@ -380,7 +380,7 @@ const AHEAD_MS: i64 = 366 * 86_400_000;
 
 /// A point's time in ms: unix seconds (below 1e11 in magnitude) or ms, or an ISO 8601
 /// date or date-time, UTC unless it carries an offset.
-fn parse_time(v: &Value, now_ms: i64) -> Result<i64, String> {
+pub fn parse_time(v: &Value, now_ms: i64) -> Result<i64, String> {
     let ms = match v {
         Value::Number(n) => {
             let f = n
