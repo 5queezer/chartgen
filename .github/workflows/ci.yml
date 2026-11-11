@@ -8,6 +8,10 @@ on:
   # By hand, on any ref: the whole of CI, and then that ref's image (ADR-0060).
   workflow_dispatch:
 
+# Read-only for every job; the image job widens it for itself.
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
 
@@ -369,14 +373,15 @@ jobs:
     # A GitHub-hosted arm64 machine: the host is arm64, and nothing is emulated.
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 90
-    # The only job of this workflow that may write anything, and only packages.
+    # The only job of this workflow that may write anything, and only packages: the
+    # workflow's own permissions, at the top, are read-only.
+    # No concurrency group on purpose: a group keeps one job waiting and cancels it
+    # when the next one queues, and image jobs queue as their runs' tests finish, not
+    # in commit order, so it could cancel the build of master's head. Builds of
+    # different commits may run side by side; the master tag is guarded below.
     permissions:
       contents: read
       packages: write
-    # One build per ref at a time, in the order they were queued.
-    concurrency:
-      group: image-${{ github.ref }}
-      cancel-in-progress: false
     env:
       IMAGE: ghcr.io/${{ github.repository }}
     steps:
