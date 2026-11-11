@@ -1418,6 +1418,22 @@ const PREFLIGHT: [&str; 3] = [
     "Access-Control-Request-Headers: authorization, content-type, mcp-session-id",
 ];
 
+/// The lower-cased head of an answer whose body may be anything.
+fn head_of(port: u16, method: &str, path: &str, headers: &[&str]) -> String {
+    use std::io::{Read, Write};
+    let mut s = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+    let mut req = format!("{method} {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n");
+    for h in headers {
+        req.push_str(&format!("{h}\r\n"));
+    }
+    req.push_str("\r\n");
+    s.write_all(req.as_bytes()).unwrap();
+    let mut answer = Vec::new();
+    s.read_to_end(&mut answer).unwrap();
+    let end = answer.windows(4).position(|w| w == b"\r\n\r\n").unwrap();
+    String::from_utf8_lossy(&answer[..end]).to_ascii_lowercase()
+}
+
 /// The lines of a lower-cased head that tell a browser what another origin may do.
 fn cors_lines(head: &str) -> Vec<&str> {
     let mut lines: Vec<&str> = head
@@ -1485,6 +1501,15 @@ fn test_routes_for_this_origin_say_nothing_to_another() {
     std::fs::write(web.join("assets/x.js"), "console.log(1)").unwrap();
     for srv in [spawn_server(Some(&web)), spawn_server(None)] {
         let p = srv.port;
+        // The icon's body is not text, so its head is read from the bytes.
+        for extra in [&PREFLIGHT[..], &["Origin: https://other.example"][..]] {
+            let method = if extra.len() > 1 { "OPTIONS" } else { "GET" };
+            let head = head_of(p, method, "/favicon.ico", extra);
+            assert!(
+                !head.contains("access-control-"),
+                "{method} /favicon.ico: {head}"
+            );
+        }
         for (method, path) in [
             ("GET", "/authorize?response_type=code&client_id=x"),
             ("GET", "/oauth/signin"),
@@ -1497,7 +1522,6 @@ fn test_routes_for_this_origin_say_nothing_to_another() {
             ("GET", "/oauth/signed-out"),
             ("GET", "/oauth/me"),
             ("POST", "/workspace/sync"),
-            // Not the .ico: this helper reads text.
             ("GET", "/favicon.svg"),
             ("GET", "/index.html"),
             ("GET", "/assets/x.js"),
