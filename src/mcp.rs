@@ -4660,8 +4660,10 @@ mod tests {
         let args = json!({ "ticker": "BTCUSDT", "timeframe": "1h", "bars": 3, "row_size": 2.5 });
         let fp = footprint_payload(&args, Sample).unwrap();
         assert_eq!(fp["footprints"][0]["row"], 2.5);
-        // Too fine for this reply: it is wider than asked, on the bar too.
-        let args = json!({ "ticker": "BTCUSDT", "timeframe": "1h", "bars": 3, "row_size": 0.01 });
+        // Too fine for this reply: it is wider than asked, on the bar too. Bars of a
+        // fixed time: those up to now are narrow enough for this row at some hours.
+        let args = json!({ "ticker": "BTCUSDT", "timeframe": "1h", "bars": 3, "row_size": 0.01,
+            "end_time": 1_699_920_000_000i64 });
         let fp = footprint_payload(&args, Sample).unwrap();
         assert_eq!(fp["row_widened"], true);
         assert_eq!(fp["footprints"][0]["row"], fp["row_size"]);
