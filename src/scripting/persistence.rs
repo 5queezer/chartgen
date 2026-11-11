@@ -117,6 +117,20 @@ pub(super) const MIGRATIONS: &[&str] = &[
     "
     ALTER TABLE refresh_tokens ADD COLUMN access_hash TEXT;
 ",
+    "
+    CREATE TABLE setups (
+        id      TEXT PRIMARY KEY,
+        owner   TEXT NOT NULL,
+        record  TEXT NOT NULL
+    );
+    CREATE INDEX setups_owner ON setups (owner);
+    CREATE TABLE setup_revisions (
+        setup_id  TEXT    NOT NULL,
+        seq       INTEGER NOT NULL,
+        body      TEXT    NOT NULL,
+        PRIMARY KEY (setup_id, seq)
+    );
+",
 ];
 
 /// Whether an owner is a signed-in account (ADR-0044).
@@ -129,6 +143,14 @@ pub fn is_account(owner: &str) -> bool {
 /// kind, now or later, is not swept into someone's account (ADR-0044).
 pub fn is_client_id(owner: &str) -> bool {
     owner.len() == 36 && uuid::Uuid::try_parse(owner).is_ok()
+}
+
+/// A setup to write: its JSON and the log entries it gained, as `(seq, JSON)`.
+pub struct StoredSetup {
+    pub id: String,
+    pub owner: String,
+    pub record: String,
+    pub revisions: Vec<(u32, String)>,
 }
 
 /// What `Store::waiting_rows` counts.
@@ -306,8 +328,18 @@ impl Store {
     /// users' scripts and the OAuth client ids that own them.
     pub fn open(path: &Path) -> rusqlite::Result<Self> {
         restrict(path);
-        let mut conn = Connection::open(path)?;
+        let conn = Connection::open(path)?;
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
+        Self::migrated(conn)
+    }
+
+    /// A store that lives in memory and is gone with the process: a replay's setups
+    /// (ADR-0059). No file is touched.
+    pub fn in_memory() -> rusqlite::Result<Self> {
+        Self::migrated(Connection::open_in_memory()?)
+    }
+
+    fn migrated(mut conn: Connection) -> rusqlite::Result<Self> {
         let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
         for (i, sql) in MIGRATIONS.iter().enumerate().skip(version as usize) {
             let tx = conn.transaction()?;
@@ -661,6 +693,47 @@ impl Store {
             )?;
         }
         tx.commit()
+    }
+
+    /// Write setups and the entries their logs gained, in one transaction (ADR-0059).
+    /// A log entry is only ever inserted: one that exists already fails the write.
+    pub fn save_setups(&self, setups: &[StoredSetup]) -> rusqlite::Result<()> {
+        let mut conn = self.conn();
+        let tx = conn.transaction()?;
+        for s in setups {
+            tx.execute(
+                "INSERT OR REPLACE INTO setups (id, owner, record) VALUES (?1, ?2, ?3)",
+                params![s.id, s.owner, s.record],
+            )?;
+            for (seq, body) in &s.revisions {
+                tx.execute(
+                    "INSERT INTO setup_revisions (setup_id, seq, body) VALUES (?1, ?2, ?3)",
+                    params![s.id, seq, body],
+                )?;
+            }
+        }
+        tx.commit()
+    }
+
+    /// Every setup's JSON, with the bytes of its log.
+    pub fn setups(&self) -> rusqlite::Result<Vec<(String, usize)>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
+            "SELECT record, (SELECT COALESCE(SUM(LENGTH(CAST(body AS BLOB))), 0)
+                             FROM setup_revisions WHERE setup_id = setups.id)
+             FROM setups ORDER BY id",
+        )?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get::<_, i64>(1)? as usize)))?;
+        rows.collect()
+    }
+
+    /// The log of one setup, oldest first.
+    pub fn setup_revisions(&self, id: &str) -> rusqlite::Result<Vec<String>> {
+        let conn = self.conn();
+        let mut stmt =
+            conn.prepare("SELECT body FROM setup_revisions WHERE setup_id = ?1 ORDER BY seq")?;
+        let rows = stmt.query_map(params![id], |r| r.get(0))?;
+        rows.collect()
     }
 
     /// Deliveries not finished, oldest first.
