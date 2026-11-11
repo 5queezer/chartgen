@@ -629,11 +629,25 @@ impl OAuthStore {
         usable
     }
 
+    /// Forget the families planned for `client_id` whose access token is gone or no
+    /// longer theirs: the plan ends with the token, whatever became of its request.
+    fn forget_plans_without_token(&mut self, client_id: &str) {
+        let tokens = &self.tokens;
+        if let Some(planned) = self.refresh.storing.get_mut(client_id) {
+            planned.retain(|(family, access)| {
+                tokens
+                    .get(access)
+                    .is_some_and(|t| t.family.as_ref() == Some(family))
+            });
+        }
+    }
+
     /// How many families `client_id` holds with sign-in off, those being stored
     /// included. A family being stored is known by the access token it was planned
     /// for: when that token is gone or no longer the family's, so is the plan,
     /// whatever became of the request that made it.
     fn families_without_user(&mut self, client_id: &str, now: i64) -> usize {
+        self.forget_plans_without_token(client_id);
         let ids: Vec<String> = self
             .refresh
             .by_client
@@ -643,15 +657,7 @@ impl OAuthStore {
             .cloned()
             .collect();
         self.expire_among(ids, now);
-        let tokens = &self.tokens;
-        if let Some(planned) = self.refresh.storing.get_mut(client_id) {
-            planned.retain(|(family, access)| {
-                tokens
-                    .get(access)
-                    .is_some_and(|t| t.family.as_ref() == Some(family))
-            });
-        }
-        let families = &self.refresh;
+        let (tokens, families) = (&self.tokens, &self.refresh);
         let stored = families.by_client.get(client_id).into_iter().flatten();
         let stored = stored.filter(|id| families.by_id.get(*id).is_some_and(|f| f.user.is_none()));
         let planned = families.storing.get(client_id).into_iter().flatten();
@@ -681,9 +687,15 @@ impl OAuthStore {
             return None;
         }
         let now = now_unix();
-        let held = self.families_without_user(client_id, now);
-        if user.is_none() && held >= MAX_TOKENS_PER_CLIENT {
-            return None;
+        // Only with sign-in off is a client's number of families limited here. With
+        // it on, a client id may be shared by many users, and their families are
+        // nothing this exchange has to look at: the user's own limits follow.
+        match user {
+            None if self.families_without_user(client_id, now) >= MAX_TOKENS_PER_CLIENT => {
+                return None;
+            }
+            None => {}
+            Some(_) => self.forget_plans_without_token(client_id),
         }
         let family_part = random_token();
         let family = hash_of(&family_part);
@@ -2753,5 +2765,44 @@ mod tests {
         assert!(exchange(&state, &answers[23], CLIENT, &write)
             .await
             .is_err());
+    }
+
+    /// With sign-in on a client id may be one that many users share, as one connector
+    /// registration is. A code exchange then looks at its own user's families, not at
+    /// those the other users hold through that client.
+    #[tokio::test]
+    async fn a_code_exchange_does_not_look_at_other_users_families_of_its_client() {
+        let mut counts = Vec::new();
+        for users in [20, 2000] {
+            let (store, _) = temp_store(&format!("count-shared-{users}"));
+            let state = started(&store, true, &[CLIENT]);
+            let write = to(&store);
+            {
+                let mut s = state.oauth.lock().unwrap();
+                for user in 0..users {
+                    s.refresh.insert(
+                        format!("hash-{user}"),
+                        RefreshToken {
+                            family: format!("family-{user}"),
+                            seq: 0,
+                            client_id: CLIENT.to_string(),
+                            user: Some(format!("github:{}", 1000 + user)),
+                            created_at: now_unix(),
+                            spent_at: None,
+                            access_hash: None,
+                        },
+                    );
+                }
+                s.refresh.take_touched();
+            }
+            let (_, token) = authorize(&state, CLIENT, Some("github:1"), &write).await;
+            assert!(token.is_some());
+            counts.push(state.oauth.lock().unwrap().refresh.take_touched());
+        }
+        assert!(counts[0] <= 2, "{counts:?}");
+        assert_eq!(
+            counts[0], counts[1],
+            "the same with 20 and with 2000 other users"
+        );
     }
 }
