@@ -10,7 +10,10 @@ its decisions get a track record a person can trust
 ([ADR-0059](/chartgen/decisions/0059-setups-paper-scored/)).
 
 Setups are off until the operator sets [`CHARTGEN_SETUPS=1`](/chartgen/guides/deploy/#setups).
-They run on Binance symbols and over the HTTP transport, where a call has an owner. The tools
+They run on Binance symbols and over the HTTP transport, where a call has an owner. A headless agent
+needs [durable tokens](/chartgen/reference/oauth/#refresh-tokens) for them: a setup belongs to
+the owner its token resolves to, which with sign-in off is the OAuth client, so an agent whose
+token does not outlive a restart loses sight of its setups until someone authorizes it again. The tools
 are in the [MCP reference](/chartgen/reference/mcp/#setups-chartgen_setups1). The web app does
 not show setups yet.
 
