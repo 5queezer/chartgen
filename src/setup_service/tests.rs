@@ -879,8 +879,8 @@ fn scenario(replay: &'static Replay) -> Vec<String> {
 #[tokio::test]
 async fn the_same_scenario_gives_the_same_bytes_twice() {
     let uses = chartgen::binance_gate::http_uses();
-    let first = crate::replay::on(fixture(usize::MAX, 0.0), scenario);
-    let second = crate::replay::on(fixture(usize::MAX, 0.0), scenario);
+    let first = crate::replay::on(Replay::of(fixture(usize::MAX, 0.0)), scenario);
+    let second = crate::replay::on(Replay::of(fixture(usize::MAX, 0.0)), scenario);
     assert_eq!(first, second);
     // The run did something: setups were made, moved and closed, and no call failed.
     let all = first.join("\n");
@@ -915,17 +915,17 @@ fn reaching_for_the_http_client_is_counted() {
 #[tokio::test]
 async fn no_bar_after_as_of_leaks_into_a_run() {
     // The run's last call is at minute 2500. The fixtures agree up to there.
-    let same = crate::replay::on(fixture(usize::MAX, 0.0), scenario);
-    let later_differs = crate::replay::on(fixture(2500, 7.0), scenario);
+    let same = crate::replay::on(Replay::of(fixture(usize::MAX, 0.0)), scenario);
+    let later_differs = crate::replay::on(Replay::of(fixture(2500, 7.0)), scenario);
     assert_eq!(same, later_differs);
     // A difference inside the run does change it, so the comparison can fail.
-    let earlier_differs = crate::replay::on(fixture(2000, 7.0), scenario);
+    let earlier_differs = crate::replay::on(Replay::of(fixture(2000, 7.0)), scenario);
     assert_ne!(same, earlier_differs);
 }
 
 #[tokio::test]
 async fn one_clock_for_every_tool_and_it_cannot_go_backwards() {
-    crate::replay::on(fixture(usize::MAX, 0.0), |replay| {
+    crate::replay::on(Replay::of(fixture(usize::MAX, 0.0)), |replay| {
         let s = replaying(replay);
         // Reading the chart at a later time closes the earlier time for setups too.
         let later = json!({ "ticker": "BTCUSDT", "timeframe": "15m", "format": "summary",
@@ -973,7 +973,7 @@ async fn one_clock_for_every_tool_and_it_cannot_go_backwards() {
 
 #[tokio::test]
 async fn a_replay_refuses_what_the_fixtures_do_not_hold() {
-    crate::replay::on(fixture(usize::MAX, 0.0), |replay| {
+    crate::replay::on(Replay::of(fixture(usize::MAX, 0.0)), |replay| {
         let t = at_minute(1500);
         for tool in [
             "get_footprint",
@@ -1015,7 +1015,7 @@ async fn a_replay_refuses_what_the_fixtures_do_not_hold() {
 }
 
 fn answers_at(bars: BTreeMap<String, Vec<Bar>>, t: i64, calls: &[Value]) -> Vec<String> {
-    crate::replay::on(bars, |replay| {
+    crate::replay::on(Replay::of(bars), |replay| {
         calls
             .iter()
             .map(|args| {
@@ -1072,7 +1072,7 @@ async fn no_bar_after_as_of_leaks_into_any_indicator_or_chart_type() {
 
 #[tokio::test]
 async fn a_replays_store_is_its_own_and_touches_no_file() {
-    crate::replay::on(fixture(usize::MAX, 0.0), |replay| {
+    crate::replay::on(Replay::of(fixture(usize::MAX, 0.0)), |replay| {
         let (a, b) = (replaying(replay), replaying(replay));
         let p = replay.quote("BTCUSDT", at_minute(1500)).unwrap().0;
         let args = json!({
@@ -1090,4 +1090,72 @@ async fn a_replays_store_is_its_own_and_touches_no_file() {
         assert_eq!(other.unwrap()["total"], 0);
         assert!(!std::path::Path::new(":memory:").exists());
     });
+}
+
+/// The answers of the five tools, pinned in a file the web app's types are tested
+/// against (`web/src/types/responses.test.ts`). They come from a replay over the
+/// example fixtures, so they are the same on every run. To write the file again after
+/// a deliberate change: `CHARTGEN_WRITE_FIXTURES=1 cargo test setup_answers`.
+#[tokio::test]
+async fn setup_answers_match_the_file_the_web_types_are_tested_against() {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+    let replay = Replay::load(&dir.join("replay")).unwrap();
+    let answers = crate::replay::on(replay, |replay| {
+        let s = replaying(replay);
+        let start = 1_767_225_600_000 + 600 * MINUTE_MS;
+        let at = |minute: i64| start + minute * MINUTE_MS;
+        let ask = |tool: &str, args: Value| call(&s, tool, args, "agent").unwrap();
+        let p = replay.quote("BTCUSDT", at(0)).unwrap().0;
+        let created = ask(
+            "create_setup",
+            json!({
+                "symbol": "BTCUSDT", "interval": "15m", "direction": "long",
+                "thesis": "example thesis",
+                "entry": { "low": p * 0.997, "high": p * 0.999 }, "invalidation": p * 0.99,
+                "targets": [p * 1.008, p * 1.02], "expires_at": at(600), "as_of": at(0),
+                "drawings": [{ "tool": "horizontalStraightLine",
+                    "points": [{ "time": at(-60), "snap": "low" }] }],
+            }),
+        );
+        let id = created["id"].clone();
+        let skipped = ask(
+            "create_setup",
+            json!({ "symbol": "ETHUSDT", "interval": "15m", "direction": "short",
+                "decision": "skip", "thesis": "example reason", "as_of": at(0) }),
+        );
+        let revised = ask(
+            "revise_setup",
+            json!({ "id": id, "reason": "example reason", "targets": [p * 1.006],
+                "thesis": "second thesis", "as_of": at(1) }),
+        );
+        let later = ask("get_setup", json!({ "id": id, "as_of": at(120) }));
+        let q = replay.quote("ETHUSDT", at(120)).unwrap().0;
+        let second = ask(
+            "create_setup",
+            json!({
+                "symbol": "ETHUSDT", "interval": "1h", "direction": "short",
+                "thesis": "example thesis",
+                "entry": { "low": q * 1.001, "high": q * 1.003 }, "invalidation": q * 1.01,
+                "targets": [q * 0.99], "expires_at": at(600), "as_of": at(120),
+            }),
+        );
+        let cancelled = ask(
+            "cancel_setup",
+            json!({ "id": second["id"], "reason": "example reason", "as_of": at(121) }),
+        );
+        json!({
+            "create_setup": created,
+            "create_setup_skip": skipped,
+            "revise_setup": revised,
+            "get_setup": later,
+            "cancel_setup": cancelled,
+            "list_setups": ask("list_setups", json!({ "as_of": at(400) })),
+        })
+    });
+    let path = dir.join("setup_responses.json");
+    let text = serde_json::to_string_pretty(&answers).unwrap() + "\n";
+    if std::env::var("CHARTGEN_WRITE_FIXTURES").is_ok() {
+        std::fs::write(&path, &text).unwrap();
+    }
+    assert_eq!(std::fs::read_to_string(&path).unwrap_or_default(), text);
 }

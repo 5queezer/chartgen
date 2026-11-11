@@ -99,10 +99,10 @@ pub fn global() -> Option<&'static Replay> {
     TEST.with(Cell::get)
 }
 
-/// Run `test` on a replay server over `bars`.
+/// Run `test` on a replay server.
 #[cfg(test)]
-pub fn on<T>(bars: BTreeMap<String, Vec<Bar>>, test: impl FnOnce(&'static Replay) -> T) -> T {
-    let replay: &'static Replay = Box::leak(Box::new(Replay::of(bars)));
+pub fn on<T>(replay: Replay, test: impl FnOnce(&'static Replay) -> T) -> T {
+    let replay: &'static Replay = Box::leak(Box::new(replay));
     let before = TEST.with(|t| t.replace(Some(replay)));
     let out = test(replay);
     TEST.with(|t| t.set(before));
