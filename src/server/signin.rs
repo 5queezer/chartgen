@@ -642,25 +642,20 @@ impl OAuthStore {
                 web_clients.insert(t.client_id.clone());
             }
         }
-        // One from before the restart counts as well, under the hash it is known by.
-        for (hash, t) in &self.restored {
-            if let Some(u) = t.user.as_ref().filter(|u| u.id == user) {
-                by_client
-                    .entry(t.client_id.clone())
-                    .or_default()
-                    .0
-                    .push((u.last_used, hash.clone()));
+        // The user's families, found through the user and not by a walk over all.
+        for held in self.families_held_by(user) {
+            let of_client = by_client.entry(held.client_id).or_default();
+            // An access token from before the restart counts as well, under the hash
+            // it is known by. It is always of a family.
+            for hash in held.restored {
+                let held_by = self.restored.get(&hash).and_then(|t| t.user.as_ref());
+                if let Some(u) = held_by.filter(|u| u.id == user) {
+                    of_client.0.push((u.last_used, hash));
+                }
             }
-        }
-        for t in self.refresh.values() {
-            if t.spent_at.is_none() && t.user.as_deref() == Some(user) {
-                let age = Duration::from_secs((unix - t.created_at).max(0) as u64);
-                by_client
-                    .entry(t.client_id.clone())
-                    .or_default()
-                    .1
-                    .push((now.checked_sub(age).unwrap_or(now), t.family.clone()));
-            }
+            let age = Duration::from_secs((unix - held.used_at).max(0) as u64);
+            let used = now.checked_sub(age).unwrap_or(now);
+            of_client.1.push((used, held.family));
         }
         let mut clients: Vec<_> = by_client
             .into_iter()
@@ -2213,6 +2208,8 @@ mod tests {
                 user: None,
             },
         );
+        s.refresh.attach("mine", "from-mine");
+        s.refresh.attach("mine", "hash-of-restored");
         let approve = |s: &mut OAuthStore, user: &str, client: &str| {
             let writes = s.signin.as_mut().unwrap().add_grant(user, client);
             s.end_dropped_grants(&writes)

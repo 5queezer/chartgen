@@ -228,6 +228,16 @@ out. There is no absolute lifetime, on purpose: an agent that keeps working is n
 for a person again. A family nobody uses is gone after 30 days, the same time after which
 an account's server alerts go ([ADR-0042](/chartgen/decisions/0042-server-side-alerts/)).
 
+The 30 days are checked where a family is used: a refresh, a revocation, an access token
+from before the restart on its first request, and the counts for a client's and a user's
+limits each look at the families they are about and end the ones that are over. So a
+family past its 30 days is refused whether or not anything has removed it yet. What nobody
+asks about any more is removed by a sweep every 10 minutes, with its access token from
+before the restart. The sweep is the first periodic task that takes the lock every
+authenticated request needs. It holds it for one look at each family, not at their tokens,
+writes nothing to the store and waits for nothing while it holds it. The rows of an
+expired family leave the file at the next start, as before.
+
 An exchange counts as getting a token: it is recorded as the client's and the user's
 activity, as a code exchange is. So a working agent keeps its owner's server alerts alive,
 and one that stopped lets them expire. A tool call still writes nothing.
@@ -373,10 +383,19 @@ registered clients already do.
   `401` and authorizes again, with a person. A process that runs through refreshes in time,
   and so does a client that stores the time, as Hermes does. A client that answers a `401`
   with a refresh needs none of this.
-- Bad, and not new: **`/token` and `/revoke` have no rate limit.** A request with a refresh
-  token the server does not know walks that client's refresh rows while holding the lock
-  every authenticated request needs. The rows are bounded, so this costs CPU and nothing
-  else. Left as it is here.
+- Bad, and not new: **`/token` and `/revoke` have no rate limit.** What one such request
+  costs does not grow with what the server holds: a refresh token names its family, the
+  families are kept by id, and a request looks at the tokens of that one family, or at none
+  if it names no family the server has. A first version kept all tokens in one table and
+  walked it, three times for a refresh token the server did not know, while holding the
+  lock every authenticated request needs: 0.6 s at the 2 million rows that the limits
+  allow with sign-in off. Who holds which family is kept per client and per user, for
+  their limits.
+- Bad, and not new: **every authenticated request walks the access tokens in memory,** to
+  drop the expired ones, as it did before this decision, and so do the per-user limits
+  when a token is issued. Access tokens are capped per family, per client and per user
+  and are never in the file. Measured: 1.3 ms for 100,000 of them, 10 ms for 240,000.
+  Left as it is here.
 - Neutral: an event stream still ends with the process and reconnects, as it already had
   to.
 - Neutral: the answers of `/token` and `/register` and the metadata document name the new

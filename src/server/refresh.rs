@@ -43,6 +43,189 @@ pub(super) struct RefreshToken {
     pub(super) access_hash: Option<String>,
 }
 
+/// One authorization: the tokens that followed each other, and the access tokens that
+/// came from it.
+pub(super) struct Family {
+    client_id: String,
+    user: Option<String>,
+    /// Its tokens by the hash of their value, spent ones included.
+    rows: HashMap<String, RefreshToken>,
+    /// The hash of its one unspent token. A family without one is of no use to anyone
+    /// and goes at the next sweep.
+    usable: Option<String>,
+    /// Its access tokens, by their key in `tokens` or `restored`: at most two, and a
+    /// third for the moment of a retry. A key may outlive its token, never the reverse.
+    access: Vec<String>,
+}
+
+impl Family {
+    /// When its usable token was issued: the last time the family was used.
+    fn used_at(&self) -> Option<i64> {
+        let usable = self.rows.get(self.usable.as_ref()?)?;
+        Some(usable.created_at)
+    }
+
+    fn live(&self, now: i64) -> bool {
+        self.used_at().is_some_and(|at| now - at < REFRESH_TTL_SECS)
+    }
+}
+
+/// What `trim_user_tokens` needs of a user's family.
+pub(super) struct Held {
+    pub(super) family: String,
+    pub(super) client_id: String,
+    pub(super) used_at: i64,
+    /// Its access tokens from before the restart, by their hash.
+    pub(super) restored: Vec<String>,
+}
+
+/// The refresh token families (ADR-0058). A token's value names its family, so a
+/// request finds its family by id and looks at that family's tokens alone: what one
+/// request costs does not grow with what the server holds. Who holds which family is
+/// kept beside it, for the limits per client and per user.
+#[derive(Default)]
+pub(super) struct Families {
+    by_id: HashMap<String, Family>,
+    by_client: HashMap<String, HashSet<String>>,
+    by_user: HashMap<String, HashSet<String>>,
+    /// Families being stored, per client, with the access token each was planned for:
+    /// they count against the client's limit before they exist. One whose access
+    /// token is gone, or no longer the family's, is forgotten when next counted.
+    storing: HashMap<String, Vec<(String, String)>>,
+    /// Tokens looked at since the count was last taken.
+    #[cfg(test)]
+    touched: std::cell::Cell<usize>,
+}
+
+impl Families {
+    /// Count `n` tokens as looked at. Every walk over a family's tokens says so here,
+    /// and a test holds the sum against the size of the store.
+    fn touch(&self, n: usize) {
+        #[cfg(test)]
+        self.touched.set(self.touched.get() + n);
+        let _ = n;
+    }
+
+    /// Put a token into its family, which begins with its first one.
+    fn put(&mut self, hash: String, token: RefreshToken) {
+        let family = self.by_id.entry(token.family.clone()).or_insert_with(|| {
+            let ids = self.by_client.entry(token.client_id.clone()).or_default();
+            ids.insert(token.family.clone());
+            if let Some(user) = &token.user {
+                let ids = self.by_user.entry(user.clone()).or_default();
+                ids.insert(token.family.clone());
+            }
+            Family {
+                client_id: token.client_id.clone(),
+                user: token.user.clone(),
+                rows: HashMap::new(),
+                usable: None,
+                access: Vec::new(),
+            }
+        });
+        if token.spent_at.is_none() {
+            family.usable = Some(hash.clone());
+        }
+        family.rows.insert(hash, token);
+    }
+
+    fn remove(&mut self, id: &str) -> Option<Family> {
+        let family = self.by_id.remove(id)?;
+        self.touch(family.rows.len());
+        if let Some(ids) = self.by_client.get_mut(&family.client_id) {
+            ids.remove(id);
+            if ids.is_empty() {
+                self.by_client.remove(&family.client_id);
+            }
+        }
+        if let Some(user) = &family.user {
+            if let Some(ids) = self.by_user.get_mut(user) {
+                ids.remove(id);
+                if ids.is_empty() {
+                    self.by_user.remove(user);
+                }
+            }
+        }
+        Some(family)
+    }
+
+    /// The clients a family keeps registered (ADR-0036).
+    pub(super) fn clients(&self) -> impl Iterator<Item = &str> {
+        self.by_client.keys().map(String::as_str)
+    }
+
+    /// A restored access token got its value back: its family knows it by that now.
+    pub(super) fn rekey(&mut self, family: &str, hash: &str, token: &str) {
+        if let Some(f) = self.by_id.get_mut(family) {
+            for key in f.access.iter_mut().filter(|key| *key == hash) {
+                *key = token.to_string();
+            }
+        }
+    }
+
+    fn stop_storing(&mut self, client_id: &str, family: &str) {
+        if let Some(planned) = self.storing.get_mut(client_id) {
+            planned.retain(|(id, _)| id != family);
+            if planned.is_empty() {
+                self.storing.remove(client_id);
+            }
+        }
+    }
+}
+
+/// What the tests reach into the families for: every token of every family.
+#[cfg(test)]
+#[cfg_attr(not(feature = "scripting"), allow(dead_code))]
+impl Families {
+    pub(super) fn values(&self) -> impl Iterator<Item = &RefreshToken> {
+        self.by_id.values().flat_map(|f| f.rows.values())
+    }
+
+    pub(super) fn values_mut(&mut self) -> impl Iterator<Item = &mut RefreshToken> {
+        self.by_id.values_mut().flat_map(|f| f.rows.values_mut())
+    }
+
+    pub(super) fn get_mut(&mut self, hash: &str) -> Option<&mut RefreshToken> {
+        self.by_id.values_mut().find_map(|f| f.rows.get_mut(hash))
+    }
+
+    pub(super) fn contains_key(&self, hash: &str) -> bool {
+        self.by_id.values().any(|f| f.rows.contains_key(hash))
+    }
+
+    pub(super) fn len(&self) -> usize {
+        self.values().count()
+    }
+
+    pub(super) fn is_empty(&self) -> bool {
+        self.by_id.is_empty()
+    }
+
+    pub(super) fn insert(&mut self, hash: String, token: RefreshToken) {
+        self.put(hash, token);
+    }
+
+    pub(super) fn extend(&mut self, tokens: impl IntoIterator<Item = (String, RefreshToken)>) {
+        for (hash, token) in tokens {
+            self.put(hash, token);
+        }
+    }
+
+    /// Make an access token a test put into `tokens` or `restored` known to `family`.
+    pub(super) fn attach(&mut self, family: &str, key: &str) {
+        self.by_id
+            .get_mut(family)
+            .unwrap()
+            .access
+            .push(key.to_string());
+    }
+
+    /// The tokens and families looked at since this was last asked.
+    pub(super) fn take_touched(&self) -> usize {
+        self.touched.replace(0)
+    }
+}
+
 /// What a change to the families writes to the store.
 #[cfg_attr(not(feature = "scripting"), allow(dead_code))]
 pub(super) enum Change {
@@ -118,6 +301,30 @@ pub(super) async fn forget_families(write: &WriteFn, families: Vec<String>) {
     if let Err(e) = write_off_worker(write, Change::Delete(families)).await {
         eprintln!("[OAuth] could not delete ended refresh tokens: {e}");
     }
+}
+
+/// How often families nobody used for `REFRESH_TTL_SECS` are removed from memory.
+const SWEEP_EVERY: Duration = Duration::from_secs(600);
+
+// A family's access tokens end with it. One that is neither the newest nor the one
+// before it is past its own lifetime long before its family is, as long as this holds.
+const _: () = assert!(ACCESS_TOKEN_SECS < REFRESH_TTL_SECS as u64);
+
+/// Remove expired families every `SWEEP_EVERY`, for as long as the server runs. No
+/// request waits for this and none depends on it: a request checks the family it
+/// names. It is what frees the memory of families nobody asks about any more. It
+/// holds the OAuth lock for one look at each family, not at their tokens, touches no
+/// store, and waits for nothing while it holds the lock.
+pub(super) fn sweep_now_and_then(state: SharedState) {
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(SWEEP_EVERY);
+        loop {
+            tick.tick().await;
+            if let Ok(mut s) = state.oauth.lock() {
+                s.expire_refresh(now_unix());
+            }
+        }
+    });
 }
 
 /// Exchanges and revocations run one at a time: each reads the families, writes the
@@ -200,25 +407,62 @@ enum Refused {
 }
 
 impl OAuthStore {
-    /// Drop the families nobody used for `REFRESH_TTL_SECS`.
+    /// Drop the families nobody used for `REFRESH_TTL_SECS`, and those with no usable
+    /// token: the sweep. It looks at each family once, not at its tokens. No request
+    /// for a token runs it: a request checks the one family it names, in `live_family`.
     pub(super) fn expire_refresh(&mut self, now: i64) {
-        let live: HashSet<String> = self
-            .refresh
-            .values()
-            .filter(|t| t.spent_at.is_none() && now - t.created_at < REFRESH_TTL_SECS)
-            .map(|t| t.family.clone())
+        let families = &self.refresh.by_id;
+        self.refresh.touch(families.len());
+        let dead: Vec<String> = families
+            .iter()
+            .filter(|(_, f)| !f.live(now))
+            .map(|(id, _)| id.clone())
             .collect();
-        self.refresh.retain(|_, t| live.contains(&t.family));
-        self.restored
-            .retain(|_, t| t.family.as_ref().is_some_and(|f| live.contains(f)));
+        self.end_families(&dead);
+    }
+
+    /// End those of `ids` that nobody used for `REFRESH_TTL_SECS`.
+    fn expire_among(&mut self, ids: Vec<String>, now: i64) {
+        let families = &self.refresh.by_id;
+        self.refresh.touch(ids.len());
+        let dead: Vec<String> = ids
+            .into_iter()
+            .filter(|id| families.get(id).is_some_and(|f| !f.live(now)))
+            .collect();
+        self.end_families(&dead);
+    }
+
+    /// Whether family `id` is in use. One nobody used for `REFRESH_TTL_SECS` ends
+    /// here, whether or not the sweep has come by.
+    pub(super) fn live_family(&mut self, id: &str, now: i64) -> bool {
+        match self.refresh.by_id.get(id).map(|f| f.live(now)) {
+            Some(true) => true,
+            Some(false) => {
+                self.end_families(&[id.to_string()]);
+                false
+            }
+            None => false,
+        }
     }
 
     /// End families, with the access tokens that came from them.
     pub(super) fn end_families(&mut self, families: &[String]) {
-        let ended = |t: &AccessToken| t.family.as_ref().is_some_and(|f| families.contains(f));
-        self.refresh.retain(|_, t| !families.contains(&t.family));
-        self.tokens.retain(|_, t| !ended(t));
-        self.restored.retain(|_, t| !ended(t));
+        for id in families {
+            let Some(family) = self.refresh.remove(id) else {
+                continue;
+            };
+            let of_family = |t: &AccessToken| t.family.as_ref() == Some(id);
+            for key in &family.access {
+                if self.tokens.get(key).is_some_and(of_family) {
+                    self.tokens.remove(key);
+                }
+                if self.restored.get(key).is_some_and(of_family) {
+                    self.restored.remove(key);
+                }
+            }
+        }
+        #[cfg(test)]
+        self.assert_families_agree();
     }
 
     /// After a refresh: a family keeps `newest` and, for `PREVIOUS_ACCESS_SECS` more,
@@ -226,46 +470,92 @@ impl OAuthStore {
     /// than two. After a retry the one before it is the token the client holds, not
     /// `lost`, the one from the answer it never got, which ends here.
     fn retire_access(&mut self, family: &str, newest: &str, lost: Option<&str>) {
+        let Some(f) = self.refresh.by_id.get(family) else {
+            return;
+        };
         let of_family = |t: &AccessToken| t.family.as_deref() == Some(family);
-        if let Some(lost) = lost {
-            self.restored.remove(lost);
-            self.tokens
-                .retain(|token, t| !of_family(t) || hash_of(token) != lost);
+        let mut held: Vec<(Instant, String)> = Vec::new();
+        for key in f.access.iter().filter(|key| key.as_str() != newest) {
+            let is_lost = lost.is_some_and(|lost| key == lost || hash_of(key) == lost);
+            let token = self.tokens.get(key).or_else(|| self.restored.get(key));
+            match token.filter(|t| of_family(t)) {
+                Some(_) if is_lost => {
+                    self.tokens.remove(key);
+                    self.restored.remove(key);
+                }
+                Some(t) => held.push((t.created_at, key.clone())),
+                None => {}
+            }
         }
-        let previous = self
-            .tokens
-            .iter()
-            .chain(self.restored.iter())
-            .filter(|(key, t)| of_family(t) && key.as_str() != newest)
-            .max_by_key(|(_, t)| t.created_at)
-            .map(|(key, _)| key.clone());
-        let keeps = |key: &String| key == newest || Some(key) == previous.as_ref();
-        self.tokens.retain(|key, t| !of_family(t) || keeps(key));
-        self.restored.retain(|key, t| !of_family(t) || keeps(key));
-        let previous = previous.and_then(|key| match self.tokens.get_mut(&key) {
-            Some(t) => Some(t),
-            None => self.restored.get_mut(&key),
-        });
-        if let Some(t) = previous {
-            let until = t.created_at.elapsed() + Duration::from_secs(PREVIOUS_ACCESS_SECS);
-            t.expires_in = t.expires_in.min(until);
+        held.sort();
+        let previous = held.pop().map(|(_, key)| key);
+        for (_, key) in held {
+            self.tokens.remove(&key);
+            self.restored.remove(&key);
+        }
+        if let Some(key) = &previous {
+            let t = match self.tokens.get_mut(key) {
+                Some(t) => Some(t),
+                None => self.restored.get_mut(key),
+            };
+            if let Some(t) = t {
+                let until = t.created_at.elapsed() + Duration::from_secs(PREVIOUS_ACCESS_SECS);
+                t.expires_in = t.expires_in.min(until);
+            }
+        }
+        if let Some(f) = self.refresh.by_id.get_mut(family) {
+            f.access = previous.into_iter().chain([newest.to_string()]).collect();
         }
     }
 
     /// The families `user` holds through `client`.
     pub(super) fn families_of(&self, user: &str, client: &str) -> Vec<String> {
-        self.refresh
-            .values()
-            .filter(|t| {
-                t.spent_at.is_none() && t.client_id == client && t.user.as_deref() == Some(user)
+        let ids = self.refresh.by_user.get(user).into_iter().flatten();
+        ids.filter(|id| {
+            let family = self.refresh.by_id.get(*id);
+            family.is_some_and(|f| f.client_id == client && f.usable.is_some())
+        })
+        .cloned()
+        .collect()
+    }
+
+    /// The families of `user` that are in use, for the user's limits.
+    pub(super) fn families_held_by(&mut self, user: &str) -> Vec<Held> {
+        let ids: Vec<String> = self
+            .refresh
+            .by_user
+            .get(user)
+            .into_iter()
+            .flatten()
+            .cloned()
+            .collect();
+        self.expire_among(ids.clone(), now_unix());
+        ids.into_iter()
+            .filter_map(|id| {
+                let f = self.refresh.by_id.get(&id)?;
+                let restored = f
+                    .access
+                    .iter()
+                    .filter(|key| self.restored.contains_key(*key));
+                Some(Held {
+                    client_id: f.client_id.clone(),
+                    used_at: f.used_at()?,
+                    restored: restored.cloned().collect(),
+                    family: id,
+                })
             })
-            .map(|t| t.family.clone())
             .collect()
     }
 
-    /// Load the stored families at startup. A token of a client no longer registered
-    /// is left out. One issued under the other sign-in mode is kept and refused, so
-    /// switching back finds it again. Returns how many families are usable.
+    /// Load the stored families at startup, from rows in the order they were stored.
+    /// A token of a client no longer registered is left out. One issued under the
+    /// other sign-in mode is kept and refused, so switching back finds it again, and
+    /// it keeps its client registered meanwhile. Returns how many families are usable.
+    ///
+    /// A family has one unspent token. A file may hold two: a build before the one
+    /// that finishes a request whose client hung up could store a successor twice.
+    /// The client then holds the one stored last, so that one is the usable one and
+    /// the other counts as replaced by it.
     #[cfg(feature = "scripting")]
     pub(super) fn restore_refresh(
         &mut self,
@@ -277,34 +567,14 @@ impl OAuthStore {
             if !self.clients.contains_key(&r.client_id) {
                 continue;
             }
-            // The 7 days count from when it was issued: a restart adds nothing. What is
-            // left is counted from now: not every platform's `Instant` can name a time
-            // before the process could have started.
-            let left = ACCESS_TOKEN_SECS.saturating_sub((now - r.created_at).max(0) as u64);
-            let access = r
-                .access_hash
-                .clone()
-                .filter(|_| r.spent_at.is_none() && r.user_id.is_some() == sign_in)
-                .filter(|_| left > 0);
-            if let Some(access) = access {
-                self.restored.insert(
-                    access,
-                    AccessToken {
-                        _token: String::new(),
-                        family: Some(r.family.clone()),
-                        client_id: r.client_id.clone(),
-                        created_at: Instant::now(),
-                        expires_in: Duration::from_secs(left),
-                        // Never a browser session, so never the web app's (ADR-0050).
-                        user: r.user_id.as_ref().map(|id| TokenUser {
-                            id: id.clone(),
-                            session: None,
-                            last_used: Instant::now(),
-                        }),
-                    },
-                );
+            if r.spent_at.is_none() {
+                let family = self.refresh.by_id.get_mut(&r.family);
+                let before = family.and_then(|f| f.rows.get_mut(f.usable.as_ref()?));
+                if let Some(before) = before {
+                    before.spent_at = Some(REPLACED);
+                }
             }
-            self.refresh.insert(
+            self.refresh.put(
                 r.token_hash,
                 RefreshToken {
                     family: r.family,
@@ -318,10 +588,74 @@ impl OAuthStore {
             );
         }
         self.expire_refresh(now);
-        self.refresh
-            .values()
-            .filter(|t| t.spent_at.is_none() && t.user.is_some() == sign_in)
-            .count()
+        let mut usable = 0;
+        for (id, f) in self.refresh.by_id.iter_mut() {
+            let Some(t) = f.usable.as_ref().and_then(|hash| f.rows.get(hash)) else {
+                continue;
+            };
+            if t.user.is_some() != sign_in {
+                continue;
+            }
+            usable += 1;
+            // The 7 days count from when it was issued: a restart adds nothing. What is
+            // left is counted from now: not every platform's `Instant` can name a time
+            // before the process could have started.
+            let left = ACCESS_TOKEN_SECS.saturating_sub((now - t.created_at).max(0) as u64);
+            let Some(access) = t.access_hash.clone().filter(|_| left > 0) else {
+                continue;
+            };
+            f.access.push(access.clone());
+            self.restored.insert(
+                access,
+                AccessToken {
+                    _token: String::new(),
+                    family: Some(id.clone()),
+                    client_id: t.client_id.clone(),
+                    created_at: Instant::now(),
+                    expires_in: Duration::from_secs(left),
+                    // Never a browser session, so never the web app's (ADR-0050).
+                    user: t.user.as_ref().map(|id| TokenUser {
+                        id: id.clone(),
+                        session: None,
+                        last_used: Instant::now(),
+                    }),
+                },
+            );
+        }
+        #[cfg(test)]
+        self.assert_families_agree();
+        usable
+    }
+
+    /// How many families `client_id` holds with sign-in off, those being stored
+    /// included. A family being stored is known by the access token it was planned
+    /// for: when that token is gone or no longer the family's, so is the plan,
+    /// whatever became of the request that made it.
+    fn families_without_user(&mut self, client_id: &str, now: i64) -> usize {
+        let ids: Vec<String> = self
+            .refresh
+            .by_client
+            .get(client_id)
+            .into_iter()
+            .flatten()
+            .cloned()
+            .collect();
+        self.expire_among(ids, now);
+        let tokens = &self.tokens;
+        if let Some(planned) = self.refresh.storing.get_mut(client_id) {
+            planned.retain(|(family, access)| {
+                tokens
+                    .get(access)
+                    .is_some_and(|t| t.family.as_ref() == Some(family))
+            });
+        }
+        let families = &self.refresh;
+        let stored = families.by_client.get(client_id).into_iter().flatten();
+        let stored = stored.filter(|id| families.by_id.get(*id).is_some_and(|f| f.user.is_none()));
+        let planned = families.storing.get(client_id).into_iter().flatten();
+        let planned =
+            planned.filter(|(_, access)| tokens.get(access).is_some_and(|t| t.user.is_none()));
+        stored.count() + planned.count()
     }
 
     /// The first token of a new family, for a code that went to `redirect_uri`. `None`
@@ -345,25 +679,20 @@ impl OAuthStore {
             return None;
         }
         let now = now_unix();
-        self.expire_refresh(now);
-        let stored = self
-            .refresh
-            .values()
-            .filter(|t| t.spent_at.is_none() && t.client_id == client_id && t.user.is_none())
-            .map(|t| &t.family);
-        let being_stored = self
-            .tokens
-            .values()
-            .filter(|t| t.client_id == client_id && t.user.is_none())
-            .filter_map(|t| t.family.as_ref());
-        let held: HashSet<&String> = stored.chain(being_stored).collect();
-        if user.is_none() && held.len() >= MAX_TOKENS_PER_CLIENT {
+        let held = self.families_without_user(client_id, now);
+        if user.is_none() && held >= MAX_TOKENS_PER_CLIENT {
             return None;
         }
         let family_part = random_token();
         let family = hash_of(&family_part);
         if let Some(t) = self.tokens.get_mut(access) {
             t.family = Some(family.clone());
+            let planned = self
+                .refresh
+                .storing
+                .entry(client_id.to_string())
+                .or_default();
+            planned.push((family.clone(), access.to_string()));
         }
         let value = format!("{family_part}.{}", random_token());
         Some(Rotation {
@@ -385,44 +714,38 @@ impl OAuthStore {
         })
     }
 
-    /// Check a presented refresh token and prepare its successor. Changes nothing.
+    /// Check a presented refresh token and prepare its successor. Changes nothing but
+    /// a family nobody used for `REFRESH_TTL_SECS`, which ends. The token names its
+    /// family, and only that family's tokens are looked at.
     fn plan_rotation(
         &mut self,
         presented: &str,
         client_id: &str,
         now: i64,
     ) -> Result<Rotation, Refused> {
-        self.expire_refresh(now);
         let sign_in = self.signin.is_some();
         let (family_part, family) = family_of(presented).ok_or(Refused::Invalid)?;
-        // This client's, and issued under this sign-in mode: with sign-in on a token's
-        // owner is its user and never its client (ADR-0044).
-        let ours = |t: &RefreshToken| {
-            t.family == family && t.client_id == client_id && t.user.is_some() == sign_in
-        };
-        if !self.clients.contains_key(client_id) {
+        if !self.clients.contains_key(client_id) || !self.live_family(&family, now) {
             return Err(Refused::Invalid);
         }
-        let Some(t) = self.refresh.get(&hash_of(presented)).filter(|t| ours(t)) else {
-            // No row for it. If it names a family of this client that is in use, it is
-            // a token of that family from before the spent ones that are kept, and it
-            // came back: the family ends, as for a spent token that is still known.
-            let in_use = self
-                .refresh
-                .values()
-                .any(|t| ours(t) && t.spent_at.is_none());
-            return Err(if in_use {
-                Refused::Reused(family)
-            } else {
-                Refused::Invalid
-            });
+        // This client's, and issued under this sign-in mode: with sign-in on a token's
+        // owner is its user and never its client (ADR-0044).
+        let ours = |f: &&Family| f.client_id == client_id && f.user.is_some() == sign_in;
+        let Some(f) = self.refresh.by_id.get(&family).filter(ours) else {
+            return Err(Refused::Invalid);
+        };
+        let Some(t) = f.rows.get(&hash_of(presented)) else {
+            // No row for it, and it names a family of this client that is in use: it
+            // is a token of that family from before the spent ones that are kept, and
+            // it came back. The family ends, as for a spent token that is still known.
+            return Err(Refused::Reused(family));
         };
         let t = t.clone();
-        let live = self
-            .refresh
-            .iter()
-            .find(|(_, l)| l.family == t.family && l.spent_at.is_none())
-            .map(|(hash, l)| (hash.clone(), l.seq, l.access_hash.clone()));
+        let live = f
+            .usable
+            .as_ref()
+            .and_then(|hash| Some((hash, f.rows.get(hash)?)));
+        let live = live.map(|(hash, l)| (hash.clone(), l.seq, l.access_hash.clone()));
         let (spent, spent_at, lost_access) = match (t.spent_at, live) {
             (None, _) => (vec![hash_of(presented)], now, None),
             // A retry by the holder of the token exchanged last: the successor it
@@ -456,20 +779,95 @@ impl OAuthStore {
     /// Take a stored rotation into the families. `false` if the family ended or its
     /// client was evicted while the store was written.
     pub(super) fn apply_rotation(&mut self, r: &Rotation) -> bool {
-        let unspent = |h: &String| self.refresh.get(h).is_some_and(|t| t.spent_at.is_none());
-        if !self.clients.contains_key(&r.token.client_id) || !r.spent.iter().all(unspent) {
+        let id = &r.token.family;
+        self.refresh.stop_storing(&r.token.client_id, id);
+        if !self.clients.contains_key(&r.token.client_id) {
             return false;
         }
-        for hash in &r.spent {
-            if let Some(t) = self.refresh.get_mut(hash) {
-                t.spent_at = Some(r.spent_at);
+        match self.refresh.by_id.get_mut(id) {
+            Some(f) => {
+                let unspent = |h: &String| f.rows.get(h).is_some_and(|t| t.spent_at.is_none());
+                if r.spent.is_empty() || !r.spent.iter().all(unspent) {
+                    return false;
+                }
+                for hash in &r.spent {
+                    if let Some(t) = f.rows.get_mut(hash) {
+                        t.spent_at = Some(r.spent_at);
+                    }
+                }
+                let floor = r.token.seq - MAX_SPENT_PER_FAMILY;
+                let rows = f.rows.len();
+                f.rows.retain(|_, t| t.spent_at.is_none() || t.seq >= floor);
+                self.refresh.touch(rows);
+            }
+            // The first token of a family, which begins here with its access token.
+            None if r.spent.is_empty() => {}
+            None => return false,
+        }
+        self.refresh.put(r.hash.clone(), r.token.clone());
+        if r.spent.is_empty() {
+            if let Some(f) = self.refresh.by_id.get_mut(id) {
+                f.access = vec![r.access.clone()];
             }
         }
-        let floor = r.token.seq - MAX_SPENT_PER_FAMILY;
-        self.refresh
-            .retain(|_, t| t.family != r.token.family || t.spent_at.is_none() || t.seq >= floor);
-        self.refresh.insert(r.hash.clone(), r.token.clone());
         true
+    }
+
+    /// The families and who holds them say the same, and no access token outlives its
+    /// family: every one that names a family is in that family's list. A key in a
+    /// list with no token behind it is allowed, and skipped where the list is used.
+    #[cfg(test)]
+    pub(super) fn assert_families_agree(&self) {
+        let families = &self.refresh;
+        let mut by_client: HashMap<String, HashSet<String>> = HashMap::new();
+        let mut by_user: HashMap<String, HashSet<String>> = HashMap::new();
+        for (id, f) in &families.by_id {
+            by_client
+                .entry(f.client_id.clone())
+                .or_default()
+                .insert(id.clone());
+            if let Some(user) = &f.user {
+                by_user.entry(user.clone()).or_default().insert(id.clone());
+            }
+            let unspent: Vec<&String> = f
+                .rows
+                .iter()
+                .filter(|(_, t)| t.spent_at.is_none())
+                .map(|(hash, _)| hash)
+                .collect();
+            assert_eq!(
+                unspent,
+                f.usable.iter().collect::<Vec<_>>(),
+                "one usable token"
+            );
+            for t in f.rows.values() {
+                assert_eq!(
+                    (&t.family, &t.client_id, &t.user),
+                    (id, &f.client_id, &f.user)
+                );
+            }
+        }
+        assert_eq!(by_client, families.by_client, "families per client");
+        assert_eq!(by_user, families.by_user, "families per user");
+        let planned: HashSet<&String> = families
+            .storing
+            .values()
+            .flatten()
+            .map(|(id, _)| id)
+            .collect();
+        for (key, t) in self.tokens.iter().chain(self.restored.iter()) {
+            let Some(id) = &t.family else { continue };
+            match families.by_id.get(id) {
+                Some(f) => assert!(
+                    f.access.contains(key),
+                    "an access token its family does not know"
+                ),
+                None => assert!(
+                    planned.contains(id),
+                    "an access token of a family that is gone"
+                ),
+            }
+        }
     }
 }
 
@@ -498,6 +896,7 @@ async fn store_family(
 ) -> Result<Option<String>, String> {
     let family = &first.token.family;
     let leave_family = |s: &mut OAuthStore| {
+        s.refresh.stop_storing(&first.token.client_id, family);
         if let Some(t) = s.tokens.get_mut(access_token) {
             t.family = None;
         }
@@ -517,6 +916,8 @@ async fn store_family(
                 vec![family.clone()]
             }
         };
+        #[cfg(test)]
+        s.assert_families_agree();
         (kept && !ended.contains(family), ended)
     };
     forget_families(write, ended).await;
@@ -610,6 +1011,8 @@ async fn rotate(
                 .user
                 .as_ref()
                 .map(|u| s.trim_user_tokens(u, kept));
+            #[cfg(test)]
+            s.assert_families_agree();
             (token, ended.unwrap_or_default())
         })
     };
@@ -687,16 +1090,14 @@ async fn end_what_it_stands_for(
         let mut s = state.oauth.lock().unwrap();
         s.adopt(token);
         let of_client = |c: &str| c == client_id;
-        match s.refresh.get(&hash_of(token)) {
-            Some(t) => of_client(&t.client_id).then(|| t.family.clone()),
-            None => match s.tokens.get(token) {
-                Some(t) => of_client(&t.client_id).then(|| t.family.clone()).flatten(),
-                // A refresh token too old to have a row still names its family.
-                None => family_of(token).map(|f| f.1).filter(|family| {
-                    let mut tokens = s.refresh.values();
-                    tokens.any(|t| &t.family == family && of_client(&t.client_id))
-                }),
-            },
+        // A refresh token names its family, also one too old to have a row.
+        let named = family_of(token).map(|f| f.1);
+        match named.filter(|id| s.live_family(id, now_unix())) {
+            Some(id) => of_client(&s.refresh.by_id[&id].client_id).then_some(id),
+            None => {
+                let access = s.tokens.get(token).filter(|t| of_client(&t.client_id));
+                access.and_then(|t| t.family.clone())
+            }
         }
     };
     let families: Vec<String> = family.into_iter().collect();
@@ -1940,5 +2341,298 @@ mod tests {
         assert_eq!(s.refresh.len(), 1);
         let family = s.refresh.values().next().unwrap().family.clone();
         assert_eq!(s.tokens[&access].family, Some(family));
+    }
+
+    /// Put `families` other families with `per` tokens each into memory: what a busy
+    /// server holds beside the family a request is about.
+    fn others(state: &SharedState, families: usize, per: i64) {
+        let mut s = state.oauth.lock().unwrap();
+        let now = now_unix();
+        for f in 0..families {
+            let family = hash_of(&format!("other-{f}"));
+            for seq in 0..per {
+                s.refresh.insert(
+                    hash_of(&format!("other-{f}.{seq}")),
+                    RefreshToken {
+                        family: family.clone(),
+                        seq,
+                        client_id: format!("other-client-{}", f / 20),
+                        user: None,
+                        created_at: now,
+                        spent_at: (seq + 1 < per).then_some(now),
+                        access_hash: None,
+                    },
+                );
+            }
+        }
+    }
+
+    /// What a request for a token costs does not grow with what the server holds.
+    /// Counted in tokens and families looked at, not in time, at 2,000 and at 200,000
+    /// tokens. A request that names no family looks at none. One that names a family
+    /// looks at that family's tokens, and a code exchange at its client's families.
+    #[tokio::test]
+    async fn a_token_request_looks_at_its_own_family_and_no_other() {
+        let one_family = MAX_SPENT_PER_FAMILY as usize + 2;
+        let mut counts = Vec::new();
+        for families in [20, 2000] {
+            let (store, _) = temp_store(&format!("count-{families}"));
+            let state = started(&store, false, &[CLIENT]);
+            let write = to(&store);
+            others(&state, families, 100);
+            let touched = |state: &SharedState| state.oauth.lock().unwrap().refresh.take_touched();
+            let bogus = format!("{}.{}", random_token(), random_token());
+            touched(&state);
+
+            assert_eq!(grant(&state, &bogus, CLIENT, &write).await.status(), 400);
+            let bogus_refresh = touched(&state);
+            assert_eq!(revoke(&state, &bogus, CLIENT, &write).await.status(), 200);
+            let bogus_revoke = touched(&state);
+            assert_eq!((bogus_refresh, bogus_revoke), (0, 0), "{families} families");
+
+            let (_, first) = authorize(&state, CLIENT, None, &write).await;
+            let code_exchange = touched(&state);
+            assert!(
+                code_exchange <= MAX_TOKENS_PER_CLIENT + 1,
+                "{code_exchange}"
+            );
+            let first = first.unwrap();
+            let (_, second) = exchange(&state, &first, CLIENT, &write).await.unwrap();
+            let valid_refresh = touched(&state);
+            let (_, third) = exchange(&state, &first, CLIENT, &write).await.unwrap();
+            let retry = touched(&state);
+            assert!(exchange(&state, &second, CLIENT, &write).await.is_err());
+            let reuse = touched(&state);
+            assert!(
+                exchange(&state, &third, CLIENT, &write).await.is_err(),
+                "ended"
+            );
+
+            let (_, token) = authorize(&state, CLIENT, None, &write).await;
+            touched(&state);
+            let token = token.unwrap();
+            assert_eq!(revoke(&state, &token, CLIENT, &write).await.status(), 200);
+            let valid_revoke = touched(&state);
+            for count in [valid_refresh, retry, reuse, valid_revoke] {
+                assert!(count <= one_family, "{count} at {families} families");
+            }
+            counts.push([code_exchange, valid_refresh, retry, reuse, valid_revoke]);
+            assert_eq!(state.oauth.lock().unwrap().refresh.len(), families * 100);
+        }
+        assert_eq!(
+            counts[0], counts[1],
+            "the same at 2,000 and at 200,000 tokens"
+        );
+    }
+
+    /// A family nobody used for 30 days has ended when it is next asked for, whether
+    /// or not the sweep has come by, and so has an access token of it from before the
+    /// restart. The token is given a lifetime of its own that is far from over: it
+    /// ends because its family did, not because 7 days are less than 30.
+    #[tokio::test]
+    async fn an_expired_family_and_its_access_token_are_refused_before_any_sweep() {
+        let (store, _) = temp_store("lazy-expiry");
+        let write = to(&store);
+        let before = started(&store, false, &[CLIENT]);
+        let (access, token) = authorize(&before, CLIENT, None, &write).await;
+        let (other_access, other) = authorize(&before, CLIENT, None, &write).await;
+        let state = started(&store, false, &[CLIENT]);
+        {
+            let mut s = state.oauth.lock().unwrap();
+            for t in s.refresh.values_mut() {
+                t.created_at = now_unix() - REFRESH_TTL_SECS - 1;
+            }
+            for t in s.restored.values_mut() {
+                t.expires_in = Duration::from_secs(10 * REFRESH_TTL_SECS as u64);
+            }
+            assert_eq!((s.refresh.len(), s.restored.len()), (2, 2));
+        }
+        assert!(!valid(&state, &access), "its family ended");
+        assert_eq!(
+            revoke(&state, &other.unwrap(), CLIENT, &write)
+                .await
+                .status(),
+            200
+        );
+        assert!(!valid(&state, &other_access));
+        {
+            let s = state.oauth.lock().unwrap();
+            assert!(s.refresh.is_empty() && s.restored.is_empty() && s.tokens.is_empty());
+        }
+        assert!(exchange(&state, &token.unwrap(), CLIENT, &write)
+            .await
+            .is_err());
+    }
+
+    /// The sweep frees what nobody asks about any more: the family, its tokens, and
+    /// its access token from before the restart. It leaves a family in use alone.
+    #[tokio::test]
+    async fn the_sweep_removes_expired_families_and_their_access_tokens() {
+        let (store, _) = temp_store("sweep");
+        let write = to(&store);
+        let before = started(&store, false, &[CLIENT]);
+        let (_, stale) = authorize(&before, CLIENT, None, &write).await;
+        let (access, fresh) = authorize(&before, CLIENT, None, &write).await;
+        let state = started(&store, false, &[CLIENT]);
+        let stale_hash = hash_of(&stale.unwrap());
+        {
+            let mut s = state.oauth.lock().unwrap();
+            let then = now_unix() - REFRESH_TTL_SECS - 1;
+            s.refresh.get_mut(&stale_hash).unwrap().created_at = then;
+            s.expire_refresh(now_unix());
+            assert_eq!((s.refresh.len(), s.restored.len()), (1, 1));
+            assert!(!s.refresh.contains_key(&stale_hash));
+        }
+        assert!(valid(&state, &access));
+        assert!(exchange(&state, &fresh.unwrap(), CLIENT, &write)
+            .await
+            .is_ok());
+    }
+
+    /// A family being stored counts against its client's limit, and is known by the
+    /// access token it was planned for. A request that never gets to store it must
+    /// not cost the client one of its families for good: the plan ends with the token.
+    #[tokio::test]
+    async fn a_family_never_stored_stops_counting_when_its_access_token_ends() {
+        let (store, _) = temp_store("plan-dropped");
+        let state = started(&store, false, &[CLIENT]);
+        let mut s = state.oauth.lock().unwrap();
+        let mut planned = Vec::new();
+        for _ in 0..MAX_TOKENS_PER_CLIENT {
+            let access = s.issue_access(Uuid::new_v4().to_string(), CLIENT, None, None);
+            assert!(s.plan_family(CLIENT, REDIRECT, None, &access).is_some());
+            planned.push(access);
+        }
+        let one_more = s.issue_access(Uuid::new_v4().to_string(), CLIENT, None, None);
+        assert!(s.plan_family(CLIENT, REDIRECT, None, &one_more).is_none());
+
+        // Their requests went away and the access tokens ended, each in another way.
+        s.tokens.remove(&planned[0]);
+        s.tokens.get_mut(&planned[1]).unwrap().family = None;
+        for _ in 0..2 {
+            let access = s.issue_access(Uuid::new_v4().to_string(), CLIENT, None, None);
+            assert!(s.plan_family(CLIENT, REDIRECT, None, &access).is_some());
+        }
+        let access = s.issue_access(Uuid::new_v4().to_string(), CLIENT, None, None);
+        assert!(s.plan_family(CLIENT, REDIRECT, None, &access).is_none());
+    }
+
+    /// An access token from before the restart is its family's under its hash, and
+    /// under its value once it was used. Its family must know it either way: after a
+    /// refresh it keeps its 60 seconds and then ends, and a revocation ends it.
+    #[tokio::test]
+    async fn an_access_token_used_after_a_restart_still_ends_with_its_family() {
+        let (store, _) = temp_store("adopted");
+        let write = to(&store);
+        let before = started(&store, false, &[CLIENT]);
+        let (restored, first) = authorize(&before, CLIENT, None, &write).await;
+        let state = started(&store, false, &[CLIENT]);
+        assert!(valid(&state, &restored), "used: known by its value now");
+
+        let (second_access, second) = exchange(&state, &first.unwrap(), CLIENT, &write)
+            .await
+            .unwrap();
+        assert!(valid(&state, &restored) && valid(&state, &second_access));
+        let left = |state: &SharedState, token: &str| {
+            let s = state.oauth.lock().unwrap();
+            s.tokens[token]
+                .expires_in
+                .saturating_sub(s.tokens[token].created_at.elapsed())
+        };
+        assert!(left(&state, &restored) <= Duration::from_secs(PREVIOUS_ACCESS_SECS));
+        let (third_access, third) = exchange(&state, &second, CLIENT, &write).await.unwrap();
+        assert!(
+            !valid(&state, &restored),
+            "older than the one before the newest"
+        );
+        assert!(valid(&state, &second_access) && valid(&state, &third_access));
+
+        // The same for one that is used only after the refresh, and then a revocation.
+        let state = started(&store, false, &[CLIENT]);
+        let (fourth_access, fourth) = exchange(&state, &third, CLIENT, &write).await.unwrap();
+        assert!(
+            valid(&state, &third_access),
+            "from before the restart, for 60 seconds"
+        );
+        assert_eq!(revoke(&state, &fourth, CLIENT, &write).await.status(), 200);
+        assert!(!valid(&state, &third_access) && !valid(&state, &fourth_access));
+        assert!(state.oauth.lock().unwrap().tokens.is_empty());
+    }
+
+    /// A build before the one that finishes a request whose client hung up could leave
+    /// two unspent tokens of one family in the file. The client holds the one stored
+    /// last: that one works after a restart, and the other one, which nobody should
+    /// hold, ends the family like any replaced token. A family with no unspent token
+    /// is not loaded.
+    #[tokio::test]
+    async fn of_two_unspent_tokens_in_a_file_the_one_stored_last_is_the_usable_one() {
+        let (store, _) = temp_store("two-usable");
+        let write = to(&store);
+        let row = |value: &str, seq: i64, spent_at: Option<i64>| {
+            let family = hash_of(value.split('.').next().unwrap());
+            let stored = scripting::persistence::StoredRefreshToken {
+                token_hash: hash_of(value),
+                family,
+                seq,
+                client_id: CLIENT.to_string(),
+                user_id: None,
+                created_at: now_unix(),
+                spent_at,
+                access_hash: Some(hash_of(&format!("access of {value}"))),
+            };
+            store.save_refresh_token(&stored, &[], 0, 0).unwrap();
+        };
+        row("fam.first", 0, Some(now_unix()));
+        row("fam.lost", 1, None);
+        row("fam.held", 1, None);
+        row("spent.only", 0, Some(now_unix()));
+
+        let state = started(&store, false, &[CLIENT]);
+        {
+            let s = state.oauth.lock().unwrap();
+            assert_eq!(
+                s.refresh.len(),
+                3,
+                "the family with no unspent token is left out"
+            );
+            assert_eq!(s.restored.len(), 1);
+        }
+        assert!(valid(&state, "access of fam.held"));
+        assert!(!valid(&state, "access of fam.lost"));
+        assert!(exchange(&state, "fam.held", CLIENT, &write).await.is_ok());
+
+        let state = started(&store, false, &[CLIENT]);
+        assert!(exchange(&state, "fam.lost", CLIENT, &write).await.is_err());
+        assert!(
+            state.oauth.lock().unwrap().refresh.is_empty(),
+            "reuse ends it"
+        );
+        assert!(store
+            .refresh_tokens(0)
+            .unwrap()
+            .iter()
+            .all(|r| r.family == hash_of("spent")));
+    }
+
+    /// A family issued under the other sign-in mode is refused, and it is still there:
+    /// it keeps its client registered, and switching back finds it.
+    #[tokio::test]
+    async fn a_family_of_the_other_sign_in_mode_stays_and_keeps_its_client() {
+        let (store, _) = temp_store("mode-stays");
+        let write = to(&store);
+        let off = started(&store, false, &[CLIENT]);
+        let (_, token) = authorize(&off, CLIENT, None, &write).await;
+        let token = token.unwrap();
+        let on = started(&store, true, &[CLIENT]);
+        assert!(exchange(&on, &token, CLIENT, &write).await.is_err());
+        {
+            let mut s = on.oauth.lock().unwrap();
+            s.expire_refresh(now_unix());
+            assert_eq!(s.refresh.len(), 1);
+            assert_eq!(s.refresh.clients().collect::<Vec<_>>(), [CLIENT]);
+            assert!(s.restored.is_empty(), "but no access token of it");
+        }
+        let off = started(&store, false, &[CLIENT]);
+        assert!(exchange(&off, &token, CLIENT, &write).await.is_ok());
     }
 }
