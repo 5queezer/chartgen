@@ -182,7 +182,11 @@ is kept, so that a token that comes back is recognised, also after a restart:
   two. **A replaced successor is marked as such and is never itself good for a retry: any
   use of one ends the family**, at once, however soon it comes and whatever happened in
   between. So if a replaced successor had in fact reached somebody, they are found out the
-  first time they use it. The mark is in the row and survives a restart.
+  first time they use it. The mark is in the row and survives a restart. Only the newest
+  replaced successor keeps its row. An earlier one has none and ends the family all the
+  same, through its family part, like a token older than the ones that are kept. So
+  retries do not make a family grow: it holds at most 102 tokens, 100 spent, one replaced
+  and the usable one.
   Rejected: answering the retry with a second successor while the first stays valid. That
   leaves two lines of tokens that never meet, and a copy made in that window is never
   noticed. Rejected as well, after a first version did it: telling a retry by position and

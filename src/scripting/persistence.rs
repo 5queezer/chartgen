@@ -477,7 +477,8 @@ impl Store {
     /// Store `new` and mark `spent` as used at `spent_at`, in one transaction: a
     /// rotation is on disk whole or not at all. `spent_at` is the time of the exchange,
     /// or 0 for a token that was replaced before it was ever exchanged. Spent tokens of
-    /// the family below `forget_below_seq` are dropped. An error if a token of `spent`
+    /// the family below `forget_below_seq` are dropped, and with `spent_at` 0 the ones
+    /// replaced earlier. An error if a token of `spent`
     /// is not a usable one here: the server spends only what it holds as usable, so
     /// the file was changed from outside, and a successor would revive what was
     /// deleted.
@@ -490,6 +491,14 @@ impl Store {
     ) -> rusqlite::Result<()> {
         let mut conn = self.conn();
         let tx = conn.transaction()?;
+        // A retry replaces a successor, and only the newest replaced one is kept:
+        // before this one is marked, so that the count below is of this one alone.
+        if spent_at == 0 {
+            tx.execute(
+                "DELETE FROM refresh_tokens WHERE family = ?1 AND spent_at = 0",
+                params![new.family],
+            )?;
+        }
         for hash in spent {
             let usable = tx.execute(
                 "UPDATE refresh_tokens SET spent_at = ?2, access_hash = NULL

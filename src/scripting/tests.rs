@@ -1333,6 +1333,33 @@ fn a_rotation_whose_token_is_not_usable_in_the_store_is_not_stored() {
     assert_eq!(rows.iter().filter(|r| r.spent_at.is_none()).count(), 1);
 }
 
+/// A retry marks the successor it replaces with `spent_at` 0, and the store keeps
+/// one such row per family: the newest.
+#[test]
+fn a_retry_leaves_one_replaced_row_in_the_store() {
+    let store = upgraded("refresh-replaced", &[]);
+    store
+        .save_refresh_token(&refresh_row("h0", "f", 0), &[], 0, 0)
+        .unwrap();
+    store
+        .save_refresh_token(&refresh_row("a", "f", 1), &["h0".to_string()], 5000, 0)
+        .unwrap();
+    for (replaced, next) in [("a", "b"), ("b", "c"), ("c", "d")] {
+        store
+            .save_refresh_token(&refresh_row(next, "f", 1), &[replaced.to_string()], 0, 0)
+            .unwrap();
+    }
+    let mut rows: Vec<(String, Option<i64>)> = store
+        .refresh_tokens(0)
+        .unwrap()
+        .into_iter()
+        .map(|r| (r.token_hash, r.spent_at))
+        .collect();
+    rows.sort();
+    let expected = [("c", Some(0)), ("d", None), ("h0", Some(5000))];
+    assert_eq!(rows, expected.map(|(hash, at)| (hash.to_string(), at)));
+}
+
 #[test]
 fn a_rotation_is_stored_whole_or_not_at_all() {
     let store = upgraded("refresh-rotation", &[]);

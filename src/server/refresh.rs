@@ -15,6 +15,8 @@ const RETRY_WINDOW_SECS: i64 = 60;
 /// The `spent_at` of a successor that a retry replaced before it was ever exchanged.
 /// It is spent "long ago": no retry window covers it, so its next use ends the family.
 /// A token spent by its own exchange carries the time of that exchange.
+/// A family keeps the newest replaced token only. An earlier one has no row any more
+/// and ends the family all the same, as any token does that names a family in use.
 pub(super) const REPLACED: i64 = 0;
 /// How long the access token before a refresh stays valid after it. A request sent
 /// with it just before the refresh may arrive just after, and a client answers a `401`
@@ -789,6 +791,10 @@ impl OAuthStore {
                 let unspent = |h: &String| f.rows.get(h).is_some_and(|t| t.spent_at.is_none());
                 if r.spent.is_empty() || !r.spent.iter().all(unspent) {
                     return false;
+                }
+                // A retry keeps the one replaced token it makes, as the store does.
+                if r.spent_at == REPLACED {
+                    f.rows.retain(|_, t| t.spent_at != Some(REPLACED));
                 }
                 for hash in &r.spent {
                     if let Some(t) = f.rows.get_mut(hash) {
@@ -2634,5 +2640,36 @@ mod tests {
         }
         let off = started(&store, false, &[CLIENT]);
         assert!(exchange(&off, &token, CLIENT, &write).await.is_ok());
+    }
+
+    /// Each retry replaces the successor the client never got. Only the newest of the
+    /// replaced ones is kept, in memory and in the store, so retries cannot make a
+    /// family grow. One that is no longer kept still ends the family when it is used.
+    #[tokio::test]
+    async fn retries_keep_one_replaced_token_and_the_others_still_end_the_family() {
+        let (store, _) = temp_store("retry-rows");
+        let state = started(&store, false, &[CLIENT]);
+        let write = to(&store);
+        let (_, first) = authorize(&state, CLIENT, None, &write).await;
+        let first = first.unwrap();
+        let mut answers = Vec::new();
+        for _ in 0..24 {
+            answers.push(exchange(&state, &first, CLIENT, &write).await.unwrap().1);
+        }
+        // The token exchanged, the newest replaced one and the usable one.
+        assert_eq!(state.oauth.lock().unwrap().refresh.len(), 3);
+        assert_eq!(store.refresh_tokens(0).unwrap().len(), 3);
+        let restarted = started(&store, false, &[CLIENT]);
+        assert_eq!(restarted.oauth.lock().unwrap().refresh.len(), 3);
+
+        assert!(exchange(&state, &answers[0], CLIENT, &write).await.is_err());
+        assert!(
+            state.oauth.lock().unwrap().refresh.is_empty(),
+            "it ended the family"
+        );
+        assert!(store.refresh_tokens(0).unwrap().is_empty());
+        assert!(exchange(&state, &answers[23], CLIENT, &write)
+            .await
+            .is_err());
     }
 }
