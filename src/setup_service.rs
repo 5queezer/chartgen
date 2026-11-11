@@ -269,10 +269,17 @@ impl Setups {
         }
     }
 
+    /// Whether a setup is scored: open, and its owner still one the operator allows.
+    /// The list is read at startup, so an owner taken off it stops here from the restart
+    /// that read the new list, as its alerts do (ADR-0042). Its setups stay readable.
+    fn runs(&self, record: &Record) -> bool {
+        record.status.is_open() && self.access.may_create(&record.owner)
+    }
+
     fn wanted_feeds(&self, st: &State) -> HashSet<FeedKey> {
         st.setups
             .values()
-            .filter(|h| h.record.status.is_open())
+            .filter(|h| self.runs(&h.record))
             .filter_map(|h| self.feed(&h.record.symbol).ok())
             .collect()
     }
@@ -898,7 +905,7 @@ impl Setups {
     /// stretch was not scored. Blocking.
     fn on_bar(&self, key: &FeedKey, bar: MinuteBar) {
         let on_feed =
-            |r: &Record| r.status.is_open() && self.feed(&r.symbol).is_ok_and(|feed| feed == *key);
+            |r: &Record| self.runs(r) && self.feed(&r.symbol).is_ok_and(|feed| feed == *key);
         let behind = self
             .lock()
             .setups
