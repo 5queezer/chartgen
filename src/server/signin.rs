@@ -684,6 +684,22 @@ impl OAuthStore {
         ended
     }
 
+    /// An approval pushed out by the limit takes the user's refresh tokens for that
+    /// client along, so that forgetting a client has one meaning (ADR-0058). Returns
+    /// the families ended, for the store.
+    fn end_dropped_grants(&mut self, writes: &[Write]) -> Vec<String> {
+        let dropped: Vec<String> = writes
+            .iter()
+            .filter_map(|w| match w {
+                Write::DeleteGrant { user, client } => Some(self.families_of(user, client)),
+                _ => None,
+            })
+            .flatten()
+            .collect();
+        self.end_families(&dropped);
+        dropped
+    }
+
     fn trim_user_codes(&mut self, user: &str) {
         let mut mine: Vec<(Instant, String)> = self
             .codes
@@ -1572,17 +1588,7 @@ pub(super) async fn consent_decision(
                 None => expired_page(),
             }
         };
-        // An approval pushed out by the limit takes the user's refresh tokens for that
-        // client along, so that forgetting a client has one meaning (ADR-0058).
-        let dropped: Vec<String> = writes
-            .iter()
-            .filter_map(|w| match w {
-                Write::DeleteGrant { user, client } => Some(s.families_of(user, client)),
-                _ => None,
-            })
-            .flatten()
-            .collect();
-        s.end_families(&dropped);
+        let dropped = s.end_dropped_grants(&writes);
         (response, writes, dropped)
     };
     super::refresh::forget_families(&super::refresh::store_write(), dropped).await;
@@ -2120,6 +2126,57 @@ mod tests {
         token_for(&mut s, 0, "github:2", 5000);
         s.trim_user_tokens("github:1");
         assert!(keeps(&s, 0));
+    }
+
+    /// Forgetting a client has one meaning: the approval pushed out by the limit takes
+    /// that user's refresh tokens for the client along, and nobody else's (ADR-0058).
+    #[test]
+    fn an_approval_dropped_at_the_limit_ends_that_users_families_for_the_client() {
+        let mut s = store_with("c0", "https://client.example/cb");
+        let family = |name: &str, client: &str, user: &str| {
+            (
+                format!("hash-{name}"),
+                super::super::refresh::RefreshToken {
+                    family: name.to_string(),
+                    seq: 0,
+                    client_id: client.to_string(),
+                    user: Some(user.to_string()),
+                    created_at: now_unix(),
+                    spent_at: None,
+                },
+            )
+        };
+        s.refresh.extend([
+            family("mine", "c0", "github:1"),
+            family("theirs", "c0", "github:2"),
+            family("other-client", "c1", "github:1"),
+        ]);
+        s.tokens.insert(
+            "from-mine".to_string(),
+            AccessToken {
+                _token: "from-mine".to_string(),
+                family: Some("mine".to_string()),
+                client_id: "c0".to_string(),
+                created_at: Instant::now(),
+                expires_in: Duration::from_secs(3600),
+                user: None,
+            },
+        );
+        let approve = |s: &mut OAuthStore, user: &str, client: &str| {
+            let writes = s.signin.as_mut().unwrap().add_grant(user, client);
+            s.end_dropped_grants(&writes)
+        };
+        assert!(approve(&mut s, "github:2", "c0").is_empty());
+        for i in 0..MAX_GRANTS_PER_USER {
+            assert!(approve(&mut s, "github:1", &format!("c{i}")).is_empty());
+        }
+        // One more than the limit: the oldest approval, of c0, is forgotten.
+        assert_eq!(approve(&mut s, "github:1", "new"), ["mine"]);
+        assert!(!s.signin.as_ref().unwrap().has_grant("github:1", "c0"));
+        assert!(s.families_of("github:1", "c0").is_empty());
+        assert!(!s.tokens.contains_key("from-mine"), "its access tokens too");
+        assert_eq!(s.families_of("github:2", "c0"), ["theirs"]);
+        assert_eq!(s.families_of("github:1", "c1"), ["other-client"]);
     }
 
     /// The tokens a client keeps are the ones in use, and the cap is the client's kind.
