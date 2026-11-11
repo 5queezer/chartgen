@@ -180,6 +180,10 @@ pub struct Record {
     /// Open time of the newest 1m bar applied.
     #[serde(default)]
     pub scored_through: Option<i64>,
+    /// Whether the server missed bars it could not read afterwards: the result does not
+    /// cover them, and the log's `gap` entries say which.
+    #[serde(default)]
+    pub gap: bool,
     #[serde(default)]
     pub pending: Vec<Pending>,
     /// Revisions written so far, and those of them the agent made.
@@ -797,6 +801,7 @@ impl Record {
             exit: None,
             result_r: None,
             scored_through: None,
+            gap: false,
             pending: Vec::new(),
             revisions: 0,
             agent_revisions: 0,
@@ -1107,6 +1112,7 @@ impl Record {
         let mut changes = Map::new();
         changes.insert("not_scored".into(), json!({ "from": from_ms, "to": to_ms }));
         self.scored_through = Some(self.scored_through.unwrap_or(0).max(to_ms - MINUTE_MS));
+        self.gap = true;
         self.log(
             now_ms,
             By::Server,

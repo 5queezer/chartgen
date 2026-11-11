@@ -851,6 +851,9 @@ export const SetupSchema = SetupLevelsSchema.extend({
   result_r: z.number().nullable(),
   // Open time of the newest 1m bar applied, ms.
   scored_through: z.number().nullable(),
+  // True when the server missed bars it could not read afterwards: the result does not
+  // cover them. The log's `gap` entries say which stretch.
+  gap: z.boolean(),
   pending: z.array(SetupPendingSchema),
   revisions: z.number().int(),
   agent_revisions: z.number().int(),

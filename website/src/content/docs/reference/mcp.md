@@ -1328,7 +1328,8 @@ setups; `can_create` in the list says so.
 A setup answers with `id`, the fields above, `bracket` (`agent`, or for a skip `atr` or `floor`:
 which rule set its levels), `status` (`watching`, `triggered`, `won`,
 `invalidated`, `expired`, `cancelled`), `created_at`, `costs`, `fill` and `exit` (each
-`{price, bar_time}` or null), `result_r` (in R, null while open), `scored_through`, `pending`
+`{price, bar_time}` or null), `result_r` (in R, null while open), `scored_through`, `gap` (true if bars were missed and could
+not be read afterwards, so the result is incomplete), `pending`
 (changes that count from the next 1m bar), `revisions` and `agent_revisions`. `log` holds every
 entry: `seq`, `at`, `by` (`agent` or `server`), `kind` (`created`, `revised`, `cancelled`,
 `status`, `voided`, `gap`), `reason` and `changes` (`{field: {from, to}}`). Times are in ms.
