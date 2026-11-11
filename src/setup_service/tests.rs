@@ -2270,3 +2270,192 @@ async fn the_event_log_is_tidied_where_only_setups_run() {
         "the numbers go on"
     );
 }
+
+// ---- ADR-0064: what a setup was made with, and the record read back ----
+
+/// `long()` with the three fields an agent may state when it makes a setup.
+fn stated() -> Value {
+    let mut args = long();
+    args["features"] = json!({ "example_number": 1.5, "example_flag": true, "example_label": "a" });
+    args["probability"] = json!(0.6);
+    args["playbook_version"] = json!("v1");
+    args
+}
+
+/// The three fields are stored with the setup and shown by every answer, and the first
+/// entry of its log holds them too. The log is what the store keeps from being
+/// rewritten, so what a setup was made with cannot be changed afterwards.
+#[tokio::test(flavor = "multi_thread")]
+async fn what_a_setup_was_made_with_is_stored_shown_and_in_its_first_log_entry() {
+    let (store, dir) = store_at("stated");
+    let s = live_on(store, hub(), Access::parse(None), Limits::default(), None);
+    let made = call(&s, "create_setup", stated(), "owner").unwrap();
+    let features = json!({ "example_flag": true, "example_label": "a", "example_number": 1.5 });
+    for view in [
+        made.clone(),
+        call(&s, "get_setup", json!({ "id": made["id"] }), "owner").unwrap(),
+        call(&s, "list_setups", json!({}), "owner").unwrap()["setups"][0].clone(),
+    ] {
+        assert_eq!(view["features"], features);
+        assert_eq!(view["probability"], 0.6);
+        assert_eq!(view["playbook_version"], "v1");
+    }
+    let first = &made["log"][0];
+    assert_eq!(first["kind"], "created");
+    assert_eq!(
+        first["changes"],
+        json!({
+            "features": { "to": features },
+            "probability": { "to": 0.6 },
+            "playbook_version": { "to": "v1" },
+        })
+    );
+
+    // The store refuses to write that entry again with other values.
+    let id = id_of(&made);
+    let record = store.setups().unwrap().remove(0).0;
+    let altered = first.to_string().replace("0.6", "0.9");
+    let rewrite = persistence::StoredSetup {
+        id: id.clone(),
+        owner: "owner".to_string(),
+        record,
+        revisions: vec![(1, altered)],
+    };
+    let refused = store.save_setups(&[rewrite]).unwrap_err().to_string();
+    assert!(refused.contains("append-only"), "{refused}");
+
+    // A restart reads them back, and a status the server gives leaves them alone.
+    drop(s);
+    let s = live_on(
+        reopen(&dir.db()),
+        hub(),
+        Access::parse(None),
+        Limits::default(),
+        None,
+    );
+    let (t, p) = (first_bar(&made), mid(&made));
+    s.on_bar(&key(), bar(t, p, p, p * 0.975, p * 0.976));
+    let later = call(&s, "get_setup", json!({ "id": id }), "owner").unwrap();
+    assert_eq!(later["status"], "triggered");
+    assert_eq!(later["features"], features);
+    assert_eq!(
+        (
+            later["probability"].clone(),
+            later["playbook_version"].clone()
+        ),
+        (json!(0.6), json!("v1"))
+    );
+    assert_eq!(later["log"][0], *first);
+}
+
+/// A setup made without them shows none of the three, and its log entry is as it was
+/// before they existed: answers of such setups do not change by a byte.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_setup_made_without_them_shows_none_of_the_three() {
+    let s = live();
+    let made = created(&s, "owner");
+    let listed = call(&s, "list_setups", json!({}), "owner").unwrap()["setups"][0].clone();
+    for view in [&made, &listed] {
+        for field in ["features", "probability", "playbook_version"] {
+            assert!(view.get(field).is_none(), "{field} in {view}");
+        }
+    }
+    assert_eq!(made["log"][0]["changes"], json!({}));
+    let stored = s.store.setups().unwrap().remove(0).0;
+    assert!(
+        !stored.contains("features")
+            && !stored.contains("probability")
+            && !stored.contains("playbook")
+    );
+}
+
+/// A record that could be rewritten after the outcome is no record: no tool takes the
+/// three fields after the setup was made, open or closed.
+#[tokio::test(flavor = "multi_thread")]
+async fn what_a_setup_was_made_with_cannot_be_revised() {
+    let s = live();
+    let made = call(&s, "create_setup", stated(), "owner").unwrap();
+    for (field, value) in [
+        ("features", json!({ "example_number": 2.5 })),
+        ("features", json!(null)),
+        ("probability", json!(0.9)),
+        ("playbook_version", json!("v2")),
+    ] {
+        let mut args = json!({ "id": made["id"], "reason": "example reason", "thesis": "another example thesis" });
+        args[field] = value;
+        let refused = call(&s, "revise_setup", args, "owner").unwrap_err();
+        assert_eq!(errors(&refused), [field], "{refused}");
+        assert!(
+            refused.contains("is fixed when a setup is made"),
+            "{refused}"
+        );
+        let mut args = json!({ "id": made["id"], "reason": "example reason" });
+        args[field] = json!(0.9);
+        let refused = call(&s, "cancel_setup", args, "owner").unwrap_err();
+        assert!(
+            refused.contains("is fixed when a setup is made"),
+            "{refused}"
+        );
+    }
+    // Nothing of those calls was applied, the thesis they carried included.
+    let now = call(&s, "get_setup", json!({ "id": made["id"] }), "owner").unwrap();
+    assert_eq!(now, made);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_three_fields_are_checked_and_bounded() {
+    let limits = Limits {
+        changes_per_minute: 1000,
+        ..Limits::default()
+    };
+    let s = live_on(mem(), hub(), Access::parse(None), limits, None);
+    let long_text = "x".repeat(33);
+    let many: serde_json::Map<String, Value> =
+        (0..17).map(|i| (format!("key_{i}"), json!(i))).collect();
+    for (field, bad) in [
+        ("features", json!([1, 2])),
+        ("features", json!("example")),
+        ("features", json!(many)),
+        ("features.Example", json!({ "Example": 1 })),
+        ("features.has space", json!({ "has space": 1 })),
+        ("features.", json!({ "": 1 })),
+        ("features.example", json!({ "example": [1] })),
+        ("features.example", json!({ "example": { "nested": 1 } })),
+        ("features.example", json!({ "example": null })),
+        ("features.example", json!({ "example": long_text })),
+        ("probability", json!(-0.01)),
+        ("probability", json!(1.01)),
+        ("probability", json!("0.5")),
+        ("playbook_version", json!("")),
+        ("playbook_version", json!(long_text)),
+        ("playbook_version", json!(3)),
+    ] {
+        let mut args = long();
+        let top = field.split('.').next().unwrap();
+        args[top] = bad.clone();
+        let refused = call(&s, "create_setup", args, "owner").unwrap_err();
+        assert_eq!(errors(&refused), [field], "{bad}: {refused}");
+    }
+    let key = "k".repeat(33);
+    let mut args = long();
+    args["features"] = json!({ key.clone(): 1 });
+    let refused = call(&s, "create_setup", args, "owner").unwrap_err();
+    assert!(refused.contains("at most 32"), "{refused}");
+    assert!(s.store.setups().unwrap().is_empty(), "nothing was stored");
+
+    // The edges are taken: 16 entries, 32 characters, 0 and 1, and null as not given.
+    let mut full: serde_json::Map<String, Value> =
+        (0..15).map(|i| (format!("key_{i}"), json!(i))).collect();
+    full.insert("k".repeat(32), json!("x".repeat(32)));
+    for (probability, features) in [
+        (json!(0), json!(full)),
+        (json!(1), json!({})),
+        (json!(null), json!(null)),
+    ] {
+        let mut args = long();
+        args["probability"] = probability;
+        args["features"] = features;
+        args["playbook_version"] = json!("x".repeat(32));
+        call(&s, "create_setup", args, "owner").unwrap();
+    }
+}

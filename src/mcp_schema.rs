@@ -490,9 +490,9 @@ pub fn event_tools() -> Vec<Value> {
 /// always include them.
 pub fn setup_tools() -> Vec<Value> {
     use crate::setups::{
-        FEE_BPS_PER_SIDE, MAX_REASON, MAX_TAG, MAX_TAGS, MAX_TARGETS, MAX_THESIS,
-        MIN_RISK_IN_ROUND_TRIP_COSTS, SKIP_ATR_LENGTH, SKIP_EXPIRY_BARS, SKIP_STOP_ATR,
-        SKIP_TARGET_ATR, SLIPPAGE_BPS_PER_SIDE,
+        FEE_BPS_PER_SIDE, MAX_FEATURES, MAX_REASON, MAX_STATED_TEXT, MAX_TAG, MAX_TAGS,
+        MAX_TARGETS, MAX_THESIS, MIN_RISK_IN_ROUND_TRIP_COSTS, SKIP_ATR_LENGTH, SKIP_EXPIRY_BARS,
+        SKIP_STOP_ATR, SKIP_TARGET_ATR, SLIPPAGE_BPS_PER_SIDE,
     };
     let as_of = json!({ "type": ["integer", "string"], "description": "Replay servers only (ADR-0059), and required there: the time this call is answered for, as unix seconds, unix ms or an ISO 8601 time. Only bars that closed at or before it are used, and it cannot be earlier than the latest as_of the server has been sent, by any caller. On any other server leave it out." });
     let time = "unix seconds, unix ms or an ISO 8601 time";
@@ -534,6 +534,9 @@ pub fn setup_tools() -> Vec<Value> {
                     "targets": targets.clone(),
                     "expires_at": expires_at.clone(),
                     "tags": tags.clone(),
+                    "features": { "type": "object", "maxProperties": MAX_FEATURES, "propertyNames": { "pattern": "^[a-z0-9_]{1,32}$" }, "additionalProperties": { "type": ["number", "boolean", "string"], "maxLength": MAX_STATED_TEXT }, "description": format!("Optional. What you measured when you made this setup, as a flat object of at most {MAX_FEATURES} entries: names of a-z, 0-9 and _, values a number, true or false, or a string of at most {MAX_STATED_TEXT} characters. The server gives them no meaning. Fixed once the setup is made; get_track_record can group by one of them.") },
+                    "probability": { "type": "number", "minimum": 0, "maximum": 1, "description": "Optional. Your own estimate, from 0 to 1, that this setup reaches its first target. Fixed once the setup is made; get_track_record shows it beside what happened." },
+                    "playbook_version": { "type": "string", "maxLength": MAX_STATED_TEXT, "description": format!("Optional. A label of at most {MAX_STATED_TEXT} characters for the rules you followed, so that results can be told apart by it. Fixed once the setup is made.") },
                     "as_of": as_of.clone()
                 },
                 "required": ["symbol", "interval", "direction", "thesis"]

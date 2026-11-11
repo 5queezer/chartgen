@@ -139,6 +139,12 @@ export interface CreateSetupInput {
    */
   expires_at?: number | string;
   /**
+   * Optional. What you measured when you made this setup, as a flat object of at most 16 entries: names of a-z, 0-9 and _, values a number, true or false, or a string of at most 32 characters. The server gives them no meaning. Fixed once the setup is made; get_track_record can group by one of them.
+   */
+  features?: {
+    [k: string]: number | boolean | string;
+  };
+  /**
    * The chart interval the setup was read on, e.g. 15m, 1h, 4h. Its drawings are placed on these bars.
    */
   interval: string;
@@ -146,6 +152,14 @@ export interface CreateSetupInput {
    * The price at which the setup is wrong: below the entry zone of a long, above that of a short, and at least 3 times the assumed round-trip cost away from it.
    */
   invalidation?: number;
+  /**
+   * Optional. A label of at most 32 characters for the rules you followed, so that results can be told apart by it. Fixed once the setup is made.
+   */
+  playbook_version?: string;
+  /**
+   * Optional. Your own estimate, from 0 to 1, that this setup reaches its first target. Fixed once the setup is made; get_track_record shows it beside what happened.
+   */
+  probability?: number;
   /**
    * Binance symbol, e.g. BTCUSDT.
    */

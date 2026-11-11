@@ -32,6 +32,12 @@ pub const MAX_TAG: usize = 64;
 /// The characters a tag may have besides lowercase letters and digits.
 pub const TAG_PUNCTUATION: &str = ":-_./";
 const TAG_HINT: &str = "lowercase letters, digits and : - _ . /, starting with a letter or digit, such as strategy:retest-short";
+/// What an agent may state when it makes a setup (ADR-0064): how many features, and how
+/// long a feature's name, a feature's text and a playbook version may be.
+pub const MAX_FEATURES: usize = 16;
+pub const MAX_STATED_TEXT: usize = 32;
+/// Fields taken when a setup is made and by no tool afterwards.
+pub const STATED_FIELDS: [&str; 3] = ["features", "probability", "playbook_version"];
 
 const MINUTE_MS: i64 = 60_000;
 
@@ -234,6 +240,15 @@ pub struct Record {
     /// None before the fill, and on a setup filled before the server kept them.
     #[serde(default)]
     pub shadow_results: Option<Shadows>,
+    /// What the agent stated when it made the setup (ADR-0064). The server gives them
+    /// no meaning and never changes them; the first entry of the log holds them too.
+    /// Not written when not stated, so a setup without them is stored as before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub features: Option<Map<String, Value>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub probability: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub playbook_version: Option<String>,
 }
 
 /// How a shadow variant ended, or that it has not.
@@ -606,7 +621,12 @@ pub fn check_fields(args: &Value, allowed: &[&str], problems: &mut Vec<Problem>)
         if allowed.contains(&key.as_str()) {
             continue;
         }
-        if SERVER_FIELDS.contains(&key.as_str()) {
+        if STATED_FIELDS.contains(&key.as_str()) {
+            problems.push(
+                Problem::new(key, format!("{key} is fixed when a setup is made"))
+                    .hint("what a setup was made with is its record; cancel it and make a new one"),
+            );
+        } else if SERVER_FIELDS.contains(&key.as_str()) {
             problems.push(
                 Problem::new(key, format!("{key} is set by the server"))
                     .hint("the server moves a setup from the price feed; leave this out"),
@@ -945,9 +965,68 @@ pub struct Draft {
     /// `None` for a skip, which takes the default bracket.
     pub levels: Option<Levels>,
     pub tags: Vec<String>,
+    pub features: Option<Map<String, Value>>,
+    pub probability: Option<f64>,
+    pub playbook_version: Option<String>,
 }
 
-pub const CREATE_FIELDS: [&str; 12] = [
+/// The features of a call: a flat object of numbers, booleans and short strings under
+/// short plain names. What they mean is the agent's own business.
+fn features(args: &Value, problems: &mut Vec<Problem>) -> Option<Map<String, Value>> {
+    let map = match args.get("features") {
+        None | Some(Value::Null) => return None,
+        Some(Value::Object(map)) => map,
+        Some(_) => {
+            problems.push(Problem::new("features", "features must be an object"));
+            return None;
+        }
+    };
+    if map.len() > MAX_FEATURES {
+        problems.push(Problem::new(
+            "features",
+            format!("features holds more than {MAX_FEATURES} entries"),
+        ));
+        return None;
+    }
+    for (name, value) in map {
+        let shown: String = name.chars().take(MAX_STATED_TEXT).collect();
+        let field = format!("features.{shown}");
+        let plain = |b: u8| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_';
+        if name.is_empty() || name.len() > MAX_STATED_TEXT || !name.bytes().all(plain) {
+            problems.push(Problem::new(
+                &field,
+                format!("a feature's name is at most {MAX_STATED_TEXT} characters of a-z, 0-9 and _, and not empty"),
+            ));
+            continue;
+        }
+        let takes = match value {
+            Value::Number(_) | Value::Bool(_) => true,
+            Value::String(text) => text.chars().count() <= MAX_STATED_TEXT,
+            _ => false,
+        };
+        if !takes {
+            problems.push(Problem::new(
+                &field,
+                format!("a feature's value is a number, true or false, or a string of at most {MAX_STATED_TEXT} characters"),
+            ));
+        }
+    }
+    Some(map.clone())
+}
+
+fn probability(args: &Value, problems: &mut Vec<Problem>) -> Option<f64> {
+    let value = args.get("probability").filter(|v| !v.is_null())?;
+    let stated = value.as_f64().filter(|p| (0.0..=1.0).contains(p));
+    if stated.is_none() {
+        problems.push(Problem::new(
+            "probability",
+            "probability must be a number from 0 to 1",
+        ));
+    }
+    stated
+}
+
+pub const CREATE_FIELDS: [&str; 15] = [
     "symbol",
     "interval",
     "direction",
@@ -960,6 +1039,9 @@ pub const CREATE_FIELDS: [&str; 12] = [
     "expires_at",
     "tags",
     "as_of",
+    "features",
+    "probability",
+    "playbook_version",
 ];
 
 impl Draft {
@@ -1000,6 +1082,12 @@ impl Draft {
             }
             _ => parse_levels(args, None, direction, &Costs::default(), now_ms, problems),
         };
+        let features = features(args, problems);
+        let probability = probability(args, problems);
+        let playbook_version = match args.get("playbook_version") {
+            None | Some(Value::Null) => None,
+            Some(_) => text(args, "playbook_version", MAX_STATED_TEXT, problems),
+        };
         if problems.len() > before {
             return None;
         }
@@ -1011,6 +1099,9 @@ impl Draft {
             thesis: thesis?,
             levels,
             tags: tags?,
+            features,
+            probability,
+            playbook_version,
         })
     }
 }
@@ -1078,8 +1169,23 @@ impl Record {
             mfe_at: None,
             closest_approach_r: None,
             shadow_results: None,
+            features: draft.features,
+            probability: draft.probability,
+            playbook_version: draft.playbook_version,
         };
-        let created = record.log(now_ms, By::Agent, Kind::Created, None, Map::new());
+        // What was stated goes into the log's first entry: the log is append-only in
+        // the store, so this is the copy that cannot be rewritten after the outcome.
+        let mut stated = Map::new();
+        for (field, value) in [
+            ("features", json!(record.features)),
+            ("probability", json!(record.probability)),
+            ("playbook_version", json!(record.playbook_version)),
+        ] {
+            if !value.is_null() {
+                stated.insert(field.to_string(), json!({ "to": value }));
+            }
+        }
+        let created = record.log(now_ms, By::Agent, Kind::Created, None, stated);
         (record, created)
     }
 

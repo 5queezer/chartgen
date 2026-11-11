@@ -966,6 +966,11 @@ export const SetupSchema = SetupLevelsSchema.extend({
   bars_to_exit: z.number().nonnegative().nullable(),
   bars_to_mae: z.number().nonnegative().nullable(),
   bars_to_mfe: z.number().nonnegative().nullable(),
+  // What the agent stated when it made the setup (ADR-0064): fixed from then on, and
+  // absent when it stated none. The server gives them no meaning.
+  features: z.record(z.string(), z.union([z.number(), z.boolean(), z.string()])).optional(),
+  probability: z.number().min(0).max(1).optional(),
+  playbook_version: z.string().optional(),
 });
 export type Setup = z.infer<typeof SetupSchema>;
 
