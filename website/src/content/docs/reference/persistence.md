@@ -272,7 +272,7 @@ SQLite database (`sqlite3 chartgen.db ".backup copy.db"`).
 
 `refresh_tokens` holds one row per refresh token handed out and not yet forgotten
 ([ADR-0058](/chartgen/decisions/0058-refresh-tokens-for-headless-clients/)). An
-authorization unused for 30 days is deleted at startup, as are all but the 100 newest spent
+authorization unused for 30 days is deleted at startup, as are all but the 2 newest spent
 rows of one at each exchange. Rows go with their client, and when a token is
 [revoked](/chartgen/reference/oauth/#revoking-a-refresh-token). The table is written with
 sign-in on and off. Deleting a client by hand should delete its rows here too; rows left

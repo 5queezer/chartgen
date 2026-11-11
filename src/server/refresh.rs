@@ -22,9 +22,10 @@ pub(super) const REPLACED: i64 = 0;
 /// with it just before the refresh may arrive just after, and a client answers a `401`
 /// for a token it believes valid with a whole new authorization.
 const PREVIOUS_ACCESS_SECS: u64 = 60;
-/// Spent tokens kept per family, so that using one again is recognised. An older one
-/// is merely unknown, and refused all the same.
-const MAX_SPENT_PER_FAMILY: i64 = 100;
+/// Spent tokens kept per family. The newest is what a retry is told by, so one is
+/// needed and the second is margin. Recognising reuse does not rest on them: an older
+/// token has no row and ends the family all the same, through its family part.
+const MAX_SPENT_PER_FAMILY: i64 = 2;
 
 /// One refresh token, by the hash of its value. A family is one authorization: its
 /// tokens follow each other by `seq`, and at most one of them is unspent.
@@ -2807,5 +2808,68 @@ mod tests {
             counts[0], counts[1],
             "the same with 20 and with 2000 other users"
         );
+    }
+
+    /// A family keeps its two newest spent tokens, in memory and in the store. The
+    /// one exchanged last is what the 60 seconds' retry is told by. An older one has
+    /// no row and ends the family all the same, through its family part. A file from
+    /// a build that kept 100 is read as it is, and loses the surplus at each family's
+    /// next exchange.
+    #[tokio::test]
+    async fn a_family_keeps_its_two_newest_spent_tokens_and_no_more() {
+        let (store, _) = temp_store("two-spent");
+        let state = started(&store, false, &[CLIENT]);
+        let write = to(&store);
+        let (_, first) = authorize(&state, CLIENT, None, &write).await;
+        let mut tokens = vec![first.unwrap()];
+        for _ in 0..3 {
+            let next = exchange(&state, &tokens[tokens.len() - 1], CLIENT, &write).await;
+            tokens.push(next.unwrap().1);
+        }
+        let expected: HashSet<String> = tokens[1..].iter().map(|t| hash_of(t)).collect();
+        let in_store = store.refresh_tokens(0).unwrap();
+        let in_store: HashSet<String> = in_store.into_iter().map(|r| r.token_hash).collect();
+        assert_eq!(in_store, expected);
+        for token in &tokens {
+            let s = state.oauth.lock().unwrap();
+            let held = s.refresh.contains_key(&hash_of(token));
+            assert_eq!(held, expected.contains(&hash_of(token)), "in memory");
+        }
+
+        // The retry, by the token exchanged last.
+        let retried = exchange(&state, &tokens[2], CLIENT, &write).await;
+        assert!(retried.is_ok(), "{retried:?}");
+        // The token that has no row any more still ends the family.
+        assert!(exchange(&state, &tokens[0], CLIENT, &write).await.is_err());
+        assert!(state.oauth.lock().unwrap().refresh.is_empty());
+        assert!(store.refresh_tokens(0).unwrap().is_empty());
+
+        // A file with 100 spent tokens of one family, as an earlier build left it.
+        let row = |value: String, seq: i64, spent_at: Option<i64>| {
+            let stored = scripting::persistence::StoredRefreshToken {
+                token_hash: hash_of(&value),
+                family: hash_of("old"),
+                seq,
+                client_id: CLIENT.to_string(),
+                user_id: None,
+                created_at: now_unix(),
+                spent_at,
+                access_hash: None,
+            };
+            store.save_refresh_token(&stored, &[], 0, 0).unwrap();
+        };
+        for seq in 0..100 {
+            row(format!("old.{seq}"), seq, Some(now_unix() - 3600));
+        }
+        row("old.100".to_string(), 100, None);
+        let state = started(&store, false, &[CLIENT]);
+        assert_eq!(
+            state.oauth.lock().unwrap().refresh.len(),
+            101,
+            "read as it is"
+        );
+        assert!(exchange(&state, "old.100", CLIENT, &write).await.is_ok());
+        assert_eq!(state.oauth.lock().unwrap().refresh.len(), 3);
+        assert_eq!(store.refresh_tokens(0).unwrap().len(), 3);
     }
 }

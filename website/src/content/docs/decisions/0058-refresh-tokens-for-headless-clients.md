@@ -185,19 +185,24 @@ is kept, so that a token that comes back is recognised, also after a restart:
   first time they use it. The mark is in the row and survives a restart. Only the newest
   replaced successor keeps its row. An earlier one has none and ends the family all the
   same, through its family part, like a token older than the ones that are kept. So
-  retries do not make a family grow: it holds at most 102 tokens, 100 spent, one replaced
+  retries do not make a family grow: it holds at most 4 tokens, 2 spent, one replaced
   and the usable one.
   Rejected: answering the retry with a second successor while the first stays valid. That
   leaves two lines of tokens that never meet, and a copy made in that window is never
   noticed. Rejected as well, after a first version did it: telling a retry by position and
   time alone. A replaced successor has the same position as the one that replaced it, so
   within a minute it passed for a retry and two holders could go on replacing each other.
-- The 100 most recent spent tokens of a family are kept, which bounds the table. **An older
+- The 2 most recent spent tokens of a family are kept, which bounds the table. **An older
   one ends the family all the same.** The server has no row for it, but its family part
   names the family, and a token that names a family in use, comes from that family's
   client and is not its usable token has come back. Without this, the limit switched
-  detection off: whoever held a copy could exchange it 101 times, after which the owner's
-  token was merely unknown, the owner authorized anew and the copy lived on.
+  detection off: whoever held a copy could exchange it until the owner's token had no
+  row, after which that token was merely unknown, the owner authorized anew and the copy
+  lived on. Since detection does not rest on the rows, only the token exchanged last has
+  to be kept, for the retry; the second is margin. A first version kept 100, which
+  with sign-in off allowed about 2 million rows (1000 clients, 20 families each) in
+  memory and in the file. With 4 per family it is about 80,000. A file written with 100
+  is read as it is and loses the surplus at each family's next exchange.
 
 **Who can end a family this way:** anyone who holds or ever held one of its tokens, and
 presents it with the family's client id. That is the point of it. Nobody else: a value
@@ -398,7 +403,7 @@ registered clients already do.
   if it names no family the server has. A first version kept all tokens in one table and
   walked it, three times for a refresh token the server did not know, while holding the
   lock every authenticated request needs: 0.6 s at the 2 million rows that the limits
-  allow with sign-in off. Who holds which family is kept per client and per user, for
+  then allowed with sign-in off. Who holds which family is kept per client and per user, for
   their limits.
 - Bad, and not new: **every authenticated request walks the access tokens in memory,** to
   drop the expired ones, as it did before this decision, and so do the per-user limits
