@@ -147,15 +147,24 @@ From here until the application runs again, production is down.
    ```sh
    b=/var/backups/chartgen/$(date +%Y%m%d-%H%M%S)
    install -d -m 700 /var/backups/chartgen "${b:?}"
-   if [ -z "$(ls -A "${b:?}")" ]; then
-     docker run --rm -v <old volume>:/from:ro -v "${b:?}":/to debian:bookworm-slim cp -a /from/. /to/
-   else
+   if [ -z "${b-}" ]; then
+     echo "NOT COPIED: b is not set."
+   elif ! running=$(docker ps -q --filter volume=<old volume>) || [ -n "$running" ]; then
+     echo "NOT COPIED: a container that uses <old volume> is running, or docker ps failed. Stop the application first."
+   elif [ -n "$(ls -A "$b")" ]; then
      echo "NOT COPIED: $b is not empty. Set b to a new directory and start this block again."
+   else
+     docker run --rm -v <old volume>:/from:ro -v "${b:?}":/to debian:bookworm-slim cp -a /from/. /to/ &&
+       chmod 700 "${b:?}" &&      # cp -a gave the directory the volume's own mode
+       check "$b/chartgen.db"     # two lines: ok, and the number of clients. Write the number down.
    fi
-   chmod 700 "${b:?}"         # cp -a gave the directory the volume's own mode
-   check "$b/chartgen.db"     # two lines: ok, and the number of clients. Write the number down.
    echo "$b"                  # write this down too: it is how to set b again in a new shell
    ```
+
+   The block copies only if nothing runs on the volume and the directory is
+   empty, and checks only what it has just copied. **A copy taken from a
+   running server can check `ok` and still miss its last writes,** which is
+   why it refuses while a container uses the volume.
 
    The source is mounted read-only and nothing in it is touched. `cp -a /from/.`
    takes `chartgen.db` and, if the application was not stopped cleanly, its
@@ -202,17 +211,21 @@ the same, `<new volume>` was typed as the old volume's name: stop, nothing
 below may be run on it.
 
 ```sh
-if [ -z "$(ls -A "${v:?}")" ]; then
-  cp -a "${b:?}"/. "${v:?}"/
-else
+if [ -z "${b-}" ] || [ -z "${v-}" ]; then
+  echo "NOT COPIED: b or v is not set."
+elif ! running=$(docker ps -q --filter volume=<new volume>) || [ -n "$running" ]; then
+  echo "NOT COPIED: a container that uses <new volume> is running, or docker ps failed. Stop the new application first."
+elif [ -n "$(ls -A "$v")" ]; then
   echo "NOT COPIED: $v is not empty, see below."; ls -A "$v"
+else
+  cp -a "${b:?}"/. "${v:?}"/ &&
+    check "$v/chartgen.db"     # ok, and the same number as in step 3
 fi
-check "$v/chartgen.db"     # ok, and the same number as in step 3
 ```
 
-The copy runs only into an empty volume. If it says `NOT COPIED`, the
-`check` after it has looked at what was already there, not at a copy.
-**Look before touching it:**
+The copy runs only into an empty volume that no running container uses, and
+the check runs only on what was just copied: a `NOT COPIED` is never followed
+by an `ok`. If it says the volume is not empty, **look before touching it:**
 
 ```sh
 check "$v/chartgen.db"
