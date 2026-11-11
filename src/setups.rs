@@ -907,6 +907,39 @@ impl Record {
             .any(|p| matches!(p, Pending::Cancel { .. }))
     }
 
+    /// Whether the setup takes no change at all any more: closed, or being cancelled.
+    pub fn takes_no_change(&self) -> bool {
+        !self.status.is_open() || self.cancel_pending()
+    }
+
+    /// Why this setup's state forbids a revision, with new levels or without. When it
+    /// does, that is the whole answer: what is wrong with levels that could not be
+    /// applied anyway is not worth a round trip.
+    pub fn revise_refusal(&self, levels: bool) -> Option<Problem> {
+        if !self.status.is_open() {
+            return Some(Problem::new(
+                "id",
+                "this setup is closed and cannot be revised",
+            ));
+        }
+        if self.cancel_pending() {
+            return Some(Problem::new("id", "this setup is being cancelled"));
+        }
+        if levels && self.decision == Decision::Skip {
+            return Some(
+                Problem::new("decision", "a skip keeps the server's default bracket")
+                    .hint("only its thesis and drawings can be revised"),
+            );
+        }
+        if levels && self.status == Status::Triggered {
+            return Some(
+                Problem::new("status", "this setup is filled, so its levels are fixed")
+                    .hint("only its thesis and drawings can be revised now"),
+            );
+        }
+        None
+    }
+
     /// The agent revises its setup. The thesis and drawings change now. New levels
     /// count from the first bar that opens at or after `now_ms`, and only while the
     /// setup is not filled.
@@ -919,28 +952,12 @@ impl Record {
         now_ms: i64,
     ) -> Result<Revision, Vec<Problem>> {
         let mut problems = Vec::new();
-        if !self.status.is_open() {
-            problems.push(Problem::new(
-                "id",
-                "this setup is closed and cannot be revised",
-            ));
-        } else if self.cancel_pending() {
-            problems.push(Problem::new("id", "this setup is being cancelled"));
-        }
-        if let Some(levels) = &levels {
-            if self.decision == Decision::Skip {
-                problems.push(
-                    Problem::new("decision", "a skip keeps the server's default bracket")
-                        .hint("only its thesis and drawings can be revised"),
-                );
-            } else if self.status == Status::Triggered {
-                problems.push(
-                    Problem::new("status", "this setup is filled, so its levels are fixed")
-                        .hint("only its thesis and drawings can be revised now"),
-                );
-            } else {
-                check_levels(self.direction, levels, &self.costs, now_ms, &mut problems);
+        match (self.revise_refusal(levels.is_some()), &levels) {
+            (Some(refusal), _) => problems.push(refusal),
+            (None, Some(levels)) => {
+                check_levels(self.direction, levels, &self.costs, now_ms, &mut problems)
             }
+            (None, None) => {}
         }
         let mut changes = Map::new();
         if let Some(thesis) = &thesis {

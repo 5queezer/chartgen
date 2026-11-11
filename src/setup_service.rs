@@ -772,11 +772,16 @@ impl Setups {
         setups::check_fields(args, &allowed, &mut problems);
         let reason = setups::reason(args, &mut problems);
         let given = |field: &str| args.get(field).is_some_and(|v| !v.is_null());
-        let thesis = match given("thesis") {
+        // What the setup's state forbids is answered as that, and what was sent for it is
+        // not judged: its problems would be about a change that cannot be made.
+        let level_change = LEVEL_FIELDS.iter().any(|f| given(f));
+        let refusal = current.revise_refusal(level_change);
+        let frozen = current.takes_no_change();
+        let thesis = match given("thesis") && !frozen {
             true => setups::text(args, "thesis", MAX_THESIS, &mut problems),
             false => None,
         };
-        let levels = match LEVEL_FIELDS.iter().any(|f| given(f)) {
+        let levels = match level_change && refusal.is_none() {
             true => setups::parse_levels(
                 args,
                 Some(current.latest_levels()),
@@ -787,7 +792,11 @@ impl Setups {
             ),
             false => None,
         };
-        let requests = self.drawing_requests(args, now, &mut problems);
+        let requests = match frozen {
+            true => None,
+            false => self.drawing_requests(args, now, &mut problems),
+        };
+        problems.extend(refusal);
         let (Some(reason), true) = (reason, problems.is_empty()) else {
             return Err(setups::problems_text(&problems));
         };

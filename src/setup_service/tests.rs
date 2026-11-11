@@ -892,6 +892,83 @@ async fn every_check_the_present_fields_allow_is_made_in_one_answer() {
     assert_eq!(after, setup);
 }
 
+/// When a setup's state forbids a change, that is the answer. Problems with levels that
+/// could not be applied anyway are not reported: fixing them would only earn the
+/// agent a second refusal.
+#[tokio::test]
+async fn a_revision_the_state_forbids_is_answered_about_the_state() {
+    // More calls than a minute's allowance of changes.
+    let limits = Limits {
+        changes_per_minute: 100,
+        ..Limits::default()
+    };
+    let s = live_on(mem(), hub(), Access::parse(None), limits, None);
+    let setup = created(&s, "owner");
+    let (id, t, p) = (id_of(&setup), first_bar(&setup), mid(&setup));
+    let revise = |extra: Value| {
+        let mut args = json!({ "id": id, "reason": "example reason" });
+        args.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        call(&s, "revise_setup", args, "owner")
+    };
+    let only = |answer: Result<Value, String>, field: &str, words: &str| {
+        let text = answer.unwrap_err();
+        assert_eq!(errors(&text), [field], "{text}");
+        assert!(text.contains(words), "{text}");
+    };
+    s.on_bar(&key(), bar(t, p, p, p * 0.975, p * 0.976));
+
+    // Filled: a stop on the wrong side, a valid target, an expiry in the past.
+    let fixed = "its levels are fixed";
+    only(revise(json!({ "invalidation": p * 1.5 })), "status", fixed);
+    only(revise(json!({ "targets": [p * 1.07] })), "status", fixed);
+    only(
+        revise(json!({ "expires_at": "2001-01-01" })),
+        "status",
+        fixed,
+    );
+    // What can still change after the fill does.
+    let revised = revise(json!({ "thesis": "after the fill" })).unwrap();
+    assert_eq!(revised["thesis"], "after the fill");
+    // Another problem of the call itself is still named beside the state.
+    let no_reason = json!({ "id": id, "invalidation": p * 1.5 });
+    let text = call(&s, "revise_setup", no_reason, "owner").unwrap_err();
+    assert_eq!(errors(&text), ["reason", "status"]);
+
+    // Closed: the stop alone, valid or not, and the thesis.
+    s.on_bar(
+        &key(),
+        bar(t + MINUTE_MS, p * 0.976, p * 1.06, p * 0.975, p * 1.05),
+    );
+    let closed = "closed and cannot be revised";
+    only(revise(json!({ "invalidation": p * 0.94 })), "id", closed);
+    only(revise(json!({ "invalidation": p * 1.5 })), "id", closed);
+    only(revise(json!({ "thesis": "too late" })), "id", closed);
+
+    // A skip keeps its bracket, whatever is sent for it.
+    let skip = json!({ "symbol": "BTCUSDT", "interval": "1h", "direction": "long",
+        "decision": "skip", "thesis": "example reason" });
+    let skip = call(&s, "create_setup", skip, "owner").unwrap();
+    let args = json!({ "id": skip["id"], "reason": "example reason", "invalidation": -1 });
+    let text = call(&s, "revise_setup", args, "owner").unwrap_err();
+    assert_eq!(errors(&text), ["decision"], "{text}");
+
+    // A setup being cancelled takes no revision.
+    let other = created(&s, "owner");
+    call(
+        &s,
+        "cancel_setup",
+        json!({ "id": other["id"], "reason": "example" }),
+        "owner",
+    )
+    .unwrap();
+    let args = json!({ "id": other["id"], "reason": "example", "targets": [1.0] });
+    let text = call(&s, "revise_setup", args, "owner").unwrap_err();
+    assert_eq!(errors(&text), ["id"], "{text}");
+    assert!(text.contains("being cancelled"));
+}
+
 #[tokio::test]
 async fn skip_is_stored_and_scored_with_the_default_bracket() {
     let s = live();
