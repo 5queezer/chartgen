@@ -7,9 +7,10 @@ sidebar:
 
 **Status:** Accepted
 **Date:** 2026-11-11
-**Amends:** [ADR-0037](/chartgen/decisions/0037-pull-based-deploy/) (what the timer
-triggers: a pull of an image built in CI, no longer a build on the host; and which
-commit goes out: exactly the one that passed CI)
+**Supersedes in part:** [ADR-0037](/chartgen/decisions/0037-pull-based-deploy/) (what
+the timer triggers: a pull of an image built in CI, no longer a build on the host; and
+which commit goes out: exactly the one that passed CI. The timer itself, pull-based
+and with no credential outside the host, stays in force)
 
 ## Context and Problem Statement
 
