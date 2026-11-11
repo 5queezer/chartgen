@@ -22,7 +22,7 @@ a token. With a provider configured it needs a [signed-in user](#sign-in) instea
 | `GET` | `/.well-known/oauth-protected-resource` | The same for the deprecated root alias (`resource` is `<base>`). |
 | `GET` | `/.well-known/oauth-authorization-server` | RFC 8414 metadata document. |
 | `POST` | `/register` | Dynamic client registration (RFC 7591). Returns a `client_id`/`client_secret`. |
-| `GET` | `/authorize` | Authorization endpoint. Requires `client_id`, `redirect_uri`, `response_type=code`, `code_challenge`, `code_challenge_method=S256`, optional `state`. |
+| `GET` | `/authorize` | Authorization endpoint. Requires `client_id`, `redirect_uri`, `response_type=code`, `code_challenge`, `code_challenge_method=S256`, optional `state`. `code_challenge` is the SHA-256 of the verifier in base64url without padding: exactly 43 characters of `A-Z a-z 0-9 - _`, or `400 invalid_request`. |
 | `POST` | `/token` | Token endpoint. Exchanges `code` + `code_verifier` for an access token and, for every client but the web app's own, a [refresh token](#refresh-tokens). Exchanges a refresh token for the next pair. |
 | `POST` | `/revoke` | [Revocation](#revoking-a-refresh-token) (RFC 7009): `token` and `client_id`, as a form or JSON. |
 | `GET` | `/oauth/signin`, `/oauth/login/{provider}`, `/oauth/callback/{provider}`, `/oauth/cancel`, `/oauth/consent` | [Sign-in](#sign-in) pages and redirects. `404` with sign-in off. |
@@ -97,6 +97,26 @@ A code works once, also after a failed attempt, with sign-in on and off. A secon
 answers `400 invalid_grant`, and the client authorizes again. Without sign-in a code used to
 stay valid for its 5 minutes
 ([ADR-0058](/chartgen/decisions/0058-refresh-tokens-for-headless-clients/)).
+
+A code not exchanged within 5 minutes expires. With sign-in on, a user keeps 20 pending
+codes. With sign-in off, where every `/authorize` for a registered client issues one:
+
+- **20 pending codes per client.** One more drops that client's oldest, never another
+  client's.
+- **2000 on the server.** Past that `/authorize` answers `429 temporarily_unavailable` with
+  `Retry-After: 60`, and stores nothing: a code somebody is about to exchange is not
+  dropped to make room.
+
+**What a stranger can do with this, with sign-in off.** Client ids are free there, so 100
+registered clients at 20 codes each hold `/authorize` at `429` for everyone, for as long as
+they keep asking: a code is gone after 5 minutes. What bounds it is `/register`'s limit of
+20 clients per address per 10 minutes, so it takes 5 addresses, or one address and 50
+minutes. Loopback is exempt from that limit, so behind a proxy on the same host it bounds
+nothing unless `CHARTGEN_TRUSTED_PROXY_HEADER` is set. Clients that hold a token are not affected. A browser that is sent to `/authorize`
+meanwhile, such as the web app on a page load, **lands on the `429` answer, a page of JSON
+with no way back**: the web app cannot recover from it by itself, as it does from an unknown
+client. Reloading after a minute works once the codes have expired. With sign-in on, none
+of this applies. A public server should have sign-in on.
 
 A user is the provider plus its immutable id, `github:<id>` or `google:<sub>`. One person
 with both accounts is two users with separate scripts; accounts are not linked.

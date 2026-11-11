@@ -242,6 +242,14 @@ A family counts as a token of its client, in every limit that counts tokens.
   family of the agent that uses it.
   [ADR-0036](/chartgen/decisions/0036-own-origin-invalid-client-redirect/): "A stranger must
   not be able to end a session in use."
+- **Pending codes with sign-in off** had no limit: every `/authorize` for a registered
+  client stored a code for 5 minutes, with a `code_challenge` of any length. Now a client
+  keeps 20, its own oldest dropped first, the server keeps 2000 and then answers `429` with
+  `Retry-After: 60` instead of dropping someone else's, and a `code_challenge` must be 43
+  base64url characters, in both modes. With sign-in off 100 free client ids can hold
+  `/authorize` at `429` for everyone while they keep asking, bounded by `/register`'s rate
+  limit per address, and a browser sent there meanwhile lands on that answer with no way
+  back. That is left as it is here: a public server should have sign-in on.
 - **A family keeps its client from being evicted,** as a live access token does. After a
   restart no access token is left in memory, and a refresh token is all a headless client
   has. Evicting its client then would cost it its authorization, and a person.

@@ -56,6 +56,12 @@ const MAX_CLIENT_NAME_LEN: usize = 256;
 /// their callback, so this is not an allow-list.
 const FORBIDDEN_REDIRECT_SCHEMES: [&str; 3] = ["javascript", "data", "vbscript"];
 const MAX_CLIENTS: usize = 1000;
+/// Pending authorization codes with sign-in off, where every `/authorize` for a
+/// registered client issues one: per client, the oldest of that client dropped, and on
+/// the whole server, past which `/authorize` answers `429` rather than drop a code
+/// somebody else is about to exchange. With sign-in on they are limited per user.
+const MAX_CODES_PER_CLIENT: usize = 20;
+const MAX_CODES: usize = 2000;
 /// Registrations per client address (the TCP peer) per `REGISTER_WINDOW`.
 /// Loopback peers are exempt: local tests and dev clients register freely,
 /// and behind a reverse proxy on the same host the peer is always loopback,
@@ -694,9 +700,46 @@ async fn oauth_authorize(
             .into_response();
     }
 
+    // PKCE is S256 only: a SHA-256 in base64url without padding, 43 characters. The
+    // challenge is kept until the code is exchanged, so it is not taken as it comes.
+    let is_s256 = params.code_challenge.len() == 43
+        && params
+            .code_challenge
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_');
+    if !is_s256 {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "invalid_request", "error_description": "code_challenge must be an S256 challenge: 43 base64url characters"})),
+        )
+            .into_response();
+    }
+
     // With sign-in on, a client id and a redirect URI are not enough (ADR-0044).
     if s.signin.is_some() {
         return signin::authorize(&mut s, &params, &headers, &client_addr(&headers, &ext));
+    }
+
+    // Hold the pending codes to their limits: this client's oldest make room first,
+    // and a full server refuses instead of dropping someone else's.
+    let mut mine: Vec<(Instant, String)> = s
+        .codes
+        .iter()
+        .filter(|(_, c)| c.client_id == params.client_id)
+        .map(|(code, c)| (c.created_at, code.clone()))
+        .collect();
+    mine.sort();
+    let excess = (mine.len() + 1).saturating_sub(MAX_CODES_PER_CLIENT);
+    for (_, code) in mine.into_iter().take(excess) {
+        s.codes.remove(&code);
+    }
+    if s.codes.len() >= MAX_CODES {
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            [(header::RETRY_AFTER, "60")],
+            Json(json!({"error": "temporarily_unavailable", "error_description": "Too many sign-ins are in progress. Try again in a minute."})),
+        )
+            .into_response();
     }
 
     // Auto-approve: generate auth code
@@ -3066,6 +3109,163 @@ mod tests {
         give_token(&mut s, "t0", "c0", LIVE);
         assert_eq!(s.make_room(nobody_owns_scripts).unwrap(), ["c1"]);
         assert!(s.clients.contains_key("c0") && s.validate_token("t0"));
+    }
+
+    const CHALLENGE: &str = "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM";
+
+    /// A server with clients `a` and `b` registered, and its `/authorize`.
+    fn authorize_app(sign_in: bool) -> (SharedState, Router) {
+        let mut oauth = OAuthStore::new();
+        if sign_in {
+            let vars = [
+                ("CHARTGEN_GITHUB_CLIENT_ID", "h"),
+                ("CHARTGEN_GITHUB_CLIENT_SECRET", "hs"),
+            ];
+            let config = signin::Config::from_vars(|name| {
+                vars.iter()
+                    .find(|(k, _)| *k == name)
+                    .map(|(_, v)| v.to_string())
+            });
+            oauth.signin = Some(signin::SignIn::new(config.unwrap().unwrap()));
+        }
+        for id in ["a", "b"] {
+            oauth.clients.insert(id.into(), client(LIVE, None));
+            oauth.clients.get_mut(id).unwrap().redirect_uris = vec!["https://x.example/cb".into()];
+        }
+        let state = Arc::new(AppState {
+            oauth: Mutex::new(oauth),
+            engine: None,
+            charts: sample_hub(),
+        });
+        let app = Router::new()
+            .route("/authorize", get(oauth_authorize))
+            .with_state(state.clone());
+        (state, app)
+    }
+
+    async fn authorize_as(app: &Router, client: &str, challenge: &str) -> Response {
+        let uri = format!(
+            "/authorize?response_type=code&client_id={client}&redirect_uri=https%3A%2F%2Fx.example%2Fcb&code_challenge={challenge}"
+        );
+        let request = Request::builder().uri(uri).body(Body::empty()).unwrap();
+        app.clone().oneshot(request).await.unwrap()
+    }
+
+    fn codes_of(state: &SharedState, client: &str) -> Vec<String> {
+        let s = state.oauth.lock().unwrap();
+        let mut codes: Vec<_> = s
+            .codes
+            .iter()
+            .filter(|(_, c)| c.client_id == client)
+            .map(|(code, c)| (c.created_at, code.clone()))
+            .collect();
+        codes.sort();
+        codes.into_iter().map(|c| c.1).collect()
+    }
+
+    /// With sign-in off every `/authorize` for a registered client stored a code, with
+    /// no limit, for 5 minutes each.
+    #[tokio::test]
+    async fn a_client_keeps_20_pending_codes_and_loses_only_its_own_oldest() {
+        let (state, app) = authorize_app(false);
+        assert_eq!(authorize_as(&app, "b", CHALLENGE).await.status(), 307);
+        assert_eq!(authorize_as(&app, "a", CHALLENGE).await.status(), 307);
+        let first = codes_of(&state, "a")[0].clone();
+        for _ in 0..MAX_CODES_PER_CLIENT {
+            assert_eq!(authorize_as(&app, "a", CHALLENGE).await.status(), 307);
+        }
+        let mine = codes_of(&state, "a");
+        assert_eq!(mine.len(), MAX_CODES_PER_CLIENT);
+        assert!(!mine.contains(&first), "the oldest went");
+        assert_eq!(codes_of(&state, "b").len(), 1, "another client's stays");
+    }
+
+    #[tokio::test]
+    async fn a_full_server_refuses_a_new_code_and_drops_nobodys() {
+        let (state, app) = authorize_app(false);
+        {
+            let mut s = state.oauth.lock().unwrap();
+            for i in 0..MAX_CODES {
+                s.codes.insert(
+                    format!("code{i}"),
+                    AuthCode {
+                        _code: String::new(),
+                        client_id: format!("other{}", i / MAX_CODES_PER_CLIENT),
+                        redirect_uri: String::new(),
+                        code_challenge: String::new(),
+                        _code_challenge_method: String::new(),
+                        created_at: Instant::now(),
+                        user: None,
+                    },
+                );
+            }
+        }
+        let refused = authorize_as(&app, "a", CHALLENGE).await;
+        assert_eq!(refused.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(refused.headers()[header::RETRY_AFTER], "60");
+        let s = state.oauth.lock().unwrap();
+        assert_eq!(s.codes.len(), MAX_CODES);
+        assert!((0..MAX_CODES).all(|i| s.codes.contains_key(&format!("code{i}"))));
+    }
+
+    /// PKCE here is S256 only, and a SHA-256 in base64url is 43 characters. Anything
+    /// else was stored as it came, however long.
+    #[tokio::test]
+    async fn a_code_challenge_that_is_no_s256_hash_is_refused() {
+        for sign_in in [false, true] {
+            let (state, app) = authorize_app(sign_in);
+            let too_long = format!("{CHALLENGE}A");
+            let not_base64url = CHALLENGE.replace('-', "+").replace('+', "%2B");
+            let huge = "A".repeat(4000);
+            for bad in [
+                &too_long,
+                &CHALLENGE[1..],
+                not_base64url.as_str(),
+                "",
+                &huge,
+            ] {
+                let refused = authorize_as(&app, "a", bad).await;
+                assert_eq!(refused.status(), StatusCode::BAD_REQUEST, "{sign_in} {bad}");
+                let bytes = refused.into_body().collect().await.unwrap().to_bytes();
+                let body = String::from_utf8_lossy(&bytes);
+                assert!(body.contains("invalid_request"), "{body}");
+            }
+            assert!(state.oauth.lock().unwrap().codes.is_empty());
+            let ok = authorize_as(&app, "a", CHALLENGE).await;
+            assert!(ok.status().is_redirection(), "{sign_in}: {}", ok.status());
+        }
+    }
+
+    /// With sign-in on, codes are limited per user (ADR-0044) and these limits do not
+    /// apply: a request goes on to the sign-in as before.
+    #[tokio::test]
+    async fn with_sign_in_on_the_pending_code_limits_change_nothing() {
+        let (state, app) = authorize_app(true);
+        {
+            let mut s = state.oauth.lock().unwrap();
+            for i in 0..MAX_CODES {
+                s.codes.insert(
+                    format!("code{i}"),
+                    AuthCode {
+                        _code: String::new(),
+                        client_id: "a".into(),
+                        redirect_uri: String::new(),
+                        code_challenge: String::new(),
+                        _code_challenge_method: String::new(),
+                        created_at: Instant::now(),
+                        user: None,
+                    },
+                );
+            }
+        }
+        let answer = authorize_as(&app, "a", CHALLENGE).await;
+        assert!(answer.status().is_redirection(), "{}", answer.status());
+        let to = answer.headers()[header::LOCATION]
+            .to_str()
+            .unwrap()
+            .to_string();
+        assert!(to.starts_with("/oauth/"), "{to}");
+        assert_eq!(state.oauth.lock().unwrap().codes.len(), MAX_CODES);
     }
 
     /// After a restart a refresh token is all a headless client has left (ADR-0058).
