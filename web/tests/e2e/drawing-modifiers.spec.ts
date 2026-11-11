@@ -6,12 +6,43 @@ import type { Page } from "@playwright/test";
 
 import { test as appTest, expect, gotoApp, pickTool, reloadApp, openSidebarTab } from "./fixtures/app";
 
+/**
+ * Every bar keeps the prices the page first saw for it. The sample feed moves the forming
+ * bar every second, and at the hours when that bar is the highest or lowest on screen each
+ * move rescales the price axis: a point placed at one pixel is then drawn at another, and
+ * these tests place and read points to the pixel. Ticks still arrive, with the same prices,
+ * or with the ones `lowerFormingBar` asks for.
+ */
+const holdBars = (page: Page) =>
+  page.addInitScript(() => {
+    type Series = { symbol?: unknown; interval?: unknown; chart_style?: unknown; bars?: Record<string, unknown>[] };
+    const held = new Map<string, Record<string, unknown>>();
+    (window as unknown as { __heldBars: typeof held }).__heldBars = held;
+    const parse = JSON.parse;
+    // Every series the page reads, polled or pushed, comes out of JSON.parse: a poll's as
+    // the text of a tool result, a push's inside its notification.
+    JSON.parse = (...args: Parameters<typeof parse>) => {
+      const value = parse(...args) as (Series & { params?: { series?: Series } }) | null;
+      const series = value?.params?.series ?? value;
+      if (Array.isArray(series?.bars) && typeof series.symbol === "string") {
+        for (const bar of series.bars) {
+          const key = `${series.symbol} ${String(series.interval)} ${String(series.chart_style)} ${String(bar.t)}`;
+          const first = held.get(key);
+          if (first) Object.assign(bar, first);
+          else held.set(key, { ...bar });
+        }
+      }
+      return value;
+    };
+  });
+
 /** Not Mac, whatever the host: there Cmd inverts the magnet, and these tests hold Ctrl. */
 const test = appTest.extend({
   page: async ({ page }, use) => {
     await page.addInitScript(() =>
       Object.defineProperty(navigator, "platform", { get: () => "Linux x86_64", configurable: true }),
     );
+    await holdBars(page);
     await use(page);
   },
 });
@@ -103,6 +134,25 @@ const valueAtY = (page: Page, y: number) =>
         .convertFromPixel([{ y: py }], { paneId: "candle_pane" })[0]!.value!,
     y,
   );
+
+/**
+ * The next tick of the feed takes the forming bar's low `px` pixels of price down, or
+ * without `px` to the price at the pane's bottom edge: under all that is drawn, so from
+ * then on that low is what the price axis ends at, and lowering it rescales the axis, by
+ * less than `px` at any pixel of the pane. Resolves when the chart has that tick.
+ */
+const lowerFormingBar = (page: Page, px?: number) =>
+  page.evaluate(async (by) => {
+    const w = window as unknown as TestWindow & { __heldBars: Map<string, { l: number }> };
+    const chart = w.__chartgenTest.chart();
+    const paneId = "candle_pane";
+    const at = (y: number) => chart.convertFromPixel([{ y }], { paneId })[0]!.value!;
+    const forming = chart.getDataList().at(-1)!;
+    const low =
+      by === null ? at(chart.getSize(paneId, "main").height) : forming.low - by * Math.abs(at(200) - at(201));
+    for (const [key, bar] of w.__heldBars) if (key.endsWith(` ${forming.timestamp / 1000}`)) bar.l = low;
+    while (chart.getDataList().at(-1)!.low !== low) await new Promise((r) => setTimeout(r, 50));
+  }, px ?? null);
 
 const nearest = (values: number[], to: number) =>
   values.reduce((best, v) => (Math.abs(v - to) < Math.abs(best - to) ? v : best));
@@ -573,6 +623,23 @@ test.describe("drawing modifiers", () => {
       const { pixels } = (await overlays(page))[0]!;
       expect(pixels[0]!.x).toBe(pixels[1]!.x);
       expect(pixels[0]!.y! - pixels[1]!.y!).toBe(1);
+    });
+
+    test("a second click on the first point, after a tick moved the axis by less than a pixel, places nothing", async ({
+      bootedApp: page,
+    }) => {
+      await page.waitForTimeout(1500);
+      await lowerFormingBar(page);
+      const line = page.getByRole("button", { name: "Trend line" });
+      await line.click();
+      await clickAt(page, { x: 500, y: 200 });
+      const price = await valueAtY(page, 200);
+      await lowerFormingBar(page, 0.5);
+      // The same pixel is another price now: the two clicks are not the same point by value.
+      expect(await valueAtY(page, 200)).not.toBe(price);
+      await clickAt(page, { x: 500, y: 200 });
+      expect(await overlays(page)).toHaveLength(0);
+      await expect(line).toHaveAttribute("aria-pressed", "true");
     });
 
     /** Off the pane klinecharts sends a double click nowhere: it must not become a second click. */
