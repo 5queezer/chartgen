@@ -1884,3 +1884,86 @@ fn a_cursor_from_a_restored_file_starts_over() {
         .parts();
     assert_eq!(changes.len(), 1);
 }
+
+fn migration_with(text: &str) -> usize {
+    persistence::MIGRATIONS
+        .iter()
+        .position(|sql| sql.contains(text))
+        .unwrap()
+}
+
+/// The order the two features' migrations must keep: the refresh token table, its
+/// column for the access token's hash, then the setups tables. A new file gets every
+/// migration, and its version is their count.
+#[test]
+fn a_fresh_file_gets_every_migration_with_setups_after_refresh_tokens() {
+    let (table, column, setups) = (
+        migration_with("CREATE TABLE refresh_tokens"),
+        migration_with("ADD COLUMN access_hash"),
+        migration_with("CREATE TABLE setups"),
+    );
+    assert!(
+        table < column && column < setups,
+        "{table} {column} {setups}"
+    );
+    assert_eq!(column, table + 1);
+    assert_eq!(setups, column + 1);
+
+    let dir = std::env::temp_dir().join(format!("chartgen-fresh-order-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("s.db");
+    schema_is_complete(&persistence::Store::open(&path).unwrap());
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    let version: i64 = conn
+        .query_row("PRAGMA user_version", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(version as usize, persistence::MIGRATIONS.len());
+    assert!(refresh_columns(&path).contains(&"access_hash".to_string()));
+    drop(conn);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A database last opened by the build with durable tokens and without setups: it has
+/// refresh tokens in it. The build with both gives it the setups tables and keeps
+/// every token, so a headless agent authorized before the deploy still is after it.
+#[test]
+fn a_file_with_refresh_tokens_and_no_setups_upgrades_and_keeps_them() {
+    let setups = migration_with("CREATE TABLE setups");
+    let mut setup: Vec<String> = persistence::MIGRATIONS[..setups]
+        .iter()
+        .map(|sql| sql.to_string())
+        .collect();
+    setup.push(format!(
+        "INSERT INTO oauth_clients (client_id, redirect_uris, created_at, last_token_at)
+             VALUES ('agent', '[\"http://127.0.0.1:9/cb\"]', 1, 2);
+         INSERT INTO refresh_tokens VALUES ('h-old', 'fam', 0, 'agent', NULL, 900, 950, NULL);
+         INSERT INTO refresh_tokens VALUES ('h-new', 'fam', 1, 'agent', NULL, 1000, NULL, 'a-hash');
+         PRAGMA user_version = {setups};"
+    ));
+    let setup: Vec<&str> = setup.iter().map(String::as_str).collect();
+    let store = upgraded("upgrade-tokens-then-setups", &setup);
+
+    let mut tokens = store.refresh_tokens(0).unwrap();
+    tokens.sort_by_key(|t| t.seq);
+    assert_eq!(tokens.len(), 2);
+    assert_eq!(
+        (tokens[0].token_hash.as_str(), tokens[0].spent_at),
+        ("h-old", Some(950))
+    );
+    assert_eq!(tokens[1].access_hash.as_deref(), Some("a-hash"));
+    assert_eq!(tokens[1].client_id, "agent");
+    // And the setups tables are there, with their append-only log.
+    assert!(store.setups().unwrap().is_empty());
+    store
+        .save_setups(&[persistence::StoredSetup {
+            id: "s1".into(),
+            owner: "agent".into(),
+            record: "{}".into(),
+            revisions: vec![(1, "{}".into())],
+        }])
+        .unwrap();
+    assert!(store.setup_owners().unwrap().contains("agent"));
+    assert_eq!(store.refresh_tokens(0).unwrap().len(), 2);
+    assert_eq!(store.oauth_clients().unwrap()[0].client_id, "agent");
+}
