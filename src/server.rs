@@ -1278,9 +1278,8 @@ async fn mcp_call(
     // On a replay server a call is answered as of the time it names, or not at all.
     let replay_at = match (crate::replay::global(), tool) {
         (Some(replay), Some(tool)) => {
-            let owner = call_owner(&state).unwrap_or_default();
             let args = params.and_then(|p| p.get("arguments"));
-            match replay.admit(tool, args.unwrap_or(&Value::Null), &owner) {
+            match replay.admit(tool, args.unwrap_or(&Value::Null)) {
                 Ok(at) => at,
                 Err(e) => {
                     let refused = crate::mcp::tool_err(id.clone(), &e);

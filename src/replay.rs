@@ -7,7 +7,7 @@
 //! interval from those, so nothing after that time can reach an answer.
 
 use std::cell::Cell;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::{Mutex, OnceLock};
 
@@ -75,9 +75,10 @@ struct Fixture {
 pub struct Replay {
     /// 1m bars per symbol, oldest first.
     bars: BTreeMap<String, Vec<Bar>>,
-    /// The latest time each owner has asked about. One clock for every tool, so a
-    /// caller cannot read the chart at a later time and then act at an earlier one.
-    clocks: Mutex<HashMap<String, i64>>,
+    /// The latest time any call has asked about. One clock for every tool and every
+    /// caller: one process is one run, and registration is open, so a clock per caller
+    /// would let a second client read a time the first has already passed.
+    clock: Mutex<Option<i64>>,
 }
 
 static GLOBAL: OnceLock<Replay> = OnceLock::new();
@@ -150,7 +151,7 @@ impl Replay {
     pub fn of(bars: BTreeMap<String, Vec<Bar>>) -> Replay {
         Replay {
             bars,
-            clocks: Mutex::default(),
+            clock: Mutex::default(),
         }
     }
 
@@ -186,14 +187,9 @@ impl Replay {
     }
 
     /// Admit a tool call that is not a setup's. A tool that reads prices needs `as_of`
-    /// and moves `owner`'s clock to it; one that would read anything but the fixtures
+    /// and moves the clock to it; one that would read anything but the fixtures
     /// is refused. Returns the time to run the call at.
-    pub fn admit(
-        &self,
-        tool: &str,
-        args: &serde_json::Value,
-        owner: &str,
-    ) -> Result<Option<i64>, String> {
+    pub fn admit(&self, tool: &str, args: &serde_json::Value) -> Result<Option<i64>, String> {
         if PLAIN_TOOLS.contains(&tool) {
             return Ok(None);
         }
@@ -203,7 +199,7 @@ impl Replay {
             ));
         }
         let now = as_of(args.get("as_of"))?;
-        self.advance(owner, now)?;
+        self.advance(now)?;
         Ok(Some(now))
     }
 
@@ -223,18 +219,17 @@ impl Replay {
         Ok((last.close, first.open, high, low, volume))
     }
 
-    /// Move `owner`'s clock to `as_of`. A time before it is refused.
-    pub fn advance(&self, owner: &str, as_of: i64) -> Result<(), String> {
-        let mut clocks = self.clocks.lock().unwrap_or_else(|p| p.into_inner());
-        let clock = clocks.entry(owner.to_string()).or_insert(as_of);
-        if as_of < *clock {
+    /// Move the clock to `as_of`. A time before it is refused.
+    pub fn advance(&self, as_of: i64) -> Result<(), String> {
+        let mut clock = self.clock.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(latest) = clock.filter(|latest| as_of < *latest) {
             return Err(format!(
-                "as_of {} is before {}, the latest time this replay has answered you for; a replay only moves forward",
+                "as_of {} is before {}, the latest time this replay has answered for; a replay only moves forward",
                 chartgen::drawings::iso(as_of),
-                chartgen::drawings::iso(*clock)
+                chartgen::drawings::iso(latest)
             ));
         }
-        *clock = as_of;
+        *clock = Some(as_of);
         Ok(())
     }
 
@@ -397,15 +392,12 @@ mod tests {
     }
 
     #[test]
-    fn the_clock_only_moves_forward_and_is_each_owners_own() {
+    fn the_clock_only_moves_forward() {
         let r = replay(10);
-        r.advance("a", 2000).unwrap();
-        r.advance("a", 2000).unwrap();
-        assert!(r
-            .advance("a", 1999)
-            .unwrap_err()
-            .contains("only moves forward"));
-        r.advance("b", 1000).unwrap();
+        r.advance(2000).unwrap();
+        r.advance(2000).unwrap();
+        assert!(r.advance(1999).unwrap_err().contains("only moves forward"));
+        r.advance(2001).unwrap();
     }
 
     #[test]

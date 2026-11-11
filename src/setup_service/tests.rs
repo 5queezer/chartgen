@@ -968,8 +968,8 @@ fn replaying(replay: &'static Replay) -> Arc<Setups> {
 }
 
 /// A chart tool as the server calls it on a replay: admitted, then run at its time.
-fn chart_tool(replay: &Replay, tool: &str, args: Value, owner: &str) -> Value {
-    match replay.admit(tool, &args, owner) {
+fn chart_tool(replay: &Replay, tool: &str, args: Value) -> Value {
+    match replay.admit(tool, &args) {
         Err(e) => json!({ "refused": e }),
         Ok(at) => crate::replay::at(at, || {
             let params = json!({ "name": tool, "arguments": args });
@@ -998,25 +998,22 @@ fn scenario(replay: &'static Replay) -> Vec<String> {
     for format in ["summary", "series", "png"] {
         let args = json!({ "ticker": "BTCUSDT", "timeframe": "15m", "bars": 60,
             "format": format, "indicators": ["rsi", "ema_stack"], "as_of": t });
-        say(chart_tool(replay, "generate_chart", args, "agent"));
+        say(chart_tool(replay, "generate_chart", args));
     }
     say(chart_tool(
         replay,
         "inspect_chart",
         json!({ "ticker": "BTCUSDT", "timeframe": "1h", "bars": 20, "as_of": t }),
-        "agent",
     ));
     say(chart_tool(
         replay,
         "get_indicators",
         json!({ "symbol": "ETHUSDT", "interval": "5m", "indicators": ["rsi", "macd"], "as_of": t }),
-        "agent",
     ));
     say(chart_tool(
         replay,
         "get_quotes",
         json!({ "symbols": ["BTCUSDT", "ETHUSDT", "SOLUSDT"], "as_of": t }),
-        "agent",
     ));
 
     let p = replay.quote("BTCUSDT", t).unwrap().0;
@@ -1046,7 +1043,6 @@ fn scenario(replay: &'static Replay) -> Vec<String> {
             replay,
             "get_quotes",
             json!({ "symbols": ["BTCUSDT"], "as_of": t }),
-            "agent",
         ));
     }
     let another = setup("create_setup", {
@@ -1122,13 +1118,13 @@ async fn no_bar_after_as_of_leaks_into_a_run() {
 }
 
 #[tokio::test]
-async fn one_clock_for_every_tool_and_it_cannot_go_backwards() {
+async fn one_clock_for_every_tool_and_caller_and_it_cannot_go_backwards() {
     crate::replay::on(Replay::of(fixture(usize::MAX, 0.0)), |replay| {
         let s = replaying(replay);
         // Reading the chart at a later time closes the earlier time for setups too.
         let later = json!({ "ticker": "BTCUSDT", "timeframe": "15m", "format": "summary",
             "indicators": [], "as_of": at_minute(1600) });
-        let read = chart_tool(replay, "generate_chart", later, "agent");
+        let read = chart_tool(replay, "generate_chart", later);
         assert!(read.get("refused").is_none(), "{read}");
         let p = replay.quote("BTCUSDT", at_minute(1500)).unwrap().0;
         let mut args = json!({
@@ -1142,7 +1138,7 @@ async fn one_clock_for_every_tool_and_it_cannot_go_backwards() {
         args["as_of"] = json!(at_minute(1700));
         let id = id_of(&call(&s, "create_setup", args, "agent").unwrap());
         let earlier = json!({ "symbols": ["BTCUSDT"], "as_of": at_minute(1650) });
-        let refused = chart_tool(replay, "get_quotes", earlier, "agent");
+        let refused = chart_tool(replay, "get_quotes", earlier);
         assert!(refused["refused"]
             .as_str()
             .unwrap()
@@ -1154,15 +1150,29 @@ async fn one_clock_for_every_tool_and_it_cannot_go_backwards() {
             "agent",
         );
         assert!(text.unwrap_err().contains("only moves forward"));
-        // Another caller has its own clock, and cannot see this one's setup.
+        // The clock is the server's, not the caller's: registration is open on a replay,
+        // so a second client must not be a way to read an earlier or a later time.
         let other = call(
             &s,
             "list_setups",
             json!({ "as_of": at_minute(1400) }),
             "other",
-        )
-        .unwrap();
-        assert_eq!(other["total"], 0);
+        );
+        assert!(other.unwrap_err().contains("only moves forward"));
+        let earlier = json!({ "symbols": ["BTCUSDT"], "as_of": at_minute(1400) });
+        let refused = chart_tool(replay, "get_quotes", earlier);
+        assert!(refused["refused"]
+            .as_str()
+            .unwrap()
+            .contains("only moves forward"));
+        // At the server's time it answers, and still cannot see the first caller's setup.
+        let other = call(
+            &s,
+            "list_setups",
+            json!({ "as_of": at_minute(1700) }),
+            "other",
+        );
+        assert_eq!(other.unwrap()["total"], 0);
         // No as_of, no answer.
         let text = call(&s, "list_setups", json!({}), "agent").unwrap_err();
         assert!(text.contains("every call needs as_of"), "{text}");
@@ -1180,12 +1190,7 @@ async fn a_replay_refuses_what_the_fixtures_do_not_hold() {
             "subscribe_chart",
             "place_order",
         ] {
-            let refused = chart_tool(
-                replay,
-                tool,
-                json!({ "ticker": "BTCUSDT", "as_of": t }),
-                "a",
-            );
+            let refused = chart_tool(replay, tool, json!({ "ticker": "BTCUSDT", "as_of": t }));
             assert!(
                 refused["refused"]
                     .as_str()
@@ -1194,7 +1199,7 @@ async fn a_replay_refuses_what_the_fixtures_do_not_hold() {
                 "{tool}"
             );
         }
-        let missing = chart_tool(replay, "inspect_chart", json!({ "ticker": "BTCUSDT" }), "a");
+        let missing = chart_tool(replay, "inspect_chart", json!({ "ticker": "BTCUSDT" }));
         assert!(missing["refused"]
             .as_str()
             .unwrap()
@@ -1205,9 +1210,9 @@ async fn a_replay_refuses_what_the_fixtures_do_not_hold() {
         // Indicators that fetch a series of their own are refused by what they are.
         let args = json!({ "ticker": "BTCUSDT", "timeframe": "15m", "format": "summary",
             "indicators": ["rsi", "funding", "fear_greed"], "as_of": t });
-        let text = chart_tool(replay, "generate_chart", args, "a").to_string();
+        let text = chart_tool(replay, "generate_chart", args).to_string();
         assert!(text.contains("Not available in a replay"), "{text}");
-        let plain = chart_tool(replay, "list_drawing_tools", json!({}), "a");
+        let plain = chart_tool(replay, "list_drawing_tools", json!({}));
         assert!(plain["result"]["content"][0]["text"].is_string());
     });
 }
@@ -1219,7 +1224,7 @@ fn answers_at(bars: BTreeMap<String, Vec<Bar>>, t: i64, calls: &[Value]) -> Vec<
             .map(|args| {
                 let mut args = args.clone();
                 args["as_of"] = json!(t);
-                chart_tool(replay, "generate_chart", args, "agent").to_string()
+                chart_tool(replay, "generate_chart", args).to_string()
             })
             .collect()
     })

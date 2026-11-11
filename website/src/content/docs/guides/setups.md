@@ -118,8 +118,9 @@ Each bar is `[open time in unix seconds, open, high, low, close, volume]`. The f
   five setup tools and by `generate_chart`, `inspect_chart`, `get_indicators` and `get_quotes`.
 - **Nothing after `as_of` is used.** A 1m bar counts only if it had closed by then, and every
   other interval is built from those bars. The bar still forming at `as_of` is not there.
-- **Time only moves forward.** Each caller has one clock for all tools. A call with an `as_of`
-  before the latest one that caller has sent is refused.
+- **Time only moves forward.** The server has one clock for all tools and all callers. A call
+  with an `as_of` before the latest one the server has been sent is refused, whoever sent it.
+  One process is one run: run two evaluations as two servers.
 - **Everything it stores lives in memory**: setups, and the OAuth clients that register with
   it. A replay server opens no database file, not `chartgen.db` either, and all of it is gone
   when the process ends. To run a scenario again, restart the server. Ids count per caller: `setup-000001`, and so on.
