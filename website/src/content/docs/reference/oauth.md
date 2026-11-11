@@ -22,7 +22,7 @@ a token. With a provider configured it needs a [signed-in user](#sign-in) instea
 | `GET` | `/.well-known/oauth-protected-resource` | The same for the deprecated root alias (`resource` is `<base>`). |
 | `GET` | `/.well-known/oauth-authorization-server` | RFC 8414 metadata document. |
 | `POST` | `/register` | Dynamic client registration (RFC 7591). Returns a `client_id`/`client_secret`. |
-| `GET` | `/authorize` | Authorization endpoint. Requires `client_id`, `redirect_uri`, `response_type=code`, `code_challenge`, `code_challenge_method=S256`, optional `state`. `code_challenge` is the SHA-256 of the verifier in base64url without padding: exactly 43 characters of `A-Z a-z 0-9 - _`, or `400 invalid_request`. |
+| `GET` | `/authorize` | Authorization endpoint. Requires `client_id`, `redirect_uri`, `response_type=code`, `code_challenge`, `code_challenge_method=S256`, optional `state`. `code_challenge` is the SHA-256 of the verifier in base64url without padding: exactly 43 characters of `A-Z a-z 0-9 - _`, or `400 invalid_request`. `code_challenge_method` may be left out; any value but `S256`, such as `plain`, is `400 invalid_request` too. |
 | `POST` | `/token` | Token endpoint. Exchanges `code` + `code_verifier` for an access token and, for every client but the web app's own, a [refresh token](#refresh-tokens). Exchanges a refresh token for the next pair. |
 | `POST` | `/revoke` | [Revocation](#revoking-a-refresh-token) (RFC 7009): `token` and `client_id`, as a form or JSON. |
 | `GET` | `/oauth/signin`, `/oauth/login/{provider}`, `/oauth/callback/{provider}`, `/oauth/cancel`, `/oauth/consent` | [Sign-in](#sign-in) pages and redirects. `404` with sign-in off. |

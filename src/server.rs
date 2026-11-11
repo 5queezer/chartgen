@@ -707,6 +707,15 @@ async fn oauth_authorize(
             .code_challenge
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_');
+    // The exchange verifies S256 only, so no other method is accepted and then
+    // treated as if it were S256. Left out, it is S256.
+    if params.code_challenge_method != "S256" {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "invalid_request", "error_description": "code_challenge_method must be S256"})),
+        )
+            .into_response();
+    }
     if !is_s256 {
         return (
             StatusCode::BAD_REQUEST,
@@ -3233,6 +3242,36 @@ mod tests {
             assert!(state.oauth.lock().unwrap().codes.is_empty());
             let ok = authorize_as(&app, "a", CHALLENGE).await;
             assert!(ok.status().is_redirection(), "{sign_in}: {}", ok.status());
+        }
+    }
+
+    /// The exchange verifies S256 and nothing else, and the metadata names S256 only. A
+    /// request naming another method used to be accepted and treated as S256.
+    #[tokio::test]
+    async fn a_code_challenge_method_other_than_s256_is_refused() {
+        for sign_in in [false, true] {
+            let (state, app) = authorize_app(sign_in);
+            for method in ["plain", "s256", "S512", ""] {
+                let query = format!("{CHALLENGE}&code_challenge_method={method}");
+                let refused = authorize_as(&app, "a", &query).await;
+                assert_eq!(
+                    refused.status(),
+                    StatusCode::BAD_REQUEST,
+                    "{sign_in} {method}"
+                );
+                let bytes = refused.into_body().collect().await.unwrap().to_bytes();
+                let body = String::from_utf8_lossy(&bytes);
+                assert!(body.contains("invalid_request"), "{body}");
+            }
+            assert!(state.oauth.lock().unwrap().codes.is_empty());
+            // Named, or left out as clients may: S256.
+            for query in [
+                format!("{CHALLENGE}&code_challenge_method=S256"),
+                CHALLENGE.into(),
+            ] {
+                let ok = authorize_as(&app, "a", &query).await;
+                assert!(ok.status().is_redirection(), "{sign_in}: {}", ok.status());
+            }
         }
     }
 

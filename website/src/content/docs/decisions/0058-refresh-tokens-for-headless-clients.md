@@ -246,7 +246,8 @@ A family counts as a token of its client, in every limit that counts tokens.
   client stored a code for 5 minutes, with a `code_challenge` of any length. Now a client
   keeps 20, its own oldest dropped first, the server keeps 2000 and then answers `429` with
   `Retry-After: 60` instead of dropping someone else's, and a `code_challenge` must be 43
-  base64url characters, in both modes. With sign-in off 100 free client ids can hold
+  base64url characters, in both modes. A `code_challenge_method` other than `S256` is
+  refused there as well: it used to be accepted and treated as S256. With sign-in off 100 free client ids can hold
   `/authorize` at `429` for everyone while they keep asking, bounded by `/register`'s rate
   limit per address, and a browser sent there meanwhile lands on that answer with no way
   back. That is left as it is here: a public server should have sign-in on.
