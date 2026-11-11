@@ -138,7 +138,7 @@ web app's and gets `403` from `/workspace/sync`.
 ### An access token after a restart
 
 The row of a family's usable refresh token also holds the SHA-256 of the access token that
-was issued with it. It is written in the same transaction, at the code exchange and at each
+was issued with it, in a column that a second migration adds to the table. It is written in the same transaction, at the code exchange and at each
 refresh, and never by a request that uses the token. A spent row loses it.
 
 At startup these hashes are loaded. The first request that carries a matching token makes

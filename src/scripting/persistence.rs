@@ -110,10 +110,12 @@ pub(super) const MIGRATIONS: &[&str] = &[
         client_id   TEXT    NOT NULL,
         user_id     TEXT,
         created_at  INTEGER NOT NULL,
-        spent_at    INTEGER,
-        access_hash TEXT
+        spent_at    INTEGER
     );
     CREATE INDEX refresh_tokens_family ON refresh_tokens (family);
+",
+    "
+    ALTER TABLE refresh_tokens ADD COLUMN access_hash TEXT;
 ",
 ];
 

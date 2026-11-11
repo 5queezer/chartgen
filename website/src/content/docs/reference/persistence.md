@@ -163,7 +163,7 @@ CREATE TABLE refresh_tokens (
     user_id     TEXT,                   -- users.id, or NULL when issued with sign-in off
     created_at  INTEGER NOT NULL,
     spent_at    INTEGER,                -- when it was exchanged; kept to recognise reuse
-    access_hash TEXT                    -- SHA-256 hex of the access token issued with it, while unspent
+    access_hash TEXT                    -- migration 8; SHA-256 hex of the access token issued with it, while unspent
 );
 CREATE INDEX refresh_tokens_family ON refresh_tokens (family);
 -- Migration 3: server alerts (ADR-0042).

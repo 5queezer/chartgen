@@ -1226,6 +1226,83 @@ fn a_file_from_before_refresh_tokens_upgrades_and_stores_them() {
     assert_eq!(store.refresh_tokens(0).unwrap(), [row]);
 }
 
+fn refresh_columns(store_path: &std::path::Path) -> Vec<String> {
+    let conn = rusqlite::Connection::open(store_path).unwrap();
+    let mut stmt = conn
+        .prepare("SELECT name FROM pragma_table_info('refresh_tokens')")
+        .unwrap();
+    let names = stmt.query_map([], |r| r.get(0)).unwrap();
+    names.collect::<Result<_, _>>().unwrap()
+}
+
+/// The table as it was first created, before the hash of the access token was kept.
+const REFRESH_TOKENS_WITHOUT_ACCESS_HASH: &str = "
+    CREATE TABLE refresh_tokens (
+        token_hash  TEXT    PRIMARY KEY,
+        family      TEXT    NOT NULL,
+        seq         INTEGER NOT NULL,
+        client_id   TEXT    NOT NULL,
+        user_id     TEXT,
+        created_at  INTEGER NOT NULL,
+        spent_at    INTEGER
+    );
+    CREATE INDEX refresh_tokens_family ON refresh_tokens (family);
+    INSERT INTO refresh_tokens VALUES ('old', 'f', 0, 'c1', NULL, 1000, NULL);
+";
+
+/// The table came first and the column for the access token's hash after it, as two
+/// migrations. A file that has the table without the column gains it, keeps its
+/// rows, and ends with the columns a new file has: the ones the queries use.
+#[test]
+fn a_refresh_tokens_table_from_before_the_access_hash_gains_the_column() {
+    let table = persistence::MIGRATIONS
+        .iter()
+        .position(|sql| sql.contains("CREATE TABLE refresh_tokens"))
+        .unwrap();
+    let mut setup: Vec<String> = persistence::MIGRATIONS[..table]
+        .iter()
+        .map(|sql| sql.to_string())
+        .collect();
+    setup.push(REFRESH_TOKENS_WITHOUT_ACCESS_HASH.to_string());
+    setup.push(format!("PRAGMA user_version = {};", table + 1));
+    let setup: Vec<&str> = setup.iter().map(String::as_str).collect();
+    let store = upgraded("upgrade-access-hash", &setup);
+
+    let old = &store.refresh_tokens(0).unwrap()[0];
+    assert_eq!((old.token_hash.as_str(), &old.access_hash), ("old", &None));
+    // Stored and used: the next token of that family, with its access token's hash.
+    let next = refresh_row("new", "f", 1);
+    store
+        .save_refresh_token(&next, &["old".to_string()], 0)
+        .unwrap();
+    let rows = store.refresh_tokens(0).unwrap();
+    assert_eq!(rows.iter().find(|r| r.spent_at.is_none()), Some(&next));
+
+    let dir = std::env::temp_dir().join(format!(
+        "chartgen-upgrade-access-hash-{}",
+        std::process::id()
+    ));
+    let fresh = upgraded("fresh-access-hash", &[]);
+    drop((store, fresh));
+    let columns = refresh_columns(&dir.join("s.db"));
+    assert_eq!(
+        columns,
+        [
+            "token_hash",
+            "family",
+            "seq",
+            "client_id",
+            "user_id",
+            "created_at",
+            "spent_at",
+            "access_hash"
+        ]
+    );
+    let fresh_dir =
+        std::env::temp_dir().join(format!("chartgen-fresh-access-hash-{}", std::process::id()));
+    assert_eq!(refresh_columns(&fresh_dir.join("s.db")), columns);
+}
+
 #[test]
 fn a_rotation_is_stored_whole_or_not_at_all() {
     let store = upgraded("refresh-rotation", &[]);
