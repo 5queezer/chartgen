@@ -631,6 +631,14 @@ impl Store {
         rows.collect()
     }
 
+    /// The owners of at least one setup, closed ones included (ADR-0059).
+    pub fn setup_owners(&self) -> rusqlite::Result<HashSet<String>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare("SELECT DISTINCT owner FROM setups")?;
+        let rows = stmt.query_map([], |r| r.get(0))?;
+        rows.collect()
+    }
+
     /// Delete clients registered over `max_age_secs` ago that never received
     /// a token and own no scripts; returns how many. An owner of a server alert
     /// has received one.

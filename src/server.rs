@@ -488,13 +488,17 @@ fn with_resource_metadata(mut resp: Response, path: &str) -> Response {
     resp
 }
 
-/// The client ids owning stored scripts, and server alerts while those are on (an
-/// off feature has no one to run them for, so its rows pin nobody); `None` if that
-/// cannot be determined. Scripts live in the store, so without one nobody owns any.
+/// The client ids owning stored scripts, and server alerts or setups while those are
+/// on (an off feature has no one to run them for, so its rows pin nobody); `None` if
+/// that cannot be determined. Scripts live in the store, so without one nobody owns any.
 fn script_owners() -> Option<HashSet<String>> {
     #[cfg(feature = "scripting")]
     if let Some(store) = scripting::persistence::global() {
-        return pinned_clients(store, crate::server_alerts::enabled())
+        let (alerts, setups) = (
+            crate::server_alerts::enabled(),
+            crate::setup_service::enabled(),
+        );
+        return pinned_clients(store, alerts, setups)
             .map_err(|e| eprintln!("[OAuth] cannot read script owners: {e}"))
             .ok();
     }
@@ -505,10 +509,14 @@ fn script_owners() -> Option<HashSet<String>> {
 fn pinned_clients(
     store: &scripting::persistence::Store,
     alerts_on: bool,
+    setups_on: bool,
 ) -> rusqlite::Result<HashSet<String>> {
     let mut owners = store.script_owners()?;
     if alerts_on {
         owners.extend(store.server_alert_owners()?);
+    }
+    if setups_on {
+        owners.extend(store.setup_owners()?);
     }
     Ok(owners)
 }
@@ -3332,9 +3340,39 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let store = scripting::persistence::Store::open(&dir.join("s.db")).unwrap();
         store.save_server_alert("a1", "owner", "{}").unwrap();
-        assert!(pinned_clients(&store, true).unwrap().contains("owner"));
-        assert!(pinned_clients(&store, false).unwrap().is_empty());
+        assert!(pinned_clients(&store, true, false)
+            .unwrap()
+            .contains("owner"));
+        assert!(pinned_clients(&store, false, false).unwrap().is_empty());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// With sign-in off a setup belongs to an OAuth client. Evicting that client would
+    /// leave its setups scored and counted with nobody able to read them (ADR-0059).
+    #[cfg(feature = "scripting")]
+    #[test]
+    fn a_setup_owner_is_pinned_only_while_setups_are_on() {
+        let store = scripting::persistence::Store::in_memory().unwrap();
+        store
+            .save_setups(&[scripting::persistence::StoredSetup {
+                id: "s1".into(),
+                owner: "owner".into(),
+                record: "{}".into(),
+                revisions: vec![],
+            }])
+            .unwrap();
+        assert!(pinned_clients(&store, false, true)
+            .unwrap()
+            .contains("owner"));
+        assert!(pinned_clients(&store, false, false).unwrap().is_empty());
+
+        // And it is not evicted to make room, as a script owner is not.
+        let mut s = full_table();
+        let owner = s.clients.keys().next().unwrap().clone();
+        let pinned = HashSet::from([owner.clone()]);
+        s.make_room(|| Some(pinned)).unwrap();
+        assert!(s.clients.contains_key(&owner));
+        assert_eq!(s.clients.len(), MAX_CLIENTS - 1);
     }
 
     #[test]
