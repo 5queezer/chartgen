@@ -68,7 +68,8 @@ the server sets (`status`, `result_r`, `fill`, `exit`, `costs`) is refused by na
 
 **Least risk.** The invalidation must be at least 3 round-trip costs from the entry:
 `3 × 2 × (fee + slippage)` of the price, 42 bps with the assumption below. A stop a hair from the
-entry would turn any move into many R.
+entry would turn any move into many R. The floor does not apply to a skip's bracket, which the
+agent does not choose.
 
 ### Status
 
