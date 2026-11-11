@@ -813,6 +813,88 @@ mod tests {
         }
     }
 
+    /// What durable tokens are for, with setups: an agent's setup belongs to the owner
+    /// its token resolves to, and the agent must find it again when the server has
+    /// restarted and when its access token has been replaced by a refresh. With sign-in
+    /// off the owner is the client, so this holds only because the client's tokens
+    /// outlive the restart.
+    #[cfg(feature = "scripting")]
+    #[tokio::test]
+    async fn a_setup_is_found_again_by_its_owner_after_a_restart_and_a_refresh() {
+        use crate::setup_service::{Limits, Setups};
+        fn setups_on(path: &std::path::Path) -> Arc<Setups> {
+            let hub = ChartHub::new(
+                Arc::new(crate::chart_push::SampleSource),
+                crate::chart_push::Limits::default(),
+            );
+            Setups::new(
+                Box::leak(Box::new(Store::open(path).unwrap())),
+                Some(hub),
+                None,
+                crate::fetch::DataSource::Sample,
+                crate::server_alerts::Access::parse(None),
+                Limits::default(),
+                None,
+            )
+        }
+        fn call(s: &Setups, tool: &str, args: Value, owner: &str) -> Value {
+            let answer = s.call_tool(tool, None, &args, Some(owner));
+            assert_eq!(answer["result"]["isError"], Value::Null, "{answer}");
+            serde_json::from_str(answer["result"]["content"][0]["text"].as_str().unwrap()).unwrap()
+        }
+
+        for (with_sign_in, user) in [(false, None), (true, Some("github:1"))] {
+            let (store, path) = temp_store(&format!("setup-owner-{with_sign_in}"));
+            let before = started(&store, with_sign_in, &[CLIENT]);
+            let (access, refresh) = authorize(&before, CLIENT, user, &to(&store)).await;
+            let was = owner(&before, &access).unwrap();
+            assert_eq!(was, user.unwrap_or(CLIENT));
+
+            let p = chartgen::data::sample_ohlcv("BTCUSDT", "1m", 1, None, crate::fetch::now_ms())
+                .unwrap()
+                .bars[0]
+                .close;
+            let setup = json!({
+                "symbol": "BTCUSDT", "interval": "1h", "direction": "long",
+                "thesis": "example thesis", "entry": { "low": p * 0.5, "high": p * 0.51 },
+                "invalidation": p * 0.4, "targets": [p * 0.9],
+                "expires_at": crate::fetch::now_ms() + 86_400_000,
+            });
+            let service = setups_on(&path);
+            let made = call(&service, "create_setup", setup, &was);
+            drop(service);
+
+            // The process is replaced. The same access token resolves to the same owner,
+            // and that owner's setup is there.
+            let after = started(&store, with_sign_in, &[CLIENT]);
+            let now = owner(&after, &access).unwrap();
+            assert_eq!(now, was);
+            let service = setups_on(&path);
+            let list = call(&service, "list_setups", json!({}), &now);
+            assert_eq!(list["total"], 1);
+            assert_eq!(list["setups"][0]["id"], made["id"]);
+
+            // The access token is replaced by a refresh. A new string, the same owner.
+            let (next_access, _) = exchange(&after, &refresh.unwrap(), CLIENT, &to(&store))
+                .await
+                .unwrap();
+            assert_ne!(next_access, access);
+            let refreshed = owner(&after, &next_access).unwrap();
+            assert_eq!(refreshed, was);
+            let got = call(
+                &service,
+                "get_setup",
+                json!({ "id": made["id"] }),
+                &refreshed,
+            );
+            assert_eq!(got["thesis"], "example thesis");
+            // Anyone else still sees nothing.
+            let other = call(&service, "list_setups", json!({}), "another-owner");
+            assert_eq!(other["total"], 0);
+            let _ = std::fs::remove_dir_all(path.parent().unwrap());
+        }
+    }
+
     /// The 7 days of an access token count from when it was issued.
     #[tokio::test]
     async fn a_restart_adds_nothing_to_an_access_tokens_lifetime() {

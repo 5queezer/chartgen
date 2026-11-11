@@ -195,7 +195,7 @@ fn field_problem(field: &str, message: impl Into<String>) -> String {
 
 impl Setups {
     #[allow(clippy::too_many_arguments)]
-    fn new(
+    pub(crate) fn new(
         store: &'static Store,
         hub: Option<Arc<ChartHub>>,
         replay: Option<&'static Replay>,
