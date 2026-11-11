@@ -93,8 +93,9 @@ pub fn global() -> Option<&'static Replay> {
     TEST.with(Cell::get)
 }
 
-/// Run `test` on a replay server.
-#[cfg(test)]
+/// Run `test` on a replay server. Its callers are the setup tests, which exist with
+/// the `scripting` feature only.
+#[cfg(all(test, feature = "scripting"))]
 pub fn on<T>(replay: Replay, test: impl FnOnce(&'static Replay) -> T) -> T {
     let replay: &'static Replay = Box::leak(Box::new(replay));
     let before = TEST.with(|t| t.replace(Some(replay)));
