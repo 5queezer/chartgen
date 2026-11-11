@@ -1478,6 +1478,18 @@ async fn mcp_call(
         .unwrap();
         return streamable_http_json_response(StatusCode::OK, result, session_id.as_deref());
     }
+    // The event log is its owner's, as alerts and setups are (ADR-0061).
+    if tool == Some("list_events") {
+        let owner = call_owner(&state);
+        let id = id.clone();
+        let args = params.and_then(|p| p.get("arguments")).cloned();
+        let result = tokio::task::spawn_blocking(move || {
+            event_call(id, args.unwrap_or(json!({})), owner.as_deref())
+        })
+        .await
+        .unwrap();
+        return streamable_http_json_response(StatusCode::OK, result, session_id.as_deref());
+    }
     // On a replay server a call is answered as of the time it names, or not at all.
     let replay_at = match (crate::replay::global(), tool) {
         (Some(replay), Some(tool)) => {
@@ -1553,7 +1565,7 @@ async fn mcp_call(
     .unwrap();
 
     let result = if method == "tools/list" {
-        with_setup_tools(with_server_alert_tools(result))
+        with_event_tools(with_setup_tools(with_server_alert_tools(result)))
     } else {
         result
     };
@@ -1584,6 +1596,28 @@ fn setup_call(tool: &str, id: Option<Value>, args: Value, owner: Option<&str>) -
         return crate::mcp::tool_ok(id, json!({ "enabled": false, "setups": [] }));
     }
     crate::mcp::tool_err(id, "Setups are off on this server")
+}
+
+/// `list_events`; without the store there is no log to read.
+#[cfg_attr(not(feature = "scripting"), allow(unused_variables))]
+fn event_call(id: Option<Value>, args: Value, owner: Option<&str>) -> Value {
+    #[cfg(feature = "scripting")]
+    return crate::event_log::call_tool(id, &args, owner);
+    #[cfg(not(feature = "scripting"))]
+    crate::mcp::tool_err(id, "The event log is off on this server")
+}
+
+/// `list_events` is listed only where there is a log: with alerts or setups on, and
+/// not on a replay.
+#[cfg_attr(not(feature = "scripting"), allow(unused_mut))]
+fn with_event_tools(mut result: Value) -> Value {
+    #[cfg(feature = "scripting")]
+    if crate::event_log::enabled() {
+        if let Some(tools) = result["result"]["tools"].as_array_mut() {
+            tools.extend(chartgen::mcp_schema::event_tools());
+        }
+    }
+    result
 }
 
 /// The setup tools are listed only where they run (`CHARTGEN_SETUPS=1`, or a replay).

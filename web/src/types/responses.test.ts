@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import answers from "../../../tests/fixtures/setup_responses.json";
 import {
+  EventsPayloadSchema,
   ListIndicatorsPayloadSchema,
   SeriesPayloadSchema,
   SetupPayloadSchema,
@@ -225,5 +226,63 @@ describe("setups (ADR-0059), against the server's own answers", () => {
   it("refuses a status the server never sends", () => {
     const bad = { ...answers.get_setup, status: "lost" };
     expect(SetupPayloadSchema.safeParse(bad).success).toBe(false);
+  });
+});
+
+describe("list_events (ADR-0061)", () => {
+  const fired = {
+    seq: 1,
+    id: "e-1",
+    type: "alert.fired",
+    at: 1_700_000_000_000,
+    alert_id: "a-1",
+    setup_id: "s-1",
+    what: {
+      price: 101.5,
+      level: 100,
+      condition: "greater",
+      bar_time: 1_700_000_000,
+      fire_count: 1,
+    },
+    delivery: "delivered",
+  };
+  const status = {
+    seq: 2,
+    id: "e-2",
+    type: "setup.status",
+    at: 1_700_000_060_000,
+    setup_id: "s-1",
+    what: { from: "triggered", to: "won", gap: false, result_r: 2 },
+    delivery: "none",
+  };
+
+  it("parses both kinds of event and the paging fields", () => {
+    const p = EventsPayloadSchema.parse({
+      events: [fired, status],
+      cursor: 2,
+      more: false,
+      truncated: false,
+    });
+    expect(p.events.map((e) => e.type)).toEqual([
+      "alert.fired",
+      "setup.status",
+    ]);
+    expect(p.events[1]?.alert_id).toBeUndefined();
+  });
+
+  it("rejects a kind or a delivery state it does not know", () => {
+    const page = { cursor: 1, more: false, truncated: false };
+    expect(() =>
+      EventsPayloadSchema.parse({
+        ...page,
+        events: [{ ...fired, type: "other" }],
+      }),
+    ).toThrow();
+    expect(() =>
+      EventsPayloadSchema.parse({
+        ...page,
+        events: [{ ...fired, delivery: "lost" }],
+      }),
+    ).toThrow();
   });
 });

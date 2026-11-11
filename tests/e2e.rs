@@ -2156,7 +2156,8 @@ mod server_alerts {
 
     /// The real binary: an alert about a setup wakes the agent's receiver with a
     /// signed body that carries the setup, on a receiver that answers, one that
-    /// keeps failing, and one that is not there. On none of these paths does the
+    /// keeps failing, also a minute later, and one that is not there. Each fire is in
+    /// the owner's event log, whatever became of its wake-up. On none of these paths does the
     /// thesis or the note, or the receiver's path, reach what the server prints.
     #[test]
     fn test_a_wake_up_reaches_the_agents_receiver_and_no_log_holds_its_body() {
@@ -2198,6 +2199,30 @@ mod server_alerts {
             };
             wait_for("the wake-up's outcome", || outcome().is_some());
             let alert = outcome().unwrap();
+            assert!(tool_names(port).contains(&"list_events".to_string()));
+            // The fire is in the owner's log however its wake-up went, and the log
+            // says what happened without the thesis or the note.
+            let logged = || {
+                let log = call_tool(port, &token, "list_events", serde_json::json!({})).unwrap();
+                assert!(!log.to_string().contains(PRIVATE), "{log}");
+                assert_eq!(log["events"].as_array().unwrap().len(), 1, "{log}");
+                assert_eq!(
+                    (log["cursor"].clone(), log["more"].clone()),
+                    (1.into(), false.into())
+                );
+                log["events"][0].clone()
+            };
+            let event = logged();
+            assert_eq!(event["type"], "alert.fired", "{event}");
+            assert_eq!(event["alert_id"], id.as_str());
+            assert_eq!(event["setup_id"], setup.as_str());
+            assert!(event["what"]["price"].is_number(), "{event}");
+            let waits = if status == Some("200 OK") {
+                "delivered"
+            } else {
+                "waiting"
+            };
+            assert_eq!(event["delivery"], waits, "{name}: {event}");
             match status {
                 Some("200 OK") => {
                     assert_eq!(alert["last_status"], 200, "{alert}");
@@ -2216,11 +2241,19 @@ mod server_alerts {
                 }
                 Some(_) => {
                     assert_eq!(alert["last_status"], 503, "{alert}");
-                    assert_eq!(
-                        seen.lock().unwrap().len(),
-                        3,
-                        "three attempts, then given up"
-                    );
+                    assert_eq!(seen.lock().unwrap().len(), 3, "three quick attempts");
+                    // It is not given up: the log holds it, and a minute later the
+                    // server tries again by itself.
+                    for _ in 0..900 {
+                        if seen.lock().unwrap().len() > 3 {
+                            break;
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(100));
+                    }
+                    assert_eq!(seen.lock().unwrap().len(), 4, "the attempt a minute later");
+                    wait_for("the later attempt's outcome", || {
+                        logged()["delivery"] == "waiting"
+                    });
                 }
                 None => assert_eq!(alert["last_error"], "could not connect", "{alert}"),
             }
