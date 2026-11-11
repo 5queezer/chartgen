@@ -19,7 +19,7 @@ use uuid::Uuid;
 use crate::chart_push::{ChartHub, PushCtx, STREAM_BUFFER};
 use crate::mcp::handle_mcp_request;
 use chartgen::engine::Engine as TradingEngine;
-use chartgen::mcp_schema::SERVER_ALERT_TOOLS;
+use chartgen::mcp_schema::{SERVER_ALERT_TOOLS, SETUP_TOOLS};
 #[cfg(feature = "scripting")]
 use chartgen::scripting;
 
@@ -1446,6 +1446,47 @@ async fn mcp_call(
         .and_then(|p| p.get("name"))
         .and_then(|n| n.as_str())
         .filter(|n| method == "tools/call" && SERVER_ALERT_TOOLS.contains(n));
+    let call_owner = |state: &Arc<AppState>| {
+        token_owned
+            .as_deref()
+            .and_then(|t| state.oauth.lock().unwrap().owner_for_token(t))
+    };
+    let tool = params
+        .and_then(|p| p.get("name"))
+        .and_then(|n| n.as_str())
+        .filter(|_| method == "tools/call");
+    // A setup belongs to the token's user, or with sign-in off to its OAuth client, as
+    // an alert does (ADR-0059).
+    if let Some(tool) = tool.filter(|n| SETUP_TOOLS.contains(n)) {
+        let owner = call_owner(&state);
+        let (tool, id) = (tool.to_string(), id.clone());
+        let args = params.and_then(|p| p.get("arguments")).cloned();
+        let result = tokio::task::spawn_blocking(move || {
+            setup_call(&tool, id, args.unwrap_or(json!({})), owner.as_deref())
+        })
+        .await
+        .unwrap();
+        return streamable_http_json_response(StatusCode::OK, result, session_id.as_deref());
+    }
+    // On a replay server a call is answered as of the time it names, or not at all.
+    let replay_at = match (crate::replay::global(), tool) {
+        (Some(replay), Some(tool)) => {
+            let owner = call_owner(&state).unwrap_or_default();
+            let args = params.and_then(|p| p.get("arguments"));
+            match replay.admit(tool, args.unwrap_or(&Value::Null), &owner) {
+                Ok(at) => at,
+                Err(e) => {
+                    let refused = crate::mcp::tool_err(id.clone(), &e);
+                    return streamable_http_json_response(
+                        StatusCode::OK,
+                        refused,
+                        session_id.as_deref(),
+                    );
+                }
+            }
+        }
+        _ => None,
+    };
     if let Some(tool) = alert_tool {
         // An alert belongs to the token's user, or with sign-in off to its OAuth client
         // (ADR-0042, ADR-0044).
@@ -1487,21 +1528,23 @@ async fn mcp_call(
         client: push_client,
     });
     let result = tokio::task::spawn_blocking(move || {
-        handle_mcp_request(
-            &method_owned,
-            id,
-            params_owned.as_ref(),
-            engine.as_ref(),
-            token_owned.as_deref(),
-            push.as_ref(),
-            user.as_deref(),
-        )
+        crate::replay::at(replay_at, || {
+            handle_mcp_request(
+                &method_owned,
+                id,
+                params_owned.as_ref(),
+                engine.as_ref(),
+                token_owned.as_deref(),
+                push.as_ref(),
+                user.as_deref(),
+            )
+        })
     })
     .await
     .unwrap();
 
     let result = if method == "tools/list" {
-        with_server_alert_tools(result)
+        with_setup_tools(with_server_alert_tools(result))
     } else {
         result
     };
@@ -1519,6 +1562,68 @@ fn server_alert_call(tool: &str, id: Option<Value>, args: Value, owner: Option<&
         return crate::mcp::tool_ok(id, json!({ "enabled": false, "alerts": [] }));
     }
     crate::mcp::tool_err(id, "Server alerts are off on this server")
+}
+
+/// A setup tool call; on a server without setups only the list answers.
+#[cfg_attr(not(feature = "scripting"), allow(unused_variables))]
+fn setup_call(tool: &str, id: Option<Value>, args: Value, owner: Option<&str>) -> Value {
+    #[cfg(feature = "scripting")]
+    if let Some(setups) = crate::setup_service::global() {
+        return setups.call_tool(tool, id, &args, owner);
+    }
+    if tool == "list_setups" {
+        return crate::mcp::tool_ok(id, json!({ "enabled": false, "setups": [] }));
+    }
+    crate::mcp::tool_err(id, "Setups are off on this server")
+}
+
+/// The setup tools are listed only where they run (`CHARTGEN_SETUPS=1`, or a replay).
+#[cfg_attr(not(feature = "scripting"), allow(unused_mut))]
+fn with_setup_tools(mut result: Value) -> Value {
+    #[cfg(feature = "scripting")]
+    if crate::setup_service::global().is_some() {
+        if let Some(tools) = result["result"]["tools"].as_array_mut() {
+            tools.extend(chartgen::mcp_schema::setup_tools());
+        }
+    }
+    result
+}
+
+/// Make this a replay server if `CHARTGEN_REPLAY_FIXTURES` says so (ADR-0059). A replay
+/// answers from fixtures only, so it refuses to be anything else as well: no engine, no
+/// sign-in, no server alerts.
+fn start_replay(has_engine: bool) -> Result<(), String> {
+    let Some(dir) = crate::replay::fixtures_dir() else {
+        return Ok(());
+    };
+    let live = [
+        (has_engine, "--trade"),
+        (
+            std::env::var("CHARTGEN_SERVER_ALERTS").is_ok_and(|v| v == "1"),
+            "CHARTGEN_SERVER_ALERTS=1",
+        ),
+        (
+            std::env::var("CHARTGEN_SETUPS").is_ok_and(|v| v == "1"),
+            "CHARTGEN_SETUPS=1 (a replay has setups of its own)",
+        ),
+        (
+            !matches!(signin::Config::from_env(), Ok(None)),
+            "a sign-in provider",
+        ),
+    ];
+    if let Some((_, what)) = live.iter().find(|(on, _)| *on) {
+        return Err(format!(
+            "CHARTGEN_REPLAY_FIXTURES cannot be combined with {what}: a replay server answers from fixtures only"
+        ));
+    }
+    #[cfg_attr(not(feature = "scripting"), allow(unused_variables))]
+    let replay = crate::replay::start(&dir)?;
+    #[cfg(feature = "scripting")]
+    crate::setup_service::start_replay(replay)?;
+    println!(
+        "Replay server: answers come from the fixtures in {dir}, as of the time each call names"
+    );
+    Ok(())
 }
 
 /// The alert tools are listed only where they run (`CHARTGEN_SERVER_ALERTS=1`).
@@ -1797,6 +1902,10 @@ impl Drop for CleanupStream {
 // --- Server startup ---
 
 pub async fn run_server(port: u16, engine: Option<Arc<RwLock<TradingEngine>>>) {
+    if let Err(e) = start_replay(engine.is_some()) {
+        eprintln!("{e}");
+        std::process::exit(2);
+    }
     #[cfg_attr(not(feature = "scripting"), allow(unused_mut))]
     let mut oauth = OAuthStore::new();
     match signin::Config::from_env() {
@@ -1914,6 +2023,8 @@ pub async fn run_server(port: u16, engine: Option<Arc<RwLock<TradingEngine>>>) {
     });
     #[cfg(feature = "scripting")]
     crate::server_alerts::start(&state.charts);
+    #[cfg(feature = "scripting")]
+    crate::setup_service::start(&state.charts);
     refresh::sweep_now_and_then(state.clone());
 
     // Store port for metadata endpoint

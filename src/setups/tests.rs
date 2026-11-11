@@ -643,6 +643,34 @@ fn a_bar_with_impossible_prices_is_not_a_bar() {
     }
 }
 
+// One principle: a bar that does not say which level it reached first counts the
+// worse outcome for the agent. Two exceptions end unfilled, at 0 R.
+
+#[test]
+fn a_bar_reaching_zone_and_invalidation_is_a_fill_and_a_stop() {
+    let mut r = create(long_args());
+    r.apply_bar(&bar(0, 101.5, 101.6, 97.9, 98.5));
+    assert_eq!(r.status, Status::Invalidated);
+    assert_eq!(r.fill.unwrap().price, 101.0);
+    assert!(r.result_r.unwrap() < -1.0);
+}
+
+#[test]
+fn a_bar_opening_beyond_the_invalidation_ends_unfilled() {
+    let mut r = create(short_args());
+    r.apply_bar(&bar(0, 103.5, 104.0, 100.5, 100.8));
+    assert_eq!(r.status, Status::Invalidated);
+    assert_eq!((r.fill, r.result_r), (None, Some(0.0)));
+}
+
+#[test]
+fn a_bar_reaching_the_invalidation_but_never_the_zone_ends_unfilled() {
+    let mut r = create(long_args());
+    r.apply_bar(&bar(0, 99.5, 99.8, 97.5, 98.2));
+    assert_eq!(r.status, Status::Invalidated);
+    assert_eq!((r.fill, r.result_r), (None, Some(0.0)));
+}
+
 /// A stored price must read back as the same number, or a setup's levels would move
 /// by a hair at every restart. serde_json only promises that with `float_roundtrip`.
 #[test]

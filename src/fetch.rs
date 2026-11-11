@@ -22,6 +22,11 @@ pub(crate) const MAX_BASE_BARS: usize = 20 * BINANCE_MAX_LIMIT;
 pub enum DataSource {
     Live,
     Sample,
+    /// Fixture bars closed by `as_of` (ADR-0059). Without a time it answers nothing:
+    /// a caller that forgot the cut must not get the newest bar there is.
+    Replay {
+        as_of: Option<i64>,
+    },
     /// Always fails, for exercising upstream-error paths in tests.
     #[cfg(test)]
     Unavailable,
@@ -29,7 +34,11 @@ pub enum DataSource {
 
 impl DataSource {
     pub fn from_env() -> Self {
-        if data::sample_source() {
+        if crate::replay::global().is_some() {
+            DataSource::Replay {
+                as_of: crate::replay::clock(),
+            }
+        } else if data::sample_source() {
             DataSource::Sample
         } else {
             DataSource::Live
@@ -82,16 +91,39 @@ pub fn fetch_ohlcv(
             "binance" => fetch_binance(symbol, interval, limit, end_time_ms),
             _ => fetch_yahoo(symbol, interval, limit, end_time_ms),
         },
+        DataSource::Replay { as_of } => {
+            let (replay, as_of) = replay_at(as_of)?;
+            let (bars, has_more) = replay.bars(symbol, interval, limit, as_of, end_time_ms)?;
+            Ok(Fetched {
+                data: OhlcvData {
+                    bars,
+                    symbol: None,
+                    interval: None,
+                    session: None,
+                },
+                has_more,
+            })
+        }
         #[cfg(test)]
         DataSource::Unavailable => Err("upstream unavailable".into()),
     }
 }
 
+/// The replay and the time to cut at, or why a replay read cannot be answered.
+fn replay_at(as_of: Option<i64>) -> Result<(&'static crate::replay::Replay, i64), String> {
+    let replay = crate::replay::global().ok_or("this server is not a replay")?;
+    let as_of = as_of.ok_or("a replay read needs as_of")?;
+    Ok((replay, as_of))
+}
+
+/// Now, in ms. Inside a replay's call it is the time that call asks about.
 pub fn now_ms() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(0)
+    crate::replay::clock().unwrap_or_else(|| {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0)
+    })
 }
 
 /// Shared blocking HTTP client; every upstream request times out after 10 s.
@@ -1814,6 +1846,21 @@ pub fn fetch_quotes(source: DataSource, symbols: &[String]) -> Vec<Result<Quote,
             |syms| fetch_binance_quotes(syms, binance_get),
             fetch_yahoo_quote,
         ),
+        DataSource::Replay { as_of } => symbols
+            .iter()
+            .map(|symbol| {
+                let (replay, as_of) = replay_at(as_of)?;
+                let (last, prev_close, high, low, volume) = replay.quote(symbol, as_of)?;
+                Ok(Quote {
+                    last,
+                    prev_close,
+                    high: Some(high),
+                    low: Some(low),
+                    volume: Some(volume),
+                    source: "replay",
+                })
+            })
+            .collect(),
         #[cfg(test)]
         DataSource::Unavailable => symbols
             .iter()

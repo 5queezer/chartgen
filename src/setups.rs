@@ -287,7 +287,8 @@ impl MinuteBar {
     }
 }
 
-fn text(args: &Value, field: &str, max: usize, problems: &mut Vec<Problem>) -> Option<String> {
+/// A required, bounded string field.
+pub fn text(args: &Value, field: &str, max: usize, problems: &mut Vec<Problem>) -> Option<String> {
     match args.get(field) {
         None | Some(Value::Null) => {
             problems.push(Problem::new(field, format!("{field} is required")));
@@ -367,7 +368,7 @@ const SERVER_FIELDS: [&str; 9] = [
     "created_at",
     "scored_through",
 ];
-const LEVEL_FIELDS: [&str; 4] = ["entry", "invalidation", "targets", "expires_at"];
+pub const LEVEL_FIELDS: [&str; 4] = ["entry", "invalidation", "targets", "expires_at"];
 
 /// Refuse fields a tool does not take.
 pub fn check_fields(args: &Value, allowed: &[&str], problems: &mut Vec<Problem>) {
@@ -376,12 +377,15 @@ pub fn check_fields(args: &Value, allowed: &[&str], problems: &mut Vec<Problem>)
         return;
     };
     for key in map.keys() {
+        if allowed.contains(&key.as_str()) {
+            continue;
+        }
         if SERVER_FIELDS.contains(&key.as_str()) {
             problems.push(
                 Problem::new(key, format!("{key} is set by the server"))
                     .hint("the server moves a setup from the price feed; leave this out"),
             );
-        } else if !allowed.contains(&key.as_str()) {
+        } else {
             problems.push(Problem::new(
                 key,
                 format!("{key} is not a field of this tool"),
@@ -792,7 +796,7 @@ impl Record {
     }
 
     /// The levels as they will be once every pending change has taken effect.
-    fn latest_levels(&self) -> &Levels {
+    pub fn latest_levels(&self) -> &Levels {
         self.pending
             .iter()
             .rev()
