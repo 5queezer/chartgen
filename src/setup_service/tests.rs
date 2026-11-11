@@ -94,7 +94,7 @@ impl Drop for Dir {
 /// A store in a file, for a test that restarts the service on it. Keep the `Dir` for
 /// as long as the store is used.
 fn store_at(name: &str) -> (&'static Store, Dir) {
-    let dir = std::env::temp_dir().join(format!("chartgen-setups-{name}-{}", std::process::id()));
+    let dir = crate::test_dir::new(format!("chartgen-setups-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let dir = Dir(dir);

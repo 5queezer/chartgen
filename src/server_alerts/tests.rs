@@ -54,7 +54,7 @@ impl PushSource for Fake {
 }
 
 fn store_at(name: &str) -> (&'static Store, std::path::PathBuf) {
-    let dir = std::env::temp_dir().join(format!(
+    let dir = crate::test_dir::new(format!(
         "chartgen-server-alerts-{name}-{}",
         std::process::id()
     ));

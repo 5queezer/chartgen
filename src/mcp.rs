@@ -3511,7 +3511,7 @@ mod tests {
     use std::path::PathBuf;
 
     fn temp_dir(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("chartgen_mcp_test_{name}"));
+        let dir = crate::test_dir::new(format!("chartgen_mcp_test_{name}"));
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::create_dir_all(&dir);
         dir
@@ -7759,11 +7759,12 @@ mod drawing_tests {
 mod scripting_tests {
     use super::*;
 
-    /// One store per test process (the store is process-wide); tests use
+    /// One store per test process (the store is process-wide), in memory: it outlives
+    /// every test, so a file of its own would be left behind by every run. Tests use
     /// distinct users, so they don't see each other's scripts.
     fn user() -> String {
-        let path = std::env::temp_dir().join(format!("chartgen-mcp-{}.db", std::process::id()));
-        scripting::persistence::open_global(&path).expect("test store");
+        scripting::persistence::open_global_in_memory();
+        assert!(scripting::persistence::global().is_some(), "test store");
         format!("client-{}", uuid::Uuid::new_v4())
     }
 
