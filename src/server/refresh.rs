@@ -184,7 +184,8 @@ impl OAuthStore {
                 continue;
             }
             // The 7 days count from when it was issued: a restart adds nothing. What is
-            // left is counted from now, since `Instant` cannot name a time before boot.
+            // left is counted from now: not every platform's `Instant` can name a time
+            // before the process could have started.
             let left = ACCESS_TOKEN_SECS.saturating_sub((now - r.created_at).max(0) as u64);
             let access = r
                 .access_hash
