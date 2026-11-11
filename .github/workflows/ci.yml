@@ -408,12 +408,23 @@ jobs:
             --push .
       # Two pushes close together finish in any order. `master` names the image of
       # master's head, so a run whose commit is no longer the head leaves it alone.
+      # The look at the head and the write of the tag are two steps, and another run
+      # can come between them: so after writing, look again, and if master has moved
+      # on meanwhile, give the tag to the head's image if it is there. If it is not
+      # there yet, the head's own run moves the tag when it gets here. What deploys
+      # goes by the commit SHA, never by this tag; nothing here fails the run.
       - name: Move the master tag
         if: ${{ github.ref == 'refs/heads/master' }}
         run: |
           head=$(git ls-remote origin refs/heads/master | cut -f1)
-          if [ "$head" = "$GITHUB_SHA" ]; then
-            docker buildx imagetools create --tag "$IMAGE:master" "$IMAGE:$GITHUB_SHA"
-          else
+          if [ "$head" != "$GITHUB_SHA" ]; then
             echo "master is at $head by now; the master tag stays with the newer run"
+            exit 0
+          fi
+          docker buildx imagetools create --tag "$IMAGE:master" "$IMAGE:$GITHUB_SHA"
+          head=$(git ls-remote origin refs/heads/master | cut -f1)
+          if [ -n "$head" ] && [ "$head" != "$GITHUB_SHA" ]; then
+            echo "master moved to $head while the tag was written"
+            docker buildx imagetools create --tag "$IMAGE:master" "$IMAGE:$head" ||
+              echo "the image of $head is not there yet; its own run moves the tag"
           fi
