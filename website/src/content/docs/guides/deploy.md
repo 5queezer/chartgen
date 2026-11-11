@@ -58,6 +58,9 @@ a token. See [what a signed-in stranger can still do](/chartgen/decisions/0044-s
 | `CHARTGEN_SERVER_ALERTS` | `src/server_alerts.rs` | `1` enables [alerts on the server](/chartgen/guides/web/#alerts-on-the-server): four MCP tools, and **Run on server** in the web app. Off when unset; alerts already stored wait in `chartgen.db`, and pin nobody. Needs a build with the `scripting` feature, which the Docker image has, and the store. Read [before turning it on](#server-alerts). |
 | `CHARTGEN_SERVER_ALERT_CLIENTS` | `src/server_alerts.rs` | Comma-separated OAuth client ids, or with [sign-in](#sign-in-through-github-and-google) on, accounts (`github:<id>`, `google:<sub>`), that may create server alerts and use webhooks. Unset: anyone may create alerts, nobody gets webhooks. `*`: anyone, with webhooks. |
 | `CHARTGEN_SERVER_ALERT_PAIRS_PER_CLIENT` | `src/server_alerts.rs` | Symbol and interval pairs one client may watch. Default 2. |
+| `CHARTGEN_SETUPS` | `src/setup_service.rs` | `1` enables [setups](/chartgen/guides/setups/): five MCP tools for trading setups the server scores on paper. Off when unset; setups already stored wait in `chartgen.db`. Needs a build with the `scripting` feature and the store. It does not need `CHARTGEN_SERVER_ALERTS`. Read [before turning it on](#setups). |
+| `CHARTGEN_SETUP_SYMBOLS_PER_OWNER` | `src/setup_service.rs` | Symbols one owner may have open setups on. Default 5. |
+| `CHARTGEN_REPLAY_FIXTURES` | `src/replay.rs` | A directory of 1m fixture bars. Set, the server is a [replay server](/chartgen/guides/setups/#replay): it answers only from those bars, as of the time each call names, and refuses to start with `--trade`, `--mcp`, `CHARTGEN_SERVER_ALERTS=1`, `CHARTGEN_SETUPS=1` or a sign-in provider. For evaluation, not for a public server. |
 | `CHARTGEN_WEBHOOK_PROXY` | `src/webhook.rs` | `http` or `https` URL of a proxy that sends the webhooks, so a receiver does not see this server's address. Unset means direct, ignoring `HTTPS_PROXY` and the like. |
 | `CHARTGEN_VAPID_SUBJECT` | `src/server_alerts.rs` | `mailto:` or `https:` URL where push services can reach you. Falls back to an https `CHARTGEN_BASE_URL`; with neither, [browser push](#browser-push) stays off. |
 | `CHARTGEN_VAPID_PRIVATE_KEY` | `src/server_alerts.rs` | Application server key for push, 32 bytes of base64url. Unset, one is made once and kept in `chartgen.db`. Changing it stops every device until its browser next opens chartgen. |
@@ -174,6 +177,25 @@ ten accounts, a debug build stayed under 97 MB in a 256 MiB container. A build w
 then keeps each account's data apart in the browser and syncs nothing
 ([ADR-0050](/chartgen/decisions/0050-per-user-workspace-sync/)). Back up the file as you would any
 user data.
+
+### Setups
+
+`CHARTGEN_SETUPS` is off by default. A setup sends nothing anywhere, but each symbol with an
+open setup holds one of the server's **16 watched pairs**, which setups share with
+[server alerts](#server-alerts). An alert and a setup on the same symbol are one pair.
+
+- **Who may create setups** follows `CHARTGEN_SERVER_ALERT_CLIENTS`, whether or not alerts are
+  on. Where it lists accounts, only those may. Unset or `*`, anyone who can get a token may.
+- **On a public server, list the accounts you trust.** Otherwise strangers can hold all 16
+  pairs: four accounts with open setups on 5 symbols each are enough, and with sign-in off
+  client ids are free. Your own agent is then refused a new symbol, and new alerts on new
+  symbols are refused too.
+- `CHARTGEN_SETUP_SYMBOLS_PER_OWNER` raises or lowers the 5 symbols per owner. The 16 is a
+  constant in the server; it cannot be raised without building it.
+- Closed setups are kept as the track record and are not deleted for inactivity. An owner
+  holds at most 500 setups and 4 MiB, the server 20,000 and 256 MiB.
+- After a restart or a deploy, the server reads the 1m bars each open setup missed, once per
+  symbol and at most 1000 bars, through the same rate limits as a chart.
 
 ### Server alerts
 
