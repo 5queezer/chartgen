@@ -392,7 +392,7 @@ impl Setups {
     }
 
     /// The time of a call. On a replay server it is the `as_of` the call names, which
-    /// moves the caller's clock and its setups up to it.
+    /// moves the server's one clock, and the caller's setups, up to it.
     fn now(&self, args: &Value, owner: &str) -> Result<i64, String> {
         let as_of = args.get("as_of").filter(|v| !v.is_null());
         let Some(replay) = self.replay else {
