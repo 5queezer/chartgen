@@ -76,12 +76,34 @@ async fn until(what: &str, mut done: impl FnMut() -> bool) {
     panic!("timed out waiting: {what}");
 }
 
-fn store_at(name: &str) -> (&'static Store, std::path::PathBuf) {
+/// A directory for a test's store file, removed when the test ends.
+struct Dir(std::path::PathBuf);
+
+impl Dir {
+    fn db(&self) -> std::path::PathBuf {
+        self.0.join("store.db")
+    }
+}
+
+impl Drop for Dir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// A store in a file, for a test that restarts the service on it. Keep the `Dir` for
+/// as long as the store is used.
+fn store_at(name: &str) -> (&'static Store, Dir) {
     let dir = std::env::temp_dir().join(format!("chartgen-setups-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
-    let path = dir.join("store.db");
-    (reopen(&path), path)
+    let dir = Dir(dir);
+    (reopen(&dir.db()), dir)
+}
+
+/// A store in memory, for every test that does not restart: it leaves no file.
+fn mem() -> &'static Store {
+    Box::leak(Box::new(Store::in_memory().unwrap()))
 }
 
 fn reopen(path: &std::path::Path) -> &'static Store {
@@ -110,14 +132,8 @@ fn live_on(
     )
 }
 
-fn live(name: &str) -> Arc<Setups> {
-    live_on(
-        store_at(name).0,
-        hub(),
-        Access::parse(None),
-        Limits::default(),
-        None,
-    )
+fn live() -> Arc<Setups> {
+    live_on(mem(), hub(), Access::parse(None), Limits::default(), None)
 }
 
 fn call(s: &Setups, tool: &str, args: Value, owner: &str) -> Result<Value, String> {
@@ -210,7 +226,7 @@ fn kinds(setup: &Value) -> Vec<&str> {
 
 #[tokio::test]
 async fn a_setup_is_created_read_and_listed() {
-    let s = live("create");
+    let s = live();
     let setup = created(&s, "owner");
     assert_eq!(setup["status"], "watching");
     assert_eq!(setup["symbol"], "BTCUSDT");
@@ -234,7 +250,7 @@ async fn a_setup_is_created_read_and_listed() {
 
 #[tokio::test]
 async fn every_problem_is_reported_at_once_and_nothing_is_stored() {
-    let s = live("problems");
+    let s = live();
     let mut args = long();
     args.as_object_mut().unwrap().remove("invalidation");
     args["symbol"] = json!("AAPL");
@@ -255,7 +271,7 @@ async fn every_problem_is_reported_at_once_and_nothing_is_stored() {
 
 #[tokio::test]
 async fn drawings_are_checked_by_the_chart_validator() {
-    let s = live("drawings");
+    let s = live();
     let now = fetch::now_ms();
     // A wrong point count, and a time before the first bar read.
     for bad in [
@@ -288,7 +304,7 @@ async fn drawings_are_checked_by_the_chart_validator() {
 
 #[tokio::test]
 async fn another_owner_cannot_read_revise_or_cancel() {
-    let s = live("owners");
+    let s = live();
     let id = id_of(&created(&s, "owner"));
     let missing = "00000000-0000-4000-8000-000000000000";
     for (tool, extra) in [
@@ -328,7 +344,7 @@ async fn another_owner_cannot_read_revise_or_cancel() {
 
 #[tokio::test]
 async fn non_binance_symbol_is_refused() {
-    let s = live("symbol");
+    let s = live();
     let text = call(&s, "create_setup", long_on("AAPL"), "owner").unwrap_err();
     assert_eq!(errors(&text), ["symbol"]);
 }
@@ -342,13 +358,7 @@ async fn limits_hold_per_owner() {
         changes_per_minute: 7,
         ..Limits::default()
     };
-    let s = live_on(
-        store_at("limits").0,
-        hub(),
-        Access::parse(None),
-        limits,
-        None,
-    );
+    let s = live_on(mem(), hub(), Access::parse(None), limits, None);
     let first = id_of(&created(&s, "owner"));
     call(&s, "create_setup", long_on("ETHUSDT"), "owner").unwrap();
     // A third symbol is one too many; a second setup on a watched one is not.
@@ -388,13 +398,7 @@ async fn totals_hold_and_keep_closed_setups() {
         setups_per_owner: 1,
         ..Limits::default()
     };
-    let s = live_on(
-        store_at("totals").0,
-        hub(),
-        Access::parse(None),
-        limits,
-        None,
-    );
+    let s = live_on(mem(), hub(), Access::parse(None), limits, None);
     let setup = created(&s, "owner");
     let p = mid(&setup);
     // Opens beyond the invalidation: closed, unfilled.
@@ -418,15 +422,7 @@ async fn totals_hold_and_keep_closed_setups() {
 
 #[tokio::test]
 async fn bytes_are_bounded_per_record_revision_and_owner() {
-    let small = |limits: Limits| {
-        live_on(
-            store_at("bytes").0,
-            hub(),
-            Access::parse(None),
-            limits,
-            None,
-        )
-    };
+    let small = |limits: Limits| live_on(mem(), hub(), Access::parse(None), limits, None);
     let record = small(Limits {
         record_bytes: 300,
         ..Limits::default()
@@ -464,13 +460,7 @@ async fn bytes_are_bounded_per_record_revision_and_owner() {
 #[tokio::test]
 async fn an_owner_the_operator_did_not_list_cannot_create() {
     let access = Access::parse(Some("github:1"));
-    let s = live_on(
-        store_at("allowlist").0,
-        hub(),
-        access,
-        Limits::default(),
-        None,
-    );
+    let s = live_on(mem(), hub(), access, Limits::default(), None);
     let text = created_err(&s, "github:2");
     assert!(text.contains("its operator allowed"), "{text}");
     assert_eq!(
@@ -484,7 +474,7 @@ async fn an_owner_the_operator_did_not_list_cannot_create() {
 /// they hold no feed and are not scored, as ADR-0042 stops such an owner's alerts.
 #[tokio::test]
 async fn setups_of_an_owner_taken_off_the_list_hold_no_feed_and_are_not_scored() {
-    let (store, path) = store_at("unlisted");
+    let (store, dir) = store_at("unlisted");
     let both = Access::parse(Some("github:1,github:2"));
     let s = live_on(store, hub(), both, Limits::default(), None);
     let kept = created(&s, "github:1");
@@ -493,7 +483,7 @@ async fn setups_of_an_owner_taken_off_the_list_hold_no_feed_and_are_not_scored()
     drop(s);
 
     let only_one = Access::parse(Some("github:1"));
-    let s = live_on(reopen(&path), hub(), only_one, Limits::default(), None);
+    let s = live_on(reopen(&dir.db()), hub(), only_one, Limits::default(), None);
     assert_eq!(s.pairs(), HashSet::from([key()]));
     // A bar through its entry and its invalidation leaves it as it was.
     let (t, p) = (first_bar(&dropped), mid(&dropped));
@@ -517,7 +507,7 @@ async fn setups_of_an_owner_taken_off_the_list_hold_no_feed_and_are_not_scored()
     // Back on the list, it is watched again and is behind like any setup the server was
     // away from: the bars it missed are read if they are in reach, else named as a gap.
     let s = live_on(
-        reopen(&path),
+        reopen(&dir.db()),
         hub(),
         Access::parse(Some("github:1,github:2")),
         Limits::default(),
@@ -550,7 +540,7 @@ fn alert(a: &Arc<ServerAlerts>, symbol: &str) -> Value {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn alerts_and_setups_share_the_servers_watched_pairs() {
-    let (store, hub) = (store_at("pairs").0, hub());
+    let (store, hub) = (mem(), hub());
     let alerts = alerts_on(store, hub.clone(), 2);
     let limits = Limits {
         pairs_total: 2,
@@ -601,7 +591,7 @@ async fn alerts_and_setups_share_the_servers_watched_pairs() {
 async fn creates_at_the_same_moment_cannot_pass_the_shared_pair_limit() {
     const PAIRS: usize = 3;
     for round in 0..12 {
-        let (store, hub) = (store_at(&format!("race-{round}")).0, hub());
+        let (store, hub) = (mem(), hub());
         let alerts = alerts_on(store, hub.clone(), PAIRS);
         let limits = Limits {
             pairs_total: PAIRS,
@@ -643,7 +633,7 @@ async fn creates_at_the_same_moment_cannot_pass_the_shared_pair_limit() {
 
 #[tokio::test]
 async fn bars_move_a_setup_and_its_log_is_kept() {
-    let (store, path) = store_at("bars");
+    let (store, dir) = store_at("bars");
     let s = live_on(store, hub(), Access::parse(None), Limits::default(), None);
     let setup = created(&s, "owner");
     let (id, t, p) = (id_of(&setup), first_bar(&setup), mid(&setup));
@@ -662,7 +652,7 @@ async fn bars_move_a_setup_and_its_log_is_kept() {
     // A restart: the setup, its fill and its log are as they were, and scoring goes on.
     drop(s);
     let s = live_on(
-        reopen(&path),
+        reopen(&dir.db()),
         hub(),
         Access::parse(None),
         Limits::default(),
@@ -690,13 +680,7 @@ async fn bars_move_a_setup_and_its_log_is_kept() {
 async fn a_setup_moves_on_the_hubs_closed_bars_only() {
     let told = Arc::new(Told::default());
     let hub = ChartHub::new(told.clone(), HubLimits::default());
-    let s = live_on(
-        store_at("hub").0,
-        hub,
-        Access::parse(None),
-        Limits::default(),
-        None,
-    );
+    let s = live_on(mem(), hub, Access::parse(None), Limits::default(), None);
     let setup = {
         let s = s.clone();
         tokio::task::spawn_blocking(move || created(&s, "owner"))
@@ -755,7 +739,7 @@ async fn a_setup_moves_on_the_hubs_closed_bars_only() {
 
 #[tokio::test]
 async fn revise_and_cancel_go_to_the_log_and_wait_for_the_next_bar() {
-    let s = live("revise");
+    let s = live();
     let setup = created(&s, "owner");
     let (id, t, p) = (id_of(&setup), first_bar(&setup), mid(&setup));
     let args = json!({ "id": id, "reason": "more room", "invalidation": p * 0.94,
@@ -808,7 +792,7 @@ async fn revise_and_cancel_go_to_the_log_and_wait_for_the_next_bar() {
 
 #[tokio::test]
 async fn skip_is_stored_and_scored_with_the_default_bracket() {
-    let s = live("skip");
+    let s = live();
     let args = json!({ "symbol": "BTCUSDT", "interval": "1h", "direction": "short",
         "decision": "skip", "thesis": "example reason" });
     let skip = call(&s, "create_setup", args.clone(), "owner").unwrap();
@@ -868,9 +852,9 @@ fn flat_bars(minutes: usize, dip: std::ops::Range<usize>) -> Replay {
 }
 
 /// A live service whose reads of missed bars come from the bars a test chose.
-fn live_reading_chosen_bars(name: &str) -> Arc<Setups> {
+fn live_reading_chosen_bars() -> Arc<Setups> {
     Setups::new(
-        store_at(name).0,
+        mem(),
         Some(hub()),
         None,
         DataSource::Replay {
@@ -898,7 +882,7 @@ fn long_made_at(s: &Setups, minute: i64, owner: &str) -> Value {
 #[tokio::test]
 async fn bars_the_server_missed_are_read_and_scored_in_order() {
     crate::replay::on(flat_bars(3000, 50..52), |_| {
-        let s = live_reading_chosen_bars("missed");
+        let s = live_reading_chosen_bars();
         // Made at minute 10, with the server down until the bar of minute 100.
         let quiet = long_made_at(&s, 60, "quiet");
         let dipped = long_made_at(&s, 10, "dipped");
@@ -925,7 +909,7 @@ async fn bars_the_server_missed_are_read_and_scored_in_order() {
 #[tokio::test]
 async fn bars_out_of_reach_are_named_as_a_gap() {
     crate::replay::on(flat_bars(3000, 0..0), |_| {
-        let s = live_reading_chosen_bars("gap");
+        let s = live_reading_chosen_bars();
         let old = long_made_at(&s, 10, "owner");
         // Further back than one read reaches: the stretch not scored is in the log.
         s.on_bar(&key(), bar(at_minute(2500), 100.0, 100.1, 99.9, 100.0));
@@ -949,7 +933,7 @@ async fn bars_out_of_reach_are_named_as_a_gap() {
 async fn a_read_of_missed_bars_that_fails_is_a_gap_too() {
     // No bars for the symbol at all: the read fails.
     crate::replay::on(Replay::of(BTreeMap::new()), |_| {
-        let s = live_reading_chosen_bars("gap-failed");
+        let s = live_reading_chosen_bars();
         let setup = long_made_at(&s, 10, "owner");
         s.on_bar(&key(), bar(at_minute(40), 100.0, 100.1, 99.9, 100.0));
         let gapped = call(&s, "get_setup", json!({ "id": id_of(&setup) }), "owner").unwrap();
@@ -962,7 +946,7 @@ async fn a_read_of_missed_bars_that_fails_is_a_gap_too() {
 
 #[tokio::test]
 async fn a_stored_row_that_cannot_be_read_is_skipped_and_never_scored() {
-    let (store, path) = store_at("bad-rows");
+    let (store, dir) = store_at("bad-rows");
     let s = live_on(store, hub(), Access::parse(None), Limits::default(), None);
     let good = created(&s, "owner");
     let mut broken: Value = serde_json::from_str(&store.setups().unwrap()[0].0).unwrap();
@@ -982,7 +966,7 @@ async fn a_stored_row_that_cannot_be_read_is_skipped_and_never_scored() {
         .unwrap();
     drop(s);
     let s = live_on(
-        reopen(&path),
+        reopen(&dir.db()),
         hub(),
         Access::parse(None),
         Limits::default(),
@@ -995,12 +979,12 @@ async fn a_stored_row_that_cannot_be_read_is_skipped_and_never_scored() {
     let p = mid(&good);
     s.on_bar(&key(), bar(first_bar(&good), p, p * 1.2, p * 0.5, p));
     // The rows are still there, untouched.
-    assert_eq!(reopen(&path).setups().unwrap().len(), 3);
+    assert_eq!(reopen(&dir.db()).setups().unwrap().len(), 3);
 }
 
 #[tokio::test]
 async fn as_of_is_refused_outside_replay_mode() {
-    let s = live("as-of");
+    let s = live();
     let mut args = long();
     args["as_of"] = json!(fetch::now_ms());
     let text = call(&s, "create_setup", args, "owner").unwrap_err();
