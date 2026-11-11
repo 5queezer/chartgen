@@ -156,6 +156,12 @@ fn long() -> Value {
     long_on("BTCUSDT")
 }
 
+/// The price `long_on` built a setup around. Bars a test sends are placed against
+/// this, never against a second reading of the sample series, which moves by the second.
+fn mid(setup: &Value) -> f64 {
+    setup["entry"]["high"].as_f64().unwrap() / 0.98
+}
+
 fn created(s: &Setups, owner: &str) -> Value {
     call(s, "create_setup", long(), owner).unwrap()
 }
@@ -390,7 +396,7 @@ async fn totals_hold_and_keep_closed_setups() {
         None,
     );
     let setup = created(&s, "owner");
-    let p = price("BTCUSDT");
+    let p = mid(&setup);
     // Opens beyond the invalidation: closed, unfilled.
     s.on_bar(
         &key(),
@@ -548,7 +554,7 @@ async fn bars_move_a_setup_and_its_log_is_kept() {
     let (store, path) = store_at("bars");
     let s = live_on(store, hub(), Access::parse(None), Limits::default(), None);
     let setup = created(&s, "owner");
-    let (id, t, p) = (id_of(&setup), first_bar(&setup), price("BTCUSDT"));
+    let (id, t, p) = (id_of(&setup), first_bar(&setup), mid(&setup));
     let get = |s: &Setups| call(s, "get_setup", json!({ "id": id }), "owner").unwrap();
 
     s.on_bar(&key(), bar(t, p, p * 1.001, p * 0.999, p));
@@ -605,7 +611,7 @@ async fn a_setup_moves_on_the_hubs_closed_bars_only() {
             .await
             .unwrap()
     };
-    let (id, t, p) = (id_of(&setup), first_bar(&setup) / 1000, price("BTCUSDT"));
+    let (id, t, p) = (id_of(&setup), first_bar(&setup) / 1000, mid(&setup));
     let status = |s: &Setups| {
         let st = s.lock();
         let record = &st.setups[&("owner".to_string(), id.clone())].record;
@@ -659,7 +665,7 @@ async fn a_setup_moves_on_the_hubs_closed_bars_only() {
 async fn revise_and_cancel_go_to_the_log_and_wait_for_the_next_bar() {
     let s = live("revise");
     let setup = created(&s, "owner");
-    let (id, t, p) = (id_of(&setup), first_bar(&setup), price("BTCUSDT"));
+    let (id, t, p) = (id_of(&setup), first_bar(&setup), mid(&setup));
     let args = json!({ "id": id, "reason": "more room", "invalidation": p * 0.94,
         "thesis": "second thesis" });
     let revised = call(&s, "revise_setup", args, "owner").unwrap();
@@ -747,37 +753,111 @@ async fn skip_is_stored_and_scored_with_the_default_bracket() {
     assert_eq!(errors(&text), ["invalidation"]);
 }
 
-#[tokio::test]
-async fn bars_the_server_missed_are_read_or_named_as_a_gap() {
-    let s = live("gap");
-    // Made 90 minutes ago, with the server down since.
-    let then = fetch::now_ms() - 90 * MINUTE_MS;
-    let setup = crate::replay::at(Some(then), || created(&s, "owner"));
-    assert_eq!(setup["created_at"], json!(then));
-    let now_bar = (fetch::now_ms() - MINUTE_MS).div_euclid(MINUTE_MS) * MINUTE_MS;
-    let p = price("BTCUSDT");
-    s.on_bar(&key(), bar(now_bar, p, p * 1.001, p * 0.999, p));
-    let caught_up = call(&s, "get_setup", json!({ "id": id_of(&setup) }), "owner").unwrap();
-    // The sample bars in between were read and applied: no gap, and nothing triggered,
-    // since they stay within a few percent of the price.
-    assert_eq!(kinds(&caught_up), ["created"]);
-    assert_eq!(caught_up["scored_through"], json!(now_bar));
+/// 1m bars the test chooses, flat at 100 but for a dip to 90.5 in `dip`. The catch-up
+/// read gets these and nothing that moves with the wall clock.
+fn flat_bars(minutes: usize, dip: std::ops::Range<usize>) -> Replay {
+    let bars = (0..minutes)
+        .map(|i| {
+            let low = if dip.contains(&i) { 90.5 } else { 99.9 };
+            Bar {
+                open: 100.0,
+                high: 100.1,
+                low,
+                close: 100.0,
+                volume: 1.0,
+                date: (T0 + i as i64 * 60).to_string(),
+            }
+        })
+        .collect();
+    Replay::of(BTreeMap::from([("BTCUSDT".to_string(), bars)]))
+}
 
-    // Further back than one read reaches: the stretch not scored is in the log.
-    let long_ago = fetch::now_ms() - 3 * 1440 * MINUTE_MS;
-    let old = crate::replay::at(Some(long_ago), || {
-        let mut args = long();
-        args["expires_at"] = json!(long_ago + 30 * 86_400_000);
-        call(&s, "create_setup", args, "other").unwrap()
+/// A live service whose reads of missed bars come from the bars a test chose.
+fn live_reading_chosen_bars(name: &str) -> Arc<Setups> {
+    Setups::new(
+        store_at(name).0,
+        Some(hub()),
+        None,
+        DataSource::Replay {
+            as_of: Some(i64::MAX / 4),
+        },
+        Access::parse(None),
+        Limits::default(),
+        None,
+    )
+}
+
+/// A long at 90 to 91, wrong at 85, made at `minute` past `T0`.
+fn long_made_at(s: &Setups, minute: i64, owner: &str) -> Value {
+    let then = T0_MS + minute * MINUTE_MS + 30_000;
+    crate::replay::at(Some(then), || {
+        let args = json!({
+            "symbol": "BTCUSDT", "interval": "1h", "direction": "long",
+            "thesis": "example thesis", "entry": { "low": 90.0, "high": 91.0 },
+            "invalidation": 85.0, "targets": [120.0], "expires_at": then + 30 * 86_400_000,
+        });
+        call(s, "create_setup", args, owner).unwrap()
+    })
+}
+
+#[tokio::test]
+async fn bars_the_server_missed_are_read_and_scored_in_order() {
+    crate::replay::on(flat_bars(3000, 50..52), |_| {
+        let s = live_reading_chosen_bars("missed");
+        // Made at minute 10, with the server down until the bar of minute 100.
+        let quiet = long_made_at(&s, 60, "quiet");
+        let dipped = long_made_at(&s, 10, "dipped");
+        s.on_bar(&key(), bar(at_minute(100), 100.0, 100.1, 99.9, 100.0));
+
+        // Nothing came near this one: no gap, nothing moved, and it is up to date.
+        let quiet = call(&s, "get_setup", json!({ "id": id_of(&quiet) }), "quiet").unwrap();
+        assert_eq!(kinds(&quiet), ["created"]);
+        assert_eq!(quiet["status"], "watching");
+        assert_eq!(quiet["scored_through"], json!(at_minute(100)));
+
+        // This one was filled by a bar the server never saw arrive.
+        let dipped = call(&s, "get_setup", json!({ "id": id_of(&dipped) }), "dipped").unwrap();
+        assert_eq!(kinds(&dipped), ["created", "status"]);
+        assert_eq!(dipped["status"], "triggered");
+        assert_eq!(
+            dipped["fill"],
+            json!({ "price": 91.0, "bar_time": at_minute(50) })
+        );
     });
-    s.on_bar(&key(), bar(now_bar + MINUTE_MS, p, p * 1.001, p * 0.999, p));
-    let gapped = call(&s, "get_setup", json!({ "id": id_of(&old) }), "other").unwrap();
-    assert_eq!(kinds(&gapped)[..2], ["created", "gap"]);
-    let gap = &gapped["log"][1];
-    assert_eq!(gap["by"], "server");
-    assert_eq!(gap["changes"]["not_scored"]["from"], json!(first_bar(&old)));
-    let to = gap["changes"]["not_scored"]["to"].as_i64().unwrap();
-    assert_eq!(to, now_bar + MINUTE_MS - CATCH_UP_BARS * MINUTE_MS);
+}
+
+#[tokio::test]
+async fn bars_out_of_reach_are_named_as_a_gap() {
+    crate::replay::on(flat_bars(3000, 0..0), |_| {
+        let s = live_reading_chosen_bars("gap");
+        let old = long_made_at(&s, 10, "owner");
+        // Further back than one read reaches: the stretch not scored is in the log.
+        s.on_bar(&key(), bar(at_minute(2500), 100.0, 100.1, 99.9, 100.0));
+        let gapped = call(&s, "get_setup", json!({ "id": id_of(&old) }), "owner").unwrap();
+        assert_eq!(kinds(&gapped), ["created", "gap"]);
+        let gap = &gapped["log"][1];
+        assert_eq!(gap["by"], "server");
+        assert_eq!(
+            gap["changes"]["not_scored"],
+            json!({ "from": at_minute(11), "to": at_minute(2500 - CATCH_UP_BARS) })
+        );
+        assert_eq!(gapped["scored_through"], json!(at_minute(2500)));
+    });
+}
+
+#[tokio::test]
+async fn a_read_of_missed_bars_that_fails_is_a_gap_too() {
+    // No bars for the symbol at all: the read fails.
+    crate::replay::on(Replay::of(BTreeMap::new()), |_| {
+        let s = live_reading_chosen_bars("gap-failed");
+        let setup = long_made_at(&s, 10, "owner");
+        s.on_bar(&key(), bar(at_minute(40), 100.0, 100.1, 99.9, 100.0));
+        let gapped = call(&s, "get_setup", json!({ "id": id_of(&setup) }), "owner").unwrap();
+        assert_eq!(
+            gapped["log"][1]["changes"]["not_scored"],
+            json!({ "from": at_minute(11), "to": at_minute(40) })
+        );
+    });
 }
 
 #[tokio::test]
@@ -812,7 +892,7 @@ async fn a_stored_row_that_cannot_be_read_is_skipped_and_never_scored() {
     assert_eq!(list["total"], 1);
     assert_eq!(list["setups"][0]["id"], good["id"]);
     assert!(call(&s, "get_setup", json!({ "id": "broken" }), "owner").is_err());
-    let p = price("BTCUSDT");
+    let p = mid(&good);
     s.on_bar(&key(), bar(first_bar(&good), p, p * 1.2, p * 0.5, p));
     // The rows are still there, untouched.
     assert_eq!(reopen(&path).setups().unwrap().len(), 3);
