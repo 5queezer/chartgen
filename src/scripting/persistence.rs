@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
 /// Schema migrations; `PRAGMA user_version` is the number applied.
-const MIGRATIONS: &[&str] = &[
+pub(super) const MIGRATIONS: &[&str] = &[
     "
     CREATE TABLE user_indicators (
         user_id      TEXT    NOT NULL,
@@ -101,6 +101,21 @@ const MIGRATIONS: &[&str] = &[
         seq      INTEGER NOT NULL,
         bytes    INTEGER NOT NULL
     );
+",
+    "
+    CREATE TABLE refresh_tokens (
+        token_hash  TEXT    PRIMARY KEY,
+        family      TEXT    NOT NULL,
+        seq         INTEGER NOT NULL,
+        client_id   TEXT    NOT NULL,
+        user_id     TEXT,
+        created_at  INTEGER NOT NULL,
+        spent_at    INTEGER
+    );
+    CREATE INDEX refresh_tokens_family ON refresh_tokens (family);
+",
+    "
+    ALTER TABLE refresh_tokens ADD COLUMN access_hash TEXT;
 ",
 ];
 
@@ -221,6 +236,25 @@ pub struct StoredSession {
     pub user_id: String,
     pub created_at: i64,
     pub expires_at: i64,
+}
+
+/// A refresh token (ADR-0058); only the hash of its value is stored. A family is one
+/// authorization: its tokens follow each other by `seq`, and at most one is unspent.
+#[derive(Clone, Debug, PartialEq)]
+pub struct StoredRefreshToken {
+    pub token_hash: String,
+    pub family: String,
+    pub seq: i64,
+    pub client_id: String,
+    /// `None` when issued with sign-in off.
+    pub user_id: Option<String>,
+    pub created_at: i64,
+    /// When it was exchanged, or 0 if a retry replaced it before it was exchanged;
+    /// kept so that using it again is recognised.
+    pub spent_at: Option<i64>,
+    /// The hash of the access token issued with it, while it is unspent: what lets
+    /// that access token outlive a restart.
+    pub access_hash: Option<String>,
 }
 
 /// A delivery not finished yet: written with the fire it reports, so a restart
@@ -425,12 +459,128 @@ impl Store {
         Ok(())
     }
 
+    /// Delete a client, and its refresh tokens with it (ADR-0058).
     pub fn delete_oauth_client(&self, client_id: &str) -> rusqlite::Result<()> {
-        self.conn().execute(
+        let mut conn = self.conn();
+        let tx = conn.transaction()?;
+        tx.execute(
+            "DELETE FROM refresh_tokens WHERE client_id = ?1",
+            params![client_id],
+        )?;
+        tx.execute(
             "DELETE FROM oauth_clients WHERE client_id = ?1",
             params![client_id],
         )?;
-        Ok(())
+        tx.commit()
+    }
+
+    /// Store `new` and mark `spent` as used at `spent_at`, in one transaction: a
+    /// rotation is on disk whole or not at all. `spent_at` is the time of the exchange,
+    /// or 0 for a token that was replaced before it was ever exchanged. Spent tokens of
+    /// the family below `forget_below_seq` are dropped, and with `spent_at` 0 the ones
+    /// replaced earlier. An error if a token of `spent`
+    /// is not a usable one here: the server spends only what it holds as usable, so
+    /// the file was changed from outside, and a successor would revive what was
+    /// deleted.
+    pub fn save_refresh_token(
+        &self,
+        new: &StoredRefreshToken,
+        spent: &[String],
+        spent_at: i64,
+        forget_below_seq: i64,
+    ) -> rusqlite::Result<()> {
+        let mut conn = self.conn();
+        let tx = conn.transaction()?;
+        // A retry replaces a successor, and only the newest replaced one is kept:
+        // before this one is marked, so that the count below is of this one alone.
+        if spent_at == 0 {
+            tx.execute(
+                "DELETE FROM refresh_tokens WHERE family = ?1 AND spent_at = 0",
+                params![new.family],
+            )?;
+        }
+        for hash in spent {
+            let usable = tx.execute(
+                "UPDATE refresh_tokens SET spent_at = ?2, access_hash = NULL
+                 WHERE token_hash = ?1 AND spent_at IS NULL",
+                params![hash, spent_at],
+            )?;
+            if usable != 1 {
+                return Err(rusqlite::Error::QueryReturnedNoRows);
+            }
+        }
+        tx.execute(
+            "DELETE FROM refresh_tokens WHERE family = ?1 AND spent_at IS NOT NULL AND seq < ?2",
+            params![new.family, forget_below_seq],
+        )?;
+        tx.execute(
+            "INSERT INTO refresh_tokens
+                 (token_hash, family, seq, client_id, user_id, created_at, spent_at, access_hash)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                new.token_hash,
+                new.family,
+                new.seq,
+                new.client_id,
+                new.user_id,
+                new.created_at,
+                new.spent_at,
+                new.access_hash
+            ],
+        )?;
+        tx.commit()
+    }
+
+    pub fn delete_refresh_families(&self, families: &[String]) -> rusqlite::Result<()> {
+        let mut conn = self.conn();
+        let tx = conn.transaction()?;
+        for family in families {
+            tx.execute(
+                "DELETE FROM refresh_tokens WHERE family = ?1",
+                params![family],
+            )?;
+        }
+        tx.commit()
+    }
+
+    /// Every stored refresh token, in the order they were stored; families whose
+    /// newest token is older than `cutoff` are deleted first, and of several unspent
+    /// tokens in one family all but the one stored last are marked replaced.
+    pub fn refresh_tokens(&self, cutoff: i64) -> rusqlite::Result<Vec<StoredRefreshToken>> {
+        let conn = self.conn();
+        conn.execute(
+            "DELETE FROM refresh_tokens WHERE family IN
+                 (SELECT family FROM refresh_tokens GROUP BY family HAVING MAX(created_at) < ?1)",
+            params![cutoff],
+        )?;
+        // A family has one unspent token. A build before the one that finishes a
+        // request whose client hung up could store a successor twice. The client
+        // holds the one stored last, so the others are marked replaced, here in the
+        // file: left as they are, every start would have to tell them apart again.
+        conn.execute(
+            "UPDATE refresh_tokens SET spent_at = 0, access_hash = NULL
+             WHERE spent_at IS NULL AND rowid <
+                 (SELECT MAX(rowid) FROM refresh_tokens AS newer
+                  WHERE newer.family = refresh_tokens.family AND newer.spent_at IS NULL)",
+            [],
+        )?;
+        let mut stmt = conn.prepare(
+            "SELECT token_hash, family, seq, client_id, user_id, created_at, spent_at, access_hash
+             FROM refresh_tokens ORDER BY rowid",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(StoredRefreshToken {
+                token_hash: r.get(0)?,
+                family: r.get(1)?,
+                seq: r.get(2)?,
+                client_id: r.get(3)?,
+                user_id: r.get(4)?,
+                created_at: r.get(5)?,
+                spent_at: r.get(6)?,
+                access_hash: r.get(7)?,
+            })
+        })?;
+        rows.collect()
     }
 
     /// The client ids that own at least one stored script.
@@ -954,7 +1104,23 @@ pub fn open_global(path: &Path) -> Option<&'static Store> {
         .as_ref()
 }
 
-/// The process-wide store at `db_path()`.
+/// Whether asking for the store may open it. Only `main` says so, and no test runs
+/// `main`: a test that reaches code asking for the store must not open, and migrate,
+/// the developer's own `~/.chartgen/chartgen.db`.
+static OPENS_ON_DEMAND: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Let `global()` open the store at `db_path()` when it is first asked for. For the
+/// start of a real process.
+pub fn open_on_demand() {
+    OPENS_ON_DEMAND.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The process-wide store: the one at `db_path()`, opened on first use, in a process
+/// that called `open_on_demand()`. Anywhere else, only a store that `open_global`
+/// already opened, and never a file of its own choosing.
 pub fn global() -> Option<&'static Store> {
-    open_global(&db_path())
+    if OPENS_ON_DEMAND.load(std::sync::atomic::Ordering::Relaxed) {
+        return open_global(&db_path());
+    }
+    STORE.get().and_then(Option::as_ref)
 }

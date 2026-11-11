@@ -24,8 +24,11 @@ for port in "$CHARTGEN_PORT" "$WEB_PORT"; do
 done
 
 tmp=$(mktemp -d)
+# The server's store: without CHARTGEN_DB it would be ~/.chartgen/chartgen.db, and every
+# page load of a run would register a client there, dated by the shifted clock.
+store=$(mktemp -d)
 server=
-trap '[ -z "$server" ] || kill "$server" 2>/dev/null; rm -rf "$tmp"' EXIT
+trap '[ -z "$server" ] || kill "$server" 2>/dev/null; rm -rf "$tmp" "$store"' EXIT
 trap 'exit 130' INT TERM # An unhandled signal would skip the EXIT trap.
 
 gcc -shared -fPIC -O1 -x c -o "$tmp/shift.so" - -ldl <<'C'
@@ -59,7 +62,8 @@ C
 
 cd "$(dirname "$0")/.."
 cargo build --quiet
-CHARTGEN_DATA_SOURCE=sample LD_PRELOAD="$tmp/shift.so" CLOCK_OFFSET_SECONDS=$offset \
+CHARTGEN_DATA_SOURCE=sample CHARTGEN_DB="$store/chartgen.db" \
+  LD_PRELOAD="$tmp/shift.so" CLOCK_OFFSET_SECONDS=$offset \
   target/debug/chartgen --serve --port "$CHARTGEN_PORT" > "$tmp/server.log" 2>&1 &
 server=$!
 for _ in $(seq 60); do listening "$CHARTGEN_PORT" && break; sleep 1; done

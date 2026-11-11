@@ -24,6 +24,7 @@ use chartgen::mcp_schema::SERVER_ALERT_TOOLS;
 use chartgen::scripting;
 
 mod listener;
+mod refresh;
 mod signin;
 mod workspace;
 
@@ -55,6 +56,18 @@ const MAX_CLIENT_NAME_LEN: usize = 256;
 /// their callback, so this is not an allow-list.
 const FORBIDDEN_REDIRECT_SCHEMES: [&str; 3] = ["javascript", "data", "vbscript"];
 const MAX_CLIENTS: usize = 1000;
+/// Pending authorization codes with sign-in off, where every `/authorize` for a
+/// registered client issues one: per client, the oldest of that client dropped, and on
+/// the whole server, past which `/authorize` answers `429` rather than drop a code
+/// somebody else is about to exchange. With sign-in on they are limited per user.
+const MAX_CODES_PER_CLIENT: usize = 20;
+const MAX_CODES: usize = 2000;
+/// Access tokens one client keeps with sign-in off that belong to no refresh token
+/// family: the web app's, and those of a client past its families. One more drops the
+/// oldest of them. A family's token is never dropped for this, so nobody who knows a
+/// client id can push out the token of an agent that uses it. With sign-in on the
+/// limits are per user (ADR-0044).
+const MAX_LOOSE_TOKENS_PER_CLIENT: usize = 100;
 /// Registrations per client address (the TCP peer) per `REGISTER_WINDOW`.
 /// Loopback peers are exempt: local tests and dev clients register freely,
 /// and behind a reverse proxy on the same host the peer is always loopback,
@@ -79,6 +92,9 @@ struct AuthCode {
 
 struct AccessToken {
     _token: String,
+    /// The refresh token family it came from, which takes it along when it ends
+    /// (ADR-0058); `None` for the web app's own client.
+    family: Option<String>,
     client_id: String,
     created_at: Instant,
     expires_in: Duration,
@@ -86,10 +102,18 @@ struct AccessToken {
     user: Option<signin::TokenUser>,
 }
 
+/// How long an access token is valid: 7 days.
+const ACCESS_TOKEN_SECS: u64 = 7 * 24 * 3600;
+
 struct OAuthStore {
     clients: HashMap<String, OAuthClient>,
     codes: HashMap<String, AuthCode>,
     tokens: HashMap<String, AccessToken>,
+    /// The refresh token families, spent tokens included (ADR-0058).
+    refresh: refresh::Families,
+    /// Access tokens from before the restart, by the hash of their value, which is all
+    /// the store has of them. The first request with one moves it to `tokens`.
+    restored: HashMap<String, AccessToken>,
     /// Recent `/register` calls per client address.
     registrations: HashMap<String, Vec<Instant>>,
     /// When a refused registration last logged, and refusals since.
@@ -106,6 +130,8 @@ impl OAuthStore {
             clients: HashMap::new(),
             codes: HashMap::new(),
             tokens: HashMap::new(),
+            refresh: refresh::Families::default(),
+            restored: HashMap::new(),
             registrations: HashMap::new(),
             refusal_logged_at: None,
             refusals_unlogged: 0,
@@ -219,7 +245,15 @@ impl OAuthStore {
             return Err(self.refuse_full());
         };
         self.cleanup_expired();
-        let live: HashSet<&str> = self.tokens.values().map(|t| t.client_id.as_str()).collect();
+        // A refresh token pins its client as an access token does (ADR-0058): after a
+        // restart it is all a headless client has left.
+        self.expire_refresh(chrono::Utc::now().timestamp());
+        let live: HashSet<&str> = self
+            .tokens
+            .values()
+            .map(|t| t.client_id.as_str())
+            .chain(self.refresh.clients())
+            .collect();
         let mut candidates: Vec<_> = self
             .clients
             .iter()
@@ -278,7 +312,30 @@ impl OAuthStore {
             .retain(|_, t| now.duration_since(t.created_at) < t.expires_in);
     }
 
+    /// Know an access token from before the restart again (ADR-0058). From here on it
+    /// is a token like any other, under the value the client sent.
+    fn adopt(&mut self, token: &str) {
+        if self.restored.is_empty() || self.tokens.contains_key(token) {
+            return;
+        }
+        let hash = signin::hash_of(token);
+        let Some(mut t) = self.restored.remove(&hash) else {
+            return;
+        };
+        // It lives through its family: one nobody used for 30 days has ended, whether
+        // or not the sweep has come by, and its access token with it.
+        if let Some(family) = &t.family {
+            if !self.live_family(family, chrono::Utc::now().timestamp()) {
+                return;
+            }
+            self.refresh.rekey(family, &hash, token);
+        }
+        t._token = token.to_string();
+        self.tokens.insert(token.to_string(), t);
+    }
+
     fn validate_token(&mut self, token: &str) -> bool {
+        self.adopt(token);
         self.cleanup_expired();
         let Some(t) = self.tokens.get_mut(token) else {
             return false;
@@ -292,10 +349,53 @@ impl OAuthStore {
         true
     }
 
+    /// Issue `token` as an access token to `client_id`.
+    fn issue_access(
+        &mut self,
+        token: String,
+        client_id: &str,
+        user: Option<signin::TokenUser>,
+        family: Option<String>,
+    ) -> String {
+        self.tokens.insert(
+            token.clone(),
+            AccessToken {
+                _token: token.clone(),
+                family,
+                client_id: client_id.to_string(),
+                created_at: Instant::now(),
+                expires_in: Duration::from_secs(ACCESS_TOKEN_SECS),
+                user,
+            },
+        );
+        if let Some(c) = self.clients.get_mut(client_id) {
+            c.last_used = Some(Instant::now());
+        }
+        token
+    }
+
+    /// With sign-in off: hold `client_id`'s access tokens that belong to no refresh
+    /// token family to their limit, the oldest by issue going first. Without a user a
+    /// token has no time of last use to go by.
+    fn trim_loose_tokens(&mut self, client_id: &str) {
+        let mut loose: Vec<(Instant, String)> = self
+            .tokens
+            .iter()
+            .filter(|(_, t)| t.client_id == client_id && t.family.is_none() && t.user.is_none())
+            .map(|(token, t)| (t.created_at, token.clone()))
+            .collect();
+        loose.sort();
+        let excess = loose.len().saturating_sub(MAX_LOOSE_TOKENS_PER_CLIENT);
+        for (_, token) in loose.into_iter().take(excess) {
+            self.tokens.remove(&token);
+        }
+    }
+
     /// The owner of what a valid token's caller stores, such as scripted indicators
     /// (ADR-0025) and server alerts (ADR-0042): its signed-in user, or with sign-in
     /// off its OAuth client (ADR-0044).
     fn owner_for_token(&mut self, token: &str) -> Option<String> {
+        self.adopt(token);
         self.cleanup_expired();
         self.tokens.get(token).map(|t| match &t.user {
             Some(user) => user.id.clone(),
@@ -305,6 +405,7 @@ impl OAuthStore {
 
     /// The signed-in user of a valid token; `None` with sign-in off.
     fn user_for_token(&mut self, token: &str) -> Option<String> {
+        self.adopt(token);
         self.cleanup_expired();
         self.tokens.get(token)?.user.as_ref().map(|u| u.id.clone())
     }
@@ -349,7 +450,9 @@ async fn oauth_metadata(State(state): State<SharedState>) -> Json<Value> {
         "token_endpoint": format!("{}/token", base),
         "registration_endpoint": format!("{}/register", base),
         "response_types_supported": ["code"],
-        "grant_types_supported": ["authorization_code"],
+        "revocation_endpoint": format!("{}/revoke", base),
+        "revocation_endpoint_auth_methods_supported": ["none"],
+        "grant_types_supported": ["authorization_code", "refresh_token"],
         "code_challenge_methods_supported": ["S256"],
         "token_endpoint_auth_methods_supported": ["none", "client_secret_post"],
         "logo_uri": format!("{}/favicon.svg", base)
@@ -520,7 +623,7 @@ async fn oauth_register(
             "client_secret": client_secret,
             "client_name": body.client_name,
             "redirect_uris": body.redirect_uris,
-            "grant_types": ["authorization_code"],
+            "grant_types": ["authorization_code", "refresh_token"],
             "response_types": ["code"],
             "token_endpoint_auth_method": "none",
             "logo_uri": format!("{}/favicon.svg", base_url()),
@@ -630,9 +733,55 @@ async fn oauth_authorize(
             .into_response();
     }
 
+    // PKCE is S256 only: a SHA-256 in base64url without padding, 43 characters. The
+    // challenge is kept until the code is exchanged, so it is not taken as it comes.
+    let is_s256 = params.code_challenge.len() == 43
+        && params
+            .code_challenge
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_');
+    // The exchange verifies S256 only, so no other method is accepted and then
+    // treated as if it were S256. Left out, it is S256.
+    if params.code_challenge_method != "S256" {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "invalid_request", "error_description": "code_challenge_method must be S256"})),
+        )
+            .into_response();
+    }
+    if !is_s256 {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "invalid_request", "error_description": "code_challenge must be an S256 challenge: 43 base64url characters"})),
+        )
+            .into_response();
+    }
+
     // With sign-in on, a client id and a redirect URI are not enough (ADR-0044).
     if s.signin.is_some() {
         return signin::authorize(&mut s, &params, &headers, &client_addr(&headers, &ext));
+    }
+
+    // Hold the pending codes to their limits: this client's oldest make room first,
+    // and a full server refuses instead of dropping someone else's.
+    let mut mine: Vec<(Instant, String)> = s
+        .codes
+        .iter()
+        .filter(|(_, c)| c.client_id == params.client_id)
+        .map(|(code, c)| (c.created_at, code.clone()))
+        .collect();
+    mine.sort();
+    let excess = (mine.len() + 1).saturating_sub(MAX_CODES_PER_CLIENT);
+    for (_, code) in mine.into_iter().take(excess) {
+        s.codes.remove(&code);
+    }
+    if s.codes.len() >= MAX_CODES {
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            [(header::RETRY_AFTER, "60")],
+            Json(json!({"error": "temporarily_unavailable", "error_description": "Too many sign-ins are in progress. Try again in a minute."})),
+        )
+            .into_response();
     }
 
     // Auto-approve: generate auth code
@@ -663,10 +812,17 @@ async fn oauth_authorize(
 #[derive(Deserialize)]
 struct TokenRequest {
     grant_type: String,
-    code: String,
-    redirect_uri: String,
     client_id: String,
+    // For `authorization_code`.
+    #[serde(default)]
+    code: String,
+    #[serde(default)]
+    redirect_uri: String,
+    #[serde(default)]
     code_verifier: String,
+    // For `refresh_token` (ADR-0058).
+    #[serde(default)]
+    refresh_token: String,
 }
 
 /// Accept token request as either form-encoded or JSON (Claude.ai may send either).
@@ -716,6 +872,15 @@ async fn oauth_token(
             }
         }
     };
+    if body.grant_type == "refresh_token" {
+        return refresh::grant(
+            &state,
+            &body.refresh_token,
+            &body.client_id,
+            &refresh::store_write(),
+        )
+        .await;
+    }
     if body.grant_type != "authorization_code" {
         return (
             StatusCode::BAD_REQUEST,
@@ -723,9 +888,15 @@ async fn oauth_token(
         )
             .into_response();
     }
+    if body.code.is_empty() || body.redirect_uri.is_empty() || body.code_verifier.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "invalid_request", "error_description": "code, redirect_uri and code_verifier are required"})),
+        )
+            .into_response();
+    }
 
-    #[cfg_attr(not(feature = "scripting"), allow(unused_variables))]
-    let (token, token_user) = {
+    let (token, token_user, family, ended) = {
         let mut s = state.oauth.lock().unwrap();
         s.cleanup_expired();
 
@@ -752,10 +923,9 @@ async fn oauth_token(
             }
         };
 
-        // A code that carries a user works once, whatever the outcome (ADR-0044).
-        if token_user.is_some() {
-            s.codes.remove(&body.code);
-        }
+        // A code works once, whatever the outcome, with sign-in on (ADR-0044) and off:
+        // a second exchange would be a second authorization (ADR-0058).
+        s.codes.remove(&body.code);
 
         // Validate client_id and redirect_uri
         if stored_client_id != body.client_id {
@@ -790,54 +960,85 @@ async fn oauth_token(
 
         // Issue access token
         let token = Uuid::new_v4().to_string();
-        let expires_in = Duration::from_secs(7 * 24 * 3600); // 7 days
-        s.tokens.insert(
-            token.clone(),
-            AccessToken {
-                _token: token.clone(),
-                client_id: body.client_id.clone(),
-                created_at: Instant::now(),
-                expires_in,
-                user: token_user.clone(),
-            },
+        let token = s.issue_access(token, &body.client_id, token_user.clone(), None);
+        // A family this ends is ended in the store too, below: a row left behind would
+        // bring it back at the next start (ADR-0058).
+        let ended = match &token_user {
+            Some(user) => s.trim_user_tokens(&user.id, None),
+            None => Vec::new(),
+        };
+        let user_id = token_user.as_ref().map(|u| u.id.clone());
+        let family = s.plan_family(
+            &body.client_id,
+            &stored_redirect_uri,
+            user_id.as_deref(),
+            &token,
         );
-        if let Some(c) = s.clients.get_mut(&body.client_id) {
-            c.last_used = Some(Instant::now());
-        }
-        if let Some(user) = &token_user {
-            s.trim_user_tokens(&user.id);
-        }
-        (token, token_user)
+        (token, user_id, family, ended)
     };
-    // Every authenticated request needs that lock, and an async worker may hold
-    // others' work: neither waits for a disk write.
-    #[cfg(feature = "scripting")]
-    {
-        let client_id = body.client_id.clone();
-        let _ = tokio::task::spawn_blocking(move || {
-            if let Some(store) = scripting::persistence::global() {
-                if let Err(e) = store.mark_oauth_client_used(&client_id) {
-                    eprintln!("[OAuth] could not record client use: {e}");
-                }
+    // What follows writes the store and then changes the families, so it runs to its
+    // end even when this client hangs up meanwhile (`refresh::to_the_end`).
+    let (state, client_id, access) = (state.clone(), body.client_id.clone(), token.clone());
+    let refresh_token = refresh::to_the_end(async move {
+        let write = refresh::store_write();
+        refresh::forget_families(&write, ended).await;
+        // A refresh token is handed out only once the store has it (ADR-0058). When
+        // the write fails the client gets the access token alone, as before refresh
+        // tokens.
+        let mut refresh_token = None;
+        if let Some(family) = family {
+            match refresh::start_family(&state, &access, family, &write).await {
+                Ok(value) => refresh_token = value,
+                Err(e) => eprintln!("[OAuth] could not store a refresh token: {e}"),
             }
-            if let Some(user) = token_user {
-                signin::after_token(&user.id);
-            }
-        })
-        .await;
-    }
+        }
+        // After the family step: a token that got a family does not count here.
+        if token_user.is_none() {
+            let mut s = state.oauth.lock().unwrap();
+            s.trim_loose_tokens(&client_id);
+        }
+        token_issued(client_id, token_user).await;
+        refresh_token
+    })
+    .await
+    .flatten();
 
     eprintln!(
         "[OAuth] POST /token SUCCESS — token issued (len={})",
         token.len()
     );
 
-    Json(json!({
+    let mut answer = json!({
         "access_token": token,
         "token_type": "Bearer",
-        "expires_in": 7 * 24 * 3600
-    }))
-    .into_response()
+        "expires_in": ACCESS_TOKEN_SECS
+    });
+    if let Some(refresh_token) = refresh_token {
+        answer["refresh_token"] = json!(refresh_token);
+    }
+    Json(answer).into_response()
+}
+
+/// Record that `client_id`, and `user` with sign-in on, got a token: the activity that
+/// keeps a client registered and an owner's server alerts alive (ADR-0042, ADR-0044).
+/// Every authenticated request needs the OAuth lock, and an async worker may hold
+/// others' work: neither waits for a disk write.
+#[cfg_attr(not(feature = "scripting"), allow(unused_variables))]
+async fn token_issued(client_id: String, user: Option<String>) {
+    #[cfg(feature = "scripting")]
+    {
+        let _ = tokio::task::spawn_blocking(move || {
+            if let Some(store) = scripting::persistence::global() {
+                if let Err(e) = store.mark_oauth_client_used(&client_id) {
+                    eprintln!("[OAuth] could not record client use: {e}");
+                }
+            }
+            if let Some(user) = user {
+                signin::after_token(&user);
+            }
+        })
+        .await;
+    }
 }
 
 /// Parse application/x-www-form-urlencoded into a JSON object.
@@ -1668,6 +1869,18 @@ pub async fn run_server(port: u16, engine: Option<Arc<RwLock<TradingEngine>>>) {
             Some(Err(e)) => eprintln!("[OAuth] cannot read stored clients: {e}"),
             None => eprintln!("[OAuth] store unavailable at {}", path.display()),
         }
+        // After the clients, which a refresh token needs (ADR-0058).
+        let cutoff = chrono::Utc::now().timestamp() - refresh::REFRESH_TTL_SECS;
+        match scripting::persistence::global().map(|s| s.refresh_tokens(cutoff)) {
+            Some(Ok(rows)) => {
+                let families = oauth.restore_refresh(rows);
+                println!("Refresh tokens: {families} authorizations restored");
+            }
+            Some(Err(e)) => eprintln!("[OAuth] cannot read stored refresh tokens: {e}"),
+            None => eprintln!(
+                "[OAuth] refresh tokens stay in memory and end with this process: no store"
+            ),
+        }
         if let Some(signin) = oauth.signin.as_mut() {
             match scripting::persistence::global().map(|s| signin.restore(s)) {
                 Some(Ok((users, sessions))) => {
@@ -1701,6 +1914,7 @@ pub async fn run_server(port: u16, engine: Option<Arc<RwLock<TradingEngine>>>) {
     });
     #[cfg(feature = "scripting")]
     crate::server_alerts::start(&state.charts);
+    refresh::sweep_now_and_then(state.clone());
 
     // Store port for metadata endpoint
     std::env::set_var("_CHARTGEN_PORT", port.to_string());
@@ -1730,6 +1944,7 @@ pub async fn run_server(port: u16, engine: Option<Arc<RwLock<TradingEngine>>>) {
         .route("/register", post(oauth_register))
         .route("/authorize", get(oauth_authorize))
         .route("/token", post(oauth_token))
+        .route("/revoke", post(refresh::revoke_endpoint))
         .route("/oauth/signin", get(signin::signin_page))
         .route("/oauth/login/{provider}", get(signin::login))
         .route("/oauth/callback/{provider}", get(signin::callback))
@@ -2274,6 +2489,7 @@ mod tests {
             "test-token".to_string(),
             AccessToken {
                 _token: "test-token".to_string(),
+                family: None,
                 client_id: "test".to_string(),
                 created_at: Instant::now(),
                 expires_in: Duration::from_secs(3600),
@@ -2333,6 +2549,7 @@ mod tests {
                 "test-token".to_string(),
                 AccessToken {
                     _token: "test-token".to_string(),
+                    family: None,
                     client_id: "test".to_string(),
                     created_at: Instant::now(),
                     expires_in: Duration::from_secs(3600),
@@ -2448,6 +2665,7 @@ mod tests {
             "push-token".to_string(),
             AccessToken {
                 _token: "push-token".to_string(),
+                family: None,
                 client_id: "test".to_string(),
                 created_at: Instant::now(),
                 expires_in: Duration::from_secs(3600),
@@ -2499,6 +2717,96 @@ mod tests {
         (v["result"]["isError"] == true, text)
     }
 
+    /// After a restart the server knows an access token by its hash only (ADR-0058).
+    /// Streams and chart subscriptions are keyed by the value the client sends, so
+    /// they work for it as for any token, from its first request on.
+    #[tokio::test]
+    async fn an_access_token_from_before_a_restart_opens_a_stream_and_subscribes() {
+        let state = Arc::new(AppState {
+            oauth: Mutex::new(OAuthStore::new()),
+            engine: None,
+            charts: sample_hub(),
+        });
+        {
+            let mut s = state.oauth.lock().unwrap();
+            s.refresh.insert(
+                "refresh-hash".to_string(),
+                refresh::RefreshToken {
+                    family: "f".into(),
+                    seq: 0,
+                    client_id: "test".into(),
+                    user: None,
+                    created_at: chrono::Utc::now().timestamp(),
+                    spent_at: None,
+                    access_hash: Some(signin::hash_of("push-token")),
+                },
+            );
+            s.restored.insert(
+                signin::hash_of("push-token"),
+                AccessToken {
+                    _token: String::new(),
+                    family: Some("f".into()),
+                    client_id: "test".to_string(),
+                    created_at: Instant::now(),
+                    expires_in: Duration::from_secs(3600),
+                    user: None,
+                },
+            );
+        }
+        let app: Router = Router::new()
+            .route("/mcp", get(sse_handler).post(mcp_handler))
+            .with_state(state.clone());
+        let init = json!({"jsonrpc": "2.0", "id": 0, "method": "initialize", "params": {}});
+        let resp = app.clone().oneshot(rpc(init, None)).await.unwrap();
+        let sid = resp.headers()["Mcp-Session-Id"]
+            .to_str()
+            .unwrap()
+            .to_string();
+        let sse = Request::builder()
+            .method("GET")
+            .uri("/mcp")
+            .header("authorization", "Bearer push-token")
+            .header("Mcp-Session-Id", &sid)
+            .body(Body::empty())
+            .unwrap();
+        let stream = app.clone().oneshot(sse).await.unwrap();
+        assert_eq!(stream.status(), StatusCode::OK);
+        let mut body = stream.into_body();
+        {
+            let s = state.oauth.lock().unwrap();
+            assert!(s.restored.is_empty() && s.tokens.contains_key("push-token"));
+        }
+
+        let args =
+            json!({"ticker": "BTCUSDT", "timeframe": "1m", "indicators": ["rsi"], "warmup": 20});
+        let (err, text) = tool_text(&app, "subscribe_chart", args, Some(&sid)).await;
+        assert!(!err, "{text}");
+        let sub: Value = serde_json::from_str(&text).unwrap();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let frame = tokio::time::timeout_at(deadline, body.frame())
+                .await
+                .expect("a tick within 5 s")
+                .unwrap()
+                .unwrap();
+            let chunk = String::from_utf8_lossy(frame.data_ref().unwrap()).to_string();
+            if let Some(data) = chunk.strip_prefix("event: message\ndata: ") {
+                let n: Value = serde_json::from_str(data.trim()).unwrap();
+                assert_eq!(n["params"]["subscription_id"], sub["subscription_id"]);
+                break;
+            }
+        }
+        // Another token's hash opens nothing.
+        let other = Request::builder()
+            .method("GET")
+            .uri("/mcp")
+            .header("authorization", "Bearer refresh-hash")
+            .body(Body::empty())
+            .unwrap();
+        let refused = app.clone().oneshot(other).await.unwrap();
+        assert_eq!(refused.status(), StatusCode::UNAUTHORIZED);
+    }
+
     #[tokio::test]
     async fn chart_ticks_flow_over_the_sse_stream_until_it_closes() {
         let state = Arc::new(AppState {
@@ -2510,6 +2818,7 @@ mod tests {
             "push-token".to_string(),
             AccessToken {
                 _token: "push-token".to_string(),
+                family: None,
                 client_id: "test".to_string(),
                 created_at: Instant::now(),
                 expires_in: Duration::from_secs(3600),
@@ -2619,6 +2928,7 @@ mod tests {
             token.into(),
             AccessToken {
                 _token: token.into(),
+                family: None,
                 client_id: client_id.into(),
                 created_at: Instant::now(),
                 expires_in,
@@ -2861,6 +3171,368 @@ mod tests {
         give_token(&mut s, "t0", "c0", LIVE);
         assert_eq!(s.make_room(nobody_owns_scripts).unwrap(), ["c1"]);
         assert!(s.clients.contains_key("c0") && s.validate_token("t0"));
+    }
+
+    const CHALLENGE: &str = "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM";
+
+    /// A server with clients `a` and `b` registered, and its `/authorize`.
+    fn authorize_app(sign_in: bool) -> (SharedState, Router) {
+        let mut oauth = OAuthStore::new();
+        if sign_in {
+            let vars = [
+                ("CHARTGEN_GITHUB_CLIENT_ID", "h"),
+                ("CHARTGEN_GITHUB_CLIENT_SECRET", "hs"),
+            ];
+            let config = signin::Config::from_vars(|name| {
+                vars.iter()
+                    .find(|(k, _)| *k == name)
+                    .map(|(_, v)| v.to_string())
+            });
+            oauth.signin = Some(signin::SignIn::new(config.unwrap().unwrap()));
+        }
+        for id in ["a", "b"] {
+            oauth.clients.insert(id.into(), client(LIVE, None));
+            oauth.clients.get_mut(id).unwrap().redirect_uris = vec!["https://x.example/cb".into()];
+        }
+        let state = Arc::new(AppState {
+            oauth: Mutex::new(oauth),
+            engine: None,
+            charts: sample_hub(),
+        });
+        let app = Router::new()
+            .route("/authorize", get(oauth_authorize))
+            .route("/token", post(oauth_token))
+            .with_state(state.clone());
+        (state, app)
+    }
+
+    async fn authorize_as(app: &Router, client: &str, challenge: &str) -> Response {
+        let uri = format!(
+            "/authorize?response_type=code&client_id={client}&redirect_uri=https%3A%2F%2Fx.example%2Fcb&code_challenge={challenge}"
+        );
+        let request = Request::builder().uri(uri).body(Body::empty()).unwrap();
+        app.clone().oneshot(request).await.unwrap()
+    }
+
+    fn codes_of(state: &SharedState, client: &str) -> Vec<String> {
+        let s = state.oauth.lock().unwrap();
+        let mut codes: Vec<_> = s
+            .codes
+            .iter()
+            .filter(|(_, c)| c.client_id == client)
+            .map(|(code, c)| (c.created_at, code.clone()))
+            .collect();
+        codes.sort();
+        codes.into_iter().map(|c| c.1).collect()
+    }
+
+    /// With sign-in off every `/authorize` for a registered client stored a code, with
+    /// no limit, for 5 minutes each.
+    #[tokio::test]
+    async fn a_client_keeps_20_pending_codes_and_loses_only_its_own_oldest() {
+        let (state, app) = authorize_app(false);
+        assert_eq!(authorize_as(&app, "b", CHALLENGE).await.status(), 307);
+        assert_eq!(authorize_as(&app, "a", CHALLENGE).await.status(), 307);
+        let first = codes_of(&state, "a")[0].clone();
+        for _ in 0..MAX_CODES_PER_CLIENT {
+            assert_eq!(authorize_as(&app, "a", CHALLENGE).await.status(), 307);
+        }
+        let mine = codes_of(&state, "a");
+        assert_eq!(mine.len(), MAX_CODES_PER_CLIENT);
+        assert!(!mine.contains(&first), "the oldest went");
+        assert_eq!(codes_of(&state, "b").len(), 1, "another client's stays");
+    }
+
+    #[tokio::test]
+    async fn a_full_server_refuses_a_new_code_and_drops_nobodys() {
+        let (state, app) = authorize_app(false);
+        {
+            let mut s = state.oauth.lock().unwrap();
+            for i in 0..MAX_CODES {
+                s.codes.insert(
+                    format!("code{i}"),
+                    AuthCode {
+                        _code: String::new(),
+                        client_id: format!("other{}", i / MAX_CODES_PER_CLIENT),
+                        redirect_uri: String::new(),
+                        code_challenge: String::new(),
+                        _code_challenge_method: String::new(),
+                        created_at: Instant::now(),
+                        user: None,
+                    },
+                );
+            }
+        }
+        let refused = authorize_as(&app, "a", CHALLENGE).await;
+        assert_eq!(refused.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(refused.headers()[header::RETRY_AFTER], "60");
+        let s = state.oauth.lock().unwrap();
+        assert_eq!(s.codes.len(), MAX_CODES);
+        assert!((0..MAX_CODES).all(|i| s.codes.contains_key(&format!("code{i}"))));
+    }
+
+    /// PKCE here is S256 only, and a SHA-256 in base64url is 43 characters. Anything
+    /// else was stored as it came, however long.
+    #[tokio::test]
+    async fn a_code_challenge_that_is_no_s256_hash_is_refused() {
+        for sign_in in [false, true] {
+            let (state, app) = authorize_app(sign_in);
+            let too_long = format!("{CHALLENGE}A");
+            let not_base64url = CHALLENGE.replace('-', "+").replace('+', "%2B");
+            let huge = "A".repeat(4000);
+            for bad in [
+                &too_long,
+                &CHALLENGE[1..],
+                not_base64url.as_str(),
+                "",
+                &huge,
+            ] {
+                let refused = authorize_as(&app, "a", bad).await;
+                assert_eq!(refused.status(), StatusCode::BAD_REQUEST, "{sign_in} {bad}");
+                let bytes = refused.into_body().collect().await.unwrap().to_bytes();
+                let body = String::from_utf8_lossy(&bytes);
+                assert!(body.contains("invalid_request"), "{body}");
+            }
+            assert!(state.oauth.lock().unwrap().codes.is_empty());
+            let ok = authorize_as(&app, "a", CHALLENGE).await;
+            assert!(ok.status().is_redirection(), "{sign_in}: {}", ok.status());
+        }
+    }
+
+    const VERIFIER: &str = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
+
+    /// The whole code flow for `client`, as a client with sign-in off runs it.
+    async fn token_for(app: &Router, client: &str) -> Value {
+        let redirect = authorize_as(app, client, CHALLENGE).await;
+        let to = redirect.headers()[header::LOCATION].to_str().unwrap();
+        let code = to.split("code=").nth(1).unwrap().split('&').next().unwrap();
+        post_token(
+            app,
+            json!({"grant_type": "authorization_code", "code": code, "client_id": client,
+                "redirect_uri": "https://x.example/cb", "code_verifier": VERIFIER}),
+        )
+        .await
+    }
+
+    async fn post_token(app: &Router, body: Value) -> Value {
+        let request = Request::builder()
+            .method("POST")
+            .uri("/token")
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap();
+        let response = app.clone().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    /// With sign-in off nothing limited a client's access tokens: a loop of
+    /// `/authorize` and `/token` minted 7-day tokens without end, and every
+    /// authenticated request walks all of them.
+    #[tokio::test]
+    async fn without_sign_in_a_clients_access_tokens_are_limited() {
+        let (state, app) = authorize_app(false);
+        let mut first_with_refresh = None;
+        let mut answers = Vec::new();
+        let rounds = signin::MAX_TOKENS_PER_CLIENT + MAX_LOOSE_TOKENS_PER_CLIENT + 10;
+        for _ in 0..rounds {
+            let answer = token_for(&app, "a").await;
+            if answer.get("refresh_token").is_some() && first_with_refresh.is_none() {
+                first_with_refresh = Some(answer.clone());
+            }
+            answers.push(answer);
+        }
+        let other = token_for(&app, "b").await;
+        let valid = |answer: &Value| {
+            let token = answer["access_token"].as_str().unwrap();
+            state.oauth.lock().unwrap().validate_token(token)
+        };
+        let of_a = |state: &SharedState| {
+            let s = state.oauth.lock().unwrap();
+            s.tokens.values().filter(|t| t.client_id == "a").count()
+        };
+        assert_eq!(
+            of_a(&state),
+            signin::MAX_TOKENS_PER_CLIENT + MAX_LOOSE_TOKENS_PER_CLIENT
+        );
+        let held = of_a(&state);
+        assert_eq!(state.oauth.lock().unwrap().tokens.len(), held + 1);
+        // The ones with a refresh token are never what makes room: an agent must not
+        // lose its token to whoever knows the client id. Nor is another client's.
+        assert!(valid(first_with_refresh.as_ref().unwrap()));
+        assert!(valid(&other));
+        // Of the rest the oldest went, and the newest is there.
+        let loose: Vec<&Value> = answers
+            .iter()
+            .filter(|a| a.get("refresh_token").is_none())
+            .collect();
+        assert!(!valid(loose[0]) && valid(loose[loose.len() - 1]));
+    }
+
+    /// Each refresh used to add an access token to the ones the family already had,
+    /// all valid for 7 days. A family keeps the newest, and the one before it for 60
+    /// more seconds: a request sent with it just before the refresh may arrive after.
+    #[tokio::test]
+    async fn a_refresh_leaves_the_access_token_before_it_60_seconds() {
+        for sign_in in [false, true] {
+            let (state, app) = authorize_app(sign_in);
+            let mut answer = if sign_in {
+                // What `/token` does for a code with a user.
+                let (access, family) = {
+                    let mut s = state.oauth.lock().unwrap();
+                    let user = signin::TokenUser {
+                        id: "github:1".into(),
+                        session: None,
+                        last_used: Instant::now(),
+                    };
+                    let access = s.issue_access("first".into(), "a", Some(user), None);
+                    let family =
+                        s.plan_family("a", "https://x.example/cb", Some("github:1"), &access);
+                    (access, family)
+                };
+                let write = refresh::store_write();
+                let refresh = refresh::start_family(&state, &access, family.unwrap(), &write)
+                    .await
+                    .unwrap();
+                json!({"access_token": access, "refresh_token": refresh})
+            } else {
+                token_for(&app, "a").await
+            };
+            let access_of = |answer: &Value| answer["access_token"].as_str().unwrap().to_string();
+            let refreshed = |answer: &Value| {
+                json!({"grant_type": "refresh_token", "client_id": "a",
+                    "refresh_token": answer["refresh_token"]})
+            };
+            let mut earlier = Vec::new();
+            for _ in 0..5 {
+                earlier.push(access_of(&answer));
+                answer = post_token(&app, refreshed(&answer)).await;
+                let mut s = state.oauth.lock().unwrap();
+                assert!(s.validate_token(&access_of(&answer)));
+                assert!(
+                    s.validate_token(earlier.last().unwrap()),
+                    "{sign_in}: the one before"
+                );
+                assert_eq!(s.tokens.len(), 2, "never more than two");
+                for old in &earlier[..earlier.len() - 1] {
+                    assert!(!s.validate_token(old));
+                }
+            }
+            // The one before has 60 seconds left, not its 7 days: seen 61 seconds on.
+            let before = earlier.last().unwrap().clone();
+            {
+                let mut s = state.oauth.lock().unwrap();
+                let t = s.tokens.get_mut(&before).unwrap();
+                assert!(t.expires_in <= t.created_at.elapsed() + Duration::from_secs(60));
+                t.expires_in = t.expires_in.saturating_sub(Duration::from_secs(61));
+                assert!(!s.validate_token(&before));
+                assert!(s.validate_token(&access_of(&answer)));
+            }
+
+            // Revoking ends both at once, with no grace.
+            let again = post_token(&app, refreshed(&answer)).await;
+            let write = refresh::store_write();
+            let token = again["refresh_token"].as_str().unwrap();
+            refresh::revoke(&state, token, "a", &write).await;
+            let mut s = state.oauth.lock().unwrap();
+            assert!(
+                !s.validate_token(&access_of(&answer)) && !s.validate_token(&access_of(&again))
+            );
+            assert!(s.tokens.is_empty());
+        }
+    }
+
+    /// The exchange verifies S256 and nothing else, and the metadata names S256 only. A
+    /// request naming another method used to be accepted and treated as S256.
+    #[tokio::test]
+    async fn a_code_challenge_method_other_than_s256_is_refused() {
+        for sign_in in [false, true] {
+            let (state, app) = authorize_app(sign_in);
+            for method in ["plain", "s256", "S512", ""] {
+                let query = format!("{CHALLENGE}&code_challenge_method={method}");
+                let refused = authorize_as(&app, "a", &query).await;
+                assert_eq!(
+                    refused.status(),
+                    StatusCode::BAD_REQUEST,
+                    "{sign_in} {method}"
+                );
+                let bytes = refused.into_body().collect().await.unwrap().to_bytes();
+                let body = String::from_utf8_lossy(&bytes);
+                assert!(body.contains("invalid_request"), "{body}");
+            }
+            assert!(state.oauth.lock().unwrap().codes.is_empty());
+            // Named, or left out as clients may: S256.
+            for query in [
+                format!("{CHALLENGE}&code_challenge_method=S256"),
+                CHALLENGE.into(),
+            ] {
+                let ok = authorize_as(&app, "a", &query).await;
+                assert!(ok.status().is_redirection(), "{sign_in}: {}", ok.status());
+            }
+        }
+    }
+
+    /// With sign-in on, codes are limited per user (ADR-0044) and these limits do not
+    /// apply: a request goes on to the sign-in as before.
+    #[tokio::test]
+    async fn with_sign_in_on_the_pending_code_limits_change_nothing() {
+        let (state, app) = authorize_app(true);
+        {
+            let mut s = state.oauth.lock().unwrap();
+            for i in 0..MAX_CODES {
+                s.codes.insert(
+                    format!("code{i}"),
+                    AuthCode {
+                        _code: String::new(),
+                        client_id: "a".into(),
+                        redirect_uri: String::new(),
+                        code_challenge: String::new(),
+                        _code_challenge_method: String::new(),
+                        created_at: Instant::now(),
+                        user: None,
+                    },
+                );
+            }
+        }
+        let answer = authorize_as(&app, "a", CHALLENGE).await;
+        assert!(answer.status().is_redirection(), "{}", answer.status());
+        let to = answer.headers()[header::LOCATION]
+            .to_str()
+            .unwrap()
+            .to_string();
+        assert!(to.starts_with("/oauth/"), "{to}");
+        assert_eq!(state.oauth.lock().unwrap().codes.len(), MAX_CODES);
+    }
+
+    /// After a restart a refresh token is all a headless client has left (ADR-0058).
+    #[test]
+    fn make_room_never_evicts_a_client_with_a_refresh_token() {
+        let mut s = full_table();
+        let now = chrono::Utc::now().timestamp();
+        let family = |created_at: i64, spent_at: Option<i64>| refresh::RefreshToken {
+            family: "f".into(),
+            seq: 0,
+            client_id: "c0".into(),
+            user: None,
+            created_at,
+            spent_at,
+            access_hash: None,
+        };
+        s.refresh.insert("h".into(), family(now, None));
+        assert_eq!(s.make_room(nobody_owns_scripts).unwrap(), ["c1"]);
+        assert!(s.clients.contains_key("c0"));
+
+        // One nobody used for 30 days pins nothing, and neither does a spent one alone.
+        for stale in [
+            family(now - refresh::REFRESH_TTL_SECS - 1, None),
+            family(now, Some(now)),
+        ] {
+            let mut s = full_table();
+            s.refresh.insert("h".into(), stale);
+            assert_eq!(s.make_room(nobody_owns_scripts).unwrap(), ["c0"]);
+            assert!(s.refresh.is_empty());
+        }
     }
 
     #[test]

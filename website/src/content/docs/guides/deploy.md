@@ -38,8 +38,9 @@ docker run -p 9315:9315 \
 
 Production must mount this volume. The `~/.chartgen/` mount persists
 `alerts.json`, `trades.log`, `subscriptions.json`, and in `chartgen.db` the
-registered OAuth clients, across restarts. Without it, every deploy forgets the
-registrations of external MCP clients. See the [persistence reference](/chartgen/reference/persistence/).
+registered OAuth clients and their refresh tokens, across restarts. Without it, every deploy forgets the
+registrations of external MCP clients, and a
+[headless agent](/chartgen/reference/oauth/#connecting-a-headless-agent) has to be authorized again by a person. See the [persistence reference](/chartgen/reference/persistence/).
 
 The image's default command is `--serve`. Add `--trade` only on a server nobody else can
 reach: its order tools and engine alerts are one shared set, not per user, for anyone with
@@ -53,7 +54,7 @@ a token. See [what a signed-in stranger can still do](/chartgen/decisions/0044-s
 | `CHARTGEN_WEB_DIR` | `src/server.rs` | Directory of a built web app (`web/dist`). When set, `GET /` with `Accept: text/html` returns its `index.html`, other paths fall back to its static files (unknown browser paths get `index.html`), and `/assets/*` is cached as immutable. Non-browser `GET /` still returns the health JSON. Unset means no static files. The Docker image sets it to `/usr/share/chartgen/web`. |
 | `CHARTGEN_DATA_SOURCE` | `src/fetch.rs` | Set to `sample` to make `generate_chart`, `get_indicators` and `get_quotes` use a deterministic offline source and never call Binance or Yahoo. Bars follow the interval grid (weekly bars open on Monday), each bar's prices depend only on the symbol and its open time (so overlapping pages match exactly), and the forming candle moves every second. Intended for E2E tests and demos. Unset means live data. |
 | `CHARTGEN_SCRIPTING` | `src/scripting/mod.rs` | `1` enables [scripted indicators](/chartgen/guides/scripted-indicators/): the four scripting MCP tools and user scripts in `generate_chart` / `list_indicators`. Off when unset. |
-| `CHARTGEN_DB` | `src/scripting/persistence.rs` | SQLite file for registered OAuth clients, with or without `CHARTGEN_SCRIPTING=1`, for scripted indicators, and with sign-in on for users and sessions. Opened at server startup; a failure is logged and leaves clients in memory only. Default `~/.chartgen/chartgen.db`, inside the persisted volume. |
+| `CHARTGEN_DB` | `src/scripting/persistence.rs` | SQLite file for registered OAuth clients, with or without `CHARTGEN_SCRIPTING=1`, for their refresh tokens, for scripted indicators, and with sign-in on for users and sessions. Opened at server startup; a failure is logged and leaves clients in memory only. Default `~/.chartgen/chartgen.db`, inside the persisted volume. |
 | `CHARTGEN_SERVER_ALERTS` | `src/server_alerts.rs` | `1` enables [alerts on the server](/chartgen/guides/web/#alerts-on-the-server): four MCP tools, and **Run on server** in the web app. Off when unset; alerts already stored wait in `chartgen.db`, and pin nobody. Needs a build with the `scripting` feature, which the Docker image has, and the store. Read [before turning it on](#server-alerts). |
 | `CHARTGEN_SERVER_ALERT_CLIENTS` | `src/server_alerts.rs` | Comma-separated OAuth client ids, or with [sign-in](#sign-in-through-github-and-google) on, accounts (`github:<id>`, `google:<sub>`), that may create server alerts and use webhooks. Unset: anyone may create alerts, nobody gets webhooks. `*`: anyone, with webhooks. |
 | `CHARTGEN_SERVER_ALERT_PAIRS_PER_CLIENT` | `src/server_alerts.rs` | Symbol and interval pairs one client may watch. Default 2. |
@@ -128,7 +129,8 @@ chartgen asks for no scope: it reads the public profile's id and login.
 4. Set `CHARTGEN_GOOGLE_CLIENT_ID` and `CHARTGEN_GOOGLE_CLIENT_SECRET`.
 
 Restart, and the log says `Sign-in required, through: GitHub, Google`. With one provider
-configured the choice of provider is skipped. Tokens are in memory, so clients sign in
+configured the choice of provider is skipped. A token from before sign-in, access or refresh,
+is not valid with it on, so every client signs in
 once after that restart; existing clients keep their `client_id`.
 
 Keep the volume at `~/.chartgen` mounted: sessions and users are stored there.
@@ -254,14 +256,15 @@ To replace one that leaked:
 
 1. Get a new id. In the browser, clear this site's data, or remove `chartgen.oauth.client_id` and
    `chartgen.oauth.client_secret` from local storage, and reload. An MCP client registers again.
-2. Stop the server. A restart also ends every token, which live in memory only, including any the old
-   id was given.
+2. Stop the server. A restart ends the web app's access tokens. What the old id was given beyond
+   that, refresh tokens and the access tokens that come back with them, goes in step 4.
 3. Put the new id in `CHARTGEN_SERVER_ALERT_CLIENTS` in place of the old one.
 4. Delete the old client and its alerts, or it can still sign in, as any stranger can, and see them:
 
    ```sql
    DELETE FROM server_alert_events WHERE alert_id IN (SELECT id FROM server_alerts WHERE owner = 'OLD_ID');
    DELETE FROM server_alerts WHERE owner = 'OLD_ID';
+   DELETE FROM refresh_tokens WHERE client_id = 'OLD_ID';
    DELETE FROM oauth_clients WHERE client_id = 'OLD_ID';
    ```
 

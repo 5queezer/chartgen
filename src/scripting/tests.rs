@@ -1097,6 +1097,7 @@ fn schema_is_complete(store: &persistence::Store) {
     assert_eq!(store.user_activity().unwrap().len(), 1);
     store.save_grant("github:1", "old-client").unwrap();
     assert!(store.live_sessions(0).unwrap().is_empty());
+    assert!(store.refresh_tokens(0).unwrap().is_empty());
     store.save_server_alert("a2", "github:1", "{}").unwrap();
     store
         .workspace_sync(
@@ -1166,6 +1167,313 @@ fn a_file_with_push_devices_upgrades_and_keeps_them() {
         store.oauth_clients().unwrap()[0].client_name.as_deref(),
         Some("Claude")
     );
+}
+
+/// Asking for the store must not open one. It used to open and migrate the default
+/// file, `~/.chartgen/chartgen.db`, on first use, so a test that reached any code
+/// asking for the store wrote the developer's own database. Nothing in this test
+/// process opens a store, so there is none.
+#[test]
+fn asking_for_the_store_opens_no_file() {
+    let path = persistence::db_path();
+    let existed = path.exists();
+    assert!(persistence::global().is_none());
+    assert_eq!(path.exists(), existed, "{}", path.display());
+}
+
+// --- Refresh tokens (ADR-0058) ---
+
+fn refresh_row(hash: &str, family: &str, seq: i64) -> persistence::StoredRefreshToken {
+    persistence::StoredRefreshToken {
+        token_hash: hash.to_string(),
+        family: family.to_string(),
+        seq,
+        client_id: "c1".to_string(),
+        user_id: (family == "users").then(|| "github:1".to_string()),
+        created_at: 1000 + seq,
+        spent_at: None,
+        access_hash: Some(format!("access-of-{hash}")),
+    }
+}
+
+/// A deploy is a new build on the file the last one left: one from before refresh
+/// tokens gets the table, keeps its clients, users and approvals, and stores a token.
+#[test]
+fn a_file_from_before_refresh_tokens_upgrades_and_stores_them() {
+    let before = persistence::MIGRATIONS
+        .iter()
+        .position(|sql| sql.contains("CREATE TABLE refresh_tokens"))
+        .unwrap();
+    let mut setup: Vec<String> = persistence::MIGRATIONS[..before]
+        .iter()
+        .map(|sql| sql.to_string())
+        .collect();
+    setup.push(format!(
+        "INSERT INTO oauth_clients (client_id, redirect_uris, created_at, last_token_at)
+             VALUES ('c1', '[\"https://x/cb\"]', 1, 2);
+         INSERT INTO users VALUES ('github:1', 'octo', 1, 1, 1);
+         INSERT INTO client_grants VALUES ('github:1', 'c1', 1);
+         PRAGMA user_version = {before};"
+    ));
+    let setup: Vec<&str> = setup.iter().map(String::as_str).collect();
+    let store = upgraded("upgrade-refresh", &setup);
+    assert_eq!(store.oauth_clients().unwrap()[0].client_id, "c1");
+    assert_eq!(store.users().unwrap()[0].id, "github:1");
+    assert_eq!(store.grants().unwrap().len(), 1);
+    assert!(store.refresh_tokens(0).unwrap().is_empty());
+    let row = refresh_row("h0", "users", 0);
+    store.save_refresh_token(&row, &[], 0, 0).unwrap();
+    assert_eq!(store.refresh_tokens(0).unwrap(), [row]);
+}
+
+fn refresh_columns(store_path: &std::path::Path) -> Vec<String> {
+    let conn = rusqlite::Connection::open(store_path).unwrap();
+    let mut stmt = conn
+        .prepare("SELECT name FROM pragma_table_info('refresh_tokens')")
+        .unwrap();
+    let names = stmt.query_map([], |r| r.get(0)).unwrap();
+    names.collect::<Result<_, _>>().unwrap()
+}
+
+/// The table as it was first created, before the hash of the access token was kept.
+const REFRESH_TOKENS_WITHOUT_ACCESS_HASH: &str = "
+    CREATE TABLE refresh_tokens (
+        token_hash  TEXT    PRIMARY KEY,
+        family      TEXT    NOT NULL,
+        seq         INTEGER NOT NULL,
+        client_id   TEXT    NOT NULL,
+        user_id     TEXT,
+        created_at  INTEGER NOT NULL,
+        spent_at    INTEGER
+    );
+    CREATE INDEX refresh_tokens_family ON refresh_tokens (family);
+    INSERT INTO refresh_tokens VALUES ('old', 'f', 0, 'c1', NULL, 1000, NULL);
+";
+
+/// The table came first and the column for the access token's hash after it, as two
+/// migrations. A file that has the table without the column gains it, keeps its
+/// rows, and ends with the columns a new file has: the ones the queries use.
+#[test]
+fn a_refresh_tokens_table_from_before_the_access_hash_gains_the_column() {
+    let table = persistence::MIGRATIONS
+        .iter()
+        .position(|sql| sql.contains("CREATE TABLE refresh_tokens"))
+        .unwrap();
+    let mut setup: Vec<String> = persistence::MIGRATIONS[..table]
+        .iter()
+        .map(|sql| sql.to_string())
+        .collect();
+    setup.push(REFRESH_TOKENS_WITHOUT_ACCESS_HASH.to_string());
+    setup.push(format!("PRAGMA user_version = {};", table + 1));
+    let setup: Vec<&str> = setup.iter().map(String::as_str).collect();
+    let store = upgraded("upgrade-access-hash", &setup);
+
+    let old = &store.refresh_tokens(0).unwrap()[0];
+    assert_eq!((old.token_hash.as_str(), &old.access_hash), ("old", &None));
+    // Stored and used: the next token of that family, with its access token's hash.
+    let next = refresh_row("new", "f", 1);
+    store
+        .save_refresh_token(&next, &["old".to_string()], next.created_at, 0)
+        .unwrap();
+    let rows = store.refresh_tokens(0).unwrap();
+    assert_eq!(rows.iter().find(|r| r.spent_at.is_none()), Some(&next));
+
+    let dir = std::env::temp_dir().join(format!(
+        "chartgen-upgrade-access-hash-{}",
+        std::process::id()
+    ));
+    let fresh = upgraded("fresh-access-hash", &[]);
+    drop((store, fresh));
+    let columns = refresh_columns(&dir.join("s.db"));
+    assert_eq!(
+        columns,
+        [
+            "token_hash",
+            "family",
+            "seq",
+            "client_id",
+            "user_id",
+            "created_at",
+            "spent_at",
+            "access_hash"
+        ]
+    );
+    let fresh_dir =
+        std::env::temp_dir().join(format!("chartgen-fresh-access-hash-{}", std::process::id()));
+    assert_eq!(refresh_columns(&fresh_dir.join("s.db")), columns);
+}
+
+/// The server only spends a token it holds as usable, and its rows are written by
+/// nobody else. A rotation that finds its token's row gone or already spent means
+/// the file was changed from outside, such as rows deleted for a revocation while the
+/// server ran: storing the successor would bring that family back.
+#[test]
+fn a_rotation_whose_token_is_not_usable_in_the_store_is_not_stored() {
+    let store = upgraded("refresh-rotation-stale", &[]);
+    store
+        .save_refresh_token(&refresh_row("h0", "f", 0), &[], 0, 0)
+        .unwrap();
+    store.delete_refresh_families(&["f".to_string()]).unwrap();
+    assert!(store
+        .save_refresh_token(&refresh_row("h1", "f", 1), &["h0".to_string()], 5000, 0)
+        .is_err());
+    assert!(store.refresh_tokens(0).unwrap().is_empty());
+
+    // Spent already: a second successor beside the first is refused as well.
+    store
+        .save_refresh_token(&refresh_row("g0", "g", 0), &[], 0, 0)
+        .unwrap();
+    store
+        .save_refresh_token(&refresh_row("g1", "g", 1), &["g0".to_string()], 5000, 0)
+        .unwrap();
+    assert!(store
+        .save_refresh_token(&refresh_row("g2", "g", 1), &["g0".to_string()], 5000, 0)
+        .is_err());
+    let rows = store.refresh_tokens(0).unwrap();
+    assert_eq!(rows.iter().filter(|r| r.spent_at.is_none()).count(), 1);
+}
+
+/// A build before the one that finishes a request whose client hung up could store
+/// a successor twice, so a file may hold two unspent tokens of one family. Reading
+/// the tokens at a start settles it in the file: the one stored last stays unspent,
+/// the other is marked replaced, and a second start finds nothing left to settle.
+#[test]
+fn of_two_unspent_tokens_the_file_keeps_the_one_stored_last() {
+    let store = upgraded("refresh-two-unspent", &[]);
+    for (hash, family, seq) in [
+        ("h0", "f", 0),
+        ("lost", "f", 1),
+        ("held", "f", 1),
+        ("g0", "g", 0),
+    ] {
+        store
+            .save_refresh_token(&refresh_row(hash, family, seq), &[], 0, 0)
+            .unwrap();
+    }
+    for _ in 0..2 {
+        let mut rows: Vec<(String, Option<i64>, bool)> = store
+            .refresh_tokens(0)
+            .unwrap()
+            .into_iter()
+            .map(|r| (r.token_hash, r.spent_at, r.access_hash.is_some()))
+            .collect();
+        rows.sort();
+        let expected = [
+            ("g0", None, true),
+            ("h0", Some(0), false),
+            ("held", None, true),
+            ("lost", Some(0), false),
+        ];
+        assert_eq!(
+            rows,
+            expected.map(|(h, at, access)| (h.to_string(), at, access))
+        );
+    }
+}
+
+/// A retry marks the successor it replaces with `spent_at` 0, and the store keeps
+/// one such row per family: the newest.
+#[test]
+fn a_retry_leaves_one_replaced_row_in_the_store() {
+    let store = upgraded("refresh-replaced", &[]);
+    store
+        .save_refresh_token(&refresh_row("h0", "f", 0), &[], 0, 0)
+        .unwrap();
+    store
+        .save_refresh_token(&refresh_row("a", "f", 1), &["h0".to_string()], 5000, 0)
+        .unwrap();
+    for (replaced, next) in [("a", "b"), ("b", "c"), ("c", "d")] {
+        store
+            .save_refresh_token(&refresh_row(next, "f", 1), &[replaced.to_string()], 0, 0)
+            .unwrap();
+    }
+    let mut rows: Vec<(String, Option<i64>)> = store
+        .refresh_tokens(0)
+        .unwrap()
+        .into_iter()
+        .map(|r| (r.token_hash, r.spent_at))
+        .collect();
+    rows.sort();
+    let expected = [("c", Some(0)), ("d", None), ("h0", Some(5000))];
+    assert_eq!(rows, expected.map(|(hash, at)| (hash.to_string(), at)));
+}
+
+#[test]
+fn a_rotation_is_stored_whole_or_not_at_all() {
+    let store = upgraded("refresh-rotation", &[]);
+    store
+        .save_refresh_token(&refresh_row("h0", "f", 0), &[], 0, 0)
+        .unwrap();
+    let next = refresh_row("h1", "f", 1);
+    store
+        .save_refresh_token(&next, &["h0".to_string()], next.created_at, 0)
+        .unwrap();
+    let rows = store.refresh_tokens(0).unwrap();
+    let spent = rows.iter().find(|r| r.token_hash == "h0").unwrap();
+    assert_eq!(
+        spent.spent_at,
+        Some(next.created_at),
+        "kept, to recognise reuse"
+    );
+    assert_eq!(spent.access_hash, None, "its access token is not restored");
+    assert_eq!(rows.iter().filter(|r| r.spent_at.is_none()).count(), 1);
+
+    // The successor cannot be stored: the token it would replace stays unspent.
+    let clash = refresh_row("h0", "f", 2);
+    assert!(store
+        .save_refresh_token(&clash, &["h1".to_string()], 5000, 0)
+        .is_err());
+    let rows = store.refresh_tokens(0).unwrap();
+    assert_eq!(rows.len(), 2);
+    let live = rows.iter().find(|r| r.spent_at.is_none()).unwrap();
+    assert_eq!(live.token_hash, "h1");
+
+    // Spent tokens below the floor are dropped, the unspent one never.
+    store
+        .save_refresh_token(&refresh_row("h2", "f", 2), &["h1".to_string()], 5000, 2)
+        .unwrap();
+    let left: Vec<String> = store
+        .refresh_tokens(0)
+        .unwrap()
+        .into_iter()
+        .map(|r| r.token_hash)
+        .collect();
+    assert_eq!(left, ["h2"]);
+}
+
+#[test]
+fn refresh_families_end_together_and_with_their_client() {
+    let store = upgraded("refresh-families", &[]);
+    store
+        .save_oauth_client("c1", &["https://x/cb".to_string()])
+        .unwrap();
+    for (hash, family, seq) in [
+        ("a0", "a", 0),
+        ("a1", "a", 1),
+        ("b0", "b", 0),
+        ("u0", "users", 0),
+    ] {
+        store
+            .save_refresh_token(&refresh_row(hash, family, seq), &[], 0, 0)
+            .unwrap();
+    }
+    let families = |store: &persistence::Store, cutoff: i64| -> Vec<String> {
+        let mut f: Vec<String> = store
+            .refresh_tokens(cutoff)
+            .unwrap()
+            .into_iter()
+            .map(|r| r.family)
+            .collect();
+        f.dedup();
+        f
+    };
+    store.delete_refresh_families(&["b".to_string()]).unwrap();
+    assert_eq!(families(&store, 0), ["a", "users"]);
+    // A family is as old as its newest token: `a` was exchanged at 1001.
+    assert_eq!(families(&store, 1001), ["a"]);
+    store.delete_oauth_client("c1").unwrap();
+    assert!(store.refresh_tokens(0).unwrap().is_empty());
+    assert!(store.oauth_clients().unwrap().is_empty());
 }
 
 /// What counts as a user's activity for their server alerts: a login or a token.

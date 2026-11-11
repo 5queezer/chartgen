@@ -73,6 +73,9 @@ struct Cli {
 }
 
 fn main() {
+    // Here and nowhere a test runs: asking for the store may open it.
+    #[cfg(feature = "scripting")]
+    chartgen::scripting::persistence::open_on_demand();
     let cli = Cli::parse();
 
     if cli.mcp {
