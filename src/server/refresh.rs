@@ -554,10 +554,9 @@ impl OAuthStore {
     /// other sign-in mode is kept and refused, so switching back finds it again, and
     /// it keeps its client registered meanwhile. Returns how many families are usable.
     ///
-    /// A family has one unspent token. A file may hold two: a build before the one
-    /// that finishes a request whose client hung up could store a successor twice.
-    /// The client then holds the one stored last, so that one is the usable one and
-    /// the other counts as replaced by it.
+    /// A family has one unspent token here. A file from a build before the one that
+    /// finishes a request whose client hung up may have held two: the store settles
+    /// that when it reads the rows, for the one stored last, which the client holds.
     #[cfg(feature = "scripting")]
     pub(super) fn restore_refresh(
         &mut self,
@@ -568,13 +567,6 @@ impl OAuthStore {
         for r in rows {
             if !self.clients.contains_key(&r.client_id) {
                 continue;
-            }
-            if r.spent_at.is_none() {
-                let family = self.refresh.by_id.get_mut(&r.family);
-                let before = family.and_then(|f| f.rows.get_mut(f.usable.as_ref()?));
-                if let Some(before) = before {
-                    before.spent_at = Some(REPLACED);
-                }
             }
             self.refresh.put(
                 r.token_hash,
@@ -2703,6 +2695,11 @@ mod tests {
             );
             assert_eq!(s.restored.len(), 1);
         }
+        assert_eq!(
+            usable_rows(&store),
+            1,
+            "settled in the file at this one start"
+        );
         assert!(valid(&state, "access of fam.held"));
         assert!(!valid(&state, "access of fam.lost"));
         assert!(exchange(&state, "fam.held", CLIENT, &write).await.is_ok());

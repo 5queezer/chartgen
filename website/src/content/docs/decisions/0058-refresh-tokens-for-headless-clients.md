@@ -224,6 +224,11 @@ waiting gives up its place and nothing is done for it, so the work that waits is
 more than the connections that are open. Only from its turn on is a request finished
 without its client.
 
+Before this was so, a hang-up could leave two unspent tokens of one family in the file.
+Such a file is settled where the rows are read at a start: the token stored last, which is
+the one the client holds, stays unspent, and the other is marked replaced, so that using
+it ends the family.
+
 ### Lifetime
 
 A family ends when its usable token is 30 days old. Every exchange starts the 30 days

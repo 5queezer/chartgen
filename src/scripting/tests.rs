@@ -1454,6 +1454,44 @@ fn a_rotation_whose_token_is_not_usable_in_the_store_is_not_stored() {
     assert_eq!(rows.iter().filter(|r| r.spent_at.is_none()).count(), 1);
 }
 
+/// A build before the one that finishes a request whose client hung up could store
+/// a successor twice, so a file may hold two unspent tokens of one family. Reading
+/// the tokens at a start settles it in the file: the one stored last stays unspent,
+/// the other is marked replaced, and a second start finds nothing left to settle.
+#[test]
+fn of_two_unspent_tokens_the_file_keeps_the_one_stored_last() {
+    let store = upgraded("refresh-two-unspent", &[]);
+    for (hash, family, seq) in [
+        ("h0", "f", 0),
+        ("lost", "f", 1),
+        ("held", "f", 1),
+        ("g0", "g", 0),
+    ] {
+        store
+            .save_refresh_token(&refresh_row(hash, family, seq), &[], 0, 0)
+            .unwrap();
+    }
+    for _ in 0..2 {
+        let mut rows: Vec<(String, Option<i64>, bool)> = store
+            .refresh_tokens(0)
+            .unwrap()
+            .into_iter()
+            .map(|r| (r.token_hash, r.spent_at, r.access_hash.is_some()))
+            .collect();
+        rows.sort();
+        let expected = [
+            ("g0", None, true),
+            ("h0", Some(0), false),
+            ("held", None, true),
+            ("lost", Some(0), false),
+        ];
+        assert_eq!(
+            rows,
+            expected.map(|(h, at, access)| (h.to_string(), at, access))
+        );
+    }
+}
+
 /// A retry marks the successor it replaces with `spent_at` 0, and the store keeps
 /// one such row per family: the newest.
 #[test]

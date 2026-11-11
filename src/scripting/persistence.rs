@@ -590,13 +590,25 @@ impl Store {
     }
 
     /// Every stored refresh token, in the order they were stored; families whose
-    /// newest token is older than `cutoff` are deleted first.
+    /// newest token is older than `cutoff` are deleted first, and of several unspent
+    /// tokens in one family all but the one stored last are marked replaced.
     pub fn refresh_tokens(&self, cutoff: i64) -> rusqlite::Result<Vec<StoredRefreshToken>> {
         let conn = self.conn();
         conn.execute(
             "DELETE FROM refresh_tokens WHERE family IN
                  (SELECT family FROM refresh_tokens GROUP BY family HAVING MAX(created_at) < ?1)",
             params![cutoff],
+        )?;
+        // A family has one unspent token. A build before the one that finishes a
+        // request whose client hung up could store a successor twice. The client
+        // holds the one stored last, so the others are marked replaced, here in the
+        // file: left as they are, every start would have to tell them apart again.
+        conn.execute(
+            "UPDATE refresh_tokens SET spent_at = 0, access_hash = NULL
+             WHERE spent_at IS NULL AND rowid <
+                 (SELECT MAX(rowid) FROM refresh_tokens AS newer
+                  WHERE newer.family = refresh_tokens.family AND newer.spent_at IS NULL)",
+            [],
         )?;
         let mut stmt = conn.prepare(
             "SELECT token_hash, family, seq, client_id, user_id, created_at, spent_at, access_hash
