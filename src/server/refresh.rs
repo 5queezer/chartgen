@@ -298,6 +298,11 @@ impl OAuthStore {
     /// load and must stay bound to its browser session (ADR-0050). With sign-in off a
     /// client id is all it takes to authorize, so a client at its limit gets no new
     /// family rather than losing one in use to whoever asks (ADR-0036).
+    ///
+    /// The family is stored with the lock released, so `access` is made the family's
+    /// here and now, before that. A token without a family is one the limits on
+    /// tokens without a refresh token may drop, and other exchanges run meanwhile. For
+    /// the same reason a family being stored already counts against the limit.
     pub(super) fn plan_family(
         &mut self,
         client_id: &str,
@@ -310,15 +315,25 @@ impl OAuthStore {
         }
         let now = now_unix();
         self.expire_refresh(now);
-        let held = self
+        let stored = self
             .refresh
             .values()
             .filter(|t| t.spent_at.is_none() && t.client_id == client_id && t.user.is_none())
-            .count();
-        if user.is_none() && held >= MAX_TOKENS_PER_CLIENT {
+            .map(|t| &t.family);
+        let being_stored = self
+            .tokens
+            .values()
+            .filter(|t| t.client_id == client_id && t.user.is_none())
+            .filter_map(|t| t.family.as_ref());
+        let held: HashSet<&String> = stored.chain(being_stored).collect();
+        if user.is_none() && held.len() >= MAX_TOKENS_PER_CLIENT {
             return None;
         }
         let family_part = random_token();
+        let family = hash_of(&family_part);
+        if let Some(t) = self.tokens.get_mut(access) {
+            t.family = Some(family.clone());
+        }
         let value = format!("{family_part}.{}", random_token());
         Some(Rotation {
             hash: hash_of(&value),
@@ -328,7 +343,7 @@ impl OAuthStore {
             spent_at: now,
             lost_access: None,
             token: RefreshToken {
-                family: hash_of(&family_part),
+                family,
                 seq: 0,
                 client_id: client_id.to_string(),
                 user: user.map(str::to_string),
@@ -427,29 +442,39 @@ impl OAuthStore {
     }
 }
 
-/// Store the first token of a family and tie `access_token` to it. `Ok(None)` if the
-/// client was evicted meanwhile, or the user's limits ended the family at once.
+/// Store the first token of a family, which `plan_family` made `access_token` part of.
+/// `Ok(None)` if the access token is gone by then, the client was evicted, or the
+/// user's limits ended the family at once: no refresh token is ever handed out beside
+/// an access token that does not work, and nothing of the family stays. `Err` if it
+/// could not be stored: the access token is then one without a family.
 pub(super) async fn start_family(
     state: &SharedState,
     access_token: &str,
     first: Rotation,
     write: &WriteFn,
 ) -> Result<Option<String>, String> {
-    write_off_worker(write, first.change()).await?;
+    let family = &first.token.family;
+    let leave_family = |s: &mut OAuthStore| {
+        if let Some(t) = s.tokens.get_mut(access_token) {
+            t.family = None;
+        }
+    };
+    if let Err(e) = write_off_worker(write, first.change()).await {
+        leave_family(&mut state.oauth.lock().unwrap());
+        return Err(e);
+    }
     let (kept, ended) = {
         let mut s = state.oauth.lock().unwrap();
-        let kept = s.apply_rotation(&first);
-        if kept {
-            if let Some(t) = s.tokens.get_mut(access_token) {
-                t.family = Some(first.token.family.clone());
-            }
-        }
+        let kept = s.tokens.contains_key(access_token) && s.apply_rotation(&first);
         let ended = match (&first.token.user, kept) {
-            (Some(user), true) => s.trim_user_tokens(user, Some(&first.token.family)),
+            (Some(user), true) => s.trim_user_tokens(user, Some(family)),
             (_, true) => Vec::new(),
-            (_, false) => vec![first.token.family.clone()],
+            (_, false) => {
+                leave_family(&mut s);
+                vec![family.clone()]
+            }
         };
-        (kept && !ended.contains(&first.token.family), ended)
+        (kept && !ended.contains(family), ended)
     };
     forget_families(write, ended).await;
     Ok(kept.then_some(first.value))
@@ -1385,6 +1410,95 @@ mod tests {
         assert!(s.families_of("github:1", "c0").is_empty());
         assert_eq!(s.families_of("github:2", "c0").len(), 1);
         assert_eq!(s.families_of("github:1", "c1").len(), 1);
+    }
+
+    /// The store write of a new family runs with the OAuth lock released, and other
+    /// exchanges run meanwhile. `meanwhile` runs inside that write, on the thread that
+    /// does it: exactly where another request would.
+    fn writing_while(store: &Arc<Store>, meanwhile: impl Fn() + Send + Sync + 'static) -> WriteFn {
+        let store = store.clone();
+        Arc::new(move |change| {
+            meanwhile();
+            write_to(&store, change)
+        })
+    }
+
+    /// A new access token used to carry no family until its family was stored. In
+    /// between it counted as one without a refresh token, and with sign-in off the
+    /// limit on those could drop it: the client then got a refresh token beside an
+    /// access token that was already gone.
+    #[tokio::test]
+    async fn a_new_token_is_its_familys_from_the_start() {
+        let (store, _) = temp_store("window-off");
+        let state = started(&store, false, &[CLIENT]);
+        // Other exchanges for the same client id, all of them while ours is written:
+        // more tokens without a refresh token than the client may keep, all newer.
+        let others = state.clone();
+        let flood = move || {
+            let mut s = others.oauth.lock().unwrap();
+            for _ in 0..=MAX_LOOSE_TOKENS_PER_CLIENT {
+                s.issue_access(Uuid::new_v4().to_string(), CLIENT, None, None);
+                s.trim_loose_tokens(CLIENT);
+            }
+        };
+        let (access, refresh) =
+            authorize(&state, CLIENT, None, &writing_while(&store, flood)).await;
+        assert!(
+            valid(&state, &access),
+            "pushed out as a token with no family"
+        );
+        let refresh = refresh.expect("and its refresh token with it");
+        assert!(exchange(&state, &refresh, CLIENT, &to(&store))
+            .await
+            .is_ok());
+    }
+
+    /// If the access token is gone all the same when the family has been stored, there
+    /// is no refresh token to hand out beside it, and no family left behind.
+    #[tokio::test]
+    async fn no_refresh_token_is_handed_out_beside_a_dead_access_token() {
+        let (store, _) = temp_store("window-gone");
+        let state = started(&store, true, &[CLIENT]);
+        // As the user's own limit of tokens per client would, with 20 newer ones.
+        let others = state.clone();
+        let gone = move || others.oauth.lock().unwrap().tokens.clear();
+        let user = Some("github:1");
+        let (access, refresh) = authorize(&state, CLIENT, user, &writing_while(&store, gone)).await;
+        assert!(!valid(&state, &access));
+        assert_eq!(refresh, None);
+        assert!(state.oauth.lock().unwrap().refresh.is_empty());
+        assert!(store.refresh_tokens(0).unwrap().is_empty(), "nor on disk");
+    }
+
+    /// With sign-in off a client keeps 20 families and gets no more. Exchanges that
+    /// run at the same time must not each see room for the last one.
+    #[tokio::test]
+    async fn exchanges_at_the_same_time_share_the_limit_of_families() {
+        let (store, _) = temp_store("window-cap");
+        let state = started(&store, false, &[CLIENT]);
+        let write = to(&store);
+        for _ in 1..MAX_TOKENS_PER_CLIENT {
+            assert!(authorize(&state, CLIENT, None, &write).await.1.is_some());
+        }
+        // Two more, the second one planned before the first is stored.
+        let (first, second) = {
+            let mut s = state.oauth.lock().unwrap();
+            let a = s.issue_access("a".into(), CLIENT, None, None);
+            let first = s.plan_family(CLIENT, REDIRECT, None, &a);
+            let b = s.issue_access("b".into(), CLIENT, None, None);
+            (first, s.plan_family(CLIENT, REDIRECT, None, &b))
+        };
+        assert!(first.is_some());
+        assert!(second.is_none(), "a 21st family");
+        // A family that could not be stored gives its place back.
+        let failed = start_family(&state, "a", first.unwrap(), &failing()).await;
+        assert!(failed.is_err());
+        let mut s = state.oauth.lock().unwrap();
+        assert!(
+            s.tokens["a"].family.is_none(),
+            "the access token alone, as before"
+        );
+        assert!(s.plan_family(CLIENT, REDIRECT, None, "b").is_some());
     }
 
     /// A family for `github:1` and `CLIENT` put there directly, with an id of the
