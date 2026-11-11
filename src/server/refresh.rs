@@ -351,10 +351,42 @@ type Turn = tokio::sync::MutexGuard<'static, ()>;
 pub(super) async fn to_the_end<T: Send + 'static>(
     work: impl std::future::Future<Output = T> + Send + 'static,
 ) -> Option<T> {
-    tokio::spawn(work)
+    tokio::spawn(async move {
+        let done = work.await;
+        #[cfg(test)]
+        WORK_ENDED.notify_waiters();
+        done
+    })
+    .await
+    .map_err(|e| eprintln!("[OAuth] a token request did not finish: {e}"))
+    .ok()
+}
+
+/// Told each time work that `to_the_end` runs has ended. A test that dropped its
+/// request has nothing else to wait on: the work goes on in a task it cannot reach.
+#[cfg(test)]
+static WORK_ENDED: tokio::sync::Notify = tokio::sync::Notify::const_new();
+
+/// Wait until `settled` holds, looking again each time some work has ended. Not a
+/// wait for a time: it returns as soon as the work is done, however long that took,
+/// and fails only if it never is.
+#[cfg(test)]
+pub(super) async fn until_work_ended(settled: impl Fn() -> bool) {
+    let waited = tokio::time::timeout(Duration::from_secs(120), async {
+        loop {
+            let ended = WORK_ENDED.notified();
+            tokio::pin!(ended);
+            // Listening before looking, so that work ending in between is not missed.
+            ended.as_mut().enable();
+            if settled() {
+                return;
+            }
+            ended.await;
+        }
+    });
+    waited
         .await
-        .map_err(|e| eprintln!("[OAuth] a token request did not finish: {e}"))
-        .ok()
+        .expect("the work a dropped request left never ended");
 }
 
 fn did_not_finish() -> Response {
@@ -2145,8 +2177,8 @@ mod tests {
         }
     }
 
-    /// Send `request` and hang up at `at`. Returns once whatever the server still does
-    /// for it is done.
+    /// Send `request` and hang up at `at`. For a refresh or a revocation it returns
+    /// once whatever the server still does for it is done.
     async fn hang_up<F>(at: HangUp, held: &HeldWrite, request: F)
     where
         F: std::future::Future + Send + 'static,
@@ -2189,7 +2221,8 @@ mod tests {
                 request.await;
             }
         }
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        // A refresh or a revocation holds the gate until its work is done, so this
+        // waits for it. Work that takes no gate is waited for by `until_work_ended`.
         drop(GATE.lock().await);
     }
 
@@ -2346,6 +2379,10 @@ mod tests {
             let _ = start_family(&s, &a, first, &w).await;
         })
         .await;
+        // Storing a family takes no gate, so nothing above waited for it. Its work
+        // has ended when the plan is gone: stored and in memory, or given up.
+        let planned = |state: &SharedState| state.oauth.lock().unwrap().refresh.storing.len();
+        until_work_ended(|| planned(&state) == 0).await;
 
         assert_eq!(store.refresh_tokens(0).unwrap().len(), 1);
         let s = state.oauth.lock().unwrap();

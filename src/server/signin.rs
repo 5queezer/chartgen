@@ -2514,12 +2514,10 @@ mod tests {
         request.abort();
         let _ = request.await;
         go.send(()).unwrap();
-        for _ in 0..200 {
-            if persisted.load(std::sync::atomic::Ordering::SeqCst) {
-                return;
-            }
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
-        panic!("the approvals were never written");
+        // The work goes on without its request, in a task this test cannot reach.
+        // Each look comes when some work has ended, not after a time: however long
+        // the delete takes, the approvals are found written once it is done.
+        let written = || persisted.load(std::sync::atomic::Ordering::SeqCst);
+        super::super::refresh::until_work_ended(written).await;
     }
 }
