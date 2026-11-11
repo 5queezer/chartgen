@@ -45,8 +45,13 @@ export function UserMenuItems(props: { user: SignedInUser }): JSX.Element {
             aria-label="Copy your user id"
             onClick={(e) => {
               e.stopPropagation();
-              void navigator.clipboard
-                ?.writeText(props.user.id)
+              // No clipboard on a page that is not served securely: say so.
+              const written = navigator.clipboard?.writeText(props.user.id);
+              if (written === undefined) {
+                showToast("Could not copy: select the id instead");
+                return;
+              }
+              void written
                 .then(() => showToast("User id copied"))
                 .catch(() => showToast("Could not copy: select the id instead"));
             }}

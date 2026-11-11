@@ -42,7 +42,7 @@ export function OperatorPage(props: { overview: OperatorOverview }): JSX.Element
   const on = () =>
     Object.entries(server().features)
       .filter(([, value]) => value)
-      .map(([name]) => name.replace("_", " "))
+      .map(([name]) => name.replaceAll("_", " "))
       .join(", ");
 
   return (

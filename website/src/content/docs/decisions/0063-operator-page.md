@@ -74,6 +74,16 @@ private to the sign-in module. `/workspace/sync` rests on the same fact
 second way to set it, and `is_first_party` is never widened: `/admin` is not a
 first-party redirect.
 
+**It is the address the code goes to that decides, not which client asked.** Any
+client may register `/` on the server's origin as its redirect, and a code for it then
+gets a session, with no consent step and no refresh token. That is safe because such a
+code is only ever delivered to the server's own page at `/`, and the app there throws
+away a `?code=` it did not ask for and never exchanges it (the browser test "a stray
+code in the address is thrown away, not exchanged" in `signin-workspace.spec.ts`). To
+get an operator's web-app token, someone else would have to read a code out of the
+address of the operator's own tab on this origin, which is as much as controlling that
+page.
+
 So an application's token never passes, for three reasons that each hold alone:
 
 - its code went to another address, so it has no session;
@@ -93,8 +103,8 @@ it. An id nobody has signed in with is not an error: it matches nobody yet.
 
 The operator reads their own id in the web app's account menu, which now shows it
 with a copy button. It is the provider's public id, the same value
-`CHARTGEN_SERVER_ALERT_CLIENTS` and `CHARTGEN_CLAIM_OWNER` take, and it is shown to
-its owner only. The other
+`CHARTGEN_SERVER_ALERT_CLIENTS`, `CHARTGEN_CLAIM_OWNER` and
+`CHARTGEN_AGENT_WEBHOOK_OWNER` take, and it is shown to its owner only. The other
 ways to read it (the provider's profile, `/oauth/me`, the store) stay as documented.
 
 ### How it is reached

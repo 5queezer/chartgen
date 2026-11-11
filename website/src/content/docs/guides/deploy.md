@@ -194,7 +194,9 @@ It only reads.
   under your name, with a copy button: `github:` and a number, or `google:` and a number.
   Set it and restart. A list the server cannot read stops the start and says which entry.
 - **Only you, and only in the web app.** An agent or connector you approved never sees it,
-  with your account or without. To everyone else the address is the app like any other
+  with your account or without. What counts as the web app is where the sign-in's code
+  is sent: exactly `/` on this server's address, where only the app's own page receives
+  it and discards a code it did not ask for. To everyone else the address is the app like any other
   and the server answers as for a path that does not exist.
 - **A restart or a deploy signs the page out;** open `/admin` again.
 - **It shows other users' ids and display names to you.** If others use your server, tell
