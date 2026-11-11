@@ -1110,6 +1110,15 @@ fn schema_is_complete(store: &persistence::Store) {
     assert_eq!(store.waiting_rows(None).unwrap().scripts, 0);
     assert!(store.server_alert_events().unwrap().is_empty());
     assert!(store.server_alert_owners().unwrap().contains("github:1"));
+    store
+        .save_setups(&[persistence::StoredSetup {
+            id: "s1".into(),
+            owner: "github:1".into(),
+            record: "{}".into(),
+            revisions: vec![(1, "{}".into())],
+        }])
+        .unwrap();
+    assert_eq!(store.setups().unwrap(), [("{}".to_string(), 2)]);
 }
 
 fn upgraded(name: &str, setup: &[&str]) -> persistence::Store {
@@ -1126,6 +1135,45 @@ fn upgraded(name: &str, setup: &[&str]) -> persistence::Store {
     // Reopening migrates nothing twice.
     drop(store);
     persistence::Store::open(&path).unwrap()
+}
+
+/// A file from just before the setups tables gets them, and keeps what it had.
+#[test]
+fn a_file_from_before_setups_upgrades_and_keeps_its_rows() {
+    let dir = std::env::temp_dir().join(format!("chartgen-upgrade-setups-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("s.db");
+    let store = persistence::Store::open(&path).unwrap();
+    store.save_server_alert("a1", "github:1", "{}").unwrap();
+    drop(store);
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    let version: i64 = conn
+        .query_row("PRAGMA user_version", [], |r| r.get(0))
+        .unwrap();
+    conn.execute_batch("DROP TABLE setups; DROP TABLE setup_revisions;")
+        .unwrap();
+    conn.pragma_update(None, "user_version", version - 1)
+        .unwrap();
+    drop(conn);
+    let store = persistence::Store::open(&path).unwrap();
+    assert_eq!(store.server_alerts().unwrap().len(), 1);
+    schema_is_complete(&store);
+}
+
+/// A log entry is never written over.
+#[test]
+fn a_setup_log_entry_cannot_be_replaced() {
+    let store = upgraded("setup-log", &[]);
+    let entry = |body: &str| persistence::StoredSetup {
+        id: "s1".into(),
+        owner: "github:1".into(),
+        record: "{}".into(),
+        revisions: vec![(1, body.into())],
+    };
+    store.save_setups(&[entry("first")]).unwrap();
+    assert!(store.save_setups(&[entry("second")]).is_err());
+    assert_eq!(store.setup_revisions("s1").unwrap(), ["first"]);
 }
 
 #[test]
