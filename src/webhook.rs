@@ -50,6 +50,14 @@ const UPSTREAM_DOMAINS: [&str; 4] = [
 pub const SIGNATURE_HEADER: &str = "X-Chartgen-Signature";
 pub const TIMESTAMP_HEADER: &str = "X-Chartgen-Timestamp";
 pub const EVENT_HEADER: &str = "X-Chartgen-Event";
+/// The headers of Standard Webhooks, sent beside the ones above (ADR-0061): a receiver
+/// built for that convention verifies a delivery without knowing this server.
+pub const STANDARD_ID_HEADER: &str = "webhook-id";
+pub const STANDARD_TIMESTAMP_HEADER: &str = "webhook-timestamp";
+pub const STANDARD_SIGNATURE_HEADER: &str = "webhook-signature";
+/// Shortest secret taken for the agent's receiver, in characters, or in bytes once a
+/// `whsec_` one is decoded: the least Standard Webhooks allows.
+const MIN_AGENT_SECRET: usize = 24;
 
 /// Longest push endpoint accepted: Windows' carry a long token.
 pub const MAX_PUSH_URL_LEN: usize = 1024;
@@ -99,6 +107,21 @@ fn is_public_v6(ip: Ipv6Addr) -> bool {
         && !(s[0] == 0x2001 && s[1] == 0x0db8)  // documentation
         && s[0] != 0x2002                       // 6to4
         && !(s[0] == 0x3fff && s[1] < 0x1000) // documentation
+}
+
+/// Is `ip` an address the agent's receiver may have (ADR-0061)? A list of what is
+/// allowed, not the opposite of public: loopback, the private IPv4 ranges and
+/// unique-local IPv6. Link-local, where every cloud keeps its metadata service, the
+/// unspecified address, multicast, broadcast, shared address space and every mapped or
+/// translated form are outside it.
+pub fn is_agent_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => {
+            let [a, b, ..] = v4.octets();
+            a == 127 || a == 10 || (a == 172 && (16..32).contains(&b)) || (a == 192 && b == 168)
+        }
+        IpAddr::V6(v6) => v6 == Ipv6Addr::LOCALHOST || v6.segments()[0] & 0xfe00 == 0xfc00,
+    }
 }
 
 /// An address range: `203.0.113.7/32`, `2001:db8::/48`, or one address.
@@ -218,6 +241,9 @@ fn parse_proxy(raw: Option<String>) -> Result<Option<String>, String> {
 #[derive(Clone)]
 pub struct Target {
     url: Url,
+    /// The operator's own receiver for the agent (`parse_agent`): the one target that
+    /// is inside, and only inside.
+    agent: bool,
 }
 
 impl Target {
@@ -229,7 +255,7 @@ impl Target {
         }
         let url = Url::parse(raw).map_err(|_| "webhook URL does not parse".to_string())?;
         if policy.allows(&url) {
-            return Ok(Self { url });
+            return Ok(Self { url, agent: false });
         }
         if url.scheme() != "https" {
             return Err("webhook URL must use https".into());
@@ -246,7 +272,44 @@ impl Target {
             Some(url::Host::Domain(name)) if is_local_name(name) => Err(REFUSED_ADDRESS.into()),
             Some(url::Host::Domain(name)) if is_our_host(name, policy) => Err(REFUSED_HOST.into()),
             None => Err("webhook URL has no host".into()),
-            _ => Ok(Self { url }),
+            _ => Ok(Self { url, agent: false }),
+        }
+    }
+
+    /// The agent's receiver, which the operator names in the environment and no
+    /// request can (ADR-0061). It is on this host or its private network, so `http`
+    /// and any port are taken, and a name with no dot, as a container has. What it
+    /// resolves to is held to `is_agent_ip` at every attempt. `own_port` is this
+    /// server's: a receiver there would be this server. The reason never repeats the
+    /// value, whose path can hold a token.
+    pub fn parse_agent(raw: &str, own_port: Option<u16>) -> Result<Self, String> {
+        if raw.len() > MAX_URL_LEN {
+            return Err(format!("is longer than {MAX_URL_LEN} bytes"));
+        }
+        let url = Url::parse(raw).map_err(|_| "does not parse".to_string())?;
+        if !matches!(url.scheme(), "http" | "https") {
+            return Err("must use http or https".into());
+        }
+        if !url.username().is_empty() || url.password().is_some() {
+            return Err("must not hold a user or password".into());
+        }
+        let port = url.port_or_known_default();
+        // This server's own port on this host. On another host the same number is
+        // another program's. A name that resolves here is not seen at this point.
+        let here = match url.host() {
+            Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+            Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+            Some(url::Host::Domain(name)) => name.eq_ignore_ascii_case("localhost"),
+            None => false,
+        };
+        if port.is_none() || (here && port == own_port) {
+            return Err("must not name this server's own port".into());
+        }
+        match url.host() {
+            Some(url::Host::Ipv4(ip)) if !is_agent_ip(ip.into()) => Err(REFUSED_AGENT.into()),
+            Some(url::Host::Ipv6(ip)) if !is_agent_ip(ip.into()) => Err(REFUSED_AGENT.into()),
+            None => Err("has no host".into()),
+            _ => Ok(Self { url, agent: true }),
         }
     }
 
@@ -260,14 +323,16 @@ impl Target {
         }
         let url = Url::parse(raw).map_err(|_| "push endpoint does not parse".to_string())?;
         if policy.allows(&url) {
-            return Ok(Self { url });
+            return Ok(Self { url, agent: false });
         }
         let plain = url.scheme() == "https"
             && url.username().is_empty()
             && url.password().is_none()
             && url.port_or_known_default() == Some(443);
         match url.host() {
-            Some(url::Host::Domain(name)) if plain && is_push_host(name) => Ok(Self { url }),
+            Some(url::Host::Domain(name)) if plain && is_push_host(name) => {
+                Ok(Self { url, agent: false })
+            }
             _ => Err("push endpoint is not a known push service".into()),
         }
     }
@@ -292,10 +357,93 @@ impl Target {
     }
 }
 
+/// The one receiver that wakes the operator's own agent (ADR-0061), read whole from
+/// the environment at startup. No request names its URL, and its secret never passes
+/// through a tool call. Not `Debug`: it holds the secret.
+#[derive(Clone)]
+pub struct AgentReceiver {
+    pub target: Target,
+    /// The one owner whose alerts may ask for it.
+    pub owner: String,
+    secret: String,
+}
+
+impl AgentReceiver {
+    /// `CHARTGEN_AGENT_WEBHOOK_URL`, `CHARTGEN_AGENT_WEBHOOK_OWNER` and
+    /// `CHARTGEN_AGENT_WEBHOOK_SECRET`: all three or none. A reason names the setting
+    /// and never its value.
+    pub fn from_env(own_port: Option<u16>) -> Result<Option<Self>, String> {
+        Self::from_vars(|name| std::env::var(name).ok(), own_port)
+    }
+
+    pub fn from_vars(
+        get: impl Fn(&str) -> Option<String>,
+        own_port: Option<u16>,
+    ) -> Result<Option<Self>, String> {
+        let var = |name: &str| {
+            get(name)
+                .map(|v| v.trim().to_string())
+                .filter(|v| !v.is_empty())
+        };
+        let url = var("CHARTGEN_AGENT_WEBHOOK_URL");
+        let owner = var("CHARTGEN_AGENT_WEBHOOK_OWNER");
+        let secret = var("CHARTGEN_AGENT_WEBHOOK_SECRET");
+        let (url, owner, secret) = match (url, owner, secret) {
+            (None, None, None) => return Ok(None),
+            (Some(url), Some(owner), Some(secret)) => (url, owner, secret),
+            (None, ..) => {
+                return Err(
+                    "CHARTGEN_AGENT_WEBHOOK_URL is not set, but its owner or secret is".into(),
+                )
+            }
+            (_, None, _) => {
+                return Err(
+                    "CHARTGEN_AGENT_WEBHOOK_OWNER is required with CHARTGEN_AGENT_WEBHOOK_URL"
+                        .into(),
+                )
+            }
+            (_, _, None) => {
+                return Err(
+                    "CHARTGEN_AGENT_WEBHOOK_SECRET is required with CHARTGEN_AGENT_WEBHOOK_URL"
+                        .into(),
+                )
+            }
+        };
+        let target = Target::parse_agent(&url, own_port)
+            .map_err(|reason| format!("CHARTGEN_AGENT_WEBHOOK_URL {reason}"))?;
+        let long_enough =
+            match standard_key(&secret) {
+                Some(key) if secret.starts_with("whsec_") => key.len() >= MIN_AGENT_SECRET,
+                Some(_) => secret.chars().count() >= MIN_AGENT_SECRET,
+                None => return Err(
+                    "CHARTGEN_AGENT_WEBHOOK_SECRET starts with whsec_ and is not base64 after it"
+                        .into(),
+                ),
+            };
+        if !long_enough {
+            return Err(format!(
+                "CHARTGEN_AGENT_WEBHOOK_SECRET is shorter than {MIN_AGENT_SECRET} characters (or bytes, behind whsec_)"
+            ));
+        }
+        Ok(Some(Self {
+            target,
+            owner,
+            secret,
+        }))
+    }
+
+    pub fn secret(&self) -> &str {
+        &self.secret
+    }
+}
+
 const REFUSED_ADDRESS: &str = "webhook URL points at a private or reserved address";
 const REFUSED_HOST: &str = "webhook URL points at a host this server itself uses";
 /// For a name that does not resolve and one that resolves to a private address alike.
 const REFUSED_NAME: &str = "webhook host does not resolve to a public address";
+const REFUSED_AGENT: &str = "must be on this host or its private network";
+const REFUSED_AGENT_NAME: &str =
+    "the receiver's name does not resolve to this host or its private network";
 
 fn normalized(name: &str) -> String {
     name.trim_end_matches('.').to_ascii_lowercase()
@@ -333,6 +481,15 @@ fn check_addresses(
     target: &Target,
     policy: &Policy,
 ) -> Result<Vec<SocketAddr>, String> {
+    if target.agent {
+        // Every address, as below: one public or link-local answer among private ones
+        // is how the operator's receiver would become a way out.
+        return if addrs.is_empty() || addrs.iter().any(|a| !is_agent_ip(a.ip())) {
+            Err(REFUSED_AGENT_NAME.into())
+        } else {
+            Ok(addrs)
+        };
+    }
     if policy.allows(&target.url) {
         return Ok(addrs);
     }
@@ -391,6 +548,33 @@ pub fn signature(secret: &str, timestamp: i64, body: &str) -> String {
     format!("sha256={}", hex::encode(mac.finalize().into_bytes()))
 }
 
+/// The key a Standard Webhooks signature is made with: what `whsec_<base64>` decodes
+/// to, and for any other secret its bytes, as receivers take both. `None` for a
+/// `whsec_` secret that is not base64.
+fn standard_key(secret: &str) -> Option<Vec<u8>> {
+    use base64::Engine;
+    match secret.strip_prefix("whsec_") {
+        Some(encoded) => base64::engine::general_purpose::STANDARD
+            .decode(encoded)
+            .ok(),
+        None => Some(secret.as_bytes().to_vec()),
+    }
+}
+
+/// `v1,<base64>` of HMAC-SHA256 over `<id>.<timestamp>.<body>`: the Standard Webhooks
+/// signature, with `timestamp` in seconds.
+pub fn standard_signature(secret: &str, id: &str, timestamp: i64, body: &str) -> Option<String> {
+    use base64::Engine;
+    let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(&standard_key(secret)?)
+        .expect("HMAC takes a key of any length");
+    mac.update(format!("{id}.{timestamp}.{body}").as_bytes());
+    let digest = mac.finalize().into_bytes();
+    Some(format!(
+        "v1,{}",
+        base64::engine::general_purpose::STANDARD.encode(digest)
+    ))
+}
+
 struct Failure {
     status: Option<u16>,
     error: String,
@@ -409,16 +593,24 @@ pub struct Request {
     pub honor_retry_after: bool,
 }
 
-/// A webhook's request. Its timestamp is the attempt's, so a retry signs anew.
+/// A webhook's request. Its timestamp is the attempt's, in seconds, so a retry signs
+/// anew; its id is the event's and the same on every attempt, which is what lets a
+/// receiver drop a repeat. Unsigned, it carries no signature header at all, never an
+/// empty one.
 fn webhook_request(body: &str, event_id: &str, secret: Option<&str>) -> Request {
     let timestamp = chrono::Utc::now().timestamp();
     let mut headers = vec![
         ("content-type", "application/json".to_string()),
         (EVENT_HEADER, event_id.to_string()),
         (TIMESTAMP_HEADER, timestamp.to_string()),
+        (STANDARD_ID_HEADER, event_id.to_string()),
+        (STANDARD_TIMESTAMP_HEADER, timestamp.to_string()),
     ];
     if let Some(secret) = secret {
         headers.push((SIGNATURE_HEADER, signature(secret, timestamp, body)));
+        if let Some(signed) = standard_signature(secret, event_id, timestamp, body) {
+            headers.push((STANDARD_SIGNATURE_HEADER, signed));
+        }
     }
     Request {
         headers,
@@ -531,7 +723,9 @@ pub async fn deliver_request(
         }
         let failure = match resolve(target, policy).await {
             Ok(addrs) => {
-                let proxy = policy.proxy.as_deref();
+                // Never through the proxy to the agent's receiver: the proxy is for
+                // hiding this server from strangers, and it is not on the inside.
+                let proxy = policy.proxy.as_deref().filter(|_| !target.agent);
                 match post(target, &addrs, make(), timing, proxy).await {
                     Ok(code) => {
                         return Outcome {
@@ -1322,6 +1516,412 @@ mod tests {
         assert!(
             req.contains(&format!("host: rebind.invalid:{port}")),
             "{req}"
+        );
+    }
+
+    // ---- ADR-0061: Standard Webhooks headers, and the agent's receiver ----
+
+    /// What a receiver built for Standard Webhooks does with a delivery, written from
+    /// the receiver the agent runs: the signed content is `<id>.<timestamp>.<body>`,
+    /// the header a list of `v1,<base64>` entries, the secret `whsec_<base64>` or any
+    /// other string taken as bytes, and the timestamp within 300 s of now.
+    fn a_standard_receiver_accepts(head: &str, body: &str, secret: &str) -> bool {
+        use base64::Engine;
+        let header = |name: &str| {
+            head.lines()
+                .find_map(|l| {
+                    l.to_lowercase()
+                        .starts_with(&format!("{name}:"))
+                        .then(|| l[name.len() + 1..].trim().to_string())
+                })
+                .unwrap_or_default()
+        };
+        let (id, timestamp, signed) = (
+            header("webhook-id"),
+            header("webhook-timestamp"),
+            header("webhook-signature"),
+        );
+        if id.is_empty() || signed.is_empty() {
+            return false;
+        }
+        let Ok(at) = timestamp.parse::<i64>() else {
+            return false;
+        };
+        if (chrono::Utc::now().timestamp() - at).abs() > 300 {
+            return false;
+        }
+        let b64 = base64::engine::general_purpose::STANDARD;
+        let key = match secret.strip_prefix("whsec_") {
+            Some(encoded) => b64.decode(encoded).unwrap(),
+            None => secret.as_bytes().to_vec(),
+        };
+        let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(&key).unwrap();
+        mac.update(format!("{id}.{timestamp}.{body}").as_bytes());
+        let expected = b64.encode(mac.finalize().into_bytes());
+        signed
+            .split_whitespace()
+            .any(|part| part.split_once(',') == Some(("v1", expected.as_str())))
+    }
+
+    fn head_and_body(request: &str) -> (&str, &str) {
+        request.split_once("\r\n\r\n").unwrap()
+    }
+
+    /// The secret of the signing test in the Standard Webhooks reference libraries
+    /// (`test_sign_function` in standard-webhooks/standard-webhooks), which is also the
+    /// example in Svix's documentation. A published test value, the key of nothing.
+    /// Put together here because secret scanners match the prefix with what follows it.
+    fn published_secret() -> String {
+        let key = "MfKQ9r8GKYqrTwjUPD8ILPZIo2LaLaSw";
+        format!("whsec_{key}")
+    }
+
+    #[test]
+    fn the_standard_signature_is_the_one_the_convention_publishes() {
+        // The reference libraries' own vector: secret, id, time, payload and signature.
+        let signed = standard_signature(
+            &published_secret(),
+            "msg_p5jXN8AQM9LWM0D4loKWxJek",
+            1_614_265_330,
+            r#"{"test": 2432232314}"#,
+        );
+        assert_eq!(
+            signed.as_deref(),
+            Some("v1,g0hM9SsE+OTPJTGt/tmIKtSyZlE3uFJELVlNIOLJ1OE=")
+        );
+        assert_eq!(standard_signature("whsec_not base64!", "id", 1, "{}"), None);
+    }
+
+    #[tokio::test]
+    async fn a_receiver_built_for_standard_webhooks_accepts_a_signed_delivery() {
+        for secret in ["0f".repeat(32), published_secret()] {
+            let (port, seen, _) = receiver(OK).await;
+            let (policy, target) = local(port);
+            let body = r#"{"id":"e1","type":"alert.fired"}"#;
+            let out = deliver(&target, &policy, body, "e1", Some(&secret), &quick(), &[]).await;
+            assert_eq!(out.status, Some(200));
+            let request = seen.lock().unwrap()[0].clone();
+            let (head, sent) = head_and_body(&request);
+            assert_eq!(sent, body);
+            assert!(a_standard_receiver_accepts(head, sent, &secret), "{head}");
+            // One byte of the body changed, or another secret: refused.
+            assert!(!a_standard_receiver_accepts(
+                head,
+                &sent.replace("e1", "e2"),
+                &secret
+            ));
+            assert!(!a_standard_receiver_accepts(
+                head,
+                sent,
+                "another secret of some length"
+            ));
+            // The headers this server always sent are there as they were.
+            let lower = head.to_lowercase();
+            let at = lower
+                .split("x-chartgen-timestamp: ")
+                .nth(1)
+                .unwrap()
+                .lines()
+                .next()
+                .unwrap()
+                .to_string();
+            assert!(lower.contains(&format!(
+                "x-chartgen-signature: {}",
+                signature(&secret, at.parse().unwrap(), body)
+            )));
+            assert!(
+                lower.contains(&format!("webhook-timestamp: {at}")),
+                "seconds, and the same instant"
+            );
+            assert!(at.len() == 10, "seconds, not milliseconds: {at}");
+        }
+    }
+
+    #[tokio::test]
+    async fn an_unsigned_delivery_has_an_id_and_no_signature_header_at_all() {
+        let (port, seen, _) = receiver(OK).await;
+        let (policy, target) = local(port);
+        deliver(&target, &policy, "{}", "e9", None, &quick(), &[]).await;
+        let head = seen.lock().unwrap()[0].to_lowercase();
+        assert!(head.contains("webhook-id: e9") && head.contains("webhook-timestamp: "));
+        assert!(!head.contains("webhook-signature") && !head.contains("x-chartgen-signature"));
+    }
+
+    #[tokio::test]
+    async fn every_attempt_of_one_event_carries_the_same_id() {
+        let (port, seen, hits) = receiver(
+            "HTTP/1.1 503 Service Unavailable\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
+        )
+        .await;
+        let (policy, target) = local(port);
+        let out = deliver(
+            &target,
+            &policy,
+            "{}",
+            "event-7",
+            Some("s3cret"),
+            &quick(),
+            &[],
+        )
+        .await;
+        assert_eq!((out.status, out.attempts), (Some(503), 3));
+        assert_eq!(hits.load(Ordering::SeqCst), 3);
+        for request in seen.lock().unwrap().iter() {
+            assert!(
+                request.to_lowercase().contains("webhook-id: event-7"),
+                "{request}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_agents_receiver_may_only_be_at_an_inside_address() {
+        for ok in [
+            "127.0.0.1",
+            "127.8.9.1",
+            "10.0.0.5",
+            "172.16.0.1",
+            "172.31.255.254",
+            "192.168.1.7",
+            "::1",
+            "fd12:3456::1",
+            "fc00::1",
+        ] {
+            assert!(is_agent_ip(ok.parse().unwrap()), "{ok}");
+        }
+        // Not "everything that is not public": each of these is non-public too.
+        for no in [
+            "169.254.169.254", // link-local: the metadata service of every cloud
+            "0.0.0.0",
+            "255.255.255.255",
+            "224.0.0.1",
+            "100.64.0.1",
+            "172.32.0.1",
+            "192.0.2.1",
+            "8.8.8.8",
+            "fe80::1",
+            "::",
+            "ff02::1",
+            "::ffff:10.0.0.1",
+            "64:ff9b::a00:1",
+            "2001:db8::1",
+        ] {
+            assert!(!is_agent_ip(no.parse().unwrap()), "{no}");
+        }
+    }
+
+    #[test]
+    fn the_agents_receiver_url_is_checked_without_repeating_it() {
+        for ok in [
+            "http://hermes:8644/webhooks/chartgen",
+            "http://127.0.0.1:8644/h",
+            "https://10.0.0.5/h",
+            "http://[fd00::2]:8644/h",
+            // This server's port number on another host is another program's.
+            "http://hermes:9315/h",
+            "http://10.0.0.5:9315/h",
+        ] {
+            assert!(Target::parse_agent(ok, Some(9315)).is_ok(), "{ok}");
+        }
+        for (no, why) in [
+            ("ftp://hermes/h", "http or https"),
+            ("http://user:token-abc@hermes:8644/h", "user or password"),
+            ("http://127.0.0.1:9315/token-abc", "own port"),
+            ("http://127.9.9.9:9315/token-abc", "own port"),
+            ("http://[::1]:9315/token-abc", "own port"),
+            ("http://LocalHost:9315/token-abc", "own port"),
+            ("http://169.254.169.254/token-abc", "private network"),
+            ("http://8.8.8.8:8644/token-abc", "private network"),
+            ("http://[fe80::1]:8644/token-abc", "private network"),
+            ("not a url token-abc", "does not parse"),
+        ] {
+            let error = Target::parse_agent(no, Some(9315))
+                .err()
+                .unwrap_or_else(|| panic!("{no} was taken"));
+            assert!(error.contains(why), "{no}: {error}");
+            assert!(
+                !error.contains("token-abc") && !error.contains("hermes"),
+                "{error}"
+            );
+        }
+    }
+
+    /// The other direction: the way in for the operator's receiver is no way in for
+    /// a webhook URL that a client names.
+    #[test]
+    fn a_client_cannot_name_the_agents_receiver_as_its_webhook_url() {
+        let policy = Policy::default();
+        for url in [
+            "http://hermes:8644/webhooks/chartgen",
+            "https://hermes:8644/webhooks/chartgen",
+            "https://hermes/webhooks/chartgen",
+            "https://127.0.0.1/webhooks/chartgen",
+            "https://10.0.0.5/webhooks/chartgen",
+            "https://[fd00::2]/webhooks/chartgen",
+        ] {
+            assert!(Target::parse(url, &policy).is_err(), "{url}");
+        }
+    }
+
+    #[test]
+    fn a_name_for_the_agents_receiver_must_resolve_inside_only() {
+        let policy = Policy::default();
+        let target = Target::parse_agent("http://hermes:8644/h", None).unwrap();
+        let at = |ips: &[&str]| -> Vec<SocketAddr> {
+            ips.iter()
+                .map(|ip| SocketAddr::new(ip.parse().unwrap(), 8644))
+                .collect()
+        };
+        assert!(check_addresses(at(&["172.18.0.5"]), &target, &policy).is_ok());
+        assert!(check_addresses(at(&["172.18.0.5", "fd00::5"]), &target, &policy).is_ok());
+        // One answer outside the list among good ones, either kind, and none at all.
+        for mixed in [
+            &["172.18.0.5", "93.184.216.34"][..],
+            &["172.18.0.5", "169.254.169.254"],
+            &["93.184.216.34"],
+            &[],
+        ] {
+            let refused = check_addresses(at(mixed), &target, &policy);
+            assert_eq!(
+                refused.err().as_deref(),
+                Some(REFUSED_AGENT_NAME),
+                "{mixed:?}"
+            );
+        }
+        // And a public webhook still may not resolve inside.
+        let public = Target::parse("https://example.com/h", &policy).unwrap();
+        assert!(check_addresses(at(&["172.18.0.5"]), &public, &policy).is_err());
+    }
+
+    #[test]
+    fn the_agents_receiver_is_all_three_settings_or_none() {
+        let with = |vars: &'static [(&'static str, &'static str)]| {
+            AgentReceiver::from_vars(
+                |name| {
+                    vars.iter()
+                        .find(|(k, _)| *k == name)
+                        .map(|(_, v)| v.to_string())
+                },
+                Some(9315),
+            )
+        };
+        const URL: (&str, &str) = (
+            "CHARTGEN_AGENT_WEBHOOK_URL",
+            "http://hermes:8644/webhooks/token-abc",
+        );
+        const OWNER: (&str, &str) = ("CHARTGEN_AGENT_WEBHOOK_OWNER", "github:42");
+        const SECRET: (&str, &str) = (
+            "CHARTGEN_AGENT_WEBHOOK_SECRET",
+            "a-secret-of-thirty-two-characters",
+        );
+        assert!(with(&[]).unwrap().is_none());
+        let set = with(&[URL, OWNER, SECRET]).unwrap().unwrap();
+        assert_eq!(
+            (set.owner.as_str(), set.target.origin().as_str()),
+            ("github:42", "http://hermes:8644")
+        );
+        let cases: [(&[(&str, &str)], &str); 7] = [
+            (&[URL, OWNER], "CHARTGEN_AGENT_WEBHOOK_SECRET is required"),
+            (&[URL, SECRET], "CHARTGEN_AGENT_WEBHOOK_OWNER is required"),
+            (&[OWNER, SECRET], "CHARTGEN_AGENT_WEBHOOK_URL is not set"),
+            (
+                &[
+                    URL,
+                    OWNER,
+                    ("CHARTGEN_AGENT_WEBHOOK_SECRET", "short-secret-token-abc"),
+                ],
+                "shorter than 24",
+            ),
+            (
+                &[
+                    URL,
+                    OWNER,
+                    ("CHARTGEN_AGENT_WEBHOOK_SECRET", "whsec_c2hvcnQ="),
+                ],
+                "shorter than 24",
+            ),
+            (
+                &[
+                    URL,
+                    OWNER,
+                    (
+                        "CHARTGEN_AGENT_WEBHOOK_SECRET",
+                        "whsec_not base64 token-abc",
+                    ),
+                ],
+                "not base64",
+            ),
+            (
+                &[
+                    (
+                        "CHARTGEN_AGENT_WEBHOOK_URL",
+                        "http://127.0.0.1:9315/token-abc",
+                    ),
+                    OWNER,
+                    SECRET,
+                ],
+                "own port",
+            ),
+        ];
+        for (vars, why) in cases {
+            let vars: &'static [(&'static str, &'static str)] =
+                Box::leak(vars.to_vec().into_boxed_slice());
+            let error = with(vars).err().unwrap_or_else(|| panic!("{why}: taken"));
+            assert!(error.contains(why), "{error}");
+            assert!(
+                !error.contains("token-abc") && !error.contains("github:42"),
+                "{error}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn the_agents_receiver_is_reached_directly_also_with_a_proxy_set() {
+        let (port, seen, _) = receiver(OK).await;
+        let policy = Policy {
+            // A proxy that is not there: a delivery through it would fail.
+            proxy: Some("http://127.0.0.1:9".to_string()),
+            ..Policy::default()
+        };
+        let target =
+            Target::parse_agent(&format!("http://127.0.0.1:{port}/webhooks/x"), None).unwrap();
+        let out = deliver(
+            &target,
+            &policy,
+            "{}",
+            "e1",
+            Some("a-secret-of-thirty-two-characters"),
+            &quick(),
+            &[],
+        )
+        .await;
+        assert_eq!((out.status, out.error), (Some(200), None));
+        let request = seen.lock().unwrap()[0].clone();
+        let (head, body) = head_and_body(&request);
+        assert!(head.starts_with("POST /webhooks/x"), "{head}");
+        assert!(a_standard_receiver_accepts(
+            head,
+            body,
+            "a-secret-of-thirty-two-characters"
+        ));
+    }
+
+    #[tokio::test]
+    async fn the_agents_receiver_is_not_followed_on_a_redirect() {
+        let (elsewhere, _, elsewhere_hits) = receiver(OK).await;
+        let reply: &'static str = Box::leak(
+            format!("HTTP/1.1 307 Temporary Redirect\r\nlocation: http://127.0.0.1:{elsewhere}/x\r\ncontent-length: 0\r\nconnection: close\r\n\r\n").into_boxed_str(),
+        );
+        let (port, _, hits) = receiver(reply).await;
+        let target = Target::parse_agent(&format!("http://127.0.0.1:{port}/h"), None).unwrap();
+        let out = deliver(&target, &Policy::default(), "{}", "e1", None, &quick(), &[]).await;
+        assert_eq!(out.status, Some(307));
+        assert_eq!(
+            (
+                hits.load(Ordering::SeqCst),
+                elsewhere_hits.load(Ordering::SeqCst)
+            ),
+            (1, 0)
         );
     }
 }

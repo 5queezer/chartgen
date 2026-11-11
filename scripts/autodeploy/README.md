@@ -197,19 +197,27 @@ Two ways.
 
 **A. In place** (keeps the uuid, the volume, the environment, the domain and
 the port). Coolify's API and UI do not offer to change an application that
-builds from a Dockerfile into a Docker Image application. Changing the
-application's build pack inside Coolify itself is **not verified by this
-repository**; do it only after it worked on an application that does not
-matter. _Rehearsal: not yet recorded._ If it is done, set the image name to
-`ghcr.io/5queezer/chartgen` and the tag to `<sha>` as well, and look at
-**Persistent Storage** again before starting: it must still show
-`<old volume>`. Then check the data where it is:
+builds from a Dockerfile into a Docker Image application. The application's
+build pack, image name and tag are changed inside Coolify itself, from within
+the coolify container.
+
+_Rehearsal, 2026-11-11, Coolify 4.7.3:_ this worked on a staging application
+and then on production. Coolify pulled the image and started it; the volume,
+the port mapping and the settings stayed. Afterwards the API reports
+`build_pack` as `dockerimage`, and this script's check of the application's
+type passes with the token it already had. **On another Coolify version, do it
+first on an application that does not matter.**
+
+Set the image name to `ghcr.io/5queezer/chartgen` and the tag to `<sha>` as
+well, and look at **Persistent Storage** again before starting: it must still
+show `<old volume>`. Then check the data where it is:
 
 ```sh
 check "$(docker volume inspect -f '{{.Mountpoint}}' <old volume>)/chartgen.db"   # ok, and the same number
 ```
 
-**B. A new application** (always possible). **New resource, Docker Image**,
+**B. A new application** (always possible; **not tried in the rehearsal of
+2026-11-11**, which used A). **New resource, Docker Image**,
 image `ghcr.io/5queezer/chartgen`, tag `<sha>`. Copy from the old application:
 every environment variable, the domain, the port (9315). Add a persistent
 storage with destination `/root/.chartgen`. **Do not start it.** Its volume,
@@ -285,7 +293,9 @@ place, until the new one is proven.
 Start the application, then (see [Is it healthy?](#is-it-healthy)):
 
 - Coolify's deployment log shows a pull of `ghcr.io/5queezer/chartgen:<sha>` and
-  no build.
+  no build. With a port mapped to the host it also says that a rolling update
+  is not supported; without mapped ports it does a rolling update. (Seen on
+  Coolify 4.7.3: the first on staging, the second on production.)
 - The container's log has the line `OAuth client store: ... (N clients
   restored)`, and `N` is the number from step 3.
 - A client that was authorized before still is, with no new authorization.

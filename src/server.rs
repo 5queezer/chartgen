@@ -2048,14 +2048,14 @@ pub async fn run_server(port: u16, engine: Option<Arc<RwLock<TradingEngine>>>) {
         engine,
         charts: ChartHub::from_env(),
     });
+    // Store port for metadata endpoint. Before the alerts start: the agent's receiver
+    // may not be at this server's own port (ADR-0061).
+    std::env::set_var("_CHARTGEN_PORT", port.to_string());
     #[cfg(feature = "scripting")]
     crate::server_alerts::start(&state.charts);
     #[cfg(feature = "scripting")]
     crate::setup_service::start(&state.charts);
     refresh::sweep_now_and_then(state.clone());
-
-    // Store port for metadata endpoint
-    std::env::set_var("_CHARTGEN_PORT", port.to_string());
 
     // Built web app (ADR-0027); unset keeps the server API-only.
     let web_dir = std::env::var_os("CHARTGEN_WEB_DIR").map(PathBuf::from);
@@ -2665,7 +2665,7 @@ mod tests {
     #[tokio::test]
     async fn a_replaced_stream_ends_and_leaves_the_new_one_its_pushes() {
         use chartgen::engine::EngineConfig;
-        let dir = std::env::temp_dir().join(format!("chartgen-replaced-{}", Uuid::new_v4()));
+        let dir = crate::test_dir::new(format!("chartgen-replaced-{}", Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let mut engine = TradingEngine::new(EngineConfig {
             symbol: "BTCUSDT".into(),
@@ -3354,7 +3354,7 @@ mod tests {
     #[cfg(feature = "scripting")]
     #[test]
     fn an_alert_owner_is_pinned_only_while_alerts_are_on() {
-        let dir = std::env::temp_dir().join(format!("chartgen-pins-{}", std::process::id()));
+        let dir = crate::test_dir::new(format!("chartgen-pins-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let store = scripting::persistence::Store::open(&dir.join("s.db")).unwrap();

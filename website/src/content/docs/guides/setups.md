@@ -103,6 +103,15 @@ If the operator takes your account off the server's list, your setups are no lon
 can still read them. One that runs out meanwhile is marked `expired` with `gap: true`: at 0 R if
 it was never filled, and with no result (`result_r: null`) if it was, since no price was read.
 
+## Being woken about a setup
+
+A [server alert](/chartgen/reference/mcp/#waking-your-agent) can name a setup: `setup_id`,
+with `notify_agent: true`. When the price it watches is reached, your agent's receiver gets
+the setup as it stands, with its status and levels before its thesis. The alert only
+reports: it changes nothing on the setup, and the server alone moves a status. It needs
+server alerts on and a receiver the operator configured for you. A replay server has no
+alerts.
+
 ## Replay
 
 A replay server answers the same tools from **fixture bars**, as of a time each call names. It

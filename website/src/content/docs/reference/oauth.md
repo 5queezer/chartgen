@@ -420,6 +420,13 @@ approved it, and is visible to that account in the web app. With sign-in off it 
 the agent's `client_id`, and anyone who learns that id can authorize as the same client, so
 do not rely on a refresh token for protection there.
 
+**Waking the agent.** An agent that has a webhook receiver can be woken by its own
+[server alerts](/chartgen/reference/mcp/#waking-your-agent), with the setup an alert is about
+in the body: the operator names the receiver once
+([deploy guide](/chartgen/guides/deploy/#the-agents-receiver)), and the agent creates alerts
+with `notify_agent: true`. The receiver needs a route whose secret is the operator's string
+and which verifies Standard Webhooks signatures.
+
 An agent that was idle for more than 30 days, or whose token files were lost, restored from
 an old backup or copied to a second machine that also runs, has to be authorized again from
 step 1. Keep the token files out of backups that might be restored next to a running

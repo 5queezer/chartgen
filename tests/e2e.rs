@@ -1,3 +1,6 @@
+#[path = "../src/test_dir.rs"]
+mod test_dir;
+
 use chartgen::data::{sample_data, OhlcvData};
 use chartgen::indicator::{ema, highest, lowest, sma, stoch, Indicator, PanelResult};
 use chartgen::indicators;
@@ -771,7 +774,7 @@ fn free_port() -> u16 {
 /// A server with an empty store of its own, never the user's real one.
 fn spawn_server(web_dir: Option<&std::path::Path>) -> Server {
     let port = free_port();
-    let db = std::env::temp_dir().join(format!("chartgen-e2e-{}-{port}.db", std::process::id()));
+    let db = crate::test_dir::new("chartgen-e2e").join("chartgen.db");
     let mut server = spawn_server_on(port, web_dir, &db, false);
     server.temp_db = Some(db);
     server
@@ -967,7 +970,7 @@ fn small_window_client(port: u16) -> std::net::TcpStream {
 /// or without a network, and never the real provider.
 fn spawn_sample_server() -> Server {
     let port = free_port();
-    let db = std::env::temp_dir().join(format!("chartgen-e2e-{}-{port}.db", std::process::id()));
+    let db = crate::test_dir::new("chartgen-e2e").join("chartgen.db");
     let mut cmd = server_command(port, None, &db, false);
     cmd.env("CHARTGEN_DATA_SOURCE", "sample");
     let mut server = start_server(cmd, port);
@@ -1514,7 +1517,7 @@ fn test_routes_for_browser_clients_answer_another_origin_as_before() {
 /// With and without the web app, where an unknown path is answered by other code.
 #[test]
 fn test_routes_for_this_origin_say_nothing_to_another() {
-    let root = std::env::temp_dir().join(format!("chartgen-web-cors-{}", std::process::id()));
+    let root = crate::test_dir::new(format!("chartgen-web-cors-{}", std::process::id()));
     let web = root.join("dist");
     std::fs::create_dir_all(web.join("assets")).unwrap();
     std::fs::write(web.join("index.html"), "<!doctype html><title>app</title>").unwrap();
@@ -1588,7 +1591,7 @@ fn test_every_answer_forbids_content_sniffing() {
 
 #[test]
 fn test_server_serves_web_app_same_origin() {
-    let root = std::env::temp_dir().join(format!("chartgen-web-{}", std::process::id()));
+    let root = crate::test_dir::new(format!("chartgen-web-{}", std::process::id()));
     let web = root.join("dist");
     std::fs::create_dir_all(web.join("assets")).unwrap();
     std::fs::write(web.join("index.html"), "<!doctype html><title>app</title>").unwrap();
@@ -1758,7 +1761,7 @@ fn assert_unknown_client_json(resp: (u16, String, String), case: &str) {
 /// page, and nothing but the server's own app may be redirected to (ADR-0036).
 #[test]
 fn test_authorize_unknown_client_returns_to_the_own_web_app_only() {
-    let web = std::env::temp_dir().join(format!("chartgen-web-authz-{}", std::process::id()));
+    let web = crate::test_dir::new(format!("chartgen-web-authz-{}", std::process::id()));
     std::fs::create_dir_all(&web).unwrap();
     std::fs::write(web.join("index.html"), "<!doctype html>").unwrap();
     let srv = spawn_server(Some(&web));
@@ -1899,7 +1902,7 @@ const SCRIPT_TOOLS: [&str; 5] = [
 
 /// A fresh path for a store that outlives one server.
 fn store_path(test: &str) -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join(format!("chartgen-{test}-{}", std::process::id()));
+    let dir = crate::test_dir::new(format!("chartgen-{test}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     dir.join("chartgen.db")
@@ -2039,6 +2042,279 @@ mod server_alerts {
             std::thread::sleep(std::time::Duration::from_millis(100));
         }
         panic!("timed out waiting for {what}");
+    }
+
+    // ---- ADR-0061: alerts that wake the owner's agent ----
+
+    const AGENT_SECRET: &str = "a-secret-of-thirty-two-characters";
+    /// Stands for what an owner's thesis and note hold: it may reach the owner's
+    /// receiver and nothing else, least of all a log.
+    const PRIVATE: &str = "PRIVATE-REASONING-MARKER";
+
+    /// A server with alerts and setups on the sample feed, the agent's receiver set
+    /// as `agent` gives it, and everything it prints kept in `log`.
+    fn waking_server(
+        db: &std::path::Path,
+        owner: &str,
+        agent: &[(&str, &str)],
+        log: &std::path::Path,
+    ) -> Server {
+        let port = free_port();
+        let mut cmd = server_command(port, None, db, false);
+        let out = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(log)
+            .unwrap();
+        cmd.env("CHARTGEN_SERVER_ALERTS", "1")
+            .env("CHARTGEN_SETUPS", "1")
+            .env("CHARTGEN_SERVER_ALERT_CLIENTS", owner)
+            .env("CHARTGEN_DATA_SOURCE", "sample")
+            .env_remove("CHARTGEN_AGENT_WEBHOOK_URL")
+            .env_remove("CHARTGEN_AGENT_WEBHOOK_OWNER")
+            .env_remove("CHARTGEN_AGENT_WEBHOOK_SECRET")
+            .envs(agent.iter().copied())
+            .stdout(out.try_clone().unwrap())
+            .stderr(out);
+        start_server(cmd, port)
+    }
+
+    /// A long far below the sample price, which nothing fills during a test, with a
+    /// thesis that carries the marker.
+    fn a_setup(port: u16, token: &str) -> String {
+        let quotes = call_tool(
+            port,
+            token,
+            "get_quotes",
+            serde_json::json!({"symbols": ["BTCUSDT"]}),
+        )
+        .unwrap();
+        let p = quotes["quotes"][0]["last"].as_f64().unwrap();
+        let setup = call_tool(
+            port,
+            token,
+            "create_setup",
+            serde_json::json!({
+                "symbol": "BTCUSDT", "interval": "1h", "direction": "long",
+                "thesis": format!("{PRIVATE} thesis"),
+                "entry": {"low": p * 0.5, "high": p * 0.51}, "invalidation": p * 0.4,
+                "targets": [p * 0.9], "expires_at": chrono::Utc::now().timestamp_millis() + 86_400_000,
+            }),
+        )
+        .unwrap();
+        setup["id"].as_str().unwrap().to_string()
+    }
+
+    /// An alert that fires at the first tick and wakes the agent about `setup`.
+    fn a_waking_alert(port: u16, token: &str, setup: &str) -> Result<serde_json::Value, String> {
+        call_tool(
+            port,
+            token,
+            "create_server_alert",
+            serde_json::json!({
+                "symbol": "BTCUSDT", "condition": "greater", "trigger": "once", "level": 0.01,
+                "notify_agent": true, "setup_id": setup, "message": format!("{PRIVATE} note"),
+            }),
+        )
+    }
+
+    /// A receiver that answers every delivery with `status`, and keeps what it got.
+    fn receiver_answering(status: &'static str) -> (u16, Arc<Mutex<Vec<String>>>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let log = seen.clone();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut s) = stream else { continue };
+                let mut buf = vec![0u8; 16384];
+                let n = s.read(&mut buf).unwrap_or(0);
+                if buf.starts_with(b"POST ") {
+                    log.lock()
+                        .unwrap()
+                        .push(String::from_utf8_lossy(&buf[..n]).to_string());
+                }
+                let _ = s.write_all(
+                    format!("HTTP/1.1 {status}\r\ncontent-length: 0\r\nconnection: close\r\n\r\n")
+                        .as_bytes(),
+                );
+            }
+        });
+        (port, seen)
+    }
+
+    /// The owner of a server with sign-in off is its OAuth client, and the operator
+    /// names it before the server starts: so the client is registered on a first
+    /// server, and the one under test opens the same store.
+    fn a_registered_client(db: &std::path::Path) -> String {
+        let port = free_port();
+        let srv = spawn_server_on(port, None, db, false);
+        let client = register_external(port);
+        drop(srv);
+        client
+    }
+
+    /// The real binary: an alert about a setup wakes the agent's receiver with a
+    /// signed body that carries the setup, on a receiver that answers, one that
+    /// keeps failing, and one that is not there. On none of these paths does the
+    /// thesis or the note, or the receiver's path, reach what the server prints.
+    #[test]
+    fn test_a_wake_up_reaches_the_agents_receiver_and_no_log_holds_its_body() {
+        for (name, status) in [
+            ("ok", Some("200 OK")),
+            ("failing", Some("503 Service Unavailable")),
+            ("absent", None),
+        ] {
+            let db = store_path(&format!("wake-up-{name}"));
+            let log = db.with_extension("log");
+            let client = a_registered_client(&db);
+            let (hook, seen) = match status {
+                Some(status) => receiver_answering(status),
+                // A port nothing listens on.
+                None => (free_port(), Arc::new(Mutex::new(Vec::new()))),
+            };
+            let url = format!("http://127.0.0.1:{hook}/webhooks/route-TOPSECRET");
+            let agent = [
+                ("CHARTGEN_AGENT_WEBHOOK_URL", url.as_str()),
+                ("CHARTGEN_AGENT_WEBHOOK_OWNER", client.as_str()),
+                ("CHARTGEN_AGENT_WEBHOOK_SECRET", AGENT_SECRET),
+            ];
+            let srv = waking_server(&db, &client, &agent, &log);
+            let port = srv.port;
+            let token = sign_in(port, &client);
+            let setup = a_setup(port, &token);
+            let alert = a_waking_alert(port, &token, &setup).unwrap();
+            let id = alert["id"].as_str().unwrap().to_string();
+            let outcome = || {
+                let list =
+                    call_tool(port, &token, "list_server_alerts", serde_json::json!({})).unwrap();
+                let alert = list["alerts"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|a| a["id"] == id.as_str())
+                    .cloned();
+                alert.filter(|a| !a["last_delivery_at"].is_null())
+            };
+            wait_for("the wake-up's outcome", || outcome().is_some());
+            let alert = outcome().unwrap();
+            match status {
+                Some("200 OK") => {
+                    assert_eq!(alert["last_status"], 200, "{alert}");
+                    let raw = seen.lock().unwrap()[0].clone();
+                    let (head, body) = raw.split_once("\r\n\r\n").unwrap();
+                    assert!(head.starts_with("POST /webhooks/route-TOPSECRET"), "{head}");
+                    let body: serde_json::Value = serde_json::from_str(body).unwrap();
+                    assert_eq!(body["setup"]["id"], setup.as_str());
+                    assert_eq!(body["setup"]["thesis"], format!("{PRIVATE} thesis"));
+                    assert_eq!(body["note"], format!("{PRIVATE} note"));
+                    let lower = head.to_lowercase();
+                    assert!(
+                        lower.contains("webhook-signature: v1,") && lower.contains("webhook-id: "),
+                        "{head}"
+                    );
+                }
+                Some(_) => {
+                    assert_eq!(alert["last_status"], 503, "{alert}");
+                    assert_eq!(
+                        seen.lock().unwrap().len(),
+                        3,
+                        "three attempts, then given up"
+                    );
+                }
+                None => assert_eq!(alert["last_error"], "could not connect", "{alert}"),
+            }
+            drop(srv);
+            let printed = std::fs::read_to_string(&log).unwrap();
+            assert!(
+                printed.contains(&format!(
+                    "Agent receiver at http://127.0.0.1:{hook} wakes the agent of owner {client}"
+                )),
+                "{printed}"
+            );
+            for private in [PRIVATE, "TOPSECRET", AGENT_SECRET, "route-"] {
+                assert!(
+                    !printed.contains(private),
+                    "{name}: {private} is in what the server printed"
+                );
+            }
+            let _ = std::fs::remove_dir_all(db.parent().unwrap());
+        }
+    }
+
+    /// A wrong agent setting leaves server alerts off, and says so where it cannot be
+    /// missed. Setups do not depend on it: their tools work and they are scored.
+    #[test]
+    fn test_a_wrong_agent_setting_turns_alerts_off_and_leaves_setups_working() {
+        let db = store_path("wake-up-wrong");
+        let log = db.with_extension("log");
+        let client = a_registered_client(&db);
+        // A name, the settings, and the line the server must print.
+        type Case<'a> = (&'a str, Vec<(&'a str, &'a str)>, String);
+        let cases: [Case; 3] = [
+            ("no secret", vec![("CHARTGEN_AGENT_WEBHOOK_URL", "http://127.0.0.1:9/h-TOPSECRET"), ("CHARTGEN_AGENT_WEBHOOK_OWNER", client.as_str())],
+             "ERROR [alerts] CHARTGEN_AGENT_WEBHOOK_SECRET is required".to_string()),
+            ("public address", vec![("CHARTGEN_AGENT_WEBHOOK_URL", "http://93.184.216.34/h-TOPSECRET"), ("CHARTGEN_AGENT_WEBHOOK_OWNER", client.as_str()), ("CHARTGEN_AGENT_WEBHOOK_SECRET", AGENT_SECRET)],
+             "ERROR [alerts] CHARTGEN_AGENT_WEBHOOK_URL must be on this host or its private network".to_string()),
+            ("owner not allowed", vec![("CHARTGEN_AGENT_WEBHOOK_URL", "http://127.0.0.1:9/h-TOPSECRET"), ("CHARTGEN_AGENT_WEBHOOK_OWNER", "someone-not-on-the-list"), ("CHARTGEN_AGENT_WEBHOOK_SECRET", AGENT_SECRET)],
+             "ERROR [alerts] CHARTGEN_AGENT_WEBHOOK_OWNER is not one of the ids in CHARTGEN_SERVER_ALERT_CLIENTS".to_string()),
+        ];
+        for (name, agent, line) in cases {
+            let _ = std::fs::remove_file(&log);
+            let srv = waking_server(&db, &client, &agent, &log);
+            let port = srv.port;
+            let token = sign_in(port, &client);
+            let tools = tool_names(port);
+            assert!(
+                !tools.iter().any(|t| t == "create_server_alert"),
+                "{name}: alerts are listed"
+            );
+            assert!(
+                tools.iter().any(|t| t == "create_setup"),
+                "{name}: setups are gone"
+            );
+            // Setups work: one is stored, read back, and watched on the feed.
+            let setup = a_setup(port, &token);
+            let read =
+                call_tool(port, &token, "get_setup", serde_json::json!({"id": setup})).unwrap();
+            assert_eq!(read["status"], "watching", "{name}: {read}");
+            // Scored, with alerts off as with them on. A setup counts from the first 1m
+            // bar that opens after it was made, so its first score comes one to two
+            // minutes later: once is enough here.
+            if name == "no secret" {
+                let scored = || {
+                    let read =
+                        call_tool(port, &token, "get_setup", serde_json::json!({"id": setup}));
+                    !read.unwrap()["scored_through"].is_null()
+                };
+                for _ in 0..135 {
+                    if scored() {
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_secs(1));
+                }
+                assert!(
+                    scored(),
+                    "the setup was not scored through a bar within 135 s"
+                );
+            }
+            // And an alert gets the answer of a server without alerts.
+            let refused = a_waking_alert(port, &token, &setup).unwrap_err();
+            assert!(refused.contains("off on this server"), "{name}: {refused}");
+            drop(srv);
+            let printed = std::fs::read_to_string(&log).unwrap();
+            assert!(printed.contains(&line), "{name}: {printed}");
+            assert!(
+                printed.contains("Server alerts stay OFF"),
+                "{name}: {printed}"
+            );
+            assert!(printed.contains("Setups enabled"), "{name}: {printed}");
+            assert!(
+                !printed.contains("TOPSECRET") && !printed.contains(AGENT_SECRET),
+                "{name}: a value is in the log"
+            );
+        }
+        let _ = std::fs::remove_dir_all(db.parent().unwrap());
     }
 
     /// The real binary, killed and started again on the same store: the alerts
@@ -4424,7 +4700,7 @@ fn test_signin_cookies_on_https() {
 #[test]
 fn test_signin_keeps_the_stale_client_recovery_and_serves_the_app() {
     let fake = FakeProvider::start();
-    let dir = std::env::temp_dir().join(format!("chartgen-signin-app-{}", std::process::id()));
+    let dir = crate::test_dir::new(format!("chartgen-signin-app-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join("index.html"), "<!doctype html>the app").unwrap();
     let port = free_port();

@@ -447,7 +447,7 @@ fn compute_timeout_caps_wall_clock() {
 
 #[test]
 fn store_round_trip_on_a_temp_db() {
-    let path = std::env::temp_dir().join(format!("chartgen-store-{}.db", uuid::Uuid::new_v4()));
+    let path = crate::test_dir::new("chartgen-store").join("s.db");
     let store = persistence::Store::open(&path).unwrap();
     let meta = json!({"title": "A"});
     store.upsert("u1", "a", "src1", &meta, "h1").unwrap();
@@ -501,7 +501,7 @@ fn store_round_trip_on_a_temp_db() {
 #[test]
 fn store_files_are_owner_only() {
     use std::os::unix::fs::PermissionsExt;
-    let dir = std::env::temp_dir().join(format!("chartgen-perm-{}", uuid::Uuid::new_v4()));
+    let dir = crate::test_dir::new(format!("chartgen-perm-{}", uuid::Uuid::new_v4()));
     let path = dir.join("nested").join("x.db");
     persistence::Store::open(&path).unwrap();
     let mode = |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
@@ -514,8 +514,7 @@ fn store_files_are_owner_only() {
 #[test]
 fn store_keeps_the_mode_of_an_existing_directory() {
     use std::os::unix::fs::PermissionsExt;
-    let dir = std::env::temp_dir().join(format!("chartgen-perm-{}", uuid::Uuid::new_v4()));
-    std::fs::create_dir(&dir).unwrap();
+    let dir = crate::test_dir::new("chartgen-perm");
     std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o1777)).unwrap();
     let path = dir.join("x.db");
     persistence::Store::open(&path).unwrap();
@@ -527,7 +526,7 @@ fn store_keeps_the_mode_of_an_existing_directory() {
 
 #[test]
 fn gc_spares_clients_that_own_scripts() {
-    let path = std::env::temp_dir().join(format!("chartgen-gc-{}.db", uuid::Uuid::new_v4()));
+    let path = crate::test_dir::new("chartgen-gc").join("s.db");
     let store = persistence::Store::open(&path).unwrap();
     store.save_oauth_client("owner", &[]).unwrap();
     store.save_oauth_client("other", &[]).unwrap();
@@ -917,7 +916,7 @@ fn concurrency_and_chart_budget() {
 /// existing file keeps its clients.
 #[test]
 fn sign_in_rows_survive_reopening() {
-    let dir = std::env::temp_dir().join(format!("chartgen-signin-{}", std::process::id()));
+    let dir = crate::test_dir::new(format!("chartgen-signin-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     let path = dir.join("s.db");
     let store = persistence::Store::open(&path).unwrap();
@@ -974,7 +973,7 @@ fn sign_in_rows_survive_reopening() {
 fn collecting_waiting_scripts_takes_every_client_without_loss() {
     const CLIENT_1: &str = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1";
     const CLIENT_2: &str = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa2";
-    let dir = std::env::temp_dir().join(format!("chartgen-claim-{}", std::process::id()));
+    let dir = crate::test_dir::new(format!("chartgen-claim-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     let store = persistence::Store::open(&dir.join("s.db")).unwrap();
     let meta = serde_json::json!({});
@@ -1123,9 +1122,12 @@ fn schema_is_complete(store: &persistence::Store) {
 }
 
 fn upgraded(name: &str, setup: &[&str]) -> persistence::Store {
-    let dir = std::env::temp_dir().join(format!("chartgen-{name}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
+    upgraded_at(name, setup).0
+}
+
+/// `upgraded`, and where its file is.
+fn upgraded_at(name: &str, setup: &[&str]) -> (persistence::Store, std::path::PathBuf) {
+    let dir = crate::test_dir::new(format!("chartgen-{name}"));
     let path = dir.join("s.db");
     let conn = rusqlite::Connection::open(&path).unwrap();
     for sql in setup {
@@ -1135,7 +1137,7 @@ fn upgraded(name: &str, setup: &[&str]) -> persistence::Store {
     let store = persistence::Store::open(&path).unwrap();
     // Reopening migrates nothing twice.
     drop(store);
-    persistence::Store::open(&path).unwrap()
+    (persistence::Store::open(&path).unwrap(), path)
 }
 
 const SCHEMA_V5_SIGNIN: &str = "
@@ -1210,7 +1212,7 @@ fn a_setup_log_entry_cannot_be_replaced() {
 /// whoever opens the file cannot change or remove an entry by an ordinary statement.
 #[test]
 fn a_setup_log_entry_cannot_be_updated_or_deleted_in_sql() {
-    let dir = std::env::temp_dir().join(format!("chartgen-setup-log-sql-{}", std::process::id()));
+    let dir = crate::test_dir::new(format!("chartgen-setup-log-sql-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("s.db");
@@ -1387,7 +1389,7 @@ fn a_refresh_tokens_table_from_before_the_access_hash_gains_the_column() {
     setup.push(REFRESH_TOKENS_WITHOUT_ACCESS_HASH.to_string());
     setup.push(format!("PRAGMA user_version = {};", table + 1));
     let setup: Vec<&str> = setup.iter().map(String::as_str).collect();
-    let store = upgraded("upgrade-access-hash", &setup);
+    let (store, upgraded_file) = upgraded_at("upgrade-access-hash", &setup);
 
     let old = &store.refresh_tokens(0).unwrap()[0];
     assert_eq!((old.token_hash.as_str(), &old.access_hash), ("old", &None));
@@ -1399,13 +1401,9 @@ fn a_refresh_tokens_table_from_before_the_access_hash_gains_the_column() {
     let rows = store.refresh_tokens(0).unwrap();
     assert_eq!(rows.iter().find(|r| r.spent_at.is_none()), Some(&next));
 
-    let dir = std::env::temp_dir().join(format!(
-        "chartgen-upgrade-access-hash-{}",
-        std::process::id()
-    ));
-    let fresh = upgraded("fresh-access-hash", &[]);
+    let (fresh, fresh_file) = upgraded_at("fresh-access-hash", &[]);
     drop((store, fresh));
-    let columns = refresh_columns(&dir.join("s.db"));
+    let columns = refresh_columns(&upgraded_file);
     assert_eq!(
         columns,
         [
@@ -1419,9 +1417,7 @@ fn a_refresh_tokens_table_from_before_the_access_hash_gains_the_column() {
             "access_hash"
         ]
     );
-    let fresh_dir =
-        std::env::temp_dir().join(format!("chartgen-fresh-access-hash-{}", std::process::id()));
-    assert_eq!(refresh_columns(&fresh_dir.join("s.db")), columns);
+    assert_eq!(refresh_columns(&fresh_file), columns);
 }
 
 /// The server only spends a token it holds as usable, and its rows are written by
@@ -1639,7 +1635,7 @@ fn ws_write(key: &str, value: Option<&str>, base_version: i64) -> persistence::W
 }
 
 fn ws_store(name: &str) -> persistence::Store {
-    let dir = std::env::temp_dir().join(format!("chartgen-ws-{name}-{}", std::process::id()));
+    let dir = crate::test_dir::new(format!("chartgen-ws-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     persistence::Store::open(&dir.join("s.db")).unwrap()
 }
@@ -2004,7 +2000,7 @@ fn a_fresh_file_gets_every_migration_with_setups_after_refresh_tokens() {
     assert_eq!(column, table + 1);
     assert_eq!(setups, column + 1);
 
-    let dir = std::env::temp_dir().join(format!("chartgen-fresh-order-{}", std::process::id()));
+    let dir = crate::test_dir::new(format!("chartgen-fresh-order-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("s.db");

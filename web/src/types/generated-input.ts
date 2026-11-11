@@ -58,9 +58,17 @@ export interface CreateServerAlertInput {
    */
   message?: string;
   /**
+   * Wake your agent when it fires: a signed POST to the receiver this server's operator configured for you. Instead of webhook_url, not with it. Refused where no receiver is configured for you.
+   */
+  notify_agent?: boolean;
+  /**
    * Notify your devices (subscribe_push) when it fires. May go with a webhook.
    */
   push?: boolean;
+  /**
+   * One of your open setups this alert is about. Needs notify_agent: the wake-up then carries the setup as it stands (status, levels, fill, result, thesis).
+   */
+  setup_id?: string;
   /**
    * Sign deliveries with a per-alert secret (HMAC-SHA256). Needs webhook_url.
    */
@@ -768,9 +776,17 @@ export interface UpdateServerAlertInput {
    */
   message?: string;
   /**
+   * Wake your agent when it fires, or stop. Not together with a webhook_url.
+   */
+  notify_agent?: boolean;
+  /**
    * Notify your devices when it fires, or stop.
    */
   push?: boolean;
+  /**
+   * One of your open setups this alert is about, or an empty string to take it off. Needs notify_agent.
+   */
+  setup_id?: string;
   /**
    * true: sign with a new secret. false: stop signing.
    */

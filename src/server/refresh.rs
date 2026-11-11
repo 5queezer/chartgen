@@ -1171,8 +1171,7 @@ mod tests {
     const REDIRECT: &str = "https://client.example/cb";
 
     fn temp_store(name: &str) -> (Arc<Store>, PathBuf) {
-        let dir =
-            std::env::temp_dir().join(format!("chartgen-refresh-{name}-{}", std::process::id()));
+        let dir = crate::test_dir::new(format!("chartgen-refresh-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("s.db");

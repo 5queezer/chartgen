@@ -9,6 +9,9 @@ mod server;
 mod server_alerts;
 #[cfg(feature = "scripting")]
 mod setup_service;
+#[cfg(test)]
+#[path = "test_dir.rs"]
+mod test_dir;
 
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};

@@ -609,7 +609,9 @@ pub fn server_alert_tools() -> Vec<Value> {
                     "message": { "type": "string", "maxLength": 200, "description": "Your note, sent in the webhook payload." },
                     "webhook_url": { "type": "string", "maxLength": 512, "description": "https URL to POST to when the alert fires." },
                     "sign": { "type": "boolean", "description": "Sign deliveries with a per-alert secret (HMAC-SHA256). Needs webhook_url.", "default": false },
-                    "push": { "type": "boolean", "description": "Notify your devices (subscribe_push) when it fires. May go with a webhook.", "default": false }
+                    "push": { "type": "boolean", "description": "Notify your devices (subscribe_push) when it fires. May go with a webhook.", "default": false },
+                    "notify_agent": { "type": "boolean", "description": "Wake your agent when it fires: a signed POST to the receiver this server's operator configured for you. Instead of webhook_url, not with it. Refused where no receiver is configured for you.", "default": false },
+                    "setup_id": { "type": "string", "maxLength": 64, "description": "One of your open setups this alert is about. Needs notify_agent: the wake-up then carries the setup as it stands (status, levels, fill, result, thesis)." }
                 },
                 "required": ["symbol", "condition", "level", "trigger"]
             }
@@ -633,7 +635,9 @@ pub fn server_alert_tools() -> Vec<Value> {
                     "message": { "type": "string", "maxLength": 200, "description": "Your note; an empty string removes it." },
                     "webhook_url": { "type": "string", "maxLength": 512, "description": "New https URL, or an empty string to remove the webhook." },
                     "sign": { "type": "boolean", "description": "true: sign with a new secret. false: stop signing." },
-                    "push": { "type": "boolean", "description": "Notify your devices when it fires, or stop." }
+                    "push": { "type": "boolean", "description": "Notify your devices when it fires, or stop." },
+                    "notify_agent": { "type": "boolean", "description": "Wake your agent when it fires, or stop. Not together with a webhook_url." },
+                    "setup_id": { "type": "string", "maxLength": 64, "description": "One of your open setups this alert is about, or an empty string to take it off. Needs notify_agent." }
                 },
                 "required": ["alert_id"]
             }
