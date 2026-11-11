@@ -865,10 +865,40 @@ export function DrawingToolbar(props: DrawingToolbarProps): JSX.Element {
         };
         const nextStep = o.nextStep.bind(o);
         o.forceComplete = () => {};
+        // The press that placed the first point. A tick can move the price axis between two
+        // clicks: the first point is then pixels away from where it was clicked, and a second
+        // click on the same spot would make a short line nobody drew. To the person the two
+        // clicks are one place, and only the mouse can say so.
+        let firstPress: typeof lastArmedPress = null;
+        // What was noted last when this tool was armed: a press from before this drawing.
+        // A first point placed with no press of its own (a touch notes none) would
+        // otherwise be remembered as that one, and a later click there be refused.
+        const before = lastArmedPress;
         o.nextStep = () => {
           const [a, b] = o.points;
+          const press = lastArmedPress;
+          if (!a || !b) {
+            firstPress = press !== before ? press : null;
+            nextStep();
+            return;
+          }
+          // Another press, at exactly the first one's position. Exactly: one pixel away is a
+          // second point. A touch notes no press here, and is judged by the points alone.
+          const samePlace =
+            press !== null &&
+            firstPress !== null &&
+            press !== firstPress &&
+            press.x === firstPress.x &&
+            press.y === firstPress.y;
+          // Only on the first point's bar. Where the chart moved sideways under the mouse, by
+          // the wheel or by a new bar, the same spot is another bar: that is a second point,
+          // and a way to draw a line without moving the mouse.
+          const sameBar =
+            a.timestamp !== undefined && b.timestamp !== undefined
+              ? a.timestamp === b.timestamp
+              : a.dataIndex === b.dataIndex;
           const toPx = (p: Partial<Point>) => chart.convertToPixel(p, { paneId: o.paneId }) as Partial<Px>;
-          if (!a || !b || !sameLinePoint(a, b, toPx)) nextStep();
+          if (!(samePlace && sameBar) && !sameLinePoint(a, b, toPx)) nextStep();
         };
       }
     }
