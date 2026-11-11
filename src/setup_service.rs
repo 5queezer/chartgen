@@ -663,8 +663,8 @@ impl Setups {
             Some(requests) => Self::place(requests, &bars)?,
             None => Vec::new(),
         };
-        let levels = match &draft.levels {
-            Some(levels) => levels.clone(),
+        let (levels, rule) = match &draft.levels {
+            Some(levels) => (levels.clone(), setups::Bracket::Agent),
             None => {
                 let secs = chartgen::data::interval_secs(&draft.interval).unwrap_or(60);
                 setups::skip_bracket(draft.direction, &bars[..closed], secs, now)
@@ -675,7 +675,8 @@ impl Setups {
         let mut st = self.lock();
         self.check_capacity(&st, owner, &symbol, &alert_pairs)?;
         let id = self.new_id(&mut st, owner);
-        let (record, created) = Record::new(id, owner, symbol, draft, levels, placed, now);
+        let (mut record, created) = Record::new(id, owner, symbol, draft, levels, placed, now);
+        record.bracket = rule;
         let log = vec![created];
         self.check_bytes(&st, &record, &log)?;
         let view = self.view(&record, &log);

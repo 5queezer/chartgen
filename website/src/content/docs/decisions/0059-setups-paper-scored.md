@@ -68,8 +68,8 @@ the server sets (`status`, `result_r`, `fill`, `exit`, `costs`) is refused by na
 
 **Least risk.** The invalidation must be at least 3 round-trip costs from the entry:
 `3 × 2 × (fee + slippage)` of the price, 42 bps with the assumption below. A stop a hair from the
-entry would turn any move into many R. The floor does not apply to a skip's bracket, which the
-agent does not choose.
+entry would turn any move into many R. A skip's bracket, which the server builds, is held to the
+same floor (below).
 
 ### Status
 
@@ -101,7 +101,12 @@ when it is created, and the agent cannot set it. A setup that was never filled s
 **Skip.** A decision not to trade is stored with `decision: "skip"` and scored as if taken, so
 skipped events are not lost. It takes no levels from the agent. The server's bracket is the same
 for every skip: in at the next bar's open, invalidation 1 × ATR(14) from the last close, one
-target 2 × ATR(14) from it, on the closed bars of the setup's interval, and an expiry after 24 of
+target 2 × ATR(14) from it, on the closed bars of the setup's interval. **Where 1 ATR is less than
+the least risk above, the invalidation is that far and the target twice that.** On a 1m chart one
+ATR can be 5 bps against 14 bps of costs: such a skip would lose whatever the market did, and every
+skip would read as right. The record says which rule set its levels, in `bracket`: `agent` for a
+setup with the agent's levels, `atr` or `floor` for a skip, so a track record can tell them apart.
+A skip has an expiry after 24 of
 those bars, or after the 90 days every setup is bound by if that is sooner (on a weekly chart 24
 bars would be 168 days). A skip cannot be cancelled and its bracket cannot be revised, so its
 expiry is what frees its place.

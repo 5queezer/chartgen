@@ -121,6 +121,8 @@ describe("setups (ADR-0059), against the server's own answers", () => {
       const setup = SetupPayloadSchema.strict().parse(answers[tool]);
       expect(setup.log[0]?.kind, tool).toBe("created");
     }
+    expect(SetupPayloadSchema.parse(answers.create_setup).bracket).toBe("agent");
+    expect(SetupPayloadSchema.parse(answers.create_setup_skip).bracket).not.toBe("agent");
     expect(SetupPayloadSchema.parse(answers.revise_setup).pending[0]?.kind).toBe("levels");
     expect(SetupPayloadSchema.parse(answers.cancel_setup).pending[0]?.kind).toBe("cancel");
   });
