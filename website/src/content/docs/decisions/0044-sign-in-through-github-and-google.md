@@ -5,7 +5,7 @@ sidebar:
   order: 44
 ---
 
-**Status:** Accepted; superseded in part by [ADR-0050](/chartgen/decisions/0050-per-user-workspace-sync/) (browser data now follows the account); amended by [ADR-0058](/chartgen/decisions/0058-refresh-tokens-for-headless-clients/) (a client other than the web app refreshes its token instead of re-authorizing)
+**Status:** Accepted; superseded in part by [ADR-0050](/chartgen/decisions/0050-per-user-workspace-sync/) (browser data now follows the account); amended by [ADR-0058](/chartgen/decisions/0058-refresh-tokens-for-headless-clients/) (a client other than the web app refreshes its token instead of re-authorizing) and by [ADR-0062](/chartgen/decisions/0062-cors-per-route-and-no-framing/) (the pages that read the session cookie answer no other origin, and the consent page's headers are a tested contract)
 **Date:** 2026-11-06
 **Amends:** [ADR-0025](/chartgen/decisions/0025-user-indicator-registry/) (with sign-in on, scripts belong to the user, not the client), [ADR-0036](/chartgen/decisions/0036-own-origin-invalid-client-redirect/) (a client's liveness is limited per user, which makes the lockout cost accounts), [ADR-0021](/chartgen/decisions/0021-realtime-chart-push/) (with sign-in on, the per-client push cap counts per user, and an operator can name a proxy's address header) [ADR-0042](/chartgen/decisions/0042-server-side-alerts/) (with sign-in on, server alerts and their allowlist belong to accounts) and [ADR-0045](/chartgen/decisions/0045-web-push-for-server-alerts/) (with sign-in on, push devices belong to the user, the last outcome is kept per device, and an endpoint has one owner)
 

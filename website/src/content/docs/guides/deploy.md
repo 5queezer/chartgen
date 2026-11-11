@@ -1,6 +1,6 @@
 ---
 title: Deployment
-description: Docker, prebuilt release binaries, reverse proxy, Coolify auto-deploy, ARM cross-compilation.
+description: Docker, the prebuilt arm64 image, release binaries, reverse proxy, Coolify auto-deploy, ARM cross-compilation.
 ---
 
 chartgen ships as a single binary. Below are the supported paths to get it running remotely.
@@ -36,6 +36,18 @@ docker run -p 9315:9315 \
   chartgen --serve
 ```
 
+On an arm64 host there is nothing to build. CI pushes the image of every commit of
+`master` that passed it ([ADR-0060](/chartgen/decisions/0060-image-built-in-ci/)):
+
+```bash
+docker pull ghcr.io/5queezer/chartgen:master          # master's head
+docker pull ghcr.io/5queezer/chartgen:<full commit sha>
+```
+
+The image is `linux/arm64` only; on x86 build it as above or use a release binary.
+The release build is one large compile: on a machine with 4 GB of memory it can
+exhaust the machine, which is why production pulls.
+
 Production must mount this volume. The `~/.chartgen/` mount persists
 `alerts.json`, `trades.log`, `subscriptions.json`, and in `chartgen.db` the
 registered OAuth clients and their refresh tokens, across restarts. Without it, every deploy forgets the
@@ -58,6 +70,9 @@ a token. See [what a signed-in stranger can still do](/chartgen/decisions/0044-s
 | `CHARTGEN_SERVER_ALERTS` | `src/server_alerts.rs` | `1` enables [alerts on the server](/chartgen/guides/web/#alerts-on-the-server): four MCP tools, and **Run on server** in the web app. Off when unset; alerts already stored wait in `chartgen.db`, and pin nobody. Needs a build with the `scripting` feature, which the Docker image has, and the store. Read [before turning it on](#server-alerts). |
 | `CHARTGEN_SERVER_ALERT_CLIENTS` | `src/server_alerts.rs` | Comma-separated OAuth client ids, or with [sign-in](#sign-in-through-github-and-google) on, accounts (`github:<id>`, `google:<sub>`), that may create server alerts and use webhooks. Unset: anyone may create alerts, nobody gets webhooks. `*`: anyone, with webhooks. |
 | `CHARTGEN_SERVER_ALERT_PAIRS_PER_CLIENT` | `src/server_alerts.rs` | Symbol and interval pairs one client may watch. Default 2. |
+| `CHARTGEN_SETUPS` | `src/setup_service.rs` | `1` enables [setups](/chartgen/guides/setups/): five MCP tools for trading setups the server scores on paper. Off when unset; setups already stored wait in `chartgen.db`. Needs a build with the `scripting` feature and the store. It does not need `CHARTGEN_SERVER_ALERTS`. Read [before turning it on](#setups). |
+| `CHARTGEN_SETUP_SYMBOLS_PER_OWNER` | `src/setup_service.rs` | Symbols one owner may have open setups on. Default 5. |
+| `CHARTGEN_REPLAY_FIXTURES` | `src/replay.rs` | A directory of 1m fixture bars. Set, the server is a [replay server](/chartgen/guides/setups/#replay): it answers only from those bars, as of the time each call names, and refuses to start with `--trade`, `--mcp`, `CHARTGEN_SERVER_ALERTS=1`, `CHARTGEN_SETUPS=1` or a sign-in provider. For evaluation, not for a public server. |
 | `CHARTGEN_WEBHOOK_PROXY` | `src/webhook.rs` | `http` or `https` URL of a proxy that sends the webhooks, so a receiver does not see this server's address. Unset means direct, ignoring `HTTPS_PROXY` and the like. |
 | `CHARTGEN_VAPID_SUBJECT` | `src/server_alerts.rs` | `mailto:` or `https:` URL where push services can reach you. Falls back to an https `CHARTGEN_BASE_URL`; with neither, [browser push](#browser-push) stays off. |
 | `CHARTGEN_VAPID_PRIVATE_KEY` | `src/server_alerts.rs` | Application server key for push, 32 bytes of base64url. Unset, one is made once and kept in `chartgen.db`. Changing it stops every device until its browser next opens chartgen. |
@@ -174,6 +189,28 @@ ten accounts, a debug build stayed under 97 MB in a 256 MiB container. A build w
 then keeps each account's data apart in the browser and syncs nothing
 ([ADR-0050](/chartgen/decisions/0050-per-user-workspace-sync/)). Back up the file as you would any
 user data.
+
+### Setups
+
+`CHARTGEN_SETUPS` is off by default. A setup sends nothing anywhere, but each symbol with an
+open setup holds one of the server's **16 watched pairs**, which setups share with
+[server alerts](#server-alerts). An alert and a setup on the same symbol are one pair.
+
+- **Who may create setups** follows `CHARTGEN_SERVER_ALERT_CLIENTS`, whether or not alerts are
+  on. Where it lists accounts, only those may. Unset or `*`, anyone who can get a token may.
+  The list is read at startup. Take an account off it and restart: its setups hold no feed and
+  are not scored from then on, and it can still read them. Past their expiry they are marked
+  expired, so they stop counting as open.
+- **On a public server, list the accounts you trust.** Otherwise strangers can hold all 16
+  pairs: four accounts with open setups on 5 symbols each are enough, and with sign-in off
+  client ids are free. Your own agent is then refused a new symbol, and new alerts on new
+  symbols are refused too.
+- `CHARTGEN_SETUP_SYMBOLS_PER_OWNER` raises or lowers the 5 symbols per owner. The 16 is a
+  constant in the server; it cannot be raised without building it.
+- Closed setups are kept as the track record and are not deleted for inactivity. An owner
+  holds at most 500 setups and 4 MiB, the server 20,000 and 256 MiB.
+- After a restart or a deploy, the server reads the 1m bars each open setup missed, once per
+  symbol and at most 1000 bars, through the same rate limits as a chart.
 
 ### Server alerts
 
@@ -343,6 +380,17 @@ closes it. Traefik's default of 90 s is fine. The numbers assume Linux with glib
 What a proxy buffers towards a client that does not read is the proxy's memory, not the server's. A local
 Caddy took 1.5 GB for 1500 such requests. If the proxy can be reached directly, limit it as well.
 
+The server forbids framing of its pages and content sniffing by itself, and answers other
+origins on the MCP and OAuth client routes only
+([ADR-0062](/chartgen/decisions/0062-cors-per-route-and-no-framing/)); there is nothing to add at
+the proxy for that, and it should not add CORS headers of its own. Two things are the proxy's:
+
+- **`Strict-Transport-Security`.** The server speaks plain HTTP behind the proxy and cannot
+  know the public side is HTTPS, so it does not send this header. Send it from the proxy.
+- **No storing of answers marked `no-store`.** The sign-in and consent pages are marked so.
+  A cache in front must honour it; do not configure one to ignore the origin's
+  `Cache-Control`.
+
 Claude.ai requires HTTPS. Terminate TLS at your reverse proxy and forward to
 chartgen's HTTP port (default `9315`). The SSE stream on `/mcp` and `/sse`
 must not be buffered — for nginx:
@@ -360,35 +408,67 @@ location / {
 ## Coolify auto-deploy
 
 A systemd timer on the Coolify host (`scripts/autodeploy/`) polls the GitHub
-API every 5 minutes. When `master` has a new head SHA and the `CI` workflow
-succeeded for it, the script calls Coolify's deploy endpoint locally:
+API every 5 minutes. When `master` has a new head SHA, the `CI` workflow
+succeeded for it and the image CI built for it is in the registry, the script
+points the Coolify application at that image and calls Coolify's deploy
+endpoint, both locally:
 
 ```
-POST ${COOLIFY_URL}/api/v1/deploy?uuid=${COOLIFY_APP_UUID}&force=false
+GET   ${COOLIFY_URL}/api/v1/applications/${COOLIFY_APP_UUID}      (must say "build_pack": "dockerimage")
+PATCH ${COOLIFY_URL}/api/v1/applications/${COOLIFY_APP_UUID}
+      {"docker_registry_image_name": "${CHARTGEN_IMAGE}", "docker_registry_image_tag": "<sha>"}
+POST  ${COOLIFY_URL}/api/v1/deploy?uuid=${COOLIFY_APP_UUID}&force=false
 Authorization: Bearer ${COOLIFY_API_TOKEN}
 ```
 
-A pending CI run is retried on the next tick; a failed one is not deployed.
-A failed Coolify call keeps the old state, so the next tick retries. The
-first run only records the current SHA. A deploy takes 20–25 minutes.
-Coolify's endpoint takes no SHA and builds the branch head, so a commit that
-lands between the CI check and the build can ship before its own CI on
-`master` finishes. This is accepted: every merge passes pull-request CI
-first and the window is small. While a new head is undeployed each tick
-makes 2 GitHub calls (about 24 per hour, against the unauthenticated limit
-of 60); an idle tick makes 1.
-Nothing is exposed inbound and the repository holds no Coolify secrets; see
-[ADR-0037](/chartgen/decisions/0037-pull-based-deploy/).
+The host pulls the image and builds nothing, and what goes out is exactly the
+commit that passed CI. The application in Coolify is of the kind **Docker
+Image**; the script refuses any other, because a deploy of one that builds
+from a Dockerfile would build on the host. A pending CI run, an image that is not published yet and a registry
+that refuses or rate-limits are all retried on the next tick; a failed CI run
+is not deployed. A failed Coolify call keeps the old state, so the next tick
+sets the tag and deploys again. The first run only records the current SHA.
 
-Install, pause and uninstall steps are in `scripts/autodeploy/README.md`.
-The token lives in `/etc/chartgen-autodeploy.env` on the host:
+The script logs that a deploy was triggered. It does not wait for it or check
+the application: look at the deployment in Coolify. `chartgen-autodeploy.sh
+rollback` deploys the image the script triggered before its last one, and
+`deploy <sha>` any published one, by its full commit SHA. After either, the
+timer leaves `master`'s head of that moment alone and deploys the next
+commit. One run works at a time, the timer's or a command by hand.
+
+While a new head is undeployed each tick makes 2 GitHub calls (about 24 per
+hour, against the unauthenticated limit of 60); an idle tick makes 1. The
+registry is asked on its own host and does not count against that.
+Nothing is exposed inbound and the repository holds no Coolify secrets; see
+[ADR-0037](/chartgen/decisions/0037-pull-based-deploy/) and
+[ADR-0060](/chartgen/decisions/0060-image-built-in-ci/).
+
+Install, pause, rollback and uninstall steps are in
+`scripts/autodeploy/README.md`, and so is **moving an existing application from
+a Dockerfile build to the image. Follow those steps in their order:** the image
+is proven to pull before anything is stopped, the data volume is copied into a
+place proven empty, and each copy is checked by what is in the database. An
+application that starts on an empty or wrong database has lost its clients,
+users, scripts, alerts and refresh tokens. The configuration lives in
+`/etc/chartgen-autodeploy.env` on the host:
 
 | Variable | What it is |
 |----------|------------|
 | `COOLIFY_URL` | Coolify instance root, e.g. `http://coolify.lan:8000`. |
-| `COOLIFY_APP_UUID` | UUID of the chartgen application in Coolify. |
-| `COOLIFY_API_TOKEN` | Coolify API token with deploy permission. |
+| `COOLIFY_APP_UUID` | UUID of the chartgen application in Coolify, a Docker Image application. |
+| `COOLIFY_API_TOKEN` | Coolify API token that may read, change and deploy the application. |
 | `GITHUB_REPO` | `owner/name` to poll, default `5queezer/chartgen`. |
+| `CHARTGEN_IMAGE` | The image without a tag, default `ghcr.io/5queezer/chartgen`. Its package must be public. |
+
+### The image
+
+The `image` job of `.github/workflows/ci.yml` builds the `Dockerfile` on a
+GitHub-hosted arm64 runner after every other CI job passed for the commit, on
+each push to `master`. To build the image of another ref, for a staging
+server, run the workflow on it: **Actions, CI, Run workflow**, and choose the
+ref. The whole of CI runs on that ref first, and the image is pushed under
+its commit SHA. The run uses the workflow file of the chosen ref, so the ref
+must contain the `image` job. `:master` is moved only from `master`.
 
 ### The old GitHub workflow
 

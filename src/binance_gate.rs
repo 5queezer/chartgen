@@ -208,8 +208,19 @@ pub fn futures_data_budget() -> &'static Budget {
     BUDGET.get_or_init(|| Budget::new("futures data", 800, Duration::from_secs(300)))
 }
 
+thread_local! {
+    static HTTP_USES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// How often this thread has asked for the upstream HTTP client. A replay's calls
+/// must leave it unchanged (ADR-0059).
+pub fn http_uses() -> usize {
+    HTTP_USES.with(std::cell::Cell::get)
+}
+
 /// Shared blocking HTTP client; every upstream request times out after 10 s.
 pub fn http() -> &'static reqwest::blocking::Client {
+    HTTP_USES.with(|n| n.set(n.get() + 1));
     static CLIENT: OnceLock<reqwest::blocking::Client> = OnceLock::new();
     CLIENT.get_or_init(|| {
         reqwest::blocking::Client::builder()

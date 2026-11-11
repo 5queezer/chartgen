@@ -402,6 +402,37 @@ fn grid_close(seed: u64, t: i64, step: i64) -> f64 {
     base * (1.0 + wave + noise)
 }
 
+thread_local! {
+    /// The time the call running on this thread is answered as of.
+    static AS_OF: std::cell::Cell<Option<i64>> = const { std::cell::Cell::new(None) };
+}
+
+/// The time the call running on this thread is answered as of, in unix ms: set for a
+/// replay's calls (ADR-0059), `None` anywhere else.
+pub fn clock() -> Option<i64> {
+    AS_OF.with(std::cell::Cell::get)
+}
+
+/// Run `call` as of `as_of`: every "now" it asks for, here or in the server, is that
+/// time, so nothing it computes depends on the wall clock.
+pub fn at<T>(as_of: Option<i64>, call: impl FnOnce() -> T) -> T {
+    let before = AS_OF.with(|c| c.replace(as_of));
+    let out = call();
+    AS_OF.with(|c| c.set(before));
+    out
+}
+
+/// Now in unix ms: the time the running call is answered as of, else the wall clock.
+/// Anything a chart tool computes from "now" reads this one.
+pub fn now_ms() -> i64 {
+    clock().unwrap_or_else(|| {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0)
+    })
+}
+
 /// Whether `CHARTGEN_DATA_SOURCE=sample` is set: every upstream read answers from a
 /// deterministic source, with no network. The one place that reads the variable.
 pub fn sample_source() -> bool {

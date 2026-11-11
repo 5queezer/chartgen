@@ -193,6 +193,10 @@ fn call_tool(
     user: Option<&str>,
     scripting: bool,
 ) -> Value {
+    let as_of = arguments.get("as_of").is_some_and(|v| !v.is_null());
+    if as_of && crate::replay::global().is_none() {
+        return tool_err(id, crate::replay::NOT_A_REPLAY);
+    }
     match tool_name {
         "generate_chart" => tool_generate_chart(id, &arguments, user),
         "list_indicators" => tool_list_indicators(id, user),
@@ -529,6 +533,27 @@ fn check_panels(unknown: &[String], invalid: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+/// On a replay server, refuse indicators that read more than the bars they are given:
+/// what they fetch is not cut at the replay's time (ADR-0059).
+fn replay_can_compute<'a>(
+    indicators: impl Iterator<Item = &'a dyn Indicator>,
+) -> Result<(), String> {
+    if crate::replay::global().is_none() {
+        return Ok(());
+    }
+    let beyond: Vec<&str> = indicators
+        .filter(|i| i.reads_beyond_bars())
+        .map(|i| i.name())
+        .collect();
+    if beyond.is_empty() {
+        return Ok(());
+    }
+    Err(format!(
+        "Not available in a replay: {}. They read series the fixtures do not hold.",
+        beyond.join(", ")
+    ))
+}
+
 /// `user` resolves the caller's scripted indicators first (ADR-0025).
 fn tool_generate_chart(id: Option<Value>, args: &Value, user: Option<&str>) -> Value {
     generate_chart(id, args, fetch::DataSource::from_env(), user)
@@ -632,6 +657,9 @@ pub(crate) fn generate_chart(
     let (panel_indicators, indicator_keys, unknown, invalid, per_key) =
         parse_panels(&panels_value, user);
     if let Err(e) = check_panels(&unknown, &invalid) {
+        return tool_err(id, &e);
+    }
+    if let Err(e) = replay_can_compute(panel_indicators.iter().map(|i| i.as_ref())) {
         return tool_err(id, &e);
     }
 
@@ -2543,6 +2571,13 @@ fn tool_get_indicators(
                 unknown.join(", ")
             ),
         );
+    }
+    let named: Vec<Box<dyn Indicator>> = indicator_names
+        .iter()
+        .filter_map(|name| indicators::by_name(name))
+        .collect();
+    if let Err(e) = replay_can_compute(named.iter().map(|i| i.as_ref())) {
+        return tool_err(id, &e);
     }
 
     // Try to get cached results from the engine first

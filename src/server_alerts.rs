@@ -74,7 +74,7 @@ pub enum Access {
 }
 
 impl Access {
-    fn parse(raw: Option<&str>) -> Self {
+    pub(crate) fn parse(raw: Option<&str>) -> Self {
         let ids: HashSet<String> = raw
             .unwrap_or("")
             .split(',')
@@ -91,7 +91,7 @@ impl Access {
         }
     }
 
-    fn may_create(&self, owner: &str) -> bool {
+    pub(crate) fn may_create(&self, owner: &str) -> bool {
         match self {
             Self::Clients(ids) => ids.contains(owner),
             _ => true,
@@ -337,7 +337,7 @@ struct Watch {
 
 /// Calls in the last minute, per key.
 #[derive(Default)]
-struct Window(HashMap<String, VecDeque<Instant>>);
+pub(crate) struct Window(HashMap<String, VecDeque<Instant>>);
 
 impl Window {
     fn has_room(&mut self, key: &str, max: usize, now: Instant) -> bool {
@@ -354,7 +354,7 @@ impl Window {
         self.0.entry(key.to_string()).or_default().push_back(now);
     }
 
-    fn admit(&mut self, key: &str, max: usize, now: Instant) -> bool {
+    pub(crate) fn admit(&mut self, key: &str, max: usize, now: Instant) -> bool {
         let admitted = self.has_room(key, max, now);
         if admitted {
             self.record(key, now);
@@ -399,7 +399,18 @@ pub struct ServerAlerts {
     /// `None` leaves push off; everything else still runs.
     vapid: Option<Vapid>,
     slots: Arc<Semaphore>,
+    /// Setups watch feeds too, and theirs count against `limits.feeds` (ADR-0059).
+    setups: OnceLock<Weak<crate::setup_service::Setups>>,
     me: Weak<ServerAlerts>,
+}
+
+/// Alerts and setups share the server's limit on watched pairs (ADR-0059). Each checks
+/// it and then stores; this is held across both steps, by both, so two creates at the
+/// same moment cannot each see room for the last pair. Taken before either service's
+/// own lock, never after.
+pub(crate) fn pair_gate() -> MutexGuard<'static, ()> {
+    static GATE: Mutex<()> = Mutex::new(());
+    GATE.lock().unwrap_or_else(|p| p.into_inner())
 }
 
 static GLOBAL: OnceLock<Arc<ServerAlerts>> = OnceLock::new();
@@ -500,7 +511,7 @@ fn now_ms() -> i64 {
 
 impl ServerAlerts {
     /// Load the stored alerts, join their feeds, resume unfinished deliveries.
-    fn new(
+    pub(crate) fn new(
         store: &'static Store,
         hub: Arc<ChartHub>,
         policy: Policy,
@@ -520,6 +531,7 @@ impl ServerAlerts {
             access,
             vapid,
             slots: Arc::new(Semaphore::new(limits.deliveries_in_flight)),
+            setups: OnceLock::new(),
             me: me.clone(),
         });
         alerts.restore();
@@ -591,6 +603,16 @@ impl ServerAlerts {
             .filter(|a| self.runs(a))
             .map(Record::feed)
             .collect()
+    }
+
+    /// The feeds active alerts hold, for the limit setups share (ADR-0059).
+    pub fn pairs(&self) -> HashSet<FeedKey> {
+        self.wanted_feeds(&self.lock())
+    }
+
+    /// Count the feeds `setups` hold against the server's limit on watched pairs.
+    pub fn count_pairs_of(&self, setups: &Arc<crate::setup_service::Setups>) {
+        let _ = self.setups.set(Arc::downgrade(setups));
     }
 
     /// Join the feeds active alerts need and leave the others.
@@ -1489,7 +1511,12 @@ impl ServerAlerts {
 
     fn check_feed_room(&self, st: &State, owner: &str, feed: &FeedKey) -> Result<(), String> {
         let wanted = self.wanted_feeds(st);
-        if !wanted.contains(feed) && wanted.len() >= self.limits.feeds {
+        // Setups never ask alerts for anything while they hold their own lock.
+        let mut watched = wanted.clone();
+        if let Some(setups) = self.setups.get().and_then(Weak::upgrade) {
+            watched.extend(setups.pairs());
+        }
+        if !watched.contains(feed) && watched.len() >= self.limits.feeds {
             return Err(format!(
                 "Limit reached: this server watches at most {} symbol and interval pairs",
                 self.limits.feeds
@@ -1609,6 +1636,8 @@ impl ServerAlerts {
             device_pushes: HashMap::new(),
             device_pushes_fire: None,
         };
+        // With setups: nobody else may take a pair between this check and the write.
+        let _pairs = pair_gate();
         let mut st = self.lock();
         // The fetch and the lookup ran unlocked: another call may have filled up.
         self.check_capacity(&st, owner, &feed)?;
@@ -1654,6 +1683,8 @@ impl ServerAlerts {
             self.check_push(owner)?;
         }
 
+        // With setups: nobody else may take a pair between this check and the write.
+        let _pairs = pair_gate();
         let mut st = self.lock();
         let mut next = st
             .alerts

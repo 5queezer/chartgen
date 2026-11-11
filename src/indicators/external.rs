@@ -840,6 +840,10 @@ impl Indicator for FundingRate {
         "funding_rate"
     }
 
+    fn reads_beyond_bars(&self) -> bool {
+        true
+    }
+
     fn description(&self) -> &str {
         "Funding Rate — crypto perpetual futures funding (Binance futures)"
     }
@@ -916,6 +920,10 @@ impl Indicator for OpenInterestHist {
         "open_interest"
     }
 
+    fn reads_beyond_bars(&self) -> bool {
+        true
+    }
+
     fn description(&self) -> &str {
         "Open Interest — total outstanding futures contracts (Binance futures, last 30 days only)"
     }
@@ -990,6 +998,10 @@ fn ls_values(
 impl Indicator for LongShortRatio {
     fn name(&self) -> &str {
         "long_short"
+    }
+
+    fn reads_beyond_bars(&self) -> bool {
+        true
     }
 
     fn description(&self) -> &str {
@@ -1183,6 +1195,10 @@ fn fng_color(value: f64) -> plotters::style::RGBAColor {
 impl Indicator for FearGreed {
     fn name(&self) -> &str {
         "fear_greed"
+    }
+
+    fn reads_beyond_bars(&self) -> bool {
+        true
     }
 
     fn description(&self) -> &str {

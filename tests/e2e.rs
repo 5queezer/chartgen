@@ -1431,6 +1431,161 @@ fn test_streams_leave_room_for_everything_else() {
     assert!(head.starts_with("HTTP/1.1 200"), "{head}");
 }
 
+/// What a browser sends before a call from a page of another origin.
+const PREFLIGHT: [&str; 3] = [
+    "Origin: https://other.example",
+    "Access-Control-Request-Method: POST",
+    "Access-Control-Request-Headers: authorization, content-type, mcp-session-id",
+];
+
+/// The lower-cased head of an answer whose body may be anything.
+fn head_of(port: u16, method: &str, path: &str, headers: &[&str]) -> String {
+    use std::io::{Read, Write};
+    let mut s = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+    let mut req = format!("{method} {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n");
+    for h in headers {
+        req.push_str(&format!("{h}\r\n"));
+    }
+    req.push_str("\r\n");
+    s.write_all(req.as_bytes()).unwrap();
+    let mut answer = Vec::new();
+    s.read_to_end(&mut answer).unwrap();
+    let end = answer.windows(4).position(|w| w == b"\r\n\r\n").unwrap();
+    String::from_utf8_lossy(&answer[..end]).to_ascii_lowercase()
+}
+
+/// The lines of a lower-cased head that tell a browser what another origin may do.
+fn cors_lines(head: &str) -> Vec<&str> {
+    let mut lines: Vec<&str> = head
+        .lines()
+        .filter(|l| l.starts_with("access-control-") || l.starts_with("vary:"))
+        .collect();
+    lines.sort_unstable();
+    lines
+}
+
+/// The routes an MCP client in a browser uses answer another origin exactly as they did
+/// before the others stopped (ADR-0062): any origin, method and header, no credentials.
+#[test]
+fn test_routes_for_browser_clients_answer_another_origin_as_before() {
+    let srv = spawn_server(None);
+    let p = srv.port;
+    for path in [
+        "/mcp",
+        "/",
+        "/message",
+        "/sse",
+        "/register",
+        "/token",
+        "/revoke",
+        "/.well-known/oauth-authorization-server",
+        "/.well-known/oauth-protected-resource",
+        "/.well-known/oauth-protected-resource/mcp",
+    ] {
+        let (st, head, _) = http(p, "OPTIONS", path, &PREFLIGHT, "");
+        assert_eq!(st, 200, "{path}: {head}");
+        assert_eq!(
+            cors_lines(&head),
+            [
+                "access-control-allow-headers: *",
+                "access-control-allow-methods: *",
+                "access-control-allow-origin: *",
+                "vary: origin, access-control-request-method, access-control-request-headers",
+            ],
+            "{path}"
+        );
+    }
+    // And the answer itself can be read there, all of its headers.
+    let from_elsewhere = ["Origin: https://other.example", JSON_POST[0], JSON_POST[1]];
+    let (st, head, _) = http(p, "POST", "/mcp", &from_elsewhere, "{}");
+    assert_eq!(st, 401, "{head}");
+    assert_eq!(
+        cors_lines(&head),
+        [
+            "access-control-allow-origin: *",
+            "access-control-expose-headers: *",
+            "vary: origin, access-control-request-method, access-control-request-headers",
+        ]
+    );
+}
+
+/// Everything else says nothing to another origin (ADR-0062): the pages that read the
+/// session cookie, what only the web app asks, the app's files and an unknown path.
+/// With and without the web app, where an unknown path is answered by other code.
+#[test]
+fn test_routes_for_this_origin_say_nothing_to_another() {
+    let root = std::env::temp_dir().join(format!("chartgen-web-cors-{}", std::process::id()));
+    let web = root.join("dist");
+    std::fs::create_dir_all(web.join("assets")).unwrap();
+    std::fs::write(web.join("index.html"), "<!doctype html><title>app</title>").unwrap();
+    std::fs::write(web.join("assets/x.js"), "console.log(1)").unwrap();
+    for srv in [spawn_server(Some(&web)), spawn_server(None)] {
+        let p = srv.port;
+        // The icon's body is not text, so its head is read from the bytes.
+        for extra in [&PREFLIGHT[..], &["Origin: https://other.example"][..]] {
+            let method = if extra.len() > 1 { "OPTIONS" } else { "GET" };
+            let head = head_of(p, method, "/favicon.ico", extra);
+            assert!(
+                !head.contains("access-control-"),
+                "{method} /favicon.ico: {head}"
+            );
+        }
+        for (method, path) in [
+            ("GET", "/authorize?response_type=code&client_id=x"),
+            ("GET", "/oauth/signin"),
+            ("GET", "/oauth/login/github"),
+            ("GET", "/oauth/callback/github"),
+            ("GET", "/oauth/cancel"),
+            ("GET", "/oauth/consent"),
+            ("POST", "/oauth/consent"),
+            ("POST", "/oauth/logout"),
+            ("GET", "/oauth/signed-out"),
+            ("GET", "/oauth/me"),
+            ("POST", "/workspace/sync"),
+            ("GET", "/favicon.svg"),
+            ("GET", "/index.html"),
+            ("GET", "/assets/x.js"),
+            ("GET", "/no-such-page"),
+            ("GET", "/admin/overview"),
+        ] {
+            let (_, head, _) = http(p, "OPTIONS", path, &PREFLIGHT, "");
+            assert!(
+                !head.contains("access-control-"),
+                "preflight {path}: {head}"
+            );
+            for accept in [HTML, "Accept: application/json"] {
+                let headers = ["Origin: https://other.example", accept];
+                let (_, head, _) = http(p, method, path, &headers, "");
+                assert!(!head.contains("access-control-"), "{method} {path}: {head}");
+            }
+        }
+    }
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Every answer forbids guessing its content type (ADR-0062): JSON, an error, a page.
+#[test]
+fn test_every_answer_forbids_content_sniffing() {
+    let srv = spawn_server(None);
+    let p = srv.port;
+    for (method, path) in [
+        ("GET", "/"),
+        ("GET", "/oauth/me"),
+        ("POST", "/mcp"),
+        ("GET", "/.well-known/oauth-authorization-server"),
+        ("GET", "/no-such-page"),
+        ("OPTIONS", "/oauth/me"),
+        ("POST", "/token"),
+    ] {
+        let (_, head, _) = http(p, method, path, &JSON_POST, "{}");
+        assert_eq!(
+            head.matches("x-content-type-options: nosniff").count(),
+            1,
+            "{method} {path}: {head}"
+        );
+    }
+}
+
 #[test]
 fn test_server_serves_web_app_same_origin() {
     let root = std::env::temp_dir().join(format!("chartgen-web-{}", std::process::id()));
@@ -1451,6 +1606,21 @@ fn test_server_serves_web_app_same_origin() {
     assert!(body.contains("<title>app</title>"), "{body}");
     assert!(head.contains("cache-control: no-cache"), "{head}");
     assert!(head.contains("x-content-type-options: nosniff"), "{head}");
+    // No other site may show the app in a frame (ADR-0062), at any path that is the app.
+    for path in ["/", "/index.html", "/some/page"] {
+        let (st, head, _) = http(p, "GET", path, &[HTML], "");
+        assert_eq!(st, 200, "{path}");
+        assert!(head.contains("x-frame-options: deny"), "{path}: {head}");
+        assert!(
+            head.contains("content-security-policy: frame-ancestors 'none'"),
+            "{path}: {head}"
+        );
+        assert_eq!(
+            head.matches("x-content-type-options: nosniff").count(),
+            1,
+            "{path}: {head}"
+        );
+    }
 
     // `/` for everyone else (health checks, MCP probes): the JSON.
     let (st, _, body) = http(p, "GET", "/", &[], "");
@@ -3911,6 +4081,18 @@ fn test_signin_third_party_client_needs_consent() {
     assert!(first.location().starts_with("/oauth/consent?request="));
     let page = b.get(&first.location());
     assert_eq!(page.status, 200, "{}", page.body);
+    // The page that asks for an approval cannot be framed, cached or sniffed, and tells
+    // no other site where the browser came from (ADR-0044, ADR-0062).
+    let head = page.head.to_ascii_lowercase();
+    for line in [
+        "x-frame-options: deny",
+        "content-security-policy: default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'",
+        "x-content-type-options: nosniff",
+        "referrer-policy: same-origin",
+        "cache-control: no-store",
+    ] {
+        assert_eq!(head.matches(line).count(), 1, "{line}: {head}");
+    }
     // The redirect host is what to trust, and what the client chose is escaped.
     let host = reqwest::Url::parse(EXTERNAL_REDIRECT).unwrap();
     assert!(

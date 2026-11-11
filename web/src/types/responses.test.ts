@@ -1,8 +1,11 @@
 import { describe, expect, it } from "vitest";
 
+import answers from "../../../tests/fixtures/setup_responses.json";
 import {
   ListIndicatorsPayloadSchema,
   SeriesPayloadSchema,
+  SetupPayloadSchema,
+  SetupsPayloadSchema,
   SummaryPayloadSchema,
 } from "./responses";
 
@@ -104,4 +107,42 @@ it("accepts additive drawing metadata while preserving older series payloads", (
   const p = SeriesPayloadSchema.parse({...series, indicators: { sar: ind }});
   expect(p.indicators.sar).toEqual(ind);
   expect(SeriesPayloadSchema.parse(series).indicators.rsi?.steps).toBeUndefined();
+});
+
+describe("setups (ADR-0059), against the server's own answers", () => {
+  it("parses a setup with its log from each tool that returns one", () => {
+    for (const tool of [
+      "create_setup",
+      "create_setup_skip",
+      "revise_setup",
+      "get_setup",
+      "cancel_setup",
+    ] as const) {
+      const setup = SetupPayloadSchema.strict().parse(answers[tool]);
+      expect(setup.log[0]?.kind, tool).toBe("created");
+    }
+    expect(SetupPayloadSchema.parse(answers.create_setup).bracket).toBe("agent");
+    expect(SetupPayloadSchema.parse(answers.create_setup_skip).bracket).not.toBe("agent");
+    expect(SetupPayloadSchema.parse(answers.revise_setup).pending[0]?.kind).toBe("levels");
+    expect(SetupPayloadSchema.parse(answers.cancel_setup).pending[0]?.kind).toBe("cancel");
+  });
+
+  it("parses the list, with closed setups scored", () => {
+    const list = SetupsPayloadSchema.strict().parse(answers.list_setups);
+    expect(list.total).toBe(3);
+    for (const setup of list.setups) {
+      expect(setup.status === "watching" || setup.status === "triggered").toBe(false);
+      expect(setup.result_r).not.toBeNull();
+    }
+    expect(list.setups.some((s) => s.fill !== null && s.exit !== null)).toBe(true);
+  });
+
+  it("parses a server with setups off", () => {
+    expect(SetupsPayloadSchema.parse({ enabled: false, setups: [] }).total).toBeUndefined();
+  });
+
+  it("refuses a status the server never sends", () => {
+    const bad = { ...answers.get_setup, status: "lost" };
+    expect(SetupPayloadSchema.safeParse(bad).success).toBe(false);
+  });
 });
