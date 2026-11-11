@@ -71,13 +71,13 @@ one and link both ways.
 | [0041](/chartgen/decisions/0041-script-editor-in-the-web-app/) | Script editor in the web app | Accepted | 2026-11-06 |
 | [0042](/chartgen/decisions/0042-server-side-alerts/) | Alerts that run on the server, with webhooks | Accepted | 2026-11-06 |
 | [0043](/chartgen/decisions/0043-multi-chart-grid/) | Multi-chart grid: per-pane store instances behind an active-chart API | Accepted | 2026-11-06 |
-| [0044](/chartgen/decisions/0044-sign-in-through-github-and-google/) | Sign-in through GitHub and Google | Accepted; superseded in part by [0050](/chartgen/decisions/0050-per-user-workspace-sync/); amended by [0058](/chartgen/decisions/0058-refresh-tokens-for-headless-clients/) and [0062](/chartgen/decisions/0062-cors-per-route-and-no-framing/) | 2026-11-06 |
+| [0044](/chartgen/decisions/0044-sign-in-through-github-and-google/) | Sign-in through GitHub and Google | Accepted; superseded in part by [0050](/chartgen/decisions/0050-per-user-workspace-sync/); amended by [0058](/chartgen/decisions/0058-refresh-tokens-for-headless-clients/) and [0062](/chartgen/decisions/0062-cors-per-route-and-no-framing/) and [0063](/chartgen/decisions/0063-operator-page/) | 2026-11-06 |
 | [0045](/chartgen/decisions/0045-web-push-for-server-alerts/) | Browser push for server alerts | Accepted | 2026-11-06 |
 | [0046](/chartgen/decisions/0046-pattern-detection/) | Pattern detection: candlesticks, chart patterns, auto fib | Accepted; amended by [0055](/chartgen/decisions/0055-provisional-swing-ends/) | 2026-11-06 |
 | [0047](/chartgen/decisions/0047-price-based-charts/) | Price-based charts: Renko, Kagi, Point & Figure, Line Break, Range | Accepted | 2026-11-06 |
 | [0048](/chartgen/decisions/0048-order-flow/) | Order flow from lower-timeframe bars: footprints, TPO, volume profiles | Accepted | 2026-11-06 |
 | [0049](/chartgen/decisions/0049-one-kline-read-per-symbol/) | One Binance kline read per symbol and interval | Accepted | 2026-11-06 |
-| [0050](/chartgen/decisions/0050-per-user-workspace-sync/) | A signed-in user's workspace, on any device | Accepted | 2026-11-07 |
+| [0050](/chartgen/decisions/0050-per-user-workspace-sync/) | A signed-in user's workspace, on any device | Accepted; amended by [0063](/chartgen/decisions/0063-operator-page/) | 2026-11-07 |
 | [0051](/chartgen/decisions/0051-bounded-connections/) | What one connection may cost | Accepted | 2026-11-07 |
 | [0052](/chartgen/decisions/0052-indicator-cost/) | What an indicator costs | Accepted | 2026-11-07 |
 | [0053](/chartgen/decisions/0053-hidden-indicators-stay-in-the-status-line/) | A hidden indicator stays in the status line | Accepted | 2026-11-08 |
@@ -90,3 +90,4 @@ one and link both ways.
 | [0060](/chartgen/decisions/0060-image-built-in-ci/) | The production image is built in CI and pulled by the host | Accepted | 2026-11-11 |
 | [0061](/chartgen/decisions/0061-alerts-that-wake-the-agent/) | An alert can wake the owner's agent | Accepted | 2026-11-11 |
 | [0062](/chartgen/decisions/0062-cors-per-route-and-no-framing/) | Other origins get an answer on the MCP and OAuth client routes only, and the app is not framed | Accepted | 2026-11-11 |
+| [0063](/chartgen/decisions/0063-operator-page/) | A read-only operator page, for a signed-in operator in the web app only | Accepted | 2026-11-11 |
