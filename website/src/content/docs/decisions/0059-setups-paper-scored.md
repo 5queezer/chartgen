@@ -63,7 +63,10 @@ nearest first), `expires_at` and `status`.
 **Falsifiable by construction.** A setup with no invalidation or no expiry is refused. The
 invalidation must be below the entry zone of a long and above that of a short, every target beyond
 the zone on the other side, and the expiry ahead, at most 90 days. The call is checked as a whole:
-any problem refuses it, each one is named with its field and a hint, and nothing is stored. A field
+any problem refuses it, each one is named with its field and a hint, and nothing is stored. A
+missing or unreadable field does not hide what is wrong with the others: every check the readable
+fields allow is made in the same answer, and a relation between two fields is judged only when
+both could be read. A field
 the server sets (`status`, `result_r`, `fill`, `exit`, `costs`) is refused by name.
 
 **Least risk.** The invalidation must be at least 3 round-trip costs from the entry:

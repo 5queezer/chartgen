@@ -778,3 +778,91 @@ fn a_record_says_which_rule_set_its_bracket() {
         Bracket::Agent
     );
 }
+
+// Every check that can be made from the fields that are present is made, in the same
+// answer. A missing field does not hide what is wrong with the others.
+
+#[test]
+fn a_missing_field_does_not_hide_a_stop_on_the_wrong_side() {
+    let args = with(
+        without(long_args(), "expires_at"),
+        "invalidation",
+        json!(102.0),
+    );
+    let problems = problems_of(args);
+    assert_eq!(fields(&problems), ["expires_at", "invalidation"]);
+    assert!(problems[1].message.contains("below its entry zone"));
+}
+
+#[test]
+fn missing_fields_do_not_hide_a_target_on_the_wrong_side() {
+    let args = without(without(long_args(), "invalidation"), "expires_at");
+    let problems = problems_of(with(args, "targets", json!([98.0])));
+    assert_eq!(
+        fields(&problems),
+        ["invalidation", "expires_at", "targets[0]"]
+    );
+}
+
+#[test]
+fn problems_of_every_kind_come_in_one_answer() {
+    // A short: thesis missing, entry upside down, stop on the wrong side of nothing
+    // that can be judged, first target wrong side, second not beyond the first,
+    // expiry in the past, and a field the server sets.
+    let args = json!({
+        "symbol": "BTCUSDT", "interval": "1h", "direction": "short",
+        "entry": { "low": 101.0, "high": 100.0 },
+        "invalidation": 99.0, "targets": [97.0, 98.0],
+        "expires_at": T0 - 1, "result_r": 3,
+    });
+    let problems = problems_of(args);
+    assert_eq!(
+        fields(&problems),
+        ["result_r", "thesis", "entry", "targets[1]", "expires_at"]
+    );
+    // With the entry the right way up, what depends on it is judged too.
+    let args = json!({
+        "symbol": "BTCUSDT", "interval": "1h", "direction": "short",
+        "entry": { "low": 100.0, "high": 101.0 },
+        "invalidation": 99.0, "targets": [102.0, 98.0, 99.0],
+        "expires_at": T0 - 1, "result_r": 3,
+    });
+    let problems = problems_of(args);
+    assert_eq!(
+        fields(&problems),
+        [
+            "result_r",
+            "thesis",
+            "invalidation",
+            "targets[0]",
+            "targets[2]",
+            "expires_at"
+        ]
+    );
+    // A relation is never reported against a field that is missing or unreadable.
+    let args = json!({
+        "symbol": "BTCUSDT", "interval": "1h", "direction": "sideways",
+        "thesis": "example", "entry": { "low": 100.0, "high": "x" },
+        "invalidation": 150.0, "targets": [1.0], "expires_at": T0 + 1000,
+    });
+    assert_eq!(fields(&problems_of(args)), ["direction", "entry.high"]);
+}
+
+#[test]
+fn a_revision_is_checked_the_same_way() {
+    let r = create(long_args());
+    // Only the new stop is sent; it is judged against the entry the setup has. The
+    // target sent with it is unreadable and is named too.
+    let args = json!({ "invalidation": 100.5, "targets": [104.0, "x"] });
+    let mut problems = Vec::new();
+    let levels = parse_levels(
+        &args,
+        Some(r.latest_levels()),
+        Some(r.direction),
+        &r.costs,
+        T0,
+        &mut problems,
+    );
+    assert!(levels.is_none());
+    assert_eq!(fields(&problems), ["targets[1]", "invalidation"]);
+}
