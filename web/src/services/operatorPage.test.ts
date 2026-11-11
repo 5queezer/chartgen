@@ -1,7 +1,13 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { OperatorOverviewSchema } from "../types/responses";
 import { fetchOverview } from "./operatorPage";
+
+const token = vi.hoisted(() => ({ value: null as string | null }));
+vi.mock("../oauth", () => ({
+  currentAccessToken: () => token.value,
+  url: (path: string) => path,
+}));
 
 const overview = {
   server: {
@@ -62,6 +68,57 @@ describe("the operator overview", () => {
   });
 
   it("is not asked for without a token", async () => {
-    expect(await fetchOverview()).toBeNull();
+    const fetched = vi.fn();
+    vi.stubGlobal("fetch", fetched);
+    expect(await fetchOverview()).toEqual({ kind: "refused" });
+    expect(fetched).not.toHaveBeenCalled();
+  });
+});
+
+describe("what the server said about the overview", () => {
+  afterEach(() => {
+    token.value = null;
+    vi.unstubAllGlobals();
+  });
+
+  const answering = (response: () => Response | Promise<Response>) => {
+    token.value = "a-token";
+    const fetched = vi.fn(response);
+    vi.stubGlobal("fetch", fetched);
+    return fetched;
+  };
+  const json = (status: number, body: unknown) =>
+    new Response(JSON.stringify(body), {
+      status,
+      headers: { "content-type": "application/json" },
+    });
+
+  it("is the overview, asked for as JSON with the token", async () => {
+    const fetched = answering(() => json(200, overview));
+    expect(await fetchOverview()).toEqual({ kind: "overview", overview });
+    const [path, init] = fetched.mock.calls[0] as unknown as [string, RequestInit];
+    expect(path).toBe("/admin/overview");
+    expect(init.headers).toEqual({ Accept: "application/json", Authorization: "Bearer a-token" });
+  });
+
+  it("is a refusal when the server answers as for a path that does not exist", async () => {
+    answering(() => new Response(null, { status: 404 }));
+    expect(await fetchOverview()).toEqual({ kind: "refused" });
+  });
+
+  it("is a refusal when the answer is something else than the overview", async () => {
+    answering(() => new Response("<!doctype html><title>app</title>", { status: 200 }));
+    expect(await fetchOverview()).toEqual({ kind: "refused" });
+    answering(() => json(200, { users: "many" }));
+    expect(await fetchOverview()).toEqual({ kind: "refused" });
+  });
+
+  it("is not a refusal when the server fails or does not answer", async () => {
+    for (const status of [500, 502, 503]) {
+      answering(() => new Response(null, { status }));
+      expect(await fetchOverview()).toEqual({ kind: "unavailable" });
+    }
+    answering(() => Promise.reject(new TypeError("Failed to fetch")));
+    expect(await fetchOverview()).toEqual({ kind: "unavailable" });
   });
 });

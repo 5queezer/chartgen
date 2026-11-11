@@ -41,28 +41,49 @@ export function forgetOperatorPage(): void {
   }
 }
 
-/** The address says /admin while the page shows. */
-export function showOperatorPath(): void {
+/**
+ * The page shows: the address says /admin, and the flag has done its work. A reload
+ * at /admin sets it again; anywhere else this tab is the app.
+ */
+export function enterOperatorPage(): void {
+  try {
+    sessionStorage.removeItem(FLAG);
+  } catch {
+    // Nothing was kept.
+  }
   if (window.location.pathname !== PATH) window.history.replaceState({}, "", PATH);
 }
 
 /**
- * The overview, or `null` when there is none for this tab: not signed in, not an
- * operator, no such page on this server, or an answer that is not the overview.
- * JSON is asked for, so that "no" is the server's short answer and not the app.
+ * What the server said. "refused" is its answer to everyone who is not an operator
+ * in the web app, the same as for a path that does not exist, and also any answer
+ * that is not the overview. "unavailable" is a failure that says nothing about who
+ * asks: no answer at all, or an error of the server itself.
  */
-export async function fetchOverview(): Promise<OperatorOverview | null> {
+export type OverviewAnswer =
+  | { kind: "overview"; overview: OperatorOverview }
+  | { kind: "refused" }
+  | { kind: "unavailable" };
+
+/**
+ * Ask for the overview. JSON is asked for, so that "no" is the server's short answer
+ * and not the app. A failure of the server or the network is not a "no": whoever was
+ * shown the page keeps it, and whoever asked for it may try again.
+ */
+export async function fetchOverview(): Promise<OverviewAnswer> {
   const token = currentAccessToken();
-  if (token === null) return null;
+  if (token === null) return { kind: "refused" };
+  let res: Response;
   try {
-    const res = await fetch(url("/admin/overview"), {
+    res = await fetch(url("/admin/overview"), {
       headers: { Accept: "application/json", Authorization: `Bearer ${token}` },
       cache: "no-store",
     });
-    if (!res.ok) return null;
-    const parsed = OperatorOverviewSchema.safeParse(await res.json());
-    return parsed.success ? parsed.data : null;
   } catch {
-    return null;
+    return { kind: "unavailable" };
   }
+  if (res.status >= 500) return { kind: "unavailable" };
+  if (!res.ok) return { kind: "refused" };
+  const parsed = OperatorOverviewSchema.safeParse(await res.json().catch(() => null));
+  return parsed.success ? { kind: "overview", overview: parsed.data } : { kind: "refused" };
 }

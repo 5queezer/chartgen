@@ -4,7 +4,7 @@
 
 import { createSignal, For, Show, type JSX } from "solid-js";
 
-import { fetchOverview, forgetOperatorPage } from "../services/operatorPage";
+import { enterOperatorPage, fetchOverview, forgetOperatorPage } from "../services/operatorPage";
 import type { OperatorOverview } from "../types/responses";
 
 const PROVIDERS: Record<string, string> = { github: "GitHub", google: "Google" };
@@ -23,27 +23,33 @@ const th = "text-left font-medium px-2 py-1 border-b border-[color:var(--color-b
 const td = "px-2 py-1 border-b border-[color:var(--color-border)] align-top";
 const num = `${td} text-right tabular-nums`;
 
-export function OperatorPage(props: { overview: OperatorOverview }): JSX.Element {
-  const [overview, setOverview] = createSignal(props.overview);
-  const [stale, setStale] = createSignal(false);
-  const refresh = async () => {
-    const next = await fetchOverview();
-    if (next === null) setStale(true);
-    else {
-      setOverview(next);
-      setStale(false);
-    }
-  };
+/**
+ * `first` is the overview the tab started with, or `null` when the server failed at
+ * that moment: then there is nothing to show yet, and the page offers to try again.
+ */
+export function OperatorPage(props: { first: OperatorOverview | null }): JSX.Element {
+  const [overview, setOverview] = createSignal(props.first);
+  const [failed, setFailed] = createSignal(props.first === null);
+  if (props.first !== null) enterOperatorPage();
   const leave = () => {
     forgetOperatorPage();
     window.location.assign("/");
   };
-  const server = () => overview().server;
-  const on = () =>
-    Object.entries(server().features)
-      .filter(([, value]) => value)
-      .map(([name]) => name.replaceAll("_", " "))
-      .join(", ");
+  const refresh = async () => {
+    const answer = await fetchOverview();
+    if (answer.kind === "overview") {
+      setOverview(answer.overview);
+      setFailed(false);
+      enterOperatorPage();
+    } else if (answer.kind === "unavailable") {
+      // Nothing was said about who asks: what is shown stays, marked as old.
+      setFailed(true);
+    } else {
+      // No longer for this tab: nothing of it stays on screen.
+      setOverview(null);
+      leave();
+    }
+  };
 
   return (
     <main
@@ -57,7 +63,7 @@ export function OperatorPage(props: { overview: OperatorOverview }): JSX.Element
           class="px-2 py-1 rounded-md border border-[color:var(--color-border)] cursor-pointer"
           onClick={() => void refresh()}
         >
-          Refresh
+          {overview() === null ? "Try again" : "Refresh"}
         </button>
         <button
           type="button"
@@ -66,11 +72,30 @@ export function OperatorPage(props: { overview: OperatorOverview }): JSX.Element
         >
           Back to the chart
         </button>
-        <Show when={stale()}>
-          <span role="status">Could not refresh: sign in again, or the server is busy.</span>
+        <Show when={failed()}>
+          <span role="status">
+            {overview() === null
+              ? "The server did not answer."
+              : "Could not refresh: the server did not answer. This is what it said before."}
+          </span>
         </Show>
       </div>
+      <Show when={overview()}>{(shown) => <OperatorTables overview={shown()} />}</Show>
+    </main>
+  );
+}
 
+function OperatorTables(props: { overview: OperatorOverview }): JSX.Element {
+  const overview = () => props.overview;
+  const server = () => overview().server;
+  const on = () =>
+    Object.entries(server().features)
+      .filter(([, value]) => value)
+      .map(([name]) => name.replaceAll("_", " "))
+      .join(", ");
+
+  return (
+    <>
       <section aria-labelledby="operator-server" class="mb-6">
         <h2 id="operator-server" class="font-semibold mb-1">
           Server
@@ -208,6 +233,6 @@ export function OperatorPage(props: { overview: OperatorOverview }): JSX.Element
           </table>
         </div>
       </section>
-    </main>
+    </>
   );
 }

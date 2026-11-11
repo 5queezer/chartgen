@@ -6,7 +6,6 @@ import {
   fetchOverview,
   forgetOperatorPage,
   noteOperatorPath,
-  showOperatorPath,
   wantsOperatorPage,
 } from "./services/operatorPage";
 import { bootWorkspace } from "./services/workspace";
@@ -35,12 +34,16 @@ async function start(root: HTMLElement): Promise<void> {
   noteOperatorPath();
   const boot = await bootWorkspace();
   if (wantsOperatorPage()) {
-    const overview = boot.user ? await fetchOverview() : null;
-    if (overview !== null) {
+    const answer = boot.user ? await fetchOverview() : ({ kind: "refused" } as const);
+    if (answer.kind !== "refused") {
+      // The overview, or a server that failed for now: the page then offers to try
+      // again, and this tab stays the operator's until the server says otherwise.
       const { OperatorPage } = await import("./components/OperatorPage");
-      showOperatorPath();
       root.textContent = "";
-      render(() => <OperatorPage overview={overview} />, root);
+      render(
+        () => <OperatorPage first={answer.kind === "overview" ? answer.overview : null} />,
+        root,
+      );
       return;
     }
     // Not for this tab, or no such page here: the app, as at any other address.

@@ -59,6 +59,49 @@ test.describe("the operator page", () => {
     await expect(page.getByTestId("user-id")).toHaveText("github:1001");
   });
 
+  test("a server that fails for a moment is not a no: the page offers to try again", async ({
+    page,
+  }) => {
+    let failures = 1;
+    await page.route("**/admin/overview", (route) =>
+      failures-- > 0 ? route.fulfill({ status: 503, body: "" }) : route.fallback(),
+    );
+    await openAdminAs(page, "GitHub", "octo");
+    await expect(operatorPage(page)).toContainText("The server did not answer.");
+    await expect(page.getByTestId("operator-users")).toHaveCount(0);
+    await page.getByRole("button", { name: "Try again" }).click();
+    await expect(page.getByTestId("operator-users")).toContainText("octo");
+    await expect(page).toHaveURL(/\/admin$/);
+
+    // Later the server fails again: what was shown stays, marked as old.
+    failures = 1;
+    await page.getByRole("button", { name: "Refresh" }).click();
+    await expect(operatorPage(page)).toContainText("Could not refresh");
+    await expect(page.getByTestId("operator-users")).toContainText("octo");
+    await page.getByRole("button", { name: "Refresh" }).click();
+    await expect(operatorPage(page)).not.toContainText("Could not refresh");
+  });
+
+  test("a refusal on refresh takes the page away, and the tab is the app", async ({ page }) => {
+    await openAdminAs(page, "GitHub", "octo");
+    await expect(page.getByTestId("operator-users")).toContainText("octo");
+    // As when the operator was taken off the list, or signed out elsewhere.
+    await page.route("**/admin/overview", (route) => route.fulfill({ status: 404, body: "" }));
+    await page.getByRole("button", { name: "Refresh" }).click();
+    await expectChartRendered(page);
+    await expect(page).toHaveURL((url) => url.pathname === "/");
+    await expect(operatorPage(page)).toHaveCount(0);
+    // The tab asked once more at most, on the refresh: the app at `/` does not ask.
+    await page.unroute("**/admin/overview");
+    const asked: string[] = [];
+    page.on("request", (r) => {
+      if (new URL(r.url()).pathname === "/admin/overview") asked.push(r.url());
+    });
+    await page.reload();
+    await expectChartRendered(page);
+    expect(asked).toEqual([]);
+  });
+
   test("another user gets the app at /admin, and from the server what an unknown path gets", async ({
     page,
   }) => {

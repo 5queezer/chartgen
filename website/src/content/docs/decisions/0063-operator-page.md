@@ -138,8 +138,13 @@ statements: none per row of a table that is not found by an index.
 path with the app, so the address tells nothing. A tab opened there keeps a flag for
 the tab (never an address: nothing stored is used as a place to go), signs in as
 usual, which returns to `/`, and asks for the overview with `Accept:
-application/json`. If the server answers it, the tab shows the page. If not, the tab
-is the app at `/`, with no message. The app has no link to `/admin`.
+application/json`. If the server answers it, the tab shows the page. If the server
+says no, which is its answer for a path that does not exist, the tab is the app at
+`/`, with no message. A failure of the server or the network is not a no: it says
+nothing about who asks, so the tab then offers to try again, and a page already
+shown keeps what it shows, marked as old. A no on a later refresh takes the page
+away. The flag is dropped once the page shows, so it cannot follow the tab to
+another address; a reload at `/admin` sets it again. The app has no link to `/admin`.
 
 The repository is public, so anyone can read that the app has such a view. What
 stays unknown from outside is whether a given server has an operator, and who.
