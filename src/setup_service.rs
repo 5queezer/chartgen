@@ -395,7 +395,7 @@ impl Setups {
             };
         };
         let now = crate::replay::as_of(as_of)?;
-        replay.advance(owner, now)?;
+        replay.advance(now)?;
         self.replay_to(replay, owner, now)?;
         Ok(now)
     }

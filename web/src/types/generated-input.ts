@@ -23,7 +23,7 @@ export interface CancelOrderInput {
 
 export interface CancelSetupInput {
   /**
-   * Replay servers only (ADR-0059), and required there: the time this call is answered for, as unix seconds, unix ms or an ISO 8601 time. Only bars that closed at or before it are used, and it cannot be earlier than the latest as_of you have sent. On any other server leave it out.
+   * Replay servers only (ADR-0059), and required there: the time this call is answered for, as unix seconds, unix ms or an ISO 8601 time. Only bars that closed at or before it are used, and it cannot be earlier than the latest as_of the server has been sent, by any caller. On any other server leave it out.
    */
   as_of?: number | string;
   /**
@@ -81,7 +81,7 @@ export interface CreateServerAlertInput {
 
 export interface CreateSetupInput {
   /**
-   * Replay servers only (ADR-0059), and required there: the time this call is answered for, as unix seconds, unix ms or an ISO 8601 time. Only bars that closed at or before it are used, and it cannot be earlier than the latest as_of you have sent. On any other server leave it out.
+   * Replay servers only (ADR-0059), and required there: the time this call is answered for, as unix seconds, unix ms or an ISO 8601 time. Only bars that closed at or before it are used, and it cannot be earlier than the latest as_of the server has been sent, by any caller. On any other server leave it out.
    */
   as_of?: number | string;
   /**
@@ -146,7 +146,7 @@ export interface DeleteServerAlertInput {
 
 export interface GenerateChartInput {
   /**
-   * Replay servers only (ADR-0059), and required there: the time this call is answered for, as unix seconds, unix ms or an ISO 8601 time. Only bars that closed at or before it are used, and it cannot be earlier than the latest as_of you have sent. On any other server leave it out.
+   * Replay servers only (ADR-0059), and required there: the time this call is answered for, as unix seconds, unix ms or an ISO 8601 time. Only bars that closed at or before it are used, and it cannot be earlier than the latest as_of the server has been sent, by any caller. On any other server leave it out.
    */
   as_of?: number | string;
   /**
@@ -373,7 +373,7 @@ export interface GetFootprintInput {
 
 export interface GetIndicatorsInput {
   /**
-   * Replay servers only (ADR-0059), and required there: the time this call is answered for, as unix seconds, unix ms or an ISO 8601 time. Only bars that closed at or before it are used, and it cannot be earlier than the latest as_of you have sent. On any other server leave it out.
+   * Replay servers only (ADR-0059), and required there: the time this call is answered for, as unix seconds, unix ms or an ISO 8601 time. Only bars that closed at or before it are used, and it cannot be earlier than the latest as_of the server has been sent, by any caller. On any other server leave it out.
    */
   as_of?: number | string;
   /**
@@ -403,7 +403,7 @@ export interface GetPositionsInput {}
 
 export interface GetQuotesInput {
   /**
-   * Replay servers only (ADR-0059), and required there: the time this call is answered for, as unix seconds, unix ms or an ISO 8601 time. Only bars that closed at or before it are used, and it cannot be earlier than the latest as_of you have sent. On any other server leave it out.
+   * Replay servers only (ADR-0059), and required there: the time this call is answered for, as unix seconds, unix ms or an ISO 8601 time. Only bars that closed at or before it are used, and it cannot be earlier than the latest as_of the server has been sent, by any caller. On any other server leave it out.
    */
   as_of?: number | string;
   /**
@@ -416,7 +416,7 @@ export interface GetQuotesInput {
 
 export interface GetSetupInput {
   /**
-   * Replay servers only (ADR-0059), and required there: the time this call is answered for, as unix seconds, unix ms or an ISO 8601 time. Only bars that closed at or before it are used, and it cannot be earlier than the latest as_of you have sent. On any other server leave it out.
+   * Replay servers only (ADR-0059), and required there: the time this call is answered for, as unix seconds, unix ms or an ISO 8601 time. Only bars that closed at or before it are used, and it cannot be earlier than the latest as_of the server has been sent, by any caller. On any other server leave it out.
    */
   as_of?: number | string;
   /**
@@ -478,7 +478,7 @@ export interface GetTpoInput {
 
 export interface InspectChartInput {
   /**
-   * Replay servers only (ADR-0059), and required there: the time this call is answered for, as unix seconds, unix ms or an ISO 8601 time. Only bars that closed at or before it are used, and it cannot be earlier than the latest as_of you have sent. On any other server leave it out.
+   * Replay servers only (ADR-0059), and required there: the time this call is answered for, as unix seconds, unix ms or an ISO 8601 time. Only bars that closed at or before it are used, and it cannot be earlier than the latest as_of the server has been sent, by any caller. On any other server leave it out.
    */
   as_of?: number | string;
   /**
@@ -521,7 +521,7 @@ export interface ListServerAlertsInput {}
 
 export interface ListSetupsInput {
   /**
-   * Replay servers only (ADR-0059), and required there: the time this call is answered for, as unix seconds, unix ms or an ISO 8601 time. Only bars that closed at or before it are used, and it cannot be earlier than the latest as_of you have sent. On any other server leave it out.
+   * Replay servers only (ADR-0059), and required there: the time this call is answered for, as unix seconds, unix ms or an ISO 8601 time. Only bars that closed at or before it are used, and it cannot be earlier than the latest as_of the server has been sent, by any caller. On any other server leave it out.
    */
   as_of?: number | string;
   /**
@@ -565,7 +565,7 @@ export interface PlaceOrderInput {
 
 export interface ReviseSetupInput {
   /**
-   * Replay servers only (ADR-0059), and required there: the time this call is answered for, as unix seconds, unix ms or an ISO 8601 time. Only bars that closed at or before it are used, and it cannot be earlier than the latest as_of you have sent. On any other server leave it out.
+   * Replay servers only (ADR-0059), and required there: the time this call is answered for, as unix seconds, unix ms or an ISO 8601 time. Only bars that closed at or before it are used, and it cannot be earlier than the latest as_of the server has been sent, by any caller. On any other server leave it out.
    */
   as_of?: number | string;
   /**

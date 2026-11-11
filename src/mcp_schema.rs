@@ -87,7 +87,7 @@ pub fn tools_list_result() -> Value {
                             "type": "integer",
                             "description": "History paging: return only bars whose open time (ms since epoch) is strictly before end_time — pass the oldest loaded bar's t × 1000 to fetch the page before it. Omit (or null) for the newest bars, including the still-forming one. Must be an integer between -2208988800000 (1900-01-01) and one year from now."
                         },
-                        "as_of": { "type": ["integer", "string"], "description": "Replay servers only (ADR-0059), and required there: the time this call is answered for, as unix seconds, unix ms or an ISO 8601 time. Only bars that closed at or before it are used, and it cannot be earlier than the latest as_of you have sent. On any other server leave it out." },
+                        "as_of": { "type": ["integer", "string"], "description": "Replay servers only (ADR-0059), and required there: the time this call is answered for, as unix seconds, unix ms or an ISO 8601 time. Only bars that closed at or before it are used, and it cannot be earlier than the latest as_of the server has been sent, by any caller. On any other server leave it out." },
                         "warmup": {
                             "type": "integer",
                             "description": "format=series only: extra older bars (max 1000) fetched and fed to indicator computation, then trimmed, so the first returned bars carry warmed-up indicator values. A non-zero warmup is raised to what the indicators need to converge (891 for ema_stack's EMA 200). png/summary/both ignore it: with indicators and a ticker they always read what those need, at least 300 bars, and still show exactly bars (ADR-0056).",
@@ -142,7 +142,7 @@ pub fn tools_list_result() -> Value {
                         "interval": { "type": "string", "description": "Alias for timeframe." },
                         "bars": { "type": "integer", "description": "Bars to read, newest last, 1 to 1000.", "default": 200 },
                         "end_time": { "type": "integer", "description": "As generate_chart's end_time: only bars that open before it (ms since epoch)." },
-                        "as_of": { "type": ["integer", "string"], "description": "Replay servers only (ADR-0059), and required there: the time this call is answered for, as unix seconds, unix ms or an ISO 8601 time. Only bars that closed at or before it are used, and it cannot be earlier than the latest as_of you have sent. On any other server leave it out." },
+                        "as_of": { "type": ["integer", "string"], "description": "Replay servers only (ADR-0059), and required there: the time this call is answered for, as unix seconds, unix ms or an ISO 8601 time. Only bars that closed at or before it are used, and it cannot be earlier than the latest as_of the server has been sent, by any caller. On any other server leave it out." },
                         "swing_depth": { "type": "integer", "description": "Bars on each side a swing high or low must top (or undercut), 1 to 50. Larger finds fewer, bigger swings.", "default": 5 }
                     }
                 }
@@ -170,7 +170,7 @@ pub fn tools_list_result() -> Value {
                             "description": "Candle interval, as generate_chart's timeframe (e.g. 1m, 7m, 45m, 1h, 4h, 8h, 1d, 2D, 2W)",
                             "default": "4h"
                         },
-                        "as_of": { "type": ["integer", "string"], "description": "Replay servers only (ADR-0059), and required there: the time this call is answered for, as unix seconds, unix ms or an ISO 8601 time. Only bars that closed at or before it are used, and it cannot be earlier than the latest as_of you have sent. On any other server leave it out." },
+                        "as_of": { "type": ["integer", "string"], "description": "Replay servers only (ADR-0059), and required there: the time this call is answered for, as unix seconds, unix ms or an ISO 8601 time. Only bars that closed at or before it are used, and it cannot be earlier than the latest as_of the server has been sent, by any caller. On any other server leave it out." },
                         "indicators": {
                             "type": "array",
                             "items": { "type": "string" },
@@ -192,7 +192,7 @@ pub fn tools_list_result() -> Value {
                             "maxItems": 50,
                             "description": "Ticker symbols (e.g. [\"BTCUSDT\", \"AAPL\", \"^GSPC\"]). At most 50 entries; trimmed, uppercased and deduplicated."
                         },
-                        "as_of": { "type": ["integer", "string"], "description": "Replay servers only (ADR-0059), and required there: the time this call is answered for, as unix seconds, unix ms or an ISO 8601 time. Only bars that closed at or before it are used, and it cannot be earlier than the latest as_of you have sent. On any other server leave it out." }
+                        "as_of": { "type": ["integer", "string"], "description": "Replay servers only (ADR-0059), and required there: the time this call is answered for, as unix seconds, unix ms or an ISO 8601 time. Only bars that closed at or before it are used, and it cannot be earlier than the latest as_of the server has been sent, by any caller. On any other server leave it out." }
                     },
                     "required": ["symbols"]
                 }
@@ -473,7 +473,7 @@ pub fn setup_tools() -> Vec<Value> {
         FEE_BPS_PER_SIDE, MAX_REASON, MAX_TARGETS, MAX_THESIS, MIN_RISK_IN_ROUND_TRIP_COSTS,
         SKIP_ATR_LENGTH, SKIP_EXPIRY_BARS, SKIP_STOP_ATR, SKIP_TARGET_ATR, SLIPPAGE_BPS_PER_SIDE,
     };
-    let as_of = json!({ "type": ["integer", "string"], "description": "Replay servers only (ADR-0059), and required there: the time this call is answered for, as unix seconds, unix ms or an ISO 8601 time. Only bars that closed at or before it are used, and it cannot be earlier than the latest as_of you have sent. On any other server leave it out." });
+    let as_of = json!({ "type": ["integer", "string"], "description": "Replay servers only (ADR-0059), and required there: the time this call is answered for, as unix seconds, unix ms or an ISO 8601 time. Only bars that closed at or before it are used, and it cannot be earlier than the latest as_of the server has been sent, by any caller. On any other server leave it out." });
     let time = "unix seconds, unix ms or an ISO 8601 time";
     let entry = json!({
         "type": "object",

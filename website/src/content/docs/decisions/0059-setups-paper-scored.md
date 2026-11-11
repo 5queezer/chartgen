@@ -204,9 +204,11 @@ directory, as of the time each call names. It is for an evaluation that can be r
   rate, open interest, long/short ratio, fear and greed) are refused, by a flag on the indicator,
   not a list. `get_footprint`, `get_tpo`, `search_symbols`, the subscriptions and the alert tools
   are refused: they read what 1m fixtures do not hold.
-- **One clock per owner.** Every tool moves the caller's clock to its `as_of`, and none may name
-  an earlier time. An agent cannot read the chart at a later time and then act at an earlier one.
-  Each owner has its own clock, so parallel runs do not disturb each other.
+- **One clock per process.** Every `as_of` call, from any tool and any caller, moves the server's
+  one clock, and none may name an earlier time. An agent cannot read the chart at a later time and
+  then act at an earlier one. The clock is not per owner: registration is open on a replay and
+  every client is a new owner, so a second client would be a way round it. One process is one
+  run; parallel runs are separate processes.
 - **Quotes.** `last` is the close of the newest 1m bar closed by `as_of`. The 24-hour fields come
   from the 1m bars of the 24 hours before it: `prev_close` is the open of the first, `high`, `low`
   and `volume` are over them all. With less than 24 hours of fixture they cover what there is.
