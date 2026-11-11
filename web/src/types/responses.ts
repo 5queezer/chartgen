@@ -847,7 +847,8 @@ export const SetupSchema = SetupLevelsSchema.extend({
   costs: z.object({ fee_bps_per_side: z.number(), slippage_bps_per_side: z.number() }),
   fill: SetupMarkSchema.nullable(),
   exit: SetupMarkSchema.nullable(),
-  // In R; null while the setup is open.
+  // In R. Null while the setup is open, and for one that expired filled while nobody
+  // scored it (`gap` is then true): no price was read, so none is invented.
   result_r: z.number().nullable(),
   // Open time of the newest 1m bar applied, ms.
   scored_through: z.number().nullable(),

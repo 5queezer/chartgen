@@ -1122,6 +1122,37 @@ impl Record {
         )
     }
 
+    /// End a setup that ran out while nobody scored it: its owner was off the operator's
+    /// list, so it got no bars. An expiry is a time, so it still expires. Never filled,
+    /// it scores 0 like any unfilled setup. Filled, it has no exit: no bar was read, and
+    /// a price is not invented, so it closes with no result. Either way the stretch that
+    /// was not scored is in the log and `gap` is set.
+    pub fn expire_unscored(&mut self, now_ms: i64) -> Vec<Revision> {
+        if !self.status.is_open() || now_ms < self.levels.expires_at {
+            return Vec::new();
+        }
+        let gap = self.note_gap(self.next_bar_time(), now_ms, now_ms);
+        let from = self.status;
+        self.status = Status::Expired;
+        self.result_r = self.fill.is_none().then_some(0.0);
+        self.pending.clear();
+        let mut changes = Map::new();
+        changed(&mut changes, "status", json!(from), json!(self.status));
+        changes.insert(
+            "result_r".into(),
+            json!({ "from": null, "to": self.result_r }),
+        );
+        let reason = "expired while its owner was not on the operator's list, so it was not scored";
+        let closed = self.log(
+            now_ms,
+            By::Server,
+            Kind::Status,
+            Some(reason.into()),
+            changes,
+        );
+        vec![gap, closed]
+    }
+
     /// The first bar this setup still needs, by open time.
     pub fn next_bar_time(&self) -> i64 {
         match self.scored_through {
