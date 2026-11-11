@@ -2454,6 +2454,7 @@ mod tests {
         let before = started(&store, false, &[CLIENT]);
         let (access, token) = authorize(&before, CLIENT, None, &write).await;
         let (other_access, other) = authorize(&before, CLIENT, None, &write).await;
+        let (third_access, third) = authorize(&before, CLIENT, None, &write).await;
         let state = started(&store, false, &[CLIENT]);
         {
             let mut s = state.oauth.lock().unwrap();
@@ -2463,8 +2464,13 @@ mod tests {
             for t in s.restored.values_mut() {
                 t.expires_in = Duration::from_secs(10 * REFRESH_TTL_SECS as u64);
             }
-            assert_eq!((s.refresh.len(), s.restored.len()), (2, 2));
+            assert_eq!((s.refresh.len(), s.restored.len()), (3, 3));
         }
+        // Each way of asking finds it ended by itself: the refresh first, before
+        // anything else has touched its family.
+        let refused = exchange(&state, &third.unwrap(), CLIENT, &write).await;
+        assert_eq!(refused, Err(StatusCode::BAD_REQUEST));
+        assert!(!valid(&state, &third_access));
         assert!(!valid(&state, &access), "its family ended");
         assert_eq!(
             revoke(&state, &other.unwrap(), CLIENT, &write)
