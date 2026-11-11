@@ -642,3 +642,18 @@ fn a_bar_with_impossible_prices_is_not_a_bar() {
         assert!(MinuteBar::of(&bad).is_none());
     }
 }
+
+/// A stored price must read back as the same number, or a setup's levels would move
+/// by a hair at every restart. serde_json only promises that with `float_roundtrip`.
+#[test]
+fn a_stored_price_reads_back_as_the_same_number() {
+    for text in [
+        "235.83115467366719",
+        "230.96865663915858",
+        "242.09508302864626",
+    ] {
+        let price: f64 = serde_json::from_str(text).unwrap();
+        assert_eq!(price, text.parse::<f64>().unwrap(), "{text}");
+        assert_eq!(serde_json::to_string(&price).unwrap(), text);
+    }
+}
