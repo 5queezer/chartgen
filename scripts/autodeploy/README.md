@@ -140,9 +140,23 @@ on the host.
 
 From here until the application runs again, production is down.
 
-1. Stop the application in Coolify, and pause the timer:
-   `systemctl disable --now chartgen-autodeploy.timer`.
-2. Copy the volume into a **new** directory that only root can read:
+1. Stop everything that deploys, in this order, **before** the application:
+
+   ```sh
+   systemctl disable --now chartgen-autodeploy.timer
+   while systemctl is-active --quiet chartgen-autodeploy.service; do sleep 2; done
+   systemctl is-active chartgen-autodeploy.service     # says: inactive
+   ```
+
+   Disabling the timer does not stop a run of the service that is already
+   under way, and that run can still ask Coolify for a deploy. So wait for it
+   to end. Then look at the application's **Deployments** in Coolify: nothing
+   may be queued or in progress. A deployment that Coolify already holds can
+   start the application again after you stopped it.
+2. Stop the application in Coolify. The copy below runs only if no running
+   container uses the volume: that is what catches a deployment that started
+   the application again behind your back, at the moment of the copy.
+3. Copy the volume into a **new** directory that only root can read:
 
    ```sh
    b=/var/backups/chartgen/$(date +%Y%m%d-%H%M%S)
@@ -285,6 +299,10 @@ timer. The script reads the application before every deploy and refuses
 one that is not a Docker Image application, so the old uuid left in that
 file by mistake deploys nothing and says so in the log.
 
+Then tell the script what runs, so that its first rollback has somewhere to
+go: `run running <sha>` with the commit you started in step 4 (`run` is
+defined under [By hand](#by-hand)).
+
 ### If it goes wrong before the new application is proven
 
 The data is in two places whatever happened: the backup directory, and
@@ -319,32 +337,54 @@ after step 6, or do it at once with `deploy <sha>` below. Deleting
 
 ## By hand
 
-The script deploys any published image, or goes back to the one before.
-Both leave the timer's state alone: a rollback is not undone at the next
-tick, and the next commit on `master` deploys as usual.
-
 ```sh
 run() { systemd-run --wait --pipe --quiet -p EnvironmentFile=/etc/chartgen-autodeploy.env \
   -p DynamicUser=yes -p StateDirectory=chartgen-autodeploy /usr/local/bin/chartgen-autodeploy.sh "$@"; }
 run deploy <full commit sha>     # that image, now
-run rollback                     # the image that ran before the one put out last
+run rollback                     # the image the script triggered before its last one
+run running <full commit sha>    # tell the script what runs now; deploys nothing
 ```
 
 `deploy` takes a full commit SHA, 40 hex characters, and nothing else: a
 name like `master` is a tag that moves. Every image stays in the registry
 under its SHA, so any earlier commit of `master` that has one can be named.
 
-The script records what it put out last, by the timer or by hand, and what
-ran before that; `rollback` deploys the latter. So after "the timer deployed
-A, then B, and B is bad", `rollback` runs A, and when the timer later deploys
-C, the next `rollback` goes to A again, which is what ran before C.
+**What the timer does after a command by hand.** A `deploy` or `rollback` is
+your word on what runs, so the timer does not put `master`'s head of that
+moment out over it: it marks that head as dealt with, without deploying it.
+That head may be the very commit you rolled back. **The next commit on
+`master` deploys as usual.** To put the head out after all, name it:
+`run deploy <sha>`. If GitHub cannot be reached when you run the command,
+the first tick that reaches it does the same and says so in the log.
 
-**A second `rollback` in a row goes forward again:** it deploys what the first
-one replaced, the image you just rolled back from. To go further back, name
-the commit with `deploy <sha>`.
+**What `rollback` knows.** The script records the image it triggered last,
+by the timer or by hand, and the one it had triggered before that;
+`rollback` deploys the latter, and prints its SHA before it does. So after
+"the timer deployed A, then B, and B is bad", `rollback` deploys A, and when
+the timer later deploys C, the next `rollback` goes to A again.
 
-The script knows only what it deployed itself: before its first deploy, or
-after a deploy made in Coolify's UI, name the SHA with `deploy`.
+It knows only what it triggered itself, and **"triggered" means Coolify
+accepted the request, not that the image ever ran.** If B was triggered and
+failed in Coolify, and C came after it, `rollback` names B. So read the SHA
+it prints; if in doubt, look up in Coolify's **Deployments** which commit
+last ran well and use `deploy <sha>`.
+
+- **A second `rollback` in a row goes forward again:** it deploys what the
+  first one replaced, the image you just rolled back from. To go further
+  back, name the commit with `deploy <sha>`.
+- **Before the script has triggered anything,** it knows no earlier image.
+  The timer's first run only notes where `master` is; that is not a
+  deployment, and `rollback` does not use it. `rollback` then deploys
+  nothing and says so. Tell the script what runs when it takes over, so
+  that the first rollback has somewhere to go: `run running <sha>` with the
+  commit of the image the application runs.
+- After a deploy made in Coolify's UI the script's record is out of date:
+  `run running <sha>`, or name the SHA with `deploy`.
+
+Only one run works at a time, the timer's or yours. A command by hand
+waits up to two minutes for a tick under way to finish; if it cannot get
+its turn it fails with `nothing was deployed`, and you run it again. A tick
+that finds a command under way does nothing.
 
 ## Is it healthy?
 
@@ -369,9 +409,9 @@ systemctl enable --now chartgen-autodeploy.timer    # resume (deploys the newest
 ```sh
 journalctl -u chartgen-autodeploy.service -n 50
 systemctl list-timers chartgen-autodeploy.timer
-cat /var/lib/private/chartgen-autodeploy/last-sha       # master's head the timer last acted on
-cat /var/lib/private/chartgen-autodeploy/deployed-sha   # what this script put out last, by the timer or by hand
-cat /var/lib/private/chartgen-autodeploy/previous-sha   # what ran before that: what rollback deploys
+cat /var/lib/private/chartgen-autodeploy/last-sha       # master's head the timer last dealt with (deployed, or left alone)
+cat /var/lib/private/chartgen-autodeploy/deployed-sha   # what this script triggered last, or was told runs
+cat /var/lib/private/chartgen-autodeploy/previous-sha   # what it had triggered before that: what rollback deploys
 ```
 
 Delete `last-sha` to make the next run re-baseline (it records the head
@@ -387,6 +427,8 @@ What the log says when nothing is deployed:
 | `not in the registry yet` | CI is green and the image is not there. Seconds after a run this is normal; if it stays, the commit is from before the image job, or the job did not run. |
 | `is the package public?` | The registry refused. Set the package to public. |
 | `registry lookup ... answered 429` | Rate limit or network; the next tick tries again. |
+| `another run is under way` | A command by hand, or a slow tick, holds the lock. The next tick comes anyway. |
+| `not deploying <sha>: an image was deployed by hand` | A command by hand came first; this head is left alone and the next commit deploys. |
 | `not a Docker Image application` | `COOLIFY_APP_UUID` names an application that builds on the host, usually the old one. Nothing was changed or deployed. |
 | `could not read the Coolify application` | The uuid is wrong, the token may not read applications, or Coolify is down. |
 | `Coolify did not take the image tag` | The API token may not change the application. |

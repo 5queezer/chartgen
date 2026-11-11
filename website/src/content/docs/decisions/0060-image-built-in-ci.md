@@ -72,7 +72,11 @@ without this job gets no image. It never runs on a pull request.
 
 `:master` is moved only by a run on `master`, and only if its commit is still
 `master`'s head when its build is done. So of two pushes close together the older
-run cannot take the tag back from the newer, in whatever order they finish. The job
+run does not take the tag back from the newer, in whatever order they finish. The
+look at the head and the write of the tag are two steps, so the job looks again
+after writing and, if `master` has moved meanwhile, gives the tag to the head's
+image. That narrows the window to a second stall and does not close it; what
+deploys goes by the commit SHA and never by this tag. The job
 has no concurrency group, on purpose: a group keeps one job waiting and cancels it
 when another queues, and image jobs queue as their runs' tests finish, not in commit
 order, so a group could cancel the build of `master`'s head.
@@ -113,16 +117,27 @@ Still the timer of ADR-0037, still pull-based. One run:
    the configuration is enough to get there.
 5. Set the application's image name and tag to that commit, then call the deploy
    API. Either failing leaves the state as it was; the next tick does both again.
-6. Record the commit as `master`'s head acted on, as what runs now, and what ran
-   before it.
+6. Record the commit as `master`'s head dealt with, as the image triggered last,
+   and the one triggered before it.
+
+One run at a time does all of this, under a lock: the timer's service and a command
+by hand are separate processes, and unlocked one could set its tag between the
+other's tag and deploy.
 
 The Coolify application pulls and starts; it does not build.
 
-**Rollback** is the tag of what ran before: `chartgen-autodeploy.sh rollback`
-deploys it, and `deploy <sha>` any published commit, by its full SHA only. Both
-record what they put out, so the next rollback is right whoever deployed last.
-Neither changes which head of `master` the timer has acted on, so the timer does not
-put the bad commit back, and the next commit on `master` deploys as usual.
+**Rollback** is a tag: `chartgen-autodeploy.sh rollback` deploys the image the
+script triggered before its last one, and `deploy <sha>` any published commit, by
+its full SHA only. What the script knows of a deploy is that Coolify accepted it,
+not that the image ever ran, and it knows nothing of what ran before its own first
+deploy unless it is told (`running <sha>`); the timer's mark of where `master` is
+does not count as a deployment. So rollback names the image before it deploys it,
+and with no earlier image known it deploys nothing.
+
+A command by hand is the operator's word on what runs. The timer then marks
+`master`'s head of that moment as dealt with, without deploying it, so a rollback is
+not undone at the next tick, also when the commit rolled back had been put out by
+hand before the timer got to it. The next commit on `master` deploys as usual.
 
 ### Consequences
 
@@ -159,7 +174,13 @@ put the bad commit back, and the next commit on `master` deploys as usual.
   proven empty, and check each copy by what is in the database. The way back is
   the old application, which builds from the repository: unless it was pinned to
   the commit it ran, starting it again may build on the host.
-- Bad: the timer still reports that a deploy was triggered, not that it is healthy.
+- Bad: the timer still reports that a deploy was triggered, not that it is healthy,
+  and rollback goes by the same knowledge: it can name an image that was triggered
+  and never ran. Confirming a deployment would mean polling Coolify, which this
+  decision leaves out; the operator reads the SHA rollback prints.
+- Bad: after a command by hand, `master`'s head of that moment is not deployed by
+  the timer, whether or not it was the commit the operator meant. It goes out with
+  the next commit, or by `deploy <sha>`.
 - Neutral: the CI run of a push to `master` takes longer by the image build. Pull
   requests are not affected.
 - Neutral: the unauthenticated GitHub API budget of ADR-0037 is unchanged: the
@@ -202,8 +223,9 @@ public repository a fork's pull request could run code on the host.
 `scripts/autodeploy/test.sh` runs the timer script against a stub that plays GitHub,
 the registry and Coolify: an image not yet published, the registry's refusals and
 rate limits, an application that is not a Docker Image one, a refused tag change, a
-failed deploy and its retry, `master` moving during a run, both commands by hand, and
-that no token is ever an argument of `curl`. `actionlint` checks the workflow.
+failed deploy and its retry, `master` moving during a run, two runs at once, the
+commands by hand and what the timer does after them, a rollback with no earlier image
+known, and that no token is ever an argument of `curl`. `actionlint` checks the workflow.
 
 Not validated when this was written: the workflow itself, which runs only on GitHub;
 the time and memory of the arm64 build; the pull on the board.

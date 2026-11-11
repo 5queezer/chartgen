@@ -392,8 +392,10 @@ sets the tag and deploys again. The first run only records the current SHA.
 
 The script logs that a deploy was triggered. It does not wait for it or check
 the application: look at the deployment in Coolify. `chartgen-autodeploy.sh
-rollback` deploys the image that ran before the one it put out last, and
-`deploy <sha>` any published one, by its full commit SHA.
+rollback` deploys the image the script triggered before its last one, and
+`deploy <sha>` any published one, by its full commit SHA. After either, the
+timer leaves `master`'s head of that moment alone and deploys the next
+commit. One run works at a time, the timer's or a command by hand.
 
 While a new head is undeployed each tick makes 2 GitHub calls (about 24 per
 hour, against the unauthenticated limit of 60); an idle tick makes 1. The
