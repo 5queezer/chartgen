@@ -147,8 +147,12 @@ From here until the application runs again, production is down.
    ```sh
    b=/var/backups/chartgen/$(date +%Y%m%d-%H%M%S)
    install -d -m 700 /var/backups/chartgen "${b:?}"
-   ls -A "${b:?}"             # prints nothing: the directory is new and empty
-   docker run --rm -v <old volume>:/from:ro -v "${b:?}":/to debian:bookworm-slim cp -a /from/. /to/
+   if [ -z "$(ls -A "${b:?}")" ]; then
+     docker run --rm -v <old volume>:/from:ro -v "${b:?}":/to debian:bookworm-slim cp -a /from/. /to/
+   else
+     echo "NOT COPIED: $b is not empty. Set b to a new directory and start this block again."
+   fi
+   chmod 700 "${b:?}"         # cp -a gave the directory the volume's own mode
    check "$b/chartgen.db"     # two lines: ok, and the number of clients. Write the number down.
    echo "$b"                  # write this down too: it is how to set b again in a new shell
    ```
@@ -198,20 +202,24 @@ the same, `<new volume>` was typed as the old volume's name: stop, nothing
 below may be run on it.
 
 ```sh
-ls -A "${v:?}"             # must print nothing
-cp -a "${b:?}"/. "${v:?}"/
+if [ -z "$(ls -A "${v:?}")" ]; then
+  cp -a "${b:?}"/. "${v:?}"/
+else
+  echo "NOT COPIED: $v is not empty, see below."; ls -A "$v"
+fi
 check "$v/chartgen.db"     # ok, and the same number as in step 3
 ```
 
-If `ls -A "$v"` prints anything, **do not copy, and look before touching
-it:**
+The copy runs only into an empty volume. If it says `NOT COPIED`, the
+`check` after it has looked at what was already there, not at a copy.
+**Look before touching it:**
 
 ```sh
 check "$v/chartgen.db"
 ```
 
-- `ok` and `0`: the new application has already run once, and this is the
-  database of a server that started empty, with its `-wal` and `-shm` files
+- `ok` and `0`: the new application has already run once,
+  and this is the database of a server that started empty, with its `-wal` and `-shm` files
   beside it. Go on below.
 - `ok` and the number from step 3, or any number above 0: **stop. This is
   not an empty server's volume; most likely it is the old one.** Move
@@ -231,7 +239,7 @@ aside="${b:?}-moved-out-of-new-volume"; install -d -m 700 "$aside"
 for f in chartgen.db chartgen.db-wal chartgen.db-shm; do
   [ ! -e "${v:?}/$f" ] || mv "${v:?}/$f" "$aside/"
 done
-ls -A "${v:?}"             # prints nothing now; then the cp and the check above
+ls -A "${v:?}"             # prints nothing now; then the copy block above again
 ```
 
 Whether Coolify takes a volume that was created by hand under the name it
