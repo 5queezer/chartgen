@@ -162,7 +162,7 @@ CREATE TABLE refresh_tokens (
     client_id   TEXT    NOT NULL,
     user_id     TEXT,                   -- users.id, or NULL when issued with sign-in off
     created_at  INTEGER NOT NULL,
-    spent_at    INTEGER,                -- when it was exchanged; kept to recognise reuse
+    spent_at    INTEGER,                -- when it was exchanged; 0: replaced by a retry before it was exchanged; NULL: usable
     access_hash TEXT                    -- migration 8; SHA-256 hex of the access token issued with it, while unspent
 );
 CREATE INDEX refresh_tokens_family ON refresh_tokens (family);

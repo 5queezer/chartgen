@@ -1222,7 +1222,7 @@ fn a_file_from_before_refresh_tokens_upgrades_and_stores_them() {
     assert_eq!(store.grants().unwrap().len(), 1);
     assert!(store.refresh_tokens(0).unwrap().is_empty());
     let row = refresh_row("h0", "users", 0);
-    store.save_refresh_token(&row, &[], 0).unwrap();
+    store.save_refresh_token(&row, &[], 0, 0).unwrap();
     assert_eq!(store.refresh_tokens(0).unwrap(), [row]);
 }
 
@@ -1273,7 +1273,7 @@ fn a_refresh_tokens_table_from_before_the_access_hash_gains_the_column() {
     // Stored and used: the next token of that family, with its access token's hash.
     let next = refresh_row("new", "f", 1);
     store
-        .save_refresh_token(&next, &["old".to_string()], 0)
+        .save_refresh_token(&next, &["old".to_string()], next.created_at, 0)
         .unwrap();
     let rows = store.refresh_tokens(0).unwrap();
     assert_eq!(rows.iter().find(|r| r.spent_at.is_none()), Some(&next));
@@ -1307,11 +1307,11 @@ fn a_refresh_tokens_table_from_before_the_access_hash_gains_the_column() {
 fn a_rotation_is_stored_whole_or_not_at_all() {
     let store = upgraded("refresh-rotation", &[]);
     store
-        .save_refresh_token(&refresh_row("h0", "f", 0), &[], 0)
+        .save_refresh_token(&refresh_row("h0", "f", 0), &[], 0, 0)
         .unwrap();
     let next = refresh_row("h1", "f", 1);
     store
-        .save_refresh_token(&next, &["h0".to_string()], 0)
+        .save_refresh_token(&next, &["h0".to_string()], next.created_at, 0)
         .unwrap();
     let rows = store.refresh_tokens(0).unwrap();
     let spent = rows.iter().find(|r| r.token_hash == "h0").unwrap();
@@ -1326,7 +1326,7 @@ fn a_rotation_is_stored_whole_or_not_at_all() {
     // The successor cannot be stored: the token it would replace stays unspent.
     let clash = refresh_row("h0", "f", 2);
     assert!(store
-        .save_refresh_token(&clash, &["h1".to_string()], 0)
+        .save_refresh_token(&clash, &["h1".to_string()], 5000, 0)
         .is_err());
     let rows = store.refresh_tokens(0).unwrap();
     assert_eq!(rows.len(), 2);
@@ -1335,7 +1335,7 @@ fn a_rotation_is_stored_whole_or_not_at_all() {
 
     // Spent tokens below the floor are dropped, the unspent one never.
     store
-        .save_refresh_token(&refresh_row("h2", "f", 2), &["h1".to_string()], 2)
+        .save_refresh_token(&refresh_row("h2", "f", 2), &["h1".to_string()], 5000, 2)
         .unwrap();
     let left: Vec<String> = store
         .refresh_tokens(0)
@@ -1359,7 +1359,7 @@ fn refresh_families_end_together_and_with_their_client() {
         ("u0", "users", 0),
     ] {
         store
-            .save_refresh_token(&refresh_row(hash, family, seq), &[], 0)
+            .save_refresh_token(&refresh_row(hash, family, seq), &[], 0, 0)
             .unwrap();
     }
     let families = |store: &persistence::Store, cutoff: i64| -> Vec<String> {

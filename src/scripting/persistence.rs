@@ -249,7 +249,8 @@ pub struct StoredRefreshToken {
     /// `None` when issued with sign-in off.
     pub user_id: Option<String>,
     pub created_at: i64,
-    /// When it was exchanged or replaced; kept so that using it again is recognised.
+    /// When it was exchanged, or 0 if a retry replaced it before it was exchanged;
+    /// kept so that using it again is recognised.
     pub spent_at: Option<i64>,
     /// The hash of the access token issued with it, while it is unspent: what lets
     /// that access token outlive a restart.
@@ -473,13 +474,15 @@ impl Store {
         tx.commit()
     }
 
-    /// Store `new` and mark `spent` as used at `new.created_at`, in one transaction: a
-    /// rotation is on disk whole or not at all. Spent tokens of the family below
-    /// `forget_below_seq` are dropped.
+    /// Store `new` and mark `spent` as used at `spent_at`, in one transaction: a
+    /// rotation is on disk whole or not at all. `spent_at` is the time of the exchange,
+    /// or 0 for a token that was replaced before it was ever exchanged. Spent tokens of
+    /// the family below `forget_below_seq` are dropped.
     pub fn save_refresh_token(
         &self,
         new: &StoredRefreshToken,
         spent: &[String],
+        spent_at: i64,
         forget_below_seq: i64,
     ) -> rusqlite::Result<()> {
         let mut conn = self.conn();
@@ -488,7 +491,7 @@ impl Store {
             tx.execute(
                 "UPDATE refresh_tokens SET spent_at = ?2, access_hash = NULL
                  WHERE token_hash = ?1 AND spent_at IS NULL",
-                params![hash, new.created_at],
+                params![hash, spent_at],
             )?;
         }
         tx.execute(

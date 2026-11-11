@@ -173,13 +173,18 @@ is kept, so that a token that comes back is recognised, also after a restart:
 - A spent token presented again **ends the family**, with the access tokens that came from
   it. Either the client or somebody with a copy holds the usable one, and the server cannot
   tell which, so neither keeps it.
-- Except within 60 seconds, for the token spent last: a client that lost the answer may send
-  the same token again. It gets a new successor and **the first successor is spent**. The
-  family still has one usable token, never two. If the first successor was in fact received
-  by somebody, their next exchange presents a spent token and the family ends as above.
+- Except within 60 seconds, for the token exchanged last: a client that lost the answer may
+  send the same token again, and again if that answer is lost too. Each retry gives a new
+  successor and **replaces the one before it**, so the family has one usable token, never
+  two. **A replaced successor is marked as such and is never itself good for a retry: any
+  use of one ends the family**, at once, however soon it comes and whatever happened in
+  between. So if a replaced successor had in fact reached somebody, they are found out the
+  first time they use it. The mark is in the row and survives a restart.
   Rejected: answering the retry with a second successor while the first stays valid. That
   leaves two lines of tokens that never meet, and a copy made in that window is never
-  noticed.
+  noticed. Rejected as well, after a first version did it: telling a retry by position and
+  time alone. A replaced successor has the same position as the one that replaced it, so
+  within a minute it passed for a retry and two holders could go on replacing each other.
 - The 100 most recent spent tokens of a family are kept. One older than that is unknown to
   the server and refused like any unknown token, without ending the family.
 

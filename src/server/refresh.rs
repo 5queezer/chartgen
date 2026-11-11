@@ -12,6 +12,10 @@ pub(super) const REFRESH_TTL_SECS: i64 = 30 * 24 * 3600;
 /// this long. It gets a new successor and the first one is spent, so a family never
 /// has two usable tokens.
 const RETRY_WINDOW_SECS: i64 = 60;
+/// The `spent_at` of a successor that a retry replaced before it was ever exchanged.
+/// It is spent "long ago": no retry window covers it, so its next use ends the family.
+/// A token spent by its own exchange carries the time of that exchange.
+pub(super) const REPLACED: i64 = 0;
 /// Spent tokens kept per family, so that using one again is recognised. An older one
 /// is merely unknown, and refused all the same.
 const MAX_SPENT_PER_FAMILY: i64 = 100;
@@ -38,11 +42,13 @@ pub(super) struct RefreshToken {
 /// What a change to the families writes to the store.
 #[cfg_attr(not(feature = "scripting"), allow(dead_code))]
 pub(super) enum Change {
-    /// A new token, and the ones it makes spent: together or not at all.
+    /// A new token, and the ones it makes spent as of `spent_at`: together or not
+    /// at all.
     Save {
         hash: String,
         token: RefreshToken,
         spent: Vec<String>,
+        spent_at: i64,
     },
     Delete(Vec<String>),
 }
@@ -67,7 +73,12 @@ pub(super) fn store_write() -> WriteFn {
 #[cfg(feature = "scripting")]
 fn write_to(store: &scripting::persistence::Store, change: Change) -> Result<(), String> {
     match change {
-        Change::Save { hash, token, spent } => store.save_refresh_token(
+        Change::Save {
+            hash,
+            token,
+            spent,
+            spent_at,
+        } => store.save_refresh_token(
             &scripting::persistence::StoredRefreshToken {
                 token_hash: hash,
                 family: token.family,
@@ -79,6 +90,7 @@ fn write_to(store: &scripting::persistence::Store, change: Change) -> Result<(),
                 access_hash: token.access_hash,
             },
             &spent,
+            spent_at,
             token.seq - MAX_SPENT_PER_FAMILY,
         ),
         Change::Delete(families) => store.delete_refresh_families(&families),
@@ -117,6 +129,8 @@ pub(super) struct Rotation {
     hash: String,
     token: RefreshToken,
     spent: Vec<String>,
+    /// The time of the exchange, or `REPLACED` for the successor a retry replaces.
+    spent_at: i64,
 }
 
 impl Rotation {
@@ -125,6 +139,7 @@ impl Rotation {
             hash: self.hash.clone(),
             token: self.token.clone(),
             spent: self.spent.clone(),
+            spent_at: self.spent_at,
         }
     }
 }
@@ -261,6 +276,7 @@ impl OAuthStore {
             value,
             access: access.to_string(),
             spent: Vec::new(),
+            spent_at: now,
             token: RefreshToken {
                 family: Uuid::new_v4().to_string(),
                 seq: 0,
@@ -296,12 +312,14 @@ impl OAuthStore {
             .iter()
             .find(|(_, l)| l.family == t.family && l.spent_at.is_none())
             .map(|(hash, l)| (hash.clone(), l.seq));
-        let spent = match (t.spent_at, live) {
-            (None, _) => vec![hash_of(presented)],
+        let (spent, spent_at) = match (t.spent_at, live) {
+            (None, _) => (vec![hash_of(presented)], now),
+            // A retry by the holder of the token exchanged last: the successor it
+            // never got is replaced, and marked so that it can never retry in turn.
             (Some(at), Some((successor, seq)))
                 if now - at <= RETRY_WINDOW_SECS && seq == t.seq + 1 =>
             {
-                vec![successor]
+                (vec![successor], REPLACED)
             }
             _ => return Err(Refused::Reused(t.family)),
         };
@@ -311,6 +329,7 @@ impl OAuthStore {
             hash: hash_of(&value),
             value,
             spent,
+            spent_at,
             token: RefreshToken {
                 seq: t.seq + 1,
                 created_at: now,
@@ -331,7 +350,7 @@ impl OAuthStore {
         }
         for hash in &r.spent {
             if let Some(t) = self.refresh.get_mut(hash) {
-                t.spent_at = Some(r.token.created_at);
+                t.spent_at = Some(r.spent_at);
             }
         }
         let floor = r.token.seq - MAX_SPENT_PER_FAMILY;
@@ -838,6 +857,71 @@ mod tests {
         assert!(exchange(&state, &lost, CLIENT, &write).await.is_err());
         assert!(exchange(&state, &second, CLIENT, &write).await.is_err());
         assert_eq!(live(&state), 0);
+    }
+
+    /// A successor that a retry replaced was never exchanged. It must not pass for a
+    /// token whose own exchange was lost: using it ends the family, at once, also
+    /// when one exchange has happened since and also after a restart.
+    #[tokio::test]
+    async fn a_replaced_successor_ends_the_family_when_it_is_used() {
+        for restart in [false, true] {
+            let (store, _) = temp_store(&format!("replaced-{restart}"));
+            let mut state = started(&store, false, &[CLIENT]);
+            let write = to(&store);
+            let (_, first) = authorize(&state, CLIENT, None, &write).await;
+            let first = first.unwrap();
+            let (_, replaced) = exchange(&state, &first, CLIENT, &write).await.unwrap();
+            let (_, successor) = exchange(&state, &first, CLIENT, &write).await.unwrap();
+            if restart {
+                state = started(&store, false, &[CLIENT]);
+            }
+            let (access, next) = exchange(&state, &successor, CLIENT, &write).await.unwrap();
+
+            assert_eq!(
+                exchange(&state, &replaced, CLIENT, &write).await,
+                Err(StatusCode::BAD_REQUEST),
+                "restart: {restart}"
+            );
+            assert!(!valid(&state, &access), "the family ended");
+            assert!(exchange(&state, &next, CLIENT, &write).await.is_err());
+            assert!(store.refresh_tokens(0).unwrap().is_empty());
+        }
+    }
+
+    /// A client may lose more than one answer. Each retry leaves one usable token, and
+    /// every successor it replaced ends the family when used.
+    #[tokio::test]
+    async fn any_number_of_retries_leaves_one_usable_token() {
+        for stale in [0, 1, 2] {
+            let (store, _) = temp_store(&format!("retries-{stale}"));
+            let state = started(&store, false, &[CLIENT]);
+            let write = to(&store);
+            let (_, first) = authorize(&state, CLIENT, None, &write).await;
+            let first = first.unwrap();
+            let mut successors = Vec::new();
+            for _ in 0..3 {
+                successors.push(exchange(&state, &first, CLIENT, &write).await.unwrap().1);
+            }
+            let usable = |state: &SharedState| {
+                let s = state.oauth.lock().unwrap();
+                s.refresh.values().filter(|t| t.spent_at.is_none()).count()
+            };
+            assert_eq!(usable(&state), 1);
+            if stale == 2 {
+                // The last one is the usable one.
+                assert!(exchange(&state, &successors[2], CLIENT, &write)
+                    .await
+                    .is_ok());
+            } else {
+                assert!(exchange(&state, &successors[stale], CLIENT, &write)
+                    .await
+                    .is_err());
+                assert!(exchange(&state, &successors[2], CLIENT, &write)
+                    .await
+                    .is_err());
+                assert_eq!(usable(&state), 0);
+            }
+        }
     }
 
     #[tokio::test]
