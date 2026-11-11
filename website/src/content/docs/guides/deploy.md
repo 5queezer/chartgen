@@ -380,6 +380,17 @@ closes it. Traefik's default of 90 s is fine. The numbers assume Linux with glib
 What a proxy buffers towards a client that does not read is the proxy's memory, not the server's. A local
 Caddy took 1.5 GB for 1500 such requests. If the proxy can be reached directly, limit it as well.
 
+The server forbids framing of its pages and content sniffing by itself, and answers other
+origins on the MCP and OAuth client routes only
+([ADR-0062](/chartgen/decisions/0062-cors-per-route-and-no-framing/)); there is nothing to add at
+the proxy for that, and it should not add CORS headers of its own. Two things are the proxy's:
+
+- **`Strict-Transport-Security`.** The server speaks plain HTTP behind the proxy and cannot
+  know the public side is HTTPS, so it does not send this header. Send it from the proxy.
+- **No storing of answers marked `no-store`.** The sign-in and consent pages are marked so.
+  A cache in front must honour it; do not configure one to ignore the origin's
+  `Cache-Control`.
+
 Claude.ai requires HTTPS. Terminate TLS at your reverse proxy and forward to
 chartgen's HTTP port (default `9315`). The SSE stream on `/mcp` and `/sse`
 must not be buffered — for nginx:

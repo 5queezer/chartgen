@@ -1729,9 +1729,21 @@ async fn serve_web(dir: PathBuf, req: Request) -> Response {
             header::REFERRER_POLICY,
             HeaderValue::from_static("same-origin"),
         );
+        // No other site shows the app in a frame and steers clicks in it (ADR-0062).
+        // Both headers: old browsers know only the first.
+        h.insert(header::X_FRAME_OPTIONS, HeaderValue::from_static("DENY"));
+        h.insert(
+            header::CONTENT_SECURITY_POLICY,
+            HeaderValue::from_static("frame-ancestors 'none'"),
+        );
     }
     h.insert(header::CACHE_CONTROL, HeaderValue::from_static(cache));
-    h.insert(
+    resp
+}
+
+/// Every answer says its content type is what it is (ADR-0062).
+async fn no_sniffing(mut resp: Response) -> Response {
+    resp.headers_mut().insert(
         header::X_CONTENT_TYPE_OPTIONS,
         HeaderValue::from_static("nosniff"),
     );
@@ -2045,8 +2057,6 @@ pub async fn run_server(port: u16, engine: Option<Arc<RwLock<TradingEngine>>>) {
     // Store port for metadata endpoint
     std::env::set_var("_CHARTGEN_PORT", port.to_string());
 
-    let cors = CorsLayer::permissive();
-
     // Built web app (ADR-0027); unset keeps the server API-only.
     let web_dir = std::env::var_os("CHARTGEN_WEB_DIR").map(PathBuf::from);
     let root_get = match web_dir.clone() {
@@ -2054,7 +2064,11 @@ pub async fn run_server(port: u16, engine: Option<Arc<RwLock<TradingEngine>>>) {
         None => get(health_handler),
     };
 
-    let mut app = Router::new()
+    // What a page on another origin may call: MCP, and what an MCP client in a browser
+    // needs to become one (ADR-0062). Any origin, and never with credentials: these
+    // take a bearer token or nothing, no cookie. `/` is here for its POST, an alias of
+    // `/mcp` (ADR-0027).
+    let for_any_origin = Router::new()
         .route(
             "/.well-known/oauth-authorization-server",
             get(oauth_metadata),
@@ -2068,9 +2082,22 @@ pub async fn run_server(port: u16, engine: Option<Arc<RwLock<TradingEngine>>>) {
             get(oauth_protected_resource),
         )
         .route("/register", post(oauth_register))
-        .route("/authorize", get(oauth_authorize))
         .route("/token", post(oauth_token))
         .route("/revoke", post(refresh::revoke_endpoint))
+        // MCP endpoints — Claude.ai may try root, /mcp, /message, or /sse
+        // /mcp is canonical; POST /, /message and /sse are deprecated
+        // aliases for older connectors (ADR-0027).
+        .route("/", root_get.post(mcp_handler))
+        .route("/mcp", get(sse_handler).post(mcp_handler))
+        .route("/message", post(mcp_handler))
+        .route("/sse", get(sse_handler))
+        // On these routes only: `layer` would also put it on the answer to an unknown path.
+        .route_layer(CorsLayer::permissive());
+    // Everything else is for this origin only and says nothing to another: the pages
+    // that read the session cookie, what only the web app asks, and the app's files.
+    let mut app = Router::new()
+        .merge(for_any_origin)
+        .route("/authorize", get(oauth_authorize))
         .route("/oauth/signin", get(signin::signin_page))
         .route("/oauth/login/{provider}", get(signin::login))
         .route("/oauth/callback/{provider}", get(signin::callback))
@@ -2087,14 +2114,7 @@ pub async fn run_server(port: u16, engine: Option<Arc<RwLock<TradingEngine>>>) {
             post(workspace::sync).layer(DefaultBodyLimit::max(workspace::MAX_BODY_BYTES)),
         )
         .route("/favicon.ico", get(favicon_ico))
-        .route("/favicon.svg", get(favicon_svg))
-        // MCP endpoints — Claude.ai may try root, /mcp, /message, or /sse
-        // /mcp is canonical; POST /, /message and /sse are deprecated
-        // aliases for older connectors (ADR-0027).
-        .route("/", root_get.post(mcp_handler))
-        .route("/mcp", get(sse_handler).post(mcp_handler))
-        .route("/message", post(mcp_handler))
-        .route("/sse", get(sse_handler));
+        .route("/favicon.svg", get(favicon_svg));
     if let Some(dir) = web_dir {
         println!("Serving web app from {}", dir.display());
         app = app.fallback(move |req: Request| serve_web(dir.clone(), req));
@@ -2103,7 +2123,7 @@ pub async fn run_server(port: u16, engine: Option<Arc<RwLock<TradingEngine>>>) {
     // there are (ADR-0051). A script or a tool call is far smaller than this.
     let app = app
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
-        .layer(cors)
+        .layer(axum::middleware::map_response(no_sniffing))
         .with_state(state);
 
     listener::keep_freed_memory_down();
