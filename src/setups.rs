@@ -538,6 +538,20 @@ struct Parts {
     expires_at: Option<i64>,
 }
 
+/// A number in a message, as a person would write it: six significant digits, no
+/// trailing zeros, so that what a float cannot hold exactly does not show.
+fn show(x: f64) -> String {
+    if x == 0.0 || !x.is_finite() {
+        return x.to_string();
+    }
+    let decimals = (5 - x.abs().log10().floor() as i32).clamp(0, 12) as usize;
+    let text = format!("{x:.decimals$}");
+    match text.contains('.') {
+        true => text.trim_end_matches('0').trim_end_matches('.').to_string(),
+        false => text,
+    }
+}
+
 /// Whether `levels` can be proven wrong: the invalidation on the far side of the entry,
 /// the targets on the near side, an expiry ahead, and enough risk to measure in.
 pub fn check_levels(
@@ -612,12 +626,14 @@ fn check_parts(
                     Problem::new(
                         "invalidation",
                         format!(
-                            "the invalidation is {risk} from the entry, closer than the least risk scored here, {floor}"
+                            "the invalidation is {} from the entry, closer than the least risk scored here, {}",
+                            show(risk),
+                            show(floor)
                         ),
                     )
                     .hint(format!(
                         "the least risk is {MIN_RISK_IN_ROUND_TRIP_COSTS} times the assumed cost of getting in and out, {} bps of the price",
-                        costs.round_trip() * 10_000.0
+                        show(costs.round_trip() * 10_000.0)
                     )),
                 );
             }

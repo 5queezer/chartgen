@@ -866,3 +866,32 @@ fn a_revision_is_checked_the_same_way() {
     assert!(levels.is_none());
     assert_eq!(fields(&problems), ["targets[1]", "invalidation"]);
 }
+
+#[test]
+fn a_message_shows_numbers_as_a_person_would_write_them() {
+    // 0.1 + 0.2 away from the entry, which a float does not hold exactly.
+    let args = with(
+        with(
+            long_args(),
+            "entry",
+            json!({ "low": 36820.3, "high": 36900.0 }),
+        ),
+        "invalidation",
+        json!(36783.48),
+    );
+    let args = with(args, "targets", json!([37500.0]));
+    let problems = problems_of(args);
+    assert_eq!(fields(&problems), ["invalidation"]);
+    let text = format!(
+        "{} {}",
+        problems[0].message,
+        problems[0].hint.as_deref().unwrap()
+    );
+    assert!(text.contains("is 36.82 from the entry"), "{text}");
+    assert!(text.contains("least risk scored here, 154.645"), "{text}");
+    assert!(text.contains("14 bps of the price"), "{text}");
+    assert!(
+        !text.contains("000000") && !text.contains("999999"),
+        "{text}"
+    );
+}
