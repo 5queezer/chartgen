@@ -11,7 +11,7 @@ import { test as appTest, expect, gotoApp, pickTool, reloadApp, openSidebarTab }
  * bar every second, and at the hours when that bar is the highest or lowest on screen each
  * move rescales the price axis: a point placed at one pixel is then drawn at another, and
  * these tests place and read points to the pixel. Ticks still arrive, with the same prices,
- * or with the ones `lowerFormingBar` asks for.
+ * or with the ones `lowerBar` asks for.
  */
 const holdBars = (page: Page) =>
   page.addInitScript(() => {
@@ -136,23 +136,29 @@ const valueAtY = (page: Page, y: number) =>
   );
 
 /**
- * The next tick of the feed takes the forming bar's low `px` pixels of price down, or
- * without `px` to the price at the pane's bottom edge: under all that is drawn, so from
- * then on that low is what the price axis ends at, and lowering it rescales the axis, by
- * less than `px` at any pixel of the pane. Resolves when the chart has that tick.
+ * The next tick of the feed takes the low of a bar `px` pixels of price down, or without
+ * `px` to the price at the pane's bottom edge: under all that is drawn, so from then on
+ * that low is what the price axis ends at, and lowering it rescales the axis, by less than
+ * `px` at any pixel of the pane. The bar is the forming one, or the one of time `bar`: a
+ * second call names the bar of the first, which may have closed in between, and a closed
+ * bar still comes with every tick. Resolves to the bar's time when the chart has the tick.
  */
-const lowerFormingBar = (page: Page, px?: number) =>
-  page.evaluate(async (by) => {
-    const w = window as unknown as TestWindow & { __heldBars: Map<string, { l: number }> };
-    const chart = w.__chartgenTest.chart();
-    const paneId = "candle_pane";
-    const at = (y: number) => chart.convertFromPixel([{ y }], { paneId })[0]!.value!;
-    const forming = chart.getDataList().at(-1)!;
-    const low =
-      by === null ? at(chart.getSize(paneId, "main").height) : forming.low - by * Math.abs(at(200) - at(201));
-    for (const [key, bar] of w.__heldBars) if (key.endsWith(` ${forming.timestamp / 1000}`)) bar.l = low;
-    while (chart.getDataList().at(-1)!.low !== low) await new Promise((r) => setTimeout(r, 50));
-  }, px ?? null);
+const lowerBar = (page: Page, px?: number, bar?: number) =>
+  page.evaluate(
+    async ([by, time]) => {
+      const w = window as unknown as TestWindow & { __heldBars: Map<string, { l: number }> };
+      const chart = w.__chartgenTest.chart();
+      const paneId = "candle_pane";
+      const at = (y: number) => chart.convertFromPixel([{ y }], { paneId })[0]!.value!;
+      const t = time ?? chart.getDataList().at(-1)!.timestamp;
+      const lowNow = () => chart.getDataList().find((b) => b.timestamp === t)!.low;
+      const low = by === null ? at(chart.getSize(paneId, "main").height) : lowNow() - by * Math.abs(at(200) - at(201));
+      for (const [key, held] of w.__heldBars) if (key.endsWith(` ${t / 1000}`)) held.l = low;
+      while (lowNow() !== low) await new Promise((r) => setTimeout(r, 50));
+      return t;
+    },
+    [px ?? null, bar ?? null] as const,
+  );
 
 const nearest = (values: number[], to: number) =>
   values.reduce((best, v) => (Math.abs(v - to) < Math.abs(best - to) ? v : best));
@@ -628,16 +634,28 @@ test.describe("drawing modifiers", () => {
     test("a second click on the first point, after a tick moved the axis by less than a pixel, places nothing", async ({
       bootedApp: page,
     }) => {
-      await page.waitForTimeout(1500);
-      await lowerFormingBar(page);
       const line = page.getByRole("button", { name: "Trend line" });
-      await line.click();
-      await clickAt(page, { x: 500, y: 200 });
-      const price = await valueAtY(page, 200);
-      await lowerFormingBar(page, 0.5);
-      // The same pixel is another price now: the two clicks are not the same point by value.
-      expect(await valueAtY(page, 200)).not.toBe(price);
-      await clickAt(page, { x: 500, y: 200 });
+      const formingBar = () =>
+        page.evaluate(() => (window as unknown as TestWindow).__chartgenTest.chart().getDataList().at(-1)!.timestamp);
+      for (;;) {
+        await page.waitForTimeout(1500);
+        const bar = await lowerBar(page);
+        await line.click();
+        await clickAt(page, { x: 500, y: 200 });
+        const price = await valueAtY(page, 200);
+        await lowerBar(page, 0.5, bar);
+        const priceNow = await valueAtY(page, 200);
+        await clickAt(page, { x: 500, y: 200 });
+        if ((await formingBar()) === bar) {
+          // The same pixel was another price: the two clicks are not the same point by value.
+          expect(priceNow).not.toBe(price);
+          break;
+        }
+        // The hour's bar closed during the clicks. The chart moved on by a bar, so the
+        // same pixel is another bar and the second click may have made a line: once more.
+        await page.evaluate(() => localStorage.removeItem("chartgen.drawings.BTCUSDT"));
+        await reloadApp(page);
+      }
       expect(await overlays(page)).toHaveLength(0);
       await expect(line).toHaveAttribute("aria-pressed", "true");
     });
