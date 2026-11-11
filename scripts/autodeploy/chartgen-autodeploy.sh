@@ -25,7 +25,8 @@ done
 GITHUB_REPO=${GITHUB_REPO:-5queezer/chartgen}
 CHARTGEN_IMAGE=${CHARTGEN_IMAGE:-ghcr.io/5queezer/chartgen}
 STATE_FILE=${STATE_FILE:-${STATE_DIRECTORY:-/var/lib/chartgen-autodeploy}/last-sha}
-# What this script last put out, by the timer or by hand, and what ran before that.
+# What this script triggered last, by the timer or by hand, or was told runs, and what
+# it had triggered before that. Triggered, not ran: see the top of this file.
 DEPLOYED_FILE=$(dirname "$STATE_FILE")/deployed-sha
 PREVIOUS_FILE=$(dirname "$STATE_FILE")/previous-sha
 # Left by a command by hand that could not ask GitHub for master's head: the next
@@ -160,14 +161,15 @@ record_deploy() {
 # rolled back. The timer's mark is moved to master's head as it is now, without
 # deploying it. The next commit on master deploys as usual. If GitHub cannot be asked
 # now, the next tick that can ask does the same.
+# Sets head_now to that head, or to nothing if GitHub could not be asked.
 leave_head_alone() {
-  local code head
+  local code
   code=$(gh_get "$API/commits/master")
-  head=
-  [ "$code" = 200 ] && head=$(jq -r '.sha // empty' "$body" 2>/dev/null)
-  if [ -n "$head" ]; then
+  head_now=
+  [ "$code" = 200 ] && head_now=$(jq -r '.sha // empty' "$body" 2>/dev/null)
+  if [ -n "$head_now" ]; then
     rm -f "$HAND_FILE"
-    write_file "$STATE_FILE" "$head"
+    write_file "$STATE_FILE" "$head_now"
   else
     write_file "$HAND_FILE" 1
   fi
@@ -186,7 +188,12 @@ manual() {
     log "deployed $sha by hand but could not record it in $(dirname "$STATE_FILE"); the timer may deploy master's head over it"
     exit 1
   fi
-  log "triggered Coolify deploy of $CHARTGEN_IMAGE:$sha by hand; the timer leaves master's present head alone and deploys the next commit"
+  log "triggered Coolify deploy of $CHARTGEN_IMAGE:$sha by hand"
+  if [ -z "$head_now" ]; then
+    log "GitHub could not be asked where master is: the first tick that can ask will leave that head alone and name it. The next commit after it deploys as usual"
+  elif [ "$head_now" != "$sha" ]; then
+    log "master's head $head_now is not deployed by the timer; to put it out: deploy $head_now. The next commit on master deploys as usual"
+  fi
 }
 
 case ${1-} in

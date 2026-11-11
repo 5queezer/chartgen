@@ -249,8 +249,11 @@ rm -f "$work"/*-sha "$work/hand"; echo x >"$STATE_FILE"
 echo "$sha_a" >"$HEAD_FILE"; step "the timer deploys A" 0 1 "$sha_a"
 echo "$sha_b" >"$HEAD_FILE"
 step "B, master's head, is deployed by hand before the timer got to it" 0 1 "$sha_b" deploy "$sha_b"
+grep -q "master's head" <<<"$out" && fail "a deploy of master's head itself spoke of a head left alone: $out"
 step "and rolled back to A" 0 1 "$sha_b" rollback
 [ "$(tag)" = "$sha_a " ] || fail "the rollback went to '$(tag)'"
+# The head set aside is named, with the way to put it out after all.
+grep -q "master's head $sha_b is not deployed by the timer; to put it out: deploy $sha_b" <<<"$out" || fail "the rollback does not name the head it sets aside: $out"
 step "the next tick does not put B out again" 0 0 "$sha_b"
 step "nor the one after" 0 0 "$sha_b"
 echo "$sha_c" >"$HEAD_FILE"; step "a later commit, C, deploys as usual" 0 1 "$sha_c"
