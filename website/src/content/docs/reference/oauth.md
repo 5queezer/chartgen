@@ -319,7 +319,7 @@ characters, `A-Z a-z 0-9 - _` and one `.`; do not parse it.
 |---|---|
 | `200` | The new pair. |
 | `400 invalid_grant` | Unknown, expired, revoked, used before, another client's, or from the other sign-in setting. Authorize again. |
-| `503 server_error` | The store could not be written. Nothing was issued, and the refresh token sent is still valid: try again. |
+| `503 server_error` | The store could not be written. Nothing was issued, and the refresh token sent is still the usable one: try again. It repeats until the next start if the token's rows were [deleted from the file while the server ran](#revoking-a-refresh-token). |
 
 **Limits.** With sign-in on, a user keeps 20 authorizations per client, the one longest
 out of use ended first, within the 20 clients they keep live. The one just issued or just
@@ -422,7 +422,9 @@ one that belongs to another client, which is left alone. `400 invalid_request` w
 **Not holding it,** for example after losing the machine the agent ran on: this takes the
 operator, because no page lists an account's authorizations yet.
 
-1. Stop the server. A running server keeps refresh tokens in memory and would not notice.
+1. Stop the server. A running server keeps refresh tokens in memory: if the rows are
+   deleted under it, access tokens of that authorization go on working, and its refresh
+   is answered `503` and stores nothing, both until the server is started again.
 2. Delete the rows, by account or by client, with the path as
    [above](#when-register-stays-at-503):
 
