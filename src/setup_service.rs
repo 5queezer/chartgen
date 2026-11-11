@@ -37,6 +37,8 @@ const UPKEEP_EVERY: Duration = Duration::from_secs(60);
 const CONTEXT_BARS: usize = 300;
 /// Most 1m bars read at once to catch up after the server missed some.
 const CATCH_UP_BARS: i64 = 1000;
+/// Closed setups one `get_track_record` reads: the newest of them.
+const TRACK_RECORD_SETUPS: usize = 500;
 
 /// `CHARTGEN_SETUPS=1` turns setups on.
 pub fn enabled() -> bool {
@@ -740,6 +742,7 @@ impl Setups {
             "revise_setup" => self.revise(args, owner, now),
             "get_setup" => self.get(args, owner),
             "list_setups" => self.list(args, owner),
+            "get_track_record" => self.track_record(args, owner, now),
             "cancel_setup" => self.cancel(args, owner, now),
             _ => Err(format!("Unknown tool: {tool}")),
         });
@@ -1043,6 +1046,135 @@ impl Setups {
                 "bytes": self.limits.bytes_per_owner,
             },
             "setups": views,
+        }))
+    }
+
+    /// The caller's closed setups, counted: in all, and grouped by one thing they were
+    /// made with (ADR-0064). It reports counts and sums and judges nothing.
+    fn track_record(&self, args: &Value, owner: &str, now: i64) -> Result<Value, String> {
+        const FIELDS: [&str; 9] = [
+            "symbol",
+            "direction",
+            "decision",
+            "playbook_version",
+            "from",
+            "to",
+            "group_by",
+            "feature",
+            "as_of",
+        ];
+        let given = |field: &str| args.get(field).filter(|v| !v.is_null());
+        if let Some(unknown) = args
+            .as_object()
+            .and_then(|map| map.keys().find(|k| !FIELDS.contains(&k.as_str())))
+        {
+            return Err(field_problem(
+                unknown,
+                format!("{unknown} is not a field of this tool"),
+            ));
+        }
+        let symbol = match given("symbol") {
+            None => None,
+            Some(v) => Some(
+                v.as_str()
+                    .and_then(normalize_quote_symbol)
+                    .ok_or_else(|| field_problem("symbol", "symbol must be a symbol"))?,
+            ),
+        };
+        fn one_of<T: serde::de::DeserializeOwned>(
+            given: Option<&Value>,
+            field: &str,
+            values: &str,
+        ) -> Result<Option<T>, String> {
+            given
+                .map(|v| serde_json::from_value(v.clone()))
+                .transpose()
+                .map_err(|_| field_problem(field, format!("{field} must be {values}")))
+        }
+        let direction: Option<setups::Direction> =
+            one_of(given("direction"), "direction", "long or short")?;
+        let decision: Option<Decision> = one_of(given("decision"), "decision", "take or skip")?;
+        let text = |field: &str| match given(field) {
+            None => Ok(None),
+            Some(v) => match v.as_str() {
+                Some(s) if s.chars().count() <= setups::MAX_STATED_TEXT => Ok(Some(s.to_string())),
+                _ => Err(field_problem(
+                    field,
+                    format!(
+                        "{field} must be a string of at most {} characters",
+                        setups::MAX_STATED_TEXT
+                    ),
+                )),
+            },
+        };
+        let playbook_version = text("playbook_version")?;
+        let feature = text("feature")?;
+        let time = |field: &str| {
+            given(field)
+                .map(|v| drawings::parse_time(v, now).map_err(|e| field_problem(field, e)))
+                .transpose()
+        };
+        let (from, to) = (time("from")?, time("to")?);
+        let group_by =
+            match (given("group_by").map(Value::as_str), feature) {
+                (None, None) => None,
+                (None, Some(_)) => {
+                    return Err(field_problem("feature", "feature needs group_by: feature"))
+                }
+                (Some(Some("feature")), Some(name)) => Some(setups::GroupBy::Feature(name)),
+                (Some(Some("feature")), None) => {
+                    return Err(field_problem(
+                        "feature",
+                        "group_by: feature needs feature, the name of one",
+                    ))
+                }
+                (Some(_), Some(_)) => {
+                    return Err(field_problem("feature", "feature needs group_by: feature"))
+                }
+                (Some(Some("playbook_version")), None) => Some(setups::GroupBy::PlaybookVersion),
+                (Some(Some("probability")), None) => Some(setups::GroupBy::Probability),
+                (Some(Some("symbol")), None) => Some(setups::GroupBy::Symbol),
+                (Some(Some("direction")), None) => Some(setups::GroupBy::Direction),
+                (Some(_), None) => return Err(field_problem(
+                    "group_by",
+                    "group_by must be playbook_version, feature, probability, symbol or direction",
+                )),
+            };
+
+        let st = self.lock();
+        let mut mine: Vec<&Record> = st
+            .setups
+            .values()
+            .map(|h| &h.record)
+            .filter(|r| r.owner == owner)
+            .filter(|r| symbol.as_ref().is_none_or(|s| *s == r.symbol))
+            .filter(|r| direction.is_none_or(|d| d == r.direction))
+            .filter(|r| decision.is_none_or(|d| d == r.decision))
+            .filter(|r| {
+                playbook_version
+                    .as_ref()
+                    .is_none_or(|v| r.playbook_version.as_ref() == Some(v))
+            })
+            .filter(|r| from.is_none_or(|t| r.created_at >= t))
+            .filter(|r| to.is_none_or(|t| r.created_at < t))
+            .collect();
+        let open = mine.iter().filter(|r| r.status.is_open()).count();
+        mine.retain(|r| !r.status.is_open());
+        // Newest first, so that what is left out, if anything is, is the oldest.
+        mine.sort_by(|a, b| (b.created_at, &b.id).cmp(&(a.created_at, &a.id)));
+        let truncated = mine.len() > TRACK_RECORD_SETUPS;
+        mine.truncate(TRACK_RECORD_SETUPS);
+        let (total, groups) = setups::track_record(&mine, group_by.as_ref())
+            .map_err(|e| field_problem("group_by", e))?;
+        Ok(json!({
+            "replay": self.replay.is_some(),
+            "closed": mine.len(),
+            "open": open,
+            "truncated": truncated,
+            "group_by": given("group_by"),
+            "feature": given("feature"),
+            "total": total,
+            "groups": groups,
         }))
     }
 

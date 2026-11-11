@@ -2514,3 +2514,330 @@ async fn what_a_setup_was_made_with_is_read_from_its_log_at_start() {
     // A setup made without them still has none.
     assert_eq!(read(&plain["id"]), plain);
 }
+
+/// A setup that the bars fill and then take to its target, or through its
+/// invalidation. Returns it as it is afterwards.
+fn closed(s: &Setups, args: Value, owner: &str, win: bool) -> Value {
+    let made = call(s, "create_setup", args, owner).unwrap();
+    let (t, p) = (first_bar(&made), mid(&made));
+    s.on_bar(&key(), bar(t, p, p, p * 0.975, p * 0.976));
+    let end = match win {
+        true => bar(t + MINUTE_MS, p * 0.976, p * 1.06, p * 0.976, p * 1.05),
+        false => bar(t + MINUTE_MS, p * 0.976, p * 0.976, p * 0.9, p * 0.9),
+    };
+    s.on_bar(&key(), end);
+    let now = call(s, "get_setup", json!({ "id": made["id"] }), owner).unwrap();
+    assert_eq!(
+        now["status"],
+        if win { "won" } else { "invalidated" },
+        "{now}"
+    );
+    now
+}
+
+fn with(mut args: Value, more: Value) -> Value {
+    for (k, v) in more.as_object().unwrap() {
+        args[k] = v.clone();
+    }
+    args
+}
+
+fn keys(record: &Value) -> Vec<Value> {
+    let groups = record["groups"].as_array().unwrap();
+    groups.iter().map(|g| g["key"].clone()).collect()
+}
+
+/// `get_track_record` counts the caller's closed setups, in all and per group, and
+/// shows the stated probability beside what happened. Open setups and other owners'
+/// are not in it.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_track_record_counts_closed_setups_in_all_and_per_group() {
+    let limits = Limits {
+        changes_per_minute: 1000,
+        ..Limits::default()
+    };
+    let s = live_on(mem(), hub(), Access::parse(None), limits, None);
+    let record = |args: Value| call(&s, "get_track_record", args, "owner").unwrap();
+    let nothing = record(json!({}));
+    assert_eq!(
+        (nothing["closed"].clone(), nothing["total"]["count"].clone()),
+        (json!(0), json!(0))
+    );
+    assert!(
+        nothing["total"]["mean_r"].is_null(),
+        "no mean of nothing: {nothing}"
+    );
+    assert!(nothing["total"]["probability"]["observed"].is_null());
+
+    let a = closed(&s, stated(), "owner", true);
+    let b_args = with(
+        long(),
+        json!({ "features": { "example_flag": false }, "probability": 0.25, "playbook_version": "v1" }),
+    );
+    let b = closed(&s, b_args, "owner", false);
+    let c = closed(&s, long(), "owner", true);
+    closed(&s, stated(), "someone-else", true);
+    created(&s, "owner");
+
+    let r = |v: &Value| v["result_r"].as_f64().unwrap();
+    let sum = r(&a) + r(&b) + r(&c);
+    let all = record(json!({}));
+    assert_eq!(
+        (all["closed"].clone(), all["open"].clone()),
+        (json!(3), json!(1))
+    );
+    assert_eq!(all["truncated"], false);
+    assert_eq!(all["groups"], json!([]));
+    assert!(all["group_by"].is_null() && all["feature"].is_null());
+    let total = &all["total"];
+    assert_eq!(
+        (
+            total["count"].clone(),
+            total["won"].clone(),
+            total["invalidated"].clone()
+        ),
+        (json!(3), json!(2), json!(1))
+    );
+    assert_eq!(
+        (total["expired"].clone(), total["cancelled"].clone()),
+        (json!(0), json!(0))
+    );
+    assert_eq!(
+        (total["with_result"].clone(), total["gaps"].clone()),
+        (json!(3), json!(0))
+    );
+    assert!((total["total_r"].as_f64().unwrap() - sum).abs() < 1e-9);
+    assert!((total["mean_r"].as_f64().unwrap() - sum / 3.0).abs() < 1e-9);
+    // Two stated a probability: 0.6 and won, 0.25 and lost.
+    assert_eq!(
+        total["probability"],
+        json!({ "stated": 2, "mean": 0.425, "won": 1, "observed": 0.5 })
+    );
+
+    let by_version = record(json!({ "group_by": "playbook_version" }));
+    assert_eq!(keys(&by_version), [json!(null), json!("v1")]);
+    assert_eq!(by_version["groups"][0]["count"], 1);
+    assert_eq!(by_version["groups"][1]["count"], 2);
+    assert_eq!(by_version["groups"][1]["won"], 1);
+    assert_eq!(
+        by_version["total"], all["total"],
+        "the total does not depend on the grouping"
+    );
+    assert_eq!(
+        keys(&record(json!({ "group_by": "probability" }))),
+        [json!(null), json!(0.2), json!(0.6)]
+    );
+    let by_flag = record(json!({ "group_by": "feature", "feature": "example_flag" }));
+    assert_eq!(keys(&by_flag), [json!(null), json!(false), json!(true)]);
+    assert_eq!(by_flag["feature"], "example_flag");
+    assert_eq!(
+        keys(&record(
+            json!({ "group_by": "feature", "feature": "no_such" })
+        )),
+        [json!(null)]
+    );
+    assert_eq!(
+        keys(&record(json!({ "group_by": "symbol" }))),
+        [json!("BTCUSDT")]
+    );
+    assert_eq!(
+        keys(&record(json!({ "group_by": "direction" }))),
+        [json!("long")]
+    );
+
+    // Filters.
+    for (filter, count) in [
+        (json!({ "playbook_version": "v1" }), 2),
+        (json!({ "playbook_version": "v2" }), 0),
+        (json!({ "direction": "short" }), 0),
+        (
+            json!({ "direction": "long", "decision": "take", "symbol": "btcusdt" }),
+            3,
+        ),
+        (json!({ "decision": "skip" }), 0),
+        (json!({ "symbol": "ETHUSDT" }), 0),
+        (json!({ "from": "2020-01-01" }), 3),
+        (json!({ "to": "2020-01-01" }), 0),
+        (
+            json!({ "from": a["created_at"], "to": a["created_at"].as_i64().unwrap() + 1 }),
+            1,
+        ),
+    ] {
+        assert_eq!(record(filter.clone())["total"]["count"], count, "{filter}");
+    }
+
+    // What it does not take.
+    for (bad, field) in [
+        (json!({ "group_by": "thesis" }), "group_by"),
+        (json!({ "group_by": "feature" }), "feature"),
+        (json!({ "feature": "example_flag" }), "feature"),
+        (
+            json!({ "group_by": "symbol", "feature": "example_flag" }),
+            "feature",
+        ),
+        (json!({ "direction": "up" }), "direction"),
+        (json!({ "decision": "maybe" }), "decision"),
+        (json!({ "from": "yesterday" }), "from"),
+        (json!({ "status": "won" }), "status"),
+        (
+            json!({ "playbook_version": "x".repeat(33) }),
+            "playbook_version",
+        ),
+    ] {
+        let refused = call(&s, "get_track_record", bad.clone(), "owner").unwrap_err();
+        assert_eq!(errors(&refused), [field], "{bad}: {refused}");
+    }
+    assert_eq!(
+        call(&s, "get_track_record", json!({}), "a-stranger").unwrap()["closed"],
+        0
+    );
+
+    // A grouping with more values than an answer holds is refused, not cut.
+    let one = s.owned("owner", &id_of(&a)).unwrap();
+    let many: Vec<Record> = (0..=setups::MAX_RECORD_GROUPS)
+        .map(|i| {
+            let mut r = one.clone();
+            r.features = Some(serde_json::Map::from_iter([("n".to_string(), json!(i))]));
+            r
+        })
+        .collect();
+    let all_of_them: Vec<&Record> = many.iter().collect();
+    let by = setups::GroupBy::Feature("n".to_string());
+    assert!(setups::track_record(&all_of_them, Some(&by)).is_err());
+    let (total, groups) = setups::track_record(&all_of_them[1..], Some(&by)).unwrap();
+    assert_eq!((total["count"].clone(), groups.len()), (json!(50), 50));
+    assert_eq!(groups[1]["key"], 2, "by number, not by text: {}", groups[1]);
+}
+
+/// A result with a gap, an expiry without a result and a cancellation are counted as
+/// what they are: a mean is over the results there are.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_track_record_counts_what_has_no_result_without_inventing_one() {
+    let s = live();
+    let cancelled = created(&s, "owner");
+    let cancel = json!({ "id": cancelled["id"], "reason": "example reason" });
+    call(&s, "cancel_setup", cancel, "owner").unwrap();
+    let (t, p) = (first_bar(&cancelled), mid(&cancelled));
+    s.on_bar(&key(), bar(t, p, p, p, p));
+    let won = closed(&s, long(), "owner", true);
+    // One that expired filled while nobody scored it: no result, and a gap.
+    let mut lost = s.owned("owner", &id_of(&won)).unwrap();
+    lost.id = "made-up".to_string();
+    lost.status = Status::Expired;
+    lost.result_r = None;
+    lost.gap = true;
+    let key = ("owner".to_string(), lost.id.clone());
+    let held = Held {
+        record: lost,
+        record_bytes: 0,
+        log_bytes: 0,
+    };
+    s.lock().setups.insert(key, held);
+
+    let total = call(&s, "get_track_record", json!({}), "owner").unwrap()["total"].clone();
+    assert_eq!(
+        (
+            total["count"].clone(),
+            total["won"].clone(),
+            total["expired"].clone(),
+            total["cancelled"].clone()
+        ),
+        (json!(3), json!(1), json!(1), json!(1))
+    );
+    assert_eq!(total["gaps"], 1);
+    let results = total["with_result"].as_u64().unwrap();
+    assert!(results < 3, "the gap has no result: {total}");
+    let mean = total["total_r"].as_f64().unwrap() / results as f64;
+    assert!((total["mean_r"].as_f64().unwrap() - mean).abs() < 1e-9);
+}
+
+/// On a replay server the record is answered as of a time, as every tool there is,
+/// and is the same on every run: it is what an evaluation reads its score from.
+#[tokio::test]
+async fn the_track_record_on_a_replay_is_the_same_on_every_run() {
+    let run = || {
+        crate::replay::on(Replay::of(fixture(usize::MAX, 0.0)), |replay| {
+            let s = replaying(replay);
+            let p = replay.quote("BTCUSDT", at_minute(1500)).unwrap().0;
+            for (i, probability) in [0.3, 0.7].into_iter().enumerate() {
+                let args = json!({
+                    "symbol": "BTCUSDT", "interval": "15m", "direction": "long", "thesis": "example",
+                    "entry": { "low": p * 0.99, "high": p * 0.995 }, "invalidation": p * 0.97,
+                    "targets": [p * 1.02], "expires_at": at_minute(1700 + i as i64),
+                    "as_of": at_minute(1500 + i as i64),
+                    "probability": probability, "playbook_version": "v1",
+                    "features": { "example_number": i },
+                });
+                call(&s, "create_setup", args, "agent").unwrap();
+            }
+            let without = call(&s, "get_track_record", json!({}), "agent").unwrap_err();
+            assert!(without.contains("as_of"), "{without}");
+            let early = json!({ "as_of": at_minute(1502), "group_by": "probability" });
+            let early = call(&s, "get_track_record", early, "agent").unwrap();
+            assert_eq!(
+                (early["closed"].clone(), early["open"].clone()),
+                (json!(0), json!(2))
+            );
+            let late = json!({ "as_of": at_minute(2900), "group_by": "probability" });
+            let late = call(&s, "get_track_record", late, "agent").unwrap();
+            assert_eq!(
+                (late["closed"].clone(), late["replay"].clone()),
+                (json!(2), json!(true))
+            );
+            late.to_string()
+        })
+    };
+    assert_eq!(run(), run());
+}
+
+/// The answers that hold what a setup was made with, and the record read back, pinned
+/// in a file the web app's types are tested against, as `setup_responses.json` is. From
+/// a replay over the example fixtures, so the same on every run. To write the file
+/// again after a deliberate change: `CHARTGEN_WRITE_FIXTURES=1 cargo test record_answers`.
+#[tokio::test]
+async fn record_answers_match_the_file_the_web_types_are_tested_against() {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+    let replay = Replay::load(&dir.join("replay")).unwrap();
+    let answers = crate::replay::on(replay, |replay| {
+        let s = replaying(replay);
+        let start = 1_767_225_600_000 + 600 * MINUTE_MS;
+        let at = |minute: i64| start + minute * MINUTE_MS;
+        let ask = |tool: &str, args: Value| call(&s, tool, args, "agent").unwrap();
+        let p = replay.quote("BTCUSDT", at(0)).unwrap().0;
+        let stated = ask(
+            "create_setup",
+            json!({
+                "symbol": "BTCUSDT", "interval": "15m", "direction": "long",
+                "thesis": "example thesis",
+                "entry": { "low": p * 0.997, "high": p * 0.999 }, "invalidation": p * 0.99,
+                "targets": [p * 1.008], "expires_at": at(300), "as_of": at(0),
+                "features": { "example_number": 1.5, "example_flag": true, "example_label": "a" },
+                "probability": 0.6, "playbook_version": "v1",
+            }),
+        );
+        ask(
+            "create_setup",
+            json!({ "symbol": "ETHUSDT", "interval": "15m", "direction": "short",
+                "decision": "skip", "thesis": "example reason", "as_of": at(0),
+                "probability": 0.4 }),
+        );
+        json!({
+            "create_setup_stated": stated,
+            "get_track_record": ask("get_track_record", json!({ "as_of": at(700) })),
+            "get_track_record_grouped": ask(
+                "get_track_record",
+                json!({ "as_of": at(700), "group_by": "feature", "feature": "example_flag" }),
+            ),
+        })
+    });
+    assert_eq!(
+        answers["get_track_record"]["closed"], 2,
+        "both must have closed by then"
+    );
+    let path = dir.join("track_record_responses.json");
+    let text = serde_json::to_string_pretty(&answers).unwrap() + "\n";
+    if std::env::var("CHARTGEN_WRITE_FIXTURES").is_ok() {
+        std::fs::write(&path, &text).unwrap();
+    }
+    assert_eq!(std::fs::read_to_string(&path).unwrap_or_default(), text);
+}

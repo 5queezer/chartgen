@@ -1892,5 +1892,160 @@ impl Record {
     }
 }
 
+/// What `get_track_record` groups closed setups by (ADR-0064).
+#[derive(Clone, Debug, PartialEq)]
+pub enum GroupBy {
+    PlaybookVersion,
+    /// One feature, by its name.
+    Feature(String),
+    /// The stated probability, in tenths: 0.0, 0.1 ... 0.9, with 1 in the last.
+    Probability,
+    Symbol,
+    Direction,
+}
+
+/// Groups one answer holds. More is not a grouping but a list, and is refused.
+pub const MAX_RECORD_GROUPS: usize = 50;
+
+impl Record {
+    /// The value this setup is grouped under; null where it stated none.
+    fn group_key(&self, by: &GroupBy) -> Value {
+        match by {
+            GroupBy::PlaybookVersion => json!(self.playbook_version),
+            GroupBy::Feature(name) => self
+                .features
+                .as_ref()
+                .and_then(|f| f.get(name))
+                .cloned()
+                .unwrap_or(Value::Null),
+            GroupBy::Probability => json!(self
+                .probability
+                .map(|p| ((p * 10.0).floor().min(9.0)) / 10.0)),
+            GroupBy::Symbol => json!(self.symbol),
+            GroupBy::Direction => json!(self.direction),
+        }
+    }
+}
+
+/// Counts over closed setups. Counts and sums only: what they mean is the reader's
+/// to judge, and a handful of setups means little.
+#[derive(Default)]
+struct Tally {
+    count: u32,
+    won: u32,
+    invalidated: u32,
+    expired: u32,
+    cancelled: u32,
+    with_result: u32,
+    total_r: f64,
+    gaps: u32,
+    stated: u32,
+    stated_sum: f64,
+    stated_won: u32,
+}
+
+impl Tally {
+    fn add(&mut self, r: &Record) {
+        self.count += 1;
+        match r.status {
+            Status::Won => self.won += 1,
+            Status::Invalidated => self.invalidated += 1,
+            Status::Expired => self.expired += 1,
+            Status::Cancelled => self.cancelled += 1,
+            Status::Watching | Status::Triggered => {}
+        }
+        if let Some(result) = r.result_r {
+            self.with_result += 1;
+            self.total_r += result;
+        }
+        self.gaps += u32::from(r.gap);
+        if let Some(p) = r.probability {
+            self.stated += 1;
+            self.stated_sum += p;
+            self.stated_won += u32::from(r.status == Status::Won);
+        }
+    }
+
+    fn json(&self) -> Value {
+        let per = |sum: f64, n: u32| (n > 0).then(|| sum / f64::from(n));
+        json!({
+            "count": self.count,
+            "won": self.won,
+            "invalidated": self.invalidated,
+            "expired": self.expired,
+            "cancelled": self.cancelled,
+            "with_result": self.with_result,
+            "total_r": self.total_r,
+            "mean_r": per(self.total_r, self.with_result),
+            "gaps": self.gaps,
+            "probability": {
+                "stated": self.stated,
+                "mean": per(self.stated_sum, self.stated),
+                "won": self.stated_won,
+                "observed": per(f64::from(self.stated_won), self.stated),
+            },
+        })
+    }
+}
+
+/// Where a group's key sorts: none first, then false and true, numbers, strings.
+fn key_order(a: &Value, b: &Value) -> std::cmp::Ordering {
+    let rank = |v: &Value| match v {
+        Value::Null => 0,
+        Value::Bool(_) => 1,
+        Value::Number(_) => 2,
+        _ => 3,
+    };
+    rank(a).cmp(&rank(b)).then_with(|| match (a, b) {
+        (Value::Bool(x), Value::Bool(y)) => x.cmp(y),
+        (Value::Number(x), Value::Number(y)) => x
+            .as_f64()
+            .partial_cmp(&y.as_f64())
+            .unwrap_or(std::cmp::Ordering::Equal),
+        (Value::String(x), Value::String(y)) => x.cmp(y),
+        _ => std::cmp::Ordering::Equal,
+    })
+}
+
+/// The counts over `closed`, in all and per group: `(total, groups)`, each group with
+/// its `key`, in the order of the keys.
+pub fn track_record(
+    closed: &[&Record],
+    by: Option<&GroupBy>,
+) -> Result<(Value, Vec<Value>), String> {
+    let mut total = Tally::default();
+    let mut groups: Vec<(Value, Tally)> = Vec::new();
+    for record in closed {
+        total.add(record);
+        let Some(by) = by else { continue };
+        let key = record.group_key(by);
+        let at = match groups.iter().position(|(k, _)| *k == key) {
+            Some(at) => at,
+            None => {
+                if groups.len() == MAX_RECORD_GROUPS {
+                    return Err(format!(
+                        "this grouping gives more than {MAX_RECORD_GROUPS} groups; group by something that takes fewer values"
+                    ));
+                }
+                groups.push((key, Tally::default()));
+                groups.len() - 1
+            }
+        };
+        groups[at].1.add(record);
+    }
+    groups.sort_by(|a, b| key_order(&a.0, &b.0));
+    let groups = groups
+        .into_iter()
+        .map(|(key, tally)| {
+            let mut group = json!({ "key": key });
+            if let (Some(group), Value::Object(counts)) = (group.as_object_mut(), tally.json()) {
+                group.extend(counts);
+            }
+            group
+        })
+        .collect();
+    Ok((total.json(), groups))
+}
+
 #[cfg(test)]
 mod tests;

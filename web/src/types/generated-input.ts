@@ -533,6 +533,42 @@ export interface GetTpoInput {
   value_area?: number;
 }
 
+export interface GetTrackRecordInput {
+  /**
+   * Replay servers only (ADR-0059), and required there: the time this call is answered for, as unix seconds, unix ms or an ISO 8601 time. Only bars that closed at or before it are used, and it cannot be earlier than the latest as_of the server has been sent, by any caller. On any other server leave it out.
+   */
+  as_of?: number | string;
+  /**
+   * Only setups you took, or only decisions not to trade.
+   */
+  decision?: "take" | "skip";
+  direction?: "long" | "short";
+  /**
+   * With group_by: feature, the name of the feature to group by.
+   */
+  feature?: string;
+  /**
+   * Only setups made at or after this time, as unix seconds, unix ms or an ISO 8601 time.
+   */
+  from?: number | string;
+  /**
+   * Count per value of one of these. probability groups by tenths (0.0, 0.1 ... 0.9, with 1 in the last). A setup that stated none is in the group whose key is null. More than 50 groups are refused.
+   */
+  group_by?: "playbook_version" | "feature" | "probability" | "symbol" | "direction";
+  /**
+   * Only setups made with this playbook_version.
+   */
+  playbook_version?: string;
+  /**
+   * Only setups on this symbol.
+   */
+  symbol?: string;
+  /**
+   * Only setups made before this time, as unix seconds, unix ms or an ISO 8601 time.
+   */
+  to?: number | string;
+}
+
 export interface InspectChartInput {
   /**
    * Replay servers only (ADR-0059), and required there: the time this call is answered for, as unix seconds, unix ms or an ISO 8601 time. Only bars that closed at or before it are used, and it cannot be earlier than the latest as_of the server has been sent, by any caller. On any other server leave it out.

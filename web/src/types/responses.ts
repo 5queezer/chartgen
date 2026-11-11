@@ -1011,6 +1011,54 @@ export const SetupsPayloadSchema = z.object({
 export type SetupsPayload = z.infer<typeof SetupsPayloadSchema>;
 
 // ---------------------------------------------------------------------------
+// Track record (ADR-0064)
+//   Produced by `Setups::track_record` in `src/setup_service.rs` and `track_record`
+//   in `src/setups.rs`: counts and sums over the caller's closed setups. It judges
+//   nothing; a group of a few setups says little.
+// ---------------------------------------------------------------------------
+
+const TrackRecordCountsSchema = z.object({
+  count: z.number().int(),
+  won: z.number().int(),
+  invalidated: z.number().int(),
+  expired: z.number().int(),
+  cancelled: z.number().int(),
+  /** Setups with a result in R. One that expired filled while nobody scored it has none. */
+  with_result: z.number().int(),
+  total_r: z.number(),
+  /** Over `with_result`; null when that is 0. */
+  mean_r: z.number().nullable(),
+  /** Results that do not cover bars the server missed. */
+  gaps: z.number().int(),
+  /** Of the setups that stated a probability: its mean, and how many of them won. */
+  probability: z.object({
+    stated: z.number().int(),
+    mean: z.number().nullable(),
+    won: z.number().int(),
+    observed: z.number().nullable(),
+  }),
+});
+
+export const TrackRecordPayloadSchema = z.object({
+  replay: z.boolean(),
+  /** Closed setups counted, and open ones that match the filters and are not. */
+  closed: z.number().int(),
+  open: z.number().int(),
+  /** True when older closed setups were left out. */
+  truncated: z.boolean(),
+  group_by: z.enum(["playbook_version", "feature", "probability", "symbol", "direction"]).nullable(),
+  feature: z.string().nullable(),
+  total: TrackRecordCountsSchema,
+  /** In the order of the keys; null is the group of setups that stated none. */
+  groups: z.array(
+    TrackRecordCountsSchema.extend({
+      key: z.union([z.string(), z.number(), z.boolean()]).nullable(),
+    }),
+  ),
+});
+export type TrackRecordPayload = z.infer<typeof TrackRecordPayloadSchema>;
+
+// ---------------------------------------------------------------------------
 // GET /admin/overview — `src/server/admin.rs` (ADR-0063). The operator page's
 //   one read: counts, times, ids and names. Times are unix seconds. A client's
 //   id is its first 8 characters.
