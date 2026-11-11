@@ -64,7 +64,7 @@ one and link both ways.
 | [0034](/chartgen/decisions/0034-drawing-and-indicator-alerts/) | Drawing and indicator alerts | Accepted | 2026-11-05 |
 | [0035](/chartgen/decisions/0035-styleable-geometry/) | Styleable indicator geometry colors | Accepted | 2026-11-05 |
 | [0036](/chartgen/decisions/0036-own-origin-invalid-client-redirect/) | Redirect an unknown OAuth client back to the server's own web app | Accepted | 2026-11-06 |
-| [0037](/chartgen/decisions/0037-pull-based-deploy/) | Pull-based deploy from the Coolify host | Accepted | 2026-11-06 |
+| [0037](/chartgen/decisions/0037-pull-based-deploy/) | Pull-based deploy from the Coolify host | Accepted; superseded in part by [0060](/chartgen/decisions/0060-image-built-in-ci/) | 2026-11-06 |
 | [0038](/chartgen/decisions/0038-custom-intervals/) | Custom intervals and session-aware future bars | Accepted | 2026-11-06 |
 | [0039](/chartgen/decisions/0039-compact-layout/) | Compact layout for phones and small tablets | Accepted | 2026-11-06 |
 | [0040](/chartgen/decisions/0040-layout-compare-restore/) | A layout stores the scale mode its compare symbols return to | Accepted | 2026-11-06 |
@@ -87,3 +87,4 @@ one and link both ways.
 | [0057](/chartgen/decisions/0057-e2e-shards/) | The e2e suite runs in duration-balanced CI shards | Accepted | 2026-11-09 |
 | [0058](/chartgen/decisions/0058-refresh-tokens-for-headless-clients/) | Refresh tokens, so a client authorized once keeps working | Accepted | 2026-11-11 |
 | [0059](/chartgen/decisions/0059-setups-paper-scored/) | A setup is a stored record, scored on paper by the server | Accepted | 2026-11-11 |
+| [0060](/chartgen/decisions/0060-image-built-in-ci/) | The production image is built in CI and pulled by the host | Accepted | 2026-11-11 |

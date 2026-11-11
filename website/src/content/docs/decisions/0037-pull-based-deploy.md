@@ -5,7 +5,7 @@ sidebar:
   order: 37
 ---
 
-**Status:** Accepted
+**Status:** Accepted; superseded in part by [ADR-0060](/chartgen/decisions/0060-image-built-in-ci/) (the timer deploys an image built in CI and no longer has Coolify build on the host; exactly the commit that passed CI goes out)
 **Date:** 2026-11-06
 
 ## Context and Problem Statement
