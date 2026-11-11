@@ -1614,9 +1614,24 @@ pub(super) async fn consent_decision(
         let dropped = s.end_dropped_grants(&writes);
         (response, writes, dropped)
     };
-    super::refresh::forget_families(&super::refresh::store_write(), dropped).await;
-    persist(writes).await;
+    store_approval(super::refresh::store_write(), dropped, persist(writes)).await;
     response
+}
+
+/// What an approval leaves for the store: the refresh tokens of an approval that the
+/// limit dropped are deleted, then the approvals are written. A browser that hangs
+/// up during the first must not keep the second from starting: after a restart the
+/// dropped approval would be back and the new one gone (`refresh::to_the_end`).
+async fn store_approval(
+    forget: super::refresh::WriteFn,
+    dropped: Vec<String>,
+    persist: impl std::future::Future<Output = ()> + Send + 'static,
+) {
+    super::refresh::to_the_end(async move {
+        super::refresh::forget_families(&forget, dropped).await;
+        persist.await;
+    })
+    .await;
 }
 
 /// `POST /oauth/logout`: end this browser's session and the web app's tokens from it.
@@ -2478,5 +2493,36 @@ mod tests {
             s.admit_login("203.0.113.9", t0 + LOGIN_WINDOW),
             "the window passes"
         );
+    }
+
+    /// The browser hangs up while the dropped approval's refresh tokens are deleted:
+    /// the approvals are written all the same.
+    #[tokio::test]
+    async fn an_approval_is_stored_even_if_the_browser_hangs_up_during_the_delete() {
+        let (begun_tx, begun) = std::sync::mpsc::channel();
+        let (go, go_rx) = std::sync::mpsc::channel::<()>();
+        let go_rx = std::sync::Mutex::new(go_rx);
+        let forget: super::super::refresh::WriteFn = Arc::new(move |_| {
+            let _ = begun_tx.send(());
+            let _ = go_rx.lock().unwrap().recv();
+            Ok(())
+        });
+        let persisted = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = persisted.clone();
+        let persist = async move { flag.store(true, std::sync::atomic::Ordering::SeqCst) };
+        let request = tokio::spawn(store_approval(forget, vec!["family".to_string()], persist));
+        while begun.try_recv().is_err() {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        request.abort();
+        let _ = request.await;
+        go.send(()).unwrap();
+        for _ in 0..200 {
+            if persisted.load(std::sync::atomic::Ordering::SeqCst) {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        panic!("the approvals were never written");
     }
 }
