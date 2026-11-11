@@ -2163,11 +2163,7 @@ mod tests {
                     client_id: "the-client".to_string(),
                     created_at: Instant::now(),
                     expires_in: Duration::from_secs(expires_in),
-                    user: user.map(|id| signin::TokenUser {
-                        id: id.to_string(),
-                        session: None,
-                        last_used: Instant::now(),
-                    }),
+                    user: user.map(|id| signin::TokenUser::of_application(id.to_string())),
                 },
             );
         };
@@ -3610,11 +3606,7 @@ mod tests {
                 // What `/token` does for a code with a user.
                 let (access, family) = {
                     let mut s = state.oauth.lock().unwrap();
-                    let user = signin::TokenUser {
-                        id: "github:1".into(),
-                        session: None,
-                        last_used: Instant::now(),
-                    };
+                    let user = signin::TokenUser::of_application("github:1");
                     let access = s.issue_access("first".into(), "a", Some(user), None);
                     let family =
                         s.plan_family("a", "https://x.example/cb", Some("github:1"), &access);

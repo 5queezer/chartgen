@@ -257,10 +257,35 @@ struct ProviderFlow {
 pub(super) struct TokenUser {
     pub(super) id: String,
     /// The browser session, for the web app's own tokens only: signing out ends
-    /// them, and leaves what other clients were given.
-    pub(super) session: Option<String>,
+    /// them, and leaves what other clients were given. Private to this module: what
+    /// only the web app may do (the workspace, the operator page) rests on who can set
+    /// it, and that is `for_code` alone (ADR-0050, ADR-0063).
+    session: Option<String>,
     /// When it last made a call; the limit per client drops the longest out of use.
     pub(super) last_used: Instant,
+}
+
+impl TokenUser {
+    /// The user of a code that goes to `redirect_uri`. **The one place a session gets
+    /// onto a code, and through it onto a token:** only when the code goes to exactly
+    /// `/` on our own origin, the web app's page (`is_first_party`).
+    fn for_code(id: &str, session: &str, redirect_uri: &str) -> Self {
+        Self {
+            id: id.to_string(),
+            session: is_first_party(&base_url(), redirect_uri).then(|| session.to_string()),
+            last_used: Instant::now(),
+        }
+    }
+
+    /// The user of a token that is not the web app's: one made by a refresh, or
+    /// brought back from the store. It has the tools and nothing of a browser.
+    pub(super) fn of_application(id: impl Into<String>) -> Self {
+        Self {
+            id: id.into(),
+            session: None,
+            last_used: Instant::now(),
+        }
+    }
 }
 
 pub(super) struct SignIn {
@@ -822,7 +847,6 @@ impl OAuthStore {
         session: &str,
     ) -> Option<String> {
         self.trim_user_codes(user);
-        let first_party = is_first_party(&base_url(), &request.redirect_uri);
         let code = Uuid::new_v4().to_string();
         self.codes.insert(
             code.clone(),
@@ -833,11 +857,7 @@ impl OAuthStore {
                 code_challenge: request.code_challenge.clone(),
                 _code_challenge_method: request.code_challenge_method.clone(),
                 created_at: Instant::now(),
-                user: Some(TokenUser {
-                    id: user.to_string(),
-                    session: first_party.then(|| session.to_string()),
-                    last_used: Instant::now(),
-                }),
+                user: Some(TokenUser::for_code(user, session, &request.redirect_uri)),
             },
         );
         client_redirect(
