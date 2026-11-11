@@ -1228,11 +1228,15 @@ Top Trader Long/Short Ratio — position share of the largest accounts (Binance 
 
 **Aliases:** `top_ls`
 
+![top_long_short sample render](../../../assets/indicators/top_long_short.png)
+
 ### `taker_ratio`
 
 Taker Buy/Sell Ratio — aggressive buy over sell volume, above 1 buyers lead (Binance futures, last 30 days only)
 
 **Aliases:** `taker_buy_sell`
+
+![taker_ratio sample render](../../../assets/indicators/taker_ratio.png)
 
 ### `fear_greed`
 

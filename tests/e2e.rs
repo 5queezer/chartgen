@@ -484,7 +484,7 @@ fn test_sample_data_sizes() {
 #[test]
 fn test_available_count() {
     let available = indicators::available();
-    assert_eq!(available.len(), 77, "Expected 77 indicators");
+    assert_eq!(available.len(), 79, "Expected 79 indicators");
 }
 
 #[test]
