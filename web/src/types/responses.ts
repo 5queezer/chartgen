@@ -900,3 +900,59 @@ export const SetupsPayloadSchema = z.object({
   setups: z.array(SetupSchema),
 });
 export type SetupsPayload = z.infer<typeof SetupsPayloadSchema>;
+
+// ---------------------------------------------------------------------------
+// GET /admin/overview — `src/server/admin.rs` (ADR-0063). The operator page's
+//   one read: counts, times, ids and names. Times are unix seconds. A client's
+//   id is its first 8 characters.
+// ---------------------------------------------------------------------------
+
+export const OperatorUserSchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  provider: z.string(),
+  created_at: z.number().int(),
+  last_login_at: z.number().int(),
+  last_token_at: z.number().int().nullable(),
+  workspace_docs: z.number().int(),
+  workspace_bytes: z.number().int(),
+  setups_open: z.number().int(),
+  setups_closed: z.number().int(),
+  server_alerts: z.number().int(),
+  authorisations: z.number().int(),
+  push_devices: z.number().int(),
+});
+
+export const OperatorClientSchema = z.object({
+  id: z.string(),
+  name: z.string().nullable(),
+  created_at: z.number().int(),
+  last_token_at: z.number().int().nullable(),
+  has_authorisation: z.boolean(),
+  owns_setups: z.boolean(),
+});
+
+export const OperatorOverviewSchema = z.object({
+  server: z.object({
+    version: z.string(),
+    started_at: z.number().int().nullable(),
+    schema_version: z.number().int(),
+    pending_deliveries: z.number().int(),
+    store_bytes: z.number().int().nullable(),
+    setups_total: z.number().int(),
+    features: z.record(z.boolean()),
+    feeds: z.object({
+      watched_pairs: z.number().int(),
+      watched_pairs_limit: z.number().int(),
+      push_subscriptions: z.number().int(),
+      push_feeds: z.number().int(),
+    }),
+  }),
+  users: z.object({ total: z.number().int(), shown: z.array(OperatorUserSchema) }),
+  clients: z.object({
+    total: z.number().int(),
+    limit: z.number().int(),
+    shown: z.array(OperatorClientSchema),
+  }),
+});
+export type OperatorOverview = z.infer<typeof OperatorOverviewSchema>;

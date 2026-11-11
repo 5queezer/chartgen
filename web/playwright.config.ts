@@ -58,7 +58,7 @@ const SIGNIN_WEB_PORT = WEB_PORT - 3_000;
 const SIGNIN_DB = join(tmpdir(), `chartgen-e2e-${SIGNIN_CHARTGEN_PORT}.db`);
 const FAKE_PROVIDER_PORT = CHARTGEN_PORT - 4_000;
 const FAKE_PROVIDER_SECRET = "fake-provider-secret";
-const SIGNIN_SPECS = /signin(-push|-workspace)?\.spec\.ts$/;
+const SIGNIN_SPECS = /signin(-push|-workspace|-operator)?\.spec\.ts$/;
 // The fake push service of signin-push.spec.ts. The server only accepts this local
 // origin because it runs on the sample source.
 const SIGNIN_PUSH_PORT = CHARTGEN_PORT - 5_000;
@@ -210,6 +210,8 @@ export default defineConfig({
         CHARTGEN_SERVER_ALERT_CLIENTS: "*",
         CHARTGEN_VAPID_SUBJECT: "mailto:ops@example.com",
         CHARTGEN_WEBHOOK_TEST_ORIGIN: `http://127.0.0.1:${SIGNIN_PUSH_PORT}`,
+        // The fake provider's GitHub user, for signin-operator.spec.ts (ADR-0063).
+        CHARTGEN_ADMIN_USERS: "github:1001",
       },
       reuseExistingServer: REUSE_SERVER,
       timeout: 300_000,
