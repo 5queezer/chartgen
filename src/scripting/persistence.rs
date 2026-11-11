@@ -130,6 +130,20 @@ pub(super) const MIGRATIONS: &[&str] = &[
         body      TEXT    NOT NULL,
         PRIMARY KEY (setup_id, seq)
     );
+    CREATE TRIGGER setup_revisions_no_update BEFORE UPDATE ON setup_revisions
+    BEGIN
+        SELECT RAISE(ABORT, 'a setup''s log is append-only');
+    END;
+    CREATE TRIGGER setup_revisions_no_delete BEFORE DELETE ON setup_revisions
+    BEGIN
+        SELECT RAISE(ABORT, 'a setup''s log is append-only');
+    END;
+    CREATE TRIGGER setup_revisions_no_replace BEFORE INSERT ON setup_revisions
+    WHEN EXISTS (SELECT 1 FROM setup_revisions
+                 WHERE setup_id = NEW.setup_id AND seq = NEW.seq)
+    BEGIN
+        SELECT RAISE(ABORT, 'a setup''s log is append-only');
+    END;
 ",
 ];
 

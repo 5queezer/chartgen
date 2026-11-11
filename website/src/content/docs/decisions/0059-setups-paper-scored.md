@@ -114,7 +114,10 @@ expiry is what frees its place.
 ### Changes and the log
 
 Nothing is edited in place. The log is a table of its own that is only ever inserted into, written
-in one transaction with the record. An entry holds its number, the time, who made it (`agent` or
+in one transaction with the record. The database enforces it: triggers abort an `UPDATE`, a
+`DELETE` and a replacing `INSERT` on that table, so the server's own code is not the only thing
+keeping the log whole. Dropping the table, or editing the file by other means, is still possible
+for whoever holds the file. An entry holds its number, the time, who made it (`agent` or
 `server`), its kind, the reason, and what changed as `from` and `to` per field. The server's status
 moves are entries too, so the log is the whole history.
 

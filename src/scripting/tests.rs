@@ -1206,6 +1206,50 @@ fn a_setup_log_entry_cannot_be_replaced() {
     assert_eq!(store.setup_revisions("s1").unwrap(), ["first"]);
 }
 
+/// The log is append-only in the database itself, not only in this server's code:
+/// whoever opens the file cannot change or remove an entry by an ordinary statement.
+#[test]
+fn a_setup_log_entry_cannot_be_updated_or_deleted_in_sql() {
+    let dir = std::env::temp_dir().join(format!("chartgen-setup-log-sql-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("s.db");
+    let store = persistence::Store::open(&path).unwrap();
+    store
+        .save_setups(&[persistence::StoredSetup {
+            id: "s1".into(),
+            owner: "github:1".into(),
+            record: "{}".into(),
+            revisions: vec![(1, "first".into())],
+        }])
+        .unwrap();
+    drop(store);
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    for statement in [
+        "UPDATE setup_revisions SET body = 'changed'",
+        "UPDATE setup_revisions SET seq = 2",
+        "DELETE FROM setup_revisions",
+        "INSERT OR REPLACE INTO setup_revisions VALUES ('s1', 1, 'replaced')",
+    ] {
+        let refused = conn.execute(statement, []).unwrap_err().to_string();
+        assert!(refused.contains("append-only"), "{statement}: {refused}");
+    }
+    drop(conn);
+    let store = persistence::Store::open(&path).unwrap();
+    assert_eq!(store.setup_revisions("s1").unwrap(), ["first"]);
+    // The setup itself is still rewritten as its status moves, with new entries added.
+    store
+        .save_setups(&[persistence::StoredSetup {
+            id: "s1".into(),
+            owner: "github:1".into(),
+            record: "{\"moved\":true}".into(),
+            revisions: vec![(2, "second".into())],
+        }])
+        .unwrap();
+    assert_eq!(store.setup_revisions("s1").unwrap(), ["first", "second"]);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn an_empty_file_gets_every_table() {
     schema_is_complete(&upgraded("upgrade-empty", &[]));

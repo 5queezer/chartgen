@@ -220,13 +220,16 @@ CREATE TABLE setup_revisions (
     body      TEXT    NOT NULL,     -- one log entry as JSON
     PRIMARY KEY (setup_id, seq)
 );
+-- Three triggers on setup_revisions abort an UPDATE, a DELETE and an INSERT that
+-- would replace an entry, with "a setup's log is append-only".
 ```
 
 ### Setups
 
 A [setup](/chartgen/guides/setups/) is one row in `setups`, rewritten as its status moves, and
 its log is rows in `setup_revisions`. **The log is only ever inserted into**: the server has no
-statement that updates or deletes an entry, and a write that would replace one fails. A setup
+statement that updates or deletes an entry, and triggers in the database refuse one from anyone
+else, along with a write that would replace an entry. A setup
 and the entries it gained are written in one transaction. Closed setups stay; nothing deletes
 them for inactivity. A row that cannot be read at startup is left where it is, counted in the
 log line `[setups] skipped N stored setups that cannot be read`, and never scored.
