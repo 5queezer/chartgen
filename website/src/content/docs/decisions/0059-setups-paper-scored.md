@@ -133,6 +133,9 @@ moves are entries too, so the log is the whole history.
 The token's user, or with sign-in off its OAuth client, as for server alerts
 (`owner_for_token`). A setup of another owner reads the same as one that does not exist.
 `CHARTGEN_CLAIM_OWNER` does not collect setups: one owned by a client stays with that client.
+While setups are on, a client that owns one is not evicted
+([ADR-0036](/chartgen/decisions/0036-own-origin-invalid-client-redirect/)), as an owner of scripts
+or alerts is not: its setups would go on being scored and counted with nobody able to read them.
 
 ### The feed, and what happens when the server was away
 
