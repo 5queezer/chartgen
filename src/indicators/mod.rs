@@ -497,3 +497,22 @@ pub fn registry() -> Vec<IndicatorInfo> {
 
 #[cfg(test)]
 mod presentation_tests;
+
+#[cfg(test)]
+mod reads_beyond_bars_tests {
+    use super::*;
+
+    /// A replay refuses an indicator that reads a series of its own, by what the
+    /// indicator says of itself (ADR-0059). One that fetches and does not say so would
+    /// read live data in a replay. So every indicator listed as external says it, and
+    /// no other does: a new one that forgets fails here.
+    #[test]
+    fn every_indicator_that_fetches_a_series_of_its_own_says_so() {
+        for info in registry() {
+            // Listed with them, and computed from the bars it is given alone.
+            let fetches = info.category == "external" && info.name != "cvd";
+            let indicator = by_name(info.name).unwrap_or_else(|| panic!("{}", info.name));
+            assert_eq!(indicator.reads_beyond_bars(), fetches, "{}", info.name);
+        }
+    }
+}

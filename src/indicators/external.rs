@@ -1031,6 +1031,10 @@ impl Indicator for TopLongShortRatio {
         "top_long_short"
     }
 
+    fn reads_beyond_bars(&self) -> bool {
+        true
+    }
+
     fn description(&self) -> &str {
         "Top Trader Long/Short Ratio — position share of the largest accounts (Binance futures, last 30 days only)"
     }
@@ -1097,6 +1101,10 @@ pub struct TakerRatio;
 impl Indicator for TakerRatio {
     fn name(&self) -> &str {
         "taker_ratio"
+    }
+
+    fn reads_beyond_bars(&self) -> bool {
+        true
     }
 
     fn description(&self) -> &str {
