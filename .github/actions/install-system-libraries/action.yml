@@ -1,0 +1,18 @@
+name: Install system libraries
+description: >-
+  Install apt packages on an Ubuntu runner. Takes Azure's Ubuntu mirror off apt's
+  mirror list first when it does not answer, so apt uses the next one instead of
+  waiting on it. Needs the repository checked out.
+inputs:
+  packages:
+    description: >-
+      Package names separated by single spaces. Empty: only the mirror check, for a
+      job whose later steps run apt themselves.
+    default: libfontconfig1-dev libfreetype-dev
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        PACKAGES: ${{ inputs.packages }}
+      run: '"$GITHUB_ACTION_PATH/install.sh"'
