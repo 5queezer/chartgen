@@ -7375,8 +7375,7 @@ mod operator_page {
     }
 
     fn web_dir(test: &str) -> std::path::PathBuf {
-        let web = std::env::temp_dir().join(format!("chartgen-{test}-{}", std::process::id()));
-        std::fs::create_dir_all(&web).unwrap();
+        let web = crate::test_dir::new(format!("chartgen-{test}"));
         std::fs::write(web.join("index.html"), "<!doctype html><title>app</title>").unwrap();
         web
     }
@@ -7592,7 +7591,6 @@ mod operator_page {
                 );
             }
         }
-        let _ = std::fs::remove_dir_all(&web);
     }
 
     fn refreshed(port: u16, client: &str, refresh: &str) -> (u16, String) {
