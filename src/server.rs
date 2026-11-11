@@ -966,22 +966,32 @@ async fn oauth_token(
         );
         (token, user_id, family, ended)
     };
-    refresh::forget_families(&refresh::store_write(), ended).await;
-    // A refresh token is handed out only once the store has it (ADR-0058). When the
-    // write fails the client gets the access token alone, as before refresh tokens.
-    let mut refresh_token = None;
-    if let Some(family) = family {
-        match refresh::start_family(&state, &token, family, &refresh::store_write()).await {
-            Ok(value) => refresh_token = value,
-            Err(e) => eprintln!("[OAuth] could not store a refresh token: {e}"),
+    // What follows writes the store and then changes the families, so it runs to its
+    // end even when this client hangs up meanwhile (`refresh::to_the_end`).
+    let (state, client_id, access) = (state.clone(), body.client_id.clone(), token.clone());
+    let refresh_token = refresh::to_the_end(async move {
+        let write = refresh::store_write();
+        refresh::forget_families(&write, ended).await;
+        // A refresh token is handed out only once the store has it (ADR-0058). When
+        // the write fails the client gets the access token alone, as before refresh
+        // tokens.
+        let mut refresh_token = None;
+        if let Some(family) = family {
+            match refresh::start_family(&state, &access, family, &write).await {
+                Ok(value) => refresh_token = value,
+                Err(e) => eprintln!("[OAuth] could not store a refresh token: {e}"),
+            }
         }
-    }
-    // After the family step: a token that got a family does not count here.
-    if token_user.is_none() {
-        let mut s = state.oauth.lock().unwrap();
-        s.trim_loose_tokens(&body.client_id);
-    }
-    token_issued(body.client_id.clone(), token_user).await;
+        // After the family step: a token that got a family does not count here.
+        if token_user.is_none() {
+            let mut s = state.oauth.lock().unwrap();
+            s.trim_loose_tokens(&client_id);
+        }
+        token_issued(client_id, token_user).await;
+        refresh_token
+    })
+    .await
+    .flatten();
 
     eprintln!(
         "[OAuth] POST /token SUCCESS — token issued (len={})",
