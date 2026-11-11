@@ -200,7 +200,8 @@ directory, as of the time each call names. It is for an evaluation that can be r
   keeps its meaning for paging. `CHARTGEN_DATA_SOURCE=sample` cannot hold a chosen scenario, and
   its forming bar moves with the wall clock.
 - **Fails closed.** A read with no time gets nothing, not the newest bar. Inside a call "now" is
-  `as_of` for every chart tool. Indicators that read more than the bars they are given (funding
+  `as_of` for every chart tool and every indicator: the server and the library read one clock, so
+  a fixture may be dated in the past or the future. Indicators that read more than the bars they are given (funding
   rate, open interest, long/short ratio, fear and greed) are refused, by a flag on the indicator,
   not a list. `get_footprint`, `get_tpo`, `search_symbols`, the subscriptions and the alert tools
   are refused: they read what 1m fixtures do not hold.

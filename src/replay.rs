@@ -6,6 +6,7 @@
 //! 1m bar only if it closed at or before the asked time and builds every other
 //! interval from those, so nothing after that time can reach an answer.
 
+#[cfg(test)]
 use std::cell::Cell;
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -31,23 +32,15 @@ pub const PRICE_TOOLS: [&str; 4] = [
 /// The tools that read no prices, and answer in a replay as anywhere.
 const PLAIN_TOOLS: [&str; 2] = ["list_indicators", "list_drawing_tools"];
 
-thread_local! {
-    /// The time the call running on this thread asks about.
-    static AS_OF: Cell<Option<i64>> = const { Cell::new(None) };
-}
-
 /// The time the call running on this thread asks about, in a replay.
 pub fn clock() -> Option<i64> {
-    AS_OF.with(Cell::get)
+    chartgen::data::clock()
 }
 
 /// Run `call` with the clock at `as_of`: every bar it reads and every "now" it asks
-/// for is cut there.
+/// for, in the server and in the indicators, is cut there.
 pub fn at<T>(as_of: Option<i64>, call: impl FnOnce() -> T) -> T {
-    let before = AS_OF.with(|c| c.replace(as_of));
-    let out = call();
-    AS_OF.with(|c| c.set(before));
-    out
+    chartgen::data::at(as_of, call)
 }
 
 /// The `as_of` of a call in a replay: unix seconds, unix ms or an ISO 8601 time.
