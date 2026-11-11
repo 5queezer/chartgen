@@ -23,6 +23,8 @@ use chartgen::mcp_schema::{SERVER_ALERT_TOOLS, SETUP_TOOLS};
 #[cfg(feature = "scripting")]
 use chartgen::scripting;
 
+#[cfg(feature = "scripting")]
+mod admin;
 mod listener;
 mod refresh;
 mod signin;
@@ -2123,8 +2125,17 @@ pub async fn run_server(port: u16, engine: Option<Arc<RwLock<TradingEngine>>>) {
     // there are (ADR-0051). A script or a tool call is far smaller than this.
     let app = app
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
-        .layer(axum::middleware::map_response(no_sniffing))
-        .with_state(state);
+        .layer(axum::middleware::map_response(no_sniffing));
+    // Outermost, so that what it lets through is answered exactly as without it, and
+    // its own answer passes no other layer (ADR-0063).
+    #[cfg(feature = "scripting")]
+    let app = app.layer(axum::middleware::from_fn_with_state(
+        state.clone(),
+        admin::layer,
+    ));
+    #[cfg(feature = "scripting")]
+    admin::mark_started();
+    let app = app.with_state(state);
 
     listener::keep_freed_memory_down();
     let addr = std::net::SocketAddr::from(([0, 0, 0, 0], port));
@@ -2163,11 +2174,7 @@ mod tests {
                     client_id: "the-client".to_string(),
                     created_at: Instant::now(),
                     expires_in: Duration::from_secs(expires_in),
-                    user: user.map(|id| signin::TokenUser {
-                        id: id.to_string(),
-                        session: None,
-                        last_used: Instant::now(),
-                    }),
+                    user: user.map(|id| signin::TokenUser::of_application(id.to_string())),
                 },
             );
         };
@@ -3086,7 +3093,7 @@ mod tests {
 
         // Closing the stream ends its subscriptions; the feed lingers 30 s.
         drop(body);
-        assert_eq!(state.charts.counts(), (0, 0, 1));
+        assert_eq!(state.charts.in_use(), (0, 0, 1));
     }
 
     // --- dynamic client registration limits ---
@@ -3610,11 +3617,7 @@ mod tests {
                 // What `/token` does for a code with a user.
                 let (access, family) = {
                     let mut s = state.oauth.lock().unwrap();
-                    let user = signin::TokenUser {
-                        id: "github:1".into(),
-                        session: None,
-                        last_used: Instant::now(),
-                    };
+                    let user = signin::TokenUser::of_application("github:1");
                     let access = s.issue_access("first".into(), "a", Some(user), None);
                     let family =
                         s.plan_family("a", "https://x.example/cb", Some("github:1"), &access);

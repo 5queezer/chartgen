@@ -2,6 +2,12 @@
 import { render } from "solid-js/web";
 import { QueryClient, QueryClientProvider } from "@tanstack/solid-query";
 
+import {
+  fetchOverview,
+  forgetOperatorPage,
+  noteOperatorPath,
+  wantsOperatorPage,
+} from "./services/operatorPage";
 import { bootWorkspace } from "./services/workspace";
 import "./styles/globals.css";
 
@@ -24,7 +30,25 @@ if (!root) {
 async function start(root: HTMLElement): Promise<void> {
   // Sign-in can take a while, retries included, and the status line is not up yet.
   root.textContent = "Signing in...";
+  // Before sign-in, which leaves this address and comes back to `/` (ADR-0063).
+  noteOperatorPath();
   const boot = await bootWorkspace();
+  if (wantsOperatorPage()) {
+    const answer = boot.user ? await fetchOverview() : ({ kind: "refused" } as const);
+    if (answer.kind !== "refused") {
+      // The overview, or a server that failed for now: the page then offers to try
+      // again, and this tab stays the operator's until the server says otherwise.
+      const { OperatorPage } = await import("./components/OperatorPage");
+      root.textContent = "";
+      render(
+        () => <OperatorPage first={answer.kind === "overview" ? answer.overview : null} />,
+        root,
+      );
+      return;
+    }
+    // Not for this tab, or no such page here: the app, as at any other address.
+    forgetOperatorPage();
+  }
   const [{ App }, { applyShareLink }] = await Promise.all([
     import("./App"),
     import("./services/shareLink"),

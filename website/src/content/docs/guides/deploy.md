@@ -67,6 +67,7 @@ a token. See [what a signed-in stranger can still do](/chartgen/decisions/0044-s
 | `CHARTGEN_DATA_SOURCE` | `src/fetch.rs` | Set to `sample` to make `generate_chart`, `get_indicators` and `get_quotes` use a deterministic offline source and never call Binance or Yahoo. Bars follow the interval grid (weekly bars open on Monday), each bar's prices depend only on the symbol and its open time (so overlapping pages match exactly), and the forming candle moves every second. Intended for E2E tests and demos. Unset means live data. |
 | `CHARTGEN_SCRIPTING` | `src/scripting/mod.rs` | `1` enables [scripted indicators](/chartgen/guides/scripted-indicators/): the four scripting MCP tools and user scripts in `generate_chart` / `list_indicators`. Off when unset. |
 | `CHARTGEN_DB` | `src/scripting/persistence.rs` | SQLite file for registered OAuth clients, with or without `CHARTGEN_SCRIPTING=1`, for their refresh tokens, for scripted indicators, and with sign-in on for users and sessions. Opened at server startup; a failure is logged and leaves clients in memory only. Default `~/.chartgen/chartgen.db`, inside the persisted volume. |
+| `CHARTGEN_ADMIN_USERS` | `src/server/admin.rs` | With [sign-in](#sign-in-through-github-and-google) on: the user ids, separated by commas (`github:<id>`, `google:<sub>`), that may open the [operator page](#the-operator-page) at `/admin`. Unset: nobody, and no such page. Anything else than such ids, or the setting with sign-in off, stops the start. |
 | `CHARTGEN_SERVER_ALERTS` | `src/server_alerts.rs` | `1` enables [alerts on the server](/chartgen/guides/web/#alerts-on-the-server): four MCP tools, and **Run on server** in the web app. Off when unset; alerts already stored wait in `chartgen.db`, and pin nobody. Needs a build with the `scripting` feature, which the Docker image has, and the store. Read [before turning it on](#server-alerts). |
 | `CHARTGEN_SERVER_ALERT_CLIENTS` | `src/server_alerts.rs` | Comma-separated OAuth client ids, or with [sign-in](#sign-in-through-github-and-google) on, accounts (`github:<id>`, `google:<sub>`), that may create server alerts and use webhooks. Unset: anyone may create alerts, nobody gets webhooks. `*`: anyone, with webhooks. |
 | `CHARTGEN_AGENT_WEBHOOK_URL` | `src/webhook.rs` | The receiver that [wakes your own agent](#the-agents-receiver): its whole URL, `http` or `https`, on this host or its private network. Set all three of these or none. |
@@ -180,6 +181,31 @@ such value.
 
 Turning sign-in off again means removing the provider variables. Users' scripts and alerts stay in
 the file, out of reach until it is turned back on, and those alerts expire after 30 days.
+
+### The operator page
+
+`/admin` in the web app shows who signed in, which clients registered and how the server
+is ([ADR-0063](/chartgen/decisions/0063-operator-page/)): the server's version, start time,
+store and features; the 200 accounts that signed in last with what each has (documents,
+setups, alerts, authorisations, push devices, as counts); the 50 clients registered last.
+It only reads.
+
+- **Name yourself in `CHARTGEN_ADMIN_USERS`.** Your id is in the web app's account menu,
+  under your name, with a copy button: `github:` and a number, or `google:` and what Google
+  calls your `sub` (digits, today).
+  Set it and restart. A list the server cannot read stops the start and says which entry.
+  The list is split at commas, so an id with a comma in it cannot be named; none is known.
+- **Only you, and only in the web app.** An agent or connector you approved never sees it,
+  with your account or without. What counts as the web app is where the sign-in's code
+  is sent: exactly `/` on this server's address, where only the app's own page receives
+  it and discards a code it did not ask for. To everyone else the address is the app like any other
+  and the server answers as for a path that does not exist.
+- **A restart or a deploy signs the page out;** open `/admin` again.
+- **It shows other users' ids and display names to you.** If others use your server, tell
+  them.
+- **Nothing in front may store its answer.** It is marked `no-store`; check once, through
+  your proxy, that the answer to `/admin/overview` arrives with that header and without
+  any `Access-Control-` header.
 
 ### Each user's workspace
 

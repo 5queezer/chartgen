@@ -291,6 +291,18 @@ impl Setups {
         self.lock().setups.get(&key).map(|h| h.record.clone())
     }
 
+    /// How many open setups each owner has, for the operator page (ADR-0063): counted
+    /// from what is held in memory, not read from the store.
+    pub(crate) fn open_by_owner(&self) -> HashMap<String, usize> {
+        let mut open = HashMap::new();
+        for ((owner, _), held) in &self.lock().setups {
+            if held.record.status.is_open() {
+                *open.entry(owner.clone()).or_default() += 1;
+            }
+        }
+        open
+    }
+
     fn lock(&self) -> MutexGuard<'_, State> {
         self.state.lock().unwrap_or_else(|p| p.into_inner())
     }
@@ -321,6 +333,12 @@ impl Setups {
     /// The feeds open setups hold, for the server's limit on watched pairs.
     pub fn pairs(&self) -> HashSet<FeedKey> {
         self.wanted_feeds(&self.lock())
+    }
+
+    /// How many pairs open setups watch, and the limit on watched pairs: what the
+    /// operator page shows on a server without alerts, where setups are all that watch.
+    pub(crate) fn watched_pairs(&self) -> (usize, usize) {
+        (self.pairs().len(), self.limits.pairs_total)
     }
 
     /// Join the feeds open setups need and leave the others.

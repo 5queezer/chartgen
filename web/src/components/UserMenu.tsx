@@ -33,6 +33,32 @@ export function UserMenuItems(props: { user: SignedInUser }): JSX.Element {
         <div class="text-sm break-words" data-testid="user-name">
           {props.user.name}
         </div>
+        {/* What an operator types into the server's settings to name this account
+            (ADR-0063). The provider's public id, shown to its owner only. */}
+        <div class="mt-1 flex items-center gap-2 text-xs text-[color:var(--color-fg-muted)]">
+          <span class="font-mono select-all break-all" data-testid="user-id">
+            {props.user.id}
+          </span>
+          <button
+            type="button"
+            class="px-1 rounded border border-[color:var(--color-border)] cursor-pointer"
+            aria-label="Copy your user id"
+            onClick={(e) => {
+              e.stopPropagation();
+              // No clipboard on a page that is not served securely: say so.
+              const written = navigator.clipboard?.writeText(props.user.id);
+              if (written === undefined) {
+                showToast("Could not copy: select the id instead");
+                return;
+              }
+              void written
+                .then(() => showToast("User id copied"))
+                .catch(() => showToast("Could not copy: select the id instead"));
+            }}
+          >
+            Copy
+          </button>
+        </div>
       </div>
       <DropdownMenu.Separator class="my-1 h-px bg-[color:var(--color-border)]" />
       <DropdownMenu.Item class={itemClass} onSelect={signOutNow}>

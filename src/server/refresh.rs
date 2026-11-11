@@ -641,11 +641,10 @@ impl OAuthStore {
                     created_at: Instant::now(),
                     expires_in: Duration::from_secs(left),
                     // Never a browser session, so never the web app's (ADR-0050).
-                    user: t.user.as_ref().map(|id| TokenUser {
-                        id: id.clone(),
-                        session: None,
-                        last_used: Instant::now(),
-                    }),
+                    user: t
+                        .user
+                        .as_ref()
+                        .map(|id| TokenUser::of_application(id.clone())),
                 },
             );
         }
@@ -1035,11 +1034,11 @@ async fn rotate(
     let token = {
         let mut s = state.oauth.lock().unwrap();
         s.apply_rotation(&rotation).then(|| {
-            let user = rotation.token.user.as_ref().map(|id| TokenUser {
-                id: id.clone(),
-                session: None,
-                last_used: Instant::now(),
-            });
+            let user = rotation
+                .token
+                .user
+                .as_ref()
+                .map(|id| TokenUser::of_application(id.clone()));
             let family = Some(rotation.token.family.clone());
             let token = s.issue_access(rotation.access.clone(), client_id, user, family);
             s.retire_access(
@@ -1237,11 +1236,7 @@ mod tests {
     ) -> (String, Option<String>) {
         let (access, family) = {
             let mut s = state.oauth.lock().unwrap();
-            let token_user = user.map(|id| TokenUser {
-                id: id.to_string(),
-                session: None,
-                last_used: Instant::now(),
-            });
+            let token_user = user.map(|id| TokenUser::of_application(id.to_string()));
             let access = s.issue_access(Uuid::new_v4().to_string(), client, token_user, None);
             let family = s.plan_family(client, REDIRECT, user, &access);
             (access, family)

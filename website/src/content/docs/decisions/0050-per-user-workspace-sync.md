@@ -5,7 +5,7 @@ sidebar:
   order: 50
 ---
 
-**Status:** Accepted
+**Status:** Accepted; amended by [ADR-0063](/chartgen/decisions/0063-operator-page/) (the operator page is the second thing only the web app's own token may do)
 **Date:** 2026-11-07
 **Supersedes in part:** [ADR-0044](/chartgen/decisions/0044-sign-in-through-github-and-google/) (browser data now follows the account, and is no longer left for the next person on a browser)
 

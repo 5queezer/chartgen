@@ -694,6 +694,15 @@ impl ServerAlerts {
         self.wanted_feeds(&self.lock())
     }
 
+    /// How many pairs alerts and setups watch together, and the limit they share.
+    pub fn watched_pairs(&self) -> (usize, usize) {
+        let mut watched = self.pairs();
+        if let Some(setups) = self.setups.get().and_then(std::sync::Weak::upgrade) {
+            watched.extend(setups.pairs());
+        }
+        (watched.len(), self.limits.feeds)
+    }
+
     /// Count the feeds `setups` hold against the server's limit on watched pairs.
     pub fn count_pairs_of(&self, setups: &Arc<crate::setup_service::Setups>) {
         let _ = self.setups.set(Arc::downgrade(setups));

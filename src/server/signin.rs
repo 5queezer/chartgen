@@ -104,6 +104,10 @@ pub(super) struct ProviderConfig {
 pub(super) struct Config {
     providers: Vec<ProviderConfig>,
     http: reqwest::Client,
+    /// The users who may see the operator page (ADR-0063). Empty: nobody. The page
+    /// reads the store, so a build without it has no page and nobody asks.
+    #[cfg_attr(not(feature = "scripting"), allow(dead_code))]
+    operators: HashSet<String>,
 }
 
 impl Config {
@@ -157,6 +161,13 @@ impl Config {
                 userinfo_url,
             });
         }
+        #[cfg(feature = "scripting")]
+        let operators = super::admin::operators(
+            var("CHARTGEN_ADMIN_USERS").as_deref(),
+            !providers.is_empty(),
+        )?;
+        #[cfg(not(feature = "scripting"))]
+        let operators = HashSet::new();
         if providers.is_empty() {
             return Ok(None);
         }
@@ -166,7 +177,11 @@ impl Config {
             .user_agent("chartgen")
             .build()
             .map_err(|e| format!("cannot build the HTTP client: {e}"))?;
-        Ok(Some(Self { providers, http }))
+        Ok(Some(Self {
+            providers,
+            http,
+            operators,
+        }))
     }
 
     pub(super) fn provider_labels(&self) -> String {
@@ -257,10 +272,35 @@ struct ProviderFlow {
 pub(super) struct TokenUser {
     pub(super) id: String,
     /// The browser session, for the web app's own tokens only: signing out ends
-    /// them, and leaves what other clients were given.
-    pub(super) session: Option<String>,
+    /// them, and leaves what other clients were given. Private to this module: what
+    /// only the web app may do (the workspace, the operator page) rests on who can set
+    /// it, and that is `for_code` alone (ADR-0050, ADR-0063).
+    session: Option<String>,
     /// When it last made a call; the limit per client drops the longest out of use.
     pub(super) last_used: Instant,
+}
+
+impl TokenUser {
+    /// The user of a code that goes to `redirect_uri`. **The one place a session gets
+    /// onto a code, and through it onto a token:** only when the code goes to exactly
+    /// `/` on our own origin, the web app's page (`is_first_party`).
+    fn for_code(id: &str, session: &str, redirect_uri: &str) -> Self {
+        Self {
+            id: id.to_string(),
+            session: is_first_party(&base_url(), redirect_uri).then(|| session.to_string()),
+            last_used: Instant::now(),
+        }
+    }
+
+    /// The user of a token that is not the web app's: one made by a refresh, or
+    /// brought back from the store. It has the tools and nothing of a browser.
+    pub(super) fn of_application(id: impl Into<String>) -> Self {
+        Self {
+            id: id.into(),
+            session: None,
+            last_used: Instant::now(),
+        }
+    }
 }
 
 pub(super) struct SignIn {
@@ -814,6 +854,35 @@ impl OAuthStore {
         Some(user.id.clone())
     }
 
+    /// Whether a request is an operator's, for the operator page (ADR-0063): sign-in is
+    /// on, this is no replay, the request comes from our own page, its token is valid
+    /// and the web app's own (`app_user_for_token`), and its user is on the list, as
+    /// written there. An application's token, an agent's or a connector's, is never
+    /// the web app's: its code did not go to `/`, a refresh gives no session, and the
+    /// web app's client gets no refresh token.
+    #[cfg(feature = "scripting")]
+    pub(super) fn is_operator(&mut self, headers: &HeaderMap) -> bool {
+        if crate::replay::global().is_some() || !from_own_origin(headers) {
+            return false;
+        }
+        if self
+            .signin
+            .as_ref()
+            .is_none_or(|s| s.config.operators.is_empty())
+        {
+            return false;
+        }
+        let Some(token) = extract_bearer_token(headers).filter(|t| self.validate_token(t)) else {
+            return false;
+        };
+        let Some(user) = self.app_user_for_token(token) else {
+            return false;
+        };
+        self.signin
+            .as_ref()
+            .is_some_and(|s| s.config.operators.contains(&user))
+    }
+
     /// Issue a code for `request` to `user`; the answer is the redirect to the client.
     fn issue_code(
         &mut self,
@@ -822,7 +891,6 @@ impl OAuthStore {
         session: &str,
     ) -> Option<String> {
         self.trim_user_codes(user);
-        let first_party = is_first_party(&base_url(), &request.redirect_uri);
         let code = Uuid::new_v4().to_string();
         self.codes.insert(
             code.clone(),
@@ -833,11 +901,7 @@ impl OAuthStore {
                 code_challenge: request.code_challenge.clone(),
                 _code_challenge_method: request.code_challenge_method.clone(),
                 created_at: Instant::now(),
-                user: Some(TokenUser {
-                    id: user.to_string(),
-                    session: first_party.then(|| session.to_string()),
-                    last_used: Instant::now(),
-                }),
+                user: Some(TokenUser::for_code(user, session, &request.redirect_uri)),
             },
         );
         client_redirect(

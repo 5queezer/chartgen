@@ -22,6 +22,8 @@ export default defineConfig({
       "/.well-known": { target: CHARTGEN_DEV_TARGET, changeOrigin: true },
       "/oauth": { target: CHARTGEN_DEV_TARGET, changeOrigin: true },
       "/workspace": { target: CHARTGEN_DEV_TARGET, changeOrigin: true },
+      // The operator page's read (ADR-0063). The page itself, /admin, is the app.
+      "/admin/overview": { target: CHARTGEN_DEV_TARGET, changeOrigin: true },
     },
   },
   build: {
